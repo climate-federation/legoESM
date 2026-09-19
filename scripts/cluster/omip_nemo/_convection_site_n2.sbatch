@@ -63,7 +63,19 @@ done
 $PY -u scripts/validate/ocean_fidelity/arctic_n2_compare.py \
   --snapshot "$SNAP" --nemo-gridt "$GT" --nemo-month 1 --mesh-mask "$MESH" \
   --max-depth-m 500 \
+  --out-json "$R/results/omip_nemo/convection_sites/n2_sites_d30.json" \
   --site="weddell:-72,-62:300,30" \
   --site="labrador:55,65:300,315" \
   --site="greenland:70,78:350,15"
+echo "=== probe rc=$? ==="
+
+# The figure reads the JSON the probe just wrote. The two northern sites are
+# flagged on the figure face: in boreal winter the snapshot-versus-monthly-mean
+# mismatch manufactures exactly the surface difference they show, so they
+# carry no claim. The austral-summer Weddell is the opposite case and is not
+# flagged.
+$PY -u scripts/plot/plot_convection_site_n2.py \
+  --json "$R/results/omip_nemo/convection_sites/n2_sites_d30.json" \
+  --confounded labrador,greenland \
+  --out "$R/results/omip_nemo/convection_sites/n2_sites_d30.png"
 echo "=== rc=$? ==="

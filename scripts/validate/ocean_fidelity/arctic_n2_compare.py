@@ -30,6 +30,7 @@ CAVEATS, stated rather than discovered later:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -95,6 +96,9 @@ def main() -> int:
                         "replaced by these boxes; given none, behaviour is "
                         "exactly the Arctic band as before. Use the equals "
                         "form -- a negative latitude reads as a flag.")
+    p.add_argument("--out-json", default=None,
+                   help="write the per-site profiles here so downstream "
+                        "plots read data rather than a scraped log")
     p.add_argument("--max-depth-m", type=float, default=120.0,
                    help="stop the per-level table below this depth. The "
                         "default suits the Arctic halocline this probe was "
@@ -157,6 +161,7 @@ def main() -> int:
     n2_nemo = _n2(T_nemo, S_nemo, gdept, gdepw_int, e3w_int)
 
     gd_i = 0.5 * (gdept[:-1] + gdept[1:])
+    report = {}
 
     # AN INTERFACE IS ONLY USABLE IF BOTH CELLS TOUCHING IT ARE WET.
     #
@@ -187,6 +192,7 @@ def main() -> int:
               f"{n_half} sea-floor interfaces excluded ===")
         print("iface depth_m     N2_ours      N2_nemo    ratio   "
               "l_b_ours_m  l_b_withNemoN_m")
+        rows = []
         for k in range(n2_our.shape[-1]):
             den = w[..., k].sum()
             if den <= 0:
@@ -200,8 +206,21 @@ def main() -> int:
             print(f"{k:3d} {gd_i[k]:9.2f} {a_our:+.4e} {a_nem:+.4e} "
                   f"{(a_our / a_nem if a_nem != 0 else np.nan):7.3f} "
                   f"{lb(a_our):11.2f} {lb(a_nem):11.2f}")
+            rows.append({"k": k, "depth_m": float(gd_i[k]),
+                         "n2_ours": a_our, "n2_nemo": a_nem})
             if gd_i[k] > a.max_depth_m:
                 break
+        report[nm] = {"columns": n_col, "wet_interfaces": n_if,
+                      "seafloor_excluded": n_half, "levels": rows}
+
+    # A PARSED TABLE IS NOT DATA. Anything downstream -- a figure, a later
+    # comparison -- reads this file, never a regex over the job log.
+    if a.out_json:
+        Path(a.out_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out_json).write_text(json.dumps(
+            {"snapshot": a.snapshot, "nemo_gridt": a.nemo_gridt,
+             "nemo_month": a.nemo_month, "sites": report}, indent=1))
+        print(f"\n[report] {a.out_json}")
     return 0
 
 
