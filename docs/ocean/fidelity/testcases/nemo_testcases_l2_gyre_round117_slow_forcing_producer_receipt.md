@@ -262,13 +262,30 @@ freshwater pair, #1484 guard, held manifest, or NEMO source changed.
 
 ## Review, citations, and tests
 
-The separate adversarial `codex exec --sandbox read-only -C` review is run
-against the committed receipt and diff.  Its verbatim result is appended in a
-follow-up receipt commit; no `SHIP` inference is made before that pass.
+The required separate adversarial review was invoked against the committed
+receipt and full Round-117 diff with `codex exec --sandbox read-only -C`.
+Independent review was unavailable in-sandbox: the read-only app-server
+initialization failed before a reviewer verdict existed.  This is not an
+approval or a `SHIP` verdict.  The terminal result is quoted verbatim:
 
-Citation-gate final results and the shifted-line plant are likewise appended
-after this receipt is committed, so the fail-closed worktree stamp names the
-actual receipt text.
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+CODEX_REVIEW_EXIT=1
+```
+
+The complete review attempt is `round117/review/codex_review.log`.
+
+The clean-tree citation gate found all nine citations, with zero failures,
+zero unmapped citations, zero failing map-audit entries, and every built-in
+control fired.  The correctly targeted shifted-line plant moved
+`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:298-321` by two
+lines, reported `SYMBOL-NOT-AT-LINE`, and exited 1.  An earlier invocation
+mistakenly supplied the resolved absolute path instead of the extracted
+citation key; that control did not fire and correctly exited 2.  It was
+replaced, not reinterpreted, by the firing control.  Reports and logs are in
+`round117/citations/`.
 
 CPU/fp64 test summaries already complete are:
 
