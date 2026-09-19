@@ -197,6 +197,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domain.f90"),
     "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domhgr.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domhgr.f90"),
+    "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90"),
     # Round 92 binds the operand diagnosis to the exact acquired Round-90
     # compiled card, including its write-only recorder.
     "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -2365,6 +2367,57 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:834-846': [
         '!* Swap',
         'sshn_e (:,:) = ssha_e(:,:)', 13],
+    # --- round 116: admitted external-step writer and current executing loop ---
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:468-477': [
+        'WRITE(l2_r81_filename',
+        '& ssumask(ntsi:ntei,ntsj:ntej), ssvmask(ntsi:ntei,ntsj:ntej)', 10],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:521-572': [
+        'IF( lwp .AND. kt == nit000 + 1 ) THEN',
+        'WRITE(l2_r81_unit) zhup2_e(ntsi:ntei,ntsj:ntej), zhvp2_e(ntsi:ntei,ntsj:ntej)',
+        52],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:602-615': [
+        'DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)',
+        '& ssha_e(ntsi:ntei,ntsj:ntej)', 14],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:669-713': [
+        ('IF( lwp .AND. kt == nit000 + 1 ) THEN', 4),
+        '& zu_frc(ntsi:ntei,ntsj:ntej), zv_frc(ntsi:ntei,ntsj:ntej)', 45],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:813-849': [
+        ('IF( lwp .AND. kt == nit000 + 1 ) THEN', 7),
+        '& sshn_e(ntsi:ntei,ntsj:ntej)', 37],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:286-291': [
+        '! set values computed in RK3_ssh',
+        'zCdU_v  (:,:) = CdU_v   (:,:)', 6],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:298-321': [
+        'CALL dyn_cor_2D_init( Kmm )',
+        'zv_frc(ji,jj) = zv_frc(ji,jj) - zv_trd(ji,jj) * ssvmask(ji,jj)', 24],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:456-531': [
+        '!* Set extrapolation coefficients for predictor step:',
+        'zhV(ji,jj) = e1v(ji,jj) * va_e(ji,jj) * zhvp2_e(ji,jj)', 76],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:542-553': [
+        '!     Compute Sea Level at step jit+1',
+        'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
+        12],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:593-607': [
+        '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
+        'zv_spg(ji,jj) = - zldg * ( zsshp2_e(ji,jj+1) - zsshp2_e(ji,jj) ) * r1_e2v(ji,jj)',
+        15],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:611': [
+        'CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )'],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:627-631': [
+        'IF ( .NOT. ll_wd ) THEN',
+        ('END DO   ;   END DO', 8), 5],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:655-667': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN',
+        '&   ) * ssvmask(ji,jj)', 13],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:701-730': [
+        'IF( .NOT.lk_linssh ) THEN !* Update ocean depth',
+        'CALL bdy_dyn2d( jn, ua_e, va_e, un_e, vn_e, hur_e, hvr_e, ssha_e )', 30],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:749-780': [
+        '!* Swap',
+        'pssh(:,:,Kaa) = pssh(:,:,Kaa) + za1 * ssha_e(:,:)', 32],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:797-804': [
+        '! Finalize sums:',
+        'pssh   (:,:,Kaa) = pssh   (:,:,Kaa) / r1_wgt1s', 8],
     'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/stprk3_stg.f90:278-324': [
         ('ALLOCATE( zub(', 1),
         ('DEALLOCATE( zub, zvb )', 1), 47],
