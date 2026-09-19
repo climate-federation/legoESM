@@ -16,6 +16,9 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+REPO_ROOT = HERE.parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import nemo_testcase_l2_gyre_phase3_gate as gate  # noqa: E402
 import nemo_testcase_l2_gyre_round16_slow_forcing as round16  # noqa: E402
