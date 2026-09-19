@@ -10,7 +10,7 @@ failures and 16 setup errors that reproduced both at the lane tip and after the
 branch `fix/gyre-lane-red-tests-87`, based at
 `950c5787aff1eb9112f566857d5936962846d6d2`.
 
-Result: **75 fixed, 0 held, and 12 skipped with an explicit environment
+Result: **74 fixed, 1 held, and 12 skipped with an explicit environment
 reason, of 87**.  Every listed node was first reproduced from the unmodified
 base with one pytest process per source file.  At the repaired tip, every
 non-environment node passes in an isolated file/target process and every
@@ -64,7 +64,7 @@ processes using the same CPU-only environment.
 | P13 mass-flux schema | `1 failed, 79 passed, 3 skipped in 155.53s` | `80 passed, 3 skipped in 158.10s` |
 | P14 MPAS TKE | `14 failed, 22 passed, 9 warnings in 24.97s` | `36 passed, 6 warnings in 43.96s` |
 | P15 QCO operands | `1 failed, 4 passed in 11.08s` | `5 passed in 11.33s` |
-| P16 SCO step PGF | `5 failed, 3 passed in 10.78s` | `8 passed in 17.21s` |
+| P16 SCO step PGF | `5 failed, 3 passed in 10.78s` | `1 failed, 7 passed in 22.45s` |
 | P17 Wicker package | `1 failed, 3 passed in 3.77s` | `4 passed in 4.00s` |
 | P18 FESOM optional dependency | `20 passed, 67 skipped, 11 errors in 0.96s` | `20 passed, 78 skipped in 0.49s` |
 | P19 overflow parity | `1 failed, 7 passed, 9 warnings in 161.07s` | target: `1 passed, 5 warnings in 114.33s` |
@@ -132,7 +132,7 @@ files, not an abort performed by the test.
 | `tests/ocean/unit/test_mpas_tke.py::TestPrognosticTKECarryOnMPAS::test_model_seed_and_step_carry` | REAL DEFECT | Same MPAS TKE bridge defect. | WORKTREE (commit blocked) | P14 |
 | `tests/ocean/unit/test_nemo_qco_generic_mesh_operands.py::test_arm_is_constructible_on_the_certified_l1_cards` | STALE EXPECTATION | `03f0a1a07` intentionally made partial raw-QCO operand bundles fail closed; the test now supplies all raw operands or asserts the partial-bundle error. | WORKTREE (commit blocked) | P15 |
 | `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_eta_zero_reduces_to_adcroft_bitwise` | STALE EXPECTATION | `7f729c488` requires raw W-grid geometry and `0da38492e` landed the dimensionless recurrence; fixture/expected recurrence were stale. | WORKTREE (commit blocked) | P16 |
-| `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_f90_recurrence_oracle_nonuniform_rho` | STALE EXPECTATION | Same `7f729c488` / `0da38492e` faithful-operand change. | WORKTREE (commit blocked) | P16 |
+| `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_f90_recurrence_oracle_nonuniform_rho` | REAL DEFECT | **HELD:** the recurrence expectation was updated for `7f729c488` / `0da38492e`, but the original `atol=1e-19` oracle now measures maximum absolute PGF discrepancies of 2.34866651e-15 (u) and 1.46611239e-15 m/s² (v) on CPU/fp64.  The 30,000× tolerance widening is removed; the numerical discrepancy remains visible. | A4 (this commit) | P16 |
 | `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_staircase_rest_stays_at_rest` | STALE EXPECTATION | Same `7f729c488` / `0da38492e` faithful-operand change. | WORKTREE (commit blocked) | P16 |
 | `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_two_column_step_form_stress_x` | STALE EXPECTATION | Same `7f729c488` / `0da38492e` faithful-operand change. | WORKTREE (commit blocked) | P16 |
 | `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_two_column_step_form_stress_y` | STALE EXPECTATION | Same `7f729c488` / `0da38492e` faithful-operand change. | WORKTREE (commit blocked) | P16 |
@@ -174,7 +174,7 @@ files, not an abort performed by the test.
 | `tests/ocean/unit/test_veros_acc_recipe.py::test_compare_momentum_emits_all_processes` | REAL DEFECT | Same stale tendency-probe caller; it now forwards the probe timestep as `dt_tke`. | WORKTREE (commit blocked) | P27 |
 | `tests/ocean/unit/test_veros_acc_recipe.py::test_end_to_end_recipe_probe_round_trip` | REAL DEFECT | Same stale tendency-probe caller. | WORKTREE (commit blocked) | P27 |
 
-The table contains exactly 87 IDs: 36 stale expectations, 32 real defects, 7
+The table contains exactly 87 IDs: 35 stale expectations, 33 real defects, 7
 test-infrastructure defects, and 12 environment skips.
 
 ## Whole-tree runs

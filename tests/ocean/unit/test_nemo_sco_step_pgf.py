@@ -293,13 +293,10 @@ def test_f90_recurrence_oracle_nonuniform_rho():
     u_mask, v_mask = compute_face_masks_3d(coord.is_active, grid_)
     u_mask = np.asarray(u_mask) > 0.5
     v_mask = np.asarray(v_mask) > 0.5
-    # 0da38492e added source-rounding barriers to preserve the compiled F90
-    # association.  The independent NumPy recurrence remains within 2.4e-15
-    # absolute, but is no longer bit-adjacent at near-zero faces.
     np.testing.assert_allclose(
-        pgf_u[u_mask], expected_u[u_mask], rtol=1e-12, atol=3e-15)
+        pgf_u[u_mask], expected_u[u_mask], rtol=1e-12, atol=1e-19)
     np.testing.assert_allclose(
-        pgf_v[v_mask], expected_v[v_mask], rtol=1e-12, atol=3e-15)
+        pgf_v[v_mask], expected_v[v_mask], rtol=1e-12, atol=1e-19)
 
 
 def test_eta_zero_reduces_to_adcroft_bitwise():
