@@ -1032,6 +1032,12 @@ def main():
                          "so the surface TKE flux is undamped in every "
                          "ice-covered column. Default off keeps existing "
                          "numbers byte-identical.")
+    ap.add_argument("--variance-budget", default=None, metavar="MESH_MASK",
+                    help="path to eORCA1 mesh_mask; enables the tracer-"
+                         "variance comparison chi = 2*int(theta' dtheta/dt)dV "
+                         "between OUR Mode-A closure and NEMO's ttrd_zdf on "
+                         "NEMO's OWN state. Needs the mesh for e1t*e2t: "
+                         "an unweighted integral on a tripole grid is wrong.")
     ap.add_argument("--use-bathy", action="store_true",
                     help="Tell the closure where each column's seafloor is "
                          "(bottom_level + w_active, derived from the state's "
@@ -1384,6 +1390,80 @@ def main():
     result["stage_b2_S"] = region_report(
         "Stage B2: operator on PRE-ZDF state dS vs strd_zdf [PSU/s]",
         dS2, strd, wet_c & np.isfinite(strd), lat_col, evd_cols=evd_cols)
+
+    # --- Variance budget: OUR closure vs NEMO's, on NEMO's OWN state ------
+    # The operator-resolved budget on NEMO's archived trends showed vertical
+    # mixing is its dominant tracer-variance destroyer. The question that
+    # matters for us is whether OUR closure destroys variance at the same
+    # rate. Because Mode-A already evaluated our K on NEMO's state, the state
+    # is shared by construction and there is NO state-difference confound --
+    # the single cleanest comparison available.
+    #
+    # chi = 2 * integral(theta' * dtheta/dt) dV, theta' about the
+    # VOLUME-WEIGHTED mean. Ratio near 1 means our closure removes tracer
+    # variance at NEMO's rate; below 1 means we under-mix, above 1 over-mix.
+    if args.variance_budget:
+        import jax.numpy as jnp
+        from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+            implicit_vertical_diffusion_ocean,
+        )
+        from global_tracer_content import load_mesh_metrics
+        e1t, e2t, _e3ref, _tm = load_mesh_metrics(args.variance_budget)
+        zc, nyc, nxc = d["T"].shape
+        ncolc = nyc * nxc
+
+        def _cols(a):
+            return np.transpose(np.asarray(a).reshape(zc, ncolc), (1, 0))
+
+        dz_c = np.where(np.isfinite(_cols(d["e3t"])), _cols(d["e3t"]), 1.0)
+        dz_h = 0.5 * (dz_c[:, :-1] + dz_c[:, 1:])
+        T_c = np.nan_to_num(_cols(d["T"]), nan=0.0)
+        area = (e1t * e2t).reshape(ncolc)[:, None]
+        dVc = area * dz_c
+        wetv = (_cols(np.isfinite(d["T"]).astype(float)) > 0.5) & np.isfinite(
+            _cols(d["ttrd_zdf"]))
+
+        # DRY CELLS MUST NOT DIFFUSE. `T_c` carries 0.0 below the sea floor
+        # (nan_to_num), so an unmasked solve sees a ~20 K jump at the last wet
+        # interface and manufactures an enormous tendency in the deepest wet
+        # cell. The first run of this budget returned a ratio of 414, which no
+        # closure whose diffusivity is 0.89-1.49x NEMO's could produce -- an
+        # instrument defect, not a result. K is therefore zeroed at every
+        # interface whose two adjacent cells are not both wet.
+        wet_cell = _cols(np.isfinite(d["T"]).astype(float)) > 0.5
+        iface_wet = wet_cell[:, :-1] & wet_cell[:, 1:]
+        K_use = np.where(iface_wet, np.nan_to_num(K_H2, nan=0.0), 0.0)
+        print(f"[variance] K interfaces kept {int(iface_wet.sum())} of "
+              f"{iface_wet.size}; K_use max {K_use.max():.4e} m2/s")
+
+        T_ours = np.asarray(implicit_vertical_diffusion_ocean(
+            jnp.asarray(T_c), jnp.asarray(K_use), jnp.asarray(dz_c),
+            jnp.asarray(dz_h), 3600.0))
+        dT_ours = (T_ours - T_c) / 3600.0
+        _nm = _cols(d["ttrd_zdf"])
+        print(f"[variance] |dT| ours max {np.abs(np.where(wetv, dT_ours, 0)).max():.4e}"
+              f"  NEMO max {np.abs(np.where(wetv, np.nan_to_num(_nm), 0)).max():.4e} K/s")
+
+        def _chi(tend):
+            w = np.where(wetv, dVc, 0.0)
+            vol = w.sum()
+            mu = float((np.where(wetv, T_c, 0.0) * w).sum() / vol)
+            return float(2.0 * (np.where(wetv, T_c - mu, 0.0)
+                                * np.where(wetv, tend, 0.0) * w).sum())
+
+        chi_ours = _chi(dT_ours)
+        chi_nemo = _chi(_cols(d["ttrd_zdf"]))
+        ratio = chi_ours / chi_nemo if chi_nemo else float("nan")
+        print(f"\n[variance] chi_zdf(theta) ours {chi_ours:+.6e}  "
+              f"NEMO {chi_nemo:+.6e}  ratio {ratio:.4f}")
+        print("[variance] ratio < 1 = we under-mix, > 1 = we over-mix; "
+              "state is NEMO's own, so this is not confounded by the state.")
+        result["variance_budget_zdf_theta"] = {
+            "chi_ours": chi_ours, "chi_nemo": chi_nemo, "ratio": ratio,
+            "n_cells": int(wetv.sum()),
+            "note": "our K from the Mode-A closure, NEMO's from ttrd_zdf, "
+                    "same state, same volumes, same BE solver",
+        }
 
     with open(out_dir / f"tendency_match_rec{args.rec}.json", "w") as f:
         json.dump(result, f, indent=1)
