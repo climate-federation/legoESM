@@ -280,3 +280,13 @@ interrupted required unit command.
 
 Second-pass dispositions are complete.  A4 and A5 remain deliberately red;
 B4 requires the scoring-definition decision recorded above.
+
+## Amendment — Decision 44 (user, 2026-09-19)
+
+The one shared matrix energy scorer (`scripts/matrix/ocean_test_matrix/energy_diagnostics.py`, monolithic semantics:
+land-masked, live layer thickness) is adopted for both runners.  Consequence accepted by the user: the registered
+MPAS LOCK_EXCHANGE verdict flips FAIL (5.290259116013614e-05 under the retired modular scorer, which summed dry
+cells with reference thicknesses) to PASS (-1.4936222653221853e-08); the lat-lon OVERFLOW verdict stays PASS
+(-8.37695888705242e-08 -> -2.0206019137654794e-08).  Every saved physical snapshot is byte-identical between the two
+scorings, so this is a change of what is scored, not of the model.  Follow-up: record on the ocean case board that the
+earlier FAIL was never a conservation failure.
