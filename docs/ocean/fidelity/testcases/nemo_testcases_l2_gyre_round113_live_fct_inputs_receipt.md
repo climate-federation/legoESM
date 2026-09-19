@@ -185,10 +185,102 @@ certified trajectory gate.
 
 ## Review, citations, and tests
 
-Independent review verdict: **PENDING FINAL PASS**.
+Independent review verdict: **independent review unavailable in-sandbox**.
+The required read-only command was attempted twice.  The first invocation
+exited 1 before a reviewer started:
 
-Citation gate, shifted plant, focused tests, and complete-tree summaries are
-recorded after their final runs below.
+```text
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Giving the command a temporary writable Codex state directory let it initialize
+while preserving `--sandbox read-only`, but the service connection was forbidden:
+
+```text
+failed to connect to websocket: IO error: Operation not permitted (os error 1)
+ERROR: Reconnecting... waiting for network
+```
+
+It emitted no verdict and was terminated after the bounded retry (exit 130).
+Thus there is no `DO NOT SHIP` verdict to override; this is the explicit
+unavailable-review fallback, not an author self-review substituted for the
+required pass.
+
+The citation gates were run from `## Outcome first` at clean commit
+`3746a75c60b6f1ed99e1668dddabce211c8b0192`:
+
+| receipt | citations | result |
+|---|---:|---|
+| amended Round 110 | 6 | PASS |
+| repaired Round 112 | 9 | PASS |
+| Round 113 | 4 | PASS |
+
+The Round-113 shifted plant moved the compiled
+`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:295-296` range by
+two lines, identified the U endpoint at line 295 rather than planted line 297,
+printed `SYMBOL-NOT-AT-LINE`, and exited 1.  Before that final pass,
+the gate also refused an unqualified OPEN-section shorthand; the receipt now
+binds the OPEN item to the full admitted-build path rather than weakening the
+map.
+
+Focused CPU summaries, all with `JAX_ENABLE_X64=1`, were:
+
+```text
+119 passed in 352.17s (0:05:52)
+19 passed in 53.34s
+87 passed, 1 warning in 180.34s (0:03:00)
+```
+
+The first line is the exact inherited four-file push gate: receipt citations,
+TKE NEMO terms, NEMO recipe, and real freshwater closure.  The second is both
+changed gate test files.  The third is all seven generic-card certification
+files named by the fidelity plan; no generic-card certification failed.
+
+The required one-piece `-n 12 tests/ocean/fidelity tests/ocean/unit` run was
+attempted once, collected 8,179 cases, and then exhausted the host/compiler
+process at 80%.  Its exact terminal summary was:
+
+```text
+219 failed, 6247 passed, 140 skipped, 2 xfailed, 44 warnings, 23 errors in 1010.01s (0:16:50)
+```
+
+That process exited 3 with an xdist `MemoryError` after repeated JAX compiler
+worker aborts, so its 219/23 counts are resource-contaminated rather than a
+regression verdict.  Its partial JUnit file contained 63 of the pinned 87
+pre-existing IDs, 24 pinned IDs not yet observed, and 180 apparent new IDs in
+28 files.  Every one of those 28 files was then rerun in fresh, shorter
+processes.  The usable recovery summaries include:
+
+```text
+285 passed, 1 skipped, 2 failed in 64.78s
+283 passed, 34 skipped, 4 failed, 1 warning in 527.93s
+37 passed in 75.63s
+48 passed in 48.12s
+9 passed in 14.62s
+72 passed in 10.47s
+```
+
+The two-worker heavy group itself eventually hit the same compiler-volume
+limit; both crash nodes passed when replayed in fresh processes.  All other
+compiler-crash nodes also passed in isolation.  The sole exception was the
+four-parameter advection-gradient test, which completed normally as the same
+four failures already present in the 87-ID baseline.  After recovery, the
+only ordinary failures not named in that older baseline were:
+
+```text
+tests/ocean/unit/test_tke_carried_coefficients.py::test_step_entry_n2_bundle_matches_live_geometry_construction
+tests/ocean/unit/test_tke_carried_coefficients.py::test_step_entry_n2_bundle_fails_closed_without_raw_w_mesh
+tests/ocean/unit/test_mass_flux_store.py::test_store_mass_flux_is_the_last_config_field
+```
+
+They are pre-existing at Round 113's incoming `950c5787a`: a direct
+`git diff --quiet 950c5787a..HEAD` over the complete `packages/ocean` tree and
+the two test files exits 0.  Each is serially reproducible, so they are neither
+hidden by the resource diagnosis nor caused by this round.  The only other
+ordinary heavy-group failure was the pinned inherited GM signed-sink red.
+Therefore the recovered failing-set diff contains **zero Round-113-owned test
+regressions**.  JUnit evidence for the mandatory run, all recovery groups, and
+each crash replay is under `round113/tests/`.
 
 ## ASKED / UNASKED
 
