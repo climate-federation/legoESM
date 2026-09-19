@@ -193,12 +193,13 @@ def _full_from_native(full, native, face: str) -> np.ndarray:
 
 def _round117_live_trace(
     card, seeded, freshwater, surface, execution_mode: str, *,
-    incoming_override=None, final_override=None,
+    incoming_override=None, final_override=None, association_arm=False,
 ):
     hooks = model_module._NEMOWSRK3TestHooks(
         expose_live_stage_operands=True,
         slow_forcing_incoming_override=incoming_override,
         barotropic_slow_forcing_override=final_override,
+        nemo_stage_rhs_accumulation_order_arm=association_arm,
     )
     model = model_module.LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
@@ -588,6 +589,38 @@ def _round117_propagating_ulp(incoming, coriolis, mask):
     raise RuntimeError("no active one-ULP incoming plant survives subtraction")
 
 
+def _round119_propagating_hpg_ulp(hpg, ldf, vor, keg, zad, mask):
+    """Find one HPG ULP that survives every compiled accumulator boundary."""
+    arrays = [
+        np.asarray(value, dtype=np.float64)
+        for value in (hpg, ldf, vor, keg, zad)
+    ]
+    mask = np.asarray(mask, dtype=bool)
+    require(all(value.shape == arrays[0].shape for value in arrays),
+            "Round-119 term extents differ")
+    require(mask.shape == arrays[0].shape, "Round-119 plant mask differs")
+    for location in map(tuple, np.argwhere(mask)):
+        ordinary = []
+        value = arrays[0][location]
+        ordinary.append(value)
+        for term in arrays[1:]:
+            value = value + term[location]
+            ordinary.append(value)
+        for direction in (np.float64(np.inf), np.float64(-np.inf)):
+            planted = np.array(arrays[0], copy=True)
+            value = np.nextafter(planted[location], direction)
+            planted[location] = value
+            changed = [value.view(np.uint64) != ordinary[0].view(np.uint64)]
+            for index, term in enumerate(arrays[1:], start=1):
+                value = value + term[location]
+                changed.append(
+                    value.view(np.uint64) != ordinary[index].view(np.uint64))
+            if all(changed):
+                return planted, tuple(int(index) for index in location), direction
+    raise RuntimeError(
+        "no active one-ULP HPG plant survives all source-order boundaries")
+
+
 def measure_round117(args) -> dict[str, object]:
     """Split the current-tip producer in the existing admitted Round-83 gate."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -602,12 +635,18 @@ def measure_round117(args) -> dict[str, object]:
 
     stage, static = _admit_round64(args)
     external = round82._admit(args)
-    direct = _admit_round117_direct(args, external) if args.round118 else None
+    direct = _admit_round117_direct(
+        args, external) if (args.round118 or args.round119) else None
     (base, card, seeded, freshwater, surface,
      captured) = round82._context(args)
     require(base["status"] == "MEASURED", "kt=2 seeded context changed")
     ordinary = _round117_live_trace(
         card, seeded, freshwater, surface, args.execution_mode)
+    source_order = (
+        _round117_live_trace(
+            card, seeded, freshwater, surface, args.execution_mode,
+            association_arm=("stage1-source-order", None))
+        if args.round119 else None)
     trace_identity = round82._pytree_identity(
         ordinary.state_after, captured.plain_state)
     require(trace_identity["bit_exact"],
@@ -830,9 +869,11 @@ def measure_round117(args) -> dict[str, object]:
         require(plant_fires, "incoming ULP plant did not cross production subtract")
         return {
             "format": (
-                "nemo-testcase-l2-gyre-round118-producer-walk-v1"
-                if args.round118 else
-                "nemo-testcase-l2-gyre-round117-producer-walk-v1"),
+                "nemo-testcase-l2-gyre-round119-association-walk-v1"
+                if args.round119 else
+                ("nemo-testcase-l2-gyre-round118-producer-walk-v1"
+                 if args.round118 else
+                 "nemo-testcase-l2-gyre-round117-producer-walk-v1")),
             "status": "PLANT_FIRED",
             "worktree": stamp,
             "execution_regime": args.execution_mode,
@@ -894,6 +935,222 @@ def measure_round117(args) -> dict[str, object]:
             incremental_residual[face][boundary] = float(
                 np.max(np.abs(delta[mask]), initial=0.0))
             previous = residual
+
+    association_walk = None
+    zad_operand_walk = None
+    if args.round119:
+        source_parts = source_order.operator_operands[0]
+
+        def _native_field(value, face):
+            data = value.data if hasattr(value, "data") else value
+            return native_u(data) if face == "u" else native_v(data)
+
+        raw_names = ("hpg", "ldf", "vorticity", "keg", "zad")
+        raw_identity = {
+            face: {
+                name: comparison(
+                    _native_field(source_parts[f"{name}_{face}"], face),
+                    _native_field(parts[f"{name}_{face}"], face),
+                    active[f"{face}3"],
+                )
+                for name in raw_names
+            }
+            for face in ("u", "v")
+        }
+        production_vs_isolated = {face: {} for face in ("u", "v")}
+        production_vs_oracle = {face: {} for face in ("u", "v")}
+        for face in ("u", "v"):
+            for boundary in ROUND117_BOUNDARIES:
+                production_key = (
+                    "after_adv" if boundary in ("after_zad", "after_adv")
+                    else boundary)
+                production_value = _native_field(
+                    source_parts[f"{production_key}_{face}"], face)
+                isolated_value = (
+                    native_u(cumulative[f"{boundary}_{face}"])
+                    if face == "u" else
+                    native_v(cumulative[f"{boundary}_{face}"]))
+                production_vs_isolated[face][boundary] = comparison(
+                    production_value, isolated_value, active[f"{face}3"])
+                production_vs_oracle[face][boundary] = comparison(
+                    production_value,
+                    owned3(stage_arrays[f"{boundary}_{face}"]),
+                    active[f"{face}3"])
+
+        ordinary_final = {
+            face: _native_field(parts[f"after_ldf_{face}"], face)
+            for face in ("u", "v")
+        }
+        source_final = {
+            face: _native_field(source_parts[f"after_adv_{face}"], face)
+            for face in ("u", "v")
+        }
+        ordinary_live_closure = {
+            "u": comparison(
+                ordinary_final["u"], native_u(producer["rhs_u"]), active["u3"]),
+            "v": comparison(
+                ordinary_final["v"], native_v(producer["rhs_v"]), active["v3"]),
+        }
+        source_producer = source_order.slow_forcing_producer
+        source_live_closure = {
+            "u": comparison(
+                source_final["u"], native_u(source_producer["rhs_u"]),
+                active["u3"]),
+            "v": comparison(
+                source_final["v"], native_v(source_producer["rhs_v"]),
+                active["v3"]),
+        }
+        source_to_ordinary = {
+            face: comparison(
+                source_final[face], ordinary_final[face], active[f"{face}3"])
+            for face in ("u", "v")
+        }
+        association_confirmed = bool(
+            all(row["bit_exact"] for rows in raw_identity.values()
+                for row in rows.values())
+            and all(row["bit_exact"] for rows in production_vs_isolated.values()
+                    for row in rows.values())
+            and all(row["bit_exact"] for row in ordinary_live_closure.values())
+            and all(row["bit_exact"] for row in source_live_closure.values())
+            and source_to_ordinary["u"]["differing_cells"] == 6882
+            and source_to_ordinary["v"]["differing_cells"] == 6566
+            and all(row["absolute_max"]
+                    == np.float64(8.470329472543003e-22)
+                    for row in source_to_ordinary.values()))
+        association_walk = {
+            "ordinary_label": (
+                "full production step; actual combined (HPG+KEG) -> VOR -> "
+                "ZAD -> LDF accumulator"),
+            "source_order_label": (
+                "full production step; private HPG -> LDF -> VOR -> KEG -> "
+                "ZAD association arm"),
+            "isolated_label": "isolated-closure JIT; not production",
+            "raw_operand_identity": raw_identity,
+            "source_order_production_vs_isolated": production_vs_isolated,
+            "source_order_production_vs_oracle": production_vs_oracle,
+            "ordinary_final_vs_ordinary_live_total": ordinary_live_closure,
+            "source_final_vs_source_live_total": source_live_closure,
+            "source_order_vs_ordinary_final": source_to_ordinary,
+            "state_after_arm_vs_ordinary": round82._pytree_identity(
+                source_order.state_after, ordinary.state_after),
+            "prediction_confirmed": association_confirmed,
+        }
+
+        _, live_r3u, live_r3v = ordinary.stage_qco[0]
+        zad_live = {
+            "velocity_u": native_u(parts["operand_velocity_u"]),
+            "velocity_v": native_v(parts["operand_velocity_v"]),
+            "ww": np.asarray(parts["operand_zad_w"], dtype=np.float64)[..., :30],
+            "r3u": native_u(live_r3u)[..., 0],
+            "r3v": native_v(live_r3v)[..., 0],
+            "thickness_u": native_u(parts["operand_zad_h_u"]),
+            "thickness_v": native_v(parts["operand_zad_h_v"]),
+            "area_t": np.asarray(card.recipe.grid.area_T, dtype=np.float64),
+            "reciprocal_area_u": native_u(
+                np.float64(1.0) / (
+                    np.asarray(card.recipe.grid.dx_u, dtype=np.float64)
+                    * np.asarray(card.recipe.grid.dy_u, dtype=np.float64))),
+            "reciprocal_area_v": native_v(
+                np.float64(1.0) / (
+                    np.asarray(card.recipe.grid.dx_v, dtype=np.float64)
+                    * np.asarray(card.recipe.grid.dy_v, dtype=np.float64))),
+        }
+        zad_oracle = {
+            "velocity_u": owned3(stage_arrays["u_Kmm"]),
+            "velocity_v": owned3(stage_arrays["v_Kmm"]),
+            "ww": owned3(stage_arrays["ww"]),
+            "r3u": owned2(stage_arrays["r3u_Kmm"]),
+            "r3v": owned2(stage_arrays["r3v_Kmm"]),
+            "thickness_u": owned3(stage_arrays["e3u_Kmm"]),
+            "thickness_v": owned3(stage_arrays["e3v_Kmm"]),
+            "area_t": owned2(stage_arrays["e1e2t"]),
+            "reciprocal_area_u": owned2(stage_arrays["r1_e1e2u"]),
+            "reciprocal_area_v": owned2(stage_arrays["r1_e1e2v"]),
+        }
+        zad_active = {
+            "velocity_u": active["u3"], "velocity_v": active["v3"],
+            "ww": active["t3"], "r3u": active["u2"],
+            "r3v": active["v2"], "thickness_u": active["u3"],
+            "thickness_v": active["v3"], "area_t": active["t2"],
+            "reciprocal_area_u": active["u2"],
+            "reciprocal_area_v": active["v2"],
+        }
+        zad_order = tuple(zad_live)
+        zad_rows = {
+            name: comparison(zad_live[name], zad_oracle[name], zad_active[name])
+            for name in zad_order
+        }
+        zad_first = next(
+            (name for name in zad_order if not zad_rows[name]["bit_exact"]), None)
+        zad_operand_walk = {
+            "order": list(zad_order),
+            "rows": zad_rows,
+            "first_non_bit": zad_first,
+            "largest_absolute_max": max(
+                zad_order, key=lambda name: zad_rows[name]["absolute_max"]),
+            "prediction_confirmed": bool(
+                zad_first == "ww"
+                and max(zad_order,
+                        key=lambda name: zad_rows[name]["absolute_max"]) == "ww"
+                and all(zad_rows[name]["bit_exact"] for name in (
+                    "velocity_u", "velocity_v", "thickness_u", "thickness_v",
+                    "area_t", "reciprocal_area_u", "reciprocal_area_v"))),
+        }
+
+        if args.plant == "association-hpg-ulp":
+            planted_native, location, direction = _round119_propagating_hpg_ulp(
+                _native_field(parts["hpg_u"], "u"),
+                _native_field(parts["ldf_u"], "u"),
+                _native_field(parts["vorticity_u"], "u"),
+                _native_field(parts["keg_u"], "u"),
+                _native_field(parts["zad_u"], "u"), active["u3"])
+            hpg_override = (
+                jnp.asarray(_full_from_native(
+                    parts["hpg_u"].data, planted_native, "u")),
+                jnp.asarray(parts["hpg_v"].data),
+            )
+            planted = _round117_live_trace(
+                card, seeded, freshwater, surface, args.execution_mode,
+                association_arm=("stage1-source-order", hpg_override))
+            planted_parts = planted.operator_operands[0]
+            planted_boundaries = {}
+            for boundary in ROUND117_BOUNDARIES:
+                production_key = (
+                    "after_adv" if boundary in ("after_zad", "after_adv")
+                    else boundary)
+                planted_boundaries[boundary] = comparison(
+                    _native_field(
+                        planted_parts[f"{production_key}_u"], "u"),
+                    _native_field(source_parts[f"{production_key}_u"], "u"),
+                    active["u3"])
+            planted_raw_identity = {
+                name: comparison(
+                    _native_field(planted_parts[f"{name}_u"], "u"),
+                    _native_field(source_parts[f"{name}_u"], "u"),
+                    active["u3"])
+                for name in raw_names
+            }
+            plant_fires = bool(
+                planted_raw_identity["hpg"]["differing_cells"] == 1
+                and all(planted_raw_identity[name]["bit_exact"]
+                        for name in raw_names if name != "hpg")
+                and all(row["differing_cells"] > 0
+                        for row in planted_boundaries.values()))
+            require(plant_fires,
+                    "Round-119 HPG ULP did not propagate through every boundary")
+            return {
+                "format": "nemo-testcase-l2-gyre-round119-association-walk-v1",
+                "status": "PLANT_FIRED",
+                "worktree": stamp,
+                "execution_regime": args.execution_mode,
+                "trace_noninterference": trace_identity,
+                "plant": args.plant,
+                "plant_location": list(location),
+                "plant_direction": float(direction),
+                "raw_operand_rows": planted_raw_identity,
+                "boundary_rows": planted_boundaries,
+                "plant_fires": plant_fires,
+            }
 
     substeps = captured.substeps
     source_replay = {}
@@ -1168,15 +1425,22 @@ def measure_round117(args) -> dict[str, object]:
             for row in face_rows.values()))
     prediction_confirmed = bool(
         p1_confirmed and p2_confirmed
-        and (magnitude is None or magnitude["prediction_confirmed"]))
+        and (magnitude is None or magnitude["prediction_confirmed"])
+        and (not args.round119 or (
+            association_walk is not None
+            and association_walk["prediction_confirmed"]
+            and zad_operand_walk is not None
+            and zad_operand_walk["prediction_confirmed"])))
     status = (
         "MEASURED" if args.execution_mode == "production-eager" else
         ("CONFIRMED" if prediction_confirmed else "REFUTED"))
     return {
         "format": (
-            "nemo-testcase-l2-gyre-round118-producer-walk-v1"
-            if direct is not None else
-            "nemo-testcase-l2-gyre-round117-producer-walk-v1"),
+            "nemo-testcase-l2-gyre-round119-association-walk-v1"
+            if args.round119 else
+            ("nemo-testcase-l2-gyre-round118-producer-walk-v1"
+             if direct is not None else
+             "nemo-testcase-l2-gyre-round117-producer-walk-v1")),
         "status": status,
         "worktree": stamp,
         "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
@@ -1232,14 +1496,21 @@ def measure_round117(args) -> dict[str, object]:
             "prediction_confirmed": p2_confirmed,
         },
         "record_directed_magnitude": magnitude,
+        "production_association_walk": association_walk,
+        "current_tip_zad_operand_walk": zad_operand_walk,
         "candidate_eligible": False,
         "candidate_reason": (
-            "direct producer inputs are certified, but the isolated cumulative "
-            "association does not close bit-for-bit to the live production RHS"
+            "the production association is attributed, but it is a last-bit "
+            "effect below the measured W-owned ZAD magnitude; the next "
+            "candidate must start at W's current-tip producer"
+            if args.round119 and association_walk is not None
+            and association_walk["prediction_confirmed"] else
+            ("direct producer inputs are certified, but the isolated cumulative "
+             "association does not close bit-for-bit to the live production RHS"
             if direct is not None else
             "diagnostic only; incoming kt2 Ue_rhs/Ve_rhs is not directly "
             "recorded and the cumulative LDF output lacks a complete direct-"
-            "input source-exactness proof"),
+            "input source-exactness proof")),
         "prediction_confirmed": prediction_confirmed,
         "plant": args.plant,
         "plant_fires": False,
@@ -1255,6 +1526,9 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round118", action="store_true",
         help="run the admitted direct pre-loop producer split")
+    round_group.add_argument(
+        "--round119", action="store_true",
+        help="run the full-step stage-1 accumulator-association discriminator")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -1283,27 +1557,30 @@ def main(argv=None) -> int:
         default="production-jit")
     parser.add_argument("--plant", choices=(
                             "none", "e3-ulp", "rhs-ulp", "final-ulp",
-                            "incoming-ulp"),
+                            "incoming-ulp", "association-hpg-ulp"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
             measure_round117(args)
-            if args.round117 or args.round118 else measure(args))
+            if args.round117 or args.round118 or args.round119 else measure(args))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND118" if args.round118 else
-            ("ROUND117" if args.round117 else "ROUND83"))
+            "ROUND119" if args.round119 else
+            ("ROUND118" if args.round118 else
+             ("ROUND117" if args.round117 else "ROUND83")))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
-    if args.round117 or args.round118:
-        prefix = "ROUND118" if args.round118 else "ROUND117"
+    if args.round117 or args.round118 or args.round119:
+        prefix = (
+            "ROUND119" if args.round119 else
+            ("ROUND118" if args.round118 else "ROUND117"))
         print(
             prefix + " PRODUCER " + report["status"] + ": first="
             + repr(report["producer_split"]["first_direct_non_bit"])

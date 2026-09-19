@@ -4961,10 +4961,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dp_dx, rho_0, direct_hpg_u)
     hpg_tendency_v = _nemo_hpg_tendency_from_pressure_or_direct(
         dp_dy, rho_0, direct_hpg_v)
+    _nemo_stage1_source_order = (
+        isinstance(nemo_operator_association, tuple)
+        and len(nemo_operator_association) == 2
+        and nemo_operator_association[0] == "stage1-source-order")
+    if _nemo_stage1_source_order and nemo_operator_association[1] is not None:
+        # Production-closure ULP plant only.  The private model hook supplies a
+        # complete HPG pair; no public configuration can reach this branch.
+        hpg_tendency_u, hpg_tendency_v = nemo_operator_association[1]
     KE_PGF_u = -dKE_dx + hpg_tendency_u
     KE_PGF_v = -dKE_dy + hpg_tendency_v
     _nemo_vector_order = (
-        nemo_operator_association and _mom_adv != "flux_form")
+        bool(nemo_operator_association) and _mom_adv != "flux_form")
     if _nemo_vector_order:
         # NEMO stprk3_stg calls dyn_hpg, dyn_vor, then dyn_adv; the vector
         # dyn_adv calls dyn_keg before dyn_zad.  Keep those routine boundaries
@@ -5113,6 +5121,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     _nemo_after_vor_u = du_dt
     _nemo_after_vor_v = dv_dt
+    # On the ordinary combined HPG+KEG path this is the first boundary after
+    # both terms have entered; the explicit association arms overwrite it at
+    # their separate KEG addition.
+    _nemo_after_keg_u = du_dt
+    _nemo_after_keg_v = dv_dt
     if _nemo_vector_order:
         # End dyn_vor; then dyn_keg is the first subroutine of dyn_adv.
         du_dt = jax.lax.optimization_barrier(du_dt)
@@ -5121,6 +5134,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _nemo_after_vor_v = dv_dt
         du_dt = jax.lax.optimization_barrier(du_dt + (-dKE_dx))
         dv_dt = jax.lax.optimization_barrier(dv_dt + (-dKE_dy))
+        _nemo_after_keg_u = du_dt
+        _nemo_after_keg_v = dv_dt
 
     # --- Stage 7c: WENO divergence (D-term) dissipation. ---
     du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(
@@ -5138,6 +5153,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         grid, _mom_adv, _weno_order, config, diagnose_momentum,
         u_full=u, v_full=v,
     )
+    _nemo_zad_term_u = diag_Dterm_u + diag_vertadv_u
+    _nemo_zad_term_v = diag_Dterm_v + diag_vertadv_v
     _nemo_after_adv_u = du_dt
     _nemo_after_adv_v = dv_dt
     if _nemo_vector_order:
@@ -5238,6 +5255,34 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         )
     _nemo_after_ldf_u = du_dt
     _nemo_after_ldf_v = dv_dt
+    _nemo_ldf_term_u = (diag_Ah_lap_u + diag_Bh_bilap_u
+                        + diag_Cs_smag_u + diag_Cl_leith_u)
+    _nemo_ldf_term_v = (diag_Ah_lap_v + diag_Bh_bilap_v
+                        + diag_Cs_smag_v + diag_Cl_leith_v)
+    if _nemo_stage1_source_order:
+        # stp2d's stage-1 Krhs is one shared in-place accumulator:
+        # dyn_hpg -> dyn_ldf -> dyn_vor -> dyn_keg -> dyn_zad.  Reassociate only
+        # the already-computed production terms, then let the ordinary full step
+        # consume the result.  Barriers preserve the compiled routine boundaries.
+        _nemo_after_hpg_u = jax.lax.optimization_barrier(hpg_tendency_u)
+        _nemo_after_hpg_v = jax.lax.optimization_barrier(hpg_tendency_v)
+        _nemo_after_ldf_u = jax.lax.optimization_barrier(
+            _nemo_after_hpg_u + _nemo_ldf_term_u)
+        _nemo_after_ldf_v = jax.lax.optimization_barrier(
+            _nemo_after_hpg_v + _nemo_ldf_term_v)
+        _nemo_after_vor_u = jax.lax.optimization_barrier(
+            _nemo_after_ldf_u + diag_vortcor_u)
+        _nemo_after_vor_v = jax.lax.optimization_barrier(
+            _nemo_after_ldf_v + diag_vortcor_v)
+        _nemo_after_keg_u = jax.lax.optimization_barrier(
+            _nemo_after_vor_u + (-dKE_dx))
+        _nemo_after_keg_v = jax.lax.optimization_barrier(
+            _nemo_after_vor_v + (-dKE_dy))
+        _nemo_after_adv_u = jax.lax.optimization_barrier(
+            _nemo_after_keg_u + _nemo_zad_term_u)
+        _nemo_after_adv_v = jax.lax.optimization_barrier(
+            _nemo_after_keg_v + _nemo_zad_term_v)
+        du_dt, dv_dt = _nemo_after_adv_u, _nemo_after_adv_v
 
     # --- Energy backscatter (post-viscosity; lateral-friction family). ---
     # Jansen-Held (2014) energy backscatter (diagnostic-E, no
@@ -5678,6 +5723,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             "after_hpg_v": _mv(_nemo_after_hpg_v),
             "after_vor_u": _mu(_nemo_after_vor_u),
             "after_vor_v": _mv(_nemo_after_vor_v),
+            "after_keg_u": _mu(_nemo_after_keg_u),
+            "after_keg_v": _mv(_nemo_after_keg_v),
             "after_adv_u": _mu(_nemo_after_adv_u),
             "after_adv_v": _mv(_nemo_after_adv_v),
             "after_ldf_u": _mu(_nemo_after_ldf_u),
@@ -5686,12 +5733,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # compiled stp2d puts LDF between HPG and VOR.
             "keg_u": _mu(-dKE_dx),
             "keg_v": _mv(-dKE_dy),
-            "zad_u": _mu(diag_Dterm_u + diag_vertadv_u),
-            "zad_v": _mv(diag_Dterm_v + diag_vertadv_v),
-            "ldf_u": _mu(diag_Ah_lap_u + diag_Bh_bilap_u
-                           + diag_Cs_smag_u + diag_Cl_leith_u),
-            "ldf_v": _mv(diag_Ah_lap_v + diag_Bh_bilap_v
-                           + diag_Cs_smag_v + diag_Cl_leith_v),
+            "zad_u": _mu(_nemo_zad_term_u),
+            "zad_v": _mv(_nemo_zad_term_v),
+            "ldf_u": _mu(_nemo_ldf_term_u),
+            "ldf_v": _mv(_nemo_ldf_term_v),
         }
     return tendencies, diagnostics
 

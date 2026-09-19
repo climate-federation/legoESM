@@ -1225,11 +1225,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # of the stage-3 divergence.  The ordinary step still completes before
     # either array is substituted into the returned diagnostic state.
     expose_stage3_momentum_rhs: str = ""
-    # One-variable diagnostic arm for the WS-RK3 vector-source association.
-    # It forces explicit compiler boundaries between dyn_hpg -> dyn_vor ->
-    # dyn_keg -> dyn_zad; production remains on the existing shared tendency
-    # accumulator because the arm was measured bit-identical at stage 2.
-    nemo_stage_rhs_accumulation_order_arm: bool = False
+    # Private diagnostic arm for the WS-RK3 vector-source association. ``True``
+    # keeps the stage-2/3 HPG -> VOR -> KEG -> ZAD discriminator.  Round 119's
+    # private ``("stage1-source-order", hpg_override)`` value drives stage 1
+    # through compiled HPG -> LDF -> VOR -> KEG -> ZAD boundaries.  Neither form
+    # is constructible by a public card.
+    nemo_stage_rhs_accumulation_order_arm: object = False
     # WRITE-only transport exposure for the ordered tracer boundary walk.
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
     # the ordinary step; it cannot affect a later stage or public execution.
@@ -5476,7 +5477,8 @@ class LatLonCGridOceanModel:
                                          .legacy_hpg_algebraic_association),
                                      nemo_operator_association=(
                                          self._nemo_ws_test_hooks
-                                         .nemo_stage_rhs_accumulation_order_arm),
+                                         .nemo_stage_rhs_accumulation_order_arm
+                                         is True),
                                      nemo_stage_zad_operands=stage_zad_operands,
                                      return_nemo_operator_components=(
                                          _return_components))

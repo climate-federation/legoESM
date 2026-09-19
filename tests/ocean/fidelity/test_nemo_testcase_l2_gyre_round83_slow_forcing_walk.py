@@ -117,3 +117,20 @@ def test_round117_one_ulp_plant_survives_subtract() -> None:
     assert np.count_nonzero(planted.view(np.uint64) != incoming.view(np.uint64)) == 1
     assert ((planted - coriolis)[location].view(np.uint64)
             != (incoming - coriolis)[location].view(np.uint64))
+
+
+def test_round119_hpg_ulp_plant_survives_every_source_boundary() -> None:
+    hpg = np.asarray([[[1.0, 2.0]]], dtype=np.float64)
+    zero = np.zeros_like(hpg)
+    active = np.asarray([[[True, False]]])
+    planted, location, _ = WALK._round119_propagating_hpg_ulp(
+        hpg, zero, zero, zero, zero, active)
+    assert location == (0, 0, 0)
+    assert np.count_nonzero(planted.view(np.uint64) != hpg.view(np.uint64)) == 1
+    value = planted[location]
+    ordinary = hpg[location]
+    for term in (zero, zero, zero, zero):
+        assert value.view(np.uint64) != ordinary.view(np.uint64)
+        value = value + term[location]
+        ordinary = ordinary + term[location]
+    assert value.view(np.uint64) != ordinary.view(np.uint64)
