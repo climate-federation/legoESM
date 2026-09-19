@@ -423,3 +423,101 @@ def test_round114_u_duplicate_guard_rejects_changed_factor():
     ):
         module._round114_collapse_u(
             [ordinary, tuple(planted)], "synthetic")
+
+
+def test_round115_geometry_trace_scores_first_nonbit_ssh_input():
+    module = _module()
+    shape = (2, 3)
+    eta_full = np.array(
+        [[0.125, 0.25, 0.375], [0.5, 0.625, 0.75]],
+        dtype=np.float64)
+    eta_half = eta_full * np.float64(0.5)
+    area_t = np.full(shape, 8.0, dtype=np.float64)
+    r1_hu0 = np.full(shape, 0.5, dtype=np.float64)
+    r1_area_u = np.full(shape, 0.25, dtype=np.float64)
+    full_trace = tuple(np.asarray(value) for value in module.jax.jit(
+        module._round115_u_trace)(eta_full, area_t, r1_hu0, r1_area_u))
+    scalar_trace = module._round115_scalar_u_trace(
+        eta_full, area_t, r1_hu0, r1_area_u)
+    for compiled, scalar in zip(full_trace, scalar_trace, strict=True):
+        np.testing.assert_array_equal(compiled, scalar)
+
+    half_trace = tuple(np.asarray(value) for value in module.jax.jit(
+        module._round115_u_trace)(eta_half, area_t, r1_hu0, r1_area_u))
+    r3u_before = np.zeros(shape, dtype=np.float64)
+    interpolated = np.asarray(module.jax.jit(module._round115_half_ratio)(
+        r3u_before, full_trace[5]))
+    np.testing.assert_array_equal(interpolated, half_trace[5])
+    one_plus_half = module._round115_u_redundant(half_trace[6])
+
+    observed_full = np.array(eta_full, copy=True)
+    observed_full[0, 0] = np.nextafter(observed_full[0, 0], np.inf)
+    observation = (
+        observed_full, eta_half, area_t, r1_hu0, r1_area_u,
+        np.asarray(one_plus_half), full_trace[5], half_trace[5],
+        *full_trace, full_trace[5], interpolated,
+        np.float64(1.0) + interpolated,
+    )
+    bundle = {
+        "wet_t": np.ones(shape, dtype=bool),
+        "wet_u_native": np.ones(shape, dtype=bool),
+        "wet_u_redundant": np.ones((2, 4), dtype=bool),
+        "area_t": area_t,
+        "ssh_n1": eta_full,
+        "ssh_half": eta_half,
+        "r1_hu0": r1_hu0,
+        "r1_area_u": r1_area_u,
+        "scalar_trace": scalar_trace,
+        "r3u_full": full_trace[5],
+        "r3u_half": interpolated,
+        "one_plus_r3u_half": np.asarray(one_plus_half),
+    }
+    score = module._round115_score_geometry(observation, bundle)
+    assert score["first_nonbit_input"] == "full_step_ssh"
+    assert score["inputs"]["full_step_ssh"]["cells_unequal"] == 1
+    assert score["direct_outputs"]["oracle_full_r3u"][
+        "classification"] == "BIT"
+    assert score["direct_outputs"]["oracle_interpolated_half_r3u"][
+        "classification"] == "BIT"
+
+
+def test_round115_geometry_ulp_plant_reaches_product_and_half_ratio_under_jit():
+    module = _module()
+    eta = module.jnp.array(
+        [[1.0, 0.5, 0.25], [1.0, 0.5, 0.25]],
+        dtype=module.jnp.float64)
+    area = module.jnp.ones_like(eta)
+    r1_depth = module.jnp.ones_like(eta)
+    r1_area = module.jnp.ones_like(eta)
+    before = module.jnp.zeros_like(eta)
+
+    def run(ssh):
+        trace = module._round115_u_trace(ssh, area, r1_depth, r1_area)
+        half = module._round115_half_ratio(before, trace[5])
+        return trace[0], trace[1], trace[5], half
+
+    ordinary = module.jax.jit(run)(eta)
+    planted_eta = eta.at[0, 0].set(module.jnp.nextafter(
+        eta[0, 0], module.jnp.asarray(module.jnp.inf)))
+    planted = module.jax.jit(run)(planted_eta)
+    assert (np.any(np.asarray(planted[0]) != np.asarray(ordinary[0]))
+            or np.any(np.asarray(planted[1]) != np.asarray(ordinary[1])))
+    assert np.any(np.asarray(planted[2]) != np.asarray(ordinary[2]))
+    assert np.any(np.asarray(planted[3]) != np.asarray(ordinary[3]))
+
+
+def test_round115_geometry_duplicate_guard_rejects_changed_execution():
+    module = _module()
+    ordinary = tuple(
+        np.array([float(index + 1)], dtype=np.float64)
+        for index in range(len(module.ROUND115_OBSERVATION_FIELDS)))
+    np.testing.assert_equal(
+        module._round115_collapse([ordinary, ordinary], "synthetic"),
+        ordinary)
+    planted = list(ordinary)
+    planted[0] = np.nextafter(planted[0], np.inf)
+    with np.testing.assert_raises_regex(
+        RuntimeError, "distinct duplicate executions"
+    ):
+        module._round115_collapse(
+            [ordinary, tuple(planted)], "synthetic")

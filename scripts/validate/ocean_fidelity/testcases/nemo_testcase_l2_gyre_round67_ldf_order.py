@@ -44,6 +44,18 @@ ROUND114_DIRECT_ORDER = (
     "e2u", "one_plus_r3u", "e3u_kmm", "u_kmm", "un_adv",
     "uu_b_kmm", "zfu",
 )
+ROUND115_TRACE_FIELDS = (
+    "west_product", "east_product", "parenthesized_sum", "half_sum",
+    "depth_product", "r3u", "one_plus_r3u",
+)
+ROUND115_OBSERVATION_FIELDS = (
+    "full_step_ssh", "half_step_ssh", "live_area_t", "live_r1_hu0",
+    "live_r1_area_u",
+    "ordinary_one_plus_r3u", "live_full_r3u", "live_half_r3u",
+    *ROUND115_TRACE_FIELDS,
+    "oracle_full_r3u", "oracle_interpolated_half_r3u",
+    "oracle_interpolated_half_one_plus_r3u",
+)
 
 
 class _Round113EagerBoundaryComplete(RuntimeError):
@@ -805,6 +817,346 @@ def _round114_collapse_u(
     return selected
 
 
+def _round115_u_redundant(value):
+    """Map native east-face U values to the model's redundant west-face row."""
+    return jnp.concatenate([value[:, -1:], value], axis=1)
+
+
+def _round115_u_trace(eta, area_t, r1_hu0, r1_area_u) -> tuple:
+    """Trace every written boundary of compiled ``dom_qco_r3c_RK3`` U."""
+    sr = nemo_source_round
+    dtype = jnp.asarray(eta).dtype
+    half = jnp.asarray(0.5, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    west = sr(jnp.asarray(area_t, dtype=dtype) * jnp.asarray(eta, dtype=dtype))
+    east = jnp.roll(west, -1, axis=1)
+    parenthesized = sr(west + east)
+    half_sum = sr(half * parenthesized)
+    depth_product = sr(half_sum * jnp.asarray(r1_hu0, dtype=dtype))
+    r3u = sr(depth_product * jnp.asarray(r1_area_u, dtype=dtype))
+    one_plus = sr(one + r3u)
+    return west, east, parenthesized, half_sum, depth_product, r3u, one_plus
+
+
+def _round115_scalar_u_trace(
+    eta: np.ndarray,
+    area_t: np.ndarray,
+    r1_hu0: np.ndarray,
+    r1_area_u: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    """Independent scalar replay of the compiled U expression."""
+    eta = np.asarray(eta, dtype=np.float64)
+    area_t = np.asarray(area_t, dtype=np.float64)
+    r1_hu0 = np.asarray(r1_hu0, dtype=np.float64)
+    r1_area_u = np.asarray(r1_area_u, dtype=np.float64)
+    require(eta.shape == area_t.shape == r1_hu0.shape == r1_area_u.shape,
+            "round-115 scalar U operands must have one native-face shape")
+    outputs = tuple(np.empty_like(eta) for _ in ROUND115_TRACE_FIELDS)
+    for jj in range(eta.shape[0]):
+        for ji in range(eta.shape[1]):
+            east_i = (ji + 1) % eta.shape[1]
+            west = np.float64(area_t[jj, ji] * eta[jj, ji])
+            east = np.float64(area_t[jj, east_i] * eta[jj, east_i])
+            parenthesized = np.float64(west + east)
+            half_sum = np.float64(np.float64(0.5) * parenthesized)
+            depth_product = np.float64(half_sum * r1_hu0[jj, ji])
+            r3u = np.float64(depth_product * r1_area_u[jj, ji])
+            one_plus = np.float64(np.float64(1.0) + r3u)
+            for output, result in zip(
+                outputs,
+                (west, east, parenthesized, half_sum, depth_product, r3u,
+                 one_plus),
+                strict=True,
+            ):
+                output[jj, ji] = result
+    return outputs
+
+
+def _round115_half_ratio(r3u_before, r3u_full):
+    """Compiled HYB stage-2 ``r1_2 * (r3u(Kbb) + r3ua)`` association."""
+    sr = nemo_source_round
+    dtype = jnp.asarray(r3u_before).dtype
+    return sr(jnp.asarray(0.5, dtype=dtype) * sr(r3u_before + r3u_full))
+
+
+def _round115_source_depth(
+    e3_face_0: np.ndarray, face_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replay compiled ``hu_0`` accumulation and masked reciprocal."""
+    e3_face_0 = np.asarray(e3_face_0, dtype=np.float64)
+    face_mask = np.asarray(face_mask, dtype=np.float64)
+    require(e3_face_0.shape == face_mask.shape,
+            "round-115 reference thickness/mask shapes differ")
+    depth = np.zeros(e3_face_0.shape[:2], dtype=np.float64)
+    for level in range(e3_face_0.shape[-1]):
+        product = np.float64(e3_face_0[..., level] * face_mask[..., level])
+        depth = np.float64(depth + product)
+    surface_mask = face_mask[..., 0]
+    denominator = np.float64(
+        np.float64(depth + np.float64(1.0)) - surface_mask)
+    reciprocal = np.float64(surface_mask / denominator)
+    return depth, reciprocal
+
+
+def _round115_owned_geometry_bundle(
+    stage_root: Path, *, plant: bool = False,
+) -> dict:
+    """Admit the kt2/stage-3 full/half SSH and QCO operand bundle."""
+    producer = (stage_root / "producer_commit.txt").read_text().strip()
+    require(producer == "715c9865008e7e419004ad1e5e643e8b71257c00",
+            "round-46 stage-record producer changed")
+    stage_path = stage_root / "oracle_momstage_kt00000002_s3.bin"
+    require(_file_sha256(stage_path)
+            == "a26121247da49d421da6ce8489627dd0b8302d10bdcd4fd1becf7752eb88524f",
+            "round-46 kt2/stage-3 record digest changed")
+    record = round66.round46.read_stage(
+        stage_path, expected_kt=2, expected_stage=3)
+    arrays = record["arrays"]
+
+    def cell2(name):
+        return np.ascontiguousarray(
+            np.asarray(arrays[name], dtype=np.float64)[2:24, 2:34])
+
+    def native_u2(name):
+        return np.ascontiguousarray(
+            np.asarray(arrays[name], dtype=np.float64)[2:24, 2:34])
+
+    def native_u3(name):
+        return np.ascontiguousarray(
+            np.asarray(arrays[name], dtype=np.float64)[2:24, 2:34, :30])
+
+    def native_v2(name):
+        return np.ascontiguousarray(
+            np.asarray(arrays[name], dtype=np.float64)[2:24, 2:34])
+
+    def native_v3(name):
+        return np.ascontiguousarray(
+            np.asarray(arrays[name], dtype=np.float64)[2:24, 2:34, :30])
+
+    def redundant_u2(name):
+        return np.ascontiguousarray(
+            np.asarray(arrays[name], dtype=np.float64)[2:24, 1:34])
+
+    e3u_0 = native_u3("e3u_0")
+    e3v_0 = native_v3("e3v_0")
+    umask = native_u3("umask")
+    vmask = native_v3("vmask")
+    hu_0, r1_hu0 = _round115_source_depth(e3u_0, umask)
+    hv_0, r1_hv0 = _round115_source_depth(e3v_0, vmask)
+    ssh_n1 = cell2("ssh_Kaa")
+    ssh_half = cell2("ssh_Kmm")
+    area_t = cell2("e1e2t")
+    r1_area_u = native_u2("r1_e1e2u")
+    r1_area_v = native_v2("r1_e1e2v")
+    area_u = native_u2("e1e2u")
+    area_v = native_v2("e1e2v")
+    r3u_before = native_u2("r3u_Kbb")
+    r3u_full = native_u2("r3u_Kaa")
+    r3u_half = native_u2("r3u_Kmm")
+    wet_u_native = np.any(umask > 0.5, axis=-1)
+
+    plant_row = None
+    planted = np.array(ssh_n1, copy=True)
+    for raw_index in np.argwhere(
+            np.isfinite(planted) & (planted != 0.0)):
+        jj, ji = (int(item) for item in raw_index)
+        for face_i in (ji, (ji - 1) % planted.shape[1]):
+            if not wet_u_native[jj, face_i]:
+                continue
+            old = planted[jj, ji]
+            new = np.nextafter(old, np.float64(np.inf))
+            old_trace = _round115_scalar_u_trace(
+                planted, area_t, r1_hu0, r1_area_u)
+            candidate = np.array(planted, copy=True)
+            candidate[jj, ji] = new
+            new_trace = _round115_scalar_u_trace(
+                candidate, area_t, r1_hu0, r1_area_u)
+            old_half = np.float64(np.float64(0.5) * np.float64(
+                r3u_before[jj, face_i] + old_trace[5][jj, face_i]))
+            new_half = np.float64(np.float64(0.5) * np.float64(
+                r3u_before[jj, face_i] + new_trace[5][jj, face_i]))
+            product_changed = bool(
+                old_trace[0][jj, face_i] != new_trace[0][jj, face_i]
+                or old_trace[1][jj, face_i] != new_trace[1][jj, face_i])
+            if (product_changed
+                    and old_trace[5][jj, face_i] != new_trace[5][jj, face_i]
+                    and old_half != new_half):
+                plant_row = {
+                    "field": "ssh_n1", "index": [jj, ji],
+                    "affected_native_u_index": [jj, face_i],
+                    "before_bits": int(
+                        np.asarray(old, dtype="=f8").view("=u8")),
+                    "after_bits": int(
+                        np.asarray(new, dtype="=f8").view("=u8")),
+                }
+                if plant:
+                    planted[jj, ji] = new
+                break
+        if plant_row is not None:
+            break
+    require(plant_row is not None,
+            "no finite nonzero SSH word propagates through full and half r3u")
+    if plant:
+        ssh_n1 = planted
+
+    scalar_trace = _round115_scalar_u_trace(
+        ssh_n1, area_t, r1_hu0, r1_area_u)
+    source_half = np.empty_like(r3u_before)
+    for jj in range(source_half.shape[0]):
+        for ji in range(source_half.shape[1]):
+            summed = np.float64(r3u_before[jj, ji] + scalar_trace[5][jj, ji])
+            source_half[jj, ji] = np.float64(np.float64(0.5) * summed)
+
+    expected_header = {
+        "version": 1, "kt": 2, "stage": 3,
+        "Kbb": 3, "Kmm": 2, "Krhs": 1, "Kaa": 1,
+        "jpi": 36, "jpj": 26, "jpk": 31, "jpkm1": 30,
+        "ntsi": 3, "ntei": 34, "ntsj": 3, "ntej": 24, "bits": 64,
+    }
+    require(record["header"] == expected_header,
+            "round-46 kt2/stage-3 header changed")
+    return {
+        "producer_commit": producer,
+        "stage_sha256": _file_sha256(stage_path),
+        "header": record["header"],
+        "ssh_n1": ssh_n1,
+        "ssh_half": ssh_half,
+        "ssh_before": cell2("ssh_Kbb"),
+        "area_t": area_t,
+        "area_u": area_u,
+        "area_v": area_v,
+        "r1_area_u": r1_area_u,
+        "r1_area_v": r1_area_v,
+        "e3u_0": e3u_0,
+        "e3v_0": e3v_0,
+        "umask": umask,
+        "vmask": vmask,
+        "hu_0": hu_0,
+        "hv_0": hv_0,
+        "r1_hu0": r1_hu0,
+        "r1_hv0": r1_hv0,
+        "r3u_before": r3u_before,
+        "r3u_full": r3u_full,
+        "r3u_half": r3u_half,
+        "one_plus_r3u_half": redundant_u2("r3u_Kmm") + np.float64(1.0),
+        "wet_t": cell2("tmask") > 0.5,
+        "wet_u_native": wet_u_native,
+        "wet_u_redundant": np.any(
+            np.asarray(arrays["umask"], dtype=np.float64)[
+                2:24, 1:34, :30] > 0.5,
+            axis=-1),
+        "scalar_trace": scalar_trace,
+        "source_half": source_half,
+        "plant_row": plant_row,
+    }
+
+
+def _round115_score_geometry(observation: tuple, bundle: dict) -> dict:
+    require(len(observation) == len(ROUND115_OBSERVATION_FIELDS),
+            "round-115 geometry callback schema changed")
+    got = {
+        name: np.asarray(value, dtype=np.float64)
+        for name, value in zip(
+            ROUND115_OBSERVATION_FIELDS, observation, strict=True)
+    }
+    wet_t = np.asarray(bundle["wet_t"], dtype=bool)
+    wet_u = np.asarray(bundle["wet_u_native"], dtype=bool)
+    wet_ur = np.asarray(bundle["wet_u_redundant"], dtype=bool)
+
+    def row(candidate, reference, mask):
+        scored = round54.field_stats(candidate, reference, mask)
+        scored["classification"] = (
+            "BIT" if scored["cells_unequal"] == 0 else "DEBT")
+        return scored
+
+    input_rows = {
+        "e1e2t": row(got["live_area_t"], bundle["area_t"], wet_t),
+        "full_step_ssh": row(
+            got["full_step_ssh"], bundle["ssh_n1"], wet_t),
+        "r1_hu_0": row(got["live_r1_hu0"], bundle["r1_hu0"], wet_u),
+        "r1_e1e2u": row(
+            got["live_r1_area_u"], bundle["r1_area_u"], wet_u),
+        "half_step_ssh": row(got["half_step_ssh"], bundle["ssh_half"], wet_t),
+    }
+    trace_rows = {
+        name: row(got[name], reference, wet_u)
+        for name, reference in zip(
+            ROUND115_TRACE_FIELDS, bundle["scalar_trace"], strict=True)
+    }
+    direct_rows = {
+        "live_full_r3u": row(
+            got["live_full_r3u"], bundle["r3u_full"], wet_u),
+        "live_half_r3u": row(
+            got["live_half_r3u"], bundle["r3u_half"], wet_u),
+        "oracle_full_r3u": row(
+            got["oracle_full_r3u"], bundle["r3u_full"], wet_u),
+        "oracle_interpolated_half_r3u": row(
+            got["oracle_interpolated_half_r3u"], bundle["r3u_half"], wet_u),
+        "oracle_interpolated_half_one_plus_r3u": row(
+            got["oracle_interpolated_half_one_plus_r3u"],
+            np.float64(1.0) + bundle["r3u_half"], wet_u),
+        "ordinary_one_plus_r3u": row(
+            got["ordinary_one_plus_r3u"],
+            bundle["one_plus_r3u_half"], wet_ur),
+    }
+    first_nonbit_input = next(
+        (name for name in (
+            "e1e2t", "full_step_ssh", "r1_hu_0", "r1_e1e2u",
+            "half_step_ssh")
+         if input_rows[name]["classification"] != "BIT"),
+        None,
+    )
+    return {
+        "inputs": input_rows,
+        "source_trace_given_nemo_inputs": trace_rows,
+        "direct_outputs": direct_rows,
+        "first_nonbit_input": first_nonbit_input,
+    }
+
+
+def _round115_score_isolated(
+    trace: tuple, full_r3u: np.ndarray, half_r3u: np.ndarray, bundle: dict,
+) -> dict:
+    """Score the separately labelled isolated-JIT source replay."""
+    require(len(trace) == len(ROUND115_TRACE_FIELDS),
+            "round-115 isolated trace schema changed")
+    wet_u = np.asarray(bundle["wet_u_native"], dtype=bool)
+
+    def row(candidate, reference):
+        scored = round54.field_stats(candidate, reference, wet_u)
+        scored["classification"] = (
+            "BIT" if scored["cells_unequal"] == 0 else "DEBT")
+        return scored
+
+    return {
+        "source_trace_given_nemo_inputs": {
+            name: row(candidate, reference)
+            for name, candidate, reference in zip(
+                ROUND115_TRACE_FIELDS, trace, bundle["scalar_trace"],
+                strict=True)
+        },
+        "direct_outputs": {
+            "oracle_full_r3u": row(full_r3u, bundle["r3u_full"]),
+            "oracle_interpolated_half_r3u": row(
+                half_r3u, bundle["r3u_half"]),
+        },
+    }
+
+
+def _round115_collapse(
+    calls: list[tuple], label: str, *, allow_prior_distinct: bool = False,
+) -> tuple:
+    require(calls, f"round-115 {label} callback did not execute")
+    selected = calls[-1]
+    for prior in calls[:-1]:
+        exact = len(prior) == len(selected) and all(
+            np.array_equal(left, right)
+            for left, right in zip(prior, selected, strict=True))
+        require(exact or allow_prior_distinct,
+                f"round-115 {label} observed distinct duplicate executions")
+    return selected
+
+
 def _replace_kmm_resume(resume, override):
     """Replace only selected stage-2 tracers at the final WS helper boundary."""
     require(resume is not None and resume[0] == 2,
@@ -822,8 +1174,9 @@ def _replace_kmm_resume(resume, override):
 def measure(args) -> dict:
     require(sum((args.round69_native, args.round70_pair, args.round71_kmm,
                  args.round111_fct_split, args.round112_fct_walk,
-                 args.round113_live_inputs, args.round114_u_operands)) <= 1,
-            "round-69/70/71/111/112/113/114 modes are exclusive")
+                 args.round113_live_inputs, args.round114_u_operands,
+                 args.round115_u_geometry)) <= 1,
+            "round-69/70/71/111/112/113/114/115 modes are exclusive")
     require(not (args.plant_pair_null_fct and args.plant_pair_content_ulp),
             "round-70 plants are mutually exclusive")
     require(args.round70_pair or not (
@@ -842,10 +1195,12 @@ def measure(args) -> dict:
             "the round-113 plant requires --round113-live-inputs")
     require(args.round114_u_operands or not args.plant_u_factor_ulp,
             "the round-114 plant requires --round114-u-operands")
+    require(args.round115_u_geometry or not args.plant_u_geometry_ulp,
+            "the round-115 plant requires --round115-u-geometry")
     require(not args.round114_u_operands or args.expect_u_record_commit,
             "round 114 requires --expect-u-record-commit")
     round114_config = {}
-    if args.round114_u_operands:
+    if args.round114_u_operands or args.round115_u_geometry:
         config = round66.build_nemo_testcase_card(
             "GYRE-zco").recipe.model_config
         round114_config = {
@@ -869,8 +1224,9 @@ def measure(args) -> dict:
             "nemo_stage_mean_imposition": True,
             "adaptive_implicit_vertadv": False,
             "gm_redi_enabled": True,
-        }, f"round-114 resolved configuration changed: {round114_config}")
-        print("ROUND114 RESOLVED CONFIG "
+        }, f"round-114/115 resolved configuration changed: {round114_config}")
+        print(("ROUND115" if args.round115_u_geometry else "ROUND114")
+              + " RESOLVED CONFIG "
               + json.dumps(round114_config, sort_keys=True), flush=True)
     reciprocal_calls: list[dict] = []
     pair_sources: list[tuple[np.ndarray, ...]] = []
@@ -883,6 +1239,7 @@ def measure(args) -> dict:
     fct_walk_calls: list[tuple[np.ndarray, ...]] = []
     live_input_calls: list[tuple[np.ndarray, ...]] = []
     u_operand_calls: list[tuple[np.ndarray, ...]] = []
+    u_geometry_calls: list[tuple[np.ndarray, ...]] = []
 
     round112_bundle = None
     round112_values = None
@@ -915,6 +1272,17 @@ def measure(args) -> dict:
             if isinstance(value, np.ndarray)
         }
 
+    round115_bundle = None
+    round115_values = None
+    if args.round115_u_geometry:
+        round115_bundle = _round115_owned_geometry_bundle(
+            args.stage_baseline_root, plant=args.plant_u_geometry_ulp)
+        round115_values = {
+            name: jnp.asarray(value)
+            for name, value in round115_bundle.items()
+            if isinstance(value, np.ndarray)
+        }
+
     real_reciprocal = round66.reciprocal_substitutions
     real_pair = model_module._nemo_ws_rk3_tracer_pair_step
     real_qsr = model_module._nemo_qsr_stage3_rate
@@ -923,6 +1291,9 @@ def measure(args) -> dict:
     real_fct = advection_module.fct_tracer_advection
     real_stage_transport = model_module._nemo_ws_stage_transport
     real_stage_faces = model_module._nemo_ws_qco_stage_faces
+    real_face_geometry = model_module.nemo_qco_live_face_geometry_cgrid
+    real_native_geometry = (
+        model_module.nemo_qco_live_face_geometry_from_operands)
     active_kmm_override: tuple[object | None, object | None] | None = None
     capture_fct_split = False
     capture_fct_walk = False
@@ -934,6 +1305,8 @@ def measure(args) -> dict:
     round113_eager_direct = False
     round114_stage3_active = False
     round114_stage3_faces = None
+    round115_stage3_active = False
+    round115_full_step_ssh = None
 
     def reciprocal_capture(live, oracle, oracle_content, wet):
         reciprocal_calls.append({
@@ -1012,6 +1385,54 @@ def measure(args) -> dict:
         u_operand_calls.append(tuple(
             np.asarray(value, dtype=np.float64) for value in values))
 
+    def u_geometry_sink(*values):
+        u_geometry_calls.append(tuple(
+            np.asarray(value, dtype=np.float64) for value in values))
+
+    def face_geometry_capture(*values, **kwargs):
+        result = real_face_geometry(*values, **kwargs)
+        if not round115_stage3_active:
+            return result
+        require(round115_values is not None,
+                "round-115 QCO oracle values were not loaded")
+        require(round115_full_step_ssh is not None,
+                "round-115 stage-3 full-step SSH was not captured")
+        require(len(values) == 10,
+                "round-115 live QCO operand schema changed")
+        (half_step_ssh, e3u_0, e3v_0, umask, vmask, hu_0, hv_0,
+         area_t, area_u, area_v) = values
+        dtype = jnp.asarray(half_step_ssh).dtype
+        one = jnp.asarray(1.0, dtype=dtype)
+        sr = nemo_source_round
+        live_wet_u = (jnp.asarray(hu_0, dtype=dtype) > 0.0).astype(dtype)
+        live_r1_hu0 = sr(
+            live_wet_u / (jnp.asarray(hu_0, dtype=dtype) + one - live_wet_u))
+        live_r1_area_u = sr(one / jnp.asarray(area_u, dtype=dtype))
+        live_half = real_native_geometry(*values)
+        live_full = real_native_geometry(
+            round115_full_step_ssh, e3u_0, e3v_0, umask, vmask,
+            hu_0, hv_0, area_t, area_u, area_v)
+        oracle_full = real_native_geometry(
+            round115_values["ssh_n1"], round115_values["e3u_0"],
+            round115_values["e3v_0"], round115_values["umask"],
+            round115_values["vmask"], round115_values["hu_0"],
+            round115_values["hv_0"], round115_values["area_t"],
+            round115_values["area_u"], round115_values["area_v"])
+        oracle_trace = _round115_u_trace(
+            round115_values["ssh_n1"], round115_values["area_t"],
+            round115_values["r1_hu0"], round115_values["r1_area_u"])
+        interpolated_half = _round115_half_ratio(
+            round115_values["r3u_before"], oracle_full.r3u)
+        observation = (
+            round115_full_step_ssh, half_step_ssh, area_t, live_r1_hu0,
+            live_r1_area_u, result[2], live_full.r3u, live_half.r3u,
+            *oracle_trace, oracle_full.r3u, interpolated_half,
+            sr(one + interpolated_half),
+        )
+        jax.debug.callback(
+            u_geometry_sink, *observation, ordered=True)
+        return result
+
     def stage_faces_capture(*values, **kwargs):
         nonlocal round114_stage3_faces
         result = real_stage_faces(*values, **kwargs)
@@ -1027,6 +1448,17 @@ def measure(args) -> dict:
 
     def stage_transport_capture(*values, **kwargs):
         nonlocal round114_stage3_active, round114_stage3_faces
+        nonlocal round115_stage3_active, round115_full_step_ssh
+        if args.round115_u_geometry and values[2] == 2:
+            require(kwargs.get("eta_after") is not None,
+                    "round-115 stage-3 call lacks full-step SSH")
+            round115_full_step_ssh = kwargs["eta_after"]
+            round115_stage3_active = True
+            try:
+                return real_stage_transport(*values, **kwargs)
+            finally:
+                round115_stage3_active = False
+                round115_full_step_ssh = None
         if not args.round114_u_operands or values[2] != 2:
             return real_stage_transport(*values, **kwargs)
         require(round114_values is not None,
@@ -1196,6 +1628,7 @@ def measure(args) -> dict:
     model_module.LatLonCGridOceanModel.step = step_capture
     model_module._nemo_ws_qco_stage_faces = stage_faces_capture
     model_module._nemo_ws_stage_transport = stage_transport_capture
+    model_module.nemo_qco_live_face_geometry_cgrid = face_geometry_capture
     try:
         base = round66.measure(args)
     finally:
@@ -1207,6 +1640,7 @@ def measure(args) -> dict:
         model_module.LatLonCGridOceanModel.step = real_step
         model_module._nemo_ws_qco_stage_faces = real_stage_faces
         model_module._nemo_ws_stage_transport = real_stage_transport
+        model_module.nemo_qco_live_face_geometry_cgrid = real_face_geometry
 
     require(len(reciprocal_calls) == 2,
             f"expected T/S reciprocal calls, got {len(reciprocal_calls)}")
@@ -1422,11 +1856,13 @@ def measure(args) -> dict:
         round66.transposed(arrays["content_T"]), reciprocal_calls[0]["wet"])
 
     model, seeded, dt, freshwater, surface = step_calls[-1]
-    if args.round113_live_inputs or args.round114_u_operands:
-        require(step_results, "round-113/114 seeded production result is absent")
+    if (args.round113_live_inputs or args.round114_u_operands
+            or args.round115_u_geometry):
+        require(step_results,
+                "round-113/114/115 seeded production result is absent")
         trace = jax.device_get(step_results[-1])
         require(hasattr(trace, "state_after"),
-                "round-113/114 seeded result is not the live operand trace")
+                "round-113/114/115 seeded result is not the live operand trace")
         baseline_state = trace.state_after
     else:
         baseline_state = jax.device_get(type(model)(
@@ -1996,6 +2432,168 @@ def measure(args) -> dict:
                 "distinguish a non-bit half-step ssh/r3 input from the "
                 "face-geometry statement, and no source correction was "
                 "constructed or proven"),
+        }
+
+    round115_matrix = {}
+    if args.round115_u_geometry:
+        require(round115_bundle is not None and round115_values is not None,
+                "round-115 record was not prepared")
+        jax.effects_barrier()
+        jit_observation = _round115_collapse(
+            u_geometry_calls, "production-step JIT",
+            allow_prior_distinct=True)
+        jit_geometry = _round115_score_geometry(
+            jit_observation, round115_bundle)
+
+        eager_geometry = {}
+        if not args.plant_u_geometry_ulp:
+            u_geometry_calls.clear()
+            model_module._nemo_ws_stage_transport = stage_transport_capture
+            model_module.nemo_qco_live_face_geometry_cgrid = (
+                face_geometry_capture)
+            try:
+                with jax.disable_jit():
+                    eager_state = model._step_impl(
+                        seeded, dt, freshwater=freshwater,
+                        surface_forcing=surface)
+                    jax.device_get(eager_state)
+                jax.effects_barrier()
+            finally:
+                model_module._nemo_ws_stage_transport = real_stage_transport
+                model_module.nemo_qco_live_face_geometry_cgrid = (
+                    real_face_geometry)
+            eager_observation = _round115_collapse(
+                u_geometry_calls, "production eager",
+                allow_prior_distinct=True)
+            eager_geometry = _round115_score_geometry(
+                eager_observation, round115_bundle)
+
+        isolated_trace = jax.device_get(jax.jit(_round115_u_trace)(
+            round115_values["ssh_n1"], round115_values["area_t"],
+            round115_values["r1_hu0"], round115_values["r1_area_u"]))
+        isolated_full = jax.device_get(jax.jit(real_native_geometry)(
+            round115_values["ssh_n1"], round115_values["e3u_0"],
+            round115_values["e3v_0"], round115_values["umask"],
+            round115_values["vmask"], round115_values["hu_0"],
+            round115_values["hv_0"], round115_values["area_t"],
+            round115_values["area_u"], round115_values["area_v"]))
+        isolated_half = jax.device_get(jax.jit(_round115_half_ratio)(
+            round115_values["r3u_before"], isolated_full.r3u))
+        isolated_geometry = _round115_score_isolated(
+            tuple(isolated_trace), np.asarray(isolated_full.r3u),
+            np.asarray(isolated_half), round115_bundle)
+
+        inputs = jit_geometry["inputs"]
+        direct = jit_geometry["direct_outputs"]
+        source_trace = jit_geometry["source_trace_given_nemo_inputs"]
+        ordinary = direct["ordinary_one_plus_r3u"]
+        ordinary_reproduced = bool(
+            ordinary["cells_unequal"] == 580
+            and ordinary["max_abs"]
+            == np.float64(7.552691805301492e-11))
+        static_inputs_bit = bool(all(
+            inputs[name]["cells_unequal"] == 0
+            for name in ("e1e2t", "r1_hu_0", "r1_e1e2u")))
+        source_trace_bit = bool(all(
+            source_trace[name]["cells_unequal"] == 0
+            for name in ROUND115_TRACE_FIELDS))
+        oracle_full_bit = bool(
+            direct["oracle_full_r3u"]["cells_unequal"] == 0)
+        oracle_half_bit = bool(
+            direct["oracle_interpolated_half_r3u"]["cells_unequal"] == 0)
+        ssh_nonbit = bool(
+            inputs["full_step_ssh"]["cells_unequal"] > 0
+            or inputs["half_step_ssh"]["cells_unequal"] > 0)
+        ssh_max = max(
+            inputs["full_step_ssh"]["max_abs"],
+            inputs["half_step_ssh"]["max_abs"])
+        if not static_inputs_bit:
+            owner = "static_qco_operand"
+        elif not oracle_full_bit:
+            owner = "qco_u_geometry_statement"
+        elif not oracle_half_bit:
+            owner = "hybrid_half_ratio_interpolation"
+        elif ssh_nonbit:
+            owner = "external_mode_ssh_chain"
+        else:
+            owner = "no_nonbit_boundary"
+
+        observations = {
+            "west_product_sha256": _array_sha256(
+                jit_observation[ROUND115_OBSERVATION_FIELDS.index(
+                    "west_product")]),
+            "east_product_sha256": _array_sha256(
+                jit_observation[ROUND115_OBSERVATION_FIELDS.index(
+                    "east_product")]),
+            "oracle_full_r3u_sha256": _array_sha256(
+                jit_observation[ROUND115_OBSERVATION_FIELDS.index(
+                    "oracle_full_r3u")]),
+            "oracle_interpolated_half_r3u_sha256": _array_sha256(
+                jit_observation[ROUND115_OBSERVATION_FIELDS.index(
+                    "oracle_interpolated_half_r3u")]),
+        }
+        plant_propagation = {}
+        plant_fired = False
+        if args.plant_u_geometry_ulp:
+            frozen = json.loads(args.u_geometry_report.read_text())[
+                "round115_u_geometry"]
+            prior = frozen["observations"]
+            product_changed = bool(
+                observations["west_product_sha256"]
+                != prior["west_product_sha256"]
+                or observations["east_product_sha256"]
+                != prior["east_product_sha256"])
+            plant_propagation = {
+                "written_product_changed": product_changed,
+                "oracle_full_r3u_changed": (
+                    observations["oracle_full_r3u_sha256"]
+                    != prior["oracle_full_r3u_sha256"]),
+                "oracle_interpolated_half_r3u_changed": (
+                    observations["oracle_interpolated_half_r3u_sha256"]
+                    != prior["oracle_interpolated_half_r3u_sha256"]),
+            }
+            plant_fired = all(plant_propagation.values())
+            require(plant_fired,
+                    "round-115 production-step SSH one-ULP plant was inert")
+
+        prediction_results = {
+            "ordinary_endpoint_reproduced": ordinary_reproduced,
+            "static_inputs_bit": static_inputs_bit,
+            "model_ssh_nonbit": ssh_nonbit,
+            "model_ssh_max_in_frozen_range": bool(
+                np.float64(1.0e-8) <= ssh_max <= np.float64(1.0e-5)),
+            "source_trace_given_nemo_inputs_bit": source_trace_bit,
+            "oracle_full_r3u_bit": oracle_full_bit,
+            "oracle_interpolated_half_r3u_bit": oracle_half_bit,
+        }
+        round115_matrix = {
+            "status": "PLANT-FIRED" if plant_fired else "MEASURED",
+            "plant_ulp": bool(args.plant_u_geometry_ulp),
+            "records": {
+                "producer_commit": round115_bundle["producer_commit"],
+                "stage_sha256": round115_bundle["stage_sha256"],
+                "header": round115_bundle["header"],
+            },
+            "resolved_config": round114_config,
+            "plant_target": round115_bundle["plant_row"],
+            "first_nonbit_input": jit_geometry["first_nonbit_input"],
+            "owner": owner,
+            "modes": {
+                "production_step_jit": jit_geometry,
+                "production_eager": eager_geometry,
+                "isolated_closure_jit": isolated_geometry,
+            },
+            "observations": observations,
+            "prediction_results": prediction_results,
+            "plant_propagation": plant_propagation,
+            "candidate_eligible": owner in (
+                "qco_u_geometry_statement",
+                "hybrid_half_ratio_interpolation"),
+            "candidate_disposition": (
+                "diagnostic upstream SSH owner; no production statement is "
+                "changed" if owner == "external_mode_ssh_chain" else
+                "same-stage statement requires a frozen landing addendum "
+                "before any candidate measurement"),
         }
 
     pair_matrix = {}
@@ -2673,9 +3271,13 @@ def measure(args) -> dict:
         status = round113_matrix["status"]
     if args.round114_u_operands:
         status = round114_matrix["status"]
+    if args.round115_u_geometry:
+        status = round115_matrix["status"]
 
     return {
         "format": (
+            "nemo-testcase-l2-gyre-round115-u-geometry-v1"
+            if args.round115_u_geometry else
             "nemo-testcase-l2-gyre-round114-u-operands-v1"
             if args.round114_u_operands else
             "nemo-testcase-l2-gyre-round113-live-inputs-v1"
@@ -2722,6 +3324,7 @@ def measure(args) -> dict:
         "round112_fct_walk": round112_matrix,
         "round113_live_inputs": round113_matrix,
         "round114_u_operands": round114_matrix,
+        "round115_u_geometry": round115_matrix,
         "criteria": {
             "content_within_floor_plus_association": content_criterion,
             "kt3_exact_pre_edit_prediction": prediction_match,
@@ -2785,6 +3388,11 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--u-operand-report", type=Path,
         default=ROOT / "round114/u_transport_walk.json")
+    parser.add_argument("--round115-u-geometry", action="store_true")
+    parser.add_argument("--plant-u-geometry-ulp", action="store_true")
+    parser.add_argument(
+        "--u-geometry-report", type=Path,
+        default=ROOT / "round115/u_geometry_walk.json")
     parser.add_argument(
         "--prediction-report", type=Path,
         default=ROOT / "round67/round67_ldf_order_before.json")
@@ -2817,7 +3425,23 @@ def main(argv=None) -> int:
     except Exception as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    if args.round114_u_operands:
+    if args.round115_u_geometry:
+        matrix = report["round115_u_geometry"]
+        inputs = matrix["modes"]["production_step_jit"]["inputs"]
+        outputs = matrix["modes"]["production_step_jit"]["direct_outputs"]
+        prefix = (
+            "STATUS PLANT-FIRED" if report["status"] == "PLANT-FIRED"
+            else f"ROUND115 U GEOMETRY {report['status']}")
+        print(
+            f"{prefix}: first={matrix['first_nonbit_input']} "
+            f"owner={matrix['owner']} "
+            f"ssh_full={inputs['full_step_ssh']['cells_unequal']}/"
+            f"{inputs['full_step_ssh']['max_abs']:.12e} "
+            f"oracle_r3u={outputs['oracle_full_r3u']['cells_unequal']}/"
+            f"{outputs['oracle_full_r3u']['max_abs']:.12e} "
+            f"half={outputs['oracle_interpolated_half_r3u']['cells_unequal']}/"
+            f"{outputs['oracle_interpolated_half_r3u']['max_abs']:.12e}")
+    elif args.round114_u_operands:
         matrix = report["round114_u_operands"]
         row = matrix["modes"]["production_step_jit"]["rows"]
         arm = matrix["factor_arm"]
@@ -2896,7 +3520,7 @@ def main(argv=None) -> int:
             f"ROUND68 PRODUCTION FCT {report['status']}: "
             f"content_T={row['content_vs_oracle']['max_abs']:.12e} "
             f"kt3_T={kt3['max_abs']:.12e}")
-    if args.round114_u_operands:
+    if args.round114_u_operands or args.round115_u_geometry:
         return 1 if report["status"] == "PLANT-FIRED" else 0
     return 0 if report["status"] == "CONFIRMED" else 1
 
