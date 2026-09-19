@@ -197,13 +197,9 @@ class TestMPASTvdEdges:
 
 @pytest.mark.parametrize("scheme", ["ppm_fct", "tvd", "superbee", "dst3"])
 def test_model_rollout_grads_finite_f32(scheme):
-    """2-step lat-lon rollout, float32: compiled reverse gradients are finite.
-
-    The implicit vertical solve acquired a custom VJP in ``1af2d777c``.
-    Direct forward-mode through a ``custom_vjp`` is unsupported by JAX, so
-    this gate no longer asks the rollout for a direct JVP.  The supported
-    forward-over-reverse contract is pinned at the solver boundary by the
-    tests landed in ``ef5c977bc``.  Pre-fix, ppm_fct reverse was ALL-NaN.
+    """2-step lat-lon rollout, float32 (default compute): reverse grad and
+    eager+jit forward directional derivatives all finite. Pre-fix: ppm_fct
+    reverse was ALL-NaN and tvd/superbee/dst3 forward was NaN (jit).
     """
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -252,3 +248,19 @@ def test_model_rollout_grads_finite_f32(scheme):
     assert int(jnp.sum(~jnp.isfinite(g))) == 0, (
         f"{scheme}: non-finite reverse gradients "
         f"(NaN={int(jnp.sum(jnp.isnan(g)))})")
+    d = (jax.random.normal(jax.random.PRNGKey(42), zero.shape)
+         * wet3).astype(zero.dtype)
+    d = d / jnp.linalg.norm(d)
+    rev = float(jnp.vdot(g, d))
+    try:
+        _, fwd = jax.jvp(loss, (zero,), (d,))
+    except TypeError as exc:
+        pytest.fail(
+            f"{scheme}: reverse directional derivative={rev:.9e}; "
+            f"forward derivative unavailable: {exc}")
+    assert bool(jnp.isfinite(fwd)), f"{scheme}: eager forward derivative NaN"
+    fwd_j = jax.jit(lambda z: jax.jvp(loss, (z,), (d,))[1])(zero)
+    assert bool(jnp.isfinite(fwd_j)), f"{scheme}: jitted forward derivative NaN"
+    # reverse and forward agree to float32 noise
+    assert np.isclose(rev, float(fwd_j), rtol=1e-3), (
+        f"{scheme}: rev={rev:.6e} vs fwd={float(fwd_j):.6e}")

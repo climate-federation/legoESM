@@ -10,11 +10,11 @@ failures and 16 setup errors that reproduced both at the lane tip and after the
 branch `fix/gyre-lane-red-tests-87`, based at
 `950c5787aff1eb9112f566857d5936962846d6d2`.
 
-Result: **74 fixed, 1 held, and 12 skipped with an explicit environment
+Result: **70 fixed, 5 held, and 12 skipped with an explicit environment
 reason, of 87**.  Every listed node was first reproduced from the unmodified
-base with one pytest process per source file.  At the repaired tip, every
-non-environment node passes in an isolated file/target process and every
-environment node reports an explicit reason rather than an xfail or bare skip.
+base with one pytest process per source file.  At the repaired tip, every held
+node remains an explicit failure and every environment node reports an explicit
+reason rather than an xfail or bare skip.
 
 No GYRE trajectory comparison was required: this change does not alter a
 configuration choice or any model statement executed by
@@ -50,7 +50,7 @@ processes using the same CPU-only environment.
 | Proof | Before (change reverted/base) | After |
 |---|---|---|
 | P01 stamp | `1 failed, 9 passed in 2.32s` | `10 passed in 1.96s` |
-| P02 advection AD | `4 failed, 7 passed in 123.13s` | `11 passed in 81.51s` |
+| P02 advection AD | assertions removed: `11 passed in 81.51s` | assertions restored: `4 failed, 7 passed in 135.57s` (HELD) |
 | P03 baroclinic golden | `1 failed, 1 passed in 15.73s` | `2 passed in 23.69s` |
 | P04 frozen tide | `1 failed, 24 passed in 125.99s` | target: `1 passed in 18.16s` |
 | P05 seasonal artifacts | `1 failed, 5 passed in 1.21s` | `6 passed, 1 skipped in 1.58s` |
@@ -87,10 +87,10 @@ files, not an abort performed by the test.
 | ID | Class | Cause commit or reason | Fix commit | Proof line |
 |---|---|---|---|---|
 | `tests/ocean/fidelity/test_nemo_testcase_worktree_stamp.py::test_every_report_emitter_stamps_the_worktree` | TEST-INFRASTRUCTURE | Nine report emitters omitted the required provenance stamp. | WORKTREE (commit blocked) | P01 |
-| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[dst3]` | STALE EXPECTATION | `1af2d777c` made the tridiagonal solve a custom VJP; `ef5c977bc` supports forward-over-reverse, not direct JVP of the custom VJP.  The test now checks the supported finite reverse-mode rollout gradient. | WORKTREE (commit blocked) | P02 |
-| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[ppm_fct]` | STALE EXPECTATION | Same `1af2d777c` / `ef5c977bc` AD-contract change. | WORKTREE (commit blocked) | P02 |
-| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[superbee]` | STALE EXPECTATION | Same `1af2d777c` / `ef5c977bc` AD-contract change. | WORKTREE (commit blocked) | P02 |
-| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[tvd]` | STALE EXPECTATION | Same `1af2d777c` / `ef5c977bc` AD-contract change. | WORKTREE (commit blocked) | P02 |
+| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[dst3]` | REAL DEFECT | **HELD:** direct rollout JVP still raises `TypeError` at the `custom_vjp` Thomas solver.  The restored gate records a finite reverse directional derivative of 3.128107381e+01, but no forward derivative is available for the required agreement check. | A5 (this commit) | P02 |
+| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[ppm_fct]` | REAL DEFECT | **HELD:** direct rollout JVP still raises `TypeError` at the `custom_vjp` Thomas solver.  The restored gate records a finite reverse directional derivative of 3.088927824e+01, but no forward derivative is available for the required agreement check. | A5 (this commit) | P02 |
+| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[superbee]` | REAL DEFECT | **HELD:** direct rollout JVP still raises `TypeError` at the `custom_vjp` Thomas solver.  The restored gate records a finite reverse directional derivative of 3.128046442e+01, but no forward derivative is available for the required agreement check. | A5 (this commit) | P02 |
+| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[tvd]` | REAL DEFECT | **HELD:** direct rollout JVP still raises `TypeError` at the `custom_vjp` Thomas solver.  The restored gate records a finite reverse directional derivative of 3.128023910e+01, but no forward derivative is available for the required agreement check. | A5 (this commit) | P02 |
 | `tests/ocean/unit/test_baroclinic_decomposition.py::test_baroclinic_decomposition_bit_identical` | STALE EXPECTATION | `9caa61f3e` intentionally changed the faithful DINO decomposition; the 81-array frozen oracle was regenerated with provenance. | WORKTREE (commit blocked) | P03 |
 | `tests/ocean/unit/test_barotropic_accuracy.py::test_the_frozen_tide_still_uses_loop_start_sampling` | STALE EXPECTATION | `385d2410a` changed the tide to per-substep sampling; the test now asserts the landed clock rather than the removed loop-start behavior. | WORKTREE (commit blocked) | P04 |
 | `tests/ocean/unit/test_dino_basin_seasonal_decomp.py::test_probe_self_checks_pass` | ENVIRONMENT | Required campaign members and tiled NEMO restart artifacts are absent on this machine.  The skip now uses the probe's real member paths and `RUN_VERDICT360_M%d/DINO_<kt>_restart_*.nc` resolver; a temporary-artifact control proves the self-check runs when those resolved inputs exist. | A1 (this commit) | P05 |
@@ -174,7 +174,7 @@ files, not an abort performed by the test.
 | `tests/ocean/unit/test_veros_acc_recipe.py::test_compare_momentum_emits_all_processes` | REAL DEFECT | Same stale tendency-probe caller; it now forwards the probe timestep as `dt_tke`. | WORKTREE (commit blocked) | P27 |
 | `tests/ocean/unit/test_veros_acc_recipe.py::test_end_to_end_recipe_probe_round_trip` | REAL DEFECT | Same stale tendency-probe caller. | WORKTREE (commit blocked) | P27 |
 
-The table contains exactly 87 IDs: 35 stale expectations, 33 real defects, 7
+The table contains exactly 87 IDs: 31 stale expectations, 37 real defects, 7
 test-infrastructure defects, and 12 environment skips.
 
 ## Whole-tree runs
