@@ -245,3 +245,52 @@ def test_year_member_admission_requires_the_registered_harness_and_fp64(
     np.savez(member / "day240.npz", **fields)
     with pytest.raises(module.GateError, match="expected float64"):
         module._admit_year_member(root, expected_commit=commit, label="test")
+
+
+def test_year_day240_cli_plant_prints_and_returns_nonzero(
+        monkeypatch, tmp_path, capsys):
+    module = _module()
+    candidate = "c" * 40
+    before = "b" * 40
+    comparison_path = tmp_path / "comparison.json"
+    before_day_path = tmp_path / "before_day.json"
+    after_day_path = tmp_path / "after_day.json"
+    registry_path = tmp_path / "moved.tsv"
+    output_path = tmp_path / "plant.json"
+    values = {
+        comparison_path: _comparison(candidate),
+        before_day_path: _day(1.0, before),
+        after_day_path: _day(0.1, candidate),
+    }
+    year_reports = iter((
+        _year(1.0, before),
+        _year(0.1, candidate),
+    ))
+    monkeypatch.setattr(module, "_read", lambda path: values[path])
+    monkeypatch.setattr(
+        module, "score_year_root", lambda *args, **kwargs: next(year_reports))
+    monkeypatch.setattr(module, "_read_moved_row_registry",
+                        lambda path: _registry())
+    monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
+    monkeypatch.setattr(
+        module, "worktree_stamp",
+        lambda: {"clean": True, "commit": candidate})
+
+    exit_code = module.main([
+        "--comparison", str(comparison_path),
+        "--before-day-gap", str(before_day_path),
+        "--after-day-gap", str(after_day_path),
+        "--expect-candidate-commit", candidate,
+        "--before-year-root", str(tmp_path / "before_year"),
+        "--after-year-root", str(tmp_path / "after_year"),
+        "--year-nemo-root", str(tmp_path / "nemo_year"),
+        "--expect-before-year-commit", before,
+        "--moved-row-registry", str(registry_path),
+        "--plant", "year-day240-worse",
+        "--output", str(output_path),
+    ])
+    report = json.loads(output_path.read_text())
+    assert exit_code == 1
+    assert report["status"] == "FAIL"
+    assert report["criteria"]["year_day240_T_rms_not_worse"] is False
+    assert "STATUS PLANT-FIRED: year-day240-worse" in capsys.readouterr().out
