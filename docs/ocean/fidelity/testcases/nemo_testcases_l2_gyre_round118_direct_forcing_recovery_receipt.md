@@ -249,8 +249,64 @@ timestep, stabilizer, year harness, reconciliation gate, freshwater pair,
 
 ## Review, citations, and tests
 
-The required separate adversarial review, citation gate and final test
-summaries are recorded here after the committed receipt is reviewed.
+The required separate adversarial review was invoked against the committed
+Round-118 diff with `codex exec --sandbox read-only -C`.  Independent review
+was unavailable in-sandbox: the read-only app-server failed before producing
+a verdict.  This is neither approval nor a `SHIP` verdict.  The complete
+terminal result is quoted verbatim:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+The process exited 1.  Its complete log is
+`round118/review/codex_review.log`; no reviewer marked the diff `DO NOT SHIP`.
+
+The clean-tree citation gate finds five Round-118 citations and ten citations
+in the amended Round-117 receipt, with zero unmapped citations, zero symbol
+failures, zero map-audit failures, and all built-in controls firing.  The
+first diagnostic pass correctly rejected four newly added broad ranges whose
+endpoint symbols were inside rather than at the range endpoints; each was
+narrowed to the exact compiled statement, not weakened.  Shifting the direct
+writer citation by two lines reports `SYMBOL-NOT-AT-LINE` and exits 1.
+Artifacts are in `round118/citations/`.
+
+CPU/fp64 pytest summaries are:
+
+```text
+20 passed in 0.70s
+119 passed in 372.94s (0:06:12)
+8 passed in 511.30s (0:08:31)
+```
+
+The 20-test focused suite covers every changed Round-51/83/117 gate and all
+reader plants.  The 119-test inherited push suite covers receipt citations,
+all TKE NEMO terms, NEMO recipe resolution, and real freshwater closure.  The
+eight-test serial suite replays every node at which an xdist worker aborted.
+
+The required single-piece
+`-n 12 tests/ocean/fidelity tests/ocean/unit` attempt collected 8,201 tests,
+then suffered eight fatal JAX worker aborts.  It reached 99%, recorded 7,524
+explicit passes and 501 failure labels, and produced no pytest summary or
+JUnit file.  After nine minutes with no controller output it was interrupted
+once with exit 130 to stay within the round's CPU budget.  The literal terminal
+state therefore has no summary line to quote; its last progress marker was:
+
+```text
+[gw19] [ 99%] PASSED tests/ocean/unit/test_no_scheme_duplication.py::test_ocean_pe_uses_eos_helper[ocean_pe_latlon_cgrid.py]
+```
+
+Diffing the 501 unique labels against the pinned 87-ID incoming baseline gives
+67 in baseline, 434 outside baseline, and 20 baseline IDs not observed.  This
+is not a trustworthy regression census: xdist labeled large assigned queues
+failed after worker aborts.  None of the changed Round-83, Round-117, or
+citation tests appears in the failed-ID set; those tests are green in both
+clean focused suites.  More decisively, all eight actual crash nodes pass
+serially in the third summary above.  The full log, extracted IDs, baseline
+intersection/difference, and serial replay are retained in
+`round118/tests/`.
 
 ## ASKED / UNASKED
 
@@ -261,7 +317,9 @@ incoming/Coriolis/final scoring under production JIT and production eager;
 incoming/Coriolis cancellation; complete same-run producer replay; explicit
 30/31-level probe retraction; first non-bit boundary and largest incremental
 owner; no-candidate falsifier; unchanged kt2 U/V, kt3 T/S and day-30 T; DINO
-risk and ORCA2 acquisition specification.
+risk and ORCA2 acquisition specification; compiled citation gate and shifted
+plant; independent review attempt; focused, push-gate and whole-tree test
+attempts with serial crash-node discrimination.
 
 UNASKED and not done: NEMO source was not modified; Codex did not invoke
 `makenemo` or `mpirun`; no record was invented; no production physics,
