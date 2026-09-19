@@ -41,7 +41,8 @@ ROUND114_U_INPUTS = (
     "r1_hu_kmm", "uu_b_kmm", "umask", "zub", "corrected_u", "zfu",
 )
 ROUND114_DIRECT_ORDER = (
-    "e2u", "e3u_kmm", "u_kmm", "un_adv", "uu_b_kmm", "zfu",
+    "e2u", "one_plus_r3u", "e3u_kmm", "u_kmm", "un_adv",
+    "uu_b_kmm", "zfu",
 )
 
 
@@ -843,6 +844,34 @@ def measure(args) -> dict:
             "the round-114 plant requires --round114-u-operands")
     require(not args.round114_u_operands or args.expect_u_record_commit,
             "round 114 requires --expect-u-record-commit")
+    round114_config = {}
+    if args.round114_u_operands:
+        config = round66.build_nemo_testcase_card(
+            "GYRE-zco").recipe.model_config
+        round114_config = {
+            "card": "GYRE-zco",
+            "tracer_time_integrator": config.tracer_time_integrator,
+            "tracer_advection": config.tracer_advection,
+            "outer_integrator": config.outer_integrator,
+            "barotropic_solver": config.barotropic.barotropic_solver,
+            "nemo_stage_mean_imposition": bool(
+                config.barotropic.nemo_stage_mean_imposition),
+            "adaptive_implicit_vertadv": bool(
+                config.adaptive_implicit_vertadv),
+            "gm_redi_enabled": config.gm_redi is not None,
+        }
+        require(round114_config == {
+            "card": "GYRE-zco",
+            "tracer_time_integrator": "rk3_ws",
+            "tracer_advection": "fct2",
+            "outer_integrator": "forward_euler",
+            "barotropic_solver": "explicit_substep",
+            "nemo_stage_mean_imposition": True,
+            "adaptive_implicit_vertadv": False,
+            "gm_redi_enabled": True,
+        }, f"round-114 resolved configuration changed: {round114_config}")
+        print("ROUND114 RESOLVED CONFIG "
+              + json.dumps(round114_config, sort_keys=True), flush=True)
     reciprocal_calls: list[dict] = []
     pair_sources: list[tuple[np.ndarray, ...]] = []
     pair_kmm: list[tuple[np.ndarray, np.ndarray]] = []
@@ -1829,17 +1858,22 @@ def measure(args) -> dict:
                 }
 
         first_direct = jit_u["first_direct_nonbit"]
+        factor_family = (
+            "e3u_kmm" if first_direct == "one_plus_r3u" else first_direct)
         substitutable_u = {"e3u_kmm", "u_kmm", "un_adv", "uu_b_kmm"}
         factor_state = None
         factor_live_observation = None
         factor_u_observation = None
-        if first_direct in substitutable_u:
+        if factor_family in substitutable_u:
             factor_state, factor_live_observation, factor_u_observation = (
                 run_round114_arm(
-                    f"{first_direct} production-JIT arm",
-                    u_factor=first_direct))
-        require(not args.plant_u_factor_ulp or first_direct == "e3u_kmm",
-                "round-114 ULP plant is calibrated only for first e3u_kmm")
+                    f"{factor_family} production-JIT arm",
+                    u_factor=factor_family))
+        require(not args.plant_u_factor_ulp or (
+                    first_direct == "one_plus_r3u"
+                    and factor_family == "e3u_kmm"),
+                "round-114 ULP plant is calibrated only for the first "
+                "r3u/e3u face-thickness family")
         require(factor_state is not None,
                 "first direct non-bit U factor is not substitutable: "
                 f"{first_direct!r}")
@@ -1897,7 +1931,8 @@ def measure(args) -> dict:
         prediction_results = {
             "e2u_predicted_bit": (
                 jit_u["rows"]["e2u"]["classification"] == "BIT"),
-            "predicted_first_e3u_kmm": first_direct == "e3u_kmm",
+            "predicted_first_r3u_e3u_family": (
+                first_direct in ("one_plus_r3u", "e3u_kmm")),
             "factor_kt3_reduction_under_ten_percent": factor_reduction > 0.9,
             "single_family": single_family_criteria,
             "triplet_reproduces_round113": triplet_reproduced,
@@ -1927,6 +1962,7 @@ def measure(args) -> dict:
                     "stage_baseline_sha256", "advmean_sha256",
                     "admission_sha256", "inherited_owned_exact")
             },
+            "resolved_config": round114_config,
             "plant_target": round114_bundle["plant_row"],
             "first_direct_nonbit": first_direct,
             "modes": {
@@ -1941,7 +1977,8 @@ def measure(args) -> dict:
             "transport_split_observations": split_observations,
             "baseline_kt3": baseline_kt3,
             "factor_arm": {
-                "factor": first_direct,
+                "first_nonbit_factor": first_direct,
+                "substituted_family": factor_family,
                 "u_rows": factor_u,
                 "fct_inputs": factor_live_rows,
                 "kt3": factor_kt3,
