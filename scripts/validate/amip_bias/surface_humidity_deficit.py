@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Why the model evaporates too little: the near-surface saturation deficit.
+"""Why the model evaporates too little: the air-sea humidity difference.
 
 Bulk evaporation is proportional to the air-sea humidity difference, and with
 the sea surface prescribed that difference is set by how moist the air just
@@ -19,6 +19,7 @@ Usage: surface_humidity_deficit.py <run> [<run> ...]
 from __future__ import annotations
 
 import glob
+import json
 import sys
 
 import numpy as np
@@ -76,6 +77,30 @@ def _ref_1000(var, months, mlat, mlon):
     return np.asarray(rb.bin_to_model(arr, rlat, rlon, mlat, mlon, label=var))
 
 
+def _prescribed_sst(run, months, mlat, mlon):
+    """The run's OWN prescribed sea surface temperature [K], binned to the
+    model grid.  Read from the forcing file named in the run manifest, not a
+    default path: this is the boundary condition both the model and the
+    reference evaporation see, so it is the one term that is genuinely shared
+    and it must come from the run rather than from an assumption."""
+    man = json.load(open(f"{rb.ROOT}/{run}/run_manifest.json"))
+    cmd = man["run"]["command_line"].split()
+    if "--forcing-path" not in cmd:
+        raise SystemExit(f"FATAL: {run} manifest names no --forcing-path")
+    path = cmd[cmd.index("--forcing-path") + 1]
+    off = float(cmd[cmd.index("--sst-offset") + 1]) if "--sst-offset" in cmd else 0.0
+    d = xr.open_dataset(path, decode_times=True)
+    var = "tosbcs" if "tosbcs" in d else "tos"
+    clim = d[var].groupby("time.month").mean("time").sel(month=months).mean("month").load()
+    rlat = np.asarray(clim["lat"], dtype=np.float64)
+    rlon = np.asarray(clim["lon"], dtype=np.float64) % 360.0
+    arr = np.asarray(clim, dtype=np.float64)
+    if arr.shape != (rlat.size, rlon.size):
+        arr = arr.T
+    return np.asarray(rb.bin_to_model(arr, rlat, rlon, mlat, mlon,
+                                      label="sst", allow_gaps=True)) + off
+
+
 def _ocean_mask(run, mlat, mlon):
     fs = sorted(glob.glob(f"{rb.ROOT}/{run}/cmor/fx/sftlf_fx_*.nc"))
     if not fs:
@@ -106,10 +131,16 @@ def _report(run, flux_run=None):
     evm = np.asarray(ev["evspsbl"]).mean(axis=0) if ev is not None else None
     evo = rb._ref_clim("evspsbl", months, mlat, mlon)
 
-    print(f"\n=== {run}: 1000 hPa relative humidity over OCEAN, and the "
-          f"saturation deficit it leaves ===")
-    print(f"{'band':<22}{'RH':>8}{'RHobs':>8}{'1-RH':>8}{'1-RHo':>8}"
-          f"{'ratio':>8}{'E/Eobs':>8}")
+    print(f"\n=== {run}: 1000 hPa air-sea humidity difference over OCEAN "
+          f"against the run's own prescribed sea surface ===")
+    # RH alone cannot tell a moist bias from a cold one: the same excess
+    # appears if the air holds more water or if it is colder at the same
+    # water.  The two have opposite consequences for the bulk flux, so the
+    # humidity and the temperature are printed separately beside it.
+    sst = _prescribed_sst(flux_run, months, mlat, mlon)
+    q_sea = saturation_specific_humidity(sst, PLEV) * 0.98   # saline surface
+    print(f"{'band':<22}{'q[g/kg]':>9}{'qobs':>8}{'dq':>8}{'dqobs':>8}"
+          f"{'ratio':>8}{'E/Eobs':>8}{'implied':>9}")
     for name, (lo, hi) in BANDS.items():
         box = (lo, hi, 0, 360)
         a = rb.region_mean(rh_m, mlat, mlon, box, valid=ocean)
@@ -118,9 +149,20 @@ def _report(run, flux_run=None):
         if evm is not None and evo is not None:
             er = (rb.region_mean(evm, mlat, mlon, box, valid=ocean)
                   / rb.region_mean(np.asarray(evo), mlat, mlon, box, valid=ocean))
-        print(f"{name:<22}{a:8.3f}{b:8.3f}{1 - a:8.3f}{1 - b:8.3f}"
-              f"{(1 - a) / (1 - b):8.3f}{er:8.3f}")
-    print("ratio = the model's saturation deficit divided by the reference's, "
+        qa = rb.region_mean(q_m, mlat, mlon, box, valid=ocean) * 1e3
+        qb = rb.region_mean(q_o, mlat, mlon, box, valid=ocean) * 1e3
+        dq = rb.region_mean(q_sea - q_m, mlat, mlon, box, valid=ocean) * 1e3
+        dqo = rb.region_mean(q_sea - q_o, mlat, mlon, box, valid=ocean) * 1e3
+        print(f"{name:<22}{qa:9.3f}{qb:8.3f}{dq:8.3f}{dqo:8.3f}"
+              f"{dq / dqo:8.3f}{er:8.3f}{er / (dq / dqo):9.3f}")
+    print("dq is the real air-sea humidity difference against the run's OWN "
+          "prescribed sea surface, which both sides share, so it replaces the "
+          "relative-humidity proxy: a proxy on RH cannot tell a moist bias "
+          "from a cold one, and the near-surface air here is moister in every "
+          "band but warmer only in the tropics.")
+    print("implied = the compensation the rest of the bulk formula (wind, "
+          "stability, gustiness, exchange coefficient) must be supplying.")
+    print("_old_ratio = the model's saturation deficit divided by the reference's, "
           "which is the factor the humidity term alone puts on evaporation. "
           "E/Eobs is what the flux diagnostics actually report: if the two "
           "columns agree, humidity explains the evaporation deficit on its "
