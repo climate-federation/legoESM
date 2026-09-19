@@ -1251,13 +1251,26 @@ def main():
         _sh_rows = []
         for _nm, _lo, _hi in REGIONS:
             _bd = (lat_col >= _lo) & (lat_col <= _hi)
-            _m = (wet_pair & _bd[:, None] & _shallow & _nonevd
+            # NEMO'S OWN TKE MUST BE PHYSICAL IN THE CELL, or the comparison
+            # is against a mask value. NEMO floors wet en at rn_emin = 1e-6
+            # (namelist_ref:1228); measured over the whole restart, 69.3% of
+            # its finite en is <= 1e-10 and the median is exactly 0.0 — those
+            # are dry rows, and 1e-10 is avtb, a DIFFUSIVITY background, not a
+            # TKE floor. The antarctic<100m seed median was exactly 1.000e-10,
+            # i.e. MOST of that set was dry in NEMO's accounting while passing
+            # the T-file wet mask, so its avm was a background and the 20x
+            # ratio was measured against it.
+            _en_phys = eseed2 > 1.0e-6
+            _m = (wet_pair & _bd[:, None] & _shallow & _nonevd & _en_phys
                   & (sh2_o > 1e-20) & np.isfinite(sh2_n))
             if int(_m.sum()) < 10:
                 continue
             _r = sh2_n[_m] / sh2_o[_m]
             _sh_rows.append({
                 "region": _nm + "/calm<100m", "n": int(_m.sum()),
+                "n_dropped_en_unphysical": int(
+                    (wet_pair & _bd[:, None] & _shallow & _nonevd
+                     & ~_en_phys).sum()),
                 "sh2_ratio_median": float(np.median(_r)),
                 "sh2_ratio_p90": float(np.percentile(_r, 90)),
                 "frac_above_2": float((_r > 2.0).mean()),
