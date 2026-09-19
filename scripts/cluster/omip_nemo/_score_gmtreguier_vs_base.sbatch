@@ -22,6 +22,18 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
 RES=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo
 NEMOT=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_T.nc
+
+# WHICH NEMO RECORD.  The grid_T file holds 5-day means spanning 90 days, so
+# the record ENDING at snapshot day D is D/5-1 -- the contract stated in
+# compare_three_way_nemo's own docstring.  An earlier version of this card
+# omitted the flag and inherited the comparator's --nemo-time-idx default of
+# -1, which is the LAST record (day 90), so a day-30 model state was scored
+# against a day-90 oracle: our MLD numbers were unchanged but NEMO's moved
+# 47.09 -> 50.44 m, tripling the MLD RMSE (16.4 -> 50.9 m) and dropping the
+# pattern correlation (0.954 -> 0.654).  It read exactly like a model
+# regression and was not one.  The record is now DERIVED from the day.
+DAY=30
+REC=$(( DAY / 5 - 1 ))
 # The scorer takes SNAPSHOT FILES, not run directories.  `snapshot_final.npz`
 # is used for all three because the Treguier arm has no `snapshot_day0030.npz`
 # (day 30 coincided with its last step, so only the final snapshot was
@@ -43,7 +55,7 @@ score() {   # score <label> <mpas-dir>
   JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 $PY -u \
     scripts/validate/ocean_fidelity/compare_three_way_nemo.py \
     --tripole "$TRP" --mpas "$mpas" --nemo-gridt "$NEMOT" \
-    --expect-day 30 --label-mpas "$label" \
+    --expect-day "$DAY" --nemo-time-idx "$REC" --label-mpas "$label" \
     --out-dir "$OUT/$label" 2>&1 | tail -80
   [ ${PIPESTATUS[0]} -eq 0 ] || { echo "FATAL: scorer failed for $label"; RC=1; }
 }
