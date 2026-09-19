@@ -109,6 +109,9 @@ def _mode(r, path):
     return "weak" if "_weak_" in os.path.basename(path) else r.get("mode", "strong")
 
 
+OCEAN_MPAS_PCG_ITERS = 30   # MPASOceanConfig.barotropic_implicit_pcg_fixed_iters
+
+
 def load(dirs):
     best = {}
     for d in dirs:
@@ -141,6 +144,16 @@ def load(dirs):
                 nlev = r.get("nlev", r.get("n_levels"))
                 if (comp, grid) in NLEV and nlev != NLEV[(comp, grid)]:
                     continue
+                # The ocean MPAS barotropic solver's iteration count sets most
+                # of its step time, and it changed from 60 to 30 (commit
+                # 4a208be8d).  Receipts from either setting are valid timings
+                # of DIFFERENT models, so mixing them inside one curve would
+                # attribute a solver change to parallel scaling.  Receipts
+                # predating the field carry no count and are refused here.
+                if comp == "ocean" and grid == "mpas":
+                    extra = r.get("metadata", {}).get("extra", {})
+                    if extra.get("pcg_fixed_iters") != OCEAN_MPAS_PCG_ITERS:
+                        continue
                 mode = _mode(r, f)
                 key = (comp, grid, _backend(r), prec, mode, _res(r, grid, mode),
                        int(r["n_devices"]))
