@@ -1288,6 +1288,16 @@ def renormalise_ah_profile(lv, A_h_new: float):
     out = lv._replace(A_h=A_h_new)
     if lv.A_h_lat_profile is None or float(A_h_new) == float(lv.A_h):
         return out
+    if float(A_h_new) <= 0.0:
+        # codex: the schedule parser accepts A_h=0 ("no lateral viscosity"),
+        # which has no finite renormalisation -- it would divide by zero eight
+        # days into an eleven-hour job.  Refuse at the boundary and say what
+        # the two coherent choices are.
+        raise SystemExit(
+            f"--visc-schedule sets A_h={A_h_new:g} while --A-h-profile-file "
+            "prescribes a viscosity profile: switching the Laplacian off and "
+            "prescribing its magnitude from a file are contradictory. Drop "
+            "the profile file, or give the segment a positive A_h.")
     r = float(lv.A_h) / float(A_h_new)
     return out._replace(
         A_h_lat_profile=tuple(float(p) * r for p in lv.A_h_lat_profile),
@@ -10196,7 +10206,12 @@ def main() -> int:
                 if _lv_eff.A_h_lat_profile is not None:
                     _pp = [float(p) * float(_lv_eff.A_h)
                            for p in _lv_eff.A_h_lat_profile]
-                    _eff = f" effective A_h {min(_pp):.4g}-{max(_pp):.4g} m2/s"
+                    # Say the consequence too (codex): with a profile file the
+                    # schedule's A_h column is a normaliser, so it cannot ramp
+                    # the prescribed viscosity -- only C_smag_lap moves.
+                    _eff = (f" effective A_h {min(_pp):.4g}-{max(_pp):.4g}"
+                            " m2/s [pinned by --A-h-profile-file; the A_h"
+                            " column normalises it and cannot ramp it]")
                 print(f"[visc-schedule] day {(step-1)*dt/86400.0:.1f}: "
                       f"A_h={_ah:g} C_smag_lap={_cs:g}{_eff} "
                       f"(segment {visc_seg_idx + 1}/{len(visc_schedule)})",

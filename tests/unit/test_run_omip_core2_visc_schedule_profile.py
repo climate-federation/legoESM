@@ -70,6 +70,16 @@ def test_v_face_profile_is_rescaled_too_when_present():
         tuple(2.0 * p for p in prof_v), rel=1e-12)
 
 
+def test_zero_A_h_with_a_profile_is_refused_not_a_zero_division():
+    # codex: --visc-schedule accepts A_h=0, which has no finite
+    # renormalisation.  It must fail at the segment boundary with a sentence,
+    # not a ZeroDivisionError eight days into an eleven-hour job.
+    with pytest.raises(SystemExit, match="contradictory"):
+        renormalise_ah_profile(_cfg(), 0.0)
+    # Without a profile, A_h=0 is a legitimate "no lateral viscosity" run.
+    assert renormalise_ah_profile(_cfg(profile=None), 0.0).A_h == 0.0
+
+
 def test_absent_profile_and_no_op_change_are_untouched():
     lv_none = _cfg(profile=None)
     assert renormalise_ah_profile(lv_none, _SCHEDULED).A_h_lat_profile is None
