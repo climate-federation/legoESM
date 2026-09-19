@@ -337,9 +337,9 @@ citations, no failures, no unmapped citations and no map-audit failures:
 `status=PASS`.  The deliberately shifted KEG pair exited nonzero with
 `status=FAIL` and `SYMBOL-NOT-AT-LINE`.  The final gate and plant JSON/log
 SHA-256 values are
-`f692b46f93f582a22e401149f76a00111204db87e9a4ef073a65343c40fe68c2`
+`b0da51a21495bba4be193fb42defa4ac83b33e4533faf356580396b193fa0297`
 and
-`a8358d5df471f7e62bc7a9c637a81808600026dd3ae8886a04c53ac1349d8727`,
+`5f88826d4cac121855414b1b78b01ea63d88e54bc7959ff88e09d84facb1c2ad`,
 respectively.
 
 ## Independent review
