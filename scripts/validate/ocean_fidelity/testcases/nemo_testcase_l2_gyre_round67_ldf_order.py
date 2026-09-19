@@ -1992,8 +1992,10 @@ def measure(args) -> dict:
             "plant_propagation": plant_propagation,
             "candidate_eligible": False,
             "candidate_disposition": (
-                "diagnostic substitution only; the first non-bit direct "
-                "factor is inherited from an upstream stage state"),
+                "diagnostic substitution only; this boundary does not "
+                "distinguish a non-bit half-step ssh/r3 input from the "
+                "face-geometry statement, and no source correction was "
+                "constructed or proven"),
         }
 
     pair_matrix = {}

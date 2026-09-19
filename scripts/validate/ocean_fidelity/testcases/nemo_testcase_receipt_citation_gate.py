@@ -183,6 +183,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90"),
     "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domqco.f90"),
     # Round 92 binds the operand diagnosis to the exact acquired Round-90
     # compiled card, including its write-only recorder.
     "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -1133,6 +1135,21 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:295-296': [
         'zFu(ji,jj,jk) = e2u(ji,jj)',
         'zFv(ji,jj,jk) = e1v(ji,jj)', 2],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:281-292': [
+        'SELECT CASE( n_baro_upd )',
+        'END SELECT', 12],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:52-54': [
+        'INTEGER,  PUBLIC, PARAMETER ::   np_HYB = 2',
+        'INTEGER  :: n_baro_upd =  np_HYB', 3],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:198-242': [
+        'CASE ( 2 )           !==  Stage 2  ==!',
+        'CASE ( 3 )           !==  Stage 3  ==!', 45],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:525-547': [
+        "WRITE(l3_unit) 'uu_Kmm          '",
+        "WRITE(l3_unit) 'e3u_Kmm         '", 23],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domqco.f90:266-268': [
+        ('pr3u(ji,jj) = 0.5_wp *', 2),
+        ('pr3v(ji,jj) = 0.5_wp *', 2), 3],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:326-346': [
         '!              !- vertical velocity and transport (ww,wi,zFw) -!',
         'zFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 21],
