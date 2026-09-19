@@ -339,6 +339,17 @@ def test_round113_live_input_materialization_and_transport_substitution():
     np.testing.assert_array_equal(np.asarray(patched[3]) * 5.0, 29.0)
     assert same_kwargs["tracer_before"] is kwargs["tracer_before"]
 
+    for family, changed_index in (
+        ("transport_u", 1), ("transport_v", 2), ("transport_w", 3),
+    ):
+        one, _ = module._round113_patch_inputs(
+            values, kwargs, bundle, "T", family)
+        for index in (1, 2, 3):
+            if index == changed_index:
+                assert not np.array_equal(np.asarray(one[index]), values[index])
+            else:
+                np.testing.assert_array_equal(np.asarray(one[index]), values[index])
+
 
 def test_round113_pair_callback_guard_fires_on_one_ulp():
     module = _module()
@@ -355,3 +366,60 @@ def test_round113_pair_callback_guard_fires_on_one_ulp():
     ):
         module._round113_collapse_calls(
             [row, row, tuple(planted), row], "synthetic")
+
+
+def test_round114_u_statement_and_score_name_first_direct_factor():
+    module = _module()
+    shape3 = (2, 3, 2)
+    shape2 = shape3[:2]
+    e2u = module.jnp.full(shape2, 3.0, dtype=module.jnp.float64)
+    e3u = module.jnp.full(shape3, 2.0, dtype=module.jnp.float64)
+    u = module.jnp.full(shape3, 0.25, dtype=module.jnp.float64)
+    un_adv = module.jnp.full(shape2, 1.5, dtype=module.jnp.float64)
+    r1_hu = module.jnp.full(shape2, 0.5, dtype=module.jnp.float64)
+    uu_b = module.jnp.full(shape2, 0.125, dtype=module.jnp.float64)
+    umask = module.jnp.ones(shape3, dtype=module.jnp.float64)
+    zub, corrected, zfu = module.jax.jit(module._round114_u_statement)(
+        e2u, e3u, u, un_adv, r1_hu, uu_b, umask)
+    np.testing.assert_array_equal(np.asarray(zub), 0.625)
+    np.testing.assert_array_equal(np.asarray(corrected), 0.875)
+    np.testing.assert_array_equal(np.asarray(zfu), 5.25)
+
+    observation = (
+        np.asarray(e2u), np.asarray(e3u), np.ones(shape2), np.asarray(u),
+        np.asarray(un_adv), np.asarray(r1_hu), np.asarray(uu_b),
+        np.asarray(umask), np.asarray(zub), np.asarray(corrected),
+        np.asarray(zfu),
+    )
+    bundle = {
+        "e2u": np.asarray(e2u), "e3u_kmm": np.asarray(e3u),
+        "one_plus_r3u": np.ones(shape2), "u_kmm": np.asarray(u),
+        "un_adv": np.asarray(un_adv), "uu_b_kmm": np.asarray(uu_b),
+        "umask": np.asarray(umask), "zfu": np.asarray(zfu),
+    }
+    planted = list(observation)
+    planted[1] = np.array(planted[1], copy=True)
+    planted[1][0, 0, 0] = np.nextafter(planted[1][0, 0, 0], np.inf)
+    score = module._round114_score_u(tuple(planted), bundle)
+    assert score["rows"]["e2u"]["classification"] == "BIT"
+    assert score["rows"]["e3u_kmm"]["cells_unequal"] == 1
+    assert score["first_direct_nonbit"] == "e3u_kmm"
+    assert score["rows"]["r1_hu_kmm"]["classification"] == (
+        "UNMEASURED_WITH_SPEC")
+
+
+def test_round114_u_duplicate_guard_rejects_changed_factor():
+    module = _module()
+    ordinary = tuple(
+        np.array([float(index + 1)], dtype=np.float64)
+        for index in range(len(module.ROUND114_U_INPUTS)))
+    np.testing.assert_equal(
+        module._round114_collapse_u([ordinary, ordinary], "synthetic"),
+        ordinary)
+    planted = list(ordinary)
+    planted[1] = np.nextafter(planted[1], np.inf)
+    with np.testing.assert_raises_regex(
+        RuntimeError, "distinct duplicate U executions"
+    ):
+        module._round114_collapse_u(
+            [ordinary, tuple(planted)], "synthetic")

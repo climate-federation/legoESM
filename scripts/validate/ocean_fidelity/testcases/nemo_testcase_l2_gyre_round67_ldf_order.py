@@ -18,6 +18,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import nemo_testcase_l2_gyre_phase3_gate as gate
+import nemo_testcase_l2_gyre_round14_advmean as round14
 import nemo_testcase_l2_gyre_round54_tracer_decomposition as round54
 import nemo_testcase_l2_gyre_round66_content_operands as round66
 import nemo_testcase_l2_gyre_round111_fct_writer_gate as round111
@@ -34,6 +35,13 @@ ROUND112_ROWS = (
 ROUND113_INPUTS = (
     "base", "transport_u", "transport_v", "transport_w",
     "h_kbb", "h_kmm", "tmask", "wmask", "r1_area", "p2dt",
+)
+ROUND114_U_INPUTS = (
+    "e2u", "e3u_kmm", "one_plus_r3u", "u_kmm", "un_adv",
+    "r1_hu_kmm", "uu_b_kmm", "umask", "zub", "corrected_u", "zfu",
+)
+ROUND114_DIRECT_ORDER = (
+    "e2u", "e3u_kmm", "u_kmm", "un_adv", "uu_b_kmm", "zfu",
 )
 
 
@@ -485,13 +493,16 @@ def _round113_patch_inputs(
     grid = values[5]
     if family == "base":
         patched_kwargs["tracer_before"] = jnp.asarray(bundle[f"base_{tracer}"])
-    elif family == "transport":
-        patched[1] = jnp.asarray(bundle["p_u"]) / jnp.asarray(
-            grid.dy_u)[..., None]
-        patched[2] = jnp.asarray(bundle["p_v"]) / jnp.asarray(
-            grid.dx_v)[..., None]
-        patched[3] = jnp.asarray(bundle["p_w"]) / jnp.asarray(
-            grid.area_T)[..., None]
+    elif family in ("transport", "transport_u", "transport_v", "transport_w"):
+        if family in ("transport", "transport_u"):
+            patched[1] = jnp.asarray(bundle["p_u"]) / jnp.asarray(
+                grid.dy_u)[..., None]
+        if family in ("transport", "transport_v"):
+            patched[2] = jnp.asarray(bundle["p_v"]) / jnp.asarray(
+                grid.dx_v)[..., None]
+        if family in ("transport", "transport_w"):
+            patched[3] = jnp.asarray(bundle["p_w"]) / jnp.asarray(
+                grid.area_T)[..., None]
     elif family == "thickness":
         patched[4] = jnp.asarray(bundle["h_kmm"])
         patched_kwargs["base_thickness"] = jnp.asarray(bundle["h_kbb"])
@@ -584,6 +595,215 @@ def _round113_score_inputs(observation: tuple, bundle: dict) -> dict:
     return rows
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _round114_owned_u_bundle(
+    *, record_root: Path, stage_baseline_root: Path, admission_path: Path,
+    expected_commit: str, p_u: np.ndarray, plant: bool = False,
+) -> dict:
+    """Admit and map direct kt2/stage-3 U operands onto owned faces."""
+    admission = json.loads(admission_path.read_text())
+    require(admission.get("verdict") == "PASS",
+            "round-77 inherited-record admission is not PASS")
+    require((admission.get("byte_identical_records"),
+             len(admission.get("classified_changed_records", ())),
+             admission.get("admitted_difference_count")) == (45, 24, 281),
+            "round-77 inherited-record admission census changed")
+    require(_file_sha256(admission_path)
+            == "cddd662d6380d7aa053bb4cfc20fbcb481a9da43009200dcbaa359e8c4e2f11d",
+            "round-77 admission digest changed")
+    producer = (record_root / "producer_commit.txt").read_text().strip()
+    require(producer.lower() == expected_commit.lower(),
+            "round-77 producer commit mismatch")
+    require(admission["worktree"]["commit"].lower() == producer.lower(),
+            "round-77 admission/worktree commit mismatch")
+
+    stage_path = record_root / "oracle_momstage_kt00000002_s3.bin"
+    baseline_path = stage_baseline_root / "oracle_momstage_kt00000002_s3.bin"
+    advmean_path = record_root / "oracle_bt_advmean_operands_kt00000002.bin"
+    require(_file_sha256(stage_path)
+            == "11da7f370ec495181adc80c7fd9daf3300b245ea8db646085122a8f46b2007e8",
+            "round-77 kt2 stage-3 record digest changed")
+    require(_file_sha256(advmean_path)
+            == "412f917a8652002beef2db22af2ef1a916171173b10fc0fb14b62fd6077d95e2",
+            "round-77 kt2 barotropic-mean record digest changed")
+    require((stage_baseline_root / "producer_commit.txt").read_text().strip()
+            == "715c9865008e7e419004ad1e5e643e8b71257c00",
+            "round-46 stage-record producer changed")
+
+    record = round66.round46.read_stage(
+        stage_path, expected_kt=2, expected_stage=3)
+    baseline = round66.round46.read_stage(
+        baseline_path, expected_kt=2, expected_stage=3)
+    require(record["header"] == baseline["header"],
+            "round-46/77 kt2 stage-3 headers differ")
+    advmean = round14.read_advmean(
+        advmean_path, expected_kt=2, include_halo=True)
+
+    def owned_u3(array):
+        return np.ascontiguousarray(
+            np.asarray(array, dtype=np.float64)[2:24, 1:34, :30])
+
+    def owned_u2(array):
+        return np.ascontiguousarray(
+            np.asarray(array, dtype=np.float64)[2:24, 1:34])
+
+    direct_fields = (
+        "e2u", "e3u_Kmm", "r3u_Kmm", "u_Kmm", "umask", "uu_b_Kmm",
+    )
+    inherited_exact = {}
+    for name in direct_fields:
+        mapper = owned_u3 if np.ndim(record["arrays"][name]) == 3 else owned_u2
+        candidate = mapper(record["arrays"][name])
+        prior = mapper(baseline["arrays"][name])
+        inherited_exact[name] = bool(np.array_equal(candidate, prior))
+        require(inherited_exact[name],
+                f"round-77 inherited owned stage field {name} moved")
+
+    arrays = record["arrays"]
+    e2u = owned_u2(arrays["e2u"])
+    e3u = owned_u3(arrays["e3u_Kmm"])
+    r3u = owned_u2(arrays["r3u_Kmm"])
+    umask = owned_u3(arrays["umask"])
+    one_plus_r3u = np.ascontiguousarray(
+        np.float64(1.0) + r3u)
+    bundle = {
+        "producer_commit": producer,
+        "stage_sha256": _file_sha256(stage_path),
+        "stage_baseline_sha256": _file_sha256(baseline_path),
+        "advmean_sha256": _file_sha256(advmean_path),
+        "admission_sha256": _file_sha256(admission_path),
+        "inherited_owned_exact": inherited_exact,
+        "e2u": e2u,
+        "e3u_kmm": e3u,
+        "one_plus_r3u": one_plus_r3u,
+        "u_kmm": owned_u3(arrays["u_Kmm"]),
+        "un_adv": np.ascontiguousarray(
+            np.asarray(advmean["post_lbc_u"], dtype=np.float64)[2:24, 1:34]),
+        "uu_b_kmm": owned_u2(arrays["uu_b_Kmm"]),
+        "umask": umask,
+        "zfu": np.ascontiguousarray(np.asarray(p_u, dtype=np.float64)),
+    }
+    expected_shapes = {
+        "e2u": (22, 33), "e3u_kmm": (22, 33, 30),
+        "one_plus_r3u": (22, 33), "u_kmm": (22, 33, 30),
+        "un_adv": (22, 33), "uu_b_kmm": (22, 33),
+        "umask": (22, 33, 30), "zfu": (22, 33, 30),
+    }
+    require(all(bundle[name].shape == shape
+                for name, shape in expected_shapes.items()),
+            "round-114 mapped U operand shape changed")
+
+    planted = np.array(bundle["e3u_kmm"], copy=True)
+    plant_row = None
+    for raw_index in np.argwhere(
+            (bundle["umask"] > 0.5) & np.isfinite(planted)
+            & (planted != 0.0) & (bundle["zfu"] != 0.0)):
+        index = tuple(int(item) for item in raw_index)
+        old = planted[index]
+        new = np.nextafter(old, np.float64(np.inf))
+        ji = index[:2]
+        old_metric_h = np.float64(bundle["e2u"][ji] * old)
+        new_metric_h = np.float64(bundle["e2u"][ji] * new)
+        if new_metric_h == old_metric_h or old_metric_h == 0.0:
+            continue
+        velocity = np.float64(bundle["zfu"][index] / old_metric_h)
+        if np.float64(new_metric_h * velocity) == np.float64(
+                old_metric_h * velocity):
+            continue
+        plant_row = {
+            "field": "e3u_kmm", "index": list(index),
+            "before_bits": int(np.asarray(old, dtype="=f8").view("=u8")),
+            "after_bits": int(np.asarray(new, dtype="=f8").view("=u8")),
+        }
+        if plant:
+            planted[index] = new
+        break
+    require(plant_row is not None,
+            "no recorded e3u word propagates a one-ULP metric product")
+    if plant:
+        bundle["e3u_kmm"] = planted
+    bundle["plant_row"] = plant_row
+    return bundle
+
+
+def _round114_u_statement(
+    e2u, e3u_kmm, u_kmm, un_adv, r1_hu_kmm, uu_b_kmm, umask,
+) -> tuple:
+    """Literal compiled zub/corrected-U/zFu source associations."""
+    zub = nemo_source_round(
+        nemo_source_round(un_adv * r1_hu_kmm) - uu_b_kmm)
+    corrected = nemo_source_round(
+        u_kmm + nemo_source_round(zub[..., None] * umask))
+    zfu = model_module._nemo_metric_stage_transport(e2u, e3u_kmm, corrected)
+    return zub, corrected, zfu
+
+
+def _round114_score_u(observation: tuple, bundle: dict) -> dict:
+    require(len(observation) == len(ROUND114_U_INPUTS),
+            "round-114 U callback schema changed")
+    got = {
+        name: np.asarray(value, dtype=np.float64)
+        for name, value in zip(ROUND114_U_INPUTS, observation, strict=True)
+    }
+    references = {
+        name: bundle.get(name) for name in ROUND114_U_INPUTS
+    }
+    wet3 = np.asarray(bundle["umask"] > 0.5)
+    wet2 = np.any(wet3, axis=-1)
+    masks = {
+        "e2u": wet2, "e3u_kmm": wet3, "one_plus_r3u": wet2,
+        "u_kmm": wet3, "un_adv": wet2, "r1_hu_kmm": wet2,
+        "uu_b_kmm": wet2, "umask": np.ones(wet3.shape, dtype=bool),
+        "zub": wet2, "corrected_u": wet3, "zfu": wet3,
+    }
+    rows = {}
+    for name in ROUND114_U_INPUTS:
+        reference = references[name]
+        if reference is None:
+            rows[name] = {
+                "classification": "UNMEASURED_WITH_SPEC",
+                "reason": (
+                    "the admitted records do not directly store this "
+                    "statement boundary; no downstream inversion is used"),
+                "shape": list(got[name].shape),
+            }
+            continue
+        reference = np.asarray(reference, dtype=np.float64)
+        require(got[name].shape == reference.shape,
+                f"round-114 U {name} shape differs")
+        row = round54.field_stats(got[name], reference, masks[name])
+        row["full_domain"] = round54.field_stats(
+            got[name], reference, np.ones(reference.shape, dtype=bool))
+        row["classification"] = (
+            "BIT" if row["cells_unequal"] == 0 else "DEBT")
+        rows[name] = row
+    first = next(
+        (name for name in ROUND114_DIRECT_ORDER
+         if rows[name]["classification"] != "BIT"), None)
+    return {"rows": rows, "first_direct_nonbit": first}
+
+
+def _round114_collapse_u(
+    calls: list[tuple], label: str, *, allow_prior_distinct: bool = False,
+) -> tuple:
+    require(calls, f"round-114 {label} U callback did not execute")
+    selected = calls[-1]
+    for prior in calls[:-1]:
+        exact = len(prior) == len(selected) and all(
+            np.array_equal(left, right)
+            for left, right in zip(prior, selected, strict=True))
+        require(exact or allow_prior_distinct,
+                f"round-114 {label} observed distinct duplicate U executions")
+    return selected
+
+
 def _replace_kmm_resume(resume, override):
     """Replace only selected stage-2 tracers at the final WS helper boundary."""
     require(resume is not None and resume[0] == 2,
@@ -601,8 +821,8 @@ def _replace_kmm_resume(resume, override):
 def measure(args) -> dict:
     require(sum((args.round69_native, args.round70_pair, args.round71_kmm,
                  args.round111_fct_split, args.round112_fct_walk,
-                 args.round113_live_inputs)) <= 1,
-            "round-69/70/71/111/112/113 modes are exclusive")
+                 args.round113_live_inputs, args.round114_u_operands)) <= 1,
+            "round-69/70/71/111/112/113/114 modes are exclusive")
     require(not (args.plant_pair_null_fct and args.plant_pair_content_ulp),
             "round-70 plants are mutually exclusive")
     require(args.round70_pair or not (
@@ -619,6 +839,10 @@ def measure(args) -> dict:
             "the round-112 plant requires --round112-fct-walk")
     require(args.round113_live_inputs or not args.plant_live_input_ulp,
             "the round-113 plant requires --round113-live-inputs")
+    require(args.round114_u_operands or not args.plant_u_factor_ulp,
+            "the round-114 plant requires --round114-u-operands")
+    require(not args.round114_u_operands or args.expect_u_record_commit,
+            "round 114 requires --expect-u-record-commit")
     reciprocal_calls: list[dict] = []
     pair_sources: list[tuple[np.ndarray, ...]] = []
     pair_kmm: list[tuple[np.ndarray, np.ndarray]] = []
@@ -629,10 +853,12 @@ def measure(args) -> dict:
     fct_split_calls: list[tuple[np.ndarray, ...]] = []
     fct_walk_calls: list[tuple[np.ndarray, ...]] = []
     live_input_calls: list[tuple[np.ndarray, ...]] = []
+    u_operand_calls: list[tuple[np.ndarray, ...]] = []
 
     round112_bundle = None
     round112_values = None
-    if args.round112_fct_walk or args.round113_live_inputs:
+    if (args.round112_fct_walk or args.round113_live_inputs
+            or args.round114_u_operands):
         round112_bundle = _round112_owned_record(
             args.fct_walk_record,
             plant=(args.plant_fct_walk_ulp or args.plant_live_input_ulp))
@@ -642,12 +868,32 @@ def measure(args) -> dict:
             if name not in ("sha256", "expected", "plant_row")
         }
 
+    round114_bundle = None
+    round114_values = None
+    if args.round114_u_operands:
+        require(round112_bundle is not None,
+                "round-114 FCT transport record was not loaded")
+        round114_bundle = _round114_owned_u_bundle(
+            record_root=args.u_record_root,
+            stage_baseline_root=args.stage_baseline_root,
+            admission_path=args.u_admission,
+            expected_commit=args.expect_u_record_commit,
+            p_u=round112_bundle["p_u"],
+            plant=args.plant_u_factor_ulp)
+        round114_values = {
+            name: jnp.asarray(value)
+            for name, value in round114_bundle.items()
+            if isinstance(value, np.ndarray)
+        }
+
     real_reciprocal = round66.reciprocal_substitutions
     real_pair = model_module._nemo_ws_rk3_tracer_pair_step
     real_qsr = model_module._nemo_qsr_stage3_rate
     real_ldf = model_module.gm_redi_tracer_tendency_latlon
     real_step = model_module.LatLonCGridOceanModel.step
     real_fct = advection_module.fct_tracer_advection
+    real_stage_transport = model_module._nemo_ws_stage_transport
+    real_stage_faces = model_module._nemo_ws_qco_stage_faces
     active_kmm_override: tuple[object | None, object | None] | None = None
     capture_fct_split = False
     capture_fct_walk = False
@@ -655,7 +901,10 @@ def measure(args) -> dict:
     fct_walk_trace_index = 0
     live_input_trace_index = 0
     active_live_input_family: str | None = None
+    active_u_factor: str | None = None
     round113_eager_direct = False
+    round114_stage3_active = False
+    round114_stage3_faces = None
 
     def reciprocal_capture(live, oracle, oracle_content, wet):
         reciprocal_calls.append({
@@ -700,7 +949,7 @@ def measure(args) -> dict:
             args.round112_fct_walk
             and kwargs.get("return_final_content", False))
         capture_live_inputs = bool(
-            args.round113_live_inputs
+            (args.round113_live_inputs or args.round114_u_operands)
             and kwargs.get("return_final_content", False))
         fct_walk_trace_index = 0
         live_input_trace_index = 0
@@ -730,6 +979,82 @@ def measure(args) -> dict:
         live_input_calls.append(tuple(
             np.asarray(value, dtype=np.float64) for value in values))
 
+    def u_operand_sink(*values):
+        u_operand_calls.append(tuple(
+            np.asarray(value, dtype=np.float64) for value in values))
+
+    def stage_faces_capture(*values, **kwargs):
+        nonlocal round114_stage3_faces
+        result = real_stage_faces(*values, **kwargs)
+        if round114_stage3_active:
+            require(round114_values is not None,
+                    "round-114 U oracle values were not loaded")
+            result = list(result)
+            if active_u_factor == "e3u_kmm":
+                result[0] = round114_values["e3u_kmm"]
+            round114_stage3_faces = tuple(result)
+            return tuple(result)
+        return result
+
+    def stage_transport_capture(*values, **kwargs):
+        nonlocal round114_stage3_active, round114_stage3_faces
+        if not args.round114_u_operands or values[2] != 2:
+            return real_stage_transport(*values, **kwargs)
+        require(round114_values is not None,
+                "round-114 U oracle values were not loaded")
+        call_values = list(values)
+        call_kwargs = dict(kwargs)
+        stage_velocity = call_values[0]
+        if active_u_factor == "u_kmm":
+            call_values[0] = (round114_values["u_kmm"], stage_velocity[1])
+        if active_u_factor == "un_adv":
+            call_kwargs["Hu_avg"] = round114_values["un_adv"]
+        if active_u_factor == "uu_b_kmm":
+            barotropic = call_kwargs.get("barotropic_velocity")
+            require(barotropic is not None,
+                    "round-114 stage-3 call lacks carried barotropic U")
+            call_kwargs["barotropic_velocity"] = (
+                round114_values["uu_b_kmm"], barotropic[1])
+        round114_stage3_faces = None
+        round114_stage3_active = True
+        try:
+            result = real_stage_transport(*call_values, **call_kwargs)
+        finally:
+            round114_stage3_active = False
+        require(round114_stage3_faces is not None,
+                "round-114 stage-3 face helper did not execute")
+        faces = round114_stage3_faces
+        u_kmm = call_values[0][0]
+        un_adv = call_kwargs["Hu_avg"]
+        r1_hu = faces[4]
+        barotropic = call_kwargs.get("barotropic_velocity")
+        require(barotropic is not None,
+                "round-114 stage-3 call used the unrecorded reduced mean")
+        uu_b = barotropic[0]
+        umask = call_kwargs["u_mask_3d"]
+        zub, corrected, replay_zfu = _round114_u_statement(
+            jnp.asarray(call_kwargs["grid"].dy_u), faces[0], u_kmm,
+            un_adv, r1_hu, uu_b, umask)
+        # The replay is inside the complete production trace and must be the
+        # exact helper output before it can label the intermediate rows.
+        replay_equal = jnp.all(replay_zfu == result[7])
+        callback_values = (
+            jnp.asarray(call_kwargs["grid"].dy_u), faces[0], faces[2],
+            u_kmm, un_adv, r1_hu, uu_b, umask, zub, corrected, result[7],
+        )
+        if round113_eager_direct:
+            require(bool(np.asarray(jax.device_get(replay_equal))),
+                    "round-114 eager U replay differs from production")
+            u_operand_sink(*jax.device_get(callback_values))
+        else:
+            def checked_sink(equal, *operands):
+                require(bool(np.asarray(equal)),
+                        "round-114 production-JIT U replay differs from helper")
+                u_operand_sink(*operands)
+            jax.debug.callback(
+                checked_sink, replay_equal, *callback_values, ordered=True)
+        return result
+
     def fct_capture(*values, **kwargs):
         nonlocal fct_walk_trace_index, live_input_trace_index
         if capture_fct_walk:
@@ -743,9 +1068,9 @@ def measure(args) -> dict:
             fct_walk_trace_index += 1
         if capture_live_inputs:
             require(round112_bundle is not None,
-                    "round-113 FCT values were not loaded")
+                    "round-113/114 FCT values were not loaded")
             require(live_input_trace_index < 2,
-                    "round-113 observed more than the T/S FCT calls")
+                    "round-113/114 observed more than the T/S FCT calls")
             tracer = TRACERS[live_input_trace_index]
             call_values, call_kwargs = _round113_patch_inputs(
                 values, kwargs, round112_bundle, tracer,
@@ -840,6 +1165,8 @@ def measure(args) -> dict:
     model_module._nemo_qsr_stage3_rate = qsr_capture
     model_module.gm_redi_tracer_tendency_latlon = ldf_capture
     model_module.LatLonCGridOceanModel.step = step_capture
+    model_module._nemo_ws_qco_stage_faces = stage_faces_capture
+    model_module._nemo_ws_stage_transport = stage_transport_capture
     try:
         base = round66.measure(args)
     finally:
@@ -849,6 +1176,8 @@ def measure(args) -> dict:
         model_module._nemo_qsr_stage3_rate = real_qsr
         model_module.gm_redi_tracer_tendency_latlon = real_ldf
         model_module.LatLonCGridOceanModel.step = real_step
+        model_module._nemo_ws_qco_stage_faces = real_stage_faces
+        model_module._nemo_ws_stage_transport = real_stage_transport
 
     require(len(reciprocal_calls) == 2,
             f"expected T/S reciprocal calls, got {len(reciprocal_calls)}")
@@ -1064,11 +1393,11 @@ def measure(args) -> dict:
         round66.transposed(arrays["content_T"]), reciprocal_calls[0]["wet"])
 
     model, seeded, dt, freshwater, surface = step_calls[-1]
-    if args.round113_live_inputs:
-        require(step_results, "round-113 seeded production result is absent")
+    if args.round113_live_inputs or args.round114_u_operands:
+        require(step_results, "round-113/114 seeded production result is absent")
         trace = jax.device_get(step_results[-1])
         require(hasattr(trace, "state_after"),
-                "round-113 seeded result is not the live operand trace")
+                "round-113/114 seeded result is not the live operand trace")
         baseline_state = trace.state_after
     else:
         baseline_state = jax.device_get(type(model)(
@@ -1370,6 +1699,264 @@ def measure(args) -> dict:
             "observations": observations,
             "plant_propagation": plant_propagation,
             "criteria": criteria,
+        }
+
+    round114_matrix = {}
+    if args.round114_u_operands:
+        require(round112_bundle is not None and round114_bundle is not None,
+                "round-114 records were not prepared")
+        jax.effects_barrier()
+        jit_live_observation = _round113_collapse_calls(
+            live_input_calls, "round-114 production-step JIT",
+            allow_prior_distinct=True)
+        jit_live_rows = _round113_score_inputs(
+            jit_live_observation, round112_bundle)
+        jit_u_observation = _round114_collapse_u(
+            u_operand_calls, "production-step JIT",
+            allow_prior_distinct=True)
+        jit_u = _round114_score_u(jit_u_observation, round114_bundle)
+
+        entry3 = gate.read_entry(
+            args.entry_root / "oracle_step_entry_kt00000003.bin")
+
+        def kt3_rows(state):
+            result = {}
+            fields = gate.lego_fields(state)
+            for tracer in TRACERS:
+                wet = reciprocal_calls[TRACERS.index(tracer)]["wet"]
+                field = np.asarray(fields[tracer], dtype=np.float64)
+                target = entry3[tracer][..., :field.shape[-1]]
+                result[tracer] = round54.field_stats(field, target, wet)
+            return result
+
+        baseline_kt3 = kt3_rows(baseline_state)
+
+        eager_u = {}
+        eager_live_rows = {}
+        if not args.plant_u_factor_ulp:
+            live_input_calls.clear()
+            u_operand_calls.clear()
+            active_live_input_family = None
+            active_u_factor = None
+            round113_eager_direct = True
+            model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
+            advection_module.fct_tracer_advection = fct_capture
+            model_module._nemo_ws_qco_stage_faces = stage_faces_capture
+            model_module._nemo_ws_stage_transport = stage_transport_capture
+            try:
+                try:
+                    with jax.disable_jit():
+                        model._step_impl(
+                            seeded, dt, freshwater=freshwater,
+                            surface_forcing=surface)
+                except _Round113EagerBoundaryComplete:
+                    pass
+            finally:
+                round113_eager_direct = False
+                model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+                advection_module.fct_tracer_advection = real_fct
+                model_module._nemo_ws_qco_stage_faces = real_stage_faces
+                model_module._nemo_ws_stage_transport = real_stage_transport
+            eager_u_observation = _round114_collapse_u(
+                u_operand_calls, "production eager",
+                allow_prior_distinct=True)
+            eager_u = _round114_score_u(
+                eager_u_observation, round114_bundle)
+            eager_live = _round113_collapse_calls(
+                live_input_calls, "round-114 production eager",
+                allow_prior_distinct=True)
+            eager_live_rows = _round113_score_inputs(
+                eager_live, round112_bundle)
+
+        def run_round114_arm(
+            label: str, *, live_family: str | None = None,
+            u_factor: str | None = None,
+        ):
+            nonlocal active_live_input_family, active_u_factor
+            live_input_calls.clear()
+            u_operand_calls.clear()
+            active_live_input_family = live_family
+            active_u_factor = u_factor
+            model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
+            advection_module.fct_tracer_advection = fct_capture
+            model_module._nemo_ws_qco_stage_faces = stage_faces_capture
+            model_module._nemo_ws_stage_transport = stage_transport_capture
+            try:
+                state = jax.device_get(type(model)(
+                    model.grid, model.z_coord, model.config).step(
+                        seeded, dt, freshwater=freshwater,
+                        surface_forcing=surface))
+                jax.effects_barrier()
+            finally:
+                active_live_input_family = None
+                active_u_factor = None
+                model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+                advection_module.fct_tracer_advection = real_fct
+                model_module._nemo_ws_qco_stage_faces = real_stage_faces
+                model_module._nemo_ws_stage_transport = real_stage_transport
+            live_observation = _round113_collapse_calls(
+                live_input_calls, label, allow_prior_distinct=True)
+            u_observation = _round114_collapse_u(
+                u_operand_calls, label, allow_prior_distinct=True)
+            return state, live_observation, u_observation
+
+        split_arms = {}
+        split_observations = {}
+        if not args.plant_u_factor_ulp:
+            for family in ("transport_u", "transport_v", "transport_w",
+                           "transport"):
+                state, live_observation, u_observation = run_round114_arm(
+                    f"{family} production-JIT arm", live_family=family)
+                live_rows = _round113_score_inputs(
+                    live_observation, round112_bundle)
+                split_arms[family] = {
+                    "inputs": live_rows,
+                    "kt3": kt3_rows(state),
+                    "state_vs_baseline": pytree_exact_census(
+                        gate.lego_fields(state),
+                        gate.lego_fields(baseline_state)),
+                    "producer_u": _round114_score_u(
+                        u_observation, round114_bundle),
+                }
+                split_observations[family] = {
+                    "transport_sha256": _array_sha256(
+                        live_observation[0][{
+                            "transport_u": 1, "transport_v": 2,
+                            "transport_w": 3, "transport": 1,
+                        }[family]]),
+                    "adv_up1_T_sha256": _array_sha256(
+                        live_observation[0][-1]),
+                }
+
+        first_direct = jit_u["first_direct_nonbit"]
+        substitutable_u = {"e3u_kmm", "u_kmm", "un_adv", "uu_b_kmm"}
+        factor_state = None
+        factor_live_observation = None
+        factor_u_observation = None
+        if first_direct in substitutable_u:
+            factor_state, factor_live_observation, factor_u_observation = (
+                run_round114_arm(
+                    f"{first_direct} production-JIT arm",
+                    u_factor=first_direct))
+        require(not args.plant_u_factor_ulp or first_direct == "e3u_kmm",
+                "round-114 ULP plant is calibrated only for first e3u_kmm")
+        require(factor_state is not None,
+                "first direct non-bit U factor is not substitutable: "
+                f"{first_direct!r}")
+        factor_live_rows = _round113_score_inputs(
+            factor_live_observation, round112_bundle)
+        factor_u = _round114_score_u(
+            factor_u_observation, round114_bundle)
+        factor_kt3 = kt3_rows(factor_state)
+        factor_observations = {
+            "e3u_kmm_sha256": _array_sha256(factor_u_observation[1]),
+            "zfu_sha256": _array_sha256(factor_u_observation[-1]),
+            "adv_up1_T_sha256": _array_sha256(
+                factor_live_observation[0][-1]),
+        }
+
+        isolated_result = jax.device_get(jax.jit(_round114_u_statement)(
+            *[jnp.asarray(jit_u_observation[index]) for index in
+              (0, 1, 3, 4, 5, 6, 7)]))
+        isolated_observation = list(jit_u_observation)
+        isolated_observation[8:] = isolated_result
+        isolated_observation = tuple(isolated_observation)
+        isolated_u = _round114_score_u(
+            isolated_observation, round114_bundle)
+        isolated_vs_production = {
+            name: round54.field_stats(
+                isolated_observation[index], jit_u_observation[index],
+                (np.any(round114_bundle["umask"] > 0.5, axis=-1)
+                 if name == "zub" else round114_bundle["umask"] > 0.5))
+            for name, index in (("zub", 8), ("corrected_u", 9), ("zfu", 10))
+        }
+
+        triplet_reproduced = False
+        single_family_criteria = {}
+        if not args.plant_u_factor_ulp:
+            triplet = split_arms["transport"]
+            triplet_reproduced = bool(
+                triplet["inputs"]["T"]["adv_up1"]["max_abs"]
+                == np.float64(1.632720658269341e-16)
+                and triplet["kt3"]["T"]["max_abs"]
+                == np.float64(5.763797261693071e-8))
+            baseline_adv_hash = _array_sha256(jit_live_observation[0][-1])
+            for family in ("transport_u", "transport_v", "transport_w"):
+                single_family_criteria[family] = {
+                    "changes_adv_up1_T": (
+                        split_observations[family]["adv_up1_T_sha256"]
+                        != baseline_adv_hash),
+                    "both_adv_rows_bit": all(
+                        split_arms[family]["inputs"][tracer]["adv_up1"][
+                            "cells_unequal"] == 0 for tracer in TRACERS),
+                }
+
+        factor_reduction = (
+            factor_kt3["T"]["max_abs"]
+            / baseline_kt3["T"]["max_abs"])
+        prediction_results = {
+            "e2u_predicted_bit": (
+                jit_u["rows"]["e2u"]["classification"] == "BIT"),
+            "predicted_first_e3u_kmm": first_direct == "e3u_kmm",
+            "factor_kt3_reduction_under_ten_percent": factor_reduction > 0.9,
+            "single_family": single_family_criteria,
+            "triplet_reproduces_round113": triplet_reproduced,
+        }
+
+        plant_propagation = {}
+        plant_fired = False
+        if args.plant_u_factor_ulp:
+            frozen = json.loads(args.u_operand_report.read_text())[
+                "round114_u_operands"]
+            plant_propagation = {
+                name: factor_observations[name]
+                != frozen["factor_arm"]["observations"][name]
+                for name in (
+                    "e3u_kmm_sha256", "zfu_sha256", "adv_up1_T_sha256")
+            }
+            plant_fired = all(plant_propagation.values())
+            require(plant_fired,
+                    "round-114 production-JIT e3u one-ULP plant was inert")
+
+        round114_matrix = {
+            "status": "PLANT-FIRED" if plant_fired else "MEASURED",
+            "plant_ulp": bool(args.plant_u_factor_ulp),
+            "records": {
+                name: round114_bundle[name] for name in (
+                    "producer_commit", "stage_sha256",
+                    "stage_baseline_sha256", "advmean_sha256",
+                    "admission_sha256", "inherited_owned_exact")
+            },
+            "plant_target": round114_bundle["plant_row"],
+            "first_direct_nonbit": first_direct,
+            "modes": {
+                "production_step_jit": jit_u,
+                "production_eager": eager_u,
+                "isolated_closure_jit": isolated_u,
+                "isolated_vs_production": isolated_vs_production,
+                "fct_consumer_production_jit": jit_live_rows,
+                "fct_consumer_production_eager": eager_live_rows,
+            },
+            "transport_split": split_arms,
+            "transport_split_observations": split_observations,
+            "baseline_kt3": baseline_kt3,
+            "factor_arm": {
+                "factor": first_direct,
+                "u_rows": factor_u,
+                "fct_inputs": factor_live_rows,
+                "kt3": factor_kt3,
+                "kt3_T_ratio_to_baseline": factor_reduction,
+                "state_vs_baseline": pytree_exact_census(
+                    gate.lego_fields(factor_state),
+                    gate.lego_fields(baseline_state)),
+                "observations": factor_observations,
+            },
+            "prediction_results": prediction_results,
+            "plant_propagation": plant_propagation,
+            "candidate_eligible": False,
+            "candidate_disposition": (
+                "diagnostic substitution only; the first non-bit direct "
+                "factor is inherited from an upstream stage state"),
         }
 
     pair_matrix = {}
@@ -2045,9 +2632,13 @@ def measure(args) -> dict:
         status = round112_matrix["status"]
     if args.round113_live_inputs:
         status = round113_matrix["status"]
+    if args.round114_u_operands:
+        status = round114_matrix["status"]
 
     return {
         "format": (
+            "nemo-testcase-l2-gyre-round114-u-operands-v1"
+            if args.round114_u_operands else
             "nemo-testcase-l2-gyre-round113-live-inputs-v1"
             if args.round113_live_inputs else
             "nemo-testcase-l2-gyre-round112-fct-walk-v1"
@@ -2091,6 +2682,7 @@ def measure(args) -> dict:
         "round111_fct_split": round111_matrix,
         "round112_fct_walk": round112_matrix,
         "round113_live_inputs": round113_matrix,
+        "round114_u_operands": round114_matrix,
         "criteria": {
             "content_within_floor_plus_association": content_criterion,
             "kt3_exact_pre_edit_prediction": prediction_match,
@@ -2139,6 +2731,21 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--live-input-report", type=Path,
         default=ROOT / "round113/live_inputs.json")
+    parser.add_argument("--round114-u-operands", action="store_true")
+    parser.add_argument("--plant-u-factor-ulp", action="store_true")
+    parser.add_argument("--expect-u-record-commit")
+    parser.add_argument(
+        "--u-record-root", type=Path,
+        default=ROOT / "round77/oracle_uamid_kt2")
+    parser.add_argument(
+        "--u-admission", type=Path,
+        default=ROOT / "round77/oracle_uamid_kt2/round77_admission.json")
+    parser.add_argument(
+        "--stage-baseline-root", type=Path,
+        default=ROOT / "round46/oracle_kt2_stage")
+    parser.add_argument(
+        "--u-operand-report", type=Path,
+        default=ROOT / "round114/u_transport_walk.json")
     parser.add_argument(
         "--prediction-report", type=Path,
         default=ROOT / "round67/round67_ldf_order_before.json")
@@ -2171,7 +2778,23 @@ def main(argv=None) -> int:
     except Exception as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    if args.round113_live_inputs:
+    if args.round114_u_operands:
+        matrix = report["round114_u_operands"]
+        row = matrix["modes"]["production_step_jit"]["rows"]
+        arm = matrix["factor_arm"]
+        prefix = (
+            "STATUS PLANT-FIRED" if report["status"] == "PLANT-FIRED"
+            else f"ROUND114 U OPERANDS {report['status']}")
+        print(
+            f"{prefix}: first={matrix['first_direct_nonbit']} "
+            f"e2u={row['e2u']['cells_unequal']}/"
+            f"{row['e2u']['max_abs']:.12e} "
+            f"e3u={row['e3u_kmm']['cells_unequal']}/"
+            f"{row['e3u_kmm']['max_abs']:.12e} "
+            f"zfu={row['zfu']['cells_unequal']}/"
+            f"{row['zfu']['max_abs']:.12e} "
+            f"factor_kt3_T={arm['kt3']['T']['max_abs']:.12e}")
+    elif args.round113_live_inputs:
         matrix = report["round113_live_inputs"]
         row = matrix["modes"]["production_step_jit"]["T"]
         arm = matrix["substitution_arm"]["rows"]["T"]["adv_up1"]
@@ -2234,6 +2857,8 @@ def main(argv=None) -> int:
             f"ROUND68 PRODUCTION FCT {report['status']}: "
             f"content_T={row['content_vs_oracle']['max_abs']:.12e} "
             f"kt3_T={kt3['max_abs']:.12e}")
+    if args.round114_u_operands:
+        return 1 if report["status"] == "PLANT-FIRED" else 0
     return 0 if report["status"] == "CONFIRMED" else 1
 
 
