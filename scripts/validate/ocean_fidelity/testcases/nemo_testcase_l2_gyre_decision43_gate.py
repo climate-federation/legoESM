@@ -139,7 +139,12 @@ def measure_generic_nemo_gyre(snapshot: Path) -> dict:
         nemo_gyre_wind_forcing,
     )
 
-    stamp = worktree_stamp()
+    # The same committed instrument is deliberately used against the landing's
+    # archived base implementation and the descendant.  Stamp both parties:
+    # the model tree is the invocation cwd; the instrument tree owns this file.
+    stamp = worktree_stamp(repo=Path.cwd())
+    instrument_stamp = worktree_stamp(
+        repo=Path(__file__).resolve().parents[4])
     require(stamp.get("clean") is True,
             "generic NEMO-GYRE measurement worktree is dirty")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
@@ -202,6 +207,7 @@ def measure_generic_nemo_gyre(snapshot: Path) -> dict:
         "format": "nemo-gyre-generic-card-three-step-v1",
         "status": "PASS" if all(certifications.values()) else "FAIL",
         "worktree": stamp,
+        "instrument_worktree": instrument_stamp,
         "snapshot": str(snapshot),
         "route_observation": {
             "tracer_time_integrator": config.tracer_time_integrator,
