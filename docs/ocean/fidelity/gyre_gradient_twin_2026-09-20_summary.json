@@ -1,0 +1,147 @@
+{
+  "format": "gyre-gradient-twin-stopped-v1",
+  "date": "2026-09-20",
+  "branch": "feat/gyre-gradient-twin",
+  "overall_status": "STOPPED_REFUTED",
+  "provenance": {
+    "incoming_tip": "4cac617cd928007506f2de7ccb098f87e04204d1",
+    "preregistration_commit": "b82ad5889c3644ac109b46ed6739b0864e9013f3",
+    "measurement_commit": "4367678b90d5c5a9d24945fdf9f986cf493214e8",
+    "backend": "cpu",
+    "jax_enable_x64": true,
+    "precision_policy": "fp64/libm",
+    "python": "/home/dbalwada/legoESM/.venv/bin/python",
+    "nemo_runs": 0
+  },
+  "direct_gate": {
+    "rollout_steps": 2,
+    "observation_steps": [
+      2
+    ],
+    "parameters": [
+      "A_h",
+      "c_k"
+    ],
+    "start_values": {
+      "A_h": 200000.0,
+      "c_k": 0.2
+    },
+    "loss_status": "FINITE_POSITIVE",
+    "override_reachability": "CONFIRMED",
+    "planted_gate_controls": "CONFIRMED",
+    "assert_no_inert": {
+      "status": "REFUTED",
+      "reason": "non-finite gradient: ['A_h', 'c_k']",
+      "gradients": {
+        "A_h": null,
+        "c_k": null
+      },
+      "nonfinite_kind": {
+        "A_h": "NaN",
+        "c_k": "NaN"
+      }
+    },
+    "finite_difference_rows": [
+      {
+        "parameter": "A_h",
+        "relative_log_step": 0.001,
+        "ad_gradient": null,
+        "finite_difference": 0.002872696489271756,
+        "ratio": null,
+        "status": "REFUTED"
+      },
+      {
+        "parameter": "A_h",
+        "relative_log_step": 0.0001,
+        "ad_gradient": null,
+        "finite_difference": 0.0028726939601056434,
+        "ratio": null,
+        "status": "REFUTED"
+      },
+      {
+        "parameter": "c_k",
+        "relative_log_step": 0.001,
+        "ad_gradient": null,
+        "finite_difference": 0.0445953232661965,
+        "ratio": null,
+        "status": "REFUTED"
+      },
+      {
+        "parameter": "c_k",
+        "relative_log_step": 0.0001,
+        "ad_gradient": null,
+        "finite_difference": 0.04459534694446765,
+        "ratio": null,
+        "status": "REFUTED"
+      }
+    ],
+    "gradient_wall_seconds": 3689.195171093568,
+    "peak_rss_mib": 72342.98046875,
+    "pytest_total_seconds": 3958.87,
+    "pytest_result": "1 failed, 2 passed"
+  },
+  "localization": {
+    "status": "LOCALIZED_POST_HOC",
+    "file": "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
+    "line": 3434,
+    "operation": "dissl_new = jnp.sqrt(tke_curr) / l_eps_final",
+    "mechanism": "The sqrt transpose evaluates a zero cotangent at zero TKE as 0/sqrt(0), producing NaN.",
+    "reverse_safe_discriminator": "A double-where sqrt guard has the same primal and returns a zero cotangent at zero TKE.",
+    "known_forward_mode_custom_vjp_block_is_owner": false
+  },
+  "predictions": {
+    "P1": {
+      "verdict": "REFUTED",
+      "scope": "mandatory two-step direct gate; registered 60-step arms were not entered",
+      "ratios": {
+        "A_h_h1e-3": null,
+        "A_h_h1e-4": null,
+        "c_k_h1e-3": null,
+        "c_k_h1e-4": null
+      }
+    },
+    "P2": {
+      "verdict": "UNMEASURED",
+      "reason": "P1 stopped optimization before the A_h arm"
+    },
+    "P3": {
+      "verdict": "UNMEASURED",
+      "reason": "P1 stopped optimization before the c_k arm"
+    },
+    "P4": {
+      "verdict": "UNMEASURED",
+      "reason": "the mandatory direct adjoint gate stopped the 60-step loss experiment"
+    },
+    "P5": {
+      "verdict": "REFUTED",
+      "n_unequal": 17895,
+      "n_values": 21120,
+      "twin_sha256": "3eb61de0c5b53abedc2c4a87b83dd327c7c1dcb9d9ead6efd06c70941eb8bda1",
+      "campaign_sha256": "37e978c18339ab871b34e73a89a15cc91dee0623264122edbb8f2f2f6bc44165",
+      "truth_scan_wall_seconds": 150.12092362344265,
+      "campaign_harness_wall_seconds": 193.2231383677572,
+      "peak_rss_mib": 6425.19140625
+    }
+  },
+  "recovery": {
+    "optimizer": "legoesm.ml.training.create_optimizer",
+    "optimizer_invoked": false,
+    "updates_executed": 0,
+    "retunes_executed": 0,
+    "identifiability_scans_executed": 0,
+    "arms": {
+      "A_h": {
+        "status": "UNMEASURED",
+        "curve": []
+      },
+      "c_k": {
+        "status": "UNMEASURED",
+        "curve": []
+      },
+      "both": {
+        "status": "UNMEASURED",
+        "curve": []
+      }
+    }
+  }
+}
