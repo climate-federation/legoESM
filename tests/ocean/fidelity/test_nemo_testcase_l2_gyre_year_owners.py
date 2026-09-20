@@ -117,7 +117,11 @@ def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
     # The frozen preregistration assumed one raw RHS ULP necessarily reaches
     # the temperature budget.  This calibrated counterexample proves why the
     # distinct effect-scale plant is required instead of pretending it did.
-    assert sum(control["decoded_temperature_rows_moved"].values()) == 0
+    low_dt_record = dict(record)
+    low_dt_record["rDt"] = 1.0
+    swallowed = harness._process_sbc_ulp_control(
+        low_dt_record, np.ones(endpoint.shape, dtype=bool))
+    assert sum(swallowed["decoded_temperature_rows_moved"].values()) == 0
     propagated = harness._process_sbc_effect_control(
         record, np.ones(endpoint.shape, dtype=bool))
     assert propagated["decoded_temperature_rows_moved"]["surface_boundary"]
