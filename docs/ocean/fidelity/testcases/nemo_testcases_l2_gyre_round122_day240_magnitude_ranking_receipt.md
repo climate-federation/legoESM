@@ -54,8 +54,8 @@ The preregistration is
 `docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round122.md`, committed
 before measurement as full commit
 `f563e05b8fe4cd31b00a786bdb8436984a57a938`.  Every authoritative scorer
-artifact carries that clean commit.  The aggregate artifact list is
-`round122/artifacts.sha256`, whose own SHA-256 is
+artifact carries that clean commit.  The scientific-measurement artifact list
+frozen before verification is `round122/artifacts.sha256`, whose own SHA-256 is
 `742097f1aae14d03a6d2ee8ed6b8d47180eee95c357b1ff55fb645abb24015a2`.
 
 The user-named daily NEMO root stops at day 30.  Before using the registered
@@ -70,7 +70,11 @@ The immutable legoESM member is
 `phase3/year_equivalence/gyre/lego_seed0_year`, clean commit
 `4d250301588d3ed0ad83fb20d6bf520e175d576e`, 2,160 fp64 CPU steps at
 `14,400 s`, with snapshots every six steps.  Round 122 reads it; it does not
-rerun or modify it.
+rerun or modify it.  The decompose loader's fixed directory spelling is
+`lego_seed0`, so the evidence root contains a read-only symbolic-link adapter
+from `round122/decompose_input/lego_seed0` to that exact `lego_seed0_year`
+directory.  The emitted JSON records the adapter as `lego_root`; the source
+manifest and snapshot bytes remain the immutable member above.
 
 ## Instrument calibration and temporal birth
 
@@ -219,8 +223,47 @@ operator attribution.
 
 ## Verification
 
-Final citation, plant, focused-test and review records will be inserted after
-their clean-tree runs.  No physics test result is claimed by this placeholder.
+The clean-tree citation gate found all four compiled-source citations, no
+unmapped citations, no failures and no failing map entries.  Its literal
+verdict was `status=PASS`; the artifact and log have identical SHA-256
+`a0869a19690cc46ff76108079166d843668af1ccf59a9c536b2e54b565ea35e8`.
+The clean worktree stamp names commit
+`af588e6a8767d078a37d36f8d168ff74a23c2002`.
+
+The deliberately shifted first-entry citation moved both endpoints by two
+lines.  It found the real first symbol at line 89, emitted
+`SYMBOL-NOT-AT-LINE`, printed `status=FAIL`, and exited 1 as required.  The
+plant JSON/log SHA-256 is
+`58f21f4741eff604629439dd27e8090e13e6d777d43857e970d856fae2ab6953`.
+
+The focused owner, citation and provenance suites ended literally:
+
+```text
+============================= 39 passed in 31.56s ==============================
+```
+
+The focused log SHA-256 is
+`0ea23e58a6b4e27f210f42aa540504e483563f0a4c4d966ffbdc41147007a1ca`.
+No model implementation or scientific instrument changed, so the frozen P4
+verification plan did not spend the round's CPU budget rerunning the 8,000+
+model-test trees.  The changed executable file is only the receipt citation
+map, covered by the cited gate suite.
+
+The required independent command was run as `codex exec --sandbox read-only`
+against the complete incoming-tip-to-receipt diff with an adversarial prompt
+covering the metric, root continuity, temporal localization, counterfactual
+census, causal boundary and compiled citations.  Its verbatim terminal result
+was:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Independent review is unavailable in-sandbox; no `SHIP` or `DO NOT SHIP`
+verdict is fabricated.  The complete review log SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## OPEN — exact handoff to round 123
 
