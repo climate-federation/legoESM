@@ -901,6 +901,8 @@ def _load_lego_trace_arrays(root: Path) -> dict[str, np.ndarray]:
 def validate_lego_process_trace(root: Path, expected_commit: str,
                                 *, plant: str | None = None,
                                 mesh_path: Path = DEFAULT_MESH) -> dict:
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
     root = Path(root)
     metadata = json.loads((root / "manifest.json").read_text())
     require(metadata["format"] == "gyre-legoesm-process-trace-v1",
@@ -1012,7 +1014,7 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
     return {
         "format": "gyre-legoesm-process-trace-validation-v1",
         "status": "PASS", "case": CASE, "root": str(root),
-        "producer_commit": expected_commit,
+        "producer_commit": expected_commit, "worktree": worktree_stamp(),
         "layout": {"record_count": LEGO_PROCESS_TRACE_STEPS,
                    "shape_3d": list(shape3), "shape_2d": list(shape2),
                    "fields": list(LEGO_PROCESS_FIELDS)},
