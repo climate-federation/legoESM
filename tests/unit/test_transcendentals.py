@@ -74,8 +74,17 @@ def test_libm_log_policy_is_scalar_library_bit_exact(name, function):
     assert np.array_equal(observed.view(np.uint64), reference.view(np.uint64))
 
 
-@pytest.mark.parametrize("function", [exp, log, log10, tanh, sin, cos])
+@pytest.mark.parametrize("function", [exp, tanh, sin, cos])
 def test_libm_policy_jit_and_eager_are_bit_exact(function):
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    values = jnp.asarray([-3.125, -0.25, 0.0, 0.75, 4.5], dtype=jnp.float64)
+    eager = np.asarray(function(values))
+    compiled = np.asarray(jax.jit(function)(values))
+    assert np.array_equal(eager.view(np.uint64), compiled.view(np.uint64))
+
+
+@pytest.mark.parametrize("function", [log, log10])
+def test_libm_log_policy_jit_and_eager_are_bit_exact(function):
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     values = jnp.asarray([0.125, 0.25, 0.5, 0.75, 4.5], dtype=jnp.float64)
     eager = np.asarray(function(values))
