@@ -2092,7 +2092,10 @@ def score_vertical_budget(nemo_vertical_root: Path, lego_trace_root: Path,
 
         frame = {name: np.asarray(array[index])
                  for name, array in arrays.items()}
-        pre_l = frame["content_T"] / frame["e3t_after"]
+        pre_l = np.divide(
+            frame["content_T"], frame["e3t_after"],
+            out=np.zeros_like(frame["content_T"]),
+            where=frame["e3t_after"] != 0.0)
         vertical_l = (frame["solved_T"] - pre_l) * wet
 
         h0 = _vertical_increment(
