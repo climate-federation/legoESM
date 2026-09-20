@@ -2264,6 +2264,20 @@ def _load_kamm_twin_module():
     return module
 
 
+def _closed_barotropic_histories_to_faces(
+        uu_b: np.ndarray, vv_b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Map NEMO's 2-D closed-basin ``uu_n/vv_n`` onto model faces."""
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        _u_east_to_face, _v_north_to_face)
+
+    uu_b = np.asarray(uu_b)
+    vv_b = np.asarray(vv_b)
+    require(uu_b.ndim == 2 and vv_b.ndim == 2,
+            "barotropic restart histories must both be two-dimensional")
+    return (_u_east_to_face(uu_b[..., None])[..., 0],
+            _v_north_to_face(vv_b[..., None])[..., 0])
+
+
 def _gyre_checkpoint_state(card, restart_path: Path):
     """Map a GYRE restart onto the certified card without rebuilding geometry."""
     import jax.numpy as jnp
@@ -2294,12 +2308,12 @@ def _gyre_checkpoint_state(card, restart_path: Path):
         "eta": state.eta.replace(data=jnp.asarray(restart.ssh)),
     }
     if state.uu_b is not None and restart.uu_b is not None:
+        uu_b, vv_b = _closed_barotropic_histories_to_faces(
+            restart.uu_b, restart.vv_b)
         updates["uu_b"] = state.uu_b.replace(
-            data=jnp.asarray(
-                _u_east_to_face(restart.uu_b[..., None])[..., 0]))
+            data=jnp.asarray(uu_b))
         updates["vv_b"] = state.vv_b.replace(
-            data=jnp.asarray(
-                _v_north_to_face(restart.vv_b[..., None])[..., 0]))
+            data=jnp.asarray(vv_b))
     state = state._replace(**updates)
     en = read_nemo_restart_en(str(restart_path), nn_hls=0)[..., :nlev]
     avm, avt, dissl = read_nemo_restart_tke_coefficients(
@@ -2379,6 +2393,10 @@ def conditional_vertical_closure(nemo_vertical_root: Path,
     def production_closure(entry, forcing):
         return model.diagnose_vertical_K(entry, card.dt_s, forcing)
 
+    evd = card.recipe.model_config.physics.convection.enhanced_diffusion
+    require(evd is not None, "GYRE closure discriminator requires EVD")
+    evd_replacement = float(evd.K_conv)
+
     checkpoints = []
     for day, restart_step, step in ((180, 1080, 1081),
                                     (210, 1260, 1261)):
@@ -2407,6 +2425,13 @@ def conditional_vertical_closure(nemo_vertical_root: Path,
         conditional_error = error(conditional_heat)
         reduction = (1.0 - conditional_error["rms_m2_s"]
                      / own_error["rms_m2_s"])
+
+        def evd_mask(candidate):
+            return candidate[interface_wet] == evd_replacement
+
+        nemo_evd = evd_mask(nemo_heat)
+        own_evd = evd_mask(own_heat)
+        conditional_evd = evd_mask(conditional_heat)
         record_t = _vertical_field(record, "T_Kbb_in", wet.shape[-1])
         entry_t = np.asarray(entry.T.data)
         require(_different_cells(record_t, entry_t, wet) == 0,
@@ -2432,6 +2457,19 @@ def conditional_vertical_closure(nemo_vertical_root: Path,
             "model_own_trajectory_avt_error": own_error,
             "model_on_nemo_entry_avt_error": conditional_error,
             "rms_error_reduction_fraction": reduction,
+            "evd_replacement_value_m2_s": evd_replacement,
+            "evd_active_cells": {
+                "nemo": int(np.count_nonzero(nemo_evd)),
+                "model_own_trajectory": int(np.count_nonzero(own_evd)),
+                "model_on_nemo_entry": int(np.count_nonzero(
+                    conditional_evd)),
+            },
+            "evd_trigger_disagreement_cells": {
+                "model_own_trajectory": int(np.count_nonzero(
+                    own_evd != nemo_evd)),
+                "model_on_nemo_entry": int(np.count_nonzero(
+                    conditional_evd != nemo_evd)),
+            },
             "jet_centroid_model": jet_lego,
             "jet_centroid_nemo": jet_nemo,
             "jet_centroid_displacement": displacement,

@@ -321,6 +321,23 @@ def test_round126_literal_matrix_and_solve_controls_are_nonvacuous(harness):
     assert harness._different_cells(solved, moved, wet) > 0
 
 
+def test_round126_barotropic_checkpoint_histories_keep_their_2d_layout(
+        harness):
+    uu_b = np.arange(6.0).reshape(2, 3)
+    vv_b = np.arange(6.0, 12.0).reshape(2, 3)
+    u_face, v_face = harness._closed_barotropic_histories_to_faces(
+        uu_b, vv_b)
+    assert u_face.shape == (2, 4)
+    assert v_face.shape == (3, 3)
+    np.testing.assert_array_equal(u_face[:, 0], 0.0)
+    np.testing.assert_array_equal(u_face[:, 1:], uu_b)
+    np.testing.assert_array_equal(v_face[0, :], 0.0)
+    np.testing.assert_array_equal(v_face[1:, :], vv_b)
+    with pytest.raises(harness.GateError, match="two-dimensional"):
+        harness._closed_barotropic_histories_to_faces(
+            uu_b[..., None], vv_b)
+
+
 def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     source_patch = (PROCESS_CARD / "stprk3_stg_round123.patch").read_text()
     removed = [line for line in source_patch.splitlines()
