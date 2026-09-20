@@ -215,6 +215,12 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/EXP00/namelist_cfg"),
     "GYRE_OMIP_L2_P3_SM_R117PRELOOP/EXP00/ocean.output": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/EXP00/ocean.output"),
+    # Round 122 scores the admitted full-year restart series, so its state-level
+    # claims bind to the exact compiled build that wrote that series.
+    "GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/restart.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/restart.f90"),
     # Round 92 binds the operand diagnosis to the exact acquired Round-90
     # compiled card, including its write-only recorder.
     "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -529,6 +535,19 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 122: per-step entry record and full-year restart semantics ---
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3.f90:89-99': [
+        'IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN',
+        "WRITE(numout,*) 'LANE1_STEP_ENTRY_DUMP '", 11],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3.f90:215-222': [
+        'CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )',
+        'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs', 8],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3.f90:260':
+        'CALL rst_write    ( kstp, Nbb, Nnn, Naa )',
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/restart.f90:176-180': [
+        "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )",
+        "CALL iom_rstput( kt, nitrst, numrow, 'sn'  , ts(:,:,:,jp_sal,Kbb) )",
+        5],
     # --- round 108: configured TEOS-10 producer and first bn2 statement ---
     'GYRE_OMIP_L2_P3_SM_R101TKEW/EXP00/namelist_cfg:126-128': [
         'ln_teos10   = .true.', 'ln_seos     = .false.', 3],
