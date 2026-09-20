@@ -267,6 +267,7 @@ def test_orca2_card_selects_resolved_rk3_sh2():
     )
     assert tke.bottom_tke_bc is True
     assert tke.eice == 1
+    assert tke.tke_langmuir_evaluation == "vectorized"
     validate_nemo_testcase_card(card)
 
     # Binding selector plant: the former tuple must be rejected by the real
@@ -309,6 +310,18 @@ def test_orca2_card_selects_resolved_rk3_sh2():
         recipe=card.recipe._replace(
             model_config=planted_cfg, physics_config=planted_cfg.physics))
     with pytest.raises(ValueError, match="nn_eice=1"):
+        validate_nemo_testcase_card(planted)
+
+    langmuir_literal = tke._replace(tke_langmuir_evaluation="nemo_literal")
+    planted_cfg = card.recipe.model_config._replace(
+        physics=card.recipe.model_config.physics._replace(
+            vertical_mixing=(
+                card.recipe.model_config.physics.vertical_mixing._replace(
+                    tke=langmuir_literal))))
+    planted = card._replace(
+        recipe=card.recipe._replace(
+            model_config=planted_cfg, physics_config=planted_cfg.physics))
+    with pytest.raises(ValueError, match="tke_langmuir_evaluation"):
         validate_nemo_testcase_card(planted)
 
 

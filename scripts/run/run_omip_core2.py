@@ -2300,10 +2300,10 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
         _check("kpp-cv", kpp_cv, _KPP_CV_RANGE)
         kpp = kpp._replace(Cv=float(kpp_cv))
     if kpp_eice is not None:
-        if int(kpp_eice) not in (0, 1, 3):
+        if int(kpp_eice) not in (0, 1, 2, 3):
             raise ValueError(
-                f"--kpp-eice must be 0 (off), 1 (legoESM linear 1-fi) or 3 "
-                f"(max(0,1-4*fi), matches NEMO nn_eice=3); got {kpp_eice!r}.")
+                f"--kpp-eice must use NEMO nn_eice numbering 0, 1, 2 or 3; "
+                f"got {kpp_eice!r}.")
         kpp = kpp._replace(eice=int(kpp_eice))
     return VerticalMixingConfig(scheme="kpp", kpp=kpp)
 
@@ -5133,14 +5133,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(default 1.6). RAISING it increases V_t^2 -> deeper "
                         "boundary layer, LOWERING it shoals it (same MLD lever "
                         "as --kpp-ri-crit). --grid mpas/latlon_bathy only.")
-    p.add_argument("--kpp-eice", type=int, default=None, choices=[0, 1, 3],
+    p.add_argument("--kpp-eice", type=int, default=None, choices=[0, 1, 2, 3],
                    help="Under-ice attenuation of the KPP turbulent velocity "
                         "scales (KPP w-scale analogue of ice suppression; "
                         "mirror of --tke-eice). Compact ice scales w_m/w_s by "
                         "(1-eff) so BOTH the boundary-layer depth and mixing "
-                        "shrink under ice. None/0 (default) = off; 1 = legoESM "
-                        "NEMO 1-tanh(10*fi); 3 = max(0,1-4*fi) "
-                        "(matches NEMO nn_eice=3, killed at fi>=0.25). The KPP grids' "
+                        "shrink under ice. None/0 (default) = off; 1 = "
+                        "1-tanh(10*fi); 2 = 1-fi; 3 = max(0,1-4*fi) "
+                        "(matches NEMO nn_eice=3, killed at fi>=0.25). The "
+                        "KPP grids' "
                         "Arctic halocline-erosion lever (over-deep MLD + "
                         "Siberian salty) that --tke-eice fixed only on the TKE "
                         "grid. Needs --prognostic-sea-ice or a prescribed SIC. "

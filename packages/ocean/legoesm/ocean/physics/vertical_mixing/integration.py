@@ -222,9 +222,9 @@ def _make_kpp(config: VerticalMixingConfig,
         # explicit pipeline honours eice instead of silently no-oping it
         # (dispatch discipline).  eice=0 -> ice_frac=None -> bit-identical.
         _kpp_eice = int(getattr(cfg, "eice", 0))
-        if _kpp_eice not in (0, 1, 3):
+        if _kpp_eice not in (0, 1, 2, 3):
             raise ValueError(
-                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1 or 3.")
+                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1, 2 or 3.")
         _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
                        if (_kpp_eice != 0 and surface_forcing is not None)
                        else None)

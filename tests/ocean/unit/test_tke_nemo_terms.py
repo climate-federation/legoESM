@@ -118,8 +118,19 @@ def test_nemo_nn_eice2_is_raw_fraction_and_dispatch_is_closed():
     np.testing.assert_array_equal(np.asarray(tangent), np.ones(4))
     for mode in (0, 1, 2, 3):
         assert nemo_tke_effective_ice_fraction(fr_i, mode).shape == fr_i.shape
+    for invalid in (-1, 4, 99):
+        with pytest.raises(ValueError, match="0, 1, 2 or 3"):
+            nemo_tke_effective_ice_fraction(fr_i, invalid)
+
+
+@pytest.mark.parametrize("invalid", [-1, 4, 99])
+def test_tke_config_validator_rejects_every_out_of_range_eice(invalid):
+    from legoesm.ocean.physics.vertical_mixing.tke import (
+        _validate_post_mixing_cfg,
+    )
+
     with pytest.raises(ValueError, match="0, 1, 2 or 3"):
-        nemo_tke_effective_ice_fraction(fr_i, 4)
+        _validate_post_mixing_cfg(TKEConfig(eice=invalid))
 
 
 # ---------------------------------------------------------------------------

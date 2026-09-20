@@ -1169,9 +1169,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # STATIC config value so eice=0 stays bit-identical (ice_frac=None).
         # Unknown eice raises inside kpp (dispatch hardening on the static val).
         _kpp_eice = int(getattr(vmix_cfg.kpp, "eice", 0))
-        if _kpp_eice not in (0, 1, 3):
+        if _kpp_eice not in (0, 1, 2, 3):
             raise ValueError(
-                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1 or 3.")
+                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1, 2 or 3.")
         _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
                        if (_kpp_eice != 0 and surface_forcing is not None)
                        else None)

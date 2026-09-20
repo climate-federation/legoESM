@@ -3505,6 +3505,11 @@ def tke_vertical_mixing(
 
 def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
     """Fail loudly unless the post-mixing prerequisites hold (see config doc)."""
+    eice = getattr(cfg, "eice", 0)
+    if eice not in (0, 1, 2, 3):
+        raise ValueError(
+            f"Unknown TKEConfig.eice={eice!r}; expected NEMO nn_eice "
+            "0, 1, 2 or 3.")
     timing = getattr(cfg, "buoyancy_timing", "pre_mixing")
     if timing not in ("pre_mixing", "post_mixing_veros"):
         raise ValueError(

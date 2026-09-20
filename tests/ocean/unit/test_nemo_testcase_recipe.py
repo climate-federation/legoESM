@@ -60,6 +60,7 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
         tke_shear_avm_weighting="nemo_face",
         tke_shear_evaluation_stage="step_entry",
         tke_shear_metric_source="nemo_qco_live_face",
+        tke_langmuir_evaluation="vectorized",
         bottom_tke_bc=True,
         eice=1,
     )
@@ -198,6 +199,10 @@ def test_gyre_card_selects_complete_resolved_operator_program():
     assert cfg.physics.vertical_mixing.tke.kappaH_min == 1.2e-5
     assert cfg.physics.vertical_mixing.tke.n2_eos_form == "teos10"
     assert cfg.physics.vertical_mixing.tke.tke_n2_time_level == "nemo_before"
+    assert (
+        cfg.physics.vertical_mixing.tke.tke_langmuir_evaluation
+        == "nemo_literal"
+    )
     assert cfg.physics.convection.scheme == "enhanced_diffusion"
     assert cfg.physics.convection.enhanced_diffusion.K_conv == 100.0
     assert cfg.physics.convection.enhanced_diffusion.nu_conv == 100.0

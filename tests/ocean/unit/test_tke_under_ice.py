@@ -8,7 +8,7 @@ Arctic.  ``TKEConfig.eice`` + the k_profiles threading close the gap.  Pinned:
 * kernel: full ice cover kills the Langmuir source and the etau injection;
 * orchestrator: ``tke_vertical_mixing(ice_frac=...)`` reduces K under ice
   relative to the no-ice call, and is bit-identical when ``ice_frac=None``;
-* nn_eice mode mapping (1 -> fi, 3 -> min(4*fi, 1)) at the config gate;
+* nn_eice numbering (1 -> tanh(10*fi), 2 -> fi, 3 -> min(4*fi, 1));
 * dispatch hardening: unknown eice raises (config gate + CLI builder).
 """
 from __future__ import annotations

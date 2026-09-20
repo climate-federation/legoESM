@@ -71,6 +71,9 @@ from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
 from legoesm.ocean.physics.vertical_mixing._shared import richardson_number
 from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
+from legoesm.ocean.physics.vertical_mixing.tke import (
+    nemo_tke_effective_ice_fraction,
+)
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 from legoesm import constants
@@ -129,26 +132,26 @@ def _kpp_ice_attenuation(ice_frac, eice):
     KPP analogue of the TKE closure's ice-fraction suppression: compact sea
     ice caps the surface, so the surface-forcing-driven turbulent velocity
     scales — and hence both the boundary-layer depth (via ``V_t^2``) and the
-    mixing coefficients — are reduced under ice.  ``eice`` selects the
-    effective ice fraction (NOT a literal nn_eice port — NEMO's control is on
-    the Langmuir/wave-TKE sources; here it is the broader KPP w-scale):
+    mixing coefficients — are reduced under ice.  ``eice`` uses NEMO's
+    ``nn_eice`` numbering even though NEMO applies the control to the
+    Langmuir/wave-TKE sources while KPP applies it to the broader w-scale:
 
     - ``0`` (default, BIT-IDENTICAL): no attenuation (returns 1.0).
-    - ``1``: eff = fi              -> factor (1 - fi)   [legoESM linear mode;
-      NOTE this is NOT NEMO nn_eice=1, which is 1-tanh(10*fi)].
+    - ``1``: eff = tanh(10*fi)     -> factor 1 - tanh(10*fi).
+    - ``2``: eff = fi              -> factor 1 - fi.
     - ``3``: eff = min(4*fi, 1)    -> factor max(0, 1 - 4*fi)  (matches NEMO
       nn_eice=3; mixing fully suppressed at fi >= 0.25).
 
     ``ice_frac`` None (no coupler ice field) -> 1.0.  Unknown ``eice`` raises
     even when off/None (contract: validate the STATIC config value first).
     """
-    if eice not in (0, 1, 3):
+    if eice not in (0, 1, 2, 3):
         raise ValueError(
-            f"Unknown KPPConfig.eice={eice!r}; expected 0 (off), 1 (linear "
-            "1-fi) or 3 (max(0,1-4*fi), NEMO nn_eice=3).")
+            f"Unknown KPPConfig.eice={eice!r}; expected NEMO nn_eice "
+            "0, 1, 2 or 3.")
     if eice == 0 or ice_frac is None:
         return 1.0
-    eff = ice_frac if eice == 1 else jnp.minimum(4.0 * ice_frac, 1.0)
+    eff = nemo_tke_effective_ice_fraction(ice_frac, eice)
     return jnp.maximum(1.0 - eff, 0.0)[..., jnp.newaxis]
 
 

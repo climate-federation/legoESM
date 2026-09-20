@@ -743,7 +743,7 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
     # NOTE: eice (under-ice lc/etau attenuation) IS wired on this bridge —
     # profiles_fn reads surface_forcing.ice_concentration under the shared
     # static gate (mirroring _run_mpas_kpp) and threads ice_frac into
-    # tke_vertical_mixing.  Validated below: eice in {0,1,3}; eice!=0 with no
+    # tke_vertical_mixing.  Validated below: eice in {0,1,2,3}; eice!=0 with no
     # ice field FAILS FAST (the KPP-bridge contract).
     if bool(getattr(cfg, "veros_dz_slots", False)):
         raise NotImplementedError(

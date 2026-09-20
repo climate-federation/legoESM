@@ -43,6 +43,18 @@ def test_override_sets_both():
     assert vm.kpp == KPPConfig()._replace(Ri_crit=0.45, Cv=2.2)
 
 
+@pytest.mark.parametrize("mode", [0, 1, 2, 3])
+def test_kpp_eice_override_uses_nemo_numbering(mode):
+    vm = _kpp_vmix_override(kpp_eice=mode)
+    assert vm.kpp == KPPConfig()._replace(eice=mode)
+
+
+@pytest.mark.parametrize("mode", [-1, 4, 99])
+def test_kpp_eice_override_rejects_out_of_range(mode):
+    with pytest.raises(ValueError, match="0, 1, 2 or 3"):
+        _kpp_vmix_override(kpp_eice=mode)
+
+
 @pytest.mark.parametrize("bad", [0.0, -0.3, float("nan"), float("inf"),
                                  _KPP_RI_CRIT_RANGE[1] + 0.1,   # above hi
                                  _KPP_RI_CRIT_RANGE[0] - 0.01])  # below lo

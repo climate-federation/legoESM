@@ -89,6 +89,7 @@ def _model_config(
     bbl_adv_option: int, bbl_gamma_s: float,
     bbl_diffusive_option: int, bbl_aht_m2_s: float,
     whole_step_identity: str,
+    tke_langmuir_evaluation: str | None,
 ) -> LatLonCGridOceanConfig:
     """The selectors shared by both certified ``key_qco + key_RK3`` runs."""
 
@@ -113,6 +114,7 @@ def _model_config(
             bbl_diffusive_option=bbl_diffusive_option,
             bbl_aht_m2_s=bbl_aht_m2_s,
             whole_step_identity="gyre_vector_ene_c2",
+            tke_langmuir_evaluation=tke_langmuir_evaluation,
         )
         # ORCA2 namelist_cfg:389 selects TKE, so zdfphy.F90:220-223 sets
         # l_zdfsh2=.TRUE. and :264-286 calls zdf_sh2 before zdf_tke.  Under
@@ -210,7 +212,13 @@ def _model_config(
             tke_etau_exponential_evaluation="jax_expression",
             tke_htau_evaluation="jax_expression",
             tke_mxl_raw_evaluation="factored",
-            tke_langmuir_evaluation="nemo_literal",  # GYRE-only, approved
+            # Card-owned selector: GYRE chooses nemo_literal, ORCA2 retains
+            # the vectorized parent arm, and non-TKE cards pass None.
+            tke_langmuir_evaluation=(
+                tke_langmuir_evaluation
+                if tke_langmuir_evaluation is not None
+                else config.physics.vertical_mixing.tke.tke_langmuir_evaluation
+            ),
             tke_shear_evaluation_stage="step_entry",
             # Decision 36 (user, 2026-09-12): NEMO's shear production
             # statement, not legoESM's legacy centred one.  zdfsh2.f90:83-114
@@ -736,6 +744,7 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
         bbl_diffusive_option=0,
         bbl_aht_m2_s=0.0,
         whole_step_identity="lane1_flux_up3",
+        tke_langmuir_evaluation=None,
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -826,6 +835,7 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
         bbl_diffusive_option=0,
         bbl_aht_m2_s=1000.0,
         whole_step_identity="lane1_flux_up3",
+        tke_langmuir_evaluation=None,
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -940,6 +950,7 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
         bbl_diffusive_option=0,
         bbl_aht_m2_s=0.0,
         whole_step_identity="gyre_vector_ene_c2",
+        tke_langmuir_evaluation="nemo_literal",
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -1255,6 +1266,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         bbl_diffusive_option=1,
         bbl_aht_m2_s=1000.0,
         whole_step_identity="orca2_vector_een_c2",
+        tke_langmuir_evaluation="vectorized",
     )
     # zdfphy.F90:146-173 initializes the pre-closure coefficient memory
     # before zdf_tke_init.  This deck resolves nn_avb=0, nn_havtb=1, so avm_k
@@ -1419,6 +1431,15 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 "(momentum_advection='vector_invariant', "
                 f"ke_gradient_scheme='c2'); got "
                 f"{cfg.momentum_advection!r}, {cfg.ke_gradient_scheme!r}")
+        tke = cfg.physics.vertical_mixing.tke
+        expected_langmuir = (
+            "nemo_literal" if card.case == "GYRE-zco" else "vectorized"
+        )
+        if tke.tke_langmuir_evaluation != expected_langmuir:
+            raise ValueError(
+                f"{card.case} requires tke_langmuir_evaluation="
+                f"{expected_langmuir!r}, got "
+                f"{tke.tke_langmuir_evaluation!r}")
         expected_baro_coriolis = (
             "ene_metric" if card.case == "GYRE-zco" else "een_metric"
         )
@@ -1442,7 +1463,6 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         else:
             if cfg.eos != "nemo_eos80" or cfg.vorticity_scheme != "een_total":
                 raise ValueError("ORCA2-zps requires EOS-80 and EEN vorticity")
-            tke = cfg.physics.vertical_mixing.tke
             sh2_tuple = (
                 tke.tke_shear_production,
                 tke.tke_shear_avm_weighting,
