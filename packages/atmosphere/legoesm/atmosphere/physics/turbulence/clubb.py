@@ -5861,16 +5861,19 @@ def scale_q_diffusivity_in_band(Kh_half, p_half, config: CLUBBConfig):
     elsewhere.  ``p_half`` is TOP-DOWN ``(ncol, nlev+1)``; ``Kh_half`` holds
     the ``nlev-1`` interior faces ``p_half[:, 1:-1]``.  Static Python gate so
     the default is byte-identical."""
-    if float(config.q_flux_scale) == 1.0:
-        return Kh_half
+    scale = float(config.q_flux_scale)
+    if not (math.isfinite(scale) and scale > 0.0):
+        raise ValueError(f"q_flux_scale must be finite and > 0, got {scale!r}")
     if not (0.0 <= config.q_flux_scale_sigma_lo < config.q_flux_scale_sigma_hi <= 1.0):
         raise ValueError(
             f"q_flux_scale_sigma band must satisfy 0 <= lo < hi <= 1, got "
             f"({config.q_flux_scale_sigma_lo}, {config.q_flux_scale_sigma_hi})")
+    if scale == 1.0:
+        return Kh_half
     sigma_face = p_half[:, 1:-1] / p_half[:, -1:]
     in_band = ((sigma_face >= config.q_flux_scale_sigma_lo)
                & (sigma_face <= config.q_flux_scale_sigma_hi))
-    return jnp.where(in_band, config.q_flux_scale * Kh_half, Kh_half)
+    return jnp.where(in_band, scale * Kh_half, Kh_half)
 
 
 def clubb_turbulence(

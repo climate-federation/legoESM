@@ -2226,8 +2226,17 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     "clubb_q_flux_scale is a diagnostic-CLUBB mechanism probe; "
                     "the prognostic closure does not read it")
+            if self.turbulence_override is not None:
+                errors.append(
+                    "clubb_q_flux_scale is refused with a turbulence_override "
+                    "(the override is authoritative; set CLUBBConfig."
+                    "q_flux_scale inside it)")
             band = self.clubb_q_flux_scale_sigma_band
-            if band is None or not (0.0 <= band[0] < band[1] <= 1.0):
+            try:
+                lo, hi = (float(band[0]), float(band[1])) if len(band) == 2 else (None, None)
+            except (TypeError, ValueError):
+                lo, hi = None, None
+            if lo is None or not (0.0 <= lo < hi <= 1.0):
                 errors.append(
                     "clubb_q_flux_scale needs clubb_q_flux_scale_sigma_band "
                     f"(lo, hi) with 0 <= lo < hi <= 1, got {band!r}")

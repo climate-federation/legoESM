@@ -3,7 +3,8 @@ diffusivity inside a sigma band of faces (the cloud-base mixing probe).
 
 Shown non-vacuous: with the kernel's ``scale_q_diffusivity_in_band`` call
 removed, ``test_scale_changes_only_vapour_inside_the_band`` fails on the
-``dq_v_dt`` inequality and the prognostic refusal test fails.
+``dq_v_dt`` inequality (the refusal test guards a separate line and is
+checked by mutating that guard).
 """
 from __future__ import annotations
 
@@ -22,10 +23,25 @@ _BAND = dict(q_flux_scale=2.5, q_flux_scale_sigma_lo=0.80, q_flux_scale_sigma_hi
 
 
 def test_default_is_byte_identical():
-    base, _ = _run(CLUBBConfig())
-    same, _ = _run(CLUBBConfig(q_flux_scale=1.0, q_flux_scale_sigma_lo=0.8,
-                               q_flux_scale_sigma_hi=0.95))
-    assert np.array_equal(np.asarray(base.dq_v_dt), np.asarray(same.dq_v_dt))
+    # The default returns the SAME array object, so the solve is untouched.
+    col = _l32_column()
+    kh = jnp.ones((3, 31))
+    assert scale_q_diffusivity_in_band(kh, col["p_half"], CLUBBConfig()) is kh
+    assert scale_q_diffusivity_in_band(
+        kh, col["p_half"], CLUBBConfig(q_flux_scale=1.0, q_flux_scale_sigma_lo=0.8,
+                                       q_flux_scale_sigma_hi=0.95)) is kh
+
+
+def test_bad_scale_or_band_raises_even_at_scale_one():
+    col = _l32_column()
+    kh = jnp.ones((3, 31))
+    for bad in (0.0, -2.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="finite and > 0"):
+            scale_q_diffusivity_in_band(kh, col["p_half"], CLUBBConfig(q_flux_scale=bad))
+    with pytest.raises(ValueError, match="0 <= lo < hi <= 1"):
+        scale_q_diffusivity_in_band(
+            kh, col["p_half"],
+            CLUBBConfig(q_flux_scale=1.0, q_flux_scale_sigma_lo=0.9, q_flux_scale_sigma_hi=0.8))
 
 
 def test_scale_changes_only_vapour_inside_the_band():
@@ -45,18 +61,25 @@ def test_scale_changes_only_vapour_inside_the_band():
     assert np.all(np.abs((dq * w).sum(1)) < 1e-5 * gross)
     # The implicit solve couples every level, so the response is not exactly
     # zero away from the band; it must peak at the scaled faces: the largest
-    # change in every column sits in a layer touching the band.
-    sigma_full = np.asarray(col["p_full"][0] / col["p_half"][0, -1])
+    # change in every column sits in a layer ADJACENT to an in-band face
+    # (face k separates layers k and k+1 in the top-down interior indexing).
+    sigma_face = np.asarray(col["p_half"][0, 1:-1] / col["p_half"][0, -1])
+    faces = np.nonzero((sigma_face >= 0.80) & (sigma_face <= 0.95))[0]
+    adjacent = set(faces.tolist()) | set((faces + 1).tolist())
+    assert 2 <= len(faces) < dq.shape[1] // 2
     for c in range(dq.shape[0]):
-        assert 0.75 <= sigma_full[np.abs(dq[c]).argmax()] <= 1.0
+        assert int(np.abs(dq[c]).argmax()) in adjacent
 
 
 def test_band_outside_the_column_is_a_no_op_and_bad_band_raises():
     base, _ = _run(CLUBBConfig())
-    off, _ = _run(CLUBBConfig(q_flux_scale=2.5, q_flux_scale_sigma_lo=0.0,
-                              q_flux_scale_sigma_hi=0.0005))
-    assert np.array_equal(np.asarray(base.dq_v_dt), np.asarray(off.dq_v_dt))
     col = _l32_column()
+    sigma_face = np.asarray(col["p_half"][0, 1:-1] / col["p_half"][0, -1])
+    hi = 0.5 * sigma_face.min()   # provably below every interior face
+    assert not np.any(sigma_face <= hi)
+    off, _ = _run(CLUBBConfig(q_flux_scale=2.5, q_flux_scale_sigma_lo=0.0,
+                              q_flux_scale_sigma_hi=hi))
+    assert np.array_equal(np.asarray(base.dq_v_dt), np.asarray(off.dq_v_dt))
     with pytest.raises(ValueError, match="0 <= lo < hi <= 1"):
         scale_q_diffusivity_in_band(
             jnp.zeros((3, 31)), col["p_half"],
@@ -64,6 +87,8 @@ def test_band_outside_the_column_is_a_no_op_and_bad_band_raises():
 
 
 def test_prognostic_path_refuses_the_knob():
+    """Non-vacuous: deleting the guard at the top of clubb_turbulence_prognostic
+    makes this fail with a shape/TypeError from the moment unpacking instead."""
     col = _l32_column()
     with pytest.raises(ValueError, match="diagnostic-CLUBB mechanism probe"):
         clubb_turbulence_prognostic(

@@ -4137,8 +4137,10 @@ def test_clubb_q_flux_scale_reaches_the_turbulence_kernel():
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
         ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
     assert cfg_off.clubb_q_flux_scale is None
-    tc_off = turbulence_config_for(cfg_off)
-    assert tc_off.clubb is None or tc_off.clubb.q_flux_scale == 1.0
+    from legoesm.atmosphere.physics.turbulence.integration import materialize_sub_config
+    tc_off = materialize_sub_config(turbulence_config_for(cfg_off)).clubb
+    assert (tc_off.q_flux_scale, tc_off.q_flux_scale_sigma_lo,
+            tc_off.q_flux_scale_sigma_hi) == (1.0, 0.0, 1.0)
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(
         ["--dataset", "analytical", "--turbulence", "clubb",
          "--clubb-q-flux-scale", "2.5",
@@ -4152,17 +4154,33 @@ def test_clubb_q_flux_scale_reaches_the_turbulence_kernel():
          "--clubb-q-flux-scale-sigma-band", "0.8", "0.95"]), parser))
     with pytest.raises(ValueError, match="requires turbulence='clubb'"):
         turbulence_config_for(cfg_bad)
+    # The pipeline refuses on its own (validate_strict may not have run):
+    # prognostic closure, a missing band, and an override that does not carry it.
+    with pytest.raises(ValueError, match="clubb_prognostic=True does not read it"):
+        turbulence_config_for(cfg_on._replace(clubb_prognostic=True))
+    with pytest.raises(ValueError, match="requires clubb_q_flux_scale_sigma_band"):
+        turbulence_config_for(cfg_on._replace(clubb_q_flux_scale_sigma_band=None))
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    with pytest.raises(ValueError, match="turbulence_override"):
+        turbulence_config_for(cfg_on._replace(
+            turbulence_override=TurbulenceConfig(scheme="clubb")))
+    # The MPAS lane (model_driver) builds its turbulence config through this
+    # same turbulence_config_for, so the analytical-lane assertion covers it.
 
 
 def test_clubb_q_flux_scale_validate_strict_refuses_bad_band_scheme_and_prognostic():
     """validate_strict refuses the probe without a band, a reversed band, the
     prognostic closure, a band with no scale, an out-of-bounds scale and a
     non-CLUBB scheme; the well-formed pair passes."""
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     parser = build_arg_parser()
     base = build_config_from_args(_postprocess_args(parser.parse_args(
         ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
     base._replace(clubb_q_flux_scale=2.5,
                   clubb_q_flux_scale_sigma_band=(0.8, 0.95)).validate_strict()
+    # A YAML-style list band is accepted by validate_strict (normalised by value).
+    base._replace(clubb_q_flux_scale=2.5,
+                  clubb_q_flux_scale_sigma_band=[0.8, 0.95]).validate_strict()
     for kw, msg in (
         (dict(clubb_q_flux_scale=2.5), "needs clubb_q_flux_scale_sigma_band"),
         (dict(clubb_q_flux_scale=2.5, clubb_q_flux_scale_sigma_band=(0.9, 0.8)),
@@ -4171,7 +4189,14 @@ def test_clubb_q_flux_scale_validate_strict_refuses_bad_band_scheme_and_prognost
               clubb_prognostic=True), "prognostic closure does not read it"),
         (dict(clubb_q_flux_scale_sigma_band=(0.8, 0.95)), "does nothing on its own"),
         (dict(clubb_q_flux_scale=50.0, clubb_q_flux_scale_sigma_band=(0.8, 0.95)),
-         "clubb_q_flux_scale"),
+         r"clubb_q_flux_scale=50"),
+        (dict(clubb_q_flux_scale=float("nan"), clubb_q_flux_scale_sigma_band=(0.8, 0.95)),
+         r"clubb_q_flux_scale=nan"),
+        (dict(clubb_q_flux_scale=2.5, clubb_q_flux_scale_sigma_band=(0.8, 0.9, 0.95)),
+         "0 <= lo < hi <= 1"),
+        (dict(clubb_q_flux_scale=2.5, clubb_q_flux_scale_sigma_band=(0.8, 0.95),
+              turbulence_override=TurbulenceConfig(scheme="clubb")),
+         "refused with a turbulence_override"),
         (dict(turbulence="louis", clubb_q_flux_scale=2.5,
               clubb_q_flux_scale_sigma_band=(0.8, 0.95)), "is a CLUBB field"),
     ):

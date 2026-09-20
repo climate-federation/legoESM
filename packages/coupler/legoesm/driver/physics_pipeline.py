@@ -4308,7 +4308,16 @@ def turbulence_config_for(config):
                 raise ValueError(
                     f"clubb_q_flux_scale requires turbulence='clubb', got "
                     f"{tc.scheme!r}.")
-            _lo, _hi = config.clubb_q_flux_scale_sigma_band
+            if getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_q_flux_scale is a diagnostic-CLUBB mechanism probe; "
+                    "clubb_prognostic=True does not read it.")
+            _band = getattr(config, "clubb_q_flux_scale_sigma_band", None)
+            if _band is None or len(_band) != 2:
+                raise ValueError(
+                    "clubb_q_flux_scale requires clubb_q_flux_scale_sigma_band "
+                    f"(lo, hi), got {_band!r}.")
+            _lo, _hi = (float(_band[0]), float(_band[1]))
             from legoesm.atmosphere.physics.turbulence.integration import (
                 materialize_sub_config,
             )
@@ -4369,6 +4378,19 @@ def turbulence_config_for(config):
                 f"{getattr(_sub, 'prognostic', None)!r}). The override is "
                 "authoritative, so set CLUBBConfig(prognostic=True) inside it "
                 "rather than relying on the experiment-level flag.")
+    if getattr(config, "clubb_q_flux_scale", None) is not None:
+        # Same reason as the prognostic refusal above: the override is
+        # authoritative, so an experiment-level probe it does not carry would
+        # be read, validated and silently discarded.
+        _sub = getattr(tc, "clubb", None)
+        if (tc.scheme != "clubb" or _sub is None
+                or float(_sub.q_flux_scale) != float(config.clubb_q_flux_scale)):
+            raise ValueError(
+                "clubb_q_flux_scale is set but an explicit turbulence_override "
+                f"is in force that does not carry it (override scheme="
+                f"{tc.scheme!r}, q_flux_scale="
+                f"{getattr(_sub, 'q_flux_scale', None)!r}). Set it inside the "
+                "override's CLUBBConfig instead.")
     return apply_surface_flux_config(tc, config)
 
 
