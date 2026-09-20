@@ -2295,9 +2295,11 @@ def _gyre_checkpoint_state(card, restart_path: Path):
     }
     if state.uu_b is not None and restart.uu_b is not None:
         updates["uu_b"] = state.uu_b.replace(
-            data=jnp.asarray(_u_east_to_face(restart.uu_b)))
+            data=jnp.asarray(
+                _u_east_to_face(restart.uu_b[..., None])[..., 0]))
         updates["vv_b"] = state.vv_b.replace(
-            data=jnp.asarray(_v_north_to_face(restart.vv_b)))
+            data=jnp.asarray(
+                _v_north_to_face(restart.vv_b[..., None])[..., 0]))
     state = state._replace(**updates)
     en = read_nemo_restart_en(str(restart_path), nn_hls=0)[..., :nlev]
     avm, avt, dissl = read_nemo_restart_tke_coefficients(
