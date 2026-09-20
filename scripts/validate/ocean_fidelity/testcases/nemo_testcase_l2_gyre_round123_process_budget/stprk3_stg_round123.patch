@@ -61,9 +61,7 @@
              IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
                 & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
              IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux
-@@ -1002,6 +1024,11 @@
-             !           !== TRA time integration + ZDF  ==!   
-             !
+@@ -1004,4 +1026,9 @@
                                 CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )  ! vertical mixing and after tracer fields
 +            IF( lr123_write ) THEN
 +               WRITE(r123_unit) ts(:,:,:,jp_tem,Kaa)
