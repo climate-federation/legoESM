@@ -163,8 +163,8 @@ provenance then required a new run.  All 11 v3 trace arrays and both endpoint
 NPZ files are byte-identical to v2; v2 is preserved but superseded.
 
 The authoritative trace is `round124/lego_process_trace_v3/`; its report and
-validation are `lego_process_trace_v3_report.json` and
-`lego_process_trace_v3_validation.json`:
+final validation are `lego_process_trace_v3_report.json` and
+`lego_process_trace_v3_validation_stamped.json`:
 
 | control | v3 result |
 |---|---:|
@@ -184,6 +184,16 @@ plant moved `Bsbc/Bqsr/Bldf/Bpre/Taa` by 1/1/1/1/3 cells, moved
 `Tbb/q_Kbb/q_Kmm/q_Kaa/B0/Badv` by zero cells, and left the separately
 compiled carried state byte-identical.
 
+The whole-tree worktree-stamp ratchet subsequently caught one Round-124
+provenance defect: the trace **validation** report retained the immutable
+producer stamp but did not stamp the tree that performed validation.  Commit
+`bc4607ca01a4b793c0c2a5878214df8a1c48f14c` adds that independent stamp.  The
+ratchet failed before the fix and passes after it; its synthetic missing-key
+arm remains the non-vacuity control.  Both the standalone validation and the
+final budget now name that clean validating commit.  Removing every
+`worktree` object leaves the pre-fix and post-fix scientific payloads exactly
+equal.
+
 For audit only, the v1 surface and shortwave signed carries were
 `-2.9933008766379514e-3 K` and `-8.393958572063607e-9 K`.  V2 assigns
 `-2.9943959019919585e-3 K` and `+1.0866313955171657e-6 K`; their combined
@@ -192,7 +202,9 @@ carry is unchanged within `8.2e-17 K`.  Only v3 appears in the verdict table.
 ## One ranked day-240 table
 
 The final machine-readable result is
-`round124/day240_process_budget_v3.json`.  A carry is the signed projection of
+`round124/day240_process_budget_v4_stamped.json`.  Its scientific payload is
+identical to `day240_process_budget_v3.json`; v4 adds the validation-worktree
+stamp described above.  A carry is the signed projection of
 that process-difference array onto the independently measured day-240 error;
 ranking is by its absolute value.  Local rows use their own local projection,
 so they locate the owner but are not additive whole-domain carries.
@@ -268,8 +280,92 @@ The command exited 1.  Independent review unavailable in-sandbox.  It emitted ne
 
 ## Verification
 
-PENDING final citation gate, shifted-citation plant, focused tests and full
-`tests/ocean/fidelity` plus `tests/ocean/unit` run.
+The machine-readable inventory is
+`round124/whole_ocean_test_audit.json`.  Collection found 8,219 node IDs.  The
+first combined `-n 12` run reached 98% before repeated JAX compiler worker
+aborts stopped progress; it was interrupted with exit 130 and emitted neither
+a terminal summary nor JUnit.  A lower-concurrency whole-fidelity retry had
+the same long-tail problem and was also interrupted with exit 130 and no
+JUnit.  The required trees were therefore split by file, as the repository
+instructions require when a process approaches the compiler limit.  Those 25
+non-overlapping partitions recorded 8,199 unique node IDs; the 20 interrupted
+cases were then run from fresh processes.
+
+Every partition's exact terminal summary follows.  `INTERRUPTED` means the
+outer 15-minute bound wrote a partial JUnit file; those omitted cases are all
+dispositioned below.
+
+| suite | exact pytest summary |
+|---|---|
+| fidelity 01 | `368 passed, 2 skipped in 13.74s` |
+| fidelity 02 | `236 passed, 3 skipped in 176.13s (0:02:56)` |
+| fidelity 03 | `234 passed in 58.16s` |
+| fidelity 04 | `197 passed in 912.02s (0:15:12)` — INTERRUPTED, one omitted |
+| fidelity 05 | `1 failed, 215 passed, 2 skipped in 95.64s (0:01:35)` |
+| fidelity 06 | `137 passed in 5.18s` |
+| unit 01 | `6 failed, 438 passed, 1 xfailed, 1 warning in 284.64s (0:04:44)` |
+| unit 02 | `334 passed, 1 skipped, 1 xfailed, 4 warnings in 359.26s (0:05:59)` |
+| unit 03 | `262 passed, 2 warnings in 904.13s (0:15:04)` — INTERRUPTED, fifteen omitted |
+| unit 04 | `4 failed, 544 passed, 9 skipped, 10 warnings in 86.48s (0:01:26)` |
+| unit 05 | `3 failed, 401 passed in 556.91s (0:09:16)` |
+| unit 06 | `1 failed, 260 passed, 14 skipped, 2 warnings in 74.61s (0:01:14)` |
+| unit 07 | `398 passed, 4 warnings in 170.62s (0:02:50)` |
+| unit 08 | `265 passed in 120.34s (0:02:00)` |
+| unit 09 | `2 failed, 441 passed, 5 skipped, 6 warnings in 215.16s (0:03:35)` |
+| unit 10 | `1 failed, 408 passed, 42 warnings in 196.54s (0:03:16)` |
+| unit 11 | `1 failed, 250 passed, 3 skipped, 2 warnings in 915.30s (0:15:15)` — INTERRUPTED, four omitted |
+| unit 12 | `584 passed, 80 skipped, 7 warnings in 455.45s (0:07:35)` |
+| unit 13 | `2 failed, 253 passed, 2 skipped, 10 warnings in 242.45s (0:04:02)` |
+| unit 14 | `299 passed in 61.43s (0:01:01)` |
+| unit 15 | `292 passed, 3 skipped, 2 warnings in 151.02s (0:02:31)` |
+| unit 16 | `302 passed, 31 skipped, 1 warning in 167.58s (0:02:47)` |
+| unit 17 | `2 failed, 472 passed in 186.75s (0:03:06)` |
+| unit 18 | `340 passed in 128.93s (0:02:08)` |
+| unit 19 | `90 passed in 42.29s` |
+
+The fresh-process disposition is mechanical:
+
+- the omitted fail-closed LOCK plant passed: `1 passed in 1094.58s
+  (0:18:14)`;
+- the four omitted production-JIT NEMO-WS cases passed: `4 passed in 598.85s
+  (0:09:58)`;
+- the omitted Coriolis groups passed: `28 passed in 11.30s`;
+- the Round-124 worktree-stamp regression failed in fidelity partition 05,
+  was fixed, and its exact rerun is `1 passed in 1.76s`;
+- the 16 raw failures absent from the old 87-ID reference were rerun together:
+  `6 failed, 10 passed, 1 warning in 101.24s (0:01:41)`.  The ten passes were
+  compiler-pressure transients.  The same six failures then reproduced on the
+  untouched incoming commit `af3f7215060fc17c71adc6794817c710df8ee471`:
+  `6 failed, 1 warning in 11.41s`; and
+- the sole remaining omitted case, unrelated CORE-II cache creation, blocks
+  inside `xarray.Dataset.to_zarr -> zarr.sync.wait`.  With an explicit
+  60-second diagnostic timeout its current-tree summary is `1 failed in
+  60.88s (0:01:00)` and its incoming-tip summary is `1 failed in 60.96s
+  (0:01:00)`, with the same stack.  This is an environment/event-loop timeout,
+  not a Round-124 source difference.
+
+The six failures present in both the incoming and Round-124 trees, but absent
+from the older 87-ID reference file, are:
+
+1. `test_freesurface_helmholtz_adjoint_mpas.py::test_production_step_grad_finite_f32_and_scan`;
+2. `test_nemo_match_recipe.py::test_mpas_factory_builds_valid_model_and_one_step_is_finite`;
+3. `test_partial_cells_phase1.py::TestFlatBottomBitExact::test_flat_bottom_nonzero_eta`;
+4. `test_partial_cells_phase2.py::TestFlatBottomBitExact::test_nonzero_eta_flat_bottom`;
+5. `test_tke_carried_coefficients.py::test_step_entry_n2_bundle_fails_closed_without_raw_w_mesh`; and
+6. `test_tke_carried_coefficients.py::test_step_entry_n2_bundle_matches_live_geometry_construction`.
+
+Six failures from the supplied 87-ID reference were observed unchanged: the
+four `test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32`
+parameters, `test_baroclinic_decomposition_bit_identical`, and
+`test_nemo_sco_step_pgf.py::test_f90_recurrence_oracle_nonuniform_rho`.
+After fresh-process adjudication the audit contains **zero Round-124-introduced
+failures**.
+
+The final owner self-check prints `self-check: all checks passed`, including
+the process-layout, decoded-effect, trace-boundary and ULP controls.  The
+earlier owner-only test run reported `15 passed, 1 skipped`; the focused owner
+plus citation suite reported `32 passed in 31.51s`.  Final post-receipt focused
+and citation reruns are recorded below by the final receipt commit.
 
 ## OPEN — round 125
 
