@@ -604,6 +604,27 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90:563-578': [
         'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk)',
         '&             / zwt(ji,jk) * tmask(ji,jj,jk)', 16],
+    # --- round 125: reused tra_zdf vertical-decomposition record ---
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90:132-146': [
+        'll_l2_tra = ( lwp .AND. kt <= nit000 + 1 )',
+        'zl2_srh(:,:,:) = pts(:,:,:,jp_sal,Krhs)', 15],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90:160-335': [
+        '!                    !--- round-35 instrument: the record ---!',
+        'CLOSE(il2_unit)', 176],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90:213-333': [
+        '!              !-- the tracer fields as tra_zdf RECEIVED them --!',
+        'WRITE(il2_unit) r3t(:,:,Kaa)', 121],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90:414-450': [
+        "IF( cdtype == 'TRA' .AND. jn == jp_tem ) THEN",
+        'zwt(:,1) = 0._wp', 37],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90:462-476': [
+        'IF( ln_zad_Aimp ) THEN',
+        'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )',
+        15],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90:523-527': [
+        'DO ji = ntsi-( 0), ntei+( 0 )          !* 1st recurrence:',
+        'zwt(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwt(ji,jk-1)',
+        5],
     # --- round 108: configured TEOS-10 producer and first bn2 statement ---
     'GYRE_OMIP_L2_P3_SM_R101TKEW/EXP00/namelist_cfg:126-128': [
         'ln_teos10   = .true.', 'ln_seos     = .false.', 3],
