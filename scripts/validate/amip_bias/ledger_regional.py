@@ -54,6 +54,7 @@ def _report(run, sftlf_run=None):
     d = np.load(f"{rundir}/budget_ledger_columns.npz", allow_pickle=True)
     rates = np.asarray(d["ledger_rates"])[:, :, 0] * SEC_PER_DAY   # water, kg/m2/day
     procs = [str(p) for p in d["processes"]]
+    rows = {}
     if not np.all(np.isfinite(rates)):
         raise SystemExit(f"FATAL: non-finite ledger rates in {run}")
     fl = _sftlf_on_mesh(sftlf_run or run, lat, lon)
@@ -72,9 +73,34 @@ def _report(run, sftlf_run=None):
                 continue
             row = (rates * w[:, None]).sum(0) / w.sum()
             pc = (pconv * w).sum() / w.sum() if pconv is not None else np.nan
+            rows[name + " " + surf] = row
             print(f"{name + ' ' + surf:<26}" + "".join(f"{v:13.3f}" for v in row) + f"{pc:13.3f}")
     print("conv_src = checkpoint-instant survivor convective rain source entering q_r "
           "(after IFS downdraft + sub-cloud evaporation).")
+    return procs, rows
+
+
+def layers_figure(runs, sftlf_run, out, regions=("ITCZ 10S-10N ocean", "trades 10-30N ocean",
+                                                "trades 10-30S ocean")):
+    """Grouped bars of the ledger rows for several runs that each carry the
+    ledger on a different sigma band (the run name is the layer label)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    tabs = {r: _report(r, sftlf_run) for r in runs}
+    procs = tabs[runs[0]][0]
+    keep = [i for i, p in enumerate(procs) if p in ("turbulence", "convection", "microphysics", "dynamics")]
+    fig, ax = plt.subplots(1, len(regions), figsize=(5 * len(regions), 4), sharey=True)
+    x = np.arange(len(keep)); wdt = 0.8 / len(runs)
+    for a, reg in zip(np.atleast_1d(ax), regions):
+        for j, r in enumerate(runs):
+            a.bar(x + (j - (len(runs) - 1) / 2) * wdt, tabs[r][1][reg][keep], wdt,
+                  label=r.split("_")[-1])
+        a.set_xticks(x); a.set_xticklabels([procs[i] for i in keep]); a.axhline(0, color="k", lw=0.8)
+        a.set_title(reg); a.grid(axis="y")
+    np.atleast_1d(ax)[0].set_ylabel("kg/m2/day"); np.atleast_1d(ax)[0].legend(title="ledger band")
+    fig.tight_layout(); fig.savefig(out, dpi=110)
+    print(f"figure {out}")
 
 
 def profile(run, sftlf_run=None, dlat=5.0, out=None):
@@ -173,6 +199,11 @@ if __name__ == "__main__":
         argv = argv[:i] + argv[i + 2:]
     prof = "--profile" in argv
     argv = [a for a in argv if a != "--profile"]
+    if "--layers" in argv:
+        i = argv.index("--layers")
+        out = argv[i + 1]
+        layers_figure(argv[:i] + argv[i + 2:], src, out)
+        raise SystemExit(0)
     for r in argv:
         if prof:
             profile(r, sftlf_run=src,
