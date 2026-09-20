@@ -277,3 +277,74 @@ def test_array_summary_hash_is_content_sensitive():
     assert (compute_config_hash(ca, "ocean")
             == compute_config_hash(_latlon_cfg()._replace(
                 runoff_depth_spread_map=a.copy()), "ocean"))
+
+
+# ---------------------------------------------------------------------------
+# The fesom lane writes the SAME manifest as every other grid (2026-09-19).
+#
+# It did not.  The fesom lane returns from ``main()`` before the shared writer
+# is ever reached, then hand-rolled a manifest of its own carrying a
+# hand-picked subset of flags and NO resolved configuration.  So the fesom
+# member of every three-grid comparison could not be described from its own
+# record: "MPAS confirms, FESOM misses on salinity only" compared one known
+# configuration against one unknown one.
+# ---------------------------------------------------------------------------
+
+
+def _driver():
+    from scripts.run import run_omip_core2
+    return run_omip_core2
+
+
+def _fake_args(tmp_path):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        forcing_path=str(tmp_path / "core2"), grid="fesom", mesh="",
+        nlev=0, output=str(tmp_path / "out"), woa_init=False,
+        woa_t="", woa_s="", latlon_res="", smoke=False,
+        fesom_mesh_dir=str(tmp_path / "mesh_nemo75_30m"),
+    )
+
+
+def test_the_shared_writer_records_the_resolved_config_and_command_line(
+        tmp_path, monkeypatch):
+    """The two keys the hand-rolled fesom manifest never had."""
+    from types import SimpleNamespace
+
+    mod = _driver()
+    monkeypatch.setattr(mod, "_is_io_proc", lambda: True, raising=False)
+    model = SimpleNamespace(config=_latlon_cfg())
+    out = tmp_path / "run"
+    path = mod._write_ocean_run_manifest(
+        _fake_args(tmp_path), model, 1800.0, 30.0, out,
+        mesh="/some/fesom/mesh", nlev=75)
+    assert path is not None, "the manifest write must not fall back to None"
+    m = read_run_manifest(path)
+    assert m["run"]["command_line"], "no command line = the run is undescribed"
+    assert m["config"]["config_hash"]
+    # The overrides must WIN over the argparse values, or a fesom manifest
+    # records a mesh and a level count the run never used.
+    assert m["config"]["mesh"] == "/some/fesom/mesh"
+    assert m["config"]["nlev"] == 75
+
+
+def test_the_fesom_forced_lane_calls_the_shared_writer_and_hand_rolls_nothing():
+    """Scoped to the lane, and non-vacuous: the OLD literal must be gone.
+
+    A source-inspection test is weak by construction, so this asserts both
+    halves -- the shared call is present inside the fesom forced loop, and the
+    hand-rolled lane tag no longer appears anywhere in the driver.  Deleting
+    the fix makes the second assertion fail even if someone re-adds a call.
+    """
+    from pathlib import Path
+    import scripts.run.run_omip_core2 as mod
+
+    src = Path(mod.__file__).read_text()
+    assert '"fesom_b4_core2_forced"' not in src, (
+        "the fesom forced lane must not hand-roll its own run_manifest.json; "
+        "it overwrote the standard one with a flag subset and no resolved "
+        "configuration")
+    body = src.split("def run_fesom_forced_loop(", 1)[1].split("\ndef ", 1)[0]
+    code = "\n".join(ln.split("#", 1)[0] for ln in body.splitlines())
+    assert "_write_ocean_run_manifest(" in code
+    assert "fesom_mesh_dir" in code
