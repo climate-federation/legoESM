@@ -4125,6 +4125,17 @@ def _validated_C_land(value):
     return value
 
 
+def refuse_cap_floor_on_fv(config) -> None:
+    """The polar-cap radiative cloud floor is applied only in the standalone
+    radiation backend (MPAS / spectral); this pipeline never applies it and
+    refuses rather than silently running without it."""
+    if getattr(config, "cloud_cap_floor_on", False):
+        raise ValueError(
+            "cloud_cap_floor_on is applied only in the standalone radiation path "
+            "(MPAS / spectral); the finite-volume PhysicsPipeline does not apply it "
+            "and refuses rather than silently running without it.")
+
+
 def build_physics_pipeline(grid, sigma, config):
     """Build a PhysicsPipeline from an ExperimentConfig.
 
@@ -4357,11 +4368,7 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
-    if getattr(config, "cloud_cap_floor_on", False):
-        raise ValueError(
-            "cloud_cap_floor_on is applied only in the standalone radiation path "
-            "(MPAS / spectral); the finite-volume PhysicsPipeline does not apply it "
-            "and refuses rather than silently running without it.")
+    refuse_cap_floor_on_fv(config)
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._cloud_conv_cloud_condensate = getattr(
         config, 'cloud_conv_cloud_condensate', None)

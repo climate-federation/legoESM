@@ -237,6 +237,9 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
     scheme is "none".
     """
     if cloud_scheme == "none":
+        if getattr(cfg, "cloud_cap_floor_on", False):
+            raise ValueError("cloud_cap_floor_on with cloud scheme 'none': the polar-cap "
+                             "radiative floor would never be applied")
         return None
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
 

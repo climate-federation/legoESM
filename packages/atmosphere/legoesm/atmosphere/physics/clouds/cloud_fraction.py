@@ -1325,7 +1325,12 @@ def apply_cap_cloud_floor(props: CloudProperties, lat_rad, p_full, dp, config: C
     liquid path ``max(lwp, cf_new * cap_floor_q_c * dp / g)`` (the LW-only path
     too when the scheme carries one).  Ice paths, effective radii and every
     other layer are returned unchanged.  ``lat_rad`` is the radiation backend's
-    latitude [rad]; ``dp`` the layer pressure thickness [Pa].
+    latitude [rad] (the backend's ozone factor uses ``sin(lat)`` on the same
+    array); ``dp`` the layer pressure thickness [Pa].  NORTHERN cap only
+    (``lat >= +lat_deg``): built for the Arctic A/B, the Antarctic is not
+    floored.  The liquid floor scales with the FLOORED fraction (``cf_new``),
+    so a layer already above ``cap_floor_cf`` gets ``cf * q_c * dp/g`` with its
+    own cf; nothing is ever lowered.
     """
     if not config.cap_floor_on:
         return props
