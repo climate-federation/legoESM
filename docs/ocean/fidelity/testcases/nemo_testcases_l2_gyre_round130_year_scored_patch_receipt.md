@@ -109,6 +109,15 @@ from-rest harness, fp64/libm policy, seed 0, six-step snapshots, and tag
 The month and 70-row ladder controls were independently regenerated at the
 same incoming commit.
 
+The fail-closed producer stamp is
+`28e13da8c3b50812b3edec556cb70d36a46b634c`, the preregistration-only child
+of incoming scientific tip `a18ba326ec94ab4afbac28de681e69e714621ec8`.
+Their `packages/ocean` trees are the identical tree
+`7155c8cf56082f21a7edd908f14730d0eb747953`; every one-patch candidate was
+branched from that preregistered control.  The registry therefore names the
+actual clean harness-producer commit rather than weakening its stamp to the
+parent.
+
 Every candidate member manifest names its own clean one-patch commit.  Two
 reporting-only descendants require an explicit identity note:
 

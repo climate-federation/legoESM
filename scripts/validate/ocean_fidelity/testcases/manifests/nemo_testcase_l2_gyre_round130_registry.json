@@ -1,6 +1,6 @@
 {
   "format": "nemo-testcase-l2-gyre-round130-registry-v1",
-  "baseline_commit": "a18ba326ec94ab4afbac28de681e69e714621ec8",
+  "baseline_commit": "28e13da8c3b50812b3edec556cb70d36a46b634c",
   "evidence_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130",
   "candidate_order": "frozen identifier order; ranking is computed by day-240 improvement",
   "candidates": [
