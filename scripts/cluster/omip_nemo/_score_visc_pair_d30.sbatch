@@ -39,12 +39,20 @@ NEMOT=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN
 # and then checked by the scorer itself: --expect-day makes a mismatch a hard
 # error as of 2026-09-19, so a card that got this wrong would now stop instead
 # of quietly scoring against day 90.
-DAY=30
+DAY=${DAY:-30}
 REC=$(( DAY / 5 - 1 ))
 
-HALF=$RES/trp_orca1faithtint_d30/snapshot_day0030.npz     # viscosity halved
-FULL=$RES/trp_orca1faithvisc_d30/snapshot_final.npz       # NEMO's own value
-OUT=$RES/score_viscpair_d30
+# DAY=25 re-runs the identical comparison one record earlier.  A structural
+# disagreement reproduces; a single-snapshot fluke does not.  Note what this
+# does NOT settle: both days compare an INSTANTANEOUS model snapshot against a
+# FIVE-DAY MEAN oracle field, and mixed-layer depth is the diagnostic most
+# sensitive to that asymmetry because it responds to individual storms.  Two
+# days sharing the same asymmetry cannot measure it.
+DD=$(printf '%04d' $DAY)
+HALF=$RES/trp_orca1faithtint_d30/snapshot_day$DD.npz      # viscosity halved
+FULL=$RES/trp_orca1faithvisc_d30/snapshot_day$DD.npz      # NEMO's own value
+[ -e "$FULL" ] || FULL=$RES/trp_orca1faithvisc_d30/snapshot_final.npz
+OUT=$RES/score_viscpair_d$DD
 
 for f in "$NEMOT" "$HALF" "$FULL"; do
   [ -e "$f" ] || { echo "FATAL: missing $f"; exit 1; }
