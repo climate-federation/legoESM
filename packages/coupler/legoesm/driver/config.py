@@ -2601,10 +2601,12 @@ class ExperimentConfig(NamedTuple):
         # surface fluxes (radiation channel), so radiation="none" would leave
         # it frozen at its seed forever; a thickness override without the
         # boolean gate would be silently inert.
+        # "rrtmg" is this driver's alias for the RRTMGP builder (the production
+        # deck spells it that way); both reach the standalone radiation path.
         if self.cloud_cap_floor_on and (self.cloud_scheme == "none"
                                         or self.radiation not in ("rrtmgp", "rrtmg")):
-            raise ValueError(
-                "cloud_cap_floor_on requires an active cloud scheme and RRTMGP/RRTMG "
+            errors.append(
+                "cloud_cap_floor_on requires an active cloud scheme and rrtmgp/rrtmg "
                 f"radiation (cloud_scheme={self.cloud_scheme!r}, radiation={self.radiation!r}); "
                 "otherwise the polar-cap radiative floor would be a silent no-op.")
         if self.mpas_ice_skin_prognostic and self.radiation == "none":

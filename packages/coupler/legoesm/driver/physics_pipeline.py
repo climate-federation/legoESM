@@ -4154,6 +4154,7 @@ def build_physics_pipeline(grid, sigma, config):
     -------
     PhysicsPipeline
     """
+    refuse_cap_floor_on_fv(config)
     # Build grid-agnostic column adapter
     adapter = make_adapter(grid)
 
@@ -4368,7 +4369,6 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
-    refuse_cap_floor_on_fv(config)
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._cloud_conv_cloud_condensate = getattr(
         config, 'cloud_conv_cloud_condensate', None)

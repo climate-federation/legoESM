@@ -1330,7 +1330,12 @@ def apply_cap_cloud_floor(props: CloudProperties, lat_rad, p_full, dp, config: C
     (``lat >= +lat_deg``): built for the Arctic A/B, the Antarctic is not
     floored.  The liquid floor scales with the FLOORED fraction (``cf_new``),
     so a layer already above ``cap_floor_cf`` gets ``cf * q_c * dp/g`` with its
-    own cf; nothing is ever lowered.
+    own cf; nothing is ever lowered.  The solver never receives the fraction
+    (``to_rrtmg_kwargs``): under ``cloud_vertical_overlap_optics="max_random"``
+    ``cap_floor_cf`` sets how many subcolumns are cloudy, under ``"none"`` it
+    acts only through the grid-mean liquid path (a partial cover then reads
+    as a thinner full cover, which longwave barely distinguishes).  The A/B
+    this was built for pins ``max_random``.
     """
     if not config.cap_floor_on:
         return props

@@ -120,20 +120,25 @@ def test_floor_reaches_the_solver_with_production_subcolumn_overlap():
     k = _backend_kwargs_reaching_the_solver(on)
     lwp = np.asarray(k["cloud_path_liq"]).reshape(8, 3, 4).transpose(1, 0, 2)   # solver gets (n_sub, ncol, nlev)
     cloudy = (lwp > 0)
-    assert cloudy[:2, :, 2:].mean() == pytest.approx(0.75)          # 6 of 8 subcolumns per floored layer
+    assert (cloudy[:2, :, 2:].sum(axis=1) == 6).all()               # 6 of 8 subcolumns, every column and layer
     assert not cloudy[2].any() and not cloudy[:, :, :2].any()
     dp = np.array([35000.0, 25000.0, 20000.0, 10000.0])
     in_cloud = 5e-5 * dp / constants.g                              # grid-mean 0.75*q*dp/g over 0.75 cover
-    assert lwp[0, :, 2][cloudy[0, :, 2]] == pytest.approx(in_cloud[2])
+    for col in range(2):
+        for lev in (2, 3):
+            assert lwp[col, :, lev][cloudy[col, :, lev]] == pytest.approx(in_cloud[lev])
+            assert lwp[col, :, lev].mean() == pytest.approx(0.75 * in_cloud[lev])
 
 
 def test_silent_no_op_paths_refuse():
-    from legoesm.driver.physics_pipeline import refuse_cap_floor_on_fv
+    from legoesm.driver.physics_pipeline import build_physics_pipeline, refuse_cap_floor_on_fv
     from legoesm.driver.model_driver import _standalone_cloud_config
     from types import SimpleNamespace
     with pytest.raises(ValueError, match="finite-volume"):
         refuse_cap_floor_on_fv(SimpleNamespace(cloud_cap_floor_on=True))
     refuse_cap_floor_on_fv(SimpleNamespace(cloud_cap_floor_on=False))
+    with pytest.raises(ValueError, match="finite-volume"):          # the builder itself, before any setup
+        build_physics_pipeline(None, None, SimpleNamespace(cloud_cap_floor_on=True))
     with pytest.raises(ValueError, match="never be applied"):
         _standalone_cloud_config(SimpleNamespace(cloud_cap_floor_on=True), "none")
     assert _standalone_cloud_config(SimpleNamespace(cloud_cap_floor_on=False), "none") is None
@@ -156,12 +161,21 @@ def test_cli_round_trip_bounds_and_cross_checks():
     cfg = cfg_from(["--dataset", "analytical", "--clouds", "xu_randall", "--radiation", "rrtmgp",
                     "--cloud-cap-floor", "--cloud-cap-floor-q-c", "1e-4", "--cloud-cap-floor-lat-deg", "70"])
     assert cfg.cloud_cap_floor_on is True and cfg.cloud_cap_floor_q_c == 1e-4
+    for rad in ("rrtmgp", "rrtmg"):                                  # "rrtmg" = the production deck's alias
+        cfg_from(["--dataset", "analytical", "--clouds", "xu_randall", "--radiation", rad,
+                  "--cloud-cap-floor"]).validate_strict()
     from legoesm.driver.model_driver import _standalone_cloud_config
     cc = _standalone_cloud_config(cfg, "xu_randall", allow_convective_cloud=True)
     assert cc.cap_floor_on is True and cc.cap_floor_q_c == 1e-4
     bad = cfg_from(["--dataset", "analytical", "--cloud-cap-floor-cf", "1.5"])
     with pytest.raises(Exception, match="cloud_cap_floor_cf"):
         bad.validate_strict()
-    noop = cfg_from(["--dataset", "analytical", "--clouds", "none", "--cloud-cap-floor"])
-    with pytest.raises(ValueError, match="silent no-op"):
-        noop.validate_strict()
+    for argv in (["--clouds", "none"], ["--clouds", "xu_randall", "--radiation", "gray"]):
+        noop = cfg_from(["--dataset", "analytical", "--cloud-cap-floor", *argv])
+        with pytest.raises(ValueError, match="silent no-op"):
+            noop.validate_strict()
+    aimip = ra._postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--clouds", "xu_randall", "--cloud-cap-floor"]), parser)
+    aimip.aimip_classical_checkpoint = "/nonexistent.eqx"
+    with pytest.raises(SystemExit, match="aimip-classical-checkpoint"):
+        ra._apply_aimip_classical_overrides(aimip)

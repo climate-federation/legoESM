@@ -2092,12 +2092,12 @@ def test_config_yaml_round_trips_authoritative_values():
     # red on main, and blind to any further drift while it was.  Values below
     # are the shipped deck: icosahedral level 6 (about 1.1 degrees, the
     # production default per the 2026-08-25 directive; level 5 remains the
-    # fast-iteration override), 30 sigma levels, dt 112.5 s (2026-08-25 dt
+    # fast-iteration override), 36 sigma levels (raised lid, efd827b76), dt 112.5 s (2026-08-25 dt
     # ladder).  The five keys are recipe-sensitive together (the YAML header
     # records that L40 + hybrid + automatic dt blew up on day one), so a change
     # here is a stability A/B, not an edit.
     assert args.resolution == 6
-    assert args.nlev == 30
+    assert args.nlev == 36
     assert args.discretization == "mpas"
     # The deck spells the mesh "voronoi"; the parser normalises the family's
     # spellings to one name, so assert the resolved value the run uses.
@@ -2107,9 +2107,9 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
     # orographic AND non-orographic; the orographic-only spelling is the
     # older deck's.
-    assert cfg.gravity_wave_drag == "mcfarlane+hines"
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     assert cfg.microphysics == "morrison"
-    assert cfg.cloud_scheme == "sundqvist"
+    assert cfg.cloud_scheme == "xu_randall"   # f82134793
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
     # Re-baselined 2026-09-13 (owner decision): the boundary layer moved from
     # the Louis first-order closure to CLUBB run PROGNOSTICALLY, so the scheme
@@ -3079,7 +3079,7 @@ def test_latlon24_production_variant_pins_polar_filter():
     # gained the non-orographic component; this assertion still named the
     # orographic-only spelling and so went red with it.
     assert cfg.convection == "sbm"
-    assert cfg.gravity_wave_drag == "mcfarlane+hines"
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
     # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
     # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)

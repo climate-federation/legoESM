@@ -2777,6 +2777,9 @@ def _apply_aimip_classical_overrides(
     args._aimip_params = None
     if not getattr(args, "aimip_classical_checkpoint", None):
         return args
+    if getattr(args, "cloud_cap_floor_on", False):
+        raise SystemExit("--cloud-cap-floor cannot be combined with --aimip-classical-checkpoint: "
+                         "the trained cloud config is prebuilt and would not carry the floor")
     from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
     from legoesm.training.aimip_params import AIMIPClassicalParams
     _p = load_checkpoint_or_fail(
@@ -2788,9 +2791,6 @@ def _apply_aimip_classical_overrides(
     args.clouds = "xu_randall"
     if args.microphysics == "none":
         args.microphysics = "sundqvist"
-    if getattr(args, "cloud_cap_floor_on", False):
-        raise SystemExit("--cloud-cap-floor cannot be combined with --aimip-classical-checkpoint: "
-                         "the trained cloud config is prebuilt and would not carry the floor")
     _cc = _p.to_cloud_config()
     args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
     args.cloud_rh_crit = float(_cc.rh_crit)
