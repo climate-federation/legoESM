@@ -285,6 +285,179 @@ def test_round124_process_hook_is_private_and_card_guarded():
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 tracer_process_trace="public-selector"))
 
+    # Round 126's larger vertical return graph must remain a distinct observer
+    # so it cannot silently change Round 124's process-boundary fusion control.
+    with pytest.raises(ValueError, match="requires tracer_process_trace"):
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                vertical_solve_trace=True))
+    vertical = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(), vertical_solve_trace=True))
+    assert vertical._nemo_ws_test_hooks.vertical_solve_trace is True
+
+
+def test_round126_literal_matrix_and_solve_controls_are_nonvacuous(harness):
+    shape = (2, 3, 4)
+    wet = np.ones(shape, dtype=bool)
+    K = np.full(shape[:-1] + (shape[-1] - 1,), 1.2e-5)
+    e3t = np.broadcast_to(np.array([10.0, 20.0, 30.0, 40.0]), shape)
+    e3w = np.broadcast_to(np.array([15.0, 25.0, 35.0]), K.shape)
+    lower, diagonal, upper = harness._literal_vertical_matrix(
+        K, e3t, e3w, wet)
+    constant = np.full(shape, 7.0)
+    content = e3t * constant
+    solved = harness._literal_vertical_solve(
+        content, lower, diagonal, upper, wet)
+    assert np.max(np.abs(solved - constant)) < 4.0e-15
+
+    planted = diagonal.copy()
+    planted[0, 0, 0] = np.nextafter(planted[0, 0, 0], np.inf)
+    assert harness._different_cells(diagonal, planted, wet) == 1
+    moved = harness._literal_vertical_solve(
+        content, lower, planted, upper, wet)
+    assert harness._different_cells(solved, moved, wet) > 0
+
+
+def test_round126_barotropic_checkpoint_histories_keep_their_2d_layout(
+        harness):
+    uu_b = np.arange(6.0).reshape(2, 3)
+    vv_b = np.arange(6.0, 12.0).reshape(2, 3)
+    u_face, v_face = harness._closed_barotropic_histories_to_faces(
+        uu_b, vv_b)
+    assert u_face.shape == (2, 4)
+    assert v_face.shape == (3, 3)
+    np.testing.assert_array_equal(u_face[:, 0], 0.0)
+    np.testing.assert_array_equal(u_face[:, 1:], uu_b)
+    np.testing.assert_array_equal(v_face[0, :], 0.0)
+    np.testing.assert_array_equal(v_face[1:, :], vv_b)
+    with pytest.raises(harness.GateError, match="two-dimensional"):
+        harness._closed_barotropic_histories_to_faces(
+            uu_b[..., None], vv_b)
+
+
+def test_round127_shapley_cube_closes_and_exposes_cancellation(harness):
+    control = harness._trigger_shapley_control()
+    assert control == {
+        "temperature": [1.0, 0.5, 0.5],
+        "salinity": [0.0, 0.5, 0.0],
+        "live_depth": [0.0, 0.0, -0.5],
+    }
+    incomplete = {subset: np.asarray(float(bool(subset & 1)))
+                  for subset in range(7)}
+    with pytest.raises(harness.GateError, match="all eight subsets"):
+        harness._trigger_shapley(incomplete)
+
+
+def test_round127_recorded_r3t_inverse_is_bit_strict(harness):
+    H = np.asarray([[1000.0, 2500.0], [4000.0, 1.0]], dtype=np.float64)
+    wet = np.asarray([[True, True], [True, False]])
+    eta_source = np.asarray([[0.125, -0.75], [1.5, 0.0]], dtype=np.float64)
+    reciprocal = np.float64(1.0) / np.where(wet, H, 1.0)
+    recorded = np.where(wet, eta_source * reciprocal, 0.0)
+    eta, control = harness._eta_for_recorded_r3t(recorded, H, wet)
+    replay = np.where(wet, eta * reciprocal, 0.0)
+    np.testing.assert_array_equal(
+        replay[wet].view(np.uint64), recorded[wet].view(np.uint64))
+    assert control["wet_cells_unequal"] == 0
+
+    impossible = recorded.copy()
+    impossible[0, 0] = np.nan
+    with pytest.raises(harness.GateError, match="could not invert"):
+        harness._eta_for_recorded_r3t(impossible, H, wet)
+
+
+def test_round127_trigger_observer_is_private_and_default_return_unchanged():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    assert "bn2_intermediate" not in card.recipe.model_config._fields
+    assert _NEMOWSRK3TestHooks().bn2_intermediate == ""
+    assert _NEMOWSRK3TestHooks(
+        bn2_intermediate="masked_rn2").bn2_intermediate == "masked_rn2"
+
+
+def test_round128_temperature_context_marginal_has_all_four_arms(harness):
+    control = harness._temperature_context_marginal_control()
+    assert control["observed"] == control["expected"]
+
+    candidates = {index: np.asarray(float(index)) for index in range(4)}
+    references = {index: np.asarray(0.0) for index in range(3)}
+    with pytest.raises(harness.GateError, match="all four"):
+        harness._temperature_context_marginal(candidates, references)
+
+
+def test_round128_temperature_telescope_and_registry_plant(harness):
+    shape = (2, 3, 4)
+    wet = np.ones(shape, dtype=bool)
+    nemo = np.full(shape, 2.0)
+    incoming = np.full(shape, 0.125)
+    cumulative = {
+        name: np.full(shape, (index + 1) * 0.03125)
+        for index, name in enumerate(harness.PROCESS_ROWS)
+    }
+    expected = np.array(nemo, copy=True)
+    expected += incoming
+    for name in harness.PROCESS_ROWS:
+        expected += cumulative[name]
+    lego = np.nextafter(expected, np.inf)
+    boundaries, deltas, raw_residual = (
+        harness._temperature_process_boundaries(
+            nemo, lego, incoming, cumulative))
+    assert raw_residual > 0.0
+    np.testing.assert_array_equal(
+        boundaries[-1][1].view(np.uint64), lego.view(np.uint64))
+
+    combined = np.zeros(shape)
+    for name in harness.TRIGGER_TEMPERATURE_PROCESS_ROWS:
+        combined += deltas[name]
+    np.testing.assert_allclose(combined, lego - nemo, atol=2.3e-16, rtol=0.0)
+    planted = harness._temperature_process_registry_plant(
+        nemo, lego, deltas, wet)
+    assert planted["removed_row"] in harness.PROCESS_ROWS
+    assert planted["endpoint_cells_moved"] > 0
+    assert planted["endpoint_residual_max_abs_K"] > 0.0
+
+    zero = {name: np.zeros(shape) for name in harness.PROCESS_ROWS}
+    _, inert_deltas, _ = harness._temperature_process_boundaries(
+        nemo, nemo + incoming, incoming, zero)
+    with pytest.raises(harness.GateError, match="no nonzero physics row"):
+        harness._temperature_process_registry_plant(
+            nemo, nemo + incoming, inert_deltas, wet)
+
+
+def test_round128_weighted_spatial_census_broadcasts_regions(harness):
+    weights = np.ones((2, 3, 4), dtype=np.float64)
+    depth = np.broadcast_to(
+        np.asarray([25.0, 250.0, 1250.0, 2000.0]), weights.shape)
+    west = np.asarray([[True, False, False], [True, False, False]])
+    interior = np.asarray([[False, True, False], [False, True, False]])
+    east = np.asarray([[False, False, True], [False, False, True]])
+    south = np.asarray([[True, True, True], [False, False, False]])
+    regions = {
+        "west_third": west, "interior_third": interior,
+        "east_third": east,
+        f"emp_south_le_{harness.EMP_SPLIT_LAT_DEG}N": south,
+        f"emp_north_gt_{harness.EMP_SPLIT_LAT_DEG}N": ~south,
+    }
+    census = harness._weighted_trigger_spatial_census(
+        weights, depth, regions)
+    assert census["absolute_cell_equivalents"] == 24.0
+    assert census["depth"] == {
+        "0_100m": 6.0, "100_1000m": 6.0, "below_1000m": 12.0}
+    assert census["region"]["west_third"] == 8.0
+    assert census["region"]["interior_third"] == 8.0
+    assert census["region"]["east_third"] == 8.0
+
+    with pytest.raises(harness.GateError, match="depth shape differs"):
+        harness._weighted_trigger_spatial_census(
+            weights, depth[..., :-1], regions)
+
 
 def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     source_patch = (PROCESS_CARD / "stprk3_stg_round123.patch").read_text()

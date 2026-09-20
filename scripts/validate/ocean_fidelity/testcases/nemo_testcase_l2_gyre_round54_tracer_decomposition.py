@@ -1169,9 +1169,17 @@ def main(argv=None) -> int:
         if args.output:
             args.output.write_text(text + "\n")
         print(text)
+        if args.plant:
+            print(f"STATUS PLANT-FIRED: {args.plant}")
+            return 1
         print(f"STATUS {report.get('status', 'PASS')}")
-        return 1 if args.plant else 0
+        return 0
     except (GateError, RuntimeError, AssertionError, OSError, ValueError) as error:
+        if (args.plant == "self-compare"
+                and str(error)
+                == "synthetic metric did not recover its planted answer"):
+            print("STATUS PLANT-FIRED: self-compare")
+            return 1
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
 
