@@ -596,7 +596,7 @@ CITATION_MAP = {
         "IF( PRESENT(Kaa) )   CALL iom_rstput( kt, nitrst, numrow, 'ssha', ssh(:,:,Kaa) )",
         9],
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynspg_ts.f90:974-980': [
-        'IF( nn_bt_flt == 3 ) THEN',
+        ('IF( nn_bt_flt == 3 ) THEN', 2),
         "CALL iom_rstput( kt, nitrst, numrow, 'vb_e'     ,    vb_e(:,:) )",
         7],
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/zdftke.f90:895-901': [
