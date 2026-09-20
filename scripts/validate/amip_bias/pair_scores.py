@@ -24,6 +24,7 @@ import regional_bias as rb
 BOXES = {"GLOBAL": (-90, 90, 0, 360), "tropics 20S-20N": (-20, 20, 0, 360)}
 # (field, display scale, unit) -- water fluxes are stored in kg m-2 s-1.
 FIELDS = [("pr", 86400.0, "mm/d"), ("evspsbl", 86400.0, "mm/d"),
+          ("pr_era5", 86400.0, "mm/d"), ("emp", 86400.0, "mm/d"),
           ("prw", 1.0, "kg/m2"), ("clt", 1.0, "%"),
           ("rsut", 1.0, "W/m2"), ("rlut", 1.0, "W/m2"),
           ("rsutcs", 1.0, "W/m2"), ("rlutcs", 1.0, "W/m2"),
@@ -42,6 +43,19 @@ def load_pair(run, var):
     difference is a like-for-like cloud radiative effect and not a mix of two
     definitions.
     """
+    if var == "pr_era5":                       # same rain, ERA5 instead of GPCP
+        d = rb._load_model(run, "pr")
+        lat, lon = np.asarray(d.lat), np.asarray(d.lon)
+        ref = rb._ref_clim("pr", rb._month_labels(d), lat, lon, src=rb.ERA5)
+        return np.asarray(d["pr"]).mean(0), np.asarray(ref), lat, lon
+    if var == "emp":
+        # Evaporation minus precipitation, ERA5 on BOTH terms.  A model whose
+        # water budget closes has E-P near zero in the monthly mean, so an
+        # evaporation bias read against ERA5 and a rain bias read against GPCP
+        # can disagree by the two references' own mismatch and manufacture a
+        # deficit the model does not have.  One reference, one budget.
+        e, p_ = load_pair(run, "evspsbl"), load_pair(run, "pr_era5")
+        return (e[0] - p_[0], e[1] - p_[1], e[2], e[3])
     if var.startswith("cre_"):
         allsky, clear = ("rsut", "rsutcs") if var == "cre_sw" else ("rlut", "rlutcs")
         a, c = load_pair(run, allsky), load_pair(run, clear)
