@@ -210,10 +210,19 @@ def tracer_content(T3d, S3d, eta, e1t, e2t, e3t, tmask, gdept=None,
     # TOTAL fixed while the bins trade against each other.
     if gdept is not None:
         bins = {}
+        heat_bins = {}
+        vol_bins = {}
         for lo, hi in zip(_DEPTH_BIN_EDGES_M[:-1], _DEPTH_BIN_EDGES_M[1:]):
             sel = (gdept >= lo) & (gdept < hi)
             bins[f"{lo:g}-{hi:g}m"] = float((S3d * dV * sel[:, None, None]).sum())
+            heat_bins[f"{lo:g}-{hi:g}m"] = float((T3d * dV * sel[:, None, None]).sum())
+            # The heat/salt bins are EXTENSIVE; without the matching volume a
+            # reader cannot turn a bin's change into degrees, and comparing
+            # bins of different thickness in C m3 invites exactly that error.
+            vol_bins[f"{lo:g}-{hi:g}m"] = float((dV * sel[:, None, None]).sum())
         out["salt_by_depth_bin_psu_m3"] = bins
+        out["heat_by_depth_bin_C_m3"] = heat_bins
+        out["volume_by_depth_bin_m3"] = vol_bins
     return out
 
 
@@ -245,6 +254,10 @@ def main() -> int:
     p.add_argument("--mesh-mask", required=True,
                    help="eORCA1.2_mesh_mask.nc with e1t/e2t/e3t_0/tmask/gdept_1d.")
     p.add_argument("--json-out", default=None)
+    p.add_argument("--region", default=None, metavar="lat0,lat1,lon0,lon1",
+                   help="Restrict every integral to a lat/lon box in degrees, "
+                        "longitudes on -180..180 (nino3 is -5,5,-150,-90). "
+                        "lon0 > lon1 straddles the dateline. Default: global.")
     a = p.parse_args()
 
     e1t, e2t, e3t, tmask = load_mesh_metrics(a.mesh_mask)
@@ -258,9 +271,24 @@ def main() -> int:
     except Exception:
         gdept = None
 
+    region_mask = None
+    if a.region:
+        try:
+            lat0, lat1, lon0, lon1 = (float(x) for x in a.region.split(","))
+        except ValueError:
+            raise SystemExit(f"--region wants lat0,lat1,lon0,lon1, got {a.region!r}")
+        lat = load_mesh_latitude(a.mesh_mask)
+        lon = load_mesh_longitude(a.mesh_mask)
+        in_lat = (lat >= lat0) & (lat <= lat1)
+        in_lon = ((lon >= lon0) & (lon <= lon1)) if lon0 <= lon1 else \
+                 ((lon >= lon0) | (lon <= lon1))
+        region_mask = in_lat & in_lon
+        print(f"[region] {a.region}: {int(region_mask.sum())} columns")
+
     report = {"generated_by": str(Path(__file__).resolve()),
               "git_sha": _git_sha(Path(__file__).resolve().parents[3]),
               "mesh_mask": str(a.mesh_mask),
+              "region": a.region or "global",
               "conventions": "native frame [0:331,1:361]; e1t*e2t*e3t_0*tmask; "
                              "z-star dilation (H+eta)/H; fp64",
               "snapshots": {}}
@@ -274,11 +302,13 @@ def main() -> int:
         if T3.shape != e3t.shape:
             raise SystemExit(f"FATAL: snapshot native frame {T3.shape} != "
                              f"mesh {e3t.shape}; wrong mesh or wrong slicing")
-        r = tracer_content(T3, S3, et, e1t, e2t, e3t, tmask, gdept)
+        r = tracer_content(T3, S3, et, e1t, e2t, e3t, tmask, gdept,
+                           region_mask=region_mask)
         report["snapshots"][str(snap)] = r
         line = (f"{Path(snap).parent.name}/{Path(snap).name}: "
                 f"salt {r['salt_content_psu_m3']:.6e} psu m3, "
-                f"mean S {r['mean_S_psu']:.4f}, vol {r['volume_m3']:.6e} m3")
+                f"mean S {r['mean_S_psu']:.4f}, mean T {r['mean_T_C']:.4f} C, "
+                f"vol {r['volume_m3']:.6e} m3")
         if prev is not None:
             ds_rel = (r["salt_content_psu_m3"] / prev - 1.0)
             line += f"  (salt vs previous: {ds_rel:+.3e} relative)"
