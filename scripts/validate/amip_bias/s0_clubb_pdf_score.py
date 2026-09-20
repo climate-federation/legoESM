@@ -15,7 +15,13 @@ minus control, averaged over pair days 5-10.
 
 Both arms publish the PDF cloud fraction into the checkpoint's
 ``physstate_cloud_fraction`` (top-down, troposphere-tapered) so the band reads
-the same field on both sides.  The diagnostic control does NOT carry its
+the same field on both sides.  The cold-layer mask is taken from the CONTROL's
+temperature and applied to both arms, so an arm that warms or cools the cap
+cannot move its own scoring mask (GLM review).  PROVENANCE CONTROL, run on the
+first scored day: each arm's stored cloud fraction is compared with the
+humidity-based cover the run's cloud scheme would diagnose from the same
+state; a stored field equal to that cover is the grid-scale cover, not the
+PDF's, and the probe aborts instead of scoring PDF against RH.  The diagnostic control does NOT carry its
 variances (they are recomputed from mixing length each step and never stored),
 so the arm's rtp2/thlp2/wp2 are reported as absolute cold-layer means only; the
 "2x control" secondary is not measurable from checkpoints and is said so.
@@ -53,16 +59,50 @@ def cold_cap_mean(field, T, lat, area, lat_lo, T_max):
     return float((field * w).sum() / w.sum()), int(m.sum())
 
 
-def load_day(run, day, lat_n):
+def load_day(run, day, lat_n, require_moments=False):
     z = np.load(f"{rb.ROOT}/{run}/checkpoint_day_{day:04d}.npz", allow_pickle=True)
     order = cl.cell_order(z, lat_n)
     if "physstate_cloud_fraction" not in z.files:
         raise SystemExit(f"FATAL: {run} day {day}: no physstate_cloud_fraction")
     out = {"T": np.asarray(z["T"])[order],
-           "cf": np.asarray(z["physstate_cloud_fraction"])[order]}
+           "cf": np.asarray(z["physstate_cloud_fraction"])[order],
+           "q_v": np.asarray(z["trc_q_v"])[order], "p_s": np.asarray(z["p_s"])[order],
+           "vgrid": np.asarray(z["meta_vgrid"], dtype=np.float64)}
+    for k in ("trc_q_c", "trc_q_i", "trc_N_c", "trc_N_i"):
+        out[k] = np.asarray(z[k])[order] if k in z.files else None
+    if not np.isfinite(out["cf"]).all():
+        raise SystemExit(f"FATAL: {run} day {day}: non-finite cloud fraction")
     mom = np.asarray(z["physstate_clubb_moments"]) if "physstate_clubb_moments" in z.files else None
     out["moments"] = None if mom is None or mom.ndim != 3 or mom.shape[1] != 15 else mom[order]
+    if require_moments and out["moments"] is None:
+        raise SystemExit(f"FATAL: {run} day {day}: no well-formed physstate_clubb_moments "
+                         f"(got {None if mom is None else mom.shape}); alarms cannot run")
     return out
+
+
+def rh_cover(d, exp):
+    """The grid-scale cover the run's cloud scheme diagnoses from the stored
+    state (same call as the live radiation entry: raw condensate and number
+    tracers handed in), for the provenance control."""
+    from legoesm import constants
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
+    cfg = cl.resolved_cloud_config(exp)
+    vg = d["vgrid"]
+    p_half = vg[0][None, :] * constants.p_ref + vg[1][None, :] * d["p_s"][:, None]
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    props = compute_cloud_properties(d["T"], p_full, d["q_v"], np.diff(p_half, axis=1), cfg,
+                                     q_cloud=d["trc_q_c"], q_ice=d["trc_q_i"],
+                                     n_cloud=d["trc_N_c"], n_ice=d["trc_N_i"])
+    return np.asarray(props.cloud_fraction)
+
+
+def check_provenance(name, d, exp, tol=1.0e-6):
+    rh = rh_cover(d, exp)
+    same = float(np.mean(np.abs(d["cf"] - rh) <= tol))
+    if same > 0.999:
+        raise SystemExit(f"FATAL: {name}: stored cloud fraction equals the humidity-based "
+                         f"cover on {same:.1%} of points; it is not the PDF cloud fraction")
+    return same
 
 
 def moment_stats(mom, T, lat, area, lat_lo, T_max):
@@ -113,15 +153,20 @@ def main(argv=None) -> int:
     rows, diffs, all_alarms = [], [], []
     for day in args.days:
         c = load_day(args.control, day, lat.size)
-        a = load_day(args.arm, day, lat.size)
+        a = load_day(args.arm, day, lat.size, require_moments=True)
+        if day == args.days[0]:
+            for nm, d, e in ((args.control, c, exp), (args.arm, a, exp_a)):
+                same = check_provenance(nm, d, e)
+                print(f"provenance {nm} day {day}: stored cf equals RH cover on "
+                      f"{same:.1%} of points [OK]")
         cf_c, n = cold_cap_mean(c["cf"], c["T"], lat, area, args.lat_lo, args.t_max)
-        cf_a, _ = cold_cap_mean(a["cf"], a["T"], lat, area, args.lat_lo, args.t_max)
+        cf_a, _ = cold_cap_mean(a["cf"], c["T"], lat, area, args.lat_lo, args.t_max)  # CONTROL mask
         d = cf_a - cf_c
         diffs.append(d)
         row = {"day": day, "cf_control": cf_c, "cf_arm": cf_a, "diff": d, "n_cold": n}
         mstr = ""
         if a["moments"] is not None:
-            ms, al = moment_stats(a["moments"], a["T"], lat, area, args.lat_lo, args.t_max)
+            ms, al = moment_stats(a["moments"], c["T"], lat, area, args.lat_lo, args.t_max)
             all_alarms += [f"day {day}: {x}" for x in al]
             row["arm_moments_cold_mean"] = {k: v[0] for k, v in ms.items()}
             row["arm_moments_absmax"] = {k: v[1] for k, v in ms.items()}

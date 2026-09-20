@@ -77,3 +77,24 @@ def test_surface_layer_lands_top_down():
     w = np.full((3, 5), 0.0); w[:, 0] = 2.0        # ascending zm index 0 = surface
     res, _ = s0.moment_stats(_packed(3, 4, wp2=w), T, lat, area, 75.0, 253.0)
     assert res["wp2"][0] == pytest.approx(1.0)     # 0.5*(2+0) on the surface layer
+
+
+def test_provenance_refuses_rh_cover(monkeypatch):
+    d = {"cf": np.full((3, 4), 0.3)}
+    monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.full((3, 4), 0.3))
+    with pytest.raises(SystemExit):
+        s0.check_provenance("ctl", d, {})
+    monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.full((3, 4), 0.1))
+    assert s0.check_provenance("ctl", d, {}) == 0.0
+
+
+def test_arm_without_moments_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(s0.rb, "ROOT", str(tmp_path))
+    (tmp_path / "arm").mkdir()
+    np.savez(tmp_path / "arm" / "checkpoint_day_0045.npz",
+             T=np.full((3, 4), 250.0), physstate_cloud_fraction=np.zeros((3, 4)),
+             trc_q_v=np.zeros((3, 4)), p_s=np.full(3, 1e5), meta_vgrid=np.zeros((2, 5)),
+             physstate_col_index=np.arange(3), physstate_clubb_moments=np.zeros((3, 1, 1)))
+    with pytest.raises(SystemExit, match="clubb_moments"):
+        s0.load_day("arm", 45, 3, require_moments=True)
+    assert s0.load_day("arm", 45, 3)["moments"] is None
