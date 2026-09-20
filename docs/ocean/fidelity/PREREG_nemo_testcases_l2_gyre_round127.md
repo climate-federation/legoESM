@@ -60,18 +60,29 @@ hook will expose the actual `rn2/rn2b` bundle that the same
 `diagnose_vertical_K` production closure consumes.  The default return and
 every ordinary model call remain byte-for-byte unchanged.
 
+Pre-measurement inventory found that the acquired Round-125 frames, rather
+than separate daily restart files, carry the needed daily oracle operands.
 For each daily whole-step entry from day 180 through day 239, the gate loads:
 
-* the independently recorded NEMO restart at step `6 * day`, including its
-  TKE coefficient memory and barotropic histories;
+* NEMO's independently recorded `T_Kbb_in`, `S_Kbb_in`, and `r3t_Kbb` at
+  entry step `6 * day + 1` (the day-180 restart supplies the inert carrier
+  fields that the returned N2 bundle does not read);
 * the independently recorded legoESM daily core state at the same day; and
-* the admitted NEMO `avt` and legoESM `heat_K` masks at entry step
-  `6 * day + 1`.
+* the admitted NEMO `avt` and legoESM `heat_K` masks at that entry step.
+
+The oracle `eta` representation is chosen by an exact checked inverse of
+NEMO's recorded `r3t = ssh * r1_ht_0`: sending it through the production
+`nemo_reciprocal` evaluation must recover every wet `r3t` bit.  This avoids
+inventing a free-surface value from a rounded quotient.  Failure to find that
+inverse refuses the instrument.  The returned `rn2/rn2b`, not the unrelated
+diffusivity contributions that also run inside `diagnose_vertical_K`, is the
+scored production output.
 
 Starting from the bridged NEMO state, all eight subsets of
 `{temperature, salinity, eta}` are replaced by legoESM's corresponding field.
 Velocity, bathymetry, closure memory, forcing and every unlisted field remain
-the NEMO arm.  Each subset runs through the same full production closure under
+the day-180 NEMO carrier arm; none is in the causal input set of the returned
+N2 bundle.  Each subset runs through the same full production closure under
 `jax.jit`; no isolated N2 calculation is scored.  `eta` is the complete
 live-depth/free-surface row because the static grid and bathymetry are already
 shared and bit-identical.
