@@ -128,6 +128,8 @@ def load_day(run, day, lat_n, require_moments=False):
            "vgrid": vgrid}
     for k in ("trc_q_c", "trc_q_i", "trc_N_c", "trc_N_i"):
         out[k] = np.asarray(z[k])[order] if k in z.files else None
+    out["conv_precip"] = (np.asarray(z["physstate_conv_precip"], dtype=np.float64)[order]
+                          if "physstate_conv_precip" in z.files else None)
     where = f"{run} day {day}"
     if "day" not in z.files or np.asarray(z["day"]).shape != ():
         raise SystemExit(f"FATAL: {where}: checkpoint carries no scalar day stamp")
@@ -142,6 +144,9 @@ def load_day(run, day, lat_n, require_moments=False):
     for k in ("trc_q_c", "trc_q_i", "trc_N_c", "trc_N_i"):
         if out[k] is not None and (out[k].shape != (lat_n, nlev) or not np.isfinite(out[k]).all()):
             raise SystemExit(f"FATAL: {where}: bad {k}")
+    cp = out["conv_precip"]
+    if cp is not None and (cp.shape != (lat_n,) or not np.isfinite(cp).all()):
+        raise SystemExit(f"FATAL: {where}: bad physstate_conv_precip")
     if out["cf"].min() < 0.0 or out["cf"].max() > 1.0:
         raise SystemExit(f"FATAL: {where}: cloud fraction outside [0, 1]")
     if vgrid.shape[0] != 2 or not np.isfinite(vgrid).all():
@@ -175,9 +180,13 @@ def rh_cover(d, exp):
     cfg = cl.resolved_cloud_config(exp)
     p_half = half_pressure(d["vgrid"], d["p_s"])
     p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    if cfg.convective_cloud and d["conv_precip"] is None:
+        raise SystemExit("FATAL: run diagnoses convective cloud but the checkpoint carries "
+                         "no physstate_conv_precip")
     props = compute_cloud_properties(d["T"], p_full, d["q_v"], np.diff(p_half, axis=1), cfg,
                                      q_cloud=d["trc_q_c"], q_ice=d["trc_q_i"],
-                                     n_cloud=d["trc_N_c"], n_ice=d["trc_N_i"])
+                                     n_cloud=d["trc_N_c"], n_ice=d["trc_N_i"],
+                                     conv_precip=d["conv_precip"] if cfg.convective_cloud else None)
     return np.asarray(props.cloud_fraction)
 
 

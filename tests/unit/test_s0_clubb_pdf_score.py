@@ -123,14 +123,25 @@ def test_rh_cover_hands_condensate_to_the_scheme(monkeypatch):
     def fake(T, p_full, q_v, dp, cfg, **kw):
         seen.update(kw); seen["p_full"] = p_full; return _P()
     monkeypatch.setattr(cfmod, "compute_cloud_properties", fake)
-    monkeypatch.setattr(s0.cl, "resolved_cloud_config", lambda exp: "cfg")
+
+    class _Cfg:
+        convective_cloud = False
+    cfg = _Cfg()
+    monkeypatch.setattr(s0.cl, "resolved_cloud_config", lambda exp: cfg)
     d = {"T": np.full((3, 4), 250.0), "q_v": np.zeros((3, 4)), "p_s": np.full(3, 1e5),
          "vgrid": np.stack([np.linspace(0, 0.01, 5), np.linspace(0, 0.99, 5)]),
          "trc_q_c": np.full((3, 4), 1e-4), "trc_q_i": np.full((3, 4), 2e-5),
-         "trc_N_c": None, "trc_N_i": None}
+         "trc_N_c": None, "trc_N_i": None, "conv_precip": np.full(3, 1e-8)}
     s0.rh_cover(d, {})
     assert seen["q_cloud"] is d["trc_q_c"] and seen["q_ice"] is d["trc_q_i"]
+    assert seen["conv_precip"] is None                        # scheme does not want it
     assert np.all(np.diff(seen["p_full"], axis=1) > 0)        # top-down pressure
+    cfg.convective_cloud = True
+    s0.rh_cover(d, {})
+    assert seen["conv_precip"] is d["conv_precip"]
+    d["conv_precip"] = None
+    with pytest.raises(SystemExit, match="conv_precip"):
+        s0.rh_cover(d, {})
 
 
 def test_arm_without_moments_is_refused(tmp_path, monkeypatch):
