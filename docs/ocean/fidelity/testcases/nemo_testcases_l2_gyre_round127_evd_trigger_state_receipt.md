@@ -266,9 +266,28 @@ Independent review unavailable in-sandbox.  It emitted neither `SHIP` nor
 
 ## Verification
 
-The owner self-check, focused suite, citation gate and shifted-citation plant
-are run from the committed receipt tip.  Their final exact summaries are
-recorded in the verification addendum below before this receipt is closed.
+The owner self-check prints `self-check: all checks passed`; its log is
+`round127/self_check.log`.  Python byte compilation and `git diff --check`
+also pass.
+
+The clean-tree focused suite covered the literal vertical solver, TEOS-10 and
+`bn2`, the compiled-intermediate observer, the year-owner gate and both new
+synthetic controls, the receipt-citation gate, and the worktree-stamp ratchet.
+Its exact summary is:
+
+```text
+======================== 94 passed in 83.11s (0:01:23) =========================
+```
+
+The log and JUnit report are `round127/focused_tests.log` and
+`round127/focused_tests.xml`.
+
+The receipt citation gate found 12 citations, zero unmapped citations, zero
+failures and zero map-audit failures in `round127/citation_gate.json`.
+Shifting the compiled `bn2` assembly citation by two lines produced
+`SYMBOL-NOT-AT-LINE`, printed no PASS verdict and exited 1; its report/log are
+`round127/citation_gate_shift_plant.json` and `.log`.  The final clean-tip
+rerun after this addendum preserves those counts.
 
 ## OPEN — round 128
 
