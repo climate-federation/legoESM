@@ -308,6 +308,43 @@ def main() -> int:
         print("NEMO's TKE is not archived in the 5-day output, so `e` cannot be "
               "compared directly; ours is printed for the length arithmetic.")
 
+    # ---- per-interface profile: WHERE do the two energy profiles part? ----
+    # The energy ratio is built so the closure constant CANCELS: with
+    # l = sqrt(2e)/N the coefficient goes as K ~ e/N, so
+    #     e_ours/e_NEMO = (avm_ours/avm_NEMO) * (N_ours/N_NEMO).
+    # Nothing here is inferred from a tuning coefficient, and NEMO's TKE never
+    # has to be archived.
+    if "avm" in nemo_K and "K_M_diag" in z:
+        avm_o = np.transpose(_native(z["K_M_diag"]), (1, 2, 0))
+        avm_n = nemo_K["avm"]
+        if avm_o.shape != avm_n.shape:
+            print(f"[profile] SKIPPED: our avm {avm_o.shape} vs NEMO "
+                  f"{avm_n.shape}")
+        else:
+            print(f"\n{'depth':>8s} {'e ours':>11s} {'avm ours':>11s} "
+                  f"{'avm NEMO':>11s} {'e ours/NEMO':>12s}")
+            top = gdepw_int <= 120.0
+            for k in np.nonzero(top)[0]:
+                col = lambda f: band_median(f, wet_i, box, gdepw_int,
+                                            gdepw_int[k] - 1e-9,
+                                            gdepw_int[k] + 1e-9)[0]
+                ao, an = col(avm_o), col(avm_n)
+                no, nn = col(n2_our), col(n2_nemo)
+                # Built from the BAND MEDIANS, not as the median of a pointwise
+                # ratio: the pointwise form goes NaN in any column where N2 is
+                # momentarily negative, and a single NaN makes the median NaN.
+                # The first version of this table printed NaN through the whole
+                # 9-65 m band -- the exact band the question is about -- and
+                # that was my instrument, not the ocean.
+                er = ((ao / an) * np.sqrt(no / nn)
+                      if (an and nn > 0 and no > 0) else float("nan"))
+                print(f"{gdepw_int[k]:8.1f} {col(tke_our):11.3e} "
+                      f"{ao:11.3e} {an:11.3e} {er:12.3e}")
+            print("A ratio that is already small at the TOP interface is a "
+                  "SURFACE SOURCE problem; one that starts near 1 and falls "
+                  "with depth is a TRANSPORT or DISSIPATION problem. That is "
+                  "the whole question this profile answers.")
+
     if a.out_json:
         Path(a.out_json).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out_json).write_text(json.dumps(report, indent=2))
