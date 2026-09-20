@@ -6349,10 +6349,34 @@ class LatLonCGridOceanModel:
                     # two source components inside the full production step;
                     # the carried trajectory is supplied by a separate
                     # ordinary compiled call in ``step`` below.
+                    # ``tend.dT_dt`` contains TWO executed sources on this
+                    # card: the shared physics pipeline's Kbb qsr_2BD field
+                    # and the external-forcing qns surface deposit.  `_qsr_b`
+                    # is the NEMO-live Kbb reconstruction used by the stage-3
+                    # replacement above; it is not necessarily bit-identical
+                    # to the pipeline field it replaces.  Re-read the SAME
+                    # physics callable in this full-step graph so the surface
+                    # row removes the component actually accumulated into
+                    # `tend`; assign the entire remaining stage-3 rate to QSR.
+                    # This keeps the pipeline-vs-NEMO operand/association
+                    # residual with shortwave instead of mislabelling its
+                    # subsurface cells as a surface boundary condition.
+                    _process_cc_state = state._replace(
+                        u=state.u.replace(data=0.5 * (
+                            state.u.data[:, :-1, :] +
+                            state.u.data[:, 1:, :])),
+                        v=state.v.replace(data=0.5 * (
+                            state.v.data[:-1, :, :] +
+                            state.v.data[1:, :, :])),
+                    )
+                    _process_physics = self._physics_fn(
+                        _process_cc_state, _grid, _zc, surface_forcing)
+                    _process_qsr_kbb = _process_physics.dT_dt.data
                     _nemo_ws_process_surface_rate = (
-                        (tend.dT_dt.data - _qsr_b) * h_k_old
+                        (tend.dT_dt.data - _process_qsr_kbb) * h_k_old
                         / jnp.maximum(_h_live_one_half, 1.0e-10))
-                    _nemo_ws_process_qsr_rate = _qsr_m
+                    _nemo_ws_process_qsr_rate = (
+                        _stage3_T_rate - _nemo_ws_process_surface_rate)
                     _process_plant = (
                         self._nemo_ws_test_hooks.tracer_process_trace)
                     if _process_plant:

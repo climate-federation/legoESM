@@ -973,6 +973,7 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
     activity = {name: 0 for name in PROCESS_ROWS}
     max_step_closure = 0.0
     chained = 0
+    surface_subsurface_visits = 0
     previous_taa = None
     for index in range(LEGO_PROCESS_TRACE_STEPS):
         frame = {name: np.asarray(array[index])
@@ -984,6 +985,8 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
             chained += _different_cells(previous_taa, frame["Tbb"], mask)
         previous_taa = frame["Taa"]
         rows = lego_process_temperature_rows(frame)
+        surface_subsurface_visits += int(np.count_nonzero(
+            rows["surface_boundary"][..., 1:][mask[..., 1:]]))
         for name in PROCESS_ROWS:
             activity[name] += int(np.count_nonzero(rows[name][mask]))
         max_step_closure = max(
@@ -991,6 +994,15 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
             float(np.max(np.abs(rows["rounding_closure"][mask]))))
     require(chained == 0,
             f"legoESM trace fails Taa-to-next-Tbb chain in {chained} cells")
+    expected_surface_visits = int(mask[..., 0].sum()) * LEGO_PROCESS_TRACE_STEPS
+    require(surface_subsurface_visits == 0,
+            "legoESM surface-boundary bucket moved "
+            f"{surface_subsurface_visits} subsurface wet cells; a non-surface "
+            "process was misclassified")
+    require(activity["surface_boundary"] == expected_surface_visits,
+            "legoESM surface-boundary activity is "
+            f"{activity['surface_boundary']}, expected exactly the "
+            f"{expected_surface_visits} wet top-cell visits")
     for name in PROCESS_ROWS[1:]:
         require(activity[name] > 0,
                 f"legoESM active process row {name} never moves a wet cell")
@@ -1007,6 +1019,9 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
         "controls": {
             "chained_cells_unequal": chained,
             "active_row_nonzero_cell_visits": activity,
+            "surface_subsurface_nonzero_cell_visits": (
+                surface_subsurface_visits),
+            "expected_surface_top_cell_visits": expected_surface_visits,
             "max_abs_step_rounding_closure_K": max_step_closure,
             "carried_state_unequal_bytes_total": 0,
             "effect_control": metadata["effect_control"],
