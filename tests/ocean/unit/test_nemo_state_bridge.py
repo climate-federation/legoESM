@@ -243,6 +243,13 @@ def test_topo_bridge_carries_raw_een_coefficient_operands_without_rebuilding():
     for name in raw._fields:
         if name == "hf_0":
             expected = np.sum(carried.e3f_0 * carried.fmask, axis=-1)
+        elif name == "fe3mask":
+            # NEMO freezes this four-T-cell mask before lateral-slip edits;
+            # it is derived from the native tmask rather than stored on the
+            # legacy NemoGrid input record.
+            from legoesm.ocean.vertical import nemo_fe3mask_from_tmask
+
+            expected = nemo_fe3mask_from_tmask(carried.tmask)
         else:
             expected = getattr(carried, name)
         np.testing.assert_array_equal(np.asarray(getattr(raw, name)), expected)

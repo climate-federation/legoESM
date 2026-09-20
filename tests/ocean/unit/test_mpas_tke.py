@@ -377,7 +377,9 @@ class TestNemoSurfaceTermsOnMPAS:
             pf(state, mesh, z_coord, None)
 
     def test_unknown_eice_raises(self, mesh, z_coord, state):
-        pf = make_tke_profiles_mpas(self._card(eice=2))
+        # NEMO modes 0--3 are all admitted: mode 2 is the raw ice-fraction
+        # attenuation added by the ORCA2 assembly.
+        pf = make_tke_profiles_mpas(self._card(eice=4))
         with pytest.raises(ValueError, match="eice"):
             pf(state, mesh, z_coord, self._ice_wind_forcing(state))
 
