@@ -90,7 +90,7 @@ def registered_pair_check(exp_c, exp_a, run_c, run_a):
         raise SystemExit("FATAL: pair does not run CLUBB")
     origin = []
     for run in (run_c, run_a):
-        cmd = json.load(open(f"{rb.ROOT}/{run}/run_manifest.json"))["command_line"]
+        cmd = json.load(open(f"{rb.ROOT}/{run}/run_manifest.json"))["run"]["command_line"]
         toks = cmd.split()
         if "--restart-from" not in toks:
             raise SystemExit(f"FATAL: {run} was not restarted from a checkpoint")

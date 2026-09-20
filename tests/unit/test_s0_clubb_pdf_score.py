@@ -152,7 +152,7 @@ def _pair_on_disk(tmp_path, ncol=3, nlev=4, arm_cf_bump=0.0, plant_nan=False, da
         seed = tmp_path / "s0_seed" / "checkpoint_day_0040.npz"
         seed.parent.mkdir(exist_ok=True); seed.write_bytes(b"")
         (d / "run_manifest.json").write_text(json.dumps(
-            {"command_line": f"run_amip.py --restart-from {seed}"}))
+            {"run": {"command_line": f"run_amip.py --restart-from {seed}"}}))
         for day in days:
             T = np.full((ncol, nlev), 240.0)
             if prog:
