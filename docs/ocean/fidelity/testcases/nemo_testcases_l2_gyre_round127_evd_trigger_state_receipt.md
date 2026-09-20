@@ -7,7 +7,8 @@ Incoming tip: `48af510469da30266f0d05187350da8e6788776c`
 Status: **HELD — temperature is the largest upstream state owner of the
 day-180-to-240 EVD trigger disagreement: 1,097 absolute Shapley
 cell-equivalents (58.66310160427808 percent), ahead of salinity's 773
-(41.33689839572193 percent), while live depth changes no trigger bit.  The
+(41.33689839572193 percent), while live depth receives zero Shapley trigger
+cell-equivalents.  The
 signed shares close exactly to all 782 daily disagreement visits, but their
 1,870 absolute total exposes 2.391304347826087-fold cancellation.  The
 trigger mismatch is already present at the first acquired step, so its true
