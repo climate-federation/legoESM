@@ -4126,6 +4126,59 @@ def test_clubb_trop_cloud_top_press_reaches_the_turbulence_kernel():
         turbulence_config_for(cfg_bad)
 
 
+def test_clubb_q_flux_scale_reaches_the_turbulence_kernel():
+    """The cloud-base mixing probe threads through the same single source as
+    the CLUBB top-press knob; None keeps the scheme's own 1.0 and the band
+    lands on the kernel config.  The --params class router does NOT reach
+    CLUBBConfig on the MPAS lane (the run refused with 'route into the built
+    pipeline's config attributes'), which is why this is a driver field."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+    assert cfg_off.clubb_q_flux_scale is None
+    tc_off = turbulence_config_for(cfg_off)
+    assert tc_off.clubb is None or tc_off.clubb.q_flux_scale == 1.0
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb",
+         "--clubb-q-flux-scale", "2.5",
+         "--clubb-q-flux-scale-sigma-band", "0.8", "0.95"]), parser))
+    tc_on = turbulence_config_for(cfg_on).clubb
+    assert (tc_on.q_flux_scale, tc_on.q_flux_scale_sigma_lo,
+            tc_on.q_flux_scale_sigma_hi) == (2.5, 0.8, 0.95)
+    cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "louis",
+         "--clubb-q-flux-scale", "2.5",
+         "--clubb-q-flux-scale-sigma-band", "0.8", "0.95"]), parser))
+    with pytest.raises(ValueError, match="requires turbulence='clubb'"):
+        turbulence_config_for(cfg_bad)
+
+
+def test_clubb_q_flux_scale_validate_strict_refuses_bad_band_scheme_and_prognostic():
+    """validate_strict refuses the probe without a band, a reversed band, the
+    prognostic closure, a band with no scale, an out-of-bounds scale and a
+    non-CLUBB scheme; the well-formed pair passes."""
+    parser = build_arg_parser()
+    base = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+    base._replace(clubb_q_flux_scale=2.5,
+                  clubb_q_flux_scale_sigma_band=(0.8, 0.95)).validate_strict()
+    for kw, msg in (
+        (dict(clubb_q_flux_scale=2.5), "needs clubb_q_flux_scale_sigma_band"),
+        (dict(clubb_q_flux_scale=2.5, clubb_q_flux_scale_sigma_band=(0.9, 0.8)),
+         "0 <= lo < hi <= 1"),
+        (dict(clubb_q_flux_scale=2.5, clubb_q_flux_scale_sigma_band=(0.8, 0.95),
+              clubb_prognostic=True), "prognostic closure does not read it"),
+        (dict(clubb_q_flux_scale_sigma_band=(0.8, 0.95)), "does nothing on its own"),
+        (dict(clubb_q_flux_scale=50.0, clubb_q_flux_scale_sigma_band=(0.8, 0.95)),
+         "clubb_q_flux_scale"),
+        (dict(turbulence="louis", clubb_q_flux_scale=2.5,
+              clubb_q_flux_scale_sigma_band=(0.8, 0.95)), "is a CLUBB field"),
+    ):
+        with pytest.raises(ValueError, match=msg):
+            base._replace(**kw).validate_strict()
+
+
 def test_clubb_trop_cloud_top_press_validate_strict_bounds_and_scheme():
     """validate_strict refuses the taper under a non-CLUBB scheme (which the
     pipeline's late check cannot see behind a turbulence_override or the

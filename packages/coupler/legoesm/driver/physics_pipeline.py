@@ -4298,6 +4298,24 @@ def turbulence_config_for(config):
             tc = materialize_sub_config(tc)
             tc = tc._replace(clubb=tc.clubb._replace(
                 trop_cloud_top_press=float(_ctp)))
+        # Cloud-base mixing probe: same threading and refusal.  None (default)
+        # => byte-identical: the scheme's own 1.0 stands.  The --params class
+        # router cannot reach CLUBBConfig on the MPAS/spectral lanes (they
+        # rebuild configs from the flat ExperimentConfig), hence a driver field.
+        _qfs = getattr(config, "clubb_q_flux_scale", None)
+        if _qfs is not None:
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_q_flux_scale requires turbulence='clubb', got "
+                    f"{tc.scheme!r}.")
+            _lo, _hi = config.clubb_q_flux_scale_sigma_band
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(
+                q_flux_scale=float(_qfs), q_flux_scale_sigma_lo=float(_lo),
+                q_flux_scale_sigma_hi=float(_hi)))
         if tc.scheme == "louis" and tc.louis is not None:
             _louis_updates = {}
             for exp_name, leaf_name in (

@@ -626,6 +626,12 @@ class ExperimentConfig(NamedTuple):
     # scheme's mixing is tapered to zero above this pressure.  None (default)
     # keeps the scheme's own 0.0 = no limit, byte-identical.
     clubb_trop_cloud_top_press: float | None = None
+    # Moisture-only multiplier on CLUBB's q_v eddy diffusivity at the faces
+    # whose sigma lies in ``clubb_q_flux_scale_sigma_band`` (cloud-base mixing
+    # probe, 2026-09-20).  None (default) keeps the scheme's own 1.0,
+    # byte-identical.  Diagnostic CLUBB only.
+    clubb_q_flux_scale: float | None = None
+    clubb_q_flux_scale_sigma_band: tuple[float, float] | None = None
     # Opt-in convective (cumulus) cloud-fraction source (Slingo-1987-inspired surrogate).  The
     # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
     # convection scheme (sbm) holds the column subsaturated, so the convecting
@@ -2211,6 +2217,24 @@ class ExperimentConfig(NamedTuple):
                 f"turbulence={self.turbulence!r} (also refused with a "
                 "turbulence_override, which bypasses the CLUBB branch)"
             )
+        if self.clubb_q_flux_scale is not None:
+            if self.turbulence != "clubb":
+                errors.append(
+                    "clubb_q_flux_scale is a CLUBB field; got "
+                    f"turbulence={self.turbulence!r}")
+            if self.clubb_prognostic:
+                errors.append(
+                    "clubb_q_flux_scale is a diagnostic-CLUBB mechanism probe; "
+                    "the prognostic closure does not read it")
+            band = self.clubb_q_flux_scale_sigma_band
+            if band is None or not (0.0 <= band[0] < band[1] <= 1.0):
+                errors.append(
+                    "clubb_q_flux_scale needs clubb_q_flux_scale_sigma_band "
+                    f"(lo, hi) with 0 <= lo < hi <= 1, got {band!r}")
+        elif self.clubb_q_flux_scale_sigma_band is not None:
+            errors.append(
+                "clubb_q_flux_scale_sigma_band is set but clubb_q_flux_scale is "
+                "None: the band does nothing on its own")
         _valid_surface_bulk = VALID_SURFACE_BULK
         if self.surface_bulk_scheme not in _valid_surface_bulk:
             errors.append(
@@ -3098,6 +3122,8 @@ class ExperimentConfig(NamedTuple):
             # 5e4 Pa would switch the boundary-layer scheme off in the free
             # troposphere, which is not what a taper is for.
             ("clubb_trop_cloud_top_press", 0.0, 5.0e4),
+            # 1 = byte-identical; the probe's own spec bounds (CLUBBConfig).
+            ("clubb_q_flux_scale", 0.1, 10.0),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):

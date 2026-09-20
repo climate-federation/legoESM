@@ -851,6 +851,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CLUBB upper domain limit [Pa] (CAM "
                              "trop_cloud_top_press): mixing tapered to zero "
                              "above it. Default: the scheme's own 0 = no limit.")
+    parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
+                        dest="clubb_q_flux_scale",
+                        help="Moisture-only multiplier on CLUBB's q_v eddy "
+                             "diffusivity at the faces whose sigma lies in "
+                             "--clubb-q-flux-scale-sigma-band (cloud-base "
+                             "mixing probe). Default: the scheme's own 1.0.")
+    parser.add_argument("--clubb-q-flux-scale-sigma-band", nargs=2, type=float,
+                        default=None, dest="clubb_q_flux_scale_sigma_band",
+                        metavar=("LO", "HI"),
+                        help="Sigma band (lo hi) of faces --clubb-q-flux-scale "
+                             "acts on; required with it.")
     parser.add_argument("--clubb-prognostic", dest="clubb_prognostic",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Run CLUBB as a PROGNOSTIC higher-order closure: "
@@ -2110,6 +2121,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
+        clubb_q_flux_scale=args.clubb_q_flux_scale,
+        clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
+                                       if args.clubb_q_flux_scale_sigma_band
+                                       is not None else None),
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
