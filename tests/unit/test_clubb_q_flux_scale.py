@@ -96,3 +96,26 @@ def test_prognostic_path_refuses_the_knob():
             col["p_full"], col["p_half"], col["z_full"], col["z_half"],
             col["T_sfc"], col["q_sfc"], col["rho"], dt=1800.0,
             config=CLUBBConfig(prognostic=True, **_BAND))
+
+
+def test_helper_scales_exactly_the_in_band_faces_per_column():
+    """Direct check of staggering and value (codex): distinct diffusivities at
+    every interior face, a different surface pressure per column, band edges
+    placed BETWEEN faces (a face exactly on an edge is float-ambiguous through
+    p_half / p_s); every face outside the band is bit-identical."""
+    ncol, nlev = 3, 12
+    p_s = np.array([1.0e5, 9.0e4, 1.01e5])
+    sig_half = np.linspace(0.0, 1.0, nlev + 1)          # top-down half levels
+    p_half = jnp.asarray(sig_half[None, :] * p_s[:, None])
+    kh = jnp.asarray(np.arange(1, ncol * (nlev - 1) + 1, dtype=float).reshape(ncol, nlev - 1))
+    lo = 0.5 * float(sig_half[8] + sig_half[9])           # between faces 7 and 8
+    hi = 0.5 * float(sig_half[10] + sig_half[11])         # between faces 9 and 10
+    out = np.asarray(scale_q_diffusivity_in_band(
+        kh, p_half, CLUBBConfig(q_flux_scale=2.5, q_flux_scale_sigma_lo=lo,
+                                q_flux_scale_sigma_hi=hi)))
+    sigma_face = np.asarray(p_half[:, 1:-1] / p_half[:, -1:])
+    expect = np.where((sigma_face >= lo) & (sigma_face <= hi), 2.5 * np.asarray(kh), np.asarray(kh))
+    assert np.array_equal(out, expect)
+    # the band covers interior faces 8 and 9 (p_half[:, 9] and p_half[:, 10]) in every column
+    for c in range(ncol):
+        assert np.array_equal(np.nonzero(out[c] != np.asarray(kh)[c])[0], np.array([8, 9]))
