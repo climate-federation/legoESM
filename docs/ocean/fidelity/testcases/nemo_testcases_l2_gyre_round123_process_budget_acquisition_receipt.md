@@ -269,15 +269,15 @@ map.
 The final focused owner, citation and worktree-stamp suites ended literally:
 
 ```text
-============================= 39 passed in 32.62s ==============================
+============================= 39 passed in 32.38s ==============================
 ```
 
 The earlier failed focused attempt is retained in
 `focused_tests_clean_pre_amendment.log`: it caught a test that applied the
 swallowed-ULP assertion to the 14,400-second layout fixture instead of the
 preregistered unit-timestep counterexample.  Commit `026bffea7e75` corrected
-the test input; no gate or scientific criterion was weakened.  The green
-rerun is `focused_tests_clean.log`.
+the test input; no gate or scientific criterion was weakened.  The final
+green rerun is `focused_tests_final.log`.
 
 The whole ocean test trees were not spent: no production implementation,
 recipe or trajectory changed, and the focused set directly covers every
