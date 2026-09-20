@@ -524,6 +524,15 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo"
+        "/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo"
+        "/eosbn2.f90"),
+    "GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo"
+        "/domqco.f90"),
     "GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo"
         "/trazdf.f90"),
@@ -565,6 +574,29 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 127: compiled N2 inputs, assembly, and acquired state rows ---
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/stprk3.f90:159-168': [
+        'CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )',
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 10],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/eosbn2.f90:1259-1308': [
+        'CASE( np_teos10, np_eos80 )',
+        'pab(ji,jj,jk,jp_sal) = zn / zs * r1_rho0 * ztm', 50],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/eosbn2.f90:1609-1618': [
+        'DO jk =  2,  jpkm1',
+        '/ (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm))) * wmask(ji,jj,jk)', 10],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/domqco.f90:208': (
+        'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 1),
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:132-140': [
+        'll_l2_tra = ( lwp .AND. kt <= nit000 + 1 )',
+        'IF( jpts /= 2 )', 9],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:217-221': [
+        '!-- the tracer fields as tra_zdf RECEIVED them --!',
+        'WRITE(il2_unit) pts(:,:,:,jp_sal,Kbb)', 5],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:332-337': [
+        "WRITE(il2_unit) 'r3t_Kbb",
+        'WRITE(il2_unit) r3t(:,:,Kaa)', 6],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/EXP00/namelist_cfg:124-128': [
+        '&nameos', 'ln_seos     = .false.', 5],
     # --- round 126: compiled vertical operator and closure response ---
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/stprk3_stg.f90:937-944': [
         'IF( ln_zdfmfc  )   CALL tra_mfc',
