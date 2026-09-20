@@ -30,6 +30,25 @@ class SeaIceState(NamedTuple):
     concentration: Field       # Ice areal fraction [0-1]
 
 
+class SI3ColumnState(NamedTuple):
+    """Single-category layered state for the selectable SI3 column path.
+
+    The bulk/category bridge follows ``icethd.F90:140-164``: ``h_i=v_i/a_i``,
+    ``h_s=v_s/a_i`` and layer enthalpies are volumetric J m-3 values while the
+    column is inside thermodynamics.
+    """
+
+    concentration: Field       # a_i [1]
+    h_ice: Field               # h_i=v_i/a_i [m]
+    h_snow: Field              # h_s=v_s/a_i [m]
+    T_surface: Field           # t_su [K]
+    e_ice: Field               # e_i[..., 3] [J/m3]
+    e_snow: Field              # e_s[..., 3] [J/m3]
+    S_bulk: Field              # s_i=sv_i/v_i [PSU]
+    S_layers: Field            # diagnostic option-2 profile [..., 3] [PSU]
+    age_volume: Field          # oa_i/a_i [s]
+
+
 class DynamicSeaIceState(NamedTuple):
     """Full dynamic sea ice state.
 

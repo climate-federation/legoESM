@@ -18,10 +18,18 @@ from legoesm.ice.config import (
     BrineConfig,
     RidgingConfig,
     MeltPondConfig,
+    SI3ThermoConfig,
+    validate_si3_bulk_config,
+    validate_si3_thermo_config,
+)
+from legoesm.ice.constants_config import (
+    IceConstantsConfig,
+    NEMO_SI3_CONSTANTS_CONFIG,
 )
 from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,
+    SI3ColumnState,
     init_dynamic_ice_state,
     distribute_dynamic_state_to_categories,
     dynamic_to_slab,
@@ -78,12 +86,14 @@ from legoesm.ice.shortwave import (
     IceSWResult,
 )
 from legoesm.ice.ponds import step_ponds
+from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card, C1DOMIPL3Card
 
 __all__ = [
     # Config and state
     "SeaIceConfig",
     "SeaIceState",
     "DynamicSeaIceState",
+    "SI3ColumnState",
     "init_dynamic_ice_state",
     "distribute_dynamic_state_to_categories",
     "dynamic_to_slab",
@@ -121,6 +131,11 @@ __all__ = [
     "BrineConfig",
     "RidgingConfig",
     "MeltPondConfig",
+    "SI3ThermoConfig",
+    "validate_si3_bulk_config",
+    "validate_si3_thermo_config",
+    "IceConstantsConfig",
+    "NEMO_SI3_CONSTANTS_CONFIG",
     # Snow physics
     "accumulate_snowfall",
     "combined_conductive_flux",
@@ -141,4 +156,6 @@ __all__ = [
     "IceSWResult",
     # Ponds
     "step_ponds",
+    "build_c1d_omip_l3_card",
+    "C1DOMIPL3Card",
 ]
