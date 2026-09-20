@@ -4357,6 +4357,11 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
+    if getattr(config, "cloud_cap_floor_on", False):
+        raise ValueError(
+            "cloud_cap_floor_on is applied only in the standalone radiation path "
+            "(MPAS / spectral); the finite-volume PhysicsPipeline does not apply it "
+            "and refuses rather than silently running without it.")
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._cloud_conv_cloud_condensate = getattr(
         config, 'cloud_conv_cloud_condensate', None)

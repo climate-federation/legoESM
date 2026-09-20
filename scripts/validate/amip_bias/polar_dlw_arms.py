@@ -65,6 +65,15 @@ def main(argv=None) -> int:
     ap.add_argument("--pin-reff-um", type=float, default=None,
                     help="extra arms: repeat all-sky and every q_c_diag arm with the "
                          "liquid effective radius pinned [um] (number-convention audit)")
+    ap.add_argument("--cap-floor-qc", type=float, nargs="*", default=[],
+                    help="arms: poleward of --cap-floor-lat and below --cap-floor-p, raise the "
+                         "layer cloud fraction to --cap-floor-cf and the grid-mean liquid path to "
+                         "cf * QC * dp/g with QC [kg/kg] in-cloud liquid (radiation only): the "
+                         "'opaque cap clouds' attribution arm, measured offline before it is run")
+    ap.add_argument("--cap-floor-cf", type=float, default=0.8)
+    ap.add_argument("--cap-floor-lat", type=float, default=70.0)
+    ap.add_argument("--cap-floor-p", type=float, default=70000.0, help="[Pa] floor applies below this")
+    ap.add_argument("--no-sundqvist", action="store_true")
     ap.add_argument("--control-tol", type=float, default=20.0,
                     help="max |replay - published| 70-90N rlut [W/m2]")
     args = ap.parse_args(argv)
@@ -110,7 +119,7 @@ def main(argv=None) -> int:
             cos_zenith=mu, sfc_albedo=0.6, sfc_emissivity=0.97, **kw)
         return (np.asarray(out.lw_flux_down[:, -1]), np.asarray(out.lw_flux_up[:, 0]))
 
-    def cloud_kwargs(cfg):
+    def cloud_kwargs(cfg, cap_qc=None):
         # Same call as cloud_layers.analyse_checkpoint (raw number tracers,
         # mirroring the live radiation entry), then the run's overlap treatment.
         conv = col("physstate_conv_precip") if cfg.convective_cloud else None
@@ -118,6 +127,13 @@ def main(argv=None) -> int:
                                          q_cloud=q_c, q_ice=q_i,
                                          n_cloud=col("trc_N_c"), n_ice=col("trc_N_i"),
                                          conv_precip=conv)
+        if cap_qc is not None:
+            capm = (lat_deg >= args.cap_floor_lat)[:, None] & (p_full > args.cap_floor_p)
+            cf_new = jnp.where(capm, jnp.maximum(props.cloud_fraction, args.cap_floor_cf), props.cloud_fraction)
+            lwp_floor = cf_new * cap_qc * jnp.asarray(dp) / constants.g
+            lwp_new = jnp.where(capm, jnp.maximum(props.lwp, lwp_floor), props.lwp)
+            props = props._replace(cloud_fraction=cf_new, lwp=lwp_new,
+                                   lwp_lw=None if props.lwp_lw is None else jnp.where(capm, jnp.maximum(props.lwp_lw, lwp_floor), props.lwp_lw))
         kw = props.to_rrtmg_kwargs()
         lwp, iwp = cl.radiation_paths(props, cfg)
         kw["cloud_path_liq"], kw["cloud_path_ice"] = jnp.asarray(lwp), jnp.asarray(iwp)
@@ -136,11 +152,12 @@ def main(argv=None) -> int:
         arms.append((f"qcd={max(args.q_c_diag):g}+Tio={min(args.t_ice_only):g}",
                      ccfg._replace(q_c_diagnostic=max(args.q_c_diag),
                                    T_ice_only=min(args.t_ice_only))))
-    if ccfg.scheme != "sundqvist":
+    if ccfg.scheme != "sundqvist" and not args.no_sundqvist:
         arms.append(("sundqvist", ccfg._replace(scheme="sundqvist")))
+    arms += [(f"cap_floor qc={q:g}", {"cfg": ccfg, "qc": q}) for q in args.cap_floor_qc]   # CloudConfig IS a tuple: mark with a dict
     if args.pin_reff_um is not None:
         arms += [(f"{n}|re={args.pin_reff_um:g}um", c) for n, c in arms
-                 if c is not None and (n == "all-sky" or n.startswith("q_c_diag"))]
+                 if c is not None and not isinstance(c, dict) and (n == "all-sky" or n.startswith("q_c_diag"))]
 
     print(f"=== {args.run} day {args.day}: surface downward LW arms "
           f"(resolved cover {ccfg.scheme}, saturation {ccfg.saturation_scheme}, "
@@ -153,7 +170,8 @@ def main(argv=None) -> int:
             dlw, olr = solve({})
             cf_tot = np.zeros(T.shape[0]); iwp = np.zeros(T.shape[0]); lwp = np.zeros(T.shape[0])
         else:
-            kw, cf, lwp_l, iwp_l = cloud_kwargs(cfg)
+            kw, cf, lwp_l, iwp_l = (cloud_kwargs(cfg["cfg"], cfg["qc"]) if isinstance(cfg, dict)
+                                    else cloud_kwargs(cfg))
             if "|re=" in name:
                 kw["cloud_r_eff_liq"] = jnp.full_like(kw["cloud_r_eff_liq"], args.pin_reff_um * 1e-6)
             dlw, olr = solve(kw)

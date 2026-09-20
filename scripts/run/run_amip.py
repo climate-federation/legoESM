@@ -873,6 +873,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "against an observed 0.70-0.82. Pairs with "
                              "--snow-age-activation-K, which alone does not "
                              "move it.")
+    parser.add_argument("--cloud-cap-floor", dest="cloud_cap_floor_on",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="ATTRIBUTION LEVER (Arctic self-isolation A/B, arm 1): "
+                             "hand radiation a cloud floor poleward of "
+                             "--cloud-cap-floor-lat-deg below --cloud-cap-floor-p-max-pa "
+                             "(cloud fraction >= --cloud-cap-floor-cf, grid-mean liquid path "
+                             ">= cf * --cloud-cap-floor-q-c * dp/g). Radiation-only; "
+                             "prognostic condensate and diagnostics untouched. Off = production.")
+    parser.add_argument("--cloud-cap-floor-lat-deg", dest="cloud_cap_floor_lat_deg",
+                        type=float, default=None, help="[deg] None = scheme default 70")
+    parser.add_argument("--cloud-cap-floor-p-max-pa", dest="cloud_cap_floor_p_max_pa",
+                        type=float, default=None, help="[Pa] floor applies below this; None = 70000")
+    parser.add_argument("--cloud-cap-floor-cf", dest="cloud_cap_floor_cf",
+                        type=float, default=None, help="imposed cloud fraction; None = 0.8")
+    parser.add_argument("--cloud-cap-floor-q-c", dest="cloud_cap_floor_q_c",
+                        type=float, default=None, help="[kg/kg] imposed in-cloud liquid; None = 5e-5")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -2097,6 +2113,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
+        cloud_cap_floor_on=args.cloud_cap_floor_on,
+        cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
+        cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,
+        cloud_cap_floor_cf=args.cloud_cap_floor_cf,
+        cloud_cap_floor_q_c=args.cloud_cap_floor_q_c,
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,

@@ -298,6 +298,11 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
             cfg, "cloud_clubb_cf_override_floor", None),
         saturation_scheme=getattr(cfg, "cloud_saturation_scheme", None),
         cover_condensate_q_ref=getattr(cfg, "cloud_cover_condensate_q_ref", None),
+        cap_floor_on=getattr(cfg, "cloud_cap_floor_on", None),
+        cap_floor_lat_deg=getattr(cfg, "cloud_cap_floor_lat_deg", None),
+        cap_floor_p_max_pa=getattr(cfg, "cloud_cap_floor_p_max_pa", None),
+        cap_floor_cf=getattr(cfg, "cloud_cap_floor_cf", None),
+        cap_floor_q_c=getattr(cfg, "cloud_cap_floor_q_c", None),
     )
 
 

@@ -677,6 +677,15 @@ class ExperimentConfig(NamedTuple):
     # RH-diagnosed schemes (CloudConfig.cover_condensate_q_ref).  None => scheme
     # default (0.0 = off).  Paired-arm lever for the invisible-ice defect.
     cloud_cover_condensate_q_ref: float | None = None
+    # Polar-cap radiative cloud floor (CloudConfig.cap_floor_*): an attribution
+    # lever for the 2026-09 Arctic self-isolation A/B, radiation-only, MPAS /
+    # spectral standalone radiation path only (the FV pipeline refuses it).
+    # Off in production; None on the floats => CloudConfig defaults.
+    cloud_cap_floor_on: bool = False
+    cloud_cap_floor_lat_deg: float | None = None
+    cloud_cap_floor_p_max_pa: float | None = None
+    cloud_cap_floor_cf: float | None = None
+    cloud_cap_floor_q_c: float | None = None
     # Snow grain-growth activation temperature [K] (BATS ~5000): the snow-age
     # clock accumulates dt*exp(A*(1/T_freeze - 1/T_snow)) so cold dry snow keeps
     # its fresh albedo. None => LandAlbedoConfig default (0.0 = off, the
@@ -3016,6 +3025,10 @@ class ExperimentConfig(NamedTuple):
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
             ("cloud_cover_condensate_q_ref", 1.0e-6, 1.0e-3),
+            ("cloud_cap_floor_lat_deg", 40.0, 89.0),
+            ("cloud_cap_floor_p_max_pa", 20000.0, 100000.0),
+            ("cloud_cap_floor_cf", 0.1, 1.0),
+            ("cloud_cap_floor_q_c", 1.0e-6, 1.0e-3),
             ("snow_age_activation_K", 0.0, 20000.0),
             # 0.5 d = melting spring snow; 400 d spans the cold-plateau
             # timescale the literature supports (Warren & Wiscombe 1980).

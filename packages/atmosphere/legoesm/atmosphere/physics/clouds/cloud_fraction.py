@@ -1315,3 +1315,23 @@ def compute_cloud_properties(
         lwp_lw=lwp_lw,
         iwp_lw=iwp_lw,
     )
+
+
+def apply_cap_cloud_floor(props: CloudProperties, lat_rad, p_full, dp, config: CloudConfig) -> CloudProperties:
+    """Polar-cap radiative cloud floor (attribution lever, see ``CloudConfig``).
+
+    Poleward of ``config.cap_floor_lat_deg`` and where ``p_full > cap_floor_p_max_pa``
+    the layer cloud fraction becomes ``max(cf, cap_floor_cf)`` and the grid-mean
+    liquid path ``max(lwp, cf_new * cap_floor_q_c * dp / g)`` (the LW-only path
+    too when the scheme carries one).  Ice paths, effective radii and every
+    other layer are returned unchanged.  ``lat_rad`` is the radiation backend's
+    latitude [rad]; ``dp`` the layer pressure thickness [Pa].
+    """
+    if not config.cap_floor_on:
+        return props
+    cap = (lat_rad >= jnp.deg2rad(config.cap_floor_lat_deg))[:, None] & (p_full > config.cap_floor_p_max_pa)
+    cf_new = jnp.where(cap, jnp.maximum(props.cloud_fraction, config.cap_floor_cf), props.cloud_fraction)
+    lwp_floor = cf_new * config.cap_floor_q_c * dp / constants.g
+    lwp_new = jnp.where(cap, jnp.maximum(props.lwp, lwp_floor), props.lwp)
+    lwp_lw = None if props.lwp_lw is None else jnp.where(cap, jnp.maximum(props.lwp_lw, lwp_floor), props.lwp_lw)
+    return props._replace(cloud_fraction=cf_new, lwp=lwp_new, lwp_lw=lwp_lw)
