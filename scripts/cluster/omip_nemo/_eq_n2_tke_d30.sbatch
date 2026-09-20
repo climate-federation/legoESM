@@ -19,6 +19,20 @@
 #   N2 ratio <<1 -> we are too WELL mixed, which would contradict the
 #                   diffusivity measurement and means one of the two probes is
 #                   wrong -- report as a conflict, do not pick a winner.
+#
+# SHEAR, added after the N2 answer came back 1.50 (too small to carry a 200x
+# coefficient deficit, so the energy is what is missing). PRE-REGISTERED on the
+# same 15-65 m band:
+#   shear^2 ratio ~0.25 -> the collapse is SELF-CONSISTENT: half the current,
+#                          a quarter the production, and the coefficient and
+#                          the current hold each other down.
+#   shear^2 ratio ~1    -> production is AVAILABLE and the energy still is not
+#                          there, so the defect is INSIDE the TKE equation
+#                          (dissipation, surface source, or its transport).
+#   shear^2 ratio >>1   -> conflict with the half-strength undercurrent on
+#                          record; report it, do not pick a winner.
+# Ri = N2/shear^2 from two measured fields is also an INDEPENDENT check on the
+# Ri ~1.16 vs ~0.27 that was inverted from the Prandtl numbers.
 set -uo pipefail
 REPO=/burg-archive/glab/users/pg2328/_fluxacc_wt
 MAIN=/burg-archive/glab/users/pg2328/legoESM
@@ -34,6 +48,8 @@ $PY scripts/validate/ocean_fidelity/equatorial_n2_vs_nemo.py \
     --snapshot $RUN/snapshot_day0030.npz \
     --nemo-gridt $GW/ORCA1_5d_20000101_20000331_grid_T.nc \
     --nemo-gridw $GW/ORCA1_5d_20000101_20000331_grid_W.nc \
+    --nemo-gridu $GW/ORCA1_5d_20000101_20000331_grid_U.nc \
+    --nemo-gridv $GW/ORCA1_5d_20000101_20000331_grid_V.nc \
     --nemo-day 30 \
     --mesh-mask $MAIN/data/grids/eORCA1.2_mesh_mask.nc \
     --out-json $MAIN/results/omip_nemo/eq_n2_tke_d30.json

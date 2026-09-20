@@ -61,6 +61,14 @@ from global_tracer_content import (  # noqa: E402
     _native, load_mesh_depth_1d, load_mesh_latitude, load_mesh_longitude,
     load_mesh_metrics,
 )
+# The MATCHED pair, already written and already paired: our staggered u/v carry
+# an extra face column/row, NEMO's carry none, and each needs its own transform
+# onto T points. Comparing a face velocity against a cell-centre average is the
+# exact staggering error that put a retracted "1.2 % agreement" into a merged
+# PR, so both sides are moved to T points here rather than one of them.
+from frozen_column_tke_twin import (  # noqa: E402
+    centre_uv_collocated, centre_uv_extra_column,
+)
 
 #: Bands matched to the diffusivity probe so the two can be read side by side.
 _BANDS = (("surface 15-65 m", 15.0, 65.0),
@@ -98,6 +106,27 @@ def bn2(T, S, gdept, gdepw_int, e3w_int):
         e3w_int=jnp.asarray(e3w_int)))
 
 
+def shear2(u, v, e3w_int):
+    """|du/dz|^2 + |dv/dz|^2 at interior interfaces, level-LAST arrays.
+
+    Differenced across the SAME interfaces N2 uses and divided by the SAME raw
+    e3w, so the two quantities land on one ladder and their ratio is a real
+    Richardson number rather than two fields on neighbouring half-levels.
+
+    Both sides go through this one function from their own u/v, so the C-grid
+    staggering -- identical on our tripole and on NEMO's eORCA1 -- cancels.
+    No rotation is applied: the box straddles no fold and the squared sum of
+    the two components is invariant under the grid rotation anyway.
+
+    Both sides arrive here on T POINTS, each through its own centring
+    transform, so neither is a face velocity paired against a cell average.
+    """
+    dz = e3w_int[None, None, :]
+    du = (u[..., :-1] - u[..., 1:]) / dz
+    dv = (v[..., :-1] - v[..., 1:]) / dz
+    return du * du + dv * dv
+
+
 def band_median(field, wet, box, z_int, lo, hi):
     """Median over the box and depth band, wet interfaces only."""
     sel = (z_int >= lo) & (z_int < hi)
@@ -121,6 +150,14 @@ def main() -> int:
     p.add_argument("--nemo-gridw", default=None,
                    help="Optional grid_W, for NEMO's archived avm/avt so the "
                         "implied mixing lengths can be compared.")
+    p.add_argument("--nemo-gridu", default=None,
+                   help="NEMO grid_U. With --nemo-gridv this adds the VERTICAL "
+                        "SHEAR on both sides, computed the same way from each "
+                        "side's own u/v, so the staggering cancels in the "
+                        "ratio. Shear production is the dominant TKE source at "
+                        "the equator, so this is what separates a production "
+                        "failure from a defect inside the TKE equation.")
+    p.add_argument("--nemo-gridv", default=None)
     p.add_argument("--mesh-mask", required=True)
     p.add_argument("--lat-halfwidth", type=float, default=2.0)
     p.add_argument("--lon-west", type=float, default=200.0)
@@ -179,6 +216,35 @@ def main() -> int:
     n2_our = bn2(T_our, S_our, gdept, gdepw_int, e3w_int)
     n2_nemo = bn2(T_nemo, S_nemo, gdept, gdepw_int, e3w_int)
 
+    s2_our = s2_nemo = None
+    if a.nemo_gridu and a.nemo_gridv:
+        for k in ("u", "v"):
+            if k not in z:
+                raise SystemExit(f"FATAL: {a.snapshot} lacks '{k}'; the shear "
+                                 "comparison needs both velocity components")
+        u_c, v_c = centre_uv_extra_column(z["u"], z["v"])
+        s2_our = shear2(np.transpose(_native(u_c), (1, 2, 0)),
+                        np.transpose(_native(v_c), (1, 2, 0)), e3w_int)
+        def _vel(path, names, what):
+            d = nc.Dataset(path)
+            try:
+                nm = next((n for n in names if n in d.variables), None)
+                if nm is None:
+                    raise SystemExit(f"FATAL: no {what} in {path}; looked for "
+                                     + ", ".join(names))
+                print(f"[nemo] {what}={nm}")
+                arr = np.ma.filled(
+                    np.ma.masked_invalid(d.variables[nm][rec]), 0.0)
+            finally:
+                d.close()
+            return np.transpose(np.asarray(arr, dtype=np.float64), (1, 2, 0))
+        un, vn = centre_uv_collocated(
+            _vel(a.nemo_gridu, ("uo", "vozocrtx", "uoce"), "u"),
+            _vel(a.nemo_gridv, ("vo", "vomecrty", "voce"), "v"))
+        s2_nemo = shear2(un, vn, e3w_int)
+        if s2_nemo.shape != s2_our.shape:
+            raise SystemExit(f"NEMO shear {s2_nemo.shape} vs ours {s2_our.shape}")
+
     # Both cells touching an interface must be wet, or a wet/dry interface
     # differences real water against NEMO's T=0/S=0 fill and reads unstable.
     wet_c = (tmask > 0.5)                                   # (nlev, nj, ni)
@@ -211,8 +277,27 @@ def main() -> int:
                "tke_ours": eo, "n_interfaces": n}
         print(f"{name:22s} {n2o:10.3e} {n2n:10.3e} {rn2:6.2f}"
               f" {eo:10.3e} {'':>10s} {n:8d}")
+        if s2_our is not None:
+            so, _ = band_median(s2_our, wet_i, box, gdepw_int, lo, hi)
+            sn, _ = band_median(s2_nemo, wet_i, box, gdepw_int, lo, hi)
+            rs2 = so / sn if sn else float("nan")
+            row.update({"shear2_ours": so, "shear2_nemo": sn,
+                        "shear2_ratio": rs2,
+                        "ri_ours": n2o / so if so else float("nan"),
+                        "ri_nemo": n2n / sn if sn else float("nan")})
+            print(f"{'':22s} shear^2 {so:10.3e} {sn:10.3e} (x{rs2:.2f})"
+                  f"   Ri {row['ri_ours']:8.3f} {row['ri_nemo']:8.3f}")
         report["bands"][name] = row
 
+    if s2_our is not None:
+        print("\nSHEAR: a ratio near 0.25 (half the velocity difference) makes "
+              "the collapse SELF-CONSISTENT -- weak current, weak production, "
+              "weak coefficient, weaker current. A ratio near 1 puts the "
+              "defect INSIDE the TKE equation, because production is then "
+              "available and the energy still is not there.")
+        print("Ri here is N2/shear^2 from the two MEASURED fields on one "
+              "ladder; it is not the Prandtl inversion and the two are "
+              "independent estimates of the same number.")
     print("\nREAD IT AS: N2 ratio near 1 exonerates stratification, so a "
           "starved K is then an ENERGY or LENGTH problem. A ratio well above 1 "
           "means our own warm surface is restratifying the column and shutting "
