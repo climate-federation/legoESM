@@ -3034,7 +3034,11 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
     _write_ocean_run_manifest(
         args, model, dt, total_days, out,
         mesh=str(args.fesom_mesh_dir),
-        nlev=int(np.asarray(state.inner.T).shape[-1]))
+        # state.nlev (= mesh.nl - 1), NOT inner.T.shape[-1]: the inner array
+        # carries a PADDING SLOT past the last physical level, so the shape
+        # would record 76 levels for a 75-level mesh (codex, verified against
+        # FesomOceanState.T, which slices [:, :self.nlev]).
+        nlev=int(state.nlev))
     if n_steps <= 0:
         raise SystemExit(f"fesom forced loop: non-positive duration "
                          f"({total_days} days at dt={dt}s -> {n_steps} "

@@ -322,10 +322,17 @@ def test_the_shared_writer_records_the_resolved_config_and_command_line(
     m = read_run_manifest(path)
     assert m["run"]["command_line"], "no command line = the run is undescribed"
     assert m["config"]["config_hash"]
+    # The run controls live under config.resolved_config, NOT config -- the
+    # first version of this test asserted config["mesh"] and failed on a
+    # KeyError. The EXPECTATION was wrong, not the writer.
+    rc = m["config"]["resolved_config"]
+    assert rc["runtime_config"], "the resolved model config is the half the "\
+        "hand-rolled fesom manifest never carried"
     # The overrides must WIN over the argparse values, or a fesom manifest
     # records a mesh and a level count the run never used.
-    assert m["config"]["mesh"] == "/some/fesom/mesh"
-    assert m["config"]["nlev"] == 75
+    assert rc["mesh"] == "/some/fesom/mesh"
+    assert rc["nlev"] == 75
+    assert rc["dt_seconds"] == 1800.0
 
 
 def test_the_fesom_forced_lane_calls_the_shared_writer_and_hand_rolls_nothing():
@@ -348,3 +355,21 @@ def test_the_fesom_forced_lane_calls_the_shared_writer_and_hand_rolls_nothing():
     code = "\n".join(ln.split("#", 1)[0] for ln in body.splitlines())
     assert "_write_ocean_run_manifest(" in code
     assert "fesom_mesh_dir" in code
+
+
+def test_the_fesom_manifest_records_physical_levels_not_the_padding_slot():
+    """``inner.T`` has one slot MORE than the mesh has levels.
+
+    ``FesomOceanState.T`` slices ``[:, :self.nlev]`` and ``nlev = mesh.nl - 1``,
+    so reading the raw inner array's last axis records 76 levels for a
+    75-level mesh (codex).  Non-vacuous in both directions: the shape read
+    must be gone AND the state attribute must be used.
+    """
+    from pathlib import Path
+    import scripts.run.run_omip_core2 as mod
+
+    body = (Path(mod.__file__).read_text()
+            .split("def run_fesom_forced_loop(", 1)[1].split("\ndef ", 1)[0])
+    code = "\n".join(ln.split("#", 1)[0] for ln in body.splitlines())
+    assert "state.inner.T).shape[-1]" not in code
+    assert "nlev=int(state.nlev)" in code
