@@ -617,12 +617,19 @@ def _process_math_self_check(failures: list[str]) -> None:
         record, np.ones(shape[:-1] + (shape[-1] - 1,), dtype=bool))
     if not control["raw_surface_rhs_increment_moved"]:
         failures.append("process surface-boundary ULP control is inert")
+    decoded_ulp_moves = sum(
+        control["decoded_temperature_rows_moved"].values())
+    if decoded_ulp_moves != 0:
+        failures.append("synthetic raw RHS ULP unexpectedly reached a decoded "
+                        "temperature row")
     propagated = _process_sbc_effect_control(
         record, np.ones(shape[:-1] + (shape[-1] - 1,), dtype=bool))
     if not propagated["decoded_temperature_rows_moved"]["surface_boundary"]:
         failures.append("process surface-boundary effect control is inert")
     print(f"  process layout {PROCESS_RECORD_BYTES} bytes and synthetic "
           "endpoint closure -- OK")
+    print("  raw RHS ULP moves its decoded RHS increment but 0 temperature "
+          "rows; effect-scale plant moves the temperature budget -- OK")
 
 
 # ------------------------------------------------------- the per-step walk ---

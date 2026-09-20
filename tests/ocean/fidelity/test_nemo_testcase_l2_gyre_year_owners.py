@@ -114,6 +114,10 @@ def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
         record, np.ones(endpoint.shape, dtype=bool))
     assert control["raw_surface_rhs_increment_moved"]
     assert control["new_uint64"] != control["old_uint64"]
+    # The frozen preregistration assumed one raw RHS ULP necessarily reaches
+    # the temperature budget.  This calibrated counterexample proves why the
+    # distinct effect-scale plant is required instead of pretending it did.
+    assert sum(control["decoded_temperature_rows_moved"].values()) == 0
     propagated = harness._process_sbc_effect_control(
         record, np.ones(endpoint.shape, dtype=bool))
     assert propagated["decoded_temperature_rows_moved"]["surface_boundary"]
