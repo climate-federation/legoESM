@@ -138,9 +138,8 @@ verdict to override.
 
 All commands used the required CPU/fp64 environment.
 
-* The direct record-gate and receipt-citation suites are rerun from the clean
-  final receipt commit below; their exact terminal summary is retained in the
-  evidence root.
+* The direct record-gate and receipt-citation suites reported exactly
+  `23 passed in 4.00s`.
 * The final unplanted citation run found five citations, zero unmapped
   citations, zero failures, an empty whole-map audit, all nine internal
   controls firing, and `status: PASS`.
