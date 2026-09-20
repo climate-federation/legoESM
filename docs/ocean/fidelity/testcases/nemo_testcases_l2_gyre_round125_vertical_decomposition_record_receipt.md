@@ -215,9 +215,14 @@ end-to-end Round-125 record.  The compiled-source citation test reported
 `16 passed in 1.88s`.  `bash -n`, Python byte compilation and `git diff
 --check` also pass.
 
-The final clean-tree focused suite and receipt citation/shift controls are
-recorded under `round125/`; every final summary and plant exit is reported by
-the committed evidence at handoff.
+The final clean-tree focused owner, citation and worktree-stamp suite reported
+`45 passed in 33.72s`; its JUnit is `round125/focused_tests.xml`.  The receipt
+citation gate found eight citations, zero unmapped citations, zero citation
+failures and zero map-audit failures in `round125/citation_gate.json`.
+Shifting the compiled writer-arm citation by two lines produced
+`SYMBOL-NOT-AT-LINE`, printed no PASS verdict and exited 1; the report and log
+are `round125/citation_gate_shift_plant.json` and
+`round125/citation_gate_shift_plant.log`.
 
 ## OPEN — round 126
 
