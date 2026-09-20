@@ -7936,6 +7936,39 @@ def main() -> int:
             f"{' and '.join(_gm_op_flags)} and --no-gm-redi are mutually "
             "exclusive: the former select the GM/Redi operator, the latter "
             "disables GM/Redi entirely.")
+    # SAME CLASS AGAIN, found by a manifest audit on 2026-09-20. These six are
+    # read only inside build_tripole (the two Redi knobs) or build_tripole and
+    # build_fesom (the other four); build_mpas_ocean does not accept them at
+    # all. Passing them with --grid mpas therefore changed NOTHING while the
+    # run reported success -- which is how the MPAS lane came to run library
+    # defaults for the whole lateral-mixing and GM/Redi stack while its sbatch
+    # card looked harmonized with the tripole's. Every "MPAS confirms"
+    # statement in the cross-grid campaign rests on that silence.
+    #
+    # Each test fires only when the flag was actually SET, so a default-valued
+    # MPAS run is untouched.
+    _tripole_only = [n for n, v in (("--redi-coefficient", args.redi_coefficient),
+                                    ("--redi-aht0", args.redi_aht0))
+                     if v is not None]
+    if _tripole_only and args.grid != "tripole":
+        raise SystemExit(
+            f"{' and '.join(_tripole_only)} is wired for --grid tripole only "
+            f"(the Redi coefficient lives in build_tripole); got --grid "
+            f"{args.grid!r}. It would have been silently discarded.")
+    _not_on_mpas = [n for n, v in (("--momentum-rk3", args.momentum_rk3 or None),
+                                   ("--adaptive-implicit-vertadv",
+                                    args.adaptive_implicit_vertadv or None),
+                                   ("--min-levels",
+                                    args.min_levels if args.min_levels != 1
+                                    else None),
+                                   ("--smag-cfl-safety", args.smag_cfl_safety))
+                    if v is not None]
+    if _not_on_mpas and args.grid == "mpas":
+        raise SystemExit(
+            f"{' and '.join(_not_on_mpas)} is not wired into the MPAS lane "
+            f"(build_mpas_ocean does not accept it); it would have been "
+            f"silently discarded. Drop the flag, or wire it through the "
+            f"builder first.")
     # ORDERED MOST-SPECIFIC-FIRST, and this one is the most specific: a
     # channel selected for a restoring that is switched off.  The previous
     # ordering fixed only the closure check, so `water_flux` ALONE still
