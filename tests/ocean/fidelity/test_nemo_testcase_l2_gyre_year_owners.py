@@ -431,6 +431,34 @@ def test_round128_temperature_telescope_and_registry_plant(harness):
             nemo, nemo + incoming, inert_deltas, wet)
 
 
+def test_round128_weighted_spatial_census_broadcasts_regions(harness):
+    weights = np.ones((2, 3, 4), dtype=np.float64)
+    depth = np.broadcast_to(
+        np.asarray([25.0, 250.0, 1250.0, 2000.0]), weights.shape)
+    west = np.asarray([[True, False, False], [True, False, False]])
+    interior = np.asarray([[False, True, False], [False, True, False]])
+    east = np.asarray([[False, False, True], [False, False, True]])
+    south = np.asarray([[True, True, True], [False, False, False]])
+    regions = {
+        "west_third": west, "interior_third": interior,
+        "east_third": east,
+        f"emp_south_le_{harness.EMP_SPLIT_LAT_DEG}N": south,
+        f"emp_north_gt_{harness.EMP_SPLIT_LAT_DEG}N": ~south,
+    }
+    census = harness._weighted_trigger_spatial_census(
+        weights, depth, regions)
+    assert census["absolute_cell_equivalents"] == 24.0
+    assert census["depth"] == {
+        "0_100m": 6.0, "100_1000m": 6.0, "below_1000m": 12.0}
+    assert census["region"]["west_third"] == 8.0
+    assert census["region"]["interior_third"] == 8.0
+    assert census["region"]["east_third"] == 8.0
+
+    with pytest.raises(harness.GateError, match="depth shape differs"):
+        harness._weighted_trigger_spatial_census(
+            weights, depth[..., :-1], regions)
+
+
 def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     source_patch = (PROCESS_CARD / "stprk3_stg_round123.patch").read_text()
     removed = [line for line in source_patch.splitlines()

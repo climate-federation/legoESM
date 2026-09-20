@@ -4625,8 +4625,9 @@ def _weighted_trigger_spatial_census(
         "absolute_cell_equivalents": float(np.sum(weights)),
         "depth": {name: float(np.sum(weights[selected]))
                   for name, selected in depth_masks.items()},
-        "region": {name: float(np.sum(
-            weights[regions[name][..., None]])) for name in region_names},
+        "region": {name: float(np.sum(weights[np.broadcast_to(
+            regions[name][..., None], weights.shape)]))
+            for name in region_names},
     }
 
 
