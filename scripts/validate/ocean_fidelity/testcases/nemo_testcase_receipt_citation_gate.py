@@ -221,6 +221,10 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3.f90"),
     "GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/restart.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/restart.f90"),
+    "GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90"),
     # Round 92 binds the operand diagnosis to the exact acquired Round-90
     # compiled card, including its write-only recorder.
     "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -548,6 +552,30 @@ CITATION_MAP = {
         "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )",
         "CALL iom_rstput( kt, nitrst, numrow, 'sn'  , ts(:,:,:,jp_sal,Kbb) )",
         5],
+    # --- round 123: stage-3 process order and implicit tracer content ---
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3_stg.f90:812,843,849': [
+        'ts(:,:,:,jn,Krhs) = 0._wp',
+        'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )',
+        'CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )',
+        3],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3_stg.f90:915,930,944': [
+        'CALL tra_qsr( kstp, Kmm, ts, Krhs )',
+        'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 3],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3_stg.f90:902,933,934,935,937,939,953': [
+        'IF( ln_bdy     )   CALL bdy_tra_dmp',
+        'IF( ln_trabbc  )   CALL tra_bbc',
+        'IF( ln_trabbl  )   CALL tra_bbl',
+        'IF( ln_tradmp  )   CALL tra_dmp',
+        'IF( ln_zdfmfc  )   CALL tra_mfc',
+        'CALL tra_osm( kstp,      Kmm, ts, Krhs )',
+        'IF( ln_zdfnpc  )   CALL tra_npc', 7],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90:546-560': [
+        'pt(ji,jj,1,jn,Kaa) =       (e3t_3d(ji,jj,1)',
+        '& + p2dt * (e3t_3d(ji,jj,jk)', 15],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90:563-578': [
+        'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk)',
+        '&             / zwt(ji,jk) * tmask(ji,jj,jk)', 16],
     # --- round 108: configured TEOS-10 producer and first bn2 statement ---
     'GYRE_OMIP_L2_P3_SM_R101TKEW/EXP00/namelist_cfg:126-128': [
         'ln_teos10   = .true.', 'ln_seos     = .false.', 3],
