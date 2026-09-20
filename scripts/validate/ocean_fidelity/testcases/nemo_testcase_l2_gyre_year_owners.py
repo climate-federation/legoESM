@@ -48,7 +48,8 @@ MODES
                      two masks differ.
   --self-check       the arithmetic and every plant.
 
-PLANTS (each exits NON-ZERO; each is exercised by the committed unit test)
+PLANTS (each exits NON-ZERO; controls have committed synthetic tests and the
+record-backed plants are persisted in their round evidence)
   forcing-phase            evaluates legoESM's forcing one step late
   forcing-qsr-pi           swaps usrdef_sbc's literal 3.1415 for rpi
   forcing-nyear            restores the (nyear-1) subtraction, as if year 2
