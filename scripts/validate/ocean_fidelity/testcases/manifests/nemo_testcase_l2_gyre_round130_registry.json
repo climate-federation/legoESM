@@ -408,13 +408,18 @@
           },
           {
             "artifact": "plant",
-            "pointer": "/stage_twin/assignment_execution_discriminator/rows",
-            "kind": "filtered-all-field",
-            "where": {
-              "execution": "production step"
-            },
-            "field": "clean_n_unequal",
+            "pointer": "/stage_twin/assignment_execution_discriminator/rows/2/clean_n_unequal",
             "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage_twin/assignment_execution_discriminator/rows/6/clean_n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage_twin/assignment_execution_discriminator/rows/2/n_unequal",
+            "equals": 1
           },
           {
             "artifact": "plant",
