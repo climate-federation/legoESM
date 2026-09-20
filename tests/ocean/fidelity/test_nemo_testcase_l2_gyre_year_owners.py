@@ -285,6 +285,41 @@ def test_round124_process_hook_is_private_and_card_guarded():
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 tracer_process_trace="public-selector"))
 
+    # Round 126's larger vertical return graph must remain a distinct observer
+    # so it cannot silently change Round 124's process-boundary fusion control.
+    with pytest.raises(ValueError, match="requires tracer_process_trace"):
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                vertical_solve_trace=True))
+    vertical = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(), vertical_solve_trace=True))
+    assert vertical._nemo_ws_test_hooks.vertical_solve_trace is True
+
+
+def test_round126_literal_matrix_and_solve_controls_are_nonvacuous(harness):
+    shape = (2, 3, 4)
+    wet = np.ones(shape, dtype=bool)
+    K = np.full(shape[:-1] + (shape[-1] - 1,), 1.2e-5)
+    e3t = np.broadcast_to(np.array([10.0, 20.0, 30.0, 40.0]), shape)
+    e3w = np.broadcast_to(np.array([15.0, 25.0, 35.0]), K.shape)
+    lower, diagonal, upper = harness._literal_vertical_matrix(
+        K, e3t, e3w, wet)
+    constant = np.full(shape, 7.0)
+    content = e3t * constant
+    solved = harness._literal_vertical_solve(
+        content, lower, diagonal, upper, wet)
+    assert np.max(np.abs(solved - constant)) < 4.0e-15
+
+    planted = diagonal.copy()
+    planted[0, 0, 0] = np.nextafter(planted[0, 0, 0], np.inf)
+    assert harness._different_cells(diagonal, planted, wet) == 1
+    moved = harness._literal_vertical_solve(
+        content, lower, planted, upper, wet)
+    assert harness._different_cells(solved, moved, wet) > 0
+
 
 def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     source_patch = (PROCESS_CARD / "stprk3_stg_round123.patch").read_text()

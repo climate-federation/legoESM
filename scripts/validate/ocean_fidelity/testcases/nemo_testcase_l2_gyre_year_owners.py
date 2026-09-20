@@ -1247,6 +1247,12 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
     trace_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_process_trace=()))
+    vertical_model = (
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                tracer_process_trace=(), vertical_solve_trace=True))
+        if include_vertical else trace_model)
     plant_index = tuple(int(x) for x in np.argwhere(wet)[0])
     plant_delta = float(np.ldexp(1.0, -40))
     plant_model = LatLonCGridOceanModel(
@@ -1302,10 +1308,20 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
         trace = trace_model.step(
             state, dt=card.dt_s, freshwater=freshwater,
             surface_forcing=surface)
-        reference = ordinary_model.step(
-            state, dt=card.dt_s, freshwater=freshwater,
-            surface_forcing=surface)
+        vertical_trace = (
+            vertical_model.step(
+                state, dt=card.dt_s, freshwater=freshwater,
+                surface_forcing=surface)
+            if include_vertical else trace)
+        # ``step`` replaces each write-only result's state_after with its own
+        # independently compiled ordinary production call.  Use the unchanged
+        # Round-124 observer's copy as the trajectory; comparing the vertical
+        # observer against it proves both reference calls agree byte-for-byte.
+        reference = trace.state_after
         unequal_bytes = _state_bit_mismatches(trace.state_after, reference)
+        if include_vertical:
+            unequal_bytes += _state_bit_mismatches(
+                vertical_trace.state_after, reference)
         total_unequal_bytes += unequal_bytes
         max_step_unequal_bytes = max(max_step_unequal_bytes, unequal_bytes)
         require(unequal_bytes == 0,
@@ -1319,10 +1335,11 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
                 trace, planted, wet, plant_index, plant_delta)
             if include_vertical:
                 vertical_effect_control = _vertical_effect_control(
-                    trace_model, state, freshwater, surface, trace, wet)
+                    vertical_model, state, freshwater, surface,
+                    vertical_trace, wet)
         frame = _trace_frame(trace)
         if include_vertical:
-            frame.update(_vertical_trace_frame(trace))
+            frame.update(_vertical_trace_frame(vertical_trace))
         index = kt - PROCESS_START_STEP
         for name in trace_fields:
             require(frame[name].shape == maps[name].shape[1:],

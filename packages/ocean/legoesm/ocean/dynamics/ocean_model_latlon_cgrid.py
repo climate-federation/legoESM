@@ -1330,6 +1330,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     bn2_alpha_beta_override: object = None  # Recorded-entry operator input.
     bn2_tracer_override: object = None  # Recorded-entry T/S operator input.
     tracer_process_trace: object = None  # Round-124 write-only trace / plant.
+    # Add the exact tracer-ZDF operands to the process return.  Kept separate
+    # so Round 124's smaller return graph remains an unchanged fusion control;
+    # Round 126 runs both observers from the same ordinary entry state.
+    vertical_solve_trace: bool = False
 
 
 def rk3_stage_velocity_update(
@@ -2437,6 +2441,10 @@ class LatLonCGridOceanModel:
                     "stage-3 FCT pair hook requires "
                     "tracer_time_integrator='rk3_ws'")
         _process_trace = self._nemo_ws_test_hooks.tracer_process_trace
+        if (self._nemo_ws_test_hooks.vertical_solve_trace
+                and _process_trace is None):
+            raise ValueError(
+                "vertical_solve_trace requires tracer_process_trace")
         if _process_trace is not None:
             if not isinstance(_process_trace, tuple) or len(
                     _process_trace) not in (0, 4):
@@ -8360,6 +8368,9 @@ class LatLonCGridOceanModel:
             _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new, z_coord=z_coord, config=config, grid=grid)
 
         tke_new = None
+        _return_vertical_solve_trace = (
+            _return_tracer_process_trace
+            and self._nemo_ws_test_hooks.vertical_solve_trace)
         if _cfg_b.implicit_vertical_mixing and _apply_implicit_vmix:
             if self._tke_prognostic_active():
                 # PROGNOSTIC TKE: seed from the carried state.tke, assemble the
@@ -8388,7 +8399,7 @@ class LatLonCGridOceanModel:
                     tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
                     return_tke_entry=_return_live_stage_operands,
-                    return_tracer_solve_trace=_return_tracer_process_trace,
+                    return_tracer_solve_trace=_return_vertical_solve_trace,
                     grid=_grid, n2_tracers=_n2_tracers,
                     n2_tracers_before=_n2_tracers_before,
                     tke_n2_bundle=_tke_n2_bundle,
@@ -8410,7 +8421,7 @@ class LatLonCGridOceanModel:
                     (state_new, tke_new,
                      _nemo_ws_live_tke_entry,
                      _nemo_ws_live_tke_statement_trace) = _tke_result
-                elif _return_tracer_process_trace:
+                elif _return_vertical_solve_trace:
                     (state_new, tke_new,
                      _nemo_ws_vertical_solve_trace) = _tke_result
                 else:
@@ -8438,9 +8449,9 @@ class LatLonCGridOceanModel:
                     nemo_tracer_content_rhs=_nemo_ws_tracer_content_rhs,
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
                     nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
-                    return_tracer_solve_trace=_return_tracer_process_trace,
+                    return_tracer_solve_trace=_return_vertical_solve_trace,
                     z_coord=z_coord, config=config, iwm_fields=iwm_fields)
-                if _return_tracer_process_trace:
+                if _return_vertical_solve_trace:
                     state_new, _nemo_ws_vertical_solve_trace = _zdf_result
                 else:
                     state_new = _zdf_result
@@ -8600,9 +8611,11 @@ class LatLonCGridOceanModel:
         if _return_tracer_process_trace:
             if (_nemo_ws_process_qco is None
                     or _nemo_ws_process_boundaries is None
-                    or _nemo_ws_process_Taa is None
-                    or _nemo_ws_vertical_solve_trace is None):
+                    or _nemo_ws_process_Taa is None):
                 raise ValueError("WS-RK3 tracer process trace is incomplete")
+            if (_return_vertical_solve_trace
+                    and _nemo_ws_vertical_solve_trace is None):
+                raise ValueError("WS-RK3 vertical solve trace is incomplete")
             _qbb, _qmm, _qaa, _, _, _ = _nemo_ws_process_qco
             return _NEMOWSTracerProcessTrace(
                 state_after=state_new,
