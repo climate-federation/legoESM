@@ -4385,6 +4385,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 production_tke_taum=None,
                 production_tke_post_sweep=None,
                 production_entry_root: Path = YEAR_ENTRY_ROOT,
+                skip_stage1_operator_replay: bool = False,
                 ) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
     direct_w_record = read_admitted_stage1_w_walk(
@@ -4758,8 +4759,11 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 if row.get("classification") != "UNMEASURED_WITH_SPEC"]
     first = next((row for row in measured
                   if row.get("classification") != "BIT"), None)
-    stage1_operator_rows, stage1_operator_first = _given_inputs(
-        records, None, kt=1, stages=(1,))
+    if skip_stage1_operator_replay:
+        stage1_operator_rows, stage1_operator_first = [], {"stage1": None}
+    else:
+        stage1_operator_rows, stage1_operator_first = _given_inputs(
+            records, None, kt=1, stages=(1,))
     stage1_rhs_rows = [
         row for row in given_entries
         if row.get("field", "").startswith("stage1_rhs_")
@@ -4774,6 +4778,12 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         "chained": chained,
         "stage_entry_identity": given_entries,
         "stage1_operator_walk": {
+            "replay_omitted": skip_stage1_operator_replay,
+            "omission_reason": (
+                "post-table replay exceeds the per-process LLVM compiler "
+                "limit; stage outputs and the separately committed operator "
+                "walk remain measured"
+                if skip_stage1_operator_replay else None),
             "compiled_order": ("hpg", "ldf", "vor", "adv"),
             "rows": stage1_operator_rows,
             "first_nonbit": stage1_operator_first["stage1"],
@@ -4838,8 +4848,11 @@ def run(
     tke_rhs_materialization: str = "",
     tke_rhs_intermediate: str = "",
     bn2_intermediate: str = "",
+    skip_stage1_operator_replay: bool = False,
 ) -> dict:
     stamp = worktree_stamp()
+    require(not skip_stage1_operator_replay or mode == "stage-twin",
+            "--skip-stage1-operator-replay is valid only in stage-twin mode")
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
     require(
         len(expected) == 40 and stamp["commit"].lower() == expected,
@@ -4963,7 +4976,8 @@ def run(
             records, root, advmean_root, memory_root, btstep_root,
             stage_closure_root, stage1_w_root, stage1_r3_root,
             plant,
-            walk_only=mode == "stage-w-walk")
+            walk_only=mode == "stage-w-walk",
+            skip_stage1_operator_replay=skip_stage1_operator_replay)
     if mode == "stage1-handoff-walk":
         require(bool(stage1_handoff_boundary),
                 "stage1-handoff-walk requires --stage1-handoff-boundary")
@@ -5102,6 +5116,12 @@ def main(argv=None) -> int:
         default="",
         help="return and score one kt=1 stage-1 momentum handoff pair",
     )
+    p.add_argument(
+        "--skip-stage1-operator-replay", action="store_true",
+        help=("stage-twin only: retain complete stage tables but omit the "
+              "redundant post-table operator replay when the process-local "
+              "LLVM compiler ceiling prevents materialization"),
+    )
     p.add_argument("--tke-rhs-materialization", default="")
     p.add_argument(
         "--tke-rhs-intermediate",
@@ -5156,6 +5176,7 @@ def main(argv=None) -> int:
         tke_rhs_materialization=args.tke_rhs_materialization,
         tke_rhs_intermediate=args.tke_rhs_intermediate,
         bn2_intermediate=args.bn2_intermediate,
+        skip_stage1_operator_replay=args.skip_stage1_operator_replay,
     )
     report["status"] = plant_aware_status(report["status"], args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)

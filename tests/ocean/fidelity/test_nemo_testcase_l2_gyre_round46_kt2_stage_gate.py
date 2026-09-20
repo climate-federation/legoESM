@@ -45,6 +45,23 @@ TWO_D = {
 }
 
 
+def test_operator_replay_skip_is_stage_twin_only(tmp_path, monkeypatch):
+    commit = "1" * 40
+    monkeypatch.setattr(gate, "worktree_stamp", lambda: {"commit": commit})
+    with pytest.raises(
+            RuntimeError,
+            match="skip-stage1-operator-replay is valid only in stage-twin"):
+        gate.run(
+            tmp_path,
+            expect_commit=commit,
+            mode="validate",
+            plant=None,
+            round40_kt1=tmp_path / "unused.bin",
+            round41_kt1=tmp_path / "also-unused.bin",
+            skip_stage1_operator_replay=True,
+        )
+
+
 def _payload(value: np.ndarray, rank: int) -> bytes:
     if rank == 2:
         return np.asarray(value).T.ravel(order="F").tobytes()
