@@ -430,6 +430,18 @@ def barotropic_implicit_mpas(
     Voronoi ghost cells are not double-counted).  Log / assert it OUTSIDE
     the JIT; never branch the compiled step on it.
     """
+    _pcg_precond = str(config.barotropic_implicit_pcg_precond)
+    if _pcg_precond not in ("jacobi", "poly"):
+        raise ValueError(
+            f"Unknown barotropic PCG preconditioner variant {_pcg_precond!r}: "
+            "config.barotropic_implicit_pcg_precond must be one of "
+            "'jacobi' or 'poly'"
+        )
+    if int(config.barotropic_implicit_pcg_poly_sweeps) < 1:
+        raise ValueError(
+            "config.barotropic_implicit_pcg_poly_sweeps must be >= 1, got "
+            f"{int(config.barotropic_implicit_pcg_poly_sweeps)}"
+        )
     # Distributed dispatch at ENTRY (resolves TODO(distributed-mpas-pcg)):
     # when ``initialize_voronoi_mpi`` has armed a partition layout, the
     # solve runs the shared fixed-M PCG with (a) a cell-halo exchange
@@ -624,8 +636,25 @@ def barotropic_implicit_mpas(
         def A_op_dist(eta_in: jnp.ndarray) -> jnp.ndarray:
             return A_op(_exchange_cells(eta_in))
 
-        def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
-            return r * inv_diag
+        if _pcg_precond == "jacobi":
+            def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
+                return r * inv_diag
+        else:
+            _poly_sweeps = int(config.barotropic_implicit_pcg_poly_sweeps)
+            _neumann_w = 2.0 / 3.0
+
+            def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
+                # SPD polynomial in the device-local block of A: TRUE
+                # diagonal (inv_diag), off-diagonals restricted to
+                # owned-owned couplings by zeroing the halo BEFORE the
+                # operator.  Applies A_op, never A_op_dist, so no halo
+                # exchange is composed in; pure jnp, reverse mode goes
+                # straight through.
+                z = _neumann_w * inv_diag * r * _owned
+                for _ in range(_poly_sweeps - 1):
+                    r_local = A_op(z) * _owned
+                    z = z + _neumann_w * inv_diag * (r - r_local) * _owned
+                return z
 
         _w_dots = _owned * mesh.areaCell.astype(eta_dtype) * mask
         eta_new, _solve_diag = solve_helmholtz_implicit(
@@ -709,14 +738,19 @@ def barotropic_implicit_mpas(
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to
     # well-resolved η).
+    # ``eta_floor_clamp_iters`` was declared on the config but never read
+    # here (the explicit-substep path honours it); the bench's
+    # --eta-clamp-iters knob was inert on this solver.  Default 3 is the
+    # value that was hard-wired, so nothing changes unless it is set.
+    _clamp_iters = int(config.eta_floor_clamp_iters)
     if _dist:
         eta_new = _clamp_redistribute(
-            eta_new, eta_floor, mask, mesh.areaCell,
+            eta_new, eta_floor, mask, mesh.areaCell, _clamp_iters,
             owned_weight=_owned, force_global=True,
         )
     else:
         eta_new = _clamp_redistribute(
-            eta_new, eta_floor, mask, mesh.areaCell,
+            eta_new, eta_floor, mask, mesh.areaCell, _clamp_iters,
         )
 
     # Residual diagnostic of the FINAL eta (post projection + clamp).

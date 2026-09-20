@@ -36,11 +36,14 @@ export LEGOESM_PYTHON="${LEGOESM_PYTHON:-/work/bd1083/b309178/diffESM/legoesm_pg
 export SCRATCH="${SCRATCH:-/scratch/${USER:0:1}/$USER}"
 if [[ "$BACKEND" == gpu ]]; then
   export JAX_PLATFORMS=cuda,cpu
-  PPN=4; ARM_TIMEOUT=1200
+  PPN=4; ARM_TIMEOUT="${ARM_TIMEOUT:-1200}"
   SRUN_DEV=(--gpus-per-node=4 --gpu-bind=none)
 else
   export JAX_PLATFORMS=cpu
-  PPN="${PPN:-8}"; ARM_TIMEOUT=2400
+  # Overridable: the 256- and 512-rank CPU arms spend most of their wall
+  # clock building and partitioning the mesh on every rank, and silently
+  # died at the fixed 2400 s.
+  PPN="${PPN:-8}"; ARM_TIMEOUT="${ARM_TIMEOUT:-2400}"
   SRUN_DEV=(--cpu-bind=cores --distribution=block:cyclic)
 fi
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"   # $REPO, $PY, PYTHONPATH

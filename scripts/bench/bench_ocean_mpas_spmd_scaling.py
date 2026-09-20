@@ -73,6 +73,12 @@ def main() -> int:
     p.add_argument("--blocks", type=int, default=3)
     p.add_argument("--probe-steps", type=int, default=3)
     p.add_argument("--multicontroller", action="store_true")
+    p.add_argument("--pcg-precond", default="jacobi",
+                   choices=["jacobi", "poly"],
+                   help="distributed PCG preconditioner; 'poly' is the "
+                        "communication-free local Neumann polynomial")
+    p.add_argument("--pcg-poly-sweeps", type=int, default=4,
+                   help="sweeps K of the local polynomial preconditioner")
     # Barotropic-solve comm knobs. The distributed implicit_cn solve costs
     # 1+2M batched allreduces per step at pcg_variant="standard" and 1+M at
     # "single_reduce" (Chronopoulos-Gear, parity-gated), plus one cell-halo
@@ -132,6 +138,9 @@ def main() -> int:
     if args.pcg_fixed_iters is not None:
         config = config._replace(
             barotropic_implicit_pcg_fixed_iters=int(args.pcg_fixed_iters))
+    config = config._replace(
+        barotropic_implicit_pcg_precond=str(args.pcg_precond),
+        barotropic_implicit_pcg_poly_sweeps=int(args.pcg_poly_sweeps))
     mesh = create_voronoi_mesh(subdivision_level=subdivision,
                                lloyd_iterations=args.lloyd)
     n_cells_orig = int(mesh.nCells)
@@ -224,6 +233,8 @@ def main() -> int:
                # to a tolerance instead, so they do NOT do fixed_iters work.
                "pcg_variant": args.pcg_variant,
                "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
+               "pcg_precond": str(config.barotropic_implicit_pcg_precond),
+               "pcg_poly_sweeps": int(config.barotropic_implicit_pcg_poly_sweeps),
                "pcg_solver_path": ("fixed_iter_pcg" if nd > 1 else "stock_cg_to_tol"),
                "eta_floor_clamp_iters": args.eta_clamp_iters,
                "barotropic_allreduces_per_step": (

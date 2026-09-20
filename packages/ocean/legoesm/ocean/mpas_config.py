@@ -346,6 +346,21 @@ class MPASOceanConfig(NamedTuple):
     barotropic_implicit_pcg_fixed_iters: int = 30
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     barotropic_implicit_pcg_variant: str = "standard"
+    # Distributed-only preconditioner for the fixed-iteration PCG.
+    # "jacobi" (default) or "poly": a communication-free Neumann-series
+    # polynomial in the device-local block of A (K local mat-vecs, no
+    # halo exchange, so it costs nothing in ppermute rounds and buys
+    # iterations back).  Measured on the real subdivision-9 systems,
+    # 128 emulated devices, f64, relative residual:
+    #                iters=10    15        20        30
+    #     jacobi       7.9e-05   1.5e-05   3.1e-06   9.9e-08
+    #     local poly4  2.0e-05   1.4e-06   8.9e-08   4.0e-10
+    #     local poly8  9.1e-06   4.0e-07   1.6e-08   2.6e-11
+    # Each PCG iteration still costs one cell-halo exchange plus two
+    # allreduces; the win is reaching the target residual at a smaller
+    # ``fixed_iters`` (30 -> 20 at poly4).
+    barotropic_implicit_pcg_precond: str = "jacobi"
+    barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global
                                         # area-weighted mean freshwater flux
