@@ -226,6 +226,57 @@ def tracer_content(T3d, S3d, eta, e1t, e2t, e3t, tmask, gdept=None,
     return out
 
 
+def load_nemo_3d(path, rec):
+    """NEMO T/S/eta at 5-day record ``rec``, on the NATIVE (331, 360) frame.
+
+    Returned in the SAME layout ``_native`` produces for our snapshots --
+    level FIRST, overlap columns and fold ghost row already gone -- so the
+    oracle and the model go through ONE ``tracer_content`` call with one set
+    of mesh metrics and one set of depth bins.  Two code paths would be two
+    conventions, which is how this campaign has produced retracted numbers.
+
+    VARIABLE NAMES: NEMO ORCA1's CF labels lie.  The 3-D fields are ``to`` and
+    ``so``, and under ``ln_teos10`` (which ORCA1 sets) they hold CONSERVATIVE
+    temperature and ABSOLUTE salinity even though the attributes say potential
+    and practical.  The name actually found is PRINTED, so a file with a
+    different archive set cannot silently change what is being compared.
+    """
+    try:
+        import netCDF4 as nc
+    except ImportError as exc:  # pragma: no cover
+        raise SystemExit(f"netCDF4 required to read the NEMO grid_T: {exc}")
+    ds = nc.Dataset(path)
+    try:
+        def pick(names, what):
+            for n in names:
+                if n in ds.variables:
+                    return n
+            raise SystemExit(f"FATAL: no {what} in {path}; looked for "
+                             + ", ".join(names))
+        tn = pick(("to", "bigthetao", "thetao", "votemper", "toce"), "3-D temperature")
+        sn = pick(("so", "so_abs", "vosaline", "soce"), "3-D salinity")
+        en = pick(("zos", "sossheig", "ssh"), "sea-surface height")
+        nt = int(ds.variables[tn].shape[0])
+        if not -nt <= rec < nt:
+            raise SystemExit(f"FATAL: record {rec} out of range for "
+                             f"n_time={nt} in {path}")
+        print(f"[nemo] {Path(path).name} record {rec} of {nt}: "
+              f"T={tn} S={sn} eta={en}")
+        T3 = np.asarray(ds.variables[tn][rec], dtype=np.float64)
+        S3 = np.asarray(ds.variables[sn][rec], dtype=np.float64)
+        et = np.asarray(ds.variables[en][rec], dtype=np.float64).squeeze()
+    finally:
+        ds.close()
+    # Land is a fill value here; it must become 0 BEFORE the mask multiply,
+    # or NaN * 0 poisons every sum (a plausible-looking total is more
+    # dangerous than a NaN only when the NaN is hidden -- here it just
+    # destroys the answer, loudly).
+    T3 = np.nan_to_num(np.ma.filled(T3, np.nan), nan=0.0)
+    S3 = np.nan_to_num(np.ma.filled(S3, np.nan), nan=0.0)
+    et = np.nan_to_num(np.ma.filled(et, np.nan), nan=0.0)
+    return T3, S3, et
+
+
 def _native(a):
     """Strip the snapshot's fold ghost row and cyclic overlap columns, and put
     the level axis FIRST.
@@ -250,8 +301,17 @@ def main() -> int:
     global _DEPTH_BIN_EDGES_M
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--snapshot", nargs="+", required=True,
-                   help="One or more tripole snapshot .npz files (scored in order).")
+    p.add_argument("--snapshot", nargs="*", default=[],
+                   help="Zero or more tripole snapshot .npz files (scored in order).")
+    p.add_argument("--nemo-gridt", default=None,
+                   help="NEMO 5-day grid_T .nc, scored through the SAME "
+                        "tracer_content with the same mesh metrics and the "
+                        "same depth bins as the snapshots.")
+    p.add_argument("--nemo-days", default=None, metavar="D0,D1,...",
+                   help="Days to read from --nemo-gridt. Each is converted to "
+                        "the 5-day record that ENDS on that day (D/5 - 1), the "
+                        "arithmetic that has been got wrong here before. Days "
+                        "must be multiples of 5.")
     p.add_argument("--mesh-mask", required=True,
                    help="eORCA1.2_mesh_mask.nc with e1t/e2t/e3t_0/tmask/gdept_1d.")
     p.add_argument("--json-out", default=None)
@@ -266,6 +326,15 @@ def main() -> int:
                         "longitudes on -180..180 (nino3 is -5,5,-150,-90). "
                         "lon0 > lon1 straddles the dateline. Default: global.")
     a = p.parse_args()
+    if not a.snapshot and not a.nemo_gridt:
+        raise SystemExit("nothing to score: pass --snapshot and/or --nemo-gridt")
+    if a.nemo_days and not a.nemo_gridt:
+        raise SystemExit("--nemo-days without --nemo-gridt does nothing")
+    if a.nemo_gridt and not a.nemo_days:
+        raise SystemExit("--nemo-gridt needs --nemo-days: the record index is "
+                         "derived from the day, never defaulted (an inherited "
+                         "-1 default once scored day 30 against NEMO's day 90 "
+                         "and the result was reported as a regression)")
 
     e1t, e2t, e3t, tmask = load_mesh_metrics(a.mesh_mask)
     # Bin by the 1-D reference depth of each level (fine for binning; partial
@@ -329,6 +398,30 @@ def main() -> int:
             line += f"  (salt vs previous: {ds_rel:+.3e} relative)"
         prev = r["salt_content_psu_m3"]
         print(line)
+
+    if a.nemo_gridt:
+        report["nemo_gridt"] = str(a.nemo_gridt)
+        report["nemo"] = {}
+        for tok in a.nemo_days.split(","):
+            day = float(tok)
+            if day <= 0 or day % 5 != 0:
+                raise SystemExit(f"--nemo-days wants positive multiples of 5 "
+                                 f"(5-day means), got {tok!r}")
+            rec = int(day // 5) - 1
+            T3, S3, et = load_nemo_3d(a.nemo_gridt, rec)
+            if T3.shape != e3t.shape:
+                raise SystemExit(
+                    f"FATAL: NEMO grid_T frame {T3.shape} != mesh native "
+                    f"{e3t.shape}. The grid_T is expected ALREADY native "
+                    "(nlev, 331, 360); a (332, 362) file would need the same "
+                    "slice the snapshots get, and guessing which is which is "
+                    "how a comparison silently shifts by a row.")
+            r = tracer_content(T3, S3, et, e1t, e2t, e3t, tmask, gdept,
+                               region_mask=region_mask)
+            report["nemo"][f"day{int(day):04d}"] = {"record": rec, **r}
+            print(f"NEMO day {day:g} (record {rec}): "
+                  f"mean T {r['mean_T_C']:.4f} C, mean S {r['mean_S_psu']:.4f}, "
+                  f"vol {r['volume_m3']:.6e} m3")
 
     if a.json_out:
         Path(a.json_out).parent.mkdir(parents=True, exist_ok=True)
