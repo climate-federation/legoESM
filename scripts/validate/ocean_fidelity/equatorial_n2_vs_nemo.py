@@ -163,6 +163,10 @@ def main() -> int:
     p.add_argument("--lon-west", type=float, default=200.0)
     p.add_argument("--lon-east", type=float, default=260.0)
     p.add_argument("--out-json", default=None)
+    p.add_argument("--plot-out", default=None,
+                   help="PNG of the per-interface profile. Drawn from the SAME "
+                        "numbers the table prints, in the same function, so a "
+                        "figure can never disagree with its own table.")
     a = p.parse_args()
 
     if a.nemo_day <= 0 or a.nemo_day % 5 != 0:
@@ -324,6 +328,7 @@ def main() -> int:
             print(f"\n{'depth':>8s} {'e ours':>11s} {'avm ours':>11s} "
                   f"{'avm NEMO':>11s} {'e ours/NEMO':>12s}")
             top = gdepw_int <= 120.0
+            prof = []
             for k in np.nonzero(top)[0]:
                 col = lambda f: band_median(f, wet_i, box, gdepw_int,
                                             gdepw_int[k] - 1e-9,
@@ -340,6 +345,34 @@ def main() -> int:
                       if (an and nn > 0 and no > 0) else float("nan"))
                 print(f"{gdepw_int[k]:8.1f} {col(tke_our):11.3e} "
                       f"{ao:11.3e} {an:11.3e} {er:12.3e}")
+                prof.append((gdepw_int[k], col(tke_our), ao, an, er))
+            report["profile"] = [
+                {"depth_m": d, "tke_ours": e, "avm_ours": ao, "avm_nemo": an,
+                 "e_ratio": er} for d, e, ao, an, er in prof]
+            if a.plot_out and prof:
+                import matplotlib
+                matplotlib.use("Agg")
+                import matplotlib.pyplot as plt
+                d = [r[0] for r in prof]
+                fig, (ax, ax2) = plt.subplots(1, 2, figsize=(10.5, 5.2),
+                                              sharey=True)
+                ax.semilogx([r[2] for r in prof], d, "o-", label="ours")
+                ax.semilogx([r[3] for r in prof], d, "s-", label="NEMO")
+                ax.set_xlabel("vertical viscosity [m$^2$/s]")
+                ax.set_ylabel("depth [m]")
+                ax.invert_yaxis(); ax.grid(alpha=0.3); ax.legend()
+                ax.set_title("the coefficient")
+                ax2.semilogx([r[4] for r in prof], d, "o-", color="crimson")
+                ax2.axvline(1.0, color="k", lw=0.8)
+                ax2.set_xlabel("turbulent energy, ours / NEMO")
+                ax2.grid(alpha=0.3)
+                ax2.set_title("1 = agreement")
+                fig.suptitle("equatorial Pacific, day 30: the surface value is "
+                             "right, the decay is not")
+                fig.tight_layout()
+                Path(a.plot_out).parent.mkdir(parents=True, exist_ok=True)
+                fig.savefig(a.plot_out, dpi=140)
+                print(f"[plot] {a.plot_out}")
             print("A ratio that is already small at the TOP interface is a "
                   "SURFACE SOURCE problem; one that starts near 1 and falls "
                   "with depth is a TRANSPORT or DISSIPATION problem. That is "

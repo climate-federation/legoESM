@@ -1,0 +1,44 @@
+ONE REVIEW, then stop. Attack this ELIMINATION CHAIN, not code style.
+
+Ocean model vs NEMO ORCA1, CORE-II forced, day 30, equatorial Pacific
+(200-260E, +/-2 deg). Our vertical mixing coefficient is ~200x below NEMO's
+between 15 and 65 m. Claim: three causes are eliminated and a fourth is
+implicated.
+
+1. STRATIFICATION eliminated. N2 ours/NEMO = 1.50 at 15-65 m. Both sides go
+   through the model's own compute_buoyancy_frequency_nemo_bn2. Since the TKE
+   closure has l = sqrt(2e)/N and K ~ C_k*l*sqrt(e), K ~ e/N, so
+   e_ours/e_NEMO = (K_o/K_N)*(N_o/N_N) = (1/203)*1.22 = 1/166. A 1.5x N2 can
+   move K by 1.5x, not 200x.
+
+2. SHEAR eliminated. shear^2 ours/NEMO = 0.77 at 15-65 m. Ours from snapshot
+   u/v centred off C-grid faces (extra column/row); NEMO's from grid_U/grid_V
+   centred off its own collocated points. Both differenced across the same
+   interfaces with the same raw e3w.
+
+3. TKE FLOOR eliminated. Ours is 1e-10 not 1e-6; NEMO zdftke.F90:841-844
+   forces rn_emin=1.e-10 under ln_zdfiwm, which ORCA1 runs.
+
+4. SURFACE SOURCE eliminated, DECAY implicated. Per-interface energy ratio
+   e_ours/e_NEMO: 1.06 at 1.0 m, 0.89 at 2.1 m, 0.30 at 3.3 m, 0.014 at 8.9 m,
+   0.004 at 24.6 m, back to ~1 below 73 m.
+
+CAVEAT I already state: our side is an instantaneous snapshot, NEMO's a 5-day
+mean.
+
+ATTACK THESE:
+- Does K ~ e/N hold where NEMO's mixing length is clipped by its surface or
+  bottom sweep rather than by the buoyancy length? Implied lengths are 0.048 m
+  (ours) and 0.75 m (NEMO). Does that actually establish no clipping?
+- Is a MEDIAN of a 5-day-mean coefficient comparable to a median of an
+  instantaneous one for an intermittent quantity? Where does that break the
+  1.06 at the top interface?
+- NEMO's top 3 m carry convective-adjustment occupancy 0.52-0.79. Does that
+  contaminate the 1.06, and if so in which direction?
+- Is eliminating shear at 0.77 sound when production is K_m*S^2 and K_m is
+  itself the collapsed quantity? State the circularity if there is one.
+- Any step where a ratio of two quantities each near its own floor is being
+  read as physics.
+
+Report only defects in the reasoning. Name the step, the flaw, and the
+measurement that would settle it.
