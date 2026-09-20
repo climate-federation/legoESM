@@ -599,7 +599,21 @@ def main() -> int:
     # a regression (2026-09-19).  When the caller states the day it expects, the
     # record must be the one that ENDS on it, and a mismatch stops the job
     # instead of printing into a log nobody reads.  USER-AUTHORISED this session.
-    check_oracle_record(a.expect_day, a.nemo_time_idx, N["n_time"], a.nemo_month)
+    # ARMED BY DEFAULT (2026-09-20, user-authorised). --expect-day was opt-in
+    # and only 5 of the 105 cards that score against NEMO passed it, so the
+    # gate was inert for the other 100 -- including the card whose inherited
+    # --nemo-time-idx default scored day 30 against NEMO's day 90 and reported
+    # it as a regression. The snapshots already CARRY their day, and the block
+    # above has just derived it, so nothing needs to be passed: when the caller
+    # states no expected day, the snapshots' own day is used. A caller that
+    # genuinely wants a different record still has --nemo-month, which
+    # check_oracle_record exempts.
+    _expect = a.expect_day
+    if _expect is None and len(known) == 1:
+        _expect = next(iter(known))
+        print(f"[oracle-record] gate armed from the snapshots' own day "
+              f"({_expect:g}); no --expect-day was given")
+    check_oracle_record(_expect, a.nemo_time_idx, N["n_time"], a.nemo_month)
     X = [_load_legoesm(pth) for pth in a.also_mask]
     print(f"[load] tripole {T['sst'].shape}  MPAS {M['sst'].shape}  "
           f"NEMO {N['sst'].shape} ({N['n_time']} records)"

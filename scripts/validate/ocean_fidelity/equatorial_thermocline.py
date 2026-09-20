@@ -99,13 +99,17 @@ def main() -> int:
                          "`mass_flux_w` is a VELOCITY [m/s], so one side has "
                          "to be divided by the cell area e1t*e2t before they "
                          "are the same quantity.")
-    ap.add_argument("--nemo-w-var", default="wocetr_eff",
+    ap.add_argument("--nemo-w-var", default=None,
                     choices=("wocetr_eff", "wo"),
                     help="which NEMO vertical field the wfile carries. "
                          "`wocetr_eff` is a TRANSPORT [m3/s] (hourly trd1h_T; "
                          "needs --mesh-mask for the area divide). `wo` is a "
                          "VELOCITY [m/s] (the 5-day grid_W files) and is "
-                         "compared directly.")
+                         "compared directly. DEFAULT: read from the file -- "
+                         "the old default was `wocetr_eff`, which the 5-day "
+                         "grid_W files do not contain at all, so a caller who "
+                         "omitted this flag compared a transport against a "
+                         "velocity or crashed on a missing variable.")
     ap.add_argument("--box-budget", default=None,
                     help="'lo,hi' longitude window: volume budget of the box "
                          "|lat|<=--budget-lat-halfwidth, --budget-layer, ours "
@@ -296,6 +300,25 @@ def main() -> int:
           f"[tilt] ours {tl:+.1f} m, NEMO {tn:+.1f} m")
 
     if a.nemo_wfile:
+        if a.nemo_w_var is None:
+            # READ IT FROM THE FILE rather than guess. The old default named
+            # wocetr_eff, which the 5-day grid_W files do not contain, so a
+            # caller who omitted the flag got a missing-variable crash or, with
+            # a file that had both, a transport compared against a velocity.
+            import netCDF4 as _nc          # function-scope, as elsewhere here
+            _ds = _nc.Dataset(a.nemo_wfile)
+            try:
+                _present = [v for v in ("wo", "wocetr_eff")
+                            if v in _ds.variables]
+            finally:
+                _ds.close()
+            if not _present:
+                raise SystemExit(
+                    f"FATAL: {a.nemo_wfile} carries neither 'wo' nor "
+                    f"'wocetr_eff'; pass --nemo-w-var explicitly.")
+            a.nemo_w_var = _present[0]
+            print(f"[nemo-w] using {a.nemo_w_var!r} (read from the file; "
+                  f"present: {_present})")
         if a.nemo_w_var == "wocetr_eff" and not a.mesh_mask:
             raise SystemExit("--nemo-wfile requires --mesh-mask: wocetr_eff is "
                              "m3/s and our mass_flux_w is m/s, and without the "
