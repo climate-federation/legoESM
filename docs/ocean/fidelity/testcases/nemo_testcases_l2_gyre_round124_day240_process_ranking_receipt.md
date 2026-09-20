@@ -52,9 +52,9 @@ before the first process measurement as full commit
   for steps 1081--1440 at `rDt=14400`.  Its chain and decoded step closure are
   exact.  Both restart files are byte-identical to the admitted year run.
   All five oracle plants printed `STATUS PLANT-FIRED` and exited 1.
-- **P1 CONFIRMED after one rejected diagnostic attempt.** The final v2 trace
-  was produced at clean commit
-  `1cbca35854fe7076382d6d854e8d2af75df54206`, contains 360 frames, has zero
+- **P1 CONFIRMED after one rejected attribution and one provenance-superseded
+  run.** The final v3 trace was produced at clean commit
+  `98327e7a2d5841da0b90bd63f19c8a6ebf07a2f8`, contains 360 frames, has zero
   unequal carried-state bytes, and reproduces every immutable endpoint field
   bit-for-bit.  The v1 process labels were rejected as described below and
   are not used in the result.
@@ -155,14 +155,20 @@ cell-centred velocity proxy, subtracts that executed component to obtain the
 top-only surface source, and leaves every remaining stage-3 heat contribution
 in the shortwave bucket.  It changes diagnostic attribution only.
 
-The admitted v2 trace is
-`round124/lego_process_trace_v2/`; its report and validation are
-`lego_process_trace_v2_report.json` and
-`lego_process_trace_v2_validation.json`:
+V2 corrected the attribution and passed scientifically, but citation audit
+found that its trace-only block sat inside an already pinned production-source
+range.  The block was moved immediately after that range so both pinned
+endpoints shift rigidly and the original extent stays unchanged.  Fail-closed
+provenance then required a new run.  All 11 v3 trace arrays and both endpoint
+NPZ files are byte-identical to v2; v2 is preserved but superseded.
 
-| control | v2 result |
+The authoritative trace is `round124/lego_process_trace_v3/`; its report and
+validation are `lego_process_trace_v3_report.json` and
+`lego_process_trace_v3_validation.json`:
+
+| control | v3 result |
 |---|---:|
-| traced frames / wall time | 360 / `1945.4 s` |
+| traced frames / wall time | 360 / `1926.0 s` |
 | carried-state unequal bytes | 0 |
 | chained temperature unequal cells | 0 |
 | generated-vs-immutable cells unequal, day 180 (T/S/u/v/SSH) | 0 / 0 / 0 / 0 / 0 |
@@ -172,8 +178,8 @@ The admitted v2 trace is
 | shortwave visits | 3,672,000 |
 | max decoded per-step closure | `7.105427357601002e-15 K` |
 
-The v2 wrong-stamp, trace-ULP and production-effect reports are
-`plant_lego_process_{stamp,ulp,effect}_v2.json`; all exited 1.  The effect
+The v3 wrong-stamp, trace-ULP and production-effect reports are
+`plant_lego_process_{stamp,ulp,effect}_v3.json`; all exited 1.  The effect
 plant moved `Bsbc/Bqsr/Bldf/Bpre/Taa` by 1/1/1/1/3 cells, moved
 `Tbb/q_Kbb/q_Kmm/q_Kaa/B0/Badv` by zero cells, and left the separately
 compiled carried state byte-identical.
@@ -181,12 +187,12 @@ compiled carried state byte-identical.
 For audit only, the v1 surface and shortwave signed carries were
 `-2.9933008766379514e-3 K` and `-8.393958572063607e-9 K`.  V2 assigns
 `-2.9943959019919585e-3 K` and `+1.0866313955171657e-6 K`; their combined
-carry is unchanged within `8.2e-17 K`.  Only v2 appears in the verdict table.
+carry is unchanged within `8.2e-17 K`.  Only v3 appears in the verdict table.
 
 ## One ranked day-240 table
 
 The final machine-readable result is
-`round124/day240_process_budget_v2.json`.  A carry is the signed projection of
+`round124/day240_process_budget_v3.json`.  A carry is the signed projection of
 that process-difference array onto the independently measured day-240 error;
 ranking is by its absolute value.  Local rows use their own local projection,
 so they locate the owner but are not additive whole-domain carries.
@@ -247,8 +253,18 @@ so `DECISION_NEEDED` is `NONE`.
 
 ## Independent adversarial review
 
-PENDING until the complete receipt diff is reviewed with `codex exec
---sandbox read-only`.
+The required command was run with `codex exec --sandbox read-only` against the
+complete incoming-tip-to-receipt diff.  Its verbatim terminal result was:
+
+```text
+Error while loading conda entry point: conda-anaconda-tos (cannot import name 'validate_prefix_exists' from 'conda.cli.install' (/home/dbalwada/miniconda3/lib/python3.13/site-packages/conda/cli/install.py))
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+The command exited 1.  Independent review unavailable in-sandbox.  It emitted neither
+`SHIP` nor `DO NOT SHIP`; no verdict is fabricated.
 
 ## Verification
 
