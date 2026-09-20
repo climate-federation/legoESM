@@ -112,6 +112,20 @@ LATLON_ONLY_OK = [
     "runtime_config.vortcor_*", "runtime_config.wall_grid_filter_rate_s",
     "runtime_config.weno_*",
 ]
+# DECLARED entries whose REASON only explains a one-sided ABSENCE ("subconfig
+# live only where scheme=X").  That reason is sound when one grid does not run
+# the scheme at all and its subtree is therefore inert.  It is NOT a licence to
+# fold a row where BOTH grids populate the subtree and the values disagree —
+# there the scheme IS live on both sides and a differing value is real physics.
+# Found 2026-09-20: tripole and the harmonized MPAS run both resolve
+# vertical_mixing.scheme='tke' and pass identical TKE flags, yet resolve
+# tke_surface_bc_level to 'interior_pinned' and 'nemo_z0' respectively -- a
+# known SST lever, folded silently under this reason.
+DECLARED_ABSENCE_ONLY = (
+    "runtime_config.physics.vertical_mixing.tke.*",
+    "runtime_config.physics.vertical_mixing.kpp.*",
+)
+
 DECLARED = {
     "runtime_config.physics.vertical_mixing.scheme":
         "campaign choice: tripole runs NEMO zdftke; KPP grids run KPP",
@@ -201,6 +215,12 @@ def classify(key, va, vb):
         return "GRID_INHERENT", "lat-lon-only integrator/config detail"
     pat = _match(key, DECLARED)
     if pat:
+        if (_match(key, dict.fromkeys(DECLARED_ABSENCE_ONLY, ""))
+                and "<ABSENT>" not in (str(va), str(vb))):
+            return "UNJUSTIFIED", (
+                f"both grids POPULATE this subconfig, so {pat}'s reason "
+                "(live only where that scheme is selected) does not apply — "
+                "two live values that disagree is a physics difference")
         return "DECLARED", DECLARED[pat]
     if "<ABSENT>" in (str(va), str(vb)):
         # Post-alias one-sided key: the other grid's config CLASS has no such

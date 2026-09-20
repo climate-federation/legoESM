@@ -2857,7 +2857,7 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
 
 
 def _write_ocean_run_manifest(args, model, dt, total_days, out_dir,
-                              *, mesh=None, nlev=None):
+                              *, mesh=None, nlev=None, io_proc: bool):
     """Write the STANDARD run manifest (resolved config + command line).
 
     Shared by every grid.  It used to live inline in ``main()``, which the
@@ -2880,7 +2880,7 @@ def _write_ocean_run_manifest(args, model, dt, total_days, out_dir,
         from legoesm.ocean.forcing import core2_nyf_cache_dir
         _resolved_forcing_path = str(core2_nyf_cache_dir())
     print(f"[setup] CORE-II forcing cache: {_resolved_forcing_path}")
-    if not _is_io_proc():
+    if not io_proc:
         return None
     try:
         from legoesm.driver.restart import (
@@ -2979,7 +2979,8 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
     print(f"[fesom-b1] done: {n_steps} steps; snapshots in {out}")
 
 
-def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
+def run_fesom_forced_loop(args, grid, z_coord, model, state, *,
+                          io_proc: bool) -> None:
     """Stage-B2+B3+B4 execution path: CORE-II bulk forcing computed ONCE by
     the SHARED grid-agnostic applicator (``compute_omip2_surface_forcing`` +
     ``compute_omip2_freshwater_forcing``) and injected into the FESOM step at
@@ -3038,7 +3039,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         # carries a PADDING SLOT past the last physical level, so the shape
         # would record 76 levels for a 75-level mesh (codex, verified against
         # FesomOceanState.T, which slices [:, :self.nlev]).
-        nlev=int(state.nlev))
+        nlev=int(state.nlev),
+        io_proc=io_proc)
     if n_steps <= 0:
         raise SystemExit(f"fesom forced loop: non-positive duration "
                          f"({total_days} days at dt={dt}s -> {n_steps} "
@@ -8514,7 +8516,8 @@ def main() -> int:
         if args.fesom_unforced:
             run_fesom_b1_smoke(args, grid, z_coord, model, state)
         else:
-            run_fesom_forced_loop(args, grid, z_coord, model, state)
+            run_fesom_forced_loop(args, grid, z_coord, model, state,
+                                  io_proc=_is_io_proc())
         return 0
     else:
         _nlat, _nlon = (int(x) for x in args.latlon_res.split("x"))
@@ -9606,7 +9609,7 @@ def main() -> int:
     # this is the same default the loader takes, and the two cannot drift
     # because both call core2_nyf_cache_dir().
     manifest_path = _write_ocean_run_manifest(
-        args, model, dt, total_days, out_dir)
+        args, model, dt, total_days, out_dir, io_proc=_is_io_proc())
 
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]

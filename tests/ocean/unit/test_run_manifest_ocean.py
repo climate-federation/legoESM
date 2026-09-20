@@ -307,17 +307,34 @@ def _fake_args(tmp_path):
 
 
 def test_the_shared_writer_records_the_resolved_config_and_command_line(
-        tmp_path, monkeypatch):
-    """The two keys the hand-rolled fesom manifest never had."""
+        tmp_path):
+    """The two keys the hand-rolled fesom manifest never had.
+
+    NO monkeypatch of the process-rank predicate.  This test used to inject a
+    module-level ``_is_io_proc`` with ``raising=False``, which silently created
+    the very global the writer was missing: the writer closed over a name that
+    only exists inside ``main()``, so every real call raised NameError while
+    this test passed.  ``raising=False`` turned "the attribute does not exist"
+    -- the bug -- into "fine, I will make one".  The rank is now an explicit
+    ``io_proc`` argument, so the writer is callable on its own and the test
+    exercises the same code path production does.
+    """
     from types import SimpleNamespace
 
     mod = _driver()
-    monkeypatch.setattr(mod, "_is_io_proc", lambda: True, raising=False)
+    assert not hasattr(mod, "_is_io_proc"), (
+        "the process-rank predicate is a local of main(); if it becomes a "
+        "module global again, this writer can silently close over it and this "
+        "test stops covering the real call path")
     model = SimpleNamespace(config=_latlon_cfg())
     out = tmp_path / "run"
+    assert mod._write_ocean_run_manifest(
+        _fake_args(tmp_path), model, 1800.0, 30.0, out,
+        mesh="/some/fesom/mesh", nlev=75, io_proc=False) is None, (
+        "a non-zero rank must not write the shared manifest")
     path = mod._write_ocean_run_manifest(
         _fake_args(tmp_path), model, 1800.0, 30.0, out,
-        mesh="/some/fesom/mesh", nlev=75)
+        mesh="/some/fesom/mesh", nlev=75, io_proc=True)
     assert path is not None, "the manifest write must not fall back to None"
     m = read_run_manifest(path)
     assert m["run"]["command_line"], "no command line = the run is undescribed"
