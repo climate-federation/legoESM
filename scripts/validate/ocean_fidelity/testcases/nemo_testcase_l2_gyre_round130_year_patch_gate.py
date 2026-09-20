@@ -233,18 +233,30 @@ def _local_proof(entry: dict[str, Any], base: Path, commit: str) -> dict[str, An
             require(value == expected,
                     f"{label}: {value!r} != {expected!r}")
             count = 1
-        elif kind == "all-field":
+        elif kind in {"all-field", "filtered-all-field"}:
             require(isinstance(value, list) and value,
                     f"{label}: all-field target is empty or not a list")
+            selected = value
+            if kind == "filtered-all-field":
+                where = check.get("where")
+                require(isinstance(where, dict) and where,
+                        f"{label}: filtered assertion has no selector")
+                selected = [row for row in value if isinstance(row, dict)
+                            and all(row.get(key) == wanted
+                                    for key, wanted in where.items())]
+                require(selected,
+                        f"{label}: filtered assertion selected no rows")
             field = check.get("field")
             require(isinstance(field, str) and all(
                 isinstance(row, dict) and row.get(field) == expected
-                for row in value), f"{label}: not every {field!r} equals {expected!r}")
-            count = len(value)
+                for row in selected),
+                f"{label}: not every selected {field!r} equals {expected!r}")
+            count = len(selected)
         else:
             raise GateError(f"{label}: unknown check kind {kind!r}")
         checked.append({"artifact": artifact, "pointer": check["pointer"],
-                        "kind": kind, "assertions": count})
+                        "kind": kind, "where": check.get("where"),
+                        "assertions": count})
 
     plant = local.get("plant")
     require(isinstance(plant, dict), f"{entry.get('id')}: plant assertion absent")

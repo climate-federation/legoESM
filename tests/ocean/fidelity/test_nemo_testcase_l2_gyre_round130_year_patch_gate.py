@@ -107,6 +107,35 @@ def test_local_proof_refuses_empty_assertion_registry(tmp_path):
         gate._local_proof(entry, tmp_path, COMMIT)
 
 
+def test_filtered_local_proof_selects_named_stage_rows(tmp_path):
+    artifact = tmp_path / "proof.json"
+    artifact.write_text(json.dumps({
+        "worktree": {"clean": True, "commit": COMMIT},
+        "rows": [
+            {"kt": 1, "stage": 1, "n_unequal": 0},
+            {"kt": 1, "stage": 2, "n_unequal": 9},
+        ],
+        "status": "PLANT-FIRED",
+    }))
+    entry = {
+        "id": "r99_wclock",
+        "local_proof": {
+            "artifacts": {
+                "proof": {"path": str(artifact), "sha256": _sha(artifact)},
+            },
+            "checks": [{
+                "artifact": "proof", "pointer": "/rows",
+                "kind": "filtered-all-field", "where": {"kt": 1, "stage": 1},
+                "field": "n_unequal", "equals": 0,
+            }],
+            "plant": {"artifact": "proof", "pointer": "/status",
+                      "accepted": ["PLANT-FIRED"]},
+        },
+    }
+    report = gate._local_proof(entry, tmp_path, COMMIT)
+    assert report["checks"][0]["assertions"] == 1
+
+
 def test_missing_candidate_plant_fires_before_ranking(tmp_path):
     year, month = _baseline_reports()
     with pytest.raises(gate.GateError, match="candidate registry must be exactly"):
