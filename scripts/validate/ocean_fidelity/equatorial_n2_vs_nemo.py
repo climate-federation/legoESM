@@ -479,8 +479,22 @@ def main() -> int:
             print(f"[profile] SKIPPED: our avm {avm_o.shape} vs NEMO "
                   f"{avm_n.shape}")
         else:
+            # The HEAT side is carried alongside because the tracer
+            # diffusivity, not the viscosity, is what the temperature bias
+            # actually rides on -- and it was previously reconstructed by
+            # dividing a point viscosity by a whole-band Prandtl median,
+            # which mixes two different reductions.  Both are measured
+            # directly here.
+            avt_o = (np.transpose(_native(z["K_H_diag"]), (1, 2, 0))
+                     if "K_H_diag" in z else None)
+            avt_n = nemo_K.get("avt")
+            heat = (avt_o is not None and avt_n is not None
+                    and avt_o.shape == avm_o.shape
+                    and avt_n.shape == avm_n.shape)
             print(f"\n{'depth':>8s} {'e ours':>11s} {'avm ours':>11s} "
-                  f"{'avm NEMO':>11s} {'e ours/NEMO':>12s}")
+                  f"{'avm NEMO':>11s} {'e ours/NEMO':>12s}"
+                  + (f" {'avt ours':>11s} {'avt NEMO':>11s} {'avt x':>8s}"
+                     if heat else ""))
             top = gdepw_int <= 120.0
             prof = []
             for k in np.nonzero(top)[0]:
@@ -488,6 +502,8 @@ def main() -> int:
                                             gdepw_int[k] - 1e-9,
                                             gdepw_int[k] + 1e-9)[0]
                 ao, an = col(avm_o), col(avm_n)
+                to = col(avt_o) if heat else float("nan")
+                tn = col(avt_n) if heat else float("nan")
                 no, nn = col(n2_our), col(n2_nemo)
                 # Built from the BAND MEDIANS, not as the median of a pointwise
                 # ratio: the pointwise form goes NaN in any column where N2 is
@@ -497,12 +513,22 @@ def main() -> int:
                 # that was my instrument, not the ocean.
                 er = ((ao / an) * np.sqrt(no / nn)
                       if (an and nn > 0 and no > 0) else float("nan"))
+                # Both band medians on the SAME reduction, so this ratio is a
+                # like-for-like comparison of the two heat diffusivities.
+                tr = to / tn if (heat and tn) else float("nan")
                 print(f"{gdepw_int[k]:8.1f} {col(tke_our):11.3e} "
-                      f"{ao:11.3e} {an:11.3e} {er:12.3e}")
-                prof.append((gdepw_int[k], col(tke_our), ao, an, er))
+                      f"{ao:11.3e} {an:11.3e} {er:12.3e}"
+                      + (f" {to:11.3e} {tn:11.3e} {tr:8.4f}" if heat else ""))
+                prof.append((gdepw_int[k], col(tke_our), ao, an, er, to, tn))
             report["profile"] = [
                 {"depth_m": d, "tke_ours": e, "avm_ours": ao, "avm_nemo": an,
-                 "e_ratio": er} for d, e, ao, an, er in prof]
+                 "e_ratio": er, "avt_ours": to, "avt_nemo": tn}
+                for d, e, ao, an, er, to, tn in prof]
+            if heat:
+                print("The avt columns are the HEAT diffusivity, measured on "
+                      "both sides with the same reduction -- this is the "
+                      "coefficient the temperature bias rides on, and the "
+                      "viscosity beside it is not a substitute for it.")
             if a.plot_out and prof:
                 import matplotlib
                 matplotlib.use("Agg")

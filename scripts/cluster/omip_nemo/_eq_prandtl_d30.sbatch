@@ -68,5 +68,6 @@ $PY scripts/validate/ocean_fidelity/equatorial_n2_vs_nemo.py \
     --nemo-day 30 \
     --mesh-mask $MAIN/data/grids/eORCA1.2_mesh_mask.nc \
     --out-json $MAIN/results/omip_nemo/eq_prandtl_d30.json \
+    --plot-out $MAIN/results/omip_nemo/eq_prandtl_profile_d30.png \
     --prandtl-check
 echo "=== rc=$? ==="
