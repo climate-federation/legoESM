@@ -29,9 +29,20 @@ export PYTHONPATH="$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' 
 export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
-RUN=$MAIN/results/omip_nemo/trp_orca1faithtint_d30
+# RUN/OUT are overridable so the SAME code path, mesh and bins can score an
+# ARM without a second copy of this card -- the defaults are the baseline's
+# own values, so an unparameterised submission runs exactly what it always
+# ran.  To score the convection arm once its legs finish:
+#   RUN=$MAIN/results/omip_nemo/trp_faithevd_d30 \
+#   OUT=$MAIN/results/omip_nemo/nino3_dipole_faithevd.json \
+#   sbatch scripts/cluster/omip_nemo/_nino3_dipole_growth.sbatch
+# Then compare that JSON against nino3_dipole_growth.json layer by layer; the
+# two are directly comparable BECAUSE they came through this one card.
+RUN=${RUN:-$MAIN/results/omip_nemo/trp_orca1faithtint_d30}
 NEMO=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_T.nc
-OUT=$MAIN/results/omip_nemo/nino3_dipole_growth.json
+OUT=${OUT:-$MAIN/results/omip_nemo/nino3_dipole_growth.json}
+echo "RUN=$RUN"
+echo "OUT=$OUT"
 $PY scripts/validate/ocean_fidelity/global_tracer_content.py \
     --snapshot $RUN/snapshot_day0005.npz $RUN/snapshot_day0010.npz \
                $RUN/snapshot_day0015.npz $RUN/snapshot_day0020.npz \
