@@ -38,7 +38,10 @@ from legoesm.ocean.physics.mixing import (
 )
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
-from legoesm.ocean.physics.vertical_mixing.tke import tke_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.tke import (
+    nemo_tke_effective_ice_fraction,
+    tke_vertical_mixing,
+)
 from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -825,9 +828,9 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         #    FAILS FAST (silent no-op forbidden — same contract as the MPAS
         #    KPP bridge).  lc/etau run fine without ice (fi=0 open water).
         _tke_eice = int(getattr(cfg, "eice", 0))
-        if _tke_eice not in (0, 1, 3):
+        if _tke_eice not in (0, 1, 2, 3):
             raise ValueError(
-                f"Unknown TKEConfig.eice={_tke_eice!r}; expected 0, 1 or 3.")
+                f"Unknown TKEConfig.eice={_tke_eice!r}; expected 0, 1, 2 or 3.")
         ice_frac = (getattr(surface_forcing, "ice_concentration", None)
                     if (_tke_eice != 0 and surface_forcing is not None)
                     else None)
@@ -845,8 +848,8 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             # SAME pre-mapping the C-grid k_profiles path does (k_profiles
             # ~:533); passing raw fi under eice=3 would silently run the
             # mode-1 (1-fi) law (codex HIGH).
-            ice_frac = (ice_frac if _tke_eice == 1
-                        else jnp.minimum(4.0 * ice_frac, 1.0))
+            ice_frac = nemo_tke_effective_ice_fraction(
+                ice_frac, _tke_eice)
         lat_deg = jnp.degrees(mesh.latCell)
 
         # Veros tke_mxl_choice=1 distance-to-boundary cap (mirrors the lat-lon

@@ -1,7 +1,7 @@
 """Precision-policy transcendental functions.
 
-``native`` delegates to JAX/XLA.  ``libm`` calls the scalar ``exp`` and
-``tanh``, ``sin``, and ``cos`` entry points from ``libm.so.6`` through
+``native`` delegates to JAX/XLA.  ``libm`` calls the scalar ``exp``, ``log``,
+``log10``, ``tanh``, ``sin``, and ``cos`` entry points from ``libm.so.6`` through
 :func:`jax.pure_callback`.
 That is the soname linked by the NEMO certification executables on the
 campaign host (glibc 2.34).  The callback deliberately invokes the scalar C
@@ -113,6 +113,45 @@ def exp(value) -> jax.Array:
     return _libm_exp(array)
 
 
+@jax.custom_jvp
+def _libm_log(value: jax.Array) -> jax.Array:
+    return _callback("log", value)
+
+
+@_libm_log.defjvp
+def _libm_log_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    return _libm_log(value), value_dot / value
+
+
+@jax.custom_jvp
+def _libm_log10(value: jax.Array) -> jax.Array:
+    return _callback("log10", value)
+
+
+@_libm_log10.defjvp
+def _libm_log10_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    result = _libm_log10(value)
+    return result, value_dot / (value * jnp.log(jnp.asarray(10.0, value.dtype)))
+
+
+def log(value) -> jax.Array:
+    """Evaluate natural logarithm under the active precision policy."""
+    array = jnp.asarray(value)
+    if get_policy().transcendentals == "native":
+        return jnp.log(array)
+    return _libm_log(array)
+
+
+def log10(value) -> jax.Array:
+    """Evaluate base-10 logarithm under the active precision policy."""
+    array = jnp.asarray(value)
+    if get_policy().transcendentals == "native":
+        return jnp.log10(array)
+    return _libm_log10(array)
+
+
 def tanh(value) -> jax.Array:
     """Evaluate hyperbolic tangent under the active precision policy."""
     array = jnp.asarray(value)
@@ -137,4 +176,4 @@ def cos(value) -> jax.Array:
     return _libm_cos(array)
 
 
-__all__ = ("cos", "exp", "sin", "tanh")
+__all__ = ("cos", "exp", "log", "log10", "sin", "tanh")

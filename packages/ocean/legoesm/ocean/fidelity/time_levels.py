@@ -961,6 +961,13 @@ _DUMP_TIME_LEVEL["oracle_rkstage1_transport_operands_kt00000001.bin"] = (
     "e2u/e3u/uu/zub/umask/zFu and e1v/e3v/vv/zvb/vmask/zFv operands "
     "immediately after stprk3_stg.F90:265-278 materializes zFu/zFv",
 )
+_DUMP_TIME_LEVEL["oracle_stage1_wzv_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "ORCA2_OMIP_L4/MY_SRC/traadv.F90 writes stage-1 Kmm=1 pFu/pFv, "
+    "Kbb/Kaa QCO stretch operands, post-wzv ww and the resulting pFw; "
+    "the binary header carries Kbb=1,Kmm=1,Kaa=3",
+)
 _DUMP_TIME_LEVEL["oracle_bt_advmean_operands_kt00000001.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"

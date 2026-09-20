@@ -1976,14 +1976,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # construction, exactly like ``metric_convention`` above.
     #   "cell_average"  (default, BIT-IDENTICAL to every prior release)
     #                   f_v is the mean of the two adjacent tracer rows' f.
-    #   "face_latitude" f_v = 2*Omega*sin(phi_face), evaluated AT the v-face
-    #                   latitude -- NEMO's own ff_f convention, and what any
-    #                   C-grid model defining its Coriolis at the F-point does.
-    # f_v is the single array every C-grid Coriolis path reads, through one of
-    # two helpers: latlon_cgrid_operators.vertex_coriolis (barotropic EEN
-    # pre-block, 3-D EEN/ENE vorticity flux) and
-    # barotropic_common.coriolis_at_faces (semi-implicit / explicit_ab2
-    # face-f Coriolis).
+    #   "face_latitude" f_v = 2*Omega*sin(phi_face), evaluated AT the v-face;
+    #                   an analytic F-point fallback only where V and F share
+    #                   latitude.
+    # Generic paths read f_v. File-backed NEMO EEN/ENE arms carry and read a
+    # separate native grid.ff_f because V and F differ on a curvilinear grid.
     # NB a grid that ARRIVES as a pre-built LatLonCGridGeometry (the NEMO
     # bridge builds one) is passed through ensure_geometry unchanged, so the
     # convention must be selected where THAT geometry is built.  The model
@@ -2234,6 +2231,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # removed RK3 micro-selectors, this is an actual NEMO namelist switch.
     bbl_adv_option: int = 0
     bbl_gamma_s: float = 0.0
+    # NEMO trabbl diffusive arm.  0 disables it; 1 selects nn_bbl_ldf=1.
+    # Kept beside the advective selector because NEMO permits the two arms
+    # independently, even though the certified ORCA2 deck selects only ldf=1.
+    bbl_diffusive_option: int = 0
+    bbl_aht_m2_s: float = 0.0
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
     #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
     # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing

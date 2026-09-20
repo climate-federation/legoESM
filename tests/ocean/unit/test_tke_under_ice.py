@@ -134,8 +134,10 @@ class TestEiceModes:
         assert vm.tke.eice == 3          # ORCA1 card default (nn_eice=3)
         vm0 = mod.build_tripole_vmix_config("tke", tke_eice=0)
         assert vm0.tke.eice == 0         # A/B override
+        vm2 = mod.build_tripole_vmix_config("tke", tke_eice=2)
+        assert vm2.tke.eice == 2         # NEMO raw-fraction arm
         with pytest.raises(ValueError, match="tke-eice"):
-            mod.build_tripole_vmix_config("tke", tke_eice=2)
+            mod.build_tripole_vmix_config("tke", tke_eice=4)
 
     def test_effective_ice_frac_mode3(self):
         # mode-3 mapping min(4*fi, 1): at fi=0.25 the source is fully killed.

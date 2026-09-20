@@ -255,7 +255,47 @@ def nemo_qco_live_face_geometry_from_operands(
     return NemoQCOLiveFaceGeometry(e3u, e3v, r1_hu, r1_hv, r3u, r3v)
 
 
-def nemo_qco_live_vorticity_e3f_cgrid(eta, z_coord, dtype, nn_e3f_typ=0):
+def _nemo_t_fold_f_owned(field, grid):
+    """Apply NEMO's owned-row T-pivot/F-point north-fold overwrite."""
+    fold = getattr(grid, "fold", None)
+    if fold is None or not bool(getattr(fold, "is_active", False)):
+        return field
+    from legoesm.grids.operators_latlon_cgrid import (
+        fold_is_local, north_fold_mask,
+    )
+    # lbc_nfd_generic.h90, c_NFtype='T', cd_nat='F': the final owned
+    # row takes the preceding row with ii2=Ni0glo-ji+1, i.e. (-1-i) mod N
+    # after stripping the two NEMO halos.  This is an F-origin permutation;
+    # it is intentionally independent of the T-origin convention detected
+    # for generic scalar halo exchange.
+    perm_f = jnp.arange(field.shape[1] - 1, -1, -1, dtype=jnp.int32)
+    folded = field[-2, perm_f]
+    if fold_is_local(grid):
+        return field.at[-1].set(folded)
+    nmask = north_fold_mask(grid)
+    if nmask is not None:
+        return field.at[-1].set(jnp.where(nmask, folded, field[-1]))
+    return field
+
+
+def nemo_fe3mask_from_tmask(tmask, *, grid=None):
+    """Return NEMO's frozen QCO thickness mask at native F points.
+
+    ``dommsk.F90:146-198`` forms the product of the four surrounding T masks,
+    applies the F-point lateral boundary condition, and copies that result to
+    ``fe3mask``.  Later slip and strait edits change ``fmask`` only.
+    """
+    active = jnp.asarray(tmask)
+    east = jnp.roll(active, -1, axis=1)
+    north = jnp.concatenate([active[1:], jnp.zeros_like(active[:1])], axis=0)
+    northeast = jnp.roll(north, -1, axis=1)
+    fe3mask = active * east * north * northeast
+    return _nemo_t_fold_f_owned(fe3mask, grid)
+
+
+def nemo_qco_live_vorticity_e3f_cgrid(
+    eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None,
+):
     """Build literal NEMO ``e3f_vor(Kmm)`` on legoESM's vertex layout.
 
     ``dyn_vor_init`` freezes ``e3f_0vor`` from masked reference T-cell
@@ -297,6 +337,10 @@ def nemo_qco_live_vorticity_e3f_cgrid(eta, z_coord, dtype, nn_e3f_typ=0):
     e3f0vor = jnp.where(
         e3f0vor == 0.0, jnp.asarray(raw.e3f_0, dtype=dtype), e3f0vor)
 
+    # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain the
+    # historical path byte-for-byte.
+    e3f0vor = _nemo_t_fold_f_owned(e3f0vor, grid)
+
     area_eta = b(
         b(jnp.asarray(raw.e1t, dtype=dtype)
           * jnp.asarray(raw.e2t, dtype=dtype)) * eta)
@@ -309,8 +353,16 @@ def nemo_qco_live_vorticity_e3f_cgrid(eta, z_coord, dtype, nn_e3f_typ=0):
     area_f = b(jnp.asarray(raw.e1f, dtype=dtype)
                * jnp.asarray(raw.e2f, dtype=dtype))
     r3f = b(b(quarter * quad) * r1_hf0 / area_f)
+    # dom_qco_zgr applies the F-point lateral boundary condition to r3f
+    # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
+    # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
+    r3f = _nemo_t_fold_f_owned(r3f, grid)
+    # dommsk.F90:146-198 freezes fe3mask from the four-T-cell free-slip
+    # mask.  The later lateral-slip/strait changes at :207-243 affect fmask
+    # only.  domzgr_substitute.h90:48,130 therefore consumes fe3mask here;
+    # using the vorticity fmask silently stretches partial-cell bottom faces.
     e3f_native = b(e3f0vor * b(
-        one + r3f[..., None] * jnp.asarray(raw.fmask, dtype=dtype)))
+        one + r3f[..., None] * jnp.asarray(raw.fe3mask, dtype=dtype)))
 
     # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
     # south/west rows are inert walls for this closed-box identity.
@@ -323,9 +375,8 @@ def nemo_qco_vorticity_f_cgrid(z_coord, dtype):
     raw = getattr(z_coord, "nemo_een_barotropic", None)
     if raw is None:
         raise ValueError("literal NEMO F-point Coriolis requires raw ff_f")
-    native = jnp.asarray(raw.ff_f, dtype=dtype)
-    with_south = jnp.concatenate([native[:1], native], axis=0)
-    return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
+    from legoesm.grids.latlon import nemo_ff_f_to_vertex
+    return nemo_ff_f_to_vertex(jnp.asarray(raw.ff_f, dtype=dtype))
 
 
 def nemo_qco_mesh_operands(z_coord, dtype):
@@ -592,6 +643,7 @@ class NemoEENBarotropicOperands(NamedTuple):
     umask: jnp.ndarray
     vmask: jnp.ndarray
     fmask: jnp.ndarray
+    fe3mask: jnp.ndarray
     hu_0: jnp.ndarray
     hv_0: jnp.ndarray
     hf_0: jnp.ndarray
@@ -914,7 +966,7 @@ def create_z_star_from_thicknesses(
             raise ValueError(
                 "NEMO EEN 2-D operands must have one common native A2D shape")
         three_d = (raw.e3u_0, raw.e3v_0, raw.e3f_0,
-                   raw.umask, raw.vmask, raw.fmask)
+                   raw.umask, raw.vmask, raw.fmask, raw.fe3mask)
         if any(np.asarray(x).shape != shape2 + (n_levels,) for x in three_d):
             raise ValueError(
                 "NEMO EEN 3-D operands must have native A2D+n_levels shape")

@@ -988,6 +988,8 @@ def widen_cgrid_geometry_band(geom, halo: int):
     # when unset (None), keeping non-seam grids byte-identical.
     if getattr(geom, "seam_wall_rows", None) is not None:
         cell_names = cell_names + ("seam_wall_rows",)
+    if getattr(geom, "ff_f", None) is not None:
+        cell_names = cell_names + ("ff_f",)
     vface_names = ("dx_v", "dy_v", "area_q", "f_v", "cos_alpha_v",
                    "sin_alpha_v", "cos_lat_v")
     # lat_v rides the same v-face axis; omitted when unset (None) so grids

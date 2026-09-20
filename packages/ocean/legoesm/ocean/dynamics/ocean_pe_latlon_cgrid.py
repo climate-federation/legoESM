@@ -1546,11 +1546,64 @@ def nemo_qco_kmm_velocity_cycle(
             u_layout(restored_u_native), v_layout(restored_v_native))
 
 
+def nemo_transport_wzv_divergence_level(
+    flux_u, flux_u_west, flux_v, flux_v_south, r1_area_t, live_e3t,
+    tmask, *, runoff_mass_flux=None, r1_rho0=None,
+):
+    """NEMO ``div_hor(np_transport)`` for one tracer level.
+
+    This is the shared, source-associated block executed at
+    ``divhor.F90:116-126,140-141``.  ``runoff_mass_flux`` is NEMO ``rnf`` in
+    kg m-2 s-1 and is supplied only for the surface level, matching the
+    resolved ``ln_rnf_depth=F`` arm at ``sbcrnf.F90:253-260``.  Explicit
+    neighbor operands make the same implementation usable both on the global
+    card and on a rank-subdomain oracle stencil without inventing a boundary
+    condition in the comparison.
+    """
+    zonal = jax.lax.optimization_barrier(flux_u - flux_u_west)
+    meridional = jax.lax.optimization_barrier(flux_v - flux_v_south)
+    numerator = jax.lax.optimization_barrier(zonal + meridional)
+    transport_div = jax.lax.optimization_barrier(
+        numerator * r1_area_t) * tmask
+    safe_e3t = jnp.where(tmask > 0.5, live_e3t, 1.0)
+    hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
+    if runoff_mass_flux is not None:
+        if r1_rho0 is None:
+            r1_rho0 = jax.lax.optimization_barrier(
+                jnp.asarray(1.0, dtype=live_e3t.dtype)
+                / jnp.asarray(constants.rho_ocean_nemo, dtype=live_e3t.dtype))
+        runoff_div = jax.lax.optimization_barrier(
+            jax.lax.optimization_barrier(runoff_mass_flux * r1_rho0)
+            / safe_e3t)
+        hdiv = jax.lax.optimization_barrier(hdiv - runoff_div)
+    return jax.lax.optimization_barrier(live_e3t * hdiv) * tmask
+
+
+def nemo_qco_wzv_recurrence(
+    flux_div, e3t0, r3_before, r3_after, tmask, dt,
+):
+    """NEMO QCO bottom-up W recurrence (``sshwzv.F90:330-336``)."""
+    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
+    r1_dt = jax.lax.optimization_barrier(
+        jnp.asarray(1.0, dtype=flux_div.dtype) / dt)
+    stretch_rate = jax.lax.optimization_barrier(
+        (r1_dt * e3t0) * r3_delta[..., None])
+    carry = jnp.zeros_like(r3_before)
+    levels = [None] * flux_div.shape[-1]
+    for jk in range(flux_div.shape[-1] - 1, -1, -1):
+        bracket = jax.lax.optimization_barrier(
+            flux_div[..., jk] + stretch_rate[..., jk])
+        carry = jax.lax.optimization_barrier(
+            carry - bracket * tmask[..., jk])
+        levels[jk] = carry
+    return jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
+
+
 def nemo_qco_wzv_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
     mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
     transport_after_override=None, barotropic_velocity_override=None,
-    volume_transport_override=None,
+    volume_transport_override=None, runoff_mass_flux=None,
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1642,19 +1695,11 @@ def nemo_qco_wzv_operands(
         west = jnp.roll(flux_u, 1, axis=1)
         south = jnp.concatenate(
             [jnp.zeros_like(flux_v[:1]), flux_v[:-1]], axis=0)
-        zonal = jax.lax.optimization_barrier(flux_u - west)
-        meridional = jax.lax.optimization_barrier(flux_v - south)
-        numerator = jax.lax.optimization_barrier(zonal + meridional)
-        transport_div = jax.lax.optimization_barrier(
-            numerator * r1_area_t) * tmask[..., jk]
-        # divhor.F90:180-184 divides the transport divergence by live e3t;
-        # ssh_nxt/wzv then multiply by that same e3t.  Preserve the executed
-        # divide/multiply instead of algebraically cancelling it -- row 4 is
-        # sensitive to those last bits through the vertical recurrence.
-        safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
-        hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
-        level = jax.lax.optimization_barrier(
-            live_t[..., jk] * hdiv) * tmask[..., jk]
+        level = nemo_transport_wzv_divergence_level(
+            flux_u, west, flux_v, south, r1_area_t, live_t[..., jk],
+            tmask[..., jk],
+            runoff_mass_flux=(runoff_mass_flux if jk == 0 else None),
+        )
         flux_levels.append(level)
         barotropic_div = jax.lax.optimization_barrier(barotropic_div + level)
     flux_div = jnp.stack(flux_levels, axis=-1)
@@ -1671,23 +1716,8 @@ def nemo_qco_wzv_operands(
             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
     r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
     r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
-    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
-    r1_dt = jax.lax.optimization_barrier(
-        jnp.asarray(1.0, dtype=eta_now.dtype) / dt)
-    stretch_rate = jax.lax.optimization_barrier(
-        (r1_dt * e3t0) * r3_delta[..., None])
-
-    # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
-    # source ordering under JIT and remains differentiable.
-    carry = jnp.zeros_like(eta_now)
-    levels = [None] * nlev
-    for jk in range(nlev - 1, -1, -1):
-        bracket = jax.lax.optimization_barrier(
-            flux_div[..., jk] + stretch_rate[..., jk])
-        carry = jax.lax.optimization_barrier(
-            carry - bracket * tmask[..., jk])
-        levels[jk] = carry
-    ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
+    ww = nemo_qco_wzv_recurrence(
+        flux_div, e3t0, r3_before, r3_after, tmask, dt)
     return ww, live_u, live_v
 
 
@@ -2684,9 +2714,12 @@ def _bc_pv_flux(
             _f_vtx_al = None
             if vorticity_scheme == "een_total":
                 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                    vertex_coriolis,
+                    nemo_een_ene_vertex_coriolis,
                 )
-                _f_vtx_al = vertex_coriolis(grid)
+                _f_vtx_al = (
+                    nemo_een_ene_vertex_coriolis(grid)
+                    if f_vtx_override is None else f_vtx_override
+                )
             # NEMO vor_een weights the transport by the neighbour face width
             # and normalises by the local one (dynvor.F90:791-792, :804-806).
             # The same weighting the barotropic EEN Coriolis already applies
@@ -2706,8 +2739,8 @@ def _bc_pv_flux(
             # (matsuno_split / explicit_ab2), matching the NEMO utrd_rvo /
             # utrd_pvo diagnostic split.
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                nemo_een_ene_vertex_coriolis,
                 pv_flux_ene,
-                vertex_coriolis,
             )
             # "ene_total" = NEMO np_CRV (dynvor.F90 vor_ene, kvor=total):
             # q = (f + zeta)/e3f at the F-point with VERTEX f (ff_f) — the
@@ -2716,7 +2749,7 @@ def _bc_pv_flux(
             # form). The separate face-f planetary add (stage 7b') is gated
             # off for this scheme. "ene" stays relative-only.
             _f_vtx = (
-                (vertex_coriolis(grid) if f_vtx_override is None
+                (nemo_een_ene_vertex_coriolis(grid) if f_vtx_override is None
                  else f_vtx_override)
                 if vorticity_scheme == "ene_total" else None)
             diag_vortcor_u, diag_vortcor_v = pv_flux_ene(
@@ -4257,7 +4290,7 @@ def _bc_external_surface_forcing(
     du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k,
     z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False,
     withhold_stress=False, shortwave_scheme="auto", shortwave_water_type="II",
-    c_sw=None,
+    shortwave_time_step_s=None, c_sw=None,
 ):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
@@ -4424,11 +4457,19 @@ def _bc_external_surface_forcing(
                 sw_tend = apply_shortwave_penetration(
                     ShortwavePenetrationConfig(
                         scheme=("nemo_qsr_rgb" if shortwave_scheme
-                                == "nemo_qsr_rgb" else "rgb_chl")),
+                                == "nemo_qsr_rgb" else "rgb_chl"),
+                        nemo_time_step_s=shortwave_time_step_s,
+                    ),
                     sw_T,
                     chl=jnp.asarray(_sf_chl, dtype=T.dtype),
                     dz_live=h_k,
                     wet_cell=wet_cell,
+                    gdepw_bottom_live=(
+                        -jnp.asarray(z_coord.z_half_ref[1:], dtype=T.dtype)
+                        * J[..., jnp.newaxis]
+                    ),
+                    gdepw_ref=-jnp.asarray(z_coord.z_half_ref, dtype=T.dtype),
+                    e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=T.dtype),
                     rho_0=float(rho_0),
                 )
                 dT_target = dT_target + sw_tend * mask_3d
@@ -5059,15 +5100,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _h_vtx_override = None
         _f_vtx_override = None
         if config.een_e3f_scheme == "nemo_avg4":
-            from legoesm.ocean.vertical import (
-                nemo_qco_live_vorticity_e3f_cgrid,
-                nemo_qco_vorticity_f_cgrid,
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                nemo_een_ene_vertex_coriolis,
+                vertex_coriolis,
             )
+            from legoesm.ocean.vertical import nemo_qco_live_vorticity_e3f_cgrid
             _h_vtx_override = nemo_qco_live_vorticity_e3f_cgrid(
-                state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0)
-            if not ene_generic_f_vtx:
-                _f_vtx_override = nemo_qco_vorticity_f_cgrid(
-                    z_coord, h_k.dtype)
+                state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid)
+            _f_vtx_override = (
+                vertex_coriolis(grid) if ene_generic_f_vtx
+                else nemo_een_ene_vertex_coriolis(grid)
+            )
         _h_vtx_operand = _h_vtx_override
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
             du_dt, dv_dt, u, v, _h_u_vor, _h_v_vor, h_k,
@@ -5500,6 +5543,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             withhold_stress=_stress_implicit,
             shortwave_scheme=_sw_scheme,
             shortwave_water_type=getattr(_sf_cfg, "shortwave_water_type", "II"),
+            shortwave_time_step_s=getattr(
+                getattr(getattr(config, "physics", None),
+                        "shortwave_penetration", None),
+                "nemo_time_step_s", None),
             c_sw=getattr(
                 getattr(getattr(config, "physics", None), "constants", None),
                 "c_sw", None),

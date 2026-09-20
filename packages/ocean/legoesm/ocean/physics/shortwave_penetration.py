@@ -38,9 +38,12 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.transcendentals import exp as precision_exp
+from legoesm.core.transcendentals import log as precision_log
+from legoesm.core.transcendentals import log10 as precision_log10
 from legoesm.ocean.eos import c_sw as _C_SW_DEFAULT
 from legoesm.ocean.eos import rho_0 as _RHO_0_DEFAULT
 
@@ -363,6 +366,209 @@ def _morel_berthon_chl_column(
     return jnp.clip(chl_z, _CHL_MIN, _CHL_MAX)
 
 
+def _nemo_rgb_extinction_level(
+    gdepw_ref: jnp.ndarray,
+    e3t_ref: jnp.ndarray,
+    *,
+    attenuation_m: jnp.ndarray,
+    fraction: jnp.ndarray,
+    rho0_csw: jnp.ndarray,
+    time_step_s: float,
+) -> jnp.ndarray:
+    """Literal ``qsr_ext_lev`` for NEMO's positive 1-D depth ladder."""
+    sr = nemo_source_round
+    dtype = e3t_ref.dtype
+    zprec = jnp.asarray(10.0e-15, dtype=dtype)
+    qmax = jnp.asarray(1000.0, dtype=dtype)
+    dt = jnp.asarray(time_step_s, dtype=dtype)
+    numerator = sr(zprec * rho0_csw)
+    denominator = sr(sr(dt * qmax) * fraction)
+    zcoef = sr(numerator / denominator)
+    zhext = sr((-attenuation_m) * precision_log(sr(zcoef * e3t_ref)))
+    levels = jnp.arange(1, e3t_ref.shape[-1] + 1, dtype=jnp.int32)
+    return jnp.min(
+        jnp.where(gdepw_ref[1:] >= zhext, levels, e3t_ref.shape[-1])
+    )
+
+
+def _nemo_morel_berthon_chl_column(
+    chl_surface: jnp.ndarray, gdepw_bottom_live: jnp.ndarray
+) -> jnp.ndarray:
+    """Source-statement ``qsr_RGBc CASE(1)`` chlorophyll profile."""
+    sr = nemo_source_round
+    dtype = chl_surface.dtype
+
+    def c(value: float) -> jnp.ndarray:
+        return jnp.asarray(value, dtype=dtype)
+
+    zlogc = precision_log(jnp.clip(chl_surface, c(_CHL_MIN), c(_CHL_MAX)))
+    zlogc = sr(zlogc)
+    zc1 = sr(c(_MB89_ZCZE_C0) + sr(c(_MB89_ZCZE_C1) * zlogc))
+    zc2 = sr(c(_MB89_ZCTOT_C0) + sr(c(_MB89_ZCTOT_C1) * zlogc))
+    zc3 = sr(c(_MB89_ZZE_C0) - sr(c(_MB89_ZZE_C1) * zc2))
+    zc3_alt = sr(c(_MB89_ZZE_ALT_C0) - sr(c(_MB89_ZZE_ALT_C1) * zc2))
+    zc3 = jnp.where(zc3 > c(_MB89_ZZE_BRANCH), zc3_alt, zc3)
+    zcze = sr(precision_exp(zc1))
+    delpsi_inner = sr(c(_MB89_DELPSI_C1) + sr(zlogc * c(_MB89_DELPSI_C2)))
+    delpsi = sr(c(_MB89_DELPSI_C0) + sr(zlogc * delpsi_inner))
+    zrdpsi = sr(c(1.0) / delpsi)
+    inv_zze = sr(precision_exp(sr(-zc3)))
+
+    zcb_inner = sr(c(_MB89_ZCB_C2) + sr(zlogc * c(_MB89_ZCB_C3)))
+    zcb_inner = sr(c(_MB89_ZCB_C1) - sr(zlogc * zcb_inner))
+    zcb = sr(c(_MB89_ZCB_C0) + sr(zlogc * zcb_inner))
+    zcmax_inner = sr(c(_MB89_ZCMAX_C1) - sr(zlogc * c(_MB89_ZCMAX_C2)))
+    zcmax = sr(c(_MB89_ZCMAX_C0) - sr(zlogc * zcmax_inner))
+    zpsimax_inner = sr(c(_MB89_ZPSIMAX_C2) + sr(zlogc * c(_MB89_ZPSIMAX_C3)))
+    zpsimax_inner = sr(c(_MB89_ZPSIMAX_C1) - sr(zlogc * zpsimax_inner))
+    zpsimax = sr(c(_MB89_ZPSIMAX_C0) - sr(zlogc * zpsimax_inner))
+
+    zpsi = sr(inv_zze[..., jnp.newaxis] * gdepw_bottom_live)
+    profile_arg = sr(zpsi - zpsimax[..., jnp.newaxis])
+    profile_arg = sr(profile_arg * zrdpsi[..., jnp.newaxis])
+    profile_arg = sr(profile_arg * profile_arg)
+    profile_exp = sr(precision_exp(sr(-profile_arg)))
+    profile_sum = sr(
+        zcb[..., jnp.newaxis]
+        + sr(zcmax[..., jnp.newaxis] * profile_exp)
+    )
+    chl = sr(zcze[..., jnp.newaxis] * profile_sum)
+    return jnp.clip(chl, c(_CHL_MIN), c(_CHL_MAX))
+
+
+def _nemo_rgb_class_row(chl: jnp.ndarray) -> jnp.ndarray:
+    """Literal 0-based spelling of ``NINT(41+20*LOG10(chl)+1.e-15)``."""
+    sr = nemo_source_round
+    dtype = chl.dtype
+    log10_chl = sr(precision_log10(chl))
+    value = sr(jnp.asarray(41.0, dtype=dtype) + sr(jnp.asarray(20.0, dtype=dtype) * log10_chl))
+    value = sr(value + jnp.asarray(1.0e-15, dtype=dtype))
+    itab = jnp.floor(sr(value + jnp.asarray(0.5, dtype=dtype)))
+    return jnp.clip(itab - 1.0, 0.0, 60.0).astype(jnp.int32)
+
+
+def _nemo_qsr_rgb_tendency(
+    sw_down: jnp.ndarray,
+    chl_surface: jnp.ndarray,
+    e3t_live: jnp.ndarray,
+    wet_cell: jnp.ndarray,
+    gdepw_bottom_live: jnp.ndarray,
+    gdepw_ref: jnp.ndarray,
+    e3t_ref: jnp.ndarray,
+    config: ShortwavePenetrationConfig,
+    rho_0: float,
+    c_sw: float,
+) -> jnp.ndarray:
+    """Literal RK3 ``qsr_RGBc`` statements from NEMO ``traqsr.F90``."""
+    if config.nemo_time_step_s is None:
+        raise ValueError("nemo_qsr_rgb requires nemo_time_step_s for qsr_ext_lev")
+    sr = nemo_source_round
+    dtype = sw_down.dtype
+
+    def c(value: float) -> jnp.ndarray:
+        return jnp.asarray(value, dtype=dtype)
+
+    table = jnp.asarray(_RGB_ATTENUATION_BGR, dtype=dtype)
+    chl_z = _nemo_morel_berthon_chl_column(chl_surface, gdepw_bottom_live)
+    row = _nemo_rgb_class_row(chl_z)
+    coeffs = table[row]
+    k_blue, k_green, k_red = coeffs[..., 0], coeffs[..., 1], coeffs[..., 2]
+
+    rho0_csw = sr(c(rho_0) * c(c_sw))
+    r1_rho0_csw = sr(c(1.0) / rho0_csw)
+    rn_abs = c(config.rgb_ir_fraction)
+    r1_si0 = sr(c(1.0) / c(config.rgb_ir_extinction_m))
+    visible_fraction = sr(c(1.0) - rn_abs)
+    zz0 = rn_abs
+    zz1 = sr(visible_fraction / c(3.0))
+    ze0 = sr(zz0 * sw_down)
+    zeR = sr(zz1 * sw_down)
+    zeG = sr(zz1 * sw_down)
+    zeB = sr(zz1 * sw_down)
+    zeT = sw_down
+
+    # ``tra_qsr_init`` uses the minimum chlorophyll class for the deepest
+    # possible RGB attenuation.  These are grid-derived selectors, not card
+    # constants; ORCA2 resolves them to 2/8/19/22.
+    min_row = _nemo_rgb_class_row(c(_CHL_MIN))
+    min_coeffs = table[min_row]
+    red_length = sr(c(1.0) / min_coeffs[2])
+    green_length = sr(c(1.0) / min_coeffs[1])
+    blue_length = sr(c(1.0) / min_coeffs[0])
+    nk0 = _nemo_rgb_extinction_level(
+        gdepw_ref, e3t_ref,
+        attenuation_m=c(config.rgb_ir_extinction_m), fraction=rn_abs,
+        rho0_csw=rho0_csw, time_step_s=config.nemo_time_step_s,
+    )
+    nkR = _nemo_rgb_extinction_level(
+        gdepw_ref, e3t_ref, attenuation_m=red_length,
+        fraction=zz1, rho0_csw=rho0_csw,
+        time_step_s=config.nemo_time_step_s,
+    )
+    nkG = _nemo_rgb_extinction_level(
+        gdepw_ref, e3t_ref, attenuation_m=green_length,
+        fraction=zz1, rho0_csw=rho0_csw,
+        time_step_s=config.nemo_time_step_s,
+    )
+    nkB = _nemo_rgb_extinction_level(
+        gdepw_ref, e3t_ref, attenuation_m=blue_length,
+        fraction=zz1, rho0_csw=rho0_csw,
+        time_step_s=config.nemo_time_step_s,
+    )
+
+    wet = wet_cell.astype(dtype)
+    wmask_next = jnp.concatenate(
+        [wet[..., 1:], jnp.zeros_like(wet[..., :1])], axis=-1
+    )
+    scan_inputs = (
+        jnp.arange(1, e3t_live.shape[-1] + 1, dtype=jnp.int32),
+        jnp.moveaxis(e3t_live, -1, 0),
+        jnp.moveaxis(k_blue, -1, 0),
+        jnp.moveaxis(k_green, -1, 0),
+        jnp.moveaxis(k_red, -1, 0),
+        jnp.moveaxis(wmask_next, -1, 0),
+    )
+
+    def level_step(carry, inputs):
+        ze0_k, zeR_k, zeG_k, zeB_k, zeT_k = carry
+        jk, ze3t, r1_LB, r1_LG, r1_LR, wmask = inputs
+        zze0 = sr(ze0_k * precision_exp(sr(sr(-ze3t) * r1_si0)))
+        zzeR = sr(zeR_k * precision_exp(sr(sr(-ze3t) * r1_LR)))
+        zzeG = sr(zeG_k * precision_exp(sr(sr(-ze3t) * r1_LG)))
+        zzeB = sr(zeB_k * precision_exp(sr(sr(-ze3t) * r1_LB)))
+
+        total0 = sr(sr(sr(zze0 + zzeB) + zzeG) + zzeR)
+        totalR = sr(sr(zzeR + zzeG) + zzeB)
+        totalG = sr(zzeG + zzeB)
+        zzeT = jnp.where(
+            jk <= nk0, sr(total0 * wmask),
+            jnp.where(
+                jk <= nkR, sr(totalR * wmask),
+                jnp.where(
+                    jk <= nkG, sr(totalG * wmask),
+                    jnp.where(jk <= nkB, sr(zzeB * wmask), c(0.0)),
+                ),
+            ),
+        )
+        delta = sr(zeT_k - zzeT)
+        increment = sr(sr(r1_rho0_csw * delta) / ze3t)
+        increment = jnp.where(jk <= nkB, increment, c(0.0))
+        next_carry = (
+            jnp.where(jk <= nk0, zze0, ze0_k),
+            jnp.where(jk <= nkR, zzeR, zeR_k),
+            jnp.where(jk <= nkG, zzeG, zeG_k),
+            jnp.where(jk <= nkB, zzeB, zeB_k),
+            jnp.where(jk <= nkB, zzeT, zeT_k),
+        )
+        return next_carry, increment
+
+    _, tendency_levels_first = jax.lax.scan(
+        level_step, (ze0, zeR, zeG, zeB, zeT), scan_inputs
+    )
+    tendency = jnp.moveaxis(tendency_levels_first, 0, -1)
+    return jnp.where(wet > c(0.0), tendency, c(0.0))
+
+
 def shortwave_penetration_rgb_tendency(
     sw_down: jnp.ndarray,
     chl_surface: jnp.ndarray,
@@ -371,6 +577,10 @@ def shortwave_penetration_rgb_tendency(
     config: ShortwavePenetrationConfig = ShortwavePenetrationConfig(),
     rho_0: float = _RHO_0_DEFAULT,
     c_sw: float = _C_SW_DEFAULT,
+    *,
+    gdepw_bottom_live: jnp.ndarray | None = None,
+    gdepw_ref: jnp.ndarray | None = None,
+    e3t_ref: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """NEMO RGB chlorophyll SW penetration temperature tendency.
 
@@ -409,6 +619,18 @@ def shortwave_penetration_rgb_tendency(
             "shortwave_penetration_rgb_tendency is the RGB kernel but got "
             f"scheme={config.scheme!r}; use apply_shortwave_penetration(...) or "
             "pass ShortwavePenetrationConfig(scheme='nemo_qsr_rgb')."
+        )
+    if config.scheme == "nemo_qsr_rgb":
+        if gdepw_bottom_live is None or gdepw_ref is None or e3t_ref is None:
+            raise ValueError(
+                "nemo_qsr_rgb requires gdepw_bottom_live, gdepw_ref, and e3t_ref"
+            )
+        if config.rgb_chl_profile != "morel_berthon":
+            raise ValueError("nemo_qsr_rgb currently requires nn_chlprfl=1/morel_berthon")
+        return _nemo_qsr_rgb_tendency(
+            sw_down, chl_surface, dz_live, wet_cell,
+            gdepw_bottom_live, gdepw_ref, e3t_ref,
+            config, rho_0, c_sw,
         )
     table = jnp.asarray(_RGB_ATTENUATION_BGR, dtype=sw_down.dtype)  # (61, 3) = (B,G,R)
     wet = wet_cell.astype(dz_live.dtype)
@@ -554,6 +776,9 @@ def apply_shortwave_penetration(
     dz_live: jnp.ndarray | None = None,
     wet_cell: jnp.ndarray | None = None,
     chl: jnp.ndarray | None = None,
+    gdepw_bottom_live: jnp.ndarray | None = None,
+    gdepw_ref: jnp.ndarray | None = None,
+    e3t_ref: jnp.ndarray | None = None,
     rho_0: float = _RHO_0_DEFAULT,
     c_sw: float = _C_SW_DEFAULT,
 ) -> jnp.ndarray:
@@ -578,7 +803,10 @@ def apply_shortwave_penetration(
         if dz_live is None or wet_cell is None:
             raise ValueError("rgb_chl SW penetration requires dz_live and wet_cell")
         return shortwave_penetration_rgb_tendency(
-            sw_down, chl, dz_live, wet_cell, config, rho_0, c_sw
+            sw_down, chl, dz_live, wet_cell, config, rho_0, c_sw,
+            gdepw_bottom_live=gdepw_bottom_live,
+            gdepw_ref=gdepw_ref,
+            e3t_ref=e3t_ref,
         )
     if config.scheme == "sweeney_2band":
         if chl is None:

@@ -1,0 +1,315 @@
+{
+  "association_arms": {
+    "factored_zbtr": {
+      "salinity": {
+        "count": 231519,
+        "max_abs": 0.0,
+        "status": "AT_BAR",
+        "unequal": 0
+      },
+      "temperature": {
+        "count": 231519,
+        "first_candidate": 6.742742670464883e-07,
+        "first_oracle": 6.742742670464882e-07,
+        "first_zero_based": [
+          3,
+          60,
+          19
+        ],
+        "max_abs": 1.0587911840678754e-22,
+        "status": "DEBT",
+        "unequal": 75
+      }
+    },
+    "flat_divide": {
+      "salinity": {
+        "count": 231519,
+        "first_candidate": 3.1863104783914705e-07,
+        "first_oracle": 3.186310478391471e-07,
+        "first_zero_based": [
+          117,
+          31,
+          16
+        ],
+        "max_abs": 5.293955920339377e-23,
+        "status": "DEBT",
+        "unequal": 1
+      },
+      "temperature": {
+        "count": 231519,
+        "first_candidate": 6.788033322712906e-07,
+        "first_oracle": 6.788033322712904e-07,
+        "first_zero_based": [
+          4,
+          55,
+          19
+        ],
+        "max_abs": 2.117582368135751e-22,
+        "status": "DEBT",
+        "unequal": 48
+      }
+    },
+    "nearest_divide": {
+      "salinity": {
+        "count": 231519,
+        "max_abs": 0.0,
+        "status": "AT_BAR",
+        "unequal": 0
+      },
+      "temperature": {
+        "count": 231519,
+        "max_abs": 0.0,
+        "status": "AT_BAR",
+        "unequal": 0
+      }
+    },
+    "reciprocal_h": {
+      "salinity": {
+        "count": 231519,
+        "first_candidate": 3.1863104783914705e-07,
+        "first_oracle": 3.186310478391471e-07,
+        "first_zero_based": [
+          117,
+          31,
+          16
+        ],
+        "max_abs": 5.293955920339377e-23,
+        "status": "DEBT",
+        "unequal": 1
+      },
+      "temperature": {
+        "count": 231519,
+        "first_candidate": 6.788033322712906e-07,
+        "first_oracle": 6.788033322712904e-07,
+        "first_zero_based": [
+          4,
+          55,
+          19
+        ],
+        "max_abs": 2.117582368135751e-22,
+        "status": "DEBT",
+        "unequal": 48
+      }
+    },
+    "single_statement_barrier": {
+      "salinity": {
+        "count": 231519,
+        "first_candidate": -3.4053181921450993e-09,
+        "first_oracle": -3.4053181921450998e-09,
+        "first_zero_based": [
+          37,
+          17,
+          27
+        ],
+        "max_abs": 5.293955920339377e-23,
+        "status": "DEBT",
+        "unequal": 3
+      },
+      "temperature": {
+        "count": 231519,
+        "first_candidate": 8.642645458419477e-08,
+        "first_oracle": 8.642645458419479e-08,
+        "first_zero_based": [
+          3,
+          43,
+          20
+        ],
+        "max_abs": 1.0587911840678754e-22,
+        "status": "DEBT",
+        "unequal": 67
+      }
+    },
+    "unbarred_scalar_expression": {
+      "salinity": {
+        "count": 231519,
+        "first_candidate": 3.1863104783914705e-07,
+        "first_oracle": 3.186310478391471e-07,
+        "first_zero_based": [
+          117,
+          31,
+          16
+        ],
+        "max_abs": 5.293955920339377e-23,
+        "status": "DEBT",
+        "unequal": 1
+      },
+      "temperature": {
+        "count": 231519,
+        "first_candidate": 6.788033322712906e-07,
+        "first_oracle": 6.788033322712904e-07,
+        "first_zero_based": [
+          4,
+          55,
+          19
+        ],
+        "max_abs": 2.117582368135751e-22,
+        "status": "DEBT",
+        "unequal": 48
+      }
+    }
+  },
+  "boundary": "ORCA2_OWNER_DIFFUSIVE_BBL",
+  "coefficients": {
+    "ahu_bbl": {
+      "count": 8489,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    },
+    "ahv_bbl": {
+      "count": 8554,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    }
+  },
+  "cross_card_rule12": {
+    "GYRE-zco": {
+      "advective_selector": 0,
+      "diffusive_selector": 0,
+      "salinity": {
+        "count": 21120,
+        "max_abs": 0.0,
+        "status": "AT_BAR",
+        "unequal": 0
+      },
+      "temperature": {
+        "count": 21120,
+        "max_abs": 0.0,
+        "status": "AT_BAR",
+        "unequal": 0
+      }
+    },
+    "LOCK_EXCHANGE-zco": {
+      "advective_selector": 0,
+      "diffusive_selector": 0,
+      "salinity": {
+        "count": 7800,
+        "max_abs": 0.0,
+        "status": "AT_BAR",
+        "unequal": 0
+      },
+      "temperature": {
+        "count": 7800,
+        "max_abs": 0.0,
+        "status": "AT_BAR",
+        "unequal": 0
+      }
+    },
+    "OVERFLOW-zps": {
+      "advective_selector": 2,
+      "diffusive_selector": 0,
+      "salinity": {
+        "count": 60600,
+        "max_abs": 0.0,
+        "status": "AT_BAR",
+        "unequal": 0
+      },
+      "temperature": {
+        "count": 60600,
+        "max_abs": 0.0,
+        "status": "AT_BAR",
+        "unequal": 0
+      }
+    }
+  },
+  "execution": {
+    "backend": "cpu",
+    "dtype": "float64",
+    "jit": "production",
+    "transcendentals": "libm"
+  },
+  "intermediate_rows": {
+    "bottom_h_jax_vs_numpy": {
+      "count": 26492,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    },
+    "increment_jax_vs_numpy": {
+      "count": 26492,
+      "first_candidate": -4.6045233427390264e-08,
+      "first_oracle": -4.604523342739026e-08,
+      "first_zero_based": [
+        1,
+        118
+      ],
+      "max_abs": 1.0587911840678754e-22,
+      "status": "DEBT",
+      "unequal": 237
+    },
+    "product_jax_vs_numpy": {
+      "count": 26492,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    },
+    "r1_area_jax_vs_numpy": {
+      "count": 26492,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    },
+    "sum_jax_vs_numpy": {
+      "count": 26492,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    },
+    "u_pair_jax_vs_numpy": {
+      "count": 26492,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    },
+    "v_pair_jax_vs_numpy": {
+      "count": 26492,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    }
+  },
+  "operand_coverage": {
+    "coefficient_exclusions": [
+      "ahu rank0 i=89: east-neighbour Kmm r3t lives on rank1",
+      "ahv rank0 j=147: fold-neighbour Kmm r3t is not in rank0 record"
+    ],
+    "rhs_exclusion": [
+      "rank0 i=0: west ahu face is owned by rank1"
+    ],
+    "upstream_substitutions": [
+      "ahu_bbl",
+      "ahv_bbl"
+    ]
+  },
+  "record": {
+    "path": "/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2s_zdf_een_a_10step_np2/oracle_bbl_diffusive_kt00000001.bin",
+    "sha256": "ec221a1947be20ab8c5025e842ed5193d04b5d06da16f52e302dd415bb61362e"
+  },
+  "rhs": {
+    "salinity_Krhs_post": {
+      "count": 231519,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    },
+    "temperature_Krhs_post": {
+      "count": 231519,
+      "max_abs": 0.0,
+      "status": "AT_BAR",
+      "unequal": 0
+    }
+  },
+  "selectors": {
+    "nn_bbl_adv": 0,
+    "nn_bbl_ldf": 1,
+    "rn_ahtbbl_m2_s": 1000.0
+  },
+  "source": {
+    "coefficients": "trabbl.F90:342-380",
+    "diffusive_rhs": "trabbl.F90:187-200",
+    "selectors": "trabbl.F90:118-138",
+    "static_geometry": "trabbl.F90:507-537"
+  },
+  "status": "PASS"
+}

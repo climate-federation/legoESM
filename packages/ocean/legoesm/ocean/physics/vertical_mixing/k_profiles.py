@@ -652,6 +652,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
 
     if scheme == "tke":
         from legoesm.ocean.physics.vertical_mixing.tke import (
+            nemo_tke_effective_ice_fraction,
             tke_vertical_mixing,
         )
         # Interpolate u, v to cell centres for the closure on C-grid;
@@ -736,14 +737,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         else:
             u_before_data = v_before_data = None
             u_face_now = v_face_now = u_face_before = v_face_before = None
-        if _shear_disc == "nemo_face_native_now2":
-            # Face-native SPATIAL geometry at NOW^2 time levels -- the
-            # RK3-oracle variant (ORCA1 is compiled key_RK3; there is no Nbb
-            # velocity to be faithful to). Same raw-face requirement as
-            # nemo_face_native, no before-state.
+        if _shear_disc == "nemo_face_native_nbb2":
+            # Face-native SPATIAL geometry with both operands at Nbb, the
+            # whole-step-entry slot under key_RK3 (stprk3.F90:164-165). Same
+            # raw-face requirement as nemo_face_native, no MLF Nnn operand.
             if not _staggered:
                 raise ValueError(
-                    "TKEConfig.tke_shear_production='nemo_face_native_now2' "
+                    "TKEConfig.tke_shear_production='nemo_face_native_nbb2' "
                     "requires the RAW (uncollapsed) C-grid face state.u/v -- "
                     "got a pre-centred state (shape matches T).")
             u_face_now = state.u.data
@@ -753,7 +753,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         _is_active = getattr(z_coord, "is_active", None)
         _surface_tmask = None
         _face_masks_3d = None
-        if _shear_disc in ("nemo_face_native", "nemo_face_native_now2"):
+        if _shear_disc in ("nemo_face_native", "nemo_face_native_nbb2"):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 compute_face_masks_3d,
             )
@@ -909,22 +909,23 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # ``TKEConfig.eice``).  The lc/etau kernels apply ``(1 - ice_frac)``
         # internally, so the mode maps onto an EFFECTIVE ice fraction:
         #   0 (default, bit-identical): no attenuation — ice_frac stays None;
-        #   1: eff = fi              -> kernel factor (1-fi)        (nn_eice=1);
+        #   1: eff = tanh(10*fi)     -> factor 1-tanh(10*fi)        (nn_eice=1);
+        #   2: eff = fi              -> factor 1-fi                  (nn_eice=2);
         #   3: eff = min(4*fi, 1)    -> kernel factor max(0,1-4*fi) (nn_eice=3,
         #      the ORCA1 namelist choice — wave TKE fully killed at fi>=0.25).
         # Unknown values raise (dispatch hardening; static config value).
         _eice = int(getattr(tke_cfg, "eice", 0))
-        if _eice not in (0, 1, 3):
+        if _eice not in (0, 1, 2, 3):
             raise ValueError(
                 f"Unknown TKEConfig.eice={_eice!r}; expected 0 (no under-ice "
-                "attenuation), 1 ((1-fi)) or 3 (max(0,1-4*fi), NEMO nn_eice=3) "
+                "attenuation), 1 (1-tanh(10fi)), 2 (1-fi), or 3 "
+                "(max(0,1-4fi), NEMO nn_eice=3) "
                 "on the lc/etau TKE sources.")
         _tke_ice_fr = None
         if _eice != 0 and surface_forcing is not None:
             _fi = getattr(surface_forcing, "ice_concentration", None)
             if _fi is not None:
-                _tke_ice_fr = (_fi if _eice == 1
-                               else jnp.minimum(4.0 * _fi, 1.0))
+                _tke_ice_fr = nemo_tke_effective_ice_fraction(_fi, _eice)
         if prognostic:
             # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
             # model step, seeded from the carried ``tke_old``, with dt = the

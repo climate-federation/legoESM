@@ -2325,6 +2325,7 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
                         if geom.seam_wall_rows is not None else None),
         native_lat_T_deg=(t(geom.native_lat_T_deg)
                           if geom.native_lat_T_deg is not None else None),
+        ff_f=(t(geom.ff_f) if geom.ff_f is not None else None),
         # lon, dlon, dlat, radius, n_lon pass through unchanged.
     )
 

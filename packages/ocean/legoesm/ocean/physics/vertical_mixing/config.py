@@ -617,7 +617,7 @@ class TKEConfig(NamedTuple):
     tke_langmuir_evaluation: str = "vectorized"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
-    # NEMO cards instead freeze p_sh2 from the step-entry NOW/BEFORE faces and
+    # NEMO cards instead freeze p_sh2 from selected step-entry face levels and
     # carried avm_k, matching zdfphy.F90:268 before the explicit update reaches
     # zdftke.F90.  Kept legacy by default so all other cards remain unchanged.
     tke_shear_evaluation_stage: str = "implicit_solve_state"
@@ -693,20 +693,10 @@ class TKEConfig(NamedTuple):
     #   BC — the prior legoESM behaviour).
     # ``True``: NEMO's bottom friction TKE source (zdftke.F90:279-288):
     #   en(mbkt+1) = max(0.001875·CdU_bot·|u_bot|, rn_emin)·ssmask, held as
-    #   a Dirichlet identity row at the ABSOLUTE-DEEPEST array interface
-    #   (``e_new[..., -1]``), not the per-column bathymetry-relative
-    #   ``bottom_level``-adjacent row. On a FLAT-BOTTOM column (every DINO
-    #   column here reaches the max depth) these coincide exactly; on
-    #   variable topography (a shallower column) the true seafloor
-    #   interface sits SHALLOWER than the array's last row, so the pin
-    #   lands one level below the real bottom (a masked/dry level there —
-    #   downstream wet-interface masking prevents any leak into wet cells,
-    #   so this is NOT a correctness bug, but the BC does not fire at the
-    #   physically correct row on shallow columns). Physics-validator
-    #   review 2026-07-24: acceptable for the Phase-2 kamm-card target
-    #   (deep/not entrainment-relevant per the Phase-1 ranking); a
-    #   bottom_level-relative scatter is the documented follow-up before
-    #   any abyssal-tendency certification.
+    #   a Dirichlet identity row at each column's bathymetry-relative
+    #   ``bottom_level``-adjacent W interface when the caller supplies a
+    #   partial-cell bottom index.  The legacy flat-bottom interface remains
+    #   supported by pinning ``e_new[..., -1]`` when no bottom index exists.
     #   Requires the model-step caller to thread the bottom-cell velocities
     #   + the NEMO bottom-drag rate (reusing
     #   ``nemo_effective_bottom_drag_r`` — single-owner doctrine, no
@@ -789,12 +779,13 @@ class TKEConfig(NamedTuple):
     #   full wave TKE even under compact ice.  Nonzero modes thread
     #   ``surface_forcing.ice_concentration`` as an EFFECTIVE ``ice_frac``
     #   into the kernels' built-in ``(1-ice_frac)`` factor:
-    #     1 -> eff = fi            (factor (1-fi),        NEMO nn_eice=1)
+    #     1 -> eff = tanh(10*fi)   (factor 1-tanh(10*fi), NEMO nn_eice=1)
+    #     2 -> eff = fi            (factor 1-fi, NEMO nn_eice=2)
     #     3 -> eff = min(4*fi, 1)  (factor max(0,1-4*fi), NEMO nn_eice=3 —
     #          the ORCA1 namelist choice; wave TKE killed at fi >= 0.25).
     #   2026-07-18 audit: the kernels ALWAYS supported ``ice_frac`` but no
     #   caller supplied it — under-ice TKE injection over-mixed the Arctic.
-    eice: int = 0                        # 0 off | 1 (1-fi) | 3 max(0,1-4fi)  (NEMO nn_eice)
+    eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
 
 
 class KPPConfig(NamedTuple):

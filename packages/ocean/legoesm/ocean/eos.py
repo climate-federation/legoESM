@@ -1041,6 +1041,43 @@ _ROQUET_EOS80 = {
     "EOS012": 2.1836324814, "EOS112": -3.4453674320e-01, "EOS022": -1.2548163097,
     # zn3 (depth^3)
     "EOS003": 1.8729078427e-02, "EOS103": -5.7238495240e-02, "EOS013": 3.8306136687e-01,
+    # thermal expansion / haline contraction, eosbn2.F90:2175-2246
+    "ALP000": -2.5218796628e-01, "ALP100": 3.4119354654e-01,
+    "ALP200": -2.2119589983e-01, "ALP300": 1.8082347094e-01,
+    "ALP400": -3.6936026529e-02, "ALP500": -5.0091801383e-03,
+    "ALP010": 1.2789915300, "ALP110": -1.2021756164,
+    "ALP210": 8.4037519952e-01, "ALP310": -4.1905788542e-01,
+    "ALP410": 9.8855300959e-02, "ALP020": -1.2634838399,
+    "ALP120": 1.6112195176, "ALP220": -7.5817155402e-01,
+    "ALP320": 4.7006963580e-02, "ALP030": 8.0812310102e-01,
+    "ALP130": -1.0102374985, "ALP230": 4.8340368631e-01,
+    "ALP040": -1.5098959754e-01, "ALP140": -1.4394226233e-02,
+    "ALP050": 3.6780433255e-02, "ALP001": 3.9631611467e-01,
+    "ALP101": 1.9159845880e-02, "ALP201": -1.0286156825e-01,
+    "ALP301": 1.6738969362e-02, "ALP011": -4.9997430930e-01,
+    "ALP111": 9.7335338937e-03, "ALP211": 6.0887771651e-02,
+    "ALP021": 2.6149576513e-01, "ALP121": -1.6671866715e-02,
+    "ALP031": -5.9503008642e-02, "ALP002": -5.4590812035e-02,
+    "ALP102": 8.6134185799e-03, "ALP012": 6.2740815484e-02,
+    "ALP003": -9.5765341718e-03,
+    "BET000": 2.1420623987, "BET100": -9.3752598635,
+    "BET200": 1.9446303907e+01, "BET300": -1.8632235232e+01,
+    "BET400": 8.9390837485, "BET500": -1.7142465871,
+    "BET010": -1.7059677327e-01, "BET110": 2.2119589983e-01,
+    "BET210": -2.7123520642e-01, "BET310": 7.3872053057e-02,
+    "BET410": 1.2522950346e-02, "BET020": 3.0054390409e-01,
+    "BET120": -4.2018759976e-01, "BET220": 3.1429341406e-01,
+    "BET320": -9.8855300959e-02, "BET030": -2.6853658626e-01,
+    "BET130": 2.5272385134e-01, "BET230": -2.3503481790e-02,
+    "BET040": 1.2627968731e-01, "BET140": -1.2085092158e-01,
+    "BET050": 1.4394226233e-03, "BET001": -2.2271304375e-01,
+    "BET101": 5.5453416919e-01, "BET201": -6.2815936268e-01,
+    "BET301": 2.0601115202e-01, "BET011": -9.5799229402e-03,
+    "BET111": 1.0286156825e-01, "BET211": -2.5108454043e-02,
+    "BET021": -2.4333834734e-03, "BET121": -3.0443885826e-02,
+    "BET031": 2.7786444526e-03, "BET002": -4.2811838287e-02,
+    "BET102": 5.1355066072e-02, "BET012": -4.3067092900e-03,
+    "BET003": -7.1548119050e-04,
 }
 
 
@@ -1387,7 +1424,9 @@ _NEMO_RHO0 = 1026.0   # NEMO rho0 (eosbn2.F90:1898); legoESM's
 # hence N2 high by 1026/1025 = +0.0976% (codex 9408213 #6).
 
 
-def nemo_roquet_alpha_beta(T, S, depth_m, rho0: float = _NEMO_RHO0):
+def nemo_roquet_alpha_beta(
+    T, S, depth_m, rho0: float = _NEMO_RHO0, *, eos_form: str = "teos10"
+):
     r"""NEMO ``rab_3d`` thermal expansion / haline contraction (polynomial EOS).
 
     Transcribes ``eosbn2.F90:1108-1143`` verbatim for the
@@ -1412,7 +1451,13 @@ def nemo_roquet_alpha_beta(T, S, depth_m, rho0: float = _NEMO_RHO0):
     ``S + rdeltaS``, which is strictly positive for physical salinity, so the
     kink is unreachable and the gradient stays finite.
     """
-    c = _ROQUET_TEOS10
+    if eos_form in ("teos10", "nemo_teos10"):
+        c = _ROQUET_TEOS10
+    elif eos_form in ("eos80", "nemo_eos80"):
+        c = _ROQUET_EOS80
+    else:
+        raise ValueError(
+            "eos_form must name NEMO's 'teos10' or 'eos80' coefficient set")
     zh = jnp.asarray(depth_m) * c["r1_Z0"]
     zt = jnp.asarray(T) * c["r1_T0"]
     zs = jnp.sqrt(jnp.abs(jnp.asarray(S) + c["rdeltaS"]) * c["r1_S0"])

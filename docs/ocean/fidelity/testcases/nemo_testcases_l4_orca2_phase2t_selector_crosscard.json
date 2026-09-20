@@ -1,0 +1,116 @@
+{
+  "c1d": {
+    "evidence": "tests/ice/unit/test_ice_transport_cgrid.py",
+    "reason": "this branch has no merged Lane-3 C1D fidelity card",
+    "status": "CONSTRUCTIBILITY_PROXY_ONLY_PENDING_ICE_MERGE"
+  },
+  "cross_card_kt1_entry": {
+    "GYRE-zco": {
+      "fields": {
+        "S": {
+          "count": 18000,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "T": {
+          "count": 18000,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "ssh": {
+          "count": 600,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "u": {
+          "count": 17400,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "v": {
+          "count": 17100,
+          "status": "AT_BAR",
+          "unequal": 0
+        }
+      },
+      "record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round15_oracle_v2_scalarmath/oracle_step_entry_kt00000001.bin",
+      "record_sha256": "9def5f4986853f497a5e0507bea185fe1ec4348715e2aeca0b14507df8e24fa0"
+    },
+    "LOCK_EXCHANGE-zco": {
+      "fields": {
+        "S": {
+          "count": 2560,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "T": {
+          "count": 2560,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "ssh": {
+          "count": 128,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "u": {
+          "count": 2540,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "v": {
+          "count": 7800,
+          "status": "AT_BAR",
+          "unequal": 0
+        }
+      },
+      "record": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10/oracle_step_entry_kt00000001.bin",
+      "record_sha256": "c9f23d441865c566e3edf0301aca4f6e440259ade1722b725a0aa0fd4c2839e1"
+    },
+    "OVERFLOW-zps": {
+      "fields": {
+        "S": {
+          "count": 17000,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "T": {
+          "count": 17000,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "ssh": {
+          "count": 200,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "u": {
+          "count": 16900,
+          "status": "AT_BAR",
+          "unequal": 0
+        },
+        "v": {
+          "count": 60600,
+          "status": "AT_BAR",
+          "unequal": 0
+        }
+      },
+      "record": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10/oracle_step_entry_kt00000001.bin",
+      "record_sha256": "cf0183e563aba8b8848bc5dea470c9e50aab2d987ff5da86241e8f82494d5c66"
+    }
+  },
+  "execution": {
+    "backend": "cpu",
+    "dtype": "float64",
+    "transcendentals": "libm"
+  },
+  "orca2_bottom_tke_bc": true,
+  "orca2_sh2_tuple": [
+    "nemo_face_native_now2",
+    "nemo_face",
+    "step_entry",
+    "nemo_qco_live_face"
+  ],
+  "scope": "actual NEMO kt=1 Nbb entry rows; no ocean step.  The production change is confined to build_orca2_zps_card, so unchanged cards enter the same production step from byte-identical state.",
+  "status": "PASS"
+}

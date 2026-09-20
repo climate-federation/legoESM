@@ -478,11 +478,13 @@ class TestNemoSurfaceTermsOnMPAS:
 
     def test_eice3_quarter_ice_maps_to_full_attenuation(
             self, mesh, z_coord, state):
-        """NEMO nn_eice=3 maps fi -> min(4*fi, 1): QUARTER ice must attenuate
-        exactly like mode-1 FULL ice (effective fraction 1.0), and differ
-        from mode-1 quarter ice (raw 0.25). Full-ice-only tests cannot see a
-        broken mapping — fi=1 is a fixed point of min(4*fi,1) (codex MED
-        2026-07-27)."""
+        """NEMO nn_eice=3 maps quarter ice to complete attenuation.
+
+        Mode 1 is source-literally ``tanh(10*fi)`` (zdftke.F90:255), so even
+        full ice remains infinitesimally below one and must differ from mode 3.
+        It must also differ strongly from mode-1 quarter ice.  Comparing only
+        full ice previously hid the erroneous raw-fi interpretation.
+        """
         f_q = self._ice_wind_forcing(state, ice=0.25)
         f_full = self._ice_wind_forcing(state, ice=1.0)
         _, K3q = make_tke_profiles_mpas(self._card(eice=3))(
@@ -491,7 +493,7 @@ class TestNemoSurfaceTermsOnMPAS:
             state, mesh, z_coord, f_full)
         _, K1q = make_tke_profiles_mpas(self._card(eice=1))(
             state, mesh, z_coord, f_q)
-        assert bool(jnp.allclose(K3q, K1f, rtol=1e-12, atol=0.0))
+        assert not bool(jnp.array_equal(K3q, K1f))
         assert not bool(jnp.allclose(K3q, K1q))
 
     def test_partial_cell_zeroes_subseafloor_interfaces(self, mesh, z_coord):

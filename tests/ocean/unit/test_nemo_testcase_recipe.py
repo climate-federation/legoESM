@@ -1,13 +1,19 @@
+from types import SimpleNamespace
+
 import jax.numpy as jnp
 import legoesm.ocean.fidelity.nemo_testcase_recipe as testcase_recipe
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
 from legoesm.ocean.fidelity.nemo_recipe import (
     nemo_gyre_emp,
     nemo_gyre_seasonal_cosines,
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    _orca2_depth_ladder,
+    _orca2_masks,
     build_gyre_zco_card,
     build_lock_exchange_zco_card,
     build_nemo_testcase_card,
@@ -16,9 +22,9 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     gyre_surface_boundary_condition,
     gyre_vertical_ladder,
     validate_nemo_testcase_card,
+    validate_nemo_testcase_card_for_execution,
 )
-from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
+from legoesm.ocean.vertical import nemo_fe3mask_from_tmask
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +32,65 @@ def _restore_precision():
     old = get_policy()
     yield
     set_policy(old)
+
+
+def test_orca2_execution_guard_rejects_registered_unmeasured_arms():
+    card = SimpleNamespace(
+        case="ORCA2-zps",
+        unmeasured_features=("si3_jpl5_layered_prather_state",),
+    )
+    # Isolate the execution guard from the structural validator: the complete
+    # deck-backed card is exercised in the phase-2 gate, not this unit test.
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            testcase_recipe, "validate_nemo_testcase_card", lambda _: None
+        )
+        with pytest.raises(ValueError, match="not execution-ready"):
+            validate_nemo_testcase_card_for_execution(card)
+
+
+def test_orca2_structural_guard_rejects_iceberg_option_drift():
+    """The comparison card cannot silently revert to the shipped icb arm."""
+    set_policy(PrecisionPolicy.fp64())
+    # Reach the ORCA2 option check without constructing the external
+    # deck-backed state in this small unit test.
+    good = build_gyre_zco_card()
+    tke = good.recipe.model_config.physics.vertical_mixing.tke._replace(
+        tke_shear_production="nemo_face_native_nbb2",
+        tke_shear_avm_weighting="nemo_face",
+        tke_shear_evaluation_stage="step_entry",
+        tke_shear_metric_source="nemo_qco_live_face",
+        bottom_tke_bc=True,
+        eice=1,
+    )
+    card = good._replace(
+        case="ORCA2-zps",
+        surface_boundary_condition="ncar_core_sbcblk",
+        surface_input_operator="nemo_fld_read",
+        icebergs_enabled=True,
+        iceberg_inputs=("icebergs_restart.nc",),
+        unmeasured_features=("si3_jpl5_layered_prather_state",),
+        recipe=good.recipe._replace(
+            model_config=good.recipe.model_config._replace(
+                eos="nemo_eos80",
+                vorticity_scheme="een_total",
+                barotropic=good.recipe.model_config.barotropic._replace(
+                    barotropic_coriolis="een_metric",
+                    n_barotropic_substeps=65,
+                ),
+                physics=good.recipe.model_config.physics._replace(
+                    vertical_mixing=(good.recipe.model_config.physics
+                                     .vertical_mixing._replace(tke=tke))
+                ),
+                bbl_diffusive_option=1,
+                bbl_aht_m2_s=1000.0,
+            )
+        ),
+        bbl_diffusive_option=1,
+        bbl_aht_m2_s=1000.0,
+    )
+    with pytest.raises(ValueError, match="ln_icebergs=F"):
+        validate_nemo_testcase_card(card)
 
 
 @pytest.mark.parametrize(
@@ -187,6 +252,64 @@ def test_gyre_whole_step_identity_rejects_hybrid_and_staged_gm():
         )
 
 
+def test_orca2_shared_ws_program_admits_een_without_admitting_a_hybrid():
+    """ORCA2 changes dynvor ENE -> EEN, not the surrounding WS program."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    set_policy(PrecisionPolicy.fp64())
+    recipe = build_gyre_zco_card().recipe
+    cfg = recipe.model_config._replace(
+        vorticity_scheme="een_total",
+        barotropic=recipe.model_config.barotropic._replace(
+            barotropic_coriolis="een_metric"
+        ),
+    )
+    LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
+    with pytest.raises(ValueError, match="incompatible with adaptive_implicit"):
+        LatLonCGridOceanModel(
+            recipe.grid,
+            recipe.z_coord,
+            cfg._replace(adaptive_implicit_vertadv=True),
+        )
+
+
+def test_orca2_depth_ladder_keeps_source_scalar_recurrence():
+    e3t = np.array([1.0, 2.0, 4.0], dtype=np.float64)
+    e3w = np.array([0.5, 1.5, 3.0], dtype=np.float64)
+    gdept, gdepw = _orca2_depth_ladder(e3t, e3w)
+    np.testing.assert_array_equal(gdepw, [0.0, 1.0, 3.0])
+    np.testing.assert_array_equal(gdept, [0.25, 1.75, 4.75])
+
+
+def test_orca2_mask_builder_applies_t_fold_and_strait_override():
+    bottom = np.array(
+        [[2, 2, 1, 1], [2, 1, 2, 1], [1, 2, 2, 1]], dtype=np.int32
+    )
+    strait = np.full((3, 4), -1.0)
+    strait[1, 1] = 0.5
+    tmask, umask, vmask, fmask = _orca2_masks(bottom, strait)
+    assert tmask.shape == umask.shape == vmask.shape == fmask.shape == (3, 4, 2)
+    np.testing.assert_array_equal(vmask[-1], vmask[-2, [0, 3, 2, 1]])
+    np.testing.assert_array_equal(fmask[-1], fmask[-2, [3, 2, 1, 0]])
+    np.testing.assert_array_equal(fmask[1, 1], [0.5, 0.5])
+
+
+def test_nemo_fe3mask_precedes_lateral_slip_changes():
+    bottom = np.array(
+        [[2, 2, 1, 1], [2, 1, 2, 1], [1, 2, 2, 1]], dtype=np.int32
+    )
+    strait = np.full((3, 4), -1.0)
+    strait[1, 1] = 0.5
+    tmask, _, _, fmask = _orca2_masks(bottom, strait)
+    fe3mask = np.asarray(nemo_fe3mask_from_tmask(tmask.astype(np.float64)))
+    assert fmask[1, 1, 0] == 0.5
+    assert fe3mask[1, 1, 0] == 1.0
+    assert fe3mask[1, 1, 0] != fmask[1, 1, 0]
+    assert set(np.unique(fe3mask)).issubset({0.0, 1.0})
+
+
 def test_testcase_cards_select_their_resolved_barotropic_filters():
     lock_baro = build_lock_exchange_zco_card().recipe.model_config.barotropic
     overflow_baro = build_overflow_zps_card().recipe.model_config.barotropic
@@ -219,6 +342,41 @@ def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
     ) == 50
     assert np.array_equal(np.asarray(recipe.grid.native_lat_T_deg), source["gphit"])
     assert np.array_equal(np.asarray(recipe.grid.f_T), source["ff_t"])
+    expected_f_v = np.concatenate(
+        [
+            source["ff_f"][:1]
+            - (source["ff_f"][1:2] - source["ff_f"][:1]),
+            source["ff_f"],
+        ],
+        axis=0,
+    )
+    # Pin the certified GYRE generic f_v bytes while carrying native NEMO ff_f
+    # independently for the ENE arm.
+    np.testing.assert_array_equal(np.asarray(recipe.grid.f_v), expected_f_v)
+    np.testing.assert_array_equal(np.asarray(recipe.grid.ff_f), source["ff_f"])
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        nemo_een_ene_vertex_coriolis,
+        vertex_coriolis,
+    )
+    generic_vertex = np.concatenate(
+        [expected_f_v, expected_f_v[:, :1]], axis=1
+    )
+    native_with_south = np.concatenate(
+        [source["ff_f"][:1], source["ff_f"]], axis=0
+    )
+    nemo_vertex = np.concatenate(
+        [native_with_south[:, -1:], native_with_south], axis=1
+    )
+    np.testing.assert_array_equal(
+        np.asarray(vertex_coriolis(recipe.grid)), generic_vertex
+    )
+    np.testing.assert_array_equal(
+        np.asarray(nemo_een_ene_vertex_coriolis(recipe.grid)), nemo_vertex
+    )
+    planted = recipe.grid._replace(ff_f=recipe.grid.f_T)
+    assert not np.array_equal(
+        np.asarray(nemo_een_ene_vertex_coriolis(planted)), nemo_vertex
+    )
     assert np.array_equal(np.asarray(recipe.z_coord.dz_ref), ladder["e3t_1d"][:30])
     assert np.array_equal(
         np.asarray(recipe.z_coord.nemo_e3w_0)[1, 1], ladder["e3w_1d"][:30]
@@ -343,6 +501,8 @@ def test_testcase_cards_pin_the_certified_bbl_selectors():
     assert (overflow.bbl_adv_option, overflow.bbl_diffusive_option) == (2, 0)
     assert overflow.bbl_aht_m2_s == 1000.0
     assert overflow.bbl_gamma_s == 20.0
+    assert lock.recipe.model_config.bbl_aht_m2_s == 0.0
+    assert overflow.recipe.model_config.bbl_aht_m2_s == 1000.0
 
 
 def test_overflow_card_carries_source_exact_unmasked_bbl_mesh_operands():

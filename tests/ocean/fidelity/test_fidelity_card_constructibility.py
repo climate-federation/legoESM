@@ -208,6 +208,110 @@ def test_geometric_eos_depth_guard_still_bites_on_uncertified_eos():
         LatLonCGridOceanModel(grid, z_coord, model_config)
 
 
+def test_geometric_eos_depth_accepts_nemo_eos80():
+    """The ORCA2 EOS-80/QCO depth pair is an admitted NEMO source arm.
+
+    ``eosbn2.F90:260`` supplies live ``gdept`` to both ``np_teos10`` and
+    ``np_eos80``.  This focused tripwire stops the allow-list from making the
+    source-certified ORCA2 card unconstructible again without needing the
+    external ORCA2 deck in the unit-test environment.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.experiments.dino import (
+        create_dino_z_star,
+        dino_config_for_recipe,
+        dino_lat_lon_grid,
+        dino_lat_lon_model_config,
+    )
+
+    cfg = dataclasses.replace(
+        dino_config_for_recipe("legoesm_default"), eos_depth="geometric")
+    grid = dino_lat_lon_grid(cfg, n_lon=12)
+    z_coord = create_dino_z_star(cfg)
+    model_config, _physics = dino_lat_lon_model_config(grid, cfg)
+    model_config = model_config._replace(eos="nemo_eos80")
+    model = LatLonCGridOceanModel(grid, z_coord, model_config)
+    assert model.config.eos == "nemo_eos80"
+    assert model.config.eos_depth == "geometric"
+
+
+def test_orca2_card_selects_resolved_rk3_sh2():
+    """ORCA2 pins NEMO's face-native NOW-squared ``zdf_sh2`` tuple.
+
+    The external deck path is supplied by the campaign environment.  Skip
+    only when that immutable input is absent from a generic unit-test host.
+    """
+    from pathlib import Path
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
+        validate_nemo_testcase_card,
+    )
+
+    deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+    card = build_orca2_zps_card(deck)
+    tke = card.recipe.model_config.physics.vertical_mixing.tke
+    assert (
+        tke.tke_shear_production,
+        tke.tke_shear_avm_weighting,
+        tke.tke_shear_evaluation_stage,
+        tke.tke_shear_metric_source,
+    ) == (
+        "nemo_face_native_nbb2", "nemo_face", "step_entry",
+        "nemo_qco_live_face",
+    )
+    assert tke.bottom_tke_bc is True
+    assert tke.eice == 1
+    validate_nemo_testcase_card(card)
+
+    # Binding selector plant: the former tuple must be rejected by the real
+    # card validator rather than compared by hand.
+    old_tke = tke._replace(
+        tke_shear_production="squared_centered",
+        tke_shear_avm_weighting="tpoint",
+        tke_shear_metric_source="tpoint_jacobian",
+    )
+    planted_cfg = card.recipe.model_config._replace(
+        physics=card.recipe.model_config.physics._replace(
+            vertical_mixing=(
+                card.recipe.model_config.physics.vertical_mixing._replace(
+                    tke=old_tke))))
+    planted = card._replace(
+        recipe=card.recipe._replace(
+            model_config=planted_cfg, physics_config=planted_cfg.physics))
+    with pytest.raises(ValueError, match="Nbb\\*Nbb face-native selector"):
+        validate_nemo_testcase_card(planted)
+
+    bottom_off = tke._replace(bottom_tke_bc=False)
+    planted_cfg = card.recipe.model_config._replace(
+        physics=card.recipe.model_config.physics._replace(
+            vertical_mixing=(
+                card.recipe.model_config.physics.vertical_mixing._replace(
+                    tke=bottom_off))))
+    planted = card._replace(
+        recipe=card.recipe._replace(
+            model_config=planted_cfg, physics_config=planted_cfg.physics))
+    with pytest.raises(ValueError, match="bottom-friction Dirichlet"):
+        validate_nemo_testcase_card(planted)
+
+    eice_off = tke._replace(eice=0)
+    planted_cfg = card.recipe.model_config._replace(
+        physics=card.recipe.model_config.physics._replace(
+            vertical_mixing=(
+                card.recipe.model_config.physics.vertical_mixing._replace(
+                    tke=eice_off))))
+    planted = card._replace(
+        recipe=card.recipe._replace(
+            model_config=planted_cfg, physics_config=planted_cfg.physics))
+    with pytest.raises(ValueError, match="nn_eice=1"):
+        validate_nemo_testcase_card(planted)
+
+
 # ---------------------------------------------------------------------------
 # Guards RELAXED by the lane-1/lane-2 merge (c9526e585).  Each was an
 # iso-side/merge-base guard that the GYRE lane deleted or narrowed; each is

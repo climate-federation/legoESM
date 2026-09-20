@@ -37,7 +37,6 @@ from legoesm.grids.latlon import (
     create_latlon_geometry,
 )
 
-
 # =========================================================================
 # NEMO mesh_mask reader
 # =========================================================================
@@ -99,6 +98,11 @@ def _read_nemo_mesh_mask(path) -> dict:
         "glamt", "gphit", "glamu", "gphiu", "glamv", "gphiv",
         "glamf", "gphif",
         "e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
+        # NEMO domhgr.F90 reads these when they are present in domain_cfg.
+        # They are source fields, not values to recover from latitude: ORCA's
+        # curvilinear grid generation and stored constants can make that
+        # reconstruction differ in the last bits.
+        "ff_t", "ff_f",
     ]
     wanted_masks = ["tmask", "umask", "vmask", "fmask"]
 
@@ -484,15 +488,14 @@ def create_tripole_grid(
     area_T = dx_T * dy_T
     total_area = jnp.sum(area_T)
 
-    # u-point metrics.  NEMO e1u/e2u have shape (n_lat, n_lon) but on
-    # a C-grid u-points have shape (n_lat, n_lon+1).  For NEMO, the
-    # u-point at index i is between T-cell (i-1) and T-cell i in the
-    # zonal direction, and e1u[j, i] is the zonal spacing there.
-    # The wrap column (i = n_lon) equals i = 0 by periodicity.
+    # u-point metrics.  NEMO's native U(i) is the east face of T(i), while
+    # legoESM's redundant U index 0 is the west face of T(0).  Therefore the
+    # complete native array belongs at indices 1:, and index 0 is the periodic
+    # image of NEMO's last U face.  The two redundant endpoints are equal.
     e1u = raw["e1u"].astype(dtype)
     e2u = raw["e2u"].astype(dtype)
-    dx_u = jnp.concatenate([e1u, e1u[:, 0:1]], axis=1)  # (n_lat, n_lon+1)
-    dy_u = jnp.concatenate([e2u, e2u[:, 0:1]], axis=1)
+    dx_u = jnp.concatenate([e1u[:, -1:], e1u], axis=1)  # (n_lat, n_lon+1)
+    dy_u = jnp.concatenate([e2u[:, -1:], e2u], axis=1)
 
     # v-point metrics.  NEMO v-points have shape (n_lat, n_lon); the
     # extra row at the fold boundary needs special handling.
@@ -520,16 +523,26 @@ def create_tripole_grid(
         # Estimate from T-point areas
         area_q = jnp.pad(area_T, ((0, 1), (0, 1)), mode="edge")
 
-    # Coriolis
-    f_T = (2.0 * omega * jnp.sin(lat_T)).astype(dtype)
+    # Coriolis.  NEMO domhgr.F90:202-226 reads ff_t/ff_f directly when the
+    # domain file supplies them.  Preserve ff_t for its literal T-point
+    # consumers and carry ff_f separately for NEMO's EEN/ENE vorticity arms.
+    f_T = raw.get("ff_t", 2.0 * omega * jnp.sin(lat_T)).astype(dtype)
 
     # f at u-points
     f_u_inner = 0.5 * (jnp.roll(f_T, 1, axis=1) + f_T)
     f_u = jnp.concatenate([f_u_inner, f_u_inner[:, 0:1]], axis=1)
 
-    # f at v-points
-    f_v_inner = 0.5 * (f_T[:-1] + f_T[1:])
-    f_v = jnp.concatenate([f_T[0:1], f_v_inner, f_T[-1:]], axis=0)
+    # Generic v-face Coriolis retains the historical tripole construction
+    # exactly.  It must not be replaced by NEMO's F-point array: on a
+    # curvilinear grid V and F are different staggerings.  Use the same
+    # analytic T field the pre-ff_t loader used so adding literal ff_t does not
+    # perturb generic face-Coriolis consumers in the last bits.
+    f_T_for_v = (2.0 * omega * jnp.sin(lat_T)).astype(dtype)
+    f_v_inner = 0.5 * (f_T_for_v[:-1] + f_T_for_v[1:])
+    f_v = jnp.concatenate(
+        [f_T_for_v[0:1], f_v_inner, f_T_for_v[-1:]], axis=0
+    )
+    ff_f = raw["ff_f"].astype(dtype) if "ff_f" in raw else None
 
     # Fold descriptor. ``_detect_fold`` raises on a genuinely ambiguous
     # (near-constant) fold row under "auto" because BOTH seam origins fit, and a
@@ -576,11 +589,13 @@ def create_tripole_grid(
     sin_alpha_v = sin_alpha_v.astype(dtype)
 
     # Pad rotation angles for staggered shapes
+    # Native U-point orientation follows the same east-face staggering as the
+    # U metrics above; preserve one layout for every native U operand.
     cos_alpha_u = jnp.concatenate(
-        [cos_alpha_u, cos_alpha_u[:, 0:1]], axis=1
+        [cos_alpha_u[:, -1:], cos_alpha_u], axis=1
     )
     sin_alpha_u = jnp.concatenate(
-        [sin_alpha_u, sin_alpha_u[:, 0:1]], axis=1
+        [sin_alpha_u[:, -1:], sin_alpha_u], axis=1
     )
     cos_alpha_v = jnp.concatenate(
         [cos_alpha_v[0:1], cos_alpha_v], axis=0
@@ -644,6 +659,7 @@ def create_tripole_grid(
         dlon=0.0,   # sentinel: tripole grids have non-uniform spacing
         dlat=0.0,
         omega=float(omega),   # (#521) so grid.omega matches the f_T/f_u/f_v build
+        ff_f=ff_f,
     )
 
 
@@ -785,6 +801,13 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
             [jnp.degrees(lat_new).astype(jnp.asarray(native_lat_pad).dtype),
              jnp.asarray(native_lat_pad)], axis=0)
 
+    # Native NEMO F rows use T-like leading indexing.  The added rows are
+    # permanently land-masked; edge padding preserves every physical source
+    # value byte-for-byte without inventing an active F-point value.
+    ff_f_pad = grid.ff_f
+    if ff_f_pad is not None:
+        ff_f_pad = _edge_pad(ff_f_pad)
+
     return grid._replace(
         n_lat=n_lat + n_pad,
         lat_T=lat_T_pad,
@@ -813,6 +836,7 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
         lat=lat_1d_pad,
         seam_wall_rows=seam_pad,
         native_lat_T_deg=native_lat_pad,
+        ff_f=ff_f_pad,
         # lon (n_lon,) unchanged; dlon/dlat sentinels unchanged.
     )
 

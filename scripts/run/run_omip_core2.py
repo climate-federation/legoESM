@@ -830,12 +830,12 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     # tripole under --partial-cell.
     if shear_production is not None:
         if shear_production not in ("squared_centered", "nemo_face_native",
-                                    "nemo_face_native_now2", "nemo_burchard"):
+                                    "nemo_face_native_nbb2", "nemo_burchard"):
             raise ValueError(
                 f"orca1_zdftke_config shear_production {shear_production!r} "
                 "invalid; expected 'squared_centered', 'nemo_face_native' "
-                "(NEMO zdf_sh2, leap-frog family), 'nemo_face_native_now2' "
-                "(same face geometry at NOW^2 -- the key_RK3 oracle variant) "
+                "(NEMO zdf_sh2, leap-frog family), 'nemo_face_native_nbb2' "
+                "(same face geometry at Nbb^2 -- the key_RK3 step-entry arm) "
                 "or 'nemo_burchard'.")
         _cfg = _cfg._replace(tke_shear_production=shear_production)
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
@@ -959,7 +959,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     composes; it is NOT an error.
 
     ``tke_eice`` (``--tke-eice``): None keeps the ORCA1 card default
-    (nn_eice=3); 0/1/3 override the under-ice lc/etau attenuation mode for
+    (nn_eice=3); 0/1/2/3 override the under-ice lc/etau attenuation mode for
     A/B runs (0 reproduces the pre-2026-07-18 no-attenuation behaviour).
 
     ``tke_surface_bc`` (``--tke-surface-bc``): None keeps the TKEConfig default
@@ -997,9 +997,9 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    shear_production=tke_shear_production,
                                    lc=tke_lc, etau_mode=tke_etau)
         if tke_eice is not None:
-            if int(tke_eice) not in (0, 1, 3):
+            if int(tke_eice) not in (0, 1, 2, 3):
                 raise ValueError(
-                    f"--tke-eice {tke_eice!r} invalid; expected 0, 1 or 3 "
+                    f"--tke-eice {tke_eice!r} invalid; expected 0, 1, 2 or 3 "
                     "(NEMO nn_eice modes).")
             _tke = _tke._replace(eice=int(tke_eice))
         vm = VerticalMixingConfig(scheme="tke", tke=_tke)
@@ -5137,7 +5137,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "mirror of --tke-eice). Compact ice scales w_m/w_s by "
                         "(1-eff) so BOTH the boundary-layer depth and mixing "
                         "shrink under ice. None/0 (default) = off; 1 = legoESM "
-                        "linear (1-fi) [NOT NEMO nn_eice=1]; 3 = max(0,1-4*fi) "
+                        "NEMO 1-tanh(10*fi); 3 = max(0,1-4*fi) "
                         "(matches NEMO nn_eice=3, killed at fi>=0.25). The KPP grids' "
                         "Arctic halocline-erosion lever (over-deep MLD + "
                         "Siberian salty) that --tke-eice fixed only on the TKE "
@@ -5169,12 +5169,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "top). Default 'none' is byte-identical. "
                         "STABILITY: TKE x superbee tracer advection blew up "
                         "on DINO in ~15 days — smoke-gate before long runs.")
-    p.add_argument("--tke-eice", type=int, default=None, choices=[0, 1, 3],
+    p.add_argument("--tke-eice", type=int, default=None, choices=[0, 1, 2, 3],
                    help="Under-ice attenuation of the TKE lc/etau wave "
                         "sources (NEMO nn_eice) for --tripole-vmix tke. "
                         "None (default) keeps the ORCA1 card value (3 = "
                         "max(0,1-4*fi), wave TKE killed at fi>=0.25); 1 = "
-                        "(1-fi); 0 = no attenuation (reproduces the "
+                        "1-tanh(10*fi); 2 = 1-fi; 0 = no attenuation (the "
                         "pre-2026-07-18 behaviour for A/B). The ice "
                         "concentration reaches the closure via "
                         "surface_forcing.ice_concentration under "
@@ -5200,7 +5200,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "fesom-mimic card (fesom-jax has no etau term).")
     p.add_argument("--tke-shear-production", type=str, default=None,
                    choices=["squared_centered", "nemo_face_native",
-                            "nemo_face_native_now2",
+                            "nemo_face_native_nbb2",
                             "nemo_burchard"],
                    help="TKE shear-production discretisation for "
                         "--tripole-vmix tke. None (default) keeps the card "

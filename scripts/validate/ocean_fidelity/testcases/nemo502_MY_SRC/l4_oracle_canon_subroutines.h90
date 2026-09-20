@@ -1,0 +1,131 @@
+   FUNCTION l4_canon_2d( pfield, cdgrid ) RESULT( zfield )
+      !! Lane-4 WRITE-only canonical view of a local 2-D operand.  The result
+      !! starts at zero and receives only owned, wet cells; pfield is never
+      !! assigned.  The size-derived offset maps A2D(0), A2D(1), and full
+      !! local arrays back to the full rank-local mask.
+      REAL(wp), DIMENSION(:,:), INTENT(in) :: pfield
+      CHARACTER(LEN=1), INTENT(in) :: cdgrid
+      REAL(wp), DIMENSION(SIZE(pfield,1),SIZE(pfield,2)) :: zfield
+      INTEGER :: ji, jj, jif, jjf, ioff, joff
+      LOGICAL :: llwet
+      zfield(:,:) = 0._wp
+      ioff = ( jpi - SIZE(pfield,1) ) / 2
+      joff = ( jpj - SIZE(pfield,2) ) / 2
+      DO jj = 1, SIZE(pfield,2)
+         jjf = jj + joff
+         DO ji = 1, SIZE(pfield,1)
+            jif = ji + ioff
+            IF( jif >= 1+nn_hls .AND. jif <= jpi-nn_hls .AND. &
+               & jjf >= 1+nn_hls .AND. jjf <= jpj-nn_hls ) THEN
+               SELECT CASE( cdgrid )
+               CASE('T')   ; llwet = ssmask (jif,jjf) /= 0._wp
+               CASE('U')   ; llwet = ssumask(jif,jjf) /= 0._wp
+               CASE('V')   ; llwet = ssvmask(jif,jjf) /= 0._wp
+               CASE('F')   ; llwet = ssfmask(jif,jjf) /= 0._wp
+               CASE DEFAULT; llwet = .FALSE.
+               END SELECT
+               IF( llwet ) zfield(ji,jj) = pfield(ji,jj)
+            ENDIF
+         END DO
+      END DO
+   END FUNCTION l4_canon_2d
+
+   FUNCTION l4_canon_3d( pfield, cdgrid ) RESULT( zfield )
+      !! As l4_canon_2d, with the matching 3-D wet mask when the third
+      !! dimension is jpk.  Short component dimensions (for example jpts)
+      !! use the surface mask independently for every component.
+      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: pfield
+      CHARACTER(LEN=1), INTENT(in) :: cdgrid
+      REAL(wp), DIMENSION(SIZE(pfield,1),SIZE(pfield,2),SIZE(pfield,3)) :: zfield
+      INTEGER :: ji, jj, jk, jif, jjf, ioff, joff
+      LOGICAL :: llwet
+      zfield(:,:,:) = 0._wp
+      ioff = ( jpi - SIZE(pfield,1) ) / 2
+      joff = ( jpj - SIZE(pfield,2) ) / 2
+      DO jk = 1, SIZE(pfield,3)
+         DO jj = 1, SIZE(pfield,2)
+            jjf = jj + joff
+            DO ji = 1, SIZE(pfield,1)
+               jif = ji + ioff
+               IF( jif >= 1+nn_hls .AND. jif <= jpi-nn_hls .AND. &
+                  & jjf >= 1+nn_hls .AND. jjf <= jpj-nn_hls ) THEN
+                  SELECT CASE( cdgrid )
+                  CASE('T')
+                     IF( SIZE(pfield,3) == jpk ) THEN
+                        llwet = tmask(jif,jjf,jk) /= 0._wp
+                     ELSE
+                        llwet = ssmask(jif,jjf) /= 0._wp
+                     ENDIF
+                  CASE('U')
+                     IF( SIZE(pfield,3) == jpk ) THEN
+                        llwet = umask(jif,jjf,jk) /= 0._wp
+                     ELSE
+                        llwet = ssumask(jif,jjf) /= 0._wp
+                     ENDIF
+                  CASE('V')
+                     IF( SIZE(pfield,3) == jpk ) THEN
+                        llwet = vmask(jif,jjf,jk) /= 0._wp
+                     ELSE
+                        llwet = ssvmask(jif,jjf) /= 0._wp
+                     ENDIF
+                  CASE DEFAULT
+                     llwet = .FALSE.
+                  END SELECT
+                  IF( llwet ) zfield(ji,jj,jk) = pfield(ji,jj,jk)
+               ENDIF
+            END DO
+         END DO
+      END DO
+   END FUNCTION l4_canon_3d
+
+   FUNCTION l4_canon_4d( pfield, cdgrid ) RESULT( zfield )
+      !! As l4_canon_3d for tracer/component, ice-category, and layered-ice
+      !! operands.  A jpk-sized third dimension uses the matching 3-D ocean
+      !! mask; every other component layout uses the surface mask.  The
+      !! source remains INTENT(in), and every unowned result slot stays zero.
+      REAL(wp), DIMENSION(:,:,:,:), INTENT(in) :: pfield
+      CHARACTER(LEN=1), INTENT(in) :: cdgrid
+      REAL(wp), DIMENSION(SIZE(pfield,1),SIZE(pfield,2),SIZE(pfield,3), &
+         & SIZE(pfield,4)) :: zfield
+      INTEGER :: ji, jj, jk, jl, jif, jjf, ioff, joff
+      LOGICAL :: llwet
+      zfield(:,:,:,:) = 0._wp
+      ioff = ( jpi - SIZE(pfield,1) ) / 2
+      joff = ( jpj - SIZE(pfield,2) ) / 2
+      DO jl = 1, SIZE(pfield,4)
+         DO jk = 1, SIZE(pfield,3)
+            DO jj = 1, SIZE(pfield,2)
+               jjf = jj + joff
+               DO ji = 1, SIZE(pfield,1)
+                  jif = ji + ioff
+                  IF( jif >= 1+nn_hls .AND. jif <= jpi-nn_hls .AND. &
+                     & jjf >= 1+nn_hls .AND. jjf <= jpj-nn_hls ) THEN
+                     SELECT CASE( cdgrid )
+                     CASE('T')
+                        IF( SIZE(pfield,3) == jpk ) THEN
+                           llwet = tmask(jif,jjf,jk) /= 0._wp
+                        ELSE
+                           llwet = ssmask(jif,jjf) /= 0._wp
+                        ENDIF
+                     CASE('U')
+                        IF( SIZE(pfield,3) == jpk ) THEN
+                           llwet = umask(jif,jjf,jk) /= 0._wp
+                        ELSE
+                           llwet = ssumask(jif,jjf) /= 0._wp
+                        ENDIF
+                     CASE('V')
+                        IF( SIZE(pfield,3) == jpk ) THEN
+                           llwet = vmask(jif,jjf,jk) /= 0._wp
+                        ELSE
+                           llwet = ssvmask(jif,jjf) /= 0._wp
+                        ENDIF
+                     CASE DEFAULT
+                        llwet = .FALSE.
+                     END SELECT
+                     IF( llwet ) zfield(ji,jj,jk,jl) = pfield(ji,jj,jk,jl)
+                  ENDIF
+               END DO
+            END DO
+         END DO
+      END DO
+   END FUNCTION l4_canon_4d

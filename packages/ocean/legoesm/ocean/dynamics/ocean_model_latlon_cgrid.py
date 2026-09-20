@@ -1236,6 +1236,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
     # the ordinary step; it cannot affect a later stage or public execution.
     expose_tracer_transport_stage: int = 0
+    # WRITE-only adjudication seam for ORCA2 Phase 2l.  The optional external
+    # endpoint tuple is ``(eta_after, Hu_avg, Hv_avg)`` and replaces only the
+    # already-registered ORACLE_SUPPLIED external-mode result after the normal
+    # compiled solve.  ``expose_stage1_wzv`` then returns the actual ``ww``
+    # produced by the one production _g0 transport path, after the ordinary
+    # step completes.  Neither field is constructible from a public card.
+    external_mode_result_override: object = None
+    expose_stage1_wzv: bool = False
     # WRITE-only stage-1 horizontal-transport operand exposure. ``thickness``
     # returns e3u/e3v(Kmm); ``corrected_velocity`` returns uu+zub*umask and
     # vv+zvb*vmask; ``transport_average`` broadcasts un_adv/vn_adv.  The
@@ -1527,7 +1535,7 @@ def _nemo_ws_stage_transport(
     legacy_min_face_thickness=False, eta_before=None, eta_after=None,
     literal_wzv=False, barotropic_velocity=None,
     legacy_wzv_rederived_transport=False,
-    legacy_aimp_midpoint_w_metric=False,
+    legacy_aimp_midpoint_w_metric=False, runoff_mass_flux=None,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -1619,7 +1627,8 @@ def _nemo_ws_stage_transport(
                 None if legacy_wzv_rederived_transport else (
                     zfu_stage,
                     zfv_stage,
-                )))
+                )),
+            runoff_mass_flux=runoff_mass_flux)
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)
@@ -1851,15 +1860,24 @@ def _nemo_ws_rk3_tracer_pair_step(
             rhs_a = rhs_b = None
         if stage_index == 2 and bbl_context is not None:
             from legoesm.ocean.physics.bbl_adv import (
+                apply_bbl_diffusive_tendency,
                 apply_bbl_adv_tendency,
                 bbl_transports,
+                nemo_bbl_diffusive_coefficients,
             )
-            (geom, area, dy_u, dx_v, gamma_s, rho0,
-             nemo_reference_geometry) = bbl_context
-            if nemo_reference_geometry:
+            (adv_option, diffusive_option, geom, diffusive_geom,
+             area, dy_u, dx_v, gamma_s, aht_m2_s, rho0,
+             nemo_reference_geometry, bbl_grid, bbl_eos_form) = bbl_context
+            if diffusive_option == 1:
                 # trabbl.F90:348 reads gdept(bottom,Kmm).  Under key_qco that
                 # is gdept_0(bottom)*(1+r3t(Kmm)); the stage thickness sum is
                 # H*(1+r3t), so this ratio is the identical stage stretch.
+                reference_depth = jnp.sum(h_k_old, axis=-1)
+                stage_stretch = jnp.sum(h_stage, axis=-1) / jnp.maximum(
+                    reference_depth, jnp.asarray(1.0e-10, h_stage.dtype))
+                live_bottom_depth = (
+                    diffusive_geom.dep_bot_ref * stage_stretch)
+            elif nemo_reference_geometry:
                 reference_depth = jnp.sum(geom.h_ref, axis=-1)
                 stage_stretch = jnp.sum(h_stage, axis=-1) / jnp.maximum(
                     reference_depth, jnp.asarray(1.0e-10, h_stage.dtype))
@@ -1868,16 +1886,28 @@ def _nemo_ws_rk3_tracer_pair_step(
                 live_depth = jnp.cumsum(h_stage, axis=-1) - 0.5 * h_stage
                 live_bottom_depth = jnp.take_along_axis(
                     live_depth, geom.bot_k[..., None], axis=-1)[..., 0]
-            utr, vtr = bbl_transports(
-                tr_a, tr_b, geom, dy_u, dx_v,
-                gamma_s=gamma_s, rho_0=rho0,
-                bottom_depth_m=live_bottom_depth,
-            )
             zero_a, zero_b = jnp.zeros_like(tr_a), jnp.zeros_like(tr_b)
-            bbl_a, bbl_b = apply_bbl_adv_tendency(
-                zero_a, zero_b, tr_a, tr_b, h_stage, area, geom, utr, vtr,
-                nlev=tr_a.shape[-1],
-            )
+            bbl_a, bbl_b = zero_a, zero_b
+            if adv_option == 2:
+                utr, vtr = bbl_transports(
+                    tr_a, tr_b, geom, dy_u, dx_v,
+                    gamma_s=gamma_s, rho_0=rho0,
+                    bottom_depth_m=live_bottom_depth,
+                )
+                bbl_a, bbl_b = apply_bbl_adv_tendency(
+                    bbl_a, bbl_b, tr_a, tr_b, h_stage, area, geom, utr, vtr,
+                    nlev=tr_a.shape[-1],
+                )
+            if diffusive_option == 1:
+                ahu_bbl, ahv_bbl = nemo_bbl_diffusive_coefficients(
+                    tr_a, tr_b, diffusive_geom,
+                    bottom_depth_m=live_bottom_depth, rho_0=rho0,
+                    grid=bbl_grid, eos_form=bbl_eos_form,
+                )
+                bbl_a, bbl_b = apply_bbl_diffusive_tendency(
+                    bbl_a, bbl_b, tr_a, tr_b, h_stage, area,
+                    diffusive_geom, ahu_bbl, ahv_bbl, grid=bbl_grid,
+                )
             # tra_bbl adds a concentration tendency to Krhs using Kbb tracers
             # and Kmm volume (stprk3_stg.F90:588; trabbl.F90:129-136,243-284).
             # This helper evolves content, so convert h*Krhs to a negative
@@ -2428,8 +2458,21 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "expose_stage3_momentum_rhs cannot be combined with another "
                 "momentum exposure: they share the returned u/v slots")
-        self.config = self._validate_config(
-            config or LatLonCGridOceanConfig.from_flat())
+        _config_input = config or LatLonCGridOceanConfig.from_flat()
+        _oracle_endpoint_diagnostic_eos_bypass = bool(
+            (self._nemo_ws_test_hooks.expose_stage1_wzv
+             or self._nemo_ws_test_hooks.expose_tracer_stage1_boundary)
+            and self._nemo_ws_test_hooks.external_mode_result_override is not None
+            and _config_input.eos == "nemo_eos80"
+            and _config_input.eos_depth == "geometric"
+        )
+        _config_for_validation = (
+            _config_input._replace(eos_depth="insitu")
+            if _oracle_endpoint_diagnostic_eos_bypass else _config_input
+        )
+        self.config = self._validate_config(_config_for_validation)
+        if _oracle_endpoint_diagnostic_eos_bypass:
+            self.config = self.config._replace(eos_depth="geometric")
         if (self._nemo_ws_test_hooks
                 .stage3_advection_content_override is not None):
             if self.config.tracer_time_integrator != "rk3_ws":
@@ -3833,10 +3876,10 @@ class LatLonCGridOceanModel:
                     f"outer_integrator={_outer_int!r}.")
             _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
                                      "squared_centered")
-            # "nemo_face_native_now2" = the face-native SPATIAL geometry at
-            # NOW^2 time levels — the RK3-oracle-compatible variant (ORCA1 is
-            # compiled key_RK3, so no Nbb velocity exists to be faithful TO);
-            # it needs no before-state and runs under any integrator.
+            # "nemo_face_native_nbb2" = face-native SPATIAL geometry with both
+            # operands at the Nbb whole-step-entry slot.  key_RK3's live call
+            # is zdf_phy(kstp,Nbb,Nbb,Nrhs), stprk3.F90:164-165; the commented
+            # Nbb,Nnn form is MLF semantics, not this arm.
             if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
                     and _outer_int not in _leapfrog_family):
                 raise ValueError(
@@ -3956,7 +3999,9 @@ class LatLonCGridOceanModel:
         # nemo_paper/nemo_dino_kamm/_mlf; "required for the S-EOS thermobaric
         # depth term", max|drho'| 1.5e-5).  Adding an EOS here requires the same:
         # the oracle line showing it takes gdept, and a receipt measuring it.
-        _geometric_certified_eos = {"nemo_teos10", "nemo_seos"}
+        _geometric_certified_eos = {
+            "nemo_eos80", "nemo_teos10", "nemo_seos",
+        }
         if (_eos_depth == "geometric"
                 and _eos_name not in _geometric_certified_eos):
             raise ValueError(
@@ -4105,11 +4150,25 @@ class LatLonCGridOceanModel:
                             "upwind_perturbation") == "nemo_advective"
                 and not getattr(config, "adaptive_implicit_vertadv", False)
             )
-            if not (_ws_flux_up3 or _ws_vector_ene_c2):
+            # Same shared WS-RK3 vector program, with dynvor's EEN selector.
+            # ORCA2 resolves ln_dynvor_een=T, nn_dynkeg=0 and ln_zad_Aimp=F
+            # (dynvor.F90:1326-1332; stprk3_stg.F90:283-299).  All EEN
+            # arithmetic already lives in the canonical vector-invariant
+            # operator; this arm only admits the source-valid composition.
+            _ws_vector_een_c2 = (
+                config.momentum_advection == "vector_invariant"
+                and getattr(config, "vorticity_scheme", "al81") == "een_total"
+                and getattr(config, "ke_gradient_scheme", "centered") == "c2"
+                and getattr(config, "vertical_momentum_scheme",
+                            "upwind_perturbation") == "nemo_advective"
+                and not getattr(config, "adaptive_implicit_vertadv", False)
+            )
+            if not (_ws_flux_up3 or _ws_vector_ene_c2 or _ws_vector_een_c2):
                 raise ValueError(
                     "NEMO rk3_ws requires one complete momentum program: "
                     "flux_form/nemo_up3/nemo_up3 or "
-                    "vector_invariant/ene_total/c2/nemo_advective")
+                    "vector_invariant/(ene_total|een_total)/c2/"
+                    "nemo_advective")
             if getattr(config, "outer_integrator", "forward_euler") != "forward_euler":
                 raise ValueError(
                     "NEMO rk3_ws does not compose with a second outer "
@@ -4151,8 +4210,21 @@ class LatLonCGridOceanModel:
                 "transport-selector arm) on this integrator.")
         if config.bbl_adv_option not in (0, 2):
             raise ValueError("bbl_adv_option must be 0 or 2")
+        if config.bbl_diffusive_option not in (0, 1):
+            raise ValueError("bbl_diffusive_option must be 0 or 1")
         if config.bbl_adv_option == 2 and config.bbl_gamma_s <= 0.0:
             raise ValueError("bbl_adv_option=2 requires bbl_gamma_s > 0")
+        if (config.bbl_diffusive_option == 1
+                and config.bbl_aht_m2_s <= 0.0):
+            raise ValueError(
+                "bbl_diffusive_option=1 requires bbl_aht_m2_s > 0")
+        if (config.bbl_diffusive_option == 1
+                and config.tracer_time_integrator != "rk3_ws"):
+            raise ValueError(
+                f"bbl_diffusive_option=1 is not honoured by "
+                f"tracer_time_integrator={config.tracer_time_integrator!r}: "
+                "NEMO tra_bbl_dif is wired at RK stage 3 only on the shared "
+                "tracer_time_integrator='rk3_ws' identity")
         if (config.bbl_adv_option == 2
                 and config.tracer_time_integrator != "rk3_ws"):
             # S-42 (docs/ocean/fidelity/nemo_branch_isomorphism_map.md): the
@@ -5328,6 +5400,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_tracer_stage = None
         _nemo_ws_exposed_tracer_boundary = None
         _nemo_ws_exposed_tracer_transport = None
+        _nemo_ws_exposed_stage1_wzv = None
         _nemo_ws_exposed_stage1_transport_operand = None
         _nemo_ws_exposed_momentum_operator = None
         _nemo_ws_exposed_stage2_rhs = None
@@ -6035,6 +6108,13 @@ class LatLonCGridOceanModel:
                     vv_b=state_new.vv_b.replace(data=_baro_v),
                 )
 
+        _external_result_override = (
+            self._nemo_ws_test_hooks.external_mode_result_override)
+        if _external_result_override is not None:
+            _eta_external, Hu_avg, Hv_avg = _external_result_override
+            state_new = state_new._replace(
+                eta=state_new.eta.replace(data=_eta_external))
+
         # NEMO-RK3 scheme identity: HYB is the live stprk3_stg barotropic
         # update (module default at :44; stages at :143-144,206-207,225), so
         # every Kaa stage receives the final external-mode velocity.  This is
@@ -6208,7 +6288,12 @@ class LatLonCGridOceanModel:
                 h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=Hv_avg,
                 u_mask_3d=_u_live_mask,
                 v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
-                H_bathy=state.H_bathy.data, config=_cfg_b,
+                H_bathy=state.H_bathy.data, config=_cfg_b, dt=dt,
+                # RK3 div_hor applies the instantaneous river mass flux to
+                # hdiv independently of the same runoff's external-mode SSH
+                # forcing (sbcrnf.F90:253-260).  Preserve that distinct input.
+                runoff_mass_flux=(
+                    None if freshwater is None else freshwater.runoff),
                 legacy_min_face_thickness=_legacy_min_faces,
                 # wzv's Kbb/Kaa ssh operands (sshwzv.F90:334): the step-entry
                 # level and the barotropic after-level, the same pair NEMO
@@ -6505,6 +6590,8 @@ class LatLonCGridOceanModel:
                                jnp.zeros_like(target_v))),
                         (target_u, target_v))),
                 **_stage_transport_kw)
+            if self._nemo_ws_test_hooks.expose_stage1_wzv:
+                _nemo_ws_exposed_stage1_wzv = _g0[2]
             _operand_name = (
                 self._nemo_ws_test_hooks.expose_stage1_transport_operand)
             if _operand_name == "thickness":
@@ -7844,10 +7931,12 @@ class LatLonCGridOceanModel:
                         ),
                     )
                 _bbl_context = None
-                if (_cfg_b.bbl_adv_option == 2
+                if ((_cfg_b.bbl_adv_option == 2
+                     or _cfg_b.bbl_diffusive_option == 1)
                         and not self._nemo_ws_test_hooks.disable_bbl):
                     from legoesm.ocean.physics.bbl_adv import (
                         bbl_static_geometry,
+                        nemo_bbl_diffusive_geometry,
                         nemo_bbl_static_geometry,
                     )
                     _h_ref = jnp.asarray(_zc.h_partial)
@@ -7855,7 +7944,8 @@ class LatLonCGridOceanModel:
                         _h_ref = jnp.broadcast_to(_h_ref, h_k_old.shape)
                     _nemo_bbl_geometry = not (
                         self._nemo_ws_test_hooks.legacy_bbl_partial_geometry)
-                    if _nemo_bbl_geometry:
+                    _bbl_geom = None
+                    if _cfg_b.bbl_adv_option == 2 and _nemo_bbl_geometry:
                         _gdept0 = getattr(_zc, "nemo_gdept_0", None)
                         _e3u0 = getattr(_zc, "nemo_bbl_e3u_0", None)
                         _e3v0 = getattr(_zc, "nemo_bbl_e3v_0", None)
@@ -7867,17 +7957,43 @@ class LatLonCGridOceanModel:
                         _bbl_geom = nemo_bbl_static_geometry(
                             _h_ref, state.land_mask.data,
                             _gdept0, _e3u0, _e3v0)
-                    else:
+                    elif _cfg_b.bbl_adv_option == 2:
                         _bbl_geom = bbl_static_geometry(
                             _h_ref, state.land_mask.data)
+                    _diffusive_geom = None
+                    if _cfg_b.bbl_diffusive_option == 1:
+                        _gdept0 = getattr(_zc, "nemo_gdept_0", None)
+                        _e3u0 = getattr(_zc, "nemo_bbl_e3u_0", None)
+                        _e3v0 = getattr(_zc, "nemo_bbl_e3v_0", None)
+                        _raw_bbl = getattr(_zc, "nemo_een_barotropic", None)
+                        if (any(value is None
+                                for value in (_gdept0, _e3u0, _e3v0))
+                                or _raw_bbl is None):
+                            raise ValueError(
+                                "NEMO diffusive BBL requires exact gdept_0, "
+                                "e3u_0/e3v_0, metrics, and U/V masks")
+                        _diffusive_geom = nemo_bbl_diffusive_geometry(
+                            _h_ref, state.land_mask.data,
+                            _gdept0, _e3u0, _e3v0,
+                            _raw_bbl.e1u, _raw_bbl.e2u,
+                            _raw_bbl.e1v, _raw_bbl.e2v,
+                            _raw_bbl.umask, _raw_bbl.vmask,
+                            aht_m2_s=_cfg_b.bbl_aht_m2_s, grid=_grid,
+                        )
                     _bbl_context = (
+                        _cfg_b.bbl_adv_option,
+                        _cfg_b.bbl_diffusive_option,
                         _bbl_geom,
+                        _diffusive_geom,
                         jnp.asarray(_grid.area_T),
                         jnp.asarray(_grid.dy_u)[:, 1:-1],
                         jnp.asarray(_grid.dx_v)[1:-1, :],
                         _cfg_b.bbl_gamma_s,
+                        _cfg_b.bbl_aht_m2_s,
                         _cfg_b.rho_0,
                         _nemo_bbl_geometry,
+                        _grid,
+                        _cfg_b.eos,
                     )
                 (T_corrected, S_corrected,
                  _nemo_ws_content_T, _nemo_ws_content_S,
@@ -8557,6 +8673,16 @@ class LatLonCGridOceanModel:
                 v=state_new.v.replace(data=_zfv),
                 T=state_new.T.replace(data=_zfw[..., :state_new.T.data.shape[-1]]),
             )
+        if _nemo_ws_exposed_stage1_wzv is not None:
+            # Diagnostic substitution happens only after the compiled step and
+            # all of its ordinary consumers have completed.
+            state_new = state_new._replace(
+                T=state_new.T.replace(
+                    data=_nemo_ws_exposed_stage1_wzv[
+                        ..., :state_new.T.data.shape[-1]
+                    ]
+                )
+            )
         if _nemo_ws_exposed_stage1_transport_operand is not None:
             _operand_u, _operand_v = _nemo_ws_exposed_stage1_transport_operand
             state_new = state_new._replace(
@@ -9214,7 +9340,7 @@ class LatLonCGridOceanModel:
         self, state, *, eta_now=None, u_now=None, v_now=None,
         z_coord=None, config=None, grid=None, return_face_metrics=False,
     ):
-        """Freeze NEMO ``p_sh2`` from the step-entry NOW/BEFORE faces."""
+        """Freeze NEMO ``p_sh2`` from the selected step-entry face levels."""
         _zc = self.z_coord if z_coord is None else z_coord
         _cfg_b = self.config if config is None else config
         vmix = getattr(getattr(_cfg_b, "physics", None),
@@ -9262,11 +9388,11 @@ class LatLonCGridOceanModel:
                 u_cell, v_cell, dz_half)
             return (p_sh2, None) if return_face_metrics else p_sh2
 
-        if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):
+        if shear_disc not in ("nemo_face_native", "nemo_face_native_nbb2"):
             raise ValueError(
                 "tke_shear_evaluation_stage='step_entry' supports "
                 "'squared_centered', 'nemo_face_native', or "
-                f"'nemo_face_native_now2'; got {shear_disc!r}.")
+                f"'nemo_face_native_nbb2'; got {shear_disc!r}.")
         if avm_weighting != "nemo_face":
             raise ValueError(
                 "step-entry face-native shear requires "
@@ -10111,7 +10237,7 @@ class LatLonCGridOceanModel:
                 and _vmix_cfg_here.scheme == "tke"
                 and getattr(_vmix_cfg_here.tke, "tke_shear_production",
                            "squared_centered") in ("nemo_face_native",
-                                                   "nemo_face_native_now2")
+                                                   "nemo_face_native_nbb2")
             )
             if _keep_raw_faces:
                 cc_state = state
