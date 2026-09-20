@@ -2856,6 +2856,81 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
     return grid, z_coord, model, state, H_bathy
 
 
+def _write_ocean_run_manifest(args, model, dt, total_days, out_dir,
+                              *, mesh=None, nlev=None):
+    """Write the STANDARD run manifest (resolved config + command line).
+
+    Shared by every grid.  It used to live inline in ``main()``, which the
+    fesom lane never reaches -- that lane returns to run its own loop and then
+    hand-rolled a manifest of its own with a hand-picked subset of flags and
+    NO resolved configuration, so a fesom run could not be described from its
+    own record and every cross-grid comparison against it was comparing one
+    known configuration with one unknown one (2026-09-19).
+
+    ``mesh``/``nlev`` override the argparse values for a lane whose mesh does
+    not come from ``--mesh`` (fesom reads a mesh DIRECTORY and takes its level
+    count from the mesh, so recording ``--nlev`` there would record a number
+    the run never used).
+
+    Best-effort: a provenance-write failure never aborts a long integration.
+    """
+    if args.forcing_path:
+        _resolved_forcing_path = str(args.forcing_path)
+    else:
+        from legoesm.ocean.forcing import core2_nyf_cache_dir
+        _resolved_forcing_path = str(core2_nyf_cache_dir())
+    print(f"[setup] CORE-II forcing cache: {_resolved_forcing_path}")
+    if not _is_io_proc():
+        return None
+    try:
+        from legoesm.driver.restart import (
+            dataset_provenance_entry,
+            write_run_manifest,
+        )
+        from legoesm.ocean.config import OceanRunRecord
+        run_record = OceanRunRecord(
+            runtime_config=model.config,
+            grid=str(args.grid),
+            mesh=str(args.mesh if mesh is None else mesh),
+            nlev=int(args.nlev if nlev is None else nlev),
+            dt_seconds=float(dt),
+            total_days=float(total_days),
+            output_path=str(args.output),
+            forcing="core2_nyf",
+            # RESOLVED, not the flag.  An empty string here used to mean
+            # "the default", and the default silently changed from the raw
+            # CORE-II winds to the bias-corrected ones -- so every manifest
+            # written before this recorded nothing about which forcing the
+            # run actually used, and the loader's own provenance line is
+            # swallowed by the `| tail` most arm scripts pipe through.
+            forcing_path=str(_resolved_forcing_path),
+            woa_init=bool(args.woa_init),
+            woa_t=str(args.woa_t or ""),
+            woa_s=str(args.woa_s or ""),
+            latlon_res=str(args.latlon_res),
+            smoke=bool(args.smoke),
+        )
+        manifest_path = write_run_manifest(
+            out_dir, run_record, config_kind="ocean",
+            runner_tag="run_omip_core2",
+            dataset_provenance=[
+                dataset_provenance_entry(pth, dataset_id=did)
+                for did, pth in (
+                    ("core2_forcing", _resolved_forcing_path),
+                    ("woa_t", args.woa_t),
+                    ("woa_s", args.woa_s),
+                )
+                if pth
+            ],
+        )
+        print(f"[setup] wrote run manifest {manifest_path}")
+        return manifest_path
+    except Exception as _exc:  # noqa: BLE001 - provenance is best-effort
+        print(f"[warn] run manifest not written: "
+              f"{type(_exc).__name__}: {_exc}")
+        return None
+
+
 def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
     """Stage-B1 execution path: UNFORCED steps + comparator-convention
     snapshots.  The full OMIP host loop cannot run this lane until B2/B3
@@ -2952,6 +3027,14 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
     dt = float(args.dt)
     total_days = 10.0 if args.smoke else args.years * 365.0
     n_steps = int(round(total_days * 86400.0 / dt))
+    # STANDARD manifest, at RUN START and via the SHARED writer, so a fesom
+    # run carries the same resolved configuration every other grid records
+    # and an interrupted run is still reconstructible. nlev comes from the
+    # MESH, not from --nlev, which this lane never reads.
+    _write_ocean_run_manifest(
+        args, model, dt, total_days, out,
+        mesh=str(args.fesom_mesh_dir),
+        nlev=int(np.asarray(state.inner.T).shape[-1]))
     if n_steps <= 0:
         raise SystemExit(f"fesom forced loop: non-positive duration "
                          f"({total_days} days at dt={dt}s -> {n_steps} "
@@ -3305,19 +3388,6 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             ice_state, grid, state.land_mask.data)
         print(f"[fesom-forced] final ice: area={_af / 1.0e12:.3f}e6 km2 "
               f"mean_conc={_cf:.3f} max_h={_hf:.3f} m")
-    (out / "run_manifest.json").write_text(json.dumps({
-        "lane": "fesom_b4_core2_forced", "git_sha": _source_revision(),
-        "n_steps": n_steps, "dt_s": dt, "total_days": total_days,
-        "emp_freshwater": bool(args.emp_freshwater),
-        "dm2dc": bool(args.dm2dc), "sw_rgb_chl": bool(args.sw_rgb_chl),
-        "prognostic_sea_ice": bool(args.prognostic_sea_ice),
-        "sss_restore": bool(args.sss_restore),
-        "sss_restore_channel": args.sss_restore_channel,
-        "runoff": bool(args.runoff),
-        "nemo_monthly_init": bool(args.nemo_monthly_init),
-        "woa_init": bool(args.woa_init),
-        "argv": sys.argv,
-    }, indent=1))
     print(f"[fesom-forced] done: {n_steps} steps; snapshots in {out}")
 
 
@@ -5942,16 +6012,29 @@ class _SurfaceFluxAccumulator:
         self._sums = {}
         self._n = 0
 
-    def add(self, sf):
-        if sf is None:
+    def add(self, sf, mld=None):
+        """Accumulate one step. ``mld`` is optional and shares the window.
+
+        The step count is incremented ONCE here, so a caller that supplies
+        only ``mld`` still gets a correctly normalised mean -- and a window
+        that mixes stepped-with-mld and stepped-without would show it, because
+        the mld sum would then cover fewer steps than the count says. The
+        driver adds both together at a single site so that cannot happen.
+        """
+        if sf is not None:
+            for name in self._FIELDS:
+                v = getattr(sf, name, None)
+                if v is None:
+                    continue
+                v = jnp.asarray(v)
+                prev = self._sums.get(name)
+                self._sums[name] = v if prev is None else prev + v
+        if mld is not None:
+            v = jnp.asarray(mld)
+            prev = self._sums.get("mld")
+            self._sums["mld"] = v if prev is None else prev + v
+        if sf is None and mld is None:
             return
-        for name in self._FIELDS:
-            v = getattr(sf, name, None)
-            if v is None:
-                continue
-            v = jnp.asarray(v)
-            prev = self._sums.get(name)
-            self._sums[name] = v if prev is None else prev + v
         self._n += 1
 
     def drain(self, dt=None):
@@ -5974,6 +6057,40 @@ class _SurfaceFluxAccumulator:
             out["flux_mean_window_s"] = np.asarray(float(dt) * self._n)
         self._sums, self._n = {}, 0
         return out
+
+
+def _mld_now(state, z_coord):
+    """MLD at this state, in the THREE-WAY SCORER'S OWN CONVENTION.
+
+    Matched to compare_three_way_nemo.py deliberately rather than chosen here:
+    delta_sigma 0.01 (NEMO ORCA1 writes mldr10_1 at 0.01 wrt 10 m, and the
+    library default of 0.03 would bias the model deep), the same wet mask
+    built from z_centre < H_bathy and land_mask > 0.5, and the same
+    bottom_depth. A 5-day mean computed on a different threshold than the
+    field it is compared against would be a new confound in place of the
+    snapshot-versus-mean one it exists to remove.
+    """
+    from legoesm.ocean.diagnostics import mixed_layer_depth
+
+    zh = getattr(z_coord, "z_half_ref", None)
+    if zh is None:
+        # Returning None here would leave the accumulator with no mld sum and
+        # the snapshot with no mld_mean, while the run reported success -- the
+        # silently-inert-flag class this campaign has now been bitten by eight
+        # times. Refuse on the first step instead.
+        raise SystemExit(
+            "--mld-accumulate needs the vertical coordinate's interface "
+            "depths (z_half_ref) and this lane's z_coord has none; drop "
+            "--mld-accumulate on this configuration.")
+    z_c = jnp.abs(0.5 * (jnp.asarray(zh)[:-1] + jnp.asarray(zh)[1:]))
+    T = getattr(state.T, "data", state.T)
+    S = getattr(state.S, "data", state.S)
+    Hb = getattr(state.H_bathy, "data", state.H_bathy)
+    mask = getattr(state.land_mask, "data", state.land_mask)
+    wet = ((z_c[(None,) * jnp.ndim(Hb) + (slice(None),)] < Hb[..., None])
+           & (mask[..., None] > 0.5)).astype(T.dtype)
+    return mixed_layer_depth(T, S, z_c, delta_sigma=0.01,
+                             wet_mask=wet, bottom_depth=Hb)
 
 
 def _snapshot_extra(args, model, state, sf, dt, z_coord, flux_acc):
@@ -7181,6 +7298,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "payload checksum, so an edit to an array's VALUES at "
                         "the same shape resumes silently, and forcing/mesh "
                         "inputs are pinned by PATH, not by content hash.")
+    p.add_argument("--mld-accumulate", action="store_true",
+                   help="Accumulate the mixed-layer depth at every step and write the mean over each snapshot window as mld_mean. Uses the three-way scorer's own convention (delta_sigma 0.01, the NEMO mldr10_1 threshold) so the two are the same diagnostic. Without this, a snapshot MLD is compared against NEMO's 5-day mean -- the snapshot-versus-mean confound that has produced retracted numbers in this campaign twice. Read-only; excluded from the restart fingerprint.")
     p.add_argument("--flux-accumulate", action="store_true",
                    help="Accumulate the APPLIED ocean surface heat flux "
                         "(q_net, sw_down) and wind stress (tau_x, tau_y) at "
@@ -9337,7 +9456,7 @@ def main() -> int:
         # Same class again: the surface-flux accumulator only READS the
         # forcing it is handed, so enabling it must not make a parent leg's
         # restart un-resumable.
-        "flux_accumulate",
+        "flux_accumulate", "mld_accumulate",
         "restart_branch_from_different_config",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
@@ -9531,58 +9650,8 @@ def main() -> int:
     # records the forcing rather than the flag.  --forcing-path wins; otherwise
     # this is the same default the loader takes, and the two cannot drift
     # because both call core2_nyf_cache_dir().
-    if args.forcing_path:
-        _resolved_forcing_path = str(args.forcing_path)
-    else:
-        from legoesm.ocean.forcing import core2_nyf_cache_dir
-        _resolved_forcing_path = str(core2_nyf_cache_dir())
-    print(f"[setup] CORE-II forcing cache: {_resolved_forcing_path}")
-    manifest_path = None
-    if _is_io_proc():
-        try:
-            from legoesm.driver.restart import (
-                dataset_provenance_entry,
-                write_run_manifest,
-            )
-            from legoesm.ocean.config import OceanRunRecord
-            run_record = OceanRunRecord(
-                runtime_config=model.config,
-                grid=str(args.grid),
-                mesh=str(args.mesh),
-                nlev=int(args.nlev),
-                dt_seconds=float(dt),
-                total_days=float(total_days),
-                output_path=str(args.output),
-                forcing="core2_nyf",
-                # RESOLVED, not the flag.  An empty string here used to mean
-                # "the default", and the default silently changed from the raw
-                # CORE-II winds to the bias-corrected ones -- so every manifest
-                # written before this recorded nothing about which forcing the
-                # run actually used, and the loader's own provenance line is
-                # swallowed by the `| tail` most arm scripts pipe through.
-                forcing_path=str(_resolved_forcing_path),
-                woa_init=bool(args.woa_init),
-                woa_t=str(args.woa_t or ""),
-                woa_s=str(args.woa_s or ""),
-                latlon_res=str(args.latlon_res),
-                smoke=bool(args.smoke),
-            )
-            manifest_path = write_run_manifest(
-                out_dir, run_record, config_kind="ocean",
-                runner_tag="run_omip_core2",
-                dataset_provenance=[
-                    dataset_provenance_entry(pth, dataset_id=did)
-                    for did, pth in (
-                        ("core2_forcing", _resolved_forcing_path),
-                        ("woa_t", args.woa_t),
-                        ("woa_s", args.woa_s),
-                    )
-                    if pth
-                ],
-            )
-            print(f"[setup] wrote run manifest {manifest_path}")
-        except Exception as _exc:  # noqa: BLE001 — provenance is best-effort
-            print(f"[warn] run manifest not written: {type(_exc).__name__}: {_exc}")
+    manifest_path = _write_ocean_run_manifest(
+        args, model, dt, total_days, out_dir)
 
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
@@ -9986,6 +10055,12 @@ def main() -> int:
             "--flux-accumulate is not wired into the --scan-block lane; "
             "drop --scan-block (the standard per-step loop accumulates the "
             "applied surface fluxes) or drop --flux-accumulate.")
+    if args.mld_accumulate and use_scan:
+        # Same accumulator, same lane, same silent-inert failure.
+        raise SystemExit(
+            "--mld-accumulate is not wired into the --scan-block lane; "
+            "drop --scan-block (the standard per-step loop accumulates the "
+            "mixed-layer depth) or drop --mld-accumulate.")
     if _evd_occ_every is not None and use_scan:
         raise SystemExit(
             "--evd-occupancy-every-hours samples inside the per-step loop; "
@@ -10307,7 +10382,9 @@ def main() -> int:
         _evd_box = ((np.asarray(state.land_mask.data) > 0.5)
                     & (np.abs(_evd_lat) <= 2.0)
                     & (_evd_lon >= 220.0) & (_evd_lon < 240.0))
-    _flux_acc = _SurfaceFluxAccumulator() if args.flux_accumulate else None
+    _flux_acc = (_SurfaceFluxAccumulator()
+                 if (args.flux_accumulate or args.mld_accumulate)
+                 else None)
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
@@ -10558,7 +10635,9 @@ def main() -> int:
                     wind_current_feedback_vfac=_wind_vfac)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
             if _flux_acc is not None:
-                _flux_acc.add(sf)
+                _flux_acc.add(sf if args.flux_accumulate else None,
+                              mld=(_mld_now(state, z_coord)
+                                   if args.mld_accumulate else None))
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
         else:
@@ -10842,9 +10921,12 @@ def main() -> int:
                                     else sf.freshwater + _fw_restore))
             state = _ensure_sharded_state(state)
             # Accumulated from the forcing HANDED TO THE STEP, so on the ice
-            # lane this is the post-blend, ice-partitioned flux.
+            # lane this is the post-blend, ice-partitioned flux. MLD rides
+            # the same window and the same single count.
             if _flux_acc is not None:
-                _flux_acc.add(sf)
+                _flux_acc.add(sf if args.flux_accumulate else None,
+                              mld=(_mld_now(state, z_coord)
+                                   if args.mld_accumulate else None))
             state = _ocean_step(state, sf, fw, _t_sec)
         if _gw_acc is not None:
             # READ-ONLY: `state` is never reassigned here, so the trajectory

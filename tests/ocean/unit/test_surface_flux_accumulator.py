@@ -181,3 +181,129 @@ def test_flag_is_excluded_from_the_restart_fingerprint():
     assert '"flux_accumulate"' in block, (
         "the read-only flux-accumulate flag must be excluded from the restart "
         "fingerprint or enabling it makes a chained leg un-resumable")
+
+
+# ---------------------------------------------------------------------------
+# --mld-accumulate: the same window, for the mixed-layer depth.
+#
+# WHY.  NEMO publishes mldr10_1 as a FIVE-DAY MEAN and we compared a SNAPSHOT
+# against it.  That confound has produced retracted numbers in this campaign
+# twice (the z0 surface-TKE arm was refuted by it; a "K_M 5%" claim turned out
+# to be a wind-lull snapshot).  Averaging our MLD over the same window removes
+# it -- but only if the two sides also share a THRESHOLD, which is what the
+# last test here pins.
+# ---------------------------------------------------------------------------
+
+
+def test_mld_rides_the_same_window_and_the_same_single_count():
+    """One step is one count even when both a flux and an MLD are added."""
+    acc = _driver()._SurfaceFluxAccumulator()
+    acc.add(_sf(q_net=np.full((2, 2), 10.0)), mld=np.full((2, 2), 40.0))
+    acc.add(_sf(q_net=np.full((2, 2), 30.0)), mld=np.full((2, 2), 60.0))
+    out = acc.drain()
+    assert out["flux_mean_n_steps"] == 2
+    np.testing.assert_allclose(out["q_net_mean"], 20.0, rtol=1e-12)
+    np.testing.assert_allclose(out["mld_mean"], 50.0, rtol=1e-12)
+
+
+def test_an_mld_only_window_is_normalised_by_its_own_count():
+    """--mld-accumulate without --flux-accumulate must still give a MEAN.
+
+    The count is incremented once per ``add``, not once per field, so a
+    caller that supplies only the MLD divides by the number of steps rather
+    than by zero or by one.
+    """
+    acc = _driver()._SurfaceFluxAccumulator()
+    for v in (10.0, 20.0, 60.0):
+        acc.add(None, mld=np.full((2, 2), v))
+    out = acc.drain()
+    assert out["flux_mean_n_steps"] == 3
+    np.testing.assert_allclose(out["mld_mean"], 30.0, rtol=1e-12)
+    assert "q_net_mean" not in out
+
+
+def test_adding_nothing_does_not_advance_the_count():
+    """Both flags off -> the accumulator is not constructed, but if a caller
+    ever reaches ``add`` with neither payload the window must not inflate."""
+    acc = _driver()._SurfaceFluxAccumulator()
+    acc.add(_sf(q_net=np.full((2, 2), 4.0)), mld=None)
+    acc.add(None, None)
+    acc.add(None, None)
+    out = acc.drain()
+    assert out["flux_mean_n_steps"] == 1
+    np.testing.assert_allclose(out["q_net_mean"], 4.0, rtol=1e-12)
+
+
+def test_mld_flag_is_excluded_from_the_restart_fingerprint():
+    """Same reason as the flux flag: a read-only diagnostic must not make a
+    chained leg un-resumable."""
+    from pathlib import Path
+    import scripts.run.run_omip_core2 as mod
+
+    src = Path(mod.__file__).read_text().splitlines()
+    start = next(i for i, ln in enumerate(src)
+                 if "_RESTART_FP_EXCLUDE = frozenset({" in ln)
+    end = next(i for i in range(start, len(src)) if src[i].strip() == "})")
+    block = "\n".join(ln.split("#", 1)[0] for ln in src[start:end + 1])
+    assert '"mld_accumulate"' in block
+
+
+def test_the_scan_block_lane_refuses_the_mld_flag_too():
+    from pathlib import Path
+    import scripts.run.run_omip_core2 as mod
+
+    src = Path(mod.__file__).read_text()
+    assert "if args.mld_accumulate and use_scan:" in src
+    guard = src.split("if args.mld_accumulate and use_scan:", 1)[1][:600]
+    assert "raise SystemExit" in guard
+    assert "--scan-block" in guard
+
+
+def test_a_lane_without_interface_depths_refuses_rather_than_writing_nothing():
+    """The silently-inert-flag class, refused.
+
+    Returning ``None`` here would leave the snapshot with no ``mld_mean``
+    while the run reported success -- exactly the failure the seven MPAS flag
+    guards were written for.  It must abort on the first step instead.
+    """
+    import pytest as _pytest
+    z_coord = SimpleNamespace()          # no z_half_ref
+    with _pytest.raises(SystemExit):
+        _driver()._mld_now(SimpleNamespace(), z_coord)
+
+
+def test_the_online_mld_uses_the_scorer_threshold_not_the_library_default():
+    """0.01 wrt 10 m (NEMO mldr10_1), NOT the library's 0.03 default.
+
+    NON-VACUITY: the profile below is chosen so the two thresholds give
+    DIFFERENT depths, and the test asserts both -- that ours equals the 0.01
+    answer AND that the 0.03 answer differs by more than a level.  A profile
+    where the two agree would let a wrong threshold pass.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.diagnostics import mixed_layer_depth
+
+    nlev = 10
+    z_half = jnp.arange(nlev + 1, dtype=jnp.float64) * 10.0     # 0..100 m
+    z_c = jnp.abs(0.5 * (z_half[:-1] + z_half[1:]))             # 5..95 m
+    # Weak, uniform stratification: ~0.01 kg/m^3 per level, so the 0.01 and
+    # 0.03 crossings are three levels apart.
+    T = (20.0 - 0.05 * jnp.arange(nlev, dtype=jnp.float64))[None, None, :]
+    T = jnp.broadcast_to(T, (2, 2, nlev))
+    S = jnp.full((2, 2, nlev), 35.0)
+    Hb = jnp.full((2, 2), 100.0)
+    mask = jnp.ones((2, 2))
+    state = SimpleNamespace(T=T, S=S, H_bathy=Hb, land_mask=mask)
+
+    got = _driver()._mld_now(state, SimpleNamespace(z_half_ref=z_half))
+
+    wet = ((z_c[None, None, :] < Hb[..., None]) & (mask[..., None] > 0.5)
+           ).astype(T.dtype)
+    want = mixed_layer_depth(T, S, z_c, delta_sigma=0.01,
+                             wet_mask=wet, bottom_depth=Hb)
+    deep = mixed_layer_depth(T, S, z_c, delta_sigma=0.03,
+                             wet_mask=wet, bottom_depth=Hb)
+    np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-12)
+    assert float(np.asarray(deep).mean() - np.asarray(want).mean()) > 10.0, (
+        "the two thresholds must disagree on this profile or the test is "
+        "vacuous")
