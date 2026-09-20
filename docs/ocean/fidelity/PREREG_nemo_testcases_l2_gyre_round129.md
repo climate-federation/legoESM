@@ -24,13 +24,20 @@ The admitted NEMO ensemble was produced by compiled configuration
 `1e-10 * sin(NINT(pdept)*73 + NINT(gphit*1000)*179 + seed*997) * ptmask`
 
 to temperature at
-`GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_istate.f90:82-90`.
+`GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_istate.f90:101-105`.
 The compiled namelist declares the selector, includes it in `namusr_def`, and
 prints it at
-`GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_nam.f90:39-42`,
+`GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_nam.f90:42`,
 `:118-122`, and `:137-145`.  The four admitted namelists select seeds
 `0,1,2,3`; all four run directories carry binary SHA-256
 `578c88f17ecaa8052276ff43e6b6c928f5be49fb218d4af33bc8718472613c4a`.
+
+Citation correction after the freeze: the first committed version named
+`:82-90`, which is the compiled base temperature/salinity profile, not the
+perturbation.  The compiled guard, assignment and runtime marker are at
+`:101-105`.  This rigid source correction changes no prediction, population,
+threshold or falsifier; the original wrong line reference is retracted here
+rather than silently carried into the receipt.
 
 legoESM's existing `nemo_istate_perturbation` uses the same amplitude,
 integer multipliers, temperature-only mask, seeds and Fortran half-away-from-

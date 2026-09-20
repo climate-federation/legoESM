@@ -225,6 +225,10 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/trazdf.f90"),
+    "GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_istate.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_istate.f90"),
+    "GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_nam.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_nam.f90"),
     # Round 92 binds the operand diagnosis to the exact acquired Round-90
     # compiled card, including its write-only recorder.
     "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -653,6 +657,20 @@ CITATION_MAP = {
         "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )",
         "CALL iom_rstput( kt, nitrst, numrow, 'sn'  , ts(:,:,:,jp_sal,Kbb) )",
         5],
+    # --- round 129: compiled infinitesimal-IC ensemble selector and write ---
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_istate.f90:101-105': [
+        'IF( nn_pert_seed /= 0 ) THEN',
+        "IF(lwp) WRITE(numout,*) 'TINY PERTURBATION SEED = ', nn_pert_seed",
+        5],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_nam.f90:42':
+        'INTEGER, PUBLIC ::   nn_pert_seed = 0',
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_nam.f90:118-122': [
+        'NAMELIST/namusr_def/ nn_GYRE, ln_bench, jpkglo, nn_pert_seed',
+        'IF(lwm)   WRITE( numond, namusr_def )', 5],
+    'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/usrdef_nam.f90:137-145': [
+        "WRITE(numout,*) 'usr_def_nam  : read the user defined namelist (namusr_def) in namelist_cfg'",
+        "WRITE(numout,*) '      from-rest ensemble perturbation seed        nn_pert_seed = ', nn_pert_seed",
+        9],
     # --- round 123: stage-3 process order and implicit tracer content ---
     'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3_stg.f90:812,843,849': [
         'ts(:,:,:,jn,Krhs) = 0._wp',
