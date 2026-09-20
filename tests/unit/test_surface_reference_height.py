@@ -237,3 +237,34 @@ def test_saline_is_on_by_default_where_the_lane_can_honour_it():
 
     out = apply_surface_flux_config(TurbulenceConfig(scheme="louis"), _Cfg())
     assert getattr(out, out.scheme).surface.ocean_q_sfc_saline is True
+
+
+def test_half_level_convention_puts_the_surface_at_the_last_index():
+    """The whole correction rests on z_half[:, -1] being the surface edge.
+
+    Ten call sites compute the reference height as z_full[:, -1] minus
+    z_half[:, -1].  If the last half level were a layer midpoint instead, that
+    subtraction silently returns a half-layer offset -- tens of metres, right
+    shape, plausible magnitude, no error anywhere.  If the ordering were
+    reversed it returns a NEGATIVE height and the log in the similarity solver
+    produces NaN in a lane that previously gave finite answers.  Neither is
+    caught by any other test here, so the convention is pinned rather than
+    assumed (GLM).
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+
+    ncol, nlev = 3, 12
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    p_s = jnp.asarray([101300.0, 97000.0, 85000.0])   # incl. a high-terrain column
+    p_half = sigma_half[None, :] * p_s[:, None]
+    T = jnp.full((ncol, nlev), 280.0)
+    z_full, z_half = compute_heights_from_sigma(T, p_half)
+
+    # the surface edge is the LAST half level, and it is exactly zero there
+    np.testing.assert_allclose(np.asarray(z_half[:, -1]), 0.0, atol=1e-9)
+    # heights increase upward, so the lowest full level sits above it
+    z_low = np.asarray(z_full[:, -1] - z_half[:, -1])
+    assert np.all(z_low > 0.0), z_low
+    # and it is a plausible lowest-level height, not a half-layer sliver
+    assert np.all(z_low < 1000.0), z_low

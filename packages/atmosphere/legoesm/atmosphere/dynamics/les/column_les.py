@@ -642,7 +642,7 @@ def extract_gcm_column(
     p_half_col = jnp.asarray(sigma.pressure_at_half(p_s_col))
     T_col = jnp.asarray(T)[idx]
     q_col = jnp.asarray(q_v)[idx]
-    z_full, _ = compute_heights_from_sigma(
+    z_full, z_half = compute_heights_from_sigma(
         T_col[None, :], p_half_col[None, :], q_col[None, :]
     )
     gcm_z = z_full[0]
@@ -670,6 +670,12 @@ def extract_gcm_column(
         w_th_s, w_qv_s = column_surface_kinematic_fluxes(
             T_col=T_col, q_v_col=q_col, u_col=u_col, v_col=v_col,
             p_full_col=p_full_col, sst_K=sst_col, p_s=p_s_col,
+            # The height of the level these values came from.  Adding the
+            # argument without passing it here would have left this lane on
+            # the uncorrected surface law while advertising the fix -- the
+            # silent-absence failure this helper has now produced repeatedly
+            # (GLM).
+            z_low=z_full[0, -1] - z_half[0, -1],
             surface_config=surface_config,
         )
         ls_state = ls_state._replace(prescribe="fluxes", w_th_s=w_th_s, w_qv_s=w_qv_s)
