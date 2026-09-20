@@ -27,6 +27,7 @@ FORMAT = "nemo-testcase-l2-gyre-round130-year-patch-ranking-v1"
 REGISTRY_FORMAT = "nemo-testcase-l2-gyre-round130-registry-v1"
 DAY_GAP_FORMAT = "gyre-year-owners-day-gap-v1"
 COMPARISON_FORMAT = "legoesm-ocean-oracle-relative-move-gate-v3"
+CARD_COMPARISON_FORMAT = "nemo-gyre-generic-card-three-step-comparison-v1"
 YEAR_DAYS = (30, 60, 90, 120, 180, 240, 300, 360)
 MONTH_DAYS = tuple(range(1, 31))
 CANDIDATES = (
@@ -272,6 +273,48 @@ def _local_proof(entry: dict[str, Any], base: Path, commit: str) -> dict[str, An
             "checks": checked, "plant_value": value}
 
 
+def _card_measurements(entry: dict[str, Any], base: Path, commit: str,
+                       measured: list[str]) -> list[dict[str, Any]]:
+    """Verify that every claimed non-primary card has a hashed measurement."""
+    specs = entry.get("card_measurements", {})
+    require(isinstance(specs, dict),
+            f"{entry.get('id')}: card-measurement registry is not an object")
+    require(set(specs) == set(measured),
+            f"{entry.get('id')}: measured-card names lack exact artifacts")
+    rows = []
+    for card in measured:
+        spec = specs[card]
+        require(isinstance(spec, dict),
+                f"{entry.get('id')}:{card}: bad card-measurement spec")
+        path = _path(base, spec.get("path"),
+                     f"{entry.get('id')}:{card}:measurement")
+        expected_sha = spec.get("sha256")
+        require(isinstance(expected_sha, str) and len(expected_sha) == 64,
+                f"{entry.get('id')}:{card}: measurement sha256 absent")
+        actual_sha = _sha256(path)
+        require(actual_sha == expected_sha,
+                f"{entry.get('id')}:{card}: measurement digest moved")
+        report = _read(path)
+        require(report.get("format") == CARD_COMPARISON_FORMAT,
+                f"{entry.get('id')}:{card}: unexpected measurement format")
+        require(report.get("status") == "PASS",
+                f"{entry.get('id')}:{card}: measurement did not pass")
+        require(report.get("after_commit") == commit,
+                f"{entry.get('id')}:{card}: after commit mismatch")
+        require(report.get("certifications_unchanged") is True,
+                f"{entry.get('id')}:{card}: certification moved")
+        all_rows = report.get("rows")
+        moved_rows = report.get("moved_rows")
+        require(isinstance(all_rows, list) and len(all_rows) == 15,
+                f"{entry.get('id')}:{card}: certified row table incomplete")
+        require(isinstance(moved_rows, list)
+                and report.get("moved_row_count") == len(moved_rows),
+                f"{entry.get('id')}:{card}: moved row table incomplete")
+        rows.append({"card": card, "path": str(path), "sha256": actual_sha,
+                     "moved_row_count": len(moved_rows)})
+    return rows
+
+
 def _measurement(entry: dict[str, Any], base: Path, baseline_year: dict[int, dict],
                  baseline_month: dict[int, dict]) -> dict[str, Any]:
     candidate_id = entry.get("id")
@@ -341,6 +384,7 @@ def _measurement(entry: dict[str, Any], base: Path, baseline_year: dict[int, dic
     require(isinstance(executing, list) and "GYRE-zco" in executing,
             f"{candidate_id}: executing-card registry is invalid")
     require(isinstance(measured, list), f"{candidate_id}: measured cards invalid")
+    card_measurements = _card_measurements(entry, base, commit, measured)
     cards_complete = set(executing) <= ({"GYRE-zco"} | set(measured))
 
     criteria = {
@@ -383,6 +427,7 @@ def _measurement(entry: dict[str, Any], base: Path, baseline_year: dict[int, dic
         "executing_cards": executing,
         "card_execution": card_execution,
         "measured_cards": measured,
+        "card_measurements": card_measurements,
         "criteria": criteria,
         "core_trajectory_and_year_pass": core,
         "landing_ready": core and cards_complete,

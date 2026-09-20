@@ -136,6 +136,42 @@ def test_filtered_local_proof_selects_named_stage_rows(tmp_path):
     assert report["checks"][0]["assertions"] == 1
 
 
+def test_measured_card_requires_hashed_passing_comparison(tmp_path):
+    comparison = tmp_path / "generic.json"
+    comparison.write_text(json.dumps({
+        "format": gate.CARD_COMPARISON_FORMAT,
+        "status": "PASS",
+        "after_commit": COMMIT,
+        "certifications_unchanged": True,
+        "rows": [{"row": f"row-{index}"} for index in range(15)],
+        "moved_rows": [{"row": "row-1"}],
+        "moved_row_count": 1,
+    }))
+    entry = {
+        "id": "r109_handoff",
+        "card_measurements": {
+            "NEMO-GYRE-recipe": {
+                "path": str(comparison), "sha256": _sha(comparison),
+            },
+        },
+    }
+    rows = gate._card_measurements(
+        entry, tmp_path, COMMIT, ["NEMO-GYRE-recipe"])
+    assert rows == [{
+        "card": "NEMO-GYRE-recipe",
+        "path": str(comparison),
+        "sha256": _sha(comparison),
+        "moved_row_count": 1,
+    }]
+
+
+def test_measured_card_claim_without_artifact_is_refused(tmp_path):
+    with pytest.raises(gate.GateError, match="lack exact artifacts"):
+        gate._card_measurements(
+            {"id": "r109_handoff"}, tmp_path, COMMIT,
+            ["NEMO-GYRE-recipe"])
+
+
 def test_missing_candidate_plant_fires_before_ranking(tmp_path):
     year, month = _baseline_reports()
     with pytest.raises(gate.GateError, match="candidate registry must be exactly"):
