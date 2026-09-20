@@ -86,11 +86,28 @@ def test_provenance_refuses_rh_cover(monkeypatch):
     with pytest.raises(SystemExit, match="grid-scale cover"):
         s0.check_provenance("ctl", d, {})
     monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.full((3, 4), 0.1))
-    assert s0.check_provenance("ctl", d, {}) == 0.0
+    assert s0.check_provenance("ctl", d, {})["global"] == 0.0
     # clear points do not count: identical zeros with ONE differing cloudy point passes
     d["cf"][:] = 0.0; d["cf"][0, 0] = 0.5
     monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.zeros((3, 4)))
-    assert s0.check_provenance("ctl", d, {}) == 0.0
+    assert s0.check_provenance("ctl", d, {})["global"] == 0.0
+    # saturated points do not count either: an overcast PDF arm equal to a
+    # saturated grid-scale cover must NOT be called grid-scale cover
+    d["cf"][:] = 1.0; d["cf"][1, 1] = 0.7
+    sat = np.ones((3, 4)); sat[1, 1] = 0.5
+    monkeypatch.setattr(s0, "rh_cover", lambda d, exp: sat)
+    assert s0.check_provenance("ctl", d, {})["global"] == 0.0
+    mask = np.zeros((3, 4), bool); mask[0, :] = True         # mask fully saturated
+    assert np.isnan(s0.check_provenance("ctl", d, {}, mask=mask)["scoring mask"])
+    monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.ones((3, 4)))
+    with pytest.raises(SystemExit, match="anywhere"):
+        s0.check_provenance("ctl", d, {})
+    # equality only OUTSIDE the scoring mask passes globally but aborts inside it
+    d["cf"][:] = 0.3; d["cf"][2, :] = 0.6
+    monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.full((3, 4), 0.3))
+    mask = np.zeros((3, 4), bool); mask[:2, :] = True
+    with pytest.raises(SystemExit, match="scoring mask"):
+        s0.check_provenance("ctl", d, {}, mask=mask)
     monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.full((3, 4), np.nan))
     with pytest.raises(SystemExit, match="not a valid field"):
         s0.check_provenance("ctl", d, {})
@@ -123,7 +140,8 @@ def test_arm_without_moments_is_refused(tmp_path, monkeypatch):
              T=np.full((3, 4), 250.0), physstate_cloud_fraction=np.zeros((3, 4)),
              trc_q_v=np.zeros((3, 4)), p_s=np.full(3, 1e5),
              meta_vgrid=np.stack([np.linspace(0, 0.01, 5), np.linspace(0, 0.99, 5)]),
-             physstate_col_index=np.arange(3), physstate_clubb_moments=np.zeros((3, 1, 1)))
+             physstate_col_index=np.arange(3), physstate_clubb_moments=np.zeros((3, 1, 1)),
+             day=np.array(45.0))
     with pytest.raises(SystemExit, match="clubb_moments"):
         s0.load_day("arm", 45, 3, require_moments=True)
     assert s0.load_day("arm", 45, 3)["moments"] is None      # (ncol,1,1) placeholder = absent
@@ -169,7 +187,8 @@ def _pair_on_disk(tmp_path, ncol=3, nlev=4, arm_cf_bump=0.0, plant_nan=False, da
                      trc_q_c=np.zeros((ncol, nlev)), trc_q_i=np.zeros((ncol, nlev)),
                      meta_vgrid=np.stack([np.linspace(0, 0.01, nlev + 1),
                                           np.linspace(0, 0.99, nlev + 1)]),
-                     physstate_col_index=np.arange(ncol), physstate_clubb_moments=mom)
+                     physstate_col_index=np.arange(ncol), physstate_clubb_moments=mom,
+                     day=np.array(float(day)))
 
 
 def _fake_mesh(monkeypatch, tmp_path):
@@ -204,3 +223,32 @@ def test_unregistered_pair_is_refused(tmp_path, monkeypatch):
     (tmp_path / "prog" / "experiment_config.json").write_text(json.dumps(exp))
     with pytest.raises(SystemExit, match="not the registered pair"):
         s0.main(["--control", "ctl", "--arm", "prog", "--days", "45"])
+
+
+def test_day_stamp_is_required_and_must_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(s0.rb, "ROOT", str(tmp_path))
+    (tmp_path / "arm").mkdir()
+    base = dict(T=np.full((3, 4), 250.0), physstate_cloud_fraction=np.zeros((3, 4)),
+                trc_q_v=np.zeros((3, 4)), p_s=np.full(3, 1e5),
+                meta_vgrid=np.stack([np.linspace(0, 0.01, 5), np.linspace(0, 0.99, 5)]),
+                physstate_col_index=np.arange(3))
+    np.savez(tmp_path / "arm" / "checkpoint_day_0045.npz", **base)
+    with pytest.raises(SystemExit, match="day stamp"):
+        s0.load_day("arm", 45, 3)
+    np.savez(tmp_path / "arm" / "checkpoint_day_0045.npz", day=np.array(44.0), **base)
+    with pytest.raises(SystemExit, match="stamped day"):
+        s0.load_day("arm", 45, 3)
+
+
+def test_pressure_must_increase_downward_in_every_column(tmp_path, monkeypatch):
+    monkeypatch.setattr(s0.rb, "ROOT", str(tmp_path))
+    (tmp_path / "arm").mkdir()
+    # coefficients monotone at p_s = 1e5 but inverted for a low-pressure column
+    a = np.array([0.0, 0.50, 0.30, 0.10, 0.0]); b = np.array([0.0, 0.00, 0.30, 0.70, 1.0])
+    assert np.all(np.diff(a * 1e5 + b * 1e5) > 0) and not np.all(np.diff(a * 1e5 + b * 5e4) > 0)
+    np.savez(tmp_path / "arm" / "checkpoint_day_0045.npz", day=np.array(45.0),
+             T=np.full((3, 4), 250.0), physstate_cloud_fraction=np.zeros((3, 4)),
+             trc_q_v=np.zeros((3, 4)), p_s=np.array([1e5, 1e5, 5e4]),
+             meta_vgrid=np.stack([a, b]), physstate_col_index=np.arange(3))
+    with pytest.raises(SystemExit, match="every column"):
+        s0.load_day("arm", 45, 3)

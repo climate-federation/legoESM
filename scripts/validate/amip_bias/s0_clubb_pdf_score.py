@@ -129,7 +129,9 @@ def load_day(run, day, lat_n, require_moments=False):
     for k in ("trc_q_c", "trc_q_i", "trc_N_c", "trc_N_i"):
         out[k] = np.asarray(z[k])[order] if k in z.files else None
     where = f"{run} day {day}"
-    if "day" in z.files and int(round(float(z["day"]))) != day:
+    if "day" not in z.files or np.asarray(z["day"]).shape != ():
+        raise SystemExit(f"FATAL: {where}: checkpoint carries no scalar day stamp")
+    if not (np.isfinite(float(z["day"])) and abs(float(z["day"]) - day) <= 1.0e-6):
         raise SystemExit(f"FATAL: {where}: checkpoint stamped day {float(z['day'])}")
     for k, shp in (("T", (lat_n, nlev)), ("cf", (lat_n, nlev)), ("q_v", (lat_n, nlev)),
                    ("p_s", (lat_n,))):
@@ -142,8 +144,12 @@ def load_day(run, day, lat_n, require_moments=False):
             raise SystemExit(f"FATAL: {where}: bad {k}")
     if out["cf"].min() < 0.0 or out["cf"].max() > 1.0:
         raise SystemExit(f"FATAL: {where}: cloud fraction outside [0, 1]")
-    if vgrid.shape[0] != 2 or not np.all(np.diff(vgrid[0] * 1e5 + vgrid[1] * 1e5) > 0):
-        raise SystemExit(f"FATAL: {where}: vertical grid not monotone top-down")
+    if vgrid.shape[0] != 2 or not np.isfinite(vgrid).all():
+        raise SystemExit(f"FATAL: {where}: malformed vertical grid")
+    p_half = half_pressure(vgrid, out["p_s"])
+    if not (np.isfinite(p_half).all() and np.all(np.diff(p_half, axis=1) > 0)):
+        raise SystemExit(f"FATAL: {where}: half-level pressure not increasing top-down "
+                         "in every column")
     mom = np.asarray(z["physstate_clubb_moments"]) if "physstate_clubb_moments" in z.files else None
     if mom is not None and mom.shape[1:] == PLACEHOLDER_MOMENTS:
         mom = None                                    # diagnostic closure: no moments
@@ -156,15 +162,18 @@ def load_day(run, day, lat_n, require_moments=False):
     return out
 
 
+def half_pressure(vgrid, p_s):
+    from legoesm import constants
+    return vgrid[0][None, :] * constants.p_ref + vgrid[1][None, :] * p_s[:, None]
+
+
 def rh_cover(d, exp):
     """The grid-scale cover the run's cloud scheme diagnoses from the stored
     state (same call as the live radiation entry: raw condensate and number
     tracers handed in), for the provenance control."""
-    from legoesm import constants
     from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
     cfg = cl.resolved_cloud_config(exp)
-    vg = d["vgrid"]
-    p_half = vg[0][None, :] * constants.p_ref + vg[1][None, :] * d["p_s"][:, None]
+    p_half = half_pressure(d["vgrid"], d["p_s"])
     p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
     props = compute_cloud_properties(d["T"], p_full, d["q_v"], np.diff(p_half, axis=1), cfg,
                                      q_cloud=d["trc_q_c"], q_ice=d["trc_q_i"],
@@ -172,23 +181,35 @@ def rh_cover(d, exp):
     return np.asarray(props.cloud_fraction)
 
 
-def check_provenance(name, d, exp, tol=1.0e-6):
-    """Fraction of CLOUDY points (either field > CLOUDY) where the stored cloud
-    fraction equals the rebuilt grid-scale cover; abort above 99 %.  Clear
-    points are excluded so a mostly clear cap cannot trip or pass the check."""
+def check_provenance(name, d, exp, mask=None, tol=1.0e-6):
+    """Fraction of CLOUDY, UNSATURATED points (either field > CLOUDY, rebuilt
+    cover < 1 - tol) where the stored cloud fraction equals the rebuilt
+    grid-scale cover; abort above 99 %.  Clear points are excluded so a mostly
+    clear cap cannot trip or pass the check; saturated points are excluded
+    because both covers are pinned at 1 there.  Evaluated over the whole field
+    and, when ``mask`` is given, again inside the scoring mask."""
     if d["trc_q_c"] is None or d["trc_q_i"] is None:
         raise SystemExit(f"FATAL: {name}: no condensate tracers; grid-scale cover cannot "
                          "be rebuilt the way the run's radiation saw it")
     rh = rh_cover(d, exp)
     if rh.shape != d["cf"].shape or not np.isfinite(rh).all() or rh.min() < 0 or rh.max() > 1:
         raise SystemExit(f"FATAL: {name}: rebuilt grid-scale cover is not a valid field")
-    cloudy = (d["cf"] > CLOUDY) | (rh > CLOUDY)
-    if cloudy.sum() == 0:
-        raise SystemExit(f"FATAL: {name}: no cloudy point in either field")
-    same = float(np.mean(np.abs(d["cf"][cloudy] - rh[cloudy]) <= tol))
-    if same > 0.99:
-        raise SystemExit(f"FATAL: {name}: stored cloud fraction equals the grid-scale cover "
-                         f"on {same:.1%} of cloudy points; it is not the PDF cloud fraction")
+    usable = ((d["cf"] > CLOUDY) | (rh > CLOUDY)) & (rh < 1.0 - tol)
+    same = {}
+    for scope, sel in (("global", usable),
+                       ("scoring mask", usable & mask if mask is not None else None)):
+        if sel is None:
+            continue
+        if sel.sum() == 0:
+            if scope == "global":
+                raise SystemExit(f"FATAL: {name}: no cloudy unsaturated point anywhere")
+            same[scope] = float("nan")       # all-saturated/clear mask: global scope decides
+            continue
+        same[scope] = float(np.mean(np.abs(d["cf"][sel] - rh[sel]) <= tol))
+        if same[scope] > 0.99:
+            raise SystemExit(f"FATAL: {name}: stored cloud fraction equals the grid-scale "
+                             f"cover on {same[scope]:.1%} of cloudy unsaturated points "
+                             f"({scope}); it is not the PDF cloud fraction")
     return same
 
 
@@ -253,15 +274,15 @@ def main(argv=None) -> int:
         a = load_day(args.arm, day, lat.size, require_moments=True)
         if not np.array_equal(c["vgrid"], a["vgrid"]):
             raise SystemExit(f"FATAL: day {day}: arms on different vertical grids")
+        score_mask = (c["T"] < args.t_max) & (lat >= args.lat_lo)[:, None]
         for nm, d, e in ((args.control, c, exp), (args.arm, a, exp_a)):
-            same = check_provenance(nm, d, e)
+            same = check_provenance(nm, d, e, mask=score_mask)
             print(f"provenance {nm} day {day}: stored cf equals grid-scale cover on "
-                  f"{same:.1%} of cloudy points [OK]")
+                  f"{same['global']:.1%} of cloudy unsaturated points globally, "
+                  f"{same['scoring mask']:.1%} inside the scoring mask [OK]")
         if day == args.days[0]:
             if p_top:
-                from legoesm import constants
-                vg = c["vgrid"]
-                p_half = vg[0][None, :] * constants.p_ref + vg[1][None, :] * c["p_s"][:, None]
+                p_half = half_pressure(c["vgrid"], c["p_s"])
                 p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
                 above, _ = cold_cap_mean((p_full < p_top).astype(float), c["T"], lat, area,
                                          args.lat_lo, args.t_max)
