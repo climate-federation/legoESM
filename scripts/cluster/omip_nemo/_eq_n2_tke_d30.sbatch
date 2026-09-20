@@ -53,5 +53,6 @@ $PY scripts/validate/ocean_fidelity/equatorial_n2_vs_nemo.py \
     --nemo-day 30 \
     --mesh-mask $MAIN/data/grids/eORCA1.2_mesh_mask.nc \
     --out-json $MAIN/results/omip_nemo/eq_n2_tke_d30.json \
-    --plot-out $MAIN/results/omip_nemo/eq_tke_profile_d30.png
+    --plot-out $MAIN/results/omip_nemo/eq_tke_profile_d30.png \
+    --tke-budget
 echo "=== rc=$? ==="

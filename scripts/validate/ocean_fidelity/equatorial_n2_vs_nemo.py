@@ -163,6 +163,16 @@ def main() -> int:
     p.add_argument("--lon-west", type=float, default=200.0)
     p.add_argument("--lon-east", type=float, default=260.0)
     p.add_argument("--out-json", default=None)
+    p.add_argument("--tke-budget", action="store_true",
+                   help="Per-band TKE budget from the snapshot: shear "
+                        "production K_m*S^2, buoyancy destruction -K_h*N^2, "
+                        "and vertical transport d/dz(K_m de/dz). Dissipation "
+                        "is NOT computed -- the dissipation length is not "
+                        "stored, and reconstructing it would assume the "
+                        "mixing-length relation this is meant to test -- so it "
+                        "is reported as the RESIDUAL, with the storage term "
+                        "the snapshot cannot see bounded and printed beside "
+                        "it.")
     p.add_argument("--plot-out", default=None,
                    help="PNG of the per-interface profile. Drawn from the SAME "
                         "numbers the table prints, in the same function, so a "
@@ -377,6 +387,52 @@ def main() -> int:
                   "SURFACE SOURCE problem; one that starts near 1 and falls "
                   "with depth is a TRANSPORT or DISSIPATION problem. That is "
                   "the whole question this profile answers.")
+
+    if a.tke_budget:
+        if s2_our is None:
+            raise SystemExit("--tke-budget needs the shear, so it needs "
+                             "--nemo-gridu and --nemo-gridv")
+        if "K_H_diag" not in z or "K_M_diag" not in z:
+            raise SystemExit("--tke-budget needs K_M_diag and K_H_diag; re-run "
+                             "the model with --kprofile-snapshots")
+        km = np.transpose(_native(z["K_M_diag"]), (1, 2, 0))
+        kh = np.transpose(_native(z["K_H_diag"]), (1, 2, 0))
+        prod = km * s2_our                      # shear production  [m2/s3]
+        buoy = -kh * n2_our                     # buoyancy work (sink if N2>0)
+        # Vertical transport of TKE, d/dz( K_m de/dz ), on the SAME interface
+        # ladder. NEMO diffuses TKE with avm itself, so K_m is the right
+        # coefficient; the ladder is one shorter at each end, so the two
+        # outermost interfaces are left out rather than one-sided-differenced.
+        dz = e3w_int
+        flux = 0.5 * (km[..., :-1] + km[..., 1:]) * \
+            (tke_our[..., :-1] - tke_our[..., 1:]) / \
+            (0.5 * (dz[:-1] + dz[1:]))[None, None, :]
+        trans = np.full_like(tke_our, np.nan)
+        trans[..., 1:-1] = (flux[..., :-1] - flux[..., 1:]) / dz[None, None, 1:-1]
+        omega = 2.0 * np.pi / 86400.0
+        print(f"\n{'band':22s} {'production':>12s} {'buoyancy':>12s} "
+              f"{'transport':>12s} {'residual':>12s} {'|de/dt| max':>12s}")
+        for name, lo, hi in _BANDS:
+            pr, _ = band_median(prod, wet_i, box, gdepw_int, lo, hi)
+            bu, _ = band_median(buoy, wet_i, box, gdepw_int, lo, hi)
+            tr, _ = band_median(np.nan_to_num(trans, nan=0.0), wet_i, box,
+                                gdepw_int, lo, hi)
+            eo, _ = band_median(tke_our, wet_i, box, gdepw_int, lo, hi)
+            print(f"{name:22s} {pr:12.3e} {bu:12.3e} {tr:12.3e} "
+                  f"{pr + bu + tr:12.3e} {omega * eo:12.3e}")
+            report["bands"][name].update(
+                {"production": pr, "buoyancy": bu, "transport": tr,
+                 "residual_is_dissipation": pr + bu + tr,
+                 "storage_bound": omega * eo})
+        print("The residual is production + buoyancy + transport, which in a "
+              "steady column equals the DISSIPATION. The column is not steady "
+              "-- TKE has a strong diurnal cycle -- but the storage term is "
+              "bounded by omega*e, printed in the last column (GLM). Where the "
+              "residual exceeds that bound by a wide margin, its magnitude and "
+              "sign hold regardless of the diurnal phase.")
+        print("TRANSPORT is the term nobody has measured yet, and it is the "
+              "one that decides between too little energy arriving from above "
+              "and too much being destroyed in place.")
 
     if a.out_json:
         Path(a.out_json).parent.mkdir(parents=True, exist_ok=True)
