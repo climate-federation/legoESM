@@ -349,7 +349,7 @@ r123_gate() {
 }
 r123_gate --json "$TARGET_RUN/round123_process_record_validation.json"
 for plant in process-stamp process-truncation process-sbc-ulp \
-             process-trajectory-ulp; do
+             process-sbc-effect process-trajectory-ulp; do
   if r123_gate --plant "$plant" \
        --json "$TARGET_RUN/round123_${plant}_plant.json" \
        >"$TARGET_RUN/round123_${plant}_plant.log" 2>&1; then

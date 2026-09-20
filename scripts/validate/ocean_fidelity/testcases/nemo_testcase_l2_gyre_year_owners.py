@@ -41,6 +41,8 @@ PLANTS (each exits NON-ZERO; each is exercised by the committed unit test)
   process-stamp            supplies a wrong producer commit
   process-truncation       removes one binary64 word from the first frame
   process-sbc-ulp          moves one post-SBC RHS value by one ULP
+  process-sbc-effect       moves post-SBC RHS by the minimum searched amount
+                           that survives into a decoded temperature row
   process-trajectory-ulp   breaks the first Taa-to-next-Tbb chain by one ULP
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
@@ -397,6 +399,54 @@ def _process_sbc_ulp_control(record: dict, mask: np.ndarray) -> dict:
     raise GateError("one-ULP surface-boundary plant is inert in every wet cell")
 
 
+def _process_sbc_effect_control(record: dict, mask: np.ndarray) -> dict:
+    """Prove an RHS boundary perturbation propagates into the budget rows.
+
+    One RHS ULP is a parser control, but it is normally far below one ULP of
+    the roughly 20-K accumulated temperature expression.  This control starts
+    at one temperature ULP mapped back into RHS units and increases only until
+    the decoded surface-boundary row moves.  The chosen perturbation and every
+    moved row are reported; no fixed scientific tolerance is introduced.
+    """
+    baseline = process_temperature_rows(record)
+    before = np.asarray(record["rhs_after_surface_boundary"],
+                        dtype=np.float64)
+    qmm = 1.0 + np.asarray(record["r3t_Kmm"], dtype=np.float64)
+    qaa = 1.0 + np.asarray(record["r3t_Kaa"], dtype=np.float64)
+    tbb = np.asarray(record["Tbb"], dtype=np.float64)
+    for j, i, k in np.argwhere(mask):
+        scale = max(abs(float(tbb[j, i, k])), 1.0)
+        temperature_ulp = float(np.spacing(scale))
+        denominator = record["rDt"] * abs(float(qmm[j, i]))
+        if denominator == 0.0:
+            continue
+        mapped = temperature_ulp * abs(float(qaa[j, i])) / denominator
+        rhs_ulp = abs(float(np.spacing(abs(before[j, i, k]))))
+        base_delta = max(mapped, rhs_ulp)
+        for multiplier in (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0):
+            new = before[j, i, k] + multiplier * base_delta
+            if not np.isfinite(new) or new == before[j, i, k]:
+                continue
+            planted = dict(record)
+            planted_sbc = np.array(before, copy=True)
+            planted_sbc[j, i, k] = new
+            planted["rhs_after_surface_boundary"] = planted_sbc
+            planted_rows = process_temperature_rows(planted)
+            moved = {name: _different_cells(
+                baseline[name], planted_rows[name], mask)
+                for name in (*PROCESS_ROWS, "rounding_closure")}
+            if moved["surface_boundary"]:
+                return {
+                    "index_jik": [int(j), int(i), int(k)],
+                    "rhs_delta": float(new - before[j, i, k]),
+                    "mapped_temperature_ulp_K": temperature_ulp,
+                    "starting_rhs_delta": base_delta,
+                    "multiplier": multiplier,
+                    "decoded_temperature_rows_moved": moved,
+                }
+    raise GateError("effect-scale surface-boundary plant is inert")
+
+
 def validate_process_record(root: Path, expected_commit: str,
                             *, plant: str | None = None) -> dict:
     """Admit all 360 passive NEMO frames, or exercise one named plant."""
@@ -442,6 +492,10 @@ def validate_process_record(root: Path, expected_commit: str,
     first = read_process_record(records[0])
     if plant == "process-sbc-ulp":
         control = _process_sbc_ulp_control(first, mask)
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": control}
+    if plant == "process-sbc-effect":
+        control = _process_sbc_effect_control(first, mask)
         return {"status": "PLANT-FIRED", "plant": plant,
                 "control": control}
     if plant == "process-trajectory-ulp":
@@ -563,6 +617,10 @@ def _process_math_self_check(failures: list[str]) -> None:
         record, np.ones(shape[:-1] + (shape[-1] - 1,), dtype=bool))
     if not control["raw_surface_rhs_increment_moved"]:
         failures.append("process surface-boundary ULP control is inert")
+    propagated = _process_sbc_effect_control(
+        record, np.ones(shape[:-1] + (shape[-1] - 1,), dtype=bool))
+    if not propagated["decoded_temperature_rows_moved"]["surface_boundary"]:
+        failures.append("process surface-boundary effect control is inert")
     print(f"  process layout {PROCESS_RECORD_BYTES} bytes and synthetic "
           "endpoint closure -- OK")
 

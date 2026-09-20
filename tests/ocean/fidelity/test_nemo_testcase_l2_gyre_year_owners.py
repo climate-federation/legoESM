@@ -114,6 +114,9 @@ def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
         record, np.ones(endpoint.shape, dtype=bool))
     assert control["raw_surface_rhs_increment_moved"]
     assert control["new_uint64"] != control["old_uint64"]
+    propagated = harness._process_sbc_effect_control(
+        record, np.ones(endpoint.shape, dtype=bool))
+    assert propagated["decoded_temperature_rows_moved"]["surface_boundary"]
 
 
 def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
@@ -133,6 +136,7 @@ def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     assert "EXPECTED_TOTAL" in run_sh and "509508000" in run_sh
     assert 'cmp -s "$SOURCE_RUN/$name" "$TARGET_RUN/$name"' in run_sh
     assert "'CALL tra_qsr'" in run_sh
+    assert "process-sbc-effect" in run_sh
     assert "process-trajectory-ulp" in run_sh
     assert "ROUND123_PROCESS_RECORD_READY" in run_sh
 
