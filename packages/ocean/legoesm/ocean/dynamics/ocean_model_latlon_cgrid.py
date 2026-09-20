@@ -11109,9 +11109,7 @@ class LatLonCGridOceanModel:
         """The vertical diffusivity and viscosity the step consumes, avt/avm.
 
         NEMO publishes ``avm`` and ``avt`` in its five-day output; ours are
-        built inside the implicit vertical solve and are not visible on the
-        tendency (for the TKE closure ``physics_fn`` deliberately returns
-        ``K_v=None`` so the solve computes the profile itself). This runs the
+        built inside the implicit vertical solve. This runs the
         SAME setup the step runs — ``_step_impl`` with the implicit mixing
         turned off to obtain the surfaced ``K_v_phys``/``tke_source`` inputs,
         then ``_apply_implicit_vertical_mixing`` on that explicit state with
@@ -11121,9 +11119,8 @@ class LatLonCGridOceanModel:
         mixing. It is the model's own code, not a re-derivation, so the number
         is directly comparable against NEMO's published field.
 
-        Returns ``(K_H, K_M)`` at interior interfaces, shape
-        ``(n_lat, n_lon, nlev-1)`` — heat diffusivity first, viscosity second.
-        No prognostic field is advanced.
+        Returns ``(K_H, K_M)`` at interior interfaces.  The private compiled-
+        bn2 hook also returns the exact ``rn2/rn2b`` bundle consumed here.
         """
         _grid = grid if grid is not None else self.grid
         _tke_n2_bundle = self._tke_step_entry_n2_bundle(state)
@@ -11140,7 +11137,7 @@ class LatLonCGridOceanModel:
         # Mirror the step's tracer solve exactly, but stop at the profile: same
         # N² (step-entry, before-advection), same carried TKE, same NOW eta,
         # same surfaced physics K.
-        return self._apply_implicit_vertical_mixing(
+        profiles = self._apply_implicit_vertical_mixing(
             state_expl, dt, surface_forcing,
             K_v_phys=K_v_phys, A_v_phys=A_v_phys,
             dt_mom=dt_mom, tke_old=_tke_old, tke_source=tke_source,
@@ -11151,6 +11148,9 @@ class LatLonCGridOceanModel:
             u_now=state.u.data, v_now=state.v.data,
             return_K_profiles=True, grid=_grid,
         )
+        if self._nemo_ws_test_hooks.bn2_intermediate:
+            return (*profiles, _tke_n2_bundle.rn2, _tke_n2_bundle.rn2b)
+        return profiles
 
     def step(self, state: LatLonCGridOceanState, dt: float,
              freshwater=None, surface_forcing=None,

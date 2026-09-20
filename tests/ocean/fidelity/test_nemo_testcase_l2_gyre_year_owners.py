@@ -338,6 +338,50 @@ def test_round126_barotropic_checkpoint_histories_keep_their_2d_layout(
             uu_b[..., None], vv_b)
 
 
+def test_round127_shapley_cube_closes_and_exposes_cancellation(harness):
+    control = harness._trigger_shapley_control()
+    assert control == {
+        "temperature": [1.0, 0.5, 0.5],
+        "salinity": [0.0, 0.5, 0.0],
+        "live_depth": [0.0, 0.0, -0.5],
+    }
+    incomplete = {subset: np.asarray(float(bool(subset & 1)))
+                  for subset in range(7)}
+    with pytest.raises(harness.GateError, match="all eight subsets"):
+        harness._trigger_shapley(incomplete)
+
+
+def test_round127_recorded_r3t_inverse_is_bit_strict(harness):
+    H = np.asarray([[1000.0, 2500.0], [4000.0, 1.0]], dtype=np.float64)
+    wet = np.asarray([[True, True], [True, False]])
+    eta_source = np.asarray([[0.125, -0.75], [1.5, 0.0]], dtype=np.float64)
+    reciprocal = np.float64(1.0) / np.where(wet, H, 1.0)
+    recorded = np.where(wet, eta_source * reciprocal, 0.0)
+    eta, control = harness._eta_for_recorded_r3t(recorded, H, wet)
+    replay = np.where(wet, eta * reciprocal, 0.0)
+    np.testing.assert_array_equal(
+        replay[wet].view(np.uint64), recorded[wet].view(np.uint64))
+    assert control["wet_cells_unequal"] == 0
+
+    impossible = recorded.copy()
+    impossible[0, 0] = np.nan
+    with pytest.raises(harness.GateError, match="could not invert"):
+        harness._eta_for_recorded_r3t(impossible, H, wet)
+
+
+def test_round127_trigger_observer_is_private_and_default_return_unchanged():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    assert "bn2_intermediate" not in card.recipe.model_config._fields
+    assert _NEMOWSRK3TestHooks().bn2_intermediate == ""
+    assert _NEMOWSRK3TestHooks(
+        bn2_intermediate="masked_rn2").bn2_intermediate == "masked_rn2"
+
+
 def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     source_patch = (PROCESS_CARD / "stprk3_stg_round123.patch").read_text()
     removed = [line for line in source_patch.splitlines()

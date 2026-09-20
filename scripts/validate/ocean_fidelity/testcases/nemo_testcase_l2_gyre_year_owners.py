@@ -3403,6 +3403,12 @@ def self_check() -> int:
         "vertical-trajectory-blind",
         lambda: _vertical_trajectory_ulp_control(
             broken_vertical, vertical_baseline, vertical_mask))
+    try:
+        control = _trigger_shapley_control()
+        print(f"  trigger Shapley owner/interaction/cancellation {control} "
+              "-- OK")
+    except Exception as error:  # noqa: BLE001
+        failures.append(f"trigger Shapley control failed: {error}")
     if failures:
         for item in failures:
             print(f"  FAILED: {item}")
@@ -3439,6 +3445,12 @@ def main(argv=None) -> int:
     parser.add_argument("--vertical-budget", type=Path, default=None,
                         help="score this NEMO vertical record against "
                              "--lego-vertical-record")
+    parser.add_argument("--trigger-state-budget", type=Path, default=None,
+                        help="attribute this NEMO EVD record's trigger "
+                             "crossings to T, S, and live depth")
+    parser.add_argument("--trigger-lego-daily-root", type=Path,
+                        default=DEFAULT_TRIGGER_LEGO_DAILY,
+                        help="independent daily legoESM core-state root")
     parser.add_argument("--reference-process-trace", type=Path,
                         default=DEFAULT_REFERENCE_PROCESS_TRACE,
                         help="admitted Round-124 process trace that a new "
@@ -3488,6 +3500,26 @@ def main(argv=None) -> int:
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
+        return 0
+    if args.trigger_state_budget is not None:
+        require(args.lego_vertical_record is not None,
+                "--trigger-state-budget needs --lego-vertical-record")
+        require(args.expect_commit is not None,
+                "--trigger-state-budget needs --expect-commit")
+        report = score_trigger_state_budget(
+            args.trigger_state_budget, args.lego_vertical_record,
+            args.trigger_lego_daily_root, args.expect_commit,
+            mesh_path=args.mesh, process_root=args.vertical_process_root,
+            plant=args.plant)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']}")
+            return 1
+        print("STATUS PASS: EVD trigger-state budget "
+              f"owner={report['ranking'][0]['owner']}")
         return 0
     if args.vertical_budget is not None:
         require(args.lego_vertical_record is not None,
@@ -3762,6 +3794,652 @@ def equal_input_step(kt: int, *, entry_root: Path = DEFAULT_ENTRY_ROOT,
         print(f"  {arm:>32s}"
               + "".join(f"{row[n]['rms']:>14.4e}" for n in FIELDS))
     return report
+
+
+# ------------------------- Round-127 EVD trigger-state magnitude budget ---
+TRIGGER_PLAYERS = ("temperature", "salinity", "live_depth")
+TRIGGER_DAY_START = 180
+TRIGGER_DAY_STOP = 240
+TRIGGER_VERTICAL_RECORD_COMMIT = (
+    "4cac617cd928007506f2de7ccb098f87e04204d1")
+TRIGGER_LEGO_TRACE_COMMIT = (
+    "34070a99e43227412a6118ecdcf31180b0e1c6d3")
+DEFAULT_TRIGGER_VERTICAL_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round125/"
+    "oracle_vertical_decomposition")
+DEFAULT_TRIGGER_LEGO_TRACE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round126/"
+    "lego_vertical_trace_v2")
+DEFAULT_TRIGGER_LEGO_DAILY = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/"
+    "gyre/lego_seed0_year")
+
+
+def _trigger_subset_label(mask: int) -> str:
+    names = [name for bit, name in enumerate(TRIGGER_PLAYERS)
+             if mask & (1 << bit)]
+    return "+".join(names) if names else "nemo"
+
+
+def _trigger_shapley(values: dict[int, np.ndarray]) -> dict[str, np.ndarray]:
+    """Exact three-player Shapley allocation for scalar or array values."""
+    require(set(values) == set(range(8)),
+            "trigger Shapley cube must contain all eight subsets")
+    shape = np.asarray(values[0]).shape
+    require(all(np.asarray(value).shape == shape for value in values.values()),
+            "trigger Shapley cube values have unequal shapes")
+    result = {}
+    # Six times each weight is 2, 1, 1, or 2 for subset sizes 0, 1, 1, 2.
+    for player in range(3):
+        bit = 1 << player
+        numerator = np.zeros(shape, dtype=np.float64)
+        for subset in range(8):
+            if subset & bit:
+                continue
+            size = int(subset.bit_count())
+            weight6 = 2 if size in (0, 2) else 1
+            numerator = numerator + weight6 * (
+                np.asarray(values[subset | bit], dtype=np.float64)
+                - np.asarray(values[subset], dtype=np.float64))
+        result[TRIGGER_PLAYERS[player]] = numerator / np.float64(6.0)
+    return result
+
+
+def _trigger_shapley_control() -> dict:
+    """Non-vacuous synthetic ownership, interaction, and cancellation arms."""
+    values = {}
+    for subset in range(8):
+        temperature = bool(subset & 1)
+        salinity = bool(subset & 2)
+        depth = bool(subset & 4)
+        values[subset] = np.asarray([
+            float(temperature),
+            float(temperature and salinity),
+            float(temperature and not depth),
+        ])
+    shares = _trigger_shapley(values)
+    expected = {
+        "temperature": np.asarray([1.0, 0.5, 0.5]),
+        "salinity": np.asarray([0.0, 0.5, 0.0]),
+        "live_depth": np.asarray([0.0, 0.0, -0.5]),
+    }
+    require(all(np.array_equal(shares[name], expected[name])
+                for name in TRIGGER_PLAYERS),
+            "synthetic trigger Shapley owner/interaction/cancellation failed")
+    closure = sum(shares.values())
+    require(np.array_equal(closure, values[7] - values[0]),
+            "synthetic trigger Shapley cube does not close")
+    return {name: shares[name].tolist() for name in TRIGGER_PLAYERS}
+
+
+def _eta_for_recorded_r3t(r3t: np.ndarray, H_bathy: np.ndarray,
+                           wet2: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Invert the recorded NEMO multiply, proving the forward bits recover."""
+    target = np.asarray(r3t, dtype=np.float64)
+    H = np.asarray(H_bathy, dtype=np.float64)
+    wet2 = np.asarray(wet2, dtype=bool)
+    require(target.shape == H.shape == wet2.shape,
+            "r3t inverse operands have unequal shapes")
+    require(bool(np.all(np.isfinite(target[wet2])))
+            and bool(np.all(np.isfinite(H[wet2]) & (H[wet2] > 0.0))),
+            "could not invert non-finite r3t or non-positive wet depth")
+    safe_H = np.where(wet2, H, 1.0)
+    reciprocal = np.float64(1.0) / safe_H
+    eta = np.where(wet2, target / reciprocal, 0.0)
+    iterations = 0
+    for iterations in range(65):
+        forward = np.where(wet2, eta * reciprocal, 0.0)
+        equal = forward.view(np.uint64) == target.view(np.uint64)
+        if bool(np.all(equal[wet2])):
+            break
+        pending = wet2 & ~equal
+        upward = np.nextafter(eta, np.inf)
+        downward = np.nextafter(eta, -np.inf)
+        up_forward = upward * reciprocal
+        down_forward = downward * reciprocal
+        up_exact = (up_forward.view(np.uint64) == target.view(np.uint64))
+        down_exact = (down_forward.view(np.uint64) == target.view(np.uint64))
+        eta = np.where(pending & up_exact, upward, eta)
+        eta = np.where(pending & ~up_exact & down_exact, downward, eta)
+        unresolved = pending & ~up_exact & ~down_exact
+        eta = np.where(unresolved & (forward < target), upward, eta)
+        eta = np.where(unresolved & (forward > target), downward, eta)
+        # A signed-zero mismatch is numerically equal but still a different
+        # recorded bit.  Copying that sign into eta makes the positive
+        # reciprocal multiplication preserve it.
+        signed_zero = unresolved & (forward == target) & (target == 0.0)
+        eta = np.where(signed_zero, target, eta)
+    forward = np.where(wet2, eta * reciprocal, 0.0)
+    unequal = int(np.count_nonzero(
+        forward[wet2].view(np.uint64) != target[wet2].view(np.uint64)))
+    require(unequal == 0,
+            f"could not invert recorded r3t multiply in {unequal} wet cells")
+    return eta, {"wet_cells_unequal": unequal,
+                 "search_iterations": int(iterations)}
+
+
+def _trigger_masks_from_K(heat_K: np.ndarray, replacement: float,
+                          interface_wet: np.ndarray) -> np.ndarray:
+    values = np.asarray(heat_K, dtype=np.float64)
+    require(values.shape == interface_wet.shape,
+            "trigger coefficient/mask shapes differ")
+    return (values == replacement) & interface_wet
+
+
+def _trigger_spatial_census(disagreement: np.ndarray,
+                            model_mask: np.ndarray,
+                            nemo_mask: np.ndarray,
+                            depth: np.ndarray,
+                            regions: dict[str, np.ndarray]) -> dict:
+    disagreement = np.asarray(disagreement, dtype=bool)
+    require(disagreement.shape == depth.shape,
+            "trigger census depth shape differs from mask")
+    depth_masks = {
+        "0_100m": depth <= 100.0,
+        "100_1000m": (depth > 100.0) & (depth <= 1000.0),
+        "below_1000m": depth > 1000.0,
+    }
+    region_names = (
+        "west_third", "interior_third", "east_third",
+        f"emp_south_le_{EMP_SPLIT_LAT_DEG}N",
+        f"emp_north_gt_{EMP_SPLIT_LAT_DEG}N",
+    )
+    return {
+        "total": int(np.count_nonzero(disagreement)),
+        "model_only": int(np.count_nonzero(model_mask & ~nemo_mask)),
+        "nemo_only": int(np.count_nonzero(nemo_mask & ~model_mask)),
+        "depth": {name: int(np.count_nonzero(disagreement & selected))
+                  for name, selected in depth_masks.items()},
+        "region": {name: int(np.count_nonzero(
+            disagreement & regions[name][..., None]))
+            for name in region_names},
+    }
+
+
+def _add_trigger_census(total: dict, row: dict) -> None:
+    total["total"] += row["total"]
+    total["model_only"] += row["model_only"]
+    total["nemo_only"] += row["nemo_only"]
+    for group in ("depth", "region"):
+        for name, value in row[group].items():
+            total[group][name] += value
+
+
+def score_trigger_state_budget(
+        nemo_vertical_root: Path, lego_trace_root: Path,
+        lego_daily_root: Path, expected_commit: str, *,
+        mesh_path: Path = DEFAULT_MESH,
+        process_root: Path = DEFAULT_PROCESS_RECORD_ROOT,
+        plant: str | None = None) -> dict:
+    """Attribute EVD trigger crossings to T, S, and live free-surface depth."""
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.eos import nemo_r3t_stretch
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "trigger-state budget refuses a dirty worktree")
+    require(stamp["commit"] == expected_commit,
+            "trigger-state budget commit differs from --expect-commit")
+    require(plant in (None, "none", "trigger-stored-mask-bit",
+                      "trigger-temperature-bit"),
+            f"unknown trigger-state plant {plant!r}")
+
+    nemo_vertical_root = Path(nemo_vertical_root)
+    lego_trace_root = Path(lego_trace_root)
+    lego_daily_root = Path(lego_daily_root)
+    admission_nemo = validate_vertical_record(
+        nemo_vertical_root, TRIGGER_VERTICAL_RECORD_COMMIT,
+        process_root=process_root)
+    admission_lego = validate_lego_vertical_trace(
+        lego_trace_root, TRIGGER_LEGO_TRACE_COMMIT, mesh_path=mesh_path)
+    _trigger_shapley_control()
+
+    card = build_nemo_testcase_card(CASE)
+    gate = _gate()
+    wet = gate.expected_masks(card)["T"]
+    wet2 = np.any(wet, axis=-1)
+    interface_wet = wet[..., :-1] & wet[..., 1:]
+    nlev = wet.shape[-1]
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            bn2_intermediate="masked_rn2"))
+    carrier_path = (nemo_vertical_root
+                    / "GYRE_OMIP_L2_P3_00001080_restart.nc")
+    carrier, _ = _gyre_checkpoint_state(card, carrier_path)
+    H_bathy = np.asarray(carrier.H_bathy.data, dtype=np.float64)
+    evd = card.recipe.model_config.physics.convection.enhanced_diffusion
+    require(evd is not None, "trigger-state budget requires active EVD")
+    threshold = float(evd.n2_threshold)
+    replacement = float(evd.K_conv)
+    lego_arrays = _load_vertical_trace_arrays(lego_trace_root)
+
+    @jax.jit
+    def production_closure(entry, forcing):
+        return model.diagnose_vertical_K(entry, card.dt_s, forcing)
+
+    @jax.jit
+    def production_stretch(eta):
+        return nemo_r3t_stretch(
+            card.recipe.z_coord, eta, carrier.H_bathy.data,
+            evaluation="nemo_reciprocal")
+
+    year = _year()
+    mesh = year.nemo_operands(mesh_path)
+    lat = np.asarray(mesh["gphit"], dtype=np.float64)
+    regions = _regions(lat, wet2)
+    raw_gdepw = np.asarray(
+        card.recipe.z_coord.nemo_gdepw_0, dtype=np.float64)
+    raw_gdepw = raw_gdepw[..., 1:nlev]
+
+    daily_rows = []
+    aggregate = {
+        name: {"bit_signed_cell_equivalents": 0.0,
+               "bit_absolute_cell_equivalents": 0.0,
+               "margin_signed_sum_s-2": 0.0,
+               "margin_abs_sum_s-2": 0.0,
+               "margin_sum_squares_s-4": 0.0,
+               "margin_samples": 0}
+        for name in TRIGGER_PLAYERS
+    }
+    endpoint_controls = {
+        "nemo_cells_unequal": 0, "lego_cells_unequal": 0,
+        "rn2_rn2b_cells_unequal": 0,
+        "r3t_stretch_cells_unequal": 0,
+    }
+    daily_records: dict[int, dict] = {}
+
+    for day in range(TRIGGER_DAY_START, TRIGGER_DAY_STOP):
+        step = STEPS_PER_DAY * day + 1
+        record = _read_vertical_record(
+            nemo_vertical_root
+            / f"oracle_trazdf_matrix_kt{step:08d}.bin", step)
+        daily_records[step] = record
+        nemo_T = _vertical_field(record, "T_Kbb_in", nlev)
+        nemo_S = _vertical_field(record, "S_Kbb_in", nlev)
+        nemo_r3t = _vertical_field(record, "r3t_Kbb")
+        nemo_eta, inverse = _eta_for_recorded_r3t(
+            nemo_r3t, H_bathy, wet2)
+        recovered_stretch = np.asarray(
+            production_stretch(jnp.asarray(nemo_eta)), dtype=np.float64)
+        expected_stretch = np.maximum(
+            np.float64(1.0) + nemo_r3t, np.float64(1.0e-6))
+        stretch_unequal = int(np.count_nonzero(
+            recovered_stretch[wet2].view(np.uint64)
+            != expected_stretch[wet2].view(np.uint64)))
+        endpoint_controls["r3t_stretch_cells_unequal"] += stretch_unequal
+        require(stretch_unequal == 0,
+                f"day {day}: exact r3t inverse changed {stretch_unequal} "
+                "production stretch bits")
+
+        lego = _load_npz(lego_daily_root / f"day{day:03d}.npz")
+        nemo_values = {
+            "temperature": nemo_T, "salinity": nemo_S,
+            "live_depth": nemo_eta,
+        }
+        lego_values = {
+            "temperature": lego["T"], "salinity": lego["S"],
+            "live_depth": lego["ssh"],
+        }
+        base = carrier._replace(
+            T=carrier.T.replace(data=jnp.asarray(nemo_T)),
+            S=carrier.S.replace(data=jnp.asarray(nemo_S)),
+            eta=carrier.eta.replace(data=jnp.asarray(nemo_eta)),
+        )
+        _, surface = gate._surface_forcings(card, base, step)
+        rn2_by_subset = {}
+        rn2b_by_subset = {}
+        masks = {}
+        margins = {}
+        for subset in range(8):
+            values = {
+                name: (lego_values[name] if subset & (1 << bit)
+                       else nemo_values[name])
+                for bit, name in enumerate(TRIGGER_PLAYERS)
+            }
+            state = carrier._replace(
+                T=carrier.T.replace(
+                    data=jnp.asarray(values["temperature"])),
+                S=carrier.S.replace(data=jnp.asarray(values["salinity"])),
+                eta=carrier.eta.replace(
+                    data=jnp.asarray(values["live_depth"])),
+            )
+            _, _, rn2, rn2b = production_closure(state, surface)
+            rn2 = np.asarray(rn2, dtype=np.float64)
+            rn2b = np.asarray(rn2b, dtype=np.float64)
+            unequal = _different_cells(rn2, rn2b, interface_wet)
+            endpoint_controls["rn2_rn2b_cells_unequal"] += unequal
+            require(unequal == 0,
+                    f"day {day} subset {_trigger_subset_label(subset)}: "
+                    f"rn2/rn2b differ in {unequal} wet interfaces")
+            rn2_by_subset[subset] = rn2
+            rn2b_by_subset[subset] = rn2b
+            masks[subset] = ((np.minimum(rn2, rn2b) <= threshold)
+                             & interface_wet)
+            margins[subset] = np.minimum(rn2, rn2b) - threshold
+
+        nemo_heat = _vertical_field(record, "avt")[:, :, 1:nlev]
+        lego_heat = np.asarray(
+            lego_arrays["heat_K"][step - PROCESS_START_STEP])
+        nemo_record_mask = _trigger_masks_from_K(
+            nemo_heat, replacement, interface_wet)
+        lego_record_mask = _trigger_masks_from_K(
+            lego_heat, replacement, interface_wet)
+        nemo_endpoint = int(np.count_nonzero(masks[0] != nemo_record_mask))
+        lego_endpoint = int(np.count_nonzero(masks[7] != lego_record_mask))
+        endpoint_controls["nemo_cells_unequal"] += nemo_endpoint
+        endpoint_controls["lego_cells_unequal"] += lego_endpoint
+        require(nemo_endpoint == 0,
+                f"day {day}: production NEMO-input mask differs from record "
+                f"in {nemo_endpoint} cells")
+        require(lego_endpoint == 0,
+                f"day {day}: production model-input mask differs from trace "
+                f"in {lego_endpoint} cells")
+
+        if day == TRIGGER_DAY_START and plant == "trigger-stored-mask-bit":
+            planted = np.array(lego_record_mask, copy=True)
+            index = tuple(int(x) for x in np.argwhere(interface_wet)[0])
+            planted[index] = ~planted[index]
+            moved = int(np.count_nonzero(masks[7] != planted))
+            require(moved == 1,
+                    f"stored-mask plant moved {moved} registered bits")
+            return {
+                "format": "gyre-trigger-state-budget-v1",
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": {"index_jik": list(index),
+                            "registered_bits_moved": moved,
+                            "clean_endpoint_cells_unequal": lego_endpoint},
+                "worktree": stamp,
+            }
+
+        if day == TRIGGER_DAY_START and plant == "trigger-temperature-bit":
+            active = masks[0] & interface_wet
+            candidates = np.argwhere(active)
+            if candidates.size == 0:
+                candidates = np.argwhere(interface_wet)
+            candidate_margins = np.abs(margins[0][tuple(candidates.T)])
+            j, i, k = (int(x) for x in candidates[
+                int(np.argmin(candidate_margins))])
+            baseline_T = np.asarray(nemo_T, dtype=np.float64)
+            selected = None
+            for exponent in range(-48, 9):
+                for sign in (1.0, -1.0):
+                    planted_T = np.array(baseline_T, copy=True)
+                    delta = np.float64(sign * (2.0 ** exponent))
+                    planted_T[j, i, k] = baseline_T[j, i, k] + delta
+                    if (planted_T[j, i, k].view(np.uint64)
+                            == baseline_T[j, i, k].view(np.uint64)):
+                        continue
+                    planted_state = base._replace(
+                        T=base.T.replace(data=jnp.asarray(planted_T)))
+                    _, _, planted_rn2, planted_rn2b = production_closure(
+                        planted_state, surface)
+                    planted_mask = (
+                        np.minimum(np.asarray(planted_rn2),
+                                   np.asarray(planted_rn2b)) <= threshold
+                    ) & interface_wet
+                    moved = int(np.count_nonzero(planted_mask != masks[0]))
+                    if moved:
+                        selected = {
+                            "temperature_index_jik": [j, i, k],
+                            "temperature_before_C": float(baseline_T[j, i, k]),
+                            "temperature_delta_C": float(delta),
+                            "trigger_bits_moved": moved,
+                        }
+                        break
+                if selected is not None:
+                    break
+            require(selected is not None,
+                    "temperature plant could not flip a production trigger")
+            _, _, repeat_rn2, repeat_rn2b = production_closure(base, surface)
+            repeat_mask = (
+                np.minimum(np.asarray(repeat_rn2),
+                           np.asarray(repeat_rn2b)) <= threshold
+            ) & interface_wet
+            selected["untouched_nemo_bits_moved"] = int(np.count_nonzero(
+                repeat_mask != masks[0]))
+            require(selected["untouched_nemo_bits_moved"] == 0,
+                    "temperature plant changed the untouched NEMO arm")
+            return {
+                "format": "gyre-trigger-state-budget-v1",
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": selected, "worktree": stamp,
+            }
+
+        f_values = {subset: (masks[subset] != nemo_record_mask).astype(
+            np.float64) for subset in range(8)}
+        bit_shares = _trigger_shapley(f_values)
+        margin_shares = _trigger_shapley(margins)
+        bit_closure = sum(bit_shares.values()) - (f_values[7] - f_values[0])
+        margin_closure = (sum(margin_shares.values())
+                          - (margins[7] - margins[0]))
+        require(float(np.max(np.abs(bit_closure[interface_wet])))
+                <= 4.0 * np.finfo(np.float64).eps,
+                f"day {day}: bit Shapley cube does not close")
+        require(float(np.max(np.abs(margin_closure[interface_wet])))
+                <= 16.0 * np.finfo(np.float64).eps * max(
+                    1.0, float(np.max(np.abs(
+                        (margins[7] - margins[0])[interface_wet])))),
+                f"day {day}: margin Shapley cube does not close")
+        full_mismatch = masks[7] != nemo_record_mask
+        player_rows = {}
+        for name in TRIGGER_PLAYERS:
+            bit_values = bit_shares[name][interface_wet]
+            margin_values = margin_shares[name][full_mismatch]
+            row = {
+                "bit_signed_cell_equivalents": float(np.sum(bit_values)),
+                "bit_absolute_cell_equivalents": float(
+                    np.sum(np.abs(bit_values))),
+                "margin_signed_sum_s-2": float(np.sum(margin_values)),
+                "margin_abs_sum_s-2": float(np.sum(np.abs(margin_values))),
+                "margin_rms_s-2": (float(np.sqrt(np.mean(
+                    margin_values ** 2))) if margin_values.size else 0.0),
+            }
+            player_rows[name] = row
+            aggregate[name]["bit_signed_cell_equivalents"] += row[
+                "bit_signed_cell_equivalents"]
+            aggregate[name]["bit_absolute_cell_equivalents"] += row[
+                "bit_absolute_cell_equivalents"]
+            aggregate[name]["margin_signed_sum_s-2"] += row[
+                "margin_signed_sum_s-2"]
+            aggregate[name]["margin_abs_sum_s-2"] += row[
+                "margin_abs_sum_s-2"]
+            aggregate[name]["margin_sum_squares_s-4"] += float(np.sum(
+                margin_values ** 2))
+            aggregate[name]["margin_samples"] += int(margin_values.size)
+        disagreement_count = int(np.count_nonzero(full_mismatch))
+        abs_total = sum(row["bit_absolute_cell_equivalents"]
+                        for row in player_rows.values())
+        daily_rows.append({
+            "day": day, "entry_step": step,
+            "full_trigger_disagreement_cells": disagreement_count,
+            "model_only_cells": int(np.count_nonzero(
+                masks[7] & ~nemo_record_mask)),
+            "nemo_only_cells": int(np.count_nonzero(
+                nemo_record_mask & ~masks[7])),
+            "players": player_rows,
+            "absolute_shapley_total": abs_total,
+            "cancellation_ratio": (
+                abs_total / disagreement_count if disagreement_count else 0.0),
+            "bit_closure_max_abs": float(np.max(
+                np.abs(bit_closure[interface_wet]))),
+            "margin_closure_max_abs_s-2": float(np.max(
+                np.abs(margin_closure[interface_wet]))),
+            "r3t_inverse": inverse,
+        })
+
+    require(plant in (None, "none"),
+            f"plant {plant!r} did not fire at day {TRIGGER_DAY_START}")
+    require(all(value == 0 for value in endpoint_controls.values()),
+            f"trigger endpoint controls moved: {endpoint_controls}")
+    inherited = {row["day"]: row["full_trigger_disagreement_cells"]
+                 for row in daily_rows}
+    require(inherited[180] == 15 and inherited[210] == 11,
+            "inherited trigger disagreement headlines are not 15/11")
+
+    ranking = []
+    for name in TRIGGER_PLAYERS:
+        row = dict(aggregate[name])
+        samples = row.pop("margin_samples")
+        squares = row.pop("margin_sum_squares_s-4")
+        row["owner"] = name
+        row["continuous_margin_rms_s-2"] = (
+            float(np.sqrt(squares / samples)) if samples else 0.0)
+        ranking.append(row)
+    ranking.sort(key=lambda row: row["bit_absolute_cell_equivalents"],
+                 reverse=True)
+    ranking_abs_total = sum(
+        row["bit_absolute_cell_equivalents"] for row in ranking)
+    for row in ranking:
+        row["fraction_of_absolute_shapley"] = (
+            row["bit_absolute_cell_equivalents"] / ranking_abs_total
+            if ranking_abs_total else 0.0)
+
+    # Direct per-step birth/census.  This is deliberately the admitted stored
+    # trajectory, independent of the daily hybrid attribution above.
+    timeline = []
+    interval_census = None
+    first_difference = None
+    for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1):
+        record = daily_records.get(step)
+        if record is None:
+            record = _read_vertical_record(
+                nemo_vertical_root
+                / f"oracle_trazdf_matrix_kt{step:08d}.bin", step)
+        nemo_heat = _vertical_field(record, "avt")[:, :, 1:nlev]
+        lego_heat = np.asarray(
+            lego_arrays["heat_K"][step - PROCESS_START_STEP])
+        nemo_mask = _trigger_masks_from_K(
+            nemo_heat, replacement, interface_wet)
+        lego_mask = _trigger_masks_from_K(
+            lego_heat, replacement, interface_wet)
+        disagreement = nemo_mask != lego_mask
+        r3t = _vertical_field(record, "r3t_Kbb")
+        depth = raw_gdepw * (np.float64(1.0) + r3t[..., None])
+        census = _trigger_spatial_census(
+            disagreement, lego_mask, nemo_mask, depth, regions)
+        timeline.append({"step": step,
+                         "day": (step - 1) / STEPS_PER_DAY,
+                         **census})
+        if interval_census is None:
+            interval_census = {
+                "total": 0, "model_only": 0, "nemo_only": 0,
+                "depth": {name: 0 for name in census["depth"]},
+                "region": {name: 0 for name in census["region"]},
+            }
+        _add_trigger_census(interval_census, census)
+        if first_difference is None and census["total"]:
+            first_difference = timeline[-1]
+    require(first_difference is not None,
+            "trigger timeline has no differing cell")
+
+    def day_prediction(day: int) -> dict:
+        row = next(item for item in daily_rows if item["day"] == day)
+        ordered = sorted(
+            TRIGGER_PLAYERS,
+            key=lambda name: row["players"][name][
+                "bit_absolute_cell_equivalents"], reverse=True)
+        total = row["absolute_shapley_total"]
+        return {
+            "order": ordered,
+            "temperature_largest": ordered[0] == "temperature",
+            "salinity_second": ordered[1] == "salinity",
+            "temperature_at_least_half": (
+                row["players"]["temperature"][
+                    "bit_absolute_cell_equivalents"] >= 0.5 * total),
+            "eta_at_most_one": (
+                row["players"]["live_depth"][
+                    "bit_absolute_cell_equivalents"] <= 1.0),
+        }
+
+    interval_order = [row["owner"] for row in ranking]
+    first_depth = max(first_difference["depth"],
+                      key=first_difference["depth"].get)
+    first_region_third = max(
+        ("west_third", "interior_third", "east_third"),
+        key=first_difference["region"].get)
+    first_latitude = max(
+        (f"emp_south_le_{EMP_SPLIT_LAT_DEG}N",
+         f"emp_north_gt_{EMP_SPLIT_LAT_DEG}N"),
+        key=first_difference["region"].get)
+    predictions = {
+        "day180": day_prediction(180),
+        "day210": day_prediction(210),
+        "interval_order": interval_order,
+        "interval_temperature_largest": interval_order[0] == "temperature",
+        "interval_salinity_second": interval_order[1] == "salinity",
+        "interval_temperature_at_least_half": (
+            ranking[0]["owner"] == "temperature"
+            and ranking[0]["fraction_of_absolute_shapley"] >= 0.5),
+        "first_difference_step_is_1081": (
+            first_difference["step"] == PROCESS_START_STEP),
+        "first_depth_is_0_100m": first_depth == "0_100m",
+        "first_region_is_west_third": first_region_third == "west_third",
+        "first_latitude_is_south": first_latitude == (
+            f"emp_south_le_{EMP_SPLIT_LAT_DEG}N"),
+    }
+    predictions["all_frozen_magnitude_predictions_confirmed"] = all((
+        predictions["day180"]["temperature_largest"],
+        predictions["day180"]["salinity_second"],
+        predictions["day180"]["temperature_at_least_half"],
+        predictions["day180"]["eta_at_most_one"],
+        predictions["day210"]["temperature_largest"],
+        predictions["day210"]["salinity_second"],
+        predictions["day210"]["temperature_at_least_half"],
+        predictions["day210"]["eta_at_most_one"],
+        predictions["interval_temperature_largest"],
+        predictions["interval_salinity_second"],
+        predictions["interval_temperature_at_least_half"],
+        predictions["first_difference_step_is_1081"],
+        predictions["first_depth_is_0_100m"],
+        predictions["first_region_is_west_third"],
+        predictions["first_latitude_is_south"],
+    ))
+    return {
+        "format": "gyre-trigger-state-budget-v1", "status": "PASS",
+        "case": CASE, "execution": "production-step jax.jit",
+        "days": [TRIGGER_DAY_START, TRIGGER_DAY_STOP - 1],
+        "steps": [PROCESS_START_STEP, PROCESS_END_STEP],
+        "n2_threshold_s-2": threshold,
+        "evd_replacement_m2_s": replacement,
+        "admission": {
+            "nemo_record": admission_nemo["status"],
+            "lego_trace": admission_lego["status"],
+            "nemo_producer_commit": TRIGGER_VERTICAL_RECORD_COMMIT,
+            "lego_producer_commit": TRIGGER_LEGO_TRACE_COMMIT,
+        },
+        "endpoint_controls": endpoint_controls,
+        "inherited_disagreements": {"day180": inherited[180],
+                                     "day210": inherited[210]},
+        "daily_rows": daily_rows, "ranking": ranking,
+        "full_interval_trigger_disagreement_visits": int(sum(
+            row["full_trigger_disagreement_cells"] for row in daily_rows)),
+        "full_interval_cancellation_ratio": (
+            ranking_abs_total / sum(
+                row["full_trigger_disagreement_cells"]
+                for row in daily_rows)
+            if any(row["full_trigger_disagreement_cells"]
+                   for row in daily_rows) else 0.0),
+        "timeline": timeline,
+        "first_difference": first_difference,
+        "interval_spatial_census": interval_census,
+        "predictions": predictions,
+        "scope": {
+            "true_birth_before_day180": "UNMEASURED",
+            "DINO": "NO-PRODUCTION-CHANGE",
+            "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+            "OVERFLOW": "NO-PRODUCTION-CHANGE",
+            "ORCA2": "UNMEASURED-WITH-SPEC",
+        },
+        "worktree": stamp,
+    }
 
 
 if __name__ == "__main__":
