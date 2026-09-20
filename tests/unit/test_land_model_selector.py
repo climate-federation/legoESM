@@ -183,3 +183,68 @@ def test_an_explicit_negative_switch_is_not_silently_overridden():
     a = _args(land_model="multilayer")
     assert mod._resolve_land_model(a, None, ["--land-model", "multilayer"]) == "multilayer"
     assert a.use_multilayer_land is True
+
+
+# --------------------------------------------------------------------------
+# The AIMIP lat-lon lane, which had no land flags at all
+# --------------------------------------------------------------------------
+
+def _run_aimip_latlon():
+    import importlib.util
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "_run_aimip_latlon_for_test",
+        repo / "scripts" / "run" / "run_aimip_latlon.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_aimip_latlon_exposes_a_land_model_flag_defaulting_to_today():
+    """The lane had NO land flag, so its land model came purely from defaults.
+
+    It builds its ExperimentConfig from a fixed argv carrying no land flags and
+    no --topography, so it resolved to "none" — no land surface model at all.
+    The flag must default to exactly that, because changing what existing AIMIP
+    runs do is a separate decision from making the choice visible.
+    """
+    mod = _run_aimip_latlon()
+    args = mod.build_parser().parse_args([])
+    assert args.land_model == "none"
+    assert args.land_mask_file == ""
+    assert land_model_switches(args.land_model) == dict(
+        slab_land_active=False, use_multilayer_land=False)
+
+
+def test_aimip_latlon_accepts_the_other_two_models():
+    mod = _run_aimip_latlon()
+    for name in ("slab", "multilayer"):
+        assert mod.build_parser().parse_args(
+            ["--land-model", name]).land_model == name
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args(["--land-model", "bucket"])
+
+
+def test_aimip_latlon_applies_the_shared_mapping_not_its_own():
+    """Both drivers must resolve the names through the same function.
+
+    Spelling the switches out a second time in this driver is how the two
+    definitions drift, which is the defect the selector exists to remove. Read
+    the source: build_latlon_config must call land_model_switches.
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    src = Path(inspect.getsourcefile(_run_aimip_latlon())).read_text()
+    fn = next((n for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.FunctionDef)
+               and n.name == "build_latlon_config"), None)
+    assert fn is not None, "build_latlon_config not found"
+    called = {n.func.id for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "land_model_switches" in called, (
+        "build_latlon_config does not route --land-model through "
+        "legoesm.land.config.land_model_switches; a second hand-written "
+        "mapping will drift from run_amip's")
