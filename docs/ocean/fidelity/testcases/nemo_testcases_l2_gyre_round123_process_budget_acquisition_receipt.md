@@ -240,12 +240,49 @@ record.
 
 ## Independent review
 
-Pending the required read-only Codex pass over the complete Round-123 diff.
+The required command was run as `codex exec --sandbox read-only` against the
+complete incoming-tip-to-receipt diff with an adversarial prompt covering the
+stop verdict, existing-record audit, field list, byte arithmetic, passive
+admission, projection algebra, ULP-control retraction, citations and the lack
+of a landing table.  Its verbatim terminal result was:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+codex_exit_code=1
+```
+
+Independent review unavailable in-sandbox.  No `SHIP` or `DO NOT SHIP`
+verdict is fabricated; the complete log is `round123/codex_review.log`.
 
 ## Final verification amendment
 
-Pending the clean-tree citation gate, its shifted-citation plant and the final
-focused suites after this receipt is committed.
+The clean-tree receipt citation gate found all six compiled-source citations,
+no unmapped citations, no failures and no failing map entries.  Its literal
+verdict was `status=PASS`.  The shifted comma-citation plant moved all three
+line numbers by two, found the real first symbol at line 812, emitted
+`SYMBOL-NOT-AT-LINE`, printed `status=FAIL`, and exited 1.  Thus the new
+compiled-order citations are plant-controlled rather than merely present in a
+map.
+
+The final focused owner, citation and worktree-stamp suites ended literally:
+
+```text
+============================= 39 passed in 32.62s ==============================
+```
+
+The earlier failed focused attempt is retained in
+`focused_tests_clean_pre_amendment.log`: it caught a test that applied the
+swallowed-ULP assertion to the 14,400-second layout fixture instead of the
+preregistered unit-timestep counterexample.  Commit `026bffea7e75` corrected
+the test input; no gate or scientific criterion was weakened.  The green
+rerun is `focused_tests_clean.log`.
+
+The whole ocean test trees were not spent: no production implementation,
+recipe or trajectory changed, and the focused set directly covers every
+changed executable Python path, both synthetic record plants, source-card
+static assertions, compiled-citation mapping and clean-tree stamping.
 
 ## OPEN — exact handoff to round 124
 
