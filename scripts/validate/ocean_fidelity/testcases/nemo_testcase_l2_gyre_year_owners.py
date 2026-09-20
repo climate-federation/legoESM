@@ -21,6 +21,11 @@ MODES
                      only one of the three that can name a LEADING FIELD.
   --process-record   validates the Round-123 compiled-order NEMO process
                      frames for steps 1081..1440 before they may be scored.
+  --produce-process-trace
+                     runs legoESM independently from rest through step 1440
+                     and records the matching production-JIT boundaries.
+  --process-budget   admits both traces, closes day 180 -> 240, and ranks the
+                     signed day-240 temperature carry by process.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -44,6 +49,9 @@ PLANTS (each exits NON-ZERO; each is exercised by the committed unit test)
   process-sbc-effect       moves post-SBC RHS by the minimum searched amount
                            that survives into a decoded temperature row
   process-trajectory-ulp   breaks the first Taa-to-next-Tbb chain by one ULP
+  lego-process-stamp       supplies a wrong legoESM producer commit
+  lego-process-ulp         moves one decoded legoESM process boundary by 1 ULP
+  lego-process-effect      exercises the stored full-production effect plant
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -123,6 +131,13 @@ PROCESS_ROWS = (
     "geometry", "advection", "surface_boundary", "shortwave",
     "lateral_diffusion", "vertical_diffusion",
 )
+LEGO_PROCESS_FIELDS = (
+    "Tbb", "q_Kbb", "q_Kmm", "q_Kaa", "B0", "Badv", "Bsbc", "Bqsr",
+    "Bldf", "Bpre", "Taa",
+)
+LEGO_PROCESS_TRACE_STEPS = PROCESS_END_STEP - PROCESS_START_STEP + 1
+DEFAULT_IMMUTABLE_GYRE_YEAR = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre")
 # The geographic stress rotation cannot be a BIT-EXACT row: recovering the
 # native pair from tau_x/tau_y in binary64 costs about 1e-17 Pa because
 # cos^2 + sin^2 is not exactly 1.  So it is scored as a DISCRIMINATION instead
@@ -592,6 +607,673 @@ def validate_process_record(root: Path, expected_commit: str,
     }
 
 
+# ----------------------------------- independent legoESM production trace ---
+def lego_process_temperature_rows(frame: dict) -> dict[str, np.ndarray]:
+    """Decode one production-JIT legoESM stage-3 process frame.
+
+    ``Bpre`` is the actual combined content handed to the implicit solve;
+    ``Bldf`` is the same components accumulated one-by-one in NEMO's compiled
+    order.  Their association difference is retained in ``rounding_closure``
+    rather than attributed to vertical diffusion.
+    """
+    tbb = np.asarray(frame["Tbb"], dtype=np.float64)
+    taa = np.asarray(frame["Taa"], dtype=np.float64)
+    rows = {
+        "geometry": np.asarray(frame["B0"], dtype=np.float64) - tbb,
+        "advection": (np.asarray(frame["Badv"], dtype=np.float64)
+                      - np.asarray(frame["B0"], dtype=np.float64)),
+        "surface_boundary": (np.asarray(frame["Bsbc"], dtype=np.float64)
+                             - np.asarray(frame["Badv"], dtype=np.float64)),
+        "shortwave": (np.asarray(frame["Bqsr"], dtype=np.float64)
+                      - np.asarray(frame["Bsbc"], dtype=np.float64)),
+        "lateral_diffusion": (np.asarray(frame["Bldf"], dtype=np.float64)
+                              - np.asarray(frame["Bqsr"], dtype=np.float64)),
+        "vertical_diffusion": (taa
+                               - np.asarray(frame["Bpre"], dtype=np.float64)),
+    }
+    combined = np.zeros_like(tbb)
+    for name in PROCESS_ROWS:
+        combined = combined + rows[name]
+    rows["rounding_closure"] = (taa - tbb) - combined
+    return rows
+
+
+def _state_bit_mismatches(left, right) -> int:
+    """Count unequal bytes across two state pytrees, including signed zero."""
+    import jax
+
+    left_leaves, left_tree = jax.tree_util.tree_flatten(left)
+    right_leaves, right_tree = jax.tree_util.tree_flatten(right)
+    require(left_tree == right_tree, "production state pytree structures differ")
+    mismatches = 0
+    for number, (left_leaf, right_leaf) in enumerate(
+            zip(left_leaves, right_leaves, strict=True)):
+        a = np.asarray(left_leaf)
+        b = np.asarray(right_leaf)
+        require(a.shape == b.shape and a.dtype == b.dtype,
+                f"production state leaf {number} shape/dtype differs")
+        mismatches += int(np.count_nonzero(
+            a.view(np.uint8).reshape(-1) != b.view(np.uint8).reshape(-1)))
+    return mismatches
+
+
+def _trace_frame(trace) -> dict[str, np.ndarray]:
+    b0, badv, bsbc, bqsr, bldf, bpre = trace.boundaries
+    return {
+        "Tbb": np.asarray(trace.Tbb, dtype=np.float64),
+        "q_Kbb": np.asarray(trace.q_Kbb, dtype=np.float64),
+        "q_Kmm": np.asarray(trace.q_Kmm, dtype=np.float64),
+        "q_Kaa": np.asarray(trace.q_Kaa, dtype=np.float64),
+        "B0": np.asarray(b0, dtype=np.float64),
+        "Badv": np.asarray(badv, dtype=np.float64),
+        "Bsbc": np.asarray(bsbc, dtype=np.float64),
+        "Bqsr": np.asarray(bqsr, dtype=np.float64),
+        "Bldf": np.asarray(bldf, dtype=np.float64),
+        "Bpre": np.asarray(bpre, dtype=np.float64),
+        "Taa": np.asarray(trace.Taa, dtype=np.float64),
+    }
+
+
+def _trace_effect_control(control_trace, planted_trace, mask: np.ndarray,
+                          index: tuple[int, int, int], delta: float) -> dict:
+    control = _trace_frame(control_trace)
+    planted = _trace_frame(planted_trace)
+    moved = {}
+    for name in LEGO_PROCESS_FIELDS:
+        active_mask = mask if control[name].ndim == 3 else np.any(mask, axis=-1)
+        moved[name] = _different_cells(
+            control[name], planted[name], active_mask)
+    state_mismatches = _state_bit_mismatches(
+        control_trace.state_after, planted_trace.state_after)
+    j, i, k = index
+    expected = DT_S * delta * control["q_Kmm"][j, i] / control["q_Kaa"][j, i]
+    observed = planted["Bsbc"][j, i, k] - control["Bsbc"][j, i, k]
+    scale_ulp = abs(float(np.spacing(control["Bsbc"][j, i, k])))
+    require(all(moved[name] == 0 for name in
+                ("Tbb", "q_Kbb", "q_Kmm", "q_Kaa", "B0", "Badv")),
+            "production effect plant moved an upstream process boundary")
+    require(all(moved[name] > 0 for name in
+                ("Bsbc", "Bqsr", "Bldf", "Bpre", "Taa")),
+            "production effect plant failed to reach a downstream boundary")
+    require(state_mismatches == 0,
+            "write-only effect plant changed the separately compiled state")
+    require(abs(observed - expected) <= 8.0 * max(scale_ulp, np.finfo(float).tiny),
+            "surface effect plant does not match dt*qmm/qaa*delta")
+    return {
+        "index_jik": list(index), "rate_delta_K_per_s": delta,
+        "expected_Bsbc_delta_K": float(expected),
+        "observed_Bsbc_delta_K": float(observed),
+        "Bsbc_delta_abs_error_K": float(abs(observed - expected)),
+        "moved_cells": moved,
+        "carried_state_unequal_bytes": state_mismatches,
+        "status": "PLANT-FIRED",
+    }
+
+
+def _write_trace_manifest(root: Path, paths: list[Path], commit: str) -> dict:
+    rows = {path.name: _sha256(path) for path in paths}
+    manifest = root / "trace_files.sha256"
+    manifest.write_text("".join(
+        f"{digest}  {name}\n" for name, digest in sorted(rows.items())))
+    stamp = root / "trace_files.stamp"
+    stamp.write_text(f"{_sha256(manifest)} {commit} {manifest.name}\n")
+    return rows
+
+
+def produce_lego_process_trace(root: Path, expected_commit: str,
+                               *, mesh_path: Path = DEFAULT_MESH) -> dict:
+    """Run seed zero independently from rest and write steps 1081--1440."""
+    _policy()
+    from numpy.lib.format import open_memmap
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"process trace requires a clean tree, dirty={stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            f"trace commit {stamp['commit']} != --expect-commit "
+            f"{expected_commit}")
+    root = Path(root)
+    require(not root.exists(),
+            f"trace root already exists; refusing overwrite: {root}")
+    root.mkdir(parents=True)
+
+    year = _year()
+    gate = _gate()
+    card = build_nemo_testcase_card(CASE)
+    require(card.dt_s == DT_S, f"card dt {card.dt_s} != {DT_S}")
+    mesh = year.nemo_operands(mesh_path)
+    operands = year.reconcile_operands(card, mesh)
+    state = card.recipe.initial_state
+    require(float(np.max(np.abs(np.asarray(state.T.data)
+                                - np.asarray(card.recipe.initial_state.T.data))))
+            == 0.0, "seed-zero initial state was modified")
+    masks = gate.expected_masks(card)
+    wet = masks["T"]
+
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_process_trace=()))
+    plant_index = tuple(int(x) for x in np.argwhere(wet)[0])
+    plant_delta = float(np.ldexp(1.0, -40))
+    plant_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(*plant_index, plant_delta)))
+
+    shape3 = tuple(int(x) for x in np.asarray(state.T.data).shape)
+    shape2 = shape3[:2]
+    maps = {}
+    paths = []
+    for name in LEGO_PROCESS_FIELDS:
+        shape = ((LEGO_PROCESS_TRACE_STEPS,) + shape2
+                 if name.startswith("q_")
+                 else (LEGO_PROCESS_TRACE_STEPS,) + shape3)
+        path = root / f"{name}.npy"
+        paths.append(path)
+        maps[name] = open_memmap(path, mode="w+", dtype="<f8", shape=shape)
+
+    snapshot_root = root / "lego_seed0"
+    snapshot_root.mkdir()
+    started = time.time()
+    total_unequal_bytes = 0
+    max_step_unequal_bytes = 0
+    effect_control = None
+    for completed in range(PROCESS_END_STEP):
+        kt = completed + 1
+        freshwater, surface = gate._surface_forcings(card, state, kt)
+        if kt < PROCESS_START_STEP:
+            state = ordinary_model.step(
+                state, dt=card.dt_s, freshwater=freshwater,
+                surface_forcing=surface)
+            if kt == PROCESS_START_STEP - 1:
+                np.savez(snapshot_root / "day180.npz",
+                         **year._snapshot(state, gate))
+            continue
+
+        trace = trace_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface)
+        reference = ordinary_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface)
+        unequal_bytes = _state_bit_mismatches(trace.state_after, reference)
+        total_unequal_bytes += unequal_bytes
+        max_step_unequal_bytes = max(max_step_unequal_bytes, unequal_bytes)
+        require(unequal_bytes == 0,
+                f"step {kt}: diagnostic carried state differs from ordinary "
+                f"production by {unequal_bytes} bytes")
+        if kt == PROCESS_START_STEP:
+            planted = plant_model.step(
+                state, dt=card.dt_s, freshwater=freshwater,
+                surface_forcing=surface)
+            effect_control = _trace_effect_control(
+                trace, planted, wet, plant_index, plant_delta)
+        frame = _trace_frame(trace)
+        index = kt - PROCESS_START_STEP
+        for name in LEGO_PROCESS_FIELDS:
+            require(frame[name].shape == maps[name].shape[1:],
+                    f"step {kt} {name}: shape {frame[name].shape}, expected "
+                    f"{maps[name].shape[1:]}")
+            require(np.all(np.isfinite(frame[name])),
+                    f"step {kt} {name}: non-finite trace value")
+            maps[name][index] = frame[name]
+        state = reference
+        if kt % 60 == 0:
+            print(f"  lego process trace step {kt:4d}  "
+                  f"{time.time() - started:7.1f} s", flush=True)
+
+    np.savez(snapshot_root / "day240.npz", **year._snapshot(state, gate))
+    for array in maps.values():
+        array.flush()
+    del maps
+    require(effect_control is not None, "production effect plant never ran")
+    metadata = {
+        "format": "gyre-legoesm-process-trace-v1", "case": CASE,
+        "producer_commit": expected_commit,
+        "steps": [PROCESS_START_STEP, PROCESS_END_STEP],
+        "record_count": LEGO_PROCESS_TRACE_STEPS,
+        "dt_s": DT_S, "seed": 0, "platform": "cpu",
+        "precision": "fp64/libm", "production_entry": "model.step/_step_jitted",
+        "shape_3d": list(shape3), "shape_2d": list(shape2),
+        "fields": list(LEGO_PROCESS_FIELDS),
+        "carried_state_unequal_bytes_total": total_unequal_bytes,
+        "carried_state_unequal_bytes_max_step": max_step_unequal_bytes,
+        "effect_control": effect_control, "operands": operands,
+        "wall_seconds": time.time() - started, "worktree": stamp,
+    }
+    metadata_path = root / "manifest.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+    paths.extend([
+        snapshot_root / "day180.npz", snapshot_root / "day240.npz",
+        metadata_path,
+    ])
+    file_hashes = _write_trace_manifest(root, paths, expected_commit)
+    report = dict(metadata)
+    report["root"] = str(root)
+    report["trace_files_sha256"] = file_hashes
+    print(f"STATUS PASS: legoESM process trace {LEGO_PROCESS_TRACE_STEPS} "
+          f"frames; carried state unequal bytes {total_unequal_bytes}")
+    return report
+
+
+def _trace_file_manifest(root: Path) -> dict[str, str]:
+    path = root / "trace_files.sha256"
+    require(path.is_file(), f"missing {path.name}")
+    rows = {}
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        words = line.split()
+        require(len(words) == 2 and re.fullmatch(
+            r"[0-9a-f]{64}", words[0]) is not None,
+            f"{path.name}:{number}: malformed row")
+        name = Path(words[1]).name
+        require(name not in rows, f"{path.name}: duplicate {name}")
+        rows[name] = words[0]
+    return rows
+
+
+def _check_trace_stamp(root: Path, expected_commit: str) -> None:
+    manifest = root / "trace_files.sha256"
+    stamp = root / "trace_files.stamp"
+    require(stamp.is_file(), f"missing {stamp.name}")
+    words = stamp.read_text().split()
+    require(len(words) == 3, f"{stamp.name}: malformed stamp")
+    require(words[0] == _sha256(manifest),
+            f"{stamp.name}: manifest digest mismatch")
+    require(words[1] == expected_commit,
+            f"{stamp.name}: producer commit mismatch")
+    require(words[2] == manifest.name,
+            f"{stamp.name}: stamped filename mismatch")
+
+
+def _load_lego_trace_arrays(root: Path) -> dict[str, np.ndarray]:
+    return {name: np.load(root / f"{name}.npy", mmap_mode="r")
+            for name in LEGO_PROCESS_FIELDS}
+
+
+def validate_lego_process_trace(root: Path, expected_commit: str,
+                                *, plant: str | None = None,
+                                mesh_path: Path = DEFAULT_MESH) -> dict:
+    root = Path(root)
+    metadata = json.loads((root / "manifest.json").read_text())
+    require(metadata["format"] == "gyre-legoesm-process-trace-v1",
+            "wrong legoESM trace format")
+    require(metadata["producer_commit"] == expected_commit,
+            "legoESM trace manifest producer commit mismatch")
+    if plant == "lego-process-stamp":
+        try:
+            _check_trace_stamp(root, "0" * 40)
+        except GateError as error:
+            return {"status": "PLANT-FIRED", "plant": plant,
+                    "reason": str(error)}
+        raise GateError("lego-process-stamp plant stayed green")
+    _check_trace_stamp(root, expected_commit)
+    manifest = _trace_file_manifest(root)
+    expected_files = {f"{name}.npy" for name in LEGO_PROCESS_FIELDS} | {
+        "day180.npz", "day240.npz", "manifest.json"}
+    require(set(manifest) == expected_files,
+            "legoESM trace manifest file set differs from the frozen layout")
+    file_paths = {name: (root / name if name not in ("day180.npz", "day240.npz")
+                         else root / "lego_seed0" / name)
+                  for name in expected_files}
+    for name, path in file_paths.items():
+        require(path.is_file(), f"missing legoESM trace file {path}")
+        require(_sha256(path) == manifest[name],
+                f"legoESM trace sha256 mismatch for {name}")
+
+    arrays = _load_lego_trace_arrays(root)
+    shape3 = tuple(metadata["shape_3d"])
+    shape2 = tuple(metadata["shape_2d"])
+    for name, array in arrays.items():
+        expected_shape = ((LEGO_PROCESS_TRACE_STEPS,) + shape2
+                          if name.startswith("q_") else
+                          (LEGO_PROCESS_TRACE_STEPS,) + shape3)
+        require(array.shape == expected_shape and array.dtype == np.float64,
+                f"{name}: shape/dtype {array.shape}/{array.dtype}, expected "
+                f"{expected_shape}/float64")
+
+    gate = _gate()
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    mask = gate.expected_masks(build_nemo_testcase_card(CASE))["T"]
+    require(mask.shape == shape3, "legoESM trace/mask shape mismatch")
+    first = {name: np.asarray(array[0]) for name, array in arrays.items()}
+    if plant == "lego-process-ulp":
+        original = lego_process_temperature_rows(first)
+        planted = {name: np.array(value, copy=True)
+                   for name, value in first.items()}
+        j, i, k = (int(x) for x in np.argwhere(mask)[0])
+        planted["Bsbc"][j, i, k] = np.nextafter(
+            planted["Bsbc"][j, i, k], np.inf)
+        changed = lego_process_temperature_rows(planted)
+        moved = {name: _different_cells(original[name], changed[name], mask)
+                 for name in (*PROCESS_ROWS, "rounding_closure")}
+        require(moved["surface_boundary"] > 0,
+                "lego-process-ulp plant did not move its consumed row")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "index_jik": [j, i, k], "moved_rows": moved}
+    if plant == "lego-process-effect":
+        control = metadata["effect_control"]
+        require(control["status"] == "PLANT-FIRED"
+                and control["moved_cells"]["Bsbc"] > 0
+                and control["moved_cells"]["Taa"] > 0
+                and control["carried_state_unequal_bytes"] == 0,
+                "stored production effect control is vacuous")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": control}
+    require(plant in (None, "none"), f"unknown lego process plant {plant!r}")
+
+    activity = {name: 0 for name in PROCESS_ROWS}
+    max_step_closure = 0.0
+    chained = 0
+    previous_taa = None
+    for index in range(LEGO_PROCESS_TRACE_STEPS):
+        frame = {name: np.asarray(array[index])
+                 for name, array in arrays.items()}
+        for name, value in frame.items():
+            require(np.all(np.isfinite(value)),
+                    f"legoESM trace frame {index} {name} is non-finite")
+        if previous_taa is not None:
+            chained += _different_cells(previous_taa, frame["Tbb"], mask)
+        previous_taa = frame["Taa"]
+        rows = lego_process_temperature_rows(frame)
+        for name in PROCESS_ROWS:
+            activity[name] += int(np.count_nonzero(rows[name][mask]))
+        max_step_closure = max(
+            max_step_closure,
+            float(np.max(np.abs(rows["rounding_closure"][mask]))))
+    require(chained == 0,
+            f"legoESM trace fails Taa-to-next-Tbb chain in {chained} cells")
+    for name in PROCESS_ROWS[1:]:
+        require(activity[name] > 0,
+                f"legoESM active process row {name} never moves a wet cell")
+    require(metadata["carried_state_unequal_bytes_total"] == 0
+            and metadata["carried_state_unequal_bytes_max_step"] == 0,
+            "legoESM diagnostic/reference carried-state comparison failed")
+    return {
+        "format": "gyre-legoesm-process-trace-validation-v1",
+        "status": "PASS", "case": CASE, "root": str(root),
+        "producer_commit": expected_commit,
+        "layout": {"record_count": LEGO_PROCESS_TRACE_STEPS,
+                   "shape_3d": list(shape3), "shape_2d": list(shape2),
+                   "fields": list(LEGO_PROCESS_FIELDS)},
+        "controls": {
+            "chained_cells_unequal": chained,
+            "active_row_nonzero_cell_visits": activity,
+            "max_abs_step_rounding_closure_K": max_step_closure,
+            "carried_state_unequal_bytes_total": 0,
+            "effect_control": metadata["effect_control"],
+        },
+    }
+
+
+def _load_npz(path: Path) -> dict[str, np.ndarray]:
+    require(path.is_file(), f"missing snapshot {path}")
+    with np.load(path) as handle:
+        return {name: np.asarray(handle[name], dtype=np.float64)
+                for name in handle.files}
+
+
+def _projection(component: np.ndarray, endpoint: np.ndarray,
+                mask: np.ndarray, endpoint_rms: float) -> tuple[float, float]:
+    denominator = float(np.sum(endpoint[mask] * endpoint[mask]))
+    require(denominator > 0.0, "zero day-240 endpoint error")
+    fraction = float(np.sum(component[mask] * endpoint[mask])) / denominator
+    return fraction * endpoint_rms, fraction
+
+
+def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
+                         expected_commit: str, *,
+                         immutable_lego_root: Path = DEFAULT_IMMUTABLE_GYRE_YEAR,
+                         nemo_root: Path = YEAR_ROOT,
+                         mesh_path: Path = DEFAULT_MESH) -> dict:
+    """Close and rank the independent day-180-to-240 process budget."""
+    _policy()
+    year = _year()
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    nemo_validation = validate_process_record(
+        nemo_process_root, "af3f7215060fc17c71adc6794817c710df8ee471")
+    lego_validation = validate_lego_process_trace(
+        lego_trace_root, expected_commit, mesh_path=mesh_path)
+    card = build_nemo_testcase_card(CASE)
+    mesh, wet3, wet2, _dz, _dy, _area, bands = year._geometry(card, mesh_path)
+    nlev = wet3.shape[-1]
+    lat = np.asarray(mesh["gphit"], dtype=np.float64)
+
+    generated180 = _load_npz(Path(lego_trace_root) / "lego_seed0/day180.npz")
+    generated240 = _load_npz(Path(lego_trace_root) / "lego_seed0/day240.npz")
+    immutable180 = _load_npz(
+        Path(immutable_lego_root) / "lego_seed0_year/day180.npz")
+    immutable240 = _load_npz(
+        Path(immutable_lego_root) / "lego_seed0_year/day240.npz")
+    immutable_mismatches = {}
+    for day, generated, immutable in (
+            (180, generated180, immutable180),
+            (240, generated240, immutable240)):
+        immutable_mismatches[str(day)] = {}
+        for name in FIELDS:
+            a = np.asarray(generated[name], dtype=np.float64)
+            b = np.asarray(immutable[name], dtype=np.float64)
+            require(a.shape == b.shape, f"day {day} {name}: shape mismatch")
+            unequal = int(np.count_nonzero(
+                a.view(np.uint64) != b.view(np.uint64)))
+            immutable_mismatches[str(day)][name] = unequal
+            require(unequal == 0,
+                    f"day {day} {name}: generated trace differs from immutable "
+                    f"year member in {unequal} cells")
+
+    nemo180 = year._load_nemo(nemo_root, 0, 180, nlev)
+    nemo240 = year._load_nemo(nemo_root, 0, 240, nlev)
+    lego_start = np.asarray(generated180["T"], dtype=np.float64)
+    lego_end = np.asarray(generated240["T"], dtype=np.float64)
+    nemo_start = np.asarray(nemo180["T"], dtype=np.float64)
+    nemo_end = np.asarray(nemo240["T"], dtype=np.float64)
+    endpoint = lego_end - nemo_end
+    endpoint_rms = _rms(endpoint, wet3)
+    require(endpoint_rms == 1.6446741930292448e-2,
+            f"day-240 headline {endpoint_rms:.17e} differs from frozen "
+            "1.6446741930292448e-2 K")
+    immutable030 = _load_npz(
+        Path(immutable_lego_root) / "lego_seed0_year/day030.npz")
+    nemo030 = year._load_nemo(nemo_root, 0, 30, nlev)
+    day30_rms = _rms(np.asarray(immutable030["T"]) - nemo030["T"], wet3)
+
+    lego_arrays = _load_lego_trace_arrays(Path(lego_trace_root))
+    components_lego = {name: np.zeros_like(lego_start) for name in PROCESS_ROWS}
+    components_nemo = {name: np.zeros_like(nemo_start) for name in PROCESS_ROWS}
+    block_lego = [{name: np.zeros_like(lego_start) for name in PROCESS_ROWS}
+                  for _ in range(6)]
+    block_nemo = [{name: np.zeros_like(nemo_start) for name in PROCESS_ROWS}
+                  for _ in range(6)]
+    block_start_lego = []
+    block_end_lego = []
+    block_start_nemo = []
+    block_end_nemo = []
+    current_block = -1
+    for index, step in enumerate(range(PROCESS_START_STEP,
+                                       PROCESS_END_STEP + 1)):
+        block = index // 60
+        if block != current_block:
+            current_block = block
+            block_start_lego.append(np.asarray(lego_arrays["Tbb"][index]).copy())
+        lego_frame = {name: np.asarray(array[index])
+                      for name, array in lego_arrays.items()}
+        nemo_frame = read_process_record(
+            Path(nemo_process_root)
+            / f"oracle_process_budget_kt{step:08d}.bin")
+        lego_rows = lego_process_temperature_rows(lego_frame)
+        nemo_rows = process_temperature_rows(nemo_frame)
+        if index % 60 == 0:
+            block_start_nemo.append(
+                np.asarray(nemo_frame["Tbb"][..., :nlev]).copy())
+        for name in PROCESS_ROWS:
+            components_lego[name] += lego_rows[name]
+            components_nemo[name] += nemo_rows[name]
+            block_lego[block][name] += lego_rows[name]
+            block_nemo[block][name] += nemo_rows[name]
+        if index % 60 == 59:
+            block_end_lego.append(np.asarray(lego_frame["Taa"]).copy())
+            block_end_nemo.append(
+                np.asarray(nemo_frame["Taa"][..., :nlev]).copy())
+
+    require(_different_cells(np.asarray(lego_arrays["Tbb"][0]),
+                             lego_start, wet3) == 0,
+            "legoESM first trace Tbb differs from day-180 snapshot")
+    require(_different_cells(np.asarray(lego_arrays["Taa"][-1]),
+                             lego_end, wet3) == 0,
+            "legoESM final trace Taa differs from day-240 snapshot")
+    first_nemo = read_process_record(
+        Path(nemo_process_root)
+        / f"oracle_process_budget_kt{PROCESS_START_STEP:08d}.bin")
+    last_nemo = read_process_record(
+        Path(nemo_process_root)
+        / f"oracle_process_budget_kt{PROCESS_END_STEP:08d}.bin")
+    require(_different_cells(first_nemo["Tbb"][..., :nlev], nemo_start,
+                             wet3) == 0,
+            "NEMO first trace Tbb differs from day-180 restart")
+    require(_different_cells(last_nemo["Taa"][..., :nlev], nemo_end,
+                             wet3) == 0,
+            "NEMO final trace Taa differs from day-240 restart")
+
+    def sum_rows(rows):
+        total = np.zeros_like(lego_start)
+        for name in PROCESS_ROWS:
+            total = total + rows[name]
+        return total
+
+    closure_lego = (lego_end - lego_start) - sum_rows(components_lego)
+    closure_nemo = (nemo_end - nemo_start) - sum_rows(components_nemo)
+    component = {"incoming": lego_start - nemo_start}
+    for name in PROCESS_ROWS:
+        component[name] = components_lego[name] - components_nemo[name]
+    component["rounding_closure"] = closure_lego - closure_nemo
+    reconstruction = np.zeros_like(endpoint)
+    for values in component.values():
+        reconstruction = reconstruction + values
+    reconstruction_residual = endpoint - reconstruction
+    max_reconstruction = float(np.max(np.abs(reconstruction_residual[wet3])))
+
+    block_components = []
+    for block in range(6):
+        item = {name: block_lego[block][name] - block_nemo[block][name]
+                for name in PROCESS_ROWS}
+        local_lego_closure = ((block_end_lego[block] - block_start_lego[block])
+                              - sum_rows(block_lego[block]))
+        local_nemo_closure = ((block_end_nemo[block] - block_start_nemo[block])
+                              - sum_rows(block_nemo[block]))
+        item["rounding_closure"] = local_lego_closure - local_nemo_closure
+        block_components.append(item)
+
+    regions = _regions(lat, wet2)
+    horizontal_masks = {name: wet3 & regions[name][..., None]
+                        for name in ("west_third", "interior_third",
+                                     "east_third")}
+    latitude_masks = {
+        f"south_le_{EMP_SPLIT_LAT_DEG}N": wet3 & (
+            lat <= EMP_SPLIT_LAT_DEG)[..., None],
+        f"north_gt_{EMP_SPLIT_LAT_DEG}N": wet3 & (
+            lat > EMP_SPLIT_LAT_DEG)[..., None],
+    }
+
+    def strongest_partition(values, partitions):
+        scored = []
+        for name, local_mask in partitions.items():
+            carry, fraction = _projection(values, endpoint, local_mask,
+                                          _rms(endpoint, local_mask))
+            # The local carry above has a local normalization.  Ranking the
+            # location instead uses its additive contribution to the GLOBAL
+            # endpoint dot product, reported beside the native local metric.
+            additive = float(np.sum(values[local_mask] * endpoint[local_mask]))
+            scored.append((abs(additive), name, carry, fraction,
+                           int(local_mask.sum())))
+        _, name, carry, fraction, cells = max(scored)
+        return {"name": name, "local_signed_carry_K": carry,
+                "local_projection_fraction": fraction, "cells": cells}
+
+    ranking = []
+    for name, values in component.items():
+        carry, fraction = _projection(values, endpoint, wet3, endpoint_rms)
+        if name == "incoming":
+            birth = {"interval_days": "before day 180", "signed_carry_K": carry}
+        else:
+            block_rows = []
+            for block, block_values in enumerate(block_components):
+                block_value = block_values[name]
+                block_carry, _ = _projection(
+                    block_value, endpoint, wet3, endpoint_rms)
+                block_rows.append((abs(block_carry), block, block_carry))
+            _, block, block_carry = max(block_rows)
+            birth = {"interval_days": [180 + 10 * block,
+                                        180 + 10 * (block + 1)],
+                     "signed_carry_K": block_carry}
+        depth_location = strongest_partition(values, bands)
+        longitude_location = strongest_partition(values, horizontal_masks)
+        latitude_location = strongest_partition(values, latitude_masks)
+        wind_mask = wet3 & regions["wind_band_15_29N"][..., None]
+        wind_dot = float(np.sum(values[wind_mask] * endpoint[wind_mask]))
+        ranking.append({
+            "owner": name, "signed_carry_K": carry,
+            "abs_signed_carry_K": abs(carry),
+            "projection_fraction": fraction,
+            "component_rms_K": _rms(values, wet3),
+            "day30_carry_K": None,
+            "day30_carry_status": "UNAVAILABLE-BY-RECORD",
+            "birth": birth, "largest_depth_partition": depth_location,
+            "largest_longitude_partition": longitude_location,
+            "largest_latitude_partition": latitude_location,
+            "wind_band_additive_dot_K2": wind_dot,
+        })
+    ranking.sort(key=lambda row: row["abs_signed_carry_K"], reverse=True)
+    signed_sum = float(sum(row["signed_carry_K"] for row in ranking))
+    sum_abs = float(sum(row["abs_signed_carry_K"] for row in ranking))
+    report = {
+        "format": "gyre-day240-process-budget-v1", "case": CASE,
+        "status": "PASS", "interval_days": [180, 240],
+        "nemo_process_root": str(nemo_process_root),
+        "lego_trace_root": str(lego_trace_root),
+        "immutable_lego_root": str(immutable_lego_root),
+        "nemo_root": str(nemo_root),
+        "headline": {"day240_T3D_rms_K": endpoint_rms,
+                     "day30_T3D_rms_K": day30_rms},
+        "endpoint_controls": {
+            "immutable_cells_unequal": immutable_mismatches,
+            "max_abs_reconstruction_residual_K": max_reconstruction,
+            "lego_interval_closure_rms_K": _rms(closure_lego, wet3),
+            "nemo_interval_closure_rms_K": _rms(closure_nemo, wet3),
+            "signed_carry_sum_K": signed_sum,
+            "signed_carry_minus_endpoint_rms_K": signed_sum - endpoint_rms,
+            "sum_abs_signed_carry_K": sum_abs,
+            "cancellation_ratio": sum_abs / endpoint_rms,
+        },
+        "ranking": ranking, "largest_owner": ranking[0]["owner"],
+        "nemo_validation": nemo_validation,
+        "lego_validation": lego_validation,
+        "worktree": worktree_stamp(),
+    }
+    print("\nDAY-240 PROCESS MAGNITUDE RANKING -- independent trajectories")
+    print(f"  {'rank':>4s} {'owner':>22s} {'signed carry K':>16s} "
+          f"{'component rms K':>16s} {'birth days':>14s}")
+    for rank, row in enumerate(ranking, 1):
+        print(f"  {rank:4d} {row['owner']:>22s} "
+              f"{row['signed_carry_K']:16.8e} "
+              f"{row['component_rms_K']:16.8e} "
+              f"{str(row['birth']['interval_days']):>14s}")
+    print(f"  day-240 T rms {endpoint_rms:.17e} K; signed carry sum "
+          f"{signed_sum:.17e} K; max reconstruction residual "
+          f"{max_reconstruction:.3e} K")
+    return report
+
+
 def _process_math_self_check(failures: list[str]) -> None:
     shape = (2, 2, 4)
     record = {
@@ -630,6 +1312,34 @@ def _process_math_self_check(failures: list[str]) -> None:
           "endpoint closure -- OK")
     print("  raw RHS ULP moves its decoded RHS increment but 0 temperature "
           "rows; effect-scale plant moves the temperature budget -- OK")
+    lego_frame = {
+        "Tbb": np.full(shape[:-1] + (shape[-1] - 1,), 2.0),
+        "B0": np.full(shape[:-1] + (shape[-1] - 1,), 2.1),
+        "Badv": np.full(shape[:-1] + (shape[-1] - 1,), 2.2),
+        "Bsbc": np.full(shape[:-1] + (shape[-1] - 1,), 2.3),
+        "Bqsr": np.full(shape[:-1] + (shape[-1] - 1,), 2.4),
+        "Bldf": np.full(shape[:-1] + (shape[-1] - 1,), 2.5),
+        "Bpre": np.full(shape[:-1] + (shape[-1] - 1,), 2.55),
+        "Taa": np.full(shape[:-1] + (shape[-1] - 1,), 2.75),
+    }
+    lego_rows = lego_process_temperature_rows(lego_frame)
+    lego_sum = np.zeros_like(lego_frame["Tbb"])
+    for name in (*PROCESS_ROWS, "rounding_closure"):
+        lego_sum += lego_rows[name]
+    if not np.array_equal(lego_sum,
+                          lego_frame["Taa"] - lego_frame["Tbb"]):
+        failures.append("legoESM process rows do not close a synthetic endpoint")
+    planted_lego = {name: np.array(value, copy=True)
+                    for name, value in lego_frame.items()}
+    planted_lego["Bsbc"][0, 0, 0] = np.nextafter(
+        planted_lego["Bsbc"][0, 0, 0], np.inf)
+    planted_rows = lego_process_temperature_rows(planted_lego)
+    synthetic_mask = np.ones_like(lego_frame["Tbb"], dtype=bool)
+    if _different_cells(lego_rows["surface_boundary"],
+                        planted_rows["surface_boundary"], synthetic_mask) == 0:
+        failures.append("legoESM process-boundary ULP plant is inert")
+    else:
+        print("  legoESM boundary rows close and their ULP plant fires -- OK")
 
 
 # ------------------------------------------------------- the per-step walk ---
@@ -1459,6 +2169,14 @@ def main(argv=None) -> int:
                         help="decompose the gap at this day")
     parser.add_argument("--process-record", type=Path, default=None,
                         help="validate a Round-123 process-record root")
+    parser.add_argument("--produce-process-trace", action="store_true",
+                        help="run the independent legoESM Round-124 process "
+                             "trace into --root")
+    parser.add_argument("--lego-process-record", type=Path, default=None,
+                        help="validate a Round-124 legoESM process trace")
+    parser.add_argument("--process-budget", type=Path, default=None,
+                        help="score this NEMO process root against "
+                             "--lego-process-record")
     parser.add_argument("--expect-commit", default=None,
                         help="required clean producer commit for records")
     parser.add_argument("--forcing-gate", action="store_true")
@@ -1473,6 +2191,8 @@ def main(argv=None) -> int:
     parser.add_argument("--lego-root", type=Path, default=None)
     parser.add_argument("--lego-tag", default="daily")
     parser.add_argument("--nemo-root", type=Path, default=YEAR_ROOT)
+    parser.add_argument("--immutable-lego-root", type=Path,
+                        default=DEFAULT_IMMUTABLE_GYRE_YEAR)
     parser.add_argument("--entry-root", type=Path, default=DEFAULT_ENTRY_ROOT)
     parser.add_argument("--mesh", type=Path, default=DEFAULT_MESH)
     parser.add_argument("--seed", type=int, default=0)
@@ -1488,6 +2208,44 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
+    if args.produce_process_trace:
+        require(args.expect_commit is not None,
+                "--produce-process-trace needs --expect-commit")
+        report = produce_lego_process_trace(
+            args.root, args.expect_commit, mesh_path=args.mesh)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        return 0
+    if args.process_budget is not None:
+        require(args.lego_process_record is not None,
+                "--process-budget needs --lego-process-record")
+        require(args.expect_commit is not None,
+                "--process-budget needs --expect-commit")
+        report = score_process_budget(
+            args.process_budget, args.lego_process_record,
+            args.expect_commit, immutable_lego_root=args.immutable_lego_root,
+            nemo_root=args.nemo_root, mesh_path=args.mesh)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        return 0
+    if args.lego_process_record is not None:
+        require(args.expect_commit is not None,
+                "--lego-process-record needs --expect-commit")
+        report = validate_lego_process_trace(
+            args.lego_process_record, args.expect_commit,
+            plant=args.plant, mesh_path=args.mesh)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report.get('reason', report.get('control', 'moved'))}")
+            return 1
+        print("STATUS PASS: legoESM process trace "
+              f"{report['layout']['record_count']} frames")
+        return 0
     if args.process_record is not None:
         require(args.expect_commit is not None,
                 "--process-record needs --expect-commit")

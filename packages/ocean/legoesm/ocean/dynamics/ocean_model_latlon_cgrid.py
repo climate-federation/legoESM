@@ -1329,6 +1329,7 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     bn2_intermediate: str = ""  # Private one-output compiled-bn2 walk.
     bn2_alpha_beta_override: object = None  # Recorded-entry operator input.
     bn2_tracer_override: object = None  # Recorded-entry T/S operator input.
+    tracer_process_trace: object = None  # Round-124 write-only trace / plant.
 
 
 def rk3_stage_velocity_update(
@@ -2435,6 +2436,22 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "stage-3 FCT pair hook requires "
                     "tracer_time_integrator='rk3_ws'")
+        _process_trace = self._nemo_ws_test_hooks.tracer_process_trace
+        if _process_trace is not None:
+            if not isinstance(_process_trace, tuple) or len(
+                    _process_trace) not in (0, 4):
+                raise ValueError(
+                    "tracer_process_trace must be () or (j, i, k, delta)")
+            if (self.config.outer_integrator != "forward_euler"
+                    or self.config.tracer_time_integrator != "rk3_ws"
+                    or self.config.gm_redi is None
+                    or self.config.physics.shortwave_penetration.scheme
+                    != "nemo_qsr_2bd"
+                    or self.config.physics.lateral_mixing.scheme != "none"
+                    or self.config.use_conservation_fixer):
+                raise ValueError(
+                    "tracer_process_trace is defined only for the resolved "
+                    "GYRE WS-RK3/QSR/GM-Redi process program")
         # The LDF route is production behavior for WS with a configured
         # GM/Redi operator; it has no private selector and therefore needs no
         # construction-time check beyond the card's ordinary validation.
@@ -4752,6 +4769,7 @@ class LatLonCGridOceanModel:
                    _vertical_K_test_override=None,
                    _return_barotropic_substeps: bool = False,
                    _return_live_stage_operands: bool = False,
+                   _return_tracer_process_trace: bool = False,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
@@ -5326,6 +5344,11 @@ class LatLonCGridOceanModel:
         _nemo_ws_tracer_content_rhs = None
         _nemo_ws_advection_content_rhs = None
         _nemo_ws_zdf_eta_kmm = None
+        _nemo_ws_process_qco = None
+        _nemo_ws_process_surface_rate = None
+        _nemo_ws_process_qsr_rate = None
+        _nemo_ws_process_boundaries = None
+        _nemo_ws_process_Taa = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -6321,6 +6344,27 @@ class LatLonCGridOceanModel:
                 _stage3_T_rate = _nemo_qsr_stage3_rate(
                     tend.dT_dt.data, _qsr_b, _qsr_m,
                     h_k_old, _h_live_one_half)
+                if _return_tracer_process_trace:
+                    # Round-124 WRITE-only process budget.  Materialize the
+                    # two source components inside the full production step;
+                    # the carried trajectory is supplied by a separate
+                    # ordinary compiled call in ``step`` below.
+                    _nemo_ws_process_surface_rate = (
+                        (tend.dT_dt.data - _qsr_b) * h_k_old
+                        / jnp.maximum(_h_live_one_half, 1.0e-10))
+                    _nemo_ws_process_qsr_rate = _qsr_m
+                    _process_plant = (
+                        self._nemo_ws_test_hooks.tracer_process_trace)
+                    if _process_plant:
+                        _pj, _pi, _pk, _pdelta = _process_plant
+                        _nemo_ws_process_surface_rate = (
+                            _nemo_ws_process_surface_rate.at[
+                                _pj, _pi, _pk].add(_pdelta))
+                        _stage3_T_rate = _stage3_T_rate.at[
+                            _pj, _pi, _pk].add(_pdelta)
+                    _nemo_ws_process_qco = (
+                        _qt_b, _qt_12, _qt_aa,
+                        h_k_old, _h_live_one_half, _h_live_new)
 
             _stage_source_rates = (
                 (
@@ -7868,6 +7912,35 @@ class LatLonCGridOceanModel:
                 _nemo_ws_advection_content_rhs = (
                     _nemo_ws_advection_content_T,
                     _nemo_ws_advection_content_S)
+                if _return_tracer_process_trace:
+                    if (_nemo_ws_process_qco is None
+                            or _nemo_ws_process_surface_rate is None
+                            or _nemo_ws_process_qsr_rate is None
+                            or _cfg_b.gm_redi is None):
+                        raise ValueError(
+                            "tracer process trace requires the resolved "
+                            "NEMO GYRE QSR and GM/Redi stage-3 program")
+                    _qbb, _qmm, _qaa, _hbb, _hmm, _haa = (
+                        _nemo_ws_process_qco)
+                    _process_adv = _nemo_ws_advection_content_T
+                    _process_sbc = (
+                        _process_adv + dt * _hmm
+                        * _nemo_ws_process_surface_rate)
+                    _process_qsr = (
+                        _process_sbc + dt * _hmm
+                        * _nemo_ws_process_qsr_rate)
+                    _process_ldf = (
+                        _process_qsr + dt * _hmm
+                        * (dT_gm * active_3d))
+                    _h_safe_process = jnp.maximum(_haa, 1.0e-10)
+                    _nemo_ws_process_boundaries = (
+                        _hbb * state.T.data / _h_safe_process,
+                        _process_adv / _h_safe_process,
+                        _process_sbc / _h_safe_process,
+                        _process_qsr / _h_safe_process,
+                        _process_ldf / _h_safe_process,
+                        _nemo_ws_content_T / _h_safe_process,
+                    )
                 _pair_divs = (None, None)
             else:
                 # store_salt_flux capture (static config bool): ask the pair
@@ -8342,6 +8415,8 @@ class LatLonCGridOceanModel:
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
                     nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
                 z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+        if _return_tracer_process_trace:
+            _nemo_ws_process_Taa = state_new.T.data
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
             # tke[taup1] FIRST, then the superbee-advection AB2 increment is
@@ -8493,6 +8568,21 @@ class LatLonCGridOceanModel:
             state_new = _nemo_ws_pre_implicit_state
 
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
+        if _return_tracer_process_trace:
+            if (_nemo_ws_process_qco is None
+                    or _nemo_ws_process_boundaries is None
+                    or _nemo_ws_process_Taa is None):
+                raise ValueError("WS-RK3 tracer process trace is incomplete")
+            _qbb, _qmm, _qaa, _, _, _ = _nemo_ws_process_qco
+            return _NEMOWSTracerProcessTrace(
+                state_after=state_new,
+                Tbb=state.T.data,
+                q_Kbb=_qbb,
+                q_Kmm=_qmm,
+                q_Kaa=_qaa,
+                boundaries=_nemo_ws_process_boundaries,
+                Taa=_nemo_ws_process_Taa,
+            )
         if _return_live_stage_operands:
             if (getattr(_cfg_b, "momentum_time_integrator", "euler")
                     != "rk3_ws"):
@@ -11120,6 +11210,17 @@ class LatLonCGridOceanModel:
                         _shortwave_tendency_test_delta),
                     _vertical_K_test_override=_vertical_K_test_override)
                 return result._replace(state_after=state_after)
+            if self._nemo_ws_test_hooks.tracer_process_trace is not None:
+                # As with the live stage operands, returning extra arrays can
+                # change XLA fusion.  The next-step state therefore comes only
+                # from an independently compiled ordinary production call.
+                state_after = self._step_live_operand_reference_jitted(
+                    state, dt, freshwater, surface_forcing, sponge,
+                    grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                    _shortwave_tendency_test_delta=(
+                        _shortwave_tendency_test_delta),
+                    _vertical_K_test_override=_vertical_K_test_override)
+                return result._replace(state_after=state_after)
             return result
 
     @partial(jax.jit, static_argnums=(0,))
@@ -11186,6 +11287,16 @@ class LatLonCGridOceanModel:
                 surface_forcing=surface_forcing, sponge=sponge,
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
                 _return_live_stage_operands=True)
+        if self._nemo_ws_test_hooks.tracer_process_trace is not None:
+            if _oi != "forward_euler":
+                raise ValueError(
+                    "tracer_process_trace is a private forward_euler "
+                    "WS-RK3 fidelity hook")
+            return self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _return_tracer_process_trace=True)
         if self.config.barotropic.barotropic_solver == "implicit_unsplit":
             # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
@@ -13733,3 +13844,15 @@ class LatLonCGridOceanModel:
             scan_fn, state, xs=None, length=n_steps,
         )
         return final_state, trajectory
+
+
+class _NEMOWSTracerProcessTrace(NamedTuple):
+    """Private production-JIT stage-3 temperature boundaries for Round 124."""
+
+    state_after: object
+    Tbb: object
+    q_Kbb: object  # noqa: N815 - NEMO time-level spelling is the record API.
+    q_Kmm: object  # noqa: N815 - NEMO time-level spelling is the record API.
+    q_Kaa: object  # noqa: N815 - NEMO time-level spelling is the record API.
+    boundaries: object
+    Taa: object

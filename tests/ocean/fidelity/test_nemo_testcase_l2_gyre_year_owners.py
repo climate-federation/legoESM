@@ -127,6 +127,92 @@ def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
     assert propagated["decoded_temperature_rows_moved"]["surface_boundary"]
 
 
+def test_round124_lego_process_budget_closes_and_ulp_control_moves(harness):
+    shape = (3, 4, 2)
+    frame = {
+        "Tbb": np.full(shape, 2.0),
+        "B0": np.full(shape, 2.1),
+        "Badv": np.full(shape, 2.2),
+        "Bsbc": np.full(shape, 2.3),
+        "Bqsr": np.full(shape, 2.4),
+        "Bldf": np.full(shape, 2.5),
+        "Bpre": np.full(shape, 2.55),
+        "Taa": np.full(shape, 2.75),
+    }
+    rows = harness.lego_process_temperature_rows(frame)
+    reconstructed = np.zeros(shape)
+    for name in (*harness.PROCESS_ROWS, "rounding_closure"):
+        reconstructed += rows[name]
+    assert np.array_equal(reconstructed, frame["Taa"] - frame["Tbb"])
+
+    planted = {name: np.array(value, copy=True)
+               for name, value in frame.items()}
+    planted["Bsbc"][0, 0, 0] = np.nextafter(
+        planted["Bsbc"][0, 0, 0], np.inf)
+    moved = harness.lego_process_temperature_rows(planted)
+    mask = np.ones(shape, dtype=bool)
+    assert harness._different_cells(
+        rows["surface_boundary"], moved["surface_boundary"], mask) == 1
+    # Removing the changed boundary makes the same assertion fail: the plant
+    # is tied to the consumed row, not merely to a nonzero synthetic array.
+    planted["Bsbc"] = np.array(frame["Bsbc"], copy=True)
+    inert = harness.lego_process_temperature_rows(planted)
+    assert harness._different_cells(
+        rows["surface_boundary"], inert["surface_boundary"], mask) == 0
+
+
+def test_round124_effect_control_reaches_downstream_not_carried_state(harness):
+    from types import SimpleNamespace
+
+    shape = (2, 2, 1)
+    q = np.ones(shape[:2])
+    base = np.full(shape, 2.0)
+    delta = float(np.ldexp(1.0, -40))
+    effect = harness.DT_S * delta
+    control = SimpleNamespace(
+        state_after=(np.array([1.0]),), Tbb=base, q_Kbb=q, q_Kmm=q,
+        q_Kaa=q, boundaries=(base, base, base, base, base, base), Taa=base)
+    downstream = base.copy()
+    downstream[0, 0, 0] += effect
+    planted = SimpleNamespace(
+        state_after=(np.array([1.0]),), Tbb=base, q_Kbb=q, q_Kmm=q,
+        q_Kaa=q,
+        boundaries=(base, base, downstream, downstream, downstream,
+                    downstream),
+        Taa=downstream)
+    report = harness._trace_effect_control(
+        control, planted, np.ones(shape, dtype=bool), (0, 0, 0), delta)
+    assert report["status"] == "PLANT-FIRED"
+    assert report["moved_cells"]["Badv"] == 0
+    assert report["moved_cells"]["Bsbc"] == 1
+    assert report["carried_state_unequal_bytes"] == 0
+
+    bad = SimpleNamespace(**{**planted.__dict__,
+                             "state_after": (np.array([2.0]),)})
+    with pytest.raises(harness.GateError, match="write-only effect plant"):
+        harness._trace_effect_control(
+            control, bad, np.ones(shape, dtype=bool), (0, 0, 0), delta)
+
+
+def test_round124_process_hook_is_private_and_card_guarded():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _NEMOWSRK3TestHooks, LatLonCGridOceanModel)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    assert "tracer_process_trace" not in card.recipe.model_config._fields
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_process_trace=()))
+    assert model._nemo_ws_test_hooks.tracer_process_trace == ()
+    with pytest.raises(ValueError, match=r"must be \(\) or"):
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                tracer_process_trace="public-selector"))
+
+
 def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     source_patch = (PROCESS_CARD / "stprk3_stg_round123.patch").read_text()
     removed = [line for line in source_patch.splitlines()
