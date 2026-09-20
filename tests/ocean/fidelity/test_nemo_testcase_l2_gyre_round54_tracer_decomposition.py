@@ -35,12 +35,13 @@ def test_field_stats_recovers_exact_synthetic_answer():
     assert row["rms"] == pytest.approx(3.0 / np.sqrt(12.0))
 
 
-def test_self_check_and_nonvacuous_plant_exit_codes():
+def test_self_check_and_nonvacuous_plant_exit_codes(capsys):
     module = _module()
     assert module.main(["--mode", "self-check"]) == 0
     assert module.main([
         "--mode", "self-check", "--plant", "self-compare"
     ]) == 1
+    assert "STATUS PLANT-FIRED: self-compare" in capsys.readouterr().out
     assert module.main(["--mode", "zdf-score"]) == 1
 
 
