@@ -121,9 +121,10 @@ The independently read latitude/depth operands also have zero raw and rounded
 disagreements, and the mesh hash is the registered
 `3bf5d10e36dc52336b9797b13eb1efb4f02d25e0fb3a0c450ac6ce69e65471df`.
 
-The preregistration's first committed citation said `usrdef_istate.f90:82-90`.
+The preregistration's first committed citation named lines 82--90 of
+`usrdef_istate.f90`.
 That range is the base profile, not the perturbation.  It is explicitly
-retracted and corrected to `:101-105` in the preregistration and here; no
+retracted and corrected to lines 101--105 in the preregistration and here; no
 prediction, value, population or falsifier changed.
 
 ## Member and time-level provenance
