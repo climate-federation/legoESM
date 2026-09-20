@@ -1165,7 +1165,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:7922-7930': [
         ('elif _tti == "rk3_ws":', 2),
         '_stage_source_rates[2][1] + dS_gm * active_3d,', 9],
-    'nemo_testcase_recipe.py:363-447': [
+    'nemo_testcase_recipe.py:371-455': [
         'return LatLonCGridOceanConfig.from_flat(',
         'gm_redi=None,', 85],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
@@ -1411,7 +1411,7 @@ CITATION_MAP = {
     # --- decision 36: RK3 face-native shear on the GYRE identity card ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
-    'nemo_testcase_recipe.py:228-230': [
+    'nemo_testcase_recipe.py:236-238': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
     'ocean_model_latlon_cgrid.py:9397-9414': [
@@ -2409,8 +2409,9 @@ CITATION_MAP = {
     # ROUND (card reconciliation): the GYRE card's own freshwater selection
     # added eighteen lines above this anchor, so 311 became 329; decision 35
     # added nine lines above it and round 56 removed two; decision 36 added
-    # fifteen more lines, and the ORCA2 merge added 77, so it is now 428.
-    'nemo_testcase_recipe.py:428': [
+    # fifteen more lines, the ORCA2 merge added 77, and the second-pass card
+    # selector added eight, so it is now 436.
+    'nemo_testcase_recipe.py:436': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:96': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -2453,8 +2454,9 @@ CITATION_MAP = {
     # ROUND (card reconciliation): the GYRE card's own freshwater selection
     # added eighteen lines above the SECOND and THIRD anchors, then decision
     # 36 added fifteen more.  ORCA2 added 75 lines above the first, 77 above
-    # the second, and 428 above the third, so they are now 167, 391 and 1399.
-    'nemo_testcase_recipe.py:167,391,1399': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    # the second, and 428 above the third.  The second-pass card selector then
+    # shifted them by 2, 8 and 12, so they are now 169, 399 and 1411.
+    'nemo_testcase_recipe.py:169,399,1411': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',

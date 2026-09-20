@@ -1,6 +1,7 @@
 # GYRE NEMO-fidelity ORCA2 merge receipt — 2026-09-20
 
-Status: **MERGED; GYRE BIT-IDENTICAL; SIX OF SEVEN ORCA2 GATES REPRODUCED.**
+Status: **MERGED; SECOND-PASS SELECTORS CORRECTED; GYRE BIT-IDENTICAL; SIX OF
+SEVEN ORCA2 GATES REPRODUCED.**
 The model-hunk inventory below was committed on clean GYRE lane tip
 `4cac617cd` before merging ORCA2 tip `4092639c3d32`.  The only unreproduced
 historical gate imports the separate L3 SI3 implementation, which is absent
@@ -13,7 +14,9 @@ The merge target is branch `fidelity/orca2-on-lane`.  ORCA2 tip
 their merge base is `03c6e8d96ff7`.  Preregistration commit `44c2cfefb`, merge
 commit `5498e8031`, integration repair `faad1b9a0`, rigid citation re-anchor
 `fc4b7e573`, and selector/mask union-test reconciliation `2a6318c42` form the
-finished unit.  Evidence is written under
+initial merge unit.  Second-pass preregistration `76e66948c` and selector
+correction `b8dec917f` close the two independently reviewed selector findings.
+Evidence is written under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_merge/`.
 
 The lane already admits the native post-boundary/pre-Langmuir TKE frame, but
@@ -73,7 +76,7 @@ configuration's `EXP00/namelist_cfg`.
 | `ocean_model_latlon_cgrid.py` | Preserve the GYRE stage/test hooks, process trace and first-step MLF ordering. | Add the narrowly scoped private EOS-80/geometric diagnostic construction bypass and carry runoff/bathymetry into WZV. | Union.  The bypass remains private and construction-only; runoff and `H_bathy` are shared operands.  Both RK3 shear aliases reach one Nbb-by-Nbb implementation, and stage calls use their literal stage-local `dt` rather than an erroneous common outer value. | ORCA2 `eosbn2.f90:1279-1332` forms EOS-80 coefficients from geometric depth; `sshwzv.f90:126-137,345-355` forms horizontal divergence and the runoff correction; `sbcrnf.f90:253-260` supplies runoff.  DINO `stpmlf.f90:131-134,451-466,534-535,617-620` and `istate.f90:139-141` fix the first-step MLF ordering. |
 | `ocean_pe_latlon_cgrid.py` | Retain GYRE's shortwave selector/water type and diagnostic operand. | Add RGB's explicit step length plus native `ff_f`, north-fold and live-`e3f` EEN operands. | Union.  GYRE keeps 2BD and ORCA2 keeps RGB; selecting both configuration seams raises a named error instead of silently choosing one.  The native F-point/fold/thickness path is selected only where configured. | ORCA2 `traqsr.f90:210-217,1080,1147-1157` executes RGB, selected by `EXP00/namelist_cfg:136`; GYRE selects 2BD at its `EXP00/namelist_cfg:78`.  ORCA2 `dynvor.f90:738-770,907-937` consumes `ff_f`, folded live thickness and `fe3mask`. |
 | `nemo_testcase_recipe.py` | Keep every GYRE card value, the existing-state `uu_b`/`vv_b` guard and its defaults. | Add a distinct fail-closed ORCA2 card and the six-field BBL expectation. | Union.  ORCA2 is a separate card, explicitly requests prognostic `uu_b`/`vv_b`, and the GYRE card and all defaults are unchanged. | ORCA2 `dynspg_ts.f90:136-164,797-860` establishes the external-mode state pair; `trabbl.f90:182-195` establishes the BBL operands. |
-| `test_tke_nemo_terms.py` | Retain the lane's `ln_mxl0` tests. | Add `nn_eice=1/2` dispatch tests. | Union of both independent test families. | ORCA2 `zdftke.f90:252-264` dispatches the three ice-attenuation modes and `zdftke.f90:835-856` initializes the mixing length. |
+| `test_tke_nemo_terms.py` | Retain the lane's `ln_mxl0` tests. | Add `nn_eice=1/2` dispatch tests. | Union of both independent test families. | ORCA2 `zdftke.f90:260-263` dispatches the three nonzero ice-attenuation modes and `zdftke.f90:835-856` initializes the mixing length. |
 
 The compiled stage aliases were also checked directly: GYRE
 `stprk3.f90:159-168` and ORCA2 `stprk3.f90:170-179` both feed the Nbb velocity
@@ -151,7 +154,7 @@ seven recorded verdicts reproduce:
 | Gate / evidence | Merged-tree result | Reproduction |
 |---|---|---|
 | Phase-1 full record/schema gate with planted controls (`orca2/phase1_gate.json`) | `PASS`; 4 record groups; all 10/10 plants `PASS_NONZERO`; SHA-256 `cd34c630d67aa6d19bc9fdb163d581be0d347f674b474ddde8fb2414f7f5d93f`. | yes |
-| Phase-2v admission and ordered TKE walk (`orca2/tke_walk.json`) | Admission `PASS`: 101 twin and 100 inherited records.  First non-bit statement remains `zpelc` at kt=2: 39,290/242,135 cells, max absolute residual `1.7763568394002505e-15`, max row ULP 4, first cell `[1,49,2]`. | yes; the only recursive JSON difference from the archived artifact is non-verdict metadata `resolved_card.langmuir_evaluation`, archived `vectorized`, merged `nemo_literal`. |
+| Phase-2v admission and ordered TKE walk (`fix/tke_walk.json`) | Admission `PASS`: 101 twin and 100 inherited records.  First non-bit statement remains `zpelc` at kt=2: 39,290/242,135 cells, max absolute residual `1.7763568394002505e-15`, max row ULP 4, first cell `[1,49,2]`. | yes; after restoring the ORCA2 card's `vectorized` Langmuir arm, the complete JSON is byte-identical to the archived `phase2w/tke_walk.json`, SHA-256 `c7ef6ed73efe06c1f8a894c9e76f9e6b8f4051a579df420ed54a8cd62ef1f947`. |
 | Phase-2y ORCA1-ice admission (`orca2/orca1ice_admission.json`) | `PASS`, 116/116 records and 26/26 plants; exact recorded SHA-256 `d3c60bf16a84f8739f8106541bea2bfcf4941e75b17e7a4f1bd0d5f7cd371297`. | yes, byte-identical |
 | Phase-2y resolved ice namelist (`orca2/ice_namelist_resolved.json`) | 185 fields; exactly the recorded one-field variant difference, `namini.nn_iceini_file` 0 versus 1; self-test passes; exact recorded SHA-256 `278a891ad15cf7aecc6f8a60533634af6a79076b9650e573a840261236554013`. | yes, byte-identical |
 | Round-20 Phase-1 schema over the Phase-2q root (`orca2/round20_phase1_schema.json`) | Expected exit 1 / `FAIL` for five extra records; exact archived SHA-256 `6574215cedafa818a3ef9900ced494d643fac4c95ea2aec8391d91df4b1f403f`. | yes, expected fail reproduced |
@@ -162,6 +165,64 @@ The unreproduced row is not a changed physics verdict and cannot be repaired by
 choosing another conflict side: neither merge parent contains the class needed
 to import its gate.  Importing that separate implementation is left explicit
 under OPEN.
+
+## Second-pass selector decisions and measurements
+
+### F1 — card-owned Langmuir evaluation
+
+The merged shared `_model_config` builder had unconditionally replaced
+`tke_langmuir_evaluation` with `nemo_literal`.  That moved ORCA2 away from its
+parent `vectorized` arm even though Decision 42 approved the literal arm for
+the GYRE card only.  The builder now takes a card-owned value: GYRE selects
+`nemo_literal`, ORCA2 selects `vectorized`, and cards without this selector
+retain their parent value.  Both selections are binding validator invariants.
+
+Complete resolved-card dumps under `fix/` give the following closed proof:
+
+| Card | Before SHA-256 | After SHA-256 | Recursive difference |
+|---|---|---|---|
+| GYRE | `4e76c62f3a7f29bcd717d424bde6c4e3d8cf8158de25e12957486f9096ae0dd8` | `4e76c62f3a7f29bcd717d424bde6c4e3d8cf8158de25e12957486f9096ae0dd8` | none; complete files byte-identical |
+| ORCA2 | `b5614392c739c03df907f8087e44e346f35e4c982d4244d0dee63b19d37f6600` | `a689781d4f5eaf70098eded8bd3c9fb7ed5fa0b4f440e9faa1b79e9b44cdb83e` | only `physics.vertical_mixing.tke.tke_langmuir_evaluation`, `nemo_literal` to `vectorized` |
+
+The offline ORCA2 TKE walk then reproduced not merely the requested ordered
+rows but the complete archived JSON byte-for-byte, as recorded in the gate
+table above.  This replaces the earlier “non-verdict metadata” description:
+the selector was a real card move, and its corrected measured result is exact.
+
+### Decision 46 — one NEMO `eice` numbering
+
+The user keeps the ORCA2 branch's compiled NEMO numbering.  In
+`cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:252-263`, mode 0 applies no
+attenuation and the executed `SELECT CASE` at lines 260-263 defines mode 1 as
+`TANH(10*fr_i)`, mode 2 as raw `fr_i`, and mode 3 as `MIN(4*fr_i,1)`.  Both
+`TKEConfig.eice` and `KPPConfig.eice` now use exactly those numbers.  KPP
+reuses the shared effective-ice dispatcher because scheme-dependent numbering
+for the same public selector would be ambiguous; only the location of the
+attenuation differs (NEMO TKE source versus legoESM KPP velocity scales).
+
+Both validators and CLI gates accept only `{0,1,2,3}`.  The small fp64 vector
+pin for modes 1 and 2 passes in the corrected tree.  A temporary swap of those
+two production arms made both pins fail (`fix/eice_swapped_modes_red.log`), and
+restoring them made both pass (`fix/eice_nemo_numbering_green.log`).
+
+The full-tree search is retained as `fix/eice_tree_rg.txt`.  It found no
+`eice` key in `config/` and no hit in any YAML/YML deck.  The complete current
+selection inventory is:
+
+| Selection site | Value | Meaning | Meaning changed by Decision 46? |
+|---|---:|---|---|
+| `TKEConfig` default and resolved GYRE card | 0 | no attenuation | no |
+| ORCA2 testcase card | 1 | `tanh(10*fr_i)` | no; the card was written and admitted for the compiled tanh arm |
+| `orca1_zdftke_config`, inherited by every tripole/MPAS TKE cluster deck | 3 | `min(4*fr_i,1)` | no |
+| `run_ll8_kppeice.sbatch` explicit KPP override | 3 | `min(4*fr_i,1)` | no |
+
+The 53 executable cluster decks inheriting the ORCA1 TKE card and the 20
+documentation/evidence files containing `eice` text are enumerated in
+`fix/eice_runtime_selection_audit.md`.  Documentation values of zero in the
+Phase-2s/2t records are historical pre-fix observations, not current deck
+selectors; the later Phase-2u/2w records resolve ORCA2 to 1.  There is no
+in-tree mode-1 KPP selection and no current mode-2 selection.  Therefore the
+number of in-tree selections whose meaning changed is **zero**.
 
 ## Citation gate and tests
 
@@ -175,6 +236,13 @@ block extent; their values and defaults did not change.  The final citation
 test is `16 passed`; the CLI artifact `tests/citation_gate_final.json` reports
 `PASS`, 274 citations, 0 unmapped, 0 failures, 0 map-audit failures, and all
 planted violations firing.
+
+The second-pass card parameter shifted four current-tree anchors.  The rigid
+re-anchor changes are `363-447` to `371-455`, `228-230` to `236-238`, `428`
+to `436`, and `167,391,1399` to `169,399,1411` in
+`nemo_testcase_recipe.py`.  Equal-extent comparisons against `2a6318c42`
+show the old and new cited source text is identical in all four cases; only
+the map keys and the matching Round-8 receipt citation moved.
 
 The required four-file push gate
 (`test_nemo_testcase_receipt_citation_gate.py`, `test_tke_nemo_terms.py`,
@@ -204,17 +272,29 @@ isolated logs, exact ID lists, and both-tree comparisons are retained under
 
 ## Independent review
 
-In-sandbox `codex exec` review is unavailable.  The operator will run the
-required independent Claude review before shipping; no self-review is offered
-as a substitute.
+The independent Claude review found the four conflict resolutions sound, no
+dropped hunks, the GYRE card unchanged, and the original GYRE trajectory
+bit-identical.  It also found the two selector moves resolved in this second
+pass: the shared Langmuir override and the previously undocumented `eice`
+numbering decision.  The supplied review findings are the input to F1 and
+Decision 46 above; no self-review is offered as a substitute.
 
 ## Choices
 
-- No configuration default, GYRE card value, scheme selection, threshold,
-  cadence, state, or data source moved.
-- ORCA2 is a separate card.  The only shared selector expansion is explicit:
-  both RK3 shear names map to the same compiled Nbb-by-Nbb arm, and selecting
-  both shortwave configuration seams fails loudly.
+- **F1 correction (merge repair, not a physics choice):** Decision 42 remains
+  GYRE-card-only.  GYRE keeps `tke_langmuir_evaluation="nemo_literal"`, ORCA2
+  is restored to its parent `"vectorized"` arm, and other cards inherit their
+  parent value.  The resolved-card and TKE-walk measurements above bind this
+  correction.
+- **Decision 46 (user):** keep compiled NEMO `nn_eice` numbering everywhere:
+  0 none, 1 `tanh(10*fr_i)`, 2 raw `fr_i`, 3 `min(4*fr_i,1)`.  The lane's old
+  mode-1 raw-fraction meaning is retired.  KPP uses the same numbering and the
+  same effective-fraction dispatcher; its former mode-1 linear behavior moves
+  to mode 2.  No in-tree KPP mode-1 selection exists, so no in-tree selection
+  changes meaning.
+- ORCA2 remains a separate card.  Both RK3 shear names map to the same compiled
+  Nbb-by-Nbb arm, and selecting both shortwave configuration seams fails
+  loudly.
 - No recorded ORCA2 verdict was hidden or rewritten.  The one unavailable gate
   is reported as unavailable and retained as an operator decision.
 
