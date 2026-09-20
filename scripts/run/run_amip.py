@@ -1247,6 +1247,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Static land-albedo NetCDF (e.g. ICON-extpar ALB). "
                              "When set (with --land-mask-file), overrides the "
                              "latitude-vegetation albedo on the land tile.")
+    parser.add_argument("--land-model", choices=("none", "slab", "multilayer"),
+                        default=None,
+                        help="Select the land surface model BY NAME, the same "
+                             "three names the coupled driver and run_lmip_smoke "
+                             "already use (CoupledESMConfig.land_mode): 'none' "
+                             "= NO land surface model at all (land temperature "
+                             "falls back to the neighbouring prescribed SST "
+                             "minus a lapse rate, and there is no soil, no "
+                             "water store and no stomatal control), 'slab' = "
+                             "the slab surface-energy-balance tile, "
+                             "'multilayer' = slab plus the Richards multilayer "
+                             "soil and CLM texture/PFT maps. Sets "
+                             "--slab-land-active and --use-multilayer-land for "
+                             "you; passing this together with either of those "
+                             "is an error rather than a silent override. "
+                             "Omitting it leaves those two flags in charge, so "
+                             "existing decks are unaffected.")
     parser.add_argument("--use-multilayer-land", default=False,
                         action=argparse.BooleanOptionalAction,
                         help="Replace the slab land tile with the differentiable "
@@ -1941,6 +1958,71 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Generate diagnostic plots after simulation completes")
 
     return parser
+
+
+def _resolve_land_model(args, parser=None, argv=None):
+    """Apply ``--land-model`` to the two land switches, or report what they mean.
+
+    The AMIP driver has selected its land surface with two independent booleans
+    while every other driver has selected it by name.  Four boolean combinations
+    encode three states, and the all-false one means NO LAND SURFACE MODEL —
+    not a simpler one.  This routes the named choice onto the switches through
+    the land package's own vocabulary, so there is one spelling of the concept
+    rather than two.
+
+    Passing --land-model together with --slab-land-active or
+    --use-multilayer-land is refused outright: silently overriding one with the
+    other is how a run ends up not being the run its deck describes.
+
+    Always returns the RESOLVED model name so the caller can print it. What the
+    run resolved to is the thing worth logging; the flags are not.
+    """
+    from legoesm.land.config import describe_land_model, land_model_switches
+
+    # Detect which switches the USER actually typed, not which came out true.
+    # Truthiness cannot see an explicit negative: ``--no-use-multilayer-land``
+    # sets False, which is also the default, so a truthiness test would let
+    # ``--land-model multilayer`` silently overrule a flag the user wrote down.
+    # Both spellings of each switch are checked, ``=value`` forms included.
+    _switches = ("slab-land-active", "use-multilayer-land")
+    _typed = [] if argv is None else [
+        f"--{name}" for name in _switches
+        if any(a == f"--{name}" or a.startswith(f"--{name}=")
+               or a == f"--no-{name}" or a.startswith(f"--no-{name}=")
+               for a in argv)]
+    # argv unavailable (direct call): fall back to truthiness, which still
+    # catches the positive forms.
+    explicit = _typed if argv is not None else [
+        f for f, v in (("--slab-land-active", args.slab_land_active),
+                       ("--use-multilayer-land", args.use_multilayer_land))
+        if v]
+    if args.land_model is not None:
+        # A mask file activates the land tile on its own, so "none" alongside
+        # one is a contradiction: the run would have land while its own
+        # selector said it did not.  Refuse rather than print a name that is
+        # not what the run resolves to.
+        if args.land_model == "none" and getattr(args, "land_mask_file", ""):
+            msg = ("--land-model none conflicts with --land-mask-file "
+                   f"{args.land_mask_file!r}: a land-mask file activates the "
+                   "land tile by itself, so the run would have a land surface "
+                   "while asking for none. Drop one of the two.")
+            if parser is not None:
+                parser.error(msg)
+            raise SystemExit(msg)
+        if explicit:
+            msg = (f"--land-model {args.land_model} conflicts with "
+                   f"{' and '.join(explicit)}; pass either the named model or "
+                   "the individual switches, not both.")
+            if parser is not None:
+                parser.error(msg)
+            raise SystemExit(msg)
+        for field, value in land_model_switches(args.land_model).items():
+            setattr(args, field, value)
+
+    return describe_land_model(
+        slab_land_active=args.slab_land_active,
+        use_multilayer_land=args.use_multilayer_land,
+        has_land_mask=bool(getattr(args, "land_mask_file", "")))
 
 
 def _default_discretization_for_grid(grid_type: str) -> str:
@@ -3032,6 +3114,20 @@ def main(argv: list[str] | None = None):
         parser.set_defaults(_config_keys=frozenset(_cfg_keys))
 
     args = parser.parse_args(argv)
+    # Land surface: map --land-model onto the two switches (and refuse the
+    # contradictory combination) BEFORE anything reads them.  The returned name
+    # is what the run actually resolved to, which is the thing worth logging —
+    # "none" here means there is no land surface model at all, so it is printed
+    # whether or not the flag was used.
+    # ``main(argv=None)`` means "read sys.argv", so resolve it here — passing
+    # the bare None would drop the resolver back to truthiness on the ordinary
+    # command-line path, i.e. exactly where the explicit-negative check matters.
+    _land_model = _resolve_land_model(
+        args, parser, argv if argv is not None else sys.argv[1:])
+    print(f"[run_amip] Land surface model: {_land_model} "
+          f"(slab_land_active={args.slab_land_active}, "
+          f"use_multilayer_land={args.use_multilayer_land}, "
+          f"land_mask_file={getattr(args, 'land_mask_file', '') or '<none>'})")
     # Postprocess FIRST: it resolves the grid/discretization sentinels
     # (``--truncation 21`` alone sets discretization="spectral" only there),
     # and the spectral fallback keys off ``args.discretization == "spectral"``
