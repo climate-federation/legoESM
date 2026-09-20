@@ -87,11 +87,22 @@ def main(argv=None):
     p_s = np.asarray(fields["ps"]["ps"]).mean(0)
     sst = _prescribed_sst(args.run, months, lat, lon)
 
-    sftlf = rb._load_model(args.run, "sftlf")
-    f_land = (np.asarray(sftlf["sftlf"]) / 100.0 if sftlf is not None
-              else np.zeros_like(p_s))
-    if f_land.ndim == 3:
-        f_land = f_land[0]
+    # The land fraction is an fx field, not part of the monthly stream, so
+    # the monthly loader returns None for it.  The previous version treated
+    # that None as "no land" and silently scored LAND columns as ocean --
+    # exactly the plausible-looking fallback this repo keeps getting caught
+    # by.  Read the fx file, and fail loudly when it is absent.
+    import glob
+    _fs = sorted(glob.glob(f"{rb.ROOT}/{args.run}/cmor/fx/sftlf_fx_*.nc"))
+    if not _fs:
+        raise SystemExit(f"FATAL: {args.run} publishes no sftlf; refusing to "
+                         "average ocean fluxes over an unknown land mask")
+    import xarray as xr
+    _d = xr.open_dataset(_fs[0])
+    f_land = np.asarray(rb.bin_to_model(
+        np.asarray(_d["sftlf"], dtype=np.float64) / 100.0,
+        np.asarray(_d.lat), np.asarray(_d.lon) % 360.0, lat, lon,
+        label="sftlf"))
     # Ocean columns only, and only where the 1000 hPa level is above ground:
     # a clamped underground sounding is a copy of the level above, not a
     # measurement, and it would enter the mean as a fictitious flux.
