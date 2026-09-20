@@ -685,63 +685,10 @@ def _mark_kt1_uninformative(row: dict, field: str, kt: int) -> dict:
 
 
 def _surface_forcings(card, state, kt: int):
-    import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
-    from legoesm.ocean.fidelity.nemo_recipe import nemo_gyre_qns
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import gyre_surface_boundary_condition
-    from legoesm.ocean.freshwater import FreshwaterForcing
-    from legoesm.ocean.state import OceanSurfaceForcing
+    # The campaign and differentiable scan must execute one forcing program.
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import gyre_surface_forcings
 
-    sbc = gyre_surface_boundary_condition(card, kt * card.dt_s)
-    sst = state.T.data[..., 0]
-    sst_m = nemo_potential_temperature_from_conservative(
-        sst, state.S.data[..., 0])
-    # usrdef_sbc.F90:109-120,138-145: qns+qsr is the Haney term plus EMP
-    # heat content, evaluated once from the entering Kbb/Nbb SST.
-    qns = nemo_gyre_qns(
-        sst,
-        sst_m,
-        sbc.t_star_c,
-        sbc.qsr_w_m2,
-        sbc.emp_kg_m2_s,
-    )
-    # NEMO carries qns/qsr separately; the shared forcing object carries their
-    # materialized sum.
-    from legoesm.core.source_rounding import nemo_source_round
-
-    q_total = nemo_source_round(qns + sbc.qsr_w_m2)
-    surface = OceanSurfaceForcing(
-        sw_down=sbc.qsr_w_m2,
-        q_net=q_total,
-        # usrdef_sbc's utau/vtau are already NEMO native-i/native-j ocean
-        # components on the 45-degree grid.  The public forcing object carries
-        # geographic atmospheric stress, so inverse-rotate to east/north and
-        # reverse the reaction sign; surface_stress_faces then recovers exactly
-        # the source-native pair instead of rotating it a second time.
-        tau_x=-(
-            card.recipe.grid.cos_alpha_u[:, 1:] * sbc.utau_pa
-            - card.recipe.grid.sin_alpha_u[:, 1:] * sbc.vtau_pa
-        ),
-        tau_y=-(
-            card.recipe.grid.sin_alpha_u[:, 1:] * sbc.utau_pa
-            + card.recipe.grid.cos_alpha_u[:, 1:] * sbc.vtau_pa
-        ),
-        # NEMO's usrdef_sbc fields are already in the native ocean
-        # referential.  Preserve those source operands through the shared
-        # forcing interface; reconstructing them after the inverse geographic
-        # rotation loses 1--3 ulp before sbcmod.F90's face interpolation.
-        tau_i_native=sbc.utau_pa,
-        tau_j_native=sbc.vtau_pa,
-    )
-    zeros = jnp.zeros_like(sbc.emp_kg_m2_s)
-    freshwater = FreshwaterForcing(
-        precip=zeros,
-        evap=sbc.emp_kg_m2_s,
-        runoff=zeros,
-        ice_fw=zeros,
-        restoring=zeros,
-    )
-    return freshwater, surface
+    return gyre_surface_forcings(card, state, kt)
 
 
 def _trajectory_growth(steps: list[dict]) -> dict:

@@ -10,7 +10,6 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 
-
 def area_weighted_mse(
     pred: jnp.ndarray,
     target: jnp.ndarray,
@@ -65,6 +64,48 @@ def area_weighted_mse(
     # Guard a fully-masked input (denom == 0 -> 0/0 NaN, inf gradient).
     denom = jnp.maximum(denom, jnp.asarray(jnp.finfo(sq_err.dtype).tiny, sq_err.dtype))
     return jnp.sum(sq_err * weight_b) / denom
+
+
+def volume_weighted_mse(
+    pred: jnp.ndarray,
+    target: jnp.ndarray,
+    volume_weights: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Volume-weighted mean squared error on an arbitrary native grid.
+
+    This is deliberately an adapter around :func:`area_weighted_mse`, not a
+    second squared-error reducer.  Flattening each native cell/face/level into
+    the latitude slot makes the existing weighted-MSE implementation compute
+    ``sum(error**2 * volume) / sum(volume)`` while retaining its empty-mask
+    guard and autodiff behavior.
+
+    ``target`` may be a scalar (for a weighted variance) or have ``pred``'s
+    shape.  ``volume_weights`` and an optional ``mask`` must have ``pred``'s
+    shape; dry cells may equivalently be represented by zero volume.
+    """
+    pred = jnp.asarray(pred)
+    target = jnp.broadcast_to(jnp.asarray(target, dtype=pred.dtype), pred.shape)
+    volume_weights = jnp.asarray(volume_weights, dtype=pred.dtype)
+    if volume_weights.shape != pred.shape:
+        raise ValueError(
+            "volume_weights must have pred's shape; "
+            f"got {volume_weights.shape} != {pred.shape}"
+        )
+    mask_flat = None
+    if mask is not None:
+        mask = jnp.asarray(mask, dtype=pred.dtype)
+        if mask.shape != pred.shape:
+            raise ValueError(
+                f"mask must have pred's shape; got {mask.shape} != {pred.shape}"
+            )
+        mask_flat = mask.reshape((-1, 1))
+    return area_weighted_mse(
+        pred.reshape((-1, 1, 1)),
+        target.reshape((-1, 1, 1)),
+        volume_weights.reshape((-1,)),
+        mask=mask_flat,
+    )
 
 
 def latitude_weighted_rmse(

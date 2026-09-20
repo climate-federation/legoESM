@@ -22,19 +22,21 @@ from legoesm.ocean.fidelity.nemo_recipe import (
     NEMOModelRecipeConfig,
     NEMORecipe,
     nemo_gyre_emp,
+    nemo_gyre_qns,
     nemo_gyre_qsr,
     nemo_gyre_t_star,
     nemo_gyre_wind,
     nemo_gyre_zero_mean_emp,
     nemo_lat_lon_model_config,
 )
+from legoesm.ocean.freshwater import FreshwaterForcing
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.convection.config import (
     EnhancedDiffusionConfig,
     OceanConvectionConfig,
 )
 from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
-from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.state import LatLonCGridOceanConfig, OceanSurfaceForcing
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
     nemo_fe3mask_from_tmask,
@@ -1346,6 +1348,52 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     )
     validate_nemo_testcase_card(card)
     return card
+def gyre_surface_forcings(
+    card: NEMOTestcaseCard, state, kt,
+) -> tuple[FreshwaterForcing, OceanSurfaceForcing]:
+    """Assemble the certified GYRE forcing pair for model step ``kt``.
+
+    This is the shared construction used by both the phase-3/year campaign
+    harness and differentiable scan drivers.  ``kt`` is one-based and may be a
+    traced integer; the seasonal clock is exactly ``kt * card.dt_s``.
+    """
+    from legoesm.core.source_rounding import nemo_source_round
+    from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
+
+    if card.surface_boundary_condition != "gyre_usrdef_sbc":
+        raise ValueError(
+            "gyre_surface_forcings requires the certified gyre_usrdef_sbc card"
+        )
+    sbc = gyre_surface_boundary_condition(card, kt * card.dt_s)
+    sst = state.T.data[..., 0]
+    sst_m = nemo_potential_temperature_from_conservative(
+        sst, state.S.data[..., 0])
+    qns = nemo_gyre_qns(
+        sst, sst_m, sbc.t_star_c, sbc.qsr_w_m2, sbc.emp_kg_m2_s)
+    q_total = nemo_source_round(qns + sbc.qsr_w_m2)
+    surface = OceanSurfaceForcing(
+        sw_down=sbc.qsr_w_m2,
+        q_net=q_total,
+        tau_x=-(
+            card.recipe.grid.cos_alpha_u[:, 1:] * sbc.utau_pa
+            - card.recipe.grid.sin_alpha_u[:, 1:] * sbc.vtau_pa
+        ),
+        tau_y=-(
+            card.recipe.grid.sin_alpha_u[:, 1:] * sbc.utau_pa
+            + card.recipe.grid.cos_alpha_u[:, 1:] * sbc.vtau_pa
+        ),
+        tau_i_native=sbc.utau_pa,
+        tau_j_native=sbc.vtau_pa,
+    )
+    zeros = jnp.zeros_like(sbc.emp_kg_m2_s)
+    freshwater = FreshwaterForcing(
+        precip=zeros,
+        evap=sbc.emp_kg_m2_s,
+        runoff=zeros,
+        ice_fw=zeros,
+        restoring=zeros,
+    )
+    return freshwater, surface
 
 
 def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
@@ -1553,6 +1601,7 @@ __all__ = (
     "build_nemo_testcase_card",
     "gyre_horizontal_coordinates",
     "gyre_surface_boundary_condition",
+    "gyre_surface_forcings",
     "gyre_vertical_ladder",
     "validate_nemo_testcase_card",
     "validate_nemo_testcase_card_for_execution",

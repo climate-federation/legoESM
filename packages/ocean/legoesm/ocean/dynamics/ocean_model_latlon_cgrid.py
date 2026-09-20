@@ -4764,6 +4764,9 @@ class LatLonCGridOceanModel:
                 nemo_stage_zad_eta_after_override),
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
+            lateral_viscosity_active=(
+                None if config is None
+                else bool(self.config.lateral_viscosity.A_h > 0.0)),
         )
 
     def tendencies_with_diagnostics(
@@ -4837,6 +4840,9 @@ class LatLonCGridOceanModel:
             ldf_state=ldf_state,
             zad_continuity_dt=_qco_dt,
             return_nemo_operator_components=return_nemo_operator_components,
+            lateral_viscosity_active=(
+                None if config is None
+                else bool(self.config.lateral_viscosity.A_h > 0.0)),
         )
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
@@ -4856,6 +4862,7 @@ class LatLonCGridOceanModel:
                    _return_tracer_process_trace: bool = False,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
+                   _nemo_ab3am4_cold_start=None,
                    z_coord=None, config=None, iwm_fields=None):
         """Core step logic — no JIT wrapper.
 
@@ -6062,6 +6069,11 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_continuity_update_test_override=False)
+                if _nemo_ab3am4_cold_start is not None:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_ab3am4_cold_start=(
+                            _nemo_ab3am4_cold_start))
             elif _return_barotropic_substeps:
                 raise NotImplementedError(
                     "GYRE substep trace requires the standard-halo barotropic path")

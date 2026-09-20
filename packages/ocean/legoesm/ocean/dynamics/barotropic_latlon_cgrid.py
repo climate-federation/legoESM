@@ -2413,6 +2413,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
     _nemo_raw_history_test_override=None,
+    _nemo_ab3am4_cold_start=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -2812,12 +2813,38 @@ def barotropic_substeps_latlon_cgrid(
         # boundary (dynspg_ts.F90:200-226, 806-808). Static Python gate on
         # pytree structure — same pattern as the prognostic state.tke seed.
         _ab3_hist = getattr(state, "bt_hist", None)
+        if _nemo_ab3am4_cold_start is not None:
+            if _ab3_hist is None:
+                raise ValueError(
+                    "the dynamic nemo_ab3am4 cold-start selector requires a "
+                    "six-array bt_hist placeholder so the scan carry treedef "
+                    "is constant")
+            # A differentiable scan cannot carry None on kt=1 and a tuple on
+            # kt>=2.  Select the exact cold operands data-dependently while
+            # retaining the tuple treedef: cold histories are the window-start
+            # values and cold coefficients are the ll_init ramp.  The supplied
+            # placeholder is therefore unreachable at kt=1.
+            _cold = jnp.asarray(_nemo_ab3am4_cold_start, dtype=bool)
+            _cold_hist = (U_bar, U_bar, V_bar, V_bar, eta, eta)
+            _ab3_hist = tuple(
+                jnp.where(_cold, cold_value, carried_value)
+                for cold_value, carried_value in zip(
+                    _cold_hist, _ab3_hist, strict=True)
+            )
         if _ab3_hist is not None and _carried_baro is None:
             raise ValueError(
                 "nemo_ab3am4 continuation requires the paired prognostic "
                 "uu_b/vv_b boundary mean when bt_hist is present")
-        _ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(
-            n_loop, ramp=_ab3_hist is None)
+        if _nemo_ab3am4_cold_start is None:
+            _ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(
+                n_loop, ramp=_ab3_hist is None)
+        else:
+            _za_cold, _zb_cold = nemo_ab3am4_coeff_arrays(
+                n_loop, ramp=True)
+            _za_warm, _zb_warm = nemo_ab3am4_coeff_arrays(
+                n_loop, ramp=False)
+            _ab3_za = jnp.where(_cold, _za_cold, _za_warm)
+            _ab3_zb = jnp.where(_cold, _zb_cold, _zb_warm)
         # cast to the state dtype: f64 coefficients would silently promote the
         # f32 carry and break the scan carry-type invariant.
         _ab3_za = _ab3_za.astype(eta.dtype)

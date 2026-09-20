@@ -3121,6 +3121,7 @@ def _bc_horizontal_viscosity(
     rho_prime=None, h_k=None, ldf_thickness_operands=None,
     ldf_metric_reciprocal_operands=None,
     vertex_mask=None,
+    lateral_viscosity_active=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
     Smagorinsky + Leith, with cos(lat) / equatorial / polar-cap scaling and the
@@ -3128,6 +3129,12 @@ def _bc_horizontal_viscosity(
     together because the meridional block reuses the slope-foot helper/fields
     defined in stage 10. Pure verbatim extraction (Q8). Returns the momentum
     accumulators plus the per-term viscosity diagnostics."""
+    # Coefficients may be traced by parameter calibration.  Operator presence
+    # is a static model choice, supplied by the owning model in that case; the
+    # direct-kernel default retains the historical config-value dispatch.
+    _A_h_active = (config.lateral_viscosity.A_h > 0
+                   if lateral_viscosity_active is None
+                   else lateral_viscosity_active)
     diag_Ah_lap_u = jnp.zeros_like(du_dt)
     diag_Ah_lap_v = jnp.zeros_like(dv_dt)
     # Cell-centre A_h coefficient field [m²/s] used to build the FAITHFUL
@@ -3231,7 +3238,7 @@ def _bc_horizontal_viscosity(
         _lv = config.lateral_viscosity
         _has_reduction = (_lv.A_h_eq_boost < 1.0
                           or _lv.A_h_lat_profile is not None)
-        if _has_reduction and _lv.A_h_floor > 0.0 and _lv.A_h > 0:
+        if _has_reduction and _lv.A_h_floor > 0.0 and _A_h_active:
             _fr = _lv.A_h_floor / _lv.A_h
             return jnp.maximum(s_u, _fr), jnp.maximum(s_v, _fr)
         return s_u, s_v
@@ -3284,7 +3291,7 @@ def _bc_horizontal_viscosity(
             uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
 
-    if _use_nemo_div_curl and config.lateral_viscosity.A_h > 0:
+    if _use_nemo_div_curl and _A_h_active:
         # NEMO dyn_ldf_lev_lap: coefficient ahmt(T)/ahmf(F) = ½·rn_Uv·MAX(e1,e2)
         # EMBEDDED inside div/curl (node 14). ``A_h`` here is NEMO's A_h_base =
         # ½·rn_Uv·R·Δλ (the DINO builder), so ½·rn_Uv = A_h / (R·Δλ). This branch
@@ -3366,7 +3373,7 @@ def _bc_horizontal_viscosity(
             _ah_scale_center = _ahmt
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-    elif _use_flux_div and config.lateral_viscosity.A_h > 0:
+    elif _use_flux_div and _A_h_active:
         # Veros component-wise harmonic friction (``flux_divergence_viscosity_cgrid``)
         # applies the cos(lat) A_h scaling INSIDE the flux (Veros
         # ``enable_hor_friction_cos_scaling`` / ``hor_friction_cosPower``).  The
@@ -3426,7 +3433,7 @@ def _bc_horizontal_viscosity(
                 diag_Bh_bilap_u, diag_Bh_bilap_v)
             du_dt = du_dt + diag_Bh_bilap_u
             dv_dt = dv_dt + diag_Bh_bilap_v
-    elif config.lateral_viscosity.A_h > 0 and config.lateral_viscosity.B_h > 0:
+    elif _A_h_active and config.lateral_viscosity.B_h > 0:
         # Both A_h Laplacian and B_h biharmonic active: the biharmonic's
         # *inner* vector Laplacian is identical to the explicit A_h
         # vector Laplacian, so compute ∇²(u, v) ONCE and feed it to
@@ -3509,7 +3516,7 @@ def _bc_horizontal_viscosity(
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
-    elif config.lateral_viscosity.A_h > 0:
+    elif _A_h_active:
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u, v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask,
@@ -3620,7 +3627,7 @@ def _bc_horizontal_viscosity(
             f"lateral_side_bc must be one of {sorted(VALID_LATERAL_SIDE_BC)}, "
             f"got {_side_bc!r}"
         )
-    if _side_bc == "no_slip" and config.lateral_viscosity.A_h > 0:
+    if _side_bc == "no_slip" and _A_h_active:
         if config.lateral_viscosity.A_h_eq_boost != 1.0:
             # codex 9430935 MAJOR-3: the side-drag takes a SCALAR A_h and
             # would silently ignore the equatorial shaping -- refuse rather
@@ -4833,6 +4840,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     return_nemo_operator_components: bool = False,
     nemo_stage_zad_operands=None,
     nemo_stage_zad_eta_after_override=None,
+    lateral_viscosity_active=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -5301,6 +5309,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             ldf_thickness_operands=ldf_thickness_operands,
             ldf_metric_reciprocal_operands=ldf_metric_reciprocal_operands,
             vertex_mask=vertex_mask,
+            lateral_viscosity_active=lateral_viscosity_active,
         )
     _nemo_after_ldf_u = du_dt
     _nemo_after_ldf_v = dv_dt
