@@ -122,7 +122,12 @@ def era5_month(var, month):
 
 
 def on_cells(d, lat, lon):
+    """Nearest ERA5 grid value at every cell; the longitude axis is padded
+    cyclically first so a cell near 360 can pick the 0-degree column."""
     import xarray as xr
+    first, last = d.isel(lon=0), d.isel(lon=-1)
+    d = xr.concat([last.assign_coords(lon=float(last.lon) - 360.0), d,
+                   first.assign_coords(lon=float(first.lon) + 360.0)], "lon")
     return d.sel(lat=xr.DataArray(lat, dims="c"), lon=xr.DataArray(lon, dims="c"),
                  method="nearest", tolerance=3.0).values
 
@@ -196,9 +201,9 @@ def profile(args):
             per_level.append((tm - te, qmk, qmk / qek, rhm, te, qek, rhk, kept))
         rows.append(per_level)
     for k, p in enumerate(PLEV):
-        r0 = rows[0][k]
+        r0 = next((r[k] for r in rows if r[k] is not None), None)   # ERA5 columns from the first run that has the level
         if r0 is None:
-            print(f"{p/100:5.0f} {0.0:5.2f}  (no supported column in the cap at this level)")
+            print(f"{p/100:5.0f} {0.0:5.2f}  (no supported column in the cap at this level, any run)")
             continue
         line = f"{p/100:5.0f} {r0[7]:5.2f} {r0[4]:7.1f} {r0[5]*1e3:7.3f} {r0[6]:7.2f} | "
         line += " ".join((f"dT{r[k][0]:+6.1f} q{r[k][1]*1e3:6.3f} ({r[k][2]:4.2f}x) RH{r[k][3]:5.2f} k{r[k][7]:4.2f}"

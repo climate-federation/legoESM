@@ -59,3 +59,13 @@ def test_area_mean_weights_and_skips_nan_and_refuses_empty():
     assert cw.area_mean(x2, area, mask).tolist() == pytest.approx([5.0, 1.0])
     with pytest.raises(SystemExit):
         cw.area_mean(np.array([np.nan, np.nan, 1.0]), area, mask)
+
+
+def test_on_cells_is_periodic_in_longitude():
+    import xarray as xr
+    lon = np.arange(0.0, 360.0, 90.0)                     # 0, 90, 180, 270
+    d = xr.DataArray(np.arange(4.0)[None, :].repeat(2, 0), dims=("lat", "lon"),
+                     coords={"lat": [70.0, 80.0], "lon": lon})
+    v = cw.on_cells(d, np.array([70.0, 70.0]), np.array([359.0, 271.0]))
+    assert v[0] == 0.0                                      # 359 is nearest to the 0-degree column, not 270
+    assert v[1] == 3.0
