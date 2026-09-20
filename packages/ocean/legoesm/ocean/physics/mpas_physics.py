@@ -434,7 +434,6 @@ def make_mpas_ocean_physics(
                         # so wetness and the deposit of the remainder in the
                         # deepest wet cell follow the same geometry the
                         # dynamics integrate against.
-                        from legoesm.ocean.vertical import compute_layer_thickness
                         _h_live = compute_layer_thickness(
                             state.eta.data, state.H_bathy.data, z_coord)
                         _wet_live = jnp.asarray(_h_live > 0.0, dtype=_h_live.dtype)
