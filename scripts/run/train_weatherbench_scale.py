@@ -52,6 +52,10 @@ class ScaleConfig(NamedTuple):
     # that data-starved the column MLP). --smoke still forces 1. Appended last
     # so positional construction in existing tests stays valid.
     n_days: int | None = None
+    # None = take the deck's ``warmup_steps``. An explicit value lets one
+    # campaign arm depart from a deck its sibling arms share. Appended last so
+    # positional construction in existing tests stays valid.
+    warmup_steps: int | None = None
 
 
 # Scenes used for the POST-TRAINING reachability report.  A subsample, not the
@@ -491,6 +495,13 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
     p.add_argument("--optimizer", default=None,
                    help="adamw|adam|muon|muon_partitioned. Default: YAML "
                         f"`optimizer`, else {_DEFAULT_OPTIMIZER}.")
+    p.add_argument("--warmup-steps", type=int, default=None,
+                   dest="warmup_steps",
+                   help="Global-schedule warmup steps, overriding the deck's "
+                        "`warmup_steps`. Lets one campaign arm depart from a "
+                        "deck other arms share. Every link of a chained run "
+                        "must pass the same value (the resume fingerprint "
+                        "covers the schedule).")
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--out", default="results/wb_scale", dest="out_dir")
     p.add_argument("--resume", action="store_true")
@@ -510,6 +521,7 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
         mode=a.mode, config_path=a.config, resolution_deg=a.resolution_deg,
         n_epochs=a.n_epochs, multi_step_hours=_parse_hours(a.multi_step_hours),
         lr=a.lr, optimizer=a.optimizer, grad_accum=a.grad_accum,
+        warmup_steps=a.warmup_steps,
         out_dir=a.out_dir, resume=a.resume, eval_wb2=a.eval_wb2, smoke=a.smoke,
         training_core=a.training_core, n_days=a.n_days,
     )
@@ -556,12 +568,14 @@ def main(argv=None):
     # re-implementing the answer in shell. Handled before anything heavy is
     # imported: it runs once per link, on a login-class shell.
     args = list(sys.argv[1:] if argv is None else argv)
-    if "--print-latest-complete" in args:
-        i = args.index("--print-latest-complete") + 1
-        if i >= len(args):
+    # FIRST argument only: scanning the whole list let any OTHER option's VALUE
+    # select the query mode, so a job wrapper whose CONFIG/OUT happened to hold
+    # this token printed a signature and exited 0 having trained nothing.
+    if args[:1] == ["--print-latest-complete"]:
+        if len(args) < 2:
             print("--print-latest-complete needs a directory", file=sys.stderr)
             raise SystemExit(2)
-        print_latest_complete_signature(args[i])
+        print_latest_complete_signature(args[1])
         return 0
 
     from legoesm.training.data_parallel import mpi_abort_on_uncaught
@@ -747,7 +761,8 @@ def _main(argv=None):
     # total_steps (``_clamped_warmup``): the cosine schedule needs
     # decay_steps > 0, which the tiny --smoke run otherwise violates.
     warmup = _resolve_warmup(
-        yml.get("warmup_steps", TrainingConfig().warmup_steps),
+        cfg.warmup_steps if cfg.warmup_steps is not None
+        else yml.get("warmup_steps", TrainingConfig().warmup_steps),
         total_steps, nproc)
 
     # --- resume from the last completed epoch --------------------------------
