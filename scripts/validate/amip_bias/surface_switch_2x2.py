@@ -61,6 +61,10 @@ def lowest_level_height(run, T_low, p_low, p_s):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("run")
+    ap.add_argument("--gustiness", type=float, nargs="*", default=None,
+                    help="also sweep the COARE convective-gustiness depth z_i "
+                         "[m] with BOTH corrections on (production 300, "
+                         "COARE-native 600)")
     args = ap.parse_args(argv)
     from legoesm import constants
     from legoesm.core.bulk_flux import compute_most_fluxes
@@ -136,6 +140,37 @@ def main(argv=None):
         ds = 100.0 * (m["saline only"] - base) / base
         db = 100.0 * (m["ON (both)"] - base) / base
         print(f"{name:<24}{dh:10.2f}{ds:10.2f}{db:10.2f}{db - dh - ds:15.2f}")
+    if args.gustiness:
+        # The production deck halves COARE's native gustiness depth (300 m
+        # against 600), and that value is a CONVERGED tuning from a campaign
+        # that ran with the surface flux inflated 16-18% by the height bug.
+        # Lowering gustiness lowers the wind floor and so lowers evaporation,
+        # which is the shape of a knob fitted to cancel the inflation.  With
+        # the inflation gone it is the first thing that should move, so its
+        # effect is measured here rather than assumed.
+        from legoesm.atmosphere.physics.turbulence.config import (
+            SurfaceLayerConfig)
+
+        def lh_gust(zi):
+            cfg = SurfaceLayerConfig(bulk_scheme="coare3",
+                                     gustiness_w_zi=float(zi))
+            _tx, _ty, _sh, lhf, _us = compute_most_fluxes(
+                wind, np.zeros_like(wind), T_a, q_a, sst,
+                q_fresh * SALINE, rho, z_ref=np.where(valid, z_true, 100.0),
+                scheme="coare3", stability_scheme="dyer1974",
+                gustiness_w_zi=float(zi))
+            return np.asarray(lhf)
+
+        print(f"\n{'band':<24}" + "".join(f"{'zi=' + str(int(z)):>12}"
+                                          for z in args.gustiness))
+        for name, box in BANDS.items():
+            cells = [rb.region_mean(lh_gust(z), lat, lon, box, valid=valid)
+                     for z in args.gustiness]
+            print(f"{name:<24}" + "".join(f"{c:12.1f}" for c in cells))
+        print("latent heat flux [W/m2] with BOTH corrections on, sweeping the "
+              "gustiness depth.\nProduction runs 300 m; COARE 3.0's own value "
+              "is 600 m.")
+
     print("\npercent change of the flux from the production default. The "
           "interaction column is the part of the package that is NOT the sum "
           "of the two switches; near zero means they are separable.")
