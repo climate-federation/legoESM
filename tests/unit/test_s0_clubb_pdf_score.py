@@ -81,12 +81,39 @@ def test_surface_layer_lands_top_down():
 
 
 def test_provenance_refuses_rh_cover(monkeypatch):
-    d = {"cf": np.full((3, 4), 0.3)}
+    d = {"cf": np.full((3, 4), 0.3), "trc_q_c": np.zeros((3, 4)), "trc_q_i": np.zeros((3, 4))}
     monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.full((3, 4), 0.3))
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="grid-scale cover"):
         s0.check_provenance("ctl", d, {})
     monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.full((3, 4), 0.1))
     assert s0.check_provenance("ctl", d, {}) == 0.0
+    # clear points do not count: identical zeros with ONE differing cloudy point passes
+    d["cf"][:] = 0.0; d["cf"][0, 0] = 0.5
+    monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.zeros((3, 4)))
+    assert s0.check_provenance("ctl", d, {}) == 0.0
+    monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.full((3, 4), np.nan))
+    with pytest.raises(SystemExit, match="not a valid field"):
+        s0.check_provenance("ctl", d, {})
+
+
+def test_rh_cover_hands_condensate_to_the_scheme(monkeypatch):
+    import legoesm.atmosphere.physics.clouds.cloud_fraction as cfmod
+    seen = {}
+
+    class _P:
+        cloud_fraction = np.zeros((3, 4))
+
+    def fake(T, p_full, q_v, dp, cfg, **kw):
+        seen.update(kw); seen["p_full"] = p_full; return _P()
+    monkeypatch.setattr(cfmod, "compute_cloud_properties", fake)
+    monkeypatch.setattr(s0.cl, "resolved_cloud_config", lambda exp: "cfg")
+    d = {"T": np.full((3, 4), 250.0), "q_v": np.zeros((3, 4)), "p_s": np.full(3, 1e5),
+         "vgrid": np.stack([np.linspace(0, 0.01, 5), np.linspace(0, 0.99, 5)]),
+         "trc_q_c": np.full((3, 4), 1e-4), "trc_q_i": np.full((3, 4), 2e-5),
+         "trc_N_c": None, "trc_N_i": None}
+    s0.rh_cover(d, {})
+    assert seen["q_cloud"] is d["trc_q_c"] and seen["q_ice"] is d["trc_q_i"]
+    assert np.all(np.diff(seen["p_full"], axis=1) > 0)        # top-down pressure
 
 
 def test_arm_without_moments_is_refused(tmp_path, monkeypatch):
@@ -94,11 +121,17 @@ def test_arm_without_moments_is_refused(tmp_path, monkeypatch):
     (tmp_path / "arm").mkdir()
     np.savez(tmp_path / "arm" / "checkpoint_day_0045.npz",
              T=np.full((3, 4), 250.0), physstate_cloud_fraction=np.zeros((3, 4)),
-             trc_q_v=np.zeros((3, 4)), p_s=np.full(3, 1e5), meta_vgrid=np.zeros((2, 5)),
+             trc_q_v=np.zeros((3, 4)), p_s=np.full(3, 1e5),
+             meta_vgrid=np.stack([np.linspace(0, 0.01, 5), np.linspace(0, 0.99, 5)]),
              physstate_col_index=np.arange(3), physstate_clubb_moments=np.zeros((3, 1, 1)))
     with pytest.raises(SystemExit, match="clubb_moments"):
         s0.load_day("arm", 45, 3, require_moments=True)
-    assert s0.load_day("arm", 45, 3)["moments"] is None
+    assert s0.load_day("arm", 45, 3)["moments"] is None      # (ncol,1,1) placeholder = absent
+    bad = dict(np.load(tmp_path / "arm" / "checkpoint_day_0045.npz"))
+    bad["physstate_clubb_moments"] = np.zeros((3, 15, 4))     # present but malformed
+    np.savez(tmp_path / "arm" / "checkpoint_day_0045.npz", **bad)
+    with pytest.raises(SystemExit, match="malformed"):
+        s0.load_day("arm", 45, 3)
 
 
 def test_all_fifteen_fields_are_screened_for_non_finite():
@@ -116,18 +149,27 @@ def _pair_on_disk(tmp_path, ncol=3, nlev=4, arm_cf_bump=0.0, plant_nan=False, da
         exp = {"clubb_prognostic": prog, "turbulence": "clubb", "grid": {"grid_type": "mpas"},
                "output": {"output_dir": str(d)}, "clubb_trop_cloud_top_press": 15000.0}
         (d / "experiment_config.json").write_text(json.dumps(exp))
+        seed = tmp_path / "s0_seed" / "checkpoint_day_0040.npz"
+        seed.parent.mkdir(exist_ok=True); seed.write_bytes(b"")
         (d / "run_manifest.json").write_text(json.dumps(
-            {"command_line": "run_amip.py --restart-from /seed/checkpoint_day_0040.npz"}))
+            {"command_line": f"run_amip.py --restart-from {seed}"}))
         for day in days:
             T = np.full((ncol, nlev), 240.0)
-            cf = np.full((ncol, nlev), 0.2 + (arm_cf_bump if prog else 0.0))
+            if prog:
+                T[:, :2] = 260.0                      # arm warms its upper layers: its OWN
+            cf = np.full((ncol, nlev), 0.2)           # mask would drop them; control mask keeps them
+            if prog:
+                cf[:, 2:] += arm_cf_bump              # excess only in the layers cold on BOTH
+                cf[:, :2] += 3 * arm_cf_bump          # decoy excess where the arm is warm
             mom = np.full((ncol, 15, nlev + 1), 1e-7)
             if plant_nan and prog:
                 mom[0, 3, 1] = np.nan
             np.savez(d / f"checkpoint_day_{day:04d}.npz", T=T, physstate_cloud_fraction=cf,
                      trc_q_v=np.zeros((ncol, nlev)), p_s=np.full(ncol, 1e5),
-                     meta_vgrid=np.zeros((2, nlev + 1)), physstate_col_index=np.arange(ncol),
-                     physstate_clubb_moments=mom)
+                     trc_q_c=np.zeros((ncol, nlev)), trc_q_i=np.zeros((ncol, nlev)),
+                     meta_vgrid=np.stack([np.linspace(0, 0.01, nlev + 1),
+                                          np.linspace(0, 0.99, nlev + 1)]),
+                     physstate_col_index=np.arange(ncol), physstate_clubb_moments=mom)
 
 
 def _fake_mesh(monkeypatch, tmp_path):
@@ -143,13 +185,14 @@ def test_end_to_end_confirms_a_planted_cloud_excess(tmp_path, monkeypatch, capsy
     s0.main(["--control", "ctl", "--arm", "prog", "--days", "45", "46"])
     out = capsys.readouterr().out
     assert "EXPLORATORY VERDICT: CONFIRM" in out      # days are not the registered 45-50
-    assert "+0.1000" in out
+    assert "+0.2000" in out                           # control mask: the +0.2 planted in the
+    assert "+0.4000" not in out                       # cold-on-both layers, not the arm-mask decoy
 
 
 def test_end_to_end_planted_nan_fails(tmp_path, monkeypatch, capsys):
     _pair_on_disk(tmp_path, arm_cf_bump=0.1, plant_nan=True)
     _fake_mesh(monkeypatch, tmp_path)
-    s0.main(["--control", "ctl", "--arm", "prog", "--days", "45", "46"])
+    assert s0.main(["--control", "ctl", "--arm", "prog", "--days", "45", "46"]) == 2
     assert "VERDICT: FAIL" in capsys.readouterr().out
 
 

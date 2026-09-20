@@ -60,6 +60,12 @@ CONFIRM, REFUTE = 0.05, 0.01
 REGISTERED_DAYS = list(range(45, 51))
 PAIR_MAY_DIFFER = {"clubb_prognostic", "output"}
 N_MOMENTS = 15
+# The pinned S0 protocol (2026-09-20): anything else is EXPLORATORY.
+PROTOCOL = {"cloud_scheme": "xu_randall", "cloud_saturation_scheme": "mixed_phase",
+            "turbulence": "clubb", "rad_update_interval_steps": None, "days": 10}
+PROTOCOL_ORIGIN = "s0_seed/checkpoint_day_0040.npz"
+PLACEHOLDER_MOMENTS = (1, 1)          # diagnostic CLUBB stores (ncol, 1, 1): no moments
+CLOUDY = 0.01                         # provenance statistic counts cloudy points only
 
 
 def registered_pair_check(exp_c, exp_a, run_c, run_a):
@@ -68,6 +74,10 @@ def registered_pair_check(exp_c, exp_a, run_c, run_a):
     manifests restart from the same checkpoint."""
     diff = sorted(k for k in set(exp_c) | set(exp_a) if exp_c.get(k) != exp_a.get(k))
     extra = [k for k in diff if k not in PAIR_MAY_DIFFER]
+    oc, oa = dict(exp_c.get("output") or {}), dict(exp_a.get("output") or {})
+    oc.pop("output_dir", None); oa.pop("output_dir", None)
+    if oc != oa:
+        extra.append("output (beyond output_dir)")
     print(f"{'field':>24s} {run_c:>12s} {run_a:>12s}")
     for k in diff:
         if k != "output":
@@ -87,7 +97,13 @@ def registered_pair_check(exp_c, exp_a, run_c, run_a):
         origin.append(toks[toks.index("--restart-from") + 1])
     if origin[0] != origin[1]:
         raise SystemExit(f"FATAL: different restart origins {origin}")
+    if not pathlib.Path(origin[0]).is_file():
+        raise SystemExit(f"FATAL: restart origin {origin[0]} does not exist")
     print(f"restart origin (both): {origin[0]}")
+    off = {k: exp_c.get(k) for k, v in PROTOCOL.items() if exp_c.get(k) != v}
+    if not origin[0].endswith(PROTOCOL_ORIGIN):
+        off["restart_from"] = origin[0]
+    return off
 
 
 def cold_cap_mean(field, T, lat, area, lat_lo, T_max):
@@ -113,20 +129,30 @@ def load_day(run, day, lat_n, require_moments=False):
     for k in ("trc_q_c", "trc_q_i", "trc_N_c", "trc_N_i"):
         out[k] = np.asarray(z[k])[order] if k in z.files else None
     where = f"{run} day {day}"
-    for k in ("T", "cf"):
-        if out[k].shape != (lat_n, nlev):
-            raise SystemExit(f"FATAL: {where}: {k} shape {out[k].shape} != {(lat_n, nlev)}")
+    if "day" in z.files and int(round(float(z["day"]))) != day:
+        raise SystemExit(f"FATAL: {where}: checkpoint stamped day {float(z['day'])}")
+    for k, shp in (("T", (lat_n, nlev)), ("cf", (lat_n, nlev)), ("q_v", (lat_n, nlev)),
+                   ("p_s", (lat_n,))):
+        if out[k].shape != shp:
+            raise SystemExit(f"FATAL: {where}: {k} shape {out[k].shape} != {shp}")
         if not np.isfinite(out[k]).all():
             raise SystemExit(f"FATAL: {where}: non-finite {k}")
+    for k in ("trc_q_c", "trc_q_i", "trc_N_c", "trc_N_i"):
+        if out[k] is not None and (out[k].shape != (lat_n, nlev) or not np.isfinite(out[k]).all()):
+            raise SystemExit(f"FATAL: {where}: bad {k}")
     if out["cf"].min() < 0.0 or out["cf"].max() > 1.0:
         raise SystemExit(f"FATAL: {where}: cloud fraction outside [0, 1]")
+    if vgrid.shape[0] != 2 or not np.all(np.diff(vgrid[0] * 1e5 + vgrid[1] * 1e5) > 0):
+        raise SystemExit(f"FATAL: {where}: vertical grid not monotone top-down")
     mom = np.asarray(z["physstate_clubb_moments"]) if "physstate_clubb_moments" in z.files else None
-    good = mom is not None and mom.shape == (lat_n, N_MOMENTS, nlev + 1)
-    if require_moments and not good:
-        raise SystemExit(f"FATAL: {where}: no well-formed physstate_clubb_moments "
-                         f"(got {None if mom is None else mom.shape}, want "
-                         f"{(lat_n, N_MOMENTS, nlev + 1)}); alarms cannot run")
-    out["moments"] = np.asarray(mom, dtype=np.float64)[order] if good else None
+    if mom is not None and mom.shape[1:] == PLACEHOLDER_MOMENTS:
+        mom = None                                    # diagnostic closure: no moments
+    if mom is not None and mom.shape != (lat_n, N_MOMENTS, nlev + 1):
+        raise SystemExit(f"FATAL: {where}: malformed physstate_clubb_moments {mom.shape}, "
+                         f"want {(lat_n, N_MOMENTS, nlev + 1)}")
+    if require_moments and mom is None:
+        raise SystemExit(f"FATAL: {where}: no physstate_clubb_moments; alarms cannot run")
+    out["moments"] = np.asarray(mom, dtype=np.float64)[order] if mom is not None else None
     return out
 
 
@@ -147,11 +173,22 @@ def rh_cover(d, exp):
 
 
 def check_provenance(name, d, exp, tol=1.0e-6):
+    """Fraction of CLOUDY points (either field > CLOUDY) where the stored cloud
+    fraction equals the rebuilt grid-scale cover; abort above 99 %.  Clear
+    points are excluded so a mostly clear cap cannot trip or pass the check."""
+    if d["trc_q_c"] is None or d["trc_q_i"] is None:
+        raise SystemExit(f"FATAL: {name}: no condensate tracers; grid-scale cover cannot "
+                         "be rebuilt the way the run's radiation saw it")
     rh = rh_cover(d, exp)
-    same = float(np.mean(np.abs(d["cf"] - rh) <= tol))
-    if same > 0.999:
-        raise SystemExit(f"FATAL: {name}: stored cloud fraction equals the humidity-based "
-                         f"cover on {same:.1%} of points; it is not the PDF cloud fraction")
+    if rh.shape != d["cf"].shape or not np.isfinite(rh).all() or rh.min() < 0 or rh.max() > 1:
+        raise SystemExit(f"FATAL: {name}: rebuilt grid-scale cover is not a valid field")
+    cloudy = (d["cf"] > CLOUDY) | (rh > CLOUDY)
+    if cloudy.sum() == 0:
+        raise SystemExit(f"FATAL: {name}: no cloudy point in either field")
+    same = float(np.mean(np.abs(d["cf"][cloudy] - rh[cloudy]) <= tol))
+    if same > 0.99:
+        raise SystemExit(f"FATAL: {name}: stored cloud fraction equals the grid-scale cover "
+                         f"on {same:.1%} of cloudy points; it is not the PDF cloud fraction")
     return same
 
 
@@ -195,13 +232,15 @@ def main(argv=None) -> int:
 
     exp = json.load(open(f"{rb.ROOT}/{args.control}/experiment_config.json"))
     exp_a = json.load(open(f"{rb.ROOT}/{args.arm}/experiment_config.json"))
-    registered_pair_check(exp, exp_a, args.control, args.arm)
+    off_protocol = registered_pair_check(exp, exp_a, args.control, args.arm)
     lat, _lon, area = cl.mesh_coords(exp)
     if not (np.isfinite(area).all() and (area > 0).all()):
         raise SystemExit("FATAL: mesh areas not finite/positive")
     registered = (sorted(set(args.days)) == args.days == REGISTERED_DAYS
-                  and args.lat_lo == 75.0 and args.t_max == 253.0)
+                  and args.lat_lo == 75.0 and args.t_max == 253.0 and not off_protocol)
     label = "REGISTERED" if registered else "EXPLORATORY"
+    if off_protocol:
+        print(f"off-protocol settings (EXPLORATORY): {off_protocol}")
     p_top = exp.get("clubb_trop_cloud_top_press")
 
     print(f"=== S0 PDF cloud fraction, {args.lat_lo:g}-90N, layers T < {args.t_max:g} K: "
@@ -214,6 +253,10 @@ def main(argv=None) -> int:
         a = load_day(args.arm, day, lat.size, require_moments=True)
         if not np.array_equal(c["vgrid"], a["vgrid"]):
             raise SystemExit(f"FATAL: day {day}: arms on different vertical grids")
+        for nm, d, e in ((args.control, c, exp), (args.arm, a, exp_a)):
+            same = check_provenance(nm, d, e)
+            print(f"provenance {nm} day {day}: stored cf equals grid-scale cover on "
+                  f"{same:.1%} of cloudy points [OK]")
         if day == args.days[0]:
             if p_top:
                 from legoesm import constants
@@ -224,10 +267,6 @@ def main(argv=None) -> int:
                                          args.lat_lo, args.t_max)
                 print(f"taper: {above:.1%} of the cold-layer weight lies above the CLUBB "
                       f"troposphere-top pressure {p_top:g} Pa (PDF cloud tapered there)")
-            for nm, d, e in ((args.control, c, exp), (args.arm, a, exp_a)):
-                same = check_provenance(nm, d, e)
-                print(f"provenance {nm} day {day}: stored cf equals RH cover on "
-                      f"{same:.1%} of points [OK]")
         cf_c, n = cold_cap_mean(c["cf"], c["T"], lat, area, args.lat_lo, args.t_max)
         cf_a, _ = cold_cap_mean(a["cf"], c["T"], lat, area, args.lat_lo, args.t_max)  # CONTROL mask
         d = cf_a - cf_c
@@ -241,9 +280,6 @@ def main(argv=None) -> int:
             row["arm_moments_absmax"] = {k: v[1] for k, v in ms.items()}
             mstr = (f"  {ms['rtp2'][0]:9.2e} {ms['thlp2'][0]:9.2e} {ms['wp2'][0]:9.2e} "
                     f"{ms['wp3'][1]:9.2e}")
-        if c["moments"] is not None:
-            _, al = moment_stats(c["moments"], c["T"], lat, area, args.lat_lo, args.t_max)
-            all_alarms += [f"day {day} (control): {x}" for x in al]
         rows.append(row)
         print(f"{day:4d} {cf_c:8.4f} {cf_a:8.4f} {d:+8.4f} {n:7d}{mstr}")
 
@@ -266,7 +302,7 @@ def main(argv=None) -> int:
         json.dump({"verdict": verdict, "label": label, "mean_diff": mean_d, "rows": rows,
                    "alarms": all_alarms, "lat_lo": args.lat_lo, "t_max": args.t_max},
                   open(args.json, "w"), indent=1)
-    return 0
+    return 2 if verdict == "FAIL" else 0
 
 
 if __name__ == "__main__":
