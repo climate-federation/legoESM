@@ -1,0 +1,47 @@
+ONE REVIEW. Adversarial. Do not fix anything. Answer in under 400 words.
+
+Review an INSTRUMENT and the CLAIM it is about to test, before the result is
+read.
+
+Setting: legoESM OMIP on the eORCA1 tripole, scored against NEMO 5.0.1 ORCA1.
+The nino3 box (5S-5N, 150W-90W) is our largest error: SST bias +0.842 C at
+day 25 and +1.147 at day 30. The surface heat flux is ELIMINATED as the cause
+-- a separate measurement found we put about 30 W/m2 LESS heat into the box
+than NEMO at both days and we are warm anyway. So the heat either arrives by
+advection or fails to leave downward.
+
+The instrument: scripts/validate/ocean_fidelity/global_tracer_content.py,
+just extended (commit 7684ea091) with --region, heat_by_depth_bin_C_m3 and
+volume_by_depth_bin_m3. It integrates T and S over wet cells on the native
+eORCA1 frame using mesh metrics e1t*e2t*e3t_0*tmask with a z-star column
+dilation (H+eta)/H, fp64. Card: scripts/cluster/omip_nemo/_nino3_heat_bins.sbatch
+runs it on the control run's day-25 and day-30 snapshots.
+
+The pre-registered reading (commit 771b54845), on the day 25 -> 30 change:
+  (a) 0-50 m warms AND 50-200 m does not => vertical trapping; corroborates a
+      separate twice-reviewed finding that our background heat diffusivity is
+      0.23-0.24x the oracle's between 100 and 317 m.
+  (b) both warm, 50-200 m change >= 0-50 m change => whole-column gain, i.e.
+      advection or a source; vertical mixing is the wrong lever.
+  (c) both warm, 50-200 m change between 0 and the 0-50 m change => mixed.
+  (d) 0-50 m does not warm => the scorecard-derived +0.46 is the suspect.
+
+Attack these specifically:
+
+(a) Is a depth-bin content change over 5 days actually able to separate
+    "trapped at the surface" from "advected into the column"? Name a physical
+    case that produces band (a) but is NOT a vertical mixing deficit.
+(b) The z-star dilation uses eta. Over 5 days in the equatorial Pacific, can a
+    free-surface or thermocline heave move heat BETWEEN bins fixed in depth
+    and be misread as a redistribution? The bins are defined on gdept_1d
+    reference depths, not on the moving column.
+(c) Both snapshots are exactly 5 days apart, so the same local time. What does
+    that do to a 0-50 m bin specifically?
+(d) The claim compares OUR d25->d30 change only, using NEMO's SST change
+    (+0.15) solely to establish the sign. Is that enough, or does band (a)
+    silently require knowing NEMO's own vertical distribution?
+(e) Anything wrong with the bin arithmetic: content divided by that bin's own
+    volume, where the volume itself changes between the two days.
+
+Say which bands you would REJECT as unreadable and what single measurement
+would settle it.
