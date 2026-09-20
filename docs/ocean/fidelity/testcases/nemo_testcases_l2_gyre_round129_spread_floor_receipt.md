@@ -267,7 +267,7 @@ controls, the full record-backed score, both subprocess plants, every citation
 map audit and the worktree-stamp ratchet.  Its exact summary is:
 
 ```text
-============================= 33 passed in 16.28s ==============================
+============================= 34 passed in 15.66s ==============================
 ```
 
 The log and JUnit report are `round129/focused_tests.log` and
