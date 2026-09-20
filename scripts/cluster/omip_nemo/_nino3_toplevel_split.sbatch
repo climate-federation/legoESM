@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=nino3bins
+#SBATCH --job-name=nino3top
 #SBATCH --account=glab
 #SBATCH --partition=short
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
 #SBATCH --time=0:30:00
-#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/nino3bins_%j.out
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/nino3top_%j.out
 #
 # WHERE, vertically, does our nino3 extra heat sit?
 #
@@ -34,7 +34,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
 RUN=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faithtint_d30
 MESH=/burg-archive/glab/users/pg2328/legoESM/data/grids/eORCA1.2_mesh_mask.nc
-OUTJ=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/nino3_heat_bins.json
+OUTJ=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/nino3_toplevel_split.json
 
 for f in "$RUN/snapshot_day0025.npz" "$RUN/snapshot_day0030.npz" "$MESH"; do
   [ -e "$f" ] || { echo "FATAL: missing $f"; exit 1; }
@@ -44,7 +44,7 @@ echo "=== nino3 box (5S-5N, 150W-90W), control run, days 25 and 30 ==="
 $PY scripts/validate/ocean_fidelity/global_tracer_content.py \
     --snapshot "$RUN/snapshot_day0025.npz" "$RUN/snapshot_day0030.npz" \
     --mesh-mask "$MESH" \
-    --region=-5,5,-150,-90 \
+    --region=-5,5,-150,-90 --depth-bin-edges=0,2,10,50,200,1000,inf \
     --json-out "$OUTJ"
 rc=$?
 echo "=== rc=$rc ==="

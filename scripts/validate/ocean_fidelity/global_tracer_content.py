@@ -247,6 +247,7 @@ def _native(a):
 
 
 def main() -> int:
+    global _DEPTH_BIN_EDGES_M
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--snapshot", nargs="+", required=True,
@@ -254,6 +255,12 @@ def main() -> int:
     p.add_argument("--mesh-mask", required=True,
                    help="eORCA1.2_mesh_mask.nc with e1t/e2t/e3t_0/tmask/gdept_1d.")
     p.add_argument("--json-out", default=None)
+    p.add_argument("--depth-bin-edges", default=None, metavar="e0,e1,...",
+                   help="Override the depth-bin edges in metres, ascending, "
+                        "last may be 'inf' (e.g. 0,2,50,200,1000,inf to split "
+                        "the top model level off from the rest of the surface "
+                        "layer). Default: %s." % (",".join(
+                            f"{e:g}" for e in _DEPTH_BIN_EDGES_M),))
     p.add_argument("--region", default=None, metavar="lat0,lat1,lon0,lon1",
                    help="Restrict every integral to a lat/lon box in degrees, "
                         "longitudes on -180..180 (nino3 is -5,5,-150,-90). "
@@ -270,6 +277,13 @@ def main() -> int:
         ds.close()
     except Exception:
         gdept = None
+
+    if a.depth_bin_edges:
+        edges = tuple(float(x) for x in a.depth_bin_edges.split(","))
+        if len(edges) < 2 or any(b <= x for x, b in zip(edges[:-1], edges[1:])):
+            raise SystemExit(f"--depth-bin-edges must be >=2 strictly "
+                             f"ascending values, got {a.depth_bin_edges!r}")
+        _DEPTH_BIN_EDGES_M = edges
 
     region_mask = None
     if a.region:
@@ -289,6 +303,7 @@ def main() -> int:
               "git_sha": _git_sha(Path(__file__).resolve().parents[3]),
               "mesh_mask": str(a.mesh_mask),
               "region": a.region or "global",
+              "depth_bin_edges_m": [float(e) for e in _DEPTH_BIN_EDGES_M],
               "conventions": "native frame [0:331,1:361]; e1t*e2t*e3t_0*tmask; "
                              "z-star dilation (H+eta)/H; fp64",
               "snapshots": {}}
