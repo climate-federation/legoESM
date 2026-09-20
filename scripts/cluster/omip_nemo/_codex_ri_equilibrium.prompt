@@ -1,0 +1,37 @@
+ONE REVIEW, then stop. Attack this DERIVATION and the conclusion drawn from it.
+
+Setting: NEMO-style TKE closure, equatorial Pacific, 15-65 m. Measured, day 30:
+our turbulent energy is ~170x below NEMO's, our vertical mixing coefficient
+~200x below, shear^2 ratio 0.77, N2 ratio 1.50, Richardson number ours 1.416
+and NEMO's 0.724. An offline budget closes to 15 percent of production with
+dissipation computed by the model's own compute_mixing_lengths (l_eps 0.041 m,
+NOT floored). Vertical transport of TKE is 9.0e-15 against production 1.6e-09.
+
+THE DERIVATION. In a purely local balance P + B = eps, with
+  K_m = C_k*l*sqrt(e),  K_h = K_m/Pr,  eps = c_eps*e^(3/2)/l,  l = sqrt(2e)/N
+substitute and the energy e CANCELS, leaving
+  1/Ri = c_eps/(2*C_k) + 1/Pr
+With C_k = 0.1, c_eps = 0.7, Pr = 1 this is Ri = 0.2222, which equals NEMO's
+documented ri_cri = 2/(2 + rn_ediss/rn_ediff) = 2/9.
+
+THE CONCLUSION I DREW. A locally-balanced column has no equilibrium ENERGY,
+only an equilibrium RICHARDSON NUMBER. Both models are measured ABOVE it
+(ours 6.4x, NEMO 3.3x), so neither can sustain turbulence locally, so NEMO's
+must be sustained non-locally; ours has essentially no transport and falls to
+its floor.
+
+ATTACK:
+- Is the substitution right, and does e really cancel? Check whether l_k and
+  l_eps being DIFFERENT (choice 3 uses min(lup,ldn) and sqrt(lup*ldn)) breaks
+  the cancellation, and by how much.
+- Is Ri_eq = ri_cri a derivation or a tautology, given NEMO defines ri_cri
+  from the same two constants?
+- Does "above critical" imply decay, or only that the local balance has no
+  fixed point there? State what actually happens to e above critical.
+- Pr is itself a function of Ri in this scheme. Does treating Pr as a
+  parameter invalidate the algebra?
+- Is the leap from "both above critical" to "NEMO must be transport-sustained"
+  justified, given NEMO's numbers are 5-day means of a diurnally varying field
+  and ours is an instant?
+
+Report only defects. Name the step, the flaw, the check that settles it.
