@@ -258,11 +258,44 @@ No configuration or carried-state choice is exposed.  `DECISION_NEEDED` is
 
 ## Independent adversarial review
 
-PENDING — replaced after the required separate read-only Codex pass.
+The required command was run against the complete incoming-tip-to-receipt
+diff with `codex exec --sandbox read-only`.  Its verbatim terminal result was:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+The command exited 1.  Independent review unavailable in-sandbox.  It emitted
+neither `SHIP` nor `DO NOT SHIP`; no verdict is fabricated.  The log is
+`round126/codex_review.log`.
 
 ## Verification
 
-PENDING — replaced after the final clean-tree gates.
+The owner self-check prints `self-check: all checks passed`; its log is
+`round126/self_check.log`.  The final clean-tree focused suite covering the
+literal vertical solver, year-owner/vertical gate, compiled-source citation
+gate and worktree-stamp ratchet reported:
+
+```text
+============================= 57 passed in 49.54s ==============================
+```
+
+Its log and JUnit are `round126/focused_tests.log` and
+`round126/focused_tests.xml`.  Python byte compilation and `git diff --check`
+also pass.
+
+The receipt citation gate found seven citations, zero unmapped citations,
+zero failures and zero map-audit failures in `round126/citation_gate.json`.
+Shifting the compiled EVD trigger citation by two lines produced
+`SYMBOL-NOT-AT-LINE`, printed no PASS verdict and exited 1; its report and log
+are `round126/citation_gate_shift_plant.json` and
+`round126/citation_gate_shift_plant.log`.  Because the private observer added
+lines to an already cited production file, every affected historical citation
+was rigidly shifted with its extent unchanged; the full campaign gate then
+passed 274 citations with zero map-audit failures in
+`round126/citation_gate_default_after_trace.json`.
 
 ## OPEN — round 127
 
