@@ -139,6 +139,113 @@ def band_median(field, wet, box, z_int, lo, hi):
     return float(np.median(vals[ok])), int(ok.sum())
 
 
+# NEMO zdftke nn_pdl=1: Pr = clamp(zri/ri_cri, 1, 10) with ri_cri deduced from
+# the two namelist coefficients (zdftke.F90:772, :399).  Written as the
+# closure's own arithmetic rather than the number 4.5 so the provenance of the
+# slope is on the page.
+_RN_EDIFF, _RN_EDISS = 0.1, 0.7
+_RI_CRI = 2.0 / (2.0 + _RN_EDISS / _RN_EDIFF)
+_PR_FLOOR, _PR_CEIL = 1.0, 10.0
+
+
+def _band_vals(field, wet, box, z_int, lo, hi):
+    """Wet values inside the box and depth band, flattened (no reduction)."""
+    sel = (z_int >= lo) & (z_int < hi)
+    if not sel.any():
+        return np.empty(0)
+    ok = wet[box][:, sel] > 0.5
+    return field[box][:, sel][ok]
+
+
+def _pr_from_ri(ri):
+    return np.clip(ri / _RI_CRI, _PR_FLOOR, _PR_CEIL)
+
+
+def _prandtl_check(n2_our, s2_our, n2_nemo, s2_nemo, z, nemo_K,
+                   wet_i, box, gdepw_int):
+    """Score each model's archived K_M/K_H against its own Prandtl mapping.
+
+    Non-circular by construction: each side is tested against ITS OWN
+    archived coefficients, so nothing here depends on the other model or on
+    the equilibrium algebra the mapping came from.
+    """
+    out = {"ri_cri": _RI_CRI, "pr_slope": 1.0 / _RI_CRI, "bands": {}}
+    have_ours = ("K_M_diag" in z) and ("K_H_diag" in z)
+    kmo = kho = None
+    if have_ours:
+        kmo = np.transpose(_native(z["K_M_diag"]), (1, 2, 0))
+        kho = np.transpose(_native(z["K_H_diag"]), (1, 2, 0))
+    have_nemo = ("avm" in nemo_K) and ("avt" in nemo_K)
+
+    print(f"\n[prandtl] Pr = clamp(Ri/{_RI_CRI:.4f}, {_PR_FLOOR:.0f}, "
+          f"{_PR_CEIL:.0f}); each model scored on its OWN archived "
+          f"coefficients.")
+    print(f"{'band':22s} {'side':6s} {'Pr pred':>9s} {'Pr arch':>9s} "
+          f"{'within1.5':>10s} {'N2<=0':>8s} {'at ceil':>8s} {'n':>7s}")
+
+    for name, lo, hi in _BANDS:
+        row = {}
+        for side, n2, s2, km, kh in (
+                ("ours", n2_our, s2_our, kmo, kho),
+                ("nemo", n2_nemo, s2_nemo,
+                 nemo_K.get("avm"), nemo_K.get("avt"))):
+            if n2 is None or s2 is None or km is None or kh is None:
+                continue
+            if km.shape != n2.shape or kh.shape != n2.shape:
+                print(f"{name:22s} {side:6s} SKIPPED: coefficient shape "
+                      f"{km.shape}/{kh.shape} vs N2 {n2.shape}")
+                continue
+            vn2 = _band_vals(n2, wet_i, box, gdepw_int, lo, hi)
+            vs2 = _band_vals(s2, wet_i, box, gdepw_int, lo, hi)
+            vkm = _band_vals(km, wet_i, box, gdepw_int, lo, hi)
+            vkh = _band_vals(kh, wet_i, box, gdepw_int, lo, hi)
+            if vn2.size == 0:
+                continue
+            # Convective occupancy first: NEMO forces zri=0 (Pr=1) wherever
+            # the BEFORE-level N2 is non-positive, so these interfaces are
+            # governed by a different branch and are counted, not averaged in
+            # silently.
+            conv = float(np.mean(vn2 <= 0.0))
+            pr_pred = _pr_from_ri(np.where(vn2 > 0.0,
+                                           vn2 / np.maximum(vs2, 1e-12), 0.0))
+            # Both Pr are strictly positive and bounded in [1, 10] by the
+            # clamp, so a POINTWISE agreement fraction is well posed here --
+            # unlike the unbounded coefficient ratios elsewhere in this file,
+            # where a pointwise quotient is meaningless.
+            pr_arch = vkm / np.maximum(vkh, 1e-30)
+            good = np.isfinite(pr_arch) & (pr_arch > 0.0)
+            agree = (float(np.mean(np.maximum(pr_arch[good] / pr_pred[good],
+                                              pr_pred[good] / pr_arch[good])
+                                   <= 1.5)) if good.any() else float("nan"))
+            ceil_frac = float(np.mean(pr_pred >= _PR_CEIL - 1e-9))
+            mp, ma = float(np.median(pr_pred)), (
+                float(np.median(pr_arch[good])) if good.any() else float("nan"))
+            row[side] = {"pr_pred_median": mp, "pr_arch_median": ma,
+                         "frac_within_1p5": agree, "frac_n2_nonpos": conv,
+                         "frac_pred_at_ceiling": ceil_frac,
+                         "n_interfaces": int(vn2.size)}
+            print(f"{name:22s} {side:6s} {mp:9.3f} {ma:9.3f} {agree:10.3f} "
+                  f"{conv:8.3f} {ceil_frac:8.3f} {vn2.size:7d}")
+        out["bands"][name] = row
+
+    if not have_nemo:
+        print("[prandtl] NEMO side SKIPPED: grid_W carries no avm/avt pair.")
+    if not have_ours:
+        print("[prandtl] our side SKIPPED: snapshot lacks K_M_diag/K_H_diag.")
+    print("READ IT AS: a side whose archived ratio does NOT match its own "
+          "predicted Pr has something other than the Prandtl mapping setting "
+          "its heat mixing -- for NEMO the candidates are the enhanced-"
+          "diffusion branch and the convective episodes a five-day mean "
+          "averages away, and the N2<=0 column measures exactly how much room "
+          "that second route has. A side that DOES match is faithful to its "
+          "own formula, which moves the question upstream to the Richardson "
+          "number itself.")
+    print("Our side is one INSTANT and NEMO's a five-day MEAN, so the two "
+          "'arch' columns are NOT comparable to each other; each is only "
+          "comparable to the 'pred' beside it.")
+    return out
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -177,6 +284,23 @@ def main() -> int:
                    help="PNG of the per-interface profile. Drawn from the SAME "
                         "numbers the table prints, in the same function, so a "
                         "figure can never disagree with its own table.")
+    p.add_argument("--prandtl-check", action="store_true",
+                   help="Score EACH model's archived viscosity/diffusivity "
+                        "ratio against the Prandtl mapping the ORCA1 card "
+                        "runs, on that model's OWN state. Three independent "
+                        "questions, none of which needs the other model: "
+                        "(1) does our archived K_M/K_H equal what our own "
+                        "formula predicts from our own N2 and shear -- an "
+                        "implementation self-check that a coding defect would "
+                        "fail; (2) does the SAME formula reproduce NEMO's "
+                        "archived avm/avt on NEMO's own fields -- if not, "
+                        "something other than the Prandtl mapping is setting "
+                        "the oracle's heat mixing; (3) how far apart are the "
+                        "card's plain gradient-Richardson argument and NEMO's "
+                        "viscosity-weighted one on our snapshot. Convective "
+                        "occupancy (the fraction of interfaces with N2<=0, "
+                        "where NEMO forces Pr=1) is printed beside each, "
+                        "because a five-day mean hides those episodes.")
     a = p.parse_args()
 
     if a.nemo_day <= 0 or a.nemo_day % 5 != 0:
@@ -321,6 +445,11 @@ def main() -> int:
     if not nemo_K:
         print("NEMO's TKE is not archived in the 5-day output, so `e` cannot be "
               "compared directly; ours is printed for the length arithmetic.")
+
+    if a.prandtl_check:
+        report["prandtl"] = _prandtl_check(
+            n2_our, s2_our, n2_nemo, s2_nemo, z, nemo_K,
+            wet_i, box, gdepw_int)
 
     # ---- per-interface profile: WHERE do the two energy profiles part? ----
     # The energy ratio is built so the closure constant CANCELS: with
