@@ -13,11 +13,17 @@ so that every day with a checkpoint can be scored, not only published months:
             lowest-layer T bias over >= 75N, and the 850 hPa zonal wind over
             70-90N next to ERA5's.
 
-ERA5 = monthly climatology 1979-2014 of the run's month (ta, hus, ps, ua),
-hus converted to mixing ratio; the model is interpolated in log-pressure per
-column to each reference pressure and a level below a column's surface is
-left out of that column's mean (no extrapolation).  Cell order is taken from
-the checkpoint's own column index (cloud_layers.cell_order).
+ERA5 = monthly climatology 1979-2014 of the run's calendar month (ta, hus,
+ps, ua; the month comes from the run's start date plus the day count on a
+365-day calendar), hus converted to mixing ratio, sampled at the model's
+cells.  The model is interpolated in log-pressure per column to each
+reference pressure; a level below a column's lowest mid-level (or above its
+top) is left out, and the SAME cells are left out of the ERA5 mean at that
+level, so both sides of every ratio and bias use one cell set.  The dome uses
+ocean cells whose model surface height is below --dome-max-z (default 5 m),
+so a surface-height difference cannot pose as a pressure difference.  Cell
+order is proven by the checkpoint's own column index; edge winds are used
+only when that index is the identity.
 
 Usage:
   cap_water.py profile <run>:<day> [...] [--lat-lo 75]
@@ -44,6 +50,30 @@ rb = cl.rb
 
 PLEV = np.array([1000, 925, 850, 700, 600, 500, 400, 300], float) * 100.0
 ERA5_YEARS = ("1979-01-01", "2014-12-31")
+ERA5_MIN_MONTHS = 30
+
+
+_NOLEAP_MONTH_ENDS = np.cumsum([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+
+
+def run_month(exp, day):
+    """Calendar month of model ``day``: the driver maps day 0 to Jan 1 of a
+    365-day (noleap) year and ``start_day`` is a day offset (0.0 in AMIP)."""
+    doy = int(np.floor(float(exp.get("start_day") or 0.0) + day)) % 365     # 0-based day of year
+    return int(np.searchsorted(_NOLEAP_MONTH_ENDS, doy, side="right")) + 1
+
+
+def paired_area_mean(model, ref, area, mask):
+    """Area means of ``model`` and ``ref`` over the SAME cells: those inside
+    ``mask`` where the model value is finite.  Returns (model, ref, retained
+    area fraction of the mask)."""
+    model, ref = np.asarray(model, dtype=np.float64), np.asarray(ref, dtype=np.float64)
+    ok = mask & np.isfinite(model)
+    if not ok.any():
+        raise SystemExit("FATAL: no supported column in the mask")
+    w = area[ok]
+    return (float((model[ok] * w).sum() / w.sum()), float((ref[ok] * w).sum() / w.sum()),
+            float(w.sum() / area[mask].sum()))
 
 
 def columns_to_plev(p_full, field, plev):
@@ -52,7 +82,7 @@ def columns_to_plev(p_full, field, plev):
     out = np.full((p_full.shape[0], np.size(plev)), np.nan)
     lt = np.log(np.atleast_1d(plev))
     for i in range(p_full.shape[0]):
-        ok = lt <= np.log(p_full[i, -1])
+        ok = (lt <= np.log(p_full[i, -1])) & (lt >= np.log(p_full[i, 0]))   # inside the column's mid-levels
         out[i, ok] = np.interp(lt[ok], np.log(p_full[i]), field[i])
     return out
 
@@ -77,8 +107,13 @@ def era5_month(var, month):
     files = sorted(glob.glob(f"{ERA5}/{var}/*.nc"))
     if not files:
         raise SystemExit(f"FATAL: no ERA5 monthly {var} under {ERA5}")
+    if len(files) != 1:
+        raise SystemExit(f"FATAL: expected one ERA5 monthly file for {var}, found {len(files)}")
     d = xr.open_dataset(files[0])[var].sel(time=slice(*ERA5_YEARS))
-    d = d[d.time.dt.month == month].mean("time")
+    d = d[d.time.dt.month == month]
+    if d.time.size < ERA5_MIN_MONTHS:
+        raise SystemExit(f"FATAL: ERA5 {var}: only {d.time.size} samples of month {month}")
+    d = d.mean("time")
     d = d.rename({("lat" if "lat" in d.dims else "latitude"): "lat",
                   ("lon" if "lon" in d.dims else "longitude"): "lon"})
     if float(d.lon.max()) <= 180.0:
@@ -111,7 +146,10 @@ def load_state(run, day):
         if not np.isfinite(st[k]).all() or st[k].shape != st["p_full"].shape:
             raise SystemExit(f"FATAL: {run} day {day}: bad {k}")
     st["u_edge"] = np.asarray(z["u"]) if "u" in z.files else None
-    st["month"] = int(((int(exp.get("start_month", 1)) - 1 + day // 30) % 12) + 1)
+    st["order_is_identity"] = bool(np.array_equal(order, np.arange(order.size)))
+    from legoesm import constants
+    st["z_sfc"] = np.asarray(z["phis"], dtype=np.float64)[order] / constants.g if "phis" in z.files else None
+    st["month"] = run_month(exp, day)
     st["exp"] = exp
     return st, lat, lon, area, order
 
@@ -134,22 +172,28 @@ def profile(args):
     Te = columns_to_plev(np.broadcast_to(plev_e[o], (lat.size, o.size)), Te[:, o], PLEV)
     qe = columns_to_plev(np.broadcast_to(plev_e[o], (lat.size, o.size)), qe[:, o], PLEV)
     mask = lat >= args.lat_lo
-    print(f"cap >= {args.lat_lo:g}N vs ERA5 month {month} clim (area-weighted on the model's cells; "
-          f"model interpolated in log-p per column)")
-    print(f"{'hPa':>5s} {'T_ERA5':>7s} {'q_ERA5':>7s} {'RH_ERA5':>7s} | "
+    rhe_full = qe / np.asarray(saturation_mixing_ratio(np.where(np.isfinite(Te), Te, 250.0), PLEV[None, :]))
+    print(f"cap >= {args.lat_lo:g}N vs ERA5 month {month} clim; every ratio/bias over the SAME cells "
+          f"(model interpolated in log-p per column, cells without that level dropped on BOTH sides; "
+          f"ERA5 columns shown are the mean over the FIRST run's supported cells; 'kept' = area fraction)")
+    print(f"{'hPa':>5s} {'kept':>5s} {'T_ERA5':>7s} {'q_ERA5':>7s} {'RH_ERA5':>7s} | "
           + " ".join(f"{s:>30s}" for s in args.specs))
     rows = []
     for st, *_ in states:
         T = columns_to_plev(st["p_full"], st["T"], PLEV)
         q = columns_to_plev(st["p_full"], st["trc_q_v"], PLEV)
         rh = q / np.asarray(saturation_mixing_ratio(np.where(np.isfinite(T), T, 250.0), PLEV[None, :]))
-        rows.append((area_mean(T, area, mask), area_mean(q, area, mask), area_mean(rh, area, mask)))
-    Tm, qm = area_mean(Te, area, mask), area_mean(qe, area, mask)
-    rhe = area_mean(qe / np.asarray(saturation_mixing_ratio(np.where(np.isfinite(Te), Te, 250.0), PLEV[None, :])), area, mask)
+        per_level = []
+        for k in range(PLEV.size):
+            tm, te, kept = paired_area_mean(T[:, k], Te[:, k], area, mask)
+            qmk, qek, _ = paired_area_mean(q[:, k], qe[:, k], area, mask)
+            rhm, rhk, _ = paired_area_mean(rh[:, k], rhe_full[:, k], area, mask)
+            per_level.append((tm - te, qmk, qmk / qek, rhm, te, qek, rhk, kept))
+        rows.append(per_level)
     for k, p in enumerate(PLEV):
-        line = f"{p/100:5.0f} {Tm[k]:7.1f} {qm[k]*1e3:7.3f} {rhe[k]:7.2f} | "
-        line += " ".join(f"dT{r[0][k]-Tm[k]:+6.1f} q{r[1][k]*1e3:6.3f} ({r[1][k]/qm[k]:4.2f}x) RH{r[2][k]:5.2f}"
-                         for r in rows)
+        r0 = rows[0][k]
+        line = f"{p/100:5.0f} {r0[7]:5.2f} {r0[4]:7.1f} {r0[5]*1e3:7.3f} {r0[6]:7.2f} | "
+        line += " ".join(f"dT{r[k][0]:+6.1f} q{r[k][1]*1e3:6.3f} ({r[k][2]:4.2f}x) RH{r[k][3]:5.2f}" for r in rows)
         print(line)
     return 0
 
@@ -160,42 +204,49 @@ def loop(args):
     from legoesm.grids.factory import create_grid
     import jax.numpy as jnp
     import xarray as xr
-    print(f"{'run:day':>14s} {'dome[hPa]':>10s} {'q925/ERA5':>10s} {'RH925':>6s} {'dT_low[K]':>10s} "
+    print(f"{'run:day':>14s} {'dome[hPa]':>10s} {'q925/ERA5':>10s} {'RH925':>6s} {'dT925[K]':>10s} "
           f"{'u850 70-90N':>12s} {'ERA5 u850':>10s}")
-    cache = {}
+    cache, meshes = {}, {}
     for spec in args.specs:
         run, day = spec.split(":")
         st, lat, lon, area, order = load_state(run, int(day))
-        m = st["month"]
-        if m not in cache:
+        m, res = st["month"], int(st["exp"]["grid"]["resolution"])
+        if (run, m) not in cache:
             sf = xr.open_dataset(glob.glob(f"{rb.ROOT}/{run}/cmor/fx/sftlf_*.nc")[0])["sftlf"]
+            if float(sf.lon.max()) <= 180.0:
+                sf = sf.assign_coords(lon=(sf.lon % 360)).sortby("lon")
             ocean = on_cells(sf.sortby("lat"), lat, lon) < 50
             pse = on_cells(era5_month("ps", m), lat, lon)
-            hus = era5_month("hus", m).sel(plev=92500.0, method="nearest")
-            qe = on_cells(hus, lat, lon); qe = qe / (1.0 - qe)
-            ua = era5_month("ua", m).sel(plev=85000.0, method="nearest").mean("lon").sel(lat=slice(70, 90))
-            ta = era5_month("ta", m)
-            Te_low = None
-            cache[m] = (ocean, pse, qe, float(ua.weighted(np.cos(np.deg2rad(ua.lat))).mean()), ta)
-            mesh = create_grid("mpas", resolution=int(st["exp"]["grid"]["resolution"]))
-        ocean, pse, qe, uref, ta = cache[m]
-        dome = (area_mean(st["p_s"] - pse, area, (lat >= 85) & ocean)
-                - area_mean(st["p_s"] - pse, area, (lat >= 60) & (lat < 70) & ocean)) / 100.0
+            qe = on_cells(era5_month("hus", m).sel(plev=92500.0), lat, lon); qe = qe / (1.0 - qe)
+            Te925 = on_cells(era5_month("ta", m).sel(plev=92500.0), lat, lon)
+            ue850 = on_cells(era5_month("ua", m).sel(plev=85000.0), lat, lon)
+            cache[(run, m)] = (ocean, pse, qe, Te925, ue850)
+        if res not in meshes:
+            meshes[res] = create_grid("mpas", resolution=res)
+        mesh = meshes[res]
+        ocean, pse, qe, Te925, ue850 = cache[(run, m)]
+        if st["z_sfc"] is None:
+            raise SystemExit(f"FATAL: {spec}: checkpoint carries no surface geopotential")
+        flat = ocean & (np.abs(st["z_sfc"]) < args.dome_max_z)
+        dome = (area_mean(st["p_s"] - pse, area, (lat >= 85) & flat)
+                - area_mean(st["p_s"] - pse, area, (lat >= 60) & (lat < 70) & flat)) / 100.0
         q925 = columns_to_plev(st["p_full"], st["trc_q_v"], 92500.0)[:, 0]
         T925 = columns_to_plev(st["p_full"], st["T"], 92500.0)[:, 0]
         cap = lat >= 75
-        qr = area_mean(q925, area, cap) / area_mean(np.where(np.isfinite(q925), qe, np.nan), area, cap)
+        qm, qek, kept = paired_area_mean(q925, qe, area, cap)
         rh = area_mean(q925 / np.asarray(saturation_mixing_ratio(np.where(np.isfinite(T925), T925, 250.0), 92500.0)), area, cap)
-        from heating_budget import era5_on_columns
-        Te = era5_on_columns(lat, st["p_full"], m)
-        dT = area_mean(st["T"][:, -1] - Te[:, -1], area, cap)
+        tm, tek, _ = paired_area_mean(T925, Te925, area, cap)
         if st["u_edge"] is None:
             raise SystemExit(f"FATAL: {spec}: checkpoint carries no edge wind")
+        if not st["order_is_identity"]:
+            raise SystemExit(f"FATAL: {spec}: columns are permuted; edge winds cannot be mapped")
+        if st["u_edge"].shape[0] != np.asarray(mesh.dvEdge).shape[0]:
+            raise SystemExit(f"FATAL: {spec}: edge count {st['u_edge'].shape[0]} != mesh")
         ue, _ = reconstruct_cell_velocity(jnp.asarray(st["u_edge"]), mesh)
-        ue = np.asarray(ue, dtype=np.float64)[order]
-        u850 = columns_to_plev(st["p_full"], ue, 85000.0)[:, 0]
-        u = area_mean(u850, area, lat >= 70)
-        print(f"{spec:>14s} {dome:+10.1f} {qr:10.2f} {rh:6.2f} {dT:+10.1f} {u:+12.1f} {uref:+10.1f}")
+        u850 = columns_to_plev(st["p_full"], np.asarray(ue, dtype=np.float64), 85000.0)[:, 0]
+        u, uref, _ = paired_area_mean(u850, ue850, area, lat >= 70)
+        print(f"{spec:>14s} {dome:+10.1f} {qm/qek:10.2f} {rh:6.2f} {tm-tek:+10.1f} {u:+12.1f} {uref:+10.1f} "
+              f"(925 hPa cells kept {kept:.2f}, dome cells {int(((lat>=85)&flat).sum())}/{int(((lat>=60)&(lat<70)&flat).sum())})")
     return 0
 
 
@@ -205,6 +256,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("profile"); p.add_argument("specs", nargs="+"); p.add_argument("--lat-lo", type=float, default=75.0)
     p.set_defaults(fn=profile)
     l = sub.add_parser("loop"); l.add_argument("specs", nargs="+"); l.set_defaults(fn=loop)
+    l.add_argument("--dome-max-z", type=float, default=5.0, help="max model surface height [m] of a dome cell")
     args = ap.parse_args(argv)
     import jax
     jax.config.update("jax_enable_x64", True)

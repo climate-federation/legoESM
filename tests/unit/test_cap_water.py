@@ -22,6 +22,32 @@ def test_columns_to_plev_is_log_linear_and_never_extrapolates_below_the_surface(
     assert out[1, 1] == pytest.approx(np.log(9.5e4))
 
 
+def test_run_month_uses_the_real_calendar():
+    assert cw.run_month({"start_day": 0.0}, 0) == 1           # day 0 = Jan 1
+    assert cw.run_month({"start_day": 0.0}, 30) == 1          # Jan 31, not "month 2"
+    assert cw.run_month({"start_day": 0.0}, 31) == 2
+    assert cw.run_month({"start_day": 0.0}, 45) == 2
+    assert cw.run_month({"start_day": 0.0}, 59) == 3          # noleap: no Feb 29
+    assert cw.run_month({"start_day": None}, 364) == 12
+    assert cw.run_month({"start_day": 40.0}, 25) == 3
+
+
+def test_paired_area_mean_drops_the_same_cells_on_both_sides():
+    area = np.array([1.0, 1.0, 2.0]); mask = np.array([True, True, True])
+    model = np.array([1.0, np.nan, 3.0]); ref = np.array([10.0, 100.0, 30.0])
+    m, r, kept = cw.paired_area_mean(model, ref, area, mask)
+    assert m == pytest.approx((1 + 6) / 3) and r == pytest.approx((10 + 60) / 3)   # cell 1 dropped from BOTH
+    assert kept == pytest.approx(3 / 4)
+    with pytest.raises(SystemExit):
+        cw.paired_area_mean(np.full(3, np.nan), ref, area, mask)
+
+
+def test_columns_to_plev_rejects_targets_above_the_top():
+    p_full = np.array([[1e4, 5e4, 9e4]])
+    out = cw.columns_to_plev(p_full, np.log(p_full), np.array([5e3, 2e4]))
+    assert np.isnan(out[0, 0]) and out[0, 1] == pytest.approx(np.log(2e4))
+
+
 def test_area_mean_weights_and_skips_nan_and_refuses_empty():
     area = np.array([1.0, 3.0, 5.0]); mask = np.array([True, True, False])
     assert cw.area_mean(np.array([2.0, 6.0, 100.0]), area, mask) == pytest.approx((2 + 18) / 4)
