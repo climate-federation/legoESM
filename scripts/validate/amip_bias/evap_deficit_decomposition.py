@@ -19,7 +19,10 @@ difference to 2 m with z0q = 1e-4 m.  Both factors are printed raw and
 matched; the matched row is the one to read.  Stability is ignored, which
 overstates the correction slightly in unstable tropical conditions.
 
-Usage: evap_deficit_decomposition.py <run>
+Usage: evap_deficit_decomposition.py <run> [fig.png]
+The optional figure shows the ocean surface-pressure difference to MERRA2
+(map) and the ocean zonal means, since the ps printout is what limits the
+kept sample.
 """
 from __future__ import annotations
 
@@ -73,7 +76,25 @@ def merra(var, months, mlat, mlon):
     return np.asarray(rb.bin_to_model(arr, rlat, rlon, mlat, mlon, label=var))
 
 
-def main(run):
+def _ps_figure(run, ps, ps_o, sea, lat, lon, out):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    d = np.where(sea, (ps - ps_o) / 100.0, np.nan)
+    w = np.cos(np.deg2rad(lat))[:, None] * sea
+    zm = lambda f: np.nansum(np.where(sea, f, 0.0) * w, 1) / np.maximum(w.sum(1), 1e-12)  # noqa: E731
+    fig, ax = plt.subplots(1, 2, figsize=(13, 4), gridspec_kw={"width_ratios": [2.2, 1]})
+    im = ax[0].pcolormesh(lon, lat, d, cmap="RdBu_r", vmin=-12, vmax=12, shading="auto")
+    fig.colorbar(im, ax=ax[0], label="ps model - MERRA2 [hPa]")
+    ax[0].set_title(f"{run}: ocean surface pressure minus MERRA2")
+    ax[1].plot(zm(ps) / 100.0, lat, label=run)
+    ax[1].plot(zm(ps_o) / 100.0, lat, "k--", label="MERRA2")
+    ax[1].set_xlabel("ocean zonal-mean ps [hPa]"); ax[1].set_ylabel("lat"); ax[1].legend(); ax[1].grid()
+    fig.tight_layout(); fig.savefig(out, dpi=110)
+    print(f"figure {out}")
+
+
+def main(run, fig=None):
     from legoesm import constants
     from legoesm.thermo import saturation_specific_humidity
 
@@ -109,6 +130,8 @@ def main(run):
     dq_m, dq_o = qs_m - q_m, qs_o - q_o
     t = np.asarray(du.time)
     sea = (fl < 0.01) & np.isfinite(sst)
+    if fig:
+        _ps_figure(run, ps, ps_o, sea, lat, lon, fig)
     for name, box in BANDS.items():
         pm = rb.region_mean(ps, lat, lon, box, valid=sea)
         po = rb.region_mean(ps_o, lat, lon, box, valid=sea)
@@ -132,4 +155,4 @@ def main(run):
           "internal-state flux; NOT a transfer coefficient.")
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
