@@ -246,12 +246,17 @@ def _prandtl_check(n2_our, s2_our, n2_nemo, s2_nemo, z, nemo_K,
         print("[prandtl] our side SKIPPED: snapshot lacks K_M_diag/K_H_diag.")
     print("READ IT AS: a side whose archived ratio does NOT match its own "
           "predicted Pr has something other than the Prandtl mapping setting "
-          "its heat mixing -- for NEMO the candidates are the enhanced-"
-          "diffusion branch and the convective episodes a five-day mean "
-          "averages away, and the N2<=0 column measures exactly how much room "
-          "that second route has. A side that DOES match is faithful to its "
-          "own formula, which moves the question upstream to the Richardson "
+          "its heat mixing. A side that DOES match is faithful to its own "
+          "formula, which moves the question upstream to the Richardson "
           "number itself.")
+    print("THE N2<=0 COLUMN CANNOT BOUND THE CONVECTIVE ROUTE, and an earlier "
+          "version of this text wrongly said it could. NEMO's N2 here is "
+          "built from FIVE-DAY-MEAN temperature and salinity, while its "
+          "enhanced-diffusion branch fires on INSTANTANEOUS unstable "
+          "episodes that such a mean erases. This column reading 0.000 is "
+          "therefore evidence about the mean state only, and is consistent "
+          "with frequent firing; the archived diffusivity, not this column, "
+          "is what settles it.")
     print("Our side is one INSTANT and NEMO's a five-day MEAN, so the two "
           "'arch' columns are NOT comparable to each other; each is only "
           "comparable to the 'pred' beside it.")
