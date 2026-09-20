@@ -26,6 +26,8 @@ MODES
                      and records the matching production-JIT boundaries.
   --process-budget   admits both traces, closes day 180 -> 240, and ranks the
                      signed day-240 temperature carry by process.
+  --vertical-record  validates the Round-125 ``tra_zdf`` internal records
+                     against the already admitted process trajectory.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -52,6 +54,10 @@ PLANTS (each exits NON-ZERO; each is exercised by the committed unit test)
   lego-process-stamp       supplies a wrong legoESM producer commit
   lego-process-ulp         moves one decoded legoESM process boundary by 1 ULP
   lego-process-effect      exercises the stored full-production effect plant
+  vertical-stamp           supplies a wrong vertical-record producer commit
+  vertical-truncation      removes one binary64 word from an internal record
+  vertical-matrix-ulp      moves one consumed matrix coefficient by one ULP
+  vertical-trajectory-ulp  breaks one internal/process Tbb comparison by 1 ULP
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -138,6 +144,36 @@ LEGO_PROCESS_FIELDS = (
 LEGO_PROCESS_TRACE_STEPS = PROCESS_END_STEP - PROCESS_START_STEP + 1
 DEFAULT_IMMUTABLE_GYRE_YEAR = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre")
+# Round 125 reuses the existing self-describing ``tra_zdf`` record.  The
+# source writer remains armed for steps 1--2; one additive source line widens
+# it to the 360-step day-180-to-240 interval.  These are byte-layout constants,
+# not scientific tolerances.
+VERTICAL_RECORD_EARLY_STEPS = (1, 2)
+VERTICAL_RECORD_STEPS = (
+    *VERTICAL_RECORD_EARLY_STEPS,
+    *range(PROCESS_START_STEP, PROCESS_END_STEP + 1),
+)
+VERTICAL_RECORD_BYTES = (
+    80 + 44 * 32 + 11 * 8
+    + 27 * PROCESS_JPI * PROCESS_JPJ * PROCESS_JPK * 8
+    + 3 * PROCESS_JPI * PROCESS_JPJ * (PROCESS_JPK - 1) * 8
+    + 3 * PROCESS_JPI * PROCESS_JPJ * 8
+)
+VERTICAL_REQUIRED_FIELDS = (
+    "T_Kbb_in", "T_Krhs_in",
+    "e3t_Kbb", "e3t_Kmm", "e3t_Kaa", "e3w_Kmm",
+    "r3t_Kbb", "r3t_Kmm", "r3t_Kaa",
+    "avt", "ah_wslp2", "akz", "zwt_mix",
+    "zwi", "zwd", "zws", "zwt_lu",
+    "rhs_T", "fwd_T", "sol_T_pre_clamp", "sol_T_post_clamp",
+)
+DEFAULT_PROCESS_RECORD_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round123/"
+    "oracle_process_budget")
+PROCESS_RECORD_COMMIT = "af3f7215060fc17c71adc6794817c710df8ee471"
+DEFAULT_ADMITTED_YEAR_RUN = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/"
+    "nemo_seed0")
 # The geographic stress rotation cannot be a BIT-EXACT row: recovering the
 # native pair from tau_x/tau_y in binary64 costs about 1e-17 Pa because
 # cos^2 + sin^2 is not exactly 1.  So it is scored as a DISCRIMINATION instead
@@ -171,6 +207,11 @@ def _year():
 def _gate():
     return _load("nemo_testcase_l2_gyre_phase3_gate",
                  "nemo_testcase_l2_gyre_phase3_gate.py")
+
+
+def _trazdf():
+    return _load("_gyre_round35_trazdf",
+                 "nemo_testcase_l2_gyre_round35_trazdf_matrix.py")
 
 
 def _round16():
@@ -324,8 +365,9 @@ def _different_cells(left: np.ndarray, right: np.ndarray,
         != np.asarray(right)[mask].view(np.uint64)))
 
 
-def _process_manifest(root: Path, records: list[Path]) -> dict[str, str]:
-    manifest = root / "process_records.sha256"
+def _record_manifest(root: Path, records: list[Path], manifest_name: str,
+                     expected_set: str) -> dict[str, str]:
+    manifest = root / manifest_name
     require(manifest.is_file(), f"missing {manifest.name}")
     rows: dict[str, str] = {}
     for number, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
@@ -338,13 +380,14 @@ def _process_manifest(root: Path, records: list[Path]) -> dict[str, str]:
         require(name not in rows, f"{manifest.name}: duplicate {name}")
         rows[name] = words[0]
     require(set(rows) == {path.name for path in records},
-            "process-record manifest file set differs from steps 1081..1440")
+            f"{manifest.name} file set differs from {expected_set}")
     return rows
 
 
-def _check_process_stamp(root: Path, expected_commit: str) -> None:
-    manifest = root / "process_records.sha256"
-    stamp = root / "process_records.stamp"
+def _check_record_stamp(root: Path, expected_commit: str, manifest_name: str,
+                        stamp_name: str) -> None:
+    manifest = root / manifest_name
+    stamp = root / stamp_name
     require(stamp.is_file(), f"missing {stamp.name}")
     words = stamp.read_text(encoding="utf-8").split()
     require(len(words) == 3, f"{stamp.name}: malformed stamp")
@@ -354,6 +397,16 @@ def _check_process_stamp(root: Path, expected_commit: str) -> None:
             f"{stamp.name}: producer commit mismatch")
     require(words[2] == manifest.name,
             f"{stamp.name}: stamped filename mismatch")
+
+
+def _process_manifest(root: Path, records: list[Path]) -> dict[str, str]:
+    return _record_manifest(
+        root, records, "process_records.sha256", "steps 1081..1440")
+
+
+def _check_process_stamp(root: Path, expected_commit: str) -> None:
+    _check_record_stamp(root, expected_commit, "process_records.sha256",
+                        "process_records.stamp")
 
 
 def _resolved_process_card(path: Path) -> dict[str, bool]:
@@ -604,6 +657,340 @@ def validate_process_record(root: Path, expected_commit: str,
         },
         "first_record_sha256": digests[expected_names[0]],
         "last_record_sha256": digests[expected_names[-1]],
+    }
+
+
+# ----------------------- day-180-to-240 tra_zdf internal record admission ---
+def _vertical_field(record: dict, name: str, nlev: int | None = None,
+                    *, transpose: bool = True) -> np.ndarray:
+    """Return one checked ``tra_zdf`` field on the NEMO interior box."""
+    trazdf = _trazdf()
+    values = np.asarray(trazdf._box(record, name, nlev), dtype=np.float64)
+    if not transpose:
+        return values
+    if values.ndim == 2:
+        return values.T.copy()
+    return np.transpose(values, (1, 0, 2)).copy()
+
+
+def _vertical_calibration(record: dict) -> dict[str, int]:
+    """Rebuild every consumed temperature boundary from recorded operands."""
+    trazdf = _trazdf()
+    rebuilt = trazdf.nemo_rebuild(record)
+    nlev = record["header"]["jpkm1"]
+    pairs = {
+        "zwt_mix": (_vertical_field(record, "zwt_mix", transpose=False),
+                    rebuilt["zwt_mix"]),
+        "zwi": (_vertical_field(record, "zwi", transpose=False),
+                rebuilt["zwi"]),
+        "zwd": (_vertical_field(record, "zwd", transpose=False),
+                rebuilt["zwd"]),
+        "zws": (_vertical_field(record, "zws", transpose=False),
+                rebuilt["zws"]),
+        "zwt_lu": (_vertical_field(record, "zwt_lu", transpose=False),
+                   rebuilt["zwt_lu"]),
+        "rhs_T": (_vertical_field(record, "rhs_T", nlev, transpose=False),
+                  rebuilt["rhs_T"][..., :nlev]),
+        "fwd_T": (_vertical_field(record, "fwd_T", nlev, transpose=False),
+                  rebuilt["fwd_T"][..., :nlev]),
+        "sol_T": (_vertical_field(
+            record, "sol_T_pre_clamp", nlev, transpose=False),
+            rebuilt["sol_T"][..., :nlev]),
+    }
+    return {
+        name: int(np.count_nonzero(
+            np.asarray(observed).view(np.uint64)
+            != np.asarray(expected).view(np.uint64)))
+        for name, (observed, expected) in pairs.items()
+    }
+
+
+def _read_vertical_record(path: Path, expect_step: int) -> dict:
+    trazdf = _trazdf()
+    try:
+        return trazdf.read_trazdf_matrix(path, expect_kt=expect_step)
+    except trazdf.RecordError as error:
+        raise GateError(str(error)) from error
+
+
+def _vertical_matrix_ulp_control(record: dict) -> dict:
+    """Move one consumed diagonal bit and prove calibration catches it."""
+    trazdf = _trazdf()
+    baseline = trazdf.nemo_rebuild(record)["zwd"]
+    planted = dict(record)
+    arrays = dict(record["arrays"])
+    diagonal = np.array(arrays["zwd"], copy=True)
+    planted["arrays"] = arrays
+    arrays["zwd"] = diagonal
+    isl, jsl = trazdf._interior(record["header"])
+    local = diagonal[isl, jsl, :]
+    for index in np.ndindex(local.shape):
+        old = local[index]
+        new = np.nextafter(old, np.inf)
+        if np.isfinite(new) and new != old:
+            local[index] = new
+            observed = _vertical_field(
+                planted, "zwd", transpose=False)
+            moved = int(np.count_nonzero(
+                observed.view(np.uint64) != baseline.view(np.uint64)))
+            require(moved == 1,
+                    f"vertical matrix ULP plant moved {moved} registered "
+                    "coefficients, expected 1")
+            return {
+                "field": "zwd", "interior_index_ijk": list(index),
+                "old_uint64": int(np.asarray(old).view(np.uint64)),
+                "new_uint64": int(np.asarray(new).view(np.uint64)),
+                "registered_coefficients_moved": moved,
+                "consumed_by": "LU diagonal recurrence",
+            }
+    raise GateError("vertical matrix ULP plant found no movable coefficient")
+
+
+def _vertical_trajectory_ulp_control(vertical_tbb: np.ndarray,
+                                     process_tbb: np.ndarray,
+                                     mask: np.ndarray) -> dict:
+    """Break one real alignment bit after proving the baseline is exact."""
+    require(_different_cells(vertical_tbb, process_tbb, mask) == 0,
+            "unplanted vertical/process Tbb fields differ")
+    planted = np.array(vertical_tbb, copy=True)
+    j, i, k = np.argwhere(mask)[0]
+    planted[j, i, k] = np.nextafter(planted[j, i, k], np.inf)
+    moved = _different_cells(planted, process_tbb, mask)
+    require(moved == 1,
+            f"vertical trajectory ULP plant moved {moved} cells, expected 1")
+    return {"field": "T_Kbb_in", "cells_unequal": moved,
+            "index_jik": [int(j), int(i), int(k)]}
+
+
+def validate_vertical_record(root: Path, expected_commit: str, *,
+                             process_root: Path = DEFAULT_PROCESS_RECORD_ROOT,
+                             plant: str | None = None) -> dict:
+    """Admit the reused ``tra_zdf`` interval record or fire one plant."""
+    root = Path(root)
+    process_root = Path(process_root)
+    expected_names = [
+        f"oracle_trazdf_matrix_kt{step:08d}.bin"
+        for step in VERTICAL_RECORD_STEPS
+    ]
+    records = [root / name for name in expected_names]
+    observed = sorted(root.glob("oracle_trazdf_matrix_kt*.bin"))
+    require([path.name for path in observed] == expected_names,
+            "vertical-record set is not exactly steps 1, 2 and 1081..1440")
+    require(VERTICAL_RECORD_BYTES == 6965416,
+            f"vertical record layout is {VERTICAL_RECORD_BYTES}, expected "
+            "6965416 bytes")
+    for path in records:
+        require(path.stat().st_size == VERTICAL_RECORD_BYTES,
+                f"{path.name}: {path.stat().st_size} bytes, expected "
+                f"{VERTICAL_RECORD_BYTES}")
+
+    producer_path = root / "producer_commit.txt"
+    require(producer_path.is_file(), f"missing {producer_path.name}")
+    producer = producer_path.read_text(encoding="utf-8").strip()
+    require(producer == expected_commit,
+            "producer_commit.txt differs from --expect-commit")
+    manifest = _record_manifest(
+        root, records, "vertical_records.sha256",
+        "steps 1, 2 and 1081..1440")
+    process_names = [
+        f"oracle_process_budget_kt{step:08d}.bin"
+        for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1)
+    ]
+    process_records = [process_root / name for name in process_names]
+    observed_process = sorted(process_root.glob(
+        "oracle_process_budget_kt*.bin"))
+    require([path.name for path in observed_process] == process_names,
+            "admitted process-record set is not exactly steps 1081..1440")
+    process_producer = (process_root / "producer_commit.txt").read_text(
+        encoding="utf-8").strip()
+    require(process_producer == PROCESS_RECORD_COMMIT,
+            "admitted process record has the wrong producer commit")
+    process_manifest = _process_manifest(process_root, process_records)
+    _check_process_stamp(process_root, PROCESS_RECORD_COMMIT)
+    if plant == "vertical-stamp":
+        try:
+            _check_record_stamp(root, "0" * 40, "vertical_records.sha256",
+                                "vertical_records.stamp")
+        except GateError as error:
+            return {"status": "PLANT-FIRED", "plant": plant,
+                    "reason": str(error)}
+        raise GateError("vertical-stamp plant stayed green")
+    _check_record_stamp(root, expected_commit, "vertical_records.sha256",
+                        "vertical_records.stamp")
+
+    first_interval = records[len(VERTICAL_RECORD_EARLY_STEPS)]
+    trazdf = _trazdf()
+    if plant == "vertical-truncation":
+        try:
+            trazdf.read_trazdf_matrix(
+                first_interval, expect_kt=PROCESS_START_STEP, truncate=True)
+        except trazdf.RecordError as error:
+            return {"status": "PLANT-FIRED", "plant": plant,
+                    "reason": str(error)}
+        raise GateError("vertical-truncation plant stayed green")
+
+    gate = _gate()
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    mask = gate.expected_masks(build_nemo_testcase_card(CASE))["T"]
+    mask2 = np.any(mask, axis=-1)
+    require(mask.shape == (PROCESS_JPJ - 4, PROCESS_JPI - 4,
+                           PROCESS_JPK - 1),
+            f"vertical mask shape {mask.shape} differs from frozen layout")
+    first = _read_vertical_record(first_interval, PROCESS_START_STEP)
+    if plant == "vertical-matrix-ulp":
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": _vertical_matrix_ulp_control(first)}
+    if plant == "vertical-trajectory-ulp":
+        process = read_process_record(
+            process_root
+            / f"oracle_process_budget_kt{PROCESS_START_STEP:08d}.bin")
+        tbb = _vertical_field(first, "T_Kbb_in", mask.shape[-1])
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": _vertical_trajectory_ulp_control(
+                    tbb, process["Tbb"][..., :mask.shape[-1]], mask)}
+    require(plant in (None, "none"),
+            f"unknown vertical-record plant {plant!r}")
+
+    alignment = {
+        "T_Kbb_in_vs_process_Tbb": 0,
+        "T_Krhs_in_vs_process_post_ldf": 0,
+        "sol_T_post_clamp_vs_process_Taa": 0,
+        "r3t_Kbb_vs_process": 0,
+        "r3t_Kmm_vs_process": 0,
+        "r3t_Kaa_vs_process": 0,
+        "sol_T_post_clamp_vs_next_T_Kbb_in": 0,
+    }
+    calibration = {
+        name: 0 for name in (
+            "zwt_mix", "zwi", "zwd", "zws", "zwt_lu",
+            "rhs_T", "fwd_T", "sol_T")
+    }
+    activity = {name: 0 for name in VERTICAL_REQUIRED_FIELDS}
+    first_header = None
+    last_header = None
+    first_digest = None
+    last_digest = None
+    previous_solution = None
+    for position, (step, path) in enumerate(
+            zip(VERTICAL_RECORD_STEPS, records, strict=True)):
+        record = first if step == PROCESS_START_STEP else \
+            _read_vertical_record(path, step)
+        require(record["sha256"] == manifest[path.name],
+                f"{path.name}: sha256 manifest mismatch")
+        require(tuple(record["order"]) == tuple(trazdf.EXPECTED_ARRAYS),
+                f"{path.name}: vertical field order differs from the "
+                "compiled writer")
+        require(all(name in record["arrays"]
+                    for name in VERTICAL_REQUIRED_FIELDS),
+                f"{path.name}: required vertical field is missing")
+        if position == 0:
+            first_header = dict(record["header"])
+            first_digest = record["sha256"]
+        if position == len(records) - 1:
+            last_header = dict(record["header"])
+            last_digest = record["sha256"]
+        if step < PROCESS_START_STEP:
+            continue
+
+        per_record = _vertical_calibration(record)
+        for name, unequal in per_record.items():
+            calibration[name] += unequal
+        process_path = process_root / f"oracle_process_budget_kt{step:08d}.bin"
+        process = read_process_record(process_path)
+        require(process["sha256"] == process_manifest[process_path.name],
+                f"{process_path.name}: sha256 manifest mismatch")
+        nlev = mask.shape[-1]
+        current_tbb = _vertical_field(record, "T_Kbb_in", nlev)
+        if previous_solution is not None:
+            alignment["sol_T_post_clamp_vs_next_T_Kbb_in"] += \
+                _different_cells(previous_solution, current_tbb, mask)
+        pairs3 = {
+            "T_Kbb_in_vs_process_Tbb": (
+                current_tbb,
+                process["Tbb"][..., :nlev]),
+            "T_Krhs_in_vs_process_post_ldf": (
+                _vertical_field(record, "T_Krhs_in", nlev),
+                process["rhs_after_lateral_diffusion"][..., :nlev]),
+            "sol_T_post_clamp_vs_process_Taa": (
+                _vertical_field(record, "sol_T_post_clamp", nlev),
+                process["Taa"][..., :nlev]),
+        }
+        for name, (left, right) in pairs3.items():
+            alignment[name] += _different_cells(left, right, mask)
+        for name in ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa"):
+            left = _vertical_field(record, name)
+            right = process[name]
+            alignment[f"{name}_vs_process"] += int(np.count_nonzero(
+                left[mask2].view(np.uint64) != right[mask2].view(np.uint64)))
+        for name in VERTICAL_REQUIRED_FIELDS:
+            values = _vertical_field(record, name, transpose=False)
+            activity[name] += int(np.count_nonzero(values))
+        previous_solution = _vertical_field(
+            record, "sol_T_post_clamp", nlev)
+
+    require(all(value == 0 for value in alignment.values()),
+            "vertical record differs from admitted process trajectory: "
+            + ", ".join(f"{name}={value}" for name, value in alignment.items()
+                        if value))
+    require(all(value == 0 for value in calibration.values()),
+            "vertical record fails compiled-arithmetic calibration: "
+            + ", ".join(f"{name}={value}" for name, value in calibration.items()
+                        if value))
+    for name in ("T_Kbb_in", "T_Krhs_in", "avt", "ah_wslp2", "zwt_mix",
+                 "zwi", "zwd", "zws", "zwt_lu", "rhs_T", "fwd_T",
+                 "sol_T_pre_clamp"):
+        require(activity[name] > 0,
+                f"vertical field {name} never contains a nonzero value")
+
+    resolved = _resolved_process_card(root / "ocean.output")
+    restart_rows = {}
+    for name, expected in PROCESS_RESTART_HASHES.items():
+        observed_digest = _sha256(root / name)
+        require(observed_digest == expected,
+                f"passive restart {name} is {observed_digest}, expected "
+                f"{expected}")
+        require(_sha256(DEFAULT_ADMITTED_YEAR_RUN / name) == expected,
+                f"admitted source restart {name} no longer has frozen hash")
+        restart_rows[name] = observed_digest
+    binary_words = (root / "binary.sha256").read_text(
+        encoding="utf-8").split()
+    require(binary_words, "binary.sha256 is empty")
+    binary_digest = _sha256(root / "nemo")
+    require(binary_words[0] == binary_digest,
+            "run binary differs from binary.sha256")
+
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    return {
+        "format": "gyre-year-owners-vertical-record-v1",
+        "status": "PASS", "case": CASE, "plant": plant,
+        "root": str(root), "process_root": str(process_root),
+        "producer_commit": producer, "worktree": worktree_stamp(),
+        "binary_sha256": binary_digest,
+        "layout": {
+            "record_steps": list(VERTICAL_RECORD_STEPS),
+            "record_count": len(records),
+            "bytes_per_record": VERTICAL_RECORD_BYTES,
+            "interval_record_count": LEGO_PROCESS_TRACE_STEPS,
+            "interval_record_bytes": (
+                LEGO_PROCESS_TRACE_STEPS * VERTICAL_RECORD_BYTES),
+            "total_record_bytes": sum(path.stat().st_size for path in records),
+            "first_header": first_header, "last_header": last_header,
+            "records_manifest_sha256": _sha256(
+                root / "vertical_records.sha256"),
+        },
+        "controls": {
+            "resolved_card": resolved,
+            "process_producer_commit": process_producer,
+            "process_manifest_sha256": _sha256(
+                process_root / "process_records.sha256"),
+            "restart_sha256": restart_rows,
+            "process_alignment_cells_unequal": alignment,
+            "compiled_calibration_cells_unequal": calibration,
+            "field_nonzero_value_visits": activity,
+        },
+        "first_record_sha256": first_digest,
+        "last_record_sha256": last_digest,
     }
 
 
@@ -2169,6 +2556,30 @@ def self_check() -> int:
     # 7. the long-horizon process budget is additive, and its RHS ULP control
     # reaches a decoded raw process boundary rather than perturbing a zero.
     _process_math_self_check(failures)
+    # 8. the Round-125 record geometry is frozen independently of a future
+    # acquisition, and its trajectory plant detects exactly one changed bit.
+    if (VERTICAL_RECORD_BYTES != 6_965_416
+            or len(VERTICAL_RECORD_STEPS) != 362
+            or VERTICAL_RECORD_STEPS[:2] != (1, 2)
+            or VERTICAL_RECORD_STEPS[2:] != tuple(range(1081, 1441))):
+        failures.append("Round-125 vertical-record geometry changed")
+    else:
+        print("  Round-125 vertical-record geometry is frozen -- OK")
+    vertical_baseline = np.ones((2, 2, 2), dtype=np.float64)
+    vertical_mask = np.ones_like(vertical_baseline, dtype=bool)
+    control = _vertical_trajectory_ulp_control(
+        vertical_baseline, vertical_baseline.copy(), vertical_mask)
+    if control["cells_unequal"] != 1:
+        failures.append("vertical trajectory plant did not move one cell")
+    else:
+        print("  vertical trajectory ULP plant moves one cell -- OK")
+    broken_vertical = vertical_baseline.copy()
+    broken_vertical[0, 0, 0] = np.nextafter(
+        broken_vertical[0, 0, 0], np.inf)
+    expect_raises(
+        "vertical-trajectory-blind",
+        lambda: _vertical_trajectory_ulp_control(
+            broken_vertical, vertical_baseline, vertical_mask))
     if failures:
         for item in failures:
             print(f"  FAILED: {item}")
@@ -2194,6 +2605,13 @@ def main(argv=None) -> int:
     parser.add_argument("--process-budget", type=Path, default=None,
                         help="score this NEMO process root against "
                              "--lego-process-record")
+    parser.add_argument("--vertical-record", type=Path, default=None,
+                        help="validate a Round-125 tra_zdf internal-record "
+                             "root")
+    parser.add_argument("--vertical-process-root", type=Path,
+                        default=DEFAULT_PROCESS_RECORD_ROOT,
+                        help="admitted Round-123 process root used to align "
+                             "the vertical record step by step")
     parser.add_argument("--expect-commit", default=None,
                         help="required clean producer commit for records")
     parser.add_argument("--forcing-gate", action="store_true")
@@ -2233,6 +2651,23 @@ def main(argv=None) -> int:
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
+        return 0
+    if args.vertical_record is not None:
+        require(args.expect_commit is not None,
+                "--vertical-record needs --expect-commit")
+        report = validate_vertical_record(
+            args.vertical_record, args.expect_commit,
+            process_root=args.vertical_process_root, plant=args.plant)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report.get('reason', report.get('control', 'moved'))}")
+            return 1
+        print("STATUS PASS: vertical tra_zdf record "
+              f"{report['layout']['record_count']} frames, "
+              f"{report['layout']['total_record_bytes']} bytes")
         return 0
     if args.process_budget is not None:
         require(args.lego_process_record is not None,

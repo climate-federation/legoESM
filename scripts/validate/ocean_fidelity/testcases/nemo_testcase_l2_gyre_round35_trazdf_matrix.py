@@ -50,6 +50,7 @@ UNMEASURED with that reason.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import struct
 import sys
@@ -199,7 +200,8 @@ def _starts_a_known_array(raw: bytes, off: int, *, eof_counts: bool) -> bool:
     return raw[off:off + 16] in _KNOWN_NAMES
 
 
-def read_trazdf_matrix(path: Path, *, expect_kt: int = 1) -> dict:
+def read_trazdf_matrix(path: Path, *, expect_kt: int = 1,
+                       truncate: bool = False) -> dict:
     """Parse the self-describing record to EOF, refusing anything malformed.
 
     Nothing here knows the array list in advance; the list is only used
@@ -218,6 +220,9 @@ def read_trazdf_matrix(path: Path, *, expect_kt: int = 1) -> dict:
     if expect_kt < 1:
         raise RecordError(f"expect_kt must be a positive step, got {expect_kt}")
     raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if truncate:
+        raw = raw[:-8]
     require(len(raw) >= 16 + 64, f"{path}: shorter than one header")
     try:
         magic = raw[:16].decode("ascii").rstrip()
@@ -376,6 +381,7 @@ def read_trazdf_matrix(path: Path, *, expect_kt: int = 1) -> dict:
         require(bool(np.isfinite(block).all()),
                 f"{path}: {name!r} carries a non-finite value")
     return {"header": header, "arrays": arrays, "order": order,
+            "sha256": digest,
             "path": str(path), "tile_shaped_salvage": salvaged}
 
 

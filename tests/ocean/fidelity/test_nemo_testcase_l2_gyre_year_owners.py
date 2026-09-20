@@ -32,6 +32,12 @@ NEMO_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
 PROCESS_CARD = (ROOT / "scripts" / "validate" / "ocean_fidelity"
                 / "testcases"
                 / "nemo_testcase_l2_gyre_round123_process_budget")
+VERTICAL_CARD = (ROOT / "scripts" / "validate" / "ocean_fidelity"
+                 / "testcases"
+                 / "nemo_testcase_l2_gyre_round125_vertical_decomposition")
+VERTICAL_EARLY_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round123/"
+    "oracle_process_budget/oracle_trazdf_matrix_kt00000001.bin")
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +61,73 @@ def test_self_check_passes_as_a_subprocess():
                             capture_output=True, text=True, cwd=str(ROOT))
     assert result.returncode == 0, result.stdout + result.stderr
     assert "self-check: all checks passed" in result.stdout
+
+
+def test_round125_vertical_layout_and_card_are_fail_closed(harness):
+    assert harness.VERTICAL_RECORD_BYTES == 6_965_416
+    assert len(harness.VERTICAL_RECORD_STEPS) == 362
+    assert harness.VERTICAL_RECORD_STEPS[:2] == (1, 2)
+    assert harness.VERTICAL_RECORD_STEPS[2:] == tuple(range(1081, 1441))
+    assert 360 * harness.VERTICAL_RECORD_BYTES == 2_507_549_760
+    assert 362 * harness.VERTICAL_RECORD_BYTES == 2_521_480_592
+
+    patch = (VERTICAL_CARD / "trazdf_round125.patch").read_text()
+    removed = [line for line in patch.splitlines()
+               if line.startswith("-") and not line.startswith("---")]
+    assert removed == []
+    assert "kt >= 1081 .AND. kt <= 1440" in patch
+    run = (VERTICAL_CARD / "run.sh").read_text()
+    for needle in (
+            "GYRE_OMIP_L2_P3_SM_R125ZDFMAG", "EXPECTED_COUNT=",
+            "EXPECTED_SIZE=", "EXPECTED_TOTAL=", "SYNTAX_PROOF_PASS",
+            "vertical-stamp", "vertical-truncation",
+            "vertical-matrix-ulp", "vertical-trajectory-ulp",
+            "ROUND125_VERTICAL_RECORD_READY"):
+        assert needle in run
+
+
+def test_round125_vertical_calibration_and_plants_are_nonvacuous(harness):
+    if not VERTICAL_EARLY_RECORD.is_file():
+        pytest.skip("admitted Round-123 early tra_zdf record unavailable")
+    record = harness._read_vertical_record(VERTICAL_EARLY_RECORD, 1)
+    assert harness._vertical_calibration(record) == {
+        "zwt_mix": 0, "zwi": 0, "zwd": 0, "zws": 0,
+        "zwt_lu": 0, "rhs_T": 0, "fwd_T": 0, "sol_T": 0,
+    }
+    control = harness._vertical_matrix_ulp_control(record)
+    assert control["field"] == "zwd"
+    assert control["registered_coefficients_moved"] == 1
+    trazdf = harness._trazdf()
+    with pytest.raises(
+            trazdf.RecordError,
+            match="truncated|followed by neither|runs past EOF"):
+        trazdf.read_trazdf_matrix(
+            VERTICAL_EARLY_RECORD, expect_kt=1, truncate=True)
+
+
+def test_round125_vertical_stamp_and_trajectory_controls_fail(tmp_path,
+                                                              harness):
+    manifest = tmp_path / "vertical_records.sha256"
+    manifest.write_text("0" * 64 + "  frame.bin\n")
+    digest = harness._sha256(manifest)
+    stamp = tmp_path / "vertical_records.stamp"
+    stamp.write_text(f"{digest} good vertical_records.sha256\n")
+    harness._check_record_stamp(
+        tmp_path, "good", manifest.name, stamp.name)
+    with pytest.raises(harness.GateError, match="producer commit mismatch"):
+        harness._check_record_stamp(
+            tmp_path, "wrong", manifest.name, stamp.name)
+
+    baseline = np.ones((2, 2, 2), dtype=np.float64)
+    mask = np.ones_like(baseline, dtype=bool)
+    control = harness._vertical_trajectory_ulp_control(
+        baseline, baseline.copy(), mask)
+    assert control["cells_unequal"] == 1
+    broken = baseline.copy()
+    broken[0, 0, 0] = np.nextafter(broken[0, 0, 0], np.inf)
+    with pytest.raises(harness.GateError,
+                       match="unplanted vertical/process Tbb fields differ"):
+        harness._vertical_trajectory_ulp_control(broken, baseline, mask)
 
 
 def _synthetic_process_record(path: Path, harness, *, kt: int = 1081):
