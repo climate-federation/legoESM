@@ -96,13 +96,25 @@ def mesh_w_1d(mesh_mask_path):
     return g, e
 
 
+#: ORCA1 runs ``ln_teos10 = .true.`` (namelist_cfg:308) and the ORCA1 card
+#: sets ``n2_eos_form="teos10"`` to match (run_omip_core2.py:987).  The bn2
+#: routine's own default is ``"seos"``, the 3-term simplified equation of
+#: state, so calling it WITHOUT this argument silently computes the
+#: stratification on an equation of state NEITHER model runs.  That exact
+#: omission was found and fixed once before in a sibling probe (2026-08-15)
+#: and was reintroduced here; it is named as a constant so the next reader
+#: sees the choice instead of inheriting a default.
+_N2_EOS_FORM = "teos10"
+
+
 def bn2(T, S, gdept, gdepw_int, e3w_int):
-    """The MODEL'S OWN NEMO bn2. T/S level-LAST, per the function's contract."""
+    """The MODEL'S OWN NEMO bn2 on the RUN'S equation of state (TEOS-10)."""
     import jax.numpy as jnp
     from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
     return np.asarray(compute_buoyancy_frequency_nemo_bn2(
         jnp.asarray(T), jnp.asarray(S),
         jnp.asarray(gdept), jnp.asarray(gdepw_int),
+        eos_form=_N2_EOS_FORM,
         e3w_int=jnp.asarray(e3w_int)))
 
 
@@ -403,7 +415,10 @@ def main() -> int:
         print(f"[nemo] grid_W carries: {sorted(nemo_K) or 'neither avm nor avt'}")
 
     report = {"snapshot": str(a.snapshot), "nemo_gridt": str(a.nemo_gridt),
-              "nemo_record": rec, "nemo_day": a.nemo_day, "bands": {}}
+              "nemo_record": rec, "nemo_day": a.nemo_day,
+              "n2_eos_form": _N2_EOS_FORM, "bands": {}}
+    print(f"[n2] equation of state: {_N2_EOS_FORM} (the run's and ORCA1's; the "
+          f"bn2 routine defaults to seos, which is neither)")
     print(f"\n{'band':22s} {'N2 ours':>10s} {'N2 NEMO':>10s} {'xN2':>6s}"
           f" {'e ours':>10s} {'sqrt(e) x':>10s} {'n':>8s}")
     for name, lo, hi in _BANDS:
