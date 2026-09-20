@@ -404,32 +404,102 @@ def main() -> int:
         # coefficient; the ladder is one shorter at each end, so the two
         # outermost interfaces are left out rather than one-sided-differenced.
         dz = e3w_int
-        flux = 0.5 * (km[..., :-1] + km[..., 1:]) * \
-            (tke_our[..., :-1] - tke_our[..., 1:]) / \
+        # The face coefficient is NEMO's max(avm(k)+avm(k+1), 2e-5) halved,
+        # NOT the plain average. Read out of the model's own tridiagonal
+        # assembly (tke.py, `avm_min` = 2.0e-5, zdftke.F90:503,505). It
+        # matters here: our avm at these depths is 3e-6 to 6e-6, so the SUM
+        # sits BELOW the floor and the real coefficient is the floor -- two to
+        # three times what a plain average gives. The first version of this
+        # term omitted the floor and understated transport by that factor.
+        _AVM_SUM_FLOOR = 2.0e-5
+        kface = 0.5 * np.maximum(km[..., :-1] + km[..., 1:], _AVM_SUM_FLOOR)
+        flux = kface * (tke_our[..., :-1] - tke_our[..., 1:]) / \
             (0.5 * (dz[:-1] + dz[1:]))[None, None, :]
         trans = np.full_like(tke_our, np.nan)
         trans[..., 1:-1] = (flux[..., :-1] - flux[..., 1:]) / dz[None, None, 1:-1]
+        # DISSIPATION from the CLOSURE'S OWN mixing-length routine, not from
+        # the buoyancy relation. Codex's first objection was that inverting
+        # K ~ e/N assumes the active length IS the buoyancy length; calling
+        # compute_mixing_lengths instead runs the real code path, sweeps and
+        # limiters included, so the length is measured rather than assumed and
+        # eps = c_eps * e^(3/2) / l_eps stops being a residual.
+        #
+        # The card is rebuilt from the run's RECORDED command line, never
+        # retyped: --tke-mxl-choice 3, --tke-surface-bc nemo_dirichlet,
+        # --tke-prognostic, --tke-kappa-convention veros_sqrte, --iwm.
+        eps_model = None
+        try:
+            import jax.numpy as jnp
+            sys.path.insert(0, str(_HERE.parents[3] / "scripts" / "run"))
+            from run_omip_core2 import orca1_zdftke_config
+            from legoesm.ocean.physics.vertical_mixing.tke import (
+                compute_mixing_lengths,
+            )
+            vcfg = orca1_zdftke_config(
+                iwm_enabled=True, surface_bc="nemo_dirichlet", mxl_choice=3,
+                prognostic=True, kappa_convention="veros_sqrte")
+            tcfg = getattr(vcfg, "tke", vcfg)
+            # dz_cell is REQUIRED for mxl_choice 3: the routine refuses
+            # without it rather than silently skipping NEMO's |dl/dz| <= e3t
+            # bounding sweeps, which is exactly the limiter codex said could
+            # not be assumed away. Reference thicknesses (e3t_0, partial cells
+            # included); the z-star dilation by eta is neglected, which is at
+            # most a percent on these levels and is stated rather than hidden.
+            l_k, l_eps = compute_mixing_lengths(
+                jnp.asarray(tke_our), jnp.asarray(n2_our),
+                jnp.asarray(e3w_int), tcfg,
+                dz_cell=jnp.asarray(np.transpose(e3t, (1, 2, 0))))
+            l_eps = np.asarray(l_eps)
+            eps_model = (tcfg.c_eps * tke_our ** 1.5
+                         / np.maximum(l_eps, tcfg.mxl_min))
+            print(f"[closure] l_eps and dissipation rebuilt with the model's "
+                  f"own compute_mixing_lengths (c_eps={tcfg.c_eps}, "
+                  f"mxl_min={tcfg.mxl_min}). NO surface wind anchor is passed "
+                  f"(taum is not in the snapshot), so the top few interfaces "
+                  f"are not faithful; read the 15-65 m band.")
+        except Exception as _exc:   # pragma: no cover - config-dependent
+            print(f"[closure] SKIPPED rebuilding l_eps: "
+                  f"{type(_exc).__name__}: {_exc}")
+
         omega = 2.0 * np.pi / 86400.0
         print(f"\n{'band':22s} {'production':>12s} {'buoyancy':>12s} "
-              f"{'transport':>12s} {'residual':>12s} {'|de/dt| max':>12s}")
+              f"{'transport':>12s} {'residual':>12s} {'|de/dt| max':>12s}"
+              + ("" if eps_model is None else
+                 f" {'eps model':>12s} {'l_eps m':>9s} {'closure':>12s}"))
         for name, lo, hi in _BANDS:
             pr, _ = band_median(prod, wet_i, box, gdepw_int, lo, hi)
             bu, _ = band_median(buoy, wet_i, box, gdepw_int, lo, hi)
             tr, _ = band_median(np.nan_to_num(trans, nan=0.0), wet_i, box,
                                 gdepw_int, lo, hi)
             eo, _ = band_median(tke_our, wet_i, box, gdepw_int, lo, hi)
-            print(f"{name:22s} {pr:12.3e} {bu:12.3e} {tr:12.3e} "
-                  f"{pr + bu + tr:12.3e} {omega * eo:12.3e}")
-            report["bands"][name].update(
-                {"production": pr, "buoyancy": bu, "transport": tr,
-                 "residual_is_dissipation": pr + bu + tr,
-                 "storage_bound": omega * eo})
+            line = (f"{name:22s} {pr:12.3e} {bu:12.3e} {tr:12.3e} "
+                    f"{pr + bu + tr:12.3e} {omega * eo:12.3e}")
+            row = {"production": pr, "buoyancy": bu, "transport": tr,
+                   "residual_is_dissipation": pr + bu + tr,
+                   "storage_bound": omega * eo}
+            if eps_model is not None:
+                ep, _ = band_median(eps_model, wet_i, box, gdepw_int, lo, hi)
+                le, _ = band_median(l_eps, wet_i, box, gdepw_int, lo, hi)
+                # CLOSURE TEST: P + B + T - eps should be ~0 in a steady
+                # column. If it is not, the reconstruction is wrong and NO
+                # number from it may be quoted.
+                resid = pr + bu + tr - ep
+                line += f" {ep:12.3e} {le:9.3f} {resid:12.3e}"
+                row.update({"eps_from_closure": ep, "l_eps_m": le,
+                            "closure_residual": resid})
+            print(line)
+            report["bands"][name].update(row)
         print("The residual is production + buoyancy + transport, which in a "
               "steady column equals the DISSIPATION. The column is not steady "
               "-- TKE has a strong diurnal cycle -- but the storage term is "
               "bounded by omega*e, printed in the last column (GLM). Where the "
               "residual exceeds that bound by a wide margin, its magnitude and "
               "sign hold regardless of the diurnal phase.")
+        if eps_model is not None:
+            print("CLOSURE column = P + B + T - eps. Near zero means every "
+                  "term is now measured and the budget closes; a large value "
+                  "means the reconstruction is wrong and nothing from it may "
+                  "be quoted. Read it BEFORE reading anything else here.")
         print("TRANSPORT is the term nobody has measured yet, and it is the "
               "one that decides between too little energy arriving from above "
               "and too much being destroyed in place.")
