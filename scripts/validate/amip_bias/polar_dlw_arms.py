@@ -112,11 +112,22 @@ def main(argv=None) -> int:
         gpoint_batch_size=16, gpoint_checkpoint=False, include_clouds=True))
     mu = jnp.full(T.shape[0], 1e-4)          # polar night; SW not reported
 
-    def solve(kw):
-        out = solver.solve_columns(
-            T=jnp.asarray(T), p_full=jnp.asarray(p_full), p_half=jnp.asarray(p_half),
-            sfc_temperature=jnp.asarray(T_sfc), q_v=jnp.asarray(q_v),
-            cos_zenith=mu, sfc_albedo=0.6, sfc_emissivity=0.97, **kw)
+    def solve(kw, n_sub=1):
+        # n_sub > 1: kw already holds (n_sub*ncol, nlev) subcolumn paths, so the
+        # column inputs are expanded the same way and the fluxes averaged back,
+        # exactly as radiation/integration.py does under max_random.  Solving
+        # the grid-mean path instead (one solve) overstates the LW effect of a
+        # partial cover, because LW is opaque at a few tens of g/m2.
+        base = dict(T=jnp.asarray(T), p_full=jnp.asarray(p_full), p_half=jnp.asarray(p_half),
+                    sfc_temperature=jnp.asarray(T_sfc), q_v=jnp.asarray(q_v),
+                    cos_zenith=mu, sfc_albedo=0.6, sfc_emissivity=0.97)
+        ncol = T.shape[0]
+        if n_sub > 1:
+            from legoesm.atmosphere.physics.clouds import subcolumns as sub
+            base = sub.expand_kwargs(base, n_sub, ncol)
+        out = solver.solve_columns(**base, **kw)
+        if n_sub > 1:
+            out = sub.average_output(out, n_sub, ncol)
         return (np.asarray(out.lw_flux_down[:, -1]), np.asarray(out.lw_flux_up[:, 0]))
 
     def cloud_kwargs(cfg, cap_qc=None):
@@ -135,10 +146,20 @@ def main(argv=None) -> int:
             props = props._replace(cloud_fraction=cf_new, lwp=lwp_new,
                                    lwp_lw=None if props.lwp_lw is None else jnp.where(capm, jnp.maximum(props.lwp_lw, lwp_floor), props.lwp_lw))
         kw = props.to_rrtmg_kwargs()
-        lwp, iwp = cl.radiation_paths(props, cfg)
-        kw["cloud_path_liq"], kw["cloud_path_ice"] = jnp.asarray(lwp), jnp.asarray(iwp)
+        lwp, iwp = cl.radiation_paths(props, cfg)          # grid-mean, for the table
+        n_sub = 1
+        if cfg.cloud_vertical_overlap_optics == "max_random":
+            from legoesm.atmosphere.physics.clouds import subcolumns as sub
+            n_sub = int(cfg.cloud_n_subcolumns)
+            mask = sub.generate_subcolumns(props.cloud_fraction, n_sub)
+            kw["cloud_path_liq"], kw["cloud_path_ice"] = sub.subcolumn_paths(
+                mask, props.cloud_fraction, props.lwp, props.iwp)
+            kw = sub.expand_kwargs(kw, n_sub, props.cloud_fraction.shape[0],
+                                   keys={"cloud_r_eff_liq", "cloud_r_eff_ice"})
+        else:
+            kw["cloud_path_liq"], kw["cloud_path_ice"] = jnp.asarray(lwp), jnp.asarray(iwp)
         cf = np.asarray(props.cloud_fraction)
-        return kw, cf, lwp, iwp
+        return kw, cf, lwp, iwp, n_sub
 
     def cap(v, lo):
         m = lat_deg >= lo
@@ -170,11 +191,11 @@ def main(argv=None) -> int:
             dlw, olr = solve({})
             cf_tot = np.zeros(T.shape[0]); iwp = np.zeros(T.shape[0]); lwp = np.zeros(T.shape[0])
         else:
-            kw, cf, lwp_l, iwp_l = (cloud_kwargs(cfg["cfg"], cfg["qc"]) if isinstance(cfg, dict)
-                                    else cloud_kwargs(cfg))
+            kw, cf, lwp_l, iwp_l, n_sub = (cloud_kwargs(cfg["cfg"], cfg["qc"]) if isinstance(cfg, dict)
+                                           else cloud_kwargs(cfg))
             if "|re=" in name:
                 kw["cloud_r_eff_liq"] = jnp.full_like(kw["cloud_r_eff_liq"], args.pin_reff_um * 1e-6)
-            dlw, olr = solve(kw)
+            dlw, olr = solve(kw, n_sub)
             cf_tot = 1.0 - np.prod(1.0 - np.clip(cf, 0.0, 1.0), axis=1)
             iwp = iwp_l.sum(1) * 1e3; lwp = lwp_l.sum(1) * 1e3
         res[name] = (dlw, olr)
