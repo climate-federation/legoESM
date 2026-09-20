@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 
 import numpy as np
@@ -98,3 +99,65 @@ def test_arm_without_moments_is_refused(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="clubb_moments"):
         s0.load_day("arm", 45, 3, require_moments=True)
     assert s0.load_day("arm", 45, 3)["moments"] is None
+
+
+def test_all_fifteen_fields_are_screened_for_non_finite():
+    lat, area, T = _grid()
+    packed = _packed(3, 4).copy()
+    packed[2, 7, 3] = np.inf                        # a field the stats never report
+    _, alarms = s0.moment_stats(packed, T, lat, area, 75.0, 253.0)
+    assert any("packed moments non-finite" in a for a in alarms)
+
+
+def _pair_on_disk(tmp_path, ncol=3, nlev=4, arm_cf_bump=0.0, plant_nan=False, days=(45, 46)):
+    for run, prog in (("ctl", False), ("prog", True)):
+        d = tmp_path / run
+        d.mkdir()
+        exp = {"clubb_prognostic": prog, "turbulence": "clubb", "grid": {"grid_type": "mpas"},
+               "output": {"output_dir": str(d)}, "clubb_trop_cloud_top_press": 15000.0}
+        (d / "experiment_config.json").write_text(json.dumps(exp))
+        (d / "run_manifest.json").write_text(json.dumps(
+            {"command_line": "run_amip.py --restart-from /seed/checkpoint_day_0040.npz"}))
+        for day in days:
+            T = np.full((ncol, nlev), 240.0)
+            cf = np.full((ncol, nlev), 0.2 + (arm_cf_bump if prog else 0.0))
+            mom = np.full((ncol, 15, nlev + 1), 1e-7)
+            if plant_nan and prog:
+                mom[0, 3, 1] = np.nan
+            np.savez(d / f"checkpoint_day_{day:04d}.npz", T=T, physstate_cloud_fraction=cf,
+                     trc_q_v=np.zeros((ncol, nlev)), p_s=np.full(ncol, 1e5),
+                     meta_vgrid=np.zeros((2, nlev + 1)), physstate_col_index=np.arange(ncol),
+                     physstate_clubb_moments=mom)
+
+
+def _fake_mesh(monkeypatch, tmp_path):
+    monkeypatch.setattr(s0.rb, "ROOT", str(tmp_path))
+    monkeypatch.setattr(s0.cl, "mesh_coords",
+                        lambda exp: (np.array([80.0, 80.0, 40.0]), np.zeros(3), np.ones(3)))
+    monkeypatch.setattr(s0, "rh_cover", lambda d, exp: np.zeros_like(d["cf"]))
+
+
+def test_end_to_end_confirms_a_planted_cloud_excess(tmp_path, monkeypatch, capsys):
+    _pair_on_disk(tmp_path, arm_cf_bump=0.1)
+    _fake_mesh(monkeypatch, tmp_path)
+    s0.main(["--control", "ctl", "--arm", "prog", "--days", "45", "46"])
+    out = capsys.readouterr().out
+    assert "EXPLORATORY VERDICT: CONFIRM" in out      # days are not the registered 45-50
+    assert "+0.1000" in out
+
+
+def test_end_to_end_planted_nan_fails(tmp_path, monkeypatch, capsys):
+    _pair_on_disk(tmp_path, arm_cf_bump=0.1, plant_nan=True)
+    _fake_mesh(monkeypatch, tmp_path)
+    s0.main(["--control", "ctl", "--arm", "prog", "--days", "45", "46"])
+    assert "VERDICT: FAIL" in capsys.readouterr().out
+
+
+def test_unregistered_pair_is_refused(tmp_path, monkeypatch):
+    _pair_on_disk(tmp_path)
+    _fake_mesh(monkeypatch, tmp_path)
+    exp = json.loads((tmp_path / "prog" / "experiment_config.json").read_text())
+    exp["cloud_rh_crit"] = 0.9                        # a second differing field
+    (tmp_path / "prog" / "experiment_config.json").write_text(json.dumps(exp))
+    with pytest.raises(SystemExit, match="not the registered pair"):
+        s0.main(["--control", "ctl", "--arm", "prog", "--days", "45"])

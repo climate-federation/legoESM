@@ -26,6 +26,15 @@ variances (they are recomputed from mixing length each step and never stored),
 so the arm's rtp2/thlp2/wp2 are reported as absolute cold-layer means only; the
 "2x control" secondary is not measurable from checkpoints and is said so.
 
+REGISTERED-PAIR GATE (codex review): the two runs' resolved configurations
+must differ in ``clubb_prognostic`` (control False, arm True) and the output
+directory ONLY, both must restart from the same checkpoint (manifest command
+line), share the vertical grid, and the scored days must be exactly the
+registered 45-50; anything else is printed as EXPLORATORY, never as the
+registered verdict.  Every stored array is shape-checked against the mesh and
+vertical grid, temperatures must be finite, cloud fractions in [0, 1], and the
+WHOLE packed moment array finite before any unpacking.
+
 Usage:
   s0_clubb_pdf_score.py --control s0_ctl --arm s0_prog --days 45 46 47 48 49 50
 """
@@ -48,6 +57,37 @@ rb = cl.rb
 
 ALARMS = {"thlp2": 100.0, "rtp2": 1.0e-4, "wp2": 100.0, "wp3": 1000.0}
 CONFIRM, REFUTE = 0.05, 0.01
+REGISTERED_DAYS = list(range(45, 51))
+PAIR_MAY_DIFFER = {"clubb_prognostic", "output"}
+N_MOMENTS = 15
+
+
+def registered_pair_check(exp_c, exp_a, run_c, run_a):
+    """Abort unless the two resolved configs differ only in the registered
+    switch (control diagnostic, arm prognostic) and the output block, and both
+    manifests restart from the same checkpoint."""
+    diff = sorted(k for k in set(exp_c) | set(exp_a) if exp_c.get(k) != exp_a.get(k))
+    extra = [k for k in diff if k not in PAIR_MAY_DIFFER]
+    print(f"{'field':>24s} {run_c:>12s} {run_a:>12s}")
+    for k in diff:
+        if k != "output":
+            print(f"{k:>24s} {str(exp_c.get(k)):>12s} {str(exp_a.get(k)):>12s}")
+    if extra:
+        raise SystemExit(f"FATAL: not the registered pair; configs also differ in {extra}")
+    if exp_c.get("clubb_prognostic") is not False or exp_a.get("clubb_prognostic") is not True:
+        raise SystemExit("FATAL: control must be diagnostic CLUBB and the arm prognostic")
+    if exp_c.get("turbulence") != "clubb":
+        raise SystemExit("FATAL: pair does not run CLUBB")
+    origin = []
+    for run in (run_c, run_a):
+        cmd = json.load(open(f"{rb.ROOT}/{run}/run_manifest.json"))["command_line"]
+        toks = cmd.split()
+        if "--restart-from" not in toks:
+            raise SystemExit(f"FATAL: {run} was not restarted from a checkpoint")
+        origin.append(toks[toks.index("--restart-from") + 1])
+    if origin[0] != origin[1]:
+        raise SystemExit(f"FATAL: different restart origins {origin}")
+    print(f"restart origin (both): {origin[0]}")
 
 
 def cold_cap_mean(field, T, lat, area, lat_lo, T_max):
@@ -64,19 +104,29 @@ def load_day(run, day, lat_n, require_moments=False):
     order = cl.cell_order(z, lat_n)
     if "physstate_cloud_fraction" not in z.files:
         raise SystemExit(f"FATAL: {run} day {day}: no physstate_cloud_fraction")
-    out = {"T": np.asarray(z["T"])[order],
-           "cf": np.asarray(z["physstate_cloud_fraction"])[order],
+    vgrid = np.asarray(z["meta_vgrid"], dtype=np.float64)
+    nlev = vgrid.shape[1] - 1
+    out = {"T": np.asarray(z["T"], dtype=np.float64)[order],
+           "cf": np.asarray(z["physstate_cloud_fraction"], dtype=np.float64)[order],
            "q_v": np.asarray(z["trc_q_v"])[order], "p_s": np.asarray(z["p_s"])[order],
-           "vgrid": np.asarray(z["meta_vgrid"], dtype=np.float64)}
+           "vgrid": vgrid}
     for k in ("trc_q_c", "trc_q_i", "trc_N_c", "trc_N_i"):
         out[k] = np.asarray(z[k])[order] if k in z.files else None
-    if not np.isfinite(out["cf"]).all():
-        raise SystemExit(f"FATAL: {run} day {day}: non-finite cloud fraction")
+    where = f"{run} day {day}"
+    for k in ("T", "cf"):
+        if out[k].shape != (lat_n, nlev):
+            raise SystemExit(f"FATAL: {where}: {k} shape {out[k].shape} != {(lat_n, nlev)}")
+        if not np.isfinite(out[k]).all():
+            raise SystemExit(f"FATAL: {where}: non-finite {k}")
+    if out["cf"].min() < 0.0 or out["cf"].max() > 1.0:
+        raise SystemExit(f"FATAL: {where}: cloud fraction outside [0, 1]")
     mom = np.asarray(z["physstate_clubb_moments"]) if "physstate_clubb_moments" in z.files else None
-    out["moments"] = None if mom is None or mom.ndim != 3 or mom.shape[1] != 15 else mom[order]
-    if require_moments and out["moments"] is None:
-        raise SystemExit(f"FATAL: {run} day {day}: no well-formed physstate_clubb_moments "
-                         f"(got {None if mom is None else mom.shape}); alarms cannot run")
+    good = mom is not None and mom.shape == (lat_n, N_MOMENTS, nlev + 1)
+    if require_moments and not good:
+        raise SystemExit(f"FATAL: {where}: no well-formed physstate_clubb_moments "
+                         f"(got {None if mom is None else mom.shape}, want "
+                         f"{(lat_n, N_MOMENTS, nlev + 1)}); alarms cannot run")
+    out["moments"] = np.asarray(mom, dtype=np.float64)[order] if good else None
     return out
 
 
@@ -112,13 +162,14 @@ def moment_stats(mom, T, lat, area, lat_lo, T_max):
     same T<T_max mask applies; CLUBB stores ascending, so flip to top-down first."""
     from legoesm.atmosphere.physics.turbulence.clubb import unpack_clubb_moments
     import jax.numpy as jnp
-    st = unpack_clubb_moments(jnp.asarray(mom))
     res, alarms = {}, []
+    mom = np.asarray(mom, dtype=np.float64)
+    if not np.isfinite(mom).all():                     # ALL 15 fields, before unpacking
+        alarms.append(f"packed moments non-finite ({int((~np.isfinite(mom)).sum())} entries)")
+        mom = np.nan_to_num(mom)
+    st = unpack_clubb_moments(jnp.asarray(mom, dtype=jnp.float64))
     for name in ("rtp2", "thlp2", "wp2", "wp3"):
         f = np.asarray(getattr(st, name), dtype=np.float64)
-        if not np.isfinite(f).all():
-            alarms.append(f"{name} non-finite ({int((~np.isfinite(f)).sum())} entries)")
-            f = np.nan_to_num(f)
         ext = float(np.abs(f).max())                   # alarm on the RAW stored level
         if f.shape[1] == T.shape[1] + 1:               # zm -> zt
             f = 0.5 * (f[:, 1:] + f[:, :-1])
@@ -139,12 +190,19 @@ def main(argv=None) -> int:
     ap.add_argument("--t-max", type=float, default=253.0)
     ap.add_argument("--json", default=None, help="write per-day numbers here")
     args = ap.parse_args(argv)
+    import jax
+    jax.config.update("jax_enable_x64", True)          # stored moments are fp64
 
     exp = json.load(open(f"{rb.ROOT}/{args.control}/experiment_config.json"))
     exp_a = json.load(open(f"{rb.ROOT}/{args.arm}/experiment_config.json"))
-    if exp["grid"] != exp_a["grid"]:
-        raise SystemExit("FATAL: arms are on different grids")
+    registered_pair_check(exp, exp_a, args.control, args.arm)
     lat, _lon, area = cl.mesh_coords(exp)
+    if not (np.isfinite(area).all() and (area > 0).all()):
+        raise SystemExit("FATAL: mesh areas not finite/positive")
+    registered = (sorted(set(args.days)) == args.days == REGISTERED_DAYS
+                  and args.lat_lo == 75.0 and args.t_max == 253.0)
+    label = "REGISTERED" if registered else "EXPLORATORY"
+    p_top = exp.get("clubb_trop_cloud_top_press")
 
     print(f"=== S0 PDF cloud fraction, {args.lat_lo:g}-90N, layers T < {args.t_max:g} K: "
           f"{args.arm} minus {args.control} ===")
@@ -154,7 +212,18 @@ def main(argv=None) -> int:
     for day in args.days:
         c = load_day(args.control, day, lat.size)
         a = load_day(args.arm, day, lat.size, require_moments=True)
+        if not np.array_equal(c["vgrid"], a["vgrid"]):
+            raise SystemExit(f"FATAL: day {day}: arms on different vertical grids")
         if day == args.days[0]:
+            if p_top:
+                from legoesm import constants
+                vg = c["vgrid"]
+                p_half = vg[0][None, :] * constants.p_ref + vg[1][None, :] * c["p_s"][:, None]
+                p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+                above, _ = cold_cap_mean((p_full < p_top).astype(float), c["T"], lat, area,
+                                         args.lat_lo, args.t_max)
+                print(f"taper: {above:.1%} of the cold-layer weight lies above the CLUBB "
+                      f"troposphere-top pressure {p_top:g} Pa (PDF cloud tapered there)")
             for nm, d, e in ((args.control, c, exp), (args.arm, a, exp_a)):
                 same = check_provenance(nm, d, e)
                 print(f"provenance {nm} day {day}: stored cf equals RH cover on "
@@ -188,13 +257,13 @@ def main(argv=None) -> int:
     else:
         verdict = "INCONCLUSIVE"
     print(f"\nmean arm-control over days {args.days[0]}-{args.days[-1]}: {mean_d:+.4f}  "
-          f"(confirm >= {CONFIRM:g}, refute <= {REFUTE:g})  VERDICT: {verdict}")
+          f"(confirm >= {CONFIRM:g}, refute <= {REFUTE:g})  {label} VERDICT: {verdict}")
     for x in all_alarms:
         print("ALARM", x)
     print("control variances: NOT CARRIED in checkpoints (diagnostic closure); "
           "'2x control' secondary not scored")
     if args.json:
-        json.dump({"verdict": verdict, "mean_diff": mean_d, "rows": rows,
+        json.dump({"verdict": verdict, "label": label, "mean_diff": mean_d, "rows": rows,
                    "alarms": all_alarms, "lat_lo": args.lat_lo, "t_max": args.t_max},
                   open(args.json, "w"), indent=1)
     return 0
