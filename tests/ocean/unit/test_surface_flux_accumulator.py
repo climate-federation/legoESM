@@ -1,0 +1,183 @@
+"""``--flux-accumulate``: the applied surface fluxes a heat budget needs.
+
+WHY THIS EXISTS.  A snapshot pair gives the STATE change but not the boundary
+fluxes that drove it, so no heat budget can be closed from snapshots alone --
+``omip_conservation_closure.py`` says so in its own docstring and refuses to
+fake the missing term.  Three independent sources converged on that gap: codex
+(endpoint states cannot recover transport correlations), GLM (the state
+signature has several sufficient causes), and a direct attempt whose residual
+exceeded its own vertical term and voided.
+
+These tests pin the behaviours that would silently corrupt a budget:
+
+  1. the window mean is a MEAN, not a sum -- a sum divided by the wrong count
+     is the classic way a flux diagnostic looks plausible and is wrong by the
+     number of steps in the window;
+  2. ``drain`` RESETS, so consecutive windows are independent rather than
+     cumulative;
+  3. an empty window writes NO key -- zero is a physically meaningful flux and
+     must never be manufactured by the instrument (the "plausible-looking
+     value is more dangerous than a NaN" rule);
+  4. a ``None`` field is skipped rather than zero-filled, for the same reason;
+  5. the flag stays OUT of the restart fingerprint, so turning a read-only
+     diagnostic on cannot make a chained leg un-resumable -- a failure this
+     driver has already had once, for the profile sampler.
+"""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+
+def _driver():
+    from scripts.run import run_omip_core2
+    return run_omip_core2
+
+
+def _sf(q_net=None, sw_down=None, tau_x=None, tau_y=None):
+    return SimpleNamespace(q_net=q_net, sw_down=sw_down,
+                           tau_x=tau_x, tau_y=tau_y)
+
+
+def test_window_mean_is_a_mean_not_a_sum():
+    acc = _driver()._SurfaceFluxAccumulator()
+    acc.add(_sf(q_net=np.full((2, 2), 10.0)))
+    acc.add(_sf(q_net=np.full((2, 2), 20.0)))
+    acc.add(_sf(q_net=np.full((2, 2), 30.0)))
+    out = acc.drain()
+    assert out["flux_mean_n_steps"] == 3
+    # 20.0 is the mean; 60.0 would be the sum.
+    np.testing.assert_allclose(out["q_net_mean"], 20.0, rtol=1e-12)
+
+
+def test_drain_resets_so_consecutive_windows_are_independent():
+    acc = _driver()._SurfaceFluxAccumulator()
+    acc.add(_sf(q_net=np.full((2, 2), 100.0)))
+    first = acc.drain()
+    acc.add(_sf(q_net=np.full((2, 2), 1.0)))
+    second = acc.drain()
+    np.testing.assert_allclose(first["q_net_mean"], 100.0, rtol=1e-12)
+    # Without the reset the second window would carry the first one's 100.
+    np.testing.assert_allclose(second["q_net_mean"], 1.0, rtol=1e-12)
+    assert second["flux_mean_n_steps"] == 1
+
+
+def test_an_empty_window_writes_no_key_rather_than_a_zero():
+    acc = _driver()._SurfaceFluxAccumulator()
+    assert acc.drain() == {}
+    # And a window of steps that carried no forcing object at all is still
+    # empty rather than zero-valued.
+    acc.add(None)
+    assert acc.drain() == {}
+
+
+def test_a_none_field_is_skipped_not_zero_filled():
+    acc = _driver()._SurfaceFluxAccumulator()
+    acc.add(_sf(q_net=np.full((2, 2), 5.0), tau_x=None))
+    out = acc.drain()
+    assert "q_net_mean" in out
+    assert "tau_x_mean" not in out
+
+
+def test_all_four_fields_are_carried():
+    acc = _driver()._SurfaceFluxAccumulator()
+    acc.add(_sf(q_net=np.ones((2, 2)), sw_down=2 * np.ones((2, 2)),
+                tau_x=3 * np.ones((2, 2)), tau_y=4 * np.ones((2, 2))))
+    out = acc.drain()
+    for k, v in (("q_net_mean", 1.0), ("sw_down_mean", 2.0),
+                 ("tau_x_mean", 3.0), ("tau_y_mean", 4.0)):
+        np.testing.assert_allclose(out[k], v, rtol=1e-12)
+
+
+def test_snapshot_extra_returns_none_when_every_diagnostic_is_off():
+    d = _driver()
+    args = SimpleNamespace(kprofile_snapshots=False)
+    assert d._snapshot_extra(args, None, None, None, None, None, None) is None
+
+
+def test_snapshot_extra_carries_the_flux_means_through():
+    d = _driver()
+    acc = d._SurfaceFluxAccumulator()
+    acc.add(_sf(q_net=np.full((2, 2), 7.0)))
+    args = SimpleNamespace(kprofile_snapshots=False)
+    extra = d._snapshot_extra(args, None, None, None, None, None, acc)
+    np.testing.assert_allclose(extra["q_net_mean"], 7.0, rtol=1e-12)
+    assert extra["flux_mean_n_steps"] == 1
+
+
+def test_window_duration_is_recoverable_from_the_file():
+    """A budget needs SECONDS, and the step count alone does not give them.
+
+    codex: flux_mean_n_steps plus the endpoint step identify which steps were
+    included but not how long the window was.
+    """
+    acc = _driver()._SurfaceFluxAccumulator()
+    for _ in range(4):
+        acc.add(_sf(q_net=np.ones((2, 2))))
+    out = acc.drain(dt=150.0)
+    assert out["flux_mean_window_s"] == pytest.approx(600.0)
+    assert out["flux_mean_n_steps"] == 4
+
+
+def test_window_duration_is_omitted_when_dt_is_unknown():
+    acc = _driver()._SurfaceFluxAccumulator()
+    acc.add(_sf(q_net=np.ones((2, 2))))
+    assert "flux_mean_window_s" not in acc.drain()
+
+
+def test_the_scan_block_lane_refuses_the_flag_rather_than_ignoring_it():
+    """A flag that is silently inert on a lane is the defect class this repo
+    bans outright: the run looks successful and the snapshots carry nothing.
+
+    codex found that the --scan-block path returns before the accumulator is
+    constructed. The driver must REFUSE, exactly as it already does for
+    --kprofile-snapshots. Scoped to the guard block so an unrelated mention of
+    the flag elsewhere cannot satisfy it.
+    """
+    from pathlib import Path
+    import scripts.run.run_omip_core2 as mod
+
+    src = Path(mod.__file__).read_text()
+    assert "if args.flux_accumulate and use_scan:" in src
+    guard = src.split("if args.flux_accumulate and use_scan:", 1)[1][:600]
+    assert "raise SystemExit" in guard
+    assert "--scan-block" in guard
+
+
+def test_flag_defaults_off_and_round_trips():
+    p = _driver()._build_arg_parser()
+    assert p.parse_args(["--grid", "tripole"]).flux_accumulate is False
+    assert p.parse_args(["--grid", "tripole",
+                         "--flux-accumulate"]).flux_accumulate is True
+
+
+def test_flag_is_excluded_from_the_restart_fingerprint():
+    """Enabling a READ-ONLY diagnostic must not break a chained leg.
+
+    The driver already lost a two-day diurnal control this way once, when the
+    profile sampler's flag was hashed into the restart fingerprint and a leg
+    could not resume its own baseline.
+
+    ``_RESTART_FP_EXCLUDE`` is a LOCAL inside ``main()``, so it cannot be
+    imported; this reads the source block instead.  A source-inspection test is
+    weak by construction, so it is scoped to the exact block rather than the
+    whole file -- the flag name appearing anywhere else in the driver (and it
+    appears in several places) must NOT satisfy it.
+    """
+    from pathlib import Path
+    import scripts.run.run_omip_core2 as mod
+
+    src = Path(mod.__file__).read_text().splitlines()
+    start = next(i for i, ln in enumerate(src)
+                 if "_RESTART_FP_EXCLUDE = frozenset({" in ln)
+    end = next(i for i in range(start, len(src)) if src[i].strip() == "})")
+    # codex: the first version of this test passed on a COMMENT that merely
+    # contained the flag name. Strip comments and require the quoted literal,
+    # so only a real set member satisfies it.
+    code = [ln.split("#", 1)[0] for ln in src[start:end + 1]]
+    block = "\n".join(code)
+    assert '"flux_accumulate"' in block, (
+        "the read-only flux-accumulate flag must be excluded from the restart "
+        "fingerprint or enabling it makes a chained leg un-resumable")

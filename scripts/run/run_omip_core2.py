@@ -5918,6 +5918,74 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
 
 
+class _SurfaceFluxAccumulator:
+    """Running mean of the APPLIED ocean surface fluxes over a snapshot window.
+
+    A snapshot pair gives the STATE change but not the boundary fluxes that
+    drove it, so no heat budget can be closed from snapshots alone -- see
+    ``omip_conservation_closure.py``, which refuses to fake the missing term.
+    This accumulates what the ocean was actually handed, at every step, and the
+    snapshot writer emits the window mean.
+
+    The fields are taken from the forcing object HANDED TO THE STEP, which on
+    the ice lane is the post-``blend_ice_ocean_forcing`` value, i.e. the
+    ice-partitioned flux the ocean really receives rather than the atmospheric
+    flux before partition.
+
+    Sums stay as device arrays so the hot loop never synchronises; the divide
+    and the host transfer happen once per window, in ``drain``.
+    """
+
+    _FIELDS = ("q_net", "sw_down", "tau_x", "tau_y")
+
+    def __init__(self):
+        self._sums = {}
+        self._n = 0
+
+    def add(self, sf):
+        if sf is None:
+            return
+        for name in self._FIELDS:
+            v = getattr(sf, name, None)
+            if v is None:
+                continue
+            v = jnp.asarray(v)
+            prev = self._sums.get(name)
+            self._sums[name] = v if prev is None else prev + v
+        self._n += 1
+
+    def drain(self, dt=None):
+        """Window means as numpy, then reset for the next window.
+
+        Returns an empty dict when no step has been accumulated, so a window
+        that saw nothing writes NO key rather than a zero -- a zero flux is a
+        physically meaningful value and must never be manufactured by the
+        instrument.
+
+        ``dt`` is recorded so the window's ELAPSED TIME is recoverable from the
+        file alone (codex: the step count plus the endpoint step identify the
+        interval but not its duration, and a budget needs seconds).
+        """
+        if self._n == 0:
+            return {}
+        out = {f"{k}_mean": np.asarray(v / self._n) for k, v in self._sums.items()}
+        out["flux_mean_n_steps"] = np.asarray(self._n)
+        if dt is not None:
+            out["flux_mean_window_s"] = np.asarray(float(dt) * self._n)
+        self._sums, self._n = {}, 0
+        return out
+
+
+def _snapshot_extra(args, model, state, sf, dt, z_coord, flux_acc):
+    """Merge the caller-supplied snapshot diagnostics into one dict."""
+    extra = {}
+    if args.kprofile_snapshots:
+        extra.update(_kprofiles(model, state, sf, dt, z_coord) or {})
+    if flux_acc is not None:
+        extra.update(flux_acc.drain(dt))
+    return extra or None
+
+
 def _kprofiles(model, state, sf, dt, z_coord):
     """The closure's own K_M/K_H at this state, for a snapshot.
 
@@ -7113,6 +7181,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "payload checksum, so an edit to an array's VALUES at "
                         "the same shape resumes silently, and forcing/mesh "
                         "inputs are pinned by PATH, not by content hash.")
+    p.add_argument("--flux-accumulate", action="store_true",
+                   help="Accumulate the APPLIED ocean surface heat flux "
+                        "(q_net, sw_down) and wind stress (tau_x, tau_y) at "
+                        "every step and write the mean over each snapshot "
+                        "window into the snapshot as q_net_mean/sw_down_mean/"
+                        "tau_x_mean/tau_y_mean plus flux_mean_n_steps. With "
+                        "--snapshot-every-days 5 that mean matches the NEMO "
+                        "5-day output window, which is what a matched heat "
+                        "budget needs: a snapshot pair gives the state change "
+                        "but not the boundary fluxes that drove it, so no "
+                        "budget can be closed without this. Read-only -- the "
+                        "trajectory is unchanged, and the flag is excluded "
+                        "from the restart fingerprint so turning it on does "
+                        "not break a chained leg.")
     p.add_argument("--kprofile-snapshots", action="store_true",
                    help="Store the vertical viscosity and diffusivity the "
                         "implicit solve consumes (K_M_diag/K_H_diag, with "
@@ -9252,6 +9334,10 @@ def main() -> int:
         # (it did: a two-day diurnal control could not resume its own
         # baseline because the sampler flag was hashed).
         "evd_occupancy_every_hours", "kprofile_snapshots",
+        # Same class again: the surface-flux accumulator only READS the
+        # forcing it is handed, so enabling it must not make a parent leg's
+        # restart un-resumable.
+        "flux_accumulate",
         "restart_branch_from_different_config",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
@@ -9891,6 +9977,15 @@ def main() -> int:
             "--kprofile-snapshots is not wired into the --scan-block lane; "
             "drop --scan-block (the standard per-step loop dumps the "
             "diffusivities) or drop --kprofile-snapshots.")
+    if args.flux_accumulate and use_scan:
+        # Same class, found by codex: the scan-block lane returns before the
+        # accumulator is even constructed, so the flag would be SILENTLY
+        # inert and the snapshots would carry no flux means while the run
+        # looked successful. Refuse rather than mislead.
+        raise SystemExit(
+            "--flux-accumulate is not wired into the --scan-block lane; "
+            "drop --scan-block (the standard per-step loop accumulates the "
+            "applied surface fluxes) or drop --flux-accumulate.")
     if _evd_occ_every is not None and use_scan:
         raise SystemExit(
             "--evd-occupancy-every-hours samples inside the per-step loop; "
@@ -10212,6 +10307,7 @@ def main() -> int:
         _evd_box = ((np.asarray(state.land_mask.data) > 0.5)
                     & (np.abs(_evd_lat) <= 2.0)
                     & (_evd_lon >= 220.0) & (_evd_lon < 240.0))
+    _flux_acc = _SurfaceFluxAccumulator() if args.flux_accumulate else None
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
@@ -10461,6 +10557,8 @@ def main() -> int:
                     u_oce=_u_oce, v_oce=_v_oce,
                     wind_current_feedback_vfac=_wind_vfac)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
+            if _flux_acc is not None:
+                _flux_acc.add(sf)
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
         else:
@@ -10743,6 +10841,10 @@ def main() -> int:
                         freshwater=(_fw_restore if sf.freshwater is None
                                     else sf.freshwater + _fw_restore))
             state = _ensure_sharded_state(state)
+            # Accumulated from the forcing HANDED TO THE STEP, so on the ice
+            # lane this is the post-blend, ice-partitioned flux.
+            if _flux_acc is not None:
+                _flux_acc.add(sf)
             state = _ocean_step(state, sf, fw, _t_sec)
         if _gw_acc is not None:
             # READ-ONLY: `state` is never reassigned here, so the trajectory
@@ -11030,8 +11132,12 @@ def main() -> int:
                 # persistent lane: the snapshot needs the full staggered-v
                 # global layout (abort boundary — one gather, then exit).
                 state = _ensure_global_state(state)
+                # codex: draining here too, so an abort keeps the partial
+                # window instead of discarding it silently.
                 _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d,
-                               grid=grid, io_proc=_is_io_proc(), ice_state=ice_state)
+                               grid=grid, io_proc=_is_io_proc(), ice_state=ice_state,
+                               extra=(_flux_acc.drain(dt)
+                                      if _flux_acc is not None else None))
                 _close_csv()
                 # Dump what the accumulator reached before the abort: the last
                 # cadence row alone would understate the run, and the run-end
@@ -11049,8 +11155,8 @@ def main() -> int:
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state, grid=grid,
                            step=step, day=day,
-                           extra=(_kprofiles(model, state, sf, dt, z_coord)
-                                  if args.kprofile_snapshots else None))
+                           extra=_snapshot_extra(args, model, state, sf, dt,
+                                                 z_coord, _flux_acc))
             print(f"[snapshot] day {day:.0f} saved", flush=True)
             # Same cadence as the snapshot, and AFTER this step's
             # gateway_step, so the row's n_steps matches the snapshot's day.
@@ -11067,9 +11173,13 @@ def main() -> int:
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
             state = _ensure_global_state(state)
+            # codex: drain here as well, or a window silently SPANS the
+            # annual snapshot and the next cadence mean covers too long.
             _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
                            z_coord=z_coord, grid=grid, io_proc=_is_io_proc(),
-                           ice_state=ice_state)
+                           ice_state=ice_state,
+                           extra=(_flux_acc.drain(dt)
+                                  if _flux_acc is not None else None))
             print(f"[snapshot] year {yr} saved", flush=True)
 
     state = jax.block_until_ready(state)
@@ -11080,8 +11190,8 @@ def main() -> int:
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
                    io_proc=_io, ice_state=ice_state, grid=grid,
                    step=step, day=day,
-                   extra=(_kprofiles(model, state, sf, dt, z_coord)
-                          if args.kprofile_snapshots else None))
+                   extra=_snapshot_extra(args, model, state, sf, dt,
+                                         z_coord, _flux_acc))
     _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state, ice_state)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
