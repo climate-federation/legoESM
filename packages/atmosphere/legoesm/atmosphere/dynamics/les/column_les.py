@@ -509,6 +509,7 @@ def column_surface_kinematic_fluxes(
     p_full_col: jax.Array,
     sst_K: jax.Array,
     p_s: jax.Array,
+    z_low: Any = None,
     surface_config: Any = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Surface kinematic θ/q_v fluxes for the LES ``prescribe="fluxes"`` BC.
@@ -550,6 +551,7 @@ def column_surface_kinematic_fluxes(
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
         SurfaceLayerConfig,
         compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
     )
     from legoesm.thermo import saturation_mixing_ratio
 
@@ -568,8 +570,13 @@ def column_surface_kinematic_fluxes(
     rho_1 = p_1 / (constants.R_d * virtual_temperature(T_1, q_1))
     q_sfc = saturation_mixing_ratio(sst_K, p_s)
     a1 = jnp.atleast_1d
-    _, _, shflx, lhflx, _ = compute_surface_fluxes(
-        a1(u_1), a1(v_1), a1(T_1), a1(q_1), a1(sst_K), a1(q_sfc), a1(rho_1), cfg)
+    # The height of the level these values came from, when the caller knows
+    # it: without it this diagnostic reports a flux computed under a
+    # different surface law than the model it is diagnosing (codex).  Its
+    # default constant scheme masked the omission.
+    _, _, shflx, lhflx, _ = surface_fluxes_at_lowest_level(
+        a1(u_1), a1(v_1), a1(T_1), a1(q_1), a1(sst_K), a1(q_sfc), a1(rho_1),
+        cfg, None if z_low is None else a1(z_low))
     # θ-flux = (sensible heat flux)/(ρ·c_p) · 1/Π, with the canonical Exner helper
     # (1/Π = (p_ref/p)^κ) — no re-derived Poisson power (CLAUDE.md "never re-derive").
     exner_inv = 1.0 / exner_function(p_s)

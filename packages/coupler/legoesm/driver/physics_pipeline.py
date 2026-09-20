@@ -4146,13 +4146,19 @@ def apply_surface_flux_config(tc, config):
             "mosaic surface); this run has neither. Grid is "
             f"{getattr(getattr(config, 'grid', None), 'grid_type', '?')!r}")
     if (sbs == "constant" and gzi is None and stc == "legoesm"
-            and sss == "dyer1974" and zml is None and not qsal):
+            and sss == "dyer1974" and zml is None and _qsal_req is None
+            and not qsal):
         # The two surface switches gate this fast path on whether they have
         # anything to SAY, not on whether they are true:
         #   zml is None  -> the experiment stated nothing, so leaving the
         #                   scheme's own value alone is the correct outcome
         #                   and returning early does exactly that.
-        #   not qsal     -> nothing to turn on.
+        #   _qsal_req is None and not qsal -> nothing stated and nothing to
+        #                   turn on.  Testing only `not qsal` let an EXPLICIT
+        #                   False return early and leave a scheme-level True
+        #                   standing -- the fourth time a value was dropped
+        #                   here, so the condition now asks whether the run
+        #                   SAID anything, never what the answer was.
         # Testing `not zml` instead dropped an experiment's explicit False
         # (codex); testing neither dropped the RESOLVED default-on, so the
         # sea-water humidity died on any run that left the bulk scheme,

@@ -152,15 +152,75 @@ def test_sea_water_reduces_the_flux_by_far_more_than_two_percent():
     assert predicted == pytest.approx(cut, rel=0.25), (predicted, cut)
 
 
-@pytest.mark.parametrize("stated,expect", [(None, None), (True, True),
-                                           (False, False)])
-def test_experiment_switch_is_tri_state(stated, expect):
+@pytest.mark.parametrize("stated", [None, True, False])
+def test_experiment_switch_is_tri_state(stated):
     """None leaves the scheme alone; True and False both reach it.
 
-    Both directions were broken in turn: propagating only True dropped an
-    explicit opt-out, and then propagating unconditionally clobbered a
-    directly-configured scheme value.  A fast path for otherwise-default
-    configs later dropped the resolved value a third time.
+    Every case starts from a scheme that already carries True, because the
+    earlier version of this test started from False and therefore passed even
+    when the override was dropped entirely -- it could not fail for the reason
+    it named (codex).  Starting from True, each of the three outcomes is
+    distinguishable: None must PRESERVE it, False must overturn it, True must
+    leave it set.
+    """
+    from legoesm.driver.physics_pipeline import apply_surface_flux_config
+    from legoesm.atmosphere.physics.turbulence.config import (
+        LouisConfig, TurbulenceConfig,
+    )
+
+    class _Cfg:
+        surface_bulk_scheme = "constant"
+        surface_gustiness_zi = None
+        surface_thermo_convention = "legoesm"
+        surface_stability_scheme = "dyer1974"
+        surface_ocean_q_sfc_saline = None
+        surface_tiled = False
+        grid = None
+
+        def __init__(self, zml):
+            self.surface_z_ref_model_level = zml
+
+    on = SurfaceLayerConfig(z_ref_model_level=True)
+    tc = TurbulenceConfig(scheme="louis", louis=LouisConfig(surface=on))
+    out = apply_surface_flux_config(tc, _Cfg(stated))
+    got = getattr(out, out.scheme).surface.z_ref_model_level
+    assert got is (True if stated is None else stated)
+
+
+def test_explicit_saline_false_overturns_a_scheme_level_true():
+    """An explicit opt-out must survive the otherwise-default fast path.
+
+    This exact combination -- everything else default, the run asking for
+    False, the scheme carrying True -- returned early and kept the True four
+    separate times during review.
+    """
+    from legoesm.driver.physics_pipeline import apply_surface_flux_config
+    from legoesm.atmosphere.physics.turbulence.config import (
+        LouisConfig, TurbulenceConfig,
+    )
+
+    class _Cfg:
+        surface_bulk_scheme = "constant"
+        surface_gustiness_zi = None
+        surface_thermo_convention = "legoesm"
+        surface_stability_scheme = "dyer1974"
+        surface_z_ref_model_level = None
+        surface_ocean_q_sfc_saline = False
+        surface_tiled = True
+        grid = None
+
+    on = SurfaceLayerConfig(ocean_q_sfc_saline=True)
+    tc = TurbulenceConfig(scheme="louis", louis=LouisConfig(surface=on))
+    out = apply_surface_flux_config(tc, _Cfg())
+    assert getattr(out, out.scheme).surface.ocean_q_sfc_saline is False
+
+
+def test_saline_is_on_by_default_where_the_lane_can_honour_it():
+    """Unstated means on wherever ocean and land can be told apart.
+
+    The tiled mosaic carries an ocean fraction, so it qualifies; keying this
+    off the grid type instead left the correction unreachable on exactly the
+    lane it was written for.
     """
     from legoesm.driver.physics_pipeline import apply_surface_flux_config
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
@@ -170,20 +230,10 @@ def test_experiment_switch_is_tri_state(stated, expect):
         surface_gustiness_zi = None
         surface_thermo_convention = "legoesm"
         surface_stability_scheme = "dyer1974"
-        surface_ocean_q_sfc_saline = False
-        surface_tiled = False
+        surface_z_ref_model_level = None
+        surface_ocean_q_sfc_saline = None
+        surface_tiled = True
         grid = None
 
-        def __init__(self, zml):
-            self.surface_z_ref_model_level = zml
-
-    tc = TurbulenceConfig(scheme="louis")
-    out = apply_surface_flux_config(tc, _Cfg(stated))
-    sub = getattr(out, out.scheme, None)
-    got = (None if sub is None or sub.surface is None
-           else sub.surface.z_ref_model_level)
-    if expect is None:
-        # untouched: whatever the scheme itself carries
-        assert got in (None, False)
-    else:
-        assert got is expect
+    out = apply_surface_flux_config(TurbulenceConfig(scheme="louis"), _Cfg())
+    assert getattr(out, out.scheme).surface.ocean_q_sfc_saline is True
