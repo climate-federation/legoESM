@@ -187,6 +187,35 @@ def test_experiment_switch_is_tri_state(stated):
     assert got is (True if stated is None else stated)
 
 
+def test_explicit_true_reaches_a_scheme_that_has_it_off():
+    """The complement: explicit True must turn it ON where it was off.
+
+    The tri-state test above starts from a scheme carrying True, where None
+    and True expect the same answer -- so deleting the explicit-True
+    propagation alone leaves it passing (codex). This is the case that
+    distinguishes them.
+    """
+    from legoesm.driver.physics_pipeline import apply_surface_flux_config
+    from legoesm.atmosphere.physics.turbulence.config import (
+        LouisConfig, TurbulenceConfig,
+    )
+
+    class _Cfg:
+        surface_bulk_scheme = "constant"
+        surface_gustiness_zi = None
+        surface_thermo_convention = "legoesm"
+        surface_stability_scheme = "dyer1974"
+        surface_z_ref_model_level = True
+        surface_ocean_q_sfc_saline = None
+        surface_tiled = False
+        grid = None
+
+    off = SurfaceLayerConfig(z_ref_model_level=False)
+    tc = TurbulenceConfig(scheme="louis", louis=LouisConfig(surface=off))
+    out = apply_surface_flux_config(tc, _Cfg())
+    assert getattr(out, out.scheme).surface.z_ref_model_level is True
+
+
 def test_explicit_saline_false_overturns_a_scheme_level_true():
     """An explicit opt-out must survive the otherwise-default fast path.
 
