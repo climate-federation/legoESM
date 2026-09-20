@@ -5357,7 +5357,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_process_qsr_rate = None
         _nemo_ws_process_boundaries = None
         _nemo_ws_process_Taa = None
-        _nemo_ws_vertical_solve_trace = None
+        _nemo_ws_vertical_solve_trace, _return_vertical_solve_trace = None, (_return_tracer_process_trace and self._nemo_ws_test_hooks.vertical_solve_trace)
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -8368,9 +8368,6 @@ class LatLonCGridOceanModel:
             _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new, z_coord=z_coord, config=config, grid=grid)
 
         tke_new = None
-        _return_vertical_solve_trace = (
-            _return_tracer_process_trace
-            and self._nemo_ws_test_hooks.vertical_solve_trace)
         if _cfg_b.implicit_vertical_mixing and _apply_implicit_vmix:
             if self._tke_prognostic_active():
                 # PROGNOSTIC TKE: seed from the carried state.tke, assemble the
@@ -8398,8 +8395,7 @@ class LatLonCGridOceanModel:
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
-                    return_tke_entry=_return_live_stage_operands,
-                    return_tracer_solve_trace=_return_vertical_solve_trace,
+                    return_tke_entry=_return_live_stage_operands, return_tracer_solve_trace=_return_vertical_solve_trace,
                     grid=_grid, n2_tracers=_n2_tracers,
                     n2_tracers_before=_n2_tracers_before,
                     tke_n2_bundle=_tke_n2_bundle,
@@ -8421,11 +8417,8 @@ class LatLonCGridOceanModel:
                     (state_new, tke_new,
                      _nemo_ws_live_tke_entry,
                      _nemo_ws_live_tke_statement_trace) = _tke_result
-                elif _return_vertical_solve_trace:
-                    (state_new, tke_new,
-                     _nemo_ws_vertical_solve_trace) = _tke_result
                 else:
-                    state_new, tke_new = _tke_result
+                    state_new, tke_new, _nemo_ws_vertical_solve_trace = (_tke_result if _return_vertical_solve_trace else (*_tke_result, None))
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
@@ -8448,13 +8441,9 @@ class LatLonCGridOceanModel:
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
                     nemo_tracer_content_rhs=_nemo_ws_tracer_content_rhs,
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
-                    nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
-                    return_tracer_solve_trace=_return_vertical_solve_trace,
+                    nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v, return_tracer_solve_trace=_return_vertical_solve_trace,
                     z_coord=z_coord, config=config, iwm_fields=iwm_fields)
-                if _return_vertical_solve_trace:
-                    state_new, _nemo_ws_vertical_solve_trace = _zdf_result
-                else:
-                    state_new = _zdf_result
+                state_new, _nemo_ws_vertical_solve_trace = (_zdf_result if _return_vertical_solve_trace else (_zdf_result, None))
         if _return_tracer_process_trace:
             _nemo_ws_process_Taa = state_new.T.data
         if tke_new is not None:
@@ -10397,12 +10386,12 @@ class LatLonCGridOceanModel:
         # codex r2 UnboundLocalError fix).  None ⇒ salt uses K_v (no ddm).
         dK_ddm_salt = None
         if do_tracers:
-            K_v_cell = K_v_cell.astype(state.T.data.dtype)
             if return_tracer_solve_trace:
-                _trace_heat_K = K_v_cell
+                _trace_heat_K = K_v_cell.astype(state.T.data.dtype)
                 _trace_isoneutral_K = (
-                    jnp.zeros_like(K_v_cell) if K33_iso is None
+                    jnp.zeros_like(_trace_heat_K) if K33_iso is None
                     else K33_iso.astype(state.T.data.dtype))
+            K_v_cell = K_v_cell.astype(state.T.data.dtype)
             if K33_iso is not None:
                 # Fold the vertical isoneutral diffusivity K_33 into the implicit
                 # tracer solve (Veros core/isoneutral/diffusion.py:154). K_33 ≥ 0 at
@@ -10847,8 +10836,7 @@ class LatLonCGridOceanModel:
                             T_solve_in, S_solve_in, _content_t, _content_s,
                             K_v_cell, dz_cell, dz_half_cell, dt, _tracer_wet,
                             evaluation="nemo_literal",
-                            implicit_w=nemo_aimp_tracer_w,
-                            return_matrix_trace=return_tracer_solve_trace))
+                            implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))
                     if return_tracer_solve_trace:
                         T_new, S_new, _trace_matrix = _tracer_result
                         if (_trace_heat_K is None
