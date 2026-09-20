@@ -10,11 +10,14 @@ variable?
 
 Reference is MERRA2, which publishes the flux, the 10 m wind, the 2 m humidity
 and the skin temperature, so every factor comes from ONE product.  Model side
-is the lowest full level (~135 m) and the run's own prescribed SST with the
-sea-water factor.  The height mismatch is stated in the output and NOT
-corrected away: a log profile makes the model's wind read ~20% higher than a
-10 m value would, and its humidity slightly lower; both are in the direction
-that makes the model's deficit look SMALLER than it is.
+is the CMOR 1000 hPa level (the lowest full level, ~135 m, where it is above
+ground) and the run's own prescribed SST with the sea-water factor.
+
+Heights are matched with a NEUTRAL log profile applied to the model side
+(review finding, codex + GLM): wind to 10 m with z0 = 2e-4 m, humidity
+difference to 2 m with z0q = 1e-4 m.  Both factors are printed raw and
+matched; the matched row is the one to read.  Stability is ignored, which
+overstates the correction slightly in unstable tropical conditions.
 
 Usage: evap_deficit_decomposition.py <run>
 """
@@ -31,6 +34,9 @@ import regional_bias as rb  # noqa: E402
 from surface_humidity_deficit import _prescribed_sst  # noqa: E402
 
 MERRA = "/work/bd1179/b309141/climateeval_input/reanalysis_MERRA2/mon"
+Z_MODEL_M, Z0_M, Z0Q_M = 135.0, 2e-4, 1e-4
+WIND_TO_10M = np.log(10.0 / Z0_M) / np.log(Z_MODEL_M / Z0_M)
+DQ_TO_2M = np.log(2.0 / Z0Q_M) / np.log(Z_MODEL_M / Z0Q_M)
 BANDS = {"tropical ocean 20S-20N": (-20, 20, 0, 360),
          "trades 10-30N": (10, 30, 0, 360),
          "trades 10-30S": (-30, -10, 0, 360),
@@ -98,25 +104,32 @@ def main(run):
     fl = np.asarray(rb.bin_to_model(np.asarray(d["sftlf"], dtype=np.float64) / 100.0,
                                     np.asarray(d.lat), np.asarray(d.lon) % 360.0,
                                     lat, lon, label="sftlf"))
-    ocean = (fl < 0.5) & (ps > 100500.0) & np.isfinite(sst) & np.isfinite(lh_o)
+    ocean = (fl < 0.01) & (ps > 100500.0) & np.isfinite(sst) & np.isfinite(lh_o)
 
     dq_m, dq_o = qs_m - q_m, qs_o - q_o
-    print(f"{run}: {100 * ocean.mean():.1f}% valid ocean columns, months {months}")
-    print(f"{'band':<24}{'LH ratio':>9}{'U ratio':>9}{'dq ratio':>9}{'resid':>8}"
-          f"{'  dq mdl':>9}{'dq M2':>8}{'q_air mdl':>10}{'q_air M2':>9}")
+    t = np.asarray(du.time)
+    sea = (fl < 0.01) & np.isfinite(sst)
+    for name, box in BANDS.items():
+        pm = rb.region_mean(ps, lat, lon, box, valid=sea)
+        po = rb.region_mean(ps_o, lat, lon, box, valid=sea)
+        print(f"ps: {name:<24} ocean-mean ps model {pm / 100:.1f} hPa, MERRA2 {po / 100:.1f} hPa")
+    print(f"{run}: model level plev[{k}] = {plev[k]:.0f} Pa; window {str(t[0])[:10]} "
+          f"to {str(t[-1])[:10]}, months {months}; ocean mask sftlf<1%, "
+          f"mean ps>1005 hPa: {100 * ocean.mean():.1f}% of columns")
+    print(f"{'band':<24}{'LH':>6}{'U raw':>7}{'U 10m':>7}{'dq raw':>7}{'dq 2m':>7}"
+          f"{'resid raw':>10}{'resid mtch':>11}{'q_air mdl':>10}{'q_air M2':>9}")
     for name, box in BANDS.items():
         r = lambda f: rb.region_mean(f, lat, lon, box, valid=ocean)  # noqa: E731
+        nkeep = rb.region_mean(ocean.astype(float), lat, lon, box)
         lh, u, dqr = r(lh_m) / r(lh_o), r(U_m) / r(U_o), r(dq_m) / r(dq_o)
-        print(f"{name:<24}{lh:9.2f}{u:9.2f}{dqr:9.2f}{lh / (u * dqr):8.2f}"
-              f"{1e3 * r(dq_m):9.2f}{1e3 * r(dq_o):8.2f}{1e3 * r(q_m):10.2f}"
-              f"{1e3 * r(q_o):9.2f}")
-    print("\nratios = model / MERRA2 of band means; resid = LH / (U * dq), i.e. the "
-          "transfer coefficient and\neverything else. dq and q in g/kg. Model wind "
-          "and humidity are at ~135 m, MERRA2's at 10 m and 2 m:\nthe log profile "
-          "puts the model's U ratio ~1.2 too HIGH and its q_air slightly LOW, "
-          "so the\nmodel's true wind excess is larger and its humidity excess "
-          "larger still than printed.")
-
+        u10, dq2 = u * WIND_TO_10M, dqr * DQ_TO_2M
+        print(f"{name:<24}{lh:6.2f}{u:7.2f}{u10:7.2f}{dqr:7.2f}{dq2:7.2f}"
+              f"{lh / (u * dqr):10.2f}{lh / (u10 * dq2):11.2f}"
+              f"{1e3 * r(q_m):10.2f}{1e3 * r(q_o):9.2f}  kept {100 * nkeep:.0f}%")
+    print(f"\nratios = model / MERRA2 of cos-lat band means (q_air in g/kg); "
+          f"height match: wind x{WIND_TO_10M:.2f}, dq x{DQ_TO_2M:.2f}.\n"
+          "resid = LH / (U * dq): coefficient + density + covariance + MERRA2's own "
+          "internal-state flux; NOT a transfer coefficient.")
 
 if __name__ == "__main__":
     main(sys.argv[1])
