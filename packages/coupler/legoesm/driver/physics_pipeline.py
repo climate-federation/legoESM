@@ -802,6 +802,12 @@ class PhysicsPipeline:
         ``C_E`` no-stability bulk law below.
         """
         T_air = T[..., -1]
+        if z_low is not None:
+            # The heights come from column-shaped (ncol, nlev) arrays while
+            # this solve keeps the native grid shape, so on a structured grid
+            # a flat (ncol,) height would not broadcast against an
+            # (nlat, nlon) air temperature at all (codex).
+            z_low = jnp.asarray(z_low).reshape(T_air.shape)
         q_air = q_v[..., -1]
         eps = self.emissivity_land
         sb = constants.sigma_sb

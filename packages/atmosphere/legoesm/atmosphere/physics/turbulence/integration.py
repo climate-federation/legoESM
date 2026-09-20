@@ -926,23 +926,19 @@ def _make_mpas_turbulence(
                     f"solved. Use one of {schemes_accepting_surface_flux()}, "
                     "or teach this scheme the argument.")
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
-                compute_surface_fluxes,
+                surface_fluxes_at_lowest_level,
             )
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
-            if getattr(_surf, "z_ref_model_level", False):
-                # The inputs ARE lowest-full-level values: tell the MOST solver
-                # their height instead of labelling them as config.z_ref (10 m),
-                # and hand it the potential temperature at that height (COARE:
-                # dT = T_sfc - (T + g/c_p * z), ~1.5 K at 150 m) so the stability
-                # is not read off a dry-adiabatic lapse.
-                _z_in = z_full[:, -1]
-                _T_in = T_col[:, -1] + (constants.g / constants.c_pd) * _z_in
-            else:
-                _z_in = None
-                _T_in = T_col[:, -1]
-            _tx, _ty, _sh, _lh, _us = compute_surface_fluxes(
-                u_col[:, -1], v_col[:, -1], _T_in, q_v_col[:, -1],
-                T_sfc, q_sfc, rho[:, -1], step_config.surface, z_ref=_z_in,
+            # Through the shared helper rather than an inline copy: this
+            # branch had its own adjustment, which kept the warmed air while
+            # the bulk law dropped the height on a constant-coefficient
+            # scheme -- the same one-sided contrast the helper exists to
+            # prevent, surviving in the one place that did not call it
+            # (codex).  Height measured from the LOCAL surface.
+            _tx, _ty, _sh, _lh, _us = surface_fluxes_at_lowest_level(
+                u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
+                T_sfc, q_sfc, rho[:, -1], step_config.surface,
+                z_full[:, -1] - z_half[:, -1],
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
