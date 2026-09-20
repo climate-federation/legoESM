@@ -785,7 +785,9 @@ class TestSingleReducePCG:
         # captured systems at the production mesh, 30 iterations put
         # float32 on its own precision floor, which no larger count
         # improves.  See the MPASOceanConfig field comment for the table.
-        assert cfg.barotropic_implicit_pcg_fixed_iters == 30
+        assert cfg.barotropic_implicit_pcg_fixed_iters == 20
+        assert cfg.barotropic_implicit_pcg_precond == "poly"
+        assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
         assert cfg.barotropic_implicit_pcg_residual_tol == 1.0e-10
         assert cfg.barotropic_implicit_pcg_tol == 1.0e-10
         assert cfg.barotropic_implicit_pcg_maxiter == 200

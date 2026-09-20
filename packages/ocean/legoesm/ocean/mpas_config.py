@@ -307,7 +307,10 @@ class MPASOceanConfig(NamedTuple):
     # with one batched allreduce per iteration — validated at solver entry,
     # ValueError on unknown).
     #
-    # 30, not 60: measured on the REAL captured systems (scripts/validate/
+    # 20 with the "poly" preconditioner below (owner decision 2026-09-20,
+    # A/B at 32 and 128 GPUs: step -8%/-14.5% f32, -6%/-11% f64 against
+    # Jacobi at 30, same residual).  The Jacobi history that set 30:
+    # measured on the REAL captured systems (scripts/validate/
     # ocean_fidelity/barotropic_pcg_convergence.py) at subdivision 7, 8 and
     # 9, in both precisions, after 200 spin-up steps at dt = 300 s.  Over
     # the configurations tested, the mesh set the iteration count and the
@@ -343,7 +346,7 @@ class MPASOceanConfig(NamedTuple):
     # 1e-10 residual has to set the count back up explicitly.
     # The lat-lon C-grid default (state.py) is a different operator on a
     # different mesh and stays at 60 until measured.
-    barotropic_implicit_pcg_fixed_iters: int = 30
+    barotropic_implicit_pcg_fixed_iters: int = 20
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     barotropic_implicit_pcg_variant: str = "standard"
     # Distributed-only preconditioner for the fixed-iteration PCG.
@@ -359,7 +362,10 @@ class MPASOceanConfig(NamedTuple):
     # Each PCG iteration still costs one cell-halo exchange plus two
     # allreduces; the win is reaching the target residual at a smaller
     # ``fixed_iters`` (30 -> 20 at poly4).
-    barotropic_implicit_pcg_precond: str = "jacobi"
+    # Default "poly" since 2026-09-20 (owner decision, A/B above); "jacobi"
+    # is the pre-2026-09-20 solver and needs fixed_iters=30 for the same
+    # residual.
+    barotropic_implicit_pcg_precond: str = "poly"
     barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global

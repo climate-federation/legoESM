@@ -430,18 +430,6 @@ def barotropic_implicit_mpas(
     Voronoi ghost cells are not double-counted).  Log / assert it OUTSIDE
     the JIT; never branch the compiled step on it.
     """
-    _pcg_precond = str(config.barotropic_implicit_pcg_precond)
-    if _pcg_precond not in ("jacobi", "poly"):
-        raise ValueError(
-            f"Unknown barotropic PCG preconditioner variant {_pcg_precond!r}: "
-            "config.barotropic_implicit_pcg_precond must be one of "
-            "'jacobi' or 'poly'"
-        )
-    if int(config.barotropic_implicit_pcg_poly_sweeps) < 1:
-        raise ValueError(
-            "config.barotropic_implicit_pcg_poly_sweeps must be >= 1, got "
-            f"{int(config.barotropic_implicit_pcg_poly_sweeps)}"
-        )
     # Distributed dispatch at ENTRY (resolves TODO(distributed-mpas-pcg)):
     # when ``initialize_voronoi_mpi`` has armed a partition layout, the
     # solve runs the shared fixed-M PCG with (a) a cell-halo exchange
@@ -469,6 +457,20 @@ def barotropic_implicit_mpas(
             "build the model on layout.local_mesh); without it the "
             "stock-CG solve and its mass projection would silently run "
             "rank-local.  Use 'explicit_substep' otherwise."
+        )
+    # Preconditioner selection: validated on the static config string here,
+    # after the multi-rank refusal above so that guard keeps firing first.
+    _pcg_precond = str(config.barotropic_implicit_pcg_precond)
+    if _pcg_precond not in ("jacobi", "poly"):
+        raise ValueError(
+            f"Unknown barotropic PCG preconditioner variant {_pcg_precond!r}: "
+            "config.barotropic_implicit_pcg_precond must be one of "
+            "'jacobi' or 'poly'"
+        )
+    if int(config.barotropic_implicit_pcg_poly_sweeps) < 1:
+        raise ValueError(
+            "config.barotropic_implicit_pcg_poly_sweeps must be >= 1, got "
+            f"{int(config.barotropic_implicit_pcg_poly_sweeps)}"
         )
     g = jnp.asarray(config.g)
     mask = state.land_mask.data

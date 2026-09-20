@@ -100,8 +100,9 @@ class TestValidation:
 
     def test_defaults(self):
         cfg = MPASOceanConfig()
-        assert cfg.barotropic_implicit_pcg_precond == "jacobi"
+        assert cfg.barotropic_implicit_pcg_precond == "poly"
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
+        assert cfg.barotropic_implicit_pcg_fixed_iters == 20
 
 
 class TestPolynomial:

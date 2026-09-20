@@ -110,7 +110,10 @@ def _mode(r, path):
     return "weak" if "_weak_" in os.path.basename(path) else r.get("mode", "strong")
 
 
-OCEAN_MPAS_PCG_ITERS = 30   # MPASOceanConfig.barotropic_implicit_pcg_fixed_iters
+# MPASOceanConfig defaults the figure is measured at: fixed_iters, precond,
+# poly_sweeps.  Rows solving anything else are a different model.
+OCEAN_MPAS_PCG_ITERS = 20
+OCEAN_MPAS_PCG_PRECOND = ("poly", 4)
 
 
 def load(dirs):
@@ -159,9 +162,12 @@ def load(dirs):
                     # never run the fixed count, so their recorded count is
                     # inert and they stay comparable across the change.
                     solver = extra.get("pcg_solver_path")
+                    pre = (extra.get("pcg_precond"), extra.get("pcg_poly_sweeps"))
                     if (solver != "stock_cg_to_tol"
-                            and iters != OCEAN_MPAS_PCG_ITERS):
-                        dropped.append((f, int(r["n_devices"]), iters))
+                            and (iters != OCEAN_MPAS_PCG_ITERS
+                                 or pre != OCEAN_MPAS_PCG_PRECOND)):
+                        dropped.append((f, int(r["n_devices"]),
+                                        f"{iters}/{pre[0]}{pre[1]}"))
                         continue
                 mode = _mode(r, f)
                 key = (comp, grid, _backend(r), prec, mode, _res(r, grid, mode),
@@ -176,8 +182,9 @@ def load(dirs):
         counts = {}
         for _f, nd, it in dropped:
             counts[it] = counts.get(it, 0) + 1
-        print(f"load: refused {len(dropped)} ocean-MPAS receipts solving a "
-              f"different iteration count than {OCEAN_MPAS_PCG_ITERS} "
+        print(f"load: refused {len(dropped)} ocean-MPAS receipts solving "
+              f"other than {OCEAN_MPAS_PCG_ITERS} iterations with "
+              f"{OCEAN_MPAS_PCG_PRECOND[0]}{OCEAN_MPAS_PCG_PRECOND[1]} "
               f"(counts found: "
               + ", ".join(f"{k!r}x{v}" for k, v in sorted(
                   counts.items(), key=lambda kv: str(kv[0]))) + ")",
