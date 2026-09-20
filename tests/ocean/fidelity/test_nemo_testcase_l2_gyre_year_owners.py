@@ -14,6 +14,7 @@ tested unconditionally, because those are the parts that can rot.
 from __future__ import annotations
 
 import importlib.util
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,9 @@ RUN_SH = (ROOT / "scripts" / "validate" / "ocean_fidelity" / "testcases"
           / "nemo_testcase_l2_gyre_earlydays" / "run.sh")
 NEMO_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                    "year_fromrest/nemo_seed0")
+PROCESS_CARD = (ROOT / "scripts" / "validate" / "ocean_fidelity"
+                / "testcases"
+                / "nemo_testcase_l2_gyre_round123_process_budget")
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +55,86 @@ def test_self_check_passes_as_a_subprocess():
                             capture_output=True, text=True, cwd=str(ROOT))
     assert result.returncode == 0, result.stdout + result.stderr
     assert "self-check: all checks passed" in result.stdout
+
+
+def _synthetic_process_record(path: Path, harness, *, kt: int = 1081):
+    shape3 = (harness.PROCESS_JPI, harness.PROCESS_JPJ, harness.PROCESS_JPK)
+    shape2 = (harness.PROCESS_JPI, harness.PROCESS_JPJ)
+
+    def block(value, shape):
+        return np.full(shape, value, dtype="=f8", order="F")
+
+    with path.open("wb") as handle:
+        handle.write(harness.PROCESS_MAGIC.encode("ascii"))
+        handle.write(struct.pack(
+            "=11i", 1, kt, 3, 1, 2, 3, 2,
+            harness.PROCESS_JPI, harness.PROCESS_JPJ, harness.PROCESS_JPK,
+            harness.PROCESS_STORAGE_BITS,
+        ))
+        handle.write(struct.pack("=d", harness.DT_S))
+        arrays = (
+            block(2.0, shape3),
+            block(0.0, shape2), block(0.0, shape2), block(0.0, shape2),
+            block(0.10, shape3), block(0.20, shape3),
+            block(0.30, shape3), block(0.40, shape3),
+            block(2.75, shape3),
+        )
+        for values in arrays:
+            handle.write(values.tobytes(order="F"))
+
+
+def test_round123_process_record_layout_and_reader(tmp_path, harness):
+    record_path = tmp_path / "oracle_process_budget_kt00001081.bin"
+    _synthetic_process_record(record_path, harness)
+    assert record_path.stat().st_size == harness.PROCESS_RECORD_BYTES
+    assert harness.PROCESS_RECORD_BYTES == 1_415_300
+    record = harness.read_process_record(record_path)
+    assert record["kstp"] == 1081
+    assert record["Tbb"].shape == (22, 32, 31)
+    assert record["r3t_Kbb"].shape == (22, 32)
+    assert np.all(record["rhs_after_lateral_diffusion"] == 0.40)
+
+    with pytest.raises(harness.GateError, match="1415292 bytes"):
+        harness.read_process_record(record_path, truncate=True)
+
+
+def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
+                                                              harness):
+    record_path = tmp_path / "oracle_process_budget_kt00001081.bin"
+    _synthetic_process_record(record_path, harness)
+    record = harness.read_process_record(record_path)
+    rows = harness.process_temperature_rows(record)
+    reconstructed = np.zeros_like(rows["geometry"])
+    for name in (*harness.PROCESS_ROWS, "rounding_closure"):
+        reconstructed += rows[name]
+    endpoint = record["Taa"][..., :30] - record["Tbb"][..., :30]
+    assert np.array_equal(reconstructed, endpoint)
+
+    control = harness._process_sbc_ulp_control(
+        record, np.ones(endpoint.shape, dtype=bool))
+    assert control["raw_surface_rhs_increment_moved"]
+    assert control["new_uint64"] != control["old_uint64"]
+
+
+def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
+    source_patch = (PROCESS_CARD / "stprk3_stg_round123.patch").read_text()
+    removed = [line for line in source_patch.splitlines()
+               if line.startswith("-") and not line.startswith("---")]
+    assert removed == []
+    assert source_patch.count("WRITE(r123_unit)") == 9
+    for statement in ("CALL tra_adv", "CALL tra_sbc_RK3", "CALL tra_ldf",
+                      "CALL tra_zdf", "DEALLOCATE( l2_qsr_before )"):
+        assert statement in source_patch
+
+    run_sh = (PROCESS_CARD / "run.sh").read_text()
+    assert "trap refuse_on_error ERR" in run_sh
+    assert "TARGET_CFG=GYRE_OMIP_L2_P3_SM_R123PROC" in run_sh
+    assert "EXPECTED_SIZE" in run_sh and "1415300" in run_sh
+    assert "EXPECTED_TOTAL" in run_sh and "509508000" in run_sh
+    assert 'cmp -s "$SOURCE_RUN/$name" "$TARGET_RUN/$name"' in run_sh
+    assert "'CALL tra_qsr'" in run_sh
+    assert "process-trajectory-ulp" in run_sh
+    assert "ROUND123_PROCESS_RECORD_READY" in run_sh
 
 
 def _toy():

@@ -19,6 +19,8 @@ MODES
   --decompose DAY    the gap at DAY by FIELD, by DEPTH and by REGION, plus the
                      fraction-of-NEMO's-own-from-rest-signal table that is the
                      only one of the three that can name a LEADING FIELD.
+  --process-record   validates the Round-123 compiled-order NEMO process
+                     frames for steps 1081..1440 before they may be scored.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -36,6 +38,10 @@ PLANTS (each exits NON-ZERO; each is exercised by the committed unit test)
   forcing-stress-transpose swaps the geographic stress pair the model consumes
   switch-blind             freezes the EVD trigger mask, so the trace must
                            REFUSE rather than report "no crossing"
+  process-stamp            supplies a wrong producer commit
+  process-truncation       removes one binary64 word from the first frame
+  process-sbc-ulp          moves one post-SBC RHS value by one ULP
+  process-trajectory-ulp   breaks the first Taa-to-next-Tbb chain by one ULP
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -48,9 +54,12 @@ was false for this one, and an independent review said so.
 from __future__ import annotations
 
 import argparse
-import ctypes
+import hashlib
 import importlib.util
+import io
 import json
+import re
+import struct
 import sys
 import time
 from pathlib import Path
@@ -85,6 +94,33 @@ FIELDS = ("T", "S", "u", "v", "ssh")
 # model actually consumes; sw_down pins qsr beside it, and the two together
 # pin qns without inventing a difference of rounded sums.
 SBC_FIELDS = ("qsr", "q_net", "emp", "utau", "vtau")
+# Round 123 extends this owner instrument with the raw, compiled-order tracer
+# boundaries needed for a day-180-to-240 process budget.  These are record
+# FORMAT constants, frozen in the round-123 preregistration, not physics
+# tolerances.
+PROCESS_MAGIC = "NEMO_L2_R123PROC"
+PROCESS_START_STEP = 1081
+PROCESS_END_STEP = 1440
+PROCESS_JPI = 36
+PROCESS_JPJ = 26
+PROCESS_JPK = 31
+PROCESS_STORAGE_BITS = 64
+PROCESS_HEADER_INTS = 11
+PROCESS_RECORD_BYTES = (
+    16 + PROCESS_HEADER_INTS * 4 + 8
+    + (6 * PROCESS_JPI * PROCESS_JPJ * PROCESS_JPK
+       + 3 * PROCESS_JPI * PROCESS_JPJ) * 8
+)
+PROCESS_RESTART_HASHES = {
+    "GYRE_OMIP_L2_P3_00001080_restart.nc":
+        "6c0c7a950b30b9d59dbf2673833ddf462a5f8ea5650f496f2f772e1e17092976",
+    "GYRE_OMIP_L2_P3_00001440_restart.nc":
+        "96529a98da0e0d89b328632a826a9d41593f81f0d1a917350f28f184d49b163a",
+}
+PROCESS_ROWS = (
+    "geometry", "advection", "surface_boundary", "shortwave",
+    "lateral_diffusion", "vertical_diffusion",
+)
 # The geographic stress rotation cannot be a BIT-EXACT row: recovering the
 # native pair from tau_x/tau_y in binary64 costs about 1e-17 Pa because
 # cos^2 + sin^2 is not exactly 1.  So it is scored as a DISCRIMINATION instead
@@ -139,6 +175,396 @@ def _policy():
 def _rms(values, mask) -> float:
     values = np.asarray(values, dtype=np.float64)
     return float(np.sqrt(np.mean(values[mask] ** 2)))
+
+
+# --------------------------------------- day-180-to-240 process boundaries ---
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _take(stream: io.BytesIO, count: int, label: str) -> bytes:
+    payload = stream.read(count)
+    require(len(payload) == count, f"process record truncated in {label}")
+    return payload
+
+
+def _process_xyz(stream: io.BytesIO, label: str) -> np.ndarray:
+    count = PROCESS_JPI * PROCESS_JPJ * PROCESS_JPK
+    values = np.frombuffer(_take(stream, count * 8, label), dtype="=f8")
+    full = values.reshape(
+        (PROCESS_JPI, PROCESS_JPJ, PROCESS_JPK), order="F")
+    return full[2:-2, 2:-2].transpose(1, 0, 2).copy()
+
+
+def _process_xy(stream: io.BytesIO, label: str) -> np.ndarray:
+    count = PROCESS_JPI * PROCESS_JPJ
+    values = np.frombuffer(_take(stream, count * 8, label), dtype="=f8")
+    full = values.reshape((PROCESS_JPI, PROCESS_JPJ), order="F")
+    return full[2:-2, 2:-2].T.copy()
+
+
+def read_process_record(path: Path, *, truncate: bool = False) -> dict:
+    """Read one frozen Round-123 NEMO process-boundary frame.
+
+    The crop and transpose are the same NEMO-(i,j,k) to model-(j,i,k)
+    operation used by ``read_entry`` in the certified phase-3 gate.  The
+    unused NEMO bottom level remains in the returned arrays; scoring crops it
+    to the card's 30-level wet mask, never pads the candidate.
+    """
+    path = Path(path)
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if truncate:
+        raw = raw[:-8]
+    require(len(raw) == PROCESS_RECORD_BYTES,
+            f"{path.name}: {len(raw)} bytes, expected "
+            f"{PROCESS_RECORD_BYTES}")
+    stream = io.BytesIO(raw)
+    magic = _take(stream, 16, "magic").decode("ascii")
+    header = struct.unpack(
+        "=11i", _take(stream, PROCESS_HEADER_INTS * 4, "header"))
+    (version, kstp, kstg, kbb, kmm, krhs, kaa, nx, ny, nz,
+     storage_bits) = header
+    require(magic == PROCESS_MAGIC, f"{path.name}: bad magic {magic!r}")
+    require(version == 1, f"{path.name}: version {version}, expected 1")
+    require(kstg == 3, f"{path.name}: stage {kstg}, expected 3")
+    require((nx, ny, nz, storage_bits) == (
+        PROCESS_JPI, PROCESS_JPJ, PROCESS_JPK, PROCESS_STORAGE_BITS),
+        f"{path.name}: dimensions/storage {(nx, ny, nz, storage_bits)}")
+    match = re.fullmatch(r"oracle_process_budget_kt(\d{8})\.bin", path.name)
+    require(match is not None, f"{path.name}: wrong process-record filename")
+    require(int(match.group(1)) == kstp,
+            f"{path.name}: filename/header step mismatch {kstp}")
+    require(all(1 <= level <= 3 for level in (kbb, kmm, krhs, kaa)),
+            f"{path.name}: time-level slot outside 1..3")
+    rdt = struct.unpack("=d", _take(stream, 8, "rDt"))[0]
+    require(rdt == DT_S, f"{path.name}: rDt {rdt}, expected {DT_S}")
+    fields = {
+        "Tbb": _process_xyz(stream, "Tbb"),
+        "r3t_Kbb": _process_xy(stream, "r3t Kbb"),
+        "r3t_Kmm": _process_xy(stream, "r3t Kmm"),
+        "r3t_Kaa": _process_xy(stream, "r3t Kaa"),
+        "rhs_after_advection": _process_xyz(stream, "RHS after advection"),
+        "rhs_after_surface_boundary": _process_xyz(
+            stream, "RHS after surface boundary"),
+        "rhs_after_shortwave": _process_xyz(stream, "RHS after shortwave"),
+        "rhs_after_lateral_diffusion": _process_xyz(
+            stream, "RHS after lateral diffusion"),
+        "Taa": _process_xyz(stream, "Taa after vertical diffusion"),
+    }
+    require(stream.read(1) == b"", f"{path.name}: trailing bytes")
+    for name, values in fields.items():
+        require(np.all(np.isfinite(values)),
+                f"{path.name}: {name} contains non-finite values")
+    return {
+        "path": str(path), "sha256": digest, "header": header, "kstp": kstp,
+        "rDt": rdt, **fields,
+    }
+
+
+def process_temperature_rows(record: dict) -> dict[str, np.ndarray]:
+    """Decode the six preregistered temperature-budget rows for one step."""
+    nlev = record["Tbb"].shape[-1] - 1
+    tbb = np.asarray(record["Tbb"][..., :nlev], dtype=np.float64)
+    taa = np.asarray(record["Taa"][..., :nlev], dtype=np.float64)
+    qbb = (1.0 + np.asarray(record["r3t_Kbb"], dtype=np.float64))[..., None]
+    qmm = (1.0 + np.asarray(record["r3t_Kmm"], dtype=np.float64))[..., None]
+    qaa = (1.0 + np.asarray(record["r3t_Kaa"], dtype=np.float64))[..., None]
+    base = qbb * tbb
+
+    def accumulated(name: str) -> np.ndarray:
+        rhs = np.asarray(record[name][..., :nlev], dtype=np.float64)
+        return (base + record["rDt"] * qmm * rhs) / qaa
+
+    b0 = base / qaa
+    badv = accumulated("rhs_after_advection")
+    bsbc = accumulated("rhs_after_surface_boundary")
+    bqsr = accumulated("rhs_after_shortwave")
+    bldf = accumulated("rhs_after_lateral_diffusion")
+    rows = {
+        "geometry": b0 - tbb,
+        "advection": badv - b0,
+        "surface_boundary": bsbc - badv,
+        "shortwave": bqsr - bsbc,
+        "lateral_diffusion": bldf - bqsr,
+        "vertical_diffusion": taa - bldf,
+    }
+    combined = np.zeros_like(tbb)
+    for name in PROCESS_ROWS:
+        combined = combined + rows[name]
+    rows["rounding_closure"] = (taa - tbb) - combined
+    return rows
+
+
+def _different_cells(left: np.ndarray, right: np.ndarray,
+                     mask: np.ndarray) -> int:
+    return int(np.count_nonzero(
+        np.asarray(left)[mask].view(np.uint64)
+        != np.asarray(right)[mask].view(np.uint64)))
+
+
+def _process_manifest(root: Path, records: list[Path]) -> dict[str, str]:
+    manifest = root / "process_records.sha256"
+    require(manifest.is_file(), f"missing {manifest.name}")
+    rows: dict[str, str] = {}
+    for number, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
+        words = line.split()
+        require(len(words) == 2,
+                f"{manifest.name}:{number}: malformed sha256 row")
+        name = Path(words[1].lstrip("*")).name
+        require(re.fullmatch(r"[0-9a-f]{64}", words[0]) is not None,
+                f"{manifest.name}:{number}: malformed digest")
+        require(name not in rows, f"{manifest.name}: duplicate {name}")
+        rows[name] = words[0]
+    require(set(rows) == {path.name for path in records},
+            "process-record manifest file set differs from steps 1081..1440")
+    return rows
+
+
+def _check_process_stamp(root: Path, expected_commit: str) -> None:
+    manifest = root / "process_records.sha256"
+    stamp = root / "process_records.stamp"
+    require(stamp.is_file(), f"missing {stamp.name}")
+    words = stamp.read_text(encoding="utf-8").split()
+    require(len(words) == 3, f"{stamp.name}: malformed stamp")
+    require(words[0] == _sha256(manifest),
+            f"{stamp.name}: manifest digest mismatch")
+    require(words[1] == expected_commit,
+            f"{stamp.name}: producer commit mismatch")
+    require(words[2] == manifest.name,
+            f"{stamp.name}: stamped filename mismatch")
+
+
+def _resolved_process_card(path: Path) -> dict[str, bool]:
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    patterns = {
+        "itend_1440": r"number of the last time step\s+nn_itend\s*=\s*1440\b",
+        "dt_14400": r"ocean time step\s+rn_Dt\s*=\s*14400(?:\.0+)?\b",
+        "tiling_off": r"Tiling \(T\) or not \(F\)\s+ln_tile\s*=\s*F\b",
+        "qsr_on": r"Light penetration in temperature Eq\.\s+ln_traqsr\s*=\s*T\b",
+        "bdy_off": r"open boundaries not used \(ln_bdy = F\)",
+        "bbc_off": r"geothermal heating at ocean bottom\s+ln_trabbc\s*=\s*F\b",
+        "bbl_off": r"bottom boundary layer flag\s+ln_trabbl\s*=\s*F\b",
+        "dmp_off": r"Apply relaxation\s+or not\s+ln_tradmp\s*=\s*F\b",
+        "mfc_off": r"convection mass flux \(mfc\)\s+ln_zdfmfc\s*=\s*F\b",
+        "osm_off": r"OSMOSIS-OBL closure \(OSM\)\s+ln_zdfosm\s*=\s*F\b",
+        "npc_off": r"non-penetrative convection \(npc\)\s+ln_zdfnpc\s*=\s*F\b",
+    }
+    rows = {name: re.search(pattern, text) is not None
+            for name, pattern in patterns.items()}
+    require(all(rows.values()),
+            "resolved process card differs: "
+            + ", ".join(name for name, ok in rows.items() if not ok))
+    return rows
+
+
+def _process_sbc_ulp_control(record: dict, mask: np.ndarray) -> dict:
+    """Move one RHS bit and prove the decoded boundary is not self-blind."""
+    before = np.asarray(record["rhs_after_surface_boundary"],
+                        dtype=np.float64)
+    adv = np.asarray(record["rhs_after_advection"], dtype=np.float64)
+    for j, i, k in np.argwhere(mask):
+        old = before[j, i, k]
+        for direction in (np.inf, -np.inf):
+            new = np.nextafter(old, direction)
+            if not np.isfinite(new) or new == old:
+                continue
+            old_delta = old - adv[j, i, k]
+            new_delta = new - adv[j, i, k]
+            if (np.asarray(old_delta).view(np.uint64)
+                    == np.asarray(new_delta).view(np.uint64)):
+                continue
+            planted = dict(record)
+            planted_sbc = np.array(before, copy=True)
+            planted_sbc[j, i, k] = new
+            planted["rhs_after_surface_boundary"] = planted_sbc
+            original_rows = process_temperature_rows(record)
+            planted_rows = process_temperature_rows(planted)
+            moved = {name: _different_cells(
+                original_rows[name], planted_rows[name], mask)
+                for name in (*PROCESS_ROWS, "rounding_closure")}
+            return {
+                "index_jik": [int(j), int(i), int(k)],
+                "old_uint64": int(np.asarray(old).view(np.uint64)),
+                "new_uint64": int(np.asarray(new).view(np.uint64)),
+                "raw_surface_rhs_increment_moved": True,
+                "decoded_temperature_rows_moved": moved,
+            }
+    raise GateError("one-ULP surface-boundary plant is inert in every wet cell")
+
+
+def validate_process_record(root: Path, expected_commit: str,
+                            *, plant: str | None = None) -> dict:
+    """Admit all 360 passive NEMO frames, or exercise one named plant."""
+    root = Path(root)
+    expected_names = [
+        f"oracle_process_budget_kt{step:08d}.bin"
+        for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1)
+    ]
+    records = [root / name for name in expected_names]
+    observed = sorted(root.glob("oracle_process_budget_kt*.bin"))
+    require([path.name for path in observed] == expected_names,
+            "process-record set is not exactly steps 1081..1440")
+    producer = (root / "producer_commit.txt").read_text(
+        encoding="utf-8").strip()
+    require(producer == expected_commit,
+            "producer_commit.txt differs from --expect-commit")
+    manifest = _process_manifest(root, records)
+
+    if plant == "process-stamp":
+        try:
+            _check_process_stamp(root, "0" * 40)
+        except GateError as error:
+            return {"status": "PLANT-FIRED", "plant": plant,
+                    "reason": str(error)}
+        raise GateError("process-stamp plant stayed green")
+    _check_process_stamp(root, expected_commit)
+    if plant == "process-truncation":
+        try:
+            read_process_record(records[0], truncate=True)
+        except GateError as error:
+            return {"status": "PLANT-FIRED", "plant": plant,
+                    "reason": str(error)}
+        raise GateError("process-truncation plant stayed green")
+
+    gate = _gate()
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    mask = gate.expected_masks(build_nemo_testcase_card(CASE))["T"]
+    require(mask.shape == (PROCESS_JPJ - 4, PROCESS_JPI - 4,
+                           PROCESS_JPK - 1),
+            f"process mask shape {mask.shape} differs from frozen layout")
+
+    first = read_process_record(records[0])
+    if plant == "process-sbc-ulp":
+        control = _process_sbc_ulp_control(first, mask)
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": control}
+    if plant == "process-trajectory-ulp":
+        second = read_process_record(records[1])
+        require(_different_cells(first["Taa"][..., :mask.shape[-1]],
+                                 second["Tbb"][..., :mask.shape[-1]],
+                                 mask) == 0,
+                "unplanted first/second process frames do not chain")
+        planted = np.array(first["Taa"], copy=True)
+        j, i, k = np.argwhere(mask)[0]
+        planted[j, i, k] = np.nextafter(planted[j, i, k], np.inf)
+        moved = _different_cells(planted[..., :mask.shape[-1]],
+                                 second["Tbb"][..., :mask.shape[-1]], mask)
+        require(moved == 1,
+                f"trajectory ULP plant moved {moved} cells, expected 1")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "chained_cells_unequal": moved,
+                "index_jik": [int(j), int(i), int(k)]}
+
+    require(plant in (None, "none"), f"unknown process plant {plant!r}")
+    activity = {name: 0 for name in PROCESS_ROWS}
+    max_rounding_closure = 0.0
+    chained_cells_unequal = 0
+    previous_taa = None
+    headers = []
+    digests = {}
+    for expected_step, path in enumerate(records, PROCESS_START_STEP):
+        record = first if expected_step == PROCESS_START_STEP \
+            else read_process_record(path)
+        require(record["kstp"] == expected_step,
+                f"{path.name}: step sequence mismatch")
+        require(record["sha256"] == manifest[path.name],
+                f"{path.name}: sha256 manifest mismatch")
+        digests[path.name] = record["sha256"]
+        if expected_step in (PROCESS_START_STEP, PROCESS_END_STEP):
+            headers.append(list(record["header"]))
+        if previous_taa is not None:
+            chained_cells_unequal += _different_cells(
+                previous_taa[..., :mask.shape[-1]],
+                record["Tbb"][..., :mask.shape[-1]], mask)
+        previous_taa = record["Taa"]
+        rows = process_temperature_rows(record)
+        for name in PROCESS_ROWS:
+            activity[name] += int(np.count_nonzero(rows[name][mask]))
+        max_rounding_closure = max(
+            max_rounding_closure,
+            float(np.max(np.abs(rows["rounding_closure"][mask]))),
+        )
+    require(chained_cells_unequal == 0,
+            f"process frames fail Taa-to-next-Tbb chain in "
+            f"{chained_cells_unequal} wet cells")
+    for name in PROCESS_ROWS[1:]:
+        require(activity[name] > 0,
+                f"active process row {name} never moves a wet cell")
+
+    resolved = _resolved_process_card(root / "ocean.output")
+    restart_rows = {}
+    for name, expected in PROCESS_RESTART_HASHES.items():
+        observed_digest = _sha256(root / name)
+        require(observed_digest == expected,
+                f"passive restart {name} is {observed_digest}, expected "
+                f"{expected}")
+        restart_rows[name] = observed_digest
+    binary_words = (root / "binary.sha256").read_text(
+        encoding="utf-8").split()
+    require(binary_words, "binary.sha256 is empty")
+    binary_digest = _sha256(root / "nemo")
+    require(binary_words[0] == binary_digest,
+            "run binary differs from binary.sha256")
+
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    return {
+        "format": "gyre-year-owners-process-record-v1",
+        "status": "PASS", "case": CASE, "plant": plant,
+        "root": str(root), "producer_commit": producer,
+        "worktree": worktree_stamp(), "binary_sha256": binary_digest,
+        "layout": {
+            "magic": PROCESS_MAGIC, "record_count": len(records),
+            "bytes_per_record": PROCESS_RECORD_BYTES,
+            "total_record_bytes": sum(path.stat().st_size for path in records),
+            "first_and_last_headers": headers,
+            "records_manifest_sha256": _sha256(
+                root / "process_records.sha256"),
+        },
+        "controls": {
+            "resolved_card": resolved,
+            "restart_sha256": restart_rows,
+            "chained_cells_unequal": chained_cells_unequal,
+            "active_row_nonzero_cell_visits": activity,
+            "max_abs_step_rounding_closure_K": max_rounding_closure,
+        },
+        "first_record_sha256": digests[expected_names[0]],
+        "last_record_sha256": digests[expected_names[-1]],
+    }
+
+
+def _process_math_self_check(failures: list[str]) -> None:
+    shape = (2, 2, 4)
+    record = {
+        "Tbb": np.full(shape, 2.0), "Taa": np.full(shape, 2.75),
+        "r3t_Kbb": np.zeros(shape[:2]),
+        "r3t_Kmm": np.zeros(shape[:2]),
+        "r3t_Kaa": np.zeros(shape[:2]), "rDt": 1.0,
+        "rhs_after_advection": np.full(shape, 0.10),
+        "rhs_after_surface_boundary": np.full(shape, 0.20),
+        "rhs_after_shortwave": np.full(shape, 0.30),
+        "rhs_after_lateral_diffusion": np.full(shape, 0.40),
+    }
+    rows = process_temperature_rows(record)
+    reconstructed = np.zeros(shape)
+    reconstructed = reconstructed[..., :-1]
+    for name in (*PROCESS_ROWS, "rounding_closure"):
+        reconstructed += rows[name]
+    if not np.array_equal(
+            reconstructed,
+            (record["Taa"] - record["Tbb"])[..., :-1]):
+        failures.append("process rows do not reconstruct a synthetic endpoint")
+    control = _process_sbc_ulp_control(
+        record, np.ones(shape[:-1] + (shape[-1] - 1,), dtype=bool))
+    if not control["raw_surface_rhs_increment_moved"]:
+        failures.append("process surface-boundary ULP control is inert")
+    print(f"  process layout {PROCESS_RECORD_BYTES} bytes and synthetic "
+          "endpoint closure -- OK")
 
 
 # ------------------------------------------------------- the per-step walk ---
@@ -948,6 +1374,9 @@ def self_check() -> int:
     expect_raises("registry-beyond-60",
                   lambda: time_level_for_dump(
                       "oracle_step_entry_kt00000061.bin"))
+    # 7. the long-horizon process budget is additive, and its RHS ULP control
+    # reaches a decoded raw process boundary rather than perturbing a zero.
+    _process_math_self_check(failures)
     if failures:
         for item in failures:
             print(f"  FAILED: {item}")
@@ -963,6 +1392,10 @@ def main(argv=None) -> int:
                              "entry dumps")
     parser.add_argument("--decompose", type=int, default=None,
                         help="decompose the gap at this day")
+    parser.add_argument("--process-record", type=Path, default=None,
+                        help="validate a Round-123 process-record root")
+    parser.add_argument("--expect-commit", default=None,
+                        help="required clean producer commit for records")
     parser.add_argument("--forcing-gate", action="store_true")
     parser.add_argument("--day-gap", action="store_true")
     parser.add_argument("--switch-trace", type=int, default=None,
@@ -990,6 +1423,22 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
+    if args.process_record is not None:
+        require(args.expect_commit is not None,
+                "--process-record needs --expect-commit")
+        report = validate_process_record(
+            args.process_record, args.expect_commit, plant=args.plant)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report.get('reason', report.get('control', 'moved'))}")
+            return 1
+        print("STATUS PASS: round123 process record "
+              f"{report['layout']['record_count']} frames, "
+              f"{report['layout']['total_record_bytes']} bytes")
+        return 0
     if args.step_gap is not None:
         report = step_gap(args.step_gap, args.root,
                           entry_root=args.entry_root, plant=args.plant)
