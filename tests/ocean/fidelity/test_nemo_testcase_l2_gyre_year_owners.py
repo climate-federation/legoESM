@@ -382,6 +382,55 @@ def test_round127_trigger_observer_is_private_and_default_return_unchanged():
         bn2_intermediate="masked_rn2").bn2_intermediate == "masked_rn2"
 
 
+def test_round128_temperature_context_marginal_has_all_four_arms(harness):
+    control = harness._temperature_context_marginal_control()
+    assert control["observed"] == control["expected"]
+
+    candidates = {index: np.asarray(float(index)) for index in range(4)}
+    references = {index: np.asarray(0.0) for index in range(3)}
+    with pytest.raises(harness.GateError, match="all four"):
+        harness._temperature_context_marginal(candidates, references)
+
+
+def test_round128_temperature_telescope_and_registry_plant(harness):
+    shape = (2, 3, 4)
+    wet = np.ones(shape, dtype=bool)
+    nemo = np.full(shape, 2.0)
+    incoming = np.full(shape, 0.125)
+    cumulative = {
+        name: np.full(shape, (index + 1) * 0.03125)
+        for index, name in enumerate(harness.PROCESS_ROWS)
+    }
+    expected = np.array(nemo, copy=True)
+    expected += incoming
+    for name in harness.PROCESS_ROWS:
+        expected += cumulative[name]
+    lego = np.nextafter(expected, np.inf)
+    boundaries, deltas, raw_residual = (
+        harness._temperature_process_boundaries(
+            nemo, lego, incoming, cumulative))
+    assert raw_residual > 0.0
+    np.testing.assert_array_equal(
+        boundaries[-1][1].view(np.uint64), lego.view(np.uint64))
+
+    combined = np.zeros(shape)
+    for name in harness.TRIGGER_TEMPERATURE_PROCESS_ROWS:
+        combined += deltas[name]
+    np.testing.assert_allclose(combined, lego - nemo, atol=2.3e-16, rtol=0.0)
+    planted = harness._temperature_process_registry_plant(
+        nemo, lego, deltas, wet)
+    assert planted["removed_row"] in harness.PROCESS_ROWS
+    assert planted["endpoint_cells_moved"] > 0
+    assert planted["endpoint_residual_max_abs_K"] > 0.0
+
+    zero = {name: np.zeros(shape) for name in harness.PROCESS_ROWS}
+    _, inert_deltas, _ = harness._temperature_process_boundaries(
+        nemo, nemo + incoming, incoming, zero)
+    with pytest.raises(harness.GateError, match="no nonzero physics row"):
+        harness._temperature_process_registry_plant(
+            nemo, nemo + incoming, inert_deltas, wet)
+
+
 def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     source_patch = (PROCESS_CARD / "stprk3_stg_round123.patch").read_text()
     removed = [line for line in source_patch.splitlines()

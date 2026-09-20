@@ -34,6 +34,10 @@ MODES
                      1081--1440; ordinary carried state remains separate.
   --vertical-budget  admits both vertical traces and decomposes the inherited
                      day-240 vertical-diffusion carry by source boundary.
+  --trigger-temperature-process-budget
+                     admits the same process/vertical traces and propagates
+                     their cumulative temperature rows through the production
+                     EVD-trigger closure in the Round-127 Shapley contexts.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -66,6 +70,10 @@ PLANTS (each exits NON-ZERO; each is exercised by the committed unit test)
   vertical-trajectory-ulp  breaks one internal/process Tbb comparison by 1 ULP
   lego-vertical-stamp      supplies a wrong legoESM vertical-trace commit
   lego-vertical-matrix-ulp changes one stored, consumed matrix coefficient
+  trigger-process-registry removes one real cumulative temperature row and
+                           proves the recorded Kbb endpoint no longer closes
+  trigger-process-level    perturbs a consumed temperature level until the
+                           production N2 threshold changes
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -3409,6 +3417,14 @@ def self_check() -> int:
               "-- OK")
     except Exception as error:  # noqa: BLE001
         failures.append(f"trigger Shapley control failed: {error}")
+    try:
+        context = _temperature_context_marginal_control()
+        telescope = _temperature_process_telescope_control()
+        print(f"  trigger temperature-process context {context} and "
+              f"telescope {telescope} -- OK")
+    except Exception as error:  # noqa: BLE001
+        failures.append(
+            f"trigger temperature-process controls failed: {error}")
     if failures:
         for item in failures:
             print(f"  FAILED: {item}")
@@ -3448,6 +3464,10 @@ def main(argv=None) -> int:
     parser.add_argument("--trigger-state-budget", type=Path, default=None,
                         help="attribute this NEMO EVD record's trigger "
                              "crossings to T, S, and live depth")
+    parser.add_argument(
+        "--trigger-temperature-process-budget", type=Path, default=None,
+        help="decompose this NEMO EVD record's temperature-trigger share "
+             "among the admitted compiled-order process rows")
     parser.add_argument("--trigger-lego-daily-root", type=Path,
                         default=DEFAULT_TRIGGER_LEGO_DAILY,
                         help="independent daily legoESM core-state root")
@@ -3519,6 +3539,27 @@ def main(argv=None) -> int:
                   f"{report['control']}")
             return 1
         print("STATUS PASS: EVD trigger-state budget "
+              f"owner={report['ranking'][0]['owner']}")
+        return 0
+    if args.trigger_temperature_process_budget is not None:
+        require(args.lego_vertical_record is not None,
+                "--trigger-temperature-process-budget needs "
+                "--lego-vertical-record")
+        require(args.expect_commit is not None,
+                "--trigger-temperature-process-budget needs --expect-commit")
+        report = score_trigger_temperature_process_budget(
+            args.trigger_temperature_process_budget,
+            args.lego_vertical_record, args.trigger_lego_daily_root,
+            args.expect_commit, mesh_path=args.mesh,
+            process_root=args.vertical_process_root, plant=args.plant)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']}")
+            return 1
+        print("STATUS PASS: EVD temperature-process budget "
               f"owner={report['ranking'][0]['owner']}")
         return 0
     if args.vertical_budget is not None:
@@ -4440,6 +4481,830 @@ def score_trigger_state_budget(
         },
         "worktree": stamp,
     }
+
+
+# ---------------- Round-128 temperature-process trigger decomposition ----
+TRIGGER_TEMPERATURE_PROCESS_ROWS = (
+    "incoming_before_day180",
+    *PROCESS_ROWS,
+    "floating_point_closure",
+)
+TRIGGER_TEMPERATURE_CONTEXT_WEIGHTS6 = (2, 1, 1, 2)
+
+
+def _temperature_context_marginal(
+        candidates: dict[int, np.ndarray],
+        references: dict[int, np.ndarray]) -> np.ndarray:
+    """Temperature's Shapley marginal across the four S/depth contexts."""
+    require(set(candidates) == set(range(4))
+            and set(references) == set(range(4)),
+            "temperature marginal needs all four salinity/depth contexts")
+    shape = np.asarray(candidates[0]).shape
+    require(all(np.asarray(values).shape == shape
+                for values in (*candidates.values(), *references.values())),
+            "temperature marginal context shapes differ")
+    numerator = np.zeros(shape, dtype=np.float64)
+    for context, weight6 in enumerate(
+            TRIGGER_TEMPERATURE_CONTEXT_WEIGHTS6):
+        numerator = numerator + np.float64(weight6) * (
+            np.asarray(candidates[context], dtype=np.float64)
+            - np.asarray(references[context], dtype=np.float64))
+    return numerator / np.float64(6.0)
+
+
+def _temperature_context_marginal_control() -> dict:
+    """Synthetic owner/interaction control for the four-context reduction."""
+    references = {
+        index: np.asarray([float(index), -float(index)])
+        for index in range(4)
+    }
+    increments = {
+        0: np.asarray([1.0, -1.0]),
+        1: np.asarray([2.0, 3.0]),
+        2: np.asarray([-1.0, 5.0]),
+        3: np.asarray([4.0, -2.0]),
+    }
+    candidates = {
+        index: references[index] + increments[index]
+        for index in range(4)
+    }
+    observed = _temperature_context_marginal(candidates, references)
+    expected = (
+        2.0 * increments[0] + increments[1] + increments[2]
+        + 2.0 * increments[3]) / 6.0
+    require(np.array_equal(observed, expected),
+            "temperature four-context Shapley control failed")
+    return {"observed": observed.tolist(), "expected": expected.tolist()}
+
+
+def _temperature_process_boundaries(
+        nemo_temperature: np.ndarray, lego_temperature: np.ndarray,
+        incoming: np.ndarray,
+        cumulative: dict[str, np.ndarray]) -> tuple[
+            list[tuple[str, np.ndarray]], dict[str, np.ndarray], float]:
+    """Build the frozen source-order temperature telescope for one entry."""
+    nemo_temperature = np.asarray(nemo_temperature, dtype=np.float64)
+    lego_temperature = np.asarray(lego_temperature, dtype=np.float64)
+    incoming = np.asarray(incoming, dtype=np.float64)
+    require(nemo_temperature.shape == lego_temperature.shape == incoming.shape,
+            "temperature telescope endpoint shapes differ")
+    require(set(cumulative) == set(PROCESS_ROWS),
+            "temperature telescope process registry is incomplete")
+
+    boundaries = [("nemo_temperature", np.array(
+        nemo_temperature, copy=True))]
+    deltas: dict[str, np.ndarray] = {}
+    previous = boundaries[0][1]
+    components = {
+        "incoming_before_day180": incoming,
+        **{name: np.asarray(cumulative[name], dtype=np.float64)
+           for name in PROCESS_ROWS},
+    }
+    for name in TRIGGER_TEMPERATURE_PROCESS_ROWS[:-1]:
+        after = previous + components[name]
+        deltas[name] = after - previous
+        boundaries.append((name, after))
+        previous = after
+    raw_residual = lego_temperature - previous
+    deltas["floating_point_closure"] = lego_temperature - previous
+    boundaries.append(("floating_point_closure", np.array(
+        lego_temperature, copy=True)))
+    return boundaries, deltas, float(np.max(np.abs(raw_residual)))
+
+
+def _temperature_process_telescope_control() -> dict:
+    """Synthetic registry control with a nonzero closure-association row."""
+    shape = (2, 2, 3)
+    nemo = np.full(shape, 2.0, dtype=np.float64)
+    incoming = np.full(shape, 0.125, dtype=np.float64)
+    cumulative = {
+        name: np.full(shape, (index + 1) * 0.03125, dtype=np.float64)
+        for index, name in enumerate(PROCESS_ROWS)
+    }
+    expected = np.array(nemo, copy=True)
+    expected += incoming
+    for name in PROCESS_ROWS:
+        expected += cumulative[name]
+    lego = np.nextafter(expected, np.inf)
+    boundaries, deltas, raw_residual = _temperature_process_boundaries(
+        nemo, lego, incoming, cumulative)
+    combined = np.zeros(shape, dtype=np.float64)
+    for name in TRIGGER_TEMPERATURE_PROCESS_ROWS:
+        combined += deltas[name]
+    residual = (lego - nemo) - combined
+    require(np.max(np.abs(residual)) <= np.finfo(np.float64).eps,
+            "synthetic temperature telescope does not close")
+    require(np.any(deltas["floating_point_closure"] != 0.0),
+            "synthetic temperature closure row is vacuous")
+    require(np.array_equal(boundaries[-1][1].view(np.uint64),
+                           lego.view(np.uint64)),
+            "synthetic temperature telescope loses its exact endpoint")
+    return {"raw_residual_max_abs_K": raw_residual,
+            "closed_residual_max_abs_K": float(np.max(np.abs(residual)))}
+
+
+def _weighted_trigger_spatial_census(
+        weights: np.ndarray, depth: np.ndarray,
+        regions: dict[str, np.ndarray]) -> dict:
+    """Sum absolute trigger cell-equivalents in the canonical spatial bins."""
+    weights = np.abs(np.asarray(weights, dtype=np.float64))
+    depth = np.asarray(depth, dtype=np.float64)
+    require(weights.shape == depth.shape,
+            "weighted trigger census depth shape differs")
+    depth_masks = {
+        "0_100m": depth <= 100.0,
+        "100_1000m": (depth > 100.0) & (depth <= 1000.0),
+        "below_1000m": depth > 1000.0,
+    }
+    region_names = (
+        "west_third", "interior_third", "east_third",
+        f"emp_south_le_{EMP_SPLIT_LAT_DEG}N",
+        f"emp_north_gt_{EMP_SPLIT_LAT_DEG}N",
+    )
+    return {
+        "absolute_cell_equivalents": float(np.sum(weights)),
+        "depth": {name: float(np.sum(weights[selected]))
+                  for name, selected in depth_masks.items()},
+        "region": {name: float(np.sum(
+            weights[regions[name][..., None]])) for name in region_names},
+    }
+
+
+def _add_weighted_trigger_census(total: dict, row: dict) -> None:
+    total["absolute_cell_equivalents"] += row[
+        "absolute_cell_equivalents"]
+    for group in ("depth", "region"):
+        for name, value in row[group].items():
+            total[group][name] += value
+
+
+def _temperature_process_registry_plant(
+        nemo_temperature: np.ndarray, lego_temperature: np.ndarray,
+        deltas: dict[str, np.ndarray], wet: np.ndarray) -> dict:
+    """Drop one real physics row while retaining the frozen closure row."""
+    candidates = []
+    for name in PROCESS_ROWS:
+        values = np.asarray(deltas[name], dtype=np.float64)
+        candidates.append((float(np.max(np.abs(values[wet]))), name))
+    magnitude, removed = max(candidates)
+    require(magnitude > 0.0,
+            "process-registry plant found no nonzero physics row")
+    combined = np.zeros_like(nemo_temperature, dtype=np.float64)
+    for name in TRIGGER_TEMPERATURE_PROCESS_ROWS:
+        if name != removed:
+            combined += deltas[name]
+    residual = (np.asarray(lego_temperature) - np.asarray(nemo_temperature)
+                - combined)
+    moved = int(np.count_nonzero(residual[wet] != 0.0))
+    require(moved > 0,
+            "process-registry plant did not break endpoint closure")
+    return {"removed_row": removed,
+            "removed_row_max_abs_K": magnitude,
+            "endpoint_cells_moved": moved,
+            "endpoint_residual_max_abs_K": float(np.max(
+                np.abs(residual[wet])))}
+
+
+def score_trigger_temperature_process_budget(
+        nemo_vertical_root: Path, lego_trace_root: Path,
+        lego_daily_root: Path, expected_commit: str, *,
+        mesh_path: Path = DEFAULT_MESH,
+        process_root: Path = DEFAULT_PROCESS_RECORD_ROOT,
+        plant: str | None = None) -> dict:
+    """Propagate cumulative temperature-process rows through production N2."""
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    require(plant in (None, "none", "trigger-process-registry",
+                      "trigger-process-level"),
+            f"unknown trigger-temperature-process plant {plant!r}")
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "trigger-temperature-process budget refuses a dirty worktree")
+    require(stamp["commit"] == expected_commit,
+            "trigger-temperature-process budget commit differs from "
+            "--expect-commit")
+    _temperature_context_marginal_control()
+    _temperature_process_telescope_control()
+
+    # Re-run the admitted Round-127 production cube first.  This re-admits
+    # both immutable records and preserves its exact state-owner boundary.
+    inherited = score_trigger_state_budget(
+        nemo_vertical_root, lego_trace_root, lego_daily_root,
+        expected_commit, mesh_path=mesh_path, process_root=process_root)
+    inherited_temperature = next(
+        row for row in inherited["ranking"] if row["owner"] == "temperature")
+    require(inherited["full_interval_trigger_disagreement_visits"] == 782,
+            "inherited full-trigger visit count is not 782")
+    require(inherited_temperature["bit_signed_cell_equivalents"] == 608.0
+            and inherited_temperature["bit_absolute_cell_equivalents"]
+            == 1097.0,
+            "inherited temperature trigger headline is not +608/1097")
+
+    nemo_vertical_root = Path(nemo_vertical_root)
+    lego_trace_root = Path(lego_trace_root)
+    lego_daily_root = Path(lego_daily_root)
+    process_root = Path(process_root)
+    card = build_nemo_testcase_card(CASE)
+    gate = _gate()
+    wet = gate.expected_masks(card)["T"]
+    wet2 = np.any(wet, axis=-1)
+    interface_wet = wet[..., :-1] & wet[..., 1:]
+    nlev = wet.shape[-1]
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            bn2_intermediate="masked_rn2"))
+    carrier, _ = _gyre_checkpoint_state(
+        card, nemo_vertical_root / "GYRE_OMIP_L2_P3_00001080_restart.nc")
+    H_bathy = np.asarray(carrier.H_bathy.data, dtype=np.float64)
+    evd = card.recipe.model_config.physics.convection.enhanced_diffusion
+    require(evd is not None,
+            "temperature-process budget requires active enhanced diffusion")
+    threshold = float(evd.n2_threshold)
+    replacement = float(evd.K_conv)
+
+    @jax.jit
+    def production_closure(entry, forcing):
+        return model.diagnose_vertical_K(entry, card.dt_s, forcing)
+
+    year = _year()
+    mesh = year.nemo_operands(mesh_path)
+    lat = np.asarray(mesh["gphit"], dtype=np.float64)
+    regions = _regions(lat, wet2)
+    raw_gdepw = np.asarray(
+        card.recipe.z_coord.nemo_gdepw_0, dtype=np.float64)[..., 1:nlev]
+    lego_vertical_arrays = _load_vertical_trace_arrays(lego_trace_root)
+    lego_process_arrays = _load_lego_trace_arrays(lego_trace_root)
+
+    first_nemo_process = read_process_record(
+        process_root
+        / f"oracle_process_budget_kt{PROCESS_START_STEP:08d}.bin")
+    first_nemo_temperature = np.asarray(
+        first_nemo_process["Tbb"][..., :nlev], dtype=np.float64)
+    first_lego_temperature = np.asarray(
+        lego_process_arrays["Tbb"][0], dtype=np.float64)
+    incoming = first_lego_temperature - first_nemo_temperature
+    cumulative = {
+        name: np.zeros_like(first_nemo_temperature) for name in PROCESS_ROWS
+    }
+    next_process_step = PROCESS_START_STEP
+
+    aggregate = {}
+    for name in TRIGGER_TEMPERATURE_PROCESS_ROWS:
+        aggregate[name] = {
+            "bit_signed_cell_equivalents": 0.0,
+            "bit_absolute_cell_equivalents": 0.0,
+            "margin_signed_sum_s-2": 0.0,
+            "margin_abs_sum_s-2": 0.0,
+            "margin_sum_squares_s-4": 0.0,
+            "margin_samples": 0,
+            "all_wet_temperature": {
+                "upper_sum_squares_K2": 0.0,
+                "lower_sum_squares_K2": 0.0,
+                "gradient_sum_squares_K2": 0.0,
+                "samples": 0,
+                "upper_max_abs_K": 0.0,
+                "lower_max_abs_K": 0.0,
+                "gradient_max_abs_K": 0.0,
+            },
+            "sensitive_temperature": {
+                "upper_sum_squares_K2": 0.0,
+                "lower_sum_squares_K2": 0.0,
+                "gradient_sum_squares_K2": 0.0,
+                "samples": 0,
+                "upper_max_abs_K": 0.0,
+                "lower_max_abs_K": 0.0,
+                "gradient_max_abs_K": 0.0,
+            },
+            "spatial_absolute": None,
+            "first_observed_effect": None,
+            "daily": [],
+        }
+
+    endpoint = {
+        "full_trigger_disagreement_visits": 0,
+        "temperature_bit_signed_cell_equivalents": 0.0,
+        "temperature_bit_absolute_cell_equivalents": 0.0,
+        "temperature_margin_signed_sum_s-2": 0.0,
+        "temperature_margin_abs_sum_s-2": 0.0,
+    }
+    controls = {
+        "nemo_endpoint_cells_unequal": 0,
+        "lego_endpoint_cells_unequal": 0,
+        "rn2_rn2b_cells_unequal": 0,
+        "temperature_endpoint_cells_unequal": 0,
+        "max_raw_temperature_reconstruction_residual_K": 0.0,
+        "max_bit_telescope_residual": 0.0,
+        "max_margin_telescope_residual_s-2": 0.0,
+        "production_closure_evaluations": 0,
+    }
+    daily_rows = []
+
+    for day in range(TRIGGER_DAY_START, TRIGGER_DAY_STOP):
+        step = STEPS_PER_DAY * day + 1
+        while next_process_step < step:
+            index = next_process_step - PROCESS_START_STEP
+            lego_frame = {
+                field: np.asarray(values[index])
+                for field, values in lego_process_arrays.items()
+            }
+            nemo_frame = read_process_record(
+                process_root
+                / f"oracle_process_budget_kt{next_process_step:08d}.bin")
+            lego_rows = lego_process_temperature_rows(lego_frame)
+            nemo_rows = process_temperature_rows(nemo_frame)
+            for name in PROCESS_ROWS:
+                cumulative[name] += lego_rows[name] - nemo_rows[name]
+            next_process_step += 1
+
+        record = _read_vertical_record(
+            nemo_vertical_root
+            / f"oracle_trazdf_matrix_kt{step:08d}.bin", step)
+        nemo_T = _vertical_field(record, "T_Kbb_in", nlev)
+        nemo_S = _vertical_field(record, "S_Kbb_in", nlev)
+        nemo_r3t = _vertical_field(record, "r3t_Kbb")
+        nemo_eta, inverse = _eta_for_recorded_r3t(
+            nemo_r3t, H_bathy, wet2)
+        lego = _load_npz(lego_daily_root / f"day{day:03d}.npz")
+        lego_T = np.asarray(
+            lego_process_arrays["Tbb"][step - PROCESS_START_STEP],
+            dtype=np.float64)
+        require(_different_cells(lego_T, lego["T"], wet) == 0,
+                f"day {day}: process trace Tbb differs from daily snapshot")
+        boundaries, temperature_deltas, raw_residual = (
+            _temperature_process_boundaries(
+                nemo_T, lego_T, incoming, cumulative))
+        raw_residual_wet = float(np.max(np.abs(
+            (lego_T - boundaries[-2][1])[wet])))
+        controls["max_raw_temperature_reconstruction_residual_K"] = max(
+            controls["max_raw_temperature_reconstruction_residual_K"],
+            raw_residual_wet)
+        controls["temperature_endpoint_cells_unequal"] += _different_cells(
+            boundaries[-1][1], lego_T, wet)
+        require(raw_residual_wet <= 1.0e-12,
+                f"day {day}: raw temperature telescope residual "
+                f"{raw_residual_wet:.17e} K exceeds 1e-12 K")
+
+        if day == TRIGGER_DAY_START + 1 \
+                and plant == "trigger-process-registry":
+            return {
+                "format": "gyre-trigger-temperature-process-budget-v1",
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": _temperature_process_registry_plant(
+                    nemo_T, lego_T, temperature_deltas, wet),
+                "worktree": stamp,
+            }
+
+        base = carrier._replace(
+            T=carrier.T.replace(data=jnp.asarray(nemo_T)),
+            S=carrier.S.replace(data=jnp.asarray(nemo_S)),
+            eta=carrier.eta.replace(data=jnp.asarray(nemo_eta)),
+        )
+        _, surface = gate._surface_forcings(card, base, step)
+        context_values = {
+            context: {
+                "salinity": (lego["S"] if context & 1 else nemo_S),
+                "live_depth": (lego["ssh"] if context & 2 else nemo_eta),
+            }
+            for context in range(4)
+        }
+
+        boundary_outputs = []
+        for boundary_name, temperature in boundaries:
+            masks = {}
+            margins = {}
+            for context in range(4):
+                values = context_values[context]
+                state = carrier._replace(
+                    T=carrier.T.replace(data=jnp.asarray(temperature)),
+                    S=carrier.S.replace(
+                        data=jnp.asarray(values["salinity"])),
+                    eta=carrier.eta.replace(
+                        data=jnp.asarray(values["live_depth"])),
+                )
+                _, _, rn2, rn2b = production_closure(state, surface)
+                controls["production_closure_evaluations"] += 1
+                rn2 = np.asarray(rn2, dtype=np.float64)
+                rn2b = np.asarray(rn2b, dtype=np.float64)
+                unequal = _different_cells(rn2, rn2b, interface_wet)
+                controls["rn2_rn2b_cells_unequal"] += unequal
+                require(unequal == 0,
+                        f"day {day} boundary {boundary_name} context "
+                        f"{context}: rn2/rn2b differ in {unequal} cells")
+                minimum = np.minimum(rn2, rn2b)
+                masks[context] = (minimum <= threshold) & interface_wet
+                margins[context] = minimum - threshold
+            boundary_outputs.append({"name": boundary_name,
+                                     "masks": masks, "margins": margins})
+
+        nemo_heat = _vertical_field(record, "avt")[:, :, 1:nlev]
+        lego_heat = np.asarray(
+            lego_vertical_arrays["heat_K"][step - PROCESS_START_STEP])
+        nemo_record_mask = _trigger_masks_from_K(
+            nemo_heat, replacement, interface_wet)
+        lego_record_mask = _trigger_masks_from_K(
+            lego_heat, replacement, interface_wet)
+        reference_masks = boundary_outputs[0]["masks"]
+        reference_margins = boundary_outputs[0]["margins"]
+        marginal_outputs = []
+        for output in boundary_outputs:
+            marginal_outputs.append({
+                "name": output["name"],
+                "bit": _temperature_context_marginal(
+                    {context: (mask != nemo_record_mask).astype(np.float64)
+                     for context, mask in output["masks"].items()},
+                    {context: (mask != nemo_record_mask).astype(np.float64)
+                     for context, mask in reference_masks.items()}),
+                "margin": _temperature_context_marginal(
+                    output["margins"], reference_margins),
+            })
+
+        nemo_endpoint = int(np.count_nonzero(
+            reference_masks[0] != nemo_record_mask))
+        lego_endpoint = int(np.count_nonzero(
+            boundary_outputs[-1]["masks"][3] != lego_record_mask))
+        controls["nemo_endpoint_cells_unequal"] += nemo_endpoint
+        controls["lego_endpoint_cells_unequal"] += lego_endpoint
+        require(nemo_endpoint == 0 and lego_endpoint == 0,
+                f"day {day}: process endpoint masks differ from records "
+                f"(NEMO={nemo_endpoint}, legoESM={lego_endpoint})")
+
+        if day == TRIGGER_DAY_START and plant == "trigger-process-level":
+            candidates = np.argwhere(interface_wet)
+            candidate_margins = np.abs(
+                reference_margins[0][tuple(candidates.T)])
+            j, i, k = (int(value) for value in candidates[
+                int(np.argmin(candidate_margins))])
+            selected = None
+            for level_name, level in (("upper", k), ("lower", k + 1)):
+                for exponent in range(-48, 9):
+                    for sign in (1.0, -1.0):
+                        planted_T = np.array(nemo_T, copy=True)
+                        delta = np.float64(sign * (2.0 ** exponent))
+                        planted_T[j, i, level] = (
+                            nemo_T[j, i, level] + delta)
+                        if (planted_T[j, i, level].view(np.uint64)
+                                == nemo_T[j, i, level].view(np.uint64)):
+                            continue
+                        planted_state = base._replace(
+                            T=base.T.replace(data=jnp.asarray(planted_T)))
+                        _, _, planted_rn2, planted_rn2b = production_closure(
+                            planted_state, surface)
+                        planted_mask = (
+                            np.minimum(np.asarray(planted_rn2),
+                                       np.asarray(planted_rn2b)) <= threshold
+                        ) & interface_wet
+                        moved = int(np.count_nonzero(
+                            planted_mask != reference_masks[0]))
+                        if moved:
+                            selected = {
+                                "interface_index_jik": [j, i, k],
+                                "consumed_level": level_name,
+                                "temperature_level_index": level,
+                                "temperature_before_C": float(
+                                    nemo_T[j, i, level]),
+                                "temperature_delta_C": float(delta),
+                                "trigger_bits_moved": moved,
+                            }
+                            break
+                    if selected is not None:
+                        break
+                if selected is not None:
+                    break
+            require(selected is not None,
+                    "consumed-level plant could not move a production "
+                    "threshold bit")
+            _, _, repeat_rn2, repeat_rn2b = production_closure(base, surface)
+            repeat_mask = (
+                np.minimum(np.asarray(repeat_rn2),
+                           np.asarray(repeat_rn2b)) <= threshold
+            ) & interface_wet
+            selected["untouched_endpoint_bits_moved"] = int(
+                np.count_nonzero(repeat_mask != reference_masks[0]))
+            require(selected["untouched_endpoint_bits_moved"] == 0,
+                    "consumed-level plant changed the untouched endpoint")
+            return {
+                "format": "gyre-trigger-temperature-process-budget-v1",
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": selected, "worktree": stamp,
+            }
+
+        full_mismatch = (
+            boundary_outputs[-1]["masks"][3] != nemo_record_mask)
+        endpoint_bit = marginal_outputs[-1]["bit"]
+        endpoint_margin = marginal_outputs[-1]["margin"]
+        inherited_day = inherited["daily_rows"][
+            day - TRIGGER_DAY_START]["players"]["temperature"]
+        observed_day = {
+            "bit_signed_cell_equivalents": float(np.sum(
+                endpoint_bit[interface_wet])),
+            "bit_absolute_cell_equivalents": float(np.sum(
+                np.abs(endpoint_bit[interface_wet]))),
+            "margin_signed_sum_s-2": float(np.sum(
+                endpoint_margin[full_mismatch])),
+            "margin_abs_sum_s-2": float(np.sum(
+                np.abs(endpoint_margin[full_mismatch]))),
+        }
+        for key, value in observed_day.items():
+            require(abs(value - inherited_day[key]) <= 1.0e-18,
+                    f"day {day}: temperature endpoint {key} {value!r} "
+                    f"differs from inherited {inherited_day[key]!r}")
+        endpoint["full_trigger_disagreement_visits"] += int(
+            np.count_nonzero(full_mismatch))
+        endpoint["temperature_bit_signed_cell_equivalents"] += observed_day[
+            "bit_signed_cell_equivalents"]
+        endpoint["temperature_bit_absolute_cell_equivalents"] += observed_day[
+            "bit_absolute_cell_equivalents"]
+        endpoint["temperature_margin_signed_sum_s-2"] += observed_day[
+            "margin_signed_sum_s-2"]
+        endpoint["temperature_margin_abs_sum_s-2"] += observed_day[
+            "margin_abs_sum_s-2"]
+
+        bit_rows = {}
+        margin_rows = {}
+        for index, name in enumerate(TRIGGER_TEMPERATURE_PROCESS_ROWS, 1):
+            bit_rows[name] = (marginal_outputs[index]["bit"]
+                              - marginal_outputs[index - 1]["bit"])
+            margin_rows[name] = (marginal_outputs[index]["margin"]
+                                 - marginal_outputs[index - 1]["margin"])
+        bit_residual = sum(bit_rows.values()) - endpoint_bit
+        margin_residual = sum(margin_rows.values()) - endpoint_margin
+        bit_max = float(np.max(np.abs(bit_residual[interface_wet])))
+        margin_max = float(np.max(np.abs(
+            margin_residual[interface_wet])))
+        controls["max_bit_telescope_residual"] = max(
+            controls["max_bit_telescope_residual"], bit_max)
+        controls["max_margin_telescope_residual_s-2"] = max(
+            controls["max_margin_telescope_residual_s-2"], margin_max)
+        require(bit_max <= 8.0 * np.finfo(np.float64).eps,
+                f"day {day}: propagated bit telescope does not close")
+        require(margin_max <= 32.0 * np.finfo(np.float64).eps,
+                f"day {day}: propagated margin telescope does not close")
+
+        sensitive = np.zeros_like(interface_wet)
+        for values in bit_rows.values():
+            sensitive |= values != 0.0
+        depth = raw_gdepw * (np.float64(1.0) + nemo_r3t[..., None])
+        day_process_rows = {}
+        for name in TRIGGER_TEMPERATURE_PROCESS_ROWS:
+            bit_values = bit_rows[name]
+            margin_values = margin_rows[name]
+            delta_T = temperature_deltas[name]
+            upper = delta_T[..., :-1]
+            lower = delta_T[..., 1:]
+            gradient = upper - lower
+            row = aggregate[name]
+            signed = float(np.sum(bit_values[interface_wet]))
+            absolute = float(np.sum(np.abs(bit_values[interface_wet])))
+            margin_signed = float(np.sum(margin_values[full_mismatch]))
+            margin_absolute = float(np.sum(
+                np.abs(margin_values[full_mismatch])))
+            row["bit_signed_cell_equivalents"] += signed
+            row["bit_absolute_cell_equivalents"] += absolute
+            row["margin_signed_sum_s-2"] += margin_signed
+            row["margin_abs_sum_s-2"] += margin_absolute
+            row["margin_sum_squares_s-4"] += float(np.sum(
+                margin_values[full_mismatch] ** 2))
+            row["margin_samples"] += int(np.count_nonzero(full_mismatch))
+
+            for label, selected_mask in (("all_wet_temperature",
+                                           interface_wet),
+                                          ("sensitive_temperature",
+                                           sensitive & interface_wet)):
+                metrics = row[label]
+                samples = int(np.count_nonzero(selected_mask))
+                metrics["samples"] += samples
+                if samples:
+                    metrics["upper_sum_squares_K2"] += float(np.sum(
+                        upper[selected_mask] ** 2))
+                    metrics["lower_sum_squares_K2"] += float(np.sum(
+                        lower[selected_mask] ** 2))
+                    metrics["gradient_sum_squares_K2"] += float(np.sum(
+                        gradient[selected_mask] ** 2))
+                    metrics["upper_max_abs_K"] = max(
+                        metrics["upper_max_abs_K"], float(np.max(
+                            np.abs(upper[selected_mask]))))
+                    metrics["lower_max_abs_K"] = max(
+                        metrics["lower_max_abs_K"], float(np.max(
+                            np.abs(lower[selected_mask]))))
+                    metrics["gradient_max_abs_K"] = max(
+                        metrics["gradient_max_abs_K"], float(np.max(
+                            np.abs(gradient[selected_mask]))))
+
+            spatial = _weighted_trigger_spatial_census(
+                bit_values, depth, regions)
+            if row["spatial_absolute"] is None:
+                row["spatial_absolute"] = {
+                    "absolute_cell_equivalents": 0.0,
+                    "depth": {key: 0.0 for key in spatial["depth"]},
+                    "region": {key: 0.0 for key in spatial["region"]},
+                }
+            _add_weighted_trigger_census(row["spatial_absolute"], spatial)
+            effect = (bit_values != 0.0) & interface_wet
+            if row["first_observed_effect"] is None and bool(np.any(effect)):
+                census = _trigger_spatial_census(
+                    effect, bit_values > 0.0, bit_values < 0.0,
+                    depth, regions)
+                census["absolute_cell_equivalents"] = absolute
+                row["first_observed_effect"] = {
+                    "day": day, "entry_step": step, **census,
+                }
+            day_row = {
+                "bit_signed_cell_equivalents": signed,
+                "bit_absolute_cell_equivalents": absolute,
+                "margin_signed_sum_s-2": margin_signed,
+                "margin_abs_sum_s-2": margin_absolute,
+                "threshold_effect_cells": int(np.count_nonzero(effect)),
+                "upper_rms_K": (float(np.sqrt(np.mean(
+                    upper[sensitive & interface_wet] ** 2)))
+                    if bool(np.any(sensitive & interface_wet)) else 0.0),
+                "lower_rms_K": (float(np.sqrt(np.mean(
+                    lower[sensitive & interface_wet] ** 2)))
+                    if bool(np.any(sensitive & interface_wet)) else 0.0),
+                "gradient_rms_K": (float(np.sqrt(np.mean(
+                    gradient[sensitive & interface_wet] ** 2)))
+                    if bool(np.any(sensitive & interface_wet)) else 0.0),
+            }
+            row["daily"].append({"day": day, **day_row})
+            day_process_rows[name] = day_row
+
+        daily_rows.append({
+            "day": day, "entry_step": step,
+            "full_trigger_disagreement_cells": int(np.count_nonzero(
+                full_mismatch)),
+            "temperature_endpoint": observed_day,
+            "temperature_sensitive_interfaces": int(np.count_nonzero(
+                sensitive & interface_wet)),
+            "process_rows": day_process_rows,
+            "raw_temperature_reconstruction_residual_K": raw_residual_wet,
+            "r3t_inverse": inverse,
+        })
+
+    require(plant in (None, "none"),
+            f"plant {plant!r} did not fire")
+    require(controls["max_raw_temperature_reconstruction_residual_K"]
+            <= 1.0e-12,
+            "temperature telescope exceeded its preregistered residual")
+    require(controls["temperature_endpoint_cells_unequal"] == 0,
+            "exact temperature endpoints are not bit-identical")
+    require(controls["nemo_endpoint_cells_unequal"] == 0
+            and controls["lego_endpoint_cells_unequal"] == 0
+            and controls["rn2_rn2b_cells_unequal"] == 0,
+            f"production endpoint controls moved: {controls}")
+    frozen_endpoint = {
+        "full_trigger_disagreement_visits": 782,
+        "temperature_bit_signed_cell_equivalents": 608.0,
+        "temperature_bit_absolute_cell_equivalents": 1097.0,
+        "temperature_margin_signed_sum_s-2": -2.1584924289917324e-05,
+        "temperature_margin_abs_sum_s-2": 4.2348751127228244e-04,
+    }
+    for key, expected in frozen_endpoint.items():
+        require(abs(endpoint[key] - expected) <= 1.0e-18,
+                f"temperature-process endpoint {key} {endpoint[key]!r} "
+                f"differs from frozen {expected!r}")
+
+    ranking = []
+    for name in TRIGGER_TEMPERATURE_PROCESS_ROWS:
+        values = aggregate[name]
+        row = {
+            "owner": name,
+            "bit_signed_cell_equivalents": values[
+                "bit_signed_cell_equivalents"],
+            "bit_absolute_cell_equivalents": values[
+                "bit_absolute_cell_equivalents"],
+            "margin_signed_sum_s-2": values["margin_signed_sum_s-2"],
+            "margin_abs_sum_s-2": values["margin_abs_sum_s-2"],
+            "continuous_margin_rms_s-2": (
+                float(np.sqrt(values["margin_sum_squares_s-4"]
+                              / values["margin_samples"]))
+                if values["margin_samples"] else 0.0),
+            "first_observed_effect": values["first_observed_effect"],
+            "spatial_absolute": values["spatial_absolute"],
+            "daily": values["daily"],
+        }
+        for label in ("all_wet_temperature", "sensitive_temperature"):
+            metrics = values[label]
+            samples = metrics["samples"]
+            row[label] = {
+                "samples": samples,
+                "upper_rms_K": (float(np.sqrt(
+                    metrics["upper_sum_squares_K2"] / samples))
+                    if samples else 0.0),
+                "lower_rms_K": (float(np.sqrt(
+                    metrics["lower_sum_squares_K2"] / samples))
+                    if samples else 0.0),
+                "gradient_rms_K": (float(np.sqrt(
+                    metrics["gradient_sum_squares_K2"] / samples))
+                    if samples else 0.0),
+                "upper_max_abs_K": metrics["upper_max_abs_K"],
+                "lower_max_abs_K": metrics["lower_max_abs_K"],
+                "gradient_max_abs_K": metrics["gradient_max_abs_K"],
+            }
+        ranking.append(row)
+    ranking.sort(key=lambda row: row["bit_absolute_cell_equivalents"],
+                 reverse=True)
+    signed_sum = float(sum(
+        row["bit_signed_cell_equivalents"] for row in ranking))
+    absolute_process_total = float(sum(
+        row["bit_absolute_cell_equivalents"] for row in ranking))
+
+    by_name = {row["owner"]: row for row in ranking}
+    vertical_spatial = by_name["vertical_diffusion"]["spatial_absolute"]
+    vertical_depth = max(
+        vertical_spatial["depth"], key=vertical_spatial["depth"].get)
+    vertical_longitude = max(
+        ("west_third", "interior_third", "east_third"),
+        key=vertical_spatial["region"].get)
+    vertical_latitude = max(
+        (f"emp_south_le_{EMP_SPLIT_LAT_DEG}N",
+         f"emp_north_gt_{EMP_SPLIT_LAT_DEG}N"),
+        key=vertical_spatial["region"].get)
+    first_nonincoming_process_day = min(
+        (by_name[name]["first_observed_effect"]["day"]
+         for name in PROCESS_ROWS
+         if by_name[name]["first_observed_effect"] is not None),
+        default=None)
+    ordered_names = [row["owner"] for row in ranking]
+    predictions = {
+        "vertical_diffusion_largest": ordered_names[0]
+        == "vertical_diffusion",
+        "lateral_diffusion_second": len(ordered_names) > 1
+        and ordered_names[1] == "lateral_diffusion",
+        "vertical_depth_is_0_100m": vertical_depth == "0_100m",
+        "vertical_longitude_is_west_third": vertical_longitude
+        == "west_third",
+        "vertical_latitude_is_south": vertical_latitude
+        == f"emp_south_le_{EMP_SPLIT_LAT_DEG}N",
+        "incoming_first_observed_day_is_180": (
+            by_name["incoming_before_day180"]["first_observed_effect"]
+            is not None
+            and by_name["incoming_before_day180"]
+            ["first_observed_effect"]["day"] == 180),
+        "first_nonincoming_process_day_is_181":
+            first_nonincoming_process_day == 181,
+    }
+    predictions["all_frozen_magnitude_predictions_confirmed"] = all(
+        predictions.values())
+
+    report = {
+        "format": "gyre-trigger-temperature-process-budget-v1",
+        "status": "PASS", "case": CASE,
+        "execution": "production-step jax.jit",
+        "days": [TRIGGER_DAY_START, TRIGGER_DAY_STOP - 1],
+        "steps": [PROCESS_START_STEP, PROCESS_END_STEP],
+        "process_order": list(TRIGGER_TEMPERATURE_PROCESS_ROWS),
+        "n2_threshold_s-2": threshold,
+        "evd_replacement_m2_s": replacement,
+        "inherited_round127": {
+            "full_trigger_disagreement_visits": inherited[
+                "full_interval_trigger_disagreement_visits"],
+            "temperature": inherited_temperature,
+            "endpoint_controls": inherited["endpoint_controls"],
+        },
+        "endpoint": endpoint,
+        "controls": controls,
+        "daily_rows": daily_rows,
+        "ranking": ranking,
+        "signed_process_sum_cell_equivalents": signed_sum,
+        "signed_process_minus_temperature_endpoint": (
+            signed_sum
+            - endpoint["temperature_bit_signed_cell_equivalents"]),
+        "absolute_process_cell_equivalents": absolute_process_total,
+        "process_cancellation_ratio_to_temperature_endpoint": (
+            absolute_process_total
+            / endpoint["temperature_bit_absolute_cell_equivalents"]),
+        "first_nonincoming_process_day": first_nonincoming_process_day,
+        "predictions": predictions,
+        "scope": {
+            "true_incoming_birth_before_day180": "UNMEASURED",
+            "DINO": "NO-PRODUCTION-CHANGE",
+            "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+            "OVERFLOW": "NO-PRODUCTION-CHANGE",
+            "ORCA2": "UNMEASURED-WITH-SPEC",
+        },
+        "worktree": stamp,
+    }
+    print("\nEVD TEMPERATURE-PROCESS RANKING -- production JIT")
+    print(f"  {'rank':>4s} {'owner':>30s} {'signed cells':>14s} "
+          f"{'absolute cells':>16s} {'first day':>10s}")
+    for rank, row in enumerate(ranking, 1):
+        first = row["first_observed_effect"]
+        first_day = "none" if first is None else str(first["day"])
+        print(f"  {rank:4d} {row['owner']:>30s} "
+              f"{row['bit_signed_cell_equivalents']:14.6f} "
+              f"{row['bit_absolute_cell_equivalents']:16.6f} "
+              f"{first_day:>10s}")
+    print(f"  endpoint signed/absolute +{endpoint['temperature_bit_signed_cell_equivalents']:.6f}/"
+          f"{endpoint['temperature_bit_absolute_cell_equivalents']:.6f}; "
+          f"process absolute {absolute_process_total:.6f}")
+    return report
 
 
 if __name__ == "__main__":
