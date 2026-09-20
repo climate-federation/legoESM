@@ -407,24 +407,87 @@ every local-proof and cross-card artifact, verifies producer commits, requires
 all 70 movement rows and all 30+8 time rows, derives the executing-card set,
 and checks the Decision-43/45 predicates.  Its result is:
 
-ROUND130_PENDING_RANKING_GATE
+`STATUS LANDING-CANDIDATE: best=r109_handoff day240_improvers=6`.
+The post-landing replay is clean at commit
+`14e6e5f8ab1530b8b141bdf6985a4ff1a871c9ac`; its registry SHA-256 is
+`2eb097297ce1f5302bb66d2e14c6bdea3183080f657998ca10a7a9b0e3e550da`.
+The final shared `packages/ocean` tree and the independently measured
+candidate tree both resolve to
+`8bfd500f3c0060c5335186b80f389e78f25938a7`.
 
 Removing one candidate, moving the immutable day-240 control, or deleting one
 real moved row each prints `STATUS PLANT-FIRED` and exits nonzero.  The
 cross-card control also proves that a bare measured-card name cannot discharge
 the requirement without its hashed 15-row comparison.
 
+The three gate plants reported, respectively:
+
+```text
+STATUS PLANT-FIRED: missing-candidate: candidate registry must be exactly ['r62_coeff', 'r88_kaa', 'r89_assign', 'r97_rhs', 'r99_wclock', 'r105_shear', 'r109_handoff', 'r112_fct']
+STATUS PLANT-FIRED: baseline-day240: baseline day 240 moved: 0.01644674193029245
+STATUS PLANT-FIRED: missing-moved-row: r62_coeff: moved-row registry is not exact
+```
+
 ## Independent adversarial review
 
-ROUND130_PENDING_REVIEW
+The required read-only Codex invocation was made with a prompt that tried to
+refute registry completeness, one-variable isolation, the Rule-43/45 table,
+the shared-card census, and the landing.  The tool could not initialize in
+this sandbox; its verbatim verdict was:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Thus, **independent review unavailable in-sandbox**.  There is no `DO NOT
+SHIP` verdict to override, and the complete failed invocation is retained as
+`phase3/round130/codex_review.log`.
 
 ## Verification
 
-ROUND130_PENDING_TESTS
+All completed suites were CPU-only with fp64 enabled:
+
+* The focused changed-path suite covered the Round-130 ranking and stage
+  gates, Decision 43, both stage-1 transport suites, both NEMO recipes, DINO,
+  and momentum RK3.  Its terminal summary was exactly
+  `244 passed, 9 warnings in 559.97s (0:09:19)`.
+* After rigidly re-anchoring the 25 citations shifted by this round, the
+  citation-gate plus worktree-stamp suite reported exactly
+  `26 passed in 3.88s`.
+* The required monolithic fidelity+unit invocation collected 8,250 tests and
+  reached 96%, but six xdist workers aborted in JAX/XLA compilation in
+  unrelated leapfrog, QG-Leith, tracer-integration, and similar tests.  It
+  then stopped making progress and was interrupted with exit 130.  It
+  produced **no terminal pytest summary**, so it is not represented as a
+  pass and cannot supply a complete failure-ID diff.
+* A lower-concurrency whole-fidelity retry passed beyond 95% without a red
+  test after the citation repair, but a final long test did not return; it
+  too was bounded with exit 130 and produced **no terminal pytest summary**.
+* Following the repository instruction to split compiler-heavy unit suites,
+  the first 60-file batch completed with exactly
+  `6 failed, 854 passed, 1 skipped, 2 xfailed, 5 warnings in 594.35s
+  (0:09:54)`.  Five failure IDs are in the frozen 87-ID baseline.  The sixth,
+  the periodic-channel FCT conservation node, immediately passed alone with
+  exactly `1 passed in 4.65s`.  The next batch again suffered an XLA compiler
+  abort, this time while compiling an unrelated EKE-source test, and was
+  stopped rather than spend the round's CPU budget on ever-smaller shards.
+
+The full-tree limitation is therefore explicit: no reproducible new failure
+was found in the completed and focused runs, but this round does not claim a
+complete all-tree green summary.  The raw monolithic, fidelity, focused, and
+split-unit logs are all retained under `phase3/round130/`.
 
 The receipt citation gate and its shifted-citation plant are reported here:
 
-ROUND130_PENDING_CITATION
+The unplanted receipt run found 22 citations, zero unmapped citations, zero
+failures, an empty map audit, all nine internal self-tests fired, and
+`status: PASS`.  Shifting the first endpoint of the registered
+`trazdf` matrix range by two lines returned exit 1 with
+`status: FAIL` and `SYMBOL-NOT-AT-LINE`; the map audit stayed empty.  The
+artifacts are `phase3/round130/citation_gate.json` and
+`phase3/round130/citation_gate_shifted_plant.json`.
 
 ## Landing and new immutable arms
 
