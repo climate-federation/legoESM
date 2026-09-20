@@ -28,6 +28,12 @@ MODES
                      signed day-240 temperature carry by process.
   --vertical-record  validates the Round-125 ``tra_zdf`` internal records
                      against the already admitted process trajectory.
+  --produce-vertical-trace
+                     extends the existing production process trace with the
+                     exact tracer-ZDF operands consumed during steps
+                     1081--1440; ordinary carried state remains separate.
+  --vertical-budget  admits both vertical traces and decomposes the inherited
+                     day-240 vertical-diffusion carry by source boundary.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -58,6 +64,8 @@ PLANTS (each exits NON-ZERO; each is exercised by the committed unit test)
   vertical-truncation      removes one binary64 word from an internal record
   vertical-matrix-ulp      moves one consumed matrix coefficient by one ULP
   vertical-trajectory-ulp  breaks one internal/process Tbb comparison by 1 ULP
+  lego-vertical-stamp      supplies a wrong legoESM vertical-trace commit
+  lego-vertical-matrix-ulp changes one stored, consumed matrix coefficient
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -142,6 +150,13 @@ LEGO_PROCESS_FIELDS = (
     "Bldf", "Bpre", "Taa",
 )
 LEGO_PROCESS_TRACE_STEPS = PROCESS_END_STEP - PROCESS_START_STEP + 1
+LEGO_VERTICAL_FIELDS = (
+    "heat_K", "isoneutral_K", "effective_K", "e3t_after", "e3w_now",
+    "content_T", "lower", "diagonal", "upper", "solved_T",
+)
+DEFAULT_REFERENCE_PROCESS_TRACE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round124/"
+    "lego_process_trace_v3")
 DEFAULT_IMMUTABLE_GYRE_YEAR = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre")
 # Round 125 reuses the existing self-describing ``tra_zdf`` record.  The
@@ -1061,6 +1076,87 @@ def _trace_frame(trace) -> dict[str, np.ndarray]:
     }
 
 
+def _vertical_trace_frame(trace) -> dict[str, np.ndarray]:
+    """Copy the exact tracer-ZDF arrays returned by the production closure."""
+    vertical = trace.vertical_solve
+    return {
+        "heat_K": np.asarray(vertical.heat_K, dtype=np.float64),
+        "isoneutral_K": np.asarray(
+            vertical.isoneutral_K, dtype=np.float64),
+        "effective_K": np.asarray(vertical.effective_K, dtype=np.float64),
+        "e3t_after": np.asarray(vertical.e3t_after, dtype=np.float64),
+        "e3w_now": np.asarray(vertical.e3w_now, dtype=np.float64),
+        "content_T": np.asarray(vertical.content_T, dtype=np.float64),
+        "lower": np.asarray(vertical.lower, dtype=np.float64),
+        "diagonal": np.asarray(vertical.diagonal, dtype=np.float64),
+        "upper": np.asarray(vertical.upper, dtype=np.float64),
+        "solved_T": np.asarray(vertical.solved_T, dtype=np.float64),
+    }
+
+
+def _vertical_effect_control(model, state, freshwater, surface, trace,
+                             wet: np.ndarray) -> dict:
+    """Perturb one consumed heat-K interface in the full production step."""
+    import jax.numpy as jnp
+
+    baseline_vertical = _vertical_trace_frame(trace)
+    interface_wet = wet[..., :-1] & wet[..., 1:]
+    candidates = np.argwhere(
+        interface_wet & np.isfinite(baseline_vertical["heat_K"])
+        & (baseline_vertical["heat_K"] > 0.0))
+    require(candidates.size > 0,
+            "vertical effect plant found no positive wet heat-K interface")
+    index = tuple(int(x) for x in candidates[0])
+    heat = np.array(baseline_vertical["heat_K"], copy=True)
+    old = float(heat[index])
+    # A single stored-matrix ULP is tested separately.  This production-effect
+    # plant uses a small, fixed physical coefficient delta so it cannot pass
+    # merely by moving a diagnostic input while rounding out of the solve.
+    delta = float(np.ldexp(1.0, -40))
+    heat[index] = old + delta
+    require(heat[index] != old, "vertical effect plant rounded to zero")
+    planted = model.step(
+        state, dt=DT_S, freshwater=freshwater, surface_forcing=surface,
+        _vertical_K_test_override=(
+            jnp.asarray(heat), trace.vertical_solve.viscosity_K))
+    planted_vertical = _vertical_trace_frame(planted)
+    baseline_process = _trace_frame(trace)
+    planted_process = _trace_frame(planted)
+    upstream_names = tuple(name for name in LEGO_PROCESS_FIELDS if name != "Taa")
+    upstream_moved = {
+        name: _different_cells(
+            baseline_process[name], planted_process[name],
+            wet if baseline_process[name].ndim == 3 else np.any(wet, axis=-1))
+        for name in upstream_names
+    }
+    moved = {
+        name: _different_cells(
+            baseline_vertical[name], planted_vertical[name],
+            interface_wet if baseline_vertical[name].shape[-1] == wet.shape[-1] - 1
+            else wet)
+        for name in LEGO_VERTICAL_FIELDS
+    }
+    solved_moved = _different_cells(
+        np.asarray(trace.vertical_solve.solved_T),
+        np.asarray(planted.vertical_solve.solved_T), wet)
+    require(all(value == 0 for value in upstream_moved.values()),
+            "vertical effect plant moved an upstream process boundary")
+    require(moved["heat_K"] == 1 and moved["effective_K"] == 1,
+            "vertical effect plant did not move exactly one K interface")
+    require(sum(moved[name] for name in ("lower", "diagonal", "upper")) > 0,
+            "vertical effect plant did not reach a consumed matrix")
+    require(solved_moved > 0,
+            "vertical effect plant did not reach the solved temperature")
+    return {
+        "status": "PLANT-FIRED", "index_jik": list(index),
+        "heat_K_before_m2_s": old,
+        "heat_K_delta_m2_s": delta,
+        "upstream_cells_moved": upstream_moved,
+        "vertical_cells_moved": moved,
+        "solved_temperature_cells_moved": solved_moved,
+    }
+
+
 def _trace_effect_control(control_trace, planted_trace, mask: np.ndarray,
                           index: tuple[int, int, int], delta: float) -> dict:
     control = _trace_frame(control_trace)
@@ -1108,7 +1204,10 @@ def _write_trace_manifest(root: Path, paths: list[Path], commit: str) -> dict:
 
 
 def produce_lego_process_trace(root: Path, expected_commit: str,
-                               *, mesh_path: Path = DEFAULT_MESH) -> dict:
+                               *, mesh_path: Path = DEFAULT_MESH,
+                               include_vertical: bool = False,
+                               reference_process_trace: Path =
+                               DEFAULT_REFERENCE_PROCESS_TRACE) -> dict:
     """Run seed zero independently from rest and write steps 1081--1440."""
     _policy()
     from numpy.lib.format import open_memmap
@@ -1159,10 +1258,17 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
     shape2 = shape3[:2]
     maps = {}
     paths = []
-    for name in LEGO_PROCESS_FIELDS:
-        shape = ((LEGO_PROCESS_TRACE_STEPS,) + shape2
-                 if name.startswith("q_")
-                 else (LEGO_PROCESS_TRACE_STEPS,) + shape3)
+    trace_fields = list(LEGO_PROCESS_FIELDS)
+    if include_vertical:
+        trace_fields.extend(LEGO_VERTICAL_FIELDS)
+    for name in trace_fields:
+        if name.startswith("q_"):
+            shape = (LEGO_PROCESS_TRACE_STEPS,) + shape2
+        elif name in ("heat_K", "isoneutral_K", "effective_K", "e3w_now"):
+            shape = (LEGO_PROCESS_TRACE_STEPS,) + shape3[:-1] + (
+                shape3[-1] - 1,)
+        else:
+            shape = (LEGO_PROCESS_TRACE_STEPS,) + shape3
         path = root / f"{name}.npy"
         paths.append(path)
         maps[name] = open_memmap(path, mode="w+", dtype="<f8", shape=shape)
@@ -1173,6 +1279,11 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
     total_unequal_bytes = 0
     max_step_unequal_bytes = 0
     effect_control = None
+    vertical_effect_control = None
+    reference_arrays = (
+        _load_lego_trace_arrays(Path(reference_process_trace))
+        if include_vertical else None)
+    reference_moved = {name: 0 for name in LEGO_PROCESS_FIELDS}
     for completed in range(PROCESS_END_STEP):
         kt = completed + 1
         freshwater, surface = gate._surface_forcings(card, state, kt)
@@ -1182,6 +1293,9 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
                 surface_forcing=surface)
             if kt == PROCESS_START_STEP - 1:
                 np.savez(snapshot_root / "day180.npz",
+                         **year._snapshot(state, gate))
+            if kt == 1260:
+                np.savez(snapshot_root / "day210.npz",
                          **year._snapshot(state, gate))
             continue
 
@@ -1203,16 +1317,31 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
                 surface_forcing=surface)
             effect_control = _trace_effect_control(
                 trace, planted, wet, plant_index, plant_delta)
+            if include_vertical:
+                vertical_effect_control = _vertical_effect_control(
+                    trace_model, state, freshwater, surface, trace, wet)
         frame = _trace_frame(trace)
+        if include_vertical:
+            frame.update(_vertical_trace_frame(trace))
         index = kt - PROCESS_START_STEP
-        for name in LEGO_PROCESS_FIELDS:
+        for name in trace_fields:
             require(frame[name].shape == maps[name].shape[1:],
                     f"step {kt} {name}: shape {frame[name].shape}, expected "
                     f"{maps[name].shape[1:]}")
             require(np.all(np.isfinite(frame[name])),
                     f"step {kt} {name}: non-finite trace value")
             maps[name][index] = frame[name]
+        if reference_arrays is not None:
+            for name in LEGO_PROCESS_FIELDS:
+                active_mask = wet if frame[name].ndim == 3 else np.any(
+                    wet, axis=-1)
+                reference_moved[name] += _different_cells(
+                    frame[name], np.asarray(reference_arrays[name][index]),
+                    active_mask)
         state = reference
+        if kt == 1260:
+            np.savez(snapshot_root / "day210.npz",
+                     **year._snapshot(state, gate))
         if kt % 60 == 0:
             print(f"  lego process trace step {kt:4d}  "
                   f"{time.time() - started:7.1f} s", flush=True)
@@ -1222,31 +1351,48 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
         array.flush()
     del maps
     require(effect_control is not None, "production effect plant never ran")
+    if include_vertical:
+        require(vertical_effect_control is not None,
+                "vertical production effect plant never ran")
+        require(all(value == 0 for value in reference_moved.values()),
+                "fresh vertical trace differs from the admitted Round-124 "
+                "process trajectory: " + ", ".join(
+                    f"{name}={value}" for name, value in reference_moved.items()
+                    if value))
     metadata = {
-        "format": "gyre-legoesm-process-trace-v1", "case": CASE,
+        "format": ("gyre-legoesm-process-vertical-trace-v2"
+                   if include_vertical else "gyre-legoesm-process-trace-v1"),
+        "case": CASE,
         "producer_commit": expected_commit,
         "steps": [PROCESS_START_STEP, PROCESS_END_STEP],
         "record_count": LEGO_PROCESS_TRACE_STEPS,
         "dt_s": DT_S, "seed": 0, "platform": "cpu",
         "precision": "fp64/libm", "production_entry": "model.step/_step_jitted",
         "shape_3d": list(shape3), "shape_2d": list(shape2),
-        "fields": list(LEGO_PROCESS_FIELDS),
+        "fields": trace_fields,
         "carried_state_unequal_bytes_total": total_unequal_bytes,
         "carried_state_unequal_bytes_max_step": max_step_unequal_bytes,
         "effect_control": effect_control, "operands": operands,
         "wall_seconds": time.time() - started, "worktree": stamp,
     }
+    if include_vertical:
+        metadata.update({
+            "vertical_effect_control": vertical_effect_control,
+            "reference_process_trace": str(reference_process_trace),
+            "reference_process_cells_unequal": reference_moved,
+        })
     metadata_path = root / "manifest.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
-    paths.extend([
-        snapshot_root / "day180.npz", snapshot_root / "day240.npz",
-        metadata_path,
-    ])
+    paths.extend([snapshot_root / "day180.npz",
+                  snapshot_root / "day240.npz", metadata_path])
+    if include_vertical:
+        paths.append(snapshot_root / "day210.npz")
     file_hashes = _write_trace_manifest(root, paths, expected_commit)
     report = dict(metadata)
     report["root"] = str(root)
     report["trace_files_sha256"] = file_hashes
-    print(f"STATUS PASS: legoESM process trace {LEGO_PROCESS_TRACE_STEPS} "
+    kind = "process+vertical" if include_vertical else "process"
+    print(f"STATUS PASS: legoESM {kind} trace {LEGO_PROCESS_TRACE_STEPS} "
           f"frames; carried state unequal bytes {total_unequal_bytes}")
     return report
 
@@ -1292,7 +1438,9 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
 
     root = Path(root)
     metadata = json.loads((root / "manifest.json").read_text())
-    require(metadata["format"] == "gyre-legoesm-process-trace-v1",
+    require(metadata["format"] in (
+        "gyre-legoesm-process-trace-v1",
+        "gyre-legoesm-process-vertical-trace-v2"),
             "wrong legoESM trace format")
     require(metadata["producer_commit"] == expected_commit,
             "legoESM trace manifest producer commit mismatch")
@@ -1305,11 +1453,17 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
         raise GateError("lego-process-stamp plant stayed green")
     _check_trace_stamp(root, expected_commit)
     manifest = _trace_file_manifest(root)
+    has_vertical = (
+        metadata["format"] == "gyre-legoesm-process-vertical-trace-v2")
     expected_files = {f"{name}.npy" for name in LEGO_PROCESS_FIELDS} | {
         "day180.npz", "day240.npz", "manifest.json"}
+    if has_vertical:
+        expected_files |= {f"{name}.npy" for name in LEGO_VERTICAL_FIELDS}
+        expected_files.add("day210.npz")
     require(set(manifest) == expected_files,
             "legoESM trace manifest file set differs from the frozen layout")
-    file_paths = {name: (root / name if name not in ("day180.npz", "day240.npz")
+    file_paths = {name: (root / name if name not in (
+                             "day180.npz", "day210.npz", "day240.npz")
                          else root / "lego_seed0" / name)
                   for name in expected_files}
     for name, path in file_paths.items():
@@ -1414,6 +1568,134 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
             "max_abs_step_rounding_closure_K": max_step_closure,
             "carried_state_unequal_bytes_total": 0,
             "effect_control": metadata["effect_control"],
+        },
+    }
+
+
+def _load_vertical_trace_arrays(root: Path) -> dict[str, np.ndarray]:
+    return {name: np.load(root / f"{name}.npy", mmap_mode="r")
+            for name in LEGO_VERTICAL_FIELDS}
+
+
+def _literal_vertical_matrix(K: np.ndarray, e3t: np.ndarray,
+                             e3w: np.ndarray, wet: np.ndarray):
+    """NEMO's active non-Aimp/non-MFC matrix association in numpy."""
+    negative_zero = np.full(e3t.shape[:-1] + (1,), -0.0, dtype=np.float64)
+    interface_wet = wet[..., 1:] & wet[..., :-1]
+    product = -np.float64(DT_S) * K
+    coeff = product / np.where(interface_wet, e3w, 1.0)
+    coeff = coeff * interface_wet
+    lower = np.concatenate((negative_zero, coeff), axis=-1)
+    upper = np.concatenate((coeff, negative_zero), axis=-1)
+    diagonal = e3t - (lower + upper)
+    diagonal = np.where(wet, diagonal, 1.0)
+    return lower, diagonal, upper
+
+
+def validate_lego_vertical_trace(root: Path, expected_commit: str, *,
+                                 plant: str | None = None,
+                                 mesh_path: Path = DEFAULT_MESH) -> dict:
+    """Admit the Round-126 extension of the existing production trace."""
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    root = Path(root)
+    metadata = json.loads((root / "manifest.json").read_text())
+    require(metadata["format"] == "gyre-legoesm-process-vertical-trace-v2",
+            "wrong legoESM vertical trace format")
+    if plant == "lego-vertical-stamp":
+        try:
+            _check_trace_stamp(root, "0" * 40)
+        except GateError as error:
+            return {"status": "PLANT-FIRED", "plant": plant,
+                    "reason": str(error)}
+        raise GateError("lego-vertical-stamp plant stayed green")
+    process_validation = validate_lego_process_trace(
+        root, expected_commit, mesh_path=mesh_path)
+    arrays = _load_vertical_trace_arrays(root)
+    shape3 = tuple(metadata["shape_3d"])
+    shape_if = shape3[:-1] + (shape3[-1] - 1,)
+    for name, array in arrays.items():
+        expected = (LEGO_PROCESS_TRACE_STEPS,) + (
+            shape_if if name in (
+                "heat_K", "isoneutral_K", "effective_K", "e3w_now")
+            else shape3)
+        require(array.shape == expected and array.dtype == np.float64,
+                f"{name}: shape/dtype {array.shape}/{array.dtype}, expected "
+                f"{expected}/float64")
+
+    gate = _gate()
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    wet = gate.expected_masks(build_nemo_testcase_card(CASE))["T"]
+    interface_wet = wet[..., 1:] & wet[..., :-1]
+    matrix_unequal = {name: 0 for name in ("lower", "diagonal", "upper")}
+    effective_unequal = 0
+    solved_unequal = 0
+    process_arrays = _load_lego_trace_arrays(root)
+    first_expected = None
+    for index in range(LEGO_PROCESS_TRACE_STEPS):
+        frame = {name: np.asarray(array[index])
+                 for name, array in arrays.items()}
+        require(all(np.all(np.isfinite(value)) for value in frame.values()),
+                f"vertical trace frame {index} contains a non-finite value")
+        expected_effective = frame["heat_K"] + frame["isoneutral_K"]
+        effective_unequal += _different_cells(
+            expected_effective, frame["effective_K"], interface_wet)
+        expected_matrix = _literal_vertical_matrix(
+            frame["effective_K"], frame["e3t_after"], frame["e3w_now"], wet)
+        if index == 0:
+            first_expected = expected_matrix
+        for name, expected in zip(
+                ("lower", "diagonal", "upper"), expected_matrix,
+                strict=True):
+            matrix_unequal[name] += _different_cells(
+                expected, frame[name], wet)
+        solved_unequal += _different_cells(
+            np.asarray(process_arrays["Taa"][index]), frame["solved_T"], wet)
+    require(effective_unequal == 0,
+            f"effective K differs from heat+isoneutral in {effective_unequal} "
+            "wet interfaces")
+    require(all(value == 0 for value in matrix_unequal.values()),
+            "production matrix differs from the registered literal rebuild: "
+            + ", ".join(f"{name}={value}" for name, value in
+                        matrix_unequal.items() if value))
+    require(solved_unequal == 0,
+            f"vertical trace solved temperature differs from process Taa in "
+            f"{solved_unequal} cells")
+
+    if plant == "lego-vertical-matrix-ulp":
+        require(first_expected is not None, "matrix plant has no first frame")
+        planted = np.array(arrays["diagonal"][0], copy=True)
+        j, i, k = (int(x) for x in np.argwhere(wet)[0])
+        planted[j, i, k] = np.nextafter(planted[j, i, k], np.inf)
+        moved = _different_cells(first_expected[1], planted, wet)
+        require(moved == 1,
+                f"vertical matrix ULP plant moved {moved} cells, expected 1")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "field": "diagonal", "index_jik": [j, i, k],
+                "registered_cells_moved": moved}
+    require(plant in (None, "none"),
+            f"unknown lego vertical plant {plant!r}")
+    effect = metadata["vertical_effect_control"]
+    require(effect["status"] == "PLANT-FIRED"
+            and effect["solved_temperature_cells_moved"] > 0
+            and all(value == 0 for value in
+                    effect["upstream_cells_moved"].values()),
+            "stored vertical production effect control is vacuous")
+    return {
+        "format": "gyre-legoesm-vertical-trace-validation-v1",
+        "status": "PASS", "case": CASE, "root": str(root),
+        "producer_commit": expected_commit, "worktree": worktree_stamp(),
+        "layout": {"record_count": LEGO_PROCESS_TRACE_STEPS,
+                   "shape_3d": list(shape3),
+                   "fields": list(LEGO_VERTICAL_FIELDS)},
+        "controls": {
+            "effective_K_cells_unequal": effective_unequal,
+            "matrix_rebuild_cells_unequal": matrix_unequal,
+            "reference_process_cells_unequal": metadata[
+                "reference_process_cells_unequal"],
+            "vertical_effect_control": effect,
+            "process_validation": process_validation["controls"],
         },
     }
 
@@ -1676,6 +1958,483 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
           f"{signed_sum:.17e} K; max reconstruction residual "
           f"{max_reconstruction:.3e} K")
     return report
+
+
+# --------------------- day-180-to-240 vertical-diffusion sub-owner budget ---
+VERTICAL_OWNER_ROWS = (
+    "live_column_gradient", "free_surface_weighting", "tke_heat_diffusivity",
+    "isoneutral_diffusivity", "matrix_content_association",
+    "implicit_solve_association", "interaction_order_residual",
+)
+
+
+def _literal_vertical_solve(content: np.ndarray, lower: np.ndarray,
+                            diagonal: np.ndarray, upper: np.ndarray,
+                            wet: np.ndarray) -> np.ndarray:
+    """The three compiled ``tra_zdf`` recurrences, in written order."""
+    nlev = content.shape[-1]
+    lu = np.array(diagonal, copy=True)
+    for k in range(1, nlev):
+        lu[..., k] = (diagonal[..., k]
+                      - lower[..., k] * upper[..., k - 1]
+                      / lu[..., k - 1])
+    work = np.array(content, copy=True)
+    for k in range(1, nlev):
+        work[..., k] = (content[..., k]
+                        - lower[..., k] / lu[..., k - 1]
+                        * work[..., k - 1])
+    solved = np.array(work, copy=True)
+    solved[..., -1] = work[..., -1] / lu[..., -1] * wet[..., -1]
+    for k in range(nlev - 2, -1, -1):
+        solved[..., k] = ((work[..., k]
+                           - upper[..., k] * solved[..., k + 1])
+                          / lu[..., k] * wet[..., k])
+    return solved
+
+
+def _vertical_increment(pre_solve: np.ndarray, K: np.ndarray,
+                        e3t: np.ndarray, e3w: np.ndarray,
+                        wet: np.ndarray) -> np.ndarray:
+    lower, diagonal, upper = _literal_vertical_matrix(K, e3t, e3w, wet)
+    content = e3t * pre_solve
+    return (_literal_vertical_solve(
+        content, lower, diagonal, upper, wet) - pre_solve) * wet
+
+
+def score_vertical_budget(nemo_vertical_root: Path, lego_trace_root: Path,
+                          expected_commit: str, *,
+                          process_root: Path = DEFAULT_PROCESS_RECORD_ROOT,
+                          immutable_lego_root: Path =
+                          DEFAULT_IMMUTABLE_GYRE_YEAR,
+                          nemo_root: Path = YEAR_ROOT,
+                          mesh_path: Path = DEFAULT_MESH) -> dict:
+    """Telescope the inherited day-240 vertical carry into source boundaries."""
+    _policy()
+    year = _year()
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    nemo_validation = validate_vertical_record(
+        nemo_vertical_root, "4cac617cd928007506f2de7ccb098f87e04204d1",
+        process_root=process_root)
+    lego_validation = validate_lego_vertical_trace(
+        lego_trace_root, expected_commit, mesh_path=mesh_path)
+    card = build_nemo_testcase_card(CASE)
+    mesh, wet, wet2, _dz, _dy, _area, bands = year._geometry(card, mesh_path)
+    nlev = wet.shape[-1]
+    lat = np.asarray(mesh["gphit"], dtype=np.float64)
+    lego_end = _load_npz(
+        Path(lego_trace_root) / "lego_seed0/day240.npz")["T"]
+    immutable_end = _load_npz(
+        Path(immutable_lego_root) / "lego_seed0_year/day240.npz")["T"]
+    require(_different_cells(lego_end, immutable_end, wet) == 0,
+            "vertical trace day-240 temperature differs from immutable member")
+    nemo_end = year._load_nemo(nemo_root, 0, 240, nlev)["T"]
+    endpoint = lego_end - nemo_end
+    endpoint_rms = _rms(endpoint, wet)
+    require(endpoint_rms == 1.6446741930292448e-2,
+            f"day-240 headline {endpoint_rms:.17e} differs from frozen value")
+
+    arrays = _load_vertical_trace_arrays(Path(lego_trace_root))
+    process_arrays = _load_lego_trace_arrays(Path(lego_trace_root))
+    components = {name: np.zeros_like(endpoint) for name in VERTICAL_OWNER_ROWS}
+    blocks = [{name: np.zeros_like(endpoint) for name in VERTICAL_OWNER_ROWS}
+              for _ in range(6)]
+    max_step_residual = 0.0
+    oracle_rebuild_unequal = 0
+    lego_rebuild_unequal = 0
+    boundary = {
+        "nemo_surface_nonzero": 0, "nemo_bottom_nonzero": 0,
+        "lego_surface_nonzero": 0, "lego_bottom_nonzero": 0,
+        "nemo_surface_max_abs": 0.0, "nemo_bottom_max_abs": 0.0,
+        "lego_surface_max_abs": 0.0, "lego_bottom_max_abs": 0.0,
+    }
+    for index, step in enumerate(range(PROCESS_START_STEP,
+                                       PROCESS_END_STEP + 1)):
+        record = _read_vertical_record(
+            Path(nemo_vertical_root)
+            / f"oracle_trazdf_matrix_kt{step:08d}.bin", step)
+        e3t_n = _vertical_field(record, "e3t_Kaa", nlev)
+        e3w_n = _vertical_field(record, "e3w_Kmm")[:, :, 1:nlev]
+        heat_n = _vertical_field(record, "avt")[:, :, 1:nlev]
+        iso_n = _vertical_field(record, "ah_wslp2")[:, :, 1:nlev]
+        rhs_n = _vertical_field(record, "rhs_T", nlev)
+        pre_n = rhs_n / e3t_n
+        sol_n = _vertical_field(record, "sol_T_pre_clamp", nlev)
+        vertical_n = (sol_n - pre_n) * wet
+        matrix_n = tuple(_vertical_field(record, name) for name in
+                         ("zwi", "zwd", "zws"))
+        rebuilt_n = _literal_vertical_solve(
+            rhs_n, *matrix_n, wet) * wet
+        oracle_rebuild_unequal += _different_cells(sol_n, rebuilt_n, wet)
+
+        frame = {name: np.asarray(array[index])
+                 for name, array in arrays.items()}
+        pre_l = frame["content_T"] / frame["e3t_after"]
+        vertical_l = (frame["solved_T"] - pre_l) * wet
+
+        h0 = _vertical_increment(
+            pre_n, heat_n + iso_n, e3t_n, e3w_n, wet)
+        h1 = _vertical_increment(
+            pre_l, heat_n + iso_n, e3t_n, e3w_n, wet)
+        h2 = _vertical_increment(
+            pre_l, heat_n + iso_n,
+            frame["e3t_after"], frame["e3w_now"], wet)
+        h3 = _vertical_increment(
+            pre_l, frame["heat_K"] + iso_n,
+            frame["e3t_after"], frame["e3w_now"], wet)
+        h4 = _vertical_increment(
+            pre_l, frame["effective_K"],
+            frame["e3t_after"], frame["e3w_now"], wet)
+        h5 = (_literal_vertical_solve(
+            frame["content_T"], frame["lower"], frame["diagonal"],
+            frame["upper"], wet) - pre_l) * wet
+        lego_rebuild_unequal += _different_cells(
+            h5 + pre_l, frame["solved_T"], wet)
+        h6 = vertical_l
+        rows = {
+            "live_column_gradient": h1 - h0,
+            "free_surface_weighting": h2 - h1,
+            "tke_heat_diffusivity": h3 - h2,
+            "isoneutral_diffusivity": h4 - h3,
+            "matrix_content_association": h5 - h4,
+            "implicit_solve_association": h6 - h5,
+        }
+        subtotal = np.zeros_like(endpoint)
+        for value in rows.values():
+            subtotal += value
+        rows["interaction_order_residual"] = (
+            (vertical_l - vertical_n) - subtotal)
+        reconstruction = np.zeros_like(endpoint)
+        for name in VERTICAL_OWNER_ROWS:
+            components[name] += rows[name]
+            blocks[index // 60][name] += rows[name]
+            reconstruction += rows[name]
+        residual = (vertical_l - vertical_n) - reconstruction
+        max_step_residual = max(
+            max_step_residual, float(np.max(np.abs(residual[wet]))))
+
+        zwt_n = _vertical_field(record, "zwt_mix")
+        boundary["nemo_surface_nonzero"] += int(np.count_nonzero(
+            zwt_n[..., 0][wet2]))
+        boundary["nemo_bottom_nonzero"] += int(np.count_nonzero(
+            zwt_n[..., -1][wet2]))
+        boundary["lego_surface_nonzero"] += int(np.count_nonzero(
+            frame["lower"][..., 0][wet2]))
+        boundary["lego_bottom_nonzero"] += int(np.count_nonzero(
+            frame["upper"][..., -1][wet2]))
+        for key, values in (
+                ("nemo_surface_max_abs", zwt_n[..., 0]),
+                ("nemo_bottom_max_abs", zwt_n[..., -1]),
+                ("lego_surface_max_abs", frame["lower"][..., 0]),
+                ("lego_bottom_max_abs", frame["upper"][..., -1])):
+            boundary[key] = max(
+                boundary[key], float(np.max(np.abs(values[wet2]))))
+
+    require(oracle_rebuild_unequal == 0,
+            f"offline source-order solve differs from NEMO in "
+            f"{oracle_rebuild_unequal} wet cells")
+    total_component = np.zeros_like(endpoint)
+    for value in components.values():
+        total_component += value
+    vertical_carry, _ = _projection(total_component, endpoint, wet, endpoint_rms)
+    inherited_carry = 2.4168271578053416e-2
+    require(abs(vertical_carry - inherited_carry) <= 2.0e-15,
+            f"sub-owner carry {vertical_carry:.17e} does not close inherited "
+            f"{inherited_carry:.17e}")
+
+    regions = _regions(lat, wet2)
+    horizontal_masks = {name: wet & regions[name][..., None]
+                        for name in ("west_third", "interior_third",
+                                     "east_third")}
+    latitude_masks = {
+        f"south_le_{EMP_SPLIT_LAT_DEG}N": wet & (
+            lat <= EMP_SPLIT_LAT_DEG)[..., None],
+        f"north_gt_{EMP_SPLIT_LAT_DEG}N": wet & (
+            lat > EMP_SPLIT_LAT_DEG)[..., None],
+    }
+
+    def strongest(values, partitions):
+        scored = []
+        for name, local_mask in partitions.items():
+            additive = float(np.sum(values[local_mask] * endpoint[local_mask]))
+            carry, fraction = _projection(
+                values, endpoint, local_mask, _rms(endpoint, local_mask))
+            scored.append((abs(additive), name, carry, fraction,
+                           int(local_mask.sum())))
+        _, name, carry, fraction, cells = max(scored)
+        return {"name": name, "local_signed_carry_K": carry,
+                "local_projection_fraction": fraction, "cells": cells}
+
+    ranking = []
+    for name, values in components.items():
+        carry, fraction = _projection(values, endpoint, wet, endpoint_rms)
+        block_rows = []
+        for block, block_values in enumerate(blocks):
+            block_carry, _ = _projection(
+                block_values[name], endpoint, wet, endpoint_rms)
+            block_rows.append((abs(block_carry), block, block_carry))
+        _, block, block_carry = max(block_rows)
+        ranking.append({
+            "owner": name, "signed_carry_K": carry,
+            "abs_signed_carry_K": abs(carry),
+            "projection_fraction": fraction,
+            "component_rms_K": _rms(values, wet),
+            "birth": {"interval_days": [180 + 10 * block,
+                                          190 + 10 * block],
+                      "signed_carry_K": block_carry},
+            "largest_depth_partition": strongest(values, bands),
+            "largest_longitude_partition": strongest(
+                values, horizontal_masks),
+            "largest_latitude_partition": strongest(values, latitude_masks),
+        })
+    ranking.sort(key=lambda row: row["abs_signed_carry_K"], reverse=True)
+    signed_sum = float(sum(row["signed_carry_K"] for row in ranking))
+    discriminator = conditional_vertical_closure(
+        nemo_vertical_root, lego_trace_root, mesh_path=mesh_path)
+    report = {
+        "format": "gyre-day240-vertical-subowner-budget-v1",
+        "status": "PASS", "case": CASE,
+        "interval_days": [180, 240],
+        "nemo_vertical_root": str(nemo_vertical_root),
+        "lego_trace_root": str(lego_trace_root),
+        "headline": {"day240_T3D_rms_K": endpoint_rms,
+                     "inherited_vertical_carry_K": inherited_carry},
+        "controls": {
+            "nemo_offline_solve_cells_unequal": oracle_rebuild_unequal,
+            "lego_offline_vs_production_solve_cells_unequal": (
+                lego_rebuild_unequal),
+            "max_abs_step_telescope_residual_K": max_step_residual,
+            "signed_carry_sum_K": signed_sum,
+            "signed_carry_minus_inherited_K": signed_sum - inherited_carry,
+            "surface_bottom": boundary,
+        },
+        "ranking": ranking, "largest_owner": ranking[0]["owner"],
+        "closure_vs_upstream": discriminator,
+        "nemo_validation": nemo_validation,
+        "lego_validation": lego_validation,
+        "worktree": worktree_stamp(),
+    }
+    print("\nDAY-240 VERTICAL SUB-OWNER RANKING -- independent trajectories")
+    print(f"  {'rank':>4s} {'owner':>30s} {'signed carry K':>16s} "
+          f"{'component rms K':>16s} {'birth days':>14s}")
+    for rank, row in enumerate(ranking, 1):
+        print(f"  {rank:4d} {row['owner']:>30s} "
+              f"{row['signed_carry_K']:16.8e} "
+              f"{row['component_rms_K']:16.8e} "
+              f"{str(row['birth']['interval_days']):>14s}")
+    print(f"  inherited carry {inherited_carry:.17e} K; signed sub-owner "
+          f"sum {signed_sum:.17e} K; max step residual "
+          f"{max_step_residual:.3e} K")
+    return report
+
+
+def _load_kamm_twin_module():
+    """Load the existing TKE restart bridge; do not duplicate its mapping."""
+    name = "_round126_kamm_twin"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = _HERE.parent / "dino_1226" / "kamm_twin_90d.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _gyre_checkpoint_state(card, restart_path: Path):
+    """Map a GYRE restart onto the certified card without rebuilding geometry."""
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        neumann_fill_cgrid)
+    from legoesm.ocean.fidelity.nemo_io import (
+        read_nemo_restart, read_nemo_restart_en,
+        read_nemo_restart_tke_coefficients)
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        _u_east_to_face, _v_north_to_face)
+
+    restart = read_nemo_restart(str(restart_path), nn_hls=0)
+    nlev = card.recipe.initial_state.T.data.shape[-1]
+    active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
+    T = neumann_fill_cgrid(
+        jnp.asarray(restart.T[..., :nlev]), jnp.asarray(active),
+        card.recipe.grid)
+    S = neumann_fill_cgrid(
+        jnp.asarray(restart.S[..., :nlev]), jnp.asarray(active),
+        card.recipe.grid)
+    u = _u_east_to_face(restart.u[..., :nlev])
+    v = _v_north_to_face(restart.v[..., :nlev])
+    state = card.recipe.initial_state
+    updates = {
+        "T": state.T.replace(data=T), "S": state.S.replace(data=S),
+        "u": state.u.replace(data=jnp.asarray(u)),
+        "v": state.v.replace(data=jnp.asarray(v)),
+        "eta": state.eta.replace(data=jnp.asarray(restart.ssh)),
+    }
+    if state.uu_b is not None and restart.uu_b is not None:
+        updates["uu_b"] = state.uu_b.replace(
+            data=jnp.asarray(_u_east_to_face(restart.uu_b)))
+        updates["vv_b"] = state.vv_b.replace(
+            data=jnp.asarray(_v_north_to_face(restart.vv_b)))
+    state = state._replace(**updates)
+    en = read_nemo_restart_en(str(restart_path), nn_hls=0)[..., :nlev]
+    avm, avt, dissl = read_nemo_restart_tke_coefficients(
+        str(restart_path), nn_hls=0)
+    state = _load_kamm_twin_module().bridge_tke_from_restart(
+        state, en, np.asarray(state.land_mask.data),
+        restart_avm=avm[..., :nlev], restart_avt=avt[..., :nlev],
+        restart_dissl=dissl[..., :nlev])
+    return state, restart
+
+
+def _upper_100m_jet_centroid(u_east: np.ndarray, v_north: np.ndarray,
+                             depths: np.ndarray, thickness: np.ndarray,
+                             west: np.ndarray, lat: np.ndarray,
+                             lon: np.ndarray) -> dict:
+    """Fastest-decile western upper-ocean speed centroid on T points."""
+    u_east = np.asarray(u_east, dtype=np.float64)
+    v_north = np.asarray(v_north, dtype=np.float64)
+    west_u = np.concatenate(
+        [np.zeros_like(u_east[:, :1]), u_east[:, :-1]], axis=1)
+    south_v = np.concatenate(
+        [np.zeros_like(v_north[:1, :]), v_north[:-1, :]], axis=0)
+    u_t = 0.5 * (west_u + u_east)
+    v_t = 0.5 * (south_v + v_north)
+    level_depth = np.mean(depths, axis=(0, 1)) if depths.ndim == 3 else depths
+    upper = level_depth <= 100.0
+    require(bool(np.any(upper)), "upper-100-m jet proxy selected no levels")
+    weights = np.asarray(thickness, dtype=np.float64)[upper]
+    speed3 = np.sqrt(u_t[..., upper] ** 2 + v_t[..., upper] ** 2)
+    speed = np.sum(speed3 * weights, axis=-1) / np.sum(weights)
+    values = speed[west]
+    threshold = float(np.quantile(values, 0.9))
+    selected = west & (speed >= threshold) & (speed > 0.0)
+    require(bool(np.any(selected)), "jet centroid selected no cells")
+    jj, ii = np.indices(speed.shape)
+    w = speed[selected]
+    denom = float(np.sum(w))
+    return {
+        "centroid_j": float(np.sum(jj[selected] * w) / denom),
+        "centroid_i": float(np.sum(ii[selected] * w) / denom),
+        "centroid_lat_deg": float(np.sum(lat[selected] * w) / denom),
+        "centroid_lon_deg": float(np.sum(lon[selected] * w) / denom),
+        "fastest_decile_threshold_m_s": threshold,
+        "selected_cells": int(np.count_nonzero(selected)),
+    }
+
+
+def conditional_vertical_closure(nemo_vertical_root: Path,
+                                 lego_trace_root: Path, *,
+                                 mesh_path: Path = DEFAULT_MESH) -> dict:
+    """Run the production closure on NEMO entries at days 180 and 210."""
+    _policy()
+    import jax
+    import netCDF4
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    card = build_nemo_testcase_card(CASE)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    gate = _gate()
+    wet = gate.expected_masks(card)["T"]
+    interface_wet = wet[..., :-1] & wet[..., 1:]
+    year = _year()
+    mesh = year.nemo_operands(mesh_path)
+    lat = np.asarray(mesh["gphit"], dtype=np.float64)
+    with netCDF4.Dataset(mesh_path) as handle:
+        lon = np.asarray(handle.variables["glamt"][0], dtype=np.float64)
+    west = _regions(lat, np.any(wet, axis=-1))["west_third"]
+    depths = np.asarray(card.recipe.z_coord.nemo_gdept_0, dtype=np.float64)
+    thickness = np.asarray(card.recipe.z_coord.dz_ref, dtype=np.float64)
+    lego_arrays = _load_vertical_trace_arrays(Path(lego_trace_root))
+
+    @jax.jit
+    def production_closure(entry, forcing):
+        return model.diagnose_vertical_K(entry, card.dt_s, forcing)
+
+    checkpoints = []
+    for day, restart_step, step in ((180, 1080, 1081),
+                                    (210, 1260, 1261)):
+        restart_path = (Path(nemo_vertical_root)
+                        / f"GYRE_OMIP_L2_P3_{restart_step:08d}_restart.nc")
+        entry, restart = _gyre_checkpoint_state(card, restart_path)
+        freshwater, surface = gate._surface_forcings(card, entry, step)
+        conditional_heat, _ = production_closure(entry, surface)
+        conditional_heat = np.asarray(conditional_heat, dtype=np.float64)
+        record = _read_vertical_record(
+            Path(nemo_vertical_root)
+            / f"oracle_trazdf_matrix_kt{step:08d}.bin", step)
+        nemo_heat = _vertical_field(record, "avt")[:, :, 1:wet.shape[-1]]
+        own_heat = np.asarray(
+            lego_arrays["heat_K"][step - PROCESS_START_STEP])
+
+        def error(candidate):
+            difference = candidate[interface_wet] - nemo_heat[interface_wet]
+            return {"rms_m2_s": float(np.sqrt(np.mean(difference ** 2))),
+                    "max_abs_m2_s": float(np.max(np.abs(difference))),
+                    "cells_unequal": int(np.count_nonzero(
+                        candidate[interface_wet].view(np.uint64)
+                        != nemo_heat[interface_wet].view(np.uint64)))}
+
+        own_error = error(own_heat)
+        conditional_error = error(conditional_heat)
+        reduction = (1.0 - conditional_error["rms_m2_s"]
+                     / own_error["rms_m2_s"])
+        record_t = _vertical_field(record, "T_Kbb_in", wet.shape[-1])
+        entry_t = np.asarray(entry.T.data)
+        require(_different_cells(record_t, entry_t, wet) == 0,
+                f"day {day}: bridged checkpoint T differs from record entry")
+
+        lego_snapshot = _load_npz(
+            Path(lego_trace_root) / f"lego_seed0/day{day}.npz")
+        jet_lego = _upper_100m_jet_centroid(
+            lego_snapshot["u"], lego_snapshot["v"], depths, thickness,
+            west, lat, lon)
+        jet_nemo = _upper_100m_jet_centroid(
+            restart.u[..., :wet.shape[-1]],
+            restart.v[..., :wet.shape[-1]], depths, thickness,
+            west, lat, lon)
+        displacement = {
+            "delta_j_cells": jet_lego["centroid_j"] - jet_nemo["centroid_j"],
+            "delta_i_cells": jet_lego["centroid_i"] - jet_nemo["centroid_i"],
+        }
+        displacement["magnitude_cells"] = float(np.hypot(
+            displacement["delta_j_cells"], displacement["delta_i_cells"]))
+        checkpoints.append({
+            "day": day, "entry_step": step,
+            "model_own_trajectory_avt_error": own_error,
+            "model_on_nemo_entry_avt_error": conditional_error,
+            "rms_error_reduction_fraction": reduction,
+            "jet_centroid_model": jet_lego,
+            "jet_centroid_nemo": jet_nemo,
+            "jet_centroid_displacement": displacement,
+        })
+
+    reductions = [row["rms_error_reduction_fraction"] for row in checkpoints]
+    vectors = [(
+        row["jet_centroid_displacement"]["delta_j_cells"],
+        row["jet_centroid_displacement"]["delta_i_cells"])
+        for row in checkpoints]
+    consistent_position = (
+        all(float(np.hypot(*vector)) > 1.0e-6 for vector in vectors)
+        and float(np.dot(vectors[0], vectors[1])) > 0.0)
+    if all(value >= 0.90 for value in reductions):
+        verdict = ("UPSTREAM-JET-POSITION-RESPONSE" if consistent_position
+                   else "UPSTREAM-STATE-RESPONSE")
+    elif any(value < 0.50 for value in reductions):
+        verdict = "TKE-CLOSURE-OWNER"
+    else:
+        verdict = "INCONCLUSIVE"
+    return {
+        "status": "PASS", "execution": "production-step jax.jit",
+        "checkpoints": checkpoints,
+        "jet_displacement_consistent": consistent_position,
+        "verdict": verdict,
+    }
 
 
 def _process_math_self_check(failures: list[str]) -> None:
@@ -2600,6 +3359,9 @@ def main(argv=None) -> int:
     parser.add_argument("--produce-process-trace", action="store_true",
                         help="run the independent legoESM Round-124 process "
                              "trace into --root")
+    parser.add_argument("--produce-vertical-trace", action="store_true",
+                        help="extend the existing production process trace "
+                             "with consumed tracer-ZDF operands")
     parser.add_argument("--lego-process-record", type=Path, default=None,
                         help="validate a Round-124 legoESM process trace")
     parser.add_argument("--process-budget", type=Path, default=None,
@@ -2608,6 +3370,15 @@ def main(argv=None) -> int:
     parser.add_argument("--vertical-record", type=Path, default=None,
                         help="validate a Round-125 tra_zdf internal-record "
                              "root")
+    parser.add_argument("--lego-vertical-record", type=Path, default=None,
+                        help="validate a Round-126 legoESM vertical trace")
+    parser.add_argument("--vertical-budget", type=Path, default=None,
+                        help="score this NEMO vertical record against "
+                             "--lego-vertical-record")
+    parser.add_argument("--reference-process-trace", type=Path,
+                        default=DEFAULT_REFERENCE_PROCESS_TRACE,
+                        help="admitted Round-124 process trace that a new "
+                             "vertical trace must reproduce")
     parser.add_argument("--vertical-process-root", type=Path,
                         default=DEFAULT_PROCESS_RECORD_ROOT,
                         help="admitted Round-123 process root used to align "
@@ -2643,14 +3414,46 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
-    if args.produce_process_trace:
+    if args.produce_process_trace or args.produce_vertical_trace:
         require(args.expect_commit is not None,
-                "--produce-process-trace needs --expect-commit")
+                "trace production needs --expect-commit")
         report = produce_lego_process_trace(
-            args.root, args.expect_commit, mesh_path=args.mesh)
+            args.root, args.expect_commit, mesh_path=args.mesh,
+            include_vertical=args.produce_vertical_trace,
+            reference_process_trace=args.reference_process_trace)
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
+        return 0
+    if args.vertical_budget is not None:
+        require(args.lego_vertical_record is not None,
+                "--vertical-budget needs --lego-vertical-record")
+        require(args.expect_commit is not None,
+                "--vertical-budget needs --expect-commit")
+        report = score_vertical_budget(
+            args.vertical_budget, args.lego_vertical_record,
+            args.expect_commit, process_root=args.vertical_process_root,
+            immutable_lego_root=args.immutable_lego_root,
+            nemo_root=args.nemo_root, mesh_path=args.mesh)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        return 0
+    if args.lego_vertical_record is not None:
+        require(args.expect_commit is not None,
+                "--lego-vertical-record needs --expect-commit")
+        report = validate_lego_vertical_trace(
+            args.lego_vertical_record, args.expect_commit,
+            plant=args.plant, mesh_path=args.mesh)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report.get('reason', report.get('control', 'moved'))}")
+            return 1
+        print("STATUS PASS: legoESM vertical trace "
+              f"{report['layout']['record_count']} frames")
         return 0
     if args.vertical_record is not None:
         require(args.expect_commit is not None,
