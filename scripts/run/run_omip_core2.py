@@ -7961,7 +7961,14 @@ def main() -> int:
                                    ("--min-levels",
                                     args.min_levels if args.min_levels != 1
                                     else None),
-                                   ("--smag-cfl-safety", args.smag_cfl_safety))
+                                   ("--smag-cfl-safety", args.smag_cfl_safety),
+                                   # SUPPORTED_APP_GRIDS for the stored flux is
+                                   # ("tripole", "latlon"); the MPAS branch
+                                   # never sets store_mass_flux, so the gateway
+                                   # diagnostic would reconstruct nothing.
+                                   ("--gateway-transports",
+                                    getattr(args, "gateway_transports", False)
+                                    or None))
                     if v is not None]
     if _not_on_mpas and args.grid == "mpas":
         raise SystemExit(

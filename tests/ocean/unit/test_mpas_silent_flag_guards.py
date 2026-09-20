@@ -51,6 +51,7 @@ def test_redi_knobs_are_refused_off_tripole(flag, value):
     "--adaptive-implicit-vertadv",
     "--min-levels",
     "--smag-cfl-safety",
+    "--gateway-transports",
 ])
 def test_flags_the_mpas_builder_cannot_accept_are_refused(flag):
     from pathlib import Path
@@ -76,7 +77,7 @@ def test_the_mpas_builder_really_does_not_accept_them():
     params = set(inspect.signature(build_mpas_ocean).parameters)
     for name in ("redi_coefficient", "redi_aht0", "momentum_time_integrator",
                  "adaptive_implicit_vertadv", "min_levels",
-                 "smag_cfl_safety"):
+                 "smag_cfl_safety", "store_mass_flux"):
         assert name not in params, (
             f"build_mpas_ocean now accepts {name!r}; wire it at the call site "
             f"and narrow the guard instead of refusing a supported flag")
