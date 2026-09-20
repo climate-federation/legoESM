@@ -65,10 +65,10 @@ def run_month(exp, day):
 
 def paired_area_mean(model, ref, area, mask):
     """Area means of ``model`` and ``ref`` over the SAME cells: those inside
-    ``mask`` where the model value is finite.  Returns (model, ref, retained
+    ``mask`` where BOTH values are finite.  Returns (model, ref, retained
     area fraction of the mask)."""
     model, ref = np.asarray(model, dtype=np.float64), np.asarray(ref, dtype=np.float64)
-    ok = mask & np.isfinite(model)
+    ok = mask & np.isfinite(model) & np.isfinite(ref)
     if not ok.any():
         raise SystemExit("FATAL: no supported column in the mask")
     w = area[ok]
@@ -147,7 +147,6 @@ def load_state(run, day):
             raise SystemExit(f"FATAL: {run} day {day}: bad {k}")
     st["u_edge"] = np.asarray(z["u"]) if "u" in z.files else None
     st["order_is_identity"] = bool(np.array_equal(order, np.arange(order.size)))
-    from legoesm import constants
     st["z_sfc"] = np.asarray(z["phis"], dtype=np.float64)[order] / constants.g if "phis" in z.files else None
     st["month"] = run_month(exp, day)
     st["exp"] = exp
@@ -159,6 +158,8 @@ def profile(args):
     specs = [(s.split(":")[0], int(s.split(":")[1])) for s in args.specs]
     states = [load_state(r, d) for r, d in specs]
     lat, lon, area = states[0][1:4]
+    if len({int(s[0]["exp"]["grid"]["resolution"]) for s in states}) != 1:
+        raise SystemExit("FATAL: checkpoints are on different meshes; one table per mesh")
     months = {s[0]["month"] for s in states}
     if len(months) != 1:
         raise SystemExit(f"FATAL: checkpoints span different months {months}; one table per month")
@@ -193,7 +194,8 @@ def profile(args):
     for k, p in enumerate(PLEV):
         r0 = rows[0][k]
         line = f"{p/100:5.0f} {r0[7]:5.2f} {r0[4]:7.1f} {r0[5]*1e3:7.3f} {r0[6]:7.2f} | "
-        line += " ".join(f"dT{r[k][0]:+6.1f} q{r[k][1]*1e3:6.3f} ({r[k][2]:4.2f}x) RH{r[k][3]:5.2f}" for r in rows)
+        line += " ".join(f"dT{r[k][0]:+6.1f} q{r[k][1]*1e3:6.3f} ({r[k][2]:4.2f}x) RH{r[k][3]:5.2f} k{r[k][7]:4.2f}"
+                         for r in rows)
         print(line)
     return 0
 
@@ -242,11 +244,13 @@ def loop(args):
             raise SystemExit(f"FATAL: {spec}: columns are permuted; edge winds cannot be mapped")
         if st["u_edge"].shape[0] != np.asarray(mesh.dvEdge).shape[0]:
             raise SystemExit(f"FATAL: {spec}: edge count {st['u_edge'].shape[0]} != mesh")
-        ue, _ = reconstruct_cell_velocity(jnp.asarray(st["u_edge"]), mesh)
-        u850 = columns_to_plev(st["p_full"], np.asarray(ue, dtype=np.float64), 85000.0)[:, 0]
-        u, uref, _ = paired_area_mean(u850, ue850, area, lat >= 70)
+        u_east, _v_north = reconstruct_cell_velocity(jnp.asarray(st["u_edge"]), mesh)   # documented order
+        u850 = columns_to_plev(st["p_full"], np.asarray(u_east, dtype=np.float64), 85000.0)[:, 0]
+        u, uref, kept_u = paired_area_mean(u850, ue850, area, lat >= 70)
+        dome_kept = (area[(lat >= 85) & flat].sum() / area[lat >= 85].sum(),
+                     area[(lat >= 60) & (lat < 70) & flat].sum() / area[(lat >= 60) & (lat < 70)].sum())
         print(f"{spec:>14s} {dome:+10.1f} {qm/qek:10.2f} {rh:6.2f} {tm-tek:+10.1f} {u:+12.1f} {uref:+10.1f} "
-              f"(925 hPa cells kept {kept:.2f}, dome cells {int(((lat>=85)&flat).sum())}/{int(((lat>=60)&(lat<70)&flat).sum())})")
+              f"(area kept: 925 hPa {kept:.2f}, wind {kept_u:.2f}, dome {dome_kept[0]:.2f}/{dome_kept[1]:.2f})")
     return 0
 
 

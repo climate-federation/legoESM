@@ -38,6 +38,9 @@ def test_paired_area_mean_drops_the_same_cells_on_both_sides():
     m, r, kept = cw.paired_area_mean(model, ref, area, mask)
     assert m == pytest.approx((1 + 6) / 3) and r == pytest.approx((10 + 60) / 3)   # cell 1 dropped from BOTH
     assert kept == pytest.approx(3 / 4)
+    ref[2] = np.nan                                       # a missing reference value drops that cell too
+    m, r, kept = cw.paired_area_mean(model, ref, area, mask)
+    assert m == 1.0 and r == 10.0 and kept == pytest.approx(1 / 4)
     with pytest.raises(SystemExit):
         cw.paired_area_mean(np.full(3, np.nan), ref, area, mask)
 
