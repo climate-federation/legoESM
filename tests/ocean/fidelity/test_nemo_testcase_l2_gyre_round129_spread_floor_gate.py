@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +16,9 @@ GATE = (Path(__file__).resolve().parents[3] / "scripts" / "validate"
         / "ocean_fidelity" / "testcases"
         / "nemo_testcase_l2_gyre_round129_spread_floor_gate.py")
 EVIDENCE = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round129")
+RECEIPT = (Path(__file__).resolve().parents[3] / "docs" / "ocean" / "fidelity"
+           / "testcases"
+           / "nemo_testcases_l2_gyre_round129_spread_floor_receipt.md")
 
 
 @pytest.fixture(scope="module")
@@ -82,3 +87,34 @@ def test_record_backed_plants_exit_nonzero(plant):
     assert result.returncode != 0, result.stdout[-3000:]
     assert "STATUS PLANT-FIRED" in result.stdout
     assert "REFUSE Round-129" in result.stderr
+
+
+@pytest.mark.skipif(not (EVIDENCE / "spread_floor.json").is_file(),
+                    reason="Round-129 score is not on this machine")
+def test_receipt_table_is_the_authoritative_json():
+    report = json.loads((EVIDENCE / "spread_floor.json").read_text())
+    observed = {}
+    pattern = re.compile(r"^\|\s*(\d+)\s*\|(.+)\|$")
+    for line in RECEIPT.read_text().splitlines():
+        match = pattern.match(line)
+        if not match or int(match.group(1)) not in report["days"]:
+            continue
+        cells = [cell.strip().strip("`")
+                 for cell in match.group(2).split("|")]
+        assert len(cells) == 6, line
+        observed[int(match.group(1))] = [float(cell) for cell in cells]
+    assert set(observed) == set(report["days"])
+    for day in report["days"]:
+        row = report["rows"][str(day)]
+        expected = [row["lego_spread"]["maximum_K"],
+                    row["nemo_spread"]["maximum_K"],
+                    *(row["matched_seed_gaps_K"][str(seed)]
+                      for seed in range(4))]
+        assert observed[day] == expected, day
+    text = RECEIPT.read_text()
+    for value in (report["day240_verdict"]
+                  ["ratio_lego_spread_over_seed0_gap"],
+                  report["day240_verdict"]["nemo_spread_over_lego_spread"],
+                  report["growth"]["spread_fit_through_day240"]["exponent"],
+                  report["growth"]["spread_day240_over_day30"]):
+        assert repr(value) in text

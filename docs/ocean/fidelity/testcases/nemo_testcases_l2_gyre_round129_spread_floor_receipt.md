@@ -6,7 +6,7 @@ Incoming tip: `2d0665437e00b9e560740a6df92e4b90ee136358`
 
 Status: **HELD — the day-240 GYRE year gap is SYSTEMATIC by the user's
 registered rule.  legoESM's maximum pairwise T3D spread is
-`2.0891293703252062e-10 K`, only `1.2702390413735022e-8` of the matched
+`2.0891293703252062e-10 K`, only `1.2702390413735022e-08` of the matched
 seed-0 gap `1.6446741930292448e-2 K`, far below the `0.3` bar.  NEMO's
 spread is `3.304067814752494e-10 K`, `1.5815525173714653` times legoESM's
 and therefore inside the registered `[0.5, 2.0]` similarity band.  The
@@ -21,7 +21,7 @@ Evidence root:
 The user's year-spread bar is **NOT MET**.  Its exact primary ratio is
 
 `R240 = 2.0891293703252062e-10 / 1.6446741930292448e-2`
-`= 1.2702390413735022e-8`.
+`= 1.2702390413735022e-08`.
 
 The required `0.3 * gap` spread is `4.934022579087734e-3 K`; the measured
 spread is smaller by `23,617,601.902` times.  Equivalently, the gap is
@@ -183,7 +183,7 @@ before any new member was run as
 - **P2 CONFIRMED.** The population is 18,000 wet T cells; all six pairs exist
   for each model on every registered day; all four matched gaps exist.  The
   pinned NEMO spread and seed-0 gap controls reproduce exactly.
-- **P3 REFUTED.** `R240=1.2702390413735022e-8`, not `>=0.3`.  Because the
+- **P3 REFUTED.** `R240=1.2702390413735022e-08`, not `>=0.3`.  Because the
   NEMO/legoESM spread ratio is `1.5815525173714653`, the user's systematic-gap
   discriminator is satisfied.
 - **P4 REFUTED.** The spread day-240/day-30 factor is `0.9095847214093747`,
@@ -237,14 +237,59 @@ No configuration or carried-state question is exposed.  `DECISION_NEEDED` is
 
 ## Independent adversarial review
 
-PENDING: the required separate read-only Codex pass will try to refute the
-initial-state identity, split-root provenance, six-pair table, exact verdict
-boundary, systematic label, growth label and next-round instruction.
+The required separate pass was invoked with `codex exec --sandbox read-only`
+against the complete incoming-tip diff, authoritative score, member manifests,
+both plants, pinned NEMO verdict and compiled YRPERT sources.  It was asked to
+refute the initial-state identity, split-root provenance, six-pair table,
+exact verdict boundary, systematic label, growth label and next-round
+instruction.  Its verbatim terminal result was:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+codex_exit_code=1
+```
+
+Independent review was unavailable in-sandbox.  It emitted neither `SHIP` nor
+`DO NOT SHIP`; no verdict is fabricated.  The complete log is
+`round129/codex_review.log`.
 
 ## Verification
 
-PENDING: final citation-gate, shifted-citation plant and focused-suite results
-will be recorded here after the complete receipt is committed and reviewed.
+The scorer self-check, Python byte compilation and `git diff --check` pass.
+The two record-backed plants each print `STATUS PLANT-FIRED` and exit 1, as
+described above.
+
+The clean-tree focused suite covers the new synthetic boundary/pair/growth
+controls, the full record-backed score, both subprocess plants, every citation
+map audit and the worktree-stamp ratchet.  Its exact summary is:
+
+```text
+============================= 33 passed in 16.28s ==============================
+```
+
+The log and JUnit report are `round129/focused_tests.log` and
+`round129/focused_tests.xml`.
+
+The standard four-file integration/push gate covers the complete citation
+suite, NEMO TKE terms, resolved NEMO recipes including the forced GYRE
+trajectory, and freshwater closure.  Its exact summary is:
+
+```text
+======================= 119 passed in 369.87s (0:06:09) ========================
+```
+
+The log and JUnit report are `round129/four_file_push_gate.log` and
+`round129/four_file_push_gate.xml`.
+
+The receipt citation gate finds 8 citations, zero unmapped citations, zero
+failures and zero map-audit failures in `round129/citation_gate.json`.
+Shifting the compiled perturbation citation by two lines produces
+`SYMBOL-NOT-AT-LINE` on its first endpoint, prints no PASS status and exits 1;
+its report and log are `round129/citation_gate_shifted_plant.json` and
+`round129/citation_gate_shifted_plant.log`.
 
 ## OPEN — round 130
 
