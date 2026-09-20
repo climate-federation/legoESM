@@ -152,6 +152,21 @@ def build_context() -> TwinContext:
     )
     initial = model.seed_scan_carry(
         raw._replace(bt_hist=bt_placeholder), card.dt_s)
+    # The eager campaign enters its first TKE closure with ``tke_old=None``.
+    # ``tke_vertical_mixing`` materializes that sentinel as a FULL array of
+    # ``tke_background`` (including inactive entries) before its own masks are
+    # applied.  ``seed_scan_carry`` uses wet-masked zeros for its generic scan
+    # seed, which is a valid stable seed but is not bit-identical to this NEMO
+    # card's eager cold program.  Materialize the sentinel's exact value while
+    # retaining the fixed Field treedef; after step one the model-written,
+    # wet-masked TKE is carried normally.
+    if raw.tke is None:
+        tke_background = jnp.asarray(
+            config.physics.vertical_mixing.tke.tke_background,
+            dtype=initial.tke.data.dtype,
+        )
+        initial = initial._replace(tke=initial.tke.replace(
+            data=jnp.full_like(initial.tke.data, tke_background)))
     return TwinContext(card=card, model=model, initial_state=initial)
 
 

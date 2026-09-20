@@ -77,6 +77,11 @@ def test_two_step_loss_overrides_no_inert_and_adjoint_fd():
     G.configure_runtime()
     context = G.build_context()
     base = context.card.recipe.model_config
+    assert context.card.recipe.initial_state.tke is None
+    assert np.all(
+        np.asarray(context.initial_state.tke.data)
+        == base.physics.vertical_mixing.tke.tke_background
+    )
 
     # Direct reachability/control for the two nested NamedTuple leaves.
     overridden = G.config_with_parameters(
