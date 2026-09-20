@@ -579,7 +579,7 @@ CITATION_MAP = {
         'CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )',
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 10],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/eosbn2.f90:1259-1308': [
-        'CASE( np_teos10, np_eos80 )',
+        ('CASE( np_teos10, np_eos80 )', 7),
         'pab(ji,jj,jk,jp_sal) = zn / zs * r1_rho0 * ztm', 50],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/eosbn2.f90:1609-1618': [
         'DO jk =  2,  jpkm1',
