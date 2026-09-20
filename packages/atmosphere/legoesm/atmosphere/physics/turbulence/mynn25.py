@@ -111,6 +111,7 @@ from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
@@ -487,10 +488,9 @@ def mynn25_turbulence(
 
     # Surface fluxes via the bulk-flux helper (which honours the SCM
     # prescribed-flux bypass when configured).
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+    tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-        T_sfc, q_sfc, rho[:, -1], config.surface,
-    )
+        T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
 
     # Kinematic surface fluxes for closure consistency (jax_scm convention).
     rho_sfc = rho[:, -1]

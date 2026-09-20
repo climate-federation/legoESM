@@ -72,6 +72,25 @@ def _pin_carry_dtype(updated, carry_in):
 _DEFAULT_SURFACE_Z0_LAND = 0.1
 
 
+def _heights_from_sigma(T_col, p_half_col):
+    """Function-scope import wrapper (core must not import atmosphere at
+    module scope; see the cross-package import rule)."""
+    from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+    return compute_heights_from_sigma(T_col, p_half_col)
+
+
+def _lowest_level_height(z_full_col, z_half_col):
+    """Lowest full level's height above the LOCAL surface [m], or None.
+
+    The subtraction is an identity where the surface interface is already
+    zero, and it is what keeps a column over a mountain from being handed its
+    absolute altitude as a surface-layer reference height.
+    """
+    if z_full_col is None or z_half_col is None:
+        return None
+    return z_full_col[:, -1] - z_half_col[:, -1]
+
+
 class PhysicsPipeline:
     """Encapsulates the full physics pipeline for operator-split stepping.
 
@@ -626,7 +645,7 @@ class PhysicsPipeline:
             self.turbulence_config.surface, self.surface_z0_land)
 
     def _unified_land_fluxes(self, T_land, T_air, q_air, u_low, v_low, p_s,
-                             beta_land=None, T_sfc_ocean=None):
+                             beta_land=None, T_sfc_ocean=None, z_low=None):
         """Land sensible/latent heat flux [W/m^2] + d(SH+LE)/dT_land under
         THE SAME surface-layer law the atmosphere side applies
         (``land_interface_flux="unified"``).
@@ -679,7 +698,7 @@ class PhysicsPipeline:
                 f"Got turbulence_config={type(self.turbulence_config).__name__}."
             )
         from legoesm.atmosphere.physics.turbulence.surface_layer import (
-            compute_surface_fluxes,
+            surface_fluxes_at_lowest_level,
         )
         # SAME lowest-full-level density the turbulence path feeds its surface
         # layer (rho_col_phys[:, -1] = p_full/(R_d*T)), NOT the legacy
@@ -709,8 +728,14 @@ class PhysicsPipeline:
                 # Tiled land tile: soil-moisture-limited effective humidity
                 # (same convention as _tiled_surface_flux's slab branch).
                 q_sfc = q_air + beta_land * (q_sfc - q_air)
-            _, _, sh, lh, _ = compute_surface_fluxes(
+            # The SAME law the atmosphere applies, including the reference
+            # height: routing only the atmosphere through the corrected helper
+            # would leave the slab debiting a different flux -- and a
+            # different derivative -- from the one the column receives, which
+            # is exactly the split this method exists to prevent (codex).
+            _, _, sh, lh, _ = surface_fluxes_at_lowest_level(
                 u_low, v_low, T_air, q_air, T_sfc, q_sfc, rho_low, cfg,
+                z_low,
             )
             return sh, lh
 
@@ -721,7 +746,7 @@ class PhysicsPipeline:
 
     def _step_slab_land(self, T_land, sw_down_sfc, lw_down_sfc,
                         T, p_s, q_v, u, v, dt, beta_land=None,
-                        albedo_land=None, T_sfc_ocean=None):
+                        albedo_land=None, T_sfc_ocean=None, z_low=None):
         """Advance the slab-land skin temperature by one radiation step.
 
         Semi-implicit surface energy balance::
@@ -797,7 +822,7 @@ class PhysicsPipeline:
             # the clamp changes only the approach rate, never the fixed point.
             shflx, lhflx, d_turb_dT = self._unified_land_fluxes(
                 T_land, T_air, q_air, u[..., -1], v[..., -1], p_s,
-                beta_land=beta_land, T_sfc_ocean=T_sfc_ocean,
+                beta_land=beta_land, T_sfc_ocean=T_sfc_ocean, z_low=z_low,
             )
             flux = sw_net + lw_net - shflx - lhflx
             dflux_dT = (-4.0 * eps * sb * T_land ** 3
@@ -966,7 +991,7 @@ class PhysicsPipeline:
 
     def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
                            sst, sic, T_land, p_s, beta_land=None,
-                           q_sfc_land_override=None):
+                           q_sfc_land_override=None, z_low=None):
         """Area-weighted (mosaic) surface turbulent flux over ocean/ice/land.
 
         Used when ``self.surface_tiled`` is True (the active land tile).  The
@@ -1023,6 +1048,15 @@ class PhysicsPipeline:
             beta_col = ad.flatten_2d(beta_land)
             q_sfc_land_col = q_low + beta_col * (q_sat_land_col - q_low)
 
+        # Sea water, not fresh, when the run asks for it: the coupler's own
+        # ocean tile already applies this factor, so a fresh-water ocean tile
+        # here put the two sides of one air-sea interface 2% apart -- about
+        # 10% of the latent heat flux, since the flux scales with
+        # (q_sfc - q_air) and not with q_sfc (codex).
+        _tiled_saline = (
+            constants.q_sat_saline_fraction
+            if getattr(self.turbulence_config.surface, "ocean_q_sfc_saline",
+                       False) else 1.0)
         tiles = SurfaceTileSpec(
             frac_ocean=frac_ocean,
             frac_ice=frac_ice,
@@ -1030,7 +1064,13 @@ class PhysicsPipeline:
             T_ocean=T_ocean,
             T_ice=ad.flatten_2d(T_ice_grid),
             T_land=ad.flatten_2d(T_land),
-            q_sfc_ocean=ad.flatten_2d(saturation_specific_humidity(sst, p_s)),
+            # Sea water, not fresh: the coupler's own ocean tile already
+            # applies this factor, so building the atmosphere's ocean tile
+            # from fresh-water saturation put the two sides of one air-sea
+            # interface 2% apart -- about 10% of the latent heat flux, since
+            # the flux scales with (q_sfc - q_air), not with q_sfc (codex).
+            q_sfc_ocean=ad.flatten_2d(
+                _tiled_saline * saturation_specific_humidity(sst, p_s)),
             q_sfc_ice=ad.flatten_2d(
                 saturation_specific_humidity(T_ice_grid, p_s)
             ),
@@ -1042,7 +1082,7 @@ class PhysicsPipeline:
 
         return compute_tiled_surface_fluxes(
             u_low, v_low, T_low, q_low, rho_low,
-            tiles, ocean_cfg, ice_cfg, land_cfg,
+            tiles, ocean_cfg, ice_cfg, land_cfg, z_low=z_low,
         )
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
@@ -1401,17 +1441,20 @@ class PhysicsPipeline:
                             _u_low, _v_low, _T_low, _q_low, _rho_low,
                             sst, sic, T_land, p_s,
                             beta_land=beta_land,
-                            q_sfc_land_override=_q_sfc_land_ml)
+                            q_sfc_land_override=_q_sfc_land_ml,
+                            z_low=_lowest_level_height(z_full_col, z_half_col))
                     else:
                         from legoesm.atmosphere.physics.turbulence.surface_layer import (  # noqa: E501
-                            compute_surface_fluxes)
+                            surface_fluxes_at_lowest_level)
                         _T_sfc_c = ad.flatten_2d(T_sfc)
                         _q_sfc_c = ad.flatten_2d(
                             saturation_specific_humidity(T_sfc, p_s))
-                        _, _, _shf_c, _lhf_c, _ = compute_surface_fluxes(
-                            _u_low, _v_low, _T_low, _q_low,
-                            _T_sfc_c, _q_sfc_c, _rho_low,
-                            self.turbulence_config.surface)
+                        _, _, _shf_c, _lhf_c, _ = (
+                            surface_fluxes_at_lowest_level(
+                                _u_low, _v_low, _T_low, _q_low,
+                                _T_sfc_c, _q_sfc_c, _rho_low,
+                                self.turbulence_config.surface,
+                                _lowest_level_height(z_full_col, z_half_col)))
                     _land_c = (
                         ad.flatten_2d(self.f_land)
                         if self.f_land is not None
@@ -1922,6 +1965,7 @@ class PhysicsPipeline:
                     u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
                     rho_col_phys[:, -1], sst, sic, T_land, p_s,
                     beta_land=beta_land, q_sfc_land_override=_q_sfc_land_ml,
+                    z_low=_lowest_level_height(z_full_col, z_half_col),
                 )
             # --- prescribed surface flux = the scheme's lower BC -------------
             # Fold the coupler/ERA5 overrides (grid-shaped; flattened to
@@ -2829,6 +2873,8 @@ class PhysicsPipeline:
                     q_air=q_v[..., -1], p_s=p_s,
                 ),
                 albedo_land=_alb_seb,
+                z_low=_lowest_level_height(*_heights_from_sigma(
+                    T_col, p_half_col)),
                 # Pre-land ocean/ice blend: the unified non-tiled law
                 # evaluates on the SAME blended T_sfc the atmosphere's
                 # turbulence surface layer sees (inert on the legacy path).
@@ -4070,18 +4116,43 @@ def apply_surface_flux_config(tc, config):
     gzi = getattr(config, "surface_gustiness_zi", None)
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
-    zml = bool(getattr(config, "surface_z_ref_model_level", False))
-    qsal = bool(getattr(config, "surface_ocean_q_sfc_saline", False))
-    if (zml or qsal) and not _is_mpas_grid(config):
-        # Implemented on the MPAS turbulence bridge only; the FV pipeline
-        # resolves its kernel through get_turbulence_fn and would run with
-        # the switches silently inert (codex whole-branch re-review).
+    zml = getattr(config, "surface_z_ref_model_level", None)
+    _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
+    # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
+    # sea-water surface humidity needs a path that separates the ocean from
+    # the land, which is the MPAS bridge's ocean fraction OR the mosaic
+    # (tiled) surface, whose ocean tile carries its own SST and fraction.
+    # Keying this off the grid alone was wrong and left the tiled lane
+    # evaporating fresh water while the code to fix it sat unreachable two
+    # files away (GLM).
+    _can_saline = _is_mpas_grid(config) or bool(
+        getattr(config, "surface_tiled", False))
+    qsal = _can_saline if _qsal_req is None else bool(_qsal_req)
+    if _qsal_req and not _can_saline:
+        # The sea-water surface humidity needs an ocean FRACTION to apply to,
+        # and only the MPAS bridge carries one into the turbulence call.  The
+        # height switch no longer belongs in this guard: every turbulence
+        # kernel now routes through surface_fluxes_at_lowest_level and honours
+        # it with the level height it already has.
         raise ValueError(
-            "surface_z_ref_model_level / surface_ocean_q_sfc_saline are "
-            "implemented on the MPAS lane only; this run's grid is "
+            "surface_ocean_q_sfc_saline needs a surface path that separates "
+            "ocean from land (the MPAS bridge's ocean fraction, or the tiled "
+            "mosaic surface); this run has neither. Grid is "
             f"{getattr(getattr(config, 'grid', None), 'grid_type', '?')!r}")
     if (sbs == "constant" and gzi is None and stc == "legoesm"
-            and sss == "dyer1974" and not zml and not qsal):
+            and sss == "dyer1974" and zml is None and not qsal):
+        # The two surface switches gate this fast path on whether they have
+        # anything to SAY, not on whether they are true:
+        #   zml is None  -> the experiment stated nothing, so leaving the
+        #                   scheme's own value alone is the correct outcome
+        #                   and returning early does exactly that.
+        #   not qsal     -> nothing to turn on.
+        # Testing `not zml` instead dropped an experiment's explicit False
+        # (codex); testing neither dropped the RESOLVED default-on, so the
+        # sea-water humidity died on any run that left the bulk scheme,
+        # gustiness, thermodynamics and stability at their defaults -- i.e.
+        # the minimal configuration of the very lane it was written for, with
+        # the correction silently contingent on an unrelated knob (GLM).
         return tc
     # `TurbulenceConfig.clubb` defaults to None and dispatch substitutes a fresh
     # CLUBBConfig(), so bailing on the None sub-config here SILENTLY DROPPED the
@@ -4105,10 +4176,16 @@ def apply_surface_flux_config(tc, config):
         # COARE convective-gustiness BL depth (only effective with a MOST
         # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
         surf = surf._replace(gustiness_w_zi=gzi)
-    if zml:
-        surf = surf._replace(z_ref_model_level=True)
-    if qsal:
-        surf = surf._replace(ocean_q_sfc_saline=True)
+    # Propagate the RESOLVED value, not only a True -- returning early on
+    # False left the scheme's own default in force, so a run asking for the
+    # legacy behaviour did not get it (codex).  But None means "not stated",
+    # and must leave a directly-configured scheme value alone: replacing
+    # unconditionally fixed the dropped opt-out by introducing a dropped
+    # opt-in (GLM).
+    if zml is not None:
+        surf = surf._replace(z_ref_model_level=bool(zml))
+    if _qsal_req is not None or _can_saline:
+        surf = surf._replace(ocean_q_sfc_saline=qsal)
     if stc != "legoesm":
         # AeroBulk thermodynamic-constants parity (#762; only effective
         # with a MOST bulk_scheme).

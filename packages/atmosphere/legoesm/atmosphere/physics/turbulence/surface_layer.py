@@ -18,6 +18,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import (
     compute_most_fluxes,
@@ -62,6 +63,55 @@ __physics_contract__ = {
         "linearly by area fraction and ustar = sqrt(|tau|/rho)."
     ),
 }
+
+
+def surface_fluxes_at_lowest_level(u, v, T, q_v, T_sfc, q_sfc, rho, config,
+                                   z_low):
+    """``compute_surface_fluxes`` told how high its own input actually is.
+
+    Every turbulence kernel feeds the surface solver the LOWEST FULL LEVEL's
+    wind, temperature and humidity.  Whether it also tells the solver the
+    height of that level is ``SurfaceLayerConfig.z_ref_model_level``; with it
+    off the solver divides by ``config.z_ref`` (10 m) for values that came
+    from over a hundred metres up, which inflates the fluxes.
+
+    Two things have to move together and that is why this is one function
+    rather than a keyword at seven call sites: the height AND the temperature.
+    The bulk formula wants the air-sea temperature difference at the reference
+    height, so the input is brought down dry-adiabatically
+    (``T + g/c_p * z``, ~1.5 K at 150 m, the COARE convention).  Passing the
+    height without that adjustment reads the stability off a dry adiabat and
+    is a different bug from the one being fixed.
+
+    ``z_low`` is the height of the lowest full level ABOVE THE LOCAL SURFACE
+    [m], shape (ncol,).  Callers pass ``z_full[:, -1] - z_half[:, -1]``: on the
+    sigma lanes the surface interface is already zero so the subtraction is an
+    identity, but the nonhydrostatic lane's heights are absolute
+    terrain-following altitudes, and without it a column over a 2 km mountain
+    would be handed a 2 km reference height and warmed ~20 K (codex).
+
+    The caller is responsible for only enabling this where ``T_sfc`` is a REAL
+    surface temperature.  Where it is a stand-in for the lowest air
+    temperature, warming the air input alone manufactures a permanent
+    air-surface contrast of -g/c_p*z (~1.3 K) and with it a spurious downward
+    sensible heat flux that no test would catch (GLM).  That is why the switch
+    is off in this config by default and turned on by the driver, which knows
+    whether the run has a surface.
+    """
+    # BOTH halves, or NEITHER.  ``compute_surface_fluxes`` honours ``z_ref``
+    # on the MOST schemes only -- the constant-coefficient path ignores it --
+    # so on a constant-Cd config the height would be dropped while the
+    # temperature adjustment survived, leaving a one-sided ~1.3 K cooling of
+    # the surface relative to the air and a sensible heat flux made of
+    # nothing (GLM).  That is the same defect this helper's precondition
+    # warns about, arriving through a different door.
+    if (not getattr(config, "z_ref_model_level", False)
+            or z_low is None
+            or config.bulk_scheme not in ("most", "coare3", "large_yeager")):
+        return compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, config)
+    return compute_surface_fluxes(
+        u, v, T + (constants.g / constants.c_pd) * z_low, q_v,
+        T_sfc, q_sfc, rho, config, z_ref=z_low)
 
 
 def compute_surface_fluxes(
@@ -362,6 +412,7 @@ def _single_tile_flux(
     q_sfc: jax.Array,
     rho: jax.Array,
     config: SurfaceLayerConfig,
+    z_ref=None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Single-tile surface flux with correct fixed-roughness MOST routing.
 
@@ -377,7 +428,7 @@ def _single_tile_flux(
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
-            z_ref=config.z_ref,
+            z_ref=(config.z_ref if z_ref is None else z_ref),
             z0_init=config.z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
@@ -409,6 +460,7 @@ def compute_tiled_surface_fluxes(
     config_ocean: SurfaceLayerConfig,
     config_ice: SurfaceLayerConfig,
     config_land: SurfaceLayerConfig,
+    z_low=None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Area-weighted (mosaic) surface fluxes over ocean / ice / land tiles.
 
@@ -447,15 +499,33 @@ def compute_tiled_surface_fluxes(
         heat fluxes [W/m^2] (positive upward), and friction velocity
         [m/s], each shape ``(ncol,)``.
     """
-    f_ocean = _single_tile_flux(
-        u, v, T, q_v, tiles.T_ocean, tiles.q_sfc_ocean, rho, config_ocean,
-    )
-    f_ice = _single_tile_flux(
-        u, v, T, q_v, tiles.T_ice, tiles.q_sfc_ice, rho, config_ice,
-    )
-    f_land = _single_tile_flux(
-        u, v, T, q_v, tiles.T_land, tiles.q_sfc_land, rho, config_land,
-    )
+    # Each tile HAS a real surface temperature, so the reference-height
+    # correction applies here exactly as on the single-surface path: when the
+    # caller supplies the lowest level's height above ground, the air is
+    # brought down to it dry-adiabatically and the solver is told the height.
+    # Without this the mosaic path kept the 10 m mislabel after the
+    # single-surface path was fixed (codex).
+    def _tile(T_sfc_tile, q_sfc_tile, cfg):
+        """One tile, with the height correction decided by ITS OWN config.
+
+        Gating all three tiles on the ocean tile's config was wrong: the land
+        and ice tiles carry their own bulk scheme, and a tile on the
+        constant-coefficient default would have ignored the height while
+        still receiving the warmed air temperature -- a fabricated flux on
+        exactly the tiles the ocean switch was not about (GLM).
+        """
+        if (z_low is None
+                or not getattr(cfg, "z_ref_model_level", False)
+                or cfg.bulk_scheme not in ("most", "coare3", "large_yeager")):
+            return _single_tile_flux(u, v, T, q_v, T_sfc_tile, q_sfc_tile,
+                                     rho, cfg)
+        return _single_tile_flux(
+            u, v, T + (constants.g / constants.c_pd) * z_low, q_v,
+            T_sfc_tile, q_sfc_tile, rho, cfg, z_ref=z_low)
+
+    f_ocean = _tile(tiles.T_ocean, tiles.q_sfc_ocean, config_ocean)
+    f_ice = _tile(tiles.T_ice, tiles.q_sfc_ice, config_ice)
+    f_land = _tile(tiles.T_land, tiles.q_sfc_land, config_land)
 
     def _blend(idx: int) -> jax.Array:
         return (

@@ -41,7 +41,7 @@ from legoesm.core.coupling_fields import (
 # The saturation vapor pressure over saline water is ~2 % lower than over
 # fresh water; q_sat at the air-sea interface is correspondingly reduced.
 # Required by OMIP-2 protocol (Griffies 2016 §2.2 → Large & Yeager 2009 §3).
-_Q_SAT_SALINE_FACTOR = 0.98
+_Q_SAT_SALINE_FACTOR = constants.q_sat_saline_fraction
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
 from legoesm.coupler.tile_fractions import (
     blend_tiles,

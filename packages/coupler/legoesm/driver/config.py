@@ -866,8 +866,19 @@ class ExperimentConfig(NamedTuple):
     # Ocean surface-layer corrections (MPAS lane; both default off pending a
     # user decision): tell the MOST solver the lowest level's real height, and
     # use sea-water saturation at the surface pressure for the ocean q_sfc.
-    surface_z_ref_model_level: bool = False
-    surface_ocean_q_sfc_saline: bool = False
+    # None = leave whatever the scheme config already carries (so a caller
+    # who set it directly is not clobbered); True/False force it.  The AMIP
+    # driver's own default is True -- see run_amip -- which is what makes the
+    # correction the production default without this field silently
+    # overruling an explicit scheme-level choice.
+    surface_z_ref_model_level: bool | None = None
+    # None = apply the sea-water surface humidity on every lane that can
+    # honour it (today: MPAS, the only turbulence bridge carrying an ocean
+    # fraction).  Explicit True on a lane that cannot is an error rather than
+    # a silent no-op; explicit False reproduces the pre-2026-09-20 behaviour,
+    # in which the atmosphere evaporated fresh water while the coupler's own
+    # ocean tile evaporated sea water.
+    surface_ocean_q_sfc_saline: bool | None = None
     # Thermodynamic constants set for the MOST surface fluxes (#762):
     # "legoesm" (default, byte-identical) = constant L_v / dry c_pd;
     # "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent L_vap(T_sfc),
