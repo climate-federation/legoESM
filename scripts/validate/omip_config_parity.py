@@ -65,12 +65,31 @@ GRID_INHERENT = {
     "runtime_config.C_smag": "per-grid Smagorinsky family (biharmonic)",
     "runtime_config.C_leith*": "per-grid Leith family",
     "runtime_config.mle": "layout (nested on lat-lon physics)",
-    "runtime_config.gm_redi.*": "layout (duplicated view of physics.lateral_mixing)",
+    # NARROWED 2026-09-20.  This used to read "runtime_config.gm_redi.*":
+    # "layout (duplicated view of physics.lateral_mixing)", which folded the
+    # ENTIRE eddy-parameterisation subtree on the theory that it merely
+    # duplicated another path.  Nothing checked that theory, and it is false
+    # here: on the tripole-vs-MPAS pair NO row under
+    # physics.lateral_mixing.gm_redi appears at all, so these keys are the
+    # ONLY place the settings are recorded -- they are the thing itself, not a
+    # view of it.  Folded under that reason were Treguier GM enabled True vs
+    # False, its coefficient 900 vs 3000, the slope scheme, the slope
+    # positions, the Redi coefficient, the bolus advection and the implicit
+    # K33 switch: six eddy-physics choices, reported as "no unjustified
+    # differences".  A gate that cannot fail on that is not a gate.
+    # Only the per-grid ARRAY payload is genuinely grid-inherent.
+    "runtime_config.gm_redi.*_f_f*": "per-grid Coriolis-dependent array",
+    "runtime_config.gm_redi.*.__array_summary__*": "per-grid array payload",
     "runtime_config.enable_runtime_checks": "layout (flat on MPAS)",
     "runtime_config.salinity_m*": "layout (flat on MPAS)",
     "runtime_config.temperature_m*": "layout (flat on MPAS)",
-    "runtime_config.A_h": "layout (grouped under lateral_viscosity on lat-lon)",
-    "runtime_config.B_h": "layout (grouped under lateral_viscosity on lat-lon)",
+    # A_h / B_h: the LAYOUT claim is true -- they sit under lateral_viscosity
+    # on the lat-lon config -- but resolve_alias already follows that nesting,
+    # so a difference surviving to here is a difference in the VALUE, not the
+    # path.  Folding it hid a five-fold lateral-viscosity mismatch (2e4 with
+    # NEMO's 3-D profile on the tripole against a uniform 1e5 on MPAS) that is
+    # already on record as a campaign-level finding.  Entries removed; an
+    # alias that resolves to equal values never reaches the buckets anyway.
 }
 # One-sided keys that only exist on the lat-lon C-grid config (integrator
 # details etc.) — inherent as long as they are ABSENT on the other side.
@@ -199,6 +218,14 @@ def main(argv=None):
     p.add_argument("manifest_b")
     p.add_argument("--strict-declared", action="store_true",
                    help="also exit 1 when DECLARED differences exist")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="also LIST the GRID_INHERENT differences instead of "
+                        "only counting them. Every folded row rests on an "
+                        "allowlist reason string, and a reason string is a "
+                        "claim; with a hundred-plus rows folded, the only way "
+                        "to check that none of them is physics is to read "
+                        "them. The summary line has promised this flag since "
+                        "the tool was written and it did not exist.")
     args = p.parse_args(argv)
     A = json.load(open(args.manifest_a))
     B = json.load(open(args.manifest_b))
@@ -233,8 +260,12 @@ def main(argv=None):
         for k, va, vb, why in rows:
             print(f"  {k:52s} | {str(va)[:24]:24s} | {str(vb)[:24]:24s} | {why}")
     n_inh = len(buckets["GRID_INHERENT"])
-    print(f"\n[parity] GRID_INHERENT differences folded: {n_inh} "
-          f"(run with -v in future to list)")
+    if args.verbose and n_inh:
+        print(f"\n== GRID_INHERENT ({n_inh}) ==")
+        for k, va, vb, why in buckets["GRID_INHERENT"]:
+            print(f"  {k:52s} | {str(va)[:24]:24s} | {str(vb)[:24]:24s} | {why}")
+    print(f"\n[parity] GRID_INHERENT differences folded: {n_inh}"
+          + ("" if args.verbose else " (-v lists them)"))
     bad = len(buckets["UNJUSTIFIED"]) + (
         len(buckets["DECLARED"]) if args.strict_declared else 0)
     if bad:
