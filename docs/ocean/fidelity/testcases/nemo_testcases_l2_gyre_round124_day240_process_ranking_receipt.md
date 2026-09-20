@@ -364,8 +364,15 @@ failures**.
 The final owner self-check prints `self-check: all checks passed`, including
 the process-layout, decoded-effect, trace-boundary and ULP controls.  The
 earlier owner-only test run reported `15 passed, 1 skipped`; the focused owner
-plus citation suite reported `32 passed in 31.51s`.  Final post-receipt focused
-and citation reruns are recorded below by the final receipt commit.
+plus citation suite reported `32 passed in 31.51s`.  Against clean receipt
+commit `078fc8a362fa0d9ecfe14351730913c711829c50`, the final focused owner,
+citation and report-stamp suite has 33/33 passing tests (`33 passed in
+33.51s`; `round124/focused_tests_post_audit.xml`).  The citation gate records
+six citations, zero failures, zero unmapped citations and zero map-audit
+failures in `round124/citation_gate_post_audit.json`.  Shifting the compiled
+writer citation from line 818 to line 820 exits 1 with
+`SYMBOL-NOT-AT-LINE`, recorded in
+`round124/citation_gate_post_audit_shift_plant.json`.
 
 ## OPEN — round 125
 
