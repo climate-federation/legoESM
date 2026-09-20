@@ -673,6 +673,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # u_data/v_data above.
         _shear_disc = getattr(vmix_cfg.tke, "tke_shear_production",
                               "squared_centered")
+        if _shear_disc == "nemo_face_native_nbb2":
+            _shear_disc = "nemo_face_native_now2"
         _needs_before = _shear_disc in ("nemo_burchard", "nemo_face_native")
         if _needs_before and (state.u_before is None or state.v_before is None):
             raise ValueError(
@@ -737,13 +739,14 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         else:
             u_before_data = v_before_data = None
             u_face_now = v_face_now = u_face_before = v_face_before = None
-        if _shear_disc == "nemo_face_native_nbb2":
-            # Face-native SPATIAL geometry with both operands at Nbb, the
-            # whole-step-entry slot under key_RK3 (stprk3.F90:164-165). Same
-            # raw-face requirement as nemo_face_native, no MLF Nnn operand.
+        if _shear_disc == "nemo_face_native_now2":
+            # Face-native SPATIAL geometry at NOW^2 time levels -- the
+            # RK3-oracle variant (ORCA1 is compiled key_RK3; there is no Nbb
+            # velocity to be faithful to). Same raw-face requirement as
+            # nemo_face_native, no before-state.
             if not _staggered:
                 raise ValueError(
-                    "TKEConfig.tke_shear_production='nemo_face_native_nbb2' "
+                    "TKEConfig.tke_shear_production='nemo_face_native_now2' "
                     "requires the RAW (uncollapsed) C-grid face state.u/v -- "
                     "got a pre-centred state (shape matches T).")
             u_face_now = state.u.data
@@ -753,7 +756,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         _is_active = getattr(z_coord, "is_active", None)
         _surface_tmask = None
         _face_masks_3d = None
-        if _shear_disc in ("nemo_face_native", "nemo_face_native_nbb2"):
+        if _shear_disc in ("nemo_face_native", "nemo_face_native_now2"):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 compute_face_masks_3d,
             )

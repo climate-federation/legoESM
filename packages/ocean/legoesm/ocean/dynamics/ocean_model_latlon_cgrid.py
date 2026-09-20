@@ -6288,7 +6288,7 @@ class LatLonCGridOceanModel:
                 h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=Hv_avg,
                 u_mask_3d=_u_live_mask,
                 v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
-                H_bathy=state.H_bathy.data, config=_cfg_b, dt=dt,
+                H_bathy=state.H_bathy.data, config=_cfg_b,
                 # RK3 div_hor applies the instantaneous river mass flux to
                 # hdiv independently of the same runoff's external-mode SSH
                 # forcing (sbcrnf.F90:253-260).  Preserve that distinct input.
@@ -9372,6 +9372,12 @@ class LatLonCGridOceanModel:
             state.T.data.shape[:-1] + (_zc.n_levels - 1,))
         shear_disc = getattr(
             tke_cfg, "tke_shear_production", "squared_centered")
+        # ``nemo_face_native_nbb2`` is the source-level name adopted by the
+        # ORCA2 card for the pre-existing GYRE ``now2`` selector.  Both mean
+        # the compiled RK3 call zdf_phy(Nbb,Nbb); keep both card spellings
+        # while routing one shared statement below.
+        if shear_disc == "nemo_face_native_nbb2":
+            shear_disc = "nemo_face_native_now2"
         avm_weighting = getattr(
             tke_cfg, "tke_shear_avm_weighting", "tpoint")
         if shear_disc == "squared_centered":
@@ -9388,11 +9394,11 @@ class LatLonCGridOceanModel:
                 u_cell, v_cell, dz_half)
             return (p_sh2, None) if return_face_metrics else p_sh2
 
-        if shear_disc not in ("nemo_face_native", "nemo_face_native_nbb2"):
+        if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):
             raise ValueError(
                 "tke_shear_evaluation_stage='step_entry' supports "
                 "'squared_centered', 'nemo_face_native', or "
-                f"'nemo_face_native_nbb2'; got {shear_disc!r}.")
+                f"'nemo_face_native_now2'; got {shear_disc!r}.")
         if avm_weighting != "nemo_face":
             raise ValueError(
                 "step-entry face-native shear requires "
@@ -10237,6 +10243,7 @@ class LatLonCGridOceanModel:
                 and _vmix_cfg_here.scheme == "tke"
                 and getattr(_vmix_cfg_here.tke, "tke_shear_production",
                            "squared_centered") in ("nemo_face_native",
+                                                   "nemo_face_native_now2",
                                                    "nemo_face_native_nbb2")
             )
             if _keep_raw_faces:
