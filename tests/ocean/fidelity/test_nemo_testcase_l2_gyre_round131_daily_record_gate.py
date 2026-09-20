@@ -18,6 +18,11 @@ DAILY_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners/nemo_seed0")
 MONTHLY_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/nemo_seed0")
+EVIDENCE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round131")
+RECEIPT = (Path(__file__).resolve().parents[3] / "docs" / "ocean"
+           / "fidelity" / "testcases"
+           / "nemo_testcases_l2_gyre_round131_daily_nudging_record_receipt.md")
 
 
 @pytest.fixture(scope="module")
@@ -80,3 +85,23 @@ def test_audit_json_shape_is_serializable(gate):
         "variables": list(gate.REQUIRED_VARIABLES),
     }
     assert json.loads(json.dumps(report)) == report
+
+
+@pytest.mark.skipif(not (EVIDENCE / "daily_record_audit.json").is_file(),
+                    reason="Round-131 audit is not on this machine")
+def test_receipt_headlines_are_bound_to_the_committed_audit():
+    report = json.loads((EVIDENCE / "daily_record_audit.json").read_text())
+    text = RECEIPT.read_text()
+    assert report["status"] == "STOPPED_FOR_RECORD"
+    assert report["tool"]["worktree_clean"] is True
+    assert report["inventory"]["observed_count"] == 30
+    assert report["inventory"]["missing_count"] == 330
+    assert report["inventory"]["last_observed_step"] == 180
+    assert report["namelist"]["nn_itend"] == 180
+    assert report["schema"]["errors"] == []
+    comparison = report["monthly_overlap"]["comparisons"]["180"]
+    assert comparison["bit_identical"] is True
+    assert comparison["daily_file_sha256"] == comparison["monthly_file_sha256"]
+    for value in ("30", "330", "180", comparison["daily_file_sha256"],
+                  report["tool"]["commit"]):
+        assert value in text

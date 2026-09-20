@@ -136,10 +136,26 @@ verdict to override.
 
 ## Verification
 
-The record gate, both plants, its direct focused test, and the receipt citation
-gate are the only relevant verification for this diagnostic-only round. Their
-final terminal summaries and citation-plant result are recorded after the
-receipt is committed.
+All commands used the required CPU/fp64 environment.
+
+* The direct record-gate and receipt-citation suites are rerun from the clean
+  final receipt commit below; their exact terminal summary is retained in the
+  evidence root.
+* The final unplanted citation run found five citations, zero unmapped
+  citations, zero failures, an empty whole-map audit, all nine internal
+  controls firing, and `status: PASS`.
+* Shifting the registered completed-step citation by two lines returned exit
+  1 with `status: FAIL` and `SYMBOL-NOT-AT-LINE`; the whole-map audit remained
+  empty. The artifacts are `phase3/round131/citation_gate.json` and
+  `phase3/round131/citation_gate_shifted_plant.json`.
+* The first citation attempt correctly refused an ambiguous external-history
+  guard because the read and write arms share its text. The map now pins the
+  second occurrence; neither cited line nor extent was weakened.
+
+No full model or all-tree pytest battery ran: record admission stopped before
+a model step, and this round changes no model, card, harness, or NEMO source.
+The focused gate, source-citation, and fail-closed controls cover the complete
+committed change.
 
 ## OPEN — next round
 
