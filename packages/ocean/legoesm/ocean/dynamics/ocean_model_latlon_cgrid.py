@@ -6344,51 +6344,6 @@ class LatLonCGridOceanModel:
                 _stage3_T_rate = _nemo_qsr_stage3_rate(
                     tend.dT_dt.data, _qsr_b, _qsr_m,
                     h_k_old, _h_live_one_half)
-                if _return_tracer_process_trace:
-                    # Round-124 WRITE-only process budget.  Materialize the
-                    # two source components inside the full production step;
-                    # the carried trajectory is supplied by a separate
-                    # ordinary compiled call in ``step`` below.
-                    # ``tend.dT_dt`` contains TWO executed sources on this
-                    # card: the shared physics pipeline's Kbb qsr_2BD field
-                    # and the external-forcing qns surface deposit.  `_qsr_b`
-                    # is the NEMO-live Kbb reconstruction used by the stage-3
-                    # replacement above; it is not necessarily bit-identical
-                    # to the pipeline field it replaces.  Re-read the SAME
-                    # physics callable in this full-step graph so the surface
-                    # row removes the component actually accumulated into
-                    # `tend`; assign the entire remaining stage-3 rate to QSR.
-                    # This keeps the pipeline-vs-NEMO operand/association
-                    # residual with shortwave instead of mislabelling its
-                    # subsurface cells as a surface boundary condition.
-                    _process_cc_state = state._replace(
-                        u=state.u.replace(data=0.5 * (
-                            state.u.data[:, :-1, :] +
-                            state.u.data[:, 1:, :])),
-                        v=state.v.replace(data=0.5 * (
-                            state.v.data[:-1, :, :] +
-                            state.v.data[1:, :, :])),
-                    )
-                    _process_physics = self._physics_fn(
-                        _process_cc_state, _grid, _zc, surface_forcing)
-                    _process_qsr_kbb = _process_physics.dT_dt.data
-                    _nemo_ws_process_surface_rate = (
-                        (tend.dT_dt.data - _process_qsr_kbb) * h_k_old
-                        / jnp.maximum(_h_live_one_half, 1.0e-10))
-                    _nemo_ws_process_qsr_rate = (
-                        _stage3_T_rate - _nemo_ws_process_surface_rate)
-                    _process_plant = (
-                        self._nemo_ws_test_hooks.tracer_process_trace)
-                    if _process_plant:
-                        _pj, _pi, _pk, _pdelta = _process_plant
-                        _nemo_ws_process_surface_rate = (
-                            _nemo_ws_process_surface_rate.at[
-                                _pj, _pi, _pk].add(_pdelta))
-                        _stage3_T_rate = _stage3_T_rate.at[
-                            _pj, _pi, _pk].add(_pdelta)
-                    _nemo_ws_process_qco = (
-                        _qt_b, _qt_12, _qt_aa,
-                        h_k_old, _h_live_one_half, _h_live_new)
 
             _stage_source_rates = (
                 (
@@ -6418,6 +6373,46 @@ class LatLonCGridOceanModel:
                     / jnp.maximum(_h_live_one_half, 1.0e-10),
                 ),
             )
+            if _return_tracer_process_trace:
+                # Round-124 WRITE-only process budget.  Materialize the two
+                # source components inside the full production step; the
+                # carried trajectory comes from a separate ordinary compiled
+                # call in ``step`` below.  ``tend.dT_dt`` contains the shared
+                # pipeline's Kbb qsr_2BD field plus the external qns surface
+                # deposit.  `_qsr_b` is the NEMO-live Kbb reconstruction used
+                # by the stage-3 replacement and need not be bit-identical to
+                # the pipeline field.  Re-read the SAME physics callable with
+                # production's cell-centred proxy so the surface row removes
+                # the component actually accumulated into `tend`; the entire
+                # remainder stays with QSR.
+                _process_cc_state = state._replace(
+                    u=state.u.replace(data=0.5 * (
+                        state.u.data[:, :-1, :] + state.u.data[:, 1:, :])),
+                    v=state.v.replace(data=0.5 * (
+                        state.v.data[:-1, :, :] + state.v.data[1:, :, :])),
+                )
+                _process_physics = self._physics_fn(
+                    _process_cc_state, _grid, _zc, surface_forcing)
+                _process_qsr_kbb = _process_physics.dT_dt.data
+                _nemo_ws_process_surface_rate = (
+                    (tend.dT_dt.data - _process_qsr_kbb) * h_k_old
+                    / jnp.maximum(_h_live_one_half, 1.0e-10))
+                _nemo_ws_process_qsr_rate = (
+                    _stage3_T_rate - _nemo_ws_process_surface_rate)
+                _process_plant = self._nemo_ws_test_hooks.tracer_process_trace
+                if _process_plant:
+                    _pj, _pi, _pk, _pdelta = _process_plant
+                    _nemo_ws_process_surface_rate = (
+                        _nemo_ws_process_surface_rate.at[
+                            _pj, _pi, _pk].add(_pdelta))
+                    _stage3_T_rate = _stage3_T_rate.at[
+                        _pj, _pi, _pk].add(_pdelta)
+                    _stage_source_rates = (
+                        *_stage_source_rates[:2],
+                        (_stage3_T_rate, _stage_source_rates[2][1]))
+                _nemo_ws_process_qco = (
+                    _qt_b, _qt_12, _qt_aa,
+                    h_k_old, _h_live_one_half, _h_live_new)
 
             def _stage_vertical_up3(u_stage, v_stage, geom):
                 # dynadv_up3.F90:239-358: vertical flux of the stage Kmm
