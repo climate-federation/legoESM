@@ -7,11 +7,11 @@ so that every day with a checkpoint can be scored, not only published months:
 
   profile   q_v, ERA5 q, their ratio, RH w.r.t. liquid (model and ERA5) and the
             T bias at reference pressures, area-weighted over lat >= --lat-lo.
-  loop      the self-isolation loop's five numbers per checkpoint: the
-            surface-pressure dome (85-90N minus 60-70N, ocean cells, model
-            minus ERA5), the 925 hPa water ratio and RH_liq over >= 75N, the
-            lowest-layer T bias over >= 75N, and the 850 hPa zonal wind over
-            70-90N next to ERA5's.
+  loop      the self-isolation loop's numbers per checkpoint: the
+            surface-pressure dome (85-90N minus 70-80N, and minus 60-70N as
+            "edge"; flat ocean cells in both datasets, model minus ERA5), the
+            925 hPa water ratio and RH_liq over >= 75N, the 925 hPa T bias over
+            >= 75N, and the 850 hPa zonal wind over 70-90N next to ERA5's.
 
 ERA5 = monthly climatology 1979-2014 of the run's calendar month (ta, hus,
 ps, ua; the month comes from the run's start date plus the day count on a
@@ -124,7 +124,7 @@ def era5_month(var, month):
 def on_cells(d, lat, lon):
     import xarray as xr
     return d.sel(lat=xr.DataArray(lat, dims="c"), lon=xr.DataArray(lon, dims="c"),
-                 method="nearest").values
+                 method="nearest", tolerance=3.0).values
 
 
 
@@ -186,16 +186,23 @@ def profile(args):
         rh = q / np.asarray(saturation_mixing_ratio(np.where(np.isfinite(T), T, 250.0), PLEV[None, :]))
         per_level = []
         for k in range(PLEV.size):
-            tm, te, kept = paired_area_mean(T[:, k], Te[:, k], area, mask)
-            qmk, qek, _ = paired_area_mean(q[:, k], qe[:, k], area, mask)
-            rhm, rhk, _ = paired_area_mean(rh[:, k], rhe_full[:, k], area, mask)
+            ok = mask & np.isfinite(q[:, k]) & np.isfinite(qe[:, k]) & np.isfinite(T[:, k]) & np.isfinite(Te[:, k])
+            if not ok.any():
+                per_level.append(None)                        # level unsupported in this cap
+                continue
+            tm, te, kept = paired_area_mean(np.where(ok, T[:, k], np.nan), Te[:, k], area, mask)
+            qmk, qek, _ = paired_area_mean(np.where(ok, q[:, k], np.nan), qe[:, k], area, mask)
+            rhm, rhk, _ = paired_area_mean(np.where(ok, rh[:, k], np.nan), rhe_full[:, k], area, mask)
             per_level.append((tm - te, qmk, qmk / qek, rhm, te, qek, rhk, kept))
         rows.append(per_level)
     for k, p in enumerate(PLEV):
         r0 = rows[0][k]
+        if r0 is None:
+            print(f"{p/100:5.0f} {0.0:5.2f}  (no supported column in the cap at this level)")
+            continue
         line = f"{p/100:5.0f} {r0[7]:5.2f} {r0[4]:7.1f} {r0[5]*1e3:7.3f} {r0[6]:7.2f} | "
-        line += " ".join(f"dT{r[k][0]:+6.1f} q{r[k][1]*1e3:6.3f} ({r[k][2]:4.2f}x) RH{r[k][3]:5.2f} k{r[k][7]:4.2f}"
-                         for r in rows)
+        line += " ".join((f"dT{r[k][0]:+6.1f} q{r[k][1]*1e3:6.3f} ({r[k][2]:4.2f}x) RH{r[k][3]:5.2f} k{r[k][7]:4.2f}"
+                          if r[k] is not None else f"{'unsupported':>30s}") for r in rows)
         print(line)
     return 0
 
@@ -206,8 +213,10 @@ def loop(args):
     from legoesm.grids.factory import create_grid
     import jax.numpy as jnp
     import xarray as xr
-    print(f"{'run:day':>14s} {'dome[hPa]':>10s} {'q925/ERA5':>10s} {'RH925':>6s} {'dT925[K]':>10s} "
-          f"{'u850 70-90N':>12s} {'ERA5 u850':>10s}")
+    print("dome = p_s anomaly (model - ERA5, flat ocean cells) 85-90N minus 70-80N; "
+          "dome_edge = minus 60-70N (few flat ocean cells there: Nordic/Barents seas only)")
+    print(f"{'run:day':>14s} {'dome[hPa]':>10s} {'edge[hPa]':>10s} {'q925/ERA5':>10s} {'RH925':>6s} "
+          f"{'dT925[K]':>10s} {'u850 70-90N':>12s} {'ERA5 u850':>10s}")
     cache, meshes = {}, {}
     for spec in args.specs:
         run, day = spec.split(":")
@@ -229,9 +238,11 @@ def loop(args):
         ocean, pse, qe, Te925, ue850 = cache[(run, m)]
         if st["z_sfc"] is None:
             raise SystemExit(f"FATAL: {spec}: checkpoint carries no surface geopotential")
-        flat = ocean & (np.abs(st["z_sfc"]) < args.dome_max_z)
-        dome = (area_mean(st["p_s"] - pse, area, (lat >= 85) & flat)
-                - area_mean(st["p_s"] - pse, area, (lat >= 60) & (lat < 70) & flat)) / 100.0
+        flat = ocean & (np.abs(st["z_sfc"]) < args.dome_max_z) & np.isfinite(pse) & (pse > 95000.0)
+        # pse > 950 hPa screens ERA5 cells that sit on terrain (no ERA5 orography on disk)
+        pole = area_mean(st["p_s"] - pse, area, (lat >= 85) & flat) / 100.0
+        dome = pole - area_mean(st["p_s"] - pse, area, (lat >= 70) & (lat < 80) & flat) / 100.0
+        dome_edge = pole - area_mean(st["p_s"] - pse, area, (lat >= 60) & (lat < 70) & flat) / 100.0
         q925 = columns_to_plev(st["p_full"], st["trc_q_v"], 92500.0)[:, 0]
         T925 = columns_to_plev(st["p_full"], st["T"], 92500.0)[:, 0]
         cap = lat >= 75
@@ -247,10 +258,11 @@ def loop(args):
         u_east, _v_north = reconstruct_cell_velocity(jnp.asarray(st["u_edge"]), mesh)   # documented order
         u850 = columns_to_plev(st["p_full"], np.asarray(u_east, dtype=np.float64), 85000.0)[:, 0]
         u, uref, kept_u = paired_area_mean(u850, ue850, area, lat >= 70)
-        dome_kept = (area[(lat >= 85) & flat].sum() / area[lat >= 85].sum(),
-                     area[(lat >= 60) & (lat < 70) & flat].sum() / area[(lat >= 60) & (lat < 70)].sum())
-        print(f"{spec:>14s} {dome:+10.1f} {qm/qek:10.2f} {rh:6.2f} {tm-tek:+10.1f} {u:+12.1f} {uref:+10.1f} "
-              f"(area kept: 925 hPa {kept:.2f}, wind {kept_u:.2f}, dome {dome_kept[0]:.2f}/{dome_kept[1]:.2f})")
+        dk = tuple(area[(lat >= lo) & (lat < hi) & flat].sum() / area[(lat >= lo) & (lat < hi)].sum()
+                   for lo, hi in ((85, 90), (70, 80), (60, 70)))
+        print(f"{spec:>14s} {dome:+10.1f} {dome_edge:+10.1f} {qm/qek:10.2f} {rh:6.2f} {tm-tek:+10.1f} {u:+12.1f} "
+              f"{uref:+10.1f} (area kept: 925 hPa {kept:.2f}, wind {kept_u:.2f}, dome cells "
+              f"{dk[0]:.2f}/{dk[1]:.2f}/{dk[2]:.2f})")
     return 0
 
 
