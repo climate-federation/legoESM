@@ -1,0 +1,72 @@
+{
+  "P5_campaign_identity": {
+    "campaign_snapshot": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gradient_twin/pass2/p5/campaign_reference/lego_seed0/day010.npz",
+    "n_unequal": 0,
+    "n_values": 85184,
+    "rows": [
+      {
+        "campaign_sha256": "86bd904a6ead8fe75ef41e51c9a7edc6d5cc8a8acb524dead83cb8f4cbc52e4b",
+        "field": "T",
+        "n_unequal": 0,
+        "n_values": 21120,
+        "twin_sha256": "86bd904a6ead8fe75ef41e51c9a7edc6d5cc8a8acb524dead83cb8f4cbc52e4b"
+      },
+      {
+        "campaign_sha256": "2758c80fb6337889218d2c9cc7e676d7b415f44fc6d8d80e2106be92d46f5b7f",
+        "field": "S",
+        "n_unequal": 0,
+        "n_values": 21120,
+        "twin_sha256": "2758c80fb6337889218d2c9cc7e676d7b415f44fc6d8d80e2106be92d46f5b7f"
+      },
+      {
+        "campaign_sha256": "9e615ba14ff92e610508bf16c9940e3a76bb4c252743e8338ff6f77c706e3c5e",
+        "field": "u",
+        "n_unequal": 0,
+        "n_values": 21120,
+        "twin_sha256": "9e615ba14ff92e610508bf16c9940e3a76bb4c252743e8338ff6f77c706e3c5e"
+      },
+      {
+        "campaign_sha256": "a20454932c113152e820cddb9547ecf1e4c2fbc74e1cf6778985e150e0c2871d",
+        "field": "v",
+        "n_unequal": 0,
+        "n_values": 21120,
+        "twin_sha256": "a20454932c113152e820cddb9547ecf1e4c2fbc74e1cf6778985e150e0c2871d"
+      },
+      {
+        "campaign_sha256": "fd42bf60ef52c3fb434c22119bcad0e7e38467be862a4f73c69b6dd8daf8e007",
+        "field": "ssh",
+        "n_unequal": 0,
+        "n_values": 704,
+        "twin_sha256": "fd42bf60ef52c3fb434c22119bcad0e7e38467be862a4f73c69b6dd8daf8e007"
+      }
+    ],
+    "status": "CONFIRMED"
+  },
+  "arm": "A_h",
+  "days": 10,
+  "dt_s": 14400.0,
+  "format": "gyre-gradient-twin-v2",
+  "observation_days": [
+    5,
+    10
+  ],
+  "observation_steps": [
+    30,
+    60
+  ],
+  "overall_status": "CONFIRMED_P5_ONLY",
+  "peak_rss_mib": 8360.02734375,
+  "provenance": {
+    "backend": "cpu",
+    "git_dirty": false,
+    "git_sha": "901cfe0d8752d29465949b00248d63cc46d3a9ec",
+    "git_status": [],
+    "jax_enable_x64": true,
+    "precision_policy": "PrecisionPolicy(storage=<class 'jax.numpy.float64'>, compute=<class 'jax.numpy.float64'>, accumulate=<class 'jax.numpy.float64'>, control=<class 'jax.numpy.float64'>, transcendentals='libm')",
+    "python": "/home/dbalwada/legoESM/.venv/bin/python"
+  },
+  "rollout_program": "Python loop; campaign forcing call then one checkpointed, per-step-jitted forward-Euler production branch",
+  "rollout_steps": 60,
+  "steps_per_day": 6,
+  "truth_wall_seconds": 140.85777247324586
+}

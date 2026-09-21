@@ -1,0 +1,225 @@
+{
+  "format": "gyre-gradient-twin-pass2-stopped-v1",
+  "date": "2026-09-21",
+  "branch": "feat/gyre-gradient-twin-2",
+  "overall_status": "STOPPED_P1_REFUTED_P5_CONFIRMED",
+  "provenance": {
+    "incoming_tip": "dda3f3257dad5a7f86e1177f934afc531e6567d9",
+    "pass1_branch": "feat/gyre-gradient-twin",
+    "pass1_source": "/tmp/gradtwin-2710410971",
+    "measurement_commit": "901cfe0d8752d29465949b00248d63cc46d3a9ec",
+    "backend": "cpu",
+    "jax_enable_x64": true,
+    "precision_policy": "fp64/libm",
+    "python": "/home/dbalwada/legoESM/.venv/bin/python",
+    "evidence_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gradient_twin/pass2/",
+    "gpu_runs": 0,
+    "nemo_runs": 0
+  },
+  "D48": {
+    "verdict": "CONFIRMED",
+    "model_edit": "One reverse-safe double-where guard around the post-tke_avn dissl sqrt/quotient; no default changed.",
+    "oracle_source": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/zdftke.F90:832-837",
+    "unit_proof": {
+      "input_classes": [
+        "positive",
+        "exactly_zero",
+        "denormal",
+        "negative",
+        "NaN"
+      ],
+      "finite_old_primal_bits_equal": true,
+      "zero_tke_vjp": 0.0,
+      "zero_divisor_vjp": 0.0,
+      "zero_zero_pair_both_vjps_finite": true,
+      "reverted_result": "1 failed in 2.06 s",
+      "guarded_result": "1 passed in 1.84 s",
+      "reverted_log": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gradient_twin/pass2/d48/unit_reverted_fail.log",
+      "guarded_log": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gradient_twin/pass2/d48/unit_guard_final_pass.log"
+    },
+    "gyre_trajectory": {
+      "before_commit": "dda3f3257dad5a7f86e1177f934afc531e6567d9",
+      "after_commit": "901cfe0d8752d29465949b00248d63cc46d3a9ec",
+      "ladder_rows": 70,
+      "differing_rows": 0,
+      "max_worsening_ulps": 0.0,
+      "residual_array_count": 210,
+      "residual_arrays_np_array_equal": true,
+      "before_residual_sha256": "0ca9f6a2e9af6350429cba95c5cc4c2b0a5a5bbc4f593633c8b5c3ac70b7b345",
+      "after_residual_sha256": "0ca9f6a2e9af6350429cba95c5cc4c2b0a5a5bbc4f593633c8b5c3ac70b7b345",
+      "daily_snapshots": 30,
+      "byte_identical_daily_snapshots": 30,
+      "differing_daily_snapshots": 0,
+      "before_member_wall_seconds": 223.3830108642578,
+      "after_member_wall_seconds": 234.5076961517334
+    },
+    "dino": {
+      "shared_implementation": "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
+      "primal_unchanged_by_construction": true,
+      "test_dino_experiment": "128 passed, 9 warnings in 105.63 s",
+      "fidelity_bar_gate_before_exit": 1,
+      "fidelity_bar_gate_after_exit": 1,
+      "fidelity_bar_gate_note": "Expected open-fidelity DEBT exit; complete stdout is byte-identical before/after.",
+      "before_stdout_sha256": "e6a5ea00f4f91601a3e0079fe75c0bfec592024c0baf06e0e80abb4bc9bd736c",
+      "after_stdout_sha256": "e6a5ea00f4f91601a3e0079fe75c0bfec592024c0baf06e0e80abb4bc9bd736c"
+    }
+  },
+  "D49": {
+    "verdict": "CONFIRMED",
+    "program": "Python loop with campaign forcing call order and a checkpointed per-step JIT; no lax.scan and no whole-rollout JIT on the differentiated path.",
+    "cold_start": "Raw campaign state with bt_hist=None; the first call is allowed to change pytree structure exactly as model.step does.",
+    "two_step_public_model_step_bit_identity": {
+      "T_unequal": 0,
+      "S_unequal": 0,
+      "u_unequal": 0,
+      "v_unequal": 0,
+      "eta_unequal": 0
+    },
+    "P5_campaign_identity": {
+      "status": "CONFIRMED",
+      "n_unequal": 0,
+      "n_values": 85184,
+      "truth_wall_seconds": 140.85777247324586,
+      "campaign_wall_seconds": 146.06153774261475,
+      "peak_rss_mib": 8360.02734375,
+      "fields": {
+        "T": "86bd904a6ead8fe75ef41e51c9a7edc6d5cc8a8acb524dead83cb8f4cbc52e4b",
+        "S": "2758c80fb6337889218d2c9cc7e676d7b415f44fc6d8d80e2106be92d46f5b7f",
+        "u": "9e615ba14ff92e610508bf16c9940e3a76bb4c252743e8338ff6f77c706e3c5e",
+        "v": "a20454932c113152e820cddb9547ecf1e4c2fbc74e1cf6778985e150e0c2871d",
+        "ssh": "fd42bf60ef52c3fb434c22119bcad0e7e38467be862a4f73c69b6dd8daf8e007"
+      }
+    }
+  },
+  "mandatory_direct_gate": {
+    "rollout_steps": 2,
+    "observation_steps": [
+      2
+    ],
+    "parameters": [
+      "A_h",
+      "c_k"
+    ],
+    "start_values": {
+      "A_h": 200000.0,
+      "c_k": 0.2
+    },
+    "loss_status": "FINITE_POSITIVE",
+    "override_reachability": "CONFIRMED",
+    "planted_gate_controls": "CONFIRMED",
+    "assert_no_inert": {
+      "status": "REFUTED",
+      "reason": "non-finite gradient: ['A_h', 'c_k']",
+      "gradients": {
+        "A_h": null,
+        "c_k": null
+      },
+      "nonfinite_kind": {
+        "A_h": "NaN",
+        "c_k": "NaN"
+      }
+    },
+    "finite_difference_rows": [
+      {
+        "parameter": "A_h",
+        "relative_log_step": 0.001,
+        "ad_gradient": null,
+        "finite_difference": 0.0028727000523191826,
+        "ratio": null,
+        "status": "REFUTED"
+      },
+      {
+        "parameter": "A_h",
+        "relative_log_step": 0.0001,
+        "ad_gradient": null,
+        "finite_difference": 0.0028726975144499622,
+        "ratio": null,
+        "status": "REFUTED"
+      },
+      {
+        "parameter": "c_k",
+        "relative_log_step": 0.001,
+        "ad_gradient": null,
+        "finite_difference": 0.044595334376873116,
+        "ratio": null,
+        "status": "REFUTED"
+      },
+      {
+        "parameter": "c_k",
+        "relative_log_step": 0.0001,
+        "ad_gradient": null,
+        "finite_difference": 0.04459535808389037,
+        "ratio": null,
+        "status": "REFUTED"
+      }
+    ],
+    "first_compile_and_gradient_wall_seconds": 1765.1603727843612,
+    "xla_reported_slow_compile_seconds": 888.198345158,
+    "non_slow_compile_plus_execution_remainder_seconds": 876.9620276263612,
+    "steady_gradient_wall_seconds": null,
+    "steady_gradient_note": "Not measured after the mandatory no-inert gate refuted; no valid 60-step gradient was run.",
+    "peak_rss_mib": 39391.35546875,
+    "pytest_total_seconds": 2118.05,
+    "pytest_result": "1 failed, 3 passed"
+  },
+  "predictions": {
+    "P1": {
+      "verdict": "REFUTED",
+      "scope": "mandatory two-step direct gate; registered 60-step arms were not entered",
+      "ratios": {
+        "A_h_h1e-3": null,
+        "A_h_h1e-4": null,
+        "c_k_h1e-3": null,
+        "c_k_h1e-4": null
+      }
+    },
+    "P2": {
+      "verdict": "UNMEASURED",
+      "reason": "P1 stopped optimization before the A_h arm"
+    },
+    "P3": {
+      "verdict": "UNMEASURED",
+      "reason": "P1 stopped optimization before the c_k arm"
+    },
+    "P4": {
+      "verdict": "UNMEASURED",
+      "reason": "The mandatory direct adjoint gate stopped the 60-step loss experiment"
+    },
+    "P5": {
+      "verdict": "CONFIRMED",
+      "n_unequal": 0,
+      "n_values": 85184
+    }
+  },
+  "recovery": {
+    "optimizer": "legoesm.ml.training.create_optimizer",
+    "optimizer_invoked": false,
+    "updates_executed": 0,
+    "retunes_executed": 0,
+    "identifiability_scans_executed": 0,
+    "cpu_cost_cap_updates": 25,
+    "cpu_cost_cap_reached": false,
+    "cpu_cost_cap_note": "The P1 gate refuted before any optimization; the cost policy cannot override adjoint validity.",
+    "gpu_time_estimate": null,
+    "gpu_time_note": "No valid gradient and no GPU timing datum exist, so extrapolation would be unsupported.",
+    "arms": {
+      "A_h": {
+        "status": "UNMEASURED",
+        "curve": []
+      },
+      "c_k": {
+        "status": "UNMEASURED",
+        "curve": []
+      },
+      "both": {
+        "status": "UNMEASURED",
+        "curve": []
+      }
+    }
+  },
+  "coordination": {
+    "github_issue_1455": "NOT_UPDATED_NETWORK_UNAVAILABLE",
+    "codex_review": "UNAVAILABLE_READ_ONLY_APP_SERVER_PATH",
+    "operator_claude_review": "REQUIRED"
+  }
+}
