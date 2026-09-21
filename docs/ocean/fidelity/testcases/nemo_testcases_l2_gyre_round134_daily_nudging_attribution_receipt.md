@@ -183,6 +183,13 @@ Every year-arm manifest records the clean measurement commit, fp64/libm
 policy, source audit digest, family registry, exact list and digest of all 359
 source boundaries, and wall time. Manifest digests are:
 
+The four interventions and the control were measured at clean commit
+`078e3e3c8b7c875466e6edab052de140864f779d`. After the reporter-stamp
+ratchet was repaired, the unchanged record was readmitted at clean commit
+`01c5fa2752862efc43dd64b8b6e2bb013d18d0ae`; the final stamped audit has the
+same inventory, schema, and twelve bit-identical monthly twins as the audit
+consumed by the arms.
+
 | arm | manifest SHA-256 | wall time |
 |---|---|---:|
 | control | `9375124f0f32beb882cbfe2d4ad518d9c1bb0a43d368c5390237c9f96f89c82a` | `1748.13 s` |
@@ -237,9 +244,24 @@ DINO into a measured fidelity row.
 
 ## Independent adversarial review
 
-PENDING in the draft reviewed below. The final receipt will quote the complete
-verbatim verdict, or the exact sandbox initialization failure if the required
-read-only Codex client cannot start. A `DO NOT SHIP` verdict blocks completion.
+The required separate command was invoked from clean draft-receipt commit
+`c9a8f6cf5` with `codex exec --sandbox read-only -C` and a prompt that tried to
+refute record completeness, reset timing, family isolation, production-JIT
+execution, `ssha` routing, all 160 score rows, the ownership caveat, plants,
+cross-card scope, and the incomplete broad tests. It returned exit 1 before
+reading the diff. Its complete Codex output, verbatim, was:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Thus **independent review unavailable in-sandbox**. The retained log is
+`phase3/round134/codex_review.log`, SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+It issued no verdict and therefore no `DO NOT SHIP` verdict. This receipt does
+not mislabel the infrastructure failure as an approving review.
 
 ## Verification
 
@@ -284,18 +306,95 @@ the two whole-tree invocations did not reach summaries, a complete final
 87-ID set comparison is **UNMEASURED**, not claimed green.
 
 The many completed file-level fidelity shards are indexed by their literal
-pytest summary lines in `phase3/round134/fidelity_file_*.log`; all completed
-shards other than the two repaired controls above passed. The largest direct
-coverage summaries include `30 passed in 17.86s` for the year harness,
-`27 passed in 30.31s` for the year scorer, `23 passed in 4.21s` for the GYRE
-phase-3 gate, `16 passed in 48.39s` for the DINO mesh suite, and
-`5 passed in 11.74s` for the DINO step-1 gate. One historical stage-sweep
-file reached its long unchanged integration after its first seven tests and
-was stopped without a summary; it is also **INCOMPLETE**.
+pytest summary lines in `phase3/round134/fidelity_file_*.log`; the exact
+per-invocation ledger follows. Lines marked INCOMPLETE are deliberately not
+converted into pass claims.
 
-The final receipt citation gate and shifted-citation plant are PENDING this
-draft's review completion. The receipt is not final until the unplanted run
-passes with every citation mapped and the shifted plant exits nonzero.
+| invocation log | exact pytest summary or terminal state |
+|---|---|
+| `citation_suite_pre_receipt.log` | `3 failed, 13 passed in 1.95s` |
+| `citation_suite_reanchored.log` | `2 failed, 14 passed in 1.84s` |
+| `citation_suite_reanchored_clean.log` | `1 failed, 15 passed in 1.91s` |
+| `citation_suite_reanchored_clean_v2.log` | `16 passed in 1.95s` |
+| `focused_tests.log` | `31 passed in 169.21s (0:02:49)` |
+| `focused_production_tests.log` | `40 passed in 245.90s (0:04:05)` |
+| `fail_closed_regression_tests.log` | `27 passed in 14.24s` |
+| `fidelity_chunk_0.log` | `364 passed, 2 skipped in 132.29s (0:02:12)` |
+| `fidelity_chunk_1.log` | `1 failed, 356 passed, 4 skipped in 51.46s` (repaired and covered by final 27-pass run) |
+| `fidelity_p2_s0.log` | `121 passed in 234.65s (0:03:54)` |
+| `fidelity_file_test_baro_fixed_bias_wall_map.log` | `79 passed in 0.20s` |
+| `fidelity_file_test_compare.log` | `14 passed in 0.35s` |
+| `fidelity_file_test_coriolis_omega_routing_audit.log` | `10 passed in 0.27s` |
+| `fidelity_file_test_fidelity_card_constructibility.log` | `16 passed in 14.77s` |
+| `fidelity_file_test_fixtures_validate.log` | `10 passed in 0.27s` |
+| `fidelity_file_test_gyre_round107_tke_rhs_intermediate_walk.log` | `9 passed in 1.69s` |
+| `fidelity_file_test_gyre_round108_bn2_intermediate_walk.log` | `15 passed in 1.00s` |
+| `fidelity_file_test_metrics_tier2.log` | `5 passed in 0.27s` |
+| `fidelity_file_test_metrics_tier5.log` | `4 deselected in 0.26s` |
+| `fidelity_file_test_mitgcm_advection_gyre_recipe.log` | `7 passed, 1 skipped in 1.96s` |
+| `fidelity_file_test_mitgcm_front_relax_recipe.log` | `5 passed, 1 deselected in 1.33s` |
+| `fidelity_file_test_mitgcm_gyre_canonical.log` | `3 passed, 2 deselected in 54.39s` |
+| `fidelity_file_test_mitgcm_monitor.log` | `11 passed in 0.32s` |
+| `fidelity_file_test_mitgcm_recipe_card.log` | `4 passed in 4.13s` |
+| `fidelity_file_test_mlf_step_mechanism_ab.log` | `5 passed in 0.81s` |
+| `fidelity_file_test_nemo_dino_mesh.log` | `16 passed in 48.39s` |
+| `fidelity_file_test_nemo_dino_step1_gate.log` | `5 passed in 11.74s` |
+| `fidelity_file_test_nemo_testcase_full_statistics.log` | `15 passed in 0.31s` |
+| `fidelity_file_test_nemo_testcase_l1_tanks_round33_zdf_rule12.log` | `15 passed in 7.46s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_oracle_census.log` | `4 passed in 0.05s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_phase3_gate.log` | `23 passed in 4.21s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round129_spread_floor_gate.log` | `1 failed, 7 passed in 10.58s` (stale digest repaired; final 27-pass run green) |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round29_zdf_matrix.log` | `9 passed in 2.01s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round32_ordering.log` | `22 passed in 3.49s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round33_stage_arm.log` | `22 passed in 9.04s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round42_ldfslp.log` | `3 passed in 7.28s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round45_ablation_gate.log` | `2 passed in 0.37s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round51_live_operands.log` | `3 passed in 0.42s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round54_tracer_decomposition.log` | `5 passed in 0.05s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round63_krhs_split.log` | `8 passed in 0.64s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round71_fct_stage2_gate.log` | `4 passed in 0.30s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round72_stage1_transport_gate.log` | `2 passed in 0.28s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round73_stage1_transport.log` | `3 passed in 0.29s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round76_advmean_walk.log` | `4 passed in 0.29s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round82_btstep_walk.log` | `6 passed in 0.64s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round85_bundle_gate.log` | `3 passed in 0.46s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_round86_zad_operands.log` | `3 passed in 0.29s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_year_fromrest.log` | `30 passed in 17.86s` |
+| `fidelity_file_test_nemo_testcase_l2_gyre_year_owners.log` | `27 passed in 30.31s` |
+| `fidelity_file_test_nemo_testcase_l4_orca2_hpg_model_arm_probe.log` | `3 passed in 0.28s` |
+| `fidelity_file_test_nemo_testcase_lock_slow_forcing_owner.log` | `3 passed in 0.75s` |
+| `fidelity_file_test_nemo_testcase_phase2_gate.log` | `10 passed in 8.38s` |
+| `fidelity_file_test_nemo_testcase_phase3_trajectory_gate.log` | `9 passed in 0.30s` |
+| `fidelity_file_test_nemo_testcase_round34_tank_zdf_removal.log` | `10 passed in 7.48s` |
+| `fidelity_file_test_nemo_testcase_round35_stamp_scope.log` | `8 passed in 0.46s` |
+| `fidelity_file_test_nemo_testcase_round39_k33_placement.log` | `8 passed in 58.04s` |
+| `fidelity_file_test_nemo_testcase_rule12_hpg_eligibility.log` | `7 passed in 0.32s` |
+| `fidelity_file_test_oceananigans_bickley_config.log` | `3 passed in 3.61s` |
+| `fidelity_file_test_oceananigans_gyre_wind_convention.log` | `3 passed in 1.46s` |
+| `fidelity_file_test_oceananigans_internal_tide.log` | `3 passed in 3.14s` |
+| `fidelity_file_test_oceananigans_recipe_card.log` | `7 passed in 0.27s` |
+| `fidelity_file_test_oceananigans_runner.log` | `6 passed in 1.11s` |
+| `fidelity_file_test_oceananigans_tendency_align.log` | `2 passed in 0.30s` |
+| `fidelity_file_test_precedence.log` | `11 passed in 0.27s` |
+| `fidelity_file_test_registry.log` | `10 passed in 0.26s` |
+| `fidelity_file_test_run_acc_freerun.log` | `2 passed, 1 deselected in 2.38s` |
+| `fidelity_file_test_run_comparison_script.log` | `11 passed in 0.29s` |
+| `fidelity_file_test_veros_global_freerun.log` | `5 passed in 0.33s` |
+| `fidelity_file_test_veros_runner.log` | `23 passed, 7 deselected in 1.80s` |
+| `full_ocean_tests.log` | **INCOMPLETE:** 8,288 collected, worker crashed, last progress 71%, no summary |
+| `full_fidelity_tests.log` | **INCOMPLETE:** 1,444 collected, last progress 94%, no summary |
+| `fidelity_chunk_2.log` | **INCOMPLETE:** 337 collected, progress reached 100%, teardown never produced summary |
+| `fidelity_p2_s1.log` | **INCOMPLETE:** 59 collected, 50 dots, no summary |
+| `fidelity_p2_s1_without_round134.log` | **INCOMPLETE:** 53 collected, 44 dots, no summary |
+| `unit_chunk_0.log` | **INCOMPLETE:** 140 collected, last progress 51%, no summary |
+| `fidelity_file_test_nemo_testcase_phase3_stage_sweep_gate.log` | **INCOMPLETE:** 10 collected, first 7 passed, long historical integration stopped, no summary |
+
+The final unplanted citation run found nine citations, zero unmapped
+citations, zero failures, an empty whole-map audit, all nine internal controls
+firing, and `status: PASS`. Shifting the registered external-step citation by
+two lines returned exit 1 with `status: FAIL` and `SYMBOL-NOT-AT-LINE`. The
+retained artifacts are `phase3/round134/citation_gate.json` and
+`phase3/round134/citation_gate_shifted_plant.json`.
 
 ## OPEN — next round
 
