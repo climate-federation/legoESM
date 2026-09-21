@@ -585,7 +585,8 @@ def measure_round140_developed(args) -> dict[str, object]:
         for face in ("u", "v")
     }
     require(all(row["bit_exact"] for row in trace_final_identity.values()),
-            "developed producer trace differs from the external call")
+            "developed producer trace differs from the external call: "
+            + repr(trace_final_identity))
 
     rows = {
         "incoming_u": round82._developed_comparison(
