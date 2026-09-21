@@ -143,6 +143,12 @@ ROUND143_DIRECTED_REGISTRY = tuple(
     for boundary in ("incoming", "final")
     for face in ("u", "v")
 )
+ROUND144_WIND_REGISTRY = tuple(
+    f"{arm}_{boundary}_{face}"
+    for arm in ("live", "density", "stress", "inverse_depth", "all", "terminal")
+    for boundary in ("incoming", "final")
+    for face in ("u", "v")
+)
 ROUND141_RHS_REGISTRY = ROUND140_RHS_REGISTRY
 ROUND142_DIRECTED_REGISTRY = (
     "ordinary_incoming_u", "ordinary_incoming_v",
@@ -1854,6 +1860,241 @@ def measure_round143_downstream_directed(args) -> dict[str, object]:
     }
 
 
+def _validate_round144_registry(registry=ROUND144_WIND_REGISTRY) -> None:
+    require(tuple(registry) == ROUND144_WIND_REGISTRY,
+            "Round-144 wind-row registry changed")
+
+
+def _round144_stress_ulp(fields, active) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Choose one recorded U-stress ULP that changes NEMO's written result."""
+    stress = np.asarray(fields["wind_tau_u"], dtype=np.float64)
+    active = np.asarray(active, dtype=bool)
+    require(stress.shape == active.shape,
+            "Round-144 stress plant extents differ")
+    rho = np.float64(fields["r1_rho0"])
+    depth = np.asarray(fields["wind_r1_hu"], dtype=np.float64)
+    post_drag = np.asarray(fields["post_drag_u"], dtype=np.float64)
+    baseline = post_drag + (rho * stress) * depth
+    for location_array in np.argwhere(active & np.isfinite(stress)):
+        location = tuple(int(index) for index in location_array)
+        for direction in (np.inf, -np.inf):
+            candidate = np.nextafter(stress[location], direction)
+            changed = post_drag[location] + (
+                rho * candidate) * depth[location]
+            if changed.view(np.uint64) != baseline[location].view(np.uint64):
+                planted = stress.copy()
+                planted[location] = candidate
+                require(np.count_nonzero(
+                    planted.view(np.uint64) != stress.view(np.uint64)) == 1,
+                    "Round-144 stress plant did not change exactly one word")
+                return planted, location
+    raise RuntimeError("no one-ULP U-stress plant changes the written result")
+
+
+def measure_round144_wind_operands(args) -> dict[str, object]:
+    """Walk the developed wind operands through the production-jitted step."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-144 measurement worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-144 measurement commit mismatch")
+    if args.plant == "wind-missing-row":
+        fired = False
+        try:
+            _validate_round144_registry(ROUND144_WIND_REGISTRY[:-1])
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-144 missing-row plant stayed green")
+        return {
+            "format": "nemo-testcase-l2-gyre-round144-wind-v1",
+            "status": "PLANT-FIRED", "worktree": stamp,
+            "plant": args.plant, "plant_fires": True,
+        }
+    _validate_round144_registry()
+    inherited = measure_round143_downstream_directed(args)
+    require(inherited["status"] == "MEASURED",
+            "Round-143 inherited controls did not measure")
+    record = read_round140_rhs(args.round140_rhs_root / ROUND140_RHS_RECORD)
+    fields = record["fields"]
+    split = read_round139_record(args.round140_rhs_root / ROUND139_RECORD)
+    active3 = {
+        "u": fields["umask"] != 0.0,
+        "v": fields["vmask"] != 0.0,
+    }
+    active2 = {face: active3[face][..., 0] for face in ("u", "v")}
+    card, state, freshwater, surface, payload, entry = round82._developed_inputs(args)
+    eta_after = jnp.asarray(payload["ssha"])
+    drag_override = (
+        jnp.asarray(fields["post_drag_u"]),
+        jnp.asarray(fields["post_drag_v"]),
+    )
+    density = np.float64(fields["r1_rho0"])
+    stresses = (
+        jnp.asarray(fields["wind_tau_u"]),
+        jnp.asarray(fields["wind_tau_v"]),
+    )
+    inverse_depths = (
+        jnp.asarray(fields["wind_r1_hu"]),
+        jnp.asarray(fields["wind_r1_hv"]),
+    )
+    arms = {
+        "live": _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            drag_override=drag_override),
+        "density": _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            drag_override=drag_override,
+            wind_operand_override=(density, None, None)),
+        "stress": _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            drag_override=drag_override,
+            wind_operand_override=(None, stresses, None)),
+        "inverse_depth": _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            drag_override=drag_override,
+            wind_operand_override=(None, None, inverse_depths)),
+        "all": _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            drag_override=drag_override,
+            wind_operand_override=(density, stresses, inverse_depths)),
+    }
+    live_producer = arms["live"][1]
+    terminal_override = tuple(
+        jnp.asarray(_full_from_native(
+            live_producer[f"incoming_{face}"],
+            fields[f"post_wind_{face}"], face))
+        for face in ("u", "v")
+    )
+    arms["terminal"] = _round140_callback_trace(
+        args, card, state, freshwater, surface, eta_after,
+        incoming_override=terminal_override)
+
+    def row(producer, boundary: str, face: str) -> dict:
+        native = (native_u(producer[f"{boundary}_{face}"])
+                  if face == "u" else native_v(producer[f"{boundary}_{face}"]))
+        return comparison(native, split[f"{boundary}_{face}"], active2[face])
+
+    rows = {
+        f"{arm}_{boundary}_{face}": row(producer, boundary, face)
+        for arm, (_, producer) in arms.items()
+        for boundary in ("incoming", "final")
+        for face in ("u", "v")
+    }
+    require(tuple(rows) == ROUND144_WIND_REGISTRY,
+            "Round-144 result omitted a registered row")
+    callback_identity = {
+        arm: trace.trace_state_identity for arm, (trace, _) in arms.items()
+    }
+    require(all(value["bit_exact"] for value in callback_identity.values()),
+            "Round-144 callback moved its plain arm")
+    external_identity = {
+        arm: {
+            face: comparison(
+                native_u(producer[f"final_{face}"])
+                if face == "u" else native_v(producer[f"final_{face}"]),
+                gate._trace_native(
+                    trace.substeps[f"slow_{face}"], f"slow_{face}")[0],
+                active2[face])
+            for face in ("u", "v")
+        }
+        for arm, (trace, producer) in arms.items()
+    }
+    require(all(row_["bit_exact"]
+                for arm_rows in external_identity.values()
+                for row_ in arm_rows.values()),
+            "Round-144 callback differs from an external-call operand")
+
+    substitution_effect = {
+        family: {
+            face: comparison(
+                native_u(arms[family][1][f"incoming_{face}"])
+                if face == "u" else native_v(
+                    arms[family][1][f"incoming_{face}"]),
+                native_u(live_producer[f"incoming_{face}"])
+                if face == "u" else native_v(
+                    live_producer[f"incoming_{face}"]),
+                active2[face])
+            for face in ("u", "v")
+        }
+        for family in ("density", "stress", "inverse_depth", "all")
+    }
+    first_moving_family = next((
+        family for family in ("density", "stress", "inverse_depth")
+        if any(not row_["bit_exact"]
+               for row_ in substitution_effect[family].values())), None)
+    first_closing_family = next((
+        family for family in ("density", "stress", "inverse_depth", "all")
+        if all(rows[f"{family}_incoming_{face}"]["bit_exact"]
+               for face in ("u", "v"))), None)
+
+    if args.plant == "wind-stress-ulp":
+        planted_u, location = _round144_stress_ulp(fields, active2["u"])
+        planted_trace, planted = _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            drag_override=drag_override,
+            wind_operand_override=(
+                None, (jnp.asarray(planted_u), stresses[1]), None))
+        require(planted_trace.trace_state_identity["bit_exact"],
+                "Round-144 stress-ULP callback moved its plain arm")
+        planted_row = comparison(
+            native_u(planted["incoming_u"]),
+            native_u(arms["stress"][1]["incoming_u"]), active2["u"])
+        require(planted_row["differing_cells"] > 0,
+                "Round-144 stress ULP did not reach incoming forcing")
+        return {
+            "format": "nemo-testcase-l2-gyre-round144-wind-v1",
+            "status": "PLANT-FIRED", "worktree": stamp,
+            "plant": args.plant, "plant_fires": True,
+            "plant_location": list(location),
+            "plant_downstream_row": planted_row,
+        }
+
+    terminal_exact = all(
+        rows[f"terminal_incoming_{face}"]["bit_exact"]
+        for face in ("u", "v"))
+    require(terminal_exact, "Round-144 terminal calibration is not BIT")
+    return {
+        "format": "nemo-testcase-l2-gyre-round144-wind-v1",
+        "status": "MEASURED", "worktree": stamp,
+        "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
+        "entry": entry, "inherited_round143": inherited,
+        "rows": rows, "substitution_effect": substitution_effect,
+        "callback_state_identity": callback_identity,
+        "callback_final_vs_external_call": external_identity,
+        "first_moving_family": first_moving_family,
+        "first_closing_family": first_closing_family,
+        "predictions": {
+            "density_inert": all(
+                row_["bit_exact"]
+                for row_ in substitution_effect["density"].values()),
+            "stress_first": first_moving_family == "stress",
+            "stress_closes": all(
+                rows[f"stress_incoming_{face}"]["bit_exact"]
+                for face in ("u", "v")),
+            "inverse_depth_closes": all(
+                rows[f"inverse_depth_incoming_{face}"]["bit_exact"]
+                for face in ("u", "v")),
+            "all_inputs_close": all(
+                rows[f"all_incoming_{face}"]["bit_exact"]
+                for face in ("u", "v")),
+            "terminal_is_bit": terminal_exact,
+        },
+        "plant": args.plant, "plant_fires": False,
+        "scope": {
+            "production_physics_changed": False,
+            "day_240_carry": "UNMEASURED",
+            "DINO": "NO-PRODUCTION-CHANGE",
+            "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+            "OVERFLOW": "NO-PRODUCTION-CHANGE",
+            "ORCA2": "UNMEASURED-WITH-SPEC; GYRE diagnostic only",
+        },
+    }
+
+
 def round117_source_order_accumulators(
     hpg_u, hpg_v, ldf_u, ldf_v, vor_u, vor_v,
     keg_u, keg_v, zad_u, zad_v,
@@ -1937,7 +2178,7 @@ def _round117_live_trace(
 def _round140_callback_trace(
     args, card, state, freshwater, surface, eta_after_override, *,
     incoming_override=None, rhs_override=None, depth_override=None,
-    drag_override=None,
+    drag_override=None, wind_operand_override=None,
 ):
     """Capture slow operands without changing the production return value."""
     captures = []
@@ -1956,6 +2197,7 @@ def _round140_callback_trace(
         slow_forcing_rhs_override=rhs_override,
         slow_forcing_depth_override=depth_override,
         slow_forcing_drag_override=drag_override,
+        slow_forcing_wind_operand_override=wind_operand_override,
         barotropic_slow_forcing_override=sink,
     )
     plain_hooks = model_module._NEMOWSRK3TestHooks(
@@ -1963,6 +2205,7 @@ def _round140_callback_trace(
         slow_forcing_rhs_override=rhs_override,
         slow_forcing_depth_override=depth_override,
         slow_forcing_drag_override=drag_override,
+        slow_forcing_wind_operand_override=wind_operand_override,
     )
     (_, _, _, _, _, trace) = round82._capture_external_context(
         args, card, state, freshwater, surface,
@@ -4085,6 +4328,9 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round143-downstream-directed", action="store_true",
         help="substitute recorded depth, drag, and wind boundaries")
+    round_group.add_argument(
+        "--round144-wind-operands", action="store_true",
+        help="substitute recorded wind operands one family at a time")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -4140,13 +4386,16 @@ def main(argv=None) -> int:
                             "rhs-record-replay-ulp", "rhs-missing-row",
                             "rhs-observer-ulp", "rhs-directed-missing-row",
                             "rhs-directed-ulp", "downstream-missing-row",
-                            "downstream-depth-ulp"),
+                            "downstream-depth-ulp", "wind-missing-row",
+                            "wind-stress-ulp"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
-            measure_round143_downstream_directed(args)
+            measure_round144_wind_operands(args)
+            if args.round144_wind_operands else
+            (measure_round143_downstream_directed(args)
             if args.round143_downstream_directed else
             (measure_round142_rhs_directed(args)
             if args.round142_rhs_directed else
@@ -4162,14 +4411,15 @@ def main(argv=None) -> int:
             if args.round121_trajectory else
             (measure_round117(args)
             if (args.round117 or args.round118 or args.round119
-                or args.round120 or args.round121) else measure(args)))))))))
+                or args.round120 or args.round121) else measure(args))))))))))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND143 DOWNSTREAM" if args.round143_downstream_directed else
+            "ROUND144 WIND" if args.round144_wind_operands else
+            ("ROUND143 DOWNSTREAM" if args.round143_downstream_directed else
             ("ROUND142 RHS" if args.round142_rhs_directed else
             ("ROUND141 RHS" if args.round141_rhs_developed else
             ("ROUND140 RHS" if args.round140_rhs_record_only else
@@ -4179,7 +4429,7 @@ def main(argv=None) -> int:
             ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83")))))))))))
+             ("ROUND117" if args.round117 else "ROUND83"))))))))))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
@@ -4218,6 +4468,13 @@ def main(argv=None) -> int:
         print(
             "ROUND143 DOWNSTREAM DIRECTED: first="
             + repr(report["first_closing_family"])
+        )
+        return 0
+    if args.round144_wind_operands:
+        print(
+            "ROUND144 WIND OPERANDS: first="
+            + repr(report["first_moving_family"])
+            + " closes=" + repr(report["first_closing_family"])
         )
         return 0
     if args.round121_trajectory:

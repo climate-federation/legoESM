@@ -489,3 +489,28 @@ def test_round143_depth_ulp_changes_exactly_one_active_word() -> None:
     assert np.count_nonzero(
         planted.view(np.uint64) != depth.view(np.uint64)) == 1
     assert planted[location] == np.nextafter(depth[location], np.inf)
+
+
+def test_round144_override_is_private_default_off_and_registered() -> None:
+    hook_name = "slow_forcing_wind_operand_override"
+    hooks = WALK.model_module._NEMOWSRK3TestHooks()
+    assert getattr(hooks, hook_name) is None
+    assert hook_name not in WALK.model_module.LatLonCGridOceanConfig._fields
+    WALK._validate_round144_registry(WALK.ROUND144_WIND_REGISTRY)
+    with pytest.raises(RuntimeError, match="registry changed"):
+        WALK._validate_round144_registry(WALK.ROUND144_WIND_REGISTRY[:-1])
+
+
+def test_round144_stress_ulp_changes_one_consumed_word() -> None:
+    fields = {
+        "r1_rho0": 1.0,
+        "wind_tau_u": np.asarray([[1.0]], dtype=np.float64),
+        "wind_r1_hu": np.asarray([[1.0]], dtype=np.float64),
+        "post_drag_u": np.asarray([[0.0]], dtype=np.float64),
+    }
+    planted, location = WALK._round144_stress_ulp(
+        fields, np.asarray([[True]]))
+    assert location == (0, 0)
+    assert np.count_nonzero(
+        planted.view(np.uint64)
+        != fields["wind_tau_u"].view(np.uint64)) == 1

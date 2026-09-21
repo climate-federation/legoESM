@@ -1065,6 +1065,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Both preserve unowned faces and are absent from the public config.
     slow_forcing_depth_override: object = None
     slow_forcing_drag_override: object = None
+    # Private round-144 discriminator for the compiled wind statement.  Each
+    # tuple member independently replaces density reciprocal, face stresses,
+    # or live inverse depths; None retains the production operand.
+    slow_forcing_wind_operand_override: object = None
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
     # leaving legoESM's deviation-form carried state untouched.  Private
     # decision-33 measurement only.
@@ -5326,14 +5330,34 @@ class LatLonCGridOceanModel:
                 _wind_r1_rho0 = nemo_source_round(1.0 / _r0)
                 _wind_r1_hu = nemo_source_round(1.0 / H_u_pre)
                 _wind_r1_hv = nemo_source_round(1.0 / H_v_pre)
+                _wind_operand_override = (
+                    self._nemo_ws_test_hooks
+                    .slow_forcing_wind_operand_override)
+                if _wind_operand_override is not None:
+                    (_rho_override, _stress_override,
+                     _inverse_depth_override) = _wind_operand_override
+                    if _rho_override is not None:
+                        _wind_r1_rho0 = jnp.asarray(
+                            _rho_override, dtype=du_dt.dtype)
+                    if _stress_override is not None:
+                        _stress_u, _stress_v = _stress_override
+                        _wind_tau_i_u = _wind_tau_i_u.at[:, 1:].set(_stress_u)
+                        _wind_tau_j_v = _wind_tau_j_v.at[1:, :].set(_stress_v)
+                    if _inverse_depth_override is not None:
+                        _r1_hu_override, _r1_hv_override = (
+                            _inverse_depth_override)
+                        _wind_r1_hu = _wind_r1_hu.at[:, 1:].set(
+                            _r1_hu_override)
+                        _wind_r1_hv = _wind_r1_hv.at[1:, :].set(
+                            _r1_hv_override)
                 if not self._nemo_ws_test_hooks.legacy_barotropic_wind_association:
                     # stp2d.F90:200-201, preserving Fortran's written
                     # ``(r1_rho0*tau)*r1_h`` product before the addition.
                     _wind_increment_u = nemo_source_round(
-                        nemo_source_round(_wind_r1_rho0 * _tau_i_u)
+                        nemo_source_round(_wind_r1_rho0 * _wind_tau_i_u)
                         * _wind_r1_hu)
                     _wind_increment_v = nemo_source_round(
-                        nemo_source_round(_wind_r1_rho0 * _tau_j_v)
+                        nemo_source_round(_wind_r1_rho0 * _wind_tau_j_v)
                         * _wind_r1_hv)
                     F_slow_u = nemo_source_round(
                         F_slow_u + _wind_increment_u) * state.u_mask.data
