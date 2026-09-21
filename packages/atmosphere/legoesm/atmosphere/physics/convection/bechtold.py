@@ -2044,6 +2044,8 @@ def distribute_rain_vapor_sink(dq_r_formation, q_v, dq_v_dt, dp_full, dt, scheme
     if scheme != "formation":
         raise ValueError(
             f"unknown rain_vapor_sink {scheme!r}; expected 'formation' or 'vapour_mass'")
+    if not dt > 0.0:
+        raise ValueError(f"rain_vapor_sink='formation' needs dt > 0, got {dt!r}")
     want = jnp.maximum(dq_r_formation, 0.0)
     capacity = _RAIN_SINK_CAPACITY_FRAC * jnp.maximum(q_v + dt * dq_v_dt, 0.0) / dt
     take = jnp.minimum(want, capacity)
@@ -2051,11 +2053,18 @@ def distribute_rain_vapor_sink(dq_r_formation, q_v, dq_v_dt, dp_full, dt, scheme
     slack = jnp.where(support, jnp.maximum(capacity - take, 0.0), 0.0)
     excess_col = jnp.sum((want - take) * dp_full, axis=-1, keepdims=True) / g
     slack_col = jnp.sum(slack * dp_full, axis=-1, keepdims=True) / g
-    add = jnp.minimum(excess_col, slack_col) * slack / jnp.maximum(slack_col, 1e-30)
+    # Inactive denominators are 1.0, not a tiny floor: 1/x**2 of a 1e-30
+    # floor overflows the float32 backward pass (NaN gradients for zero-rain
+    # and exhausted-capacity columns, codex-confirmed), and 0*NaN from an
+    # unselected 0/0 branch poisons the gradient the same way.
+    has_slack = slack_col > 0.0
+    add = jnp.where(has_slack, jnp.minimum(excess_col, slack_col) * slack
+                    / jnp.where(has_slack, slack_col, 1.0), 0.0)
     sink = take + add
     rain_total = jnp.sum(want * dp_full, axis=-1) / g
     realized = jnp.sum(sink * dp_full, axis=-1) / g
-    scale = jnp.where(rain_total > 0.0, realized / jnp.maximum(rain_total, 1e-30), 1.0)
+    has_rain = rain_total > 0.0
+    scale = jnp.where(has_rain, realized / jnp.where(has_rain, rain_total, 1.0), 1.0)
     return sink, scale
 
 
