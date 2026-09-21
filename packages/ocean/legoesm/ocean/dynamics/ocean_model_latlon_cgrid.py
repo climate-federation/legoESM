@@ -1059,6 +1059,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # faces of the completed 3-D momentum RHS before its depth reduction.
     # None leaves the production program unchanged; this is not configurable.
     slow_forcing_rhs_override: object = None
+    # Private round-143 downstream discriminators.  The depth override lands
+    # before the live wind/drag arithmetic.  The drag override replaces that
+    # completed boundary and then applies the already-computed wind once.
+    # Both preserve unowned faces and are absent from the public config.
+    slow_forcing_depth_override: object = None
+    slow_forcing_drag_override: object = None
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
     # leaving legoESM's deviation-form carried state untouched.  Private
     # decision-33 measurement only.
@@ -5268,6 +5274,12 @@ class LatLonCGridOceanModel:
         _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+        _slow_depth_override = (
+            self._nemo_ws_test_hooks.slow_forcing_depth_override)
+        if _slow_depth_override is not None:
+            _slow_depth_u, _slow_depth_v = _slow_depth_override
+            F_slow_u = F_slow_u.at[:, 1:].set(_slow_depth_u)
+            F_slow_v = F_slow_v.at[1:, :].set(_slow_depth_v)
         _F_slow_depth_u = F_slow_u
         _F_slow_depth_v = F_slow_v
 
@@ -5389,8 +5401,23 @@ class LatLonCGridOceanModel:
             F_slow_v = (F_slow_v
                         - _r_v_bt.astype(F_slow_v.dtype) / H_v_pre
                         * (_v_bot - _V_bar_now)) * state.v_mask.data
-        _F_slow_drag_u = F_slow_u
-        _F_slow_drag_v = F_slow_v
+        _slow_drag_override = (
+            self._nemo_ws_test_hooks.slow_forcing_drag_override)
+        if _slow_drag_override is not None:
+            _slow_drag_u, _slow_drag_v = _slow_drag_override
+            F_slow_u = F_slow_u.at[:, 1:].set(_slow_drag_u)
+            F_slow_v = F_slow_v.at[1:, :].set(_slow_drag_v)
+            _F_slow_drag_u = F_slow_u
+            _F_slow_drag_v = F_slow_v
+            F_slow_u = nemo_source_round(
+                F_slow_u + _wind_increment_u) * state.u_mask.data
+            F_slow_v = nemo_source_round(
+                F_slow_v + _wind_increment_v) * state.v_mask.data
+            _F_slow_wind_u = F_slow_u
+            _F_slow_wind_v = F_slow_v
+        else:
+            _F_slow_drag_u = F_slow_u
+            _F_slow_drag_v = F_slow_v
 
         # A2 — depth-mean biharmonic hyperviscosity on (U_bar, V_bar).
         # Damps the barotropic standing mode at deep cells next to steep

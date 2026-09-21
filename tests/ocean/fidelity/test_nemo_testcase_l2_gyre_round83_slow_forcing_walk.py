@@ -468,3 +468,24 @@ def test_round142_rhs_ulp_plant_changes_one_consumed_word() -> None:
     changed = np.asarray(WALK._round142_u_depth_reduction(
         np.ones_like(rhs), planted, np.ones((1, 1), dtype=np.float64)))
     assert changed[0, 0].view(np.uint64) != baseline[0, 0].view(np.uint64)
+
+
+def test_round143_overrides_are_private_default_off_and_registered() -> None:
+    hooks = WALK.model_module._NEMOWSRK3TestHooks()
+    for hook_name in (
+            "slow_forcing_depth_override", "slow_forcing_drag_override"):
+        assert getattr(hooks, hook_name) is None
+        assert hook_name not in WALK.model_module.LatLonCGridOceanConfig._fields
+    WALK._validate_round143_registry(WALK.ROUND143_DIRECTED_REGISTRY)
+    with pytest.raises(RuntimeError, match="registry changed"):
+        WALK._validate_round143_registry(WALK.ROUND143_DIRECTED_REGISTRY[:-1])
+
+
+def test_round143_depth_ulp_changes_exactly_one_active_word() -> None:
+    depth = np.asarray([[0.0, 2.0], [3.0, 1.0]], dtype=np.float64)
+    active = np.asarray([[False, True], [True, True]])
+    planted, location = WALK._round143_depth_ulp(depth, active)
+    assert location == (1, 0)
+    assert np.count_nonzero(
+        planted.view(np.uint64) != depth.view(np.uint64)) == 1
+    assert planted[location] == np.nextafter(depth[location], np.inf)
