@@ -320,3 +320,22 @@ def test_bin_sums_hand_values_and_sector_index_wrap():
                       air_in=np.array([[True]]))
     assert dry[0, 0].tolist() == [0.0, 0.0, 0.0, 2.0, 2.0]
     assert cw.bin_sums(np.array([[0.0]]), np.array([[2.0]]), np.array([[0]]), np.array([[0]]), np.array([[True]]))[0, 0, 4] == 0.0
+
+
+def test_inflow_air_state_weights_only_entering_air_and_returns_rh():
+    import numpy as np
+    w = np.array([[2.0, -1.0], [1.0, 0.0]]); q = np.array([[1e-3, 9.0], [3e-3, 9.0]])
+    T = np.array([[250.0, 999.0], [260.0, 999.0]]); q_sat = np.array([[2e-3, 1.0], [6e-3, 1.0]])
+    layer = np.zeros((2, 2), int); sector = np.zeros((2, 2), int)
+    S = cw.inflow_air_state(w, q, T, q_sat, layer, sector, np.ones((2, 2), bool))
+    M, qm, Tm, rh = S[0, 0]
+    assert M == 3.0 and qm == pytest.approx((2 * 1e-3 + 1 * 3e-3) / 3) and Tm == pytest.approx((2 * 250 + 260) / 3)
+    assert rh == pytest.approx((2 * 1e-3 + 3e-3) / (2 * 2e-3 + 6e-3))      # both entering elements at RH 0.5
+    assert np.isnan(S[1, 0, 0]) and np.isnan(S[0, 1, 0])                    # bins with no entering air
+    # the ERA5 path: uniform northward flow, q = q_sat/2 everywhere -> RH 0.5, T as given
+    plev = np.array([500.0, 700.0, 850.0, 1000.0]) * 100.0; lon = np.arange(0.0, 360.0, 30.0)
+    from legoesm.thermo import saturation_mixing_ratio
+    Tf = np.full((plev.size, lon.size), 255.0)
+    rs = np.asarray(saturation_mixing_ratio(Tf, plev[:, None] * np.ones_like(Tf))); qs = rs / (1 + rs)
+    A = cw.era5_boundary_transport(np.ones_like(Tf), 0.5 * qs, np.full(lon.size, 1000e2), lon, plev, 72.5, T=Tf)
+    assert np.nanmax(np.abs(A[..., 3] - 0.5)) < 1e-12 and np.nanmax(np.abs(A[..., 2] - 255.0)) < 1e-12

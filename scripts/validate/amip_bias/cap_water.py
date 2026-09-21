@@ -184,9 +184,9 @@ def profile(args):
     o = np.argsort(plev_e)
     Te = columns_to_plev(np.broadcast_to(plev_e[o], (lat.size, o.size)), Te[:, o], PLEV)
     qe = columns_to_plev(np.broadcast_to(plev_e[o], (lat.size, o.size)), qe[:, o], PLEV)
-    mask = lat >= args.lat_lo
+    mask = (lat >= args.lat_lo) & (lat < args.lat_hi)
     rhe_full = qe / np.asarray(saturation_mixing_ratio(np.where(np.isfinite(Te), Te, 250.0), PLEV[None, :]))
-    print(f"cap >= {args.lat_lo:g}N vs ERA5 month {month} clim; every ratio/bias over the SAME cells "
+    print(f"band {args.lat_lo:g}-{args.lat_hi:g}N vs ERA5 month {month} clim; every ratio/bias over the SAME cells "
           f"(model interpolated in log-p per column, cells without that level dropped on BOTH sides; "
           f"ERA5 columns shown are the mean over the FIRST run's supported cells; 'kept' = area fraction)")
     print(f"{'hPa':>5s} {'kept':>5s} {'T_ERA5':>7s} {'q_ERA5':>7s} {'RH_ERA5':>7s} | "
@@ -381,6 +381,28 @@ SECTORS = (("Atl 330-30", 330.0), ("Bar 30-90", 30.0), ("Sib 90-150", 90.0), ("P
            ("Ala 210-270", 210.0), ("CAA 270-330", 270.0))      # 60-degree sectors, start longitude [deg E]
 
 
+def cap_inflow_air_state(q, T, u_edge, dp, p_full, mesh, cap):
+    """``inflow_air_state`` on the model's cap boundary: edge mass weights as in
+    ``cap_transport_bins``, edge-averaged mixing ratio converted to specific
+    humidity (the ERA5 convention), edge-averaged T, q_sat from the shared
+    saturation curve at the edge-level pressure."""
+    import jax.numpy as jnp
+    from legoesm.core.operators_voronoi import cell_to_edge_avg_3d
+    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm import constants
+    c0, c1 = np.asarray(mesh.cellsOnEdge[0]), np.asarray(mesh.cellsOnEdge[1])
+    orient = np.where(cap[c1] & ~cap[c0], 1.0, 0.0) + np.where(cap[c0] & ~cap[c1], -1.0, 0.0)
+    w = orient[:, None] * np.asarray(u_edge) * np.asarray(cell_to_edge_avg_3d(jnp.asarray(dp), mesh)) \
+        * np.asarray(mesh.dvEdge)[:, None] / constants.g
+    r = np.asarray(cell_to_edge_avg_3d(jnp.asarray(q), mesh)); qs = r / (1.0 + r)
+    Te = np.asarray(cell_to_edge_avg_3d(jnp.asarray(T), mesh))
+    p_edge = np.asarray(cell_to_edge_avg_3d(jnp.asarray(p_full), mesh))
+    rs = np.asarray(saturation_mixing_ratio(jnp.asarray(Te), jnp.asarray(p_edge))); q_sat = rs / (1.0 + rs)
+    layer = np.digitize(p_edge, LAYER_BOUNDS_PA)
+    sector = sector_index(np.degrees(np.asarray(mesh.lonEdge)))[:, None] * np.ones_like(layer)
+    return inflow_air_state(w, qs, Te, q_sat, layer, sector, orient[:, None] != 0)
+
+
 def cap_transport_bins(q, u_edge, dp, p_full, mesh, cap, q_ref=None):
     """Per (layer, sector) gross inflow, gross outflow and net transport across the
     cap boundary [kg/s], the signed net change from replacing q by ``q_ref``
@@ -433,7 +455,40 @@ def bin_sums(F, chg, layer, sector, active, air_in=None):
     return out
 
 
-def era5_boundary_transport(v, q, ps, lon_deg, plev, lat_b):
+def inflow_air_state(w, q, T, q_sat, layer, sector, active):
+    """(3 layers, len(SECTORS), 4) over the elements whose AIR enters the cap
+    (``w > 0``): mass transport [kg/s], mass-weighted humidity [kg/kg], mass-
+    weighted temperature [K] and the mass-weighted relative humidity
+    sum(w q)/sum(w q_sat) (NaN where no air enters).  Both boundary
+    instruments call it with their own mass weights ``w``."""
+    out = np.full((3, len(SECTORS), 4), np.nan)
+    for li in range(3):
+        for si in range(len(SECTORS)):
+            m = (layer == li) & (sector == si) & active & (w > 0)
+            if not m.any():
+                continue
+            wm = w[m]; M = wm.sum()
+            out[li, si] = (M, (wm * q[m]).sum() / M, (wm * T[m]).sum() / M, (wm * q[m]).sum() / (wm * q_sat[m]).sum())
+    return out
+
+
+def print_inflow_air(label, S, to_hpa):
+    """Per-sector (all levels) and per-layer inflowing-air state from ``inflow_air_state``."""
+    print(f"{'':>14s}  inflowing air, {label}: mass in [hPa/day] / q [g/kg] / T [K] / RH")
+    print(f"{'':>26s}" + "".join(f"{nm:>30s}" for nm, _ in SECTORS) + f"{'ALL':>30s}")
+    rows = [(LAYER_NAMES[li], S[li:li + 1]) for li in range(3)] + [("ALL", S)]
+    for name, B in rows:
+        def cell(sub):
+            M = np.nansum(sub[..., 0])
+            if M <= 0:
+                return f"  {'-':>28s}"
+            q = np.nansum(sub[..., 0] * sub[..., 1]) / M; T = np.nansum(sub[..., 0] * sub[..., 2]) / M
+            rh = np.nansum(sub[..., 0] * sub[..., 1]) / np.nansum(sub[..., 0] * sub[..., 1] / np.where(np.isfinite(sub[..., 3]) & (sub[..., 3] > 0), sub[..., 3], np.nan))
+            return f"  {M * to_hpa:6.1f}/{q * 1e3:5.3f}/{T:6.1f}/{rh:4.2f}"
+        print(f"{'':>14s}{name:>12s}" + "".join(cell(B[:, si]) for si in range(len(SECTORS))) + cell(B))
+
+
+def era5_boundary_transport(v, q, ps, lon_deg, plev, lat_b, T=None):
     """Moisture transport across the latitude circle ``lat_b`` [deg N] from ERA5
     pressure-level fields already interpolated to that circle: ``v`` and ``q``
     (nlev, nlon) [m/s northward; kg per kg of the air that ``dp/g`` weighs,
@@ -454,7 +509,9 @@ def era5_boundary_transport(v, q, ps, lon_deg, plev, lat_b):
     Layers by the level pressure, as the model uses the edge-level pressure:
     a slab straddling 600 or 800 hPa is counted whole on the side its centre
     lies (totals are exact, per-layer rows carry a half-slab caveat on both
-    sides of the comparison).
+    sides of the comparison).  With ``T`` (nlev, nlon) [K] the INFLOWING-air
+    state of ``inflow_air_state`` is returned instead (q_sat from the shared
+    saturation curve at the level pressure, as specific humidity).
     """
     from legoesm import constants
     v, q, ps, plev = (np.asarray(a, dtype=np.float64) for a in (v, q, ps, plev))
@@ -475,6 +532,11 @@ def era5_boundary_transport(v, q, ps, lon_deg, plev, lat_b):
     F = v * q * w
     layer = np.digitize(plev, LAYER_BOUNDS_PA)[:, None] * np.ones_like(F, dtype=int)
     sector = sector_index(lon)[None, :] * np.ones_like(F, dtype=int)
+    if T is not None:
+        from legoesm.thermo import saturation_mixing_ratio
+        q_sat = np.asarray(saturation_mixing_ratio(np.asarray(T, dtype=np.float64), plev[:, None] * np.ones_like(F)))
+        q_sat = q_sat / (1.0 + q_sat)                                          # mixing ratio -> specific, like q
+        return inflow_air_state(v * w, q, np.asarray(T, dtype=np.float64), q_sat, layer, sector, np.ones(F.shape, bool))
     return bin_sums(F, np.zeros_like(F), layer, sector, np.ones(F.shape, bool))
 
 
@@ -543,14 +605,16 @@ def era5_transport(args):
     stems = dict(kv.split("=") for kv in args.stems.split(","))
     d = {k: era5_daily(f"{args.era5_dir}/{stems[k]}.nc", v).sel(time=slice(*args.dates))
          for k, v in (("v", "var132"), ("q", "var133"), ("ps", "var134"))}
+    if "T" in stems:
+        d["T"] = era5_daily(f"{args.era5_dir}/{stems['T']}.nc", "var130").sel(time=slice(*args.dates))
     n = d["v"].time.size
     if n == 0 or any(x.time.size != n for x in d.values()):
         raise SystemExit(f"FATAL: ERA5 dates {args.dates}: {[int(x.time.size) for x in d.values()]} samples")
-    for k in ("q", "ps"):
-        if not np.array_equal(d[k].time.values, d["v"].time.values) or not np.array_equal(d[k].lon.values, d["v"].lon.values):
+    for k in d:
+        if k != "v" and (not np.array_equal(d[k].time.values, d["v"].time.values) or not np.array_equal(d[k].lon.values, d["v"].lon.values)):
             raise SystemExit(f"FATAL: ERA5 {k}: time/lon axis differs from v")
-    if not np.array_equal(d["q"].plev.values, d["v"].plev.values):
-        raise SystemExit("FATAL: ERA5 q: plev axis differs from v")
+        if k in ("q", "T") and not np.array_equal(d[k].plev.values, d["v"].plev.values):
+            raise SystemExit(f"FATAL: ERA5 {k}: plev axis differs from v")
     if args.hour is not None:
         d = {k: x.sel(time=x.time.dt.hour == args.hour) for k, x in d.items()}
         n = d["v"].time.size
@@ -575,13 +639,15 @@ def era5_transport(args):
           f"files {args.era5_dir}/{{{args.stems}}}; plev {plev[0]/100:g}-{plev[-1]/100:g} hPa ({plev.size}); "
           f"cap_water @ {sha or 'unknown'}")
     print(f"{'time':>16s} {'in':>8s} {'out':>8s} {'net':>8s} {'mass net':>9s}")
-    bins, mass = [], []
+    bins, mass, air = [], [], []
     for t in range(n):
         q = np.asarray(d["q"].isel(time=t), dtype=np.float64)                 # specific humidity on total-air dp
         v, ps = np.asarray(d["v"].isel(time=t)), np.asarray(d["ps"].isel(time=t))
         b = era5_boundary_transport(v, q, ps, lon, plev, args.lat) * to_mm
         m = era5_boundary_transport(v, np.ones_like(q), ps, lon, plev, args.lat) * to_hpa
         bins.append(b); mass.append(m)
+        if "T" in d:
+            air.append(era5_boundary_transport(v, q, ps, lon, plev, args.lat, T=np.asarray(d["T"].isel(time=t))))
         T, M = b.sum(axis=(0, 1)), m.sum(axis=(0, 1))
         if n <= 31:
             print(f"{str(d['v'].time.values[t])[:16]:>16s} {T[0]:8.3f} {T[1]:8.3f} {T[2]:8.3f} {M[2]:9.1f}")
@@ -589,11 +655,26 @@ def era5_transport(args):
     B, M = np.mean(bins, axis=0), np.mean(mass, axis=0)
     print(f"{'ERA5':>14s}: net import {label} {B.sum(axis=(0, 1))[2]:+.3f} mm/day (mass net {M.sum(axis=(0, 1))[2]:+.1f} hPa/day)")
     print_bin_tables([(label, B, "mm/day over the cap"), (f"AIR MASS, {label}", M, "hPa/day of cap-mean p_s")], False)
+    if air:
+        # time mean of the inflow state = inflow-mass-weighted over samples (mass-weighted q, T, RH)
+        A = np.asarray(air); Mw = np.nan_to_num(A[..., 0])
+        S = np.full(A.shape[1:], np.nan); Msum = Mw.sum(0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            S[..., 0] = Msum
+            for j in (1, 2):
+                S[..., j] = np.nansum(Mw * A[..., j], axis=0) / Msum
+            S[..., 3] = np.nansum(Mw * A[..., 1], axis=0) / np.nansum(Mw * A[..., 1] / A[..., 3], axis=0)
+        S[..., 0] /= n
+        print_inflow_air(label, S, to_hpa)
+    else:
+        S = None
     if args.json:
         json.dump({"dates": list(args.dates), "n": int(n), "lat": args.lat, "stems": args.stems, "cap_water": sha,
                    "sectors": [nm for nm, _ in SECTORS], "layers": list(LAYER_NAMES),
                    "moisture_mm_day": B.tolist(), "mass_hpa_day": M.tolist(),
                    "times": [str(t)[:16] for t in d["v"].time.values],
+                   "inflow_air": (S.tolist() if air else None),
+                   "inflow_air_columns": ["mass_in_kg_s_per_sample", "q_kg_kg", "T_K", "RH"],
                    "samples_moisture_mm_day": np.asarray(bins).tolist(), "samples_mass_hpa_day": np.asarray(mass).tolist()},
                   open(args.json, "w"))
     return 0
@@ -651,6 +732,7 @@ def transport(args):
                 a.setdefault("mass_bins", []).append(bm * constants.g / A * 86400.0 / 100.0)
             b = cap_transport_bins(st["trc_q_v"], st["u_edge"], st["dp"], st["p_full"], mesh, cap,
                                    qref if args.era5_q else None)
+            a.setdefault("air", []).append(cap_inflow_air_state(st["trc_q_v"], st["T"], st["u_edge"], st["dp"], st["p_full"], mesh, cap))
             tot = b.sum(axis=(0, 1))
             if not np.allclose(tot[:3], (gin, gout, net), rtol=1e-9, atol=1e-6):
                 raise SystemExit(f"FATAL: {spec}: bins {tot[:3]} do not recover the totals {(gin, gout, net)}")
@@ -682,6 +764,14 @@ def transport(args):
                 tables.append((f"AIR MASS, trapezoid days {a['days'][0]:g}-{a['days'][-1]:g}", trapezoid(a["mass_bins"]),
                                "hPa/day of cap-mean p_s"))
             print_bin_tables(tables, args.era5_q)
+            A = np.asarray(a["air"]); Mw = np.nan_to_num(A[..., 0]); Msum = Mw.sum(0)
+            S = np.full(A.shape[1:], np.nan)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                S[..., 0] = Msum / n
+                for j in (1, 2):
+                    S[..., j] = np.nansum(Mw * A[..., j], axis=0) / Msum
+                S[..., 3] = np.nansum(Mw * A[..., 1], axis=0) / np.nansum(Mw * A[..., 1] / A[..., 3], axis=0)
+            print_inflow_air(f"mean of {n} snapshots days {a['days'][0]:g}-{a['days'][-1]:g}", S, constants.g / a["A"] * 86400.0 / 100.0)
         if run in era5acc:
             e = era5acc[run]
             print(f"{'':>14s}  ERA5-humidity replacement, trapezoid: extra gross inflow {tz(e['extra']):+.3f} mm/day; "
@@ -693,6 +783,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("profile"); p.add_argument("specs", nargs="+"); p.add_argument("--lat-lo", type=float, default=75.0)
+    p.add_argument("--lat-hi", type=float, default=90.01, help="band upper latitude (exclusive)")
     p.set_defaults(fn=profile)
     l = sub.add_parser("loop"); l.add_argument("specs", nargs="+"); l.set_defaults(fn=loop)
     t = sub.add_parser("transport"); t.add_argument("specs", nargs="+"); t.set_defaults(fn=transport)
