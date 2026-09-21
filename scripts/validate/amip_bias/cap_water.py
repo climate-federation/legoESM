@@ -150,6 +150,8 @@ def load_state(run, day):
         raise SystemExit(f"FATAL: {run} day {day}: pressure not increasing top-down")
     st["p_full"] = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
     st["dp"] = np.diff(p_half, axis=1)
+    for k in ("trc_q_c", "trc_q_i"):
+        st[k] = np.asarray(z[k], dtype=np.float64)[order] if k in z.files else None
     for k in ("T", "trc_q_v"):
         if not np.isfinite(st[k]).all() or st[k].shape != st["p_full"].shape:
             raise SystemExit(f"FATAL: {run} day {day}: bad {k}")
@@ -276,12 +278,81 @@ def loop(args):
     return 0
 
 
+def cap_moisture_transport(q, u_edge, dp, mesh, cap):
+    """Column-integrated moisture transport across the boundary of the cell set
+    ``cap`` [kg/s]: (gross inflow, gross outflow, net) plus the same net from
+    the model's own divergence operator, the closure check on the edge selection.
+
+    The edge flux is the model's tracer flux (``tracer_horizontal_advection``:
+    ``cell_to_edge_avg`` of q times the edge-normal wind), mass-weighted with
+    the edge-averaged layer thickness and summed over levels.  ``u_edge`` is
+    positive from ``cellsOnEdge[0]`` to ``cellsOnEdge[1]`` (``edgeSignOnCell``
+    is +1 for that first cell), so an edge with only its second cell inside
+    the cap carries ``+F`` inward and one with only its first cell inside
+    carries ``-F`` inward.  Interior edges cancel in the area-integrated
+    divergence, so ``-sum_cap(area * div)`` must equal the boundary sum.
+    """
+    import jax.numpy as jnp
+    from legoesm.core.operators_voronoi import cell_to_edge_avg_3d, divergence_cell_3d
+    from legoesm import constants
+    q, u_edge, dp = jnp.asarray(q), jnp.asarray(u_edge), jnp.asarray(dp)
+    flux = cell_to_edge_avg_3d(q, mesh) * u_edge * cell_to_edge_avg_3d(dp, mesh) / constants.g
+    F = np.asarray(jnp.sum(flux, axis=1) * mesh.dvEdge, dtype=np.float64)   # (nEdges,) kg/s
+    c0, c1 = np.asarray(mesh.cellsOnEdge[0]), np.asarray(mesh.cellsOnEdge[1])
+    inward = np.where(cap[c1] & ~cap[c0], F, 0.0) + np.where(cap[c0] & ~cap[c1], -F, 0.0)
+    div = np.asarray(jnp.sum(divergence_cell_3d(flux, mesh), axis=1), dtype=np.float64)
+    net_div = -float((np.asarray(mesh.areaCell, dtype=np.float64) * div)[cap].sum())
+    return float(inward[inward > 0].sum()), float(inward[inward < 0].sum()), float(inward.sum()), net_div
+
+
+def transport(args):
+    """Moisture import into the cap (lat >= --lat) per checkpoint, mm/day over the cap area:
+    gross in, gross out, net, and the time means of the per-snapshot products (transient
+    included) vs the product of the time-mean fields (mean-flow part)."""
+    from legoesm.grids.factory import create_grid
+    print(f"moisture transport across lat >= {args.lat:g} [mm/day over the cap area]; vapour and condensate separately")
+    print(f"{'run:day':>14s} {'in':>8s} {'out':>8s} {'net':>8s} {'closure':>9s} {'cond net':>9s} {'prw':>7s}")
+    meshes, acc = {}, {}
+    for spec in args.specs:
+        run, day = spec.split(":")
+        st, lat, lon, area, order = load_state(run, int(day))
+        if st["u_edge"] is None or not st["order_is_identity"]:
+            raise SystemExit(f"FATAL: {spec}: needs edge winds and identity column order")
+        res = int(st["exp"]["grid"]["resolution"])
+        if res not in meshes:
+            meshes[res] = create_grid("mpas", resolution=res)
+        mesh = meshes[res]
+        if st["u_edge"].shape[0] != np.asarray(mesh.dvEdge).shape[0]:
+            raise SystemExit(f"FATAL: {spec}: edge count {st['u_edge'].shape[0]} != mesh")
+        cap = np.asarray(lat >= args.lat)
+        A = float(area[cap].sum())
+        to_mm = 86400.0 / A
+        gin, gout, net, net_div = cap_moisture_transport(st["trc_q_v"], st["u_edge"], st["dp"], mesh, cap)
+        if abs(net - net_div) > 1e-6 * max(abs(gin), abs(gout), 1.0):
+            raise SystemExit(f"FATAL: {spec}: boundary sum {net:.4g} != -area*div {net_div:.4g}")
+        cnet = (cap_moisture_transport(st["trc_q_c"] + st["trc_q_i"], st["u_edge"], st["dp"], mesh, cap)[2]
+                if st["trc_q_c"] is not None and st["trc_q_i"] is not None else float("nan"))
+        prw = float(area_mean(np.asarray(column_water_vapor(st["trc_q_v"], st["p_s"], None, dp=st["dp"])), area, cap))
+        print(f"{spec:>14s} {gin*to_mm:8.3f} {gout*to_mm:8.3f} {net*to_mm:8.3f} {(net-net_div)*to_mm:9.1e} {cnet*to_mm:9.4f} {prw:7.2f}")
+        a = acc.setdefault(run, {"n": 0, "net": 0.0, "q": 0.0, "u": 0.0, "dp": 0.0, "mesh": mesh, "cap": cap, "A": A})
+        a["n"] += 1; a["net"] += net * to_mm
+        a["q"] = a["q"] + st["trc_q_v"]; a["u"] = a["u"] + st["u_edge"]; a["dp"] = a["dp"] + st["dp"]
+    for run, a in acc.items():
+        n = a["n"]
+        mean_net = cap_moisture_transport(a["q"] / n, a["u"] / n, a["dp"] / n, a["mesh"], a["cap"])[2] * 86400.0 / a["A"]
+        print(f"{run:>14s}: time-mean of snapshot products {a['net']/n:+.3f} mm/day over {n} snapshots; "
+              f"product of time-mean fields {mean_net:+.3f}; transient part {a['net']/n - mean_net:+.3f}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("profile"); p.add_argument("specs", nargs="+"); p.add_argument("--lat-lo", type=float, default=75.0)
     p.set_defaults(fn=profile)
     l = sub.add_parser("loop"); l.add_argument("specs", nargs="+"); l.set_defaults(fn=loop)
+    t = sub.add_parser("transport"); t.add_argument("specs", nargs="+"); t.set_defaults(fn=transport)
+    t.add_argument("--lat", type=float, default=72.5, help="cap boundary latitude [deg N]")
     l.add_argument("--dome-max-z", type=float, default=5.0, help="max model surface height [m] of a dome cell")
     args = ap.parse_args(argv)
     import jax

@@ -91,3 +91,29 @@ def test_load_state_layer_thickness_closes_the_column(tmp_path, monkeypatch):
     p_top = vg[0][0] * constants.p_ref
     assert np.allclose(st["dp"].sum(axis=1), st["p_s"] - p_top)
     assert np.all(st["dp"] > 0)
+
+
+def test_cap_moisture_transport_boundary_sum_matches_the_divergence_operator():
+    """One unit of edge flux across a single boundary edge of the northern cap: gross in/out
+    follow the edge orientation, the net equals -sum(area*div) to round-off."""
+    import numpy as np
+    from legoesm import constants
+    from legoesm.grids.factory import create_grid
+    mesh = create_grid("mpas", resolution=2)
+    lat = np.asarray(mesh.latCell); cap = lat >= 0.0
+    c0, c1 = np.asarray(mesh.cellsOnEdge[0]), np.asarray(mesh.cellsOnEdge[1])
+    boundary = np.where(cap[c0] != cap[c1])[0]
+    e_in = next(e for e in boundary if cap[c1[e]])        # flow c0 -> c1 enters the cap
+    e_out = next(e for e in boundary if cap[c0[e]])       # flow c0 -> c1 leaves the cap
+    n_cells, n_edges, nlev = lat.size, c0.size, 3
+    q = np.full((n_cells, nlev), 2.0e-3); dp = np.full((n_cells, nlev), 1000.0)
+    u = np.zeros((n_edges, nlev)); u[e_in, :] = 1.0; u[e_out, :] = 0.5
+    gin, gout, net, net_div = cw.cap_moisture_transport(q, u, dp, mesh, cap)
+    unit = 2.0e-3 * 1000.0 / constants.g * nlev
+    assert gin == pytest.approx(unit * float(mesh.dvEdge[e_in]), rel=1e-6)
+    assert gout == pytest.approx(-0.5 * unit * float(mesh.dvEdge[e_out]), rel=1e-6)
+    assert net == pytest.approx(gin + gout, rel=1e-6) and net_div == pytest.approx(net, rel=1e-6)
+    # an interior edge moves nothing across the boundary
+    e_int = next(e for e in range(n_edges) if cap[c0[e]] and cap[c1[e]])
+    u2 = np.zeros_like(u); u2[e_int, :] = 3.0
+    assert cw.cap_moisture_transport(q, u2, dp, mesh, cap)[2] == pytest.approx(0.0, abs=1e-9)
