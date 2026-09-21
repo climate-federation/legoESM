@@ -1236,6 +1236,7 @@ def _round141_rhs_callback_trace(
             eta_after_override=eta_after_override,
             traced_hooks=hooks,
             plain_hooks=model_module._NEMOWSRK3TestHooks(),
+            require_state_identity=False,
         )
         require(rhs_captures, f"Round-141 RHS {face} callback did not fire")
         require(final_captures,
@@ -1301,9 +1302,6 @@ def measure_round141_rhs_developed(args) -> dict[str, object]:
         args, card, state, freshwater, surface, jnp.asarray(payload["ssha"]))
     control_trace, control_final = _round140_callback_trace(
         args, card, state, freshwater, surface, jnp.asarray(payload["ssha"]))
-    require(all(trace.trace_state_identity["bit_exact"]
-                for trace in minimal_traces.values()),
-            "Round-141 one-face RHS callback moved the returned production state")
     require(control_trace.trace_state_identity["bit_exact"],
             "Round-140 control callback moved the returned production state")
     callback_identity = {
@@ -1315,9 +1313,43 @@ def measure_round141_rhs_developed(args) -> dict[str, object]:
         }
         for face in ("u", "v")
     }
-    require(all(row["bit_exact"] for rows in callback_identity.values()
-                for row in rows.values()),
-            "Round-141 RHS callback moved an external-forcing boundary")
+    observer_state_bit = all(
+        trace.trace_state_identity["bit_exact"]
+        for trace in minimal_traces.values())
+    observer_external_bit = all(
+        row["bit_exact"] for rows in callback_identity.values()
+        for row in rows.values())
+    if not (observer_state_bit and observer_external_bit):
+        return {
+            "format": "nemo-testcase-l2-gyre-round141-rhs-walk-v1",
+            "status": "REFUTED-NONPASSIVE-OBSERVER", "worktree": stamp,
+            "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
+            "entry": entry, "record_admission": admission,
+            "record_replay": validate_round140_rhs_replay(record),
+            "observer_state_identity": {
+                face: trace.trace_state_identity
+                for face, trace in minimal_traces.items()},
+            "control_state_identity": control_trace.trace_state_identity,
+            "observer_external_boundary_identity": callback_identity,
+            "same_run_boundary_calibration": boundary_calibration,
+            "first_non_bit_operand": None,
+            "rows": {},
+            "predictions": {
+                "observer_state_bit": observer_state_bit,
+                "observer_external_boundaries_bit": observer_external_bit,
+            },
+            "all_frozen_predictions_confirmed": False,
+            "scientific_rows_withheld": True,
+            "plant": args.plant, "plant_fires": False,
+            "scope": {
+                "production_physics_changed": False,
+                "day_240_carry": "UNMEASURED",
+                "DINO": "NO-PRODUCTION-CHANGE",
+                "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+                "OVERFLOW": "NO-PRODUCTION-CHANGE",
+                "ORCA2": "UNMEASURED-WITH-SPEC; GYRE diagnostic only",
+            },
+        }
 
     h_k = compute_layer_thickness(
         state.eta.data, state.H_bathy.data, card.recipe.z_coord,
@@ -1395,12 +1427,8 @@ def measure_round141_rhs_developed(args) -> dict[str, object]:
             and rows["reciprocal_v"]["bit_exact"]),
         "rhs_u_first": bool(first is not None and first["boundary"] == "rhs_u"),
         "rhs_v_non_bit": not rows["rhs_v"]["bit_exact"],
-        "callback_returned_state_bit": all(
-            trace.trace_state_identity["bit_exact"]
-            for trace in minimal_traces.values()),
-        "callback_external_boundaries_bit": all(
-            row["bit_exact"] for values in callback_identity.values()
-            for row in values.values()),
+        "callback_returned_state_bit": observer_state_bit,
+        "callback_external_boundaries_bit": observer_external_bit,
         "same_run_post_wind_boundary_bit": all(
             row["bit_exact"] for row in boundary_calibration.values()),
     }

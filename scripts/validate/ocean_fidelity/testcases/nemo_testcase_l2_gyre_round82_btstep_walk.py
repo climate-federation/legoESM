@@ -195,7 +195,8 @@ def _context(args):
 
 def _capture_external_context(args, card, seeded, freshwater, surface, *,
                               base=None, eta_after_override=None,
-                              traced_hooks=None, plain_hooks=None):
+                              traced_hooks=None, plain_hooks=None,
+                              require_state_identity=True):
     """Capture all external substeps in one complete production closure."""
     captures = []
     real_barotropic = model_module.barotropic_substeps_latlon_cgrid
@@ -256,8 +257,9 @@ def _capture_external_context(args, card, seeded, freshwater, surface, *,
         plain_model, seeded, card.dt_s, freshwater, surface,
         args.execution_mode, eta_after_override=eta_after_override))
     trace_identity = _pytree_identity(traced_state, plain_state)
-    require(trace_identity["bit_exact"],
-            "full-step substep capture moved the returned production state")
+    if require_state_identity:
+        require(trace_identity["bit_exact"],
+                "full-step substep capture moved the returned production state")
     captured = captures[0]
     trace = SimpleNamespace(
         state_after=traced_state,
