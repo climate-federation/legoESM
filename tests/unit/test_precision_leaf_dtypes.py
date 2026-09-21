@@ -59,6 +59,16 @@ def _cast_to_storage(state, storage):
 
 
 def _run_mpas(mode):
+    """MPAS PE — the NEGATIVE control, and it is labelled as one.
+
+    Measured: this core does not promote in mixed even without the
+    step-boundary re-cast (its tendencies are cast explicitly, the mass fixer
+    touches only ``p_s``, and the positivity stage casts its weights to the
+    tracer dtype).  So this row cannot go red by removing the MPAS
+    finalization — it is here to show the re-cast does not BREAK a core that
+    was already clean, and the discriminating rows are the lat-lon and cube
+    ones.  Recorded so nobody reads a green MPAS row as coverage it is not.
+    """
     from legoesm.runtime.precision import apply_precision
 
     apply_precision(mode)
