@@ -217,6 +217,121 @@ def column_store_snapshot_column(p_s, dsigma, T, *species, dp=None,
                      axis=-1)
 
 
+# ---------------------------------------------------------------------------
+# TOTAL energy (#1354)
+# ---------------------------------------------------------------------------
+#
+# The ledger's ``energy`` column is DRY ENTHALPY, ``c_pd * int T dp/g``.  That
+# is the right quantity for attributing HEATING, and the wrong one for
+# attributing a LEAK, because dry enthalpy is not conserved by adiabatic
+# dynamics: a perfectly conserving core converts enthalpy into geopotential
+# and kinetic energy all the time, and every joule of that conversion lands in
+# the ``dynamics`` row -- which is computed as a store delta and therefore
+# cannot tell conversion from leakage.  Measured on one level-5 artifact
+# (#1354): the dynamics row reads 33 W/m^2 with no leak required to explain it.
+#
+# The helpers below supply the column the attribution actually needs.  For a
+# HYDROSTATIC atmosphere the column total energy is
+#
+#     TE = (1/g) int_0^{p_s} ( c_p T + 1/2 |v|^2 + L_v q_v - L_f q_ice ) dp
+#          + Phi_s p_s / g
+#
+# The surface term and the c_p (rather than c_v) are the same statement: the
+# geopotential integral ``int Phi dp`` is integrated by parts using the
+# hydrostatic relation, giving ``Phi_s p_s + int R_d T dp``, and
+# ``c_v + R_d = c_p``.  So the ``c_pd * int T dp/g`` the ledger already
+# computes is exactly the internal-plus-geopotential part, and what is MISSING
+# from it is kinetic energy, the latent terms, and the surface geopotential
+# term that moves when the mass fixer moves ``p_s``.
+
+
+def column_total_energy(p_s, dsigma, T, *, u=None, v=None, phis=None,
+                        q_v=None, q_ice=None, dp=None, level_weight=None):
+    """PER-COLUMN total energy [J/m^2] for a hydrostatic column (#1354).
+
+    Parameters mirror :func:`column_store_snapshot_column`.  Every optional
+    term defaults to absent rather than zero-filled, so a caller that has no
+    winds gets the enthalpy+latent energy and knows it: ``None`` means "this
+    term was not supplied", and the docstring of whatever quotes the number
+    has to say which terms were in it.
+
+    ``phis`` is the SURFACE GEOPOTENTIAL [m^2/s^2]; it enters as
+    ``phis * p_s / g``, the integrated-by-parts boundary term, and it is the
+    term that makes the total energy respond to a mass-fixer ``p_s``
+    adjustment.  Omitting it over flat ground costs nothing; omitting it over
+    topography does not.
+    """
+    ref = jnp.asarray(p_s)
+    acc = jnp.result_type(ref.dtype, jnp.float32)
+
+    def _col(x, scale):
+        if x is None:
+            return jnp.zeros(ref.shape, dtype=acc)
+        return scale * column_mass_integral(
+            apply_level_weight(x, level_weight), p_s, dsigma, dp=dp)
+
+    total = _col(T, constants.c_pd)
+    if u is not None or v is not None:
+        ke = None
+        for w in (u, v):
+            if w is None:
+                continue
+            ke = w * w if ke is None else ke + w * w
+        total = total + _col(ke, 0.5)
+    total = total + _col(q_v, constants.L_v) - _col(q_ice, constants.L_f)
+    if phis is not None:
+        total = total + jnp.asarray(phis) * ref / constants.g
+    return jnp.asarray(total, dtype=acc)
+
+
+def total_energy_entry_column(p_s, dsigma, *, dT_dt=None, du_dt=None,
+                              dv_dt=None, u=None, v=None, dq_v_dt=None,
+                              dq_ice_dt=None, dp_s_dt=None, phis=None,
+                              dp=None, level_weight=None):
+    """PER-COLUMN total-energy rate [W/m^2] for ONE process (#1354).
+
+    The time derivative of :func:`column_total_energy` holding the layer-mass
+    weights fixed, plus the surface term's own rate:
+
+        dTE/dt = c_p int dT/dt dp/g
+               + int (u du/dt + v dv/dt) dp/g
+               + L_v int dq_v/dt dp/g  -  L_f int dq_ice/dt dp/g
+               + Phi_s (dp_s/dt) / g
+
+    The kinetic term needs the CURRENT winds as well as their tendency --
+    d/dt(|v|^2/2) = v . dv/dt -- so a process that returns a momentum
+    tendency must hand over the state it was computed against, not just the
+    tendency.  A process with no momentum tendency contributes nothing there,
+    which is the common case and is why ``u``/``v`` are optional.
+
+    Holding the layer masses fixed is exact for every physics process (they
+    do not move ``p_s``) and is NOT exact for the dycore, which is why the
+    dynamics row must be filled from a pair of
+    :func:`column_total_energy` snapshots rather than from this function.
+    """
+    ref = jnp.asarray(p_s)
+    acc = jnp.result_type(ref.dtype, jnp.float32)
+    rate = jnp.zeros(ref.shape, dtype=acc)
+
+    def _col(x, scale):
+        if x is None:
+            return jnp.zeros(ref.shape, dtype=acc)
+        return scale * column_mass_integral(
+            apply_level_weight(x, level_weight), p_s, dsigma, dp=dp)
+
+    rate = rate + _col(dT_dt, constants.c_pd)
+    dke = None
+    for w, dw in ((u, du_dt), (v, dv_dt)):
+        if w is None or dw is None:
+            continue
+        dke = w * dw if dke is None else dke + w * dw
+    rate = rate + _col(dke, 1.0)
+    rate = rate + _col(dq_v_dt, constants.L_v) - _col(dq_ice_dt, constants.L_f)
+    if phis is not None and dp_s_dt is not None:
+        rate = rate + jnp.asarray(phis) * jnp.asarray(dp_s_dt) / constants.g
+    return jnp.asarray(rate, dtype=acc)
+
+
 def zero_ledger_column(n_columns, dtype=jnp.float64):
     """A zeros ``(n_columns, N_LEDGER, 2)`` per-column accumulator seed."""
     return jnp.zeros((n_columns, N_LEDGER, 2), dtype=dtype)
