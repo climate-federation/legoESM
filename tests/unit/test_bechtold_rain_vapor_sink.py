@@ -95,7 +95,7 @@ def test_legacy_spreads_by_vapour_mass_over_every_level():
     w = np.asarray(q_v * dp); w = w / w.sum(1, keepdims=True)
     expect = _col_int(form, dp)[:, None] * constants.g * w / np.asarray(dp)
     np.testing.assert_allclose(np.asarray(sink), expect, rtol=RTOL, atol=0)
-    np.testing.assert_allclose(scale, 1.0)      # legacy never rescales
+    np.testing.assert_allclose(scale, 1.0)      # legacy returns before the has_rain mask: never rescales
     assert (np.asarray(sink)[0] > 0).all() and np.all(np.asarray(sink)[1] == 0.0)
 
 
@@ -151,6 +151,9 @@ def test_float32_gradients_finite_for_zero_rain_and_exhausted_capacity(trace):
         grads = fn(*args)
         assert all(np.isfinite(np.asarray(g)).all() for g in grads)
     sink, scale = distribute_rain_vapor_sink(*args, DT, "formation")
+    if trace > 0.0:      # pin the precondition: a sub-floor trace, not the trivial form == 0
+        col_flux = float(np.sum(np.asarray(args[0][1]) * np.asarray(args[3][1]))) / constants.g
+        assert 0.0 < col_flux <= _RAIN_SINK_ZERO_FLUX
     assert np.all(np.asarray(sink)[0] == 0.0) and np.asarray(scale)[0] == 0.0
     # the sub-floor trace: scale 0 and sink 0 together, so rain == sink exactly
     assert np.all(np.asarray(sink)[1] == 0.0) and np.asarray(scale)[1] == 0.0

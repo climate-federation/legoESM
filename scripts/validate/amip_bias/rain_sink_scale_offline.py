@@ -155,7 +155,12 @@ def _run(a, rec, bcfg, lat, fl, sel, w, dt):
     rain_total = np.sum(f64(r["want"]) * f64(r["dp"]), axis=1) / g
     routed = realized - taken                       # excess that found slack
     discarded = generated - routed                  # rain deleted: (1-scale)*rain (sub-floor: all of it)
-    np.testing.assert_allclose(discarded, (1.0 - f64(r["scale"])) * rain_total, rtol=1e-5, atol=1e-15)
+    # Pairing contract, evaluated on the returned (post-mask) sink.  The
+    # bound is proportional to the column's rain, not to the discard: scale
+    # is a recorded float32 quotient (~1 ulp of rain_total), so a fixed atol
+    # below that noise fails healthy scale~1 columns (codex + GLM round 5).
+    np.testing.assert_array_less(np.abs(discarded - (1.0 - f64(r["scale"])) * rain_total),
+                                 5e-7 * rain_total + 1e-20)
     print(f"recorded cap scale over the selected columns: min {r['scale'].min():.6f}  "
           f"columns with scale<1: {np.sum(r['scale'] < 1.0)}  "
           f"levels with want>cap: {binding.sum()} of {np.sum(r['want'] > 0)} formation levels  "
