@@ -316,6 +316,7 @@ converted into pass claims.
 | `citation_suite_reanchored.log` | `2 failed, 14 passed in 1.84s` |
 | `citation_suite_reanchored_clean.log` | `1 failed, 15 passed in 1.91s` |
 | `citation_suite_reanchored_clean_v2.log` | `16 passed in 1.95s` |
+| `citation_suite_final.log` | `16 passed in 1.94s` |
 | `focused_tests.log` | `31 passed in 169.21s (0:02:49)` |
 | `focused_production_tests.log` | `40 passed in 245.90s (0:04:05)` |
 | `fail_closed_regression_tests.log` | `27 passed in 14.24s` |
