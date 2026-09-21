@@ -131,7 +131,9 @@ Preregistered R1-P4 predicted kt=10 SSH in `[0.014,0.017] m`; it is
 kt>1 differences to legoESM because no legoESM trajectory ran.  The full
 round-1 JSON is
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round1/round1_ladder.json`,
-SHA-256 `511ad246473c316c9880d6cfb25c167194e93334222096db0e3bdd151c607539`.
+SHA-256 `e8f10afa89b61d64e233834a65f528a5ac9e85287c8e7cdc5ae831de15b1c66b`.
+It stamps clean producer commit `88f759bcba02` and records SHA-256 for both
+NEMO inputs at every entry/stage checkpoint.
 
 ## 4. Exact record stop and acquisition
 
@@ -172,7 +174,10 @@ The script was syntax-checked, its patch dry-run succeeds, and its preflight
 pins the binary, deck/input manifests, source card, compiler card, frozen
 Phase-2x sources, and patch hashes.  Each staged twin also retains the
 producer's compiled `iceistate.f90` and its SHA-256 so the executing branch
-cannot be lost as it was in the older record.  It was not run by this agent.
+cannot be lost as it was in the older record.  Its final admission additionally
+stamps the clean Git worktree and requires twin equality of both the binary and
+compiled producer source before reporting their digests.  It was not run by
+this agent.
 
 ## 5. Prediction ledger
 
@@ -196,9 +201,10 @@ Shifting the ORCA2 citation by two lines made the first anchor fail at line
 444 instead of 442 and exited 1 as required; planted JSON SHA-256 is
 `47a949ce44e7efcebf1dcbba5f5bdb7c1a66c782b8f7ba2c7a60d344dbde166d`.
 
-The focused round-1 ladder plus citation tests passed 21/21 in 2.42 seconds
-(log SHA-256
-`550eadd3d42d252c52ceb67c4567d54d8e049b3659e128bd37fa8d784aab5199`).
+The final focused round-1 ladder plus citation tests passed 23/23 in 2.26
+seconds, including the clean-worktree stamp and acquisition-producer binding
+controls (log SHA-256
+`ff3a4c86341117bac6277b432a80b8ce7cd8c201c8aa7257b895325636d85bbb`).
 The required single `tests/ocean/fidelity -n 12` invocation collected 1,514
 tests, reached beyond 95% with one displayed failure and seven skips, then
 made no progress for more than the five-minute deadlock threshold used by the
