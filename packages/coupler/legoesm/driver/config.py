@@ -441,7 +441,7 @@ def parse_gwd_spec(value: str) -> str:
 
     Delegates the SEMANTICS to ``ExperimentConfig.validate_strict`` rather than
     re-implementing them: a membership-only check accepted composites strict
-    rejects -- "none+hines", "e3sm_cam+hines", "ml_emulator+hines", duplicates
+    rejects -- "none+hines", "ml_emulator+hines", duplicates
     like "hines+hines" (codex) -- so the CLI would advertise a spec the config
     then refuses. Asking the real validator keeps the two from diverging by
     construction, which is the same lesson as resolving the effective surface
@@ -483,7 +483,7 @@ def parse_gwd_spec(value: str) -> str:
 # "large_yeager") only, so an accepted "most" would silently degrade to the
 # constant-coefficient branch — a loud rejection is better than wrong physics.
 # See driver/air_sea_consistency.py.
-VALID_SURFACE_BULK = ("constant", "coare3", "large_yeager")
+VALID_SURFACE_BULK = ("constant", "coare3", "large_yeager", "large_yeager_cesm")
 
 
 class ExperimentConfig(NamedTuple):
@@ -1623,6 +1623,20 @@ class ExperimentConfig(NamedTuple):
     e3sm_cam_latitude_taper: bool = False       # E3SMFrontalConfig.latitude_taper:
                                                 # OFF, E3SM's unstructured branch
                                                 # (our grids); see that field's docs
+    # CAM6-suite additions (2026-09-21).  ``e3sm_cam_source`` also accepts a
+    # ``+``-joined set ("orographic+frontal+convective").  None = the kernel's
+    # single ``e3sm_cam_effgw`` (byte-identical); CAM6 f09 sets effgw_cm=1.0,
+    # effgw_beres_dp=0.4.  ``e3sm_cam_beres_variant``: "e3sm" (default) or
+    # "cam6" (gw_convect.F90 end-off shift, real storm speed, interface
+    # source level; see gwd_config_for).  ``e3sm_cam_mfcc_table_path``: the
+    # offline Beres table (newmfspectra40_dc25.nc); "" = stand-in spectrum.
+    e3sm_cam_effgw_cm: float | None = None      # E3SMFrontalConfig.effgw
+    e3sm_cam_effgw_beres: float | None = None   # E3SMBeresConfig.effgw
+    e3sm_cam_beres_variant: str = "e3sm"        # "e3sm" | "cam6" (also sets
+                                                # CAM's min_hdepth 1 km + row lookup)
+    e3sm_cam_mfcc_table_path: str = ""          # E3SMBeresConfig.mfcc_table_path
+    e3sm_cam_dttke_intrinsic: bool = False      # E3SMCAMConfig.dttke_use_intrinsic
+                                                # (CAM6 heating form; E3SM-3.0.1 off)
     # Appended at the tuple END to preserve the positional ABI (codex
     # 2026-07-27 flavor review, Major 1).
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
@@ -3219,13 +3233,49 @@ class ExperimentConfig(NamedTuple):
                     f"{_f} must be a positive, finite gravity-wave-drag "
                     f"parameter, got {_v!r}"
                 )
-        if self.e3sm_cam_source not in (
-                "orographic", "frontal", "convective", "background"):
+        _e3sm_parts = str(self.e3sm_cam_source).split("+")
+        _e3sm_valid = ("orographic", "frontal", "convective", "background")
+        if self.e3sm_cam_source not in _e3sm_valid and (
+                any(p not in _e3sm_valid for p in _e3sm_parts)
+                or len(set(_e3sm_parts)) != len(_e3sm_parts)):
             errors.append(
-                f"e3sm_cam_source must be one of "
-                f"('orographic', 'frontal', 'convective', 'background'), "
-                f"got {self.e3sm_cam_source!r}"
+                f"e3sm_cam_source must be one of {_e3sm_valid} or a "
+                f"'+'-joined set of distinct ones, got {self.e3sm_cam_source!r}"
             )
+        if ("convective" in _e3sm_parts
+                and "e3sm_cam" in str(self.gravity_wave_drag).split("+")
+                and self.convection == "none"):
+            errors.append(
+                "e3sm_cam_source includes 'convective' (Beres) but "
+                "convection='none': no scheme publishes the convective "
+                "heating the Beres source reads, so it would launch nothing "
+                "(silent no-op)"
+            )
+        for _f in ("e3sm_cam_effgw_cm", "e3sm_cam_effgw_beres"):
+            _v = getattr(self, _f)
+            if _v is not None and (
+                    not math.isfinite(_v) or _v <= 0.0 or _v > 1.0):
+                errors.append(
+                    f"{_f} must be None or a finite efficiency in (0, 1], "
+                    f"got {_v!r}"
+                )
+        if not isinstance(self.e3sm_cam_dttke_intrinsic, bool):
+            errors.append(
+                f"e3sm_cam_dttke_intrinsic must be a bool, "
+                f"got {self.e3sm_cam_dttke_intrinsic!r}"
+            )
+        if self.e3sm_cam_beres_variant not in ("e3sm", "cam6"):
+            errors.append(
+                f"e3sm_cam_beres_variant must be one of ('e3sm', 'cam6'), "
+                f"got {self.e3sm_cam_beres_variant!r}"
+            )
+        if self.e3sm_cam_mfcc_table_path:
+            if not os.path.isfile(self.e3sm_cam_mfcc_table_path):
+                errors.append(
+                    f"e3sm_cam_mfcc_table_path={self.e3sm_cam_mfcc_table_path!r} "
+                    f"does not exist (the Beres table would silently fall "
+                    f"back to nothing at build time)"
+                )
         if isinstance(self.e3sm_cam_pgwv, bool) or \
                 not isinstance(self.e3sm_cam_pgwv, int) or \
                 self.e3sm_cam_pgwv < 0:
@@ -3233,7 +3283,7 @@ class ExperimentConfig(NamedTuple):
                 f"e3sm_cam_pgwv must be an int >= 0, "
                 f"got {self.e3sm_cam_pgwv!r}"
             )
-        if self.e3sm_cam_source in ("frontal", "background") and \
+        if any(p in ("frontal", "background") for p in _e3sm_parts) and \
                 self.e3sm_cam_pgwv < 1:
             errors.append(
                 f"e3sm_cam_pgwv must be >= 1 for a launch-everywhere "
@@ -3287,14 +3337,16 @@ class ExperimentConfig(NamedTuple):
             _ov = getattr(self, "gravity_wave_drag_override", None)
             _e3sm_src = (getattr(getattr(_ov, "e3sm_cam", None), "source", None)
                          if _ov is not None else None) or self.e3sm_cam_source
-            if "e3sm_cam" in _gwd_parts and _e3sm_src != "background":
+            if ("e3sm_cam" in _gwd_parts
+                    and "orographic" in str(_e3sm_src).split("+")
+                    and any(p in ("lindzen", "mcfarlane") for p in _gwd_parts)):
                 errors.append(
-                    f"gravity_wave_drag {self.gravity_wave_drag!r} may only "
-                    f"composite e3sm_cam with e3sm_cam_source='background'; "
-                    f"got e3sm_cam_source={_e3sm_src!r} "
-                    f"(orographic double-counts topographic drag against "
-                    f"lindzen/mcfarlane; frontal/convective need per-column "
-                    f"source fields the composite does not carry)"
+                    f"composite gravity_wave_drag {self.gravity_wave_drag!r} "
+                    f"pairs e3sm_cam's orographic source with lindzen/mcfarlane "
+                    f"(e3sm_cam_source={_e3sm_src!r}): topographic drag would "
+                    f"be double-counted; use frontal/convective/background "
+                    f"sources there, or run e3sm_cam alone with "
+                    f"'orographic+frontal+convective'"
                 )
             # Mirror get_gwd_fn's runtime rule so a duplicate composite
             # fails HERE, not later during physics construction.

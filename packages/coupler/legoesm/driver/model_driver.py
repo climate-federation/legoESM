@@ -10610,6 +10610,9 @@ class ModelDriver:
                 # is the correct pre-feature state (no convective cloud was
                 # diagnosed before it existed).
                 "conv_precip",
+                # conv_heating (2026-09-21): the Beres convective-source lag
+                # carry; zero-seed = no convective heating before the feature.
+                "conv_heating",
             })
             if _any_physstate:
                 from legoesm.atmosphere.physics.physics_state import (

@@ -78,8 +78,11 @@ def _tend(cfg):
 def test_composite_with_background_is_member_sum():
     name, fn, _ = get_gwd_fn(GravityWaveDragConfig(scheme="mcfarlane+e3sm_cam", e3sm_cam=BG))
     assert name == "mcfarlane+e3sm_cam" and callable(fn)
-    for bad in ("orographic", "frontal", "convective"):
-        with pytest.raises(ValueError, match="background"):
+    # Since the CAM6 suite (2026-09-21) the frontal/convective source fields are
+    # threaded through the composite, so only e3sm_cam's own OROGRAPHIC source is
+    # non-composable next to lindzen/mcfarlane (double-counted topographic drag).
+    for bad in ("orographic",):
+        with pytest.raises(ValueError, match="[Nn]on-composable"):
             get_gwd_fn(GravityWaveDragConfig(scheme="mcfarlane+e3sm_cam",
                                              e3sm_cam=BG._replace(source=bad)))
     t_c = _tend(GravityWaveDragConfig(scheme="mcfarlane+e3sm_cam", e3sm_cam=BG))
