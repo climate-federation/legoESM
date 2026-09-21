@@ -172,6 +172,30 @@ def build_latlon_config(args):
         "--ic", "standard",
     ]
     parsed = ra.build_arg_parser().parse_args(argv)
+    # Land surface model.  This lane builds its ExperimentConfig from a FIXED
+    # argv that passes no land flags and no --topography, so until now it
+    # resolved to "none" — meaning NO land surface model at all: land skin
+    # temperature falls back to the neighbouring prescribed SST minus a lapse
+    # rate, with no soil, no water store and no stomatal control.  That was a
+    # default nobody had chosen, which is the shape of failure this repo has
+    # paid for before, so the choice is now explicit and printed.
+    #
+    # The switches come from the land package's own mapping rather than being
+    # spelled out here, so this driver and run_amip cannot drift apart.
+    from legoesm.land.config import describe_land_model, land_model_switches
+    for _field, _value in land_model_switches(args.land_model).items():
+        setattr(parsed, _field, _value)
+    if getattr(args, "land_mask_file", ""):
+        parsed.land_mask_file = args.land_mask_file
+    logger.info(
+        "Land surface model: %s (slab_land_active=%s, use_multilayer_land=%s, "
+        "land_mask_file=%s)",
+        describe_land_model(
+            slab_land_active=parsed.slab_land_active,
+            use_multilayer_land=parsed.use_multilayer_land,
+            has_land_mask=bool(getattr(parsed, "land_mask_file", ""))),
+        parsed.slab_land_active, parsed.use_multilayer_land,
+        getattr(parsed, "land_mask_file", "") or "<none>")
     return ra.build_config_from_args(parsed)
 
 
@@ -669,6 +693,23 @@ def build_parser():
              "no tracer slots); it refuses loudly rather than dropping them.")
     p.add_argument("--era5-zarr", default=None)
     p.add_argument("--output-dir", default="results/aimip_latlon")
+    p.add_argument("--land-model", choices=("none", "slab", "multilayer"),
+                   default="none",
+                   help="Land surface model for the physics rollout, same "
+                        "three names the coupled driver and run_amip use. "
+                        "DEFAULT 'none' preserves what this lane has always "
+                        "done, which is to run with NO land surface model: "
+                        "land skin temperature falls back to the neighbouring "
+                        "prescribed SST minus a lapse rate, with no soil, no "
+                        "water store and no stomatal control. 'slab' and "
+                        "'multilayer' need somewhere for land to exist, so "
+                        "pass --land-mask-file with them (this lane builds a "
+                        "flat topography, and the driver refuses a land tile "
+                        "that would have no land under it).")
+    p.add_argument("--land-mask-file", type=str, default="",
+                   help="Land-mask NetCDF forwarded to the ExperimentConfig. "
+                        "Required to give --land-model slab/multilayer any "
+                        "land to act on, since this lane runs flat topography.")
     p.add_argument("--smoke", action="store_true",
                    help="tiny config (n_lat=32, 1 epoch, 1+1 short windows)")
     return p
