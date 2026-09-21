@@ -132,9 +132,22 @@ For continuity, the incoming certified values—not remeasurements—remain:
 
 ## Verification and independent review
 
-The focused gate test emitted `4 passed in 0.63s`. The final citation and
-focused-test results are recorded in the closing commits and evidence files
-for this receipt.
+The final focused invocation covered the extended external/QCO gate, every
+receipt-citation control, and the complete time-level registry unit file. Its
+exact summary was `48 passed in 2.22s`. The clean-tree citation pass found six
+citations, zero failures, zero unmapped citations, and zero failing map
+entries. Shifting the final-`pssh` citation by two lines exited 1 with
+`SYMBOL-NOT-AT-LINE`.
+
+Retained evidence digests are:
+
+| artifact | SHA-256 |
+|---|---|
+| `preflight_after_failfast.log` | `956eaa8465879a2ec6a7327e49e66ee0432a010e0be7be75bfe3e370a7e02093` |
+| `layout_plant.log` | `560544dc32525db18084fd2471040aa79f15f28dcd249c4934340c43e9f7947f` |
+| `acquisition_retry.log` | `a18526cea02650c9ef475a33a09ec4f9ef0a2da234f8c09f72b3b08f7cfee998` |
+| `codex_review.log` | `8e3330eeb312ddb37b9da73c3ece4a8aa7e2ade4b7bb255573aa487bc89f0f58` |
+| `focused_tests.log` | `bc57012b7f21161880d7e87a443f1ea3aab7af227f2931fa523d97fe8d4f5095` |
 
 The required separate Codex command was invoked. Its complete verdict-bearing
 output was unavailable because the read-only sandbox prevented its in-process
