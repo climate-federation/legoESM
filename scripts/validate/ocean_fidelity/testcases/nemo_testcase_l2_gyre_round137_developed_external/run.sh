@@ -75,6 +75,10 @@ for path in "$SOURCE_ROOT/EXP00" "$SOURCE_ROOT/MY_SRC"; do
     exit 64
   fi
 done
+if [[ "$MODE" == --run && ! -w "$NEMO_ROOT/cfgs" ]]; then
+  printf 'REFUSE: NEMO configuration directory is not writable in this sandbox\n' >&2
+  exit 64
+fi
 
 digest=$(sha256sum "$SOURCE_ROOT/BLD/bin/nemo.exe" | awk '{print $1}')
 if [[ "$digest" != "$SOURCE_BINARY_SHA" ]] || \
