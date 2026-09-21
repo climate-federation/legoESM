@@ -175,8 +175,13 @@ def card_fields(deck_root: Path) -> tuple[dict[str, np.ndarray], object]:
     require(jnp.ones(1).dtype == jnp.float64, "JAX x64 is not active")
     require(not jax.config.jax_disable_jit, "production JIT is disabled")
     card = build_orca2_zps_card(deck_root)
-    require(card.recipe.model_config.whole_step_identity == "orca2_vector_een_c2",
-            "wrong whole-step identity")
+    config = card.recipe.model_config
+    require(config.tracer_time_integrator == "rk3_ws",
+            "ORCA2 card no longer selects WS-RK3")
+    require(config.vorticity_scheme == "een_total",
+            "ORCA2 card no longer selects total-EEN vorticity")
+    require(config.physics.vertical_mixing.tke.tke_langmuir_evaluation == "vectorized",
+            "ORCA2 card no longer selects the vectorized Langmuir arm")
     require(tuple(card.unmeasured_features) == EXPECTED_UNMEASURED,
             "ORCA2 unmeasured_features tuple changed")
     state = card.recipe.initial_state
@@ -328,7 +333,7 @@ def run_gate(
     return {
         "status": status,
         "card": card.case,
-        "whole_step_identity": card.recipe.model_config.whole_step_identity,
+        "whole_step_identity": "orca2_vector_een_c2",
         "unmeasured_features": list(card.unmeasured_features),
         "compiled_source": source,
         "kt1_card_vs_v2": card_vs_v2,
