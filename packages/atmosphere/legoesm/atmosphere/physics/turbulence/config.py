@@ -267,15 +267,19 @@ class SurfaceLayerConfig(NamedTuple):
     # Labelling a 135 m level as 10 m inflates ocean latent heat 16-18% and
     # stress 16-54% (measured offline over the tropical and trade oceans).
     #
-    # It stays False HERE and is turned on by the driver
-    # (ExperimentConfig.surface_z_ref_model_level, default True since
-    # 2026-09-20) for the same reason as the saline switch below: the fix
-    # brings the air temperature down dry-adiabatically to the reference
-    # height, which is only meaningful against a REAL surface temperature.
-    # The idealized lanes substitute the lowest air temperature for a missing
-    # surface, and there the adjustment would invent an air-surface contrast
-    # and a downward sensible heat flux out of nothing.
-    z_ref_model_level: bool = False
+    # Production default, and it lives HERE (one default): the driver's
+    # ExperimentConfig.surface_z_ref_model_level and the run_amip flag are
+    # None = "leave the scheme's value alone", so an untouched run resolves to
+    # this value and a dry-dynamics deck (fv3_duo) sees no non-default field.
+    # Only the MOST schemes (most/coare3/large_yeager) honour it, and only
+    # when the caller supplies the level height (surface_fluxes_at_lowest_level);
+    # the constant-coefficient path is byte-identical either way.  The
+    # dry-adiabatic adjustment is meaningful only against a REAL surface
+    # temperature: a lane that substitutes the lowest air temperature for a
+    # missing surface and still selects a MOST scheme must set this False,
+    # or the adjustment invents an air-surface contrast and a downward
+    # sensible heat flux out of nothing.
+    z_ref_model_level: bool = True
     # Ocean q_sfc = 0.98 * q_sat(SST, p_s) (sea water at the surface pressure)
     # via core.bulk_flux.ocean_surface_q_sat.  The coupler tile ALWAYS applies
     # this factor, so leaving it off makes the two sides of one air-sea

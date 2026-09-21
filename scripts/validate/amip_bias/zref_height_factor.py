@@ -3,9 +3,9 @@
 
 The MPAS surface path hands the MOST solver the lowest full level's wind,
 temperature and humidity.  Whether it also tells the solver how HIGH that
-level is depends on ``SurfaceLayerConfig.z_ref_model_level``, which defaults
-to False -- and with it False the solver divides by ``z_ref``, 10 m, while the
-values came from roughly 150 m.  A log profile does not care much about the
+level is depends on ``SurfaceLayerConfig.z_ref_model_level`` (True by default
+since 2026-09-21) -- with it False the solver divides by ``z_ref``, 10 m, while
+the values came from roughly 150 m.  A log profile does not care much about the
 roughness length but it cares a great deal about that ratio.
 
 This calls the SAME routine the model calls, twice, on identical soundings:

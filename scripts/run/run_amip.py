@@ -727,9 +727,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "transport runaway; None keeps the scheme "
                              "default byte-identically.")
     parser.add_argument("--surface-z-ref-model-level", dest="surface_z_ref_model_level",
-                        action=argparse.BooleanOptionalAction, default=True,
+                        action=argparse.BooleanOptionalAction, default=None,
                         help="Tell the ocean MOST solver the real height of the lowest "
-                             "model level instead of labelling its inputs as z_ref (10 m).")
+                             "model level instead of labelling its inputs as z_ref (10 m). "
+                             "Unset keeps the scheme's own value (True, the production "
+                             "default); --no-surface-z-ref-model-level turns it off.")
     parser.add_argument("--surface-ocean-q-sfc-saline", dest="surface_ocean_q_sfc_saline",
                         action=argparse.BooleanOptionalAction, default=None,
                         help="Ocean surface humidity = 0.98 x q_sat(SST, p_s) (sea water at "

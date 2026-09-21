@@ -119,9 +119,11 @@ def test_mpas_bridge_applies_both_switches():
 
 
 def test_switches_are_refused_where_they_would_be_inert():
-    """codex whole-branch review P2: the two switches are MPAS-bridge
-    implementations; other bridges and the MPAS path without supplied land
-    fluxes must refuse them instead of silently ignoring them."""
+    """codex whole-branch review P2, updated: the level height now reaches
+    every lane (each kernel calls surface_fluxes_at_lowest_level), so it is
+    honoured, not refused; the sea-water humidity still needs a land fraction
+    the structured-grid factories do not carry, so it is refused there
+    instead of silently ignored."""
     import pytest
     from legoesm.atmosphere.physics.turbulence import integration as ti
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
@@ -129,5 +131,7 @@ def test_switches_are_refused_where_they_would_be_inert():
     tc = ti.materialize_sub_config(TurbulenceConfig(scheme="louis"))
     surf = tc.louis.surface._replace(bulk_scheme="coare3", z_ref_model_level=True)
     tc = tc._replace(louis=tc.louis._replace(surface=surf))
-    with pytest.raises(NotImplementedError, match="MPAS"):
+    assert callable(ti.make_turbulence_physics(tc, model_type="hydrostatic", dt=600.0))
+    tc = tc._replace(louis=tc.louis._replace(surface=surf._replace(ocean_q_sfc_saline=True)))
+    with pytest.raises(NotImplementedError, match="land fraction"):
         ti.make_turbulence_physics(tc, model_type="hydrostatic", dt=600.0)
