@@ -91,6 +91,7 @@ class TwinContext:
     card: object
     model: LatLonCGridOceanModel
     initial_state: object
+    checkpointed_step: object
 
 
 class InertParameterError(ValueError):
@@ -122,7 +123,7 @@ def selected_parameters(param: str) -> tuple[str, ...]:
 
 
 def build_context() -> TwinContext:
-    """Build and scan-seed exactly the certified campaign card."""
+    """Build the certified card and its parameterized production-step twin."""
     card = build_nemo_testcase_card(CASE)
     require(card.dt_s == DT_S, f"card dt {card.dt_s} != {DT_S}")
     config = card.recipe.model_config
@@ -131,28 +132,38 @@ def build_context() -> TwinContext:
     require(not config.freeze_floor, "unexpected GYRE freeze floor")
     require(not config.ew_cyclic_overlap, "unexpected GYRE cyclic-overlap projection")
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, config)
-    # ``nemo_ab3am4`` normally represents its first-window state as
-    # ``bt_hist=None`` and writes a six-array tuple after step one.  A scan
-    # carry cannot change treedef.  Give the carry an unreachable shape/dtype
-    # placeholder; ``rollout_observations`` replaces it by None *inside* the
-    # kt=1 cond branch, so the executed first step remains the campaign's exact
-    # cold-start program while both cond branches return the tuple treedef.
-    raw = card.recipe.initial_state
-    uu_b = getattr(raw.uu_b, "data", raw.uu_b)
-    vv_b = getattr(raw.vv_b, "data", raw.vv_b)
-    require(uu_b is not None and vv_b is not None,
-            "GYRE WS-RK3 state lacks prognostic uu_b/vv_b")
-    bt_placeholder = (
-        jnp.zeros_like(uu_b),
-        jnp.zeros_like(uu_b),
-        jnp.zeros_like(vv_b),
-        jnp.zeros_like(vv_b),
-        jnp.zeros_like(raw.eta.data),
-        jnp.zeros_like(raw.eta.data),
+    initial = card.recipe.initial_state
+    require(initial.bt_hist is None,
+            "GYRE campaign cold start no longer enters with bt_hist=None")
+    model.prime_step_caches(initial)
+
+    def parameterized_step(state, freshwater, surface, a_h, c_k):
+        # This is the parameterized equivalent of the production
+        # ``model._step_jitted`` forward-Euler arm used by ``model.step``.
+        # The two scalar leaves are dynamic JIT operands; every other config
+        # leaf and every call argument matches the campaign step.  P5 checks
+        # the resulting primal against that public entry point at day 10.
+        step_config = config_with_parameters(
+            config, {"A_h": a_h, "c_k": c_k})
+        return model._step_impl(
+            state,
+            card.dt_s,
+            freshwater=freshwater,
+            surface_forcing=surface,
+            config=step_config,
+        )
+
+    # Decision 49: retain a compilation boundary around EACH production step,
+    # and rematerialize that step in reverse mode.  There is deliberately no
+    # scan: the cold first-step pytree may become the warm-step pytree exactly
+    # as it does in the campaign's Python loop.
+    checkpointed_step = jax.jit(jax.checkpoint(parameterized_step))
+    return TwinContext(
+        card=card,
+        model=model,
+        initial_state=initial,
+        checkpointed_step=checkpointed_step,
     )
-    initial = model.seed_scan_carry(
-        raw._replace(bt_hist=bt_placeholder), card.dt_s)
-    return TwinContext(card=card, model=model, initial_state=initial)
 
 
 def config_with_parameters(base_config, values: Mapping[str, jax.Array]):
@@ -183,40 +194,44 @@ def rollout_observations(
     obs_steps: Sequence[int],
     initial_state=None,
 ) -> TwinObservations:
-    """Run one checkpointed ``lax.scan`` and retain registered observations."""
+    """Run the campaign's checkpointed per-step-JIT Python program."""
     obs_steps = tuple(int(step) for step in obs_steps)
-    if not obs_steps or min(obs_steps) < 1 or max(obs_steps) > n_steps:
+    if (not obs_steps or min(obs_steps) < 1 or max(obs_steps) > n_steps
+            or tuple(sorted(set(obs_steps))) != obs_steps):
         raise ValueError(f"observation steps {obs_steps} outside 1..{n_steps}")
     card, model = context.card, context.model
-    scan_initial = context.initial_state if initial_state is None else initial_state
+    state = context.initial_state if initial_state is None else initial_state
+    a_h = config.lateral_viscosity.A_h
+    c_k = config.physics.vertical_mixing.tke.c_k
+    wanted = set(obs_steps)
+    observations: list[TwinObservations] = []
 
-    def one_step(state, kt):
+    # Keep this call order synchronized with
+    # nemo_testcase_l2_gyre_year_fromrest.run_member: forcing first, then the
+    # public step shim's cold TKE-carry seed/cache prime, then one compiled
+    # forward-Euler step.  Python-loop treedef evolution is intentional.
+    for kt in range(1, n_steps + 1):
         freshwater, surface = gyre_surface_forcings(card, state, kt)
-        new_state = model._step_impl(
+        state = model._seed_tke_preclosure_carry(state)
+        model.prime_step_caches(state)
+        state = context.checkpointed_step(
             state,
-            card.dt_s,
-            freshwater=freshwater,
-            surface_forcing=surface,
-            config=config,
-            _nemo_ab3am4_cold_start=(kt == 1),
+            freshwater,
+            surface,
+            a_h,
+            c_k,
         )
-        fields = TwinObservations(
-            new_state.T.data,
-            new_state.S.data,
-            new_state.u.data,
-            new_state.v.data,
-            new_state.eta.data,
-        )
-        return new_state, fields
-
-    checkpointed_step = jax.checkpoint(one_step)
-    _, trajectory = jax.lax.scan(
-        checkpointed_step,
-        scan_initial,
-        jnp.arange(1, n_steps + 1, dtype=jnp.int32),
-    )
-    indices = jnp.asarray([step - 1 for step in obs_steps], dtype=jnp.int32)
-    return jax.tree_util.tree_map(lambda field: field[indices], trajectory)
+        if kt in wanted:
+            observations.append(TwinObservations(
+                state.T.data,
+                state.S.data,
+                state.u.data,
+                state.v.data,
+                state.eta.data,
+            ))
+    require(len(observations) == len(obs_steps),
+            "rollout did not retain every registered observation")
+    return jax.tree_util.tree_map(lambda *rows: jnp.stack(rows), *observations)
 
 
 def _live_volumes(context: TwinContext, observations: TwinObservations):
@@ -522,7 +537,7 @@ def optimize(
         params = optax.apply_updates(params, updates)
         started = time.perf_counter()
         value_device, gradients_device = value_and_grad(params)
-        value_device.block_until_ready()
+        jax.block_until_ready((value_device, gradients_device))
         wall_s = time.perf_counter() - started
         value = float(np.asarray(value_device))
         gradients = dict(gradients_device)
@@ -629,7 +644,7 @@ def campaign_identity(
     days: int,
     n_steps: int,
 ) -> dict:
-    """Compare scan truth against the existing campaign's own day snapshot."""
+    """Compare loop truth against the existing campaign's own day snapshot."""
     require(days * STEPS_PER_DAY == n_steps, "days/step count mismatch")
     harness = _load_year_harness()
     campaign_root = root / "campaign_reference"
@@ -641,18 +656,38 @@ def campaign_identity(
     )
     path = campaign_root / "lego_seed0" / f"day{days:03d}.npz"
     require(path.is_file(), f"campaign harness did not write {path}")
+    twin_fields = {
+        "T": np.asarray(truth.T[-1], dtype=np.float64),
+        "S": np.asarray(truth.S[-1], dtype=np.float64),
+        # The campaign snapshot intentionally removes legoESM's redundant
+        # west/south face slots through ``gate.lego_fields``.
+        "u": np.asarray(truth.u[-1][:, 1:, :], dtype=np.float64),
+        "v": np.asarray(truth.v[-1][1:, :, :], dtype=np.float64),
+        "ssh": np.asarray(truth.eta[-1], dtype=np.float64),
+    }
+    rows = []
     with np.load(path) as dataset:
-        campaign_t = np.asarray(dataset["T"], dtype=np.float64)
-    twin_t = np.asarray(truth.T[-1], dtype=np.float64)
-    unequal = int(np.count_nonzero(
-        twin_t.view(np.uint64) != campaign_t.view(np.uint64)))
+        for name, twin in twin_fields.items():
+            campaign = np.asarray(dataset[name], dtype=np.float64)
+            require(twin.shape == campaign.shape,
+                    f"P5 {name} shape mismatch: {twin.shape} != {campaign.shape}")
+            unequal = int(np.count_nonzero(
+                twin.view(np.uint64) != campaign.view(np.uint64)))
+            rows.append({
+                "field": name,
+                "n_unequal": unequal,
+                "n_values": int(twin.size),
+                "twin_sha256": hashlib.sha256(twin.tobytes()).hexdigest(),
+                "campaign_sha256": hashlib.sha256(
+                    campaign.tobytes()).hexdigest(),
+            })
+    unequal = sum(row["n_unequal"] for row in rows)
     return {
         "status": "CONFIRMED" if unequal == 0 else "REFUTED",
         "n_unequal": unequal,
-        "n_values": int(twin_t.size),
+        "n_values": sum(row["n_values"] for row in rows),
         "campaign_snapshot": str(path),
-        "twin_sha256": hashlib.sha256(twin_t.tobytes()).hexdigest(),
-        "campaign_sha256": hashlib.sha256(campaign_t.tobytes()).hexdigest(),
+        "rows": rows,
     }
 
 
@@ -710,6 +745,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--days", type=int, default=10)
     parser.add_argument("--obs-days", type=parse_obs_days, default=(5, 10))
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument(
+        "--identity-only",
+        action="store_true",
+        help="stop after the day-10 campaign-program identity gate",
+    )
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.days <= 0 or args.steps <= 0 or args.steps > 100:
@@ -727,7 +767,7 @@ def run(args: argparse.Namespace, argv: Sequence[str]) -> tuple[dict, int]:
     n_steps = args.days * STEPS_PER_DAY
     obs_steps = tuple(day * STEPS_PER_DAY for day in args.obs_days)
     summary = {
-        "format": "gyre-gradient-twin-v1",
+        "format": "gyre-gradient-twin-v2",
         "arm": args.param,
         "trainable": list(trainable),
         "truth": TRUTH,
@@ -738,6 +778,10 @@ def run(args: argparse.Namespace, argv: Sequence[str]) -> tuple[dict, int]:
         "observation_days": list(args.obs_days),
         "observation_steps": list(obs_steps),
         "dt_s": DT_S,
+        "rollout_program": (
+            "Python loop; campaign forcing call then one checkpointed, "
+            "per-step-jitted forward-Euler production branch"
+        ),
         "loss": {
             "fields": list(FIELD_NAMES),
             "reducer": "legoesm.ml.loss.volume_weighted_mse",
@@ -758,16 +802,14 @@ def run(args: argparse.Namespace, argv: Sequence[str]) -> tuple[dict, int]:
     truth_config = config_with_parameters(
         base, {name: jnp.asarray(value, dtype=jnp.float64)
                for name, value in TRUTH.items()})
-    truth_rollout = jax.jit(
-        lambda initial: rollout_observations(
-            context,
-            truth_config,
-            n_steps=n_steps,
-            obs_steps=obs_steps,
-            initial_state=initial,
-        ))
     truth_started = time.perf_counter()
-    truth = truth_rollout(context.initial_state)
+    truth = rollout_observations(
+        context,
+        truth_config,
+        n_steps=n_steps,
+        obs_steps=obs_steps,
+        initial_state=context.initial_state,
+    )
     truth.T.block_until_ready()
     summary["truth_wall_seconds"] = time.perf_counter() - truth_started
     truth_dir = root / "truth"
@@ -794,6 +836,10 @@ def run(args: argparse.Namespace, argv: Sequence[str]) -> tuple[dict, int]:
         summary["overall_status"] = "STOPPED_P5"
         summary["peak_rss_mib"] = _rss_mib()
         return summary, 2
+    if args.identity_only:
+        summary["overall_status"] = "CONFIRMED_P5_ONLY"
+        summary["peak_rss_mib"] = _rss_mib()
+        return summary, 0
 
     reference = build_reference(context, truth)
     summary["truth_variances"] = {
@@ -834,18 +880,47 @@ def run(args: argparse.Namespace, argv: Sequence[str]) -> tuple[dict, int]:
         summary["peak_rss_mib"] = _rss_mib()
         return summary, 2
 
-    value_and_grad = jax.jit(jax.value_and_grad(loss))
+    # Decision 49: differentiate the per-step-jitted campaign-style Python
+    # loop itself.  Do not wrap the complete 60-step composition in another
+    # JIT boundary; that would once again be a different primal program.
+    value_and_grad = jax.value_and_grad(loss)
+    rss_before_gradient = _rss_mib()
     gradient_started = time.perf_counter()
     start_value_device, gradients_device = value_and_grad(start)
-    start_value_device.block_until_ready()
+    jax.block_until_ready((start_value_device, gradients_device))
     start_gradient_wall = time.perf_counter() - gradient_started
+    rss_after_first_gradient = _rss_mib()
     start_value = float(np.asarray(start_value_device))
     gradients = dict(gradients_device)
+    steady_started = time.perf_counter()
+    steady_value_device, steady_gradients_device = value_and_grad(start)
+    jax.block_until_ready((steady_value_device, steady_gradients_device))
+    steady_gradient_wall = time.perf_counter() - steady_started
+    require(
+        float(np.asarray(steady_value_device)) == start_value,
+        "repeated start gradient changed the primal loss",
+    )
+    for name in trainable:
+        require(
+            np.array_equal(
+                np.asarray(steady_gradients_device[name]),
+                np.asarray(gradients[name]),
+            ),
+            f"repeated start gradient changed {name}",
+        )
+    gradients = dict(steady_gradients_device)
+    summary["gradient_cost"] = {
+        "first_compile_and_gradient_wall_seconds": start_gradient_wall,
+        "post_compile_gradient_wall_seconds": steady_gradient_wall,
+        "rss_before_first_gradient_mib": rss_before_gradient,
+        "rss_after_first_gradient_mib": rss_after_first_gradient,
+        "peak_rss_after_post_compile_gradient_mib": _rss_mib(),
+    }
     # Always measure the registered finite differences, including when AD is
     # poisoned.  A non-finite AD value then yields an explicit null ratio and
     # REFUTED row instead of suppressing the comparison behind no-inert.
     fd_rows = finite_difference_rows(
-        jitted_loss, start, gradients, trainable, steps=FD_STEPS)
+        loss, start, gradients, trainable, steps=FD_STEPS)
     fd_passed = all(row["status"] == "CONFIRMED" for row in fd_rows)
     summary["P1_adjoint"] = {
         "status": "CONFIRMED" if fd_passed else "REFUTED",
@@ -873,17 +948,27 @@ def run(args: argparse.Namespace, argv: Sequence[str]) -> tuple[dict, int]:
         summary["peak_rss_mib"] = _rss_mib()
         return summary, 2
 
+    requested_steps = args.steps
+    effective_steps = requested_steps
+    if steady_gradient_wall > 600.0 and requested_steps > 25:
+        effective_steps = 25
+    summary["cpu_cost_policy"] = {
+        "threshold_seconds_per_gradient": 600.0,
+        "requested_updates": requested_steps,
+        "effective_updates": effective_steps,
+        "capped_for_cpu_cost": effective_steps != requested_steps,
+    }
     recovery = optimize(
         value_and_grad,
         start,
         start_value,
         gradients,
-        start_gradient_wall,
-        args.steps,
+        steady_gradient_wall,
+        effective_steps,
     )
     summary["recovery"] = recovery
     if not recovery["success"]:
-        summary["identifiability_scan"] = loss_landscape(jitted_loss, trainable)
+        summary["identifiability_scan"] = loss_landscape(loss, trainable)
         summary["optimizer_retune"] = {
             "performed": False,
             "reason": "registered initial attempt exhausted; landscape reported without tuning",
@@ -904,7 +989,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary, exit_code = run(args, actual_argv)
     except Exception as error:  # fail closed while retaining a machine receipt
         summary = {
-            "format": "gyre-gradient-twin-v1",
+            "format": "gyre-gradient-twin-v2",
             "arm": args.param,
             "overall_status": "ERROR",
             "error_type": type(error).__name__,
