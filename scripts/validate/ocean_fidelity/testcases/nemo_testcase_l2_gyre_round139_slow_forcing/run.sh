@@ -134,7 +134,7 @@ check_layout() {
   [[ "$(grep -Fc "r139_magic = 'NEMO_L2_R139SLOW'" "$dyn")" -eq 1 ]] &&
   [[ "$(grep -Fc '& ntsi, ntei, ntsj, ntej, 6' "$dyn")" -eq 1 ]] &&
   [[ "$(grep -Fc 'WRITE(r139_unit) Ue_rhs(ntsi:ntei,ntsj:ntej), Ve_rhs(ntsi:ntei,ntsj:ntej)' "$dyn")" -eq 1 ]] &&
-  [[ "$(grep -Fc '& zu_trd(ntsi:ntei,ntsj:ntej), zv_trd(ntsi:ntei,ntsj:ntej)' "$dyn")" -eq 1 ]] &&
+  [[ "$(grep -F -A1 'WRITE(r139_unit) Ue_rhs(ntsi:ntei,ntsj:ntej), Ve_rhs(ntsi:ntei,ntsj:ntej)' "$dyn" | grep -Fc '& zu_trd(ntsi:ntei,ntsj:ntej), zv_trd(ntsi:ntei,ntsj:ntej)')" -eq 1 ]] &&
   [[ "$(grep -Fc 'WRITE(r139_unit) zu_frc(ntsi:ntei,ntsj:ntej), zv_frc(ntsi:ntei,ntsj:ntej)' "$dyn")" -eq 1 ]]
 }
 if ! check_layout "$dry/dynspg_ts.F90"; then
