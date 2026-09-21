@@ -232,12 +232,17 @@ Error: failed to initialize in-process app-server client: Read-only file system 
 Independent review unavailable in-sandbox; per the standing operator rule the
 round continued. No `DO NOT SHIP` verdict exists.
 
-Final clean-tree verification results will be inserted after the receipt's
-first commit. The required set is the Round-81 parser, extended Round-82 walk,
-developed year-owner bridge, receipt citation gate, and the shifted-citation
-plant.
+The clean-tree focused invocation covered the Round-81 parser, the extended
+Round-82 walk, the developed year-owner bridge, every receipt-citation control,
+and the complete fidelity time-level unit file. Its exact summary was
+`86 passed in 33.46s`.
 
-Evidence digests before final verification:
+The clean-tree receipt citation gate found 9 citations, zero unmapped
+citations, zero failures, and zero failing map entries. Shifting the
+frozen-forcing citation by two lines exited 1 with
+`SYMBOL-NOT-AT-LINE`; all of the gate's own planted controls fired too.
+
+Evidence digests:
 
 | artifact | SHA-256 |
 |---|---|
@@ -247,6 +252,10 @@ Evidence digests before final verification:
 | `missing-boundary_plant.json` | `9ee65bab9b89cc58dedb8312b885de4c901f90d4c7bb9a20a9f1e06b94c93e0d` |
 | `entry-ssh-ulp_plant.json` | `71924decb9154b8949a30617bac714980c3135a2c85a71c266e5939d1e736ed3` |
 | `final-pssh-ulp_plant.json` | `7b14802925bbb30dce10b17d9772ddf822df7b718c6c174ab826a2f483582b39` |
+| `focused_tests.log` | `1eeb1de11609c332db187a1cc7d7ab6000821767f6b1bc25759aed2f66822736` |
+| `citation_gate_draft.json` | `b70d8a842a7e87fc4c27fab6e680417a5b7860db5229fd7c9ff4b76e6e9640e5` |
+| `citation_gate_shifted_plant_draft.json` | `5a9cb683dd9252647eda0ddc433d676dcfb102456291ab4ceac4c8ef61dc14bd` |
+| `codex_review_unavailable.txt` | `92015cb4c0f52be782d229ae8a686707c0122077dd13c515153d648e2a22da67` |
 
 ## Campaign surfaces and headline numbers
 
