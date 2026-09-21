@@ -4164,6 +4164,11 @@ def test_clubb_q_flux_scale_reaches_the_turbulence_kernel():
     with pytest.raises(ValueError, match="turbulence_override"):
         turbulence_config_for(cfg_on._replace(
             turbulence_override=TurbulenceConfig(scheme="clubb")))
+    # ... even when the override carries the same scale (its band may differ).
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    with pytest.raises(ValueError, match="turbulence_override"):
+        turbulence_config_for(cfg_on._replace(turbulence_override=TurbulenceConfig(
+            scheme="clubb", clubb=CLUBBConfig(q_flux_scale=2.5))))
     # The MPAS lane (model_driver) builds its turbulence config through this
     # same turbulence_config_for, so the analytical-lane assertion covers it.
 

@@ -4379,18 +4379,15 @@ def turbulence_config_for(config):
                 "authoritative, so set CLUBBConfig(prognostic=True) inside it "
                 "rather than relying on the experiment-level flag.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
-        # Same reason as the prognostic refusal above: the override is
-        # authoritative, so an experiment-level probe it does not carry would
-        # be read, validated and silently discarded.
-        _sub = getattr(tc, "clubb", None)
-        if (tc.scheme != "clubb" or _sub is None
-                or float(_sub.q_flux_scale) != float(config.clubb_q_flux_scale)):
-            raise ValueError(
-                "clubb_q_flux_scale is set but an explicit turbulence_override "
-                f"is in force that does not carry it (override scheme="
-                f"{tc.scheme!r}, q_flux_scale="
-                f"{getattr(_sub, 'q_flux_scale', None)!r}). Set it inside the "
-                "override's CLUBBConfig instead.")
+        # Same reason as the prognostic refusal above, and the same rule as
+        # validate_strict: the override is authoritative, so the
+        # experiment-level probe is refused outright rather than reconciled
+        # (an override carrying the same scale but its own band would
+        # otherwise pass and scale a different set of faces).
+        raise ValueError(
+            "clubb_q_flux_scale is set but an explicit turbulence_override is "
+            "in force; set CLUBBConfig(q_flux_scale=..., q_flux_scale_sigma_lo/hi=...) "
+            "inside the override instead of the experiment-level probe.")
     return apply_surface_flux_config(tc, config)
 
 
