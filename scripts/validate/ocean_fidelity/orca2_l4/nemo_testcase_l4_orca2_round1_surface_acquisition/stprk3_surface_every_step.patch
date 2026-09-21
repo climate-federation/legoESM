@@ -1,6 +1,6 @@
 --- stprk3.F90
 +++ stprk3.F90
-@@ -159,7 +159,7 @@
+@@ -159,6 +159,6 @@
        IF( ln_bdy     )   CALL bdy_dta    ( kstp, Nbb )                     ! update dynamic & tracer data at open boundaries
        IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
                           CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)
@@ -8,7 +8,6 @@
 +                         CALL l4_dump_ocean_surface_input( kstp, Nbb )     ! round-1 WRITE-only per-step acquisition
  !!$      IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
                           !clem: problem with isf and cpl: sbcfwb needs isf but isf needs fwf from sbccpl
- 
 @@ -426,6 +426,7 @@
        !! halo exchange and U/V stress interpolation.  No model array is set.
        INTEGER, INTENT(in) :: kstp, klevel
