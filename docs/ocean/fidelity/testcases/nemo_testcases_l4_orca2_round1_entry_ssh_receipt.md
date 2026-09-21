@@ -184,7 +184,41 @@ cannot be lost as it was in the older record.  It was not run by this agent.
 | R1-P4 | **REFUTED** | kt=10 NEMO-root-differential SSH is 0.11244887791514496 m, not `[0.014,0.017]`. |
 | R1-P5 | CONFIRMED | kt=2..10 post-`sbc` frames are absent; status `STOP_RECORD_GAP`. |
 
-## 6. No landing and GYRE disposition
+## 6. Citation, tests, and independent review
+
+The receipt citation gate passed from `## Mechanically cited finding` with
+one mapped compiled-source citation, no failures, no unmapped citations, no
+map-audit failures, and all nine gate self-controls firing.  Its JSON is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round1/citation_gate.json`
+(SHA-256
+`7ad7c29217c7b7b422ccf448417d8aba9c3034d2767fa0841d5cd71c4b50f06b`).
+Shifting the ORCA2 citation by two lines made the first anchor fail at line
+444 instead of 442 and exited 1 as required; planted JSON SHA-256 is
+`47a949ce44e7efcebf1dcbba5f5bdb7c1a66c782b8f7ba2c7a60d344dbde166d`.
+
+The focused round-1 ladder plus citation tests passed 21/21 in 2.42 seconds
+(log SHA-256
+`550eadd3d42d252c52ceb67c4567d54d8e049b3659e128bd37fa8d784aab5199`).
+The required single `tests/ocean/fidelity -n 12` invocation collected 1,514
+tests, reached beyond 95% with one displayed failure and seven skips, then
+made no progress for more than the five-minute deadlock threshold used by the
+preceding merge receipts.  It was interrupted and has no pytest summary, so
+it is **INCOMPLETE**, not a pass.  No second broad battery was run.  The
+preserved partial log SHA-256 is
+`ee9c676e895d87fbb9cc8857ca8c4c103b341d5ed0f920b85fd16ef99945aae1`.
+The separately isolated listed worktree-stamp ratchet passed 1/1.  The listed
+pre-existing SI3 scalar-math provenance red reproduced 1/1 with
+`GateError: A MY_SRC is not verbatim`.  Because xdist did not flush the broad
+run's failing node ID, this receipt does not claim those two failures are the
+same observation.
+
+The required separate `codex exec --sandbox read-only` review was attempted
+twice, including ephemeral mode, but both processes stopped before reading
+the diff with `failed to initialize in-process app-server client: Read-only
+file system (os error 30)`.  Verdict: **independent review unavailable
+in-sandbox**.
+
+## 7. No landing and GYRE disposition
 
 No file below `packages/` changed.  Therefore the shared-model GYRE base/tip
 trajectory requirement was not triggered; claiming a GYRE physics landing
@@ -193,7 +227,7 @@ category-load configuration, which is sea-ice-adjacent and explicitly outside
 the autonomous ocean-only fix scope.  A one-statement landing was not
 attempted.
 
-## 7. OPEN / round-2 plan
+## 8. OPEN / round-2 plan
 
 1. The operator must run the committed acquisition unchanged and return its
    two admitted roots; until then, the kt=1..10 candidate ladder is
