@@ -33,6 +33,14 @@ __param_spec__ = {
             "clubb_cf_override_strength": "opt-in marine-Sc lever, default 1.0 (full) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
             "clubb_cf_override_floor": "opt-in marine-Sc cloud-collapse floor, default 0.0 (off) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
             "cover_condensate_q_ref": "opt-in condensate-aware cover floor, default 0.0 (off) = the physical floor; production value pending the 2026-09 cc_cond paired arms",
+            # CAM6 cldfrc2m ramp ends sit ON the physical bound 1.0 (ice
+            # stratus complete at ice saturation; stratospheric ramp is a
+            # step at rhi=1): unseedable by a sigmoid, so fixed.
+            "cam6_rhmaxi": "CAM6 cldfrc2m rhmaxi default 1.0 = ice saturation, the physical ceiling of the aist ramp",
+            "cam6_rhminis": "CAM6 cldfrc2m rhminis default 1.0 (stratospheric step at rhi=1) = physical ceiling",
+            "cam6_rhmaxis": "CAM6 cldfrc2m rhmaxis default 1.0 (stratospheric step at rhi=1) = physical ceiling",
+            "cam6_deepcu_frac_limit": "numerics: threshold below which the deep-convective fraction is zeroed (clubb_intr frac_limit)",
+            "cam6_deepcu_ic_limit": "numerics: in-cloud water floor below which the deep-convective fraction is zeroed (clubb_intr ic_limit)",
             "cloud_inhomogeneity_factor": "Cahalan plane-parallel-bias reduction, default 1.0 (homogeneous, no reduction) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
@@ -75,6 +83,15 @@ __param_spec__ = {
             "conv_cloud_condensate": {"units": "kg/kg", "bounds": (1.0e-5, 1.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "thin anvil-cirrus in-cloud condensate", "shape": None},
             # --- condensate (adiabatic in-cloud LWC growth rate, opt-in vertical structure) ---
             "adiabatic_lwc_rate": {"units": "kg/kg/m", "bounds": (5.0e-7, 3.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "adiabatic cloud LWC gradient ~1-2 g/kg per km (Brenguier et al. 2000)", "shape": None},
+            # --- cam6_ice_stratus / cam6_deep_convective: CAM6 namelist constants,
+            # held at the cam_cesm2_1_rel_60 CLUBB defaults (tier 0: no
+            # ExperimentConfig scalar routes them to --params yet; promote
+            # to tier 2 together with that wiring) ---
+            "cam6_rhmini": {"units": "1", "bounds": (0.5, 0.99), "tunable_tier": 0, "transform": "sigmoid", "category": "cam6_ice_stratus", "reference": "CAM6 cldfrc2m.F90:846-856; namelist cldfrc2m_rhmini (CLUBB default 0.80)", "shape": None},
+            # --- cam6_deep_convective: clubb_intr.F90 deepcu = min(dp1*log(1+dp2*M_up), max) ---
+            "cam6_deepcu_dp1": {"units": "1", "bounds": (0.01, 0.5), "tunable_tier": 0, "transform": "sigmoid", "category": "cam6_deep_convective", "reference": "CAM6 clubb_intr.F90:2501 (0.1)", "shape": None},
+            "cam6_deepcu_dp2": {"units": "m^2 s/kg", "bounds": (50.0, 5000.0), "tunable_tier": 0, "transform": "sigmoid", "category": "cam6_deep_convective", "reference": "CAM6 clubb_intr.F90:2501 (500)", "shape": None},
+            "cam6_deepcu_max": {"units": "1", "bounds": (0.1, 0.99), "tunable_tier": 0, "transform": "sigmoid", "category": "cam6_deep_convective", "reference": "CAM6 clubb_intr.F90:2501 (0.6)", "shape": None},
         },
     },
 }
@@ -334,6 +351,26 @@ class CloudConfig(NamedTuple):
     # convention, Tiedtke 1993; equals the shared mixed_phase_saturation curve
     # at the default T_ice_only = constants.T_hom_freeze).  Unknown => raise.
     saturation_scheme: str = "liquid"
+    # --- CAM6 cloud macrophysics (scheme="cam6_clubb"; CESM2.1
+    # cam_cesm2_1_rel_60): cloud_frac = min(max(alst, aist) + deepcu, 1) with
+    # alst = the CLUBB PDF liquid fraction (``cloud_fraction_override``),
+    # aist = cldfrc2m.F90 aist_vector ice stratus, deepcu = clubb_intr.F90
+    # deep-convective fraction (clubb_intr.F90:2492-2506, 2575, 2586) ---
+    # cldfrc2m.F90:846-856 rhi ramp ends (namelist cldfrc2m_rhmini/rhmaxi;
+    # CLUBB defaults 0.80 / 1.0), and their stratospheric values rhminis /
+    # rhmaxis (1.0 / 1.0) used at and above the tropopause.
+    cam6_rhmini: float = 0.80
+    cam6_rhmaxi: float = 1.0
+    cam6_rhminis: float = 1.0
+    cam6_rhmaxis: float = 1.0
+    # clubb_intr.F90:2501 deepcu = max(0, min(dp1*log(1 + dp2*M_up), max));
+    # :2504 zeroed when deepcu <= frac_limit or in-cloud water < ic_limit
+    # (:1356-1357).
+    cam6_deepcu_dp1: float = 0.1
+    cam6_deepcu_dp2: float = 500.0
+    cam6_deepcu_max: float = 0.6
+    cam6_deepcu_frac_limit: float = 0.01
+    cam6_deepcu_ic_limit: float = 1.0e-12
 
 
 def build_cloud_config(

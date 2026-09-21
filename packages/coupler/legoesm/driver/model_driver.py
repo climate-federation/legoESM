@@ -7069,13 +7069,12 @@ class ModelDriver:
                 and getattr(self._device_config, "mesh", None) is not None
                 and tuple(getattr(self._device_config, "tiling", (1, 1))) != (1, 1)
             )
-            if _grid == "mpas" or _disc == "spectral" \
-                    or _latlon_spmd or _tiled_cube:
+            if _disc == "spectral" or _latlon_spmd or _tiled_cube:
                 raise NotImplementedError(
                     "use_clubb_cloud_fraction is wired through the single-device "
-                    "per-step AND fused-compiled rollouts, but NOT the "
-                    "multi-device / distinct-dycore ones: it needs "
-                    "grid_type != 'mpas', discretization != "
+                    "per-step AND fused-compiled rollouts and the MPAS lane, but "
+                    "NOT the multi-device / spectral ones: it needs "
+                    "discretization != "
                     "'spectral', enable_latlon_spmd=False, and no multi-device "
                     "cube tiling.  Got "
                     f"compiled={compiled}, grid={_grid!r}, discretization="
@@ -7700,10 +7699,26 @@ class ModelDriver:
                 if (abs(_per_day - round(_per_day)) < 1e-9
                         and _phase_err_days < 1e-9):
                     _flux_days = _win_days
+        # Physics carry (CLUBB cloud fraction + deep-convection inputs) so
+        # the CMOR cloud diagnostics diagnose cloud_scheme='cam6_clubb' the
+        # same WAY radiation does (current-state sampling; see
+        # DiagnosticCollector._cam6_cloud_kwargs for the lag caveat).
+        # Cell-axis arrays (not the carry object) so the MPI gather can map
+        # them; absent for every other cloud scheme (byte-identical feed).
+        _cam6_carry = {}
+        _ps_carry = getattr(self, "_mpas_phys_state", None)
+        if (getattr(getattr(self, "config", None), "cloud_scheme", None)
+                == "cam6_clubb" and _ps_carry is not None):
+            _cam6_carry = dict(
+                cloud_fraction=_ps_carry.cloud_fraction,
+                conv_mass_flux_up=_ps_carry.conv_mass_flux_up,
+                conv_icwmr=_ps_carry.conv_icwmr,
+            )
         return dict(
             T=state.T.data,
             p_s=state.p_s.data,
             lat_deg=lat_deg,
+            **_cam6_carry,
             q_v=q_v,
             q_c=q_c,
             q_i=q_i,
@@ -10672,6 +10687,11 @@ class ModelDriver:
                 # conv_heating (2026-09-21): the Beres convective-source lag
                 # carry; zero-seed = no convective heating before the feature.
                 "conv_heating",
+                # conv_mass_flux_up / conv_icwmr (2026-09-21): the CAM6
+                # deep-convective cloud-fraction lag carries; zero-seed is
+                # the correct pre-feature state (deepcu exactly 0).
+                "conv_mass_flux_up",
+                "conv_icwmr",
             })
             if _any_physstate:
                 from legoesm.atmosphere.physics.physics_state import (

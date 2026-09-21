@@ -3034,19 +3034,22 @@ def test_diagnostic_condensate_scheme_validate_strict():
             cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()
 
 
-def test_use_clubb_cloud_fraction_rejected_on_mpas_spectral():
-    """use_clubb_cloud_fraction is enforced only inside build_physics_pipeline,
-    which mpas/spectral never build — so validate_strict must reject the opt-in
-    there rather than let it silently no-op (audit 2026-07-17 dispatch-hardening)."""
+def test_use_clubb_cloud_fraction_rejected_on_spectral_only():
+    """use_clubb_cloud_fraction is enforced by build_physics_pipeline (cd-grid)
+    and combined.make_physics (MPAS); the spectral standalone path builds
+    neither, so validate_strict must reject the opt-in there rather than let
+    it silently no-op (audit 2026-07-17 dispatch-hardening).  MPAS became a
+    legal lane with the CAM6 cloud-fraction port (cloud_scheme='cam6_clubb')."""
     from legoesm.driver.config import DycoreConfig, ExperimentConfig
-    for bad_disc in ("spectral", "mpas"):
+    for bad_disc in ("spectral",):
         with pytest.raises(ValueError, match="silently no-op"):
             ExperimentConfig(
                 turbulence="clubb", use_clubb_cloud_fraction=True,
                 dycore=DycoreConfig(discretization=bad_disc)).validate_strict()
-    # cd-grid aliases DO build the pipeline, so the guard must not block them
-    # (the pipeline's own turbulence=='clubb' check still applies).
-    for ok_disc in ("centered", "finite_volume"):
+    # cd-grid aliases DO build the pipeline and MPAS builds make_physics, so
+    # the guard must not block them (their own turbulence=='clubb' checks
+    # still apply).
+    for ok_disc in ("centered", "finite_volume", "mpas"):
         try:
             ExperimentConfig(
                 turbulence="clubb", use_clubb_cloud_fraction=True,

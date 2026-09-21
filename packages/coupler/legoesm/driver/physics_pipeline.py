@@ -4823,17 +4823,15 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._use_clubb_cloud_fraction = getattr(
         config, 'use_clubb_cloud_fraction', False)
     if pipeline._use_clubb_cloud_fraction:
-        _turb_is_diag_clubb = (
-            getattr(config, 'turbulence', 'none') == 'clubb'
-            and not getattr(turb_config, 'prognostic', False)
-        )
-        if not _turb_is_diag_clubb:
+        # Both CLUBB paths (diagnostic and prognostic) publish
+        # ``TurbulenceOutput.cloud_fraction``; any other closure produces none.
+        if getattr(config, 'turbulence', 'none') != 'clubb':
             raise ValueError(
-                "use_clubb_cloud_fraction=True requires diagnostic CLUBB "
-                "turbulence (turbulence='clubb', not prognostic) to produce the "
+                "use_clubb_cloud_fraction=True requires CLUBB turbulence "
+                "(turbulence='clubb', diagnostic or prognostic) to produce the "
                 "sub-grid cloud fraction; got turbulence="
-                f"{getattr(config, 'turbulence', 'none')!r}.  Enable diagnostic "
-                "CLUBB or unset use_clubb_cloud_fraction."
+                f"{getattr(config, 'turbulence', 'none')!r}.  Enable CLUBB "
+                "or unset use_clubb_cloud_fraction."
             )
     # Clear-sky diagnostic (#843): enable the 2nd clouds-off radiation pass
     # only when config.output.clear_sky_diag is set (default off).

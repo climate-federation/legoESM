@@ -1146,7 +1146,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Clouds & microphysics (full-physics defaults — see the policy note above)
     parser.add_argument("--clouds", type=str, default="xu_randall",
-                        choices=["none", "sundqvist", "xu_randall"])
+                        choices=["none", "sundqvist", "xu_randall",
+                                 "cam6_clubb"])
     parser.add_argument("--microphysics", type=str, default="sundqvist",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",

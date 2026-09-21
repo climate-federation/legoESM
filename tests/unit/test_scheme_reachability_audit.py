@@ -328,6 +328,14 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
             # algorithm as the ocean tile), so satisfy it rather than trip it.
             if axis == "surface_bulk_scheme" and scheme != "constant":
                 kwargs["turbulence"] = "louis"
+            # CAM6's cloud fraction IS the CLUBB PDF fraction plus the carry
+            # routing, and is wired on the MPAS lane only (documented
+            # cross-field contract, validate_strict enforces all three).
+            if axis == "clouds" and scheme == "cam6_clubb":
+                from legoesm.driver.config import DycoreConfig
+                kwargs.update(turbulence="clubb", use_clubb_cloud_fraction=True,
+                              microphysics="sundqvist", radiation="rrtmgp",
+                              dycore=DycoreConfig(discretization="mpas"))
             try:
                 ExperimentConfig(**kwargs).validate_strict()
             except ValueError as e:  # pragma: no cover - failure path
