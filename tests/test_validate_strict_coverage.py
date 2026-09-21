@@ -325,8 +325,8 @@ def test_default_config_is_valid() -> None:
     "field",
     sorted(
         EXPECTED_VALIDATED
-        # nested DycoreConfig fields; tested separately below
-        - {"model_type", "discretization", "mpas_vert_advection_scheme"}
+        # nested DycoreConfig / GridConfig fields; tested separately below
+        - {"model_type", "discretization", "mpas_vert_advection_scheme", "vertical_coord"}
         | EQUALITY_VALIDATED
     ),
 )
@@ -342,6 +342,12 @@ def test_validate_strict_rejects_bogus_nested_dycore() -> None:
     assert _bogus_raises(dycore=DycoreConfig(model_type=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(discretization=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(mpas_vert_advection_scheme=_BOGUS))
+
+
+def test_validate_strict_rejects_bogus_nested_grid() -> None:
+    from legoesm.driver.config import GridConfig
+
+    assert _bogus_raises(grid=GridConfig(vertical_coord=_BOGUS))
 
 
 # ---------------------------------------------------------------------------
