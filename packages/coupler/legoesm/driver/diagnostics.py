@@ -983,6 +983,11 @@ class DiagnosticCollector:
             self.dsigma, self.sigma_full,
             sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,
             elapsed_seconds=elapsed_s,
+            # Surface turbulent fluxes close the atmospheric budget (#1354):
+            # without them a healthy prescribed-SST run reads the surface flux
+            # as a false leak.  shflx/lhflx are the CMOR hfss/hfls (+up).
+            shflx=shflx,
+            lhflx=lhflx,
             area_weights=self._area_w,
             dp=self._dp(state.p_s.data),
             p_full=self._p_full(state.p_s.data),
@@ -1332,6 +1337,9 @@ class DiagnosticCollector:
         lw_up_toa,
         sw_net_sfc,
         lw_net_sfc,
+        sw_down_toa=None,
+        shflx=None,
+        lhflx=None,
     ) -> dict:
         """Collect only scalar reduction diagnostics (no host materialization).
 
@@ -1407,6 +1415,28 @@ class DiagnosticCollector:
         self.rsdt.append(float('nan'))
         self.hfss.append(float('nan'))
         self.hfls.append(float('nan'))
+
+        # Energy budget (#1354) on the distributed / SPMD lane too.  Gated on
+        # the TOA-down flux being supplied: a real AMIP run passes it (and the
+        # surface turbulent fluxes), while a dynamics-only scaling benchmark
+        # does not -- so the benchmark keeps its zero-overhead scalar path and
+        # never pays for the column-MSE reduction.  All reductions are
+        # SPMD-global (area_weighted_mean / column_moist_static_energy), so the
+        # sharded arrays reduce correctly with no host gather.
+        if sw_down_toa is not None:
+            _q_v_e = (jnp.zeros_like(state.T.data) if q_v is None else q_v)
+            self.energy_tracker.update(
+                state.T.data, _q_v_e, state.u.data, state.v.data,
+                state.phis.data, state.p_s.data,
+                self.dsigma, self.sigma_full,
+                sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,
+                elapsed_seconds=elapsed_day * 86400.0,
+                shflx=shflx,
+                lhflx=lhflx,
+                area_weights=self._area_w,
+                dp=self._dp(state.p_s.data),
+                p_full=self._p_full(state.p_s.data),
+            )
 
         return {
             'mean_sst': mean_sst,

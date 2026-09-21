@@ -313,8 +313,12 @@ class TestEnergyBudgetTracker:
         lw_net_sfc = jnp.full(shape, -60.0)
         return sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc
 
-    def test_first_update_zero_residual(self):
-        """First update should have zero dE/dt and residual (no previous)."""
+    def test_first_update_nan_residual(self):
+        """First update has no previous snapshot, so dE/dt and the residual
+        are NaN -- never 0.  A zero would read as "the budget closes", which
+        every restart segment's first window would otherwise publish as a
+        false pass (#1354)."""
+        import math
         tracker = EnergyBudgetTracker()
         T, q_v, u, v, phis, p_s, dsigma, sigma_full = self._make_state()
         sw_down_toa, sw_up_toa, lw_up_toa, sw_sfc, lw_sfc = self._make_fluxes()
@@ -324,8 +328,8 @@ class TestEnergyBudgetTracker:
             sw_down_toa, sw_up_toa, lw_up_toa, sw_sfc, lw_sfc,
             elapsed_seconds=0.0,
         )
-        assert budget.dE_dt == 0.0
-        assert budget.residual == 0.0
+        assert math.isnan(budget.dE_dt)
+        assert math.isnan(budget.residual)
 
     def test_two_updates_computes_tendency(self):
         """After two updates with different T, dE/dt should be nonzero."""
@@ -345,8 +349,11 @@ class TestEnergyBudgetTracker:
         # Warming → positive tendency
         assert budget.dE_dt > 0.0
 
-    def test_steady_state_small_residual(self):
-        """If state doesn't change, dE/dt=0 and residual = R_TOA."""
+    def test_steady_state_residual_is_minus_surface_flux(self):
+        """Steady column, balanced TOA (R_TOA=0): dE/dt=0, so the residual is
+        -F_sfc.  With sw_net 200 + lw_net -60 and no turbulent fluxes,
+        F_sfc = 140 W/m2 (net down into the surface) and residual = -140.
+        The pre-#1354 closure dropped F_sfc and (wrongly) expected 0 here."""
         tracker = EnergyBudgetTracker()
         T, q_v, u, v, phis, p_s, dsigma, sigma_full = self._make_state()
         # Balanced TOA: R_TOA = 0
@@ -363,9 +370,54 @@ class TestEnergyBudgetTracker:
                                 sw_down_toa, sw_up_toa, lw_up_toa, sw_sfc, lw_sfc,
                                 elapsed_seconds=3600.0)
 
-        # No change in energy → dE/dt = 0, residual = R_TOA = 0
         npt.assert_allclose(budget.dE_dt, 0.0, atol=1e-10)
-        npt.assert_allclose(budget.residual, 0.0, atol=1e-10)
+        npt.assert_allclose(budget.residual, -140.0, atol=1e-6)
+
+    def test_surface_turbulent_fluxes_enter_the_closure(self):
+        """SH/LH are +up (out of the surface into the atmosphere), so they
+        REDUCE the net downward surface flux: F_sfc = sw_net + lw_net - SH - LH.
+        With sw_net 200, lw_net -60, SH 20, LH 80: F_sfc = 40, so a steady
+        R_TOA=0 column reads residual = -40 (vs -140 without turbulent flux)."""
+        tracker = EnergyBudgetTracker()
+        T, q_v, u, v, phis, p_s, dsigma, sigma_full = self._make_state()
+        sw_down_toa = jnp.full((6, 4, 4), 340.0)
+        sw_up_toa = jnp.full((6, 4, 4), 100.0)
+        lw_up_toa = jnp.full((6, 4, 4), 240.0)
+        sw_sfc = jnp.full((6, 4, 4), 200.0)
+        lw_sfc = jnp.full((6, 4, 4), -60.0)
+        shf = jnp.full((6, 4, 4), 20.0)
+        lhf = jnp.full((6, 4, 4), 80.0)
+
+        for t in (0.0, 3600.0):
+            budget = tracker.update(
+                T, q_v, u, v, phis, p_s, dsigma, sigma_full,
+                sw_down_toa, sw_up_toa, lw_up_toa, sw_sfc, lw_sfc,
+                elapsed_seconds=t, shflx=shf, lhflx=lhf)
+        npt.assert_allclose(budget.sfc_shf, 20.0, atol=1e-6)
+        npt.assert_allclose(budget.sfc_lhf, 80.0, atol=1e-6)
+        npt.assert_allclose(budget.residual, -40.0, atol=1e-6)
+
+    def test_residual_obeys_the_closure_identity(self):
+        """The residual must equal R_TOA - F_sfc - dE/dt exactly, where
+        F_sfc = sfc_net - SH - LH, computed from the tracker's OWN recorded
+        fields.  This pins the closure formula regardless of the (T-coupled)
+        geopotential term, and stays non-vacuous because dE/dt is nonzero
+        (the column warms between the two samples)."""
+        tracker = EnergyBudgetTracker()
+        _make = self._make_state
+        T0, q_v, u, v, phis, p_s, dsigma, sigma_full = _make(nlev=10, T_val=280.0)
+        T1 = jnp.full_like(T0, 281.5)         # warming -> dE/dt > 0
+        fx = (jnp.full((6, 4, 4), 340.0), jnp.full((6, 4, 4), 100.0),
+              jnp.full((6, 4, 4), 240.0), jnp.full((6, 4, 4), 200.0),
+              jnp.full((6, 4, 4), -60.0))
+        shf, lhf = jnp.full((6, 4, 4), 15.0), jnp.full((6, 4, 4), 70.0)
+        tracker.update(T0, q_v, u, v, phis, p_s, dsigma, sigma_full, *fx,
+                       elapsed_seconds=0.0, shflx=shf, lhflx=lhf)
+        b = tracker.update(T1, q_v, u, v, phis, p_s, dsigma, sigma_full, *fx,
+                           elapsed_seconds=3600.0, shflx=shf, lhflx=lhf)
+        f_sfc = b.sfc_net - b.sfc_shf - b.sfc_lhf
+        npt.assert_allclose(b.residual, b.toa_net - f_sfc - b.dE_dt, atol=1e-6)
+        assert b.dE_dt > 0.0          # non-vacuous: the column actually warmed
 
     def test_toa_net_correct(self):
         """TOA net should match SW_down - SW_up - LW_up."""

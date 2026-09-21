@@ -404,9 +404,11 @@ class _MPASSfcFluxAccum:
     the "monthly mean" of a day/night field like rsut kept the full
     instantaneous diurnal pattern while labeled ``time: mean``).
 
-    Covers slots 2..7 of the ``_sfc_diag`` contract (2 precip, 3 rlut,
-    4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the strongly diurnal flux fields —
-    plus the clear-sky TOA pair (10 rsutcs, 11 rlutcs; #843 lean-lane
+    Covers slots 0..7 of the ``_sfc_diag`` contract (0 sw_net_sfc,
+    1 lw_net_sfc, 2 precip, 3 rlut, 4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the
+    strongly diurnal flux fields, including the surface net radiation the
+    #1354 energy-budget closure needs (``F_sfc = sw_net + lw_net - SH - LH``)
+    — plus the clear-sky TOA pair (10 rsutcs, 11 rlutcs; #843 lean-lane
     port), which is only ever non-None when ``--clear-sky-diag`` is on
     (empty slots add nothing: dump/restore stay byte-identical when off).
     State-derived fields (tas/ta/ua/...) stay snapshots; the collector
@@ -435,7 +437,7 @@ class _MPASSfcFluxAccum:
     reporting precision, documented rather than engineered around.
     """
 
-    SLOTS = (2, 3, 4, 5, 6, 7, 10, 11)
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -3893,6 +3895,12 @@ class ModelDriver:
                 lw_up_toa=kwargs.get('lw_up_toa', None),
                 sw_net_sfc=kwargs.get('sw_net_sfc', None),
                 lw_net_sfc=kwargs.get('lw_net_sfc', None),
+                # TOA-down + surface turbulent fluxes close the energy budget
+                # on the distributed lane (#1354); absent on a dynamics-only
+                # benchmark, which then skips the budget.
+                sw_down_toa=kwargs.get('sw_down_toa', None),
+                shflx=kwargs.get('shflx', None),
+                lhflx=kwargs.get('lhflx', None),
             )
 
         if self._device_config is not None:
@@ -7079,6 +7087,7 @@ class ModelDriver:
                 _kw = self._mpas_cmip_native_kwargs(day, diag)
                 diag.feed_cmip_accumulators_native(day, **_kw)
                 self._feed_mpas_moisture_budget(day, diag, _kw)
+                self._feed_mpas_energy_budget(day, diag, _kw)
         except Exception as exc:  # pragma: no cover - defensive diag guard
             logger.error(
                 "  CMOR accumulator feed FAILED at day %.2f (run continues; "
@@ -7150,6 +7159,112 @@ class ModelDriver:
             # coordinate.
             dp=_p_half[..., 1:] - _p_half[..., :-1],
         )
+
+    def _feed_mpas_energy_budget(self, day: float, diag, kw: dict) -> None:
+        """Record the column energy-budget residual ``R_TOA - F_sfc - dE/dt``.
+
+        The decisive #1354 test -- is the day-130+ interior warming an
+        internal energy-bookkeeping LEAK (residual != 0) or a real flux
+        imbalance (residual ~ 0)? -- needs the column moist-static-energy
+        tendency ``dE/dt``. Only the collector's ``EnergyBudgetTracker``
+        computes it, and it is updated inside ``DiagnosticCollector.collect``,
+        which this run loop never calls -- so every run of this campaign
+        published NO ``energy_*`` series and the test has never been runnable
+        on the lane that detonates. This wires it, from the SAME window-mean
+        TOA (``rsdt``/``rsut``/``rlut``) AND surface fluxes (net radiation
+        slots 0/1 + ``hfss``/``hfls``) the CMOR output publishes, so the
+        closure ``F_sfc = sw_net + lw_net - SH - LH`` is complete and the
+        residual closes against numbers a reader can see in the output.
+
+        SERIAL ONLY, for the same reason as the moisture budget: the tracker
+        takes a plain area-weighted mean, which under a cell partition would
+        be rank-local and count halo cells twice -- a confidently-wrong
+        global. The multi-rank lane needs the owned-mask-and-allreduce
+        treatment ``_mpas_global_diag`` already does, and says so once.
+        """
+        if self._voronoi_layout is not None:
+            if not getattr(self, "_logged_energy_budget_mpi", False):
+                logger.info(
+                    "  energy-budget closure NOT recorded under the cell "
+                    "partition (the tracker's area mean is rank-local); "
+                    "serial runs publish it.")
+                self._logged_energy_budget_mpi = True
+            return
+        # Window means or nothing -- the same discipline as the moisture
+        # budget and the CMOR flux feed. A short/absent window would mix a
+        # partial-window TOA mean into the residual and manufacture an
+        # imbalance out of nothing.
+        _acc = getattr(self, "_mpas_sfc_accum", None)
+        if _acc is None or not _acc.has_samples() or not _acc.is_complete():
+            return
+        sw_down_toa = kw.get("rsdt")
+        sw_up_toa = kw.get("rsut")
+        lw_up_toa = kw.get("rlut")
+        if sw_down_toa is None or sw_up_toa is None or lw_up_toa is None:
+            return          # a run without radiation: no TOA budget to close
+        state = self.state
+        tracers = state.tracers
+        T = state.T.data
+        q_v = (tracers["q_v"].data
+               if tracers is not None and "q_v" in tracers
+               else jnp.zeros_like(T))
+        # Cell-collocated winds for the kinetic term (``state.u`` is
+        # edge-normal on MPAS); reuse the CMOR feed's Perot reconstruction.
+        u_cell = kw.get("u_east")
+        v_cell = kw.get("v_north")
+        if u_cell is None or v_cell is None:
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            u_cell, v_cell = reconstruct_cell_velocity(state.u.data, self.grid)
+        _p_s = state.p_s.data
+        _p_half = self.sigma.pressure_at_half(_p_s)
+        area = getattr(self.grid, "areaCell", None)
+        # Surface net SW/LW (slots 0/1) window-means -- the accumulator now
+        # covers them (SLOTS), so the closure carries the full surface flux
+        # ``F_sfc = sw_net + lw_net - SH - LH``.  SH/LH come from the SAME
+        # window-mean CMOR kwargs (hfss/hfls, +up).  If the surface radiation
+        # was not diagnosed this window there is no closure to publish -- skip
+        # rather than invent one.
+        def _slot_mean(i):
+            m = _acc.mean(i)
+            return None if m is None else jnp.asarray(m)
+        sw_net_sfc = _slot_mean(0)
+        lw_net_sfc = _slot_mean(1)
+        if sw_net_sfc is None or lw_net_sfc is None:
+            return
+        diag.energy_tracker.update(
+            T, q_v, u_cell, v_cell, state.phis.data, _p_s,
+            self.sigma.dsigma, self.sigma.sigma_full,
+            sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,
+            elapsed_seconds=float(day) * 86400.0,
+            shflx=kw.get("hfss"),
+            lhflx=kw.get("hfls"),
+            area_weights=(None if area is None
+                          else jnp.asarray(area).reshape(-1)),
+            # Hybrid coordinates make ``p_s * dsigma`` / ``p_s * sigma_full``
+            # wrong over terrain; the coordinate's own half/full pressures are
+            # right for either coordinate (the tracker's sigma fallback keeps
+            # the pure-sigma cube path byte-identical).
+            dp=_p_half[..., 1:] - _p_half[..., :-1],
+            p_full=self.sigma.pressure_at_full(_p_s),
+        )
+
+    @staticmethod
+    def _backfill_energy_row(ts: dict, energy_tracker, n_before: int) -> None:
+        """Overwrite the last (NaN-placeholder) energy timeseries row with THIS
+        interval's values, iff the CMOR/energy feed just added a fresh sample.
+
+        The lean lane appends NaN placeholders for the energy series in its
+        diagnostic block, THEN feeds the tracker; sampling before the feed
+        would publish the previous interval's closure and drop the final
+        interval's entirely (codex).  A withheld/partial window adds no
+        sample (``len`` unchanged), so the placeholder NaN correctly stands.
+        """
+        if (energy_tracker is not None
+                and len(energy_tracker.residual) > n_before
+                and ts.get("energy_residual")):
+            ts["energy_residual"][-1] = float(energy_tracker.residual[-1])
+            ts["energy_toa_net"][-1] = float(energy_tracker.toa_net[-1])
+            ts["energy_column"][-1] = float(energy_tracker.column_energy[-1])
 
     def _mpas_cmip_native_kwargs(self, day: float, diag,
                                  u_override=None) -> dict:
@@ -9483,6 +9598,12 @@ class ModelDriver:
             "days": [], "T_atm": [], "T_min": [], "T_max": [],
             "max_wind": [], "dry_mass_ps": [], "T_finite": [], "CWV": [],
             "moisture_residual": [],
+            # Energy-budget series (#1354): the residual distinguishes an
+            # internal leak from a real TOA imbalance ONLY alongside
+            # ``energy_toa_net`` (a residual ~ 0 with a large toa_net is an
+            # imbalance; a large residual is a bookkeeping leak). Column
+            # energy carries the raw MSE the tendency is differenced from.
+            "energy_residual": [], "energy_toa_net": [], "energy_column": [],
         }
 
         t_start = time.time()
@@ -10368,6 +10489,14 @@ class ModelDriver:
                 _ts["moisture_residual"].append(
                     float(_mt.residual[-1])
                     if _mt is not None and _mt.residual else float("nan"))
+                # Energy budget (#1354): append NaN placeholders now and
+                # backfill THIS interval's values after the CMOR/energy feed
+                # below updates the tracker.  Sampling here (before the feed)
+                # would publish the PREVIOUS interval's closure and drop the
+                # final interval's entirely (codex).
+                _ts["energy_residual"].append(float("nan"))
+                _ts["energy_toa_net"].append(float("nan"))
+                _ts["energy_column"].append(float("nan"))
 
                 # Ice-crystal number telemetry (2026-07-28, century3 day-803
                 # NaN): N_i grew x2/day for 800 days with every CLIMATE
@@ -10392,7 +10521,7 @@ class ModelDriver:
                     + ("" if _cwv != _cwv else f"  CWV={_cwv:.1f}kg/m2")
                     + ("" if _ni_max != _ni_max
                        else f"  Ni^max={_ni_max:.1e}/kg")
-                    + f"  ({rate:.1f} sim-days/s)"
+                    + f"  ({rate:.4f} sim-days/s, {elapsed:.0f}s)"
                 )
 
                 # Budget-ledger emission (#1311): interval-mean per-column
@@ -10469,7 +10598,11 @@ class ModelDriver:
                 # chains keep monotonic calendar months (matches the cube
                 # path).  Feed cost is host-side numpy at diag cadence only.
                 if self._mpas_cmip_feed_on:
+                    _et = getattr(getattr(self, "diagnostics", None),
+                                  "energy_tracker", None)
+                    _e_n0 = len(_et.residual) if _et is not None else 0
                     self._feed_mpas_cmip_accumulators(START_DAY + elapsed_day)
+                    self._backfill_energy_row(_ts, _et, _e_n0)
 
             # Periodic checkpoint for the 100-yr restart chain — cadence is
             # independent of the diagnostic interval.  ``day`` is the
@@ -11147,7 +11280,7 @@ class ModelDriver:
                 logger.info(
                     f"  Day {elapsed_day:6.1f}: T=[{T_min:.1f},{T_max:.1f}]K "
                     f"mean={mean_T:.1f}K  p_s={mean_ps/100:.1f}hPa  "
-                    f"|v|_max={max_wind:.1f}m/s  ({rate:.1f} sim-days/s)"
+                    f"|v|_max={max_wind:.1f}m/s  ({rate:.4f} sim-days/s, {elapsed:.0f}s)"
                 )
 
                 from legoesm.driver.diagnostics import (
@@ -11327,6 +11460,8 @@ class ModelDriver:
             sw_net_sfc=_arr("sw_net_sfc") if "sw_net_sfc" in ts else nan,
             lw_net_sfc=_arr("lw_net_sfc") if "lw_net_sfc" in ts else nan,
             energy_residual=_arr("energy_residual") if "energy_residual" in ts else nan,
+            energy_toa_net=_arr("energy_toa_net") if "energy_toa_net" in ts else nan,
+            energy_column=_arr("energy_column") if "energy_column" in ts else nan,
             moisture_residual=_arr("moisture_residual") if "moisture_residual" in ts else nan,
         )
         # Persist the run summary in the same place run_amip's main path

@@ -370,12 +370,14 @@ class EnergyBudget(NamedTuple):
     toa_sw_down: float      # SW_down at TOA
     toa_sw_up: float        # SW_up at TOA
     toa_lw_up: float        # LW_up at TOA
-    sfc_sw_net: float       # SW net at surface
-    sfc_lw_net: float       # LW net at surface
-    sfc_net: float          # total surface net radiation
+    sfc_sw_net: float       # SW net at surface (+down)
+    sfc_lw_net: float       # LW net at surface (+down)
+    sfc_net: float          # surface net RADIATION (sfc_sw_net + sfc_lw_net)
     column_energy: float    # column-integrated moist static energy [J/m²]
     dE_dt: float            # energy tendency [W/m²]
-    residual: float         # R_TOA - dE/dt [W/m²]
+    residual: float         # R_TOA - F_sfc - dE/dt [W/m²] (0 = closed column)
+    sfc_shf: float = 0.0    # surface sensible heat flux [W/m²] (+up)
+    sfc_lhf: float = 0.0    # surface latent heat flux [W/m²] (+up)
 
 
 class EnergyBudgetTracker:
@@ -406,6 +408,8 @@ class EnergyBudgetTracker:
         self.sfc_sw_net: list[float] = []
         self.sfc_lw_net: list[float] = []
         self.sfc_net: list[float] = []
+        self.sfc_shf: list[float] = []
+        self.sfc_lhf: list[float] = []
         self.column_energy: list[float] = []
         self.dE_dt: list[float] = []
         self.residual: list[float] = []
@@ -428,6 +432,8 @@ class EnergyBudgetTracker:
         sw_net_sfc: jax.Array,
         lw_net_sfc: jax.Array,
         elapsed_seconds: float,
+        shflx: jax.Array | None = None,
+        lhflx: jax.Array | None = None,
         area_weights: jax.Array | None = None,
         dp: jax.Array | None = None,
         p_full: jax.Array | None = None,
@@ -470,6 +476,12 @@ class EnergyBudgetTracker:
             T, q_v, u, v, phis, p_s, dsigma, sigma_full,
             dp=dp, p_full=p_full,
         )
+        # Surface turbulent fluxes (+up, out of the surface into the column).
+        # Absent (idealized run with no surface scheme) -> 0, i.e. a
+        # radiation-only surface exchange, which is the correct closure there.
+        # Kept in the SAME fused stack (one host transfer) via a zero stand-in.
+        _shf_arr = jnp.zeros_like(sw_net_sfc) if shflx is None else shflx
+        _lhf_arr = jnp.zeros_like(sw_net_sfc) if lhflx is None else lhflx
         _h = np.asarray(jnp.stack([
             area_weighted_mean(E, area_weights),
             area_weighted_mean(sw_down_toa, area_weights),
@@ -477,6 +489,8 @@ class EnergyBudgetTracker:
             area_weighted_mean(lw_up_toa, area_weights),
             area_weighted_mean(sw_net_sfc, area_weights),
             area_weighted_mean(lw_net_sfc, area_weights),
+            area_weighted_mean(_shf_arr, area_weights),
+            area_weighted_mean(_lhf_arr, area_weights),
         ]))
         mean_E = float(_h[0])
         mean_sw_down_toa = float(_h[1])
@@ -484,20 +498,33 @@ class EnergyBudgetTracker:
         mean_lw_up_toa = float(_h[3])
         mean_sw_sfc = float(_h[4])
         mean_lw_sfc = float(_h[5])
+        mean_shf = float(_h[6])
+        mean_lhf = float(_h[7])
         mean_toa_net = mean_sw_down_toa - mean_sw_up_toa - mean_lw_up_toa
-        mean_sfc_net = mean_sw_sfc + mean_lw_sfc
+        mean_sfc_net = mean_sw_sfc + mean_lw_sfc          # radiation only
+        # F_sfc: net DOWNWARD total energy flux at the surface (into the
+        # surface/ocean). Sign convention: sw_net_sfc / lw_net_sfc are +down
+        # (into surface); SH / LH are +up (out of the surface into the
+        # atmosphere), so they REDUCE the net downward flux.
+        mean_F_sfc = mean_sfc_net - mean_shf - mean_lhf
 
-        # Energy tendency and residual
+        # Atmospheric-column energy closure. All terms are energy INTO the
+        # column: it enters at the top as R_TOA (+down) and leaves at the
+        # bottom as F_sfc (+down into the surface), so dE_atm/dt = R_TOA - F_sfc
+        # and a conserving column has  residual = R_TOA - F_sfc - dE/dt = 0.
+        # (The pre-#1354 residual = R_TOA - dE/dt DROPPED F_sfc, so a healthy
+        # prescribed-SST run read the ocean-uptake surface flux, O(5-20 W/m2),
+        # as a false leak.)
         if self._prev_energy is not None and self._prev_time is not None:
             dt = elapsed_seconds - self._prev_time
-            if dt > 0:
-                dE_dt = (mean_E - self._prev_energy) / dt
-            else:
-                dE_dt = 0.0
-            residual = mean_toa_net - dE_dt
+            dE_dt = (mean_E - self._prev_energy) / dt if dt > 0 else float("nan")
+            residual = mean_toa_net - mean_F_sfc - dE_dt
         else:
-            dE_dt = 0.0
-            residual = 0.0
+            # No previous snapshot -> no tendency. NaN, never 0: a zero residual
+            # reads as "the budget closes", which every restart segment's first
+            # window would otherwise publish as a false pass (#1354 / codex).
+            dE_dt = float("nan")
+            residual = float("nan")
 
         self._prev_energy = mean_E
         self._prev_time = elapsed_seconds
@@ -513,6 +540,8 @@ class EnergyBudgetTracker:
             column_energy=mean_E,
             dE_dt=dE_dt,
             residual=residual,
+            sfc_shf=mean_shf,
+            sfc_lhf=mean_lhf,
         )
 
         self.times.append(elapsed_seconds)
@@ -523,6 +552,8 @@ class EnergyBudgetTracker:
         self.sfc_sw_net.append(mean_sw_sfc)
         self.sfc_lw_net.append(mean_lw_sfc)
         self.sfc_net.append(mean_sfc_net)
+        self.sfc_shf.append(mean_shf)
+        self.sfc_lhf.append(mean_lhf)
         self.column_energy.append(mean_E)
         self.dE_dt.append(dE_dt)
         self.residual.append(residual)
@@ -544,6 +575,8 @@ class EnergyBudgetTracker:
             "sfc_sw_net": self.sfc_sw_net,
             "sfc_lw_net": self.sfc_lw_net,
             "sfc_net": self.sfc_net,
+            "sfc_shf": self.sfc_shf,
+            "sfc_lhf": self.sfc_lhf,
             "column_energy": self.column_energy,
             "dE_dt": self.dE_dt,
             "residual": self.residual,
@@ -557,6 +590,8 @@ class EnergyBudgetTracker:
         self.sfc_sw_net = []
         self.sfc_lw_net = []
         self.sfc_net = []
+        self.sfc_shf = []
+        self.sfc_lhf = []
         self.column_energy = []
         self.dE_dt = []
         self.residual = []
@@ -571,12 +606,16 @@ class EnergyBudgetTracker:
         res = np.array(self.residual[1:])  # skip first (no dE/dt)
         toa = np.array(self.toa_net[1:])
         dEdt = np.array(self.dE_dt[1:])
+        # F_sfc = net downward surface flux = radiation - (SH + LH).
+        f_sfc = (np.array(self.sfc_net[1:])
+                 - np.array(self.sfc_shf[1:]) - np.array(self.sfc_lhf[1:]))
 
         lines = [
             "Energy Budget Summary",
             "=" * 40,
             f"  Samples:           {len(res)}",
             f"  <R_TOA>:           {np.mean(toa):+.2f} W/m²",
+            f"  <F_sfc> (down):    {np.mean(f_sfc):+.2f} W/m²",
             f"  <dE/dt>:           {np.mean(dEdt):+.2f} W/m²",
             f"  <Residual>:        {np.mean(res):+.4f} W/m²",
             f"  |Residual| max:    {np.max(np.abs(res)):.4f} W/m²",
