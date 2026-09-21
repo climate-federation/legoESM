@@ -8,7 +8,7 @@ Preregistration commit: `d99ef4453`
 
 Accepted measurement/retraction commit: `089db8c4d`
 
-Acquisition-card commit: `3c0609f13`
+Final acquisition-contract commit: `fb4e4ea03`
 
 Status: **STOPPED_FOR_RECORD — the admitted developed-state walk proves that
 the first non-bit boundary is the completed incoming U slow forcing, with the
@@ -160,6 +160,14 @@ fp64 dimensions and field sizes, exact EOF, finite values, exact stamp and
 producer, a closed ordered manifest, inherited-byte passivity, and literal
 depth/wind replay.
 
+A final adversarial audit caught and corrected a would-be replay defect before
+handoff: after the parser removes NEMO's single non-contributing `jpk` slot,
+the older 31-slot helper would also have skipped the deepest retained physical
+level. The Round-140 replay now sums all 30 retained levels, and a non-vacuous
+test places the only nonzero product at level 30. The closed manifest also
+includes the parent external-record validation, and every inherited stream
+stamp is checked against its producer and digest.
+
 The additive patch has zero removed lines. Dry preprocessing and
 `gfortran -fsyntax-only` printed `SYNTAX_PROOF_PASS stp2d.f90`; its layout
 plant removed the post-drag write and exited 69 with
@@ -205,7 +213,7 @@ line-228 endpoint; it does not weaken the anchor or widen the cited range.
 Focused CPU/x64 test summaries:
 
 ```text
-81 passed in 2.76s
+82 passed in 2.58s
 ```
 
 The focused set covers the private live-operand hook contract, the admitted
@@ -228,8 +236,9 @@ full fidelity time-level unit file.
 | `citation_gate_shifted_plant_final.json` | `a9effd55b20c455c9a92279e930c59a9c0e22325e28809fe6041e6d12a0952d5` |
 | `codex_review.log` | `3a9581859fa4443d6ea3767dcf85865a0c9734478edbe95f4a3fc1d59642cb16` |
 | `focused_tests.log` | `a5fb1f4b5f9128fc2cb52faae3a78ba0c9d3bf0bb0bdc7abe1b5ce130fb1ca27` |
+| `focused_tests_final.log` | `4fc84ac5a40d2b9f1a78407842b5d6377e155ed28734c012e93fafbbaa2482d4` |
 | `stp2d_round140.patch` | `d26262941a229b168e22c87c631f25fa7d2b65d61ad1426b376629ce64629a75` |
-| `run.sh` | `8f803a29fc96a8ea748a0114bde67f309d2ad5055932374fadb122c16648125f` |
+| `run.sh` | `e7906557524578a923876cddd7ff82fb640f2ceca45e914f30231aae2dfc9189` |
 
 ## Decision-43/45 gate and campaign surfaces
 
