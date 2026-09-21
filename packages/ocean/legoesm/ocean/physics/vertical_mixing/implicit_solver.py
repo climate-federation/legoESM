@@ -473,6 +473,8 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     dt: float,
     wet: jax.Array,
     implicit_w: jax.Array | None = None,
+    *,
+    return_matrix_trace: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Literal NEMO ``trazdf`` content matrix and paired ordered solves."""
     if content_rhs_1.shape != content_rhs_2.shape:
@@ -486,8 +488,12 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     if content_rhs_1.shape[-1] < 2:
         divisor = jnp.maximum(e3t_after, _EPS)
         wet_f = jnp.asarray(wet, dtype=content_rhs_1.dtype)
-        return (content_rhs_1 / divisor * wet_f,
-                content_rhs_2 / divisor * wet_f)
+        out = (content_rhs_1 / divisor * wet_f,
+               content_rhs_2 / divisor * wet_f)
+        if return_matrix_trace:
+            zero = jnp.zeros_like(content_rhs_1)
+            return (*out, (zero, divisor, zero))
+        return out
 
     wet_f = jnp.asarray(wet, dtype=content_rhs_1.dtype)
     lower, diagonal, upper = nemo_tracer_tridiagonal(
@@ -497,6 +503,10 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
         lower, diagonal, upper, content_rhs_1) * wet_f
     out_2 = nemo_ordered_tridiagonal_solve(
         lower, diagonal, upper, content_rhs_2) * wet_f
+    if return_matrix_trace:
+        # WRITE-only diagnostic: these are the exact arrays consumed by the
+        # two production recurrences above, not a second reconstruction.
+        return out_1, out_2, (lower, diagonal, upper)
     return out_1, out_2
 
 
@@ -635,17 +645,22 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
     *,
     evaluation: str = "shared_thomas",
     implicit_w: jax.Array | None = None,
+    return_matrix_trace: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Static production dispatch for the paired tracer ZDF application."""
     if evaluation == "shared_thomas" and implicit_w is not None:
         raise ValueError("implicit_w requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas":
+        if return_matrix_trace:
+            raise ValueError(
+                "return_matrix_trace requires evaluation='nemo_literal'")
         return implicit_vertical_diffusion_ocean_pair(
             field_1, field_2, K, dz_after, e3w_now, dt)
     if evaluation == "nemo_literal":
         return implicit_vertical_diffusion_nemo_tracer_pair(
             content_rhs_1, content_rhs_2, K, dz_after, e3w_now, dt, wet,
-            implicit_w=implicit_w)
+            implicit_w=implicit_w,
+            return_matrix_trace=return_matrix_trace)
     raise ValueError(
         "unknown ZDF tracer solver evaluation "
         f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")
