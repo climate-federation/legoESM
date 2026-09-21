@@ -17,7 +17,7 @@ from legoesm.atmosphere.physics.convection import _ifs_test_ascent as ta
 from legoesm.atmosphere.physics.convection import _ifs_ascent as asc
 from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import compute_moist_adiabat
-from legoesm.thermo import saturation_mixing_ratio, saturation_specific_humidity
+from legoesm.thermo import saturation_specific_humidity
 
 
 # --------------------------------------------------------------------------
@@ -39,7 +39,7 @@ def column(kind, nlev=30, ps=101300.0, sigma_half=None):
         Tad = np.asarray(compute_moist_adiabat(jnp.array([T0]), jnp.array(pf)[None, :], jnp.array([q0])))[0]
         T = np.where(pf > 95000, T0 * (pf / ps) ** rcpl, Tad - 1.0)
         T = np.where(pf < 15000, np.maximum(T, 200.0), T)
-        qs = np.asarray(saturation_mixing_ratio(jnp.array(T), jnp.array(pf)))
+        qs = np.asarray(saturation_specific_humidity(jnp.array(T), jnp.array(pf)))
         q = np.where(pf > 95000, q0, 0.8 * qs)
         q = np.minimum(q, q0)
     else:  # "trade"
@@ -48,7 +48,7 @@ def column(kind, nlev=30, ps=101300.0, sigma_half=None):
                                np.where(pf > 80000, 300.7 + 6.0 * (85000 - pf) / 5000,
                                         306.7 + 3.0 * (80000 - pf) / 10000)))
         T = th * (pf / 1e5) ** rcpl
-        qs = np.asarray(saturation_mixing_ratio(jnp.array(T), jnp.array(pf)))
+        qs = np.asarray(saturation_specific_humidity(jnp.array(T), jnp.array(pf)))
         q = np.where(pf > 95000, 0.017, np.where(pf > 85000, 0.85 * qs, 0.3 * qs))
         q = np.minimum(q, 0.017)
     return T[None, :].astype(np.float32), q[None, :].astype(np.float32), p_full, p_half
@@ -85,13 +85,13 @@ def _run(T, q, p_full, p_half, cfg_t=None, cfg_a=None):
         jnp.zeros((1, T.shape[1]), jnp.float32),
         cfg_t)
 
-    qsp = q / (1.0 + q)
+    qsp = q      # q is already PQEN specific humidity: no seam conversion
     T_h, q_h, s_h = ta.half_level_env(T, qsp, p_full, p_half,
                                        geo_full, geo_half, cfg_t)
     qs = saturation_specific_humidity(T, p_full)
 
-    q_u0 = tst.q_u / (1.0 + tst.q_u)
-    l_u0 = tst.l_u / (1.0 + tst.q_u + tst.l_u)
+    q_u0 = tst.q_u   # PQU / PLU are on the same moist-mass basis as PQEN
+    l_u0 = tst.l_u
 
     out = asc.ifs_updraught_ascent(
         T, qsp, qs, p_full, p_half, geo_full, geo_half, T_h, q_h,
@@ -125,21 +125,21 @@ def test_deep_sounding_profile():
     top = int(out.k_ctop[0])
     assert base == 28
     assert abs(float(p_full[0, base]) - 962.0 * 100.0) < 200.0
-    assert top == 23
-    assert abs(float(p_full[0, top]) - 794.0 * 100.0) < 200.0
+    assert top == 24
+    assert abs(float(p_full[0, top]) - 827.0 * 100.0) < 200.0
     M_ratio = np.asarray(out.M[0] / 0.02)
-    expected_M = [1.00, 0.98, 1.16, 1.34, 1.52, 0.93]
-    for i, k in enumerate(range(28, 22, -1)):
+    expected_M = [1.00, 0.98, 1.16, 1.34, 0.83]
+    for i, k in enumerate(range(28, 23, -1)):
         assert M_ratio[k] == pytest.approx(expected_M[i], abs=0.03), (k, i)
-    assert np.all(M_ratio[:23] == pytest.approx(0.0, abs=1e-8))
+    assert np.all(M_ratio[:24] == pytest.approx(0.0, abs=1e-8))
     K = np.asarray(out.PKINEU[0])
-    expected_K = [4.2, 7.5, 7.7, 6.3, 4.0, 1.4]
-    for i, k in enumerate(range(28, 22, -1)):
+    expected_K = [2.04, 4.51, 4.80, 3.26, 1.08]
+    for i, k in enumerate(range(28, 23, -1)):
         assert K[k] == pytest.approx(expected_K[i], abs=0.15), (k, i)
-    assert np.all(K[:23] == pytest.approx(0.0, abs=1e-6))
+    assert np.all(K[:24] == pytest.approx(0.0, abs=1e-6))
     pdmfup_sum = float(np.sum(np.asarray(out.PDMFUP)))
     assert pdmfup_sum > 0.0
-    assert pdmfup_sum == pytest.approx(2.49e-5, rel=0.20)
+    assert pdmfup_sum == pytest.approx(2.04e-5, rel=0.20)
 
 
 def test_trade_sounding_profile():
@@ -155,12 +155,12 @@ def test_trade_sounding_profile():
     for i, k in enumerate(range(28, 24, -1)):
         assert M_ratio[k] == pytest.approx(expected_M[i], abs=0.03), (k, i)
     K = np.asarray(out.PKINEU[0])
-    expected_K = [1.4, 6.5, 7.2, 7.8]
+    expected_K = [1.26, 5.53, 6.06, 6.41]
     for i, k in enumerate(range(28, 24, -1)):
         assert K[k] == pytest.approx(expected_K[i], abs=0.15), (k, i)
     pdmfup_sum = float(np.sum(np.asarray(out.PDMFUP)))
     assert pdmfup_sum > 0.0
-    assert pdmfup_sum == pytest.approx(7.4e-6, rel=0.20)
+    assert pdmfup_sum == pytest.approx(1.09e-5, rel=0.20)
 
 
 def test_mass_flux_nonnegative_and_zero_above_top():
@@ -230,12 +230,12 @@ def test_inactive_column_untouched():
         jnp.zeros((1,), jnp.float32),
         jnp.zeros((1, T.shape[1]), jnp.float32),
         cfg_t)
-    qsp = q / (1.0 + q)
+    qsp = q      # q is already PQEN specific humidity: no seam conversion
     T_h, q_h, s_h = ta.half_level_env(T, qsp, p_full, p_half,
                                        geo_full, geo_half, cfg_t)
     qs = saturation_specific_humidity(T, p_full)
-    q_u0 = tst.q_u / (1.0 + tst.q_u)
-    l_u0 = tst.l_u / (1.0 + tst.q_u + tst.l_u)
+    q_u0 = tst.q_u   # PQU / PLU are on the same moist-mass basis as PQEN
+    l_u0 = tst.l_u
     nlev = T.shape[1]
     out = asc.ifs_updraught_ascent(
         T, qsp, qs, p_full, p_half, geo_full, geo_half, T_h, q_h,
@@ -265,8 +265,8 @@ def test_jit_eager_parity():
                                ta.IFSTestAscentConfig(column_refine=2),
                                asc.IFSAscentConfig())
     (Tj, qsp, qs, pf, ph, gf, gh, T_h, q_h) = env
-    q_u0 = tst.q_u / (1.0 + tst.q_u)
-    l_u0 = tst.l_u / (1.0 + tst.q_u + tst.l_u)
+    q_u0 = tst.q_u   # PQU / PLU are on the same moist-mass basis as PQEN
+    l_u0 = tst.l_u
     cfg_a = asc.IFSAscentConfig()
 
     def model(Tj, qsp, qs, pf, ph, gf, gh, T_h, q_h, ldcum, ktype, k_dpl, k_cbot, klab0, T_u0, q_u0, l_u0, w_base):
@@ -327,8 +327,8 @@ def test_gradient_finite():
                                ta.IFSTestAscentConfig(column_refine=2),
                                asc.IFSAscentConfig())
     (Tj, qsp, qs, pf, ph, gf, gh, T_h, q_h) = env
-    q_u0 = tst.q_u / (1.0 + tst.q_u)
-    l_u0 = tst.l_u / (1.0 + tst.q_u + tst.l_u)
+    q_u0 = tst.q_u   # PQU / PLU are on the same moist-mass basis as PQEN
+    l_u0 = tst.l_u
     cfg_a = asc.IFSAscentConfig()
 
     def loss(T_):

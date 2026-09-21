@@ -81,6 +81,7 @@ from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     diagnostic_heat_flux_full,
@@ -252,10 +253,9 @@ def smagorinsky_turbulence(
     dz = jnp.clip(dz, 1.0, None)
 
     # Surface fluxes
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+    tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-        T_sfc, q_sfc, rho[:, -1], config.surface,
-    )
+        T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
 
     # Convert surface fluxes to boundary conditions for diffusion
     # Momentum: flux = tau / rho ~ Cd * |V| * u  (already has rho in it)

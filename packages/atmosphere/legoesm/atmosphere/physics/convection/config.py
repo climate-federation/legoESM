@@ -1629,6 +1629,20 @@ class BechtoldConfig(NamedTuple):
     # 297 baseline with the residual std improved, moisture residual
     # improved).  False restores the legacy split path byte-identically.
     use_ifs_inplume_precip: bool = True
+    # Where the vapour that becomes in-plume rain is debited from the
+    # environment (and its latent heat released), use_ifs_inplume_precip only:
+    #   "formation"   - at the rain-formation levels (precip_frac*M_u profile,
+    #                   cuascn PDMFUP), capacity-limited per level after the
+    #                   transport tendencies; excess redistributed within the
+    #                   formation support, and any remainder REDUCES the rain
+    #                   and its heating consistently.  DEFAULT.
+    #   "vapour_mass" - legacy: column-exact sink spread over ALL levels by
+    #                   q_v*dp ("same relative drying rate everywhere"), which
+    #                   took 43% of the ITCZ's convective rain water, and put
+    #                   its heat, below 850 hPa where the plume never condensed
+    #                   (2026-09-21 banded ledgers; codex + GLM confirmed
+    #                   against cudtdqn).  Kept selectable for the A/B.
+    rain_vapor_sink: str = "formation"
     # Horizontal grid spacing [m] for the IFS ZTAURES resolution factor on the
     # convective turnover time (ZDX = sqrt(cell area), cumastrn.F90:713,
     # 762-768).  0 (default) = legacy resolution-agnostic ZTAURES = 1.0; the
@@ -1662,17 +1676,18 @@ class BechtoldConfig(NamedTuple):
     # AS A WHOLE, in place of the legacy Bechtold reduction.  Static python
     # bool, so only one branch is ever traced.
     #
-    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Measured 2026-09-17 on a
-    # frozen deep column: a +-11000 K/day dipole across the two lowest levels.
-    # Cause (codex oracle review): the chain omits CUFLXN, which cumastrn runs
-    # BEFORE cudtdqn (cumastrn.F90:1104 then :1226) to subtract the
-    # environmental transport and build the below-cloud-base fluxes, so raw
-    # plume fluxes reach a stage that expects processed ones.  Also open: the
-    # humidity convention differs across the trigger/ascent boundary, KTYPE is
-    # not reclassified against the actual ascent top (cumastrn.F90:634-641),
-    # the detrained condensate and precipitation are dropped from the host
-    # water budget, and the early return bypasses the legacy downdraught and
-    # sub-cloud evaporation rather than keeping them.
+    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Closed so far: CUFLXN and
+    # the absolute-flux reconstruction (which removes a +-11000 K/day dipole at
+    # the two lowest levels) and the humidity convention across the trigger /
+    # ascent seam (q_v, q_u and l_u are all PQEN / PQU / PLU specific humidity,
+    # cubasen.F90:72 and :677-678) and the KTYPE reclassification against the
+    # actual ascent top (cumastrn.F90:635-641) and the return of the detrained
+    # condensate and the convective precipitation to the host water budget.
+    # Still open: the early return
+    # bypasses the legacy downdraught and sub-cloud evaporation rather than
+    # keeping them, and the ported ascent does not return an updated LDCUM
+    # (CUASCN has it INOUT and clears it for mid-level columns, cuascn.F90:389
+    # and :627), which is harmless only while this port has no KTYPE=3 branch.
     use_ifs_ascent: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production

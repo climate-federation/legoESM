@@ -626,6 +626,12 @@ class ExperimentConfig(NamedTuple):
     # scheme's mixing is tapered to zero above this pressure.  None (default)
     # keeps the scheme's own 0.0 = no limit, byte-identical.
     clubb_trop_cloud_top_press: float | None = None
+    # Moisture-only multiplier on CLUBB's q_v eddy diffusivity at the faces
+    # whose sigma lies in ``clubb_q_flux_scale_sigma_band`` (cloud-base mixing
+    # probe, 2026-09-20).  None (default) keeps the scheme's own 1.0,
+    # byte-identical.  Diagnostic CLUBB only.
+    clubb_q_flux_scale: float | None = None
+    clubb_q_flux_scale_sigma_band: tuple[float, float] | None = None
     # Opt-in convective (cumulus) cloud-fraction source (Slingo-1987-inspired surrogate).  The
     # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
     # convection scheme (sbm) holds the column subsaturated, so the convecting
@@ -866,8 +872,19 @@ class ExperimentConfig(NamedTuple):
     # Ocean surface-layer corrections (MPAS lane; both default off pending a
     # user decision): tell the MOST solver the lowest level's real height, and
     # use sea-water saturation at the surface pressure for the ocean q_sfc.
-    surface_z_ref_model_level: bool = False
-    surface_ocean_q_sfc_saline: bool = False
+    # None = leave whatever the scheme config already carries (so a caller
+    # who set it directly is not clobbered); True/False force it.  The AMIP
+    # driver's own default is True -- see run_amip -- which is what makes the
+    # correction the production default without this field silently
+    # overruling an explicit scheme-level choice.
+    surface_z_ref_model_level: bool | None = None
+    # None = apply the sea-water surface humidity on every lane that can
+    # honour it (today: MPAS, the only turbulence bridge carrying an ocean
+    # fraction).  Explicit True on a lane that cannot is an error rather than
+    # a silent no-op; explicit False reproduces the pre-2026-09-20 behaviour,
+    # in which the atmosphere evaporated fresh water while the coupler's own
+    # ocean tile evaporated sea water.
+    surface_ocean_q_sfc_saline: bool | None = None
     # Thermodynamic constants set for the MOST surface fluxes (#762):
     # "legoesm" (default, byte-identical) = constant L_v / dry c_pd;
     # "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent L_vap(T_sfc),
@@ -1282,6 +1299,10 @@ class ExperimentConfig(NamedTuple):
     # escape hatch while the implicit bottom-boundary behaviour is under
     # investigation — day-65 pilot blowup bisect, 2026-07-22).
     bechtold_subsidence_solve: str = "implicit_flux"
+    # Where the in-plume rain's vapour is debited (BechtoldConfig.rain_vapor_sink):
+    # "formation" (default, at the rain-formation levels) or "vapour_mass"
+    # (legacy spread over the whole column by vapour mass; the A/B control).
+    bechtold_rain_vapor_sink: str = "formation"
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -1915,6 +1936,12 @@ class ExperimentConfig(NamedTuple):
                 f"('implicit_flux', 'advective'), got "
                 f"{self.bechtold_subsidence_solve!r}"
             )
+        if self.bechtold_rain_vapor_sink not in ("formation", "vapour_mass"):
+            errors.append(
+                f"bechtold_rain_vapor_sink must be one of "
+                f"('formation', 'vapour_mass'), got "
+                f"{self.bechtold_rain_vapor_sink!r}"
+            )
         if (self.convective_precip_efficiency is not None
                 and not (0.0 <= self.convective_precip_efficiency <= 1.0)):
             errors.append(
@@ -2200,6 +2227,33 @@ class ExperimentConfig(NamedTuple):
                 f"turbulence={self.turbulence!r} (also refused with a "
                 "turbulence_override, which bypasses the CLUBB branch)"
             )
+        if self.clubb_q_flux_scale is not None:
+            if self.turbulence != "clubb":
+                errors.append(
+                    "clubb_q_flux_scale is a CLUBB field; got "
+                    f"turbulence={self.turbulence!r}")
+            if self.clubb_prognostic:
+                errors.append(
+                    "clubb_q_flux_scale is a diagnostic-CLUBB mechanism probe; "
+                    "the prognostic closure does not read it")
+            if self.turbulence_override is not None:
+                errors.append(
+                    "clubb_q_flux_scale is refused with a turbulence_override "
+                    "(the override is authoritative; set CLUBBConfig."
+                    "q_flux_scale inside it)")
+            band = self.clubb_q_flux_scale_sigma_band
+            try:
+                lo, hi = (float(band[0]), float(band[1])) if len(band) == 2 else (None, None)
+            except (TypeError, ValueError):
+                lo, hi = None, None
+            if lo is None or not (0.0 <= lo < hi <= 1.0):
+                errors.append(
+                    "clubb_q_flux_scale needs clubb_q_flux_scale_sigma_band "
+                    f"(lo, hi) with 0 <= lo < hi <= 1, got {band!r}")
+        elif self.clubb_q_flux_scale_sigma_band is not None:
+            errors.append(
+                "clubb_q_flux_scale_sigma_band is set but clubb_q_flux_scale is "
+                "None: the band does nothing on its own")
         _valid_surface_bulk = VALID_SURFACE_BULK
         if self.surface_bulk_scheme not in _valid_surface_bulk:
             errors.append(
@@ -3087,6 +3141,8 @@ class ExperimentConfig(NamedTuple):
             # 5e4 Pa would switch the boundary-layer scheme off in the free
             # troposphere, which is not what a taper is for.
             ("clubb_trop_cloud_top_press", 0.0, 5.0e4),
+            # 1 = byte-identical; the probe's own spec bounds (CLUBBConfig).
+            ("clubb_q_flux_scale", 0.1, 10.0),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):
@@ -3641,6 +3697,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_enable_cmt=getattr(amip_cfg, 'bechtold_enable_cmt', None),
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
+            bechtold_rain_vapor_sink=getattr(amip_cfg, 'bechtold_rain_vapor_sink', "formation"),
             convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
@@ -3823,6 +3880,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
             bechtold_downdraft_transport=self.bechtold_downdraft_transport,
             bechtold_subsidence_solve=self.bechtold_subsidence_solve,
+            bechtold_rain_vapor_sink=self.bechtold_rain_vapor_sink,
             convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,

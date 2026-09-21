@@ -23,7 +23,7 @@ primitives, none changes the physics where the primitive exists):
   * Half-level environment values ZTENH/ZQENH/ZSENH are the arithmetic
     means of the adjacent full levels, as in cuinin (cubasen.F90:296-312).
   * Saturation uses the liquid curve only
-    (legoesm.thermo.saturation_mixing_ratio); the IFS liquid/ice blend
+    (legoesm.thermo.saturation_specific_humidity); the IFS liquid/ice blend
     FOEALFCU / FOEALFA-R5LES/R5IES (cubasen.F90:486-489 and 525-540) is
     NOT available, hence the freezing correction ZLGLAC is zero
     (liquid-only condensate) and the cloud-base saturation-deficit
@@ -204,7 +204,7 @@ __physics_contract__ = {
                "convective departure level, cloud base/top, test-parcel profiles and "
                "base vertical velocity; classifies deep vs shallow vs none.",
     "inputs": {
-        "T": "K", "q_v": "kg/kg (mixing ratio)", "p_full": "Pa", "p_half": "Pa",
+        "T": "K", "q_v": "kg/kg (specific humidity, PQEN)", "p_full": "Pa", "p_half": "Pa",
         "geo_full": "m2/s2 (geopotential, surface-relative; geo_half[:, nlev] = 0)",
         "geo_half": "m2/s2", "shf_w_m2": "W/m2 (PAHFS sign: negative = upward)",
         "lhf_w_m2": "W/m2 (PQHFL sign: negative = upward; PQHFL = -lhf/L_v [kg m-2 s-1])",
@@ -213,7 +213,8 @@ __physics_contract__ = {
     "outputs": {
         "ldcum": "1 (bool-valued float)", "ktype": "1 deep, 2 shallow, 0 none",
         "k_dpl/k_cbot/k_ctop": "surface-last full-level indices (-1 when none)",
-        "w_base": "m/s (PWUBASE)", "T_u": "K", "q_u/l_u": "kg/kg",
+        "w_base": "m/s (PWUBASE)", "T_u": "K",
+        "q_u/l_u": "kg/kg (PQU/PLU, same moist-mass basis as PQEN)",
         "klab": "0/1/2", "cape_test": "J/kg (PCAPE = max of ZCAPE over departures)",
         "w2": "m2/s2 (ZWU2H/PWU2H of the selected ascent)",
     },
@@ -653,8 +654,8 @@ class TestAscent(NamedTuple):
     k_ctop: jnp.ndarray
     w_base: jnp.ndarray      # PWUBASE [m/s]
     T_u: jnp.ndarray         # (ncol, nlev) K, half-level parcel values
-    q_u: jnp.ndarray         # (ncol, nlev) kg/kg MIXING RATIO per unit dry air
-    l_u: jnp.ndarray         # (ncol, nlev) kg/kg MIXING RATIO per unit dry air
+    q_u: jnp.ndarray         # (ncol, nlev) kg/kg specific humidity (PQU)
+    l_u: jnp.ndarray         # (ncol, nlev) kg/kg, same moist-mass basis (PLU)
     klab: jnp.ndarray        # (ncol, nlev) int32
     cape_test: jnp.ndarray   # (ncol,) J/kg (PCAPE = max of ZCAPE over departures)
     w2: jnp.ndarray          # (ncol, nlev) m2/s2, ZWU2H of the SELECTED ascent
@@ -684,11 +685,10 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
     they are selected, so clipped-index gathers on the discarded branch are
     harmless (k_dep = 0 never occurs: the departure scan runs N-1 ... 1).
 
-    q_v here is SPECIFIC HUMIDITY (the repo-convention mixing ratio is
-    converted once at the ifs_departure_search entry).  dq_dt_adv is a
-    SPECIFIC-humidity tendency [kg/kg/s] (PTENQA); a caller holding a
-    dry-air mixing-ratio tendency w must convert it first via
-    dq = dw/(1+w)^2 before passing it here.
+    q_v here is SPECIFIC HUMIDITY (PQEN, cubasen.F90:72), the same basis
+    as at the ifs_departure_search entry -- there is no conversion seam.
+    dq_dt_adv is a SPECIFIC-humidity tendency [kg/kg/s] (PTENQA) on the
+    same basis.
 
     The departure temperature is returned EXPLICITLY as ``"T_dep"`` (review
     finding 1): it is the source's ZTU(JKK) -- the single ZTEXC excess over
@@ -940,17 +940,19 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
     departures x N-1 masked ascent levels); reverse-mode AD memory over the
     nested scans is to be measured.
 
-    API humidity convention (repo convention): the input ``q_v`` is a MIXING
-    RATIO; it is converted to specific humidity ``q = q_v/(1 + q_v)`` at
-    entry and everything inside (half-level environment, saturation, ascent)
-    works in specific humidity.  ``dq_dt_adv`` is a SPECIFIC-humidity
-    tendency [kg/kg/s] (PTENQA); a caller holding a dry-air mixing-ratio
-    tendency w must convert it first via dq = dw/(1+w)^2.  The returned
-    ``q_u`` and ``l_u`` profiles are converted at the boundary to per-unit
-    MOIST-total-mass denominators, consistently for both species:
-    ``w_u = q_u/max(1 - q_u - l_u, 0.5)`` and
-    ``l_w = l_u/max(1 - q_u - l_u, 0.5)`` (the physical floor 0.5 reflects
-    q + l < 0.5 always; review finding 4).
+    API humidity convention (oracle: the vendored OpenIFS source): ``q_v``
+    is SPECIFIC humidity [kg/kg], exactly the source's PQEN ("PROVISIONAL
+    ENVIRONMENT SPEC. HUMIDITY", cubasen.F90:72; PQENH likewise :62, set
+    from PQEN at cuinin.F90:187, with PQU initialised from PQENH at
+    cuinin.F90:211).  NO unit conversion happens at either boundary: the
+    half-level environment, saturation and ascent all work in specific
+    humidity on this single moist-mass basis, and the returned ``q_u`` and
+    ``l_u`` profiles are PQU / PLU on the SAME moist-mass basis as PQEN
+    (cubasen.F90:677-678 copies ZQU/ZLU straight into PQU/PLU;
+    cuascn.F90:526/534 combine PQENH and PQU with the same ZDMFEN/ZDMFDE
+    weights, :570-572 call CUADJTQ on PQU directly, :618 moves
+    ZQOLD - PQU into PLU).  ``dq_dt_adv`` is a specific-humidity tendency
+    [kg/kg/s] (PTENQA) on the same basis; there is no mixing-ratio seam.
 
     Surface flux sign convention: shf_w_m2 / lhf_w_m2 follow the IFS PAHFS /
     PQHFL convention, NEGATIVE = upward (into the atmosphere); the latent
@@ -1011,8 +1013,8 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
             f"'cell_centre', got {cfg.mixed_layer_gate!r}")
 
     ncol, nlev = T.shape
-    # API boundary: mixing ratio -> specific humidity for everything inside
-    q = q_v / (1.0 + q_v)
+    # q_v IS specific humidity, exactly PQEN (cubasen.F90:72) -- no conversion
+    q = q_v
     env_half = half_level_env(T, q, p_full, p_half, geo_full, geo_half, cfg)
     T_h, q_h, s_h = env_half
     idx = jnp.arange(ncol)
@@ -1179,15 +1181,8 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
     w2_out = final["w2_out"]; w2_sfc_out = final["w2_sfc_out"]
     ldsc = final["ldsc"]; kbotsc = final["kbotsc"]
 
-    # API boundary: specific humidity -> per-unit MOIST-total-mass species,
-    # consistently for both outputs (review finding 4): the denominator
-    # 1 - q - l is floored at the physical bound 0.5 (q + l < 0.5 always),
-    # which also keeps the conversion AD-safe
-    den = jnp.maximum(1.0 - qu - lu, 0.5)
-    qu_w = qu / den
-    l_w = lu / den
-
-    return TestAscent(ldcum, ktype, kdpl, kcbot, kctop, wbase, Tu, qu_w, l_w,
+    # PQU / PLU leave on the SAME moist-mass basis as PQEN (cubasen.F90:677-678)
+    return TestAscent(ldcum, ktype, kdpl, kcbot, kctop, wbase, Tu, qu, lu,
                       klab, cape_out, w2_out, w2_sfc_out, ldsc, kbotsc)
 
 
@@ -1209,12 +1204,125 @@ def _hydrostatic_geopotential(T, q, p_half):
     return phi_half, phi_full
 
 
+def _layer_centre(p_half):
+    """Layer-centre pressures of a half-level grid (ncol, nlev+1) ->
+    (ncol, nlev): 0.5*(p_half[:, :-1] + p_half[:, 1:]).  This is THE
+    location convention of ifs_departure_search_refined: every level value
+    is its LAYER MEAN located at this half-level midpoint, DERIVED FROM
+    p_half -- never the caller's p_full, which on a log-midpoint or
+    IFS-hybrid grid differs from it by a fraction of a layer.  Both the
+    r == 1 arm and every r > 1 path of the refined wrapper build the
+    pressure they hand to the source-literal ifs_departure_search with
+    this one expression; native ifs_departure_search keeps the source's
+    PAP convention (the model's full-level pressure, as handed in) and is
+    unchanged."""
+    return 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+
+
+def _refine_half_levels(p_half, r):
+    """Refined half levels: r equal-pressure sub-layers per parent layer.
+
+    Fractions j/r for j = 0..r-1 keep EVERY parent interface exactly once
+    (p_r[:, 0] == p_half[:, 0] and p_r[:, k*r] == p_half[:, k] for all k,
+    surface-last layout, half levels (ncol, nlev+1)); the surface half
+    level p_half[:, nlev] is appended unchanged, so the result is
+    (ncol, nlev*r + 1), every sub-layer has strictly positive thickness,
+    and r = 1 reproduces p_half exactly.
+    """
+    nlev = p_half.shape[1] - 1
+    h_par = jnp.repeat(jnp.arange(nlev), r)              # static parent index
+    frac = jnp.tile(jnp.arange(r), nlev).astype(p_half.dtype) / r
+    lo_h = p_half[:, h_par]
+    dp_h = p_half[:, h_par + 1] - lo_h
+    return jnp.concatenate(
+        [lo_h + frac * dp_h, p_half[:, nlev:nlev + 1]], axis=1)
+
+
+def _fv_minmod_refine(x, c_par, h_par_dp, c_child, k_par):
+    """Delta-p-conservative minmod-limited piecewise-linear refinement.
+
+    Parent values x (ncol, nlev) are LAYER MEANS on the parent layers with
+    pressure centres c_par and pressure thicknesses h_par_dp; c_child
+    (ncol, nlev*r) are the sub-layer centres and k_par (nlev*r,) the static
+    parent index of each child.  Returns the sub-layer means
+
+        x_kj = x_k + m_k * (c_kj - c_k),
+        m_k = minmod(d_minus / (c_k - c_{k-1}),
+                     d_plus  / (c_{k+1} - c_k),
+                     2*d_minus / h_k, 2*d_plus / h_k),
+        d_minus = x_k - x_{k-1},  d_plus = x_{k+1} - x_k,
+
+    where minmod returns the smallest-magnitude argument when all four
+    arguments share a sign and 0 otherwise; the 2*d/h arguments are the
+    endpoint bound that keeps the reconstruction inside the neighbour
+    range.  m_k is 0 exactly on the top and bottom parent layers.  The
+    children of a parent are equal-pressure sub-layers whose centres
+    average to the parent centre, so sum_j x_kj * dp/r == x_k * dp to
+    round-off; children are bounded by the neighbouring parent values
+    (non-negative when the parents are), the operator is exact for
+    profiles affine in pressure and the identity at r = 1.  Static index
+    arithmetic only -- JAX-traceable, no branching on traced values, no
+    data-dependent shapes.  q is NOT clipped against saturation: a scalar
+    limiter cannot guarantee sub-saturation and clipping would break the
+    per-layer conservation.
+    """
+    nlev = x.shape[1]
+    ones = jnp.ones_like(c_par[:, :1])
+    diff = x[:, 1:] - x[:, :-1]
+    d_minus = jnp.concatenate([x[:, :1], diff], axis=1)   # x_k - x_{k-1}
+    d_plus = jnp.concatenate([diff, x[:, -1:]], axis=1)   # x_{k+1} - x_k
+    dc = c_par[:, 1:] - c_par[:, :-1]
+    dc_minus = jnp.concatenate([ones, dc], axis=1)        # c_k - c_{k-1}
+    dc_plus = jnp.concatenate([dc, ones], axis=1)         # c_{k+1} - c_k
+    s1 = d_minus / dc_minus
+    s2 = d_plus / dc_plus
+    s3 = 2.0 * d_minus / h_par_dp
+    s4 = 2.0 * d_plus / h_par_dp
+    sgn = jnp.sign(s1)
+    same = ((sgn == jnp.sign(s2)) & (sgn == jnp.sign(s3))
+            & (sgn == jnp.sign(s4)) & (sgn != 0.0))
+    mag = jnp.minimum(jnp.minimum(jnp.abs(s1), jnp.abs(s2)),
+                      jnp.minimum(jnp.abs(s3), jnp.abs(s4)))
+    m = jnp.where(same, sgn * mag, 0.0)
+    interior = (jnp.arange(nlev) > 0) & (jnp.arange(nlev) < nlev - 1)
+    m = jnp.where(interior, m, 0.0)                       # flat top/bottom
+    return x[:, k_par] + m[:, k_par] * (c_child - c_par[:, k_par])
+
+
 def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
                                  shf_w_m2, lhf_w_m2, ustar, land_frac,
                                  dq_dt_adv, cfg):
     """REFINED-COLUMN trigger (codex design r14, item 3): run the UNCHANGED
     source-literal ``ifs_departure_search`` on a vertically refined copy of
     each column and map the results back to the parent levels.
+
+    CONVENTION (one meaning, both arms): this function treats every level
+    value it is handed (T, q_v, dq_dt_adv) as its LAYER MEAN, located at
+    the half-level midpoint _layer_centre(p_half) derived from p_half
+    rather than trusting the caller's p_full, which is NOT used as a
+    location anywhere here.  The GEOPOTENTIAL is derived here too, by
+    hydrostatic integration of p_half, so both the pressure and the
+    geopotential a level value is paired with come from one geometry;
+    the geo_full / geo_half arguments are consequently unused, as is
+    p_full, and all three are kept for signature parity with the native
+    search (callers pass the same argument tuple to both).  Both the
+    r == 1 arm and every r > 1 path therefore hand the source-literal
+    search a layer-centre pressure and a module-built geopotential; the
+    native
+    ``ifs_departure_search`` keeps the source's PAP convention (the
+    model's full-level pressure, as handed in) and is unchanged.
+
+    Two of that search's pressure tests are PORT-LOCAL rather than
+    source-literal, so they are covered by this convention too and get
+    layer centres through this wrapper (codex, correcting an earlier
+    audit): the NJKT1/NJKT2 departure and test-top bounds, which the
+    source precomputes ONCE as level INDICES from a standard pressure
+    profile (sucumf.F90:284, ``IF(STPRE(JLEV) > 350.E2)NJKT1=JLEV``)
+    rather than testing PAP per column, and the optional ``cell_centre``
+    mixed-layer gate, where the source uses a half-level difference
+    (cubasen.F90:400, ``PAPH(KLEV+1)-PAPH(JKK-1) < 60.E2``).  The
+    saturation calls ARE source-literal: satur.F90:120 divides by
+    PAPRSF, the full-level pressure.
 
     PURPOSE: the coarse-grid departure sampling defect.  On ~33 hPa
     layers (L60-like grids) the first elevated departure launches with
@@ -1244,17 +1352,20 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
     and calls ifs_departure_search directly): refined half levels split
     each parent layer evenly in PRESSURE; refined full levels are the
     midpoints of the refined half intervals.  Dry static energy
-    s = c_p T + Phi and SPECIFIC humidity q are reconstructed
-    LINEARLY IN PRESSURE between the parent FULL levels (piecewise
-    linear, edge values held constant beyond the first/last parent full
-    level by clamping the interpolation weight to [0, 1]); dq_dt_adv is
-    interpolated like q.  Temperature is DERIVED from s,
+    s = c_p T + Phi, SPECIFIC humidity q and dq_dt_adv are reconstructed
+    from the parent LAYER MEANS with the Delta-p-conservative
+    piecewise-linear minmod-limited finite-volume operator
+    (_fv_minmod_refine) on the parent-layer pressure geometry taken from
+    p_half (layer centres and thicknesses, NOT p_full): per-parent mass is
+    conserved to round-off, every child value is bounded by the
+    neighbouring parent values, and profiles affine in pressure are
+    reproduced exactly in the interior.  Temperature is DERIVED from s,
     T = (s - Phi_refined)/c_p, and nothing else is recomputed.  The
     refined geopotential is hydrostatic from the refined T and q
     (_hydrostatic_geopotential, cumulative R_d T_v ln(p) from the
     surface); the circularity T(s, Phi(T)) is broken with a single
-    provisional pass that interpolates the parent T with the same
-    weights purely to seed Phi (the final s-derived T then closes the
+    provisional pass that reconstructs the parent T with the same
+    operator purely to seed Phi (the final s-derived T then closes the
     consistency to within the reconstruction error).
 
     RESTRICTION (map back to the parent levels): refined half indices
@@ -1280,61 +1391,68 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
     if r < 1:
         raise ValueError(
             f"IFSTestAscentConfig.column_refine must be >= 1, got {r}")
+
+    # The GEOPOTENTIAL is a level value too, so it gets the same treatment as
+    # the pressure: derived here from p_half by the module's own hydrostatic
+    # integration rather than taken from the caller, in BOTH arms.  Leaving
+    # the caller's geo_full in place would reintroduce the very seam this
+    # convention removes -- the r > 1 path already inverts the reconstructed
+    # dry static energy against a module-built refined geopotential, so a
+    # caller whose geopotential sits on a different geometry would have its
+    # temperature offset by the difference (GLM review).
+    geo_half, geo_full = _hydrostatic_geopotential(T, q_v, p_half)
+
     if r == 1:
-        return ifs_departure_search(T, q_v, p_full, p_half, geo_full,
-                                    geo_half, shf_w_m2, lhf_w_m2, ustar,
-                                    land_frac, dq_dt_adv, cfg)
+        # SAME convention as every r > 1 path: the level values' location
+        # is the layer centre derived from p_half, not the caller's
+        # p_full.  The old early return forwarded the caller's p_full,
+        # which made the refinement's anchoring a function of r on any
+        # grid where p_full != mid(p_half).
+        return ifs_departure_search(T, q_v, _layer_centre(p_half), p_half,
+                                    geo_full, geo_half, shf_w_m2, lhf_w_m2,
+                                    ustar, land_frac, dq_dt_adv, cfg)
 
     ncol, nlev = T.shape
-    dt = T.dtype
     c_pd = constants.c_pd
-    # API boundary: mixing ratio -> specific humidity (as in
-    # ifs_departure_search); q_v_r is converted back at the end
-    q = q_v / (1.0 + q_v)
+    # q_v IS specific humidity, exactly PQEN (cubasen.F90:72) -- no conversion
+    q = q_v
 
     # ---- refined grids (static index arithmetic, traced pressures)
-    # half levels: r sub-layers per parent layer, even in pressure; the
-    # refined half levels at multiples of r COINCIDE with the parent
-    # interfaces (frac = j/r, j = 1..r), and the surface half level
-    # p_half[:, nlev] is appended unchanged
-    h_par = jnp.repeat(jnp.arange(nlev), r)              # (nlev*r,) static
-    frac = jnp.tile(jnp.arange(1, r + 1), nlev).astype(dt) / r
-    lo_h = p_half[:, h_par]
-    dp_h = p_half[:, h_par + 1] - lo_h
-    p_half_r = jnp.concatenate(
-        [lo_h + frac * dp_h, p_half[:, nlev:nlev + 1]], axis=1)
-    # full levels: midpoints of the refined half intervals
-    p_full_r = 0.5 * (p_half_r[:, :-1] + p_half_r[:, 1:])
+    # half levels: r sub-layers per parent layer, even in pressure, at
+    # fractions j/r for j = 0..r-1 so that EVERY parent interface appears
+    # exactly once (the refined half levels at multiples of r coincide
+    # with the parent interfaces, including the model top p_half[:, 0]);
+    # the surface half level p_half[:, nlev] is appended unchanged, every
+    # sub-layer has positive thickness, and r = 1 reproduces p_half
+    p_half_r = _refine_half_levels(p_half, r)
+    # full levels: sub-layer centres, the same _layer_centre convention
+    p_full_r = _layer_centre(p_half_r)
 
-    # ---- reconstruction weights (traced, computed once per column):
-    # refined full index k_r lies in parent layer k_par = k_r // r; the
-    # piecewise-linear-in-pressure weight between the parent FULL levels
-    # k_par and k_par+1, clamped to [0, 1] (edge values held constant
-    # beyond the first/last parent full level -- the refined full level
-    # midpoints near the domain edges can fall outside the parent full
-    # levels' pressure range).  NOTE: plain interpolation between
-    # full-level points is NOT conservative (see docstring); the
-    # Delta-p-conservative limited reconstruction is the follow-up if
-    # the gate test fails.
-    k_par = (jnp.arange(nlev * r) // r)                  # static
-    p_lo = p_full[:, k_par]
-    p_hi = p_full[:, k_par + 1]
-    w = jnp.clip((p_full_r - p_lo) / (p_hi - p_lo), 0.0, 1.0)
+    # ---- reconstruction (traced, computed once per column): the
+    # Delta-p-conservative finite-volume piecewise-linear minmod operator
+    # (_fv_minmod_refine), parent values as LAYER MEANS on the parent
+    # half-level geometry (layer centres/thicknesses from p_half, NOT
+    # p_full); children are the sub-layer means at the refined sub-layer
+    # centres.  This replaces the old clipped linear ramp between parent
+    # FULL levels, which was half-cell shifted and NOT conservative.
+    c_par = _layer_centre(p_half)                        # parent layer centres
+    h_par_dp = p_half[:, 1:] - p_half[:, :-1]            # parent thicknesses
+    k_par = jnp.repeat(jnp.arange(nlev), r)              # (nlev*r,) static
 
-    def _lin(x):
-        return x[:, k_par] + w * (x[:, k_par + 1] - x[:, k_par])
+    def _fv(x):
+        return _fv_minmod_refine(x, c_par, h_par_dp, p_full_r, k_par)
 
-    s_r = _lin(c_pd * T + geo_full)                      # dry static energy
-    q_r = _lin(q)                                        # specific humidity
-    dq_r = _lin(dq_dt_adv)                               # interpolated like q
-    # provisional T (same weights) only to SEED the hydrostatic Phi;
-    # the final T below is derived from s (T = (s - Phi_refined)/c_p)
-    T_prov = _lin(T)
+    s_r = _fv(c_pd * T + geo_full)                       # dry static energy
+    q_r = _fv(q)                                         # specific humidity
+    dq_r = _fv(dq_dt_adv)                                # reconstructed like q
+    # provisional T (same operator) only to SEED the hydrostatic Phi; the
+    # final T below is derived from s (T = (s - Phi_refined)/c_p)
+    T_prov = _fv(T)
     phi_half_r, phi_full_r = _hydrostatic_geopotential(T_prov, q_r, p_half_r)
     T_r = (s_r - phi_full_r) / c_pd                      # derive temperature
 
     # ---- run the UNCHANGED source-literal search on the refined column
-    q_v_r = q_r / (1.0 - q_r)                            # back to mixing ratio
+    q_v_r = q_r                                 # stays specific humidity (PQEN)
     res = ifs_departure_search(T_r, q_v_r, p_full_r, p_half_r,
                                phi_full_r, phi_half_r, shf_w_m2,
                                lhf_w_m2, ustar, land_frac, dq_r, cfg)

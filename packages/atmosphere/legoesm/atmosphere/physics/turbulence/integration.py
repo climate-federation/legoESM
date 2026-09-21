@@ -94,7 +94,7 @@ class TurbulenceSchemeTraits(NamedTuple):
 
 
 # Sea-water saturation reduction of q_sat (coupler.py uses the same value).
-_Q_SAT_SALINE_FACTOR = 0.98
+_Q_SAT_SALINE_FACTOR = constants.q_sat_saline_fraction
 
 _ENERGY_FIELD_BY_SCHEME = {
     "tke": "tke",
@@ -506,12 +506,21 @@ def make_turbulence_physics(
         _sub = getattr(materialize_sub_config(turbulence_config),
                        turbulence_config.scheme, None)
         _srf = getattr(_sub, "surface", None)
-        if _srf is not None and (getattr(_srf, "z_ref_model_level", False)
-                                 or getattr(_srf, "ocean_q_sfc_saline", False)):
+        # z_ref_model_level now reaches EVERY lane: each turbulence kernel
+        # calls surface_fluxes_at_lowest_level, which honours it from the
+        # config with the level height the kernel already has.  The saline
+        # ocean humidity still cannot: it applies to the OCEAN fraction only,
+        # and the structured-grid lanes deliberately have no land fraction in
+        # the turbulence factory (see the f_land guard above), so applying it
+        # would put sea water under the continents.  Raise rather than ignore.
+        if _srf is not None and getattr(_srf, "ocean_q_sfc_saline", False):
             raise NotImplementedError(
-                "SurfaceLayerConfig.z_ref_model_level / ocean_q_sfc_saline are "
-                f"implemented on the MPAS turbulence bridge only; model_type="
-                f"{model_type!r} would silently ignore them")
+                "SurfaceLayerConfig.ocean_q_sfc_saline needs a land fraction "
+                "to apply the sea-water humidity to the ocean tile only, and "
+                f"the {model_type!r} turbulence factory has none (f_land is "
+                "the MPAS bridge's knob). Pass surface=...\n"
+                "._replace(ocean_q_sfc_saline=False) on this lane, or extend "
+                "the lane to carry a land fraction.")
     if model_type == "hydrostatic":
         return _make_hydrostatic_turbulence(turbulence_config, dt)
     elif model_type == "nonhydrostatic":
@@ -902,13 +911,6 @@ def _make_mpas_turbulence(
         # the ocean/ice fraction keep the scheme's own bulk computation.
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
         _surface_flux = None
-        if (_shf_land is None
-                and getattr(_surf, "z_ref_model_level", False)):
-            raise ValueError(
-                "surface z_ref_model_level is only honoured on the MPAS path "
-                "that computes the ocean fluxes itself (land fluxes supplied "
-                "via forcing['shflx_land'/'lhflx_land']); this call has none, "
-                "so the switch would be silently inert")
         if _shf_land is not None:
             if f_land is None:
                 raise ValueError(
@@ -924,23 +926,19 @@ def _make_mpas_turbulence(
                     f"solved. Use one of {schemes_accepting_surface_flux()}, "
                     "or teach this scheme the argument.")
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
-                compute_surface_fluxes,
+                surface_fluxes_at_lowest_level,
             )
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
-            if getattr(_surf, "z_ref_model_level", False):
-                # The inputs ARE lowest-full-level values: tell the MOST solver
-                # their height instead of labelling them as config.z_ref (10 m),
-                # and hand it the potential temperature at that height (COARE:
-                # dT = T_sfc - (T + g/c_p * z), ~1.5 K at 150 m) so the stability
-                # is not read off a dry-adiabatic lapse.
-                _z_in = z_full[:, -1]
-                _T_in = T_col[:, -1] + (constants.g / constants.c_pd) * _z_in
-            else:
-                _z_in = None
-                _T_in = T_col[:, -1]
-            _tx, _ty, _sh, _lh, _us = compute_surface_fluxes(
-                u_col[:, -1], v_col[:, -1], _T_in, q_v_col[:, -1],
-                T_sfc, q_sfc, rho[:, -1], step_config.surface, z_ref=_z_in,
+            # Through the shared helper rather than an inline copy: this
+            # branch had its own adjustment, which kept the warmed air while
+            # the bulk law dropped the height on a constant-coefficient
+            # scheme -- the same one-sided contrast the helper exists to
+            # prevent, surviving in the one place that did not call it
+            # (codex).  Height measured from the LOCAL surface.
+            _tx, _ty, _sh, _lh, _us = surface_fluxes_at_lowest_level(
+                u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
+                T_sfc, q_sfc, rho[:, -1], step_config.surface,
+                z_full[:, -1] - z_half[:, -1],
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)

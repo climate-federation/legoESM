@@ -398,7 +398,14 @@ class AIMIPClassicalParams(eqx.Module):
             ``legoesm.core.bulk_flux.validate_bulk_scheme``.
         """
         d = self.as_dict()
-        base = SurfaceLayerConfig()
+        # The AIMIP lanes substitute the lowest air temperature for the
+        # surface wherever no surface is supplied (free-running spectral
+        # physics; NaN over land in the SST-anchored forcing), and the MOST
+        # height adjustment against such a "surface" invents an air-surface
+        # contrast and a downward sensible heat flux out of nothing.  Keep it
+        # off here (the scheme default is True) until this lane carries a
+        # real surface temperature everywhere.
+        base = SurfaceLayerConfig(z_ref_model_level=False)
         return base._replace(
             Cd_neutral=d["surface_Cd_neutral"],
             Ch_neutral=d["surface_Ch_neutral"],

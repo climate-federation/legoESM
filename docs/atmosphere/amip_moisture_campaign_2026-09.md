@@ -777,3 +777,199 @@ chain now receives.
 Next, in order: port CUFLXN, fix the humidity convention at the trigger/ascent seam, reclassify
 KTYPE after the ascent, return the condensate and precipitation to the host, and only then the
 day-110 replay and the 5-day screen.
+
+## Iteration K — the trigger/ascent seam, the KTYPE retype, and the first-guess contract (2026-09-17)
+
+Three oracle defects closed on the faithful chain, each diagnosed by codex against the vendored
+Fortran, coded by GLM, and reviewed by codex and GLM in turn.
+
+**1. The seam was specific humidity all along.** The ported trigger applied `q/(1+q)` on entry and
+`q/max(1-q-l, 0.5)` on exit (twice each, counting the refined wrapper). The oracle has neither:
+PQEN, PQENH, PQU and PLU are one moist-mass basis end to end (cubasen.F90:72 and :62,
+cuinin.F90:187 and :211, cubasen.F90:677-678, cuascn.F90:526/534/570-572/618). The two conversions
+are exact inverses when there is no condensate, so the returned vapour was unchanged and the defect
+was invisible from outside — it lived INSIDE, where the environment was 1.67% drier than the
+saturation curve it was compared against. Correcting it deepens the deep fixtures by 30-70 hPa,
+lowers their cloud base by 17 hPa and raises precipitation generation 30%; the trade-cumulus tops
+do not move, because they are inversion-limited rather than humidity-limited.
+
+Both column fixtures also built their humidity as a fraction of `saturation_mixing_ratio`. On a
+specific-humidity API that is a 1.7% moist bias in the FIXTURE, and it makes the module-wrong and
+fixture-wrong hypotheses produce identical diffs — GLM's finding. They now use
+`saturation_specific_humidity`, which is genuinely `w_s/(1+w_s)`.
+
+**2. KTYPE is now reclassified against the actual ascent top** (cumastrn.F90:635-641), between the
+single ascent and the final closure, on the realised half-level pressure depth against RDEPTHS. The
+source resets nothing else there and never runs a second ascent.
+
+**3. The first guess and the rescale now divide by the same number.** ifs_closure rebuilds ZMFUB
+internally and forms ZMFS = ZMFUB1/ZMFUB (cumastrn.F90:963), so it has to rebuild it with the
+PRE-reclassification type — codex's P1. Fixing that exposed a second, older defect: the chain built
+its ZDH from the FULL-level environment at cloud base while ifs_closure used the HALF-level one, so
+the flux that launched the ascent and the flux the closure divided by were different quantities.
+The oracle uses ZTENH/ZQENH (cumastrn.F90:570-571). Both sites now use the half-level environment,
+and two tests pin the identity.
+
+That last correction costs mass flux on the 30-level fixture: peak heating falls from just over 1 to
+0.33 K/day. MEASURED, not inferred — on that column the retype is inert (realised depth 6.8 kPa
+against a 20 kPa split, KTYPE 2 -> 2) and the rescale is ZMFS = 0.96, so the half-level ZDH is the
+whole effect. The fixture has a sharp humidity step at 950 hPa, which is why the half-level humidity
+at cloud base is 0.0129 against 0.017 at the full level.
+
+REFUTED in review, both by reading the Fortran: ZDHPBL is NOT gated on KTYPE==2 (cumastrn.F90:493
+gates on LDCUM and the sub-cloud level range only), and ITOPM2 is KCTOP, not KCTOP-2 (:637).
+
+STILL OPEN on this path, in order: the detrained condensate and the convective precipitation are
+dropped from the host water budget while their latent heating is kept (codex: the vapour sink is
+already in PTENQ via the flux-divergence form, so the host loses sum(PLUDE) + surface precipitation
+per unit time); the early return bypasses the legacy downdraught and sub-cloud evaporation; the
+ported ascent does not return an updated LDCUM (CUASCN has it INOUT, cuascn.F90:389 and :627),
+harmless only while there is no KTYPE=3 branch; plitot is zero, there is no convective momentum
+transport, and ustar is a fixed 0.1 m/s.
+
+ALSO OPEN, found by GLM while reviewing the seam fix: the trigger's sub-layer refinement does not
+converge to the native-grid answer. On the deep sounding, L30 refined by 1/2/4 gives 895/557/523 hPa
+against a native L60 top of 616 hPa, and the native-vs-refined gap widened from 25 to 59 hPa with
+the seam fix. The gate test now documents that rather than certifying agreement.
+
+## Iteration L — the host water budget, and the grid refinement (2026-09-18)
+
+**The chain was destroying water.** The ported cudtdqn already removes the detrained
+condensate and the convective precipitation from the vapour tendency (cudtdqn.F90:343-347), so
+a host that receives neither loses that water while keeping its latent heating. Measured on the
+active deep fixture: 0.051 mm/day on one weak column, which in a convecting tropical column is
+the whole convective rain rate. Both are now returned, converted with the same expression the
+tendency module builds its own ZDP from, and the column budget closes to 3 parts in 10 million.
+On this chain — no downdraught, no sub-cloud evaporation, PSNDE = 0 — the surface rate equals
+the sum of PDMFUP; when any of those lands, the rain tendency must become the per-level net.
+
+**The sub-layer refinement had two defects.** Its half levels ran at fractions 1/r..1 per parent
+with the surface appended again, which dropped the model top, displaced every interface by one
+sub-layer and left a ZERO-THICKNESS bottom cell with its full level exactly at the surface. And
+the reconstruction interpolated between parent FULL levels with the weight clipped to [0, 1],
+while the sub-layers of a parent straddle its centre — so the shallower half were pinned to the
+parent value and only the deeper half interpolated, toward the next layer down. On the last
+parent it read out of bounds. Measured: up to 38% of a parent layer's water created or
+destroyed, 1.25% of the column, and up to 31.5% error against the analytic profile with a mean
+MOIST bias of +3.5e-4 kg/kg.
+
+Now a Δp-conservative piecewise-linear finite-volume reconstruction with a minmod limiter.
+Per-parent water conserved to 2e-7, profile error 2.3% at r = 2, mean bias down to +1.0e-4.
+
+**The spuriously moist environment was driving spuriously vigorous convection.** Controlled A/B
+on the reconstruction alone: the trade column keeps its mass-flux profile and cloud top exactly
+but loses 22% of its kinetic energy and, rising more slowly through a drier cloud layer, carries
+16% more condensate and rains 37% more; the deep column's ascent is shallower (760 -> 827 hPa)
+with 28% less mass flux, 43% less kinetic energy and 32% less rain. The refined cloud top moves
+557 -> 658 hPa at r = 2 against a native L60 answer of 616, so the refined-native gap falls from
+59 to 42 hPa.
+
+**Owner decision (2026-09-18): keep the layer-average semantics, consistently.** A level value is
+the mean over its layer, located at the layer centre derived from the half levels, never the
+caller's full-level pressure. `_layer_centre` is now the single expression for that, used by both
+arms of the refinement wrapper — the r = 1 shortcut previously forwarded the caller's p_full, so
+the anchoring was a function of r. The geopotential gets the same treatment, because forwarding
+the caller's while re-anchoring the pressure reintroduces the same sub-layer shift. The
+source-literal search is unchanged; its saturation calls divide by PAPRSF as the source does.
+Codex refuted an audit claim here: the NJKT1/NJKT2 bounds and the optional cell-centre
+mixed-layer gate are PORT-LOCAL, not source-literal, and already receive layer centres through
+the wrapper.
+
+**OPEN, cause unknown.** Neither ladder converges — L30 refined r = 1/2/4/8 gives
+895/658/625/591 hPa, native L30/L60/L120 gives 895/616/536 — and the refined-native gap GROWS
+with effective resolution, 42 hPa at 60 levels and 89 at 120. A resolution-sensitive departure
+search and the point-sample-versus-layer-mean semantics of the fixtures are both candidates and
+neither has been discriminated. The gate test records this instead of certifying agreement.
+
+## Iteration M — the surface-layer reference height, and a controlled pair
+
+The evaporation deficit turned out to sit on a pending decision rather than on
+physics nobody had looked at. Commit da7cca173 (2026-09-15, "opt-in ocean
+surface-layer corrections — real input height, sea-water q_sfc") added two
+switches and left both off, its own message saying "both default False (user
+decision pending)". No committed configuration has set either since.
+
+What the height switch does. On the MPAS path the similarity solver is handed
+the lowest full level's wind, temperature and humidity, but with
+`surface_z_ref_model_level` False it is told those values came from 10 m. They
+come from about 147 m. Calling the model's own flux routine twice on identical
+soundings — `scripts/validate/amip_bias/zref_height_factor.py` — the
+mislabelling inflates latent heat by 1.13 to 1.30 depending on regime and
+surface stress by 1.16 to 1.54. A neutral-limit estimate of 1.5 was too high;
+stability corrections eat about a fifth of it.
+
+The controlled pair. Two five-day branches from the pinned day-105 state, one
+variable, both corrections against neither, both with the process ledger on.
+Global, area-weighted, kg/m2/day at day 110:
+
+                       off      on    change
+  evaporation        2.278   2.008     -11.9%
+  convective rain    2.014   1.782     -11.5%
+  stratiform rain    0.795   0.804      +1.1%
+  transport          0.145   0.136
+  column drying      0.840   0.961
+
+Tropical ocean surface layer at the same day: specific humidity 19.48 against
+18.70 g/kg, so the corrected arm closes roughly a third of the excess over
+ERA5's 17.2 in five days, and the air cools by 1.03 K.
+
+How to read it. The immediate evaporation penalty was 24% on day one and 12%
+by day five, so half of it was already recovered as the surface layer dried —
+which is the signature GLM's review predicted if the inflated coefficient was
+CAUSING the moist bias rather than merely offsetting it. But five days is the
+transient, not the answer: precipitation moves from 95% to 87% of the
+reference and relative humidity gets WORSE, 0.877 to 0.897, because the
+cooling outpaces the drying. Whether the arm recovers depends on whether the
+drying continues at 0.12 kg/m2/day for the thirty-odd days it would take to
+remove a bias of 4 to 8 mm, and this pair cannot say.
+
+Open, and needing a decision: a thirty-day pair is the only thing that settles
+whether these corrections are net-positive. The cold drift of about 1 K in
+five days is the risk to watch in it.
+
+## Iteration N — where the convective rain's vapour is debited (2026-09-21)
+
+The claim, reviewed before code (codex read cudtdqn/cuascn/cuflxn; GLM from
+knowledge): the Bechtold port debited the vapour that becomes in-plume rain,
+and released its latent heat, in proportion to each level's vapour mass, so
+43.5% of the ITCZ's convective rain water (1.60 of 3.68 kg/m2/day, day 135
+banded ledgers) was taken from, and its heat put into, the layers below
+sigma 0.83 where the plume never condensed; ~0.8/day and ~30 W/m2 (2-3 K/day)
+landed below cloud base. IFS assembles the sink where the rain forms. Both
+reviewers confirmed the mechanism against the source.
+
+Fix (`BechtoldConfig.rain_vapor_sink`, default "formation"; "vapour_mass"
+keeps the legacy spread for the A/B; `--bechtold-rain-vapor-sink`): the debit
+and its heating follow the rain-formation profile (precip_frac * M_u), capped
+per level at 0.9 of the post-transport vapour, excess redistributed within the
+formation support, any remainder reducing the rain and heating together so
+rain == sink holds exactly per column. The user moved the production default
+in the same change. Five review rounds (codex + GLM each): NaN float32
+gradients from 1e-30 denominators (fixed, non-vacuous test), a physical flux
+floor for the masks, sub-floor columns emit no rain and debit nothing, and
+the offline probe records the helper's cap scale directly (0 of 9401 formation
+levels binding on day 135: the cap does not act in production).
+
+Pre-registered 1-day arm (wv_sfcon_rvs_* vs wv_sfcon_led_*, day 135->136,
+ITCZ ocean): q850 ratio 0.71 -> 0.78, T850 bias +1.54 -> -0.04 K, sub-cloud
+convective term -0.86 -> +0.01 (profile side CONFIRMED); convective rain
+3.69 -> 1.89 (-49%, outside the +-25% band). The rain halving rides on the
+carried relaxed mass flux: swapping the control's memory into the arm's state
+gives 5.15, its T+q gives 0.74.
+
+Five-day pair (wv_sfcon_rvs5 vs wv_sfcon_leg5, days 136-140, one variable):
+evaporation transient CONFIRMED (global hfls 56.5 -> 60.4 vs legacy 60.3);
+q850 ratio 0.71 -> 0.83, T850 +1.47 -> -0.58 K, q925 0.87 -> 0.97; the
+mid-level bulge shrinks (600 hPa 1.04 -> 0.94, 500 hPa 1.38 -> 1.12,
+PLAUSIBLE until repeated). Convective rain INCONCLUSIVE by the
+pre-registration (day-140 ratio 0.63, between REFUTE 0.60 and CONFIRM 0.75,
+recovering slowly from 0.51). Pair scores, 5-day means: tropics pr RMSE
+6.50 -> 4.63 mm/d (-29%), bias +0.30 -> -0.38; prw RMSE 10.89 -> 9.98;
+global pr RMSE 4.29 -> 3.35. Figures: qprofile_rvs5_vs_leg5.png,
+pair5_pr_hfls_timeseries.png, ledger_layers_wv_sfcon_rvs.png.
+
+Open after this iteration: the ITCZ convective rain settles ~35% below the
+legacy scheme, so whether the closure (rprcon / CAPE relaxation) was tuned
+against the misplaced heating is the next user decision; pre-existing 1e-30
+divisors in the downdraft evaporation and rescale (NaN gradients at zero
+rain, codex) are not touched here; the 30-day continuation is not run.

@@ -727,11 +727,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "transport runaway; None keeps the scheme "
                              "default byte-identically.")
     parser.add_argument("--surface-z-ref-model-level", dest="surface_z_ref_model_level",
-                        action=argparse.BooleanOptionalAction, default=False,
+                        action=argparse.BooleanOptionalAction, default=None,
                         help="Tell the ocean MOST solver the real height of the lowest "
-                             "model level instead of labelling its inputs as z_ref (10 m).")
+                             "model level instead of labelling its inputs as z_ref (10 m). "
+                             "Unset keeps the scheme's own value (True, the production "
+                             "default); --no-surface-z-ref-model-level turns it off.")
     parser.add_argument("--surface-ocean-q-sfc-saline", dest="surface_ocean_q_sfc_saline",
-                        action=argparse.BooleanOptionalAction, default=False,
+                        action=argparse.BooleanOptionalAction, default=None,
                         help="Ocean surface humidity = 0.98 x q_sat(SST, p_s) (sea water at "
                              "the surface pressure) instead of fresh water at the lowest level.")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
@@ -851,6 +853,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CLUBB upper domain limit [Pa] (CAM "
                              "trop_cloud_top_press): mixing tapered to zero "
                              "above it. Default: the scheme's own 0 = no limit.")
+    parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
+                        dest="clubb_q_flux_scale",
+                        help="Moisture-only multiplier on CLUBB's q_v eddy "
+                             "diffusivity at the faces whose sigma lies in "
+                             "--clubb-q-flux-scale-sigma-band (cloud-base "
+                             "mixing probe). Default: the scheme's own 1.0.")
+    parser.add_argument("--clubb-q-flux-scale-sigma-band", nargs=2, type=float,
+                        default=None, dest="clubb_q_flux_scale_sigma_band",
+                        metavar=("LO", "HI"),
+                        help="Sigma band (lo hi) of faces --clubb-q-flux-scale "
+                             "acts on; required with it.")
     parser.add_argument("--clubb-prognostic", dest="clubb_prognostic",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Run CLUBB as a PROGNOSTIC higher-order closure: "
@@ -953,6 +966,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "stability escape hatch of the 2026-07-22 day-65 "
                              "blowup bisect). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_subsidence_solve}.")
+    parser.add_argument("--bechtold-rain-vapor-sink", type=str,
+                        choices=["formation", "vapour_mass"],
+                        default=_EXPERIMENT_DEFAULTS.bechtold_rain_vapor_sink,
+                        dest="bechtold_rain_vapor_sink",
+                        help="Where the in-plume convective rain's vapour is "
+                             "debited and its latent heat released: formation "
+                             "(default, at the rain-formation levels) or "
+                             "vapour_mass (legacy whole-column spread by vapour "
+                             "mass; the A/B control). "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_rain_vapor_sink}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -2110,6 +2133,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
+        clubb_q_flux_scale=args.clubb_q_flux_scale,
+        clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
+                                       if args.clubb_q_flux_scale_sigma_band
+                                       is not None else None),
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
@@ -2279,6 +2306,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
+        bechtold_rain_vapor_sink=args.bechtold_rain_vapor_sink,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
@@ -2878,10 +2906,13 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
     surface (anemic evaporation over a calm warm ocean).
 
     This re-applies the previously-resolved surface ``bulk_scheme`` +
-    ``gustiness_w_zi`` onto the trained Louis config, keeping the trained
-    ``Cd_neutral``/``Ch_neutral``/``z0`` (the MOST/COARE schemes ignore the
-    neutral ``Cd``/``Ch`` but DO use ``z0``, so preserving all three is
-    correct).  No-op when there is no prior turbulence config / surface.
+    ``gustiness_w_zi`` + ``stability_scheme`` and the two run-resolved surface
+    switches (``z_ref_model_level``, ``ocean_q_sfc_saline``) onto the trained
+    Louis config, keeping the trained ``Cd_neutral``/``Ch_neutral``/``z0``
+    (the MOST/COARE schemes ignore the neutral ``Cd``/``Ch`` but DO use
+    ``z0``, so preserving all three is correct).  The switches were dropped
+    here before, so ``--surface-z-ref-model-level`` never reached the trained
+    lane.  No-op when there is no prior turbulence config / surface.
     """
     prev_surf = getattr(prev_turb_config, "surface", None)
     if prev_surf is None or getattr(louis_config, "surface", None) is None:
@@ -2890,7 +2921,9 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
         surface=louis_config.surface._replace(
             bulk_scheme=prev_surf.bulk_scheme,
             gustiness_w_zi=prev_surf.gustiness_w_zi,
-            stability_scheme=prev_surf.stability_scheme))
+            stability_scheme=prev_surf.stability_scheme,
+            z_ref_model_level=prev_surf.z_ref_model_level,
+            ocean_q_sfc_saline=prev_surf.ocean_q_sfc_saline))
 
 
 def _apply_sundqvist_overrides(micro_config, args):

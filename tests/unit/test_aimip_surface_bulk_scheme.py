@@ -41,6 +41,19 @@ def test_to_surface_config_default_is_constant():
     assert sfc.bulk_scheme == "constant"
 
 
+def test_to_surface_config_keeps_the_height_switch_off():
+    """The AIMIP lanes substitute the lowest air temperature for a missing
+    surface, so the MOST height adjustment must stay off here even though the
+    scheme default is True (it would invent a downward sensible heat flux)."""
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+
+    p = AIMIPClassicalParams.from_defaults()
+    assert SurfaceLayerConfig().z_ref_model_level is True      # the scheme default
+    for scheme in ("constant", "most", "coare3"):
+        assert p.to_surface_config(bulk_scheme=scheme).z_ref_model_level is False
+
+
 def test_to_surface_config_most_requested():
     from legoesm.training.aimip_params import AIMIPClassicalParams
 

@@ -131,7 +131,10 @@ from legoesm.atmosphere.physics._shared import (
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
-from legoesm.atmosphere.physics.turbulence.surface_layer import compute_surface_fluxes
+from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
+)
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
     implicit_vertical_diffusion_theta,
@@ -319,6 +322,9 @@ __param_spec__ = {
             "wp2_max": "numerics: wp2 upper clip [m^2/s^2]",
         },
         "params": {
+            "q_flux_scale": {"units": "1", "bounds": (0.1, 10.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "moisture-only multiplier on Kh for q_v inside a sigma band of faces; 1.0 = byte-identical (cloud-base mixing arm, 2026-09-20)", "shape": None},
+            "q_flux_scale_sigma_lo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "lower sigma of the face band q_flux_scale acts on", "shape": None},
+            "q_flux_scale_sigma_hi": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "upper sigma of the face band q_flux_scale acts on", "shape": None},
             "pdf_variance_scale": {"units": "1", "bounds": (0.25, 8.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_pdf", "reference": "multiplier on the DIAGNOSED sub-grid variance entering the PDF closure; 1.0 is the closure's own mixing-length estimate", "shape": None},
         },
     },
@@ -705,6 +711,19 @@ class CLUBBConfig(NamedTuple):
     # does not respond to 2x and 4x here, it will not respond to a prognostic
     # variance either, and the campaign should look elsewhere.
     pdf_variance_scale: float = 1.0
+    # Moisture-only multiplier on the eddy diffusivity used for q_v, applied
+    # at the interior faces whose sigma (p_half / p_surface) lies in
+    # [q_flux_scale_sigma_lo, q_flux_scale_sigma_hi].  1.0 = byte-identical.
+    # A mechanism probe (2026-09-20): the surface layer is too moist under a
+    # cloud layer that is too dry while the turbulent moisture flux dies
+    # between ~300 m and cloud base; scaling only the vapour exchange across
+    # that interface, with T and momentum untouched, tests whether the
+    # humidity profile is mixing-limited or pinned by convection and the
+    # resolved circulation.  Diagnostic path only: the prognostic closure
+    # transports rtm inside its own solver and refuses a value other than 1.
+    q_flux_scale: float = 1.0
+    q_flux_scale_sigma_lo: float = 0.0
+    q_flux_scale_sigma_hi: float = 1.0
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -5878,6 +5897,27 @@ def unpack_clubb_moments(arr: jax.Array) -> CLUBBMomentState:
 # ===========================================================================
 
 
+def scale_q_diffusivity_in_band(Kh_half, p_half, config: CLUBBConfig):
+    """``Kh_half`` for the q_v diffusion: ``config.q_flux_scale`` at the
+    interior faces whose sigma lies in the configured band, unchanged
+    elsewhere.  ``p_half`` is TOP-DOWN ``(ncol, nlev+1)``; ``Kh_half`` holds
+    the ``nlev-1`` interior faces ``p_half[:, 1:-1]``.  Static Python gate so
+    the default is byte-identical."""
+    scale = float(config.q_flux_scale)
+    if not (math.isfinite(scale) and scale > 0.0):
+        raise ValueError(f"q_flux_scale must be finite and > 0, got {scale!r}")
+    if not (0.0 <= config.q_flux_scale_sigma_lo < config.q_flux_scale_sigma_hi <= 1.0):
+        raise ValueError(
+            f"q_flux_scale_sigma band must satisfy 0 <= lo < hi <= 1, got "
+            f"({config.q_flux_scale_sigma_lo}, {config.q_flux_scale_sigma_hi})")
+    if scale == 1.0:
+        return Kh_half
+    sigma_face = p_half[:, 1:-1] / p_half[:, -1:]
+    in_band = ((sigma_face >= config.q_flux_scale_sigma_lo)
+               & (sigma_face <= config.q_flux_scale_sigma_hi))
+    return jnp.where(in_band, scale * Kh_half, Kh_half)
+
+
 def clubb_turbulence(
     u: jax.Array,
     v: jax.Array,
@@ -6049,10 +6089,9 @@ def clubb_turbulence(
     if surface_flux is not None:
         tau_x, tau_y, shflx, lhflx, ustar = surface_flux
     else:
-        tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+        tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-            T_sfc, q_sfc, rho[:, -1], config.surface,
-        )
+            T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
     sflx_u, sflx_v = tau_x, tau_y
     sflx_T = shflx / constants.c_pd
     sflx_q = lhflx / constants.L_v
@@ -6062,7 +6101,9 @@ def clubb_turbulence(
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
     T_new = implicit_vertical_diffusion_theta(
         T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T)
-    q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
+    q_new = implicit_vertical_diffusion(
+        q_v, scale_q_diffusivity_in_band(Kh_half, p_half, config), rho, dz_layer, dz_half,
+        dt, sflx_q)
 
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
 
@@ -6221,9 +6262,9 @@ def clubb_step(
     need_bulk = (sfc_wpthlp is None or sfc_wprtp is None
                  or sfc_upwp is None or sfc_vpwp is None)
     if need_bulk:
-        tau_x, tau_y, shflx_b, lhflx_b, ustar_b = compute_surface_fluxes(
+        tau_x, tau_y, shflx_b, lhflx_b, ustar_b = surface_fluxes_at_lowest_level(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-            T_sfc, q_sfc, rho_sfc, config.surface)
+            T_sfc, q_sfc, rho_sfc, config.surface, z_full[:, -1] - z_half[:, -1])
         wpthlp_b = shflx_b / (rho_sfc * constants.c_pd * exner_sfc)  # w'thl' [K m/s]
         wprtp_b = lhflx_b / (rho_sfc * constants.L_v)                # w'rt'  [kg/kg m/s]
         # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
@@ -6365,6 +6406,11 @@ def clubb_turbulence_prognostic(
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
     """
+    if float(config.q_flux_scale) != 1.0:
+        raise ValueError(
+            "q_flux_scale is a diagnostic-CLUBB mechanism probe; the prognostic "
+            "closure transports rtm inside its own solver and does not read it "
+            f"(got {config.q_flux_scale}).")
     moments = unpack_clubb_moments(clubb_moments)
     n_sub = max(1, math.ceil(dt / config.clubb_dt))
 
