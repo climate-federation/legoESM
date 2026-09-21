@@ -20,7 +20,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.atmosphere.physics.physics_state import (
     PHYSSTATE_INPUT_FIELDS,
     PhysicsState,
@@ -36,13 +35,13 @@ def _cfg():
 
 
 def _setup(n=3, nlev=8, seed=42):
-    from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationConfig,
         MPASPrimitiveEquationModel,
     )
     from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
     mesh = create_voronoi_mesh(n)
     sigma = create_sigma_coordinate(nlev)
     model = MPASPrimitiveEquationModel(mesh, sigma, MPASPrimitiveEquationConfig())
@@ -191,7 +190,9 @@ def test_model_step_held_publishes_cached_diagnostics_and_compiles_once():
             # the published step ledger = cached PHYSICS rows + the dycore's
             # own per-step dynamics / clip / closure rows
             from legoesm.diagnostics.process_ledger import (
-                ROW_CLIPS, ROW_DYNAMICS, ROW_OTHER,
+                ROW_CLIPS,
+                ROW_DYNAMICS,
+                ROW_OTHER,
             )
             led = np.asarray(model._step_ledger)
             phys_rows = [r for r in range(led.shape[1])
@@ -199,7 +200,8 @@ def test_model_step_held_publishes_cached_diagnostics_and_compiles_once():
             assert np.array_equal(led[:, phys_rows, :],
                                   np.asarray(cache.ledger_rows)[:, phys_rows, :])
             # published slots: 0 = sw_net_sfc, 6 = shflx_sfc (core.state map)
-            _arr = lambda x: np.asarray(getattr(x, "data", x))
+            def _arr(x):
+                return np.asarray(getattr(x, "data", x))
             assert np.array_equal(_arr(model._sfc_diag[0]), _arr(cache.sw_net_sfc))
             assert np.array_equal(_arr(model._sfc_diag[6]), _arr(cache.shflx_sfc))
         else:
@@ -211,7 +213,10 @@ def test_model_step_held_publishes_cached_diagnostics_and_compiles_once():
 
 def _mpas_cfg(**kw):
     from legoesm.driver.config import (
-        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
     )
     kw.setdefault("radiation", "gray")
     return ExperimentConfig(
@@ -234,7 +239,10 @@ def test_validate_strict_physics_update_steps():
         with pytest.raises(ValueError, match="physics_update_steps"):
             _mpas_cfg(**bad).validate_strict()
     from legoesm.driver.config import (
-        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
     )
     cube = ExperimentConfig(
         grid=GridConfig(resolution=8, nlev=8), dycore=DycoreConfig(dt=600.0),
@@ -260,6 +268,7 @@ def test_validate_strict_physics_update_steps():
 def test_physics_update_steps_round_trips_cli_and_amip_config():
     from legoesm.driver.config import ExperimentConfig
     from legoesm.forcing.amip_config import AMIPExperimentConfig
+
     from scripts.run.run_amip import build_arg_parser
     parser = build_arg_parser()
     assert parser.parse_args([]).physics_update_steps == 1
