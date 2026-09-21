@@ -56,6 +56,44 @@ def _round139_fields() -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
     return fields, u_mask, v_mask
 
 
+def _round140_rhs_payload() -> bytes:
+    nx, ny, nz = 36, 26, 31
+    header = struct.pack(
+        "=8i", WALK.ROUND140_RHS_VERSION, WALK.ROUND139_KT,
+        1, 3, nx, ny, nz, 64)
+    sizes = struct.pack(
+        "=7i", *((nx * ny * nz,) * 6 + ((nx - 4) * (ny - 4),)))
+    zero3 = np.zeros((ny, nx, nz), dtype=np.float64)
+    mask3 = np.ones((ny, nx, nz), dtype=np.float64)
+    zero_full = np.zeros((ny, nx), dtype=np.float64)
+    one_full = np.ones((ny, nx), dtype=np.float64)
+    zero_interior = np.zeros((ny - 4, nx - 4), dtype=np.float64)
+
+    def field3(values):
+        return np.asarray(values).transpose(1, 0, 2).tobytes(order="F")
+
+    def full2(values):
+        return np.asarray(values).T.tobytes(order="F")
+
+    def interior2(values):
+        return np.asarray(values).T.tobytes(order="F")
+
+    body = b"".join((
+        field3(zero3), field3(zero3), field3(mask3),
+        field3(zero3), field3(zero3), field3(mask3),
+        interior2(zero_interior), interior2(zero_interior),
+        full2(one_full), full2(one_full),
+        interior2(zero_interior), interior2(zero_interior),
+        full2(zero_full), full2(zero_full),
+        np.asarray([1.0], dtype=np.float64).tobytes(),
+        full2(zero_full), full2(zero_full),
+        full2(one_full), full2(one_full),
+        interior2(zero_interior), interior2(zero_interior),
+    ))
+    return (WALK.ROUND140_RHS_MAGIC.ljust(16).encode("ascii")
+            + header + sizes + body)
+
+
 def test_bottom_value_selects_deepest_wet_face_level() -> None:
     values = np.array([[[1.0, 2.0, 99.0], [3.0, 88.0, 77.0]]])
     mask = np.array([[[True, True, False], [True, False, False]]])
@@ -192,6 +230,34 @@ def test_round140_registry_rejects_a_missing_operand() -> None:
     WALK._validate_round140_registry()
     with pytest.raises(RuntimeError, match="registry changed"):
         WALK._validate_round140_registry(WALK.ROUND140_OPERAND_REGISTRY[:-1])
+
+
+def test_round140_rhs_reader_replay_and_registry_are_fail_closed() -> None:
+    payload = _round140_rhs_payload()
+    assert len(payload) == WALK.ROUND140_RHS_EXPECTED_SIZE
+    record = WALK.read_round140_rhs_bytes(payload)
+    assert tuple(record["fields"]) == WALK.ROUND140_RHS_FIELDS
+    assert all(
+        row["bit_exact"]
+        for row in WALK.validate_round140_rhs_replay(record).values())
+    WALK._validate_round140_rhs_registry()
+    with pytest.raises(RuntimeError, match="developed-RHS registry changed"):
+        WALK._validate_round140_rhs_registry(WALK.ROUND140_RHS_REGISTRY[:-1])
+
+
+def test_round140_rhs_reader_and_replay_plants_fire() -> None:
+    payload = _round140_rhs_payload()
+    bad_header = bytearray(payload)
+    bad_header[16:20] = struct.pack("=i", WALK.ROUND140_RHS_VERSION + 1)
+    with pytest.raises(RuntimeError, match="bad Round-140 RHS header"):
+        WALK.read_round140_rhs_bytes(bytes(bad_header))
+    with pytest.raises(RuntimeError, match="record size changed"):
+        WALK.read_round140_rhs_bytes(payload[:-1])
+    record = WALK.read_round140_rhs_bytes(payload)
+    planted = np.array(record["fields"]["post_wind_u"], copy=True)
+    planted[0, 0] = np.nextafter(planted[0, 0], np.float64(np.inf))
+    with pytest.raises(RuntimeError, match="source replay is not bit exact"):
+        WALK.validate_round140_rhs_replay(record, post_wind_u=planted)
 
 
 def test_round117_compiled_accumulator_order_keeps_after_adv_identity() -> None:

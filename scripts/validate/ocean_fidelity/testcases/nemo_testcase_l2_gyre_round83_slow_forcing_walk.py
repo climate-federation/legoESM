@@ -98,6 +98,44 @@ ROUND140_OPERAND_REGISTRY = (
     "incoming_u", "incoming_v", "coriolis_u", "coriolis_v",
     "mask_u", "mask_v", "final_u", "final_v",
 )
+ROUND140_CALLBACK_FIELDS = (
+    *ROUND140_OPERAND_REGISTRY,
+    "rhs_u", "rhs_v", "thickness_u", "thickness_v",
+    "depth_u", "depth_v", "mask3_u", "mask3_v",
+    "depth_mean_u", "depth_mean_v", "post_wind_u", "post_wind_v",
+    "post_drag_u", "post_drag_v", "wind_tau_u", "wind_tau_v",
+    "wind_r1_rho0", "wind_r1_hu", "wind_r1_hv",
+)
+ROUND140_RHS_RECORD = "oracle_developed_rhs_kt00001081.bin"
+ROUND140_RHS_MAGIC = "NEMO_L2_R140RHS"
+ROUND140_RHS_VERSION = 3
+ROUND140_RHS_FIELDS = (
+    "e3u", "rhs_u", "umask", "e3v", "rhs_v", "vmask",
+    "depth_mean_u", "depth_mean_v", "r1_hu0", "r1_hv0",
+    "post_drag_u", "post_drag_v", "cd_u", "cd_v", "r1_rho0",
+    "wind_tau_u", "wind_tau_v", "wind_r1_hu", "wind_r1_hv",
+    "post_wind_u", "post_wind_v",
+)
+ROUND140_RHS_EXPECTED_SIZE = 1_486_548
+ROUND140_RHS_MANIFEST = "round140_outputs.sha256"
+ROUND140_RHS_MANIFEST_MEMBERS = (
+    ROUND140_RHS_RECORD, ROUND140_RHS_RECORD + ".stamp",
+    ROUND139_RECORD, ROUND139_RECORD + ".stamp",
+    round81.DEVELOPED_RECORD, round81.DEVELOPED_RECORD + ".stamp",
+    round81.DEVELOPED_QCO_RECORD, round81.DEVELOPED_QCO_RECORD + ".stamp",
+    "GYRE_OMIP_L2_P3_00001080_restart.nc",
+    "oracle_process_budget_kt00001081.bin",
+    "round140_passive_admission_plant.log",
+    "round140_rhs_header_plant.log", "round140_rhs_header_plant.json",
+    "round140_rhs_replay_ulp_plant.log", "round140_rhs_replay_ulp_plant.json",
+    "round140_rhs_stamp_plant.log", "round140_rhs_stamp_plant.json",
+    "round140_rhs_truncation_plant.log", "round140_rhs_truncation_plant.json",
+)
+ROUND140_RHS_REGISTRY = (
+    "thickness_u", "thickness_v", "rhs_u", "rhs_v",
+    "mask3_u", "mask3_v", "reciprocal_u", "reciprocal_v",
+    "depth_mean_u", "depth_mean_v",
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -252,6 +290,119 @@ def read_round139_record(path: Path) -> dict:
     return read_round139_record_bytes(path.read_bytes())
 
 
+def read_round140_rhs_bytes(payload: bytes) -> dict[str, object]:
+    """Read the developed ``NEMO_L2_R140RHS`` stream fail closed."""
+    require(len(payload) == ROUND140_RHS_EXPECTED_SIZE,
+            "Round-140 developed-RHS record size changed")
+    magic_bytes, offset = _round139_take(payload, 0, 16, "RHS magic")
+    try:
+        magic = magic_bytes.decode("ascii").rstrip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError("Round-140 RHS magic is not ASCII") from error
+    raw_header, offset = _round139_take(payload, offset, 8 * 4, "RHS header")
+    version, kt, kbb, krhs, nx, ny, nz, bits = struct.unpack(
+        "=8i", raw_header)
+    raw_sizes, offset = _round139_take(payload, offset, 7 * 4, "RHS sizes")
+    sizes = struct.unpack("=7i", raw_sizes)
+    expected_sizes = (nx * ny * nz,) * 6 + ((nx - 4) * (ny - 4),)
+    require(
+        (magic, version, kt, kbb, krhs, nx, ny, nz, bits, sizes)
+        == (ROUND140_RHS_MAGIC, ROUND140_RHS_VERSION, ROUND139_KT,
+            1, 3, 36, 26, 31, 64, expected_sizes),
+        "bad Round-140 RHS header "
+        + repr((magic, version, kt, kbb, krhs, nx, ny, nz, bits, sizes)),
+    )
+
+    def take_values(count: int, label: str) -> np.ndarray:
+        nonlocal offset
+        raw, offset = _round139_take(payload, offset, count * 8, label)
+        values = np.frombuffer(raw, dtype=np.float64).copy()
+        require(values.size == count, f"bad Round-140 RHS {label} count")
+        require(np.all(np.isfinite(values)),
+                f"non-finite Round-140 RHS {label}")
+        return values
+
+    def field3(label: str) -> np.ndarray:
+        return take_values(nx * ny * nz, label).reshape(
+            (nx, ny, nz), order="F").transpose(1, 0, 2)[2:-2, 2:-2, :nz - 1]
+
+    def full2(label: str) -> np.ndarray:
+        return take_values(nx * ny, label).reshape(
+            (nx, ny), order="F").T[2:-2, 2:-2]
+
+    def interior2(label: str) -> np.ndarray:
+        return take_values((nx - 4) * (ny - 4), label).reshape(
+            (nx - 4, ny - 4), order="F").T
+
+    fields = {
+        "e3u": field3("e3u"),
+        "rhs_u": field3("rhs_u"),
+        "umask": field3("umask"),
+        "e3v": field3("e3v"),
+        "rhs_v": field3("rhs_v"),
+        "vmask": field3("vmask"),
+        "depth_mean_u": interior2("depth_mean_u"),
+        "depth_mean_v": interior2("depth_mean_v"),
+        "r1_hu0": full2("r1_hu0"),
+        "r1_hv0": full2("r1_hv0"),
+        "post_drag_u": interior2("post_drag_u"),
+        "post_drag_v": interior2("post_drag_v"),
+        "cd_u": full2("cd_u"),
+        "cd_v": full2("cd_v"),
+    }
+    fields["r1_rho0"] = float(take_values(1, "r1_rho0")[0])
+    fields.update({
+        "wind_tau_u": full2("wind_tau_u"),
+        "wind_tau_v": full2("wind_tau_v"),
+        "wind_r1_hu": full2("wind_r1_hu"),
+        "wind_r1_hv": full2("wind_r1_hv"),
+        "post_wind_u": interior2("post_wind_u"),
+        "post_wind_v": interior2("post_wind_v"),
+    })
+    require(offset == len(payload), "trailing Round-140 RHS payload")
+    require(tuple(fields) == ROUND140_RHS_FIELDS,
+            "Round-140 RHS field census changed")
+    return {
+        "header": {
+            "magic": magic, "version": version, "kt": kt,
+            "Kbb": kbb, "Krhs": krhs, "nx": nx, "ny": ny,
+            "nz": nz, "bits": bits, "sizes": sizes,
+        },
+        "fields": fields,
+    }
+
+
+def read_round140_rhs(path: Path) -> dict[str, object]:
+    require(path.name == ROUND140_RHS_RECORD,
+            "Round-140 developed-RHS record name changed")
+    return read_round140_rhs_bytes(path.read_bytes())
+
+
+def validate_round140_rhs_replay(record: dict[str, object], *,
+                                 post_wind_u=None) -> dict[str, object]:
+    """Replay the two directly closed statements in the acquired stream."""
+    fields = record["fields"]
+    rows = {}
+    for face in ("u", "v"):
+        active3 = fields[f"{face}mask"] != 0.0
+        active2 = active3[..., 0]
+        depth = round16._source_sum(
+            fields[f"e3{face}"], fields[f"rhs_{face}"],
+            fields[f"{face}mask"], fields[f"r1_h{face}0"])
+        rows[f"depth_{face}"] = comparison(
+            depth, fields[f"depth_mean_{face}"], active2)
+        wind = ((np.float64(fields["r1_rho0"])
+                 * fields[f"wind_tau_{face}"])
+                * fields[f"wind_r1_h{face}"])
+        final = fields[f"post_drag_{face}"] + wind
+        observed = (post_wind_u if face == "u" and post_wind_u is not None
+                    else fields[f"post_wind_{face}"])
+        rows[f"wind_{face}"] = comparison(final, observed, active2)
+    require(all(row["bit_exact"] for row in rows.values()),
+            "Round-140 RHS source replay is not bit exact")
+    return rows
+
+
 def _round139_bits_equal(left, right) -> bool:
     left = np.ascontiguousarray(np.asarray(left, dtype=np.float64))
     right = np.ascontiguousarray(np.asarray(right, dtype=np.float64))
@@ -383,6 +534,80 @@ def _validate_round140_registry(registry=ROUND140_OPERAND_REGISTRY) -> None:
             "Round-140 developed operand registry has duplicates")
 
 
+def _validate_round140_rhs_registry(registry=ROUND140_RHS_REGISTRY) -> None:
+    require(tuple(registry) == ROUND140_RHS_REGISTRY,
+            "Round-140 developed-RHS registry changed")
+    require(len(registry) == len(set(registry)),
+            "Round-140 developed-RHS registry has duplicates")
+
+
+def _validate_round140_rhs_stamp(path: Path, producer: str, words=None) -> str:
+    stamp = path.with_name(path.name + ".stamp")
+    require(stamp.is_file(), "Round-140 RHS record stamp is missing")
+    actual = stamp.read_text().split() if words is None else list(words)
+    digest = sha256(path)
+    require(actual == [digest, producer, path.name],
+            "Round-140 RHS record stamp mismatch")
+    return digest
+
+
+def _verify_round140_rhs_closed_run(root: Path) -> dict[str, object]:
+    """Verify the closed acquisition and every inherited scientific byte."""
+    manifest_path = root / ROUND140_RHS_MANIFEST
+    require(manifest_path.is_file(), "Round-140 RHS manifest is missing")
+    entries = {}
+    for line in manifest_path.read_text().splitlines():
+        parts = line.split(maxsplit=1)
+        require(len(parts) == 2, "malformed Round-140 RHS manifest row")
+        digest, name = parts
+        require(name not in entries,
+                f"duplicate Round-140 RHS manifest row {name}")
+        path = root / name
+        require(path.is_file(), f"missing Round-140 RHS manifest member {name}")
+        require(sha256(path) == digest,
+                f"Round-140 RHS manifest member changed: {name}")
+        entries[name] = digest
+    require(tuple(entries) == ROUND140_RHS_MANIFEST_MEMBERS,
+            "Round-140 RHS manifest census or order changed")
+    inherited = {
+        ROUND139_RECORD: sha256(
+            ROOT / "round139/oracle_developed_slow_forcing" / ROUND139_RECORD),
+        round81.DEVELOPED_RECORD: ROUND139_PARENT_EXTERNAL_SHA256,
+        round81.DEVELOPED_QCO_RECORD: ROUND139_PARENT_QCO_SHA256,
+        "GYRE_OMIP_L2_P3_00001080_restart.nc": ROUND139_PARENT_RESTART_SHA256,
+        "oracle_process_budget_kt00001081.bin": ROUND139_PARENT_PROCESS_SHA256,
+    }
+    for name, expected in inherited.items():
+        require(sha256(root / name) == expected,
+                f"Round-140 instrument perturbed inherited {name}")
+    markers = {
+        "passive": ("round140_passive_admission_plant.log",
+                    "STATUS PLANT-FIRED: passive-admission"),
+        "header": ("round140_rhs_header_plant.log", "STATUS PLANT-FIRED"),
+        "replay": ("round140_rhs_replay_ulp_plant.log", "STATUS PLANT-FIRED"),
+        "stamp": ("round140_rhs_stamp_plant.log", "STATUS PLANT-FIRED"),
+        "truncation": ("round140_rhs_truncation_plant.log", "STATUS PLANT-FIRED"),
+    }
+    seen = {}
+    for name, (filename, marker) in markers.items():
+        lines = (root / filename).read_text().splitlines()
+        require(lines and marker in lines[-1],
+                f"Round-140 RHS {name} plant marker changed")
+        seen[name] = lines[-1]
+    timing = (root / "run.user.time.log").read_text().splitlines()
+    stdout = (root / "run.user.stdout.log").read_text().splitlines()
+    require(timing and timing[-1] == "RUN_DONE",
+            "Round-140 RHS acquisition lacks RUN_DONE")
+    require(stdout and stdout[-1] == "STOP 0",
+            "Round-140 RHS acquisition lacks STOP 0")
+    return {
+        "manifest": str(manifest_path),
+        "manifest_members": len(entries),
+        "plants": seen,
+        "completion": {"nemo": stdout[-1], "run": timing[-1]},
+    }
+
+
 def measure_round139_record(args) -> dict[str, object]:
     """Admit the passive split record before any production comparison."""
     stamp = worktree_stamp()
@@ -493,6 +718,84 @@ def measure_round139_record(args) -> dict[str, object]:
         "replay": replay,
         "closed_run": closed_run,
         "plant": args.plant,
+        "plant_fires": False,
+    }
+
+
+def measure_round140_rhs_record(args) -> dict[str, object]:
+    """Admit the passive developed three-dimensional RHS record."""
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-140 RHS admission worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-140 RHS admission commit mismatch")
+    root = args.round140_rhs_root
+    record_path = root / ROUND140_RHS_RECORD
+    require(record_path.is_file(), "Round-140 RHS record is missing")
+    producer = (root / "producer_commit.txt").read_text().strip()
+    require(producer.lower() == args.expect_rhs_record_commit.lower(),
+            "Round-140 RHS producer commit changed")
+    payload = record_path.read_bytes()
+    if args.plant == "rhs-record-stamp":
+        fired = False
+        try:
+            _validate_round140_rhs_stamp(
+                record_path, producer,
+                ("0" * 64, producer, record_path.name))
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-140 RHS stamp plant stayed green")
+        return {"format": "nemo-testcase-l2-gyre-round140-rhs-record-v1",
+                "status": "PLANT-FIRED", "plant": args.plant,
+                "plant_fires": True, "worktree": stamp}
+    if args.plant == "rhs-record-header":
+        planted = bytearray(payload)
+        planted[16:20] = struct.pack("=i", ROUND140_RHS_VERSION + 1)
+        fired = False
+        try:
+            read_round140_rhs_bytes(bytes(planted))
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-140 RHS header plant stayed green")
+        return {"format": "nemo-testcase-l2-gyre-round140-rhs-record-v1",
+                "status": "PLANT-FIRED", "plant": args.plant,
+                "plant_fires": True, "worktree": stamp}
+    if args.plant == "rhs-record-truncation":
+        fired = False
+        try:
+            read_round140_rhs_bytes(payload[:-1])
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-140 RHS truncation plant stayed green")
+        return {"format": "nemo-testcase-l2-gyre-round140-rhs-record-v1",
+                "status": "PLANT-FIRED", "plant": args.plant,
+                "plant_fires": True, "worktree": stamp}
+    record = read_round140_rhs_bytes(payload)
+    if args.plant == "rhs-record-replay-ulp":
+        planted = np.array(record["fields"]["post_wind_u"], copy=True)
+        active = record["fields"]["umask"][..., 0] != 0.0
+        location = tuple(int(value) for value in np.argwhere(active)[0])
+        planted[location] = np.nextafter(
+            planted[location], np.float64(np.inf))
+        fired = False
+        try:
+            validate_round140_rhs_replay(record, post_wind_u=planted)
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-140 RHS replay-ULP plant stayed green")
+        return {"format": "nemo-testcase-l2-gyre-round140-rhs-record-v1",
+                "status": "PLANT-FIRED", "plant": args.plant,
+                "plant_location": list(location), "plant_fires": True,
+                "worktree": stamp}
+    replay = validate_round140_rhs_replay(record)
+    closed = _verify_round140_rhs_closed_run(root)
+    digest = _validate_round140_rhs_stamp(record_path, producer)
+    return {
+        "format": "nemo-testcase-l2-gyre-round140-rhs-record-v1",
+        "status": "PASS", "worktree": stamp,
+        "producer_commit": producer, "record": str(record_path),
+        "record_sha256": digest, "record_size": len(payload),
+        "header": record["header"], "replay": replay,
+        "closed_run": closed, "plant": args.plant,
         "plant_fires": False,
     }
 
@@ -732,6 +1035,137 @@ def measure_round140_developed(args) -> dict[str, object]:
     }
 
 
+def measure_round140_rhs_developed(args) -> dict[str, object]:
+    """Walk the developed slow forcing upstream through its 3-D RHS."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-140 RHS measurement worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-140 RHS measurement commit mismatch")
+    if args.plant == "rhs-missing-row":
+        fired = False
+        try:
+            _validate_round140_rhs_registry(ROUND140_RHS_REGISTRY[:-1])
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-140 RHS missing-row plant stayed green")
+        return {
+            "format": "nemo-testcase-l2-gyre-round140-rhs-walk-v1",
+            "status": "PLANT-FIRED", "worktree": stamp,
+            "plant": args.plant, "plant_fires": True,
+        }
+    _validate_round140_rhs_registry()
+    admission = measure_round140_rhs_record(args)
+    record = read_round140_rhs(args.round140_rhs_root / ROUND140_RHS_RECORD)
+    fields = record["fields"]
+    split = read_round139_record(args.round140_rhs_root / ROUND139_RECORD)
+    boundary_calibration = {
+        face: comparison(
+            fields[f"post_wind_{face}"], split[f"incoming_{face}"],
+            fields[f"{face}mask"][..., 0] != 0.0)
+        for face in ("u", "v")
+    }
+    require(all(row["bit_exact"] for row in boundary_calibration.values()),
+            "Round-140 RHS and Round-139 incoming boundaries differ")
+
+    card, state, freshwater, surface, payload, entry = round82._developed_inputs(args)
+    captured, producer = _round140_callback_trace(
+        args, card, state, freshwater, surface, jnp.asarray(payload["ssha"]))
+    require(captured.trace_state_identity["bit_exact"],
+            "Round-140 RHS callback moved the returned production state")
+    active = {
+        "u3": fields["umask"] != 0.0,
+        "v3": fields["vmask"] != 0.0,
+    }
+    active["u2"] = active["u3"][..., 0]
+    active["v2"] = active["v3"][..., 0]
+    live = {
+        "thickness_u": native_u(producer["thickness_u"]),
+        "thickness_v": native_v(producer["thickness_v"]),
+        "rhs_u": native_u(producer["rhs_u"]),
+        "rhs_v": native_v(producer["rhs_v"]),
+        "mask3_u": native_u(producer["mask3_u"]),
+        "mask3_v": native_v(producer["mask3_v"]),
+        "reciprocal_u": np.float64(1.0) / native_u(producer["depth_u"]),
+        "reciprocal_v": np.float64(1.0) / native_v(producer["depth_v"]),
+        "depth_mean_u": native_u(producer["depth_mean_u"]),
+        "depth_mean_v": native_v(producer["depth_mean_v"]),
+    }
+    oracle = {
+        "thickness_u": fields["e3u"],
+        "thickness_v": fields["e3v"],
+        "rhs_u": fields["rhs_u"],
+        "rhs_v": fields["rhs_v"],
+        "mask3_u": fields["umask"],
+        "mask3_v": fields["vmask"],
+        "reciprocal_u": fields["r1_hu0"],
+        "reciprocal_v": fields["r1_hv0"],
+        "depth_mean_u": fields["depth_mean_u"],
+        "depth_mean_v": fields["depth_mean_v"],
+    }
+    rows = {}
+    for name in ROUND140_RHS_REGISTRY:
+        face = "u" if name.endswith("_u") else "v"
+        mask = active[f"{face}{'3' if live[name].ndim == 3 else '2'}"]
+        rows[name] = comparison(live[name], oracle[name], mask)
+    require(tuple(rows) == ROUND140_RHS_REGISTRY,
+            "Round-140 RHS result omitted a registered operand")
+    first = next(({"boundary": name, **rows[name]}
+                  for name in ROUND140_RHS_REGISTRY
+                  if not rows[name]["bit_exact"]), None)
+    final_identity = {
+        face: comparison(
+            native_u(producer["final_u"]) if face == "u"
+            else native_v(producer["final_v"]),
+            gate._trace_native(
+                captured.substeps[f"slow_{face}"], f"slow_{face}")[0],
+            active[f"{face}2"])
+        for face in ("u", "v")
+    }
+    require(all(row["bit_exact"] for row in final_identity.values()),
+            "Round-140 RHS callback differs from the ordinary external call")
+    predictions = {
+        "geometry_pair_bit": bool(
+            rows["thickness_u"]["bit_exact"]
+            and rows["thickness_v"]["bit_exact"]),
+        "mask_pair_bit": bool(
+            rows["mask3_u"]["bit_exact"] and rows["mask3_v"]["bit_exact"]),
+        "reference_reciprocal_pair_bit": bool(
+            rows["reciprocal_u"]["bit_exact"]
+            and rows["reciprocal_v"]["bit_exact"]),
+        "rhs_u_first": bool(first is not None and first["boundary"] == "rhs_u"),
+        "callback_returned_state_bit": captured.trace_state_identity["bit_exact"],
+        "same_run_post_wind_boundary_bit": bool(
+            boundary_calibration["u"]["bit_exact"]
+            and boundary_calibration["v"]["bit_exact"]),
+    }
+    return {
+        "format": "nemo-testcase-l2-gyre-round140-rhs-walk-v1",
+        "status": "MEASURED", "worktree": stamp,
+        "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
+        "entry": entry, "record_admission": admission,
+        "record_replay": validate_round140_rhs_replay(record),
+        "observer_state_identity": captured.trace_state_identity,
+        "observer_final_vs_actual_external_call": final_identity,
+        "same_run_boundary_calibration": boundary_calibration,
+        "first_non_bit_operand": first, "rows": rows,
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "plant": args.plant, "plant_fires": False,
+        "scope": {
+            "production_physics_changed": False,
+            "DINO": "NO-PRODUCTION-CHANGE",
+            "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+            "OVERFLOW": "NO-PRODUCTION-CHANGE",
+            "ORCA2": "UNMEASURED-WITH-SPEC; GYRE diagnostic only",
+        },
+    }
+
+
 def round117_source_order_accumulators(
     hpg_u, hpg_v, ldf_u, ldf_v, vor_u, vor_v,
     keg_u, keg_v, zad_u, zad_v,
@@ -819,17 +1253,13 @@ def _round140_callback_trace(
     """Capture slow operands without changing the production return value."""
     captures = []
 
-    def sink(incoming_u, incoming_v, coriolis_u, coriolis_v,
-             mask_u, mask_v, final_u, final_v):
+    def sink(*values):
+        require(len(values) == len(ROUND140_CALLBACK_FIELDS),
+                "Round-140 callback field census changed")
         captures.append({
-            "incoming_u": np.asarray(incoming_u),
-            "incoming_v": np.asarray(incoming_v),
-            "coriolis_u": np.asarray(coriolis_u),
-            "coriolis_v": np.asarray(coriolis_v),
-            "mask_u": np.asarray(mask_u),
-            "mask_v": np.asarray(mask_v),
-            "final_u": np.asarray(final_u),
-            "final_v": np.asarray(final_v),
+            name: np.asarray(value)
+            for name, value in zip(
+                ROUND140_CALLBACK_FIELDS, values, strict=True)
         })
 
     traced_hooks = model_module._NEMOWSRK3TestHooks(
@@ -2902,9 +3332,16 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round140-developed", action="store_true",
         help="run the production step-1081 developed operand split")
+    round_group.add_argument(
+        "--round140-rhs-record-only", action="store_true",
+        help="admit the developed step-1081 three-dimensional RHS record")
+    round_group.add_argument(
+        "--round140-rhs-developed", action="store_true",
+        help="run the production step-1081 developed RHS operand split")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
+    parser.add_argument("--expect-rhs-record-commit", default="")
     parser.add_argument("--round64-root", type=Path, default=ROOT / "round64/oracle_krhs_split")
     parser.add_argument("--round46-root", type=Path, default=ROOT / "round46/oracle_kt2_stage")
     parser.add_argument("--round64-admission", type=Path,
@@ -2936,6 +3373,9 @@ def main(argv=None) -> int:
         "--round139-root", type=Path,
         default=ROOT / "round139/oracle_developed_slow_forcing")
     parser.add_argument(
+        "--round140-rhs-root", type=Path,
+        default=ROOT / "round140/oracle_developed_rhs")
+    parser.add_argument(
         "--daily-root", type=Path,
         default=ROOT / "round132/oracle_daily_restarts")
     parser.add_argument(
@@ -2948,13 +3388,19 @@ def main(argv=None) -> int:
                             "association-keg-ulp", "zad-w-ulp",
                             "record-stamp", "record-header",
                             "record-truncation", "record-replay-ulp",
-                            "developed-missing-row"),
+                            "developed-missing-row", "rhs-record-stamp",
+                            "rhs-record-header", "rhs-record-truncation",
+                            "rhs-record-replay-ulp", "rhs-missing-row"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
-            measure_round140_developed(args)
+            measure_round140_rhs_developed(args)
+            if args.round140_rhs_developed else
+            (measure_round140_rhs_record(args)
+            if args.round140_rhs_record_only else
+            (measure_round140_developed(args)
             if args.round140_developed else
             (measure_round139_record(args)
             if args.round139_record_only else
@@ -2962,20 +3408,22 @@ def main(argv=None) -> int:
             if args.round121_trajectory else
             (measure_round117(args)
             if (args.round117 or args.round118 or args.round119
-                or args.round120 or args.round121) else measure(args)))))
+                or args.round120 or args.round121) else measure(args)))))))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND140 DEVELOPED" if args.round140_developed else
+            "ROUND140 RHS" if (
+                args.round140_rhs_record_only or args.round140_rhs_developed) else
+            ("ROUND140 DEVELOPED" if args.round140_developed else
             ("ROUND139 RECORD" if args.round139_record_only else
             ("ROUND121" if args.round121 else
             ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83")))))))
+             ("ROUND117" if args.round117 else "ROUND83"))))))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
@@ -2988,6 +3436,18 @@ def main(argv=None) -> int:
     if args.round140_developed:
         print(
             "ROUND140 DEVELOPED SLOW-FORCING MEASURED: first="
+            + repr(report["first_non_bit_operand"])
+        )
+        return 0
+    if args.round140_rhs_record_only:
+        print(
+            "ROUND140 DEVELOPED RHS RECORD " + report["status"] + ": "
+            + report.get("record_sha256", "plant")
+        )
+        return 0 if report["status"] == "PASS" else 1
+    if args.round140_rhs_developed:
+        print(
+            "ROUND140 DEVELOPED RHS MEASURED: first="
             + repr(report["first_non_bit_operand"])
         )
         return 0

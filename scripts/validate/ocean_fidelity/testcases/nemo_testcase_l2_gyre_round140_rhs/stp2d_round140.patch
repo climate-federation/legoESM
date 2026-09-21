@@ -1,0 +1,75 @@
+--- stp2d.F90
++++ stp2d.F90
+@@ -89,9 +89,12 @@
+       !
+       INTEGER  ::   ji, jj, jk, jtile                    ! dummy loop indices
+       INTEGER  ::   l2_slow_unit, l2_slow_ios
++      INTEGER  ::   r140_slow_unit, r140_slow_ios
+       REAL(wp) ::   zg_2, zintp, zgrho0r, zld, zztmp     ! local scalars
+       CHARACTER(LEN=16)  :: l2_slow_magic
++      CHARACTER(LEN=16)  :: r140_slow_magic
+       CHARACTER(LEN=256) :: l2_slow_filename
++      CHARACTER(LEN=256) :: r140_slow_filename
+ #if ! defined key_PSYCLONE_2p5p0
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) ::   zpice   ! 2D workspace
+ #else
+@@ -176,6 +179,21 @@
+             !
+          END SELECT
+          !
++         ! Round 140: repeat the established slow-forcing operand list at
++         ! developed step 1081.  This block is WRITE-only.
++         IF( lwp .AND. kt == 1081 ) THEN
++            IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'round-140 slow forcing requires 64-bit wp' )
++            WRITE(r140_slow_filename,'("oracle_developed_rhs_kt",I8.8,".bin")') kt
++            OPEN( NEWUNIT=r140_slow_unit, FILE=TRIM(r140_slow_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++               &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r140_slow_ios )
++            IF( r140_slow_ios /= 0 )   CALL ctl_stop( 'cannot open round-140 developed RHS dump' )
++            r140_slow_magic = 'NEMO_L2_R140RHS'
++            WRITE(r140_slow_unit) r140_slow_magic, 3, kt, Kbb, Krhs, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++            WRITE(r140_slow_unit) SIZE(e3u_3d), SIZE(uu(:,:,:,Krhs)), SIZE(umask), &
++               & SIZE(e3v_3d), SIZE(vv(:,:,:,Krhs)), SIZE(vmask), SIZE(Ue_rhs)
++            WRITE(r140_slow_unit) e3u_3d, uu(:,:,:,Krhs), umask, e3v_3d, vv(:,:,:,Krhs), vmask
++         ENDIF
++         !
+          ! Lane-2 round-16 slow-forcing operand instrument.  WRITE-only:
+          ! no model operand is assigned or reordered by this block.
+          IF( lwp .AND. kt == nit000 ) THEN
+@@ -208,6 +226,9 @@
+          IF( lwp .AND. kt == nit000 ) THEN
+             WRITE(l2_slow_unit) Ue_rhs, Ve_rhs, r1_hu_0, r1_hv_0
+          ENDIF
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r140_slow_unit) Ue_rhs, Ve_rhs, r1_hu_0, r1_hv_0
++         ENDIF
+ 
+          !              !=====================================!
+          !              !==  Dynamics: 2D momentum forcing  ==!
+@@ -217,11 +238,15 @@
+          !                             !* baroclinic drag forcing *!   (also provide the barotropic drag coeff.)
+          CALL dyn_drg_init( Kbb, Kbb, uu, vv, uu_b, vv_b, Ue_rhs, Ve_rhs, CdU_u, CdU_v )
+          IF( lwp .AND. kt == nit000 )   WRITE(l2_slow_unit) Ue_rhs, Ve_rhs, CdU_u, CdU_v
++         IF( lwp .AND. kt == 1081 )   WRITE(r140_slow_unit) Ue_rhs, Ve_rhs, CdU_u, CdU_v
+          !
+          !                             !* wind forcing *!
+          IF( lwp .AND. kt == nit000 ) THEN
+             WRITE(l2_slow_unit) r1_rho0, utauU, vtauV, r1_hu(:,:,Kbb), r1_hv(:,:,Kbb)
+          ENDIF
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r140_slow_unit) r1_rho0, utauU, vtauV, r1_hu(:,:,Kbb), r1_hv(:,:,Kbb)
++         ENDIF
+          DO_2D( 0, 0, 0, 0 )
+             Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * r1_hu(ji,jj,Kbb)
+             Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj) * r1_hv(ji,jj,Kbb)
+@@ -231,6 +256,11 @@
+             CLOSE(l2_slow_unit)
+             WRITE(numout,*) 'LANE2_SLOW_FORCING_DUMP ', kt, TRIM(l2_slow_filename)
+          ENDIF
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r140_slow_unit) Ue_rhs, Ve_rhs
++            CLOSE(r140_slow_unit)
++            WRITE(numout,*) 'ROUND140_DEVELOPED_RHS_DUMP ', kt, TRIM(r140_slow_filename)
++         ENDIF
+          !
+          !                             !* atmospheric pressure forcing *!
+          IF( ln_apr_dyn ) THEN
