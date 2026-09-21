@@ -22,6 +22,11 @@
 #                       per-lane
 #   why not cheaper   : env-only; the ocean ladder is re-measured after it
 #                       either way, so this is the cheapest possible check.
+# RESULT 32 GPUs (job 27582583, s9 f32): 8 ch 43.46 / 43.35 (repeat,
+#   spread 0.25%), 32 ch 42.39 -> -2.4%.  Below the pre-registered +3%
+#   transfer bar, so the atmosphere-sized gain does NOT transfer at 32; it
+#   is a small real gain, not a loss, so the user's both-lanes pin (32)
+#   stands and the ocean ladder is re-measured at 32.  128-GPU arms queued.
 set -uo pipefail
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
