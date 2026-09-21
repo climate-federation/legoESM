@@ -1581,8 +1581,13 @@ def measure_round142_rhs_directed(args) -> dict[str, object]:
         for face in ("u", "v")))
 
     if args.plant == "rhs-directed-ulp":
+        h_k = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, card.recipe.z_coord,
+            min_water_column_m=(
+                card.recipe.model_config.min_water_column_m))
+        h_u = native_u(min_cell_to_uface(h_k))
         planted_u, location = _round142_propagating_rhs_ulp(
-            fields, active3["u"])
+            fields, active3["u"], h_u)
         planted_trace, planted = _round140_callback_trace(
             args, card, state, freshwater, surface, eta_after,
             rhs_override=(jnp.asarray(planted_u), jnp.asarray(fields["rhs_v"])))
@@ -1756,33 +1761,45 @@ def _validate_round142_registry(registry=ROUND142_DIRECTED_REGISTRY) -> None:
             "Round-142 directed-row registry changed")
 
 
-def _round142_propagating_rhs_ulp(fields, active) -> tuple[np.ndarray, tuple[int, ...]]:
-    """Plant one recorded wet U-RHS word that survives NEMO's depth sum."""
+@jax.jit
+def _round142_u_depth_reduction(h_u, rhs_u, mask_u):
+    """Use the production U stacked-sum expression for plant selection."""
+    pair = jnp.sum(jnp.stack([h_u, rhs_u * h_u], axis=-1), axis=-2)
+    return pair[..., 1] / jnp.maximum(pair[..., 0], 1.0e-10) * mask_u
+
+
+def _round142_propagating_rhs_ulp(
+        fields, active, h_u) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Plant one wet U-RHS word that survives the model depth reduction."""
     rhs = np.asarray(fields["rhs_u"], dtype=np.float64)
-    e3 = np.asarray(fields["e3u"], dtype=np.float64)
-    mask = np.asarray(fields["umask"], dtype=np.float64)
-    reciprocal = np.asarray(fields["r1_hu0"], dtype=np.float64)
-    for horizontal in np.argwhere(np.any(active, axis=-1)):
-        j, i = (int(value) for value in horizontal)
-        baseline = _round140_source_sum(
-            e3[j:j + 1, i:i + 1], rhs[j:j + 1, i:i + 1],
-            mask[j:j + 1, i:i + 1],
-            reciprocal[j:j + 1, i:i + 1])[0, 0]
-        levels = np.flatnonzero(active[j, i])
-        for k in levels:
-            candidate = np.array(rhs[j, i], copy=True)
-            direction = (np.float64(np.inf) if candidate[k] >= 0.0
-                         else np.float64(-np.inf))
-            candidate[k] = np.nextafter(candidate[k], direction)
-            changed = _round140_source_sum(
-                e3[j:j + 1, i:i + 1], candidate[None, None, :],
-                mask[j:j + 1, i:i + 1],
-                reciprocal[j:j + 1, i:i + 1])[0, 0]
-            if changed.view(np.uint64) != baseline.view(np.uint64):
-                planted = np.array(rhs, copy=True)
-                planted[j, i, k] = candidate[k]
-                return planted, (j, i, int(k))
-    raise RuntimeError("no one-ULP U-RHS plant survives the recorded depth sum")
+    h_u = np.asarray(h_u, dtype=np.float64)
+    require(rhs.shape == h_u.shape == active.shape,
+            "Round-142 plant extents differ")
+    mask2 = np.asarray(active[..., 0], dtype=np.float64)
+    baseline = np.asarray(_round142_u_depth_reduction(
+        jnp.asarray(h_u), jnp.asarray(rhs), jnp.asarray(mask2)))
+    for k in range(rhs.shape[-1]):
+        planted_level = np.array(rhs, copy=True)
+        direction = np.where(
+            planted_level[..., k] >= 0.0,
+            np.float64(np.inf), np.float64(-np.inf))
+        planted_level[..., k] = np.nextafter(
+            planted_level[..., k], direction)
+        changed = np.asarray(_round142_u_depth_reduction(
+            jnp.asarray(h_u), jnp.asarray(planted_level), jnp.asarray(mask2)))
+        changed_bits = changed.view(np.uint64) != baseline.view(np.uint64)
+        locations = np.argwhere(changed_bits & active[..., k])
+        if locations.size:
+            j, i = (int(value) for value in locations[0])
+            planted = np.array(rhs, copy=True)
+            planted[j, i, k] = planted_level[j, i, k]
+            single = np.asarray(_round142_u_depth_reduction(
+                jnp.asarray(h_u), jnp.asarray(planted), jnp.asarray(mask2)))
+            require(single[j, i].view(np.uint64)
+                    != baseline[j, i].view(np.uint64),
+                    "Round-142 selected ULP does not survive alone")
+            return planted, (j, i, k)
+    raise RuntimeError("no one-ULP U-RHS plant survives the model depth sum")
 
 
 @jax.jit

@@ -459,12 +459,12 @@ def test_round142_rhs_ulp_plant_changes_one_consumed_word() -> None:
         "r1_hu0": np.ones((1, 1), dtype=np.float64),
     }
     planted, location = WALK._round142_propagating_rhs_ulp(
-        fields, np.ones_like(rhs, dtype=bool))
+        fields, np.ones_like(rhs, dtype=bool), np.ones_like(rhs))
     assert location == (0, 0, 0)
     assert np.count_nonzero(
         planted.view(np.uint64) != rhs.view(np.uint64)) == 1
-    baseline = WALK._round140_source_sum(
-        fields["e3u"], rhs, fields["umask"], fields["r1_hu0"])
-    changed = WALK._round140_source_sum(
-        fields["e3u"], planted, fields["umask"], fields["r1_hu0"])
+    baseline = np.asarray(WALK._round142_u_depth_reduction(
+        np.ones_like(rhs), rhs, np.ones((1, 1), dtype=np.float64)))
+    changed = np.asarray(WALK._round142_u_depth_reduction(
+        np.ones_like(rhs), planted, np.ones((1, 1), dtype=np.float64)))
     assert changed[0, 0].view(np.uint64) != baseline[0, 0].view(np.uint64)
