@@ -73,4 +73,29 @@ def test_swap_replay_distinguishes_signed_zero() -> None:
 def test_layout_and_record_level_are_exact() -> None:
     assert (GATE.NX, GATE.NY, GATE.N_ARRAYS) == (32, 22, 37)
     assert GATE.EXPECTED_SIZE == 10_439_164
+    assert GATE.EXPECTED_DEVELOPED_SIZE == 10_444_796
+    assert GATE.EXPECTED_QCO_SIZE == 22_508
     assert time_level_for_dump(GATE.RECORD) == "now"
+    assert time_level_for_dump(GATE.DEVELOPED_RECORD) == "now"
+    assert time_level_for_dump(GATE.DEVELOPED_QCO_RECORD) == "after"
+
+
+def test_developed_final_boundary_and_qco_plants_fire() -> None:
+    final_pssh = np.arange(GATE.COUNT, dtype=np.float64).reshape(
+        (GATE.NY, GATE.NX)) / 32.0
+    ssha = np.zeros((GATE.JPJ, GATE.JPI), dtype=np.float64)
+    ssha[GATE.NTSJ - 1:GATE.NTEJ,
+         GATE.NTSI - 1:GATE.NTEI] = final_pssh
+    r1_ht_0 = np.full_like(ssha, 0.125)
+    fields = {
+        "final_pssh": final_pssh,
+        "swap_eta": np.repeat(final_pssh[None, ...], GATE.N_CYCLE, axis=0),
+    }
+    qco = {"ssha": ssha, "r1_ht_0": r1_ht_0,
+           "r3ta": ssha * r1_ht_0}
+    result = GATE.validate_developed_boundary(fields, qco)
+    assert all(row["bit_exact"] for row in result.values())
+    with pytest.raises(SystemExit, match="stage-1 ssha"):
+        GATE.validate_developed_boundary(fields, qco, final_pssh_ulp=True)
+    with pytest.raises(SystemExit, match="QCO multiplication"):
+        GATE.validate_developed_boundary(fields, qco, qco_ulp=True)

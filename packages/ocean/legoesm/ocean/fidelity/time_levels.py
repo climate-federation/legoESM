@@ -998,6 +998,21 @@ _DUMP_TIME_LEVEL["oracle_bt_step_operands_kt00000002.bin"] = (
     "WRITE-only patch records its current/history/midpoint, continuity, "
     "pressure, trend, forcing, update, and swap operands in source order",
 )
+_DUMP_TIME_LEVEL["oracle_bt_step_operands_kt00001081.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90 "
+    "records the step-1081 current/history/midpoint, continuity, pressure, "
+    "trend, forcing, update, swap, and final pssh boundaries in compiled "
+    "source order",
+)
+_DUMP_TIME_LEVEL["oracle_stage1_qco_operands_kt00001081.bin"] = (
+    "after",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/stprk3_stg.f90 records "
+    "stage-1 ssha copied from the completed external solve and the direct "
+    "after-step r3ta result of dom_qco_r3c_RK3",
+)
 _DUMP_TIME_LEVEL["oracle_bt_ordered_operands_kt00000001.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"

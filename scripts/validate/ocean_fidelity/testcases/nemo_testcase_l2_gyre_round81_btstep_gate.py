@@ -15,7 +15,10 @@ from legoesm.ocean.fidelity.time_levels import time_level_for_dump
 
 RECORD = "oracle_bt_step_operands_kt00000002.bin"
 UAMID_RECORD = "oracle_bt_uamid_operands_kt00000002.bin"
+DEVELOPED_RECORD = "oracle_bt_step_operands_kt00001081.bin"
+DEVELOPED_QCO_RECORD = "oracle_stage1_qco_operands_kt00001081.bin"
 MAGIC = "NEMO_L2_BTSTP_1"
+QCO_MAGIC = "NEMO_L2_R137QCO"
 N_CYCLE = 50
 JPI, JPJ = 36, 26
 NTSI, NTEI, NTSJ, NTEJ = 3, 34, 3, 24
@@ -40,6 +43,10 @@ COUNT = NX * NY
 PREFIX_SIZE = 16 + 11 * 4 + 8 + len(MASK_FIELDS) * COUNT * 8
 SUBSTEP_SIZE = 4 + 3 * 8 + N_ARRAYS * COUNT * 8 + 4 * 8
 EXPECTED_SIZE = PREFIX_SIZE + N_CYCLE * SUBSTEP_SIZE
+EXPECTED_DEVELOPED_SIZE = EXPECTED_SIZE + COUNT * 8
+QCO_N_ARRAYS = 3
+QCO_COUNT = JPI * JPJ
+EXPECTED_QCO_SIZE = 16 + 7 * 4 + QCO_N_ARRAYS * QCO_COUNT * 8
 
 
 def require(condition: bool, message: str) -> None:
@@ -64,7 +71,8 @@ def _read_array(handle, name: str, substep: int | None = None) -> np.ndarray:
     return result
 
 
-def read_record(path: Path, *, expected_kt: int = 2) -> dict:
+def read_record(path: Path, *, expected_kt: int = 2,
+                has_final_pssh: bool = False) -> dict:
     require(time_level_for_dump(path.name) == "now", "record level is not NOW")
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -105,8 +113,10 @@ def read_record(path: Path, *, expected_kt: int = 2) -> dict:
             back_coefficients.append(back)
             for name in ARRAY_FIELDS[19:]:
                 rows[name].append(_read_array(handle, name, expected))
+        final_pssh = (_read_array(handle, "final_pssh")
+                      if has_final_pssh else None)
         require(handle.read(1) == b"", "trailing payload")
-    return {
+    result = {
         "header": {
             "version": version, "kt": kt, "ncycle": ncycle,
             "jpi": jpi, "jpj": jpj, "bits": bits,
@@ -119,6 +129,52 @@ def read_record(path: Path, *, expected_kt: int = 2) -> dict:
         "mid_coefficients": np.stack(mid_coefficients),
         "back_coefficients": np.stack(back_coefficients),
         **{name: np.stack(values) for name, values in rows.items()},
+    }
+    if final_pssh is not None:
+        result["final_pssh"] = final_pssh
+    return result
+
+
+def _read_qco_array(handle, name: str) -> np.ndarray:
+    values = np.fromfile(handle, dtype=np.float64, count=QCO_COUNT)
+    require(values.size == QCO_COUNT, f"truncated QCO {name}")
+    result = values.reshape((JPI, JPJ), order="F").T
+    require(np.all(np.isfinite(result)), f"non-finite QCO {name}")
+    return result
+
+
+def read_qco_record(path: Path, *, expected_kt: int = 1081) -> dict:
+    require(time_level_for_dump(path.name) == "after",
+            "QCO record level is not AFTER")
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        raw_header = handle.read(7 * 4)
+        require(len(raw_header) == 7 * 4, "truncated QCO header")
+        header = struct.unpack("=7i", raw_header)
+        version, kt, stage, jpi, jpj, bits, nfields = header
+        require(
+            (magic, version, kt, stage, jpi, jpj, bits, nfields)
+            == (QCO_MAGIC, 1, expected_kt, 1, JPI, JPJ, 64,
+                QCO_N_ARRAYS),
+            f"bad QCO header {(magic, *header)}",
+        )
+        fields = {
+            name: _read_qco_array(handle, name)
+            for name in ("ssha", "r1_ht_0", "r3ta")
+        }
+        require(handle.read(1) == b"", "trailing QCO payload")
+    return {
+        "header": {
+            "version": version,
+            "kt": kt,
+            "stage": stage,
+            "jpi": jpi,
+            "jpj": jpj,
+            "bits": bits,
+            "nfields": nfields,
+            "registry_level": "after",
+        },
+        **fields,
     }
 
 
@@ -227,6 +283,34 @@ def validate_fields(fields: dict, *, replay_ulp: bool = False,
     return rows
 
 
+def validate_developed_boundary(fields: dict, qco: dict, *,
+                                final_pssh_ulp: bool = False,
+                                qco_ulp: bool = False) -> dict:
+    qco_r3ta = np.array(qco["r3ta"], copy=True)
+    if qco_ulp:
+        qco_r3ta.flat[0] = np.nextafter(qco_r3ta.flat[0], np.inf)
+    qco_replay = _row(qco["ssha"] * qco["r1_ht_0"], qco_r3ta)
+    require(qco_replay["bit_exact"],
+            "developed QCO multiplication replay is not bit-exact")
+
+    owned_ssha = qco["ssha"][NTSJ - 1:NTEJ, NTSI - 1:NTEI]
+    if final_pssh_ulp:
+        owned_ssha = np.array(owned_ssha, copy=True)
+        owned_ssha.flat[0] = np.nextafter(owned_ssha.flat[0], np.inf)
+    final_identity = _row(fields["final_pssh"], owned_ssha)
+    require(final_identity["bit_exact"],
+            "external final pssh differs from stage-1 ssha")
+    final_substep_identity = _row(
+        fields["final_pssh"], fields["swap_eta"][-1])
+    require(final_substep_identity["bit_exact"],
+            "external final pssh differs from final substep SSH")
+    return {
+        "qco_multiplication": qco_replay,
+        "external_to_stage1_ssha": final_identity,
+        "final_substep_to_pssh": final_substep_identity,
+    }
+
+
 def compare_uamid(fields: dict, path: Path, *, plant: bool = False) -> dict:
     import importlib.util
 
@@ -257,32 +341,66 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--expect-commit", required=True)
-    parser.add_argument("--uamid-root", type=Path, required=True)
+    parser.add_argument("--uamid-root", type=Path)
+    parser.add_argument("--record", default=RECORD)
+    parser.add_argument("--expected-kt", type=int, default=2)
+    parser.add_argument("--qco-record")
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--plant",
         choices=("none", "stamp", "header", "truncation", "replay-ulp",
-                 "swap-ulp", "uamid-ulp"),
+                 "swap-ulp", "uamid-ulp", "final-pssh-ulp", "qco-ulp"),
         default="none",
     )
     args = parser.parse_args()
-    path = args.root / RECORD
-    stamp = args.root / f"{RECORD}.stamp"
+    path = args.root / args.record
+    stamp = args.root / f"{args.record}.stamp"
     require(path.is_file() and stamp.is_file(), "record or stamp missing")
     producer = (args.root / "producer_commit.txt").read_text().strip()
     require(producer == args.expect_commit, "producer_commit.txt mismatch")
     expected_commit = "planted-wrong-commit" if args.plant == "stamp" else producer
-    require(stamp.read_text().split() == [sha256(path), expected_commit, RECORD],
+    require(stamp.read_text().split()
+            == [sha256(path), expected_commit, args.record],
             "record stamp mismatch")
     observed_size = path.stat().st_size - (1 if args.plant == "truncation" else 0)
-    require(observed_size == EXPECTED_SIZE, "record byte size is not exact")
-    fields = read_record(path, expected_kt=(3 if args.plant == "header" else 2))
+    developed = args.qco_record is not None
+    expected_size = EXPECTED_DEVELOPED_SIZE if developed else EXPECTED_SIZE
+    require(observed_size == expected_size, "record byte size is not exact")
+    expected_kt = args.expected_kt + (1 if args.plant == "header" else 0)
+    fields = read_record(
+        path, expected_kt=expected_kt, has_final_pssh=developed)
     rows = validate_fields(
         fields, replay_ulp=args.plant == "replay-ulp",
         swap_ulp=args.plant == "swap-ulp")
-    uamid = compare_uamid(
-        fields, args.uamid_root / UAMID_RECORD,
-        plant=args.plant == "uamid-ulp")
+    uamid = None
+    developed_boundary = None
+    qco_sha256 = None
+    if developed:
+        qco_path = args.root / args.qco_record
+        qco_stamp = args.root / f"{args.qco_record}.stamp"
+        require(qco_path.is_file() and qco_stamp.is_file(),
+                "developed QCO record or stamp missing")
+        require(qco_stamp.read_text().split()
+                == [sha256(qco_path), producer, args.qco_record],
+                "QCO record stamp mismatch")
+        require(qco_path.stat().st_size == EXPECTED_QCO_SIZE,
+                "QCO record byte size is not exact")
+        qco = read_qco_record(qco_path, expected_kt=args.expected_kt)
+        developed_boundary = validate_developed_boundary(
+            fields, qco,
+            final_pssh_ulp=args.plant == "final-pssh-ulp",
+            qco_ulp=args.plant == "qco-ulp")
+        qco_sha256 = sha256(qco_path)
+        require(args.plant != "uamid-ulp",
+                "uamid plant is unavailable for developed record")
+    else:
+        require(args.uamid_root is not None,
+                "--uamid-root is required for the kt=2 record")
+        require(args.plant not in ("final-pssh-ulp", "qco-ulp"),
+                "developed plant requires --qco-record")
+        uamid = compare_uamid(
+            fields, args.uamid_root / UAMID_RECORD,
+            plant=args.plant == "uamid-ulp")
     report = {
         "format": "nemo-testcase-l2-gyre-round81-btstep-v1",
         "worktree": worktree_stamp(),
@@ -293,6 +411,8 @@ def main() -> None:
         "dt_s": float(fields["dt_s"]),
         "replay_rows": rows,
         "round77_uamid_identity": uamid,
+        "developed_boundary": developed_boundary,
+        "qco_record_sha256": qco_sha256,
         "plant": args.plant,
         "status": "AT-BAR",
     }
