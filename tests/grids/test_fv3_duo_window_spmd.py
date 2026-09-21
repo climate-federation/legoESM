@@ -431,8 +431,8 @@ def test_tracer_multi_subcycle_matches_faces(setup):
     flat = win_model.to_flat(win)
     q_ref, q_win = np.asarray(ref["q"][0]), np.asarray(flat["q"][0])
     assert np.isfinite(q_win).all()
-    assert np.array_equal(q_ref, q_win), (
+    assert _bytes_equal(q_ref, q_win), (
         f"tracer differs in {int((q_ref != q_win).sum())} owned cells")
     for nm in ("u", "v", "pt", "delp"):
-        assert np.array_equal(np.asarray(ref["state"][nm]),
-                              np.asarray(flat["state"][nm])), nm
+        assert _bytes_equal(np.asarray(ref["state"][nm]),
+                            np.asarray(flat["state"][nm])), nm
