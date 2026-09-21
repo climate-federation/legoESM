@@ -1226,22 +1226,32 @@ def _make_spectral_pe_turbulence(
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
-    if carry_field in ("qke", "clubb_moments"):
-        # Phase C codex iter-3 high: spectral PE dynamics drops the
-        # returned ``PhysicsState`` (see spectral_pe.py:1556-1557), so an
-        # evolved prognostic carry (qke, or the prognostic-CLUBB moments)
-        # would silently re-initialise on every step.  Fail fast until
-        # phys_state is threaded through the spectral PE step.
-        _what = "MYNN-2.5" if carry_field == "qke" else "prognostic CLUBB"
+    if carry_field == "qke":
+        # MYNN-2.5 stays refused on this lane. The mechanism below is not
+        # carry-specific, so it would probably work -- but "probably" is not a
+        # measurement, and nothing exercises qke here. Lift it with its own
+        # continuity test, not as a side effect of the CLUBB one.
         raise NotImplementedError(
-            f"{_what} turbulence requires a dynamics driver that "
-            "persists PhysicsState across steps.  The current "
-            "spectral PE driver discards the returned phys_state, "
-            f"which would silently re-initialise the {carry_field} carry on "
-            f"every step.  Use ``model_type='hydrostatic'`` for {_what} (MPAS "
-            "turbulence is not yet wired up); tracking issue: thread "
-            "PhysicsState through the spectral PE step path."
-        )
+            "MYNN-2.5 turbulence carries a prognostic qke on a spectral PE "
+            "lane that has no test pinning the carry across steps. Use "
+            "``model_type='hydrostatic'``, or add the continuity test "
+            "(tests/unit/test_spectral_prognostic_clubb_carry.py is the "
+            "pattern) before enabling it here.")
+    # Prognostic CLUBB used to be refused alongside it, because the spectral
+    # lane dropped the returned PhysicsState and the moments would have
+    # re-initialised every step. What is true NOW, consumer by consumer:
+    #   * the TRAINING rollout threads it: spectral_rollout scans
+    #     (state, rad_cache, phys_state) whenever the physics_fn carries the
+    #     with_phys_state / init_phys_state markers, which the classical
+    #     factory attaches. This is the lane the AMIP-matched WB arm runs.
+    #   * the MODEL's step() threads it on the LEAPFROG path only; under
+    #     ssp_rk3 physics is evaluated per sub-stage, where a per-step carry is
+    #     ill-defined, and ``refuse_unthreaded_stateful_physics`` still refuses
+    #     there. That guard protects the RK3 model path, not this one.
+    #   * a caller that threads NOTHING is refused per step below, rather than
+    #     silently re-seeding.
+    # The NONHYDROSTATIC lane keeps its own refusal: that driver still drops
+    # the state.
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
         tke_out = None
@@ -1313,6 +1323,17 @@ def _make_spectral_pe_turbulence(
             scheme_config, phys_state, rho)
 
         if needs_tke:
+            if carry_field == "clubb_moments" and phys_state is None:
+                # Seeding fresh here would look like a working run and be a
+                # memoryless one: the moments would restart from the floor
+                # every step. A caller on this lane must thread the carry (the
+                # markers on the classical factory do).
+                raise ValueError(
+                    "prognostic CLUBB on the spectral PE lane was called "
+                    "without a physics state, so its moments would re-seed "
+                    "every step. Thread the carry (spectral_rollout does this "
+                    "through the with_phys_state/init_phys_state markers), or "
+                    "select diagnostic CLUBB.")
             tke_in = _read_turb_carry(
                 phys_state, carry_field, ncol, nlev, scheme_config, _state_dtype)
             turb_out, tke_new = turb_fn(
