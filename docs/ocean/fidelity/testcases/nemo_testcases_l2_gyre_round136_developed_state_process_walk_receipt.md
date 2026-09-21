@@ -238,11 +238,30 @@ Every planted violation exited nonzero and printed `STATUS PLANT-FIRED`:
 Focused and broad test summaries are recorded below after the final clean-tree
 pass:
 
-* `TEST_SUMMARY_PENDING`
+* developed-state/year-owner gate: `30 passed in 30.71s`;
+* FCT advection unit file: `27 passed in 26.19s`;
+* receipt citation unit file: `16 passed in 1.95s`;
+* full `tests/ocean/fidelity tests/ocean/unit`: `TEST_SUMMARY_PENDING`.
+
+After measurement, the source statement that constructs one flux pair was
+consolidated from a parenthesized multiline assignment to the same one-line
+assignment. This was an AST-neutral formatting change made solely to preserve
+the citation gate's rigid historical source extent; no measurement code path
+or arithmetic expression changed.
 
 ## Independent adversarial review
 
-`REVIEW_PENDING`
+The required separate command was invoked, but the read-only sandbox prevented
+the in-process app-server client from initializing. Its output was, verbatim:
+
+```text
+Error while loading conda entry point: conda-anaconda-tos (cannot import name 'validate_prefix_exists' from 'conda.cli.install' (/home/dbalwada/miniconda3/lib/python3.13/site-packages/conda/cli/install.py))
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Independent review was unavailable in-sandbox; the command emitted no verdict.
 
 ## OPEN — round 137
 
