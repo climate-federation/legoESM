@@ -285,8 +285,39 @@ reported `SYMBOL-NOT-AT-LINE`, and produced
 The focused log SHA-256 is
 `5094b4b6cc76bb5c82631baf54f785ebe22dc9ed66baf6a4cd8c65367412351a`.
 
-The final citation regression suite and requested broad-tree attempt are
-reported after they run from the clean post-review receipt commit.
+The clean post-review citation/ratchet suite reported exactly:
+
+```text
+30 passed in 17.38s
+```
+
+It covers the complete citation-gate regression file, all Round-135 tests,
+and the certified spread-floor harness pin. After the broad attempt described
+next exhausted compiler workers, the same affected suite was run once more in
+a fresh process and reported:
+
+```text
+30 passed in 17.37s
+```
+
+The logs have SHA-256 digests
+`5c74d281ec45991f4c1eb61298e3e2854dea8aa540c0e69c6748e32586316a0d`
+and
+`59dd3e2f444e2627cf478b2b526d94920dbeaeeb92fb4e766c0b2a11ef0cc22d`,
+respectively.
+
+The requested combined `tests/ocean/fidelity tests/ocean/unit -n 12` run was
+attempted from the clean post-review commit. It collected 8,353 tests and
+reached 93%, but nine JAX processes aborted while compiling and xdist reported
+eight workers as “Not properly terminated.” The controller then ceased making
+progress and was interrupted. There is no pytest summary line, so the run is
+**INCOMPLETE** and is not represented as either a pass or a stable failure
+set. In particular, the partial failure IDs cannot honestly be diffed against
+the inherited-red list. The retained log is `phase3/round135/full_ocean_tests.log`,
+SHA-256
+`9007eaf0da1d8759d8b96b33aa0bbe5e0c02e182df97db464e5741e7f572fb04`.
+The two completed affected suites above are green before and after this
+compiler exhaustion.
 
 ## OPEN — next round
 
