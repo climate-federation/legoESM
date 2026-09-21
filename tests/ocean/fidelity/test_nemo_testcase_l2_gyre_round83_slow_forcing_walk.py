@@ -514,3 +514,18 @@ def test_round144_stress_ulp_changes_one_consumed_word() -> None:
     assert np.count_nonzero(
         planted.view(np.uint64)
         != fields["wind_tau_u"].view(np.uint64)) == 1
+
+
+def test_round145_inverse_depth_ulp_changes_one_consumed_word() -> None:
+    fields = {
+        "r1_rho0": 1.0,
+        "wind_tau_u": np.asarray([[1.0]], dtype=np.float64),
+        "wind_r1_hu": np.asarray([[1.0]], dtype=np.float64),
+        "post_drag_u": np.asarray([[0.0]], dtype=np.float64),
+    }
+    planted, location = WALK._round145_inverse_depth_ulp(
+        fields, np.asarray([[True]]))
+    assert location == (0, 0)
+    assert np.count_nonzero(
+        planted.view(np.uint64)
+        != fields["wind_r1_hu"].view(np.uint64)) == 1

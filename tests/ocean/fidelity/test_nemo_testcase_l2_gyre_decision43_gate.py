@@ -210,6 +210,21 @@ def test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured():
     assert measured["status"] == "PASS"
 
 
+def test_wind_qco_route_is_derived_from_every_recipe():
+    module = _module()
+    cards = module._card_execution("wind_qco")
+    assert cards["GYRE-zco"]["executes_route"] is True
+    assert cards["NEMO-GYRE-recipe"]["executes_route"] is True
+    assert cards["LOCK_EXCHANGE-zco"]["surface_stress_implicit"] is False
+    assert cards["LOCK_EXCHANGE-zco"]["executes_route"] is False
+    assert cards["OVERFLOW-zps"]["surface_stress_implicit"] is False
+    assert cards["OVERFLOW-zps"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm"]["surface_stress_implicit"] is False
+    assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm_mlf"]["surface_stress_implicit"] is False
+    assert cards["DINO:nemo_dino_kamm_mlf"]["executes_route"] is False
+
+
 def test_year_member_admission_requires_the_registered_harness_and_fp64(
         tmp_path):
     module = _module()

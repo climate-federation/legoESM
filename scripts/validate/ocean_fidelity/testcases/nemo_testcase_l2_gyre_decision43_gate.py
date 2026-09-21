@@ -219,26 +219,31 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     )
     from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
 
-    require(route in {"ldf_stage3", "fct_metric_upstream"},
+    require(route in {"ldf_stage3", "fct_metric_upstream", "wind_qco"},
             f"unknown Decision-43 source route {route!r}")
 
     def row(config, **extra):
         values = {
             "tracer_time_integrator": config.tracer_time_integrator,
+            "momentum_time_integrator": config.momentum_time_integrator,
+            "surface_stress_implicit": bool(config.surface_stress_implicit),
             "tracer_advection": config.tracer_advection,
             "adaptive_implicit_vertadv": bool(
                 config.adaptive_implicit_vertadv),
             "gm_redi_configured": config.gm_redi is not None,
         }
         values.update(extra)
-        values["executes_route"] = bool(
-            (config.tracer_time_integrator == "rk3_ws"
-             and config.gm_redi is not None)
-            if route == "ldf_stage3" else
-            (config.tracer_time_integrator == "rk3_ws"
-             and config.tracer_advection == "fct2"
-             and not config.adaptive_implicit_vertadv)
-        )
+        if route == "ldf_stage3":
+            executes = (config.tracer_time_integrator == "rk3_ws"
+                        and config.gm_redi is not None)
+        elif route == "fct_metric_upstream":
+            executes = (config.tracer_time_integrator == "rk3_ws"
+                        and config.tracer_advection == "fct2"
+                        and not config.adaptive_implicit_vertadv)
+        else:
+            executes = (config.momentum_time_integrator == "rk3_ws"
+                        and config.surface_stress_implicit)
+        values["executes_route"] = bool(executes)
         return values
 
     rows = {}
@@ -630,7 +635,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generic-after-snapshot", type=Path)
     parser.add_argument("--moved-row-registry", type=Path)
     parser.add_argument(
-        "--route", choices=("ldf_stage3", "fct_metric_upstream"),
+        "--route", choices=("ldf_stage3", "fct_metric_upstream", "wind_qco"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],

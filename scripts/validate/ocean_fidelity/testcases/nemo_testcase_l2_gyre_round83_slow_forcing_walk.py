@@ -1891,6 +1891,34 @@ def _round144_stress_ulp(fields, active) -> tuple[np.ndarray, tuple[int, ...]]:
     raise RuntimeError("no one-ULP U-stress plant changes the written result")
 
 
+def _round145_inverse_depth_ulp(
+    fields, active,
+) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Choose one recorded U reciprocal ULP that changes the wind result."""
+    depth = np.asarray(fields["wind_r1_hu"], dtype=np.float64)
+    active = np.asarray(active, dtype=bool)
+    require(depth.shape == active.shape,
+            "Round-145 inverse-depth plant extents differ")
+    rho = np.float64(fields["r1_rho0"])
+    stress = np.asarray(fields["wind_tau_u"], dtype=np.float64)
+    post_drag = np.asarray(fields["post_drag_u"], dtype=np.float64)
+    baseline = post_drag + (rho * stress) * depth
+    for location_array in np.argwhere(active & np.isfinite(depth)):
+        location = tuple(int(index) for index in location_array)
+        for direction in (np.inf, -np.inf):
+            candidate = np.nextafter(depth[location], direction)
+            changed = post_drag[location] + (
+                rho * stress[location]) * candidate
+            if changed.view(np.uint64) != baseline[location].view(np.uint64):
+                planted = depth.copy()
+                planted[location] = candidate
+                require(np.count_nonzero(
+                    planted.view(np.uint64) != depth.view(np.uint64)) == 1,
+                    "Round-145 reciprocal plant did not change one word")
+                return planted, location
+    raise RuntimeError("no one-ULP U reciprocal changes the written result")
+
+
 def measure_round144_wind_operands(args) -> dict[str, object]:
     """Walk the developed wind operands through the production-jitted step."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -2060,6 +2088,27 @@ def measure_round144_wind_operands(args) -> dict[str, object]:
                 "Round-144 stress ULP did not reach incoming forcing")
         return {
             "format": "nemo-testcase-l2-gyre-round144-wind-v1",
+            "status": "PLANT-FIRED", "worktree": stamp,
+            "plant": args.plant, "plant_fires": True,
+            "plant_location": list(location),
+            "plant_downstream_row": planted_row,
+        }
+    if args.plant == "wind-inverse-depth-ulp":
+        planted_u, location = _round145_inverse_depth_ulp(fields, active2["u"])
+        planted_trace, planted = _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            drag_override=drag_override,
+            wind_operand_override=(
+                None, None, (jnp.asarray(planted_u), inverse_depths[1])))
+        require(planted_trace.trace_state_identity["bit_exact"],
+                "Round-145 reciprocal-ULP callback moved its plain arm")
+        planted_row = comparison(
+            native_u(planted["incoming_u"]),
+            native_u(live_producer["incoming_u"]), active2["u"])
+        require(planted_row["differing_cells"] > 0,
+                "Round-145 reciprocal ULP did not reach incoming forcing")
+        return {
+            "format": "nemo-testcase-l2-gyre-round145-wind-routing-v1",
             "status": "PLANT-FIRED", "worktree": stamp,
             "plant": args.plant, "plant_fires": True,
             "plant_location": list(location),
@@ -4400,7 +4449,7 @@ def main(argv=None) -> int:
                             "rhs-observer-ulp", "rhs-directed-missing-row",
                             "rhs-directed-ulp", "downstream-missing-row",
                             "downstream-depth-ulp", "wind-missing-row",
-                            "wind-stress-ulp"),
+                            "wind-stress-ulp", "wind-inverse-depth-ulp"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
