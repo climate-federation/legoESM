@@ -599,6 +599,9 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 135: accepted-state swap before the daily tracer record ---
+    'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
+        'IF ( .NOT. l_perpetual_ts ) THEN', ('ENDIF', 8), 10],
     # --- round 134: compiled daily-restart schema and next-step SSH use ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:188-201': [
         '!  RK3 : single first external mode computation',
