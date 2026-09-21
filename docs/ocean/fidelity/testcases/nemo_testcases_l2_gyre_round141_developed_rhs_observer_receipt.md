@@ -102,18 +102,28 @@ permits continuation. No production physics is landed.
 Adding the private hook shifted existing citations in the same source file.
 Every affected endpoint was rigidly moved by the corresponding +6, +16, or
 +22 lines; cited extents and endpoint symbols are unchanged. The final
-citation gate and its shifted-citation plant are recorded after this receipt
-is committed.
+citation gate passed with 4 citations, 0 unmapped citations, 0 failures, and
+0 failing map entries. Shifting the compiled-order citation by two lines made
+the gate fail and exit 1 as required.
 
 Focused CPU/x64 tests before the final citation pass reported:
 
 ```text
 32 passed in 0.84s
+77 passed in 2.66s
 ```
 
 The first combined pass reported `3 failed, 74 passed in 2.61s`, solely the
 expected pre-commit shifted-citation audit. The rigid re-anchor was committed
 before the final clean test run; no failure is carried.
+
+| evidence artifact | SHA-256 |
+|---|---|
+| `developed_rhs_jit.json` | `a8f412a7edcace3f1ebafcf66bdaf5687a95d6c3d6cd3e8d50d7674620dce00f` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `focused_tests_final.log` | `a1fd36cecde19442d4e8211fc0c807b21c04c1650bba039b5d7d3304a64c226f` |
+| `citation_gate_final.json` | `28304077e2af55e5cbcc10bcae7cf3c8df88a142d856c6262d6a451ed89f90cd` |
+| `citation_gate_shifted_plant_final.json` | `0e4523c256b2aee85b5cdc64542b7f03932a2a602385bbf2be763649efb4a7eb` |
 
 ## Certified trajectory and scope
 
