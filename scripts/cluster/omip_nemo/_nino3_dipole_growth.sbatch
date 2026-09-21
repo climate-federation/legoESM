@@ -49,9 +49,25 @@ echo "OUT=$OUT"
 # writes snapshot_final.npz, and leg 2 overwrote leg 1's copy before it was
 # renamed. Scoring the days that exist through this ONE card keeps the arm and
 # the baseline comparable at every day they share; a second card would not.
-# Both sides are paired day-for-day -- the same list drives our snapshots and
-# NEMO's records, so a window can never be compared against a different window.
+# Both sides are paired day-for-day from ONE NORMALISED list, so a window can
+# never be compared against a different window.
+#
+# The normalisation is not cosmetic. printf "%04d" reads a leading-zero
+# argument as OCTAL: a raw "015" became snapshot_day0013.npz while --nemo-days
+# still received 015, which Python reads as decimal 15 -- our day 13 scored
+# against NEMO's day 15, silently, with the file present and the day counts
+# equal so nothing downstream could notice. "090" was worse: printf failed and
+# emitted 0000, and the script carried on. Codex found this by execution.
+# $((10#$d)) forces base 10, and the SAME normalised values feed both sides.
 DAYS=${DAYS:-5,10,15,20,25,30}
+_norm=""
+for d in ${DAYS//,/ }; do
+  case "$d" in
+    ''|*[!0-9]*) echo "REFUSING: day '$d' is not a non-negative decimal integer."; exit 4;;
+  esac
+  _norm="$_norm,$((10#$d))"
+done
+DAYS=${_norm#,}
 SNAPS=$(for d in ${DAYS//,/ }; do printf "%s/snapshot_day%04d.npz " "$RUN" "$d"; done)
 echo "DAYS=$DAYS"
 for s in $SNAPS; do
