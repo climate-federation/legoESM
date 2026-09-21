@@ -175,8 +175,8 @@ physics rows moved and nothing landed.
 
 ## Independent adversarial review
 
-The required separate read-only Codex pass was invoked against both Round-133
-commits, the retained target, the preflight and plant evidence, and the
+The required separate read-only Codex pass was invoked against the Round-133
+implementation commits, the retained target, the preflight and plant evidence, and the
 compiled source. Its prompt explicitly tried to refute the no-run diagnosis,
 no-rebuild default, retained identity checks, non-vacuous plant, single-refusal
 control flow, preservation of failed evidence, final-marker ordering, and
@@ -196,9 +196,31 @@ dual-review rule has NO GATE in this round.
 
 ## Verification
 
-All Python commands use the required CPU/fp64 environment. The final focused
-pytest and citation-gate summaries are recorded after this receipt is
-committed; they must be green before the final handoff.
+All Python commands used the required CPU/fp64 environment.
+
+* `bash -n` accepted the amended acquisition script.
+* The clean-commit recovery preflight returned zero with all four syntax
+  proofs, the empty-failed-run row, the retained-build row, and the exact ready
+  marker quoted below.
+* The retained-binary plant returned 1 with `STATUS PLANT-FIRED`; the
+  unknown-mode control and explicit fresh-build control each returned 64 with
+  one named refusal. The fresh-build control stopped at the existing-target
+  guard before any `makenemo` call.
+* The focused Round-131 admission-gate and receipt-citation suites reported
+  exactly `23 passed in 2.52s`.
+* The unplanted citation run found five citations, zero unmapped citations,
+  zero failures, an empty whole-map audit, all nine internal controls firing,
+  and `status: PASS`.
+* Shifting the completed-step citation by two lines returned exit 1 with
+  `status: FAIL` and `SYMBOL-NOT-AT-LINE`. The retained artifacts are
+  `phase3/round133/citation_gate.json` and
+  `phase3/round133/citation_gate_shifted_plant.json`.
+
+No full model or all-tree pytest battery ran: this round changes one operator
+acquisition shell path and documentation, not model code, a card, a Python
+gate, or NEMO source. The real-input preflight, planted identity failure,
+fresh-build refusal, focused gate suite, and citation controls cover the
+committed scope.
 
 The committed acquisition preflight already reports:
 
