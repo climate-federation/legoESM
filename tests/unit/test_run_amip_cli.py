@@ -2216,11 +2216,17 @@ def test_aimip_louis_preserves_resolved_surface_scheme():
     assert trained.surface.bulk_scheme == "constant"
     # _resolve_turbulence had already applied coare3 + gustiness 300:
     resolved = LouisConfig(surface=SurfaceLayerConfig(
-        bulk_scheme="coare3", gustiness_w_zi=300.0))
+        bulk_scheme="coare3", gustiness_w_zi=300.0,
+        z_ref_model_level=False, ocean_q_sfc_saline=True))
     out = _louis_with_preserved_surface(trained, resolved)
     assert out.surface.bulk_scheme == "coare3"        # preserved, not clobbered
     assert out.surface.gustiness_w_zi == 300.0
     assert out.surface.Cd_neutral == 1.5e-3           # trained Cd/Ch/z0 kept
+    # the run-resolved surface switches survive too (they were dropped, so
+    # --no-surface-z-ref-model-level never reached the trained lane); the
+    # values are chosen AGAINST the scheme defaults so a drop is visible
+    assert out.surface.z_ref_model_level is False
+    assert out.surface.ocean_q_sfc_saline is True
 
 
 def test_aimip_louis_preserve_surface_noop_without_prev():

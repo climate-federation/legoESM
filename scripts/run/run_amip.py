@@ -2906,10 +2906,13 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
     surface (anemic evaporation over a calm warm ocean).
 
     This re-applies the previously-resolved surface ``bulk_scheme`` +
-    ``gustiness_w_zi`` onto the trained Louis config, keeping the trained
-    ``Cd_neutral``/``Ch_neutral``/``z0`` (the MOST/COARE schemes ignore the
-    neutral ``Cd``/``Ch`` but DO use ``z0``, so preserving all three is
-    correct).  No-op when there is no prior turbulence config / surface.
+    ``gustiness_w_zi`` + ``stability_scheme`` and the two run-resolved surface
+    switches (``z_ref_model_level``, ``ocean_q_sfc_saline``) onto the trained
+    Louis config, keeping the trained ``Cd_neutral``/``Ch_neutral``/``z0``
+    (the MOST/COARE schemes ignore the neutral ``Cd``/``Ch`` but DO use
+    ``z0``, so preserving all three is correct).  The switches were dropped
+    here before, so ``--surface-z-ref-model-level`` never reached the trained
+    lane.  No-op when there is no prior turbulence config / surface.
     """
     prev_surf = getattr(prev_turb_config, "surface", None)
     if prev_surf is None or getattr(louis_config, "surface", None) is None:
@@ -2918,7 +2921,9 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
         surface=louis_config.surface._replace(
             bulk_scheme=prev_surf.bulk_scheme,
             gustiness_w_zi=prev_surf.gustiness_w_zi,
-            stability_scheme=prev_surf.stability_scheme))
+            stability_scheme=prev_surf.stability_scheme,
+            z_ref_model_level=prev_surf.z_ref_model_level,
+            ocean_q_sfc_saline=prev_surf.ocean_q_sfc_saline))
 
 
 def _apply_sundqvist_overrides(micro_config, args):

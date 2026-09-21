@@ -118,12 +118,15 @@ def test_mpas_bridge_applies_both_switches():
     np.testing.assert_allclose(hgt["T_in"] - off["T_in"], constants.g / constants.c_pd * z, rtol=1e-12)
 
 
-def test_switches_are_refused_where_they_would_be_inert():
+def test_height_switch_accepted_and_saline_refused_on_structured_lanes():
     """codex whole-branch review P2, updated: the level height now reaches
     every lane (each kernel calls surface_fluxes_at_lowest_level), so it is
     honoured, not refused; the sea-water humidity still needs a land fraction
     the structured-grid factories do not carry, so it is refused there
-    instead of silently ignored."""
+    instead of silently ignored.  That the height is HONOURED (not merely
+    accepted) is pinned at the kernel by test_surface_reference_height
+    (correction lowers the latent flux; switch off is byte-identical) and on
+    the MPAS bridge by test_mpas_bridge_applies_both_switches above."""
     import pytest
     from legoesm.atmosphere.physics.turbulence import integration as ti
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
