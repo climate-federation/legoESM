@@ -69,6 +69,8 @@ readonly SOURCE_CPP=$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm
 readonly TARGET_CPP=$TARGET_ROOT/cpp_$TARGET_CFG.fcm
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
+readonly MPIRUN=/home/dbalwada/miniconda3/envs/nemo-build/bin/mpirun
+readonly NM=/usr/bin/nm
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
 readonly GATE=$HERE/../nemo_testcase_l2_gyre_round131_daily_record_gate.py
 readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round132.md
@@ -94,13 +96,15 @@ for path in "$SOURCE_ROOT/EXP00" "$SOURCE_ROOT/MY_SRC"; do
   [[ -d "$path" ]] || refuse 64 "missing source-card directory $path"
 done
 for path in "$SOURCE_BINARY" "$SOURCE_CPP" \
-            "$NEMO_ROOT/arch/arch-$ARCH.fcm" "$FC" "$PY" "$GATE" \
+            "$NEMO_ROOT/arch/arch-$ARCH.fcm" "$FC" "$MPIRUN" "$NM" \
+            "$PY" "$GATE" \
             "$PREREG" "$RECOVERY_PREREG" "$DAILY_CONTROL/namelist_cfg" \
             "$MONTHLY_CONTROL/namelist_cfg" "$OLD_DAY30" "$MONTHLY_DAY30"; do
   [[ -f "$path" ]] || refuse 64 "missing frozen acquisition input $path"
 done
 [[ -x "$SOURCE_BINARY" ]] || refuse 64 "source binary is not executable"
-[[ -x "$FC" && -x "$PY" ]] || refuse 64 "compiler or Python is not executable"
+[[ -x "$FC" && -x "$MPIRUN" && -x "$NM" && -x "$PY" ]] || \
+  refuse 64 "compiler, MPI launcher, nm, or Python is not executable"
 
 if [[ "$(readlink -m "$TARGET_ROOT")" != \
       "$(readlink -m "$NEMO_ROOT/cfgs/$TARGET_CFG")" ]]; then
@@ -213,7 +217,7 @@ verify_retained_preparation() {
     cmp -s "$SOURCE_ROOT/BLD/ppsrc/nemo/$name.f90" "$path" || \
       refuse 66 "retained compiled $name.f90 differs from the source branch"
   done
-  if nm -D "$BINARY" | grep -q '_ZGV'; then
+  if "$NM" -D "$BINARY" | grep -q '_ZGV'; then
     refuse 66 "vector-math symbol present in the retained binary"
   fi
 
@@ -455,7 +459,7 @@ if [[ "$MODE" == "--acquire" ]]; then
     cmp -s "$source" "$target" || \
       refuse 68 "compiled $name.f90 differs from the source-card branch"
   done
-  if nm -D "$BINARY" | grep -q '_ZGV'; then
+  if "$NM" -D "$BINARY" | grep -q '_ZGV'; then
     refuse 68 "vector-math symbol present in the new target binary"
   fi
   sha256sum "$BINARY" >"$PROVENANCE/binary.sha256"
@@ -492,7 +496,7 @@ cd "$TARGET_RUN"
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   >"$RUN_TIME_LOG"
-if mpirun -np 1 --oversubscribe ./nemo 2>&1 | tee "$RUN_STDOUT_LOG"; then
+if "$MPIRUN" -np 1 --oversubscribe ./nemo 2>&1 | tee "$RUN_STDOUT_LOG"; then
   :
 else
   run_status=$?
