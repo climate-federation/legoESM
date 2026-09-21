@@ -4491,6 +4491,9 @@ def gwd_config_for(config):
     _effgw_cm = getattr(config, "e3sm_cam_effgw_cm", None)
     if _effgw_cm is not None:
         fr = fr._replace(effgw=float(_effgw_cm))
+    _frontgfc = getattr(config, "e3sm_cam_frontgfc", None)
+    if _frontgfc is not None:
+        fr = fr._replace(frontgfc=float(_frontgfc))
     # Beres (convective) source: offline table path, its own efficiency, and
     # the oracle variant of the source kernel ("e3sm" = the E3SM defaults,
     # "cam6" = CAM6 gw_convect.F90: end-off spectrum shift, real storm speed,

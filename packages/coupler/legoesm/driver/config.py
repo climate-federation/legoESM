@@ -1639,6 +1639,9 @@ class ExperimentConfig(NamedTuple):
     # offline Beres table (newmfspectra40_dc25.nc); "" = stand-in spectrum.
     e3sm_cam_effgw_cm: float | None = None      # E3SMFrontalConfig.effgw
     e3sm_cam_effgw_beres: float | None = None   # E3SMBeresConfig.effgw
+    e3sm_cam_frontgfc: float | None = None      # E3SMFrontalConfig.frontgfc
+                                                # [K^2/(m^2 s)]; None = kernel
+                                                # default 1.25e-15; CAM6 f09 3.0e-15
     e3sm_cam_beres_variant: str = "e3sm"        # "e3sm" | "cam6" (also sets
                                                 # CAM's min_hdepth 1 km + row lookup)
     e3sm_cam_mfcc_table_path: str = ""          # E3SMBeresConfig.mfcc_table_path
@@ -3275,6 +3278,11 @@ class ExperimentConfig(NamedTuple):
                 "heating the Beres source reads, so it would launch nothing "
                 "(silent no-op)"
             )
+        _fg = self.e3sm_cam_frontgfc
+        if _fg is not None and (not math.isfinite(_fg) or _fg <= 0.0):
+            errors.append(
+                f"e3sm_cam_frontgfc must be None or a positive, finite "
+                f"frontogenesis threshold [K^2/(m^2 s)], got {_fg!r}")
         for _f in ("e3sm_cam_effgw_cm", "e3sm_cam_effgw_beres"):
             _v = getattr(self, _f)
             if _v is not None and (

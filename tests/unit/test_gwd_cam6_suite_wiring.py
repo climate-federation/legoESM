@@ -41,6 +41,7 @@ CAM6_KW = dict(
     e3sm_cam_effgw=0.125,
     e3sm_cam_effgw_cm=1.0,
     e3sm_cam_effgw_beres=0.4,
+    e3sm_cam_frontgfc=3.0e-15,
     e3sm_cam_beres_variant="cam6",
 )
 
@@ -122,9 +123,15 @@ def test_amip_cli_round_trips_the_cam6_suite():
             "--e3sm-cam-source", "orographic+frontal+convective",
             "--e3sm-cam-pgwv", "32", "--e3sm-cam-effgw", "0.125",
             "--e3sm-cam-effgw-cm", "1.0", "--e3sm-cam-effgw-beres", "0.4",
+            "--e3sm-cam-frontgfc", "3.0e-15",
             "--e3sm-cam-beres-variant", "cam6", "--e3sm-cam-dttke-intrinsic"]
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(argv), parser))
     assert cfg.e3sm_cam_source == "orographic+frontal+convective"
+    assert cfg.e3sm_cam_frontgfc == 3.0e-15
+    from legoesm.driver.physics_pipeline import gwd_config_for
+    assert gwd_config_for(cfg).e3sm_cam.frontal.frontgfc == 3.0e-15
+    with pytest.raises(ValueError, match="frontgfc"):
+        cfg._replace(e3sm_cam_frontgfc=-1.0).validate_strict()
     assert cfg.e3sm_cam_dttke_intrinsic is True
     assert cfg.e3sm_cam_effgw_cm == 1.0 and cfg.e3sm_cam_effgw_beres == 0.4
     assert cfg.e3sm_cam_beres_variant == "cam6"

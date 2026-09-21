@@ -1624,6 +1624,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Beres convective-source efficiency (CAM "
                              "effgw_beres_dp; CAM6 f09 0.4). Default None = "
                              "--e3sm-cam-effgw.")
+    parser.add_argument("--e3sm-cam-frontgfc", type=float, default=None,
+                        dest="e3sm_cam_frontgfc",
+                        help="Frontogenesis threshold for the frontal source "
+                             "[K^2/(m^2 s)] (CAM frontgfc; CAM6 f09 3.0e-15). "
+                             "Default None = kernel default 1.25e-15.")
     parser.add_argument("--e3sm-cam-beres-variant", type=str, default=None,
                         choices=["e3sm", "cam6"],
                         dest="e3sm_cam_beres_variant",
@@ -2316,6 +2321,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         e3sm_cam_effgw_beres=(args.e3sm_cam_effgw_beres
                               if args.e3sm_cam_effgw_beres is not None
                               else _EXPERIMENT_DEFAULTS.e3sm_cam_effgw_beres),
+        e3sm_cam_frontgfc=(args.e3sm_cam_frontgfc
+                           if args.e3sm_cam_frontgfc is not None
+                           else _EXPERIMENT_DEFAULTS.e3sm_cam_frontgfc),
         e3sm_cam_beres_variant=(
             args.e3sm_cam_beres_variant
             if args.e3sm_cam_beres_variant is not None
