@@ -217,6 +217,10 @@ sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
 
 cd "$NEMO_ROOT"
 ./makenemo -r GYRE_PISCES -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+if [[ ! -d "$TARGET_ROOT/EXP00" || ! -d "$TARGET_ROOT/MY_SRC" ]]; then
+  printf 'REFUSE: makenemo could not create the new Round-137 configuration\n' >&2
+  exit 68
+fi
 while IFS= read -r -d '' source; do
   cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"
 done < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
