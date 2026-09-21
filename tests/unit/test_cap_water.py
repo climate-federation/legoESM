@@ -117,3 +117,43 @@ def test_cap_moisture_transport_boundary_sum_matches_the_divergence_operator():
     e_int = next(e for e in range(n_edges) if cap[c0[e]] and cap[c1[e]])
     u2 = np.zeros_like(u); u2[e_int, :] = 3.0
     assert cw.cap_moisture_transport(q, u2, dp, mesh, cap)[2] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_cap_moisture_transport_splits_in_and_out_per_level():
+    """A boundary column with inflow below and outflow aloft counts in BOTH gross terms."""
+    import numpy as np
+    from legoesm import constants
+    from legoesm.grids.factory import create_grid
+    mesh = create_grid("mpas", resolution=2)
+    lat = np.asarray(mesh.latCell); cap = lat >= 0.0
+    c0, c1 = np.asarray(mesh.cellsOnEdge[0]), np.asarray(mesh.cellsOnEdge[1])
+    e = next(e for e in np.where(cap[c0] != cap[c1])[0] if cap[c1[e]])
+    q = np.full((lat.size, 2), 1.0e-3); dp = np.full((lat.size, 2), 1000.0)
+    u = np.zeros((c0.size, 2)); u[e] = [-1.0, 2.0]                 # aloft out, below in
+    gin, gout, net, _ = cw.cap_moisture_transport(q, u, dp, mesh, cap)
+    unit = 1.0e-3 * 1000.0 / constants.g * float(mesh.dvEdge[e])
+    assert gin == pytest.approx(2.0 * unit, rel=1e-6) and gout == pytest.approx(-unit, rel=1e-6)
+    assert net == pytest.approx(unit, rel=1e-6)
+    with pytest.raises(SystemExit, match="non-finite"):
+        cw.cap_moisture_transport(np.where(q > 0, np.nan, q), u, dp, mesh, cap)
+
+
+def test_inflow_humidity_weights_only_the_entering_air():
+    """Reference humidity twice the model's on the inflow edge: ratio 0.5 and the extra import
+    equals the inflow's own transport; an outflow-only wind gives no weight; NaN reference
+    levels are excluded from the weights and reported in the cover fraction."""
+    import numpy as np
+    from legoesm import constants
+    from legoesm.grids.factory import create_grid
+    mesh = create_grid("mpas", resolution=2)
+    lat = np.asarray(mesh.latCell); cap = lat >= 0.0
+    c0, c1 = np.asarray(mesh.cellsOnEdge[0]), np.asarray(mesh.cellsOnEdge[1])
+    e = next(e for e in np.where(cap[c0] != cap[c1])[0] if cap[c1[e]])
+    q = np.full((lat.size, 2), 1.0e-3); dp = np.full((lat.size, 2), 1000.0)
+    u = np.zeros((c0.size, 2)); u[e] = [1.0, 1.0]
+    qm, qr, extra, cover = cw.inflow_humidity(q, 2.0 * q, u, dp, mesh, cap)
+    assert qm == pytest.approx(1.0e-3) and qr == pytest.approx(2.0e-3) and cover == pytest.approx(1.0)
+    assert extra == pytest.approx(cw.cap_moisture_transport(q, u, dp, mesh, cap)[0], rel=1e-6)
+    ref = 2.0 * q; ref[:, 0] = np.nan                                # top level undefined
+    qm, qr, extra, cover = cw.inflow_humidity(q, ref, u, dp, mesh, cap)
+    assert cover == pytest.approx(0.5) and qr == pytest.approx(2.0e-3)
