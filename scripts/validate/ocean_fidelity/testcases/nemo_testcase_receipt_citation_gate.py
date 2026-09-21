@@ -2854,7 +2854,7 @@ CITATION_MAP = {
         ('END DO   ;   END DO', 1), 37],
     'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90:1336-1359': [
         ('SUBROUTINE dyn_cor_2D( punb, pvnb, zu_trd, zv_trd   )', 1),
-        'END SUBROUTINE dyn_cor_2D', 24],
+        ('END SUBROUTINE dyn_cor_2D', 2), 24],
     'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90:462-591': [
         'DO jn = 1, icycle',
         '& ssha_e(ntsi:ntei,ntsj:ntej)', 130],
