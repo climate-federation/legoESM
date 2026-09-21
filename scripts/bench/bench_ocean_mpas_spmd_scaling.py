@@ -231,6 +231,14 @@ def main() -> int:
                # allreduces/step = 1+2M (standard) or 1+M (single_reduce),
                # plus M cell-halo exchanges. Single-device rows run stock CG
                # to a tolerance instead, so they do NOT do fixed_iters work.
+               # The NCCL transport the arm ran with: the channel count moves
+               # the s9 ATMOSPHERE step 17% at 128 GPUs, so rows at different settings are
+               # different measurements (plot_nature_scaling.py refuses mixes).
+               "nccl_env": {
+                   k: os.environ.get(k, "")
+                   for k in ("NCCL_MIN_NCHANNELS", "NCCL_MAX_NCHANNELS",
+                                "NCCL_P2P_NET_CHUNKSIZE")
+               },
                "pcg_variant": args.pcg_variant,
                "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
                "pcg_precond": str(config.barotropic_implicit_pcg_precond),

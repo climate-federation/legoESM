@@ -114,11 +114,19 @@ def _mode(r, path):
 # poly_sweeps.  Rows solving anything else are a different model.
 OCEAN_MPAS_PCG_ITERS = 20
 OCEAN_MPAS_PCG_PRECOND = ("poly", 4)
+# NCCL channel count both MPAS lanes pin (nature_ladder.sbatch): 8 -> 32 on
+# 2026-09-21 (s9 atm: 5.57 -> 4.65 ms at 128 GPUs).  Multi-device MPAS GPU
+# rows at any other count or chunk size, or without the stamp, are refused.
+# The 32-channel gain is ATMOSPHERE evidence; the ocean lane (PCG-dominated,
+# 2M+9 allreduces/step) is pinned by decision and A/B-checked separately.
+MPAS_NCCL_CHANNELS = "32"
+MPAS_NCCL_CHUNK = "131072"
 
 
 def load(dirs):
     best = {}
     dropped = []
+    dropped_nccl = []
     for d in dirs:
         for f in glob.glob(os.path.join(d, "**", "*.jsonl"), recursive=True):
             if f.endswith(".failed.jsonl"):     # quarantined by the ladder
@@ -169,6 +177,14 @@ def load(dirs):
                         dropped.append((f, int(r["n_devices"]),
                                         f"{iters}/{pre[0]}{pre[1]}"))
                         continue
+                if (grid in ("icosahedral", "mpas") and _backend(r) == "gpu"
+                        and int(r["n_devices"]) > 1):
+                    env = r.get("metadata", {}).get("extra", {}).get("nccl_env") or {}
+                    ch = (env.get("NCCL_MIN_NCHANNELS"), env.get("NCCL_MAX_NCHANNELS"),
+                          env.get("NCCL_P2P_NET_CHUNKSIZE"))
+                    if ch != (MPAS_NCCL_CHANNELS, MPAS_NCCL_CHANNELS, MPAS_NCCL_CHUNK):
+                        dropped_nccl.append((f, int(r["n_devices"]), ch))
+                        continue
                 mode = _mode(r, f)
                 key = (comp, grid, _backend(r), prec, mode, _res(r, grid, mode),
                        int(r["n_devices"]))
@@ -191,6 +207,18 @@ def load(dirs):
               file=sys.stderr)
         for _f, nd, it in sorted(dropped, key=lambda d: d[1])[:20]:
             print(f"  nd={nd:<5} iters={it!r}  {_f}", file=sys.stderr)
+    if dropped_nccl:
+        counts = {}
+        for _f, nd, ch in dropped_nccl:
+            counts[ch] = counts.get(ch, 0) + 1
+        print(f"load: refused {len(dropped_nccl)} multi-device MPAS GPU receipts "
+              f"not at {MPAS_NCCL_CHANNELS} NCCL channels / {MPAS_NCCL_CHUNK} chunk "
+              f"(min/max/chunk found: "
+              + ", ".join(f"{k!r}x{v}" for k, v in sorted(
+                  counts.items(), key=lambda kv: str(kv[0]))) + ")",
+              file=sys.stderr)
+        for _f, nd, ch in sorted(dropped_nccl, key=lambda d: d[1])[:20]:
+            print(f"  nd={nd:<5} channels={ch!r}  {_f}", file=sys.stderr)
     return best
 
 

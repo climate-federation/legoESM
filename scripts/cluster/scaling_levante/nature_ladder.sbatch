@@ -15,8 +15,12 @@
 #   MATRIX=ocean_gpu / ocean_cpu likewise.
 #
 # Existing receipts that this ladder does NOT repeat (reuse decision):
-# atm lat-lon LL2048/LL4096 + MPAS s9/s10 GPU strong f32/f64 1-128 (Aug 2026,
-# /work/bd1083/b309178/diffESM/scaling_receipts/ladder2n).
+# atm lat-lon LL2048/LL4096 GPU strong f32/f64 1-128 (Aug 2026,
+# /work/bd1083/b309178/diffESM/scaling_receipts/ladder2n).  The MPAS s9/s10
+# GPU strong series from the same campaign ran at 8 NCCL channels and is NOT
+# reused: both MPAS lanes now pin 32 channels (2026-09-21 sweep at s9:
+# 5.57 -> 4.65 ms at 128 GPUs, 7.70 -> 7.26 at 32; atm_mpas_nccl_sweep.sbatch)
+# and the plotter refuses MPAS GPU rows measured at any other channel count.
 #
 # Weak arms of the MPAS-atm and cube lanes are strong-bench runs at a larger
 # mesh per device count (those benches have no --mode); the receipt then says
@@ -96,7 +100,7 @@ run_arm() {
       fi
       args+=(--nlev 26 --steps "$STEPS" --warmup "$WARMUP") ;;
     mpas)
-      export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
+      export NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=131072
       export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
       bench=scripts/bench/bench_mpas_spmd_scaling.py
       args+=(--subdivision "$res" --nlev 26 --lloyd 0 --wide-halo --partition-method sfc
@@ -119,7 +123,7 @@ run_arm() {
       fi
       args+=(--steps "$STEPS" --warmup "$WARMUP") ;;
     omps)
-      export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
+      export NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=131072
       export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
       bench=scripts/bench/bench_ocean_mpas_spmd_scaling.py
       args+=(--nlev 40 --lloyd 0 --block-steps 20 --blocks 3)
@@ -150,7 +154,8 @@ case "$MATRIX" in
   atm_gpu)
     NLON_WEAK=8192
     add latlon weak   32   $P2_GPU                # 32 rows x 8192 x 26 per GPU (= LL4096@128 share)
-    add mpas   strong 10   192
+    add mpas   strong 9    $P2_GPU
+    add mpas   strong 10   2 4 8 16 32 64 128 192
     add mpas   weak 7 2;  add mpas weak 8 8;  add mpas weak 9 32;  add mpas weak 10 128   # ~81k cells/GPU
     add cube   strong 768:2 24; add cube strong 768:3 54
     add cube   strong 768:4 96                    # kt must divide 768: {2,3,4,6,8}; 216 > GPU cap
