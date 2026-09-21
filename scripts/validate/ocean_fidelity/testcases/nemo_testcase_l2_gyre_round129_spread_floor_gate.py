@@ -48,13 +48,14 @@ ROUND129_MEMBER0_COMMIT = (
     "4d250301588d3ed0ad83fb20d6bf520e175d576e")
 ROUND129_NEW_MEMBER_COMMIT = (
     "007affce297763a9594aea19babf8c9eace4883a")
-# Round 134 extended only private, default-off daily-reset diagnostics in the
-# certified harness.  Its unnudged control reproduced all five saved fields
-# bit-for-bit at every one of 360 daily boundaries before this pin moved.
+# Rounds 134-135 extended only private, default-off daily-reset diagnostics in
+# the certified harness.  Round 135's fresh unnudged control reproduced all
+# five saved fields bit-for-bit at every one of 360 daily boundaries before
+# this pin moved.
 ROUND129_ORIGINAL_YEAR_HARNESS_SHA256 = (
     "7a679711c8ce02191e839f9f4359f21e753e8e2b6014a19a2302fb69ca168f9c")
 ROUND129_YEAR_HARNESS_SHA256 = (
-    "d8d2f85d9ad7285dea38920080b03c8ecad0b8ed37897327e4430d8182d556fb")
+    "2996d361ec62465e16e98c7b7a96163132dc088291757bac1efb26ce2e81d55f")
 ROUND129_PHASE3_GATE_SHA256 = (
     "e57fe1c475a1d386f30856f1841a2efb65162df6968b74b1a200f8850bdd9112")
 ROUND129_MESH_SHA256 = (
