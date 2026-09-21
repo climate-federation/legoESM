@@ -235,6 +235,12 @@ Every planted violation exited nonzero and printed `STATUS PLANT-FIRED`:
 | effect-scale surface RHS | one decoded surface-boundary and shortwave cell moved |
 | entry-temperature ULP | geometry/advection/SBC/QSR/ZDF boundaries moved; command exited 1 |
 
+The final clean-tree receipt citation pass found all 16 mapped citations with
+zero failures or unmapped citations. Shifting the compiled QCO citation by two
+lines exited 1 with `SYMBOL-NOT-AT-LINE`. The final normal and planted reports
+are `citation_gate_final_receipt.json` and
+`citation_gate_final_receipt_shifted_plant.json` under the evidence root.
+
 Focused and broad test summaries are recorded below after the final clean-tree
 pass:
 
