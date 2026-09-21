@@ -144,9 +144,11 @@ hook-definition and five implementation lines. Every affected citation was
 rigidly re-anchored with its extent and endpoint symbols unchanged. The
 committed citation unit rerun reported `16 passed in 1.95s`.
 
-The final receipt citation gate and its shifted-citation plant are recorded
-after this receipt is committed. The final focused combined rerun is likewise
-recorded after the receipt commit.
+The receipt citation gate passed with 4 citations, 0 unmapped citations,
+0 failures, 0 failing map entries, and 0 failed self-controls. Shifting the
+compiled HPG-through-ZAD citation by two lines made exactly one citation fail;
+the plant exited nonzero as required. The final four-file focused rerun
+reported `53 passed in 2.55s`.
 
 ## Evidence artifacts
 
@@ -159,6 +161,9 @@ recorded after the receipt commit.
 | `missing_row_plant_commit7be6.json` | `9a54e407c84fecc0a6e8de62d02dece4dbd3bdf729546f307bfd0cb022d9b469` |
 | `missing_row_plant_commit7be6.log` | `0e7dbd46102f0e6c931853d6ec2b1236a197ae4f2f3ee3cef94a2a546b135b8c` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `citation_gate.json` | `25a769a657de089fbddbaa9ee1b0cf5fa5c083c94d160ed7260900d42a7de6f4` |
+| `citation_gate_shifted_plant.json` | `6ca6ac36fb66ac86867ed42954f6a85c1cb43ba438b65570e78a4d8c781f55a8` |
+| `focused_tests_final.log` | `3adf41fc072bebff81016370ab5ec94c6be4d661624e1c0551c4e68e50735324` |
 
 ## Decision-43/45 gate and campaign scope
 
