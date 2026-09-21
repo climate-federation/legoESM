@@ -65,5 +65,6 @@ arm mpas bound_rep -c 64 --cpu-bind=cores
 arm omps ladder
 arm omps bound     -c 64 --cpu-bind=cores
 arm omps ladder_rep
+arm omps bound_rep -c 64 --cpu-bind=cores
 echo "=== DONE rc=$rc outdir=$OUTDIR ==="
 exit "$rc"
