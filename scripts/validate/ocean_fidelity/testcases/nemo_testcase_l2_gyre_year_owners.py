@@ -6089,8 +6089,11 @@ def _process_cumulative_boundaries(record: dict) -> dict[str, np.ndarray]:
 
 
 def _bit_mismatch_count(actual, expected, mask=None) -> int:
-    actual = np.asarray(actual)
-    expected = np.asarray(expected)
+    # Restart variables can be transposed NetCDF views.  Compare their value
+    # bytes in logical C order rather than requiring their source strides to
+    # make the final axis contiguous.
+    actual = np.ascontiguousarray(actual)
+    expected = np.ascontiguousarray(expected)
     require(actual.shape == expected.shape,
             f"bit comparison shapes differ: {actual.shape} vs "
             f"{expected.shape}")

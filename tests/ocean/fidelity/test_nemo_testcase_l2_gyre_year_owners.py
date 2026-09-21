@@ -228,6 +228,12 @@ def test_round136_registry_and_signed_zero_controls_are_nonvacuous(harness):
     assert row["max_abs"] == 0.0
     assert row["first_unequal_jik"] == [0, 0, 0]
 
+    contiguous = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
+    noncontiguous = np.transpose(contiguous, (1, 0, 2))
+    assert not noncontiguous.flags.c_contiguous
+    assert harness._bit_mismatch_count(
+        noncontiguous, np.array(noncontiguous, order="C")) == 0
+
 
 def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
                                                               harness):
