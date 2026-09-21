@@ -50,6 +50,7 @@ OVERFLOW_RUN = Path(
 _OCE = NEMO / "src/OCE"
 _DYN = _OCE / "DYN"
 _R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
+_ORCA2_COMPILED = NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo"
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
@@ -68,6 +69,10 @@ FILES = {
     # cannot bind to OVERFLOW's ocean.output or to LOCK's ppsrc.
     "LDF/ldfslp.F90": _OCE / "LDF/ldfslp.F90",
     "domqco.F90": _OCE / "DOM/domqco.F90",
+    # ORCA2 round 1 binds its first non-bit entry field to the compiled branch
+    # that executes the category-summed initial snow/ice load adjustment.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90": (
+        _ORCA2_COMPILED / "iceistate.f90"),
     # --- round 40 paths: the stage-3 momentum operators and zdf_mxl ---
     "dynvor.F90": _DYN / "dynvor.F90",
     "dynkeg.F90": _DYN / "dynkeg.F90",
@@ -599,6 +604,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 card round 1: initial category-load SSH adjustment ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:442-459': [
+        'snwice_mass  (:,:) = tmask(:,:,1) * SUM',
+        'ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj', 18],
     # --- round 135: accepted-state swap before the daily tracer record ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
         'IF ( .NOT. l_perpetual_ts ) THEN', ('ENDIF', 8), 10],

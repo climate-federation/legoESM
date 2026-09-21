@@ -29,6 +29,7 @@ readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 readonly COMPILED_STPRK3=$TARGET_ROOT/BLD/ppsrc/nemo/stprk3.f90
+readonly COMPILED_ICEISTATE=$TARGET_ROOT/BLD/ppsrc/nemo/iceistate.f90
 readonly BASELINE=/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_orca1ice_phase2x_a_10step_np2
 readonly FROZEN_ICE=/data/abyssal/dbalwada/nemo-testcases-l4/build/phase2x_orca1ice/MY_SRC_final
 readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round1/acquisition
@@ -307,6 +308,7 @@ stage_run() {
   done <"$BASELINE/input_files.sha256"
   cp "$BASELINE/deck_files.sha256" "$BASELINE/input_files.sha256" "$target/"
   cp "$BINARY" "$target/nemo"
+  cp "$COMPILED_ICEISTATE" "$target/compiled_iceistate.f90"
   (cd "$target" && sha256sum -c deck_files.sha256 >/dev/null) || {
     printf 'REFUSE: staged deck differs in %s\n' "$target" >&2
     exit 66
@@ -316,6 +318,7 @@ stage_run() {
     exit 66
   }
   sha256sum "$target/nemo" >"$target/binary.sha256"
+  sha256sum "$target/compiled_iceistate.f90" >"$target/compiled_source.sha256"
 }
 
 run_one() {
@@ -398,6 +401,10 @@ touch "$TARGET_ROOT/MY_SRC/"*.F90
   printf 'REFUSE: target build produced no executable\n' >&2
   exit 68
 }
+[[ -f "$COMPILED_ICEISTATE" ]] || {
+  printf 'REFUSE: target build produced no compiled iceistate branch\n' >&2
+  exit 68
+}
 for marker in \
   'CALL l4_dump_ocean_surface_input( kstp, Nbb )' \
   'WRITE(cl_surface_file' \
@@ -411,6 +418,14 @@ if grep -Fq 'IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input' "$COMPILED
   printf 'REFUSE: compiled source retained the kt=1-only surface call\n' >&2
   exit 68
 fi
+for marker in \
+  'snwice_mass  (:,:) = tmask(:,:,1) * SUM' \
+  'ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj'; do
+  grep -Fq "$marker" "$COMPILED_ICEISTATE" || {
+    printf 'REFUSE: compiled iceistate source lacks marker: %s\n' "$marker" >&2
+    exit 68
+  }
+done
 if nm -D "$BINARY" | grep -q '_ZGV'; then
   printf 'REFUSE: vector-math symbol is present in the acquisition binary\n' >&2
   exit 68
