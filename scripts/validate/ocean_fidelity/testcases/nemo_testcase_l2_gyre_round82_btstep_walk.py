@@ -590,7 +590,9 @@ def _developed_comparison(actual, expected, mask) -> dict:
     expected = np.ascontiguousarray(np.asarray(expected, dtype=np.float64))
     mask = np.asarray(mask, dtype=bool)
     require(actual.shape == expected.shape == mask.shape,
-            "developed comparison extents differ")
+            "developed comparison extents differ: "
+            f"actual={actual.shape}, expected={expected.shape}, "
+            f"mask={mask.shape}")
     unequal = (actual.view(np.uint64) != expected.view(np.uint64)) & mask
     delta = actual[mask] - expected[mask]
     first = ([int(value) for value in np.argwhere(unequal)[0]]
