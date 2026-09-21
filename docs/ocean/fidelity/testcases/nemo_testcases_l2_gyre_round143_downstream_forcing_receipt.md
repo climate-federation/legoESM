@@ -4,6 +4,8 @@ Date: 2026-09-21
 Incoming lane tip: `478f8abf2b70a106f9910190ca66199767bc3a63`  
 Preregistration commit: `590394b33`  
 Measurement implementation and stamp: `2926841cc498ae0d2be31b6f64c4c2ae84e9f0d2`  
+Initial receipt and citation-map commit: `ecb3f9d14`
+Rigid citation re-anchor commits: `ed6bc015e`, `985f13751`
 Status: **HELD — no production physics landed**
 
 ## Result
@@ -98,9 +100,17 @@ It exited 1 and supplied no `SHIP`, `HOLD`, or `DO NOT SHIP` verdict.
 Independent review was unavailable in-sandbox; the standing operator rule
 permits continuation. No production physics is landed.
 
-The pre-measurement focused test run reported `28 passed in 1.24s`. Final
-focused tests and the citation gate are recorded below after the final commit
-stamp.
+The pre-measurement focused test run reported `28 passed in 1.24s`. The first
+four-file focused run after adding the new hooks reported `1 failed, 75 passed
+in 2.44s`: the only failure was the expected cumulative-receipt citation drift
+caused by the 27 inserted lines. After rigidly shifting the nine affected
+receipt references, the same run reported `76 passed in 2.45s`.
+
+The preregistration citation gate passed with 5 citations, 0 unmapped, 0
+failures, and 0 failing map entries. The receipt gate passed with 4 citations,
+0 unmapped, 0 failures, and 0 failing map entries. Shifting the exact wind
+statement citation by two lines made exactly one citation fail; the plant
+exited 1 as required.
 
 ## Evidence artifacts
 
@@ -113,6 +123,10 @@ stamp.
 | `depth_ulp_plant.json` | `7a72ac0922ecb0d1e5b4b88b98324284613c6ce5924fac9b9a0e485be852d22e` |
 | `depth_ulp_plant.log` | `740e006e76579099eac8c2907c829740533ec83ce5bc6cc6130835ee4e80c3e9` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `focused_tests_clean.log` | `7a75419e240ea2597f786f041e25f98480a4bb927d3a089f52162f84a549c907` |
+| `prereg_citation_gate_clean.json` | `6ddb02b1112622684ce951a99af481b39ed78acaedd8892a8751723c5c6735d0` |
+| `citation_gate_clean.json` | `17a5fc251643279ca3cc98ae60ef0860358c2f446970ff34535d5faa0c730518` |
+| `citation_gate_shifted_plant_clean.json` | `f4111964b36b716004b626e2742b544537c830e29c54845f6c2ebcafd1536f42` |
 
 ## Decision-43/45 gate and campaign scope
 
