@@ -1435,6 +1435,53 @@ def make_hybrid_levels(
     return create_hybrid_coordinate(n_levels, A_half, B_half, p_ref)
 
 
+# --- CAM6 L32 hybrid interface coefficients (CESM2.1 cam_vcoords_L32_c180105.nc) ---
+# p_half[k] = A_half[k] * P0 + B_half[k] * p_s with P0 = 1e5 Pa, top at 2.255 hPa
+# (CAM6 / CESM2 default 32-level grid, Danabasoglu et al. 2020).  Layer mass
+# is positive for every p_s >= 500 hPa (min dp = 277.6 Pa, independent of
+# p_s in the pure-pressure top), unlike make_hybrid_levels' analytic A(eta),
+# which inverts below ~656 hPa.  Values are the file's float64 contents.
+CAM6_L32_HYAI = (
+    0.00225523952394724, 0.00503169186413288, 0.0101579474285245,
+    0.0185553170740604, 0.0297346755951211, 0.0392730012536049,
+    0.0471144989132881, 0.0562404990196228, 0.0668004974722862,
+    0.0807014182209969, 0.0949410423636436, 0.11169321089983,
+    0.131401270627975, 0.154586806893349, 0.181863352656364,
+    0.17459799349308, 0.166050657629967, 0.155995160341263,
+    0.14416541159153, 0.130248308181763, 0.113875567913055,
+    0.0946138575673103, 0.0753444507718086, 0.0576589405536652,
+    0.0427346378564835, 0.0316426791250706, 0.0252212174236774,
+    0.0191967375576496, 0.0136180268600583, 0.00853108894079924,
+    0.00397881818935275, 0.0, 0.0,
+)
+CAM6_L32_HYBI = (
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0393548272550106, 0.0856537595391273, 0.140122056007385,
+    0.204201176762581, 0.279586911201477, 0.368274360895157,
+    0.47261056303978, 0.576988518238068, 0.672786951065063,
+    0.753628432750702, 0.813710987567902, 0.848494648933411,
+    0.881127893924713, 0.911346435546875, 0.938901245594025,
+    0.963559806346893, 0.985112190246582, 1.0,
+)
+CAM6_L32_P0 = 1.0e5
+
+
+def make_cam6_l32_levels(p_ref: float = CAM6_L32_P0) -> HybridSigmaPressureCoordinate:
+    """CAM6's 32-level hybrid grid from its published interface coefficients.
+
+    ``p_ref`` must equal the table's own P0 (1e5 Pa): the A coefficients
+    are defined against it, so another reference pressure would silently
+    move every interface.
+    """
+    if p_ref != CAM6_L32_P0:
+        raise ValueError(
+            f"CAM6 L32 coefficients are defined against P0 = {CAM6_L32_P0} Pa; "
+            f"got p_ref={p_ref}")
+    A_half = jnp.asarray(CAM6_L32_HYAI, dtype=jnp.float64)
+    B_half = jnp.asarray(CAM6_L32_HYBI, dtype=jnp.float64)
+    return create_hybrid_coordinate(len(CAM6_L32_HYAI) - 1, A_half, B_half, p_ref)
+
+
 def standard_hybrid_levels(
     n_levels: int = 40,
     p_ref: float = constants.p_ref,

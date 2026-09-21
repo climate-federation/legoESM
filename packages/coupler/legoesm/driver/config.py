@@ -61,7 +61,7 @@ class GridConfig(NamedTuple):
     grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, mpas
     resolution: int = 16             # N for CS, n_max for spectral
     nlev: int = 40
-    vertical_coord: str = "hybrid"   # sigma, hybrid
+    vertical_coord: str = "hybrid"   # sigma, hybrid, cam_l32 (CAM6 32-level table)
     p_top_Pa: float = 200.0
     stretching: float = 2.0
     # SIGMA-coordinate layer redistribution toward the tropopause, at FIXED
@@ -1755,6 +1755,20 @@ class ExperimentConfig(NamedTuple):
         elif g.vertical_coord == "hybrid" and g.sigma_layout != "standard":
             errors.append(
                 f"grid.sigma_layout={g.sigma_layout!r} is inert on the hybrid lane")
+        elif g.vertical_coord == "cam_l32":
+            # The CAM6 table fixes every interface: nlev, top and spacing are
+            # not free, and the analytic-hybrid / sigma knobs would be inert.
+            if g.nlev != 32:
+                errors.append(
+                    f"grid.vertical_coord='cam_l32' is the CAM6 32-level table; nlev must be 32 (got {g.nlev})")
+            if (g.p_top_Pa != 200.0 or g.stretching != 2.0 or g.sigma_top != 0.01
+                    or g.sigma_layout != "standard" or g.tropopause_refine != 1.0):
+                errors.append(
+                    "grid.p_top_Pa/stretching/sigma_top/sigma_layout/tropopause_refine are inert "
+                    "on vertical_coord='cam_l32' (the table fixes them); leave them at their defaults")
+        elif g.vertical_coord not in ("sigma", "hybrid"):
+            errors.append(
+                f"grid.vertical_coord must be one of ('sigma', 'hybrid', 'cam_l32'); got {g.vertical_coord!r}")
         # Tropopause refinement: 1.0 = uniform.  The upper bound is NOT a
         # vertical-CFL limit — the first-order-upwind vertical advective CFL
         # is only 0.26 at refine=3 / dt=75 s / omega=5 Pa/s and 0.39 at

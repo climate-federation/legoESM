@@ -1751,6 +1751,12 @@ class ModelDriver:
             self.sigma = make_hybrid_levels(
                 gc.nlev, p_top_Pa=gc.p_top_Pa, stretching=gc.stretching,
             )
+        elif gc.vertical_coord == "cam_l32":
+            from legoesm.grids.vertical import make_cam6_l32_levels
+            self.sigma = make_cam6_l32_levels()
+        elif gc.vertical_coord != "sigma":
+            raise ValueError(
+                f"unknown vertical_coord {gc.vertical_coord!r}; expected 'sigma', 'hybrid' or 'cam_l32'")
         else:
             from legoesm.grids.vertical import create_sigma_coordinate
             self.sigma = create_sigma_coordinate(

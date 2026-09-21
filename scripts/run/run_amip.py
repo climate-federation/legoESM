@@ -153,7 +153,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resolution", type=int, default=16)
     parser.add_argument("--nlev", type=int, default=40)
     parser.add_argument("--vertical-coord", type=str, default="hybrid",
-                        choices=["sigma", "hybrid"])
+                        choices=["sigma", "hybrid", "cam_l32"],
+                        help="cam_l32 = CAM6's 32-level hybrid table (nlev must be 32)")
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
     # ``mpas`` is the canonical name for the SCVT Voronoi mesh + TRiSK
