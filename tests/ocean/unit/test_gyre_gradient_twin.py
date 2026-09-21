@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import sys
 import time
@@ -13,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.ml.loss import volume_weighted_mse
+import legoesm.ocean.physics.vertical_mixing.tke as tke_mod
 
 _REPO = Path(__file__).resolve().parents[3]
 _SCRIPT = _REPO / "scripts/experiment/gyre_gradient_twin.py"
@@ -72,33 +74,37 @@ def test_no_inert_and_fd_controls_fire():
         assert all(row["status"] == "REFUTED" for row in broken_rows)
 
 
-def test_nemo_literal_dissl_zero_vjp_localizes_poison():
-    """The literal post-AVN sqrt has a NaN VJP at masked zero TKE."""
-    tke = jnp.asarray([0.0, 4.0], dtype=jnp.float64)
-    l_eps = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
-    cotangent = jnp.asarray([0.0, 1.0], dtype=jnp.float64)
+def test_nemo_literal_dissl_guard_primal_bits_and_zero_vjp():
+    """The production post-AVN guard preserves finite primals and zero VJP."""
+    values = jnp.asarray(
+        [4.0, 0.0, np.nextafter(0.0, 1.0), -1.0, np.nan],
+        dtype=jnp.float64,
+    )
+    l_eps = jnp.asarray([2.0, 3.0, 5.0, 7.0, 11.0], dtype=jnp.float64)
 
-    # This is the exact operation at vertical_mixing/tke.py:3434.  Its primal
-    # is finite, but sqrt's transpose evaluates 0 / sqrt(0) on a masked entry.
-    _, pullback = jax.vjp(lambda value: jnp.sqrt(value) / l_eps, tke)
-    literal_vjp = np.asarray(pullback(cotangent)[0])
-    assert np.isnan(literal_vjp[0])
-    assert literal_vjp[1] == 0.125
-
-    # A double-where guard is primal-identical and demonstrates the
-    # discriminating repair, but the production operation is intentionally not
-    # changed in this stopped/refuted experiment.
     def reverse_safe(value):
         positive = value > 0.0
-        return jnp.where(
-            positive,
-            jnp.sqrt(jnp.where(positive, value, 1.0)) / l_eps,
-            0.0,
-        )
+        safe = jnp.where(positive, value, 1.0)
+        return jnp.where(positive, jnp.sqrt(safe) / l_eps, 0.0)
 
-    _, safe_pullback = jax.vjp(reverse_safe, tke)
-    safe_vjp = np.asarray(safe_pullback(cotangent)[0])
-    np.testing.assert_array_equal(safe_vjp, np.asarray([0.0, 0.125]))
+    old_primal = np.asarray(jnp.sqrt(values) / l_eps)
+    new_primal = np.asarray(reverse_safe(values))
+    old_finite = np.isfinite(old_primal)
+    np.testing.assert_array_equal(
+        new_primal[old_finite].view(np.uint64),
+        old_primal[old_finite].view(np.uint64),
+    )
+
+    _, pullback = jax.vjp(reverse_safe, values)
+    vjp = np.asarray(pullback(jnp.ones_like(values))[0])
+    assert np.isfinite(vjp[1])
+    assert vjp[1] == 0.0
+
+    # Pin the exact running symbol, not a wrapper. Reverting the production
+    # guard to ``jnp.sqrt(tke_curr)`` must make this direct regression red.
+    source = inspect.getsource(tke_mod.tke_vertical_mixing)
+    assert "_dissl_sqrt_input = jnp.where(" in source
+    assert "jnp.sqrt(_dissl_sqrt_input)" in source
 
 
 def test_two_step_loss_overrides_no_inert_and_adjoint_fd():

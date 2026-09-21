@@ -3469,7 +3469,9 @@ def tke_vertical_mixing(
     if _matrix_eval == "nemo_literal":
         # Post-solve tke_avn overwrite, MY_SRC/zdftke.F90:832-837.  Keep the
         # source association: zsqen=SQRT(en), then dissl=zsqen/zmxld.
-        dissl_new = jnp.sqrt(tke_curr) / l_eps_final
+        _dissl_sqrt_input = jnp.where(tke_curr > 0.0, tke_curr, 1.0)
+        dissl_new = jnp.where(
+            tke_curr > 0.0, jnp.sqrt(_dissl_sqrt_input) / l_eps_final, 0.0)
     _statement_trace = None
     if return_statement_trace:
         if any(value is None for value in (
