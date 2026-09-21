@@ -180,20 +180,38 @@ The required separate read-only Codex review result is recorded verbatim
 below after the final diff review:
 
 ```text
-PENDING_REVIEW
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+EXIT=1
 ```
+
+Independent review was unavailable in-sandbox and emitted no `SHIP`, `HOLD`,
+or `DO NOT SHIP` verdict. The standing operator rule permits continuation in
+this case. Nothing scientific or production-facing is being landed; the
+result is a record stop.
 
 Citation-gate and shifted-citation-plant results:
 
 ```text
-PENDING_CITATION_GATE
+clean: PASS; 4 citations; 0 unmapped; 0 failures; 0 failing map entries
+shifted stp2d citation plant: FAIL as intended; exit 1
 ```
+
+The first clean attempt refused the post-wind anchor because its prefix occurs
+at three writer boundaries. The final map pins occurrence 3 at the actual
+line-228 endpoint; it does not weaken the anchor or widen the cited range.
 
 Focused CPU/x64 test summaries:
 
 ```text
-PENDING_TESTS
+81 passed in 2.76s
 ```
+
+The focused set covers the private live-operand hook contract, the admitted
+external-step parser, the external-step walk, the extended slow-forcing
+reader/registry/replay controls, every citation-gate unit control, and the
+full fidelity time-level unit file.
 
 ## Artifacts
 
@@ -206,6 +224,12 @@ PENDING_TESTS
 | `rhs_preflight.log` | `8b2f596fad6f9f21cdb5b52efdccd2b6cff2052dfc84e761dbd2453779487956` |
 | `rhs_layout_plant.log` | `6b45a1ab9bd6ba63f2b5552bb24c3956092c6dec24ac9c9a762ba0054c91581d` |
 | `rhs_acquisition_refusal.log` | `e858fc1137e60ec08c846e076595f8ab32e1ecba09a7be5e920fd36b88307c88` |
+| `citation_gate_final.json` | `5e3c4f6586fde0348227711ff4da21e354ad6264659525cdc600036eeb981288` |
+| `citation_gate_shifted_plant_final.json` | `a9effd55b20c455c9a92279e930c59a9c0e22325e28809fe6041e6d12a0952d5` |
+| `codex_review.log` | `3a9581859fa4443d6ea3767dcf85865a0c9734478edbe95f4a3fc1d59642cb16` |
+| `focused_tests.log` | `a5fb1f4b5f9128fc2cb52faae3a78ba0c9d3bf0bb0bdc7abe1b5ce130fb1ca27` |
+| `stp2d_round140.patch` | `d26262941a229b168e22c87c631f25fa7d2b65d61ad1426b376629ce64629a75` |
+| `run.sh` | `8f803a29fc96a8ea748a0114bde67f309d2ad5055932374fadb122c16648125f` |
 
 ## Decision-43/45 gate and campaign surfaces
 
