@@ -244,6 +244,7 @@ def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
     )
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
         gwd_carries_spectrum,
+        gwd_reads_conv_heating,
     )
     # Profile-prognostic convection counts as stateful (codex round 5):
     # the bridge reads phys_state.conv_prog_profile for ZM/KF/Emanuel/
@@ -259,6 +260,9 @@ def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
         or conv.is_profile_prognostic
         or conv.is_stochastic
         or gwd_carries_spectrum(config.gravity_wave_drag.scheme)
+        # The E3SM/CAM Beres convective source reads the lagged
+        # ``conv_heating`` carry; unthreaded it would launch nothing.
+        or gwd_reads_conv_heating(config.gravity_wave_drag)
     )
 
 

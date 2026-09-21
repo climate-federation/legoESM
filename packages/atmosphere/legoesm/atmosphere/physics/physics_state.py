@@ -197,6 +197,13 @@ class PhysicsState(NamedTuple):
     # pytree; byte-identical for runs that never read it).  Appended LAST
     # with a default so existing direct constructors are unaffected.
     conv_precip: jnp.ndarray = None
+    # CONVECTIVE heating rate [K/s], shape (ncol, nlev), written by the
+    # convection module each step and read one step LAGGED by the E3SM/CAM
+    # Beres convective gravity-wave source on the standalone (MPAS /
+    # hydrostatic factory) path — CAM's pbuf ``TTEND_DP`` analogue.  Same
+    # lagged-carry convention as ``conv_precip``; zeros for runs that never
+    # read it.  Appended LAST with a default.
+    conv_heating: jnp.ndarray = None
     # OPTIONAL per-step PRESCRIBED surface KINEMATIC fluxes, shape (ncol,), in
     # the same units and sign convention as ``SCMForcing.w_th_s`` / ``w_qv_s``:
     # ``surface_wth_override`` [K m/s] and ``surface_wqv_override``
@@ -424,6 +431,7 @@ def init_physics_state(
         # Lagged convective surface precip for the standalone-path Slingo-1987-inspired surrogate
         # cumulus cloud fraction; zeros before the first convection step.
         conv_precip=jnp.zeros((ncol,), dtype=dtype),
+        conv_heating=jnp.zeros((ncol, nlev), dtype=dtype),
     )
 
 
@@ -506,4 +514,5 @@ def update_physics_state(phys_state, updates):
         # carried forward unchanged when the step's convection published
         # nothing (schemes without a rain split).
         conv_precip=updates.get("conv_precip", phys_state.conv_precip),
+        conv_heating=updates.get("conv_heating", phys_state.conv_heating),
     )

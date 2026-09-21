@@ -303,7 +303,8 @@ class DiagnosticCollector:
         self.surface_stability_scheme = surface_stability_scheme
         self.tas_profile_scheme = (
             surface_bulk_scheme
-            if surface_bulk_scheme in ("most", "coare3", "large_yeager")
+            if surface_bulk_scheme in ("most", "coare3", "large_yeager",
+                                       "large_yeager_cesm")
             else "coare3"
         )
         # Vertical coordinate object (``SigmaCoordinate`` or
@@ -758,6 +759,14 @@ class DiagnosticCollector:
         # large_yeager or grachev/gryanik run otherwise published a
         # coare3-native-default tas).  The 2 m value is set by stability, so
         # gustiness is left scheme-native here (pre-existing choice).
+        if self.tas_profile_scheme == "large_yeager_cesm":
+            # CESM shr_flux_atmOcn's own ``tref`` diagnostic (2 m).
+            from legoesm.core.bulk_flux import compute_sam_oceflx_fluxes
+            *_, T_2m = compute_sam_oceflx_fluxes(
+                u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+                z_bot=10.0, variant="cesm", return_2m=True,
+            )
+            return T_2m
         *_, T_2m = compute_most_fluxes(
             u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
             scheme=self.tas_profile_scheme, return_2m=True,

@@ -704,7 +704,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # run_coupled so AMIP can run with the SAME tuned slab parameters. Defaults
     # (constant / 0 / None / off) keep the prior AMIP behaviour byte-identical.
     parser.add_argument("--surface-bulk-scheme", type=str, default="constant",
-                        choices=["constant", "coare3", "large_yeager"],
+                        choices=["constant", "coare3", "large_yeager",
+                                 "large_yeager_cesm"],
                         help="Surface-layer bulk-flux scheme (coare3 = COARE 3.0 "
                              "MOST with convective gustiness; the tuned slab value). "
                              "Matches ExperimentConfig.validate_strict — 'most' is "
@@ -1608,10 +1609,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Hines saturation momentum-flux cap [Pa] "
                              "(default 0.1).")
     parser.add_argument("--e3sm-cam-source", type=str, default=None,
-                        choices=["orographic", "frontal", "convective",
-                                 "background"],
                         dest="e3sm_cam_source",
-                        help="E3SM CAM gravity-wave source spectrum.")
+                        help="E3SM CAM gravity-wave source: orographic | "
+                             "frontal | convective | background, or a "
+                             "'+'-joined set (CAM6 f09: "
+                             "orographic+frontal+convective). Validated by "
+                             "ExperimentConfig.validate_strict.")
+    parser.add_argument("--e3sm-cam-effgw-cm", type=float, default=None,
+                        dest="e3sm_cam_effgw_cm",
+                        help="Frontal-source efficiency (CAM effgw_cm; CAM6 "
+                             "f09 1.0). Default None = --e3sm-cam-effgw.")
+    parser.add_argument("--e3sm-cam-effgw-beres", type=float, default=None,
+                        dest="e3sm_cam_effgw_beres",
+                        help="Beres convective-source efficiency (CAM "
+                             "effgw_beres_dp; CAM6 f09 0.4). Default None = "
+                             "--e3sm-cam-effgw.")
+    parser.add_argument("--e3sm-cam-beres-variant", type=str, default=None,
+                        choices=["e3sm", "cam6"],
+                        dest="e3sm_cam_beres_variant",
+                        help="Beres source kernel oracle: e3sm (default) or "
+                             "cam6 (gw_convect.F90: end-off spectrum shift, "
+                             "real storm speed, interface source level).")
+    parser.add_argument("--e3sm-cam-dttke-intrinsic",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        dest="e3sm_cam_dttke_intrinsic",
+                        help="Spectral GW heating form: intrinsic-frequency "
+                             "sum (c-u)*gwut (CAM6 gw_common.F90:690) vs the "
+                             "E3SM-3.0.1 ground-relative sum c*gwut (default).")
+    parser.add_argument("--e3sm-cam-mfcc-table", type=str, default=None,
+                        dest="e3sm_cam_mfcc_table_path",
+                        help="Offline Beres lookup table netcdf (CAM "
+                             "gw_drag_file, newmfspectra40_dc25.nc). Unset = "
+                             "the documented analytic stand-in spectrum.")
     parser.add_argument("--e3sm-cam-pgwv", type=int, default=None,
                         dest="e3sm_cam_pgwv",
                         help="Number of gravity-wave phase-speed bins.")
@@ -2281,6 +2310,24 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.e3sm_cam_latitude_taper
             if args.e3sm_cam_latitude_taper is not None
             else _EXPERIMENT_DEFAULTS.e3sm_cam_latitude_taper),
+        e3sm_cam_effgw_cm=(args.e3sm_cam_effgw_cm
+                           if args.e3sm_cam_effgw_cm is not None
+                           else _EXPERIMENT_DEFAULTS.e3sm_cam_effgw_cm),
+        e3sm_cam_effgw_beres=(args.e3sm_cam_effgw_beres
+                              if args.e3sm_cam_effgw_beres is not None
+                              else _EXPERIMENT_DEFAULTS.e3sm_cam_effgw_beres),
+        e3sm_cam_beres_variant=(
+            args.e3sm_cam_beres_variant
+            if args.e3sm_cam_beres_variant is not None
+            else _EXPERIMENT_DEFAULTS.e3sm_cam_beres_variant),
+        e3sm_cam_mfcc_table_path=(
+            args.e3sm_cam_mfcc_table_path
+            if args.e3sm_cam_mfcc_table_path is not None
+            else _EXPERIMENT_DEFAULTS.e3sm_cam_mfcc_table_path),
+        e3sm_cam_dttke_intrinsic=(
+            args.e3sm_cam_dttke_intrinsic
+            if args.e3sm_cam_dttke_intrinsic is not None
+            else _EXPERIMENT_DEFAULTS.e3sm_cam_dttke_intrinsic),
         mcfarlane_tau_max=(
             args.mcfarlane_tau_max if args.mcfarlane_tau_max is not None
             else _EXPERIMENT_DEFAULTS.mcfarlane_tau_max),

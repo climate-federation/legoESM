@@ -847,6 +847,18 @@ def _make_hydrostatic_convection(
                                      "conv_precip": _p_conv_diag}
                 else:
                     conv_prog_out = {"conv_precip": _p_conv_diag}
+            # Publish the TOTAL convective heating [K/s] (ncol, nlev) into the
+            # ``PhysicsState.conv_heating`` lag carry: the E3SM/CAM Beres
+            # convective gravity-wave source reads it next step (CAM feeds
+            # deep-only TTEND_DP; documented departure, see e3sm_cam_gwd).
+            _heat = conv_out.dT_dt.reshape(ncol, nlev)
+            if isinstance(conv_prog_out, dict):
+                conv_prog_out = {**conv_prog_out, "conv_heating": _heat}
+            elif conv_prog_out is not None:
+                conv_prog_out = {"conv_prog_profile": conv_prog_out,
+                                 "conv_heating": _heat}
+            else:
+                conv_prog_out = {"conv_heating": _heat}
 
         # Convective momentum transport (CMT): use the scheme's optional
         # ``du_dt_conv``/``dv_dt_conv`` when present (Zhang-McFarlane,
