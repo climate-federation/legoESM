@@ -852,6 +852,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "only adds planetary albedo (amip_production.yaml A/B: "
                              "OFF 0.295 vs ON 0.370).")
     parser.add_argument("--held-suarez-forcing", action="store_true", default=False)
+    parser.add_argument(
+        "--fv3-duo-windows", type=int, default=None, metavar="KT",
+        help=("fv3_duo window SPMD: split every face into KT x KT windows, one "
+              "per device (6*KT*KT ranks, --distributed --distributed-mode "
+              "spmd). Explicit only; the device count must match exactly. "
+              "Requires --fv3-duo-window-pad. Default: the face layout."))
+    parser.add_argument(
+        "--fv3-duo-window-pad", type=int, default=None, metavar="PAD",
+        help=("Window halo width for --fv3-duo-windows (a measured per-deck "
+              "value, e.g. 11 at C48 with 3 acoustic substeps; no default)."))
     parser.add_argument("--allow-disabled-physics", action="store_true",
                         default=False,
                         help="Permit a parameterization slot set to 'none' (an "
@@ -1827,6 +1837,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     dycore_config = DycoreConfig(
         discretization=args.discretization,
         dt=args.dt,
+        fv3_duo_windows=args.fv3_duo_windows,
+        fv3_duo_window_pad=args.fv3_duo_window_pad,
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
         k_h_scale=args.k_h_scale,

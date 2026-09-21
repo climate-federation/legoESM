@@ -410,6 +410,22 @@ class TestComponentFactoryDispatch:
             create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                      create_sigma_coordinate(KM))
 
+    def test_window_layout_refuses_wrong_device_count(self):
+        """--fv3-duo-windows KT needs EXACTLY 6*KT*KT devices; this test
+        process has far fewer, so the factory must refuse and NAME the
+        required count (no auto-fallback to the face layout)."""
+        import jax
+        from legoesm.driver.component_factory import create_atmosphere_dycore
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        cfg = _fv3_duo_config()
+        cfg = cfg._replace(dycore=cfg.dycore._replace(
+            fv3_duo_windows=2, fv3_duo_window_pad=5))
+        assert jax.local_device_count() != 24
+        with pytest.raises(ValueError, match="needs exactly 24"):
+            create_atmosphere_dycore(cfg, create_cubed_sphere(N),
+                                     create_sigma_coordinate(KM))
+
     def test_held_suarez_hydrostatic_constructs(self):
         """hydro + held_suarez_forcing passes the wall AND the specific
         guards, and the constructed grid carries the ext bundle
@@ -977,7 +993,7 @@ def test_wall_default_surface_is_frozen():
 
 # ponytail: filled by the first CI run's failure message; the VALUE is
 # the reviewable artifact, the mechanism is above.
-_WALL_SURFACE_SHA256 = "7fb1bc3750cdf11d0ba437879c131a1b1edb8db5fa70550b9bec0caece2efb49"
+_WALL_SURFACE_SHA256 = "0689caad23886cc4e58e97e8bef32ba089abeb2c6d0c1b777b674847a79a2dff"
 
 
 def test_wall_leaf_types_are_scalar():

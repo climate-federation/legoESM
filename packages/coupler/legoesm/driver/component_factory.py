@@ -300,6 +300,7 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # guard above refuses every other mode). The three engineering knobs
     # it selects are dual-reviewed and parity-gated (PR #1656).
     "distributed", "distributed_mode",
+    "dycore.fv3_duo_windows", "dycore.fv3_duo_window_pad",
     # Output cadence + destination -- the OutputConfig fields the lane's
     # snapshot + checkpoint writers read (checkpoint_days: slice-2
     # restart, the shared cube/MPAS cadence field -> fv3duo_ckpt_v1).
@@ -913,6 +914,31 @@ def create_atmosphere_dycore(
         # unit-tested in test_fv3_duo_layout_policy.
         multiprocess = config.distributed
         devs = jax.devices() if multiprocess else jax.local_devices()
+        kt = config.dycore.fv3_duo_windows
+        if kt is not None:
+            # EXPLICIT window SPMD (M6 in the driver): 6*kt*kt devices, one
+            # window each, on a (face, tile_i, tile_j) mesh.  No auto-
+            # selection and no tolerance on the count: a mismatch is a
+            # mis-built launch, refused (user call 2026-09-21).
+            pad = config.dycore.fv3_duo_window_pad
+            need = 6 * kt * kt
+            if len(devs) != need:
+                raise ValueError(
+                    f"fv3_duo_windows={kt} needs exactly {need} "
+                    f"{'global' if multiprocess else 'local'} devices "
+                    f"(6*kt*kt, one window each); found {len(devs)}. Launch "
+                    f"{need} ranks with --distributed --distributed-mode "
+                    f"spmd, or drop --fv3-duo-windows for the face layout.")
+            mesh = Mesh(np.array(devs).reshape(6, kt, kt),
+                        ("face", "tile_i", "tile_j"))
+            logger.info(
+                "  fv3_duo layout: WINDOW-sharded, kt=%d pad=%d over %d %s "
+                "device(s) (one window each) + face-batched%s", kt, pad,
+                len(devs), "global" if multiprocess else "local",
+                " [multi-process SPMD]" if multiprocess else "")
+            return FV3DuoDynamicsModel(
+                bundle, cfg, step_spmd_mesh=mesh, step_windows=(kt, pad),
+                step_face_batched=True)
         layout = resolve_fv3_duo_layout(
             world=max(jax.process_count(), launcher_world_size()),
             n_local=jax.local_device_count(),

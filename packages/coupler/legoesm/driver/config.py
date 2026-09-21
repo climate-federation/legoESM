@@ -274,6 +274,13 @@ class DycoreConfig(NamedTuple):
     # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION by existing
     # callers, not full tuple ABI (exact unpacking / len() still break).
     mpas_vert_advection_scheme: str = "upwind"
+    # FV3 duo window SPMD (M6): split every face into kt x kt windows, one
+    # per device (6*kt*kt ranks).  Both EXPLICIT, no auto-selection and no
+    # default pad: the pad is a measured, per-deck halo width (11 at C48
+    # with 3 acoustic substeps), not a formula, so it must appear in the
+    # run's config (user call 2026-09-21).  None = the face layout.
+    fv3_duo_windows: int | None = None
+    fv3_duo_window_pad: int | None = None
 
 
 class EvaluationConfig(NamedTuple):
@@ -1587,6 +1594,27 @@ class ExperimentConfig(NamedTuple):
                 "silently ignore it.")
         if d.dt <= 0:
             errors.append(f"dycore.dt must be > 0, got {d.dt}")
+        if d.fv3_duo_windows is not None:
+            if d.discretization != "fv3_duo":
+                errors.append(
+                    "dycore.fv3_duo_windows is only meaningful with "
+                    f"dycore.discretization='fv3_duo', got {d.discretization!r}")
+            if not isinstance(d.fv3_duo_windows, int) or d.fv3_duo_windows < 2:
+                errors.append(
+                    "dycore.fv3_duo_windows must be an int >= 2 (kt, for "
+                    f"6*kt*kt ranks), got {d.fv3_duo_windows!r}")
+            if d.fv3_duo_window_pad is None:
+                errors.append(
+                    "dycore.fv3_duo_window_pad is REQUIRED with "
+                    "dycore.fv3_duo_windows (the pad is a measured per-deck "
+                    "halo width, never defaulted)")
+            elif not isinstance(d.fv3_duo_window_pad, int) or d.fv3_duo_window_pad < 1:
+                errors.append(
+                    "dycore.fv3_duo_window_pad must be an int >= 1, got "
+                    f"{d.fv3_duo_window_pad!r}")
+        elif d.fv3_duo_window_pad is not None:
+            errors.append(
+                "dycore.fv3_duo_window_pad given without dycore.fv3_duo_windows")
         if d.hyperdiff_scale < 0:
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:

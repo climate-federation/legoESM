@@ -3799,3 +3799,61 @@ def test_sub_daily_diag_days_round_trips_and_never_disables_the_check():
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_default.output.diag_days == pytest.approx(5.0)
+
+
+_FV3_DUO_ARGV = ["--dataset", "analytical", "--grid-type", "cubed_sphere",
+                 "--discretization", "fv3_duo", "--resolution", "12",
+                 "--nlev", "5", "--precision", "fp64",
+                 "--radiation", "none", "--convection", "none",
+                 "--microphysics", "none", "--turbulence", "none",
+                 "--gravity-wave-drag", "none", "--allow-disabled-physics"]
+
+
+def _fv3_duo_cfg(extra):
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(_FV3_DUO_ARGV + extra), parser)
+    return build_config_from_args(args)
+
+
+def test_fv3_duo_windows_flags_round_trip_and_validate():
+    """--fv3-duo-windows KT + --fv3-duo-window-pad PAD reach DycoreConfig
+    and pass validate_strict together; the defaults are None (face
+    layout), so an unset pair changes nothing."""
+    cfg = _fv3_duo_cfg([])
+    assert cfg.dycore.fv3_duo_windows is None
+    assert cfg.dycore.fv3_duo_window_pad is None
+    cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2", "--fv3-duo-window-pad", "5"])
+    assert cfg.dycore.fv3_duo_windows == 2
+    assert cfg.dycore.fv3_duo_window_pad == 5
+    cfg.validate_strict()
+
+
+def test_fv3_duo_windows_without_pad_is_refused():
+    """The pad is a measured per-deck halo width, never defaulted."""
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2"])
+    with pytest.raises(ValueError, match="fv3_duo_window_pad is REQUIRED"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_window_pad_without_windows_is_refused():
+    cfg = _fv3_duo_cfg(["--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="without dycore.fv3_duo_windows"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_windows_below_two_is_refused():
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "1", "--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="int >= 2"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_windows_on_another_discretization_is_refused():
+    parser = build_arg_parser()
+    argv = [a if a != "fv3_duo" else "cdgrid" for a in _FV3_DUO_ARGV]
+    args = _postprocess_args(parser.parse_args(
+        argv + ["--fv3-duo-windows", "2", "--fv3-duo-window-pad", "5"]),
+        parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises(ValueError, match="only meaningful with"):
+        cfg.validate_strict()

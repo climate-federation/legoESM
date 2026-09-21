@@ -44,10 +44,15 @@ export JAX_CPU_COLLECTIVES_IMPLEMENTATION=${COLL:-gloo}
 LAUNCH="$WT/scripts/cluster/fv3_native/bind_rank.sh"
 
 N=${N:-12}; NLEV=${NLEV:-5}; DAYS=${DAYS:-1}; DT=${DT:-600}
+# KT unset: arm B is the 6-rank FACE layout.  KT=k (with PAD): arm B is the
+# 6*k*k-rank WINDOW layout (--fv3-duo-windows); submit with matching
+# --ntasks, e.g. --nodes=4 --ntasks=24 --ntasks-per-node=6 --export=ALL,KT=2,PAD=5,N=24
+KT=${KT:-}; PAD=${PAD:-}
+WINFLAGS=""; [ -n "$KT" ] && WINFLAGS="--fv3-duo-windows $KT --fv3-duo-window-pad $PAD"
 REL_PEAK_MAX=${REL_PEAK_MAX:-1e-11}
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/duo_hs_mp_parity_$SLURM_JOB_ID
 mkdir -p "$OUT"
-echo "sha $(git rev-parse --short HEAD) dirty $(git status --porcelain | wc -l)  nodes $SLURM_JOB_NODELIST  C$N nlev=$NLEV days=$DAYS dt=$DT"
+echo "sha $(git rev-parse --short HEAD) dirty $(git status --porcelain | wc -l)  nodes $SLURM_JOB_NODELIST  C$N nlev=$NLEV days=$DAYS dt=$DT  arm B: ${SLURM_NTASKS} ranks ${WINFLAGS:-face layout}"
 
 COMMON=(scripts/run/run_amip.py --dataset analytical --grid-type cubed_sphere
         --discretization fv3_duo --resolution "$N" --nlev "$NLEV" --precision fp64
@@ -60,9 +65,9 @@ srun -N 1 -n 1 --mpi=pmix "$PY" "${COMMON[@]}" --output "$OUT/serial" > "$OUT/se
 RC_A=$?
 echo "arm A rc=$RC_A  $(grep -vE "cuda|jax_plugins|xla_bridge|versions_helpers|for d in range|_check_cuda|plugin_module" "$OUT/serial.log" | grep -cE 'Error') non-CUDA-noise error lines"
 
-echo "===== arm B: 6 processes (JAX HS twin) ====="
-srun -N 2 -n 6 --ntasks-per-node=3 --mpi=pmix --kill-on-bad-exit=0 $LAUNCH "$PY" "${COMMON[@]}" \
-  --distributed --distributed-mode spmd --output "$OUT/mp6" > "$OUT/mp6.log" 2>&1
+echo "===== arm B: $SLURM_NTASKS processes (JAX HS twin${KT:+, windows kt=$KT pad=$PAD}) ====="
+srun -N "$SLURM_JOB_NUM_NODES" -n "$SLURM_NTASKS" --mpi=pmix --kill-on-bad-exit=0 $LAUNCH "$PY" "${COMMON[@]}" \
+  --distributed --distributed-mode spmd $WINFLAGS --output "$OUT/mp6" > "$OUT/mp6.log" 2>&1
 RC_B=$?
 echo "arm B rc=$RC_B  $(grep -vE "cuda|jax_plugins|xla_bridge|versions_helpers|for d in range|_check_cuda|plugin_module" "$OUT/mp6.log" | grep -cE 'Error') non-CUDA-noise error lines"
 grep -m1 -E "process_count|multi-process|_fv3_duo_apply_held_suarez_jax|NotImplementedError" "$OUT/mp6.log" || true
