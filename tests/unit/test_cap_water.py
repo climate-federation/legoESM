@@ -69,3 +69,25 @@ def test_on_cells_is_periodic_in_longitude():
     v = cw.on_cells(d, np.array([70.0, 70.0]), np.array([359.0, 271.0]))
     assert v[0] == 0.0                                      # 359 is nearest to the 0-degree column, not 270
     assert v[1] == 3.0
+
+
+
+def test_load_state_layer_thickness_closes_the_column(tmp_path, monkeypatch):
+    """dp sums to p_s - p_top, so the column-water storage term spans the whole column."""
+    import json
+    import numpy as np
+    (tmp_path / "r").mkdir()
+    vg = np.array([[200.0 / 1e5 * 1.0, 0.0, 0.0, 0.0], [0.0, 0.3, 0.7, 1.0]])   # p_top = 200 Pa * p_ref/1e5
+    np.savez(tmp_path / "r" / "checkpoint_day_0015.npz", T=np.full((4, 3), 250.0),
+             p_s=np.array([1e5, 9e4, 1e5, 9.5e4]), trc_q_v=np.full((4, 3), 1e-3),
+             meta_vgrid=vg, day=np.array(15.0))
+    json.dump({}, open(tmp_path / "r" / "experiment_config.json", "w"))
+    lat = np.array([80.0, 76.0, 70.0, 60.0]); lon = np.zeros(4); area = np.ones(4)
+    monkeypatch.setattr(cw.rb, "ROOT", str(tmp_path))
+    monkeypatch.setattr(cw.cl, "mesh_coords", lambda exp: (lat, lon, area))
+    monkeypatch.setattr(cw.cl, "cell_order", lambda z, n: np.arange(n))
+    st = cw.load_state("r", 15)[0]
+    from legoesm import constants
+    p_top = vg[0][0] * constants.p_ref
+    assert np.allclose(st["dp"].sum(axis=1), st["p_s"] - p_top)
+    assert np.all(st["dp"] > 0)

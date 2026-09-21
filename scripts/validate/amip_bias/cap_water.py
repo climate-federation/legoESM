@@ -40,6 +40,8 @@ import sys
 
 import numpy as np
 
+from legoesm.diagnostics.column_integrals import column_water_vapor
+
 _VAL = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(_VAL))
 _spec = importlib.util.spec_from_file_location("cloud_layers", _VAL / "cloud_layers.py")
@@ -147,6 +149,7 @@ def load_state(run, day):
     if not np.all(np.diff(p_half, axis=1) > 0):
         raise SystemExit(f"FATAL: {run} day {day}: pressure not increasing top-down")
     st["p_full"] = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    st["dp"] = np.diff(p_half, axis=1)
     for k in ("T", "trc_q_v"):
         if not np.isfinite(st[k]).all() or st[k].shape != st["p_full"].shape:
             raise SystemExit(f"FATAL: {run} day {day}: bad {k}")
@@ -221,7 +224,7 @@ def loop(args):
     print("dome = p_s anomaly (model - ERA5, flat ocean cells) 85-90N minus 70-80N; "
           "dome_edge = minus 60-70N (few flat ocean cells there: Nordic/Barents seas only)")
     print(f"{'run:day':>14s} {'dome[hPa]':>10s} {'edge[hPa]':>10s} {'q925/ERA5':>10s} {'RH925':>6s} "
-          f"{'dT925[K]':>10s} {'u850 70-90N':>12s} {'ERA5 u850':>10s}")
+          f"{'dT925[K]':>10s} {'u850 70-90N':>12s} {'ERA5 u850':>10s} {'prw>=72.5N':>11s} {'prw>=75N':>9s}")
     cache, meshes = {}, {}
     for spec in args.specs:
         run, day = spec.split(":")
@@ -265,8 +268,10 @@ def loop(args):
         u, uref, kept_u = paired_area_mean(u850, ue850, area, lat >= 70)
         dk = tuple(area[(lat >= lo) & (lat < hi) & flat].sum() / area[(lat >= lo) & (lat < hi)].sum()
                    for lo, hi in ((85, 90), (70, 80), (60, 70)))
+        prw = np.asarray(column_water_vapor(st["trc_q_v"], st["p_s"], None, dp=st["dp"]), dtype=np.float64)
+        prw725, prw75 = area_mean(prw, area, lat >= 72.5), area_mean(prw, area, cap)
         print(f"{spec:>14s} {dome:+10.1f} {dome_edge:+10.1f} {qm/qek:10.2f} {rh:6.2f} {tm-tek:+10.1f} {u:+12.1f} "
-              f"{uref:+10.1f} (area kept: 925 hPa {kept:.2f}, wind {kept_u:.2f}, dome cells "
+              f"{uref:+10.1f} {prw725:11.2f} {prw75:9.2f} (area kept: 925 hPa {kept:.2f}, wind {kept_u:.2f}, dome cells "
               f"{dk[0]:.2f}/{dk[1]:.2f}/{dk[2]:.2f})")
     return 0
 
