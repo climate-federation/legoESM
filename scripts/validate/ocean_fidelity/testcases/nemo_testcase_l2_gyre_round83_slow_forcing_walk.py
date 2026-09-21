@@ -1976,7 +1976,19 @@ def measure_round144_wind_operands(args) -> dict[str, object]:
     def row(producer, boundary: str, face: str) -> dict:
         native = (native_u(producer[f"{boundary}_{face}"])
                   if face == "u" else native_v(producer[f"{boundary}_{face}"]))
-        return comparison(native, split[f"{boundary}_{face}"], active2[face])
+        reference = np.asarray(split[f"{boundary}_{face}"])
+        active_face = np.asarray(active2[face], dtype=bool)
+        result = comparison(native, reference, active_face)
+        absolute = np.abs(np.asarray(native) - reference)
+        selected = absolute[active_face]
+        result["absolute_rms"] = float(np.sqrt(np.mean(selected * selected)))
+        different = (
+            np.asarray(native).view(np.uint64) != reference.view(np.uint64))
+        locations = np.argwhere(active_face & different)
+        result["first_unequal_index"] = (
+            [int(index) for index in locations[0]]
+            if locations.size else None)
+        return result
 
     rows = {
         f"{arm}_{boundary}_{face}": row(producer, boundary, face)
