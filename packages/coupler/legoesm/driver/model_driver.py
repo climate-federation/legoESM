@@ -7769,10 +7769,10 @@ class ModelDriver:
         tmp + os.replace).
 
         Refusals that REMAIN (each loud, none silent): no MPI, no
-        HELD-SUAREZ under multi-process SPMD (dry dynamics only there —
-        the HS step is single-process-only, see the guard above), no
-        ensemble.  Single- AND multi-process face SPMD (dry dynamics)
-        are both supported via --distributed-mode spmd; multi-process
+        ensemble.  Single- AND multi-process face SPMD are both supported
+        via --distributed-mode spmd, dry or with Held-Suarez (the
+        multi-process HS step is the face-stacked JAX twin, see
+        ``_fv3_duo_apply_held_suarez``); multi-process
         checkpoint/snapshot I/O goes through
         ``_fv3_duo_reshard_bundle_global`` / the gather-then-root-write
         helpers, not the single-process ``np.asarray`` path directly.
@@ -7822,23 +7822,6 @@ class ModelDriver:
                 "--distributed-mode spmd); MPI mode is not wired for "
                 "this lane. Launch one process, or pass "
                 "--distributed-mode spmd.")
-        if self._is_spmd_multiprocess() and cfg.held_suarez_forcing:
-            # _fv3_duo_apply_held_suarez round-trips the bundle through
-            # per-process NumPy (state_3d_to_numpy / np.asarray on each
-            # leaf), which is correct only when every leaf is fully
-            # host-addressable -- true single-process (all shards
-            # local), false under multi-process SPMD where each rank is
-            # addressable for only its own face shards (codex BLOCKER,
-            # mp-driver-io design review 2026-08-27). Multi-process SPMD
-            # runs dry dynamics only until that path is designed.
-            raise NotImplementedError(
-                "fv3_duo multi-process SPMD does not support "
-                "held_suarez_forcing: the certified 3-pass HS step is "
-                "single-process-only (it np.asarray's per-face leaves "
-                "of the bundle, which are not fully host-addressable "
-                "under multi-process SPMD). Run dry "
-                "(held_suarez_forcing=False), or drop --distributed for "
-                "a single-process HS run.")
         if cfg.distributed and cfg.distributed_mode != "spmd":
             raise NotImplementedError(
                 "fv3_duo distributed runs are SPMD-only "
@@ -7945,6 +7928,13 @@ class ModelDriver:
     def _fv3_duo_apply_held_suarez(self, bundle: dict, dt: float) -> dict:
         """One certified Held-Suarez physics step on the duo bundle.
 
+        Multi-process SPMD dispatches to :meth:`_fv3_duo_apply_held_suarez_jax`
+        (the face-stacked pure-JAX twin, pinned to this NumPy path at 1e-11
+        in ``test_fv3_physics_coupling``): the per-face leaves of a
+        multi-process bundle are not host-addressable, so the NumPy
+        round-trip below cannot run there.  Single-process keeps this
+        path byte-identical (user call 2026-09-21: one variable moves).
+
         Thin adapter only — ALL numerics live in
         ``apply_held_suarez_step`` (the 3-pass orchestration gated at
         1.7645e-8 vs the Fortran oracle).  That function wants the
@@ -7972,6 +7962,8 @@ class ModelDriver:
         exchange), so the lane's "NO loop state" restart invariant
         survives.
         """
+        if self._is_spmd_multiprocess():
+            return self._fv3_duo_apply_held_suarez_jax(bundle, dt)
         from legoesm.core.fv3_cgrid_phase_3d import state_3d_to_numpy
         from legoesm.core.fv3_native_physics_coupling import (
             apply_held_suarez_step,
@@ -7996,6 +7988,39 @@ class ModelDriver:
         for nm in ("u", "v", "pt"):  # the ONLY fields HS mutates
             new_state[nm] = jnp.asarray(
                 np.stack([face[nm] for face in state_np]))
+        return {**bundle, "state": new_state}
+
+    def _fv3_duo_apply_held_suarez_jax(self, bundle: dict, dt: float) -> dict:
+        """Face-stacked JAX Held-Suarez step for the multi-process lane.
+
+        Jitted once per driver (metrics and halo tables are trace-time
+        constants); the three moved leaves are pinned to the step's face
+        sharding so the loop does not decay to replicated arrays.
+        """
+        from legoesm.core.fv3_native_physics_coupling import (
+            apply_held_suarez_step_sixface_jax, stack_held_suarez_metrics,
+        )
+        fn = getattr(self, "_fv3_duo_hs_jax_fn", None)
+        if fn is None:
+            grid = self.model.grid
+            n, ng, km = grid.n, grid.ng, self.model.config.km
+            tab = self.model.sixface_halo_tables
+            amat6, lat6, wv6 = stack_held_suarez_metrics(grid.ctx_np)
+            sh = self.model.step_out_shardings
+
+            def _hs(state, press, dt):
+                out = apply_held_suarez_step_sixface_jax(
+                    state, press, tab, amat6, lat6, wv6, dt=dt, n=n, ng=ng,
+                    km=km, strat=True)
+                if sh is not None:
+                    for nm in ("u", "v", "pt"):
+                        out[nm] = jax.lax.with_sharding_constraint(out[nm],
+                                                                   sh)
+                return out
+            fn = jax.jit(_hs)
+            self._fv3_duo_hs_jax_fn = fn
+        press = {nm: bundle["press"][nm] for nm in ("pe", "peln", "pkz")}
+        new_state = fn(bundle["state"], press, float(dt))
         return {**bundle, "state": new_state}
 
     def _fv3_duo_reshard_bundle_global(self, bundle: dict) -> dict:

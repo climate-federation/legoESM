@@ -336,6 +336,12 @@ def pin_local_gpu(local_rank: int, n_local: int | None) -> str | None:
     oversubscribed = (n_local > len(visible) if n_local is not None
                       else local_rank >= len(visible))
     if oversubscribed:
+        if _non_gpu_platform_selected():
+            # More ranks than GPUs, but the run selected a non-GPU platform
+            # (JAX_PLATFORMS=cpu on a GPU node): no CUDA backend will ever be
+            # created, so there is nothing to pin and nothing to refuse
+            # (measured: the six-process CPU duo parity died here, job 9902131).
+            return None
         if os.environ.get("LEGOESM_ALLOW_SHARED_GPU") == "1":
             # Deliberate oversubscription (MPS): spread round-robin instead of
             # refusing.  Without this the flag would be a lie — it gated only
@@ -770,6 +776,7 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     node_fps = [f for h, f in comm.allgather((hosts[rank], fingerprint))
                 if h == hosts[rank]]
     if (pin_err is None and _host_visible_gpus()
+            and not _non_gpu_platform_selected()
             and os.environ.get("LEGOESM_ALLOW_SHARED_GPU") != "1"
             and node_fps.count(fingerprint) > 1):
         pin_err = (
