@@ -2015,8 +2015,7 @@ def _nemo_ws_rk3_tracer_pair_step(
             h_one_half, h_one_third, 1)
     if stop_after_stage == 2:
         return a2, b2
-    fd2_a, fd2_b, _, _, fct_activity = _flux_pair(
-        a2, b2, dt, 2, h_k_new)
+    fd2_a, fd2_b, _, _, fct_activity = _flux_pair(a2, b2, dt, 2, h_k_new)
     advection_content_a = h_k_old * tr_a - dt * fd2_a
     advection_content_b = h_k_old * tr_b - dt * fd2_b
     if stage3_advection_content_override is not None:

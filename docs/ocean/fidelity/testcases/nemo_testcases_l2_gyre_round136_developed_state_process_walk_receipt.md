@@ -105,13 +105,13 @@ Shortwave and lateral diffusion are accumulated and recorded at
 
 The compiled stage program saves the external-mode after SSH as `ssha` and
 passes it to `dom_qco_r3c_RK3` at
-`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:145-193`.
+`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:150-180`.
 Inside that compiled routine the T-point statement is
 `pr3t = pssh * r1_ht_0` at
-`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/domqco.f90:237-258`.
+`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/domqco.f90:237-257`.
 Stage 2 constructs the half-step ratio from entry plus after, and stage 3
 places the full `r3ta` in `Kaa`, at
-`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:218-258`.
+`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:223-255`.
 
 Those statements explain the measured layout: exact `q_Kbb`, non-bit
 `q_Kaa`, and a half-sized non-bit `q_Kmm`. They do **not** prove the multiply
@@ -140,9 +140,9 @@ cells. These operators execute later, so overlap is **not causal attribution**.
 | TKE floors | diffusivity only: 9,973 interfaces / 10,731 projected cells; viscosity and energy unmeasured | diffusivity 9,973, viscosity 9,973, post-solve energy 15,058 interfaces; union 16,025 projected cells | NEMO partial 10,717 (59.6217%); legoESM union 16,001 (89.0181%) |
 
 The compiled FCT routine computes its beta branches at
-`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90:849-878` and applies
+`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90:849-876` and applies
 the sign-selected `MIN(1, beta...)` coefficients at
-`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90:886-931`.
+`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90:905-931`.
 Because its coefficients were not recorded, the table deliberately labels
 NEMO FCT activity unmeasured rather than treating the model's 502-cell map as
 NEMO evidence.
