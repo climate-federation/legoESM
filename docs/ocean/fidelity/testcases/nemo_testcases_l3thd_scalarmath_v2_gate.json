@@ -1,0 +1,376 @@
+{
+  "arch": {
+    "fcflags": "-fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer -ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize",
+    "paths": {
+      "A": "/data/abyssal/dbalwada/nemo-testcases-l3/nemo502_si3bulk_scalarmath_a_src/arch/arch-conda-scalarmath.fcm",
+      "B": "/data/abyssal/dbalwada/nemo-testcases-l3/nemo502_si3bulk_scalarmath_b_src/arch/arch-conda-scalarmath.fcm",
+      "shipped": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/arch/arch-conda-scalarmath.fcm"
+    },
+    "sha256": {
+      "A": "132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561",
+      "B": "132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561",
+      "shipped": "132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561"
+    }
+  },
+  "build": {
+    "binaries": {
+      "A": {
+        "path": "/data/abyssal/dbalwada/nemo-testcases-l3/nemo502_si3bulk_scalarmath_a_src/cfgs/C1D_OMIP_L3_SM/BLD/bin/nemo.exe",
+        "sha256": "1bb0f4c8f844b8d5755c623c18b076cda1929a5f75ab5d56e1edcc1ee10defe4",
+        "zgv_symbols": []
+      },
+      "B": {
+        "path": "/data/abyssal/dbalwada/nemo-testcases-l3/nemo502_si3bulk_scalarmath_b_src/cfgs/C1D_OMIP_L3_SM/BLD/bin/nemo.exe",
+        "sha256": "b52e289890126ec436d245b0e8dd80ccccf4c8c4a08fc4bb55077ad4bb307289",
+        "zgv_symbols": []
+      }
+    },
+    "command": "makenemo -n C1D_OMIP_L3_SM -d 'OCE SAS ICE' -m conda-scalarmath -j 8 -y",
+    "run": "CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 ./nemo.exe; no mpirun"
+  },
+  "comparisons": {
+    "C1D_SASICE_00008760_restart.nc": {
+      "bytes": 1176,
+      "first_difference": null,
+      "kind": "restart",
+      "transcendental_owner": null,
+      "v1_sha256": "84ed40c5e5d46f9830f4c203b3e3a79f6dfffaf142dc4c44347648e2cd9f5265",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "84ed40c5e5d46f9830f4c203b3e3a79f6dfffaf142dc4c44347648e2cd9f5265",
+      "v2_sha256": "84ed40c5e5d46f9830f4c203b3e3a79f6dfffaf142dc4c44347648e2cd9f5265"
+    },
+    "C1D_SASICE_00008760_restart_ice.nc": {
+      "bytes": 2160,
+      "first_difference": null,
+      "kind": "restart",
+      "transcendental_owner": null,
+      "v1_sha256": "b61cb8443e14b3f0868ef125f621c0b1748aff7bc827dfab0d4044fc3f773b4e",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "b61cb8443e14b3f0868ef125f621c0b1748aff7bc827dfab0d4044fc3f773b4e",
+      "v2_sha256": "b61cb8443e14b3f0868ef125f621c0b1748aff7bc827dfab0d4044fc3f773b4e"
+    },
+    "C1D_SASICE_1y_20180101_20181231_grid_T_0000.nc": {
+      "bytes": 5684,
+      "first_difference": {
+        "classification": "run metadata",
+        "field": "global:TimeStamp"
+      },
+      "kind": "model_output",
+      "transcendental_owner": "NONE_METADATA_ONLY",
+      "v1_sha256": "10793e03d91c63b011f497be347f307113eefb82885525a0355c2ea59581bd26",
+      "v1_v2": "DIFFERENT_METADATA_ONLY",
+      "v1_v2_netcdf": {
+        "different_variables": [],
+        "differing_global_attributes": [
+          "TimeStamp"
+        ],
+        "metadata_only": true,
+        "numeric_variables_identical": true
+      },
+      "v2_a_b": "DIFFERENT_METADATA_ONLY",
+      "v2_a_b_netcdf": {
+        "different_variables": [],
+        "differing_global_attributes": [
+          "TimeStamp"
+        ],
+        "metadata_only": true,
+        "numeric_variables_identical": true
+      },
+      "v2_rebuild_b_sha256": "d57c876ddbf1136654946f8e76ac120c641ea1a8b7404792236c2b2af6ab86d1",
+      "v2_sha256": "5202df7a8df558f9d23fbdef1c9da57c4243db3c8dc02f1fd464d63d6d3fee4a"
+    },
+    "C1D_SASICE_1y_20180101_20181231_grid_U_0000.nc": {
+      "bytes": 2476,
+      "first_difference": {
+        "classification": "run metadata",
+        "field": "global:TimeStamp"
+      },
+      "kind": "model_output",
+      "transcendental_owner": "NONE_METADATA_ONLY",
+      "v1_sha256": "dc254f3d39fa3dab96953bae22f6fdefab726bd7e4be3141ffe385036c9568b6",
+      "v1_v2": "DIFFERENT_METADATA_ONLY",
+      "v1_v2_netcdf": {
+        "different_variables": [],
+        "differing_global_attributes": [
+          "TimeStamp"
+        ],
+        "metadata_only": true,
+        "numeric_variables_identical": true
+      },
+      "v2_a_b": "DIFFERENT_METADATA_ONLY",
+      "v2_a_b_netcdf": {
+        "different_variables": [],
+        "differing_global_attributes": [
+          "TimeStamp"
+        ],
+        "metadata_only": true,
+        "numeric_variables_identical": true
+      },
+      "v2_rebuild_b_sha256": "e0d4f4efc2617b25298ae23610ebd27db08a8a51136363bb0151dfc6f8f60f46",
+      "v2_sha256": "ff1eeed439ca25e6cf2f45848c1fdf30c69d4f57f91a925332153ce2298f09b0"
+    },
+    "C1D_SASICE_1y_20180101_20181231_grid_V_0000.nc": {
+      "bytes": 2476,
+      "first_difference": {
+        "classification": "run metadata",
+        "field": "global:TimeStamp"
+      },
+      "kind": "model_output",
+      "transcendental_owner": "NONE_METADATA_ONLY",
+      "v1_sha256": "1a34b6241203c61f3aa4eb58fd3b5518e08153ae7204064c28cf26db1e611324",
+      "v1_v2": "DIFFERENT_METADATA_ONLY",
+      "v1_v2_netcdf": {
+        "different_variables": [],
+        "differing_global_attributes": [
+          "TimeStamp"
+        ],
+        "metadata_only": true,
+        "numeric_variables_identical": true
+      },
+      "v2_a_b": "DIFFERENT_METADATA_ONLY",
+      "v2_a_b_netcdf": {
+        "different_variables": [],
+        "differing_global_attributes": [
+          "TimeStamp"
+        ],
+        "metadata_only": true,
+        "numeric_variables_identical": true
+      },
+      "v2_rebuild_b_sha256": "dff10287c98e96c3c40e44b2cdba3a90a7e6aae62d2926e1a4078b48c562f223",
+      "v2_sha256": "37952d3d061e4356dab7413001c6c67f0b703a56b8cf6b5591b33cd25b5d2ae7"
+    },
+    "icedrift_diagnostics.ascii": {
+      "bytes": 3154052,
+      "first_difference": null,
+      "kind": "model_output",
+      "transcendental_owner": null,
+      "v1_sha256": "55c6a89af4f1ba16f02723dda6849f3f1ad75ae9f7eb3f382bef6a58c119346c",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "55c6a89af4f1ba16f02723dda6849f3f1ad75ae9f7eb3f382bef6a58c119346c",
+      "v2_sha256": "55c6a89af4f1ba16f02723dda6849f3f1ad75ae9f7eb3f382bef6a58c119346c"
+    },
+    "ocean.output": {
+      "bytes": 11893471,
+      "first_difference": null,
+      "kind": "ocean_output",
+      "numeric_tokens_identical": true,
+      "transcendental_owner": null,
+      "v1_sha256": "3e47d39f061ca1f9fa111a46b01bb3d1dbcfa10be73422fced0abc9e4af25430",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "3e47d39f061ca1f9fa111a46b01bb3d1dbcfa10be73422fced0abc9e4af25430",
+      "v2_sha256": "3e47d39f061ca1f9fa111a46b01bb3d1dbcfa10be73422fced0abc9e4af25430"
+    },
+    "oracle_si3_bulk_operands.bin": {
+      "bytes": 8374560,
+      "first_difference": null,
+      "kind": "stream",
+      "transcendental_owner": null,
+      "v1_sha256": "57868f3212646bdf6b0c4add0f48701c0082718331bc76a153050c6d1d44dfe9",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "57868f3212646bdf6b0c4add0f48701c0082718331bc76a153050c6d1d44dfe9",
+      "v2_sha256": "57868f3212646bdf6b0c4add0f48701c0082718331bc76a153050c6d1d44dfe9"
+    },
+    "oracle_si3_dh_operands.bin": {
+      "bytes": 4752,
+      "first_difference": null,
+      "kind": "stream",
+      "transcendental_owner": null,
+      "v1_sha256": "9efbcb9113c2748f9085c519092848596daf0f573ba8a4625d02ee3c08bc8b14",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "9efbcb9113c2748f9085c519092848596daf0f573ba8a4625d02ee3c08bc8b14",
+      "v2_sha256": "9efbcb9113c2748f9085c519092848596daf0f573ba8a4625d02ee3c08bc8b14"
+    },
+    "oracle_si3_dh_remap_operands.bin": {
+      "bytes": 552,
+      "first_difference": null,
+      "kind": "stream",
+      "transcendental_owner": null,
+      "v1_sha256": "8fbeb7df70b3c66b4e7acdd7ab0df3ed8fc01bfaa6150dbc47e3b444638b40a5",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "8fbeb7df70b3c66b4e7acdd7ab0df3ed8fc01bfaa6150dbc47e3b444638b40a5",
+      "v2_sha256": "8fbeb7df70b3c66b4e7acdd7ab0df3ed8fc01bfaa6150dbc47e3b444638b40a5"
+    },
+    "oracle_si3_exchange_frames.bin": {
+      "bytes": 18571200,
+      "first_difference": null,
+      "kind": "stream",
+      "transcendental_owner": null,
+      "v1_sha256": "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4",
+      "v2_sha256": "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4"
+    },
+    "oracle_si3_reassoc_operands.bin": {
+      "bytes": 192,
+      "first_difference": null,
+      "kind": "stream",
+      "transcendental_owner": null,
+      "v1_sha256": "4b832b0c274d6aab032f16958224ebfb6fea603af22e1a1f1d474ff71b1e4589",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "4b832b0c274d6aab032f16958224ebfb6fea603af22e1a1f1d474ff71b1e4589",
+      "v2_sha256": "4b832b0c274d6aab032f16958224ebfb6fea603af22e1a1f1d474ff71b1e4589"
+    },
+    "oracle_si3_thd_frames.bin": {
+      "bytes": 103368000,
+      "first_difference": null,
+      "kind": "stream",
+      "transcendental_owner": null,
+      "v1_sha256": "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b",
+      "v2_sha256": "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b"
+    },
+    "oracle_si3_zdf_inputs.bin": {
+      "bytes": 1471680,
+      "first_difference": null,
+      "kind": "stream",
+      "transcendental_owner": null,
+      "v1_sha256": "cd1b15c821f19442a840e99c067c640e5146b754fc137a2c81e88856d6ea7efd",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "cd1b15c821f19442a840e99c067c640e5146b754fc137a2c81e88856d6ea7efd",
+      "v2_sha256": "cd1b15c821f19442a840e99c067c640e5146b754fc137a2c81e88856d6ea7efd"
+    },
+    "oracle_si3_zdf_operands.bin": {
+      "bytes": 4600,
+      "first_difference": null,
+      "kind": "stream",
+      "transcendental_owner": null,
+      "v1_sha256": "aad46579fb2d2cc19299d7a25992802525603bb9858adf1e892ff5d85bf40442",
+      "v1_v2": "IDENTICAL",
+      "v2_a_b": "IDENTICAL",
+      "v2_rebuild_b_sha256": "aad46579fb2d2cc19299d7a25992802525603bb9858adf1e892ff5d85bf40442",
+      "v2_sha256": "aad46579fb2d2cc19299d7a25992802525603bb9858adf1e892ff5d85bf40442"
+    }
+  },
+  "different_v1_v2_artifacts": 3,
+  "different_v1_v2_streams": 0,
+  "oracle_version": "V2_SCALAR_MATH",
+  "prediction_disposition": "REFUTED: every registered stream, restart, diagnostic, and ocean.output is V1-to-V2 byte-identical; annual NetCDF variables are bit-identical with TimeStamp-only metadata drift; no first differing scientific frame, field, or transcendental owner exists",
+  "reproducible_streams": 8,
+  "status": "REPRODUCIBLE",
+  "stream_inventory": [
+    "oracle_si3_bulk_operands.bin",
+    "oracle_si3_dh_operands.bin",
+    "oracle_si3_dh_remap_operands.bin",
+    "oracle_si3_exchange_frames.bin",
+    "oracle_si3_reassoc_operands.bin",
+    "oracle_si3_thd_frames.bin",
+    "oracle_si3_zdf_inputs.bin",
+    "oracle_si3_zdf_operands.bin"
+  ],
+  "transcendental_sources_registered": {
+    "BL99 exp/log": "icethd_zdf_bl99.F90:217,228-230,314-315",
+    "Goff ice real power/log10": "sbc_phy.F90:665-679,693-711,727-790",
+    "frazil tanh": "icethd_do.F90:407 (registered but no V1/V2 difference)",
+    "ice albedo exp/log": "icealb.F90:124-185"
+  },
+  "verbatim_inputs": {
+    "A": {
+      "cpp_sha256": "b1ca9f56ec13250dda1d65a17ddcefcf54fd5ffdad0cf30789e38ced35c2bd72",
+      "exp00": {
+        "axis_def_nemo.xml": "067bf12ec39bb08e439e941c392d1df9d57c8bc7c327bd66d44eea9634e8d1d0",
+        "context_nemo.xml": "430536d83f9fd7230b18b0a8a4e6b5f041777d8dae86c9945e79b59450c6a1b7",
+        "domain_def_nemo.xml": "0ef3725496b43fb465d460b38c440f0cabdc67d3d7ec53c4dc5890f47d30e5c4",
+        "field_def_nemo-ice.xml": "87572bf7c3120d606ec847c09c69f75378b0216c0289c5f2f73048daa93b3b2c",
+        "field_def_nemo-oce.xml": "81dc9ac00231e7a2751b443d4057b871dbb728fc3f3dd9662ff823896d97d05a",
+        "file_def_nemo-ice.xml": "f702edd804a0d94867e184feb9055597c0c437400f8fe63013c70266cb82cc8a",
+        "file_def_nemo-oce.xml": "def824001d74014d7a25c0cea16a4f6b18f0cb1a9d9e0b0b4475f1656a8731fa",
+        "grid_def_nemo.xml": "01cc18b998a01cf9e0d06732966c62cef1e4ba4218e62f3f2ebec10b441631fd",
+        "iodef.xml": "84bbd92343b9e457057838619cdca956b4961459273ad2a21b17bc28d2a540da",
+        "namelist_cfg": "6151c0fdd2431d07c7897d5852846a620edd58c55255f11b7fb3569803b5342c",
+        "namelist_ice_cfg": "da7b4fc5865edf6a6a912d6316a51f6b845aaf7e8b87e9da121c6f0a46278033",
+        "namelist_ice_ref": "055ab5e6839c12dbae61bf1c3bcdda46a8f95cf275b7f294d68d7f8e73179307",
+        "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd"
+      },
+      "forcing": {
+        "path": "/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_scalarmath_v2_a/SAS/ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc",
+        "sha256": "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
+      },
+      "my_src": {
+        "icesbc.F90": "75cdaaeec423f27c79983730828cb6a9978f1d0dbbfac9a671a7e083a95ea74e",
+        "icestp.F90": "c2384d4d4ff96c4aa9c880ca7de07b7180355e361e2c8584f59fba84e53ec982",
+        "icethd.F90": "3afb13b7612f09b5cdb1322a55186a53f77891ff5016d3859ec9e2da58cc5490",
+        "icethd_dh.F90": "fb4f9f22aee0ee15a6accd2172bbb16b79f8fd958b07aa684cd8c770bcb99a2d",
+        "icethd_zdf_bl99.F90": "b94881987515fbc5ecde3f24f331276e56a7ba884e5a96e0c40fe2e324f55bab",
+        "sbcblk.F90": "087e551a49e5bb0aefe93e80f1bca817365b1f68d84dc59b4178eff87c010cea",
+        "usrdef_hgr.F90": "cea3157451d468bf3c425f5c42c5cc9fddd5fed9ce49b409d951cf0fa6245eb1",
+        "usrdef_nam.F90": "fcb90b410b3c0697ad36e394b976d22be62659b3609fa85c49de51824083948d",
+        "usrdef_zgr.F90": "e4d9b93fea99479980224452cc78bf514de2d7ab2b70a069c223a5fee8a81940"
+      },
+      "run_root_exp": {
+        "axis_def_nemo.xml": "067bf12ec39bb08e439e941c392d1df9d57c8bc7c327bd66d44eea9634e8d1d0",
+        "context_nemo.xml": "430536d83f9fd7230b18b0a8a4e6b5f041777d8dae86c9945e79b59450c6a1b7",
+        "domain_def_nemo.xml": "0ef3725496b43fb465d460b38c440f0cabdc67d3d7ec53c4dc5890f47d30e5c4",
+        "field_def_nemo-ice.xml": "87572bf7c3120d606ec847c09c69f75378b0216c0289c5f2f73048daa93b3b2c",
+        "field_def_nemo-oce.xml": "81dc9ac00231e7a2751b443d4057b871dbb728fc3f3dd9662ff823896d97d05a",
+        "file_def_nemo-ice.xml": "f702edd804a0d94867e184feb9055597c0c437400f8fe63013c70266cb82cc8a",
+        "file_def_nemo-oce.xml": "def824001d74014d7a25c0cea16a4f6b18f0cb1a9d9e0b0b4475f1656a8731fa",
+        "grid_def_nemo.xml": "01cc18b998a01cf9e0d06732966c62cef1e4ba4218e62f3f2ebec10b441631fd",
+        "iodef.xml": "84bbd92343b9e457057838619cdca956b4961459273ad2a21b17bc28d2a540da",
+        "namelist_cfg": "6151c0fdd2431d07c7897d5852846a620edd58c55255f11b7fb3569803b5342c",
+        "namelist_ice_cfg": "da7b4fc5865edf6a6a912d6316a51f6b845aaf7e8b87e9da121c6f0a46278033",
+        "namelist_ice_ref": "055ab5e6839c12dbae61bf1c3bcdda46a8f95cf275b7f294d68d7f8e73179307",
+        "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd"
+      }
+    },
+    "B": {
+      "cpp_sha256": "b1ca9f56ec13250dda1d65a17ddcefcf54fd5ffdad0cf30789e38ced35c2bd72",
+      "exp00": {
+        "axis_def_nemo.xml": "067bf12ec39bb08e439e941c392d1df9d57c8bc7c327bd66d44eea9634e8d1d0",
+        "context_nemo.xml": "430536d83f9fd7230b18b0a8a4e6b5f041777d8dae86c9945e79b59450c6a1b7",
+        "domain_def_nemo.xml": "0ef3725496b43fb465d460b38c440f0cabdc67d3d7ec53c4dc5890f47d30e5c4",
+        "field_def_nemo-ice.xml": "87572bf7c3120d606ec847c09c69f75378b0216c0289c5f2f73048daa93b3b2c",
+        "field_def_nemo-oce.xml": "81dc9ac00231e7a2751b443d4057b871dbb728fc3f3dd9662ff823896d97d05a",
+        "file_def_nemo-ice.xml": "f702edd804a0d94867e184feb9055597c0c437400f8fe63013c70266cb82cc8a",
+        "file_def_nemo-oce.xml": "def824001d74014d7a25c0cea16a4f6b18f0cb1a9d9e0b0b4475f1656a8731fa",
+        "grid_def_nemo.xml": "01cc18b998a01cf9e0d06732966c62cef1e4ba4218e62f3f2ebec10b441631fd",
+        "iodef.xml": "84bbd92343b9e457057838619cdca956b4961459273ad2a21b17bc28d2a540da",
+        "namelist_cfg": "6151c0fdd2431d07c7897d5852846a620edd58c55255f11b7fb3569803b5342c",
+        "namelist_ice_cfg": "da7b4fc5865edf6a6a912d6316a51f6b845aaf7e8b87e9da121c6f0a46278033",
+        "namelist_ice_ref": "055ab5e6839c12dbae61bf1c3bcdda46a8f95cf275b7f294d68d7f8e73179307",
+        "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd"
+      },
+      "forcing": {
+        "path": "/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_scalarmath_v2_b/SAS/ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc",
+        "sha256": "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
+      },
+      "my_src": {
+        "icesbc.F90": "75cdaaeec423f27c79983730828cb6a9978f1d0dbbfac9a671a7e083a95ea74e",
+        "icestp.F90": "c2384d4d4ff96c4aa9c880ca7de07b7180355e361e2c8584f59fba84e53ec982",
+        "icethd.F90": "3afb13b7612f09b5cdb1322a55186a53f77891ff5016d3859ec9e2da58cc5490",
+        "icethd_dh.F90": "fb4f9f22aee0ee15a6accd2172bbb16b79f8fd958b07aa684cd8c770bcb99a2d",
+        "icethd_zdf_bl99.F90": "b94881987515fbc5ecde3f24f331276e56a7ba884e5a96e0c40fe2e324f55bab",
+        "sbcblk.F90": "087e551a49e5bb0aefe93e80f1bca817365b1f68d84dc59b4178eff87c010cea",
+        "usrdef_hgr.F90": "cea3157451d468bf3c425f5c42c5cc9fddd5fed9ce49b409d951cf0fa6245eb1",
+        "usrdef_nam.F90": "fcb90b410b3c0697ad36e394b976d22be62659b3609fa85c49de51824083948d",
+        "usrdef_zgr.F90": "e4d9b93fea99479980224452cc78bf514de2d7ab2b70a069c223a5fee8a81940"
+      },
+      "run_root_exp": {
+        "axis_def_nemo.xml": "067bf12ec39bb08e439e941c392d1df9d57c8bc7c327bd66d44eea9634e8d1d0",
+        "context_nemo.xml": "430536d83f9fd7230b18b0a8a4e6b5f041777d8dae86c9945e79b59450c6a1b7",
+        "domain_def_nemo.xml": "0ef3725496b43fb465d460b38c440f0cabdc67d3d7ec53c4dc5890f47d30e5c4",
+        "field_def_nemo-ice.xml": "87572bf7c3120d606ec847c09c69f75378b0216c0289c5f2f73048daa93b3b2c",
+        "field_def_nemo-oce.xml": "81dc9ac00231e7a2751b443d4057b871dbb728fc3f3dd9662ff823896d97d05a",
+        "file_def_nemo-ice.xml": "f702edd804a0d94867e184feb9055597c0c437400f8fe63013c70266cb82cc8a",
+        "file_def_nemo-oce.xml": "def824001d74014d7a25c0cea16a4f6b18f0cb1a9d9e0b0b4475f1656a8731fa",
+        "grid_def_nemo.xml": "01cc18b998a01cf9e0d06732966c62cef1e4ba4218e62f3f2ebec10b441631fd",
+        "iodef.xml": "84bbd92343b9e457057838619cdca956b4961459273ad2a21b17bc28d2a540da",
+        "namelist_cfg": "6151c0fdd2431d07c7897d5852846a620edd58c55255f11b7fb3569803b5342c",
+        "namelist_ice_cfg": "da7b4fc5865edf6a6a912d6316a51f6b845aaf7e8b87e9da121c6f0a46278033",
+        "namelist_ice_ref": "055ab5e6839c12dbae61bf1c3bcdda46a8f95cf275b7f294d68d7f8e73179307",
+        "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd"
+      }
+    }
+  }
+}

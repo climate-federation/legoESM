@@ -72,6 +72,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.core import transcendentals
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo_vector
 from legoesm.grids.halo_latlon import pad_halo_vector_latlon
@@ -115,8 +117,8 @@ def cell_gradient_voronoi(
     -------
     df_dx, df_dy : array ``(nCells,)``
     """
-    eoc = mesh.edgesOnCell                 # (maxEdges, nCells)
-    sign = mesh.edgeSignOnCell             # (maxEdges, nCells)
+    eoc = mesh.edgesOnCell  # (maxEdges, nCells)
+    sign = mesh.edgeSignOnCell  # (maxEdges, nCells)
     mask = (eoc >= 0).astype(f_cell.dtype)
     eoc_safe = jnp.maximum(eoc, 0)
 
@@ -126,7 +128,9 @@ def cell_gradient_voronoi(
     c2_safe = jnp.maximum(c2, 0)
     interior = c2 >= 0
     f_edge = jnp.where(
-        interior, 0.5 * (f_cell[c1_safe] + f_cell[c2_safe]), f_cell[c1_safe],
+        interior,
+        0.5 * (f_cell[c1_safe] + f_cell[c2_safe]),
+        f_cell[c1_safe],
     )
 
     cos_a = jnp.cos(mesh.angleEdge)
@@ -136,7 +140,7 @@ def cell_gradient_voronoi(
     f_e_x = f_edge * cos_a * dv
     f_e_y = f_edge * sin_a * dv
 
-    f_e_x_gathered = f_e_x[eoc_safe]       # (maxEdges, nCells)
+    f_e_x_gathered = f_e_x[eoc_safe]  # (maxEdges, nCells)
     f_e_y_gathered = f_e_y[eoc_safe]
 
     flux_x = sign * f_e_x_gathered * mask
@@ -175,11 +179,14 @@ def _strain_rates_voronoi(
 # Ice strength
 # ==============================================================================
 
+
 def ice_strength(
     h: jnp.ndarray,
     A: jnp.ndarray,
     P_star: float = _RHEO_DEFAULTS.P_star,
     C_strength: float = _RHEO_DEFAULTS.C_strength,
+    *,
+    source_exact: bool = False,
 ) -> jnp.ndarray:
     """Compute ice strength following Hibler (1979).
 
@@ -195,18 +202,27 @@ def ice_strength(
         Ice strength parameter [N/m^2].
     C_strength : float
         Exponential decay constant.
+    source_exact : bool
+        Materialize the four H79 operations in NEMO source order.  The default
+        remains the native JAX association; SI3's C-grid oracle card selects
+        this arm together with scalar-libm transcendental evaluation.
 
     Returns
     -------
     P : array
         Ice strength [N/m].
     """
-    return P_star * h * jnp.exp(-C_strength * (1.0 - A))
+    source_round = nemo_source_round if source_exact else lambda value: value
+    concentration_deficit = source_round(1.0 - A)
+    exponent = source_round(-C_strength * concentration_deficit)
+    prefactor = source_round(P_star * h)
+    return source_round(prefactor * transcendentals.exp(exponent))
 
 
 # ==============================================================================
 # Strain rates
 # ==============================================================================
+
 
 def _strain_rates_cubed_sphere(
     u_ice: jnp.ndarray,
@@ -215,9 +231,12 @@ def _strain_rates_cubed_sphere(
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Strain rate tensor on the cubed sphere (centered FD, halo-2 vector exchange)."""
     u_pad, v_pad = pad_halo_vector(
-        u_ice, v_ice,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded, grid.sin_angle_padded,
+        u_ice,
+        v_ice,
+        grid.cos_angle,
+        grid.sin_angle,
+        grid.cos_angle_padded,
+        grid.sin_angle_padded,
         interp_offsets=grid.halo_interp_offsets,
     )
     du_dx = (u_pad[:, 2:, 1:-1] - u_pad[:, :-2, 1:-1]) / grid.dx
@@ -283,8 +302,8 @@ def _strain_rates_latlon(
         Strain rate tensor components [1/s].
     """
     u_pad, v_pad = pad_halo_vector_latlon(u_ice, v_ice, halo=1)
-    dx = grid.dx                       # (n_lat, n_lon)
-    dy = grid.dy[:, None]              # broadcast to (n_lat, 1)
+    dx = grid.dx  # (n_lat, n_lon)
+    dy = grid.dy[:, None]  # broadcast to (n_lat, 1)
 
     du_dx = (u_pad[1:-1, 2:] - u_pad[1:-1, :-2]) / dx
     du_dy = (u_pad[2:, 1:-1] - u_pad[:-2, 1:-1]) / dy
@@ -299,7 +318,7 @@ def _strain_rates_latlon(
     # tunable, and NOT the rejected hard clip — it does not cap real-grid rows).
     cos_lat = jnp.cos(grid.lat)
     cos_safe = jnp.where(jnp.abs(cos_lat) < 1e-12, 1e-12, cos_lat)
-    metric = (jnp.sin(grid.lat) / cos_safe / grid.radius)[:, None]   # (n_lat, 1)
+    metric = (jnp.sin(grid.lat) / cos_safe / grid.radius)[:, None]  # (n_lat, 1)
 
     eps_11 = du_dx - v_ice * metric
     eps_22 = dv_dy
@@ -330,15 +349,14 @@ def strain_rates(
     if _is_latlon_grid(grid):
         return _strain_rates_latlon(u_ice, v_ice, grid)
     if not isinstance(grid, CubedSphereGrid):
-        raise TypeError(
-            f"unsupported grid {type(grid).__name__} for strain_rates"
-        )
+        raise TypeError(f"unsupported grid {type(grid).__name__} for strain_rates")
     return _strain_rates_cubed_sphere(u_ice, v_ice, grid)
 
 
 # ==============================================================================
 # Deformation invariant
 # ==============================================================================
+
 
 def delta_deformation(
     eps_11: jnp.ndarray,
@@ -368,8 +386,8 @@ def delta_deformation(
         Deformation rate invariant [1/s].
     """
     divergence = eps_11 + eps_22
-    shear = (eps_11 - eps_22) ** 2 + 4.0 * eps_12 ** 2
-    Delta_sq = divergence ** 2 + shear / (e_yield ** 2)
+    shear = (eps_11 - eps_22) ** 2 + 4.0 * eps_12**2
+    Delta_sq = divergence**2 + shear / (e_yield**2)
     # Floor the sqrt *argument* at Delta_min**2 (not the result at Delta_min).
     # Forward-identical — sqrt(max(Delta_sq, Delta_min**2)) == max(sqrt(Delta_sq),
     # Delta_min) — but AD-safe: the argument is >= Delta_min**2 > 0 so sqrt is
@@ -378,12 +396,13 @@ def delta_deformation(
     # start, eps_ij == 0): sqrt'(0) = inf and the outer max routes a zero
     # selector into it -> 0*inf = NaN, poisoning every VP/EVP/mEVP stress
     # gradient on the first backward pass.
-    return jnp.sqrt(jnp.maximum(Delta_sq, Delta_min ** 2))
+    return jnp.sqrt(jnp.maximum(Delta_sq, Delta_min**2))
 
 
 # ==============================================================================
 # VP stress tensor
 # ==============================================================================
+
 
 def vp_stress(
     eps_11: jnp.ndarray,
@@ -419,7 +438,7 @@ def vp_stress(
         Stress tensor components [N/m].
     """
     zeta = P / (2.0 * Delta)
-    eta = zeta / (e_yield ** 2)
+    eta = zeta / (e_yield**2)
 
     trace = eps_11 + eps_22
     sigma_11 = 2.0 * eta * eps_11 + (zeta - eta) * trace - P / 2.0
@@ -432,6 +451,7 @@ def vp_stress(
 # ==============================================================================
 # EVP subcycle stress update
 # ==============================================================================
+
 
 def evp_stress_update(
     sigma_11: jnp.ndarray,
@@ -511,7 +531,12 @@ def evp_stress_update(
 
     # VP target stress
     s11_vp, s22_vp, s12_vp = vp_stress(
-        eps_11, eps_22, eps_12, P, Delta, e_yield,
+        eps_11,
+        eps_22,
+        eps_12,
+        P,
+        Delta,
+        e_yield,
     )
 
     # EVP relaxation factor: E = dt_s / (2 · T_damp) with T_damp =
@@ -529,6 +554,7 @@ def evp_stress_update(
 # ==============================================================================
 # mEVP pseudo-time stress update
 # ==============================================================================
+
 
 def mevp_stress_update(
     sigma_11: jnp.ndarray,
@@ -616,7 +642,12 @@ def mevp_stress_update(
     Delta = delta_deformation(eps_11, eps_22, eps_12, e_yield, Delta_min)
 
     s11_vp, s22_vp, s12_vp = vp_stress(
-        eps_11, eps_22, eps_12, P, Delta, e_yield,
+        eps_11,
+        eps_22,
+        eps_12,
+        P,
+        Delta,
+        e_yield,
     )
 
     inv_alpha = 1.0 / alpha
