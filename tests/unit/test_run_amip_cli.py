@@ -1359,6 +1359,26 @@ def test_bechtold_cape_threshold_flows_to_config():
     assert cfg.validate_strict() is None
 
 
+def test_bechtold_rain_vapor_sink_flows_to_config_and_kernel():
+    """The rain vapour-sink selector threads CLI -> ExperimentConfig ->
+    BechtoldConfig; the default is the formation-local debit and the legacy
+    vapour-mass spread stays selectable for the A/B; validate_strict refuses
+    anything else."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert cfg.bechtold_rain_vapor_sink == "formation"
+    cfg_legacy = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "bechtold",
+         "--bechtold-rain-vapor-sink", "vapour_mass"]), parser))
+    assert cfg_legacy.bechtold_rain_vapor_sink == "vapour_mass"
+    with pytest.raises(ValueError, match="bechtold_rain_vapor_sink"):
+        cfg._replace(bechtold_rain_vapor_sink="bogus").validate_strict()
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    assert _resolve_convection(cfg)[1].rain_vapor_sink == "formation"
+    assert _resolve_convection(cfg_legacy)[1].rain_vapor_sink == "vapour_mass"
+
+
 def test_bechtold_subsidence_solve_flows_to_config():
     """--bechtold-subsidence-solve round-trips into ExperimentConfig (the
     day-65 blowup-bisect stability escape hatch); unset matches the

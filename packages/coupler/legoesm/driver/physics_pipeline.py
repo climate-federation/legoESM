@@ -3695,6 +3695,9 @@ def _resolve_convection(config):
             # 2026-07-22): fallback matches the BechtoldConfig default.
             subsidence_solve=getattr(
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
+            # Rain vapour-sink placement (2026-09-21): fallback matches the
+            # BechtoldConfig default (formation-local).
+            rain_vapor_sink=getattr(config, 'bechtold_rain_vapor_sink', 'formation'),
             enable_cmt=_resolve_enable_cmt(config),
             cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
             cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),

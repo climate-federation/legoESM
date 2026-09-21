@@ -1299,6 +1299,10 @@ class ExperimentConfig(NamedTuple):
     # escape hatch while the implicit bottom-boundary behaviour is under
     # investigation — day-65 pilot blowup bisect, 2026-07-22).
     bechtold_subsidence_solve: str = "implicit_flux"
+    # Where the in-plume rain's vapour is debited (BechtoldConfig.rain_vapor_sink):
+    # "formation" (default, at the rain-formation levels) or "vapour_mass"
+    # (legacy spread over the whole column by vapour mass; the A/B control).
+    bechtold_rain_vapor_sink: str = "formation"
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -1931,6 +1935,12 @@ class ExperimentConfig(NamedTuple):
                 f"bechtold_subsidence_solve must be one of "
                 f"('implicit_flux', 'advective'), got "
                 f"{self.bechtold_subsidence_solve!r}"
+            )
+        if self.bechtold_rain_vapor_sink not in ("formation", "vapour_mass"):
+            errors.append(
+                f"bechtold_rain_vapor_sink must be one of "
+                f"('formation', 'vapour_mass'), got "
+                f"{self.bechtold_rain_vapor_sink!r}"
             )
         if (self.convective_precip_efficiency is not None
                 and not (0.0 <= self.convective_precip_efficiency <= 1.0)):
@@ -3687,6 +3697,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_enable_cmt=getattr(amip_cfg, 'bechtold_enable_cmt', None),
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
+            bechtold_rain_vapor_sink=getattr(amip_cfg, 'bechtold_rain_vapor_sink', "formation"),
             convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
@@ -3869,6 +3880,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
             bechtold_downdraft_transport=self.bechtold_downdraft_transport,
             bechtold_subsidence_solve=self.bechtold_subsidence_solve,
+            bechtold_rain_vapor_sink=self.bechtold_rain_vapor_sink,
             convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,

@@ -1629,6 +1629,20 @@ class BechtoldConfig(NamedTuple):
     # 297 baseline with the residual std improved, moisture residual
     # improved).  False restores the legacy split path byte-identically.
     use_ifs_inplume_precip: bool = True
+    # Where the vapour that becomes in-plume rain is debited from the
+    # environment (and its latent heat released), use_ifs_inplume_precip only:
+    #   "formation"   - at the rain-formation levels (precip_frac*M_u profile,
+    #                   cuascn PDMFUP), capacity-limited per level after the
+    #                   transport tendencies; excess redistributed within the
+    #                   formation support, and any remainder REDUCES the rain
+    #                   and its heating consistently.  DEFAULT.
+    #   "vapour_mass" - legacy: column-exact sink spread over ALL levels by
+    #                   q_v*dp ("same relative drying rate everywhere"), which
+    #                   took 43% of the ITCZ's convective rain water, and put
+    #                   its heat, below 850 hPa where the plume never condensed
+    #                   (2026-09-21 banded ledgers; codex + GLM confirmed
+    #                   against cudtdqn).  Kept selectable for the A/B.
+    rain_vapor_sink: str = "formation"
     # Horizontal grid spacing [m] for the IFS ZTAURES resolution factor on the
     # convective turnover time (ZDX = sqrt(cell area), cumastrn.F90:713,
     # 762-768).  0 (default) = legacy resolution-agnostic ZTAURES = 1.0; the

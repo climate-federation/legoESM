@@ -964,6 +964,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "stability escape hatch of the 2026-07-22 day-65 "
                              "blowup bisect). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_subsidence_solve}.")
+    parser.add_argument("--bechtold-rain-vapor-sink", type=str,
+                        choices=["formation", "vapour_mass"],
+                        default=_EXPERIMENT_DEFAULTS.bechtold_rain_vapor_sink,
+                        dest="bechtold_rain_vapor_sink",
+                        help="Where the in-plume convective rain's vapour is "
+                             "debited and its latent heat released: formation "
+                             "(default, at the rain-formation levels) or "
+                             "vapour_mass (legacy whole-column spread by vapour "
+                             "mass; the A/B control). "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_rain_vapor_sink}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -2294,6 +2304,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
+        bechtold_rain_vapor_sink=args.bechtold_rain_vapor_sink,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
