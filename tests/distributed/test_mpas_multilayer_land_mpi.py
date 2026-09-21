@@ -70,6 +70,24 @@ RES, NLEV, DT, DAYS = 3, 20, 300.0, 1     # level 3 = 642 cells; days is an int
 N_SOIL = 6
 
 
+def _shared_tmp_root():
+    """Directory both ranks can see, resolved rather than hard-coded.
+
+    ``LEGOESM_TEST_SHARED_TMP`` wins when it exists.  The previous fallback was
+    one machine's absolute scratch path, so on any other cluster every test in
+    this module died in ``mkdtemp`` with ``FileNotFoundError`` before it
+    reached a single assertion -- a distributed gate that could only ever run
+    on the machine it was written on.  ``/tmp`` is the last resort and is
+    node-local, which is correct for a single-node ``srun`` and is why the
+    single-node case is the one this module documents.
+    """
+    env = os.environ.get("LEGOESM_TEST_SHARED_TMP")
+    for cand in (env, os.environ.get("SCRATCH"), os.getcwd(), tempfile.gettempdir()):
+        if cand and os.path.isdir(cand) and os.access(cand, os.W_OK):
+            return cand
+    raise RuntimeError("no writable shared temp directory found")
+
+
 def _land_mask_path():
     """A deterministic, spatially varying land mask, written once by rank 0.
 
@@ -82,8 +100,7 @@ def _land_mask_path():
     path = None
     if comm.Get_rank() == 0:
         import xarray as xr
-        d = tempfile.mkdtemp(prefix="landmask_", dir=os.environ.get(
-            "LEGOESM_TEST_SHARED_TMP", "/work/bd1083/b309178/diffESM"))
+        d = tempfile.mkdtemp(prefix="landmask_", dir=_shared_tmp_root())
         path = os.path.join(d, "landmask.nc")
         lat = np.arange(-89.0, 90.0, 2.0)
         lon = np.arange(0.0, 360.0, 2.0)
@@ -105,8 +122,7 @@ def _shared_tmpdir(prefix):
     comm = MPI.COMM_WORLD
     d = None
     if comm.Get_rank() == 0:
-        d = tempfile.mkdtemp(prefix=prefix, dir=os.environ.get(
-            "LEGOESM_TEST_SHARED_TMP", "/work/bd1083/b309178/diffESM"))
+        d = tempfile.mkdtemp(prefix=prefix, dir=_shared_tmp_root())
     return comm.bcast(d, root=0)
 
 
@@ -121,6 +137,17 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True):
         convection="none", turbulence="none", precision="fp64",
         land_mask_path=mask_path, use_multilayer_land=True,
         multilayer_n_layers=N_SOIL, multilayer_soil_depth=2.5,
+        # NAME the land surface scheme rather than inherit the driver default.
+        # This test asks one question -- are the soil columns partitioned
+        # correctly -- and the answer does not depend on which canopy sits on
+        # top of them, so it takes the scheme with no external data
+        # dependency. Leaving it unnamed was a hidden choice and it broke: the
+        # default moved to the two-leaf canopy, which REFUSES to run without a
+        # harmonized surfdata file, so every test in this module died in setup
+        # at np=1 as well as under MPI -- a distributed gate that could not run
+        # at all, on any rank count, and nothing noticed because nothing runs
+        # it in CI.
+        land_surface_scheme="simple_seb",
         distributed=distributed,
     )
     d = ModelDriver(cfg, output_dir=output_dir or tempfile.mkdtemp())
@@ -171,6 +198,15 @@ def _compare(ref, d):
     n_owned = part.n_owned_cells
     gids = np.asarray(part.local_cells[:n_owned])
     n_global = np.asarray(ref.state.T.data).shape[0]
+    # At ONE rank the partition hands that rank every cell, so the comparison
+    # below is a state against itself and proves nothing. That is a property
+    # of the rank count, not a defect, so it SKIPS -- it used to fail, which
+    # made the whole np=1 rung of the ladder red for a structural reason and
+    # buried the real failures. At np>1 a rank that still owns everything IS a
+    # defect and keeps failing.
+    if MPI.COMM_WORLD.Get_size() == 1:
+        pytest.skip("np=1: one rank owns the whole mesh, so this comparison "
+                    "is vacuous by construction; run under mpirun -n >= 2")
     assert n_owned < n_global, "this rank was given every global cell"
 
     ref_cols, ref_other = _column_leaves(ref._land_ml_state, n_global)
@@ -232,6 +268,15 @@ def test_land_advance_on_the_voronoi_partition_is_bit_exact():
     local_gids = np.asarray(part.local_cells[:n_local])
     owned_gids = local_gids[:n_owned]
     ncol = np.asarray(ref_d._land_ml_state.T_soil).shape[0]
+    # At ONE rank the partition hands that rank every cell, so the comparison
+    # below is a state against itself and proves nothing. That is a property
+    # of the rank count, not a defect, so it SKIPS -- it used to fail, which
+    # made the whole np=1 rung of the ladder red for a structural reason and
+    # buried the real failures. At np>1 a rank that still owns everything IS a
+    # defect and keeps failing.
+    if MPI.COMM_WORLD.Get_size() == 1:
+        pytest.skip("np=1: one rank owns the whole mesh, so this comparison "
+                    "is vacuous by construction; run under mpirun -n >= 2")
     assert n_owned < ncol, "this rank was given every global cell"
 
     # Both sides start from the SAME land state -- the serial one, sliced.
