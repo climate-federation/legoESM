@@ -358,3 +358,39 @@ def test_band_refresh_touches_only_the_face_edge_bands(setup):
     assert _bytes_equal(band[must], xw[must])          # face-edge bands right
     assert _bytes_equal(band[~anyb], poisoned[~anyb])  # the rest untouched
     assert (band != full).any(), "band refresh is not narrower than full"
+
+
+def test_tracer_stays_finite_beyond_two_steps(setup):
+    """The window step's TRACER must survive more than two steps.
+
+    The per-firing pad refresh is band-restricted (face-edge bands only,
+    ``refresh_band``), so intra-face seam pads depend on the FULL refresh
+    every phase gets at entry.  The tracer step had none: its outer-pad
+    NaN (the expected stencil-reach cells) survived into the next step
+    and ate ~2 cells inward per step, reaching owned cells at step 3
+    (C24 kt=2 pad=5 n_split=8; gate jobs 9910440/1, probe 9912744).
+    Every earlier window certificate ran TWO steps -- one short.  This
+    runs four at pad=4 (the module's layout, where the front arrives
+    even sooner) on the six-face-scattered OWNED cells, and also asserts
+    the dynamics leaves so a regression there is named, not masked.
+    FAILS on the tree without the tracer entry refresh (fv3_dynamics).
+    """
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel)
+    from legoesm.grids.factory import create_fv3_duo_grid
+    mesh = Mesh(np.array(jax.devices()[:6 * KT * KT]).reshape(6, KT, KT),
+                ("face", "tile_i", "tile_j"))
+    model = FV3DuoDynamicsModel(
+        create_fv3_duo_grid(N), FV3DuoConfig(km=KM, hydrostatic=True,
+                                             n_split=8),
+        step_spmd_mesh=mesh, step_windows=(KT, PAD))
+    win = model.dcmip16_initial_state(do_pert=True)
+    for step in range(1, 5):
+        win = model.step(win, 300.0)
+        flat = model.to_flat(win)
+        q0 = np.asarray(flat["q"][0])
+        assert np.isfinite(q0).all(), (
+            f"step {step}: tracer non-finite in "
+            f"{int((~np.isfinite(q0)).sum())} owned cells")
+        for nm in ("u", "v", "pt", "delp"):
+            assert np.isfinite(np.asarray(flat["state"][nm])).all(), (step, nm)

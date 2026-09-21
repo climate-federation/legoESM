@@ -761,6 +761,24 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             # -- the spec's own [face][iq] order. Passing the list
             # straight through made the callee see nq as the face axis.
             _q_in = jnp.stack(qq, axis=1)
+            # WINDOW lane: the tracer step is a phase of its own between
+            # the acoustic loop and the remap, and like every acoustic
+            # substep it needs its seam pads rebuilt from the owners at
+            # ENTRY (acoustic_loop_3d does this for state/nh/flux_cap).
+            # Without it the tracer's pad NaN (the outer stencil-reach
+            # cells, expected) survived into the next step and ate ~2
+            # cells inward per step, reaching owned cells at step 3
+            # (C24 kt=2 pad=5 n_split=8; gate jobs 9910440/1, probe
+            # 9912744; forced refresh before OR after the step confines
+            # it, jobs 9912821/2).  No-op on the six-face lane.
+            _wc = getattr(getattr(ctx, "tab", None), "window_comm", None)
+            if _wc is not None:
+                _nb, _nq, _m0, _m1, _kk = _q_in.shape
+                _flat = jnp.moveaxis(_q_in, 1, -1).reshape(_nb, _m0, _m1,
+                                                          _kk * _nq)
+                _flat = _wc.refresh({"q": _flat})["q"]
+                _q_in = jnp.moveaxis(
+                    _flat.reshape(_nb, _m0, _m1, _kk, _nq), -1, 1)
             _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1_delp, ac["flux_cap"],
                                        km=km, nq=nq, hord_tr=hord_tr,
                                        dt=mdt, q_split=tracer_q_split,
