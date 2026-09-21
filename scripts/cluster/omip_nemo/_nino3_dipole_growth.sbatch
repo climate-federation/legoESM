@@ -43,11 +43,24 @@ NEMO=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_
 OUT=${OUT:-$MAIN/results/omip_nemo/nino3_dipole_growth.json}
 echo "RUN=$RUN"
 echo "OUT=$OUT"
+# DAYS is the scoring window. The DEFAULT IS THE BASELINE'S OWN SIX RECORDS, so
+# an unparameterised submission runs exactly what it always ran. It is
+# overridable because the convection arm lost its day-15 snapshot: each leg
+# writes snapshot_final.npz, and leg 2 overwrote leg 1's copy before it was
+# renamed. Scoring the days that exist through this ONE card keeps the arm and
+# the baseline comparable at every day they share; a second card would not.
+# Both sides are paired day-for-day -- the same list drives our snapshots and
+# NEMO's records, so a window can never be compared against a different window.
+DAYS=${DAYS:-5,10,15,20,25,30}
+SNAPS=$(for d in ${DAYS//,/ }; do printf "%s/snapshot_day%04d.npz " "$RUN" "$d"; done)
+echo "DAYS=$DAYS"
+for s in $SNAPS; do
+  [ -f "$s" ] || { echo "REFUSING: $s does not exist -- scoring a window whose"; \
+                   echo "          snapshots are absent would silently mis-pair days."; exit 3; }
+done
 $PY scripts/validate/ocean_fidelity/global_tracer_content.py \
-    --snapshot $RUN/snapshot_day0005.npz $RUN/snapshot_day0010.npz \
-               $RUN/snapshot_day0015.npz $RUN/snapshot_day0020.npz \
-               $RUN/snapshot_day0025.npz $RUN/snapshot_day0030.npz \
-    --nemo-gridt $NEMO --nemo-days 5,10,15,20,25,30 \
+    --snapshot $SNAPS \
+    --nemo-gridt $NEMO --nemo-days $DAYS \
     --mesh-mask $MAIN/data/grids/eORCA1.2_mesh_mask.nc \
     --region=-5,5,-150,-90 \
     --depth-bin-edges 0,2,10,50,200,1000,inf \
