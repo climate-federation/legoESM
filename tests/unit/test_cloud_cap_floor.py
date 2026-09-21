@@ -131,19 +131,40 @@ def test_floor_reaches_the_solver_with_production_subcolumn_overlap():
 
 
 def test_silent_no_op_paths_refuse():
-    from legoesm.driver.physics_pipeline import build_physics_pipeline, refuse_cap_floor_on_fv
-    from legoesm.driver.model_driver import _standalone_cloud_config
+    from legoesm.driver.physics_pipeline import (build_physics_pipeline, cap_floor_lane_applies,
+                                                  refuse_cap_floor_on_fv)
+    from legoesm.driver.model_driver import ModelDriver, _standalone_cloud_config
     from types import SimpleNamespace
+
+    def cfg(grid, disc, on=True):
+        return SimpleNamespace(cloud_cap_floor_on=on, grid=SimpleNamespace(grid_type=grid),
+                               dycore=SimpleNamespace(discretization=disc))
+    assert cap_floor_lane_applies(cfg("mpas", "finite_volume"))
+    assert cap_floor_lane_applies(cfg("latlon", "spectral"))
+    assert not cap_floor_lane_applies(cfg("latlon", "finite_volume"))
+    assert not cap_floor_lane_applies(cfg("cubed_sphere", "fv3_duo"))
     with pytest.raises(ValueError, match="finite-volume"):
-        refuse_cap_floor_on_fv(SimpleNamespace(cloud_cap_floor_on=True))
-    refuse_cap_floor_on_fv(SimpleNamespace(cloud_cap_floor_on=False))
+        refuse_cap_floor_on_fv(cfg("cubed_sphere", "finite_volume"))
+    refuse_cap_floor_on_fv(cfg("cubed_sphere", "finite_volume", on=False))
+    refuse_cap_floor_on_fv(cfg("mpas", "finite_volume"))
+
+    # ModelDriver.run itself: the gate is its first statement, so a stub whose
+    # next call raises a sentinel shows whether the gate let the lane through.
+    class _Entered(Exception):
+        pass
+    def run_with(config):
+        stub = SimpleNamespace(config=config)
+        stub._reject_shallow_water_unrunnable = lambda: (_ for _ in ()).throw(_Entered())
+        return ModelDriver.run(stub)
+    with pytest.raises(_Entered):                     # MPAS + floor on: proceeds
+        run_with(cfg("mpas", "finite_volume"))
+    with pytest.raises(_Entered):                     # any lane, floor off: proceeds
+        run_with(cfg("cubed_sphere", "finite_volume", on=False))
+    with pytest.raises(ValueError, match="finite-volume"):   # FV lane + floor on: refused
+        run_with(cfg("cubed_sphere", "finite_volume"))
     # The pipeline is built on EVERY lane (MPAS included), so the refusal must
     # not live in the builder: the MPAS cap arm died at setup when it did.
     import inspect
-    from legoesm.driver.model_driver import ModelDriver
-    src = inspect.getsource(ModelDriver.run)
-    assert "refuse_cap_floor_on_fv(self.config)" in src
-    assert src.index("refuse_cap_floor_on_fv") < src.index("self._run_fv3_duo(")
     assert "refuse_cap_floor_on_fv" not in inspect.getsource(build_physics_pipeline)
     with pytest.raises(ValueError, match="never be applied"):
         _standalone_cloud_config(SimpleNamespace(cloud_cap_floor_on=True), "none")

@@ -6866,6 +6866,7 @@ class ModelDriver:
         str
             Run status ("COMPLETED" or "BLOWUP at day ...").
         """
+        refuse_cap_floor_on_fv(self.config)
         # SW is not runnable via ModelDriver — reject at the public entry even
         # if a caller reached run() without setup() (codex M2 review).
         self._reject_shallow_water_unrunnable()
@@ -6934,9 +6935,6 @@ class ModelDriver:
             # fv3_duo steps its own six-face bundled pytree — keyed on the
             # DISCRETIZATION (its grid_type is the shared "cubed_sphere"),
             # so it must dispatch before every grid-keyed branch below.
-            if not (self.config.grid.grid_type == "mpas"
-                    or self.config.dycore.discretization == "spectral"):
-                refuse_cap_floor_on_fv(self.config)
             if self.config.dycore.discretization == "fv3_duo":
                 status = self._run_fv3_duo(start_step, start_day)
             elif self.config.grid.grid_type == "mpas":
