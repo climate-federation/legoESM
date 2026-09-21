@@ -4027,8 +4027,11 @@ def test_surface_height_and_saline_flags_round_trip():
     parser = build_arg_parser()
     default_cfg = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical", "--turbulence", "louis"]), parser))
-    assert default_cfg.surface_z_ref_model_level is False
-    assert default_cfg.surface_ocean_q_sfc_saline is False
+    # CLI defaults: the real level height is the production default (owner,
+    # d20698425); the sea-water humidity is None = on where the lane can
+    # honour it (MPAS bridge or tiled surface).
+    assert default_cfg.surface_z_ref_model_level is True
+    assert default_cfg.surface_ocean_q_sfc_saline is None
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--turbulence", "louis",
@@ -4042,8 +4045,8 @@ def test_surface_height_and_saline_flags_round_trip():
     assert surf.z_ref_model_level is True
     assert surf.ocean_q_sfc_saline is True
     assert surf.bulk_scheme == "coare3"
-    # any other lane resolves its kernel past the bridge guard: refuse there
-    with pytest.raises(ValueError, match="MPAS lane only"):
+    # a lane with no ocean/land separation cannot honour the explicit request
+    with pytest.raises(ValueError, match="separates ocean from land"):
         turbulence_config_for(cfg._replace(grid=cfg.grid._replace(grid_type="cubed_sphere")))
 
 
