@@ -1,6 +1,6 @@
 """Unit tests for the Bitz-Lipscomb (1999) sea-ice thermodynamic core.
 
-Pins the physics of ``ice/_future/bitz_lipscomb.py`` (finding F-ICE-1,
+Pins the physics of ``ice/bitz_lipscomb.py`` (finding F-ICE-1,
 the multi-layer enthalpy replacement for the Semtner-0 single skin
 node), ahead of its prognostic-state integration:
 
@@ -21,7 +21,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
-from legoesm.ice._future.bitz_lipscomb import (
+from legoesm.ice.bitz_lipscomb import (
     freezing_temperature,
     ice_enthalpy,
     ice_temperature_from_enthalpy,
