@@ -47,17 +47,27 @@ mkdir -p "$LEGOESM_TEST_SHARED_TMP"
 export JAX_PLATFORMS=cpu
 export OMP_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
+# Optional: covers the two-leaf canopy leaves as well as the soil columns.
+# Without it the canopy rows SKIP (they refuse to run on generic constants).
+: "${LEGOESM_TEST_SURFDATA:=/burg-archive/glab/users/pg2328/legoESM/data/legoesm_surfdata_c260716.nc}"
+export LEGOESM_TEST_SURFDATA
 
 echo "sha=$(git rev-parse --short HEAD) host=$(hostname) $(date -u)"
 "$PY_MPI" -c "import jax, mpi4py; print('jax', jax.__version__, 'mpi4py', mpi4py.__version__)"
 
 TESTS="tests/distributed/test_mpas_multilayer_land_mpi.py tests/unit/test_mpas_qv_smoothing.py"
 
+FAILED=0
 for np in 1 2 4; do
   echo "=== np=$np $(date -u) ==="
   srun --mpi=pmix --cpu-bind=cores -n "$np" \
       "$PY_MPI" -m pytest $TESTS -q -p no:randomly 2>&1 | tail -30
-  echo "=== np=$np exit=${PIPESTATUS[0]} ==="
+  rc=${PIPESTATUS[0]}
+  echo "=== np=$np exit=$rc ==="
+  [ "$rc" -ne 0 ] && FAILED=1
 done
 
-echo "MPAS LAND MPI 1321 ITEM 4 DONE $(date -Is)"
+# The job's OWN exit code has to carry the verdict. Printing a failure and
+# exiting 0 is how a red ladder gets read as a green one (review finding).
+echo "MPAS LAND MPI 1321 ITEM 4 DONE $(date -Is) overall=$([ $FAILED -eq 0 ] && echo PASS || echo FAIL)"
+exit "$FAILED"
