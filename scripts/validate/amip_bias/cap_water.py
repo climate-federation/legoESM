@@ -420,6 +420,7 @@ def transport(args):
     gross in, gross out, net, and the time means of the per-snapshot products (transient
     included) vs the product of the time-mean fields (mean-flow part)."""
     from legoesm.grids.factory import create_grid
+    from legoesm import constants
     print(f"moisture transport across lat >= {args.lat:g} [mm/day over the cap area]; vapour and condensate separately")
     print(f"{'run:day':>14s} {'in':>8s} {'out':>8s} {'net':>8s} {'closure':>9s} {'cond net':>9s} {'prw':>7s}"
           + (f" {'q_in model':>11s} {'q_in ERA5':>10s} {'ratio':>6s} {'extra in':>9s} {'net chg':>8s} {'cover':>6s}" if args.era5_q else ""))
@@ -460,6 +461,10 @@ def transport(args):
         a.setdefault("snaps", []).append((st["trc_q_v"], st["u_edge"], st["dp"]))
         a.setdefault("days", []).append(float(day))
         if args.bins:
+            if args.mass:
+                # AIR-mass transport (q = 1): hPa/day of cap-mean surface pressure equivalent
+                bm = cap_transport_bins(np.ones_like(st["trc_q_v"]), st["u_edge"], st["dp"], st["p_full"], mesh, cap)
+                a.setdefault("mass_bins", []).append(bm * constants.g / A * 86400.0 / 100.0)
             b = cap_transport_bins(st["trc_q_v"], st["u_edge"], st["dp"], st["p_full"], mesh, cap,
                                    qref if args.era5_q else None)
             tot = b.sum(axis=(0, 1))
@@ -488,8 +493,12 @@ def transport(args):
             bins = a["bins"]
             tzb = (0.5 * (bins[0] + bins[-1]) + sum(bins[1:-1])) / (n - 1) if n > 1 else bins[0]
             names = ("above 600", "600-800 hPa", "below 800")
-            for label, B in ((f"trapezoid days {a['days'][0]:g}-{a['days'][-1]:g}", tzb),
-                             (f"day {a['days'][-1]:g} alone", bins[-1])):
+            tables = [(f"trapezoid days {a['days'][0]:g}-{a['days'][-1]:g}", tzb), (f"day {a['days'][-1]:g} alone", bins[-1])]
+            if args.mass:
+                mb = a["mass_bins"]
+                tables.append((f"AIR MASS [hPa/day of cap-mean p_s], trapezoid days {a['days'][0]:g}-{a['days'][-1]:g}",
+                               (0.5 * (mb[0] + mb[-1]) + sum(mb[1:-1])) / (n - 1) if n > 1 else mb[0]))
+            for label, B in tables:
                 print(f"{'':>14s}  layer x sector, {label} [mm/day over the cap]: in / out / net"
                       + (" / ERA5-q net change" if args.era5_q else ""))
                 print(f"{'':>26s}" + "".join(f"{nm:>26s}" for nm, _ in SECTORS) + f"{'ALL':>26s}")
@@ -518,6 +527,8 @@ def main(argv=None) -> int:
     l = sub.add_parser("loop"); l.add_argument("specs", nargs="+"); l.set_defaults(fn=loop)
     t = sub.add_parser("transport"); t.add_argument("specs", nargs="+"); t.set_defaults(fn=transport)
     t.add_argument("--lat", type=float, default=72.5, help="cap boundary latitude [deg N]")
+    t.add_argument("--mass", action="store_true", help="with --bins: also the AIR-mass transport per bin (q = 1), "
+                   "in hPa/day of cap-mean surface-pressure equivalent")
     t.add_argument("--bins", action="store_true", help="layer (600/800 hPa) x 60-degree longitude sector "
                    "decomposition of in/out/net (and the ERA5-q net change), trapezoid mean and last day alone")
     t.add_argument("--era5-q", action="store_true", help="inflow-weighted humidity of the entering air, "
