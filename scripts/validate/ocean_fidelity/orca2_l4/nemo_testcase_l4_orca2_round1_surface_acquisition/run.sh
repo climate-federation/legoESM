@@ -258,11 +258,13 @@ finalize() {
     printf 'REFUSE: B ordinary outputs are not passive to the pinned root\n' >&2
     exit 66
   }
-  "$PYTHON" - "$RUN_A" "$RUN_B" "$inherited" <<'PY'
+  PYTHONPATH="$PYTHONPATH_VALUE" "$PYTHON" - "$RUN_A" "$RUN_B" "$inherited" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
+
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 a, b = map(pathlib.Path, sys.argv[1:3])
 inherited = int(sys.argv[3])
@@ -273,7 +275,14 @@ for path in sorted(a.glob("oracle_ocean_surface_input_kt*.bin")):
     if digest != hashlib.sha256(other.read_bytes()).hexdigest():
         raise SystemExit(f"twin digest mismatch: {path.name}")
     rows.append({"file": path.name, "bytes": path.stat().st_size, "sha256": digest})
+producer = {}
+for name in ("nemo", "compiled_iceistate.f90"):
+    digest = hashlib.sha256((a / name).read_bytes()).hexdigest()
+    if digest != hashlib.sha256((b / name).read_bytes()).hexdigest():
+        raise SystemExit(f"twin producer differs: {name}")
+    producer[name] = digest
 result = {
+    "worktree": worktree_stamp(),
     "status": "PASS",
     "root_label": "VARIANT_ORACLE_ORCA1ICE_ROUND1_SURFACE_INPUTS",
     "inherited_streams_passive": inherited,
@@ -281,6 +290,7 @@ result = {
     "surface_frames_total": len(rows),
     "twin_surface_frames_raw_exact": True,
     "surface_frames": rows,
+    "producer_sha256": producer,
 }
 rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
 (a / "round1_surface_admission.json").write_text(rendered)

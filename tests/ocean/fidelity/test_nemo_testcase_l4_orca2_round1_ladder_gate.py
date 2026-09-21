@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import struct
 
 import numpy as np
@@ -106,3 +107,26 @@ def test_compiled_source_anchors_are_line_rigid(tmp_path):
     path.write_text("\n".join(lines) + "\n")
     with pytest.raises(gate.GateError, match="source anchor missing"):
         gate.validate_compiled_source(path)
+
+
+def test_report_provenance_refuses_an_unstampable_tree(monkeypatch):
+    sentinel = {"commit": "a" * 40, "clean": True}
+    monkeypatch.setattr(gate, "worktree_stamp", lambda: sentinel)
+    assert gate.provenance_stamp() is sentinel
+
+    def refuse():
+        raise RuntimeError("dirty planted tree")
+
+    monkeypatch.setattr(gate, "worktree_stamp", refuse)
+    with pytest.raises(gate.GateError, match="dirty planted tree"):
+        gate.provenance_stamp()
+
+
+def test_acquisition_report_binds_tree_binary_and_compiled_source():
+    run_sh = (
+        Path(gate.__file__).parent
+        / "nemo_testcase_l4_orca2_round1_surface_acquisition/run.sh"
+    ).read_text()
+    assert '"worktree": worktree_stamp()' in run_sh
+    assert 'for name in ("nemo", "compiled_iceistate.f90")' in run_sh
+    assert 'raise SystemExit(f"twin producer differs: {name}")' in run_sh

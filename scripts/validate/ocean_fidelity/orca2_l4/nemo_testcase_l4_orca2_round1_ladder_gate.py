@@ -32,6 +32,8 @@ for package in (
     if str(package) not in sys.path:
         sys.path.insert(0, str(package))
 
+from legoesm.ocean.fidelity.provenance import worktree_stamp
+
 NX, NY, NZ, NTR = 94, 152, 31, 2
 HALO = 2
 FIELD_ORDER = ("T", "S", "u", "v", "ssh")
@@ -65,6 +67,15 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def provenance_stamp() -> dict[str, object]:
+    """Refuse a report whose code cannot be tied to a clean commit."""
+
+    try:
+        return worktree_stamp()
+    except RuntimeError as exc:
+        raise GateError(str(exc)) from exc
 
 
 def _owned_xyz(block: np.ndarray) -> np.ndarray:
@@ -270,11 +281,16 @@ def root_differential(v2_root: Path, orca1ice_root: Path) -> dict[str, object]:
             else:
                 name = f"oracle_stage_kt{kt:08d}_s{stage}.bin"
                 label = f"stage{stage}"
-            left = read_state_frame(v2_root / name, kt=kt, stage=stage)
-            right = read_state_frame(orca1ice_root / name, kt=kt, stage=stage)
+            left_path = v2_root / name
+            right_path = orca1ice_root / name
+            left = read_state_frame(left_path, kt=kt, stage=stage)
+            right = read_state_frame(right_path, kt=kt, stage=stage)
             compared = compare_fields(left, right)
             checkpoints.append({"kt": kt, "checkpoint": label,
-                                "record": name, **compared})
+                                "record": name,
+                                "v2_sha256": sha256(left_path),
+                                "orca1ice_sha256": sha256(right_path),
+                                **compared})
     kt10 = next(
         row for row in checkpoints
         if row["kt"] == 10 and row["checkpoint"] == "entry"
@@ -303,6 +319,7 @@ def run_gate(
     *,
     plant: str | None = None,
 ) -> dict[str, object]:
+    stamp = provenance_stamp()
     source = validate_compiled_source(compiled_source)
     candidate, card = card_fields(deck_root)
     if plant == "kt1_T":
@@ -335,6 +352,7 @@ def run_gate(
     status = "READY_FOR_CANDIDATE_TRAJECTORY" if support["trajectory_supported"] \
         else "STOP_RECORD_GAP"
     return {
+        "worktree": stamp,
         "status": status,
         "card": card.case,
         "whole_step_identity": "orca2_vector_een_c2",
