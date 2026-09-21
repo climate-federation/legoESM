@@ -15,10 +15,11 @@
 #          can run there), XLA:CPU collectives=mpi, jax.distributed via SLURM
 #          (needs >1 hostname, hence --nodes=2)
 # Same deck, same steps; the final snapshots are diffed field by field.
-# PASS: every field within REL_PEAK_MAX (peak-relative) -- the twin is pinned
-# to the authority at 1e-11 per step in test_fv3_physics_coupling; a whole
-# day of steps may compound that, hence the looser gate.  Any NaN, missing
-# snapshot, or non-zero exit REFUSES.
+# PASS: every field within REL_PEAK_MAX (peak-relative), 1e-11 = the twin's
+# per-step pin to the authority in test_fv3_physics_coupling (user call
+# 2026-09-21; measured 2.7e-13 over 144 steps, jobs 9902213/9903984, so a
+# day of steps does not compound it).  Any NaN, missing snapshot, or
+# non-zero exit REFUSES.
 set -uo pipefail
 WT=${WT:-/burg-archive/glab/users/pg2328/legoESM_codex_m8}
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
@@ -43,7 +44,7 @@ export JAX_CPU_COLLECTIVES_IMPLEMENTATION=${COLL:-gloo}
 LAUNCH="$WT/scripts/cluster/fv3_native/bind_rank.sh"
 
 N=${N:-12}; NLEV=${NLEV:-5}; DAYS=${DAYS:-1}; DT=${DT:-600}
-REL_PEAK_MAX=${REL_PEAK_MAX:-1e-9}
+REL_PEAK_MAX=${REL_PEAK_MAX:-1e-11}
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/duo_hs_mp_parity_$SLURM_JOB_ID
 mkdir -p "$OUT"
 echo "sha $(git rev-parse --short HEAD) dirty $(git status --porcelain | wc -l)  nodes $SLURM_JOB_NODELIST  C$N nlev=$NLEV days=$DAYS dt=$DT"
