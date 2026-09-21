@@ -526,6 +526,13 @@ class ExperimentConfig(NamedTuple):
     # Radiation
     radiation: str = "gray"
     rad_update_steps: int = 1
+    # Physics cadence (CAM6 suite): run the WHOLE column physics every N
+    # steps and re-apply its cached tendency set (u, v, T, p_s, every
+    # tracer, precip / surface / TOA diagnostics, ledger rows) on the steps
+    # in between -- CAM's physics-every-1800-s pattern.  1 = every step
+    # (byte-identical to before).  MPAS lane only; ``rad_update_steps`` must
+    # be a multiple of it so radiation stays on physics steps.
+    physics_update_steps: int = 1
     # Un-fuse radiation from the compiled-segment scan (issue: ~3h XLA
     # compile).  Static Python gate (NOT trainable); default OFF keeps
     # every existing run byte-identical.  When True AND
@@ -2555,6 +2562,23 @@ class ExperimentConfig(NamedTuple):
         # alias set via normalize_grid_type per codex F-B3).
         _is_mpas = (d.discretization == "mpas"
                     or normalize_grid_type(g.grid_type) == "mpas")
+        _pus = self.physics_update_steps
+        if not isinstance(_pus, int) or isinstance(_pus, bool) or _pus < 1:
+            errors.append(
+                f"physics_update_steps must be an int >= 1, got {_pus!r}")
+        elif _pus > 1:
+            if not _is_mpas:
+                errors.append(
+                    f"physics_update_steps={_pus} is wired into the MPAS lane "
+                    "only (combined.make_physics cadence variants); it would "
+                    "be silently inert here")
+            _rus = self.rad_update_steps
+            if _rus < _pus or _rus % _pus != 0:
+                errors.append(
+                    f"rad_update_steps={_rus} must be a multiple of "
+                    f"physics_update_steps={_pus} (>= it) so radiation is "
+                    "recomputed on physics steps; a held-physics step cannot "
+                    "solve radiation")
         if _is_mpas:
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
@@ -3572,6 +3596,7 @@ class ExperimentConfig(NamedTuple):
             sic_scale=amip_cfg.sic_scale,
             radiation=amip_cfg.radiation,
             rad_update_steps=amip_cfg.rad_update_steps,
+            physics_update_steps=amip_cfg.physics_update_steps,
             unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
@@ -3793,6 +3818,7 @@ class ExperimentConfig(NamedTuple):
             sic_scale=self.sic_scale,
             radiation=self.radiation,
             rad_update_steps=self.rad_update_steps,
+            physics_update_steps=self.physics_update_steps,
             diurnal_cycle=self.diurnal_cycle,
             co2_ppmv=self.co2_ppmv,
             ch4_ppbv=self.ch4_ppbv,

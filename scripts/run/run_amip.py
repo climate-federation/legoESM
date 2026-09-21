@@ -488,6 +488,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # when the user did not provide a value.  Resolved to ``1`` after
     # production-profile processing.
     parser.add_argument("--rad-update-steps", type=int, default=None)
+    parser.add_argument("--physics-update-steps", type=int, default=1,
+                        help="Run the whole column physics every N steps and "
+                             "re-apply its cached tendencies in between (CAM "
+                             "cadence; MPAS lane). rad-update-steps must be a "
+                             "multiple. 1 = every step.")
     parser.add_argument("--unfused-radiation", action="store_true", default=False,
                         help="Run radiation outside the compiled segment scan")
     parser.add_argument("--per-step-rollout", action="store_true", default=False,
@@ -2101,6 +2106,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sic_scale=args.sic_scale if args.sic_scale is not None else _sic_default,
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
+        physics_update_steps=args.physics_update_steps,
         unfused_radiation=args.unfused_radiation,
         rrtmgp_use_scan=args.rrtmgp_use_scan,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,

@@ -125,6 +125,7 @@ def make_physics(
     land_beta: float = 1.0,
     budget_ledger: bool = False,
     budget_ledger_level_weight=None,
+    physics_cadence: str = "off",
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -190,6 +191,13 @@ def make_physics(
             "sfc_albedo_override / sfc_emissivity_override are only wired for "
             f"model_type='spectral_pe', got {model_type!r}."
         )
+    if physics_cadence not in ("off", "write"):
+        raise ValueError(
+            f"physics_cadence must be 'off' or 'write'; got {physics_cadence!r}")
+    if physics_cadence != "off" and model_type != "mpas":
+        raise ValueError(
+            "physics_cadence (physics_update_steps > 1) is wired into the MPAS "
+            f"lane only; model_type={model_type!r} would silently ignore it")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
             config, dt, column_mesh=column_mesh, need_rad=need_rad)
@@ -206,6 +214,7 @@ def make_physics(
         fn = _make_hydrostatic_combined(
             config, dt, model_type="mpas", column_mesh=column_mesh,
             need_rad=need_rad, f_land=f_land, land_beta=land_beta,
+            physics_cadence=physics_cadence,
             budget_ledger=budget_ledger,
             budget_ledger_level_weight=budget_ledger_level_weight)
     else:
@@ -213,7 +222,8 @@ def make_physics(
             f"Unknown model_type: {model_type!r}. "
             f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
-    fn._requires_phys_state = physics_config_requires_phys_state(config)
+    fn._requires_phys_state = (physics_config_requires_phys_state(config)
+                               or physics_cadence != "off")
     return fn
 
 
@@ -325,6 +335,138 @@ def _attach_lifecycle_hooks(physics_fn, tagged_fns):
 # Hydrostatic
 # ======================================================================
 
+def _copy_physics_fn_attrs(dst, src):
+    # every lifecycle hook / marker the driver probes on a physics fn
+    dst.__dict__.update(getattr(src, "__dict__", {}))
+    dst._requires_phys_state = True
+    return dst
+
+
+def merge_physics_cache(prev, new):
+    """The new tendency pytree in the STRUCTURE of the previous cache.
+
+    Every field the new call produced replaces the cached one, re-wrapped in
+    the cached Field (metadata and dtype from the seed, so the held-radiation
+    variant's differently-named first module cannot change the carry
+    structure); a field the new call did not produce (radiation-only
+    diagnostics on a held-radiation step) keeps its cached value -- the same
+    keep-last-per-slot rule the dycore's surface-diagnostic bundle applies.
+    Any other structural difference raises.
+    """
+    if type(new) is not type(prev):
+        raise ValueError(
+            f"physics cache: seed is {type(prev).__name__}, step produced "
+            f"{type(new).__name__}")
+    out = {}
+    for f in type(prev)._fields:
+        vp, vn = getattr(prev, f), getattr(new, f, None)
+        if f == "tracer_tendencies":
+            if vp is None:
+                if vn is not None:
+                    raise ValueError("physics cache: the seed has no tracer "
+                                     "tendencies but this step produced some")
+                out[f] = None
+            elif vn is None:
+                out[f] = vp
+            else:
+                if set(vn) != set(vp):
+                    raise ValueError(
+                        "physics cache: tracer set changed between the seed "
+                        f"{sorted(vp)} and this step {sorted(vn)}")
+                out[f] = {k: vp[k].replace(data=_same_shape(f, vp[k].data, vn[k].data))
+                          for k in vp}
+            continue
+        elif vp is None:
+            if vn is not None:
+                raise ValueError(
+                    f"physics cache: the seed has no {f!r} but this step produced "
+                    "one; seed the cache from the full variant")
+            out[f] = None
+        elif vn is None:
+            out[f] = vp
+        elif isinstance(vp, Field):
+            out[f] = vp.replace(data=_same_shape(f, vp.data, vn.data))
+        else:
+            out[f] = _same_shape(f, jnp.asarray(vp), jnp.asarray(vn))
+    return type(prev)(**out)
+
+
+def _same_shape(name, cached, new):
+    if new.shape != cached.shape:
+        raise ValueError(
+            f"physics cache: {name} shape changed from the seed {cached.shape} "
+            f"to {new.shape}")
+    return new.astype(cached.dtype)
+
+
+# leafless marker `physics_cache_seed` puts in ``held_physics`` while tracing
+# (a bare object is not a pytree leaf jax.eval_shape can abstract)
+_SEEDING = ()
+
+
+def _with_physics_cache(physics_fn):
+    def cached_physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
+        out = physics_fn(state, grid, sigma_coord, phys_state=phys_state, forcing=forcing)
+        tend, ps_out = (out if type(out) is tuple else (out, None))
+        if ps_out is None:
+            ps_out = phys_state
+        if ps_out is None:
+            raise ValueError(
+                "physics cadence 'write' needs a PhysicsState carry to hold the "
+                "cache; step was called with phys_state=None")
+        prev = phys_state.held_physics
+        if prev == _SEEDING:
+            return tend, ps_out
+        if prev is None:
+            raise ValueError(
+                "physics cadence 'write' with an unseeded PhysicsState.held_physics: "
+                "seed it with physics_cache_seed() so the carry structure is fixed "
+                "before the first step")
+        ps_out = update_physics_state(ps_out, {"held_physics": merge_physics_cache(prev, tend)})
+        return tend, ps_out
+    return _copy_physics_fn_attrs(cached_physics_fn, physics_fn)
+
+
+def held_physics_variant(physics_fn):
+    """The held-physics step: returns ``PhysicsState.held_physics`` unchanged.
+
+    Derived from the built ``"write"`` physics fn (no second construction of
+    the module chain); carries every hook/marker of the source fn.  Apply any
+    outer wrapper (Held-Suarez) to the derived fn separately.
+    """
+    def held_physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
+        cache = getattr(phys_state, "held_physics", None) if phys_state is not None else None
+        if cache is None:
+            raise ValueError(
+                "held-physics step with an empty PhysicsState.held_physics: seed it with "
+                "physics_cache_seed() and run a physics ('write') step first")
+        # per-step INPUT fields are consumed (reset) like on any other call
+        return cache, update_physics_state(phys_state, {})
+    held_physics_fn = _copy_physics_fn_attrs(held_physics_fn, physics_fn)
+    # reads no neighbour cell (no state at all): the MPI step skips the halo
+    # exchange before it
+    held_physics_fn._column_local = True
+    return held_physics_fn
+
+
+def physics_cache_seed(physics_fn, state, grid, sigma_coord, phys_state, forcing=None):
+    """Zero-filled ``held_physics`` with the full variant's output structure.
+
+    Traced with ``jax.eval_shape`` (no compute, no compile), so the carry has
+    its final structure BEFORE the first jitted step and the full variant is
+    compiled once.  Pass the state in the precision the step hands the
+    physics (the dycore casts to the compute policy); the merge also casts
+    every write to the seed's dtype, so the carry's dtypes are fixed here.
+    """
+    import jax
+    def _f(s, ps, f):
+        out = physics_fn(s, grid, sigma_coord, phys_state=ps, forcing=f)
+        return out[0] if type(out) is tuple else out
+    shapes = jax.eval_shape(
+        _f, state, phys_state._replace(held_physics=_SEEDING), forcing)
+    return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), shapes)
+
+
 def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                model_type: str = "hydrostatic",
                                column_mesh=None,
@@ -332,8 +474,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                f_land=None,
                                land_beta: float = 1.0,
                                budget_ledger: bool = False,
-                               budget_ledger_level_weight=None) -> Callable:
+                               budget_ledger_level_weight=None,
+                               physics_cadence: str = "off") -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
+
+    ``physics_cadence``: ``"off"`` (default, byte-identical to before);
+    ``"write"`` additionally stores the full tendency pytree of every call in
+    ``PhysicsState.held_physics`` (seed it with :func:`physics_cache_seed`;
+    :func:`held_physics_variant` derives the step that re-applies it).
 
     Uses the unified ``HydrostaticTendencies`` with optional ``dv_dt``.
     When *model_type* is ``"mpas"``, the radiation factory is called
@@ -796,7 +944,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
-    return _attach_lifecycle_hooks(physics_fn, tagged_fns)
+    physics_fn = _attach_lifecycle_hooks(physics_fn, tagged_fns)
+    if physics_cadence == "write":
+        physics_fn = _with_physics_cache(physics_fn)
+    return physics_fn
 
 
 # ======================================================================
