@@ -453,6 +453,23 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
                 ext_scalar_sixface_allk(
                     jnp.moveaxis(base, 1, -1), tab, "A"),
                 -1, 1)
+            # WINDOW lane: the exchange above is a band-restricted firing
+            # (face-edge bands only), so each sub-iteration eats one
+            # stencil reach of intra-face seam pad and nothing rebuilds
+            # it mid-phase.  MEASURED (C24 kt=2 pad=5, jobs 9913482/4):
+            # nsplt=2 bitwise, nsplt=3 corrupts q (1056 -> 25883 of
+            # 27000 cells in 3 steps; dynamics untouched).  A full seam
+            # refresh per sub-iteration, exactly the acoustic-substep
+            # entry pattern, makes the tracer phase pad-depth-safe for
+            # any nsplt.  ponytail: fires on every masked scan slot too
+            # (NSPLT_MAX per level); gate it on `run` via lax.cond if
+            # the ladder shows it.  No-op on the six-face lane.
+            _wc = getattr(tab, "window_comm", None)
+            if _wc is not None:
+                _ref = _wc.refresh({f"q{iq}": exch[:, iq]
+                                    for iq in range(nq)})
+                exch = jnp.stack([_ref[f"q{iq}"] for iq in range(nq)],
+                                 axis=1)
             # PROVEN no-op when inactive: where returns the old arrays
             # bit-exactly; both arms are total and finite (rule 2).
             return (jnp.where(run, exch, qn2),

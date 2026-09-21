@@ -394,3 +394,45 @@ def test_tracer_stays_finite_beyond_two_steps(setup):
             f"{int((~np.isfinite(q0)).sum())} owned cells")
         for nm in ("u", "v", "pt", "delp"):
             assert np.isfinite(np.asarray(flat["state"][nm])).all(), (step, nm)
+
+
+def test_tracer_multi_subcycle_matches_faces(setup):
+    """The window tracer phase must match the face model when the
+    transport SUB-CYCLES (nsplt >= 3).
+
+    Every earlier window certificate resolved nsplt=1 on every level
+    (gate logs 9912851/2, 9913366).  Each transport sub-iteration's
+    exchange is a band-restricted firing, so intra-face seam pads erode
+    one stencil reach per sub-iteration and the phase's ENTRY refresh
+    does not reach them: at C24 kt=2 pad=5, nsplt=2 was bitwise and
+    nsplt=3 corrupted the tracer (gate jobs 9913482/9913484, 1056 owned
+    cells at step 1, dynamics untouched).  A 30000 s outer step at the
+    same acoustic dt (n_split=800) resolves nsplt=3 on the top level;
+    asserted so the case cannot silently fall back to the certified
+    nsplt=1 regime.  FAILS on the tree without the per-sub-iteration
+    seam refresh (fv3_tracer2d).
+    """
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel)
+    from legoesm.grids.factory import create_fv3_duo_grid
+    grid = create_fv3_duo_grid(N)
+    cfg = FV3DuoConfig(km=KM, hydrostatic=True, n_split=800)
+    ref_model = FV3DuoDynamicsModel(grid, cfg)
+    ref = ref_model.step(ref_model.dcmip16_initial_state(do_pert=True),
+                         30000.0)
+    mesh = Mesh(np.array(jax.devices()[:6 * KT * KT]).reshape(6, KT, KT),
+                ("face", "tile_i", "tile_j"))
+    win_model = FV3DuoDynamicsModel(grid, cfg, step_spmd_mesh=mesh,
+                                    step_windows=(KT, 5))
+    win = win_model.step(win_model.dcmip16_initial_state(do_pert=True),
+                         30000.0)
+    ns = np.asarray(win_model.last_nsplt)
+    assert ns.max() >= 3, f"case fell back to the certified regime: {ns}"
+    flat = win_model.to_flat(win)
+    q_ref, q_win = np.asarray(ref["q"][0]), np.asarray(flat["q"][0])
+    assert np.isfinite(q_win).all()
+    assert np.array_equal(q_ref, q_win), (
+        f"tracer differs in {int((q_ref != q_win).sum())} owned cells")
+    for nm in ("u", "v", "pt", "delp"):
+        assert np.array_equal(np.asarray(ref["state"][nm]),
+                              np.asarray(flat["state"][nm])), nm
