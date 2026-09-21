@@ -765,7 +765,47 @@ class DiagnosticCollector:
         )
         return T_2m
 
-    def _clt_percent(self, T, p_s, q_v, q_c, q_i=None):
+    def _cam6_cloud_kwargs(self, cloud_fraction, conv_mass_flux_up,
+                           conv_icwmr, lat_deg, p_s, ncol, nlev):
+        """Extra ``compute_cloud_properties`` kwargs for cloud_scheme
+        'cam6_clubb': the CLUBB cloud fraction + deep-convection carries, lat
+        [rad] and interface pressures.  Empty (byte-identical call) for every
+        other scheme; a cam6 run without the carry raises here rather than
+        silently scoring an RH cloud cover the radiation never used.
+
+        SAMPLING: the carry handed in is the one written by THIS step's
+        physics (CLUBB's current PDF fraction), applied to the current state;
+        the radiation call read the carry as it stood at its last update
+        (one physics step behind, more under radiation subcycling).  clt/clivi
+        therefore describe the model's CURRENT cloud field, not a readout of
+        what radiation integrated -- the same convention the conv_precip
+        convective cover and the RH schemes' clt already follow."""
+        if getattr(self._cloud_config, "scheme", None) != "cam6_clubb":
+            return {}
+        if (cloud_fraction is None or conv_mass_flux_up is None
+                or conv_icwmr is None or lat_deg is None):
+            raise ValueError(
+                "cloud_scheme='cam6_clubb' diagnostics need the lagged "
+                "cloud_fraction / conv_mass_flux_up / conv_icwmr carries and "
+                "lat_deg; got None.")
+        if self.vcoord is None:
+            raise ValueError(
+                "cloud_scheme='cam6_clubb' diagnostics need interface "
+                "pressures (a vertical coordinate on the collector); got none.")
+        return dict(
+            p_half=jnp.reshape(
+                jnp.asarray(self.vcoord.pressure_at_half(
+                    jnp.reshape(jnp.asarray(p_s), (ncol,)))), (ncol, nlev + 1)),
+            cloud_fraction_override=jnp.reshape(
+                jnp.asarray(cloud_fraction), (ncol, nlev)),
+            lat=jnp.deg2rad(jnp.reshape(jnp.asarray(lat_deg), (ncol,))),
+            conv_mass_flux_up=jnp.reshape(
+                jnp.asarray(conv_mass_flux_up), (ncol, nlev + 1)),
+            conv_icwmr=jnp.reshape(jnp.asarray(conv_icwmr), (ncol, nlev)),
+        )
+
+    def _clt_percent(self, T, p_s, q_v, q_c, q_i=None, *, cloud_fraction=None,
+                     conv_mass_flux_up=None, conv_icwmr=None, lat_deg=None):
         """Total cloud cover [%] under MAXIMUM-RANDOM overlap, or ``None``.
 
         SHARED by the cube/lat-lon :meth:`collect` path and the lean MPAS
@@ -820,6 +860,9 @@ class DiagnosticCollector:
             self._cloud_config,
             q_cloud=jnp.reshape(q_c, (ncol, nlev)),
             q_ice=q_ice_col,
+            **self._cam6_cloud_kwargs(
+                cloud_fraction, conv_mass_flux_up, conv_icwmr, lat_deg,
+                p_s, ncol, nlev),
         )
         return np.asarray(
             jnp.reshape(maximum_random_overlap(cloud_props.cloud_fraction),
@@ -1484,6 +1527,9 @@ class DiagnosticCollector:
         T,
         p_s,
         lat_deg=None,
+        cloud_fraction=None,
+        conv_mass_flux_up=None,
+        conv_icwmr=None,
         q_v=None,
         q_c=None,
         q_i=None,
@@ -1801,7 +1847,11 @@ class DiagnosticCollector:
             # ``collect`` path uses, so the MPAS lane cannot report a
             # different cloud cover for an identical state.  Skipped (not
             # zeroed) on a cloud-free run -- see ``_clt_percent``.
-            clt_field = self._clt_percent(T_np, p_s_np, q_v_np, q_c_np, q_i_np)
+            clt_field = self._clt_percent(
+                T_np, p_s_np, q_v_np, q_c_np, q_i_np,
+                cloud_fraction=cloud_fraction,
+                conv_mass_flux_up=conv_mass_flux_up,
+                conv_icwmr=conv_icwmr, lat_deg=lat_deg)
             if clt_field is not None:
                 r = self._regrid_to_latlon_2d(clt_field)
                 if r is not None:
@@ -1863,6 +1913,9 @@ class DiagnosticCollector:
                     # still get clivi); both None keeps the fields absent.
                     q_cloud=None if q_c_np is None else jnp.asarray(q_c_np),
                     q_ice=None if q_i_np is None else jnp.asarray(q_i_np),
+                    **self._cam6_cloud_kwargs(
+                        cloud_fraction, conv_mass_flux_up, conv_icwmr,
+                        lat_deg, p_s_np, *np.shape(T_np)[-2:]),
                 )
                 self._cloud_paths_radiative = True
                 # Per-layer grid-mean paths [kg/m2] -> column path.

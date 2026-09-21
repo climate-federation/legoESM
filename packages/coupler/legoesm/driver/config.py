@@ -417,7 +417,7 @@ VALID_TURBULENCE = (
 
 VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
 
-VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved")
+VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_clubb")
 
 # ``gravity_wave_drag`` additionally accepts a ``+``-joined COMPOSITION of these
 # (e.g. "hines+mcfarlane"); validate_strict splits on "+" before membership.
@@ -2178,22 +2178,72 @@ class ExperimentConfig(NamedTuple):
                 "pipeline); it would silently run 'constant'.  Use a "
                 "pipeline backend (cd-grid / latlon) or scheme='constant'."
             )
-        # use_clubb_cloud_fraction is enforced (turbulence must be clubb) only
-        # inside build_physics_pipeline, which the mpas/spectral standalone
-        # radiation paths never build — so the opt-in would silently no-op
-        # there.  Reject it loudly on those backends (dispatch-hardening,
-        # mirrors the condensate-scheme guard above).
+        # use_clubb_cloud_fraction is enforced (turbulence must be clubb) by
+        # build_physics_pipeline (cd-grid / latlon) and by combined.make_physics
+        # (MPAS); the spectral standalone radiation path builds neither, so the
+        # opt-in would silently no-op there.  Reject it loudly on that backend
+        # (dispatch-hardening, mirrors the condensate-scheme guard above).
         if (self.use_clubb_cloud_fraction
-                and self.dycore.discretization
-                in _NO_CLOUD_THREAD_DISCRETIZATIONS):
+                and self.dycore.discretization == "spectral"):
             errors.append(
                 "use_clubb_cloud_fraction=True is not wired into the "
                 f"{self.dycore.discretization!r} radiation path (that backend "
                 "builds RadiationConfig directly, bypassing the shared physics "
                 "pipeline that enforces it); it would silently no-op.  Use a "
-                "pipeline backend (cd-grid / latlon) with turbulence='clubb', "
-                "or drop --use-clubb-cloud-fraction."
+                "pipeline backend (cd-grid / latlon) or MPAS with "
+                "turbulence='clubb', or drop --use-clubb-cloud-fraction."
             )
+        # The CLUBB cloud-fraction routing needs the producer on EVERY lane
+        # (build_physics_pipeline / combined.make_physics both raise at build
+        # time; fail at config time too so a deck is refused before setup).
+        if self.use_clubb_cloud_fraction and self.turbulence != "clubb":
+            errors.append(
+                "use_clubb_cloud_fraction=True requires turbulence='clubb' "
+                "(the only cloud-fraction-producing closure); got "
+                f"{self.turbulence!r}."
+            )
+        # CAM6 cloud fraction (cldfrc2m ice stratus + CLUBB liquid + deepcu):
+        # the liquid part IS the CLUBB PDF fraction, so it needs the producer
+        # and the carry routing; wired on the MPAS combined-physics lane only
+        # (the FV pipeline's cloud call and the cube CMOR collector do not
+        # thread lat / the deep-convection carries).
+        if self.cloud_scheme == "cam6_clubb":
+            if self.turbulence != "clubb":
+                errors.append(
+                    "cloud_scheme='cam6_clubb' takes its liquid cloud fraction "
+                    "from CLUBB's PDF; requires turbulence='clubb', got "
+                    f"{self.turbulence!r}."
+                )
+            if not self.use_clubb_cloud_fraction:
+                errors.append(
+                    "cloud_scheme='cam6_clubb' requires "
+                    "use_clubb_cloud_fraction=True (routes the CLUBB cloud-"
+                    "fraction carry to radiation); got False."
+                )
+            if self.dycore.discretization != "mpas":
+                errors.append(
+                    "cloud_scheme='cam6_clubb' is wired on the MPAS lane only; "
+                    f"got discretization={self.dycore.discretization!r}."
+                )
+            if self.convective_cloud:
+                errors.append(
+                    "cloud_scheme='cam6_clubb' carries its own deep-convective "
+                    "fraction (clubb_intr deepcu); convective_cloud=True is "
+                    "not part of CAM6 and is refused."
+                )
+            if self.microphysics == "none":
+                errors.append(
+                    "cloud_scheme='cam6_clubb' has no diagnostic condensate "
+                    "floor (CAM6 radiates the prognostic condensate); requires "
+                    "a microphysics scheme, got microphysics='none'."
+                )
+            if self.radiation not in ("rrtmgp", "rrtmg"):
+                errors.append(
+                    "cloud_scheme='cam6_clubb' needs a cloud-path radiation "
+                    "(rrtmgp/rrtmg) -- 'gray'/'none' return before the cloud "
+                    "call, so the CAM6 cloud field would radiate nothing while "
+                    f"clt/clivi report it; got radiation={self.radiation!r}."
+                )
         # Cross-field: the diagnostic-condensate FLOOR exists only for the
         # sub-grid diagnostic-fraction schemes (sundqvist / xu_randall); 'none'
         # skips clouds and 'resolved' (CRM) excludes the floor.  It is radiatively

@@ -230,6 +230,15 @@ class PhysicsState(NamedTuple):
     surface_lhflx_override_w_m2: jnp.ndarray = None   # [W/m^2] latent, positive up
     surface_tau_x_override_pa: jnp.ndarray = None     # [Pa] eastward stress on the atmosphere
     surface_tau_y_override_pa: jnp.ndarray = None     # [Pa] northward stress on the atmosphere
+    # CAM6 ``cam6_clubb`` deep-convective cloud-fraction inputs, written by a
+    # convection scheme that exposes ``ConvectionOutput.mass_flux_up`` /
+    # ``icwmr`` and read one step LAGGED by radiation (same convention as
+    # ``conv_precip``).  Interface updraft mass flux (ncol, nlev+1) [kg/m^2/s]
+    # top->bottom, and deep in-cloud condensate (ncol, nlev) [kg/kg]; always
+    # materialised as zeros (uniform pytree; zero => deepcu exactly 0).
+    # Appended LAST so positional constructors keep their field order.
+    conv_mass_flux_up: jnp.ndarray = None
+    conv_icwmr: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -413,6 +422,8 @@ def init_physics_state(
         # Lagged convective surface precip for the standalone-path Slingo-1987-inspired surrogate
         # cumulus cloud fraction; zeros before the first convection step.
         conv_precip=jnp.zeros((ncol,), dtype=dtype),
+        conv_mass_flux_up=jnp.zeros((ncol, nlev + 1), dtype=dtype),
+        conv_icwmr=jnp.zeros((ncol, nlev), dtype=dtype),
     )
 
 
@@ -494,4 +505,7 @@ def update_physics_state(phys_state, updates):
         # carried forward unchanged when the step's convection published
         # nothing (schemes without a rain split).
         conv_precip=updates.get("conv_precip", phys_state.conv_precip),
+        conv_mass_flux_up=updates.get(
+            "conv_mass_flux_up", phys_state.conv_mass_flux_up),
+        conv_icwmr=updates.get("conv_icwmr", phys_state.conv_icwmr),
     )
