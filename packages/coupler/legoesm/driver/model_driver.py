@@ -763,7 +763,7 @@ class _MPASSfcFluxAccum:
             self.window_start_day = float(window_start_day)
 
 
-def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
+def _mpas_hard_saturation_poststep(T, q_v, q_c, p_full, dt,
                                    hard_threshold, hard_max_heating_K,
                                    ice_curve=False, q_i=None):
     """MPAS POST-STEP hard-saturation-adjustment drain (array-level, testable).
@@ -771,26 +771,24 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
     Applies the reviewed hard-saturation-adjustment DRAIN
     (:func:`legoesm.atmosphere.physics.microphysics._warm_rain.hard_saturation_drain`
     -- bracketed-bisection on-curve solve + per-step latent-heating & vapour
-    rate limit) on the FINAL post-dycore state, on the pure-sigma pressure
-    ``p_full = p_s * sigma_full`` (the SAME convention the driver diagnostics
-    use; this MPAS path is pure sigma, so the hybrid A_full/B_full reduce to
-    sigma_full).  Conserves ``c_pd*T + L_v*q_v`` exactly: the SAME drain
+    rate limit) on the FINAL post-dycore state, on the caller-supplied
+    full-level pressure ``p_full`` (the driver passes
+    ``self.sigma.pressure_at_full(p_s)``, correct on both the sigma and the
+    hybrid lanes).  Conserves ``c_pd*T + L_v*q_v`` exactly: the SAME drain
     ``dq = rate*dt`` is removed from vapour, added to cloud water, and heats T by
     ``(L_v/c_pd)*dq``.  A pure drain (>= 0) -- no spurious evaporation.
 
     Parameters
     ----------
-    T, q_v, p_s : array
-        Temperature [K] (ncol, nlev), vapour [kg/kg] (ncol, nlev), surface
-        pressure [Pa] (ncol,).
+    T, q_v, p_full : array
+        Temperature [K] (ncol, nlev), vapour [kg/kg] (ncol, nlev), full-level
+        pressure [Pa] (ncol, nlev).
     q_c : array or None
         Cloud water [kg/kg] (ncol, nlev), the condensate RECIPIENT.  ``None`` if
         the run carries no q_c tracer -> the drain is a NO-OP (there is no
         reservoir to receive the condensate; draining vapour with nowhere to put
         it would LOSE total water).  On the moist warm-rain MPAS path q_c is
         always present (the driver hook additionally gates on it).
-    sigma_full : array
-        Full-level sigma (nlev,).
     dt : float
         Dycore step [s].
     hard_threshold, hard_max_heating_K : float
@@ -822,11 +820,14 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
         mixed_phase_l_over_cp,
         mixed_phase_liquid_fraction,
     )
+    if p_full.shape != T.shape:
+        raise ValueError(
+            f"p_full must be the full-level pressure {T.shape}, got "
+            f"{p_full.shape} (a bare sigma array is no longer accepted).")
     if q_c is None:
         # No condensate reservoir -> cannot conserve total water by draining;
         # do nothing (the moist path always has q_c).
         return T, q_v, None, q_i, jnp.zeros_like(q_v)
-    p_full = p_s[:, None] * jnp.asarray(sigma_full)[None, :]
     # The ice curve DEPOSITS to cloud ice; without a q_i reservoir it cannot do
     # so, and heating with the blended (L_s-weighted) latent heat while binning
     # the condensate as LIQUID q_c would inject (1-w)*L_f*dq of spurious energy.
@@ -2313,9 +2314,10 @@ class ModelDriver:
             # and the vertical humidity taper on this grid keeps the moisture
             # consistent with the temperature state AND with the first physics
             # step, so a topography+hybrid run does not start supersaturated on a
-            # mismatched pressure grid.  (Do NOT switch to pressure_at_full here
-            # unless the whole physics pipeline is migrated to it too.)
-            p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
+            # mismatched pressure grid -- the same ``pressure_at_full`` every
+            # physics bridge and the driver now use (sigma-pressure ratchet:
+            # tests/test_no_sigma_pressure_reimpl.py).
+            p_full_init = self.sigma.pressure_at_full(self.state.p_s.data)
             q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
             self.tracers["q_v"] = cfg.rh_init * q_sat_init * self.sigma.sigma_full ** 2
             self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
@@ -2326,6 +2328,7 @@ class ModelDriver:
                 jnp.mean(column_water_vapor(
                     self.tracers["q_v"], self.state.p_s.data,
                     self.sigma.dsigma,
+                    dp=self.sigma.layer_thickness_dp(self.state.p_s.data),
                 )),
             ])
             _h = np.asarray(_stats)
@@ -2535,6 +2538,7 @@ class ModelDriver:
                     jnp.mean(column_water_vapor(
                         self.tracers["q_v"], self.state.p_s.data,
                         self.sigma.dsigma,
+                        dp=self.sigma.layer_thickness_dp(self.state.p_s.data),
                     )),
                     jnp.mean(self.state.T.data),
                 ])
@@ -2553,6 +2557,7 @@ class ModelDriver:
                     jnp.mean(column_water_vapor(
                         self.tracers["q_v"], self.state.p_s.data,
                         self.sigma.dsigma,
+                        dp=self.sigma.layer_thickness_dp(self.state.p_s.data),
                     )),
                     jnp.mean(self.state.T.data),
                 ])
@@ -3704,8 +3709,8 @@ class ModelDriver:
         shape_2d = p_s.shape
         ncol = int(np.prod(np.array(shape_2d)))
 
-        p_full = p_s[..., None] * self.sigma.sigma_full
-        p_half = p_s[..., None] * self.sigma.sigma_half
+        p_full = self.sigma.pressure_at_full(p_s)
+        p_half = self.sigma.pressure_at_half(p_s)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
         lat_col = lat.reshape(ncol)
@@ -4251,7 +4256,7 @@ class ModelDriver:
                 Handles arbitrary lat shapes: (6,n,n) for cubed-sphere,
                 (n_lat, n_lon) for lat-lon, (n_lat,) for Gaussian.
                 """
-                p_full = p_s[..., None] * sigma_full
+                p_full = self.sigma.pressure_at_full(p_s)
                 # Expand lat to broadcast with (... , nlev)
                 n_expand = p_full.ndim - lat.ndim
                 lat_exp = lat
@@ -11337,7 +11342,7 @@ class ModelDriver:
                 (_T_hs, _qv_hs, _qc_hs, _qi_hs,
                  _dq_hs) = _mpas_hard_saturation_poststep(
                     self.state.T.data, _trc["q_v"].data, _qc_fld.data,
-                    self.state.p_s.data, self.sigma.sigma_full, DT,
+                    self.sigma.pressure_at_full(self.state.p_s.data), DT,
                     _hard_sat_threshold, _hard_sat_max_heating,
                     ice_curve=_hard_sat_ice_curve,
                     q_i=None if _qi_fld is None else _qi_fld.data)
@@ -11364,8 +11369,7 @@ class ModelDriver:
                     if (_ni_fld is not None and _ice_nuc_mass is not None
                             and _n_i_nuc_max is not None):
                         _dq_i_dep = _qi_hs - _qi_fld.data
-                        _pf = self.state.p_s.data[:, None] * jnp.asarray(
-                            self.sigma.sigma_full)[None, :]
+                        _pf = self.sigma.pressure_at_full(self.state.p_s.data)
                         _new_trc["N_i"] = _ni_fld.replace(
                             data=_seed_nucleated_ice_number(
                                 _ni_fld.data, _dq_i_dep, _ice_nuc_mass,
@@ -11417,7 +11421,8 @@ class ModelDriver:
                     )
                     _cwv_field = column_water_vapor(
                         self.state.tracers["q_v"].data, p_s_data,
-                        self.sigma.dsigma)
+                        self.sigma.dsigma,
+                        dp=self.sigma.layer_thickness_dp(p_s_data))
 
                 if self._voronoi_layout is not None:
                     # MPAS cell-partition MPI: the state spans owned+halo
@@ -15626,7 +15631,7 @@ class ModelDriver:
         self._apply_double_moment_tendencies(phys_out, DT)
 
         if MICROPHYSICS == "none":
-            p_full = self.state.p_s.data[..., None] * sigma_full
+            p_full = self.sigma.pressure_at_full(self.state.p_s.data)
             q_sat = saturation_mixing_ratio(new_T, p_full)
             excess = jnp.maximum(self.q_v - q_sat, 0.0)
             self.q_v = self.q_v - excess
@@ -15782,13 +15787,13 @@ class ModelDriver:
 
             # Saturation adjustment
             if MICROPHYSICS == "none":
-                p_full = self.state.p_s.data[..., None] * sigma_full
+                p_full = self.sigma.pressure_at_full(self.state.p_s.data)
                 q_sat = saturation_mixing_ratio(new_T, p_full)
                 excess = jnp.maximum(self.q_v - q_sat, 0.0)
                 self.q_v = self.q_v - excess
                 new_T = new_T + constants.L_v * excess / constants.c_pd
                 precip_ls = jnp.sum(
-                    excess * self.state.p_s.data[..., None] * dsigma, axis=-1
+                    excess * self.sigma.layer_thickness_dp(self.state.p_s.data), axis=-1
                 ) / (constants.g * DT)
             else:
                 precip_ls = jnp.zeros(shape_2d, dtype=new_T.dtype)

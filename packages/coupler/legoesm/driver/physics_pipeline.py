@@ -146,6 +146,7 @@ class PhysicsPipeline:
         sigma_full,
         sigma_half,
         dsigma,
+        sigma_coord,
         convection_fn,
         convection_config,
         radiation_fn,
@@ -173,6 +174,7 @@ class PhysicsPipeline:
         self.sigma_full = sigma_full
         self.sigma_half = sigma_half
         self.dsigma = dsigma
+        self.sigma_coord = sigma_coord
         self.convection_fn = convection_fn
         self.convection_config = convection_config
         self.radiation_fn = radiation_fn
@@ -534,7 +536,7 @@ class PhysicsPipeline:
         two use ONE consistent transfer estimate (no re-derived bulk
         formula).  ``1.0`` is the [m^2/s^2] wind-speed floor.
         """
-        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T_low)
+        rho_low = self.sigma_coord.pressure_at_full(p_s)[..., -1] / (constants.R_d * T_low)
         wind_speed = jnp.sqrt(u_low ** 2 + v_low ** 2 + 1.0)
         return rho_low, wind_speed
 
@@ -706,7 +708,7 @@ class PhysicsPipeline:
         # SAME lowest-full-level density the turbulence path feeds its surface
         # layer (rho_col_phys[:, -1] = p_full/(R_d*T)), NOT the legacy
         # _land_surface_bulk value — the law must see identical inputs.
-        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T_air)
+        rho_low = self.sigma_coord.pressure_at_full(p_s)[..., -1] / (constants.R_d * T_air)
         if self.surface_tiled:
             cfg = self._land_tile_surface_cfg()
         else:
@@ -1168,8 +1170,8 @@ class PhysicsPipeline:
         else:
             beta_land = None
 
-        p_full = p_s[..., None] * self.sigma_full
-        p_half = p_s[..., None] * self.sigma_half
+        p_full = self.sigma_coord.pressure_at_full(p_s)
+        p_half = self.sigma_coord.pressure_at_half(p_s)
 
         # Flatten to columns via adapter
         T_col = ad.flatten_3d(T)
@@ -1770,8 +1772,7 @@ class PhysicsPipeline:
             # (precip_efficiency=0) -> no-op, byte-identical.
             if conv_out.dq_r_conv_dt is not None:
                 dq_r_dt_conv = ad.unflatten_3d(conv_out.dq_r_conv_dt)
-                _dp_r = p_s[..., None] * (
-                    self.sigma_half[1:] - self.sigma_half[:-1])
+                _dp_r = self.sigma_coord.layer_thickness_dp(p_s)
                 precip_conv_rain = jnp.maximum(
                     jnp.sum(dq_r_dt_conv * _dp_r / constants.g, axis=-1),
                     0.0)  # (..., n, n) kg/m2/s in-updraft rain to the surface
@@ -1782,7 +1783,7 @@ class PhysicsPipeline:
             # from q_v == surface precip, independent of how a scheme defines
             # its dq_c_conv_dt — sbm/dca rescale it to this, but Kuo's
             # heating-derived condensate does not equal it exactly).
-            _dp = p_s[..., None] * (self.sigma_half[1:] - self.sigma_half[:-1])
+            _dp = self.sigma_coord.layer_thickness_dp(p_s)
             precip_conv = jnp.maximum(
                 -jnp.sum(dq_v_dt_conv * _dp / constants.g, axis=-1),
                 0.0)  # (..., n, n) kg/m2/s
@@ -1803,9 +1804,9 @@ class PhysicsPipeline:
         # bottom-layer T/q kick when no turbulence scheme owns surface
         # exchange.  If turbulence is active, its TurbulenceOutput.shflx /
         # lhflx overrides the bulk values further below.
-        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T[..., -1])
+        rho_low = self.sigma_coord.pressure_at_full(p_s)[..., -1] / (constants.R_d * T[..., -1])
         wind_speed = jnp.sqrt(u[..., -1] ** 2 + v[..., -1] ** 2 + 1.0)
-        dp_low = p_s * (self.sigma_half[-1] - self.sigma_half[-2])
+        dp_low = self.sigma_coord.layer_thickness_dp(p_s)[..., -1]
 
         shflx = rho_low * constants.c_pd * _C_H * wind_speed * (T_sfc - T[..., -1])
         q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
@@ -2558,8 +2559,8 @@ class PhysicsPipeline:
                 sfc_sw_down >= _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2,
                 jnp.nan_to_num(_alb), albedo)
 
-        p_full = p_s[..., None] * self.sigma_full
-        p_half = p_s[..., None] * self.sigma_half
+        p_full = self.sigma_coord.pressure_at_full(p_s)
+        p_half = self.sigma_coord.pressure_at_half(p_s)
 
         # Flatten to columns via adapter.  ``q_v`` is kept in the
         # repo's mixing-ratio convention here; each ``radiation_fn``
@@ -4758,6 +4759,7 @@ def build_physics_pipeline(grid, sigma, config):
         sigma_full=sigma.sigma_full,
         sigma_half=sigma.sigma_half,
         dsigma=sigma.dsigma,
+        sigma_coord=sigma,
         convection_fn=convection_fn,
         convection_config=convection_config,
         radiation_fn=radiation_fn,

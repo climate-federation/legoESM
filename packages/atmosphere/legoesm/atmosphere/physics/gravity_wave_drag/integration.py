@@ -1032,10 +1032,8 @@ def _make_spectral_pe_gwd(
         nlev = sigma_coord.n_levels
         n_lat, n_lon = p_s.shape
 
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         ncol = n_lat * n_lon
         T_col = T.reshape(ncol, nlev)
