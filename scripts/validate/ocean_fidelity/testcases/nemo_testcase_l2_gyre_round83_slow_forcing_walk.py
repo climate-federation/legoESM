@@ -66,6 +66,38 @@ ROUND139_EXPECTED_SIZE = (
 )
 ROUND139_PARENT_EXTERNAL_SHA256 = (
     "6bc0f990ccba183a48ad09549b72b549603694e917389eb4f8b9c03c88ceaf09")
+ROUND139_PARENT_RESTART_SHA256 = (
+    "6c0c7a950b30b9d59dbf2673833ddf462a5f8ea5650f496f2f772e1e17092976")
+ROUND139_PARENT_PROCESS_SHA256 = (
+    "526d1fc73faeda990c661f2363a5bb328168bae17d4aea315daf05c35b4cd7b0")
+ROUND139_PARENT_QCO_SHA256 = (
+    "626d21e229f7ced8f606f6385e04224fb2e086cef92d81d95dff7e2ef3e90878")
+ROUND139_MANIFEST = "round139_outputs.sha256"
+ROUND139_MANIFEST_MEMBERS = (
+    ROUND139_RECORD,
+    ROUND139_RECORD + ".stamp",
+    round81.DEVELOPED_RECORD,
+    round81.DEVELOPED_RECORD + ".stamp",
+    round81.DEVELOPED_QCO_RECORD,
+    round81.DEVELOPED_QCO_RECORD + ".stamp",
+    "GYRE_OMIP_L2_P3_00001080_restart.nc",
+    "oracle_process_budget_kt00001081.bin",
+    "round139_parent_record_validation.json",
+    "round139_record_validation.json",
+    "round139_passive_admission_plant.log",
+    "round139_record-header_plant.log",
+    "round139_record-replay-ulp_plant.log",
+    "round139_record-stamp_plant.log",
+    "round139_record-truncation_plant.log",
+    "round139_record-header_plant.json",
+    "round139_record-replay-ulp_plant.json",
+    "round139_record-stamp_plant.json",
+    "round139_record-truncation_plant.json",
+)
+ROUND140_OPERAND_REGISTRY = (
+    "incoming_u", "incoming_v", "coriolis_u", "coriolis_v",
+    "mask_u", "mask_v", "final_u", "final_v",
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -265,6 +297,92 @@ def _validate_round139_stamp(path: Path, producer: str, words=None) -> str:
     return digest
 
 
+def _verify_round139_closed_run(root: Path) -> dict[str, object]:
+    """Re-admit the acquisition's closed outputs and planted violations."""
+    manifest_path = root / ROUND139_MANIFEST
+    require(manifest_path.is_file(), "Round-139 closed manifest is missing")
+    entries = {}
+    for line in manifest_path.read_text().splitlines():
+        parts = line.split(maxsplit=1)
+        require(len(parts) == 2, "malformed Round-139 manifest row")
+        digest, name = parts
+        require(name not in entries, f"duplicate Round-139 manifest row {name}")
+        path = root / name
+        require(path.is_file(), f"missing Round-139 manifest member {name}")
+        require(sha256(path) == digest,
+                f"Round-139 manifest member changed: {name}")
+        entries[name] = digest
+    require(tuple(entries) == ROUND139_MANIFEST_MEMBERS,
+            "Round-139 closed manifest census or order changed")
+
+    inherited = {
+        "restart": (
+            "GYRE_OMIP_L2_P3_00001080_restart.nc",
+            ROUND139_PARENT_RESTART_SHA256),
+        "process": (
+            "oracle_process_budget_kt00001081.bin",
+            ROUND139_PARENT_PROCESS_SHA256),
+        "external": (
+            round81.DEVELOPED_RECORD, ROUND139_PARENT_EXTERNAL_SHA256),
+        "qco": (
+            round81.DEVELOPED_QCO_RECORD, ROUND139_PARENT_QCO_SHA256),
+    }
+    inherited_hashes = {}
+    for label, (name, expected) in inherited.items():
+        actual = sha256(root / name)
+        require(actual == expected,
+                f"Round-139 inherited {label} record changed")
+        inherited_hashes[label] = actual
+
+    markers = {
+        "passive-admission": "STATUS PLANT-FIRED: passive-admission",
+        "record-header": "STATUS PLANT-FIRED",
+        "record-replay-ulp": "STATUS PLANT-FIRED",
+        "record-stamp": "STATUS PLANT-FIRED",
+        "record-truncation": "STATUS PLANT-FIRED",
+    }
+    plant_markers = {}
+    for name, marker in markers.items():
+        lines = (root / f"round139_{name.replace('-', '_')}_plant.log")
+        if not lines.is_file():
+            lines = root / f"round139_{name}_plant.log"
+        require(lines.is_file(), f"Round-139 {name} plant log is missing")
+        final = lines.read_text().splitlines()
+        require(final and marker in final[-1],
+                f"Round-139 {name} plant marker changed")
+        plant_markers[name] = final[-1]
+
+    timing = (root / "run.user.time.log").read_text().splitlines()
+    stdout = (root / "run.user.stdout.log").read_text().splitlines()
+    require(timing and timing[-1] == "RUN_DONE",
+            "Round-139 acquisition lacks RUN_DONE")
+    require(stdout and stdout[-1] == "STOP 0",
+            "Round-139 acquisition lacks STOP 0")
+    parent = json.loads(
+        (root / "round139_parent_record_validation.json").read_text())
+    child = json.loads((root / "round139_record_validation.json").read_text())
+    require(parent.get("status") == "AT-BAR",
+            "Round-139 parent-record validation moved")
+    require(child.get("status") == "PASS",
+            "Round-139 split-record validation moved")
+    return {
+        "manifest": str(manifest_path),
+        "manifest_members": len(entries),
+        "inherited_sha256": inherited_hashes,
+        "plants": plant_markers,
+        "completion": {"nemo": stdout[-1], "run": timing[-1]},
+        "parent_record_status": parent["status"],
+        "split_record_status": child["status"],
+    }
+
+
+def _validate_round140_registry(registry=ROUND140_OPERAND_REGISTRY) -> None:
+    require(tuple(registry) == ROUND140_OPERAND_REGISTRY,
+            "Round-140 developed operand registry changed")
+    require(len(registry) == len(set(registry)),
+            "Round-140 developed operand registry has duplicates")
+
+
 def measure_round139_record(args) -> dict[str, object]:
     """Admit the passive split record before any production comparison."""
     stamp = worktree_stamp()
@@ -328,6 +446,7 @@ def measure_round139_record(args) -> dict[str, object]:
             "worktree": stamp,
         }
 
+    closed_run = _verify_round139_closed_run(root)
     digest = _validate_round139_stamp(record_path, producer)
     fields = read_round139_record(record_path)
     external_path = root / round81.DEVELOPED_RECORD
@@ -372,8 +491,246 @@ def measure_round139_record(args) -> dict[str, object]:
         "record_size": record_path.stat().st_size,
         "header": fields["header"],
         "replay": replay,
+        "closed_run": closed_run,
         "plant": args.plant,
         "plant_fires": False,
+    }
+
+
+def measure_round140_developed(args) -> dict[str, object]:
+    """Split the first developed non-bit forcing boundary in production."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-140 measurement worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-140 measurement commit mismatch")
+    if args.plant == "developed-missing-row":
+        fired = False
+        try:
+            _validate_round140_registry(ROUND140_OPERAND_REGISTRY[:-1])
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-140 missing-row plant stayed green")
+        return {
+            "format": "nemo-testcase-l2-gyre-round140-developed-split-v1",
+            "status": "PLANT-FIRED",
+            "worktree": stamp,
+            "plant": args.plant,
+            "plant_fires": True,
+        }
+    _validate_round140_registry()
+    record_admission = measure_round139_record(args)
+    fields = read_round139_record(args.round139_root / ROUND139_RECORD)
+    external = round81.read_record(
+        args.round139_root / round81.DEVELOPED_RECORD,
+        expected_kt=ROUND139_KT, has_final_pssh=True)
+    record_replay = validate_round139_record(
+        fields, external["u_mask"], external["v_mask"])
+
+    card, state, freshwater, surface, payload, entry = (
+        round82._developed_inputs(args))
+    all_cells = np.ones((round81.NY, round81.NX), dtype=bool)
+    active = {
+        "u": np.asarray(external["u_mask"] != 0.0, dtype=bool),
+        "v": np.asarray(external["v_mask"] != 0.0, dtype=bool),
+    }
+    live_masks = {
+        "u": native_u(state.u_mask.data),
+        "v": native_v(state.v_mask.data),
+    }
+    mask_rows = {
+        face: round82._developed_comparison(
+            live_masks[face], external[f"{face}_mask"], all_cells)
+        for face in ("u", "v")
+    }
+    require(all(row["bit_exact"] for row in mask_rows.values()),
+            "developed model masks differ from the admitted record")
+
+    (_, _, _, _, _, captured) = round82._capture_external_context(
+        args, card, state, freshwater, surface,
+        eta_after_override=jnp.asarray(payload["ssha"]))
+    ordinary = _round117_live_trace(
+        card, state, freshwater, surface, args.execution_mode,
+        eta_after_override=jnp.asarray(payload["ssha"]))
+    observer_identity = round82._pytree_identity(
+        ordinary.state_after, captured.plain_state)
+    require(observer_identity["bit_exact"],
+            "developed live operand hook moved the returned production state")
+    producer = ordinary.slow_forcing_producer
+    live = {
+        "u": {
+            "incoming": native_u(producer["incoming_u"]),
+            "coriolis": native_u(producer["coriolis_u"]),
+            "final": native_u(producer["final_u"]),
+        },
+        "v": {
+            "incoming": native_v(producer["incoming_v"]),
+            "coriolis": native_v(producer["coriolis_v"]),
+            "final": native_v(producer["final_v"]),
+        },
+    }
+    actual_external = {
+        "u": gate._trace_native(
+            captured.substeps["slow_u"], "slow_u")[0],
+        "v": gate._trace_native(
+            captured.substeps["slow_v"], "slow_v")[0],
+    }
+    trace_final_identity = {
+        face: round82._developed_comparison(
+            live[face]["final"], actual_external[face], active[face])
+        for face in ("u", "v")
+    }
+    require(all(row["bit_exact"] for row in trace_final_identity.values()),
+            "developed producer trace differs from the external call")
+
+    rows = {
+        "incoming_u": round82._developed_comparison(
+            live["u"]["incoming"], fields["incoming_u"], active["u"]),
+        "incoming_v": round82._developed_comparison(
+            live["v"]["incoming"], fields["incoming_v"], active["v"]),
+        "coriolis_u": round82._developed_comparison(
+            live["u"]["coriolis"], fields["coriolis_u"], active["u"]),
+        "coriolis_v": round82._developed_comparison(
+            live["v"]["coriolis"], fields["coriolis_v"], active["v"]),
+        "mask_u": mask_rows["u"],
+        "mask_v": mask_rows["v"],
+        "final_u": round82._developed_comparison(
+            live["u"]["final"], fields["final_u"], active["u"]),
+        "final_v": round82._developed_comparison(
+            live["v"]["final"], fields["final_v"], active["v"]),
+    }
+    require(tuple(rows) == ROUND140_OPERAND_REGISTRY,
+            "Round-140 result omitted a registered operand")
+    first = next(({"boundary": name, **rows[name]}
+                  for name in ROUND140_OPERAND_REGISTRY
+                  if not rows[name]["bit_exact"]), None)
+
+    if args.plant == "incoming-ulp":
+        planted_native, location, direction = _round117_propagating_ulp(
+            live["u"]["incoming"], live["u"]["coriolis"], active["u"])
+        incoming_override = (
+            jnp.asarray(_full_from_native(
+                producer["incoming_u"], planted_native, "u")),
+            jnp.asarray(producer["incoming_v"]),
+        )
+        planted = _round117_live_trace(
+            card, state, freshwater, surface, args.execution_mode,
+            incoming_override=incoming_override,
+            eta_after_override=jnp.asarray(payload["ssha"]))
+        planted_producer = planted.slow_forcing_producer
+        plant_rows = {
+            "incoming_u": round82._developed_comparison(
+                native_u(planted_producer["incoming_u"]),
+                live["u"]["incoming"], active["u"]),
+            "coriolis_u": round82._developed_comparison(
+                native_u(planted_producer["coriolis_u"]),
+                live["u"]["coriolis"], active["u"]),
+            "final_u": round82._developed_comparison(
+                native_u(planted_producer["final_u"]),
+                live["u"]["final"], active["u"]),
+        }
+        plant_fires = bool(
+            plant_rows["incoming_u"]["differing_cells"] == 1
+            and plant_rows["coriolis_u"]["bit_exact"]
+            and plant_rows["final_u"]["differing_cells"] > 0)
+        require(plant_fires,
+                "Round-140 incoming-U ULP did not cross production subtraction")
+        return {
+            "format": "nemo-testcase-l2-gyre-round140-developed-split-v1",
+            "status": "PLANT-FIRED",
+            "worktree": stamp,
+            "plant": args.plant,
+            "plant_location": list(location),
+            "plant_direction": float(direction),
+            "plant_rows": plant_rows,
+            "plant_fires": True,
+        }
+
+    nemo_incoming_override = (
+        jnp.asarray(_full_from_native(
+            producer["incoming_u"], fields["incoming_u"], "u")),
+        jnp.asarray(_full_from_native(
+            producer["incoming_v"], fields["incoming_v"], "v")),
+    )
+    directed = _round117_live_trace(
+        card, state, freshwater, surface, args.execution_mode,
+        incoming_override=nemo_incoming_override,
+        eta_after_override=jnp.asarray(payload["ssha"]))
+    directed_producer = directed.slow_forcing_producer
+    directed_rows = {
+        "incoming_u_vs_record": round82._developed_comparison(
+            native_u(directed_producer["incoming_u"]),
+            fields["incoming_u"], active["u"]),
+        "incoming_v_vs_record": round82._developed_comparison(
+            native_v(directed_producer["incoming_v"]),
+            fields["incoming_v"], active["v"]),
+        "coriolis_u_vs_baseline": round82._developed_comparison(
+            native_u(directed_producer["coriolis_u"]),
+            live["u"]["coriolis"], active["u"]),
+        "coriolis_v_vs_baseline": round82._developed_comparison(
+            native_v(directed_producer["coriolis_v"]),
+            live["v"]["coriolis"], active["v"]),
+        "final_u_vs_record": round82._developed_comparison(
+            native_u(directed_producer["final_u"]),
+            fields["final_u"], active["u"]),
+        "final_v_vs_record": round82._developed_comparison(
+            native_v(directed_producer["final_v"]),
+            fields["final_v"], active["v"]),
+    }
+    predictions = {
+        "incoming_u_first": bool(
+            first is not None and first["boundary"] == "incoming_u"),
+        "incoming_u_580_of_580": (
+            rows["incoming_u"]["differing_cells"]
+            == rows["incoming_u"]["cells_scored"] == 580),
+        "incoming_v_570_of_570": (
+            rows["incoming_v"]["differing_cells"]
+            == rows["incoming_v"]["cells_scored"] == 570),
+        "coriolis_pair_bit": bool(
+            rows["coriolis_u"]["bit_exact"]
+            and rows["coriolis_v"]["bit_exact"]),
+        "mask_pair_bit": bool(
+            rows["mask_u"]["bit_exact"] and rows["mask_v"]["bit_exact"]),
+        "NEMO_incoming_pair_makes_final_pair_bit": bool(
+            directed_rows["final_u_vs_record"]["bit_exact"]
+            and directed_rows["final_v_vs_record"]["bit_exact"]),
+        "ordinary_trace_reproduces_round138_final_pair": bool(
+            rows["final_u"]["differing_cells"] == 580
+            and rows["final_v"]["differing_cells"] == 570
+            and rows["final_u"]["absolute_max"]
+            == 4.2854247978022983e-13
+            and rows["final_v"]["absolute_max"]
+            == 4.4333086294645174e-13),
+        "live_hook_returned_state_bit": observer_identity["bit_exact"],
+    }
+    return {
+        "format": "nemo-testcase-l2-gyre-round140-developed-split-v1",
+        "status": "MEASURED",
+        "worktree": stamp,
+        "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
+        "entry": entry,
+        "record_admission": record_admission,
+        "record_replay": record_replay,
+        "observer_state_identity": observer_identity,
+        "trace_final_vs_actual_external_call": trace_final_identity,
+        "first_non_bit_operand": first,
+        "rows": rows,
+        "NEMO_incoming_directed_arm": directed_rows,
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "plant": args.plant,
+        "plant_fires": False,
+        "scope": {
+            "production_physics_changed": False,
+            "DINO": "NO-PRODUCTION-CHANGE",
+            "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+            "OVERFLOW": "NO-PRODUCTION-CHANGE",
+            "ORCA2": "UNMEASURED-WITH-SPEC; GYRE diagnostic only",
+        },
     }
 
 
@@ -438,7 +795,7 @@ def _full_from_native(full, native, face: str) -> np.ndarray:
 def _round117_live_trace(
     card, seeded, freshwater, surface, execution_mode: str, *,
     incoming_override=None, final_override=None, association_arm=False,
-    zad_w_override=None,
+    zad_w_override=None, eta_after_override=None,
 ):
     hooks = model_module._NEMOWSRK3TestHooks(
         expose_live_stage_operands=True,
@@ -453,7 +810,8 @@ def _round117_live_trace(
     )
     model.prime_step_caches(seeded)
     return jax.device_get(round82._execute_step(
-        model, seeded, card.dt_s, freshwater, surface, execution_mode))
+        model, seeded, card.dt_s, freshwater, surface, execution_mode,
+        eta_after_override=eta_after_override))
 
 
 @jax.jit
@@ -2504,6 +2862,9 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round139-record-only", action="store_true",
         help="admit the developed step-1081 slow-forcing split record")
+    round_group.add_argument(
+        "--round140-developed", action="store_true",
+        help="run the production step-1081 developed operand split")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -2537,37 +2898,47 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--round139-root", type=Path,
         default=ROOT / "round139/oracle_developed_slow_forcing")
+    parser.add_argument(
+        "--daily-root", type=Path,
+        default=ROOT / "round132/oracle_daily_restarts")
+    parser.add_argument(
+        "--daily-audit", type=Path,
+        default=ROOT / "round136/daily_record_audit.json")
     parser.add_argument("--trajectory-tag", default="round121_w")
     parser.add_argument("--plant", choices=(
                             "none", "e3-ulp", "rhs-ulp", "final-ulp",
                             "incoming-ulp", "association-hpg-ulp",
                             "association-keg-ulp", "zad-w-ulp",
                             "record-stamp", "record-header",
-                            "record-truncation", "record-replay-ulp"),
+                            "record-truncation", "record-replay-ulp",
+                            "developed-missing-row"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
-            measure_round139_record(args)
+            measure_round140_developed(args)
+            if args.round140_developed else
+            (measure_round139_record(args)
             if args.round139_record_only else
             (measure_round121_trajectory(args)
             if args.round121_trajectory else
             (measure_round117(args)
             if (args.round117 or args.round118 or args.round119
-                or args.round120 or args.round121) else measure(args))))
+                or args.round120 or args.round121) else measure(args)))))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND139 RECORD" if args.round139_record_only else
+            "ROUND140 DEVELOPED" if args.round140_developed else
+            ("ROUND139 RECORD" if args.round139_record_only else
             ("ROUND121" if args.round121 else
             ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83"))))))
+             ("ROUND117" if args.round117 else "ROUND83")))))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
@@ -2577,6 +2948,12 @@ def main(argv=None) -> int:
             + report["record_sha256"]
         )
         return 0 if report["status"] == "PASS" else 1
+    if args.round140_developed:
+        print(
+            "ROUND140 DEVELOPED SLOW-FORCING MEASURED: first="
+            + repr(report["first_non_bit_operand"])
+        )
+        return 0
     if args.round121_trajectory:
         print("ROUND121 W TRAJECTORY " + report["status"] + ": "
               + report["trajectory_kind"])

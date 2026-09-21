@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import struct
 from pathlib import Path
 
@@ -144,6 +145,53 @@ def test_round139_replay_control_detects_one_ulp_in_consumed_result() -> None:
     with pytest.raises(RuntimeError, match="does not replay bit for bit"):
         WALK.validate_round139_record(
             parsed, u_mask, v_mask, final_u=planted)
+
+
+def test_round139_closed_run_manifest_and_markers_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in WALK.ROUND139_MANIFEST_MEMBERS:
+        path = tmp_path / name
+        if name == "round139_parent_record_validation.json":
+            path.write_text(json.dumps({"status": "AT-BAR"}))
+        elif name == "round139_record_validation.json":
+            path.write_text(json.dumps({"status": "PASS"}))
+        elif name == "round139_passive_admission_plant.log":
+            path.write_text("STATUS PLANT-FIRED: passive-admission\n")
+        elif name.endswith("_plant.log"):
+            path.write_text("ROUND139 STATUS PLANT-FIRED\n")
+        else:
+            path.write_bytes((name + "\n").encode())
+    (tmp_path / "run.user.time.log").write_text("NEMO_DONE\nRUN_DONE\n")
+    (tmp_path / "run.user.stdout.log").write_text("STOP 0\n")
+    inherited = {
+        "ROUND139_PARENT_RESTART_SHA256":
+            "GYRE_OMIP_L2_P3_00001080_restart.nc",
+        "ROUND139_PARENT_PROCESS_SHA256":
+            "oracle_process_budget_kt00001081.bin",
+        "ROUND139_PARENT_EXTERNAL_SHA256": WALK.round81.DEVELOPED_RECORD,
+        "ROUND139_PARENT_QCO_SHA256": WALK.round81.DEVELOPED_QCO_RECORD,
+    }
+    for constant, name in inherited.items():
+        monkeypatch.setattr(WALK, constant, WALK.sha256(tmp_path / name))
+    manifest = "".join(
+        f"{WALK.sha256(tmp_path / name)}  {name}\n"
+        for name in WALK.ROUND139_MANIFEST_MEMBERS
+    )
+    (tmp_path / WALK.ROUND139_MANIFEST).write_text(manifest)
+    report = WALK._verify_round139_closed_run(tmp_path)
+    assert report["manifest_members"] == len(WALK.ROUND139_MANIFEST_MEMBERS)
+
+    changed = tmp_path / WALK.ROUND139_MANIFEST_MEMBERS[0]
+    changed.write_bytes(changed.read_bytes() + b"plant")
+    with pytest.raises(RuntimeError, match="manifest member changed"):
+        WALK._verify_round139_closed_run(tmp_path)
+
+
+def test_round140_registry_rejects_a_missing_operand() -> None:
+    WALK._validate_round140_registry()
+    with pytest.raises(RuntimeError, match="registry changed"):
+        WALK._validate_round140_registry(WALK.ROUND140_OPERAND_REGISTRY[:-1])
 
 
 def test_round117_compiled_accumulator_order_keeps_after_adv_identity() -> None:
