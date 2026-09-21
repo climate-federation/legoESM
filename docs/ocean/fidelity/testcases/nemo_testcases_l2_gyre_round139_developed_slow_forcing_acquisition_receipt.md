@@ -104,8 +104,51 @@ None of the unmeasured predictions is promoted to a finding.
 
 ## Review, citations, and focused verification
 
-The separate read-only Codex review, receipt citation gate, shifted-citation
-plant, and final focused test result are recorded after this draft commit.
+The required separate read-only Codex command was invoked against the whole
+Round-139 diff and evidence. It could not initialize its in-process app-server
+inside the read-only sandbox, so it emitted no verdict. Its output was,
+verbatim:
+
+```text
+Error while loading conda entry point: conda-anaconda-tos (cannot import name 'validate_prefix_exists' from 'conda.cli.install' (/home/dbalwada/miniconda3/lib/python3.13/site-packages/conda/cli/install.py))
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Independent review unavailable in-sandbox; the standing operator rule permits
+the round to continue. No `DO NOT SHIP` verdict exists, and nothing scientific
+or production-facing is being shipped.
+
+The first receipt-citation attempt failed closed because the bare terminal
+anchor `END SUBROUTINE dyn_cor_2D` also matches the preceding `_init`
+subroutine. The map now pins the second occurrence rather than weakening or
+removing the citation. From the corrected clean commit, the gate finds two
+citations, zero unmapped citations, zero failures, and zero failing map
+entries. Shifting the Coriolis citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE`; all internal gate controls fire. The final post-receipt
+artifacts are `citation_gate_final.json` and
+`citation_gate_shifted_plant_final.json`.
+
+The focused CPU/x64 invocation covered the inherited external-record parser,
+the extended Round-83 slow-forcing walk and all new Round-139 parser/replay
+controls, every receipt-citation control, and the full fidelity time-level
+unit file. Its exact summary is `66 passed in 2.54s`.
+
+Evidence digests before the final post-receipt citation rerun:
+
+| artifact | SHA-256 |
+|---|---|
+| `preflight.log` (retracted first layout check) | `9207a526f467ca648978ca8a96fc5b3e55d9a7dff31bd06c5424d782b3a8fa0e` |
+| `preflight_after_layout_fix.log` | `16a1761691ed525e02ae36a4ef3c1a0ddc51dabc98bc5d652276e7dcc0573de1` |
+| `layout_plant.log` | `60babc006ceaa9d38fc3c47b387b7a2f18f0fd156ba53db5b56d49d60d493098` |
+| `acquisition.log` | `a18526cea02650c9ef475a33a09ec4f9ef0a2da234f8c09f72b3b08f7cfee998` |
+| `citation_gate.json` | `a375052efbd2dc68e21c40caee00e089b0965bee4c5a874309a943d037bd341a` |
+| `citation_gate_shifted_plant.json` | `3addae94fae19b1cf5748ee05ef0d6546cc77a64809b5bb721b1e2a1b46edeb7` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `focused_tests.log` | `12abf566cb464f24a41ef5d2435e86fdcb247b8477cb8c3a768aaa74c01c40fc` |
+| `dynspg_ts_round139.patch` | `6f32f90a592053572a751088f7036e8d75dfb4a6da9877790f7bc4ae17d8eb70` |
+| `run.sh` | `9d944098e4c8bfcfe5672c7f80d704e7895905079f64f84bc24179d7669b04a4` |
 
 ## Campaign surfaces and unchanged headline rows
 
