@@ -436,3 +436,35 @@ def test_round141_depth_reduction_uses_the_production_stacked_sum() -> None:
         h_u, h_v, rhs_u, rhs_v, mask, mask))
     assert got_u[0, 0] == (2.0 * 5.0 + 3.0 * 7.0) / 5.0
     assert got_v[0, 0] == (4.0 * 11.0 + 1.0 * 13.0) / 5.0
+
+
+def test_round142_rhs_override_is_private_default_off_and_registered() -> None:
+    hook_name = "slow_forcing_rhs_override"
+    hooks = WALK.model_module._NEMOWSRK3TestHooks()
+    assert getattr(hooks, hook_name) is None
+    assert hook_name not in WALK.model_module.LatLonCGridOceanConfig._fields
+    WALK._validate_round142_registry(WALK.ROUND142_DIRECTED_REGISTRY)
+    with pytest.raises(RuntimeError, match="registry changed"):
+        WALK._validate_round142_registry(
+            WALK.ROUND142_DIRECTED_REGISTRY[:-1])
+
+
+def test_round142_rhs_ulp_plant_changes_one_consumed_word() -> None:
+    rhs = np.zeros((1, 1, 30), dtype=np.float64)
+    rhs[0, 0, 0] = 1.0
+    fields = {
+        "rhs_u": rhs,
+        "e3u": np.ones_like(rhs),
+        "umask": np.ones_like(rhs),
+        "r1_hu0": np.ones((1, 1), dtype=np.float64),
+    }
+    planted, location = WALK._round142_propagating_rhs_ulp(
+        fields, np.ones_like(rhs, dtype=bool))
+    assert location == (0, 0, 0)
+    assert np.count_nonzero(
+        planted.view(np.uint64) != rhs.view(np.uint64)) == 1
+    baseline = WALK._round140_source_sum(
+        fields["e3u"], rhs, fields["umask"], fields["r1_hu0"])
+    changed = WALK._round140_source_sum(
+        fields["e3u"], planted, fields["umask"], fields["r1_hu0"])
+    assert changed[0, 0].view(np.uint64) != baseline[0, 0].view(np.uint64)

@@ -1055,6 +1055,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # materialization passive against the ordinary production step.
     slow_forcing_rhs_observer: object = None
     slow_forcing_rhs_observer_face: str = ""
+    # Private round-142 directed discriminator: replace only the owned native
+    # faces of the completed 3-D momentum RHS before its depth reduction.
+    # None leaves the production program unchanged; this is not configurable.
+    slow_forcing_rhs_override: object = None
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
     # leaving legoESM's deviation-form carried state untouched.  Private
     # decision-33 measurement only.
@@ -5222,6 +5226,11 @@ class LatLonCGridOceanModel:
         # couples the slow forcing to the evolving barotropic state.
         du_dt = tend.du_dt.data
         dv_dt = tend.dv_dt.data
+        _slow_rhs_override = self._nemo_ws_test_hooks.slow_forcing_rhs_override
+        if _slow_rhs_override is not None:
+            _slow_rhs_u, _slow_rhs_v = _slow_rhs_override
+            du_dt = du_dt.at[:, 1:, :].set(_slow_rhs_u)
+            dv_dt = dv_dt.at[1:, :, :].set(_slow_rhs_v)
         _slow_rhs_observer = self._nemo_ws_test_hooks.slow_forcing_rhs_observer
         if callable(_slow_rhs_observer):
             if self._nemo_ws_test_hooks.slow_forcing_rhs_observer_face == "u":

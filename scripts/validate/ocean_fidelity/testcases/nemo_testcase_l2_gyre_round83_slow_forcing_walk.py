@@ -138,6 +138,12 @@ ROUND140_RHS_REGISTRY = (
     "depth_mean_u", "depth_mean_v",
 )
 ROUND141_RHS_REGISTRY = ROUND140_RHS_REGISTRY
+ROUND142_DIRECTED_REGISTRY = (
+    "ordinary_incoming_u", "ordinary_incoming_v",
+    "ordinary_final_u", "ordinary_final_v",
+    "directed_incoming_u", "directed_incoming_v",
+    "directed_final_u", "directed_final_v",
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -1459,6 +1465,175 @@ def measure_round141_rhs_developed(args) -> dict[str, object]:
     }
 
 
+def measure_round142_rhs_directed(args) -> dict[str, object]:
+    """Substitute NEMO's completed 3-D RHS without observing model RHS."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-142 measurement worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-142 measurement commit mismatch")
+    if args.plant == "rhs-directed-missing-row":
+        fired = False
+        try:
+            _validate_round142_registry(ROUND142_DIRECTED_REGISTRY[:-1])
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-142 missing-row plant stayed green")
+        return {
+            "format": "nemo-testcase-l2-gyre-round142-rhs-directed-v1",
+            "status": "PLANT-FIRED", "worktree": stamp,
+            "plant": args.plant, "plant_fires": True,
+        }
+    _validate_round142_registry()
+    admission = measure_round140_rhs_record(args)
+    record = read_round140_rhs(args.round140_rhs_root / ROUND140_RHS_RECORD)
+    fields = record["fields"]
+    split = read_round139_record(args.round140_rhs_root / ROUND139_RECORD)
+    active3 = {
+        "u": fields["umask"] != 0.0,
+        "v": fields["vmask"] != 0.0,
+    }
+    active2 = {face: active3[face][..., 0] for face in ("u", "v")}
+    calibration = {
+        face: comparison(
+            fields[f"post_wind_{face}"], split[f"incoming_{face}"],
+            active2[face])
+        for face in ("u", "v")
+    }
+    require(all(row["bit_exact"] for row in calibration.values()),
+            "Round-140 RHS and Round-139 incoming boundaries differ")
+
+    card, state, freshwater, surface, payload, entry = round82._developed_inputs(args)
+    eta_after = jnp.asarray(payload["ssha"])
+    ordinary_trace, ordinary = _round140_callback_trace(
+        args, card, state, freshwater, surface, eta_after)
+    require(ordinary_trace.trace_state_identity["bit_exact"],
+            "Round-142 ordinary callback moved the production state")
+    override = (jnp.asarray(fields["rhs_u"]), jnp.asarray(fields["rhs_v"]))
+    directed_trace, directed = _round140_callback_trace(
+        args, card, state, freshwater, surface, eta_after,
+        rhs_override=override)
+    require(directed_trace.trace_state_identity["bit_exact"],
+            "Round-142 directed callback moved its production arm")
+
+    def row(producer, boundary: str, face: str) -> dict:
+        native = (native_u(producer[f"{boundary}_{face}"])
+                  if face == "u" else native_v(producer[f"{boundary}_{face}"]))
+        return comparison(native, split[f"{boundary}_{face}"], active2[face])
+
+    rows = {
+        "ordinary_incoming_u": row(ordinary, "incoming", "u"),
+        "ordinary_incoming_v": row(ordinary, "incoming", "v"),
+        "ordinary_final_u": row(ordinary, "final", "u"),
+        "ordinary_final_v": row(ordinary, "final", "v"),
+        "directed_incoming_u": row(directed, "incoming", "u"),
+        "directed_incoming_v": row(directed, "incoming", "v"),
+        "directed_final_u": row(directed, "final", "u"),
+        "directed_final_v": row(directed, "final", "v"),
+    }
+    require(tuple(rows) == ROUND142_DIRECTED_REGISTRY,
+            "Round-142 result omitted a registered row")
+    ordinary_reproduced = bool(
+        rows["ordinary_incoming_u"]["absolute_max"]
+        == 4.2854247978022983e-13
+        and rows["ordinary_incoming_v"]["absolute_max"]
+        == 4.433308633699682e-13
+        and rows["ordinary_final_u"]["absolute_max"]
+        == 4.2854247978022983e-13
+        and rows["ordinary_final_v"]["absolute_max"]
+        == 4.4333086294645174e-13)
+    require(ordinary_reproduced,
+            "Round-142 default path does not reproduce Round 140")
+
+    external_identity = {}
+    for arm, trace, producer in (
+            ("ordinary", ordinary_trace, ordinary),
+            ("directed", directed_trace, directed)):
+        external_identity[arm] = {
+            face: comparison(
+                native_u(producer[f"final_{face}"])
+                if face == "u" else native_v(producer[f"final_{face}"]),
+                gate._trace_native(
+                    trace.substeps[f"slow_{face}"], f"slow_{face}")[0],
+                active2[face])
+            for face in ("u", "v")
+        }
+    require(all(row_["bit_exact"]
+                for arm_rows in external_identity.values()
+                for row_ in arm_rows.values()),
+            "Round-142 callback differs from an actual external-call operand")
+
+    state_impact = round82._pytree_identity(
+        directed_trace.state_after, ordinary_trace.state_after)
+    require(not state_impact["bit_exact"],
+            "Round-142 RHS override did not execute through production")
+    exact_closure = bool(
+        rows["directed_incoming_u"]["bit_exact"]
+        and rows["directed_incoming_v"]["bit_exact"])
+    family_confirmed = bool(all(
+        rows[f"directed_incoming_{face}"]["absolute_max"] <= 1.0e-18
+        and rows[f"ordinary_incoming_{face}"]["absolute_max"]
+        >= 1.0e3 * rows[f"directed_incoming_{face}"]["absolute_max"]
+        for face in ("u", "v")))
+
+    if args.plant == "rhs-directed-ulp":
+        planted_u, location = _round142_propagating_rhs_ulp(
+            fields, active3["u"])
+        planted_trace, planted = _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            rhs_override=(jnp.asarray(planted_u), jnp.asarray(fields["rhs_v"])))
+        require(planted_trace.trace_state_identity["bit_exact"],
+                "Round-142 ULP callback moved its production arm")
+        planted_row = comparison(
+            native_u(planted["incoming_u"]),
+            native_u(directed["incoming_u"]), active2["u"])
+        plant_fires = planted_row["differing_cells"] > 0
+        require(plant_fires,
+                "Round-142 one-ULP RHS plant did not reach incoming forcing")
+        return {
+            "format": "nemo-testcase-l2-gyre-round142-rhs-directed-v1",
+            "status": "PLANT-FIRED", "worktree": stamp,
+            "plant": args.plant, "plant_fires": True,
+            "plant_location": list(location),
+            "plant_downstream_row": planted_row,
+        }
+
+    return {
+        "format": "nemo-testcase-l2-gyre-round142-rhs-directed-v1",
+        "status": "MEASURED", "worktree": stamp,
+        "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
+        "entry": entry, "record_admission": admission,
+        "record_replay": validate_round140_rhs_replay(record),
+        "same_run_boundary_calibration": calibration,
+        "ordinary_callback_state_identity": ordinary_trace.trace_state_identity,
+        "directed_callback_state_identity": directed_trace.trace_state_identity,
+        "callback_final_vs_external_call": external_identity,
+        "directed_state_vs_ordinary": state_impact,
+        "rows": rows,
+        "predictions": {
+            "ordinary_reproduces_round140": ordinary_reproduced,
+            "directed_incoming_pair_bit": exact_closure,
+            "completed_rhs_family_magnitude_confirmed": family_confirmed,
+        },
+        "exact_closure_prediction_confirmed": exact_closure,
+        "completed_rhs_family_magnitude_confirmed": family_confirmed,
+        "conditional_cumulative_acquisition_required": family_confirmed,
+        "plant": args.plant, "plant_fires": False,
+        "scope": {
+            "production_physics_changed": False,
+            "day_240_carry": "UNMEASURED",
+            "DINO": "NO-PRODUCTION-CHANGE",
+            "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+            "OVERFLOW": "NO-PRODUCTION-CHANGE",
+            "ORCA2": "UNMEASURED-WITH-SPEC; GYRE diagnostic only",
+        },
+    }
+
+
 def round117_source_order_accumulators(
     hpg_u, hpg_v, ldf_u, ldf_v, vor_u, vor_v,
     keg_u, keg_v, zad_u, zad_v,
@@ -1541,7 +1716,7 @@ def _round117_live_trace(
 
 def _round140_callback_trace(
     args, card, state, freshwater, surface, eta_after_override, *,
-    incoming_override=None,
+    incoming_override=None, rhs_override=None,
 ):
     """Capture slow operands without changing the production return value."""
     captures = []
@@ -1557,10 +1732,12 @@ def _round140_callback_trace(
 
     traced_hooks = model_module._NEMOWSRK3TestHooks(
         slow_forcing_incoming_override=incoming_override,
+        slow_forcing_rhs_override=rhs_override,
         barotropic_slow_forcing_override=sink,
     )
     plain_hooks = model_module._NEMOWSRK3TestHooks(
         slow_forcing_incoming_override=incoming_override,
+        slow_forcing_rhs_override=rhs_override,
     )
     (_, _, _, _, _, trace) = round82._capture_external_context(
         args, card, state, freshwater, surface,
@@ -1572,6 +1749,40 @@ def _round140_callback_trace(
             duplicate, captures[0])["bit_exact"],
             "Round-140 slow-forcing callbacks differ")
     return trace, captures[0]
+
+
+def _validate_round142_registry(registry=ROUND142_DIRECTED_REGISTRY) -> None:
+    require(tuple(registry) == ROUND142_DIRECTED_REGISTRY,
+            "Round-142 directed-row registry changed")
+
+
+def _round142_propagating_rhs_ulp(fields, active) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Plant one recorded wet U-RHS word that survives NEMO's depth sum."""
+    rhs = np.asarray(fields["rhs_u"], dtype=np.float64)
+    e3 = np.asarray(fields["e3u"], dtype=np.float64)
+    mask = np.asarray(fields["umask"], dtype=np.float64)
+    reciprocal = np.asarray(fields["r1_hu0"], dtype=np.float64)
+    for horizontal in np.argwhere(np.any(active, axis=-1)):
+        j, i = (int(value) for value in horizontal)
+        baseline = _round140_source_sum(
+            e3[j:j + 1, i:i + 1], rhs[j:j + 1, i:i + 1],
+            mask[j:j + 1, i:i + 1],
+            reciprocal[j:j + 1, i:i + 1])[0, 0]
+        levels = np.flatnonzero(active[j, i])
+        for k in levels:
+            candidate = np.array(rhs[j, i], copy=True)
+            direction = (np.float64(np.inf) if candidate[k] >= 0.0
+                         else np.float64(-np.inf))
+            candidate[k] = np.nextafter(candidate[k], direction)
+            changed = _round140_source_sum(
+                e3[j:j + 1, i:i + 1], candidate[None, None, :],
+                mask[j:j + 1, i:i + 1],
+                reciprocal[j:j + 1, i:i + 1])[0, 0]
+            if changed.view(np.uint64) != baseline.view(np.uint64):
+                planted = np.array(rhs, copy=True)
+                planted[j, i, k] = candidate[k]
+                return planted, (j, i, int(k))
+    raise RuntimeError("no one-ULP U-RHS plant survives the recorded depth sum")
 
 
 @jax.jit
@@ -3631,6 +3842,9 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round141-rhs-developed", action="store_true",
         help="run the passive production step-1081 completed-RHS split")
+    round_group.add_argument(
+        "--round142-rhs-directed", action="store_true",
+        help="substitute the recorded completed RHS without observing it")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -3684,13 +3898,16 @@ def main(argv=None) -> int:
                             "developed-missing-row", "rhs-record-stamp",
                             "rhs-record-header", "rhs-record-truncation",
                             "rhs-record-replay-ulp", "rhs-missing-row",
-                            "rhs-observer-ulp"),
+                            "rhs-observer-ulp", "rhs-directed-missing-row",
+                            "rhs-directed-ulp"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
-            measure_round141_rhs_developed(args)
+            measure_round142_rhs_directed(args)
+            if args.round142_rhs_directed else
+            (measure_round141_rhs_developed(args)
             if args.round141_rhs_developed else
             (measure_round140_rhs_record(args)
             if args.round140_rhs_record_only else
@@ -3702,14 +3919,15 @@ def main(argv=None) -> int:
             if args.round121_trajectory else
             (measure_round117(args)
             if (args.round117 or args.round118 or args.round119
-                or args.round120 or args.round121) else measure(args)))))))
+                or args.round120 or args.round121) else measure(args))))))))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND141 RHS" if args.round141_rhs_developed else
+            "ROUND142 RHS" if args.round142_rhs_directed else
+            ("ROUND141 RHS" if args.round141_rhs_developed else
             ("ROUND140 RHS" if args.round140_rhs_record_only else
             ("ROUND140 DEVELOPED" if args.round140_developed else
             ("ROUND139 RECORD" if args.round139_record_only else
@@ -3717,7 +3935,7 @@ def main(argv=None) -> int:
             ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83")))))))))
+             ("ROUND117" if args.round117 else "ROUND83"))))))))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
@@ -3743,6 +3961,13 @@ def main(argv=None) -> int:
         print(
             "ROUND141 DEVELOPED RHS MEASURED: first="
             + repr(report["first_non_bit_operand"])
+        )
+        return 0
+    if args.round142_rhs_directed:
+        print(
+            "ROUND142 DEVELOPED RHS DIRECTED: family_confirmed="
+            + repr(report["completed_rhs_family_magnitude_confirmed"])
+            + " exact=" + repr(report["exact_closure_prediction_confirmed"])
         )
         return 0
     if args.round121_trajectory:
