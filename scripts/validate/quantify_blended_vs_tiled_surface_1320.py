@@ -44,14 +44,27 @@ and the turbulence blends them in by land fraction.  Its own comment is
 explicit that "momentum and the ocean/ice fraction keep the scheme's own bulk
 computation".  So:
 
-  * the SENSIBLE and LATENT rows below describe a lane WITHOUT that hand-over
-    (no interactive land).  On the production lane the land-tile heat
-    coupling is already a real flux from a real land model, and these rows
-    OVERSTATE it.
-  * the MOMENTUM (tau) row is the production-relevant one.  Surface stress
-    over the land fraction is still computed by the single blended-surface
-    bulk law, with the OCEAN roughness, and that is the part the tiled port
-    would change.
+  * the three-arm SENSIBLE and LATENT rows describe a lane WITHOUT that
+    hand-over (no interactive land).  On the production lane the LAND tile's
+    heat is already a real flux from a real land model, so those rows
+    OVERSTATE the production defect.
+  * the MOMENTUM (tau) row IS production-relevant.  Surface stress over the
+    land fraction is still computed by the single blended-surface bulk law,
+    with the OCEAN roughness.
+  * and so is the PRODUCTION-LANE block at the end, which is the arm the
+    first version of this probe was missing.  The lane computes
+    ``heat = (1-f) * BULK(T_blend, q_blend) + f * F_land``, so the OCEAN
+    fraction's flux is evaluated on the BLENDED surface rather than on the
+    ocean surface.  ``F_land`` cancels in the difference against the correct
+    form, and what is left is the averaging-order error the issue body
+    describes, SURVIVING the land-flux hand-over over the ocean side of every
+    coastal cell.  It is not small.
+
+NOT COVERED, and not small either: sea ice.  The ocean and ice fractions are
+themselves blended inside the non-land fraction, and the dry-ice against
+saturated-ocean humidity contrast is the largest ``q_sfc`` contrast in the
+model, so the ice margin is where the order error should be worst.  This
+population contains ZERO ice columns.  Untested is not the same as small.
 
 WHAT THIS IS NOT.  It is an offline, single-snapshot, per-column comparison of
 one flux calculation.  It does not run the model, so it cannot say what the
@@ -164,13 +177,36 @@ def run(cases, cfg_ocean, cfg_ice, cfg_land):
     tx_s, ty_s, sh_s, lh_s, _ = compute_tiled_surface_fluxes(
         u, v, T, q, rho, tiles, cfg_ocean, cfg_ocean, cfg_ocean)
 
+    # FOURTH AND FIFTH ARMS: what the PRODUCTION lane actually computes, and
+    # what it should. With the interactive land on, the lane replaces only the
+    # land fraction's HEAT with the land model's own flux and keeps
+    #     heat = (1-f) * BULK(T_blend, q_blend) + f * F_land
+    # i.e. the ocean fraction's flux is evaluated on the BLENDED surface, not
+    # on the OCEAN surface. The correct form is
+    #     heat = (1-f) * BULK(T_ocean, q_ocean) + f * F_land
+    # and the difference between them is the averaging-order error that
+    # SURVIVES the land-flux hand-over -- the one the issue body describes,
+    # still alive over the ocean side of every coastal cell. (Review finding:
+    # this arm was missing, and without it "the heat is already handled" was
+    # not earned.) F_land cancels in the difference, so it need not be
+    # modelled here.
+    _, _, sh_o, lh_o, _ = compute_surface_fluxes(
+        u, v, T, q, T_o, q_o, rho, cfg_ocean)
+    f_o = f_ocean
+    sh_prod = f_o * sh_b
+    lh_prod = f_o * lh_b
+    sh_prod_ok = f_o * sh_o
+    lh_prod_ok = f_o * lh_o
+
     def _pack(tx, ty, sh, lh):
         return dict(shflx=np.asarray(sh), lhflx=np.asarray(lh),
                     tau=np.asarray(jnp.hypot(tx, ty)))
 
     return (_pack(tx_t, ty_t, sh_t, lh_t),
             _pack(tx_b, ty_b, sh_b, lh_b),
-            _pack(tx_s, ty_s, sh_s, lh_s))
+            _pack(tx_s, ty_s, sh_s, lh_s),
+            dict(shflx=np.asarray(sh_prod), lhflx=np.asarray(lh_prod)),
+            dict(shflx=np.asarray(sh_prod_ok), lhflx=np.asarray(lh_prod_ok)))
 
 
 def _stats(d):
@@ -211,7 +247,7 @@ def control(cfg_ocean, cfg_ice, cfg_land, n=200, seed=7):
                                              jnp.asarray(cases["p_s"])))
     # beta chosen so the land tile's q_sfc equals the ocean tile's 0.98*q_sat.
     cases["beta"] = np.full(n, 0.98)
-    t, b, _ = run(cases, cfg_ocean, cfg_ocean, cfg_ocean)
+    t, b = run(cases, cfg_ocean, cfg_ocean, cfg_ocean)[:2]
     return max(float(np.max(np.abs(b[k] - t[k]))) for k in ("shflx", "lhflx"))
 
 
@@ -256,7 +292,8 @@ def main(argv=None):
               f"z0={getattr(c, 'z0', None)}")
 
     cases = build_cases(args.n)
-    tiled, blended, same_law = run(cases, cfg_ocean, cfg_ice, cfg_land)
+    tiled, blended, same_law, prod, prod_ok = run(
+        cases, cfg_ocean, cfg_ice, cfg_land)
 
     # TWO populations, reported separately (never one frightening number with
     # no provenance): the full sampled box, which deliberately includes severe
@@ -287,9 +324,30 @@ def main(argv=None):
                       f"{p_['max_abs']:10.3f}   [{v['unit']}]")
             print(f"{'':7s} {'(mean tiled flux)':17s} {v['mean_tiled']:12.3f}")
 
+    # THE PRODUCTION-LANE HEAT ORDER ERROR -- the arm the first version of
+    # this probe was missing. Land heat comes from the land model on both
+    # sides and cancels; what is left is the ocean fraction evaluated on the
+    # blended surface instead of the ocean surface.
+    print("\nPRODUCTION-LANE ocean-fraction heat error "
+          "(interactive land ON; land flux cancels):")
+    print(f"{'flux':8s} {'mean signed':>12s} {'mean |d|':>10s} "
+          f"{'p95 |d|':>10s} {'max |d|':>10s} {'mean prod':>10s}")
+    prod_summary = {}
+    for label, mask in pops:
+        for k in ("shflx", "lhflx"):
+            sel = slice(None) if mask is None else mask
+            d = prod[k][sel] - prod_ok[k][sel]
+            st = _stats(d)
+            st["mean_production_flux"] = float(np.mean(prod[k][sel]))
+            prod_summary[f"{label}|{k}"] = st
+            print(f"{k:8s} {st['mean_signed']:12.3f} {st['mean_abs']:10.3f} "
+                  f"{st['p95_abs']:10.3f} {st['max_abs']:10.3f} "
+                  f"{st['mean_production_flux']:10.3f}   [{label.split()[0]}]")
+
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(dict(control_max_abs=ctrl, summary=summary,
+                           production_ocean_fraction=prod_summary,
                            n=args.n), fh, indent=2)
         print(f"\nwrote {args.json}")
     return 0

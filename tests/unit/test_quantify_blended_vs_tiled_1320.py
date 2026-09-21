@@ -62,15 +62,37 @@ def test_the_control_is_not_vacuous(mod, cfgs):
     """
     o, i, l = cfgs
     cases = mod.build_cases(40)
-    tiled, blended, same_law = mod.run(cases, o, i, l)
+    tiled, blended = mod.run(cases, o, i, l)[:2]
     assert float(np.max(np.abs(blended["shflx"] - tiled["shflx"]))) > 1.0
+
+
+def test_the_production_lane_ocean_fraction_error_is_real(mod, cfgs):
+    """The arm the first version of this probe was missing.
+
+    With the interactive land on, the lane keeps
+    ``heat = (1-f)*BULK(T_blend, q_blend) + f*F_land`` — so the OCEAN
+    fraction is evaluated on the BLENDED surface. The land flux cancels in
+    the difference against the correct form, and what is left must not be
+    negligible, or the claim that the averaging-order defect survives the
+    hand-over is wrong.
+    """
+    o, i, l = cfgs
+    cases = mod.build_cases(200)
+    _, _, _, prod, prod_ok = mod.run(cases, o, i, l)
+    for k in ("shflx", "lhflx"):
+        err = float(np.mean(np.abs(prod[k] - prod_ok[k])))
+        scale = float(np.mean(np.abs(prod[k])))
+        assert err > 0.1 * scale, (
+            f"{k}: the production-lane ocean-fraction order error {err:.2f} "
+            f"is under a tenth of the flux itself {scale:.2f} — the issue "
+            f"comment's claim that this survives the land hand-over fails")
 
 
 def test_the_decomposition_adds_up(mod, cfgs):
     """total == averaging_order + tile_law, exactly, by construction."""
     o, i, l = cfgs
     cases = mod.build_cases(40)
-    tiled, blended, same_law = mod.run(cases, o, i, l)
+    tiled, blended, same_law = mod.run(cases, o, i, l)[:3]
     for k in ("shflx", "lhflx"):
         total = blended[k] - tiled[k]
         parts = (blended[k] - same_law[k]) + (same_law[k] - tiled[k])
@@ -88,7 +110,7 @@ def test_momentum_is_where_the_production_defect_lives(mod, cfgs):
     """
     o, i, l = cfgs
     cases = mod.build_cases(200)
-    tiled, blended, same_law = mod.run(cases, o, i, l)
+    tiled, blended, same_law = mod.run(cases, o, i, l)[:3]
     order = float(np.mean(np.abs(blended["tau"] - same_law["tau"])))
     law = float(np.mean(np.abs(same_law["tau"] - tiled["tau"])))
     assert law > 20.0 * order, (
