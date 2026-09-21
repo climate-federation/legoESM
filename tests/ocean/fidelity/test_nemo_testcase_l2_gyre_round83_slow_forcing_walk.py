@@ -260,6 +260,17 @@ def test_round140_rhs_reader_and_replay_plants_fire() -> None:
         WALK.validate_round140_rhs_replay(record, post_wind_u=planted)
 
 
+def test_round140_rhs_replay_includes_the_deepest_physical_level() -> None:
+    e3 = np.zeros((1, 1, 30), dtype=np.float64)
+    rhs = np.zeros_like(e3)
+    mask = np.ones_like(e3)
+    e3[..., -1] = 2.0
+    rhs[..., -1] = 3.0
+    result = WALK._round140_source_sum(
+        e3, rhs, mask, np.asarray([[0.5]], dtype=np.float64))
+    np.testing.assert_array_equal(result, [[3.0]])
+
+
 def test_round117_compiled_accumulator_order_keeps_after_adv_identity() -> None:
     terms = [np.asarray([value], dtype=np.float64) for value in range(1, 11)]
     rows = jax.device_get(jax.jit(WALK.round117_source_order_accumulators)(

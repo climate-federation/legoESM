@@ -72,6 +72,8 @@ ROUND139_PARENT_PROCESS_SHA256 = (
     "526d1fc73faeda990c661f2363a5bb328168bae17d4aea315daf05c35b4cd7b0")
 ROUND139_PARENT_QCO_SHA256 = (
     "626d21e229f7ced8f606f6385e04224fb2e086cef92d81d95dff7e2ef3e90878")
+ROUND139_RECORD_SHA256 = (
+    "0fee139d96d9a3731ad1d40a6dc28ead3b95b4a1bbb68f51d7cc99baf1215e95")
 ROUND139_MANIFEST = "round139_outputs.sha256"
 ROUND139_MANIFEST_MEMBERS = (
     ROUND139_RECORD,
@@ -118,6 +120,7 @@ ROUND140_RHS_MANIFEST_MEMBERS = (
     round81.DEVELOPED_QCO_RECORD, round81.DEVELOPED_QCO_RECORD + ".stamp",
     "GYRE_OMIP_L2_P3_00001080_restart.nc",
     "oracle_process_budget_kt00001081.bin",
+    "round140_parent_record_validation.json",
     "round140_passive_admission_plant.log",
     "round140_rhs_header_plant.log", "round140_rhs_header_plant.json",
     "round140_rhs_replay_ulp_plant.log", "round140_rhs_replay_ulp_plant.json",
@@ -371,6 +374,17 @@ def read_round140_rhs(path: Path) -> dict[str, object]:
     return read_round140_rhs_bytes(path.read_bytes())
 
 
+def _round140_source_sum(e3, rhs, mask, reciprocal) -> np.ndarray:
+    """Replay NEMO's SUM after the parser has removed only the jpk slot."""
+    product = (e3 * rhs) * mask
+    require(product.shape[-1] == 30,
+            "Round-140 RHS replay physical-level count changed")
+    total = np.array(product[..., 0], copy=True)
+    for level in range(1, product.shape[-1]):
+        total = total + product[..., level]
+    return total * reciprocal
+
+
 def validate_round140_rhs_replay(record: dict[str, object], *,
                                  post_wind_u=None) -> dict[str, object]:
     """Replay the two directly closed statements in the acquired stream."""
@@ -379,7 +393,7 @@ def validate_round140_rhs_replay(record: dict[str, object], *,
     for face in ("u", "v"):
         active3 = fields[f"{face}mask"] != 0.0
         active2 = active3[..., 0]
-        depth = round16._source_sum(
+        depth = _round140_source_sum(
             fields[f"e3{face}"], fields[f"rhs_{face}"],
             fields[f"{face}mask"], fields[f"r1_h{face}0"])
         rows[f"depth_{face}"] = comparison(
@@ -563,8 +577,7 @@ def _verify_round140_rhs_closed_run(root: Path) -> dict[str, object]:
     require(tuple(entries) == ROUND140_RHS_MANIFEST_MEMBERS,
             "Round-140 RHS manifest census or order changed")
     inherited = {
-        ROUND139_RECORD: sha256(
-            ROOT / "round139/oracle_developed_slow_forcing" / ROUND139_RECORD),
+        ROUND139_RECORD: ROUND139_RECORD_SHA256,
         round81.DEVELOPED_RECORD: ROUND139_PARENT_EXTERNAL_SHA256,
         round81.DEVELOPED_QCO_RECORD: ROUND139_PARENT_QCO_SHA256,
         "GYRE_OMIP_L2_P3_00001080_restart.nc": ROUND139_PARENT_RESTART_SHA256,
@@ -573,6 +586,16 @@ def _verify_round140_rhs_closed_run(root: Path) -> dict[str, object]:
     for name, expected in inherited.items():
         require(sha256(root / name) == expected,
                 f"Round-140 instrument perturbed inherited {name}")
+    producer = (root / "producer_commit.txt").read_text().strip()
+    for name in (ROUND139_RECORD, round81.DEVELOPED_RECORD,
+                 round81.DEVELOPED_QCO_RECORD):
+        words = (root / f"{name}.stamp").read_text().split()
+        require(words == [sha256(root / name), producer, name],
+                f"Round-140 inherited stamp changed: {name}")
+    parent = json.loads(
+        (root / "round140_parent_record_validation.json").read_text())
+    require(parent.get("status") == "AT-BAR",
+            "Round-140 parent-record validation moved")
     markers = {
         "passive": ("round140_passive_admission_plant.log",
                     "STATUS PLANT-FIRED: passive-admission"),
@@ -598,6 +621,7 @@ def _verify_round140_rhs_closed_run(root: Path) -> dict[str, object]:
         "manifest_members": len(entries),
         "plants": seen,
         "completion": {"nemo": stdout[-1], "run": timing[-1]},
+        "parent_record_status": parent["status"],
     }
 
 

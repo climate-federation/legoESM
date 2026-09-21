@@ -357,6 +357,7 @@ done
     "$SPLIT_RECORD" "$SPLIT_RECORD.stamp" \
     "$EXTERNAL_RECORD" "$EXTERNAL_RECORD.stamp" \
     "$QCO_RECORD" "$QCO_RECORD.stamp" "$RESTART_1080" "$PROCESS_1081" \
+    round140_parent_record_validation.json \
     round140_passive_admission_plant.log \
     round140_rhs_header_plant.log round140_rhs_header_plant.json \
     round140_rhs_replay_ulp_plant.log round140_rhs_replay_ulp_plant.json \
