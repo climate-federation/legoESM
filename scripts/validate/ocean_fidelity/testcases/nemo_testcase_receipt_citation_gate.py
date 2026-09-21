@@ -545,6 +545,12 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
         "/trazdf.f90"),
+    "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
+        "/domqco.f90"),
+    "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
+        "/traadv_fct.f90"),
     # Round 126 scores the compiled Round-125 acquisition branch itself.
     "GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo"
@@ -701,6 +707,15 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:818-830': [
         'lr123_write = lwp .AND. .NOT.ln_tile .AND. kstg == 3',
         'WRITE(r123_unit) r3t(:,:,Kbb), r3t(:,:,Kmm), r3t(:,:,Kaa)', 13],
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:145-193': [
+        'ssha(:,:) = ssh (:,:,Kaa)',
+        'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )', 49],
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:218-258': [
+        'r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )',
+        'r3t(:,:,Kaa) = r3ta(:,:)', 41],
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/domqco.f90:237-258': [
+        'SUBROUTINE dom_qco_r3c_RK3( pssh, pr3t, pr3u, pr3v, pr3f )',
+        'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 22],
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:861-869': [
         'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )',
         ('IF( lr123_write )   WRITE(r123_unit) ts(:,:,:,jp_tem,Krhs)', 2), 9],
@@ -717,6 +732,16 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/trazdf.f90:563-578': [
         'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk)',
         '&             / zwt(ji,jk) * tmask(ji,jj,jk)', 16],
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90:849-878': [
+        '!==  compute the beta term  ==!',
+        'IF( zdo /=  zbig .AND. zneg /= 0._wp ) THEN', 30],
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90:886-931': [
+        'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji+1,jj,ik) ),',
+        'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji,jj,ikm1) ),',
+        46],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/zdftke.f90:473-474': [
+        'Set the minimum value of tke',
+        'en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin )', 2],
     # --- round 122: per-step entry record and full-year restart semantics ---
     'GYRE_OMIP_L2_P3_SM_YRPERT/BLD/ppsrc/nemo/stprk3.f90:89-99': [
         'IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN',
