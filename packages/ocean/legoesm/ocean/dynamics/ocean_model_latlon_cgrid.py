@@ -1049,6 +1049,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # constructible as a model configuration selector.
     slow_forcing_incoming_override: object = None
     barotropic_slow_forcing_override: object = None
+    # WRITE-only developed-state observer for the completed three-dimensional
+    # momentum RHS before its depth reduction.  Kept separate from the final
+    # slow-forcing callback so the round-141 gate can prove this minimum
+    # materialization passive against the ordinary production step.
+    slow_forcing_rhs_observer: object = None
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
     # leaving legoESM's deviation-form carried state untouched.  Private
     # decision-33 measurement only.
@@ -5206,6 +5211,10 @@ class LatLonCGridOceanModel:
         # couples the slow forcing to the evolving barotropic state.
         du_dt = tend.du_dt.data
         dv_dt = tend.dv_dt.data
+        _slow_rhs_observer = self._nemo_ws_test_hooks.slow_forcing_rhs_observer
+        if callable(_slow_rhs_observer):
+            jax.debug.callback(
+                _slow_rhs_observer, du_dt, dv_dt, ordered=True)
 
         # Compute layer thickness at u/v faces for depth-averaging.
         # Min-rule: the face's effective wet thickness is the shallower

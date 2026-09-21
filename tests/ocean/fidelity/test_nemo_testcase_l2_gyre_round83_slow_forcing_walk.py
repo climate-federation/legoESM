@@ -411,3 +411,25 @@ def test_round121_proxy_executes_directed_model_only_at_kt2() -> None:
     assert [directed for kind, directed, _ in calls if kind == "step"] == [
         False, True, False, False]
     assert len(audit) == 1
+
+
+def test_round141_rhs_observer_is_private_default_off_and_registered() -> None:
+    hook_name = "slow_forcing_rhs_observer"
+    hooks = WALK.model_module._NEMOWSRK3TestHooks()
+    assert getattr(hooks, hook_name) is None
+    assert hook_name not in WALK.model_module.LatLonCGridOceanConfig._fields
+    WALK._validate_round140_rhs_registry(WALK.ROUND141_RHS_REGISTRY)
+    with pytest.raises(RuntimeError, match="registry changed"):
+        WALK._validate_round140_rhs_registry(WALK.ROUND141_RHS_REGISTRY[:-1])
+
+
+def test_round141_depth_reduction_uses_the_production_stacked_sum() -> None:
+    h_u = np.asarray([[[2.0, 3.0]]], dtype=np.float64)
+    h_v = np.asarray([[[4.0, 1.0]]], dtype=np.float64)
+    rhs_u = np.asarray([[[5.0, 7.0]]], dtype=np.float64)
+    rhs_v = np.asarray([[[11.0, 13.0]]], dtype=np.float64)
+    mask = np.ones((1, 1), dtype=np.float64)
+    got_u, got_v = jax.device_get(WALK._round141_depth_reduction(
+        h_u, h_v, rhs_u, rhs_v, mask, mask))
+    assert got_u[0, 0] == (2.0 * 5.0 + 3.0 * 7.0) / 5.0
+    assert got_v[0, 0] == (4.0 * 11.0 + 1.0 * 13.0) / 5.0

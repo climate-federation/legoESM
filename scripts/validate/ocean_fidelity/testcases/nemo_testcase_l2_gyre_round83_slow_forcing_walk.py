@@ -36,8 +36,13 @@ from legoesm.core.precision import (  # noqa: E402
 from legoesm.ocean.dynamics import (  # noqa: E402
     ocean_model_latlon_cgrid as model_module,
 )
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (  # noqa: E402
+    min_cell_to_uface,
+    min_cell_to_vface,
+)
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump  # noqa: E402
+from legoesm.ocean.vertical import compute_layer_thickness  # noqa: E402
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
 ROUND64_PRODUCER = "3b3b045bd9e03b60330204e7590e4c4470b7a0ca"
@@ -132,6 +137,7 @@ ROUND140_RHS_REGISTRY = (
     "mask3_u", "mask3_v", "reciprocal_u", "reciprocal_v",
     "depth_mean_u", "depth_mean_v",
 )
+ROUND141_RHS_REGISTRY = ROUND140_RHS_REGISTRY
 
 
 def require(condition: bool, message: str) -> None:
@@ -1178,6 +1184,226 @@ def measure_round140_rhs_developed(args) -> dict[str, object]:
         "plant": args.plant, "plant_fires": False,
         "scope": {
             "production_physics_changed": False,
+            "DINO": "NO-PRODUCTION-CHANGE",
+            "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+            "OVERFLOW": "NO-PRODUCTION-CHANGE",
+            "ORCA2": "UNMEASURED-WITH-SPEC; GYRE diagnostic only",
+        },
+    }
+
+
+@jax.jit
+def _round141_depth_reduction(h_u, h_v, rhs_u, rhs_v, mask_u, mask_v):
+    """Replay the production stacked depth reductions from captured RHS."""
+    pair_u = jnp.sum(
+        jnp.stack([h_u, rhs_u * h_u], axis=-1), axis=-2)
+    pair_v = jnp.sum(
+        jnp.stack([h_v, rhs_v * h_v], axis=-1), axis=-2)
+    depth_u = pair_u[..., 1] / jnp.maximum(pair_u[..., 0], 1.0e-10)
+    depth_v = pair_v[..., 1] / jnp.maximum(pair_v[..., 0], 1.0e-10)
+    return depth_u * mask_u, depth_v * mask_v
+
+
+def _round141_rhs_callback_trace(
+        args, card, state, freshwater, surface, eta_after_override):
+    """Capture only the completed 3-D RHS and prove the callback passive."""
+    rhs_captures = []
+    final_captures = []
+
+    def rhs_sink(rhs_u, rhs_v):
+        rhs_captures.append((np.asarray(rhs_u), np.asarray(rhs_v)))
+
+    def final_sink(*values):
+        require(len(values) == len(ROUND140_CALLBACK_FIELDS),
+                "Round-141 final callback field census changed")
+        final_captures.append({
+            name: np.asarray(value)
+            for name, value in zip(
+                ROUND140_CALLBACK_FIELDS, values, strict=True)
+        })
+
+    hooks = model_module._NEMOWSRK3TestHooks(
+        slow_forcing_rhs_observer=rhs_sink,
+        barotropic_slow_forcing_override=final_sink,
+    )
+    (_, _, _, _, _, trace) = round82._capture_external_context(
+        args, card, state, freshwater, surface,
+        eta_after_override=eta_after_override,
+        traced_hooks=hooks,
+        plain_hooks=model_module._NEMOWSRK3TestHooks(),
+    )
+    require(rhs_captures, "Round-141 RHS callback did not fire")
+    require(final_captures, "Round-141 final callback did not fire")
+    for duplicate in rhs_captures[1:]:
+        require(round82._pytree_identity(
+            duplicate, rhs_captures[0])["bit_exact"],
+            "Round-141 RHS callbacks differ")
+    for duplicate in final_captures[1:]:
+        require(round82._pytree_identity(
+            duplicate, final_captures[0])["bit_exact"],
+            "Round-141 final callbacks differ")
+    return trace, rhs_captures[0], final_captures[0]
+
+
+def measure_round141_rhs_developed(args) -> dict[str, object]:
+    """Score the developed completed 3-D momentum RHS in production JIT."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-141 RHS measurement worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-141 RHS measurement commit mismatch")
+    if args.plant == "rhs-missing-row":
+        fired = False
+        try:
+            _validate_round140_rhs_registry(ROUND141_RHS_REGISTRY[:-1])
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-141 RHS missing-row plant stayed green")
+        return {
+            "format": "nemo-testcase-l2-gyre-round141-rhs-walk-v1",
+            "status": "PLANT-FIRED", "worktree": stamp,
+            "plant": args.plant, "plant_fires": True,
+        }
+    _validate_round140_rhs_registry()
+    admission = measure_round140_rhs_record(args)
+    record = read_round140_rhs(args.round140_rhs_root / ROUND140_RHS_RECORD)
+    fields = record["fields"]
+    split = read_round139_record(args.round140_rhs_root / ROUND139_RECORD)
+    active3 = {
+        "u": fields["umask"] != 0.0,
+        "v": fields["vmask"] != 0.0,
+    }
+    active2 = {face: active3[face][..., 0] for face in ("u", "v")}
+    boundary_calibration = {
+        face: comparison(
+            fields[f"post_wind_{face}"], split[f"incoming_{face}"],
+            active2[face])
+        for face in ("u", "v")
+    }
+    require(all(row["bit_exact"] for row in boundary_calibration.values()),
+            "Round-140 RHS and Round-139 incoming boundaries differ")
+
+    card, state, freshwater, surface, payload, entry = round82._developed_inputs(args)
+    minimal_trace, captured_rhs, captured_final = _round141_rhs_callback_trace(
+        args, card, state, freshwater, surface, jnp.asarray(payload["ssha"]))
+    control_trace, control_final = _round140_callback_trace(
+        args, card, state, freshwater, surface, jnp.asarray(payload["ssha"]))
+    require(minimal_trace.trace_state_identity["bit_exact"],
+            "Round-141 RHS callback moved the returned production state")
+    require(control_trace.trace_state_identity["bit_exact"],
+            "Round-140 control callback moved the returned production state")
+    callback_identity = {
+        name: comparison(
+            captured_final[name], control_final[name],
+            np.ones_like(captured_final[name], dtype=bool))
+        for name in ROUND140_CALLBACK_FIELDS
+    }
+    require(all(row["bit_exact"] for row in callback_identity.values()),
+            "Round-141 RHS callback moved an external-forcing boundary")
+
+    h_k = compute_layer_thickness(
+        state.eta.data, state.H_bathy.data, card.recipe.z_coord,
+        min_water_column_m=card.recipe.model_config.min_water_column_m)
+    h_u = min_cell_to_uface(h_k)
+    h_v = min_cell_to_vface(h_k, card.recipe.grid)
+    mask_u = state.u_mask.data
+    mask_v = state.v_mask.data
+    rhs_u, rhs_v = captured_rhs
+    depth_u, depth_v = jax.device_get(_round141_depth_reduction(
+        h_u, h_v, jnp.asarray(rhs_u), jnp.asarray(rhs_v), mask_u, mask_v))
+    H_u = jnp.maximum(jnp.sum(h_u, axis=-1), 1.0e-10)
+    H_v = jnp.maximum(jnp.sum(h_v, axis=-1), 1.0e-10)
+    expected_masks = gate.expected_masks(card)
+    live = {
+        "thickness_u": native_u(h_u),
+        "thickness_v": native_v(h_v),
+        "rhs_u": native_u(rhs_u),
+        "rhs_v": native_v(rhs_v),
+        "mask3_u": np.asarray(expected_masks["u"], dtype=np.float64),
+        "mask3_v": np.asarray(expected_masks["v"], dtype=np.float64),
+        "reciprocal_u": native_u(np.float64(1.0) / np.asarray(H_u)),
+        "reciprocal_v": native_v(np.float64(1.0) / np.asarray(H_v)),
+        "depth_mean_u": native_u(depth_u),
+        "depth_mean_v": native_v(depth_v),
+    }
+    oracle = {
+        "thickness_u": fields["e3u"],
+        "thickness_v": fields["e3v"],
+        "rhs_u": fields["rhs_u"],
+        "rhs_v": fields["rhs_v"],
+        "mask3_u": fields["umask"],
+        "mask3_v": fields["vmask"],
+        "reciprocal_u": fields["r1_hu0"],
+        "reciprocal_v": fields["r1_hv0"],
+        "depth_mean_u": fields["depth_mean_u"],
+        "depth_mean_v": fields["depth_mean_v"],
+    }
+    if args.plant == "rhs-observer-ulp":
+        planted = np.array(oracle["rhs_u"], copy=True)
+        location = tuple(int(value) for value in np.argwhere(active3["u"])[0])
+        planted[location] = np.nextafter(
+            planted[location], np.float64(np.inf))
+        row = comparison(live["rhs_u"], planted, active3["u"])
+        baseline = comparison(live["rhs_u"], oracle["rhs_u"], active3["u"])
+        require(row != baseline,
+                "Round-141 RHS observer ULP plant did not move its row")
+        return {
+            "format": "nemo-testcase-l2-gyre-round141-rhs-walk-v1",
+            "status": "PLANT-FIRED", "worktree": stamp,
+            "plant": args.plant, "plant_fires": True,
+            "plant_location": list(location),
+            "ordinary_row": baseline, "planted_row": row,
+        }
+
+    rows = {}
+    for name in ROUND141_RHS_REGISTRY:
+        face = "u" if name.endswith("_u") else "v"
+        mask = active3[face] if live[name].ndim == 3 else active2[face]
+        rows[name] = comparison(live[name], oracle[name], mask)
+    require(tuple(rows) == ROUND141_RHS_REGISTRY,
+            "Round-141 RHS result omitted a registered operand")
+    first = next(({"boundary": name, **rows[name]}
+                  for name in ROUND141_RHS_REGISTRY
+                  if not rows[name]["bit_exact"]), None)
+    predictions = {
+        "geometry_pair_bit": bool(
+            rows["thickness_u"]["bit_exact"]
+            and rows["thickness_v"]["bit_exact"]),
+        "mask_pair_bit": bool(
+            rows["mask3_u"]["bit_exact"]
+            and rows["mask3_v"]["bit_exact"]),
+        "reference_reciprocal_pair_bit": bool(
+            rows["reciprocal_u"]["bit_exact"]
+            and rows["reciprocal_v"]["bit_exact"]),
+        "rhs_u_first": bool(first is not None and first["boundary"] == "rhs_u"),
+        "rhs_v_non_bit": not rows["rhs_v"]["bit_exact"],
+        "callback_returned_state_bit": minimal_trace.trace_state_identity["bit_exact"],
+        "callback_external_boundaries_bit": all(
+            row["bit_exact"] for row in callback_identity.values()),
+        "same_run_post_wind_boundary_bit": all(
+            row["bit_exact"] for row in boundary_calibration.values()),
+    }
+    return {
+        "format": "nemo-testcase-l2-gyre-round141-rhs-walk-v1",
+        "status": "MEASURED", "worktree": stamp,
+        "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
+        "entry": entry, "record_admission": admission,
+        "record_replay": validate_round140_rhs_replay(record),
+        "observer_state_identity": minimal_trace.trace_state_identity,
+        "control_state_identity": control_trace.trace_state_identity,
+        "observer_external_boundary_identity": callback_identity,
+        "same_run_boundary_calibration": boundary_calibration,
+        "first_non_bit_operand": first, "rows": rows,
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "plant": args.plant, "plant_fires": False,
+        "scope": {
+            "production_physics_changed": False,
+            "day_240_carry": "UNMEASURED",
             "DINO": "NO-PRODUCTION-CHANGE",
             "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
             "OVERFLOW": "NO-PRODUCTION-CHANGE",
@@ -3355,6 +3581,9 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round140-rhs-record-only", action="store_true",
         help="admit the developed step-1081 three-dimensional RHS record")
+    round_group.add_argument(
+        "--round141-rhs-developed", action="store_true",
+        help="run the passive production step-1081 completed-RHS split")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -3407,13 +3636,16 @@ def main(argv=None) -> int:
                             "record-truncation", "record-replay-ulp",
                             "developed-missing-row", "rhs-record-stamp",
                             "rhs-record-header", "rhs-record-truncation",
-                            "rhs-record-replay-ulp", "rhs-missing-row"),
+                            "rhs-record-replay-ulp", "rhs-missing-row",
+                            "rhs-observer-ulp"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
-            measure_round140_rhs_record(args)
+            measure_round141_rhs_developed(args)
+            if args.round141_rhs_developed else
+            (measure_round140_rhs_record(args)
             if args.round140_rhs_record_only else
             (measure_round140_developed(args)
             if args.round140_developed else
@@ -3423,21 +3655,22 @@ def main(argv=None) -> int:
             if args.round121_trajectory else
             (measure_round117(args)
             if (args.round117 or args.round118 or args.round119
-                or args.round120 or args.round121) else measure(args))))))
+                or args.round120 or args.round121) else measure(args)))))))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND140 RHS" if args.round140_rhs_record_only else
+            "ROUND141 RHS" if args.round141_rhs_developed else
+            ("ROUND140 RHS" if args.round140_rhs_record_only else
             ("ROUND140 DEVELOPED" if args.round140_developed else
             ("ROUND139 RECORD" if args.round139_record_only else
             ("ROUND121" if args.round121 else
             ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83"))))))))
+             ("ROUND117" if args.round117 else "ROUND83")))))))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
@@ -3459,6 +3692,12 @@ def main(argv=None) -> int:
             + report.get("record_sha256", "plant")
         )
         return 0 if report["status"] == "PASS" else 1
+    if args.round141_rhs_developed:
+        print(
+            "ROUND141 DEVELOPED RHS MEASURED: first="
+            + repr(report["first_non_bit_operand"])
+        )
+        return 0
     if args.round121_trajectory:
         print("ROUND121 W TRAJECTORY " + report["status"] + ": "
               + report["trajectory_kind"])
