@@ -101,11 +101,29 @@ production step changes exactly one incoming U face by
 
 ## Review, citation gate, and focused tests
 
-REVIEW_PLACEHOLDER
+The required separate read-only Codex review emitted exactly:
 
-CITATION_PLACEHOLDER
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
 
-TEST_PLACEHOLDER
+It exited 1 and supplied no `SHIP`, `HOLD`, or `DO NOT SHIP` verdict.
+Independent review was unavailable in-sandbox; the standing operator rule
+permits continuation. No production physics is landed.
+
+The preregistration citation gate passed with 3 citations, 0 unmapped, 0
+failures, and 0 failing map entries. The receipt gate passed with 7 citations,
+0 unmapped, 0 failures, and 0 failing map entries. Shifting the exact U/V wind
+statement citation by two lines made exactly one endpoint fail; the plant
+exited 1 as required.
+
+The final four-file focused suite reported `78 passed in 2.63s`:
+`test_nemo_testcase_l2_gyre_round83_slow_forcing_walk.py`,
+`test_nemo_testcase_l2_gyre_round51_live_operands.py`,
+`test_nemo_testcase_receipt_citation_gate.py`, and
+`test_fidelity_time_levels.py`.
 
 ## Evidence artifacts
 
@@ -115,6 +133,11 @@ TEST_PLACEHOLDER
 | `missing_row_plant.json` | `9b6dcfb4a69eba102c205d4b09f08b74a26802b11879a45b15ac21a3a0008c56` |
 | `missing_row_plant.log` | `88acecc7cefe66cd6b88946db0907d5e654a6b1cd29eceeff6c68570172e1a56` |
 | `stress_ulp_plant_final.json` | `0b055981b3fe219921850c4b5cad8961177be7d7e09900124adadf726d677c44` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `focused_tests_final.log` | `edf475123ed1b7e283713da2ea6b319b16ae5d461c0169a56c92d265b711fe97` |
+| `prereg_citation_gate_final.json` | `1dc139f32d5f5ae3cf155b4100305669a038dccd026c816733ba00f361595ce0` |
+| `receipt_citation_gate_final.json` | `0fc7ee9faa3ce5c6a46dfc58ee149d6f0be70c122c1f425fae39df47de87844e` |
+| `receipt_citation_shift_plant.json` | `f345cc7591862a13553d6353141cdadd2f7406111cbbdfa80c31401b707546cc` |
 
 The earlier `wind_operands.json` is preliminary and superseded because it did
 not include the preregistered RMS and first-index fields. The zero-byte
