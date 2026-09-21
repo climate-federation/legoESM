@@ -48,7 +48,14 @@ else
   # clock building and partitioning the mesh on every rank, and silently
   # died at the fixed 2400 s.
   PPN="${PPN:-8}"; ARM_TIMEOUT="${ARM_TIMEOUT:-2400}"
-  SRUN_DEV=(--cpu-bind=cores --distribution=block:cyclic)
+  # Each rank gets its full share of the node's hardware threads.  Without
+  # --cpus-per-task srun binds every rank to ONE core (affinity = 2 hw
+  # threads): every CPU ladder before 2026-09-21 ran that way, 7.4x slower
+  # per rank than the 32-core share (s7 atm, 4 ranks/node: 1270 -> 172 ms).
+  # 4 ranks/node measured best on the interactive node (4x32: 172, 8x16:
+  # 195, 16x8: 199, 2x64: 211 ms).
+  SRUN_DEV=(--cpu-bind=cores --distribution=block:cyclic
+            --cpus-per-task="$(( ${SLURM_CPUS_ON_NODE:-256} / PPN ))")
 fi
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"   # $REPO, $PY, PYTHONPATH
 cd "$REPO"

@@ -7,6 +7,8 @@ run falsifiable from the record alone.
 
 from __future__ import annotations
 
+import os
+
 import importlib.util
 from pathlib import Path
 
@@ -56,9 +58,10 @@ def test_record_carries_roadmap_item9_fields():
         "devices_per_rank", "decomposition", "solver_variant",
         "solver_residual", "cells_per_rank", "scaling_kind",
         "gpu_direct_requested", "gpu_direct_active", "host_staged_halo",
-        "schema_version", "timestamp_utc",
+        "schema_version", "timestamp_utc", "cpu_affinity",
     ):
         assert k in rec, f"item-9 field {k!r} absent"
+    assert rec["cpu_affinity"] == len(os.sched_getaffinity(0)) > 0
     assert rec["solver_variant"] == "single_reduce_pcg"
     assert rec["solver_residual"] == pytest.approx(3.2e-11)
     assert rec["scaling_kind"] == "strong"

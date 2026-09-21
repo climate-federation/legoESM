@@ -120,6 +120,11 @@ OCEAN_MPAS_PCG_PRECOND = ("poly", 4)
 # The 32-channel gain is ATMOSPHERE evidence; the ocean lane (PCG-dominated,
 # 2M+9 allreduces/step) is pinned by decision and A/B-checked separately.
 MPAS_NCCL_CHANNELS = "32"
+# Multi-rank CPU rows need each rank's full core share (nature_ladder.sbatch
+# passes --cpus-per-task = node threads / ranks-per-node = 64 since
+# 2026-09-21); rows stamped below this, or unstamped, were 1-core ranks
+# (7.4x slower per rank) and are refused.
+CPU_AFFINITY_MIN = 16
 MPAS_NCCL_CHUNK = "131072"
 
 
@@ -127,6 +132,7 @@ def load(dirs):
     best = {}
     dropped = []
     dropped_nccl = []
+    dropped_aff = []
     for d in dirs:
         for f in glob.glob(os.path.join(d, "**", "*.jsonl"), recursive=True):
             if f.endswith(".failed.jsonl"):     # quarantined by the ladder
@@ -177,6 +183,11 @@ def load(dirs):
                         dropped.append((f, int(r["n_devices"]),
                                         f"{iters}/{pre[0]}{pre[1]}"))
                         continue
+                if _backend(r) == "cpu" and int(r["n_devices"]) > 1:
+                    aff = r.get("metadata", {}).get("cpu_affinity")
+                    if aff is None or int(aff) < CPU_AFFINITY_MIN:
+                        dropped_aff.append((f, int(r["n_devices"]), aff))
+                        continue
                 if (grid in ("icosahedral", "mpas") and _backend(r) == "gpu"
                         and int(r["n_devices"]) > 1):
                     env = r.get("metadata", {}).get("extra", {}).get("nccl_env") or {}
@@ -207,6 +218,12 @@ def load(dirs):
               file=sys.stderr)
         for _f, nd, it in sorted(dropped, key=lambda d: d[1])[:20]:
             print(f"  nd={nd:<5} iters={it!r}  {_f}", file=sys.stderr)
+    if dropped_aff:
+        print(f"load: refused {len(dropped_aff)} multi-rank CPU receipts whose "
+              f"ranks had fewer than {CPU_AFFINITY_MIN} hardware threads "
+              f"(unstamped = pre-2026-09-21 one-core ranks): "
+              + ", ".join(sorted({f"{d[0].split('/')[-2]}" for d in dropped_aff})),
+              file=sys.stderr)
     if dropped_nccl:
         counts = {}
         for _f, nd, ch in dropped_nccl:
