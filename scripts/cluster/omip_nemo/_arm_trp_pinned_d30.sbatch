@@ -42,15 +42,22 @@
 # Day 5 is deliberately NOT the primary: its two-lineage gap was 0.077
 # against a 0.060 cross-grid noise floor, which is 1.3x noise and settles
 # nothing. The 5-daily snapshots give every intermediate day for free.
+#
+# RUN FROM _omip_merge, NOT FROM THE MAIN CHECKOUT. The first submission of
+# this card did `cd` to main and died in 21 s on "unrecognized arguments" for
+# thirteen flags: main's driver is OLDER than the branch the control ran on.
+# The control's own manifest says so -- package_path is under _omip_merge --
+# and reproducing a run means reproducing its TREE, not just its flags.
 set -uo pipefail
-R=/burg-archive/glab/users/pg2328/legoESM; cd $R || exit 1
-echo "MAIN HEAD: $(git log --oneline -1)"
-export PYTHONPATH="$R/src:$(ls -d $R/packages/*/ | sed 's:/$::' | tr '\n' ':')$R"
+ROOT=/burg-archive/glab/users/pg2328/_omip_merge; cd $ROOT || exit 1
+echo "HEAD: $(git -C $ROOT log --oneline -1)"
+echo "dirty: $(git -C $ROOT status --porcelain | wc -l)"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_ENABLE_X64=1
-CMD=$(cat $R/omip_nemo/_arm_trp_pinned_d30.txt)
+CMD=$(cat /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_arm_trp_pinned_d30.txt)
 echo "CMD: $PY scripts/run/run_omip_core2.py $CMD"
 $PY -u scripts/run/run_omip_core2.py $CMD
 echo "=== card exit: $? ==="
-ls $R/results/omip_nemo/trp_pinned_d30/*.npz 2>/dev/null
+ls /burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_pinned_d30/*.npz 2>/dev/null
 echo DONE
