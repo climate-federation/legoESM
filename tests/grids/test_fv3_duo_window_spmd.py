@@ -415,11 +415,20 @@ def test_tracer_multi_subcycle_matches_faces(setup):
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
         FV3DuoConfig, FV3DuoDynamicsModel)
     from legoesm.grids.factory import create_fv3_duo_grid
+    from jax.sharding import NamedSharding, PartitionSpec as P
     grid = create_fv3_duo_grid(N)
     cfg = FV3DuoConfig(km=KM, hydrostatic=True, n_split=800)
-    ref_model = FV3DuoDynamicsModel(grid, cfg)
-    ref = ref_model.step(ref_model.dcmip16_initial_state(do_pert=True),
-                         30000.0)
+    # the gate's reference: face-sharded, face-batched (the plain
+    # per-level loop path is a different reduction order, not bitwise)
+    sh6 = NamedSharding(Mesh(np.array(jax.devices()[:6]), ("face",)),
+                        P("face"))
+    ref_model = FV3DuoDynamicsModel(grid, cfg, step_out_shardings=sh6,
+                                    step_face_batched=True)
+    ref = ref_model.dcmip16_initial_state(do_pert=True)
+    ref = jax.tree_util.tree_map(
+        lambda a: jax.device_put(a, sh6) if hasattr(a, "ndim")
+        and a.ndim >= 3 and a.shape[0] == 6 else a, ref)
+    ref = ref_model.step(ref, 30000.0)
     mesh = Mesh(np.array(jax.devices()[:6 * KT * KT]).reshape(6, KT, KT),
                 ("face", "tile_i", "tile_j"))
     win_model = FV3DuoDynamicsModel(grid, cfg, step_spmd_mesh=mesh,
