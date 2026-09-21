@@ -209,6 +209,8 @@ def test_round136_registry_and_signed_zero_controls_are_nonvacuous(harness):
         "availability": harness.developed_record_availability(),
         "cumulative_boundaries": {
             name: {} for name in harness.PROCESS_ROWS},
+        "geometry_operands": {
+            name: {} for name in harness.DEVELOPED_GEOMETRY_OPERANDS},
         "increment_rows": {name: {} for name in harness.PROCESS_ROWS},
         "branches": {name: {} for name in harness.DEVELOPED_BRANCHES},
     }

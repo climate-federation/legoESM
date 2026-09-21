@@ -6043,6 +6043,7 @@ DEVELOPED_BOUNDARY_FIELDS = {
     "lateral_diffusion": "Bldf",
     "vertical_diffusion": "Taa",
 }
+DEVELOPED_GEOMETRY_OPERANDS = ("q_Kbb", "q_Kmm", "q_Kaa")
 DEVELOPED_BRANCHES = ("fct_nonosc", "evd_replacement", "tke_floors")
 
 
@@ -6174,6 +6175,9 @@ def _validate_developed_registry(report: dict, plant: str | None = None) -> None
         "developed-state requested-day registry is incomplete")
     require(set(candidate["cumulative_boundaries"]) == set(PROCESS_ROWS),
             "developed-state process-row registry is incomplete")
+    require(set(candidate["geometry_operands"])
+            == set(DEVELOPED_GEOMETRY_OPERANDS),
+            "developed-state geometry-operand registry is incomplete")
     require(set(candidate["increment_rows"]) == set(PROCESS_ROWS),
             "developed-state increment-row registry is incomplete")
     require(set(candidate["branches"]) == set(DEVELOPED_BRANCHES),
@@ -6184,6 +6188,8 @@ def _developed_registry_plant(plant: str) -> dict:
     synthetic = {
         "availability": developed_record_availability(),
         "cumulative_boundaries": {name: {} for name in PROCESS_ROWS},
+        "geometry_operands": {
+            name: {} for name in DEVELOPED_GEOMETRY_OPERANDS},
         "increment_rows": {name: {} for name in PROCESS_ROWS},
         "branches": {name: {} for name in DEVELOPED_BRANCHES},
     }
@@ -6433,6 +6439,15 @@ def developed_state_process_walk(
         name: np.asarray(lego_frame[field], dtype=np.float64)
         for name, field in DEVELOPED_BOUNDARY_FIELDS.items()
     }
+    nemo_qco = {
+        "q_Kbb": 1.0 + np.asarray(record["r3t_Kbb"], dtype=np.float64),
+        "q_Kmm": 1.0 + np.asarray(record["r3t_Kmm"], dtype=np.float64),
+        "q_Kaa": 1.0 + np.asarray(record["r3t_Kaa"], dtype=np.float64),
+    }
+    geometry_operands = {
+        name: _score_developed_row(lego_frame[name], values, wet2)
+        for name, values in nemo_qco.items()
+    }
     boundary_rows = {
         name: _score_developed_row(
             lego_boundaries[name], nemo_boundaries[name], wet)
@@ -6584,6 +6599,7 @@ def developed_state_process_walk(
         "observer_state_unequal_bytes": observer_unequal_bytes,
         "branch_observer_cells_unequal": branch_observer_unequal,
         "cumulative_boundaries": boundary_rows,
+        "geometry_operands": geometry_operands,
         "increment_rows": increment_rows,
         "branches": branches,
         "branch_maps": {"path": str(maps_path),
@@ -6610,6 +6626,10 @@ def developed_state_process_walk(
           f"{'rms K':>16s}")
     for name in PROCESS_ROWS:
         row = boundary_rows[name]
+        print(f"  {name:>22s} {row['cells_unequal']:10d} "
+              f"{row['max_abs']:16.8e} {row['rms']:16.8e}")
+    print("  geometry operands (2-D wet columns):")
+    for name, row in geometry_operands.items():
         print(f"  {name:>22s} {row['cells_unequal']:10d} "
               f"{row['max_abs']:16.8e} {row['rms']:16.8e}")
     print(f"  FIRST NON-BIT: {report['first_non_bit_boundary']}")
