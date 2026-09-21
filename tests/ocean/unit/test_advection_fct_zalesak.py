@@ -99,6 +99,35 @@ class TestConservation:
         assert all(value.shape == tracer.shape for value in exposed[2])
         assert all(bool(jnp.all(jnp.isfinite(value))) for value in exposed[2])
 
+    def test_write_only_activity_map_preserves_outputs_and_is_nonvacuous(
+        self, grid_small, smooth_state,
+    ):
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+
+        def run(field, expose):
+            return fct_tracer_advection(
+                field, mu, mv, w_half, h_k, grid_small, dt,
+                high_order="centred2", return_limiter_activity=expose)
+
+        ordinary = jax.jit(lambda: run(tracer, False))()
+        exposed = jax.jit(lambda: run(tracer, True))()
+        for got, want in zip(exposed[:2], ordinary, strict=True):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+        activity = np.asarray(exposed[2])
+        assert activity.shape == tracer.shape
+        assert activity.dtype == np.bool_
+        assert activity.any()
+
+        # A zero-transport arm has exactly zero antidiffusive flux, so a map
+        # that merely reports alpha<1 without checking the consumed flux
+        # would fire here and make the developed-state overlap vacuous.
+        uniform = jnp.full_like(tracer, 7.0)
+        uniform_activity = np.asarray(jax.jit(lambda: fct_tracer_advection(
+            uniform, jnp.zeros_like(mu), jnp.zeros_like(mv),
+            jnp.zeros_like(w_half), h_k, grid_small, dt,
+            high_order="centred2", return_limiter_activity=True))()[2])
+        assert not uniform_activity.any()
+
 
 # ---------------------------------------------------------------------------
 # Monotonicity (no new extrema)

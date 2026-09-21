@@ -171,6 +171,64 @@ def test_round123_process_record_layout_and_reader(tmp_path, harness):
         harness.read_process_record(record_path, truncate=True)
 
 
+def test_round136_record_availability_refuses_endpoint_relabeling(harness):
+    rows = harness.developed_record_availability()
+    assert [row["day"] for row in rows] == [30, 90, 180, 240]
+    assert [row["status"] for row in rows] == [
+        "UNAVAILABLE_BY_RECORD", "UNAVAILABLE_BY_RECORD", "MEASURED",
+        "UNAVAILABLE_BY_RECORD"]
+    assert rows[2]["entry_step"] == 1080
+    assert rows[2]["process_step"] == 1081
+    assert rows[3]["entry_step"] == 1440
+    assert rows[3]["process_step"] is None
+    assert "step-1439" in rows[3]["reason"]
+
+
+def test_round136_cumulative_boundaries_follow_recorded_write_order(
+        tmp_path, harness):
+    path = tmp_path / "oracle_process_budget_kt00001081.bin"
+    _synthetic_process_record(path, harness)
+    record = harness.read_process_record(path)
+    rows = harness._process_cumulative_boundaries(record)
+    assert tuple(rows) == harness.PROCESS_ROWS
+    # qbb=qmm=qaa=1 in the synthetic record, so B = Tbb + dt*RHS.
+    expected = {
+        "geometry": 2.0,
+        "advection": 2.0 + harness.DT_S * 0.10,
+        "surface_boundary": 2.0 + harness.DT_S * 0.20,
+        "shortwave": 2.0 + harness.DT_S * 0.30,
+        "lateral_diffusion": 2.0 + harness.DT_S * 0.40,
+        "vertical_diffusion": 2.75,
+    }
+    for name, value in expected.items():
+        assert np.all(rows[name] == value), name
+
+
+def test_round136_registry_and_signed_zero_controls_are_nonvacuous(harness):
+    report = {
+        "availability": harness.developed_record_availability(),
+        "cumulative_boundaries": {
+            name: {} for name in harness.PROCESS_ROWS},
+        "increment_rows": {name: {} for name in harness.PROCESS_ROWS},
+        "branches": {name: {} for name in harness.DEVELOPED_BRANCHES},
+    }
+    harness._validate_developed_registry(report)
+    for plant, message in (
+            ("missing-day", "requested-day registry"),
+            ("missing-process-row", "process-row registry"),
+            ("missing-branch", "branch registry")):
+        with pytest.raises(harness.GateError, match=message):
+            harness._validate_developed_registry(report, plant=plant)
+
+    positive = np.asarray([[[0.0]]], dtype=np.float64)
+    negative = np.asarray([[[-0.0]]], dtype=np.float64)
+    row = harness._score_developed_row(
+        positive, negative, np.ones_like(positive, dtype=bool))
+    assert row["cells_unequal"] == 1
+    assert row["max_abs"] == 0.0
+    assert row["first_unequal_jik"] == [0, 0, 0]
+
+
 def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
                                                               harness):
     record_path = tmp_path / "oracle_process_budget_kt00001081.bin"
@@ -292,11 +350,21 @@ def test_round124_process_hook_is_private_and_card_guarded():
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 vertical_solve_trace=True))
+    with pytest.raises(ValueError, match="requires tracer_process_trace"):
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                tracer_process_branch_activity=True))
     vertical = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             tracer_process_trace=(), vertical_solve_trace=True))
     assert vertical._nemo_ws_test_hooks.vertical_solve_trace is True
+    branch = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(), tracer_process_branch_activity=True))
+    assert branch._nemo_ws_test_hooks.tracer_process_branch_activity is True
 
 
 def test_round126_literal_matrix_and_solve_controls_are_nonvacuous(harness):

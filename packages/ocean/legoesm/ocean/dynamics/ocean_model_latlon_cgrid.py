@@ -485,6 +485,7 @@ def _compute_advection_flux_div(
     fct_base_thickness=None,
     fct_after_thickness=None,
     fct_implicit_w=None,
+    return_fct_activity: bool = False,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -557,7 +558,7 @@ def _compute_advection_flux_div(
             "centered/ppm/dst3/weno5/weno7).")
     if tracer_advection in ("ppm_fct", "fct2"):
         from legoesm.ocean.advection import fct_tracer_advection
-        div_hut, vert_flux_div = fct_tracer_advection(
+        fct_result = fct_tracer_advection(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
             high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
             tracer_before=tr_before,
@@ -575,7 +576,12 @@ def _compute_advection_flux_div(
             base_thickness=fct_base_thickness,
             after_thickness=fct_after_thickness,
             implicit_w=fct_implicit_w,
+            return_limiter_activity=return_fct_activity,
         )
+        if return_fct_activity:
+            div_hut, vert_flux_div, fct_activity = fct_result
+        else:
+            div_hut, vert_flux_div = fct_result
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
             ppm_to_u_points, ppm_to_v_points,
@@ -703,6 +709,11 @@ def _compute_advection_flux_div(
         vert_flux_div = vert_flux_div.at[..., 0].add(
             w_baro[..., 0] * tr[..., 0])
 
+    if return_fct_activity:
+        if tracer_advection not in ("ppm_fct", "fct2"):
+            raise ValueError(
+                "return_fct_activity requires an FCT tracer scheme")
+        return div_hut, vert_flux_div, fct_activity
     if return_h_fluxes:
         return div_hut, vert_flux_div, _h_flux_pair[0], _h_flux_pair[1]
     return div_hut, vert_flux_div
@@ -737,6 +748,7 @@ def compute_advection_flux_div_pair(
     fct_base_thickness=None,
     fct_after_thickness=None,
     fct_implicit_w=None,
+    return_a_fct_activity: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -785,7 +797,7 @@ def compute_advection_flux_div_pair(
         or tracer_advection not in _LEVEL_SEPARABLE_H_SCHEMES
         or os.environ.get("LEGOESM_TRACER_PAIR", "0") != "1"
     ):
-        pair_a = _compute_advection_flux_div(
+        pair_a_result = _compute_advection_flux_div(
             tr_a, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
             recon_fill_mask=recon_fill_mask,
@@ -795,7 +807,13 @@ def compute_advection_flux_div_pair(
             fct_base_thickness=fct_base_thickness,
             fct_after_thickness=fct_after_thickness,
             fct_implicit_w=fct_implicit_w,
+            return_fct_activity=return_a_fct_activity,
         )
+        if return_a_fct_activity:
+            pair_a = pair_a_result[:2]
+            activity_a = pair_a_result[2]
+        else:
+            pair_a = pair_a_result
         out_b = _compute_advection_flux_div(
             tr_b, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
@@ -811,6 +829,8 @@ def compute_advection_flux_div_pair(
         if return_b_h_fluxes:
             div_b, vert_b, sf_u, sf_v = out_b
             return pair_a, (div_b, vert_b), (sf_u, sf_v)
+        if return_a_fct_activity:
+            return pair_a, out_b, activity_a
         return pair_a, out_b
 
     nlev = tr_a.shape[-1]
@@ -1338,6 +1358,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     bn2_alpha_beta_override: object = None  # Recorded-entry operator input.
     bn2_tracer_override: object = None  # Recorded-entry T/S operator input.
     tracer_process_trace: object = None  # Round-124 write-only trace / plant.
+    # Return the stage-3 FCT active-cell map alongside the unchanged process
+    # boundaries. Kept separate so Round 136 can prove this larger return
+    # graph does not move the already-admitted Round-124 observer's rows.
+    tracer_process_branch_activity: bool = False
     # Add the exact tracer-ZDF operands to the process return.  Kept separate
     # so Round 124's smaller return graph remains an unchanged fusion control;
     # Round 126 runs both observers from the same ordinary entry state.
@@ -1753,6 +1777,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     stage3_advection_content_override=None,
     return_final_content: bool = False,
     return_stage1_trace: bool = False,
+    return_fct_activity: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -1794,6 +1819,7 @@ def _nemo_ws_rk3_tracer_pair_step(
                 "resume must hand in stage 1 or 2, below stop_after_stage")
 
     def _flux_pair(a_val, b_val, stage_dt, stage_index, h_after):
+        fct_activity = None
         stage_geom = stage_transport_geometry[stage_index]
         if len(stage_geom) == 6:
             mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage = stage_geom
@@ -1848,7 +1874,7 @@ def _nemo_ws_rk3_tracer_pair_step(
             (fd_a, rhs_a), (fd_b, rhs_b) = (
                 _cen2_content_div(a_val), _cen2_content_div(b_val))
         else:
-            (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
+            pair_result = compute_advection_flux_div_pair(
                 a_val, b_val, tracer_advection, mf_u, mf_v,
                 w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
                 recon_fill_mask=recon_fill_mask,
@@ -1859,7 +1885,14 @@ def _nemo_ws_rk3_tracer_pair_step(
                 fct_base_thickness=h_k_old,
                 fct_after_thickness=h_after,
                 fct_implicit_w=wi_stage,
+                return_a_fct_activity=(
+                    return_fct_activity and stage_index == 2),
             )
+            if return_fct_activity and stage_index == 2:
+                (dh_a, dv_a), (dh_b, dv_b), fct_activity = pair_result
+            else:
+                (dh_a, dv_a), (dh_b, dv_b) = pair_result
+                fct_activity = None
             fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
             rhs_a = rhs_b = None
         if stage_index == 2 and bbl_context is not None:
@@ -1918,7 +1951,7 @@ def _nemo_ws_rk3_tracer_pair_step(
             # flux divergence before the final dt update.
             fd_a = fd_a - h_stage * bbl_a
             fd_b = fd_b - h_stage * bbl_b
-        return fd_a, fd_b, rhs_a, rhs_b
+        return fd_a, fd_b, rhs_a, rhs_b, fct_activity
 
     def _stage(
         base, flux_div, concentration_rhs, source_rate, stage_dt,
@@ -1943,7 +1976,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     if resume_stage >= 1:
         a1, b1 = a_resume, b_resume
     else:
-        fd0_a, fd0_b, rhs0_a, rhs0_b = _flux_pair(
+        fd0_a, fd0_b, rhs0_a, rhs0_b, _ = _flux_pair(
             tr_a, tr_b, dt / 3.0, 0, h_one_third)
         # WRITE-only source-order values.  The CEN2 RK stage already returns
         # its concentration RHS directly; for another private diagnostic
@@ -1972,7 +2005,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     if resume_stage >= 2:
         a2, b2 = a_resume, b_resume
     else:
-        fd1_a, fd1_b, rhs1_a, rhs1_b = _flux_pair(
+        fd1_a, fd1_b, rhs1_a, rhs1_b, _ = _flux_pair(
             a1, b1, dt / 2.0, 1, h_one_half)
         a2 = _stage(
             tr_a, fd1_a, rhs1_a, stage_source_rates[1][0], dt / 2.0,
@@ -1982,7 +2015,8 @@ def _nemo_ws_rk3_tracer_pair_step(
             h_one_half, h_one_third, 1)
     if stop_after_stage == 2:
         return a2, b2
-    fd2_a, fd2_b, _, _ = _flux_pair(a2, b2, dt, 2, h_k_new)
+    fd2_a, fd2_b, _, _, fct_activity = _flux_pair(
+        a2, b2, dt, 2, h_k_new)
     advection_content_a = h_k_old * tr_a - dt * fd2_a
     advection_content_b = h_k_old * tr_b - dt * fd2_b
     if stage3_advection_content_override is not None:
@@ -1998,6 +2032,11 @@ def _nemo_ws_rk3_tracer_pair_step(
     out_b = jnp.where(
         active_3d > 0.5,
         content_b / jnp.maximum(h_k_new, 1.0e-10), tr_b)
+    if return_final_content and return_fct_activity:
+        return (
+            out_a, out_b, content_a, content_b,
+            advection_content_a, advection_content_b, fct_activity,
+        )
     if return_final_content:
         return (
             out_a, out_b, content_a, content_b,
@@ -2488,6 +2527,11 @@ class LatLonCGridOceanModel:
                 and _process_trace is None):
             raise ValueError(
                 "vertical_solve_trace requires tracer_process_trace")
+        if (self._nemo_ws_test_hooks.tracer_process_branch_activity
+                and _process_trace is None):
+            raise ValueError(
+                "tracer_process_branch_activity requires "
+                "tracer_process_trace")
         if _process_trace is not None:
             if not isinstance(_process_trace, tuple) or len(
                     _process_trace) not in (0, 4):
@@ -8009,11 +8053,7 @@ class LatLonCGridOceanModel:
                         _grid,
                         _cfg_b.eos,
                     )
-                (T_corrected, S_corrected,
-                 _nemo_ws_content_T, _nemo_ws_content_S,
-                 _nemo_ws_advection_content_T,
-                 _nemo_ws_advection_content_S) = (
-                    _nemo_ws_rk3_tracer_pair_step(
+                _ws_tracer_result = _nemo_ws_rk3_tracer_pair_step(
                     # NEMO's stage ladder always restarts from ts(Kbb).
                     # The explicit non-advective tendency is supplied below
                     # as the stage-3 Krhs source, not pre-applied to this base.
@@ -8055,7 +8095,25 @@ class LatLonCGridOceanModel:
                         self._nemo_ws_test_hooks
                         .stage3_advection_content_override),
                     return_final_content=True,
-                ))
+                    return_fct_activity=(
+                        _return_tracer_process_trace
+                        and self._nemo_ws_test_hooks
+                        .tracer_process_branch_activity),
+                )
+                if (_return_tracer_process_trace
+                        and self._nemo_ws_test_hooks
+                        .tracer_process_branch_activity):
+                    (T_corrected, S_corrected,
+                     _nemo_ws_content_T, _nemo_ws_content_S,
+                     _nemo_ws_advection_content_T,
+                     _nemo_ws_advection_content_S,
+                     _nemo_ws_fct_activity) = _ws_tracer_result
+                else:
+                    (T_corrected, S_corrected,
+                     _nemo_ws_content_T, _nemo_ws_content_S,
+                     _nemo_ws_advection_content_T,
+                     _nemo_ws_advection_content_S) = _ws_tracer_result
+                    _nemo_ws_fct_activity = None
                 _nemo_ws_tracer_content_rhs = (
                     _nemo_ws_content_T, _nemo_ws_content_S)
                 _nemo_ws_advection_content_rhs = (
@@ -8746,6 +8804,7 @@ class LatLonCGridOceanModel:
                 boundaries=_nemo_ws_process_boundaries,
                 Taa=_nemo_ws_process_Taa,
                 vertical_solve=_nemo_ws_vertical_solve_trace,
+                fct_activity=_nemo_ws_fct_activity,
             )
         if _return_live_stage_operands:
             if (getattr(_cfg_b, "momentum_time_integrator", "euler")
@@ -11532,7 +11591,9 @@ class LatLonCGridOceanModel:
                 surface_forcing=surface_forcing, sponge=sponge,
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
                 _return_tracer_process_trace=True,
-                _vertical_K_test_override=_vertical_K_test_override)
+                _vertical_K_test_override=_vertical_K_test_override,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
         if self.config.barotropic.barotropic_solver == "implicit_unsplit":
             # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
@@ -14112,3 +14173,4 @@ class _NEMOWSTracerProcessTrace(NamedTuple):
     boundaries: object
     Taa: object
     vertical_solve: object
+    fct_activity: object

@@ -841,6 +841,7 @@ def fct_tracer_advection(
     base_thickness: jnp.ndarray | None = None,
     after_thickness: jnp.ndarray | None = None,
     implicit_w: jnp.ndarray | None = None, return_nemo_split: bool = False,
+    return_limiter_activity: bool = False,
 ) -> tuple:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -907,6 +908,11 @@ def fct_tracer_advection(
         ``h_k`` itself.  False (z-star default): the AFTER thickness
         ``h_new = h_k - dt*div(mf)`` is derived in the body and the
         Zalesak box is certified against it -- see the h_new block.
+    return_limiter_activity : bool
+        Private write-only diagnostic. If true, append a cell-centred bool
+        map for cells incident to a non-zero antidiffusive face whose limiter
+        coefficient is below one. False preserves the ordinary two-array
+        return.
 
     Returns
     -------
@@ -1154,6 +1160,28 @@ def fct_tracer_advection(
     F_vert_fct = jnp.pad(F_vert_low_int + limited_w, (*pad_axes_v, (1, 1)))
     vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
     anti_full = jnp.pad(limited_w, (*pad_axes_v, (1, 1)))
+    if return_limiter_activity:
+        # WRITE-only branch census for the developed-state fidelity walk.
+        # A cell is active when a non-zero antidiffusive flux on any incident
+        # face is multiplied by an alpha below one.  The ordinary return and
+        # every default caller remain byte-for-byte unchanged.
+        limited_u = (alpha_u_full < 1.0) & (ad_flux_u != 0.0)
+        limited_v = (alpha_v < 1.0) & (ad_flux_v != 0.0)
+        limited_w = (alpha_vert_face < 1.0) & (ad_vert_int != 0.0)
+        cell_activity = (
+            limited_u[:, :-1, :] | limited_u[:, 1:, :]
+            | limited_v[:-1, :, :] | limited_v[1:, :, :]
+            | jnp.pad(limited_w, ((0, 0), (0, 0), (0, 1)))
+            | jnp.pad(limited_w, ((0, 0), (0, 0), (1, 0)))
+        )
+        if active_mask is not None:
+            cell_activity = cell_activity & (active_mask > 0.5)
+        if return_nemo_split:
+            return (div_h_fct, vert_div_fct,
+                    (div_h_low, vert_div_low, div_h_anti,
+                     anti_full[..., :-1] - anti_full[..., 1:]),
+                    cell_activity)
+        return div_h_fct, vert_div_fct, cell_activity
     if return_nemo_split:
         return div_h_fct, vert_div_fct, (div_h_low, vert_div_low, div_h_anti,
             anti_full[..., :-1] - anti_full[..., 1:])

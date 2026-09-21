@@ -38,6 +38,10 @@ MODES
                      admits the same process/vertical traces and propagates
                      their cumulative temperature rows through the production
                      EVD-trigger closure in the Round-127 Shapley contexts.
+  --developed-step-walk
+                     drives one production-JIT step from NEMO's admitted
+                     day-180 restart and compares the recorded stage-3
+                     temperature boundaries and active-branch maps.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -75,6 +79,10 @@ record-backed plants are persisted in their round evidence)
                            proves the recorded Kbb endpoint no longer closes
   trigger-process-level    perturbs a consumed temperature level until the
                            production N2 threshold changes
+  missing-day              removes a developed-state requested-day row
+  missing-process-row      removes a developed-state process boundary
+  missing-branch           removes a developed-state branch family
+  entry-temperature-ulp    moves one consumed entry T value by one ULP
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -4099,6 +4107,16 @@ def main(argv=None) -> int:
     parser.add_argument("--trigger-lego-daily-root", type=Path,
                         default=DEFAULT_TRIGGER_LEGO_DAILY,
                         help="independent daily legoESM core-state root")
+    parser.add_argument("--developed-step-walk", action="store_true",
+                        help="run the Round-136 step-1081 production walk "
+                             "from NEMO's admitted day-180 restart")
+    parser.add_argument("--developed-process-root", type=Path,
+                        default=DEFAULT_PROCESS_RECORD_ROOT)
+    parser.add_argument("--developed-vertical-root", type=Path,
+                        default=DEFAULT_DEVELOPED_VERTICAL_ROOT)
+    parser.add_argument("--daily-record-root", type=Path,
+                        default=DEFAULT_DEVELOPED_DAILY_ROOT)
+    parser.add_argument("--daily-record-audit", type=Path, default=None)
     parser.add_argument("--reference-process-trace", type=Path,
                         default=DEFAULT_REFERENCE_PROCESS_TRACE,
                         help="admitted Round-124 process trace that a new "
@@ -4149,6 +4167,26 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
+    if args.developed_step_walk:
+        require(args.expect_commit is not None,
+                "--developed-step-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-step-walk needs --daily-record-audit")
+        report = developed_state_process_walk(
+            args.developed_process_root, args.developed_vertical_root,
+            args.daily_record_root, args.daily_record_audit,
+            args.expect_commit, args.root, mesh_path=args.mesh,
+            plant=args.plant)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']}")
+            return 1
+        print("STATUS PASS: developed-state step 1081 first non-bit "
+              f"{report['first_non_bit_boundary']}")
+        return 0
     if args.daily_tracer_subfamily_attribution:
         require(not args.daily_reset_attribution,
                 "choose one daily-reset attribution mode")
@@ -5982,6 +6020,596 @@ def score_trigger_temperature_process_budget(
     print(f"  endpoint signed/absolute +{endpoint['temperature_bit_signed_cell_equivalents']:.6f}/"
           f"{endpoint['temperature_bit_absolute_cell_equivalents']:.6f}; "
           f"process absolute {absolute_process_total:.6f}")
+    return report
+
+
+# ---------------- Round-136 developed-state, equal-input process walk -----
+DEVELOPED_REQUESTED_DAYS = (30, 90, 180, 240)
+DEVELOPED_ENTRY_STEP = 1080
+DEVELOPED_PROCESS_STEP = 1081
+DEVELOPED_VERTICAL_RECORD_COMMIT = (
+    "4cac617cd928007506f2de7ccb098f87e04204d1")
+DEFAULT_DEVELOPED_DAILY_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round132/"
+    "oracle_daily_restarts")
+DEFAULT_DEVELOPED_VERTICAL_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round125/"
+    "oracle_vertical_decomposition")
+DEVELOPED_BOUNDARY_FIELDS = {
+    "geometry": "B0",
+    "advection": "Badv",
+    "surface_boundary": "Bsbc",
+    "shortwave": "Bqsr",
+    "lateral_diffusion": "Bldf",
+    "vertical_diffusion": "Taa",
+}
+DEVELOPED_BRANCHES = ("fct_nonosc", "evd_replacement", "tke_floors")
+
+
+def developed_record_availability() -> list[dict]:
+    """Freeze what the admitted record can and cannot measure exactly."""
+    return [
+        {"day": 30, "entry_step": 180, "process_step": None,
+         "status": "UNAVAILABLE_BY_RECORD"},
+        {"day": 90, "entry_step": 540, "process_step": None,
+         "status": "UNAVAILABLE_BY_RECORD"},
+        {"day": 180, "entry_step": DEVELOPED_ENTRY_STEP,
+         "process_step": DEVELOPED_PROCESS_STEP, "status": "MEASURED"},
+        {"day": 240, "entry_step": 1440, "process_step": None,
+         "status": "UNAVAILABLE_BY_RECORD",
+         "reason": "frame 1440 begins from unrecorded full step-1439 state"},
+    ]
+
+
+def _process_cumulative_boundaries(record: dict) -> dict[str, np.ndarray]:
+    """Materialize the six cumulative values bracketed by the R123 writes."""
+    nlev = record["Tbb"].shape[-1] - 1
+    tbb = np.asarray(record["Tbb"][..., :nlev], dtype=np.float64)
+    qbb = (1.0 + np.asarray(record["r3t_Kbb"],
+                            dtype=np.float64))[..., None]
+    qmm = (1.0 + np.asarray(record["r3t_Kmm"],
+                            dtype=np.float64))[..., None]
+    qaa = (1.0 + np.asarray(record["r3t_Kaa"],
+                            dtype=np.float64))[..., None]
+    base = qbb * tbb
+
+    def accumulated(field: str) -> np.ndarray:
+        rhs = np.asarray(record[field][..., :nlev], dtype=np.float64)
+        return (base + record["rDt"] * qmm * rhs) / qaa
+
+    return {
+        "geometry": base / qaa,
+        "advection": accumulated("rhs_after_advection"),
+        "surface_boundary": accumulated("rhs_after_surface_boundary"),
+        "shortwave": accumulated("rhs_after_shortwave"),
+        "lateral_diffusion": accumulated("rhs_after_lateral_diffusion"),
+        "vertical_diffusion": np.asarray(
+            record["Taa"][..., :nlev], dtype=np.float64),
+    }
+
+
+def _bit_mismatch_count(actual, expected, mask=None) -> int:
+    actual = np.asarray(actual)
+    expected = np.asarray(expected)
+    require(actual.shape == expected.shape,
+            f"bit comparison shapes differ: {actual.shape} vs "
+            f"{expected.shape}")
+    different = actual.view(np.uint8).reshape(actual.shape + (-1,)) != (
+        expected.view(np.uint8).reshape(expected.shape + (-1,)))
+    different = np.any(different, axis=-1)
+    if mask is not None:
+        selected = np.asarray(mask, dtype=bool)
+        require(selected.shape == actual.shape,
+                "bit comparison mask shape differs")
+        different &= selected
+    return int(np.count_nonzero(different))
+
+
+def _score_developed_row(actual, expected, mask: np.ndarray) -> dict:
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    mask = np.asarray(mask, dtype=bool)
+    require(actual.shape == expected.shape == mask.shape,
+            "developed-row arrays/mask have unequal shapes")
+    bits = actual.view(np.uint64) != expected.view(np.uint64)
+    differing = bits & mask
+    delta = actual[mask] - expected[mask]
+    first = None
+    if np.any(differing):
+        first = [int(value) for value in np.argwhere(differing)[0]]
+    return {
+        "cells_scored": int(np.count_nonzero(mask)),
+        "cells_unequal": int(np.count_nonzero(differing)),
+        "max_abs": float(np.max(np.abs(delta))),
+        "rms": float(np.sqrt(np.mean(delta * delta))),
+        "first_unequal_jik": first,
+        "bit_exact": not bool(np.any(differing)),
+    }
+
+
+def _interface_cells(mask: np.ndarray, nlev: int) -> np.ndarray:
+    """Project an active W-interface map onto both adjacent T cells."""
+    mask = np.asarray(mask, dtype=bool)
+    require(mask.shape[-1] == nlev - 1,
+            "interface activity does not have nlev-1 levels")
+    cells = np.zeros(mask.shape[:-1] + (nlev,), dtype=bool)
+    cells[..., :-1] |= mask
+    cells[..., 1:] |= mask
+    return cells
+
+
+def _branch_census(mask: np.ndarray, unequal: np.ndarray) -> dict:
+    mask = np.asarray(mask, dtype=bool)
+    unequal = np.asarray(unequal, dtype=bool)
+    require(mask.shape == unequal.shape,
+            "branch/unequal activity shapes differ")
+    active = int(np.count_nonzero(mask))
+    overlap = int(np.count_nonzero(mask & unequal))
+    return {
+        "active_cells": active,
+        "overlap_with_first_non_bit_cells": overlap,
+        "overlap_fraction_of_first_non_bit": (
+            float(overlap / np.count_nonzero(unequal))
+            if np.count_nonzero(unequal) else 0.0),
+    }
+
+
+def _validate_developed_registry(report: dict, plant: str | None = None) -> None:
+    """Require every requested day, process boundary, and branch family."""
+    candidate = json.loads(json.dumps(report))
+    if plant == "missing-day":
+        candidate["availability"] = candidate["availability"][:-1]
+    elif plant == "missing-process-row":
+        candidate["cumulative_boundaries"].pop(PROCESS_ROWS[-1], None)
+    elif plant == "missing-branch":
+        candidate["branches"].pop(DEVELOPED_BRANCHES[-1], None)
+    elif plant not in (None, "none"):
+        raise GateError(f"unknown developed registry plant {plant!r}")
+    require(
+        [row["day"] for row in candidate["availability"]]
+        == list(DEVELOPED_REQUESTED_DAYS),
+        "developed-state requested-day registry is incomplete")
+    require(set(candidate["cumulative_boundaries"]) == set(PROCESS_ROWS),
+            "developed-state process-row registry is incomplete")
+    require(set(candidate["increment_rows"]) == set(PROCESS_ROWS),
+            "developed-state increment-row registry is incomplete")
+    require(set(candidate["branches"]) == set(DEVELOPED_BRANCHES),
+            "developed-state branch registry is incomplete")
+
+
+def _developed_registry_plant(plant: str) -> dict:
+    synthetic = {
+        "availability": developed_record_availability(),
+        "cumulative_boundaries": {name: {} for name in PROCESS_ROWS},
+        "increment_rows": {name: {} for name in PROCESS_ROWS},
+        "branches": {name: {} for name in DEVELOPED_BRANCHES},
+    }
+    try:
+        _validate_developed_registry(synthetic, plant=plant)
+    except GateError as error:
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": str(error)}
+    raise GateError(f"developed registry plant {plant!r} stayed green")
+
+
+def _developed_state_inventory(state) -> list[dict]:
+    mapped = {
+        "u", "v", "T", "S", "eta", "uu_b", "vv_b", "tke",
+        "tke_avm", "tke_avt", "tke_dissl", "tke_avm_surface", "bt_hist",
+    }
+    static = {"H_bathy", "land_mask", "u_mask", "v_mask"}
+    recomputed = {"w"}
+    rows = []
+    for name, value in zip(state._fields, state, strict=True):
+        if name in mapped:
+            classification = "mapped_from_restart"
+            require(value is not None,
+                    f"restart-mapped state leaf {name} is None")
+        elif name in static:
+            classification = "static_card_geometry"
+            require(value is not None, f"static state leaf {name} is None")
+        elif name in recomputed:
+            classification = "diagnostic_recomputed_in_step"
+            require(value is not None,
+                    f"recomputed diagnostic state leaf {name} is None")
+        else:
+            require(value is None,
+                    f"unclassified live developed-state leaf {name}")
+            classification = "inert_none_for_resolved_card"
+        if isinstance(value, tuple):
+            shape = [list(np.asarray(item).shape) for item in value]
+            dtype = [str(np.asarray(item).dtype) for item in value]
+        elif value is None:
+            shape = None
+            dtype = None
+        else:
+            array = np.asarray(getattr(value, "data", value))
+            shape = list(array.shape)
+            dtype = str(array.dtype)
+        rows.append({"name": name, "classification": classification,
+                     "shape": shape, "dtype": dtype})
+    require({row["name"] for row in rows} == set(state._fields),
+            "developed-state inventory omitted a state leaf")
+    return rows
+
+
+def developed_state_process_walk(
+        process_root: Path, vertical_root: Path, daily_root: Path,
+        daily_audit: Path, expected_commit: str, evidence_root: Path, *,
+        mesh_path: Path = DEFAULT_MESH, plant: str | None = None) -> dict:
+    """Run step 1081 through production JIT from NEMO's exact day-180 state."""
+    if plant in ("missing-day", "missing-process-row", "missing-branch"):
+        return _developed_registry_plant(plant)
+    require(plant in (None, "none", "entry-temperature-ulp"),
+            f"unknown developed-state plant {plant!r}")
+    _policy()
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        _u_east_to_face, _v_north_to_face)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"developed-state walk requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "developed-state walk commit differs from --expect-commit")
+    process_root = Path(process_root)
+    vertical_root = Path(vertical_root)
+    daily_root = Path(daily_root)
+    daily_audit = Path(daily_audit)
+    evidence_root = Path(evidence_root)
+
+    process_admission = validate_process_record(
+        process_root, PROCESS_RECORD_COMMIT)
+    vertical_admission = validate_vertical_record(
+        vertical_root, DEVELOPED_VERTICAL_RECORD_COMMIT,
+        process_root=process_root)
+    year = _year()
+    audit, daily_hashes = year._daily_record_contract(
+        daily_audit, daily_root, expected_commit)
+    restart_path = year._daily_restart_path(daily_root, DEVELOPED_ENTRY_STEP)
+    payload = year._load_daily_reset_payload(restart_path, PROCESS_JPK - 1)
+    expected_payload_hash = daily_hashes.get(restart_path.name)
+    require(expected_payload_hash is not None,
+            "step-1080 restart is absent from the admitted daily manifest")
+    year._require_payload_digest(payload, expected_payload_hash)
+
+    card = build_nemo_testcase_card(CASE)
+    gate = _gate()
+    wet = gate.expected_masks(card)["T"]
+    wet2 = np.any(wet, axis=-1)
+    interface_wet = wet[..., :-1] & wet[..., 1:]
+    state, _ = _gyre_checkpoint_state(card, restart_path)
+    history = (
+        jnp.asarray(year._face_history(payload["ub_e"], "u")),
+        jnp.asarray(year._face_history(payload["ubb_e"], "u")),
+        jnp.asarray(year._face_history(payload["vb_e"], "v")),
+        jnp.asarray(year._face_history(payload["vbb_e"], "v")),
+        jnp.asarray(payload["sshb_e"]),
+        jnp.asarray(payload["sshbb_e"]),
+    )
+    state = state._replace(bt_hist=history)
+    inventory = _developed_state_inventory(state)
+    for row in inventory:
+        print(f"  STATE {row['name']}: {row['classification']} "
+              f"shape={row['shape']} dtype={row['dtype']}", flush=True)
+
+    land = np.asarray(state.land_mask.data) > 0.5
+    expected_tke = np.where(land[..., None], payload["en"][..., 1:], 0.0)
+    expected_avm = np.where(
+        land[..., None], payload["avm_k"][..., 1:], 0.0)
+    expected_avt = np.where(
+        land[..., None], payload["avt_k"][..., 1:], 0.0)
+    expected_dissl = np.where(
+        land[..., None], payload["dissl"][..., 1:], 0.0)
+    expected_avm_surface = np.where(land, payload["avm_k"][..., 0], 0.0)
+    source_checks = {
+        "T_wet": _bit_mismatch_count(state.T.data, payload["tn"], wet),
+        "S_wet": _bit_mismatch_count(state.S.data, payload["sn"], wet),
+        "u_faces": _bit_mismatch_count(
+            state.u.data, _u_east_to_face(payload["un"])),
+        "v_faces": _bit_mismatch_count(
+            state.v.data, _v_north_to_face(payload["vn"])),
+        "eta": _bit_mismatch_count(state.eta.data, payload["sshn"]),
+        "uu_b": _bit_mismatch_count(
+            state.uu_b.data, year._face_history(payload["uu_n"], "u")),
+        "vv_b": _bit_mismatch_count(
+            state.vv_b.data, year._face_history(payload["vv_n"], "v")),
+        "tke": _bit_mismatch_count(state.tke.data, expected_tke),
+        "tke_avm": _bit_mismatch_count(state.tke_avm.data, expected_avm),
+        "tke_avt": _bit_mismatch_count(state.tke_avt.data, expected_avt),
+        "tke_dissl": _bit_mismatch_count(
+            state.tke_dissl.data, expected_dissl),
+        "tke_avm_surface": _bit_mismatch_count(
+            state.tke_avm_surface.data, expected_avm_surface),
+    }
+    for index, (actual, expected) in enumerate(zip(
+            state.bt_hist, history, strict=True)):
+        source_checks[f"bt_hist_{index}"] = _bit_mismatch_count(
+            actual, expected)
+    require(all(value == 0 for value in source_checks.values()),
+            "restart bridge changed a mapped source: " + ", ".join(
+                f"{name}={value}" for name, value in source_checks.items()
+                if value))
+
+    record_path = (process_root
+                   / f"oracle_process_budget_kt{DEVELOPED_PROCESS_STEP:08d}.bin")
+    record = read_process_record(record_path)
+    entry_t_unequal = _different_cells(
+        np.asarray(state.T.data),
+        np.asarray(record["Tbb"][..., :wet.shape[-1]]), wet)
+
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    control_trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(), vertical_solve_trace=True))
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(), vertical_solve_trace=True,
+            tracer_process_branch_activity=True))
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+    control_trace = control_trace_model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=ssha)
+    trace = trace_model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=ssha)
+    ordinary = ordinary_model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=ssha)
+    observer_unequal_bytes = _state_bit_mismatches(
+        trace.state_after, ordinary)
+    require(observer_unequal_bytes == 0,
+            f"process observer changed {observer_unequal_bytes} state bytes")
+
+    lego_frame = _trace_frame(trace)
+    control_frame = _trace_frame(control_trace)
+    branch_observer_unequal = {
+        name: _different_cells(
+            lego_frame[name], control_frame[name],
+            wet if lego_frame[name].ndim == 3 else wet2)
+        for name in LEGO_PROCESS_FIELDS
+    }
+    lego_vertical_frame = _vertical_trace_frame(trace)
+    control_vertical_frame = _vertical_trace_frame(control_trace)
+    for name in LEGO_VERTICAL_FIELDS:
+        values = lego_vertical_frame[name]
+        selected = (interface_wet
+                    if values.shape[-1] == wet.shape[-1] - 1 else wet)
+        branch_observer_unequal[f"vertical_{name}"] = _different_cells(
+            values, control_vertical_frame[name], selected)
+    require(all(value == 0 for value in branch_observer_unequal.values()),
+            "FCT branch observer moved an existing process/vertical row: "
+            + ", ".join(
+                f"{name}={value}" for name, value
+                in branch_observer_unequal.items() if value))
+    if plant == "entry-temperature-ulp":
+        j, i, k = (int(value) for value in np.argwhere(wet)[0])
+        planted_t = np.array(state.T.data, copy=True)
+        before = planted_t[j, i, k]
+        planted_t[j, i, k] = np.nextafter(before, np.inf)
+        require(planted_t[j, i, k] != before,
+                "entry-temperature ULP plant rounded away")
+        planted_state = state._replace(
+            T=state.T.replace(data=jnp.asarray(planted_t)))
+        planted_trace = trace_model.step(
+            planted_state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        planted_frame = _trace_frame(planted_trace)
+        moved = {
+            name: _different_cells(
+                lego_frame[field], planted_frame[field], wet)
+            for name, field in DEVELOPED_BOUNDARY_FIELDS.items()
+        }
+        require(any(value > 0 for value in moved.values()),
+                "entry-temperature ULP plant moved no registered boundary")
+        return {
+            "status": "PLANT-FIRED", "plant": plant,
+            "control": {"index_jik": [j, i, k],
+                        "old_uint64": int(np.asarray(before).view(np.uint64)),
+                        "new_uint64": int(np.asarray(
+                            planted_t[j, i, k]).view(np.uint64)),
+                        "moved_boundaries": moved},
+        }
+
+    nemo_boundaries = _process_cumulative_boundaries(record)
+    lego_boundaries = {
+        name: np.asarray(lego_frame[field], dtype=np.float64)
+        for name, field in DEVELOPED_BOUNDARY_FIELDS.items()
+    }
+    boundary_rows = {
+        name: _score_developed_row(
+            lego_boundaries[name], nemo_boundaries[name], wet)
+        for name in PROCESS_ROWS
+    }
+    nemo_increments = process_temperature_rows(record)
+    lego_increments = lego_process_temperature_rows(lego_frame)
+    increment_rows = {
+        name: _score_developed_row(
+            lego_increments[name], nemo_increments[name], wet)
+        for name in PROCESS_ROWS
+    }
+    first_non_bit = next(
+        (name for name in PROCESS_ROWS
+         if boundary_rows[name]["cells_unequal"]), "NONE")
+    first_diff = (
+        np.zeros_like(wet, dtype=bool) if first_non_bit == "NONE" else
+        ((lego_boundaries[first_non_bit].view(np.uint64)
+          != nemo_boundaries[first_non_bit].view(np.uint64)) & wet))
+
+    vertical_record = _read_vertical_record(
+        vertical_root
+        / f"oracle_trazdf_matrix_kt{DEVELOPED_PROCESS_STEP:08d}.bin",
+        DEVELOPED_PROCESS_STEP)
+    nemo_heat = _vertical_field(vertical_record, "avt")[
+        :, :, 1:wet.shape[-1]]
+    lego_heat = np.asarray(trace.vertical_solve.heat_K, dtype=np.float64)
+    lego_viscosity = np.asarray(
+        trace.vertical_solve.viscosity_K, dtype=np.float64)
+    require(nemo_heat.shape == lego_heat.shape == interface_wet.shape,
+            "developed EVD coefficient shapes differ")
+    config = card.recipe.model_config.physics
+    evd_value = float(config.convection.enhanced_diffusion.K_conv)
+    tke_config = config.vertical_mixing.tke
+    kh_floor = float(tke_config.kappaH_min)
+    km_floor = float(tke_config.kappaM_min)
+    energy_floor = float(tke_config.tke_background)
+    nemo_evd = (nemo_heat == evd_value) & interface_wet
+    lego_evd = (lego_heat == evd_value) & interface_wet
+    nemo_kh_floor = (nemo_heat == kh_floor) & interface_wet & ~nemo_evd
+    lego_kh_floor = (lego_heat == kh_floor) & interface_wet & ~lego_evd
+    lego_km_floor = (lego_viscosity == km_floor) & interface_wet & ~lego_evd
+    lego_energy_floor = (
+        np.asarray(trace.state_after.tke.data) == energy_floor) & interface_wet
+    fct_activity = np.asarray(trace.fct_activity, dtype=bool) & wet
+    nemo_evd_cells = _interface_cells(nemo_evd, wet.shape[-1]) & wet
+    lego_evd_cells = _interface_cells(lego_evd, wet.shape[-1]) & wet
+    nemo_kh_cells = _interface_cells(nemo_kh_floor, wet.shape[-1]) & wet
+    lego_floor_cells = (
+        _interface_cells(
+            lego_kh_floor | lego_km_floor | lego_energy_floor,
+            wet.shape[-1]) & wet)
+    branches = {
+        "fct_nonosc": {
+            "NEMO": {"status": "UNMEASURED",
+                     "reason": "R123 stores no nonosc coefficients"},
+            "legoESM_on_NEMO_entry": {
+                "status": "MEASURED_PRODUCTION_STEP",
+                **_branch_census(fct_activity, first_diff),
+            },
+        },
+        "evd_replacement": {
+            "NEMO": {"status": "MEASURED_ADMITTED_AVT",
+                     **_branch_census(nemo_evd_cells, first_diff)},
+            "legoESM_on_NEMO_entry": {
+                "status": "MEASURED_PRODUCTION_STEP",
+                **_branch_census(lego_evd_cells, first_diff)},
+            "interface_cells_disagree": int(np.count_nonzero(
+                nemo_evd != lego_evd)),
+        },
+        "tke_floors": {
+            "NEMO": {
+                "status": "PARTIAL_MEASURED_ADMITTED_AVT",
+                "diffusivity_floor_interfaces": int(np.count_nonzero(
+                    nemo_kh_floor)),
+                **_branch_census(nemo_kh_cells, first_diff),
+                "unmeasured": ["viscosity_floor", "post_solve_energy_floor"],
+            },
+            "legoESM_on_NEMO_entry": {
+                "status": "MEASURED_PRODUCTION_STEP",
+                "diffusivity_floor_interfaces": int(np.count_nonzero(
+                    lego_kh_floor)),
+                "viscosity_floor_interfaces": int(np.count_nonzero(
+                    lego_km_floor)),
+                "post_solve_energy_floor_interfaces": int(np.count_nonzero(
+                    lego_energy_floor)),
+                **_branch_census(lego_floor_cells, first_diff),
+            },
+        },
+    }
+
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    maps_path = evidence_root / (
+        f"developed_branch_maps_{expected_commit[:12]}.npz")
+    require(not maps_path.exists(),
+            f"refusing to overwrite developed branch maps {maps_path}")
+    np.savez_compressed(
+        maps_path, first_non_bit_cells=first_diff,
+        lego_fct_nonosc=fct_activity, nemo_evd=nemo_evd,
+        lego_evd=lego_evd, nemo_tke_diffusivity_floor=nemo_kh_floor,
+        lego_tke_diffusivity_floor=lego_kh_floor,
+        lego_tke_viscosity_floor=lego_km_floor,
+        lego_tke_energy_floor=lego_energy_floor)
+
+    predictions = {
+        "entry_T_bit_exact": entry_t_unequal == 0,
+        "geometry_bit_exact": boundary_rows["geometry"]["bit_exact"],
+        "first_non_bit_is_advection": first_non_bit == "advection",
+        "fct_active": bool(np.any(fct_activity)),
+        "fct_overlaps_first_non_bit": bool(np.any(
+            fct_activity & first_diff)),
+        "evd_active": bool(np.any(nemo_evd) or np.any(lego_evd)),
+        "tke_floor_active": bool(
+            np.any(nemo_kh_floor) or np.any(lego_floor_cells)),
+        "observer_bit_exact": observer_unequal_bytes == 0,
+    }
+    report = {
+        "format": "gyre-developed-state-process-walk-v1",
+        "status": "PASS", "case": CASE,
+        "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
+        "entry_step": DEVELOPED_ENTRY_STEP,
+        "process_step": DEVELOPED_PROCESS_STEP,
+        "availability": developed_record_availability(),
+        "record_contract": {
+            "process_fields": [
+                "Tbb", "r3t_Kbb", "r3t_Kmm", "r3t_Kaa",
+                "rhs_after_advection", "rhs_after_surface_boundary",
+                "rhs_after_shortwave", "rhs_after_lateral_diffusion", "Taa"],
+            "not_recorded": [
+                "salinity", "ttrd_xad", "ttrd_yad", "ttrd_zad",
+                "nonosc coefficients", "day30", "day90", "step1441"],
+        },
+        "first_non_bit_boundary": (
+            first_non_bit if entry_t_unequal == 0 else "ENTRY_T_MISMATCH"),
+        "claim": (
+            "first recorded non-bit compiled call is CALL tra_adv"
+            if entry_t_unequal == 0 and first_non_bit == "advection" else
+            "no internal statement named"),
+        "entry": {
+            "restart": str(restart_path),
+            "restart_sha256": payload["sha256"],
+            "daily_audit": str(daily_audit),
+            "daily_audit_sha256": _sha256(daily_audit),
+            "T_vs_process_Tbb_cells_unequal": entry_t_unequal,
+            "source_mapping_cells_unequal": source_checks,
+            "state_inventory": inventory,
+            "ssha_scratch_source": "restart ssha via private exact-entry override",
+        },
+        "observer_state_unequal_bytes": observer_unequal_bytes,
+        "branch_observer_cells_unequal": branch_observer_unequal,
+        "cumulative_boundaries": boundary_rows,
+        "increment_rows": increment_rows,
+        "branches": branches,
+        "branch_maps": {"path": str(maps_path),
+                        "sha256": _sha256(maps_path)},
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "admissions": {
+            "process_record_count": process_admission["layout"]["record_count"],
+            "vertical_record_count": vertical_admission["layout"]["record_count"],
+            "daily_record_count": audit["inventory"]["observed_count"],
+        },
+        "scope": {
+            "production_physics_changed": False,
+            "DINO": "NO-PRODUCTION-CHANGE",
+            "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+            "OVERFLOW": "NO-PRODUCTION-CHANGE",
+            "ORCA2": "UNMEASURED-WITH-SPEC",
+        },
+        "worktree": stamp,
+    }
+    _validate_developed_registry(report)
+    print("\nDEVELOPED-STATE STEP 1081 -- cumulative temperature boundaries")
+    print(f"  {'boundary':>22s} {'unequal':>10s} {'max abs K':>16s} "
+          f"{'rms K':>16s}")
+    for name in PROCESS_ROWS:
+        row = boundary_rows[name]
+        print(f"  {name:>22s} {row['cells_unequal']:10d} "
+              f"{row['max_abs']:16.8e} {row['rms']:16.8e}")
+    print(f"  FIRST NON-BIT: {report['first_non_bit_boundary']}")
     return report
 
 
