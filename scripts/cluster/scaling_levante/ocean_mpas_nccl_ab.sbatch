@@ -3,6 +3,7 @@
 #SBATCH --exclusive
 #SBATCH --mem=0
 #SBATCH --time=02:00:00
+# STALL_DIAG=1 needs --time=03:00:00 at submission (two 2400 s arms + setup).
 #SBATCH --output=ocean_mpas_nccl_ab_%j.log
 
 # NCCL channel-count A/B for the MPAS-OCEAN lane (2026-09-21).  The
@@ -44,6 +45,17 @@ NODES="${SLURM_JOB_NUM_NODES:-1}"; PPN=4
 echo "nodes=$NODES outdir=$OUTDIR sha=$(git rev-parse --short HEAD)"
 rc=0
 
+# STALL_DIAG=1: the 128-GPU 32-channel arm (job 27582584) never reached its
+# first collective in 1200 s while the 8-channel arm finished in ~600 s.
+# Diagnostic mode: NCCL init logging, 2400 s limit, and a Python traceback
+# of every rank dumped at 1500 s (faulthandler) to see where it sits.
+STALL_DIAG="${STALL_DIAG:-0}"
+LIMIT=1200; RUNNER=("$PY")
+if [[ "$STALL_DIAG" == 1 ]]; then
+  LIMIT=2400
+  export NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ENV,NET
+  RUNNER=("$PY" -c 'import faulthandler, runpy, sys; faulthandler.dump_traceback_later(1500, repeat=False); sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")')
+fi
 arm() {  # arm <nd> <label> <env assignments...>
   local nd="$1" label="$2"; shift 2
   local nn=$(( (nd + PPN - 1) / PPN ))
@@ -52,9 +64,9 @@ arm() {  # arm <nd> <label> <env assignments...>
   grep -q '"valid": true' "$OUTDIR/${tag}.jsonl" 2>/dev/null && { echo "[have] $tag"; return 0; }
   rm -f "$OUTDIR/${tag}.jsonl"
   echo "=== arm $tag $(date '+%F %T')  env: $*"
-  if ! env "$@" timeout --kill-after=30 1200 srun --export=ALL --nodes="$nn" --ntasks="$nd" \
+  if ! env "$@" timeout --kill-after=30 "$LIMIT" srun --export=ALL --nodes="$nn" --ntasks="$nd" \
         --ntasks-per-node="$PPN" --gpus-per-node=4 --gpu-bind=none --kill-on-bad-exit=1 \
-        "$PY" scripts/bench/bench_ocean_mpas_spmd_scaling.py \
+        "${RUNNER[@]}" scripts/bench/bench_ocean_mpas_spmd_scaling.py \
         --multicontroller --n-devices "$nd" --subdivision 9 --nlev 40 --lloyd 0 \
         --block-steps 20 --blocks 3 \
         --out "$OUTDIR/${tag}.jsonl" < /dev/null; then
@@ -65,10 +77,17 @@ arm() {  # arm <nd> <label> <env assignments...>
 }
 
 CH=131072
-for ND in ${ND_LIST:-32 128}; do
-  arm "$ND" ch8     NCCL_MIN_NCHANNELS=8  NCCL_MAX_NCHANNELS=8  NCCL_P2P_NET_CHUNKSIZE=$CH   # old ladder pin
-  arm "$ND" ch32    NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=$CH   # new ladder pin
-  arm "$ND" ch8_rep NCCL_MIN_NCHANNELS=8  NCCL_MAX_NCHANNELS=8  NCCL_P2P_NET_CHUNKSIZE=$CH   # noise floor
-done
+if [[ "$STALL_DIAG" == 1 ]]; then
+  for ND in ${ND_LIST:-128}; do
+    arm "$ND" ch32_diag  NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=$CH
+    arm "$ND" ch32_diag2 NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=$CH  # reproducible?
+  done
+else
+  for ND in ${ND_LIST:-32 128}; do
+    arm "$ND" ch8     NCCL_MIN_NCHANNELS=8  NCCL_MAX_NCHANNELS=8  NCCL_P2P_NET_CHUNKSIZE=$CH   # old ladder pin
+    arm "$ND" ch32    NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=$CH   # new ladder pin
+    arm "$ND" ch8_rep NCCL_MIN_NCHANNELS=8  NCCL_MAX_NCHANNELS=8  NCCL_P2P_NET_CHUNKSIZE=$CH   # noise floor
+  done
+fi
 echo "=== DONE rc=$rc outdir=$OUTDIR ==="
 exit "$rc"
