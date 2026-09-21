@@ -45,7 +45,12 @@
 set -uo pipefail
 REPO=/burg-archive/glab/users/pg2328/_fluxacc_wt
 MAIN=/burg-archive/glab/users/pg2328/legoESM
-cd $REPO || exit 1
+# CWD must be the MAIN checkout: the tool defaults --mesh to the RELATIVE
+# path data/grids/eORCA1.2_mesh_mask.nc, build_tripole compares that string
+# against whatever is passed, and a worktree carries no untracked data/ at
+# all. So the code comes from $REPO via PYTHONPATH while the working
+# directory supplies the data tree.
+cd $MAIN || exit 1
 echo "=== HEAD $(git -C $REPO rev-parse HEAD)"
 export PYTHONPATH="$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 export JAX_PLATFORMS=cpu
@@ -53,7 +58,7 @@ export JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 SNAP=$MAIN/results/omip_nemo/trp_orca1faithtint_d30/snapshot_day0030.npz
 [ -f "$SNAP" ] || { echo "REFUSING: $SNAP absent"; exit 3; }
-CMD="$PY scripts/validate/ocean_fidelity/smag_vs_prescribed_viscosity.py --snapshot $SNAP --mesh $MAIN/data/grids/eORCA1.2_mesh_mask.nc --C-smag 3.0 --A-h-uniform 100000 --level 0"
+CMD="$PY $REPO/scripts/validate/ocean_fidelity/smag_vs_prescribed_viscosity.py --snapshot $SNAP --C-smag 3.0 --A-h-uniform 100000 --level 0"
 echo "CMD: $CMD"
 $CMD
 rc=$?; echo "=== rc=$rc ==="
