@@ -542,6 +542,15 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
+        "/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
+        "/stp2d.f90"),
+    "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
     "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
         "/trazdf.f90"),
@@ -707,6 +716,16 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:818-830': [
         'lr123_write = lwp .AND. .NOT.ln_tile .AND. kstg == 3',
         'WRITE(r123_unit) r3t(:,:,Kbb), r3t(:,:,Kmm), r3t(:,:,Kaa)', 13],
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3.f90:188-201': [
+        '!  RK3 : single first external mode computation',
+        'CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 14],
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stp2d.f90:291-298': [
+        '!             Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
+        ('CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 1),
+        8],
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/dynspg_ts.f90:797-827': [
+        '! Finalize sums:',
+        'pssh (:,:,Kaa) = ssha_e(:,:)', 31],
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:150-180': [
         'ssha(:,:) = ssh (:,:,Kaa)',
         'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )', 31],
