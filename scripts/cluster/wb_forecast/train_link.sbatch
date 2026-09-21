@@ -11,7 +11,11 @@
 # for the script name.
 #
 # Env: CONFIG (required), OUT (required), MODE (physics|neural_gcm|sfno,
-# default physics), EPOCHS, LR, WARMUP_STEPS (optional). LR/WARMUP_STEPS
+# default physics), EPOCHS, LR, WARMUP_STEPS, VAL_WINDOWS (optional).
+# VAL_WINDOWS scores that many held-out windows from the deck's eval years after
+# every epoch, so the run has a generalisation curve and not only a training
+# one; it must be the SAME on every link of a chain, like the two below.
+# LR/WARMUP_STEPS
 # override the deck for THIS run without editing it, which is how a campaign
 # arm departs from a deck that other arms share -- config/wb/campaign/
 # spectral_t63.yaml is read by the column-MLP and SFNO arms too, so moving its
@@ -50,6 +54,7 @@ opt_args=()
 [ -n "${EPOCHS:-}" ] && opt_args+=(--epochs "$EPOCHS")
 [ -n "${LR:-}" ] && opt_args+=(--lr "$LR")
 [ -n "${WARMUP_STEPS:-}" ] && opt_args+=(--warmup-steps "$WARMUP_STEPS")
+[ -n "${VAL_WINDOWS:-}" ] && opt_args+=(--val-windows "$VAL_WINDOWS")
 
 "$PY" -u scripts/run/train_weatherbench_scale.py \
   --config "${CONFIG:?set CONFIG}" \
