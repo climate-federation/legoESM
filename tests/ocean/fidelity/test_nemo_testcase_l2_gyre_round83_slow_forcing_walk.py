@@ -417,7 +417,10 @@ def test_round141_rhs_observer_is_private_default_off_and_registered() -> None:
     hook_name = "slow_forcing_rhs_observer"
     hooks = WALK.model_module._NEMOWSRK3TestHooks()
     assert getattr(hooks, hook_name) is None
+    assert hooks.slow_forcing_rhs_observer_face == ""
     assert hook_name not in WALK.model_module.LatLonCGridOceanConfig._fields
+    assert "slow_forcing_rhs_observer_face" not in (
+        WALK.model_module.LatLonCGridOceanConfig._fields)
     WALK._validate_round140_rhs_registry(WALK.ROUND141_RHS_REGISTRY)
     with pytest.raises(RuntimeError, match="registry changed"):
         WALK._validate_round140_rhs_registry(WALK.ROUND141_RHS_REGISTRY[:-1])

@@ -1206,43 +1206,52 @@ def _round141_depth_reduction(h_u, h_v, rhs_u, rhs_v, mask_u, mask_v):
 
 def _round141_rhs_callback_trace(
         args, card, state, freshwater, surface, eta_after_override):
-    """Capture only the completed 3-D RHS and prove the callback passive."""
-    rhs_captures = []
-    final_captures = []
+    """Capture one RHS face per compiled step and prove each callback passive."""
+    rhs = {}
+    finals = {}
+    traces = {}
+    for face in ("u", "v"):
+        rhs_captures = []
+        final_captures = []
 
-    def rhs_sink(rhs_u, rhs_v):
-        rhs_captures.append((np.asarray(rhs_u), np.asarray(rhs_v)))
+        def rhs_sink(value):
+            rhs_captures.append(np.asarray(value))
 
-    def final_sink(*values):
-        require(len(values) == len(ROUND140_CALLBACK_FIELDS),
-                "Round-141 final callback field census changed")
-        final_captures.append({
-            name: np.asarray(value)
-            for name, value in zip(
-                ROUND140_CALLBACK_FIELDS, values, strict=True)
-        })
+        def final_sink(*values):
+            require(len(values) == len(ROUND140_CALLBACK_FIELDS),
+                    "Round-141 final callback field census changed")
+            final_captures.append({
+                name: np.asarray(value)
+                for name, value in zip(
+                    ROUND140_CALLBACK_FIELDS, values, strict=True)
+            })
 
-    hooks = model_module._NEMOWSRK3TestHooks(
-        slow_forcing_rhs_observer=rhs_sink,
-        barotropic_slow_forcing_override=final_sink,
-    )
-    (_, _, _, _, _, trace) = round82._capture_external_context(
-        args, card, state, freshwater, surface,
-        eta_after_override=eta_after_override,
-        traced_hooks=hooks,
-        plain_hooks=model_module._NEMOWSRK3TestHooks(),
-    )
-    require(rhs_captures, "Round-141 RHS callback did not fire")
-    require(final_captures, "Round-141 final callback did not fire")
-    for duplicate in rhs_captures[1:]:
-        require(round82._pytree_identity(
-            duplicate, rhs_captures[0])["bit_exact"],
-            "Round-141 RHS callbacks differ")
-    for duplicate in final_captures[1:]:
-        require(round82._pytree_identity(
-            duplicate, final_captures[0])["bit_exact"],
-            "Round-141 final callbacks differ")
-    return trace, rhs_captures[0], final_captures[0]
+        hooks = model_module._NEMOWSRK3TestHooks(
+            slow_forcing_rhs_observer=rhs_sink,
+            slow_forcing_rhs_observer_face=face,
+            barotropic_slow_forcing_override=final_sink,
+        )
+        (_, _, _, _, _, trace) = round82._capture_external_context(
+            args, card, state, freshwater, surface,
+            eta_after_override=eta_after_override,
+            traced_hooks=hooks,
+            plain_hooks=model_module._NEMOWSRK3TestHooks(),
+        )
+        require(rhs_captures, f"Round-141 RHS {face} callback did not fire")
+        require(final_captures,
+                f"Round-141 final {face} callback did not fire")
+        for duplicate in rhs_captures[1:]:
+            require(round82._pytree_identity(
+                duplicate, rhs_captures[0])["bit_exact"],
+                f"Round-141 RHS {face} callbacks differ")
+        for duplicate in final_captures[1:]:
+            require(round82._pytree_identity(
+                duplicate, final_captures[0])["bit_exact"],
+                f"Round-141 final {face} callbacks differ")
+        rhs[face] = rhs_captures[0]
+        finals[face] = final_captures[0]
+        traces[face] = trace
+    return traces, (rhs["u"], rhs["v"]), finals
 
 
 def measure_round141_rhs_developed(args) -> dict[str, object]:
@@ -1288,21 +1297,26 @@ def measure_round141_rhs_developed(args) -> dict[str, object]:
             "Round-140 RHS and Round-139 incoming boundaries differ")
 
     card, state, freshwater, surface, payload, entry = round82._developed_inputs(args)
-    minimal_trace, captured_rhs, captured_final = _round141_rhs_callback_trace(
+    minimal_traces, captured_rhs, captured_final = _round141_rhs_callback_trace(
         args, card, state, freshwater, surface, jnp.asarray(payload["ssha"]))
     control_trace, control_final = _round140_callback_trace(
         args, card, state, freshwater, surface, jnp.asarray(payload["ssha"]))
-    require(minimal_trace.trace_state_identity["bit_exact"],
-            "Round-141 RHS callback moved the returned production state")
+    require(all(trace.trace_state_identity["bit_exact"]
+                for trace in minimal_traces.values()),
+            "Round-141 one-face RHS callback moved the returned production state")
     require(control_trace.trace_state_identity["bit_exact"],
             "Round-140 control callback moved the returned production state")
     callback_identity = {
-        name: comparison(
-            captured_final[name], control_final[name],
-            np.ones_like(captured_final[name], dtype=bool))
-        for name in ROUND140_CALLBACK_FIELDS
+        face: {
+            name: comparison(
+                captured_final[face][name], control_final[name],
+                np.ones_like(captured_final[face][name], dtype=bool))
+            for name in ROUND140_CALLBACK_FIELDS
+        }
+        for face in ("u", "v")
     }
-    require(all(row["bit_exact"] for row in callback_identity.values()),
+    require(all(row["bit_exact"] for rows in callback_identity.values()
+                for row in rows.values()),
             "Round-141 RHS callback moved an external-forcing boundary")
 
     h_k = compute_layer_thickness(
@@ -1381,9 +1395,12 @@ def measure_round141_rhs_developed(args) -> dict[str, object]:
             and rows["reciprocal_v"]["bit_exact"]),
         "rhs_u_first": bool(first is not None and first["boundary"] == "rhs_u"),
         "rhs_v_non_bit": not rows["rhs_v"]["bit_exact"],
-        "callback_returned_state_bit": minimal_trace.trace_state_identity["bit_exact"],
+        "callback_returned_state_bit": all(
+            trace.trace_state_identity["bit_exact"]
+            for trace in minimal_traces.values()),
         "callback_external_boundaries_bit": all(
-            row["bit_exact"] for row in callback_identity.values()),
+            row["bit_exact"] for values in callback_identity.values()
+            for row in values.values()),
         "same_run_post_wind_boundary_bit": all(
             row["bit_exact"] for row in boundary_calibration.values()),
     }
@@ -1393,7 +1410,9 @@ def measure_round141_rhs_developed(args) -> dict[str, object]:
         "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
         "entry": entry, "record_admission": admission,
         "record_replay": validate_round140_rhs_replay(record),
-        "observer_state_identity": minimal_trace.trace_state_identity,
+        "observer_state_identity": {
+            face: trace.trace_state_identity
+            for face, trace in minimal_traces.items()},
         "control_state_identity": control_trace.trace_state_identity,
         "observer_external_boundary_identity": callback_identity,
         "same_run_boundary_calibration": boundary_calibration,

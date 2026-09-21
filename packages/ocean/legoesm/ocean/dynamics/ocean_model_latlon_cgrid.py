@@ -1054,6 +1054,7 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # slow-forcing callback so the round-141 gate can prove this minimum
     # materialization passive against the ordinary production step.
     slow_forcing_rhs_observer: object = None
+    slow_forcing_rhs_observer_face: str = ""
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
     # leaving legoESM's deviation-form carried state untouched.  Private
     # decision-33 measurement only.
@@ -2468,6 +2469,16 @@ class LatLonCGridOceanModel:
         if self._nemo_ws_test_hooks.expose_momentum_stage not in (0, 1, 2, 3):
             raise ValueError(
                 "expose_momentum_stage must be one of 0, 1, 2, or 3")
+        _rhs_observer = self._nemo_ws_test_hooks.slow_forcing_rhs_observer
+        _rhs_observer_face = (
+            self._nemo_ws_test_hooks.slow_forcing_rhs_observer_face)
+        if _rhs_observer_face not in ("", "u", "v"):
+            raise ValueError(
+                "slow_forcing_rhs_observer_face must be '', 'u', or 'v'")
+        if callable(_rhs_observer) != bool(_rhs_observer_face):
+            raise ValueError(
+                "slow_forcing_rhs_observer and its face must be selected "
+                "together")
         if self._nemo_ws_test_hooks.expose_momentum_operator_stage not in (
                 2, 3):
             raise ValueError(
@@ -5213,8 +5224,10 @@ class LatLonCGridOceanModel:
         dv_dt = tend.dv_dt.data
         _slow_rhs_observer = self._nemo_ws_test_hooks.slow_forcing_rhs_observer
         if callable(_slow_rhs_observer):
-            jax.debug.callback(
-                _slow_rhs_observer, du_dt, dv_dt, ordered=True)
+            if self._nemo_ws_test_hooks.slow_forcing_rhs_observer_face == "u":
+                jax.debug.callback(_slow_rhs_observer, du_dt, ordered=True)
+            else:
+                jax.debug.callback(_slow_rhs_observer, dv_dt, ordered=True)
 
         # Compute layer thickness at u/v faces for depth-averaging.
         # Min-rule: the face's effective wet thickness is the shallower
