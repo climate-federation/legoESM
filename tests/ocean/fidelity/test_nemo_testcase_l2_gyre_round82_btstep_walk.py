@@ -161,3 +161,8 @@ def test_developed_comparison_counts_signed_zero_and_first_index() -> None:
     assert row["absolute_max"] == 0.0
     assert row["rms"] == 0.0
     assert row["first_unequal_index"] == [0, 0]
+
+    scalar = WALK._developed_comparison(
+        np.float64(1.0), np.float64(1.0), np.ones((), dtype=bool))
+    assert scalar["bit_exact"] is True
+    assert scalar["cells_scored"] == 1

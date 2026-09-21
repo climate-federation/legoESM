@@ -586,8 +586,8 @@ def _admit(args) -> dict:
 
 def _developed_comparison(actual, expected, mask) -> dict:
     """Bit and norm census with signed-zero sensitivity and a first index."""
-    actual = np.ascontiguousarray(np.asarray(actual, dtype=np.float64))
-    expected = np.ascontiguousarray(np.asarray(expected, dtype=np.float64))
+    actual = np.array(actual, dtype=np.float64, copy=True, order="C")
+    expected = np.array(expected, dtype=np.float64, copy=True, order="C")
     mask = np.asarray(mask, dtype=bool)
     require(actual.shape == expected.shape == mask.shape,
             "developed comparison extents differ: "
@@ -608,8 +608,8 @@ def _developed_comparison(actual, expected, mask) -> dict:
 
 
 def _developed_unequal_mask(actual, expected, mask) -> np.ndarray:
-    actual = np.ascontiguousarray(np.asarray(actual, dtype=np.float64))
-    expected = np.ascontiguousarray(np.asarray(expected, dtype=np.float64))
+    actual = np.array(actual, dtype=np.float64, copy=True, order="C")
+    expected = np.array(expected, dtype=np.float64, copy=True, order="C")
     mask = np.asarray(mask, dtype=bool)
     require(actual.shape == expected.shape == mask.shape,
             "developed mismatch-mask extents differ")
