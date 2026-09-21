@@ -8,10 +8,12 @@ returned rain (which the downdraft/sub-cloud evaporation rescale further).
 Modes
   default            both schemes on the same state: rain, sink, heat, and the
                      recorded scale/binding statistics over ALL columns
-  --swap-with RUN    formation scheme on four states: this run's, RUN's, and
-                     the two T/q swaps (T from RUN with q from here, and the
-                     reverse) -- the discriminator for "closure responds to
-                     the cooled/moistened state" vs "changed conversion"
+  --swap-with RUN    formation scheme on six states: each run's full state
+                     (known-answer rows), then T, q, T+q, or the carried
+                     convection state (mass-flux memory + stochastic state)
+                     taken from RUN into this run's state.  Each row mixes
+                     trigger, closure, conversion and evaporation responses;
+                     none isolates the closure.
 
 Limits (state them next to any number): winds, dynamics tendencies and
 surface fluxes are zeros/dummies (not in the checkpoint); the diurnal
@@ -123,16 +125,16 @@ def _run(a, rec, bcfg, lat, fl, sel, w, dt):
         # trigger, closure, conversion and evaporation responses; none isolates
         # the closure -- that needs the pre-relaxation closure mass flux, which
         # the kernel does not return.  Swapped T rides this run's ps.
-        st_mem = dict(st, prog=so["prog"], stoch=so["stoch"])
+        st_mem = dict(st, prog=so["prog"], stoch=so["stoch"])   # memory AND stochastic state
         rows = [(f"full state {a.run}", st, None, None), (f"full state {a.swap_with}", so, None, None),
                 (f"T from {a.swap_with}, rest {a.run}", st, so["T"], None),
                 (f"q from {a.swap_with}, rest {a.run}", st, None, so["q"]),
                 (f"T+q from {a.swap_with}, rest {a.run}", st, so["T"], so["q"]),
-                (f"memory from {a.swap_with}, rest {a.run}", st_mem, None, None)]
+                (f"conv state (memory+stoch) from {a.swap_with}", st_mem, None, None)]
         print(f"=== formation scheme on swapped states ({tag}) [kg/m2/day; peak M_u kg/m2/s] ===")
         for name, base, T, q in rows:
             rain, sink, heat, mu = _call(bcfg, base, fl[sel], dt, "formation", T, q)
-            print(f"{name:40s} rain {np.sum(w*rain):.3f}  sink {np.sum(w*sink):.3f}  "
+            print(f"{name:44s} rain {np.sum(w*rain):.3f}  sink {np.sum(w*sink):.3f}  "
                   f"peak M_u {np.sum(w*mu):.4f}  raining {np.mean(rain > 1e-6):.0%}")
         return
     res = {}
@@ -146,11 +148,14 @@ def _run(a, rec, bcfg, lat, fl, sel, w, dt):
     assert r["scale"].shape[0] == len(sel)
     binding = (r["want"] > r["cap"]) & (r["want"] > 0)
     g = constants.g
-    generated = np.sum(np.maximum(r["want"] - r["cap"], 0) * r["dp"], axis=1) / g
-    realized = np.sum(r["sink"] * r["dp"], axis=1) / g
-    taken = np.sum(np.minimum(r["want"], r["cap"]) * r["dp"], axis=1) / g
+    f64 = lambda x: np.asarray(x, np.float64)       # native-dtype capacity, float64 sums
+    generated = np.sum(f64(np.maximum(r["want"] - r["cap"], 0)) * f64(r["dp"]), axis=1) / g
+    realized = np.sum(f64(r["sink"]) * f64(r["dp"]), axis=1) / g
+    taken = np.sum(f64(np.minimum(r["want"], r["cap"])) * f64(r["dp"]), axis=1) / g
+    rain_total = np.sum(f64(r["want"]) * f64(r["dp"]), axis=1) / g
     routed = realized - taken                       # excess that found slack
-    discarded = generated - routed                  # excess the scale deleted from the rain
+    discarded = generated - routed                  # rain deleted: (1-scale)*rain (sub-floor: all of it)
+    np.testing.assert_allclose(discarded, (1.0 - f64(r["scale"])) * rain_total, rtol=1e-5, atol=1e-15)
     print(f"recorded cap scale over the selected columns: min {r['scale'].min():.6f}  "
           f"columns with scale<1: {np.sum(r['scale'] < 1.0)}  "
           f"levels with want>cap: {binding.sum()} of {np.sum(r['want'] > 0)} formation levels  "

@@ -2060,9 +2060,9 @@ def distribute_rain_vapor_sink(dq_r_formation, q_v, dq_v_dt, dp_full, dt, scheme
     # unselected 0/0 branch poisons the gradient the same way.
     # Masks use a physical floor, not the dtype's smallest normal: the
     # backward pass of a/b carries 1/b**2, and a "normal" b of 1e-30 kg/m2/s
-    # (a soft-gated trace of formation) still overflows float32 there.  Below
-    # the floor the column is not rescaled (scale 1) -- a rain of 1e-12
-    # kg/m2/s is 1e-7 mm/day.
+    # (a soft-gated trace of formation) still overflows float32 there.  A
+    # column whose formation integrates to less than the floor (1e-7 mm/day)
+    # gets scale 0 AND sink 0, so rain == sink holds exactly there too.
     tiny = _RAIN_SINK_ZERO_FLUX
     has_slack = slack_col > tiny
     add = jnp.where(has_slack, jnp.minimum(excess_col, slack_col) * slack
@@ -2071,7 +2071,8 @@ def distribute_rain_vapor_sink(dq_r_formation, q_v, dq_v_dt, dp_full, dt, scheme
     rain_total = jnp.sum(want * dp_full, axis=-1) / g
     realized = jnp.sum(sink * dp_full, axis=-1) / g
     has_rain = rain_total > tiny
-    scale = jnp.where(has_rain, realized / jnp.where(has_rain, rain_total, 1.0), 1.0)
+    scale = jnp.where(has_rain, realized / jnp.where(has_rain, rain_total, 1.0), 0.0)
+    sink = jnp.where(has_rain[:, None], sink, 0.0)
     return sink, scale
 
 

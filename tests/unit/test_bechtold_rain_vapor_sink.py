@@ -30,7 +30,8 @@ def _column():
     (so a missing thickness weight cannot hide), moist below.
     Column 0 rains at levels 4..6; column 1 is the counter-case: no rain."""
     nlev = 10
-    dp = jnp.asarray(np.stack([np.linspace(5.0e3, 1.4e4, nlev)] * 2))
+    dp = jnp.asarray(np.stack([np.linspace(5.0e3, 1.4e4, nlev),
+                               np.linspace(1.4e4, 5.0e3, nlev)]))   # column 1 reversed
     q_v = jnp.asarray(np.stack([np.linspace(1e-4, 1.6e-2, nlev),
                                 np.linspace(2e-4, 1.2e-2, nlev)]))
     dq_v_dt = jnp.zeros_like(q_v)
@@ -62,7 +63,9 @@ def _expected(form, q_v, dq, dp, dt=DT):
     sink = take + add
     rain = np.sum(want * dpn, 1) / g; real = np.sum(sink * dpn, 1) / g
     on = rain > _RAIN_SINK_ZERO_FLUX
-    return sink, np.where(on, real / np.where(on, rain, 1.0), 1.0)
+    # below the floor: no rain is emitted (scale 0) and nothing is debited
+    return (np.where(on[:, None], sink, 0.0),
+            np.where(on, real / np.where(on, rain, 1.0), 0.0))
 
 
 def _check_pairing(sink, scale, form, q_v, dq, dp):
@@ -81,8 +84,8 @@ def test_formation_debits_only_where_rain_forms_and_is_column_exact():
     sink, scale = np.asarray(sink), np.asarray(scale)
     assert np.all(sink[0, :4] == 0.0) and np.all(sink[0, 7:] == 0.0)
     np.testing.assert_allclose(sink[0, 4:7], FORM, rtol=RTOL)
-    assert np.all(sink[1] == 0.0) and scale[1] == 1.0      # counter-column untouched
-    np.testing.assert_allclose(scale, 1.0, rtol=RTOL)
+    assert np.all(sink[1] == 0.0) and scale[1] == 0.0      # counter-column: no rain, no debit
+    np.testing.assert_allclose(scale[0], 1.0, rtol=RTOL)
     _check_pairing(sink, scale, np.asarray(form), q_v, dq, dp)
 
 
@@ -92,7 +95,7 @@ def test_legacy_spreads_by_vapour_mass_over_every_level():
     w = np.asarray(q_v * dp); w = w / w.sum(1, keepdims=True)
     expect = _col_int(form, dp)[:, None] * constants.g * w / np.asarray(dp)
     np.testing.assert_allclose(np.asarray(sink), expect, rtol=RTOL, atol=0)
-    np.testing.assert_allclose(scale, 1.0)
+    np.testing.assert_allclose(scale, 1.0)      # legacy never rescales
     assert (np.asarray(sink)[0] > 0).all() and np.all(np.asarray(sink)[1] == 0.0)
 
 
@@ -107,16 +110,16 @@ def test_capacity_cap_redistributes_within_support_then_reduces_rain():
     # the excess went to levels 4 and 6 (the rest of the formation support)
     assert (sink[0, [4, 6]] > FORM[[0, 2]] * (1 + RTOL)).all()
     assert np.all(sink[0, :4] == 0.0) and np.all(sink[0, 7:] == 0.0)
-    assert np.all(sink[1] == 0.0) and scale[1] == 1.0
+    assert np.all(sink[1] == 0.0) and scale[1] == 0.0
     _check_pairing(sink, scale, np.asarray(form), q_v, dq, dp)
-    np.testing.assert_allclose(scale, 1.0, rtol=RTOL)   # enough slack: nothing lost
+    np.testing.assert_allclose(scale[0], 1.0, rtol=RTOL)   # enough slack: nothing lost
     assert (np.asarray(q_v) - DT * sink >= 0.0).all()    # no level goes negative
     # dry the whole support: the rain must shrink, never borrow from outside
     q_v2 = q_v.at[:, 4:7].set(1.0e-6)
     sink2, scale2 = distribute_rain_vapor_sink(form, q_v2, dq, dp, DT, "formation")
     sink2, scale2 = np.asarray(sink2), np.asarray(scale2)
     assert np.all(sink2[0, :4] == 0.0) and np.all(sink2[0, 7:] == 0.0)
-    assert 0.0 < scale2[0] < 1.0 and scale2[1] == 1.0
+    assert 0.0 < scale2[0] < 1.0 and scale2[1] == 0.0
     np.testing.assert_allclose(sink2[0, 4:7], cap5, rtol=RTOL)   # every level at its cap
     _check_pairing(sink2, scale2, np.asarray(form), q_v2, dq, dp)
     assert (np.asarray(q_v2) - DT * sink2 >= 0.0).all()
@@ -127,7 +130,7 @@ def test_capacity_sees_the_transport_tendency():
     dq = dq.at[0, 5].set(-np.asarray(q_v)[0, 5] / DT)   # transport empties level 5
     sink, scale = distribute_rain_vapor_sink(form, q_v, dq, dp, DT, "formation")
     assert np.asarray(sink)[0, 5] == 0.0
-    np.testing.assert_allclose(scale, 1.0, rtol=RTOL)
+    np.testing.assert_allclose(np.asarray(scale)[0], 1.0, rtol=RTOL)
     _check_pairing(np.asarray(sink), np.asarray(scale), np.asarray(form), q_v, dq, dp)
 
 
@@ -149,7 +152,8 @@ def test_float32_gradients_finite_for_zero_rain_and_exhausted_capacity(trace):
         assert all(np.isfinite(np.asarray(g)).all() for g in grads)
     sink, scale = distribute_rain_vapor_sink(*args, DT, "formation")
     assert np.all(np.asarray(sink)[0] == 0.0) and np.asarray(scale)[0] == 0.0
-    assert np.asarray(scale)[1] == 1.0
+    # the sub-floor trace: scale 0 and sink 0 together, so rain == sink exactly
+    assert np.all(np.asarray(sink)[1] == 0.0) and np.asarray(scale)[1] == 0.0
 
 
 def test_unknown_scheme_and_bad_dt_raise():
