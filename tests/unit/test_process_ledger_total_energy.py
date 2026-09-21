@@ -118,28 +118,56 @@ def test_a_real_heat_source_is_visible_in_both(column):
     assert float(jnp.min(jnp.abs(te_rate))) > 1.0
 
 
-def test_surface_geopotential_term_responds_to_a_mass_fix(column):
-    """A p_s adjustment over topography moves the total energy, and must.
+def test_a_mass_fix_is_measured_by_SNAPSHOTS_and_the_rate_helper_refuses(column):
+    """The mass fixer moves p_s, and the rate helper must not pretend to cover it.
 
-    The mass fixer's whole job is to move ``p_s``. Over a mountain that
-    changes the column's energy through the ``Phi_s p_s / g`` boundary term,
-    and a total-energy budget that omitted it would blame the difference on
-    whatever ran next.
+    Review finding: a process that moves ``p_s`` changes BOTH the surface term
+    and every layer's mass, so a rate helper that carries the first without
+    the second is a mixed convention and is wrong even over flat ground. The
+    helper now refuses, and the snapshot pair is what measures it.
     """
     d = column
-    dps = jnp.full((NCOL,), 5.0)     # +5 Pa, the scale of a mass-fix correction
-    rate = total_energy_entry_column(
-        d["p_s"], d["dsigma"], dp_s_dt=dps, phis=d["phis"])
-    expected = d["phis"] * dps / constants.g
-    np.testing.assert_allclose(np.asarray(rate), np.asarray(expected),
-                               rtol=1e-12)
-    # It is not negligible: over 1.5 km of terrain a 5 Pa/s drift is ~7.5 kW/m^2.
-    assert float(jnp.max(jnp.abs(rate))) > 1.0
+    dps = 5.0            # +5 Pa, the scale of a mass-fix correction
+    with pytest.raises(ValueError, match="FIXED-LAYER-MASS"):
+        total_energy_entry_column(d["p_s"], d["dsigma"],
+                                  dp_s_dt=jnp.full((NCOL,), dps),
+                                  phis=d["phis"])
 
-    # And it is absent when phis is not supplied -- the helper does not invent
-    # a surface term, it reports what it was given.
-    bare = total_energy_entry_column(d["p_s"], d["dsigma"], dp_s_dt=dps)
-    assert float(jnp.max(jnp.abs(bare))) == 0.0
+    # The snapshot pair carries both terms. Bump p_s and re-snapshot: the
+    # change contains the surface term AND the layer-mass term, and it is not
+    # negligible over 1.5 km of terrain.
+    before = column_total_energy(d["p_s"], d["dsigma"], d["T"], u=d["u"],
+                                 v=d["v"], q_v=d["q_v"], phis=d["phis"])
+    after = column_total_energy(d["p_s"] + dps, d["dsigma"], d["T"], u=d["u"],
+                                v=d["v"], q_v=d["q_v"], phis=d["phis"])
+    delta = after - before
+    surface_only = d["phis"] * dps / constants.g
+    assert float(jnp.min(jnp.abs(delta))) > 1.0e3, (
+        "a 5 Pa mass fix should move the column total energy by more than a "
+        "kJ/m^2; if it does not, this test is not exercising the surface term")
+    # The layer-mass half is NOT small next to the surface half -- which is
+    # exactly why including only one of them was refused above.
+    assert float(jnp.min(jnp.abs(delta - surface_only))) > 0.1 * float(
+        jnp.max(jnp.abs(surface_only))), (
+        "the layer-mass contribution is negligible against the surface term "
+        "here, so this test cannot justify the refusal it is documenting")
+
+
+def test_a_momentum_tendency_without_its_wind_raises(column):
+    """Silently dropping a momentum tendency would under-report a process."""
+    d = column
+    with pytest.raises(ValueError, match="without"):
+        total_energy_entry_column(d["p_s"], d["dsigma"],
+                                  du_dt=jnp.zeros((NCOL, NLEV)))
+
+
+def test_a_band_may_not_carry_the_whole_column_surface_term(column):
+    """The surface term belongs to the column, not to a band inside it."""
+    d = column
+    w = jnp.concatenate([jnp.ones(NLEV // 2), jnp.zeros(NLEV - NLEV // 2)])
+    with pytest.raises(ValueError, match="whole"):
+        column_total_energy(d["p_s"], d["dsigma"], d["T"], phis=d["phis"],
+                            level_weight=w)
 
 
 def test_store_agrees_with_the_enthalpy_store_when_only_T_is_supplied(column):

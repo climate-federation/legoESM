@@ -245,6 +245,34 @@ def column_store_snapshot_column(p_s, dsigma, T, *species, dp=None,
 # term that moves when the mass fixer moves ``p_s``.
 
 
+# WHAT A TOTAL-ENERGY LEDGER STILL DOES NOT CLOSE, named here so nobody reads
+# a TE row as a closed budget (mechanism review, #1354):
+#
+#  * Phi_s p_s / g is the correct and sufficient MECHANICAL boundary term, and
+#    it is NOT the whole lower boundary. An atmospheric column also exchanges
+#    energy with the surface through the sensible and latent heat fluxes and
+#    through the enthalpy that LEAVES WITH THE PRECIPITATION. That last one is
+#    not small: rain carries c_l T ~ 1.2 MJ/kg, so 1 mm/day is ~14 W/m^2 --
+#    the same order as the ~18 W/m^2 non-closure this issue is chasing. Snow
+#    carries c_i T - L_f, i.e. the OPPOSITE sign in a liquid-at-0C reference.
+#    Any closed budget needs these as their own rows.
+#  * A process that returns a MOMENTUM tendency and no thermal tendency is
+#    entirely kinetic, so omitting the kinetic term does not make its row
+#    small -- it makes it noise. Gravity-wave drag is exactly that case
+#    (global mean ~0.1-1 W/m^2, 5-30 W/m^2 locally over steep orography).
+#    Boundary-layer drag and convective momentum transport contribute ~1-5%
+#    and ~0.5-2% of their own thermal rows respectively.
+#  * ``u du/dt`` is the instantaneous rate; the exact finite-step kinetic
+#    increment is ``(u_new^2 - u_old^2)/2``, larger by ``(du)^2/2``. Building
+#    a physics row from a PAIR of ``column_total_energy`` snapshots rather
+#    than from tendency algebra captures that term, and the effect of clips
+#    and update order, for free -- which is the recommended way to wire this.
+#  * Designed dissipation is not leakage: divergence damping, del-2/del-4
+#    momentum diffusion, the Rayleigh sponge and the time filter all remove
+#    total energy on purpose. Enumerate and subtract them before calling a
+#    dycore-row residual a leak.
+
+
 def column_total_energy(p_s, dsigma, T, *, u=None, v=None, phis=None,
                         q_v=None, q_ice=None, dp=None, level_weight=None):
     """PER-COLUMN total energy [J/m^2] for a hydrostatic column (#1354).
@@ -262,11 +290,23 @@ def column_total_energy(p_s, dsigma, T, *, u=None, v=None, phis=None,
     topography does not.
     """
     ref = jnp.asarray(p_s)
-    acc = jnp.result_type(ref.dtype, jnp.float32)
+    if phis is not None and level_weight is not None:
+        # The surface term is the boundary term of the WHOLE-column
+        # integration by parts. A band integral has its own geopotential
+        # boundary terms at the band edges, and adding the full surface term
+        # to a band would be wrong by all of them (review finding). Refuse
+        # rather than return a plausible number.
+        raise ValueError(
+            "column_total_energy: phis and level_weight together are not "
+            "meaningful — the surface geopotential term belongs to the whole "
+            "column, and a band integral needs boundary terms at its own "
+            "edges. Take the band without phis, or the column without "
+            "level_weight.")
+    zero = jnp.zeros(ref.shape, dtype=jnp.result_type(ref.dtype, jnp.float32))
 
     def _col(x, scale):
         if x is None:
-            return jnp.zeros(ref.shape, dtype=acc)
+            return zero
         return scale * column_mass_integral(
             apply_level_weight(x, level_weight), p_s, dsigma, dp=dp)
 
@@ -281,7 +321,10 @@ def column_total_energy(p_s, dsigma, T, *, u=None, v=None, phis=None,
     total = total + _col(q_v, constants.L_v) - _col(q_ice, constants.L_f)
     if phis is not None:
         total = total + jnp.asarray(phis) * ref / constants.g
-    return jnp.asarray(total, dtype=acc)
+    # NB the accumulation dtype is whatever ``column_mass_integral`` produced
+    # (it promotes to the fp64 budget accumulator internally); do NOT force it
+    # back to p_s's dtype, which would throw that away on an fp32 p_s.
+    return total
 
 
 def total_energy_entry_column(p_s, dsigma, *, dT_dt=None, du_dt=None,
@@ -296,7 +339,11 @@ def total_energy_entry_column(p_s, dsigma, *, dT_dt=None, du_dt=None,
         dTE/dt = c_p int dT/dt dp/g
                + int (u du/dt + v dv/dt) dp/g
                + L_v int dq_v/dt dp/g  -  L_f int dq_ice/dt dp/g
-               + Phi_s (dp_s/dt) / g
+
+    ``dp_s_dt`` and ``phis`` are accepted only so that passing them RAISES:
+    a process that moves ``p_s`` also moves every layer's mass, and carrying
+    the surface term without the layer-mass term is a mixed convention that
+    is wrong even over flat ground.
 
     The kinetic term needs the CURRENT winds as well as their tendency --
     d/dt(|v|^2/2) = v . dv/dt -- so a process that returns a momentum
@@ -308,14 +355,43 @@ def total_energy_entry_column(p_s, dsigma, *, dT_dt=None, du_dt=None,
     do not move ``p_s``) and is NOT exact for the dycore, which is why the
     dynamics row must be filled from a pair of
     :func:`column_total_energy` snapshots rather than from this function.
+
+    One more thing this function is NOT: ``u du/dt`` is the instantaneous
+    rate, not the exact finite-step kinetic increment ``(u_new^2 - u_old^2)/2``
+    — they differ by ``(du)^2/2``. For a diagnostic rate over one step that is
+    second order and fine; for a closed budget over a step, snapshot.
+
+    ``q_ice`` must be ALL frozen mass species (cloud ice, snow, graupel), not
+    just cloud ice, or the fusion term is short by whatever is left out.
     """
     ref = jnp.asarray(p_s)
-    acc = jnp.result_type(ref.dtype, jnp.float32)
-    rate = jnp.zeros(ref.shape, dtype=acc)
+    if dp_s_dt is not None or phis is not None:
+        # HALF a mass term is worse than none (review finding). A process that
+        # moves p_s changes BOTH the surface term Phi_s dp_s/dt / g AND every
+        # layer's mass, contributing sum_k e_k d(dp_k)/dt / g with
+        # e = c_p T + K + L_v q_v - L_f q_ice. Including only the first is a
+        # mixed convention that is wrong even over flat ground. The mass-moving
+        # case is exactly the dycore row, and the dycore row is filled from a
+        # PAIR of ``column_total_energy`` snapshots, which carries both terms
+        # by construction.
+        raise ValueError(
+            "total_energy_entry_column: this is the FIXED-LAYER-MASS rate and "
+            "cannot represent a process that moves p_s — it would carry the "
+            "surface term without the layer-mass term. Use a pair of "
+            "column_total_energy snapshots for the dycore / mass-fixer row.")
+    for name, w, dw in (("u", u, du_dt), ("v", v, dv_dt)):
+        if dw is not None and w is None:
+            raise ValueError(
+                f"total_energy_entry_column: d{name}/dt was supplied without "
+                f"{name}. The kinetic rate is v.dv/dt, so the tendency alone "
+                f"is not enough and dropping it silently would under-report "
+                f"this process.")
+    zero = jnp.zeros(ref.shape, dtype=jnp.result_type(ref.dtype, jnp.float32))
+    rate = zero
 
     def _col(x, scale):
         if x is None:
-            return jnp.zeros(ref.shape, dtype=acc)
+            return zero
         return scale * column_mass_integral(
             apply_level_weight(x, level_weight), p_s, dsigma, dp=dp)
 
@@ -327,9 +403,7 @@ def total_energy_entry_column(p_s, dsigma, *, dT_dt=None, du_dt=None,
         dke = w * dw if dke is None else dke + w * dw
     rate = rate + _col(dke, 1.0)
     rate = rate + _col(dq_v_dt, constants.L_v) - _col(dq_ice_dt, constants.L_f)
-    if phis is not None and dp_s_dt is not None:
-        rate = rate + jnp.asarray(phis) * jnp.asarray(dp_s_dt) / constants.g
-    return jnp.asarray(rate, dtype=acc)
+    return rate
 
 
 def zero_ledger_column(n_columns, dtype=jnp.float64):
