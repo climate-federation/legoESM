@@ -4127,8 +4127,10 @@ def _validated_C_land(value):
 
 def refuse_cap_floor_on_fv(config) -> None:
     """The polar-cap radiative cloud floor is applied only in the standalone
-    radiation backend (MPAS / spectral); this pipeline never applies it and
-    refuses rather than silently running without it."""
+    radiation backend that the MPAS and spectral lanes call; this pipeline's
+    own radiation never applies it.  Called by the driver's lane dispatch for
+    every OTHER lane (the pipeline object itself is built on all lanes, so
+    the refusal cannot live in build_physics_pipeline)."""
     if getattr(config, "cloud_cap_floor_on", False):
         raise ValueError(
             "cloud_cap_floor_on is applied only in the standalone radiation path "
@@ -4154,7 +4156,6 @@ def build_physics_pipeline(grid, sigma, config):
     -------
     PhysicsPipeline
     """
-    refuse_cap_floor_on_fv(config)
     # Build grid-agnostic column adapter
     adapter = make_adapter(grid)
 

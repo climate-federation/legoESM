@@ -34,6 +34,7 @@ from legoesm.core.tracers import (
 )
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
+    refuse_cap_floor_on_fv,
     convection_config_for,
     build_physics_pipeline,
     gwd_config_for,
@@ -6933,6 +6934,9 @@ class ModelDriver:
             # fv3_duo steps its own six-face bundled pytree — keyed on the
             # DISCRETIZATION (its grid_type is the shared "cubed_sphere"),
             # so it must dispatch before every grid-keyed branch below.
+            if not (self.config.grid.grid_type == "mpas"
+                    or self.config.dycore.discretization == "spectral"):
+                refuse_cap_floor_on_fv(self.config)
             if self.config.dycore.discretization == "fv3_duo":
                 status = self._run_fv3_duo(start_step, start_day)
             elif self.config.grid.grid_type == "mpas":

@@ -137,8 +137,14 @@ def test_silent_no_op_paths_refuse():
     with pytest.raises(ValueError, match="finite-volume"):
         refuse_cap_floor_on_fv(SimpleNamespace(cloud_cap_floor_on=True))
     refuse_cap_floor_on_fv(SimpleNamespace(cloud_cap_floor_on=False))
-    with pytest.raises(ValueError, match="finite-volume"):          # the builder itself, before any setup
-        build_physics_pipeline(None, None, SimpleNamespace(cloud_cap_floor_on=True))
+    # The pipeline is built on EVERY lane (MPAS included), so the refusal must
+    # not live in the builder: the MPAS cap arm died at setup when it did.
+    import inspect
+    from legoesm.driver.model_driver import ModelDriver
+    src = inspect.getsource(ModelDriver.run)
+    assert "refuse_cap_floor_on_fv(self.config)" in src
+    assert src.index("refuse_cap_floor_on_fv") < src.index("self._run_fv3_duo(")
+    assert "refuse_cap_floor_on_fv" not in inspect.getsource(build_physics_pipeline)
     with pytest.raises(ValueError, match="never be applied"):
         _standalone_cloud_config(SimpleNamespace(cloud_cap_floor_on=True), "none")
     assert _standalone_cloud_config(SimpleNamespace(cloud_cap_floor_on=False), "none") is None
