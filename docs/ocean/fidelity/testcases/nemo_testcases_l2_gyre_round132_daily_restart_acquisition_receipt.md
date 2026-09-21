@@ -40,7 +40,7 @@ SYNTAX_PROOF_PASS restart.f90
 SYNTAX_PROOF_PASS stprk3.f90
 SYNTAX_PROOF_PASS dynspg_ts.f90
 SYNTAX_PROOF_PASS zdftke.f90
-ROUND132_DAILY_RESTART_PREFLIGHT_READY /tmp/gyre-r132-provenance.Ep9O5WKC
+ROUND132_DAILY_RESTART_PREFLIGHT_READY /tmp/gyre-r132-provenance.b7kkm12g
 ```
 
 There is no acquisition result to overstate: record count, bytewise monthly
@@ -161,7 +161,7 @@ unchanged. The ORCA2 assembly present at the incoming tip was not touched.
 ## Mechanical controls and evidence
 
 The safe preflight log is `phase3/round132/preflight.log` (SHA-256
-`767cee1d10748305e74441189ce28f8348c7d8eafe0e47cc1fe733331d91874d`).
+`0e79f30fa7d57d8c53e3ffc30b2cc3adcb4f6a7522bcb9ae9b5f8ace7d83f3f4`).
 It includes the exact control census, three-row delta, four syntax proofs, and
 the preflight-ready marker. It contains no `RUN_DONE` marker.
 
@@ -182,7 +182,7 @@ Their logs are `phase3/round132/missing-boundary_plant.log` and
 
 ## Independent adversarial review
 
-The required separate read-only Codex pass was invoked against both Round-132
+The required separate read-only Codex pass was invoked against the Round-132
 commits, this receipt, the Round-131 gate, and the cited compiled source. Its
 prompt explicitly tried to refute source-card identity, exact namelist
 isolation, count/size coverage, bytewise twin admission, control non-vacuity,
