@@ -676,8 +676,10 @@ def _admit_developed(args) -> tuple[dict, dict, dict]:
             "Round-137 passive restart identity changed")
     require(round81.sha256(process) == DEVELOPED_PROCESS_SHA256,
             "Round-137 passive process identity changed")
-    require("STOP 0" in (root / "ocean.output").read_text(),
-            "Round-137 NEMO run did not finish with STOP 0")
+    ocean_lines = [line.strip() for line in (
+        root / "ocean.output").read_text().splitlines() if line.strip()]
+    require(ocean_lines and ocean_lines[-1] == "AAAAAAAA",
+            "Round-137 NEMO ocean log lacks its terminal completion marker")
     plants = {}
     for name in (
             "final-pssh-ulp", "header", "passive-admission", "qco-ulp",
