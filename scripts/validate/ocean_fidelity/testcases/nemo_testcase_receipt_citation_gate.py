@@ -313,6 +313,16 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/zdfdrg.f90"),
     "GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/stp2d.f90"),
+    # Round 138 consumes the operator-run developed-state record and binds
+    # every statement to that record producer's exact compiled branch.
+    "GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/stp2d.f90"),
+    "GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    "GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/domqco.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -2835,6 +2845,34 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:301-308': [
         '!             Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
         'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 8],
+    # --- round 138: developed-state external solve and consumed QCO boundary ---
+    'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/stp2d.f90:291-298': [
+        '!             Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
+        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 8],
+    'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90:289-325': [
+        '! set values computed in RK3_ssh',
+        ('END DO   ;   END DO', 1), 37],
+    'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90:462-591': [
+        'DO jn = 1, icycle',
+        '& ssha_e(ntsi:ntei,ntsj:ntej)', 130],
+    'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90:631-684': [
+        '! Half-step back interpolation of SSH for surface pressure',
+        '& zu_frc(ntsi:ntei,ntsj:ntej), zv_frc(ntsi:ntei,ntsj:ntej)', 54],
+    'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90:697-759': [
+        '! Set next velocities:',
+        'hvr_e(ji,jj) = ssvmask(ji,jj) / (  hv_e(ji,jj)', 63],
+    'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90:811-844': [
+        'vbb_e  (:,:) = vb_e  (:,:)',
+        'END DO                                               !        end loop', 34],
+    'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/dynspg_ts.f90:857-890': [
+        '! Finalize sums:',
+        'WRITE(r137_unit) pssh(ntsi:ntei,ntsj:ntej,Kaa)', 34],
+    'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/stprk3_stg.f90:176-205': [
+        '!==  ssh/h0 ratio at Kaa  ==!',
+        ('r3u(:,:,Kaa) = r3ua(:,:)', 1), 30],
+    'GYRE_OMIP_L2_P3_SM_R137EXT/BLD/ppsrc/nemo/domqco.f90:237-258': [
+        ('SUBROUTINE dom_qco_r3c_RK3', 1),
+        ('END DO   ;   END DO', 4), 22],
 }
 
 
