@@ -90,9 +90,13 @@ all four target compiled files are byte-identical to these source-build files.
 The script performs `makenemo -r GYRE_PISCES` under the new target name, then
 copies every top-level source-card `EXP00` and `MY_SRC` entry file-by-file and
 copies the cpp keys under that target name. It compares the complete
-path-bearing manifest before building, rebuilds with `conda-scalarmath`,
-rejects vector-math symbols, records the actual new binary hash, and compares
-the four relevant compiled files byte-for-byte with the frozen source build.
+link-aware path-bearing entry manifest before building: regular files compare
+by SHA-256, while symbolic links compare by their recorded link target. This
+distinction is required for `EXP00/nemo`, whose identical `../BLD/bin/nemo.exe`
+link resolves to the preliminary target binary before the intended rebuild.
+The script then rebuilds with `conda-scalarmath`, rejects vector-math symbols,
+records the actual new binary hash, and compares the four relevant compiled
+files byte-for-byte with the frozen source build.
 
 The operator specified 2,160 steps and a restart every six steps. The only
 additional cadence row is `nn_write=2160`, inherited from the certified

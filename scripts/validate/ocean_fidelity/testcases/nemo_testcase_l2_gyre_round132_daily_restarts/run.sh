@@ -111,6 +111,21 @@ source_card_manifest() {
   )
 }
 
+copy_card_manifest() {
+  (
+    cd "$1"
+    while IFS= read -r -d '' path; do
+      if [[ -L "$path" ]]; then
+        printf 'L\t%s\t%s\n' "$path" "$(readlink "$path")"
+      else
+        fields=$(sha256sum "$path")
+        printf 'F\t%s\t%s\n' "$path" "${fields%% *}"
+      fi
+    done < <(find EXP00 MY_SRC -maxdepth 2 \
+      \( -type f -o -type l \) -print0 | sort -z)
+  )
+}
+
 digest_of() {
   local fields
   fields=$(sha256sum "$1")
@@ -121,6 +136,7 @@ readonly PROVENANCE=$(mktemp -d /tmp/gyre-r132-provenance.XXXXXXXX)
 printf 'temporary provenance directory (retained): %s\n' "$PROVENANCE"
 printf '%s\n' "$COMMIT" >"$PROVENANCE/producer_commit.txt"
 source_card_manifest "$SOURCE_ROOT" >"$PROVENANCE/source_cfg.sha256"
+copy_card_manifest "$SOURCE_ROOT" >"$PROVENANCE/source_copy_card.manifest"
 sha256sum "$NEMO_ROOT/arch/arch-$ARCH.fcm" "$SOURCE_CPP" \
   "$SOURCE_BINARY" "$GATE" "$PREREG" \
   >"$PROVENANCE/toolchain.sha256"
@@ -282,9 +298,10 @@ done < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \
   \( -type f -o -type l \) -print0 | sort -z)
 cp "$SOURCE_CPP" "$TARGET_CPP"
 
-source_card_manifest "$TARGET_ROOT" >"$PROVENANCE/target_cfg_before_build.sha256"
-cmp -s "$PROVENANCE/source_cfg.sha256" \
-  "$PROVENANCE/target_cfg_before_build.sha256" || \
+copy_card_manifest "$TARGET_ROOT" \
+  >"$PROVENANCE/target_copy_card_before_build.manifest"
+cmp -s "$PROVENANCE/source_copy_card.manifest" \
+  "$PROVENANCE/target_copy_card_before_build.manifest" || \
   refuse 68 "file-by-file target card differs from the source card"
 cmp -s "$SOURCE_CPP" "$TARGET_CPP" || \
   refuse 68 "target cpp keys differ from the source card"
