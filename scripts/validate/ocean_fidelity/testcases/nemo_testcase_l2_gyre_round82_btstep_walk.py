@@ -943,8 +943,10 @@ def measure_developed(args) -> dict:
         eta_after_override=jnp.asarray(payload["ssha"]))
     rows, live_arrays = _developed_rows(fields, captured.substeps, active)
     first = first_non_bit(rows)
-    live_final = np.asarray(
-        captured.state_after_barotropic.eta.data, dtype=np.float64)
+    # The callback's barotropic state retains its solver halo, whereas the
+    # registered substep trace and NEMO stream both use the owned native box.
+    # The final swap is the exact pssh field returned by that solve.
+    live_final = np.asarray(live_arrays["swap_eta"][-1], dtype=np.float64)
     oracle_final = np.array(fields["final_pssh"], copy=True)
     if args.plant == "final-pssh-ulp":
         location = tuple(int(value) for value in np.argwhere(active["t"])[0])
