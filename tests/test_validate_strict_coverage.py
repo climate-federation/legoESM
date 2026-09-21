@@ -49,6 +49,9 @@ _CONFIG_REL = "packages/coupler/legoesm/driver/config.py"
 EXPECTED_VALIDATED: frozenset[str] = frozenset(
     {
         "radiation",
+        # grid.vertical_coord: 'sigma' | 'hybrid' | 'cam_l32' (the CAM6 L32
+        # table); membership-checked in validate_strict since the cam_l32 lane.
+        "vertical_coord",
         "cloud_scheme",
         "cloud_diagnostic_condensate_scheme",
         # Cloud-fraction RH saturation curve ("liquid" | "mixed_phase"), the
@@ -109,7 +112,6 @@ KNOWN_UNVALIDATED: frozenset[str] = frozenset(
         # _has_membership below only counts a membership test that HEADS an
         # if/elif.
         "grid_type",        # grids.factory.create_grid (C3)
-        "vertical_coord",   # consumed by the vertical-coordinate builder
         "time_integrator",  # timestepping.dispatch.dispatch_integrator (C3)
     }
 )
