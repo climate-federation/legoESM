@@ -5968,10 +5968,10 @@ class LatLonCGridOceanModel:
                     F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
                     _slow_final_override = self._nemo_ws_test_hooks.barotropic_slow_forcing_override
                     if callable(_slow_final_override):
-                        jax.debug.callback(_slow_final_override, _slow_incoming_u, _slow_incoming_v,
-                            _cor_u_sub, _cor_v_sub, state.u_mask.data, state.v_mask.data, F_slow_u, F_slow_v,
-                            du_dt, dv_dt, h_u_pre, h_v_pre, H_u_pre, H_v_pre, jnp.broadcast_to(u_mask_3d, du_dt.shape), jnp.broadcast_to(v_mask_3d, dv_dt.shape), _F_slow_depth_u, _F_slow_depth_v, _F_slow_wind_u, _F_slow_wind_v,
-                            _F_slow_drag_u, _F_slow_drag_v, _wind_tau_i_u, _wind_tau_j_v, _wind_r1_rho0, _wind_r1_hu, _wind_r1_hv, ordered=True)
+                        jax.debug.callback(
+                            _slow_final_override, _slow_incoming_u, _slow_incoming_v,
+                            _cor_u_sub, _cor_v_sub, state.u_mask.data, state.v_mask.data,
+                            F_slow_u, F_slow_v, ordered=True)
                     elif _slow_final_override is not None:
                         F_slow_u, F_slow_v = _slow_final_override
                     _nemo_ws_live_slow_forcing_producer = {

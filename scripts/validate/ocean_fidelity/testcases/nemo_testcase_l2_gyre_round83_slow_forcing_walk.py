@@ -98,14 +98,7 @@ ROUND140_OPERAND_REGISTRY = (
     "incoming_u", "incoming_v", "coriolis_u", "coriolis_v",
     "mask_u", "mask_v", "final_u", "final_v",
 )
-ROUND140_CALLBACK_FIELDS = (
-    *ROUND140_OPERAND_REGISTRY,
-    "rhs_u", "rhs_v", "thickness_u", "thickness_v",
-    "depth_u", "depth_v", "mask3_u", "mask3_v",
-    "depth_mean_u", "depth_mean_v", "post_wind_u", "post_wind_v",
-    "post_drag_u", "post_drag_v", "wind_tau_u", "wind_tau_v",
-    "wind_r1_rho0", "wind_r1_hu", "wind_r1_hv",
-)
+ROUND140_CALLBACK_FIELDS = ROUND140_OPERAND_REGISTRY
 ROUND140_RHS_RECORD = "oracle_developed_rhs_kt00001081.bin"
 ROUND140_RHS_MAGIC = "NEMO_L2_R140RHS"
 ROUND140_RHS_VERSION = 3
@@ -1037,6 +1030,9 @@ def measure_round140_developed(args) -> dict[str, object]:
 
 def measure_round140_rhs_developed(args) -> dict[str, object]:
     """Walk the developed slow forcing upstream through its 3-D RHS."""
+    raise RuntimeError(
+        "RETRACTED: materializing the upstream RHS operands moved the "
+        "returned production state; no developed-RHS comparison is valid")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
             "precision policy is not fp64/libm")
@@ -3335,9 +3331,6 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round140-rhs-record-only", action="store_true",
         help="admit the developed step-1081 three-dimensional RHS record")
-    round_group.add_argument(
-        "--round140-rhs-developed", action="store_true",
-        help="run the production step-1081 developed RHS operand split")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -3396,9 +3389,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         report = (
-            measure_round140_rhs_developed(args)
-            if args.round140_rhs_developed else
-            (measure_round140_rhs_record(args)
+            measure_round140_rhs_record(args)
             if args.round140_rhs_record_only else
             (measure_round140_developed(args)
             if args.round140_developed else
@@ -3408,15 +3399,14 @@ def main(argv=None) -> int:
             if args.round121_trajectory else
             (measure_round117(args)
             if (args.round117 or args.round118 or args.round119
-                or args.round120 or args.round121) else measure(args)))))))
+                or args.round120 or args.round121) else measure(args))))))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND140 RHS" if (
-                args.round140_rhs_record_only or args.round140_rhs_developed) else
+            "ROUND140 RHS" if args.round140_rhs_record_only else
             ("ROUND140 DEVELOPED" if args.round140_developed else
             ("ROUND139 RECORD" if args.round139_record_only else
             ("ROUND121" if args.round121 else
@@ -3445,12 +3435,6 @@ def main(argv=None) -> int:
             + report.get("record_sha256", "plant")
         )
         return 0 if report["status"] == "PASS" else 1
-    if args.round140_rhs_developed:
-        print(
-            "ROUND140 DEVELOPED RHS MEASURED: first="
-            + repr(report["first_non_bit_operand"])
-        )
-        return 0
     if args.round121_trajectory:
         print("ROUND121 W TRAJECTORY " + report["status"] + ": "
               + report["trajectory_kind"])
