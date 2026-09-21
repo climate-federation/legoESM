@@ -226,6 +226,13 @@ mtimes are 2026-09-04 17:35, after the A executable's 08:24 build time.  The
 gate correctly refuses to attribute that executable to the later source.
 Neither the external record nor the bar was edited to make it pass.
 
+The whole-file hashes in the dynamics table are the exact clean-tree artifacts
+from preregistration commit `dfa2026b40db`.  The later integration repair
+`ed601563ef37` adds the required producer-worktree object to those JSON reports,
+so a post-repair whole-file hash necessarily changes even when every scientific
+row is identical.  That metadata-only change is not presented as a new exact
+hash claim; the post-repair stamped A-grid rerun is the execution control.
+
 | Dynamics program | Recorded verdict | Merged-tree reproduction |
 |---|---|---|
 | `nemo_si3_oracle_gate.py` | rungs 3.1/3.2 `DEBT`, rung 3.3 `VERIFIED` | Same three verdicts. |
