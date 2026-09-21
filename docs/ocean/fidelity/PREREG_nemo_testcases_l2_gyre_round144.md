@@ -16,7 +16,7 @@ and association of that wind statement; it changes no production physics.
 ## P0 — compiled order and controls
 
 The admitted target writes the direct wind operands at
-`GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:241-247`, then evaluates
+`GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:241-246`, then evaluates
 the U and V additions at
 `GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:248-251`, with the written
 order `post_drag + ((r1_rho0 * stress) * live_inverse_depth)`. The record then

@@ -57,7 +57,7 @@ Langmuir requires its bottom/W operands and one iteration
 mesh ladders (`ocean_model_latlon_cgrid.py:5908-5915,5934-5941`); step-entry
 shear and its live face metric require carried velocity/`avm`, QCO geometry,
 and raw face metrics (`ocean_model_latlon_cgrid.py:6008-6099`); literal htau
-requires native T-point latitude (`ocean_model_latlon_cgrid.py:6902-6911`);
+requires native T-point latitude (`ocean_model_latlon_cgrid.py:6926-6911`);
 carried slope N2 and literal PRD require the fixed `nemo_bn2`/S-EOS settings
 (`dino.py:3206-3226`). The etau exponential, raw MXL association, final ZDF
 recurrence, and remaining three slope arithmetic selectors add no
