@@ -329,6 +329,10 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R139SLOW/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "GYRE_OMIP_L2_P3_SM_R139SLOW/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R139SLOW/BLD/ppsrc/nemo/stp2d.f90"),
+    # Round 141 consumes the admitted Round-140 completed three-dimensional
+    # RHS record and binds its program order to that exact compiled writer.
+    "GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -2895,6 +2899,19 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R139SLOW/BLD/ppsrc/nemo/stp2d.f90:297-298': [
         'IF( ln_dynspg_ts )',
         'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 2],
+    # --- round 141: admitted completed 3-D RHS and its compiled consumers ---
+    'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:142-169': [
+        '!*  hydrostatic pressure gradient (HPG))  *!',
+        'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 28],
+    'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:182-192': [
+        ('IF( lwp .AND. kt == 1081 ) THEN', 1),
+        'WRITE(r140_slow_unit) e3u_3d, uu(:,:,:,Krhs), umask, e3v_3d, vv(:,:,:,Krhs), vmask', 11],
+    'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:210-228': [
+        '!*  vertical averaging  *!',
+        'WRITE(r140_slow_unit) Ue_rhs, Ve_rhs, r1_hu_0, r1_hv_0', 19],
+    'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:236-260': [
+        '!* baroclinic drag forcing *!',
+        "WRITE(numout,*) 'ROUND140_DEVELOPED_RHS_DUMP '", 25],
 }
 
 
