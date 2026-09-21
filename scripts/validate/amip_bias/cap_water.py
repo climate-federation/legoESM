@@ -348,8 +348,9 @@ def inflow_humidity(q_model, q_ref, u_edge, dp, mesh, cap):
     (w = inward u * dp * dv / g > 0), restricted to edge-levels where the
     reference is defined; the extra gross import obtained by replacing only q
     with the reference on the INFLOW [kg/s]; the signed NET change when q is
-    replaced on inflow AND outflow [kg/s]; and the inflow mass fraction where
-    the reference is defined.  Both humidities are the centred two-cell edge
+    replaced on inflow AND outflow [kg/s]; and the inflow and outflow mass
+    fractions where the reference is defined (elsewhere the model humidity is
+    RETAINED, so the replacement is partial by those fractions).  Both humidities are the centred two-cell edge
     average (the flux reconstruction), i.e. the boundary humidity, not the
     upwind cell's.  A fixed-flow sensitivity, not a budget partition."""
     import jax.numpy as jnp
@@ -366,10 +367,11 @@ def inflow_humidity(q_model, q_ref, u_edge, dp, mesh, cap):
     if not use.any() or not (w > 0).any():
         raise SystemExit("FATAL: no inflow edge-level with a defined reference humidity")
     covered = float(w[use].sum() / w[w > 0].sum())
+    out_cov = float(w[(w < 0) & fin].sum() / w[w < 0].sum()) if (w < 0).any() else 1.0
     ww = w[use]
     both = (w != 0) & fin
     return float((qm[use] * ww).sum() / ww.sum()), float((qr[use] * ww).sum() / ww.sum()), \
-        float(((qr[use] - qm[use]) * ww).sum()), float(((qr[both] - qm[both]) * w[both]).sum()), covered
+        float(((qr[use] - qm[use]) * ww).sum()), float(((qr[both] - qm[both]) * w[both]).sum()), covered, out_cov
 
 
 def transport(args):
@@ -407,24 +409,35 @@ def transport(args):
             if key not in era5q:
                 era5q[key] = era5_q_columns(st["month"], lat, lon)
             qref = era5_q_on_levels(*era5q[key], st["p_full"])
-            qm, qr, extra, netchg, cov = inflow_humidity(st["trc_q_v"], qref, st["u_edge"], st["dp"], mesh, cap)
-            line += f" {qm*1e3:11.3f} {qr*1e3:10.3f} {qm/qr:6.2f} {extra*to_mm:9.3f} {netchg*to_mm:8.3f} {cov:6.2f}"
+            qm, qr, extra, netchg, cov, ocov = inflow_humidity(st["trc_q_v"], qref, st["u_edge"], st["dp"], mesh, cap)
+            line += f" {qm*1e3:11.3f} {qr*1e3:10.3f} {qm/qr:6.2f} {extra*to_mm:9.3f} {netchg*to_mm:8.3f} {cov:6.2f}/{ocov:4.2f}"
             e_acc = era5acc.setdefault(run, {"extra": [], "netchg": []})
             e_acc["extra"].append(extra * to_mm); e_acc["netchg"].append(netchg * to_mm)
         print(line)
         a = acc.setdefault(run, {"n": 0, "net": 0.0, "nets": [], "q": 0.0, "u": 0.0, "dp": 0.0, "mesh": mesh, "cap": cap, "A": A})
         a["n"] += 1; a["net"] += net * to_mm; a["nets"].append(net * to_mm)
+        a.setdefault("snaps", []).append((st["trc_q_v"], st["u_edge"], st["dp"]))
+        a.setdefault("days", []).append(float(day))
         a["q"] = a["q"] + st["trc_q_v"]; a["u"] = a["u"] + st["u_edge"]; a["dp"] = a["dp"] + st["dp"]
     for run, a in acc.items():
         n = a["n"]
         mean_net = cap_moisture_transport(a["q"] / n, a["u"] / n, a["dp"] / n, a["mesh"], a["cap"])[2] * 86400.0 / a["A"]
         nets = a["nets"]
+        if n > 1 and not np.allclose(np.diff(a["days"]), a["days"][1] - a["days"][0]):
+            raise SystemExit(f"FATAL: {run}: snapshots not equally spaced in time ({a['days']})")
         trap = (0.5 * (nets[0] + nets[-1]) + sum(nets[1:-1])) / (n - 1) if n > 1 else nets[0]
+        # humidity-weather covariance: each snapshot's winds carrying the run's TIME-MEAN humidity
+        q_mean = a["q"] / n
+        nets_qmean = [cap_moisture_transport(q_mean, u_s, dp_s, a["mesh"], a["cap"])[2] * 86400.0 / a["A"]
+                      for _q, u_s, dp_s in a["snaps"]]
+        tz = lambda v: (0.5 * (v[0] + v[-1]) + sum(v[1:-1])) / (len(v) - 1) if len(v) > 1 else v[0]
+        C = tz(nets) - tz(nets_qmean)
         print(f"{run:>14s}: mean of {n} snapshot products {a['net']/n:+.3f} mm/day (trapezoid over the span {trap:+.3f}); "
               f"product of time-mean fields {mean_net:+.3f}; remainder (transients + dp covariance) {a['net']/n - mean_net:+.3f}")
+        print(f"{'':>14s}  snapshot winds carrying the run's time-mean humidity, trapezoid {tz(nets_qmean):+.3f}; "
+              f"humidity-weather covariance C = original - that = {C:+.3f} mm/day")
         if run in era5acc:
             e = era5acc[run]
-            tz = lambda v: (0.5 * (v[0] + v[-1]) + sum(v[1:-1])) / (len(v) - 1) if len(v) > 1 else v[0]
             print(f"{'':>14s}  ERA5-humidity replacement, trapezoid: extra gross inflow {tz(e['extra']):+.3f} mm/day; "
                   f"signed NET change (inflow and outflow replaced) {tz(e['netchg']):+.3f}")
     return 0
