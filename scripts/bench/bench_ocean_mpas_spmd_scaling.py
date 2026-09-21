@@ -55,7 +55,7 @@ def weak_level_for(cells_per_device: int, n_devices: int, levels=range(2, 11)) -
     return best
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--n-devices", type=int, required=True)
     p.add_argument("--subdivision", type=int, default=6)
@@ -95,11 +95,31 @@ def main() -> int:
     p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
                    default="standard")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
-                   help="distributed PCG iteration count (config default 60); "
+                   help="distributed PCG iteration count (config default 20); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--out", type=str, default="ocean_mpas_spmd_scaling.jsonl")
-    args = p.parse_args()
+    return p
+
+
+def apply_pcg_overrides(config, args):
+    """Config with the PCG flags applied; a flag left unset (None) keeps the
+    MPASOceanConfig default, so a ladder arm without flags measures the
+    production solver (tests/bench/test_bench_ocean_mpas_spmd_cli.py)."""
+    if args.pcg_fixed_iters is not None:
+        config = config._replace(
+            barotropic_implicit_pcg_fixed_iters=int(args.pcg_fixed_iters))
+    if args.pcg_precond is not None:
+        config = config._replace(
+            barotropic_implicit_pcg_precond=str(args.pcg_precond))
+    if args.pcg_poly_sweeps is not None:
+        config = config._replace(
+            barotropic_implicit_pcg_poly_sweeps=int(args.pcg_poly_sweeps))
+    return config
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     import jax
 
@@ -141,15 +161,7 @@ def main() -> int:
         args.nlev, barotropic_solver="implicit_cn",
         pcg_variant=args.pcg_variant,
         eta_floor_clamp_iters=args.eta_clamp_iters)
-    if args.pcg_fixed_iters is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_fixed_iters=int(args.pcg_fixed_iters))
-    if args.pcg_precond is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_precond=str(args.pcg_precond))
-    if args.pcg_poly_sweeps is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_poly_sweeps=int(args.pcg_poly_sweeps))
+    config = apply_pcg_overrides(config, args)
     mesh = create_voronoi_mesh(subdivision_level=subdivision,
                                lloyd_iterations=args.lloyd)
     n_cells_orig = int(mesh.nCells)
