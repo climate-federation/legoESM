@@ -90,7 +90,7 @@ def bucket_key(day):
     differently from the sums it is subtracting."""
     doy, _ = day_to_calendar(float(day))
     return int(float(day) // 365.0), MonthlyAccumulator.day_to_month(doy)
-MIN_SPATIAL_CORR = 0.9
+MIN_SPATIAL_CORR = 0.8   # user 2026-09-21: 0.88 on a 5-vs-10-day cloud-cover window; a grid mismatch gives ~0
 
 
 def sidecar_sums(path):
