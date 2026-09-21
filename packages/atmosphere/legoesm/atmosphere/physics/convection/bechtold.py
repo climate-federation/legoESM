@@ -2057,13 +2057,14 @@ def distribute_rain_vapor_sink(dq_r_formation, q_v, dq_v_dt, dp_full, dt, scheme
     # floor overflows the float32 backward pass (NaN gradients for zero-rain
     # and exhausted-capacity columns, codex-confirmed), and 0*NaN from an
     # unselected 0/0 branch poisons the gradient the same way.
-    has_slack = slack_col > 0.0
+    tiny = jnp.finfo(q_v.dtype).tiny          # smallest normal: no subnormal 1/x**2
+    has_slack = slack_col > tiny
     add = jnp.where(has_slack, jnp.minimum(excess_col, slack_col) * slack
                     / jnp.where(has_slack, slack_col, 1.0), 0.0)
     sink = take + add
     rain_total = jnp.sum(want * dp_full, axis=-1) / g
     realized = jnp.sum(sink * dp_full, axis=-1) / g
-    has_rain = rain_total > 0.0
+    has_rain = rain_total > tiny
     scale = jnp.where(has_rain, realized / jnp.where(has_rain, rain_total, 1.0), 1.0)
     return sink, scale
 
