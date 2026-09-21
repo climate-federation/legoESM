@@ -2075,6 +2075,10 @@ def measure_round144_wind_operands(args) -> dict[str, object]:
         family for family in ("density", "stress", "inverse_depth", "all")
         if all(rows[f"{family}_incoming_{face}"]["bit_exact"]
                for face in ("u", "v"))), None)
+    if (args.round145_wind_routing
+            and all(rows[f"live_incoming_{face}"]["bit_exact"]
+                    for face in ("u", "v"))):
+        first_closing_family = "live"
 
     if args.plant == "wind-stress-ulp":
         planted_u, location = _round144_stress_ulp(fields, active2["u"])
