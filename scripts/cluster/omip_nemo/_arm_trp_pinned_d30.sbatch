@@ -58,6 +58,12 @@ export JAX_ENABLE_X64=1
 CMD=$(cat /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_arm_trp_pinned_d30.txt)
 echo "CMD: $PY scripts/run/run_omip_core2.py $CMD"
 $PY -u scripts/run/run_omip_core2.py $CMD
-echo "=== card exit: $? ==="
+rc=$?
+echo "=== card exit: $rc ==="
 ls /burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_pinned_d30/*.npz 2>/dev/null
 echo DONE
+# The first version of this card ended on `echo DONE`, so SLURM recorded
+# COMPLETED for a run that had died of GPU out-of-memory at day 0. A job's
+# exit status is the LAST command's, and a status that cannot fail is not a
+# status.
+exit $rc
