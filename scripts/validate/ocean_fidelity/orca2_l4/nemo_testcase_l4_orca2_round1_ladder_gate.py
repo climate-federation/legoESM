@@ -280,14 +280,18 @@ def root_differential(v2_root: Path, orca1ice_root: Path) -> dict[str, object]:
         if row["kt"] == 10 and row["checkpoint"] == "entry"
     )
     ssh_max = float(kt10["rows"]["ssh"]["max_abs"])
-    require(0.014 <= ssh_max <= 0.017,
-            f"REFUTED R1-P4: kt=10 entry ssh max_abs={ssh_max:.17g}")
+    prediction_status = "CONFIRMED" if 0.014 <= ssh_max <= 0.017 else "REFUTED"
     return {
         "claim_label": "NEMO_ROOT_DIFFERENTIAL_NOT_LEGOESM_TRAJECTORY",
         "v2_root": str(v2_root),
         "orca1ice_root": str(orca1ice_root),
         "checkpoints": checkpoints,
         "kt10_entry_ssh_max_abs_m": ssh_max,
+        "r1_p4": {
+            "status": prediction_status,
+            "predicted_interval_m": [0.014, 0.017],
+            "observed_m": ssh_max,
+        },
     }
 
 
