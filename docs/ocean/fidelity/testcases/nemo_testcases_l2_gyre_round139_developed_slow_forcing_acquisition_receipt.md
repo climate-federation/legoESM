@@ -134,8 +134,8 @@ The focused CPU/x64 invocation covered the inherited external-record parser,
 the extended Round-83 slow-forcing walk and all new Round-139 parser/replay
 controls, every receipt-citation control, and the full fidelity time-level
 unit file. Its exact summary is `66 passed in 2.54s`.
-The same focused set was rerun from clean receipt commit `a1d5153ac` and
-reported `66 passed in 2.45s`.
+The same focused set was rerun from a clean receipt tree and reported
+`66 passed in 2.45s`.
 
 Evidence digests before the final post-receipt citation rerun:
 
