@@ -2912,6 +2912,15 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:236-260': [
         '!* baroclinic drag forcing *!',
         "WRITE(numout,*) 'ROUND140_DEVELOPED_RHS_DUMP '", 25],
+    'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:236-239': [
+        '!* baroclinic drag forcing *!',
+        'WRITE(r140_slow_unit) Ue_rhs, Ve_rhs, CdU_u, CdU_v', 4],
+    'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:241-260': [
+        '!* wind forcing *!',
+        "WRITE(numout,*) 'ROUND140_DEVELOPED_RHS_DUMP '", 20],
+    'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:249-250': [
+        'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj)',
+        'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj)', 2],
 }
 
 
