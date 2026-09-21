@@ -303,7 +303,8 @@ def _compare_overlap(daily_path: Path, monthly_path: Path) -> dict:
 
 
 def audit_record(daily_root: Path, monthly_root: Path,
-                 ready_stamp: Path | None = None) -> dict:
+                 ready_stamp: Path | None = None,
+                 worktree: dict | None = None) -> dict:
     records, ignored = inventory(daily_root)
     observed_steps = sorted(records)
     missing_steps = sorted(set(REQUIRED_STEPS) - set(observed_steps))
@@ -382,6 +383,7 @@ def audit_record(daily_root: Path, monthly_root: Path,
     last_step = observed_steps[-1] if observed_steps else None
     return {
         "format": "nemo-testcase-l2-gyre-round131-daily-record-audit-v1",
+        "worktree": worktree,
         "status": "ADMITTED" if admitted else "STOPPED_FOR_RECORD",
         "admitted": admitted,
         "daily_root": str(daily_root),
@@ -482,7 +484,7 @@ def main(argv=None) -> int:
 
     stamp = worktree_stamp(args.expect_commit)
     report = audit_record(args.daily_root, args.monthly_root,
-                          ready_stamp=args.ready_stamp)
+                          ready_stamp=args.ready_stamp, worktree=stamp)
     report["tool"] = stamp
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
