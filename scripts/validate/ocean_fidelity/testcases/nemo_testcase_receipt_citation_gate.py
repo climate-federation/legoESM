@@ -2891,7 +2891,7 @@ CITATION_MAP = {
         ('END SUBROUTINE dyn_cor_2D', 2), 24],
     'GYRE_OMIP_L2_P3_SM_R139SLOW/BLD/ppsrc/nemo/stp2d.f90:139-228': [
         '!*  hydrostatic pressure gradient (HPG))  *!',
-        "WRITE(l2_slow_unit) Ue_rhs, Ve_rhs", 90],
+        ("WRITE(l2_slow_unit) Ue_rhs, Ve_rhs", 3), 90],
     'GYRE_OMIP_L2_P3_SM_R139SLOW/BLD/ppsrc/nemo/stp2d.f90:297-298': [
         'IF( ln_dynspg_ts )',
         'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 2],
