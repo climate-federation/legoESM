@@ -771,14 +771,14 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             # (C24 kt=2 pad=5 n_split=8; gate jobs 9910440/1, probe
             # 9912744; forced refresh before OR after the step confines
             # it, jobs 9912821/2).  No-op on the six-face lane.
+            # One tracer per key (each (nb, W, W, km), the layout pt already
+            # relies on) in ONE firing -- NOT km*nq merged into the trailing
+            # axis, which can collide with a horizontal extent and trip the
+            # layout classifier (codex: nq=4, km=5 at C24 gives 20 = n_w+1).
             _wc = getattr(getattr(ctx, "tab", None), "window_comm", None)
             if _wc is not None:
-                _nb, _nq, _m0, _m1, _kk = _q_in.shape
-                _flat = jnp.moveaxis(_q_in, 1, -1).reshape(_nb, _m0, _m1,
-                                                          _kk * _nq)
-                _flat = _wc.refresh({"q": _flat})["q"]
-                _q_in = jnp.moveaxis(
-                    _flat.reshape(_nb, _m0, _m1, _kk, _nq), -1, 1)
+                _ref = _wc.refresh({f"q{i}": _q_in[:, i] for i in range(nq)})
+                _q_in = jnp.stack([_ref[f"q{i}"] for i in range(nq)], axis=1)
             _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1_delp, ac["flux_cap"],
                                        km=km, nq=nq, hord_tr=hord_tr,
                                        dt=mdt, q_split=tracer_q_split,
