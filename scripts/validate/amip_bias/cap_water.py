@@ -28,6 +28,8 @@ only when that index is the identity.
 Usage:
   cap_water.py profile <run>:<day> [...] [--lat-lo 75]
   cap_water.py loop    <run>:<day> [...]
+  cap_water.py transport <run>:<day> [...] [--bins --mass --era5-q]
+  cap_water.py era5 --era5-dir DIR --dates 1979-01-07,1979-01-16   (same bins from ERA5 daily analyses)
 """
 from __future__ import annotations
 
@@ -381,9 +383,9 @@ SECTORS = (("Atl 330-30", 330.0), ("Bar 30-90", 30.0), ("Sib 90-150", 90.0), ("P
 
 def cap_transport_bins(q, u_edge, dp, p_full, mesh, cap, q_ref=None):
     """Per (layer, sector) gross inflow, gross outflow and net transport across the
-    cap boundary [kg/s], and the signed net change from replacing q by ``q_ref``
-    where it is defined (0 where not); bins recover the totals of
-    ``cap_moisture_transport``.  Layers by the edge-averaged level pressure,
+    cap boundary [kg/s], the signed net change from replacing q by ``q_ref``
+    where it is defined (0 where not), and that change over the inflowing
+    elements alone; bins recover the totals of ``cap_moisture_transport``.  Layers by the edge-averaged level pressure,
     sectors by the edge longitude."""
     import jax.numpy as jnp
     from legoesm.core.operators_voronoi import cell_to_edge_avg_3d
@@ -401,18 +403,200 @@ def cap_transport_bins(q, u_edge, dp, p_full, mesh, cap, q_ref=None):
         chg[fin] = (qr[fin] - qm[fin]) * w[fin]
     p_edge = np.asarray(cell_to_edge_avg_3d(jnp.asarray(p_full), mesh))
     layer = np.digitize(p_edge, LAYER_BOUNDS_PA)                      # 0 above 600, 1 600-800, 2 below 800
-    lon = np.degrees(np.asarray(mesh.lonEdge)) % 360.0
+    sector = sector_index(np.degrees(np.asarray(mesh.lonEdge)))
+    return bin_sums(F, chg, layer, sector[:, None] * np.ones_like(layer), orient[:, None] != 0, air_in=w > 0)
+
+
+def sector_index(lon_deg):
+    """Index into ``SECTORS`` of each longitude [deg, any range]."""
+    lon = np.asarray(lon_deg) % 360.0
     sector = np.full(lon.shape, -1)
     for k, (_, lo) in enumerate(SECTORS):
         sector[((lon - lo) % 360.0) < 60.0] = k
     assert (sector >= 0).all()
-    out = np.zeros((3, len(SECTORS), 4))
+    return sector
+
+
+def bin_sums(F, chg, layer, sector, active, air_in=None):
+    """(3 layers, len(SECTORS), 5): gross inflow, gross outflow, net, the summed
+    ``chg`` of the ``active`` elements of ``F`` in each (layer, sector) bin, and
+    that sum over the elements whose AIR enters the cap (``air_in``, the sign of
+    the mass transport; defaults to ``F > 0``, which differs where q is 0)."""
+    if air_in is None:
+        air_in = F > 0
+    out = np.zeros((3, len(SECTORS), 5))
     for li in range(3):
         for si in range(len(SECTORS)):
-            m = (layer == li) & (sector[:, None] == si) & (orient[:, None] != 0)
-            Fm, cm = F[m], chg[m]
-            out[li, si] = (Fm[Fm > 0].sum(), Fm[Fm < 0].sum(), Fm.sum(), cm.sum())
+            m = (layer == li) & (sector == si) & active
+            Fm, cm, am = F[m], chg[m], air_in[m]
+            out[li, si] = (Fm[Fm > 0].sum(), Fm[Fm < 0].sum(), Fm.sum(), cm.sum(), cm[am].sum())
     return out
+
+
+def era5_boundary_transport(v, q, ps, lon_deg, plev, lat_b):
+    """Moisture transport across the latitude circle ``lat_b`` [deg N] from ERA5
+    pressure-level fields already interpolated to that circle: ``v`` and ``q``
+    (nlev, nlon) [m/s northward; kg per kg of the air that ``dp/g`` weighs,
+    i.e. SPECIFIC humidity for ERA5's total-air pressure], ``ps`` (nlon) [Pa],
+    ``plev`` (nlev) [Pa] increasing downward.  Returns the (layer, sector)
+    bins [kg/s] as ``bin_sums`` (chg column = 0), + = northward = into the cap.
+
+    Same construction as the model's ``cap_transport_bins``: the transport of
+    each (level, longitude) element is v * q * dp / g * (R cos(lat) dlon) and
+    the in/out split is made per element before any sum.  ``dp`` is the
+    level's pressure slab between the arithmetic mid-points to its
+    neighbours; the top slab reaches up to plev[0] minus half the first
+    spacing (floored at 0) and the LOWEST level's slab reaches down to the
+    surface pressure, so the column is complete from ~0 to ps.  Every slab
+    is cut at ps: a level whose centre is below ground keeps only the part
+    of its slab above the surface (ERA5's below-ground values are
+    extrapolations; that retained part is the price of a complete column).
+    Layers by the level pressure, as the model uses the edge-level pressure:
+    a slab straddling 600 or 800 hPa is counted whole on the side its centre
+    lies (totals are exact, per-layer rows carry a half-slab caveat on both
+    sides of the comparison).
+    """
+    from legoesm import constants
+    v, q, ps, plev = (np.asarray(a, dtype=np.float64) for a in (v, q, ps, plev))
+    if not (np.diff(plev) > 0).all() or plev[-1] < 5000.0:
+        raise SystemExit("FATAL: ERA5 plev must increase downward and be in Pa")
+    for name, a in (("v", v), ("q", q), ("ps", ps)):
+        if not np.isfinite(a).all():
+            raise SystemExit(f"FATAL: non-finite ERA5 {name} on the boundary circle")
+    mid = 0.5 * (plev[1:] + plev[:-1])
+    p_hi = np.concatenate([[max(plev[0] - 0.5 * (plev[1] - plev[0]), 0.0)], mid])
+    p_lo = np.concatenate([mid, [np.inf]])                                  # lowest slab: down to ps
+    dp = np.clip(np.minimum(p_lo[:, None], ps[None, :]) - p_hi[:, None], 0.0, None)   # (nlev, nlon)
+    lon = np.asarray(lon_deg, dtype=np.float64) % 360.0
+    dlon = np.diff(np.concatenate([lon, [lon[0] + 360.0]]))
+    if not np.allclose(dlon, dlon[0]):
+        raise SystemExit("FATAL: ERA5 longitudes not equally spaced")
+    w = dp / constants.g * constants.R_earth * np.cos(np.radians(lat_b)) * np.radians(dlon)[None, :]
+    F = v * q * w
+    layer = np.digitize(plev, LAYER_BOUNDS_PA)[:, None] * np.ones_like(F, dtype=int)
+    sector = sector_index(lon)[None, :] * np.ones_like(F, dtype=int)
+    return bin_sums(F, np.zeros_like(F), layer, sector, np.ones(F.shape, bool))
+
+
+LAYER_NAMES = ("above 600", "600-800 hPa", "below 800")
+
+
+def print_bin_tables(tables, with_chg):
+    """The layer x sector tables of ``bin_sums`` output: in / out / net per bin,
+    row and column totals; ``tables`` = [(label, B, units), ...]."""
+    for label, B, units in tables:
+        print(f"{'':>14s}  layer x sector, {label} [{units}]: in / out / net"
+              + (" / ERA5-q net change / ERA5-q inflow change" if with_chg else ""))
+        print(f"{'':>26s}" + "".join(f"{nm:>26s}" for nm, _ in SECTORS) + f"{'ALL':>26s}")
+        for li in range(3):
+            row = "".join(f"  {B[li, si, 0]:5.3f}/{B[li, si, 1]:6.3f}/{B[li, si, 2]:6.3f}"
+                          + (f"/{B[li, si, 3]:6.3f}/{B[li, si, 4]:6.3f}" if with_chg else "      ") for si in range(len(SECTORS)))
+            T = B[li].sum(axis=0)
+            row += f"  {T[0]:5.3f}/{T[1]:6.3f}/{T[2]:6.3f}" + (f"/{T[3]:6.3f}/{T[4]:6.3f}" if with_chg else "")
+            print(f"{'':>14s}{LAYER_NAMES[li]:>12s}{row}")
+        T = B.sum(axis=(0, 1)); Ts = B.sum(axis=0)
+        row = "".join(f"  {Ts[si, 0]:5.3f}/{Ts[si, 1]:6.3f}/{Ts[si, 2]:6.3f}"
+                      + (f"/{Ts[si, 3]:6.3f}/{Ts[si, 4]:6.3f}" if with_chg else "      ") for si in range(len(SECTORS)))
+        print(f"{'':>14s}{'ALL':>12s}{row}  {T[0]:5.3f}/{T[1]:6.3f}/{T[2]:6.3f}" + (f"/{T[3]:6.3f}/{T[4]:6.3f}" if with_chg else ""))
+
+
+def trapezoid(v):
+    """Trapezoid time mean of equally spaced samples (one sample = itself)."""
+    return (0.5 * (v[0] + v[-1]) + sum(v[1:-1])) / (len(v) - 1) if len(v) > 1 else v[0]
+
+
+def era5_daily(path, var):
+    """One variable of a cdo-converted ERA5 daily file with a datetime time axis
+    (cdo leaves the pressure-level files' axis as the float 'YYYYMMDD.f' it
+    read from GRIB; the surface file decodes)."""
+    import pandas as pd
+    import xarray as xr
+    d = xr.open_dataset(path)[var]
+    if not np.issubdtype(d.time.dtype, np.datetime64):
+        t = np.asarray(d.time, dtype=np.float64)
+        days = pd.to_datetime([f"{int(x):08d}" for x in t], format="%Y%m%d")
+        d = d.assign_coords(time=days + pd.to_timedelta(np.round((t - np.floor(t)) * 86400.0), unit="s"))
+    if not (np.diff(d.time.values).astype("timedelta64[s]") > np.timedelta64(0, "s")).all():
+        raise SystemExit(f"FATAL: {path}: time axis not increasing")
+    return d
+
+
+def era5_transport(args):
+    """The same layer x sector boundary transport from ERA5 pressure-level
+    analyses (the DKRZ pool extracted to netCDF: v = var132, specific humidity =
+    var133, surface pressure = var134; file stems from ``--stems``), for the
+    samples in ``--dates a,b`` inclusive: per sample and the plain mean over the
+    window, moisture [mm/day over the cap] and air mass [hPa/day of cap-mean
+    surface pressure].  The per-sample products are averaged (in/out split per
+    sample and element), so with the pool's hourly files the mean carries the
+    sub-daily v'q' covariance AND the sub-daily sign reversals; the DAILY-MEAN
+    files (stamped 11:30) lose both (products of daily means, split after
+    averaging) - measured Jan 7-16 1979: gross in 1.094 hourly vs 1.004 daily.  A plain
+    mean over the window: for daily-mean files each sample already represents
+    its day; hourly analyses are instantaneous samples, and ``--hour H`` keeps
+    only those at hour H (00 UTC = the model's checkpoint protocol; the mean
+    of 10 daily 00 UTC samples vs the 240-hour mean measures the snapshot
+    alias).  The model side uses the trapezoid of its instantaneous snapshots."""
+    from legoesm import constants
+    if len(args.dates) != 2:
+        raise SystemExit(f"FATAL: --dates needs first,last; got {args.dates}")
+    stems = dict(kv.split("=") for kv in args.stems.split(","))
+    d = {k: era5_daily(f"{args.era5_dir}/{stems[k]}.nc", v).sel(time=slice(*args.dates))
+         for k, v in (("v", "var132"), ("q", "var133"), ("ps", "var134"))}
+    n = d["v"].time.size
+    if n == 0 or any(x.time.size != n for x in d.values()):
+        raise SystemExit(f"FATAL: ERA5 dates {args.dates}: {[int(x.time.size) for x in d.values()]} samples")
+    for k in ("q", "ps"):
+        if not np.array_equal(d[k].time.values, d["v"].time.values) or not np.array_equal(d[k].lon.values, d["v"].lon.values):
+            raise SystemExit(f"FATAL: ERA5 {k}: time/lon axis differs from v")
+    if not np.array_equal(d["q"].plev.values, d["v"].plev.values):
+        raise SystemExit("FATAL: ERA5 q: plev axis differs from v")
+    if args.hour is not None:
+        d = {k: x.sel(time=x.time.dt.hour == args.hour) for k, x in d.items()}
+        n = d["v"].time.size
+        if n == 0:
+            raise SystemExit(f"FATAL: no ERA5 samples at hour {args.hour}")
+    step = np.diff(d["v"].time.values).astype("timedelta64[s]")
+    if n > 1 and not (step == step[0]).all():
+        raise SystemExit(f"FATAL: ERA5 samples not equally spaced: {np.unique(step)}")
+    for k in d:
+        d[k] = d[k].sortby("lat").interp(lat=args.lat).transpose("time", ..., "lon")
+    plev = np.asarray(d["v"].plev, dtype=np.float64)
+    lon = np.asarray(d["v"].lon, dtype=np.float64)
+    A = 2.0 * np.pi * constants.R_earth ** 2 * (1.0 - np.sin(np.radians(args.lat)))
+    to_mm, to_hpa = 86400.0 / A, constants.g / A * 86400.0 / 100.0
+    import subprocess
+    sha = subprocess.run(["git", "-C", str(_VAL), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    if subprocess.run(["git", "-C", str(_VAL), "status", "--porcelain", "--", str(pathlib.Path(__file__).name)],
+                      capture_output=True, text=True).stdout.strip():
+        sha += "+dirty"
+    print(f"ERA5 moisture transport across {args.lat:g}N [mm/day over the cap area]; {n} samples "
+          f"{str(d['v'].time.values[0])[:16]}..{str(d['v'].time.values[-1])[:16]} step {step[0] if n > 1 else 'n/a'}; "
+          f"files {args.era5_dir}/{{{args.stems}}}; plev {plev[0]/100:g}-{plev[-1]/100:g} hPa ({plev.size}); "
+          f"cap_water @ {sha or 'unknown'}")
+    print(f"{'time':>16s} {'in':>8s} {'out':>8s} {'net':>8s} {'mass net':>9s}")
+    bins, mass = [], []
+    for t in range(n):
+        q = np.asarray(d["q"].isel(time=t), dtype=np.float64)                 # specific humidity on total-air dp
+        v, ps = np.asarray(d["v"].isel(time=t)), np.asarray(d["ps"].isel(time=t))
+        b = era5_boundary_transport(v, q, ps, lon, plev, args.lat) * to_mm
+        m = era5_boundary_transport(v, np.ones_like(q), ps, lon, plev, args.lat) * to_hpa
+        bins.append(b); mass.append(m)
+        T, M = b.sum(axis=(0, 1)), m.sum(axis=(0, 1))
+        if n <= 31:
+            print(f"{str(d['v'].time.values[t])[:16]:>16s} {T[0]:8.3f} {T[1]:8.3f} {T[2]:8.3f} {M[2]:9.1f}")
+    label = f"mean of {n} samples {args.dates[0]}..{args.dates[1]}"
+    B, M = np.mean(bins, axis=0), np.mean(mass, axis=0)
+    print(f"{'ERA5':>14s}: net import {label} {B.sum(axis=(0, 1))[2]:+.3f} mm/day (mass net {M.sum(axis=(0, 1))[2]:+.1f} hPa/day)")
+    print_bin_tables([(label, B, "mm/day over the cap"), (f"AIR MASS, {label}", M, "hPa/day of cap-mean p_s")], False)
+    if args.json:
+        json.dump({"dates": list(args.dates), "n": int(n), "lat": args.lat, "stems": args.stems, "cap_water": sha,
+                   "sectors": [nm for nm, _ in SECTORS], "layers": list(LAYER_NAMES),
+                   "moisture_mm_day": B.tolist(), "mass_hpa_day": M.tolist(),
+                   "times": [str(t)[:16] for t in d["v"].time.values],
+                   "samples_moisture_mm_day": np.asarray(bins).tolist(), "samples_mass_hpa_day": np.asarray(mass).tolist()},
+                  open(args.json, "w"))
+    return 0
 
 
 def transport(args):
@@ -478,12 +662,12 @@ def transport(args):
         nets = a["nets"]
         if n > 1 and not np.allclose(np.diff(a["days"]), a["days"][1] - a["days"][0]):
             raise SystemExit(f"FATAL: {run}: snapshots not equally spaced in time ({a['days']})")
-        trap = (0.5 * (nets[0] + nets[-1]) + sum(nets[1:-1])) / (n - 1) if n > 1 else nets[0]
+        trap = trapezoid(nets)
         # humidity-weather covariance: each snapshot's winds carrying the run's TIME-MEAN humidity
         q_mean = a["q"] / n
         nets_qmean = [cap_moisture_transport(q_mean, u_s, dp_s, a["mesh"], a["cap"])[2] * 86400.0 / a["A"]
                       for _q, u_s, dp_s in a["snaps"]]
-        tz = lambda v: (0.5 * (v[0] + v[-1]) + sum(v[1:-1])) / (len(v) - 1) if len(v) > 1 else v[0]
+        tz = trapezoid
         C = tz(nets) - tz(nets_qmean)
         print(f"{run:>14s}: mean of {n} snapshot products {a['net']/n:+.3f} mm/day (trapezoid over the span {trap:+.3f}); "
               f"product of time-mean fields {mean_net:+.3f}; remainder (transients + dp covariance) {a['net']/n - mean_net:+.3f}")
@@ -491,27 +675,13 @@ def transport(args):
               f"humidity-weather covariance C = original - that = {C:+.3f} mm/day")
         if args.bins:
             bins = a["bins"]
-            tzb = (0.5 * (bins[0] + bins[-1]) + sum(bins[1:-1])) / (n - 1) if n > 1 else bins[0]
-            names = ("above 600", "600-800 hPa", "below 800")
-            tables = [(f"trapezoid days {a['days'][0]:g}-{a['days'][-1]:g}", tzb), (f"day {a['days'][-1]:g} alone", bins[-1])]
+            tzb = trapezoid(bins)
+            tables = [(f"trapezoid days {a['days'][0]:g}-{a['days'][-1]:g}", tzb, "mm/day over the cap"),
+                      (f"day {a['days'][-1]:g} alone", bins[-1], "mm/day over the cap")]
             if args.mass:
-                mb = a["mass_bins"]
-                tables.append((f"AIR MASS [hPa/day of cap-mean p_s], trapezoid days {a['days'][0]:g}-{a['days'][-1]:g}",
-                               (0.5 * (mb[0] + mb[-1]) + sum(mb[1:-1])) / (n - 1) if n > 1 else mb[0]))
-            for label, B in tables:
-                print(f"{'':>14s}  layer x sector, {label} [mm/day over the cap]: in / out / net"
-                      + (" / ERA5-q net change" if args.era5_q else ""))
-                print(f"{'':>26s}" + "".join(f"{nm:>26s}" for nm, _ in SECTORS) + f"{'ALL':>26s}")
-                for li in range(3):
-                    row = "".join(f"  {B[li, si, 0]:5.3f}/{B[li, si, 1]:6.3f}/{B[li, si, 2]:6.3f}"
-                                  + (f"/{B[li, si, 3]:6.3f}" if args.era5_q else "      ") for si in range(len(SECTORS)))
-                    T = B[li].sum(axis=0)
-                    row += f"  {T[0]:5.3f}/{T[1]:6.3f}/{T[2]:6.3f}" + (f"/{T[3]:6.3f}" if args.era5_q else "")
-                    print(f"{'':>14s}{names[li]:>12s}{row}")
-                T = B.sum(axis=(0, 1)); Ts = B.sum(axis=0)
-                row = "".join(f"  {Ts[si, 0]:5.3f}/{Ts[si, 1]:6.3f}/{Ts[si, 2]:6.3f}"
-                              + (f"/{Ts[si, 3]:6.3f}" if args.era5_q else "      ") for si in range(len(SECTORS)))
-                print(f"{'':>14s}{'ALL':>12s}{row}  {T[0]:5.3f}/{T[1]:6.3f}/{T[2]:6.3f}" + (f"/{T[3]:6.3f}" if args.era5_q else ""))
+                tables.append((f"AIR MASS, trapezoid days {a['days'][0]:g}-{a['days'][-1]:g}", trapezoid(a["mass_bins"]),
+                               "hPa/day of cap-mean p_s"))
+            print_bin_tables(tables, args.era5_q)
         if run in era5acc:
             e = era5acc[run]
             print(f"{'':>14s}  ERA5-humidity replacement, trapezoid: extra gross inflow {tz(e['extra']):+.3f} mm/day; "
@@ -527,6 +697,13 @@ def main(argv=None) -> int:
     l = sub.add_parser("loop"); l.add_argument("specs", nargs="+"); l.set_defaults(fn=loop)
     t = sub.add_parser("transport"); t.add_argument("specs", nargs="+"); t.set_defaults(fn=transport)
     t.add_argument("--lat", type=float, default=72.5, help="cap boundary latitude [deg N]")
+    e = sub.add_parser("era5", help=era5_transport.__doc__.split("\n")[0]); e.set_defaults(fn=era5_transport)
+    e.add_argument("--era5-dir", required=True, help="directory with pl_132.nc, pl_133.nc, sf_134.nc")
+    e.add_argument("--dates", type=lambda x: tuple(x.split(",")), required=True, help="first,last date (inclusive)")
+    e.add_argument("--lat", type=float, default=72.5, help="cap boundary latitude [deg N]")
+    e.add_argument("--stems", default="v=pl_132,q=pl_133,ps=sf_134", help="file stems per variable (hourly: v=pl1h_132,...)")
+    e.add_argument("--json", default=None, help="also write the window-mean bins (layer x sector x in/out/net) to this file")
+    e.add_argument("--hour", type=int, default=None, help="keep only samples at this UTC hour (hourly files)")
     t.add_argument("--mass", action="store_true", help="with --bins: also the AIR-mass transport per bin (q = 1), "
                    "in hPa/day of cap-mean surface-pressure equivalent")
     t.add_argument("--bins", action="store_true", help="layer (600/800 hPa) x 60-degree longitude sector "

@@ -198,4 +198,125 @@ def test_cap_transport_bins_recover_the_totals():
     tot = b.sum(axis=(0, 1))
     assert tot[:3] == pytest.approx([gin, gout, net], rel=1e-6)   # one path sums in float32
     assert tot[3] == pytest.approx(cw.inflow_humidity(q, q_ref, u, dp, mesh, cap)[3], rel=1e-6)
-    assert b.shape == (3, 6, 4) and (b[:, :, 0] >= 0).all() and (b[:, :, 1] <= 0).all()
+    assert b.shape == (3, 6, 5) and (b[:, :, 0] >= 0).all() and (b[:, :, 1] <= 0).all()
+    assert np.abs(b[:, :, 4]).sum() > 0 and not np.allclose(b[:, :, 4], b[:, :, 3])   # inflow-only column is its own number
+
+
+def test_era5_boundary_transport_matches_the_analytic_uniform_flow():
+    """Uniform 1 m/s northward flow of unit mixing ratio through a 1000 hPa column
+    crosses the circle at the analytic rate; the surface cut-off, the in/out split
+    per element and the layer/sector binning are checked against hand values."""
+    import numpy as np
+    from legoesm import constants
+    plev = np.array([100.0, 500.0, 700.0, 850.0, 925.0, 1000.0]) * 100.0
+    nlon = 360
+    lon = np.arange(nlon) * (360.0 / nlon)
+    v = np.ones((plev.size, nlon)); q = np.ones_like(v); ps = np.full(nlon, 1000e2)
+    lat_b = 72.5
+    b = cw.era5_boundary_transport(v, q, ps, lon, plev, lat_b)
+    # the column reaches from 0 (top slab floored) to ps = 1000 hPa (the lowest slab extends to the surface)
+    expect = 1000e2 / constants.g * 2.0 * np.pi * constants.R_earth * np.cos(np.radians(lat_b))
+    assert b.sum(axis=(0, 1))[2] == pytest.approx(expect, rel=1e-12)
+    assert (b[:, :, 1] == 0).all() and b.sum(axis=(0, 1))[0] == pytest.approx(expect, rel=1e-12)
+    # layers by level pressure: 100/500 above 600, 700 in 600-800, 850/925/1000 below 800.
+    # Literal slab thicknesses [hPa] for plev 100/500/700/850/925/1000 with ps = 1000: top slab 0..300 (mid-point 300,
+    # floored at 0), then 300..600, 600..775, 775..887.5, 887.5..962.5, 962.5..1000 (lowest slab cut at ps).
+    SLAB_HPA = (300.0, 300.0, 175.0, 112.5, 75.0, 37.5)
+    assert sum(SLAB_HPA) == 1000.0
+    slab = lambda k: SLAB_HPA[k] * 100.0
+    per = 2.0 * np.pi * constants.R_earth * np.cos(np.radians(lat_b)) / constants.g
+    assert b[0].sum(axis=0)[2] == pytest.approx(per * (slab(0) + slab(1)), rel=1e-12)
+    assert b[1].sum(axis=0)[2] == pytest.approx(per * slab(2), rel=1e-12)
+    assert b[2].sum(axis=0)[2] == pytest.approx(per * (slab(3) + slab(4) + slab(5)), rel=1e-12)
+    # six equal sectors
+    assert b.sum(axis=0)[:, 2] == pytest.approx(np.full(6, expect / 6.0), rel=1e-12)
+    # a southward half: split per element, not after the sum
+    v2 = v.copy(); v2[:, : nlon // 2] = -1.0
+    b2 = cw.era5_boundary_transport(v2, q, ps, lon, plev, lat_b)
+    assert b2.sum(axis=(0, 1))[2] == pytest.approx(0.0, abs=1e-6 * expect)
+    assert b2.sum(axis=(0, 1))[0] == pytest.approx(expect / 2.0, rel=1e-12)
+    assert b2.sum(axis=(0, 1))[1] == pytest.approx(-expect / 2.0, rel=1e-12)
+    # a surface at 800 hPa removes everything below it
+    b3 = cw.era5_boundary_transport(v, q, np.full(nlon, 800e2), lon, plev, lat_b)
+    assert b3.sum(axis=(0, 1))[2] == pytest.approx(per * 800e2, rel=1e-12)
+    # a surface ABOVE the lowest level (1040 hPa > 1000): the column still reaches ps, not 1012.5
+    b4 = cw.era5_boundary_transport(v, q, np.full(nlon, 1040e2), lon, plev, lat_b)
+    assert b4.sum(axis=(0, 1))[2] == pytest.approx(per * 1040e2, rel=1e-12)
+    # opposing winds at different levels of ONE longitude both count (in aloft, out below)
+    v3 = v.copy(); v3[3:, :] = -1.0
+    b5 = cw.era5_boundary_transport(v3, q, ps, lon, plev, lat_b)
+    assert b5.sum(axis=(0, 1))[0] == pytest.approx(per * (slab(0) + slab(1) + slab(2)), rel=1e-12)
+    assert b5.sum(axis=(0, 1))[1] == pytest.approx(-per * (slab(3) + slab(4) + slab(5)), rel=1e-12)
+    with pytest.raises(SystemExit):
+        cw.era5_boundary_transport(v, q, ps, lon, plev[::-1], lat_b)
+    with pytest.raises(SystemExit):
+        cw.era5_boundary_transport(v, q, ps, lon, plev / 100.0, lat_b)      # hPa, not Pa
+    with pytest.raises(SystemExit):
+        cw.era5_boundary_transport(np.where(v > 2, v, np.nan), q, ps, lon, plev, lat_b)
+
+
+def test_era5_transport_end_to_end_on_a_synthetic_two_day_file(tmp_path, capsys):
+    """cdo-style files (float 'YYYYMMDD.f' time on the pressure-level files, decoded
+    time on the surface file): all three samples of an inclusive --dates window are
+    used, the window mean is the PLAIN mean (a trapezoid would weight the middle
+    sample twice), --hour keeps one sample, and a uniform northward flow reproduces
+    the analytic transport in the printed ALL column."""
+    import numpy as np, xarray as xr
+    from legoesm import constants
+    plev = np.array([100.0, 500.0, 700.0, 850.0, 925.0, 1000.0]) * 100.0
+    lat = np.array([74.0, 73.0, 72.0, 71.0]); lon = np.arange(0.0, 360.0, 10.0)
+    tf = np.array([19790107.47916667, 19790108.47916667, 19790109.47916667])
+    td = np.array(["1979-01-07T11:30", "1979-01-08T11:30", "1979-01-09T11:30"], dtype="datetime64[ns]")
+    v = np.zeros((3, plev.size, lat.size, lon.size)); v[0] = 1.0; v[1] = 7.0; v[2] = 1.0   # plain mean 3, trapezoid 4
+    xr.Dataset({"var132": (("time", "plev", "lat", "lon"), v)}, coords={"time": tf, "plev": plev, "lat": lat, "lon": lon}).to_netcdf(tmp_path / "pl_132.nc")
+    xr.Dataset({"var133": (("time", "plev", "lat", "lon"), np.full_like(v, 1e-3))}, coords={"time": tf, "plev": plev, "lat": lat, "lon": lon}).to_netcdf(tmp_path / "pl_133.nc")
+    xr.Dataset({"var134": (("time", "lat", "lon"), np.full((3, lat.size, lon.size), 1000e2))}, coords={"time": td, "lat": lat, "lon": lon}).to_netcdf(tmp_path / "sf_134.nc")
+    import json
+    args = type("A", (), dict(era5_dir=str(tmp_path), dates=("1979-01-07", "1979-01-09"), lat=72.5, stems="v=pl_132,q=pl_133,ps=sf_134",
+                              json=str(tmp_path / "bins.json"), hour=None))
+    assert cw.era5_transport(args) == 0
+    out = capsys.readouterr().out
+    assert "3 samples" in out
+    A = 2.0 * np.pi * constants.R_earth ** 2 * (1.0 - np.sin(np.radians(72.5)))
+    per_v = 1e-3 * 1000e2 / constants.g * 2.0 * np.pi * constants.R_earth * np.cos(np.radians(72.5)) * 86400.0 / A
+    line = [l for l in out.splitlines() if "net import" in l][0]
+    assert float(line.split("samples")[1].split()[1]) == pytest.approx(3.0 * per_v, abs=6e-4)   # plain mean; trapezoid would give 4
+    j = json.load(open(tmp_path / "bins.json"))
+    assert j["n"] == 3 and len(j["samples_moisture_mm_day"]) == 3 and len(j["times"]) == 3
+    assert np.asarray(j["samples_moisture_mm_day"])[1][:, :, 2].sum() == pytest.approx(7.0 * per_v, rel=1e-6)   # net column, middle sample
+    args.hour = 11
+    assert cw.era5_transport(args) == 0 and "3 samples" in capsys.readouterr().out
+    args.hour = 5
+    with pytest.raises(SystemExit):
+        cw.era5_transport(args)
+    with pytest.raises(SystemExit):
+        cw.era5_transport(type("B", (), dict(vars(args), dates=("1979-01-07",))))
+    # a proper hourly subset: 6-hourly files, --hour 12 keeps 3 of 12 samples (v = 7 at 12 UTC, 1 elsewhere) and the
+    # provenance step is the FILTERED cadence (86400 s), not the file's
+    th = np.array([f"1979-01-0{d}T{h:02d}:00" for d in (7, 8, 9) for h in (0, 6, 12, 18)], dtype="datetime64[ns]")
+    vh = np.ones((12, plev.size, lat.size, lon.size)); vh[2::4] = 7.0
+    for name, var, arr in (("pl_132", "var132", vh), ("pl_133", "var133", np.full_like(vh, 1e-3))):
+        xr.Dataset({var: (("time", "plev", "lat", "lon"), arr)}, coords={"time": th, "plev": plev, "lat": lat, "lon": lon}).to_netcdf(tmp_path / f"{name}.nc")
+    xr.Dataset({"var134": (("time", "lat", "lon"), np.full((12, lat.size, lon.size), 1000e2))}, coords={"time": th, "lat": lat, "lon": lon}).to_netcdf(tmp_path / "sf_134.nc")
+    args.hour = 12; args.dates = ("1979-01-07", "1979-01-09")
+    assert cw.era5_transport(args) == 0
+    out = capsys.readouterr().out
+    assert "3 samples" in out and "step 86400 seconds" in out
+    line = [l for l in out.splitlines() if "net import" in l][0]
+    assert float(line.split("samples")[1].split()[1]) == pytest.approx(7.0 * per_v, abs=6e-4)
+
+
+def test_bin_sums_hand_values_and_sector_index_wrap():
+    import numpy as np
+    assert list(cw.sector_index([0.0, 29.9, 30.0, 359.9, -30.0, 210.0, 269.9, 270.0])) == [0, 0, 1, 0, 0, 4, 4, 5]
+    F = np.array([[1.0, -2.0], [3.0, 4.0]]); chg = np.array([[0.5, 0.5], [0.5, 0.5]])
+    layer = np.array([[0, 0], [2, 2]]); sector = np.array([[1, 1], [1, 3]])
+    out = cw.bin_sums(F, chg, layer, sector, np.array([[True, True], [True, False]]))
+    assert out[0, 1].tolist() == [1.0, -2.0, -1.0, 1.0, 0.5]   # inflow-only chg counts the +1 element alone
+    assert out[2, 1].tolist() == [3.0, 0.0, 3.0, 0.5, 0.5]
+    assert out[2, 3].tolist() == [0.0, 0.0, 0.0, 0.0, 0.0]      # inactive element left out
+    # entering AIR with zero moisture (F = 0, w > 0): the inflow-only substitution must still count it
+    dry = cw.bin_sums(np.array([[0.0]]), np.array([[2.0]]), np.array([[0]]), np.array([[0]]), np.array([[True]]),
+                      air_in=np.array([[True]]))
+    assert dry[0, 0].tolist() == [0.0, 0.0, 0.0, 2.0, 2.0]
+    assert cw.bin_sums(np.array([[0.0]]), np.array([[2.0]]), np.array([[0]]), np.array([[0]]), np.array([[True]]))[0, 0, 4] == 0.0
