@@ -1943,9 +1943,14 @@ def measure_round144_wind_operands(args) -> dict[str, object]:
             "plant": args.plant, "plant_fires": True,
         }
     _validate_round144_registry()
-    inherited = measure_round143_downstream_directed(args)
-    require(inherited["status"] == "MEASURED",
-            "Round-143 inherited controls did not measure")
+    if args.round145_wind_routing:
+        inherited = measure_round140_rhs_record(args)
+        require(inherited["status"] == "PASS",
+                "Round-145 RHS record admission did not pass")
+    else:
+        inherited = measure_round143_downstream_directed(args)
+        require(inherited["status"] == "MEASURED",
+                "Round-143 inherited controls did not measure")
     record = read_round140_rhs(args.round140_rhs_root / ROUND140_RHS_RECORD)
     fields = record["fields"]
     split = read_round139_record(args.round140_rhs_root / ROUND139_RECORD)
@@ -4393,6 +4398,9 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round144-wind-operands", action="store_true",
         help="substitute recorded wind operands one family at a time")
+    round_group.add_argument(
+        "--round145-wind-routing", action="store_true",
+        help="score the production QCO-to-wind candidate without old pins")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -4456,7 +4464,7 @@ def main(argv=None) -> int:
     try:
         report = (
             measure_round144_wind_operands(args)
-            if args.round144_wind_operands else
+            if (args.round144_wind_operands or args.round145_wind_routing) else
             (measure_round143_downstream_directed(args)
             if args.round143_downstream_directed else
             (measure_round142_rhs_directed(args)
@@ -4480,7 +4488,8 @@ def main(argv=None) -> int:
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND144 WIND" if args.round144_wind_operands else
+            "ROUND145 WIND" if args.round145_wind_routing else
+            ("ROUND144 WIND" if args.round144_wind_operands else
             ("ROUND143 DOWNSTREAM" if args.round143_downstream_directed else
             ("ROUND142 RHS" if args.round142_rhs_directed else
             ("ROUND141 RHS" if args.round141_rhs_developed else
@@ -4491,7 +4500,7 @@ def main(argv=None) -> int:
             ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83"))))))))))))
+             ("ROUND117" if args.round117 else "ROUND83")))))))))))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
@@ -4532,9 +4541,10 @@ def main(argv=None) -> int:
             + repr(report["first_closing_family"])
         )
         return 0
-    if args.round144_wind_operands:
+    if args.round144_wind_operands or args.round145_wind_routing:
         print(
-            "ROUND144 WIND OPERANDS: first="
+            ("ROUND145 WIND ROUTING: first=" if args.round145_wind_routing
+             else "ROUND144 WIND OPERANDS: first=")
             + repr(report["first_moving_family"])
             + " closes=" + repr(report["first_closing_family"])
         )
