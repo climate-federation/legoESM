@@ -180,3 +180,22 @@ def test_era5_q_on_levels_masks_below_surface_brackets():
     out = cw.era5_q_on_levels(plev, cols, ps, p_full)
     assert np.isfinite(out[0, :2]).all() and np.isnan(out[0, 2]) and np.isnan(out[0, 3])
     assert out[0, 0] == pytest.approx(np.interp(np.log(60000.0), np.log(plev[:3]), cols[0, :3]))
+
+
+def test_cap_transport_bins_recover_the_totals():
+    import numpy as np
+    from legoesm.grids.factory import create_grid
+    mesh = create_grid("mpas", resolution=2)
+    lat = np.asarray(mesh.latCell); cap = lat >= 0.0
+    rng = np.random.default_rng(0)
+    n_cells, n_edges, nlev = lat.size, np.asarray(mesh.dvEdge).size, 4
+    q = rng.uniform(1e-4, 5e-3, (n_cells, nlev)); dp = rng.uniform(500.0, 2000.0, (n_cells, nlev))
+    p_full = np.cumsum(dp, axis=1) + 50000.0 * rng.uniform(0.5, 1.5, (n_cells, 1))
+    u = rng.normal(0.0, 5.0, (n_edges, nlev))
+    q_ref = 1.5 * q; q_ref[:, 0] = np.nan
+    b = cw.cap_transport_bins(q, u, dp, p_full, mesh, cap, q_ref)
+    gin, gout, net, _ = cw.cap_moisture_transport(q, u, dp, mesh, cap)
+    tot = b.sum(axis=(0, 1))
+    assert tot[:3] == pytest.approx([gin, gout, net], rel=1e-6)   # one path sums in float32
+    assert tot[3] == pytest.approx(cw.inflow_humidity(q, q_ref, u, dp, mesh, cap)[3], rel=1e-6)
+    assert b.shape == (3, 6, 4) and (b[:, :, 0] >= 0).all() and (b[:, :, 1] <= 0).all()

@@ -374,6 +374,47 @@ def inflow_humidity(q_model, q_ref, u_edge, dp, mesh, cap):
         float(((qr[use] - qm[use]) * ww).sum()), float(((qr[both] - qm[both]) * w[both]).sum()), covered, out_cov
 
 
+LAYER_BOUNDS_PA = (60000.0, 80000.0)                  # above 600 / 600-800 / below 800 hPa (edge-level pressure)
+SECTORS = (("Atl 330-30", 330.0), ("Bar 30-90", 30.0), ("Sib 90-150", 90.0), ("Pac 150-210", 150.0),
+           ("Ala 210-270", 210.0), ("CAA 270-330", 270.0))      # 60-degree sectors, start longitude [deg E]
+
+
+def cap_transport_bins(q, u_edge, dp, p_full, mesh, cap, q_ref=None):
+    """Per (layer, sector) gross inflow, gross outflow and net transport across the
+    cap boundary [kg/s], and the signed net change from replacing q by ``q_ref``
+    where it is defined (0 where not); bins recover the totals of
+    ``cap_moisture_transport``.  Layers by the edge-averaged level pressure,
+    sectors by the edge longitude."""
+    import jax.numpy as jnp
+    from legoesm.core.operators_voronoi import cell_to_edge_avg_3d
+    from legoesm import constants
+    c0, c1 = np.asarray(mesh.cellsOnEdge[0]), np.asarray(mesh.cellsOnEdge[1])
+    orient = np.where(cap[c1] & ~cap[c0], 1.0, 0.0) + np.where(cap[c0] & ~cap[c1], -1.0, 0.0)
+    w = orient[:, None] * np.asarray(u_edge) * np.asarray(cell_to_edge_avg_3d(jnp.asarray(dp), mesh)) \
+        * np.asarray(mesh.dvEdge)[:, None] / constants.g
+    qm = np.asarray(cell_to_edge_avg_3d(jnp.asarray(q), mesh))
+    F = qm * w                                                        # (nEdges, nlev), + = into the cap
+    chg = np.zeros_like(F)
+    if q_ref is not None:
+        qr = np.asarray(cell_to_edge_avg_3d(jnp.asarray(q_ref), mesh))
+        fin = np.isfinite(qr)
+        chg[fin] = (qr[fin] - qm[fin]) * w[fin]
+    p_edge = np.asarray(cell_to_edge_avg_3d(jnp.asarray(p_full), mesh))
+    layer = np.digitize(p_edge, LAYER_BOUNDS_PA)                      # 0 above 600, 1 600-800, 2 below 800
+    lon = np.degrees(np.asarray(mesh.lonEdge)) % 360.0
+    sector = np.full(lon.shape, -1)
+    for k, (_, lo) in enumerate(SECTORS):
+        sector[((lon - lo) % 360.0) < 60.0] = k
+    assert (sector >= 0).all()
+    out = np.zeros((3, len(SECTORS), 4))
+    for li in range(3):
+        for si in range(len(SECTORS)):
+            m = (layer == li) & (sector[:, None] == si) & (orient[:, None] != 0)
+            Fm, cm = F[m], chg[m]
+            out[li, si] = (Fm[Fm > 0].sum(), Fm[Fm < 0].sum(), Fm.sum(), cm.sum())
+    return out
+
+
 def transport(args):
     """Moisture import into the cap (lat >= --lat) per checkpoint, mm/day over the cap area:
     gross in, gross out, net, and the time means of the per-snapshot products (transient
@@ -418,6 +459,13 @@ def transport(args):
         a["n"] += 1; a["net"] += net * to_mm; a["nets"].append(net * to_mm)
         a.setdefault("snaps", []).append((st["trc_q_v"], st["u_edge"], st["dp"]))
         a.setdefault("days", []).append(float(day))
+        if args.bins:
+            b = cap_transport_bins(st["trc_q_v"], st["u_edge"], st["dp"], st["p_full"], mesh, cap,
+                                   qref if args.era5_q else None)
+            tot = b.sum(axis=(0, 1))
+            if not np.allclose(tot[:3], (gin, gout, net), rtol=1e-9, atol=1e-6):
+                raise SystemExit(f"FATAL: {spec}: bins {tot[:3]} do not recover the totals {(gin, gout, net)}")
+            a.setdefault("bins", []).append(b * to_mm)
         a["q"] = a["q"] + st["trc_q_v"]; a["u"] = a["u"] + st["u_edge"]; a["dp"] = a["dp"] + st["dp"]
     for run, a in acc.items():
         n = a["n"]
@@ -436,6 +484,25 @@ def transport(args):
               f"product of time-mean fields {mean_net:+.3f}; remainder (transients + dp covariance) {a['net']/n - mean_net:+.3f}")
         print(f"{'':>14s}  snapshot winds carrying the run's time-mean humidity, trapezoid {tz(nets_qmean):+.3f}; "
               f"humidity-weather covariance C = original - that = {C:+.3f} mm/day")
+        if args.bins:
+            bins = a["bins"]
+            tzb = (0.5 * (bins[0] + bins[-1]) + sum(bins[1:-1])) / (n - 1) if n > 1 else bins[0]
+            names = ("above 600", "600-800 hPa", "below 800")
+            for label, B in ((f"trapezoid days {a['days'][0]:g}-{a['days'][-1]:g}", tzb),
+                             (f"day {a['days'][-1]:g} alone", bins[-1])):
+                print(f"{'':>14s}  layer x sector, {label} [mm/day over the cap]: in / out / net"
+                      + (" / ERA5-q net change" if args.era5_q else ""))
+                print(f"{'':>26s}" + "".join(f"{nm:>26s}" for nm, _ in SECTORS) + f"{'ALL':>26s}")
+                for li in range(3):
+                    row = "".join(f"  {B[li, si, 0]:5.3f}/{B[li, si, 1]:6.3f}/{B[li, si, 2]:6.3f}"
+                                  + (f"/{B[li, si, 3]:6.3f}" if args.era5_q else "      ") for si in range(len(SECTORS)))
+                    T = B[li].sum(axis=0)
+                    row += f"  {T[0]:5.3f}/{T[1]:6.3f}/{T[2]:6.3f}" + (f"/{T[3]:6.3f}" if args.era5_q else "")
+                    print(f"{'':>14s}{names[li]:>12s}{row}")
+                T = B.sum(axis=(0, 1)); Ts = B.sum(axis=0)
+                row = "".join(f"  {Ts[si, 0]:5.3f}/{Ts[si, 1]:6.3f}/{Ts[si, 2]:6.3f}"
+                              + (f"/{Ts[si, 3]:6.3f}" if args.era5_q else "      ") for si in range(len(SECTORS)))
+                print(f"{'':>14s}{'ALL':>12s}{row}  {T[0]:5.3f}/{T[1]:6.3f}/{T[2]:6.3f}" + (f"/{T[3]:6.3f}" if args.era5_q else ""))
         if run in era5acc:
             e = era5acc[run]
             print(f"{'':>14s}  ERA5-humidity replacement, trapezoid: extra gross inflow {tz(e['extra']):+.3f} mm/day; "
@@ -451,6 +518,8 @@ def main(argv=None) -> int:
     l = sub.add_parser("loop"); l.add_argument("specs", nargs="+"); l.set_defaults(fn=loop)
     t = sub.add_parser("transport"); t.add_argument("specs", nargs="+"); t.set_defaults(fn=transport)
     t.add_argument("--lat", type=float, default=72.5, help="cap boundary latitude [deg N]")
+    t.add_argument("--bins", action="store_true", help="layer (600/800 hPa) x 60-degree longitude sector "
+                   "decomposition of in/out/net (and the ERA5-q net change), trapezoid mean and last day alone")
     t.add_argument("--era5-q", action="store_true", help="inflow-weighted humidity of the entering air, "
                    "model vs ERA5 monthly climatology on the same weights [g/kg], and the extra gross import "
                    "from replacing q by ERA5 [mm/day]; 'cover' = inflow mass fraction where ERA5 is defined")
