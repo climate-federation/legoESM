@@ -926,3 +926,50 @@ remove a bias of 4 to 8 mm, and this pair cannot say.
 Open, and needing a decision: a thirty-day pair is the only thing that settles
 whether these corrections are net-positive. The cold drift of about 1 K in
 five days is the risk to watch in it.
+
+## Iteration N — where the convective rain's vapour is debited (2026-09-21)
+
+The claim, reviewed before code (codex read cudtdqn/cuascn/cuflxn; GLM from
+knowledge): the Bechtold port debited the vapour that becomes in-plume rain,
+and released its latent heat, in proportion to each level's vapour mass, so
+43.5% of the ITCZ's convective rain water (1.60 of 3.68 kg/m2/day, day 135
+banded ledgers) was taken from, and its heat put into, the layers below
+sigma 0.83 where the plume never condensed; ~0.8/day and ~30 W/m2 (2-3 K/day)
+landed below cloud base. IFS assembles the sink where the rain forms. Both
+reviewers confirmed the mechanism against the source.
+
+Fix (`BechtoldConfig.rain_vapor_sink`, default "formation"; "vapour_mass"
+keeps the legacy spread for the A/B; `--bechtold-rain-vapor-sink`): the debit
+and its heating follow the rain-formation profile (precip_frac * M_u), capped
+per level at 0.9 of the post-transport vapour, excess redistributed within the
+formation support, any remainder reducing the rain and heating together so
+rain == sink holds exactly per column. The user moved the production default
+in the same change. Five review rounds (codex + GLM each): NaN float32
+gradients from 1e-30 denominators (fixed, non-vacuous test), a physical flux
+floor for the masks, sub-floor columns emit no rain and debit nothing, and
+the offline probe records the helper's cap scale directly (0 of 9401 formation
+levels binding on day 135: the cap does not act in production).
+
+Pre-registered 1-day arm (wv_sfcon_rvs_* vs wv_sfcon_led_*, day 135->136,
+ITCZ ocean): q850 ratio 0.71 -> 0.78, T850 bias +1.54 -> -0.04 K, sub-cloud
+convective term -0.86 -> +0.01 (profile side CONFIRMED); convective rain
+3.69 -> 1.89 (-49%, outside the +-25% band). The rain halving rides on the
+carried relaxed mass flux: swapping the control's memory into the arm's state
+gives 5.15, its T+q gives 0.74.
+
+Five-day pair (wv_sfcon_rvs5 vs wv_sfcon_leg5, days 136-140, one variable):
+evaporation transient CONFIRMED (global hfls 56.5 -> 60.4 vs legacy 60.3);
+q850 ratio 0.71 -> 0.83, T850 +1.47 -> -0.58 K, q925 0.87 -> 0.97; the
+mid-level bulge shrinks (600 hPa 1.04 -> 0.94, 500 hPa 1.38 -> 1.12,
+PLAUSIBLE until repeated). Convective rain INCONCLUSIVE by the
+pre-registration (day-140 ratio 0.63, between REFUTE 0.60 and CONFIRM 0.75,
+recovering slowly from 0.51). Pair scores, 5-day means: tropics pr RMSE
+6.50 -> 4.63 mm/d (-29%), bias +0.30 -> -0.38; prw RMSE 10.89 -> 9.98;
+global pr RMSE 4.29 -> 3.35. Figures: qprofile_rvs5_vs_leg5.png,
+pair5_pr_hfls_timeseries.png, ledger_layers_wv_sfcon_rvs.png.
+
+Open after this iteration: the ITCZ convective rain settles ~35% below the
+legacy scheme, so whether the closure (rprcon / CAPE relaxation) was tuned
+against the misplaced heating is the next user decision; pre-existing 1e-30
+divisors in the downdraft evaporation and rescale (NaN gradients at zero
+rain, codex) are not touched here; the 30-day continuation is not run.
