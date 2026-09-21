@@ -5225,9 +5225,9 @@ class LatLonCGridOceanModel:
         _slow_rhs_observer = self._nemo_ws_test_hooks.slow_forcing_rhs_observer
         if callable(_slow_rhs_observer):
             if self._nemo_ws_test_hooks.slow_forcing_rhs_observer_face == "u":
-                jax.debug.callback(_slow_rhs_observer, du_dt, ordered=True)
+                jax.debug.callback(_slow_rhs_observer, du_dt, ordered=False)
             else:
-                jax.debug.callback(_slow_rhs_observer, dv_dt, ordered=True)
+                jax.debug.callback(_slow_rhs_observer, dv_dt, ordered=False)
 
         # Compute layer thickness at u/v faces for depth-averaging.
         # Min-rule: the face's effective wet thickness is the shallower
