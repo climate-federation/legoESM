@@ -230,6 +230,15 @@ class PhysicsState(NamedTuple):
     surface_lhflx_override_w_m2: jnp.ndarray = None   # [W/m^2] latent, positive up
     surface_tau_x_override_pa: jnp.ndarray = None     # [Pa] eastward stress on the atmosphere
     surface_tau_y_override_pa: jnp.ndarray = None     # [Pa] northward stress on the atmosphere
+    # Physics-cadence cache (physics_update_steps > 1): the FULL tendency
+    # pytree (HydrostaticTendencies incl. precip / surface / TOA diagnostics
+    # and ledger rows) of the most recent physics step, re-applied unchanged
+    # by the held-physics step variant on the steps in between -- the CAM
+    # physics-every-1800-s pattern, generalising ``rad_heating``.  Seeded by
+    # the driver from ``jax.eval_shape`` of the full variant so the carry
+    # structure is fixed before the first step; never persisted (the first
+    # step of every job is a physics step and repopulates it).
+    held_physics: object = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -241,6 +250,8 @@ class PhysicsState(NamedTuple):
 # absence as a hole in the physics memory.
 PHYSSTATE_INPUT_FIELDS = frozenset({
     "dyn_tendency_T", "dyn_tendency_qv",
+    # per-job physics-cadence cache: carried across steps, never persisted
+    "held_physics",
     "surface_wth_override", "surface_wqv_override",
     "surface_shflx_override_w_m2", "surface_lhflx_override_w_m2",
     "surface_tau_x_override_pa", "surface_tau_y_override_pa",
@@ -476,6 +487,7 @@ def update_physics_state(phys_state, updates):
         # diurnal cycle at whatever instant the driver last refreshed.
         surface_wth_override=updates.get("surface_wth_override", None),
         surface_wqv_override=updates.get("surface_wqv_override", None),
+        held_physics=updates.get("held_physics", phys_state.held_physics),
         # Prescribed-flux anchors are window-constant inputs: CARRY them
         # (like surface_T_sfc_override), do NOT reset like wth/wqv above.
         surface_shflx_override_w_m2=updates.get(

@@ -9523,7 +9523,46 @@ class ModelDriver:
                 float(_ledger_band[0]), float(_ledger_band[1]),
                 100.0 * float(jnp.sum(_ledger_weight * self.sigma.dsigma)
                               / jnp.sum(self.sigma.dsigma)))
-        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
+        # ---- Physics cadence (CAM6 suite) ----
+        # ``physics_update_steps > 1``: the full physics runs every
+        # PHYS_UPDATE_STEPS-th step and writes its complete tendency pytree
+        # into ``PhysicsState.held_physics``; the in-between steps run a
+        # held variant that returns that cache unchanged (one more compiled
+        # ``model.step``, no per-step Python branch inside the trace).  The
+        # cache is seeded from ``jax.eval_shape`` of the full variant before
+        # the first step so the carry structure never changes (no retrace).
+        # Radiation cadence is unchanged: ``rad_update_steps`` is validated
+        # as a multiple of PHYS_UPDATE_STEPS, so every radiation step is a
+        # physics step.  Off by default (cadence "off" = byte-identical).
+        # Departures from CAM6 (documented, not emulated):
+        #  * ftype: CAM applies the physics INCREMENT to the tracers at the
+        #    physics step (ftype=2 hands only T/u/v to the dycore as
+        #    tendencies spread over the dynamics substeps); here every
+        #    field, tracers included, is applied as a rate on each dynamics
+        #    step -- same integral, tracers reach the state N-1 steps later.
+        #  * coupling order: CAM splits the physics around the surface
+        #    coupler (tphysbc -> coupler -> tphysac, then dynamics); here the
+        #    step is dynamics -> whole physics, and the land tile keeps its
+        #    own cadence (land_update_seconds), now forced with the held
+        #    atmospheric fluxes on every step.
+        #  * held steps recompute the analytic Held-Suarez forcing (cheap);
+        #    stochastic draws / carried memories advance on physics steps.
+        # The physics TIMESTEP is the cadence (CAM: dtime = 1800 s is the
+        # physics step): every scheme integrates its prognostic memory
+        # (TKE, convective memory, ...) and forms its implicit updates over
+        # PHYS_UPDATE_STEPS*DT, and the returned RATES are applied by the
+        # dynamics for exactly that long -- same integral as CAM's one
+        # increment per physics step.  With DT the memories would advance
+        # 1/N of simulated time (codex round 1).
+        PHYS_UPDATE_STEPS = cfg.physics_update_steps
+        if (not isinstance(PHYS_UPDATE_STEPS, int)
+                or isinstance(PHYS_UPDATE_STEPS, bool) or PHYS_UPDATE_STEPS < 1):
+            raise ValueError(
+                f"physics_update_steps must be an int >= 1, got {PHYS_UPDATE_STEPS!r}")
+        _hold_phys = PHYS_UPDATE_STEPS > 1
+        _phys_cadence_write = "write" if _hold_phys else "off"
+        DT_PHYS = DT * PHYS_UPDATE_STEPS
+        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT_PHYS,
                                   budget_ledger_level_weight=_ledger_weight,
                                   column_mesh=_column_mesh,
                                   f_land=(_f_land_cells
@@ -9531,7 +9570,21 @@ class ModelDriver:
                                               or _land_beta_soil_on)
                                           else None),
                                   land_beta=_land_beta,
-                                  budget_ledger=_budget_ledger_on)
+                                  budget_ledger=_budget_ledger_on,
+                                  physics_cadence=_phys_cadence_write)
+        if _hold_phys:
+            from legoesm.atmosphere.physics.combined import held_physics_variant
+            physics_fn_held = held_physics_variant(physics_fn)
+        else:
+            physics_fn_held = None
+        if _hold_phys:
+            logger.info(
+                "  Physics cadence: full physics every "
+                f"{PHYS_UPDATE_STEPS} steps (physics timestep "
+                f"{DT_PHYS:.1f} s = {DT_PHYS / 60.0:.1f} min); cached tendencies "
+                "(u, v, T, p_s, tracers, precip, surface/TOA fluxes, ledger) "
+                "re-applied in between"
+            )
 
         # ---- Radiation sub-cycle (issue #316, MPAS port) ----
         # The MPAS physics_fn fuses radiation into ``model.step`` and ran the
@@ -9550,7 +9603,7 @@ class ModelDriver:
         RAD_UPDATE_STEPS = max(1, int(cfg.rad_update_steps))
         _subcycle_rad = RAD_UPDATE_STEPS > 1 and cfg.radiation != "none"
         physics_fn_norad = (
-            make_physics(phys_cfg, model_type="mpas", dt=DT,
+            make_physics(phys_cfg, model_type="mpas", dt=DT_PHYS,
                          column_mesh=_column_mesh, need_rad=False,
                          f_land=(_f_land_cells
                                  if (_land_beta != 1.0
@@ -9558,7 +9611,8 @@ class ModelDriver:
                                  else None),
                          land_beta=_land_beta,
                          budget_ledger=_budget_ledger_on,
-                         budget_ledger_level_weight=_ledger_weight)
+                         budget_ledger_level_weight=_ledger_weight,
+                         physics_cadence=_phys_cadence_write)
             if _subcycle_rad else None
         )
         if _subcycle_rad:
@@ -10394,13 +10448,18 @@ class ModelDriver:
                 # source of truth) so the carry contract and the sharded /
                 # spectral refusals still see a stateful physics THROUGH this
                 # wrapper, not a deceptively diagnostic-looking callable.
-                if physics_config_requires_phys_state(phys_cfg):
+                if (physics_config_requires_phys_state(phys_cfg)
+                        or getattr(_rrtmgp_fn, "_requires_phys_state", False)):
                     _hs_physics_fn._requires_phys_state = True
                 return _hs_physics_fn
 
             physics_fn = _wrap_hs(physics_fn)
             if physics_fn_norad is not None:
                 physics_fn_norad = _wrap_hs(physics_fn_norad)
+            # Physics cadence: HS forcing is analytic and cheap, so it is
+            # recomputed on held steps (the cache holds physics only).
+            if physics_fn_held is not None:
+                physics_fn_held = _wrap_hs(physics_fn_held)
 
         run_status = "COMPLETED"
         logger.info(f"Starting MPAS: {n_steps_total} steps, {N_DAYS} days "
@@ -10705,6 +10764,7 @@ class ModelDriver:
         # threaded through unchanged.  Built once outside the loop.
         _mpi_step = None
         _mpi_step_norad = None
+        _mpi_step_held = None
         if self._voronoi_layout is not None:
             from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
             _mpi_step = make_voronoi_mpi_step(
@@ -10720,6 +10780,14 @@ class ModelDriver:
                     config=self.model.config, physics_fn=physics_fn_norad,
                     return_phys_state=True,
                 )
+            _mpi_step_held = (
+                make_voronoi_mpi_step(
+                    self.model, self._voronoi_layout, self.model.sigma_coord,
+                    config=self.model.config, physics_fn=physics_fn_held,
+                    return_phys_state=True,
+                )
+                if physics_fn_held is not None else None
+            )
             logger.info(
                 "  MPAS MPI step active (rank %d/%d)",
                 self._voronoi_layout.rank, self._voronoi_layout.n_ranks,
@@ -11005,12 +11073,32 @@ class ModelDriver:
             # radiation and repopulates the cache before any held step reads
             # it.  When subcycling is off, every step is a full step.
             _use_rad = (not _subcycle_rad) or (step % RAD_UPDATE_STEPS == 0)
+            # Physics cadence: step 0 of every job is a physics step (the
+            # cache is per-job, never persisted), then every
+            # PHYS_UPDATE_STEPS-th; the held variant re-applies the cache in
+            # between.  Radiation steps are always physics steps (validated).
+            _is_phys_step = (not _hold_phys) or (step % PHYS_UPDATE_STEPS == 0)
+            # Seed ONLY on step 0 (a physics step, so the zero seed is never
+            # applied); any other empty-cache step is refused by the held
+            # variant instead of silently applying zeros.
+            if _hold_phys and step == 0:
+                assert _phys_state.held_physics is None
+                from legoesm.atmosphere.physics.combined import physics_cache_seed
+                from legoesm.core.precision import cast_pytree as _cast_pytree
+                _phys_state = _phys_state._replace(
+                    held_physics=physics_cache_seed(
+                        physics_fn, _cast_pytree(self.state, None, "compute"),
+                        (self._voronoi_layout.local_mesh
+                         if self._voronoi_layout is not None else self.model.mesh),
+                        self.model.sigma_coord, _phys_state, _forcing))
             if _mpi_step is not None:
-                _mstep = _mpi_step if _use_rad else _mpi_step_norad
+                _mstep = ((_mpi_step if _use_rad else _mpi_step_norad)
+                          if _is_phys_step else _mpi_step_held)
                 self.state, _phys_state = _mstep(
                     self.state, DT, _forcing, _phys_state)
             else:
-                _pfn = physics_fn if _use_rad else physics_fn_norad
+                _pfn = ((physics_fn if _use_rad else physics_fn_norad)
+                        if _is_phys_step else physics_fn_held)
                 self.state = self.model.step(
                     self.state, DT, physics_fn=_pfn, forcing=_forcing,
                     phys_state=_phys_state)
