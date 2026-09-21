@@ -2,7 +2,7 @@
 #SBATCH --account=bd1179_gpu
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=01:30:00
+#SBATCH --time=02:00:00
 #SBATCH --output=gpu_cpubind_ab_%j.log
 
 # Host-core binding A/B for the GPU ladders (2026-09-21).  nature_ladder.sbatch
@@ -48,7 +48,7 @@ arm() {  # arm <lane> <label> <srun extra args...>
   fi
   echo "=== arm $tag $(date '+%F %T')  srun extra: $*"
   srun --export=ALL --nodes="$NODES" --ntasks="$ND" --ntasks-per-node="$PPN" --gpus-per-node=4 \
-       --gpu-bind=none "$@" bash -c 'echo "affinity rank=$SLURM_PROCID cpus=$(nproc)"' | sort | uniq -c | head -3
+       --gpu-bind=none "$@" bash -c 'echo "affinity cpus=$(nproc)"' | sort | uniq -c
   if ! timeout --kill-after=30 1500 srun --export=ALL --nodes="$NODES" --ntasks="$ND" \
         --ntasks-per-node="$PPN" --gpus-per-node=4 --gpu-bind=none --kill-on-bad-exit=1 "$@" \
         "$PY" "$bench" --multicontroller --n-devices "$ND" "${args[@]}" \
@@ -59,9 +59,11 @@ arm() {  # arm <lane> <label> <srun extra args...>
   sleep 5
 }
 arm mpas ladder
-arm mpas bound   -c 64 --cpu-bind=cores
+arm mpas bound     -c 64 --cpu-bind=cores
 arm mpas ladder_rep
+arm mpas bound_rep -c 64 --cpu-bind=cores
 arm omps ladder
-arm omps bound   -c 64 --cpu-bind=cores
+arm omps bound     -c 64 --cpu-bind=cores
+arm omps ladder_rep
 echo "=== DONE rc=$rc outdir=$OUTDIR ==="
 exit "$rc"

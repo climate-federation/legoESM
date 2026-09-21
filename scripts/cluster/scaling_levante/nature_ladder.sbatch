@@ -53,9 +53,11 @@ else
   # threads): every CPU ladder before 2026-09-21 ran that way, 7.4x slower
   # per rank than the 32-core share (s7 atm, 4 ranks/node: 1270 -> 172 ms).
   # 4 ranks/node measured best on the interactive node (4x32: 172, 8x16:
-  # 195, 16x8: 199, 2x64: 211 ms).
+  # 195, 16x8: 199, 2x64: 211 ms); every CPU submission passes PPN=4.
+  # SLURM_CPUS_ON_NODE is the batch step's per-node allocation (whole node
+  # under --exclusive); no fallback, a wrong divisor must fail loudly.
   SRUN_DEV=(--cpu-bind=cores --distribution=block:cyclic
-            --cpus-per-task="$(( ${SLURM_CPUS_ON_NODE:-256} / PPN ))")
+            --cpus-per-task="$(( ${SLURM_CPUS_ON_NODE:?} / PPN ))")
 fi
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"   # $REPO, $PY, PYTHONPATH
 cd "$REPO"

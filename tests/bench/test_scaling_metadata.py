@@ -61,7 +61,10 @@ def test_record_carries_roadmap_item9_fields():
         "schema_version", "timestamp_utc", "cpu_affinity",
     ):
         assert k in rec, f"item-9 field {k!r} absent"
-    assert rec["cpu_affinity"] == len(os.sched_getaffinity(0)) > 0
+    if hasattr(os, "sched_getaffinity"):
+        assert rec["cpu_affinity"] == len(os.sched_getaffinity(0)) > 0
+    else:
+        assert rec["cpu_affinity"] is None
     assert rec["solver_variant"] == "single_reduce_pcg"
     assert rec["solver_residual"] == pytest.approx(3.2e-11)
     assert rec["scaling_kind"] == "strong"

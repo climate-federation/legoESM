@@ -123,7 +123,8 @@ MPAS_NCCL_CHANNELS = "32"
 # Multi-rank CPU rows need each rank's full core share (nature_ladder.sbatch
 # passes --cpus-per-task = node threads / ranks-per-node = 64 since
 # 2026-09-21); rows stamped below this, or unstamped, were 1-core ranks
-# (7.4x slower per rank) and are refused.
+# (7.4x slower per rank) and are refused -- single-rank rows included, the
+# old launch bound a one-task step to one core just the same.
 CPU_AFFINITY_MIN = 16
 MPAS_NCCL_CHUNK = "131072"
 
@@ -183,7 +184,7 @@ def load(dirs):
                         dropped.append((f, int(r["n_devices"]),
                                         f"{iters}/{pre[0]}{pre[1]}"))
                         continue
-                if _backend(r) == "cpu" and int(r["n_devices"]) > 1:
+                if _backend(r) == "cpu":
                     aff = r.get("metadata", {}).get("cpu_affinity")
                     if aff is None or int(aff) < CPU_AFFINITY_MIN:
                         dropped_aff.append((f, int(r["n_devices"]), aff))
@@ -219,7 +220,7 @@ def load(dirs):
         for _f, nd, it in sorted(dropped, key=lambda d: d[1])[:20]:
             print(f"  nd={nd:<5} iters={it!r}  {_f}", file=sys.stderr)
     if dropped_aff:
-        print(f"load: refused {len(dropped_aff)} multi-rank CPU receipts whose "
+        print(f"load: refused {len(dropped_aff)} CPU receipts whose "
               f"ranks had fewer than {CPU_AFFINITY_MIN} hardware threads "
               f"(unstamped = pre-2026-09-21 one-core ranks): "
               + ", ".join(sorted({f"{d[0].split('/')[-2]}" for d in dropped_aff})),
