@@ -2049,12 +2049,13 @@ def measure_round144_wind_operands(args) -> dict[str, object]:
             args, card, state, freshwater, surface, eta_after,
             drag_override=drag_override,
             wind_operand_override=(
-                None, (jnp.asarray(planted_u), stresses[1]), None))
+                density, (jnp.asarray(planted_u), stresses[1]),
+                inverse_depths))
         require(planted_trace.trace_state_identity["bit_exact"],
                 "Round-144 stress-ULP callback moved its plain arm")
         planted_row = comparison(
             native_u(planted["incoming_u"]),
-            native_u(arms["stress"][1]["incoming_u"]), active2["u"])
+            native_u(arms["all"][1]["incoming_u"]), active2["u"])
         require(planted_row["differing_cells"] > 0,
                 "Round-144 stress ULP did not reach incoming forcing")
         return {
