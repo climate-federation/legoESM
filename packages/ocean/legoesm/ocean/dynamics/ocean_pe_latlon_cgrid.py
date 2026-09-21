@@ -4832,6 +4832,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_operator_association: bool = False,
     return_nemo_operator_components: bool = False,
     nemo_stage_zad_operands=None,
+    nemo_stage_zad_eta_after_override=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -4948,6 +4949,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             eta, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
             qco_tmask_3d, qco_dt,
             freshwater_eta_tendency=zad_freshwater_eta_tendency,
+            eta_after_override=nemo_stage_zad_eta_after_override,
         )
         # The W/H pair is a materialized NEMO stage boundary.  Without these
         # barriers XLA fuses the full tendency graph back through continuity;

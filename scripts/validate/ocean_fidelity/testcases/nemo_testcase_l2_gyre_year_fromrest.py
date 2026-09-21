@@ -73,6 +73,16 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest")
 DEFAULT_NEMO_MESH = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10/mesh_mask.nc")
+DAILY_RESET_FAMILIES = ("control", "tracer", "vector", "ssh", "tke")
+DAILY_RESET_VARIABLES = {
+    "control": (),
+    "tracer": ("tn", "sn"),
+    "vector": ("un", "vn", "uu_n", "vv_n",
+               "ub_e", "ubb_e", "vb_e", "vbb_e"),
+    "ssh": ("sshn", "ssha", "sshb_e", "sshbb_e"),
+    "tke": ("en", "avm_k", "avt_k", "dissl"),
+}
+DAILY_RESET_PLANTS = ("daily-source-ulp", "daily-family-registry")
 # Depth bands exist because the floor and the gap otherwise live in DIFFERENT
 # VOLUMES: the 1e-10 K seed is uniform to the bottom, while a year-1 from-rest
 # gap lives in the top few hundred metres.  A whole-column rms therefore
@@ -347,9 +357,232 @@ def _snapshot(state, gate) -> dict:
             for key, value in fields.items()}
 
 
+def _daily_restart_path(root: Path, step: int) -> Path:
+    return Path(root) / f"GYRE_OMIP_L2_P3_{step:08d}_restart.nc"
+
+
+def _load_daily_reset_payload(path: Path, nlev: int) -> dict:
+    """Read one admitted daily restart with explicit axis contracts."""
+    from netCDF4 import Dataset
+
+    require(path.is_file(), f"missing admitted daily restart {path}")
+    with Dataset(path, "r") as handle:
+        require(int(np.asarray(handle.variables["kt"][...]))
+                == int(path.name.split("_")[-2]),
+                f"{path}: scalar kt disagrees with filename")
+
+        def xyz(name: str) -> np.ndarray:
+            variable = handle.variables[name]
+            require(variable.dimensions == ("time_counter", "nav_lev", "y", "x"),
+                    f"{path.name}/{name}: axes {variable.dimensions}")
+            values = np.asarray(variable[0], dtype=np.float64).transpose(1, 2, 0)
+            require(values.shape[-1] >= nlev,
+                    f"{path.name}/{name}: {values.shape[-1]} levels < {nlev}")
+            return values[..., :nlev]
+
+        def xy(name: str) -> np.ndarray:
+            variable = handle.variables[name]
+            require(variable.dimensions == ("time_counter", "y", "x"),
+                    f"{path.name}/{name}: axes {variable.dimensions}")
+            return np.asarray(variable[0], dtype=np.float64)
+
+        payload = {
+            name: xyz(name) for name in
+            ("tn", "sn", "un", "vn", "en", "avm_k", "avt_k", "dissl")
+        }
+        payload.update({
+            name: xy(name) for name in
+            ("uu_n", "vv_n", "sshn", "ssha", "ub_e", "ubb_e",
+             "vb_e", "vbb_e", "sshb_e", "sshbb_e")
+        })
+    for name, values in payload.items():
+        require(bool(np.all(np.isfinite(values))),
+                f"{path.name}/{name}: non-finite daily reset operand")
+    payload["path"] = str(path)
+    payload["sha256"] = sha256(path)
+    return payload
+
+
+def _daily_record_contract(audit_path: Path, record_root: Path,
+                           expect_commit: str) -> tuple[dict, dict[str, str]]:
+    """Bind a reset run to an admitted record and its closed SHA manifest."""
+    require(audit_path.is_file(), f"missing daily-record audit {audit_path}")
+    audit = json.loads(audit_path.read_text())
+    require(audit.get("status") == "ADMITTED" and audit.get("admitted") is True,
+            f"{audit_path}: daily record is not ADMITTED")
+    require(Path(audit["daily_root"]).resolve() == Path(record_root).resolve(),
+            f"{audit_path}: admitted root {audit['daily_root']} != {record_root}")
+    require(audit.get("tool", {}).get("commit") == expect_commit,
+            f"{audit_path}: admission commit does not equal {expect_commit}")
+    required = set(audit["requirements"]["required_variables"])
+    expected = set().union(*map(set, DAILY_RESET_VARIABLES.values()))
+    require(expected <= required,
+            f"{audit_path}: admission omits reset variables {sorted(expected-required)}")
+    stamp = audit.get("acquisition_stamp")
+    require(stamp is not None and stamp.get("verified_file_count") == YEAR_DAYS,
+            f"{audit_path}: acquisition SHA manifest was not verified")
+    manifest_path = Path(stamp["manifest"])
+    require(manifest_path.is_file(), f"missing admitted SHA manifest {manifest_path}")
+    require(sha256(manifest_path) == stamp["manifest_sha256"],
+            f"{manifest_path}: changed since record admission")
+    entries = {}
+    for line in manifest_path.read_text().splitlines():
+        digest, name = line.split()
+        entries[name] = digest
+    return audit, entries
+
+
+def _require_payload_digest(payload: dict, expected_sha256: str, *,
+                            plant: bool = False) -> None:
+    observed = payload["sha256"]
+    if plant:
+        observed = ("0" if observed[0] != "0" else "1") + observed[1:]
+    require(observed == expected_sha256,
+            f"{Path(payload['path']).name}: payload SHA-256 {observed} != "
+            f"admitted {expected_sha256}")
+
+
+def validate_daily_reset_registry(registry=None) -> None:
+    actual = DAILY_RESET_VARIABLES if registry is None else registry
+    require(tuple(actual) == DAILY_RESET_FAMILIES,
+            "daily reset family registry order/set changed")
+    require(actual["control"] == (), "control arm must reset no variables")
+    expected = {
+        "tracer": ("tn", "sn"),
+        "vector": ("un", "vn", "uu_n", "vv_n",
+                   "ub_e", "ubb_e", "vb_e", "vbb_e"),
+        "ssh": ("sshn", "ssha", "sshb_e", "sshbb_e"),
+        "tke": ("en", "avm_k", "avt_k", "dissl"),
+    }
+    require(all(tuple(actual[name]) == values
+                for name, values in expected.items()),
+            "daily reset family registry omits or adds a source variable")
+
+
+def daily_reset_self_check(plant: str | None) -> int:
+    """Failing controls for the source hash and exact family registry."""
+    validate_daily_reset_registry()
+    if plant is None:
+        _require_payload_digest(
+            {"path": "synthetic.nc", "sha256": "a" * 64}, "a" * 64)
+        print("SELF-CHECK OK: daily source digest and five-family registry")
+        return 0
+    try:
+        if plant == "daily-source-ulp":
+            _require_payload_digest(
+                {"path": "synthetic.nc", "sha256": "a" * 64},
+                "a" * 64, plant=True)
+        elif plant == "daily-family-registry":
+            broken = dict(DAILY_RESET_VARIABLES)
+            broken["ssh"] = ("sshn", "sshb_e", "sshbb_e")
+            validate_daily_reset_registry(broken)
+        else:  # pragma: no cover - argparse constrains the value
+            raise AssertionError(plant)
+    except GateError as error:
+        print(f"REFUSE Round-134 {plant}: {error}", file=sys.stderr)
+        print(f"STATUS PLANT-FIRED: {plant}")
+        return 1
+    print(f"REFUSE Round-134 plant {plant} did not fire", file=sys.stderr)
+    return 3
+
+
+def _face_history(values: np.ndarray, face: str) -> np.ndarray:
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        _u_east_to_face, _v_north_to_face)
+
+    values3 = np.asarray(values, dtype=np.float64)[..., None]
+    if face == "u":
+        return _u_east_to_face(values3)[..., 0]
+    if face == "v":
+        return _v_north_to_face(values3)[..., 0]
+    raise ValueError(face)
+
+
+def _load_kamm_twin_module():
+    """Load the existing TKE restart bridge; never duplicate its mapping."""
+    name = "_gyre_year_kamm_twin"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parent.parent / "dino_1226" / "kamm_twin_90d.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    require(spec is not None and spec.loader is not None,
+            f"cannot load TKE restart bridge {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def apply_daily_reset(state, payload: dict, family: str, card):
+    """Replace exactly one registered family; return state and one-step ssha."""
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        _u_east_to_face, _v_north_to_face)
+
+    require(family in DAILY_RESET_FAMILIES and family != "control",
+            f"unknown reset family {family!r}")
+    nlev = state.T.data.shape[-1]
+    if family == "tracer":
+        active = jnp.asarray(card.recipe.z_coord.is_active)
+        T = neumann_fill_cgrid(jnp.asarray(payload["tn"][..., :nlev]),
+                               active, card.recipe.grid)
+        S = neumann_fill_cgrid(jnp.asarray(payload["sn"][..., :nlev]),
+                               active, card.recipe.grid)
+        return state._replace(
+            T=state.T.replace(data=T), S=state.S.replace(data=S)), None
+    if family == "vector":
+        require(state.uu_b is not None and state.vv_b is not None,
+                "vector reset requires live uu_b/vv_b state")
+        require(state.bt_hist is not None and len(state.bt_hist) == 6,
+                "vector reset requires six carried barotropic histories")
+        hist = state.bt_hist
+        new_hist = (
+            jnp.asarray(_face_history(payload["ub_e"], "u")),
+            jnp.asarray(_face_history(payload["ubb_e"], "u")),
+            jnp.asarray(_face_history(payload["vb_e"], "v")),
+            jnp.asarray(_face_history(payload["vbb_e"], "v")),
+            hist[4], hist[5],
+        )
+        return state._replace(
+            u=state.u.replace(data=jnp.asarray(
+                _u_east_to_face(payload["un"][..., :nlev]))),
+            v=state.v.replace(data=jnp.asarray(
+                _v_north_to_face(payload["vn"][..., :nlev]))),
+            uu_b=state.uu_b.replace(data=jnp.asarray(
+                _face_history(payload["uu_n"], "u"))),
+            vv_b=state.vv_b.replace(data=jnp.asarray(
+                _face_history(payload["vv_n"], "v"))),
+            bt_hist=new_hist,
+        ), None
+    if family == "ssh":
+        require(state.bt_hist is not None and len(state.bt_hist) == 6,
+                "ssh reset requires six carried barotropic histories")
+        hist = state.bt_hist
+        new_hist = (*hist[:4], jnp.asarray(payload["sshb_e"]),
+                    jnp.asarray(payload["sshbb_e"]))
+        return state._replace(
+            eta=state.eta.replace(data=jnp.asarray(payload["sshn"])),
+            bt_hist=new_hist), jnp.asarray(payload["ssha"])
+    if family == "tke":
+        require(all(getattr(state, name) is not None for name in (
+            "tke", "tke_avm", "tke_avt", "tke_dissl", "tke_avm_surface")),
+            "TKE reset requires live TKE state and coefficient memory")
+        reset = _load_kamm_twin_module().bridge_tke_from_restart(
+            state, payload["en"], np.asarray(state.land_mask.data),
+            restart_avm=payload["avm_k"], restart_avt=payload["avt_k"],
+            restart_dissl=payload["dissl"])
+        return reset, None
+    raise AssertionError(family)  # pragma: no cover
+
+
 def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
                mesh_path: Path = DEFAULT_NEMO_MESH, tag: str = "",
-               plant: str | None = None, snap_steps: int = SNAP_STEPS) -> int:
+               plant: str | None = None, snap_steps: int = SNAP_STEPS,
+               daily_reset_family: str | None = None,
+               daily_record_root: Path | None = None,
+               daily_record_audit: Path | None = None,
+               expect_commit: str | None = None) -> int:
     """One legoESM member: from rest, ``days`` days, a snapshot every 30 days.
 
     ``snap_steps`` exists so a FINER record can be taken through the SAME
@@ -375,6 +608,28 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
             "precision policy is not fp64/libm")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    producer_stamp = worktree_stamp()
+    if expect_commit is not None:
+        require(producer_stamp["commit"] == expect_commit,
+                f"member commit {producer_stamp['commit']} != "
+                f"--expect-commit {expect_commit}")
+    if daily_reset_family is not None:
+        validate_daily_reset_registry()
+        require(daily_reset_family in DAILY_RESET_FAMILIES,
+                f"unknown daily reset family {daily_reset_family!r}")
+        require(seed == 0, "daily reset attribution is registered for member 0")
+        require(days == YEAR_DAYS,
+                "daily reset attribution requires the full 360-day member")
+        require(snap_steps == STEPS_PER_DAY,
+                "daily reset attribution requires six-step daily snapshots")
+        require(expect_commit is not None,
+                "daily reset attribution requires --expect-commit")
+        require(daily_record_root is not None and daily_record_audit is not None,
+                "daily reset attribution requires an admitted record and audit")
+        record_audit, admitted_hashes = _daily_record_contract(
+            daily_record_audit, daily_record_root, expect_commit)
+    else:
+        record_audit, admitted_hashes = None, {}
     gate, gate_sha = _gate_module()
     card = build_nemo_testcase_card(CASE)
     require(card.dt_s == DT_S, f"card dt {card.dt_s} != {DT_S}")
@@ -405,14 +660,21 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
 
     out = Path(out_root) / (f"lego_seed{seed}" + (f"_{tag}" if tag else ""))
+    if daily_reset_family is not None:
+        require(not out.exists() or not any(out.iterdir()),
+                f"daily reset output {out} is not empty; refusing stale rows")
     out.mkdir(parents=True, exist_ok=True)
     n_steps = days * STEPS_PER_DAY
     started = time.time()
+    reset_sources = []
+    pending_ssha = None
     for completed in range(n_steps):
         kt = completed + 1
         freshwater, surface = gate._surface_forcings(card, state, kt)
         state = model.step(state, dt=card.dt_s,
-                           freshwater=freshwater, surface_forcing=surface)
+                           freshwater=freshwater, surface_forcing=surface,
+                           _nemo_stage1_zad_eta_after_override=pending_ssha)
+        pending_ssha = None
         if kt % snap_steps == 0:
             arrays = _snapshot(state, gate)
             require(all(np.all(np.isfinite(value)) for value in arrays.values()),
@@ -420,6 +682,20 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
             np.savez(out / f"day{kt // STEPS_PER_DAY:03d}.npz", **arrays)
             print(f"  seed {seed} day {kt // STEPS_PER_DAY:3d}  "
                   f"{time.time() - started:7.1f} s", flush=True)
+        if (daily_reset_family not in (None, "control")
+                and kt % STEPS_PER_DAY == 0 and kt < n_steps):
+            path = _daily_restart_path(daily_record_root, kt)
+            payload = _load_daily_reset_payload(path, state.T.data.shape[-1])
+            expected_hash = admitted_hashes.get(path.name)
+            require(expected_hash is not None,
+                    f"{path.name}: absent from admitted acquisition manifest")
+            _require_payload_digest(payload, expected_hash)
+            state, pending_ssha = apply_daily_reset(
+                state, payload, daily_reset_family, card)
+            reset_sources.append({
+                "step": kt, "day": kt // STEPS_PER_DAY,
+                "path": str(path), "sha256": payload["sha256"],
+            })
     manifest = {
         "format": "nemo-testcase-l2-gyre-year-fromrest-member-v1",
         "case": CASE, "seed": seed, "tag": tag, "days": days,
@@ -431,8 +707,22 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
         "perturbation": properties,
         "operands": operands,
         "wall_seconds": time.time() - started,
-        "worktree": worktree_stamp(),
+        "worktree": producer_stamp,
     }
+    if daily_reset_family is not None:
+        manifest["daily_reset"] = {
+            "family": daily_reset_family,
+            "registered_variables": list(
+                DAILY_RESET_VARIABLES[daily_reset_family]),
+            "timing": "after pre-reset daily snapshot; consumed next step",
+            "applied_boundary_count": len(reset_sources),
+            "applied_boundaries": reset_sources,
+            "record_root": str(daily_record_root),
+            "record_audit": str(daily_record_audit),
+            "record_audit_sha256": sha256(daily_record_audit),
+            "record_producer_commit": (
+                record_audit["acquisition_stamp"]["producer_commit"]),
+        }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(json.dumps({"member": str(out), "wall_s": manifest["wall_seconds"]}))
     return 0
@@ -697,11 +987,13 @@ def _load_lego(root: Path, seed: int, day: int) -> dict:
                 for key in handle.files}
 
 
-def _load_nemo(root: Path, seed: int, day: int, nlev: int) -> dict:
+def _load_nemo(root: Path, seed: int, day: int, nlev: int, *,
+               directory: Path | None = None) -> dict:
     import netCDF4
 
     step = day * STEPS_PER_DAY
-    directory = Path(root) / f"nemo_seed{seed}"
+    directory = (Path(root) / f"nemo_seed{seed}"
+                 if directory is None else Path(directory))
     matches = sorted(directory.glob(f"*_{step:08d}_restart.nc"))
     require(len(matches) == 1,
             f"expected exactly one NEMO restart for seed {seed} step {step} "
@@ -1697,6 +1989,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--member", type=int, default=None,
                         help="run one legoESM member with this seed")
+    parser.add_argument("--daily-reset-family", choices=DAILY_RESET_FAMILIES,
+                        help="Round-134 daily oracle-reset arm")
+    parser.add_argument("--daily-record-root", type=Path)
+    parser.add_argument("--daily-record-audit", type=Path)
+    parser.add_argument("--expect-commit",
+                        help="full clean producer commit required by reset arms")
+    parser.add_argument("--daily-reset-self-check", action="store_true")
     parser.add_argument("--days", type=int, default=YEAR_DAYS)
     parser.add_argument("--snap-steps", type=int, default=SNAP_STEPS,
                         help="snapshot cadence in STEPS; the preregistered "
@@ -1733,9 +2032,14 @@ def main(argv=None) -> int:
                         choices=["perturbation-zero", "perturbation-relative",
                                  "floor-inflate", "gap-zero",
                                  "operand-mismatch", "frame-flip",
-                                 "alignment-initial", "mask-shift"])
+                                 "alignment-initial", "mask-shift",
+                                 *DAILY_RESET_PLANTS])
     args = parser.parse_args(argv)
 
+    if args.daily_reset_self_check:
+        if args.plant is not None and args.plant not in DAILY_RESET_PLANTS:
+            parser.error("--daily-reset-self-check accepts only daily plants")
+        return daily_reset_self_check(args.plant)
     if args.self_check:
         return self_check()
     if args.census is not None:
@@ -1751,7 +2055,11 @@ def main(argv=None) -> int:
     if args.member is not None:
         return run_member(args.member, args.root, days=args.days,
                           mesh_path=args.mesh, tag=args.tag,
-                          plant=args.plant, snap_steps=args.snap_steps)
+                          plant=args.plant, snap_steps=args.snap_steps,
+                          daily_reset_family=args.daily_reset_family,
+                          daily_record_root=args.daily_record_root,
+                          daily_record_audit=args.daily_record_audit,
+                          expect_commit=args.expect_commit)
     if args.alignment_gate:
         report = alignment_gate(args.root, mesh_path=args.mesh,
                                 entry_path=args.entry, plant=args.plant)

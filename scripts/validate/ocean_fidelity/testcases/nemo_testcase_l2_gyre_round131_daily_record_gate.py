@@ -46,11 +46,12 @@ RESTART_RE = re.compile(
     r"^GYRE_OMIP_L2_P3_(?P<step>[0-9]{8})_restart[.]nc$")
 REQUIRED_VARIABLES = (
     "tn", "sn",
-    "un", "vn", "ub_e", "vb_e", "ubb_e", "vbb_e",
+    "un", "vn", "uu_n", "vv_n",
+    "ub_e", "vb_e", "ubb_e", "vbb_e",
     "sshn", "ssha", "sshb_e", "sshbb_e",
     "en", "avm_k", "avt_k", "dissl",
 )
-PLANTS = ("missing-boundary", "required-variable")
+PLANTS = ("missing-boundary", "required-variable", "monthly-overlap-ulp")
 
 
 def require(condition: bool, message: str) -> None:
@@ -170,6 +171,54 @@ def _array_digest(variable) -> str:
     return digest.hexdigest()
 
 
+def require_bit_identical(left: np.ndarray, right: np.ndarray,
+                          label: str) -> None:
+    left = np.asarray(left)
+    right = np.asarray(right)
+    require(left.dtype == right.dtype and left.shape == right.shape,
+            f"{label}: dtype/shape mismatch "
+            f"{(left.dtype, left.shape)} != {(right.dtype, right.shape)}")
+    require(np.array_equal(left, right, equal_nan=True),
+            f"{label}: arrays are not bit-identical")
+
+
+def validate_ready_stamp(root: Path, stamp_path: Path) -> dict:
+    """Verify the acquisition's closed 360-file SHA manifest and stamp."""
+    require(stamp_path.is_file(), f"missing acquisition stamp {stamp_path}")
+    parts = stamp_path.read_text().strip().split()
+    require(len(parts) == 3,
+            f"{stamp_path}: expected SHA, producer commit, and manifest name")
+    expected_manifest_sha, producer_commit, manifest_name = parts
+    require(bool(re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha)),
+            f"{stamp_path}: invalid manifest SHA-256")
+    require(bool(re.fullmatch(r"[0-9a-f]{40}", producer_commit)),
+            f"{stamp_path}: invalid producer commit")
+    manifest = root / manifest_name
+    require(manifest.is_file(), f"missing acquisition manifest {manifest}")
+    require(sha256(manifest) == expected_manifest_sha,
+            f"{manifest}: checksum disagrees with {stamp_path}")
+    entries: dict[str, str] = {}
+    for line in manifest.read_text().splitlines():
+        fields = line.split()
+        require(len(fields) == 2 and re.fullmatch(r"[0-9a-f]{64}", fields[0]),
+                f"{manifest}: malformed checksum line {line!r}")
+        require(fields[1] not in entries,
+                f"{manifest}: duplicate path {fields[1]}")
+        entries[fields[1]] = fields[0]
+    expected_names = {restart_path(root, step).name for step in REQUIRED_STEPS}
+    require(set(entries) == expected_names,
+            f"{manifest}: checksum paths do not equal the 360 required restarts")
+    mismatches = [name for name, digest in entries.items()
+                  if sha256(root / name) != digest]
+    require(not mismatches,
+            f"acquisition checksum mismatch begins at {mismatches[0]}")
+    return {
+        "path": str(stamp_path), "sha256": sha256(stamp_path),
+        "manifest": str(manifest), "manifest_sha256": expected_manifest_sha,
+        "producer_commit": producer_commit, "verified_file_count": len(entries),
+    }
+
+
 def _template_schema(monthly_root: Path) -> tuple[dict, Path]:
     path = restart_path(monthly_root, MONTHLY_STEPS[0])
     require(path.is_file(), f"missing monthly schema reference {path}")
@@ -227,13 +276,19 @@ def _compare_overlap(daily_path: Path, monthly_path: Path) -> dict:
         validate_required_variables(daily.variables)
         validate_required_variables(monthly.variables)
         for name in REQUIRED_VARIABLES:
+            daily_values = _raw_array(daily.variables[name])
+            monthly_values = _raw_array(monthly.variables[name])
             daily_digest = _array_digest(daily.variables[name])
             monthly_digest = _array_digest(monthly.variables[name])
             digests[name] = {
                 "daily": daily_digest,
                 "monthly": monthly_digest,
             }
-            if daily_digest != monthly_digest:
+            try:
+                require_bit_identical(
+                    daily_values, monthly_values,
+                    f"{daily_path.name}/{name} monthly overlap")
+            except GateError:
                 unequal.append(name)
     return {
         "daily_path": str(daily_path),
@@ -246,12 +301,20 @@ def _compare_overlap(daily_path: Path, monthly_path: Path) -> dict:
     }
 
 
-def audit_record(daily_root: Path, monthly_root: Path) -> dict:
+def audit_record(daily_root: Path, monthly_root: Path,
+                 ready_stamp: Path | None = None) -> dict:
     records, ignored = inventory(daily_root)
     observed_steps = sorted(records)
     missing_steps = sorted(set(REQUIRED_STEPS) - set(observed_steps))
     unexpected_steps = sorted(set(observed_steps) - set(REQUIRED_STEPS))
     errors: list[str] = []
+
+    stamp_report = None
+    if ready_stamp is not None:
+        try:
+            stamp_report = validate_ready_stamp(daily_root, ready_stamp)
+        except GateError as error:
+            errors.append(str(error))
 
     if missing_steps:
         errors.append(
@@ -348,6 +411,7 @@ def audit_record(daily_root: Path, monthly_root: Path) -> dict:
             "nn_itend": nn_itend,
             "nn_stock": nn_stock,
         },
+        "acquisition_stamp": stamp_report,
         "schema": {
             "template_path": str(template_path),
             "checked_file_count": len(records) if template else 0,
@@ -368,7 +432,7 @@ def self_check(plant: str | None) -> int:
     if plant is None:
         validate_inventory(REQUIRED_STEPS)
         validate_required_variables(REQUIRED_VARIABLES)
-        print("SELF-CHECK OK: complete 360-boundary inventory and 16-field "
+        print("SELF-CHECK OK: complete 360-boundary inventory and 18-field "
               "schema pass")
         return 0
     try:
@@ -376,6 +440,11 @@ def self_check(plant: str | None) -> int:
             validate_inventory(REQUIRED_STEPS, plant=plant)
         elif plant == "required-variable":
             validate_required_variables(REQUIRED_VARIABLES, plant=plant)
+        elif plant == "monthly-overlap-ulp":
+            original = np.array([1.0, 2.0], dtype=np.float64)
+            moved = original.copy()
+            moved[1] = np.nextafter(moved[1], np.inf)
+            require_bit_identical(original, moved, "monthly-overlap-ulp plant")
         else:  # pragma: no cover - argparse constrains the value
             raise AssertionError(plant)
     except GateError as error:
@@ -394,6 +463,8 @@ def main(argv=None) -> int:
     parser.add_argument("--daily-root", type=Path, default=DEFAULT_DAILY_ROOT)
     parser.add_argument("--monthly-root", type=Path,
                         default=DEFAULT_MONTHLY_ROOT)
+    parser.add_argument("--ready-stamp", type=Path,
+                        help="acquisition stamp closing a 360-file SHA manifest")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--expect-commit")
     parser.add_argument("--plant", choices=PLANTS)
@@ -409,7 +480,8 @@ def main(argv=None) -> int:
         parser.error("--audit requires --output")
 
     stamp = worktree_stamp(args.expect_commit)
-    report = audit_record(args.daily_root, args.monthly_root)
+    report = audit_record(args.daily_root, args.monthly_root,
+                          ready_stamp=args.ready_stamp)
     report["tool"] = stamp
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")

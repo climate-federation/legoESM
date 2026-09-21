@@ -42,7 +42,8 @@ def test_complete_virtual_record_passes(gate):
     gate.validate_required_variables(gate.REQUIRED_VARIABLES)
 
 
-@pytest.mark.parametrize("plant", ["missing-boundary", "required-variable"])
+@pytest.mark.parametrize(
+    "plant", ["missing-boundary", "required-variable", "monthly-overlap-ulp"])
 def test_plants_exit_nonzero_on_complete_virtual_record(plant):
     result = subprocess.run(
         [sys.executable, str(GATE), "--self-check", "--plant", plant],
@@ -57,6 +58,15 @@ def test_missing_boundary_and_variable_are_fail_closed(gate):
         gate.validate_inventory(gate.REQUIRED_STEPS[:-1])
     with pytest.raises(gate.GateError, match="dissl"):
         gate.validate_required_variables(gate.REQUIRED_VARIABLES[:-1])
+    without_live_velocity = tuple(
+        name for name in gate.REQUIRED_VARIABLES if name != "uu_n")
+    with pytest.raises(gate.GateError, match="uu_n"):
+        gate.validate_required_variables(without_live_velocity)
+
+
+def test_schema_includes_both_live_barotropic_velocity_slots(gate):
+    assert len(gate.REQUIRED_VARIABLES) == 18
+    assert {"uu_n", "vv_n"} <= set(gate.REQUIRED_VARIABLES)
 
 
 @pytest.mark.skipif(not DAILY_ROOT.is_dir() or not MONTHLY_ROOT.is_dir(),

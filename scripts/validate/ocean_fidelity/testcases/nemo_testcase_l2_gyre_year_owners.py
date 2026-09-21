@@ -122,6 +122,13 @@ DEFAULT_ENTRY_ROOT = YEAR_ROOT / "nemo_pristine"
 EMP_SPLIT_LAT_DEG = 37.2
 WIND_BAND_LAT_DEG = (15.0, 29.0)
 FIELDS = ("T", "S", "u", "v", "ssh")
+DAILY_ATTRIBUTION_FAMILIES = ("tracer", "vector", "ssh", "tke")
+DAILY_ATTRIBUTION_DAYS = (30, 60, 90, 120, 180, 240, 300, 360)
+DAILY_ATTRIBUTION_BASELINE_T = {
+    30: 6.89043148782590898e-05,
+    240: 1.64467402331753935e-02,
+    360: 1.12235712478436639e-02,
+}
 # The MODEL-FACING rows.  NEMO carries qns and qsr apart and the shared
 # forcing object carries their materialized SUM, so "q_net" is the row the
 # model actually consumes; sw_down pins qsr beside it, and the two together
@@ -3164,6 +3171,250 @@ def day_gap(*, lego_root: Path = DEFAULT_ROOT, lego_tag: str = "daily",
     return report
 
 
+# -------------------------------------- Round-134 daily reset attribution ---
+def _direct_snapshot(member: Path, day: int) -> dict[str, np.ndarray]:
+    path = Path(member) / f"day{day:03d}.npz"
+    require(path.is_file(), f"missing reset-arm snapshot {path}")
+    with np.load(path) as handle:
+        arrays = {name: np.asarray(handle[name], dtype=np.float64)
+                  for name in FIELDS}
+    require(all(np.all(np.isfinite(values)) for values in arrays.values()),
+            f"{path}: non-finite scored field")
+    return arrays
+
+
+def _bit_unequal(left: np.ndarray, right: np.ndarray) -> int:
+    left = np.asarray(left, dtype=np.float64)
+    right = np.asarray(right, dtype=np.float64)
+    require(left.shape == right.shape,
+            f"bit comparison shapes differ {left.shape} != {right.shape}")
+    return int(np.count_nonzero(left.view(np.uint64) != right.view(np.uint64)))
+
+
+def _daily_arm_manifest(member: Path, family: str, expect_commit: str) -> dict:
+    path = Path(member) / "manifest.json"
+    require(path.is_file(), f"missing reset-arm manifest {path}")
+    manifest = json.loads(path.read_text())
+    stamp = manifest.get("worktree", {})
+    require(stamp.get("commit") == expect_commit and stamp.get("clean") is True,
+            f"{path}: arm is not a clean {expect_commit} product")
+    require(manifest.get("steps") == 2160
+            and manifest.get("snapshot_step_interval") == STEPS_PER_DAY,
+            f"{path}: arm is not the registered 2160-step daily run")
+    reset = manifest.get("daily_reset", {})
+    require(reset.get("family") == family,
+            f"{path}: reset family {reset.get('family')!r} != {family!r}")
+    expected_count = 0 if family == "control" else 359
+    require(reset.get("applied_boundary_count") == expected_count,
+            f"{path}: applied {reset.get('applied_boundary_count')} boundaries, "
+            f"expected {expected_count}")
+    return manifest
+
+
+def daily_reset_attribution(
+        arms_root: Path, free_member: Path, nemo_daily_root: Path,
+        expect_commit: str, *, mesh_path: Path = DEFAULT_MESH,
+        plant: str | None = None) -> dict:
+    """Rank daily oracle reset leverage at the day-240 T3D endpoint."""
+    _policy()
+    year = _year()
+    gate = _gate()
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["commit"] == expect_commit and stamp["clean"] is True,
+            f"scorer is not a clean {expect_commit} product")
+    card = build_nemo_testcase_card(CASE)
+    _mesh, wet3, wet2, _dz, _dy, _area, bands = year._geometry(
+        card, mesh_path)
+    masks = gate.expected_masks(card)
+    masks = {"T": wet3, "S": wet3, "ssh": wet2,
+             "u": masks["u"], "v": masks["v"]}
+    nlev = wet3.shape[-1]
+
+    members = {
+        family: Path(arms_root) / family / "lego_seed0_year"
+        for family in ("control", *DAILY_ATTRIBUTION_FAMILIES)
+    }
+    manifests = {
+        family: _daily_arm_manifest(member, family, expect_commit)
+        for family, member in members.items()
+    }
+
+    control_unequal = {name: 0 for name in FIELDS}
+    first_control_mismatch = None
+    for day in range(1, 361):
+        control = _direct_snapshot(members["control"], day)
+        free = _direct_snapshot(free_member, day)
+        for name in FIELDS:
+            unequal = _bit_unequal(control[name], free[name])
+            control_unequal[name] += unequal
+            if unequal and first_control_mismatch is None:
+                first_control_mismatch = {
+                    "day": day, "field": name, "cells_unequal": unequal}
+    require(first_control_mismatch is None,
+            f"daily control does not reproduce immutable free arm: "
+            f"{first_control_mismatch}")
+
+    day1 = _direct_snapshot(members["control"], 1)
+    day1_unequal = {}
+    for family in DAILY_ATTRIBUTION_FAMILIES:
+        candidate = _direct_snapshot(members[family], 1)
+        day1_unequal[family] = {
+            name: _bit_unequal(candidate[name], day1[name]) for name in FIELDS}
+        require(all(value == 0 for value in day1_unequal[family].values()),
+                f"{family}: reset moved the pre-reset day-1 snapshot")
+
+    rows = []
+    baseline = {}
+    for day in DAILY_ATTRIBUTION_DAYS:
+        free = _direct_snapshot(free_member, day)
+        nemo = year._load_nemo(
+            Path("."), 0, day, nlev, directory=nemo_daily_root)
+        for family in DAILY_ATTRIBUTION_FAMILIES:
+            reset = _direct_snapshot(members[family], day)
+            for name in FIELDS:
+                mask = masks[name]
+                free_gap = _rms(free[name] - nemo[name], mask)
+                reset_gap = _rms(reset[name] - nemo[name], mask)
+                row = {
+                    "family": family, "day": day, "field": name,
+                    "free_vs_nemo_rms": free_gap,
+                    "reset_vs_nemo_rms": reset_gap,
+                    "reset_vs_free_rms": _rms(reset[name] - free[name], mask),
+                    "removed_gap_rms": free_gap - reset_gap,
+                }
+                rows.append(row)
+                if family == DAILY_ATTRIBUTION_FAMILIES[0]:
+                    baseline[(day, name)] = free_gap
+
+    expected_rows = (len(DAILY_ATTRIBUTION_FAMILIES)
+                     * len(DAILY_ATTRIBUTION_DAYS) * len(FIELDS))
+    if plant == "daily-attribution-registry":
+        rows.pop()
+    if len(rows) != expected_rows:
+        if plant == "daily-attribution-registry":
+            return {
+                "format": "gyre-daily-reset-attribution-v1",
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": {"registered_rows": len(rows),
+                            "required_rows": expected_rows},
+                "worktree": stamp,
+            }
+        raise GateError(
+            f"attribution registry has {len(rows)} rows, expected {expected_rows}")
+    require(plant in (None, "none"), f"plant {plant!r} did not fire")
+
+    for day, expected in DAILY_ATTRIBUTION_BASELINE_T.items():
+        require(baseline[(day, "T")] == expected,
+                f"immutable day-{day} T baseline {baseline[(day, 'T')]:.17e} "
+                f"!= preregistered {expected:.17e}")
+
+    day240 = [row for row in rows
+              if row["day"] == 240 and row["field"] == "T"]
+    ranking = sorted(({
+        "family": row["family"],
+        "day240_free_vs_nemo_T_rms_K": row["free_vs_nemo_rms"],
+        "day240_reset_vs_nemo_T_rms_K": row["reset_vs_nemo_rms"],
+        "day240_removed_T_rms_K": row["removed_gap_rms"],
+    } for row in day240), key=lambda row: row["day240_removed_T_rms_K"],
+        reverse=True)
+    winner = ranking[0]["family"]
+
+    first_difference = None
+    for day in range(1, 361):
+        free = _direct_snapshot(members["control"], day)
+        reset = _direct_snapshot(members[winner], day)
+        unequal = _bit_unequal(reset["T"], free["T"])
+        if unequal:
+            first_difference = (day, reset["T"] - free["T"], unequal)
+            break
+    require(first_difference is not None,
+            f"winning {winner} arm never moves temperature")
+    birth_day, birth_delta, birth_unequal = first_difference
+    total = float(np.sum(birth_delta[wet3] ** 2))
+    require(total > 0.0, "winning arm's first differing T row has zero energy")
+    depth_birth = {
+        name: {
+            "rms_K": _rms(birth_delta, mask),
+            "share_of_sum_dT2": float(np.sum(birth_delta[mask] ** 2)) / total,
+            "cells": int(mask.sum()),
+        } for name, mask in bands.items()
+    }
+    lat = np.asarray(card.recipe.grid.native_lat_T_deg, dtype=np.float64)
+    region_birth = {}
+    for name, mask2 in _regions(lat, wet2).items():
+        mask = wet3 & mask2[..., None]
+        region_birth[name] = {
+            "rms_K": _rms(birth_delta, mask),
+            "share_of_sum_dT2": float(np.sum(birth_delta[mask] ** 2)) / total,
+            "cells": int(mask.sum()),
+        }
+    peak = np.unravel_index(int(np.argmax(np.abs(np.where(
+        wet3, birth_delta, 0.0)))), birth_delta.shape)
+    strongest_depth = max(depth_birth,
+                          key=lambda name: depth_birth[name]["share_of_sum_dT2"])
+    third_names = ("west_third", "interior_third", "east_third")
+    strongest_third = max(
+        third_names,
+        key=lambda name: region_birth[name]["share_of_sum_dT2"])
+
+    report = {
+        "format": "gyre-daily-reset-attribution-v1", "status": "PASS",
+        "case": CASE, "execution": "production step through self._step_jitted",
+        "days": list(DAILY_ATTRIBUTION_DAYS), "fields": list(FIELDS),
+        "arms_root": str(arms_root), "free_member": str(free_member),
+        "nemo_daily_root": str(nemo_daily_root),
+        "control_reproduction": {
+            "days_checked": 360, "fields": list(FIELDS),
+            "cells_unequal": control_unequal, "all_bit_identical": True,
+        },
+        "pre_reset_day1_cells_unequal": day1_unequal,
+        "manifests": {family: {
+            "path": str(members[family] / "manifest.json"),
+            "sha256": _sha256(members[family] / "manifest.json"),
+            "reset": manifests[family]["daily_reset"],
+        } for family in members},
+        "rows": rows, "registered_row_count": len(rows),
+        "all_moved_rows_registered": len(rows) == expected_rows,
+        "ranking": ranking, "winner": winner,
+        "birth": {
+            "day": birth_day, "T_cells_unequal": birth_unequal,
+            "T_rms_K": _rms(birth_delta, wet3),
+            "depth": depth_birth, "region": region_birth,
+            "strongest_depth": strongest_depth,
+            "strongest_third": strongest_third,
+            "peak": {"j": int(peak[0]), "i": int(peak[1]),
+                     "k": int(peak[2]), "dT_K": float(birth_delta[peak])},
+        },
+        "frozen_prediction": {
+            "predicted_winner": "vector", "actual_winner": winner,
+            "winner_confirmed": winner == "vector",
+            "predicted_first_day": 2, "actual_first_day": birth_day,
+            "first_day_confirmed": birth_day == 2,
+            "predicted_depth": "0_100", "actual_depth": strongest_depth,
+            "depth_confirmed": strongest_depth == "0_100",
+            "predicted_third": "west_third", "actual_third": strongest_third,
+            "third_confirmed": strongest_third == "west_third",
+        },
+        "three_step_cadence": "UNMEASURED: the oracle record is daily only",
+        "worktree": stamp,
+    }
+    print("\nDAILY RESET DAY-240 TEMPERATURE RANKING")
+    print(f"  {'rank':>4s} {'family':>10s} {'free gap':>14s} "
+          f"{'reset gap':>14s} {'removed':>14s}")
+    for rank, row in enumerate(ranking, 1):
+        print(f"  {rank:4d} {row['family']:>10s} "
+              f"{row['day240_free_vs_nemo_T_rms_K']:14.6e} "
+              f"{row['day240_reset_vs_nemo_T_rms_K']:14.6e} "
+              f"{row['day240_removed_T_rms_K']:14.6e}")
+    print(f"  winner {winner}; first T difference day {birth_day}; "
+          f"{strongest_third}/{strongest_depth}")
+    return report
+
+
 # ------------------------------------------------------- the switch trace ---
 def switch_trace(steps: int, out: Path, *, seeds: tuple[int, int] = (0, 1),
                  mesh_path: Path = DEFAULT_MESH, every: int = 1,
@@ -3484,6 +3735,12 @@ def main(argv=None) -> int:
                         help="required clean producer commit for records")
     parser.add_argument("--forcing-gate", action="store_true")
     parser.add_argument("--day-gap", action="store_true")
+    parser.add_argument("--daily-reset-attribution", action="store_true",
+                        help="score the four Round-134 daily reset arms")
+    parser.add_argument("--arms-root", type=Path,
+                        help="root containing control/tracer/vector/ssh/tke")
+    parser.add_argument("--free-member", type=Path,
+                        help="immutable free-run member directory")
     parser.add_argument("--switch-trace", type=int, default=None,
                         help="trace the EVD trigger mask over N steps")
     parser.add_argument("--equal-input", type=int, default=None,
@@ -3511,6 +3768,22 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
+    if args.daily_reset_attribution:
+        require(args.expect_commit is not None,
+                "--daily-reset-attribution needs --expect-commit")
+        require(args.arms_root is not None and args.free_member is not None,
+                "--daily-reset-attribution needs --arms-root and --free-member")
+        report = daily_reset_attribution(
+            args.arms_root, args.free_member, args.nemo_root,
+            args.expect_commit, mesh_path=args.mesh, plant=args.plant)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: {report['control']}")
+            return 1
+        print(f"STATUS PASS: daily reset owner={report['winner']}")
+        return 0
     if args.produce_process_trace or args.produce_vertical_trace:
         require(args.expect_commit is not None,
                 "trace production needs --expect-commit")

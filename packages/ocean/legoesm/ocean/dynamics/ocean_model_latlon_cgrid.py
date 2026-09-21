@@ -4700,7 +4700,8 @@ class LatLonCGridOceanModel:
                    legacy_hpg_algebraic=False,
                    nemo_operator_association=False,
                    return_nemo_operator_components=False,
-                   nemo_stage_zad_operands=None):
+                   nemo_stage_zad_operands=None,
+                   nemo_stage_zad_eta_after_override=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -4759,6 +4760,8 @@ class LatLonCGridOceanModel:
             legacy_hpg_algebraic=legacy_hpg_algebraic,
             nemo_operator_association=nemo_operator_association,
             nemo_stage_zad_operands=nemo_stage_zad_operands,
+            nemo_stage_zad_eta_after_override=(
+                nemo_stage_zad_eta_after_override),
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
         )
@@ -4847,6 +4850,7 @@ class LatLonCGridOceanModel:
                    _external_tracer_rate=None,
                    _shortwave_tendency_test_delta=None,
                    _vertical_K_test_override=None,
+                   _nemo_stage1_zad_eta_after_override=None,
                    _return_barotropic_substeps: bool = False,
                    _return_live_stage_operands: bool = False,
                    _return_tracer_process_trace: bool = False,
@@ -5090,6 +5094,8 @@ class LatLonCGridOceanModel:
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
                                    if self._nemo_ws_test_hooks.stage1_zad_w_override is not None else None),
+                               nemo_stage_zad_eta_after_override=(
+                                   _nemo_stage1_zad_eta_after_override),
                                return_nemo_operator_components=_return_live_stage_operands)
         if _return_live_stage_operands:
             tend, _, _nemo_ws_stage1_operator_operands = _tend_result
@@ -11290,7 +11296,9 @@ class LatLonCGridOceanModel:
              vertex_mask=None, t_seconds=None,
              external_tracer_rate=None,
              _shortwave_tendency_test_delta=None,
-             _vertical_K_test_override=None) -> LatLonCGridOceanState:
+             _vertical_K_test_override=None,
+             _nemo_stage1_zad_eta_after_override=None,
+             ) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
 
         ``external_tracer_rate`` (optional ``(dT_dt, dS_dt)`` array pair,
@@ -11387,7 +11395,8 @@ class LatLonCGridOceanModel:
                 "Passing it under another integrator would be a silent "
                 "no-op.")
         if ((_shortwave_tendency_test_delta is not None
-             or _vertical_K_test_override is not None)
+             or _vertical_K_test_override is not None
+             or _nemo_stage1_zad_eta_after_override is not None)
                 and self.config.outer_integrator != "forward_euler"):
             raise ValueError(
                 "private GYRE causal-arm overrides are implemented only for "
@@ -11405,7 +11414,9 @@ class LatLonCGridOceanModel:
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
                 external_tracer_rate=external_tracer_rate,
                 _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
-                _vertical_K_test_override=_vertical_K_test_override)
+                _vertical_K_test_override=_vertical_K_test_override,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
             if self._nemo_ws_test_hooks.expose_live_stage_operands:
                 # Returning the diagnostic tuple changes XLA's optimization
                 # boundary and can move a last-bit rounding in the prognostic
@@ -11418,7 +11429,9 @@ class LatLonCGridOceanModel:
                     grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
                     _shortwave_tendency_test_delta=(
                         _shortwave_tendency_test_delta),
-                    _vertical_K_test_override=_vertical_K_test_override)
+                    _vertical_K_test_override=_vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override=(
+                        _nemo_stage1_zad_eta_after_override))
                 return result._replace(state_after=state_after)
             if self._nemo_ws_test_hooks.tracer_process_trace is not None:
                 # As with the live stage operands, returning extra arrays can
@@ -11429,7 +11442,9 @@ class LatLonCGridOceanModel:
                     grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
                     _shortwave_tendency_test_delta=(
                         _shortwave_tendency_test_delta),
-                    _vertical_K_test_override=_vertical_K_test_override)
+                    _vertical_K_test_override=_vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override=(
+                        _nemo_stage1_zad_eta_after_override))
                 return result._replace(state_after=state_after)
             return result
 
@@ -11439,14 +11454,18 @@ class LatLonCGridOceanModel:
             freshwater=None, surface_forcing=None, sponge=None, *, grid=None,
             vertex_mask=None, t_seconds=None,
             _shortwave_tendency_test_delta=None,
-            _vertical_K_test_override=None) -> LatLonCGridOceanState:
+            _vertical_K_test_override=None,
+            _nemo_stage1_zad_eta_after_override=None,
+            ) -> LatLonCGridOceanState:
         """Ordinary compiled result paired with the private operand trace."""
         new_state = self._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
             grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
             _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
-            _vertical_K_test_override=_vertical_K_test_override)
+            _vertical_K_test_override=_vertical_K_test_override,
+            _nemo_stage1_zad_eta_after_override=(
+                _nemo_stage1_zad_eta_after_override))
         if self.config.polar_filter.use_polar_filter:
             new_state = self._apply_polar_filter(new_state, dt, grid=grid)
         if self.config.freeze_floor:
@@ -11462,7 +11481,9 @@ class LatLonCGridOceanModel:
                      vertex_mask=None, t_seconds=None,
                      external_tracer_rate=None,
                      _shortwave_tendency_test_delta=None,
-                     _vertical_K_test_override=None) -> LatLonCGridOceanState:
+                     _vertical_K_test_override=None,
+                     _nemo_stage1_zad_eta_after_override=None,
+                     ) -> LatLonCGridOceanState:
         """JIT body of :meth:`step` (split out so the vertex-mask cache
         fill runs eagerly — see the ``step`` docstring).
 
@@ -11486,7 +11507,9 @@ class LatLonCGridOceanModel:
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
-                _return_barotropic_substeps=True)
+                _return_barotropic_substeps=True,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
         if self._nemo_ws_test_hooks.expose_live_stage_operands:
             if _oi != "forward_euler":
                 raise ValueError(
@@ -11496,7 +11519,9 @@ class LatLonCGridOceanModel:
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
-                _return_live_stage_operands=True)
+                _return_live_stage_operands=True,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
         if self._nemo_ws_test_hooks.tracer_process_trace is not None:
             if _oi != "forward_euler":
                 raise ValueError(
@@ -11566,7 +11591,9 @@ class LatLonCGridOceanModel:
                                         _shortwave_tendency_test_delta=(
                                             _shortwave_tendency_test_delta),
                                         _vertical_K_test_override=(
-                                            _vertical_K_test_override))
+                                            _vertical_K_test_override),
+                                        _nemo_stage1_zad_eta_after_override=(
+                                            _nemo_stage1_zad_eta_after_override))
         # Feature-gated on a STATIC config bool (CLAUDE.md feature-gating
         # exception): a Python ``if`` selects the branch at trace time, so
         # the freeze-floor clamp is only traced when enabled — no jnp.where
