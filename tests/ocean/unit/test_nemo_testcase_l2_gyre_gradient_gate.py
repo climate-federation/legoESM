@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import legoesm.ocean.physics.vertical_mixing.tke as tke_mod
+import numpy as np
 import pytest
 
 _REPO = Path(__file__).resolve().parents[3]
@@ -67,6 +70,37 @@ def test_volume_weighted_mse_ignores_zero_volume_cells():
     target = jnp.asarray([0.0, 1.0, 0.0], dtype=jnp.float64)
     volume = jnp.asarray([1.0, 3.0, 0.0], dtype=jnp.float64)
     assert float(G.volume_weighted_mse(pred, target, volume)) == pytest.approx(3.25)
+
+
+def test_nemo_literal_dissl_guard_preserves_primal_bits_and_zero_vjp():
+    """The approved production guard changes only the zero-TKE transpose."""
+    values = jnp.asarray(
+        [4.0, 0.0, np.nextafter(0.0, 1.0), -1.0, np.nan],
+        dtype=jnp.float64,
+    )
+    divisors = jnp.asarray([2.0, 3.0, 5.0, 7.0, 11.0], dtype=jnp.float64)
+
+    def reverse_safe(value):
+        positive = value > 0.0
+        safe = jnp.where(positive, value, 1.0)
+        return jnp.where(positive, jnp.sqrt(safe) / divisors, 0.0)
+
+    old_primal = np.asarray(jnp.sqrt(values) / divisors)
+    new_primal = np.asarray(reverse_safe(values))
+    old_finite = np.isfinite(old_primal)
+    np.testing.assert_array_equal(
+        new_primal[old_finite].view(np.uint64),
+        old_primal[old_finite].view(np.uint64),
+    )
+
+    _, pullback = jax.vjp(reverse_safe, values)
+    vjp = np.asarray(pullback(jnp.ones_like(values))[0])
+    assert np.isfinite(vjp[1])
+    assert vjp[1] == 0.0
+
+    source = inspect.getsource(tke_mod.tke_vertical_mixing)
+    assert "_dissl_sqrt_input = jnp.where(" in source
+    assert "jnp.sqrt(_dissl_sqrt_input)" in source
 
 
 def test_resource_cli_requires_a_schedule():
