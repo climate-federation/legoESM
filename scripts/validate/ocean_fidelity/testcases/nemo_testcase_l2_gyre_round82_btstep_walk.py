@@ -681,10 +681,19 @@ def _admit_developed(args) -> tuple[dict, dict, dict]:
     require(ocean_lines and ocean_lines[-1] == "AAAAAAAA",
             "Round-137 NEMO ocean log lacks its terminal completion marker")
     plants = {}
-    for name in (
-            "final-pssh-ulp", "header", "passive-admission", "qco-ulp",
-            "replay-ulp", "stamp", "swap-ulp", "truncation"):
-        path = root / f"round137_{name}_plant.log"
+    plant_files = {
+        "final-pssh-ulp": "final-pssh-ulp",
+        "header": "header",
+        "passive-admission": "passive_admission",
+        "qco-ulp": "qco-ulp",
+        "replay-ulp": "replay-ulp",
+        "stamp": "stamp",
+        "swap-ulp": "swap-ulp",
+        "truncation": "truncation",
+    }
+    for name, file_stem in plant_files.items():
+        path = root / f"round137_{file_stem}_plant.log"
+        require(path.is_file(), f"Round-137 {name} plant log is missing")
         marker = f"STATUS PLANT-FIRED: {name}"
         require(path.read_text().splitlines()[-1] == marker,
                 f"Round-137 {name} plant marker changed")
