@@ -211,7 +211,8 @@ def validate_ready_stamp(root: Path, stamp_path: Path) -> dict:
     mismatches = [name for name, digest in entries.items()
                   if sha256(root / name) != digest]
     require(not mismatches,
-            f"acquisition checksum mismatch begins at {mismatches[0]}")
+            "acquisition checksum mismatch begins at "
+            f"{mismatches[0] if mismatches else '<none>'}")
     return {
         "path": str(stamp_path), "sha256": sha256(stamp_path),
         "manifest": str(manifest), "manifest_sha256": expected_manifest_sha,
