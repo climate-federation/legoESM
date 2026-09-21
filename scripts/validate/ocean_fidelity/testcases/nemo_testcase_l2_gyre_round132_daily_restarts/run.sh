@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# USER-EXECUTED ACQUISITION ONLY. The agent may run --preflight, but must not
-# run the default path because it invokes makenemo and mpirun.
+# USER-EXECUTED ACQUISITION ONLY. The agent may run --preflight or
+# --resume-preflight, but must not run the default path because it invokes
+# mpirun. The default resumes the already-built Round-132 target; it never
+# invokes makenemo.
 refuse_on_error() {
   local status=$?
   trap - ERR
@@ -21,12 +23,12 @@ refuse() {
 }
 
 if [[ $# -gt 1 ]]; then
-  refuse 64 "usage: $0 [--preflight]"
+  refuse 64 "usage: $0 [--acquire|--preflight|--resume|--resume-preflight|--plant-binary]"
 fi
-readonly MODE=${1:---acquire}
+readonly MODE=${1:---resume}
 case "$MODE" in
-  --acquire|--preflight) ;;
-  *) refuse 64 "unknown mode $MODE; use --preflight or no argument" ;;
+  --acquire|--preflight|--resume|--resume-preflight|--plant-binary) ;;
+  *) refuse 64 "unknown mode $MODE; use --resume-preflight or no argument" ;;
 esac
 
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH
@@ -36,6 +38,7 @@ readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R132DAILY
 readonly ARCH=conda-scalarmath
 readonly PHASE3=/data/abyssal/dbalwada/nemo-testcases-l2/phase3
 readonly ROUND132=$PHASE3/round132
+readonly ROUND133=$PHASE3/round133
 readonly DAILY_CONTROL=$PHASE3/year_owners/nemo_seed0
 readonly MONTHLY_CONTROL=$PHASE3/year_fromrest/nemo_seed0
 readonly TARGET_RUN=$ROUND132/oracle_daily_restarts
@@ -53,6 +56,8 @@ readonly SOURCE_CARD_MANIFEST_SHA=977818735d03095ffbbac145014db463b781e543a0d77b
 readonly SOURCE_CPP_SHA=54bd2cead92cee1eaa8cb257c7f7cdea8fe39cc9fb0f47c7c0d5853b909b34b7
 readonly ARCH_SHA=132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561
 readonly DAY30_SHA=853b3d41b2aa512e934430cc1fcbf36ea574c2148419d6c4b98a1e16db94cfc6
+readonly TARGET_BINARY_SHA=24aefbfb9f4b596c4c0c8002c17811577f3622b4c4bf34add13d770caf988eff
+readonly ROUND132_COMMIT=e9f3bb6a557581f0cc5b18a60a27757b60f49ef7
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly HERE=$here
@@ -62,12 +67,18 @@ readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly SOURCE_BINARY=$SOURCE_ROOT/BLD/bin/nemo.exe
 readonly SOURCE_CPP=$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm
 readonly TARGET_CPP=$TARGET_ROOT/cpp_$TARGET_CFG.fcm
+readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
 readonly GATE=$HERE/../nemo_testcase_l2_gyre_round131_daily_record_gate.py
 readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round132.md
+readonly RECOVERY_PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round133.md
 readonly OLD_DAY30=$DAILY_CONTROL/GYRE_OMIP_L2_P3_00000180_restart.nc
 readonly MONTHLY_DAY30=$MONTHLY_CONTROL/GYRE_OMIP_L2_P3_00000180_restart.nc
+readonly PREPARED="namelist_ref namelist_top_cfg namelist_top_ref \
+namelist_pisces_cfg namelist_pisces_ref context_nemo.xml file_def_nemo.xml \
+iodef.xml axis_def_nemo.xml domain_def_nemo.xml grid_def_nemo.xml \
+field_def_nemo-oce.xml field_def_nemo-pisces.xml"
 
 cd "$REPO"
 if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
@@ -84,16 +95,13 @@ for path in "$SOURCE_ROOT/EXP00" "$SOURCE_ROOT/MY_SRC"; do
 done
 for path in "$SOURCE_BINARY" "$SOURCE_CPP" \
             "$NEMO_ROOT/arch/arch-$ARCH.fcm" "$FC" "$PY" "$GATE" \
-            "$PREREG" "$DAILY_CONTROL/namelist_cfg" \
+            "$PREREG" "$RECOVERY_PREREG" "$DAILY_CONTROL/namelist_cfg" \
             "$MONTHLY_CONTROL/namelist_cfg" "$OLD_DAY30" "$MONTHLY_DAY30"; do
   [[ -f "$path" ]] || refuse 64 "missing frozen acquisition input $path"
 done
 [[ -x "$SOURCE_BINARY" ]] || refuse 64 "source binary is not executable"
 [[ -x "$FC" && -x "$PY" ]] || refuse 64 "compiler or Python is not executable"
 
-if [[ -e "$TARGET_ROOT" || -e "$TARGET_RUN" ]]; then
-  refuse 64 "new target already exists: $TARGET_ROOT or $TARGET_RUN"
-fi
 if [[ "$(readlink -m "$TARGET_ROOT")" != \
       "$(readlink -m "$NEMO_ROOT/cfgs/$TARGET_CFG")" ]]; then
   refuse 64 "target configuration escaped its registered path"
@@ -101,6 +109,14 @@ fi
 if [[ "$(readlink -m "$TARGET_RUN")" != \
       "$(readlink -m "$ROUND132/oracle_daily_restarts")" ]]; then
   refuse 64 "target run escaped its registered path"
+fi
+if [[ "$MODE" == "--acquire" || "$MODE" == "--preflight" ]]; then
+  if [[ -e "$TARGET_ROOT" || -e "$TARGET_RUN" ]]; then
+    refuse 64 "new target already exists: $TARGET_ROOT or $TARGET_RUN"
+  fi
+else
+  [[ -d "$TARGET_ROOT" && -d "$TARGET_RUN" ]] || \
+    refuse 64 "retained target is incomplete: $TARGET_ROOT or $TARGET_RUN"
 fi
 
 source_card_manifest() {
@@ -130,6 +146,111 @@ digest_of() {
   local fields
   fields=$(sha256sum "$1")
   printf '%s\n' "${fields%% *}"
+}
+
+verify_retained_preparation() {
+  local path name producer expected_binary recorded_binary extra
+  local built_binary staged_binary partial_output
+  for path in "$BINARY" "$TARGET_RUN/nemo" "$TARGET_RUN/binary.sha256" \
+              "$TARGET_RUN/producer_commit.txt" \
+              "$TARGET_RUN/source_cfg.sha256" \
+              "$TARGET_RUN/source_copy_card.manifest" \
+              "$TARGET_RUN/target_copy_card_before_build.manifest" \
+              "$TARGET_RUN/toolchain.sha256" "$TARGET_RUN/namelist_cfg" \
+              "$TARGET_RUN/run.user.stdout.log" \
+              "$TARGET_RUN/run.user.time.log" "$TARGET_CPP"; do
+    [[ -f "$path" ]] || refuse 66 "retained acquisition lacks $path"
+  done
+  [[ -x "$BINARY" && -x "$TARGET_RUN/nemo" ]] || \
+    refuse 66 "retained built or staged binary is not executable"
+
+  producer=$(tr -d '[:space:]' <"$TARGET_RUN/producer_commit.txt")
+  [[ "$producer" == "$ROUND132_COMMIT" ]] || \
+    refuse 66 "retained producer commit is $producer, expected $ROUND132_COMMIT"
+
+  [[ "$(wc -l <"$TARGET_RUN/binary.sha256")" -eq 1 ]] || \
+    refuse 66 "retained binary manifest is not exactly one row"
+  read -r expected_binary recorded_binary extra <"$TARGET_RUN/binary.sha256"
+  [[ -z "${extra:-}" && "$recorded_binary" == "$BINARY" ]] || \
+    refuse 66 "retained binary manifest names an unexpected target"
+  [[ "$expected_binary" == "$TARGET_BINARY_SHA" ]] || \
+    refuse 66 "retained binary manifest moved from $TARGET_BINARY_SHA"
+  if [[ "$MODE" == "--plant-binary" ]]; then
+    expected_binary=0000000000000000000000000000000000000000000000000000000000000000
+  fi
+  built_binary=$(digest_of "$BINARY")
+  staged_binary=$(digest_of "$TARGET_RUN/nemo")
+  if [[ "$built_binary" != "$expected_binary" || \
+        "$staged_binary" != "$expected_binary" ]]; then
+    if [[ "$MODE" == "--plant-binary" ]]; then
+      printf 'REFUSE: STATUS PLANT-FIRED: retained-binary-identity\n' >&2
+      exit 1
+    fi
+    refuse 66 "retained built or staged binary differs from binary.sha256"
+  fi
+  if [[ "$MODE" == "--plant-binary" ]]; then
+    refuse 2 "retained-binary-identity plant stayed green"
+  fi
+
+  cmp -s "$PROVENANCE/source_cfg.sha256" \
+    "$TARGET_RUN/source_cfg.sha256" || \
+    refuse 66 "frozen source-card digest manifest moved"
+  cmp -s "$PROVENANCE/source_copy_card.manifest" \
+    "$TARGET_RUN/source_copy_card.manifest" || \
+    refuse 66 "frozen link-aware source-card manifest moved"
+  cmp -s "$TARGET_RUN/source_copy_card.manifest" \
+    "$TARGET_RUN/target_copy_card_before_build.manifest" || \
+    refuse 66 "retained pre-build target card differs from the source card"
+  [[ "$(awk '{print $1}' "$PROVENANCE/toolchain.sha256")" == \
+     "$(awk '{print $1}' "$TARGET_RUN/toolchain.sha256")" ]] || \
+    refuse 66 "retained Round-132 toolchain manifest moved"
+  cmp -s "$SOURCE_CPP" "$TARGET_CPP" || \
+    refuse 66 "retained target cpp keys differ from the source card"
+
+  for name in restart stprk3 dynspg_ts zdftke; do
+    path=$TARGET_ROOT/BLD/ppsrc/nemo/$name.f90
+    [[ -f "$path" ]] || refuse 66 "retained target lacks compiled $name.f90"
+    cmp -s "$SOURCE_ROOT/BLD/ppsrc/nemo/$name.f90" "$path" || \
+      refuse 66 "retained compiled $name.f90 differs from the source branch"
+  done
+  if nm -D "$BINARY" | grep -q '_ZGV'; then
+    refuse 66 "vector-math symbol present in the retained binary"
+  fi
+
+  for name in $PREPARED; do
+    [[ -e "$TARGET_ROOT/EXP00/$name" && -f "$TARGET_RUN/$name" ]] || \
+      refuse 66 "retained staged input is missing: $name"
+    cmp -s "$TARGET_ROOT/EXP00/$name" "$TARGET_RUN/$name" || \
+      refuse 66 "retained staged input differs from target card: $name"
+  done
+  cmp -s "$PROVENANCE/namelist_cfg" "$TARGET_RUN/namelist_cfg" || \
+    refuse 66 "retained staged namelist differs from the proved three-row delta"
+
+  partial_output=$(find "$TARGET_RUN" -maxdepth 1 -type f \
+    \( -name '*.nc' -o -name 'ocean.output*' \) -print -quit)
+  [[ -z "$partial_output" ]] || \
+    refuse 66 "retained run is not empty; found NEMO output $partial_output"
+  grep -Fq '/usr/bin/time: No such file or directory' \
+    "$TARGET_RUN/run.user.stdout.log" || \
+    refuse 66 "retained failure log lacks the registered missing-wrapper error"
+  if grep -hEq '^(STOP 0|NEMO_DONE|RUN_DONE)$' \
+      "$TARGET_RUN"/run.user.*.log; then
+    refuse 66 "retained failed run contains a completion marker"
+  fi
+  for path in "$TARGET_RUN/run.resume.time.log" \
+              "$TARGET_RUN/run.resume.stdout.log" \
+              "$TARGET_RUN/round133_resume_commit.txt" \
+              "$TARGET_RUN/round133_daily_record_audit.json" \
+              "$TARGET_RUN/round133_daily_record_audit.log" \
+              "$TARGET_RUN/round133_daily_restarts.sha256" \
+              "$TARGET_RUN/round133_daily_restarts.stamp"; do
+    [[ ! -e "$path" ]] || \
+      refuse 66 "retained target already has a recovery output: $path"
+  done
+
+  printf 'FAILED_RUN_PASS restarts=0 ocean_output=0 completion_markers=0\n'
+  printf 'RETAINED_BUILD_PASS binary_sha256=%s compiled_files=4 staged_inputs=13 producer=%s\n' \
+    "$TARGET_BINARY_SHA" "$producer"
 }
 
 readonly PROVENANCE=$(mktemp -d /tmp/gyre-r132-provenance.XXXXXXXX)
@@ -274,7 +395,7 @@ for name in restart stprk3 dynspg_ts zdftke; do
     | tee -a "$PROVENANCE/syntax_proof.log"
 done
 
-for mount in /tmp "$ROUND132" "$NEMO_ROOT"; do
+for mount in /tmp "$ROUND132" "$ROUND133" "$NEMO_ROOT"; do
   mkdir -p "$mount"
   free_kb=$(df -Pk "$mount" | awk 'NR==2 {print $4}')
   [[ "$free_kb" -ge 4194304 ]] || \
@@ -286,87 +407,102 @@ if [[ "$MODE" == "--preflight" ]]; then
   exit 0
 fi
 
-cd "$NEMO_ROOT"
-./makenemo -r GYRE_PISCES -n "$TARGET_CFG" -m "$ARCH" del_key 'key_xios'
-while IFS= read -r -d '' source; do
-  cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"
-done < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \
-  \( -type f -o -type l \) -print0 | sort -z)
-while IFS= read -r -d '' source; do
-  cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"
-done < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \
-  \( -type f -o -type l \) -print0 | sort -z)
-cp "$SOURCE_CPP" "$TARGET_CPP"
-
-copy_card_manifest "$TARGET_ROOT" \
-  >"$PROVENANCE/target_copy_card_before_build.manifest"
-cmp -s "$PROVENANCE/source_copy_card.manifest" \
-  "$PROVENANCE/target_copy_card_before_build.manifest" || \
-  refuse 68 "file-by-file target card differs from the source card"
-cmp -s "$SOURCE_CPP" "$TARGET_CPP" || \
-  refuse 68 "target cpp keys differ from the source card"
-target_exp_count=$(find "$TARGET_ROOT/EXP00" -maxdepth 1 \
-  \( -type f -o -type l \) | wc -l)
-target_my_count=$(find "$TARGET_ROOT/MY_SRC" -maxdepth 1 \
-  \( -type f -o -type l \) | wc -l)
-[[ "$target_exp_count" -eq "$SOURCE_EXP_COUNT" ]] || \
-  refuse 68 "target EXP00 count is $target_exp_count, expected $SOURCE_EXP_COUNT"
-[[ "$target_my_count" -eq "$SOURCE_MY_COUNT" ]] || \
-  refuse 68 "target MY_SRC count is $target_my_count, expected $SOURCE_MY_COUNT"
-
-touch "$TARGET_ROOT/MY_SRC/"*.F90
-./makenemo -n "$TARGET_CFG" -m "$ARCH"
-readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
-[[ -x "$BINARY" ]] || refuse 68 "new target binary is not executable"
-for name in restart stprk3 dynspg_ts zdftke; do
-  source=$SOURCE_ROOT/BLD/ppsrc/nemo/$name.f90
-  target=$TARGET_ROOT/BLD/ppsrc/nemo/$name.f90
-  [[ -f "$target" ]] || refuse 68 "new target lacks compiled $name.f90"
-  cmp -s "$source" "$target" || \
-    refuse 68 "compiled $name.f90 differs from the source-card branch"
-done
-if nm -D "$BINARY" | grep -q '_ZGV'; then
-  refuse 68 "vector-math symbol present in the new target binary"
+if [[ "$MODE" == "--resume" || "$MODE" == "--resume-preflight" || \
+      "$MODE" == "--plant-binary" ]]; then
+  verify_retained_preparation
+  if [[ "$MODE" == "--resume-preflight" ]]; then
+    printf 'ROUND133_DAILY_RESTART_RESUME_PREFLIGHT_READY %s\n' "$TARGET_RUN"
+    exit 0
+  fi
 fi
-sha256sum "$BINARY" >"$PROVENANCE/binary.sha256"
 
-mkdir "$TARGET_RUN"
-readonly PREPARED="namelist_ref namelist_top_cfg namelist_top_ref \
-namelist_pisces_cfg namelist_pisces_ref context_nemo.xml file_def_nemo.xml \
-iodef.xml axis_def_nemo.xml domain_def_nemo.xml grid_def_nemo.xml \
-field_def_nemo-oce.xml field_def_nemo-pisces.xml"
-for name in $PREPARED; do
-  [[ -e "$TARGET_ROOT/EXP00/$name" ]] || \
-    refuse 68 "copied source card lacks prepared input $name"
-  cp -L "$TARGET_ROOT/EXP00/$name" "$TARGET_RUN/$name"
+if [[ "$MODE" == "--acquire" ]]; then
+  cd "$NEMO_ROOT"
+  ./makenemo -r GYRE_PISCES -n "$TARGET_CFG" -m "$ARCH" del_key 'key_xios'
+  while IFS= read -r -d '' source; do
+    cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"
+  done < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \
+    \( -type f -o -type l \) -print0 | sort -z)
+  while IFS= read -r -d '' source; do
+    cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"
+  done < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \
+    \( -type f -o -type l \) -print0 | sort -z)
+  cp "$SOURCE_CPP" "$TARGET_CPP"
+
+  copy_card_manifest "$TARGET_ROOT" \
+    >"$PROVENANCE/target_copy_card_before_build.manifest"
+  cmp -s "$PROVENANCE/source_copy_card.manifest" \
+    "$PROVENANCE/target_copy_card_before_build.manifest" || \
+    refuse 68 "file-by-file target card differs from the source card"
+  cmp -s "$SOURCE_CPP" "$TARGET_CPP" || \
+    refuse 68 "target cpp keys differ from the source card"
+  target_exp_count=$(find "$TARGET_ROOT/EXP00" -maxdepth 1 \
+    \( -type f -o -type l \) | wc -l)
+  target_my_count=$(find "$TARGET_ROOT/MY_SRC" -maxdepth 1 \
+    \( -type f -o -type l \) | wc -l)
+  [[ "$target_exp_count" -eq "$SOURCE_EXP_COUNT" ]] || \
+    refuse 68 "target EXP00 count is $target_exp_count, expected $SOURCE_EXP_COUNT"
+  [[ "$target_my_count" -eq "$SOURCE_MY_COUNT" ]] || \
+    refuse 68 "target MY_SRC count is $target_my_count, expected $SOURCE_MY_COUNT"
+
+  touch "$TARGET_ROOT/MY_SRC/"*.F90
+  ./makenemo -n "$TARGET_CFG" -m "$ARCH"
+  [[ -x "$BINARY" ]] || refuse 68 "new target binary is not executable"
+  for name in restart stprk3 dynspg_ts zdftke; do
+    source=$SOURCE_ROOT/BLD/ppsrc/nemo/$name.f90
+    target=$TARGET_ROOT/BLD/ppsrc/nemo/$name.f90
+    [[ -f "$target" ]] || refuse 68 "new target lacks compiled $name.f90"
+    cmp -s "$source" "$target" || \
+      refuse 68 "compiled $name.f90 differs from the source-card branch"
+  done
+  if nm -D "$BINARY" | grep -q '_ZGV'; then
+    refuse 68 "vector-math symbol present in the new target binary"
+  fi
+  sha256sum "$BINARY" >"$PROVENANCE/binary.sha256"
+
+  mkdir "$TARGET_RUN"
+  for name in $PREPARED; do
+    [[ -e "$TARGET_ROOT/EXP00/$name" ]] || \
+      refuse 68 "copied source card lacks prepared input $name"
+    cp -L "$TARGET_ROOT/EXP00/$name" "$TARGET_RUN/$name"
+  done
+  write_namelist "$TARGET_RUN/namelist_cfg"
+  cmp -s "$PROVENANCE/namelist_cfg" "$TARGET_RUN/namelist_cfg" || \
+    refuse 68 "staged namelist differs from the preflight-proved namelist"
+  cp "$BINARY" "$TARGET_RUN/nemo"
+  cmp -s "$BINARY" "$TARGET_RUN/nemo" || \
+    refuse 68 "staged executable differs from the new target binary"
+  cp "$PROVENANCE"/* "$TARGET_RUN/"
+else
+  printf '%s\n' "$COMMIT" >"$TARGET_RUN/round133_resume_commit.txt"
+fi
+
+if [[ "$MODE" == "--resume" ]]; then
+  readonly RUN_TIME_LOG=$TARGET_RUN/run.resume.time.log
+  readonly RUN_STDOUT_LOG=$TARGET_RUN/run.resume.stdout.log
+else
+  readonly RUN_TIME_LOG=$TARGET_RUN/run.user.time.log
+  readonly RUN_STDOUT_LOG=$TARGET_RUN/run.user.stdout.log
+fi
+for path in "$RUN_TIME_LOG" "$RUN_STDOUT_LOG"; do
+  [[ ! -e "$path" ]] || refuse 69 "run log already exists: $path"
 done
-write_namelist "$TARGET_RUN/namelist_cfg"
-cmp -s "$PROVENANCE/namelist_cfg" "$TARGET_RUN/namelist_cfg" || \
-  refuse 68 "staged namelist differs from the preflight-proved namelist"
-cp "$BINARY" "$TARGET_RUN/nemo"
-cmp -s "$BINARY" "$TARGET_RUN/nemo" || \
-  refuse 68 "staged executable differs from the new target binary"
-cp "$PROVENANCE"/* "$TARGET_RUN/"
 
-(
-  cd "$TARGET_RUN"
-  export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-  printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    >run.user.time.log
-  set +e
-  /usr/bin/time -p -o run.user.time.log -a \
-    mpirun -np 1 --oversubscribe ./nemo 2>&1 | tee run.user.stdout.log
-  run_status=${PIPESTATUS[0]}
-  set -e
-  if [[ "$run_status" -ne 0 ]]; then
-    refuse 69 "NEMO acquisition process exited $run_status"
-  fi
-  if ! grep -Fxq 'STOP 0' run.user.stdout.log; then
-    refuse 69 "NEMO run did not terminate with STOP 0"
-  fi
-  printf 'NEMO_FINISHED_UTC=%s\nNEMO_DONE\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
-)
+cd "$TARGET_RUN"
+export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  >"$RUN_TIME_LOG"
+if mpirun -np 1 --oversubscribe ./nemo 2>&1 | tee "$RUN_STDOUT_LOG"; then
+  :
+else
+  run_status=$?
+  refuse 69 "NEMO acquisition pipeline exited $run_status"
+fi
+if ! grep -Fxq 'STOP 0' "$RUN_STDOUT_LOG"; then
+  refuse 69 "NEMO run did not terminate with STOP 0"
+fi
+printf 'NEMO_FINISHED_UTC=%s\nNEMO_DONE\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$RUN_TIME_LOG"
 
 for pattern in \
   'ocean time step.*rn_Dt.*14400\.000000000000' \
@@ -434,17 +570,15 @@ cmp -s "$TARGET_RUN/GYRE_OMIP_L2_P3_00000180_restart.nc" \
 printf 'TWIN_IDENTICAL_OLD_DAILY GYRE_OMIP_L2_P3_00000180_restart.nc\n'
 
 "$PY" "$GATE" --self-check \
-  >"$TARGET_RUN/round132_gate_self_check.log" 2>&1
-grep -Fq 'SELF-CHECK OK' "$TARGET_RUN/round132_gate_self_check.log" || \
+  >"$TARGET_RUN/round133_gate_self_check.log" 2>&1
+grep -Fq 'SELF-CHECK OK' "$TARGET_RUN/round133_gate_self_check.log" || \
   refuse 72 "Round-131 complete-record self-check lacks its success marker"
 for plant in missing-boundary required-variable; do
-  log=$TARGET_RUN/round132_${plant}_plant.log
-  set +e
-  "$PY" "$GATE" --self-check --plant "$plant" >"$log" 2>&1
-  plant_status=$?
-  set -e
-  if [[ "$plant_status" -eq 0 ]]; then
+  log=$TARGET_RUN/round133_${plant}_plant.log
+  if "$PY" "$GATE" --self-check --plant "$plant" >"$log" 2>&1; then
     refuse 72 "Round-131 $plant plant stayed green"
+  else
+    plant_status=$?
   fi
   if [[ "$plant_status" -ne 1 ]]; then
     refuse 72 "Round-131 $plant plant exited $plant_status, expected 1"
@@ -455,25 +589,23 @@ done
 
 "$PY" "$GATE" --audit --daily-root "$TARGET_RUN" \
   --monthly-root "$MONTHLY_CONTROL" --expect-commit "$COMMIT" \
-  --output "$TARGET_RUN/round132_daily_record_audit.json" \
-  | tee "$TARGET_RUN/round132_daily_record_audit.log"
-grep -Fxq 'STATUS ADMITTED' "$TARGET_RUN/round132_daily_record_audit.log" || \
+  --output "$TARGET_RUN/round133_daily_record_audit.json" \
+  | tee "$TARGET_RUN/round133_daily_record_audit.log"
+grep -Fxq 'STATUS ADMITTED' "$TARGET_RUN/round133_daily_record_audit.log" || \
   refuse 72 "daily-record gate did not print STATUS ADMITTED"
 
-(
-  cd "$TARGET_RUN"
-  sha256sum GYRE_OMIP_L2_P3_*_restart.nc >daily_restarts.sha256
-  [[ "$(wc -l <daily_restarts.sha256)" -eq "$EXPECTED_COUNT" ]] || \
-    refuse 73 "restart digest manifest does not contain $EXPECTED_COUNT rows"
-  manifest_digest=$(digest_of daily_restarts.sha256)
-  printf '%s %s %s\n' "$manifest_digest" "$COMMIT" \
-    daily_restarts.sha256 >daily_restarts.stamp
-  sha256sum daily_restarts.sha256 daily_restarts.stamp \
-    round132_daily_record_audit.json round132_daily_record_audit.log \
-    round132_gate_self_check.log round132_*_plant.log \
-    >round132_outputs.sha256
-  printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
-)
+cd "$TARGET_RUN"
+sha256sum GYRE_OMIP_L2_P3_*_restart.nc >round133_daily_restarts.sha256
+[[ "$(wc -l <round133_daily_restarts.sha256)" -eq "$EXPECTED_COUNT" ]] || \
+  refuse 73 "restart digest manifest does not contain $EXPECTED_COUNT rows"
+manifest_digest=$(digest_of round133_daily_restarts.sha256)
+printf '%s %s %s\n' "$manifest_digest" "$COMMIT" \
+  round133_daily_restarts.sha256 >round133_daily_restarts.stamp
+sha256sum round133_daily_restarts.sha256 round133_daily_restarts.stamp \
+  round133_daily_record_audit.json round133_daily_record_audit.log \
+  round133_gate_self_check.log round133_*_plant.log \
+  >round133_outputs.sha256
+printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$RUN_TIME_LOG"
 
-printf 'ROUND132_DAILY_RESTART_RECORD_READY %s\n' "$TARGET_RUN"
+printf 'ROUND133_DAILY_RESTART_RECORD_READY %s\n' "$TARGET_RUN"
