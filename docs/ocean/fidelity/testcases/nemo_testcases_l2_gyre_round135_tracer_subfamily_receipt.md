@@ -244,7 +244,25 @@ U/V, and no immutable before arm changes.
 
 ## Independent adversarial review
 
-PENDING CLEAN-DRAFT REVIEW.
+The required separate command was invoked from clean draft-receipt commit
+`436ffd83545fd3345c4222125929121cb76cb858` with `codex exec --sandbox
+read-only -C` and a prompt that tried to refute record reuse, the control,
+one-variable isolation, cadence counts, every registered row, non-additive
+interpretation, birth localization, plants, the no-production-change table,
+and cross-card scope. It returned exit 1 before reading the diff. Its complete
+Codex output, verbatim, was:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Thus **independent review unavailable in-sandbox**. The retained log is
+`phase3/round135/codex_review.log`, SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+It issued no verdict and therefore no `DO NOT SHIP` verdict. This receipt does
+not mislabel the infrastructure failure as an approving review.
 
 ## Verification
 
@@ -256,8 +274,19 @@ gate, and the spread-floor digest ratchet reported exactly:
 80 passed in 59.99s
 ```
 
-The citation gate, shifted-citation plant, final focused rerun, and broad-tree
-attempt are recorded after the clean draft review below.
+The clean citation gate found three citations, zero unmapped citations, zero
+failures, an empty whole-map audit, and `status: PASS`. Its JSON is
+`phase3/round135/citation_gate.json`, SHA-256
+`dc9e51b6fd0a79e7267aa78f5b3160dac4f0e0dda24311dffbd82fe4ce68b4f2`.
+Shifting the accepted-state citation's first endpoint by two lines exited 1,
+reported `SYMBOL-NOT-AT-LINE`, and produced
+`citation_gate_shifted_plant.json`, SHA-256
+`f15c825d4bee55470326663a23e95d7284e2d22eb757b9b61d77d2638bb1716a`.
+The focused log SHA-256 is
+`5094b4b6cc76bb5c82631baf54f785ebe22dc9ed66baf6a4cd8c65367412351a`.
+
+The final citation regression suite and requested broad-tree attempt are
+reported after they run from the clean post-review receipt commit.
 
 ## OPEN — next round
 
