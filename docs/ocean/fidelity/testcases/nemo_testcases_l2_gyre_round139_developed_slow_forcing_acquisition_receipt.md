@@ -134,6 +134,8 @@ The focused CPU/x64 invocation covered the inherited external-record parser,
 the extended Round-83 slow-forcing walk and all new Round-139 parser/replay
 controls, every receipt-citation control, and the full fidelity time-level
 unit file. Its exact summary is `66 passed in 2.54s`.
+The same focused set was rerun from clean receipt commit `a1d5153ac` and
+reported `66 passed in 2.45s`.
 
 Evidence digests before the final post-receipt citation rerun:
 
@@ -147,6 +149,7 @@ Evidence digests before the final post-receipt citation rerun:
 | `citation_gate_shifted_plant.json` | `3addae94fae19b1cf5748ee05ef0d6546cc77a64809b5bb721b1e2a1b46edeb7` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
 | `focused_tests.log` | `12abf566cb464f24a41ef5d2435e86fdcb247b8477cb8c3a768aaa74c01c40fc` |
+| `focused_tests_final.log` | `02645a8f4ba6aaec5390ea47de4aa958295b96f64586e6583a87e69478c9fd73` |
 | `dynspg_ts_round139.patch` | `6f32f90a592053572a751088f7036e8d75dfb4a6da9877790f7bc4ae17d8eb70` |
 | `run.sh` | `9d944098e4c8bfcfe5672c7f80d704e7895905079f64f84bc24179d7669b04a4` |
 
