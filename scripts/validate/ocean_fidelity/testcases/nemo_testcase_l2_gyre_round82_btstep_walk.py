@@ -194,7 +194,8 @@ def _context(args):
 
 
 def _capture_external_context(args, card, seeded, freshwater, surface, *,
-                              base=None, eta_after_override=None):
+                              base=None, eta_after_override=None,
+                              traced_hooks=None, plain_hooks=None):
     """Capture all external substeps in one complete production closure."""
     captures = []
     real_barotropic = model_module.barotropic_substeps_latlon_cgrid
@@ -230,6 +231,7 @@ def _capture_external_context(args, card, seeded, freshwater, surface, *,
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
+        _nemo_ws_test_hooks=traced_hooks,
     )
     traced_model.prime_step_caches(seeded)
     model_module.barotropic_substeps_latlon_cgrid = capture_barotropic
@@ -247,7 +249,8 @@ def _capture_external_context(args, card, seeded, freshwater, surface, *,
         require(_pytree_identity(duplicate, captures[0])["bit_exact"],
                 "full-step barotropic callbacks differ")
     plain_model = model_module.LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=plain_hooks)
     plain_model.prime_step_caches(seeded)
     plain_state = jax.device_get(_execute_step(
         plain_model, seeded, card.dt_s, freshwater, surface,

@@ -550,17 +550,12 @@ def measure_round140_developed(args) -> dict[str, object]:
     require(all(row["bit_exact"] for row in mask_rows.values()),
             "developed model masks differ from the admitted record")
 
-    (_, _, _, _, _, captured) = round82._capture_external_context(
+    captured, producer = _round140_callback_trace(
         args, card, state, freshwater, surface,
-        eta_after_override=jnp.asarray(payload["ssha"]))
-    ordinary = _round117_live_trace(
-        card, state, freshwater, surface, args.execution_mode,
-        eta_after_override=jnp.asarray(payload["ssha"]))
-    observer_identity = round82._pytree_identity(
-        ordinary.state_after, captured.plain_state)
+        jnp.asarray(payload["ssha"]))
+    observer_identity = captured.trace_state_identity
     require(observer_identity["bit_exact"],
-            "developed live operand hook moved the returned production state")
-    producer = ordinary.slow_forcing_producer
+            "developed operand callback moved the returned production state")
     live = {
         "u": {
             "incoming": native_u(producer["incoming_u"]),
@@ -618,11 +613,10 @@ def measure_round140_developed(args) -> dict[str, object]:
                 producer["incoming_u"], planted_native, "u")),
             jnp.asarray(producer["incoming_v"]),
         )
-        planted = _round117_live_trace(
-            card, state, freshwater, surface, args.execution_mode,
-            incoming_override=incoming_override,
-            eta_after_override=jnp.asarray(payload["ssha"]))
-        planted_producer = planted.slow_forcing_producer
+        planted_trace, planted_producer = _round140_callback_trace(
+            args, card, state, freshwater, surface,
+            jnp.asarray(payload["ssha"]),
+            incoming_override=incoming_override)
         plant_rows = {
             "incoming_u": round82._developed_comparison(
                 native_u(planted_producer["incoming_u"]),
@@ -635,6 +629,8 @@ def measure_round140_developed(args) -> dict[str, object]:
                 live["u"]["final"], active["u"]),
         }
         plant_fires = bool(
+            planted_trace.trace_state_identity["bit_exact"]
+            and
             plant_rows["incoming_u"]["differing_cells"] == 1
             and plant_rows["coriolis_u"]["bit_exact"]
             and plant_rows["final_u"]["differing_cells"] > 0)
@@ -657,11 +653,10 @@ def measure_round140_developed(args) -> dict[str, object]:
         jnp.asarray(_full_from_native(
             producer["incoming_v"], fields["incoming_v"], "v")),
     )
-    directed = _round117_live_trace(
-        card, state, freshwater, surface, args.execution_mode,
-        incoming_override=nemo_incoming_override,
-        eta_after_override=jnp.asarray(payload["ssha"]))
-    directed_producer = directed.slow_forcing_producer
+    directed_trace, directed_producer = _round140_callback_trace(
+        args, card, state, freshwater, surface,
+        jnp.asarray(payload["ssha"]),
+        incoming_override=nemo_incoming_override)
     directed_rows = {
         "incoming_u_vs_record": round82._developed_comparison(
             native_u(directed_producer["incoming_u"]),
@@ -697,6 +692,8 @@ def measure_round140_developed(args) -> dict[str, object]:
         "mask_pair_bit": bool(
             rows["mask_u"]["bit_exact"] and rows["mask_v"]["bit_exact"]),
         "NEMO_incoming_pair_makes_final_pair_bit": bool(
+            directed_trace.trace_state_identity["bit_exact"]
+            and
             directed_rows["final_u_vs_record"]["bit_exact"]
             and directed_rows["final_v_vs_record"]["bit_exact"]),
         "ordinary_trace_reproduces_round138_final_pair": bool(
@@ -813,6 +810,45 @@ def _round117_live_trace(
     return jax.device_get(round82._execute_step(
         model, seeded, card.dt_s, freshwater, surface, execution_mode,
         eta_after_override=eta_after_override))
+
+
+def _round140_callback_trace(
+    args, card, state, freshwater, surface, eta_after_override, *,
+    incoming_override=None,
+):
+    """Capture slow operands without changing the production return value."""
+    captures = []
+
+    def sink(incoming_u, incoming_v, coriolis_u, coriolis_v,
+             mask_u, mask_v, final_u, final_v):
+        captures.append({
+            "incoming_u": np.asarray(incoming_u),
+            "incoming_v": np.asarray(incoming_v),
+            "coriolis_u": np.asarray(coriolis_u),
+            "coriolis_v": np.asarray(coriolis_v),
+            "mask_u": np.asarray(mask_u),
+            "mask_v": np.asarray(mask_v),
+            "final_u": np.asarray(final_u),
+            "final_v": np.asarray(final_v),
+        })
+
+    traced_hooks = model_module._NEMOWSRK3TestHooks(
+        slow_forcing_incoming_override=incoming_override,
+        barotropic_slow_forcing_override=sink,
+    )
+    plain_hooks = model_module._NEMOWSRK3TestHooks(
+        slow_forcing_incoming_override=incoming_override,
+    )
+    (_, _, _, _, _, trace) = round82._capture_external_context(
+        args, card, state, freshwater, surface,
+        eta_after_override=eta_after_override,
+        traced_hooks=traced_hooks, plain_hooks=plain_hooks)
+    require(captures, "Round-140 slow-forcing callback did not fire")
+    for duplicate in captures[1:]:
+        require(round82._pytree_identity(
+            duplicate, captures[0])["bit_exact"],
+            "Round-140 slow-forcing callbacks differ")
+    return trace, captures[0]
 
 
 @jax.jit

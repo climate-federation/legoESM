@@ -1043,10 +1043,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # stage program.  Private WRITE-only round-51 instrument; no constructible
     # model configuration can select it.
     expose_live_stage_operands: bool = False
-    # Private one-variable controls for the frozen barotropic forcing walk.
-    # The incoming override lands immediately before dyn_cor_2D's equivalent;
-    # the final override lands immediately after its subtract-and-mask.  They
-    # are test-only arrays, never constructible configuration selectors.
+    # Private controls for the frozen barotropic forcing walk.  Incoming arrays
+    # land before dyn_cor_2D's equivalent; final arrays land after it.  A
+    # callable final value is a WRITE-only operand observer instead.  None is
+    # constructible as a model configuration selector.
     slow_forcing_incoming_override: object = None
     barotropic_slow_forcing_override: object = None
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
@@ -5966,18 +5966,18 @@ class LatLonCGridOceanModel:
                         _een_pre_shared = _een_pre_built
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
                     F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
-                    _slow_final_override = (
-                        self._nemo_ws_test_hooks
-                        .barotropic_slow_forcing_override)
-                    if _slow_final_override is not None:
+                    _slow_final_override = self._nemo_ws_test_hooks.barotropic_slow_forcing_override
+                    if callable(_slow_final_override):
+                        jax.debug.callback(
+                            _slow_final_override, _slow_incoming_u, _slow_incoming_v,
+                            _cor_u_sub, _cor_v_sub, state.u_mask.data, state.v_mask.data,
+                            F_slow_u, F_slow_v, ordered=True)
+                    elif _slow_final_override is not None:
                         F_slow_u, F_slow_v = _slow_final_override
                     _nemo_ws_live_slow_forcing_producer = {
-                        "rhs_u": du_dt,
-                        "rhs_v": dv_dt,
-                        "thickness_u": h_u_pre,
-                        "thickness_v": h_v_pre,
-                        "depth_u": H_u_pre,
-                        "depth_v": H_v_pre,
+                        "rhs_u": du_dt, "rhs_v": dv_dt,
+                        "thickness_u": h_u_pre, "thickness_v": h_v_pre,
+                        "depth_u": H_u_pre, "depth_v": H_v_pre,
                         "post_wind_u": _F_slow_wind_u,
                         "post_wind_v": _F_slow_wind_v,
                         "post_drag_u": _F_slow_drag_u,
