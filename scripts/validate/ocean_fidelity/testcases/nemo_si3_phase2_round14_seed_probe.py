@@ -30,6 +30,7 @@ from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
     step_ice_rheo_card,
 )
 from legoesm.ice.transport import SI3_PRATHER_MOMENT_NAMES
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 HERE = Path(__file__).resolve().parent
 ORACLE_GATE = HERE / "nemo_si3_oracle_gate.py"
@@ -451,6 +452,7 @@ def run_probe(
 
     report = {
         "format": "nemo-si3-phase2-round14-seed-producer-v1",
+        "worktree": worktree_stamp(),
         "status": "DEBT" if plant else classification,
         "exit_code": 1 if plant or classification != "PRODUCER-NAMED" else 0,
         "execution": "CPU/fp64 production JIT; scalar-libm card",

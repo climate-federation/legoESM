@@ -19,6 +19,7 @@ from pathlib import Path
 
 import netCDF4
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 _LANE1_PATH = Path(__file__).with_name("nemo_testcase_oracle_gate.py")
 _SPEC = importlib.util.spec_from_file_location("nemo_testcase_oracle_gate_l1", _LANE1_PATH)
@@ -554,6 +555,7 @@ def disposition_template(root: Path, rung: str) -> dict:
     nlay_i, nlay_s, nn_icesal, ponds = _resolved_ice_settings(root)
     return {
         "format": FORMAT,
+        "worktree": worktree_stamp(),
         "git_sha": git_sha(),
         "rung": rung,
         "files": {name: sha256(path) for name, path in files.items()},

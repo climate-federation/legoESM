@@ -26,6 +26,7 @@ from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
     _forcing_for_state,
     build_ice_rheo_card,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 from legoesm import constants
 
@@ -509,6 +510,7 @@ def run_probe(
     status = "BIT-EXACT" if clean and not plant else "DEBT"
     report = {
         "format": "nemo-si3-phase2-round13-active-aevp-probe-v1",
+        "worktree": worktree_stamp(),
         "status": status,
         "execution": "CPU/fp64 production JIT; scalar-libm transcendental policy",
         "clock": {

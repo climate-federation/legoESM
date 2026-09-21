@@ -19,6 +19,7 @@ from typing import cast
 import jax
 import netCDF4
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 POINTWISE_BAR = 1.0e-15
 PLANTED_STRESS_DIVERGENCE_WEIGHT = 0.5001
@@ -226,6 +227,7 @@ def run_gate(root: Path = ROOT, *, plant_geometry: bool = False) -> tuple[dict, 
     overall_status = _status_from_rows(rows, unmeasured)
     report = {
         "format": "nemo-si3-phase2-rung33-partial-v1",
+        "worktree": worktree_stamp(),
         "status": overall_status,
         "numeric_status": numeric_status,
         "bar": POINTWISE_BAR,

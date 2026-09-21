@@ -13,6 +13,7 @@ from typing import NamedTuple, cast
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d_rhg/final")
 HERE = Path(__file__).resolve().parent
@@ -763,6 +764,7 @@ def run_replay(root: Path = ROOT) -> tuple[dict[str, object], int]:
         classification = "IMPLEMENTATION_OWNER"
     report = {
         "format": "nemo-si3-phase2-rung33-written-order-replay-v1",
+        "worktree": worktree_stamp(),
         "status": classification,
         "bar": POINTWISE_BAR,
         "ulp_limit": ULP_LIMIT,

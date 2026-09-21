@@ -12,6 +12,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 _PREREGISTER_COMMIT = "9b369d9d082"
 _GRID_N_LAT = 8
@@ -106,6 +107,7 @@ def run_guard(before_ref: str = _PREREGISTER_COMMIT) -> dict[str, object]:
         }
     return {
         "format": "nemo-si3-rung33-agrid-guard-v2",
+        "worktree": worktree_stamp(),
         "before_ref": before_ref,
         "checkout": str(_REPO_ROOT),
         "schemes": schemes,

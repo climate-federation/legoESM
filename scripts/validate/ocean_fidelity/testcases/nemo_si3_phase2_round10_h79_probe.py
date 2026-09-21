@@ -20,6 +20,7 @@ import netCDF4
 import numpy as np
 from legoesm.ice.dynamics import _SI3_ICE_PRESENCE
 from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import build_ice_rheo_card
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 from legoesm import constants
 
@@ -155,6 +156,7 @@ def run_probe(root: Path = ROOT, probe_root: Path = PROBE_ROOT) -> tuple[dict[st
     vector_binds = vector_row["max_abs"] != 0.0
     report = {
         "format": "nemo-si3-phase2-round10-h79-libm-probe-v1",
+        "worktree": worktree_stamp(),
         "status": "BIT-EXACT" if scalar_exact and vector_binds else "DEBT",
         "execution": "CPU/fp64 host replay; NEMO operand from WRITE-only copy-run dump",
         "source": {

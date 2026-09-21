@@ -14,6 +14,7 @@ from typing import cast
 import jax
 import netCDF4
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 POINTWISE_BAR = 1.0e-15
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d_rhg/final")
@@ -530,6 +531,7 @@ def run_gate(root: Path = ROOT) -> tuple[dict[str, object], int]:
     overall_status = rung33_gate._status_from_rows(rows)
     report = {
         "format": "nemo-si3-phase2-rung33-trajectory-v1",
+        "worktree": worktree_stamp(),
         "status": overall_status,
         "bar": POINTWISE_BAR,
         "backend": jax.default_backend(),
