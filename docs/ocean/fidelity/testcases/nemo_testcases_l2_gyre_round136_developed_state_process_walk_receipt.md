@@ -241,7 +241,111 @@ pass:
 * developed-state/year-owner gate: `30 passed in 30.71s`;
 * FCT advection unit file: `27 passed in 26.19s`;
 * receipt citation unit file: `16 passed in 1.95s`;
-* full `tests/ocean/fidelity tests/ocean/unit`: `TEST_SUMMARY_PENDING`.
+* the first combined year-owner/advection invocation reported `1 failed, 56
+  passed`; its only failure was the pre-existing `1.7826e-10` versus `1e-10`
+  conservation threshold, and the advection file then passed alone as the
+  preceding `27 passed` line records;
+* a clean-tree rerun of the 16 fidelity tests that had correctly refused an
+  uncommitted receipt reported `72 passed in 17.05s`;
+* the worktree-stamp/RK3/MPAS check reported `1 failed, 2 passed, 1 warning in
+  93.38s`: the stamp ratchet and named RK3 test passed; the unrelated MPAS
+  bottom-drag test retained its float32/float64 CG-carry mismatch.
+
+The required combined `tests/ocean/fidelity tests/ocean/unit -n 12` sweep was
+run once. It reached 94% but nine workers aborted in JAX compilation and the
+xdist parent stopped making progress; interruption emitted no summary line.
+A second fidelity-only `-n 4` sweep reached 95% and likewise emitted no summary
+before its remaining long-running gates were bounded. This is the exact
+large-suite compiler-limit failure mode warned about in `AGENTS.md`, so the
+run was split into fresh processes rather than assigned a false pass/fail
+verdict.
+
+The completed 20-file split invocations emitted these exact summary lines:
+
+| group | exact pytest summary |
+|---:|---|
+| 01 | `348 passed, 1 skipped in 19.19s` |
+| 02 | `155 passed, 4 skipped in 85.51s` |
+| 03 | `7 failed, 192 passed in 145.21s` |
+| 04 | `5 failed, 202 passed in 173.41s` |
+| 05 | `6 failed, 151 passed, 1 skipped in 52.02s` |
+| 06 | timeout after ten minutes; no summary emitted |
+| 07 | `130 passed, 2 skipped in 17.14s` |
+| 08 | `4 failed, 279 passed, 1 xfailed, 1 warning in 275.01s` |
+| 09 | `1 failed, 293 passed, 1 xfailed, 4 warnings in 539.82s` |
+| 10 | `1 failed, 304 passed, 1 skipped in 281.79s` |
+| 11 | timeout after ten minutes; no summary emitted |
+
+Sixteen of the group-03/04/05 failures were the intended dirty-tree stamp
+refusal; after the receipt was committed those exact tests are the `72 passed`
+clean-tree line above. Of the remaining completed-split failures, five match
+the supplied 87-node baseline exactly (the four float32 advection-gradient
+cases and baroclinic decomposition). The SI3 scalar-math failure is the later
+operator-registered pre-existing `A MY_SRC is not verbatim` debt. The sole
+failure absent from that old list is
+`test_mpas_bbl_keeps_thin_partial_cell_run_stable`; an isolated rerun reproduces
+it in `barotropic_implicit_mpas` before any changed Round-136 path executes.
+
+The timeout groups were then run one file per fresh process. Files 101--120
+emitted, in order:
+
+```text
+2 passed in 0.27s
+3 passed in 0.27s
+3 passed in 0.80s
+5 passed in 0.58s
+18 passed in 0.45s
+timeout after 180s; no summary (OVERFLOW barotropic gate, four tests completed)
+10 passed in 9.24s
+3 passed in 6.35s
+8 passed in 0.30s
+timeout after 180s; no summary (phase-3 stage-sweep gate, one test completed)
+9 passed in 0.34s
+16 passed in 2.02s
+21 passed in 1.42s
+10 passed in 7.39s
+8 passed in 0.47s
+50 passed in 27.32s
+17 passed in 3.88s
+8 passed in 65.20s
+7 passed in 0.46s
+5 passed in 0.40s
+```
+
+Files 201--220 emitted, in order:
+
+```text
+8 passed in 0.13s
+9 passed in 14.37s
+2 passed in 0.09s
+5 passed in 0.34s
+4 passed in 6.87s
+4 passed in 0.09s
+6 passed in 0.69s
+25 passed in 0.39s
+28 passed in 0.41s
+3 passed in 0.21s
+5 passed in 0.34s
+4 passed in 2.52s
+timeout after 180s; no summary (CORE2 corrected-cache file, four tests completed)
+4 passed in 1.17s
+5 passed in 3.19s
+19 passed in 9.00s
+16 passed in 66.15s
+10 passed, 2 warnings in 49.31s
+39 passed in 2.16s
+31 passed in 17.68s
+```
+
+Finally, the nine selectors interrupted by the combined xdist run were all
+rerun in fresh processes. Seven correctly named invocations emitted
+`1 passed in 6.46s`, `1 passed in 12.37s`, `1 passed in 7.74s`, `5 passed in
+3.59s`, `1 passed in 1.22s`, `1 passed in 43.32s`, and `1 passed in 75.35s`.
+Two initially incomplete node selectors each emitted `no tests ran`; their
+class-qualified correction emitted `2 passed in 66.32s`. Thus all nine
+interrupted selectors pass outside the exhausted workers. The full-tree sweep
+is honestly recorded as infrastructure-incomplete, not green; every test that
+directly exercises this round's changed paths is green.
 
 After measurement, the source statement that constructs one flux pair was
 consolidated from a parenthesized multiline assignment to the same one-line
