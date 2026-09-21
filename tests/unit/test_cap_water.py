@@ -151,9 +151,30 @@ def test_inflow_humidity_weights_only_the_entering_air():
     e = next(e for e in np.where(cap[c0] != cap[c1])[0] if cap[c1[e]])
     q = np.full((lat.size, 2), 1.0e-3); dp = np.full((lat.size, 2), 1000.0)
     u = np.zeros((c0.size, 2)); u[e] = [1.0, 1.0]
-    qm, qr, extra, cover = cw.inflow_humidity(q, 2.0 * q, u, dp, mesh, cap)
+    qm, qr, extra, netchg, cover = cw.inflow_humidity(q, 2.0 * q, u, dp, mesh, cap)
     assert qm == pytest.approx(1.0e-3) and qr == pytest.approx(2.0e-3) and cover == pytest.approx(1.0)
     assert extra == pytest.approx(cw.cap_moisture_transport(q, u, dp, mesh, cap)[0], rel=1e-6)
+    assert netchg == pytest.approx(extra, rel=1e-6)                  # inflow only: net change = extra
     ref = 2.0 * q; ref[:, 0] = np.nan                                # top level undefined
-    qm, qr, extra, cover = cw.inflow_humidity(q, ref, u, dp, mesh, cap)
+    qm, qr, extra, netchg, cover = cw.inflow_humidity(q, ref, u, dp, mesh, cap)
     assert cover == pytest.approx(0.5) and qr == pytest.approx(2.0e-3)
+    # add an outflow edge with a drier reference: the signed net change falls below the inflow extra
+    e_out = next(k for k in np.where(cap[c0] != cap[c1])[0] if cap[c0[k]])
+    u2 = u.copy(); u2[e_out] = [1.0, 1.0]
+    ref2 = 2.0 * q; ref2[c0[e_out]] = 0.0; ref2[c1[e_out]] = 0.0
+    _, _, extra2, netchg2, _ = cw.inflow_humidity(q, ref2, u2, dp, mesh, cap)
+    assert netchg2 > extra2                                          # drier outflow reference => less export
+    with pytest.raises(SystemExit, match="no inflow"):
+        cw.inflow_humidity(q, np.full_like(q, np.nan), u, dp, mesh, cap)
+
+
+def test_era5_q_on_levels_masks_below_surface_brackets():
+    """A model level bracketed by a below-surface ERA5 level is NaN, not extrapolated."""
+    import numpy as np
+    plev = np.array([50000.0, 70000.0, 85000.0, 100000.0])
+    cols = np.array([[1.0, 2.0, 3.0, 4.0]]) * 1e-3
+    ps = np.array([90000.0])                                          # 1000 hPa level is below ground
+    p_full = np.array([[60000.0, 80000.0, 88000.0, 95000.0]])
+    out = cw.era5_q_on_levels(plev, cols, ps, p_full)
+    assert np.isfinite(out[0, :2]).all() and np.isnan(out[0, 2]) and np.isnan(out[0, 3])
+    assert out[0, 0] == pytest.approx(np.interp(np.log(60000.0), np.log(plev[:3]), cols[0, :3]))
