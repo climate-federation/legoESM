@@ -2227,6 +2227,15 @@ def test_aimip_louis_preserves_resolved_surface_scheme():
     # values are chosen AGAINST the scheme defaults so a drop is visible
     assert out.surface.z_ref_model_level is False
     assert out.surface.ocean_q_sfc_saline is True
+    # the production shape (codex round 2): the trained Louis config pins the
+    # height switch False (AIMIP substitutes air T for a missing surface) and
+    # the run-resolved surface carries the scheme default True -- the AMIP
+    # lane has a real surface temperature, so the resolved value must win
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+    trained_real = AIMIPClassicalParams.from_defaults().to_louis_config()
+    assert trained_real.surface.z_ref_model_level is False
+    resolved_default = LouisConfig(surface=SurfaceLayerConfig(bulk_scheme="coare3"))
+    assert _louis_with_preserved_surface(trained_real, resolved_default).surface.z_ref_model_level is True
 
 
 def test_aimip_louis_preserve_surface_noop_without_prev():
