@@ -1,0 +1,51 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -156,6 +156,7 @@
+       INTEGER  ::   l2_unit, l2_ios, l2_drag_unit, l2_drag_ios, l2_adv_unit, l2_adv_ios
+       INTEGER  ::   l2_ord_unit, l2_ord_ios
+       INTEGER  ::   r137_unit, r137_ios
++      INTEGER  ::   r139_unit, r139_ios
+       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backward dissipation
+@@ -199,6 +200,8 @@
+       CHARACTER(LEN=96) :: l2_adv_filename
+       CHARACTER(LEN=96) :: l2_ord_filename
+       CHARACTER(LEN=96) :: r137_filename
++      CHARACTER(LEN=96) :: r139_filename
++      CHARACTER(LEN=16) :: r139_magic
+       CHARACTER(LEN=16) :: l2_magic
+       REAL(wp) ::   zttide   ! Time of day for tidal updates
+       !!----------------------------------------------------------------------
+@@ -326,11 +329,31 @@
+       !
+       !
+       CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )
++      ! Round 139: split the first developed non-bit boundary into its
++      ! incoming RHS and initializing Coriolis operands.  This stream is
++      ! WRITE-only and does not assign or reorder any model operand.
++      IF( lwp .AND. kt == 1081 ) THEN
++         IF( STORAGE_SIZE(1._wp) /= 64 )   CALL ctl_stop( 'round-139 slow-forcing split requires fp64' )
++         WRITE(r139_filename,'("oracle_slow_forcing_split_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=r139_unit, FILE=TRIM(r139_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=r139_ios )
++         IF( r139_ios /= 0 )   CALL ctl_stop( 'cannot open round-139 slow-forcing split' )
++         r139_magic = 'NEMO_L2_R139SLOW'
++         WRITE(r139_unit) r139_magic, 1, kt, Kmm, jpi, jpj, STORAGE_SIZE(1._wp), &
++            & ntsi, ntei, ntsj, ntej, 6
++         WRITE(r139_unit) Ue_rhs(ntsi:ntei,ntsj:ntej), Ve_rhs(ntsi:ntei,ntsj:ntej), &
++            & zu_trd(ntsi:ntei,ntsj:ntej), zv_trd(ntsi:ntei,ntsj:ntej)
++      ENDIF
+       !
+       DO_2D( 0, 0, 0, 0 )                          ! Remove coriolis term (and possibly spg) from barotropic trend
+          zu_frc(ji,jj) = zu_frc(ji,jj) - zu_trd(ji,jj) * ssumask(ji,jj)
+          zv_frc(ji,jj) = zv_frc(ji,jj) - zv_trd(ji,jj) * ssvmask(ji,jj)
+       END_2D
++      IF( lwp .AND. kt == 1081 ) THEN
++         WRITE(r139_unit) zu_frc(ntsi:ntei,ntsj:ntej), zv_frc(ntsi:ntei,ntsj:ntej)
++         CLOSE(r139_unit)
++         WRITE(numout,*) 'ROUND139_SLOW_FORCING_DUMP ', kt, Kmm, TRIM(r139_filename)
++      ENDIF
+ 
+ #else
+       !                    !========================================!

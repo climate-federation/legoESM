@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from legoesm.ocean.dynamics import (  # noqa: E402
     ocean_model_latlon_cgrid as model_module,
 )
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
+from legoesm.ocean.fidelity.time_levels import time_level_for_dump  # noqa: E402
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
 ROUND64_PRODUCER = "3b3b045bd9e03b60330204e7590e4c4470b7a0ca"
@@ -48,6 +50,22 @@ ROUND117_FINAL_MAX = {
     "u": np.float64(1.0529650291768787e-11),
     "v": np.float64(1.0765559917925099e-11),
 }
+ROUND139_RECORD = "oracle_slow_forcing_split_kt00001081.bin"
+ROUND139_MAGIC = "NEMO_L2_R139SLOW"
+ROUND139_FIELDS = (
+    "incoming_u", "incoming_v", "coriolis_u", "coriolis_v",
+    "final_u", "final_v",
+)
+ROUND139_KT = 1081
+ROUND139_KMM = 1
+ROUND139_HEADER_INTS = 11
+ROUND139_COUNT = round81.NX * round81.NY
+ROUND139_EXPECTED_SIZE = (
+    16 + ROUND139_HEADER_INTS * 4
+    + len(ROUND139_FIELDS) * ROUND139_COUNT * 8
+)
+ROUND139_PARENT_EXTERNAL_SHA256 = (
+    "6bc0f990ccba183a48ad09549b72b549603694e917389eb4f8b9c03c88ceaf09")
 
 
 def require(condition: bool, message: str) -> None:
@@ -131,6 +149,232 @@ def comparison(candidate, oracle, active) -> dict[str, object]:
         np.asarray(oracle, dtype=np.float64),
         np.asarray(active, dtype=bool),
     )
+
+
+def _round139_take(payload: bytes, offset: int, count: int,
+                   label: str) -> tuple[bytes, int]:
+    """Take one exact binary segment and fail closed on truncation."""
+    stop = offset + count
+    require(stop <= len(payload), f"truncated Round-139 {label}")
+    return payload[offset:stop], stop
+
+
+def read_round139_record_bytes(payload: bytes, *,
+                               expected_kt: int = ROUND139_KT) -> dict:
+    """Read the native step-entry slow-forcing split without defaults."""
+    magic_bytes, offset = _round139_take(payload, 0, 16, "magic")
+    try:
+        magic = magic_bytes.decode("ascii").rstrip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError("Round-139 magic is not ASCII") from error
+    raw_header, offset = _round139_take(
+        payload, offset, ROUND139_HEADER_INTS * 4, "header")
+    header = struct.unpack(f"={ROUND139_HEADER_INTS}i", raw_header)
+    (version, kt, kmm, jpi, jpj, bits, ntsi, ntei, ntsj, ntej,
+     nfields) = header
+    expected = (
+        1, expected_kt, ROUND139_KMM, round81.JPI, round81.JPJ, 64,
+        round81.NTSI, round81.NTEI, round81.NTSJ, round81.NTEJ,
+        len(ROUND139_FIELDS),
+    )
+    require(magic == ROUND139_MAGIC,
+            f"bad Round-139 magic {magic!r}")
+    require(header == expected,
+            f"bad Round-139 header {(magic, *header)}")
+    arrays = {}
+    array_bytes = ROUND139_COUNT * 8
+    for name in ROUND139_FIELDS:
+        raw, offset = _round139_take(payload, offset, array_bytes, name)
+        values = np.frombuffer(raw, dtype=np.float64).copy()
+        require(values.size == ROUND139_COUNT,
+                f"bad Round-139 {name} element count")
+        values = values.reshape((round81.NX, round81.NY), order="F").T
+        require(np.all(np.isfinite(values)),
+                f"non-finite Round-139 {name}")
+        arrays[name] = values
+    require(offset == len(payload), "trailing Round-139 payload")
+    return {
+        "header": {
+            "version": version,
+            "kt": kt,
+            "Kmm": kmm,
+            "jpi": jpi,
+            "jpj": jpj,
+            "bits": bits,
+            "ntsi": ntsi,
+            "ntei": ntei,
+            "ntsj": ntsj,
+            "ntej": ntej,
+            "nfields": nfields,
+            "registry_level": "before",
+        },
+        **arrays,
+    }
+
+
+def read_round139_record(path: Path) -> dict:
+    require(time_level_for_dump(path.name) == "before",
+            "Round-139 record level is not BEFORE")
+    require(path.stat().st_size == ROUND139_EXPECTED_SIZE,
+            "Round-139 record size changed")
+    return read_round139_record_bytes(path.read_bytes())
+
+
+def _round139_bits_equal(left, right) -> bool:
+    left = np.ascontiguousarray(np.asarray(left, dtype=np.float64))
+    right = np.ascontiguousarray(np.asarray(right, dtype=np.float64))
+    require(left.shape == right.shape, "Round-139 replay extents differ")
+    return bool(np.array_equal(left.view(np.uint64), right.view(np.uint64)))
+
+
+def validate_round139_record(fields: dict, u_mask, v_mask, *,
+                             final_u=None, final_v=None) -> dict:
+    """Replay compiled lines 323/324 with their recorded association."""
+    u_mask = np.asarray(u_mask, dtype=np.float64)
+    v_mask = np.asarray(v_mask, dtype=np.float64)
+    require(
+        fields["incoming_u"].shape == fields["incoming_v"].shape
+        == fields["coriolis_u"].shape == fields["coriolis_v"].shape
+        == fields["final_u"].shape == fields["final_v"].shape
+        == u_mask.shape == v_mask.shape == (round81.NY, round81.NX),
+        "Round-139 operand extents changed",
+    )
+    expected_u = fields["incoming_u"] - fields["coriolis_u"] * u_mask
+    expected_v = fields["incoming_v"] - fields["coriolis_v"] * v_mask
+    observed_u = fields["final_u"] if final_u is None else final_u
+    observed_v = fields["final_v"] if final_v is None else final_v
+    replay_u = _round139_bits_equal(observed_u, expected_u)
+    replay_v = _round139_bits_equal(observed_v, expected_v)
+    require(replay_u and replay_v,
+            "Round-139 final forcing does not replay bit for bit")
+    return {
+        "u_bit_exact": replay_u,
+        "v_bit_exact": replay_v,
+        "u_wet_faces": int(np.count_nonzero(u_mask)),
+        "v_wet_faces": int(np.count_nonzero(v_mask)),
+    }
+
+
+def _validate_round139_stamp(path: Path, producer: str, words=None) -> str:
+    stamp = path.with_name(path.name + ".stamp")
+    require(stamp.is_file(), "Round-139 record stamp is missing")
+    actual = stamp.read_text().split() if words is None else list(words)
+    digest = sha256(path)
+    require(actual == [digest, producer, path.name],
+            "Round-139 record stamp mismatch")
+    return digest
+
+
+def measure_round139_record(args) -> dict[str, object]:
+    """Admit the passive split record before any production comparison."""
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-139 record admission worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-139 record admission commit mismatch")
+    root = args.round139_root
+    record_path = root / ROUND139_RECORD
+    require(record_path.is_file(), "Round-139 split record is missing")
+    producer_path = root / "producer_commit.txt"
+    require(producer_path.is_file(), "Round-139 producer stamp is missing")
+    producer = producer_path.read_text().strip()
+    require(producer.lower() == args.expect_record_commit.lower(),
+            "Round-139 record producer commit changed")
+
+    if args.plant == "record-stamp":
+        planted_words = "0" * 64, producer, record_path.name
+        fired = False
+        try:
+            _validate_round139_stamp(record_path, producer, planted_words)
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-139 stamp plant stayed green")
+        return {
+            "format": "nemo-testcase-l2-gyre-round139-record-v1",
+            "status": "PLANT-FIRED",
+            "plant": args.plant,
+            "plant_fires": True,
+            "worktree": stamp,
+        }
+
+    payload = record_path.read_bytes()
+    if args.plant == "record-header":
+        planted = bytearray(payload)
+        planted[16:20] = struct.pack("=i", 2)
+        fired = False
+        try:
+            read_round139_record_bytes(bytes(planted))
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-139 header plant stayed green")
+        return {
+            "format": "nemo-testcase-l2-gyre-round139-record-v1",
+            "status": "PLANT-FIRED",
+            "plant": args.plant,
+            "plant_fires": True,
+            "worktree": stamp,
+        }
+    if args.plant == "record-truncation":
+        fired = False
+        try:
+            read_round139_record_bytes(payload[:-1])
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-139 truncation plant stayed green")
+        return {
+            "format": "nemo-testcase-l2-gyre-round139-record-v1",
+            "status": "PLANT-FIRED",
+            "plant": args.plant,
+            "plant_fires": True,
+            "worktree": stamp,
+        }
+
+    digest = _validate_round139_stamp(record_path, producer)
+    fields = read_round139_record(record_path)
+    external_path = root / round81.DEVELOPED_RECORD
+    require(external_path.is_file(),
+            "Round-139 inherited external record is missing")
+    require(round81.sha256(external_path) == ROUND139_PARENT_EXTERNAL_SHA256,
+            "Round-139 inherited external record changed")
+    external = round81.read_record(
+        external_path, expected_kt=ROUND139_KT, has_final_pssh=True)
+    if args.plant == "record-replay-ulp":
+        planted = np.array(fields["final_u"], copy=True)
+        active = external["u_mask"] != 0.0
+        location = tuple(int(value) for value in np.argwhere(active)[0])
+        planted[location] = np.nextafter(
+            planted[location], np.float64(np.inf))
+        fired = False
+        try:
+            validate_round139_record(
+                fields, external["u_mask"], external["v_mask"],
+                final_u=planted)
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-139 replay-ULP plant stayed green")
+        return {
+            "format": "nemo-testcase-l2-gyre-round139-record-v1",
+            "status": "PLANT-FIRED",
+            "plant": args.plant,
+            "plant_fires": True,
+            "location": list(location),
+            "worktree": stamp,
+        }
+
+    replay = validate_round139_record(
+        fields, external["u_mask"], external["v_mask"])
+    return {
+        "format": "nemo-testcase-l2-gyre-round139-record-v1",
+        "status": "PASS",
+        "worktree": stamp,
+        "producer_commit": producer,
+        "record": str(record_path),
+        "record_sha256": digest,
+        "record_size": record_path.stat().st_size,
+        "header": fields["header"],
+        "replay": replay,
+        "plant": args.plant,
+        "plant_fires": False,
+    }
 
 
 def round117_source_order_accumulators(
@@ -2257,6 +2501,9 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round121-trajectory", action="store_true",
         help="run the one-step NEMO-W arm through a certified trajectory")
+    round_group.add_argument(
+        "--round139-record-only", action="store_true",
+        help="admit the developed step-1081 slow-forcing split record")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -2287,35 +2534,49 @@ def main(argv=None) -> int:
         "--trajectory-kind", choices=("ladder", "year"), default="ladder")
     parser.add_argument(
         "--member-root", type=Path, default=ROOT / "round121")
+    parser.add_argument(
+        "--round139-root", type=Path,
+        default=ROOT / "round139/oracle_developed_slow_forcing")
     parser.add_argument("--trajectory-tag", default="round121_w")
     parser.add_argument("--plant", choices=(
                             "none", "e3-ulp", "rhs-ulp", "final-ulp",
                             "incoming-ulp", "association-hpg-ulp",
-                            "association-keg-ulp", "zad-w-ulp"),
+                            "association-keg-ulp", "zad-w-ulp",
+                            "record-stamp", "record-header",
+                            "record-truncation", "record-replay-ulp"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
-            measure_round121_trajectory(args)
+            measure_round139_record(args)
+            if args.round139_record_only else
+            (measure_round121_trajectory(args)
             if args.round121_trajectory else
             (measure_round117(args)
             if (args.round117 or args.round118 or args.round119
-                or args.round120 or args.round121) else measure(args)))
+                or args.round120 or args.round121) else measure(args))))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND121" if args.round121 else
+            "ROUND139 RECORD" if args.round139_record_only else
+            ("ROUND121" if args.round121 else
             ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83")))))
+             ("ROUND117" if args.round117 else "ROUND83"))))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
+    if args.round139_record_only:
+        print(
+            "ROUND139 SLOW-FORCING RECORD " + report["status"] + ": "
+            + report["record_sha256"]
+        )
+        return 0 if report["status"] == "PASS" else 1
     if args.round121_trajectory:
         print("ROUND121 W TRAJECTORY " + report["status"] + ": "
               + report["trajectory_kind"])

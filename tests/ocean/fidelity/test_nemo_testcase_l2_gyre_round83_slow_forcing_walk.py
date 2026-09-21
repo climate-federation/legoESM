@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import struct
 from pathlib import Path
 
 import numpy as np
 import jax
+import pytest
 
 
 SCRIPT = (
@@ -16,6 +18,41 @@ SPEC = importlib.util.spec_from_file_location("round83_slow_forcing_walk", SCRIP
 assert SPEC and SPEC.loader
 WALK = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(WALK)
+
+
+def _round139_payload(arrays: dict[str, np.ndarray]) -> bytes:
+    header = struct.pack(
+        "=11i", 1, WALK.ROUND139_KT, WALK.ROUND139_KMM,
+        WALK.round81.JPI, WALK.round81.JPJ, 64,
+        WALK.round81.NTSI, WALK.round81.NTEI,
+        WALK.round81.NTSJ, WALK.round81.NTEJ,
+        len(WALK.ROUND139_FIELDS),
+    )
+    body = b"".join(
+        np.asarray(arrays[name], dtype=np.float64).T.tobytes(order="F")
+        for name in WALK.ROUND139_FIELDS
+    )
+    return WALK.ROUND139_MAGIC.ljust(16).encode("ascii") + header + body
+
+
+def _round139_fields() -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    shape = (WALK.round81.NY, WALK.round81.NX)
+    base = np.arange(np.prod(shape), dtype=np.float64).reshape(shape) + 10.0
+    cor_u = np.full(shape, 0.25, dtype=np.float64)
+    cor_v = np.full(shape, -0.5, dtype=np.float64)
+    u_mask = np.ones(shape, dtype=np.float64)
+    v_mask = np.ones(shape, dtype=np.float64)
+    u_mask[0, 0] = 0.0
+    v_mask[-1, -1] = 0.0
+    fields = {
+        "incoming_u": base,
+        "incoming_v": -base,
+        "coriolis_u": cor_u,
+        "coriolis_v": cor_v,
+        "final_u": base - cor_u * u_mask,
+        "final_v": -base - cor_v * v_mask,
+    }
+    return fields, u_mask, v_mask
 
 
 def test_bottom_value_selects_deepest_wet_face_level() -> None:
@@ -67,6 +104,46 @@ def test_comparison_detects_one_ulp_on_an_active_cell() -> None:
     assert not row["bit_exact"]
     assert row["differing_cells"] == 1
     assert row["absolute_max"] > 0.0
+
+
+def test_round139_record_reader_and_replay_cover_all_six_fields() -> None:
+    fields, u_mask, v_mask = _round139_fields()
+    payload = _round139_payload(fields)
+    assert len(payload) == WALK.ROUND139_EXPECTED_SIZE
+    parsed = WALK.read_round139_record_bytes(payload)
+    for name in WALK.ROUND139_FIELDS:
+        np.testing.assert_array_equal(parsed[name], fields[name])
+    replay = WALK.validate_round139_record(parsed, u_mask, v_mask)
+    assert replay == {
+        "u_bit_exact": True,
+        "v_bit_exact": True,
+        "u_wet_faces": int(np.count_nonzero(u_mask)),
+        "v_wet_faces": int(np.count_nonzero(v_mask)),
+    }
+
+
+def test_round139_record_reader_refuses_header_truncation_and_trailing_byte() -> None:
+    fields, _, _ = _round139_fields()
+    payload = _round139_payload(fields)
+    bad_header = bytearray(payload)
+    bad_header[16:20] = struct.pack("=i", 2)
+    with pytest.raises(RuntimeError, match="bad Round-139 header"):
+        WALK.read_round139_record_bytes(bytes(bad_header))
+    with pytest.raises(RuntimeError, match="truncated Round-139 final_v"):
+        WALK.read_round139_record_bytes(payload[:-1])
+    with pytest.raises(RuntimeError, match="trailing Round-139 payload"):
+        WALK.read_round139_record_bytes(payload + b"x")
+
+
+def test_round139_replay_control_detects_one_ulp_in_consumed_result() -> None:
+    fields, u_mask, v_mask = _round139_fields()
+    parsed = WALK.read_round139_record_bytes(_round139_payload(fields))
+    planted = np.array(parsed["final_u"], copy=True)
+    location = tuple(int(value) for value in np.argwhere(u_mask != 0.0)[0])
+    planted[location] = np.nextafter(planted[location], np.float64(np.inf))
+    with pytest.raises(RuntimeError, match="does not replay bit for bit"):
+        WALK.validate_round139_record(
+            parsed, u_mask, v_mask, final_u=planted)
 
 
 def test_round117_compiled_accumulator_order_keeps_after_adv_identity() -> None:
