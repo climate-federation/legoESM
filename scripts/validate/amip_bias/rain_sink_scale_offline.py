@@ -18,7 +18,7 @@ surface fluxes are zeros/dummies (not in the checkpoint); the diurnal
 correction and the closure's moisture convergence therefore see dummies,
 identically in every call of one invocation.
 
-Usage: rain_sink_scale_offline.py <run> [--day 135] [--sftlf-from run]
+Usage: rain_sink_scale_offline.py <run> [--day 135] [--sftlf-from run] [--box BOX]
                                   [--swap-with run] [--stride N]
 """
 from __future__ import annotations
@@ -37,19 +37,23 @@ ROOT = os.environ.get("AMIP_ROOT", "/work/bd1083/b309178/diffESM/legoesm_pg/amip
 
 
 class _Recorder:
-    """Wraps distribute_rain_vapor_sink; keeps the last call's arrays."""
+    """Wraps distribute_rain_vapor_sink; keeps the formation call's arrays.
+    The capacity mirror runs in the helper's own dtype so borderline
+    want > cap classifications match the kernel's."""
     def __init__(self):
         self.orig = B.distribute_rain_vapor_sink
         self.last = None
+        self.calls = []
 
     def __call__(self, form, q_v, dq_v_dt, dp, dt, scheme):
         sink, scale = self.orig(form, q_v, dq_v_dt, dp, dt, scheme)
+        self.calls.append(scheme)
         if scheme == "formation":
-            want = np.maximum(np.asarray(form, np.float64), 0.0)
-            cap = B._RAIN_SINK_CAPACITY_FRAC * np.maximum(
-                np.asarray(q_v, np.float64) + dt * np.asarray(dq_v_dt, np.float64), 0.0) / dt
-            self.last = dict(want=want, cap=cap, sink=np.asarray(sink, np.float64),
-                             scale=np.asarray(scale, np.float64), dp=np.asarray(dp, np.float64))
+            q_v, dq_v_dt = np.asarray(q_v), np.asarray(dq_v_dt)
+            cap = (B._RAIN_SINK_CAPACITY_FRAC
+                   * np.maximum(q_v + q_v.dtype.type(dt) * dq_v_dt, 0.0) / q_v.dtype.type(dt))
+            self.last = dict(want=np.maximum(np.asarray(form), 0.0), cap=cap,
+                             sink=np.asarray(sink), scale=np.asarray(scale), dp=np.asarray(dp))
         return sink, scale
 
 
@@ -81,8 +85,8 @@ def _call(bcfg, st, fl_sel, dt, scheme, T=None, q=None):
     sink = -np.sum(np.asarray(out.dq_v_dt, np.float64) * m, axis=1) * SEC_PER_DAY
     heat = (np.sum(np.asarray(out.dT_dt, np.float64) * m, axis=1)
             * constants.c_pd / constants.L_v * SEC_PER_DAY)
-    mb = np.max(np.asarray(M_u, np.float64), axis=1)
-    return rain, sink, heat, mb
+    mu_max = np.max(np.asarray(M_u, np.float64), axis=1)   # relaxed profile's peak, NOT the closure's M_b
+    return rain, sink, heat, mu_max
 
 
 def main(argv=None):
@@ -100,22 +104,36 @@ def main(argv=None):
     dt = float(exp["dycore"]["dt"])
     _, bcfg = _resolve_convection(experiment_config_from_dict(exp))
     rec = _Recorder(); B.distribute_rain_vapor_sink = rec
+    try:
+        _run(a, rec, bcfg, lat, fl, sel, w, dt)
+    finally:
+        B.distribute_rain_vapor_sink = rec.orig
+
+
+def _run(a, rec, bcfg, lat, fl, sel, w, dt):
     st = _state(a.run, a.day, sel)
     tag = f"{a.box} ocean, {len(sel)} cols, day {a.day}"
     if a.swap_with:
         so = _state(a.swap_with, a.day, sel)
-        # Rows 1-2 are known-answer checks (each run's FULL state incl. its
-        # carried mass-flux memory); rows 3-4 swap only T or q into this run's
-        # state and keep this run's memory, so they read the instantaneous
-        # thermodynamic response with the relaxation memory held fixed.
+        assert so["T"].shape == st["T"].shape and np.array_equal(so["vg"], st["vg"]), "different grids"
+        # Rows 1-2: known-answer checks (each run's FULL state incl. its carried
+        # mass-flux memory).  Rows 3-5: swap T, q, or both into this run's
+        # state keeping its memory (instantaneous thermodynamic response,
+        # memory fixed).  Row 6: only the memory swapped.  Each row mixes
+        # trigger, closure, conversion and evaporation responses; none isolates
+        # the closure -- that needs the pre-relaxation closure mass flux, which
+        # the kernel does not return.  Swapped T rides this run's ps.
+        st_mem = dict(st, prog=so["prog"], stoch=so["stoch"])
         rows = [(f"full state {a.run}", st, None, None), (f"full state {a.swap_with}", so, None, None),
                 (f"T from {a.swap_with}, rest {a.run}", st, so["T"], None),
-                (f"q from {a.swap_with}, rest {a.run}", st, None, so["q"])]
-        print(f"=== formation scheme on swapped states ({tag}) [kg/m2/day; M_b kg/m2/s] ===")
+                (f"q from {a.swap_with}, rest {a.run}", st, None, so["q"]),
+                (f"T+q from {a.swap_with}, rest {a.run}", st, so["T"], so["q"]),
+                (f"memory from {a.swap_with}, rest {a.run}", st_mem, None, None)]
+        print(f"=== formation scheme on swapped states ({tag}) [kg/m2/day; peak M_u kg/m2/s] ===")
         for name, base, T, q in rows:
-            rain, sink, heat, mb = _call(bcfg, base, fl[sel], dt, "formation", T, q)
+            rain, sink, heat, mu = _call(bcfg, base, fl[sel], dt, "formation", T, q)
             print(f"{name:40s} rain {np.sum(w*rain):.3f}  sink {np.sum(w*sink):.3f}  "
-                  f"M_b {np.sum(w*mb):.4f}  raining {np.mean(rain > 1e-6):.0%}")
+                  f"peak M_u {np.sum(w*mu):.4f}  raining {np.mean(rain > 1e-6):.0%}")
         return
     res = {}
     for s in ("vapour_mass", "formation"):
@@ -123,13 +141,21 @@ def main(argv=None):
         res[s] = rain
         print(f"{s:12s} ({tag}): rain {np.sum(w*rain):.3f}  vapour sink {np.sum(w*sink):.3f}  "
               f"heat/L_v {np.sum(w*heat):.3f} kg/m2/day; rain>0 in {np.mean(rain > 1e-6):.0%} of columns")
+    assert rec.calls.count("formation") == 1, rec.calls
     r = rec.last
+    assert r["scale"].shape[0] == len(sel)
     binding = (r["want"] > r["cap"]) & (r["want"] > 0)
-    excess = np.sum(np.maximum(r["want"] - r["cap"], 0) * r["dp"], axis=1) / constants.g * SEC_PER_DAY
-    print(f"recorded cap scale over ALL columns: min {r['scale'].min():.6f}  "
+    g = constants.g
+    generated = np.sum(np.maximum(r["want"] - r["cap"], 0) * r["dp"], axis=1) / g
+    realized = np.sum(r["sink"] * r["dp"], axis=1) / g
+    taken = np.sum(np.minimum(r["want"], r["cap"]) * r["dp"], axis=1) / g
+    routed = realized - taken                       # excess that found slack
+    discarded = generated - routed                  # excess the scale deleted from the rain
+    print(f"recorded cap scale over the selected columns: min {r['scale'].min():.6f}  "
           f"columns with scale<1: {np.sum(r['scale'] < 1.0)}  "
           f"levels with want>cap: {binding.sum()} of {np.sum(r['want'] > 0)} formation levels  "
-          f"area-mean excess routed by redistribution {np.sum(w*excess):.4f} kg/m2/day")
+          f"excess generated {np.sum(w*generated)*SEC_PER_DAY:.4f} / routed {np.sum(w*routed)*SEC_PER_DAY:.4f} "
+          f"/ discarded {np.sum(w*discarded)*SEC_PER_DAY:.4f} kg/m2/day")
     on = res["vapour_mass"] > 1e-6
     print(f"returned-rain ratio formation/vapour_mass (post-evaporation, NOT the scale): "
           f"rain-weighted {np.sum(w[on]*res['formation'][on])/np.sum(w[on]*res['vapour_mass'][on]):.3f}")

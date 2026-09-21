@@ -16,6 +16,7 @@ import pytest
 from legoesm import constants
 from legoesm.atmosphere.physics.convection.bechtold import (
     _RAIN_SINK_CAPACITY_FRAC,
+    _RAIN_SINK_ZERO_FLUX,
     distribute_rain_vapor_sink,
 )
 
@@ -25,10 +26,11 @@ RTOL = 1e-6                                  # holds in float32 and float64
 
 
 def _column():
-    """Two columns, 10 levels top-down, dp uniform 100 hPa, moist below.
+    """Two columns, 10 levels top-down, layer thickness growing 50 -> 140 hPa
+    (so a missing thickness weight cannot hide), moist below.
     Column 0 rains at levels 4..6; column 1 is the counter-case: no rain."""
     nlev = 10
-    dp = jnp.full((2, nlev), 1.0e4)
+    dp = jnp.asarray(np.stack([np.linspace(5.0e3, 1.4e4, nlev)] * 2))
     q_v = jnp.asarray(np.stack([np.linspace(1e-4, 1.6e-2, nlev),
                                 np.linspace(2e-4, 1.2e-2, nlev)]))
     dq_v_dt = jnp.zeros_like(q_v)
@@ -53,11 +55,14 @@ def _expected(form, q_v, dq, dp, dt=DT):
     dpn = np.asarray(dp)
     excess = np.sum((want - take) * dpn, 1, keepdims=True)
     slack_col = np.sum(slack * dpn, 1, keepdims=True)
-    add = np.where(slack_col > 0, np.minimum(excess, slack_col) * slack
-                   / np.where(slack_col > 0, slack_col, 1.0), 0.0)
+    g = constants.g
+    on = slack_col / g > _RAIN_SINK_ZERO_FLUX
+    add = np.where(on, np.minimum(excess, slack_col) * slack
+                   / np.where(on, slack_col, 1.0), 0.0)
     sink = take + add
-    rain = np.sum(want * dpn, 1); real = np.sum(sink * dpn, 1)
-    return sink, np.where(rain > 0, real / np.where(rain > 0, rain, 1.0), 1.0)
+    rain = np.sum(want * dpn, 1) / g; real = np.sum(sink * dpn, 1) / g
+    on = rain > _RAIN_SINK_ZERO_FLUX
+    return sink, np.where(on, real / np.where(on, rain, 1.0), 1.0)
 
 
 def _check_pairing(sink, scale, form, q_v, dq, dp):
@@ -126,9 +131,13 @@ def test_capacity_sees_the_transport_tendency():
     _check_pairing(np.asarray(sink), np.asarray(scale), np.asarray(form), q_v, dq, dp)
 
 
-def test_float32_gradients_finite_for_zero_rain_and_exhausted_capacity():
+@pytest.mark.parametrize("trace", [0.0, 1e-30])
+def test_float32_gradients_finite_for_zero_rain_and_exhausted_capacity(trace):
+    """trace = 1e-30: a soft-gated whisper of formation in the no-rain column
+    (a NORMAL float32 number whose 1/x**2 overflows the backward pass)."""
     q_v, dq, dp, form = _column()
     q_v = q_v.at[0, 4:7].set(0.0)                     # column 0: capacity exhausted
+    form = form.at[1, 3].set(trace)
     args = [jnp.asarray(a, jnp.float32) for a in (form, q_v, dq, dp)]
 
     def loss(form, q_v, dq, dp):

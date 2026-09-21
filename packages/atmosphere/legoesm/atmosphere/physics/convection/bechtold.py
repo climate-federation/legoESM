@@ -2015,6 +2015,7 @@ def _ifs_cloud_base_qsat(
 # may remove in one step (positivity margin; the legacy vapour-mass spread
 # needed none because every level lost the same small relative amount).
 _RAIN_SINK_CAPACITY_FRAC = 0.9
+_RAIN_SINK_ZERO_FLUX = 1e-12   # kg/m2/s; column flux below this is not rescaled (numerics floor)
 
 
 def distribute_rain_vapor_sink(dq_r_formation, q_v, dq_v_dt, dp_full, dt, scheme):
@@ -2057,7 +2058,12 @@ def distribute_rain_vapor_sink(dq_r_formation, q_v, dq_v_dt, dp_full, dt, scheme
     # floor overflows the float32 backward pass (NaN gradients for zero-rain
     # and exhausted-capacity columns, codex-confirmed), and 0*NaN from an
     # unselected 0/0 branch poisons the gradient the same way.
-    tiny = jnp.finfo(q_v.dtype).tiny          # smallest normal: no subnormal 1/x**2
+    # Masks use a physical floor, not the dtype's smallest normal: the
+    # backward pass of a/b carries 1/b**2, and a "normal" b of 1e-30 kg/m2/s
+    # (a soft-gated trace of formation) still overflows float32 there.  Below
+    # the floor the column is not rescaled (scale 1) -- a rain of 1e-12
+    # kg/m2/s is 1e-7 mm/day.
+    tiny = _RAIN_SINK_ZERO_FLUX
     has_slack = slack_col > tiny
     add = jnp.where(has_slack, jnp.minimum(excess_col, slack_col) * slack
                     / jnp.where(has_slack, slack_col, 1.0), 0.0)
