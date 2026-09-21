@@ -73,16 +73,20 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest")
 DEFAULT_NEMO_MESH = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10/mesh_mask.nc")
-DAILY_RESET_FAMILIES = ("control", "tracer", "vector", "ssh", "tke")
+DAILY_RESET_FAMILIES = (
+    "control", "tracer", "temperature", "salinity", "vector", "ssh", "tke")
 DAILY_RESET_VARIABLES = {
     "control": (),
     "tracer": ("tn", "sn"),
+    "temperature": ("tn",),
+    "salinity": ("sn",),
     "vector": ("un", "vn", "uu_n", "vv_n",
                "ub_e", "ubb_e", "vb_e", "vbb_e"),
     "ssh": ("sshn", "ssha", "sshb_e", "sshbb_e"),
     "tke": ("en", "avm_k", "avt_k", "dissl"),
 }
-DAILY_RESET_PLANTS = ("daily-source-ulp", "daily-family-registry")
+DAILY_RESET_PLANTS = (
+    "daily-source-ulp", "daily-family-registry", "daily-cadence-registry")
 # Depth bands exist because the floor and the gap otherwise live in DIFFERENT
 # VOLUMES: the 1e-10 K seed is uniform to the bottom, while a year-1 from-rest
 # gap lives in the top few hundred metres.  A whole-column rms therefore
@@ -449,6 +453,8 @@ def validate_daily_reset_registry(registry=None) -> None:
     require(actual["control"] == (), "control arm must reset no variables")
     expected = {
         "tracer": ("tn", "sn"),
+        "temperature": ("tn",),
+        "salinity": ("sn",),
         "vector": ("un", "vn", "uu_n", "vv_n",
                    "ub_e", "ubb_e", "vb_e", "vbb_e"),
         "ssh": ("sshn", "ssha", "sshb_e", "sshbb_e"),
@@ -459,13 +465,23 @@ def validate_daily_reset_registry(registry=None) -> None:
             "daily reset family registry omits or adds a source variable")
 
 
+def validate_daily_reset_interval(interval_days: int) -> None:
+    require(isinstance(interval_days, int) and not isinstance(interval_days, bool),
+            "daily reset interval must be an integer number of days")
+    require(1 <= interval_days < YEAR_DAYS,
+            f"daily reset interval {interval_days} is outside [1, {YEAR_DAYS})")
+
+
 def daily_reset_self_check(plant: str | None) -> int:
     """Failing controls for the source hash and exact family registry."""
     validate_daily_reset_registry()
+    for interval_days in (1, 2, 4, 8):
+        validate_daily_reset_interval(interval_days)
     if plant is None:
         _require_payload_digest(
             {"path": "synthetic.nc", "sha256": "a" * 64}, "a" * 64)
-        print("SELF-CHECK OK: daily source digest and five-family registry")
+        print("SELF-CHECK OK: daily source digest, seven-family registry, "
+              "and cadence registry")
         return 0
     try:
         if plant == "daily-source-ulp":
@@ -476,6 +492,8 @@ def daily_reset_self_check(plant: str | None) -> int:
             broken = dict(DAILY_RESET_VARIABLES)
             broken["ssh"] = ("sshn", "sshb_e", "sshbb_e")
             validate_daily_reset_registry(broken)
+        elif plant == "daily-cadence-registry":
+            validate_daily_reset_interval(0)
         else:  # pragma: no cover - argparse constrains the value
             raise AssertionError(plant)
     except GateError as error:
@@ -523,14 +541,18 @@ def apply_daily_reset(state, payload: dict, family: str, card):
     require(family in DAILY_RESET_FAMILIES and family != "control",
             f"unknown reset family {family!r}")
     nlev = state.T.data.shape[-1]
-    if family == "tracer":
+    if family in ("tracer", "temperature", "salinity"):
         active = jnp.asarray(card.recipe.z_coord.is_active)
-        T = neumann_fill_cgrid(jnp.asarray(payload["tn"][..., :nlev]),
-                               active, card.recipe.grid)
-        S = neumann_fill_cgrid(jnp.asarray(payload["sn"][..., :nlev]),
-                               active, card.recipe.grid)
-        return state._replace(
-            T=state.T.replace(data=T), S=state.S.replace(data=S)), None
+        replacements = {}
+        if family in ("tracer", "temperature"):
+            T = neumann_fill_cgrid(jnp.asarray(payload["tn"][..., :nlev]),
+                                   active, card.recipe.grid)
+            replacements["T"] = state.T.replace(data=T)
+        if family in ("tracer", "salinity"):
+            S = neumann_fill_cgrid(jnp.asarray(payload["sn"][..., :nlev]),
+                                   active, card.recipe.grid)
+            replacements["S"] = state.S.replace(data=S)
+        return state._replace(**replacements), None
     if family == "vector":
         require(state.uu_b is not None and state.vv_b is not None,
                 "vector reset requires live uu_b/vv_b state")
@@ -580,6 +602,7 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
                mesh_path: Path = DEFAULT_NEMO_MESH, tag: str = "",
                plant: str | None = None, snap_steps: int = SNAP_STEPS,
                daily_reset_family: str | None = None,
+               daily_reset_interval_days: int = 1,
                daily_record_root: Path | None = None,
                daily_record_audit: Path | None = None,
                expect_commit: str | None = None) -> int:
@@ -615,8 +638,12 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
                 f"--expect-commit {expect_commit}")
     if daily_reset_family is not None:
         validate_daily_reset_registry()
+        validate_daily_reset_interval(daily_reset_interval_days)
         require(daily_reset_family in DAILY_RESET_FAMILIES,
                 f"unknown daily reset family {daily_reset_family!r}")
+        require(daily_reset_family != "control"
+                or daily_reset_interval_days == 1,
+                "control arm requires the one-day registered interval")
         require(seed == 0, "daily reset attribution is registered for member 0")
         require(days == YEAR_DAYS,
                 "daily reset attribution requires the full 360-day member")
@@ -629,6 +656,8 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
         record_audit, admitted_hashes = _daily_record_contract(
             daily_record_audit, daily_record_root, expect_commit)
     else:
+        require(daily_reset_interval_days == 1,
+                "--daily-reset-interval-days requires --daily-reset-family")
         record_audit, admitted_hashes = None, {}
     gate, gate_sha = _gate_module()
     card = build_nemo_testcase_card(CASE)
@@ -683,7 +712,8 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
             print(f"  seed {seed} day {kt // STEPS_PER_DAY:3d}  "
                   f"{time.time() - started:7.1f} s", flush=True)
         if (daily_reset_family not in (None, "control")
-                and kt % STEPS_PER_DAY == 0 and kt < n_steps):
+                and kt % (STEPS_PER_DAY * daily_reset_interval_days) == 0
+                and kt < n_steps):
             path = _daily_restart_path(daily_record_root, kt)
             payload = _load_daily_reset_payload(path, state.T.data.shape[-1])
             expected_hash = admitted_hashes.get(path.name)
@@ -714,6 +744,7 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
             "family": daily_reset_family,
             "registered_variables": list(
                 DAILY_RESET_VARIABLES[daily_reset_family]),
+            "interval_days": daily_reset_interval_days,
             "timing": "after pre-reset daily snapshot; consumed next step",
             "applied_boundary_count": len(reset_sources),
             "applied_boundaries": reset_sources,
@@ -1990,7 +2021,9 @@ def main(argv=None) -> int:
     parser.add_argument("--member", type=int, default=None,
                         help="run one legoESM member with this seed")
     parser.add_argument("--daily-reset-family", choices=DAILY_RESET_FAMILIES,
-                        help="Round-134 daily oracle-reset arm")
+                        help="Round-134/135 oracle-reset arm")
+    parser.add_argument("--daily-reset-interval-days", type=int, default=1,
+                        help="whole-day interval between admitted resets")
     parser.add_argument("--daily-record-root", type=Path)
     parser.add_argument("--daily-record-audit", type=Path)
     parser.add_argument("--expect-commit",
@@ -2057,6 +2090,8 @@ def main(argv=None) -> int:
                           mesh_path=args.mesh, tag=args.tag,
                           plant=args.plant, snap_steps=args.snap_steps,
                           daily_reset_family=args.daily_reset_family,
+                          daily_reset_interval_days=(
+                              args.daily_reset_interval_days),
                           daily_record_root=args.daily_record_root,
                           daily_record_audit=args.daily_record_audit,
                           expect_commit=args.expect_commit)
