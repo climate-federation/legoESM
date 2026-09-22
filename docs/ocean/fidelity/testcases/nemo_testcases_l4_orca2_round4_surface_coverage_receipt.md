@@ -117,16 +117,34 @@ requirement was not triggered.  No scientific or configuration choice was
 made.  The fresh target and rank-qualified record names are operational
 consequences of the measured patch shortfall and the no-overwrite rule.
 
-The required separate `codex exec --sandbox read-only` review will be recorded
-in the final verification amendment.  Its earlier attempt stopped before
-reading the diff because the in-process app-server could not initialize on the
-read-only filesystem.
+The required separate `codex exec --sandbox read-only` review was attempted on
+the complete final executable diff.  It stopped before reading the diff
+because the in-process app-server could not initialize on the read-only
+filesystem (`Read-only file system (os error 30)`).  Verdict:
+**independent review unavailable in-sandbox**.  The review log SHA-256 is
+`4154359fb80a5b516b50cb7861ca5a5321eac33a58608714b68c46acba6d0603`.
 
 ## 7. Verification
 
-Final citation-gate, focused-test, and full fidelity-battery results will be
-recorded after this receipt is committed so every result carries a clean
-producer stamp.
+The citation gate passed from clean committed receipt `6c72b3468`: one mapped
+compiled-source citation, no failure, no unmapped citation, no map-audit
+failure, and all 9/9 self-controls fired.  Its rigid two-line shift changed the
+verdict to FAIL and exited 1.  The baseline and plant JSON SHA-256 values are
+respectively
+`a5a69d663568bae98033e0fe8bbfaed415075dab9663d4eba8ea80ea21973de1`
+and
+`a3721566aef5767c0c9472593e76117eed0a69b37c3f052d64be4e345d49be9d`.
+
+The focused ladder/citation tests passed 23/23 in 2.25 seconds (log SHA-256
+`6603f2bdb0d16ceeb5c954fa9179c623a67dd2cd19b6e236ffd2c75a150fe47a`).
+The required single `tests/ocean/fidelity -n 12` invocation collected 1,516
+tests, displayed one failure, reached 99%, then made no progress for a bounded
+five-minute interval and was interrupted without a pytest summary.  It is
+**INCOMPLETE**, not a pass (log SHA-256
+`0996b127da3946c4dd8d99c5c6a2af1d80bdc8102da0b44f3f88ac21239a6f52`).
+The displayed failure is the listed pre-existing SI3 scalar-math provenance
+red.  Its isolated rerun reproduced `A MY_SRC is not verbatim` (log SHA-256
+`dcb5f5afbeb0233320c9f60cb63012e73dcc09a14f12fecd62e7d3aeb4751931`).
 
 ## 8. OPEN
 
