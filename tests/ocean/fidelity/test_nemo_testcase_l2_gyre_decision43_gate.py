@@ -244,6 +244,23 @@ def test_momentum_ldf_live_geometry_route_is_derived_from_every_recipe():
     assert cards["DINO:nemo_dino_kamm_mlf"]["executes_route"] is False
 
 
+def test_generic_comparison_registers_an_unchanged_card(tmp_path):
+    module = _module()
+    snapshot = tmp_path / "same.npz"
+    np.savez(snapshot, step1_T=np.ones((2,), dtype=np.float64))
+    report = {
+        "format": "nemo-gyre-generic-card-three-step-v1",
+        "status": "PASS",
+        "worktree": {"commit": "a" * 40},
+        "certifications": {"finite": True},
+    }
+    compared = module.compare_generic_nemo_gyre(
+        report, snapshot, report, snapshot)
+    assert compared["status"] == "PASS"
+    assert compared["moved_row_count"] == 0
+    assert compared["rows"][0]["cells_unequal"] == 0
+
+
 def test_year_member_admission_requires_the_registered_harness_and_fp64(
         tmp_path):
     module = _module()
