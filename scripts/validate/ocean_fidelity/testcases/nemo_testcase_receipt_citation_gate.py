@@ -852,7 +852,7 @@ CITATION_MAP = {
         'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji+1,jj,ik) ),',
         ('pcc(ji,jj,jk) = pcc(ji,jj,jk) * zcoef', 2), 27],
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv.f90:358-365': [
-        'SELECT CASE ( nadv )',
+        ('SELECT CASE ( nadv )', 1),
         'CALL tra_adv_fct ( kt, nit000', 8],
     'round123/oracle_process_budget/ocean.output:756-764': [
         'Namelist namtra_adv : chose a advection scheme for tracers',
