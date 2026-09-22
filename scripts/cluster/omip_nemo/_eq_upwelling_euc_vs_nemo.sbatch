@@ -4,7 +4,7 @@
 #SBATCH --partition=short
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=1:00:00
+#SBATCH --time=2:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/equpw_%j.out
 #
 # IS THE EQUATORIAL WARM BIAS AN ASCENT DEFICIT OR AN UNDERCURRENT DEFICIT?
@@ -51,7 +51,17 @@ for f in ${STEM}_grid_T.nc ${STEM}_grid_U.nc ${STEM}_grid_V.nc ${STEM}_grid_W.nc
 done
 
 rc=0
-for pair in "d25:4:5:snapshot_day0025.npz" "d30:5:6:snapshot_final.npz"; do
+# ALL SIX MATCHED DAYS, because a single day cannot tell an initial-condition
+# offset from a momentum sink. GLM's discriminator: an offset present from the
+# first day means the ICs differ and nothing is being removed; ours
+# decelerating while NEMO's accelerates means a local sink; both steady at
+# different values means an equilibrium difference. Day 30 stays in the series
+# but its MEAN circulation is not readable -- it sits inside a measured wind
+# relaxation (our nino3 stress falls 0.0780 to 0.0356, NEMO's 0.0834 to
+# 0.0533) and its upwelling ratio reads 1.54 against 1.00 on every other day.
+for pair in "d05:0:1:snapshot_day0005.npz" "d10:1:2:snapshot_day0010.npz" \
+            "d15:2:3:snapshot_day0015.npz" "d20:3:4:snapshot_day0020.npz" \
+            "d25:4:5:snapshot_day0025.npz" "d30:5:6:snapshot_final.npz"; do
   TAG=${pair%%:*}; rest=${pair#*:}
   R0=${rest%%:*}; rest=${rest#*:}
   R1=${rest%%:*}; SNAPNAME=${rest#*:}
@@ -63,7 +73,7 @@ for pair in "d25:4:5:snapshot_day0025.npz" "d30:5:6:snapshot_final.npz"; do
     --nemo-t-recs "$R0:$R1" --label "ctl_$TAG" \
     --nemo-wfile ${STEM}_grid_W.nc --nemo-w-var wo --nemo-w-recs "$R0:$R1" \
     --nemo-ufile ${STEM}_grid_U.nc --nemo-vfile ${STEM}_grid_V.nc \
-    --mesh-mask "$MESH" 2>&1 | tail -120
+    --mesh-mask "$MESH" 2>&1 | tail -400
   r=${PIPESTATUS[0]}; echo "### ctl $TAG rc=$r"; [ "$r" -eq 0 ] || rc=$r
 done
 echo "=== card exit: $rc ==="
