@@ -97,8 +97,26 @@ read-only filesystem.  Verdict: **independent review unavailable in-sandbox**.
 
 ## 6. Verification
 
-Citation-gate, focused-test, and broad-suite results are appended only after
-this receipt is committed and the gates run from a clean tree.
+The receipt citation gate passed from clean committed receipt `bab584a48`:
+one mapped compiled-source citation, no failures or unmapped citations, no
+map-audit failures, and all 9/9 self-controls fired.  Shifting that citation by
+two lines changed the verdict to FAIL and exited 1.  The baseline and plant
+JSON SHA-256 values are respectively
+`423f32e7f4f7a3fde8e89d897266bdd51494300ab6f675cbecef5ee8fdc4ac83`
+and `31db33537c5bbc725453e6ad763c8eb8d8f78916e72832df5edc42bec1859c58`.
+
+The focused ladder/citation tests passed 23/23 in 2.27 seconds (log SHA-256
+`5494a6880eb477c37f81ff18d1fabafbbfb603097edc3795fa96a941fc192426`).
+The required single `tests/ocean/fidelity -n 12` invocation collected 1,516
+tests, displayed one failure, reached 99%, then produced no progress for five
+minutes and was interrupted without a pytest summary.  It is **INCOMPLETE**,
+not a pass (log SHA-256
+`0fbdb255e3cc676eaab835a3f54ecb2449ab9e450c92244821a446898855b3de`).
+The displayed failure is the listed pre-existing SI3 scalar-math provenance
+red; isolated rerun reproduced `A MY_SRC is not verbatim` (log SHA-256
+`e38c53d46e9ec3673bbc2490caaec7ac1f4a920649c13286b029358da9dca9b9`).
+The worktree-stamp ratchet passed 10/10 in isolation (log SHA-256
+`d5e2bc126787b57240603e8afcfc39de23c1626759bde90425ccb40a3811e44d`).
 
 ## 7. OPEN
 
