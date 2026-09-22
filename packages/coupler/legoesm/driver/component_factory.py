@@ -131,6 +131,9 @@ class DiffusionCoeffs(NamedTuple):
     # smoothing that stabilizes vertical computational modes (the cldG abs-145
     # tropical sawtooth died with BOTH scaled 0.25).
     K_h_A: float = None
+    # Divergence-SELECTIVE biharmonic damping [m^4/s] (CAM-FV ldiv4).  Only
+    # the MPAS hydrostatic lane consumes it; 0.0 = off, byte-identical.
+    div_damp4: float = 0.0
 
 
 def _grid_min_dx(grid) -> float:
@@ -155,6 +158,17 @@ def _grid_min_dx(grid) -> float:
         # dycore is needed for stable 2deg global runs (TODO).
         return float(jnp.min(jnp.asarray(grid.dx))) / 2.0
     return 1e5
+
+
+def _grid_cell_area(grid, dx_min: float) -> float:
+    """Smallest cell area [m^2], the ``L^2`` of CAM-FV's divergence damping.
+
+    MPAS/Voronoi carries ``areaCell`` directly; every other grid falls back
+    to ``dx_min**2``, which is the same quantity for a quasi-uniform mesh.
+    """
+    if hasattr(grid, 'areaCell'):
+        return float(jnp.min(jnp.asarray(grid.areaCell)))
+    return float(dx_min) ** 2
 
 
 def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
@@ -196,8 +210,19 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
 
     _khs = getattr(dc, "k_h_scale", None)
     K_h_A = A_h if _khs is None else _khs * 3.0e-3 * dx_min ** 2 / DT
+
+    # Divergence-selective biharmonic damping, translated from CAM-FV's
+    # ``ldiv4`` (cd_core.F90:655-683).  CAM sets tau4 = 0.01/dt and multiplies
+    # by the SQUARE of the cell area, i.e. nu_div4 = 0.01 * L^4 / dt with
+    # L^2 the cell area -- the ae/cose factors in cdx4/cdy4/cdtau4 are the
+    # spherical metric of that same product, written out for a lat-lon grid.
+    # Keeping the nondimensional 0.01 and our own dt/area makes the PER-STEP
+    # damping of the grid-scale divergent mode identical to CAM's, which is
+    # the invariant that transfers between cores with different time steps.
+    nu_div4_cam = 0.01 * _grid_cell_area(grid, dx_min) ** 2 / DT
+    div_damp4 = getattr(dc, "mpas_div_damp4_scale", 0.0) * nu_div4_cam
     return DiffusionCoeffs(A_h=A_h, hyperdiff=hyperdiff, div_damp=div_damp,
-                           K_h_A=K_h_A)
+                           K_h_A=K_h_A, div_damp4=div_damp4)
 
 
 # Solvers that apply the EXPLICIT biharmonic hyperdiff / divergence damping
@@ -741,6 +766,11 @@ def create_atmosphere_dycore(
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
             sponge_del2_top_layers=int(dc.mpas_sponge_del2_top_layers),
             sponge_del2_top_factor=float(dc.mpas_sponge_del2_top_factor),
+            # Divergence-selective biharmonic damping (CAM-FV ldiv4).  The
+            # vector del2/del4 above damp rotational and divergent modes
+            # alike; this one is the piece CAM applies at every level and we
+            # had computed (``div_damp``) but never handed to this core.
+            nu_div4=diff.div_damp4,
             # Budget-ledger vertical band. The dycore owns the SNAPSHOT-derived
             # dynamics and clips rows, so it needs the SAME weight the physics
             # rows use; without it those two rows stay full-column while the

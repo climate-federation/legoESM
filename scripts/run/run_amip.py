@@ -403,6 +403,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="mpas_sponge_del2_top_factor",
                         help="top-layer del2 viscosity multiplier of the sponge, ramping "
                              "geometrically to 1 below the sponge layers (1.0 = off)")
+    parser.add_argument("--mpas-div-damp4-scale", type=float, default=None,
+                        dest="mpas_div_damp4_scale",
+                        help="Divergence-SELECTIVE biharmonic damping on the MPAS "
+                             "hydrostatic lane, as a multiple of CAM-FV's own ldiv4 "
+                             "coefficient 0.01*area^2/dt (1.0 = CAM strength, 0 = off). "
+                             "Unlike --div-damp-scale / the del2+del4 viscosities, this "
+                             "damps only the curl-free mode and leaves balanced flow alone.")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -2079,6 +2086,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                                      if args.mpas_sponge_del2_top_layers is not None else 0),
         mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
                                      if args.mpas_sponge_del2_top_factor is not None else 1.0),
+        mpas_div_damp4_scale=(args.mpas_div_damp4_scale
+                              if args.mpas_div_damp4_scale is not None else 0.0),
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,

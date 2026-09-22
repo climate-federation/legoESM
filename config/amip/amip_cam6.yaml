@@ -35,6 +35,16 @@ mpas_sponge_del2_top_layers: 2       # index-based sponge: 2 layers on L32 span
 mpas_sponge_del2_top_factor: 8.0
 mpas_vert_advection_scheme: upwind   # van Leer vertical advection is sigma-only
                                      # on the MPAS lane; upwind runs on hybrid
+mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
+                                     # 4th-order DIVERGENCE damping at every
+                                     # level (cd_core.F90 tau4 = 0.01/dt times
+                                     # the squared cell area).  1.0 = CAM's own
+                                     # strength.  Our del2/del4 are VECTOR
+                                     # Laplacians and damp balanced flow too;
+                                     # this is the curl-free-only term CAM
+                                     # relies on, and the L32 table's 14
+                                     # pure-pressure top layers have no way to
+                                     # absorb divergence into their own mass.
 
 # ---- physics cadence ---------------------------------------------------------
 physics_update_steps: 16    # CAM6: physics every 1800 s (16 x 112.5 s); the

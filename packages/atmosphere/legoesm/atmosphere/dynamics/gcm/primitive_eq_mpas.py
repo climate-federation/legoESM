@@ -53,6 +53,7 @@ from legoesm.core.operators_voronoi import (
     pv_flux_enstrophy_conserving_3d,
     vector_laplacian_del2_3d,
     vector_laplacian_del4_3d,
+    div_damp_del4_3d,
     cell_to_edge_avg_3d,
     apvm_correction_3d,
 )
@@ -198,6 +199,17 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # layer gets the full factor), 1 below.  0 / 1.0 = off, byte-identical.
     sponge_del2_top_layers: int = 0
     sponge_del2_top_factor: float = 1.0
+    # Divergence-SELECTIVE biharmonic damping [m⁴/s], CAM-FV's ``ldiv4``
+    # (``fv_div24del2flag=4``, the CAM6 physics default at every horizontal
+    # grid).  ``nu_del2``/``nu_del4`` above are VECTOR Laplacians: they damp
+    # the rotational and divergent modes together, so cranking them to quiet
+    # a noisy divergence field also crushes the jets.  This term damps only
+    # the curl-free part.  It matters most on a hybrid table with
+    # pure-pressure (B=0) layers, whose fixed mass leaves continuity no
+    # choice but to convert horizontal divergence into vertical mass flux.
+    # 0.0 = off, byte-identical.  Appended at the tuple END: preserves
+    # POSITIONAL CONSTRUCTION by existing callers.
+    nu_div4: float = 0.0
 
 
 # ============================================================================
@@ -553,6 +565,12 @@ def mpas_hydrostatic_tendencies(
         du_dt_3d = du_dt_3d + _nu2[None, :] * vector_laplacian_del2_3d(u_3d, mesh)
     elif config.nu_del4 > 0:
         du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
+
+    # Divergence-selective biharmonic damping (CAM-FV ldiv4).  Same sign
+    # convention as the vector biharmonic above: the del4 term enters with a
+    # minus sign, del2 with a plus.
+    if config.nu_div4 > 0:
+        du_dt_3d = du_dt_3d - config.nu_div4 * div_damp_del4_3d(u_3d, mesh)
 
     # Batched divergences.  ``divergence_cell_3d`` shares the same
     # MPAS edgesOnCell gather + reduce on the leading edge axis (the

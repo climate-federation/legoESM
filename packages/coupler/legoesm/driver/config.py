@@ -312,6 +312,14 @@ class DycoreConfig(NamedTuple):
     # in the top n layers (raised-lid experiment); 0 / 1.0 = off.
     mpas_sponge_del2_top_layers: int = 0
     mpas_sponge_del2_top_factor: float = 1.0
+    # Divergence-SELECTIVE biharmonic damping on the MPAS hydrostatic lane,
+    # as a multiple of CAM-FV's own ldiv4 coefficient 0.01*area^2/dt
+    # (cd_core.F90:655-683; fv_div24del2flag=4 is the CAM6 physics default at
+    # every horizontal grid).  1.0 = CAM's strength, 0.0 = off and
+    # byte-identical.  The existing nu_del2/nu_del4 are VECTOR Laplacians and
+    # damp balanced flow together with the divergent mode; this term does not.
+    # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION.
+    mpas_div_damp4_scale: float = 0.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -1837,6 +1845,10 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
+        _dd4 = getattr(d, "mpas_div_damp4_scale", 0.0)
+        if not isinstance(_dd4, (int, float)) or isinstance(_dd4, bool) or _dd4 < 0:
+            errors.append(
+                f"dycore.mpas_div_damp4_scale must be a number >= 0, got {_dd4!r}")
         # Dynamical-core axis membership.  Mirror the gate in
         # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
         # config-validation time, instead of deep in the solver factory at JIT.
@@ -3002,6 +3014,14 @@ class ExperimentConfig(NamedTuple):
                 "dycore.mpas_sponge_del2_top_layers > 0 is silently inert when "
                 f"a_h_scale={d.a_h_scale!r} turns the del2 viscosity off; use a_h_scale > 0 "
                 "or set mpas_sponge_del2_top_layers=0")
+        _dd4s = getattr(d, "mpas_div_damp4_scale", 0.0)
+        if (isinstance(_dd4s, (int, float)) and not isinstance(_dd4s, bool)
+                and _dd4s > 0
+                and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
+            errors.append(
+                "dycore.mpas_div_damp4_scale is wired into the hydrostatic MPAS dycore "
+                f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
+                "it would be silently inert")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
