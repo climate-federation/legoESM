@@ -92,9 +92,16 @@ arm changed.
 
 ## Review and gates
 
-The separate read-only Codex review result is recorded below after the final
-receipt diff is committed.  The receipt citation gate and its shifted-citation
-plant are likewise recorded in the final amendment commit.
+The required separate read-only Codex pass was attempted against the committed
+diff.  It produced no scientific verdict because the in-process app-server
+could not initialize in the read-only sandbox.  Its verbatim terminal finding
+was: `Error: failed to initialize in-process app-server client: Read-only file
+system (os error 30)`.  Therefore **independent review was unavailable
+in-sandbox**; this is not represented as a SHIP verdict.  The round changes no
+production physics and remains stopped before scientific measurement.
+
+The receipt citation gate and its shifted-citation plant are recorded in the
+final evidence amendment.
 
 ## Evidence
 
@@ -104,6 +111,7 @@ plant are likewise recorded in the final amendment commit.
 | `layout_plant.log` | `9cfb3218842167328a98359a061a2e39ca1611d611abcc6062c777fd55636197` |
 | `acquisition.log` | `acd1af2dce1235a6dc07f64f6b9933cf03eaad465852a5de3aabfb313f641d36` |
 | `parser_tests.log` | `3125ea7be43eaff8638305b0397e992840a6e097fd68025e13f60403a0adc1a5` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
 
 ## OPEN — round 147
 
