@@ -136,8 +136,18 @@ exception, and pytest reported `1 failed in 3.54s`.  With the guard present,
 the same test passes.  The own-mesh mask plant and bridge/own-input equivalence
 are covered by the five-test QCO file, which reports exactly `5 passed in
 55.26s`.  The final candidate-sensitive four-file gate reports exactly `61
-passed in 18.66s` before this receipt was added; it is rerun after the receipt
-and citation map are committed.
+passed in 28.17s` after the receipt and citation map were committed.
+
+The required combined `tests/ocean/fidelity tests/ocean/unit -n 12` run did
+not produce a trustworthy regression verdict: it exhausted memory, workers
+crashed, and xdist ended with an internal assertion.  Its exact terminal
+summary is `186 failed, 7614 passed, 153 skipped, 2 xfailed, 62 warnings, 38
+errors in 1514.42s`.  A mechanical comparison extracts 186 failed IDs, of
+which 174 are absent from the frozen 87-ID list; the retained traceback shows
+`MemoryError` and a crashed worker, so those 174 are recorded in
+`full_failed_ids_not_in_frozen_base.txt` but are not misreported as 174 code
+regressions.  Every changed-path focused test is green, including the four
+tests that were red at the starting tip.
 
 The required read-only Codex review was attempted after the implementation.
 Its verdict is unavailable; the log ends verbatim: `Error: failed to initialize
@@ -145,8 +155,10 @@ in-process app-server client: Read-only file system (os error 30)`.  This is
 **independent review unavailable in-sandbox**, not approval and not a
 DO-NOT-SHIP verdict.
 
-The final citation gate and shifted-citation plant are recorded after this
-receipt.  No NEMO build or run was requested, and no NEMO source was modified.
+The final citation gate reports PASS over 7 citations, zero unmapped, zero
+failures, and an empty map audit.  Shifting the compiled LDF citation by two
+lines reports FAIL and exits 1.  No NEMO build or run was requested, and no
+NEMO source was modified.
 
 ## OPEN — round 151
 
