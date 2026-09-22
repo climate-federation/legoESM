@@ -763,6 +763,47 @@ def _surface_forcings(
     return freshwater, surface
 
 
+# The ONE unbuilt statement this ladder is allowed to stop on.  Matching the
+# refusal text is the point: without it any future NotImplementedError from a
+# different routine would be labelled as this gap and cited to the wrong
+# compiled line.
+EEN_FOLD_REFUSAL = "nemo_avg4 is not defined for a tripolar fold"
+
+
+def unbuilt_statement_blocker(exc: NotImplementedError, kt: int) -> dict[str, object]:
+    """Classify a deliberate "not built" refusal, or refuse to label it."""
+
+    message = str(exc)
+    require(EEN_FOLD_REFUSAL in message,
+            "the production step raised an unregistered NotImplementedError; "
+            "it is not the EEN vertex-thickness fold gap and must not be "
+            f"labelled as one: {message}")
+    return {
+        "status": "STOP_PRODUCTION_EEN_E3F_FOLD_GAP",
+        "kt": kt,
+        "message": message,
+        "legoesm_source": (
+            "packages/ocean/legoesm/ocean/dynamics/"
+            "ocean_pe_latlon_cgrid.py:2402-2405"),
+        "nemo_source_citation": TRAJECTORY_CITATIONS["een_e3f"],
+    }
+
+
+def entry_eligibility(bridge: dict[str, object]) -> tuple[bool, str]:
+    """Whether the card's OWN entry state is exact, and what that certifies.
+
+    Only sea-surface height may come from NEMO (Decision 52).  If any other
+    field still needs the record, the twin is NOT eligible and says so.
+    """
+
+    rows = bridge["rows"]
+    independent = all(
+        rows[name]["bit_identical"] for name in ("T", "S", "u", "v"))
+    return independent, (
+        "DECISION52_SSH_ONLY" if independent
+        else "STOP_INITIAL_T_S_TRANSCRIPTION")
+
+
 def unaltered_initial_ts(deck_root: Path, card) -> dict[str, np.ndarray]:
     """ABLATION: the initial state WITHOUT the ORCA_R2 hand alterations.
 
@@ -869,32 +910,25 @@ def candidate_trajectory(
         except NotImplementedError as exc:
             # An explicitly UNBUILT statement, named by the production code.
             # It is recorded, not swallowed: the gate still exits non-zero and
-            # registers no magnitude.  Anything else (a ValueError, a shape
-            # error) is a defect and propagates.
+            # registers no magnitude.  A refusal from any OTHER routine is not
+            # labelled as this one, and anything that is not a deliberate
+            # refusal (a ValueError, a shape error) is a defect and propagates.
+            blocker = unbuilt_statement_blocker(exc, kt)
+            entry_exact, eligibility = entry_eligibility(bridge)
             return {
                 "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
                 "execution": "production-jit-cpu-fp64-x64-libm",
                 "decision52_bridge": bridge,
                 "independent_entry_before_bridge": independent,
                 "hand_alteration_ablation": ablation,
-                "independent_entry_ts_bit_identical": all(
-                    bridge["rows"][name]["bit_identical"]
-                    for name in ("T", "S", "u", "v")),
-                "given_nemo_entry_eligibility": "DECISION52_SSH_ONLY",
+                "independent_entry_ts_bit_identical": entry_exact,
+                "given_nemo_entry_eligibility": eligibility,
                 "chlorophyll_kt1_input_reconstruction": chl_row,
                 "first_non_bit_statement": first_non_bit,
                 "kt10_same_field_magnitude":
                     "UNMEASURED_STOP_PRODUCTION_EEN_E3F_FOLD_GAP",
                 "checkpoints": checkpoints,
-                "execution_blocker": {
-                    "status": "STOP_PRODUCTION_EEN_E3F_FOLD_GAP",
-                    "kt": kt,
-                    "message": str(exc),
-                    "legoesm_source": (
-                        "packages/ocean/legoesm/ocean/dynamics/"
-                        "ocean_pe_latlon_cgrid.py:2402-2405"),
-                    "nemo_source_citation": TRAJECTORY_CITATIONS["een_e3f"],
-                },
+                "execution_blocker": blocker,
             }
         for stage in (1, 2, 3):
             oracle_stage = read_state_frame(
@@ -928,9 +962,7 @@ def candidate_trajectory(
         row["checkpoint"]: row["rows"][first_field]
         for row in checkpoints if row["kt"] == max_step
     }
-    entry_ts_independent = all(
-        bridge["rows"][name]["bit_identical"] for name in ("T", "S", "u", "v")
-    )
+    entry_ts_independent, eligibility = entry_eligibility(bridge)
     return {
         "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
         "execution": "production-jit-cpu-fp64-x64-libm",
@@ -938,9 +970,7 @@ def candidate_trajectory(
         "independent_entry_before_bridge": independent,
         "hand_alteration_ablation": ablation,
         "independent_entry_ts_bit_identical": entry_ts_independent,
-        "given_nemo_entry_eligibility": (
-            "DECISION52_SSH_ONLY" if entry_ts_independent else
-            "STOP_INITIAL_T_S_TRANSCRIPTION"),
+        "given_nemo_entry_eligibility": eligibility,
         "chlorophyll_kt1_input_reconstruction": chl_row,
         "first_non_bit_statement": first_non_bit,
         "kt10_same_field_magnitude": kt10_rows,

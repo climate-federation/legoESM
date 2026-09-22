@@ -182,8 +182,7 @@ def test_round6_independent_trajectory_uses_production_step_and_only_bridges_ssh
     assert "trace = model.step(" in source
     assert "state = trace.state_after" in source
     assert '"claim_label": "INDEPENDENT_WITH_DECISION52_SSH"' in source
-    assert '"DECISION52_SSH_ONLY" if entry_ts_independent else' in source
-    assert '"STOP_INITIAL_T_S_TRANSCRIPTION")' in source
+    assert '"given_nemo_entry_eligibility": eligibility' in source
     assert '"rnf_tsc"' in source
 
 
@@ -231,13 +230,48 @@ def test_an_unbuilt_statement_is_recorded_not_swallowed():
     """A named NotImplementedError stops the ladder WITHOUT a magnitude."""
     source = Path(gate.__file__).read_text()
     assert "except NotImplementedError as exc:" in source
-    assert '"status": "STOP_PRODUCTION_EEN_E3F_FOLD_GAP"' in source
     assert '"UNMEASURED_STOP_PRODUCTION_EEN_E3F_FOLD_GAP"' in source
     # a defect must NOT be caught here
     assert "except ValueError" not in source.split(
         "def candidate_trajectory")[1]
     # and the stop is a non-zero exit
     assert '"STOP_PRODUCTION_EEN_E3F_FOLD_GAP",\n    ):' in source
+
+
+def test_only_the_registered_refusal_may_be_labelled_as_the_fold_gap():
+    """An unbuilt statement from ANOTHER routine must not borrow this citation.
+
+    Found by the round-7 independent review: the first version labelled every
+    NotImplementedError as the vertex-thickness gap and cited it to the
+    compiled routine that builds that field.
+    """
+    labelled = gate.unbuilt_statement_blocker(
+        NotImplementedError(
+            "nemo_avg4 is not defined for a tripolar fold; its certified "
+            "NEMO GYRE use is a closed beta-plane box"), kt=1)
+    assert labelled["status"] == "STOP_PRODUCTION_EEN_E3F_FOLD_GAP"
+    assert labelled["kt"] == 1
+    assert "dynvor.f90:912-937" in labelled["nemo_source_citation"]
+
+    with pytest.raises(gate.GateError, match="unregistered"):
+        gate.unbuilt_statement_blocker(
+            NotImplementedError("some other operator is not built"), kt=3)
+
+
+def test_entry_eligibility_refuses_to_certify_a_non_bit_entry_field():
+    """Also from the review: the stop arm certified the twin unconditionally."""
+    def bridge(**bits):
+        rows = {name: {"bit_identical": bits.get(name, True)}
+                for name in gate.FIELD_ORDER}
+        return {"rows": rows}
+
+    assert gate.entry_eligibility(bridge()) == (True, "DECISION52_SSH_ONLY")
+    # sea-surface height is the ONE field Decision 52 may supply
+    assert gate.entry_eligibility(bridge(ssh=False)) == (
+        True, "DECISION52_SSH_ONLY")
+    for field in ("T", "S", "u", "v"):
+        assert gate.entry_eligibility(bridge(**{field: False})) == (
+            False, "STOP_INITIAL_T_S_TRANSCRIPTION"), field
 
 
 def test_round7_ablation_rebuilds_the_unaltered_initial_state():
