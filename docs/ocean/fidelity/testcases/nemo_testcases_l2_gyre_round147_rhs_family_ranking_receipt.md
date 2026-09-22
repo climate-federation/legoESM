@@ -58,7 +58,7 @@ declares full-domain `pCdU_u`/`pCdU_v` output arrays, says the method is inner
 domain only, and assigns only `ntsi:ntei,ntsj:ntej` at
 `GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/dynspg_ts.f90:1460-1493`.
 The caller consumes drag and wind over the same inner loop at
-`GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:236-251`.
+`GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:236-250`.
 
 The corrected admission reports PASS.  The new family record's final ZAD pair
 is BIT both to its same-run inherited completed RHS and to Round 140 on all
@@ -168,7 +168,8 @@ Stay on NEMO's day-180 entry and the LDF family only.  Extend the existing
 Round-50 literal LDF walk—do not create a second harness—to score the compiled
 curl/divergence intermediates and the in-place U/V additions under production
 JIT.  Distinguish operator output from accumulator association using
-`dynldf_lev.f90:121-140`; the adjacent-snapshot subtraction is not an oracle
+`GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/dynldf_lev.f90:121-140`;
+the adjacent-snapshot subtraction is not an oracle
 for the isolated addend.  Only a source-exact statement candidate may then be
 run through the ladder, month, and 360-day Decision-43/45 gate.  If existing
 restart/static operands cannot close that literal walk, preregister a direct

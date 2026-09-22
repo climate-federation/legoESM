@@ -21,7 +21,7 @@ The Round-146 compiled writer records every full `uu(:,:,:,Krhs)` and
 `GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/stp2d.f90:145-192`.
 The inherited Round-140 writer records those full arrays plus their masks after
 ZAD at
-`GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:174-188`.
+`GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:180-192`.
 The discrimination is whether the extra writes changed a model-owned value or
 whether the byte comparison included dry, halo, or other unowned array cells.
 

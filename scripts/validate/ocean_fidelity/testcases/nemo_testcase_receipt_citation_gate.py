@@ -2935,7 +2935,7 @@ CITATION_MAP = {
         '!*  hydrostatic pressure gradient (HPG))  *!',
         "WRITE(numout,*) 'ROUND146_DEVELOPED_RHS_FAMILIES_DUMP '", 48],
     'GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/dynldf_lev.f90:121-140': [
-        'DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)',
+        ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 1),
         '&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 20],
     'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/dynspg_ts.f90:1460-1493': [
         'SUBROUTINE dyn_drg_init( Kbb, Kmm, puu, pvv, puu_b ,pvv_b, pu_RHSi, pv_RHSi, pCdU_u, pCdU_v )',
@@ -2949,6 +2949,12 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:249-250': [
         'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj)',
         'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj)', 2],
+    'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:180-192': [
+        '! Round 140: repeat the established slow-forcing operand list at',
+        'WRITE(r140_slow_unit) e3u_3d, uu(:,:,:,Krhs), umask, e3v_3d, vv(:,:,:,Krhs), vmask', 13],
+    'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:236-250': [
+        '!* baroclinic drag forcing *!',
+        'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj)', 15],
     # --- round 144: developed wind operand walk ---
     'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/domqco.f90:160-182': [
         'SUBROUTINE dom_qco_zgr( Kbb, Kmm )',
