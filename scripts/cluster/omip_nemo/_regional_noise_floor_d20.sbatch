@@ -46,8 +46,14 @@ set -uo pipefail
 M=/burg-archive/glab/users/pg2328/_fluxacc_wt; cd $M || exit 1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 R=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo
-A=$R/trp_faithz0_d30/snapshot_day0020.npz
-B=$R/trp_faithz0_d90/snapshot_day0020.npz
+# DAY is settable so the same null can be re-read as the pair diverges
+# further. That matters: a floor sampled after five days of divergence
+# understates the floor after fifteen, and the scorecard rows it is being
+# compared against are quoted at day 30.
+DAY=${DAY:-0020}
+A=$R/trp_faithz0_d30/snapshot_day${DAY}.npz
+B=$R/trp_faithz0_d90/snapshot_day${DAY}.npz
+echo "### same-configuration null at day ${DAY}"
 for f in "$A" "$B"; do [ -r "$f" ] || { echo "FATAL: missing $f"; exit 1; }; done
 
 $PY -u - "$A" "$B" <<'EOF'
@@ -105,31 +111,49 @@ def stats(diff2d, mask):
     d = diff2d[m]
     rms = float(np.sqrt(np.sum(w * d * d) / np.sum(w)))
     mean = float(np.sum(w * d) / np.sum(w))
-    return rms, mean, float(np.abs(d).max()), int(m.sum())
+    # How many cells differ AT ALL, bitwise. This is the discriminator a
+    # rounded print cannot give: a region that is bitwise identical across
+    # thousands of active cells after days of divergence is masked or
+    # clamped, not merely quiet, whereas a region where most cells differ
+    # by a tiny amount is simply one the divergence has not reached yet.
+    return rms, mean, float(np.abs(d).max()), int(m.sum()), int(np.sum(d != 0.0))
 
-for var in ("T", "S"):
+for var in ("T", "S", "eta"):
     x = np.asarray(A[var], dtype=np.float64)
     y = np.asarray(B[var], dtype=np.float64)
     # Surface level is the scored quantity (SST / SSS); axis order is
-    # reported so a wrong guess about it cannot pass silently.
+    # reported so a wrong guess about it cannot pass silently. eta is
+    # already two-dimensional and is included because it discriminates
+    # between the two explanations for a region that does not move: a
+    # masking bug freezes EVERY field there, whereas sea level responding
+    # while temperature does not points at a surface clamp.
     print(f"\n=== {var}  shape {x.shape} ===")
-    lvl_axis = int(np.argmin(x.shape))
-    surf = np.take(x, 0, axis=lvl_axis) - np.take(y, 0, axis=lvl_axis)
-    print(f"level axis taken as {lvl_axis} (size {x.shape[lvl_axis]}); "
-          f"surface field shape {surf.shape}, grid shape {lat.shape}")
+    if x.ndim == 2:
+        surf = x - y
+        print(f"two-dimensional field; shape {surf.shape}, grid shape {lat.shape}")
+    else:
+        lvl_axis = int(np.argmin(x.shape))
+        surf = np.take(x, 0, axis=lvl_axis) - np.take(y, 0, axis=lvl_axis)
+        print(f"level axis taken as {lvl_axis} (size {x.shape[lvl_axis]}); "
+              f"surface field shape {surf.shape}, grid shape {lat.shape}")
     if surf.shape != lat.shape:
         print("  !! surface field does not match the grid shape -- axis guess wrong, skipping")
         continue
-    print(f"  {'region':20s} {'wRMS':>10s} {'wmean':>10s} {'max|d|':>10s} {'cells':>9s}")
+    # The weighted MEAN is the column to read against a scorecard bias. A
+    # root-mean-square is the wrong floor for a bias statistic: it cannot
+    # cancel, so it is systematically larger and flatters nothing.
+    print(f"  {'region':20s} {'wRMS':>12s} {'wmean(bias)':>14s} "
+          f"{'max|d|':>12s} {'cells':>8s} {'differ':>8s}")
     seen = {}
     for name, mask in region_masks():
         s = stats(surf, mask)
         if s is None:
-            print(f"  {name:20s} {'no cells':>10s}")
+            print(f"  {name:20s} {'no cells':>12s}")
             continue
-        rms, mean, mx, n = s
+        rms, mean, mx, n, ndiff = s
         seen[name] = (rms, n)
-        print(f"  {name:20s} {rms:10.4f} {mean:+10.4f} {mx:10.4f} {n:9d}")
+        print(f"  {name:20s} {rms:12.3e} {mean:+14.3e} {mx:12.3e} "
+              f"{n:8d} {ndiff:8d}")
 
     # NON-VACUITY GATES. The reproducibility job already proved these two
     # files differ -- 2.614 K in T over roughly 42% of cells. So a table of
