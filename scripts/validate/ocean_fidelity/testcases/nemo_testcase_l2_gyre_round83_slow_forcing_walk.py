@@ -4400,38 +4400,11 @@ def _round147_oracle_addends(fields: dict) -> dict[str, tuple[np.ndarray, np.nda
     return addends
 
 
-def _round147_family_ulp(oracle_addend, live_addend, live_total,
-                         thickness, active):
-    """Find one family-input ULP that survives construction and depth reduction."""
-    oracle_addend = np.asarray(oracle_addend, dtype=np.float64)
-    live_addend = np.asarray(live_addend, dtype=np.float64)
-    live_total = np.asarray(live_total, dtype=np.float64)
-    thickness = np.asarray(thickness, dtype=np.float64)
-    active = np.asarray(active, dtype=bool)
-    base_rhs = live_total + (oracle_addend - live_addend)
-    mask2 = active[..., 0].astype(np.float64)
-    base_depth = np.asarray(_round142_u_depth_reduction(
-        jnp.asarray(thickness), jnp.asarray(base_rhs), jnp.asarray(mask2)))
-    for level in range(oracle_addend.shape[-1]):
-        trial = np.array(oracle_addend, copy=True)
-        direction = np.where(trial[..., level] >= 0.0,
-                             np.float64(np.inf), np.float64(-np.inf))
-        trial[..., level] = np.nextafter(trial[..., level], direction)
-        trial_rhs = live_total + (trial - live_addend)
-        trial_depth = np.asarray(_round142_u_depth_reduction(
-            jnp.asarray(thickness), jnp.asarray(trial_rhs), jnp.asarray(mask2)))
-        locations = np.argwhere(
-            (trial_depth.view(np.uint64) != base_depth.view(np.uint64))
-            & active[..., level])
-        if locations.size:
-            j, i = (int(value) for value in locations[0])
-            planted = np.array(oracle_addend, copy=True)
-            planted[j, i, level] = trial[j, i, level]
-            require(np.count_nonzero(
-                planted.view(np.uint64) != oracle_addend.view(np.uint64)) == 1,
-                "Round-147 family plant did not change exactly one word")
-            return planted, (j, i, level)
-    raise RuntimeError("no one-ULP family input survives the depth reduction")
+def _round147_directed_rhs_ulp(base_rhs, thickness, active):
+    """Find one directed-RHS ULP that survives the production depth reduction."""
+    return _round142_propagating_rhs_ulp(
+        {"rhs_u": np.asarray(base_rhs, dtype=np.float64)},
+        np.asarray(active, dtype=bool), np.asarray(thickness, dtype=np.float64))
 
 
 def measure_round147_rhs_families(args) -> dict[str, object]:
@@ -4568,11 +4541,10 @@ def measure_round147_rhs_families(args) -> dict[str, object]:
 
     if args.plant == "family-input-ulp":
         family = owner or largest["u"]
-        planted_u, location = _round147_family_ulp(
-            oracle_addends[family][0], live_addends[family][0], live_total[0],
-            rhs_fields["e3u"], active["u"])
+        planted_u, location = _round147_directed_rhs_ulp(
+            overrides[family][0], rhs_fields["e3u"], active["u"])
         planted_override = (
-            live_total[0] + (planted_u - live_addends[family][0]),
+            planted_u,
             overrides[family][1],
         )
         planted_trace, planted = _round140_callback_trace(

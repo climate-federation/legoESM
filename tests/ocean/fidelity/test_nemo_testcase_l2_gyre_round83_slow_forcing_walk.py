@@ -547,3 +547,15 @@ def test_round147_registry_and_adjacent_family_differences() -> None:
     for pair in addends.values():
         assert np.array_equal(pair[0], np.ones((22, 32, 30)))
         assert np.array_equal(pair[1], np.ones((22, 32, 30)))
+
+
+def test_round147_directed_rhs_plant_changes_one_consumed_word() -> None:
+    shape = (2, 2, 1)
+    rhs = np.ones(shape, dtype=np.float64)
+    thickness = np.ones(shape, dtype=np.float64)
+    active = np.ones(shape, dtype=bool)
+    planted, location = WALK._round147_directed_rhs_ulp(
+        rhs, thickness, active)
+    assert len(location) == 3
+    assert np.count_nonzero(
+        planted.view(np.uint64) != rhs.view(np.uint64)) == 1
