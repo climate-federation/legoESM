@@ -9,13 +9,28 @@
 #
 # IS THE EQUATORIAL WARM BIAS AN ASCENT DEFICIT OR AN UNDERCURRENT DEFICIT?
 #
-# Tonight's surface-flux measurement makes this the right question. Our net
-# heat into nino3 is 30-40 W/m2 BELOW NEMO's while we sit 1.34 K WARMER, so
-# the surface is a heat SINK relative to the oracle and the warmth cannot be
-# arriving through the air-sea interface. It is dynamical. That also matches
-# the standing budget result: at the mixing base the column balance is an
-# advective near-cancellation, -75.7 against +72.4 K/month, where a 3% error
-# in either term is the whole bias.
+# RETRACTED, AND THE RETRACTION IS THE REASON THIS HEADER WAS REWRITTEN (R24,
+# cd2c15d75). The card originally justified itself with: "our net heat into
+# nino3 is 30-40 W/m2 BELOW NEMO's while we sit 1.34 K WARMER, so the surface
+# is a heat SINK and the warmth must be dynamical." That inference is
+# CIRCULAR. With a prescribed atmosphere the bulk formulae restore SST at
+# about 38 W/m2 per K, so a warm ocean MUST lose extra heat -- 38 x 1.34 K
+# predicts ~51 W/m2, MORE than the 30-40 observed. The heat deficit is the
+# EXPECTED RESPONSE to being warm, not independent evidence of a dynamical
+# cause, and the restoring coefficient itself is a tautology (R23): with a
+# prescribed atmosphere it is simply our own bulk's slope.
+#
+# The card is still worth running, on the narrower ground that it MEASURES
+# the circulation directly instead of inferring it. The standing budget
+# result stands on its own: at the mixing base the column balance is an
+# advective near-cancellation, -75.7 against +72.4 K/month, so a 3% error in
+# either term is the whole bias.
+#
+# ONE FURTHER CAVEAT ON WHAT THIS CARD CAN CONCLUDE: the upwelling comparison
+# may be UNINFORMATIVE (also R24). Equatorial ascent is Ekman divergence, and
+# our wind stress is MATCHED to NEMO's by construction, so a ratio near 1.00
+# is what a locked input predicts and validates nothing. The undercurrent
+# blocks do not share that defect.
 #
 # An earlier attempt (9907300) failed rc=1 precisely because the NEMO half was
 # not supplied. Those files all exist, so this supplies them:
