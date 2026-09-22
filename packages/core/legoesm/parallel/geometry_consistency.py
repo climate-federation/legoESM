@@ -50,6 +50,7 @@ __all__ = [
     "band_fingerprint",
     "band_fingerprints_agree",
     "checked_shard_put",
+    "checked_replicated_put",
     "content_hash48",
     "name_digest48",
     "schema_fingerprint",
@@ -703,6 +704,39 @@ def checked_shard_put(arr, name, sharding, *, context, n_bands):
     return jax.make_array_from_callback(
         host.shape, sharding, lambda idx: host[idx])
 
+
+
+def checked_replicated_put(arr, name, sharding, *, context):
+    """Broadcast-check a REPLICATED field, then put it WITHOUT jax's
+    whole-array ``device_put`` equality assert (wall 2 above, for the
+    replicated case that :func:`checked_shard_put` does not cover).
+
+    Single-process: plain ``jax.device_put`` — byte-unchanged, no host
+    round trip. Multi-process: :func:`broadcast_checked` first, so the
+    byte-CANONICAL process-0 bytes and its symmetric raise on real
+    divergence are preserved exactly as before, then
+    ``jax.make_array_from_callback`` places those bytes. Every device
+    still holds IDENTICAL replicated geometry — the replicated contract
+    — because the bytes handed to the callback are process 0's.
+
+    Why bypass the assert: it is REDUNDANT after ``broadcast_checked``,
+    which has already proven agreement and broadcast one copy. Jax
+    re-verifies it by all-gathering the whole field to every process and
+    comparing in NumPy, about ``P*N*(2s+1)`` bytes per field. At lat-lon
+    4096x8192 each field is 134 MB, so per-rank peak grew as 12.7/22.2/
+    41.1 GB (f32) and 24.6/41.5/73.4 GB (f64) at 32/64/128 ranks, and
+    the 128-rank f64 arm was OOM-killed. The cubed-sphere lane, which
+    never takes this path, is flat at 8.2 GB.
+    """
+    if jax.process_count() <= 1:
+        return jax.device_put(arr, sharding)
+    host = np.asarray(broadcast_checked(arr, name, context=context))
+    # data_callback is typed ``Index | None``; None means "the whole
+    # array" for a fully-replicated shard, and host[None] would add an
+    # axis instead of returning it.
+    return jax.make_array_from_callback(
+        host.shape, sharding,
+        lambda idx: host if idx is None else host[idx])
 
 def leaf_digest48(x) -> float:
     # Dtype-AWARE 48-bit digest of one numeric leaf. content_hash48 alone

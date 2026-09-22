@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --account=bd1179_gpu
+#SBATCH --account=bb1596_gpu
 #SBATCH --partition=gpu
 #SBATCH --constraint=a100_80
 #SBATCH --nodes=32

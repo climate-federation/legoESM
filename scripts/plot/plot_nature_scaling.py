@@ -26,6 +26,7 @@ import csv
 import glob
 import json
 import os
+import sys
 from collections import defaultdict
 
 import matplotlib
@@ -38,7 +39,7 @@ PANELS = [
     ("atmosphere", "latlon", "lat–lon", "4096×8192 L26 (strong) · 32 / 8 rows per device (weak)"),
     ("atmosphere", "icosahedral", "MPAS icosahedral", "subdiv-9/10 L26 · 81k / 5k cells per device (weak)"),
     ("atmosphere", "cubed-sphere", "cubed-sphere", "C768 L26 · 6·kt² tiles"),
-    ("ocean", "tripole", "tripole (ORCA fold)", "3072×4352 L75 (ORCA12-class) · 24 / 6 rows per device (weak)"),
+    ("ocean", "tripole", "tripole (ORCA fold)", "3072×4352 L75 (ORCA12-class) · GPU only — see note"),
     ("ocean", "mpas", "MPAS Voronoi", "subdiv-9 L40 (2.6M cells) · 20k / 5k cells per device (weak)"),
     ("ocean", "fesom", "FESOM2 (fesom_jax)", "forca20 2.1M nodes L70 · float64 only"),
 ]
@@ -109,8 +110,30 @@ def _mode(r, path):
     return "weak" if "_weak_" in os.path.basename(path) else r.get("mode", "strong")
 
 
+# MPASOceanConfig defaults the figure is measured at: fixed_iters, precond,
+# poly_sweeps.  Rows solving anything else are a different model.
+OCEAN_MPAS_PCG_ITERS = 20
+OCEAN_MPAS_PCG_PRECOND = ("poly", 4)
+# NCCL channel count both MPAS lanes pin (nature_ladder.sbatch): 8 -> 32 on
+# 2026-09-21 (s9 atm: 5.57 -> 4.65 ms at 128 GPUs).  Multi-device MPAS GPU
+# rows at any other count or chunk size, or without the stamp, are refused.
+# The 32-channel gain is ATMOSPHERE evidence; the ocean lane (PCG-dominated,
+# 2M+9 allreduces/step) is pinned by decision and A/B-checked separately.
+MPAS_NCCL_CHANNELS = "32"
+# Multi-rank CPU rows need each rank's full core share (nature_ladder.sbatch
+# passes --cpus-per-task = node threads / ranks-per-node = 64 since
+# 2026-09-21); rows stamped below this, or unstamped, were 1-core ranks
+# (7.4x slower per rank) and are refused -- single-rank rows included, the
+# old launch bound a one-task step to one core just the same.
+CPU_AFFINITY_MIN = 16
+MPAS_NCCL_CHUNK = "131072"
+
+
 def load(dirs):
     best = {}
+    dropped = []
+    dropped_nccl = []
+    dropped_aff = []
     for d in dirs:
         for f in glob.glob(os.path.join(d, "**", "*.jsonl"), recursive=True):
             if f.endswith(".failed.jsonl"):     # quarantined by the ladder
@@ -141,12 +164,79 @@ def load(dirs):
                 nlev = r.get("nlev", r.get("n_levels"))
                 if (comp, grid) in NLEV and nlev != NLEV[(comp, grid)]:
                     continue
+                # The ocean MPAS barotropic solver's iteration count sets most
+                # of its step time, and it changed from 60 to 30 (commit
+                # 4a208be8d).  Receipts from either setting are valid timings
+                # of DIFFERENT models, so mixing them inside one curve would
+                # attribute a solver change to parallel scaling.  Receipts
+                # predating the field carry no count and are refused here.
+                if comp == "ocean" and grid == "mpas":
+                    extra = r.get("metadata", {}).get("extra", {})
+                    iters = extra.get("pcg_fixed_iters")
+                    # Single-device rows solve to a TOLERANCE (stock CG) and
+                    # never run the fixed count, so their recorded count is
+                    # inert and they stay comparable across the change.
+                    solver = extra.get("pcg_solver_path")
+                    pre = (extra.get("pcg_precond"), extra.get("pcg_poly_sweeps"))
+                    if (solver != "stock_cg_to_tol"
+                            and (iters != OCEAN_MPAS_PCG_ITERS
+                                 or pre != OCEAN_MPAS_PCG_PRECOND)):
+                        dropped.append((f, int(r["n_devices"]),
+                                        f"{iters}/{pre[0]}{pre[1]}"))
+                        continue
+                if _backend(r) == "cpu":
+                    aff = r.get("metadata", {}).get("cpu_affinity")
+                    if aff is None or int(aff) < CPU_AFFINITY_MIN:
+                        dropped_aff.append((f, int(r["n_devices"]), aff))
+                        continue
+                if (grid in ("icosahedral", "mpas") and _backend(r) == "gpu"
+                        and int(r["n_devices"]) > 1):
+                    env = r.get("metadata", {}).get("extra", {}).get("nccl_env") or {}
+                    ch = (env.get("NCCL_MIN_NCHANNELS"), env.get("NCCL_MAX_NCHANNELS"),
+                          env.get("NCCL_P2P_NET_CHUNKSIZE"))
+                    if ch != (MPAS_NCCL_CHANNELS, MPAS_NCCL_CHANNELS, MPAS_NCCL_CHUNK):
+                        dropped_nccl.append((f, int(r["n_devices"]), ch))
+                        continue
                 mode = _mode(r, f)
                 key = (comp, grid, _backend(r), prec, mode, _res(r, grid, mode),
                        int(r["n_devices"]))
                 steps = r.get("steps") or r.get("metadata", {}).get("extra", {}).get("steps")
                 if key not in best or ms < best[key][0]:
                     best[key] = (float(ms), job, f, steps)
+    if dropped:
+        # Never silent: a refused row and a node that died both look like a
+        # missing point on the curve, and only one of them is the reader's
+        # problem.
+        counts = {}
+        for _f, nd, it in dropped:
+            counts[it] = counts.get(it, 0) + 1
+        print(f"load: refused {len(dropped)} ocean-MPAS receipts solving "
+              f"other than {OCEAN_MPAS_PCG_ITERS} iterations with "
+              f"{OCEAN_MPAS_PCG_PRECOND[0]}{OCEAN_MPAS_PCG_PRECOND[1]} "
+              f"(counts found: "
+              + ", ".join(f"{k!r}x{v}" for k, v in sorted(
+                  counts.items(), key=lambda kv: str(kv[0]))) + ")",
+              file=sys.stderr)
+        for _f, nd, it in sorted(dropped, key=lambda d: d[1])[:20]:
+            print(f"  nd={nd:<5} iters={it!r}  {_f}", file=sys.stderr)
+    if dropped_aff:
+        print(f"load: refused {len(dropped_aff)} CPU receipts whose "
+              f"ranks had fewer than {CPU_AFFINITY_MIN} hardware threads "
+              f"(unstamped = pre-2026-09-21 one-core ranks): "
+              + ", ".join(sorted({f"{d[0].split('/')[-2]}" for d in dropped_aff})),
+              file=sys.stderr)
+    if dropped_nccl:
+        counts = {}
+        for _f, nd, ch in dropped_nccl:
+            counts[ch] = counts.get(ch, 0) + 1
+        print(f"load: refused {len(dropped_nccl)} multi-device MPAS GPU receipts "
+              f"not at {MPAS_NCCL_CHANNELS} NCCL channels / {MPAS_NCCL_CHUNK} chunk "
+              f"(min/max/chunk found: "
+              + ", ".join(f"{k!r}x{v}" for k, v in sorted(
+                  counts.items(), key=lambda kv: str(kv[0]))) + ")",
+              file=sys.stderr)
+        for _f, nd, ch in sorted(dropped_nccl, key=lambda d: d[1])[:20]:
+            print(f"  nd={nd:<5} channels={ch!r}  {_f}", file=sys.stderr)
     return best
 
 
@@ -158,6 +248,10 @@ def main() -> int:
     ap.add_argument("--png", default=None)
     ap.add_argument("--max-res", type=int, default=2,
                     help="resolutions per panel (highest first)")
+    ap.add_argument("--layout", choices=["main", "supp", "all"], default="main",
+                    help="main = the five grids whose multi-device path is "
+                         "performance-tuned (the cube slot carries the legend); "
+                         "supp = the cubed-sphere panel alone; all = every panel")
     args = ap.parse_args()
 
     best = load(args.receipts)
@@ -172,11 +266,24 @@ def main() -> int:
         "legend.fontsize": 5.8, "axes.linewidth": 0.6, "lines.markersize": 3.2,
         "figure.dpi": 300, "savefig.dpi": 300, "pdf.fonttype": 42, "ps.fonttype": 42,
     })
-    fig, axs = plt.subplots(2, 3, figsize=(180 / 25.4, 105 / 25.4))
+    # The tiled cubed-sphere step is correctness-validated but not yet
+    # performance-tuned above 6 devices (it anti-scales: 23 -> 41 -> 34 ms at
+    # 24 -> 54 -> 96 GPUs on C768), so the main figure leaves its slot to the
+    # legend and the panel moves to the supplement.
+    cube_i = next(i for i, p in enumerate(PANELS) if p[1] == "cubed-sphere")
+    if args.layout == "supp":
+        fig, axs = plt.subplots(1, 1, figsize=(70 / 25.4, 60 / 25.4), squeeze=False)
+        panels = [(cube_i, PANELS[cube_i])]
+    else:
+        fig, axs = plt.subplots(2, 3, figsize=(180 / 25.4, 105 / 25.4))
+        panels = [(i, p) for i, p in enumerate(PANELS)
+                  if args.layout == "all" or i != cube_i]
+        if args.layout == "main":
+            axs.ravel()[cube_i].set_axis_off()
     prov = []
     summary = []
-    for i, (comp, grid, title, sub) in enumerate(PANELS):
-        ax = axs.ravel()[i]
+    for slot, (i, (comp, grid, title, sub)) in enumerate(panels):
+        ax = axs.ravel()[slot if args.layout == "supp" else i]
         keys = [k for k in series if k[0] == comp and k[1] == grid]
         # highest resolutions first, capped per panel
         ress = sorted({k[4] for k in keys},
@@ -222,11 +329,11 @@ def main() -> int:
         else:
             ax.text(0.5, 0.5, "no receipts yet", transform=ax.transAxes, ha="center",
                     color="#999999", fontsize=7)
-        if i % 3 == 0:
+        if args.layout == "supp" or i % 3 == 0:
             ax.set_ylabel("time per step (ms)")
-        if i >= 3:
+        if args.layout == "supp" or i >= 3 or (args.layout == "main" and i == 1):
             ax.set_xlabel("devices (GPUs or CPU ranks)")
-        ax.text(-0.22, 1.18, chr(ord("a") + i), transform=ax.transAxes, fontsize=9,
+        ax.text(-0.22, 1.18, chr(ord("a") + slot), transform=ax.transAxes, fontsize=9,
                 fontweight="bold", va="top")
 
     handles = [
@@ -236,11 +343,16 @@ def main() -> int:
         Line2D([], [], color="#444444", lw=0.8, label="float64"),
         Line2D([], [], color="#666666", ls="--", lw=0.6, label="ideal (anchored at first point)"),
     ]
-    fig.legend(handles=handles, frameon=False, loc="lower center", ncol=5,
-               bbox_to_anchor=(0.5, -0.01), handlelength=1.8)
-    for row, name in ((0, "ATMOSPHERE"), (1, "OCEAN")):
-        fig.text(0.008, 0.93 if row == 0 else 0.46, name, fontsize=7.5, fontweight="bold",
-                 rotation=90, va="top", ha="left")
+    if args.layout == "main":
+        axs.ravel()[cube_i].legend(handles=handles, frameon=False, loc="center left",
+                                   handlelength=1.8, labelspacing=0.5, fontsize=6.2)
+    else:
+        fig.legend(handles=handles, frameon=False, loc="lower center", ncol=5,
+                   bbox_to_anchor=(0.5, -0.01), handlelength=1.8)
+    if args.layout != "supp":
+        for row, name in ((0, "ATMOSPHERE"), (1, "OCEAN")):
+            fig.text(0.008, 0.93 if row == 0 else 0.46, name, fontsize=7.5,
+                     fontweight="bold", rotation=90, va="top", ha="left")
     fig.suptitle(f"{args.mode.capitalize()} scaling — Levante (4×A100-80/node, 2×AMD Milan 7763/node)",
                  fontsize=7.5, y=0.995)
     fig.subplots_adjust(left=0.08, right=0.99, top=0.88, bottom=0.14, wspace=0.42, hspace=0.62)
