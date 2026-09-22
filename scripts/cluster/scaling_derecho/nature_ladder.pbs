@@ -24,6 +24,35 @@
 #                         -l walltime=08:00:00 -v MATRIX=atm_cpu ... (PPN=4)
 #   MATRIX=ocean_gpu / ocean_cpu likewise.
 #
+# The ladders now run to 1024 devices, which is 256 nodes at four GPUs per
+# node:
+#   select=64:...:ngpus=4   -> up to  256 devices
+#   select=128:...:ngpus=4  -> up to  512 devices
+#   select=256:...:ngpus=4  -> up to 1024 devices
+# Submit the largest allocation the queue will give and let the node guard
+# below skip what does not fit; a resubmission into the same OUTDIR resumes.
+# Derecho's GPU pool is far smaller than its CPU pool, so the top GPU rungs
+# may be unschedulable in practice — check what the queue actually grants
+# rather than assuming the 1024-device arm will ever run.
+#
+# RESOLUTION RUNGS.  An icosahedral mesh quadruples its cell count per
+# subdivision, so the nominal spacing halves:
+#
+#     subdiv  8     655,362 cells   30.0 km   about 1/3.7 degree
+#     subdiv  9   2,621,442 cells   15.0 km   about 1/7.4 degree
+#     subdiv 10  10,485,762 cells    7.5 km   about 1/15  degree
+#     subdiv 11  41,943,042 cells    3.7 km   about 1/30  degree
+#     subdiv 12 167,772,162 cells    1.9 km   about 1/59  degree
+#
+# A 1/48-degree target is 2.3 km, which falls between subdivisions 11 and 12;
+# subdivision 12 is the nearest rung and is the one the tables below carry.
+# THE TWO FINEST RUNGS NEED A MESH THAT DOES NOT EXIST YET. Generating and
+# caching a 42-million-cell mesh, let alone a 168-million-cell one, is its own
+# job, and the 168-million-cell ocean at forty levels needs roughly 164
+# thousand cells per device even at 1024 devices. Expect those arms to skip on
+# the memory preflight until the meshes are built; that is the gate working,
+# not a failure of this script.
+#
 # Arms whose node need exceeds the allocation are skipped, so the same script
 # is submitted at several node counts; a valid receipt is never re-run
 # ("[have]"), which makes a resubmission into the same OUTDIR a resume.
@@ -153,17 +182,20 @@ add() {  # add <lane> <mode> <res> <nd...>   (both precisions)
   local nd x64
   for nd in "$@"; do for x64 in 0 1; do ARMS+=("$lane" "$mode" "$res" "$nd" "$x64"); done; done
 }
-P2_GPU="1 2 4 8 16 32 64 128 192"
-P2_CPU="1 2 4 8 16 32 64 128 256 512"
+P2_GPU="1 2 4 8 16 32 64 128 192 256 512 1024"
+P2_CPU="1 2 4 8 16 32 64 128 256 512 1024"
 case "$MATRIX" in
   atm_gpu)
     NLON_WEAK=8192
     add latlon weak   32   $P2_GPU
     add latlon strong 2048 $P2_GPU                # Derecho has no reusable lat-lon strong
-    add latlon strong 4096 4 8 16 32 64 128 192   # receipts, so both are measured here
+    add latlon strong 4096 4 8 16 32 64 128 192 256 512 1024  # receipts, so both are measured here
+    add latlon strong 8192 128 256 512 1024        # the fine lat-lon rung
     add mpas   strong 9    $P2_GPU
-    add mpas   strong 10   2 4 8 16 32 64 128 192
+    add mpas   strong 10   2 4 8 16 32 64 128 192 256 512 1024
+    add mpas   strong 11   64 128 256 512 1024     # ~3.7 km, near 1/30 degree
     add mpas   weak 7 2;  add mpas weak 8 8;  add mpas weak 9 32;  add mpas weak 10 128
+    add mpas   weak 10 512
     add cube   strong 768:2 24; add cube strong 768:3 54
     add cube   strong 768:4 96
     add cube   weak 192:2 24; add cube weak 288:3 54; add cube weak 384:4 96
@@ -180,10 +212,13 @@ case "$MATRIX" in
     ;;
   ocean_gpu)
     NLON_TRIPOLE=4352
-    add tripole strong 3072 8 16 32 64 128 192
+    add tripole strong 3072 8 16 32 64 128 192 256 512 1024
     add tripole weak   24   $P2_GPU
     add omps    strong 9    $P2_GPU
-    add omps    weak 20480 2 8 32 128
+    add omps    strong 10   8 16 32 64 128 256 512 1024   # ~7.5 km, near 1/15 degree
+    add omps    strong 11   64 128 256 512 1024          # ~3.7 km, near 1/30 degree
+    add omps    strong 12   256 512 1024                 # ~1.9 km, near 1/60 degree
+    add omps    weak 20480 2 8 32 128 512 1024
     ;;
   ocean_cpu)
     NLON_TRIPOLE=4352
