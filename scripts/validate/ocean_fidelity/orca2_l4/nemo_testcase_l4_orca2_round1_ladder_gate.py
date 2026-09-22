@@ -55,6 +55,7 @@ DEFAULT_TRAJECTORY_SOURCE_ROOT = Path(
     "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
 )
 TRAJECTORY_CITATIONS = {
+    "initial_ts": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:217-254",
     "stage_dump": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:215-231,329-348",
     "runoff_tracer": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:314-328",
     "salt_flux": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:290-311",
@@ -654,8 +655,6 @@ def candidate_trajectory(
         eta=state.eta.replace(data=jnp.asarray(entry1["ssh"], dtype=jnp.float64))
     )
     bridge = compare_fields(_candidate_fields(state), entry1)
-    require(bridge["first_non_bit_field"] is None,
-            f"Decision-52 entry bridge is non-bit: {bridge['first_non_bit_field']}")
 
     # The kt=1 chlorophyll frame is an independent emitted witness for the
     # input-file interpolation used at all ten steps.
@@ -692,7 +691,7 @@ def candidate_trajectory(
                 "kt": kt,
                 "checkpoint": "entry",
                 "field": first_field,
-                "source_citation": TRAJECTORY_CITATIONS["stage_dump"],
+                "source_citation": TRAJECTORY_CITATIONS["initial_ts"],
             }
 
         surface_fields = assemble_surface_fields(root, kt)
@@ -736,10 +735,11 @@ def candidate_trajectory(
         for row in checkpoints if row["kt"] == max_step
     }
     return {
-        "claim_label": "GIVEN_NEMO_ENTRY",
+        "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
         "execution": "production-jit-cpu-fp64-x64-libm",
         "decision52_bridge": bridge,
         "independent_entry_before_bridge": independent,
+        "given_nemo_entry_eligibility": "STOP_INITIAL_T_S_TRANSCRIPTION",
         "chlorophyll_kt1_input_reconstruction": chl_row,
         "first_non_bit_statement": first_non_bit,
         "kt10_same_field_magnitude": kt10_rows,
@@ -822,8 +822,8 @@ def run_gate(
         trajectory = candidate_trajectory(
             deck_root, orca1ice_root, card, max_step=max_step
         )
-        status = "CANDIDATE_TRAJECTORY_DEBT"
-        trajectory_claim = "MEASURED_GIVEN_NEMO_ENTRY"
+        status = "STOP_INITIAL_TS_TRANSCRIPTION_GAP"
+        trajectory_claim = "MEASURED_INDEPENDENT_WITH_DECISION52_SSH"
     return {
         "worktree": stamp,
         "status": status,
@@ -891,7 +891,12 @@ def main() -> int:
         print("REFUSE: STOP_ENTRY_RECORD_GAP: full-domain step-entry states are missing",
               file=sys.stderr)
         return 3
-    if result["status"] == "CANDIDATE_TRAJECTORY_DEBT":
+    if result["status"] == "STOP_INITIAL_TS_TRANSCRIPTION_GAP":
+        print(
+            "REFUSE: STOP_INITIAL_TS_TRANSCRIPTION_GAP: the card omits the "
+            "active compiled ORCA2 T/S initialization edits",
+            file=sys.stderr,
+        )
         return 4
     return 0
 

@@ -174,12 +174,13 @@ def test_acquisition_report_binds_tree_binary_and_compiled_source():
     assert '"compiled_stprk3.f90"' in run_sh
 
 
-def test_round6_trajectory_uses_production_step_and_only_bridges_ssh():
+def test_round6_independent_trajectory_uses_production_step_and_only_bridges_ssh():
     source = Path(gate.__file__).read_text()
     assert "state = state._replace(" in source
     assert "eta=state.eta.replace(data=" in source
     assert "_NEMOWSRK3TestHooks(expose_live_stage_operands=True)" in source
     assert "trace = model.step(" in source
     assert "state = trace.state_after" in source
-    assert '"claim_label": "GIVEN_NEMO_ENTRY"' in source
+    assert '"claim_label": "INDEPENDENT_WITH_DECISION52_SSH"' in source
+    assert '"given_nemo_entry_eligibility": "STOP_INITIAL_T_S_TRANSCRIPTION"' in source
     assert '"rnf_tsc"' in source
