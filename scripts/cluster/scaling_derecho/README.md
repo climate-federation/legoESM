@@ -5,7 +5,25 @@
 > (`scripts/cluster/scaling_levante/nature_ladder.sbatch`). Same arm table,
 > same benches, same receipt schema, so Derecho and Levante rows feed the one
 > plotter (`scripts/plot/plot_nature_scaling.py`). Submit one job per matrix
-> and node count, e.g.
+> and device count with the wrapper, which builds the right select string for
+> the backend so the long qsub line cannot be mistyped:
+> ```bash
+> ./scripts/cluster/scaling_derecho/submit_nature_ladder.sh ocean_gpu 1024
+> ./scripts/cluster/scaling_derecho/submit_nature_ladder.sh ocean_cpu 1024 12:00:00
+> ./scripts/cluster/scaling_derecho/submit_nature_ladder.sh atm_gpu    512
+> ```
+> Four ranks per node either way, so the node count is the device count over
+> four and 1024 devices is 256 nodes. `DRY_RUN=1` prints the qsub line without
+> submitting, and `OUTDIR=...` resumes into an existing directory, since a
+> valid receipt is never re-run and arms needing more nodes than the
+> allocation are skipped.
+>
+> The processor pool is far larger than the accelerator pool, so a thousand
+> ranks is routine while a thousand accelerators may not be grantable at all.
+> Check what the queue actually gives rather than assuming the top rung will
+> run, and submit the largest allocation you can get.
+>
+> The raw form still works:
 > ```bash
 > qsub -l select=32:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB \
 >      -v MATRIX=atm_gpu scripts/cluster/scaling_derecho/nature_ladder.pbs
