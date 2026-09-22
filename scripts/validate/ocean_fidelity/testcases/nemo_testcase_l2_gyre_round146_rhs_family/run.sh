@@ -19,7 +19,11 @@ readonly RECORD=oracle_developed_rhs_families_kt00001081.bin
 readonly EXPECTED_SIZE=2321368
 readonly SOURCE_BINARY_SHA=6703dc6b6b2bd6431f78a8649d9ea15275be61a3243632aeeb7f20e9f71dd772
 readonly RESUME_BUILD_COMMIT=44a0d6e8146ae8919b4cda26653fe979186a724c
-readonly MODE=${1:---run}
+if [[ $# -eq 0 && -d "$NEMO_ROOT/cfgs/$TARGET_CFG" && -d "$TARGET_RUN" ]]; then
+  readonly MODE=--resume-run
+else
+  readonly MODE=${1:---run}
+fi
 case "$MODE" in
   --run|--resume-run|--preflight-only|--plant-layout) ;;
   *) printf 'REFUSE: usage: %s [--run|--resume-run|--preflight-only|--plant-layout]\n' "$0" >&2; exit 64 ;;
