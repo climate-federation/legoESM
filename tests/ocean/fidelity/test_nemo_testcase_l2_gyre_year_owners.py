@@ -308,6 +308,28 @@ def test_round154_fct_registry_and_first_statement_are_nonvacuous(harness):
         "cells_unequal"] == 1
 
 
+def test_round155_transport_registry_and_first_operand_are_nonvacuous(harness):
+    expected = {
+        name: np.ones((1,), dtype=np.float64)
+        for name in harness.DEVELOPED_TRANSPORT_U_ROWS
+    }
+    exact = harness._developed_transport_mode_rows(expected, expected)
+    assert exact["rows_scored"] == len(harness.DEVELOPED_TRANSPORT_U_ROWS)
+    assert exact["bit_exact_rows"] == exact["rows_scored"]
+    assert exact["first_non_bit_row"] == "NONE"
+
+    planted = {name: value.copy() for name, value in expected.items()}
+    planted["un_adv"][0] = np.nextafter(planted["un_adv"][0], np.inf)
+    moved = harness._developed_transport_mode_rows(planted, expected)
+    assert moved["first_non_bit_row"] == "un_adv"
+    assert moved["rows"]["un_adv"]["cells_unequal"] == 1
+
+    incomplete = dict(planted)
+    incomplete.pop("zFu")
+    with pytest.raises(harness.GateError, match="registry is incomplete"):
+        harness._developed_transport_mode_rows(incomplete, expected)
+
+
 def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
                                                               harness):
     record_path = tmp_path / "oracle_process_budget_kt00001081.bin"

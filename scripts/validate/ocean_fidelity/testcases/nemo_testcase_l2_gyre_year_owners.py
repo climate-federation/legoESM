@@ -42,6 +42,9 @@ MODES
                      drives one production-JIT step from NEMO's admitted
                      day-180 restart and compares the recorded stage-3
                      temperature boundaries and active-branch maps.
+  --developed-transport-walk
+                     extends that same production step across the Round-154
+                     stage-3 U-transport operands and written values.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -83,6 +86,8 @@ record-backed plants are persisted in their round evidence)
   missing-process-row      removes a developed-state process boundary
   missing-branch           removes a developed-state branch family
   entry-temperature-ulp    moves one consumed entry T value by one ULP
+  transport-un-adv-ulp     moves one observed stage-3 un_adv value by one ULP
+                           and requires a written transport row to change
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -4113,6 +4118,9 @@ def main(argv=None) -> int:
     parser.add_argument("--developed-fct-walk", action="store_true",
                         help="extend the developed step walk across the "
                              "admitted Round-153 61-field FCT record")
+    parser.add_argument("--developed-transport-walk", action="store_true",
+                        help="extend the developed step walk across the "
+                             "admitted Round-154 stage-3 transport record")
     parser.add_argument("--developed-process-root", type=Path,
                         default=DEFAULT_PROCESS_RECORD_ROOT)
     parser.add_argument("--developed-vertical-root", type=Path,
@@ -4121,6 +4129,8 @@ def main(argv=None) -> int:
                         default=DEFAULT_DEVELOPED_DAILY_ROOT)
     parser.add_argument("--daily-record-audit", type=Path, default=None)
     parser.add_argument("--developed-fct-record-root", type=Path,
+                        default=None)
+    parser.add_argument("--developed-transport-record-root", type=Path,
                         default=None)
     parser.add_argument("--reference-process-trace", type=Path,
                         default=DEFAULT_REFERENCE_PROCESS_TRACE,
@@ -4172,7 +4182,8 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
-    if args.developed_step_walk or args.developed_fct_walk:
+    if (args.developed_step_walk or args.developed_fct_walk
+            or args.developed_transport_walk):
         require(args.expect_commit is not None,
                 "--developed-step-walk needs --expect-commit")
         require(args.daily_record_audit is not None,
@@ -4181,13 +4192,19 @@ def main(argv=None) -> int:
             require(args.developed_fct_record_root is not None,
                     "--developed-fct-walk needs "
                     "--developed-fct-record-root")
+        if args.developed_transport_walk:
+            require(args.developed_transport_record_root is not None,
+                    "--developed-transport-walk needs "
+                    "--developed-transport-record-root")
         report = developed_state_process_walk(
             args.developed_process_root, args.developed_vertical_root,
             args.daily_record_root, args.daily_record_audit,
             args.expect_commit, args.root, mesh_path=args.mesh,
             plant=args.plant,
             fct_record_root=(args.developed_fct_record_root
-                             if args.developed_fct_walk else None))
+                             if args.developed_fct_walk else None),
+            transport_record_root=(args.developed_transport_record_root
+                                   if args.developed_transport_walk else None))
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
@@ -4195,7 +4212,10 @@ def main(argv=None) -> int:
             print(f"STATUS PLANT-FIRED: {args.plant}: "
                   f"{report['control']}")
             return 1
-        if args.developed_fct_walk:
+        if args.developed_transport_walk:
+            print("STATUS PASS: developed stage-3 transport first owner "
+                  f"{report['internal_statement_owner']}")
+        elif args.developed_fct_walk:
             print("STATUS PASS: developed-state FCT first owner "
                   f"{report['internal_statement_owner']}")
         else:
@@ -6071,6 +6091,11 @@ DEVELOPED_FCT_TRACER_FIELDS = (
     "anti_pre_w", "coef_u", "coef_v", "coef_w", "anti_post_u",
     "anti_post_v", "anti_post_w", "final_div", "divisor", "rhs_final",
 )
+DEVELOPED_TRANSPORT_U_ROWS = (
+    "un_adv", "r1_hu_0", "one_plus_r3u_Kmm", "live_inverse_depth", "uu_b_Kmm",
+    "zub", "e2u", "e3u_0", "umask", "live_e3u_Kmm", "uu_Kmm",
+    "corrected_u", "zFu",
+)
 
 
 def developed_record_availability() -> list[dict]:
@@ -6389,6 +6414,56 @@ def _developed_fct_record(root: Path) -> dict:
     }
 
 
+def _developed_transport_record(root: Path) -> dict:
+    """Read the admitted R154 stage-3 transport record on legoESM's U grid."""
+    gate154 = _load(
+        "nemo_testcase_l2_gyre_round154_developed_transport_gate",
+        "nemo_testcase_l2_gyre_round154_developed_transport_gate.py")
+    admission_path = root / "round154_developed_transport_admission.json"
+    admission = json.loads(admission_path.read_text(encoding="utf-8"))
+    require(admission["status"] == "PASS",
+            "Round-154 transport record is not admitted")
+    record = gate154.read_record(root / gate154.RECORD)
+    require(record["sha256"] == admission["record"]["sha256"],
+            "Round-154 transport record differs from its admission")
+    fields = record["fields"]
+
+    def owned2(name):
+        return np.ascontiguousarray(fields[name][1:34, 2:24].T)
+
+    def owned3(name):
+        return np.ascontiguousarray(
+            fields[name][1:34, 2:24, :30].transpose(1, 0, 2))
+
+    recorded_r3u = owned2("r3u_Kmm")
+    oracle = {
+        "un_adv": owned2("un_adv"),
+        "r1_hu_0": owned2("r1_hu_0"),
+        "one_plus_r3u_Kmm": np.float64(1.0) + recorded_r3u,
+        "uu_b_Kmm": owned2("uu_b_Kmm"),
+        "zub": owned2("zub"),
+        "e2u": owned2("e2u"),
+        "e3u_0": owned3("e3u_0"),
+        "umask": owned3("umask"),
+        "uu_Kmm": owned3("uu_Kmm"),
+        "zFu": owned3("zFu"),
+    }
+    b = np.float64
+    oracle["live_inverse_depth"] = (
+        oracle["r1_hu_0"] / oracle["one_plus_r3u_Kmm"])
+    oracle["live_e3u_Kmm"] = (
+        oracle["e3u_0"]
+        * (b(1.0) + recorded_r3u[..., None] * oracle["umask"]))
+    oracle["corrected_u"] = (
+        oracle["uu_Kmm"] + oracle["zub"][..., None] * oracle["umask"])
+    require(set(oracle) == set(DEVELOPED_TRANSPORT_U_ROWS),
+            "Round-154 U-transport row registry is incomplete")
+    return {
+        "sha256": record["sha256"], "admission": admission,
+        "rows": oracle, "field_count": len(fields),
+    }
+
+
 def _score_developed_fct(actual, expected) -> dict:
     actual = np.asarray(actual, dtype=np.float64)
     expected = np.asarray(expected, dtype=np.float64)
@@ -6405,6 +6480,28 @@ def _score_developed_fct(actual, expected) -> dict:
         "rms": float(np.sqrt(np.mean(delta * delta))),
         "first_unequal_index": first,
         "bit_exact": not bool(np.any(different)),
+    }
+
+
+def _developed_transport_mode_rows(actual: dict, expected: dict) -> dict:
+    """Score one stage-3 U observation and retain compiled operand order."""
+    required = set(DEVELOPED_TRANSPORT_U_ROWS)
+    require(set(actual) == required,
+            "observed developed transport registry is incomplete")
+    require(set(expected) == required,
+            "oracle developed transport registry is incomplete")
+    rows = {
+        name: _score_developed_fct(actual[name], expected[name])
+        for name in DEVELOPED_TRANSPORT_U_ROWS
+    }
+    first = next(
+        (name for name in DEVELOPED_TRANSPORT_U_ROWS
+         if not rows[name]["bit_exact"]), "NONE")
+    return {
+        "rows": rows,
+        "first_non_bit_row": first,
+        "rows_scored": len(rows),
+        "bit_exact_rows": int(sum(row["bit_exact"] for row in rows.values())),
     }
 
 
@@ -6499,18 +6596,20 @@ def developed_state_process_walk(
         process_root: Path, vertical_root: Path, daily_root: Path,
         daily_audit: Path, expected_commit: str, evidence_root: Path, *,
         mesh_path: Path = DEFAULT_MESH, plant: str | None = None,
-        fct_record_root: Path | None = None) -> dict:
+        fct_record_root: Path | None = None,
+        transport_record_root: Path | None = None) -> dict:
     """Run step 1081 through production JIT from NEMO's exact day-180 state."""
     if plant in ("missing-day", "missing-process-row", "missing-branch",
                  "missing-ranking-row"):
         return _developed_registry_plant(plant)
     require(plant in (None, "none", "entry-temperature-ulp",
-                      "fct-transport-ulp"),
+                      "fct-transport-ulp", "transport-un-adv-ulp"),
             f"unknown developed-state plant {plant!r}")
     _policy()
     import jax
     import jax.numpy as jnp
     from legoesm.ocean import advection as advection_module
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
     from legoesm.ocean.advection import NEMO_FCT_TRACE_FIELDS
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
@@ -6533,6 +6632,9 @@ def developed_state_process_walk(
     fct_bundle = (
         _developed_fct_record(Path(fct_record_root))
         if fct_record_root is not None else None)
+    transport_bundle = (
+        _developed_transport_record(Path(transport_record_root))
+        if transport_record_root is not None else None)
 
     process_admission = validate_process_record(
         process_root, PROCESS_RECORD_COMMIT)
@@ -6767,6 +6869,202 @@ def developed_state_process_walk(
                 np.asarray(value) for value in jax.device_get(isolated_trace))
         fct_modes["isolated_closure_jit"] = isolated
 
+    transport_modes = {}
+    transport_observer_unequal_bytes = 0
+    transport_plant_index = None
+    if transport_bundle is not None:
+        real_corrected = model_module._nemo_stage_corrected_velocity
+        real_metric = model_module._nemo_metric_stage_transport
+        real_qco_faces = model_module._nemo_ws_qco_stage_faces
+
+        def run_transport_observed(*, eager=False, plant_index=None):
+            corrected_calls = []
+            metric_calls = []
+            qco_calls = []
+            corrected_trace_count = 0
+            metric_trace_count = 0
+
+            def corrected_capture(
+                    velocity, transport_average, inverse_depth,
+                    barotropic_velocity, face_mask):
+                nonlocal corrected_trace_count
+                call_index = corrected_trace_count
+                corrected_trace_count += 1
+                average = transport_average
+                if plant_index is not None and call_index == 4:
+                    old = average[plant_index]
+                    average = average.at[plant_index].set(
+                        jnp.nextafter(old, jnp.asarray(jnp.inf, old.dtype)))
+                result = real_corrected(
+                    velocity, average, inverse_depth, barotropic_velocity,
+                    face_mask)
+                b = model_module.nemo_source_round
+                correction = b(b(average * inverse_depth)
+                               - barotropic_velocity)
+
+                def sink(*values):
+                    corrected_calls.append(tuple(
+                        np.asarray(value) for value in values))
+
+                jax.debug.callback(
+                    sink, velocity, average, inverse_depth,
+                    barotropic_velocity, face_mask, correction, result,
+                    ordered=True)
+                return result
+
+            def metric_capture(metric, face_thickness, corrected_velocity):
+                nonlocal metric_trace_count
+                metric_trace_count += 1
+                result = real_metric(
+                    metric, face_thickness, corrected_velocity)
+
+                def sink(*values):
+                    metric_calls.append(tuple(
+                        np.asarray(value) for value in values))
+
+                jax.debug.callback(
+                    sink, metric, face_thickness, corrected_velocity, result,
+                    ordered=True)
+                return result
+
+            def qco_capture(*values, **kwargs):
+                result = real_qco_faces(*values, **kwargs)
+                if kwargs.get("include_reciprocals", False):
+                    def sink(*arrays):
+                        qco_calls.append(tuple(
+                            np.asarray(value) for value in arrays))
+
+                    jax.debug.callback(
+                        sink, result[0], result[2], result[4],
+                        ordered=True)
+                return result
+
+            observed_model = LatLonCGridOceanModel(
+                card.recipe.grid, card.recipe.z_coord,
+                card.recipe.model_config)
+            model_module._nemo_stage_corrected_velocity = corrected_capture
+            model_module._nemo_metric_stage_transport = metric_capture
+            model_module._nemo_ws_qco_stage_faces = qco_capture
+            try:
+                if eager:
+                    with jax.disable_jit():
+                        result = observed_model._step_impl(
+                            state, card.dt_s, freshwater=freshwater,
+                            surface_forcing=surface,
+                            _nemo_stage1_zad_eta_after_override=ssha)
+                        jax.device_get(result)
+                else:
+                    result = observed_model.step(
+                        state, dt=card.dt_s, freshwater=freshwater,
+                        surface_forcing=surface,
+                        _nemo_stage1_zad_eta_after_override=ssha)
+                    jax.device_get(result)
+                jax.effects_barrier()
+            finally:
+                model_module._nemo_stage_corrected_velocity = real_corrected
+                model_module._nemo_metric_stage_transport = real_metric
+                model_module._nemo_ws_qco_stage_faces = real_qco_faces
+
+            require(len(corrected_calls) == 6,
+                    f"transport observer saw {len(corrected_calls)} "
+                    "corrected-velocity calls, expected six")
+            require(len(metric_calls) == 6,
+                    f"transport observer saw {len(metric_calls)} metric "
+                    "transport calls, expected six")
+            stage3_u = corrected_calls[4]
+            stage3_metric_u = metric_calls[4]
+            matches = [row for row in qco_calls
+                       if np.array_equal(row[0], stage3_metric_u[1])
+                       and np.array_equal(row[2], stage3_u[2])]
+            require(bool(matches),
+                    "no reciprocal-QCO call matches the stage-3 U operands")
+            one_plus_r3 = matches[-1][1]
+            actual = {
+                "un_adv": stage3_u[1],
+                "r1_hu_0": None,
+                "one_plus_r3u_Kmm": one_plus_r3,
+                "live_inverse_depth": stage3_u[2],
+                "uu_b_Kmm": stage3_u[3],
+                "zub": stage3_u[5],
+                "e2u": stage3_metric_u[0],
+                "e3u_0": None,
+                "umask": stage3_u[4],
+                "live_e3u_Kmm": stage3_metric_u[1],
+                "uu_Kmm": stage3_u[0],
+                "corrected_u": stage3_u[6],
+                "zFu": stage3_metric_u[3],
+            }
+            # Zero-ssh through the SAME shared QCO builder exposes the static
+            # reference e3u_0 and r1_hu_0 operands without inverting a live
+            # product.  This is a context row, not a second transport formula.
+            reference = real_qco_faces(
+                jnp.zeros_like(state.eta.data),
+                jnp.asarray(card.recipe.z_coord.nemo_e3t_0),
+                jnp.asarray(stage3_u[4]),
+                jnp.asarray(corrected_calls[5][4]),
+                card.recipe.grid, include_reciprocals=True)
+            actual["e3u_0"] = np.asarray(reference[0])
+            actual["r1_hu_0"] = np.asarray(reference[4])
+            require(set(actual) == set(DEVELOPED_TRANSPORT_U_ROWS),
+                    "production U-transport observation registry is incomplete")
+            return result, actual
+
+        transport_state, production_transport = run_transport_observed()
+        transport_modes["production_step_jit"] = production_transport
+        if plant == "transport-un-adv-ulp":
+            un_adv = production_transport["un_adv"]
+            inverse = production_transport["live_inverse_depth"]
+            baro = production_transport["uu_b_Kmm"]
+            baseline = (un_adv * inverse) - baro
+            candidates = np.argwhere(np.isfinite(un_adv) & (un_adv != 0.0))
+            for candidate in candidates:
+                index = tuple(int(value) for value in candidate)
+                moved = np.nextafter(un_adv[index], np.inf)
+                if ((moved * inverse[index]) - baro[index]) != baseline[index]:
+                    transport_plant_index = index
+                    break
+            require(transport_plant_index is not None,
+                    "no nonzero un_adv ULP reaches the stage-3 correction")
+            _planted_state, planted = run_transport_observed(
+                plant_index=transport_plant_index)
+            moved = _score_developed_fct(
+                planted["zFu"], production_transport["zFu"])
+            require(moved["cells_unequal"] > 0,
+                    "production un_adv ULP plant moved no completed zFu")
+            return {
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": {"un_adv_index": list(transport_plant_index),
+                            "zFu": moved},
+            }
+        _eager_transport_state, eager_transport = run_transport_observed(
+            eager=True)
+        transport_modes["production_eager"] = eager_transport
+
+        @jax.jit
+        def isolated_transport(
+                velocity, average, inverse, barotropic, mask, metric,
+                thickness):
+            b = model_module.nemo_source_round
+            correction = b(b(average * inverse) - barotropic)
+            corrected = b(
+                velocity + b(correction[..., None] * mask))
+            completed = b(b(metric[..., None] * thickness) * corrected)
+            return correction, corrected, completed
+
+        isolated_values = isolated_transport(
+            jnp.asarray(production_transport["uu_Kmm"]),
+            jnp.asarray(production_transport["un_adv"]),
+            jnp.asarray(production_transport["live_inverse_depth"]),
+            jnp.asarray(production_transport["uu_b_Kmm"]),
+            jnp.asarray(production_transport["umask"]),
+            jnp.asarray(production_transport["e2u"]),
+            jnp.asarray(production_transport["live_e3u_Kmm"]))
+        isolated_rows = dict(production_transport)
+        (isolated_rows["zub"], isolated_rows["corrected_u"],
+         isolated_rows["zFu"]) = (
+            np.asarray(value) for value in jax.device_get(isolated_values))
+        transport_modes["isolated_closure_jit"] = isolated_rows
+
     ordinary = ordinary_model.step(
         state, dt=card.dt_s, freshwater=freshwater,
         surface_forcing=surface,
@@ -6780,6 +7078,11 @@ def developed_state_process_walk(
             observed_state, ordinary)
         require(fct_observer_unequal_bytes == 0,
                 "FCT statement observer changed production state")
+    if transport_bundle is not None:
+        transport_observer_unequal_bytes = _state_bit_mismatches(
+            transport_state, ordinary)
+        require(transport_observer_unequal_bytes == 0,
+                "transport observer changed production state")
 
     lego_frame = _trace_frame(trace)
     control_frame = _trace_frame(control_trace)
@@ -6856,6 +7159,29 @@ def developed_state_process_walk(
             "first_non_bit_statement": production[
                 "first_non_bit_statement"],
             "observer_state_unequal_bytes": fct_observer_unequal_bytes,
+        }
+    transport_walk = None
+    if transport_bundle is not None:
+        mode_rows = {
+            mode_name: _developed_transport_mode_rows(
+                values, transport_bundle["rows"])
+            for mode_name, values in transport_modes.items()
+        }
+        production = mode_rows["production_step_jit"]
+        transport_walk = {
+            "record_root": str(transport_record_root),
+            "record_sha256": transport_bundle["sha256"],
+            "admission_sha256": _sha256(
+                Path(transport_record_root)
+                / "round154_developed_transport_admission.json"),
+            "record_fields": transport_bundle["admission"]["record"][
+                "fields"],
+            "record_field_count": transport_bundle["field_count"],
+            "scored_rows": list(DEVELOPED_TRANSPORT_U_ROWS),
+            "modes": mode_rows,
+            "authoritative_mode": "production_step_jit",
+            "first_non_bit_row": production["first_non_bit_row"],
+            "observer_state_unequal_bytes": transport_observer_unequal_bytes,
         }
     if plant == "entry-temperature-ulp":
         j, i, k = (int(value) for value in np.argwhere(wet)[0])
@@ -7083,6 +7409,21 @@ def developed_state_process_walk(
                 not row["bit_exact"] for row in coef_rows),
             "FCT_observer_bit_exact": fct_observer_unequal_bytes == 0,
         })
+    if transport_walk is not None:
+        production_transport_rows = transport_walk["modes"][
+            "production_step_jit"]["rows"]
+        predictions.update({
+            "transport_reference_geometry_bit_exact": all(
+                production_transport_rows[name]["bit_exact"]
+                for name in ("e2u", "e3u_0", "umask", "r1_hu_0")),
+            "transport_first_non_bit_is_un_adv": (
+                transport_walk["first_non_bit_row"] == "un_adv"),
+            "transport_later_Kmm_state_non_bit": any(
+                not production_transport_rows[name]["bit_exact"]
+                for name in ("one_plus_r3u_Kmm", "uu_b_Kmm", "uu_Kmm")),
+            "transport_observer_bit_exact": (
+                transport_observer_unequal_bytes == 0),
+        })
     report = {
         "format": "gyre-developed-state-process-walk-v1",
         "status": "PASS", "case": CASE,
@@ -7175,6 +7516,38 @@ def developed_state_process_walk(
         report["claim"] = claim
         report["first_directly_scored_active_statement"] = first_statement
         report["admissions"]["FCT_record_fields"] = fct_walk["field_count"]
+    if transport_walk is not None:
+        report["format"] = "gyre-developed-stage3-transport-walk-v1"
+        report["transport_walk"] = transport_walk
+        report["record_contract"]["transport_record_fields"] = (
+            transport_walk["record_fields"])
+        first_transport = transport_walk["first_non_bit_row"]
+        if first_transport in (
+                "un_adv", "r1_hu_0", "one_plus_r3u_Kmm",
+                "live_inverse_depth", "uu_b_Kmm", "e2u", "e3u_0",
+                "umask", "live_e3u_Kmm", "uu_Kmm"):
+            owner = f"INHERITED_CONTEXT:{first_transport}"
+            claim = (
+                "the first developed stage-3 U-transport mismatch is "
+                f"inherited at {first_transport}; no downstream transport "
+                "statement is an admissible owner")
+        elif first_transport == "zub":
+            owner = "stprk3_stg.f90:303-304/308-309 barotropic correction"
+            claim = "the written stage-3 barotropic correction is first non-bit"
+        elif first_transport == "corrected_u":
+            owner = "stprk3_stg.f90:314 corrected velocity add"
+            claim = "the stage-3 corrected U velocity is first non-bit"
+        elif first_transport == "zFu":
+            owner = "stprk3_stg.f90:314 metric transport product"
+            claim = "the completed stage-3 U transport is first non-bit"
+        else:
+            owner = "NONE"
+            claim = "all registered developed stage-3 U transport rows are bit exact"
+        report["internal_statement_owner"] = owner
+        report["claim"] = claim
+        report["first_directly_scored_active_statement"] = first_transport
+        report["admissions"]["transport_record_fields"] = (
+            transport_walk["record_field_count"])
     _validate_developed_registry(report)
     print("\nDEVELOPED-STATE STEP 1081 -- cumulative temperature boundaries")
     print(f"  {'boundary':>22s} {'unequal':>10s} {'max abs K':>16s} "
@@ -7204,6 +7577,17 @@ def developed_state_process_walk(
                   f"{mode['bit_exact_rows']:5d}/{mode['rows_scored']:<5d} "
                   f"{mode['first_non_bit_context']:>28s} "
                   f"{mode['first_non_bit_statement']:>24s}")
+        print(f"  AUTHORITATIVE OWNER: {report['internal_statement_owner']}")
+    if transport_walk is not None:
+        print("\nDEVELOPED STAGE-3 U TRANSPORT -- compiled-order walk")
+        print(f"  {'row':>24s} {'unequal':>10s} {'max abs':>16s} {'bit':>6s}")
+        rows = transport_walk["modes"]["production_step_jit"]["rows"]
+        for name in DEVELOPED_TRANSPORT_U_ROWS:
+            row = rows[name]
+            print(f"  {name:>24s} {row['cells_unequal']:10d} "
+                  f"{row['max_abs']:16.8e} "
+                  f"{'BIT' if row['bit_exact'] else 'DEBT':>6s}")
+        print(f"  FIRST NON-BIT: {transport_walk['first_non_bit_row']}")
         print(f"  AUTHORITATIVE OWNER: {report['internal_statement_owner']}")
     return report
 
