@@ -242,6 +242,7 @@ def main() -> int:
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    details = {}
     try:
         payload = (args.root / RECORD).read_bytes()
         if args.plant == "header":
@@ -270,6 +271,7 @@ def main() -> int:
             field = candidate_parent["fields"]["rhs_u"]
             field[index] = np.nextafter(field[index], np.inf)
         parent = _parent_comparison(candidate_parent, baseline)
+        details["parent_vs_round140"] = parent
         require(parent["passive"],
                 "Round-140 parent moved on a model-owned cell")
         if args.plant == "parent-dry-ulp":
@@ -282,6 +284,7 @@ def main() -> int:
         inherited = _exact_inherited(
             args.root, args.round140_root,
             plant_restart=args.plant == "restart-byte")
+        details["exact_inherited"] = inherited
         if args.plant == "final-ulp":
             record["fields"]["after_zad_u"][2, 2, 0] = np.nextafter(
                 record["fields"]["after_zad_u"][2, 2, 0], np.inf)
@@ -319,7 +322,7 @@ def main() -> int:
     except (GateError, OSError, ValueError) as error:
         result = {"format": "nemo-testcase-l2-gyre-round146-rhs-family-v2",
                   "status": "PLANT-FIRED" if args.plant != "none" else "FAIL",
-                  "plant": args.plant, "error": str(error)}
+                  "plant": args.plant, "error": str(error), **details}
         args.output.write_text(json.dumps(result, indent=2) + "\n")
         marker = "STATUS PLANT-FIRED" if args.plant != "none" else "STATUS FAIL"
         print(f"ROUND146 RHS FAMILY {args.plant.upper()} {marker}: {error}")
