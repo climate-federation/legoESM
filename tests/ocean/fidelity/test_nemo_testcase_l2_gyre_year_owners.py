@@ -265,10 +265,12 @@ def test_round154_fct_registry_and_first_statement_are_nonvacuous(harness):
 
     scalar = np.ones((1,), dtype=np.float64)
     common_expected = {
-        name: (np.zeros_like(scalar) if name.startswith("r3t_") else
-               scalar.copy())
+        name: scalar.copy()
         for name in harness.DEVELOPED_FCT_COMMON_FIELDS
     }
+    common_expected["e3t_3d"] = np.ones((1, 1, 1), dtype=np.float64)
+    for name in ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa"):
+        common_expected[name] = np.zeros((1, 1), dtype=np.float64)
     tracer_expected = {
         name: scalar.copy() for name in harness.DEVELOPED_FCT_TRACER_FIELDS
     }
@@ -281,6 +283,9 @@ def test_round154_fct_registry_and_first_statement_are_nonvacuous(harness):
     }
     common_actual = {name: scalar.copy()
                      for name in harness.DEVELOPED_FCT_COMMON_FIELDS}
+    common_actual["e3t_3d"] = np.ones((1, 1, 1), dtype=np.float64)
+    for name in ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa"):
+        common_actual[name] = np.ones((1, 1, 1), dtype=np.float64)
     observed_tracer = tuple(scalar.copy() for _ in range(
         13 + len(NEMO_FCT_TRACE_FIELDS)))
     observed = {"T": observed_tracer, "S": observed_tracer}

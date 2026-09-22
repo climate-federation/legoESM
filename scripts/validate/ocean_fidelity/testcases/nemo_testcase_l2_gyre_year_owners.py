@@ -6422,9 +6422,11 @@ def _developed_fct_mode_rows(
     for name in DEVELOPED_FCT_COMMON_FIELDS:
         expected = bundle["common"][name]
         if name.startswith("r3t_"):
-            # legoESM consumes q=1+r3 directly.  Score that live operand,
-            # rather than manufacturing an r3 value with a lossy q-1.
-            expected = np.float64(1.0) + expected
+            # legoESM consumes live thickness, not a stored r3.  Score that
+            # exact operand against NEMO's recorded e3t_0*(1+r3), rather than
+            # manufacturing an r3 value with a lossy thickness/e3t_0 - 1.
+            expected = (bundle["common"]["e3t_3d"]
+                        * (np.float64(1.0) + expected[..., None]))
         common[name] = _score_developed_fct(common_actual[name], expected)
     tracers = {}
     trace_offset = 13
@@ -6802,40 +6804,37 @@ def developed_state_process_walk(
                 in branch_observer_unequal.items() if value))
     fct_walk = None
     if fct_bundle is not None:
-        reference_observation = fct_modes["production_step_jit"]["T"]
         for mode_name, observed in fct_modes.items():
             for tracer in ("T", "S"):
-                for index in range(2, 10):
-                    require(np.array_equal(
-                        observed[tracer][index],
-                        fct_modes["production_step_jit"][tracer][index]),
-                        f"{mode_name} changed shared FCT context index {index}")
+                require(len(observed[tracer]) == 35,
+                        f"{mode_name} {tracer} has incomplete observation")
             for index in range(2, 10):
                 require(np.array_equal(
                     observed["T"][index], observed["S"][index]),
                     f"{mode_name} T/S FCT context index {index} differs")
         zcoord = card.recipe.z_coord
-        common_actual = {
-            "p2dt": np.asarray([card.dt_s], dtype=np.float64),
-            "transport_u": reference_observation[2],
-            "transport_v": reference_observation[3],
-            "transport_w": reference_observation[4],
-            "e3t_3d": np.asarray(zcoord.nemo_e3t_0, dtype=np.float64),
-            "r3t_Kbb": np.asarray(lego_frame["q_Kbb"], dtype=np.float64),
-            "r3t_Kmm": np.asarray(lego_frame["q_Kmm"], dtype=np.float64),
-            "r3t_Kaa": np.asarray(lego_frame["q_Kaa"], dtype=np.float64),
-            "tmask": reference_observation[8],
-            # GYRE-zco has full-depth wet columns, so the consumed interior
-            # W mask and T mask have identical owned-domain values.  The
-            # record retains both rows and this comparison proves that fact.
-            "wmask": reference_observation[8],
-            "r1_e1e2t": np.float64(1.0) / np.asarray(
-                card.recipe.grid.area_T, dtype=np.float64),
-        }
+        def common_actual(observed):
+            reference = observed["T"]
+            return {
+                "p2dt": np.asarray([card.dt_s], dtype=np.float64),
+                "transport_u": reference[2],
+                "transport_v": reference[3],
+                "transport_w": reference[4],
+                "e3t_3d": np.asarray(zcoord.nemo_e3t_0, dtype=np.float64),
+                "r3t_Kbb": reference[5],
+                "r3t_Kmm": reference[6],
+                "r3t_Kaa": reference[7],
+                "tmask": reference[8],
+                # GYRE-zco has full-depth wet columns, so the consumed
+                # interior W mask and T mask have identical owned values.
+                "wmask": reference[8],
+                "r1_e1e2t": np.float64(1.0) / np.asarray(
+                    card.recipe.grid.area_T, dtype=np.float64),
+            }
         mode_rows = {
-            name: _developed_fct_mode_rows(values, fct_bundle, common_actual)
-            for name, values in fct_modes.items()
-        }
+            name: _developed_fct_mode_rows(
+                values, fct_bundle, common_actual(values))
+            for name, values in fct_modes.items()}
         production = mode_rows["production_step_jit"]
         all_record_fields = set(DEVELOPED_FCT_COMMON_FIELDS)
         all_record_fields.update(
