@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 refuse_unexpected() {
   local status=$?
-  printf 'REFUSE: round-1 ORCA2 surface acquisition failed at line %s (exit %s)\n' \
+  printf 'REFUSE: round-5 ORCA2 surface/entry acquisition failed at line %s (exit %s)\n' \
     "${BASH_LINENO[0]:-unknown}" "$status" >&2
   exit "$status"
 }
@@ -24,7 +24,7 @@ export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2_OMIP_L4
-readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE
+readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
@@ -32,17 +32,17 @@ readonly COMPILED_STPRK3=$TARGET_ROOT/BLD/ppsrc/nemo/stprk3.f90
 readonly COMPILED_ICEISTATE=$TARGET_ROOT/BLD/ppsrc/nemo/iceistate.f90
 readonly BASELINE=/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_orca1ice_phase2x_a_10step_np2
 readonly FROZEN_ICE=/data/abyssal/dbalwada/nemo-testcases-l4/build/phase2x_orca1ice/MY_SRC_final
-readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round4/acquisition
-readonly RUN_A=$EVIDENCE/orca1ice_surface_every_step_a_np2
-readonly RUN_B=$EVIDENCE/orca1ice_surface_every_step_b_np2
+readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition
+readonly RUN_A=$EVIDENCE/orca1ice_surface_entry_every_step_a_np2
+readonly RUN_B=$EVIDENCE/orca1ice_surface_entry_every_step_b_np2
 readonly EXPECTED_BASELINE_STREAMS=116
 readonly EXPECTED_INHERITED_STREAMS=107
-readonly EXPECTED_TARGET_STREAMS=126
+readonly EXPECTED_TARGET_STREAMS=136
 readonly EXPECTED_DECK_MANIFEST_SHA256=51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9
 readonly EXPECTED_INPUT_MANIFEST_SHA256=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
 readonly EXPECTED_BASELINE_BINARY_SHA256=8e40bf0b595eabba1bd428775a45e87f3f42a778333374cbbfb26eeb6c685869
 readonly EXPECTED_STPRK3_SHA256=9d0318fda246ef1ed3df50172b9d72a5e0b5df879b9a661b38622c9078078989
-readonly EXPECTED_PATCH_SHA256=8d6ea354a59dd8090ae438ca8ae2e5b962dfe8ad6dd78bcfbb61ca1c6b973754
+readonly EXPECTED_PATCH_SHA256=877fcb02c77aa8f7f6b5ebb7845ee8ca0f26d0be9d437b0f10c3cef7c7803b9c
 readonly EXPECTED_CPP_SHA256=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67
 readonly EXPECTED_ARCH_SHA256=132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561
 readonly PARTIAL_STREAM=oracle_transport_kt00000001_s1.bin
@@ -174,6 +174,37 @@ for rank in range(2):
 PY
 }
 
+validate_entry_schema() {
+  local run=$1
+  "$PYTHON" - "$run" <<'PY'
+import pathlib
+import struct
+import sys
+import numpy as np
+
+root = pathlib.Path(sys.argv[1])
+nx, ny, nz, ntr = 94, 152, 31, 2
+count = 4 * nx * ny * nz + nx * ny
+for rank in range(2):
+    for kt in range(1, 11):
+        name = (f"oracle_step_entry_kt{kt:08d}.bin" if rank == 0 else
+                f"oracle_step_entry_rank{rank:04d}_kt{kt:08d}.bin")
+        path = root / name
+        if not path.is_file():
+            raise SystemExit(f"missing {path.name}")
+        with path.open("rb") as handle:
+            magic = handle.read(16).decode("ascii").rstrip()
+            header = struct.unpack("=8i", handle.read(32))
+            values = np.fromfile(handle, dtype=np.float64)
+        level = 1 if kt % 2 else 3
+        wanted = (1, kt, level, nx, ny, nz, ntr, 64)
+        if magic != "NEMO_L1_ENTRY_1" or header != wanted:
+            raise SystemExit(f"bad schema {path.name}: {magic!r} {header}")
+        if values.size != count or not np.isfinite(values).all():
+            raise SystemExit(f"bad payload/EOF {path.name}: {values.size}/{count}")
+PY
+}
+
 ordinary_identity() {
   local reference=$1 candidate=$2
   PYTHONPATH="$PYTHONPATH_VALUE" "$PYTHON" - "$reference" "$candidate" <<'PY'
@@ -207,6 +238,10 @@ finalize() {
     }
     validate_surface_schema "$run" || {
       printf 'REFUSE: %s surface frame schema failed\n' "$run" >&2
+      exit 66
+    }
+    validate_entry_schema "$run" || {
+      printf 'REFUSE: %s entry frame schema failed\n' "$run" >&2
       exit 66
     }
   done
@@ -262,6 +297,13 @@ finalize() {
       exit 66
     }
   done
+  for kt in $(seq 1 10); do
+    name=$(printf 'oracle_step_entry_rank0001_kt%08d.bin' "$kt")
+    cmp -s "$RUN_A/$name" "$RUN_B/$name" || {
+      printf 'REFUSE: target twins differ: %s\n' "$name" >&2
+      exit 66
+    }
+  done
   ordinary_identity "$BASELINE" "$RUN_A" || {
     printf 'REFUSE: A ordinary outputs are not passive to the pinned root\n' >&2
     exit 66
@@ -287,6 +329,13 @@ for path in sorted(a.glob("oracle_ocean_surface_input*.bin")):
     if digest != hashlib.sha256(other.read_bytes()).hexdigest():
         raise SystemExit(f"twin digest mismatch: {path.name}")
     rows.append({"file": path.name, "bytes": path.stat().st_size, "sha256": digest})
+entry_rows = []
+for path in sorted(a.glob("oracle_step_entry_rank*.bin")):
+    other = b / path.name
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != hashlib.sha256(other.read_bytes()).hexdigest():
+        raise SystemExit(f"twin digest mismatch: {path.name}")
+    entry_rows.append({"file": path.name, "bytes": path.stat().st_size, "sha256": digest})
 producer = {}
 for name in ("nemo", "compiled_iceistate.f90", "compiled_stprk3.f90"):
     digest = hashlib.sha256((a / name).read_bytes()).hexdigest()
@@ -296,19 +345,23 @@ for name in ("nemo", "compiled_iceistate.f90", "compiled_stprk3.f90"):
 result = {
     "worktree": worktree_stamp(),
     "status": "PASS",
-    "root_label": "VARIANT_ORACLE_ORCA1ICE_ROUND4_FULL_SURFACE_INPUTS",
+    "root_label": "VARIANT_ORACLE_ORCA1ICE_ROUND5_FULL_ENTRY_INPUTS",
     "inherited_streams_passive": inherited,
     "new_surface_frames": 19,
     "surface_frames_total": len(rows),
     "twin_surface_frames_raw_exact": True,
     "surface_frames": rows,
+    "new_rank1_entry_frames": len(entry_rows),
+    "entry_frames_total": 10 + len(entry_rows),
+    "twin_rank1_entry_frames_raw_exact": True,
+    "rank1_entry_frames": entry_rows,
     "producer_sha256": producer,
 }
 rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
 (a / "round1_surface_admission.json").write_text(rendered)
 print(rendered, end="")
 PY
-  printf 'ORCA2_ROUND1_SURFACE_ACQUISITION_PASS %s %s\n' "$RUN_A" "$RUN_B"
+  printf 'ORCA2_ROUND5_FULL_ENTRY_ACQUISITION_PASS %s %s\n' "$RUN_A" "$RUN_B"
 }
 
 stage_run() {
@@ -432,6 +485,8 @@ touch "$TARGET_ROOT/MY_SRC/"*.F90
 for marker in \
   'CALL l4_dump_ocean_surface_input( kstp, Nbb )' \
   'WRITE(cl_surface_file' \
+  'WRITE(cl_traj' \
+  'oracle_step_entry_rank' \
   'mpprank, kstp' \
   "STATUS='NEW'"; do
   grep -Fq "$marker" "$COMPILED_STPRK3" || {
@@ -439,6 +494,10 @@ for marker in \
     exit 68
   }
 done
+if grep -Fq 'IF( lwp .AND. kstp >= nit000' "$COMPILED_STPRK3"; then
+  printf 'REFUSE: compiled source retained the root-only step-entry writer\n' >&2
+  exit 68
+fi
 if sed -n '/SUBROUTINE l4_dump_ocean_surface_input/,/END SUBROUTINE l4_dump_ocean_surface_input/p' \
     "$COMPILED_STPRK3" | grep -Fq 'IF( .NOT.lwp ) RETURN' || \
     grep -Fq 'IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input' "$COMPILED_STPRK3"; then

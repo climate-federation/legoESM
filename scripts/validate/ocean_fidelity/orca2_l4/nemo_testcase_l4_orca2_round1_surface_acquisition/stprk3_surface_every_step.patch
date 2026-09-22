@@ -9,6 +9,25 @@
     USE sbc_ice, ONLY : snwice_mass, snwice_mass_b, snwice_fmass, rCdU_ice
     USE sbc_oce, ONLY : ln_icebergs
     USE icb_oce, ONLY : berg_grid, nclasses
+@@ -88,11 +88,15 @@
+       !
+       ! Lane-1 certified oracle: exact step-entry Nbb state.  This is a
+       ! write-only instrument; no prognostic array is assigned here.
+-      IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN
++      IF( kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN
+          IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 trajectory requires 64-bit wp' )
+-         WRITE(cl_traj,'("oracle_step_entry_kt",I8.8,".bin")') kstp
++         IF( lwp ) THEN
++            WRITE(cl_traj,'("oracle_step_entry_kt",I8.8,".bin")') kstp
++         ELSE
++            WRITE(cl_traj,'("oracle_step_entry_rank",I4.4,"_kt",I8.8,".bin")') mpprank, kstp
++         ENDIF
+          OPEN( NEWUNIT=itraj, FILE=TRIM(cl_traj), ACCESS='STREAM', FORM='UNFORMATTED', &
+-            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios_traj )
++            &  STATUS='NEW', ACTION='WRITE', IOSTAT=ios_traj )
+          IF( ios_traj /= 0 )   CALL ctl_stop( 'cannot open lane1 trajectory file' )
+          cl_magic = 'NEMO_L1_ENTRY_1'
+          WRITE(itraj) cl_magic, 1, kstp, Nbb, jpi, jpj, jpk, jpts, STORAGE_SIZE(1._wp)
 @@ -159,6 +159,6 @@
        IF( ln_bdy     )   CALL bdy_dta    ( kstp, Nbb )                     ! update dynamic & tracer data at open boundaries
        IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry

@@ -5,11 +5,11 @@ This gate deliberately distinguishes three claims:
 
 * the current legoESM card versus the pinned ORCA1-ice root at kt=1;
 * the admitted V2 versus ORCA1-ice NEMO-root differential through kt=10;
-* whether the records contain the per-step surface inputs needed for an
-  actual legoESM kt=1..10 trajectory.
+* whether the records contain the per-step surface inputs and full-domain
+  step-entry state needed for an actual legoESM kt=1..10 trajectory.
 
 The second claim is never presented as a legoESM trajectory.  The third claim
-stops fail-closed until all ten post-sbc surface frames exist.
+stops fail-closed until both MPI slabs exist for the surface and entry records.
 """
 
 from __future__ import annotations
@@ -277,6 +277,75 @@ def surface_support(root: Path) -> dict[str, object]:
     }
 
 
+def entry_support(root: Path) -> dict[str, object]:
+    """Require both owned MPI slabs for every step-entry state."""
+
+    present: list[dict[str, object]] = []
+    missing: list[str] = []
+    for rank in range(2):
+        for kt in range(1, 11):
+            name = (
+                f"oracle_step_entry_kt{kt:08d}.bin"
+                if rank == 0 else
+                f"oracle_step_entry_rank{rank:04d}_kt{kt:08d}.bin"
+            )
+            path = root / name
+            if path.is_file():
+                fields = read_state_frame(path, kt=kt, stage=None)
+                present.append({
+                    "file": name,
+                    "kt": kt,
+                    "rank": rank,
+                    "owned_shapes": {
+                        field: list(values.shape) for field, values in fields.items()
+                    },
+                    "bytes": path.stat().st_size,
+                    "sha256": sha256(path),
+                })
+            else:
+                missing.append(name)
+    return {
+        "required": 20,
+        "present": present,
+        "missing": missing,
+        "trajectory_supported": not missing,
+    }
+
+
+def initial_output_substitution_check(
+    root: Path, entry: dict[str, np.ndarray]
+) -> dict[str, object]:
+    """Prove the rank-0 output.init shard is not the step-entry operand."""
+
+    from netCDF4 import Dataset
+
+    path = root / "output.init_0000.nc"
+    require(path.is_file(), f"missing initial-output shard: {path}")
+    variable = {
+        "T": "votemper",
+        "S": "vosaline",
+        "u": "vozocrtx",
+        "v": "vomecrty",
+        "ssh": "sossheig",
+    }
+    candidate: dict[str, np.ndarray] = {}
+    with Dataset(path) as dataset:
+        for field, name in variable.items():
+            values = np.asarray(dataset.variables[name][0], dtype=np.float64)
+            if field != "ssh":
+                values = np.moveaxis(values[:30], 0, -1)
+            candidate[field] = values
+    compared = compare_fields(candidate, entry)
+    require(compared["first_non_bit_field"] is not None,
+            "output.init unexpectedly became the step-entry state")
+    return {
+        "file": path.name,
+        "sha256": sha256(path),
+        "disposition": "NOT_A_STEP_ENTRY_OPERAND",
+        **compared,
+    }
+
+
 def root_differential(v2_root: Path, orca1ice_root: Path) -> dict[str, object]:
     checkpoints: list[dict[str, object]] = []
     for kt in range(1, 11):
@@ -355,8 +424,17 @@ def run_gate(
 
     differential = root_differential(v2_root, orca1ice_root)
     support = surface_support(orca1ice_root)
-    status = "READY_FOR_CANDIDATE_TRAJECTORY" if support["trajectory_supported"] \
-        else "STOP_RECORD_GAP"
+    full_entry = entry_support(orca1ice_root)
+    output_init = initial_output_substitution_check(orca1ice_root, orca1ice_entry)
+    if not support["trajectory_supported"]:
+        status = "STOP_RECORD_GAP"
+        trajectory_claim = "UNMEASURED_RECORD_GAP"
+    elif not full_entry["trajectory_supported"]:
+        status = "STOP_ENTRY_RECORD_GAP"
+        trajectory_claim = "UNMEASURED_ENTRY_RECORD_GAP"
+    else:
+        status = "READY_FOR_CANDIDATE_TRAJECTORY"
+        trajectory_claim = "RECORDS_AVAILABLE_BUT_CANDIDATE_NOT_RUN"
     return {
         "worktree": stamp,
         "status": status,
@@ -374,10 +452,9 @@ def run_gate(
         },
         "admitted_root_differential": differential,
         "surface_input_support": support,
-        "trajectory_claim": (
-            "UNMEASURED_RECORD_GAP" if not support["trajectory_supported"]
-            else "RECORDS_AVAILABLE_BUT_CANDIDATE_NOT_RUN"
-        ),
+        "full_entry_support": full_entry,
+        "output_init_substitution_check": output_init,
+        "trajectory_claim": trajectory_claim,
     }
 
 
@@ -410,6 +487,10 @@ def main() -> int:
         print("REFUSE: STOP_RECORD_GAP: exact per-step ocean surface inputs are missing",
               file=sys.stderr)
         return 2
+    if result["status"] == "STOP_ENTRY_RECORD_GAP":
+        print("REFUSE: STOP_ENTRY_RECORD_GAP: full-domain step-entry states are missing",
+              file=sys.stderr)
+        return 3
     return 0
 
 

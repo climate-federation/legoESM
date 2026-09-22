@@ -95,6 +95,19 @@ def test_surface_support_names_every_missing_step(tmp_path):
     )
 
 
+def test_entry_support_names_every_missing_slab(tmp_path):
+    result = gate.entry_support(tmp_path)
+    assert result["trajectory_supported"] is False
+    assert result["required"] == 20
+    assert result["missing"] == (
+        [f"oracle_step_entry_kt{kt:08d}.bin" for kt in range(1, 11)]
+        + [
+            f"oracle_step_entry_rank0001_kt{kt:08d}.bin"
+            for kt in range(1, 11)
+        ]
+    )
+
+
 def test_compiled_source_anchors_are_line_rigid(tmp_path):
     lines = [f"line {number}" for number in range(1, 461)]
     lines[441] = "snwice_mass  (:,:) = tmask(:,:,1) * SUM( mass, dim=3 )"
@@ -136,11 +149,12 @@ def test_acquisition_report_binds_tree_binary_and_compiled_source():
     assert 'for name in ("nemo", "compiled_iceistate.f90", "compiled_stprk3.f90")' in run_sh
     assert 'raise SystemExit(f"twin producer differs: {name}")' in run_sh
     assert 'readonly MODE=${1:---run}' in run_sh
-    assert 'readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE' in run_sh
-    assert 'phase3/orca2_rounds/round4/acquisition' in run_sh
+    assert 'readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY' in run_sh
+    assert 'phase3/orca2_rounds/round5/acquisition' in run_sh
     assert 'readonly EXPECTED_INHERITED_STREAMS=107' in run_sh
-    assert 'readonly EXPECTED_TARGET_STREAMS=126' in run_sh
+    assert 'readonly EXPECTED_TARGET_STREAMS=136' in run_sh
     assert 'oracle_si3_bulk_operands.bin' in run_sh
     assert 'oracle_tke_walk_kt00000002.bin' in run_sh
     assert 'oracle_ocean_surface_input_rank0001_kt%08d.bin' in run_sh
+    assert 'oracle_step_entry_rank0001_kt%08d.bin' in run_sh
     assert '"compiled_stprk3.f90"' in run_sh
