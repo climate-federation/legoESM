@@ -5104,6 +5104,7 @@ class LatLonCGridOceanModel:
         # rebuilt its own min-of-stretched-T pair.  ``None`` (every other
         # integrator) keeps that historical min rule.
         _ws_face_thickness_kbb = None
+        _ws_ldf_thickness_kbb = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
             # NEMO's e3u/e3v(Kbb) = e3u_0*(1+r3u(Kbb)) for the step-entry
             # dyn_adv (stp2d.F90:172 -> dynadv_up3.F90:160; the same pair
@@ -5154,6 +5155,15 @@ class LatLonCGridOceanModel:
                 _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,
                     _ws_v_live_mask, _grid)[:2]
+                from legoesm.ocean.vertical import (
+                    nemo_qco_live_vorticity_e3f_cgrid,
+                )
+                _ws_e3f_kbb = nemo_qco_live_vorticity_e3f_cgrid(
+                    state.eta.data, _zc, state.eta.data.dtype, grid=_grid)
+                _ws_ldf_thickness_kbb = (
+                    _geom_density[1], _ws_face_thickness_kbb[0],
+                    _ws_face_thickness_kbb[1], _ws_e3f_kbb,
+                    _ws_face_thickness_kbb[0], _ws_face_thickness_kbb[1])
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
@@ -5163,6 +5173,7 @@ class LatLonCGridOceanModel:
                                zad_continuity_dt=dt,
                                up3_upwind_selector=_up3_selector_override,
                                momentum_flux_face_thickness=_ws_face_thickness_kbb,
+                               ldf_thickness_operands=_ws_ldf_thickness_kbb,
                                nemo_operator_association=self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm,
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
@@ -5661,6 +5672,18 @@ class LatLonCGridOceanModel:
                     and bool(self._nemo_ws_test_hooks.expose_momentum_operator))
                 _return_components = (
                     _expose_operator or _return_live_stage_operands)
+                _stage_ldf_thickness = None
+                if (not skip_ldf and stage_face_thickness is not None
+                        and _ws_face_thickness_kbb is not None):
+                    from legoesm.ocean.vertical import (
+                        nemo_qco_live_vorticity_e3f_cgrid,
+                    )
+                    _stage_ldf_thickness = (
+                        _geom_density[1], _ws_face_thickness_kbb[0],
+                        _ws_face_thickness_kbb[1],
+                        nemo_qco_live_vorticity_e3f_cgrid(
+                            st.eta.data, _zc, st.eta.data.dtype, grid=_grid),
+                        stage_face_thickness[0], stage_face_thickness[1])
                 td_result = self.tendencies(
                                      st, surface_forcing, sponge=sponge, dt=dt,
                                      momentum_only=True,
@@ -5706,6 +5729,8 @@ class LatLonCGridOceanModel:
                                              self._nemo_ws_test_hooks
                                              .legacy_vector_ene_min_face_thickness
                                          ) else stage_face_thickness),
+                                     ldf_thickness_operands=(
+                                         _stage_ldf_thickness),
                                      ene_generic_f_vtx=(
                                          self._nemo_ws_test_hooks
                                          .legacy_ene_vertex_coriolis),

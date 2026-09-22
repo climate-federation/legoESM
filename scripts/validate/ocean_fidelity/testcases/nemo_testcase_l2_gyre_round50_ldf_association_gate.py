@@ -442,10 +442,15 @@ def run_developed(
     import nemo_testcase_l2_gyre_round83_slow_forcing_walk as round83
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        min_cell_to_uface,
-        min_cell_to_vertex,
-        min_cell_to_vface,
+        compute_face_masks_3d,
         nemo_lateral_viscosity_coefficients,
+    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _nemo_ws_qco_stage_faces,
+    )
+    from legoesm.ocean.vertical import (
+        compute_layer_thickness,
+        nemo_qco_live_vorticity_e3f_cgrid,
     )
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -480,13 +485,23 @@ def run_developed(
     h_k = np.asarray(parts["operand_h_k"], dtype=np.float64)
     u = np.asarray(parts["operand_ldf_velocity_u"], dtype=np.float64)
     v = np.asarray(parts["operand_ldf_velocity_v"], dtype=np.float64)
+    u_live_mask, v_live_mask = compute_face_masks_3d(
+        card.recipe.z_coord.is_active, grid)
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(state.eta.data), state.H_bathy.data,
+        card.recipe.z_coord,
+        min_water_column_m=card.recipe.model_config.min_water_column_m)
+    live_u, live_v = _nemo_ws_qco_stage_faces(
+        state.eta.data, h_ref, u_live_mask, v_live_mask, grid)[:2]
     model = {
         "u": u,
         "v": v,
         "e3t": h_k,
-        "e3u": np.asarray(min_cell_to_uface(jnp.asarray(h_k))),
-        "e3v": np.asarray(min_cell_to_vface(jnp.asarray(h_k), grid)),
-        "e3f": np.asarray(min_cell_to_vertex(jnp.asarray(h_k), grid)),
+        "e3u": np.asarray(live_u),
+        "e3v": np.asarray(live_v),
+        "e3f": np.asarray(nemo_qco_live_vorticity_e3f_cgrid(
+            state.eta.data, card.recipe.z_coord, state.eta.data.dtype,
+            grid=grid)),
         "e2u": np.asarray(grid.dy_u),
         "e1v": np.asarray(grid.dx_v),
         "e2v": np.asarray(grid.dy_v),
