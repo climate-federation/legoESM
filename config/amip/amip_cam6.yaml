@@ -57,7 +57,13 @@ morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # so precipitation crosses >1 layer per 600 s.
                                  # DEPARTURE: Morrison sediments the PRE-source
                                  # pools (MG2 sediments post-source, :2204).
-morrison_sed_cfl_substeps_strict: true  # abort if a column needs > 256 sub-steps
+morrison_sed_cfl_substeps_strict: false # the abort path is an equinox error_if,
+                                        # i.e. a host callback, and the GPU lane
+                                        # runs JAX_PLATFORMS=cuda with no CPU
+                                        # device to place it on (this killed the
+                                        # first 60-day arm at day 2).  The
+                                        # required sub-step count is still
+                                        # reported as a diagnostic.
                                  # (L32 at 600 s needs ~90 for graupel; a clamp
                                  # would silently slow the fall)
 hard_saturation_adjustment: true

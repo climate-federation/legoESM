@@ -3158,6 +3158,24 @@ def main(argv: list[str] | None = None):
     # ``--truncation``-only spelling, so gaussian AMIP died at setup on the
     # prognostic default schemes (2026-07-21 audit — cross-grid smoke).
     args = _postprocess_args(args, parser, argv if argv is not None else sys.argv[1:])
+
+    # The strict sedimentation-overflow abort is an equinox ``error_if``, i.e.
+    # a host callback: it needs a CPU device to place its inputs on, which the
+    # GPU lane (``JAX_PLATFORMS=cuda``) does not have.  Refuse at startup
+    # instead of dying mid-run (the first CAM6 60-day arm died at day 2).
+    if getattr(args, "morrison_sed_cfl_substeps_strict", False):
+        import jax as _jax
+        if not any(d.platform == "cpu" for d in _jax.devices()) and not any(
+                _b == "cpu" for _b in _jax.local_devices()):
+            try:
+                _jax.devices("cpu")
+            except RuntimeError:
+                raise SystemExit(
+                    "morrison_sed_cfl_substeps_strict=True needs a CPU device for "
+                    "its host-callback abort, but none is available (JAX_PLATFORMS="
+                    f"{os.environ.get('JAX_PLATFORMS', '<unset>')!r}).  Add 'cpu' to "
+                    "JAX_PLATFORMS or run with the flag off (the required sub-step "
+                    "count is still reported as a diagnostic).") from None
     _apply_spectral_scheme_fallback(
         args, argv if argv is not None else sys.argv[1:], parser)
 
