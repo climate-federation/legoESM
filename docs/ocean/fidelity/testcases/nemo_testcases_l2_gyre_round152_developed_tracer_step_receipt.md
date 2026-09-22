@@ -178,9 +178,27 @@ codex_exit=1
 ```
 
 Independent review was unavailable in-sandbox.  It emitted neither `SHIP` nor
-`DO NOT SHIP`; no approval is fabricated.  The receipt citation gate,
-shifted-line plant, and final focused test summaries are added after their
-clean-tree runs.
+`DO NOT SHIP`; no approval is fabricated.
+
+The clean-tree receipt citation gate reports `PASS`: 10 citations found, zero
+unmapped, zero failures, and zero failing map entries.  Shifting the compiled
+FCT dispatch citation by two lines reports `FAIL` and exits 1.
+
+Focused test summaries are:
+
+* developed process, citation, and stamp files: `1 failed, 56 passed in
+  35.24s`; the only failure is the registered pre-existing worktree-stamp
+  ratchet, with exactly the Round-146 RHS-family and Round-50 LDF-association
+  offenders;
+* live-geometry guard, prognostic barotropic state, and complete generic NEMO
+  recipe files: `35 passed in 886.24s (0:14:46)`;
+* the changed year-owner file alone before the evidence run: `30 passed, 1
+  skipped in 5.41s`.
+
+No combined full-ocean tree was launched: this round changes no production
+path and already ran the requested production-JIT scientific step plus all
+three prior-landing production-path files.  No new failure occurs in a changed
+path.
 
 ## OPEN — round 153
 
