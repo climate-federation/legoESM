@@ -382,7 +382,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-mpas-conservative-tracer-clamp restores the "
                              "legacy clamp for bit-comparison runs.")
     parser.add_argument("--mpas-vert-advection-scheme",
-                        choices=("upwind", "van_leer"),
+                        choices=("upwind", "van_leer", "sb"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
                         help="Vertical advection scheme on the MPAS sigma lane "
                              "(theta, tracers, edge winds).  'upwind' (default) "
@@ -406,8 +406,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mpas-div-damp4-scale", type=float, default=None,
                         dest="mpas_div_damp4_scale",
                         help="Divergence-SELECTIVE biharmonic damping on the MPAS "
-                             "hydrostatic lane, as a multiple of CAM-FV's own ldiv4 "
-                             "coefficient 0.01*area^2/dt (1.0 = CAM strength, 0 = off). "
+                             "hydrostatic lane, as a multiple of CAM-FV's ldiv4 "
+                             "nondimensional rate 0.01*area^2/dt (0 = off). 1.0 is "
+                             "CAM's rate per APPLICATION, not CAM's behaviour: CAM "
+                             "applies it per acoustic substep with a per-cell "
+                             "coefficient, so treat this as a calibration knob. "
                              "Unlike --div-damp-scale / the del2+del4 viscosities, this "
                              "damps only the curl-free mode and leaves balanced flow alone.")
     parser.add_argument("--div-damp-scale", type=float,

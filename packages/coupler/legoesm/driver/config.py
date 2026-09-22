@@ -1869,10 +1869,16 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
+        # NaN/inf must die here: the scale multiplies a coefficient that goes
+        # straight into a momentum tendency, so a non-finite value does not
+        # raise anywhere downstream -- it silently turns the whole wind field
+        # non-finite on the first step (codex review 2026-09-22).
         _dd4 = getattr(d, "mpas_div_damp4_scale", 0.0)
-        if not isinstance(_dd4, (int, float)) or isinstance(_dd4, bool) or _dd4 < 0:
+        if (not isinstance(_dd4, (int, float)) or isinstance(_dd4, bool)
+                or not math.isfinite(_dd4) or _dd4 < 0):
             errors.append(
-                f"dycore.mpas_div_damp4_scale must be a number >= 0, got {_dd4!r}")
+                "dycore.mpas_div_damp4_scale must be a finite number >= 0, "
+                f"got {_dd4!r}")
         # Dynamical-core axis membership.  Mirror the gate in
         # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
         # config-validation time, instead of deep in the solver factory at JIT.
@@ -3017,7 +3023,7 @@ class ExperimentConfig(NamedTuple):
                     "Unset it or use the MPAS lane.")
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
-        _vert_adv_options = ("upwind", "van_leer")
+        _vert_adv_options = ("upwind", "van_leer", "sb")
         _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
             errors.append(
@@ -3057,7 +3063,17 @@ class ExperimentConfig(NamedTuple):
                     "MPAS dycore; on discretization="
                     f"{d.discretization!r} it would be silently inert. "
                     "Leave it at 'upwind' or use the MPAS lane.")
-            if g.vertical_coord != "sigma":
+            # 'van_leer' is sigma-only; 'sb' (conservative Simmons-Burridge
+            # flux form) is HYBRID-only.  Each lane refuses the other's scheme
+            # rather than run it silently inert.
+            _sb = d.mpas_vert_advection_scheme == "sb"
+            if _sb and g.vertical_coord == "sigma":
+                errors.append(
+                    "dycore.mpas_vert_advection_scheme='sb' is the conservative "
+                    "flux form of the HYBRID vertical transport; on "
+                    "vertical_coord='sigma' it would be silently inert. "
+                    "Use a hybrid vertical_coord, or 'upwind'/'van_leer'.")
+            if not _sb and g.vertical_coord != "sigma":
                 errors.append(
                     "dycore.mpas_vert_advection_scheme is implemented for the "
                     "sigma vertical coordinate only; on vertical_coord="

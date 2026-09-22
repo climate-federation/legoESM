@@ -38,13 +38,20 @@ mpas_vert_advection_scheme: upwind   # van Leer vertical advection is sigma-only
 mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
                                      # 4th-order DIVERGENCE damping at every
                                      # level (cd_core.F90 tau4 = 0.01/dt times
-                                     # the squared cell area).  1.0 = CAM's own
-                                     # strength.  Our del2/del4 are VECTOR
-                                     # Laplacians and damp balanced flow too;
-                                     # this is the curl-free-only term CAM
-                                     # relies on, and the L32 table's 14
-                                     # pure-pressure top layers have no way to
-                                     # absorb divergence into their own mass.
+                                     # the squared cell area).  1.0 = CAM's
+                                     # nondimensional RATE, not CAM's behaviour
+                                     # (CAM applies it per acoustic substep,
+                                     # per cell); 7.235e15 m^4/s here.  RATE
+                                     # PENDING USER APPROVAL.  Our del2/del4
+                                     # are VECTOR Laplacians and damp balanced
+                                     # flow too; this is the curl-free-only
+                                     # term CAM relies on, and the L32 table's
+                                     # 14 pure-pressure top layers have no way
+                                     # to absorb divergence into their own mass.
+                                     # MEASURED, physics off, from the day-5
+                                     # state: cuts the 24 hPa hot-patch drift
+                                     # from 3.14 to 1.96 K/h, a 38% reduction
+                                     # -- real but NOT sufficient on its own.
 
 # ---- physics cadence ---------------------------------------------------------
 physics_update_steps: 16    # CAM6: physics every 1800 s (16 x 112.5 s); the

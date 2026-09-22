@@ -391,12 +391,19 @@ def mpas_hydrostatic_tendencies(
             f"unknown vert_advection_scheme {_vert_scheme!r}; expected one of "
             f"{VERTICAL_ADVECTION_SCHEMES}"
         )
-    if _hybrid and _vert_scheme != "upwind":
+    if _hybrid and _vert_scheme not in ("upwind", "sb"):
         raise ValueError(
             f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
             "sigma vertical coordinate only; the hybrid lane advects with "
             "vertical_advection_hybrid, where it would be silently inert. "
-            "Use vertical_coord='sigma' or leave the scheme at 'upwind'."
+            "Use vertical_coord='sigma', or 'upwind'/'sb' on the hybrid lane."
+        )
+    if not _hybrid and _vert_scheme == "sb":
+        raise ValueError(
+            "vert_advection_scheme='sb' (conservative Simmons-Burridge flux "
+            "form) is wired into the HYBRID lane only; on the sigma lane it "
+            "would be silently inert. Use vertical_coord='cam_l32'/'hybrid', "
+            "or 'upwind'/'van_leer' on sigma."
         )
 
     u_3d = state.u.data        # (nEdges, nlev)
@@ -652,8 +659,12 @@ def mpas_hydrostatic_tendencies(
         # Advecting θ cancels the two large near-equal terms BEFORE
         # discretization, killing the 2Δz residual the 1/p prefactor
         # amplified at the stretched top levels.  See the σ branch below.
+        # scheme='sb' swaps the upwind advective operator inside the θ
+        # round-trip for the conservative Simmons-Burridge flux form, which
+        # satisfies the discrete product rule the advective one violates.
         vert_thermo_T = vertical_advection_theta_hybrid(
-            T_3d, mass_flux, p_s, sigma_coord)
+            T_3d, mass_flux, p_s, sigma_coord,
+            conservative=(_vert_scheme == "sb"))
         # Hybrid carries a mass flux, not a coordinate velocity; the
         # diagnostic reports the equivalent dsigma/dt so the two branches are
         # comparable (dp/dt per unit layer mass).

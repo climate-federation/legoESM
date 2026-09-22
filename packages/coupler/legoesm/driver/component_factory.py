@@ -211,14 +211,29 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     _khs = getattr(dc, "k_h_scale", None)
     K_h_A = A_h if _khs is None else _khs * 3.0e-3 * dx_min ** 2 / DT
 
-    # Divergence-selective biharmonic damping, translated from CAM-FV's
-    # ``ldiv4`` (cd_core.F90:655-683).  CAM sets tau4 = 0.01/dt and multiplies
-    # by the SQUARE of the cell area, i.e. nu_div4 = 0.01 * L^4 / dt with
-    # L^2 the cell area -- the ae/cose factors in cdx4/cdy4/cdtau4 are the
-    # spherical metric of that same product, written out for a lat-lon grid.
-    # Keeping the nondimensional 0.01 and our own dt/area makes the PER-STEP
-    # damping of the grid-scale divergent mode identical to CAM's, which is
-    # the invariant that transfers between cores with different time steps.
+    # Divergence-selective biharmonic damping, scaled from CAM-FV's ``ldiv4``
+    # (cd_core.F90:620-684): CAM sets tau4 = 0.01/dt and multiplies by the
+    # SQUARE of the cell area, so nu_div4 = 0.01 * L^4 / dt with L^2 the cell
+    # area.  The Earth-radius factors are consistent (CAM's angular divergence
+    # supplies one ae, its angular Laplacian two, cdtau4 the fourth), verified
+    # in review -- no metric factor is missing.
+    #
+    # CAM-INSPIRED, NOT IDENTICAL, and the difference is not a detail:
+    #  * CAM applies this once per ACOUSTIC substep, we apply it once per
+    #    dycore step, so matching the nondimensional 0.01 matches the per-
+    #    APPLICATION damping fraction, never the damping per simulated second.
+    #  * CAM's coefficient is per-cell and sits INSIDE the final gradient;
+    #    ours is one global scalar outside it, built from the SMALLEST cell.
+    #    On the res6 mesh areaCell spans a factor 1.60, so the coarsest cells
+    #    receive 1/1.60^2 = 39% of the nominal rate.  Quasi-uniform meshes
+    #    only; a variable-resolution mesh needs the per-cell form.
+    #  * The discrete eigenvalues and the SSP-RK54 stability function differ
+    #    from CAM's, so the realised per-step damping differs too (measured
+    #    21.8% of the strongest scalar-Laplacian mode, against CAM's nominal
+    #    1% per application before its own integrator).
+    # The scale is therefore a CALIBRATION KNOB whose 1.0 means "CAM's own
+    # nondimensional rate", not "CAM's behaviour".  res6 at dt=112.5 s gives
+    # 7.235e15 m^4/s at scale 1.0.
     nu_div4_cam = 0.01 * _grid_cell_area(grid, dx_min) ** 2 / DT
     div_damp4 = getattr(dc, "mpas_div_damp4_scale", 0.0) * nu_div4_cam
     return DiffusionCoeffs(A_h=A_h, hyperdiff=hyperdiff, div_damp=div_damp,
