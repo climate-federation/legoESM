@@ -682,12 +682,12 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- round 154: developed production FCT walk and inherited transport ---
-    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:260-315': [
+    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:260-314': [
         'CASE ( 3 )           !==  Stage 3  ==!',
         'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
-        56],
+        55],
     'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:785':
-        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
+        ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 1),
     'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:879':
         'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )',
     'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv.f90:195':
@@ -700,10 +700,10 @@ CITATION_MAP = {
         'CALL fct_up1_2stp( Kbb, Kmm, Kaa, p2dt', 3],
     'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv_fct.f90:515-553': [
         'ptFu(ji,jj,jk) = MAX( pU(ji,jj,jk) , 0._wp ) * pt_b(ji,jj,jk)',
-        'pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 39],
+        ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 2), 39],
     'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv_fct.f90:924-953': [
         'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji+1,jj,ik) )',
-        'pcc(ji,jj,jk) = pcc(ji,jj,jk) * zcoef', 30],
+        ('pcc(ji,jj,jk) = pcc(ji,jj,jk) * zcoef', 2), 30],
     # --- round 153: developed-state FCT operator acquisition ---
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90:164-199': [
         'DO jn = 1, kjpt            !==  loop over the tracers  ==!',

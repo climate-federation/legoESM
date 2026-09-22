@@ -46,7 +46,7 @@ that every inherited private stream would remain byte-identical is
 This paragraph cites only the compiled branch that produced the record.
 Stage 3 establishes Kmm = N+1/2 and forms horizontal volume transports from
 the live Kmm face thickness, Kmm velocity, and barotropic correction at
-`GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:260-315`.
+`GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:260-314`.
 The program calls `tra_adv_trp` at
 `GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:785` before passing
 those transports to `tra_adv` at
