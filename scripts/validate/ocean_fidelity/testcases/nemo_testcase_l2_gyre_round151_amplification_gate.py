@@ -36,7 +36,7 @@ DEFAULT_CONTROL = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round149/"
     "candidate_year/lego_seed0_year")
 DEFAULT_NEMO = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners")
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest")
 
 
 class GateError(RuntimeError):
@@ -187,6 +187,9 @@ def score(root: Path, control: Path, nemo_root: Path, *,
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
             "precision policy is not fp64/libm")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    stamp = worktree_stamp()
+    require(stamp["clean"] is True,
+            "scorer worktree is dirty; evidence requires a committed gate")
     year = _year_module()
     card = build_nemo_testcase_card(year.CASE)
     _, wet3, _, _, _, _, _ = year._geometry(card, year.DEFAULT_NEMO_MESH)
@@ -271,7 +274,7 @@ def score(root: Path, control: Path, nemo_root: Path, *,
             "systematic_alternative_ceiling_K": SYSTEMATIC_CEILING_K,
             "verdict": verdict,
         },
-        "worktree": worktree_stamp(),
+        "worktree": stamp,
     }
 
 
