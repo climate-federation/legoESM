@@ -420,3 +420,37 @@ def test_defaults_match_cam6_hardcodes_and_namelist():
     assert cfg.limcnv_p_pa == 4000.0 and cfg.parcel_tpert == 0.0
     from legoesm.atmosphere.physics.convection.config import __param_spec__
     assert __param_spec__["ZhangMcFarlaneConfig"]["params"]["ke"]["units"] == "s^-1 (kg/m^2/s)^-1/2"
+
+
+def test_deepcu_inputs_match_transcription_and_feed_the_consumer(cols):
+    """``mass_flux_up`` / ``icwmr`` are CAM's CMFMC / ICWMRDP (the pbuf fields
+    clubb_intr's deepcu reads): mc scattered to the top face of each layer,
+    bottom face 0, kg/m^2/s (zm_conv_intr.F90:661); in-cloud ql, zero outside
+    convecting columns.  Pinned against the loop transcription and shown to
+    yield a non-zero CAM6 deep-convective cloud fraction."""
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import cam6_deep_convective_fraction
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+
+    out, _ = zhang_mcfarlane_convection(
+        cols["T"], cols["q"], cols["pf"], cols["ph"], cols["u"], cols["v"],
+        jnp.zeros_like(cols["T"]), DT, CFG, land_frac=cols["land"], cld_frac=cols["cld"])
+    assert out.mass_flux_up.shape == (4, NLEV + 1) and out.icwmr.shape == (4, NLEV)
+    assert bool((out.mass_flux_up[:, -1] == 0.0).all())
+    assert bool(jnp.isfinite(out.mass_flux_up).all()) and bool(jnp.isfinite(out.icwmr).all())
+    n_deep = 0
+    for i in range(4):
+        Oi = _oracle(cols, i)
+        if not Oi["ideep"]:
+            assert float(jnp.abs(out.mass_flux_up[i]).max()) == 0.0
+            assert float(jnp.abs(out.icwmr[i]).max()) == 0.0
+            continue
+        n_deep += 1
+        _close(out.mass_flux_up[i, :NLEV], Oi["mc"] * 100.0 / constants.g, what=f"cmfmc col{i}")
+        _close(out.icwmr[i], Oi["ql"], what=f"icwmrdp col{i}")
+        # cloud base (maxg, 1-based) carries a positive net mass flux
+        assert float(out.mass_flux_up[i, Oi["mx"] - 1]) > 0.0
+    assert n_deep >= 2
+    deepcu = cam6_deep_convective_fraction(out.mass_flux_up, out.icwmr,
+                                           CloudConfig(scheme="cam6_clubb"))
+    assert float(deepcu[0].max()) > 0.0 and float(deepcu[3].max()) == 0.0
+    assert bool(jnp.isfinite(deepcu).all())

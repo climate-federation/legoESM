@@ -81,6 +81,10 @@ __physics_contract__ = {
         "du_dt_conv": "m/s^2 (None if enable_cmt=False)",
         "dv_dt_conv": "m/s^2 (None if enable_cmt=False)",
         "conv_prog_profile_new": "kg/m^2/s (diagnosed mb at [:, -1])",
+        "mass_flux_up": "kg/m^2/s (CAM cmfmc: net deep mass flux mu+md on "
+                        "interfaces, top->bottom, bottom face 0)",
+        "icwmr": "kg/kg (CAM ICWMRDP: in-cloud updraft condensate, 0 outside "
+                 "convecting columns)",
     },
     "sign_convention": (
         "z up; surface at [:, -1]. dT_dt > 0 warms (includes the fusion "
@@ -195,6 +199,15 @@ def zhang_mcfarlane_convection(
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
         dq_r_conv_dt=evap.ntprprd,
+        # pbuf fields clubb_intr's deepcu reads (clubb_intr.F90:2501-2504):
+        # CMFMC = zm_convr's net mass flux mc (mu + md, mb-scaled) scattered
+        # to interface k = the top face of layer k, bottom face 0, hPa/s ->
+        # kg/m^2/s (zm_conv.F90:1189, zm_conv_intr.F90:661); ICWMRDP = the
+        # in-cloud updraft condensate ql, zeroed for every column before the
+        # gather (zm_conv.F90:538) and rewritten in gathered ones (:1193).
+        mass_flux_up=jnp.concatenate(
+            [conv.mc * 100.0 / constants.g, jnp.zeros((ncol, 1), dtype)], axis=1),
+        icwmr=jnp.where(conv.ideep[:, None], conv.ql, 0.0),
     )
     mb_kg = conv.mb * 100.0 / constants.g
     conv_prog_profile_new = jnp.zeros_like(conv_prog_profile).at[:, -1].set(mb_kg)

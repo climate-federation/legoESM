@@ -488,3 +488,26 @@ def test_cubed_sphere_grid_carries_land_frac_to_zm():
     assert float(jnp.abs(outs[0]).max()) > 0.0
     assert float(jnp.abs(outs[1] - outs[0]).max()) > 0.0, (
         "c0_lnd != c0_ocn: a land grid must change the ZM heating")
+
+
+def test_hydro_bridge_publishes_deepcu_inputs_into_the_carry():
+    """The bridge publishes ``mass_flux_up``/``icwmr`` into the lagged
+    ``PhysicsState`` carry only when the scheme sets both; before the port
+    set them the CAM6 deep-convective cloud fraction was exactly zero on the
+    CAM6 deck (GLM merged-suite review)."""
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import cam6_deep_convective_fraction
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+
+    n, nlev = 4, 12
+    ncol = 6 * n * n
+    cfg = _make_zm_only_config()
+    state, grid, sigma = _convecting_3d_state(n, nlev)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    ps = init_physics_state(ncol, nlev, cfg)
+    assert float(jnp.abs(ps.conv_mass_flux_up).max()) == 0.0
+    _, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
+    mf, icw = ps_out.conv_mass_flux_up, ps_out.conv_icwmr
+    assert mf.shape == (ncol, nlev + 1) and icw.shape == (ncol, nlev)
+    assert float(mf.max()) > 0.0 and float(icw.max()) > 0.0
+    deepcu = cam6_deep_convective_fraction(mf, icw, CloudConfig(scheme="cam6_clubb"))
+    assert float(deepcu.max()) > 0.0
