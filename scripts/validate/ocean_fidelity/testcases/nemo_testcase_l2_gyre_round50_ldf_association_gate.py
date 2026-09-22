@@ -122,9 +122,19 @@ def admit_developed_ldf_record(
     *,
     expect_commit: str,
     plant: str | None = None,
+    parent_path: Path | None = None,
+    parent_baseline_path: Path | None = None,
+    family_baseline_path: Path | None = None,
+    inherited_root: Path | None = None,
+    inherited_baseline_root: Path | None = None,
 ) -> dict:
     """Admit the passive direct record against its family boundaries."""
-    from nemo_testcase_l2_gyre_round146_rhs_family_gate import read_record_bytes
+    from nemo_testcase_l2_gyre_round146_rhs_family_gate import (
+        _exact_inherited,
+        _parent_comparison,
+        read_record_bytes,
+        read_round140_bytes,
+    )
 
     original = record_path.read_bytes()
     original_record = read_developed_ldf_bytes(original)
@@ -141,7 +151,8 @@ def admit_developed_ldf_record(
         offset = original_record["offsets"][name]
         value = struct.unpack_from("=d", payload, offset)[0]
         struct.pack_into("=d", payload, offset, np.nextafter(value, np.inf))
-    elif plant is not None:
+    elif plant not in (None, "parent-wet-ulp", "parent-dry-ulp",
+                       "restart-byte"):
         raise ValueError(f"unknown developed LDF plant {plant!r}")
 
     record = read_developed_ldf_bytes(bytes(payload))
@@ -153,7 +164,8 @@ def admit_developed_ldf_record(
             == (expected_sha, expect_commit, record_path.name),
             "developed LDF stamp mismatch")
 
-    family = read_record_bytes(family_path.read_bytes())["fields"]
+    family_payload = family_path.read_bytes()
+    family = read_record_bytes(family_payload)["fields"]
     fields = record["fields"]
     masks = {"u": fields["umask"] != 0.0,
              "v": fields["vmask"] != 0.0}
@@ -174,7 +186,7 @@ def admit_developed_ldf_record(
     require(np.all(np.isfinite(fields["zcur"][zcur_owned]))
             and np.all(np.isfinite(fields["zdiv"][zdiv_owned])),
             "non-finite owned developed LDF intermediate")
-    return {
+    report = {
         "format": "nemo-testcase-l2-gyre-round148-developed-ldf-admission-v1",
         "record_sha256": actual_sha,
         "record_size": len(payload),
@@ -187,6 +199,48 @@ def admit_developed_ldf_record(
         },
         "status": "PASS",
     }
+    parent_args = (parent_path, parent_baseline_path, family_baseline_path,
+                   inherited_root, inherited_baseline_root)
+    require(all(value is not None for value in parent_args)
+            or all(value is None for value in parent_args),
+            "developed run admission paths must be supplied together")
+    if parent_path is not None:
+        candidate_parent = read_round140_bytes(parent_path.read_bytes())
+        baseline_parent = read_round140_bytes(
+            parent_baseline_path.read_bytes())
+        if plant in ("parent-wet-ulp", "parent-dry-ulp"):
+            mask = candidate_parent["fields"]["umask"] != 0.0
+            target = mask if plant == "parent-wet-ulp" else ~mask
+            locations = np.argwhere(target)
+            require(locations.size > 0, "parent plant has no target cell")
+            index = tuple(int(value) for value in locations[0])
+            value = candidate_parent["fields"]["rhs_u"][index]
+            candidate_parent["fields"]["rhs_u"][index] = np.nextafter(
+                value, np.inf)
+        parent = _parent_comparison(candidate_parent, baseline_parent)
+        report["parent_vs_round146"] = parent
+        require(parent["passive"],
+                "Round-148 parent moved on a model-owned cell")
+        if plant == "parent-dry-ulp":
+            require(not parent["rows"]["rhs_u"]["excluded"]["bit_exact"]
+                    and parent["rows"]["rhs_u"]["owned"]["bit_exact"],
+                    "excluded parent plant was not classified")
+            raise RuntimeError(
+                "excluded-cell change classified without admitting an "
+                "owned-cell change")
+        family_baseline_payload = family_baseline_path.read_bytes()
+        report["family_vs_round146"] = {
+            "bit_exact": family_payload == family_baseline_payload,
+            "candidate_sha256": hashlib.sha256(family_payload).hexdigest(),
+            "baseline_sha256": hashlib.sha256(
+                family_baseline_payload).hexdigest(),
+        }
+        require(report["family_vs_round146"]["bit_exact"],
+                "Round-146 family record moved")
+        report["exact_inherited"] = _exact_inherited(
+            inherited_root, inherited_baseline_root,
+            plant_restart=plant == "restart-byte")
+    return report
 
 
 def _u_face(value: np.ndarray) -> np.ndarray:
@@ -596,11 +650,17 @@ def main(argv=None) -> int:
     parser.add_argument("--admit-developed", action="store_true")
     parser.add_argument("--developed-record", type=Path)
     parser.add_argument("--developed-family-record", type=Path)
+    parser.add_argument("--developed-family-baseline", type=Path)
+    parser.add_argument("--developed-parent-record", type=Path)
+    parser.add_argument("--developed-parent-baseline", type=Path)
+    parser.add_argument("--developed-root", type=Path)
+    parser.add_argument("--developed-baseline-root", type=Path)
     parser.add_argument("--developed-stamp", type=Path)
     parser.add_argument(
         "--developed-plant",
         choices=("header", "truncation", "missing-field", "zcur-ulp",
-                 "post-ulp"),
+                 "post-ulp", "parent-wet-ulp", "parent-dry-ulp",
+                 "restart-byte"),
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
@@ -617,6 +677,11 @@ def main(argv=None) -> int:
                 args.developed_stamp,
                 expect_commit=args.expect_commit,
                 plant=args.developed_plant,
+                parent_path=args.developed_parent_record,
+                parent_baseline_path=args.developed_parent_baseline,
+                family_baseline_path=args.developed_family_baseline,
+                inherited_root=args.developed_root,
+                inherited_baseline_root=args.developed_baseline_root,
             )
         except Exception as error:
             if args.developed_plant:

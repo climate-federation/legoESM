@@ -21,8 +21,8 @@ readonly EXPECTED_SIZE=4717612
 readonly SOURCE_BINARY_SHA=8270a36f619c46c196e7389bf063b4ac2c8ead418e66ffd3f1357b772de5d250
 readonly MODE=${1:---run}
 case "$MODE" in
-  --run|--preflight-only|--plant-layout) ;;
-  *) printf 'REFUSE: usage: %s [--run|--preflight-only|--plant-layout]\n' "$0" >&2; exit 64 ;;
+  --run|--admit-existing|--preflight-only|--plant-layout) ;;
+  *) printf 'REFUSE: usage: %s [--run|--admit-existing|--preflight-only|--plant-layout]\n' "$0" >&2; exit 64 ;;
 esac
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -113,6 +113,69 @@ if [[ "$MODE" == --preflight-only ]]; then
   exit 0
 fi
 
+readonly EXACT_INHERITED="GYRE_OMIP_L2_P3_00001080_restart.nc GYRE_OMIP_L2_P3_00001081_restart.nc oracle_process_budget_kt00001081.bin oracle_bt_step_operands_kt00001081.bin oracle_stage1_qco_operands_kt00001081.bin oracle_slow_forcing_split_kt00001081.bin"
+admit_existing() {
+  for path in "$TARGET_RUN/$RECORD" "$TARGET_RUN/$FAMILY_RECORD" \
+    "$TARGET_RUN/oracle_developed_rhs_kt00001081.bin" \
+    "$TARGET_RUN/binary.sha256" "$TARGET_RUN/source_cfg.sha256" \
+    "$TARGET_RUN/producer_commit.txt" "$TARGET_RUN/nemo" "$BINARY"; do
+    if [[ ! -f "$path" ]]; then printf 'REFUSE: existing admission lacks %s\n' "$path" >&2; exit 70; fi
+  done
+  if ! cmp -s "$TARGET_RUN/nemo" "$BINARY" || \
+     ! (cd "$TARGET_RUN" && sha256sum -c binary.sha256 >/dev/null); then
+    printf 'REFUSE: existing Round-148 binary changed\n' >&2
+    exit 70
+  fi
+  if ! (cd "$SOURCE_ROOT" && sha256sum -c "$TARGET_RUN/source_cfg.sha256" >/dev/null); then
+    printf 'REFUSE: Round-146 source-card ancestry changed\n' >&2
+    exit 70
+  fi
+  local producer_commit
+  producer_commit=$(tr -d '[:space:]' <"$TARGET_RUN/producer_commit.txt")
+  if [[ ! "$producer_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    printf 'REFUSE: malformed producer commit %s\n' "$producer_commit" >&2
+    exit 70
+  fi
+  printf '%s %s %s\n' "$(sha256sum "$TARGET_RUN/$RECORD" | awk '{print $1}')" \
+    "$producer_commit" "$RECORD" >"$TARGET_RUN/$RECORD.stamp"
+  gate() {
+    $PY "$GATE" --admit-developed --expect-commit "$producer_commit" \
+      --developed-record "$TARGET_RUN/$RECORD" \
+      --developed-family-record "$TARGET_RUN/$FAMILY_RECORD" \
+      --developed-family-baseline "$SOURCE_RUN/$FAMILY_RECORD" \
+      --developed-parent-record "$TARGET_RUN/oracle_developed_rhs_kt00001081.bin" \
+      --developed-parent-baseline "$SOURCE_RUN/oracle_developed_rhs_kt00001081.bin" \
+      --developed-root "$TARGET_RUN" --developed-baseline-root "$SOURCE_RUN" \
+      --developed-stamp "$TARGET_RUN/$RECORD.stamp" "$@"
+  }
+  local plant
+  for plant in header truncation missing-field zcur-ulp post-ulp parent-wet-ulp parent-dry-ulp restart-byte; do
+    if gate --developed-plant "$plant" >"$TARGET_RUN/round148_${plant}_plant.log" 2>&1; then
+      printf 'REFUSE: %s plant stayed green\n' "$plant" >&2
+      exit 72
+    fi
+    if ! grep -Fq 'STATUS PLANT-FIRED' "$TARGET_RUN/round148_${plant}_plant.log"; then
+      printf 'REFUSE: %s plant lacks marker\n' "$plant" >&2
+      exit 72
+    fi
+  done
+  gate --output "$TARGET_RUN/round148_developed_ldf_admission.json"
+  (
+    cd "$TARGET_RUN"
+    sha256sum "$RECORD" "$RECORD.stamp" $EXACT_INHERITED \
+      oracle_developed_rhs_kt00001081.bin "$FAMILY_RECORD" \
+      round148_*_plant.log round148_developed_ldf_admission.json \
+      >round148_outputs.sha256
+    printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
+  )
+  printf 'ROUND148_DEVELOPED_LDF_READY %s\n' "$TARGET_RUN"
+}
+
+if [[ "$MODE" == --admit-existing ]]; then
+  admit_existing
+  exit 0
+fi
+
 if [[ -e "$TARGET_ROOT" || -e "$TARGET_RUN" ]]; then
   printf 'REFUSE: new target already exists: %s or %s\n' "$TARGET_ROOT" "$TARGET_RUN" >&2
   exit 67
@@ -186,36 +249,10 @@ if [[ "$bytes" -ne "$EXPECTED_SIZE" ]]; then
   printf 'REFUSE: record is %s bytes, expected %s\n' "$bytes" "$EXPECTED_SIZE" >&2
   exit 70
 fi
-readonly INHERITED="GYRE_OMIP_L2_P3_00001080_restart.nc GYRE_OMIP_L2_P3_00001081_restart.nc oracle_process_budget_kt00001081.bin oracle_bt_step_operands_kt00001081.bin oracle_stage1_qco_operands_kt00001081.bin oracle_slow_forcing_split_kt00001081.bin oracle_developed_rhs_kt00001081.bin oracle_developed_rhs_families_kt00001081.bin"
-for name in $INHERITED; do
+for name in $EXACT_INHERITED; do
   if ! cmp -s "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; then
     printf 'REFUSE: passive instrument moved inherited %s\n' "$name" >&2
     exit 71
   fi
 done
-printf '%s %s %s\n' "$(sha256sum "$TARGET_RUN/$RECORD" | awk '{print $1}')" \
-  "$COMMIT" "$RECORD" >"$TARGET_RUN/$RECORD.stamp"
-gate() {
-  $PY "$GATE" --admit-developed --expect-commit "$COMMIT" \
-    --developed-record "$TARGET_RUN/$RECORD" \
-    --developed-family-record "$TARGET_RUN/$FAMILY_RECORD" \
-    --developed-stamp "$TARGET_RUN/$RECORD.stamp" "$@"
-}
-for plant in header truncation missing-field zcur-ulp post-ulp; do
-  if gate --developed-plant "$plant" >"$TARGET_RUN/round148_${plant}_plant.log" 2>&1; then
-    printf 'REFUSE: %s plant stayed green\n' "$plant" >&2
-    exit 72
-  fi
-  if ! grep -Fq 'STATUS PLANT-FIRED' "$TARGET_RUN/round148_${plant}_plant.log"; then
-    printf 'REFUSE: %s plant lacks marker\n' "$plant" >&2
-    exit 72
-  fi
-done
-gate --output "$TARGET_RUN/round148_developed_ldf_admission.json"
-(
-  cd "$TARGET_RUN"
-  sha256sum "$RECORD" "$RECORD.stamp" $INHERITED round148_*_plant.log \
-    round148_developed_ldf_admission.json >round148_outputs.sha256
-  printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
-)
-printf 'ROUND148_DEVELOPED_LDF_READY %s\n' "$TARGET_RUN"
+admit_existing
