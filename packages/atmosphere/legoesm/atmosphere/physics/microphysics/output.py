@@ -95,6 +95,12 @@ class MicrophysicsOutput(NamedTuple):
     # convective vapour sink (both draw the same pre-physics q_v).  ``None`` for
     # schemes that do not expose it (the joint clamp then skips the micro term).
     dq_v_to_qc_dt: jax.Array | None = None
+    # MG2-style CFL sub-stepping (``sedimentation_tendency(n_substeps_max>1)``):
+    # per-column max over species of the REQUIRED sub-step count, unclipped.
+    # Above the scheme's static cap the loop clamped (mass conserved, the
+    # species fell slower than its terminal speed).  None when the sub-
+    # stepping is off.
+    sed_substeps_required: jax.Array | None = None
 
 
 def make_zero_hydrometeors(
@@ -143,7 +149,8 @@ def sedimentation_tendency(
     extra_sink: jax.Array | None = None,
     n_substeps_max: int = 1,
     cfl_speed: jax.Array | None = None,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
+    return_substeps: bool = False,
+) -> jax.Array | tuple:
     """Compute sedimentation tendency from vertical flux divergence.
 
     When ``dt`` is supplied the outgoing flux at each level is capped
@@ -193,6 +200,12 @@ def sedimentation_tendency(
         Extra fall speed entering the sub-step count only (MG2 sizes one
         ``nstep`` per species from ``max(mass-, number-weighted)`` speed
         so the number falls in lock-step with the mass).
+    return_substeps : bool, default False
+        Append the per-column REQUIRED sub-step count ``(ncol,)`` int32
+        (``1 + floor(max_k V dt/dz)``, NOT clipped to ``n_substeps_max``) to
+        the return tuple.  A value above the cap means the loop clamped and
+        that column fell slower than its terminal speed (mass conserved) --
+        the caller must surface it.  Ones on the one-pass path.
 
     Returns
     -------
@@ -206,7 +219,7 @@ def sedimentation_tendency(
             raise ValueError("sedimentation sub-stepping needs dt")
         return _sedimentation_substepped(
             q_pos, rho, V_t, dz, dt, return_surface_flux, extra_sink,
-            int(n_substeps_max), cfl_speed)
+            int(n_substeps_max), cfl_speed, return_substeps)
     flux = V_t * q_pos * rho  # (ncol, nlev) outgoing flux density [kg/m^2/s]
 
     if dt is not None:
@@ -230,14 +243,15 @@ def sedimentation_tendency(
     dz_safe = jnp.clip(dz, 1.0, None)
     tendency = (flux_in - flux) / (rho * dz_safe)
 
-    if return_surface_flux:
+    out = (tendency, flux[:, -1]) if return_surface_flux else (tendency,)
+    if return_substeps:
         # Bottom outgoing flux is the precipitation reaching the surface.
-        return tendency, flux[:, -1]
-    return tendency
+        out = out + (jnp.ones(q.shape[0], dtype=jnp.int32),)
+    return out if len(out) > 1 else out[0]
 
 
 def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
-                              extra_sink, n_max, cfl_speed):
+                              extra_sink, n_max, cfl_speed, return_substeps):
     """MG2 ``micro_mg2_0.F90`` sedimentation loop (see caller docstring).
 
     Static-shape ``lax.fori_loop`` over ``n_max`` with sub-steps beyond a
@@ -249,7 +263,11 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
     dt = jnp.maximum(dt, 1.0e-12)
     v_cfl = V_t if cfl_speed is None else jnp.maximum(V_t, cfl_speed)
     cfl = jnp.max(v_cfl * dt / dz_safe, axis=1, keepdims=True)  # (ncol, 1)
-    nstep = jnp.clip(1 + jnp.floor(cfl).astype(jnp.int32), 1, n_max)
+    # int32 headroom for an infinite CFL; a NaN fall speed reports 1 so the
+    # count is always a sane integer (the tendency carries the NaN itself)
+    cfl = jnp.where(jnp.isfinite(cfl), jnp.minimum(cfl, 2.0 ** 30), 0.0)  # coeff-ok: int32 headroom
+    nstep_req = 1 + jnp.floor(cfl).astype(jnp.int32)
+    nstep = jnp.clip(nstep_req, 1, n_max)
     dt_s = dt / nstep
     reserve = extra_sink * dt if extra_sink is not None else None
 
@@ -270,6 +288,7 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
     _, tendency, sfc = jax.lax.fori_loop(
         0, n_max, body,
         (q_pos, jnp.zeros_like(q_pos), jnp.zeros_like(q_pos[:, -1])))
-    if return_surface_flux:
-        return tendency, sfc
-    return tendency
+    out = (tendency, sfc) if return_surface_flux else (tendency,)
+    if return_substeps:
+        out = out + (nstep_req[:, 0],)
+    return out if len(out) > 1 else out[0]

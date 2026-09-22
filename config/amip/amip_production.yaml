@@ -113,6 +113,16 @@ radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
 rad_update_steps: 32        # exactly hourly at dt 112.5 (48 was hourly at dt 75)
 clouds: sundqvist
 microphysics: morrison
+morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
+                                 # sedimentation (micro_mg2_0.F90 loop). The
+                                 # one-pass form moved a hydrometeor at most one
+                                 # layer per call; production bottom-layer rain
+                                 # CFL ~3.4 at 112.5 s (281 m layer, 9.1 m/s cap),
+                                 # so this changes production numerics BY DESIGN.
+                                 # Pre-2026-09-22 runs: --no-morrison-sed-cfl-substeps
+                                 # morrison_sed_cfl_substeps_strict left at its default
+                                 # (False): max required count here is 8 (graupel) vs the
+                                 # 256 cap; turning the abort on is a user choice, not taken.
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
 # NEW BASELINE, 2026-09-13 (owner decision). This moves TWO things at once and

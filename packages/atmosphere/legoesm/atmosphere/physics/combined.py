@@ -834,7 +834,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # on (#843 lean-lane port) — a None extra is never attached.
         _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
                         "shflx_sfc", "lhflx_sfc",
-                        "sw_up_toa_clr", "lw_up_toa_clr")
+                        "sw_up_toa_clr", "lw_up_toa_clr",
+                        "sed_substeps_required")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete
@@ -962,6 +963,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _set = {k: v for k, v in extras.items() if v is not None}
         return combined._replace(**_set) if _set else combined
 
+    # Diagnostic extras that are COUNTS (int): combined across macmic
+    # sub-steps as the maximum, never weighted-averaged like the fluxes.
+    _COUNT_DIAG_FIELDS = frozenset({"sed_substeps_required"})
+    assert _COUNT_DIAG_FIELDS <= {"sw_up_toa", "lw_up_toa", "sw_down_toa",
+                                  "shflx_sfc", "lhflx_sfc", "sw_up_toa_clr",
+                                  "lw_up_toa_clr", "sed_substeps_required"}
+
     def _advance_state(state, du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends, dt_x):
         """``state + dt_x * tendency`` (CAM ``physics_update``); ``phis`` fixed."""
         kw = dict(
@@ -1004,9 +1012,15 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         upd.update(upd_r)
         ex = dict(ex)
         for k, v in ex_r.items():
-            if v is not None:
-                ex[k] = (v.replace(data=w * v.data) if ex.get(k) is None
-                         else ex[k].replace(data=ex[k].data + w * v.data))
+            if v is None:
+                continue
+            if k in _COUNT_DIAG_FIELDS:
+                # a COUNT: the window's worst sub-step, not an average
+                ex[k] = (v if ex.get(k) is None
+                         else ex[k].replace(data=jnp.maximum(ex[k].data, v.data)))
+                continue
+            ex[k] = (v.replace(data=w * v.data) if ex.get(k) is None
+                     else ex[k].replace(data=ex[k].data + w * v.data))
         return (_ws(du, du_r), _ws(dv, dv_r), _ws(dT, dT_r), _ws(dps, dps_r),
                 _ws(dphis, dphis_r), tr, upd,
                 first if first is not None else first_r,

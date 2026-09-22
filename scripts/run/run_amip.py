@@ -1706,12 +1706,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "fall_b_i=0.865 and PSD bounds tuned against "
                              "anvil-ice over-accumulation, the exact disease "
                              "of the 2026-07 AMIP warm drift).")
-    parser.add_argument("--morrison-sed-cfl-substeps", action="store_true",
-                        default=False, dest="morrison_sed_cfl_substeps",
+    parser.add_argument("--morrison-sed-cfl-substeps",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        dest="morrison_sed_cfl_substeps",
                         help="MG2-style CFL sub-stepping of Morrison rain/ice/"
                              "snow/graupel sedimentation (per column nstep = "
-                             "1 + floor(max V dt/dz)); default one upwind pass "
-                             "per call.")
+                             "1 + floor(max V dt/dz)); default ON (user "
+                             "2026-09-22). --no-morrison-sed-cfl-substeps = the "
+                             "legacy one-pass form (falls at most one layer per "
+                             "call) for reproducing earlier runs.")
+    parser.add_argument("--morrison-sed-cfl-substeps-strict", action="store_true",
+                        default=False, dest="morrison_sed_cfl_substeps_strict",
+                        help="With --morrison-sed-cfl-substeps: abort the run "
+                             "when any column needs more sub-steps than the "
+                             "static cap (otherwise the count is only reported).")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -2299,6 +2307,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
+        morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

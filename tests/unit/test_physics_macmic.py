@@ -24,14 +24,13 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, "tests/unit")
-from test_physics_cadence import _leaves_equal, _mpas_cfg, _setup  # noqa: E402
-
 from legoesm.atmosphere.physics.physics_state import (  # noqa: E402
     PHYSSTATE_PER_CALL_INPUTS,
     PhysicsState,
     init_physics_state,
     update_physics_state,
 )
+from test_physics_cadence import _leaves_equal, _mpas_cfg, _setup  # noqa: E402
 
 _X64 = bool(jax.config.jax_enable_x64)
 # summation-order noise of the N-term averages at the running dtype
@@ -109,6 +108,14 @@ def _reference(cfg, state, mesh, sigma, ps, dt, n):
     return dT, du, dq, precip, ps_m
 
 
+# Column sums of the N=1 (default) tendency on the moist fixture, computed at
+# the PARENT commit 0870fdb52 (before the macmic loop existed), CPU x64:
+# sum dT_dt, sum |dT_dt|, sum dq_v_dt, sum dq_r_dt.  The N=1 path must keep
+# reproducing them (codex round 3: default-vs-explicit-1 was tautological).
+_N1_PARENT_PINS = (-0.4682190773295994, 0.547585380929818,
+                   0.00019821679962792423, -1.4502397831824815e-05)
+
+
 def test_n1_default_is_the_parallel_split():
     from legoesm.atmosphere.physics.combined import make_physics
     mesh, sigma, state = _moist_setup()
@@ -118,6 +125,12 @@ def test_n1_default_is_the_parallel_split():
     t1, p1 = make_physics(cfg, model_type="mpas", dt=1800.0, cld_macmic_num_steps=1)(
         state, mesh, sigma, phys_state=ps)
     assert _leaves_equal(t0, t1) and _leaves_equal(p0, p1)
+    got = (float(jnp.sum(t0.dT_dt.data)), float(jnp.sum(jnp.abs(t0.dT_dt.data))),
+           float(jnp.sum(t0.tracer_tendencies["q_v"].data)),
+           float(jnp.sum(t0.tracer_tendencies["q_r"].data)))
+    if _X64 and jax.default_backend() == "cpu":
+        # CPU-x64 pins (summation order); f32 differs from them by ~2 %
+        np.testing.assert_allclose(got, _N1_PARENT_PINS, rtol=1e-10)
 
 
 def test_macmic_matches_the_sequential_reference_and_is_not_a_rescaling():
@@ -282,6 +295,7 @@ def test_validation_cli_and_amip_round_trip():
     with pytest.raises(ValueError, match="MPAS lane"):
         cube.validate_strict()
     from legoesm.forcing.amip_config import AMIPExperimentConfig
+
     from scripts.run.run_amip import build_arg_parser
     parser = build_arg_parser()
     assert parser.parse_args([]).cld_macmic_num_steps == 1

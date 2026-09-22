@@ -535,10 +535,16 @@ class MorrisonConfig(NamedTuple):
     morrison_flavor: str = "mg"      # "mg" (global default) | "sam" (CRM)
     # MG2 (micro_mg2_0.F90 sedimentation loop) CFL sub-stepping of rain /
     # ice / snow / graupel sedimentation: per column nstep = 1 + floor(max
-    # V·dt/dz), capped at ``morrison._SEDIMENTATION_SUBSTEPS_MAX``.  False
-    # (default) = one upwind pass per call with the flux cap (a hydrometeor
-    # falls at most one layer per call).
-    sed_cfl_substeps: bool = False
+    # V·dt/dz), capped at ``morrison._SEDIMENTATION_SUBSTEPS_MAX``.  True
+    # (DEFAULT, user decision 2026-09-22 -- the one-pass form let a
+    # hydrometeor fall at most one layer per call, a defect at every dt where
+    # V·dt/dz > 1: production rain CFL ~3.4 at 112.5 s).  False = the legacy
+    # one-pass flux-capped form, kept for reproducing pre-2026-09-22 runs.
+    sed_cfl_substeps: bool = True
+    # Fail loudly (runtime error under jit) when any column needs more sub-
+    # steps than the cap; off = the count is only reported
+    # (``MicrophysicsOutput.sed_substeps_required``).
+    sed_cfl_substeps_strict: bool = False
     # Warm-rain autoconversion + accretion scheme:
     #   "kk2000" (default) = Khairoutdinov-Kogan 2000, the SAM M2005
     #     DEFAULT (IRAIN=0): PRC=1350·qc^2.47·(Nc[#/cm³])^-1.79,
@@ -1181,6 +1187,7 @@ def apply_microphysics_experiment_flags(
     morrison_scalars: dict | None = None,
     morrison_flavor: str | None = None,
     morrison_sed_cfl_substeps: bool | None = None,
+    morrison_sed_cfl_substeps_strict: bool | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1286,8 +1293,23 @@ def apply_microphysics_experiment_flags(
                 f"morrison_sed_cfl_substeps={morrison_sed_cfl_substeps!r} is "
                 "only supported by the morrison microphysics scheme (got "
                 f"{scheme!r}); use --microphysics morrison or drop it.")
+        if not isinstance(morrison_sed_cfl_substeps, bool):
+            raise TypeError(
+                "morrison_sed_cfl_substeps must be a bool, got "
+                f"{morrison_sed_cfl_substeps!r}")
         scheme_config = scheme_config._replace(
-            sed_cfl_substeps=bool(morrison_sed_cfl_substeps))
+            sed_cfl_substeps=morrison_sed_cfl_substeps)
+    if morrison_sed_cfl_substeps_strict is not None:
+        if not isinstance(morrison_sed_cfl_substeps_strict, bool):
+            raise TypeError(
+                "morrison_sed_cfl_substeps_strict must be a bool, got "
+                f"{morrison_sed_cfl_substeps_strict!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_sed_cfl_substeps_strict is only supported by the "
+                f"morrison microphysics scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(
+            sed_cfl_substeps_strict=morrison_sed_cfl_substeps_strict)
     if morrison_scalars:
         # Morrison ice-process tunables (``morrison_*`` ExperimentConfig flat
         # scalars).  HARD scheme gate, NOT field-presence: Thompson carries

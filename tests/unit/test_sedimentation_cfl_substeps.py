@@ -21,12 +21,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.atmosphere.physics.microphysics.output import sedimentation_tendency
 
 # exact checks (array_equal) hold at either precision; the closure tolerance
 # follows the dtype so the module never skips
-_RTOL = 1e-12 if jax.config.jax_enable_x64 else 1e-5
+_X64 = bool(jax.config.jax_enable_x64)
+_RTOL = 1e-12 if _X64 else 1e-5
 
 
 def _column(ncol=2, nlev=20, dz_m=1000.0, V=5.0):
@@ -99,6 +99,85 @@ def test_substepped_equals_nstep_sequential_one_pass_calls():
     assert float(jnp.abs(q + dt * sub)[:, 14:16].max()) > 0.0   # reached layer ~15
 
 
+def test_pulse_reaches_the_surface_within_one_call():
+    """A pulse 4 layers up with CFL 15 per call reaches the surface only with
+    sub-stepping; the surface flux equals the column water lost (closure)
+    and is a large fraction of the pulse (codex round 3: the earlier pulses
+    never reached the surface, so a zeroed surface flux passed)."""
+    q, rho, Vt, dz = _column(nlev=8)
+    q = jnp.zeros_like(q).at[:, 3].set(1.0e-4)
+    dt = 3000.0                                          # 15 layers of travel
+    one, p_one = sedimentation_tendency(q, rho, Vt, dz, dt=dt, return_surface_flux=True)
+    sub, p_sub, req = sedimentation_tendency(q, rho, Vt, dz, dt=dt, return_surface_flux=True,
+                                             n_substeps_max=64, return_substeps=True)
+    assert float(p_one.max()) == 0.0
+    col0 = jnp.sum(q * rho * dz, axis=1)
+    lost = -jnp.sum(sub * rho * dz, axis=1)
+    np.testing.assert_allclose(np.asarray(p_sub * dt), np.asarray(lost * dt), rtol=_RTOL,
+                               atol=_RTOL * float(col0.max()))
+    assert float((p_sub * dt / col0).min()) > 0.95      # ~all of it lands
+    assert np.array_equal(np.asarray(req), np.full(q.shape[0], 16, dtype=np.int32))
+    _, _, req_one = sedimentation_tendency(q, rho, Vt, dz, dt=dt, return_surface_flux=True,
+                                           return_substeps=True)
+    assert np.array_equal(np.asarray(req_one), np.ones(q.shape[0], dtype=np.int32))
+
+
+def test_morrison_frozen_precipitation_reaches_the_surface_with_energy_closure():
+    """Cold snow shaft at 600 s: sub-stepping delivers frozen precipitation to
+    the surface, water closes column-wise against it, and the heating is
+    IDENTICAL to the one-pass call -- sedimentation moves mass, not heat, and
+    the process rates act on the same pre-source pools (documented
+    departure from MG2)."""
+    sys.path.insert(0, "tests/unit")
+    from legoesm.atmosphere.physics.microphysics import morrison as mor
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from test_physics_microphysics import _make_column
+
+    from legoesm import constants
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column(T_sfc=255.0, q_c_val=0.0)
+    hydro = hydro._replace(q_s=hydro.q_s.at[:, -6:].set(2.0e-3))
+    q_v = 0.5 * q_v
+    dt = 600.0
+    off = mor.morrison_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
+                                    config=MorrisonConfig(sed_cfl_substeps=False))
+    on = mor.morrison_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
+                                   config=MorrisonConfig())
+    assert bool(jnp.all(T < constants.T_freeze))
+    assert float(on.precipitation.min()) > float(off.precipitation.max()) > 0.0
+    assert on.sed_substeps_required is not None and int(on.sed_substeps_required.max()) > 1
+    assert off.sed_substeps_required is None
+    for out in (off, on):
+        dq = (out.dq_v_dt + out.dq_c_dt + out.dq_r_dt + out.dq_i_dt + out.dq_s_dt + out.dq_g_dt)
+        col = jnp.sum(dq * rho * dz, axis=1)
+        np.testing.assert_allclose(np.asarray(col), -np.asarray(out.precipitation),
+                                   rtol=1e-6 if _X64 else 1e-4,
+                                   atol=(1e-6 if _X64 else 1e-4) * float(out.precipitation.max()))
+    np.testing.assert_allclose(np.asarray(on.dT_dt), np.asarray(off.dT_dt), rtol=0, atol=0)
+    # column enthalpy: sedimentation adds nothing; every heating term is a
+    # phase change of a water species (L_s for the vapour<->ice branches here)
+    dh = constants.c_pd * on.dT_dt + constants.L_s * on.dq_v_dt
+    assert float(jnp.abs(jnp.sum(dh * rho * dz, axis=1)).max()) <= 1e-6 * float(
+        jnp.sum(jnp.abs(constants.c_pd * on.dT_dt) * rho * dz, axis=1).max() + 1e-30)
+
+
+def test_strict_mode_raises_when_the_cap_binds(monkeypatch):
+    sys.path.insert(0, "tests/unit")
+    from legoesm.atmosphere.physics.microphysics import morrison as mor
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from test_physics_microphysics import _make_column
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column()
+    hydro = hydro._replace(q_r=hydro.q_r.at[:, -4:].set(1.0e-3),
+                           N_r=hydro.N_r.at[:, -4:].set(1.0e3))
+    monkeypatch.setattr(mor, "_SEDIMENTATION_SUBSTEPS_MAX", 2)
+    out = mor.morrison_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 600.0,
+                                    config=MorrisonConfig(sed_cfl_substeps=True))
+    assert int(out.sed_substeps_required.max()) > 2      # reported, not clamped
+    with pytest.raises(Exception, match="_SEDIMENTATION_SUBSTEPS_MAX"):
+        mor.morrison_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 600.0,
+                                  config=MorrisonConfig(sed_cfl_substeps=True,
+                                                        sed_cfl_substeps_strict=True))
+
+
 def test_reserve_holds_the_joint_positivity_guarantee():
     q, rho, Vt, dz = _column()
     q = jnp.full_like(q, 1.0e-4)
@@ -130,13 +209,12 @@ def test_needs_dt():
 # Morrison gate
 # ---------------------------------------------------------------------------
 
-def test_morrison_gate_off_is_default_and_on_reaches_the_helper(monkeypatch):
+def test_morrison_gate_reaches_the_helper_and_legacy_off_is_one_pass(monkeypatch):
     sys.path.insert(0, "tests/unit")
-    from test_physics_microphysics import _make_column
-
     from legoesm.atmosphere.physics.microphysics import morrison as mor
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
-    assert MorrisonConfig().sed_cfl_substeps is False
+    from test_physics_microphysics import _make_column
+    assert MorrisonConfig().sed_cfl_substeps is True     # user decision 2026-09-22
     T, q_v, hydro, p_full, p_half, rho, dz = _make_column()
     # a rain shaft through the four ~470 m layers above the surface: V_r of
     # several m/s at 600 s is super-CFL there (the top layers are km thick and
@@ -152,7 +230,7 @@ def test_morrison_gate_off_is_default_and_on_reaches_the_helper(monkeypatch):
         return orig(*a, **kw)
     monkeypatch.setattr(mor, "sedimentation_tendency", spy)
     off = mor.morrison_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 600.0,
-                                    config=MorrisonConfig())
+                                    config=MorrisonConfig(sed_cfl_substeps=False))
     assert set(seen) == {1}
     seen.clear()
     on = mor.morrison_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 600.0,
@@ -171,23 +249,57 @@ def test_applier_and_config_refuse_the_flag_off_morrison():
         ThompsonConfig,
         apply_microphysics_experiment_flags,
     )
-    on = apply_microphysics_experiment_flags(
-        MorrisonConfig(), "morrison", morrison_sed_cfl_substeps=True)
-    assert on.sed_cfl_substeps is True
+    off = apply_microphysics_experiment_flags(
+        MorrisonConfig(), "morrison", morrison_sed_cfl_substeps=False)
+    assert off.sed_cfl_substeps is False
     with pytest.raises(ValueError, match="morrison_sed_cfl_substeps"):
         apply_microphysics_experiment_flags(
-            ThompsonConfig(), "thompson", morrison_sed_cfl_substeps=True)
+            ThompsonConfig(), "thompson", morrison_sed_cfl_substeps=False)
+    with pytest.raises(TypeError, match="bool"):
+        apply_microphysics_experiment_flags(
+            MorrisonConfig(), "morrison", morrison_sed_cfl_substeps="true")
     from legoesm.driver.config import ExperimentConfig
-    assert ExperimentConfig._field_defaults["morrison_sed_cfl_substeps"] is False
+    # the flat default is LOCKED to the scheme leaf (both True since 2026-09-22)
+    assert (ExperimentConfig._field_defaults["morrison_sed_cfl_substeps"]
+            is MorrisonConfig().sed_cfl_substeps is True)
+    assert (ExperimentConfig._field_defaults["morrison_sed_cfl_substeps_strict"]
+            is MorrisonConfig().sed_cfl_substeps_strict is False)
+    from legoesm.forcing.amip_config import AMIPExperimentConfig
+    assert AMIPExperimentConfig().morrison_sed_cfl_substeps is True
+    assert AMIPExperimentConfig().morrison_sed_cfl_substeps_strict is False
+    # an untouched non-Morrison config is silent; an explicit deviation is not
+    ExperimentConfig(microphysics="thompson").validate_strict()
+    with pytest.raises(ValueError, match="must be a bool"):
+        ExperimentConfig(microphysics="morrison",
+                         morrison_sed_cfl_substeps="true").validate_strict()
+    with pytest.raises(ValueError, match="needs"):
+        ExperimentConfig(microphysics="morrison", morrison_sed_cfl_substeps=False,
+                         morrison_sed_cfl_substeps_strict=True).validate_strict()
+    ExperimentConfig(microphysics="morrison", morrison_sed_cfl_substeps=True,
+                     morrison_sed_cfl_substeps_strict=True).validate_strict()
     from legoesm.driver.physics_pipeline import thread_morrison_scalars
-    cfg = ExperimentConfig(microphysics="morrison", morrison_sed_cfl_substeps=True)
-    assert thread_morrison_scalars(cfg, "morrison", MorrisonConfig()).sed_cfl_substeps
+    cfg = ExperimentConfig(microphysics="morrison", morrison_sed_cfl_substeps=True,
+                           morrison_sed_cfl_substeps_strict=True)
+    threaded = thread_morrison_scalars(cfg, "morrison", MorrisonConfig())
+    assert threaded.sed_cfl_substeps and threaded.sed_cfl_substeps_strict
+    legacy = thread_morrison_scalars(
+        ExperimentConfig(microphysics="morrison", morrison_sed_cfl_substeps=False),
+        "morrison", MorrisonConfig())
+    assert legacy.sed_cfl_substeps is False
+    with pytest.raises(ValueError, match="only supported by the morrison"):
+        thread_morrison_scalars(
+            ExperimentConfig(microphysics="thompson", morrison_sed_cfl_substeps=False),
+            "thompson", ThompsonConfig())
+    with pytest.raises(TypeError, match="bool"):
+        thread_morrison_scalars(ExperimentConfig(microphysics="morrison",
+                                                 morrison_sed_cfl_substeps="true"),
+                                "morrison", MorrisonConfig())
     base = MorrisonConfig()
     assert thread_morrison_scalars(ExperimentConfig(microphysics="morrison"),
                                    "morrison", base) is base
     with pytest.raises(ValueError, match="morrison_sed_cfl_substeps"):
         ExperimentConfig(microphysics="thompson",
-                         morrison_sed_cfl_substeps=True).validate_strict()
+                         morrison_sed_cfl_substeps=False).validate_strict()
 
 
 def test_cli_round_trip():
@@ -199,11 +311,111 @@ def test_cli_round_trip():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--microphysics", "morrison",
-        "--morrison-sed-cfl-substeps"]), parser))
-    assert cfg.morrison_sed_cfl_substeps is True
+        "--no-morrison-sed-cfl-substeps"]), parser))
+    assert cfg.morrison_sed_cfl_substeps is False
     d = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert d.morrison_sed_cfl_substeps is False
+    assert d.morrison_sed_cfl_substeps is True
     from legoesm.driver.config import ExperimentConfig
     rt = ExperimentConfig.from_amip_config(cfg.to_amip_config())
-    assert rt.morrison_sed_cfl_substeps is True
+    assert rt.morrison_sed_cfl_substeps is False
+    cfg2 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--morrison-sed-cfl-substeps", "--morrison-sed-cfl-substeps-strict"]), parser))
+    assert cfg2.morrison_sed_cfl_substeps_strict is True
+    assert ExperimentConfig.from_amip_config(
+        cfg2.to_amip_config()).morrison_sed_cfl_substeps_strict is True
+
+
+def test_required_count_rides_the_combined_tendency_and_the_cadence_cache():
+    """The int diagnostic Field survives the combined physics (max over the
+    macmic window), the cadence cache seed (same structure, no retrace) and
+    the held variant (re-published unscaled)."""
+    sys.path.insert(0, "tests/unit")
+    from legoesm.atmosphere.physics.combined import (
+        PhysicsConfig,
+        held_physics_variant,
+        make_physics,
+        physics_cache_seed,
+    )
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    from test_physics_macmic import _moist_setup
+    mesh, sigma, state = _moist_setup()
+    zeros = state.T.replace(data=jnp.zeros_like(state.T.data))
+    state = state._replace(tracers={**state.tracers,
+                                    **{k: zeros.replace(name=k) for k in
+                                       ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}})
+    cfg = PhysicsConfig(
+        turbulence=TurbulenceConfig(scheme="tke"),
+        microphysics=MicrophysicsConfig(scheme="morrison",
+                                        morrison=MorrisonConfig(sed_cfl_substeps=True)))
+    ps = init_physics_state(*state.T.data.shape, cfg)
+    f3 = make_physics(cfg, model_type="mpas", dt=1800.0, cld_macmic_num_steps=3,
+                      physics_cadence="write", physics_cadence_steps=2)
+    seeded = ps._replace(held_physics=physics_cache_seed(f3, state, mesh, sigma, ps))
+    t, p = f3(state, mesh, sigma, phys_state=seeded)
+    req = t.sed_substeps_required
+    assert req is not None and req.data.dtype == jnp.int32 and int(req.data.max()) > 1
+    assert (jax.tree_util.tree_structure(p.held_physics)
+            == jax.tree_util.tree_structure(seeded.held_physics))
+    t_h, _ = held_physics_variant(f3)(state, mesh, sigma, phys_state=p)
+    assert np.array_equal(np.asarray(t_h.sed_substeps_required.data), np.asarray(req.data))
+    assert float(jnp.abs(t_h.dT_dt.data).max()) == 0.0
+    # the N=1 call at the sub-step length IS the window's first sub-cycle
+    # (same state, same 600 s), so its count is a lower bound of the max --
+    # and equals it whenever the later sub-cycles do not add hydrometeors
+    f1 = make_physics(cfg, model_type="mpas", dt=600.0)
+    t1, _ = f1(state, mesh, sigma, phys_state=ps)
+    assert bool(jnp.all(t1.sed_substeps_required.data <= req.data))
+
+
+def test_combined_count_is_the_max_over_the_macmic_window(monkeypatch):
+    """The exported count is the element-wise MAX of the three sub-cycle
+    counts, not their average (GLM round 3, #1/#7)."""
+    sys.path.insert(0, "tests/unit")
+    from legoesm.atmosphere.physics import combined as cmb
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    from test_physics_macmic import _moist_setup
+    mesh, sigma, state = _moist_setup()
+    zeros = state.T.replace(data=jnp.zeros_like(state.T.data))
+    state = state._replace(tracers={**state.tracers,
+                                    **{k: zeros.replace(name=k) for k in
+                                       ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}})
+    cfg = cmb.PhysicsConfig(
+        turbulence=TurbulenceConfig(scheme="tke"),
+        microphysics=MicrophysicsConfig(scheme="morrison",
+                                        morrison=MorrisonConfig(sed_cfl_substeps=True)))
+    seen = []
+    orig = cmb.make_microphysics_physics
+
+    def spying(*a, **kw):
+        fn = orig(*a, **kw)
+
+        def wrapped(*aa, **kk):
+            t = fn(*aa, **kk)
+            # non-monotone per-call bumps: max != last != mean are all distinct
+            bump = (3000, 1000, 2000)[len(seen)]
+            t = t._replace(sed_substeps_required=t.sed_substeps_required.replace(
+                data=t.sed_substeps_required.data + bump))
+            seen.append(np.asarray(t.sed_substeps_required.data))
+            return t
+        for attr in ("_wants_forcing", "_wants_phys_state_ro"):
+            if hasattr(fn, attr):
+                setattr(wrapped, attr, getattr(fn, attr))
+        return wrapped
+    monkeypatch.setattr(cmb, "make_microphysics_physics", spying)
+    ps = init_physics_state(*state.T.data.shape, cfg)
+    f3 = cmb.make_physics(cfg, model_type="mpas", dt=1800.0, cld_macmic_num_steps=3)
+    t, _ = f3(state, mesh, sigma, phys_state=ps)
+    assert len(seen) == 3
+    expect = np.maximum(np.maximum(seen[0], seen[1]), seen[2])
+    assert t.sed_substeps_required.data.dtype == seen[0].dtype
+    assert np.array_equal(np.asarray(t.sed_substeps_required.data), expect)
+    assert not np.array_equal(expect, seen[2])          # not last-wins
+    assert not np.array_equal(expect, (seen[0] + seen[1] + seen[2]) / 3)

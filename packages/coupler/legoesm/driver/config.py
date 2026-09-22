@@ -1657,8 +1657,13 @@ class ExperimentConfig(NamedTuple):
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
                                                 # "mg" (E3SM MG, GCM default) |
                                                 # "sam" (gSAM M2005 anvil tune)
-    morrison_sed_cfl_substeps: bool = False     # MorrisonConfig.sed_cfl_substeps:
+    morrison_sed_cfl_substeps: bool = True      # MorrisonConfig.sed_cfl_substeps:
                                                 # MG2 CFL sub-stepped sedimentation
+                                                # (default ON, user 2026-09-22;
+                                                # False = legacy one-pass form)
+    morrison_sed_cfl_substeps_strict: bool = False  # MorrisonConfig.sed_cfl_substeps_strict:
+                                                # runtime error when a column
+                                                # needs more sub-steps than the cap
     # Flux law the SLAB-land skin energy balance debits at the land-air
     # interface (physics_pipeline._step_slab_land):
     #   "legacy_dual" (default, byte-identical): the slab debits its OWN
@@ -3214,10 +3219,20 @@ class ExperimentConfig(NamedTuple):
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} unknown; choose "
                 "'mg' (E3SM MG, default) or 'sam' (gSAM M2005).")
-        if self.morrison_sed_cfl_substeps and self.microphysics != "morrison":
+        for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict"):
+            _v = getattr(self, _nm)
+            if not isinstance(_v, bool):
+                errors.append(f"{_nm} must be a bool, got {_v!r}")
+            elif (_v is not ExperimentConfig._field_defaults[_nm]
+                    and self.microphysics != "morrison"):
+                errors.append(
+                    f"{_nm}={_v} requires microphysics='morrison' "
+                    f"(got {self.microphysics!r}); it would be silently inert")
+        if (self.morrison_sed_cfl_substeps_strict is True
+                and self.morrison_sed_cfl_substeps is False):
             errors.append(
-                "morrison_sed_cfl_substeps=True requires microphysics='morrison' "
-                f"(got {self.microphysics!r}); it would be silently inert")
+                "morrison_sed_cfl_substeps_strict=True needs "
+                "morrison_sed_cfl_substeps=True (nothing to check otherwise)")
         if self.morrison_flavor != "mg" and self.microphysics != "morrison":
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} requires "
@@ -3734,6 +3749,7 @@ class ExperimentConfig(NamedTuple):
             physics_update_steps=amip_cfg.physics_update_steps,
             cld_macmic_num_steps=amip_cfg.cld_macmic_num_steps,
             morrison_sed_cfl_substeps=amip_cfg.morrison_sed_cfl_substeps,
+            morrison_sed_cfl_substeps_strict=amip_cfg.morrison_sed_cfl_substeps_strict,
             unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
@@ -3958,6 +3974,7 @@ class ExperimentConfig(NamedTuple):
             physics_update_steps=self.physics_update_steps,
             cld_macmic_num_steps=self.cld_macmic_num_steps,
             morrison_sed_cfl_substeps=self.morrison_sed_cfl_substeps,
+            morrison_sed_cfl_substeps_strict=self.morrison_sed_cfl_substeps_strict,
             diurnal_cycle=self.diurnal_cycle,
             co2_ppmv=self.co2_ppmv,
             ch4_ppbv=self.ch4_ppbv,

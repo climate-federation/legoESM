@@ -54,7 +54,12 @@ use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
 microphysics: morrison      # mg flavour (MG2 port = run 2)
 morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # nstep = 1 + int(max V dt/dz) per column,
-                                 # so precipitation crosses >1 layer per 600 s
+                                 # so precipitation crosses >1 layer per 600 s.
+                                 # DEPARTURE: Morrison sediments the PRE-source
+                                 # pools (MG2 sediments post-source, :2204).
+morrison_sed_cfl_substeps_strict: true  # abort if a column needs > 256 sub-steps
+                                 # (L32 at 600 s needs ~90 for graupel; a clamp
+                                 # would silently slow the fall)
 hard_saturation_adjustment: true
 cloud_partial_coverage_optics: none
 cloud_optics_inhomogeneity: two_region

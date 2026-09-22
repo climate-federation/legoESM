@@ -465,6 +465,10 @@ def _make_hydrostatic_microphysics(
             precip=Field(
                 data=micro_out.precipitation.reshape(shape_2d).astype(p_s.dtype),
                 name="precip_micro", dims=dims_2d, units="kg/m^2/s"),
+            sed_substeps_required=(
+                None if micro_out.sed_substeps_required is None else Field(
+                    data=micro_out.sed_substeps_required.reshape(shape_2d),
+                    name="sed_substeps_required", dims=dims_2d, units="1")),
         )
 
     def reset_state():

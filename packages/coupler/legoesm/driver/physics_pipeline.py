@@ -3983,16 +3983,31 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _flavor = getattr(config, "morrison_flavor", None)
     if _flavor in (None, "mg"):
         _flavor = None
-    _sed_sub = getattr(config, "morrison_sed_cfl_substeps", False)
-    _sed_sub = True if _sed_sub else None
-    if not _touched and _flavor is None and _sed_sub is None:
+    _sed_sub = getattr(config, "morrison_sed_cfl_substeps",
+                       _ExpCfg._field_defaults["morrison_sed_cfl_substeps"])
+    _sed_strict = getattr(config, "morrison_sed_cfl_substeps_strict",
+                          _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"])
+    for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
+                    ("morrison_sed_cfl_substeps_strict", _sed_strict)):
+        if not isinstance(_v, bool):
+            raise TypeError(f"{_nm} must be a bool, got {_v!r}")
+    # Forward only when the flat value deviates from the ExperimentConfig
+    # default (locked equal to the MorrisonConfig leaf by test), so an
+    # untouched config stays byte-identical on Morrison and silent elsewhere.
+    _sed_sub = (None if _sed_sub is _ExpCfg._field_defaults["morrison_sed_cfl_substeps"]
+                else _sed_sub)
+    _sed_strict = (None if _sed_strict
+                   is _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"]
+                   else _sed_strict)
+    if not _touched and _flavor is None and _sed_sub is None and _sed_strict is None:
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
     )
     return apply_microphysics_experiment_flags(
         micro_config, scheme, morrison_scalars=_touched,
-        morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub)
+        morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
+        morrison_sed_cfl_substeps_strict=_sed_strict)
 
 
 def _resolve_microphysics(config):
