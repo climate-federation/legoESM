@@ -114,20 +114,34 @@ def per_rank_summary(evs: list[dict]) -> dict:
 
 
 def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
-                         fills: int = 3) -> None:
+                         fills: int = 3, end_tol_frac: float = 0.25) -> bool:
     """Cross-rank arrival spread using the SCHEDULE, not overlap.
 
     ``pm`` = partner map: rank -> ordered [(round, partner), ...] it
     participates in per fill. Per rank the traced event sequence is
-    (fills x participations + 1 allreduce) per step, so the k-th
+    (fills x participations + 1 reduction) per step, so the k-th
     participation of fill f of step s sits at a KNOWN index — no clock
     needed for identification. For a pair (a, b) that are partners in
     round r, the two paired SendRecv kernels END together (the transfer
     completes on both sides), so per-pair end deltas estimate the
     constant per-rank clock offset; the residual start delta after
     removing it is the genuine arrival skew of that pair.
+
+    THE SEQUENCE MODEL IS AN ASSUMPTION ABOUT THE LANE, NOT A FACT.
+    The defaults describe the atmosphere step: four traced steps, three
+    halo fills, one reduction. A lane whose step has a different shape —
+    an ocean step, for instance, whose free-surface solver contributes two
+    exchanges and two reductions per iteration — produces a longer
+    sequence, and indexing into it with the wrong period pairs events that
+    never belonged together. So the count must match the model EXACTLY.
+    A trace that merely has enough events is refused, because "enough" is
+    how an incompatible sequence gets silently accepted.
+
+    Returns True when at least one pair was quoted, False when everything
+    was refused.
     """
     ranks = sorted(summaries)
+    quoted = 0
     part = {rk: pm["ranks"][rk.replace("rank", "")] for rk in ranks
             if rk.replace("rank", "") in pm["ranks"]}
 
@@ -147,14 +161,16 @@ def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
             if not common:
                 continue
             ca, cb = summaries[a]["collectives"], summaries[b]["collectives"]
-            need_a = idx(a, steps - 1, fills - 1,
-                         max(k for k, _, _ in common)) + 1
-            need_b = idx(b, steps - 1, fills - 1,
-                         max(k for _, k, _ in common)) + 1
-            if len(ca) < need_a or len(cb) < need_b:
-                print(f"{a}-{b}: event count mismatch vs schedule "
-                      f"(a {len(ca)}<{need_a} or b {len(cb)}<{need_b}) — "
-                      f"sequence model wrong, NOT quotable")
+            # EXACT, not "at least": a longer sequence means the lane's step
+            # is not the one this model describes, and indexing into it
+            # would pair unrelated events with a straight face.
+            want_a = steps * (fills * len(part[a]) + 1)
+            want_b = steps * (fills * len(part[b]) + 1)
+            if len(ca) != want_a or len(cb) != want_b:
+                print(f"{a}-{b}: event count disagrees with the sequence "
+                      f"model (a {len(ca)} vs {want_a}, b {len(cb)} vs "
+                      f"{want_b}, from steps={steps} fills={fills}) — the "
+                      f"model does not describe this lane, NOT quotable")
                 continue
             end_d, start_d, durs = [], [], []
             for s in range(steps):
@@ -168,13 +184,28 @@ def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
             off = statistics.median(end_d)
             resid_start = [abs(d - off) for d in start_d]
             resid_end = [abs(d - off) for d in end_d]
+            kernel = statistics.median(durs)
+            end_resid = statistics.median(resid_end)
             print(f"{a}-{b}: {len(start_d)} partner pairs "
                   f"(rounds {[r for _, _, r in common]}), clock offset "
                   f"{off:+.1f} us")
+            # Matched participants finish together, so once the constant
+            # offset is removed the END residual must collapse. If it does
+            # not, the two clocks are not aligned and every skew number
+            # derived from them is meaningless — so withhold them rather
+            # than print them next to a caveat nobody will read.
+            if end_resid > end_tol_frac * kernel:
+                print(f"    CALIBRATION FAILED: end residual {end_resid:.1f} us "
+                      f"exceeds {end_tol_frac:.0%} of the {kernel:.1f} us "
+                      f"kernel. The clocks are not aligned; arrival skew is "
+                      f"WITHHELD for this pair.")
+                continue
+            quoted += 1
             print(f"    arrival skew  median {statistics.median(resid_start):7.1f}"
                   f"  p90 {sorted(resid_start)[int(0.9 * len(resid_start))]:7.1f} us"
-                  f"   | end residual median {statistics.median(resid_end):5.1f} us"
-                  f"   | kernel median {statistics.median(durs):7.1f} us")
+                  f"   | end residual median {end_resid:5.1f} us"
+                  f"   | kernel median {kernel:7.1f} us")
+    return quoted > 0
 
 
 def main() -> int:
@@ -185,6 +216,21 @@ def main() -> int:
                          "round->partner per rank. Enables partner-aware "
                          "cross-rank arrival skew (the only quotable "
                          "form — overlap matching pairs non-partners).")
+    ap.add_argument("--steps", type=int, default=4,
+                    help="traced steps in the capture (default 4, which is "
+                         "what the atmosphere bench traces)")
+    ap.add_argument("--fills", type=int, default=3,
+                    help="halo fills per step in the lane under capture "
+                         "(default 3, the atmosphere step). Together with "
+                         "--steps this IS the sequence model; a trace whose "
+                         "event count disagrees is refused rather than "
+                         "indexed with the wrong period.")
+    ap.add_argument("--end-tol-frac", type=float, default=0.25,
+                    help="reject a pair whose end residual exceeds this "
+                         "fraction of the kernel duration: matched "
+                         "participants finish together, so a large residual "
+                         "means the clocks are not aligned and the skew is "
+                         "meaningless")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -210,7 +256,13 @@ def main() -> int:
     # that overlap in wall-clock (shared node clock) and overlap by
     # >50% of the shorter one are treated as the same logical exchange.
     rank_names = sorted(summaries)
-    if len(rank_names) < 2:
+    if args.partner_map is not None:
+        # Overlap matching pairs ranks that were never partners, so once a
+        # schedule is available its numbers are the only ones that may
+        # appear at all. Printing both invites the wrong one being quoted.
+        print("cross-rank: overlap matching SUPPRESSED — a partner map was "
+              "given, and schedule-matched numbers are the quotable ones")
+    elif len(rank_names) < 2:
         print("cross-rank: <2 ranks — spread not computed")
     else:
         base = summaries[rank_names[0]]["collectives"]
@@ -293,10 +345,18 @@ def main() -> int:
                 print(f"  median END spread   : {statistics.median(c_ends):8.1f} us "
                       f"(must be ~0 by construction — self-consistency)")
 
+    skew_ok = None
     if args.partner_map is not None:
         pm = json.load(open(args.partner_map))
         print("=== partner-aware arrival skew (schedule-matched) ===")
-        partner_aware_spread(summaries, pm)
+        skew_ok = partner_aware_spread(summaries, pm, steps=args.steps,
+                                       fills=args.fills,
+                                       end_tol_frac=args.end_tol_frac)
+        if not skew_ok:
+            print("NO PAIR SURVIVED: arrival skew is not available from this "
+                  "capture. The kernel, collective and gap shares above still "
+                  "stand; the skew numbers do not exist and must not be "
+                  "inferred from the shares.")
 
     if args.out:
         with open(args.out, "w") as f:

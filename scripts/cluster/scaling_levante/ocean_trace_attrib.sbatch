@@ -94,8 +94,16 @@ PM=("--partner-map" "$OUTDIR/traces/partner_map.json")
   echo "WARNING: no partner map was written; arrival-skew numbers from this"
   echo "         capture are NOT quotable. Kernel/collective/gap shares still are."
   PM=(); }
+# The capture traces three blocks of twenty steps. The number of halo fills
+# in an ocean step is NOT known yet — the free-surface solver contributes its
+# own exchanges on top of the physics ones — so the default, which describes
+# the atmosphere, is left in place deliberately. The analyzer will refuse and
+# print the observed event count next to the one the model predicts, and that
+# difference is what gives the ocean's real period. Set --fills from it on the
+# next capture; do not guess it now and quote whatever comes out.
 "$PY" scripts/bench/analyze_jax_trace_gaps.py \
-  --trace-root "$OUTDIR/traces" "${PM[@]}" --out "$OUTDIR/trace_summary.json"
+  --trace-root "$OUTDIR/traces" "${PM[@]}" --steps 60 \
+  --out "$OUTDIR/trace_summary.json"
 rcv=$?
 [ "$rcv" -ne 0 ] && rc=$rcv
 echo "DONE rc=$rc outdir=$OUTDIR"; exit $rc
