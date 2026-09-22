@@ -221,18 +221,37 @@ def main() -> int:
         # jitted global reduction -> replicated scalar (fully addressable) over
         # EVERY prognostic leaf, not a host fetch of one sharded field.
         finite = bool(_all_finite(state))
-        if args.profile_dir is not None and jax.process_index() < 4:
+        if args.profile_dir is not None:
+            # EVERY rank replays the steps, because a step is collective:
+            # gating the replay on a rank-local predicate would leave the
+            # untraced ranks out of the halo exchanges and the solver's
+            # reductions, and the job would hang. Only the trace itself is
+            # rank-local, and only the first four ranks take one, because
+            # they share a node clock and that is what makes the cross-rank
+            # collective start spread meaningful.
             import pathlib
-            pdir = pathlib.Path(args.profile_dir) / f"rank{jax.process_index()}"
-            pdir.mkdir(parents=True, exist_ok=True)
-            jax.profiler.start_trace(str(pdir))
+            tracing = jax.process_index() < 4
+            if tracing:
+                # A rank-local failure here must not raise: the replay below
+                # is collective, so a rank that bailed out would hang the
+                # other ranks until the job's wall limit.
+                try:
+                    pdir = (pathlib.Path(args.profile_dir)
+                            / f"rank{jax.process_index()}")
+                    pdir.mkdir(parents=True, exist_ok=True)
+                    jax.profiler.start_trace(str(pdir))
+                except Exception as exc:   # noqa: BLE001 - see above
+                    print(f"[profile] rank {jax.process_index()} not tracing: {exc}",
+                          flush=True)
+                    tracing = False
             try:
                 st = state
                 for _ in range(4):
                     st = advance(st, aux)
                     jax.block_until_ready(jax.tree.leaves(st))
             finally:
-                jax.profiler.stop_trace()
+                if tracing:
+                    jax.profiler.stop_trace()
     finally:
         if nd > 1:
             disarm_mpas_ocean_spmd()
