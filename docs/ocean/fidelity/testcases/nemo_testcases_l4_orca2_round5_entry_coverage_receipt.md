@@ -131,10 +131,28 @@ this environment.
 
 ## 7. Verification
 
-The focused ladder test passes 8/8.  Acquisition Bash syntax, patch dry-run,
-pinned-source preflight, and invalid-mode control pass.  The final citation
-gate, its rigid-shift plant, and the required full fidelity battery are run
-after this receipt is committed so the receipt itself is in scope.
+The focused ladder/citation tests pass 24/24 in 2.30 seconds (JUnit SHA-256
+`50738035d258046b46bd6a69f406932ed512ba98d810c48503af5defcc0a85d5`).
+Acquisition Bash syntax, patch dry-run, pinned-source preflight, and
+invalid-mode control pass.
+
+The citation gate passes from clean committed receipt `4a2ffcbb6`: one mapped
+compiled-source citation, no failure, no unmapped citation, no map-audit
+failure, and all 9/9 self-controls fired.  Its rigid two-line shift changes
+the verdict to FAIL and exits 1.  Baseline and plant JSON SHA-256 values are
+respectively
+`6e3371a19638231547b6d0f1475413f118c2fe004d912259b33019ab1a1b0b01`
+and
+`f9c6313835823d91afe4ffdf40ec991dee7d835035c0c479c088960409512b49`.
+
+The required single `tests/ocean/fidelity -n 12` invocation collected 1,517
+tests, displayed one failure, reached 99%, then produced no output for five
+minutes and was interrupted without a pytest summary.  It is **INCOMPLETE**,
+not a pass.  The displayed failure is the listed pre-existing SI3 scalar-math
+provenance red; its isolated rerun reproduces
+`nemo_si3_scalarmath_v2_gate.GateError: A MY_SRC is not verbatim` (1 failed in
+0.62 seconds).  The new ORCA2 entry-coverage tests all passed inside the full
+run before the stall.
 
 ## 8. OPEN
 
