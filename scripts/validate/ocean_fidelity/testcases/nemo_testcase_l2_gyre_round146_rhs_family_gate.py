@@ -38,6 +38,7 @@ EXACT_INHERITED = (
     "oracle_stage1_qco_operands_kt00001081.bin",
     "oracle_slow_forcing_split_kt00001081.bin",
 )
+INTERIOR_OWNED_FIELDS = ("cd_u", "cd_v", "wind_tau_u", "wind_tau_v")
 
 
 class GateError(RuntimeError):
@@ -183,18 +184,24 @@ def _parent_comparison(candidate: dict, baseline: dict) -> dict:
         if name in ("rhs_u", "rhs_v"):
             mask_name = "umask" if name == "rhs_u" else "vmask"
             mask = baseline["fields"][mask_name] != 0.0
+        elif name in INTERIOR_OWNED_FIELDS:
+            mask = np.zeros(candidate_field.shape, dtype=bool)
+            mask[2:-2, 2:-2] = True
+        else:
+            mask = None
+        if mask is not None:
             row["owned"] = _identity(candidate_field[mask], baseline_field[mask])
             row["excluded"] = _identity(
                 candidate_field[~mask], baseline_field[~mask])
             row["owned_cells"] = int(np.count_nonzero(mask))
             row["excluded_cells"] = int(np.count_nonzero(~mask))
         rows[name] = row
+    owned_fields = ("rhs_u", "rhs_v") + INTERIOR_OWNED_FIELDS
     exact_fields = tuple(name for name in ROUND140_FIELDS
-                         if name not in ("rhs_u", "rhs_v"))
+                         if name not in owned_fields)
     passive = (
         all(rows[name]["all"]["bit_exact"] for name in exact_fields)
-        and rows["rhs_u"]["owned"]["bit_exact"]
-        and rows["rhs_v"]["owned"]["bit_exact"]
+        and all(rows[name]["owned"]["bit_exact"] for name in owned_fields)
     )
     return {"passive": passive, "rows": rows}
 
@@ -238,6 +245,8 @@ def main() -> int:
                                              "final-ulp", "missing-field",
                                              "parent-wet-ulp",
                                              "parent-dry-ulp",
+                                             "parent-interior-ulp",
+                                             "parent-halo-ulp",
                                              "restart-byte"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
@@ -262,24 +271,34 @@ def main() -> int:
         baseline = read_round140_bytes(baseline_payload)
         candidate_parent = read_round140_bytes(
             (args.root / ROUND140_RECORD).read_bytes())
-        if args.plant in ("parent-wet-ulp", "parent-dry-ulp"):
-            mask = candidate_parent["fields"]["umask"] != 0.0
-            locations = np.argwhere(
-                mask if args.plant == "parent-wet-ulp" else ~mask)
+        parent_plants = ("parent-wet-ulp", "parent-dry-ulp",
+                         "parent-interior-ulp", "parent-halo-ulp")
+        if args.plant in parent_plants:
+            if args.plant in ("parent-wet-ulp", "parent-dry-ulp"):
+                field_name = "rhs_u"
+                mask = candidate_parent["fields"]["umask"] != 0.0
+                target_owned = args.plant == "parent-wet-ulp"
+            else:
+                field_name = "cd_u"
+                mask = np.zeros((NY, NX), dtype=bool)
+                mask[2:-2, 2:-2] = True
+                target_owned = args.plant == "parent-interior-ulp"
+            locations = np.argwhere(mask if target_owned else ~mask)
             require(locations.size > 0, "parent plant has no target cell")
             index = tuple(int(value) for value in locations[0])
-            field = candidate_parent["fields"]["rhs_u"]
+            field = candidate_parent["fields"][field_name]
             field[index] = np.nextafter(field[index], np.inf)
         parent = _parent_comparison(candidate_parent, baseline)
         details["parent_vs_round140"] = parent
         require(parent["passive"],
                 "Round-140 parent moved on a model-owned cell")
-        if args.plant == "parent-dry-ulp":
-            excluded = parent["rows"]["rhs_u"]["excluded"]
+        if args.plant in ("parent-dry-ulp", "parent-halo-ulp"):
+            field_name = "rhs_u" if args.plant == "parent-dry-ulp" else "cd_u"
+            excluded = parent["rows"][field_name]["excluded"]
             require(not excluded["bit_exact"]
-                    and parent["rows"]["rhs_u"]["owned"]["bit_exact"],
-                    "dry-cell exclusion plant did not isolate an excluded cell")
-            raise GateError("dry-cell exclusion classified without admitting "
+                    and parent["rows"][field_name]["owned"]["bit_exact"],
+                    "exclusion plant did not isolate an excluded cell")
+            raise GateError("excluded-cell change classified without admitting "
                             "an owned-cell change")
         inherited = _exact_inherited(
             args.root, args.round140_root,

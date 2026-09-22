@@ -205,7 +205,7 @@ gate() {
   "$PY" "$GATE" --root "$TARGET_RUN" --round140-root "$SOURCE_RUN" --repo "$REPO" \
     --expect-commit "$COMMIT" "$@"
 }
-for plant in header truncation final-ulp missing-field parent-wet-ulp parent-dry-ulp restart-byte; do
+for plant in header truncation final-ulp missing-field parent-wet-ulp parent-dry-ulp parent-interior-ulp parent-halo-ulp restart-byte; do
   if gate --plant "$plant" --output "$TARGET_RUN/round146_${plant}_plant.json" \
        >"$TARGET_RUN/round146_${plant}_plant.log" 2>&1; then
     printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 72

@@ -90,3 +90,22 @@ def test_parent_comparison_registers_excluded_rhs_change():
     assert result["passive"]
     assert result["rows"]["rhs_u"]["owned"]["differing_cells"] == 0
     assert result["rows"]["rhs_u"]["excluded"]["differing_cells"] == 1
+
+
+def test_parent_comparison_rejects_interior_workspace_change():
+    baseline = MODULE.read_round140_bytes(_round140_payload())
+    candidate = MODULE.read_round140_bytes(_round140_payload())
+    candidate["fields"]["cd_u"][2, 2] = 1.0
+    result = MODULE._parent_comparison(candidate, baseline)
+    assert not result["passive"]
+    assert result["rows"]["cd_u"]["owned"]["differing_cells"] == 1
+
+
+def test_parent_comparison_registers_workspace_halo_change():
+    baseline = MODULE.read_round140_bytes(_round140_payload())
+    candidate = MODULE.read_round140_bytes(_round140_payload())
+    candidate["fields"]["cd_u"][0, 0] = 1.0
+    result = MODULE._parent_comparison(candidate, baseline)
+    assert result["passive"]
+    assert result["rows"]["cd_u"]["owned"]["differing_cells"] == 0
+    assert result["rows"]["cd_u"]["excluded"]["differing_cells"] == 1
