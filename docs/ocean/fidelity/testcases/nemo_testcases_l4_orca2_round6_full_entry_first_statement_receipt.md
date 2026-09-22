@@ -149,6 +149,12 @@ pre-existing SI3 scalar-math provenance red, `A MY_SRC is not verbatim`; no
 new failing ID appeared.  The captured stdout SHA-256 is
 `9ca26f80f807428df046db4dd72ffba3422ff01e988a12c996e97e8631156d08`.
 
+The receipt citation gate passes with both compiled citations mapped and no
+failure, unmapped citation, or map-audit failure.  Its rigid two-line shift of
+the `dtatsd` citation exits 1 at `SYMBOL-NOT-AT-LINE`, proving the control
+fires.  The citation-gate unit suite passes 16/16 after the round-6 maps are
+committed.
+
 ## 7. OPEN
 
 1. In the next round, perform Decision 52's already scheduled independent
