@@ -1110,7 +1110,10 @@ class RRTMGP:
           raise ValueError(
               f"column_chunk_size {column_chunk_size} must divide ncol "
               f"{ncol} exactly (radiation columns are independent, but the "
-              "lax.map reshape requires equal-size blocks)."
+              "lax.map reshape requires equal-size blocks). Note that ncol "
+              "here is the SOLVER's column count: with max-random overlap "
+              "it is cloud_n_subcolumns * the grid's column count, so a "
+              "block size chosen against the grid alone need not divide it."
           )
       n_block = ncol // column_chunk_size
 
