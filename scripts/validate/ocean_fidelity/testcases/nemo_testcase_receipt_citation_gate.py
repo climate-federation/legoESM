@@ -684,6 +684,13 @@ CITATION_MAP = {
         'SELECT CASE( nn_e3f_typ )',
         'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
         26],
+    'vertical.py:296-378': [
+        'def nemo_qco_live_vorticity_e3f_cgrid(',
+        'return jnp.concatenate([with_south[:, -1:], with_south], axis=1)',
+        83],
+    'ocean_model_latlon_cgrid.py:5109-5111': [
+        '_ws_uses_nemo_ldf_e3 = (',
+        'and _cfg_b.lateral_viscosity_e3_weighting == "nemo_e3")', 3],
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stp2d.f90:158-164': [
         'CALL eos    ( ts, Kbb, rhd )',
         ('IF( lwp .AND. kt == 1081 )   WRITE(r146_family_unit)', 2), 7],
