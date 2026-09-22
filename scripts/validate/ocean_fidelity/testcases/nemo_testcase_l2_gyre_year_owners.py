@@ -7007,9 +7007,16 @@ def developed_state_process_walk(
             actual["r1_hu_0"] = np.asarray(reference[4])
             require(set(actual) == set(DEVELOPED_TRANSPORT_U_ROWS),
                     "production U-transport observation registry is incomplete")
-            return result, actual
+            replay_live = actual["e3u_0"] * (
+                np.float64(1.0)
+                + (actual["one_plus_r3u_Kmm"] - np.float64(1.0))[..., None]
+                * actual["umask"])
+            closure = _score_developed_fct(
+                replay_live, actual["live_e3u_Kmm"])
+            return result, actual, closure
 
-        transport_state, production_transport = run_transport_observed()
+        (transport_state, production_transport,
+         production_transport_closure) = run_transport_observed()
         transport_modes["production_step_jit"] = production_transport
         if plant == "transport-un-adv-ulp":
             un_adv = production_transport["un_adv"]
@@ -7025,7 +7032,7 @@ def developed_state_process_walk(
                     break
             require(transport_plant_index is not None,
                     "no nonzero un_adv ULP reaches the stage-3 correction")
-            _planted_state, planted = run_transport_observed(
+            _planted_state, planted, _planted_closure = run_transport_observed(
                 plant_index=transport_plant_index)
             moved = _score_developed_fct(
                 planted["zFu"], production_transport["zFu"])
@@ -7036,8 +7043,8 @@ def developed_state_process_walk(
                 "control": {"un_adv_index": list(transport_plant_index),
                             "zFu": moved},
             }
-        _eager_transport_state, eager_transport = run_transport_observed(
-            eager=True)
+        (_eager_transport_state, eager_transport,
+         eager_transport_closure) = run_transport_observed(eager=True)
         transport_modes["production_eager"] = eager_transport
 
         @jax.jit
@@ -7182,6 +7189,10 @@ def developed_state_process_walk(
             "authoritative_mode": "production_step_jit",
             "first_non_bit_row": production["first_non_bit_row"],
             "observer_state_unequal_bytes": transport_observer_unequal_bytes,
+            "model_live_e3_reconstruction": {
+                "production_step_jit": production_transport_closure,
+                "production_eager": eager_transport_closure,
+            },
         }
     if plant == "entry-temperature-ulp":
         j, i, k = (int(value) for value in np.argwhere(wet)[0])
