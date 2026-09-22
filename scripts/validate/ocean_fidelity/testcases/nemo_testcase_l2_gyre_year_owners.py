@@ -6131,6 +6131,27 @@ def _score_developed_row(actual, expected, mask: np.ndarray) -> dict:
     }
 
 
+def _rank_developed_process_rows(increment_rows: dict[str, dict]) -> list[dict]:
+    """Rank the complete compiled-order process registry by one-step RMS."""
+    require(set(increment_rows) == set(PROCESS_ROWS),
+            "developed-state process ranking input is incomplete")
+    ranked = []
+    for rank, name in enumerate(
+            sorted(PROCESS_ROWS,
+                   key=lambda row: increment_rows[row]["rms"],
+                   reverse=True), 1):
+        row = increment_rows[name]
+        ranked.append({
+            "rank": rank,
+            "name": name,
+            "cells_unequal": row["cells_unequal"],
+            "max_abs_temperature_contribution_K": row["max_abs"],
+            "rms_temperature_contribution_K": row["rms"],
+            "rms_effective_tendency_K_s": row["rms"] / DT_S,
+        })
+    return ranked
+
+
 def _interface_cells(mask: np.ndarray, nlev: int) -> np.ndarray:
     """Project an active W-interface map onto both adjacent T cells."""
     mask = np.asarray(mask, dtype=bool)
@@ -6167,6 +6188,8 @@ def _validate_developed_registry(report: dict, plant: str | None = None) -> None
         candidate["cumulative_boundaries"].pop(PROCESS_ROWS[-1], None)
     elif plant == "missing-branch":
         candidate["branches"].pop(DEVELOPED_BRANCHES[-1], None)
+    elif plant == "missing-ranking-row":
+        candidate["process_ranking"] = candidate["process_ranking"][:-1]
     elif plant not in (None, "none"):
         raise GateError(f"unknown developed registry plant {plant!r}")
     require(
@@ -6182,6 +6205,12 @@ def _validate_developed_registry(report: dict, plant: str | None = None) -> None
             "developed-state increment-row registry is incomplete")
     require(set(candidate["branches"]) == set(DEVELOPED_BRANCHES),
             "developed-state branch registry is incomplete")
+    ranking = candidate["process_ranking"]
+    require({row["name"] for row in ranking} == set(PROCESS_ROWS),
+            "developed-state process ranking is incomplete")
+    require([row["rank"] for row in ranking]
+            == list(range(1, len(PROCESS_ROWS) + 1)),
+            "developed-state process ranking is not contiguous")
 
 
 def _developed_registry_plant(plant: str) -> dict:
@@ -6192,6 +6221,9 @@ def _developed_registry_plant(plant: str) -> dict:
             name: {} for name in DEVELOPED_GEOMETRY_OPERANDS},
         "increment_rows": {name: {} for name in PROCESS_ROWS},
         "branches": {name: {} for name in DEVELOPED_BRANCHES},
+        "process_ranking": [
+            {"rank": rank, "name": name}
+            for rank, name in enumerate(PROCESS_ROWS, 1)],
     }
     try:
         _validate_developed_registry(synthetic, plant=plant)
@@ -6247,7 +6279,8 @@ def developed_state_process_walk(
         daily_audit: Path, expected_commit: str, evidence_root: Path, *,
         mesh_path: Path = DEFAULT_MESH, plant: str | None = None) -> dict:
     """Run step 1081 through production JIT from NEMO's exact day-180 state."""
-    if plant in ("missing-day", "missing-process-row", "missing-branch"):
+    if plant in ("missing-day", "missing-process-row", "missing-branch",
+                 "missing-ranking-row"):
         return _developed_registry_plant(plant)
     require(plant in (None, "none", "entry-temperature-ulp"),
             f"unknown developed-state plant {plant!r}")
@@ -6460,6 +6493,7 @@ def developed_state_process_walk(
             lego_increments[name], nemo_increments[name], wet)
         for name in PROCESS_ROWS
     }
+    process_ranking = _rank_developed_process_rows(increment_rows)
     first_non_bit = next(
         (name for name in PROCESS_ROWS
          if boundary_rows[name]["cells_unequal"]), "NONE")
@@ -6601,6 +6635,7 @@ def developed_state_process_walk(
         "cumulative_boundaries": boundary_rows,
         "geometry_operands": geometry_operands,
         "increment_rows": increment_rows,
+        "process_ranking": process_ranking,
         "branches": branches,
         "branch_maps": {"path": str(maps_path),
                         "sha256": _sha256(maps_path)},
@@ -6633,6 +6668,11 @@ def developed_state_process_walk(
         print(f"  {name:>22s} {row['cells_unequal']:10d} "
               f"{row['max_abs']:16.8e} {row['rms']:16.8e}")
     print(f"  FIRST NON-BIT: {report['first_non_bit_boundary']}")
+    print("  isolated one-step contribution ranking (largest RMS first):")
+    for row in process_ranking:
+        print(f"  {row['rank']:2d} {row['name']:>20s} "
+              f"{row['rms_temperature_contribution_K']:16.8e} K  "
+              f"{row['rms_effective_tendency_K_s']:16.8e} K/s")
     return report
 
 

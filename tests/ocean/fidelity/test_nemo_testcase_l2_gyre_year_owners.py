@@ -213,12 +213,16 @@ def test_round136_registry_and_signed_zero_controls_are_nonvacuous(harness):
             name: {} for name in harness.DEVELOPED_GEOMETRY_OPERANDS},
         "increment_rows": {name: {} for name in harness.PROCESS_ROWS},
         "branches": {name: {} for name in harness.DEVELOPED_BRANCHES},
+        "process_ranking": [
+            {"rank": rank, "name": name}
+            for rank, name in enumerate(harness.PROCESS_ROWS, 1)],
     }
     harness._validate_developed_registry(report)
     for plant, message in (
             ("missing-day", "requested-day registry"),
             ("missing-process-row", "process-row registry"),
-            ("missing-branch", "branch registry")):
+            ("missing-branch", "branch registry"),
+            ("missing-ranking-row", "process ranking")):
         with pytest.raises(harness.GateError, match=message):
             harness._validate_developed_registry(report, plant=plant)
 
@@ -235,6 +239,24 @@ def test_round136_registry_and_signed_zero_controls_are_nonvacuous(harness):
     assert not noncontiguous.flags.c_contiguous
     assert harness._bit_mismatch_count(
         noncontiguous, np.array(noncontiguous, order="C")) == 0
+
+
+def test_round152_process_ranking_is_complete_and_uses_one_step_rms(harness):
+    rows = {
+        name: {"cells_unequal": index + 1,
+               "max_abs": float(index + 1),
+               "rms": float(index + 1)}
+        for index, name in enumerate(harness.PROCESS_ROWS)
+    }
+    ranking = harness._rank_developed_process_rows(rows)
+    assert [row["name"] for row in ranking] == list(
+        reversed(harness.PROCESS_ROWS))
+    assert [row["rank"] for row in ranking] == [1, 2, 3, 4, 5, 6]
+    assert ranking[0]["rms_effective_tendency_K_s"] == (
+        ranking[0]["rms_temperature_contribution_K"] / harness.DT_S)
+    with pytest.raises(harness.GateError, match="ranking input is incomplete"):
+        harness._rank_developed_process_rows(
+            {name: rows[name] for name in harness.PROCESS_ROWS[:-1]})
 
 
 def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
