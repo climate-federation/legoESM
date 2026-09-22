@@ -41,7 +41,11 @@ export SCRATCH="${SCRATCH:-/scratch/${USER:0:1}/$USER}"
 if [[ "$BACKEND" == gpu ]]; then
   export JAX_PLATFORMS=cuda,cpu
   PPN=4; ARM_TIMEOUT="${ARM_TIMEOUT:-1200}"
-  SRUN_DEV=(--gpus-per-node=4 --gpu-bind=none)
+  # Each GPU rank gets its full 64-thread host share (A/B gpu_cpubind_ab,
+  # job 27586798, 32 GPUs x2: ocean-MPAS 43.25 -> 42.62 ms, atm-MPAS 7.36
+  # -> 7.23/7.39, i.e. -1.5% / within spread); receipts stamp cpu_affinity.
+  SRUN_DEV=(--gpus-per-node=4 --gpu-bind=none --cpu-bind=cores
+            --cpus-per-task="$(( ${SLURM_CPUS_ON_NODE:?} / PPN ))")
 else
   export JAX_PLATFORMS=cpu
   # Overridable: the 256- and 512-rank CPU arms spend most of their wall
