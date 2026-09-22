@@ -2,7 +2,7 @@
 
 Date: 2026-09-22
 
-Incoming lane tip: `2374207bf01f4c52dd80b5e7a94a40fd703b1cd2`.
+Incoming lane tip: `2374207bfd8ddbf5708207c3839daaff603cef91`.
 Evidence belongs under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round153/`.  This document is
 frozen before constructing or parsing the developed-state FCT record.
