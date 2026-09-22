@@ -43,7 +43,7 @@ if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
   exit 63
 fi
 readonly COMMIT=$(git rev-parse HEAD)
-export PYTHONPATH=$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
+export PYTHONPATH=$here/..:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 for path in "$PATCH" "$GATE" "$PREREG" "$CANONICAL_SOURCE" \
