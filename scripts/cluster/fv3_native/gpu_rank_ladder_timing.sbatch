@@ -17,7 +17,6 @@
 # WORKAROUND, delete when the nodes are fixed: g[045-054],g[185-193] compile the
 # sharded step and then hang in its first execution (pinned-node A/B, jobs
 # 9777265 good vs 9777266 hung).
-#SBATCH --exclude=g[045-051],g[053-054],g[185-193]
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/gpu_rank_ladder_%j.log
 # Rank-count ladder for the FV3 window-SPMD step on GPU, inside ONE allocation:
 #   row 1: kt=1 -> 6 ranks

@@ -23,7 +23,6 @@
 # fault is not raw fabric bandwidth and the reproducer is the gate itself.
 # DELETE THIS LINE once the nodes are fixed -- it is a workaround, not a
 # property of the model.
-#SBATCH --exclude=g[045-051],g[053-054],g[185-193]
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/m6_gpu_gate_%j.log
 # M6 on REAL GPU RANKS: one window per process, one A100 per process,
 # jax.distributed via SLURM, NCCL collectives.  2 GPUs per node.

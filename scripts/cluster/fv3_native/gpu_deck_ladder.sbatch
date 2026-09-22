@@ -16,7 +16,6 @@
 #SBATCH --time=04:00:00
 # these compile the sharded step and then hang in its first execution
 # (pinned-node A/B, jobs 9777265 good vs 9777266 hung); delete when fixed
-#SBATCH --exclude=g[045-051],g[053-054],g[185-193]
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/gpu_deck_ladder_%j.log
 # GPU DECK LADDER: for each deck, build its own six-face reference and then
 # score the sharded step against it at 6*kt*kt ranks, all inside ONE
