@@ -254,13 +254,14 @@ on the cumulative receipt is green again at 274 citations, zero unmapped.
 
 The focused campaign and blast-radius set reported exactly:
 
-> 1 failed, 198 passed in 775.57s (0:12:55)
+> 199 passed in 747.59s (0:12:27)
 
-The single failure was the cumulative-receipt citation check during the
-re-anchor, and it is the reason the re-anchor reached the receipts as well as
-the map; the set is green at the final commit.  It covers the six-file push
-gate, the year-owner harness tests, and the RK3 tracer tests that exercise the
-corrected-velocity helper whose signature gained the write-only keyword.
+An earlier run of the same set reported `1 failed, 198 passed` on the
+cumulative-receipt citation check; that failure is what showed the re-anchor
+had to reach the receipts as well as the map, and it is green once it did.
+The set covers the six-file push gate, the year-owner harness tests, and the
+RK3 tracer tests that exercise the corrected-velocity helper whose signature
+gained the write-only keyword.
 
 No unasked scientific or configuration choice was made.  No production
 default, configuration, carried state, restart schema or physics changed: the
