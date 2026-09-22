@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import struct
 from collections import Counter
 from pathlib import Path
 
@@ -25,6 +27,166 @@ SOURCE = (
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/"
     "dynldf_lev.f90:121-140"
 )
+
+DEVELOPED_MAGIC = "NEMO_L2_R148LDF"
+DEVELOPED_RECORD = "oracle_developed_ldf_kt00001081.bin"
+DEVELOPED_NX, DEVELOPED_NY, DEVELOPED_NZ = 36, 26, 31
+DEVELOPED_COUNT = DEVELOPED_NX * DEVELOPED_NY * DEVELOPED_NZ
+DEVELOPED_SURFACE_COUNT = DEVELOPED_NX * DEVELOPED_NY
+DEVELOPED_FIELDS = (
+    ("u_kbb", "3d"), ("v_kbb", "3d"),
+    ("tmask", "3d"), ("umask", "3d"),
+    ("vmask", "3d"), ("fmask", "3d"),
+    ("ahmt", "3d"), ("ahmf", "3d"),
+    ("e3t_kbb", "3d"), ("e3u_kbb", "3d"),
+    ("e3v_kbb", "3d"), ("e3f_live", "3d"),
+    ("e3u_kmm", "3d"), ("e3v_kmm", "3d"),
+    ("pre_u", "3d"), ("pre_v", "3d"),
+    ("e2u", "2d"), ("e1v", "2d"),
+    ("e2v", "2d"), ("e1u", "2d"),
+    ("r1_e1e2t", "2d"), ("r1_e1e2f", "2d"),
+    ("r1_e1u", "2d"), ("r1_e2v", "2d"),
+    ("r1_e2u", "2d"), ("r1_e1v", "2d"),
+    ("zcur", "3d"), ("zdiv", "3d"),
+    ("post_u", "3d"), ("post_v", "3d"),
+)
+DEVELOPED_EXPECTED_SIZE = (
+    16 + 9 * 4 + len(DEVELOPED_FIELDS) * 4
+    + (20 * DEVELOPED_COUNT + 10 * DEVELOPED_SURFACE_COUNT) * 8
+)
+
+
+def read_developed_ldf_bytes(payload: bytes) -> dict:
+    """Decode the Round-148 direct LDF stream with a closed field census."""
+    require(len(payload) == DEVELOPED_EXPECTED_SIZE,
+            f"developed LDF record is {len(payload)} bytes, expected "
+            f"{DEVELOPED_EXPECTED_SIZE}")
+    magic = payload[:16].decode("ascii").rstrip()
+    header = struct.unpack_from("=9i", payload, 16)
+    expected_header = (1, 1081, 1, 1, 3, DEVELOPED_NX,
+                       DEVELOPED_NY, DEVELOPED_NZ, 64)
+    require(magic == DEVELOPED_MAGIC and header == expected_header,
+            f"bad developed LDF header: {(magic, header)!r}")
+    offset = 16 + 9 * 4
+    sizes = struct.unpack_from(f"={len(DEVELOPED_FIELDS)}i", payload, offset)
+    expected_sizes = tuple(
+        DEVELOPED_COUNT if kind == "3d" else DEVELOPED_SURFACE_COUNT
+        for _, kind in DEVELOPED_FIELDS)
+    require(sizes == expected_sizes,
+            f"bad developed LDF field sizes: {sizes!r}")
+    offset += len(DEVELOPED_FIELDS) * 4
+    fields, offsets = {}, {}
+    for (name, kind), count in zip(DEVELOPED_FIELDS, sizes):
+        offsets[name] = offset
+        end = offset + count * 8
+        require(end <= len(payload), f"truncated developed LDF field {name}")
+        values = np.frombuffer(payload[offset:end], dtype=np.float64).copy()
+        require(values.size == count and np.all(np.isfinite(values)),
+                f"non-finite or incomplete developed LDF field {name}")
+        if kind == "3d":
+            fields[name] = values.reshape(
+                (DEVELOPED_NX, DEVELOPED_NY, DEVELOPED_NZ),
+                order="F").transpose(1, 0, 2)
+        else:
+            fields[name] = values.reshape(
+                (DEVELOPED_NX, DEVELOPED_NY), order="F").T
+        offset = end
+    require(offset == len(payload), "trailing developed LDF payload")
+    require(tuple(fields) == tuple(name for name, _ in DEVELOPED_FIELDS),
+            "developed LDF field registry changed")
+    return {
+        "header": {"magic": magic, "version": header[0], "kt": header[1],
+                   "Kbb": header[2], "Kmm": header[3], "Krhs": header[4],
+                   "nx": header[5], "ny": header[6], "nz": header[7],
+                   "bits": header[8]},
+        "fields": fields,
+        "offsets": offsets,
+    }
+
+
+def _bit_identity(got: np.ndarray, reference: np.ndarray) -> dict:
+    require(got.shape == reference.shape,
+            f"identity shape mismatch: {got.shape} versus {reference.shape}")
+    unequal = got.view(np.uint64) != reference.view(np.uint64)
+    return {
+        "bit_exact": not bool(np.any(unequal)),
+        "differing_cells": int(np.count_nonzero(unequal)),
+        "max_abs": float(np.max(np.abs(got - reference))) if got.size else 0.0,
+    }
+
+
+def admit_developed_ldf_record(
+    record_path: Path,
+    family_path: Path,
+    stamp_path: Path,
+    *,
+    expect_commit: str,
+    plant: str | None = None,
+) -> dict:
+    """Admit the passive direct record against its family boundaries."""
+    from nemo_testcase_l2_gyre_round146_rhs_family_gate import read_record_bytes
+
+    original = record_path.read_bytes()
+    original_record = read_developed_ldf_bytes(original)
+    payload = bytearray(original)
+    if plant == "header":
+        payload[0] ^= 1
+    elif plant == "truncation":
+        del payload[-8:]
+    elif plant == "missing-field":
+        struct.pack_into("=i", payload, 16 + 9 * 4
+                         + (len(DEVELOPED_FIELDS) - 1) * 4, 0)
+    elif plant in ("zcur-ulp", "post-ulp"):
+        name = "zcur" if plant == "zcur-ulp" else "post_u"
+        offset = original_record["offsets"][name]
+        value = struct.unpack_from("=d", payload, offset)[0]
+        struct.pack_into("=d", payload, offset, np.nextafter(value, np.inf))
+    elif plant is not None:
+        raise ValueError(f"unknown developed LDF plant {plant!r}")
+
+    record = read_developed_ldf_bytes(bytes(payload))
+    stamp_rows = stamp_path.read_text().split()
+    require(len(stamp_rows) == 3, "bad developed LDF stamp")
+    expected_sha, stamped_commit, stamped_name = stamp_rows
+    actual_sha = hashlib.sha256(bytes(payload)).hexdigest()
+    require((actual_sha, stamped_commit, stamped_name)
+            == (expected_sha, expect_commit, record_path.name),
+            "developed LDF stamp mismatch")
+
+    family = read_record_bytes(family_path.read_bytes())["fields"]
+    fields = record["fields"]
+    masks = {"u": fields["umask"] != 0.0,
+             "v": fields["vmask"] != 0.0}
+    boundaries = {}
+    for face in ("u", "v"):
+        mask = masks[face]
+        boundaries[f"pre_{face}"] = _bit_identity(
+            fields[f"pre_{face}"][mask], family[f"after_hpg_{face}"][mask])
+        boundaries[f"post_{face}"] = _bit_identity(
+            fields[f"post_{face}"][mask], family[f"after_ldf_{face}"][mask])
+    require(all(row["bit_exact"] for row in boundaries.values()),
+            f"developed LDF boundaries do not close: {boundaries}")
+
+    zcur_owned = np.zeros_like(fields["zcur"], dtype=bool)
+    zdiv_owned = np.zeros_like(fields["zdiv"], dtype=bool)
+    zcur_owned[0:25, 0:35, :30] = True
+    zdiv_owned[1:26, 1:36, :30] = True
+    require(np.all(np.isfinite(fields["zcur"][zcur_owned]))
+            and np.all(np.isfinite(fields["zdiv"][zdiv_owned])),
+            "non-finite owned developed LDF intermediate")
+    return {
+        "format": "nemo-testcase-l2-gyre-round148-developed-ldf-admission-v1",
+        "record_sha256": actual_sha,
+        "record_size": len(payload),
+        "header": record["header"],
+        "field_registry": list(fields),
+        "boundaries": boundaries,
+        "owned_intermediate_cells": {
+            "zcur": int(np.count_nonzero(zcur_owned)),
+            "zdiv": int(np.count_nonzero(zdiv_owned)),
+        },
+        "status": "PASS",
+    }
 
 
 def _u_face(value: np.ndarray) -> np.ndarray:
@@ -431,8 +593,45 @@ def main(argv=None) -> int:
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument("--admit-developed", action="store_true")
+    parser.add_argument("--developed-record", type=Path)
+    parser.add_argument("--developed-family-record", type=Path)
+    parser.add_argument("--developed-stamp", type=Path)
+    parser.add_argument(
+        "--developed-plant",
+        choices=("header", "truncation", "missing-field", "zcur-ulp",
+                 "post-ulp"),
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
+    if args.admit_developed:
+        require(not args.plant, "use --developed-plant in developed mode")
+        require(args.developed_record is not None
+                and args.developed_family_record is not None
+                and args.developed_stamp is not None,
+                "developed admission requires record, family record, and stamp")
+        try:
+            report = admit_developed_ldf_record(
+                args.developed_record,
+                args.developed_family_record,
+                args.developed_stamp,
+                expect_commit=args.expect_commit,
+                plant=args.developed_plant,
+            )
+        except Exception as error:
+            if args.developed_plant:
+                print(f"ROUND148 DEVELOPED LDF {args.developed_plant.upper()} "
+                      f"STATUS PLANT-FIRED: {error}")
+                return 1
+            raise
+        if args.developed_plant:
+            print(f"REFUSE: developed LDF {args.developed_plant} plant stayed green")
+            return 2
+        text = json.dumps(report, indent=2, sort_keys=True)
+        if args.output:
+            args.output.write_text(text + "\n")
+        print(text)
+        return 0
     report = run(args.root, expect_commit=args.expect_commit, plant=args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:

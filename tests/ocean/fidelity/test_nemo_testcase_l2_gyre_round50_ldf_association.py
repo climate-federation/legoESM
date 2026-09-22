@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import struct
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).parents[3]
@@ -130,3 +133,60 @@ def test_shared_ldf_intermediate_seam_is_default_inert():
             uu, args[1], grid, args[3], args[4], args[5], **kwargs)[0]
     ))(args[0])
     assert np.isfinite(np.asarray(grad)).all()
+
+
+def _developed_payload() -> bytes:
+    chunks = [gate.DEVELOPED_MAGIC.ljust(16).encode("ascii")]
+    chunks.append(struct.pack(
+        "=9i", 1, 1081, 1, 1, 3, gate.DEVELOPED_NX,
+        gate.DEVELOPED_NY, gate.DEVELOPED_NZ, 64))
+    sizes = tuple(
+        gate.DEVELOPED_COUNT if kind == "3d" else gate.DEVELOPED_SURFACE_COUNT
+        for _, kind in gate.DEVELOPED_FIELDS)
+    chunks.append(struct.pack(f"={len(sizes)}i", *sizes))
+    for name, kind in gate.DEVELOPED_FIELDS:
+        count = (gate.DEVELOPED_COUNT if kind == "3d"
+                 else gate.DEVELOPED_SURFACE_COUNT)
+        fill = 0.0 if name in ("zcur", "zdiv") else 1.0
+        chunks.append(np.full(count, fill, dtype=np.float64).tobytes())
+    return b"".join(chunks)
+
+
+def _family_payload() -> bytes:
+    nx, ny, nz = 36, 26, 31
+    count = nx * ny * nz
+    fields = 10
+    chunks = [b"NEMO_L2_R146FAM".ljust(16), struct.pack(
+        "=8i", 1, 1081, 1, 3, nx, ny, nz, 64),
+        struct.pack(f"={fields}i", *((count,) * fields))]
+    chunks.extend(np.ones(count, dtype=np.float64).tobytes()
+                  for _ in range(fields))
+    return b"".join(chunks)
+
+
+def test_developed_record_admission_and_plants(tmp_path):
+    payload = _developed_payload()
+    assert len(payload) == gate.DEVELOPED_EXPECTED_SIZE
+    record_path = tmp_path / gate.DEVELOPED_RECORD
+    family_path = tmp_path / "oracle_developed_rhs_families_kt00001081.bin"
+    stamp_path = tmp_path / f"{gate.DEVELOPED_RECORD}.stamp"
+    record_path.write_bytes(payload)
+    family_path.write_bytes(_family_payload())
+    commit = "a" * 40
+    stamp_path.write_text(
+        f"{hashlib.sha256(payload).hexdigest()} {commit} {record_path.name}\n")
+
+    report = gate.admit_developed_ldf_record(
+        record_path, family_path, stamp_path, expect_commit=commit)
+    assert report["status"] == "PASS"
+    assert len(report["field_registry"]) == len(gate.DEVELOPED_FIELDS)
+    assert report["owned_intermediate_cells"] == {
+        "zcur": 35 * 25 * 30,
+        "zdiv": 35 * 25 * 30,
+    }
+    for plant in ("header", "truncation", "missing-field", "zcur-ulp",
+                  "post-ulp"):
+        with pytest.raises(Exception):
+            gate.admit_developed_ldf_record(
+                record_path, family_path, stamp_path,
+                expect_commit=commit, plant=plant)
