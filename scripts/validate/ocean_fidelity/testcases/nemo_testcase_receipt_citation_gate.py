@@ -590,6 +590,12 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
         "/traadv_fct.f90"),
+    "GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo"
+        "/traadv.f90"),
+    "round123/oracle_process_budget/ocean.output": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round123"
+             "/oracle_process_budget/ocean.output")),
     # Round 126 scores the compiled Round-125 acquisition branch itself.
     "GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo"
@@ -845,6 +851,12 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90:905-931': [
         'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji+1,jj,ik) ),',
         ('pcc(ji,jj,jk) = pcc(ji,jj,jk) * zcoef', 2), 27],
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv.f90:358-365': [
+        'SELECT CASE ( nadv )',
+        'CALL tra_adv_fct ( kt, nit000', 8],
+    'round123/oracle_process_budget/ocean.output:756-764': [
+        'Namelist namtra_adv : chose a advection scheme for tracers',
+        'implicit   optimized(1)/accurate(2)    nn_fct_imp =            1', 9],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/zdftke.f90:473-474': [
         'Set the minimum value of tke',
         'en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin )', 2],
