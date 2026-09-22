@@ -691,10 +691,10 @@ CITATION_MAP = {
         'CASE ( 3 )           !==  Stage 3  ==!',
         'r3f(:,:    ) = r1_2 * ( r3fb(:,:) + r3fa(:,:) )', 17],
     'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:300-309': [
-        'SELECT CASE( n_baro_upd )',
+        ('SELECT CASE( n_baro_upd )', 4),
         'zvb(ji,jj) = vn_adv(ji,jj)*(r1_hv_0(ji,jj) /(1._wp+r3v(ji,jj,Kmm))) - vv_b(ji,jj,Kmm)', 10],
     'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:313-315': [
-        'DO jk =  1,  jpkm1',
+        ('DO jk =  1,  jpkm1', 1),
         'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))', 3],
     'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:317-321': [
         'IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 3 )',
