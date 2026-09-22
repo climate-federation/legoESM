@@ -78,7 +78,29 @@ requirement was therefore not triggered.  No configuration choice was made:
 Decision 52 was recorded as given, and the card's six sea-ice selectors and
 registry entries were left unchanged.
 
-## 5. OPEN
+## 5. Citation, tests, and independent review
+
+The receipt citation gate passed with one mapped compiled-source citation, no
+failures or unmapped citations, and all 9/9 self-controls firing.  Shifting
+that citation by two lines changed the verdict to FAIL and exited 1, as
+required.  The final artifacts are `citation_gate.json` and
+`citation_gate_plant.json` under the round-2 evidence directory.
+
+The focused ladder and citation tests passed 23/23 in 2.32 seconds (log
+SHA-256 `ee2b2c8b3b8b662aa523ebe39fd41f411c7c5356e6d105406e4ca5468ad78017`).
+The required single `tests/ocean/fidelity -n 12` invocation collected 1,516
+tests, displayed one failure by 56%, reached 66%, and ended without a pytest
+summary.  It is **INCOMPLETE**, not a pass; the truncated log SHA-256 is
+`7ce2c79915969a2e8a63a74811246a7b628ea7e5d9f871ec372a267dca479889`.
+The worker did not flush the failing node ID.  The listed pre-existing SI3
+scalar-math provenance red was rerun in isolation and reproduced at `A MY_SRC
+is not verbatim`; the worktree-stamp suite passed 10/10.
+
+The required separate `codex exec --sandbox read-only` review stopped before
+reading the diff because its in-process app-server could not initialize on the
+read-only filesystem.  Verdict: **independent review unavailable in-sandbox**.
+
+## 6. OPEN
 
 1. The operator must run
    `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round1_surface_acquisition/run.sh --run`
