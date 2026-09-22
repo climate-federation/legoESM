@@ -1075,6 +1075,100 @@ def _orca2_masks(bottom_level: np.ndarray, strait_shlat: np.ndarray):
     return tmask, umask, vmask, fmask
 
 
+# ORCA_R2 initial-condition hand alterations, transcribed from the compiled
+# ``dtatsd.f90:218-253`` branch that this deck executes (``cn_cfg="ORCA"`` and
+# ``nn_cfg=2`` come from the domain file's ``CfgName``/``CfgIndex``, and
+# ``namelist_cfg`` sets ``ln_tsd_dmp = .true.``, so the branch is live).  NEMO
+# applies them to the TIME-INTERPOLATED field before the land mask, and with
+# ``ln_tint = .true.`` they are re-applied from the interpolated field at every
+# call rather than accumulating.
+#
+# Index arithmetic, read off ``mppini.f90:1586-1594`` rather than inferred: the
+# source writes global halo-frame indices ``ij0 = 101 + nn_hls`` and
+# ``ii0 = 141 + nn_hls - 1``, and ``mi0``/``mj0`` map a global halo-frame index
+# to ``index - nn_hls`` in the inner domain, so every ``nn_hls`` cancels and the
+# boxes are the halo-independent inner one-based ranges below.  Level ranges are
+# Fortran one-based inclusive.
+_ORCA2_ALBORAN_BOX = (101, 109, 140, 154)      # (j0, j1, i0, i1), inner 1-based
+_ORCA2_RED_SEA_BOX = (87, 96, 147, 159)
+_ORCA2_ALBORAN_TEMPERATURE_OFFSETS_C = ((13, 13, -0.20), (14, 15, -0.35),
+                                        (16, 25, -0.40))
+_ORCA2_ALBORAN_SALINITY_OFFSETS_PSU = ((13, 13, -0.15), (14, 15, -0.25),
+                                       (16, 17, -0.30), (18, 25, -0.35))
+_ORCA2_RED_SEA_TEMPERATURES_C = ((4, 10, 7.0), (11, 13, 6.5), (14, 20, 6.0))
+
+
+def _orca2_box(field, box):
+    """Inner one-based ``(j0, j1, i0, i1)`` box as a mutable view."""
+
+    j0, j1, i0, i1 = box
+    return field[j0 - 1:j1, i0 - 1:i1]
+
+
+def apply_orca2_hand_alterations(temperature, salinity):
+    """Apply the ORCA_R2 initial hand alterations IN PLACE, in source order.
+
+    ``temperature`` and ``salinity`` are the time-interpolated, UNMASKED input
+    fields shaped ``(nlat, nlon, nlev)``.  NEMO subtracts the Alboran Sea
+    temperature then salinity increments and finally assigns the Red Sea deep
+    temperatures, all before the land mask (``dtatsd.f90:218-253``, masked at
+    ``:307-310``).
+    """
+
+    alboran_t = _orca2_box(temperature, _ORCA2_ALBORAN_BOX)
+    for k0, k1, offset in _ORCA2_ALBORAN_TEMPERATURE_OFFSETS_C:
+        alboran_t[..., k0 - 1:k1] += np.float64(offset)
+    alboran_s = _orca2_box(salinity, _ORCA2_ALBORAN_BOX)
+    for k0, k1, offset in _ORCA2_ALBORAN_SALINITY_OFFSETS_PSU:
+        alboran_s[..., k0 - 1:k1] += np.float64(offset)
+    red_sea_t = _orca2_box(temperature, _ORCA2_RED_SEA_BOX)
+    for k0, k1, value in _ORCA2_RED_SEA_TEMPERATURES_C:
+        red_sea_t[..., k0 - 1:k1] = np.float64(value)
+
+
+def build_orca2_initial_ts(
+    temperature_path,
+    salinity_path,
+    tmask,
+    *,
+    apply_hand_alterations: bool = True,
+):
+    """ORCA2's independent initial temperature and salinity, as NEMO builds it.
+
+    The executed order is the compiled one: read the monthly input files, do
+    ``fldread``'s two-record time interpolation, apply the ORCA_R2 hand
+    alterations (``dtatsd.f90:218-253``), then mask.  The z/zps branch
+    (``dtatsd.f90:307-310``) masks AFTER the copy, which is why the alterations
+    are applied to the unmasked field.
+
+    ``apply_hand_alterations=False`` is an ABLATION CONTROL for the fidelity
+    gate -- it reproduces the pre-transcription state so the gate can show the
+    alterations own the whole residual.  It is not a configuration knob and no
+    card, recipe or driver exposes it; the card always takes the default, which
+    is what NEMO executes.
+    """
+
+    import netCDF4  # noqa: N813
+
+    # fld_read.F90:181-227: at kt=1 (0.0625 d), December and January are
+    # centred at -15.5 and +15.5 d.  Preserve the source multiply-add order.
+    after_weight = np.float64(249.0 / 496.0)
+    before_weight = np.float64(1.0) - after_weight
+    with netCDF4.Dataset(temperature_path, "r") as ds:
+        t_dec = np.asarray(ds.variables["votemper"][11, :30], dtype=np.float64)
+        t_jan = np.asarray(ds.variables["votemper"][0, :30], dtype=np.float64)
+    with netCDF4.Dataset(salinity_path, "r") as ds:
+        s_dec = np.asarray(ds.variables["vosaline"][11, :30], dtype=np.float64)
+        s_jan = np.asarray(ds.variables["vosaline"][0, :30], dtype=np.float64)
+    temperature = np.moveaxis(before_weight * t_dec + after_weight * t_jan, 0, -1)
+    salinity = np.moveaxis(before_weight * s_dec + after_weight * s_jan, 0, -1)
+
+    if apply_hand_alterations:
+        apply_orca2_hand_alterations(temperature, salinity)
+
+    return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))
+
+
 def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
@@ -1193,20 +1287,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_bbl_e3v_0=jnp.asarray(raw_e3["e3v_0"], dtype=jnp.float64),
     )
 
-    # fld_read.F90:181-227: at kt=1 (0.0625 d), December and January are
-    # centred at -15.5 and +15.5 d.  Preserve the source multiply-add order.
-    after_weight = np.float64(249.0 / 496.0)
-    before_weight = np.float64(1.0) - after_weight
-    with netCDF4.Dataset(temperature_path, "r") as ds:
-        t_dec = np.asarray(ds.variables["votemper"][11, :30], dtype=np.float64)
-        t_jan = np.asarray(ds.variables["votemper"][0, :30], dtype=np.float64)
-    with netCDF4.Dataset(salinity_path, "r") as ds:
-        s_dec = np.asarray(ds.variables["vosaline"][11, :30], dtype=np.float64)
-        s_jan = np.asarray(ds.variables["vosaline"][0, :30], dtype=np.float64)
-    temperature = np.moveaxis(before_weight * t_dec + after_weight * t_jan, 0, -1)
-    salinity = np.moveaxis(before_weight * s_dec + after_weight * s_jan, 0, -1)
-    temperature = np.where(tmask, temperature, 0.0)
-    salinity = np.where(tmask, salinity, 0.0)
+    temperature, salinity = build_orca2_initial_ts(
+        temperature_path, salinity_path, tmask)
 
     # iceistate.F90:262-291 creates one-category ice from the surface T/S and
     # hemisphere, :309-393 distributes it over jpl=5 while conserving volume,
@@ -1549,6 +1631,8 @@ __all__ = (
     "build_gyre_zco_card",
     "build_lock_exchange_zco_card",
     "build_overflow_zps_card",
+    "apply_orca2_hand_alterations",
+    "build_orca2_initial_ts",
     "build_orca2_zps_card",
     "build_nemo_testcase_card",
     "gyre_horizontal_coordinates",
