@@ -27,11 +27,18 @@
 # latency is a fabric property.
 set -uo pipefail
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
+# Accept a submit directory that is either the repo root or the launcher
+# directory itself.  Slurm copies the batch script into its spool dir, so
+# BASH_SOURCE cannot be used to find the repo (job 27591170 died in 8 s on an
+# unbound REPO after being submitted from the launcher directory).
+ENV_SH="${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
+[[ -f "$ENV_SH" ]] || ENV_SH="${SUBMIT_DIR}/_env.sh"
+[[ -f "$ENV_SH" ]] || { echo "cannot find _env.sh from $SUBMIT_DIR" >&2; exit 2; }
 export JAX_PLATFORMS=cuda,cpu
 export LEGOESM_XLA_OVERLAP=0
-export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
+export LEGOESM_REPO="${LEGOESM_REPO:-$(cd "$(dirname "$ENV_SH")/../../.." && pwd)}"
 export LEGOESM_PYTHON="${LEGOESM_PYTHON:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python}"
-source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
+source "$ENV_SH"
 cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/halo_c2d64_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
