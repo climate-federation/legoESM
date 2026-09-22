@@ -166,6 +166,9 @@ def measure(args: argparse.Namespace) -> dict:
         drop_last=args.plant == "missing-field",
     )
     fields = record["fields"]
+    for name, field in fields.items():
+        require(np.all(np.isfinite(field["values"])),
+                f"{name} contains a non-finite payload")
     require(fields["p2dt"]["values"].item() == 14400.0,
             "stage-3 p2dt is not the resolved 14400 s")
     for mask in ("tmask", "wmask"):
