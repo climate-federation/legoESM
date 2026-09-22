@@ -85,9 +85,14 @@ def test_compare_fields_is_exact_and_ranks_max_abs():
 def test_surface_support_names_every_missing_step(tmp_path):
     result = gate.surface_support(tmp_path)
     assert result["trajectory_supported"] is False
-    assert result["missing"] == [
-        f"oracle_ocean_surface_input_kt{kt:08d}.bin" for kt in range(1, 11)
-    ]
+    assert result["required"] == 20
+    assert result["missing"] == (
+        [f"oracle_ocean_surface_input_kt{kt:08d}.bin" for kt in range(1, 11)]
+        + [
+            f"oracle_ocean_surface_input_rank0001_kt{kt:08d}.bin"
+            for kt in range(1, 11)
+        ]
+    )
 
 
 def test_compiled_source_anchors_are_line_rigid(tmp_path):
@@ -128,12 +133,14 @@ def test_acquisition_report_binds_tree_binary_and_compiled_source():
         / "nemo_testcase_l4_orca2_round1_surface_acquisition/run.sh"
     ).read_text()
     assert '"worktree": worktree_stamp()' in run_sh
-    assert 'for name in ("nemo", "compiled_iceistate.f90")' in run_sh
+    assert 'for name in ("nemo", "compiled_iceistate.f90", "compiled_stprk3.f90")' in run_sh
     assert 'raise SystemExit(f"twin producer differs: {name}")' in run_sh
     assert 'readonly MODE=${1:---run}' in run_sh
-    assert 'readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE' in run_sh
-    assert 'phase3/orca2_rounds/round3/acquisition' in run_sh
+    assert 'readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE' in run_sh
+    assert 'phase3/orca2_rounds/round4/acquisition' in run_sh
     assert 'readonly EXPECTED_INHERITED_STREAMS=107' in run_sh
-    assert 'readonly EXPECTED_TARGET_STREAMS=116' in run_sh
+    assert 'readonly EXPECTED_TARGET_STREAMS=126' in run_sh
     assert 'oracle_si3_bulk_operands.bin' in run_sh
     assert 'oracle_tke_walk_kt00000002.bin' in run_sh
+    assert 'oracle_ocean_surface_input_rank0001_kt%08d.bin' in run_sh
+    assert '"compiled_stprk3.f90"' in run_sh

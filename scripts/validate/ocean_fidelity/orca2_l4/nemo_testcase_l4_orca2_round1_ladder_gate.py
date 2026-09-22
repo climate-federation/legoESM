@@ -228,7 +228,7 @@ def validate_compiled_source(path: Path) -> dict[str, object]:
     }
 
 
-def validate_surface_frame(path: Path, kt: int) -> dict[str, object]:
+def validate_surface_frame(path: Path, kt: int, rank: int) -> dict[str, object]:
     """Validate the dynamic-kt form of the frozen Phase-2b schema."""
 
     from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -249,22 +249,28 @@ def validate_surface_frame(path: Path, kt: int) -> dict[str, object]:
             f"{path.name}: surface schema/EOF mismatch")
     values = np.memmap(path, dtype=np.float64, mode="r", offset=offset, shape=(count,))
     require(bool(np.isfinite(values).all()), f"{path.name}: non-finite surface payload")
-    return {"file": path.name, "kt": kt, "bytes": path.stat().st_size,
+    return {"file": path.name, "kt": kt, "rank": rank,
+            "bytes": path.stat().st_size,
             "sha256": sha256(path)}
 
 
 def surface_support(root: Path) -> dict[str, object]:
     present: list[dict[str, object]] = []
     missing: list[str] = []
-    for kt in range(1, 11):
-        name = f"oracle_ocean_surface_input_kt{kt:08d}.bin"
-        path = root / name
-        if path.is_file():
-            present.append(validate_surface_frame(path, kt))
-        else:
-            missing.append(name)
+    for rank in range(2):
+        for kt in range(1, 11):
+            name = (
+                f"oracle_ocean_surface_input_kt{kt:08d}.bin"
+                if rank == 0 else
+                f"oracle_ocean_surface_input_rank{rank:04d}_kt{kt:08d}.bin"
+            )
+            path = root / name
+            if path.is_file():
+                present.append(validate_surface_frame(path, kt, rank))
+            else:
+                missing.append(name)
     return {
-        "required": 10,
+        "required": 20,
         "present": present,
         "missing": missing,
         "trajectory_supported": not missing,

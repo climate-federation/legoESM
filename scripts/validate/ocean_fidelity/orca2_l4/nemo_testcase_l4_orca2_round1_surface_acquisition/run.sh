@@ -24,7 +24,7 @@ export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2_OMIP_L4
-readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE
+readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
@@ -32,17 +32,17 @@ readonly COMPILED_STPRK3=$TARGET_ROOT/BLD/ppsrc/nemo/stprk3.f90
 readonly COMPILED_ICEISTATE=$TARGET_ROOT/BLD/ppsrc/nemo/iceistate.f90
 readonly BASELINE=/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_orca1ice_phase2x_a_10step_np2
 readonly FROZEN_ICE=/data/abyssal/dbalwada/nemo-testcases-l4/build/phase2x_orca1ice/MY_SRC_final
-readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round3/acquisition
+readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round4/acquisition
 readonly RUN_A=$EVIDENCE/orca1ice_surface_every_step_a_np2
 readonly RUN_B=$EVIDENCE/orca1ice_surface_every_step_b_np2
 readonly EXPECTED_BASELINE_STREAMS=116
 readonly EXPECTED_INHERITED_STREAMS=107
-readonly EXPECTED_TARGET_STREAMS=116
+readonly EXPECTED_TARGET_STREAMS=126
 readonly EXPECTED_DECK_MANIFEST_SHA256=51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9
 readonly EXPECTED_INPUT_MANIFEST_SHA256=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
 readonly EXPECTED_BASELINE_BINARY_SHA256=8e40bf0b595eabba1bd428775a45e87f3f42a778333374cbbfb26eeb6c685869
 readonly EXPECTED_STPRK3_SHA256=9d0318fda246ef1ed3df50172b9d72a5e0b5df879b9a661b38622c9078078989
-readonly EXPECTED_PATCH_SHA256=624a9b605bddf895ea4f51da4a344a073b8c89792d1ca37e106734b7dedcdd7b
+readonly EXPECTED_PATCH_SHA256=8d6ea354a59dd8090ae438ca8ae2e5b962dfe8ad6dd78bcfbb61ca1c6b973754
 readonly EXPECTED_CPP_SHA256=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67
 readonly EXPECTED_ARCH_SHA256=132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561
 readonly PARTIAL_STREAM=oracle_transport_kt00000001_s1.bin
@@ -154,20 +154,23 @@ classes = (20, 12, 1, 2)
 reduced = (nx - 2 * halo) * (ny - 2 * halo)
 halo1 = (nx - 2 * (halo - 1)) * (ny - 2 * (halo - 1))
 count = classes[0] * nx * ny + (classes[1] + classes[3] * ntr) * reduced + classes[2] * halo1
-for kt in range(1, 11):
-    path = root / f"oracle_ocean_surface_input_kt{kt:08d}.bin"
-    if not path.is_file():
-        raise SystemExit(f"missing {path.name}")
-    with path.open("rb") as handle:
-        magic = handle.read(16).decode("ascii").rstrip()
-        header = struct.unpack("=13i", handle.read(52))
-        values = np.fromfile(handle, dtype=np.float64)
-    level = 1 if kt % 2 else 3
-    wanted = (1, kt, level, nx, ny, ntr, nclasses, halo, *classes, 64)
-    if magic != "NEMO_L4_SBCIN_1" or header != wanted:
-        raise SystemExit(f"bad schema {path.name}: {magic!r} {header}")
-    if values.size != count or not np.isfinite(values).all():
-        raise SystemExit(f"bad payload/EOF {path.name}: {values.size}/{count}")
+for rank in range(2):
+    for kt in range(1, 11):
+        name = (f"oracle_ocean_surface_input_kt{kt:08d}.bin" if rank == 0 else
+                f"oracle_ocean_surface_input_rank{rank:04d}_kt{kt:08d}.bin")
+        path = root / name
+        if not path.is_file():
+            raise SystemExit(f"missing {path.name}")
+        with path.open("rb") as handle:
+            magic = handle.read(16).decode("ascii").rstrip()
+            header = struct.unpack("=13i", handle.read(52))
+            values = np.fromfile(handle, dtype=np.float64)
+        level = 1 if kt % 2 else 3
+        wanted = (1, kt, level, nx, ny, ntr, nclasses, halo, *classes, 64)
+        if magic != "NEMO_L4_SBCIN_1" or header != wanted:
+            raise SystemExit(f"bad schema {path.name}: {magic!r} {header}")
+        if values.size != count or not np.isfinite(values).all():
+            raise SystemExit(f"bad payload/EOF {path.name}: {values.size}/{count}")
 PY
 }
 
@@ -252,6 +255,13 @@ finalize() {
       exit 66
     }
   done
+  for kt in $(seq 1 10); do
+    name=$(printf 'oracle_ocean_surface_input_rank0001_kt%08d.bin' "$kt")
+    cmp -s "$RUN_A/$name" "$RUN_B/$name" || {
+      printf 'REFUSE: target twins differ: %s\n' "$name" >&2
+      exit 66
+    }
+  done
   ordinary_identity "$BASELINE" "$RUN_A" || {
     printf 'REFUSE: A ordinary outputs are not passive to the pinned root\n' >&2
     exit 66
@@ -271,14 +281,14 @@ from legoesm.ocean.fidelity.provenance import worktree_stamp
 a, b = map(pathlib.Path, sys.argv[1:3])
 inherited = int(sys.argv[3])
 rows = []
-for path in sorted(a.glob("oracle_ocean_surface_input_kt*.bin")):
+for path in sorted(a.glob("oracle_ocean_surface_input*.bin")):
     other = b / path.name
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     if digest != hashlib.sha256(other.read_bytes()).hexdigest():
         raise SystemExit(f"twin digest mismatch: {path.name}")
     rows.append({"file": path.name, "bytes": path.stat().st_size, "sha256": digest})
 producer = {}
-for name in ("nemo", "compiled_iceistate.f90"):
+for name in ("nemo", "compiled_iceistate.f90", "compiled_stprk3.f90"):
     digest = hashlib.sha256((a / name).read_bytes()).hexdigest()
     if digest != hashlib.sha256((b / name).read_bytes()).hexdigest():
         raise SystemExit(f"twin producer differs: {name}")
@@ -286,9 +296,9 @@ for name in ("nemo", "compiled_iceistate.f90"):
 result = {
     "worktree": worktree_stamp(),
     "status": "PASS",
-    "root_label": "VARIANT_ORACLE_ORCA1ICE_ROUND1_SURFACE_INPUTS",
+    "root_label": "VARIANT_ORACLE_ORCA1ICE_ROUND4_FULL_SURFACE_INPUTS",
     "inherited_streams_passive": inherited,
-    "new_surface_frames": 9,
+    "new_surface_frames": 19,
     "surface_frames_total": len(rows),
     "twin_surface_frames_raw_exact": True,
     "surface_frames": rows,
@@ -321,6 +331,7 @@ stage_run() {
   cp "$BASELINE/deck_files.sha256" "$BASELINE/input_files.sha256" "$target/"
   cp "$BINARY" "$target/nemo"
   cp "$COMPILED_ICEISTATE" "$target/compiled_iceistate.f90"
+  cp "$COMPILED_STPRK3" "$target/compiled_stprk3.f90"
   (cd "$target" && sha256sum -c deck_files.sha256 >/dev/null) || {
     printf 'REFUSE: staged deck differs in %s\n' "$target" >&2
     exit 66
@@ -330,7 +341,8 @@ stage_run() {
     exit 66
   }
   sha256sum "$target/nemo" >"$target/binary.sha256"
-  sha256sum "$target/compiled_iceistate.f90" >"$target/compiled_source.sha256"
+  sha256sum "$target/compiled_iceistate.f90" "$target/compiled_stprk3.f90" \
+    >"$target/compiled_source.sha256"
 }
 
 run_one() {
@@ -420,14 +432,17 @@ touch "$TARGET_ROOT/MY_SRC/"*.F90
 for marker in \
   'CALL l4_dump_ocean_surface_input( kstp, Nbb )' \
   'WRITE(cl_surface_file' \
+  'mpprank, kstp' \
   "STATUS='NEW'"; do
   grep -Fq "$marker" "$COMPILED_STPRK3" || {
     printf 'REFUSE: compiled source lacks marker: %s\n' "$marker" >&2
     exit 68
   }
 done
-if grep -Fq 'IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input' "$COMPILED_STPRK3"; then
-  printf 'REFUSE: compiled source retained the kt=1-only surface call\n' >&2
+if sed -n '/SUBROUTINE l4_dump_ocean_surface_input/,/END SUBROUTINE l4_dump_ocean_surface_input/p' \
+    "$COMPILED_STPRK3" | grep -Fq 'IF( .NOT.lwp ) RETURN' || \
+    grep -Fq 'IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input' "$COMPILED_STPRK3"; then
+  printf 'REFUSE: compiled source retained a root-only or kt=1-only surface call\n' >&2
   exit 68
 fi
 for marker in \
