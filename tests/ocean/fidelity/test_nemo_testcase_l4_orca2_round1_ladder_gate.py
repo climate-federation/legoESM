@@ -131,3 +131,5 @@ def test_acquisition_report_binds_tree_binary_and_compiled_source():
     assert 'for name in ("nemo", "compiled_iceistate.f90")' in run_sh
     assert 'raise SystemExit(f"twin producer differs: {name}")' in run_sh
     assert 'readonly MODE=${1:---run}' in run_sh
+    assert 'readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE' in run_sh
+    assert 'phase3/orca2_rounds/round3/acquisition' in run_sh
