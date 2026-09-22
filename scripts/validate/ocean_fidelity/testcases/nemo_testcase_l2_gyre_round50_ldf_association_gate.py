@@ -405,6 +405,255 @@ def _spatial(name: str, got: np.ndarray, ref: np.ndarray, wet: np.ndarray) -> di
     }
 
 
+def _developed_identity(name: str, got, reference, active) -> dict:
+    """Bitwise row for one directly aligned developed-state operand."""
+    got = np.asarray(got, dtype=np.float64)
+    reference = np.asarray(reference, dtype=np.float64)
+    active = np.asarray(active, dtype=bool)
+    require(got.shape == reference.shape == active.shape,
+            f"developed row {name} shape mismatch: "
+            f"{got.shape}, {reference.shape}, {active.shape}")
+    unequal = (got.view(np.uint64) != reference.view(np.uint64)) & active
+    delta = got[active] - reference[active]
+    return {
+        "name": name,
+        "cells": int(np.count_nonzero(active)),
+        "cells_unequal": int(np.count_nonzero(unequal)),
+        "max_abs": float(np.max(np.abs(delta))) if delta.size else 0.0,
+        "bit_exact": not bool(np.any(unequal)),
+    }
+
+
+def run_developed(
+    developed_root: Path,
+    *,
+    expect_commit: str,
+    daily_root: Path,
+    daily_audit: Path,
+    plant: bool,
+) -> dict:
+    """Walk day-180 LDF operands from the production-jitted step."""
+    import argparse
+
+    import jax
+    import jax.numpy as jnp
+
+    import nemo_testcase_l2_gyre_round82_btstep_walk as round82
+    import nemo_testcase_l2_gyre_round83_slow_forcing_walk as round83
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        min_cell_to_uface,
+        min_cell_to_vertex,
+        min_cell_to_vface,
+        nemo_lateral_viscosity_coefficients,
+    )
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "developed LDF walk requires fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "developed LDF walk requires x64")
+    stamp = worktree_stamp()
+    require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
+            f"developed LDF worktree stamp changed: {stamp}")
+
+    admission_path = developed_root / "round148_developed_ldf_admission.json"
+    admission = json.loads(admission_path.read_text())
+    record_path = developed_root / DEVELOPED_RECORD
+    require(admission.get("status") == "PASS"
+            and admission.get("record_sha256") == sha256(record_path),
+            "Round-148 direct LDF record is not admitted")
+    record = read_developed_ldf_bytes(record_path.read_bytes())["fields"]
+
+    args = argparse.Namespace(daily_root=daily_root, daily_audit=daily_audit)
+    card, state, freshwater, surface, payload, entry = round82._developed_inputs(args)
+    eta_after = jnp.asarray(payload["ssha"])
+
+    def trace(one_state):
+        return round83._round117_live_trace(
+            card, one_state, freshwater, surface, "production-jit",
+            eta_after_override=eta_after)
+
+    exposed = trace(state)
+    parts = exposed.operator_operands[0]
+    require(parts is not None, "production step omitted stage-1 operands")
+    grid = card.recipe.grid
+    h_k = np.asarray(parts["operand_h_k"], dtype=np.float64)
+    u = np.asarray(parts["operand_ldf_velocity_u"], dtype=np.float64)
+    v = np.asarray(parts["operand_ldf_velocity_v"], dtype=np.float64)
+    model = {
+        "u": u,
+        "v": v,
+        "e3t": h_k,
+        "e3u": np.asarray(min_cell_to_uface(jnp.asarray(h_k))),
+        "e3v": np.asarray(min_cell_to_vface(jnp.asarray(h_k), grid)),
+        "e3f": np.asarray(min_cell_to_vertex(jnp.asarray(h_k), grid)),
+        "e2u": np.asarray(grid.dy_u),
+        "e1v": np.asarray(grid.dx_v),
+        "e2v": np.asarray(grid.dy_v),
+        "e1u": np.asarray(grid.dx_u),
+        "r1_e1e2t": np.asarray(1.0 / grid.area_T),
+        "r1_e1e2f": np.asarray(1.0 / grid.area_q),
+        "r1_e1u": np.asarray(1.0 / grid.dx_u),
+        "r1_e2v": np.asarray(1.0 / grid.dy_v),
+        "r1_e2u": np.asarray(1.0 / grid.dy_u),
+        "r1_e1v": np.asarray(1.0 / grid.dx_v),
+    }
+
+    def t3(name):
+        return record[name][2:-2, 2:-2, :30]
+
+    def u3(name):
+        return record[name][2:-2, 1:-2, :30]
+
+    def v3(name):
+        return record[name][1:-2, 2:-2, :30]
+
+    def f3(name):
+        return record[name][1:-2, 1:-2, :30]
+
+    def t2(name):
+        return record[name][2:-2, 2:-2]
+
+    def u2(name):
+        return record[name][2:-2, 1:-2]
+
+    def v2(name):
+        return record[name][1:-2, 2:-2]
+
+    def f2(name):
+        return record[name][1:-2, 1:-2]
+
+    nemo = {
+        "u": u3("u_kbb"), "v": v3("v_kbb"),
+        "tmask": t3("tmask"), "umask": u3("umask"),
+        "vmask": v3("vmask"), "fmask": f3("fmask"),
+        "ahmt": t3("ahmt"), "ahmf": f3("ahmf"),
+        "e3t": t3("e3t_kbb"), "e3u": u3("e3u_kbb"),
+        "e3v": v3("e3v_kbb"), "e3f": f3("e3f_live"),
+        "e3u_kmm": u3("e3u_kmm"), "e3v_kmm": v3("e3v_kmm"),
+        "pre_u": u3("pre_u"), "pre_v": v3("pre_v"),
+        "post_u": u3("post_u"), "post_v": v3("post_v"),
+        "e2u": u2("e2u"), "e1v": v2("e1v"),
+        "e2v": v2("e2v"), "e1u": u2("e1u"),
+        "r1_e1e2t": t2("r1_e1e2t"),
+        "r1_e1e2f": f2("r1_e1e2f"),
+        "r1_e1u": u2("r1_e1u"), "r1_e2v": v2("r1_e2v"),
+        "r1_e2u": u2("r1_e2u"), "r1_e1v": v2("r1_e1v"),
+        "zcur": f3("zcur"), "zdiv": t3("zdiv"),
+    }
+    for name in ("u", "v", "e3t", "e3u", "e3v", "e3f"):
+        require(model[name].shape == nemo[name].shape,
+                f"developed {name} mapping changed: "
+                f"{model[name].shape} != {nemo[name].shape}")
+
+    half_uv = (card.recipe.model_config.lateral_viscosity.A_h
+               / (grid.radius * grid.dlon))
+    ahmt_1d, ahmf_1d = nemo_lateral_viscosity_coefficients(grid, half_uv)
+    model["ahmt"] = (np.asarray(ahmt_1d)[:, None, None]
+                     * (nemo["tmask"] != 0.0))
+    model["ahmf"] = (np.asarray(ahmf_1d)[:, None, None]
+                     * (nemo["fmask"] != 0.0))
+
+    masks = {
+        "t": nemo["tmask"] != 0.0,
+        "u": nemo["umask"] != 0.0,
+        "v": nemo["vmask"] != 0.0,
+        "f": nemo["fmask"] != 0.0,
+    }
+    rows = []
+
+    def add(name, got, ref, active):
+        rows.append(_developed_identity(name, got, ref, active))
+
+    # Compiled line 159, then its velocity bracket (160--161).
+    add("zcur.ahmf", model["ahmf"], nemo["ahmf"], masks["f"])
+    add("zcur.e3f_live", model["e3f"], nemo["e3f"], masks["f"])
+    add("zcur.r1_e1e2f", model["r1_e1e2f"], nemo["r1_e1e2f"],
+        masks["f"][..., 0])
+    add("zcur.e2v", model["e2v"], nemo["e2v"],
+        masks["v"][..., 0])
+    add("zcur.v", model["v"], nemo["v"], masks["v"])
+    add("zcur.e1u", model["e1u"], nemo["e1u"],
+        masks["u"][..., 0])
+    add("zcur.u", model["u"], nemo["u"], masks["u"])
+    # Compiled lines 163--165.
+    add("zdiv.ahmt", model["ahmt"], nemo["ahmt"], masks["t"])
+    add("zdiv.r1_e1e2t", model["r1_e1e2t"], nemo["r1_e1e2t"],
+        masks["t"][..., 0])
+    add("zdiv.e3t_kbb", model["e3t"], nemo["e3t"], masks["t"])
+    add("zdiv.e2u", model["e2u"], nemo["e2u"],
+        masks["u"][..., 0])
+    add("zdiv.e3u_kbb", model["e3u"], nemo["e3u"], masks["u"])
+    add("zdiv.e1v", model["e1v"], nemo["e1v"],
+        masks["v"][..., 0])
+    add("zdiv.e3v_kbb", model["e3v"], nemo["e3v"], masks["v"])
+
+    literal = literal_ldf_numpy(
+        nemo["u"], nemo["v"], e3t_kbb=nemo["e3t"],
+        e3u_kbb=nemo["e3u"], e3v_kbb=nemo["e3v"],
+        e3f_live=nemo["e3f"], e3u_kmm=nemo["e3u_kmm"],
+        e3v_kmm=nemo["e3v_kmm"], e2u=nemo["e2u"],
+        e1v=nemo["e1v"], e2v=nemo["e2v"], e1u=nemo["e1u"],
+        r1_e1e2t=nemo["r1_e1e2t"], r1_e1e2f=nemo["r1_e1e2f"],
+        r1_e1u=nemo["r1_e1u"], r1_e2v=nemo["r1_e2v"],
+        r1_e2u=nemo["r1_e2u"], r1_e1v=nemo["r1_e1v"],
+        ahmt=nemo["ahmt"], ahmf=nemo["ahmf"],
+        tmask=nemo["tmask"], umask=nemo["umask"],
+        vmask=nemo["vmask"], fmask=nemo["fmask"])
+    add("nemo_literal.zcur", literal["zcur"], nemo["zcur"], masks["f"])
+    add("nemo_literal.zdiv", literal["zdiv"], nemo["zdiv"], masks["t"])
+    add("nemo_literal.post_u", _op("add", nemo["pre_u"], literal["visc_u"]),
+        nemo["post_u"], masks["u"])
+    add("nemo_literal.post_v", _op("add", nemo["pre_v"], literal["visc_v"]),
+        nemo["post_v"], masks["v"])
+
+    production_u = np.asarray(parts["ldf_u"].data, dtype=np.float64)
+    production_v = np.asarray(parts["ldf_v"].data, dtype=np.float64)
+    add("production_step.ldf_term_u", production_u, literal["visc_u"],
+        masks["u"])
+    add("production_step.ldf_term_v", production_v, literal["visc_v"],
+        masks["v"])
+    add("production_step.after_ldf_u", parts["after_ldf_u"].data,
+        nemo["post_u"], masks["u"])
+    add("production_step.after_ldf_v", parts["after_ldf_v"].data,
+        nemo["post_v"], masks["v"])
+
+    first = next((row for row in rows if not row["bit_exact"]), None)
+    require(first is not None, "developed LDF walk unexpectedly has no debt")
+    plant_row = None
+    if plant:
+        eta = np.asarray(state.eta.data, dtype=np.float64).copy()
+        active = h_k[..., 0] > 0.0
+        location = tuple(int(value) for value in np.argwhere(active)[0])
+        eta[location] = eta[location] + np.float64(65536.0) * np.spacing(
+            eta[location] if eta[location] != 0.0 else np.float64(1.0))
+        planted_state = state._replace(
+            eta=state.eta.replace(data=jnp.asarray(eta)))
+        planted_parts = trace(planted_state).operator_operands[0]
+        planted_u = np.asarray(planted_parts["ldf_u"].data, dtype=np.float64)
+        changed = planted_u.view(np.uint64) != production_u.view(np.uint64)
+        plant_row = {
+            "eta_location": list(location),
+            "ldf_u_cells_moved": int(np.count_nonzero(changed)),
+            "ldf_u_max_abs": float(np.max(np.abs(planted_u - production_u))),
+        }
+        require(plant_row["ldf_u_cells_moved"] > 0,
+                "production entry-thickness plant did not move LDF")
+
+    return {
+        "format": "nemo-testcase-l2-gyre-round149-developed-ldf-walk-v1",
+        "status": "PLANT-FIRED" if plant else "MEASURED",
+        "worktree": stamp,
+        "execution_regime": "production-jit-cpu-fp64-x64-libm",
+        "entry": entry,
+        "record_sha256": sha256(record_path),
+        "admission_sha256": sha256(admission_path),
+        "rows": rows,
+        "first_nonbit": first,
+        "plant": plant_row,
+    }
+
+
 def _scale_variants(jnp, a, b, c):
     """Closed association ladder for the compiled ``a*b/c`` statement."""
     return {
@@ -648,6 +897,7 @@ def main(argv=None) -> int:
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--plant", action="store_true")
     parser.add_argument("--admit-developed", action="store_true")
+    parser.add_argument("--walk-developed", action="store_true")
     parser.add_argument("--developed-record", type=Path)
     parser.add_argument("--developed-family-record", type=Path)
     parser.add_argument("--developed-family-baseline", type=Path)
@@ -656,6 +906,8 @@ def main(argv=None) -> int:
     parser.add_argument("--developed-root", type=Path)
     parser.add_argument("--developed-baseline-root", type=Path)
     parser.add_argument("--developed-stamp", type=Path)
+    parser.add_argument("--daily-root", type=Path)
+    parser.add_argument("--daily-audit", type=Path)
     parser.add_argument(
         "--developed-plant",
         choices=("header", "truncation", "missing-field", "zcur-ulp",
@@ -664,6 +916,22 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
+    if args.walk_developed:
+        require(not args.admit_developed,
+                "developed walk and admission are mutually exclusive")
+        require(args.developed_root is not None
+                and args.daily_root is not None
+                and args.daily_audit is not None,
+                "developed walk requires developed/daily roots and audit")
+        report = run_developed(
+            args.developed_root, expect_commit=args.expect_commit,
+            daily_root=args.daily_root, daily_audit=args.daily_audit,
+            plant=args.plant)
+        text = json.dumps(report, indent=2, sort_keys=True)
+        if args.output:
+            args.output.write_text(text + "\n")
+        print(text)
+        return 1 if args.plant else 0
     if args.admit_developed:
         require(not args.plant, "use --developed-plant in developed mode")
         require(args.developed_record is not None
