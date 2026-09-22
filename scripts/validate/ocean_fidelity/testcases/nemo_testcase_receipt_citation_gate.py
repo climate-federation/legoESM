@@ -643,6 +643,17 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo"
         "/traadv_fct.f90"),
+    # Round 154 reads the exact instrumented build that produced the admitted
+    # developed FCT record; its added observation calls shift FCT line numbers.
+    "GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo"
+        "/traadv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv_fct.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo"
+        "/traadv_fct.f90"),
     # --- round 36 paths: THIS ROUND'S OWN BUILD ---
     # The R35TRAZDF card is the one that produced the round-35 record, and it
     # is the only build whose trazdf.f90 carries the instrument, so its line
@@ -670,6 +681,29 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 154: developed production FCT walk and inherited transport ---
+    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:260-315': [
+        'CASE ( 3 )           !==  Stage 3  ==!',
+        'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
+        56],
+    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:785':
+        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
+    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90:879':
+        'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )',
+    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv.f90:195':
+        'IF( ln_dynadv_vec )   ll_Fw = .true.',
+    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv.f90:266-280': [
+        'IF( ll_Fw ) THEN',
+        'pFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 15],
+    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv_fct.f90:176-178': [
+        "IF( cdtype == 'TRA' ) CALL r153_begin",
+        'CALL fct_up1_2stp( Kbb, Kmm, Kaa, p2dt', 3],
+    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv_fct.f90:515-553': [
+        'ptFu(ji,jj,jk) = MAX( pU(ji,jj,jk) , 0._wp ) * pt_b(ji,jj,jk)',
+        'pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 39],
+    'GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/traadv_fct.f90:924-953': [
+        'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji+1,jj,ik) )',
+        'pcc(ji,jj,jk) = pcc(ji,jj,jk) * zcoef', 30],
     # --- round 153: developed-state FCT operator acquisition ---
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90:164-199': [
         'DO jn = 1, kjpt            !==  loop over the tracers  ==!',
