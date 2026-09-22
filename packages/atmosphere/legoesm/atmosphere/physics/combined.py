@@ -70,7 +70,10 @@ from legoesm.atmosphere.physics.microphysics.integration import (
 from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
     make_gwd_physics,
 )
-from legoesm.atmosphere.physics.physics_state import update_physics_state
+from legoesm.atmosphere.physics.physics_state import (
+    PHYSSTATE_PER_CALL_INPUTS,
+    update_physics_state,
+)
 from legoesm.atmosphere.physics._shared import zero_like_tracers
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
@@ -127,6 +130,7 @@ def make_physics(
     budget_ledger_level_weight=None,
     physics_cadence: str = "off",
     physics_cadence_steps: int = 1,
+    cld_macmic_num_steps: int = 1,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -207,9 +211,18 @@ def make_physics(
         raise ValueError(
             f"physics_cadence_steps={physics_cadence_steps} with physics_cadence="
             "'off' would be silently ignored; pass physics_cadence='write'")
+    if (not isinstance(cld_macmic_num_steps, int)
+            or isinstance(cld_macmic_num_steps, bool) or cld_macmic_num_steps < 1):
+        raise ValueError(
+            f"cld_macmic_num_steps must be an int >= 1, got {cld_macmic_num_steps!r}")
+    if cld_macmic_num_steps != 1 and model_type not in ("hydrostatic", "mpas"):
+        raise ValueError(
+            "cld_macmic_num_steps > 1 (CAM macrophysics/microphysics sub-cycle) is "
+            f"wired into the hydrostatic/MPAS combined physics only; got {model_type!r}")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
-            config, dt, column_mesh=column_mesh, need_rad=need_rad)
+            config, dt, column_mesh=column_mesh, need_rad=need_rad,
+            cld_macmic_num_steps=cld_macmic_num_steps)
     elif model_type == "nonhydrostatic":
         fn = _make_nonhydrostatic_combined(config, dt)
     elif model_type == "spectral_pe":
@@ -225,6 +238,7 @@ def make_physics(
             need_rad=need_rad, f_land=f_land, land_beta=land_beta,
             physics_cadence=physics_cadence,
             physics_cadence_steps=physics_cadence_steps,
+            cld_macmic_num_steps=cld_macmic_num_steps,
             budget_ledger=budget_ledger,
             budget_ledger_level_weight=budget_ledger_level_weight)
     else:
@@ -530,8 +544,24 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                budget_ledger: bool = False,
                                budget_ledger_level_weight=None,
                                physics_cadence: str = "off",
-                               physics_cadence_steps: int = 1) -> Callable:
+                               physics_cadence_steps: int = 1,
+                               cld_macmic_num_steps: int = 1) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
+
+    ``cld_macmic_num_steps`` (CAM6 namelist ``cld_macmic_num_steps``, 3 for
+    CLUBB+MG2 at dtime=1800): 1 (default) is the byte-identical parallel
+    split of every module on the pre-physics state.  N > 1 ports the CAM
+    ``tphysbc`` macro/micro loop: deep convection is applied to an
+    intermediate state first (CAM ``physics_update`` after
+    ``convect_deep_tend``), then turbulence (macrophysics) and microphysics
+    run N times sequentially at ``dt/N`` on that state, each sub-step's
+    increment applied before the next (``cld_macmic_ztodt``); their
+    tendencies, precipitation and ledger rows are averaged over the window
+    (CAM's ``1/N`` scaling).  Departures from CAM: radiation and gravity-wave
+    drag see the PRE-physics state (CAM: post-macmic / post-coupler) exactly
+    as the N=1 parallel split already does, and the whole convective
+    increment (including detrained condensate) is applied before sub-step 1
+    rather than spread over the sub-steps (CAM hands ``dlf`` per sub-step).
 
     ``physics_cadence``: ``"off"`` (default, byte-identical to before);
     ``"write"`` additionally stores the full tendency pytree of every call in
@@ -585,6 +615,16 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # not an unsupported one: its variance is carried state rather than a
     # mixing-length estimate re-derived each step.
     _turb_produces_cf = config.turbulence.scheme == "clubb"
+    _n_macmic = int(cld_macmic_num_steps)
+    if _n_macmic > 1 and (config.turbulence.scheme == "none"
+                          and config.microphysics.scheme == "none"):
+        raise ValueError(
+            f"cld_macmic_num_steps={_n_macmic} sub-cycles turbulence and "
+            "microphysics, but both are 'none'; set it to 1")
+    # Sub-cycled modules are BUILT with the sub-step length: implicit
+    # diffusion, CLUBB's moment advance and Morrison's process/sedimentation
+    # integration all take their own ``dt``.
+    _dt_sub = dt / _n_macmic
     if config.radiation.use_clubb_cloud_fraction and not _turb_produces_cf:
         raise ValueError(
             "RadiationConfig.use_clubb_cloud_fraction=True requires a "
@@ -617,15 +657,37 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _turb_sn, _, _turb_sc = get_turbulence_fn(config.turbulence)
         _turb_field = turbulence_carry_field(_turb_sn, _turb_sc)
         tagged_fns.append((
-            make_turbulence_physics(config.turbulence, model_type, dt,
+            make_turbulence_physics(config.turbulence, model_type, _dt_sub,
                                     f_land=f_land, land_beta=land_beta),
             True,
             _turb_field,
         ))
     if config.microphysics.scheme != "none":
-        tagged_fns.append((make_microphysics_physics(config.microphysics, model_type, dt), False, None))
+        tagged_fns.append((
+            make_microphysics_physics(config.microphysics, model_type, _dt_sub),
+            False, None))
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, model_type, dt), True, "gwd_spectrum"))
+    # Macmic group of each module, PARALLEL to ``tagged_fns`` (same append
+    # order): "pre" = applied to the intermediate state before the loop
+    # (deep convection), "sub" = sub-cycled (turbulence, microphysics),
+    # "once" = evaluated once on the pre-physics state (radiation, GWD).
+    _macmic_group = []
+    if config.radiation.scheme != "none":
+        _macmic_group.append("once")
+    if config.convection.scheme != "none":
+        _macmic_group.append("pre")
+    if config.turbulence.scheme != "none":
+        _macmic_group.append("sub")
+    if config.microphysics.scheme != "none":
+        _macmic_group.append("sub")
+    if config.gravity_wave_drag.scheme != "none":
+        _macmic_group.append("once")
+    if len(_macmic_group) != len(tagged_fns):
+        raise AssertionError(
+            f"macmic group map has {len(_macmic_group)} entries for "
+            f"{len(tagged_fns)} physics modules — the two append sequences "
+            "have drifted; every module needs exactly one group.")
 
     # Radiation sub-cycle plumbing.  Radiation is always ``tagged_fns[0]``
     # when configured (appended first above), so in the accumulator below
@@ -635,6 +697,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # ``_non_rad_fns`` is the module list with radiation removed.
     _has_rad = config.radiation.scheme != "none"
     _non_rad_fns = tagged_fns[1:] if _has_rad else tagged_fns
+    _non_rad_groups = _macmic_group[1:] if _has_rad else _macmic_group
 
     # --- Per-process budget-ledger row map (#1311 MPAS attribution) --------
     # A list PARALLEL to ``tagged_fns`` giving each module's ledger row.  Kept
@@ -899,6 +962,113 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _set = {k: v for k, v in extras.items() if v is not None}
         return combined._replace(**_set) if _set else combined
 
+    def _advance_state(state, du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends, dt_x):
+        """``state + dt_x * tendency`` (CAM ``physics_update``); ``phis`` fixed."""
+        kw = dict(
+            u=state.u.replace(data=state.u.data + dt_x * du_dt),
+            T=state.T.replace(data=state.T.data + dt_x * dT_dt),
+            p_s=state.p_s.replace(data=state.p_s.data + dt_x * dp_s_dt),
+        )
+        if state.v is not None and dv_dt is not None:
+            kw["v"] = state.v.replace(data=state.v.data + dt_x * dv_dt)
+        if state.tracers is not None and tracer_tends:
+            kw["tracers"] = {
+                k: (f.replace(data=f.data + dt_x * tracer_tends[k])
+                    if k in tracer_tends else f)
+                for k, f in state.tracers.items()
+            }
+        return state._replace(**kw)
+
+    def _add_scaled(acc, r, w):
+        """``acc + w * r`` over the ``_accumulate`` result tuple (None-aware).
+
+        ``first`` keeps the first non-None; ``phys_updates`` merge (later
+        wins, so a sub-cycled carry leaves the loop at its final value).
+        """
+        if acc is None:
+            acc = (None, None, None, None, None, {}, {}, None, None,
+                   {k: None for k in r[9]}, None)
+        (du, dv, dT, dps, dphis, tr, upd, first, pr, ex, led) = acc
+        (du_r, dv_r, dT_r, dps_r, dphis_r, tr_r, upd_r, first_r, pr_r,
+         ex_r, led_r) = r
+
+        def _ws(a, b):
+            if b is None:
+                return a
+            return w * b if a is None else a + w * b
+
+        tr = dict(tr)
+        for k, v in tr_r.items():
+            tr[k] = _ws(tr.get(k), v)
+        upd = dict(upd)
+        upd.update(upd_r)
+        ex = dict(ex)
+        for k, v in ex_r.items():
+            if v is not None:
+                ex[k] = (v.replace(data=w * v.data) if ex.get(k) is None
+                         else ex[k].replace(data=ex[k].data + w * v.data))
+        return (_ws(du, du_r), _ws(dv, dv_r), _ws(dT, dT_r), _ws(dps, dps_r),
+                _ws(dphis, dphis_r), tr, upd,
+                first if first is not None else first_r,
+                _ws(pr, pr_r), ex, _ws(led, led_r))
+
+    def _carry_within_call(ps, upd):
+        """Intermediate carry update INSIDE one physics call: the per-call
+        inputs (dynamics tendencies, prescribed surface fluxes) stay visible
+        to every later sub-module; the call's final update clears them."""
+        if ps is None:
+            return None
+        keep = {k: getattr(ps, k) for k in PHYSSTATE_PER_CALL_INPUTS}
+        return update_physics_state(ps, {**keep, **upd})
+
+    def _accumulate_step(fns, groups, state, grid, sigma_coord, phys_state,
+                         forcing, ledger_rows=None):
+        """``_accumulate`` (N=1, byte-identical) or the CAM macmic loop."""
+        if _n_macmic == 1:
+            return _accumulate(fns, state, grid, sigma_coord, phys_state,
+                               forcing, ledger_rows=ledger_rows)
+        rows = ledger_rows if ledger_rows is not None else [None] * len(fns)
+        sel = {g: [(f, r) for f, gg, r in zip(fns, groups, rows) if gg == g]
+               for g in ("once", "pre", "sub")}
+
+        def _run(fns_rows, st, ps):
+            return _accumulate([f for f, _ in fns_rows], st, grid, sigma_coord,
+                               ps, forcing,
+                               ledger_rows=([r for _, r in fns_rows]
+                                            if ledger_rows is not None else None))
+        # Evaluation order: the group holding ``fns[0]`` first, so ``first``
+        # (radiation when configured) is the template exactly as at N=1.
+        # ``first`` is only ever a Field TEMPLATE and, when radiation leads,
+        # the radiative heating; on a sub-led list it is sub-step 1's dt/N
+        # tendency and must not be read quantitatively.
+        acc = None
+        state_m = state
+        ps_m = phys_state
+        if groups[0] == "once" and sel["once"]:
+            acc = _add_scaled(acc, _run(sel["once"], state, phys_state), 1.0)
+        if sel["pre"]:
+            r_pre = _run(sel["pre"], state, phys_state)
+            acc = _add_scaled(acc, r_pre, 1.0)
+            state_m = _advance_state(state_m, r_pre[0], r_pre[1], r_pre[2],
+                                     r_pre[3], r_pre[5], dt)
+            # CAM order: clubb_tend_cam reads THIS step's convect_deep_tend
+            # output (cmfmc, dlf), so the convective carries are visible to
+            # the sub-cycle (the N=1 split hands them over one step late).
+            ps_m = _carry_within_call(ps_m, r_pre[6])
+        # Each sub-cycled module is applied (state AND carry) before the next
+        # one runs: CAM physics_update after clubb_tend_cam, then
+        # microp_driver_tend on the updated state (physpkg.F90:2097-2101).
+        for _i in range(_n_macmic):
+            for _fr in sel["sub"]:
+                r_sub = _run([_fr], state_m, ps_m)
+                state_m = _advance_state(state_m, r_sub[0], r_sub[1], r_sub[2],
+                                         r_sub[3], r_sub[5], _dt_sub)
+                ps_m = _carry_within_call(ps_m, r_sub[6])
+                acc = _add_scaled(acc, r_sub, 1.0 / _n_macmic)
+        if groups[0] != "once" and sel["once"]:
+            acc = _add_scaled(acc, _run(sel["once"], state, phys_state), 1.0)
+        return acc
+
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
         has_v = state.v is not None
 
@@ -922,8 +1092,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 return zt._replace(dT_dt=zt.dT_dt.replace(data=dT)), phys_state
             (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
              combined_tracer_tends, phys_updates, first,
-             precip_accum, sfc_diag_extras, _led) = _accumulate(
-                _non_rad_fns, state, grid, sigma_coord, phys_state, forcing,
+             precip_accum, sfc_diag_extras, _led) = _accumulate_step(
+                _non_rad_fns, _non_rad_groups, state, grid, sigma_coord,
+                phys_state, forcing,
                 ledger_rows=(_non_rad_rows if _budget_ledger else None))
             if cached_rad is not None:
                 # cached_rad is column-shaped (ncol, nlev); restore native layout.
@@ -964,9 +1135,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             return _zero_tendencies(state, has_v), None
         (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
          combined_tracer_tends, phys_updates, first,
-         precip_accum, sfc_diag_extras, _led) = _accumulate(
-            tagged_fns, state, grid, sigma_coord, phys_state, forcing,
-            ledger_rows=(_ledger_row_of if _budget_ledger else None))
+         precip_accum, sfc_diag_extras, _led) = _accumulate_step(
+            tagged_fns, _macmic_group, state, grid, sigma_coord, phys_state,
+            forcing, ledger_rows=(_ledger_row_of if _budget_ledger else None))
         # Cache the radiative heating contribution for the held sub-cycle
         # steps.  Radiation is tagged_fns[0], so ``first.dT_dt`` is exactly
         # its contribution before any other module is summed.

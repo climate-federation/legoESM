@@ -65,6 +65,8 @@ class AMIPExperimentConfig(NamedTuple):
     radiation: str = "gray"  # "gray" or "rrtmg"
     rad_update_steps: int = 1  # recompute radiation every N steps (1 = every step)
     physics_update_steps: int = 1  # run the whole physics every N steps, hold its tendencies between (MPAS)
+    cld_macmic_num_steps: int = 1  # CAM6 macro/micro sub-cycles per physics step (namelist cld_macmic_num_steps)
+    morrison_sed_cfl_substeps: bool = False  # MG2 CFL sub-stepped sedimentation inside Morrison
     diurnal_cycle: bool = False  # use instantaneous solar zenith angle
     solar_source: str = "constant"  # "constant", "file", or "spectral_file"
     solar_file: str = ""

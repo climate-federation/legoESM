@@ -264,6 +264,14 @@ class PhysicsState(NamedTuple):
 # ERA5-surface-flux lane) and then carried unchanged -- so the
 # restart/carry-completeness gate must neither require them nor treat their
 # absence as a hole in the physics memory.
+# The subset of the inputs that ``update_physics_state`` RESETS to None on
+# every call (consumed per physics call).  A sub-cycle inside one physics call
+# must carry them across its intermediate carry updates so every sub-module of
+# the same call sees them; only the call's final update may clear them.
+PHYSSTATE_PER_CALL_INPUTS = (
+    "dyn_tendency_T", "dyn_tendency_qv",
+    "surface_wth_override", "surface_wqv_override",
+)
 PHYSSTATE_INPUT_FIELDS = frozenset({
     "dyn_tendency_T", "dyn_tendency_qv",
     # per-job physics-cadence cache: carried across steps, never persisted

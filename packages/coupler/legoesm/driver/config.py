@@ -533,6 +533,11 @@ class ExperimentConfig(NamedTuple):
     # (byte-identical to before).  MPAS lane only; ``rad_update_steps`` must
     # be a multiple of it so radiation stays on physics steps.
     physics_update_steps: int = 1
+    # CAM6 ``cld_macmic_num_steps``: turbulence (macrophysics) and
+    # microphysics run N times sequentially at dt_phys/N inside each
+    # physics step, after the convective increment (CAM tphysbc macmic
+    # loop).  1 = the parallel split (byte-identical).  MPAS lane.
+    cld_macmic_num_steps: int = 1
     # Un-fuse radiation from the compiled-segment scan (issue: ~3h XLA
     # compile).  Static Python gate (NOT trainable); default OFF keeps
     # every existing run byte-identical.  When True AND
@@ -1652,6 +1657,8 @@ class ExperimentConfig(NamedTuple):
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
                                                 # "mg" (E3SM MG, GCM default) |
                                                 # "sam" (gSAM M2005 anvil tune)
+    morrison_sed_cfl_substeps: bool = False     # MorrisonConfig.sed_cfl_substeps:
+                                                # MG2 CFL sub-stepped sedimentation
     # Flux law the SLAB-land skin energy balance debits at the land-air
     # interface (physics_pipeline._step_slab_land):
     #   "legacy_dual" (default, byte-identical): the slab debits its OWN
@@ -2646,6 +2653,20 @@ class ExperimentConfig(NamedTuple):
                     f"physics_update_steps={_pus} (>= it) so radiation is "
                     "recomputed on physics steps; a held-physics step cannot "
                     "solve radiation")
+        _nmm = self.cld_macmic_num_steps
+        if not isinstance(_nmm, int) or isinstance(_nmm, bool) or _nmm < 1:
+            errors.append(
+                f"cld_macmic_num_steps must be an int >= 1, got {_nmm!r}")
+        elif _nmm > 1:
+            if not _is_mpas:
+                errors.append(
+                    f"cld_macmic_num_steps={_nmm} is wired into the MPAS lane "
+                    "only (combined.make_physics macmic loop); it would be "
+                    "silently inert here")
+            if self.turbulence == "none" and self.microphysics == "none":
+                errors.append(
+                    f"cld_macmic_num_steps={_nmm} sub-cycles turbulence and "
+                    "microphysics, but both are 'none'")
         if _is_mpas:
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
@@ -3193,6 +3214,10 @@ class ExperimentConfig(NamedTuple):
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} unknown; choose "
                 "'mg' (E3SM MG, default) or 'sam' (gSAM M2005).")
+        if self.morrison_sed_cfl_substeps and self.microphysics != "morrison":
+            errors.append(
+                "morrison_sed_cfl_substeps=True requires microphysics='morrison' "
+                f"(got {self.microphysics!r}); it would be silently inert")
         if self.morrison_flavor != "mg" and self.microphysics != "morrison":
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} requires "
@@ -3707,6 +3732,8 @@ class ExperimentConfig(NamedTuple):
             radiation=amip_cfg.radiation,
             rad_update_steps=amip_cfg.rad_update_steps,
             physics_update_steps=amip_cfg.physics_update_steps,
+            cld_macmic_num_steps=amip_cfg.cld_macmic_num_steps,
+            morrison_sed_cfl_substeps=amip_cfg.morrison_sed_cfl_substeps,
             unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
@@ -3929,6 +3956,8 @@ class ExperimentConfig(NamedTuple):
             radiation=self.radiation,
             rad_update_steps=self.rad_update_steps,
             physics_update_steps=self.physics_update_steps,
+            cld_macmic_num_steps=self.cld_macmic_num_steps,
+            morrison_sed_cfl_substeps=self.morrison_sed_cfl_substeps,
             diurnal_cycle=self.diurnal_cycle,
             co2_ppmv=self.co2_ppmv,
             ch4_ppbv=self.ch4_ppbv,

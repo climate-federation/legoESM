@@ -533,6 +533,12 @@ class MorrisonConfig(NamedTuple):
     # selects ``ice_to_snow_scheme="mg_ferrier"`` (180-s Ferrier ice→snow). Warm
     # rain (kk2000) and ice deposition (m2005) are ALREADY MG-faithful in both.
     morrison_flavor: str = "mg"      # "mg" (global default) | "sam" (CRM)
+    # MG2 (micro_mg2_0.F90 sedimentation loop) CFL sub-stepping of rain /
+    # ice / snow / graupel sedimentation: per column nstep = 1 + floor(max
+    # V·dt/dz), capped at ``morrison._SEDIMENTATION_SUBSTEPS_MAX``.  False
+    # (default) = one upwind pass per call with the flux cap (a hydrometeor
+    # falls at most one layer per call).
+    sed_cfl_substeps: bool = False
     # Warm-rain autoconversion + accretion scheme:
     #   "kk2000" (default) = Khairoutdinov-Kogan 2000, the SAM M2005
     #     DEFAULT (IRAIN=0): PRC=1350·qc^2.47·(Nc[#/cm³])^-1.79,
@@ -1174,6 +1180,7 @@ def apply_microphysics_experiment_flags(
     homogeneous_ice_nucleation: bool = False,
     morrison_scalars: dict | None = None,
     morrison_flavor: str | None = None,
+    morrison_sed_cfl_substeps: bool | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1273,6 +1280,14 @@ def apply_microphysics_experiment_flags(
                 "--microphysics morrison or drop the override.")
         scheme_config = scheme_config._replace(
             morrison_flavor=morrison_flavor)
+    if morrison_sed_cfl_substeps is not None:
+        if scheme != "morrison":
+            raise ValueError(
+                f"morrison_sed_cfl_substeps={morrison_sed_cfl_substeps!r} is "
+                "only supported by the morrison microphysics scheme (got "
+                f"{scheme!r}); use --microphysics morrison or drop it.")
+        scheme_config = scheme_config._replace(
+            sed_cfl_substeps=bool(morrison_sed_cfl_substeps))
     if morrison_scalars:
         # Morrison ice-process tunables (``morrison_*`` ExperimentConfig flat
         # scalars).  HARD scheme gate, NOT field-presence: Thompson carries

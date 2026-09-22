@@ -493,6 +493,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "re-apply its cached tendencies in between (CAM "
                              "cadence; MPAS lane). rad-update-steps must be a "
                              "multiple. 1 = every step.")
+    parser.add_argument("--cld-macmic-num-steps", type=int, default=1,
+                        help="CAM6 cld_macmic_num_steps: sub-cycle turbulence "
+                             "(macrophysics) + microphysics N times at "
+                             "dt_phys/N inside each physics step, after the "
+                             "convective increment (MPAS lane). 1 = parallel "
+                             "split.")
     parser.add_argument("--unfused-radiation", action="store_true", default=False,
                         help="Run radiation outside the compiled segment scan")
     parser.add_argument("--per-step-rollout", action="store_true", default=False,
@@ -1700,6 +1706,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "fall_b_i=0.865 and PSD bounds tuned against "
                              "anvil-ice over-accumulation, the exact disease "
                              "of the 2026-07 AMIP warm drift).")
+    parser.add_argument("--morrison-sed-cfl-substeps", action="store_true",
+                        default=False, dest="morrison_sed_cfl_substeps",
+                        help="MG2-style CFL sub-stepping of Morrison rain/ice/"
+                             "snow/graupel sedimentation (per column nstep = "
+                             "1 + floor(max V dt/dz)); default one upwind pass "
+                             "per call.")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -2142,6 +2154,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
         physics_update_steps=args.physics_update_steps,
+        cld_macmic_num_steps=args.cld_macmic_num_steps,
         unfused_radiation=args.unfused_radiation,
         rrtmgp_use_scan=args.rrtmgp_use_scan,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
@@ -2285,6 +2298,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hard_sat_ice_curve=args.hard_sat_ice_curve,
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,
+        morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

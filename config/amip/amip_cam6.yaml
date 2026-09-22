@@ -40,6 +40,9 @@ mpas_vert_advection_scheme: upwind   # van Leer vertical advection is sigma-only
 physics_update_steps: 16    # CAM6: physics every 1800 s (16 x 112.5 s); the
                             # held-physics steps re-apply the last tendencies
 rad_update_steps: 32        # CAM6 f09: radiation hourly (iradsw = -1)
+cld_macmic_num_steps: 3     # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_sgs,
+                            # dtime 1800): CLUBB + microphysics sub-cycled 3 x
+                            # at 600 s inside each physics step (tphysbc macmic)
 
 # ---- radiation / clouds / microphysics --------------------------------------
 radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
@@ -49,6 +52,9 @@ clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
 use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
                                  # radiation (required by cam6_clubb)
 microphysics: morrison      # mg flavour (MG2 port = run 2)
+morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
+                                 # nstep = 1 + int(max V dt/dz) per column,
+                                 # so precipitation crosses >1 layer per 600 s
 hard_saturation_adjustment: true
 cloud_partial_coverage_optics: none
 cloud_optics_inhomogeneity: two_region

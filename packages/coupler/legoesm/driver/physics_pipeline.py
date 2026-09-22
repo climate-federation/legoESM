@@ -3983,14 +3983,16 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _flavor = getattr(config, "morrison_flavor", None)
     if _flavor in (None, "mg"):
         _flavor = None
-    if not _touched and _flavor is None:
+    _sed_sub = getattr(config, "morrison_sed_cfl_substeps", False)
+    _sed_sub = True if _sed_sub else None
+    if not _touched and _flavor is None and _sed_sub is None:
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
     )
     return apply_microphysics_experiment_flags(
         micro_config, scheme, morrison_scalars=_touched,
-        morrison_flavor=_flavor)
+        morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub)
 
 
 def _resolve_microphysics(config):

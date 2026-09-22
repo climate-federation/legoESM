@@ -90,6 +90,15 @@ _FALL_RHO_EXP = 0.54             # (rho_su/rho)^0.54 fall-speed density correcti
 _FALL_RHO_EXP_ICE = 0.35         # ice fall-speed density correction exponent
 _VT_CAP_RAIN = 9.1               # rain fall-speed cap [m/s]
 _VT_CAP_GRAUPEL = 20.0           # graupel fall-speed cap [m/s]
+# Static cap on MG2-style sedimentation sub-steps per call (a loop bound for
+# the fixed-shape AD-safe loop, not a tunable; MG2's count is unbounded).
+# Sized so it never binds on the campaign grids: the fastest species (graupel,
+# capped at 20 m/s) over the thinnest layer (CAM L32 bottom layer ~62 m) at
+# the 600 s macmic sub-step needs 1 + 20*600/62 = 194; rain (9.1 m/s) 89.
+# When it DOES bind the flux cap fires and the species falls slower than its
+# terminal speed (mass is conserved, the transport is wrong) -- keep it above
+# the resolved CFL of every configured lane.
+_SEDIMENTATION_SUBSTEPS_MAX = 256
 _VT_CLIP_RAIN = 20.0             # rain fall-speed clip ceiling [m/s]
 _VT_CLIP_FROZEN = 5.0            # snow/ice fall-speed clip ceiling [m/s]
 _VT_CAP_SNOW_ICE = 1.2           # snow/ice-cap fall-speed factor [m/s]
@@ -1221,18 +1230,25 @@ def morrison_microphysics(
     # melt_ice for q_i, melt_snow for q_s, evaporation for q_r) ALREADY
     # consume up to q/dt, AND sed independently can drain another q/dt
     # — driving the pool negative.  Mirrors the iter-29 q_r/evap fix.
+    # MG2 CFL sub-stepping (static gate; 1 = the one-pass flux-capped form).
+    # One nstep per species from max(mass-, number-weighted) fall speed, as
+    # micro_mg2_0.F90 does, so mass and number fall in lock-step.
+    _nsub = (_SEDIMENTATION_SUBSTEPS_MAX if config.sed_cfl_substeps else 1)
     sed_r, precip_r = sedimentation_tendency(
         q_r, rho, V_t_r, dz, dt=dt,
         return_surface_flux=True,
         extra_sink=evaporation + freeze_rain + pracg,
+        n_substeps_max=_nsub, cfl_speed=V_n_r,
     )
     sed_i, precip_i = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
         extra_sink=aggregation + melt_ice + jnp.maximum(-dq_i_dep, 0.0),
+        n_substeps_max=_nsub, cfl_speed=V_n_i,
     )
     sed_s, precip_s = sedimentation_tendency(
         q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
         extra_sink=melt_snow + jnp.maximum(-prds, 0.0),
+        n_substeps_max=_nsub, cfl_speed=V_n_s,
     )
     # Graupel sedimentation. In-column q_g sinks sharing the step are melting
     # AND sublimation (the negative PRDG branch); both reserve mass so sed +
@@ -1240,6 +1256,7 @@ def morrison_microphysics(
     sed_g, precip_g = sedimentation_tendency(
         q_g, rho, V_t_g, dz, dt=dt, return_surface_flux=True,
         extra_sink=melt_graupel + jnp.maximum(-prdg, 0.0),
+        n_substeps_max=_nsub, cfl_speed=V_n_g,
     )
     # NUMBER sedimentation (so the rain/ice number falls WITH the mass and the
     # PSD stays consistent in a column). N_i is per-mass ⇒ the same flux form
@@ -1251,7 +1268,8 @@ def morrison_microphysics(
     # dN_r/dt and the per-volume flux divergence is exact.
     rho_eff = jnp.maximum(rho, _RHO_FLOOR)
     sed_N_r = rho_eff * sedimentation_tendency(
-        jnp.clip(N_r, 0.0) / rho_eff, rho_eff, V_n_r, dz, dt=dt)
+        jnp.clip(N_r, 0.0) / rho_eff, rho_eff, V_n_r, dz, dt=dt,
+        n_substeps_max=_nsub, cfl_speed=V_t_r)
     # Ice-NUMBER sinks sharing this step with number sedimentation — melt,
     # sublimation (both mass-proportional; melt_ice / dq_i_dep are FINAL
     # donor-clamped values here) and the ice->snow autoconversion number
@@ -1278,15 +1296,18 @@ def morrison_microphysics(
         dN_i_autoconv = aggregation * _ni_pos / _qi_floor
     sed_N_i = sedimentation_tendency(
         jnp.clip(N_i, 0.0), rho, V_n_i, dz, dt=dt,
-        extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv)
+        extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv,
+        n_substeps_max=_nsub, cfl_speed=V_t_i)
     if snow_double_moment:
         # N_s is per-mass ⇒ same flux form as q (UNS number-weighted speed).
         sed_N_s = sedimentation_tendency(
-            jnp.clip(N_s, 0.0), rho, V_n_s, dz, dt=dt)
+            jnp.clip(N_s, 0.0), rho, V_n_s, dz, dt=dt,
+            n_substeps_max=_nsub, cfl_speed=V_t_s)
     if graupel_double_moment:
         # N_g per-mass ⇒ same flux form as q (UNG number-weighted speed).
         sed_N_g = sedimentation_tendency(
-            jnp.clip(N_g, 0.0), rho, V_n_g, dz, dt=dt)
+            jnp.clip(N_g, 0.0), rho, V_n_g, dz, dt=dt,
+            n_substeps_max=_nsub, cfl_speed=V_t_g)
 
     # === LATENT HEATING ===
     L_v = constants.L_v

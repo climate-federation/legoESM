@@ -141,6 +141,8 @@ def sedimentation_tendency(
     dt: float | jax.Array | None = None,
     return_surface_flux: bool = False,
     extra_sink: jax.Array | None = None,
+    n_substeps_max: int = 1,
+    cfl_speed: jax.Array | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Compute sedimentation tendency from vertical flux divergence.
 
@@ -176,6 +178,21 @@ def sedimentation_tendency(
         cap becomes ``(q - extra_sink·dt) · ρ · dz / dt`` so the
         combined per-step removal by sedimentation plus the external
         sink cannot exceed available ``q``.  Codex iter-29 #1.
+    n_substeps_max : int, default 1
+        Static cap on MG2-style CFL sub-stepping (``micro_mg2_0.F90``
+        sedimentation loop).  1 (default) = one upwind pass per call with
+        the flux cap above, byte-identical.  > 1: per column
+        ``nstep = 1 + floor(max_k V·dt/dz)`` clipped to the cap, the
+        column is advanced ``nstep`` times at ``dt/nstep`` on a running
+        ``q`` (each sub-step falls through as many layers as its Courant
+        number allows), tendency and surface flux are the sub-step means.
+        Requires ``dt``.  The flux cap reserves the FULL-step
+        ``extra_sink·dt`` at every sub-step, so the joint positivity
+        guarantee is unchanged.
+    cfl_speed : jax.Array, optional
+        Extra fall speed entering the sub-step count only (MG2 sizes one
+        ``nstep`` per species from ``max(mass-, number-weighted)`` speed
+        so the number falls in lock-step with the mass).
 
     Returns
     -------
@@ -184,6 +201,12 @@ def sedimentation_tendency(
         ``(tendency, surface_flux)`` if ``return_surface_flux=True``.
     """
     q_pos = jnp.clip(q, 0.0, None)
+    if n_substeps_max > 1:
+        if dt is None:
+            raise ValueError("sedimentation sub-stepping needs dt")
+        return _sedimentation_substepped(
+            q_pos, rho, V_t, dz, dt, return_surface_flux, extra_sink,
+            int(n_substeps_max), cfl_speed)
     flux = V_t * q_pos * rho  # (ncol, nlev) outgoing flux density [kg/m^2/s]
 
     if dt is not None:
@@ -210,4 +233,43 @@ def sedimentation_tendency(
     if return_surface_flux:
         # Bottom outgoing flux is the precipitation reaching the surface.
         return tendency, flux[:, -1]
+    return tendency
+
+
+def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
+                              extra_sink, n_max, cfl_speed):
+    """MG2 ``micro_mg2_0.F90`` sedimentation loop (see caller docstring).
+
+    Static-shape ``lax.fori_loop`` over ``n_max`` with sub-steps beyond a
+    column's own ``nstep`` masked out, so the graph is fixed and reverse-mode
+    AD flows through every active sub-step.  ``nstep`` is an integer (no
+    gradient), as in the reference.
+    """
+    dz_safe = jnp.clip(dz, 1.0, None)
+    dt = jnp.maximum(dt, 1.0e-12)
+    v_cfl = V_t if cfl_speed is None else jnp.maximum(V_t, cfl_speed)
+    cfl = jnp.max(v_cfl * dt / dz_safe, axis=1, keepdims=True)  # (ncol, 1)
+    nstep = jnp.clip(1 + jnp.floor(cfl).astype(jnp.int32), 1, n_max)
+    dt_s = dt / nstep
+    reserve = extra_sink * dt if extra_sink is not None else None
+
+    def body(i, carry):
+        q_dum, tend_acc, sfc_acc = carry
+        active = i < nstep                                   # (ncol, 1)
+        flux = V_t * q_dum * rho
+        q_for_cap = (jnp.maximum(q_dum - reserve, 0.0) if reserve is not None
+                     else q_dum)
+        flux = jnp.minimum(flux, q_for_cap * rho * dz / dt_s)
+        flux = jnp.where(active, flux, 0.0)
+        flux_in = jnp.pad(flux[:, :-1], ((0, 0), (1, 0)))
+        tend = (flux_in - flux) / (rho * dz_safe)
+        q_dum = q_dum + dt_s * tend
+        return (q_dum, tend_acc + tend / nstep,
+                sfc_acc + flux[:, -1] / nstep[:, 0])
+
+    _, tendency, sfc = jax.lax.fori_loop(
+        0, n_max, body,
+        (q_pos, jnp.zeros_like(q_pos), jnp.zeros_like(q_pos[:, -1])))
+    if return_surface_flux:
+        return tendency, sfc
     return tendency

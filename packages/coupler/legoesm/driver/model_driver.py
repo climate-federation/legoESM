@@ -9621,6 +9621,12 @@ class ModelDriver:
                 f"({CHECKPOINT_INTERVAL} steps) must both be multiples of the "
                 "cadence so every checkpoint is a resumable window boundary")
         DT_PHYS = DT * PHYS_UPDATE_STEPS
+        if cfg.cld_macmic_num_steps > 1:
+            logger.info(
+                f"  CAM macmic sub-cycle: turbulence + microphysics run "
+                f"{cfg.cld_macmic_num_steps} x at "
+                f"{DT_PHYS / cfg.cld_macmic_num_steps:.1f} s inside each "
+                "physics step, after the convective increment")
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT_PHYS,
                                   budget_ledger_level_weight=_ledger_weight,
                                   column_mesh=_column_mesh,
@@ -9631,7 +9637,8 @@ class ModelDriver:
                                   land_beta=_land_beta,
                                   budget_ledger=_budget_ledger_on,
                                   physics_cadence=_phys_cadence_write,
-                                  physics_cadence_steps=PHYS_UPDATE_STEPS)
+                                  physics_cadence_steps=PHYS_UPDATE_STEPS,
+                                  cld_macmic_num_steps=cfg.cld_macmic_num_steps)
         if _hold_phys:
             from legoesm.atmosphere.physics.combined import held_physics_variant
             physics_fn_held = held_physics_variant(physics_fn)
@@ -9674,7 +9681,8 @@ class ModelDriver:
                          budget_ledger=_budget_ledger_on,
                          budget_ledger_level_weight=_ledger_weight,
                          physics_cadence=_phys_cadence_write,
-                         physics_cadence_steps=PHYS_UPDATE_STEPS)
+                         physics_cadence_steps=PHYS_UPDATE_STEPS,
+                         cld_macmic_num_steps=cfg.cld_macmic_num_steps)
             if _subcycle_rad else None
         )
         if _subcycle_rad:
