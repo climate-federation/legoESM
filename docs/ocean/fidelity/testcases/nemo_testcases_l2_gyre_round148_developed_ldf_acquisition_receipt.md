@@ -119,7 +119,9 @@ claim.  No configuration choice was made.
 
 The focused extended-walker suite reports `4 passed in 6.18s`.  The
 preregistration citation gate passes with two mapped citations and no failures;
-shifting the `:121-130` citation by two lines makes it report
+shifting the
+`GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/dynldf_lev.f90:121-130`
+citation by two lines makes it report
 `SYMBOL-NOT-AT-LINE` and exit 1.  Final focused and receipt-citation results are
 recorded below after the receipt commit.
 
