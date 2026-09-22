@@ -149,6 +149,11 @@ from compare_omip_nemo import (  # noqa: E402
 # Sub-domains scored on their own masks (NOT inferred from the latitude bands):
 # the two regions this campaign keeps failing in.
 _ARCTIC_LAT_N = 60.0
+# How many one-cell rings inward from the scored domain's edge --dump-cells
+# labels.  Six is ~600 km at the 1-degree default, past any plausible coastal
+# or mask-mismatch influence, and the dilation is cheap.  Affects the dump
+# only; no printed number reads it.
+_DUMP_RING_MAX = 6
 
 # Named boxes the campaign directive scores by name.  The latitude bands cannot
 # see them: "tropics" spans all longitudes, so an equatorial Pacific cold-tongue
@@ -747,9 +752,24 @@ def main() -> int:
                 "SSS_a": sssT, "SSS_b": sssM, "SSS_nemo": sssN}
         for lab, dk in node_dist.items():
             dump[f"node_km_{lab}"] = dk
+        # Ring 1 touches a non-scored cell, ring 2 is one cell further in, and
+        # 0 means further from the edge than _DUMP_RING_MAX.  The complement of
+        # `ocean` is real land UNION every cell some arm masked, so this is
+        # distance to the edge of the COMMON SCORED DOMAIN -- which is the
+        # mask-mismatch surface, not a coastline.  Carried so an error can be
+        # stratified by it at FIXED node distance; nothing printed uses it.
+        ring = np.zeros(ocean.shape, dtype=np.int16)
+        reached = np.zeros(ocean.shape, dtype=bool)
+        for k in range(1, _DUMP_RING_MAX + 1):
+            grown = _coastal_mask(ocean, k)
+            ring[grown & ~reached] = k
+            reached = grown
+        dump["edge_ring"] = ring
         np.savez(a.dump_cells, **dump)
         print(f"[dump] {a.dump_cells}: {int(ocean.sum())} scored cells, "
-              f"node-distance grids for {sorted(node_dist) or 'none'}")
+              f"node-distance grids for {sorted(node_dist) or 'none'}, "
+              f"edge rings 1-{_DUMP_RING_MAX} on "
+              f"{int((ring > 0).sum())} of them")
 
     # --- MLD (density threshold, matched to NEMO mldr10_1) -------------------
     mldT_raw, mldM_raw = _lego_mld(T), _lego_mld(M)

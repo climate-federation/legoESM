@@ -42,6 +42,43 @@
 #     bins are selecting hard ocean, not a remap artifact, and neither arm is
 #     implicated by this test.
 # Pre-registered before the numbers exist, so the verdict cannot be fitted.
+#
+# SECOND PASS, ADDED AFTER THE FIRST RAN. The node-distance table came back
+# ELEVATED AT BOTH ENDS with a flat middle: of the excess variance (the gap,
+# not either arm's own error) 48% sits in the DENSEST bin and 39% in the
+# SPARSEST, leaving 14% across the four middle bins that cover 83% of the area.
+# Two ends means two mechanisms, and the dichotomy pre-registered above was too
+# narrow to name either. The sparse end is what a sparse remap predicts. The
+# DENSE end is not, and that is what this pass goes after.
+#
+# THE HYPOTHESIS, which is GLM's: the dense bin is where FESOM refines -- on
+# coasts -- and it is also where the tripole enjoys a HOME-GEOMETRY ADVANTAGE,
+# running on NEMO's own eORCA1 grid and land mask while FESOM does not. A
+# disagreement about where the ocean ENDS would therefore read as FESOM error
+# against a NEMO-anchored metric, and would concentrate on the boundary of the
+# scored domain. So: stratify by distance to that boundary AT FIXED NODE
+# DISTANCE, which is what the first pass could not do.
+#   * excess variance in bin 1 concentrated in rings 1-2 -> the domain edge
+#     carries bin 1's half of the gap, and the remaining question is per-arm
+#     MASK AGREEMENT, which needs a dump field that does not exist yet.
+#   * excess flat across rings inside bin 1 -> the edge is NOT it; a dense-mesh
+#     representativeness effect or a real model difference survives.
+#   * both arms rising toward the edge with a FLAT RATIO -> the rings select
+#     hard ocean and neither arm is implicated, exactly as for node distance.
+# The ALL-CELLS table is the control for the bin-1 one: a ring effect that is
+# just as strong everywhere is not a fact about the dense bin.
+#
+# WHAT "EDGE" MEANS HERE, stated because the name would otherwise overclaim:
+# the complement of the scored mask is real land UNION every cell some arm
+# masked away, so ring 1 is "touching something not scored", NOT "touching a
+# coastline". That is the right surface for a mask-mismatch question and the
+# wrong one for a coastal-physics question; do not read it as the latter.
+#
+# THE GATE THAT THE RETRACTED VERSION (3558d23d2) WOULD HAVE FAILED: each
+# table recombines its rings through the area-fraction identity and ABORTS if
+# the result misses the stratum total by more than 5e-4. The retraction was
+# caused by recombining with CELL COUNTS instead of area; a decomposition that
+# cannot reproduce the number it decomposes is arithmetic about nothing.
 set -uo pipefail
 M=/burg-archive/glab/users/pg2328/_fluxacc_wt; cd $M || exit 1
 export PYTHONPATH="$M/src:$(ls -d $M/packages/*/ | sed 's:/$::' | tr '\n' ':')$M:$M/scripts/validate"
@@ -147,6 +184,104 @@ print("Read this against the PRE-REGISTERED reading in the card header: a flat "
       "carries it. The ratio, not either arm's own trend, is the discriminator "
       "-- both arms see the same bins, so anything the bins select about ocean "
       "difficulty divides out.")
+
+# ---------------------------------------------------------------------------
+# SECOND STRATIFIER: DISTANCE TO THE EDGE OF THE SCORED DOMAIN, AT FIXED NODE
+# DISTANCE.  See the card header for the pre-registered reading.
+# ---------------------------------------------------------------------------
+if "edge_ring" not in d.files:
+    raise SystemExit(
+        "VACUOUS: this dump predates --dump-cells writing edge_ring; "
+        "re-run the scorer above rather than reading a stale npz.")
+ring = np.asarray(d["edge_ring"], dtype=int)
+
+# ORIENTATION GATE. The recombination gate below proves the rings PARTITION the
+# stratum, which an inverted labelling would also satisfy -- and reading the
+# table upside down is exactly the kind of error that survives a passing check.
+# So verify independently, without reusing the dilation that built the labels:
+# every ring-1 cell must touch a non-scored cell among its eight neighbours,
+# and no interior cell may.
+touch = np.zeros(scored.shape, dtype=bool)
+for dy in (-1, 0, 1):
+    for dx in (-1, 0, 1):
+        if dy == 0 and dx == 0:
+            continue
+        s = np.roll(~scored, dx, axis=1)         # longitude periodic
+        sh = np.zeros_like(s)
+        if dy == 0:
+            sh = s
+        elif dy > 0:
+            sh[dy:] = s[:-dy]
+        else:
+            sh[:dy] = s[-dy:]
+        touch |= sh
+bad1 = int((scored & (ring == 1) & ~touch).sum())
+bad0 = int((scored & (ring == 0) & touch).sum())
+if bad1 or bad0:
+    raise SystemExit(
+        f"FATAL: edge_ring is not oriented as documented -- {bad1} ring-1 "
+        f"cells touch no unscored neighbour and {bad0} interior cells do. "
+        f"Every ring number below would be read backwards.")
+print(f"[gate] edge_ring orientation verified on {int((ring == 1).sum())} "
+      f"ring-1 cells against an independent neighbour test")
+
+# The excess variance is the quantity that decomposes the GAP rather than
+# describing either arm: with frac_s the area fraction of stratum s, the
+# identity total_rms^2 = sum_s frac_s * rms_s^2 holds for EACH arm, so the
+# difference of the two totals splits as sum_s frac_s * (rms_b^2 - rms_a^2).
+def excess_table(mask_all, title):
+    tot = area[mask_all].sum()
+    if tot <= 0:
+        print(f"\n{title}: EMPTY")
+        return
+    ra_all, rb_all = wrms(ea, area, mask_all), wrms(eb, area, mask_all)
+    gap = rb_all ** 2 - ra_all ** 2
+    print(f"\n{title}")
+    print(f"  whole stratum: tripole {ra_all:.4f}  {lab_b} {rb_all:.4f}  "
+          f"n={int(mask_all.sum())}")
+    print(f"{'edge ring':>12} {'cells':>7} {'area frac':>9} {'tripole':>9} "
+          f"{lab_b:>9} {'ratio':>7} {'% of gap':>9}")
+    # Rings run 1 (touching a non-scored cell) outward; 0 is everything
+    # deeper inside than the dump labelled, i.e. the interior.
+    groups = [(k, f"{k}") for k in range(1, int(ring.max()) + 1)]
+    groups.append((0, "interior"))
+    acc_a = acc_b = 0.0
+    n_rows = 0
+    for val, lab in groups:
+        m = mask_all & (ring == val)
+        n = int(m.sum())
+        if n == 0:
+            continue
+        n_rows += 1
+        frac = float(area[m].sum() / tot)
+        ra, rb = wrms(ea, area, m), wrms(eb, area, m)
+        acc_a += frac * ra ** 2
+        acc_b += frac * rb ** 2
+        share = (frac * (rb ** 2 - ra ** 2) / gap * 100.0) if gap != 0 else float("nan")
+        print(f"{lab:>12} {n:7d} {frac:9.3f} {ra:9.4f} {rb:9.4f} "
+              f"{rb / ra if ra > 0 else float('nan'):7.2f} {share:8.1f}%")
+    if n_rows < 3:
+        raise SystemExit(f"VACUOUS: only {n_rows} non-empty rings in {title}")
+    # The recombination gate: if these do not reproduce the stratum totals the
+    # decomposition is not the identity it claims to be, and every share above
+    # is arithmetic about nothing.  This is the check the RETRACTED
+    # count-weighted version (3558d23d2) would have failed.
+    print(f"  recombine: tripole {np.sqrt(acc_a):.4f} vs {ra_all:.4f}, "
+          f"{lab_b} {np.sqrt(acc_b):.4f} vs {rb_all:.4f}")
+    for got, want, who in ((np.sqrt(acc_a), ra_all, "tripole"),
+                           (np.sqrt(acc_b), rb_all, lab_b)):
+        if abs(got - want) > 5e-4:
+            raise SystemExit(
+                f"FATAL: {who} ring recombination {got:.6f} != stratum total "
+                f"{want:.6f}; the area-fraction identity does not hold and "
+                f"nothing above is readable.")
+
+lo1, hi1 = edges[0], edges[1]
+bin1 = use & (nd >= lo1) & (nd < hi1)
+excess_table(bin1, f"BIN 1 ONLY (node distance {lo1:.0f}-{hi1:.0f} km), "
+                   f"by distance to the scored domain's edge")
+excess_table(use, "ALL SCORED CELLS, by distance to the scored domain's edge "
+                  "(the control: is any ring effect specific to bin 1?)")
 EOF
 rc2=$?
 echo "=== card exit: $rc2 ==="
