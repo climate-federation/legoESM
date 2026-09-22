@@ -68,8 +68,26 @@ B = np.load(sys.argv[2], allow_pickle=True)
 lat = np.asarray(A["lat_T"], dtype=np.float64)
 lon = np.asarray(A["lon_T"], dtype=np.float64) % 360.0
 area = np.asarray(A["cell_area"], dtype=np.float64)
-wet = np.asarray(A["land_mask"]) < 0.5 if A["land_mask"].max() <= 1.0 else np.asarray(A["land_mask"]) > 0.5
-print(f"wet cells: {int(wet.sum())} of {wet.size}   (land_mask min {A['land_mask'].min()}, max {A['land_mask'].max()})")
+# The field named land_mask holds 1 for OCEAN in these snapshots, not for
+# land. The first version of this card guessed the other way and every
+# statistic came out exactly zero -- because it was averaging over land fill
+# values, which are identical in both files. The guess is no longer made:
+# the polarity is DERIVED from where the ocean actually has water, and the
+# derivation is asserted.
+mask_raw = np.asarray(A["land_mask"], dtype=np.float64)
+Tsurf_a = np.take(np.asarray(A["T"], dtype=np.float64), 0, axis=2)
+hi = mask_raw > 0.5
+lo = ~hi
+# Ocean cells carry a spread of temperatures; land fill does not.
+spread_hi = float(np.nanstd(Tsurf_a[hi])) if hi.any() else 0.0
+spread_lo = float(np.nanstd(Tsurf_a[lo])) if lo.any() else 0.0
+wet = hi if spread_hi > spread_lo else lo
+polarity = "1=ocean" if wet is hi else "0=ocean"
+print(f"land_mask polarity DERIVED as {polarity}: surface-T spread is "
+      f"{spread_hi:.3f} K where mask>0.5 and {spread_lo:.3f} K where mask<=0.5")
+print(f"wet cells: {int(wet.sum())} of {wet.size} "
+      f"({100.0 * wet.sum() / wet.size:.1f}%)")
+assert wet.sum() > 0.5 * wet.size, "wet fraction implausibly small for a global ocean mesh"
 
 def region_masks():
     for name, s, n, w, e in BOXES:
@@ -103,13 +121,33 @@ for var in ("T", "S"):
         print("  !! surface field does not match the grid shape -- axis guess wrong, skipping")
         continue
     print(f"  {'region':20s} {'wRMS':>10s} {'wmean':>10s} {'max|d|':>10s} {'cells':>9s}")
+    seen = {}
     for name, mask in region_masks():
         s = stats(surf, mask)
         if s is None:
             print(f"  {name:20s} {'no cells':>10s}")
             continue
         rms, mean, mx, n = s
+        seen[name] = (rms, n)
         print(f"  {name:20s} {rms:10.4f} {mean:+10.4f} {mx:10.4f} {n:9d}")
+
+    # NON-VACUITY GATES. The reproducibility job already proved these two
+    # files differ -- 2.614 K in T over roughly 42% of cells. So a table of
+    # zeros here does not mean the runs agree, it means this card is
+    # measuring the wrong cells, which is exactly what happened on its first
+    # run. Both gates below would have caught that immediately.
+    if seen.get("global", (0.0, 0))[0] <= 0.0:
+        raise SystemExit(
+            f"VACUOUS: global {var} difference is exactly zero, but the two "
+            f"files are known to differ. The mask or the level axis is wrong."
+        )
+    n_nino3 = seen.get("nino3", (0.0, 0))[1]
+    if n_nino3 < 500:
+        raise SystemExit(
+            f"VACUOUS: nino3 resolves only {n_nino3} cells. That box spans 10 "
+            f"degrees of latitude and 60 of longitude in open ocean and must "
+            f"hold thousands. Check the units and layout of lat_T / lon_T."
+        )
 
 print("\nREAD THIS AGAINST the standing day-30 scorecard, ours minus NEMO: "
       "southern ocean -0.107, off North America -0.012, Arctic +0.010, "
