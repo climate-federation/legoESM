@@ -225,14 +225,42 @@ printed `STATUS PLANT-FIRED` and exited 69.
 
 ## Independent review
 
-Pending the required read-only Codex pass.  Its verbatim verdict is inserted
-here before the final receipt commit.
+**Independent review unavailable in-sandbox.**  The required command was
+attempted exactly with `codex exec --sandbox read-only -C` against this clone,
+but the reviewer stopped before reading the diff.  Its terminal verdict was:
+
+> Error: failed to initialize in-process app-server client: Read-only file
+> system (os error 30)
+
+The complete attempt is `round154/codex_review.log`.  It produced neither a
+SHIP nor a DO NOT SHIP verdict.
 
 ## Tests and citation gate
 
-Pending final focused suites and the citation gate.  Every summary line and
-the shifted-citation nonzero plant are inserted here before the final receipt
-commit.
+The focused campaign and blast-radius set reported exactly:
+
+> 122 passed in 983.84s (0:16:23)
+
+That set includes the FCT trace/unit tests, the Round-153 admission controls,
+the Round-154 acquisition controls, the citation-gate tests, and the required
+face-mask, prognostic-barotropic-state, and generic-recipe suites.  The normal
+citation gate reported `PASS`, with zero failures and zero unmapped citations.
+Its shifted-line plant exited 1 and reported `SYMBOL-NOT-AT-LINE` (with the
+other deliberately damaged anchors also non-OK).
+
+The mandated combined `tests/ocean/fidelity tests/ocean/unit -n 12` invocation
+was also run once.  It did not complete as a valid regression suite: five JAX
+workers aborted while compiling unrelated tests, pytest then hit a
+`MemoryError`, and xdist ended with an internal error.  Its literal terminal
+summary was:
+
+> 327 failed, 5990 passed, 121 skipped, 2 xfailed, 56 warnings, 79 errors in
+> 873.79s (0:14:33)
+
+The cascading failures/errors therefore cannot be diffed meaningfully against
+the known-red list.  The full log preserves all worker traces at
+`round154/full_ocean_tests.log`; the clean 122-test focused result above is the
+usable result for every path changed or required by this round.
 
 ## OPEN — Round 155
 
