@@ -117,8 +117,10 @@ claim.  No configuration choice was made.
 
 ## Evidence and tests
 
-The focused extended-walker suite reports `4 passed in 6.18s`.  The
-preregistration citation gate passes with two mapped citations and no failures;
+The final focused extended-walker and citation-gate suite reports
+`20 passed in 8.11s`.  The preregistration citation gate passes with two mapped
+citations and no failures; the receipt gate passes with three mapped citations
+and no failures;
 shifting the
 `GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/dynldf_lev.f90:121-130`
 citation by two lines makes it report
@@ -132,6 +134,9 @@ recorded below after the receipt commit.
 | `layout_plant.log` | `59c746863b621b902b93c83d5fe391707fe973829792945b9706167048cdf1b5` |
 | `prereg_citation_gate.json` | `a98dda6b23dfc93f13948cd2d28827aab6a3e276242b948dd25772090691a657` |
 | `prereg_citation_plant.json` | `dc9fcac113f2a6b07b6c98791a59f434790b566dc4fc999ac3bb675e2b28279d` |
+| `receipt_citation_gate.json` | `dc8fecd7eb3b0e83d75f470ed60ec890fbf41b13eda02bb6f4c49d709f685cd0` |
+| `receipt_citation_plant.json` | `32ed5136295b7aa4a5526aa22a163bc4e6785af3f10d76652c7a301981071600` |
+| `focused_tests_final.log` | `a28ac4c3b08e04414ef1a51c11044362dcfa40fa09bf55e68908fd63f8e7ce4f` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
 
 ## OPEN — round 149
