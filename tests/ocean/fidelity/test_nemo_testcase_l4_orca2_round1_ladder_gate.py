@@ -130,3 +130,4 @@ def test_acquisition_report_binds_tree_binary_and_compiled_source():
     assert '"worktree": worktree_stamp()' in run_sh
     assert 'for name in ("nemo", "compiled_iceistate.f90")' in run_sh
     assert 'raise SystemExit(f"twin producer differs: {name}")' in run_sh
+    assert 'readonly MODE=${1:---run}' in run_sh

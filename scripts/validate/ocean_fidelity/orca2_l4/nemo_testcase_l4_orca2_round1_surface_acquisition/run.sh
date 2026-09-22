@@ -9,9 +9,9 @@ refuse_unexpected() {
 }
 trap refuse_unexpected ERR
 
-# USER-EXECUTED ACQUISITION ONLY.  --run is the only mode that invokes
-# makenemo and mpirun.  Codex must use --preflight-only, never --run.
-readonly MODE=${1:---preflight-only}
+# USER-EXECUTED ACQUISITION ONLY.  No argument or --run invokes makenemo and
+# mpirun.  Agents must pass --preflight-only explicitly and never use --run.
+readonly MODE=${1:---run}
 case "$MODE" in
   --preflight-only|--run|--finalize) ;;
   *)
