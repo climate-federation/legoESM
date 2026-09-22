@@ -73,6 +73,9 @@ FILES = {
     # that executes the category-summed initial snow/ice load adjustment.
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90": (
         _ORCA2_COMPILED / "iceistate.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo"
+        "/stprk3.f90"),
     # --- round 40 paths: the stage-3 momentum operators and zdf_mxl ---
     "dynvor.F90": _DYN / "dynvor.F90",
     "dynkeg.F90": _DYN / "dynkeg.F90",
@@ -608,6 +611,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:442-459': [
         'snwice_mass  (:,:) = tmask(:,:,1) * SUM',
         'ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj', 18],
+    # --- ORCA2 card round 4: returned surface record is root-rank only ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90:396-400': [
+        'IF( .NOT.lwp ) RETURN',
+        "FORM='UNFORMATTED', STATUS='NEW', ACTION='WRITE', IOSTAT=ios", 5],
     # --- round 135: accepted-state swap before the daily tracer record ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
         'IF ( .NOT. l_perpetual_ts ) THEN', ('ENDIF', 8), 10],
