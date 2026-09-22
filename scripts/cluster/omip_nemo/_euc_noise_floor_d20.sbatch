@@ -65,16 +65,25 @@ for f in ${STEM}_grid_T.nc ${STEM}_grid_U.nc ${STEM}_grid_V.nc ${STEM}_grid_W.nc
   [ -r "$f" ] || { echo "FATAL: missing $f"; exit 1; }
 done
 
+# DAY is settable because the surface null was later shown to GROW about
+# sixfold every five days. A floor measured once at day 20 is not a floor at
+# day 25 or 30, and the equatorial numbers are the session's main surviving
+# claim, so they get re-tested at the later days rather than assumed stable.
+# The oracle record follows the day by the usual rule, REC = DAY/5 - 1.
+DAY=${DAY:-0020}
+REC0=$(( 10#$DAY / 5 - 1 )); REC1=$(( REC0 + 1 ))
+echo "### equatorial same-configuration null at day ${DAY} (NEMO rec ${REC0}:${REC1})"
+
 rc=0
-for pair in "d30run:$R/trp_faithz0_d30/snapshot_day0020.npz" \
-            "d90run:$R/trp_faithz0_d90/snapshot_day0020.npz"; do
+for pair in "d30run:$R/trp_faithz0_d30/snapshot_day${DAY}.npz" \
+            "d90run:$R/trp_faithz0_d90/snapshot_day${DAY}.npz"; do
   TAG=${pair%%:*}; SNAP=${pair#*:}
   [ -r "$SNAP" ] || { echo "FATAL: missing $SNAP"; rc=1; continue; }
-  echo "############ $TAG  day 20  (NEMO rec 3:4) ############"
+  echo "############ $TAG  day $DAY  (NEMO rec ${REC0}:${REC1}) ############"
   $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline.py \
     --legoesm-snapshot "$SNAP" --nemo-gridt ${STEM}_grid_T.nc \
-    --nemo-t-recs "3:4" --label "null_$TAG" \
-    --nemo-wfile ${STEM}_grid_W.nc --nemo-w-var wo --nemo-w-recs "3:4" \
+    --nemo-t-recs "${REC0}:${REC1}" --label "null_$TAG" \
+    --nemo-wfile ${STEM}_grid_W.nc --nemo-w-var wo --nemo-w-recs "${REC0}:${REC1}" \
     --nemo-ufile ${STEM}_grid_U.nc --nemo-vfile ${STEM}_grid_V.nc \
     --mesh-mask "$MESH" 2>&1 | tail -400
   r=${PIPESTATUS[0]}; echo "### $TAG rc=$r"; [ "$r" -eq 0 ] || rc=$r
