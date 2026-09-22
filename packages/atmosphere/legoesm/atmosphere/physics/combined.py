@@ -126,6 +126,7 @@ def make_physics(
     budget_ledger: bool = False,
     budget_ledger_level_weight=None,
     physics_cadence: str = "off",
+    physics_cadence_steps: int = 1,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -198,6 +199,14 @@ def make_physics(
         raise ValueError(
             "physics_cadence (physics_update_steps > 1) is wired into the MPAS "
             f"lane only; model_type={model_type!r} would silently ignore it")
+    if (not isinstance(physics_cadence_steps, int)
+            or isinstance(physics_cadence_steps, bool) or physics_cadence_steps < 1):
+        raise ValueError(
+            f"physics_cadence_steps must be an int >= 1, got {physics_cadence_steps!r}")
+    if physics_cadence == "off" and physics_cadence_steps != 1:
+        raise ValueError(
+            f"physics_cadence_steps={physics_cadence_steps} with physics_cadence="
+            "'off' would be silently ignored; pass physics_cadence='write'")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
             config, dt, column_mesh=column_mesh, need_rad=need_rad)
@@ -215,6 +224,7 @@ def make_physics(
             config, dt, model_type="mpas", column_mesh=column_mesh,
             need_rad=need_rad, f_land=f_land, land_beta=land_beta,
             physics_cadence=physics_cadence,
+            physics_cadence_steps=physics_cadence_steps,
             budget_ledger=budget_ledger,
             budget_ledger_level_weight=budget_ledger_level_weight)
     else:
@@ -408,7 +418,43 @@ def _same_shape(name, cached, new):
 _SEEDING = ()
 
 
-def _with_physics_cache(physics_fn):
+# The tendency fields the dycore integrates into the STATE (``state + dt *
+# tend``); everything else on the tendency pytree (precip, surface / TOA
+# fluxes, ledger rows) is a diagnostic RATE the driver accumulates per step.
+_STATE_TENDENCY_FIELDS = ("du_dt", "dv_dt", "dT_dt", "dp_s_dt", "dphis_dt",
+                          "tracer_tendencies")
+
+
+def _scale_state_tendencies(tend, factor):
+    """``tend`` with the state-changing tendencies times ``factor`` (a static
+    Python number; ``0`` gives exact zeros, never ``0 * NaN``) and every
+    diagnostic field untouched."""
+    def _one(f):
+        if factor == 0:
+            return f.replace(data=jnp.zeros_like(f.data))
+        return f.replace(data=f.data * factor)
+    upd = {}
+    for name in _STATE_TENDENCY_FIELDS:
+        v = getattr(tend, name, None)
+        if v is None:
+            continue
+        upd[name] = ({k: _one(f) for k, f in v.items()} if isinstance(v, dict)
+                     else _one(v))
+    return tend._replace(**upd)
+
+
+def _with_physics_cache(physics_fn, n_steps=1):
+    """The physics ("write") step of the cadence.
+
+    CAM-FV sequence (``physics_update`` applies ``ptend * ztodt`` to the state
+    once per physics step, ``uv3s_update`` likewise for the winds, and the
+    dynamics substeps run unforced): the state tendencies are returned times
+    ``n_steps`` so the dycore's ``state + dt * tend`` on THIS step is the whole
+    ``dt * n_steps`` physics increment, and the held steps in between apply
+    zero (:func:`held_physics_variant`).  The cache keeps the UNSCALED rates
+    (window-mean precip / fluxes / ledger rows for the accumulators).
+    ``n_steps == 1`` returns the tendency unchanged.
+    """
     def cached_physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
         out = physics_fn(state, grid, sigma_coord, phys_state=phys_state, forcing=forcing)
         tend, ps_out = (out if type(out) is tuple else (out, None))
@@ -419,20 +465,24 @@ def _with_physics_cache(physics_fn):
                 "physics cadence 'write' needs a PhysicsState carry to hold the "
                 "cache; step was called with phys_state=None")
         prev = phys_state.held_physics
+        applied = tend if n_steps == 1 else _scale_state_tendencies(tend, n_steps)
         if prev == _SEEDING:
-            return tend, ps_out
+            return applied, ps_out
         if prev is None:
             raise ValueError(
                 "physics cadence 'write' with an unseeded PhysicsState.held_physics: "
                 "seed it with physics_cache_seed() so the carry structure is fixed "
                 "before the first step")
         ps_out = update_physics_state(ps_out, {"held_physics": merge_physics_cache(prev, tend)})
-        return tend, ps_out
+        return applied, ps_out
     return _copy_physics_fn_attrs(cached_physics_fn, physics_fn)
 
 
 def held_physics_variant(physics_fn):
-    """The held-physics step: returns ``PhysicsState.held_physics`` unchanged.
+    """The held-physics step: ``PhysicsState.held_physics`` with the STATE
+    tendencies zeroed (the whole physics increment was applied on the physics
+    step, CAM-FV style) and the diagnostic rates (precip, surface / TOA
+    fluxes, ledger rows) re-published unchanged for the per-step accumulators.
 
     Derived from the built ``"write"`` physics fn (no second construction of
     the module chain); carries every hook/marker of the source fn.  Apply any
@@ -445,7 +495,7 @@ def held_physics_variant(physics_fn):
                 "held-physics step with an empty PhysicsState.held_physics: seed it with "
                 "physics_cache_seed() and run a physics ('write') step first")
         # per-step INPUT fields are consumed (reset) like on any other call
-        return cache, update_physics_state(phys_state, {})
+        return _scale_state_tendencies(cache, 0), update_physics_state(phys_state, {})
     held_physics_fn = _copy_physics_fn_attrs(held_physics_fn, physics_fn)
     # reads no neighbour cell (no state at all): the MPI step skips the halo
     # exchange before it
@@ -479,13 +529,17 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                land_beta: float = 1.0,
                                budget_ledger: bool = False,
                                budget_ledger_level_weight=None,
-                               physics_cadence: str = "off") -> Callable:
+                               physics_cadence: str = "off",
+                               physics_cadence_steps: int = 1) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
     ``physics_cadence``: ``"off"`` (default, byte-identical to before);
     ``"write"`` additionally stores the full tendency pytree of every call in
-    ``PhysicsState.held_physics`` (seed it with :func:`physics_cache_seed`;
-    :func:`held_physics_variant` derives the step that re-applies it).
+    ``PhysicsState.held_physics`` (seed it with :func:`physics_cache_seed`)
+    and returns the state tendencies times ``physics_cadence_steps`` so the
+    dycore applies the whole physics increment on this step;
+    :func:`held_physics_variant` derives the step that applies zero state
+    tendency and re-publishes the cached diagnostic rates in between.
 
     Uses the unified ``HydrostaticTendencies`` with optional ``dv_dt``.
     When *model_type* is ``"mpas"``, the radiation factory is called
@@ -950,7 +1004,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
 
     physics_fn = _attach_lifecycle_hooks(physics_fn, tagged_fns)
     if physics_cadence == "write":
-        physics_fn = _with_physics_cache(physics_fn)
+        physics_fn = _with_physics_cache(physics_fn, physics_cadence_steps)
     return physics_fn
 
 

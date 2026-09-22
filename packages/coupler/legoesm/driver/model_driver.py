@@ -9545,35 +9545,52 @@ class ModelDriver:
                               / jnp.sum(self.sigma.dsigma)))
         # ---- Physics cadence (CAM6 suite) ----
         # ``physics_update_steps > 1``: the full physics runs every
-        # PHYS_UPDATE_STEPS-th step and writes its complete tendency pytree
-        # into ``PhysicsState.held_physics``; the in-between steps run a
-        # held variant that returns that cache unchanged (one more compiled
-        # ``model.step``, no per-step Python branch inside the trace).  The
-        # cache is seeded from ``jax.eval_shape`` of the full variant before
-        # the first step so the carry structure never changes (no retrace).
-        # Radiation cadence is unchanged: ``rad_update_steps`` is validated
-        # as a multiple of PHYS_UPDATE_STEPS, so every radiation step is a
-        # physics step.  Off by default (cadence "off" = byte-identical).
+        # PHYS_UPDATE_STEPS-th step with physics timestep PHYS_UPDATE_STEPS*DT
+        # and its whole increment is applied to the state on THAT step (the
+        # returned state tendencies are scaled by N so the dycore's
+        # ``state + DT * tend`` is the N*DT increment); the in-between steps
+        # run a held variant that applies ZERO state tendency and re-publishes
+        # the cached diagnostic rates (precip, surface / TOA fluxes, ledger
+        # rows) for the per-step accumulators (one more compiled
+        # ``model.step``, no per-step Python branch inside the trace).  This
+        # is CAM-FV's sequence: physics_update applies ptend*ztodt once,
+        # uv3s_update the wind increment once, and the dynamics substeps run
+        # unforced (dp_coupling.F90; FV has no ftype -- se_ftype is SE-only).
+        # The earlier held-RATE design (2026-09-21) re-applied a rate fixed on
+        # the window's start state for N dynamics steps; Morrison's
+        # condensation then kept heating a storm column after the dynamics
+        # had removed its vapour (+65 K in one window, NaN by day 1 on the
+        # L32 + ZM deck).  The cache is seeded from ``jax.eval_shape`` of the
+        # full variant before the first step so the carry structure never
+        # changes (no retrace).  Radiation cadence is unchanged:
+        # ``rad_update_steps`` is validated as a multiple of
+        # PHYS_UPDATE_STEPS, so every radiation step is a physics step.  Off
+        # by default (cadence "off" = byte-identical).
+        # Process ledger: the physics rows are the cached window-mean RATES
+        # on every step while the state increment lands on one step, so the
+        # per-step residual (ROW_OTHER) carries +(N-1)*R on the physics step
+        # and -R on each held step; only sums over WHOLE windows attribute
+        # correctly.  Diagnostic intervals are multiples of the cadence on
+        # the CAM6 deck (diag_days*768 steps).
+        # Post-increment order, as in CAM (qneg3 right after physics_update):
+        # the dycore's dry-mass fix, conserving tracer clamp and hard-
+        # saturation drain run on the incremented state in the same step.
         # Departures from CAM6 (documented, not emulated):
-        #  * ftype: CAM applies the physics INCREMENT to the tracers at the
-        #    physics step (ftype=2 hands only T/u/v to the dycore as
-        #    tendencies spread over the dynamics substeps); here every
-        #    field, tracers included, is applied as a rate on each dynamics
-        #    step -- same integral, tracers reach the state N-1 steps later.
-        #  * coupling order: CAM splits the physics around the surface
-        #    coupler (tphysbc -> coupler -> tphysac, then dynamics); here the
-        #    step is dynamics -> whole physics, and the land tile keeps its
-        #    own cadence (land_update_seconds), now forced with the held
-        #    atmospheric fluxes on every step.
+        #  * order: CAM applies the increment BEFORE its dynamics step
+        #    (tphysbc -> coupler -> tphysac -> dynamics); here the step is
+        #    dynamics -> physics increment, i.e. the dynamics on the physics
+        #    step sees the pre-increment state (one DT of lag, not N).
+        #  * coupling: CAM splits the physics around the surface coupler;
+        #    here the land tile keeps its own cadence (land_update_seconds),
+        #    forced with the cached atmospheric fluxes on every step.
         #  * held steps recompute the analytic Held-Suarez forcing (cheap);
         #    stochastic draws / carried memories advance on physics steps.
         # The physics TIMESTEP is the cadence (CAM: dtime = 1800 s is the
         # physics step): every scheme integrates its prognostic memory
         # (TKE, convective memory, ...) and forms its implicit updates over
-        # PHYS_UPDATE_STEPS*DT, and the returned RATES are applied by the
-        # dynamics for exactly that long -- same integral as CAM's one
-        # increment per physics step.  With DT the memories would advance
-        # 1/N of simulated time (codex round 1).
+        # PHYS_UPDATE_STEPS*DT, and the returned RATES times that span are
+        # the one increment CAM applies per physics step.  With DT the
+        # memories would advance 1/N of simulated time (codex round 1).
         PHYS_UPDATE_STEPS = cfg.physics_update_steps
         if (not isinstance(PHYS_UPDATE_STEPS, int)
                 or isinstance(PHYS_UPDATE_STEPS, bool) or PHYS_UPDATE_STEPS < 1):
@@ -9581,6 +9598,28 @@ class ModelDriver:
                 f"physics_update_steps must be an int >= 1, got {PHYS_UPDATE_STEPS!r}")
         _hold_phys = PHYS_UPDATE_STEPS > 1
         _phys_cadence_write = "write" if _hold_phys else "off"
+        # The cache is per-job (step 0 of every job is a physics step, i.e.
+        # a whole increment is applied at once), so a restart from inside a
+        # window would apply a second increment where the uninterrupted run
+        # had held steps.  Refuse it; the wallclock exit below only
+        # checkpoints on window boundaries so the chain never produces one.
+        if _hold_phys and start_step % PHYS_UPDATE_STEPS != 0:
+            raise ValueError(
+                f"physics_update_steps={PHYS_UPDATE_STEPS}: restart step "
+                f"{start_step} is not on a physics-window boundary (the held "
+                "cache is not persisted, so resuming mid-window would apply "
+                "an extra physics increment); restart from a checkpoint "
+                "whose absolute step is a multiple of the cadence")
+        # ... and never WRITE one: every periodic checkpoint and the final
+        # one must land on a window boundary, else the next link is refused.
+        if _hold_phys and (n_steps_total % PHYS_UPDATE_STEPS != 0
+                           or (CHECKPOINT_INTERVAL > 0
+                               and CHECKPOINT_INTERVAL % PHYS_UPDATE_STEPS != 0)):
+            raise ValueError(
+                f"physics_update_steps={PHYS_UPDATE_STEPS}: the run length "
+                f"({n_steps_total} steps) and the checkpoint interval "
+                f"({CHECKPOINT_INTERVAL} steps) must both be multiples of the "
+                "cadence so every checkpoint is a resumable window boundary")
         DT_PHYS = DT * PHYS_UPDATE_STEPS
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT_PHYS,
                                   budget_ledger_level_weight=_ledger_weight,
@@ -9591,7 +9630,8 @@ class ModelDriver:
                                           else None),
                                   land_beta=_land_beta,
                                   budget_ledger=_budget_ledger_on,
-                                  physics_cadence=_phys_cadence_write)
+                                  physics_cadence=_phys_cadence_write,
+                                  physics_cadence_steps=PHYS_UPDATE_STEPS)
         if _hold_phys:
             from legoesm.atmosphere.physics.combined import held_physics_variant
             physics_fn_held = held_physics_variant(physics_fn)
@@ -9601,9 +9641,10 @@ class ModelDriver:
             logger.info(
                 "  Physics cadence: full physics every "
                 f"{PHYS_UPDATE_STEPS} steps (physics timestep "
-                f"{DT_PHYS:.1f} s = {DT_PHYS / 60.0:.1f} min); cached tendencies "
-                "(u, v, T, p_s, tracers, precip, surface/TOA fluxes, ledger) "
-                "re-applied in between"
+                f"{DT_PHYS:.1f} s = {DT_PHYS / 60.0:.1f} min); the whole "
+                "physics increment (u, v, T, p_s, tracers) is applied on the "
+                "physics step (CAM-FV physics_update), zero in between; "
+                "cached precip / surface / TOA rates re-published every step"
             )
 
         # ---- Radiation sub-cycle (issue #316, MPAS port) ----
@@ -9632,7 +9673,8 @@ class ModelDriver:
                          land_beta=_land_beta,
                          budget_ledger=_budget_ledger_on,
                          budget_ledger_level_weight=_ledger_weight,
-                         physics_cadence=_phys_cadence_write)
+                         physics_cadence=_phys_cadence_write,
+                         physics_cadence_steps=PHYS_UPDATE_STEPS)
             if _subcycle_rad else None
         )
         if _subcycle_rad:
@@ -11813,8 +11855,11 @@ class ModelDriver:
                 _ckpt_day = START_DAY + (step + 1) * DT / 86400.0
                 _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
                 _ckpt(start_step + step + 1, _ckpt_day)
-                # Wallclock-aware clean exit for long HPC dependency chains.
-                self._maybe_wallclock_exit(_ckpt, start_step + step + 1, _ckpt_day)
+                # Wallclock-aware clean exit for long HPC dependency chains --
+                # only on a physics-window boundary (see the restart guard).
+                if (start_step + step + 1) % PHYS_UPDATE_STEPS == 0:
+                    self._maybe_wallclock_exit(
+                        _ckpt, start_step + step + 1, _ckpt_day)
 
         # Write the CMOR NetCDF from the (now-fed) accumulators on a CLEAN
         # completion.  MUST run BEFORE the final checkpoint below so its
