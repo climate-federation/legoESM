@@ -35,7 +35,11 @@ import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean import vertical as vertical_module
-from legoesm.ocean.vertical import nemo_qco_live_face_geometry_cgrid
+from legoesm.ocean.vertical import (
+    compute_layer_thickness,
+    nemo_qco_live_face_geometry_cgrid,
+    nemo_qco_live_vorticity_e3f_cgrid,
+)
 
 
 def _synthetic_operands():
@@ -147,6 +151,51 @@ def test_shared_builder_carries_source_literal_live_face_reciprocal_bits():
     live_e3u = e3u0 * (np.float64(1.0) + r3u[..., None] * umask)
     rederived = np.float64(1.0) / np.sum(live_e3u, axis=-1)
     assert not np.array_equal(rederived.view(np.uint64), expected.view(np.uint64))
+
+
+def test_live_f_thickness_uses_each_cards_own_mesh_without_bridge_operands():
+    """Native and bridged GYRE cards reach one own-mesh F-thickness rule."""
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    set_policy(PrecisionPolicy.fp64())
+    native = build_nemo_gyre_recipe()
+    native_h0 = compute_layer_thickness(
+        jnp.zeros_like(native.initial_state.eta.data),
+        native.initial_state.H_bathy.data, native.z_coord,
+        min_water_column_m=native.model_config.min_water_column_m)
+    native_tmask = jnp.broadcast_to(
+        native.initial_state.land_mask.data[..., None], native_h0.shape)
+    native_e3f = nemo_qco_live_vorticity_e3f_cgrid(
+        native.initial_state.eta.data, native.z_coord,
+        native.initial_state.eta.data.dtype, grid=native.grid,
+        e3t_0=native_h0, tmask=native_tmask)
+    assert np.asarray(native_e3f).shape == (23, 33, 30)
+    assert bool(jnp.all(jnp.isfinite(native_e3f)))
+
+    bridged = build_nemo_testcase_card("GYRE-zco").recipe
+    recorded_default = nemo_qco_live_vorticity_e3f_cgrid(
+        bridged.initial_state.eta.data, bridged.z_coord,
+        bridged.initial_state.eta.data.dtype, grid=bridged.grid)
+    own_mesh = nemo_qco_live_vorticity_e3f_cgrid(
+        bridged.initial_state.eta.data, bridged.z_coord,
+        bridged.initial_state.eta.data.dtype, grid=bridged.grid,
+        e3t_0=bridged.z_coord.nemo_e3t_0,
+        tmask=bridged.z_coord.is_active)
+    np.testing.assert_array_equal(
+        np.asarray(own_mesh).view(np.uint64),
+        np.asarray(recorded_default).view(np.uint64))
+
+    # PLANTED VIOLATION: removing one consumed mask cell changes a wet F row.
+    changed_mask = bridged.z_coord.is_active.at[10, 15, 0].set(False)
+    changed = nemo_qco_live_vorticity_e3f_cgrid(
+        bridged.initial_state.eta.data, bridged.z_coord,
+        bridged.initial_state.eta.data.dtype, grid=bridged.grid,
+        e3t_0=bridged.z_coord.nemo_e3t_0, tmask=changed_mask)
+    assert not np.array_equal(
+        np.asarray(changed).view(np.uint64), np.asarray(own_mesh).view(np.uint64))
 
 
 def test_ws_rk3_stage_transport_reaches_the_shared_builder():

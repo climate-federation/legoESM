@@ -5104,7 +5104,11 @@ class LatLonCGridOceanModel:
         # rebuilt its own min-of-stretched-T pair.  ``None`` (every other
         # integrator) keeps that historical min rule.
         _ws_face_thickness_kbb = None
+        _ws_ldf_face_thickness_kbb = None
         _ws_ldf_thickness_kbb = None
+        _ws_uses_nemo_ldf_e3 = (
+            _cfg_b.lateral_viscosity_operator == "nemo_div_curl"
+            and _cfg_b.lateral_viscosity_e3_weighting == "nemo_e3")
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
             # NEMO's e3u/e3v(Kbb) = e3u_0*(1+r3u(Kbb)) for the step-entry
             # dyn_adv (stp2d.F90:172 -> dynadv_up3.F90:160; the same pair
@@ -5155,15 +5159,28 @@ class LatLonCGridOceanModel:
                 _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,
                     _ws_v_live_mask, _grid)[:2]
+            if _ws_uses_nemo_ldf_e3:
+                _ws_ldf_face_thickness_kbb = (
+                    _ws_face_thickness_kbb
+                    if _ws_face_thickness_kbb is not None
+                    else _nemo_ws_qco_stage_faces(
+                        state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                        _ws_v_live_mask, _grid)[:2])
                 from legoesm.ocean.vertical import (
                     nemo_qco_live_vorticity_e3f_cgrid,
                 )
+                _ws_t_live_mask = getattr(_zc, "is_active", None)
+                if _ws_t_live_mask is None:
+                    _ws_t_live_mask = jnp.broadcast_to(
+                        state.land_mask.data[..., None], _ws_h_ref.shape)
                 _ws_e3f_kbb = nemo_qco_live_vorticity_e3f_cgrid(
-                    state.eta.data, _zc, state.eta.data.dtype, grid=_grid)
+                    state.eta.data, _zc, state.eta.data.dtype, grid=_grid,
+                    e3t_0=_ws_h_ref, tmask=_ws_t_live_mask)
                 _ws_ldf_thickness_kbb = (
-                    _geom_density[1], _ws_face_thickness_kbb[0],
-                    _ws_face_thickness_kbb[1], _ws_e3f_kbb,
-                    _ws_face_thickness_kbb[0], _ws_face_thickness_kbb[1])
+                    _geom_density[1], _ws_ldf_face_thickness_kbb[0],
+                    _ws_ldf_face_thickness_kbb[1], _ws_e3f_kbb,
+                    _ws_ldf_face_thickness_kbb[0],
+                    _ws_ldf_face_thickness_kbb[1])
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
@@ -5673,16 +5690,17 @@ class LatLonCGridOceanModel:
                 _return_components = (
                     _expose_operator or _return_live_stage_operands)
                 _stage_ldf_thickness = None
-                if (not skip_ldf and stage_face_thickness is not None
-                        and _ws_face_thickness_kbb is not None):
+                if (not skip_ldf and _ws_uses_nemo_ldf_e3
+                        and stage_face_thickness is not None):
                     from legoesm.ocean.vertical import (
                         nemo_qco_live_vorticity_e3f_cgrid,
                     )
                     _stage_ldf_thickness = (
-                        _geom_density[1], _ws_face_thickness_kbb[0],
-                        _ws_face_thickness_kbb[1],
+                        _geom_density[1], _ws_ldf_face_thickness_kbb[0],
+                        _ws_ldf_face_thickness_kbb[1],
                         nemo_qco_live_vorticity_e3f_cgrid(
-                            st.eta.data, _zc, st.eta.data.dtype, grid=_grid),
+                            st.eta.data, _zc, st.eta.data.dtype, grid=_grid,
+                            e3t_0=_ws_h_ref, tmask=_ws_t_live_mask),
                         stage_face_thickness[0], stage_face_thickness[1])
                 td_result = self.tendencies(
                                      st, surface_forcing, sponge=sponge, dt=dt,
