@@ -79,6 +79,12 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
         "/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dtatsd.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/eosbn2.f90"),
     # --- round 40 paths: the stage-3 momentum operators and zdf_mxl ---
     "dynvor.F90": _DYN / "dynvor.F90",
     "dynkeg.F90": _DYN / "dynkeg.F90",
@@ -622,6 +628,14 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:92-94': [
         'IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN',
         'WRITE(cl_traj,\'("oracle_step_entry_kt",I8.8,".bin")\') kstp', 3],
+    # --- ORCA2 card round 6: full-domain entry and first runtime stop ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:218-253': [
+        'IF( cn_cfg == "orca" .OR. cn_cfg == "ORCA" ) THEN',
+        'sf_tsd(jp_tem)%fnow( mi0(ii0,nn_hls):mi1(ii1,nn_hls) , mj0(ij0,nn_hls):mj1(ij1,nn_hls) , 14:20 ) = 6.0_wp',
+        36],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90:1587-1647': [
+        'SUBROUTINE bn2( pts, pab, pn2, Kmm, kbnd )',
+        'END SUBROUTINE bn2_t', 61],
     # --- round 135: accepted-state swap before the daily tracer record ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
         'IF ( .NOT. l_perpetual_ts ) THEN', ('ENDIF', 8), 10],
