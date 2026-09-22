@@ -311,3 +311,38 @@ def test_evd_n2_eos_form_unknown_raises():
                 rho, z_coord.dz_ref, J, cfg, T=Tj, S=Sj,
                 t_depth=gdept[None, None, :], w_depth=gdepw[None, None, :],
                 g=constants.g, rho_ref=rho_0)
+
+
+def test_evd_n2_eos_form_accepts_the_eos80_arm_the_orca2_card_selects():
+    """ORCA2 runs ``ln_eos80 = .true.``; the trigger must accept and use it.
+
+    Before this arm existed the call RAISED, so "it runs" is already the
+    headline.  Non-vacuity follows the TEOS-10 test's shape: the EOS-80 and
+    simplified sets must give a different N2 on this column and the smooth
+    trigger must then differ, so a dropped forward cannot pass.  EOS-80 and
+    TEOS-10 are deliberately NOT compared here -- they are two fits of the
+    same seawater and agree far inside this trigger's threshold; the kernel
+    test in ``test_nemo_roquet_eos.py`` pins that they are different numbers.
+    """
+    z_coord, H_deep, T, S = _compensated_front_column()
+    Tj = jnp.asarray(T)[None, None, :]
+    Sj = jnp.asarray(S)[None, None, :]
+    gdept, gdepw = nemo_bn2_live_ladders(z_coord, jnp.zeros(()),
+                                         jnp.asarray(H_deep))
+    n2_seos = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        Tj, Sj, gdept[None, None, :], gdepw[None, None, :],
+        g=constants.g, eos_form="seos",
+        e3w_source="depth_difference"))[0, 0]
+    n2_eos80 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        Tj, Sj, gdept[None, None, :], gdepw[None, None, :],
+        g=constants.g, eos_form="eos80",
+        e3w_source="depth_difference"))[0, 0]
+    assert not np.allclose(n2_seos, n2_eos80, rtol=1e-3, atol=0), (
+        "the EOS-80 and simplified sets agree on this column -- the check "
+        "below cannot detect a dropped forward")
+
+    K_eos80, flag_eos80 = _evd_n2_column("eos80", smooth_transition=True)
+    assert np.all(np.isfinite(K_eos80)) and np.all(np.isfinite(flag_eos80))
+    _, flag_seos = _evd_n2_column("seos", smooth_transition=True)
+    assert not np.array_equal(flag_seos, flag_eos80), (
+        "convective_K_A_flag ignored the eos80 arm")
