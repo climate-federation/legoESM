@@ -851,9 +851,9 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv_fct.f90:905-931': [
         'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji+1,jj,ik) ),',
         ('pcc(ji,jj,jk) = pcc(ji,jj,jk) * zcoef', 2), 27],
-    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv.f90:358-365': [
+    'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv.f90:358-364': [
         ('SELECT CASE ( nadv )', 1),
-        'CALL tra_adv_fct ( kt, nit000', 8],
+        'CALL tra_adv_fct ( kt, nit000', 7],
     'round123/oracle_process_budget/ocean.output:756-764': [
         'Namelist namtra_adv : chose a advection scheme for tracers',
         'implicit   optimized(1)/accurate(2)    nn_fct_imp =            1', 9],

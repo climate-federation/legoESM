@@ -38,7 +38,7 @@ For the first process call, the record's resolved output selects FCT2 with
 optimized implicit treatment at
 `round123/oracle_process_budget/ocean.output:756-764`, and the compiled
 dispatcher enters `CALL tra_adv_fct` at
-`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv.f90:358-365`.
+`GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/traadv.f90:358-364`.
 This is the first directly scored active-branch statement boundary.  It is not
 an internal ownership claim: an input transport or any earlier FCT write may
 already differ, and this record cannot discriminate them.
