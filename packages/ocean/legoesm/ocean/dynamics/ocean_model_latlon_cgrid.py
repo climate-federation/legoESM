@@ -5103,7 +5103,7 @@ class LatLonCGridOceanModel:
         # NEMO's dyn_adv_up3 consumes e3u(Kmm) while legoESM's tendencies()
         # rebuilt its own min-of-stretched-T pair.  ``None`` (every other
         # integrator) keeps that historical min rule.
-        _ws_qco_faces_kbb = None
+        _ws_face_thickness_kbb = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
             # NEMO's e3u/e3v(Kbb) = e3u_0*(1+r3u(Kbb)) for the step-entry
             # dyn_adv (stp2d.F90:172 -> dynadv_up3.F90:160; the same pair
@@ -5151,9 +5151,9 @@ class LatLonCGridOceanModel:
                 jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m)
             if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:
-                _ws_qco_faces_kbb = _nemo_ws_qco_stage_faces(
+                _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,
-                    _ws_v_live_mask, _grid, include_reciprocals=True)
+                    _ws_v_live_mask, _grid)[:2]
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
@@ -5162,9 +5162,7 @@ class LatLonCGridOceanModel:
                                ldf_state=_ldf_state, z_coord=z_coord, config=config,
                                zad_continuity_dt=dt,
                                up3_upwind_selector=_up3_selector_override,
-                               momentum_flux_face_thickness=(
-                                   None if _ws_qco_faces_kbb is None
-                                   else _ws_qco_faces_kbb[:2]),
+                               momentum_flux_face_thickness=_ws_face_thickness_kbb,
                                nemo_operator_association=self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm,
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
@@ -5330,12 +5328,8 @@ class LatLonCGridOceanModel:
                 _wind_tau_i_u = _tau_i_u
                 _wind_tau_j_v = _tau_j_v
                 _wind_r1_rho0 = nemo_source_round(1.0 / _r0)
-                _wind_r1_hu = (
-                    _ws_qco_faces_kbb[4] if _ws_qco_faces_kbb is not None
-                    else nemo_source_round(1.0 / H_u_pre))
-                _wind_r1_hv = (
-                    _ws_qco_faces_kbb[5] if _ws_qco_faces_kbb is not None
-                    else nemo_source_round(1.0 / H_v_pre))
+                _wind_r1_hu = nemo_source_round(1.0 / H_u_pre)
+                _wind_r1_hv = nemo_source_round(1.0 / H_v_pre)
                 _wind_operand_override = (
                     self._nemo_ws_test_hooks
                     .slow_forcing_wind_operand_override)
