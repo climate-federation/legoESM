@@ -4401,10 +4401,16 @@ def _round147_oracle_addends(fields: dict) -> dict[str, tuple[np.ndarray, np.nda
 
 
 def _round147_directed_rhs_ulp(base_rhs, thickness, active):
-    """Find one directed-RHS ULP that survives the production depth reduction."""
-    return _round142_propagating_rhs_ulp(
+    """Plant one consumed directed-RHS word above the fused rounding floor."""
+    planted, location = _round142_propagating_rhs_ulp(
         {"rhs_u": np.asarray(base_rhs, dtype=np.float64)},
         np.asarray(active, dtype=bool), np.asarray(thickness, dtype=np.float64))
+    base_rhs = np.asarray(base_rhs, dtype=np.float64)
+    planted[location] = (
+        base_rhs[location] + np.float64(65536.0) * np.spacing(base_rhs[location]))
+    require(planted[location] != base_rhs[location],
+            "Round-147 directed-RHS plant rounded away at its input")
+    return planted, location
 
 
 def measure_round147_rhs_families(args) -> dict[str, object]:
