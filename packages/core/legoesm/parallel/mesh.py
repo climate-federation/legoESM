@@ -29,6 +29,7 @@ from typing import NamedTuple, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 logger = logging.getLogger(__name__)
@@ -764,12 +765,18 @@ def multiprocess_safe_device_put(leaf, sharding):
     ``jax.device_put`` — byte-identical behavior to before.
     Already-global (non-fully-addressable) leaves pass through unchanged.
     """
-    if not isinstance(leaf, (jax.Array, jnp.ndarray)):
+    # NUMPY ARRAYS MUST TAKE THE LOCAL PATH TOO. ``jnp.ndarray`` IS
+    # ``jax.Array``, so the original pair named one type, and a NumPy leaf —
+    # which is what the mesh builders produce — failed the check and fell
+    # straight through to the asserting placement below. That assert gathers
+    # the whole field onto every process, so per-process memory grew with the
+    # process count and a 31.6 GiB allocation ended the ten-million-cell
+    # ladder at 192 devices.
+    if not isinstance(leaf, (jax.Array, np.ndarray)):
         return jax.device_put(leaf, sharding)
     if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
         return leaf  # already a global sharded array; nothing to place
     if jax.process_count() > 1:
-        import numpy as np
         host = np.asarray(leaf)
         return jax.make_array_from_callback(
             host.shape, sharding, lambda idx: host[idx])
