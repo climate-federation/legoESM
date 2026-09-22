@@ -185,6 +185,19 @@ Repository ratchets: 5,241 passed, 3 failed — all three are the listed
 pre-existing reds (two inline-coefficient rows and one parameter-spec row), and
 no new failing identifier appeared.
 
+The single required ocean-fidelity battery completed in 2,455.10 s:
+**1 failed, 1518 passed, 7 skipped**.  That one failure is the listed
+pre-existing sea-ice scalar-math provenance red (`A MY_SRC is not verbatim`);
+no new failing identifier appeared.  The seven named push gates pass at the
+round's final tip.
+
+New direct tests: six on the hand alterations, pinning each box, each level
+and each value, with a synthetic shifted box that must fail; three on the
+EOS-80 stratification arm, including one that would catch it silently
+returning the TEOS-10 answer and one that keeps the typo refusal; one on the
+convection trigger's acceptance of the same arm; and four on the gate's
+coefficient audit, its refusal parser and its eligibility helper.
+
 ## 9. OPEN
 
 1. **The next statement in execution order is the vertex thickness on the
