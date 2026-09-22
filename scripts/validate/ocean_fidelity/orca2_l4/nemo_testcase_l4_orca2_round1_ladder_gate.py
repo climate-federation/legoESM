@@ -696,12 +696,40 @@ def candidate_trajectory(
 
         surface_fields = assemble_surface_fields(root, kt)
         freshwater, surface = _surface_forcings(card, deck_root, surface_fields, kt)
-        trace = model.step(
-            state,
-            dt=card.dt_s,
-            freshwater=freshwater,
-            surface_forcing=surface,
-        )
+        try:
+            trace = model.step(
+                state,
+                dt=card.dt_s,
+                freshwater=freshwater,
+                surface_forcing=surface,
+            )
+        except ValueError as exc:
+            if "compute_buoyancy_frequency_nemo_bn2 eos_form='eos80'" not in str(exc):
+                raise
+            require(first_non_bit is not None,
+                    "EOS80 BN2 stop preceded a registered entry mismatch")
+            require(first_field is not None,
+                    "EOS80 BN2 stop has no registered first field")
+            return {
+                "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
+                "execution": "production-jit-cpu-fp64-x64-libm",
+                "decision52_bridge": bridge,
+                "independent_entry_before_bridge": independent,
+                "given_nemo_entry_eligibility": "STOP_INITIAL_T_S_TRANSCRIPTION",
+                "chlorophyll_kt1_input_reconstruction": chl_row,
+                "first_non_bit_statement": first_non_bit,
+                "kt10_same_field_magnitude": "UNMEASURED_STOP_PRODUCTION_EOS80_BN2_GAP",
+                "checkpoints": checkpoints,
+                "execution_blocker": {
+                    "status": "STOP_PRODUCTION_EOS80_BN2_GAP",
+                    "message": str(exc),
+                    "nemo_source_citation": (
+                        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/"
+                        "nemo/eosbn2.f90:1587-1647"
+                    ),
+                    "legoesm_source": "packages/ocean/legoesm/ocean/eos.py:748-753",
+                },
+            }
         for stage in (1, 2, 3):
             oracle_stage = read_state_frame(
                 root / f"oracle_stage_kt{kt:08d}_s{stage}.bin",
@@ -822,7 +850,9 @@ def run_gate(
         trajectory = candidate_trajectory(
             deck_root, orca1ice_root, card, max_step=max_step
         )
-        status = "STOP_INITIAL_TS_TRANSCRIPTION_GAP"
+        status = trajectory.get("execution_blocker", {}).get(
+            "status", "STOP_INITIAL_TS_TRANSCRIPTION_GAP"
+        )
         trajectory_claim = "MEASURED_INDEPENDENT_WITH_DECISION52_SSH"
     return {
         "worktree": stamp,
@@ -891,10 +921,13 @@ def main() -> int:
         print("REFUSE: STOP_ENTRY_RECORD_GAP: full-domain step-entry states are missing",
               file=sys.stderr)
         return 3
-    if result["status"] == "STOP_INITIAL_TS_TRANSCRIPTION_GAP":
+    if result["status"] in (
+        "STOP_INITIAL_TS_TRANSCRIPTION_GAP",
+        "STOP_PRODUCTION_EOS80_BN2_GAP",
+    ):
         print(
-            "REFUSE: STOP_INITIAL_TS_TRANSCRIPTION_GAP: the card omits the "
-            "active compiled ORCA2 T/S initialization edits",
+            f"REFUSE: {result['status']}: the admitted ORCA2 ladder cannot "
+            "reach kt=10",
             file=sys.stderr,
         )
         return 4
