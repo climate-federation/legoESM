@@ -33,7 +33,7 @@ the completed `Krhs` in the depth average at
 
 The new compiled target preserves those calls and writes the native U/V
 cumulative arrays immediately after each one at
-`GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/stp2d.f90:145-193`.  The source
+`GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/stp2d.f90:145-192`.  The source
 card removes no line, assigns no model operand, adds no model call, and has one
 open, ten array writes, and one close only at `kt=1081`.
 
