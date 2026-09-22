@@ -47,3 +47,18 @@ def test_each_flag_overrides_independently():
     assert r["barotropic_implicit_pcg_poly_sweeps"] == 7
     assert r["barotropic_implicit_pcg_fixed_iters"] == 11
     assert r["barotropic_implicit_pcg_precond"] == d["barotropic_implicit_pcg_precond"]
+
+
+def test_profile_dir_is_off_unless_asked_and_leaves_the_solver_alone():
+    """The profiling window must be opt-in and must not touch the solver.
+
+    It replays four extra steps AFTER the timed window, so a default that
+    silently switched it on would both inflate the arm's wall time and put
+    profiler overhead inside a scaling receipt.
+    """
+    args = mod.build_parser().parse_args(["--n-devices", "1"])
+    assert args.profile_dir is None
+    assert _resolved([]) == _resolved(["--profile-dir", "/tmp/does-not-matter"])
+    on = mod.build_parser().parse_args(
+        ["--n-devices", "1", "--profile-dir", "/tmp/x"])
+    assert on.profile_dir == "/tmp/x"

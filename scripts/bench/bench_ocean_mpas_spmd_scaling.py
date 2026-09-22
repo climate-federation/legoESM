@@ -98,6 +98,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="distributed PCG iteration count (config default 20); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="After the timed window, replay four steps under "
+                        "jax.profiler from ranks 0-3 (one node, shared "
+                        "clock) into <dir>/rank<k>/ and leave the reported "
+                        "timing untouched. The chrome-format trace.json.gz "
+                        "feeds scripts/bench/analyze_jax_trace_gaps.py, "
+                        "which splits the step into kernel time, collective "
+                        "time and gap. nsys silently drops the halo "
+                        "collectives on this lane, so it is not an option; "
+                        "and tracing from the first step fills the "
+                        "profiler's event cap with compile-phase host "
+                        "events, leaving the device tracks empty.")
     p.add_argument("--out", type=str, default="ocean_mpas_spmd_scaling.jsonl")
     return p
 
@@ -209,6 +221,18 @@ def main() -> int:
         # jitted global reduction -> replicated scalar (fully addressable) over
         # EVERY prognostic leaf, not a host fetch of one sharded field.
         finite = bool(_all_finite(state))
+        if args.profile_dir is not None and jax.process_index() < 4:
+            import pathlib
+            pdir = pathlib.Path(args.profile_dir) / f"rank{jax.process_index()}"
+            pdir.mkdir(parents=True, exist_ok=True)
+            jax.profiler.start_trace(str(pdir))
+            try:
+                st = state
+                for _ in range(4):
+                    st = advance(st, aux)
+                    jax.block_until_ready(jax.tree.leaves(st))
+            finally:
+                jax.profiler.stop_trace()
     finally:
         if nd > 1:
             disarm_mpas_ocean_spmd()
