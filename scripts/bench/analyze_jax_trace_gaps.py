@@ -73,6 +73,17 @@ def is_collective(name: str) -> bool:
             or "all-reduce" in n or "allreduce" in n)
 
 
+def is_reduction(name: str) -> bool:
+    n = name.lower()
+    return "all-reduce" in n or "allreduce" in n or "reducescatter" in n
+
+
+def is_pairwise(name: str) -> bool:
+    n = name.lower()
+    return ("sendrecv" in n or "send_recv" in n
+            or "collective-permute" in n or "permute" in n)
+
+
 def _union_ms(evs: list[dict]) -> float:
     """Total device-BUSY time as the union of event intervals — events
     on different streams overlap, so a plain duration sum overstates
@@ -114,7 +125,7 @@ def per_rank_summary(evs: list[dict]) -> dict:
 
 
 def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
-                         fills: int = 3, end_tol_frac: float = 0.25) -> bool:
+                         fills: int = 3, end_tol_us: float = 5.0) -> bool:
     """Cross-rank arrival spread using the SCHEDULE, not overlap.
 
     ``pm`` = partner map: rank -> ordered [(round, partner), ...] it
@@ -144,6 +155,10 @@ def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
     quoted = 0
     part = {rk: pm["ranks"][rk.replace("rank", "")] for rk in ranks
             if rk.replace("rank", "") in pm["ranks"]}
+    missing = [rk for rk in ranks if rk not in part]
+    if missing:
+        print(f"  no schedule entry for {', '.join(missing)} — those ranks "
+              f"contribute nothing, so this is a coverage hole, not a result")
 
     def idx(rank, step, fill, k):
         p = len(part[rank])
@@ -172,6 +187,34 @@ def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
                       f"{want_b}, from steps={steps} fills={fills}) — the "
                       f"model does not describe this lane, NOT quotable")
                 continue
+            # A matching COUNT is not a matching SEQUENCE. Check that the
+            # events the index model lands on are actually the pairwise
+            # exchanges it thinks they are, and that each step's trailing
+            # slot really is a reduction. Without this an incompatible
+            # sequence of the same length still passes.
+            bad = None
+            for rk, pt in ((a, part[a]), (b, part[b])):
+                seq = summaries[rk]["collectives"]
+                per = fills * len(pt) + 1
+                for s in range(steps):
+                    if not is_reduction(seq[s * per + per - 1][0]):
+                        bad = (rk, "trailing slot is not a reduction",
+                               seq[s * per + per - 1][0]); break
+                    for f in range(fills):
+                        for k in range(len(pt)):
+                            nm = seq[s * per + f * len(pt) + k][0]
+                            if not is_pairwise(nm):
+                                bad = (rk, "fill slot is not a pairwise "
+                                       "exchange", nm); break
+                        if bad: break
+                    if bad: break
+                if bad: break
+            if bad:
+                print(f"{a}-{b}: {bad[1]} at a computed index on {bad[0]} "
+                      f"(saw '{bad[2]}') — the sequence model does not "
+                      f"describe this lane, NOT quotable")
+                continue
+
             end_d, start_d, durs = [], [], []
             for s in range(steps):
                 for f in range(fills):
@@ -194,11 +237,24 @@ def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
             # not, the two clocks are not aligned and every skew number
             # derived from them is meaningless — so withhold them rather
             # than print them next to a caveat nobody will read.
-            if end_resid > end_tol_frac * kernel:
-                print(f"    CALIBRATION FAILED: end residual {end_resid:.1f} us "
-                      f"exceeds {end_tol_frac:.0%} of the {kernel:.1f} us "
-                      f"kernel. The clocks are not aligned; arrival skew is "
-                      f"WITHHELD for this pair.")
+            # The gate is ABSOLUTE and reads the TAIL, for two reasons both
+            # reviewers demonstrated with counterexamples. Scaling it to the
+            # kernel let a long-kernel lane hide a large clock fault, and
+            # reading the median let a fault that corrupts a minority of
+            # pairs pass while the skew it produced was quoted to one
+            # decimal. What the residual is really bounded by is timestamp
+            # jitter, which does not grow with kernel length. The WORST
+            # residual is the right statistic, not a quantile: a quantile of
+            # a handful of comparisons can step right over the one bad pair,
+            # and one bad pair is enough to invalidate the set.
+            end_worst = max(resid_end)
+            if end_worst > end_tol_us:
+                print(f"    CALIBRATION FAILED: worst end residual "
+                      f"{end_worst:.1f} us exceeds the {end_tol_us:.1f} us "
+                      f"tolerance (median {end_resid:.1f}, kernel "
+                      f"{kernel:.1f}). Matched participants finish together, "
+                      f"so this pair's timestamps cannot be compared; "
+                      f"arrival skew is WITHHELD.")
                 continue
             quoted += 1
             print(f"    arrival skew  median {statistics.median(resid_start):7.1f}"
@@ -225,12 +281,14 @@ def main() -> int:
                          "--steps this IS the sequence model; a trace whose "
                          "event count disagrees is refused rather than "
                          "indexed with the wrong period.")
-    ap.add_argument("--end-tol-frac", type=float, default=0.25,
-                    help="reject a pair whose end residual exceeds this "
-                         "fraction of the kernel duration: matched "
-                         "participants finish together, so a large residual "
-                         "means the clocks are not aligned and the skew is "
-                         "meaningless")
+    ap.add_argument("--end-tol-us", type=float, default=5.0,
+                    help="reject a pair whose END-residual p90 exceeds this "
+                         "many microseconds. Matched participants finish "
+                         "together, so the residual is bounded by timestamp "
+                         "jitter, which is absolute and does not grow with "
+                         "kernel length. The WORST residual is gated, not a "
+                         "quantile, because a quantile of a handful of "
+                         "comparisons steps right over the one bad pair.")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -351,7 +409,7 @@ def main() -> int:
         print("=== partner-aware arrival skew (schedule-matched) ===")
         skew_ok = partner_aware_spread(summaries, pm, steps=args.steps,
                                        fills=args.fills,
-                                       end_tol_frac=args.end_tol_frac)
+                                       end_tol_us=args.end_tol_us)
         if not skew_ok:
             print("NO PAIR SURVIVED: arrival skew is not available from this "
                   "capture. The kernel, collective and gap shares above still "
@@ -359,11 +417,24 @@ def main() -> int:
                   "inferred from the shares.")
 
     if args.out:
+        payload = {k: {kk: vv for kk, vv in v.items() if kk != "collectives"}
+                   for k, v in summaries.items()}
+        payload["_status"] = {
+            "arrival_skew_quotable": skew_ok,
+            "partner_map": str(args.partner_map) if args.partner_map else None,
+            "steps": args.steps, "fills": args.fills,
+            "end_tol_us": args.end_tol_us,
+            # The shares above are CAPTURE statistics. The span includes the
+            # harness barriers that sit inside the trace window, and the
+            # collective and compute totals sum durations across streams, so
+            # concurrent events are counted twice. They do not yet budget the
+            # receipt's step time and must not be quoted as if they did.
+            "shares_are_capture_statistics_not_a_step_budget": True,
+        }
         with open(args.out, "w") as f:
-            json.dump({k: {kk: vv for kk, vv in v.items()
-                           if kk != "collectives"}
-                       for k, v in summaries.items()}, f, indent=1)
-    return 0
+            json.dump(payload, f, indent=1)
+    # "ran and refused everything" must not look like success to a launcher.
+    return 0 if skew_ok is not False else 3
 
 
 if __name__ == "__main__":

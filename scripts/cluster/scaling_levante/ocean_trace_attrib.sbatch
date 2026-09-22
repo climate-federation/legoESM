@@ -94,13 +94,17 @@ PM=("--partner-map" "$OUTDIR/traces/partner_map.json")
   echo "WARNING: no partner map was written; arrival-skew numbers from this"
   echo "         capture are NOT quotable. Kernel/collective/gap shares still are."
   PM=(); }
-# The capture traces three blocks of twenty steps. The number of halo fills
-# in an ocean step is NOT known yet — the free-surface solver contributes its
-# own exchanges on top of the physics ones — so the default, which describes
-# the atmosphere, is left in place deliberately. The analyzer will refuse and
-# print the observed event count next to the one the model predicts, and that
-# difference is what gives the ocean's real period. Set --fills from it on the
-# next capture; do not guess it now and quote whatever comes out.
+# RETRACTED: an earlier version of this comment said the refusal's printed
+# counts would reveal the ocean's period. They do not. The count is degenerate
+# — two fills with three reductions per step gives the same total as four
+# fills with one — and the model hard-codes one reduction per step, so no
+# setting of the two options here can describe an ocean step at all.
+#
+# The analyzer will therefore refuse, which is the correct outcome and the
+# reason it is still run: the refusal is the evidence that the attribution is
+# not available, and it now exits non-zero so this cannot read as success.
+# Making it available needs the model driven by event NAMES rather than by a
+# fixed period, which is a change to the analyzer, not a flag here.
 "$PY" scripts/bench/analyze_jax_trace_gaps.py \
   --trace-root "$OUTDIR/traces" "${PM[@]}" --steps 60 \
   --out "$OUTDIR/trace_summary.json"

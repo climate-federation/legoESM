@@ -63,16 +63,25 @@ import json, sys, pathlib, math
 out, offs, rows = pathlib.Path(sys.argv[1]), [int(t) for t in sys.argv[2].split(",")], int(sys.argv[3])
 for nd, w in ((32, 1), (128, 1), (128, 130)):
     rs = {json.loads(l)["strategy"]: json.loads(l) for l in open(out / f"nd{nd}_w{w}.jsonl")}
-    assert set(rs) == {"ppermute", "ragged", "uniform"}, sorted(rs)
+    # The uniform all-to-all's operand grows with the SQUARE of the device
+    # count, so the bench skips it deliberately above a small count. That is
+    # an answer, not a missing arm: a transport that cannot be built at the
+    # device counts we care about is unavailable there. Requiring it here
+    # turned a completed measurement into a failed job.
+    assert {"ppermute", "ragged"} <= set(rs), sorted(rs)
     for r in rs.values():
         assert r["n_devices"] == nd and r["offsets"] == offs and r["rows"] == rows \
             and r["width"] == w and r["verified_exact"] is True \
             and math.isfinite(r["per_fill_us"]) and r["per_fill_us"] > 0 \
             and r["env_overlap"] == "0", r
     pp = rs["ppermute"]["per_fill_us"]
-    best = min(rs["ragged"]["per_fill_us"], rs["uniform"]["per_fill_us"])
+    single = [r["per_fill_us"] for k, r in rs.items() if k != "ppermute"]
+    best = min(single)
+    uni = (f"{rs['uniform']['per_fill_us']:9.1f}" if "uniform" in rs
+           else "  skipped")
     print(f"nd{nd} w{w}: ppermute({rs['ppermute']['n_collectives_per_fill']}r) {pp:9.1f} us | "
-          f"ragged {rs['ragged']['per_fill_us']:9.1f} | uniform {rs['uniform']['per_fill_us']:9.1f} | "
-          f"best/ppermute {best/pp:.3f}")
+          f"ragged {rs['ragged']['per_fill_us']:9.1f} | uniform {uni} | "
+          f"best/ppermute {best/pp:.3f}"
+          + ("" if best < pp else "   <- the rounds already win here"))
 EOF2
 echo "DONE rc=$rc"; exit $rc

@@ -20,15 +20,22 @@ mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)
 
 
-def _summaries(events_per_rank):
+def _name(i, period):
+    """Pairwise exchange everywhere but the trailing slot of each step."""
+    return "nccl_allreduce" if (i % period) == period - 1 else "nccl_sendrecv"
+
+
+def _summaries(events_per_rank, period=2, offsets=None):
     """Two ranks whose collectives are perfectly aligned but for a constant
     clock offset, which is the case the analyzer is supposed to handle."""
     out = {}
     for rank, n in events_per_rank.items():
-        offset = 1000.0 if rank == "rank1" else 0.0
-        out[rank] = {"collectives": [(f"nccl_{i}", offset + i * 100.0,
-                                      offset + i * 100.0 + 40.0)
-                                     for i in range(n)]}
+        base = 1000.0 if rank == "rank1" else 0.0
+        out[rank] = {"collectives": [
+            (_name(i, period),
+             base + (offsets[i] if offsets and rank == "rank1" else 0.0) + i * 100.0,
+             base + (offsets[i] if offsets and rank == "rank1" else 0.0) + i * 100.0 + 40.0)
+            for i in range(n)]}
     return out
 
 
@@ -72,3 +79,34 @@ def test_unaligned_clocks_withhold_the_skew(capsys):
     assert ok is False
     assert "CALIBRATION FAILED" in text
     assert "arrival skew  median" not in text   # the numbers, not the refusal
+
+
+def test_a_clock_fault_in_a_minority_of_pairs_is_caught(capsys):
+    """The counterexample a reviewer built against the first gate: three
+    pairs aligned and one off by ten milliseconds.  A median-based gate sees
+    a zero residual and quotes a ten-millisecond skew with a straight face."""
+    n = 4 * (1 * 1 + 1)
+    offs = [0.0] * n
+    offs[-2] = 10000.0          # one pair's clock jumps
+    s = _summaries({"rank0": n, "rank1": n}, offsets=offs)
+    ok = mod.partner_aware_spread(s, _PM, steps=4, fills=1)
+    text = capsys.readouterr().out
+    assert ok is False
+    assert "CALIBRATION FAILED" in text
+    assert "arrival skew  median" not in text
+
+
+def test_a_sequence_of_the_right_length_but_wrong_types_is_refused(capsys):
+    """Count equality is necessary, not sufficient.  A lane whose step has a
+    different shape can produce the same number of events."""
+    n = 4 * (1 * 1 + 1)
+    s = _summaries({"rank0": n, "rank1": n})
+    # Every slot a pairwise exchange: no trailing reduction anywhere.
+    for rank in s:
+        s[rank]["collectives"] = [("nccl_sendrecv", a, b)
+                                  for _, a, b in s[rank]["collectives"]]
+    ok = mod.partner_aware_spread(s, _PM, steps=4, fills=1)
+    text = capsys.readouterr().out
+    assert ok is False
+    assert "not a reduction" in text
+    assert "arrival skew  median" not in text
