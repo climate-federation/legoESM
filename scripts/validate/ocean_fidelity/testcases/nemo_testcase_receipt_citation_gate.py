@@ -613,7 +613,7 @@ CITATION_MAP = {
         'ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj', 18],
     # --- ORCA2 card round 4: returned surface record is root-rank only ---
     'ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90:396-400': [
-        'IF( .NOT.lwp ) RETURN',
+        ('IF( .NOT.lwp ) RETURN', 5),
         "FORM='UNFORMATTED', STATUS='NEW', ACTION='WRITE', IOSTAT=ios", 5],
     # --- round 135: accepted-state swap before the daily tracer record ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
