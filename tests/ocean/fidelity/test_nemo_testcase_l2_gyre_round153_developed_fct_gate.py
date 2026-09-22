@@ -53,8 +53,11 @@ def _tree(tmp_path: Path) -> tuple[Path, Path, str]:
     ):
         (baseline / name).write_bytes(payload)
         (root / name).write_bytes(payload)
+    for name in gate.EXPECTED_CHANGED_DIAGNOSTICS:
+        (baseline / name).write_bytes(b"before")
+        (root / name).write_bytes(b"after")
     manifest = "".join(
-        f"{_sha256(baseline / name)} {name}\n"
+        f"{_sha256(root / name)} {name}\n"
         for name in gate.inherited_names(baseline)
     )
     (root / "round153_inherited.sha256").write_text(manifest)
@@ -78,7 +81,7 @@ def test_round153_gate_accepts_complete_record(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "plant",
     ("stamp", "truncation", "missing-field", "coefficients-one",
-     "inherited-byte"),
+     "inherited-byte", "restart-byte"),
 )
 def test_round153_gate_plants_exit_nonzero(
     tmp_path: Path, plant: str, capsys: pytest.CaptureFixture[str]

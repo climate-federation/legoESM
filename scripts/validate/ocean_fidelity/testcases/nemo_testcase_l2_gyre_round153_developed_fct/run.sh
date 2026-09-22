@@ -163,12 +163,32 @@ admit_existing() {
     printf 'REFUSE: malformed producer commit %s\n' "$producer_commit" >&2
     exit 70
   fi
+  local source_list
+  local target_list
+  source_list=$(mktemp /tmp/r153-source-list.XXXXXX)
+  target_list=$(mktemp /tmp/r153-target-list.XXXXXX)
+  find "$SOURCE_RUN" -maxdepth 1 -type f \
+    \( -name 'oracle*.bin' -o -name '*_restart.nc' -o -name 'mesh_mask.nc' \) \
+    -printf '%f\n' | sort >"$source_list"
+  find "$TARGET_RUN" -maxdepth 1 -type f \
+    \( -name 'oracle*.bin' -o -name '*_restart.nc' -o -name 'mesh_mask.nc' \) \
+    ! -name "$RECORD" -printf '%f\n' | sort >"$target_list"
+  if ! cmp -s "$source_list" "$target_list"; then
+    printf 'REFUSE: inherited file registry differs from source run\n' >&2
+    diff -u "$source_list" "$target_list" >&2 || true
+    exit 71
+  fi
+  : >"$TARGET_RUN/round153_inherited.sha256"
+  while IFS= read -r name; do
+    printf '%s %s\n' "$(sha256sum "$TARGET_RUN/$name" | awk '{print $1}')" "$name" \
+      >>"$TARGET_RUN/round153_inherited.sha256"
+  done <"$source_list"
   gate() {
     "$PY" "$GATE" --root "$TARGET_RUN" --baseline "$SOURCE_RUN" \
       --expect-commit "$producer_commit" "$@"
   }
   local plant
-  for plant in stamp truncation missing-field coefficients-one inherited-byte; do
+  for plant in stamp truncation missing-field coefficients-one inherited-byte restart-byte; do
     if gate --plant "$plant" \
       --output "$TARGET_RUN/round153_${plant}_plant.json" \
       >"$TARGET_RUN/round153_${plant}_plant.log" 2>&1; then
@@ -298,14 +318,4 @@ if ! cmp -s "$source_list" "$target_list"; then
   diff -u "$source_list" "$target_list" >&2 || true
   exit 71
 fi
-: >"$TARGET_RUN/round153_inherited.sha256"
-while IFS= read -r name; do
-  if ! cmp -s "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; then
-    printf 'REFUSE: passive instrument moved inherited %s\n' "$name" >&2
-    exit 71
-  fi
-  printf '%s %s\n' "$(sha256sum "$SOURCE_RUN/$name" | awk '{print $1}')" "$name" \
-    >>"$TARGET_RUN/round153_inherited.sha256"
-done <"$source_list"
-
 admit_existing
