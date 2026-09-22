@@ -7086,6 +7086,67 @@ def developed_state_process_walk(
             np.asarray(value) for value in jax.device_get(isolated_values))
         transport_modes["isolated_closure_jit"] = isolated_rows
 
+        # Decision 43 ranks owners by MAGNITUDE, so the completed transport
+        # is also attributed operand by operand: the SAME isolated closure
+        # re-evaluates stprk3_stg.f90:303-304 and :314 with ONE operand
+        # replaced by NEMO's recorded value and scores the product against
+        # NEMO's own zFu.  The ``all`` arm is the calibration: NEMO's own
+        # operands must rebuild NEMO's transport bit for bit, or the
+        # statement association itself is the candidate.  These arms are
+        # isolated-closure JIT and are never relabelled as production.
+        oracle_rows = transport_bundle["rows"]
+        substitution_operands = (
+            "e2u", "live_e3u_Kmm", "uu_Kmm", "un_adv",
+            "live_inverse_depth", "uu_b_Kmm", "umask")
+        oracle_active = np.asarray(oracle_rows["umask"]) != 0.0
+
+        def transport_arm(substituted):
+            picked = tuple(
+                jnp.asarray(
+                    oracle_rows[name] if name in substituted
+                    else production_transport[name])
+                for name in ("uu_Kmm", "un_adv", "live_inverse_depth",
+                             "uu_b_Kmm", "umask", "e2u", "live_e3u_Kmm"))
+            completed = np.asarray(
+                jax.device_get(isolated_transport(*picked)[2]))
+            row = _score_developed_fct(completed, oracle_rows["zFu"])
+            delta = completed[oracle_active] - np.asarray(
+                oracle_rows["zFu"])[oracle_active]
+            bits = (completed.view(np.uint64)
+                    != np.asarray(oracle_rows["zFu"]).view(np.uint64))
+            row["substituted"] = list(substituted)
+            row["active_cells_scored"] = int(np.count_nonzero(oracle_active))
+            row["active_cells_unequal"] = int(
+                np.count_nonzero(bits & oracle_active))
+            row["active_max_abs"] = float(
+                np.max(np.abs(delta), initial=0.0))
+            return row
+
+        transport_attribution = {"none": transport_arm(())}
+        baseline_max = transport_attribution["none"]["active_max_abs"]
+        for name in substitution_operands:
+            transport_attribution[name] = transport_arm((name,))
+        transport_attribution["uu_Kmm+un_adv"] = transport_arm(
+            ("uu_Kmm", "un_adv"))
+        transport_attribution["all"] = transport_arm(substitution_operands)
+        # Calibration of the attribution instrument itself: with nothing
+        # substituted the isolated closure must reproduce the production
+        # transport row it is standing in for, cell for cell.
+        require(transport_attribution["none"]["cells_unequal"]
+                == _score_developed_fct(
+                    production_transport["zFu"],
+                    oracle_rows["zFu"])["cells_unequal"],
+                "transport attribution baseline differs from the production "
+                "transport row")
+        for name, row in transport_attribution.items():
+            row["active_max_abs_removed_fraction"] = (
+                float((baseline_max - row["active_max_abs"]) / baseline_max)
+                if baseline_max > 0.0 else 0.0)
+        ranked = sorted(
+            (name for name in substitution_operands),
+            key=lambda name: -transport_attribution[name][
+                "active_max_abs_removed_fraction"])
+
     ordinary = ordinary_model.step(
         state, dt=card.dt_s, freshwater=freshwater,
         surface_forcing=surface,
@@ -7206,6 +7267,14 @@ def developed_state_process_walk(
             "model_live_e3_reconstruction": {
                 "production_step_jit": production_transport_closure,
                 "production_eager": eager_transport_closure,
+            },
+            "operand_attribution": {
+                "mode": "isolated_closure_jit",
+                "scored_against": "NEMO recorded zFu",
+                "baseline_active_max_abs": baseline_max,
+                "arms": transport_attribution,
+                "ranked_by_removed_fraction": ranked,
+                "magnitude_owner": ranked[0],
             },
         }
     if plant == "entry-temperature-ulp":
@@ -7448,6 +7517,18 @@ def developed_state_process_walk(
                 for name in ("one_plus_r3u_Kmm", "uu_b_Kmm", "uu_Kmm")),
             "transport_observer_bit_exact": (
                 transport_observer_unequal_bytes == 0),
+            "transport_oracle_operands_rebuild_zFu_bit": (
+                transport_walk["operand_attribution"]["arms"]["all"][
+                    "bit_exact"]),
+            "transport_uu_Kmm_removes_over_90_percent": (
+                transport_walk["operand_attribution"]["arms"]["uu_Kmm"][
+                    "active_max_abs_removed_fraction"] > 0.90),
+            "transport_un_adv_removes_under_1_percent": (
+                transport_walk["operand_attribution"]["arms"]["un_adv"][
+                    "active_max_abs_removed_fraction"] < 0.01),
+            "transport_magnitude_owner_is_uu_Kmm": (
+                transport_walk["operand_attribution"]["magnitude_owner"]
+                == "uu_Kmm"),
         })
     report = {
         "format": "gyre-developed-state-process-walk-v1",
@@ -7614,6 +7695,16 @@ def developed_state_process_walk(
                   f"{'BIT' if row['bit_exact'] else 'DEBT':>6s}")
         print(f"  FIRST NON-BIT: {transport_walk['first_non_bit_row']}")
         print(f"  AUTHORITATIVE OWNER: {report['internal_statement_owner']}")
+        attribution = transport_walk["operand_attribution"]
+        print("\n  directed operand substitution (isolated closure JIT, "
+              "scored against NEMO's recorded zFu):")
+        print(f"  {'arm':>24s} {'active unequal':>15s} "
+              f"{'active max abs':>16s} {'removed':>9s}")
+        for name, row in attribution["arms"].items():
+            print(f"  {name:>24s} {row['active_cells_unequal']:15d} "
+                  f"{row['active_max_abs']:16.8e} "
+                  f"{row['active_max_abs_removed_fraction']:9.4f}")
+        print(f"  MAGNITUDE OWNER: {attribution['magnitude_owner']}")
     return report
 
 
