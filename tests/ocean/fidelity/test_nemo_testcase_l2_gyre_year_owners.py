@@ -260,6 +260,49 @@ def test_round152_process_ranking_is_complete_and_uses_one_step_rms(harness):
             {name: rows[name] for name in harness.PROCESS_ROWS[:-1]})
 
 
+def test_round154_fct_registry_and_first_statement_are_nonvacuous(harness):
+    from legoesm.ocean.advection import NEMO_FCT_TRACE_FIELDS
+
+    scalar = np.ones((1,), dtype=np.float64)
+    common_expected = {
+        name: (np.zeros_like(scalar) if name.startswith("r3t_") else
+               scalar.copy())
+        for name in harness.DEVELOPED_FCT_COMMON_FIELDS
+    }
+    tracer_expected = {
+        name: scalar.copy() for name in harness.DEVELOPED_FCT_TRACER_FIELDS
+    }
+    tracer_expected["rhs_entry"] = np.zeros_like(scalar)
+    bundle = {
+        "common": common_expected,
+        "tracers": {name: {key: value.copy()
+                            for key, value in tracer_expected.items()}
+                    for name in ("T", "S")},
+    }
+    common_actual = {name: scalar.copy()
+                     for name in harness.DEVELOPED_FCT_COMMON_FIELDS}
+    observed_tracer = tuple(scalar.copy() for _ in range(
+        13 + len(NEMO_FCT_TRACE_FIELDS)))
+    observed = {"T": observed_tracer, "S": observed_tracer}
+    exact = harness._developed_fct_mode_rows(
+        observed, bundle, common_actual)
+    assert exact["rows_scored"] == 61
+    assert exact["bit_exact_rows"] == 61
+    assert exact["first_non_bit_context"] == "NONE"
+    assert exact["first_non_bit_statement"] == "NONE"
+
+    first_u = 13 + NEMO_FCT_TRACE_FIELDS.index("first_u")
+    planted_values = list(observed_tracer)
+    planted_values[first_u] = np.nextafter(
+        planted_values[first_u], np.inf)
+    planted = harness._developed_fct_mode_rows(
+        {"T": tuple(planted_values), "S": observed_tracer},
+        bundle, common_actual)
+    assert planted["first_non_bit_statement"] == "T.first_u"
+    assert planted["tracers"]["T"]["rows"]["first_u"][
+        "cells_unequal"] == 1
+
+
 def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
                                                               harness):
     record_path = tmp_path / "oracle_process_budget_kt00001081.bin"

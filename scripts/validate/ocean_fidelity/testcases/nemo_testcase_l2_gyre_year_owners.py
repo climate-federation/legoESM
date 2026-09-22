@@ -4110,6 +4110,9 @@ def main(argv=None) -> int:
     parser.add_argument("--developed-step-walk", action="store_true",
                         help="run the Round-136 step-1081 production walk "
                              "from NEMO's admitted day-180 restart")
+    parser.add_argument("--developed-fct-walk", action="store_true",
+                        help="extend the developed step walk across the "
+                             "admitted Round-153 61-field FCT record")
     parser.add_argument("--developed-process-root", type=Path,
                         default=DEFAULT_PROCESS_RECORD_ROOT)
     parser.add_argument("--developed-vertical-root", type=Path,
@@ -4117,6 +4120,8 @@ def main(argv=None) -> int:
     parser.add_argument("--daily-record-root", type=Path,
                         default=DEFAULT_DEVELOPED_DAILY_ROOT)
     parser.add_argument("--daily-record-audit", type=Path, default=None)
+    parser.add_argument("--developed-fct-record-root", type=Path,
+                        default=None)
     parser.add_argument("--reference-process-trace", type=Path,
                         default=DEFAULT_REFERENCE_PROCESS_TRACE,
                         help="admitted Round-124 process trace that a new "
@@ -4167,16 +4172,22 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
-    if args.developed_step_walk:
+    if args.developed_step_walk or args.developed_fct_walk:
         require(args.expect_commit is not None,
                 "--developed-step-walk needs --expect-commit")
         require(args.daily_record_audit is not None,
                 "--developed-step-walk needs --daily-record-audit")
+        if args.developed_fct_walk:
+            require(args.developed_fct_record_root is not None,
+                    "--developed-fct-walk needs "
+                    "--developed-fct-record-root")
         report = developed_state_process_walk(
             args.developed_process_root, args.developed_vertical_root,
             args.daily_record_root, args.daily_record_audit,
             args.expect_commit, args.root, mesh_path=args.mesh,
-            plant=args.plant)
+            plant=args.plant,
+            fct_record_root=(args.developed_fct_record_root
+                             if args.developed_fct_walk else None))
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
@@ -4184,8 +4195,12 @@ def main(argv=None) -> int:
             print(f"STATUS PLANT-FIRED: {args.plant}: "
                   f"{report['control']}")
             return 1
-        print("STATUS PASS: developed-state step 1081 first non-bit "
-              f"{report['first_non_bit_boundary']}")
+        if args.developed_fct_walk:
+            print("STATUS PASS: developed-state FCT first owner "
+                  f"{report['internal_statement_owner']}")
+        else:
+            print("STATUS PASS: developed-state step 1081 first non-bit "
+                  f"{report['first_non_bit_boundary']}")
         return 0
     if args.daily_tracer_subfamily_attribution:
         require(not args.daily_reset_attribution,
@@ -6045,6 +6060,17 @@ DEVELOPED_BOUNDARY_FIELDS = {
 }
 DEVELOPED_GEOMETRY_OPERANDS = ("q_Kbb", "q_Kmm", "q_Kaa")
 DEVELOPED_BRANCHES = ("fct_nonosc", "evd_replacement", "tke_floors")
+DEVELOPED_FCT_COMMON_FIELDS = (
+    "p2dt", "transport_u", "transport_v", "transport_w", "e3t_3d",
+    "r3t_Kbb", "r3t_Kmm", "r3t_Kaa", "tmask", "wmask", "r1_e1e2t",
+)
+DEVELOPED_FCT_TRACER_FIELDS = (
+    "base", "now", "rhs_entry", "first_u", "first_v", "first_w",
+    "first_div", "midpoint", "average_u", "average_v", "average_w",
+    "upstream_div", "rhs_after_up", "anti_pre_u", "anti_pre_v",
+    "anti_pre_w", "coef_u", "coef_v", "coef_w", "anti_post_u",
+    "anti_post_v", "anti_post_w", "final_div", "divisor", "rhs_final",
+)
 
 
 def developed_record_availability() -> list[dict]:
@@ -6277,18 +6303,213 @@ def _developed_state_inventory(state) -> list[dict]:
     return rows
 
 
+def _developed_fct_record(root: Path) -> dict:
+    """Read and map the admitted R153 stream onto legoESM's owned domain."""
+    gate153 = _load(
+        "nemo_testcase_l2_gyre_round153_developed_fct_gate",
+        "nemo_testcase_l2_gyre_round153_developed_fct_gate.py")
+    admission_path = root / "round153_developed_fct_admission.json"
+    admission = json.loads(admission_path.read_text(encoding="utf-8"))
+    require(admission["status"] == "PASS", "Round-153 FCT record is not admitted")
+    record = gate153.self_describing.read_self_describing_record(
+        root / gate153.RECORD, magic_expected=gate153.MAGIC,
+        header_expected=gate153.HEADER, rows_expected=gate153.EXPECTED_ROWS)
+    require(record["sha256"] == admission["record"]["sha256"],
+            "Round-153 FCT record differs from its admission")
+    fields = record["fields"]
+
+    def value(name):
+        return np.asarray(fields[name]["values"], dtype=np.float64)
+
+    def owned3(name, islice, jslice):
+        return np.ascontiguousarray(
+            value(name)[islice, jslice].transpose(1, 0, 2))
+
+    def owned2(name, islice, jslice):
+        return np.ascontiguousarray(value(name)[islice, jslice, 0].T)
+
+    common = {
+        "p2dt": np.asarray([value("p2dt").item()], dtype=np.float64),
+        "transport_u": owned3("transport_u", slice(1, 34), slice(2, 24)),
+        "transport_v": owned3("transport_v", slice(2, 34), slice(1, 24)),
+        "transport_w": np.pad(
+            owned3("transport_w", slice(1, 33), slice(1, 23)),
+            ((0, 0), (0, 0), (0, 1))),
+        "e3t_3d": owned3("e3t_3d", slice(1, 33), slice(1, 23)),
+        "r3t_Kbb": owned2("r3t_Kbb", slice(1, 33), slice(1, 23)),
+        "r3t_Kmm": owned2("r3t_Kmm", slice(1, 33), slice(1, 23)),
+        "r3t_Kaa": owned2("r3t_Kaa", slice(1, 33), slice(1, 23)),
+        "tmask": owned3("tmask", slice(1, 33), slice(1, 23)),
+        "wmask": owned3("wmask", slice(1, 33), slice(1, 23)),
+        "r1_e1e2t": owned2("r1_e1e2t", slice(1, 33), slice(1, 23)),
+    }
+    mappings = {
+        "base": (slice(2, 34), slice(2, 24)),
+        "now": (slice(2, 34), slice(2, 24)),
+        "rhs_entry": (slice(None), slice(None)),
+        "first_u": (slice(1, 34), slice(2, 24)),
+        "first_v": (slice(2, 34), slice(1, 24)),
+        "first_w": (slice(1, 33), slice(1, 23)),
+        "first_div": (slice(1, 33), slice(1, 23)),
+        "midpoint": (slice(1, 33), slice(1, 23)),
+        "average_u": (slice(None), slice(1, 23)),
+        "average_v": (slice(1, 33), slice(None)),
+        "average_w": (slice(1, 33), slice(1, 23)),
+        "upstream_div": (slice(None), slice(None)),
+        "rhs_after_up": (slice(None), slice(None)),
+        "anti_pre_u": (slice(None), slice(1, 23)),
+        "anti_pre_v": (slice(1, 33), slice(None)),
+        "anti_pre_w": (slice(None), slice(None)),
+        "coef_u": (slice(None), slice(1, 23)),
+        "coef_v": (slice(1, 33), slice(None)),
+        "coef_w": (slice(None), slice(None)),
+        "anti_post_u": (slice(None), slice(1, 23)),
+        "anti_post_v": (slice(1, 33), slice(None)),
+        "anti_post_w": (slice(None), slice(None)),
+        "final_div": (slice(None), slice(None)),
+        "divisor": (slice(None), slice(None)),
+        "rhs_final": (slice(None), slice(None)),
+    }
+    tracers = {
+        tracer: {
+            name: owned3(f"{name}_{tracer}", *slices)
+            for name, slices in mappings.items()
+        }
+        for tracer in ("T", "S")
+    }
+    classified = set(DEVELOPED_FCT_COMMON_FIELDS)
+    classified.update(
+        f"{name}_{tracer}" for tracer in ("T", "S")
+        for name in DEVELOPED_FCT_TRACER_FIELDS)
+    require(classified == set(fields), "Round-153 FCT field registry is incomplete")
+    return {
+        "sha256": record["sha256"], "admission": admission,
+        "common": common, "tracers": tracers,
+        "field_count": len(fields),
+    }
+
+
+def _score_developed_fct(actual, expected) -> dict:
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    require(actual.shape == expected.shape,
+            f"developed FCT shapes differ: {actual.shape} vs {expected.shape}")
+    different = actual.view(np.uint64) != expected.view(np.uint64)
+    delta = actual - expected
+    first = ([int(value) for value in np.argwhere(different)[0]]
+             if np.any(different) else None)
+    return {
+        "cells_scored": int(actual.size),
+        "cells_unequal": int(np.count_nonzero(different)),
+        "max_abs": float(np.max(np.abs(delta))),
+        "rms": float(np.sqrt(np.mean(delta * delta))),
+        "first_unequal_index": first,
+        "bit_exact": not bool(np.any(different)),
+    }
+
+
+def _developed_fct_mode_rows(
+        observed: dict[str, tuple[np.ndarray, ...]], bundle: dict,
+        common_actual: dict[str, np.ndarray]) -> dict:
+    """Score one complete FCT observation mode in compiled-write order."""
+    from legoesm.ocean.advection import NEMO_FCT_TRACE_FIELDS
+
+    require(set(observed) == {"T", "S"},
+            "developed FCT observer omitted a tracer")
+    require(set(common_actual) == set(DEVELOPED_FCT_COMMON_FIELDS),
+            "developed FCT common-input registry is incomplete")
+    common = {}
+    for name in DEVELOPED_FCT_COMMON_FIELDS:
+        expected = bundle["common"][name]
+        if name.startswith("r3t_"):
+            # legoESM consumes q=1+r3 directly.  Score that live operand,
+            # rather than manufacturing an r3 value with a lossy q-1.
+            expected = np.float64(1.0) + expected
+        common[name] = _score_developed_fct(common_actual[name], expected)
+    tracers = {}
+    trace_offset = 13
+    for tracer in ("T", "S"):
+        values = observed[tracer]
+        require(len(values) == trace_offset + len(NEMO_FCT_TRACE_FIELDS),
+                f"{tracer} FCT observer returned {len(values)} values")
+        actual = {
+            "base": values[1], "now": values[0],
+            "rhs_entry": np.zeros_like(values[0]),
+        }
+        actual.update({
+            name: values[trace_offset + index]
+            for index, name in enumerate(NEMO_FCT_TRACE_FIELDS)
+        })
+        require(set(actual) == set(DEVELOPED_FCT_TRACER_FIELDS),
+                f"{tracer} FCT statement registry is incomplete")
+        rows = {
+            name: _score_developed_fct(
+                actual[name], bundle["tracers"][tracer][name])
+            for name in DEVELOPED_FCT_TRACER_FIELDS
+        }
+        limiter = {}
+        for face in ("u", "v", "w"):
+            got = np.asarray(actual[f"coef_{face}"])
+            want = np.asarray(bundle["tracers"][tracer][f"coef_{face}"])
+            got_active = got.view(np.uint64) != np.float64(1.0).view(np.uint64)
+            want_active = (
+                want.view(np.uint64) != np.float64(1.0).view(np.uint64))
+            limiter[face] = {
+                "lego_active": int(np.count_nonzero(got_active)),
+                "NEMO_active": int(np.count_nonzero(want_active)),
+                "both_active": int(np.count_nonzero(got_active & want_active)),
+                "selection_disagrees": int(np.count_nonzero(
+                    got_active != want_active)),
+                "coefficient_cells_unequal": rows[f"coef_{face}"][
+                    "cells_unequal"],
+            }
+        tracers[tracer] = {"rows": rows, "limiter_activity": limiter}
+
+    context_order = list(DEVELOPED_FCT_COMMON_FIELDS) + [
+        f"{tracer}.{name}" for tracer in ("T", "S")
+        for name in ("base", "now", "rhs_entry")]
+    statement_order = [
+        f"{tracer}.{name}" for tracer in ("T", "S")
+        for name in DEVELOPED_FCT_TRACER_FIELDS[3:]]
+    flat = dict(common)
+    flat.update({
+        f"{tracer}.{name}": row
+        for tracer in ("T", "S")
+        for name, row in tracers[tracer]["rows"].items()
+    })
+    first_context = next(
+        (name for name in context_order if not flat[name]["bit_exact"]),
+        "NONE")
+    first_statement = next(
+        (name for name in statement_order if not flat[name]["bit_exact"]),
+        "NONE")
+    return {
+        "common_inputs": common, "tracers": tracers,
+        "first_non_bit_context": first_context,
+        "first_non_bit_statement": first_statement,
+        "context_order": context_order, "statement_order": statement_order,
+        "rows_scored": len(flat),
+        "bit_exact_rows": int(sum(row["bit_exact"] for row in flat.values())),
+    }
+
+
 def developed_state_process_walk(
         process_root: Path, vertical_root: Path, daily_root: Path,
         daily_audit: Path, expected_commit: str, evidence_root: Path, *,
-        mesh_path: Path = DEFAULT_MESH, plant: str | None = None) -> dict:
+        mesh_path: Path = DEFAULT_MESH, plant: str | None = None,
+        fct_record_root: Path | None = None) -> dict:
     """Run step 1081 through production JIT from NEMO's exact day-180 state."""
     if plant in ("missing-day", "missing-process-row", "missing-branch",
                  "missing-ranking-row"):
         return _developed_registry_plant(plant)
-    require(plant in (None, "none", "entry-temperature-ulp"),
+    require(plant in (None, "none", "entry-temperature-ulp",
+                      "fct-transport-ulp"),
             f"unknown developed-state plant {plant!r}")
     _policy()
+    import jax
     import jax.numpy as jnp
+    from legoesm.ocean import advection as advection_module
+    from legoesm.ocean.advection import NEMO_FCT_TRACE_FIELDS
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
     from legoesm.ocean.fidelity.nemo_state_bridge import (
@@ -6307,6 +6528,9 @@ def developed_state_process_walk(
     daily_root = Path(daily_root)
     daily_audit = Path(daily_audit)
     evidence_root = Path(evidence_root)
+    fct_bundle = (
+        _developed_fct_record(Path(fct_record_root))
+        if fct_record_root is not None else None)
 
     process_admission = validate_process_record(
         process_root, PROCESS_RECORD_COMMIT)
@@ -6410,6 +6634,137 @@ def developed_state_process_walk(
         state, dt=card.dt_s, freshwater=freshwater,
         surface_forcing=surface,
         _nemo_stage1_zad_eta_after_override=ssha)
+
+    fct_modes = {}
+    fct_observer_unequal_bytes = 0
+    if fct_bundle is not None:
+        real_fct = advection_module.fct_tracer_advection
+
+        def collapse(calls, label):
+            require(len(calls) >= 2 and len(calls) % 2 == 0,
+                    f"{label} observed {len(calls)} FCT calls")
+            pair = {"T": calls[0], "S": calls[1]}
+            for index, duplicate in enumerate(calls[2:], 2):
+                original = calls[index % 2]
+                require(len(duplicate) == len(original)
+                        and all(np.array_equal(left, right)
+                                for left, right in zip(
+                                    duplicate, original, strict=True)),
+                        f"{label} observed distinct duplicate FCT calls")
+            return pair
+
+        def run_observed(*, eager=False, plant_index=None):
+            calls = []
+
+            def sink(*values):
+                calls.append(tuple(np.asarray(value) for value in values))
+
+            def capture(*values, **kwargs):
+                call_values = list(values)
+                base = kwargs.get("tracer_before")
+                active = kwargs.get("active_mask")
+                h_base = kwargs.get("base_thickness")
+                h_after = kwargs.get("after_thickness")
+                implicit_w = kwargs.get("implicit_w")
+                require(base is not None and active is not None
+                        and h_base is not None and h_after is not None
+                        and implicit_w is not None,
+                        "developed FCT call lacks a recorded NEMO operand")
+                if plant_index is not None:
+                    old = call_values[1][plant_index]
+                    call_values[1] = call_values[1].at[plant_index].set(
+                        jnp.nextafter(old, jnp.asarray(jnp.inf, old.dtype)))
+                div_h, div_w, fct_trace = real_fct(
+                    *call_values, **kwargs, return_nemo_trace=True)
+                grid = call_values[5]
+                observed = (
+                    call_values[0], base,
+                    call_values[1] * jnp.asarray(grid.dy_u)[..., None],
+                    call_values[2] * jnp.asarray(grid.dx_v)[..., None],
+                    call_values[3] * jnp.asarray(grid.area_T)[..., None],
+                    h_base, call_values[4], h_after, active, implicit_w,
+                    call_values[1], call_values[2], call_values[3],
+                    *fct_trace,
+                )
+                jax.debug.callback(sink, *observed, ordered=True)
+                return div_h, div_w
+
+            observed_model = LatLonCGridOceanModel(
+                card.recipe.grid, card.recipe.z_coord,
+                card.recipe.model_config)
+            advection_module.fct_tracer_advection = capture
+            try:
+                if eager:
+                    with jax.disable_jit():
+                        result = observed_model._step_impl(
+                            state, card.dt_s, freshwater=freshwater,
+                            surface_forcing=surface,
+                            _nemo_stage1_zad_eta_after_override=ssha)
+                        jax.device_get(result)
+                else:
+                    result = observed_model.step(
+                        state, dt=card.dt_s, freshwater=freshwater,
+                        surface_forcing=surface,
+                        _nemo_stage1_zad_eta_after_override=ssha)
+                    jax.device_get(result)
+                jax.effects_barrier()
+            finally:
+                advection_module.fct_tracer_advection = real_fct
+            return result, collapse(
+                calls, "production eager" if eager else "production-step JIT")
+
+        observed_state, production_jit = run_observed()
+        fct_modes["production_step_jit"] = production_jit
+        if plant == "fct-transport-ulp":
+            raw_u = production_jit["T"][10]
+            candidates = np.argwhere(np.isfinite(raw_u) & (raw_u != 0.0))
+            require(candidates.size > 0, "no nonzero production U transport")
+            plant_index = tuple(int(value) for value in candidates[0])
+            _planted_state, planted = run_observed(plant_index=plant_index)
+            trace_offset = 13
+            first_u = NEMO_FCT_TRACE_FIELDS.index("first_u")
+            moved = _score_developed_fct(
+                planted["T"][trace_offset + first_u],
+                production_jit["T"][trace_offset + first_u])
+            require(moved["cells_unequal"] > 0,
+                    "production FCT transport ULP plant moved no first face")
+            return {
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": {"raw_u_index": list(plant_index),
+                            "first_u_T": moved},
+            }
+        _eager_state, production_eager = run_observed(eager=True)
+        fct_modes["production_eager"] = production_eager
+
+        isolated = {}
+        for tracer in ("T", "S"):
+            observed = production_jit[tracer]
+            (now, base, _p_u, _p_v, _p_w, h_base, h_now, h_after,
+             active, implicit_w, raw_u, raw_v, raw_w) = observed[:13]
+
+            @jax.jit
+            def isolated_call(
+                    now_value, base_value, u_value, v_value, w_value,
+                    h_base_value, h_now_value, h_after_value, active_value,
+                    implicit_value):
+                return real_fct(
+                    now_value, u_value, v_value, w_value, h_now_value,
+                    card.recipe.grid, card.dt_s, high_order="centred2",
+                    tracer_before=base_value, active_mask=active_value,
+                    low_order_predictor="nemo_rk3_two_step",
+                    base_thickness=h_base_value,
+                    after_thickness=h_after_value,
+                    implicit_w=implicit_value, return_nemo_trace=True)
+
+            _dh, _dw, isolated_trace = isolated_call(
+                jnp.asarray(now), jnp.asarray(base), jnp.asarray(raw_u),
+                jnp.asarray(raw_v), jnp.asarray(raw_w), jnp.asarray(h_base),
+                jnp.asarray(h_now), jnp.asarray(h_after), jnp.asarray(active),
+                jnp.asarray(implicit_w))
+            isolated[tracer] = tuple(observed[:13]) + tuple(
+                np.asarray(value) for value in jax.device_get(isolated_trace))
+        fct_modes["isolated_closure_jit"] = isolated
+
     ordinary = ordinary_model.step(
         state, dt=card.dt_s, freshwater=freshwater,
         surface_forcing=surface,
@@ -6418,6 +6773,11 @@ def developed_state_process_walk(
         trace.state_after, ordinary)
     require(observer_unequal_bytes == 0,
             f"process observer changed {observer_unequal_bytes} state bytes")
+    if fct_bundle is not None:
+        fct_observer_unequal_bytes = _state_bit_mismatches(
+            observed_state, ordinary)
+        require(fct_observer_unequal_bytes == 0,
+                "FCT statement observer changed production state")
 
     lego_frame = _trace_frame(trace)
     control_frame = _trace_frame(control_trace)
@@ -6440,6 +6800,64 @@ def developed_state_process_walk(
             + ", ".join(
                 f"{name}={value}" for name, value
                 in branch_observer_unequal.items() if value))
+    fct_walk = None
+    if fct_bundle is not None:
+        reference_observation = fct_modes["production_step_jit"]["T"]
+        for mode_name, observed in fct_modes.items():
+            for tracer in ("T", "S"):
+                for index in range(2, 10):
+                    require(np.array_equal(
+                        observed[tracer][index],
+                        fct_modes["production_step_jit"][tracer][index]),
+                        f"{mode_name} changed shared FCT context index {index}")
+            for index in range(2, 10):
+                require(np.array_equal(
+                    observed["T"][index], observed["S"][index]),
+                    f"{mode_name} T/S FCT context index {index} differs")
+        zcoord = card.recipe.z_coord
+        common_actual = {
+            "p2dt": np.asarray([card.dt_s], dtype=np.float64),
+            "transport_u": reference_observation[2],
+            "transport_v": reference_observation[3],
+            "transport_w": reference_observation[4],
+            "e3t_3d": np.asarray(zcoord.nemo_e3t_0, dtype=np.float64),
+            "r3t_Kbb": np.asarray(lego_frame["q_Kbb"], dtype=np.float64),
+            "r3t_Kmm": np.asarray(lego_frame["q_Kmm"], dtype=np.float64),
+            "r3t_Kaa": np.asarray(lego_frame["q_Kaa"], dtype=np.float64),
+            "tmask": reference_observation[8],
+            # GYRE-zco has full-depth wet columns, so the consumed interior
+            # W mask and T mask have identical owned-domain values.  The
+            # record retains both rows and this comparison proves that fact.
+            "wmask": reference_observation[8],
+            "r1_e1e2t": np.float64(1.0) / np.asarray(
+                card.recipe.grid.area_T, dtype=np.float64),
+        }
+        mode_rows = {
+            name: _developed_fct_mode_rows(values, fct_bundle, common_actual)
+            for name, values in fct_modes.items()
+        }
+        production = mode_rows["production_step_jit"]
+        all_record_fields = set(DEVELOPED_FCT_COMMON_FIELDS)
+        all_record_fields.update(
+            f"{name}_{tracer}" for tracer in ("T", "S")
+            for name in DEVELOPED_FCT_TRACER_FIELDS)
+        require(len(all_record_fields) == fct_bundle["field_count"] == 61,
+                "developed FCT scored-field registry is not 61 rows")
+        fct_walk = {
+            "record_root": str(fct_record_root),
+            "record_sha256": fct_bundle["sha256"],
+            "admission_sha256": _sha256(
+                Path(fct_record_root)
+                / "round153_developed_fct_admission.json"),
+            "record_fields": sorted(all_record_fields),
+            "field_count": fct_bundle["field_count"],
+            "modes": mode_rows,
+            "authoritative_mode": "production_step_jit",
+            "first_non_bit_context": production["first_non_bit_context"],
+            "first_non_bit_statement": production[
+                "first_non_bit_statement"],
+            "observer_state_unequal_bytes": fct_observer_unequal_bytes,
+        }
     if plant == "entry-temperature-ulp":
         j, i, k = (int(value) for value in np.argwhere(wet)[0])
         planted_t = np.array(state.T.data, copy=True)
@@ -6578,19 +6996,62 @@ def developed_state_process_walk(
             },
         },
     }
+    if fct_walk is not None:
+        authoritative = fct_walk["modes"]["production_step_jit"]
+        nemo_active = {}
+        lego_active = {}
+        selection_disagrees = {}
+        for tracer in ("T", "S"):
+            activity_rows = authoritative["tracers"][tracer][
+                "limiter_activity"]
+            nemo_active[tracer] = sum(
+                row["NEMO_active"] for row in activity_rows.values())
+            lego_active[tracer] = sum(
+                row["lego_active"] for row in activity_rows.values())
+            selection_disagrees[tracer] = sum(
+                row["selection_disagrees"]
+                for row in activity_rows.values())
+        branches["fct_nonosc"]["NEMO"] = {
+            "status": "MEASURED_DIRECT_COEFFICIENT_RECORD",
+            "active_face_coefficients": nemo_active,
+        }
+        branches["fct_nonosc"]["legoESM_on_NEMO_entry"].update({
+            "active_face_coefficients": lego_active,
+            "selection_disagrees": selection_disagrees,
+            "direct_record_status": "MEASURED_PRODUCTION_STEP",
+        })
 
     evidence_root.mkdir(parents=True, exist_ok=True)
     maps_path = evidence_root / (
         f"developed_branch_maps_{expected_commit[:12]}.npz")
     require(not maps_path.exists(),
             f"refusing to overwrite developed branch maps {maps_path}")
-    np.savez_compressed(
-        maps_path, first_non_bit_cells=first_diff,
-        lego_fct_nonosc=fct_activity, nemo_evd=nemo_evd,
-        lego_evd=lego_evd, nemo_tke_diffusivity_floor=nemo_kh_floor,
-        lego_tke_diffusivity_floor=lego_kh_floor,
-        lego_tke_viscosity_floor=lego_km_floor,
-        lego_tke_energy_floor=lego_energy_floor)
+    branch_map_values = {
+        "first_non_bit_cells": first_diff,
+        "lego_fct_nonosc": fct_activity, "nemo_evd": nemo_evd,
+        "lego_evd": lego_evd,
+        "nemo_tke_diffusivity_floor": nemo_kh_floor,
+        "lego_tke_diffusivity_floor": lego_kh_floor,
+        "lego_tke_viscosity_floor": lego_km_floor,
+        "lego_tke_energy_floor": lego_energy_floor,
+    }
+    if fct_bundle is not None:
+        coef_start = 13
+        from legoesm.ocean.advection import NEMO_FCT_TRACE_FIELDS
+        one_bits = np.float64(1.0).view(np.uint64)
+        for tracer in ("T", "S"):
+            observed = fct_modes["production_step_jit"][tracer]
+            for face in ("u", "v", "w"):
+                index = coef_start + NEMO_FCT_TRACE_FIELDS.index(
+                    f"coef_{face}")
+                got = np.asarray(observed[index])
+                want = np.asarray(
+                    fct_bundle["tracers"][tracer][f"coef_{face}"])
+                branch_map_values[f"lego_{tracer}_coef_{face}_active"] = (
+                    got.view(np.uint64) != one_bits)
+                branch_map_values[f"nemo_{tracer}_coef_{face}_active"] = (
+                    want.view(np.uint64) != one_bits)
+    np.savez_compressed(maps_path, **branch_map_values)
 
     predictions = {
         "entry_T_bit_exact": entry_t_unequal == 0,
@@ -6604,6 +7065,25 @@ def developed_state_process_walk(
             np.any(nemo_kh_floor) or np.any(lego_floor_cells)),
         "observer_bit_exact": observer_unequal_bytes == 0,
     }
+    if fct_walk is not None:
+        production_fct = fct_walk["modes"]["production_step_jit"]
+        coef_rows = [
+            production_fct["tracers"][tracer]["rows"][f"coef_{face}"]
+            for tracer in ("T", "S") for face in ("u", "v", "w")]
+        first_context = fct_walk["first_non_bit_context"]
+        first_statement = fct_walk["first_non_bit_statement"]
+        predictions.update({
+            "recorded_limiters_active_T_and_S": all(
+                fct_bundle["admission"]["limiter_active_coefficients"][tracer]
+                > 0 for tracer in ("T", "S")),
+            "first_FCT_non_bit_no_later_than_first_horizontal_faces": (
+                first_context != "NONE"
+                or first_statement in ("T.first_u", "T.first_v",
+                                       "S.first_u", "S.first_v")),
+            "developed_active_limiter_row_differs": any(
+                not row["bit_exact"] for row in coef_rows),
+            "FCT_observer_bit_exact": fct_observer_unequal_bytes == 0,
+        })
     report = {
         "format": "gyre-developed-state-process-walk-v1",
         "status": "PASS", "case": CASE,
@@ -6669,6 +7149,33 @@ def developed_state_process_walk(
         },
         "worktree": stamp,
     }
+    if fct_walk is not None:
+        report["format"] = "gyre-developed-state-fct-walk-v1"
+        report["fct_walk"] = fct_walk
+        report["record_contract"]["FCT_record_fields"] = (
+            fct_walk["record_fields"])
+        report["record_contract"]["not_recorded"].remove(
+            "nonosc coefficients")
+        first_context = fct_walk["first_non_bit_context"]
+        first_statement = fct_walk["first_non_bit_statement"]
+        if first_context != "NONE":
+            owner = f"INHERITED_CONTEXT:{first_context}"
+            claim = (
+                "the first developed FCT mismatch is inherited at caller "
+                f"context row {first_context}; no downstream FCT statement "
+                "is an admissible owner")
+        elif first_statement != "NONE":
+            owner = first_statement
+            claim = (
+                "the first developed production-JIT FCT non-bit statement is "
+                f"{first_statement}")
+        else:
+            owner = "NONE"
+            claim = "all directly recorded developed FCT rows are bit exact"
+        report["internal_statement_owner"] = owner
+        report["claim"] = claim
+        report["first_directly_scored_active_statement"] = first_statement
+        report["admissions"]["FCT_record_fields"] = fct_walk["field_count"]
     _validate_developed_registry(report)
     print("\nDEVELOPED-STATE STEP 1081 -- cumulative temperature boundaries")
     print(f"  {'boundary':>22s} {'unequal':>10s} {'max abs K':>16s} "
@@ -6689,6 +7196,16 @@ def developed_state_process_walk(
         print(f"  {row['rank']:2d} {row['name']:>20s} "
               f"{row['rms_temperature_contribution_K']:16.8e} K  "
               f"{row['rms_effective_tendency_K_s']:16.8e} K/s")
+    if fct_walk is not None:
+        print("\nDEVELOPED FCT -- 61-field compiled-order walk")
+        print(f"  {'mode':>24s} {'exact rows':>12s} "
+              f"{'first context':>28s} {'first statement':>24s}")
+        for mode_name, mode in fct_walk["modes"].items():
+            print(f"  {mode_name:>24s} "
+                  f"{mode['bit_exact_rows']:5d}/{mode['rows_scored']:<5d} "
+                  f"{mode['first_non_bit_context']:>28s} "
+                  f"{mode['first_non_bit_statement']:>24s}")
+        print(f"  AUTHORITATIVE OWNER: {report['internal_statement_owner']}")
     return report
 
 
