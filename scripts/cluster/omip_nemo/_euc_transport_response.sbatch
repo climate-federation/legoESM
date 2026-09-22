@@ -74,12 +74,31 @@ print(f"u shape {u.shape}; lat shape {lat.shape}; {len(z)} levels, "
 # The band the probe integrates over: |lat| <= 1 and the top 400 m.
 in_band = np.abs(lat) <= 1.0
 in_depth = np.abs(z) <= 400.0
-print(f"perturbing {int(in_band.sum())} columns x {int(in_depth.sum())} "
-      f"levels by du = {du} m/s")
-assert in_band.any() and in_depth.any(), "empty perturbation band"
+
+# u lives on the ZONAL FACES, so it carries one more column than the tracer
+# grid: (332, 363, 75) against lat_T's (332, 362). The first version of this
+# card indexed u with the tracer mask and died on the shape mismatch, which
+# is the right failure -- silently broadcasting would have perturbed the
+# wrong faces. The face at (j, i) lies between T(j, i) and T(j, i+1) and
+# shares their row, so the face mask is the tracer mask with the wrapping
+# column appended.
+if u.shape[1] == in_band.shape[1] + 1:
+    in_band_u = np.concatenate([in_band, in_band[:, :1]], axis=1)
+    print(f"u is face-staggered ({u.shape[1]} faces vs {in_band.shape[1]} "
+          f"cells); band mask extended by the wrap column")
+elif u.shape[1] == in_band.shape[1]:
+    in_band_u = in_band
+else:
+    raise SystemExit(f"u second axis {u.shape[1]} matches neither the tracer "
+                     f"count {in_band.shape[1]} nor that plus one")
+
+print(f"perturbing {int(in_band_u.sum())} columns x {int(in_depth.sum())} "
+      f"levels by du = {du} m/s; integration depth spans z = "
+      f"{z[in_depth].min():.1f} to {z[in_depth].max():.1f} m")
+assert in_band_u.any() and in_depth.any(), "empty perturbation band"
 
 pert = u.copy()
-pert[in_band[..., None] & in_depth[None, None, :]] += du
+pert[in_band_u[..., None] & in_depth[None, None, :]] += du
 moved = int(np.sum(pert != u))
 print(f"cells actually changed: {moved}")
 assert moved > 0, "perturbation changed nothing -- band indexing is wrong"
@@ -94,13 +113,28 @@ rc=$?
 for pair in "baseline:$SRC" "perturbed:$WORK/perturbed.npz"; do
   TAG=${pair%%:*}; SNAP=${pair#*:}
   echo "############ $TAG ############"
+  # Full output, not a grep. The first run of this card piped the probe
+  # through `grep -A 8 'NET ZONAL TRANSPORT'`, both arms exited 1, and the
+  # reason was thrown away with everything that did not match -- including
+  # the baseline arm, which is the untouched snapshot that every earlier job
+  # read without complaint, so the fault was in how this card CALLS the probe
+  # rather than in the data. A filter that discards the error text turns a
+  # diagnosable failure into a mystery.
   $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline.py \
     --legoesm-snapshot "$SNAP" --nemo-gridt ${STEM}_grid_T.nc \
     --nemo-t-recs "5:6" --label "resp_$TAG" \
+    --nemo-wfile ${STEM}_grid_W.nc --nemo-w-var wo --nemo-w-recs "5:6" \
     --nemo-ufile ${STEM}_grid_U.nc --nemo-vfile ${STEM}_grid_V.nc \
-    --mesh-mask "$MESH" 2>&1 | grep -A 8 'NET ZONAL TRANSPORT'
+    --mesh-mask "$MESH" 2>&1 | tail -400
   r=${PIPESTATUS[0]}; echo "### $TAG rc=$r"; [ "$r" -eq 0 ] || rc=$r
 done
-echo "PREDICTED SHIFT: du * 400 m = $(echo "$DU" | awk '{printf "%.2f", $1*400}') m2/s at every longitude."
+echo "PREDICTED SHIFT: du * H, where H is the depth the probe integrates over."
+echo "With du = $DU and H near 400 m that is about $(echo "$DU" | awk '{printf "%.2f", $1*400}') m2/s."
+echo "THE SHARP PART OF THE TEST IS EQUALITY ACROSS LONGITUDES, not the second"
+echo "decimal: H is set by where the 400 m cut falls between level centres, so"
+echo "the absolute value carries that ambiguity while the longitude-to-longitude"
+echo "spread does not. Every column deeper than 400 m must shift by the SAME"
+echo "amount; a column that shifts by less is shallower than the integration"
+echo "depth, and that is a fact about the bathymetry rather than the instrument."
 echo "=== card exit: $rc ==="
 exit $rc
