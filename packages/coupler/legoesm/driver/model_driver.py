@@ -305,6 +305,216 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
 # roughly twice a day at dt~100 s.  A logging cadence + a count epsilon, not
 # physics.
 _HARD_SAT_LOG_CADENCE_STEPS = 432
+# Cadence (steps) of the sedimentation sub-step report; same as the
+# hard-saturation log so a run has ONE diagnostic rhythm.
+_SED_SUBSTEP_LOG_CADENCE_STEPS = _HARD_SAT_LOG_CADENCE_STEPS
+
+
+def effective_sed_substeps_cap(micro_cfg, scheme, cfg=None) -> int:
+    """The sedimentation sub-step cap the lane will actually run.
+
+    ``micro_cfg`` is the RESOLVED (already flat-threaded) microphysics
+    config, so its scheme leaf is read first: it already carries whatever the
+    flat ``ExperimentConfig`` field forwarded, and a deck that sets only the
+    leaf is honoured.  A NON-DEFAULT flat field wins, because threading
+    forwards it onto the leaf; the leaf survives only where the flat field
+    sits at its default (GLM 2026-09-22: the old wording overstated this).
+    Falls back to the flat field and then to the scheme default.
+    """
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    if scheme != "morrison":
+        # no other scheme sub-steps sedimentation; returning the Morrison
+        # default here would name a cap nothing runs
+        return 0
+    _leaf = None
+    if micro_cfg is not None:
+        # a bare scheme leaf (what the finite-volume pipeline carries) or the
+        # threaded container keyed by scheme name
+        _leaf = (micro_cfg if hasattr(micro_cfg, "sed_cfl_substeps_max")
+                 else getattr(micro_cfg, scheme, None))
+    _cap = getattr(_leaf, "sed_cfl_substeps_max", None)
+    if _cap is None and cfg is not None:
+        _cap = getattr(cfg, "morrison_sed_cfl_substeps_max", None)
+    return int(MorrisonConfig._field_defaults["sed_cfl_substeps_max"]
+               if _cap is None else _cap)
+
+
+def require_cpu_for_strict_sedimentation() -> None:
+    """Refuse at startup when the strict sedimentation abort has no CPU.
+
+    The abort is an equinox ``error_if``, i.e. a host callback: it needs a
+    CPU device to place its inputs on, which the GPU-only lane
+    (``JAX_PLATFORMS=cuda``) does not have.  Refusing here beats dying mid
+    run (the first CAM6 60-day arm died at day 2).
+
+    The declared platform list is preferred over querying devices: every
+    rank reads the same string, so the refusal is collective by
+    construction, and no backend is initialized to reach it (GLM
+    2026-09-22).  Only when nothing is declared does this query JAX, after
+    the multicontroller init (querying devices initializes the backend, and
+    ``jax.distributed.initialize`` must run first -- codex 2026-09-22).
+    """
+    _plat = os.environ.get("JAX_PLATFORMS", "")
+    _cpu_exc = None
+    if _plat.strip():
+        # jax accepts platform names case-insensitively (GLM 2026-09-22)
+        _has_cpu = "cpu" in [t.strip().lower() for t in _plat.split(",")]
+    else:
+        import jax as _jax
+        try:
+            _has_cpu = bool(_jax.devices("cpu"))
+        except Exception as _exc:   # RuntimeError today; jax promises nothing
+            _cpu_exc = f"{type(_exc).__name__}: {_exc}"
+            print(f"WARNING: no CPU device for the strict sedimentation "
+                  f"abort: {_cpu_exc}", file=sys.stderr)
+            _has_cpu = False
+    if _has_cpu:
+        return
+    raise SystemExit(
+        "morrison_sed_cfl_substeps_strict=True needs a CPU device for its "
+        "host-callback abort, but none is available (JAX_PLATFORMS="
+        f"{_plat or '<unset>'!r}).  Add 'cpu' to JAX_PLATFORMS or run with "
+        "the flag off (the required sub-step count is still reported as a "
+        "diagnostic)."
+        + (f"  Backend error: {_cpu_exc}" if _cpu_exc else ""))
+
+
+def _resolved_sed_flag(cfg, micro_cfg, leaf_field: str, flat_field: str):
+    """A sedimentation switch as the RUN resolves it: the scheme leaf first
+    (it already carries whatever the flat field forwarded), the flat field
+    as the fallback -- the same precedence as the cap resolver."""
+    _leaf = None
+    if micro_cfg is not None:
+        _leaf = (micro_cfg if hasattr(micro_cfg, leaf_field) else
+                 getattr(micro_cfg, "morrison", None))
+    _v = getattr(_leaf, leaf_field, None)
+    return getattr(cfg, flat_field, False) if _v is None else _v
+
+
+def strict_sed_abort_requested(cfg, micro_cfg=None) -> bool:
+    """Whether THIS run arms the strict sedimentation abort.
+
+    Read from the resolved leaf as well as the flat field: a deck that sets
+    only the leaf still needs the CPU the host-callback abort lands on
+    (codex 2026-09-22 -- the guard used to read the flat flag alone, so a
+    leaf-only deck skipped it and would have died mid-run).
+    """
+    if getattr(cfg, "microphysics", None) != "morrison":
+        return False
+    return bool(_resolved_sed_flag(cfg, micro_cfg, "sed_cfl_substeps_strict",
+                                   "morrison_sed_cfl_substeps_strict"))
+
+
+def warn_sed_substeps_unreported(cfg, lane: str = "current",
+                                 micro_cfg=None) -> bool:
+    """Say out loud that THIS lane cannot report a clamped fall.
+
+    The MPAS loop and the per-step loop publish the required sub-step count
+    and log its window maximum; every other lane (compiled segments, the
+    spectral loop, the lat-band and tiled-cube SPMD loops, fv3_duo) reduces
+    inside ``lax.scan`` or discards the microphysics output, and carries no
+    slot for the count, so a clamp there is invisible unless the strict
+    abort is on.  Called from the lane DISPATCHER, so a new lane inherits
+    the warning instead of inheriting silence (codex 2026-09-22).  A silent gap is what this round
+    was opened to remove (GLM 2026-09-22), so the gap announces itself once
+    at run start.  Returns True when the warning was emitted.
+    """
+    if getattr(cfg, "microphysics", None) != "morrison":
+        return False            # no other scheme sub-steps sedimentation
+    if not _resolved_sed_flag(cfg, micro_cfg, "sed_cfl_substeps",
+                              "morrison_sed_cfl_substeps"):
+        return False
+    if strict_sed_abort_requested(cfg, micro_cfg):
+        return False            # a clamp aborts, so nothing can hide
+    logger.warning(
+        "microphysics sedimentation: CFL sub-stepping is ON but the %s lane "
+        "does not report the required sub-step count - a clamped fall would "
+        "be silent here; the MPAS and per-step lanes do report it, and "
+        "morrison_sed_cfl_substeps_strict=True makes a clamp fatal on every "
+        "lane", lane)
+    return True
+
+
+def _sed_substeps_slot() -> int:
+    """Index of ``sed_substeps_required`` in the MPAS ``_sfc_diag`` tuple.
+
+    Derived from the SHARED slot contract (``MPAS_SFC_DIAG_EXTRA_KEYS``
+    entries start at tuple slot 3), never hand-counted.
+    """
+    from legoesm.core.state import (
+        MPAS_SFC_DIAG_BASE_KEYS,
+        MPAS_SFC_DIAG_EXTRA_KEYS,
+    )
+    return (len(MPAS_SFC_DIAG_BASE_KEYS)
+            + MPAS_SFC_DIAG_EXTRA_KEYS.index("sed_substeps_required"))
+
+
+def _sed_published_count(sfc_diag, slot, counts):
+    """The step's sub-step count from either publication route, or None.
+
+    ``counts`` is the count a NON-MPAS lane returns directly (the
+    finite-volume pipeline's ``PhysicsOutput.sed_substeps_required``);
+    ``sfc_diag`` is the MPAS lean-loop export tuple.  Both routes exist
+    because the two lanes publish diagnostics differently (codex 2026-09-22:
+    reporting only inside the MPAS loop left the finite-volume lane silent).
+    """
+    if counts is not None:
+        return jnp.max(getattr(counts, "data", counts))
+    if not sfc_diag or len(sfc_diag) <= slot or sfc_diag[slot] is None:
+        return None
+    return jnp.max(getattr(sfc_diag[slot], "data", sfc_diag[slot]))
+
+
+def sed_substeps_window_max(sfc_diag, running=None, slot=None, counts=None):
+    """Running maximum of the published sub-step count, on device.
+
+    Called EVERY step (no host sync): a single step's overflow between two
+    reports would otherwise be lost, because the export slot holds only the
+    latest step's count (codex 2026-09-22).  Returns the updated running
+    maximum, or ``running`` unchanged when the lane published no count.
+    """
+    if slot is None:
+        slot = _sed_substeps_slot()
+    _req = _sed_published_count(sfc_diag, slot, counts)
+    if _req is None:
+        return running
+    return _req if running is None else jnp.maximum(running, _req)
+
+
+def report_sed_substep_overflow(sfc_diag, cap, step, slot=None, running=None,
+                                counts=None):
+    """Log the microphysics' required CFL sedimentation sub-step count.
+
+    ``sfc_diag`` is the MPAS lean-loop export tuple (slot contract
+    ``core.state.MPAS_SFC_DIAG_EXTRA_KEYS``); ``running`` is the window
+    maximum accumulated by :func:`sed_substeps_window_max` since the last
+    report.  Returns the reported maximum, or None when neither source
+    carries a count (sub-stepping off, or a non-Morrison scheme).
+
+    A count above the static cap means the loop CLAMPED: mass is still
+    conserved, but that species fell slower than its terminal speed.  Without
+    this line the clamp is invisible unless the run enables the strict abort.
+    """
+    if slot is None:
+        slot = _sed_substeps_slot()
+    _req = _sed_published_count(sfc_diag, slot, counts)
+    if running is not None:
+        _req = running if _req is None else jnp.maximum(running, _req)
+    if _req is None:
+        return None
+    _n = int(_req)
+    if _n > cap:
+        logger.warning(
+            "microphysics sedimentation: a column needed %d CFL sub-steps but "
+            "the loop is capped at %d, so it CLAMPED (mass conserved, the "
+            "species fell slower than its terminal speed) - raise "
+            "morrison_sed_cfl_substeps_max or shorten the physics step; "
+            "at step %d", _n, cap, step)
+    else:
+        logger.info(
+            "microphysics sedimentation: max %d CFL sub-steps required of %d "
+            "available, at step %d", _n, cap, step)
+    return _n
 _HARD_SAT_LOG_QV_EPS = 1.0e-9        # [kg/kg] count a point as "drained" above this
 
 
@@ -7120,11 +7330,24 @@ class ModelDriver:
             # fv3_duo steps its own six-face bundled pytree — keyed on the
             # DISCRETIZATION (its grid_type is the shared "cubed_sphere"),
             # so it must dispatch before every grid-keyed branch below.
+            if strict_sed_abort_requested(
+                    self.config, getattr(self.physics, "micro_config", None)):
+                # every driver, not just run_amip: a deck that turns the
+                # strict abort on must not reach day 2 of a GPU run before
+                # discovering its host callback has nowhere to land
+                # (GLM 2026-09-22)
+                require_cpu_for_strict_sedimentation()
             if self.config.dycore.discretization == "fv3_duo":
+                warn_sed_substeps_unreported(
+                    self.config, "fv3_duo",
+                    getattr(self.physics, "micro_config", None))
                 status = self._run_fv3_duo(start_step, start_day)
             elif self.config.grid.grid_type == "mpas":
                 status = self._run_mpas(start_step, start_day)
             elif self.config.dycore.discretization == "spectral":
+                warn_sed_substeps_unreported(
+                    self.config, "spectral",
+                    getattr(self.physics, "micro_config", None))
                 status = self._run_spectral(start_step, start_day)
             elif (self.config.enable_latlon_spmd
                     and self.config.grid.grid_type == "latlon"):
@@ -7137,6 +7360,9 @@ class ModelDriver:
                 # operator-split one DOES stash the held surface fields; the
                 # refusal now lives in _run_compiled_latlon_spmd, on the
                 # stateless sub-lane that genuinely produces none.
+                warn_sed_substeps_unreported(
+                    self.config, "lat-band SPMD",
+                    getattr(self.physics, "micro_config", None))
                 status = self._run_compiled_latlon_spmd(start_step, start_day)
             elif (self.config.grid.grid_type == "cubed_sphere"
                     and self._device_config is not None
@@ -7160,8 +7386,14 @@ class ModelDriver:
                     "Run the coupled case on <=6 devices (n_devices<=6, so "
                     "tiling==(1,1)) -- the compiled lane stashes the held "
                     "fields; this one does not.")
+                warn_sed_substeps_unreported(
+                    self.config, "tiled cube SPMD",
+                    getattr(self.physics, "micro_config", None))
                 status = self._run_tiled_cube_spmd(start_step, start_day)
             elif compiled:
+                warn_sed_substeps_unreported(
+                    self.config, "compiled segments",
+                    getattr(self.physics, "micro_config", None))
                 status = self._run_compiled(start_step, start_day)
             else:
                 status = self._run_per_step(start_step, start_day)
@@ -9318,6 +9550,11 @@ class ModelDriver:
                     cfg, cfg.microphysics,
                     getattr(_micro_cfg, cfg.microphysics)),
             })
+        # The cap the lane ACTUALLY runs -- read from the THREADED scheme
+        # config (_micro_cfg above), not from the flat field, which a deck's
+        # own microphysics sub-config can override.
+        _sed_cap_effective = effective_sed_substeps_cap(
+            _micro_cfg, cfg.microphysics, cfg)
         # Post-step hard-saturation-adjustment guard (opt-in), MPAS: read its
         # threshold + per-step heating cap from the (unmodified) scheme config,
         # and fail LOUDLY here if a non-warm-rain scheme was requested with the
@@ -10914,6 +11151,10 @@ class ModelDriver:
         # the (already host-syncing) diag block reads them.
         _led_accum = None
         _led_nsteps = 0
+        # Window maximum of the microphysics' required CFL sedimentation
+        # sub-step count (device array; reported and reset per window, and
+        # flushed after the loop so a partial window is not lost).
+        _sed_req_window = None
         from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
             # Enter the daily-boundary block also when a coupler segment_callback
@@ -11445,6 +11686,22 @@ class ModelDriver:
                 self._mpas_sfc_accum.add(
                     getattr(self.model, "_sfc_diag", None))
 
+            # Sedimentation sub-steps: accumulate the window maximum on
+            # device EVERY step (the export slot holds only the latest
+            # step), and report it once per cadence window -- one host sync
+            # per window, and only when the lane published a count.
+            _sed_req_window = sed_substeps_window_max(
+                getattr(self.model, "_sfc_diag", None), _sed_req_window)
+            # ``step > 0``: at step 0 the window holds one step and the
+            # report would fire before anything accumulated, which also let
+            # a test mistake the opening report for the post-loop flush
+            # (codex 2026-09-22).
+            if step > 0 and (step % _SED_SUBSTEP_LOG_CADENCE_STEPS) == 0:
+                report_sed_substep_overflow(
+                    getattr(self.model, "_sfc_diag", None),
+                    int(_sed_cap_effective), step, running=_sed_req_window)
+                _sed_req_window = None
+
             # Diagnostics at intervals — phased by DIAG_PHASE (= start_step
             # for a real periodic cadence, 0 for the once-at-the-end
             # sentinel; see its definition).  On the periodic path a restart
@@ -11877,6 +12134,13 @@ class ModelDriver:
         # periodic checkpoint (exact-checkpoint-cadence completion).  Gated on
         # the feed being active (serial / 1-rank with CMIP output); a no-op
         # otherwise.
+        # Flush the partial sedimentation window: an overflow in the last
+        # steps before the run ends must still be reported.
+        if _sed_req_window is not None:
+            report_sed_substep_overflow(
+                None, int(_sed_cap_effective), n_steps_total,
+                running=_sed_req_window)
+
         if run_status == "COMPLETED" and self._mpas_cmip_feed_on:
             self._finalize_mpas_cmip(
                 START_DAY + n_steps_total * DT / 86400.0)
@@ -15586,6 +15850,16 @@ class ModelDriver:
             else step_unified_no_rad
         )
 
+        # Sedimentation sub-step reporting: the window opens BEFORE the
+        # warm-up step, which is a real physics step whose count would
+        # otherwise be dropped -- a first-step-only overflow, or a one-step
+        # run, would report nothing (codex 2026-09-22).
+        _sed_req_window = None
+        _sed_warned_silent = False
+        _sed_cap_per_step = effective_sed_substeps_cap(
+            getattr(self.physics, "micro_config", None),
+            self.config.microphysics, self.config)
+
         self.state = self.model.step_with_physics(self.state, DT)
         # Physics reads winds at cell centres.  On the persistent-D lane this
         # is a READ-ONLY view of the corner winds (#1028); on every other lane
@@ -15682,6 +15956,8 @@ class ModelDriver:
         self.q_c = self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)
         self.q_r = self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)
         self._apply_double_moment_tendencies(phys_out, DT)
+        _sed_req_window = sed_substeps_window_max(
+            None, _sed_req_window, counts=phys_out.sed_substeps_required)
 
         if MICROPHYSICS == "none":
             p_full = self.sigma.pressure_at_full(self.state.p_s.data)
@@ -15775,6 +16051,24 @@ class ModelDriver:
                     **_phys_carry_step_inputs(),
                 )
             conv_prog = phys_out.conv_prog
+            # Sedimentation sub-steps: same window-maximum + cadence report as
+            # the MPAS loop, from the count this lane returns directly
+            # (codex 2026-09-22: reporting only inside _run_mpas left every
+            # finite-volume run silent about a clamped fall).
+            _sed_req_window = sed_substeps_window_max(
+                None, _sed_req_window, counts=phys_out.sed_substeps_required)
+            if step > 0 and (step % _SED_SUBSTEP_LOG_CADENCE_STEPS) == 0:
+                if (_sed_req_window is None and not _sed_warned_silent):
+                    # a reporting lane that published NOTHING (the multilayer
+                    # microphysics branch returns no count) is as blind as a
+                    # non-reporting one, so it says so once (GLM 2026-09-22)
+                    _sed_warned_silent = warn_sed_substeps_unreported(
+                        self.config, "per-step (no count published)",
+                        getattr(self.physics, "micro_config", None))
+                report_sed_substep_overflow(
+                    None, int(_sed_cap_per_step), step,
+                    running=_sed_req_window)
+                _sed_req_window = None
             if phys_out.w_land is not None:
                 w_land = phys_out.w_land
             if phys_out.snow is not None:
@@ -15948,6 +16242,9 @@ class ModelDriver:
             if checkpoint_interval > 0 and (step + 1) % checkpoint_interval == 0:
                 self.save_checkpoint(step + 1, day)
 
+        report_sed_substep_overflow(
+            None, int(_sed_cap_per_step), n_steps_total,
+            running=_sed_req_window)
         return self._finalize_run(
             run_status, t_jit, t_start,
             n_steps_total, START_DAY, N_DAYS, checkpoint_interval,

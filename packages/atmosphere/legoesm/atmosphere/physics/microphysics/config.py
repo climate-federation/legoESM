@@ -533,18 +533,6 @@ class MorrisonConfig(NamedTuple):
     # selects ``ice_to_snow_scheme="mg_ferrier"`` (180-s Ferrier ice→snow). Warm
     # rain (kk2000) and ice deposition (m2005) are ALREADY MG-faithful in both.
     morrison_flavor: str = "mg"      # "mg" (global default) | "sam" (CRM)
-    # MG2 (micro_mg2_0.F90 sedimentation loop) CFL sub-stepping of rain /
-    # ice / snow / graupel sedimentation: per column nstep = 1 + floor(max
-    # V·dt/dz), capped at ``morrison._SEDIMENTATION_SUBSTEPS_MAX``.  True
-    # (DEFAULT, user decision 2026-09-22 -- the one-pass form let a
-    # hydrometeor fall at most one layer per call, a defect at every dt where
-    # V·dt/dz > 1: production rain CFL ~3.4 at 112.5 s).  False = the legacy
-    # one-pass flux-capped form, kept for reproducing pre-2026-09-22 runs.
-    sed_cfl_substeps: bool = True
-    # Fail loudly (runtime error under jit) when any column needs more sub-
-    # steps than the cap; off = the count is only reported
-    # (``MicrophysicsOutput.sed_substeps_required``).
-    sed_cfl_substeps_strict: bool = False
     # Warm-rain autoconversion + accretion scheme:
     #   "kk2000" (default) = Khairoutdinov-Kogan 2000, the SAM M2005
     #     DEFAULT (IRAIN=0): PRC=1350·qc^2.47·(Nc[#/cm³])^-1.79,
@@ -911,6 +899,45 @@ class MorrisonConfig(NamedTuple):
     # target plain ice saturation.  See thermo.homogeneous_freezing_rh_factor.
     homogeneous_ice_supersaturation: bool = True
 
+    # --- MG2 CFL sub-stepped sedimentation -------------------------------
+    # APPENDED AT THE TUPLE END so every positional construction and every
+    # pickle written before 2026-09-22 keeps binding the same fields.
+    # MG2 (micro_mg2_0.F90 sedimentation loop) CFL sub-stepping of rain /
+    # ice / snow / graupel sedimentation: per column nstep = 1 + floor(max
+    # V·dt/dz), capped at ``sed_cfl_substeps_max``.  True (DEFAULT, user
+    # decision 2026-09-22 -- the one-pass form let a hydrometeor fall at most
+    # one layer per call, a defect at every dt where V·dt/dz > 1: production
+    # rain CFL ~3.4 at 112.5 s).  False = the legacy one-pass flux-capped
+    # form, kept for reproducing pre-2026-09-22 runs.
+    sed_cfl_substeps: bool = True
+    # Static bound of the fixed-shape sub-step loop (a loop count, not a
+    # tunable): iterations beyond a column's own nstep are masked, so the
+    # COST is linear in this number -- measured on 2048 columns, CPU x64,
+    # whole Morrison call: one pass 10 ms, cap 8 20 ms, 16 24 ms, 32 32 ms,
+    # 96 59 ms, 128 74 ms, 256 131 ms (sigma-36 dt 112.5; L32 dt 600 is
+    # within 15 %).  Required counts per lane (ISA column, the caps' density
+    # factor included): production sigma-36 at 112.5 s needs 8, CAM L32 at
+    # 600 s needs 90, at 1800 s 269.  Capped at 1024.  Exceeding the cap
+    # clamps the fall (mass conserved, transport wrong); the required count
+    # is always reported and ``sed_cfl_substeps_strict`` makes it fatal.
+    # 256 stays the value in BOTH arms of CAM6 run 1; per-deck sizing
+    # (production 16, CAM6 128) is deferred to the next campaign as its own
+    # one-lever change (user 2026-09-22, amip_runs/_cam6/PREREGISTRATION.md).
+    sed_cfl_substeps_max: int = 256
+    # Fail loudly (runtime error under jit, attached to the sedimentation
+    # tendencies so it cannot be eliminated as dead code) when any column
+    # needs more sub-steps than the cap; off = the count is only reported
+    # (``MicrophysicsOutput.sed_substeps_required``).
+    sed_cfl_substeps_strict: bool = False
+
+
+# Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
+# ExperimentConfig): the loop cost is LINEAR in the cap, so a typo ("2560")
+# silently decouples a run's cost from its physics.  The largest configured
+# lane needs 269 (CAM L32 at 1800 s).  ONE definition, imported by the other
+# validators (GLM 2026-09-22: three independent 1024s can drift apart).
+SED_CFL_SUBSTEPS_MAX_LIMIT = 1024
+
 
 class ThompsonConfig(NamedTuple):
     """Configuration for Thompson hybrid-moment microphysics."""
@@ -1187,6 +1214,7 @@ def apply_microphysics_experiment_flags(
     morrison_scalars: dict | None = None,
     morrison_flavor: str | None = None,
     morrison_sed_cfl_substeps: bool | None = None,
+    morrison_sed_cfl_substeps_max: int | None = None,
     morrison_sed_cfl_substeps_strict: bool | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
@@ -1299,6 +1327,23 @@ def apply_microphysics_experiment_flags(
                 f"{morrison_sed_cfl_substeps!r}")
         scheme_config = scheme_config._replace(
             sed_cfl_substeps=morrison_sed_cfl_substeps)
+    if morrison_sed_cfl_substeps_max is not None:
+        # scheme gate FIRST: a non-Morrison deck that also mistyped the value
+        # should be told which knob does not belong, not its range
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_sed_cfl_substeps_max is only supported by the "
+                f"morrison microphysics scheme (got {scheme!r}).")
+        if (not isinstance(morrison_sed_cfl_substeps_max, int)
+                or isinstance(morrison_sed_cfl_substeps_max, bool)
+                or not 1 <= morrison_sed_cfl_substeps_max
+                <= SED_CFL_SUBSTEPS_MAX_LIMIT):
+            raise ValueError(
+                "morrison_sed_cfl_substeps_max must be an int in "
+                f"[1, {SED_CFL_SUBSTEPS_MAX_LIMIT}] (the sub-step loop cost "
+                f"is linear in it), got {morrison_sed_cfl_substeps_max!r}")
+        scheme_config = scheme_config._replace(
+            sed_cfl_substeps_max=morrison_sed_cfl_substeps_max)
     if morrison_sed_cfl_substeps_strict is not None:
         if not isinstance(morrison_sed_cfl_substeps_strict, bool):
             raise TypeError(

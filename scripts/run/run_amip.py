@@ -1722,6 +1722,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "2026-09-22). --no-morrison-sed-cfl-substeps = the "
                              "legacy one-pass form (falls at most one layer per "
                              "call) for reproducing earlier runs.")
+    parser.add_argument("--morrison-sed-cfl-substeps-max", type=int,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_sed_cfl_substeps_max"],
+                        dest="morrison_sed_cfl_substeps_max",
+                        help="Static bound of the Morrison CFL sedimentation "
+                             "sub-step loop; the cost is LINEAR in it (whole "
+                             "Morrison call on 2048 columns, CPU x64: one pass "
+                             "10 ms, 16 -> 24 ms, 96 -> 59 ms, 256 -> 131 ms). "
+                             "Required counts: 8 on production sigma-36 at "
+                             "112.5 s, 90 on CAM L32 at 600 s.")
     parser.add_argument("--morrison-sed-cfl-substeps-strict", action="store_true",
                         default=False, dest="morrison_sed_cfl_substeps_strict",
                         help="With --morrison-sed-cfl-substeps: abort the run "
@@ -2316,6 +2326,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
+        morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
@@ -3132,6 +3143,8 @@ def _require_full_physics_for_amip(args, parser) -> None:
         "ENTIRE stack is dry; latlon-SPMD dry runs go through Held-Suarez.)")
 
 
+
+
 def main(argv: list[str] | None = None):
     # Persistent cross-process XLA compile cache (RRTMGP cold-compile ~2600 s,
     # otherwise re-paid every launch).  Idempotent; before any jit.  run_amip
@@ -3168,23 +3181,6 @@ def main(argv: list[str] | None = None):
     # prognostic default schemes (2026-07-21 audit — cross-grid smoke).
     args = _postprocess_args(args, parser, argv if argv is not None else sys.argv[1:])
 
-    # The strict sedimentation-overflow abort is an equinox ``error_if``, i.e.
-    # a host callback: it needs a CPU device to place its inputs on, which the
-    # GPU lane (``JAX_PLATFORMS=cuda``) does not have.  Refuse at startup
-    # instead of dying mid-run (the first CAM6 60-day arm died at day 2).
-    if getattr(args, "morrison_sed_cfl_substeps_strict", False):
-        import jax as _jax
-        if not any(d.platform == "cpu" for d in _jax.devices()) and not any(
-                _b == "cpu" for _b in _jax.local_devices()):
-            try:
-                _jax.devices("cpu")
-            except RuntimeError:
-                raise SystemExit(
-                    "morrison_sed_cfl_substeps_strict=True needs a CPU device for "
-                    "its host-callback abort, but none is available (JAX_PLATFORMS="
-                    f"{os.environ.get('JAX_PLATFORMS', '<unset>')!r}).  Add 'cpu' to "
-                    "JAX_PLATFORMS or run with the flag off (the required sub-step "
-                    "count is still reported as a diagnostic).") from None
     _apply_spectral_scheme_fallback(
         args, argv if argv is not None else sys.argv[1:], parser)
 
@@ -3200,6 +3196,19 @@ def main(argv: list[str] | None = None):
                          "is the route-B transport for the lat-band SPMD lane).")
         from legoesm.parallel.early_init import init_multicontroller_distributed
         init_multicontroller_distributed(getattr(args, "coordinator", None))
+
+    # The strict sedimentation-overflow abort is an equinox ``error_if``, i.e.
+    # a host callback: it needs a CPU device to place its inputs on, which the
+    # GPU lane (``JAX_PLATFORMS=cuda``) does not have.  Refuse at startup
+    # instead of dying mid-run (the first CAM6 60-day arm died at day 2).
+    # AFTER the multicontroller init: querying devices initializes the backend,
+    # and jax.distributed.initialize must run before any backend work, so the
+    # guard used to break a valid --multicontroller launch (codex 2026-09-22).
+    if getattr(args, "morrison_sed_cfl_substeps_strict", False):
+        from legoesm.driver.model_driver import (
+            require_cpu_for_strict_sedimentation,
+        )
+        require_cpu_for_strict_sedimentation()
 
     # --aimip-classical-checkpoint: seed the classical physics with the AIMIP
     # best-fit trained params used as INITIAL values (forces the trained scheme

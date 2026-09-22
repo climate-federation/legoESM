@@ -1587,6 +1587,9 @@ class PhysicsPipeline:
         # Isolated saturation-adjustment condensation (q_v->q_c) for the joint
         # vapour donor clamp below; None unless the micro scheme exposes it.
         _micro_dq_v_to_qc = None
+        # CFL sedimentation sub-steps the scheme required this step; None
+        # unless the scheme publishes it (Morrison with sub-stepping on).
+        _sed_req = None
 
         if micro_out_ml is not None:
             dT_dt_micro = ad.unflatten_3d(micro_out_ml.dT_dt)
@@ -1703,6 +1706,9 @@ class PhysicsPipeline:
             dN_c_dt = ad.unflatten_3d(micro_out.dN_c_dt)
             dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
             dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
+            _sed_req = getattr(micro_out, "sed_substeps_required", None)
+            if _sed_req is not None:
+                _sed_req = ad.unflatten_2d(_sed_req)
             _c = micro_out.dq_v_to_qc_dt
             _micro_dq_v_to_qc = (
                 ad.unflatten_3d(_c) if _c is not None else None)
@@ -2329,6 +2335,7 @@ class PhysicsPipeline:
             cloud_fraction=(
                 turb_out.cloud_fraction if turb_out is not None else None),
             budget_ledger=_bl_out,
+            sed_substeps_required=_sed_req,
         )
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
@@ -3987,10 +3994,15 @@ def thread_morrison_scalars(config, scheme, micro_config):
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps"])
     _sed_strict = getattr(config, "morrison_sed_cfl_substeps_strict",
                           _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"])
+    _sed_max = getattr(config, "morrison_sed_cfl_substeps_max",
+                       _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
                     ("morrison_sed_cfl_substeps_strict", _sed_strict)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
+    if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
+        raise ValueError(
+            f"morrison_sed_cfl_substeps_max must be an int >= 1, got {_sed_max!r}")
     # Forward only when the flat value deviates from the ExperimentConfig
     # default (locked equal to the MorrisonConfig leaf by test), so an
     # untouched config stays byte-identical on Morrison and silent elsewhere.
@@ -3999,7 +4011,11 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _sed_strict = (None if _sed_strict
                    is _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"]
                    else _sed_strict)
-    if not _touched and _flavor is None and _sed_sub is None and _sed_strict is None:
+    _sed_max = (None if _sed_max
+                == _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"]
+                else _sed_max)
+    if (not _touched and _flavor is None and _sed_sub is None
+            and _sed_strict is None and _sed_max is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4007,6 +4023,7 @@ def thread_morrison_scalars(config, scheme, micro_config):
     return apply_microphysics_experiment_flags(
         micro_config, scheme, morrison_scalars=_touched,
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
+        morrison_sed_cfl_substeps_max=_sed_max,
         morrison_sed_cfl_substeps_strict=_sed_strict)
 
 
