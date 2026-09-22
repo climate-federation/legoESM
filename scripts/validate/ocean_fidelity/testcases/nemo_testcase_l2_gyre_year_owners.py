@@ -6205,6 +6205,8 @@ def _validate_developed_registry(report: dict, plant: str | None = None) -> None
             "developed-state increment-row registry is incomplete")
     require(set(candidate["branches"]) == set(DEVELOPED_BRANCHES),
             "developed-state branch registry is incomplete")
+    require(candidate["first_non_bit_process_call"] in PROCESS_ROWS[1:],
+            "developed-state first process call is unregistered")
     ranking = candidate["process_ranking"]
     require({row["name"] for row in ranking} == set(PROCESS_ROWS),
             "developed-state process ranking is incomplete")
@@ -6221,6 +6223,7 @@ def _developed_registry_plant(plant: str) -> dict:
             name: {} for name in DEVELOPED_GEOMETRY_OPERANDS},
         "increment_rows": {name: {} for name in PROCESS_ROWS},
         "branches": {name: {} for name in DEVELOPED_BRANCHES},
+        "first_non_bit_process_call": "advection",
         "process_ranking": [
             {"rank": rank, "name": name}
             for rank, name in enumerate(PROCESS_ROWS, 1)],
@@ -6497,6 +6500,9 @@ def developed_state_process_walk(
     first_non_bit = next(
         (name for name in PROCESS_ROWS
          if boundary_rows[name]["cells_unequal"]), "NONE")
+    first_non_bit_process_call = next(
+        (name for name in PROCESS_ROWS[1:]
+         if increment_rows[name]["cells_unequal"]), "NONE")
     first_diff = (
         np.zeros_like(wet, dtype=bool) if first_non_bit == "NONE" else
         ((lego_boundaries[first_non_bit].view(np.uint64)
@@ -6616,6 +6622,14 @@ def developed_state_process_walk(
         },
         "first_non_bit_boundary": (
             first_non_bit if entry_t_unequal == 0 else "ENTRY_T_MISMATCH"),
+        "first_non_bit_process_call": first_non_bit_process_call,
+        "first_directly_scored_active_statement": (
+            "CALL tra_adv -> active CALL tra_adv_fct"
+            if first_non_bit_process_call == "advection" else
+            first_non_bit_process_call),
+        "internal_statement_owner": (
+            "UNMEASURED: the developed record stores no FCT faces, "
+            "coefficients, or NEMO limiter activity"),
         "claim": (
             "first recorded non-bit compiled call is CALL tra_adv"
             if entry_t_unequal == 0 and first_non_bit == "advection" else
@@ -6668,6 +6682,8 @@ def developed_state_process_walk(
         print(f"  {name:>22s} {row['cells_unequal']:10d} "
               f"{row['max_abs']:16.8e} {row['rms']:16.8e}")
     print(f"  FIRST NON-BIT: {report['first_non_bit_boundary']}")
+    print("  FIRST NON-BIT PROCESS CALL: "
+          f"{report['first_non_bit_process_call']}")
     print("  isolated one-step contribution ranking (largest RMS first):")
     for row in process_ranking:
         print(f"  {row['rank']:2d} {row['name']:>20s} "

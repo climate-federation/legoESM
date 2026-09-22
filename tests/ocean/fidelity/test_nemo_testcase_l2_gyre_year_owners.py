@@ -213,6 +213,7 @@ def test_round136_registry_and_signed_zero_controls_are_nonvacuous(harness):
             name: {} for name in harness.DEVELOPED_GEOMETRY_OPERANDS},
         "increment_rows": {name: {} for name in harness.PROCESS_ROWS},
         "branches": {name: {} for name in harness.DEVELOPED_BRANCHES},
+        "first_non_bit_process_call": "advection",
         "process_ranking": [
             {"rank": rank, "name": name}
             for rank, name in enumerate(harness.PROCESS_ROWS, 1)],
