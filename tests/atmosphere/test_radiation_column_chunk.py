@@ -202,3 +202,37 @@ def test_optics_only_passthrough_when_disabled(solver):
         np.testing.assert_allclose(
             np.asarray(g), np.asarray(r), rtol=0.0, atol=1e-10,
         )
+
+
+def test_chunked_backward_bounds_scratch(solver):
+    """Checkpointing each block is what makes chunking save MEMORY, not just
+    compile time: the backward pass recomputes one block instead of holding
+    every block's radiation activations.
+
+    Non-vacuity: drop the ``jax.checkpoint`` wrapper around ``_one`` in
+    ``solve_columns_chunked`` and the chunked gradient's scratch rises to the
+    unchunked figure, so this fails.  (A remat-in-the-jaxpr assertion would
+    NOT be a control: ``solve_columns`` already remats its g-point blocks, so
+    the primitive is present either way.)
+    """
+    # 128 columns in blocks of 16: measured reverse-mode scratch is 0.019 GiB
+    # checkpointed against 0.093 GiB unchunked, and 0.075 GiB chunked WITHOUT
+    # the checkpoint (which also grows with ncol, while the checkpointed
+    # figure stays flat) -- so 0.5 separates the two cleanly.
+    ncol, nlev = 128, 12
+    inp = _make_inputs(ncol, nlev, seed=3)
+    T0 = inp["T"]
+    rest = {k: v for k, v in inp.items() if k != "T"}
+
+    def _scratch(fn):
+        return jax.jit(jax.grad(fn)).lower(T0).compile(
+        ).memory_analysis().temp_size_in_bytes
+
+    def loss_unchunked(T):
+        return jnp.sum(solver.solve_columns(T=T, **rest).sw_flux_up)
+
+    def loss_chunked(T):
+        out = solver.solve_columns_chunked(column_chunk_size=16, T=T, **rest)
+        return jnp.sum(out.sw_flux_up)
+
+    assert _scratch(loss_chunked) < 0.5 * _scratch(loss_unchunked)

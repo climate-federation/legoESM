@@ -619,6 +619,18 @@ def _build_mode_components_spectral(cfg, yml):
         # block halves the radiation activations the backward pass holds, at
         # the cost of more blocks to walk.  Exposed here so a run can be made
         # to fit without editing code.
+        # Radiation COLUMN block size: the solve is split into blocks of this
+        # many columns and each block is checkpointed, so the backward pass
+        # holds one block's activations instead of every column's.  Needed
+        # when max-random overlap expands the solver's column axis by the
+        # sub-column count (8 sub-columns at T63/L32 asks for 490 GiB
+        # otherwise).  0 = off, and the value must divide the solver's column
+        # count (n_sub * ncol when sub-columns are on).
+        _col_chunk = int(_cl.get("rrtmgp_column_chunk_size", 0))
+        if _col_chunk < 0:
+            raise ValueError(
+                "classical.rrtmgp_column_chunk_size must be >= 0, got "
+                f"{_col_chunk}; 0 disables column chunking.")
         _gpt_batch = int(_cl.get("rrtmgp_gpoint_batch_size", 16))
         if _gpt_batch < 1:
             raise ValueError(
@@ -631,6 +643,7 @@ def _build_mode_components_spectral(cfg, yml):
                 p, grid, dt, radiation=_radiation, split_rad=True,
                 rad_update_interval_steps=_rad_interval,
                 rrtmgp_gpoint_batch_size=_gpt_batch,
+                rrtmgp_column_chunk_size=_col_chunk,
                 param_overrides=(_param_fixed or None),
                 orbital_insolation=bool(
                     _cl.get("orbital_insolation", False)),
