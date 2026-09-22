@@ -15,12 +15,11 @@
 # jaxlib 0.10.1" - all four CPU variants crash, hang, or run 6x slower.  There
 # is deliberately NO CPU lane; BACKEND=cpu is refused below.
 #
-# Halo transport per point: ragged at npes<=32, coloured at npes>=64, plus a
-# HYBRID row at npes>=64: coloured for the 3-D fields, padded dense a2a for
-# the free-surface CG's ~2x70 single-level exchanges (fesom_jax 0d1fe62;
-# owner-adopted 2026-09-22 on job 27593181: 253.1 -> 227.6/228.3 ms at 64
-# GPUs, -10%).  The halo tag 'coloured+sshpadded' names it in the receipt.
-# coloured arm at 16/32 so the choice is measured.  FORCE_HALO / HALO_LIST
+# Halo transport per point: ragged AND coloured at npes<=32 (so the choice is
+# measured); coloured AND the HYBRID 'coloured+sshpadded' at npes>=64 —
+# coloured for the 3-D fields, padded dense a2a for the free-surface CG's
+# ~2x70 single-level exchanges (fesom_jax 0d1fe62; owner-adopted 2026-09-22
+# on job 27593181: 253.1 -> 227.6/228.3 ms at 64 GPUs, -10%).  FORCE_HALO / HALO_LIST
 # override and then run ONLY the requested transport.  Each (npes, transport)
 # arm is run TWICE (STEPS=150).  One honest per-arm receipt per arm is written;
 # the plotter keys by (component, grid, backend, precision, mode, resolution,
