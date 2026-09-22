@@ -150,9 +150,26 @@ system (os error 30)`.  It produced no SHIP/DO NOT SHIP verdict; this is
 | `decision43_45.json` | `d8a87286010db6e8175d83ccbc3fc0c7fceeb77dfccf6fa161d435ce20ecdd12` |
 | `moved_rows.tsv` | `de3b39aee07f8f84288bda763287e5efaa4eb4725dc5acc4eb7aa07459a409bb` |
 
-Focused and full-tree test summaries, plus the citation-gate and shifted
-citation plant summaries, are appended below after their final clean-tree
-runs.
+The final candidate-sensitive four-file suite reports exactly `60 passed in
+24.86s`.  The DINO real-card base and candidate suites report respectively
+`128 passed, 9 warnings in 108.56s` and `128 passed, 9 warnings in 111.82s`.
+
+The required combined `tests/ocean/fidelity tests/ocean/unit -n 12` run reached
+98%, then stopped emitting progress after six JAX/XLA worker aborts.  It was
+bounded with exit 130 and emitted **no terminal pytest summary**, so it is not
+represented as a pass and cannot supply a complete failure-ID diff against the
+frozen known-red inventory.  The six traceback nodes were rerun in fresh serial
+processes and report, in order, `1 passed in 8.82s`, `1 passed in 13.94s`, `1
+passed in 8.30s`, `1 passed in 13.24s`, `1 passed in 31.86s`, and `1 passed in
+20.78s`.  They cover distributed barotropic PCG differentiation, additive
+momentum-friction differentiation, stored mass flux, the z-star PGF self-test,
+model-step differentiation, and first-step TKE advection.  The incomplete
+large-suite log is retained as evidence, not promoted to a green result.
+
+The receipt citation gate reports PASS with 9 citations, zero unmapped, zero
+failures, and an empty map audit.  The two preregistrations independently PASS
+with 3 and 4 citations.  Shifting the compiled LDF citation by two lines
+reports FAIL and exits 1.
 
 ## OPEN — round 150
 
