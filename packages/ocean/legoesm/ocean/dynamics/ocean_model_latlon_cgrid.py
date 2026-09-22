@@ -1564,17 +1564,27 @@ def _nemo_cen2_tracer_rhs(
 
 def _nemo_stage_corrected_velocity(
     velocity, transport_average, inverse_depth, barotropic_velocity, face_mask,
+    *, return_correction=False,
 ):
     """Literal ``stprk3_stg.F90:265-278`` zub/zvb composition.
 
     NEMO uses its separately stored ``uu_b/vv_b(Kmm)`` operand here; reducing
     the 3-D velocity again is algebraically equivalent but not bitwise so.
+
+    ``return_correction`` additionally hands back the written ``zub``/``zvb``
+    correction itself.  It is WRITE-ONLY provenance for the fidelity walks,
+    which otherwise have to recompute the correction outside this function and
+    would then be measuring their own transcription; the returned corrected
+    velocity is the same object either way and no production caller sets it.
     """
     correction = nemo_source_round(
         nemo_source_round(transport_average * inverse_depth)
         - barotropic_velocity)
-    return nemo_source_round(
+    corrected = nemo_source_round(
         velocity + nemo_source_round(correction[..., None] * face_mask))
+    if return_correction:
+        return corrected, correction
+    return corrected
 
 
 def _nemo_ws_stage_transport(

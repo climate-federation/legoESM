@@ -6908,12 +6908,9 @@ def developed_state_process_walk(
                     old = average[plant_index]
                     average = average.at[plant_index].set(
                         jnp.nextafter(old, jnp.asarray(jnp.inf, old.dtype)))
-                result = real_corrected(
+                result, correction = real_corrected(
                     velocity, average, inverse_depth, barotropic_velocity,
-                    face_mask)
-                b = model_module.nemo_source_round
-                correction = b(b(average * inverse_depth)
-                               - barotropic_velocity)
+                    face_mask, return_correction=True)
 
                 def sink(*values):
                     corrected_calls.append(tuple(
@@ -6987,6 +6984,10 @@ def developed_state_process_walk(
                     "transport calls, expected six")
             stage3_u = corrected_calls[4]
             stage3_metric_u = metric_calls[4]
+            require(np.array_equal(np.asarray(stage3_metric_u[0]),
+                                   np.asarray(card.recipe.grid.dy_u)),
+                    "the fifth metric-transport call is not the U call: its "
+                    "metric is not the card's e2u")
             matches = [row for row in qco_calls
                        if np.array_equal(row[0], stage3_metric_u[1])
                        and np.array_equal(row[2], stage3_u[2])]
@@ -7065,11 +7066,13 @@ def developed_state_process_walk(
         def isolated_transport(
                 velocity, average, inverse, barotropic, mask, metric,
                 thickness):
-            b = model_module.nemo_source_round
-            correction = b(b(average * inverse) - barotropic)
-            corrected = b(
-                velocity + b(correction[..., None] * mask))
-            completed = b(b(metric[..., None] * thickness) * corrected)
+            # The SAME two shared helpers the production stage calls, so this
+            # closure measures legoESM's transcription and not a second copy
+            # of the compiled statements written inside the instrument.
+            corrected, correction = real_corrected(
+                velocity, average, inverse, barotropic, mask,
+                return_correction=True)
+            completed = real_metric(metric, thickness, corrected)
             return correction, corrected, completed
 
         isolated_values = isolated_transport(
@@ -7120,32 +7123,41 @@ def developed_state_process_walk(
                 np.count_nonzero(bits & oracle_active))
             row["active_max_abs"] = float(
                 np.max(np.abs(delta), initial=0.0))
-            return row
+            row["active_rms"] = float(
+                np.sqrt(np.mean(delta * delta)) if delta.size else 0.0)
+            return row, completed
 
-        transport_attribution = {"none": transport_arm(())}
-        baseline_max = transport_attribution["none"]["active_max_abs"]
-        for name in substitution_operands:
-            transport_attribution[name] = transport_arm((name,))
-        transport_attribution["uu_Kmm+un_adv"] = transport_arm(
-            ("uu_Kmm", "un_adv"))
-        transport_attribution["all"] = transport_arm(substitution_operands)
+        none_row, none_completed = transport_arm(())
         # Calibration of the attribution instrument itself: with nothing
         # substituted the isolated closure must reproduce the production
-        # transport row it is standing in for, cell for cell.
-        require(transport_attribution["none"]["cells_unequal"]
-                == _score_developed_fct(
-                    production_transport["zFu"],
-                    oracle_rows["zFu"])["cells_unequal"],
-                "transport attribution baseline differs from the production "
-                "transport row")
+        # transport row it stands in for, BYTE for byte, not merely with the
+        # same count of unequal cells.
+        require(np.array_equal(
+                    none_completed.view(np.uint64),
+                    np.asarray(production_transport["zFu"]).view(np.uint64)),
+                "transport attribution baseline is not byte-identical to the "
+                "production transport row")
+        transport_attribution = {"none": none_row}
+        baseline_max = none_row["active_max_abs"]
+        baseline_rms = none_row["active_rms"]
+        for name in substitution_operands:
+            transport_attribution[name] = transport_arm((name,))[0]
+        transport_attribution["uu_Kmm+un_adv"] = transport_arm(
+            ("uu_Kmm", "un_adv"))[0]
+        transport_attribution["all"] = transport_arm(substitution_operands)[0]
         for name, row in transport_attribution.items():
             row["active_max_abs_removed_fraction"] = (
                 float((baseline_max - row["active_max_abs"]) / baseline_max)
                 if baseline_max > 0.0 else 0.0)
+            # The argmax is free to move between arms, so the ranking uses the
+            # rms, which is a whole-field quantity, and reports both.
+            row["active_rms_removed_fraction"] = (
+                float((baseline_rms - row["active_rms"]) / baseline_rms)
+                if baseline_rms > 0.0 else 0.0)
         ranked = sorted(
             (name for name in substitution_operands),
             key=lambda name: -transport_attribution[name][
-                "active_max_abs_removed_fraction"])
+                "active_rms_removed_fraction"])
 
     ordinary = ordinary_model.step(
         state, dt=card.dt_s, freshwater=freshwater,
@@ -7268,12 +7280,25 @@ def developed_state_process_walk(
                 "production_step_jit": production_transport_closure,
                 "production_eager": eager_transport_closure,
             },
+            "row_provenance": {
+                "e3u_0": "static card geometry, re-evaluated EAGERLY through "
+                         "the shared QCO builder at zero ssh from the "
+                         "production call's own h_ref and masks",
+                "r1_hu_0": "static card geometry, same eager re-evaluation",
+                "live_inverse_depth": "production value, the r1_hu the stage "
+                                      "consumed",
+                "zub": "production value returned by the shared corrected-"
+                       "velocity helper",
+                "default": "production value sunk from the executed stage",
+            },
             "operand_attribution": {
                 "mode": "isolated_closure_jit",
                 "scored_against": "NEMO recorded zFu",
                 "baseline_active_max_abs": baseline_max,
+                "baseline_active_rms": baseline_rms,
                 "arms": transport_attribution,
                 "ranked_by_removed_fraction": ranked,
+                "ranking_metric": "active_rms_removed_fraction",
                 "magnitude_owner": ranked[0],
             },
         }
@@ -7522,10 +7547,10 @@ def developed_state_process_walk(
                     "bit_exact"]),
             "transport_uu_Kmm_removes_over_90_percent": (
                 transport_walk["operand_attribution"]["arms"]["uu_Kmm"][
-                    "active_max_abs_removed_fraction"] > 0.90),
+                    "active_rms_removed_fraction"] > 0.90),
             "transport_un_adv_removes_under_1_percent": (
-                transport_walk["operand_attribution"]["arms"]["un_adv"][
-                    "active_max_abs_removed_fraction"] < 0.01),
+                abs(transport_walk["operand_attribution"]["arms"]["un_adv"][
+                    "active_rms_removed_fraction"]) < 0.01),
             "transport_magnitude_owner_is_uu_Kmm": (
                 transport_walk["operand_attribution"]["magnitude_owner"]
                 == "uu_Kmm"),
@@ -7699,11 +7724,14 @@ def developed_state_process_walk(
         print("\n  directed operand substitution (isolated closure JIT, "
               "scored against NEMO's recorded zFu):")
         print(f"  {'arm':>24s} {'active unequal':>15s} "
-              f"{'active max abs':>16s} {'removed':>9s}")
+              f"{'active max abs':>16s} {'max rm':>8s} "
+              f"{'active rms':>16s} {'rms rm':>8s}")
         for name, row in attribution["arms"].items():
             print(f"  {name:>24s} {row['active_cells_unequal']:15d} "
                   f"{row['active_max_abs']:16.8e} "
-                  f"{row['active_max_abs_removed_fraction']:9.4f}")
+                  f"{row['active_max_abs_removed_fraction']:8.4f} "
+                  f"{row['active_rms']:16.8e} "
+                  f"{row['active_rms_removed_fraction']:8.4f}")
         print(f"  MAGNITUDE OWNER: {attribution['magnitude_owner']}")
     return report
 
