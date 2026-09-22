@@ -640,6 +640,9 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo"
+        "/traadv_fct.f90"),
     # --- round 36 paths: THIS ROUND'S OWN BUILD ---
     # The R35TRAZDF card is the one that produced the round-35 record, and it
     # is the only build whose trazdf.f90 carries the instrument, so its line
@@ -667,6 +670,22 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 153: developed-state FCT operator acquisition ---
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90:164-199': [
+        'DO jn = 1, kjpt            !==  loop over the tracers  ==!',
+        ('END DO   ;   END DO   ;   END DO', 4), 36],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90:495-610': [
+        '! *** 1st step',
+        ('END DO   ;   END DO   ;   END DO', 28), 116],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90:306-330': [
+        '!        !==  monotonicity algorithm  ==!',
+        ('END DO   ;   END DO   ;   END DO', 9), 25],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90:849-883': [
+        '!        !==  compute the beta term  ==!   (zbetup/do)',
+        ('END DO   ;   END DO', 53), 35],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90:886-936': [
+        '!        !==  monotonic flux  ==!',
+        'END DO    ! jk-loop', 51],
     # --- round 149: developed live lateral-diffusion geometry ---
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/dynldf_lev.f90:111-140': [
         'r148_ldf_dump = lwp .AND. kt == 1081 .AND. Kbb == Kmm',
