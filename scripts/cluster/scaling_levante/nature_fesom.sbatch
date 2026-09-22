@@ -16,6 +16,10 @@
 # is deliberately NO CPU lane; BACKEND=cpu is refused below.
 #
 # Halo transport per point: ragged at npes<=32, coloured at npes>=64, plus a
+# HYBRID row at npes>=64: coloured for the 3-D fields, padded dense a2a for
+# the free-surface CG's ~2x70 single-level exchanges (fesom_jax 0d1fe62;
+# owner-adopted 2026-09-22 on job 27593181: 253.1 -> 227.6/228.3 ms at 64
+# GPUs, -10%).  The halo tag 'coloured+sshpadded' names it in the receipt.
 # coloured arm at 16/32 so the choice is measured.  FORCE_HALO / HALO_LIST
 # override and then run ONLY the requested transport.  Each (npes, transport)
 # arm is run TWICE (STEPS=150).  One honest per-arm receipt per arm is written;
@@ -83,9 +87,15 @@ run_arm() {
   local log="$OUTDIR/forca20_d${npes}_${halo}_r${rep}.log"
   local arm="$OUTDIR/forca20_d${npes}_${halo}_r${rep}.jsonl"
   echo "=== forca20 npes=$npes halo=$halo rep=$rep nn=$nn $(date '+%F %T')"
+  local HALO_FLAGS
+  case "$halo" in
+    coloured+sshpadded) HALO_FLAGS=(--halo coloured --ssh-halo padded) ;;
+    ragged|coloured|padded|allgather) HALO_FLAGS=(--halo "$halo") ;;
+    *) echo "!!! unknown halo tag '$halo'"; rc=1; return 1 ;;
+  esac
   if ! timeout --kill-after=30 "$ARM_TIMEOUT" srun --export=ALL "${SR[@]}" --cpus-per-task=64 --kill-on-bad-exit=1 \
        "$PY" scripts/bench/bench_forward_scaling.py --name forca20 --mesh-dir "$M" --dist-dir "$D" \
-         --npes "$npes" --halo "$halo" --steps "$STEPS" --dt 240 --ic-dir "$M" \
+         --npes "$npes" "${HALO_FLAGS[@]}" --steps "$STEPS" --dt 240 --ic-dir "$M" \
          --year 1958 "${PHYS[@]}" < /dev/null > "$log" 2>&1; then
     echo "!!! FAILED npes=$npes halo=$halo rep=$rep"; rc=1; return 1
   fi
@@ -142,7 +152,9 @@ for NPES in ${NPES_LIST:-16 32 64 128}; do
   SR=(--nodes="$nn" --ntasks="$nn" --ntasks-per-node=1 --gpus-per-node=4 --cpu-bind=none)
   if (( nn > NODES )); then echo "[skip] npes=$NPES needs $nn nodes"; continue; fi
   BASE=$(HALO_FOR "$NPES")
-  if (( NPES <= 32 )) && ! HALO_EXPLICIT "$NPES"; then HALOS=(ragged coloured); else HALOS=("$BASE"); fi
+  if HALO_EXPLICIT "$NPES"; then HALOS=("$BASE")
+  elif (( NPES <= 32 )); then HALOS=(ragged coloured)
+  else HALOS=(coloured coloured+sshpadded); fi
   for HALO in "${HALOS[@]}"; do
     for REP in 1 2; do
       arm="$OUTDIR/forca20_d${NPES}_${HALO}_r${REP}.jsonl"
