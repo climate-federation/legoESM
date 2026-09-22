@@ -34,13 +34,19 @@
 #
 # Four runs: {control nemo_z0, arm interior_pinned} x {day 25, day 30}.
 set -uo pipefail
-M=/burg-archive/glab/users/pg2328/_omip_merge; cd $M || exit 1
+M=/burg-archive/glab/users/pg2328/_fluxacc_wt; cd $M || exit 1
 export PYTHONPATH="$M/src:$(ls -d $M/packages/*/ | sed 's:/$::' | tr '\n' ':')$M:$M/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 R=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo
 SBC=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_SBC.nc
-[ -r "$SBC" ] || { echo "FATAL: no SBC file $SBC"; exit 1; }
+# The probe's --mesh default is RELATIVE (data/grids/...), and data/ is
+# runtime-only so it exists under _omip_merge and not under this worktree.
+# Running from the editable tree therefore needs the mesh named absolutely.
+MESH=/burg-archive/glab/users/pg2328/_omip_merge/data/grids/eORCA1.2_mesh_mask.nc
+for f in "$SBC" "$MESH"; do
+  [ -r "$f" ] || { echo "FATAL: missing $f"; exit 1; }
+done
 
 rc=0
 for pair in "d25:25:4:5:snapshot_day0025.npz" "d30:30:5:6:snapshot_final.npz"; do
@@ -54,7 +60,8 @@ for pair in "d25:25:4:5:snapshot_day0025.npz" "d30:30:5:6:snapshot_final.npz"; d
     [ -r "$SNAP" ] || { echo "FATAL: missing $SNAP"; rc=1; continue; }
     echo "########## $LAB  day $DAY  (NEMO recs $R0:$R1) ##########"
     $PY -u scripts/validate/ocean_fidelity/nino3_flux_vs_nemo.py \
-      --snapshot "$SNAP" --nemo-sbc "$SBC" --nemo-recs "$R0:$R1" --day "$DAY" 2>&1 | tail -40
+      --snapshot "$SNAP" --nemo-sbc "$SBC" --nemo-recs "$R0:$R1" --day "$DAY" \
+      --mesh "$MESH" 2>&1 | tail -40
     r=${PIPESTATUS[0]}; echo "### $LAB $TAG rc=$r"; [ "$r" -eq 0 ] || rc=$r
   done
 done

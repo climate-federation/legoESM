@@ -176,6 +176,26 @@ def main() -> int:
         tn, _ = box_mean(taum_n, lat_n, lon_n, w_n, b)
         print(f"  {name:20s}{qo:10.1f}{qn:10.1f}{qo - qn:10.1f}"
               f"{to:11.4f}{tn:11.4f}{(to / tn if tn else np.nan):8.2f}")
+
+    # Our four terms, same boxes and the same area weights as qt above.
+    # The total alone cannot say WHICH term fails to respond when the trades
+    # slacken: NEMO's net heat over nino3 rose 10.2 W/m2 between the day-25
+    # and day-30 windows while ours rose 1.1, and only a split distinguishes
+    # a latent-response deficit from a radiative or sensible one.  NEMO
+    # publishes no term split on this file, so these columns are OURS ONLY and
+    # are read ACROSS WINDOWS, never against the oracle.
+    terms_o = {
+        "sw_net": (1.0 - constants.alpha_ocean_broadband) * np.asarray(sw),
+        "lw_net": _EMISS * np.asarray(lw) - lwup,
+        "sensible": np.asarray(shflx),
+        "latent": np.asarray(lhflx),
+    }
+    print(f"\n{'box (OURS ONLY)':22s}" + "".join(f"{k:>11s}" for k in terms_o)
+          + f"{'sum':>11s}")
+    for name, b in BOXES.items():
+        vals = [box_mean(v, lat_o, lon_o, w_o, b)[0] for v in terms_o.values()]
+        print(f"  {name:20s}" + "".join(f"{v:11.1f}" for v in vals)
+              + f"{sum(vals):11.1f}")
     print("\nHeat within ~10 W/m2 AND stress ratio ~1 => forcing is fine, the "
           "bias is dynamics.\nHeat more positive by >20 W/m2 => forcing.  "
           "Stress ratio <0.8 => weak trades drive the weak EUC.")
