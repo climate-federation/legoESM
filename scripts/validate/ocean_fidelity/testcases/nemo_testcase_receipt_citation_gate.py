@@ -678,7 +678,7 @@ CITATION_MAP = {
         ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls)', 2),
         ('END DO   ;   END DO', 6), 31],
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/domqco.f90:273-286': [
-        'IF( PRESENT( pr3f ) ) THEN             !==  ratio at f-point  ==!',
+        ('IF( PRESENT( pr3f ) ) THEN             !==  ratio at f-point  ==!', 2),
         ('END DO   ;   END DO', 6), 14],
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/dynvor.f90:911-936': [
         'SELECT CASE( nn_e3f_typ )',
