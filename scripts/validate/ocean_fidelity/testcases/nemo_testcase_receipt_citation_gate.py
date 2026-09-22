@@ -617,6 +617,20 @@ FILES = {
         "/zdfevd.f90"),
     "GYRE_OMIP_L2_P3_SM_R125ZDFMAG/EXP00/namelist_cfg": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R125ZDFMAG/EXP00/namelist_cfg"),
+    # Round 149 reads the exact preprocessed build that produced the admitted
+    # Round-148 developed lateral-diffusion record.
+    "GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo"
+        "/dynldf_lev.f90"),
+    "GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo"
+        "/domqco.f90"),
+    "GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo"
+        "/stp2d.f90"),
+    "GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
     # --- round 36 paths: THIS ROUND'S OWN BUILD ---
     # The R35TRAZDF card is the one that produced the round-35 record, and it
     # is the only build whose trazdf.f90 carries the instrument, so its line
@@ -644,6 +658,33 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 149: developed live lateral-diffusion geometry ---
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/dynldf_lev.f90:111-140': [
+        'r148_ldf_dump = lwp .AND. kt == 1081 .AND. Kbb == Kmm',
+        ('ENDIF', 4), 30],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/dynldf_lev.f90:142-197': [
+        ('DO jk = 1, jpkm1', 1), ('ENDIF', 7), 56],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stp2d.f90:204-217': [
+        '! Round 140: repeat the established slow-forcing operand list',
+        ('ENDIF', 6), 14],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/dynldf_lev.f90:157-176': [
+        ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 1),
+        ('&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1),
+        20],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/domqco.f90:256-286': [
+        ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls)', 2),
+        ('END DO   ;   END DO', 6), 31],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stp2d.f90:158-164': [
+        'CALL eos    ( ts, Kbb, rhd )',
+        ('IF( lwp .AND. kt == 1081 )   WRITE(r146_family_unit)', 2), 7],
+    'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stprk3_stg.f90:704-739': [
+        ('!              !---------------!', 2),
+        'IF( kstg == 3 )   CALL dyn_zdf(', 36],
+    'ocean_model_latlon_cgrid.py:5154-5176': [
+        'if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:',
+        'ldf_thickness_operands=_ws_ldf_thickness_kbb,', 23],
+    'ocean_model_latlon_cgrid.py:5675-5733': [
+        '_stage_ldf_thickness = None', '_stage_ldf_thickness),', 59],
     # --- round 135: accepted-state swap before the daily tracer record ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
         'IF ( .NOT. l_perpetual_ts ) THEN', ('ENDIF', 8), 10],
