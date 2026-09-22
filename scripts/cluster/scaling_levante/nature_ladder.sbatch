@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --account=bd1179_gpu
+#SBATCH --account=bb1596_gpu
 #SBATCH --exclusive
 #SBATCH --mem=0
 #SBATCH --time=04:00:00

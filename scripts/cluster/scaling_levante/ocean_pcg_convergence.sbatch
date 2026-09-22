@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --account=bd1179_gpu
+#SBATCH --account=bb1596_gpu
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1

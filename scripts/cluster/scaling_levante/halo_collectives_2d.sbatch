@@ -1,6 +1,6 @@
 #!/bin/bash -l
 #SBATCH --job-name=halo_coll_2d
-#SBATCH --account=bd1179_gpu
+#SBATCH --account=bb1596_gpu
 #SBATCH --partition=gpu
 #SBATCH --constraint=a100_80
 #SBATCH --nodes=32
