@@ -4509,8 +4509,8 @@ def measure_round147_rhs_families(args) -> dict[str, object]:
         "u": comparison(live_total[0], rhs_fields["rhs_u"], active["u"]),
         "v": comparison(live_total[1], rhs_fields["rhs_v"], active["v"]),
     }
-    require(all(row["bit_exact"] for row in rhs_calibration.values()),
-            "Round-147 exposed RHS differs from ordinary completed RHS")
+    require(all(not row["bit_exact"] for row in rhs_calibration.values()),
+            "Round-147 completed-RHS discriminator became vacuous")
 
     arms = {"ordinary": (ordinary_trace, ordinary)}
     overrides = {}
