@@ -162,9 +162,14 @@ Error: failed to initialize in-process app-server client: Read-only file system 
 Its exit was 1.  Independent review was unavailable in-sandbox; no `SHIP` or
 `DO NOT SHIP` verdict is fabricated.  This round lands no physics.
 
-The clean-tree receipt citation gate and its shifted-citation plant are run on
-the final receipt commit; their exact result and final focused-test summary
-are appended below before handoff.
+At clean receipt commit `175c8edfc`, the citation gate reports `PASS`: five
+citations found, zero unmapped citations, zero citation failures, and zero
+failing map entries.  Shifting the compiled parent range by two lines reports
+`FAIL` and exits 1.  The final combined focused suite reports `28 passed in
+2.98s`; it includes both FCT record readers, every Round-153 plant, and the
+citation gate's own controls.  No full ocean tree was launched because this
+round adds an unexecuted private NEMO acquisition and no production Python
+path or physics.
 
 ## OPEN — round 154
 
