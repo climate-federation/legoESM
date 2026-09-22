@@ -78,7 +78,7 @@ def setup():
     return grid, sigma, fields, state
 
 
-def _pipeline_step(grid, sigma, f, scheme, conv_prog=None):
+def _pipeline_step(grid, sigma, f, scheme, conv_prog=None, **step_kw):
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
         dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
@@ -89,8 +89,25 @@ def _pipeline_step(grid, sigma, f, scheme, conv_prog=None):
     return pipe.physics_step_no_rad(
         f["T"], f["p_s"], f["q_v"], f["q_c"], f["q_r"], conv_prog,
         f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
-        f["z3"], f["z2"], f["z2"], f["z2"], f["z2"], f["z2"],
+        f["z3"], f["z2"], f["z2"], f["z2"], f["z2"], f["z2"], **step_kw,
     )
+
+
+def test_zm_cloud_fraction_carry_reaches_rain_evaporation(setup):
+    """CAM6 ZM evaporates convective rain at ``ke*(1-cldfrc)*(1-RH)*sqrt(flx)``
+    with the previous step's total cloud fraction.  The pipeline threads the
+    ``cloud_fraction`` carry into ``physics_step_no_rad`` (codex round 1);
+    a half-cloudy carry must halve the evaporation relative to ``None``."""
+    grid, sigma, f, _ = setup
+    ncol = 6 * 4 * 4
+    base = _pipeline_step(grid, sigma, f, "zhang_mcfarlane")
+    cloudy = _pipeline_step(grid, sigma, f, "zhang_mcfarlane",
+                            cloud_fraction=jnp.full((ncol, NLEV), 0.5))
+    assert float(jnp.abs(base.precip).max()) > 0.0, "ZM must fire on this column"
+    d = float(jnp.abs(cloudy.dq_v_dt - base.dq_v_dt).max())
+    assert d > 0.0, "the cloud-fraction carry did not reach the rain evaporation"
+    # less evaporation aloft -> more rain reaches the surface
+    assert float((cloudy.precip - base.precip).sum()) > 0.0
 
 
 class TestBridgeEquivalence:

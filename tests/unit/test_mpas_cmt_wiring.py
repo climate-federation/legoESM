@@ -211,3 +211,37 @@ def test_other_cmt_schemes_keep_zero_edge_winds_on_mpas_with_switches_off():
         du = np.asarray(tend.du_dt.data)
         assert du.shape == (mesh.nEdges, NLEV)
         assert np.all(du == 0.0), scheme
+
+
+def test_zm_cmt_reaches_mpas_edge_winds():
+    """CAM6 Zhang-McFarlane's momtran output takes the same edge projection
+    as Bechtold's once ``mpas_cmt`` is on."""
+    mesh = create_voronoi_mesh(3, lloyd_iterations=3)
+    state, sigma = _state(mesh)
+    fn = make_convection_physics(
+        ConvectionConfig(scheme="zhang_mcfarlane", mpas_cmt=True), model_type="mpas", dt=600.0)
+    tend, out = fn(state, mesh, sigma)
+    du = np.asarray(tend.du_dt.data)
+    assert du.shape == (mesh.nEdges, NLEV) and np.all(np.isfinite(du))
+    assert np.asarray(out["conv_precip"]).max() > 1e-7, "fixture must convect or the test is vacuous"
+    assert np.abs(du).max() > 0.0
+
+
+def test_pipeline_builder_switches_mpas_cmt_on_for_every_cmt_scheme():
+    """``convection_config_for`` set ``mpas_cmt`` for Bechtold only, so a
+    production MPAS run with ZM (``enable_cmt=True`` by default) received
+    zero winds and its momentum transport was discarded (codex deck review)."""
+    from legoesm.driver.config import ExperimentConfig, GridConfig
+    from legoesm.driver.physics_pipeline import convection_config_for
+
+    def cc(scheme):
+        return convection_config_for(ExperimentConfig(
+            grid=GridConfig(grid_type="mpas", nlev=NLEV), convection=scheme))
+
+    assert cc("zhang_mcfarlane").mpas_cmt is True
+    assert cc("tiedtke").mpas_cmt is True
+    # Bechtold's lane-preserving MPAS default is CMT off (bechtold_enable_cmt None)
+    assert cc("bechtold").mpas_cmt is False
+    assert convection_config_for(ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
+        convection="zhang_mcfarlane")).mpas_cmt is False
