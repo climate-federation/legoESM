@@ -1,5 +1,19 @@
 # Derecho scaling: CPU node vs A100, strong scaling
 
+> **For the Nature-figure sweep (strong + weak, f32 + f64, all five grids),
+> use `nature_ladder.pbs`** — the PBS port of the Levante campaign ladder
+> (`scripts/cluster/scaling_levante/nature_ladder.sbatch`). Same arm table,
+> same benches, same receipt schema, so Derecho and Levante rows feed the one
+> plotter (`scripts/plot/plot_nature_scaling.py`). Submit one job per matrix
+> and node count, e.g.
+> ```bash
+> qsub -l select=32:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB \
+>      -v MATRIX=atm_gpu scripts/cluster/scaling_derecho/nature_ladder.pbs
+> ```
+> The scripts below are the ORIGINAL per-grid CPU-vs-GPU comparison and are
+> unchanged.
+
+
 **The single supported way to test legoESM scaling on NCAR Derecho.** It runs a
 strong-scaling sweep on BOTH backends — CPU MPI ranks 1→128 (128-core EPYC,
 `main` queue) and GPU A100 — single node (1→4) or multi-node via `NODES`
