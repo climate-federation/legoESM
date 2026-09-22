@@ -25,6 +25,30 @@ def _payload() -> bytes:
     return header + values * len(MODULE.FIELDS)
 
 
+def _round140_payload(rhs_u_value: float = 0.0) -> bytes:
+    count = MODULE.COUNT
+    interior = (MODULE.NX - 4) * (MODULE.NY - 4)
+    header = b"NEMO_L2_R140RHS".ljust(16, b" ") + struct.pack(
+        "=8i", 3, 1081, 1, 3, MODULE.NX, MODULE.NY, MODULE.NZ, 64)
+    header += struct.pack("=7i", *((count,) * 6 + (interior,)))
+    zero3 = np.zeros(count, dtype=np.float64)
+    rhs_u = np.full(count, rhs_u_value, dtype=np.float64)
+    umask = np.zeros(count, dtype=np.float64)
+    umask[0] = 1.0
+    chunks = [zero3, rhs_u, umask, zero3, zero3, zero3]
+    chunks += [np.zeros(interior, dtype=np.float64) for _ in range(2)]
+    chunks += [np.zeros(MODULE.NX * MODULE.NY, dtype=np.float64)
+               for _ in range(2)]
+    chunks += [np.zeros(interior, dtype=np.float64) for _ in range(2)]
+    chunks += [np.zeros(MODULE.NX * MODULE.NY, dtype=np.float64)
+               for _ in range(2)]
+    chunks += [np.zeros(1, dtype=np.float64)]
+    chunks += [np.zeros(MODULE.NX * MODULE.NY, dtype=np.float64)
+               for _ in range(4)]
+    chunks += [np.zeros(interior, dtype=np.float64) for _ in range(2)]
+    return header + b"".join(chunk.tobytes() for chunk in chunks)
+
+
 def test_round146_reader_closes_the_field_census():
     record = MODULE.read_record_bytes(_payload())
     assert tuple(record["fields"]) == MODULE.FIELDS
@@ -41,3 +65,28 @@ def test_round146_reader_rejects_shifted_header():
 def test_round146_reader_rejects_truncation():
     with pytest.raises(MODULE.GateError, match="record is"):
         MODULE.read_record_bytes(_payload()[:-1])
+
+
+def test_round140_full_reader_closes_every_field():
+    record = MODULE.read_round140_bytes(_round140_payload())
+    assert tuple(record["fields"]) == MODULE.ROUND140_FIELDS
+    assert len(_round140_payload()) == MODULE.ROUND140_EXPECTED_SIZE
+
+
+def test_parent_comparison_rejects_owned_rhs_change():
+    baseline = MODULE.read_round140_bytes(_round140_payload())
+    candidate = MODULE.read_round140_bytes(_round140_payload())
+    candidate["fields"]["rhs_u"][0, 0, 0] = 1.0
+    result = MODULE._parent_comparison(candidate, baseline)
+    assert not result["passive"]
+    assert result["rows"]["rhs_u"]["owned"]["differing_cells"] == 1
+
+
+def test_parent_comparison_registers_excluded_rhs_change():
+    baseline = MODULE.read_round140_bytes(_round140_payload())
+    candidate = MODULE.read_round140_bytes(_round140_payload())
+    candidate["fields"]["rhs_u"][0, 0, 1] = 1.0
+    result = MODULE._parent_comparison(candidate, baseline)
+    assert result["passive"]
+    assert result["rows"]["rhs_u"]["owned"]["differing_cells"] == 0
+    assert result["rows"]["rhs_u"]["excluded"]["differing_cells"] == 1

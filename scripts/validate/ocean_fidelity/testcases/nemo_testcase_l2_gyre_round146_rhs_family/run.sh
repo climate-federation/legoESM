@@ -16,17 +16,22 @@ readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R146RHSFAM
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round140/oracle_developed_rhs
 readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round146/oracle_developed_rhs_families
 readonly RECORD=oracle_developed_rhs_families_kt00001081.bin
+readonly ROUND140_RECORD=oracle_developed_rhs_kt00001081.bin
 readonly EXPECTED_SIZE=2321368
 readonly SOURCE_BINARY_SHA=6703dc6b6b2bd6431f78a8649d9ea15275be61a3243632aeeb7f20e9f71dd772
 readonly RESUME_BUILD_COMMIT=44a0d6e8146ae8919b4cda26653fe979186a724c
 if [[ $# -eq 0 && -d "$NEMO_ROOT/cfgs/$TARGET_CFG" && -d "$TARGET_RUN" ]]; then
-  readonly MODE=--resume-run
+  if [[ -f "$TARGET_RUN/$RECORD" ]]; then
+    readonly MODE=--resume-admission
+  else
+    readonly MODE=--resume-run
+  fi
 else
   readonly MODE=${1:---run}
 fi
 case "$MODE" in
-  --run|--resume-run|--preflight-only|--plant-layout) ;;
-  *) printf 'REFUSE: usage: %s [--run|--resume-run|--preflight-only|--plant-layout]\n' "$0" >&2; exit 64 ;;
+  --run|--resume-run|--resume-admission|--preflight-only|--plant-layout) ;;
+  *) printf 'REFUSE: usage: %s [--run|--resume-run|--resume-admission|--preflight-only|--plant-layout]\n' "$0" >&2; exit 64 ;;
 esac
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -102,7 +107,7 @@ printf 'SYNTAX_PROOF_PASS stp2d.f90\n'
 if [[ "$MODE" == --preflight-only ]]; then printf 'ROUND146_RHS_FAMILY_PREFLIGHT_READY\n'; exit 0; fi
 
 readonly PREPARED="namelist_cfg namelist_ref namelist_top_cfg namelist_top_ref namelist_pisces_cfg namelist_pisces_ref context_nemo.xml file_def_nemo.xml iodef.xml axis_def_nemo.xml domain_def_nemo.xml grid_def_nemo.xml field_def_nemo-oce.xml field_def_nemo-pisces.xml"
-if [[ "$MODE" == --resume-run ]]; then
+if [[ "$MODE" == --resume-run || "$MODE" == --resume-admission ]]; then
   if [[ ! -x "$BINARY" || ! -x "$TARGET_RUN/nemo" || ! -f "$TARGET_RUN/binary.sha256" ]]; then
     printf 'REFUSE: resume target lacks its built binary or staged digest\n' >&2; exit 68
   fi
@@ -120,13 +125,13 @@ if [[ "$MODE" == --resume-run ]]; then
       printf 'REFUSE: resume prepared input changed: %s\n' "$name" >&2; exit 68
     fi
   done
-  if [[ -e "$TARGET_RUN/$RECORD" ]]; then
+  if [[ "$MODE" == --resume-run && -e "$TARGET_RUN/$RECORD" ]]; then
     printf 'REFUSE: resume record already exists; acquisition is not restartable\n' >&2; exit 68
   fi
-  if [[ -f "$TARGET_RUN/run.user.stdout.log" ]]; then
+  if [[ "$MODE" == --resume-run && -f "$TARGET_RUN/run.user.stdout.log" ]]; then
     mv "$TARGET_RUN/run.user.stdout.log" "$TARGET_RUN/run.user.sandbox_refusal.log"
   fi
-  if [[ -f "$TARGET_RUN/run.user.time.log" ]]; then
+  if [[ "$MODE" == --resume-run && -f "$TARGET_RUN/run.user.time.log" ]]; then
     mv "$TARGET_RUN/run.user.time.log" "$TARGET_RUN/run.user.sandbox_refusal.time.log"
   fi
   printf 'ROUND146_RESUME_BINARY_VERIFIED %s\n' "$(sha256sum "$BINARY" | awk '{print $1}')"
@@ -168,40 +173,39 @@ else
   cp "$BINARY" "$TARGET_RUN/nemo"
   cp "$manifest"/* "$TARGET_RUN/"
 fi
-(
-  cd "$TARGET_RUN"
-  printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log
-  started=$SECONDS
-  mpirun -np 1 --oversubscribe ./nemo 2>&1 | tee run.user.stdout.log
-  status=${PIPESTATUS[0]}
-  printf 'wall_seconds %s\n' "$((SECONDS-started))" >>run.user.time.log
-  if [[ "$status" -ne 0 ]]; then printf 'REFUSE: NEMO process failed\n' >&2; exit 69; fi
-  if ! grep -Fxq 'STOP 0' run.user.stdout.log; then printf 'REFUSE: NEMO lacks STOP 0\n' >&2; exit 69; fi
-)
+if [[ "$MODE" != --resume-admission ]]; then
+  (
+    cd "$TARGET_RUN"
+    printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log
+    started=$SECONDS
+    mpirun -np 1 --oversubscribe ./nemo 2>&1 | tee run.user.stdout.log
+    status=${PIPESTATUS[0]}
+    printf 'wall_seconds %s\n' "$((SECONDS-started))" >>run.user.time.log
+    if [[ "$status" -ne 0 ]]; then printf 'REFUSE: NEMO process failed\n' >&2; exit 69; fi
+    if ! grep -Fxq 'STOP 0' run.user.stdout.log; then printf 'REFUSE: NEMO lacks STOP 0\n' >&2; exit 69; fi
+  )
+else
+  if ! grep -Fxq 'STOP 0' "$TARGET_RUN/run.user.stdout.log"; then
+    printf 'REFUSE: completed acquisition lacks STOP 0\n' >&2; exit 69
+  fi
+  printf 'ROUND146_EXISTING_RUN_VERIFIED\n'
+fi
 
 if [[ ! -f "$TARGET_RUN/$RECORD" ]]; then printf 'REFUSE: RHS-family record missing\n' >&2; exit 70; fi
 bytes=$(stat -c %s "$TARGET_RUN/$RECORD")
 if [[ "$bytes" -ne "$EXPECTED_SIZE" ]]; then printf 'REFUSE: record is %s bytes, expected %s\n' "$bytes" "$EXPECTED_SIZE" >&2; exit 70; fi
-readonly INHERITED="GYRE_OMIP_L2_P3_00001080_restart.nc GYRE_OMIP_L2_P3_00001081_restart.nc oracle_process_budget_kt00001081.bin oracle_bt_step_operands_kt00001081.bin oracle_stage1_qco_operands_kt00001081.bin oracle_slow_forcing_split_kt00001081.bin oracle_developed_rhs_kt00001081.bin"
+readonly INHERITED="GYRE_OMIP_L2_P3_00001080_restart.nc GYRE_OMIP_L2_P3_00001081_restart.nc oracle_process_budget_kt00001081.bin oracle_bt_step_operands_kt00001081.bin oracle_stage1_qco_operands_kt00001081.bin oracle_slow_forcing_split_kt00001081.bin"
 for name in $INHERITED; do
   if ! cmp -s "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; then
     printf 'REFUSE: passive instrument moved inherited %s\n' "$name" >&2; exit 71
   fi
 done
-plant_dir=$(mktemp -d /tmp/gyre-r146-passive-plant.XXXXXX)
-cp "$TARGET_RUN/GYRE_OMIP_L2_P3_00001081_restart.nc" "$plant_dir/restart.nc"
-"$PY" -c "from pathlib import Path; p=Path('$plant_dir/restart.nc'); b=bytearray(p.read_bytes()); b[-1]^=1; p.write_bytes(b)"
-if cmp -s "$SOURCE_RUN/GYRE_OMIP_L2_P3_00001081_restart.nc" "$plant_dir/restart.nc"; then
-  printf 'REFUSE: passive admission plant stayed green\n' >&2; exit 71
-fi
-printf 'STATUS PLANT-FIRED: passive-admission\n' >"$TARGET_RUN/round146_passive_admission_plant.log"
-
 printf '%s %s %s\n' "$(sha256sum "$TARGET_RUN/$RECORD" | awk '{print $1}')" "$COMMIT" "$RECORD" >"$TARGET_RUN/$RECORD.stamp"
 gate() {
   "$PY" "$GATE" --root "$TARGET_RUN" --round140-root "$SOURCE_RUN" --repo "$REPO" \
     --expect-commit "$COMMIT" "$@"
 }
-for plant in header truncation final-ulp missing-field; do
+for plant in header truncation final-ulp missing-field parent-wet-ulp parent-dry-ulp restart-byte; do
   if gate --plant "$plant" --output "$TARGET_RUN/round146_${plant}_plant.json" \
        >"$TARGET_RUN/round146_${plant}_plant.log" 2>&1; then
     printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 72
@@ -213,7 +217,7 @@ done
 gate --output "$TARGET_RUN/round146_rhs_family_validation.json"
 (
   cd "$TARGET_RUN"
-  sha256sum "$RECORD" "$RECORD.stamp" $INHERITED round146_*_plant.log \
+  sha256sum "$RECORD" "$RECORD.stamp" $INHERITED "$ROUND140_RECORD" round146_*_plant.log \
     round146_*_plant.json round146_rhs_family_validation.json >round146_outputs.sha256
   printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
 )
