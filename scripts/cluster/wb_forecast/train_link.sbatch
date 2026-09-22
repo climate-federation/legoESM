@@ -27,7 +27,7 @@
 # scripts/cluster/levante/train_wb.slurm; this is the chainable one-GPU link.
 #SBATCH --job-name=wbtrain
 #SBATCH --partition=gpu
-#SBATCH --account=bd1083_gpu
+#SBATCH --account=bb1596_gpu
 #SBATCH --constraint=a100_80
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=32
