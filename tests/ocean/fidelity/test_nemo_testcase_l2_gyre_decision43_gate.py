@@ -225,6 +225,25 @@ def test_wind_qco_route_is_derived_from_every_recipe():
     assert cards["DINO:nemo_dino_kamm_mlf"]["executes_route"] is False
 
 
+def test_momentum_ldf_live_geometry_route_is_derived_from_every_recipe():
+    module = _module()
+    cards = module._card_execution("momentum_ldf_live_geometry")
+    assert cards["GYRE-zco"]["executes_route"] is True
+    assert cards["NEMO-GYRE-recipe"]["lateral_viscosity_operator"] == (
+        "vector_laplacian")
+    assert cards["NEMO-GYRE-recipe"]["executes_route"] is False
+    assert cards["LOCK_EXCHANGE-zco"]["lateral_viscosity_operator"] == (
+        "vector_laplacian")
+    assert cards["LOCK_EXCHANGE-zco"]["executes_route"] is False
+    assert cards["OVERFLOW-zps"]["lateral_viscosity_operator"] == (
+        "vector_laplacian")
+    assert cards["OVERFLOW-zps"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm"]["momentum_time_integrator"] == "euler"
+    assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm_mlf"]["momentum_time_integrator"] == "euler"
+    assert cards["DINO:nemo_dino_kamm_mlf"]["executes_route"] is False
+
+
 def test_year_member_admission_requires_the_registered_harness_and_fp64(
         tmp_path):
     module = _module()

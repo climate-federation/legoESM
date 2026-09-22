@@ -219,13 +219,19 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     )
     from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
 
-    require(route in {"ldf_stage3", "fct_metric_upstream", "wind_qco"},
+    require(route in {
+        "ldf_stage3", "fct_metric_upstream", "wind_qco",
+        "momentum_ldf_live_geometry",
+    },
             f"unknown Decision-43 source route {route!r}")
 
     def row(config, **extra):
         values = {
             "tracer_time_integrator": config.tracer_time_integrator,
             "momentum_time_integrator": config.momentum_time_integrator,
+            "lateral_viscosity_operator": config.lateral_viscosity_operator,
+            "lateral_viscosity_e3_weighting": (
+                config.lateral_viscosity_e3_weighting),
             "surface_stress_implicit": bool(config.surface_stress_implicit),
             "tracer_advection": config.tracer_advection,
             "adaptive_implicit_vertadv": bool(
@@ -240,9 +246,14 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             executes = (config.tracer_time_integrator == "rk3_ws"
                         and config.tracer_advection == "fct2"
                         and not config.adaptive_implicit_vertadv)
-        else:
+        elif route == "wind_qco":
             executes = (config.momentum_time_integrator == "rk3_ws"
                         and config.surface_stress_implicit)
+        else:
+            executes = (
+                config.momentum_time_integrator == "rk3_ws"
+                and config.lateral_viscosity_operator == "nemo_div_curl"
+                and config.lateral_viscosity_e3_weighting == "nemo_e3")
         values["executes_route"] = bool(executes)
         return values
 
@@ -356,10 +367,13 @@ def measure_generic_nemo_gyre(snapshot: Path) -> dict:
         "snapshot": str(snapshot),
         "route_observation": {
             "tracer_time_integrator": config.tracer_time_integrator,
+            "momentum_time_integrator": config.momentum_time_integrator,
             "gm_redi_configured": config.gm_redi is not None,
             "executes_ldf_stage3_route": bool(
                 config.tracer_time_integrator == "rk3_ws"
                 and config.gm_redi is not None),
+            "executes_momentum_ldf_live_geometry_route": bool(
+                config.momentum_time_integrator == "rk3_ws"),
         },
         "rows": rows,
         "certifications": certifications,
@@ -635,7 +649,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generic-after-snapshot", type=Path)
     parser.add_argument("--moved-row-registry", type=Path)
     parser.add_argument(
-        "--route", choices=("ldf_stage3", "fct_metric_upstream", "wind_qco"),
+        "--route", choices=(
+            "ldf_stage3", "fct_metric_upstream", "wind_qco",
+            "momentum_ldf_live_geometry"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],
