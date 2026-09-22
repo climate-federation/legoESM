@@ -704,11 +704,22 @@ def _euc_merid_block(a, L, zc):
                 print(f"\n[sea level] difference change 220E->260E: "
                       f"{100.0 * _r:+.2f} cm; 200E->260E: {100.0 * _r2:+.2f} cm")
                 if np.isfinite(_r):
+                    # g*d(delta eta)/dx -- the GRADIENT, not the force. The
+                    # zonal pressure-gradient force is MINUS this, so a
+                    # difference that FALLS eastward (_acc < 0) means OUR
+                    # barotropic forcing pushes MORE eastward than NEMO's.
+                    # The label used to call _acc itself an "acceleration",
+                    # which inverted the physical direction on every negative
+                    # trend; the number is unchanged so the pre-registered
+                    # thresholds below still mean what they meant.
                     _acc = 9.80665 * _r / (40.0 * 111e3 * np.cos(0.0))
-                    print(f"[sea level] implied zonal acceleration difference "
-                          f"{_acc:+.3e} m/s^2 = {_acc * 2.592e6:+.3f} m/s per "
-                          f"30 days, against a measured core deficit of "
-                          f"0.33 m/s at 220E.")
+                    print(f"[sea level] g*d(delta eta)/dx = {_acc:+.3e} m/s^2; "
+                          f"implied zonal FORCE difference (ours minus NEMO) "
+                          f"{-_acc:+.3e} m/s^2 = {-_acc * 2.592e6:+.3f} m/s "
+                          f"per 30 days, against a measured core deficit of "
+                          f"0.33 m/s at 220E. POSITIVE force = ours pushes "
+                          f"more eastward, i.e. the gradient FAVOURS our "
+                          f"undercurrent and cannot explain a weak one.")
                 print("[sea level] PRE-REGISTERED: >= +5 cm rise 220E->260E "
                       "CONFIRMS the pressure gradient as the cause; <= +1 cm "
                       "over 200E->260E REFUTES it. Between the two, report "
