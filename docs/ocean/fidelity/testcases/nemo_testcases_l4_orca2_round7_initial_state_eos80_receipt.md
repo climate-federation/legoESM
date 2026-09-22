@@ -166,15 +166,22 @@ it, and two allowed-value sets gained the EOS-80 name.  No parallel ladder,
 parser or launcher was created; the existing ORCA2 ladder was extended.  No
 NEMO run was attempted and no acquisition is needed.
 
-The required separate `codex exec --sandbox read-only` review RAN this round
-and returned: *"Found 2 defects ... No defect found in index/level mapping,
-array aliasing, defaults, or GYRE routing. T/S match the emitted kt=1 oracle
+The required separate read-only independent review RAN ONCE this round, on
+the committed diff, before the user paused that tool for the remainder of the
+round; no second pass was run, and none was attempted after the pause.  Its
+verdict: *"Found 2 defects ... No defect found in index/level mapping, array
+aliasing, defaults, or GYRE routing. T/S match the emitted kt=1 oracle
 bit-for-bit."*  Both defects were in the gate's new stop arm, neither in the
 model, and both are fixed with tests that exercise the failing side: it
 labelled every deliberate refusal as this round's gap, and it certified the
 entry state unconditionally.  The reviewer also ran its own independent check
-that the TEOS-10 path is byte-unchanged.  Its report is retained with the
-round's evidence.
+that the TEOS-10 stratification path is byte-unchanged.  Its full report is
+retained with the round's evidence.
+
+Because the pause landed after the fixes, those fixes are themselves
+UNREVIEWED by a second party: they are small, they are covered by the two new
+tests named above, and they only narrow what the gate will certify, but that
+is the honest status and the next round should re-review them.
 
 The receipt citation gate passes with every citation mapped, no failure and no
 map-audit failure, and a rigid two-line shift of a round-7 citation makes it
@@ -189,7 +196,7 @@ The single required ocean-fidelity battery completed in 2,455.10 s:
 **1 failed, 1518 passed, 7 skipped**.  That one failure is the listed
 pre-existing sea-ice scalar-math provenance red (`A MY_SRC is not verbatim`);
 no new failing identifier appeared.  The seven named push gates pass at the
-round's final tip.
+round's final tip: **136 passed in 1,083.03 s**.
 
 New direct tests: six on the hand alterations, pinning each box, each level
 and each value, with a synthetic shifted box that must fail; three on the
