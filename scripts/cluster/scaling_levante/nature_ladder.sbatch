@@ -188,7 +188,12 @@ case "$MATRIX" in
     NLON_TRIPOLE=4352                             # ORCA12-class: 3072 x 4352 x 75
     add tripole strong 3072 8 16 32 64 128 192
     add tripole weak   24   $P2_GPU
-    add omps    strong 9    $P2_GPU               # ico9 2.6M cells (~14 km) x 40 levels
+    add omps    strong 9    $P2_GPU               # ico9 2.6M cells (~15 km) x 40 levels
+    # Twice as fine: ico10 is 10.5M cells (~7.5 km, near 1/15 degree). Its
+    # mesh is already cached. Four devices carry the same per-device load as
+    # one device does at ico9, which is a row that ran, so the ladder starts
+    # there rather than at one.
+    add omps    strong 10   4 8 16 32 64 128 192
     add omps    weak 20480 2 8 32 128             # level-quantized: s6@2, s7@8, s8@32, s9@128
     ;;
   ocean_cpu)
