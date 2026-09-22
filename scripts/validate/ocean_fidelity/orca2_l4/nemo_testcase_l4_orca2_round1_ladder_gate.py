@@ -50,6 +50,15 @@ DEFAULT_COMPILED_SOURCE = Path(
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90"
 )
 SOURCE_CITATION = "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:442-459"
+DEFAULT_TRAJECTORY_SOURCE_ROOT = Path(
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
+    "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+)
+TRAJECTORY_CITATIONS = {
+    "stage_dump": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:215-231,329-348",
+    "runoff_tracer": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:314-328",
+    "salt_flux": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:290-311",
+}
 
 
 class GateError(RuntimeError):
@@ -133,7 +142,11 @@ def read_state_frame(path: Path, *, kt: int, stage: int | None) -> dict[str, np.
 def score(actual: np.ndarray, expected: np.ndarray) -> dict[str, object]:
     require(actual.shape == expected.shape,
             f"score shape mismatch: {actual.shape} != {expected.shape}")
-    unequal_mask = actual != expected
+    require(actual.dtype == expected.dtype == np.dtype(np.float64),
+            f"score dtype mismatch: {actual.dtype} != {expected.dtype} != float64")
+    actual_bits = np.ascontiguousarray(actual).view(np.uint64)
+    expected_bits = np.ascontiguousarray(expected).view(np.uint64)
+    unequal_mask = actual_bits != expected_bits
     unequal = int(np.count_nonzero(unequal_mask))
     if unequal:
         delta = np.abs(actual[unequal_mask] - expected[unequal_mask])
@@ -252,6 +265,160 @@ def validate_surface_frame(path: Path, kt: int, rank: int) -> dict[str, object]:
     return {"file": path.name, "kt": kt, "rank": rank,
             "bytes": path.stat().st_size,
             "sha256": sha256(path)}
+
+
+def read_surface_fields(path: Path, kt: int, rank: int) -> dict[str, np.ndarray]:
+    """Decode one rank-local post-``sbc`` operand frame to owned arrays."""
+
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_phase2b_exchange_gate as surface,
+    )
+
+    validate_surface_frame(path, kt, rank)
+    offset = 16 + struct.calcsize(surface.HEADER_FMT)
+    payload = np.memmap(path, dtype=np.float64, mode="r", offset=offset)
+    sizes = {
+        "full": NX * NY,
+        "reduced": (NX - 2 * HALO) * (NY - 2 * HALO),
+        "halo1": (NX - 2) * (NY - 2),
+        "reduced3d": NTR * (NX - 2 * HALO) * (NY - 2 * HALO),
+    }
+    decoded: dict[str, np.ndarray] = {}
+    cursor = 0
+    for name, allocation in surface.FIELDS:
+        size = sizes[allocation]
+        values = np.asarray(payload[cursor:cursor + size])
+        cursor += size
+        if allocation == "full":
+            field = values.reshape((NX, NY), order="F")
+            field = field[HALO:-HALO, HALO:-HALO].T
+        elif allocation == "reduced":
+            field = values.reshape((NX - 2 * HALO, NY - 2 * HALO), order="F").T
+        elif allocation == "halo1":
+            field = values.reshape((NX - 2, NY - 2), order="F")
+            field = field[1:-1, 1:-1].T
+        else:
+            field = values.reshape(
+                (NX - 2 * HALO, NY - 2 * HALO, NTR), order="F"
+            ).transpose(1, 0, 2)
+        require(field.shape[:2] == (NY - 2 * HALO, NX - 2 * HALO),
+                f"{path.name}: bad owned shape for {name}: {field.shape}")
+        decoded[name] = field
+    require(cursor == payload.size,
+            f"{path.name}: schema walk consumed {cursor}/{payload.size}")
+    return decoded
+
+
+def assemble_state_fields(root: Path, kt: int, *, stage: int | None) -> dict[str, np.ndarray]:
+    """Assemble the two owned longitude slabs for an entry state."""
+
+    require(stage is None, "full-domain stage frames were not acquired")
+    slabs = []
+    for rank in range(2):
+        name = (
+            f"oracle_step_entry_kt{kt:08d}.bin" if rank == 0 else
+            f"oracle_step_entry_rank{rank:04d}_kt{kt:08d}.bin"
+        )
+        slabs.append(read_state_frame(root / name, kt=kt, stage=None))
+    return {
+        field: np.concatenate([slabs[0][field], slabs[1][field]], axis=1)
+        for field in FIELD_ORDER
+    }
+
+
+def assemble_surface_fields(root: Path, kt: int) -> dict[str, np.ndarray]:
+    slabs = []
+    for rank in range(2):
+        name = (
+            f"oracle_ocean_surface_input_kt{kt:08d}.bin" if rank == 0 else
+            f"oracle_ocean_surface_input_rank{rank:04d}_kt{kt:08d}.bin"
+        )
+        slabs.append(read_surface_fields(root / name, kt, rank))
+    require(slabs[0].keys() == slabs[1].keys(), "surface slab field mismatch")
+    return {
+        field: np.concatenate([slabs[0][field], slabs[1][field]], axis=1)
+        for field in slabs[0]
+    }
+
+
+def chlorophyll_at_step(deck_root: Path, kt: int, wet: np.ndarray) -> np.ndarray:
+    """Reproduce the yearly December/January ``fld_read`` interpolation."""
+
+    from netCDF4 import Dataset
+
+    require(1 <= kt <= 10, "chlorophyll step must be in 1..10")
+    path = deck_root / "chlorophyll.nc"
+    require(path.is_file(), f"missing ORCA2 chlorophyll input: {path}")
+    with Dataset(path) as dataset:
+        source = np.asarray(dataset.variables["CHLA"][:], dtype=np.float64)
+    require(source.shape == (12, 148, 180),
+            f"unexpected chlorophyll shape {source.shape}")
+    # fldread.F90's yearly interpolation spans the two 31-day centred records.
+    # With the 3-hour ORCA2 clock there are 496 steps between the December and
+    # January centres; kt=1 is 249/496 of that interval.  Keep NEMO's two-term
+    # multiply/add association, independently pinned against its kt=1 dump.
+    after = np.float64(248 + kt) / np.float64(496)
+    before = np.float64(1.0) - after
+    result = before * source[11] + after * source[0]
+    return np.where(wet, result, np.float64(0.0))
+
+
+def validate_round5_admission(root: Path, *, plant: bool = False) -> dict[str, object]:
+    path = root / "round1_surface_admission.json"
+    require(path.is_file(), f"missing acquisition admission: {path}")
+    result = json.loads(path.read_text())
+    require(result.get("status") == "PASS", "acquisition admission is not PASS")
+    require(result.get("surface_frames_total") == 20, "admission surface total")
+    require(result.get("entry_frames_total") == 20, "admission entry total")
+    require(result.get("inherited_streams_passive") == 107,
+            "admission inherited passivity")
+    require(result.get("twin_surface_frames_raw_exact") is True,
+            "admission surface twins are not exact")
+    require(result.get("twin_rank1_entry_frames_raw_exact") is True,
+            "admission rank-1 entry twins are not exact")
+    rows = list(result.get("surface_frames", [])) + list(
+        result.get("rank1_entry_frames", []))
+    require(len(rows) == 30, f"admission manifest has {len(rows)} rows")
+    for index, row in enumerate(rows):
+        record = root / str(row["file"])
+        observed = sha256(record)
+        if plant and index == 0:
+            observed = "0" * 64
+        require(observed == row["sha256"],
+                f"admission digest mismatch: {record.name}")
+    return {
+        "path": str(path),
+        "sha256": sha256(path),
+        "status": result["status"],
+        "surface_frames_total": result["surface_frames_total"],
+        "entry_frames_total": result["entry_frames_total"],
+        "inherited_streams_passive": result["inherited_streams_passive"],
+        "manifest_rows_verified": len(rows),
+    }
+
+
+def validate_trajectory_sources(root: Path) -> dict[str, object]:
+    anchors = {
+        "stprk3.f90": (
+            "CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )",
+            "CALL l1_dump_stage( kstp, 1, Naa )",
+            "SUBROUTINE l1_dump_stage",
+        ),
+        "trasbc.f90": (
+            "IF( ln_rnf ) THEN",
+            "rnf_tsc(ji,jj,jp_tem) * zdep",
+            "rnf_tsc(ji,jj,jp_sal) * zdep",
+        ),
+    }
+    rows = {}
+    for name, tokens in anchors.items():
+        path = root / name
+        require(path.is_file(), f"missing compiled trajectory source: {path}")
+        source = path.read_text()
+        for token in tokens:
+            require(token in source, f"compiled {name} anchor missing: {token}")
+        rows[name] = {"path": str(path), "sha256": sha256(path)}
+    return {"files": rows, "citations": TRAJECTORY_CITATIONS}
 
 
 def surface_support(root: Path) -> dict[str, object]:
@@ -386,12 +553,224 @@ def root_differential(v2_root: Path, orca1ice_root: Path) -> dict[str, object]:
     }
 
 
+def _candidate_fields(state) -> dict[str, np.ndarray]:
+    return {
+        "T": np.asarray(state.T.data)[..., :30],
+        "S": np.asarray(state.S.data)[..., :30],
+        "u": np.asarray(state.u.data)[:, 1:, :30],
+        "v": np.asarray(state.v.data)[1:, :, :30],
+        "ssh": np.asarray(state.eta.data),
+    }
+
+
+def _stage_candidate_fields(stage_output) -> dict[str, np.ndarray]:
+    u, v, temperature, salinity, ssh = stage_output
+    return {
+        "T": np.asarray(temperature)[..., :30],
+        "S": np.asarray(salinity)[..., :30],
+        "u": np.asarray(u)[:, 1:, :30],
+        "v": np.asarray(v)[1:, :, :30],
+        "ssh": np.asarray(ssh),
+    }
+
+
+def _rank0_fields(fields: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    return {name: values[:, :90] for name, values in fields.items()}
+
+
+def _surface_forcings(
+    card, deck_root: Path, fields: dict[str, np.ndarray], kt: int
+):
+    import jax.numpy as jnp
+
+    from legoesm.core.source_rounding import nemo_source_round
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    shape = fields["emp"].shape
+    require(shape == (148, 180), f"assembled surface shape is {shape}")
+    zeros = np.zeros(shape, dtype=np.float64)
+    native_i = fields["utau"]
+    native_j = fields["vtau"]
+    cos_alpha = np.asarray(card.recipe.grid.cos_alpha_u)[:, 1:]
+    sin_alpha = np.asarray(card.recipe.grid.sin_alpha_u)[:, 1:]
+    require(cos_alpha.shape == sin_alpha.shape == shape,
+            "ORCA2 stress-rotation shape mismatch")
+    # Inverse of the production atmospheric east/north -> NEMO-native rotation.
+    # The native pair is also supplied directly, so production never performs
+    # this lossy round trip; geographic fields keep the forcing API complete.
+    tau_x = -(cos_alpha * native_i - sin_alpha * native_j)
+    tau_y = -(sin_alpha * native_i + cos_alpha * native_j)
+    wet = np.asarray(card.recipe.initial_state.land_mask.data) > 0.5
+    chl = chlorophyll_at_step(deck_root, kt, wet)
+    q_total = np.asarray(nemo_source_round(
+        jnp.asarray(fields["qns"]) + jnp.asarray(fields["qsr"])
+    ))
+    freshwater = FreshwaterForcing(
+        precip=jnp.asarray(zeros),
+        evap=jnp.asarray(fields["emp"]),
+        runoff=jnp.asarray(zeros),
+        ice_fw=jnp.asarray(zeros),
+        restoring=jnp.asarray(zeros),
+    )
+    surface = OceanSurfaceForcing(
+        sw_down=jnp.asarray(fields["qsr"]),
+        q_net=jnp.asarray(q_total),
+        tau_x=jnp.asarray(tau_x),
+        tau_y=jnp.asarray(tau_y),
+        salt_flux=jnp.asarray(np.float64(1.0e-3) * fields["sfx"]),
+        chl=jnp.asarray(chl),
+        taum=jnp.asarray(fields["taum"]),
+        ice_concentration=jnp.asarray(fields["fr_i"]),
+        tau_i_native=jnp.asarray(native_i),
+        tau_j_native=jnp.asarray(native_j),
+    )
+    return freshwater, surface
+
+
+def candidate_trajectory(
+    deck_root: Path,
+    root: Path,
+    card,
+    *,
+    max_step: int = 10,
+) -> dict[str, object]:
+    """Run the production ORCA2 step with the acquired exact surface operands."""
+
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+
+    require(1 <= max_step <= 10, "candidate max_step must be in 1..10")
+    entry1 = assemble_state_fields(root, 1, stage=None)
+    state = card.recipe.initial_state
+    independent = compare_fields(_candidate_fields(state), entry1)
+    # Decision 52 authorizes exactly this operand replacement and nothing else.
+    state = state._replace(
+        eta=state.eta.replace(data=jnp.asarray(entry1["ssh"], dtype=jnp.float64))
+    )
+    bridge = compare_fields(_candidate_fields(state), entry1)
+    require(bridge["first_non_bit_field"] is None,
+            f"Decision-52 entry bridge is non-bit: {bridge['first_non_bit_field']}")
+
+    # The kt=1 chlorophyll frame is an independent emitted witness for the
+    # input-file interpolation used at all ten steps.
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_rgb_gate as rgb_gate,
+    )
+
+    emitted_chl = np.asarray(rgb_gate.read_rgb(
+        root / "oracle_rgb_chl_kt00000001.bin"
+    )["chl"])
+    wet = np.asarray(card.recipe.initial_state.land_mask.data)[:, :90] > 0.5
+    reconstructed_chl = chlorophyll_at_step(deck_root, 1,
+                                             np.asarray(card.recipe.initial_state.land_mask.data) > 0.5)
+    chl_row = score(reconstructed_chl[:, :90], emitted_chl)
+    require(chl_row["bit_identical"], "kt1 chlorophyll interpolation is non-bit")
+
+    model = LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_live_stage_operands=True),
+    )
+    checkpoints: list[dict[str, object]] = []
+    first_non_bit: dict[str, object] | None = None
+    first_field: str | None = None
+    for kt in range(1, max_step + 1):
+        oracle_entry = assemble_state_fields(root, kt, stage=None)
+        entry_comparison = compare_fields(_candidate_fields(state), oracle_entry)
+        entry_row = {"kt": kt, "checkpoint": "entry", **entry_comparison}
+        checkpoints.append(entry_row)
+        if first_non_bit is None and entry_comparison["first_non_bit_field"] is not None:
+            first_field = str(entry_comparison["first_non_bit_field"])
+            first_non_bit = {
+                "kt": kt,
+                "checkpoint": "entry",
+                "field": first_field,
+                "source_citation": TRAJECTORY_CITATIONS["stage_dump"],
+            }
+
+        surface_fields = assemble_surface_fields(root, kt)
+        freshwater, surface = _surface_forcings(card, deck_root, surface_fields, kt)
+        trace = model.step(
+            state,
+            dt=card.dt_s,
+            freshwater=freshwater,
+            surface_forcing=surface,
+        )
+        for stage in (1, 2, 3):
+            oracle_stage = read_state_frame(
+                root / f"oracle_stage_kt{kt:08d}_s{stage}.bin",
+                kt=kt,
+                stage=stage,
+            )
+            candidate_stage = _rank0_fields(
+                _stage_candidate_fields(trace.stage_outputs[stage - 1])
+            )
+            comparison = compare_fields(candidate_stage, oracle_stage)
+            checkpoint = {"kt": kt, "checkpoint": f"stage{stage}", **comparison}
+            checkpoints.append(checkpoint)
+            if first_non_bit is None and comparison["first_non_bit_field"] is not None:
+                first_field = str(comparison["first_non_bit_field"])
+                first_non_bit = {
+                    "kt": kt,
+                    "checkpoint": f"stage{stage}",
+                    "field": first_field,
+                    "source_citation": (
+                        TRAJECTORY_CITATIONS["runoff_tracer"]
+                        if stage == 1 and first_field in ("T", "S") else
+                        TRAJECTORY_CITATIONS["stage_dump"]
+                    ),
+                }
+        state = trace.state_after
+
+    require(first_non_bit is not None, "candidate trajectory unexpectedly stayed bit-exact")
+    require(first_field is not None, "first non-bit field was not recorded")
+    kt10_rows = {
+        row["checkpoint"]: row["rows"][first_field]
+        for row in checkpoints if row["kt"] == max_step
+    }
+    return {
+        "claim_label": "GIVEN_NEMO_ENTRY",
+        "execution": "production-jit-cpu-fp64-x64-libm",
+        "decision52_bridge": bridge,
+        "independent_entry_before_bridge": independent,
+        "chlorophyll_kt1_input_reconstruction": chl_row,
+        "first_non_bit_statement": first_non_bit,
+        "kt10_same_field_magnitude": kt10_rows,
+        "checkpoints": checkpoints,
+        "unsupported_recorded_channels": {
+            "rnf_tsc": (
+                "recorded exactly in every surface frame; the production step "
+                "has no channel for NEMO's runoff T/S source"
+            ),
+            "rnf_tsc_b": "recorded carry; no production state field",
+            "freshwater_budget_carry": "card registry remains UNMEASURED",
+        },
+        "resolved_surface_mapping": {
+            "stress": "utau/vtau native T-grid pair",
+            "heat": "q_net=nemo_source_round(qns+qsr); sw_down=qsr",
+            "freshwater": "net=-emp through FreshwaterForcing.evap",
+            "salt": "salt_flux=1e-3*sfx (NEMO record is g m-2 s-1)",
+            "tke": "taum and fr_i supplied",
+            "chlorophyll": "yearly December/January fld_read interpolation",
+        },
+    }
+
+
 def run_gate(
     deck_root: Path,
     v2_root: Path,
     orca1ice_root: Path,
     compiled_source: Path,
+    trajectory_source_root: Path,
     *,
+    max_step: int = 10,
     plant: str | None = None,
 ) -> dict[str, object]:
     stamp = provenance_stamp()
@@ -426,6 +805,9 @@ def run_gate(
     support = surface_support(orca1ice_root)
     full_entry = entry_support(orca1ice_root)
     output_init = initial_output_substitution_check(orca1ice_root, orca1ice_entry)
+    admission = None
+    trajectory_sources = None
+    trajectory = None
     if not support["trajectory_supported"]:
         status = "STOP_RECORD_GAP"
         trajectory_claim = "UNMEASURED_RECORD_GAP"
@@ -433,8 +815,15 @@ def run_gate(
         status = "STOP_ENTRY_RECORD_GAP"
         trajectory_claim = "UNMEASURED_ENTRY_RECORD_GAP"
     else:
-        status = "READY_FOR_CANDIDATE_TRAJECTORY"
-        trajectory_claim = "RECORDS_AVAILABLE_BUT_CANDIDATE_NOT_RUN"
+        admission = validate_round5_admission(
+            orca1ice_root, plant=plant == "surface_hash"
+        )
+        trajectory_sources = validate_trajectory_sources(trajectory_source_root)
+        trajectory = candidate_trajectory(
+            deck_root, orca1ice_root, card, max_step=max_step
+        )
+        status = "CANDIDATE_TRAJECTORY_DEBT"
+        trajectory_claim = "MEASURED_GIVEN_NEMO_ENTRY"
     return {
         "worktree": stamp,
         "status": status,
@@ -444,7 +833,8 @@ def run_gate(
         "compiled_source": source,
         "kt1_card_vs_v2": card_vs_v2,
         "kt1_card_vs_pinned_orca1ice": card_vs_orca1ice,
-        "first_non_bit_statement": {
+        "independent_first_non_bit_statement": {
+            "claim_label": "INDEPENDENT",
             "field": "ssh",
             "source_citation": SOURCE_CITATION,
             "ownership": "INITIAL_SI3_CATEGORY_LOAD_CONFIGURATION",
@@ -454,6 +844,9 @@ def run_gate(
         "surface_input_support": support,
         "full_entry_support": full_entry,
         "output_init_substitution_check": output_init,
+        "acquisition_admission": admission,
+        "trajectory_sources": trajectory_sources,
+        "candidate_trajectory": trajectory,
         "trajectory_claim": trajectory_claim,
     }
 
@@ -464,8 +857,13 @@ def main() -> int:
     parser.add_argument("--v2-root", type=Path, required=True)
     parser.add_argument("--orca1ice-root", type=Path, required=True)
     parser.add_argument("--compiled-source", type=Path, default=DEFAULT_COMPILED_SOURCE)
+    parser.add_argument(
+        "--trajectory-source-root", type=Path,
+        default=DEFAULT_TRAJECTORY_SOURCE_ROOT,
+    )
+    parser.add_argument("--max-step", type=int, default=10)
     parser.add_argument("--json-out", type=Path)
-    parser.add_argument("--plant", choices=("kt1_T",))
+    parser.add_argument("--plant", choices=("kt1_T", "surface_hash"))
     args = parser.parse_args()
     try:
         result = run_gate(
@@ -473,6 +871,8 @@ def main() -> int:
             args.v2_root,
             args.orca1ice_root,
             args.compiled_source,
+            args.trajectory_source_root,
+            max_step=args.max_step,
             plant=args.plant,
         )
     except (GateError, OSError, UnicodeError, struct.error, ValueError) as exc:
@@ -491,6 +891,8 @@ def main() -> int:
         print("REFUSE: STOP_ENTRY_RECORD_GAP: full-domain step-entry states are missing",
               file=sys.stderr)
         return 3
+    if result["status"] == "CANDIDATE_TRAJECTORY_DEBT":
+        return 4
     return 0
 
 

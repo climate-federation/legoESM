@@ -82,6 +82,20 @@ def test_compare_fields_is_exact_and_ranks_max_abs():
     assert result["rows"]["S"]["first_unequal_index"] == [1]
 
 
+def test_compare_fields_detects_signed_zero_bit_difference():
+    baseline = {
+        name: np.zeros((1,), dtype=np.float64) for name in gate.FIELD_ORDER
+    }
+    actual = {name: value.copy() for name, value in baseline.items()}
+    actual["T"][0] = np.float64(-0.0)
+
+    result = gate.compare_fields(actual, baseline)
+
+    assert result["first_non_bit_field"] == "T"
+    assert result["rows"]["T"]["unequal"] == 1
+    assert result["rows"]["T"]["max_abs"] == 0.0
+
+
 def test_surface_support_names_every_missing_step(tmp_path):
     result = gate.surface_support(tmp_path)
     assert result["trajectory_supported"] is False
@@ -158,3 +172,14 @@ def test_acquisition_report_binds_tree_binary_and_compiled_source():
     assert 'oracle_ocean_surface_input_rank0001_kt%08d.bin' in run_sh
     assert 'oracle_step_entry_rank0001_kt%08d.bin' in run_sh
     assert '"compiled_stprk3.f90"' in run_sh
+
+
+def test_round6_trajectory_uses_production_step_and_only_bridges_ssh():
+    source = Path(gate.__file__).read_text()
+    assert "state = state._replace(" in source
+    assert "eta=state.eta.replace(data=" in source
+    assert "_NEMOWSRK3TestHooks(expose_live_stage_operands=True)" in source
+    assert "trace = model.step(" in source
+    assert "state = trace.state_after" in source
+    assert '"claim_label": "GIVEN_NEMO_ENTRY"' in source
+    assert '"rnf_tsc"' in source
