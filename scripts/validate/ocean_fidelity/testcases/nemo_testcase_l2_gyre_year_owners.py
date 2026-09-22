@@ -6494,6 +6494,19 @@ def _developed_transport_mode_rows(actual: dict, expected: dict) -> dict:
         name: _score_developed_fct(actual[name], expected[name])
         for name in DEVELOPED_TRANSPORT_U_ROWS
     }
+    active3 = np.asarray(expected["umask"]) != 0.0
+    active2 = np.any(active3, axis=-1)
+    for name, row in rows.items():
+        values = np.asarray(actual[name])
+        reference = np.asarray(expected[name])
+        active = active3 if values.ndim == 3 else active2
+        require(values.shape == reference.shape == active.shape,
+                f"developed transport active mask differs for {name}")
+        bits = values.view(np.uint64) != reference.view(np.uint64)
+        delta = values[active] - reference[active]
+        row["active_cells_scored"] = int(np.count_nonzero(active))
+        row["active_cells_unequal"] = int(np.count_nonzero(bits & active))
+        row["active_max_abs"] = float(np.max(np.abs(delta), initial=0.0))
     first = next(
         (name for name in DEVELOPED_TRANSPORT_U_ROWS
          if not rows[name]["bit_exact"]), "NONE")
@@ -6936,6 +6949,7 @@ def developed_state_process_walk(
 
                     jax.debug.callback(
                         sink, result[0], result[2], result[4],
+                        values[1], values[2], values[3],
                         ordered=True)
                 return result
 
@@ -6999,9 +7013,9 @@ def developed_state_process_walk(
             # product.  This is a context row, not a second transport formula.
             reference = real_qco_faces(
                 jnp.zeros_like(state.eta.data),
-                jnp.asarray(card.recipe.z_coord.nemo_e3t_0),
-                jnp.asarray(stage3_u[4]),
-                jnp.asarray(corrected_calls[5][4]),
+                jnp.asarray(matches[-1][3]),
+                jnp.asarray(matches[-1][4]),
+                jnp.asarray(matches[-1][5]),
                 card.recipe.grid, include_reciprocals=True)
             actual["e3u_0"] = np.asarray(reference[0])
             actual["r1_hu_0"] = np.asarray(reference[4])

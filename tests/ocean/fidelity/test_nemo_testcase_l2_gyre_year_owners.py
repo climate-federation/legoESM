@@ -309,8 +309,12 @@ def test_round154_fct_registry_and_first_statement_are_nonvacuous(harness):
 
 
 def test_round155_transport_registry_and_first_operand_are_nonvacuous(harness):
+    fields_3d = {
+        "e3u_0", "umask", "live_e3u_Kmm", "uu_Kmm", "corrected_u", "zFu",
+    }
     expected = {
-        name: np.ones((1,), dtype=np.float64)
+        name: np.ones((1, 1, 1) if name in fields_3d else (1, 1),
+                      dtype=np.float64)
         for name in harness.DEVELOPED_TRANSPORT_U_ROWS
     }
     exact = harness._developed_transport_mode_rows(expected, expected)
@@ -319,7 +323,8 @@ def test_round155_transport_registry_and_first_operand_are_nonvacuous(harness):
     assert exact["first_non_bit_row"] == "NONE"
 
     planted = {name: value.copy() for name, value in expected.items()}
-    planted["un_adv"][0] = np.nextafter(planted["un_adv"][0], np.inf)
+    planted["un_adv"][0, 0] = np.nextafter(
+        planted["un_adv"][0, 0], np.inf)
     moved = harness._developed_transport_mode_rows(planted, expected)
     assert moved["first_non_bit_row"] == "un_adv"
     assert moved["rows"]["un_adv"]["cells_unequal"] == 1
