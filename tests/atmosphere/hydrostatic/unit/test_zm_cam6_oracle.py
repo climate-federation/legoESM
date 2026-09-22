@@ -485,6 +485,13 @@ def test_real_columns_with_zero_humidity_are_finite_and_pinned(tag):
         assert bool(jnp.isfinite(getattr(out, name)).all()), name
     assert bool(jnp.isfinite(carry).all())
     assert bool(out.convective_mask.any()), "fixture columns must convect (they did in the run)"
+    # the tendency is a RATE: a 1800 s physics step (CAM's dtime, the cadence
+    # arm) returns the same dT_dt as a 112.5 s one except where the mumax CFL
+    # cap on mb binds (then smaller), never larger (2026-09-22 cadence bisect)
+    out_h, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, u, jnp.zeros_like(T), 1800.0, CFG,
+                                          pref_edge=pref)
+    assert float(jnp.abs(out_h.dT_dt).max()) <= 1.05 * float(jnp.abs(out.dT_dt).max())
+    assert float(jnp.abs(out_h.dq_v_dt).max()) <= 1.05 * float(jnp.abs(out.dq_v_dt).max())
     # the run's second physics call: the carry from the first call plus a
     # carried cloud fraction (the wrapper reads neither into the kernels)
     out2, carry2 = zhang_mcfarlane_convection(
