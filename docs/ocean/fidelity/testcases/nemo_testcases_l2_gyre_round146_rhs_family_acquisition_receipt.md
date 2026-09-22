@@ -100,8 +100,11 @@ system (os error 30)`.  Therefore **independent review was unavailable
 in-sandbox**; this is not represented as a SHIP verdict.  The round changes no
 production physics and remains stopped before scientific measurement.
 
-The receipt citation gate and its shifted-citation plant are recorded in the
-final evidence amendment.
+The preregistration citation gate passed with two citations and no failures;
+the receipt gate passed with three citations and no failures.  Shifting the
+new compiled-writer citation by two lines made the gate print `STATUS FAIL`
+and exit 1.  The combined parser/citation focused suite reported `19 passed in
+2.11s`.
 
 ## Evidence
 
@@ -112,6 +115,10 @@ final evidence amendment.
 | `acquisition.log` | `acd1af2dce1235a6dc07f64f6b9933cf03eaad465852a5de3aabfb313f641d36` |
 | `parser_tests.log` | `3125ea7be43eaff8638305b0397e992840a6e097fd68025e13f60403a0adc1a5` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `prereg_citation_gate.log` | `b8307d283e692836c4d90da680efa7ec35d746d36df3ab0eae7296199adac1ca` |
+| `receipt_citation_gate.log` | `937c71cd9bb41f4e6d087ef7c095cd573df4fc4dcf6deee79f755a973e38e27e` |
+| `receipt_citation_plant.log` | `6a72db7057a8c85214c350b9bb14daa92466cb1d46ec7b872206c39b5d38ff8d` |
+| `focused_tests.log` | `a4c4056dee2c654e53a8c35159ccec79471f724b0747d05f553642e8b7acf4fb` |
 
 ## OPEN — round 147
 
