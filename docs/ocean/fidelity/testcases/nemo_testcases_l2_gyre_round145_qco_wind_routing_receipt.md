@@ -145,8 +145,46 @@ separate campaign decision.
 | base / candidate month | `a7a2b0f3d5b6c6256370df04e16efb294086c32a01a2cd6f52d2dc6f71ac3fc` / `9ad052fa8c59c13a51844c90094a025bebeb22c8115436cb90326e7506fc0517` |
 | base / candidate year | `56a83b6c3fd05ec1523670271fa2c21a3a52160f309a65ccb36cf8839d1a7566` / `8c9ce0763af343855dcfe4c19c9456f5e1bcfbb86ae70c607aefb40dfbae6bf2` |
 
-Independent review, citation-gate, shifted-citation plant, and final focused
-and full-tree test summaries are recorded below after the final clean commit.
+The required separate read-only review was attempted against the final held
+diff.  It was unavailable inside the sandbox and emitted verbatim:
+`Error: failed to initialize in-process app-server client: Read-only file
+system (os error 30)`.  It returned 1 before a `SHIP`/`DO NOT SHIP` verdict;
+per the standing operator rule this is recorded as **independent review
+unavailable in-sandbox**, not treated as approval.  No physics remains to ship.
+
+The receipt citation gate reported `status: PASS`, 4 citations, 0 unmapped, 0
+failures, and 0 failing map entries.  Shifting the exact wind-statement
+citation by two lines reported `status: FAIL` and
+exited 1.  The preregistration's four citations independently passed the same
+gate.
+
+Test summaries:
+
+* candidate and base DINO real-card suites each reported `128 passed, 9
+  warnings in 113 s`;
+* the final candidate-sensitive five-file suite reported `63 passed in
+  247.38s`;
+* the mandated combined ocean fidelity/unit run collected 8,379 tests and
+  reached 94%, but six xdist workers aborted inside unrelated JAX compilation
+  and the replacement pool stopped emitting progress; it emitted **no summary
+  line** before infrastructure termination.  A lower-concurrency split of the
+  complete 1,533-test fidelity tree reached 98% with one documented known red
+  and likewise stopped emitting progress; it also emitted **no summary line**.
+  These are retained in `full_ocean_tests.log` and
+  `full_fidelity_split.log`, not represented as passing suites;
+* every test named by a worker-abort traceback was rerun in a fresh serial
+  process.  The six summary lines were respectively `1 passed in 29.67s`, `1
+  passed in 8.46s`, `1 passed in 22.29s`, `1 passed in 10.98s`, `1 passed in
+  116.67s`, and `1 passed in 1.47s`.  The DINO aborting node is covered by the
+  complete 128-test DINO pass above.
+
+The aborted nodes were partial-cell grid construction, leapfrog dispatch,
+NEMO MLF dispatch, bottom drag, ocean SCM, DINO wind-from-rest, and Sweeney
+shortwave.  Their isolated passes prove the aborts are the documented
+large-suite compiler-pressure failure, not round-145 failures.  The known-red
+inventory remains the campaign state's worktree-stamp ratchet, RK3-WS/MXL3,
+SI3 provenance, root ratchets, and two TKE coefficient tests.  The changed
+candidate-sensitive set introduced no new red.
 
 ## OPEN — round 146
 
