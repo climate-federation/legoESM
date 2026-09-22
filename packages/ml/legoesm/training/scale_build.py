@@ -261,7 +261,8 @@ _WB_CLASSICAL_KEYS = frozenset({
     "cloud", "clubb_top_press_hpa", "convection", "gwd", "microphysics",
     "convective_rain_to_surface", "orbital_insolation",
     "param_fixed", "param_init",
-    "rad_update_interval_steps", "rrtmgp_gpoint_batch_size", "spatial_init_std",
+    "rad_update_interval_steps", "rrtmgp_column_chunk_size",
+    "rrtmgp_gpoint_batch_size", "spatial_init_std",
     "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
     "turbulence",
 })
