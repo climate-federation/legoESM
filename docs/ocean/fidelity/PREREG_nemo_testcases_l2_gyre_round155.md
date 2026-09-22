@@ -67,3 +67,32 @@ year harness, reconciliation gate, freshwater pair, or #1484 guard changes in
 this round.  ORCA2 remains **UNMEASURED-WITH-SPEC**: repeat the developed-entry
 stage-3 transport operand walk on the ocean-only ORCA2 card before transferring
 a statement verdict.
+
+## Addendum — directed operand attribution (frozen before measuring)
+
+Measured at tip `7a15317a9` and frozen before the substitution runs.  The
+compiled-order walk above names the first unequal INPUT.  Decision 43 ranks
+owners by MAGNITUDE, so the completed stage-3 U transport difference is also
+attributed operand by operand: the two written statements at
+`GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:300-309` and
+`:313-315` are re-evaluated in one isolated JIT closure with ONE operand
+replaced by NEMO's recorded value, and the completed transport is scored
+against NEMO's own recorded `zFu`.  Isolated arms are never relabelled as
+production.
+
+Frozen predictions:
+
+A1. The calibration arm, in which EVERY operand is NEMO's recorded value,
+    rebuilds NEMO's `zFu` bit for bit (0 of 21,780 cells unequal).  If it does
+    not, the statement association itself differs and becomes the candidate.
+A2. Substituting NEMO's `uu(Kmm)` alone removes more than 90% of the
+    production baseline maximum difference `1.4246544619672932`.
+A3. Substituting NEMO's `un_adv` alone removes less than 1% of it.
+A4. The ranked magnitude owner of the developed stage-3 U transport
+    difference is therefore `uu(Kmm)`, the stage-2 velocity, NOT the
+    compiled-order first input `un_adv`.
+
+Falsifier: if `un_adv`'s alone-arm reduction is greater than or equal to
+`uu(Kmm)`'s, A2 and A4 are REFUTED and `un_adv` remains both the
+compiled-order and the magnitude owner.  A refuted prediction stays in the
+receipt.  No physics, configuration, or carried state changes either way.
