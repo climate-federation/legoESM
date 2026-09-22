@@ -81,19 +81,32 @@ def _take(stream: io.BytesIO, count: int, label: str) -> bytes:
     return data
 
 
-def read_record(path: Path, *, truncate: bool = False) -> dict:
+def read_self_describing_record(
+    path: Path,
+    *,
+    magic_expected: str,
+    header_expected: tuple[int, ...],
+    rows_expected: tuple[tuple, ...],
+    truncate: bool = False,
+    drop_last: bool = False,
+) -> dict:
+    """Read the shared ordered-field stream used by the FCT writer probes."""
     raw = path.read_bytes()
     if truncate:
         raw = raw[:-8]
     stream = io.BytesIO(raw)
     magic = _take(stream, 16, "magic").decode("ascii").rstrip()
-    header = struct.unpack("=14i", _take(stream, 56, "header"))
-    require(magic == MAGIC, f"bad magic {magic!r}")
-    require(header == HEADER, f"header {header} != {HEADER}")
+    header_bytes = len(header_expected) * 4
+    header = struct.unpack(
+        f"={len(header_expected)}i", _take(stream, header_bytes, "header"))
+    require(magic == magic_expected, f"bad magic {magic!r}")
+    require(header == header_expected,
+            f"header {header} != {header_expected}")
 
     fields: dict[str, dict] = {}
     observed = []
-    for index in range(header[10]):
+    field_count = header[10] - int(drop_last)
+    for index in range(field_count):
         name = _take(stream, 16, f"field {index} name").decode("ascii").rstrip()
         rank, nx, ny, nz, i0, j0, k0 = struct.unpack(
             "=7i", _take(stream, 28, f"{name} metadata"))
@@ -111,9 +124,19 @@ def read_record(path: Path, *, truncate: bool = False) -> dict:
         }
         observed.append((name, rank, (nx, ny, nz), (i0, j0, k0)))
     require(stream.read(1) == b"", "record has trailing bytes")
-    require(tuple(observed) == EXPECTED_ROWS,
+    require(tuple(observed) == rows_expected[:field_count],
             "field order, rank, extent, or origin differs from the source card")
     return {"header": header, "fields": fields, "sha256": sha256(path)}
+
+
+def read_record(path: Path, *, truncate: bool = False) -> dict:
+    return read_self_describing_record(
+        path,
+        magic_expected=MAGIC,
+        header_expected=HEADER,
+        rows_expected=EXPECTED_ROWS,
+        truncate=truncate,
+    )
 
 
 def check_stamp(root: Path, expected_commit: str) -> None:
