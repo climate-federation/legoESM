@@ -45,6 +45,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.convection._zm_cam6 import (
+    Q_MIN_VAPOR,
     momtran,
     zm_conv_evap,
     zm_convr,
@@ -93,7 +94,9 @@ __physics_contract__ = {
         "dq_r_conv_dt integrates over the column to the surface convective "
         "precipitation (kg/m^2/s = -sum dp (dq_v_dt + dq_c_conv_dt)/g)."
     ),
-    # moisture: vapour + cloud + rain sources close the column to rounding;
+    # moisture: vapour + cloud + rain sources close the column to rounding,
+    # up to CAM's qneg3 floor (Q_MIN_VAPOR, 1e-12 kg/kg) applied to the
+    # state the kernels read, never to the returned tendency (as in CAM);
     # momentum: momtran is flux-form (exact column conservation).
     "conserves": ["moisture", "momentum"],
     "differentiable": True,
@@ -154,6 +157,9 @@ def zhang_mcfarlane_convection(
     dtype = T.dtype
     q_v, p_full, p_half, u, v = (jnp.asarray(a, dtype) for a in (q_v, p_full, p_half, u, v))
     cp = constants.c_pd
+    # CAM's physics_update floors Q at qmin before zm_conv_tend runs (qneg3);
+    # the host hands exact zeros, on which the Fortran itself would NaN.
+    q_v = jnp.maximum(q_v, Q_MIN_VAPOR)
 
     dz, _, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
     zf = jnp.concatenate(
@@ -174,7 +180,7 @@ def zhang_mcfarlane_convection(
 
     # zm_conv_tend: physics_update before zm_conv_evap (zm_conv_intr.F90:686).
     T1 = T + conv.heat / cp * dt
-    q1 = q_v + conv.dqdt * dt
+    q1 = jnp.maximum(q_v + conv.dqdt * dt, Q_MIN_VAPOR)   # qneg3 after the update, too
     pdel = p_half[:, 1:] - p_half[:, :-1]
     evap = zm_conv_evap(T1, p_full, pdel, q1, conv.rprd, cf, dt, conv.prec, ke=config.ke)
 

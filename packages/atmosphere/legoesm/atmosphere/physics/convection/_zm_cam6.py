@@ -121,6 +121,11 @@ _F_MAX = 0.0002                # f <= 2e-4 1/m, zm_conv.F90:3165
 _F_TINY = 1.0e-6               # f(j0) < 1e-6 bump, zm_conv.F90:3171
 _LOGMEAN_TOL = 1.0e-6          # interface log-mean switch, zm_conv.F90:892/3098
 _MD_SMALL = 1.0e-20            # small, zm_conv.F90:3446
+# CAM floors water vapour at this value after every parameterization
+# (qneg3 in physics_update, physics_types.F90:340; cnst_add('Q', ..., 1.E-12)
+# in physpkg.F90:178), so zm_convr never sees q = 0: the interface log-mean
+# log(q(k-1)/q(k)) (zm_conv.F90:900) would be NaN on an exact zero.
+Q_MIN_VAPOR = 1.0e-12
 _HMIN_INIT = 1.0e6             # hmin init, zm_conv.F90:3049
 _MBSTH = 1.0e-15               # convtran/momtran mass-flux threshold, zm_conv.F90:1754/2093
 _CONVTRAN_SMALL = 1.0e-36      # convtran small, zm_conv.F90:1752

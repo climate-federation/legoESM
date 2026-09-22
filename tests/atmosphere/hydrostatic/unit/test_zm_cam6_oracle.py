@@ -13,6 +13,7 @@ measured size of the saturation-curve departure (Goff-Gratch vs Tetens).
 from __future__ import annotations
 
 import math
+import pathlib
 
 import jax
 import jax.numpy as jnp
@@ -454,3 +455,48 @@ def test_deepcu_inputs_match_transcription_and_feed_the_consumer(cols):
                                            CloudConfig(scheme="cam6_clubb"))
     assert float(deepcu[0].max()) > 0.0 and float(deepcu[3].max()) == 0.0
     assert bool(jnp.isfinite(deepcu).all())
+
+
+# ---------------------------------------------------------------------------
+# real AMIP columns with an exact zero in the humidity profile (2026-09-22 blowup)
+# ---------------------------------------------------------------------------
+_REAL_FIX = pathlib.Path(__file__).parent / "fixtures" / "zm_cam6_real_zero_humidity_columns.npz"
+
+
+@pytest.mark.parametrize("tag", ["32", "36"])
+def test_real_columns_with_zero_humidity_are_finite_and_pinned(tag):
+    """The CAM6 60-day arm went NaN in every field within 38 steps: real MPAS
+    columns carry an exact q_v = 0 layer (the host's tracer clip), on which
+    the interface log-mean log(q(k-1)/q(k)) is NaN -- in the Fortran too.
+    CAM never sees a zero because physics_update floors Q at qmin = 1e-12
+    (qneg3) before and after zm_convr; the wrapper applies the same floor.
+    Raw columns through the wrapper must be finite AND match the transcription
+    fed the floored humidity (the floor is the only thing between them)."""
+    d = np.load(_REAL_FIX)
+    T, q, pf, ph = (jnp.asarray(d[k + tag]) for k in ("T", "q", "p_full", "p_half"))
+    pref = jnp.asarray(d["pref_edge" + tag])
+    ncol, nlev = T.shape
+    assert bool((q == 0.0).any()), "fixture must contain an exact zero"
+    u = jnp.zeros_like(T)
+    out, carry = zhang_mcfarlane_convection(T, q, pf, ph, u, u, jnp.zeros_like(T), 112.5, CFG,
+                                            pref_edge=pref)
+    for name in ("dT_dt", "dq_v_dt", "dq_c_conv_dt", "dq_r_conv_dt", "cape", "du_dt_conv",
+                 "mass_flux_up", "icwmr"):
+        assert bool(jnp.isfinite(getattr(out, name)).all()), name
+    assert bool(jnp.isfinite(carry).all())
+    assert bool(out.convective_mask.any()), "fixture columns must convect (they did in the run)"
+    # the run's second physics call: the carry from the first call plus a
+    # carried cloud fraction (the wrapper reads neither into the kernels)
+    out2, carry2 = zhang_mcfarlane_convection(
+        T, q, pf, ph, u, u, carry, 112.5, CFG, cld_frac=jnp.full(T.shape, 0.5), pref_edge=pref)
+    assert bool(jnp.isfinite(out2.dT_dt).all()) and bool(jnp.isfinite(out2.dq_v_dt).all())
+    assert bool(jnp.isfinite(carry2).all())
+    dz, _, z = compute_column_geometry(T, pf, ph, q_v=jnp.maximum(q, Z.Q_MIN_VAPOR))
+    zf = jnp.concatenate([jnp.cumsum(dz[:, ::-1], axis=1)[:, ::-1], jnp.zeros((ncol, 1))], axis=1)
+    c = dict(T=T, q=jnp.maximum(q, Z.Q_MIN_VAPOR), pf=pf, ph=ph, z=z, zf=zf, land=jnp.zeros((ncol,)))
+    P = _port(c, pref_edge=pref)
+    for i in range(ncol):
+        Oi = _oracle(c, i, pref_edge=pref)
+        assert bool(P.ideep[i]) == bool(Oi["ideep"])
+        for name in ("dqdt", "heat", "dlf", "rprd", "mu", "md"):
+            _close(getattr(P, name)[i], Oi[name], what=f"{name} col{i}")
