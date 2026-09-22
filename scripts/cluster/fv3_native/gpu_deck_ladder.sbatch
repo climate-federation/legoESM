@@ -87,7 +87,7 @@ for d in "${DECKS[@]}"; do
   IFS='|' read -r N KM KT PAD NSPLIT DT STEPS <<<"$d"
   RANKS=$((6 * KT * KT)); SNODES=$((RANKS / 2))
   REF="$OUT/ref_c${N}_km${KM}_kt${KT}.npz"
-  RLOG="$OUT/c${N}_ref.log"; SLOG="$OUT/c${N}_score.log"
+  RLOG="$OUT/c${N}_kt${KT}_ref.log"; SLOG="$OUT/c${N}_kt${KT}_score.log"
   echo ""
   echo "===== DECK C$N km=$KM kt=$KT pad=$PAD n_split=$NSPLIT dt=$DT steps=$STEPS ====="
 
