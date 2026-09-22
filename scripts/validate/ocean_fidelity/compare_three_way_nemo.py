@@ -283,8 +283,16 @@ def node_cloud_extrapolation(src, scored, tgt_lat_deg, tgt_lon_deg, far_factor=2
     spacing_km = float(np.median(d_self[:, 1])) * _EARTH_KM
     tlon2d, tlat2d = np.meshgrid(tgt_lon_deg, tgt_lat_deg)
     d_tgt, _ = tree.query(_xyz_deg(tlat2d.ravel(), tlon2d.ravel()), k=1)
-    d_km = d_tgt.reshape(tlat2d.shape)[scored] * _EARTH_KM   # chord ~ arc at these scales
-    return {"median_node_spacing_km": spacing_km,
+    # chord ~ arc at these scales
+    d_km_grid = d_tgt.reshape(tlat2d.shape) * _EARTH_KM
+    d_km = d_km_grid[scored]
+    # The summaries below collapse this to five numbers, which is enough to
+    # FLAG the exposure but not to test it: separating a remap artifact from a
+    # model difference needs the error stratified by THIS distance, per cell.
+    # Carried under a private key; --dump-cells writes it and the caller pops
+    # it before the report is serialised (an ndarray would not survive json).
+    return {"_d_km_grid": d_km_grid,
+            "median_node_spacing_km": spacing_km,
             "nearest_node_p50_km": float(np.median(d_km)),
             "nearest_node_p99_km": float(np.percentile(d_km, 99)),
             "nearest_node_max_km": float(d_km.max()),
@@ -531,6 +539,13 @@ def main() -> int:
                         "stencil's k=4 neighbours span a different physical "
                         "distance on a ~60 km MPAS cell than on a ~111 km "
                         "ORCA1 cell. Changing --res-deg does NOT test this.")
+    p.add_argument("--dump-cells", default=None, metavar="PATH",
+                   help="Write an npz of the PER-CELL scored fields (SST/SSS "
+                        "for each arm and NEMO), the cos-latitude area "
+                        "weights, the scored mask, and each node-cloud arm's "
+                        "nearest-node distance. Changes no number the report "
+                        "prints; it exists so an error can be stratified by "
+                        "NODE DISTANCE rather than by a coastal proxy.")
     p.add_argument("--mask-mode", choices=("nearest", "coverage"), default="nearest",
                    help="How a target cell is classified ocean.  'nearest' "
                         "(default) requires the nearest SOURCE cell of every "
@@ -701,9 +716,11 @@ def main() -> int:
     # values at the common mask's coast may be extrapolated from offshore.
     # Measured per such source and carried with the numbers; the mask is not
     # changed by it.
+    node_dist = {}            # label -> per-target-cell nearest-node distance
     for lab, src in ((lab_a, T), (lab_b, M)):
         chk = node_cloud_extrapolation(src, ocean, tgt_lat, tgt_lon)
         if chk is not None:
+            node_dist[lab] = chk.pop("_d_km_grid")
             report.setdefault("node_cloud_check", {})[lab] = chk
             print(f"[node-cloud] {lab}: no land in the snapshot, its nearest-wet "
                   f"test is vacuous; nearest node over scored cells p50 "
@@ -722,6 +739,17 @@ def main() -> int:
     # join the per-field finite intersection but are never scored.
     fields = [("SST", sstT, sstM, sstN, "degC", area, [f for f, _ in sstX]),
               ("SSS", sssT, sssM, sssN, "psu", area, sssX)]
+
+    if a.dump_cells:
+        dump = {"lat2d": lat2d, "lon2d": lon2d, "scored": ocean, "area": area,
+                "label_a": lab_a, "label_b": lab_b,
+                "SST_a": sstT, "SST_b": sstM, "SST_nemo": sstN,
+                "SSS_a": sssT, "SSS_b": sssM, "SSS_nemo": sssN}
+        for lab, dk in node_dist.items():
+            dump[f"node_km_{lab}"] = dk
+        np.savez(a.dump_cells, **dump)
+        print(f"[dump] {a.dump_cells}: {int(ocean.sum())} scored cells, "
+              f"node-distance grids for {sorted(node_dist) or 'none'}")
 
     # --- MLD (density threshold, matched to NEMO mldr10_1) -------------------
     mldT_raw, mldM_raw = _lego_mld(T), _lego_mld(M)
