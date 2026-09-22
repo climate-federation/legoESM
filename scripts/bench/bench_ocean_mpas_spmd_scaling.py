@@ -99,17 +99,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--profile-dir", type=str, default=None,
-                   help="After the timed window, replay four steps under "
-                        "jax.profiler from ranks 0-3 (one node, shared "
-                        "clock) into <dir>/rank<k>/ and leave the reported "
-                        "timing untouched. The chrome-format trace.json.gz "
-                        "feeds scripts/bench/analyze_jax_trace_gaps.py, "
-                        "which splits the step into kernel time, collective "
-                        "time and gap. nsys silently drops the halo "
-                        "collectives on this lane, so it is not an option; "
-                        "and tracing from the first step fills the "
-                        "profiler's event cap with compile-phase host "
-                        "events, leaving the device tracks empty.")
+                   help="Trace the timed fused blocks from ranks 0-3 (one "
+                        "node, shared clock) into <dir>/rank<k>/. The "
+                        "chrome-format trace.json.gz feeds "
+                        "scripts/bench/analyze_jax_trace_gaps.py, which "
+                        "splits the step into kernel time, collective time "
+                        "and gap. A traced run's own timing carries "
+                        "profiler overhead, so its receipt is a capture "
+                        "artifact, never a ladder row. nsys silently drops "
+                        "the halo collectives on this lane and is not an "
+                        "option.")
     p.add_argument("--out", type=str, default="ocean_mpas_spmd_scaling.jsonl")
     return p
 
@@ -214,44 +213,42 @@ def main() -> int:
         t0 = time.perf_counter()
         jax.block_until_ready(jax.tree.leaves(advance(state, aux)))
         compile_ms = (time.perf_counter() - t0) * 1e3
+        # Trace the FUSED BLOCKS the receipt times, not a hand-rolled replay:
+        # a Python-dispatched replay carries dispatch gaps the enclosing scan
+        # does not have, so its kernel/collective/gap shares could not budget
+        # the reported step. Only the first four ranks pass a directory,
+        # because they share a node clock and that is what makes the
+        # cross-rank collective start spread meaningful; the helper runs the
+        # blocks on every rank either way, which is required because a block
+        # is collective. A traced run's own timing carries profiler overhead,
+        # so its receipt is a capture artifact and never a ladder row.
+        trace_dir = None
+        if args.profile_dir is not None and jax.process_index() < 4:
+            trace_dir = f"{args.profile_dir}/rank{jax.process_index()}"
+        if args.profile_dir is not None and jax.process_index() == 0 and nd > 1:
+            # The analyzer's cross-rank arrival skew is only quotable when it
+            # matches each collective to its SCHEDULED partner; its fallback,
+            # matching by overlap, pairs ranks that never talked to each other.
+            # Rank 0 already holds the schedule, so emit the map here rather
+            # than rebuilding the partition in a second job.
+            import json as _json
+            import pathlib as _pl
+            _pm = {}
+            for _rk in range(4):
+                _pm[str(_rk)] = [
+                    [_r, int(_dst)]
+                    for _r, _perm in enumerate(layout.ppermute_perms)
+                    for _src, _dst in _perm if _src == _rk]
+            _pl.Path(args.profile_dir).mkdir(parents=True, exist_ok=True)
+            with open(f"{args.profile_dir}/partner_map.json", "w") as _f:
+                _json.dump({"n_rounds": rounds, "ranks": _pm}, _f)
         state, t = timed_scan_blocks(
             advance, state, block_steps=args.block_steps, n_blocks=args.blocks,
             probe_steps=args.probe_steps, sync_label="ocean_mpas_spmd_bench",
-            aux=aux)
+            trace_dir=trace_dir, aux=aux)
         # jitted global reduction -> replicated scalar (fully addressable) over
         # EVERY prognostic leaf, not a host fetch of one sharded field.
         finite = bool(_all_finite(state))
-        if args.profile_dir is not None:
-            # EVERY rank replays the steps, because a step is collective:
-            # gating the replay on a rank-local predicate would leave the
-            # untraced ranks out of the halo exchanges and the solver's
-            # reductions, and the job would hang. Only the trace itself is
-            # rank-local, and only the first four ranks take one, because
-            # they share a node clock and that is what makes the cross-rank
-            # collective start spread meaningful.
-            import pathlib
-            tracing = jax.process_index() < 4
-            if tracing:
-                # A rank-local failure here must not raise: the replay below
-                # is collective, so a rank that bailed out would hang the
-                # other ranks until the job's wall limit.
-                try:
-                    pdir = (pathlib.Path(args.profile_dir)
-                            / f"rank{jax.process_index()}")
-                    pdir.mkdir(parents=True, exist_ok=True)
-                    jax.profiler.start_trace(str(pdir))
-                except Exception as exc:   # noqa: BLE001 - see above
-                    print(f"[profile] rank {jax.process_index()} not tracing: {exc}",
-                          flush=True)
-                    tracing = False
-            try:
-                st = state
-                for _ in range(4):
-                    st = advance(st, aux)
-                    jax.block_until_ready(jax.tree.leaves(st))
-            finally:
-                if tracing:
-                    jax.profiler.stop_trace()
     finally:
         if nd > 1:
             disarm_mpas_ocean_spmd()

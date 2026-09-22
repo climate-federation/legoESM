@@ -64,34 +64,42 @@ def test_profile_dir_is_off_unless_asked_and_leaves_the_solver_alone():
     assert on.profile_dir == "/tmp/x"
 
 
-def test_profiled_replay_is_not_gated_on_the_rank():
-    """The replayed steps are COLLECTIVE, so no rank-local guard may wrap them.
-
-    Gating them on the rank index leaves the untraced ranks out of the halo
-    exchanges and the solver's reductions, and the job hangs until its wall
-    limit.  Only starting and stopping the trace may be rank-local.  This
-    caught exactly that defect in the first draft of the feature.
+def test_the_timed_blocks_are_not_gated_on_the_rank():
+    """A fused block is COLLECTIVE, so no rank-local guard may wrap the call
+    that runs it.  Only the trace directory handed to it may be rank-local:
+    ranks that skip the blocks would not join their halo exchanges or the
+    solver's reductions, and the job hangs until its wall limit.  An earlier
+    draft of the profiling window did exactly that, and this gate goes red
+    against it.
     """
     import ast
 
     src = (_BENCH_DIR / "bench_ocean_mpas_spmd_scaling.py").read_text()
     tree = ast.parse(src)
 
-    def guards_the_rank(node):
+    def mentions_the_rank(node):
         return any(isinstance(n, ast.Attribute) and n.attr == "process_index"
-                   for n in ast.walk(node.test))
+                   for n in ast.walk(node))
 
-    replays = [n for n in ast.walk(tree)
-               if isinstance(n, ast.For)
-               and any(isinstance(c, ast.Name) and c.id == "advance"
-                       for c in ast.walk(n))]
-    assert replays, "the profiled replay loop is gone; update this gate"
+    timed = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name)
+             and n.func.id == "timed_scan_blocks"]
+    assert timed, "the timed-block call is gone; update this gate"
 
-    rank_guarded = [n for n in ast.walk(tree)
-                    if isinstance(n, ast.If) and guards_the_rank(n)]
-    assert rank_guarded, "no rank guard at all; update this gate"
-    for guard in rank_guarded:
-        for loop in replays:
-            assert loop not in ast.walk(guard), (
-                "a replayed step sits inside a rank-local guard: the ranks "
-                "that skip it will not join its collectives and the job hangs")
+    guards = [n for n in ast.walk(tree)
+              if isinstance(n, ast.If) and mentions_the_rank(n.test)]
+    assert guards, "no rank guard at all; update this gate"
+    for guard in guards:
+        for call in timed:
+            assert call not in ast.walk(guard), (
+                "the timed blocks sit inside a rank-local guard: the ranks "
+                "that skip them will not join their collectives and the job "
+                "hangs")
+
+    # And the trace directory itself MUST stay rank-local, or all 128 ranks
+    # write traces and the analyzer's same-node clock assumption is void.
+    assert any(mentions_the_rank(g.test)
+               and any(isinstance(n, ast.Name) and n.id == "trace_dir"
+                       for n in ast.walk(g))
+               for g in guards), "the trace directory is no longer rank-local"

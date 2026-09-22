@@ -61,9 +61,16 @@ export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"
 rc=0
 
 ND="${ND:-128}"; PPN=4; NN=$(( ND / PPN ))
+(( NN == ${SLURM_JOB_NUM_NODES:?} )) || {
+  echo "ERROR: ND=$ND wants $NN nodes, allocation has $SLURM_JOB_NUM_NODES" >&2
+  exit 2; }
 # The ocean lane wedges at 32 NCCL channels beyond 64 GPUs (three arms,
 # two jobs), so this capture pins the setting that is measured to complete.
 export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
+
+# The split is an attribution OF THIS transport configuration and may not be
+# quoted against a receipt taken at another channel count.
+env | grep -E '^(NCCL|XLA|JAX|LEGOESM)_' | sort > "$OUTDIR/capture_env.txt"
 
 echo "=== ocean subdiv-9 at $ND GPUs, ranks 0-3 traced ==="
 srun --export=ALL --nodes="$NN" --ntasks="$ND" --ntasks-per-node="$PPN" \
@@ -78,8 +85,17 @@ srun --export=ALL --nodes="$NN" --ntasks="$ND" --ntasks-per-node="$PPN" \
 
 echo "=== TRACE ATTRIBUTION ==="
 set +e
+# Without the schedule-matched partner map the analyzer falls back to pairing
+# collectives by overlap, which pairs ranks that never exchanged anything; its
+# own help says that form is not quotable. The bench writes the map next to
+# the traces.
+PM=("--partner-map" "$OUTDIR/traces/partner_map.json")
+[[ -f "$OUTDIR/traces/partner_map.json" ]] || {
+  echo "WARNING: no partner map was written; arrival-skew numbers from this"
+  echo "         capture are NOT quotable. Kernel/collective/gap shares still are."
+  PM=(); }
 "$PY" scripts/bench/analyze_jax_trace_gaps.py \
-  --trace-root "$OUTDIR/traces" --out "$OUTDIR/trace_summary.json"
+  --trace-root "$OUTDIR/traces" "${PM[@]}" --out "$OUTDIR/trace_summary.json"
 rcv=$?
 [ "$rcv" -ne 0 ] && rc=$rcv
 echo "DONE rc=$rc outdir=$OUTDIR"; exit $rc
