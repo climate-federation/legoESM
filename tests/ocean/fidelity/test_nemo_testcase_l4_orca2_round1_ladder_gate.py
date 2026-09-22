@@ -182,5 +182,54 @@ def test_round6_independent_trajectory_uses_production_step_and_only_bridges_ssh
     assert "trace = model.step(" in source
     assert "state = trace.state_after" in source
     assert '"claim_label": "INDEPENDENT_WITH_DECISION52_SSH"' in source
-    assert '"given_nemo_entry_eligibility": "STOP_INITIAL_T_S_TRANSCRIPTION"' in source
+    assert '"DECISION52_SSH_ONLY" if entry_ts_independent else' in source
+    assert '"STOP_INITIAL_T_S_TRANSCRIPTION")' in source
     assert '"rnf_tsc"' in source
+
+
+def test_eos80_coefficient_audit_matches_the_compiled_block_and_can_fail(
+        tmp_path):
+    """126 numbers re-derived from the compiled file, not trusted by eye."""
+    source = Path(
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs"
+        "/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90")
+    if not source.is_file():
+        pytest.skip("the round-5 ORCA2 compiled build is not on this host")
+
+    result = gate.validate_eos80_coefficients(source)
+    assert result["coefficients_compared"] == 126
+    assert (result["density_terms"], result["alpha_terms"],
+            result["beta_terms"]) == (52, 35, 35)
+    assert result["normalization"]["rdeltaS"] == 20.0
+    assert result["normalization"]["r1_S0"] == 1.0 / 40.0
+
+    with pytest.raises(gate.GateError, match="differ from the compiled"):
+        gate.validate_eos80_coefficients(source, plant=True)
+
+
+def test_shared_eos_branch_check_reads_the_compiled_routines():
+    """The EOS-80 statement is a coefficient selection, not a second formula."""
+    source = Path(
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs"
+        "/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90")
+    if not source.is_file():
+        pytest.skip("the round-5 ORCA2 compiled build is not on this host")
+
+    result = gate.validate_shared_eos_branch(source)
+    assert result["rab_case_shared"] is True
+    assert result["bn2_has_no_eos_branch"] is True
+
+
+def test_fortran_real_refuses_a_non_literal():
+    assert gate._fortran_real("1._wp/40._wp") == 1.0 / 40.0
+    assert gate._fortran_real("-2.2856621162e+01_wp") == -22.856621162
+    with pytest.raises(gate.GateError, match="Fortran real expression"):
+        gate._fortran_real("rn_alpha")
+
+
+def test_round7_ablation_rebuilds_the_unaltered_initial_state():
+    """The gate's ablation must go through the card's own helper."""
+    source = Path(gate.__file__).read_text()
+    assert "apply_hand_alterations=False" in source
+    assert "the hand-alteration ablation is vacuous" in source
+    assert '"hand_alteration_ablation": ablation' in source

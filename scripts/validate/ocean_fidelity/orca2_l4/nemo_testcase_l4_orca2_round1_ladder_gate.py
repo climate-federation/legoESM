@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import struct
 import sys
 from pathlib import Path
@@ -56,6 +57,14 @@ DEFAULT_TRAJECTORY_SOURCE_ROOT = Path(
 )
 TRAJECTORY_CITATIONS = {
     "initial_ts": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:217-254",
+    "initial_ts_mask": (
+        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:307-310"),
+    "global_index_map": (
+        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/mppini.f90:1586-1594"),
+    "eos80_init": (
+        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90:2284-2293"),
+    "rab_polynomial": (
+        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90:1279-1332"),
     "stage_dump": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:215-231,329-348",
     "runoff_tracer": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:314-328",
     "salt_flux": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:290-311",
@@ -218,6 +227,129 @@ def card_fields(deck_root: Path) -> tuple[dict[str, np.ndarray], object]:
         "ssh": np.asarray(state.eta.data)[:, :90],
     }
     return fields, card
+
+
+_FORTRAN_REAL = re.compile(r"^[-0-9.eE+*/ ]+$")
+
+
+def _fortran_real(expression: str) -> float:
+    """Evaluate one Fortran real literal or literal quotient as float64."""
+
+    cleaned = expression.replace("_wp", "").strip()
+    require(bool(_FORTRAN_REAL.match(cleaned)),
+            f"unexpected Fortran real expression: {expression!r}")
+    return float(eval(cleaned, {"__builtins__": {}}, {}))  # noqa: S307
+
+
+def extract_compiled_eos80_coefficients(path: Path) -> dict[str, float]:
+    """Parse the compiled ``eos_init`` EOS-80 case into a coefficient map.
+
+    Mechanical, not by eye: the block is delimited by its own two ``CASE``
+    lines, and every simple ``NAME = <real>`` assignment inside it is taken.
+    122 numbers copied by hand is exactly where a silent wrong-number defect
+    enters, so the gate re-derives them from the compiled file every run.
+    """
+
+    require(path.is_file(), f"compiled EOS source missing: {path}")
+    lines = path.read_text().splitlines()
+    starts = [i for i, line in enumerate(lines)
+              if line.strip().startswith("CASE( np_eos80 )")
+              and "polynomial EOS-80" in line]
+    require(len(starts) == 1,
+            f"expected one EOS-80 eos_init case, found {len(starts)}")
+    start = starts[0]
+    ends = [i for i in range(start + 1, len(lines))
+            if lines[i].strip().startswith("CASE( np_seos )")]
+    require(bool(ends), "EOS-80 eos_init case has no following CASE")
+    assignment = re.compile(r"^\s*([A-Za-z]\w*)\s*=\s*([^!]+?)\s*$")
+    coefficients: dict[str, float] = {}
+    for line in lines[start + 1:ends[0]]:
+        match = assignment.match(line)
+        if match is None:
+            continue
+        name, expression = match.group(1), match.group(2)
+        if name[:3] not in ("EOS", "ALP", "BET") and name not in (
+            "rdeltaS", "r1_S0", "r1_T0", "r1_Z0"
+        ):
+            continue
+        require(name not in coefficients, f"duplicate EOS-80 coefficient {name}")
+        coefficients[name] = _fortran_real(expression)
+    return coefficients
+
+
+def validate_eos80_coefficients(
+    path: Path, *, plant: bool = False
+) -> dict[str, object]:
+    """The committed EOS-80 set must equal the compiled one, bit for bit."""
+
+    from legoesm.ocean.eos import _ROQUET_EOS80  # noqa: PLC2701
+
+    compiled = extract_compiled_eos80_coefficients(path)
+    committed = dict(_ROQUET_EOS80)
+    if plant:
+        compiled["EOS000"] = np.nextafter(compiled["EOS000"], np.inf)
+    require(set(compiled) == set(committed),
+            "EOS-80 coefficient NAME set differs: "
+            f"compiled-only={sorted(set(compiled) - set(committed))}, "
+            f"committed-only={sorted(set(committed) - set(compiled))}")
+    differing = sorted(
+        name for name in compiled
+        if np.float64(compiled[name]).tobytes()
+        != np.float64(committed[name]).tobytes()
+    )
+    require(not differing,
+            f"EOS-80 coefficients differ from the compiled source: {differing}")
+    return {
+        "path": str(path),
+        "sha256": sha256(path),
+        "citation": TRAJECTORY_CITATIONS["eos80_init"],
+        "coefficients_compared": len(compiled),
+        "density_terms": sum(1 for name in compiled if name.startswith("EOS")),
+        "alpha_terms": sum(1 for name in compiled if name.startswith("ALP")),
+        "beta_terms": sum(1 for name in compiled if name.startswith("BET")),
+        "normalization": {name: compiled[name] for name in
+                          ("rdeltaS", "r1_S0", "r1_T0", "r1_Z0")},
+        "bit_identical": True,
+    }
+
+
+def validate_shared_eos_branch(path: Path) -> dict[str, object]:
+    """The expansion coefficients branch once; the N-squared assembly never.
+
+    NEMO runs ONE polynomial for TEOS-10 and EOS-80 and selects between them
+    only through the coefficients eos_init loads, and its buoyancy-frequency
+    routine carries no equation-of-state selection at all.  That is why the
+    ORCA2 statement is a coefficient-set selection on the evaluator this repo
+    already ships rather than a second formula.
+    """
+
+    lines = path.read_text().splitlines()
+    rab = [i for i, line in enumerate(lines)
+           if line.strip().startswith("SUBROUTINE rab_3d_t")]
+    require(len(rab) == 1, "expected one rab_3d_t definition")
+    end = next(i for i in range(rab[0], len(lines))
+               if lines[i].strip() == "END SUBROUTINE rab_3d_t")
+    body = "\n".join(lines[rab[0]:end])
+    require("CASE( np_teos10, np_eos80 )" in body,
+            "rab_3d_t no longer shares one case between TEOS-10 and EOS-80")
+    require(body.count("CASE( np_eos80 )") == 0,
+            "rab_3d_t grew a separate EOS-80 case")
+    bn2 = [i for i, line in enumerate(lines)
+           if line.strip().startswith("SUBROUTINE bn2_t")]
+    require(len(bn2) == 1, "expected one bn2_t definition")
+    bn2_end = next(i for i in range(bn2[0], len(lines))
+                   if lines[i].strip() == "END SUBROUTINE bn2_t")
+    bn2_body = "\n".join(lines[bn2[0]:bn2_end])
+    require("SELECT CASE" not in bn2_body and "neos" not in bn2_body,
+            "bn2_t grew an equation-of-state branch")
+    return {
+        "rab_case_shared": True,
+        "bn2_has_no_eos_branch": True,
+        "rab_citation": TRAJECTORY_CITATIONS["rab_polynomial"],
+        "bn2_citation": (
+            "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+            "/eosbn2.f90:1587-1647"),
+    }
 
 
 def validate_compiled_source(path: Path) -> dict[str, object]:
@@ -629,6 +761,27 @@ def _surface_forcings(
     return freshwater, surface
 
 
+def unaltered_initial_ts(deck_root: Path, card) -> dict[str, np.ndarray]:
+    """ABLATION: the initial state WITHOUT the ORCA_R2 hand alterations.
+
+    This is the pre-round-7 card, rebuilt through the same helper the card
+    uses, so the gate can show the alterations own the whole entry residual
+    rather than merely shrinking it.  Rule 4: it ablates the transcription,
+    not a proxy for it.
+    """
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_orca2_initial_ts
+
+    tmask = np.asarray(card.recipe.z_coord.is_active)
+    temperature, salinity = build_orca2_initial_ts(
+        deck_root / "data_1m_potential_temperature_nomask.nc",
+        deck_root / "data_1m_salinity_nomask.nc",
+        tmask,
+        apply_hand_alterations=False,
+    )
+    return {"T": temperature, "S": salinity}
+
+
 def candidate_trajectory(
     deck_root: Path,
     root: Path,
@@ -650,6 +803,14 @@ def candidate_trajectory(
     entry1 = assemble_state_fields(root, 1, stage=None)
     state = card.recipe.initial_state
     independent = compare_fields(_candidate_fields(state), entry1)
+    unaltered = unaltered_initial_ts(deck_root, card)
+    ablation = {
+        name: score(unaltered[name], entry1[name]) for name in ("T", "S")
+    }
+    require(not ablation["T"]["bit_identical"] and
+            not ablation["S"]["bit_identical"],
+            "the hand-alteration ablation is vacuous: removing the compiled "
+            "ORCA_R2 alterations changed nothing")
     # Decision 52 authorizes exactly this operand replacement and nothing else.
     state = state._replace(
         eta=state.eta.replace(data=jnp.asarray(entry1["ssh"], dtype=jnp.float64))
@@ -696,40 +857,12 @@ def candidate_trajectory(
 
         surface_fields = assemble_surface_fields(root, kt)
         freshwater, surface = _surface_forcings(card, deck_root, surface_fields, kt)
-        try:
-            trace = model.step(
-                state,
-                dt=card.dt_s,
-                freshwater=freshwater,
-                surface_forcing=surface,
-            )
-        except ValueError as exc:
-            if "compute_buoyancy_frequency_nemo_bn2 eos_form='eos80'" not in str(exc):
-                raise
-            require(first_non_bit is not None,
-                    "EOS80 BN2 stop preceded a registered entry mismatch")
-            require(first_field is not None,
-                    "EOS80 BN2 stop has no registered first field")
-            return {
-                "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
-                "execution": "production-jit-cpu-fp64-x64-libm",
-                "decision52_bridge": bridge,
-                "independent_entry_before_bridge": independent,
-                "given_nemo_entry_eligibility": "STOP_INITIAL_T_S_TRANSCRIPTION",
-                "chlorophyll_kt1_input_reconstruction": chl_row,
-                "first_non_bit_statement": first_non_bit,
-                "kt10_same_field_magnitude": "UNMEASURED_STOP_PRODUCTION_EOS80_BN2_GAP",
-                "checkpoints": checkpoints,
-                "execution_blocker": {
-                    "status": "STOP_PRODUCTION_EOS80_BN2_GAP",
-                    "message": str(exc),
-                    "nemo_source_citation": (
-                        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/"
-                        "nemo/eosbn2.f90:1587-1647"
-                    ),
-                    "legoesm_source": "packages/ocean/legoesm/ocean/eos.py:748-753",
-                },
-            }
+        trace = model.step(
+            state,
+            dt=card.dt_s,
+            freshwater=freshwater,
+            surface_forcing=surface,
+        )
         for stage in (1, 2, 3):
             oracle_stage = read_state_frame(
                 root / f"oracle_stage_kt{kt:08d}_s{stage}.bin",
@@ -762,12 +895,19 @@ def candidate_trajectory(
         row["checkpoint"]: row["rows"][first_field]
         for row in checkpoints if row["kt"] == max_step
     }
+    entry_ts_independent = all(
+        bridge["rows"][name]["bit_identical"] for name in ("T", "S", "u", "v")
+    )
     return {
         "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
         "execution": "production-jit-cpu-fp64-x64-libm",
         "decision52_bridge": bridge,
         "independent_entry_before_bridge": independent,
-        "given_nemo_entry_eligibility": "STOP_INITIAL_T_S_TRANSCRIPTION",
+        "hand_alteration_ablation": ablation,
+        "independent_entry_ts_bit_identical": entry_ts_independent,
+        "given_nemo_entry_eligibility": (
+            "DECISION52_SSH_ONLY" if entry_ts_independent else
+            "STOP_INITIAL_T_S_TRANSCRIPTION"),
         "chlorophyll_kt1_input_reconstruction": chl_row,
         "first_non_bit_statement": first_non_bit,
         "kt10_same_field_magnitude": kt10_rows,
@@ -835,6 +975,8 @@ def run_gate(
     output_init = initial_output_substitution_check(orca1ice_root, orca1ice_entry)
     admission = None
     trajectory_sources = None
+    eos_branch = None
+    eos_coefficients = None
     trajectory = None
     if not support["trajectory_supported"]:
         status = "STOP_RECORD_GAP"
@@ -847,11 +989,19 @@ def run_gate(
             orca1ice_root, plant=plant == "surface_hash"
         )
         trajectory_sources = validate_trajectory_sources(trajectory_source_root)
+        eos_branch = validate_shared_eos_branch(
+            trajectory_source_root / "eosbn2.f90")
+        eos_coefficients = validate_eos80_coefficients(
+            trajectory_source_root / "eosbn2.f90",
+            plant=plant == "eos80_coeff",
+        )
         trajectory = candidate_trajectory(
             deck_root, orca1ice_root, card, max_step=max_step
         )
-        status = trajectory.get("execution_blocker", {}).get(
-            "status", "STOP_INITIAL_TS_TRANSCRIPTION_GAP"
+        status = (
+            "LADDER_MEASURED"
+            if trajectory["independent_entry_ts_bit_identical"] else
+            "STOP_INITIAL_TS_TRANSCRIPTION_GAP"
         )
         trajectory_claim = "MEASURED_INDEPENDENT_WITH_DECISION52_SSH"
     return {
@@ -876,6 +1026,8 @@ def run_gate(
         "output_init_substitution_check": output_init,
         "acquisition_admission": admission,
         "trajectory_sources": trajectory_sources,
+        "eos80_shared_branch": eos_branch,
+        "eos80_coefficient_audit": eos_coefficients,
         "candidate_trajectory": trajectory,
         "trajectory_claim": trajectory_claim,
     }
@@ -893,7 +1045,8 @@ def main() -> int:
     )
     parser.add_argument("--max-step", type=int, default=10)
     parser.add_argument("--json-out", type=Path)
-    parser.add_argument("--plant", choices=("kt1_T", "surface_hash"))
+    parser.add_argument(
+        "--plant", choices=("kt1_T", "surface_hash", "eos80_coeff"))
     args = parser.parse_args()
     try:
         result = run_gate(
@@ -924,7 +1077,7 @@ def main() -> int:
     if result["status"] in (
         "STOP_INITIAL_TS_TRANSCRIPTION_GAP",
         "STOP_PRODUCTION_EOS80_BN2_GAP",
-    ):
+    ):  # pragma: no cover - retained fail-closed arm
         print(
             f"REFUSE: {result['status']}: the admitted ORCA2 ladder cannot "
             "reach kt=10",
