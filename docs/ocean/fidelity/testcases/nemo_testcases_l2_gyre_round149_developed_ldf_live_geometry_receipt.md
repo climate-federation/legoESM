@@ -124,6 +124,12 @@ rows agree, all 58 ladder rows are registered, first-over-bar is not earlier,
 and kt1 retains the bar.  Its day-240-worse and missing-registry plants print
 `STATUS PLANT-FIRED` and exit 1.
 
+These candidate artifacts are now the immutable before arms for the next
+landing: `phase3/round149/candidate_ladder_certified.json`,
+`phase3/round149/candidate_month_gap.json` with its `candidate_month/` member,
+and `phase3/round149/candidate_year_gap.json` with its `candidate_year/`
+member.  No older arm may be used as the next landing's before trajectory.
+
 ## Blast radius, review, and evidence
 
 The execution census is derived from every resolved recipe.  The route
