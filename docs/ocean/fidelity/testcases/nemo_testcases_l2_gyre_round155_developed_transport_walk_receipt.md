@@ -14,10 +14,11 @@ The preregistration is
 `docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round155.md`, committed as
 `06ebee850`; its directed-attribution addendum was frozen separately as
 `49530f7e8`, before the substitution arms were run.  The authoritative
-measurement commit is `6c4c2a2c0`, which reproduces the compiled-order table
-first measured at `c29c3e995` value for value and adds the attribution.
-Evidence is under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round155/`;
-the final measurement is `developed_transport_walk_6c4c2a2c0.json`.
+measurement commit is `f9422daed`, which reproduces the compiled-order table
+first measured at `c29c3e995` value for value, at `6c4c2a2c0` again, and adds
+the attribution through the model's own helpers.  Evidence is under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round155/`; the final
+measurement is `developed_transport_walk_f9422daed.json`.
 
 No physics, configuration, default, carried state, restart schema, stabilizer,
 year harness, reconciliation gate, freshwater pair, or #1484 guard changed.
@@ -44,10 +45,10 @@ The Round-154 record's normal gate reports `STATUS PASS`: 20 finite registered
 fields and all seven restarts plus `mesh_mask.nc` bit-identical to the
 Round-153 baseline.  Its stamp, truncation, restart-byte, and operand-ULP
 plants each print their named `STATUS PLANT-FIRED` marker and exit 1; all five
-runs were repeated at the measurement commit `6c4c2a2c0`
+runs were repeated during this round
 (`round154_admission_recheck_6c4c2a2c0.json`,
-`round154_plants_6c4c2a2c0.status`).  The daily record audit at that commit
-admits 360/360 boundaries and 12/12 monthly overlaps.
+`round154_plants_6c4c2a2c0.status`).  The daily record audit at the
+measurement commit admits 360/360 boundaries and 12/12 monthly overlaps.
 
 The existing year-owner developed-step harness loads NEMO's exact step-1080
 restart and executes `LatLonCGridOceanModel.step` through production JIT.  It
@@ -101,43 +102,49 @@ the already non-bit live ratio.
 ## Directed operand attribution (Decision 43, magnitude)
 
 Compiled order names the first unequal input; it does not say which operand
-CARRIES the difference.  The two written statements were re-evaluated in the
-same isolated JIT closure with ONE operand replaced by NEMO's recorded value,
-and the product scored against NEMO's own recorded transport over the 17,400
-active U faces.  Arms are isolated-closure JIT and are not production.
+CARRIES the difference.  The two written statements were re-evaluated in one
+isolated JIT closure that calls the SAME two shared helpers the production
+stage calls, with ONE operand replaced by NEMO's recorded value, and the
+product scored against NEMO's own recorded transport over the 17,400 active U
+faces.  Arms are isolated-closure JIT and are not production.
 
 Two anchor arms calibrate the instrument.  With nothing substituted the
-closure reproduces the production transport row cell for cell (17,400 unequal,
-maximum 1.4246544619672932), which the gate requires.  With every operand
-substituted the closure rebuilds NEMO's transport **BIT — 0 of 17,400 cells
-unequal, maximum 0** — so legoESM's transcription of the compiled barotropic
-correction and the compiled metric-transport product is exact, and no
-statement inside the stage-3 transport is an admissible owner.
+closure is byte-identical to the production transport row, which the gate
+requires.  With every operand substituted it rebuilds NEMO's transport
+**BIT — 0 of 17,400 active cells and 0 of all 21,780 cells unequal, maximum
+0** — so legoESM's transcription of the compiled barotropic correction and of
+the compiled metric-transport product is exact, and no statement inside the
+stage-3 transport is an admissible owner.
 
-| substituted operand | active unequal | active max abs | fraction removed |
-|---|---:|---:|---:|
-| none (production) | 17,400 | 1.4246544619672932 | 0 |
-| `uu(Kmm)` | 17,400 | 9.611541259801015e-3 | 0.9932534228359285 |
-| `uu_b(Kmm)` | 17,400 | 1.424409581362852 | 1.7188771802470907e-4 |
-| `e2u` | 17,400 | 1.4246544619672932 | 0 |
-| `umask` | 17,400 | 1.4246544619672932 | 0 |
-| live inverse depth | 17,400 | 1.42465446217102 | -1.43000859952954e-10 |
-| live `e3u(Kmm)` | 17,400 | 1.424654508344247 | -3.255312433357603e-8 |
-| `un_adv` | 17,400 | 1.4247952934965724 | -9.885311353657392e-5 |
-| `uu(Kmm)` and `un_adv` | 17,400 | 1.9552775600459427e-2 | 0.986275425991044 |
-| all (calibration) | 0 | 0 | 1 |
+The ranking uses the root mean square over active faces, because the argmax
+of a maximum is free to move between arms; the maximum is reported beside it.
 
-`uu(Kmm)` is the magnitude owner: it alone removes 99.33% of the completed
-transport difference.  `un_adv`, the first unequal input in compiled order,
-removes none of it — substituting it alone is marginally worse, and adding it
-on top of `uu(Kmm)` raises the residual from 9.61e-3 to 1.96e-2, so at this
-magnitude the two partly compensate.  Ranked by fraction removed the order is
-`uu(Kmm)`, `uu_b(Kmm)`, `e2u`, `umask`, live inverse depth, live `e3u(Kmm)`,
-`un_adv`.
+| substituted operand | active max abs | max removed | active rms | rms removed |
+|---|---:|---:|---:|---:|
+| none (production) | 1.4246544619672932 | 0 | 4.119014779519268e-2 | 0 |
+| `uu(Kmm)` | 9.611541259801015e-3 | 0.9932534228359285 | 1.971739597490058e-3 | 0.9521307957598496 |
+| `un_adv` | 1.4247952934965724 | -9.885311353657392e-5 | 4.0906314330495554e-2 | 6.890809571949426e-3 |
+| live inverse depth | 1.42465446217102 | -1.43000859952954e-10 | 4.1190142497562796e-2 | 1.2861400521610125e-7 |
+| live `e3u(Kmm)` | 1.424654508344247 | -3.255312433357603e-8 | 4.119014533873493e-2 | 5.963702188595683e-8 |
+| `e2u` | 1.4246544619672932 | 0 | 4.119014779519268e-2 | 0 |
+| `umask` | 1.4246544619672932 | 0 | 4.119014779519268e-2 | 0 |
+| `uu_b(Kmm)` | 1.424409581362852 | 1.7188771802470907e-4 | 4.1951556442092586e-2 | -1.8485212791316354e-2 |
+| `uu(Kmm)` and `un_adv` | 1.9552775600459427e-2 | 0.986275425991044 | 3.7540190212523483e-3 | 0.9088612393449463 |
+| all (calibration) | 0 | 1 | 0 | 1 |
+
+Every arm leaves all 17,400 active faces unequal except the calibration arm,
+which leaves none.
+
+`uu(Kmm)` is the magnitude owner: it alone removes 95.2% of the transport
+difference by rms and 99.3% by maximum.  `un_adv`, the first unequal input in
+compiled order, removes 0.69% by rms and none at all by maximum, and adding it
+on top of `uu(Kmm)` raises the residual rms from 1.97e-3 to 3.75e-3, so at
+this magnitude the two partly compensate.  `uu_b(Kmm)` is negative on rms:
+substituting NEMO's value alone makes the transport slightly worse.
 
 This is a one-step magnitude at the developed day-180 entry, not a day-240
 carry: no candidate exists, so no year arm was run and no day-240 number is
-claimed for either operand.
+claimed for any operand.
 
 ## Predictions and verdict
 
@@ -156,11 +163,12 @@ claimed for either operand.
 Addendum predictions, frozen at `49530f7e8` before the substitution arms ran:
 
 A1. NEMO's own operands rebuild NEMO's transport bit for bit: **CONFIRMED**,
-   0 of 17,400 active cells unequal.
-A2. `uu(Kmm)` alone removes more than 90%: **CONFIRMED**, 99.33%.
-A3. `un_adv` alone removes less than 1%: **CONFIRMED**, it removes none
-   (-0.0099%).
-A4. The magnitude owner is `uu(Kmm)`, not `un_adv`: **CONFIRMED**.
+   0 of 17,400 active cells and 0 of all 21,780 cells unequal.
+A2. `uu(Kmm)` alone removes more than 90%: **CONFIRMED**, 95.21% by rms and
+   99.33% by maximum.
+A3. `un_adv` alone removes less than 1%: **CONFIRMED**, 0.69% by rms.
+A4. The magnitude owner is `uu(Kmm)`, not `un_adv`: **CONFIRMED** on both
+   metrics.
 
 **First non-bit statement:** none inside the measured transport block, and
 the calibration arm proves it: NEMO's own operands rebuild NEMO's transport
@@ -198,11 +206,39 @@ Reading additional input from stdin...
 Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
 ```
 
-Its exit was 1.  Independent review was unavailable in-sandbox; no `SHIP` or
-`DO NOT SHIP` verdict is fabricated.  This round lands no physics.
+Its exit was 1, so an independent review was obtained from a separate
+reviewer instead.  That reviewer returned **DO NOT SHIP** on the first
+attribution, with this blocker verbatim:
 
-The citation gate, shifted-citation plant, and focused-suite summary are
-recorded after this receipt's clean commit.
+> The closure hand-copies the arithmetic of `_nemo_stage_corrected_velocity`
+> and `_nemo_metric_stage_transport` instead of calling them. Every
+> substitution arm, including the "all" calibration, therefore exercises the
+> *instrument's* transcription, not legoESM's.
+
+It was right, and it is fixed: the closure now calls both shared helpers, and
+the corrected-velocity helper returns the written correction itself on a
+write-only keyword so the walk reports the executed value rather than a
+recomputation.  Re-measured, every compiled-order row is unchanged value for
+value and the calibration arm is still bit — which also REFUTES the same
+review's hypothesis that the recomputed correction differed from the executed
+one under production JIT: both are 3.0153192095982995e-10.
+
+Its other findings are closed as follows.  The baseline anchor now requires
+byte identity with the production row instead of an equal count of unequal
+cells.  The ranking moved to the root mean square, whose value is a whole-field
+quantity, with the maximum reported beside it; `uu(Kmm)` is first on both.  The
+small-effect predicate now takes an absolute value, so a large negative
+fraction can no longer pass it.  The fifth observed call is pinned to the
+zonal metric, so a U/V ordering change cannot silently score the wrong side.
+The two static reference rows, `e3u_0` and `r1_hu_0`, record in the report
+that they are an EAGER re-evaluation of the shared builder at zero free
+surface from the production call's own inputs, not values sunk from the jitted
+stage; the retraction paragraph above should be read with that provenance.
+Registered and not closed: the new registry test proves row ordering and
+registry completeness only, not the observation, the index mapping, or the
+attribution — those rest on the in-run controls.
+
+This round lands no physics.
 
 No unasked scientific or configuration choice was made.
 
