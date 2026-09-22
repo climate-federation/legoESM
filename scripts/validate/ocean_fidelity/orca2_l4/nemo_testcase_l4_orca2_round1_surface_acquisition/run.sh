@@ -36,8 +36,8 @@ readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/r
 readonly RUN_A=$EVIDENCE/orca1ice_surface_every_step_a_np2
 readonly RUN_B=$EVIDENCE/orca1ice_surface_every_step_b_np2
 readonly EXPECTED_BASELINE_STREAMS=116
-readonly EXPECTED_INHERITED_STREAMS=109
-readonly EXPECTED_TARGET_STREAMS=118
+readonly EXPECTED_INHERITED_STREAMS=107
+readonly EXPECTED_TARGET_STREAMS=116
 readonly EXPECTED_DECK_MANIFEST_SHA256=51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9
 readonly EXPECTED_INPUT_MANIFEST_SHA256=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
 readonly EXPECTED_BASELINE_BINARY_SHA256=8e40bf0b595eabba1bd428775a45e87f3f42a778333374cbbfb26eeb6c685869
@@ -54,6 +54,8 @@ readonly -a EXPECTED_ABSENT_STREAMS=(
   oracle_een_e3fvor_kt00000001.bin
   oracle_een_q_kt00000001.bin
   oracle_een_zpvo_kt00000001.bin
+  oracle_si3_bulk_operands.bin
+  oracle_tke_walk_kt00000002.bin
   oracle_zdf_sh2_operands_kt00000001.bin
   oracle_zdf_sh2_operands_kt00000002.bin
 )

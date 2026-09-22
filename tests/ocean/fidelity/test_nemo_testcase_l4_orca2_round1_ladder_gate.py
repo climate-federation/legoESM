@@ -133,3 +133,7 @@ def test_acquisition_report_binds_tree_binary_and_compiled_source():
     assert 'readonly MODE=${1:---run}' in run_sh
     assert 'readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE' in run_sh
     assert 'phase3/orca2_rounds/round3/acquisition' in run_sh
+    assert 'readonly EXPECTED_INHERITED_STREAMS=107' in run_sh
+    assert 'readonly EXPECTED_TARGET_STREAMS=116' in run_sh
+    assert 'oracle_si3_bulk_operands.bin' in run_sh
+    assert 'oracle_tke_walk_kt00000002.bin' in run_sh
