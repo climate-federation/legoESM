@@ -132,7 +132,18 @@ The three member-manifest SHA-256 values, in increasing-amplitude order, are
 
 ## Verification
 
-Pending final citation and focused-test pass.
+The receipt and preregistration citation gates each report PASS with one
+compiled-source citation, zero unmapped citations, zero failures, and an empty
+map audit.  Shifting the compiled perturbation citation by two lines reports
+FAIL and exits 1.
+
+The focused four-file suite reports exactly `1 failed, 58 passed in 22.92s`.
+The sole failure is the known pre-existing worktree-stamp ratchet, naming only
+the Round-146 RHS-family gate and Round-50 LDF-association gate.  The new
+Round-151 emitter is absent from its offender set; all 58 remaining focused
+tests pass.  No full ocean tree was run because this round changed no
+production path and its three completed 360-day integrations are the requested
+trajectory test.
 
 ## OPEN — round 152
 
