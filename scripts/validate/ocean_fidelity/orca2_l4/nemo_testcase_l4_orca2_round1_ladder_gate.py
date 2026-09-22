@@ -63,6 +63,8 @@ TRAJECTORY_CITATIONS = {
         "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/mppini.f90:1586-1594"),
     "eos80_init": (
         "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90:2284-2293"),
+    "een_e3f": (
+        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynvor.f90:912-937"),
     "rab_polynomial": (
         "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90:1279-1332"),
     "stage_dump": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:215-231,329-348",
@@ -857,12 +859,43 @@ def candidate_trajectory(
 
         surface_fields = assemble_surface_fields(root, kt)
         freshwater, surface = _surface_forcings(card, deck_root, surface_fields, kt)
-        trace = model.step(
-            state,
-            dt=card.dt_s,
-            freshwater=freshwater,
-            surface_forcing=surface,
-        )
+        try:
+            trace = model.step(
+                state,
+                dt=card.dt_s,
+                freshwater=freshwater,
+                surface_forcing=surface,
+            )
+        except NotImplementedError as exc:
+            # An explicitly UNBUILT statement, named by the production code.
+            # It is recorded, not swallowed: the gate still exits non-zero and
+            # registers no magnitude.  Anything else (a ValueError, a shape
+            # error) is a defect and propagates.
+            return {
+                "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
+                "execution": "production-jit-cpu-fp64-x64-libm",
+                "decision52_bridge": bridge,
+                "independent_entry_before_bridge": independent,
+                "hand_alteration_ablation": ablation,
+                "independent_entry_ts_bit_identical": all(
+                    bridge["rows"][name]["bit_identical"]
+                    for name in ("T", "S", "u", "v")),
+                "given_nemo_entry_eligibility": "DECISION52_SSH_ONLY",
+                "chlorophyll_kt1_input_reconstruction": chl_row,
+                "first_non_bit_statement": first_non_bit,
+                "kt10_same_field_magnitude":
+                    "UNMEASURED_STOP_PRODUCTION_EEN_E3F_FOLD_GAP",
+                "checkpoints": checkpoints,
+                "execution_blocker": {
+                    "status": "STOP_PRODUCTION_EEN_E3F_FOLD_GAP",
+                    "kt": kt,
+                    "message": str(exc),
+                    "legoesm_source": (
+                        "packages/ocean/legoesm/ocean/dynamics/"
+                        "ocean_pe_latlon_cgrid.py:2402-2405"),
+                    "nemo_source_citation": TRAJECTORY_CITATIONS["een_e3f"],
+                },
+            }
         for stage in (1, 2, 3):
             oracle_stage = read_state_frame(
                 root / f"oracle_stage_kt{kt:08d}_s{stage}.bin",
@@ -998,10 +1031,11 @@ def run_gate(
         trajectory = candidate_trajectory(
             deck_root, orca1ice_root, card, max_step=max_step
         )
-        status = (
+        status = trajectory.get("execution_blocker", {}).get(
+            "status",
             "LADDER_MEASURED"
             if trajectory["independent_entry_ts_bit_identical"] else
-            "STOP_INITIAL_TS_TRANSCRIPTION_GAP"
+            "STOP_INITIAL_TS_TRANSCRIPTION_GAP",
         )
         trajectory_claim = "MEASURED_INDEPENDENT_WITH_DECISION52_SSH"
     return {
@@ -1076,8 +1110,8 @@ def main() -> int:
         return 3
     if result["status"] in (
         "STOP_INITIAL_TS_TRANSCRIPTION_GAP",
-        "STOP_PRODUCTION_EOS80_BN2_GAP",
-    ):  # pragma: no cover - retained fail-closed arm
+        "STOP_PRODUCTION_EEN_E3F_FOLD_GAP",
+    ):
         print(
             f"REFUSE: {result['status']}: the admitted ORCA2 ladder cannot "
             "reach kt=10",

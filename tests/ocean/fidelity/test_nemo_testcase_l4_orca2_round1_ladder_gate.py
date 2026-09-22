@@ -227,6 +227,19 @@ def test_fortran_real_refuses_a_non_literal():
         gate._fortran_real("rn_alpha")
 
 
+def test_an_unbuilt_statement_is_recorded_not_swallowed():
+    """A named NotImplementedError stops the ladder WITHOUT a magnitude."""
+    source = Path(gate.__file__).read_text()
+    assert "except NotImplementedError as exc:" in source
+    assert '"status": "STOP_PRODUCTION_EEN_E3F_FOLD_GAP"' in source
+    assert '"UNMEASURED_STOP_PRODUCTION_EEN_E3F_FOLD_GAP"' in source
+    # a defect must NOT be caught here
+    assert "except ValueError" not in source.split(
+        "def candidate_trajectory")[1]
+    # and the stop is a non-zero exit
+    assert '"STOP_PRODUCTION_EEN_E3F_FOLD_GAP",\n    ):' in source
+
+
 def test_round7_ablation_rebuilds_the_unaltered_initial_state():
     """The gate's ablation must go through the card's own helper."""
     source = Path(gate.__file__).read_text()
