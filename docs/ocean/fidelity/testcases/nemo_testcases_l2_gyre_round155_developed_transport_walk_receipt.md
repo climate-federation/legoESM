@@ -14,11 +14,13 @@ The preregistration is
 `docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round155.md`, committed as
 `06ebee850`; its directed-attribution addendum was frozen separately as
 `49530f7e8`, before the substitution arms were run.  The authoritative
-measurement commit is `f9422daed`, which reproduces the compiled-order table
-first measured at `c29c3e995` value for value, at `6c4c2a2c0` again, and adds
-the attribution through the model's own helpers.  Evidence is under
+measurement commit is `2c3817e9e`, on a clean tree.  It reproduces the
+compiled-order table value for value at each of the three commits that
+measured it (`c29c3e995`, `6c4c2a2c0`, `f9422daed`) and carries the
+attribution measured through the model's own helpers.  Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round155/`; the final
-measurement is `developed_transport_walk_f9422daed.json`.
+measurement is `developed_transport_walk_final.json`.  Commits after it are
+this receipt and a rigid citation re-anchor, neither of which moves a number.
 
 No physics, configuration, default, carried state, restart schema, stabilizer,
 year harness, reconciliation gate, freshwater pair, or #1484 guard changed.
@@ -158,7 +160,8 @@ claimed for any operand.
    preregistered state rows are non-bit.
 5. Production `un_adv` ULP plant: **CONFIRMED**.  One ULP at active index
    `[1,2]` moves 16 completed `zFu` levels, maximum
-   7.275957614183426e-12 m3/s, prints `STATUS PLANT-FIRED`, and exits 1.
+   7.275957614183426e-12 m3/s, prints `STATUS PLANT-FIRED`, and exits 1; it
+   was re-run at the final measurement commit with the same values.
 
 Addendum predictions, frozen at `49530f7e8` before the substitution arms ran:
 
@@ -240,7 +243,29 @@ attribution — those rest on the in-run controls.
 
 This round lands no physics.
 
-No unasked scientific or configuration choice was made.
+The citation gate on this receipt reported `PASS` with 4 citations, zero
+failures, zero unmapped citations and zero map entries failing audit; its
+shifted-line plant exited 1 with `SYMBOL-NOT-AT-LINE`.  Exposing the written
+correction added ten lines to the C-grid ocean model, which moved every
+citation pinned below it, so thirty-five map entries and the four receipts
+that quote them were re-anchored by a rigid ten-line shift: both endpoints
+moved, no pinned extent changed and no anchor symbol was weakened.  The gate
+on the cumulative receipt is green again at 274 citations, zero unmapped.
+
+The focused campaign and blast-radius set reported exactly:
+
+> 1 failed, 198 passed in 775.57s (0:12:55)
+
+The single failure was the cumulative-receipt citation check during the
+re-anchor, and it is the reason the re-anchor reached the receipts as well as
+the map; the set is green at the final commit.  It covers the six-file push
+gate, the year-owner harness tests, and the RK3 tracer tests that exercise the
+corrected-velocity helper whose signature gained the write-only keyword.
+
+No unasked scientific or configuration choice was made.  No production
+default, configuration, carried state, restart schema or physics changed: the
+only production edit is a write-only keyword that returns an already-computed
+value and is set by no production caller.
 
 ## OPEN — Round 156
 
