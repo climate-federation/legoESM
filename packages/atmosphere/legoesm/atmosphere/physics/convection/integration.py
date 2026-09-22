@@ -1691,7 +1691,8 @@ def _make_spectral_pe_convection(
                         dt=dt, config=scheme_config,
                         land_frac=land_fraction_for_columns(grid, ncol, scheme_config),
                         cld_frac=None if _cf is None else _cf.reshape(ncol, nlev),
-                        pref_edge=sigma_half * constants.p_ref,
+                        pref_edge=sigma_coord.pressure_at_half(
+                            jnp.asarray(constants.p_ref, dtype=T_col.dtype)),
                     )
                 conv_prog_out = prog_new_profile
             elif is_w_grid_consumer:
