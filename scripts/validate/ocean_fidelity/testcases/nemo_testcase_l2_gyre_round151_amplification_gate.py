@@ -140,11 +140,15 @@ def _initial_delta(amplitude_K: float, year, card, wet: np.ndarray) -> dict:
     latitude = np.broadcast_to(
         np.asarray(card.recipe.grid.native_lat_T_deg,
                    dtype=np.float64)[..., None], depth.shape)
-    perturbation = year.nemo_istate_perturbation(
-        depth, latitude, wet.astype(np.float64), 1)
-    # This process-local assignment is the exact one member mode makes.
-    scale = amplitude_K / year.PERT_AMPLITUDE_K
-    perturbation = perturbation * scale
+    saved_amplitude = year.PERT_AMPLITUDE_K
+    year.PERT_AMPLITUDE_K = amplitude_K
+    try:
+        # Use the exact statement member mode used; post-hoc rescaling can
+        # round differently from multiplying SIN by the requested amplitude.
+        perturbation = year.nemo_istate_perturbation(
+            depth, latitude, wet.astype(np.float64), 1)
+    finally:
+        year.PERT_AMPLITUDE_K = saved_amplitude
     base = np.asarray(card.recipe.initial_state.T.data, dtype=np.float64)
     applied = (base + perturbation) - base
     require(int(np.count_nonzero(applied[~wet])) == 0,
