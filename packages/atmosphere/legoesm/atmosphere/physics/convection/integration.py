@@ -175,6 +175,10 @@ class ConvectionSchemeTraits(NamedTuple):
     is_stochastic: bool          # carries conv_stoch_state (+ optional PRNG key)
     is_mc_consumer: bool         # consumes large-scale moisture convergence
     is_simple_mc_consumer: bool  # stateless MC-driven leaf (canonical Kuo)
+    rain_is_net_flux: bool       # ``dq_r_conv_dt`` is a SIGNED net precipitation-flux
+    # divergence (CAM ZM ``ntprprd``: production minus evaporation of rain from
+    # above); it column-integrates to surface rain and is NOT a per-layer
+    # tracer source -- a bridge without a surface-precip sink must refuse it.
     detrains_to_cloud: bool      # convective condensate is true DETRAINMENT into
     # the q_c cloud bucket (plume / mass-flux schemes).  False = an ADJUSTMENT
     # scheme (Betts-Miller sbm / dca / Kuo) whose column-net drying is convective
@@ -207,6 +211,7 @@ def convection_scheme_traits(scheme_name: str) -> ConvectionSchemeTraits:
         is_stochastic=scheme_name in ("bechtold",),
         is_mc_consumer=scheme_name in ("tiedtke", "bechtold"),
         is_simple_mc_consumer=scheme_name in ("kuo",),
+        rain_is_net_flux=scheme_name in ("zhang_mcfarlane",),
         # Plume / mass-flux schemes genuinely detrain condensate into q_c; the
         # adjustment schemes (sbm Betts-Miller / dca / kuo) produce convective
         # PRECIPITATION (their drying falls out), so their condensate is routed
@@ -696,12 +701,23 @@ def _make_hydrostatic_convection(
                         moisture_convergence=mc_col,
                     )
                 else:
+                    # Zhang-McFarlane (CAM6): land fraction selects the
+                    # c0 autoconversion coefficient; the carried cloud
+                    # fraction feeds the rain-evaporation (1 - cldfrc).
+                    _cf = (phys_state.cloud_fraction
+                           if phys_state is not None
+                           and getattr(phys_state, "cloud_fraction", None) is not None
+                           else None)
                     conv_out, prog_new_profile = conv_fn(
                         T=T_col, q_v=q_v_col,
                         p_full=p_full_col, p_half=p_half_col,
                         u=u_col, v=v_col,
                         conv_prog_profile=prog_in,
                         dt=dt, config=scheme_config,
+                        land_frac=land_fraction_for_columns(grid, ncol, scheme_config),
+                        cld_frac=None if _cf is None else _cf.reshape(ncol, nlev),
+                        pref_edge=sigma_coord.pressure_at_half(
+                            jnp.asarray(constants.p_ref, dtype=T_col.dtype)),
                     )
                 conv_prog_out = prog_new_profile
             elif is_w_grid_consumer:
@@ -795,6 +811,11 @@ def _make_hydrostatic_convection(
             # survivor rain out of the column as surface precip below instead
             # of into q_r / q_c.
             _to_sfc = bool(getattr(convection_config, "rain_to_surface", False))
+            # A NET precipitation-flux divergence (CAM ZM) is signed per layer:
+            # booking it into q_r/q_c would create condensate sinks in layers
+            # holding none.  Its column integral IS the surface rain, so it
+            # takes the surface route regardless of ``rain_to_surface``.
+            _to_sfc = _to_sfc or _tr.rain_is_net_flux
             if _dq_r_conv is not None and not _has_qr and not _to_sfc:
                 dq_c_conv_dt = dq_c_conv_dt + _dq_r_conv.reshape(shape_3d)
             tracer_tends = {
@@ -829,9 +850,14 @@ def _make_hydrostatic_convection(
             # dp = p_half[k+1] - p_half[k] > 0 (p increases downward).
             if _dq_r_conv is not None:
                 _dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-                _p_conv_diag = jnp.sum(
-                    jnp.maximum(_dq_r_conv.reshape(ncol, nlev), 0.0)
-                    * _dp_col, axis=-1) / constants.g
+                if _tr.rain_is_net_flux:
+                    # signed field: clip the column SUM, not the layers
+                    _p_conv_diag = jnp.maximum(jnp.sum(
+                        _dq_r_conv.reshape(ncol, nlev) * _dp_col, axis=-1), 0.0) / constants.g
+                else:
+                    _p_conv_diag = jnp.sum(
+                        jnp.maximum(_dq_r_conv.reshape(ncol, nlev), 0.0)
+                        * _dp_col, axis=-1) / constants.g
                 if _to_sfc:
                     # Column water removed == this flux (the q_r/q_c hand-off
                     # above is skipped); latent heat already booked by the plume.
@@ -1225,12 +1251,21 @@ def _make_nonhydrostatic_convection(
                         moisture_convergence=mc_col,
                     )
                 else:
+                    # Zhang-McFarlane (CAM6): land fraction selects the
+                    # c0 autoconversion coefficient; the carried cloud
+                    # fraction feeds the rain-evaporation (1 - cldfrc).
+                    _cf = (phys_state.cloud_fraction
+                           if phys_state is not None
+                           and getattr(phys_state, "cloud_fraction", None) is not None
+                           else None)
                     conv_out, prog_new_profile = conv_fn(
                         T=T_col, q_v=q_v_col,
                         p_full=p_full_col, p_half=p_half_col,
                         u=u_col, v=v_col,
                         conv_prog_profile=prog_in,
                         dt=dt, config=scheme_config,
+                        land_frac=land_fraction_for_columns(grid, ncol, scheme_config),
+                        cld_frac=None if _cf is None else _cf.reshape(ncol, nlev),
                     )
                 conv_prog_out = prog_new_profile
             elif is_w_grid_consumer:
@@ -1291,6 +1326,15 @@ def _make_nonhydrostatic_convection(
         # it -> unsupported config; raise LOUDLY (static Python on n_tracers +
         # dq_r-is-None; no silent coerce, no invented re-evaporation).  Only
         # fires when dq_r is present (sbm/dca/kuo emit None -> no raise).
+        if _tr.rain_is_net_flux and conv_out.dq_r_conv_dt is not None:
+            raise ValueError(
+                f"convection scheme '{scheme_name}' emits a signed NET rain-flux "
+                "divergence (dq_r_conv_dt) that must be column-integrated to "
+                "surface precipitation; the non-hydrostatic bridge has no "
+                "surface-precip sink and booking it per layer into a tracer "
+                "would create condensate sinks in layers holding none. Use the "
+                "hydrostatic bridge or the unified PhysicsPipeline."
+            )
         if conv_out.dq_r_conv_dt is not None and n_tracers < 2:
             raise ValueError(
                 "convection emitted a rain-split source (dq_r_conv_dt) but the "
@@ -1632,12 +1676,22 @@ def _make_spectral_pe_convection(
                         moisture_convergence=mc_col,
                     )
                 else:
+                    # Zhang-McFarlane (CAM6): land fraction selects the
+                    # c0 autoconversion coefficient; the carried cloud
+                    # fraction feeds the rain-evaporation (1 - cldfrc).
+                    _cf = (phys_state.cloud_fraction
+                           if phys_state is not None
+                           and getattr(phys_state, "cloud_fraction", None) is not None
+                           else None)
                     conv_out, prog_new_profile = conv_fn(
                         T=T_col, q_v=q_v_col,
                         p_full=p_full_col, p_half=p_half_col,
                         u=u_col, v=v_col,
                         conv_prog_profile=prog_in,
                         dt=dt, config=scheme_config,
+                        land_frac=land_fraction_for_columns(grid, ncol, scheme_config),
+                        cld_frac=None if _cf is None else _cf.reshape(ncol, nlev),
+                        pref_edge=sigma_half * constants.p_ref,
                     )
                 conv_prog_out = prog_new_profile
             elif is_w_grid_consumer:
@@ -1701,6 +1755,16 @@ def _make_spectral_pe_convection(
         # (``dq_r_conv_dt is not None`` => bechtold/tiedtke precip_efficiency>0);
         # the ``conv_fn is not None`` clause short-circuits before ``conv_out``
         # is read, so a physics-free spectral step is unaffected.
+        if (conv_fn is not None and _tr.rain_is_net_flux
+                and conv_out.dq_r_conv_dt is not None):
+            raise ValueError(
+                f"convection scheme '{scheme_name}' emits a signed NET rain-flux "
+                "divergence (dq_r_conv_dt) that must be column-integrated to "
+                "surface precipitation; the spectral bridge has no surface-precip "
+                "sink and booking it per layer into a tracer would create "
+                "condensate sinks in layers holding none. Use the hydrostatic "
+                "bridge or the unified PhysicsPipeline."
+            )
         if (conv_fn is not None and state.tracers is None
                 and conv_out.dq_r_conv_dt is not None):
             raise ValueError(

@@ -2425,7 +2425,7 @@ def bechtold_convection(
     # under-scale a column whose uncapped flux exceeds the cap when the turnover
     # time lengthens.  The non-turnover path uses the capped value as before.
     M_b_uncapped = M_b_deterministic * jnp.maximum(stoch_factor, 0.0)
-    # See ZhangMcFarlaneConfig.M_b_max.
+    # Hard cap on the cloud-base mass flux [kg/m^2/s] (config.M_b_max).
     M_b = jnp.clip(M_b_uncapped, 0.0, config.M_b_max)
     if config.use_ifs_cape_closure:
         # IFS floors the triggered deep cloud-base flux at 0.001 kg/m^2/s

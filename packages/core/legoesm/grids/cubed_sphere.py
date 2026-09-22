@@ -173,6 +173,7 @@ class CubedSphereGrid(NamedTuple):
     hy_ext_h3: jax.Array
     duogrid: object  # DuoGridData | None — use object to avoid circular import
     subgrid_topo_stddev: object = None  # jax.Array (6,n,n) [m] | None — oro-GWD launch h_topo
+    land_frac: object = None  # jax.Array (6*n*n,) [0-1] | None — optional physics mask
     gnomonic_form: str = "equiangular"  # static provenance (pytree aux_data)
     fv3_grid_type: int = 2              # static provenance (pytree aux_data)
 

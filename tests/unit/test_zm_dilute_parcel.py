@@ -34,8 +34,8 @@ import pytest
 
 from legoesm.atmosphere.physics.convection._zm_dilute import (
     dilute_parcel_cape,
-    _moist_entropy,
-    _invert_entropy,
+    moist_entropy,
+    invert_entropy,
 )
 from legoesm.atmosphere.physics.thermodynamics import parcel_profile_and_cape
 
@@ -80,8 +80,8 @@ def test_entropy_inversion_round_trips():
     T = jnp.array([300.0, 280.0, 250.0])
     p = jnp.array([1.0e5, 8.0e4, 5.0e4])
     qt = jnp.array([0.018, 0.010, 0.003])
-    s = _moist_entropy(T, p, qt)
-    T_rec = _invert_entropy(s, p, qt, T + 5.0)
+    s = moist_entropy(T, p, qt)
+    T_rec = invert_entropy(s, p, qt, T + 5.0)
     assert jnp.allclose(T_rec, T, atol=0.05), f"{T_rec} vs {T}"
 
 

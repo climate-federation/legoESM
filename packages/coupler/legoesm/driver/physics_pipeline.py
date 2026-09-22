@@ -1108,7 +1108,7 @@ class PhysicsPipeline:
                             sfc_taux_override=None, sfc_tauy_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
                             w_land=None, snow=None, land_ml=None,
-                            land_ml_params=None):
+                            land_ml_params=None, cloud_fraction=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
@@ -1497,13 +1497,25 @@ class PhysicsPipeline:
                         moisture_convergence=mc_col,
                     )
                 else:
-                    # Zhang-McFarlane: CMT winds, no MC kwarg.
+                    # Zhang-McFarlane (CAM6): CMT winds, no MC kwarg; the
+                    # land fraction selects the c0 autoconversion
+                    # coefficient; the previous step's cloud-fraction carry
+                    # (CLUBB's PDF cloud fraction, None otherwise -> CAM's
+                    # (1 - cldfrc) = 1) feeds the rain evaporation; the
+                    # 40 hPa cap is fixed from the REFERENCE interfaces.
                     conv_out, conv_prog_out = self.convection_fn(
                         T=T_col, q_v=q_v_col,
                         p_full=p_full_col, p_half=p_half_col,
                         u=u_conv_col, v=v_conv_col,
                         conv_prog_profile=conv_prog,
                         dt=dt, config=_conv_cfg,
+                        land_frac=(
+                            ad.flatten_2d(self.f_land)
+                            if self.f_land is not None
+                            else jnp.zeros((ad.ncol,), dtype=T_col.dtype)),
+                        cld_frac=(None if cloud_fraction is None
+                                  else cloud_fraction.reshape(T_col.shape)),
+                        pref_edge=self.sigma_half * constants.p_ref,
                     )
             elif _ctr.is_w_grid_consumer:
                 # Kain-Fritsch: resolved-w trigger.
@@ -3072,7 +3084,7 @@ class PhysicsPipeline:
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
-                    land_ml_params=land_ml_params,
+                    land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -3136,7 +3148,7 @@ class PhysicsPipeline:
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
-                    land_ml_params=land_ml_params,
+                    land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -3630,9 +3642,12 @@ def convection_config_for(config, grid_dx_m=None):
             and float(grid_dx_m) > 0.0 and leaf.dx_m == 0.0):
         leaf = leaf._replace(dx_m=float(grid_dx_m))
     cc = cc._replace(**{scheme: leaf})
-    if scheme == "bechtold" and leaf.enable_cmt and _is_mpas_grid(config):
+    if getattr(leaf, "enable_cmt", False) and _is_mpas_grid(config):
         # The MPAS bridge reconstructs winds only on this explicit switch;
-        # Bechtold's CMT resolved ON for an MPAS run is what asks for it.
+        # any scheme whose CMT resolved ON for an MPAS run asks for it
+        # (Bechtold via _resolve_enable_cmt; Zhang-McFarlane / Tiedtke via
+        # their leaf default).  Gating this on Bechtold alone handed ZM zero
+        # winds and silently discarded its momtran output.
         cc = cc._replace(mpas_cmt=True)
     return cc
 
