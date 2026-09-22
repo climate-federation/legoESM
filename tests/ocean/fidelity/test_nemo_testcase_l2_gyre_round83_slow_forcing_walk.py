@@ -529,3 +529,21 @@ def test_round145_inverse_depth_ulp_changes_one_consumed_word() -> None:
     assert np.count_nonzero(
         planted.view(np.uint64)
         != fields["wind_r1_hu"].view(np.uint64)) == 1
+
+
+def test_round147_registry_and_adjacent_family_differences() -> None:
+    WALK._validate_round147_registry(WALK.ROUND147_FAMILY_REGISTRY)
+    with pytest.raises(RuntimeError, match="registry changed"):
+        WALK._validate_round147_registry(WALK.ROUND147_FAMILY_REGISTRY[:-1])
+    shape = (WALK.round146_family.NY, WALK.round146_family.NX,
+             WALK.round146_family.NZ)
+    fields = {}
+    for value, family in enumerate(WALK.round146_family.FAMILIES, start=1):
+        for face in ("u", "v"):
+            fields[f"after_{family}_{face}"] = np.full(
+                shape, float(value), dtype=np.float64)
+    addends = WALK._round147_oracle_addends(fields)
+    assert tuple(addends) == WALK.round146_family.FAMILIES
+    for pair in addends.values():
+        assert np.array_equal(pair[0], np.ones((22, 32, 30)))
+        assert np.array_equal(pair[1], np.ones((22, 32, 30)))

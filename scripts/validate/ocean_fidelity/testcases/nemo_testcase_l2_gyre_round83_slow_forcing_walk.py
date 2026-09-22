@@ -28,6 +28,7 @@ import nemo_testcase_l2_gyre_round78_uamid_walk as round78  # noqa: E402
 import nemo_testcase_l2_gyre_round81_btstep_gate as round81  # noqa: E402
 import nemo_testcase_l2_gyre_round82_btstep_walk as round82  # noqa: E402
 import nemo_testcase_l2_gyre_round117_preloop_gate as round117_record  # noqa: E402
+import nemo_testcase_l2_gyre_round146_rhs_family_gate as round146_family  # noqa: E402
 from legoesm.core.precision import (  # noqa: E402
     PrecisionPolicy,
     get_policy,
@@ -140,6 +141,12 @@ ROUND140_RHS_REGISTRY = (
 ROUND143_DIRECTED_REGISTRY = tuple(
     f"{arm}_{boundary}_{face}"
     for arm in ("ordinary", "rhs", "depth", "drag", "wind")
+    for boundary in ("incoming", "final")
+    for face in ("u", "v")
+)
+ROUND147_FAMILY_REGISTRY = tuple(
+    f"{arm}_{boundary}_{face}"
+    for arm in ("ordinary",) + round146_family.FAMILIES
     for boundary in ("incoming", "final")
     for face in ("u", "v")
 )
@@ -4360,6 +4367,253 @@ def measure_round121_trajectory(args) -> dict[str, object]:
     }
 
 
+def _validate_round147_registry(registry=ROUND147_FAMILY_REGISTRY) -> None:
+    require(tuple(registry) == ROUND147_FAMILY_REGISTRY,
+            "Round-147 family registry changed")
+
+
+def _round147_owned(value) -> np.ndarray:
+    value = np.asarray(value, dtype=np.float64)
+    require(value.shape == (round146_family.NY, round146_family.NX,
+                            round146_family.NZ),
+            "Round-147 NEMO family extent changed")
+    return value[2:-2, 2:-2, :round146_family.NZ - 1]
+
+
+def _round147_oracle_addends(fields: dict) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Recover each recorded NEMO addend from adjacent cumulative writes."""
+    addends = {}
+    previous = {
+        "u": np.zeros_like(_round147_owned(fields["after_hpg_u"])),
+        "v": np.zeros_like(_round147_owned(fields["after_hpg_v"])),
+    }
+    for family in round146_family.FAMILIES:
+        current = {
+            face: _round147_owned(fields[f"after_{family}_{face}"])
+            for face in ("u", "v")
+        }
+        addends[family] = tuple(
+            current[face] - previous[face] for face in ("u", "v"))
+        previous = current
+    require(tuple(addends) == round146_family.FAMILIES,
+            "Round-147 oracle family census changed")
+    return addends
+
+
+def _round147_family_ulp(oracle_addend, live_addend, live_total,
+                         thickness, active):
+    """Find one family-input ULP that survives construction and depth reduction."""
+    oracle_addend = np.asarray(oracle_addend, dtype=np.float64)
+    live_addend = np.asarray(live_addend, dtype=np.float64)
+    live_total = np.asarray(live_total, dtype=np.float64)
+    thickness = np.asarray(thickness, dtype=np.float64)
+    active = np.asarray(active, dtype=bool)
+    base_rhs = live_total + (oracle_addend - live_addend)
+    mask2 = active[..., 0].astype(np.float64)
+    base_depth = np.asarray(_round142_u_depth_reduction(
+        jnp.asarray(thickness), jnp.asarray(base_rhs), jnp.asarray(mask2)))
+    for level in range(oracle_addend.shape[-1]):
+        trial = np.array(oracle_addend, copy=True)
+        direction = np.where(trial[..., level] >= 0.0,
+                             np.float64(np.inf), np.float64(-np.inf))
+        trial[..., level] = np.nextafter(trial[..., level], direction)
+        trial_rhs = live_total + (trial - live_addend)
+        trial_depth = np.asarray(_round142_u_depth_reduction(
+            jnp.asarray(thickness), jnp.asarray(trial_rhs), jnp.asarray(mask2)))
+        locations = np.argwhere(
+            (trial_depth.view(np.uint64) != base_depth.view(np.uint64))
+            & active[..., level])
+        if locations.size:
+            j, i = (int(value) for value in locations[0])
+            planted = np.array(oracle_addend, copy=True)
+            planted[j, i, level] = trial[j, i, level]
+            require(np.count_nonzero(
+                planted.view(np.uint64) != oracle_addend.view(np.uint64)) == 1,
+                "Round-147 family plant did not change exactly one word")
+            return planted, (j, i, level)
+    raise RuntimeError("no one-ULP family input survives the depth reduction")
+
+
+def measure_round147_rhs_families(args) -> dict[str, object]:
+    """Rank NEMO's five developed RHS families through the production step."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-147 measurement worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-147 measurement commit mismatch")
+    if args.plant == "family-missing-row":
+        fired = False
+        try:
+            _validate_round147_registry(ROUND147_FAMILY_REGISTRY[:-1])
+        except RuntimeError:
+            fired = True
+        require(fired, "Round-147 missing-row plant stayed green")
+        return {"format": "nemo-testcase-l2-gyre-round147-rhs-family-v1",
+                "status": "PLANT-FIRED", "worktree": stamp,
+                "plant": args.plant, "plant_fires": True}
+    _validate_round147_registry()
+
+    family_root = args.round146_rhs_family_root
+    validation = json.loads(
+        (family_root / "round146_rhs_family_validation.json").read_text())
+    require(validation.get("status") == "PASS",
+            "Round-146 family record is not admitted")
+    require(validation["worktree"]["commit"].lower()
+            == args.expect_family_record_commit.lower(),
+            "Round-146 admission commit changed")
+    family_path = family_root / round146_family.RECORD
+    stamp_words = family_path.with_name(family_path.name + ".stamp").read_text().split()
+    require(stamp_words == [sha256(family_path),
+                            args.expect_family_record_commit,
+                            family_path.name],
+            "Round-146 family record stamp changed")
+    family_record = round146_family.read_record_bytes(family_path.read_bytes())
+    require(validation["record_sha256"] == sha256(family_path),
+            "Round-146 validation hash changed")
+
+    rhs_record = read_round140_rhs(args.round140_rhs_root / ROUND140_RHS_RECORD)
+    rhs_fields = rhs_record["fields"]
+    split = read_round139_record(args.round140_rhs_root / ROUND139_RECORD)
+    active = {"u": rhs_fields["umask"] != 0.0,
+              "v": rhs_fields["vmask"] != 0.0}
+    active2 = {face: active[face][..., 0] for face in ("u", "v")}
+    oracle_addends = _round147_oracle_addends(family_record["fields"])
+
+    card, state, freshwater, surface, payload, entry = round82._developed_inputs(args)
+    eta_after = jnp.asarray(payload["ssha"])
+    exposed = _round117_live_trace(
+        card, state, freshwater, surface, args.execution_mode,
+        eta_after_override=eta_after)
+    ordinary_trace, ordinary = _round140_callback_trace(
+        args, card, state, freshwater, surface, eta_after)
+    trace_identity = round82._pytree_identity(
+        exposed.state_after, ordinary_trace.plain_state)
+    require(trace_identity["bit_exact"],
+            "Round-147 live-family exposure moved production state")
+
+    parts = exposed.operator_operands[0]
+    live_total = (native_u(exposed.stage1_full_rhs[0]),
+                  native_v(exposed.stage1_full_rhs[1]))
+    live_names = {"hpg": "hpg", "ldf": "ldf", "vor": "vorticity",
+                  "keg": "keg", "zad": "zad"}
+    live_addends = {
+        family: (native_u(parts[f"{name}_u"].data),
+                 native_v(parts[f"{name}_v"].data))
+        for family, name in live_names.items()
+    }
+    rhs_calibration = {
+        "u": comparison(live_total[0], native_u(ordinary["rhs_u"]), active["u"]),
+        "v": comparison(live_total[1], native_v(ordinary["rhs_v"]), active["v"]),
+    }
+    require(all(row["bit_exact"] for row in rhs_calibration.values()),
+            "Round-147 exposed RHS differs from ordinary completed RHS")
+
+    arms = {"ordinary": (ordinary_trace, ordinary)}
+    overrides = {}
+    for family in round146_family.FAMILIES:
+        overrides[family] = tuple(
+            live_total[index]
+            + (oracle_addends[family][index] - live_addends[family][index])
+            for index in range(2))
+        arms[family] = _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            rhs_override=tuple(jnp.asarray(value)
+                               for value in overrides[family]))
+
+    def row(producer, boundary: str, face: str) -> dict:
+        value = (native_u(producer[f"{boundary}_{face}"])
+                 if face == "u" else native_v(producer[f"{boundary}_{face}"]))
+        return comparison(value, split[f"{boundary}_{face}"], active2[face])
+
+    rows = {
+        f"{arm}_{boundary}_{face}": row(producer, boundary, face)
+        for arm, (_, producer) in arms.items()
+        for boundary in ("incoming", "final")
+        for face in ("u", "v")
+    }
+    require(tuple(rows) == ROUND147_FAMILY_REGISTRY,
+            "Round-147 result omitted a registered row")
+    require(rows["ordinary_incoming_u"]["absolute_max"]
+            == 4.2854247978022983e-13
+            and rows["ordinary_incoming_v"]["absolute_max"]
+            == 4.433308633699682e-13,
+            "Round-147 ordinary arm does not reproduce Round 143")
+
+    local_rows = {
+        family: {
+            face: comparison(live_addends[family][index],
+                             oracle_addends[family][index], active[face])
+            for index, face in enumerate(("u", "v"))
+        }
+        for family in round146_family.FAMILIES
+    }
+    reductions = {
+        family: {
+            face: 1.0 - (rows[f"{family}_incoming_{face}"]["absolute_max"]
+                        / rows[f"ordinary_incoming_{face}"]["absolute_max"])
+            for face in ("u", "v")
+        }
+        for family in round146_family.FAMILIES
+    }
+    largest = {
+        face: max(round146_family.FAMILIES,
+                  key=lambda family: reductions[family][face])
+        for face in ("u", "v")
+    }
+    owner = largest["u"] if largest["u"] == largest["v"] else None
+
+    if args.plant == "family-input-ulp":
+        family = owner or largest["u"]
+        planted_u, location = _round147_family_ulp(
+            oracle_addends[family][0], live_addends[family][0], live_total[0],
+            rhs_fields["e3u"], active["u"])
+        planted_override = (
+            live_total[0] + (planted_u - live_addends[family][0]),
+            overrides[family][1],
+        )
+        planted_trace, planted = _round140_callback_trace(
+            args, card, state, freshwater, surface, eta_after,
+            rhs_override=tuple(jnp.asarray(value) for value in planted_override))
+        require(planted_trace.trace_state_identity["bit_exact"],
+                "Round-147 family plant callback moved its plain arm")
+        planted_row = comparison(
+            native_u(planted["incoming_u"]),
+            native_u(arms[family][1]["incoming_u"]), active2["u"])
+        require(planted_row["differing_cells"] > 0,
+                "Round-147 family-input ULP did not reach incoming forcing")
+        return {"format": "nemo-testcase-l2-gyre-round147-rhs-family-v1",
+                "status": "PLANT-FIRED", "worktree": stamp,
+                "plant": args.plant, "plant_fires": True,
+                "family": family, "plant_location": list(location),
+                "plant_downstream_row": planted_row}
+
+    return {
+        "format": "nemo-testcase-l2-gyre-round147-rhs-family-v1",
+        "status": "MEASURED", "worktree": stamp,
+        "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
+        "entry": entry, "family_record_admission": validation,
+        "trace_noninterference": trace_identity,
+        "rhs_calibration": rhs_calibration,
+        "local_family_rows": local_rows, "rows": rows,
+        "reduction_fraction": reductions, "largest_family": largest,
+        "unambiguous_owner": owner,
+        "hpg_prediction_confirmed": bool(
+            owner == "hpg" and reductions["hpg"]["u"] > 0.5
+            and reductions["hpg"]["v"] > 0.5),
+        "plant": args.plant, "plant_fires": False,
+        "scope": {"production_physics_changed": False,
+                  "day_240_carry": "UNMEASURED",
+                  "DINO": "NO-PRODUCTION-CHANGE",
+                  "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+                  "OVERFLOW": "NO-PRODUCTION-CHANGE",
+                  "ORCA2": "UNMEASURED-WITH-SPEC; GYRE diagnostic only"},
+    }
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     round_group = parser.add_mutually_exclusive_group()
@@ -4405,6 +4659,9 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round145-wind-routing", action="store_true",
         help="score the production QCO-to-wind candidate without old pins")
+    round_group.add_argument(
+        "--round147-rhs-family-directed", action="store_true",
+        help="substitute developed RHS families one at a time")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -4443,6 +4700,10 @@ def main(argv=None) -> int:
         "--round140-rhs-root", type=Path,
         default=ROOT / "round140/oracle_developed_rhs")
     parser.add_argument(
+        "--round146-rhs-family-root", type=Path,
+        default=ROOT / "round146/oracle_developed_rhs_families")
+    parser.add_argument("--expect-family-record-commit", default="")
+    parser.add_argument(
         "--daily-root", type=Path,
         default=ROOT / "round132/oracle_daily_restarts")
     parser.add_argument(
@@ -4461,12 +4722,15 @@ def main(argv=None) -> int:
                             "rhs-observer-ulp", "rhs-directed-missing-row",
                             "rhs-directed-ulp", "downstream-missing-row",
                             "downstream-depth-ulp", "wind-missing-row",
-                            "wind-stress-ulp", "wind-inverse-depth-ulp"),
+                            "wind-stress-ulp", "wind-inverse-depth-ulp",
+                            "family-missing-row", "family-input-ulp"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
+            measure_round147_rhs_families(args)
+            if args.round147_rhs_family_directed else
             measure_round144_wind_operands(args)
             if (args.round144_wind_operands or args.round145_wind_routing) else
             (measure_round143_downstream_directed(args)
@@ -4491,7 +4755,7 @@ def main(argv=None) -> int:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
-        prefix = (
+        prefix = ("ROUND147 RHS FAMILY" if args.round147_rhs_family_directed else (
             "ROUND145 WIND" if args.round145_wind_routing else
             ("ROUND144 WIND" if args.round144_wind_operands else
             ("ROUND143 DOWNSTREAM" if args.round143_downstream_directed else
@@ -4504,7 +4768,7 @@ def main(argv=None) -> int:
             ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83")))))))))))))
+             ("ROUND117" if args.round117 else "ROUND83"))))))))))))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
@@ -4544,6 +4808,10 @@ def main(argv=None) -> int:
             "ROUND143 DOWNSTREAM DIRECTED: first="
             + repr(report["first_closing_family"])
         )
+        return 0
+    if args.round147_rhs_family_directed:
+        print("ROUND147 RHS FAMILY DIRECTED: owner="
+              + repr(report["unambiguous_owner"]))
         return 0
     if args.round144_wind_operands or args.round145_wind_routing:
         print(
