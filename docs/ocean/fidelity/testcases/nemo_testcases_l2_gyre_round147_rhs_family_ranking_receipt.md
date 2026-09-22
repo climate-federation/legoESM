@@ -158,9 +158,13 @@ changes its LDF route.  No configuration choice was made.
 | `family_input_ulp_plant.json` | `55705b43b339b163cf85c0b6c1902b4995cfea585fee8cb9ece8c81d7b7bb42b` |
 | failed `passive_discrimination.json` | `c08f58d94157b07d9c9b02aeacf308e944d6e894e54ac0847079d85106f2341d` |
 | corrected Round-146 validation | `8970d82321f462536973164477a9d1c24b0b3903bafb184f06dad8c1b3583955` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `focused_tests_final.log` | `ee767b58dd0a76c46c49afcbfa88cfa5d29a92609c9c61033463c43bf57417f3` |
 
-The family/parser focused suite reports `41 passed`.  Citation-gate and final
-focused summaries are recorded after this receipt's committed citation pass.
+The final focused suite reports `57 passed in 2.49s`.  The preregistration,
+receipt, and Round-146 amendment citation gates pass with 2, 4, and 1 mapped
+citations respectively and no unmapped or failing entries.  Shifting the
+active LDF citation by two lines reports FAIL and exits 1.
 
 ## OPEN — round 148
 
