@@ -72,6 +72,10 @@ echo "gpu model: $(sort -u "$OUT/gpu_models.txt")"
 DECKS=(
   "24|5|2|5|1|900|2"
   "48|10|2|11|3|900|2"
+  # C96 at 6 ranks first: the 24-rank row hung on first dispatch on UNIFORM
+  # RTX 8000 (ladder 9867745, compiled 558 s, no dispatch in ~30 min); if this
+  # row completes the hang is the 24-rank collective at C96 sizes, not the deck
+  "96|10|1|5|3|450|2"
   "96|10|2|11|3|450|2"
 )
 REF_CAP=${REF_CAP:-1800}
