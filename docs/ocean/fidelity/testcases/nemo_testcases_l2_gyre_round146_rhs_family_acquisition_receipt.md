@@ -132,3 +132,19 @@ day-240 year sensitivity and Decision-43/45 gate; do not revive the refused
 downstream wind candidate or chase the `1e-22` Coriolis floor.
 
 `DECISION_NEEDED`: NONE.
+
+## Post-round admission amendment (Round 147)
+
+The operator subsequently ran the acquisition to `STOP 0`; its original
+post-run check exited 71 because it compared uninitialized full-array halo
+storage byte-for-byte.  Round 147 decoded the entire inherited record and
+bound ownership to the compiled loops.  Both restarts and the other five
+inherited records are byte-identical.  All 704 inner-domain values of `CdU_u`,
+`CdU_v`, `utauU`, and `vtauV` are BIT; only their 232-cell excluded halos
+move.  The compiled drag routine declares `CdU_u`/`CdU_v` full-domain output
+arrays but explicitly computes the inner domain only at
+`GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/dynspg_ts.f90:1460-1493`.
+Round 147 therefore retracts the whole-array passivity test, preserves its
+failed JSON, and admits the existing record without rebuilding or rerunning
+NEMO.  The authoritative corrected admission is documented in the Round 147
+receipt; it does not change this round's original `STOPPED_FOR_RECORD` verdict.
