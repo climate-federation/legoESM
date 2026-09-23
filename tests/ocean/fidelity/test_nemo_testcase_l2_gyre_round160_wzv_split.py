@@ -186,3 +186,37 @@ def test_the_production_defaults_keep_the_split_on_and_the_arms_off():
     assert hooks.stage2_momentum_wzv_clock_pair is False
     assert hooks.expose_stage_momentum_w is False
     assert hooks.expose_stage_face_r3 == 0
+
+
+def test_the_admission_gate_census_uses_the_model_s_own_predicate():
+    """The Decision-43 card census must not restate the code's condition.
+
+    A gate that re-derives "does this card execute the route" can encode a
+    predicate the model does not have, which is how a landing once shipped
+    while the gate said the card was not reached.  This asserts agreement on
+    every certified card, so a re-derivation that drifts goes red.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = (Path(__file__).resolve().parents[3]
+            / "scripts/validate/ocean_fidelity/testcases"
+            / "nemo_testcase_l2_gyre_decision43_gate.py")
+    spec = importlib.util.spec_from_file_location("_d43_round160", path)
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+
+    rows = gate._card_execution("stage_momentum_wzv")
+    assert [name for name, row in rows.items() if row["executes_route"]] == [
+        "GYRE-zco"]
+
+    configs = {
+        "GYRE-zco": build_nemo_testcase_card("GYRE-zco").recipe.model_config,
+        "LOCK_EXCHANGE-zco": build_nemo_testcase_card(
+            "LOCK_EXCHANGE-zco").recipe.model_config,
+        "OVERFLOW-zps": build_nemo_testcase_card(
+            "OVERFLOW-zps").recipe.model_config,
+    }
+    for name, config in configs.items():
+        assert rows[name]["executes_route"] is (
+            nemo_stage_momentum_wzv_executes(config))

@@ -221,7 +221,7 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
 
     require(route in {
         "ldf_stage3", "fct_metric_upstream", "wind_qco",
-        "momentum_ldf_live_geometry",
+        "momentum_ldf_live_geometry", "stage_momentum_wzv",
     },
             f"unknown Decision-43 source route {route!r}")
 
@@ -237,6 +237,10 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             "adaptive_implicit_vertadv": bool(
                 config.adaptive_implicit_vertadv),
             "gm_redi_configured": config.gm_redi is not None,
+            "momentum_advection": getattr(
+                config, "momentum_advection", "flux_form"),
+            "wzv_call2_evaluation": getattr(
+                config, "wzv_call2_evaluation", "generic"),
         }
         values.update(extra)
         if route == "ldf_stage3":
@@ -249,6 +253,14 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
         elif route == "wind_qco":
             executes = (config.momentum_time_integrator == "rk3_ws"
                         and config.surface_stress_implicit)
+        elif route == "stage_momentum_wzv":
+            # Round 160.  The census imports the model's OWN predicate rather
+            # than restating it, so the gate cannot encode a condition the
+            # code does not (operator note AR, finding 2).
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                nemo_stage_momentum_wzv_executes)
+
+            executes = nemo_stage_momentum_wzv_executes(config)
         else:
             executes = (
                 config.momentum_time_integrator == "rk3_ws"
@@ -653,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--route", choices=(
             "ldf_stage3", "fct_metric_upstream", "wind_qco",
-            "momentum_ldf_live_geometry"),
+            "momentum_ldf_live_geometry", "stage_momentum_wzv"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],
