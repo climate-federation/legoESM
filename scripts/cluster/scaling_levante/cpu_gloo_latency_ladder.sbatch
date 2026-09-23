@@ -2,7 +2,7 @@
 #SBATCH --job-name=gloo_lat
 #SBATCH --account=bb1596
 #SBATCH --partition=compute
-#SBATCH --nodes=64
+#SBATCH --nodes=32
 #SBATCH --ntasks-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
@@ -94,12 +94,17 @@ mkdir -p "$OUTDIR"
 echo "provenance: $($PY -c 'import legoesm.parallel.sharded_dynamics as m; print(m.__file__)')"
 echo "sha=$(git -C "$REPO" rev-parse --short HEAD) ppn=$PPN outdir=$OUTDIR"
 
+# TRIMMED to 128 ranks on 32 nodes 2026-09-23: the 64-node request sat
+# unscheduled for hours while three other jobs queued behind it, and the
+# question it serves is the 64 -> 128 kink, which 8 through 128 brackets. The
+# 256-rank arm was the only one needing 64 nodes.
+#
 # LARGEST FIRST, and the wall clock covers the worst case: twelve arms at the
 # 900 s per-arm timeout is three hours, which a two-hour job cannot hold. If
 # something still eats the budget, the arms lost are the cheap small ones
 # that can be re-run in a single node-hour, not the 64-node arms that are the
 # whole reason for the allocation.
-LADDER="${LADDER:-256 128 64 32 16 8}"
+LADDER="${LADDER:-128 64 32 16 8}"
 COLLECTIVES="${COLLECTIVES:-ppermute allreduce}"
 want=0; ok=0
 for ND in $LADDER; do
