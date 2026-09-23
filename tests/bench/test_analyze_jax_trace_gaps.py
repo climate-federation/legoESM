@@ -285,3 +285,34 @@ def test_gate_flags_without_their_mode_are_refused(tmp_path, monkeypatch):
             assert flag in str(exc), (flag, exc)
         else:
             raise AssertionError(f"{flag} was silently ignored")
+
+
+def test_cpu_capture_collective_names_are_recognised():
+    """CPU captures name collectives differently, and a miss reads as zero.
+
+    A GPU capture carries HLO instruction names; a CPU capture carries the
+    JAX primitive names instead, verified by tracing each of these on this
+    stack.  ``collective_family`` returns None for anything it does not
+    know, and None means the family contributes nothing -- so a missing name
+    does not fail, it reports a confident zero.  For a while every CPU trace
+    reported no reductions at all because ``psum`` was absent and the name
+    pattern rejected the underscore in ``all_gather`` outright.
+    """
+    seen_on_cpu = {
+        "ppermute.3": "permute",
+        "psum.7": "all-reduce",
+        "pmax.7": "all-reduce",
+        "pmin.7": "all-reduce",
+        "all_gather.7": "all-gather",
+    }
+    for name, family in seen_on_cpu.items():
+        assert mod.collective_family(name) == family, name
+
+    # The GPU spellings must keep working; this table serves both captures.
+    assert mod.collective_family("all-reduce.18") == "all-reduce"
+    assert mod.collective_family("collective-permute.1295") == "permute"
+
+    # Still anchored: a fused kernel that merely CONTAINS a collective's name
+    # is not that collective, and the zero-width end markers are not events.
+    assert mod.collective_family("fusion.all_gather.18") is None
+    assert mod.collective_family("end: psum.7") is None
