@@ -394,6 +394,13 @@ class TestComponentFactoryDispatch:
         # step); the NH combination stays refused as uncertified.
         (dict(held_suarez_forcing=True, model_type="nonhydrostatic"),
          "hydrostatic-only"),
+        # Kessler is routed ALONE on the hydrostatic arm; with HS or NH
+        # it stays refused, and any second scheme next to it is inert.
+        (dict(microphysics="kessler", held_suarez_forcing=True),
+         "choose one"),
+        (dict(microphysics="kessler", model_type="nonhydrostatic"),
+         "Kessler is hydrostatic-only"),
+        (dict(microphysics="kessler", turbulence="louis"), "silently inert"),
         # distributed now legal with mode spmd; the DEFAULT mode (mpi)
         # is refused with the SPMD-only message (PR #1656 driver wiring).
         (dict(distributed=True), "SPMD-only"),
@@ -425,6 +432,20 @@ class TestComponentFactoryDispatch:
         with pytest.raises(ValueError, match="needs exactly 24"):
             create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                      create_sigma_coordinate(KM))
+
+    def test_kessler_hydrostatic_constructs(self):
+        """hydro + microphysics='kessler' (alone) passes the wall and
+        the specific guards: the one routed scheme on this lane."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        from legoesm.driver.component_factory import create_atmosphere_dycore
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        cfg = _fv3_duo_config(microphysics="kessler")
+        model = create_atmosphere_dycore(cfg, create_cubed_sphere(N),
+                                         create_sigma_coordinate(KM))
+        assert isinstance(model, FV3DuoDynamicsModel)
 
     def test_held_suarez_hydrostatic_constructs(self):
         """hydro + held_suarez_forcing passes the wall AND the specific
@@ -659,6 +680,67 @@ class TestModelDriverLane:
             assert d > 0.0, f"HS left {nm} bit-identical to dry dynamics"
         assert (tmp_path / "fv3duo_status.txt").read_text().strip() \
             == "COMPLETED"
+
+    def test_kessler_run_is_dynamics_plus_the_bridge(self, tmp_path):
+        """Kessler-on driver run COMPLETEs with THREE tracers (DCMIP16
+        humidity + zero cloud + zero rain) and its final state is
+        bitwise the driver's own dynamics step composed with the shared
+        Kessler bridge after every step -- the routing is exactly that
+        and nothing else (and the bridge reads pe/peln of the SAME
+        step's press dict, not a stale one)."""
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
+            apply_kessler_step_sixface_jax)
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path),
+                              microphysics="kessler")
+        driver = ModelDriver(cfg, output_dir=tmp_path)
+        driver.setup()
+        status = driver.run()
+        assert status == "COMPLETED", f"Kessler driver lane returned {status!r}"
+        assert len(driver.state["q"]) == 3
+        dt = float(driver.config.dycore.dt)
+        n_steps = int(cfg.days * 86400.0 / dt)
+        bundle = driver.model.dcmip16_initial_state(do_pert=True)
+        q0 = bundle["q"][0]
+        bundle = {**bundle, "q": [q0, jnp.zeros_like(q0), jnp.zeros_like(q0)]}
+        g = driver.model.grid
+        for _ in range(n_steps):
+            bundle = driver.model.step(bundle, dt)
+            st, q = apply_kessler_step_sixface_jax(
+                bundle["state"], bundle["press"], bundle["q"], dt=dt,
+                n=g.n, ng=g.ng, km=driver.model.config.km)
+            bundle = {**bundle, "state": st, "q": q}
+        pt_drv = np.asarray(driver.state["state"]["pt"])
+        assert np.isfinite(pt_drv).all()
+        # the driver's bridge is jitted, this composition is eager: XLA
+        # fusion makes that rounding-level (1e-13 of peak), not bitwise
+        def _close(x, y):
+            x, y = np.asarray(x), np.asarray(y)
+            return np.abs(x - y).max() <= 1e-13 * max(np.abs(x).max(), 1e-300)
+        assert _close(pt_drv, bundle["state"]["pt"])
+        for i in range(3):
+            assert _close(driver.state["q"][i], bundle["q"][i]), i
+        # the humidity slot is the DCMIP16 field, not a passenger copy
+        assert float(np.abs(np.asarray(driver.state["q"][0])).max()) > 1e-3
+
+    def test_kessler_restart_template_carries_three_tracers(self, tmp_path):
+        """The multi-process restart validator sizes a checkpoint against
+        the deck's OWN fresh IC; with Kessler on that IC carries three
+        tracers, so a Kessler checkpoint (nq=3) is not refused as
+        foreign (GLM 2026-09-23).  Dry deck: one."""
+        from legoesm.driver.model_driver import ModelDriver
+        for micro, nq in (("kessler", 3), ("none", 1)):
+            cfg = _fv3_duo_config(output_dir=str(tmp_path / micro),
+                                  microphysics=micro)
+            driver = ModelDriver(cfg, output_dir=tmp_path / micro)
+            driver.setup()
+            flat = driver._fv3_duo_flatten_bundle(
+                driver._fv3_duo_host_faces(driver._fv3_duo_fresh_ic()))
+            assert sum(nm.startswith("q_") for nm in flat) == nq, micro
+            if micro == "kessler":
+                assert not np.asarray(flat["q_1"]).any()
+                assert not np.asarray(flat["q_2"]).any()
+                assert np.asarray(flat["q_0"]).any()
 
     def test_blowup_writes_explicit_status_marker(self, tmp_path):
         """A guard-tripped run leaves an EXPLICIT marker (not just a

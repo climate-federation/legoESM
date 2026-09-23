@@ -771,13 +771,29 @@ def create_atmosphere_dycore(
                          "turbulence", "gravity_wave_drag")
             if getattr(config, name) != "none"
         }
-        if _physics_on:
+        # The ONE routed scheme: Kessler warm rain, the shared column core
+        # applied by _run_fv3_duo._fv3_duo_apply_kessler after each step
+        # (apply_kessler_step_sixface_jax).  Alone -- with Held-Suarez the
+        # ordering of two operator-split forcings is an uncertified choice.
+        kessler_alone = _physics_on == {"microphysics": "kessler"}
+        if kessler_alone and config.held_suarez_forcing:
+            raise ValueError(
+                "fv3_duo: microphysics='kessler' together with "
+                "held_suarez_forcing is not certified (two operator-split "
+                "forcings, unmeasured ordering); choose one.")
+        if kessler_alone and model_type != "hydrostatic":
+            raise ValueError(
+                "fv3_duo Kessler is hydrostatic-only: the bridge reads "
+                "pt as temperature on the hydrostatic post-remap state; "
+                f"model_type={model_type!r} + kessler is uncertified.")
+        if _physics_on and not kessler_alone:
             raise ValueError(
                 f"fv3_duo runs DRY dynamics: the certified fv_dynamics "
                 f"lane refuses moist coupling (fv3_dynamics.py:301-311) "
                 f"and the driver lane routes no scheme tendencies (the "
                 f"only physics it runs is the certified Held-Suarez step, "
-                f"--held-suarez-forcing), so these active schemes would "
+                f"--held-suarez-forcing, or Kessler microphysics ALONE), "
+                f"so these active schemes would "
                 f"be silently inert: {_physics_on}. Set them all to "
                 f"'none' (with --allow-disabled-physics in run_amip).")
         if config.held_suarez_forcing and model_type != "hydrostatic":
