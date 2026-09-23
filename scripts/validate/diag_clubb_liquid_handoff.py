@@ -169,7 +169,11 @@ def main():
                 _T = _T + _dts * _dT; _q = _q + _dts * _dq
                 _tv = jnp.maximum(virtual_temperature(_T, _q), clubb_cfg.T0 * 0.5)
                 _rho = p_full / (constants.R_d * _tv)
-        rcm_a = np.asarray(diags["rcm"])          # ascending (bottom-up)
+        # GRID MEAN, not the in-layer value: compute_cloud_cover divides rcm by
+        # a vertical cloud fraction <= 1 at cloud edges, so diags["rcm"] is the
+        # in-cloud water and integrating it as a grid mean inflates the
+        # inventory and the missing-share (codex).
+        rcm_a = np.asarray(diags["rcm_grid"])     # ascending (bottom-up)
         cf_a = np.asarray(diags["cloud_frac"])
         rcm = rcm_a[:, ::-1][:, :nlev] if rcm_a.shape[1] >= nlev else rcm_a[:, ::-1]
         cfl = cf_a[:, ::-1][:, :nlev] if cf_a.shape[1] >= nlev else cf_a[:, ::-1]

@@ -357,11 +357,18 @@ def test_partition_uses_the_grid_mean_liquid_not_the_in_cloud_one():
 
 
 def _mpas_cfg(**kw):
-    """A minimal MPAS ExperimentConfig carrying the liquid partition."""
-    from legoesm.driver.config import ExperimentConfig
-    base = dict(clubb_liquid_partition=True, clubb_prognostic=True,
+    """A minimal ExperimentConfig on the MPAS lane carrying the liquid partition.
+
+    It really selects MPAS: the macro/micro sub-cycle the partition depends on
+    is wired into that lane only, so a helper that quietly left the grid on the
+    default would exercise a different guard than the one under test (codex).
+    """
+    from legoesm.driver.config import GridConfig
+    base = dict(grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+                clubb_liquid_partition=True, clubb_prognostic=True,
                 turbulence="clubb", microphysics="morrison",
-                cld_macmic_num_steps=3, cloud_q_c_diagnostic=None)
+                cld_macmic_num_steps=3,
+                cloud_q_c_diagnostic=0.0, cloud_conv_cloud_condensate=0.0)
     base.update(kw)
     return base
 
@@ -384,13 +391,11 @@ def test_partition_requires_the_sequential_macro_micro_subcycle():
     bad = ExperimentConfig(**_mpas_cfg(cld_macmic_num_steps=1))
     with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
         bad.validate_strict()
-    # ... and the same config with the sub-cycle on does not raise for THIS
-    # reason, so the guard is about the sub-cycle and not about something else.
-    good = ExperimentConfig(**_mpas_cfg(cld_macmic_num_steps=3))
-    try:
-        good.validate_strict()
-    except ValueError as exc:
-        assert "cld_macmic_num_steps>=2" not in str(exc)
+    # ... and the same config with the sub-cycle on raises nothing at all, so
+    # the guard is about the sub-cycle and the helper is not tripping some
+    # other check (a try/except that merely tolerates other errors would hide
+    # a helper that never reached this guard -- codex).
+    ExperimentConfig(**_mpas_cfg(cld_macmic_num_steps=3)).validate_strict()
 
 
 def test_partition_refuses_the_diagnostic_condensate_floor():
@@ -404,8 +409,20 @@ def test_partition_refuses_the_diagnostic_condensate_floor():
     from legoesm.driver.config import ExperimentConfig
 
     bad = ExperimentConfig(**_mpas_cfg(cloud_q_c_diagnostic=5.0e-5))
-    with pytest.raises(ValueError, match="cloud_q_c_diagnostic"):
+    with pytest.raises(ValueError, match="q_c_diagnostic"):
         bad.validate_strict()
+    # None is the dangerous case, and the one the first version of this guard
+    # let through: it does not mean "no floor", it means "take the scheme's
+    # default", which is non-zero.  The check therefore reads the RESOLVED
+    # cloud config (codex).
+    defaulted = ExperimentConfig(**_mpas_cfg(cloud_q_c_diagnostic=None))
+    with pytest.raises(ValueError, match="RESOLVED cloud config"):
+        defaulted.validate_strict()
+    # ... and 0 must be ACCEPTED, which the range check rejects on its own
+    # (its lower bound is 1e-6 because a floor of 0 was previously
+    # unreachable), so demanding 0 without that exemption would be a
+    # configuration nobody can satisfy.
+    ExperimentConfig(**_mpas_cfg(cloud_q_c_diagnostic=0.0)).validate_strict()
 
 
 def test_the_host_applies_the_subcycled_modules_in_sequence():
@@ -433,3 +450,112 @@ def test_the_host_applies_the_subcycled_modules_in_sequence():
     # And at N=1 the parallel branch really is taken, which is what the guard
     # exists for.
     assert "if _n_macmic == 1:" in inspect.getsource(combined)
+
+
+def test_an_override_cannot_smuggle_the_lever_past_the_ordering_guard():
+    """The guard has to bind on the RESOLVED config, not the experiment flag.
+
+    An authoritative ``turbulence_override`` carrying
+    ``CLUBBConfig(liquid_partition=True)``, or a direct ``make_physics`` call,
+    both reach the combined-physics factory without the experiment-level flag
+    ever being set -- and codex reproduced exactly that, validating cleanly with
+    the sub-cycle off.  The refusal therefore lives at the factory, where the
+    resolved turbulence config is what it reads.
+    """
+    import pytest
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+
+    cfg = PhysicsConfig(
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=_ON),
+        microphysics=MicrophysicsConfig(scheme="morrison"))
+    with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
+        make_physics(cfg, model_type="mpas", cld_macmic_num_steps=1)
+    # ... and it builds once the sub-cycle is on, so the guard is about the
+    # sub-cycle rather than rejecting the lever outright.
+    make_physics(cfg, model_type="mpas", cld_macmic_num_steps=3)
+    # The lever off is untouched at every N.
+    off = PhysicsConfig(
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=_OFF),
+        microphysics=MicrophysicsConfig(scheme="morrison"))
+    make_physics(off, model_type="mpas", cld_macmic_num_steps=1)
+
+
+def test_condensate_loading_reaches_the_buoyancy():
+    """CAM carries the suspended liquid's weight in thv (clubb_intr.F90:1603).
+
+    Suspended water is weight without vapour buoyancy, so omitting it makes a
+    cloud layer look too buoyant -- precisely the layers this lever creates.
+    Non-vacuity: the same column with and without host liquid must differ
+    through the buoyancy, not only through the water budget, so this compares
+    against a run whose liquid was folded into vapour instead (equal total
+    water, equal moist static energy, different condensate loading).
+    """
+    from legoesm.atmosphere.physics.turbulence.clubb import clubb_step
+
+    col = _column(q_c_amp=5.0e-4)
+    dt = 300.0
+    moments = init_clubb_moments(_NCOL, _NLEV, _ON, dtype=jnp.float64)
+    out_liq = clubb_step(
+        col["u"], col["v"], col["T"], col["q_v"], moments,
+        col["p_full"], col["p_half"], col["z_full"], col["z_half"],
+        col["T_sfc"], col["q_sfc"], col["rho"], dt, _ON, q_c=col["q_c"])
+    # Same total water and same temperature, but presented as all-vapour, so
+    # the ONLY difference is that the closure is told none of it is condensate.
+    out_vap = clubb_step(
+        col["u"], col["v"],
+        col["T"] - (constants.L_v / constants.c_pd) * col["q_c"],
+        col["q_v"] + col["q_c"], moments,
+        col["p_full"], col["p_half"], col["z_full"], col["z_half"],
+        col["T_sfc"], col["q_sfc"], col["rho"], dt, _ON,
+        q_c=jnp.zeros_like(col["q_c"]))
+    # The advanced means see the same rt and thl in both, so any difference is
+    # the loading term in thv.  Compare the BUOYANCY FLUX, which is what thv
+    # feeds: the prognostic variances are floored at tke_min after one step from
+    # a fresh moment state and would compare equal for a reason that has nothing
+    # to do with the loading.
+    wpthvp_liq = np.asarray(out_liq[5]["wpthvp"])
+    wpthvp_vap = np.asarray(out_vap[5]["wpthvp"])
+    assert not np.allclose(wpthvp_liq, wpthvp_vap, rtol=1e-12, atol=0), (
+        "condensate loading did not reach the buoyancy")
+    # Loading is a NEGATIVE buoyancy contribution, so the column carrying its
+    # water as condensate must be the less buoyant of the two somewhere.
+    assert (wpthvp_liq < wpthvp_vap - 1e-14).any()
+
+
+def test_mpas_lane_refuses_a_state_missing_either_tracer():
+    """Both halves of the pair, or the missing half is destroyed.
+
+    The vapour block substitutes zeros for a missing ``q_v`` and the tendency
+    section then emits nothing for it, so a state carrying liquid but no vapour
+    would evaporate liquid into a tendency nothing applies (codex).
+    """
+    import pytest
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        make_turbulence_physics,
+    )
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    import inspect
+
+    fn = make_turbulence_physics(
+        TurbulenceConfig(scheme="clubb", clubb=_ON), model_type="mpas")
+    src = inspect.getsource(fn)
+    # The refusal names BOTH tracers; a guard that only required q_c would leave
+    # the vapour half to be silently zero-filled.
+    assert '("q_v", "q_c")' in src
+    assert "is not carried" in src
+
+
+def test_public_wrapper_refuses_liquid_with_the_lever_off():
+    """The wrapper drops q_c before clubb_step sees it, so it must check too."""
+    import pytest
+    col = _column(q_c_amp=1.0e-4)
+    moments = pack_clubb_moments(
+        init_clubb_moments(_NCOL, _NLEV, _OFF, dtype=jnp.float64))
+    with pytest.raises(ValueError, match="liquid_partition=False"):
+        clubb_turbulence_prognostic(
+            col["u"], col["v"], col["T"], col["q_v"], moments,
+            col["p_full"], col["p_half"], col["z_full"], col["z_half"],
+            col["T_sfc"], col["q_sfc"], col["rho"], 300.0, _OFF,
+            q_c=col["q_c"])

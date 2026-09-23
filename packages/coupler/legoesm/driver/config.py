@@ -2750,21 +2750,49 @@ class ExperimentConfig(NamedTuple):
                     f"At cld_macmic_num_steps={_nmm!r} they are evaluated in "
                     "parallel on the same state and summed, which leaves the "
                     "microphysical sinks evaluated on the pre-exchange liquid")
-            # The diagnostic condensate floor exists to paper over the very
-            # defect this lever removes.  Left on, the two fight: the floor
-            # re-imposes liquid on top of the closure's rcm, and it materialises
-            # that liquid without a matching vapour sink, so it also breaks the
-            # exact total-water pairing the exchange guarantees.  It is a
-            # mechanism to switch OFF here, not a number to retune (GLM).
-            if self.cloud_q_c_diagnostic:
-                errors.append(
-                    "clubb_liquid_partition=True with "
-                    f"cloud_q_c_diagnostic={self.cloud_q_c_diagnostic!r}: the "
-                    "diagnostic condensate floor exists to compensate for the "
-                    "missing closure liquid this lever restores, it would be "
-                    "added on top of it, and it creates cloud water with no "
-                    "vapour sink, breaking the exchange's total-water pairing. "
-                    "Set cloud_q_c_diagnostic to 0 or None")
+            # The diagnostic condensate floors exist to compensate for the very
+            # liquid this lever restores, so with it on they are added on top of
+            # the closure's own water and the clouds are opaque twice over.
+            # They act on the RADIATIVE condensate, not on the prognostic
+            # tracers, so this is an opacity error rather than a break in the
+            # exchange's tracer-water pairing (codex corrected the rationale) --
+            # but it is still a mechanism to switch OFF, not a number to retune.
+            #
+            # Checked against the RESOLVED cloud config, because ``None`` here
+            # does not mean "no floor": it means "take the scheme's default",
+            # which is non-zero.  Both floors count: the stratiform
+            # ``q_c_diagnostic`` and the independent convective
+            # ``conv_cloud_condensate`` term in cloud_fraction.py.
+            try:
+                from legoesm.atmosphere.physics.clouds.config import (
+                    build_cloud_config,
+                )
+                _cc = build_cloud_config(
+                    self.cloud_scheme,
+                    q_c_diagnostic=self.cloud_q_c_diagnostic,
+                    conv_cloud_condensate=self.cloud_conv_cloud_condensate,
+                    convective_cloud=bool(self.convective_cloud))
+            except Exception:                       # pragma: no cover
+                _cc = None                          # reported by its own check
+            if _cc is not None:
+                _floors = [
+                    (n, v) for n, v in
+                    (("q_c_diagnostic", getattr(_cc, "q_c_diagnostic", 0.0)),
+                     ("conv_cloud_condensate",
+                      getattr(_cc, "conv_cloud_condensate", 0.0)
+                      if bool(self.convective_cloud) else 0.0))
+                    if v
+                ]
+                if _floors:
+                    errors.append(
+                        "clubb_liquid_partition=True leaves a diagnostic "
+                        "condensate floor active in the RESOLVED cloud config "
+                        f"({', '.join(f'{n}={v!r}' for n, v in _floors)}). "
+                        "Those floors exist to compensate for the missing "
+                        "closure liquid this lever restores, so they would be "
+                        "imposed on top of it and the clouds would be made "
+                        "opaque twice. Set them to 0 explicitly (None means "
+                        "the scheme's non-zero default, not 'off')")
         if _is_mpas:
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
@@ -3413,6 +3441,15 @@ class ExperimentConfig(NamedTuple):
             ("clubb_q_flux_scale", 0.1, 10.0),
         ):
             _v = getattr(self, _f)
+            # 0.0 means OFF for the two radiative condensate floors, and the
+            # liquid partition REQUIRES them off (it supplies the liquid they
+            # were compensating for).  Their ranges start above zero because a
+            # floor of 0 was previously unreachable; without this the guard
+            # below would demand a value this loop then rejects (codex).
+            if (self.clubb_liquid_partition and _v == 0.0
+                    and _f in ("cloud_q_c_diagnostic",
+                               "cloud_conv_cloud_condensate")):
+                continue
             if _v is not None and not (_lo <= _v <= _hi):
                 errors.append(
                     f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
