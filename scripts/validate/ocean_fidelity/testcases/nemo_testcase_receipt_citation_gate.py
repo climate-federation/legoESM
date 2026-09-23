@@ -730,6 +730,8 @@ CITATION_MAP = {
     # that wrote the record it walks ---
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:462':
         ("CALL r156_stage2_pair3( 'rhs_entry       ', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )", 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:495':
+        ("CALL r156_stage2_pair3( 'rhd_ww          ', rhd, ww )", 1),
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:497':
         ('CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )', 1),
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:499':
