@@ -307,7 +307,7 @@ def test_multilayer_land_accepted_on_mpas():
     (VoronoiMesh had no lat/lat2d) is retired — setup now reads latCell."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--grid-type", "mpas", "--discretization", "mpas",
         "--use-multilayer-land",
     ]), parser)
@@ -618,7 +618,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     # not here — single-point CLM-ML runs today via run_lmip).
     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
-        "--use-multilayer-land",
+        "--use-multilayer-land", "--land-mask-file", "lsm.nc",
     ]), parser))
     assert cfg_clm.land_surface_scheme == "clm_ml"
     cfg_clm.validate_strict()  # must not raise
@@ -1162,7 +1162,7 @@ def test_surface_tiled_flags_flow_to_config():
     and validate together with --slab-land-active + --turbulence louis."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
@@ -1211,7 +1211,7 @@ def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
     CLUBB family (clubb routes it through clubb_step's kinematic interface)."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", scheme,
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
@@ -1228,7 +1228,7 @@ def test_soil_bucket_flags_flow_to_config():
     and validate together with an active land tile."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
@@ -1257,7 +1257,7 @@ def test_infiltration_params_reject_nan_and_negative():
     a bare ``x < 0`` would let NaN slip through and poison the infiltration cap)."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--slab-land-active", "--land-soil-bucket"]),
+        ["--dataset", "analytical", "--land-mask-file", "land_mask.nc", "--slab-land-active", "--land-soil-bucket"]),
         parser)
     base = build_config_from_args(args)
     assert base.validate_strict() is None          # baseline is valid
@@ -1295,7 +1295,7 @@ def test_land_stomatal_beta_flag_flows_to_config():
     """--land-stomatal-beta round-trips and validates with the bucket on."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
