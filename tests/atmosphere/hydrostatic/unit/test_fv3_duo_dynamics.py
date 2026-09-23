@@ -993,7 +993,28 @@ def test_wall_default_surface_is_frozen():
 
 # ponytail: filled by the first CI run's failure message; the VALUE is
 # the reviewable artifact, the mechanism is above.
-_WALL_SURFACE_SHA256 = "0689caad23886cc4e58e97e8bef32ba089abeb2c6d0c1b777b674847a79a2dff"
+#
+# 2026-09-23, merging main into this branch (#1769). The gate fired and it
+# was RIGHT to: it failed on the merge commit and not on the pre-merge tip.
+# The review it demands, done rather than skipped -- the flattened surface was
+# dumped on both trees and differenced:
+#
+#   39 paths ADDED by main, 5 REMOVED, and exactly ONE default MOVED:
+#       albedo_ice: 0.65 -> 0.8
+#
+# An ADDED default cannot trip the wall (it refuses non-default VALUES, and a
+# new field arrives at its own default), and `test_wall_allowlist_paths_are_live`
+# passes on the merge, so none of the 5 removals left a stale allow-list entry.
+# The one MOVED default is the question the gate exists to force, and
+# `albedo_ice` is inert on this lane: it is read by `ice/sea_ice.py` and the
+# AMIP surface-albedo blend, and `_refuse_fv3_duo_non_default` admits only
+# grid / dycore / span / window / output-cadence / distributed paths -- the duo
+# lane has no radiation and no sea ice to read it.
+#
+# Recorded because it is main's, not this branch's, and someone should look at
+# it there: `forcing/amip.py` still declares `albedo_ice: float = 0.65`, so the
+# two declarations of that quantity now disagree.
+_WALL_SURFACE_SHA256 = "8851a6fe84378ee1fbda9dc96fd238895a493dc7e74a4e3350727f49066d3842"
 
 
 def test_wall_leaf_types_are_scalar():
