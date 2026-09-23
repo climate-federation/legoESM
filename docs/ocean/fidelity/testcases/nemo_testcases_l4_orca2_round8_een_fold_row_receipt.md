@@ -187,6 +187,38 @@ longitude, a synthetic violation proving that assertion can fail for both the
 T-origin mirror and a self-sourced row, that nothing below the fold row moves
 against a flat grid, and that an inactive fold takes no fold branch at all.
 
+## 8a. Independent review
+
+The mandated read-only independent review **was not run with codex, which the
+user paused**.  A separate fresh adversarial reviewer with no part in the work
+was run in its place, on the committed model diff and the oracle source.
+
+It **confirmed the index work independently rather than on trust**: it rebuilt
+a haloed array, ran the compiled Fortran row and longitude loops verbatim from
+T-cell data, and compared the result to the shipped fold row — bit-identical,
+largest difference 0.0.  That reconstruction starts from T data, so it does not
+inherit the vertex-column convention the change assumes, which is the one thing
+the round's own test could not rule out.  It also executed the pre-change
+function body against the new one over all three rules, both grid kinds and
+both reference-thickness settings: **byte-identical in all eleven cases, the
+twelfth being the one that changes from a refusal to a value.**
+
+It found one false statement, now fixed: the helper's parameter documentation
+claimed the per-level reference thickness is consulted by only one of the three
+rules, when the rule both cards select requires it outright.
+
+It raised three residual risks, each carried into OPEN rather than argued away:
+
+| risk | status |
+|---|---|
+| the dry-cell substitution is applied BEFORE the fold here and AFTER it in NEMO; the two commute only where the reference thickness is horizontally uniform per level | **MEASURED, does not bite on the recorded half**: the fold row is 0 / 2,700 unequal against NEMO's own operand. UNMEASURED on the unrecorded half. |
+| this helper's rule builds its frozen sum from the uniform reference ladder, while the baroclinic lane overrides it with the literal builder that uses NEMO's own reference thickness; the helper's value now feeds the BAROTROPIC operands | **UNMEASURED.** No bit-match is claimed for it here; section 3's numbers are the literal builder's, which is what the baroclinic lane consumes. |
+| the mirrored fold row derives entirely from the row below, so it is silently wrong if the card's last tracer row is not already fold-consistent | **MEASURED, does not bite on the recorded half**: same 0 / 2,700. UNMEASURED on the unrecorded half. |
+
+A reviewer's finding is a hypothesis until measured; the first and third were
+measured against NEMO's own recorded operand in this round and did not bite.
+The second is genuinely open and is round 9's to settle.
+
 ## 9. OPEN
 
 1. **The next statement in execution order is the lateral viscosity
@@ -205,7 +237,11 @@ against a flat grid, and that an inactive fold takes no fold branch at all.
    configuration, which is out of scope on this lane.
 5. The recorded runoff tracer-source operands remain an explicit later
    boundary; this round did not reach them.
-6. GitHub issue 1455 remains an operator-post action because no GitHub
+6. **The barotropic vertex thickness is unmeasured.** This round's helper now
+   supplies it on a tripolar grid, built from the uniform reference ladder
+   rather than from NEMO's own reference thickness. Nothing here claims it is
+   bit-exact; measure it against the record before any such claim.
+7. GitHub issue 1455 remains an operator-post action because no GitHub
    connector is installed in this environment.
 
 ## Choices
