@@ -398,8 +398,11 @@ def test_round156_stage2_split_separates_barotropic_from_baroclinic(harness):
     planted = harness._developed_stage2_velocity_split(
         barotropic, oracle, plant_index=(0, 0))
     assert planted["planted_uu_b_index"] == [0, 0]
-    assert (planted["rows"]["nemo_depth_mean_substituted"]["active_max_abs"]
-            != rows["nemo_depth_mean_substituted"]["active_max_abs"])
+    # A one-unit-in-the-last-place change to one column moves about thirty
+    # cells by about 1e-16, which no maximum over the field can see, so the
+    # control is the fingerprint of the whole reprojected field.
+    assert (planted["reprojection_sha256"]
+            != report["reprojection_sha256"])
 
 
 def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,

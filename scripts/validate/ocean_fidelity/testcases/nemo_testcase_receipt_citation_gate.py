@@ -686,6 +686,28 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 156: developed stage-2 velocity split ---
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:217-256': [
+        'CASE ( 2 )           !==  Stage 2  ==!',
+        ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 2), 40],
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:400-497': [
+        'CASE ( 2 , 3 )    !==  Stage 2 & 3  ==!',
+        'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 98],
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:475':
+        ('CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )', 1),
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:485':
+        ('CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )', 1),
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:697-699': [
+        'uu(ji,jj,jk,Kaa) = (         ( 1._wp + r3u(ji,jj,Kbb) ) * uu(ji,jj,jk,Kbb )',
+        '/           ( 1._wp + r3u(ji,jj,Kaa) ) * umask(ji,jj,jk)', 3],
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:732':
+        ('CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )', 1),
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:745':
+        ('IF( kstg == 3 )   CALL dyn_zdf', 1),
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:753':
+        ('zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)', 1),
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:772':
+        ('uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)', 1),
     # --- round 155: developed stage-3 U-transport operand walk ---
     'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:261-277': [
         'CASE ( 3 )           !==  Stage 3  ==!',

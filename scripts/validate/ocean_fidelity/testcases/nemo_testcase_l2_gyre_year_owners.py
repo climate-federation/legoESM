@@ -6647,7 +6647,8 @@ def _developed_stage2_velocity_split(production: dict, oracle: dict, *,
             np.abs(discrepancy), initial=0.0)),
     }
 
-    residual = run(uu_lego, masked_weight) - uu_nemo
+    reprojected = run(uu_lego, masked_weight)
+    residual = reprojected - uu_nemo
     base_delta = uu_lego - uu_nemo
 
     def level_rms(field):
@@ -6668,6 +6669,8 @@ def _developed_stage2_velocity_split(production: dict, oracle: dict, *,
         "external_half_known_answer": external,
         "baseline_level_active_rms": level_rms(base_delta),
         "residual_level_active_rms": level_rms(residual),
+        "reprojection_sha256": hashlib.sha256(
+            np.ascontiguousarray(reprojected).tobytes()).hexdigest(),
         "planted_uu_b_index": list(planted) if planted is not None else None,
     }
 
@@ -7329,14 +7332,21 @@ def developed_state_process_walk(
             index = tuple(int(value) for value in candidates[0])
             planted_split = _developed_stage2_velocity_split(
                 production_transport, oracle_rows, plant_index=index)
-            before = stage2_split["rows"]["nemo_depth_mean_substituted"]
-            after = planted_split["rows"]["nemo_depth_mean_substituted"]
-            require(after["active_max_abs"] != before["active_max_abs"],
+            before = stage2_split["reprojection_sha256"]
+            after = planted_split["reprojection_sha256"]
+            require(after != before,
                     "stage-2 uu_b ULP plant moved no reprojected velocity")
             return {
                 "status": "PLANT-FIRED", "plant": plant,
-                "control": {"uu_b_index": list(index),
-                            "before": before, "after": after},
+                "control": {
+                    "uu_b_index": list(index),
+                    "before_reprojection_sha256": before,
+                    "after_reprojection_sha256": after,
+                    "before_row": stage2_split["rows"][
+                        "nemo_depth_mean_substituted"],
+                    "after_row": planted_split["rows"][
+                        "nemo_depth_mean_substituted"],
+                },
             }
 
     ordinary = ordinary_model.step(
