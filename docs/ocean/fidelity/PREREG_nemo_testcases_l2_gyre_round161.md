@@ -128,7 +128,7 @@ answer to the year question rather than a curiosity.
    compiled-rounding floor and the live-versus-offline row carries essentially
    all of the `1.45e-13`.  REFUTED if the statement row carries more than 10%
    of the `1.45e-13`, in which case the COMPOSITION is the first non-bit
-   statement and its citation is `stprk3_stg.f90:211` against
+   statement and its citation is `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:211` against
    `vertical.py:247`.
 4. **The observer is passive and live.**  With the observer installed and the
    substitution disabled, every state leaf is BIT-IDENTICAL to the unobserved
