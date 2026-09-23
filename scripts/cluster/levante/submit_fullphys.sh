@@ -30,6 +30,12 @@
 set -euo pipefail
 
 REPO=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
+# PINNED 2026-09-23: config/amip/amip_production.yaml became the CAM6 suite on
+# that date and the GPU chain's CONFIG_YAML default follows it.  This script is
+# a one-variable arm comparison whose baseline is the configuration it was
+# measured against, so it names the same deck under its new name explicitly.
+# Resolved against the SAME tree the chain runs, so it cannot drift apart.
+export CONFIG_YAML="${CONFIG_YAML:-${REPO}/config/amip/amip_sundqvist_l36.yaml}"
 : "${TARGET_DAYS:=1825}"      # 5 yr first; extend once stable
 
 # Physics switches shared by BOTH grids.

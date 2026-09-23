@@ -6,6 +6,11 @@
 # Score: days 81-85 window means vs cc_ctl (rsut, rlut, clt, layer cover).
 set -euo pipefail
 WT=/work/bd1083/b309178/diffESM/legoesm_pg/wt_cloudreview
+# PINNED 2026-09-23: config/amip/amip_production.yaml became the CAM6 suite on
+# that date and the GPU chain's CONFIG_YAML default follows it.  This script is
+# a one-variable arm comparison whose baseline is the configuration it was
+# measured against, so it names the same deck under its new name explicitly.
+# Resolved against the SAME tree the chain runs, so it cannot drift apart.
 MAIN=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
 ROOT=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs
 BASE="--resolution 6 --checkpoint-days 10 \
@@ -24,7 +29,7 @@ declare -A ARMS=(
 for name in "${!ARMS[@]}"; do
   [[ -f ${ROOT}/${name}/checkpoint_day_0080.npz ]] || { echo "missing day-80 checkpoint in ${name}" >&2; exit 2; }
   jid=$(sbatch --account=bd1083 --job-name="${name}" --time=06:00:00 \
-        --export="ALL,REPO=${WT},PY=${MAIN}/.venv/bin/python,NAME=${name},TARGET_DAYS=86,MAX_WALLCLOCK_SECONDS=19800,EXTRA=${BASE} ${ARMS[$name]}" \
+        --export="ALL,REPO=${WT},CONFIG_YAML=${WT}/config/amip/amip_sundqvist_l36.yaml,PY=${MAIN}/.venv/bin/python,NAME=${name},TARGET_DAYS=86,MAX_WALLCLOCK_SECONDS=19800,EXTRA=${BASE} ${ARMS[$name]}" \
         "${WT}/scripts/cluster/levante/amip_mpas_gpu_chain.sbatch" | awk '{print $NF}')
   echo "${name} ${jid} EXTRA='${BASE} ${ARMS[$name]}'"
 done
