@@ -102,3 +102,37 @@ def test_tracer_path_on_the_hybrid_lane_ignores_the_scheme_selector():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_conservative_operator_is_not_positivity_preserving_on_sparse_condensate():
+    """Why routing tracers through 'sb' is NOT a one-line fix (codex, 2026-09-23).
+
+    The Simmons-Burridge form uses centered interface values and carries no
+    limiter, so a single cloudy layer between empty ones goes NEGATIVE in one
+    physics step.  The upwind form in use is monotone and does not.  Any
+    reroute of condensate onto the conservative operator therefore has to bring
+    a positivity-preserving variant or a validated repair with it, because the
+    existing repair borrows mass and changes the band inventory that this whole
+    investigation is measuring.
+    """
+    import jax.numpy as jnp
+    from legoesm.grids.vertical import (
+        make_cam6_l32_levels, vertical_advection_hybrid,
+        vertical_advection_hybrid_sb)
+
+    coord = make_cam6_l32_levels()
+    nlev = coord.A_full.shape[0]
+    p_s = jnp.array([1.0e5])
+    q = jnp.asarray(np.eye(1, nlev, 18) * 1.0e-3)   # one cloudy layer
+    mf = jnp.concatenate([jnp.zeros((1, 1)), jnp.full((1, nlev - 1), 0.3),
+                          jnp.zeros((1, 1))], axis=-1)
+    dt = 1800.0
+
+    q_up = q + dt * vertical_advection_hybrid(q, mf, p_s, coord)
+    q_sb = q + dt * vertical_advection_hybrid_sb(q, mf, p_s, coord)
+
+    assert float(jnp.min(q_up)) >= 0.0, (
+        "the upwind form in use is monotone and must stay non-negative")
+    assert float(jnp.min(q_sb)) < 0.0, (
+        "if this passes, the conservative form has gained a limiter and the "
+        "positivity caveat on rerouting tracers can be dropped")

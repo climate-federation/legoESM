@@ -8,18 +8,24 @@ TEMPERATURE path only (primitive_eq_mpas.py:666-667, ``conservative=
 condensate species -- rides the non-conservative upwind advective operator
 unconditionally, whatever the deck selects.
 
-The advective form ``-F df/dp`` does not satisfy the discrete product rule, so
-``sum(dp * f)`` is not conserved in pairing with continuity.  The conservative
-form ``vertical_advection_hybrid_sb`` telescopes to the (zero) boundary fluxes
-and is conserved.  On a species with a sharp vertical gradient the difference
-moves mass between layers WITHOUT destroying it globally, which is exactly the
-signature of a band deficit with a closed global inventory.
+The advective form ``-F df/dp`` does not satisfy the discrete product rule; the
+conservative ``vertical_advection_hybrid_sb`` telescopes to the (zero) boundary
+fluxes.  The conservation statement is about the FLUX FORM
+``adv_k - f_k*(mdot_{k+1/2}-mdot_{k-1/2})/dp_k``, NOT about the advection
+operator on its own: the operator alone has a non-zero column integral for
+BOTH forms, so comparing raw global tendencies is not a conservation test.
+Only the flux-form column integral printed at the end is one.
 
 This probe applies BOTH operators to the same state and the same mass flux and
-reports, per species: the band-integrated tendency from each, their difference,
-and the GLOBAL column-integrated tendency from each (the conservation test --
-the conservative operator's global integral must vanish to round-off, the
-advective one need not).
+reports, per species, the band-integrated tendency from each and their
+difference, then the flux-form global integral as the conservation test.
+
+WHAT IT DOES NOT ESTABLISH.  The flux-form residual is the INSTANTANEOUS
+vertical-advection contribution at one state.  It is not the model's total
+water non-conservation per day: surface-pressure hyperdiffusion, the time
+integration stages, positivity repair and any mass fixer all contribute and are
+outside this probe.  Nor can a single snapshot exclude a cause, because altered
+vapour transport feeds back on condensation and circulation over days.
 
 NUMBERS ONLY -- no verdict.
 """
@@ -133,7 +139,12 @@ def main():
     allm = np.ones_like(band, dtype=bool)
 
     print(f"[{a.label}] --- vertical transport of each tracer, "
-          f"{a.band[0]:.0f}-{a.band[1]:.0f} hPa [kg/m2/day]")
+          f"{a.band[0]:.0f}-{a.band[1]:.0f} hPa.  UNITS: q_* rows are "
+          f"kg/m2/day; N_* rows are per-MASS number, so their dp/g integral is "
+          f"#/m2/day -- do NOT read the N_* rows as water.")
+    print(f"[{a.label}] These are ADVECTION-OPERATOR tendencies, not completed "
+          f"band inventory tendencies; the continuity term cancels only in the "
+          f"scheme-to-scheme DIFFERENCE column, which is the trustworthy one.")
     print(f"[{a.label}] {'species':8s} {'advective(now)':>15s} "
           f"{'conservative(sb)':>17s} {'difference':>13s} "
           f"{'GLOBAL adv':>13s} {'GLOBAL sb':>13s}")
@@ -147,8 +158,9 @@ def main():
         b_s = masked_int(sb, dp, A, g, band) * _DAY
         g_a = masked_int(adv, dp, A, g, allm) * _DAY
         g_s = masked_int(sb, dp, A, g, allm) * _DAY
+        unit = "#/m2/day" if n.startswith("N_") else "kg/m2/day"
         print(f"[{a.label}] {n:8s} {b_a:+15.6e} {b_s:+17.6e} "
-              f"{b_a - b_s:+13.6e} {g_a:+13.6e} {g_s:+13.6e}")
+              f"{b_a - b_s:+13.6e} {g_a:+13.6e} {g_s:+13.6e}  [{unit}]")
 
     # Conservation test on the total water path, the quantity that must not be
     # created or destroyed by vertical transport.
