@@ -713,6 +713,24 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 162: the T-point ratio, its statement and its two readers ---
+    # The ratio at the T point is a single product of the stage sea surface
+    # height, and it is the ONE operand of the velocity-indicator continuity
+    # solve that rounds 159-161 never substituted.  The two compiled lines it
+    # reaches are already mapped above (divhor.f90:126-130 divides by it and
+    # :153 multiplies it back); what is new here is the statement that makes
+    # it and legoESM's three answering lines.
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90:257':
+        ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
+    'ocean_pe_latlon_cgrid.py:1674':
+        ('r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)', 1),
+    'ocean_pe_latlon_cgrid.py:1675':
+        ('live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask', 1),
+    'ocean_pe_latlon_cgrid.py:1699':
+        ('flux_u, west, flux_v, south, r1_area_t, live_t[..., jk],', 1),
+    'ocean_pe_latlon_cgrid.py:1717-1718': [
+        ('r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)', 1),
+        ('r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)', 1), 2],
     # --- round 161: the stage face ratio, its producer and its composition ---
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:172':
         ('ssh (:,:,Kaa) = r2_3 * ssh (:,:,Kbb) + r1_3 * ssha(:,:)', 2),
