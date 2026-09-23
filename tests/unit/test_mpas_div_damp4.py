@@ -279,10 +279,10 @@ def test_production_deck_selects_both_levers_and_no_other_deck_does():
     for deck in sorted(cfgdir.rglob("*.yaml")):
         if deck.name == "amip_production.yaml":
             continue
-        try:
-            other = read_yaml_with_includes(deck) or {}
-        except SystemExit:                      # not a run config (no parser here)
-            continue
+        # No catch: measured 2026-09-23, all 313 config/**/*.yaml resolve
+        # without raising, so a swallowed error here would only be an escape
+        # hatch for a deck that stopped resolving (GLM round-2 review).
+        other = read_yaml_with_includes(deck) or {}
         if not isinstance(other, dict):
             continue
         assert other.get("mpas_div_damp4_scale", 0.0) == 0.0, deck
