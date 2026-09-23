@@ -80,14 +80,16 @@ def test_the_channel_moves_every_stage(arms, stage):
         assert float(delta.max()) > 0.0, f"stage {stage} {name} did not move"
 
 
-@pytest.mark.parametrize("stage", (1, 2))
-def test_the_deposit_reaches_only_the_top_cell(arms, stage):
-    """nk_rnf = 1.  Stages 1 and 2 carry no vertical mixing to spread it.
+def test_the_deposit_reaches_only_the_top_cell(arms):
+    """nk_rnf = 1: the deposit itself enters the top cell and no other.
 
-    Stage 3 is excluded deliberately: NEMO runs ``tra_zdf`` there, so the
-    deposit legitimately reaches deeper levels by that stage and the check
-    would not be about this statement any more.
+    Scored at stage 1 ONLY, and that is not a weakening.  By stage 2 the
+    stage-1 tracer field has already been advected, so the deposit has
+    legitimately reached level 1 (measured: 1.3e-12 on this card) and by
+    stage 3 ``tra_zdf`` mixes it down as well.  Testing a later stage would
+    be testing transport, not this statement.
     """
+    stage = 1
     on, off = arms[stage]
     for name in ("T", "S"):
         delta = (np.asarray(getattr(on, name).data)
