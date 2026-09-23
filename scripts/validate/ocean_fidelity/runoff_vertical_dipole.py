@@ -188,8 +188,17 @@ def main() -> int:
     hi = np.percentile(nz, args.river_pct)
     lo = np.percentile(nz, args.low_pct)
 
+    # The HALO is the conservation test. Horizontal smoothing moves river
+    # water out of the mouth and into the cells around it, so if extra
+    # smoothing is what makes FESOM's mouths saltier, the same water must show
+    # up as FRESHER somewhere nearby -- and the mouth-plus-halo total must
+    # very nearly cancel. A saltier mouth with no fresher halo is not
+    # smoothing; it is missing water.
     strata = [
         (f"river mouths (>p{args.river_pct:g})", have & (rnf_full > hi)),
+        (f"halo (p{args.low_pct:g}-p{args.river_pct:g})",
+         have & (rnf_full > lo) & (rnf_full <= hi)),
+        (f"mouth+halo (>p{args.low_pct:g})", have & (rnf_full > lo)),
         (f"low runoff (<=p{args.low_pct:g})", have & (rnf_full > 0.0)
          & (rnf_full <= lo)),
     ]
