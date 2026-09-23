@@ -654,7 +654,13 @@ def test_new_config_fields_sit_at_the_tuple_end():
     import hashlib
     for cls, n, digest in (
             (MorrisonConfig, 116, "7c53729bd19b02a1"),
-            (ExperimentConfig, 283, "3ff6c466165774e9"),
+            # 283 -> 288 at the 2026-09-23 merge of main: main inserted five
+            # cloud_cap_floor_* fields MID-tuple (idx ~65-69), which is exactly
+            # what this guard is for.  Recomputed, not relaxed -- the audit
+            # that accompanied it found no positional construction of this
+            # tuple anywhere and its serialization is name-keyed (_asdict),
+            # so nothing re-binds.
+            (ExperimentConfig, 288, "f4655d1685936e55"),
             (AMIPExperimentConfig, 125, "9f3b43eb47f505b6")):
         assert len(cls._fields) == n, (cls.__name__, len(cls._fields))
         assert hashlib.sha256(",".join(cls._fields).encode()).hexdigest()[:16] \
