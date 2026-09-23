@@ -28,6 +28,17 @@ the same state:
 3. Our sedimentation acts on PRE-source pools (morrison.py:29-36); MG2
    sediments the POST-source hydrometeors (:2204-2211).
 
+READ THE ABSOLUTE COLUMN, NOT THE FRACTION.  A fraction of the reservoir is
+normalised by the very quantity under investigation, so an arm with an
+anomalously small reservoir shows large fractional sinks by construction.  On
+the 2026-09-23 day-5 states that inverted the story: the CAM6 arm removes only
+0.54x the baseline's cloud water in absolute terms and condenses 2.23x as much,
+so its cold-sector microphysics is a NET SOURCE of +0.090 kg/m2/day while the
+baseline's is a NET SINK of -0.112.  Microphysics alone would GROW the CAM6
+reservoir and SHRINK the baseline's, which is the opposite of the observed
+deficit.  The band also does not balance, so terms of order 0.1 kg/m2/day from
+transport and the other parameterizations are present and outside this probe.
+
 NUMBERS ONLY -- no verdict.
 """
 import argparse
@@ -185,6 +196,12 @@ def main():
         net = band_rate(np.asarray(out.dq_c_dt), dp, A, g, mask) * _DAY
         denom = max(abs(band_rate(np.asarray(t), dp, A, g, mask) * _DAY)
                     for t in out.qc_budget.values()) or 1.0
+        gross_sink = sum(
+            -band_rate(np.asarray(t), dp, A, g, mask) * _DAY
+            for t in out.qc_budget.values()
+            if band_rate(np.asarray(t), dp, A, g, mask) < 0.0)
+        print(f"[{a.label}]     {'GROSS SINK (absolute)':22s} {gross_sink:13.6e} "
+              f"kg/m2/day  <- compare THIS between arms, not the fractions")
         print(f"[{a.label}]     {'SUM OF TERMS':22s} {tot:+13.6e}")
         print(f"[{a.label}]     {'scheme dq_c_dt':22s} {net:+13.6e}")
         print(f"[{a.label}]     {'RESIDUAL':22s} {tot - net:+13.6e}   "
