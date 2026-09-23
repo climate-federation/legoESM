@@ -4144,6 +4144,9 @@ def main(argv=None) -> int:
     parser.add_argument("--developed-stage2-wzv-walk", action="store_true",
                         help="walk the PRODUCER of NEMO's stage-2 vertical "
                              "velocity at the developed day-180 state")
+    parser.add_argument("--developed-stage2-wzv-split", action="store_true",
+                        help="score NEMO's SECOND per-stage continuity solve "
+                             "at the developed day-180 state")
     parser.add_argument("--reference-process-trace", type=Path,
                         default=DEFAULT_REFERENCE_PROCESS_TRACE,
                         help="admitted Round-124 process trace that a new "
@@ -4194,6 +4197,71 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
+    if args.developed_stage2_wzv_split:
+        require(args.expect_commit is not None,
+                "--developed-stage2-wzv-split needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-stage2-wzv-split needs --daily-record-audit")
+        require(args.developed_stage2_record_root is not None,
+                "--developed-stage2-wzv-split needs "
+                "--developed-stage2-record-root")
+        try:
+            report = developed_stage2_wzv_split_walk(
+                args.daily_record_root, args.daily_record_audit,
+                args.expect_commit, args.developed_stage2_record_root,
+                args.root, plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            if str(error).startswith("PLANT-BLIND"):
+                # A control that did NOT catch its plant must never print the
+                # marker a caught one prints (round 103's defect).  Exit 2,
+                # distinct from a fired plant's 1.
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            # Any OTHER fail-closed check tripping under a plant is the plant
+            # being caught by a control earlier in the walk.
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: {report['control']}")
+            return 1
+        for name, row in report[
+                "vertical_velocity_scored_against_nemo"].items():
+            print(f"  WW {name}: rms {row['active_rms']:.6e} "
+                  f"max {row['active_max_abs']:.6e} "
+                  f"removed {row['rms_removed_fraction'] * 100.0:.3f}% "
+                  f"relative {row['relative_to_own_rms']:.6e}")
+        for name, row in report["stage2_rhs_scored_against_nemo"].items():
+            print(f"  RHS {name}: u rms {row['u']['active_rms']:.6e} "
+                  f"v rms {row['v']['active_rms']:.6e}")
+        out = report["stage2_output_velocity_scored_against_nemo"]
+        for name in ("before_shared", "after_momentum"):
+            print(f"  STAGE2-OUT {name}: u rms {out[name]['u']['active_rms']:.6e} "
+                  f"v rms {out[name]['v']['active_rms']:.6e}")
+        identity = report["controls"]["tracer_identity"]
+        print("  TRACER IDENTITY cells moved: "
+              + ", ".join(f"{key} {row['cells_unequal']}"
+                          for key, row in identity.items()))
+        step_move = report["one_step_tracer_move_through_the_velocity"]
+        print(f"  ONE-STEP T rms {step_move['T']['one_step_rms']:.6e} K "
+              f"({step_move['T']['as_fraction_of_the_shared_field_move']:.4f} "
+              "of round 159's shared-field move)")
+        clock = report["residual_discriminator"]["oracle_stage_clock_pair"]
+        print(f"  RESIDUAL clock/level pair: rms {clock['active_rms']:.6e} "
+              f"removed {clock['residual_removed_fraction'] * 100.0:.3f}% "
+              f"relative {clock['relative_to_own_rms']:.6e}")
+        for tag, row in report["residual_discriminator"][
+                "live_thickness_ratio_operand"].items():
+            print(f"  RESIDUAL r3{tag}(Kmm) vs oracle: cells "
+                  f"{row['active_cells_unequal']}/{row['active_cells_scored']} "
+                  f"rms {row['active_rms']:.6e} "
+                  f"relative {row['relative_to_own_rms']:.6e}")
+        print("STATUS PASS: round-160 developed stage-2 wzv split walk")
+        return 0
     if args.developed_stage2_wzv_walk:
         require(args.expect_commit is not None,
                 "--developed-stage2-wzv-walk needs --expect-commit")
@@ -8153,6 +8221,380 @@ def developed_stage2_wzv_walk(
         "stage2_rhs_scored_against_nemo": rhs,
         "round158_reference": ROUND158,
         "tracer_consequence_of_changing_the_shared_field": tracer,
+    }
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    return report
+
+
+DEVELOPED_WZV_SPLIT_PLANTS = ("wzv-split-shared", "wzv-split-inert")
+
+
+def developed_stage2_wzv_split_walk(
+        daily_root: Path, daily_audit: Path, expected_commit: str,
+        stage2_record_root: Path, evidence_root: Path, *,
+        plant: str | None = None) -> dict:
+    """Score NEMO's SECOND per-stage continuity solve against the oracle.
+
+    Round 159 measured that the oracle solves continuity twice per stage on
+    this deck: once on the RAW stage velocity for the momentum vertical
+    advection (``stprk3_stg.f90:360``, the velocity indicator at
+    ``divhor.f90:126-130``) and once on the barotropically corrected
+    transports for the tracer transport (``traadv.f90:274``, the transport
+    indicator at ``divhor.f90:134-138``), the second overwriting the same
+    array.  legoESM solved it once.  Round 160 builds the second solve at
+    stages 2 and 3; this walk scores it.
+
+    Three things have to hold at once and each has its own row: the momentum
+    field moves onto the oracle's, the TRACER field does not move at all, and
+    the stage-2 right-hand side lands on round 158's oracle-``ww`` ceiling.
+    Every arm is one production step through ``LatLonCGridOceanModel.step``
+    under production just-in-time compilation from the oracle's admitted
+    day-180 entry, never an isolated closure (operator note L-amend).
+    """
+    require(plant in (None, "none") + DEVELOPED_WZV_SPLIT_PLANTS,
+            f"unknown developed stage-2 wzv split plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+        nemo_stage_momentum_wzv_executes)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"wzv split walk requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "wzv split walk commit differs from --expect-commit")
+    evidence_root = Path(evidence_root)
+    oracle = _developed_stage2_record(Path(stage2_record_root))
+    rows = dict(oracle["rows"])
+
+    bundle = _developed_entry_bundle(
+        daily_root, daily_audit, expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+
+    require(nemo_stage_momentum_wzv_executes(card.recipe.model_config),
+            "the GYRE card does not resolve NEMO's two-solve stage program, "
+            "so this walk would score a program the card never runs")
+
+    nlev = int(np.asarray(state.T.data).shape[-1])
+    nemo_ww = np.ascontiguousarray(np.asarray(rows["ww_t"])[..., :nlev])
+    cell_mask = np.asarray(gate.expected_masks(card)["T"])[..., :nlev]
+
+    observer_unequal: list[int] = []
+
+    def step(**hook_kwargs):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hook_kwargs)
+            if hook_kwargs else None)
+        result = model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        jax.device_get(result)
+        return result
+
+    # The two ordinary steps: production (the split) and the before arm (the
+    # single shared solve production ran before round 160).
+    after_plain = step()
+    before_plain = step(legacy_shared_stage_wzv=True)
+
+    def run(base, *, passive=True, **hook_kwargs):
+        result = step(**hook_kwargs)
+        if passive:
+            # A WRITE-only exposure substitutes its slots AFTER the ordinary
+            # step completes, so passivity is judged on every OTHER field.
+            neutral = result._replace(u=base.u, v=base.v, T=base.T)
+            observer_unequal.append(_state_bit_mismatches(neutral, base))
+        return result
+
+    def stage_w(stage, *, momentum, legacy=False, base=None, **extra):
+        hooks = dict(expose_tracer_transport_stage=stage,
+                     expose_tracer_transport_as_ww=True,
+                     expose_stage_momentum_w=momentum)
+        if legacy:
+            hooks["legacy_shared_stage_wzv"] = True
+        hooks.update(extra)
+        arm_base = base if base is not None else (
+            before_plain if legacy else after_plain)
+        return np.asarray(
+            run(arm_base, passive=not extra, **hooks).T.data)
+
+    def stage2_rhs(*, legacy=False):
+        hooks = dict(expose_stage2_momentum_rhs=True)
+        if legacy:
+            hooks["legacy_shared_stage_wzv"] = True
+        base = before_plain if legacy else after_plain
+        result = run(base, **hooks)
+        return (np.asarray(result.u.data), np.asarray(result.v.data))
+
+    def stage2_out(*, legacy=False):
+        hooks = dict(expose_momentum_stage=2)
+        if legacy:
+            hooks["legacy_shared_stage_wzv"] = True
+        base = before_plain if legacy else after_plain
+        result = run(base, **hooks)
+        return (np.asarray(result.u.data), np.asarray(result.v.data))
+
+    # FACE-WINDOW CONTROL, the same one round 159 used.
+    entry_control = {
+        tag: _score_stage2_face(
+            np.asarray(getattr(state, tag).data),
+            rows[f"uu_vv_Kbb_{tag}"], rows[f"umask_vmask_{tag}"])
+        for tag in ("u", "v")
+    }
+    require(all(row["cells_unequal"] == 0 for row in entry_control.values()),
+            "the Round-156 record window does not land on legoESM's face "
+            f"grid: {entry_control}")
+
+    # CELL-WINDOW CONTROL: the dry-column pattern, both directions.
+    nemo_dry_column = np.all(np.asarray(rows["rhd_t"]) == 0.0, axis=-1)
+    lego_dry_column = np.asarray(state.land_mask.data) <= 0.5
+    cell_window = {
+        "nemo_dry_columns": int(np.count_nonzero(nemo_dry_column)),
+        "lego_dry_columns": int(np.count_nonzero(lego_dry_column)),
+        "columns_disagreeing": int(
+            np.count_nonzero(nemo_dry_column != lego_dry_column)),
+    }
+    require(cell_window["columns_disagreeing"] == 0,
+            "the Round-156 record cell window does not land on legoESM's T "
+            f"grid: {cell_window}")
+    off_mask_max = float(np.max(np.abs(nemo_ww[~(cell_mask != 0.0)]),
+                                initial=0.0))
+    require(off_mask_max == 0.0,
+            "NEMO's stage-2 vertical velocity is non-zero where the card's "
+            f"mask is dry, so the two masks are not one mask: {off_mask_max}")
+
+    # The four stage-2 fields the split touches or must not touch.
+    before_mom_w = stage_w(2, momentum=True, legacy=True)
+    before_trc_w = stage_w(2, momentum=False, legacy=True)
+    after_mom_w = stage_w(2, momentum=True)
+    after_trc_w = stage_w(2, momentum=False)
+
+    # LIVENESS.  With the split OFF the two consumers must read ONE field;
+    # with it ON they must read two.  An inert split would otherwise report
+    # "the tracer field did not move" while proving nothing.
+    liveness = {
+        "before_momentum_equals_tracer": _score_stage2_face(
+            before_mom_w, before_trc_w, cell_mask),
+        "after_momentum_versus_tracer": _score_stage2_face(
+            after_mom_w, after_trc_w, cell_mask),
+    }
+    if plant == "wzv-split-inert":
+        # Claim the split is on while leaving it off.  Being CAUGHT is the two
+        # consumers reading one field; anything else is PLANT-BLIND, and a
+        # blind control must not be able to print the fired marker.
+        if liveness["before_momentum_equals_tracer"][
+                "active_cells_unequal"] > 0:
+            raise GateError(
+                "PLANT-BLIND: the liveness control did not refuse an arm "
+                "whose two consumers still read one field: "
+                f"{liveness['before_momentum_equals_tracer']}")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": liveness["before_momentum_equals_tracer"]}
+    require(liveness["before_momentum_equals_tracer"][
+                "active_cells_unequal"] == 0,
+            "the before arm's two consumers do not read one field, so it is "
+            f"not the pre-split program: {liveness}")
+    require(liveness["after_momentum_versus_tracer"][
+                "active_cells_unequal"] > 0,
+            "the split left the momentum and tracer fields equal, so it "
+            f"never fired: {liveness}")
+
+    # THE TRACER IDENTITY.  The oracle re-solves continuity for the tracers,
+    # so the split must leave their field and their stage state untouched.
+    tracer_identity = {
+        "stage2_tracer_w": _score_stage2_face(
+            after_trc_w, before_trc_w, cell_mask),
+    }
+    for field in ("T", "S"):
+        before_stage = np.asarray(getattr(
+            run(before_plain, expose_tracer_stage=2,
+                legacy_shared_stage_wzv=True), field).data)
+        after_stage = np.asarray(getattr(
+            run(after_plain, expose_tracer_stage=2), field).data)
+        tracer_identity[f"stage2_tracer_{field}"] = _score_stage2_face(
+            after_stage, before_stage, cell_mask)
+    if plant == "wzv-split-shared":
+        # Claim the split is on while the SHARED field is the one that moved
+        # (round 159's arm).  The tracer-identity control must refuse it.
+        shared = stage_w(2, momentum=False, legacy=True,
+                         base=before_plain,
+                         stage2_wzv_velocity_form=True)
+        caught = _score_stage2_face(shared, before_trc_w, cell_mask)
+        if caught["active_cells_unequal"] == 0:
+            raise GateError(
+                "PLANT-BLIND: the tracer-identity control did not refuse an "
+                f"arm that moved the shared field: {caught}")
+        return {"status": "PLANT-FIRED", "plant": plant, "control": caught}
+    require(all(row["cells_unequal"] == 0
+                for row in tracer_identity.values()),
+            "the split moved the tracer path, so it changed two things: "
+            f"{tracer_identity}")
+
+    active = cell_mask != 0.0
+    own_rms = float(np.sqrt(np.mean(nemo_ww[active] ** 2)))
+    scored = {
+        "before_shared": _score_stage2_face(before_mom_w, nemo_ww, cell_mask),
+        "after_momentum": _score_stage2_face(after_mom_w, nemo_ww, cell_mask),
+        "after_tracer": _score_stage2_face(after_trc_w, nemo_ww, cell_mask),
+    }
+    base_rms = scored["before_shared"]["active_rms"]
+    base_max = scored["before_shared"]["active_max_abs"]
+    for row in scored.values():
+        row["relative_to_own_rms"] = (
+            float(row["active_rms"] / own_rms) if own_rms > 0.0 else 0.0)
+        row["rms_removed_fraction"] = (
+            float((base_rms - row["active_rms"]) / base_rms)
+            if base_rms > 0.0 else 0.0)
+        row["max_abs_removed_fraction"] = (
+            float((base_max - row["active_max_abs"]) / base_max)
+            if base_max > 0.0 else 0.0)
+
+    # AUTHORITY.  The before arm must reproduce rounds 158 and 159 exactly, or
+    # this walk is splitting a different number.
+    ROUND159_PRODUCTION_WW = 1.2326857042024439e-08
+    ROUND159_VELOCITY_FORM_WW = 2.334682468902387e-13
+    ROUND158 = {
+        "production": {"u": 3.844166e-12, "v": 6.428546e-12},
+        "nemo_ww_ceiling": {"u": 1.121563e-14, "v": 1.308047e-14},
+    }
+    require(abs(scored["before_shared"]["active_rms"]
+                - ROUND159_PRODUCTION_WW) <= 5.0e-22,
+            "the before arm does not reproduce round 159's production "
+            f"vertical velocity: {scored['before_shared']['active_rms']}")
+
+    rhs = {}
+    for name, frame in (("before_shared", stage2_rhs(legacy=True)),
+                        ("after_momentum", stage2_rhs())):
+        rhs[name] = {
+            tag: _score_stage2_face(
+                frame[index], rows[f"after_adv_{tag}"],
+                rows[f"umask_vmask_{tag}"])
+            for tag, index in (("u", 0), ("v", 1))
+        }
+    for tag in ("u", "v"):
+        require(abs(rhs["before_shared"][tag]["active_rms"]
+                    - ROUND158["production"][tag]) <= 5.0e-18,
+                "the before arm's after-advection row moved from round 158 "
+                f"on {tag}: {rhs['before_shared'][tag]['active_rms']}")
+        rhs["after_momentum"][tag]["rms_removed_fraction"] = float(
+            (ROUND158["production"][tag]
+             - rhs["after_momentum"][tag]["active_rms"])
+            / ROUND158["production"][tag])
+        rhs["after_momentum"][tag]["times_the_nemo_ww_ceiling"] = float(
+            rhs["after_momentum"][tag]["active_rms"]
+            / ROUND158["nemo_ww_ceiling"][tag])
+
+    # STAGE 3's ENTRY: the stage-2 output velocity, which is the field round
+    # 155 attributed 95.2% of the developed stage-3 transport difference to
+    # and round 157 measured at 1.30926020461275e-06 m/s.
+    ROUND157_STAGE2_OUTPUT = {"u": 1.30926020461275e-06}
+    stage2_output = {}
+    for name, frame in (("before_shared", stage2_out(legacy=True)),
+                        ("after_momentum", stage2_out())):
+        stage2_output[name] = {
+            tag: _score_stage2_face(
+                frame[index], rows[f"uu_vv_Kaa_final_{tag}"],
+                rows[f"umask_vmask_{tag}"])
+            for tag, index in (("u", 0), ("v", 1))
+        }
+    for tag in ("u", "v"):
+        base_out = stage2_output["before_shared"][tag]["active_rms"]
+        stage2_output["after_momentum"][tag]["rms_removed_fraction"] = (
+            float((base_out - stage2_output["after_momentum"][tag]
+                   ["active_rms"]) / base_out) if base_out > 0.0 else 0.0)
+    stage2_output["round157_reference"] = ROUND157_STAGE2_OUTPUT
+
+    # STAGE 3: the split must fire there too (stprk3_stg.f90:358 skips only
+    # stage 1).  There is no developed stage-3 vertical-velocity record, so
+    # this row is the two fields against EACH OTHER, not against the oracle.
+    stage3_split = _score_stage2_face(
+        stage_w(3, momentum=True), stage_w(3, momentum=False), cell_mask)
+
+    # THE TRACER CONSEQUENCE, for comparison with round 159's shared-field
+    # move of 1.203492e-07 K.  The split changes the final one-step tracer
+    # state only THROUGH the corrected stage-2 velocity.
+    ROUND159_SHARED_TRACER_RMS = 1.2034924e-07
+    tracer_step = {}
+    for field in ("T", "S"):
+        delta = (np.asarray(getattr(after_plain, field).data)[active]
+                 - np.asarray(getattr(before_plain, field).data)[active])
+        tracer_step[field] = {
+            "cells_scored": int(delta.size),
+            "cells_unequal": int(np.count_nonzero(delta != 0.0)),
+            "one_step_rms": float(np.sqrt(np.mean(delta * delta))),
+            "one_step_max_abs": float(np.max(np.abs(delta), initial=0.0)),
+        }
+    tracer_step["round159_shared_field_T_rms"] = ROUND159_SHARED_TRACER_RMS
+    tracer_step["T"]["as_fraction_of_the_shared_field_move"] = float(
+        tracer_step["T"]["one_step_rms"] / ROUND159_SHARED_TRACER_RMS)
+
+    # THE DISCRIMINATOR for the residual round 159 registered.
+    clock_w = stage_w(2, momentum=True, base=after_plain,
+                      stage2_momentum_wzv_clock_pair=True)
+    residual = {
+        "after_momentum": scored["after_momentum"],
+        "oracle_stage_clock_pair": _score_stage2_face(
+            clock_w, nemo_ww, cell_mask),
+    }
+    residual["oracle_stage_clock_pair"]["relative_to_own_rms"] = float(
+        residual["oracle_stage_clock_pair"]["active_rms"] / own_rms)
+    residual["oracle_stage_clock_pair"]["residual_removed_fraction"] = float(
+        (scored["after_momentum"]["active_rms"]
+         - residual["oracle_stage_clock_pair"]["active_rms"])
+        / scored["after_momentum"]["active_rms"])
+    r3_result = run(after_plain, expose_stage_face_r3=2)
+    r3_rows = {}
+    for tag, field in (("u", "u"), ("v", "v")):
+        lego_r3 = np.asarray(getattr(r3_result, field).data)[..., 0]
+        r3_rows[tag] = _score_stage2_face(
+            lego_r3, np.asarray(rows[f"r3_Kmm_{tag}"]),
+            np.asarray(rows[f"umask_vmask_{tag}"])[..., 0])
+        own = float(np.sqrt(np.mean(
+            np.asarray(rows[f"r3_Kmm_{tag}"]) ** 2)))
+        r3_rows[tag]["relative_to_own_rms"] = (
+            float(r3_rows[tag]["active_rms"] / own) if own > 0.0 else 0.0)
+    residual["live_thickness_ratio_operand"] = r3_rows
+
+    require(all(count == 0 for count in observer_unequal),
+            f"a passive exposure moved production state: {observer_unequal}")
+
+    report = {
+        "format": "gyre-round160-developed-stage2-wzv-split-walk-v1",
+        "status": "PASS",
+        "worktree": stamp,
+        "record": {"sha256": oracle["sha256"], "meta": oracle["meta"]},
+        "entry": {"step": DEVELOPED_ENTRY_STEP,
+                  "process_step": DEVELOPED_PROCESS_STEP},
+        "controls": {
+            "entry_face_window": entry_control,
+            "cell_window": cell_window,
+            "nemo_ww_off_mask_max_abs": off_mask_max,
+            "split_liveness": liveness,
+            "tracer_identity": tracer_identity,
+            "passive_observer_unequal": observer_unequal,
+        },
+        "nemo_ww_own_rms": own_rms,
+        "vertical_velocity_scored_against_nemo": scored,
+        "stage2_rhs_scored_against_nemo": rhs,
+        "stage2_output_velocity_scored_against_nemo": stage2_output,
+        "stage3_momentum_versus_tracer_field": stage3_split,
+        "one_step_tracer_move_through_the_velocity": tracer_step,
+        "residual_discriminator": residual,
+        "round158_reference": ROUND158,
+        "round159_reference": {
+            "production_ww_rms": ROUND159_PRODUCTION_WW,
+            "velocity_form_ww_rms": ROUND159_VELOCITY_FORM_WW,
+        },
     }
     evidence_root.mkdir(parents=True, exist_ok=True)
     return report
