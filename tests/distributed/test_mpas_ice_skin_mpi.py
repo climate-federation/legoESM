@@ -244,7 +244,11 @@ def test_serial_and_distributed_skins_agree_within_the_atmospheric_spread():
     # defect if it exceeds what its own forcing already differs by.
     atm = float(np.max(np.abs(
         np.asarray(d.state.T.data)[:n_owned] - np.asarray(ref.state.T.data)[gids])))
-    assert diff < max(10.0 * atm, 0.5), (
+    # The multiplier is set from what was measured on this configuration, not
+    # chosen for comfort: a ceiling of ten times the atmospheric difference
+    # would admit a permutation that swaps a handful of cells, which was GLM's
+    # objection to the first version of this bound.
+    assert diff < max(3.0 * atm, 0.5), (
         f"the distributed skin differs from the serial skin by {diff:.3g} K, "
         f"far beyond the {atm:.3g} K the two atmospheres differ by -- that is "
         f"a partitioning defect, not inherited weather")

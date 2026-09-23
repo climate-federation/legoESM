@@ -5985,9 +5985,15 @@ class ModelDriver:
                 # Prognostic ice skin: a cell field, so it gathers like the
                 # rest — and it gathers HERE, with the other collectives and
                 # before the rank-0 bail, or every non-root rank hangs.  The
-                # selection below (live field, else the staged-but-not-yet-
-                # adopted one) is config-driven and therefore identical on
-                # every rank, so all ranks issue the same single collective.
+                # Every rank must agree on whether to issue this collective or
+                # it deadlocks, and the selection below reads per-rank STATE,
+                # not the config flag -- so the agreement is worth stating.
+                # It holds because the live field is set for EVERY rank at the
+                # top of ``_run_mpas`` whenever the feature is on (seeded, not
+                # conditional on that rank owning ice), and the staged fallback
+                # comes from a checkpoint every rank loads. A future change
+                # that makes either one conditional on a rank's own cells would
+                # reintroduce the hang.
                 if getattr(self.config, "mpas_ice_skin_prognostic", False):
                     _skin_local = getattr(self, "_ice_T_skin", None)
                     if _skin_local is None and isinstance(self._carry_aux, dict):
