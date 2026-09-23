@@ -62,8 +62,9 @@ G=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GAT
 STEM=$G/ORCA1_5d_20000101_20000331
 DUMP=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/_nodedist_work/cells_d30.npz
 FES=$R/fesom_orca1faithtint_d30/snapshot_day0030.npz
+TRP=$R/trp_pinned_d30/snapshot_final.npz
 
-for f in "$DUMP" "$FES" ${STEM}_grid_T.nc; do
+for f in "$DUMP" "$FES" "$TRP" ${STEM}_grid_T.nc; do
   [ -r "$f" ] || { echo "FATAL: missing $f"; exit 1; }
 done
 
@@ -77,7 +78,7 @@ echo "=== the control ==="
 # --nemo-time-idx 5 is the record the day-30 scorecard used (records are 5-day
 # means, so the day-N record is N/5 - 1); the dump was written from it.
 $PY -u scripts/validate/ocean_fidelity/fesom_pseudo_arm.py \
-  --dump "$DUMP" --fesom "$FES" \
+  --dump "$DUMP" --fesom "$FES" --tripole "$TRP" \
   --nemo-gridt ${STEM}_grid_T.nc --nemo-time-idx 5 --res-deg 1.0
 rc2=$?
 echo "=== card exit: $rc2 ==="

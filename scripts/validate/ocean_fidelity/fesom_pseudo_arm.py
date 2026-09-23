@@ -147,6 +147,11 @@ def main() -> int:
                         "supplies the scored mask, area weights, edge rings "
                         "and the dumped fields the gates reproduce.")
     p.add_argument("--fesom", type=Path, required=True)
+    p.add_argument("--tripole", type=Path, required=True,
+                   help="The tripole snapshot, needed only as the CONTROL for "
+                        "the stencil-reach test: it shares the oracle's grid "
+                        "and land mask, so its stencil cannot cross a "
+                        "coastline the oracle knows about.")
     p.add_argument("--nemo-gridt", type=Path, required=True)
     p.add_argument("--nemo-time-idx", type=int, required=True)
     p.add_argument("--res-deg", type=float, default=1.0)
@@ -175,15 +180,18 @@ def main() -> int:
             f"this run disagree about the target.")
 
     F = _load_legoesm(a.fesom)
+    T = _load_legoesm(a.tripole)
     N = _load_nemo(a.nemo_gridt, a.nemo_time_idx)
-    print(f"[load] FESOM {F['sss'].shape} nodes, oracle {N['sss'].shape}")
+    print(f"[load] FESOM {F['sss'].shape} nodes, tripole {T['sss'].shape}, "
+          f"oracle {N['sss'].shape}")
 
     def rg(src, field):
         return regrid_curv_to_latlon(field, src["lat"], src["lon"],
                                      src["mask"], tgt_lat, tgt_lon)
 
     # --- gate 1 + 2: reproduce the dumped fields -----------------------------
-    for label, src, want in (("oracle", N, sss_n), ("FESOM", F, sss_b)):
+    for label, src, want in (("oracle", N, sss_n), ("FESOM", F, sss_b),
+                             ("tripole", T, sss_a)):
         got, _ = rg(src, src["sss"])
         err = float(np.nanmax(np.abs(got - want)))
         if not (err <= _REPRO_TOL):
@@ -247,6 +255,30 @@ def main() -> int:
         pseudo_nodes.reshape(np.asarray(F["lat"]).shape),
         F["lat"], F["lon"], F["mask"], tgt_lat, tgt_lon)
 
+    # --- stencil reach: does FESOM draw its coastal values across land? ------
+    # The one surviving mechanism this data can still reach. FESOM's snapshot
+    # has NO LAND -- every node is wet -- so nothing stops the four-neighbour
+    # stencil at a coastal target cell from averaging in nodes on the far side
+    # of a headland or a bay. Narrowing it to the SINGLE nearest node removes
+    # three of the four chances to do that.
+    #
+    # ONE-SIDED, and for a reason worth stating: k=1 also drops the averaging,
+    # which by itself would RAISE the error. So a FALL in ring 1 at k=1 is
+    # evidence of cross-barrier contamination, while no change or a rise is
+    # ambiguous and must be reported as such.
+    #
+    # The tripole is the control and it is what makes this readable at all: it
+    # runs on the ORACLE'S OWN grid and land mask, so its stencil cannot cross
+    # a coastline the oracle knows about. If BOTH arms move alike, the k=1
+    # change is about averaging and says nothing about barriers; only FESOM's
+    # ring 1 moving is the signature.
+    lon2d_f, lat2d_f = np.meshgrid(tgt_lon, tgt_lat)
+    k1 = {}
+    for lab, src in (("tripole", T), ("FESOM", F)):
+        v, _ = idw_to_points(src["sss"], src["lat"], src["lon"], src["mask"],
+                             lat2d_f.ravel(), lon2d_f.ravel(), k=1)
+        k1[lab] = v.reshape(scored.shape) - sss_n
+
     err_a, err_b = sss_a - sss_n, sss_b - sss_n
     err_p = pseudo - sss_n
     use = scored & np.isfinite(err_a) & np.isfinite(err_b) & np.isfinite(err_p)
@@ -254,7 +286,8 @@ def main() -> int:
         raise SystemExit(f"VACUOUS: only {int(use.sum())} usable cells")
 
     print(f"\n{'edge ring':>12} {'cells':>7} {'tripole':>9} {'FESOM':>9} "
-          f"{'PSEUDO':>9} {'FES-PSE':>9} {'excess':>9} {'pseudo/ex':>10}")
+          f"{'PSEUDO':>9} {'FES-PSE':>9} {'trip k1':>9} {'FES k1':>9} "
+          f"{'excess':>9} {'pseudo/ex':>10}")
     rows = [(k, str(k)) for k in range(1, int(ring.max()) + 1)]
     rows.append((0, "interior"))
     rows.append((None, "ALL"))
@@ -278,8 +311,10 @@ def main() -> int:
         dd = rb ** 2 - ra ** 2
         ex = np.sqrt(dd) if dd > 0 else -np.sqrt(-dd)
         frac = rp / ex if ex > 0 else float("nan")
+        ka = wrms(k1["tripole"], area, m)
+        kb = wrms(k1["FESOM"], area, m)
         print(f"{lab:>12} {n:7d} {ra:9.4f} {rb:9.4f} {rp:9.4f} {rr:9.4f} "
-              f"{ex:9.4f} {frac:10.2f}")
+              f"{ka:9.4f} {kb:9.4f} {ex:9.4f} {frac:10.2f}")
 
     # GLM's tightening, and the reason the word "bound" is not used above.
     # The pseudo field is band-limited to the ORACLE's resolution and its
@@ -306,6 +341,15 @@ def main() -> int:
     print(f"  FESOM's error:       ring 1 "
           f"{wcorr(err_p, err_b, use & (ring == 1)):+.3f}, all "
           f"{wcorr(err_p, err_b, use):+.3f}")
+
+    print("\n'trip k1'/'FES k1' narrow each arm's interpolation to its SINGLE "
+          "nearest source, removing three of the four chances to average in a "
+          "node from across a coastline. Read ONE-SIDED: k=1 also drops the "
+          "averaging, which alone would RAISE the error, so a FALL in FESOM's "
+          "ring 1 is evidence of cross-barrier contamination while no change "
+          "or a rise is ambiguous. The tripole is the control -- it shares the "
+          "oracle's grid and land mask, so both arms moving alike means the "
+          "change is about averaging, not barriers.")
 
     print("\nPSEUDO is the oracle's own field carried through FESOM's mesh: "
           "zero model error by construction, so it measures what the SCORING "
