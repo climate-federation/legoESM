@@ -84,6 +84,8 @@ FAIL=0
 SUMMARY=()
 
 for d in "${DECKS[@]}"; do
+  # SKIP_DECK=<glob> drops rows (e.g. "96|10|2|*" while the 24-rank C96 hang is open)
+  [ -n "${SKIP_DECK:-}" ] && [[ "$d" == $SKIP_DECK ]] && { echo "===== SKIPPED $d (SKIP_DECK) ====="; continue; }
   IFS='|' read -r N KM KT PAD NSPLIT DT STEPS <<<"$d"
   RANKS=$((6 * KT * KT)); SNODES=$((RANKS / 2))
   REF="$OUT/ref_c${N}_km${KM}_kt${KT}.npz"
