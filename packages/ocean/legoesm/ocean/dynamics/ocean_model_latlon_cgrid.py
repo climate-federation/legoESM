@@ -5809,6 +5809,17 @@ class LatLonCGridOceanModel:
                             "vorticity, advection, keg, or zad")
                     _op_u = _operator_components[f"{_operator_name}_u"].data
                     _op_v = _operator_components[f"{_operator_name}_v"].data
+                    if (_operator_name in ("keg", "zad")
+                            and extra_rhs is not None):
+                        # The two halves are the VECTOR form's routines.  A
+                        # flux-form card adds its own vertical term to the
+                        # same dyn_adv bucket through ``extra_rhs``, and that
+                        # term belongs to neither half, so publishing a half
+                        # there would silently omit it.  Refuse instead.
+                        raise ValueError(
+                            "expose_momentum_operator='keg'/'zad' is the "
+                            "vector-invariant split; this stage carries a "
+                            "separate flux-form vertical term")
                     if _operator_name == "advection" and extra_rhs is not None:
                         # dynadv_up3's stage-3-style vertical term is evaluated
                         # by the shared literal helper and added to the same

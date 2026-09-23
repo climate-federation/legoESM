@@ -7425,8 +7425,12 @@ def developed_stage2_advection_split(
         "ww_dry_column_max_abs": float(np.max(
             np.abs(np.asarray(rows["ww_t"])[nemo_dry_column]), initial=0.0)),
     }
-    require(t_window_control["columns_disagreeing"] == 0
-            and t_window_control["ww_bottom_interface_max_abs"] == 0.0,
+    # Only the dry-column pattern DISCRIMINATES: the bottom interface is
+    # architecturally zero in NEMO, so it reads 0.0 for every candidate
+    # window and pins nothing.  It stays as a sanity row, labelled, and the
+    # refusal rests on the land pattern alone.
+    t_window_control["bottom_interface_row_is_not_discriminating"] = True
+    require(t_window_control["columns_disagreeing"] == 0,
             "the Round-156 record cell window does not land on legoESM's "
             f"T grid: {t_window_control}")
 
@@ -7482,6 +7486,10 @@ def developed_stage2_advection_split(
             rows[f"umask_vmask_{tag}"])
         for tag, index in (("u", 0), ("v", 1))
     }
+    require(all(row["active_cells_unequal"] == 0
+                for row in halves_control.values()),
+            "legoESM's two advection halves do not sum to the bucket they "
+            f"came out of: {halves_control}")
     if plant == "keg-zad-sum":
         # The control has to catch a half that is not the half it is named.
         planted = {
@@ -7536,7 +7544,11 @@ def developed_stage2_advection_split(
         row, column, level = np.unravel_index(
             int(np.argmax(interior)), interior.shape)
         index = (int(row), int(column), int(level) + 1)
-        moved[index] = np.nextafter(moved[index], np.inf)
+        # A single unit in the last place moved exactly one face last time,
+        # one rounding from announcing nothing.  One part in a million
+        # million is still far below every difference this walk attributes
+        # and leaves the control a margin.
+        moved[index] = moved[index] * np.float64(1.0 + 1.0e-12)
         planted_zad = run_uv(
             passive=False,
             stage2_zad_operand_override=(jnp.asarray(moved), None, None),
@@ -7705,12 +7717,23 @@ def developed_stage2_advection_split(
             "owner_ratio": (rms(d_zad) / rms(d_keg)) if rms(d_keg) else
                            float("inf"),
         }
+        zad_on_nemo_ww = np.asarray(ww_arm["zad"][index])
+        closure = (zad_on_nemo_ww - zad_nemo_implied)[active]
+        split[tag]["zad_on_nemo_ww_vs_implied_rms"] = float(
+            np.sqrt(np.mean(closure * closure)) if closure.size else 0.0)
+        split[tag]["zad_on_nemo_ww_vs_implied_max_abs"] = float(
+            np.max(np.abs(closure), initial=0.0))
         split[tag]["sum_reproduces_total"] = (
             abs(split[tag]["sum_of_halves_rms"]
                 - split[tag]["total_difference_rms"])
             / split[tag]["total_difference_rms"]
             if split[tag]["total_difference_rms"] else 0.0)
 
+    require(all(row["cells_unequal"] == 0
+                for row in keg_reach_control.values()),
+            "the stage-2 vertical-velocity substitution reached the "
+            f"kinetic-energy gradient, which reads no vertical velocity: "
+            f"{keg_reach_control}")
     require(all(value == 0 for value in observer_unequal),
             "an advection-split exposure hook moved the production state "
             f"outside u/v: {observer_unequal}")
