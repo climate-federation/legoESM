@@ -90,6 +90,23 @@ def read_record(root: Path) -> tuple[np.ndarray, np.ndarray]:
     return np.moveaxis(ahmt, 0, -1), np.moveaxis(ahmf, 0, -1)
 
 
+def read_mesh_masks(root: Path) -> tuple[np.ndarray, np.ndarray]:
+    """NEMO's own tmask and fmask, both ranks, on the card's axis order."""
+
+    import netCDF4  # noqa: N813
+
+    blocks_t, blocks_f = [], []
+    for rank in (0, 1):
+        path = root / f"mesh_mask_{rank:04d}.nc"
+        require(path.is_file(), f"missing recorded mesh mask: {path}")
+        with netCDF4.Dataset(path, "r") as ds:
+            ds.set_auto_maskandscale(False)
+            blocks_t.append(np.asarray(ds.variables["tmask"][0], dtype=np.float64))
+            blocks_f.append(np.asarray(ds.variables["fmask"][0], dtype=np.float64))
+    return (np.moveaxis(np.concatenate(blocks_t, axis=2), 0, -1),
+            np.moveaxis(np.concatenate(blocks_f, axis=2), 0, -1))
+
+
 def read_file(path: Path) -> tuple[np.ndarray, np.ndarray]:
     import netCDF4  # noqa: N813
 
@@ -206,22 +223,30 @@ def run_gate(deck_root: Path, record_root: Path, *, plant: str | None = None):
     # tell the transcription apart from a wrong one.
     controls = {
         "no_mask": score(file_t[..., :ACTIVE_NZ], record_t[..., :ACTIVE_NZ]),
+        # the VERTEX-layout array read without the F index shift
         "no_f_index_shift": score(
-            (file_f[..., :ACTIVE_NZ]
-             * np.asarray(card.recipe.z_coord.nemo_een_barotropic.fmask)[
-                 ..., :ACTIVE_NZ]),
-            record_f[..., :ACTIVE_NZ]),
-        "f_read_as_t": score(
-            ahmt, record_f[..., :ACTIVE_NZ]),
+            ahmf_vertex[1:, :GLOBAL_NX], record_f[..., :ACTIVE_NZ]),
+        "f_read_as_t": score(ahmt, record_f[..., :ACTIVE_NZ]),
     }
-    # "no_f_index_shift" compares NEMO's native F field against the record in
-    # its own layout, so it is bit-identical by construction; what must differ
-    # is the VERTEX-layout array read without the shift.
-    controls["no_f_index_shift"] = score(
-        ahmf_vertex[1:, :GLOBAL_NX], record_f[..., :ACTIVE_NZ])
     for name, row in controls.items():
         require(not row["bit_identical"],
                 f"control {name!r} is vacuous: it did not change any cell")
+
+    # The masks the transcription multiplies in are the card's OWN, so they
+    # are a claim in their own right: compare them with NEMO's mesh mask over
+    # every cell, not only where the coefficient happens to be non-zero.
+    mesh_t, mesh_f = read_mesh_masks(record_root)
+    mask_rows = {
+        "tmask_vs_nemo_mesh_mask": score(tmask, mesh_t[..., :ACTIVE_NZ]),
+        "fmask_vs_nemo_mesh_mask": score(
+            np.asarray(card.recipe.z_coord.nemo_een_barotropic.fmask)[
+                ..., :ACTIVE_NZ],
+            mesh_f[..., :ACTIVE_NZ]),
+    }
+    for name, row in mask_rows.items():
+        require(row["bit_identical"],
+                f"{name}: the card's mask is not NEMO's "
+                f"({row['unequal']} cells)")
 
     # Coverage NEMO carries and the card does not: level 31 is never masked
     # (ldfdyn.f90:388-393 stops at jpkm1), and the card has no such level.
@@ -317,6 +342,7 @@ def run_gate(deck_root: Path, record_root: Path, *, plant: str | None = None):
         "record_root": str(record_root),
         "fold_consistency": fold,
         "rows": rows,
+        "card_masks_vs_nemo_mesh_mask": mask_rows,
         "controls": controls,
         "coverage": coverage,
         "f_index_map_vs_nemo_f_product": index_map,

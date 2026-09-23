@@ -2412,9 +2412,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # bit-identical) is nn_ahm_ijk_t=20: ldf_c2d builds 1/2*rn_Uv*MAX(e1,e2)
     # from the grid metrics.  "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30: the whole
     # 3-D field is READ (ldfdyn.f90:348-353) and supplied by the card on
-    # z_coord.nemo_ldf_ahmt / nemo_ldf_ahmf; A_h then only switches the
-    # operator on, exactly as rn_Uv does in NEMO's own -30 arm.  Raises on
-    # anything else, and on the file source without those operands.
+    # z_coord.nemo_ldf_ahmt / nemo_ldf_ahmf; A_h's MAGNITUDE is then unused by
+    # this operator and only its positivity still selects it, exactly as rn_Uv
+    # is unused in NEMO's own -30 arm.  Raises on anything else, on the file
+    # source without those operands, and on the file source combined with a
+    # no-slip side drag or the flux-form K_diss_h diagnostic, both of which do
+    # read the scalar A_h or a latitude profile.
     lateral_viscosity_coefficient_source: str = "nemo_ldf_c2d"
     # Lateral side boundary condition for the harmonic viscosity:
     #   "free_slip" (default) — viscous flux zeroed at walls (∂u_tang/∂n = 0).

@@ -316,3 +316,29 @@ def test_default_coefficient_source_is_the_formula():
     ldf_c2d, exactly as before."""
     assert (LatLonCGridOceanConfig.from_flat(A_h=1.0e4)
             .lateral_viscosity_coefficient_source == "nemo_ldf_c2d")
+
+
+def test_file_source_refuses_a_no_slip_side_drag():
+    """The side drag reads the SCALAR A_h, which this source does not define."""
+    geo = _geo()
+    cfg = LatLonCGridOceanConfig.from_flat(
+        lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
+        lateral_side_bc="no_slip", A_h=1.5e4, A_h_lat_scaling=True)
+    with pytest.raises(ValueError, match="no_slip"):
+        _call_visc_z(geo, cfg, None)
+
+
+def test_file_source_refuses_the_flux_form_kdiss_diagnostic():
+    """That diagnostic consumes a LATITUDE profile and would silently
+    broadcast a full three-dimensional coefficient."""
+    import types
+    geo = _geo()
+    cfg = LatLonCGridOceanConfig.from_flat(
+        lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
+        A_h=1.5e4, A_h_lat_scaling=True)
+    eke = types.SimpleNamespace(source_kdiss_h=True, kdiss_h_flux_form=True)
+    cfg = cfg._replace(gm_redi=types.SimpleNamespace(eke=eke))
+    with pytest.raises(ValueError, match="K_diss_h"):
+        _call_visc_z(geo, cfg, None)

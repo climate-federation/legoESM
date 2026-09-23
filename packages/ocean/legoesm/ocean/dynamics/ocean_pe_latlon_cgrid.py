@@ -3356,13 +3356,32 @@ def _bc_horizontal_viscosity(
                 "harmonic Laplacian (NEMO ln_dynldf_lap); B_h biharmonic is not "
                 "wired for this operator (DINO uses Laplacian only)."
             )
+        if _ahm_source == "nemo_ahm_3d_file" and _want_kdiss_flux:
+            raise ValueError(
+                "lateral_viscosity_coefficient_source='nemo_ahm_3d_file' "
+                "supplies a full (lat, lon, lev) coefficient; the flux-form "
+                "K_diss_h diagnostic consumes a LATITUDE profile and would "
+                "silently broadcast it. Not wired."
+            )
+        if (_ahm_source == "nemo_ahm_3d_file"
+                and getattr(config, "lateral_side_bc", "free_slip") != "free_slip"):
+            raise ValueError(
+                "lateral_viscosity_coefficient_source='nemo_ahm_3d_file' "
+                "cannot be combined with lateral_side_bc='no_slip': the side "
+                "drag reads the SCALAR lateral_viscosity.A_h, which this "
+                "source does not define (NEMO carries its lateral momentum "
+                "boundary condition inside the read coefficient's fmask)."
+            )
         if _ahm_source == "nemo_ahm_3d_file":
             # NEMO nn_ahm_ijk_t=-30 (ldfdyn.f90:348-353): no coefficient is
             # computed.  ahmt/ahmf are READ from eddy_viscosity_3D.nc, lateral-
             # boundary-exchanged by the read path and then masked, and the card
             # carries that result here.  rn_Uv is inert in NEMO's own -30 arm
-            # (zah0, ldfdyn.f90:314, is never referenced inside it), so A_h is
-            # only the on/off switch tested above.
+            # (zah0, ldfdyn.f90:314, is never referenced inside it), so A_h's
+            # MAGNITUDE is unused by this operator and only its positivity,
+            # tested above, still selects the operator.  The no-slip side drag
+            # does read the scalar A_h, which is why that combination is
+            # refused above rather than silently taking a stale number.
             _ahmt = getattr(z_coord, "nemo_ldf_ahmt", None)
             _ahmf = getattr(z_coord, "nemo_ldf_ahmf", None)
             if _ahmt is None or _ahmf is None:
@@ -3381,13 +3400,20 @@ def _bc_horizontal_viscosity(
                 )
             _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
             _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
-        # 3-D staircase vertex mask (NEMO fmask analogue, rn_shlat=0 free-slip):
-        # a 2-D surface vertex mask broadcast over levels leaves zeta LIVE at
-        # submerged staircase side walls, where it is computed against the dry
-        # cells' zero velocities — an accidental NO-SLIP on every slope/sill
-        # face (ahmf·zeta stress) that NEMO's 3-D fmask zeroes (free-slip).
-        # Build per level from is_active; plain z-star coords (no is_active)
-        # keep the 2-D mask bit-identically.
+        # 3-D staircase vertex mask: a 2-D surface vertex mask broadcast over
+        # levels leaves zeta LIVE at submerged staircase side walls, where it
+        # is computed against the dry cells' zero velocities — an accidental
+        # NO-SLIP on every slope/sill face (ahmf·zeta stress) that NEMO's 3-D
+        # fmask zeroes.  Build per level from is_active; plain z-star coords
+        # (no is_active) keep the 2-D mask bit-identically.
+        # THIS MASK IS NOT NEMO's fmask.  It is the four-T-cell product, 0 or
+        # 1.  NEMO's fmask carries the lateral momentum boundary condition in
+        # its VALUE (rn_shlat, and a per-strait override: 0, 0.5, 1 or 2), and
+        # ldf_dyn_init multiplies it into ahmf ONCE while dyn_ldf_lev then
+        # reads ahmf as stored.  Under the read-file coefficient source that
+        # boundary condition is therefore already inside ``_ahmf`` and this
+        # second masking is a documented, MEASURED deviation, not a match --
+        # see the round-9 receipt's OPEN item on downstream vertex masking.
         _visc_vmask = vertex_mask
         _act3 = getattr(z_coord, "is_active", None)
         if _act3 is not None:

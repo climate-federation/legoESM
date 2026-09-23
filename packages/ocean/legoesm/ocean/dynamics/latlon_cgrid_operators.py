@@ -1434,8 +1434,11 @@ def nemo_ldf_lap_viscosity_cgrid(
     ----------
     u, v : face velocities (2-D or 3-D).
     grid : LatLonGrid.
-    ahmt : (n_lat,)    T-point viscosity coefficient [m²/s].
-    ahmf : (n_lat+1,)  F-point viscosity coefficient [m²/s].
+    ahmt : (n_lat,) or (n_lat, n_lon, nlev)
+        T-point viscosity coefficient [m²/s].  The full three-dimensional form
+        is NEMO's READ coefficient (nn_ahm_ijk_t=-30) and is used as given.
+    ahmf : (n_lat+1,) or (n_lat+1, n_lon+1, nlev)
+        F-point viscosity coefficient [m²/s], on the vertex layout.
     mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
     Returns
     -------
@@ -1456,6 +1459,10 @@ def nemo_ldf_lap_viscosity_cgrid(
         # A coefficient that is already full (lat, lon, lev) -- NEMO's READ
         # ahmt_3d/ahmf_3d, nn_ahm_ijk_t=-30 -- passes through unchanged.
         if c.ndim == 3:
+            if not is_3d:
+                raise ValueError(
+                    "a full (lat, lon, lev) viscosity coefficient needs 3-D "
+                    "velocities; got 2-D")
             return c
         return c[:, None, None] if is_3d else c[:, None]
 
@@ -1628,8 +1635,11 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     ----------
     u, v : face velocities (2-D or 3-D).
     grid : LatLonGrid.
-    ahmt : (n_lat,)    T-point viscosity coefficient [m²/s].
-    ahmf : (n_lat+1,)  F-point viscosity coefficient [m²/s].
+    ahmt : (n_lat,) or (n_lat, n_lon, nlev)
+        T-point viscosity coefficient [m²/s].  The full three-dimensional form
+        is NEMO's READ coefficient (nn_ahm_ijk_t=-30) and is used as given.
+    ahmf : (n_lat+1,) or (n_lat+1, n_lon+1, nlev)
+        F-point viscosity coefficient [m²/s], on the vertex layout.
     h_k : cell-centre layer thickness (NEMO e3t), same shape as ``u``'s
         cell-centre analogue (2-D or 3-D matching ``u``/``v``).
     mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
@@ -1654,6 +1664,10 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         # A coefficient that is already full (lat, lon, lev) -- NEMO's READ
         # ahmt_3d/ahmf_3d, nn_ahm_ijk_t=-30 -- passes through unchanged.
         if c.ndim == 3:
+            if not is_3d:
+                raise ValueError(
+                    "a full (lat, lon, lev) viscosity coefficient needs 3-D "
+                    "velocities; got 2-D")
             return c
         return c[:, None, None] if is_3d else c[:, None]
 
