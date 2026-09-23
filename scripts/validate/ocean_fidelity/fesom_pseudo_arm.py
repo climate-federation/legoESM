@@ -96,6 +96,13 @@ def idw_to_points(field, src_lat_deg, src_lon_deg, ocean_mask,
     vals = np.asarray(field, dtype=np.float64).ravel()[m]
     tree = cKDTree(src_xyz)
     d, idx = tree.query(_xyz_deg(tlat, tlon), k=k)
+    # cKDTree drops the neighbour axis entirely at k=1, returning (n,) rather
+    # than (n,1), so the normalisation below would sum over the TARGET points.
+    # regrid_curv_to_latlon carries the same latent defect and never trips it
+    # because every caller uses its k=4 default; this routine is exercised at
+    # k=1 by its own tests, which is how it was found.
+    if np.ndim(d) == 1:
+        d, idx = d[:, None], idx[:, None]
     d = np.maximum(d, 1e-12)
     w = (1.0 / d) / (1.0 / d).sum(axis=1, keepdims=True)
     out = (vals[idx] * w).sum(axis=1)
