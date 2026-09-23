@@ -80,8 +80,13 @@ rc=${PIPESTATUS[0]}
 [ -r "$RUNOFF" ] || { echo "FATAL: no runoff file at $RUNOFF"; exit 1; }
 
 rc=0
+# NODE_LANE selects which unstructured lane is compared against the
+# tripole. Default FESOM reproduces every earlier run byte-for-byte;
+# NODE_LANE=mpas_orca1faithtint_d30 runs the MPAS falsification arm.
+NODE_LANE=${NODE_LANE:-fesom_orca1faithtint_d30}
+echo "node lane: $NODE_LANE"
 for DAY in 0005 0030; do
-  FES=$R/fesom_orca1faithtint_d30/snapshot_day${DAY}.npz
+  FES=$R/$NODE_LANE/snapshot_day${DAY}.npz
   TRP=$R/trp_pinned_d30/snapshot_day${DAY}.npz
   [ -r "$TRP" ] || TRP=$R/trp_pinned_d30/snapshot_final.npz
   if [ ! -r "$FES" ] || [ ! -r "$TRP" ]; then
