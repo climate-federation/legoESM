@@ -81,6 +81,40 @@ GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 DEFAULT_NLEV = int(os.environ.get("LEGOESM_MATRIX_NLEV", "40"))
 
 
+def _matrix_vcoord(declared: str) -> str:
+    """Vertical coordinate for a case, with a probe override (#1029).
+
+    The registered coordinate wins unless ``LEGOESM_MATRIX_VCOORD`` is set.
+    Why the override exists: the terrain pressure-gradient truncation error at
+    a stratified rest state is ~7x LARGER on sigma than on hybrid at the same
+    level count and the same mountain (measured: 1.37e-4 vs 1.84e-5 m/s^2 at
+    40 levels), so swapping the coordinate moves that error by a known factor
+    WITHOUT touching the timestep -- which the level-count ladder cannot do,
+    because more levels also tighten the vertical CFL.  Unset -> the declared
+    coordinate, so no committed configuration moves.  Cases registered with no
+    vertical coordinate ("none", e.g. shallow water) are never overridden.
+    """
+    if declared in ("", "none"):
+        return declared
+    return os.environ.get("LEGOESM_MATRIX_VCOORD", declared)
+
+
+def _matrix_dt_scale() -> float:
+    """Multiplier on every resolved matrix timestep (#1029 probe override).
+
+    Exists so a level-count ladder can be run at FIXED VERTICAL CFL: doubling
+    the level count halves the layer thickness, so an arm that only changes
+    ``LEGOESM_MATRIX_NLEV`` changes two things at once.  Unset -> 1.0 exactly,
+    so no committed timestep moves.
+    """
+    v = float(os.environ.get("LEGOESM_MATRIX_DT_SCALE", "1.0"))
+    if not (0.0 < v <= 1.0e3):
+        raise ValueError(
+            f"LEGOESM_MATRIX_DT_SCALE must be a positive finite multiplier; "
+            f"got {v!r}")
+    return v
+
+
 def _mpas_integrator() -> str:
     """Time integrator for the MPAS hydrostatic PE matrix cases (ico, dt=200).
 
@@ -134,9 +168,9 @@ def _latlon_polar_filter_on(case: str | None = None) -> bool:
 def _latlon_dt(dx_pole: float, dt_cap: float, case: str | None = None) -> float:
     """dt for a lat-lon PE case: ``dt_cap`` when the polar filter relaxes the
     polar CFL, else the legacy pole-limited ``0.5 dx_pole / 300``."""
-    if _latlon_polar_filter_on(case):
-        return dt_cap
-    return min(dt_cap, 0.5 * dx_pole / 300.0)
+    base = dt_cap if _latlon_polar_filter_on(case) else min(
+        dt_cap, 0.5 * dx_pole / 300.0)
+    return base * _matrix_dt_scale()
 
 
 # ===========================================================================
@@ -408,6 +442,12 @@ def _build_test_matrix() -> list[TestCase]:
     # directly from ``_CASE_FAMILIES`` inside ``filter_tests``.
     for tc in matrix:
         tc.family = _primary_family(tc.case)
+        # #1029 probe override, applied HERE rather than at the vertical-grid
+        # builder so the coordinate a case reports is the coordinate it ran:
+        # the summary rows, the run directory and — the part that matters —
+        # the known-failure lookup are all keyed on it, so an overridden arm
+        # does not silently inherit another coordinate's xfail waiver.
+        tc.vertical_coord = _matrix_vcoord(tc.vertical_coord)
 
     return matrix
 

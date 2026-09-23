@@ -70,6 +70,24 @@ RES, NLEV, DT, DAYS = 3, 20, 300.0, 1     # level 3 = 642 cells; days is an int
 N_SOIL = 6
 
 
+def _shared_tmp_root():
+    """Directory both ranks can see, resolved rather than hard-coded.
+
+    ``LEGOESM_TEST_SHARED_TMP`` wins when it exists.  The previous fallback was
+    one machine's absolute scratch path, so on any other cluster every test in
+    this module died in ``mkdtemp`` with ``FileNotFoundError`` before it
+    reached a single assertion -- a distributed gate that could only ever run
+    on the machine it was written on.  ``/tmp`` is the last resort and is
+    node-local, which is correct for a single-node ``srun`` and is why the
+    single-node case is the one this module documents.
+    """
+    env = os.environ.get("LEGOESM_TEST_SHARED_TMP")
+    for cand in (env, os.environ.get("SCRATCH"), os.getcwd(), tempfile.gettempdir()):
+        if cand and os.path.isdir(cand) and os.access(cand, os.W_OK):
+            return cand
+    raise RuntimeError("no writable shared temp directory found")
+
+
 def _land_mask_path():
     """A deterministic, spatially varying land mask, written once by rank 0.
 
@@ -82,8 +100,7 @@ def _land_mask_path():
     path = None
     if comm.Get_rank() == 0:
         import xarray as xr
-        d = tempfile.mkdtemp(prefix="landmask_", dir=os.environ.get(
-            "LEGOESM_TEST_SHARED_TMP", "/work/bd1083/b309178/diffESM"))
+        d = tempfile.mkdtemp(prefix="landmask_", dir=_shared_tmp_root())
         path = os.path.join(d, "landmask.nc")
         lat = np.arange(-89.0, 90.0, 2.0)
         lon = np.arange(0.0, 360.0, 2.0)
@@ -105,12 +122,24 @@ def _shared_tmpdir(prefix):
     comm = MPI.COMM_WORLD
     d = None
     if comm.Get_rank() == 0:
-        d = tempfile.mkdtemp(prefix=prefix, dir=os.environ.get(
-            "LEGOESM_TEST_SHARED_TMP", "/work/bd1083/b309178/diffESM"))
+        d = tempfile.mkdtemp(prefix=prefix, dir=_shared_tmp_root())
     return comm.bcast(d, root=0)
 
 
-def _build(distributed, mask_path, output_dir=None, fix_mass=True):
+def _surfdata_or_none():
+    """Path to a harmonized surfdata file, or None.
+
+    The canopy schemes REFUSE to run without it (they would otherwise run on
+    generic constants with every tuned per-PFT value inert), so the canopy
+    coverage below is opt-in on the file being present rather than a hard
+    dependency that would make this module unrunnable again.
+    """
+    cand = os.environ.get("LEGOESM_TEST_SURFDATA", "")
+    return cand if cand and os.path.isfile(cand) else None
+
+
+def _build(distributed, mask_path, output_dir=None, fix_mass=True,
+           land_surface_scheme="simple_seb"):
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=RES, nlev=NLEV,
                         vertical_coord="sigma"),
@@ -121,6 +150,18 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True):
         convection="none", turbulence="none", precision="fp64",
         land_mask_path=mask_path, use_multilayer_land=True,
         multilayer_n_layers=N_SOIL, multilayer_soil_depth=2.5,
+        # NAME the land surface scheme rather than inherit the driver default.
+        # This test asks one question -- are the soil columns partitioned
+        # correctly -- and the answer does not depend on which canopy sits on
+        # top of them, so it takes the scheme with no external data
+        # dependency. Leaving it unnamed was a hidden choice and it broke: the
+        # default moved to the two-leaf canopy, which REFUSES to run without a
+        # harmonized surfdata file, so every test in this module died in setup
+        # at np=1 as well as under MPI -- a distributed gate that could not run
+        # at all, on any rank count, and nothing noticed because nothing runs
+        # it in CI.
+        land_surface_scheme=land_surface_scheme,
+        surfdata_path=_surfdata_or_none() or "",
         distributed=distributed,
     )
     d = ModelDriver(cfg, output_dir=output_dir or tempfile.mkdtemp())
@@ -129,6 +170,20 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True):
         "no multilayer land state was built -- use_multilayer_land did not "
         "take effect, so this test would be comparing nothing")
     return d
+
+
+def _bitwise_equal(a, b) -> bool:
+    """Strict equality for the BIT-EXACT tiers.
+
+    ``np.array_equal`` is not bit equality: it accepts +0.0 == -0.0 and it
+    compares across dtypes after promotion, so a float32 rank result would
+    "equal" a float64 serial one (review finding). Comparing dtype, shape and
+    then the raw bytes is what the word bit-exact in this module's docstring
+    actually claims.
+    """
+    a, b = np.asarray(a), np.asarray(b)
+    return (a.dtype == b.dtype and a.shape == b.shape
+            and a.tobytes() == b.tobytes())
 
 
 def _column_leaves(state, ncol):
@@ -171,6 +226,15 @@ def _compare(ref, d):
     n_owned = part.n_owned_cells
     gids = np.asarray(part.local_cells[:n_owned])
     n_global = np.asarray(ref.state.T.data).shape[0]
+    # At ONE rank the partition hands that rank every cell, so the comparison
+    # below is a state against itself and proves nothing. That is a property
+    # of the rank count, not a defect, so it SKIPS -- it used to fail, which
+    # made the whole np=1 rung of the ladder red for a structural reason and
+    # buried the real failures. At np>1 a rank that still owns everything IS a
+    # defect and keeps failing.
+    if MPI.COMM_WORLD.Get_size() == 1:
+        pytest.skip("np=1: one rank owns the whole mesh, so this comparison "
+                    "is vacuous by construction; run under mpirun -n >= 2")
     assert n_owned < n_global, "this rank was given every global cell"
 
     ref_cols, ref_other = _column_leaves(ref._land_ml_state, n_global)
@@ -206,7 +270,8 @@ def _compare(ref, d):
     return diffs, sorted(ref_other), spread, atm
 
 
-def test_land_advance_on_the_voronoi_partition_is_bit_exact():
+@pytest.mark.parametrize("scheme", ["simple_seb", "two_leaf"])
+def test_land_advance_on_the_voronoi_partition_is_bit_exact(scheme):
     """Identical forcing, sliced by the Voronoi partition: advance must commute.
 
     This is the claim work item 4 is really about -- a rank advancing its OWN
@@ -224,14 +289,29 @@ def test_land_advance_on_the_voronoi_partition_is_bit_exact():
     from legoesm.land.multilayer_land import step_multilayer_land
 
     mask = _land_mask_path()
-    d = _build(True, mask)
-    ref_d = _build(False, mask)
+    if scheme != "simple_seb" and _surfdata_or_none() is None:
+        pytest.skip(
+            f"land_surface_scheme={scheme!r} needs a harmonized surfdata file; "
+            "set LEGOESM_TEST_SURFDATA to cover the canopy leaves too "
+            "(review finding: simple_seb omits the two-leaf per-column cache, "
+            "so the simple_seb row alone does not cover every per-column leaf)")
+    d = _build(True, mask, land_surface_scheme=scheme)
+    ref_d = _build(False, mask, land_surface_scheme=scheme)
 
     part = d._voronoi_layout.partition
     n_owned, n_local = part.n_owned_cells, part.n_local_cells
     local_gids = np.asarray(part.local_cells[:n_local])
     owned_gids = local_gids[:n_owned]
     ncol = np.asarray(ref_d._land_ml_state.T_soil).shape[0]
+    # At ONE rank the partition hands that rank every cell, so the comparison
+    # below is a state against itself and proves nothing. That is a property
+    # of the rank count, not a defect, so it SKIPS -- it used to fail, which
+    # made the whole np=1 rung of the ladder red for a structural reason and
+    # buried the real failures. At np>1 a rank that still owns everything IS a
+    # defect and keeps failing.
+    if MPI.COMM_WORLD.Get_size() == 1:
+        pytest.skip("np=1: one rank owns the whole mesh, so this comparison "
+                    "is vacuous by construction; run under mpirun -n >= 2")
     assert n_owned < ncol, "this rank was given every global cell"
 
     # Both sides start from the SAME land state -- the serial one, sliced.
@@ -299,7 +379,7 @@ def test_land_advance_on_the_voronoi_partition_is_bit_exact():
         f"comparison would be vacuous; leaves that vary: {sorted(moving)}")
     bad = {k: float(np.max(np.abs(out_cols[k][:n_owned] - ref_cols[k][owned_gids])))
            for k in ref_cols
-           if not np.array_equal(out_cols[k][:n_owned], ref_cols[k][owned_gids])}
+           if not _bitwise_equal(out_cols[k][:n_owned], ref_cols[k][owned_gids])}
     assert not bad, (
         f"the land advance does NOT commute with the Voronoi partition: {bad}")
     if MPI.COMM_WORLD.Get_rank() == 0:
