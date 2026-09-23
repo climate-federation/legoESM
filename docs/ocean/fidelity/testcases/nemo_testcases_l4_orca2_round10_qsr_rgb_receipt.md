@@ -100,10 +100,7 @@ Three sites changed, each mirroring the two-band arm that was already there:
 takes nothing by hand.  The scheme, infrared fraction and length, chlorophyll
 profile and time step come from the ORCA2 CARD and each is required to equal
 the value section 1 reads from the record.  The reference depth ladder comes
-from the card's own vertical coordinate.  The live operands are built with the
-two expressions the production sites build, and the call goes through
-`apply_shortwave_penetration` — the production entry point, not the kernel
-underneath it.
+from the card's own vertical coordinate.
 
 | row | result |
 |---|---|
@@ -113,7 +110,8 @@ underneath it.
 | control: the card's two-band sibling through the same dispatcher | fires, 149,842 unequal, max 4.81e-07 K/s |
 | control: the reference ladder instead of the live one | fires, 148,122 unequal, max 2.29e-08 K/s |
 | control: an unresolved chlorophyll profile | fires — REFUSED at the kernel, never substituted |
-| control: one representable value moved on one wet cell | fires, 1 unequal |
+| control: one representable value moved on one wet cell, operand row | fires, 1 unequal |
+| control: the same, on the SHARED PIPELINE row | fires, 1 unequal |
 
 The first row is the one that BINDS on the diff.  It calls
 `make_ocean_physics` — the production factory — with the card's own shortwave
@@ -129,6 +127,18 @@ base commit, with this gate dropped in unchanged, refuses: the pipeline's own
 scheme='nemo_qsr_rgb'`.  An earlier draft of this gate did NOT bind — it
 re-implemented the operands and passed with the whole model diff absent — and
 the independent reviewer measured that.  See section 8a.
+
+**WHAT THIS GATE DOES NOT COVER, stated rather than implied.**  Round 10
+changed THREE sites and this gate binds on ONE of them: the shared physics
+pipeline.  The Runge-Kutta stage-three seam
+(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py`) and the
+external-stage suppression
+(`packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py`) carry NO
+gate of their own — the gate never builds a model — and the seam is exactly
+where section 2's exactness claim lives.  A second blind spot: the pipeline row
+feeds in a sea surface constructed so the pipeline's own jacobian reproduces
+the record's `r3t`, so the row cannot detect an error in how that stretch is
+DERIVED, only in what is done with it.  Both are in OPEN.
 
 Label: **given NEMO's entry** (the `qsr`, chlorophyll and `r3t` operands are
 the record's own recorded frames).
@@ -325,11 +335,34 @@ Nine findings, every one of them this round's own.  All are fixed or recorded:
 | D8 | section 3a's proof is a zero-against-zero comparison | weakened to what it actually shows |
 | D9 | section 6 elided the `fe3mask` factor from the quoted line | the line is now quoted in full |
 
-One further defect surfaced while fixing D1 and is fixed here: with shortwave
-penetration as the ONLY enabled physics module, the pipeline seeded the TRACER
-tendencies from `state.u`, which on a C-grid is one column wider than the
-tracer field.  Each zero slot now takes its own field's shape.  No card with
-any other module enabled is affected, and the round's GYRE proof covers it.
+One further defect surfaced while fixing D1 and is fixed here: with no physics
+module enabled at all, the pipeline seeded EVERY zero tendency from `state.u`,
+which on a C-grid is one column wider than the tracer field.  Each slot now
+takes its own field's shape.  Production never reached it — the lat-lon driver
+hands the pipeline a cell-centred proxy in which velocity and tracer fields
+share a shape — so it was reachable only from a caller passing a raw C-grid
+state, which is what the new gate does.  The reviewer established that
+reachability boundary; an earlier wording of this receipt overstated it.
+
+### 8b. Second review pass, on the fixes
+
+> VERDICT: SHIP WITH FIXES (was BLOCK).
+
+Two residual defects, both acted on:
+
+| finding | what it was | what was done |
+|---|---|---|
+| F1 | the new "the pipeline still refuses the generic scheme" test called the KERNEL, not the pipeline, so re-widening the branch left it green — the same class of defect as D1 | rewritten to call `make_ocean_physics`, and PROVEN non-vacuous: with the branch re-widened it FAILS (`DID NOT RAISE`), and the model file was restored (`git status --porcelain` shows only the test moved).  A companion test pins that the NEMO selector's branch is reachable and deposits |
+| F2 | the gate binds on one of the three sites the round changed, and the receipt implied more | stated explicitly in section 3, and in OPEN |
+
+Two smaller ones, also acted on: section 3's "the production entry point"
+sentence (the framing that produced D1) is deleted, and the pipeline row now
+has its own one-representable-value plant control, which fires.
+
+The reviewer also verified independently that D1's fix binds (base commit
+refuses, tip is AT_BAR), that the `eta = r3t*H` round trip is a two-rounding
+round trip rather than an identity, that no second widened path was left, and
+that no wrong `traqsr` citation remains.
 
 ## 9. OPEN
 
@@ -365,7 +398,13 @@ any other module enabled is affected, and the round's GYRE proof covers it.
 8. **The stage-three seam's exact removal is conditional on no WET column
    being shallower than the minimum water column** (section 2).  Measured true
    on this card today; nothing enforces it.
-9. GitHub issue 1455 remains an operator-post action because no GitHub
+9. **Two of the three sites this round changed carry no gate**: the
+   Runge-Kutta stage-three seam and the external-stage suppression (section
+   3).  The seam owns section 2's exactness claim.
+10. **The pipeline row cannot detect an error in how the stretch is DERIVED**,
+   because its input sea surface is constructed to reproduce the record's
+   `r3t` through that same derivation (section 3).
+11. GitHub issue 1455 remains an operator-post action because no GitHub
    connector is installed in this environment.
 
 ## Choices

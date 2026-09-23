@@ -97,20 +97,80 @@ def test_the_gate_uses_the_PRODUCTION_thickness_and_stretch_helpers():
     np.testing.assert_array_equal(got, want)
 
 
-def test_the_shared_pipeline_still_REFUSES_the_generic_rgb_scheme():
-    """Round 10 opened the pipeline to the NEMO identity selector ONLY.  The
-    generic ``rgb_chl`` deposit is owned by the external surface-forcing
-    stage; if the pipeline ever accepts it too, qsr is counted twice."""
-    from legoesm.ocean.physics.shortwave_penetration import (
-        shortwave_penetration_tendency)
+def _only_shortwave_physics(scheme):
+    """An OceanPhysicsConfig carrying nothing but this shortwave scheme."""
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 
-    _, config, z_coord, kw = _operands()
-    generic = ShortwavePenetrationConfig(scheme="rgb_chl")
+    return OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        surface_forcing=SurfaceForcingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(scheme="none"),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=ShortwavePenetrationConfig(
+            scheme=scheme, nemo_time_step_s=10800.0),
+        mle=None,
+    )
+
+
+def _tiny_state_and_geometry():
+    """A small C-grid rest state the shared pipeline can be called on.
+
+    Built with the model's OWN initialiser (``rest_state_latlon_cgrid_ocean``)
+    rather than a hand-assembled NamedTuple, so the test keeps working when the
+    state grows a field.
+    """
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate, create_z_star_from_thicknesses)
+
+    dz_ref = np.array([10.0, 12.0, 15.0, 20.0, 30.0, 50.0])
+    grid = create_latlon_grid(n_lat=NLAT, n_lon=NLON)
+    z_star = create_z_star_from_thicknesses(dz_ref)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_star, H_max=float(dz_ref.sum()), land_lat_threshold=90.0)
+    z_coord = create_partial_cell_coordinate(
+        z_star, np.asarray(state.H_bathy.data))
+    forcing = OceanSurfaceForcing(
+        sw_down=jnp.full((NLAT, NLON), 200.0),
+        chl=jnp.full((NLAT, NLON), 0.5),
+    )
+    return state, grid, z_coord, forcing
+
+
+def test_the_SHARED_PIPELINE_still_refuses_the_generic_rgb_scheme():
+    """Round 10 opened the PIPELINE to the NEMO identity selector ONLY.
+
+    The generic ``rgb_chl`` deposit is owned by the external surface-forcing
+    stage; if the pipeline accepted it too, qsr would be counted twice.  This
+    calls ``make_ocean_physics`` -- the thing that was widened -- so
+    re-widening that branch makes this test FAIL.  Asserting the kernel's own
+    refusal instead would not: the regression routed AROUND the kernel.
+    """
+    from legoesm.ocean.physics.combined import make_ocean_physics
+
+    state, grid, z_coord, forcing = _tiny_state_and_geometry()
+    physics_fn = make_ocean_physics(_only_shortwave_physics("rgb_chl"))
     with pytest.raises(ValueError, match="two-band Jerlov kernel"):
-        shortwave_penetration_tendency(
-            jnp.asarray(kw["qsr"]), jnp.asarray(z_coord.dz_ref),
-            jnp.asarray(z_coord.z_half_ref), jnp.ones_like(jnp.asarray(kw["qsr"])),
-            generic, config.rho_0, config.physics.constants.c_sw)
+        physics_fn(state, grid, z_coord, forcing)
+
+
+def test_the_shared_pipeline_ACCEPTS_the_nemo_identity_selector():
+    """The other half: the branch round 10 opened is reachable and deposits."""
+    from legoesm.ocean.physics.combined import make_ocean_physics
+
+    state, grid, z_coord, forcing = _tiny_state_and_geometry()
+    physics_fn = make_ocean_physics(_only_shortwave_physics("nemo_qsr_rgb"))
+    out = np.asarray(physics_fn(state, grid, z_coord, forcing).dT_dt.data)
+    assert out.shape == (NLAT, NLON, NLEV)
+    assert np.isfinite(out).all() and np.abs(out).max() > 0.0
 
 
 def test_the_wet_mask_falls_out_of_the_partial_cell_thickness():

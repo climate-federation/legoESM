@@ -29,6 +29,7 @@ Controls (each must FIRE, i.e. leave cells unequal):
   --control static       the reference ladder instead of the live one
   --control surface-chl  the surface chlorophyll profile instead of Morel-Berthon
   --plant                one representable value moved on one wet cell
+  --control pipeline-plant  the same, on the SHARED PIPELINE row
 """
 
 from __future__ import annotations
@@ -286,7 +287,7 @@ def validate(deck_root: Path, root: Path, *, plant: bool, control: str | None) -
     # the record's own r3t; that round trip is exact (measured below, and the
     # gate refuses if it stops being exact).
     pipeline = None
-    if not (plant or control):
+    if not (plant or control) or control == "pipeline-plant":
         from legoesm.ocean.state import OceanSurfaceForcing
         from legoesm.ocean.vertical import compute_ocean_jacobian
 
@@ -320,7 +321,17 @@ def validate(deck_root: Path, root: Path, *, plant: bool, control: str | None) -
         pipeline_candidate = np.asarray(nemo_source_round(
             nemo_source_round(jnp.asarray(before_qsr) + jnp.asarray(deposit))
             - jnp.asarray(before_qsr))).copy()
+        if control == "pipeline-plant":
+            index = tuple(np.argwhere(wet[:, :90])[0])
+            pipeline_candidate[index] = np.nextafter(
+                pipeline_candidate[index], np.inf)
         pipeline = score(pipeline_candidate, qsr["increment"], wet[:, :90])
+        if control == "pipeline-plant":
+            require(pipeline["status"] != "AT_BAR",
+                    "the pipeline-row plant did not fire; that row is vacuous")
+            raise GateError(
+                "control pipeline-plant rejected through the scorer "
+                f"({pipeline['unequal']}/{pipeline['count']} unequal)")
         require(pipeline["status"] == "AT_BAR",
                 "the SHARED PHYSICS PIPELINE's own shortwave deposit is not "
                 f"NEMO's: {pipeline['unequal']}/{pipeline['count']} unequal, "
@@ -375,7 +386,8 @@ def main() -> int:
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--plant", action="store_true")
     parser.add_argument("--control",
-                        choices=("two-band", "static", "surface-chl"))
+                        choices=("two-band", "static", "surface-chl",
+                                 "pipeline-plant"))
     args = parser.parse_args()
     try:
         result = validate(args.deck_root, args.oracle_root,
