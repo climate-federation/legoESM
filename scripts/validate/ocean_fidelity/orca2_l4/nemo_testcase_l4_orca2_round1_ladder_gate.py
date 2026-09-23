@@ -72,6 +72,8 @@ TRAJECTORY_CITATIONS = {
     "salt_flux": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:290-311",
     "ldf_dyn_coefficient": (
         "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/ldfdyn.f90:348-353"),
+    "qsr_rgb_chlorophyll": (
+        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traqsr.f90:213,258-468"),
 }
 
 
@@ -772,20 +774,20 @@ def _surface_forcings(
 # vertex thickness on a tripolar fold row; round 8 transcribed it, and the walk
 # then reached the lateral-viscosity coefficient.
 UNBUILT_STATEMENTS = {
-    "STOP_PRODUCTION_LDF_DYN_TRIPOLAR_COEFF_GAP": {
+    "STOP_PRODUCTION_QSR_RGB_PIPELINE_GAP": {
         "refusal": (
-            "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
-            "with a scalar dlon"),
+            "shortwave_penetration_tendency is the two-band Jerlov kernel but "
+            "got scheme='nemo_qsr_rgb'"),
         "legoesm_source": (
-            "packages/ocean/legoesm/ocean/dynamics/"
-            "ocean_pe_latlon_cgrid.py:3332-3336"),
-        "citation": "ldf_dyn_coefficient",
+            "packages/ocean/legoesm/ocean/physics/combined.py:336-355"),
+        "citation": "qsr_rgb_chlorophyll",
         "resolved_setting": (
-            "the record resolves nn_ahm_ijk_t = -30, so NEMO READS the whole "
-            "three-dimensional coefficient from eddy_viscosity_3D.nc "
-            "(ahmt_3d, ahmf_3d); the production arm instead builds the "
-            "nn_ahm_ijk_t = 20 formula from a single zonal grid spacing, "
-            "which a tripolar mesh does not have"),
+            "the record resolves ln_qsr_rgb = .true. with nn_chldta = 1 "
+            "(run ocean.output:1207,1211), so NEMO dispatches qsr_RGBc, the "
+            "three-band chlorophyll attenuation with the Morel-Berthon "
+            "vertical profile; the shared ocean physics pipeline has only the "
+            "two-band Jerlov kernel and carries neither the chlorophyll field "
+            "nor the live thickness the RGB kernel reads"),
     },
 }
 
