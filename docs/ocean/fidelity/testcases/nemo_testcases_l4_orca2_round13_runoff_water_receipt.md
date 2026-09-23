@@ -23,12 +23,15 @@ never does.  That single wrong operand is why round 12's pairing arm barely
 moved: it deposited a second, nearly identical copy of the runoff's own heat
 instead of the compensating volume.
 
-Statement B narrowed the ladder's first disagreement to ONE owner: the
-barotropic external mode's end-of-step sea surface.  Three downstream
-statements are bit-exact against this record, the three stage sea surfaces are
-one quantity seen at three interpolation weights (ratio 1 : 1.5 : 3 to 3.0e-16)
-and the stage-1 velocity disagreement is a depth-uniform offset (median spread
-1.7e-10 of the column mean).
+Statement B does NOT name an owner, and the first draft of this receipt said it
+did — **retracted here** (section 5e).  What it establishes is narrower and
+still useful: three downstream statements are bit-exact against this record,
+the ladder's sea-surface rows carry no stage-specific content, and the stage-1
+velocity disagreement is a DEPTH-UNIFORM offset (median spread 1.7e-10 of the
+column mean), which is the signature of the two-dimensional barotropic
+correction and not of any three-dimensional momentum operator.  The barotropic
+external mode is the leading candidate, labelled PLAUSIBLE, with the
+discriminating substitution named for round 14.
 
 No configuration, selector default, tunable, threshold, cadence, resolution,
 timestep, carried state, data source, NEMO source or sea-ice registry entry
@@ -218,11 +221,12 @@ Label: `INDEPENDENT_WITH_DECISION52_SSH`.
 
 So the disagreement is owned UPSTREAM of the stage program, not inside it.
 
-### 5b. The sea surface is ONE quantity, not three
+### 5b. The sea-surface rows carry no stage-specific content — and that is WEAKER than it looks
 
 NEMO's stage sea surfaces are the step's end-of-step value interpolated at 1/3,
-1/2 and 1 (`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:137,152-154`).  If the three stage disagreements
-stand in the ratio 1 : 1.5 : 3, they are the same number seen three times.
+1/2 and 1 (`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:137,152-154`),
+and so are legoESM's.  If the three stage disagreements stand in the ratio
+1 : 1.5 : 3, the whole disagreement is inherited from the end-of-step value.
 
 | stage | max abs |
 |---|---|
@@ -231,9 +235,17 @@ stand in the ratio 1 : 1.5 : 3, they are the same number seen three times.
 | 3 | 2.4484e-01 m |
 
 Measured ratios 1.0, 1.4999999999999996, 2.9999999999999996 — worst relative
-departure from the prediction **3.0e-16**, machine precision.  **CONFIRMED: one
-quantity**, NEMO's end-of-step external-mode sea surface, which legoESM misses
-by **0.2448 m** at kt=1 on the rank-0 half.
+departure from the prediction **3.0e-16**, machine precision.
+
+**WHAT THAT DOES AND DOES NOT SHOW, and the first draft of this receipt got it
+wrong.**  Once the step-entry sea surface agrees bitwise — it does at kt=1 —
+and both sides interpolate the same weights, the stage difference equals
+`w_i` times the end-of-step difference ALGEBRAICALLY, for any cause whatever.
+So the ratio CONFIRMS only that legoESM adds no per-stage sea-surface source of
+its own and that the two interpolations agree; it attributes nothing.  The
+useful number it carries is the size: legoESM's end-of-step sea surface differs
+from NEMO's by **0.2448 m** at kt=1 on the rank-0 half, and that single number
+is what the three stage rows are.
 
 ### 5c. The velocities are the same owner
 
@@ -253,14 +265,19 @@ dividing by a near-zero column mean and is reported rather than trimmed.
 
 ### 5d. The verdict, and what round 14 must run
 
-**CONFIRMED**: the sea surface is one end-of-step quantity; the velocities are
-depth-uniform; the stage transport, the divergence/WZV recurrence and the
-pressure gradient are each bit-exact.
+**CONFIRMED**: the stage sea-surface rows carry no per-stage source and reduce
+to one end-of-step number, 0.2448 m; the stage-1 velocity disagreement is
+depth-uniform on the great majority of columns; the stage transport, the
+divergence/WZV recurrence and the pressure gradient are each bit-exact against
+this record.
 
-**PLAUSIBLE, and it is the strongest reading of those four facts**: the
-barotropic external mode owns all three of the largest kt=1 rows.  It is not
-CONFIRMED because "depth-uniform" is necessary for the barotropic correction
-and not sufficient — a depth-uniform forcing error would look the same.
+**PLAUSIBLE**: the barotropic external mode owns all three of the largest kt=1
+rows.  Two reasons it is not CONFIRMED.  "Depth-uniform" is necessary for the
+barotropic correction and not sufficient — a depth-uniform forcing error would
+look the same.  And the sea-surface ratio, which the first draft of this
+receipt read as an attribution, is algebraic rather than physical (section 5b),
+so it cannot separate the barotropic solver from anything else upstream that
+reaches only the end-of-step sea surface.
 
 **The discriminating measurement, named for round 14**: the record carries
 `oracle_slow_forcing_kt00000001.bin`, `oracle_bt_frames_kt00000001.bin`,
@@ -283,6 +300,23 @@ the solver itself.  No new NEMO run is needed for either arm.
 | R13-P7 | **CONFIRMED** — `LADDER_MEASURED` kt=1..10, first statement still UNATTRIBUTED at kt=1 stage 1. |
 | R13-P8 | **CONFIRMED** — the stage-1 transport, the WZV recurrence and the pressure gradient are each AT BAR, so the owner is upstream of them. |
 
+### 5e. RETRACTION
+
+The first draft of this receipt wrote that statement B "narrowed the ladder's
+first disagreement to ONE owner: the barotropic external mode's end-of-step sea
+surface", and labelled the sea-surface ratio CONFIRMED evidence for it.  **That
+is withdrawn.**  The ratio is algebraic, not physical: with the step-entry sea
+surface bitwise equal and both sides interpolating the same weights it holds
+for ANY end-of-step difference.  The corrected reading is in sections 5b and
+5d — the ratio rules a per-stage source OUT, the depth-uniformity is real
+evidence about the velocities, and the barotropic owner is PLAUSIBLE and
+unmeasured until round 14 runs the substitution in section 5d.  The
+`nemo_testcase_l4_orca2_round13_stage1_owner_probe.py` instrument was changed
+to say so where it computes the number and to stop printing "ONE_QUANTITY" as
+its verdict, because a probe that prints its own conclusion gets that
+conclusion quoted back as evidence.
+
+
 ## 7. GYRE is unchanged
 
 Proven at the round's base tip (`638a18efb`) and at its final tip, with the
@@ -303,8 +337,32 @@ runs proven byte-identical; the field that means what this table says is
 ## 8. Independent review
 
 Codex is paused, so `codex exec` was NOT run and this round claims no
-independent codex verdict.  A fresh adversarial reviewer was run in its place;
-its verdict and every finding are in section 8a.
+independent codex verdict.  A fresh adversarial reviewer was run in its place.
+It read the compiled Fortran itself, traced `freshwater.runoff` to both of its
+consumers, enumerated every caller of the changed helper, and checked the
+plant, the revert evidence and a sample of the citation shifts.
+
+### 8a. Its verdict, verbatim
+
+> SHIP WITH FIXES
+
+### 8b. What it found, and what was done
+
+| finding | what it was | what was done |
+|---|---|---|
+| 1 (HIGH) | the saved gate JSON did not contain the reachability control, so the published discriminator numbers came from a run that predated it — "controls that never ran on the cited artifact", a failure this campaign has hit before | the gate was re-run at the control's own commit; the JSON now carries the row (`wzv_call2_evaluation: nemo_literal`, `freshwater_closure: real_freshwater`, both owners reachable) and the discriminator numbers are UNCHANGED at 1.5287e-03 and 1.4823e-04.  **CLOSED by re-measurement** |
+| 2 (HIGH) | the sea-surface ratio test is close to true BY CONSTRUCTION, not an independent discriminator, and the receipt's "narrowed to ONE owner" overclaims it | **accepted in full and RETRACTED** (section 5e).  The receipt's headline, section 5b and section 5d now say the ratio is algebraic, rules a per-stage source out and attributes nothing; the probe says so where it computes the number and no longer prints "ONE_QUANTITY" as a verdict |
+| 3 (LOW) | `emp` was verified free of runoff on the cited paths and in the `nn_fwb = 2` arm, but `sbcmod`/`sbcblk`/`sbcice_*` were not read | scope stated: the receipt claims the cited paths and the freshwater-budget arm, nothing wider.  Carried into OPEN |
+
+What it verified INDEPENDENTLY and found correct: that the surface arm of
+`sbc_rnf_div` is the one that runs and that legoESM's divergence branch matches
+its multiply-then-divide order; that `zfact = 0.5*r1_rho0` is assigned and
+never read in this build, so the receipt is right to ignore it; that the
+`nn_fwb = 2` correction is a spatially uniform scalar that never touches `rnf`;
+that every other caller of the changed helper wants the runoff included, so the
+default preserves no bug; that the plant fires and the revert makes two real
+tests fail; and that a sample of the twenty-four citation shifts is a uniform
++20 with preserved block lengths.
 
 ## 9. Gate and test results at the round's final tip
 
@@ -395,7 +453,7 @@ freshwater-budget correction were NOT switched on.
 
 ## 10. OPEN — round 14's order
 
-1. **Split the barotropic owner.**  Substitute the record's own
+1. **Split the barotropic owner — and note it is PLAUSIBLE, not named.**  Substitute the record's own
    `oracle_slow_forcing_kt00000001.bin` into legoESM's barotropic solve and
    re-measure the end-of-step sea surface (section 5d).  That one substitution
    separates "the solver" from "what the solver is handed", and it is the

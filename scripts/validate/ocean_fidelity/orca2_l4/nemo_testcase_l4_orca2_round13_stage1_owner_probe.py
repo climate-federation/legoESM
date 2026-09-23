@@ -10,10 +10,20 @@ them.  This probe asks TWO questions that a ratio and a variance can answer
 without a new NEMO run.
 
 1.  The sea surface.  NEMO's stage sea surfaces are the step's end-of-step
-    value interpolated at 1/3, 1/2 and 1 (``stprk3_stg.f90`` HYB), so if the
-    stage-1, stage-2 and stage-3 sea-surface disagreements stand in the ratio
-    1 : 1.5 : 3 then they are ONE quantity -- the barotropic external mode's
-    end-of-step sea surface -- and not three independent stage statements.
+    value interpolated at 1/3, 1/2 and 1 (``stprk3_stg.f90`` HYB), and so are
+    legoESM's, so if the stage-1, stage-2 and stage-3 sea-surface
+    disagreements stand in the ratio 1 : 1.5 : 3 they carry NO stage-specific
+    content: the whole disagreement is inherited from the end-of-step sea
+    surface.
+
+    **WEAK BY CONSTRUCTION, AND LABELLED SO.**  Once the step-entry sea
+    surface agrees bitwise -- it does at kt=1 -- and both sides interpolate
+    the same weights, ``stage_i_candidate - stage_i_oracle`` equals
+    ``w_i * (end_candidate - end_oracle)`` ALGEBRAICALLY, whatever caused the
+    end-of-step difference.  So a passing ratio says only that legoESM adds no
+    per-stage sea-surface source of its own and that the two interpolations
+    agree; it says NOTHING about what produced the end-of-step error.  It is
+    reported for what it rules out, not as an attribution.
 
 2.  The velocities.  Each stage velocity carries the barotropic correction
     ``un_adv/hu(Kmm) - uu_b(Kmm)`` (``stprk3_stg.f90:270-277``), which is a
@@ -22,8 +32,11 @@ without a new NEMO run.
     non-zero, it is that correction -- the same barotropic owner -- and not a
     three-dimensional momentum operator.
 
-Neither question is a damage-field correlation: both are predictions a named
-mechanism makes and a different mechanism does not.
+The second question is a prediction one named mechanism makes and another does
+not.  The first is weaker than it looks and is labelled so where it is
+computed: it follows algebraically from the shared interpolation once the
+step-entry sea surface agrees, so it rules a stage-specific source OUT rather
+than ruling any cause in.
 """
 
 from __future__ import annotations
@@ -115,12 +128,14 @@ def run(deck_root: Path, root: Path, json_out: Path | None, kt: int = 1):
         "measured_ratios": ratios,
         "predicted_by_the_HYB_interpolation": predicted,
         "worst_relative_departure": worst,
-        "verdict": ("ONE_QUANTITY" if worst < 1.0e-06
-                    else "NOT_ONE_QUANTITY"),
+        "verdict": ("NO_PER_STAGE_SEA_SURFACE_SOURCE" if worst < 1.0e-06
+                    else "A_PER_STAGE_SEA_SURFACE_SOURCE_EXISTS"),
         "implied_end_of_step_disagreement_m": ssh_max[2],
-        "note": ("if the three stage sea surfaces disagree in the ratio "
-                 "1 : 1.5 : 3 they are the SAME end-of-step sea surface seen "
-                 "at three interpolation weights"),
+        "note": ("WEAK BY CONSTRUCTION: with the step-entry sea surface "
+                 "bitwise equal and both sides interpolating the same "
+                 "weights, this ratio follows algebraically for ANY "
+                 "end-of-step difference.  It rules out a per-stage "
+                 "sea-surface source in legoESM; it attributes nothing"),
     }
 
     # --- 2. is the velocity row the barotropic correction? ----------------
