@@ -89,9 +89,33 @@ CMD=$(cat /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_ctl_trp_d90.txt)
 #
 # The .txt is untracked, so the adoption is asserted rather than trusted; the
 # pre-adoption line is kept as _ctl_trp_d90.pre_fwadopt.txt.
+# HARMONIZED 2026-09-23, BY THE USER: river runoff is now smoothed with 8
+# horizontal passes on this lane, up from the 2 it inherited from a per-grid
+# default. Nothing in any run command had ever selected either value, so our
+# three OMIP grids were running three different river treatments that nobody
+# picked -- the tripole 2, MPAS and FESOM 8. 8 is the value carrying measured
+# support: the recorded MPAS sensitivity puts the Amazon salinity bias at
+# -1.04 with 2 passes against -0.335 with 8, and global salinity rmse at 1.046
+# against 0.990. So the harmonization goes UP to 8 rather than down to 2.
+#
+# IT IS EXPLICIT ON THE COMMAND LINE EVEN THOUGH THE REPO DEFAULT NOW MATCHES,
+# because a default is not a record and this lane's behaviour changes.
+#
+# THE MECHANISM THIS WAS FOUND WHILE CHASING WAS REFUTED, and the change is
+# hygiene rather than a fix. FESOM's river-mouth columns hold more salt than
+# the tripole's, and both river explanations died on their own pre-registered
+# tests: vertical depth spreading by the cancellation ratio (0.95 where 0.65
+# refutes, and with the sign backwards), horizontal smoothing by the missing
+# fresh halo (the ring around each mouth is saltier too, so no water is being
+# moved). This is NOT expected to close the coastal gap.
+#
+# EVERY NUMBER FROM THIS CARD IS ON A NEW BASELINE AGAIN. The pre-adoption
+# line is kept beside it as _arm_trp_pinned_d30.pre_spread8.txt / the matching
+# _ctl name.
 for _flag in "--sss-restore-channel water_flux" \
              "--sss-restore-normalization live_s" \
-             "--freshwater-closure real_freshwater"; do
+             "--freshwater-closure real_freshwater" \
+             "--runoff-spread-passes 8"; do
   case "$CMD" in
     *"$_flag"*) ;;
     *) echo "FATAL: command line lacks the adopted treatment ($_flag)"; exit 1 ;;
