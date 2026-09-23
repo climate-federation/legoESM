@@ -340,7 +340,10 @@ and raises it.  DECISION_NEEDED is in the final report.
    out of scope on this lane.
 9. The barotropic vertex thickness is still unmeasured (round 8's OPEN item 6).
 10. Two of the three sites round 10 changed still carry no gate of their own.
-11. GitHub issue 1455 remains an operator-post action.
+11. **The wide ocean-fidelity battery was not run at the final clean tip** —
+   the one started in this round went dirty under the review fixes and is
+   discarded (section 10).  Operator action.
+12. GitHub issue 1455 remains an operator-post action.
 
 ## Choices
 
@@ -405,4 +408,8 @@ and 5 against the saved artifacts, re-deriving the GYRE digest itself.
 | GYRE identity, base vs tip | section 4 |
 | DINO, lock exchange, overflow | 169 passed |
 | barotropic batteries | 26 passed (isolated) plus 90 passed, 1 skipped, 1 xfailed |
-| the named push gates plus this round's new tests | **132 passed in 363.02 s** |
+| the named push gates plus this round's new tests, at the final clean tip | **132 passed in 363.02 s** |
+| this round's own new tests, re-run after the review fixes | **6 passed** |
+| receipt citation gate, at the final clean tip | **PASS**, 274 citations, 0 failures, 0 map-audit failures, 0 unmapped |
+| citation gate with a rigid two-line plant on a REAL key | **FIRES** — exit 1, status FAIL, the planted citation named with its own line: `dynldf_lev_rot_scheme.h90:24-25`, `SYMBOL-NOT-AT-LINE`, "that symbol identifies line 24", found at line 26 |
+| the wide ocean-fidelity battery | **DISCARDED, not cited.**  It was started before the review fixes, so the worktree went dirty under it mid-run and every gate that stamps the worktree would refuse — the same contamination round 10 recorded and discarded.  The citable battery is the push-gate row above, run at the final clean tip.  Re-running it clean is an operator action, recorded in OPEN. |
