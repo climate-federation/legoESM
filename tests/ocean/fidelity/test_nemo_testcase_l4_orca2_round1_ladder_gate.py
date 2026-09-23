@@ -227,35 +227,54 @@ def test_fortran_real_refuses_a_non_literal():
 
 
 def test_an_unbuilt_statement_is_recorded_not_swallowed():
-    """A named NotImplementedError stops the ladder WITHOUT a magnitude."""
+    """A registered refusal stops the ladder WITHOUT a magnitude.
+
+    Round 8 transcribed the vertex thickness on the fold row, so the refusal
+    this used to name no longer exists and the magnitude key is now built from
+    whichever registered stop fired.  The invariants it guards are unchanged:
+    only a deliberate refusal is caught, every stop is UNMEASURED, and the
+    gate exits non-zero.
+    """
     source = Path(gate.__file__).read_text()
-    assert "except NotImplementedError as exc:" in source
-    assert '"UNMEASURED_STOP_PRODUCTION_EEN_E3F_FOLD_GAP"' in source
-    # a defect must NOT be caught here
-    assert "except ValueError" not in source.split(
-        "def candidate_trajectory")[1]
-    # and the stop is a non-zero exit
-    assert '"STOP_PRODUCTION_EEN_E3F_FOLD_GAP",\n    ):' in source
+    assert "except (NotImplementedError, ValueError) as exc:" in source
+    assert 'f"UNMEASURED_{blocker[\'status\']}"' in source
+    # the stop list is the registry itself, so a stop can never exit zero
+    assert "*UNBUILT_STATEMENTS,\n    ):" in source
+    # and a refusal is only ever caught at the ONE call site that classifies
+    # it -- scope the search to this function's own body, not the rest of the
+    # module, or main()'s own handler is counted too.
+    body = source.split("def candidate_trajectory")[1].split("\ndef ")[0]
+    assert body.count("except ") == 1
+    assert "unbuilt_statement_blocker(exc, kt)" in body
 
 
-def test_only_the_registered_refusal_may_be_labelled_as_the_fold_gap():
-    """An unbuilt statement from ANOTHER routine must not borrow this citation.
+def test_only_a_registered_refusal_may_be_labelled_as_an_unbuilt_statement():
+    """An unbuilt statement from ANOTHER routine must not borrow a citation.
 
     Found by the round-7 independent review: the first version labelled every
-    NotImplementedError as the vertex-thickness gap and cited it to the
-    compiled routine that builds that field.
+    refusal as the vertex-thickness gap and cited it to the compiled routine
+    that builds that field.  Round 8 transcribed that statement and registered
+    the next one, so this now exercises the registry rather than one name.
     """
+    (only,) = gate.UNBUILT_STATEMENTS
     labelled = gate.unbuilt_statement_blocker(
-        NotImplementedError(
-            "nemo_avg4 is not defined for a tripolar fold; its certified "
-            "NEMO GYRE use is a closed beta-plane box"), kt=1)
-    assert labelled["status"] == "STOP_PRODUCTION_EEN_E3F_FOLD_GAP"
+        ValueError(gate.UNBUILT_STATEMENTS[only]["refusal"] +
+                   " (got dlon<=0; tripolar unsupported)."), kt=1)
+    assert labelled["status"] == only == (
+        "STOP_PRODUCTION_LDF_DYN_TRIPOLAR_COEFF_GAP")
     assert labelled["kt"] == 1
-    assert "dynvor.f90:912-937" in labelled["nemo_source_citation"]
+    assert "ldfdyn.f90:348-353" in labelled["nemo_source_citation"]
+    # the resolved setting that makes this a gap, not a tripolar port
+    assert "nn_ahm_ijk_t = -30" in labelled["resolved_setting"]
 
-    with pytest.raises(gate.GateError, match="unregistered"):
-        gate.unbuilt_statement_blocker(
-            NotImplementedError("some other operator is not built"), kt=3)
+    # The statement round 8 transcribed is no longer registered, so its old
+    # refusal text cannot be labelled either -- the registry shrank with it.
+    for stale in (
+        "nemo_avg4 is not defined for a tripolar fold",
+        "some other operator is not built",
+    ):
+        with pytest.raises(gate.GateError, match="unregistered"):
+            gate.unbuilt_statement_blocker(NotImplementedError(stale), kt=3)
 
 
 def test_entry_eligibility_refuses_to_certify_a_non_bit_entry_field():
