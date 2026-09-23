@@ -36,9 +36,12 @@ A second continuity solve at stages 2 and 3 only.  The momentum vertical
 advection reads a vertical velocity built through the velocity indicator from
 the raw stage velocity; the tracer transport keeps today's transport-form
 field, byte for byte.  Stage 1 gets NO momentum solve, because the compiled
-program skips it there (`:358`) and the stage-1 right-hand side is built in the
+program skips it there
+(`GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:358`) and the stage-1 right-hand side is built in the
 two-dimensional step.  The adaptive-implicit partition is a separate program
-in the oracle as well — `:362` partitions the momentum pair under the velocity
+in the oracle as well —
+`GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:362` partitions the
+momentum pair under the velocity
 indicator and `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/traadv.f90:277`
 partitions the tracer pair under the transport indicator — and that second
 partition is NOT transcribed here, so selecting both must refuse loudly rather
