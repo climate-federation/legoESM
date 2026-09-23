@@ -342,6 +342,48 @@ def main() -> int:
           f"{wcorr(err_p, err_b, use & (ring == 1)):+.3f}, all "
           f"{wcorr(err_p, err_b, use):+.3f}")
 
+    # --- inside ring 1, does the excess survive a CLOSE nearest node? -------
+    # The discriminating question left after the stencil-reach test came back
+    # ambiguous. Narrowing to one neighbour removed none of FESOM's coastal
+    # error, but the single nearest node can itself sit across a barrier, so
+    # interpolation is not cleared. Where that node lies WELL INSIDE the target
+    # cell, a barrier crossing is implausible -- a 1 degree cell is ~110 km at
+    # the equator and less poleward, so a node within ~13 km of the cell centre
+    # is almost certainly in the same body of water.
+    #
+    # Conditioning on ring 1 and varying node distance WITHIN it is the right
+    # way round: node distance and ring are correlated (FESOM refines at
+    # coasts), so an unconditioned node-distance split re-measures the ring.
+    #
+    # READING: the excess holding up at the CLOSEST node distances finishes the
+    # interpolation story and leaves a coastal model difference. The excess
+    # concentrating at the FAR distances keeps interpolation alive.
+    nd_key = "node_km_FESOM2"
+    if nd_key in d.files:
+        nd = np.asarray(d[nd_key], dtype=np.float64)
+        r1 = use & (ring == 1)
+        qs = np.percentile(nd[r1], [25, 50, 75])
+        edges = np.concatenate([[0.0], qs, [np.inf]])
+        print(f"\nRING 1 ONLY, split by FESOM's nearest-node distance "
+              f"(its own quartiles inside this ring: "
+              + "/".join(f"{x:.0f}" for x in qs) + " km)")
+        print(f"{'node dist [km]':>16} {'cells':>7} {'area frac':>9} "
+              f"{'tripole':>9} {'FESOM':>9} {'ratio':>7}")
+        tot = area[r1].sum()
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            m = r1 & (nd >= lo) & (nd < hi)
+            n = int(m.sum())
+            if n == 0:
+                continue
+            ra_, rb_ = wrms(err_a, area, m), wrms(err_b, area, m)
+            hi_s = "inf" if not np.isfinite(hi) else f"{hi:.0f}"
+            print(f"{lo:7.0f} - {hi_s:>6} {n:7d} "
+                  f"{float(area[m].sum() / tot):9.3f} {ra_:9.4f} {rb_:9.4f} "
+                  f"{rb_ / ra_ if ra_ > 0 else float('nan'):7.2f}")
+    else:
+        print(f"\n[skip] dump has no {nd_key}; the ring-1 node-distance split "
+              f"needs it and is NOT reported rather than guessed")
+
     print("\n'trip k1'/'FES k1' narrow each arm's interpolation to its SINGLE "
           "nearest source, removing three of the four chances to average in a "
           "node from across a coastline. Read ONE-SIDED: k=1 also drops the "
