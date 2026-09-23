@@ -135,3 +135,66 @@ def test_score_reports_the_worst_cell():
     assert row["unequal"] == 1
     assert row["worst_cell"] == [1, 2]
     assert gate.score(a, a)["bit_identical"] is True
+
+
+# --- round 8's OPEN item 3: the other half of the tripolar fold row ----------
+
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_phase2n_een_operand_gate as een,
+)
+
+
+def _write_rank_block(path, magic, owned):
+    """One rank's instrumented dump: owned cells filled, halo slots empty."""
+    local = np.zeros((een.LOCAL_NY, een.LOCAL_NX, een.NZ))
+    local[een.HALO:-een.HALO, een.HALO:-een.HALO, :] = owned
+    payload = local.transpose(1, 0, 2).ravel(order="F")
+    path.write_bytes(magic.ljust(16).encode("ascii")
+                     + b"\0" * 40 + payload.tobytes())
+
+
+def _write_per_rank(tmp_path, *, halo_leak=False):
+    rng = np.random.default_rng(8)
+    halves = {}
+    for name, stem, magic in (
+        ("e3f_0vor", "oracle_een_e3f0vor", "NEMO_L4_E3F0_1"),
+        ("live_e3f_vor", "oracle_een_e3fvor", "NEMO_L4_E3FV_1"),
+    ):
+        blocks = []
+        for rank in (0, 1):
+            owned = rng.random((148, 90, een.NZ)) + 1.0
+            blocks.append(owned)
+            path = tmp_path / f"{stem}_kt00000001_r{rank:04d}.bin"
+            _write_rank_block(path, magic, owned)
+            if halo_leak and rank == 1:
+                raw = bytearray(path.read_bytes())
+                raw[56:64] = np.float64(3.0).tobytes()
+                path.write_bytes(bytes(raw))
+        halves[name] = np.concatenate(blocks, axis=1)
+    return halves
+
+
+def test_per_rank_record_joins_both_halves_of_the_fold_row(tmp_path):
+    halves = _write_per_rank(tmp_path)
+    recorded, coverage = een._stitch_per_rank(tmp_path)
+    for name, expected in halves.items():
+        assert recorded[name].shape == (148, een.GLOBAL_NX, een.ACTIVE_NZ)
+        np.testing.assert_array_equal(
+            recorded[name], expected[..., :een.ACTIVE_NZ])
+    # each rank is checked in its own right, not just the join
+    assert set(coverage) == {
+        "e3f_0vor_rank0", "e3f_0vor_rank1",
+        "live_e3f_vor_rank0", "live_e3f_vor_rank1",
+    }
+    assert all(row["halo_slots_all_zero"] for row in coverage.values())
+
+
+def test_per_rank_record_refuses_a_halo_slot_that_is_not_empty(tmp_path):
+    """Non-vacuity: the emptiness of the halo is asserted, not assumed.
+
+    Round 8 retracted a count that read those zeroed slots as NEMO values;
+    the guard that prevents it must still be able to fire.
+    """
+    _write_per_rank(tmp_path, halo_leak=True)
+    with pytest.raises(een.GateError, match="halo slot is non-zero"):
+        een._stitch_per_rank(tmp_path)

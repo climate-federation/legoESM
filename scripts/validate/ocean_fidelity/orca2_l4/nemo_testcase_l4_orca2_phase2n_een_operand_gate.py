@@ -355,21 +355,76 @@ def _fold_arm(primitives, *, perm: str, source_row: str, z_coord, grid, eta):
     return e3f0.at[-1].set(source[index])
 
 
-def _fold_row_rows(card, oracle_paths) -> dict[str, object]:
-    """Score the fold row alone, with its ablation and its two wrong rules."""
+MAGICS = (("e3f_0vor", "NEMO_L4_E3F0_1"), ("live_e3f_vor", "NEMO_L4_E3FV_1"))
+
+
+def _stitch_per_rank(per_rank_root: Path) -> tuple[dict, dict]:
+    """Both ranks' owned halves of the fold row, joined into the full domain.
+
+    The round-8 acquisition removed the writer's rank guard and tagged each
+    file with its rank, so the two owned blocks together cover all 180
+    longitudes.  Rank zero owns i = 0..89 and rank one i = 90..179, the
+    longitude-only split the run prints (``ocean.output:196-202``).
+    """
+
+    recorded, coverage = {}, {}
+    for name, magic in MAGICS:
+        halves = []
+        for rank in (0, 1):
+            path = per_rank_root / (
+                ("oracle_een_e3f0vor" if name == "e3f_0vor"
+                 else "oracle_een_e3fvor")
+                + f"_kt00000001_r{rank:04d}.bin")
+            coverage[f"{name}_rank{rank}"] = _assert_record_is_owned_only(
+                path, magic)
+            halves.append(_read_local_with_halo(path, magic)[
+                HALO:-HALO, HALO:-HALO, :ACTIVE_NZ])
+        joined = np.concatenate(halves, axis=1)
+        require(joined.shape[1] == GLOBAL_NX,
+                f"{name}: the two ranks join to {joined.shape[1]} longitudes, "
+                f"not {GLOBAL_NX}")
+        recorded[name] = joined
+    return recorded, coverage
+
+
+def _fold_row_rows(card, oracle_paths, per_rank_root=None) -> dict[str, object]:
+    """Score the fold row alone, with its ablation and its two wrong rules.
+
+    With ``per_rank_root`` the record covers ALL 180 fold-row longitudes, so
+    the exchange is certified in BOTH directions; without it the record is
+    rank zero's 90 owned destinations only.
+    """
     z_coord = card.recipe.z_coord
     grid = card.recipe.grid
     coverage = {
         name: _assert_record_is_owned_only(oracle_paths[name], magic)
-        for name, magic in (("e3f_0vor", "NEMO_L4_E3F0_1"),
-                            ("live_e3f_vor", "NEMO_L4_E3FV_1"))
+        for name, magic in MAGICS
     }
     recorded = {
         name: _read_local_with_halo(oracle_paths[name], magic)[
             HALO:-HALO, HALO:-HALO, :ACTIVE_NZ]
-        for name, magic in (("e3f_0vor", "NEMO_L4_E3F0_1"),
-                            ("live_e3f_vor", "NEMO_L4_E3FV_1"))
+        for name, magic in MAGICS
     }
+    n_cols = GLOBAL_NX // 2
+    rank0_agreement = None
+    if per_rank_root is not None:
+        full, per_rank_coverage = _stitch_per_rank(Path(per_rank_root))
+        # The new acquisition is a different build, so its rank-zero half must
+        # reproduce the admitted record before its rank-one half is believed.
+        rank0_agreement = {
+            name: int(np.sum(
+                full[name][:, :n_cols].view(np.uint64)
+                != recorded[name].view(np.uint64)))
+            for name in full
+        }
+        for name, unequal in rank0_agreement.items():
+            require(unequal == 0,
+                    f"{name}: the per-rank record's rank-zero half disagrees "
+                    f"with the admitted record in {unequal} cells")
+        coverage = {"rank_zero_only_record": coverage,
+                    "per_rank_record": per_rank_coverage}
+        recorded = full
+        n_cols = GLOBAL_NX
     own_eta = jnp.asarray(card.recipe.initial_state.eta.data, jnp.float64)
     # eta = 0 makes r3f exactly zero, so the live builder returns its own
     # FROZEN e3f_0vor bit for bit (x * 1.0 is exact).  That is how the frozen
@@ -383,8 +438,7 @@ def _fold_row_rows(card, oracle_paths) -> dict[str, object]:
     }
 
     def _unequal(candidate: np.ndarray, expected: np.ndarray) -> dict[str, object]:
-        actual = np.asarray(candidate, np.float64)[:, :GLOBAL_NX // 2,
-                                                   :ACTIVE_NZ]
+        actual = np.asarray(candidate, np.float64)[:, :n_cols, :ACTIVE_NZ]
         rows = {}
         for label, sl in (("owned_block", slice(None)),
                           ("north_fold_row", slice(FOLD_ROW, FOLD_ROW + 1))):
@@ -462,6 +516,8 @@ def _fold_row_rows(card, oracle_paths) -> dict[str, object]:
                 "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/"
                 "lbcnfd.f90:722-746"),
         },
+        "recorded_fold_row_longitudes": n_cols,
+        "per_rank_rank_zero_agreement": rank0_agreement,
         "unmeasured": {
             "other_half_of_the_fold_row": (
                 "rank one owns the remaining 90 fold-row longitudes and the "
@@ -469,6 +525,9 @@ def _fold_row_rows(card, oracle_paths) -> dict[str, object]:
                 "are UNRECORDED; every recorded destination's SOURCE does lie "
                 "in rank one's half, so the exchange across the rank boundary "
                 "is exercised in one direction only"
+            ) if per_rank_root is None else (
+                "NOTHING: the per-rank record covers all 180 fold-row "
+                "longitudes, so both directions of the exchange are certified"
             ),
         },
     }
@@ -538,7 +597,8 @@ def _rule12_rows():
     return rows
 
 
-def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, object]:
+def validate(deck_root: Path, oracle_root: Path, plant: bool,
+             per_rank_root: Path | None = None) -> dict[str, object]:
     jax.config.update("jax_enable_x64", True)
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
@@ -630,7 +690,7 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
             ],
         },
         "cross_card_rule12": _rule12_rows(),
-        "north_fold_row": _fold_row_rows(card, paths),
+        "north_fold_row": _fold_row_rows(card, paths, per_rank_root),
         "source": {
             "e3f_0vor": "dynvor.F90:918-950",
             "live_e3f_vor": "domqco.F90:233-246; domzgr_substitute.h90:130",
@@ -653,9 +713,14 @@ def main() -> int:
     parser.add_argument("--oracle-root", type=Path, required=True)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument(
+        "--per-rank-root", type=Path,
+        help="round-8 per-rank EEN record; certifies BOTH directions of "
+             "the tripolar fold instead of rank zero's half alone")
     args = parser.parse_args()
     try:
-        result = validate(args.deck_root, args.oracle_root, args.plant)
+        result = validate(args.deck_root, args.oracle_root, args.plant,
+                          args.per_rank_root)
     except (GateError, OSError, ValueError, IndexError, struct.error) as exc:
         print(f"FAIL: {exc}")
         return 1
