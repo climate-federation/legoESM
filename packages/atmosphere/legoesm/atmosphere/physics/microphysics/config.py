@@ -906,11 +906,14 @@ class MorrisonConfig(NamedTuple):
     # :2718 the gated residual) leaves MG2 with NO vapour-to-liquid
     # condensation at all in a CLUBB configuration.
     #
-    # BOTH SIGNS, deliberately.  CAM switches the whole block with one flag, and
-    # the negative branch is not a microphysical sink -- it is the other half of
-    # the same adjustment, and CLUBB's PDF evaporates cloud liquid as readily as
-    # it condenses it.  Every genuine sink (autoconversion, accretion, Bergeron,
-    # riming, sedimentation) is untouched.
+    # POSITIVE BRANCH ONLY.  An earlier version said "both signs"; that was
+    # wrong twice.  CAM's block is guarded by ``qtmp > qvn``
+    # (micro_mg2_0.F90:2700), so it fires on positive supersaturation and has
+    # no evaporation branch to switch off.  And our default
+    # ``wbf_scheme="emergent"`` has no explicit Bergeron rate: the mixed-phase
+    # cloud-water sink IS that negative branch.  Every genuine sink
+    # (autoconversion, accretion, the emergent WBF, riming, sedimentation) is
+    # untouched.
     #
     # WHY IT MATTERS: the adjustment removes the whole supersaturation on every
     # call, so running microphysics N times inside one physics step adjusts N
@@ -1245,7 +1248,7 @@ def apply_microphysics_experiment_flags(
     morrison_scalars: dict | None = None,
     morrison_flavor: str | None = None,
     morrison_sed_cfl_substeps: bool | None = None,
-    liquid_from_closure: bool = False,
+    liquid_from_closure: bool | None = None,
     morrison_sed_cfl_substeps_max: int | None = None,
     morrison_sed_cfl_substeps_strict: bool | None = None,
 ):
@@ -1347,22 +1350,27 @@ def apply_microphysics_experiment_flags(
                 "--microphysics morrison or drop the override.")
         scheme_config = scheme_config._replace(
             morrison_flavor=morrison_flavor)
-    if liquid_from_closure and not hasattr(scheme_config,
-                                           "liquid_from_closure"):
+    if liquid_from_closure is not None and not hasattr(
+            scheme_config, "liquid_from_closure"):
         # Scheme gate, same shape as the Morrison-only knobs below: a deck that
         # asks for this on a scheme with no saturation adjustment to switch off
         # must be told, not silently ignored.
-        raise ValueError(
-            f"liquid_from_closure=True is not supported by the {scheme!r} "
-            "microphysics scheme (it has no saturation adjustment to hand "
-            "over); use --microphysics morrison or drop it.")
-    if hasattr(scheme_config, "liquid_from_closure"):
-        # Assigned UNCONDITIONALLY, unlike the opt-in knobs below.  This one is
-        # slaved to the closure: the driver passes what the closure resolved
-        # to, so passing False must CLEAR a directly-constructed True rather
-        # than leave it standing.  A sub-config that arrived with the flag set
-        # and a closure that is not delivering liquid would otherwise reach a
-        # built model with no liquid source at all (codex).
+        if liquid_from_closure:
+            raise ValueError(
+                f"liquid_from_closure=True is not supported by the {scheme!r} "
+                "microphysics scheme (it has no saturation adjustment to hand "
+                "over); use --microphysics morrison or drop it.")
+    elif liquid_from_closure is not None:
+        # TRI-STATE, and the None matters.  This knob is slaved to the closure,
+        # so a driver passing False must CLEAR a directly-constructed True
+        # rather than leave it standing -- otherwise a model builds with no
+        # liquid source at all (codex round 1).  But the helper is also called
+        # a SECOND time further down this same file to thread the Morrison
+        # scalar knobs, and a plain ``False`` default made that second call
+        # silently undo the first: setting morrison_flavor or
+        # morrison_sed_cfl_substeps_max disabled the gate while the closure
+        # stayed on (codex round 2, reproduced).  None means "not this
+        # caller's business, leave it".
         scheme_config = scheme_config._replace(
             liquid_from_closure=bool(liquid_from_closure))
     if morrison_sed_cfl_substeps is not None:

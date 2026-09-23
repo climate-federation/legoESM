@@ -839,3 +839,34 @@ def test_microphysics_half_alone_is_refused_at_the_factory():
                     morrison=MorrisonConfig(liquid_from_closure=True)),
             ),
             dt=600.0, model_type="mpas", cld_macmic_num_steps=1)
+
+
+def test_scalar_threading_does_not_undo_the_gate():
+    """A second helper call for unrelated knobs must not clear the flag.
+
+    The helper is called twice on the coupled lane: once for the closure
+    flags, then again to thread the Morrison scalar knobs.  With a plain
+    ``False`` default the second call silently undid the first, so setting
+    ``morrison_flavor`` or a sedimentation knob disabled the gate while the
+    closure stayed on -- a model with no liquid source, passing validation
+    (codex round 2, reproduced).  ``None`` means "leave it alone".
+    """
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MorrisonConfig, apply_microphysics_experiment_flags,
+    )
+    resolved = apply_microphysics_experiment_flags(
+        MorrisonConfig(), "morrison", liquid_from_closure=True)
+    assert resolved.liquid_from_closure is True
+
+    for kw in ({"morrison_flavor": "sam"},
+               {"morrison_sed_cfl_substeps_max": 128},
+               {"homogeneous_ice_nucleation": True},
+               {}):
+        after = apply_microphysics_experiment_flags(resolved, "morrison", **kw)
+        assert after.liquid_from_closure is True, (
+            f"threading {kw!r} cleared the gate")
+
+    # ...and an explicit False still clears it.
+    assert apply_microphysics_experiment_flags(
+        resolved, "morrison", liquid_from_closure=False
+    ).liquid_from_closure is False
