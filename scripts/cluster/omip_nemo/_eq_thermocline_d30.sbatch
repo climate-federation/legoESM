@@ -94,5 +94,28 @@ done
 $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline_structure.py $ARGS \
   --nemo-gridt $GT --nemo-rec 5 --nemo-rec-early 2
 rc=$?
+
+# THE DISCRIMINATOR ADDED AFTER THE FIRST RUN, and it is a test of the
+# INSTRUMENT rather than of the model. Our snapshots are INSTANTANEOUS, every
+# lane runs --dm2dc so the shortwave has a diurnal cycle, the top level centre
+# is 0.512 m, and every mark sits at exactly day N.0 -- the same clock hour
+# each time. The oracle's records are 5-DAY MEANS, which average the diurnal
+# cycle away. A fixed-phase instantaneous sample of a half-metre level against
+# a 5-day mean is exactly the aliasing this campaign has been burned by.
+#
+# The near-surface profile separates the two readings outright:
+#   * the warm anomaly confined to the top one to three levels, decaying with
+#     an e-folding of a few metres  ->  DIURNAL SKIN, the finding is a
+#     sampling artefact and the model may be fine.
+#   * the anomaly still large at 10-20 m  ->  a real mixing defect, and the
+#     decoupled-surface reading stands.
+for box in "220 240" "240 260"; do
+  set -- $box
+  echo
+  echo "===== near-surface profile ${1}-${2}E ====="
+  $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline_structure.py $ARGS \
+    --nemo-gridt $GT --nemo-rec 5 --nemo-rec-early 2 --surface-profile \
+    --surface-lon-lo $1 --surface-lon-hi $2 2>&1 | sed -n '/=== Near-surface/,$p' || rc=1
+done
 echo "=== card exit: $rc ==="
 exit $rc
