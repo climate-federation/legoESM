@@ -2273,11 +2273,13 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     Parameters
     ----------
     dz_ref : array, shape (nlev,), or None
-        Per-level reference thickness [m] (``z_coord.dz_ref``), used ONLY by
-        the ``"nemo_avg"`` branch at FULLY-DRY vertices (``wet_count == 0``)
-        — see NEMO ``dynvor.F90`` lines quoted below.  ``None`` reproduces
-        the legacy ``BIG_H``-everywhere dry-vertex behaviour (``"min"``
-        branch is dz_ref-independent and always bit-identical).
+        Per-level reference thickness [m] (``z_coord.dz_ref``).  The
+        ``"nemo_avg"`` branch consults it at FULLY-DRY vertices
+        (``wet_count == 0``) — see NEMO ``dynvor.F90`` lines quoted below —
+        and ``None`` there reproduces the legacy ``BIG_H``-everywhere
+        dry-vertex behaviour.  The ``"nemo_avg4"`` branch REQUIRES it (it is
+        the frozen reference sum's own operand) and raises without it.  The
+        ``"min"`` branch is dz_ref-independent and always bit-identical.
 
     Returns ``(h_vtx, Fu_ext, u_ext)`` — ``h_vtx`` is
     ``(n_lat+1, n_lon+1, nlev)``; ``Fu_ext``/``u_ext`` are the same
