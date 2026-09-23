@@ -68,7 +68,7 @@ divergent statement is the model CONSTRUCTION, and it is the only one.**
 
 **THE TWO ROWS ARE ONE SELECTION, NOT TWO FREE FIELDS.** The model REFUSES
 `real_freshwater` with `fix_eta_drift=False`
-(`ocean_model_latlon_cgrid.py:3006-3018`), so only three of the four
+(`ocean_model_latlon_cgrid.py:3111-3123`), so only three of the four
 combinations are constructible at all. The pair is one choice with a
 mechanically enforced companion.
 
@@ -347,7 +347,7 @@ step, and a real freshwater source would move `ssh` by `5.1750e-04` m.
 Turning the channel OFF is a first-order change; choosing between the two ways
 of carrying it is bit-for-bit identical. The freshwater reaches the state
 through the barotropic continuity source (`F_slow_eta`, built for any closure
-other than `"none"`, `ocean_model_latlon_cgrid.py:5492-5495`) and **the virtual
+other than `"none"`, `ocean_model_latlon_cgrid.py:5597-5600`) and **the virtual
 salt term never reaches salinity at all** — a `1.8e-03` g/kg per-step source
 that produces `0` unequal cells.
 
@@ -391,7 +391,7 @@ AFTER THE CONTENT IS CAPTURED.** `implicit_solver.py:625-648` hands
 `implicit_vertical_diffusion_nemo_tracer_pair` only the `content_rhs_*`
 arrays; `field_1`/`field_2` are dropped. Measured: perturbing `field_2` by
 `+1e3` moves `max|dS|` by **`0.0`** on that arm, against `1000.0` on the shared
-Thomas arm. The content is captured at `ocean_model_latlon_cgrid.py:7664`,
+Thomas arm. The content is captured at `ocean_model_latlon_cgrid.py:7804`,
 BEFORE the virtual-salt block at `:7898-7963` — which is the mechanism behind
 section 7, now CONFIRMED rather than plausible. Everything that mutates T/S
 between those two points is discarded: the virtual salt flux, the

@@ -51,8 +51,8 @@ S-35 registry row and map:
 
 | site | symbol | file | when it runs |
 |---|---|---|---|
-| (a) BEFORE the implicit solve | `_replace_stage_mean` | `ocean_model_latlon_cgrid.py:4818` (called `:4987`, `:5003`, `:5021` for stages 1/2/3) | every `momentum_time_integrator="rk3_ws"` card, unconditionally (only the private `stage_barotropic_correction` test hook disables it) |
-| (b) AFTER the implicit solve | `_impose_mean` + `_fixed_depth_means` | `ocean_model_latlon_cgrid.py:6403-6407`, `:6483-6497`, helper `:6580` | gated on `barotropic.nemo_stage_mean_imposition and _apply_implicit_vmix` |
+| (a) BEFORE the implicit solve | `_replace_stage_mean` | `ocean_model_latlon_cgrid.py:4923` (called `:4987`, `:5003`, `:5021` for stages 1/2/3) | every `momentum_time_integrator="rk3_ws"` card, unconditionally (only the private `stage_barotropic_correction` test hook disables it) |
+| (b) AFTER the implicit solve | `_impose_mean` + `_fixed_depth_means` | `ocean_model_latlon_cgrid.py:6509-6513`, `:6483-6497`, helper `:6580` | gated on `barotropic.nemo_stage_mean_imposition and _apply_implicit_vmix` |
 
 INSTANTIATED, not read off a default (Rule 10) — both cards print
 `nemo_stage_mean_imposition = False`, `implicit_vertical_mixing = True`,

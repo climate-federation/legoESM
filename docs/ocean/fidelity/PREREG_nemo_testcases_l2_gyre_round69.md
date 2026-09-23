@@ -37,7 +37,7 @@ a positive sign to `Krhs` at `:257-305`. The compiled ZDF statement forms
 substitution at `:575-580`.
 
 legoESM's single WS helper forms its stage-3 advection content and source
-association at `ocean_model_latlon_cgrid.py:1905-1917`, returning the actual
+association at `ocean_model_latlon_cgrid.py:1991-2003`, returning the actual
 content at `:1918-1922`. The production GYRE path constructs its stage-3
 SBC/QSR source at `:6181-6208`, computes the Kbb-input GM/Redi rate at
 `:7117-7128,7340-7422`, and calls the helper with the source tuple at
