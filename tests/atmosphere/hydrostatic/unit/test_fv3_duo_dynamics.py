@@ -1014,7 +1014,26 @@ def test_wall_default_surface_is_frozen():
 # Recorded because it is main's, not this branch's, and someone should look at
 # it there: `forcing/amip.py` still declares `albedo_ice: float = 0.65`, so the
 # two declarations of that quantity now disagree.
-_WALL_SURFACE_SHA256 = "8851a6fe84378ee1fbda9dc96fd238895a493dc7e74a4e3350727f49066d3842"
+#
+# 2026-09-23, merging main into the raised-lid branch (#1773). Same gate, same
+# review. The flattened surface was dumped either side of this branch and
+# differenced:
+#
+#   5 paths ADDED -- cloud_cap_floor_{on,lat_deg,p_max_pa,cf,q_c}, the
+#     polar-cap radiative floor, a diagnostic attribution lever whose `on`
+#     default is False;
+#   0 REMOVED;
+#   1 default MOVED: cloud_saturation_scheme 'liquid' -> 'mixed_phase'.
+#
+# The moved default is this branch's own and deliberate (RH for cloud fraction
+# measured against the ice-blended saturation curve; against the liquid curve
+# at all temperatures, 230 K ice-saturated air reads RH_liquid 0.662 against an
+# rh_crit of 0.85, so cold cloud is impossible). It is INERT on the duo lane,
+# which has no clouds and no radiation and whose wall admits only grid /
+# dycore / span / window / output-cadence / distributed paths -- and it is not
+# carried by a default anywhere it matters either: config/amip/amip_production.yaml
+# PINS `cloud_saturation_scheme: mixed_phase` explicitly.
+_WALL_SURFACE_SHA256 = "71129e0044383074ff9fb65d9eddef903a21419dbba9a7941fbd90adcf0796a0"
 
 
 def test_wall_leaf_types_are_scalar():
