@@ -286,6 +286,21 @@ face scorer's mask awareness (removing the mask makes the dry-face arm fail)
 and the reader's refusal of a record whose flags select the thickness-weighted
 assignment (removing the guard makes the refusal arm fail).
 
+The six-file push gate and this round's harness tests were run together and
+reported exactly:
+
+> 1 failed, 170 passed in 939.18s (0:15:39)
+
+The one failure is this walk's own working copy, not a defect: the receipt was
+still uncommitted, and `test_forcing_gate_plants_all_exit_non_zero` spawns a
+subprocess whose provenance stamp refuses a dirty tree.  Re-run on the
+committed tree it reports `1 passed in 25.66s`.
+
+The citation gate on this receipt reported `PASS` with 13 citations, zero
+failures, zero unmapped citations and zero map entries failing audit; its
+shifted-line plant on the advection citation exited 1 with
+`SYMBOL-NOT-AT-LINE`.
+
 Independent review not run (codex paused).
 
 ## OPEN — Round 158
