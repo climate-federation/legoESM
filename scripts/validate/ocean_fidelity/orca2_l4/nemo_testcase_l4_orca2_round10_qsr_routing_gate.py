@@ -112,16 +112,14 @@ def production_rgb_tendency(sw_cfg, config, z_coord, *, qsr, chl, h_ref, r3t,
     )
 
     stretch = np.float64(1.0) + (r3t if live else np.zeros_like(r3t))
-    # ``compute_layer_thickness`` (the pipeline's own call) returns the
-    # PARTIAL-CELL reference thickness times the column stretch, and that
-    # reference is ZERO below the seafloor -- so ``dz_live > 0`` is the wet
-    # mask, exactly as NEMO's ``e3t_0*(1+r3t*tmask)`` is multiplied by
-    # ``wmask`` at traqsr.f90:388.  Reproduce that, not the raw mesh e3t_0
-    # (which NEMO keeps non-zero everywhere and which would mark dry cells
-    # wet).
-    dz_live = h_ref * (np.float64(1.0) + (r3t[..., None] if live
-                                          else np.zeros_like(r3t)[..., None])
-                       * tmask)
+    # ``compute_layer_thickness`` IS ``h_partial * J`` and ``J`` IS NEMO's
+    # ``1 + r3t`` (vertical.py) -- ONE stretch, not two.  ``h_partial`` is
+    # ZERO below the seafloor, so ``dz_live > 0`` is the wet mask, which is
+    # what NEMO's ``wmask`` factor does at traqsr.f90:388-391.  No separate
+    # tmask multiply: NEMO's ``e3t_0`` is non-zero everywhere and legoESM's
+    # reference thickness is not.
+    del tmask
+    dz_live = h_ref * stretch[..., None]
     gdepw_ref = -jnp.asarray(z_coord.z_half_ref, dtype=jnp.float64)
     gdepw_bottom_live = gdepw_ref[1:] * jnp.asarray(stretch)[..., jnp.newaxis]
     dz_live = jnp.asarray(dz_live)
@@ -137,6 +135,38 @@ def production_rgb_tendency(sw_cfg, config, z_coord, *, qsr, chl, h_ref, r3t,
         rho_0=config.rho_0,
         c_sw=config.physics.constants.c_sw,
     )
+
+
+def pipeline_shortwave_deposit(card, config, state):
+    """The deposit the SHARED PHYSICS PIPELINE itself applies.
+
+    This calls ``make_ocean_physics`` -- the production factory -- with the
+    card's OWN shortwave configuration and every other module switched off, so
+    the only tendency it can return is the shortwave block of
+    ``packages/ocean/legoesm/ocean/physics/combined.py``.  That block is the
+    thing round 10 changed: before it, this call RAISES, which is what makes
+    this row bind on the diff rather than merely re-run a kernel that was
+    already there.
+    """
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig, make_ocean_physics
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+
+    only_shortwave = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        surface_forcing=SurfaceForcingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(scheme="none"),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=config.physics.shortwave_penetration,
+        mle=None,
+        constants=config.physics.constants,
+    )
+    physics_fn = make_ocean_physics(only_shortwave)
+    return physics_fn
 
 
 def validate(deck_root: Path, root: Path, *, plant: bool, control: str | None) -> dict:
@@ -246,6 +276,56 @@ def validate(deck_root: Path, root: Path, *, plant: bool, control: str | None) -
         candidate[index] = np.nextafter(candidate[index], np.inf)
 
     result = score(candidate, qsr["increment"], wet[:, :90])
+
+    # --- the row that BINDS on round 10's diff -------------------------------
+    # Everything above tests the kernel and the operand expressions.  This runs
+    # the SHARED PHYSICS PIPELINE itself, through the production factory, with
+    # the card's own shortwave configuration -- the code path round 10 changed,
+    # and the one that REFUSED before it.  The pipeline derives its own stretch
+    # from the sea surface, so the state is given the sea surface that carries
+    # the record's own r3t; that round trip is exact (measured below, and the
+    # gate refuses if it stops being exact).
+    pipeline = None
+    if not (plant or control):
+        from legoesm.ocean.state import OceanSurfaceForcing
+        from legoesm.ocean.vertical import compute_ocean_jacobian
+
+        state = card.recipe.initial_state
+        H_bathy = np.asarray(state.H_bathy.data, dtype=np.float64)
+        r3t_full = np.zeros(H_bathy.shape, dtype=np.float64)
+        r3t_full[:, :90] = r3t
+        eta = r3t_full * H_bathy
+        jac = np.asarray(compute_ocean_jacobian(
+            jnp.asarray(eta), state.H_bathy.data, z_coord))
+        surface_wet = np.asarray(z_coord.is_active)[..., 0] > 0.0
+        stretch_unequal = int((
+            jac[surface_wet].view(np.uint64)
+            != (np.float64(1.0) + r3t_full)[surface_wet].view(np.uint64)).sum())
+        require(stretch_unequal == 0,
+                "the sea surface that carries the record's r3t no longer "
+                f"reproduces it through the pipeline's own jacobian: "
+                f"{stretch_unequal} columns unequal")
+        chl_full = np.zeros(H_bathy.shape, dtype=np.float64)
+        chl_full[:, :90] = np.asarray(rgb["chl"], dtype=np.float64)
+        qsr_full = np.zeros(H_bathy.shape, dtype=np.float64)
+        qsr_full[:, :90] = np.asarray(rgb["qsr"], dtype=np.float64)
+        physics_fn = pipeline_shortwave_deposit(card, config, state)
+        tendencies = physics_fn(
+            state._replace(eta=state.eta.replace(data=jnp.asarray(eta))),
+            card.recipe.grid, z_coord,
+            OceanSurfaceForcing(sw_down=jnp.asarray(qsr_full),
+                                chl=jnp.asarray(chl_full)),
+        )
+        deposit = np.asarray(tendencies.dT_dt.data)[:, :90, :ACTIVE_Z]
+        pipeline_candidate = np.asarray(nemo_source_round(
+            nemo_source_round(jnp.asarray(before_qsr) + jnp.asarray(deposit))
+            - jnp.asarray(before_qsr))).copy()
+        pipeline = score(pipeline_candidate, qsr["increment"], wet[:, :90])
+        require(pipeline["status"] == "AT_BAR",
+                "the SHARED PHYSICS PIPELINE's own shortwave deposit is not "
+                f"NEMO's: {pipeline['unequal']}/{pipeline['count']} unequal, "
+                f"max |delta| {pipeline['max_abs']:.6e}")
+
     if plant or control:
         require(result["unequal"] > 0,
                 f"control {control or 'plant'!r} did not fire; it proves nothing")
@@ -259,6 +339,7 @@ def validate(deck_root: Path, root: Path, *, plant: bool, control: str | None) -
         "owner": "ORCA2_OWNER",
         "label": "given NEMO's entry",
         "result": result,
+        "shared_physics_pipeline_result": pipeline,
         "card_resolved_settings": {
             field: {"value": getattr(
                 config.physics.shortwave_penetration, field),
@@ -267,7 +348,7 @@ def validate(deck_root: Path, root: Path, *, plant: bool, control: str | None) -
         },
         "card_reference_ladder_unequal": ladder_rows,
         "operand_expressions": {
-            "dz_live": "e3t_0*(1+r3t*tmask)  (traqsr.f90:386)",
+            "dz_live": "h_partial*(1+r3t) == compute_layer_thickness  (traqsr.f90:388)",
             "gdepw_bottom_live": "-z_half_ref[1:]*(1+r3t)  (traqsr.f90:349)",
             "dispatcher": "apply_shortwave_penetration (the production entry)",
         },

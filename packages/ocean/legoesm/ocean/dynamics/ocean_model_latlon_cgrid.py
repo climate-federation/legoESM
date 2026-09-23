@@ -6437,7 +6437,7 @@ class LatLonCGridOceanModel:
                 # chlorophyll penetration.  ``tra_qsr`` runs ONCE per step, at
                 # stage 3, with Kmm (stprk3_stg.F90:581; traqsr.f90:213 ->
                 # qsr_RGBc, whose live operands are ``e3t_0*(1+r3t(Kmm))`` and
-                # ``gdepw_1d*(1+r3t(Kmm))``, traqsr.f90:349,386).  The shared
+                # ``gdepw_1d*(1+r3t(Kmm))``, traqsr.f90:388, :349).  The shared
                 # pipeline already deposited the SAME kernel on the step-entry
                 # (Kbb) ladder; rebuild that field with the pipeline's own two
                 # operands so the subtraction below removes it exactly, then

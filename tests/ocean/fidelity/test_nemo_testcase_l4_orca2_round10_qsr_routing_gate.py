@@ -27,6 +27,17 @@ from legoesm.ocean.physics.shortwave_penetration import (  # noqa: E402
 NLAT, NLON, NLEV = 3, 4, 6
 
 
+def _partial_cell_coordinate(h_ref, z_coord):
+    """A real OceanPartialCellCoordinate whose reference column IS ``h_ref``."""
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate, create_z_star_from_thicknesses)
+
+    return create_partial_cell_coordinate(
+        create_z_star_from_thicknesses(np.asarray(z_coord.dz_ref)),
+        np.asarray(h_ref).sum(axis=-1),
+    )
+
+
 def _operands():
     dz_ref = np.array([10.0, 12.0, 15.0, 20.0, 30.0, 50.0])
     z_half_ref = -np.concatenate([[0.0], np.cumsum(dz_ref)])
@@ -53,25 +64,53 @@ def _operands():
                  tmask=tmask))
 
 
-def test_the_gate_builds_the_production_operand_expressions():
+def test_the_gate_uses_the_PRODUCTION_thickness_and_stretch_helpers():
+    """Not a retyping of the gate: the reference comes from the model's own
+    ``compute_layer_thickness`` / ``compute_ocean_jacobian``, which is what the
+    shared pipeline calls.  If the gate ever drifts to a different live
+    ladder, this fails."""
+    from legoesm.ocean.vertical import (
+        compute_layer_thickness, compute_ocean_jacobian)
+
     sw_cfg, config, z_coord, kw = _operands()
-    got = np.asarray(gate.production_rgb_tendency(
-        sw_cfg, config, z_coord, live=True, **kw))
-    # The production sites (physics/combined.py and the RK3 stage-3 seam in
-    # ocean_model_latlon_cgrid.py) build exactly this pair.
-    stretch = 1.0 + kw["r3t"]
-    dz_live = kw["h_ref"] * (1.0 + kw["r3t"][..., None] * kw["tmask"])
+    # A real partial-cell coordinate whose reference column is the test's
+    # h_ref, so the production helpers can be asked the same question.
+    zc = _partial_cell_coordinate(kw["h_ref"], z_coord)
+    H = kw["h_ref"].sum(axis=-1)
+    eta = kw["r3t"] * H
+    J = np.asarray(compute_ocean_jacobian(jnp.asarray(eta),
+                                          jnp.asarray(H), zc))
+    dz_live = np.asarray(compute_layer_thickness(jnp.asarray(eta),
+                                                 jnp.asarray(H), zc))
     gdepw_ref = -jnp.asarray(z_coord.z_half_ref)
     want = np.asarray(apply_shortwave_penetration(
         sw_cfg, jnp.asarray(kw["qsr"]),
         chl=jnp.asarray(kw["chl"]),
         dz_live=jnp.asarray(dz_live),
         wet_cell=jnp.asarray(dz_live > 0.0, dtype=jnp.asarray(dz_live).dtype),
-        gdepw_bottom_live=gdepw_ref[1:] * jnp.asarray(stretch)[..., None],
+        gdepw_bottom_live=gdepw_ref[1:] * jnp.asarray(J)[..., None],
         gdepw_ref=gdepw_ref,
         e3t_ref=jnp.asarray(z_coord.dz_ref),
         rho_0=config.rho_0, c_sw=config.physics.constants.c_sw))
+    got = np.asarray(gate.production_rgb_tendency(
+        sw_cfg, config, z_coord, live=True, **kw))
     np.testing.assert_array_equal(got, want)
+
+
+def test_the_shared_pipeline_still_REFUSES_the_generic_rgb_scheme():
+    """Round 10 opened the pipeline to the NEMO identity selector ONLY.  The
+    generic ``rgb_chl`` deposit is owned by the external surface-forcing
+    stage; if the pipeline ever accepts it too, qsr is counted twice."""
+    from legoesm.ocean.physics.shortwave_penetration import (
+        shortwave_penetration_tendency)
+
+    _, config, z_coord, kw = _operands()
+    generic = ShortwavePenetrationConfig(scheme="rgb_chl")
+    with pytest.raises(ValueError, match="two-band Jerlov kernel"):
+        shortwave_penetration_tendency(
+            jnp.asarray(kw["qsr"]), jnp.asarray(z_coord.dz_ref),
+            jnp.asarray(z_coord.z_half_ref), jnp.ones_like(jnp.asarray(kw["qsr"])),
+            generic, config.rho_0, config.physics.constants.c_sw)
 
 
 def test_the_wet_mask_falls_out_of_the_partial_cell_thickness():
