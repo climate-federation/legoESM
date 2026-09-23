@@ -4208,11 +4208,17 @@ def main(argv=None) -> int:
                 args.expect_commit, args.developed_stage2_record_root,
                 args.root, plant=args.plant)
         except GateError as error:
-            # A plant that trips a fail-closed check raises rather than
-            # returning a report; it still announces itself, because this
-            # campaign scrapes logs for the marker.
             if args.plant in (None, "none"):
                 raise
+            if str(error).startswith("PLANT-BLIND"):
+                # A control that did NOT catch its plant must never print the
+                # marker a caught one prints; round 103 shipped a plant that
+                # announced success while firing and this campaign scrapes
+                # logs.  Exit 2, distinct from a fired plant's 1.
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            # Any OTHER fail-closed check tripping under a plant is the plant
+            # being caught by a control earlier in the walk.
             print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
             return 1
         if args.json:
@@ -7967,22 +7973,29 @@ def developed_stage2_wzv_walk(
     nemo_dry_column = np.all(np.asarray(rows["rhd_t"]) == 0.0, axis=-1)
     lego_dry_column = np.asarray(state.land_mask.data) <= 0.5
     if plant == "wzv-cell-window":
-        # A window one cell off in longitude has to be refused.  Round 158's
-        # first attempt at this window WAS one cell off and this control is
-        # what caught it, so the plant reproduces that failure deliberately.
-        nemo_dry_column = np.roll(nemo_dry_column, 1, axis=1)
+        # A window one cell off has to be refused, in BOTH directions: round
+        # 158's first attempt at this window WAS one cell off and this control
+        # is what caught it, so the plant reproduces that failure deliberately.
+        # A blind control must NOT be able to print the fired marker, so the
+        # arm that was caught RETURNS and the arm that was not RAISES.
+        caught = {}
+        for name, axis in (("shifted_one_column_east", 1),
+                           ("shifted_one_row_north", 0)):
+            rolled = np.roll(nemo_dry_column, 1, axis=axis)
+            caught[name] = int(
+                np.count_nonzero(rolled != lego_dry_column))
+        blind = [name for name, count in caught.items() if count == 0]
+        if blind:
+            raise GateError(
+                "PLANT-BLIND: the cell-window control did not refuse "
+                f"{blind}: {caught}")
+        return {"status": "PLANT-FIRED", "plant": plant, "control": caught}
     cell_window = {
         "nemo_dry_columns": int(np.count_nonzero(nemo_dry_column)),
         "lego_dry_columns": int(np.count_nonzero(lego_dry_column)),
         "columns_disagreeing": int(
             np.count_nonzero(nemo_dry_column != lego_dry_column)),
     }
-    if plant == "wzv-cell-window":
-        require(cell_window["columns_disagreeing"] == 0,
-                "the cell-window control did NOT refuse a window shifted by "
-                f"one column: {cell_window}")
-        return {"status": "PLANT-FIRED", "plant": plant,
-                "control": cell_window}
     require(cell_window["columns_disagreeing"] == 0,
             "the Round-156 record cell window does not land on legoESM's T "
             f"grid: {cell_window}")
@@ -8003,12 +8016,15 @@ def developed_stage2_wzv_walk(
     form_liveness = _score_stage2_face(form_w, production_w, cell_mask)
     if plant == "wzv-form-inert":
         # Claim the arm is on while leaving it off.  The liveness refusal has
-        # to catch a run that never selected the other call form.
+        # to catch a run that never selected the other call form.  As above,
+        # a blind control cannot print the fired marker: being caught is
+        # ``active_cells_unequal == 0``, and anything else is PLANT-BLIND.
         inert = stage2_w(form=False, passive=False)
         inert_liveness = _score_stage2_face(inert, production_w, cell_mask)
-        require(inert_liveness["active_cells_unequal"] > 0,
-                "the liveness control did NOT refuse an arm that never "
-                f"selected NEMO's other call form: {inert_liveness}")
+        if inert_liveness["active_cells_unequal"] > 0:
+            raise GateError(
+                "PLANT-BLIND: the liveness control did not refuse an arm "
+                f"that never selected the other call form: {inert_liveness}")
         return {"status": "PLANT-FIRED", "plant": plant,
                 "control": inert_liveness}
     require(form_liveness["active_cells_unequal"] > 0,

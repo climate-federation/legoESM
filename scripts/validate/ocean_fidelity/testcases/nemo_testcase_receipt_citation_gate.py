@@ -2442,7 +2442,7 @@ CITATION_MAP = {
     'vertical.py:1625': ('def compute_ocean_jacobian(', 1),
     'ocean_model_latlon_cgrid.py:5725-5729': [
         'transport_velocity = (', ('* _ws_stage_v_mask,', 1), 5],
-    'ocean_model_latlon_cgrid.py:7044': ('_g2 = _nemo_ws_stage_transport(', 1),
+    'ocean_model_latlon_cgrid.py:7026': ('_g2 = _nemo_ws_stage_transport(', 1),
     'ocean_model_latlon_cgrid.py:7044': (
         '_stage3_hpg_operands = _stage_hpg_operands(', 1),
     'nemo_testcase_l2_gyre_phase3_gate.py:323': (
