@@ -390,7 +390,44 @@ findings and what was done with each:
 
 ## The six-file push gate and this round's own tests
 
-PLACEHOLDER_TESTS
+The six-file push gate together with this round's own three test files, on the
+committed tree, reported exactly:
+
+> 182 passed in 1001.79s (0:16:41)
+
+The other cards' own gates — both DINO recipes, both tanks and the tank
+zero-diffusion removal — were run as a separate battery, because two full
+batteries at once collapse this box's compiler:
+
+> 170 passed, 9 warnings in 339.86s (0:05:39)
+
+The generic NEMO-GYRE recipe's own file is inside the first battery.  Nothing
+on any of those cards moved, which is what the census predicts: none of them
+runs the statement, before or after.
+
+The citation gate on this receipt reported `PASS` with 20 citations, zero
+failures, zero unmapped citations, zero map entries failing audit, and all nine
+self-tests fired.  Its shifted-line plant, on the named first non-bit statement
+`GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:360`, exited 1 with
+`SYMBOL-NOT-AT-LINE`.
+
+The walk's two plants were re-run on the committed tree after the hold and both
+still fire, each exiting 1.
+
+Three earlier runs of the walk refused themselves before any of this was
+reported, and each refusal was a control doing its job rather than a nuisance:
+a passivity control that had not been told which slots an exposure writes, and
+then the same control counting bytes where the honest quantity is a magnitude.
+Both are fixed in the tree and the second is registered above.
+
+## One more measurement this round did NOT make
+
+The stage-3 momentum vertical velocity is scored only against the stage-3
+TRACER field, not against the oracle, because no developed stage-3
+vertical-velocity record exists.  Everything said about stage 3 here is either
+that the split fires there (measured, 18,000 interfaces) or that the stage-2
+output velocity it inherits improves (measured against the oracle).  The
+stage-3 producer itself is **UNMEASURED**.
 
 ## OPEN — Round 161
 
