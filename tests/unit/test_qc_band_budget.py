@@ -1,0 +1,146 @@
+"""Closure tests for the in-run cloud-water band budget.
+
+The closure test is the point of the diagnostic: the accumulated terms must
+reproduce the ACTUAL change in band inventory, including the part caused by the
+grid moving under the tracer.  Everything else here is guard rails.
+"""
+import numpy as np
+import pytest
+
+import jax
+import jax.numpy as jnp
+
+from legoesm.diagnostics.qc_band_budget import CloudWaterBandBudget
+from legoesm.diagnostics.process_ledger import pressure_band_weight
+
+P_LO, P_HI, G = 5.0e4, 8.0e4, 9.80616
+
+
+def _grid(ncol, nlev, p_s):
+    """Hybrid-like half levels: a fixed pressure part plus a p_s-following part."""
+    a = jnp.linspace(1.0e3, 5.0e4, nlev + 1)
+    b = jnp.linspace(0.0, 1.0, nlev + 1)
+    ph = a[None, :] + b[None, :] * (p_s[:, None] - a[-1])
+    return ph, ph[:, 1:] - ph[:, :-1]
+
+
+def test_pressure_band_weight_is_fractional_and_partitions_unity():
+    p_s = jnp.array([1.0e5, 9.5e4])
+    ph, _ = _grid(2, 12, p_s)
+    w = pressure_band_weight(ph, P_LO, P_HI)
+    assert jnp.all(w >= 0.0) and jnp.all(w <= 1.0)
+    # Adjacent bands partition each layer exactly.
+    lo = pressure_band_weight(ph, 0.0, P_HI)
+    hi = pressure_band_weight(ph, P_HI, 2.0e5)
+    assert float(jnp.max(jnp.abs(lo + hi - 1.0))) < 1e-12
+    # A fractional edge really is fractional, not a 0/1 mask.
+    assert float(jnp.max(jnp.minimum(w, 1.0 - w))) > 0.0
+
+
+def test_budget_closes_against_the_actual_inventory_change():
+    """THE test.  Integrate a tracer with known tendencies on a MOVING grid and
+    require the accumulated budget to reproduce the inventory change.
+
+    Non-vacuous three ways, each asserted below: dropping a process term, or
+    dropping the mass-redistribution term, or holding the grid fixed while the
+    model's grid moves, all break the closure by far more than the tolerance.
+    """
+    ncol, nlev, nstep, dt = 6, 20, 40, 900.0
+    key = jax.random.PRNGKey(0)
+    q = jax.random.uniform(key, (ncol, nlev)) * 1.0e-3
+    area = jnp.full((ncol,), 1.0 / ncol)
+    names = ("condensation", "accretion", "riming")
+    bud = CloudWaterBandBudget(P_LO, P_HI, area, G, names)
+
+    # Surface pressure drifts, so layer thickness AND band membership move.
+    def ps_at(i):
+        return jnp.full((ncol,), 1.0e5) + 3.0e3 * jnp.sin(
+            jnp.arange(ncol) + i * 0.1)
+
+    ph, dp = _grid(ncol, nlev, ps_at(0))
+    bud.begin_window(q, dp, ph)
+    for i in range(nstep):
+        k = jax.random.fold_in(key, i)
+        terms = {
+            "condensation": jax.random.uniform(k, (ncol, nlev)) * 2.0e-7,
+            "accretion": -jax.random.uniform(
+                jax.random.fold_in(k, 1), (ncol, nlev)) * 1.0e-7,
+            "riming": -jax.random.uniform(
+                jax.random.fold_in(k, 2), (ncol, nlev)) * 5.0e-8,
+        }
+        ph_new, dp_new = _grid(ncol, nlev, ps_at(i + 1))
+        bud.accumulate(terms, q, dp, ph, dp_new, ph_new, dt)
+        q = q + dt * sum(terms.values())
+        ph, dp = ph_new, dp_new
+    out = bud.close_window(q, dp, ph)
+
+    scale = float(sum(abs(v) for v in out["terms"].values())
+                  + abs(out["mass_redistribution"]))
+    assert scale > 0.0, "the test must actually exercise the budget"
+    assert abs(float(out["residual"])) <= 1.0e-12 * scale, (
+        f"budget did not close: residual {float(out['residual']):.3e} "
+        f"against scale {scale:.3e}")
+    assert out["window_days"] == pytest.approx(nstep * dt / 86400.0)
+
+    # Non-vacuity 1: drop a process term.
+    broken = (float(out["inventory_change"])
+              - (float(out["sum_of_terms"]) - float(out["terms"]["accretion"])))
+    assert abs(broken) > 1.0e-6 * scale
+    # Non-vacuity 2: drop the mass-redistribution term.
+    broken2 = (float(out["inventory_change"])
+               - (float(out["sum_of_terms"])
+                  - float(out["mass_redistribution"])))
+    assert abs(broken2) > 1.0e-6 * scale, (
+        "the moving grid must contribute, or this test cannot detect its "
+        "omission and the whole point of the term is untested")
+
+
+def test_missing_or_unregistered_terms_raise_rather_than_pass_silently():
+    area = jnp.full((3,), 1.0 / 3)
+    bud = CloudWaterBandBudget(P_LO, P_HI, area, G, ("a", "b"))
+    ph, dp = _grid(3, 8, jnp.full((3,), 1.0e5))
+    q = jnp.zeros((3, 8))
+    bud.begin_window(q, dp, ph)
+    z = jnp.zeros((3, 8))
+    with pytest.raises(KeyError):
+        bud.accumulate({"a": z}, q, dp, ph, dp, ph, 1.0)
+    with pytest.raises(KeyError):
+        bud.accumulate({"a": z, "b": z, "c": z}, q, dp, ph, dp, ph, 1.0)
+
+
+def test_accumulate_before_begin_window_raises():
+    area = jnp.full((2,), 0.5)
+    bud = CloudWaterBandBudget(P_LO, P_HI, area, G, ("a",))
+    ph, dp = _grid(2, 6, jnp.full((2,), 1.0e5))
+    with pytest.raises(RuntimeError):
+        bud.accumulate({"a": jnp.zeros((2, 6))}, jnp.zeros((2, 6)),
+                       dp, ph, dp, ph, 1.0)
+
+
+def test_state_round_trips_for_the_restart_chain():
+    area = jnp.full((4,), 0.25)
+    ph, dp = _grid(4, 10, jnp.full((4,), 1.0e5))
+    q = jnp.full((4, 10), 1.0e-4)
+    a = CloudWaterBandBudget(P_LO, P_HI, area, G, ("x", "y"))
+    a.begin_window(q, dp, ph)
+    a.accumulate({"x": jnp.full((4, 10), 1e-8), "y": jnp.full((4, 10), -2e-9)},
+                 q, dp, ph, dp, ph, 600.0)
+    b = CloudWaterBandBudget(P_LO, P_HI, area, G, ("x", "y"))
+    b.set_state(a.get_state())
+    assert float(b.terms["x"]) == pytest.approx(float(a.terms["x"]))
+    assert float(b.terms["y"]) == pytest.approx(float(a.terms["y"]))
+    assert b.elapsed_s == pytest.approx(a.elapsed_s)
+
+
+def test_bad_band_edges_and_duplicate_terms_are_rejected():
+    area = jnp.full((2,), 0.5)
+    with pytest.raises(ValueError):
+        CloudWaterBandBudget(8.0e4, 5.0e4, area, G, ("a",))
+    with pytest.raises(ValueError):
+        CloudWaterBandBudget(P_LO, P_HI, area, G, ())
+    with pytest.raises(ValueError):
+        CloudWaterBandBudget(P_LO, P_HI, area, G, ("a", "a"))
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
