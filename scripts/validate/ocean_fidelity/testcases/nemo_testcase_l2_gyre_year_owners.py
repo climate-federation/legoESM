@@ -4147,6 +4147,13 @@ def main(argv=None) -> int:
     parser.add_argument("--developed-stage2-wzv-split", action="store_true",
                         help="score NEMO's SECOND per-stage continuity solve "
                              "at the developed day-180 state")
+    parser.add_argument("--developed-stage2-face-r3", action="store_true",
+                        help="substitute the oracle's own r3u/r3v into the "
+                             "velocity-form continuity producer and walk the "
+                             "face ratio to its own producer statement")
+    parser.add_argument("--developed-process-rank-split", action="store_true",
+                        help="run round 152's one-step magnitude ranking in "
+                             "both stage programs and report which row grew")
     parser.add_argument("--reference-process-trace", type=Path,
                         default=DEFAULT_REFERENCE_PROCESS_TRACE,
                         help="admitted Round-124 process trace that a new "
@@ -4197,6 +4204,56 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
+    if args.developed_stage2_face_r3:
+        require(args.expect_commit is not None,
+                "--developed-stage2-face-r3 needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-stage2-face-r3 needs --daily-record-audit")
+        require(args.developed_stage2_record_root is not None,
+                "--developed-stage2-face-r3 needs "
+                "--developed-stage2-record-root")
+        try:
+            report = developed_stage2_face_r3_walk(
+                args.daily_record_root, args.daily_record_audit,
+                args.expect_commit, args.developed_stage2_record_root,
+                args.root, plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            if str(error).startswith("PLANT-BLIND"):
+                # A control that did NOT catch its plant must never print the
+                # marker a caught one prints (round 103's defect).
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: {report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["vertical_velocity_scored_against_nemo"],
+                         indent=2))
+        print(json.dumps(report["producer_decomposition"], indent=2))
+        print("STATUS PASS")
+        return 0
+    if args.developed_process_rank_split:
+        require(args.expect_commit is not None,
+                "--developed-process-rank-split needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-process-rank-split needs --daily-record-audit")
+        report = developed_process_rank_split(
+            args.developed_process_root, args.daily_record_root,
+            args.daily_record_audit, args.expect_commit, args.root)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        print(json.dumps(report["comparison"], indent=2))
+        print("STATUS PASS")
+        return 0
     if args.developed_stage2_wzv_split:
         require(args.expect_commit is not None,
                 "--developed-stage2-wzv-split needs --expect-commit")
@@ -7040,6 +7097,13 @@ def _developed_stage2_record(root: Path) -> dict:
         i_window, j_window = WINDOWS[tag]
         rows[f"r3_Kmm_{tag}"] = np.ascontiguousarray(
             fields[name][index][i_window, j_window].T)
+    # The stage's own sea surface heights, on the same T window, so a walk
+    # can rebuild legoESM's face-ratio statement from the ORACLE's operand
+    # instead of from legoESM's (round 161).
+    rows["ssh_Kmm_t"] = np.ascontiguousarray(
+        fields["ssh_Kmm_ssh_Kaa"][0][T_WINDOW].T)
+    rows["ssh_Kaa_t"] = np.ascontiguousarray(
+        fields["ssh_Kmm_ssh_Kaa"][1][T_WINDOW].T)
     rows["rDt"] = np.float64(fields["rDt_r1_Dt"][0])
     rows["ln_dynadv_vec"] = float(fields["flags_vec_linssh"][0])
     rows["lk_linssh"] = float(fields["flags_vec_linssh"][1])
@@ -8678,6 +8742,500 @@ def developed_stage2_wzv_split_walk(
     evidence_root.mkdir(parents=True, exist_ok=True)
     return report
 
+
+DEVELOPED_FACE_R3_PLANTS = ("face-r3-inert", "face-r3-tracer")
+
+
+def developed_stage2_face_r3_walk(
+        daily_root: Path, daily_audit: Path, expected_commit: str,
+        stage2_record_root: Path, evidence_root: Path, *,
+        plant: str | None = None) -> dict:
+    """Does the live face free-surface ratio own the stage-2 residual?
+
+    Round 160 built NEMO's second per-stage continuity solve
+    (``stprk3_stg.f90:360``, velocity indicator at ``divhor.f90:126-130``) and
+    took the developed stage-2 vertical velocity to ``2.334682468902387e-13``
+    m/s, which is still ``9.74e-08`` of that field's own size.  It also
+    measured that the face ratio the velocity indicator rebuilds each face
+    transport from differs from the oracle's OWN recorded ``r3u(Kmm)`` on
+    every active face, and registered that it had NOT shown the operand to own
+    the residual.  This walk shows it, one variable.
+
+    Two arms take the velocity indicator and both get the substitution: round
+    160's CORRECTED arm, where the momentum vertical advection reads its own
+    solve, and round 159's SHARED arm, where the single field is built in the
+    velocity form.  The substitution is made by an observer that wraps the
+    producer for exactly ONE call, the technique the tracer and transport
+    observers in this instrument already use, so no production line changes
+    and no card can reach it.
+
+    The walk also decomposes the ratio difference itself with no model step at
+    all: the oracle never rebuilds the stage ratio from the stage sea surface
+    height (``stprk3_stg.f90:185`` calls ``dom_qco_r3c_RK3`` once per step and
+    ``:211``/``:255`` COMBINE two ratios per stage), while legoESM builds one
+    ratio from the already-combined height at ``vertical.py:247``.  The two are
+    the same number algebraically, so the walk asks which side of that
+    boundary carries the difference: the STATEMENT row is legoESM's form on the
+    oracle's own recorded ``ssh(Kmm)``, the OPERAND row is legoESM's live
+    ratio against that same reconstruction.
+    """
+    require(plant in (None, "none") + DEVELOPED_FACE_R3_PLANTS,
+            f"unknown developed face-r3 plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe_module
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+        nemo_stage_momentum_wzv_resolved)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    from legoesm.ocean.vertical import (
+        nemo_qco_live_face_geometry_cgrid, nemo_qco_resolved_mesh_operands)
+    from legoesm.ocean.eos import nemo_source_round
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"face-r3 walk requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "face-r3 walk commit differs from --expect-commit")
+    evidence_root = Path(evidence_root)
+    oracle = _developed_stage2_record(Path(stage2_record_root))
+    rows = dict(oracle["rows"])
+
+    bundle = _developed_entry_bundle(
+        daily_root, daily_audit, expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+    require(nemo_stage_momentum_wzv_resolved(card.recipe.model_config),
+            "the GYRE card does not resolve NEMO's two-solve stage program")
+
+    nlev = int(np.asarray(state.T.data).shape[-1])
+    nemo_ww = np.ascontiguousarray(np.asarray(rows["ww_t"])[..., :nlev])
+    cell_mask = np.asarray(gate.expected_masks(card)["T"])[..., :nlev]
+    face_mask = {tag: np.asarray(rows[f"umask_vmask_{tag}"])[..., 0]
+                 for tag in ("u", "v")}
+    oracle_r3 = {tag: np.asarray(rows[f"r3_Kmm_{tag}"])
+                 for tag in ("u", "v")}
+
+    # --- the operand the substitution installs, on NEMO's native extent ----
+    # legoESM's redundant U face 0 is the periodic wrap of the last native
+    # face and its V row 0 is the closed south wall, which is the map
+    # ``nemo_qco_live_face_geometry_cgrid`` writes once; invert it here rather
+    # than index the producer's own arrays a second way.
+    native_r3 = {"u": oracle_r3["u"][:, 1:], "v": oracle_r3["v"][1:, :]}
+
+    real_geometry = pe_module.nemo_qco_live_face_geometry_from_operands
+    real_wzv = model_module.nemo_qco_wzv_operands
+    geometry_calls = {"count": 0}
+
+    def substituted_geometry(eta, e3u_0, e3v_0, umask3, vmask3, hu_0, hv_0,
+                             area_t, area_u, area_v):
+        # domzgr_substitute.h90:127 / vertical.py:251 -- NEMO's OWN thickness
+        # statement with the oracle's ratio in place of legoESM's, and nothing
+        # else touched.  The reciprocals this helper also returns are not
+        # consumed by the velocity indicator (the caller takes ``[:2]``), so
+        # they keep legoESM's values and are reported as such.
+        geometry_calls["count"] += 1
+        geom = real_geometry(eta, e3u_0, e3v_0, umask3, vmask3, hu_0, hv_0,
+                             area_t, area_u, area_v)
+        b = nemo_source_round
+        one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
+        r3u = jnp.asarray(substitute_operand["u"], dtype=geom.e3u.dtype)
+        r3v = jnp.asarray(substitute_operand["v"], dtype=geom.e3v.dtype)
+        e3u = b(jnp.asarray(e3u_0, dtype=geom.e3u.dtype)
+                * b(one + r3u[..., None] * jnp.asarray(umask3)))
+        e3v = b(jnp.asarray(e3v_0, dtype=geom.e3v.dtype)
+                * b(one + r3v[..., None] * jnp.asarray(vmask3)))
+        return geom._replace(e3u=e3u, e3v=e3v, r3u=r3u, r3v=r3v)
+
+    substitute_operand = native_r3
+    ledgers: dict[str, list] = {}
+
+    def run(label, *, substitute_ordinal=None, observe=True, **hook_kwargs):
+        """One production step, optionally with the producer observer on."""
+        ledger: list[dict] = []
+
+        def capture(*args, **kwargs):
+            velocity_indicator = (
+                kwargs.get("volume_transport_override") is None
+                and kwargs.get("transport_after_override") is None)
+            index = sum(row["velocity_indicator"] for row in ledger)
+            row = {"call": len(ledger),
+                   "velocity_indicator": bool(velocity_indicator),
+                   "velocity_ordinal": index if velocity_indicator else None,
+                   "substituted": False}
+            ledger.append(row)
+            if (substitute_ordinal is not None and velocity_indicator
+                    and index == substitute_ordinal):
+                row["substituted"] = True
+                before = geometry_calls["count"]
+                pe_module.nemo_qco_live_face_geometry_from_operands = (
+                    substituted_geometry)
+                try:
+                    result = real_wzv(*args, **kwargs)
+                finally:
+                    pe_module.nemo_qco_live_face_geometry_from_operands = (
+                        real_geometry)
+                require(geometry_calls["count"] == before + 1,
+                        "the substituted producer ran "
+                        f"{geometry_calls['count'] - before} times in one "
+                        "velocity-indicator call, not once")
+                return result
+            return real_wzv(*args, **kwargs)
+
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hook_kwargs)
+            if hook_kwargs else None)
+        if observe:
+            model_module.nemo_qco_wzv_operands = capture
+        try:
+            result = model.step(
+                state, dt=card.dt_s, freshwater=freshwater,
+                surface_forcing=surface,
+                _nemo_stage1_zad_eta_after_override=ssha)
+            jax.device_get(result)
+        finally:
+            model_module.nemo_qco_wzv_operands = real_wzv
+        if observe:
+            ledgers[label] = ledger
+        return result
+
+    def ledger_summary(label):
+        ledger = ledgers[label]
+        return {
+            "calls": len(ledger),
+            "velocity_indicator_calls": sum(
+                row["velocity_indicator"] for row in ledger),
+            "substituted_calls": sum(row["substituted"] for row in ledger),
+            "pattern": [row["velocity_indicator"] for row in ledger],
+        }
+
+    def stage2_momentum_w(result_hooks, *, substitute_ordinal=None,
+                          label=""):
+        result = run(label, substitute_ordinal=substitute_ordinal,
+                     expose_tracer_transport_stage=2,
+                     expose_tracer_transport_as_ww=True,
+                     **result_hooks)
+        return np.asarray(result.T.data)
+
+    CORRECTED = {"nemo_stage_momentum_wzv_split": True,
+                 "expose_stage_momentum_w": True}
+    SHARED = {"stage2_wzv_velocity_form": True}
+
+    # ---- OBSERVER PASSIVITY: the wrapper alone must move ZERO bytes -------
+    plain = run("plain-unobserved", observe=False,
+                nemo_stage_momentum_wzv_split=True)
+    observed = run("plain-observed", nemo_stage_momentum_wzv_split=True)
+    observer_passivity = _state_leaf_move(observed, plain)
+    require(observer_passivity["unequal_bytes"] == 0,
+            "the producer observer is not passive: "
+            f"{observer_passivity}")
+
+    # ---- THE FOUR SCORED ARMS --------------------------------------------
+    arms = {}
+    arms["corrected_baseline"] = stage2_momentum_w(
+        CORRECTED, label="corrected-baseline")
+    arms["corrected_oracle_r3"] = stage2_momentum_w(
+        CORRECTED, substitute_ordinal=0, label="corrected-oracle-r3")
+    arms["shared_velocity_form_baseline"] = stage2_momentum_w(
+        SHARED, label="shared-baseline")
+    arms["shared_velocity_form_oracle_r3"] = stage2_momentum_w(
+        SHARED, substitute_ordinal=0, label="shared-oracle-r3")
+
+    for label in ("corrected-baseline", "shared-baseline"):
+        require(ledger_summary(label)["substituted_calls"] == 0,
+                f"{label} substituted a call it should not have")
+    for label in ("corrected-oracle-r3", "shared-oracle-r3"):
+        require(ledger_summary(label)["substituted_calls"] == 1,
+                f"{label} did not substitute exactly one call: "
+                f"{ledger_summary(label)}")
+
+    own_rms = float(np.sqrt(np.mean(nemo_ww[cell_mask != 0.0] ** 2)))
+    scored = {name: _score_stage2_face(values, nemo_ww, cell_mask)
+              for name, values in arms.items()}
+    for row in scored.values():
+        row["relative_to_own_rms"] = float(row["active_rms"] / own_rms)
+
+    # AUTHORITY: both baselines must reproduce round 159/160's own number, or
+    # this walk is dividing a different residual.
+    ROUND160_CORRECTED_WW = 2.334682468902387e-13
+    for name in ("corrected_baseline", "shared_velocity_form_baseline"):
+        require(abs(scored[name]["active_rms"] - ROUND160_CORRECTED_WW)
+                <= 5.0e-22,
+                f"{name} does not reproduce the round-160 residual: "
+                f"{scored[name]['active_rms']}")
+
+    base = scored["corrected_baseline"]["active_rms"]
+    for arm, name in (("corrected_oracle_r3", "corrected_baseline"),
+                      ("shared_velocity_form_oracle_r3",
+                       "shared_velocity_form_baseline")):
+        reference = scored[name]["active_rms"]
+        scored[arm]["residual_removed_fraction"] = float(
+            (reference - scored[arm]["active_rms"]) / reference)
+
+    # LIVENESS: a substitution that moves nothing is a control that perturbs
+    # a zero and proves nothing.
+    liveness = {
+        "corrected": _score_stage2_face(
+            arms["corrected_oracle_r3"], arms["corrected_baseline"],
+            cell_mask),
+        "shared": _score_stage2_face(
+            arms["shared_velocity_form_oracle_r3"],
+            arms["shared_velocity_form_baseline"], cell_mask),
+    }
+    if plant == "face-r3-inert":
+        # Claim the oracle's ratio is installed while handing the producer
+        # legoESM's OWN live ratio: the liveness control must refuse it.
+        live = run("plant-live-r3", expose_stage_face_r3=2,
+                   nemo_stage_momentum_wzv_split=True)
+        substitute_operand = {
+            "u": np.asarray(live.u.data)[..., 0][:, 1:],
+            "v": np.asarray(live.v.data)[..., 0][1:, :],
+        }
+        planted = stage2_momentum_w(
+            CORRECTED, substitute_ordinal=0, label="plant-inert")
+        caught = _score_stage2_face(
+            planted, arms["corrected_baseline"], cell_mask)
+        if caught["active_cells_unequal"] != 0:
+            raise GateError(
+                "PLANT-BLIND: the liveness control did not refuse a "
+                f"substitution that installs legoESM's own ratio: {caught}")
+        return {"status": "PLANT-FIRED", "plant": plant, "control": caught}
+    require(all(row["active_cells_unequal"] > 0 for row in liveness.values()),
+            f"the substitution moved nothing, so it proves nothing: {liveness}")
+
+    # TRACER IDENTITY: the momentum substitution must not reach the tracers.
+    tracer_identity = {
+        "stage2_tracer_w": _score_stage2_face(
+            np.asarray(run("tracer-w-substituted", substitute_ordinal=0,
+                           nemo_stage_momentum_wzv_split=True,
+                           expose_tracer_transport_stage=2,
+                           expose_tracer_transport_as_ww=True).T.data),
+            np.asarray(run("tracer-w-baseline",
+                           nemo_stage_momentum_wzv_split=True,
+                           expose_tracer_transport_stage=2,
+                           expose_tracer_transport_as_ww=True).T.data),
+            cell_mask),
+    }
+    if plant == "face-r3-tracer":
+        # Claim the substitution is momentum-only while wiring it into the
+        # SHARED producer that the tracers also read (the split off): the
+        # tracer-identity control must refuse it.
+        planted = np.asarray(run(
+            "plant-tracer", substitute_ordinal=0,
+            stage2_wzv_velocity_form=True,
+            expose_tracer_transport_stage=2,
+            expose_tracer_transport_as_ww=True).T.data)
+        against = np.asarray(run(
+            "plant-tracer-base", stage2_wzv_velocity_form=True,
+            expose_tracer_transport_stage=2,
+            expose_tracer_transport_as_ww=True).T.data)
+        caught = _score_stage2_face(planted, against, cell_mask)
+        if caught["active_cells_unequal"] == 0:
+            raise GateError(
+                "PLANT-BLIND: the tracer-identity control did not refuse a "
+                f"substitution that reached the tracer field: {caught}")
+        return {"status": "PLANT-FIRED", "plant": plant, "control": caught}
+    require(tracer_identity["stage2_tracer_w"]["cells_unequal"] == 0,
+            "the momentum substitution moved the tracer path: "
+            f"{tracer_identity}")
+
+    # ---- THE PRODUCER WALK, offline from the record alone ----------------
+    live = run("live-face-r3", expose_stage_face_r3=2,
+               nemo_stage_momentum_wzv_split=True)
+    live_r3 = {"u": np.asarray(live.u.data)[..., 0],
+               "v": np.asarray(live.v.data)[..., 0]}
+    ops = nemo_qco_resolved_mesh_operands(
+        card.recipe.z_coord, card.recipe.grid,
+        jnp.asarray(rows["umask_vmask_u"]), jnp.asarray(rows["umask_vmask_v"]),
+        jnp.float64, nlev)
+    _, _, opu, opv = nemo_qco_live_face_geometry_cgrid(
+        jnp.asarray(rows["ssh_Kmm_t"]), ops.e3u_0, ops.e3v_0, ops.umask3,
+        ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v)
+    offline_r3 = {"u": np.asarray(opu) - 1.0, "v": np.asarray(opv) - 1.0}
+    producer = {}
+    for tag in ("u", "v"):
+        own = float(np.sqrt(np.mean(oracle_r3[tag] ** 2)))
+        rows_for_tag = {
+            "live_versus_oracle": _score_stage2_face(
+                live_r3[tag], oracle_r3[tag], face_mask[tag]),
+            "statement_given_oracle_ssh": _score_stage2_face(
+                offline_r3[tag], oracle_r3[tag], face_mask[tag]),
+            "live_versus_statement": _score_stage2_face(
+                live_r3[tag], offline_r3[tag], face_mask[tag]),
+        }
+        for row in rows_for_tag.values():
+            row["relative_to_own_rms"] = float(row["active_rms"] / own)
+        producer[tag] = rows_for_tag
+        producer[tag]["operand_own_rms"] = own
+
+    # ---- THE UNRELATED-ARM PASSIVITY CONTROL round 160's review asked for -
+    # Round 160 loosened a zero-byte passivity requirement to two units in the
+    # last place at row scale.  These two exposure arms are on code this round
+    # did not write, and they answer whether that floor is general.
+    unrelated = {}
+    for label, wrote, hooks in (
+            ("expose_momentum_stage=1", ("u", "v"),
+             {"expose_momentum_stage": 1}),
+            ("expose_tracer_stage=3", ("T", "S", "eta"),
+             {"expose_tracer_stage": 3})):
+        exposed = run(f"unrelated-{label}", observe=False, **hooks)
+        neutral = exposed._replace(
+            **{name: getattr(plain, name) for name in wrote})
+        unrelated[label] = _state_leaf_move(neutral, plain)
+
+    report = {
+        "format": "gyre-round161-developed-stage2-face-r3-walk-v1",
+        "status": "PASS",
+        "worktree": stamp,
+        "record": {"sha256": oracle["sha256"], "meta": oracle["meta"]},
+        "entry": {"step": DEVELOPED_ENTRY_STEP,
+                  "process_step": DEVELOPED_PROCESS_STEP},
+        "controls": {
+            "observer_passivity": observer_passivity,
+            "call_ledgers": {label: ledger_summary(label)
+                             for label in sorted(ledgers)},
+            "substitution_liveness": liveness,
+            "tracer_identity": tracer_identity,
+            "unrelated_exposure_passivity": unrelated,
+        },
+        "nemo_ww_own_rms": own_rms,
+        "vertical_velocity_scored_against_nemo": scored,
+        "producer_decomposition": producer,
+        "round160_reference": {
+            "corrected_ww_rms": ROUND160_CORRECTED_WW,
+            "shared_ww_rms": 1.2326857042024439e-08,
+            "r3u_operand_rms": 1.4516405645036015e-13,
+            "r3v_operand_rms": 1.3880628732222712e-13,
+        },
+    }
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    return report
+
+
+def developed_process_rank_split(
+        process_root: Path, daily_root: Path, daily_audit: Path,
+        expected_commit: str, evidence_root: Path) -> dict:
+    """Round 152's one-step magnitude ranking, in BOTH stage programs.
+
+    Round 160's second continuity solve makes the developed stage-2 momentum
+    vertical velocity five orders more exact and makes the YEAR worse.  The
+    corrected velocity reaches the tracers only through the stage-3 transport,
+    and round 134 measured that the tracer pair carries 99.7% of the day-240
+    gap, so the question "which day-240 owner does the corrected velocity
+    feed" is answered by running the SAME ranking in both programs from the
+    same developed entry and reading which row grew.
+    """
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"process-rank split requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "process-rank split commit differs from --expect-commit")
+    process_root = Path(process_root)
+    evidence_root = Path(evidence_root)
+    process_admission = validate_process_record(
+        process_root, PROCESS_RECORD_COMMIT)
+    record = read_process_record(
+        process_root
+        / f"oracle_process_budget_kt{DEVELOPED_PROCESS_STEP:08d}.bin")
+    bundle = _developed_entry_bundle(daily_root, daily_audit, expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    state = bundle["state"]
+    wet = bundle["wet"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(bundle["payload"]["ssha"])
+    nemo_increments = process_temperature_rows(record)
+
+    def ranked(**extra):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                tracer_process_trace=(), vertical_solve_trace=True, **extra))
+        trace = model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        jax.device_get(trace)
+        frame = _trace_frame(trace)
+        lego = lego_process_temperature_rows(frame)
+        increments = {
+            name: _score_developed_row(lego[name], nemo_increments[name], wet)
+            for name in PROCESS_ROWS
+        }
+        return increments, _rank_developed_process_rows(increments)
+
+    production_rows, production_rank = ranked()
+    corrected_rows, corrected_rank = ranked(
+        nemo_stage_momentum_wzv_split=True)
+
+    # AUTHORITY: the production arm must reproduce round 152's own table, or
+    # this is ranking a different step.
+    ROUND152 = {
+        "vertical_diffusion": 2.1834089000437955e-5,
+        "lateral_diffusion": 1.0655217366755294e-5,
+        "shortwave": 2.513690760498398e-7,
+        "advection": 1.0974591404090626e-8,
+        "geometry": 6.281725340556424e-12,
+        "surface_boundary": 4.6577410196032515e-15,
+    }
+    for name, value in ROUND152.items():
+        require(abs(production_rows[name]["rms"] - value)
+                <= 1.0e-6 * abs(value),
+                f"the production arm does not reproduce round 152's {name} "
+                f"row: {production_rows[name]['rms']} against {value}")
+
+    comparison = []
+    for name in PROCESS_ROWS:
+        before = production_rows[name]["rms"]
+        after = corrected_rows[name]["rms"]
+        comparison.append({
+            "name": name,
+            "production_rms_K": before,
+            "corrected_rms_K": after,
+            "change_K": float(after - before),
+            "relative_change": (float((after - before) / before)
+                                if before > 0.0 else None),
+            "grew": bool(after > before),
+            "production_cells_unequal": production_rows[name][
+                "cells_unequal"],
+            "corrected_cells_unequal": corrected_rows[name]["cells_unequal"],
+        })
+    grew = [row for row in comparison if row["grew"]]
+    grew.sort(key=lambda row: row["change_K"], reverse=True)
+    report = {
+        "format": "gyre-round161-developed-process-rank-split-v1",
+        "status": "PASS",
+        "worktree": stamp,
+        "process_record_admission": process_admission["status"],
+        "entry": {"step": DEVELOPED_ENTRY_STEP,
+                  "process_step": DEVELOPED_PROCESS_STEP},
+        "round152_reference": ROUND152,
+        "production_ranking": production_rank,
+        "corrected_ranking": corrected_rank,
+        "comparison": comparison,
+        "rows_that_grew": grew,
+        "largest_growth": grew[0] if grew else None,
+        "largest_owner_production": production_rank[0]["name"],
+        "largest_owner_corrected": corrected_rank[0]["name"],
+    }
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    return report
 
 def _developed_entry_bundle(daily_root, daily_audit, expected_commit):
     """Build NEMO's admitted day-180 entry state for a developed walk.
