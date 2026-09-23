@@ -398,7 +398,7 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
     mesh = _stitch(root, "mesh_mask_{rank:04d}.nc",
                    ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
                     "e3t_0", "e3u_0", "e3v_0", "e3f_0",
-                    "tmask", "umask", "vmask", "fmask"))
+                    "tmask", "umask", "vmask"))
     coeff = _stitch(root, "output.init_{rank:04d}.nc", ("ahmt", "ahmf"))
     ahmt, ahmf = coeff["ahmt"], coeff["ahmf"]
     require(ahmt.shape == (NY_G, NX_G, NZ), f"ahmt shape {ahmt.shape}")
@@ -411,9 +411,19 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
     du_ref, dv_ref = nemo_dynldf_lev_lap_rot(
         mesh, ahmt, ahmf, entry["u"], entry["v"], entry["ssh"])
 
+    # ONE cell set for every row: wet, and defined by the transcription.  The
+    # transcription leaves the rows whose latitude neighbours fall outside the
+    # owned block undefined, and an ablation can make a cell defined that the
+    # reference row could not score -- so without this the closure row would
+    # be scored on 1,319 more v cells than the row it is compared against.
+    weight_u = mesh["umask"] * np.isfinite(du_ref)
+    weight_v = mesh["vmask"] * np.isfinite(dv_ref)
     rows: dict[str, object] = {
-        "u_momentum": score(du_prod, du_ref, mesh["umask"]),
-        "v_momentum": score(dv_prod, dv_ref, mesh["vmask"]),
+        "scored_cell_set": (
+            "wet faces where the compiled transcription is defined; the SAME "
+            "set for every row below"),
+        "u_momentum": score(du_prod, du_ref, weight_u),
+        "v_momentum": score(dv_prod, dv_ref, weight_v),
     }
 
     # --- ablation A: legoESM's extra zero/one vertex mask on ahmf ----------
@@ -439,9 +449,9 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
         mesh, ahmt, ahmf, entry["u"], entry["v"], entry["ssh"],
         ahmf_extra_mask=nemo_vertex_mask)
     rows["ablation_extra_vertex_mask_u"] = score(
-        du_maskA, du_ref, mesh["umask"])
+        du_maskA, du_ref, weight_u)
     rows["ablation_extra_vertex_mask_v"] = score(
-        dv_maskA, dv_ref, mesh["vmask"])
+        dv_maskA, dv_ref, weight_v)
     rows["coefficient_cells_zeroed_by_the_extra_mask"] = int(
         ((ahmf != 0.0) & (nemo_vertex_mask == 0.0)).sum())
 
@@ -451,9 +461,9 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
         mesh, ahmt, ahmf, entry["u"], entry["v"], entry["ssh"],
         thickness_override=(h_u, h_v, h_f))
     rows["ablation_min_rule_thickness_u"] = score(
-        du_thick, du_ref, mesh["umask"])
+        du_thick, du_ref, weight_u)
     rows["ablation_min_rule_thickness_v"] = score(
-        dv_thick, dv_ref, mesh["vmask"])
+        dv_thick, dv_ref, weight_v)
     rows["thickness_operand_disagreement"] = {
         "note": ("legoESM's LIVE min-rule face/vertex thickness against the "
                  "record's own REFERENCE e3u_0/e3v_0/e3f_0; the stretch is "
@@ -479,8 +489,8 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
         mesh, ahmt, ahmf, entry["u"], entry["v"], entry["ssh"],
         ahmf_extra_mask=nemo_vertex_mask,
         thickness_override=(h_u, h_v, h_f))
-    rows["closure_both_ablations_u"] = score(du_prod, du_both, mesh["umask"])
-    rows["closure_both_ablations_v"] = score(dv_prod, dv_both, mesh["vmask"])
+    rows["closure_both_ablations_u"] = score(du_prod, du_both, weight_u)
+    rows["closure_both_ablations_v"] = score(dv_prod, dv_both, weight_v)
 
     result = {
         "gate": "nemo_testcase_l4_orca2_round11_dynldf_operator_gate",
