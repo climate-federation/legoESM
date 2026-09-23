@@ -158,7 +158,10 @@ def _safe_reciprocal(a):
 
 def nemo_dynldf_lev_lap_rot(mesh, ahmt, ahmf, u, v, ssh, *,
                             ahmf_extra_mask=None,
-                            thickness_override=None):
+                            thickness_override=None,
+                            e3t_override=None,
+                            metric_override=None,
+                            curl_zonal_edge_from_cell=False):
     """NEMO ``dynldf_lev_lap``'s ``np_typ_rot`` arm, statement by statement.
 
     ``ahmf_extra_mask`` (ablation A) multiplies the stored ``ahmf`` by a
@@ -167,6 +170,23 @@ def nemo_dynldf_lev_lap_rot(mesh, ahmt, ahmf, u, v, ssh, *,
     by fmask").  ``thickness_override`` (ablation B) supplies the LIVE
     ``e3u``/``e3v``/``e3f`` directly, in place of the record's own reference
     thicknesses stretched by NEMO's ``r3``.
+
+    ROUND 12 -- the three substitutions that name the residual those two leave.
+
+    ``e3t_override`` replaces the OUTER DIVISOR of the divergence term
+    (``dynldf_lev.f90:127``): NEMO divides by its own live ``e3t``, and round
+    11's thickness ablation overrode only the FACE and VERTEX thicknesses, so
+    this divisor was never substituted.
+
+    ``metric_override`` is a mapping from NEMO metric name (``e1t_e2t``,
+    ``e1f_e2f``, ``e1u``, ``e2u``, ``e1v``, ``e2v``) to legoESM's OWN stored
+    array for the same role, already on NEMO's index convention.
+
+    ``curl_zonal_edge_from_cell`` weights the circulation's two zonal edges by
+    the CELL zonal length at the eastern neighbour instead of ``e1u``, which
+    is what legoESM's shared ``curl_vertex_cgrid`` does
+    (``operators_latlon_cgrid.py:1252-1270`` reads ``grid.dx_T``, the T-point
+    metric, where ``dynldf_lev.f90:125`` reads ``e1u``).
     """
     e1t, e2t = mesh["e1t"], mesh["e2t"]
     e1u, e2u = mesh["e1u"], mesh["e2u"]
@@ -176,10 +196,24 @@ def nemo_dynldf_lev_lap_rot(mesh, ahmt, ahmf, u, v, ssh, *,
     e3t0, e3u0, e3v0, e3f0 = (mesh["e3t_0"], mesh["e3u_0"],
                               mesh["e3v_0"], mesh["e3f_0"])
 
-    r1_e1e2t = _safe_reciprocal(e1t * e2t)
-    r1_e1e2u = _safe_reciprocal(e1u * e2u)
-    r1_e1e2v = _safe_reciprocal(e1v * e2v)
-    r1_e1e2f = _safe_reciprocal(e1f * e2f)
+    # Round 12, substitution A-metric.  The reference geometry (the reference
+    # thicknesses, the column sums and their reciprocals) stays NEMO's -- only
+    # the metrics the four compiled statements read are swapped, so this row
+    # isolates the stored-metric values and nothing else.
+    e1t_e2t = e1t * e2t
+    e1f_e2f = e1f * e2f
+    if metric_override is not None:
+        e1t_e2t = metric_override.get("e1t_e2t", e1t_e2t)
+        e1f_e2f = metric_override.get("e1f_e2f", e1f_e2f)
+        e1u = metric_override.get("e1u", e1u)
+        e2u = metric_override.get("e2u", e2u)
+        e1v = metric_override.get("e1v", e1v)
+        e2v = metric_override.get("e2v", e2v)
+
+    r1_e1e2t = _safe_reciprocal(e1t_e2t)
+    r1_e1e2u = _safe_reciprocal(mesh["e1u"] * mesh["e2u"])
+    r1_e1e2v = _safe_reciprocal(mesh["e1v"] * mesh["e2v"])
+    r1_e1e2f = _safe_reciprocal(e1f_e2f)
     r1_e1u = _safe_reciprocal(e1u)
     r1_e2u = _safe_reciprocal(e2u)
     r1_e1v = _safe_reciprocal(e1v)
@@ -216,6 +250,8 @@ def nemo_dynldf_lev_lap_rot(mesh, ahmt, ahmf, u, v, ssh, *,
     r3f = 0.25 * ((at + _xp(at)) + (_yp(at) + _xp(_yp(at)))) * r1_hf0 * r1_e1e2f
 
     e3t_L = e3t0 * (1.0 + r3t[..., None] * tmask)
+    if e3t_override is not None:
+        e3t_L = e3t_override
     e3u_L = e3u0 * (1.0 + r3u[..., None] * umask)
     e3v_L = e3v0 * (1.0 + r3v[..., None] * vmask)
     e3f_L = e3f0 * (1.0 + r3f[..., None] * fs_fmask)
@@ -226,7 +262,11 @@ def nemo_dynldf_lev_lap_rot(mesh, ahmt, ahmf, u, v, ssh, *,
 
     # dynldf_lev.f90:123 -- zwf(ji-1,jj-1), written on the F index it lands on.
     e2v_v = e2v[..., None] * v
-    e1u_u = e1u[..., None] * u
+    # dynldf_lev.f90:125 weights the two zonal edges of the circulation loop
+    # by e1u.  legoESM's shared curl reads the CELL metric of the EASTERN
+    # neighbour for the same edge (operators_latlon_cgrid.py:1262-1270).
+    zonal_edge = _xp(e1t) if curl_zonal_edge_from_cell else e1u
+    e1u_u = zonal_edge[..., None] * u
     circulation = (_xp(e2v_v) - e2v_v) - (_yp(e1u_u) - e1u_u)
     zwf = ahmf_used * e3f_L * r1_e1e2f[..., None] * circulation
 
@@ -386,10 +426,37 @@ def legoesm_min_rule_thicknesses(card, entry, mesh):
     # so NEMO's F(jj, ji) is the vertex at (jj+1, ji+1).
     h_f = np.asarray(min_cell_to_vertex(h_k, grid),
                      dtype=np.float64)[1:, 1:, :NZ]
+    h_t = np.asarray(h_k, dtype=np.float64)[:, :, :NZ]
     require(h_u.shape == (NY_G, NX_G, NZ), f"h_u shape {h_u.shape}")
     require(h_v.shape == (NY_G, NX_G, NZ), f"h_v shape {h_v.shape}")
     require(h_f.shape == (NY_G, NX_G, NZ), f"h_f shape {h_f.shape}")
-    return h_u, h_v, h_f
+    require(h_t.shape == (NY_G, NX_G, NZ), f"h_t shape {h_t.shape}")
+    return h_u, h_v, h_f, h_t
+
+
+def legoesm_metrics_on_nemo_index(card):
+    """legoESM's OWN stored horizontal metrics, on NEMO's index convention.
+
+    The card's grid stores each metric on legoESM's face layout; the map is
+    the one round 9 proved and round 11 reuses -- legoESM ``u[j, i+1]`` is
+    NEMO ``u(ji=i, jj=j)``, legoESM ``v[j+1, i]`` is NEMO ``v(ji=i, jj=j)``,
+    legoESM ``vertex[j, i]`` is NEMO ``F(ji=i-1, jj=j-1)``, and legoESM cell
+    ``(j, i)`` is NEMO ``T(ji=i, jj=j)``.  Each entry names the role the
+    compiled statements read it in, NOT merely a similarly-shaped array.
+    """
+    grid = card.recipe.grid
+    out = {
+        "e1t_e2t": np.asarray(grid.area, dtype=np.float64),
+        "e1f_e2f": np.asarray(grid.area_q, dtype=np.float64)[1:, 1:],
+        "e1u": np.asarray(grid.dx_u, dtype=np.float64)[:, 1:],
+        "e2u": np.asarray(grid.dy_u, dtype=np.float64)[:, 1:],
+        "e1v": np.asarray(grid.dx_v, dtype=np.float64)[1:, :],
+        "e2v": np.asarray(grid.dy_v, dtype=np.float64)[1:, :],
+    }
+    for name, value in out.items():
+        require(value.shape == (NY_G, NX_G),
+                f"legoESM metric {name} has shape {value.shape}")
+    return out
 
 
 def run_gate(deck_root: Path, root: Path, json_out: Path | None,
@@ -456,7 +523,7 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
         ((ahmf != 0.0) & (nemo_vertex_mask == 0.0)).sum())
 
     # --- ablation B: legoESM's min-rule thicknesses ------------------------
-    h_u, h_v, h_f = legoesm_min_rule_thicknesses(card, entry, mesh)
+    h_u, h_v, h_f, h_t = legoesm_min_rule_thicknesses(card, entry, mesh)
     du_thick, dv_thick = nemo_dynldf_lev_lap_rot(
         mesh, ahmt, ahmf, entry["u"], entry["v"], entry["ssh"],
         thickness_override=(h_u, h_v, h_f))
@@ -491,6 +558,61 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
         thickness_override=(h_u, h_v, h_f))
     rows["closure_both_ablations_u"] = score(du_prod, du_both, weight_u)
     rows["closure_both_ablations_v"] = score(dv_prod, dv_both, weight_v)
+
+    # --- ROUND 12: the THIRD difference, named -----------------------------
+    # Each row below is the closure ABOVE plus exactly ONE further legoESM
+    # behaviour.  Scored against the production operator on the SAME cell set,
+    # so a row that falls below the closure has explained part of what the
+    # closure left, and a row that does not move is VACUOUS and is reported as
+    # vacuous rather than as agreement.
+    common = dict(ahmf_extra_mask=nemo_vertex_mask,
+                  thickness_override=(h_u, h_v, h_f))
+    variants = {
+        "third_e3t_divisor": dict(common, e3t_override=h_t),
+        "third_curl_zonal_edge": dict(common, curl_zonal_edge_from_cell=True),
+        "third_stored_metrics": dict(
+            common, metric_override=legoesm_metrics_on_nemo_index(card)),
+    }
+    for name, kwargs in variants.items():
+        du_x, dv_x = nemo_dynldf_lev_lap_rot(
+            mesh, ahmt, ahmf, entry["u"], entry["v"], entry["ssh"], **kwargs)
+        rows[f"{name}_u"] = score(du_prod, du_x, weight_u)
+        rows[f"{name}_v"] = score(dv_prod, dv_x, weight_v)
+        # A substitution that moves NOTHING is vacuous, and says so.
+        rows[f"{name}_moves_the_oracle"] = bool(
+            not np.array_equal(np.nan_to_num(du_x), np.nan_to_num(du_both))
+            or not np.array_equal(np.nan_to_num(dv_x),
+                                  np.nan_to_num(dv_both)))
+
+    du_all, dv_all = nemo_dynldf_lev_lap_rot(
+        mesh, ahmt, ahmf, entry["u"], entry["v"], entry["ssh"],
+        ahmf_extra_mask=nemo_vertex_mask,
+        thickness_override=(h_u, h_v, h_f),
+        e3t_override=h_t,
+        curl_zonal_edge_from_cell=True,
+        metric_override=legoesm_metrics_on_nemo_index(card))
+    rows["closure_all_five_u"] = score(du_prod, du_all, weight_u)
+    rows["closure_all_five_v"] = score(dv_prod, dv_all, weight_v)
+
+    # The fourth candidate round 11 named -- the slope-foot factor the
+    # production path applies to the operator's output
+    # (ocean_pe_latlon_cgrid.py:3221-3223) -- is settled by reading the value
+    # it multiplies by, not by a substitution: at alpha = 0 both factors are
+    # the scalar 1.0 and no array exists to substitute.
+    _alpha = float(getattr(card.recipe.model_config, "slope_foot_alpha", 0.0))
+    rows["slope_foot"] = {
+        "alpha": _alpha,
+        "factor_is_the_scalar_one": _alpha <= 0.0,
+        "verdict": ("VACUOUS -- the factor is the scalar 1.0, so the "
+                    "production operator's output is returned unmultiplied"
+                    if _alpha <= 0.0 else
+                    "LIVE -- a 3-D factor multiplies the operator's output"),
+    }
+    # NEMO's stage-three Kbb/Kmm split is EXCLUDED a priori, not measured:
+    # this gate drives both sides with ONE recorded sea surface, so no such
+    # difference can exist inside it (preregistration, statement A).
+    rows["kbb_kmm_split"] = (
+        "EXCLUDED BY CONSTRUCTION -- one sea surface drives both sides")
 
     result = {
         "gate": "nemo_testcase_l4_orca2_round11_dynldf_operator_gate",
