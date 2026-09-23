@@ -217,3 +217,23 @@ selects; no scheme selection, tunable, threshold, cadence, resolution,
 timestep, carried state, data source or previously-tolerated condition moved,
 and no stabilizer NEMO lacks was added.  The promoted helper name is a rename
 with no behavioural change.
+
+## 10. Gate and test results at the round's final tip
+
+| check | result |
+|---|---|
+| EEN operand gate, including the new fold-row section | PASS; the fold row AT BAR for both operands, all three controls firing |
+| ORCA2 ladder gate | exit 4, `STOP_PRODUCTION_LDF_DYN_TRIPOLAR_COEFF_GAP` at kt=1, no magnitude registered |
+| receipt citation gate | PASS, 274 citations mapped, 0 failures, 0 map-audit failures, 0 unmapped |
+| citation gate with a rigid two-line plant | refuses, exit 2 |
+| the seven named push gates plus the new fold-row tests | **165 passed in 517.05 s** |
+
+Six citations in an earlier receipt and in the citation map were rigidly
+re-anchored: the transcription inserted twenty-one lines above them in the same
+file, the gate reported that same uniform shift for every one, and no cited
+text changed.
+
+**Non-vacuity, measured.**  The seven new tests were run unchanged against the
+round's base tip, where the helper still refuses: **4 failed, 3 passed** — the
+four tripolar ones fail on the refusal itself, and the three that pass are the
+non-tripolar cases, which are correctly inert.  The base clone was left clean.
