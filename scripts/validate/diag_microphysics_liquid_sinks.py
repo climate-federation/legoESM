@@ -211,6 +211,31 @@ def main():
         print(f"[{a.label}]   {'NET sink on cloud water':30s} {netv:12.6e} kg/m2/day   "
               f"{netv/max(res,1e-30):9.4f} per day")
 
+
+    def _warm_rain_terms(Tx, qvx, qcx, qrx, rhox, dtx):
+        """Autoconversion and accretion rates alone, same closure as above."""
+        if getattr(cfg, "subgrid_autoconversion", False):
+            qs_ = saturation_mixing_ratio(Tx, p_full)
+            rh_ = qvx / jnp.maximum(qs_, 1.0e-10)
+            ar_ = (1.0 - rh_) / max(1.0 - cfg.subgrid_rh_crit, 1.0e-6)
+            as_ = jnp.where(ar_ > 0.0, ar_, 1.0)
+            cfx = jnp.clip(jnp.where(ar_ > 0.0, 1.0 - jnp.sqrt(as_), 1.0),
+                           cfg.subgrid_cf_min, 1.0)
+        else:
+            cfx = jnp.ones_like(qcx)
+        qci, qri = qcx / cfx, qrx / cfx
+        if scheme == "kk2000":
+            d_au, _, _ = autoconversion_kk2000(qci, N_c_eff, rhox, dtx)
+            d_ac = accretion_kk2000(qci, qri)
+        elif scheme == "sb2001":
+            d_au, _, _ = autoconversion_sb2001(qci, qri, N_c_eff, rhox)
+            d_ac = accretion_sb2001(qci, qri, rhox)
+        else:
+            d_au, _, _ = autoconversion_sb(qci, N_c_eff, rhox, cfg.k_au,
+                                           cfg.x_star, cfg.autoconversion_sharpness)
+            d_ac = accretion_sb_fn(qci, qri, rhox, cfg.k_ac)
+        return d_au * cfx, d_ac * cfx
+
     if a.dt_split:
         print(f"[{a.label}] --- timestep split, same scheme, same columns, same elapsed time")
         for label, dts, nrep in ((f"one call at {dt_micro:.1f} s", dt_micro, 1),
@@ -218,8 +243,13 @@ def main():
             Tc, qvc, qcc, qrc = T, q_v, q_c, q_r
             hy = hyd
             acc = np.zeros_like(qcn)
+            acc_ac = np.zeros_like(qcn)
+            acc_au = np.zeros_like(qcn)
             for _ in range(nrep):
                 o = micro_fn(Tc, qvc, hy, p_full, p_half, rho, dz, dts, mcfg)
+                _au_i, _ac_i = _warm_rain_terms(Tc, qvc, qcc, qrc, rho, dts)
+                acc_au = acc_au + np.asarray(_au_i) * dts
+                acc_ac = acc_ac + np.asarray(_ac_i) * dts
                 acc = acc + np.asarray(o.dq_c_dt) * dts
                 Tc = Tc + dts * o.dT_dt
                 qvc = qvc + dts * o.dq_v_dt
@@ -228,8 +258,12 @@ def main():
                 hy = hy._replace(q_c=qcc, q_r=qrc)
             tot = dts * nrep
             v = masked_rate(-acc / tot, dp, A, g, band) * _DAY
+            va = masked_rate(acc_ac / tot, dp, A, g, band) * _DAY
+            vu = masked_rate(acc_au / tot, dp, A, g, band) * _DAY
             print(f"[{a.label}]   {label:26s} net sink over {tot:.1f} s: "
                   f"{v:12.6e} kg/m2/day in the band")
+            print(f"[{a.label}]   {'':26s}   accretion alone: {va:12.6e}   "
+                  f"autoconversion alone: {vu:12.6e} kg/m2/day")
 
 
 if __name__ == "__main__":

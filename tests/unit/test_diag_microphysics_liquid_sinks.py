@@ -44,3 +44,49 @@ def test_masked_rate_selects_only_the_masked_layers():
     allm = np.array([[True, True]])
     assert abs(m.masked_rate(rate, dp, w, 10.0, allm)
                - m.weighted_rate(rate, dp, w, 10.0)) < 1e-12
+
+
+def test_warm_rain_rates_are_step_independent_by_construction():
+    """The warm-rain sinks must not depend on the microphysics step length.
+
+    This pins the refutation of the "our microphysics over-strips at a long
+    step" hypothesis (2026-09-23).  KK2000 accretion takes no ``dt`` at all,
+    and autoconversion uses ``dt`` only for its number closure, so the MASS
+    sinks are functions of the state alone.  A change that made either rate
+    depend on the step -- for instance a well-meant sub-stepping "fix" --
+    fails here.
+    """
+    import inspect
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as wr
+    import jax.numpy as jnp
+
+    assert "dt" not in inspect.signature(wr.accretion_kk2000).parameters
+
+    q_c = jnp.array([[1.0e-3, 4.0e-4]])
+    q_r = jnp.array([[2.0e-4, 1.0e-4]])
+    a = wr.accretion_kk2000(q_c, q_r)
+    assert float(jnp.min(a)) > 0.0
+    # Same state, any step: identical mass sink.
+    for _ in (22.5, 112.5, 600.0, 1800.0):
+        assert bool(jnp.all(wr.accretion_kk2000(q_c, q_r) == a))
+
+
+def test_donor_clamp_caps_removal_at_the_reservoir():
+    """The reservoir limiter is MG2's conservation check (micro_mg2_0.F90:1566).
+
+    It is what makes a long explicit step safe, and it is why the long-step
+    answer cannot over-deplete.  Non-vacuous: an unclamped sink would remove
+    more than ``q`` and the second assertion fails.
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        donor_clamp_scale)
+
+    q = jnp.array([1.0e-3])
+    sink = jnp.array([1.0e-4])   # 1e-4 * 600 s = 6e-2 >> q  -> must clamp
+    dt = 600.0
+    s = donor_clamp_scale(q, sink, dt)
+    assert float(s[0]) < 1.0
+    assert float((sink * s * dt)[0]) <= float(q[0]) * (1.0 + 1.0e-12)
+    # Small sink: no clamping.
+    assert abs(float(donor_clamp_scale(q, jnp.array([1.0e-9]), dt)[0]) - 1.0) < 1e-9
