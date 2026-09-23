@@ -39,6 +39,16 @@ reservoir and SHRINK the baseline's, which is the opposite of the observed
 deficit.  The band also does not balance, so terms of order 0.1 kg/m2/day from
 transport and the other parameterizations are present and outside this probe.
 
+SCALE FIRST, because it decides whether this instrument can answer anything.
+A 31.5 % deficit on a band reservoir of 2.7e-02 kg/m2 sustained over 20 days is
+an imbalance of about 4.2e-04 kg/m2/day.  The instantaneous terms below are
+1e-01 to 4e-01, i.e. roughly 600x larger, and they cancel: measured on the
+baseline's own day-5 and day-10 checkpoints, band-restricted, the true 5-day
+mean rate is -5.2e-04 kg/m2/day against an instantaneous -2.8e-01, a factor of
+535.  A single-state budget therefore CANNOT attribute this deficit, and no
+amount of extra terms changes that.  Use this probe to compare PROCESSES
+between arms, never to close a multi-day inventory.
+
 UPSTREAM TERMS.  ``--upstream`` adds the non-microphysical terms that change
 band cloud water, so the band budget can be closed rather than only its
 microphysics part: horizontal advection of q_c, vertical advection of q_c
@@ -269,7 +279,13 @@ def main():
         u["horizontal transport"] = band_rate(
             np.asarray(dqh), dp, A, g, band) * _DAY
 
-        # 2. convective detrainment into q_c, from the deck's own scheme.
+        # 2. convective detrainment into q_c.  This is a q_c SOURCE APPLIED
+        #    OUTSIDE morrison's dq_c_dt (convection/integration.py:786-827), so
+        #    the microphysics budget above is NOT the complete q_c budget and
+        #    this term must be added (GLM review, 2026-09-23).  CLUBB is NOT a
+        #    second external source on this deck: its closure liquid is
+        #    discarded and only the fraction is published, measured at 95-98 %
+        #    missing (diag_clubb_liquid_handoff.py).
         try:
             from legoesm.driver.physics_pipeline import _resolve_convection
             conv_fn, ccfg = _resolve_convection(config)
