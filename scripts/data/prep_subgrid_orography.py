@@ -290,6 +290,17 @@ def main(argv=None) -> int:
                 ds, var_name=args.elev_var,
                 fine_res_deg=args.fine_res_deg, block_deg=args.block_deg)
     out.attrs["source"] = str(args.input)
+    # MACHINE-READABLE construction record (#1712).  The loader has to know the
+    # file's scale decomposition to tell whether it double-counts orography the
+    # model already resolves, and a free-text ``history`` is a pointer, not a
+    # citable fact -- it used to be the only record, and the loader ignored it.
+    out.attrs["block_deg"] = float(args.block_deg)
+    out.attrs["fine_res_deg"] = float(args.fine_res_deg)
+    out.attrs["construction"] = (
+        "residual_stddev" if args.resolved_cutoff_deg is not None
+        else "block_stddev")
+    if args.resolved_cutoff_deg is not None:
+        out.attrs["resolved_cutoff_deg"] = float(args.resolved_cutoff_deg)
     out.attrs["history"] = (
         f"prep_subgrid_orography.py --fine-res-deg {args.fine_res_deg} "
         f"--block-deg {args.block_deg}"

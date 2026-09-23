@@ -19,6 +19,7 @@ design) and ``docs/ocean/experiments/density_jacobian_pgf_mpas.md``
 """
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 
@@ -253,16 +254,25 @@ def compute_pressure_at_target_smc03(
     z_seafloor = z_bot_per_cell[..., -1:]                  # (..., 1)
     z_t_clamped = jnp.clip(z_target, min=0.0, max=z_seafloor)
 
-    # 3. Find enclosing cell per target via broadcasting + argmax.
-    # in_cell[..., k, t] == True iff z_top_k <= z_t <= z_bot_k.
-    z_top_e = z_top_per_cell[..., :, None]                 # (..., nlev, 1)
-    z_bot_e = z_bot_per_cell[..., :, None]
-    z_t_e = z_t_clamped[..., None, :]                       # (..., 1, n_t)
-    in_cell = (z_t_e >= z_top_e) & (z_t_e <= z_bot_e)
-    # First-True (argmax of int) handles interface ties deterministically:
-    # a target sitting exactly at z_top_k matches both cell k-1 (its bottom)
-    # and cell k (its top) — argmax picks k-1, which is a valid cell.
-    k_t = jnp.argmax(in_cell.astype(jnp.int32), axis=-2)   # (..., n_t)
+    # 3. Find the enclosing cell per target.  z_bot is nondecreasing down a
+    # column (thicknesses are >= 0), so the first cell whose BOTTOM reaches
+    # the target is the enclosing one, and a sorted search finds it without
+    # ever forming the (..., nlev, n_t) comparison table the obvious
+    # broadcast builds.  That table is what made this scheme unusable on a
+    # fine mesh: on the ico7 Voronoi grid it is 491520 x 75 x 75 entries,
+    # about 22 GB of float temporaries per call, so the step asked for a
+    # single 33 GiB buffer and no GPU on the cluster could run it.
+    #
+    # side="left" reproduces the previous first-True argmax exactly,
+    # including the interface tie: a target sitting exactly on z_bot_{k-1}
+    # belongs to cell k-1 under both rules.
+    _nlev = z_bot_per_cell.shape[-1]
+    k_t = jax.vmap(
+        lambda bot, tgt: jnp.searchsorted(bot, tgt, side="left")
+    )(
+        z_bot_per_cell.reshape(-1, _nlev),
+        z_t_clamped.reshape(-1, z_t_clamped.shape[-1]),
+    ).reshape(z_t_clamped.shape)                            # (..., n_t)
 
     # 4. Gather per-cell quantities at k_t and evaluate the in-cell integral.
     rho_kt = jnp.take_along_axis(rho_per_cell, k_t, axis=-1)

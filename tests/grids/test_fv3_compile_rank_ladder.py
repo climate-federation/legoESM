@@ -243,3 +243,43 @@ def test_ref_npz_without_distributed_is_refused_before_any_work():
     with pytest.raises(SystemExit) as e:
         gate.main(["--ref-npz", "does-not-need-to-exist.npz"])
     assert e.value.code == 2
+
+
+def test_gpu_peak_ceiling_is_refused_outside_rounding_and_wired_in_the_launcher():
+    """User call 2026-09-15: GPU rows pass within a peak-relative ceiling;
+    the flag refuses anything that is not rounding-level, and the GPU
+    launcher passes it while the CPU launcher does not."""
+    from pathlib import Path
+    with pytest.raises(SystemExit) as e:
+        gate.main(["--distributed", "--ref-npz", "x.npz", "--gpu-max-rel-peak", "1e-3"])
+    assert e.value.code == 2
+    root = Path(__file__).resolve().parents[2] / "scripts" / "cluster" / "fv3_native"
+    gpu = (root / "tiled_m6_model_gate_gpu.sbatch").read_text()
+    cpu = (root / "tiled_m6_model_gate.sbatch").read_text()
+    assert "--gpu-max-rel-peak" in gpu and 'GPU_MAX_REL_PEAK:-1e-13' in gpu
+    assert "--gpu-max-rel-peak" not in cpu
+
+
+def test_timed_steps_are_checked_for_divergence_and_agree_across_ranks():
+    """codex 2026-09-16: the scored steps refuse a non-finite state, the
+    timed ones did not -- a deck that blew up after the last scored step
+    still printed a p50. The check must also be agreed across ranks before
+    any rank leaves the loop, or they desynchronise on the next collective."""
+    import ast
+    import inspect
+    src = inspect.getsource(gate)
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "main")
+    # the WINDOW arm's timed loop: `for it in range(args.timing)`, not the
+    # flat-reference loop `range(args.steps + args.timing)`
+    loops = [n for n in ast.walk(fn)
+             if isinstance(n, ast.For)
+             and ast.unparse(n.iter).strip() == "range(args.timing)"]
+    assert loops, "no window timed-step loop found"
+    body = ast.unparse(loops[0])
+    assert "isfinite" in body, "timed steps are not checked for divergence"
+    assert "process_allgather" in body, "the check is not agreed across ranks"
+    assert "break" in body and "timing_ok" in body
+    # and the report is skipped when it was refused
+    assert "if timing_ok:" in src

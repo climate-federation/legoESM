@@ -463,7 +463,12 @@ def tvd_to_v_points(
         # fold_is_local is False under SPMD, so key off north_fold_mask (tripole
         # + SPMD armed) — else this would edge-clamp the tripole fold seam.
         if fold_is_local(grid) or north_fold_mask(grid) is not None:
-            _fn = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+            # Pivot-layout meshes (eORCA025): the J+1 ghost is the row BELOW
+            # the pivot permuted (J+k <- J-k); permuting the stored pivot row
+            # itself reads the land mirror twins (codex fold-fix RED 5).
+            _src = (f[-2] if bool(getattr(grid.fold, "pivot_row_stored",
+                                          False)) else f[-1])
+            _fn = f_north2.at[n_lat - 1].set(_src[grid.fold.perm_T])
         else:
             _fn = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
         f_north2 = jnp.where(north_mask, _fn, f_north2)
@@ -473,7 +478,9 @@ def tvd_to_v_points(
             f_south2 = f_south2.at[1].set(f_south[1])
         if north_is_pole:
             if fold_is_local(grid):
-                f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+                _src = (f[-2] if bool(getattr(grid.fold, "pivot_row_stored",
+                                              False)) else f[-1])
+                f_north2 = f_north2.at[n_lat - 1].set(_src[grid.fold.perm_T])
             else:
                 f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
     t_grad = ratio_grad_floor(f.dtype)
@@ -2183,7 +2190,17 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        if een_e3f_scheme == "nemo_avg":
+        if bool(getattr(fold, "pivot_row_stored", False)):
+            # Pivot layout (eORCA025): the top F/vertex row is the MIRROR of
+            # the vertex row below (measured: F row J = perm_f(F row J-1)),
+            # so the completed row below permuted with the F map IS the top
+            # row — no partner-cell construction from the (half-land) stored
+            # pivot T row (codex fold-fix RED 6).
+            from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+            h_vtx_north = h_vtx[-2:-1][:, fold_perm_f(fold), :]
+            h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid,
+                                     north_mask=nmask)
+        elif een_e3f_scheme == "nemo_avg":
             h_k_partner = h_k[-1:, fold.perm_T, :]
             h_sw_partner = h_sw[-1:, fold.perm_T, :]
             t_k_partner = t_k[-1:, fold.perm_T, :]
@@ -2204,7 +2221,9 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
                 jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
                 jnp.minimum(h_k_partner, h_sw_partner),
             )
-        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
+        if not bool(getattr(fold, "pivot_row_stored", False)):
+            h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid,
+                                     north_mask=nmask)
     h_vtx = jnp.concatenate(
         [h_vtx, h_vtx[:, 0:1, :]], axis=1,
     )  # (n_lat+1, n_lon+1, nlev)
@@ -2381,8 +2400,12 @@ def _bc_pv_flux(
     # Fu_ext padded in the fused exchange above; (n_lat+2, n_lon+1, nlev).
     if fold_is_local(grid) or nmask is not None:
         _f = grid.fold
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T, fold_perm_u,
+        )
         Fu_fold_row = fold_row(
-            Fu[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
+            fold_ghost_source_T(Fu, _f), fold_perm_u(_f),
+            _f.vector_sign_u, _f.perm_T.shape[0])
         Fu_ext = apply_north_fold(Fu_ext, Fu_fold_row, grid, north_mask=nmask)
     Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
                        + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
@@ -2412,8 +2435,11 @@ def _bc_pv_flux(
     # (``nmask`` computed at the Fu fold block above — same grid, same scope.)
     if fold_is_local(grid) or nmask is not None:
         _f = grid.fold
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T as _fgsT, fold_perm_u as _fpu,
+        )
         u_fold_row = fold_row(
-            u[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
+            _fgsT(u, _f), _fpu(_f), _f.vector_sign_u, _f.perm_T.shape[0])
         u_ext = apply_north_fold(u_ext, u_fold_row, grid, north_mask=nmask)
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
@@ -3009,6 +3035,8 @@ def _bc_horizontal_viscosity(
     # ∇·(A_h∇u); "vector_laplacian" (default) = the grad(div)−k×grad(curl) form
     # below (bit-identical to the historical path).
     _visc_op = getattr(config, "lateral_viscosity_operator", "vector_laplacian")
+    if getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0:
+        _validate_biharmonic_gamma0(config.lateral_viscosity, grid)
     if _visc_op not in ("vector_laplacian", "flux_divergence", "nemo_div_curl"):
         raise ValueError(
             "lateral_viscosity_operator must be 'vector_laplacian', "
@@ -3333,15 +3361,41 @@ def _bc_horizontal_viscosity(
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-    elif config.lateral_viscosity.B_h > 0:
-        bilap_u, bilap_v = _biharmonic_op(u, v)
-        if config.lateral_viscosity.B_h_lat_scaling:
+    elif (config.lateral_viscosity.B_h > 0
+          or getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0):
+        _validate_biharmonic_gamma0(config.lateral_viscosity, grid)
+        if getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0:
+            # FESOM2 gamma0*h^3 on the LOCAL face size (2-D metrics), in the
+            # CONSERVATIVE two-stage form -nabla^2( B(x) nabla^2 (u, v) ): the
+            # coefficient sits between the two vector Laplacians as in FESOM's
+            # coefficient-weighted stages, so the term is dissipative
+            # (integral of u . tendency = -integral of B |nabla^2 u|^2 <= 0);
+            # B(x) times the completed bilaplacian is not (codex batch-2 P1).
+            coef_u, coef_v = biharmonic_gamma0_coefficients(
+                grid, config.lateral_viscosity.B_h_gamma0)
+            vlap_u, vlap_v = vector_laplacian_cgrid(
+                u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
+                vertex_mask=vertex_mask)
+            coef_u = coef_u.astype(vlap_u.dtype)
+            coef_v = coef_v.astype(vlap_v.dtype)
+            if vlap_u.ndim != 2:
+                coef_u = coef_u[:, :, None]
+                coef_v = coef_v[:, :, None]
+            bilap_u, bilap_v = vector_laplacian_cgrid(
+                coef_u * vlap_u, coef_v * vlap_v, grid,
+                mask=mask, u_mask=u_mask, v_mask=v_mask,
+                vertex_mask=vertex_mask)
+            diag_Bh_bilap_u = -bilap_u
+            diag_Bh_bilap_v = -bilap_v
+        elif config.lateral_viscosity.B_h_lat_scaling:
+            bilap_u, bilap_v = _biharmonic_op(u, v)
             # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
             # CFL violation near poles where dx shrinks (MOM6 convention).
             scale_u, scale_v = biharmonic_scaling_factor(grid)
             diag_Bh_bilap_u = -config.lateral_viscosity.B_h * scale_u[:, None, None] * bilap_u
             diag_Bh_bilap_v = -config.lateral_viscosity.B_h * scale_v[:, None, None] * bilap_v
         else:
+            bilap_u, bilap_v = _biharmonic_op(u, v)
             diag_Bh_bilap_u = -config.lateral_viscosity.B_h * bilap_u
             diag_Bh_bilap_v = -config.lateral_viscosity.B_h * bilap_v
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
@@ -3909,7 +3963,50 @@ def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
     return tau_i_u, tau_j_v, dz_0_u, dz_0_v
 
 
-def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False, withhold_stress=False):
+def biharmonic_gamma0_coefficients(grid, gamma0):
+    """FESOM2 resolution-scaled biharmonic coefficients B(x) = gamma0 * h(x)^3.
+
+    ``h = sqrt(dx*dy)`` at each face from the 2-D face metrics [m]
+    (fesom_jax momentum.py: coef ~ gamma0 * len^3, gamma0 = 0.003
+    dimensionless).  Returns ``(coef_u (n_lat, n_lon+1), coef_v (n_lat+1,
+    n_lon))`` in m^4/s.
+    """
+    coef_u = gamma0 * (grid.dx_u * grid.dy_u) ** 1.5
+    coef_v = gamma0 * (grid.dx_v * grid.dy_v) ** 1.5
+    return coef_u, coef_v
+
+
+def _validate_biharmonic_gamma0(config, grid):
+    """Static checks for the ``B_h_gamma0`` biharmonic path (accepts the
+    model config or a ``LateralViscosityConfig``): B_h and B_h_gamma0 are
+    mutually exclusive, gamma0 excludes ``B_h_lat_scaling`` (it already
+    scales with the local face size), and it needs the 2-D face metrics."""
+    lv = getattr(config, "lateral_viscosity", config)
+    b_h = getattr(lv, "B_h", 0.0) or 0.0
+    gamma0 = getattr(lv, "B_h_gamma0", 0.0) or 0.0
+    lat_scaling = bool(getattr(lv, "B_h_lat_scaling", False))
+    a_h = getattr(lv, "A_h", 0.0) or 0.0
+    if a_h > 0.0 and gamma0 > 0.0:
+        raise ValueError(
+            "LateralViscosityConfig: B_h_gamma0 > 0 requires A_h = 0 (FESOM2 has no "
+            "Laplacian; the A_h branches would silently ignore gamma0).")
+    if b_h > 0.0 and gamma0 > 0.0:
+        raise ValueError(
+            "LateralViscosityConfig: B_h and B_h_gamma0 are mutually exclusive "
+            "(B_h is a scalar coefficient, B_h_gamma0 the FESOM2 gamma0*h^3 form); "
+            "set B_h = 0 when B_h_gamma0 > 0.")
+    if gamma0 > 0.0 and lat_scaling:
+        raise ValueError(
+            "LateralViscosityConfig: B_h_gamma0 already scales with the LOCAL face "
+            "size as gamma0*h^3; set B_h_lat_scaling = False when B_h_gamma0 > 0.")
+    if gamma0 > 0.0 and not hasattr(grid, "dx_u"):
+        raise ValueError(
+            "LateralViscosityConfig: B_h_gamma0 > 0 requires 2-D face metrics "
+            "grid.dx_u/dy_u/dx_v/dy_v in metres (curvilinear/tripolar grids); "
+            "this grid has no dx_u.")
+
+
+def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False, withhold_stress=False, shortwave_scheme="auto", shortwave_water_type="II"):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
     with tripolar east-north -> grid-aligned rotation. Pure verbatim extraction
@@ -3991,7 +4088,65 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             # uses the SAME scatter-add/add sequence as before (bit-identical
             # default-off path); the implicit branch starts from zeros.
             dT_target = dT_surf if route_heat_to_implicit else dT_dt
-            if _sf_sw is not None and _sf_chl is not None:
+            if shortwave_scheme not in ("auto", "jerlov_2band", "sweeney_2band"):
+                raise ValueError(
+                    f"unknown surface_forcing.shortwave_scheme {shortwave_scheme!r}; "
+                    "expected 'auto', 'jerlov_2band' or 'sweeney_2band'")
+            if shortwave_scheme == "sweeney_2band" and _sf_sw is not None:
+                # FESOM2 chlorophyll two-band: the visible fraction of the net
+                # shortwave penetrates on the live partial-cell thickness, the
+                # rest heats the surface cell; column total stays q_net.
+                if _sf_chl is None:
+                    raise ValueError(
+                        "surface_forcing.shortwave_scheme='sweeney_2band' requires "
+                        "OceanSurfaceForcing.chl; got None")
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    apply_shortwave_penetration,
+                    ShortwavePenetrationConfig,
+                    penetrating_fraction,
+                )
+                _sw_cfg = ShortwavePenetrationConfig(scheme="sweeney_2band")
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                sw_absorbed = sw_T * jnp.asarray(penetrating_fraction(_sw_cfg), dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_absorbed
+                # Surface deposit on the LIVE top thickness (partial top
+                # cells), so the column integrates to q_net.
+                _inv_rho_csw_h0 = 1.0 / (
+                    jnp.asarray(rho_0, dtype=T.dtype)
+                    * jnp.asarray(_c_sw, dtype=T.dtype)
+                    * jnp.maximum(jnp.asarray(h_k[..., 0], dtype=T.dtype), 1e-10))
+                dT_target = dT_target.at[..., 0].add(
+                    q_nonsolar * _inv_rho_csw_h0 * mask
+                )
+                wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
+                sw_tend = apply_shortwave_penetration(
+                    _sw_cfg, sw_absorbed,
+                    chl=jnp.asarray(_sf_chl, dtype=T.dtype),
+                    dz_live=h_k, wet_cell=wet_cell, rho_0=float(rho_0),
+                )
+                dT_target = dT_target + sw_tend * mask_3d
+            elif shortwave_scheme == "jerlov_2band" and _sf_sw is not None:
+                # Two-band Jerlov with the configured water type (routes the
+                # run_omip --water-type flag; "auto" keeps the kernel default).
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    shortwave_penetration_tendency,
+                    ShortwavePenetrationConfig,
+                    penetrating_fraction,
+                )
+                _sw_cfg = ShortwavePenetrationConfig(
+                    scheme="jerlov_2band", water_type=shortwave_water_type)
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                sw_absorbed = sw_T * jnp.asarray(penetrating_fraction(_sw_cfg), dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_absorbed
+                dT_target = dT_target.at[..., 0].add(
+                    q_nonsolar * inv_rho_csw_dz * mask
+                )
+                sw_tend = shortwave_penetration_tendency(
+                    sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref, J, _sw_cfg,
+                    rho_0=float(rho_0),
+                )
+                dT_target = dT_target + sw_tend * mask_3d
+            elif _sf_sw is not None and _sf_chl is not None:
                 # NEMO RGB chlorophyll penetration (ln_qsr_rgb).  NEMO
                 # partitions 100% of net SW across IR + R/G/B bands, so NO
                 # 0.94 "skin" pre-split here: the full sw is the penetrating
@@ -4879,6 +5034,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             h_k, z_coord, J, grid, rho_0, mask, mask_3d,
             route_heat_to_implicit=_sf_implicit,
             withhold_stress=_stress_implicit,
+            shortwave_scheme=getattr(_sf_cfg, "shortwave_scheme", "auto"),
+            shortwave_water_type=getattr(_sf_cfg, "shortwave_water_type", "II"),
         )
     )
 

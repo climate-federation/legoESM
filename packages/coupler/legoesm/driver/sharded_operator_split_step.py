@@ -46,7 +46,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
-    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
+    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked, checked_replicated_put,
     coerce_bool, coerce_count, config_digest48, name_digest48,
     tree_schema_digest48)
 from legoesm.parallel.latlon_spmd import (
@@ -478,12 +478,15 @@ def make_sharded_operator_split_step(
     assert_schema_agrees(_ordered, n_dev,
                          context="make_sharded_operator_split_step",
                          arrays=[raw[n] for n in _ordered])
+    # checked_replicated_put keeps that guarded broadcast and places the
+    # canonical bytes WITHOUT jax's whole-array device_put equality assert,
+    # whose per-field all-gather (~P*N*(2s+1) bytes) made per-rank memory grow
+    # with the rank count on the lat-lon lane until a 128-rank arm was
+    # OOM-killed.
     stacks = {
-        name: jax.device_put(
-            jnp.asarray(broadcast_checked(
-                raw[name], name,
-                context="make_sharded_operator_split_step")),
-            rep)
+        name: checked_replicated_put(
+            raw[name], name, rep,
+            context="make_sharded_operator_split_step")
         for name in _ordered
     }
     _cache = {}

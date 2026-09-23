@@ -247,6 +247,10 @@ class RidgingConfig(NamedTuple):
     closing_rate_max: float = 1.0      # Cap on convergence rate [1/s]
                                         # (sanity bound; physical Δ rarely
                                         # exceeds 1e-5)
+    # "strain": existing convergence + shear closure. "convergence":
+    # convergence only, also available on the tripole C-grid via its existing
+    # fold-aware transport divergence. Does not enable rheology or landfast.
+    closing_scheme: str = "strain"
 
 
 class MeltPondConfig(NamedTuple):
@@ -399,3 +403,20 @@ class SeaIceConfig(NamedTuple):
     # APPENDED at the tail (after every pre-existing field) so positional
     # SeaIceConfig(...) constructors keep their meaning (codex L1-r1 #3).
     sw_transmittance_const: float = 0.0
+    # Lead / open-water ice formation source (new-physics path only):
+    #  * "ice_skin" (legacy): lead ice grows from the ICE-skin atmospheric
+    #    deficit max(-Q_sfc, 0) x (1-A), gated on SST <= T_freeze_ocean, and
+    #    the ocean is DEBITED its latent heat.  Under a prognostic ocean that
+    #    separately receives the open-water flux (1-A)*q_open this double-
+    #    counts the cooling and nothing caps the ocean at the freezing point:
+    #    measured 2026-09-02 on both OMIP grids, the polar top cell reaches
+    #    -3 C (min -8 C) by day 105 while NEMO never drops below freezing.
+    #  * "nemo_qlead": NEMO SI3 lead heat budget (icesbc.F90:357-405).
+    #    zqld = (1-A)*q_open*dt is the open-water cooling; zqfr = rho0*cp*
+    #    dz_top*(Tf-SST) the energy that brings the top cell to freezing;
+    #    qlead = min(0, zqld - zqfr) forms ice, and its latent heat is
+    #    RETURNED to the ocean (extraction -L_f*rho_i*dV/dt), so the ocean
+    #    cools at most to Tf and a supercooled cell (zqfr > 0) freezes back
+    #    to Tf (frazil).  Needs q_open_top + ocean_dz_top_m from the
+    #    caller (step_sea_ice kwargs); the OMIP driver passes them.
+    lead_freeze_source: str = "ice_skin"

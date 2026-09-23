@@ -38,7 +38,7 @@ def test_deep_levels_come_from_the_nearest_column_that_has_them():
     shelf = [20.0] + [np.nan] * 5
     near = [18.0, 12.0, 8.0, 5.0, 3.0, 2.0]
     far = [17.0, 11.0, 7.0, 4.0, 2.5, 1.5]
-    (filled,), n = _fill_source_levels_nearest_valid(
+    (filled,), n, _ = _fill_source_levels_nearest_valid(
         [_source([shelf, near, far])], SRC_LAT, SRC_LON)
 
     assert n == 5
@@ -60,7 +60,7 @@ def test_the_donor_changes_with_depth_not_once_per_column():
     gap = [np.nan] * N_LEV_SRC
     near = [18.0, 12.0, 8.0] + [np.nan] * 3
     far = [17.0, 11.0, 7.0, 4.0, 2.5, 1.5]
-    (filled,), _ = _fill_source_levels_nearest_valid(
+    (filled,), _, _ = _fill_source_levels_nearest_valid(
         [_source([gap, near, far])], SRC_LAT, SRC_LON)
 
     np.testing.assert_allclose(filled[0, 0, :3], near[:3])   # near wins
@@ -76,7 +76,7 @@ def test_a_level_observed_nowhere_is_left_for_the_callers_fill():
     a = [18.0, 12.0, 8.0, 5.0, 3.0, np.nan]
     b = [17.0, 11.0, 7.0, 4.0, 2.5, np.nan]
     c = [16.0, 10.0, 6.0, 3.5, 2.0, np.nan]
-    (filled,), n = _fill_source_levels_nearest_valid(
+    (filled,), n, _ = _fill_source_levels_nearest_valid(
         [_source([a, b, c])], SRC_LAT, SRC_LON)
     assert n == 0
     assert np.all(np.isnan(filled[..., -1]))
@@ -85,7 +85,7 @@ def test_a_level_observed_nowhere_is_left_for_the_callers_fill():
 
 def test_a_complete_source_field_is_returned_unchanged():
     full = _source([[18.0, 12.0, 8.0, 5.0, 3.0, 2.0]] * 3)
-    (filled,), n = _fill_source_levels_nearest_valid([full], SRC_LAT, SRC_LON)
+    (filled,), n, _ = _fill_source_levels_nearest_valid([full], SRC_LAT, SRC_LON)
     assert n == 0
     np.testing.assert_array_equal(filled, full)
 
@@ -98,7 +98,7 @@ def test_nearest_is_measured_across_the_dateline():
     src = _source([[10.0] * N_LEV_SRC,
                    [-5.0] * N_LEV_SRC,
                    [np.nan] * N_LEV_SRC])
-    (filled,), n = _fill_source_levels_nearest_valid([src], SRC_LAT, lon)
+    (filled,), n, _ = _fill_source_levels_nearest_valid([src], SRC_LAT, lon)
     assert n == N_LEV_SRC
     np.testing.assert_allclose(filled[0, 2, :], 10.0)
 
@@ -135,7 +135,7 @@ def test_each_source_cell_keeps_its_own_coordinate():
                      [4.0, 5.0, 6.0]])
     src = np.repeat(vals[:, :, None], N_LEV_SRC, axis=2)
     src[1, 2, :] = np.nan                       # (1 N, 180 E) is missing
-    (filled,), n = _fill_source_levels_nearest_valid([src], lat, lon)
+    (filled,), n, _ = _fill_source_levels_nearest_valid([src], lat, lon)
 
     assert n == N_LEV_SRC
     # Its true nearest neighbour is 1 degree away in latitude, at (0 N, 180 E),
@@ -158,7 +158,7 @@ def test_the_flatten_transpose_round_trip_moves_no_value():
     src[2, 5, 3] = np.nan
     lat = np.linspace(-60.0, 60.0, 4)
     lon = np.linspace(0.0, 300.0, 7)
-    (filled,), n = _fill_source_levels_nearest_valid([src], lat, lon)
+    (filled,), n, _ = _fill_source_levels_nearest_valid([src], lat, lon)
     assert n == 1
     ref[2, 5, 3] = filled[2, 5, 3]
     np.testing.assert_array_equal(filled, ref)
@@ -176,7 +176,7 @@ def test_temperature_and_salinity_come_from_the_SAME_donor_column():
                             [34.5, 35.5, 36.5]])[:, :, None], N_LEV_SRC, axis=2)
     # Salinity alone is missing at (1 N, 180 E); temperature there is present.
     S[1, 2, :] = np.nan
-    (Tf, Sf), n = _fill_source_levels_nearest_valid([T, S], lat, lon)
+    (Tf, Sf), n, _ = _fill_source_levels_nearest_valid([T, S], lat, lon)
 
     # The cell counts as missing because ONE field is, so BOTH are replaced
     # from the same donor: (0 N, 180 E), one degree away.

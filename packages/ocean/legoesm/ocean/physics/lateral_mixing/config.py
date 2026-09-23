@@ -275,6 +275,13 @@ class GMRediConfig(NamedTuple):
     # Treguier-1997 adaptive κ (NEMO nn_aei_ijk_t=21, the oracle scaling) —
     # mutually exclusive with visbeck.enabled (dispatch raises on both).
     treguier: TreguierConfig = TreguierConfig()
+    # Opt-in NEMO 5.0.1 ldftra.F90:415-441 (nn_aht_ijk_t=21).
+    # Requires unfloored Treguier and the native rotated-Laplacian path.
+    redi_coefficient: str = "constant"  # constant (existing overrides) | nemo21
+    redi_aht0: float = 900.0  # ORCA1: 0.5 * rn_Ud(0.018) * rn_Ld(100 km)
+    # Exact NEMO ff_f at the NE corner of each T cell, same shape as T[:,:,0].
+    # Supplied from mesh gphif for nemo21; no averaged-f fallback.
+    redi_f_f: object = None
     slope_scheme: str = "triads"     # "triads" (default), "centered", or "nemo_iso_lap"
     # GM eddy-induced (bolus) advection FORM for slope_scheme="nemo_iso_lap"
     # (NEMO ldf_eiv_trp): "centred" (default, BYTE-IDENTICAL) applies the bolus

@@ -96,6 +96,12 @@ def test_mpas_lloyd_flag_round_trip():
     assert parse_args(["--grid", "mpas", "--mpas-lloyd", "0"]).mpas_lloyd == 0
 
 
+def test_no_final_snapshot_flag_round_trip():
+    """--no-final-snapshot is off by default; probe arms select it."""
+    assert parse_args(["--grid", "mpas"]).no_final_snapshot is False
+    assert parse_args(["--grid", "tripole", "--no-final-snapshot"]).no_final_snapshot is True
+
+
 def test_multicontroller_flags_round_trip():
     """--multicontroller / --coordinator parse and reach OMIPRunConfig
     (the route-B cross-process lane, part 2c of the ocean-SPMD promotion)."""
@@ -695,7 +701,8 @@ def test_thickness_only_setup_explicitly_selects_legacy_e3w(monkeypatch):
     class SetupReached(Exception):
         pass
 
-    def capture(dz, **kwargs):
+    def capture(dz, t_depth_ref_m=None, **kwargs):
+        seen["t_depth_ref_m"] = t_depth_ref_m
         seen.update(kwargs)
         raise SetupReached
 
@@ -704,7 +711,7 @@ def test_thickness_only_setup_explicitly_selects_legacy_e3w(monkeypatch):
         run_omip._create_setup(
             "mpas", "ico1", 3, 60.0, "full", "type1",
             dz_ref_override=np.array([10.0, 20.0, 30.0]))
-    assert seen == {"nemo_e3w_source": "depth_difference"}
+    assert seen == {"t_depth_ref_m": None, "nemo_e3w_source": "depth_difference"}
 
 
 def test_viscosity_overrides_reach_the_plain_latlon_lane():
@@ -990,6 +997,9 @@ def test_tripole_mesh_flags_parse():
                     "--tripole-strip-north-rows", "1"])
     assert a.tripole_mesh == spec and a.tripole_strip_north_rows == 1
     assert a.tripole_fold_convention == "auto"
+    assert a.tripole_closed_seas is None
+    a = parse_args(["--grid", "tripole", "--tripole-closed-seas", "marmara,black_sea"])
+    assert a.tripole_closed_seas == "marmara,black_sea"
     a = parse_args(["--grid", "tripole", "--tripole-mesh", spec,
                     "--tripole-fold-convention", "(n_lon-i)%n_lon"])
     assert a.tripole_fold_convention == "(n_lon-i)%n_lon"
@@ -1015,3 +1025,58 @@ def test_spmd_device_count_off_and_single_controller():
     on = build_config_from_args(parse_args([
         "--grid", "tripole", "--enable-latlon-spmd", "--spmd-n-devices", "3"]))
     assert _spmd_device_count(on) == 3
+
+
+def test_frazil_flag_round_trips_and_defaults_off():
+    assert parse_args(["--grid", "mpas"]).frazil is False
+    assert parse_args(["--grid", "mpas", "--frazil"]).frazil is True
+    assert parse_args(["--grid", "mpas", "--frazil", "--no-frazil"]).frazil is False
+
+
+def test_tke_card_round_trip_and_rejection():
+    """--tke-card fesom2 selects the prognostic FESOM2 constant set; unknown
+    cards are refused by argparse AND by the builder (dispatch hardening)."""
+    import argparse
+
+    import scripts.run.run_omip as run_omip
+
+    args = run_omip.parse_args(["--vertical-mixing-scheme", "tke", "--tke-card", "fesom2"])
+    vm = run_omip.build_vertical_mixing_config_from_args(args)
+    assert vm.scheme == "tke"
+    assert vm.tke.prognostic is True
+    assert vm.tke.surface_flux_coeff == 3.75
+    assert vm.tke.prandtl_mode == "richardson"
+    assert vm.tke.enable_kappaH_profile is False
+
+    dflt = run_omip.build_vertical_mixing_config_from_args(
+        run_omip.parse_args(["--vertical-mixing-scheme", "tke"]))
+    assert dflt.tke.prognostic is False
+    assert dflt.tke.surface_flux_coeff == 1.0
+    assert dflt.tke.prandtl_mode == "unit"
+
+    with pytest.raises(SystemExit):
+        run_omip.parse_args(["--tke-card", "bogus"])
+    ns = run_omip.parse_args(["--vertical-mixing-scheme", "tke"])
+    ns = argparse.Namespace(**{**vars(ns), "tke_card": "bogus"})
+    with pytest.raises(ValueError, match="unknown --tke-card"):
+        run_omip.build_vertical_mixing_config_from_args(ns)
+
+
+def test_ic_from_fesom_mesh_round_trip():
+    a = parse_args(["--grid", "mpas"])
+    assert a.ic_from_fesom_mesh is None
+    a = parse_args(["--grid", "tripole", "--woa-init", "--ic-from-fesom-mesh", "/meshes/forca20"])
+    assert a.ic_from_fesom_mesh == "/meshes/forca20"
+    assert a.woa_init is True
+    assert a.ic_cache_dir is None
+    a = parse_args(["--grid", "tripole", "--woa-init", "--ic-from-fesom-mesh", "/meshes/forca20",
+                    "--ic-cache-dir", "/work/ic_cache"])
+    assert a.ic_cache_dir == "/work/ic_cache"
+
+
+def test_driver_forwards_ic_cache_dir_to_the_fesom_initializer():
+    import inspect
+    from scripts.run import run_omip
+    src = inspect.getsource(run_omip.run_omip_single)
+    i = src.index("init_ocean_from_fesom_mesh(")
+    assert 'cache_dir=getattr(args, "ic_cache_dir", None)' in src[i:i + 600]

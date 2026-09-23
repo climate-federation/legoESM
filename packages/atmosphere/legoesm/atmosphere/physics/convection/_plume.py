@@ -996,13 +996,28 @@ def cmt_gregory_1997(
     # Vertical divergence of the flux: ``du/dt = -(1/rho) * dF/dz``.
     # Using hydrostatic ``dz = -dp/(rho*g)`` gives
     # ``du/dt = -(g) * dF/dp`` after the rho cancels.
-    dflux_u = jnp.diff(flux_u, axis=-1, append=flux_u[:, -1:])
-    dflux_v = jnp.diff(flux_v, axis=-1, append=flux_v[:, -1:])
+    # ``flux_k`` is the flux through the interface ABOVE layer k (the top
+    # layer's is zero by the prepend), and NO convective momentum flux crosses
+    # the surface: appending zero closes the bottom so the column integral
+    # sum_k dp_k du_dt_k / g = flux_top - flux_bottom = 0 exactly.  (Repeating
+    # the last flux, as before 2026-09-15, left -flux_last in the column.)
+    _zero = jnp.zeros_like(flux_u[:, :1])
+    dflux_u = jnp.diff(flux_u, axis=-1, append=_zero)
+    dflux_v = jnp.diff(flux_v, axis=-1, append=_zero)
 
     du_dt = -constants.g * dflux_u / dp
     dv_dt = -constants.g * dflux_v / dp
 
-    # Cap the thin-top-layer numerical spike (see _CMT_DUDT_MAX); NaN-safe.
-    du_dt = jnp.clip(jnp.nan_to_num(du_dt), -_CMT_DUDT_MAX, _CMT_DUDT_MAX)
-    dv_dt = jnp.clip(jnp.nan_to_num(dv_dt), -_CMT_DUDT_MAX, _CMT_DUDT_MAX)
-    return du_dt, dv_dt
+    # Cap the thin-top-layer numerical spike (see _CMT_DUDT_MAX) with a
+    # COLUMN-UNIFORM scale so the capped column still conserves momentum
+    # (a per-level clip does not); NaN-safe.
+    du_dt = jnp.nan_to_num(du_dt)
+    dv_dt = jnp.nan_to_num(dv_dt)
+    _peak = jnp.maximum(
+        jnp.max(jnp.abs(du_dt), axis=-1, keepdims=True),
+        jnp.max(jnp.abs(dv_dt), axis=-1, keepdims=True))
+    # Denominator floored at the cap itself: below the cap the ratio is >= 1
+    # and the min picks 1.0 with a finite float32 derivative (a 1e-30 floor
+    # overflowed the reciprocal's gradient in float32 at zero tendency).
+    _scale = jnp.minimum(1.0, _CMT_DUDT_MAX / jnp.maximum(_peak, _CMT_DUDT_MAX))
+    return du_dt * _scale, dv_dt * _scale

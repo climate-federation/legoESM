@@ -1,5 +1,8 @@
 
 
+import pytest
+
+
 class TestNEMONormalization:
     """`normalization="live_s"` = NEMO ``sbcssr`` nn_sssr=2, which ORCA1 runs.
 
@@ -359,24 +362,34 @@ class TestRestoringChannelFlag:
             "other freshwater; it must be SET, not skipped.")
         assert "_fw_restore if sf.freshwater is None" in block
 
-    def test_the_two_channels_are_exclusive_in_source(self):
+    @pytest.mark.parametrize("loop_name", ["main", "run_fesom_forced_loop"])
+    def test_the_two_channels_are_exclusive_in_source(self, loop_name):
         """The post-step applier must be guarded by `not _sss_water_flux`.
 
         Asserted on the source of the function that RUNS, because reaching this
         branch in a unit test needs a real eORCA1 mesh. A double application
         would not crash -- it would quietly double the restoring -- so the
         exclusivity is worth pinning even by this weaker means.
+
+        EVERY loop that carries both channels is checked, not just ``main``.
+        The FESOM lane runs its own loop and returns before ``main``'s, so a
+        check on ``main`` alone leaves the identical failure mode ungated
+        there -- deleting the fesom guard would keep every suite green.
         """
         import inspect
 
         from scripts.run import run_omip_core2
 
-        src = inspect.getsource(run_omip_core2.main)
-        assert "if sss_restore_cfg is not None and not _sss_water_flux:" in src, (
-            "the post-step SSS-restoring applier is no longer guarded against "
-            "the water-flux channel; restoring would be applied twice.")
-        # and the pre-step branch must exist
-        assert "if _sss_water_flux:" in src
+        src = inspect.getsource(getattr(run_omip_core2, loop_name))
+        assert "and not _sss_water_flux:" in src, (
+            f"{loop_name}: the post-step SSS-restoring applier is no longer "
+            "guarded against the water-flux channel; restoring would be "
+            "applied twice.")
+        # and the pre-step branch must exist, in either spelling
+        assert ("if _sss_water_flux:" in src
+                or "if sss_restore_cfg is not None and _sss_water_flux:" in src), (
+            f"{loop_name}: no pre-step water-flux branch; the water_flux "
+            "channel would silently do nothing.")
 
     def test_water_flux_requires_real_freshwater(self, monkeypatch):
         """The DOUBLE-APPLICATION guard (codex 9387241 RED).

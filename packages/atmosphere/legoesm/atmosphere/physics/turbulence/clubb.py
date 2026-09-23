@@ -131,7 +131,10 @@ from legoesm.atmosphere.physics._shared import (
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
-from legoesm.atmosphere.physics.turbulence.surface_layer import compute_surface_fluxes
+from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
+)
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
     implicit_vertical_diffusion_theta,
@@ -319,6 +322,9 @@ __param_spec__ = {
             "wp2_max": "numerics: wp2 upper clip [m^2/s^2]",
         },
         "params": {
+            "q_flux_scale": {"units": "1", "bounds": (0.1, 10.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "moisture-only multiplier on Kh for q_v inside a sigma band of faces; 1.0 = byte-identical (cloud-base mixing arm, 2026-09-20)", "shape": None},
+            "q_flux_scale_sigma_lo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "lower sigma of the face band q_flux_scale acts on", "shape": None},
+            "q_flux_scale_sigma_hi": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "upper sigma of the face band q_flux_scale acts on", "shape": None},
             "pdf_variance_scale": {"units": "1", "bounds": (0.25, 8.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_pdf", "reference": "multiplier on the DIAGNOSED sub-grid variance entering the PDF closure; 1.0 is the closure's own mixing-length estimate", "shape": None},
         },
     },
@@ -705,6 +711,19 @@ class CLUBBConfig(NamedTuple):
     # does not respond to 2x and 4x here, it will not respond to a prognostic
     # variance either, and the campaign should look elsewhere.
     pdf_variance_scale: float = 1.0
+    # Moisture-only multiplier on the eddy diffusivity used for q_v, applied
+    # at the interior faces whose sigma (p_half / p_surface) lies in
+    # [q_flux_scale_sigma_lo, q_flux_scale_sigma_hi].  1.0 = byte-identical.
+    # A mechanism probe (2026-09-20): the surface layer is too moist under a
+    # cloud layer that is too dry while the turbulent moisture flux dies
+    # between ~300 m and cloud base; scaling only the vapour exchange across
+    # that interface, with T and momentum untouched, tests whether the
+    # humidity profile is mixing-limited or pinned by convection and the
+    # resolved circulation.  Diagnostic path only: the prognostic closure
+    # transports rtm inside its own solver and refuses a value other than 1.
+    q_flux_scale: float = 1.0
+    q_flux_scale_sigma_lo: float = 0.0
+    q_flux_scale_sigma_hi: float = 1.0
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -3262,7 +3281,8 @@ def windm_edsclrm_lhs(lhs_diff, lhs_ma_zt, dt, invrs_rho_ds_zt, rho_ds_zm,
 def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
                           ug, vg, um_forcing, vm_forcing,
                           rho_ds_zm, rho_ds_zt, invrs_rho_ds_zt, fcor,
-                          c_K10, nu10, dt, gr: CLUBBGrid, l_tke_aniso=True):
+                          c_K10, nu10, dt, gr: CLUBBGrid, l_tke_aniso=True,
+                          vector_sfc_stress=False):
     """Advance um/vm (and the diagnostic upwp/vpwp) via eddy diffusion.
 
     Faithful port of ``advance_windm_edsclrm`` for the CAM ``l_predict_upwp_vpwp
@@ -3285,6 +3305,20 @@ def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
         Time step [s].
     l_tke_aniso : bool
         CAM default True → clip upwp/vpwp against up2/vp2 (else against wp2).
+    vector_sfc_stress : bool, default False
+        Apply the surface momentum flux as the VECTOR it is, rather than as a
+        magnitude aligned with the model wind. The reference scheme's implicit
+        surface term can only represent drag antiparallel to the wind, which is
+        exact for a bulk stress (computed FROM that wind) and lossy for a
+        PRESCRIBED one: a reanalysis stress carries a genuine cross-wind
+        component, and CAM's formulation silently rotates it onto the model's
+        own wind direction. With this set, the prescribed flux is applied whole
+        as an explicit source at the lowest level with the implicit term's own
+        discrete metric, and the implicit drag is switched off, so the column
+        feels exactly what was prescribed. Set it ONLY for a prescribed flux:
+        for a wind-dependent bulk stress the implicit treatment is what keeps
+        the drag stable. Default False keeps every existing caller
+        bit-identical.
 
     Returns
     -------
@@ -3301,14 +3335,39 @@ def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
     lhs_diff = diffusion_zt_lhs(Km_zm, nu10_arr, invrs_rho_ds_zt, rho_ds_zm, gr)
     lhs_ma_zt = term_ma_zt_lhs_upwind(wm_zt, gr)
 
-    um_tndcy, vm_tndcy = compute_uv_tndcy(fcor, ug, vg, um, vm, um_forcing, vm_forcing)
-
     # sqrt(max(s^2, eps^2)) is forward-identical to the reference's
     # max(sqrt(s^2), eps) but AD-safe: it never differentiates through sqrt(0),
     # so calm-wind columns (um=vm=0, which feed the implicit sfc-flux LHS term)
     # keep finite gradients.
     wind_speed = jnp.sqrt(jnp.maximum(um ** 2 + vm ** 2, _EPS ** 2))
     u_star_sqd = safe_sqrt(upwp[:, 0] ** 2 + vpwp[:, 0] ** 2)
+
+    if vector_sfc_stress:
+        # A PRESCRIBED surface flux is applied WHOLE and explicitly, and the
+        # implicit surface term is switched off for it (u_star_sqd = 0).
+        #
+        # Why not keep part of it implicit: the implicit term applies its drag
+        # to the NEW wind while any explicit remainder is built from the OLD
+        # one, so a split leaves an error a(U_old - U_new) in the flux the
+        # column actually feels -- it would conserve the prescribed vector only
+        # in the limit of vanishing drag (codex). Applied whole, the flux the
+        # column feels IS the prescribed one, up to the accuracy of the
+        # advance's other terms (the budget tests assert 5%, not round-off).
+        #
+        # Why explicit is safe here, where it would not be for a bulk stress: a
+        # prescribed flux does not depend on the wind being solved for, so it
+        # is a source term with no feedback, and cannot amplify. The implicit
+        # treatment exists to stabilise the -u_star^2 * U/|U| DRAG, which this
+        # branch no longer applies. The column budget then closes on the
+        # prescribed vector to the accuracy of the advance's other terms; the
+        # budget tests assert 5% for that reason, not round-off.
+        _metric = (invrs_rho_ds_zt[:, 0] * gr.invrs_dzt[:, 0]
+                   * rho_ds_zm[:, 0])
+        um_forcing = um_forcing.at[:, 0].add(_metric * upwp[:, 0])
+        vm_forcing = vm_forcing.at[:, 0].add(_metric * vpwp[:, 0])
+        u_star_sqd = jnp.zeros_like(u_star_sqd)
+
+    um_tndcy, vm_tndcy = compute_uv_tndcy(fcor, ug, vg, um, vm, um_forcing, vm_forcing)
 
     # First Crank-Nicholson half (explicit) for upwp/vpwp.
     xpwp_u = calc_xpwp(Km_zm_p_nu10, um, gr.invrs_dzm)[:, 1:-1]
@@ -5624,7 +5683,7 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                        p_sfc, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
                        invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm,
                        sfc_elevation, fcor, ug, vg, dt, gr: CLUBBGrid, config,
-                       radht_zt=None):
+                       radht_zt=None, vector_sfc_stress=False):
     """One prognostic CLUBB step (the CAM-default ``advance_clubb_core`` core).
 
     Runs, in the CAM order, ``compute_clubb_diagnostics`` -> the pre-advance ADG1
@@ -5770,7 +5829,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     um, vm, upwp, vpwp = advance_windm_edsclrm(
         state.um, state.vm, upwp, vpwp, wp2, up2, vp2, wm_zt, diag["Kh_zm"],
         ug, vg, forcing.um, forcing.vm, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zt,
-        fcor, p.c_K10, p.nu10, dt, gr, l_tke_aniso=True)  # CAM l_tke_aniso
+        fcor, p.c_K10, p.nu10, dt, gr, l_tke_aniso=True,  # CAM l_tke_aniso
+        vector_sfc_stress=vector_sfc_stress)
 
     new_state = CLUBBMomentState(
         rtm=rtm, thlm=thlm, um=um, vm=vm, wp2=wp2, wp3=wp3, up2=up2, vp2=vp2,
@@ -5874,6 +5934,27 @@ def unpack_clubb_moments(arr: jax.Array) -> CLUBBMomentState:
 # ===========================================================================
 # 19. Scheme entries
 # ===========================================================================
+
+
+def scale_q_diffusivity_in_band(Kh_half, p_half, config: CLUBBConfig):
+    """``Kh_half`` for the q_v diffusion: ``config.q_flux_scale`` at the
+    interior faces whose sigma lies in the configured band, unchanged
+    elsewhere.  ``p_half`` is TOP-DOWN ``(ncol, nlev+1)``; ``Kh_half`` holds
+    the ``nlev-1`` interior faces ``p_half[:, 1:-1]``.  Static Python gate so
+    the default is byte-identical."""
+    scale = float(config.q_flux_scale)
+    if not (math.isfinite(scale) and scale > 0.0):
+        raise ValueError(f"q_flux_scale must be finite and > 0, got {scale!r}")
+    if not (0.0 <= config.q_flux_scale_sigma_lo < config.q_flux_scale_sigma_hi <= 1.0):
+        raise ValueError(
+            f"q_flux_scale_sigma band must satisfy 0 <= lo < hi <= 1, got "
+            f"({config.q_flux_scale_sigma_lo}, {config.q_flux_scale_sigma_hi})")
+    if scale == 1.0:
+        return Kh_half
+    sigma_face = p_half[:, 1:-1] / p_half[:, -1:]
+    in_band = ((sigma_face >= config.q_flux_scale_sigma_lo)
+               & (sigma_face <= config.q_flux_scale_sigma_hi))
+    return jnp.where(in_band, scale * Kh_half, Kh_half)
 
 
 def clubb_turbulence(
@@ -6047,10 +6128,9 @@ def clubb_turbulence(
     if surface_flux is not None:
         tau_x, tau_y, shflx, lhflx, ustar = surface_flux
     else:
-        tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+        tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-            T_sfc, q_sfc, rho[:, -1], config.surface,
-        )
+            T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
     sflx_u, sflx_v = tau_x, tau_y
     sflx_T = shflx / constants.c_pd
     sflx_q = lhflx / constants.L_v
@@ -6060,7 +6140,9 @@ def clubb_turbulence(
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
     T_new = implicit_vertical_diffusion_theta(
         T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T)
-    q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
+    q_new = implicit_vertical_diffusion(
+        q_v, scale_q_diffusivity_in_band(Kh_half, p_half, config), rho, dz_layer, dz_half,
+        dt, sflx_q)
 
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
 
@@ -6144,17 +6226,21 @@ def clubb_step(
     ``sfc_wprtp`` enter ``advance_xm_wpxp`` directly as the scalar surface-flux
     lower-BC — applied EXACTLY and directionally (a prescribed ``w'thl'_sfc``
     closes the column θl budget to round-off). The momentum components are NOT
-    applied as an independent ``(u'w', v'w')`` vector: CAM's
-    ``l_imp_sfc_momentum_flux = .true.`` path (``advance_windm_edsclrm``) consumes
-    ONLY the surface-stress-vector MAGNITUDE
-    ``u_*^2 = sqrt(u'w'_sfc^2 + v'w'_sfc^2)`` (so ``u_* = (u'w'_sfc^2 +
-    v'w'_sfc^2)^{1/4}``) and re-applies it implicitly as a drag ANTIPARALLEL to the
-    near-surface wind (``-rho u_*^2 u/|V|``). So ``sfc_upwp``/``sfc_vpwp`` set only
-    the stress magnitude (equivalently a prescribed ``u_*``); their azimuth is discarded —
-    prescribing ``(u'w', 0)`` and ``(0, u'w')`` give identical wind tendencies.
-    This is the correct contract for prescribed-``u_*`` LES forcing and is exact
-    for the bulk drag (which is already wind-antiparallel by construction), but a
-    cross-wind momentum-flux vector cannot be imposed through this interface.
+    applied as an independent ``(u'w', v'w')`` VECTOR, whichever way it arrives
+    (the kinematic arguments here, or ``SurfaceLayerConfig.prescribed_tau_*_pa``
+    folded in by the bridge). CAM's ``l_imp_sfc_momentum_flux = .true.`` path
+    (``advance_windm_edsclrm``) consumes only the stress-vector MAGNITUDE
+    ``u_*^2 = sqrt(u'w'_sfc^2 + v'w'_sfc^2)`` and re-applies it implicitly as a
+    drag ANTIPARALLEL to the near-surface wind (``-rho u_*^2 u/|V|``), which is
+    exact for the bulk drag (already wind-antiparallel by construction) and
+    silently rotates a PRESCRIBED stress onto the model's own wind. Since
+    2026-09-21 a prescribed flux instead goes in whole as an explicit surface
+    source with that term's discrete metric, and the implicit drag is switched
+    off for it, so a cross-wind momentum flux CAN be imposed here: prescribing
+    ``(u'w', 0)`` and ``(0, u'w')`` now give different wind tendencies, each
+    along its own axis. ``u_*`` itself is still reported as the fourth root of
+    the stress-squared magnitude, so prescribed-``u_*`` LES forcing reads the
+    same. See test_prognostic_clubb_prescribed_momentum_flux_is_applied_as_a_vector.
 
     Returns ``(du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diagnostics)`` — the
     four mean tendencies (top-down ``(ncol, nlev)``), the advanced moment state,
@@ -6216,9 +6302,9 @@ def clubb_step(
     need_bulk = (sfc_wpthlp is None or sfc_wprtp is None
                  or sfc_upwp is None or sfc_vpwp is None)
     if need_bulk:
-        tau_x, tau_y, shflx_b, lhflx_b, ustar_b = compute_surface_fluxes(
+        tau_x, tau_y, shflx_b, lhflx_b, ustar_b = surface_fluxes_at_lowest_level(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-            T_sfc, q_sfc, rho_sfc, config.surface)
+            T_sfc, q_sfc, rho_sfc, config.surface, z_full[:, -1] - z_half[:, -1])
         wpthlp_b = shflx_b / (rho_sfc * constants.c_pd * exner_sfc)  # w'thl' [K m/s]
         wprtp_b = lhflx_b / (rho_sfc * constants.L_v)                # w'rt'  [kg/kg m/s]
         # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
@@ -6269,7 +6355,20 @@ def clubb_step(
         invrs_rho_ds_zm=invrs_rho_ds_zm, invrs_rho_ds_zt=invrs_rho_ds_zt,
         wm_zt=zeros_zt, wm_zm=zeros_zm, sfc_elevation=sfc_elevation,
         fcor=jnp.zeros((ncol,), dtype=T.dtype), ug=um, vg=vm, dt=dt, gr=gr,
-        config=config, radht_zt=radht_zt)
+        config=config, radht_zt=radht_zt,
+        # A PRESCRIBED surface stress is a vector boundary condition, so it is
+        # applied as one. A stress the scheme computed itself from this wind is
+        # already antiparallel to it, and takes the reference path unchanged.
+        #
+        # BOTH routes count. The explicit kinematic arguments are one; the
+        # production and training lanes use the OTHER, folding the stress into
+        # ``config.surface.prescribed_tau_*_pa`` so that compute_surface_fluxes
+        # returns it in place of the bulk value. Keying on the arguments alone
+        # left the real ERA5 lane on the magnitude-only path (codex).
+        vector_sfc_stress=(
+            sfc_upwp is not None or sfc_vpwp is not None
+            or getattr(config.surface, "prescribed_tau_x_pa", None) is not None
+            or getattr(config.surface, "prescribed_tau_y_pa", None) is not None))
 
     # ---- Map advanced means back to top-down tendencies ----
     u_new = flip_vertical(new_state.um)
@@ -6359,6 +6458,11 @@ def clubb_turbulence_prognostic(
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
     """
+    if float(config.q_flux_scale) != 1.0:
+        raise ValueError(
+            "q_flux_scale is a diagnostic-CLUBB mechanism probe; the prognostic "
+            "closure transports rtm inside its own solver and does not read it "
+            f"(got {config.q_flux_scale}).")
     moments = unpack_clubb_moments(clubb_moments)
     n_sub = max(1, math.ceil(dt / config.clubb_dt))
 

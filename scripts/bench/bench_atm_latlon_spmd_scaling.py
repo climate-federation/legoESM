@@ -301,6 +301,13 @@ def main() -> int:
 
     _stage("importing jax")
     _import_jax()
+    # Precision: JAX_ENABLE_X64 drives the LABEL, but the model state dtype
+    # comes from the precision POLICY (default fp32), NOT x64 — so without
+    # this the "float64" arm silently runs fp32 state.  Set the policy to
+    # match the x64 flag the launcher sets per arm.
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64() if jax.config.jax_enable_x64
+               else PrecisionPolicy.fp32())
     # LEGOESM_HANG_DEBUG=1: dump every thread's Python stack to stderr every
     # 5 minutes. Pure stdlib. Three 192-rank arms hung INSIDE the first
     # (compiling+executing) call with nothing to bisect on; the periodic

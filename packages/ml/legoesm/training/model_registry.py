@@ -45,11 +45,19 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
     # `residual_scale` is present but NULL: the sentinel means "pass nothing",
     # so `build_column_physics` applies its own value (0.01) — what BOTH lanes
     # get today. Restating the number here would be a second source of truth.
-    "column_nn": {"nn_hidden_dim": 256, "n_layers": 4, "residual_scale": None},
+    # ``spatial_embedding``: NeuralGCM-style static features + learned
+    # per-grid-point embedding (column_nn) / ACE2-style land-fraction plane
+    # (sfno_physics).  ``era5_surface_fluxes``: the six ERA5 surface-flux planes
+    # as extra inputs.  Both OFF here so AIMIP is unchanged; the WB campaign
+    # decks set them explicitly.
+    "column_nn": {"nn_hidden_dim": 256, "n_layers": 4, "residual_scale": None,
+                  "spatial_embedding": False, "era5_surface_fluxes": False},
     "sfno_physics": {
         "sfno_embed_dim": 128,
         "sfno_n_blocks": 4,
         "sfno_mlp_expansion": 4,
+        "spatial_embedding": False,
+        "era5_surface_fluxes": False,
     },
     "sfno_full": {
         "sfno_embed_dim": 128,
@@ -67,6 +75,27 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
 # so epoch 0 integrates the pure dycore.  ``sfno_full`` REPLACES the dycore, so
 # there is nothing to fall back to and a zeroed decoder would emit a zero state.
 _ZERO_INIT_DECODER = {"sfno_physics": True, "sfno_full": False}
+
+
+def sfno_extra_input_channels(*, spatial_embedding: bool,
+                              era5_surface_fluxes: bool) -> int:
+    """Extra SFNO input planes beyond the three baseline forcing planes.
+
+    ``spatial_embedding`` appends the ACE2-style static land-fraction plane;
+    ``era5_surface_fluxes`` appends the six ERA5 surface-flux / stress planes.
+    The counts live next to the column network that shares them
+    (``atmosphere.physics.neural_physics``) so one constant feeds both arms.
+    """
+    from legoesm.atmosphere.physics.neural_physics import (
+        N_SFC_FLUX_INPUT_CHANNELS,
+        N_SFNO_LAND_FRAC_CHANNELS,
+    )
+    n = 0
+    if spatial_embedding:
+        n += N_SFNO_LAND_FRAC_CHANNELS
+    if era5_surface_fluxes:
+        n += N_SFC_FLUX_INPUT_CHANNELS
+    return n
 
 
 def _resolve(variant: str, overrides: dict[str, Any] | None) -> dict[str, Any]:
@@ -113,7 +142,10 @@ def sfno_arch_config(variant: str, *, nlev: int,
         from legoesm.training.neural_gcm_spectral import (
             N_SFNO_FORCING_CHANNELS,
         )
-        in_channels = spec.n_channels + N_SFNO_FORCING_CHANNELS
+        in_channels = (spec.n_channels + N_SFNO_FORCING_CHANNELS
+                       + sfno_extra_input_channels(
+                           spatial_embedding=bool(kw["spatial_embedding"]),
+                           era5_surface_fluxes=bool(kw["era5_surface_fluxes"])))
         extra = {}
     else:  # sfno_full: the emulator sees (1 + history) copies of the state.
         in_channels = spec.n_channels * (1 + int(kw["sfno_history_steps"]))
@@ -187,11 +219,22 @@ def build_variant(variant: str, *, nlev: int, grid=None, seed: int = 0,
         )
         extra_cn = ({} if kw["residual_scale"] is None
                     else {"residual_scale": float(kw["residual_scale"])})
+        _spatial = bool(kw["spatial_embedding"])
+        if _spatial:
+            # The learned per-grid-point embedding table is sized by the grid.
+            if grid is None:
+                raise ValueError(
+                    "variant 'column_nn' with spatial_embedding=True needs a "
+                    "spectral `grid` (it sizes the learned per-grid-point "
+                    "embedding table)")
+            extra_cn["n_columns"] = int(grid.n_lat) * int(grid.n_lon)
         return build_column_physics(
             nlev=nlev,
             hidden_dim=int(kw["nn_hidden_dim"]),
             n_layers=int(kw["n_layers"]),
             key=jax.random.PRNGKey(seed),
+            spatial_embedding=_spatial,
+            era5_surface_fluxes=bool(kw["era5_surface_fluxes"]),
             **extra_cn,
         )
 

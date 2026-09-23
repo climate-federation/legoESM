@@ -126,6 +126,16 @@ rad_update_steps: 32        # exactly hourly at dt 112.5 (48 was hourly at dt 75
 # (it would otherwise give a near-uniform cover wherever cloud exists).
 clouds: xu_randall
 microphysics: morrison
+morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
+                                 # sedimentation (micro_mg2_0.F90 loop). The
+                                 # one-pass form moved a hydrometeor at most one
+                                 # layer per call; production bottom-layer rain
+                                 # CFL ~3.4 at 112.5 s (281 m layer, 9.1 m/s cap),
+                                 # so this changes production numerics BY DESIGN.
+                                 # Pre-2026-09-22 runs: --no-morrison-sed-cfl-substeps
+                                 # morrison_sed_cfl_substeps_strict left at its default
+                                 # (False): max required count here is 8 (graupel) vs the
+                                 # 256 cap; turning the abort on is a user choice, not taken.
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
 # NEW BASELINE, 2026-09-13 (owner decision). This moves TWO things at once and
@@ -267,6 +277,17 @@ cloud_partial_coverage_optics: none
 cloud_optics_inhomogeneity: two_region
 cloud_fsd: 1.0
 convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain split
+# Survivor convective rain (after the IFS downdraft + sub-cloud evaporation)
+# goes to the SURFACE (IFS cuflxn); before 2026-09-16 it entered the
+# microphysics rain tracer and was re-evaporated at grid-mean humidity
+# (4.1 kg/m2/day below 700 hPa in the tropics). 30-day pair: tropical-ocean
+# prw -9 kg/m2, evaporation +4 %; the RH cover threshold is being re-tuned
+# on the drier column (cloud-cover session).
+convective_rain_to_surface: true
+# Cloud-base mass-flux cap: the pipeline used to fall back to 0.02 on a field
+# no config carried (bound in 71 % of tropical-ocean columns); 0.05 is the
+# scheme's own default (user 2026-09-16). Range 0.02-0.15.
+bechtold_M_b_max: 0.05
                             # (raises pr, drains column moisture). The bechtold
                             # rain-split scheme is on this branch (#929), so the
                             # old #932 argparse hard-error no longer applies.
