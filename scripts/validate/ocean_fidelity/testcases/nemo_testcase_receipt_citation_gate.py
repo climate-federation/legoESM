@@ -659,6 +659,11 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    # Round 157 reads the build that produced the admitted developed stage-2
+    # record, whose line numbers are NOT R154TRPWALK's.
+    "GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
     # --- round 36 paths: THIS ROUND'S OWN BUILD ---
     # The R35TRAZDF card is the one that produced the round-35 record, and it
     # is the only build whose trazdf.f90 carries the instrument, so its line
@@ -686,6 +691,34 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 157: developed stage-2 right-hand-side walk, on the build
+    # that wrote the record it walks ---
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:462':
+        ("CALL r156_stage2_pair3( 'rhs_entry       ', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )", 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:497':
+        ('CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:499':
+        ("CALL r156_stage2_pair3( 'after_hpg       ', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )", 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:510':
+        ('CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:512':
+        ("CALL r156_stage2_pair3( 'after_vor       ', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )", 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:523':
+        ('IF( ln_dynadv_vec ) THEN                        ! VIF: only velocities used for momentum advection', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:525':
+        ('CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:531':
+        ("CALL r156_stage2_pair3( 'after_adv       ', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )", 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:721':
+        ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:723':
+        ('uu(ji,jj,jk,Kaa) = ( uu(ji,jj,jk,Kbb) + rDt * uu(ji,jj,jk,Krhs) ) * umask(ji,jj,jk)', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:738':
+        ("CALL r156_stage2_pair3( 'uu_vv_Kaa_raw   ', uu(:,:,:,Kaa), vv(:,:,:,Kaa) )", 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:787':
+        ('zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:810':
+        ('uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)', 1),
     # --- round 156: developed stage-2 velocity split ---
     'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:217-256': [
         'CASE ( 2 )           !==  Stage 2  ==!',
