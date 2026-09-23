@@ -126,6 +126,23 @@ cpp -Dkey_nosignedzero -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
 "$FC" -fsyntax-only -ffree-line-length-none -I "$syntax" \
   -I "$SOURCE_ROOT/BLD/inc" -J "$syntax" "$syntax/stprk3_stg.f90"
 printf 'SYNTAX_PROOF_PASS l2_r156_stage2.f90 stprk3_stg.f90\n'
+
+# A writer that opens its file and then writes no group at all passes every
+# syntax and layout check above, so the bytes themselves are proved here:
+# compile the writer against small stubs, drive it with indexable values, and
+# parse the result with the SAME reader the admission gate uses.
+roundtrip=$(mktemp -d /tmp/gyre-r156-developed-stage2-roundtrip.XXXXXX)
+cp "$here/layout_stubs.F90" "$here/layout_driver.F90" "$WRITER" "$roundtrip/"
+(
+  cd "$roundtrip"
+  "$FC" -ffree-line-length-none -c layout_stubs.F90
+  "$FC" -ffree-line-length-none -c l2_r156_stage2.F90
+  "$FC" -ffree-line-length-none -o layout_driver layout_driver.F90 \
+    layout_stubs.o l2_r156_stage2.o
+  ./layout_driver
+)
+"$PY" "$here/layout_roundtrip.py" \
+  "$roundtrip/oracle_developed_stage2_kt00001081.bin"
 if [[ "$MODE" == --preflight-only ]]; then
   printf 'ROUND156_DEVELOPED_STAGE2_PREFLIGHT_READY\n'
   exit 0

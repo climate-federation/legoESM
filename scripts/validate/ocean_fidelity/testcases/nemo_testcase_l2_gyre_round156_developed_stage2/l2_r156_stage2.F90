@@ -20,7 +20,11 @@ MODULE l2_r156_stage2
    PRIVATE
    PUBLIC :: r156_stage2_open, r156_stage2_pair3, r156_stage2_pair2
    PUBLIC :: r156_stage2_scal, r156_stage2_close
-   INTEGER, SAVE :: nunit = -1
+   !  NEWUNIT hands back a NEGATIVE unit number, so "is the file open" is a
+   !  LOGICAL here and never a sign test on the unit -- a sign test silently
+   !  skipped every group and left an 80-byte header behind.
+   INTEGER, SAVE :: nunit = 0
+   LOGICAL, SAVE :: lopen = .FALSE.
    LOGICAL, SAVE :: ldone = .FALSE.
 CONTAINS
 
@@ -38,12 +42,13 @@ CONTAINS
       WRITE(nunit) magic
       WRITE(nunit) 1, kt, kstg, Kbb, Kmm, Krhs, Kaa, jpi, jpj, jpk, &
          & STORAGE_SIZE(1._wp), 18, ntsi, ntei, ntsj, ntej
+      lopen = .TRUE.
    END SUBROUTINE r156_stage2_open
 
    SUBROUTINE r156_stage2_pair3( cdname, pu, pv )
       CHARACTER(LEN=16), INTENT(in) :: cdname
       REAL(wp), DIMENSION(:,:,:), INTENT(in) :: pu, pv
-      IF( ldone .OR. nunit < 0 ) RETURN
+      IF( .NOT.lopen ) RETURN
       IF( ANY( SHAPE(pu) /= SHAPE(pv) ) ) ERROR STOP 'R156_STAGE2_PAIR3_SHAPE'
       WRITE(nunit) cdname
       WRITE(nunit) 3, SIZE(pu,1), SIZE(pu,2), SIZE(pu,3)
@@ -54,7 +59,7 @@ CONTAINS
    SUBROUTINE r156_stage2_pair2( cdname, pu, pv )
       CHARACTER(LEN=16), INTENT(in) :: cdname
       REAL(wp), DIMENSION(:,:), INTENT(in) :: pu, pv
-      IF( ldone .OR. nunit < 0 ) RETURN
+      IF( .NOT.lopen ) RETURN
       IF( ANY( SHAPE(pu) /= SHAPE(pv) ) ) ERROR STOP 'R156_STAGE2_PAIR2_SHAPE'
       WRITE(nunit) cdname
       WRITE(nunit) 2, SIZE(pu,1), SIZE(pu,2), 1
@@ -65,7 +70,7 @@ CONTAINS
    SUBROUTINE r156_stage2_scal( cdname, pa, pb )
       CHARACTER(LEN=16), INTENT(in) :: cdname
       REAL(wp), INTENT(in) :: pa, pb
-      IF( ldone .OR. nunit < 0 ) RETURN
+      IF( .NOT.lopen ) RETURN
       WRITE(nunit) cdname
       WRITE(nunit) 0, 1, 1, 1
       WRITE(nunit) pa
@@ -73,9 +78,10 @@ CONTAINS
    END SUBROUTINE r156_stage2_scal
 
    SUBROUTINE r156_stage2_close()
-      IF( ldone .OR. nunit < 0 ) RETURN
+      IF( .NOT.lopen ) RETURN
       CLOSE(nunit)
-      nunit = -1
+      nunit = 0
+      lopen = .FALSE.
       ldone = .TRUE.
    END SUBROUTINE r156_stage2_close
 
