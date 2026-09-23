@@ -255,7 +255,7 @@ def nemo_qco_live_face_geometry_from_operands(
     return NemoQCOLiveFaceGeometry(e3u, e3v, r1_hu, r1_hv, r3u, r3v)
 
 
-def _nemo_t_fold_f_owned(field, grid):
+def nemo_t_fold_f_owned(field, grid):
     """Apply NEMO's owned-row T-pivot/F-point north-fold overwrite."""
     fold = getattr(grid, "fold", None)
     if fold is None or not bool(getattr(fold, "is_active", False)):
@@ -290,7 +290,7 @@ def nemo_fe3mask_from_tmask(tmask, *, grid=None):
     north = jnp.concatenate([active[1:], jnp.zeros_like(active[:1])], axis=0)
     northeast = jnp.roll(north, -1, axis=1)
     fe3mask = active * east * north * northeast
-    return _nemo_t_fold_f_owned(fe3mask, grid)
+    return nemo_t_fold_f_owned(fe3mask, grid)
 
 
 def nemo_qco_live_vorticity_e3f_cgrid(
@@ -339,7 +339,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
 
     # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain the
     # historical path byte-for-byte.
-    e3f0vor = _nemo_t_fold_f_owned(e3f0vor, grid)
+    e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
 
     area_eta = b(
         b(jnp.asarray(raw.e1t, dtype=dtype)
@@ -356,7 +356,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
     # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
-    r3f = _nemo_t_fold_f_owned(r3f, grid)
+    r3f = nemo_t_fold_f_owned(r3f, grid)
     # dommsk.F90:146-198 freezes fe3mask from the four-T-cell free-slip
     # mask.  The later lateral-slip/strait changes at :207-243 affect fmask
     # only.  domzgr_substitute.h90:48,130 therefore consumes fe3mask here;

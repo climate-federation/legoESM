@@ -2390,7 +2390,30 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        if een_e3f_scheme in ("nemo_avg", "nemo_avg4"):
+        if een_e3f_scheme == "nemo_avg4":
+            # NEMO gives the fold row NO formula of its own.  ``dyn_vor_init``
+            # evaluates the same masked four-cell average over the owned
+            # domain (dynvor.F90:913-919) and then completes the field with
+            # the ORDINARY F-point north-fold exchange, sign +1
+            # (dynvor.F90:935), before the zero -> reference-thickness
+            # substitution (dynvor.F90:937).  Under a T pivot that exchange
+            # rewrites the LAST OWNED row from the row immediately below it
+            # at the mirrored longitude (lbcnfd.F90:722-746: the row loop
+            # ends at ``ipj - ihls``, its source row at ``ipj - ihls - 1``,
+            # and the longitude loop pairs ``ii1 + ii2 = ipi + 1``).
+            #
+            # That exchange is already written ONCE, for the live vorticity
+            # thickness (``ocean.vertical.nemo_t_fold_f_owned``); reuse it
+            # rather than re-derive the permutation here.  It reads NEMO's
+            # native F layout, whose column ``i`` is this vertex array's
+            # column ``i + 1``, so shift into that layout and back -- both
+            # are exact index moves that touch no arithmetic.
+            from legoesm.ocean.vertical import nemo_t_fold_f_owned
+            h_vtx = jnp.roll(
+                nemo_t_fold_f_owned(jnp.roll(h_vtx, -1, axis=1), grid),
+                1, axis=1,
+            )
+        elif een_e3f_scheme == "nemo_avg":
             h_k_partner = h_k[-1:, fold.perm_T, :]
             h_sw_partner = h_sw[-1:, fold.perm_T, :]
             t_k_partner = t_k[-1:, fold.perm_T, :]
@@ -2399,10 +2422,6 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
             wet_count_north = t_k[-1:] + t_sw[-1:] + t_k_partner + t_sw_partner
             # Same fully-dry-vertex fallback as the interior branch above
             # (dry_fallback: dz_ref[k] when available, else legacy BIG_H).
-            if een_e3f_scheme == "nemo_avg4":
-                raise NotImplementedError(
-                    "nemo_avg4 is not defined for a tripolar fold; its "
-                    "certified NEMO GYRE use is a closed beta-plane box")
             h_vtx_north = jnp.where(
                 wet_count_north > 0.0,
                 e3f_sum_north / jnp.maximum(wet_count_north, 1.0),
@@ -2415,7 +2434,9 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
                 jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
                 jnp.minimum(h_k_partner, h_sw_partner),
             )
-        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
+        if een_e3f_scheme != "nemo_avg4":
+            h_vtx = apply_north_fold(
+                h_vtx, h_vtx_north, grid, north_mask=nmask)
     h_vtx = jnp.concatenate(
         [h_vtx, h_vtx[:, 0:1, :]], axis=1,
     )  # (n_lat+1, n_lon+1, nlev)
