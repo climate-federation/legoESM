@@ -70,6 +70,8 @@ TRAJECTORY_CITATIONS = {
     "stage_dump": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:215-231,329-348",
     "runoff_tracer": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:314-328",
     "salt_flux": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:290-311",
+    "ldf_dyn_coefficient": (
+        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/ldfdyn.f90:348-353"),
 }
 
 
@@ -763,29 +765,49 @@ def _surface_forcings(
     return freshwater, surface
 
 
-# The ONE unbuilt statement this ladder is allowed to stop on.  Matching the
-# refusal text is the point: without it any future NotImplementedError from a
-# different routine would be labelled as this gap and cited to the wrong
-# compiled line.
-EEN_FOLD_REFUSAL = "nemo_avg4 is not defined for a tripolar fold"
+# The unbuilt statements this ladder is allowed to stop on, each keyed by the
+# EXACT refusal text the production code prints.  Matching that text is the
+# point: without it a refusal from a different routine would be labelled as one
+# of these and cited to the wrong compiled line.  Round 7's entry was the EEN
+# vertex thickness on a tripolar fold row; round 8 transcribed it, and the walk
+# then reached the lateral-viscosity coefficient.
+UNBUILT_STATEMENTS = {
+    "STOP_PRODUCTION_LDF_DYN_TRIPOLAR_COEFF_GAP": {
+        "refusal": (
+            "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
+            "with a scalar dlon"),
+        "legoesm_source": (
+            "packages/ocean/legoesm/ocean/dynamics/"
+            "ocean_pe_latlon_cgrid.py:3332-3336"),
+        "citation": "ldf_dyn_coefficient",
+        "resolved_setting": (
+            "the record resolves nn_ahm_ijk_t = -30, so NEMO READS the whole "
+            "three-dimensional coefficient from eddy_viscosity_3D.nc "
+            "(ahmt_3d, ahmf_3d); the production arm instead builds the "
+            "nn_ahm_ijk_t = 20 formula from a single zonal grid spacing, "
+            "which a tripolar mesh does not have"),
+    },
+}
 
 
-def unbuilt_statement_blocker(exc: NotImplementedError, kt: int) -> dict[str, object]:
+def unbuilt_statement_blocker(exc: Exception, kt: int) -> dict[str, object]:
     """Classify a deliberate "not built" refusal, or refuse to label it."""
 
     message = str(exc)
-    require(EEN_FOLD_REFUSAL in message,
-            "the production step raised an unregistered NotImplementedError; "
-            "it is not the EEN vertex-thickness fold gap and must not be "
-            f"labelled as one: {message}")
+    matches = [name for name, entry in UNBUILT_STATEMENTS.items()
+               if entry["refusal"] in message]
+    require(len(matches) == 1,
+            "the production step raised an unregistered refusal; it is not a "
+            "known unbuilt ORCA2 statement and must not be labelled as one: "
+            f"{message}")
+    entry = UNBUILT_STATEMENTS[matches[0]]
     return {
-        "status": "STOP_PRODUCTION_EEN_E3F_FOLD_GAP",
+        "status": matches[0],
         "kt": kt,
         "message": message,
-        "legoesm_source": (
-            "packages/ocean/legoesm/ocean/dynamics/"
-            "ocean_pe_latlon_cgrid.py:2402-2405"),
-        "nemo_source_citation": TRAJECTORY_CITATIONS["een_e3f"],
+        "legoesm_source": entry["legoesm_source"],
+        "nemo_source_citation": TRAJECTORY_CITATIONS[entry["citation"]],
+        "resolved_setting": entry["resolved_setting"],
     }
 
 
@@ -907,7 +929,7 @@ def candidate_trajectory(
                 freshwater=freshwater,
                 surface_forcing=surface,
             )
-        except NotImplementedError as exc:
+        except (NotImplementedError, ValueError) as exc:
             # An explicitly UNBUILT statement, named by the production code.
             # It is recorded, not swallowed: the gate still exits non-zero and
             # registers no magnitude.  A refusal from any OTHER routine is not
@@ -926,7 +948,7 @@ def candidate_trajectory(
                 "chlorophyll_kt1_input_reconstruction": chl_row,
                 "first_non_bit_statement": first_non_bit,
                 "kt10_same_field_magnitude":
-                    "UNMEASURED_STOP_PRODUCTION_EEN_E3F_FOLD_GAP",
+                    f"UNMEASURED_{blocker['status']}",
                 "checkpoints": checkpoints,
                 "execution_blocker": blocker,
             }
@@ -1140,7 +1162,7 @@ def main() -> int:
         return 3
     if result["status"] in (
         "STOP_INITIAL_TS_TRANSCRIPTION_GAP",
-        "STOP_PRODUCTION_EEN_E3F_FOLD_GAP",
+        *UNBUILT_STATEMENTS,
     ):
         print(
             f"REFUSE: {result['status']}: the admitted ORCA2 ladder cannot "
