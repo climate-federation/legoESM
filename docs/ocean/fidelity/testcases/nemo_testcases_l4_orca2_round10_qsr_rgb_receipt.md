@@ -1,0 +1,297 @@
+# NEMO testcase Lane 4 — ORCA2 card round 10 transcription receipt
+
+Date: 2026-09-23
+
+Starting tip: `84ba7f9cd04d4c2b0e5aca0f81f2b73086ca2c1c`
+
+Preregistration: `5191f0be6c48`
+
+Status: **HELD.**  Round 9's OPEN item 1 is discharged: the three-band
+chlorophyll shortwave penetration that ORCA2's namelist selects is now the
+deposit the shared physics pipeline applies, routed through the RGB kernel
+legoESM already carried and gated cell by cell against the record's own `qsr`
+right-hand-side increment with the card's own configuration and operands.  The
+ladder leaves that stop and reaches the next one, which is NOT an unbuilt
+statement: the production step's post-Runge-Kutta sea-surface height is
+non-finite at kt=1, so `kt=10` stays **UNMEASURED** — not zero, not
+extrapolated.
+
+Round 9's OPEN item 3 (the second masking of an already-masked viscosity
+coefficient) is TRANSCRIBED and CITED here but deliberately **NOT LANDED**;
+section 6 says exactly why and what decision it needs.
+
+No configuration, selector default, tunable, threshold, cadence, resolution,
+timestep, carried state, data source, NEMO source or sea-ice registry entry
+changed.  Sea ice remains out of scope and the six-entry `unmeasured_features`
+tuple is unchanged.
+
+Independent review **not run (codex paused)**; a separate fresh adversarial
+reviewer was run in its place (section 8).
+
+## 1. What NEMO actually does, and what nothing here may choose
+
+Every setting below was read from the record's own resolved output, not from a
+deck comment.  The record is the pinned ORCA1-ice reference run
+`orca1ice_surface_entry_every_step_a_np2`.
+
+| resolved setting | value | where it is printed |
+|---|---|---|
+| shortwave family | `ln_qsr_rgb = T` | `ocean.output:1207` |
+| chlorophyll source | data file, `nn_chldta = 1` | `ocean.output:1211` |
+| chlorophyll vertical profile | Morel-Berthon analytical, `nn_chlprfl = 1` | `ocean.output:1212` |
+| infrared fraction | `rn_abs = 0.58` | `ocean.output:1213` |
+| infrared attenuation length | `rn_si0 = 0.35` m | `ocean.output:1214` |
+| ocean time step | `rn_Dt = 10800` s | `ocean.output:217` |
+| reference density and heat capacity | `rho0 = 1026`, `rcp = 3991.8679571196299` | `ocean.output:172,174` |
+| lateral momentum boundary condition | **no-slip**, `rn_shlat = 2.0` | `ocean.output:339` |
+
+With those, `tra_qsr` dispatches `qsr_RGBc`
+(`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traqsr.f90:213`).  Five
+statements, in this order:
+
+| statement | compiled owner |
+|---|---|
+| the look-up-table index per level from the Morel-Berthon profile evaluated on the LIVE interface depth `gdepw_1d(jk+1)*(1+r3t(Kmm))` | `traqsr.f90:349` |
+| the surface partition: infrared `rn_abs`, three equal red/green/blue bands `(1-rn_abs)/3`, and the total | `traqsr.f90:368-374` |
+| four depth ranges bounded by `nk0`, `nkR`, `nkG`, `nkB`, one band dropped at each boundary, the summed flux multiplied by the w-level mask | `traqsr.f90:379-463` |
+| the deposit into the temperature right-hand side, `r1_rho0_rcp*(zeT - zzeT)/ze3t` with `ze3t = e3t_3d*(1+r3t(Kmm)*tmask)` | `traqsr.f90:388,394` |
+| the deepest level light reaches, `nksr = nkV = nkB` | `traqsr.f90:1193-1195,1308` |
+
+`tra_qsr` is called ONCE per step, at Runge-Kutta stage three, with `Kmm`.
+That is the whole reason the routing needed a second site: legoESM's shared
+pipeline runs before the stages.
+
+## 2. What landed, and what it deliberately does not add
+
+**No second RGB kernel.**  legoESM already carried `qsr_RGBc` literally, behind
+`apply_shortwave_penetration(scheme="nemo_qsr_rgb")` in
+`packages/ocean/legoesm/ocean/physics/shortwave_penetration.py`, used by the
+external-forcing stage and gated against this record by the pre-existing
+`nemo_testcase_l4_orca2_rgb_gate.py`.  Searched first (Rule 4): `grep -rn
+"nemo_qsr_rgb\|apply_shortwave_penetration"` over `packages/`, `src/`,
+`scripts/` and `tests/` returned that kernel, its dispatcher, the external
+stage's call and the existing gate — so this round routes, it does not write.
+
+Three sites changed, each mirroring the two-band arm that was already there:
+
+1. The shared pipeline dispatches the RGB schemes through
+   `apply_shortwave_penetration` with NEMO's live `key_qco` operands; the
+   two-band call beside it is untouched and bit-identical.
+2. The Runge-Kutta stage-three seam gains the RGB twin of the existing
+   `qsr_2BD` substitution: the pipeline's step-entry evaluation is removed and
+   the `Kmm` evaluation added.  The removal arm reuses the pipeline's OWN
+   jacobian expression, so it is exact rather than approximate.
+3. The external surface-forcing stage stops ALSO depositing under the NEMO RGB
+   selector, exactly as it already declined to under the two-band one.  Without
+   that, `qsr` would be counted twice while the column-integrated heat budget
+   stayed misleadingly close through the `qns` subtraction.  Every non-NEMO
+   caller keeps its generic `rgb_chl` deposit unchanged.
+
+## 3. The gate, and the four controls that each fire
+
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round10_qsr_routing_gate.py`
+takes nothing by hand.  The scheme, infrared fraction and length, chlorophyll
+profile and time step come from the ORCA2 CARD and each is required to equal
+the value section 1 reads from the record.  The reference depth ladder comes
+from the card's own vertical coordinate.  The live operands are built with the
+two expressions the production sites build, and the call goes through
+`apply_shortwave_penetration` — the production entry point, not the kernel
+underneath it.
+
+| row | result |
+|---|---|
+| the card's deposit vs the record's `qsr` increment, every owned wet cell | **AT_BAR**, 0 of 233,341 unequal |
+| control: the card's two-band sibling through the same dispatcher | fires, 149,842 unequal, max 4.81e-07 K/s |
+| control: the reference ladder instead of the live one | fires, 148,122 unequal, max 2.29e-08 K/s |
+| control: an unresolved chlorophyll profile | fires — REFUSED at the kernel, never substituted |
+| control: one representable value moved on one wet cell | fires, 1 unequal |
+
+Label: **given NEMO's entry** (the `qsr`, chlorophyll and `r3t` operands are
+the record's own recorded frames).
+
+### 3a. A second, independent statement the gate MEASURED rather than assumed
+
+The card's 1-D reference ladder is not bit-identical to NEMO's:
+
+| row | disagreeing levels | magnitude |
+|---|---|---|
+| `gdepw_1d` vs the record's own dumped ladder | level 29 | 9.094947e-13 m (one representable value at 4500 m) |
+| `e3t_1d` vs the mesh mask | levels 28 and 29 | 9.094947e-13 m |
+| `e3t_0`, the 3-D partial-cell thickness that actually enters the deposit | none | 0 of the owned wet cells |
+
+Those two levels sit far below the blue extinction level, and the AT_BAR result
+was obtained with the card's OWN ladder — which is the proof that the
+disagreement cannot reach the deposit, rather than an argument that it should
+not.  It is carried into OPEN as its own statement.
+
+## 4. Where the ladder stops now, and the control that says it is not this round's change
+
+With the shortwave routed, the ORCA2 ladder no longer returns
+`STOP_PRODUCTION_QSR_RGB_PIPELINE_GAP`.  It reaches the next condition at
+kt=1 and that condition is **not** a deliberate refusal: legoESM's own
+raw-mesh guard (`packages/ocean/legoesm/ocean/eos.py:738-742`) refuses a
+buoyancy-frequency divisor that is not finite and positive.
+
+The call chain, read off a trace-time marker inserted temporarily and reverted
+(`git status --porcelain` clean afterwards):
+
+```
+_step_jitted -> _step_impl -> _apply_implicit_vertical_mixing
+  -> vertical_mixing/k_profiles.py:426,1260 -> convection/enhanced_diffusion.py:181
+  -> eos.py:738-742
+```
+
+The divisor is the raw mesh `e3w_0` times the stretch `max(1+r3t, 1e-6)`.  The
+raw field is measured clean (0 of 799,200 non-positive or non-finite) and the
+floor cannot produce a non-positive value, so the guard can only fire on a
+**non-finite** stretch — that is, on a non-finite sea-surface height in the
+state the implicit vertical mixing receives, which is the post-Runge-Kutta
+working state.
+
+**CONTROL, one variable:** the same step, same compiled graph, with the
+shortwave flux set identically to zero, fires the SAME guard.  With `qsr = 0`
+the RGB kernel still runs and returns exactly zero, so the step is numerically
+the step without any shortwave at all.  This round's deposit is therefore NOT
+what makes the guard fire; the statement was simply unreachable while the
+pipeline refused earlier.  The pipeline's own RGB field is separately measured
+finite, 0 NaN, 0 Inf, peak 6.874e-06 K/s (about 0.6 K/day).
+
+That is where round 11 starts.  No magnitude is registered for kt=10 and none
+is guessed.
+
+## 5. GYRE is unchanged
+
+The GYRE card selects `nemo_qsr_2bd` and carries no chlorophyll field, so it
+takes none of the new branches.  Proven, not argued, at the round's base tip
+and at its final tip with the evaluation protocol byte-identical:
+
+| row | result |
+|---|---|
+| ten-step ladder, offline oracle-relative compare | **PASS** — 70 certified rows, 0 status changes, 0 violations, max worsening 0 ULPs, first-over-bar unmoved (`u`,`v` at kt=2) |
+| residual arrays `np.array_equal` | 210 / 210 |
+| thirty-day member, byte-identical daily snapshots | 30 / 30 |
+| day-30 digest | `14a7e64b4512860e...` — the same as rounds 7, 8 and 9 |
+
+DINO's card executes the same RGB kernel through its own `rgb_chl` selector:
+`tests/ocean/unit/test_dino_experiment.py` — **128 passed**, no movement.
+
+## 6. Round 9's OPEN item 3, transcribed and NOT landed
+
+NEMO stores the F-point viscosity with `fmask` already folded in, and the
+compiled operator says so in its own comment.  The shearing term of the
+resolved divergence-vorticity laplacian is
+
+```
+zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk) * e3f * r1_e1e2f * ( d(e2v*v) - d(e1u*u) )
+```
+
+annotated `! ahmf already * by fmask`
+(`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynldf_lev.f90:123`); the
+divergence twin carries `! ahmt already * by tmask` at `:127`.  **No further
+mask multiplies either term.**  With `rn_shlat = 2` the stored `fmask` is not a
+zero/one field: a coastal F point whose free-slip value was zero is reset to
+`rn_shlat` times the neighbouring velocity-mask maximum
+(`dommsk.f90:269-277`), and the strait overrides may replace it again
+(`dommsk.f90:283-303`).  That non-zero coastal value IS ORCA2's no-slip lateral
+boundary condition.
+
+legoESM's shared div-curl multiplies the F-point vorticity by its own zero/one
+vertex mask before applying the coefficient
+(`packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:1484-1489`),
+which discards exactly those values.  Round 9's own gate already measures the
+size: **48,287 of 799,200** F cells where NEMO's coefficient is non-zero and
+legoESM's vertex mask zeroes it.
+
+It is NOT landed here, for two stated reasons:
+
+1. **No record can gate it.**  The admitted 10-step records carry no isolated
+   lateral-viscosity tendency stream — the instrumented writer list is
+   `l1_dump_bt_frames`, `l1_dump_stage`, `l1_dump_rhs`, `l2_dump_zdf` and
+   `l4_dump_ocean_surface_input`, and none of them emits the `dyn_ldf`
+   increment (R10-P7 **CONFIRMED**).
+2. **No trajectory movement could be registered either**, because the ladder
+   stops at kt=1 on section 4's statement.
+
+The fix's shape is settled and scoped: the second masking must be dropped ONLY
+where NEMO's mask is already inside the coefficient, which today is the single
+card selecting the file source.  Every other card, GYRE included, builds the
+coefficient from the metric formula, which carries no mask, and must stay
+bit-identical.  That is a decision, and it is in the final report rather than
+in this diff.
+
+## 7. Frozen predictions, resolved
+
+| ID | outcome |
+|---|---|
+| R10-P1 | **CONFIRMED** — all five statements read as preregistered, and the existing kernel gate is unchanged. |
+| R10-P2 | **CONFIRMED** — the refusal is gone and the ladder advances past it. |
+| R10-P3 | **CONFIRMED** — 0 of 233,341 owned wet cells unequal, with the card's own configuration and the production operand expressions. |
+| R10-P4 | **CONFIRMED** — section 5. |
+| R10-P5 | **CONFIRMED** — `dynldf_lev.f90:123` carries `ahmf` and no mask factor, and round 9's count of 48,287 reproduces. |
+| R10-P6 | **NOT TESTED** — the fix is not landed (section 6), so neither half of the prediction was measured.  It is not counted as confirmed. |
+| R10-P7 | **CONFIRMED** — no lateral-viscosity tendency stream exists in the admitted records. |
+
+## 8. Independent review
+
+Codex is paused, so `codex exec` was NOT run and this round does not claim an
+independent codex verdict.  A fresh adversarial reviewer was run in its place;
+its verdict is quoted verbatim in section 8a.
+
+## 9. OPEN
+
+1. **The ladder now stops on a non-finite post-Runge-Kutta sea-surface height
+   at kt=1** (section 4), inside the implicit vertical mixing's
+   buoyancy-frequency divisor.  It is measured, its call chain is named, and a
+   one-variable control shows it is not this round's shortwave.  Localising
+   WHICH operator first produces the non-finite value is round 11's first job,
+   and it needs no new record.
+2. **Round 9's OPEN item 3 — the second masking — is transcribed and cited but
+   not landed** (section 6).  It needs either a new instrumented NEMO
+   acquisition of the `dyn_ldf` increment, or a decision that an
+   operator-level bit gate against the compiled loop is the right bar here.
+3. **The card's 1-D reference ladder disagrees with NEMO by one representable
+   value at levels 28-29** (section 3a).  Measured, proven unable to reach the
+   shortwave deposit, owner unassigned.
+4. The independent sea-surface height still differs by up to 1.55 cm on 16,433
+   of 26,640 surface cells, owned by the initial sea-ice category
+   configuration, which is out of scope on this lane.
+5. The recorded runoff tracer-source operands remain an explicit later
+   boundary; this round did not reach them.
+6. **The barotropic vertex thickness is still unmeasured** (round 8's OPEN item
+   6, untouched here).
+7. **The two-band seam's step-entry arm is not exact.**  For `nemo_qsr_2bd` the
+   pipeline evaluates on the reference ladder while the stage-three
+   substitution removes a live-ladder reconstruction, so the two do not cancel
+   exactly and the residual is reweighted into the surface term.  The RGB arm
+   landed here does not have that property (it reuses the pipeline's own
+   jacobian expression).  This is a PRE-EXISTING GYRE statement, unmeasured,
+   reported because it was read while transcribing beside it — it is NOT
+   touched by this diff.
+8. GitHub issue 1455 remains an operator-post action because no GitHub
+   connector is installed in this environment.
+
+## Choices
+
+ASKED: none were needed for what landed.  Every setting this round touched is
+fixed by the record's resolved configuration and was read from it (section 1).
+One decision is RAISED rather than taken, in the final report: how round 9's
+OPEN item 3 should be gated before it lands (section 6).
+
+UNASKED: none.  No scheme selection, selector default, tunable, threshold,
+cadence, resolution, timestep, carried state, data source or
+previously-tolerated condition moved, and no stabiliser NEMO lacks was added.
+The external stage's non-NEMO RGB callers keep the behaviour they had.
+
+## 10. Gate and test results at the round's final tip
+
+| check | result |
+|---|---|
+| round-10 shortwave routing gate | **AT_BAR**, 0 of 233,341 unequal |
+| its four controls | all four fire |
+| ORCA2 ladder gate at the base tip | exit 4, `STOP_PRODUCTION_QSR_RGB_PIPELINE_GAP` at kt=1 |
+| ORCA2 ladder gate at the final tip | past that stop; refused by the raw-mesh guard of section 4, no magnitude registered |
+| DINO card, same kernel | 128 passed |
+| GYRE identity, base vs tip | section 5 |
+| receipt citation gate | CITATION_GATE |
+| citation gate with a rigid two-line plant | CITATION_PLANT |
+| the named push gates plus this round's new tests, at the final tip | PUSH_BATTERY |
