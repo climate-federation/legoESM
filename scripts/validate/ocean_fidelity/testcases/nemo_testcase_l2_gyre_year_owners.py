@@ -8307,12 +8307,16 @@ def developed_stage2_wzv_split_walk(
     after_plain = step()
     before_plain = step(legacy_shared_stage_wzv=True)
 
-    def run(base, *, passive=True, **hook_kwargs):
+    def run(base, *, passive=True, wrote=("u", "v", "T"), **hook_kwargs):
         result = step(**hook_kwargs)
         if passive:
-            # A WRITE-only exposure substitutes its slots AFTER the ordinary
-            # step completes, so passivity is judged on every OTHER field.
-            neutral = result._replace(u=base.u, v=base.v, T=base.T)
+            # A WRITE-only exposure substitutes its OWN slots AFTER the
+            # ordinary step completes, so passivity is judged on every other
+            # field.  ``wrote`` names exactly the slots this exposure writes,
+            # so an exposure that touches a field it did not declare is
+            # caught rather than excused.
+            neutral = result._replace(
+                **{name: getattr(base, name) for name in wrote})
             observer_unequal.append(_state_bit_mismatches(neutral, base))
         return result
 
@@ -8333,7 +8337,7 @@ def developed_stage2_wzv_split_walk(
         if legacy:
             hooks["legacy_shared_stage_wzv"] = True
         base = before_plain if legacy else after_plain
-        result = run(base, **hooks)
+        result = run(base, wrote=("u", "v"), **hooks)
         return (np.asarray(result.u.data), np.asarray(result.v.data))
 
     def stage2_out(*, legacy=False):
@@ -8341,7 +8345,7 @@ def developed_stage2_wzv_split_walk(
         if legacy:
             hooks["legacy_shared_stage_wzv"] = True
         base = before_plain if legacy else after_plain
-        result = run(base, **hooks)
+        result = run(base, wrote=("u", "v"), **hooks)
         return (np.asarray(result.u.data), np.asarray(result.v.data))
 
     # FACE-WINDOW CONTROL, the same one round 159 used.
@@ -8416,11 +8420,15 @@ def developed_stage2_wzv_split_walk(
             after_trc_w, before_trc_w, cell_mask),
     }
     for field in ("T", "S"):
+        # expose_tracer_stage substitutes T, S AND the stage eta, so those
+        # three are its declared slots and every other field is the control.
         before_stage = np.asarray(getattr(
-            run(before_plain, expose_tracer_stage=2,
+            run(before_plain, wrote=("T", "S", "eta"),
+                expose_tracer_stage=2,
                 legacy_shared_stage_wzv=True), field).data)
         after_stage = np.asarray(getattr(
-            run(after_plain, expose_tracer_stage=2), field).data)
+            run(after_plain, wrote=("T", "S", "eta"),
+                expose_tracer_stage=2), field).data)
         tracer_identity[f"stage2_tracer_{field}"] = _score_stage2_face(
             after_stage, before_stage, cell_mask)
     if plant == "wzv-split-shared":
@@ -8552,7 +8560,7 @@ def developed_stage2_wzv_split_walk(
         (scored["after_momentum"]["active_rms"]
          - residual["oracle_stage_clock_pair"]["active_rms"])
         / scored["after_momentum"]["active_rms"])
-    r3_result = run(after_plain, expose_stage_face_r3=2)
+    r3_result = run(after_plain, wrote=("u", "v"), expose_stage_face_r3=2)
     r3_rows = {}
     for tag, field in (("u", "u"), ("v", "v")):
         lego_r3 = np.asarray(getattr(r3_result, field).data)[..., 0]
