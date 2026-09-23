@@ -268,8 +268,18 @@ Two plants, each printing its own marker and exiting nonzero:
   `STATUS PLANT-FIRED: entry-kbb-ulp` with one unequal active face at
   6.938894e-18 and exits 1.
 * `hpg-rank-scale` scales the recorded pressure-gradient snapshot by one part
-  in a million; the magnitude ranking must move off the advection, and it
-  prints `STATUS PLANT-FIRED: hpg-rank-scale` and exits 1.
+  in a million.  The eastward pressure-gradient row then rises from last place
+  to third, above BOTH vorticity rows, at a measured relative difference of
+  9.999966e-07 against the one part in a million that was planted; the
+  ranking becomes advection v, advection u, pressure gradient u, vorticity v,
+  vorticity u, pressure gradient v.  It prints
+  `STATUS PLANT-FIRED: hpg-rank-scale` and exits 1.
+
+  Registered rather than quietly fixed: the first version of this plant
+  demanded the TOP of the ranking and fired because its own assertion was
+  wrong, not because the check caught the planted defect.  A scaling of one
+  part in a million lands two orders above the floor rows and four below the
+  advection, which is where the corrected control puts it.
 
 Two new tests, each shown to FAIL when the thing it checks is removed: the
 face scorer's mask awareness (removing the mask makes the dry-face arm fail)
