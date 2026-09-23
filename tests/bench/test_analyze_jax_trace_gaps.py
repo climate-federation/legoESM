@@ -110,3 +110,20 @@ def test_a_sequence_of_the_right_length_but_wrong_types_is_refused(capsys):
     assert ok is False
     assert "not a reduction" in text
     assert "arrival skew  median" not in text
+
+
+def test_the_census_reports_a_period_only_when_one_exists():
+    """The census exists to LEARN a lane's step, so it must never invent a
+    period. An index model built on a period the sequence does not have pairs
+    unrelated events, which is the defect this whole file is about."""
+    step = ["nccl_sendrecv", "nccl_sendrecv", "nccl_allreduce"]
+    assert mod.exact_period(step * 4) == 3
+    assert mod.exact_period(["a"] * 6) == 1
+    assert mod.exact_period([]) is None
+    # No repetition at all means no period. Half a sequence is not one,
+    # because a period has to describe the WHOLE sequence.
+    assert mod.exact_period(["a", "b", "c", "d"]) is None
+    # A truncated final repetition still HAS the period, and reporting it is
+    # right: the capture was cut mid-step. The separate exact-count check is
+    # what refuses to index such a trace, not this one.
+    assert mod.exact_period(step * 4 + step[:1]) == 3

@@ -105,9 +105,17 @@ PM=("--partner-map" "$OUTDIR/traces/partner_map.json")
 # not available, and it now exits non-zero so this cannot read as success.
 # Making it available needs the model driven by event NAMES rather than by a
 # fixed period, which is a change to the analyzer, not a flag here.
+# The census is the POINT of this capture for now: it prints the collective
+# names in trace order and reports whether the sequence has an exact period.
+# That is how the ocean's step gets learned rather than guessed, and it is the
+# thing no amount of reasoning about the solver could supply.
 "$PY" scripts/bench/analyze_jax_trace_gaps.py \
-  --trace-root "$OUTDIR/traces" "${PM[@]}" --steps 60 \
+  --trace-root "$OUTDIR/traces" "${PM[@]}" --steps 60 --name-census 80 \
   --out "$OUTDIR/trace_summary.json"
-rcv=$?
+# The skew half is expected to REFUSE until the model is name-driven, and it
+# now exits non-zero when it does. That is the capture working, so do not let
+# it mark the job failed.
+rcv=$?; [ "$rcv" -eq 3 ] && { echo "(skew refused as expected; census above is
+the deliverable)"; rcv=0; }
 [ "$rcv" -ne 0 ] && rc=$rcv
 echo "DONE rc=$rc outdir=$OUTDIR"; exit $rc

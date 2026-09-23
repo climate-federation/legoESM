@@ -84,6 +84,22 @@ def is_pairwise(name: str) -> bool:
             or "collective-permute" in n or "permute" in n)
 
 
+def exact_period(seq: list[str]) -> int | None:
+    """The shortest period that describes the WHOLE sequence, or None.
+
+    Used to learn a lane's step from a capture instead of assuming it. It
+    returns None rather than a nearest fit, because an index model built on a
+    period the sequence does not actually have pairs unrelated events.
+    """
+    n = len(seq)
+    if n == 0:
+        return None
+    for period in range(1, n // 2 + 1):
+        if all(seq[i] == seq[i % period] for i in range(n)):
+            return period
+    return None
+
+
 def _union_ms(evs: list[dict]) -> float:
     """Total device-BUSY time as the union of event intervals — events
     on different streams overlap, so a plain duration sum overstates
@@ -289,6 +305,13 @@ def main() -> int:
                          "kernel length. The WORST residual is gated, not a "
                          "quantile, because a quantile of a handful of "
                          "comparisons steps right over the one bad pair.")
+    ap.add_argument("--name-census", type=int, default=0, metavar="N",
+                    help="print the first N collective names per rank, in "
+                         "trace order, with their repeat structure. This is "
+                         "how a lane's step is LEARNED instead of guessed: "
+                         "the event count alone is degenerate, since two "
+                         "fills with three reductions per step totals the "
+                         "same as four fills with one.")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -402,6 +425,25 @@ def main() -> int:
                 print(f"  p90    START spread : {sorted(c_spreads)[int(0.9 * len(c_spreads))]:8.1f} us")
                 print(f"  median END spread   : {statistics.median(c_ends):8.1f} us "
                       f"(must be ~0 by construction — self-consistency)")
+
+    if args.name_census:
+        print(f"=== collective name census (first {args.name_census} per rank) ===")
+        for rk in sorted(summaries):
+            seq = [nm for nm, _, _ in summaries[rk]["collectives"]]
+            print(f"--- {rk}: {len(seq)} collectives")
+            for i, nm in enumerate(seq[:args.name_census]):
+                kind = ("reduction" if is_reduction(nm)
+                        else "pairwise" if is_pairwise(nm) else "OTHER")
+                print(f"  {i:4d}  {kind:9s}  {nm}")
+            # The shortest repeating prefix, if the sequence has one, is the
+            # period the index model would need. Reported, never assumed.
+            period = exact_period(seq)
+            if period is not None:
+                print(f"  repeats with period {period} "
+                      f"({len(seq) // period} whole repetitions)")
+            else:
+                print("  no exact repeating period — the sequence is not "
+                      "periodic, so no fixed index model can describe it")
 
     skew_ok = None
     if args.partner_map is not None:
