@@ -4151,6 +4151,10 @@ def main(argv=None) -> int:
                         help="substitute the oracle's own r3u/r3v into the "
                              "velocity-form continuity producer and walk the "
                              "face ratio to its own producer statement")
+    parser.add_argument("--developed-stage2-t-r3", action="store_true",
+                        help="substitute the oracle's own T-point ratio into "
+                             "the velocity-form continuity producer and score "
+                             "legoESM's stage sea surface height")
     parser.add_argument("--developed-process-rank-split", action="store_true",
                         help="run round 152's one-step magnitude ranking in "
                              "both stage programs and report which row grew")
@@ -4238,6 +4242,42 @@ def main(argv=None) -> int:
         print(json.dumps(report["vertical_velocity_scored_against_nemo"],
                          indent=2))
         print(json.dumps(report["producer_decomposition"], indent=2))
+        print("STATUS PASS")
+        return 0
+    if args.developed_stage2_t_r3:
+        require(args.expect_commit is not None,
+                "--developed-stage2-t-r3 needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-stage2-t-r3 needs --daily-record-audit")
+        require(args.developed_stage2_record_root is not None,
+                "--developed-stage2-t-r3 needs "
+                "--developed-stage2-record-root")
+        try:
+            report = developed_stage2_t_r3_walk(
+                args.daily_record_root, args.daily_record_audit,
+                args.expect_commit, args.developed_stage2_record_root,
+                args.root, plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            if str(error).startswith("PLANT-BLIND"):
+                # A control that did NOT catch its plant must never print the
+                # marker a caught one prints (round 103's defect).
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: {report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["vertical_velocity_scored_against_nemo"],
+                         indent=2))
+        print(json.dumps(report["stage_sea_surface_height"], indent=2))
         print("STATUS PASS")
         return 0
     if args.developed_process_rank_split:
@@ -9204,6 +9244,416 @@ def developed_stage2_face_r3_walk(
     return report
 
 
+DEVELOPED_T_R3_PLANTS = ("t-r3-inert", "t-r3-tracer")
+
+
+def developed_stage2_t_r3_walk(
+        daily_root: Path, daily_audit: Path, expected_commit: str,
+        stage2_record_root: Path, evidence_root: Path, *,
+        plant: str | None = None) -> dict:
+    """Does the T-point free-surface ratio own the stage-2 residual?
+
+    Rounds 159, 160 and 161 substituted three operands of the velocity-form
+    continuity solve from the oracle's own record -- the stage entry velocity,
+    the stage clock and after-level pair, and the face free-surface ratio --
+    and every one of them is inert, leaving the residual UNOWNED at
+    ``2.334682468902387e-13`` m/s.  The T-point ratio is the one operand of
+    that solve nothing has installed.
+
+    It enters the compiled program TWICE, both inside one statement pair: the
+    whole horizontal divergence is divided by the live thickness at
+    ``GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:126-130`` and the
+    same live thickness multiplies the divergence back at
+    ``GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:153``.  legoESM
+    forms the ratio at ``ocean_pe_latlon_cgrid.py:1674``, the thickness at
+    ``ocean_pe_latlon_cgrid.py:1675`` and hands it to the divergence block at
+    ``ocean_pe_latlon_cgrid.py:1699``, so replacing that ONE operand replaces
+    both compiled occurrences and nothing else.
+
+    The stretching term at
+    ``GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/sshwzv.f90:297-298`` reads the
+    ratio at the AFTER and BEFORE levels, not the now level -- legoESM's
+    answering pair is ``ocean_pe_latlon_cgrid.py:1717-1718`` -- so it is not
+    part of this substitution, and the walk says so rather than leaving it
+    implied.
+
+    The record carries the stage sea surface height, not the T-point ratio, so
+    the operand installed is NEMO's own ratio statement
+    (``GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90:257``) evaluated on
+    the oracle's recorded ``ssh(Kmm)``.  The walk calibrates that
+    reconstruction first: fed legoESM's OWN height it must reproduce the
+    production step bit for bit, which is what makes it the same statement
+    rather than a second implementation of it.
+
+    The same observer answers round 161's other open item by sinking the
+    height legoESM hands the producer and scoring it against the oracle's
+    recorded one.
+    """
+    require(plant in (None, "none") + DEVELOPED_T_R3_PLANTS,
+            f"unknown developed t-r3 plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe_module
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+        nemo_stage_momentum_wzv_resolved)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    from legoesm.ocean.vertical import nemo_qco_resolved_mesh_operands
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"t-r3 walk requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "t-r3 walk commit differs from --expect-commit")
+    evidence_root = Path(evidence_root)
+    oracle = _developed_stage2_record(Path(stage2_record_root))
+    rows = dict(oracle["rows"])
+
+    bundle = _developed_entry_bundle(
+        daily_root, daily_audit, expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+    require(nemo_stage_momentum_wzv_resolved(card.recipe.model_config),
+            "the GYRE card does not resolve NEMO's two-solve stage program")
+
+    nlev = int(np.asarray(state.T.data).shape[-1])
+    nemo_ww = np.ascontiguousarray(np.asarray(rows["ww_t"])[..., :nlev])
+    cell_mask = np.asarray(gate.expected_masks(card)["T"])[..., :nlev]
+    cell_mask2 = np.any(cell_mask, axis=-1)
+    oracle_ssh = np.ascontiguousarray(np.asarray(rows["ssh_Kmm_t"]))
+
+    real_level = pe_module.nemo_transport_wzv_divergence_level
+    real_wzv = model_module.nemo_qco_wzv_operands
+    level_calls = {"count": 0}
+    # "oracle" installs NEMO's recorded height in the ratio statement;
+    # "identity" installs legoESM's OWN height, which must reproduce the
+    # production step bit for bit and is what calibrates the transcription.
+    height_source = {"mode": "oracle"}
+
+    def substituted_thickness(args):
+        """NEMO's live e3t from ONE substituted operand, nothing else moved.
+
+        ``ocean_pe_latlon_cgrid.py:1668-1675`` in the producer's own operands:
+        the reference thickness column sum, its reciprocal, the ratio, and the
+        thickness.  Only the HEIGHT fed to the ratio changes.
+        """
+        eta_now, _eta_before, u, _v, grid, z_coord = args[:6]
+        u_mask_3d, v_mask_3d, mask_3d = args[6], args[7], args[8]
+        levels = u.shape[-1]
+        ops = nemo_qco_resolved_mesh_operands(
+            z_coord, grid, u_mask_3d, v_mask_3d, eta_now.dtype, levels)
+        e3t0 = ops.e3t_0
+        tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
+        h0 = jnp.zeros_like(eta_now)
+        for jk in range(levels):
+            h0 = jax.lax.optimization_barrier(
+                h0 + e3t0[..., jk] * tmask[..., jk])
+        h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
+        r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
+        if height_source["mode"] == "identity":
+            height = eta_now
+        else:
+            height = jnp.asarray(oracle_ssh, dtype=eta_now.dtype)
+        r3 = jax.lax.optimization_barrier(height * r1_h0)
+        return e3t0 * (1.0 + r3[..., None] * tmask) * tmask
+
+    ledgers: dict[str, list] = {}
+    sunk: dict[str, list] = {}
+
+    def run(label, *, substitute_ordinal=None, sink_ordinal=None,
+            observe=True, **hook_kwargs):
+        """One production step, optionally with the producer observer on."""
+        ledger: list[dict] = []
+        heights: list[np.ndarray] = []
+
+        def capture(*args, **kwargs):
+            velocity_indicator = (
+                kwargs.get("volume_transport_override") is None
+                and kwargs.get("transport_after_override") is None)
+            index = sum(row["velocity_indicator"] for row in ledger)
+            row = {"call": len(ledger),
+                   "velocity_indicator": bool(velocity_indicator),
+                   "velocity_ordinal": index if velocity_indicator else None,
+                   "substituted": False, "sunk": False}
+            ledger.append(row)
+            if (sink_ordinal is not None and velocity_indicator
+                    and index == sink_ordinal):
+                row["sunk"] = True
+                jax.debug.callback(
+                    lambda value: heights.append(np.asarray(value)),
+                    args[0], ordered=True)
+            if (substitute_ordinal is not None and velocity_indicator
+                    and index == substitute_ordinal):
+                row["substituted"] = True
+                thickness = substituted_thickness(args)
+                before = level_calls["count"]
+
+                def substituted_level(flux_u, flux_u_west, flux_v,
+                                      flux_v_south, r1_area_t, live_e3t,
+                                      tmask, **level_kwargs):
+                    jk = level_calls["count"]
+                    level_calls["count"] += 1
+                    return real_level(
+                        flux_u, flux_u_west, flux_v, flux_v_south, r1_area_t,
+                        thickness[..., jk], tmask, **level_kwargs)
+
+                pe_module.nemo_transport_wzv_divergence_level = (
+                    substituted_level)
+                try:
+                    result = real_wzv(*args, **kwargs)
+                finally:
+                    pe_module.nemo_transport_wzv_divergence_level = real_level
+                require(level_calls["count"] == before + nlev,
+                        "the substituted divergence block ran "
+                        f"{level_calls['count'] - before} levels in one "
+                        f"velocity-indicator call, not {nlev}")
+                return result
+            return real_wzv(*args, **kwargs)
+
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hook_kwargs)
+            if hook_kwargs else None)
+        if observe:
+            model_module.nemo_qco_wzv_operands = capture
+        try:
+            result = model.step(
+                state, dt=card.dt_s, freshwater=freshwater,
+                surface_forcing=surface,
+                _nemo_stage1_zad_eta_after_override=ssha)
+            jax.device_get(result)
+            jax.effects_barrier()
+        finally:
+            model_module.nemo_qco_wzv_operands = real_wzv
+        if observe:
+            ledgers[label] = ledger
+            if sink_ordinal is not None:
+                sunk[label] = heights
+        return result
+
+    def ledger_summary(label):
+        ledger = ledgers[label]
+        return {
+            "calls": len(ledger),
+            "velocity_indicator_calls": sum(
+                row["velocity_indicator"] for row in ledger),
+            "substituted_calls": sum(row["substituted"] for row in ledger),
+            "sunk_calls": sum(row["sunk"] for row in ledger),
+            "pattern": [row["velocity_indicator"] for row in ledger],
+        }
+
+    def stage2_momentum_w(result_hooks, *, substitute_ordinal=None, label=""):
+        result = run(label, substitute_ordinal=substitute_ordinal,
+                     expose_tracer_transport_stage=2,
+                     expose_tracer_transport_as_ww=True,
+                     **result_hooks)
+        return np.asarray(result.T.data)
+
+    CORRECTED = {"nemo_stage_momentum_wzv_split": True,
+                 "expose_stage_momentum_w": True}
+    SHARED = {"stage2_wzv_velocity_form": True}
+
+    # ---- OBSERVER PASSIVITY: the wrapper alone must move ZERO bytes -------
+    plain = run("plain-unobserved", observe=False,
+                nemo_stage_momentum_wzv_split=True)
+    observed = run("plain-observed", nemo_stage_momentum_wzv_split=True)
+    observer_passivity = _state_leaf_move(observed, plain)
+    require(observer_passivity["unequal_bytes"] == 0,
+            f"the producer observer is not passive: {observer_passivity}")
+
+    # ---- ORDER C: the stage height legoESM hands the producer -------------
+    sunk_state = run("eta-sink", sink_ordinal=0,
+                     nemo_stage_momentum_wzv_split=True)
+    sink_passivity = _state_leaf_move(sunk_state, plain)
+    require(sink_passivity["unequal_bytes"] == 0,
+            f"the height sink is not passive: {sink_passivity}")
+    heights = sunk[ "eta-sink"]
+    require(len(heights) == 1,
+            f"the height sink fired {len(heights)} times, not once")
+    lego_ssh = np.ascontiguousarray(
+        np.asarray(heights[0], dtype=np.float64))
+    stage_height = {
+        "scored": _score_stage2_face(lego_ssh, oracle_ssh, cell_mask2),
+        "oracle_own_rms": float(
+            np.sqrt(np.mean(oracle_ssh[cell_mask2 != 0.0] ** 2))),
+    }
+    stage_height["relative_to_own_rms"] = float(
+        stage_height["scored"]["active_rms"]
+        / stage_height["oracle_own_rms"])
+    # Round 161 predicted this height difference from the face ratio it
+    # measured, dividing by the reciprocal reference depth.  Close the loop in
+    # the other direction: the height difference divided by the reference
+    # depth must reproduce that face-ratio difference.
+    ops_check = nemo_qco_resolved_mesh_operands(
+        card.recipe.z_coord, card.recipe.grid,
+        jnp.asarray(rows["umask_vmask_u"]), jnp.asarray(rows["umask_vmask_v"]),
+        jnp.float64, nlev)
+    tmask_check = np.asarray(
+        np.any(np.asarray(ops_check.e3t_0) != 0.0, axis=-1), dtype=np.float64)
+    depth = np.sum(
+        np.asarray(ops_check.e3t_0)
+        * np.asarray(cell_mask, dtype=np.float64), axis=-1)
+    safe_depth = np.where(depth > 0.0, depth, 1.0)
+    implied = (lego_ssh - oracle_ssh) / safe_depth
+    stage_height["implied_t_ratio_difference_rms"] = float(
+        np.sqrt(np.mean(implied[cell_mask2 != 0.0] ** 2)))
+    stage_height["round161_face_ratio_difference_rms"] = {
+        "u": 1.4516405645036015e-13, "v": 1.3880628732222712e-13}
+    stage_height["implied_over_measured_face_u"] = float(
+        stage_height["implied_t_ratio_difference_rms"]
+        / 1.4516405645036015e-13)
+    stage_height["tmask_columns"] = int(np.count_nonzero(tmask_check))
+
+    # ---- THE CALIBRATION: the same statement, not a second one -----------
+    arms = {}
+    arms["corrected_baseline"] = stage2_momentum_w(
+        CORRECTED, label="corrected-baseline")
+    height_source["mode"] = "identity"
+    arms["corrected_identity"] = stage2_momentum_w(
+        CORRECTED, substitute_ordinal=0, label="corrected-identity")
+    height_source["mode"] = "oracle"
+    calibration = _score_stage2_face(
+        arms["corrected_identity"], arms["corrected_baseline"], cell_mask)
+    require(calibration["cells_unequal"] == 0,
+            "the substituted ratio statement fed legoESM's own height does "
+            f"not reproduce the production step: {calibration}")
+
+    # ---- THE FOUR SCORED ARMS --------------------------------------------
+    arms["corrected_oracle_r3t"] = stage2_momentum_w(
+        CORRECTED, substitute_ordinal=0, label="corrected-oracle-r3t")
+    arms["shared_velocity_form_baseline"] = stage2_momentum_w(
+        SHARED, label="shared-baseline")
+    arms["shared_velocity_form_oracle_r3t"] = stage2_momentum_w(
+        SHARED, substitute_ordinal=0, label="shared-oracle-r3t")
+
+    for label in ("corrected-baseline", "shared-baseline"):
+        require(ledger_summary(label)["substituted_calls"] == 0,
+                f"{label} substituted a call it should not have")
+    for label in ("corrected-identity", "corrected-oracle-r3t",
+                  "shared-oracle-r3t"):
+        require(ledger_summary(label)["substituted_calls"] == 1,
+                f"{label} did not substitute exactly one call: "
+                f"{ledger_summary(label)}")
+
+    own_rms = float(np.sqrt(np.mean(nemo_ww[cell_mask != 0.0] ** 2)))
+    scored = {name: _score_stage2_face(values, nemo_ww, cell_mask)
+              for name, values in arms.items()}
+    for row in scored.values():
+        row["relative_to_own_rms"] = float(row["active_rms"] / own_rms)
+
+    # AUTHORITY: both baselines must reproduce round 159/160's own number, or
+    # this walk is dividing a different residual.
+    ROUND160_CORRECTED_WW = 2.334682468902387e-13
+    for name in ("corrected_baseline", "shared_velocity_form_baseline"):
+        require(abs(scored[name]["active_rms"] - ROUND160_CORRECTED_WW)
+                <= 5.0e-22,
+                f"{name} does not reproduce the round-160 residual: "
+                f"{scored[name]['active_rms']}")
+
+    for arm, name in (("corrected_oracle_r3t", "corrected_baseline"),
+                      ("shared_velocity_form_oracle_r3t",
+                       "shared_velocity_form_baseline")):
+        reference = scored[name]["active_rms"]
+        scored[arm]["residual_removed_fraction"] = float(
+            (reference - scored[arm]["active_rms"]) / reference)
+
+    # LIVENESS: a substitution that moves nothing is a control that perturbs
+    # a zero and proves nothing.
+    liveness = {
+        "corrected": _score_stage2_face(
+            arms["corrected_oracle_r3t"], arms["corrected_baseline"],
+            cell_mask),
+        "shared": _score_stage2_face(
+            arms["shared_velocity_form_oracle_r3t"],
+            arms["shared_velocity_form_baseline"], cell_mask),
+    }
+    if plant == "t-r3-inert":
+        # Claim the oracle's height is installed while handing the ratio
+        # statement legoESM's OWN height: the liveness control must refuse it.
+        height_source["mode"] = "identity"
+        planted = stage2_momentum_w(
+            CORRECTED, substitute_ordinal=0, label="plant-inert")
+        height_source["mode"] = "oracle"
+        caught = _score_stage2_face(
+            planted, arms["corrected_baseline"], cell_mask)
+        if caught["active_cells_unequal"] != 0:
+            raise GateError(
+                "PLANT-BLIND: the liveness control did not refuse a "
+                f"substitution that installs legoESM's own height: {caught}")
+        return {"status": "PLANT-FIRED", "plant": plant, "control": caught}
+    require(all(row["active_cells_unequal"] > 0 for row in liveness.values()),
+            f"the substitution moved nothing, so it proves nothing: {liveness}")
+
+    # TRACER IDENTITY: the momentum substitution must not reach the tracers.
+    tracer_identity = {
+        "stage2_tracer_w": _score_stage2_face(
+            np.asarray(run("tracer-w-substituted", substitute_ordinal=0,
+                           nemo_stage_momentum_wzv_split=True,
+                           expose_tracer_transport_stage=2,
+                           expose_tracer_transport_as_ww=True).T.data),
+            np.asarray(run("tracer-w-baseline",
+                           nemo_stage_momentum_wzv_split=True,
+                           expose_tracer_transport_stage=2,
+                           expose_tracer_transport_as_ww=True).T.data),
+            cell_mask),
+    }
+    if plant == "t-r3-tracer":
+        # Claim the substitution is momentum-only while wiring it into the
+        # SHARED producer that the tracers also read (the split off): the
+        # tracer-identity control must refuse it.
+        planted = np.asarray(run(
+            "plant-tracer", substitute_ordinal=0,
+            stage2_wzv_velocity_form=True,
+            expose_tracer_transport_stage=2,
+            expose_tracer_transport_as_ww=True).T.data)
+        against = np.asarray(run(
+            "plant-tracer-base", stage2_wzv_velocity_form=True,
+            expose_tracer_transport_stage=2,
+            expose_tracer_transport_as_ww=True).T.data)
+        caught = _score_stage2_face(planted, against, cell_mask)
+        if caught["active_cells_unequal"] == 0:
+            raise GateError(
+                "PLANT-BLIND: the tracer-identity control did not refuse a "
+                f"substitution that reached the tracer field: {caught}")
+        return {"status": "PLANT-FIRED", "plant": plant, "control": caught}
+    require(tracer_identity["stage2_tracer_w"]["cells_unequal"] == 0,
+            "the momentum substitution moved the tracer path: "
+            f"{tracer_identity}")
+
+    report = {
+        "format": "gyre-round162-developed-stage2-t-r3-walk-v1",
+        "status": "PASS",
+        "worktree": stamp,
+        "record": {"sha256": oracle["sha256"], "meta": oracle["meta"]},
+        "entry": {"step": DEVELOPED_ENTRY_STEP,
+                  "process_step": DEVELOPED_PROCESS_STEP},
+        "controls": {
+            "observer_passivity": observer_passivity,
+            "height_sink_passivity": sink_passivity,
+            "statement_calibration": calibration,
+            "call_ledgers": {label: ledger_summary(label)
+                             for label in sorted(ledgers)},
+            "substitution_liveness": liveness,
+            "tracer_identity": tracer_identity,
+        },
+        "nemo_ww_own_rms": own_rms,
+        "vertical_velocity_scored_against_nemo": scored,
+        "stage_sea_surface_height": stage_height,
+        "round160_reference": {
+            "corrected_ww_rms": ROUND160_CORRECTED_WW,
+            "shared_ww_rms": 1.2326857042024439e-08,
+        },
+    }
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    return report
+
 COMBINED_CANCELLATION_PAIR = ("advection", "vertical_diffusion")
 DEVELOPED_RANK_SPLIT_PLANTS = ("rank-combined-mispair",)
 # Round 129 measured the year harness's run-to-run temperature floor.
@@ -9348,11 +9798,21 @@ def developed_process_rank_split(
     combined_error = ((production_lego[first] + production_lego[second])
                       - nemo_combined)[mask]
     scale = float(np.max(np.abs(combined_error)))
-    residual = float(np.max(np.abs(combined_error - (e_first + e_second))))
+    gap = combined_error - (e_first + e_second)
+    residual = float(np.max(np.abs(gap)))
     decomposition = {
         "max_abs_residual_K": residual,
+        "cells_with_a_residual": int(np.count_nonzero(gap)),
         "combined_error_max_abs_K": scale,
         "allowed_K": 8.0 * float(np.spacing(scale)),
+        # The magnitudes the identity is exact or inexact AT, so a hard zero
+        # can be read against the size of the numbers that produced it.
+        "increment_max_abs_K": {
+            f"lego_{first}": float(np.max(np.abs(production_lego[first][mask]))),
+            f"lego_{second}": float(np.max(np.abs(production_lego[second][mask]))),
+            f"nemo_{first}": float(np.max(np.abs(nemo_increments[first][mask]))),
+            f"nemo_{second}": float(np.max(np.abs(nemo_increments[second][mask]))),
+        },
     }
     decomposition["holds"] = bool(
         residual <= decomposition["allowed_K"])
