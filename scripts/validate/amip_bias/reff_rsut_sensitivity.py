@@ -62,6 +62,12 @@ def main(argv=None) -> int:
                    default=[8.0, 10.0, 12.0, 14.0])
     p.add_argument("--n-times", type=int, default=8,
                    help="local-time quadrature points over the diurnal cycle")
+    p.add_argument("--cover-schemes", nargs="*", default=[],
+                   choices=("sundqvist", "xu_randall"),
+                   help="also re-solve the radiation with the cloud COVER "
+                        "closure swapped, everything else held fixed. Cover "
+                        "changes the water paths as well as the fraction, so "
+                        "this reports rsut AND rlut per closure.")
     args = p.parse_args(argv)
 
     import jax
@@ -114,7 +120,8 @@ def main(argv=None) -> int:
     n_i_vol = n_i * rho if conv == "per_mass" else n_i
 
     # Production cloud config (config/amip/amip_production.yaml).
-    ccfg = CloudConfig(scheme="sundqvist", rh_crit=0.85, q_c_diagnostic=5.0e-6)
+    ccfg = CloudConfig(scheme="sundqvist", rh_crit=0.85, q_c_diagnostic=5.0e-6,
+                       saturation_scheme="mixed_phase")
     cp = compute_cloud_properties(
         T=T, p_full=p_full, q_v=q_v, dp=dp, config=ccfg,
         q_cloud=q_c, q_ice=q_i, n_cloud=n_c_vol, n_ice=n_i_vol)
@@ -157,24 +164,32 @@ def main(argv=None) -> int:
     area_w = jnp.asarray(np.cos(lat) * 0.0 + 1.0)   # SCVT ~equal-area
     area_w = area_w / jnp.sum(area_w)
 
-    def rsut_mean(r_eff_liq):
-        tot = 0.0
+    def _toa(r_eff_liq, kwx=None):
+        """Diurnally-averaged TOA (rsut, rlut) for one set of cloud fields."""
+        kwx = kw if kwx is None else kwx
+        sw = 0.0
+        lw = 0.0
         for mu in cosz_t:
             mu_j = jnp.asarray(np.maximum(mu, 0.0))
             out = solver.solve_columns(
                 T=T, p_full=p_full, p_half=p_half, sfc_temperature=T_sfc,
                 q_v=q_v, cos_zenith=jnp.maximum(mu_j, 1e-4),
                 sfc_albedo=0.06, sfc_emissivity=0.97,
-                cloud_path_liq=kw["cloud_path_liq"],
-                cloud_path_ice=kw["cloud_path_ice"],
+                cloud_path_liq=kwx["cloud_path_liq"],
+                cloud_path_ice=kwx["cloud_path_ice"],
                 cloud_r_eff_liq=r_eff_liq,
-                cloud_r_eff_ice=kw.get("cloud_r_eff_ice"))
+                cloud_r_eff_ice=kwx.get("cloud_r_eff_ice"))
             # Night columns: SW up is 0 when mu ~ 0; the 1e-4 floor keeps the
             # solver defined and contributes ~0 flux.
             day_mask = jnp.asarray(mu > 0.0)
-            tot = tot + jnp.sum(area_w * jnp.where(
+            sw = sw + jnp.sum(area_w * jnp.where(
                 day_mask, out.sw_flux_up[:, 0], 0.0))
-        return float(tot / len(cosz_t))
+            lw = lw + jnp.sum(area_w * out.lw_flux_up[:, 0])
+        n = len(cosz_t)
+        return float(sw / n), float(lw / n)
+
+    def rsut_mean(r_eff_liq):
+        return _toa(r_eff_liq)[0]
 
     print(f"{args.checkpoint}: {ncol} columns, {nlev} levels, day {day:g}, "
           f"{args.n_times}-point diurnal quadrature")
@@ -219,6 +234,31 @@ def main(argv=None) -> int:
                   f"{(v - prev_v) / (r_um - prev_r):+.3f} W/m2/um "
                   f"over {prev_r:g}-{r_um:g} um")
         prev_r, prev_v = r_um, v
+
+    # COVER-CLOSURE ARMS.  Swapping the closure moves the cloud FRACTION and,
+    # through the radiative condensate floor and the in-cloud scaling, the
+    # water PATHS too -- so each arm needs its own compute_cloud_properties
+    # solve and its own PSD radius, not just a different fraction.  Both
+    # numbers are reported: a closure that trades cover for optical depth can
+    # brighten in the shortwave and still change the longwave more.
+    if args.cover_schemes:
+        print()
+        print(f"{'cover':>12s} {'rsut [W/m2]':>12s} {'rlut [W/m2]':>12s} "
+              f"{'cf mean':>9s} {'LWP':>8s} {'IWP':>8s}")
+        for sch in args.cover_schemes:
+            cfg_s = ccfg._replace(scheme=sch)
+            cp_s = compute_cloud_properties(
+                T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg_s,
+                q_cloud=q_c, q_ice=q_i, n_cloud=n_c_vol, n_ice=n_i_vol)
+            kw_s = cp_s.to_rrtmg_kwargs()
+            sw_s, lw_s = _toa(kw_s["cloud_r_eff_liq"], kw_s)
+            _cf_s = float(np.mean(np.asarray(cp_s.cloud_fraction)))
+            _lwp = float(np.mean(np.sum(np.asarray(kw_s["cloud_path_liq"]), axis=1)))
+            _iwp = float(np.mean(np.sum(np.asarray(kw_s["cloud_path_ice"]), axis=1)))
+            print(f"{sch:>12s} {sw_s:12.3f} {lw_s:12.3f} {_cf_s:9.4f} "
+                  f"{_lwp * 1e3:8.2f} {_iwp * 1e3:8.2f}")
+        print("  LWP/IWP are grid-mean column paths [g/m2] as handed to the "
+              "solver; cf mean is over all layers.")
     return 0
 
 

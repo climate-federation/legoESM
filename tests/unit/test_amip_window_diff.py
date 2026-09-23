@@ -219,3 +219,10 @@ def test_bucket_key_matches_the_accumulator(wd):
     for day in (0, 30, 59, 60, 89, 90, 100, 110, 364, 365, 400):
         doy, _ = day_to_calendar(float(day))
         assert wd.bucket_key(day) == (day // 365, MonthlyAccumulator.day_to_month(doy))
+
+
+def test_p_minus_e_is_derived_in_mm_per_day_and_the_cap_bands_exist(wd):
+    assert wd.DERIVED["P-E"] == ("pr", "evspsbl") and wd.UNITS["P-E"] == "mm/d"
+    assert "evspsbl" in wd.FIELDS and wd.SCALE["evspsbl"] == wd.SCALE["pr"] == 86400.0
+    assert wd.BANDS["Arctic 72.5-90N"] == (72.5, 90.0, 0.0, 360.0)
+    assert wd.BANDS["Arctic 75-90N"] == (75.0, 90.0, 0.0, 360.0)

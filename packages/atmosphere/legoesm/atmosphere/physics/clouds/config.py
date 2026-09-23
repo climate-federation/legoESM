@@ -32,6 +32,10 @@ __param_spec__ = {
             # default. Same class as land.canopy.interception_fraction.
             "clubb_cf_override_strength": "opt-in marine-Sc lever, default 1.0 (full) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
             "clubb_cf_override_floor": "opt-in marine-Sc cloud-collapse floor, default 0.0 (off) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
+            "cap_floor_lat_deg": "structural: latitude gate [deg] of the polar-cap radiative cloud floor (attribution lever, cap_floor_on=False in production)",
+            "cap_floor_p_max_pa": "structural: pressure gate [Pa] of the polar-cap radiative cloud floor (attribution lever)",
+            "cap_floor_cf": "attribution lever: imposed cloud fraction of the polar-cap radiative floor, not a closure coefficient",
+            "cap_floor_q_c": "attribution lever: imposed in-cloud liquid [kg/kg] of the polar-cap radiative floor, not a closure coefficient",
             "cover_condensate_q_ref": "opt-in condensate-aware cover floor, default 0.0 (off) = the physical floor; production value pending the 2026-09 cc_cond paired arms",
             # CAM6 cldfrc2m ramp ends sit ON the physical bound 1.0 (ice
             # stratus complete at ice saturation; stratospheric ramp is a
@@ -200,6 +204,19 @@ class CloudConfig(NamedTuple):
     # identical).  The production default is decided by the paired arms
     # cc_cond* (2026-09), not here.
     cover_condensate_q_ref: float = 0.0
+    # --- Polar-cap radiative cloud floor: an ATTRIBUTION lever, not physics ---
+    # When ``cap_floor_on``, every layer poleward of ``cap_floor_lat_deg`` with
+    # p_full > ``cap_floor_p_max_pa`` is handed to radiation with cloud fraction
+    # >= ``cap_floor_cf`` and grid-mean liquid path >= cf * cap_floor_q_c * dp/g
+    # (``apply_cap_cloud_floor``).  Radiation-only: the prognostic condensate,
+    # the published cloud diagnostics and every other lane are untouched.  Built
+    # for the 2026-09 Arctic self-isolation A/B (arm 1: does the missing surface
+    # cloud longwave seed the cold-core high?).  Off = production behaviour.
+    cap_floor_on: bool = False
+    cap_floor_lat_deg: float = 70.0
+    cap_floor_p_max_pa: float = 70000.0
+    cap_floor_cf: float = 0.8
+    cap_floor_q_c: float = 5.0e-5
     # M2005 cloud-ice bulk density [kg/m³] (RHOI) for the PSD ice effective
     # radius EFFI=1.5/LAMI, LAMI=(ρ_ci·π·N_i/q_i)^(1/3) (RAD-1-ice). Only
     # used when ``compute_cloud_properties`` is given explicit ``n_ice``.
@@ -350,7 +367,13 @@ class CloudConfig(NamedTuple):
     # the RH criterion and the diagnosed condensate phase agree (IFS alpha(T)
     # convention, Tiedtke 1993; equals the shared mixed_phase_saturation curve
     # at the default T_ice_only = constants.T_hom_freeze).  Unknown => raise.
-    saturation_scheme: str = "liquid"
+    # "mixed_phase" by default since 2026-09-17: RH is measured against the
+    # ice-fraction-blended liquid/ice saturation curve.  The old "liquid"
+    # default measured it against the liquid curve at ALL temperatures, which
+    # makes cold cloud impossible — at 230 K / 900 hPa ice-saturated air reads
+    # RH_liquid 0.662 against an rh_crit of 0.85.  "liquid" is retained for
+    # byte-identical reproduction of earlier runs.
+    saturation_scheme: str = "mixed_phase"
     # --- CAM6 cloud macrophysics (scheme="cam6_clubb"; CESM2.1
     # cam_cesm2_1_rel_60): cloud_frac = min(max(alst, aist) + deepcu, 1) with
     # alst = the CLUBB PDF liquid fraction (``cloud_fraction_override``),
@@ -397,6 +420,11 @@ def build_cloud_config(
     clubb_cf_override_floor: float | None = None,
     saturation_scheme: str | None = None,
     cover_condensate_q_ref: float | None = None,
+    cap_floor_on: bool | None = None,
+    cap_floor_lat_deg: float | None = None,
+    cap_floor_p_max_pa: float | None = None,
+    cap_floor_cf: float | None = None,
+    cap_floor_q_c: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -449,6 +477,11 @@ def build_cloud_config(
         overrides["saturation_scheme"] = saturation_scheme
     if cover_condensate_q_ref is not None:
         overrides["cover_condensate_q_ref"] = cover_condensate_q_ref
+    for _name, _val in (("cap_floor_on", cap_floor_on), ("cap_floor_lat_deg", cap_floor_lat_deg),
+                        ("cap_floor_p_max_pa", cap_floor_p_max_pa), ("cap_floor_cf", cap_floor_cf),
+                        ("cap_floor_q_c", cap_floor_q_c)):
+        if _val is not None:
+            overrides[_name] = _val
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )

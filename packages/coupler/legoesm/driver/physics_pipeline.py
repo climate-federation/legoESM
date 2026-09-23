@@ -4646,6 +4646,25 @@ def _validated_C_land(value):
     return value
 
 
+def cap_floor_lane_applies(config) -> bool:
+    """True on the lanes whose radiation goes through the standalone backend
+    (MPAS grid, spectral dycore), the only place the polar-cap cloud floor is
+    applied; every other lane runs this pipeline's own radiation."""
+    return (config.grid.grid_type == "mpas"
+            or config.dycore.discretization == "spectral")
+
+
+def refuse_cap_floor_on_fv(config) -> None:
+    """Refuse an enabled polar-cap cloud floor on any lane that would never
+    apply it.  Called at the top of ModelDriver.run (the pipeline object is
+    built on all lanes, so the refusal cannot live in build_physics_pipeline)."""
+    if getattr(config, "cloud_cap_floor_on", False) and not cap_floor_lane_applies(config):
+        raise ValueError(
+            "cloud_cap_floor_on is applied only in the standalone radiation path "
+            "(MPAS / spectral); the finite-volume PhysicsPipeline does not apply it "
+            "and refuses rather than silently running without it.")
+
+
 def build_physics_pipeline(grid, sigma, config):
     """Build a PhysicsPipeline from an ExperimentConfig.
 
