@@ -6906,10 +6906,16 @@ def _developed_stage2_record(root: Path) -> dict:
     # window is the T window the Round-153/154 readers already use, and all
     # jpk levels are kept because legoESM's own vertical velocity carries one
     # interface per level plus the bottom.
+    # The cell window is the one the two FACE windows imply on a C grid:
+    # legoESM's u face 0 is the WEST face of its cell 0, so the cell that owns
+    # u window index 1 starts one further east, and the same argument in the
+    # other direction fixes the row.  The cell control below refuses any other
+    # choice, which is how the first attempt at this window was caught.
+    T_WINDOW = (slice(2, 34), slice(2, 24))
     rows["ww_t"] = np.ascontiguousarray(
-        fields["rhd_ww"][1][1:33, 1:23, :].transpose(1, 0, 2))
+        fields["rhd_ww"][1][T_WINDOW].transpose(1, 0, 2))
     rows["rhd_t"] = np.ascontiguousarray(
-        fields["rhd_ww"][0][1:33, 1:23, :30].transpose(1, 0, 2))
+        fields["rhd_ww"][0][T_WINDOW][..., :30].transpose(1, 0, 2))
     for name, index, tag in (("r3u_r3v_Kmm", 0, "u"), ("r3u_r3v_Kmm", 1, "v")):
         i_window, j_window = WINDOWS[tag]
         rows[f"r3_Kmm_{tag}"] = np.ascontiguousarray(
