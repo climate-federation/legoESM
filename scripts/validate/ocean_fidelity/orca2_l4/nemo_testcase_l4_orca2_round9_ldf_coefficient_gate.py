@@ -259,6 +259,30 @@ def run_gate(deck_root: Path, record_root: Path, *, plant: str | None = None):
                 f"index-map control {name!r} is vacuous")
     fold_row_mask = score(mapped[-1], nemo_f_product[-1])
 
+    # REPORTED, not asserted: what the OPERATOR then does with the coefficient.
+    # NEMO stores ahmf already multiplied by fmask and dyn_ldf_lev reads it as
+    # stored; legoESM's div-curl multiplies it again by its own per-level
+    # vertex mask.  Where that mask is zero and NEMO's coefficient is not, the
+    # two disagree -- a statement about the MASK, downstream of this round.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,  # noqa: F401  (import parity with the operator)
+    )
+    import jax
+    cell3 = tmask * surface[..., np.newaxis]
+    visc_vmask = np.asarray(jax.vmap(
+        lambda m2: compute_vertex_mask(m2, grid=card.recipe.grid),
+        in_axes=-1, out_axes=-1)(jnp.asarray(cell3)))
+    visc_vmask = visc_vmask * vertex_mask[..., np.newaxis]
+    downstream_mask = {
+        "nemo_coefficient_zeroed_by_the_legoesm_vertex_mask": int(np.sum(
+            (visc_vmask[1:, 1:GLOBAL_NX + 1] == 0.0)
+            & (ahmf_native != 0.0))),
+        "cells": int(ahmf_native.size),
+        "note": (
+            "NEMO's dyn_ldf_lev reads ahmf as ldf_dyn_init stored it; the "
+            "legoESM operator masks it again with its own vertex mask"),
+    }
+
     ahmf_south_row = {
         "card_value_is_zero": bool(np.all(ahmf_vertex[0] == 0.0)),
         "legoesm_vertex_mask_is_zero": bool(np.all(vertex_mask[0] == 0.0)),
@@ -299,6 +323,7 @@ def run_gate(deck_root: Path, record_root: Path, *, plant: str | None = None):
         "f_index_map_controls": index_map_controls,
         "fold_row_vertex_mask_vs_nemo_f_product": fold_row_mask,
         "ahmf_south_vertex_row": ahmf_south_row,
+        "downstream_vertex_masking": downstream_mask,
         "one_implementation": single_implementation,
     }
     failed = [name for name, row in rows.items() if not row["bit_identical"]]
