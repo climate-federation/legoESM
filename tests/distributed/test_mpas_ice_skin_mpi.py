@@ -176,17 +176,27 @@ def test_checkpoint_round_trip_is_exact_over_owned_cells():
     # The file must be GLOBAL: a rank-local fragment written as if it were
     # global is the exact failure the save-side gather prevents, and it would
     # otherwise only surface as a wrong restart months later.
+    #
+    # Only rank 0 can read the file, but the VERDICT is broadcast and asserted
+    # by every rank. A bare rank-0 assert would abort that rank inside a
+    # collective region and leave the others waiting at the next barrier
+    # forever -- the failure would present as a hang rather than a failure,
+    # which is the worst way for a gate to report.
+    verdict = None
     if MPI.COMM_WORLD.Get_rank() == 0:
         with np.load(path) as z:
-            assert "ice_T_skin" in z.files, (
-                "the checkpoint carries no skin, so the chain would silently "
-                "re-run the multi-week spin-up every restart")
-            n_global = int(z["ice_T_skin"].shape[0])
-        assert n_global == d._voronoi_layout.partition.nCells_global, (
-            f"the checkpoint holds {n_global} skin values but the global mesh "
-            f"has {d._voronoi_layout.partition.nCells_global} cells -- a "
-            f"rank-local fragment was written as a global field")
-    MPI.COMM_WORLD.Barrier()
+            has = "ice_T_skin" in z.files
+            n_global = int(z["ice_T_skin"].shape[0]) if has else -1
+        if not has:
+            verdict = ("the checkpoint carries no skin, so the chain would "
+                       "silently re-run the multi-week spin-up every restart")
+        elif n_global != d._voronoi_layout.partition.nCells_global:
+            verdict = (
+                f"the checkpoint holds {n_global} skin values but the global "
+                f"mesh has {d._voronoi_layout.partition.nCells_global} cells "
+                f"-- a rank-local fragment was written as a global field")
+    verdict = MPI.COMM_WORLD.bcast(verdict, root=0)
+    assert verdict is None, verdict
 
     fresh = _build(True, output_dir=out)
     fresh.load_checkpoint(path)
@@ -200,13 +210,13 @@ def test_checkpoint_round_trip_is_exact_over_owned_cells():
                 "this rank's owned cells")
     # The same values must sit at the same GLOBAL cells, not merely somewhere
     # in the array: a permuted gather preserves the multiset and would pass a
-    # sorted comparison.
-    if MPI.COMM_WORLD.Get_rank() == 0:
-        with np.load(path) as z:
-            glob = np.asarray(z["ice_T_skin"])
-        np.testing.assert_array_equal(
-            glob[gids], before[:n_owned],
-            err_msg="this rank's owned cells landed at the wrong global slots")
+    # sorted comparison.  Every rank checks ITS OWN cells against the file, so
+    # a gather that scrambled one rank's band cannot hide behind rank 0's.
+    with np.load(path) as z:
+        glob = np.asarray(z["ice_T_skin"])
+    np.testing.assert_array_equal(
+        glob[gids], before[:n_owned],
+        err_msg="this rank's owned cells landed at the wrong global slots")
 
 
 def test_serial_and_distributed_skins_agree_within_the_atmospheric_spread():
