@@ -151,3 +151,9 @@ def test_budget_publication_survives_strict_sedimentation_mode():
     assert o.qc_budget is not None
     assert set(o.qc_budget) and all(
         hasattr(v, "shape") for v in o.qc_budget.values())
+
+
+def test_upstream_flag_is_off_by_default():
+    m = _load()
+    a = m.build_arg_parser().parse_args(["--config", "c", "--restart", "r"])
+    assert a.upstream is False

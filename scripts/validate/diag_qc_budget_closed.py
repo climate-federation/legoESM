@@ -39,6 +39,14 @@ reservoir and SHRINK the baseline's, which is the opposite of the observed
 deficit.  The band also does not balance, so terms of order 0.1 kg/m2/day from
 transport and the other parameterizations are present and outside this probe.
 
+UPSTREAM TERMS.  ``--upstream`` adds the non-microphysical terms that change
+band cloud water, so the band budget can be closed rather than only its
+microphysics part: horizontal advection of q_c, vertical advection of q_c
+(both operators, since the conservative lever does not reach tracers on the
+hybrid lane), convective detrainment into q_c, and the sedimentation flux
+across the two band edges.  Cloud droplets do not sediment in this scheme, so
+that last term is reported for the condensate that does.
+
 NUMBERS ONLY -- no verdict.
 """
 import argparse
@@ -68,6 +76,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--label", default="arm")
     ap.add_argument("--band", nargs=2, type=float, default=[500.0, 800.0],
                     metavar=("P_LO_HPA", "P_HI_HPA"))
+    ap.add_argument("--upstream", action="store_true",
+                    help="add horizontal/vertical transport, convective "
+                         "detrainment and band-edge sedimentation")
     ap.add_argument("--no-graupel", action="store_true",
                     help="MG2-faithful counterfactual: CAM6's MG2 carries no "
                          "graupel category at all (micro_mg_cam.F90:139), so "
@@ -108,7 +119,8 @@ def main():
     sc = model.sigma_coord
     T = jnp.asarray(state.T.data)
     ncol, nlev = T.shape
-    area = np.asarray(model.mesh.areaCell).reshape(ncol)
+    mesh = model.mesh
+    area = np.asarray(mesh.areaCell).reshape(ncol)
     A = area / area.sum()
     p_s = jnp.asarray(state.p_s.data)
     p_full = sc.pressure_at_full(p_s).reshape(ncol, nlev)
@@ -216,6 +228,76 @@ def main():
               f"time -- signs are classified after summing over cells)")
 
     res = band_rate(np.asarray(q_c), dp, A, g, band)
+
+    if a.upstream:
+        print(f"[{a.label}] === UPSTREAM terms on band cloud water "
+              f"[kg/m2/day, + = source of band q_c] ===")
+        u = {}
+        # 1. transport.  The conservative lever does not reach tracers on the
+        #    hybrid lane, so report what the model USES and what it would give.
+        from legoesm.grids.vertical import (
+            vertical_advection_hybrid, vertical_advection_hybrid_sb,
+            compute_mass_flux_from_cumsum, HybridSigmaPressureCoordinate)
+        from legoesm.core.operators_voronoi import (
+            divergence_cell_3d, cell_to_edge_avg_3d)
+        u_3d = jnp.asarray(state.u.data)
+        dp_edge = cell_to_edge_avg_3d(jnp.asarray(dp), mesh)
+        cumsum_dp = jnp.cumsum(divergence_cell_3d(u_3d * dp_edge, mesh), axis=-1)
+        if isinstance(sc, HybridSigmaPressureCoordinate):
+            mf = compute_mass_flux_from_cumsum(cumsum_dp, cumsum_dp[..., -1:], sc)
+            u["vertical transport (in use)"] = band_rate(
+                np.asarray(vertical_advection_hybrid(q_c, mf, p_s, sc)),
+                dp, A, g, band) * _DAY
+            u["vertical transport (conservative)"] = band_rate(
+                np.asarray(vertical_advection_hybrid_sb(q_c, mf, p_s, sc)),
+                dp, A, g, band) * _DAY
+        else:
+            # Sigma lane: the core builds sigma-dot from the SAME cumsum
+            # (primitive_eq_mpas.py:687-689) and DOES pass the selector to
+            # tracers (:799-800), so report the scheme the deck actually runs.
+            from legoesm.grids.vertical import (
+                vertical_advection, compute_sigma_dot_from_cumsum)
+            sig_dot = compute_sigma_dot_from_cumsum(
+                cumsum_dp, cumsum_dp[..., -1:], p_s, sc)
+            _sch = getattr(model.config, "vert_advection_scheme", "upwind")
+            u[f"vertical transport (in use, {_sch})"] = band_rate(
+                np.asarray(vertical_advection(q_c, sig_dot, sc, scheme=_sch)),
+                dp, A, g, band) * _DAY
+        from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
+            tracer_horizontal_advection)
+        dqh = tracer_horizontal_advection(q_c[..., None], u_3d, mesh)[..., 0]
+        u["horizontal transport"] = band_rate(
+            np.asarray(dqh), dp, A, g, band) * _DAY
+
+        # 2. convective detrainment into q_c, from the deck's own scheme.
+        try:
+            from legoesm.driver.physics_pipeline import _resolve_convection
+            conv_fn, ccfg = _resolve_convection(config)
+        except Exception as exc:                      # pragma: no cover
+            print(f"[{a.label}]   convective detrainment: UNAVAILABLE ({exc})")
+            conv_fn = None
+        if conv_fn is not None:
+            print(f"[{a.label}]   convective detrainment: run "
+                  f"scripts/validate/diag_convective_detrainment.py for the "
+                  f"per-band split; it is the committed instrument for this "
+                  f"term and is not duplicated here")
+
+        # 3. sedimentation across the two band edges.  Cloud droplets do not
+        #    sediment in this scheme, so q_c has NO edge flux; the falling
+        #    species do, and they are what rime q_c away inside the band.
+        print(f"[{a.label}]   sedimentation of q_c across the band edges: "
+              f"structurally ZERO -- cloud droplets do not sediment here "
+              f"(morrison.py has no sed term in dq_c_dt).  The falling species "
+              f"enter as riming partners, already inside the microphysics "
+              f"terms above.")
+        for k, v in u.items():
+            print(f"[{a.label}]   {k:36s} {v:+13.6e}   "
+                  f"{v / max(res, 1e-30):+9.4f} /day of the band reservoir")
+        tot_up = sum(v for k, v in u.items()
+                     if "conservative" not in k)
+        print(f"[{a.label}]   {'TRANSPORT TOTAL (as the model runs it)':36s} "
+              f"{tot_up:+13.6e}")
+
     # --- departure 1: MG2 in-cloud cloud-water cap ------------------------
     from legoesm.atmosphere.physics.microphysics.morrison import (
         resolve_morrison_flavor)
