@@ -111,7 +111,8 @@ def _plant_one_value(a):
     return out
 
 
-def _stage_sources(deck_root: Path, root: Path, kt: int, *, with_runoff: bool):
+def _stage_sources(deck_root: Path, root: Path, kt: int, *, with_runoff: bool,
+                   with_runoff_mass: bool = False):
     """Run the PRODUCTION step and return its per-stage tracer source rates."""
     import jax.numpy as jnp
 
@@ -141,6 +142,17 @@ def _stage_sources(deck_root: Path, root: Path, kt: int, *, with_runoff: bool):
             "this gate cannot bind on a channel that does not exist")
     if not with_runoff:
         surface = surface._replace(runoff_tracer_content=None)
+    if with_runoff_mass:
+        # MEASUREMENT ARM ONLY -- nothing lands from it.  NEMO's sea-surface
+        # forcing is (emp - rnf)/rho0 (``sbcrnf.f90:263,275`` feeds the same
+        # runoff into the horizontal divergence); the ladder supplies only
+        # emp, so the runoff's MASS is absent while its HEAT is now present.
+        # legoESM's net freshwater is precip - evap + runoff, and the ladder
+        # sets evap = emp, so adding the recorded rnf here restores NEMO's
+        # pairing.  This arm asks whether the pairing is what the heat-only
+        # landing is missing.
+        freshwater = freshwater._replace(
+            runoff=jnp.asarray(surface_fields["rnf"]))
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
@@ -167,6 +179,8 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
         deck_root, root, kt, with_runoff=True)
     rates_off, tops_off, _, _, _, stage1_off = _stage_sources(
         deck_root, root, kt, with_runoff=False)
+    _, _, _, _, _, stage1_paired = _stage_sources(
+        deck_root, root, kt, with_runoff=True, with_runoff_mass=True)
     for stage in range(3):
         require(np.array_equal(tops[stage], tops_off[stage]),
                 f"stage {stage + 1} live top thickness moved when the runoff "
@@ -259,7 +273,8 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
     oracle_s1 = ladder.read_state_frame(
         root / f"oracle_stage_kt{kt:08d}_s1.bin", kt=kt, stage=1)["T"]
     ny1, nx1, nz1 = oracle_s1.shape
-    for name, block in (("with", stage1_on), ("without", stage1_off)):
+    for name, block in (("with", stage1_on), ("without", stage1_off),
+                        ("with_the_mass_paired", stage1_paired)):
         sub = block[:ny1, :nx1, :nz1]
         delta = np.abs(sub - oracle_s1)
         carries = (rnf[:ny1, :nx1] != 0.0)[..., None] & np.ones(
