@@ -107,7 +107,7 @@ run_arm() {   # $1=ranks  $2=cpus-per-task  $3=rep
     # runs under the arm's own srun flags.
     srun --export=ALL --nodes=1 --ntasks=1 --cpu-bind=cores \
         --cpus-per-task="$cpt" "$PY" \
-        "$REPO/scripts/bench/_probe_thread_pool.py" \
+        "$REPO/scripts/bench/thread_pool_census.py" \
         "$OUTDIR/threads_cpt${cpt}.json" >/dev/null 2>&1
     timeout --kill-after=30 900 srun --export=ALL --nodes="$nn" --ntasks="$nd" \
         --ntasks-per-node="$PPN" --cpu-bind=cores --cpus-per-task="$cpt" \
