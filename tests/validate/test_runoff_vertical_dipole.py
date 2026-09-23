@@ -44,10 +44,13 @@ def test_pure_redistribution_cancels_and_a_net_offset_does_not():
     z = np.arange(5.0, 155.0, 10.0)      # 15 levels inside 150 m
     dz = m.dz_from_centers(z)
 
-    # (b) vertical placement: fresh at the top, salty below, nothing added.
+    # (b) vertical placement: fresh in the surface cell, salty below it,
+    # nothing added. The compensation starts BELOW the surface band, which is
+    # both what the physical lever does and what lets the two cases below
+    # carry the identical surface value.
     redist = np.zeros_like(z)
     redist[0] = -1.0
-    redist[1:] = -redist[0] * dz[0] / dz[1:].sum()
+    redist[2:] = -redist[0] * dz[0] / dz[2:].sum()
     r = m.dipole_stats(redist, dz, z, 150.0)
     assert r["surface"] < 0 < r["subsurface"]
     assert r["cancel"] == pytest.approx(0.0, abs=1e-9)
