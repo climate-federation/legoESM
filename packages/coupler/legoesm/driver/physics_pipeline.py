@@ -146,6 +146,7 @@ class PhysicsPipeline:
         sigma_full,
         sigma_half,
         dsigma,
+        sigma_coord,
         convection_fn,
         convection_config,
         radiation_fn,
@@ -173,6 +174,7 @@ class PhysicsPipeline:
         self.sigma_full = sigma_full
         self.sigma_half = sigma_half
         self.dsigma = dsigma
+        self.sigma_coord = sigma_coord
         self.convection_fn = convection_fn
         self.convection_config = convection_config
         self.radiation_fn = radiation_fn
@@ -403,6 +405,9 @@ class PhysicsPipeline:
         # gravity_wave_drag/frontogenesis.py); the pipeline then computes
         # frontgf per step from the pre-physics (u, v, T, p) fields.
         self._gwd_takes_frontgf = False
+        # Offline Beres ``mfcc`` table (loaded once by the builder from
+        # ``e3sm_cam_mfcc_table_path``); None -> the kernel's stand-in.
+        self._gwd_mfcc_table = None
         self.subgrid_topo_stddev = None
         # Set for a stateless '+'-composite GWD (issue #834): the combined
         # executor returns a (GWDOutput, spectrum) tuple even with no stateful
@@ -531,7 +536,7 @@ class PhysicsPipeline:
         two use ONE consistent transfer estimate (no re-derived bulk
         formula).  ``1.0`` is the [m^2/s^2] wind-speed floor.
         """
-        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T_low)
+        rho_low = self.sigma_coord.pressure_at_full(p_s)[..., -1] / (constants.R_d * T_low)
         wind_speed = jnp.sqrt(u_low ** 2 + v_low ** 2 + 1.0)
         return rho_low, wind_speed
 
@@ -703,7 +708,7 @@ class PhysicsPipeline:
         # SAME lowest-full-level density the turbulence path feeds its surface
         # layer (rho_col_phys[:, -1] = p_full/(R_d*T)), NOT the legacy
         # _land_surface_bulk value — the law must see identical inputs.
-        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T_air)
+        rho_low = self.sigma_coord.pressure_at_full(p_s)[..., -1] / (constants.R_d * T_air)
         if self.surface_tiled:
             cfg = self._land_tile_surface_cfg()
         else:
@@ -1103,7 +1108,7 @@ class PhysicsPipeline:
                             sfc_taux_override=None, sfc_tauy_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
                             w_land=None, snow=None, land_ml=None,
-                            land_ml_params=None):
+                            land_ml_params=None, cloud_fraction=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
@@ -1165,8 +1170,8 @@ class PhysicsPipeline:
         else:
             beta_land = None
 
-        p_full = p_s[..., None] * self.sigma_full
-        p_half = p_s[..., None] * self.sigma_half
+        p_full = self.sigma_coord.pressure_at_full(p_s)
+        p_half = self.sigma_coord.pressure_at_half(p_s)
 
         # Flatten to columns via adapter
         T_col = ad.flatten_3d(T)
@@ -1492,13 +1497,25 @@ class PhysicsPipeline:
                         moisture_convergence=mc_col,
                     )
                 else:
-                    # Zhang-McFarlane: CMT winds, no MC kwarg.
+                    # Zhang-McFarlane (CAM6): CMT winds, no MC kwarg; the
+                    # land fraction selects the c0 autoconversion
+                    # coefficient; the previous step's cloud-fraction carry
+                    # (CLUBB's PDF cloud fraction, None otherwise -> CAM's
+                    # (1 - cldfrc) = 1) feeds the rain evaporation; the
+                    # 40 hPa cap is fixed from the REFERENCE interfaces.
                     conv_out, conv_prog_out = self.convection_fn(
                         T=T_col, q_v=q_v_col,
                         p_full=p_full_col, p_half=p_half_col,
                         u=u_conv_col, v=v_conv_col,
                         conv_prog_profile=conv_prog,
                         dt=dt, config=_conv_cfg,
+                        land_frac=(
+                            ad.flatten_2d(self.f_land)
+                            if self.f_land is not None
+                            else jnp.zeros((ad.ncol,), dtype=T_col.dtype)),
+                        cld_frac=(None if cloud_fraction is None
+                                  else cloud_fraction.reshape(T_col.shape)),
+                        pref_edge=self.sigma_half * constants.p_ref,
                     )
             elif _ctr.is_w_grid_consumer:
                 # Kain-Fritsch: resolved-w trigger.
@@ -1767,8 +1784,7 @@ class PhysicsPipeline:
             # (precip_efficiency=0) -> no-op, byte-identical.
             if conv_out.dq_r_conv_dt is not None:
                 dq_r_dt_conv = ad.unflatten_3d(conv_out.dq_r_conv_dt)
-                _dp_r = p_s[..., None] * (
-                    self.sigma_half[1:] - self.sigma_half[:-1])
+                _dp_r = self.sigma_coord.layer_thickness_dp(p_s)
                 precip_conv_rain = jnp.maximum(
                     jnp.sum(dq_r_dt_conv * _dp_r / constants.g, axis=-1),
                     0.0)  # (..., n, n) kg/m2/s in-updraft rain to the surface
@@ -1779,7 +1795,7 @@ class PhysicsPipeline:
             # from q_v == surface precip, independent of how a scheme defines
             # its dq_c_conv_dt — sbm/dca rescale it to this, but Kuo's
             # heating-derived condensate does not equal it exactly).
-            _dp = p_s[..., None] * (self.sigma_half[1:] - self.sigma_half[:-1])
+            _dp = self.sigma_coord.layer_thickness_dp(p_s)
             precip_conv = jnp.maximum(
                 -jnp.sum(dq_v_dt_conv * _dp / constants.g, axis=-1),
                 0.0)  # (..., n, n) kg/m2/s
@@ -1800,9 +1816,9 @@ class PhysicsPipeline:
         # bottom-layer T/q kick when no turbulence scheme owns surface
         # exchange.  If turbulence is active, its TurbulenceOutput.shflx /
         # lhflx overrides the bulk values further below.
-        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T[..., -1])
+        rho_low = self.sigma_coord.pressure_at_full(p_s)[..., -1] / (constants.R_d * T[..., -1])
         wind_speed = jnp.sqrt(u[..., -1] ** 2 + v[..., -1] ** 2 + 1.0)
-        dp_low = p_s * (self.sigma_half[-1] - self.sigma_half[-2])
+        dp_low = self.sigma_coord.layer_thickness_dp(p_s)[..., -1]
 
         shflx = rho_low * constants.c_pd * _C_H * wind_speed * (T_sfc - T[..., -1])
         q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
@@ -2089,6 +2105,41 @@ class PhysicsPipeline:
                 rho=rho_col_phys, lat=lat_col,
                 dt=dt, config=self.gwd_config,
             )
+            _e3sm_kw = {}
+            if (self._gwd_takes_land_frac
+                    and self.f_land is not None):
+                # E3SM gw_drag.F90:904-906: oro drag is landfrac-scaled
+                # (zeroed over ocean) BEFORE the heating closure; the
+                # e3sm_cam kernel applies it to its orographic source.
+                _e3sm_kw["land_frac_col"] = ad.flatten_2d(self.f_land)
+            if self._gwd_takes_frontgf:
+                # E3SM drives the frontal (CM) source from the dycore
+                # frontogenesis function (pbuf FRONTGF, gw_drag.F90 via
+                # gravity_waves_sources.F90).  Compute it here from THIS
+                # step's pre-physics fields with the grid family's
+                # producer (covariant ugradv recipe; the build-time gate
+                # guarantees the family is supported).
+                from legoesm.atmosphere.physics.gravity_wave_drag.frontogenesis import (  # noqa: E501
+                    compute_frontogenesis,
+                )
+                _fgf_col, _ = compute_frontogenesis(
+                    u, v, T, p_full, self._grid,
+                )
+                _e3sm_kw["frontgf_col"] = _fgf_col
+            if self._gwd_takes_netdt:
+                # E3SM drives the Beres convective GW source from the
+                # deep-convective heating (pbuf TTEND_DP,
+                # gw_drag.F90:766-778: gw_beres_src(..., ttend_dp, ...)).
+                # We pass THIS STEP's convection-scheme heating in the
+                # same column layout.  DOCUMENTED DEPARTURE: our
+                # convection schemes report TOTAL convective heating
+                # (deep + shallow + downdraft), not E3SM's deep-only
+                # TTEND_DP; Beres's hdepth/q0 scan then sees the full
+                # convective column.  The kernel's gw_beres_src takes
+                # it as netdt_col [K/s]; the offline mfcc table (if any)
+                # rides along.
+                _e3sm_kw["netdt_col"] = conv_out.dT_dt
+                _e3sm_kw["mfcc_table"] = self._gwd_mfcc_table
             if self._gwd_prognostic:
                 # Prognostic spectral GWD (issue #413): the wave-action
                 # spectrum is the carry; kernel returns
@@ -2117,7 +2168,7 @@ class PhysicsPipeline:
                         "updated PhysicsOutput value back."
                     )
                 gwd_out, gwd_spectrum_out = self.gwd_fn(
-                    spectrum_in=_spec_in, **_gwd_kwargs,
+                    spectrum_in=_spec_in, **_gwd_kwargs, **_e3sm_kw,
                 )
             elif self._gwd_composite:
                 # Stateless '+'-composite (e.g. ``hines+mcfarlane``, issue #834):
@@ -2133,46 +2184,15 @@ class PhysicsPipeline:
                     _gwd_kwargs["h_topo_col"] = ad.flatten_2d(
                         self.subgrid_topo_stddev
                     )
-                gwd_out, _ = self.gwd_fn(spectrum_in=None, **_gwd_kwargs)
+                gwd_out, _ = self.gwd_fn(
+                    spectrum_in=None, **_gwd_kwargs, **_e3sm_kw)
             else:
                 if (self._gwd_orographic
                         and self.subgrid_topo_stddev is not None):
                     _gwd_kwargs["h_topo_col"] = ad.flatten_2d(
                         self.subgrid_topo_stddev
                     )
-                if (self._gwd_takes_land_frac
-                        and self.f_land is not None):
-                    # E3SM gw_drag.F90:904-906: oro drag is landfrac-scaled
-                    # (zeroed over ocean) BEFORE the heating closure; the
-                    # e3sm_cam kernel applies it to its orographic source.
-                    _gwd_kwargs["land_frac_col"] = ad.flatten_2d(self.f_land)
-                if self._gwd_takes_frontgf:
-                    # E3SM drives the frontal (CM) source from the dycore
-                    # frontogenesis function (pbuf FRONTGF, gw_drag.F90 via
-                    # gravity_waves_sources.F90).  Compute it here from THIS
-                    # step's pre-physics fields with the grid family's
-                    # producer (covariant ugradv recipe; the build-time gate
-                    # below guarantees the family is supported).
-                    from legoesm.atmosphere.physics.gravity_wave_drag.frontogenesis import (  # noqa: E501
-                        compute_frontogenesis,
-                    )
-                    _fgf_col, _ = compute_frontogenesis(
-                        u, v, T, p_full, self._grid,
-                    )
-                    _gwd_kwargs["frontgf_col"] = _fgf_col
-                if self._gwd_takes_netdt:
-                    # E3SM drives the Beres convective GW source from the
-                    # deep-convective heating (pbuf TTEND_DP,
-                    # gw_drag.F90:766-778: gw_beres_src(..., ttend_dp, ...)).
-                    # We pass THIS STEP's convection-scheme heating in the
-                    # same column layout.  DOCUMENTED DEPARTURE: our
-                    # convection schemes report TOTAL convective heating
-                    # (deep + shallow + downdraft), not E3SM's deep-only
-                    # TTEND_DP — Beres's hdepth/q0 scan then sees the full
-                    # convective column.  The kernel's gw_beres_src takes
-                    # it as netdt_col [K/s].
-                    _gwd_kwargs["netdt_col"] = conv_out.dT_dt
-                gwd_out = self.gwd_fn(**_gwd_kwargs)
+                gwd_out = self.gwd_fn(**_gwd_kwargs, **_e3sm_kw)
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(gwd_out.dT_dt)
@@ -2551,8 +2571,8 @@ class PhysicsPipeline:
                 sfc_sw_down >= _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2,
                 jnp.nan_to_num(_alb), albedo)
 
-        p_full = p_s[..., None] * self.sigma_full
-        p_half = p_s[..., None] * self.sigma_half
+        p_full = self.sigma_coord.pressure_at_full(p_s)
+        p_half = self.sigma_coord.pressure_at_half(p_s)
 
         # Flatten to columns via adapter.  ``q_v`` is kept in the
         # repo's mixing-ratio convention here; each ``radiation_fn``
@@ -3064,7 +3084,7 @@ class PhysicsPipeline:
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
-                    land_ml_params=land_ml_params,
+                    land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -3128,7 +3148,7 @@ class PhysicsPipeline:
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
-                    land_ml_params=land_ml_params,
+                    land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -3622,9 +3642,12 @@ def convection_config_for(config, grid_dx_m=None):
             and float(grid_dx_m) > 0.0 and leaf.dx_m == 0.0):
         leaf = leaf._replace(dx_m=float(grid_dx_m))
     cc = cc._replace(**{scheme: leaf})
-    if scheme == "bechtold" and leaf.enable_cmt and _is_mpas_grid(config):
+    if getattr(leaf, "enable_cmt", False) and _is_mpas_grid(config):
         # The MPAS bridge reconstructs winds only on this explicit switch;
-        # Bechtold's CMT resolved ON for an MPAS run is what asks for it.
+        # any scheme whose CMT resolved ON for an MPAS run asks for it
+        # (Bechtold via _resolve_enable_cmt; Zhang-McFarlane / Tiedtke via
+        # their leaf default).  Gating this on Bechtold alone handed ZM zero
+        # winds and silently discarded its momtran output.
         cc = cc._replace(mpas_cmt=True)
     return cc
 
@@ -3960,14 +3983,31 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _flavor = getattr(config, "morrison_flavor", None)
     if _flavor in (None, "mg"):
         _flavor = None
-    if not _touched and _flavor is None:
+    _sed_sub = getattr(config, "morrison_sed_cfl_substeps",
+                       _ExpCfg._field_defaults["morrison_sed_cfl_substeps"])
+    _sed_strict = getattr(config, "morrison_sed_cfl_substeps_strict",
+                          _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"])
+    for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
+                    ("morrison_sed_cfl_substeps_strict", _sed_strict)):
+        if not isinstance(_v, bool):
+            raise TypeError(f"{_nm} must be a bool, got {_v!r}")
+    # Forward only when the flat value deviates from the ExperimentConfig
+    # default (locked equal to the MorrisonConfig leaf by test), so an
+    # untouched config stays byte-identical on Morrison and silent elsewhere.
+    _sed_sub = (None if _sed_sub is _ExpCfg._field_defaults["morrison_sed_cfl_substeps"]
+                else _sed_sub)
+    _sed_strict = (None if _sed_strict
+                   is _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"]
+                   else _sed_strict)
+    if not _touched and _flavor is None and _sed_sub is None and _sed_strict is None:
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
     )
     return apply_microphysics_experiment_flags(
         micro_config, scheme, morrison_scalars=_touched,
-        morrison_flavor=_flavor)
+        morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
+        morrison_sed_cfl_substeps_strict=_sed_strict)
 
 
 def _resolve_microphysics(config):
@@ -4481,11 +4521,48 @@ def gwd_config_for(config):
         latitude_taper=bool(getattr(config, "e3sm_cam_latitude_taper",
                                     gc.e3sm_cam.frontal.latitude_taper)),
     )
+    _effgw_cm = getattr(config, "e3sm_cam_effgw_cm", None)
+    if _effgw_cm is not None:
+        fr = fr._replace(effgw=float(_effgw_cm))
+    _frontgfc = getattr(config, "e3sm_cam_frontgfc", None)
+    if _frontgfc is not None:
+        fr = fr._replace(frontgfc=float(_frontgfc))
+    # Beres (convective) source: offline table path, its own efficiency, and
+    # the oracle variant of the source kernel ("e3sm" = the E3SM defaults,
+    # "cam6" = CAM6 gw_convect.F90: end-off spectrum shift, real storm speed,
+    # interface-based source level).  hdepth_min_km / cf / al stay --params.
+    _variant = str(getattr(config, "e3sm_cam_beres_variant", "e3sm"))
+    # "cam6" also carries CAM's deep-convection descriptor values
+    # (gw_drag.F90:882 min_hdepth = 1000 m; index_of_nearest row lookup); a
+    # later --params override of hdepth_min_km still wins (applied after).
+    _variant_flags = {
+        "e3sm": dict(spectrum_shift="circular", storm_speed_truncate=True,
+                     source_level_rule="nearest_midpoint", hd_index_rule="nint"),
+        "cam6": dict(spectrum_shift="end_off", storm_speed_truncate=False,
+                     source_level_rule="interface_below_p",
+                     hd_index_rule="nearest_grid", hdepth_min_km=1.0),
+    }
+    if _variant not in _variant_flags:
+        raise ValueError(
+            f"e3sm_cam_beres_variant must be one of {tuple(_variant_flags)}, "
+            f"got {_variant!r}")
+    br = gc.e3sm_cam.beres._replace(
+        mfcc_table_path=str(getattr(config, "e3sm_cam_mfcc_table_path", "")),
+        **_variant_flags[_variant],
+    )
+    _effgw_beres = getattr(config, "e3sm_cam_effgw_beres", None)
+    if _effgw_beres is not None:
+        br = br._replace(effgw=float(_effgw_beres))
     ec = gc.e3sm_cam._replace(
         source=str(getattr(config, "e3sm_cam_source", gc.e3sm_cam.source)),
         pgwv=int(getattr(config, "e3sm_cam_pgwv", gc.e3sm_cam.pgwv)),
         effgw=float(getattr(config, "e3sm_cam_effgw", gc.e3sm_cam.effgw)),
+        # CAM6 intrinsic-frequency spectral heating sum_l (c_l - ubm) gwut_l
+        # (gw_common.F90:690) vs the E3SM-3.0.1 ground-relative form.
+        dttke_use_intrinsic=bool(getattr(config, "e3sm_cam_dttke_intrinsic",
+                                         gc.e3sm_cam.dttke_use_intrinsic)),
         frontal=fr,
+        beres=br,
     )
     return gc._replace(mcfarlane=mc, hines=hn, e3sm_cam=ec)
 
@@ -4714,6 +4791,7 @@ def build_physics_pipeline(grid, sigma, config):
         sigma_full=sigma.sigma_full,
         sigma_half=sigma.sigma_half,
         dsigma=sigma.dsigma,
+        sigma_coord=sigma,
         convection_fn=convection_fn,
         convection_config=convection_config,
         radiation_fn=radiation_fn,
@@ -4779,17 +4857,15 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._use_clubb_cloud_fraction = getattr(
         config, 'use_clubb_cloud_fraction', False)
     if pipeline._use_clubb_cloud_fraction:
-        _turb_is_diag_clubb = (
-            getattr(config, 'turbulence', 'none') == 'clubb'
-            and not getattr(turb_config, 'prognostic', False)
-        )
-        if not _turb_is_diag_clubb:
+        # Both CLUBB paths (diagnostic and prognostic) publish
+        # ``TurbulenceOutput.cloud_fraction``; any other closure produces none.
+        if getattr(config, 'turbulence', 'none') != 'clubb':
             raise ValueError(
-                "use_clubb_cloud_fraction=True requires diagnostic CLUBB "
-                "turbulence (turbulence='clubb', not prognostic) to produce the "
+                "use_clubb_cloud_fraction=True requires CLUBB turbulence "
+                "(turbulence='clubb', diagnostic or prognostic) to produce the "
                 "sub-grid cloud fraction; got turbulence="
-                f"{getattr(config, 'turbulence', 'none')!r}.  Enable diagnostic "
-                "CLUBB or unset use_clubb_cloud_fraction."
+                f"{getattr(config, 'turbulence', 'none')!r}.  Enable CLUBB "
+                "or unset use_clubb_cloud_fraction."
             )
     # Clear-sky diagnostic (#843): enable the 2nd clouds-off radiation pass
     # only when config.output.clear_sky_diag is set (default off).
@@ -4869,13 +4945,21 @@ def build_physics_pipeline(grid, sigma, config):
     # ``e3sm_cam`` kernel accepts ``land_frac_col``; the pipeline threads its
     # own ``f_land`` (set by the model driver next to ``subgrid_topo_stddev``)
     # into the GWD call for exactly this scheme.
-    pipeline._gwd_takes_land_frac = (_gwd_scheme == "e3sm_cam")
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        e3sm_mfcc_table,
+        e3sm_sources,
+    )
+    _resolved_gwd = gwd_config_for(config) if _gwd_scheme != "none" else None
+    _e3sm_srcs = e3sm_sources(_resolved_gwd) if _resolved_gwd is not None else ()
+    pipeline._gwd_takes_land_frac = "e3sm_cam" in _gwd_scheme.split("+")
     # Beres netdt threading: only when the resolved e3sm_cam config actually
     # selects the convective source (the kernel accepts the kwarg for every
     # source but only Beres consumes it — avoid useless plumbing otherwise).
-    pipeline._gwd_takes_netdt = (
-        _gwd_scheme == "e3sm_cam"
-        and getattr(pipeline.gwd_config, "source", None) == "convective"
+    # Multi-source ("orographic+frontal+convective") and GWD composites
+    # ("mcfarlane+e3sm_cam") are read from the resolved config's source set.
+    pipeline._gwd_takes_netdt = "convective" in _e3sm_srcs
+    pipeline._gwd_mfcc_table = (
+        e3sm_mfcc_table(_resolved_gwd) if _resolved_gwd is not None else None
     )
     # Frontal (CM) source needs the frontogenesis function FRONTGF (E3SM's
     # producer lives in the SE dynamics, gravity_waves_sources.F90).  A
@@ -4885,8 +4969,7 @@ def build_physics_pipeline(grid, sigma, config):
     # zeros path would make a coupled frontal selection a SILENT no-op —
     # keep rejecting loudly there (the leaf keeps None->zeros for
     # standalone/unit callers that pass frontgf explicitly).
-    if (_gwd_scheme == "e3sm_cam"
-            and getattr(pipeline.gwd_config, "source", None) == "frontal"):
+    if "frontal" in _e3sm_srcs:
         from legoesm.atmosphere.physics.gravity_wave_drag.frontogenesis import (
             frontogenesis_supported,
         )

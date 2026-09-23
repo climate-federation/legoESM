@@ -395,7 +395,7 @@ def tiedtke_convection(
         + shallow_weight * M_b_shallow
         + midlevel_weight * M_b_midlevel
     )
-    # See ZhangMcFarlaneConfig.M_b_max.
+    # Hard cap on the cloud-base mass flux [kg/m^2/s] (config.M_b_max).
     M_b = jnp.clip(M_b, 0.0, config.M_b_max)
 
     # -- Plume integration -------------------------------------------------

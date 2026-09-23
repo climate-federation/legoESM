@@ -153,7 +153,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resolution", type=int, default=16)
     parser.add_argument("--nlev", type=int, default=40)
     parser.add_argument("--vertical-coord", type=str, default="hybrid",
-                        choices=["sigma", "hybrid"])
+                        choices=["sigma", "hybrid", "cam_l32"],
+                        help="cam_l32 = CAM6's 32-level hybrid table (nlev must be 32)")
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
     # ``mpas`` is the canonical name for the SCVT Voronoi mesh + TRiSK
@@ -487,6 +488,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # when the user did not provide a value.  Resolved to ``1`` after
     # production-profile processing.
     parser.add_argument("--rad-update-steps", type=int, default=None)
+    parser.add_argument("--physics-update-steps", type=int, default=1,
+                        help="Run the whole column physics every N steps and "
+                             "re-apply its cached tendencies in between (CAM "
+                             "cadence; MPAS lane). rad-update-steps must be a "
+                             "multiple. 1 = every step.")
+    parser.add_argument("--cld-macmic-num-steps", type=int, default=1,
+                        help="CAM6 cld_macmic_num_steps: sub-cycle turbulence "
+                             "(macrophysics) + microphysics N times at "
+                             "dt_phys/N inside each physics step, after the "
+                             "convective increment (MPAS lane). 1 = parallel "
+                             "split.")
     parser.add_argument("--unfused-radiation", action="store_true", default=False,
                         help="Run radiation outside the compiled segment scan")
     parser.add_argument("--per-step-rollout", action="store_true", default=False,
@@ -698,7 +710,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # run_coupled so AMIP can run with the SAME tuned slab parameters. Defaults
     # (constant / 0 / None / off) keep the prior AMIP behaviour byte-identical.
     parser.add_argument("--surface-bulk-scheme", type=str, default="constant",
-                        choices=["constant", "coare3", "large_yeager"],
+                        choices=["constant", "coare3", "large_yeager",
+                                 "large_yeager_cesm"],
                         help="Surface-layer bulk-flux scheme (coare3 = COARE 3.0 "
                              "MOST with convective gustiness; the tuned slab value). "
                              "Matches ExperimentConfig.validate_strict — 'most' is "
@@ -1139,7 +1152,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Clouds & microphysics (full-physics defaults — see the policy note above)
     parser.add_argument("--clouds", type=str, default="xu_randall",
-                        choices=["none", "sundqvist", "xu_randall"])
+                        choices=["none", "sundqvist", "xu_randall",
+                                 "cam6_clubb"])
     parser.add_argument("--microphysics", type=str, default="sundqvist",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",
@@ -1619,10 +1633,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Hines saturation momentum-flux cap [Pa] "
                              "(default 0.1).")
     parser.add_argument("--e3sm-cam-source", type=str, default=None,
-                        choices=["orographic", "frontal", "convective",
-                                 "background"],
                         dest="e3sm_cam_source",
-                        help="E3SM CAM gravity-wave source spectrum.")
+                        help="E3SM CAM gravity-wave source: orographic | "
+                             "frontal | convective | background, or a "
+                             "'+'-joined set (CAM6 f09: "
+                             "orographic+frontal+convective). Validated by "
+                             "ExperimentConfig.validate_strict.")
+    parser.add_argument("--e3sm-cam-effgw-cm", type=float, default=None,
+                        dest="e3sm_cam_effgw_cm",
+                        help="Frontal-source efficiency (CAM effgw_cm; CAM6 "
+                             "f09 1.0). Default None = --e3sm-cam-effgw.")
+    parser.add_argument("--e3sm-cam-effgw-beres", type=float, default=None,
+                        dest="e3sm_cam_effgw_beres",
+                        help="Beres convective-source efficiency (CAM "
+                             "effgw_beres_dp; CAM6 f09 0.4). Default None = "
+                             "--e3sm-cam-effgw.")
+    parser.add_argument("--e3sm-cam-frontgfc", type=float, default=None,
+                        dest="e3sm_cam_frontgfc",
+                        help="Frontogenesis threshold for the frontal source "
+                             "[K^2/(m^2 s)] (CAM frontgfc; CAM6 f09 3.0e-15). "
+                             "Default None = kernel default 1.25e-15.")
+    parser.add_argument("--e3sm-cam-beres-variant", type=str, default=None,
+                        choices=["e3sm", "cam6"],
+                        dest="e3sm_cam_beres_variant",
+                        help="Beres source kernel oracle: e3sm (default) or "
+                             "cam6 (gw_convect.F90: end-off spectrum shift, "
+                             "real storm speed, interface source level).")
+    parser.add_argument("--e3sm-cam-dttke-intrinsic",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        dest="e3sm_cam_dttke_intrinsic",
+                        help="Spectral GW heating form: intrinsic-frequency "
+                             "sum (c-u)*gwut (CAM6 gw_common.F90:690) vs the "
+                             "E3SM-3.0.1 ground-relative sum c*gwut (default).")
+    parser.add_argument("--e3sm-cam-mfcc-table", type=str, default=None,
+                        dest="e3sm_cam_mfcc_table_path",
+                        help="Offline Beres lookup table netcdf (CAM "
+                             "gw_drag_file, newmfspectra40_dc25.nc). Unset = "
+                             "the documented analytic stand-in spectrum.")
     parser.add_argument("--e3sm-cam-pgwv", type=int, default=None,
                         dest="e3sm_cam_pgwv",
                         help="Number of gravity-wave phase-speed bins.")
@@ -1676,6 +1723,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "fall_b_i=0.865 and PSD bounds tuned against "
                              "anvil-ice over-accumulation, the exact disease "
                              "of the 2026-07 AMIP warm drift).")
+    parser.add_argument("--morrison-sed-cfl-substeps",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        dest="morrison_sed_cfl_substeps",
+                        help="MG2-style CFL sub-stepping of Morrison rain/ice/"
+                             "snow/graupel sedimentation (per column nstep = "
+                             "1 + floor(max V dt/dz)); default ON (user "
+                             "2026-09-22). --no-morrison-sed-cfl-substeps = the "
+                             "legacy one-pass form (falls at most one layer per "
+                             "call) for reproducing earlier runs.")
+    parser.add_argument("--morrison-sed-cfl-substeps-strict", action="store_true",
+                        default=False, dest="morrison_sed_cfl_substeps_strict",
+                        help="With --morrison-sed-cfl-substeps: abort the run "
+                             "when any column needs more sub-steps than the "
+                             "static cap (otherwise the count is only reported).")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -2182,6 +2243,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sic_scale=args.sic_scale if args.sic_scale is not None else _sic_default,
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
+        physics_update_steps=args.physics_update_steps,
+        cld_macmic_num_steps=args.cld_macmic_num_steps,
         unfused_radiation=args.unfused_radiation,
         rrtmgp_use_scan=args.rrtmgp_use_scan,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
@@ -2325,6 +2388,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hard_sat_ice_curve=args.hard_sat_ice_curve,
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,
+        morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
+        morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None
@@ -2356,6 +2421,27 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.e3sm_cam_latitude_taper
             if args.e3sm_cam_latitude_taper is not None
             else _EXPERIMENT_DEFAULTS.e3sm_cam_latitude_taper),
+        e3sm_cam_effgw_cm=(args.e3sm_cam_effgw_cm
+                           if args.e3sm_cam_effgw_cm is not None
+                           else _EXPERIMENT_DEFAULTS.e3sm_cam_effgw_cm),
+        e3sm_cam_effgw_beres=(args.e3sm_cam_effgw_beres
+                              if args.e3sm_cam_effgw_beres is not None
+                              else _EXPERIMENT_DEFAULTS.e3sm_cam_effgw_beres),
+        e3sm_cam_frontgfc=(args.e3sm_cam_frontgfc
+                           if args.e3sm_cam_frontgfc is not None
+                           else _EXPERIMENT_DEFAULTS.e3sm_cam_frontgfc),
+        e3sm_cam_beres_variant=(
+            args.e3sm_cam_beres_variant
+            if args.e3sm_cam_beres_variant is not None
+            else _EXPERIMENT_DEFAULTS.e3sm_cam_beres_variant),
+        e3sm_cam_mfcc_table_path=(
+            args.e3sm_cam_mfcc_table_path
+            if args.e3sm_cam_mfcc_table_path is not None
+            else _EXPERIMENT_DEFAULTS.e3sm_cam_mfcc_table_path),
+        e3sm_cam_dttke_intrinsic=(
+            args.e3sm_cam_dttke_intrinsic
+            if args.e3sm_cam_dttke_intrinsic is not None
+            else _EXPERIMENT_DEFAULTS.e3sm_cam_dttke_intrinsic),
         mcfarlane_tau_max=(
             args.mcfarlane_tau_max if args.mcfarlane_tau_max is not None
             else _EXPERIMENT_DEFAULTS.mcfarlane_tau_max),
@@ -3168,6 +3254,24 @@ def main(argv: list[str] | None = None):
     # ``--truncation``-only spelling, so gaussian AMIP died at setup on the
     # prognostic default schemes (2026-07-21 audit — cross-grid smoke).
     args = _postprocess_args(args, parser, argv if argv is not None else sys.argv[1:])
+
+    # The strict sedimentation-overflow abort is an equinox ``error_if``, i.e.
+    # a host callback: it needs a CPU device to place its inputs on, which the
+    # GPU lane (``JAX_PLATFORMS=cuda``) does not have.  Refuse at startup
+    # instead of dying mid-run (the first CAM6 60-day arm died at day 2).
+    if getattr(args, "morrison_sed_cfl_substeps_strict", False):
+        import jax as _jax
+        if not any(d.platform == "cpu" for d in _jax.devices()) and not any(
+                _b == "cpu" for _b in _jax.local_devices()):
+            try:
+                _jax.devices("cpu")
+            except RuntimeError:
+                raise SystemExit(
+                    "morrison_sed_cfl_substeps_strict=True needs a CPU device for "
+                    "its host-callback abort, but none is available (JAX_PLATFORMS="
+                    f"{os.environ.get('JAX_PLATFORMS', '<unset>')!r}).  Add 'cpu' to "
+                    "JAX_PLATFORMS or run with the flag off (the required sub-step "
+                    "count is still reported as a diagnostic).") from None
     _apply_spectral_scheme_fallback(
         args, argv if argv is not None else sys.argv[1:], parser)
 

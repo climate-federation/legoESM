@@ -61,7 +61,7 @@ class GridConfig(NamedTuple):
     grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, mpas
     resolution: int = 16             # N for CS, n_max for spectral
     nlev: int = 40
-    vertical_coord: str = "hybrid"   # sigma, hybrid
+    vertical_coord: str = "hybrid"   # sigma, hybrid, cam_l32 (CAM6 32-level table)
     p_top_Pa: float = 200.0
     stretching: float = 2.0
     # SIGMA-coordinate layer redistribution toward the tropopause, at FIXED
@@ -417,7 +417,7 @@ VALID_TURBULENCE = (
 
 VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
 
-VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved")
+VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_clubb")
 
 # ``gravity_wave_drag`` additionally accepts a ``+``-joined COMPOSITION of these
 # (e.g. "hines+mcfarlane"); validate_strict splits on "+" before membership.
@@ -441,7 +441,7 @@ def parse_gwd_spec(value: str) -> str:
 
     Delegates the SEMANTICS to ``ExperimentConfig.validate_strict`` rather than
     re-implementing them: a membership-only check accepted composites strict
-    rejects -- "none+hines", "e3sm_cam+hines", "ml_emulator+hines", duplicates
+    rejects -- "none+hines", "ml_emulator+hines", duplicates
     like "hines+hines" (codex) -- so the CLI would advertise a spec the config
     then refuses. Asking the real validator keeps the two from diverging by
     construction, which is the same lesson as resolving the effective surface
@@ -483,7 +483,7 @@ def parse_gwd_spec(value: str) -> str:
 # "large_yeager") only, so an accepted "most" would silently degrade to the
 # constant-coefficient branch — a loud rejection is better than wrong physics.
 # See driver/air_sea_consistency.py.
-VALID_SURFACE_BULK = ("constant", "coare3", "large_yeager")
+VALID_SURFACE_BULK = ("constant", "coare3", "large_yeager", "large_yeager_cesm")
 
 
 class ExperimentConfig(NamedTuple):
@@ -526,6 +526,18 @@ class ExperimentConfig(NamedTuple):
     # Radiation
     radiation: str = "gray"
     rad_update_steps: int = 1
+    # Physics cadence (CAM6 suite): run the WHOLE column physics every N
+    # steps and re-apply its cached tendency set (u, v, T, p_s, every
+    # tracer, precip / surface / TOA diagnostics, ledger rows) on the steps
+    # in between -- CAM's physics-every-1800-s pattern.  1 = every step
+    # (byte-identical to before).  MPAS lane only; ``rad_update_steps`` must
+    # be a multiple of it so radiation stays on physics steps.
+    physics_update_steps: int = 1
+    # CAM6 ``cld_macmic_num_steps``: turbulence (macrophysics) and
+    # microphysics run N times sequentially at dt_phys/N inside each
+    # physics step, after the convective increment (CAM tphysbc macmic
+    # loop).  1 = the parallel split (byte-identical).  MPAS lane.
+    cld_macmic_num_steps: int = 1
     # Un-fuse radiation from the compiled-segment scan (issue: ~3h XLA
     # compile).  Static Python gate (NOT trainable); default OFF keeps
     # every existing run byte-identical.  When True AND
@@ -1623,11 +1635,35 @@ class ExperimentConfig(NamedTuple):
     e3sm_cam_latitude_taper: bool = False       # E3SMFrontalConfig.latitude_taper:
                                                 # OFF, E3SM's unstructured branch
                                                 # (our grids); see that field's docs
+    # CAM6-suite additions (2026-09-21).  ``e3sm_cam_source`` also accepts a
+    # ``+``-joined set ("orographic+frontal+convective").  None = the kernel's
+    # single ``e3sm_cam_effgw`` (byte-identical); CAM6 f09 sets effgw_cm=1.0,
+    # effgw_beres_dp=0.4.  ``e3sm_cam_beres_variant``: "e3sm" (default) or
+    # "cam6" (gw_convect.F90 end-off shift, real storm speed, interface
+    # source level; see gwd_config_for).  ``e3sm_cam_mfcc_table_path``: the
+    # offline Beres table (newmfspectra40_dc25.nc); "" = stand-in spectrum.
+    e3sm_cam_effgw_cm: float | None = None      # E3SMFrontalConfig.effgw
+    e3sm_cam_effgw_beres: float | None = None   # E3SMBeresConfig.effgw
+    e3sm_cam_frontgfc: float | None = None      # E3SMFrontalConfig.frontgfc
+                                                # [K^2/(m^2 s)]; None = kernel
+                                                # default 1.25e-15; CAM6 f09 3.0e-15
+    e3sm_cam_beres_variant: str = "e3sm"        # "e3sm" | "cam6" (also sets
+                                                # CAM's min_hdepth 1 km + row lookup)
+    e3sm_cam_mfcc_table_path: str = ""          # E3SMBeresConfig.mfcc_table_path
+    e3sm_cam_dttke_intrinsic: bool = False      # E3SMCAMConfig.dttke_use_intrinsic
+                                                # (CAM6 heating form; E3SM-3.0.1 off)
     # Appended at the tuple END to preserve the positional ABI (codex
     # 2026-07-27 flavor review, Major 1).
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
                                                 # "mg" (E3SM MG, GCM default) |
                                                 # "sam" (gSAM M2005 anvil tune)
+    morrison_sed_cfl_substeps: bool = True      # MorrisonConfig.sed_cfl_substeps:
+                                                # MG2 CFL sub-stepped sedimentation
+                                                # (default ON, user 2026-09-22;
+                                                # False = legacy one-pass form)
+    morrison_sed_cfl_substeps_strict: bool = False  # MorrisonConfig.sed_cfl_substeps_strict:
+                                                # runtime error when a column
+                                                # needs more sub-steps than the cap
     # Flux law the SLAB-land skin energy balance debits at the land-air
     # interface (physics_pipeline._step_slab_land):
     #   "legacy_dual" (default, byte-identical): the slab debits its OWN
@@ -1755,6 +1791,20 @@ class ExperimentConfig(NamedTuple):
         elif g.vertical_coord == "hybrid" and g.sigma_layout != "standard":
             errors.append(
                 f"grid.sigma_layout={g.sigma_layout!r} is inert on the hybrid lane")
+        elif g.vertical_coord == "cam_l32":
+            # The CAM6 table fixes every interface: nlev, top and spacing are
+            # not free, and the analytic-hybrid / sigma knobs would be inert.
+            if g.nlev != 32:
+                errors.append(
+                    f"grid.vertical_coord='cam_l32' is the CAM6 32-level table; nlev must be 32 (got {g.nlev})")
+            if (g.p_top_Pa != 200.0 or g.stretching != 2.0 or g.sigma_top != 0.01
+                    or g.sigma_layout != "standard" or g.tropopause_refine != 1.0):
+                errors.append(
+                    "grid.p_top_Pa/stretching/sigma_top/sigma_layout/tropopause_refine are inert "
+                    "on vertical_coord='cam_l32' (the table fixes them); leave them at their defaults")
+        elif g.vertical_coord not in ("sigma", "hybrid"):
+            errors.append(
+                f"grid.vertical_coord must be one of ('sigma', 'hybrid', 'cam_l32'); got {g.vertical_coord!r}")
         # Tropopause refinement: 1.0 = uniform.  The upper bound is NOT a
         # vertical-CFL limit — the first-order-upwind vertical advective CFL
         # is only 0.26 at refine=3 / dt=75 s / omega=5 Pa/s and 0.39 at
@@ -2164,22 +2214,72 @@ class ExperimentConfig(NamedTuple):
                 "pipeline); it would silently run 'constant'.  Use a "
                 "pipeline backend (cd-grid / latlon) or scheme='constant'."
             )
-        # use_clubb_cloud_fraction is enforced (turbulence must be clubb) only
-        # inside build_physics_pipeline, which the mpas/spectral standalone
-        # radiation paths never build — so the opt-in would silently no-op
-        # there.  Reject it loudly on those backends (dispatch-hardening,
-        # mirrors the condensate-scheme guard above).
+        # use_clubb_cloud_fraction is enforced (turbulence must be clubb) by
+        # build_physics_pipeline (cd-grid / latlon) and by combined.make_physics
+        # (MPAS); the spectral standalone radiation path builds neither, so the
+        # opt-in would silently no-op there.  Reject it loudly on that backend
+        # (dispatch-hardening, mirrors the condensate-scheme guard above).
         if (self.use_clubb_cloud_fraction
-                and self.dycore.discretization
-                in _NO_CLOUD_THREAD_DISCRETIZATIONS):
+                and self.dycore.discretization == "spectral"):
             errors.append(
                 "use_clubb_cloud_fraction=True is not wired into the "
                 f"{self.dycore.discretization!r} radiation path (that backend "
                 "builds RadiationConfig directly, bypassing the shared physics "
                 "pipeline that enforces it); it would silently no-op.  Use a "
-                "pipeline backend (cd-grid / latlon) with turbulence='clubb', "
-                "or drop --use-clubb-cloud-fraction."
+                "pipeline backend (cd-grid / latlon) or MPAS with "
+                "turbulence='clubb', or drop --use-clubb-cloud-fraction."
             )
+        # The CLUBB cloud-fraction routing needs the producer on EVERY lane
+        # (build_physics_pipeline / combined.make_physics both raise at build
+        # time; fail at config time too so a deck is refused before setup).
+        if self.use_clubb_cloud_fraction and self.turbulence != "clubb":
+            errors.append(
+                "use_clubb_cloud_fraction=True requires turbulence='clubb' "
+                "(the only cloud-fraction-producing closure); got "
+                f"{self.turbulence!r}."
+            )
+        # CAM6 cloud fraction (cldfrc2m ice stratus + CLUBB liquid + deepcu):
+        # the liquid part IS the CLUBB PDF fraction, so it needs the producer
+        # and the carry routing; wired on the MPAS combined-physics lane only
+        # (the FV pipeline's cloud call and the cube CMOR collector do not
+        # thread lat / the deep-convection carries).
+        if self.cloud_scheme == "cam6_clubb":
+            if self.turbulence != "clubb":
+                errors.append(
+                    "cloud_scheme='cam6_clubb' takes its liquid cloud fraction "
+                    "from CLUBB's PDF; requires turbulence='clubb', got "
+                    f"{self.turbulence!r}."
+                )
+            if not self.use_clubb_cloud_fraction:
+                errors.append(
+                    "cloud_scheme='cam6_clubb' requires "
+                    "use_clubb_cloud_fraction=True (routes the CLUBB cloud-"
+                    "fraction carry to radiation); got False."
+                )
+            if self.dycore.discretization != "mpas":
+                errors.append(
+                    "cloud_scheme='cam6_clubb' is wired on the MPAS lane only; "
+                    f"got discretization={self.dycore.discretization!r}."
+                )
+            if self.convective_cloud:
+                errors.append(
+                    "cloud_scheme='cam6_clubb' carries its own deep-convective "
+                    "fraction (clubb_intr deepcu); convective_cloud=True is "
+                    "not part of CAM6 and is refused."
+                )
+            if self.microphysics == "none":
+                errors.append(
+                    "cloud_scheme='cam6_clubb' has no diagnostic condensate "
+                    "floor (CAM6 radiates the prognostic condensate); requires "
+                    "a microphysics scheme, got microphysics='none'."
+                )
+            if self.radiation not in ("rrtmgp", "rrtmg"):
+                errors.append(
+                    "cloud_scheme='cam6_clubb' needs a cloud-path radiation "
+                    "(rrtmgp/rrtmg) -- 'gray'/'none' return before the cloud "
+                    "call, so the CAM6 cloud field would radiate nothing while "
+                    f"clt/clivi report it; got radiation={self.radiation!r}."
+                )
         # Cross-field: the diagnostic-condensate FLOOR exists only for the
         # sub-grid diagnostic-fraction schemes (sundqvist / xu_randall); 'none'
         # skips clouds and 'resolved' (CRM) excludes the floor.  It is radiatively
@@ -2541,6 +2641,37 @@ class ExperimentConfig(NamedTuple):
         # alias set via normalize_grid_type per codex F-B3).
         _is_mpas = (d.discretization == "mpas"
                     or normalize_grid_type(g.grid_type) == "mpas")
+        _pus = self.physics_update_steps
+        if not isinstance(_pus, int) or isinstance(_pus, bool) or _pus < 1:
+            errors.append(
+                f"physics_update_steps must be an int >= 1, got {_pus!r}")
+        elif _pus > 1:
+            if not _is_mpas:
+                errors.append(
+                    f"physics_update_steps={_pus} is wired into the MPAS lane "
+                    "only (combined.make_physics cadence variants); it would "
+                    "be silently inert here")
+            _rus = self.rad_update_steps
+            if _rus < _pus or _rus % _pus != 0:
+                errors.append(
+                    f"rad_update_steps={_rus} must be a multiple of "
+                    f"physics_update_steps={_pus} (>= it) so radiation is "
+                    "recomputed on physics steps; a held-physics step cannot "
+                    "solve radiation")
+        _nmm = self.cld_macmic_num_steps
+        if not isinstance(_nmm, int) or isinstance(_nmm, bool) or _nmm < 1:
+            errors.append(
+                f"cld_macmic_num_steps must be an int >= 1, got {_nmm!r}")
+        elif _nmm > 1:
+            if not _is_mpas:
+                errors.append(
+                    f"cld_macmic_num_steps={_nmm} is wired into the MPAS lane "
+                    "only (combined.make_physics macmic loop); it would be "
+                    "silently inert here")
+            if self.turbulence == "none" and self.microphysics == "none":
+                errors.append(
+                    f"cld_macmic_num_steps={_nmm} sub-cycles turbulence and "
+                    "microphysics, but both are 'none'")
         if _is_mpas:
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
@@ -3088,6 +3219,20 @@ class ExperimentConfig(NamedTuple):
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} unknown; choose "
                 "'mg' (E3SM MG, default) or 'sam' (gSAM M2005).")
+        for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict"):
+            _v = getattr(self, _nm)
+            if not isinstance(_v, bool):
+                errors.append(f"{_nm} must be a bool, got {_v!r}")
+            elif (_v is not ExperimentConfig._field_defaults[_nm]
+                    and self.microphysics != "morrison"):
+                errors.append(
+                    f"{_nm}={_v} requires microphysics='morrison' "
+                    f"(got {self.microphysics!r}); it would be silently inert")
+        if (self.morrison_sed_cfl_substeps_strict is True
+                and self.morrison_sed_cfl_substeps is False):
+            errors.append(
+                "morrison_sed_cfl_substeps_strict=True needs "
+                "morrison_sed_cfl_substeps=True (nothing to check otherwise)")
         if self.morrison_flavor != "mg" and self.microphysics != "morrison":
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} requires "
@@ -3205,13 +3350,54 @@ class ExperimentConfig(NamedTuple):
                     f"{_f} must be a positive, finite gravity-wave-drag "
                     f"parameter, got {_v!r}"
                 )
-        if self.e3sm_cam_source not in (
-                "orographic", "frontal", "convective", "background"):
+        _e3sm_parts = str(self.e3sm_cam_source).split("+")
+        _e3sm_valid = ("orographic", "frontal", "convective", "background")
+        if self.e3sm_cam_source not in _e3sm_valid and (
+                any(p not in _e3sm_valid for p in _e3sm_parts)
+                or len(set(_e3sm_parts)) != len(_e3sm_parts)):
             errors.append(
-                f"e3sm_cam_source must be one of "
-                f"('orographic', 'frontal', 'convective', 'background'), "
-                f"got {self.e3sm_cam_source!r}"
+                f"e3sm_cam_source must be one of {_e3sm_valid} or a "
+                f"'+'-joined set of distinct ones, got {self.e3sm_cam_source!r}"
             )
+        if ("convective" in _e3sm_parts
+                and "e3sm_cam" in str(self.gravity_wave_drag).split("+")
+                and self.convection == "none"):
+            errors.append(
+                "e3sm_cam_source includes 'convective' (Beres) but "
+                "convection='none': no scheme publishes the convective "
+                "heating the Beres source reads, so it would launch nothing "
+                "(silent no-op)"
+            )
+        _fg = self.e3sm_cam_frontgfc
+        if _fg is not None and (not math.isfinite(_fg) or _fg <= 0.0):
+            errors.append(
+                f"e3sm_cam_frontgfc must be None or a positive, finite "
+                f"frontogenesis threshold [K^2/(m^2 s)], got {_fg!r}")
+        for _f in ("e3sm_cam_effgw_cm", "e3sm_cam_effgw_beres"):
+            _v = getattr(self, _f)
+            if _v is not None and (
+                    not math.isfinite(_v) or _v <= 0.0 or _v > 1.0):
+                errors.append(
+                    f"{_f} must be None or a finite efficiency in (0, 1], "
+                    f"got {_v!r}"
+                )
+        if not isinstance(self.e3sm_cam_dttke_intrinsic, bool):
+            errors.append(
+                f"e3sm_cam_dttke_intrinsic must be a bool, "
+                f"got {self.e3sm_cam_dttke_intrinsic!r}"
+            )
+        if self.e3sm_cam_beres_variant not in ("e3sm", "cam6"):
+            errors.append(
+                f"e3sm_cam_beres_variant must be one of ('e3sm', 'cam6'), "
+                f"got {self.e3sm_cam_beres_variant!r}"
+            )
+        if self.e3sm_cam_mfcc_table_path:
+            if not os.path.isfile(self.e3sm_cam_mfcc_table_path):
+                errors.append(
+                    f"e3sm_cam_mfcc_table_path={self.e3sm_cam_mfcc_table_path!r} "
+                    f"does not exist (the Beres table would silently fall "
+                    f"back to nothing at build time)"
+                )
         if isinstance(self.e3sm_cam_pgwv, bool) or \
                 not isinstance(self.e3sm_cam_pgwv, int) or \
                 self.e3sm_cam_pgwv < 0:
@@ -3219,7 +3405,7 @@ class ExperimentConfig(NamedTuple):
                 f"e3sm_cam_pgwv must be an int >= 0, "
                 f"got {self.e3sm_cam_pgwv!r}"
             )
-        if self.e3sm_cam_source in ("frontal", "background") and \
+        if any(p in ("frontal", "background") for p in _e3sm_parts) and \
                 self.e3sm_cam_pgwv < 1:
             errors.append(
                 f"e3sm_cam_pgwv must be >= 1 for a launch-everywhere "
@@ -3273,14 +3459,16 @@ class ExperimentConfig(NamedTuple):
             _ov = getattr(self, "gravity_wave_drag_override", None)
             _e3sm_src = (getattr(getattr(_ov, "e3sm_cam", None), "source", None)
                          if _ov is not None else None) or self.e3sm_cam_source
-            if "e3sm_cam" in _gwd_parts and _e3sm_src != "background":
+            if ("e3sm_cam" in _gwd_parts
+                    and "orographic" in str(_e3sm_src).split("+")
+                    and any(p in ("lindzen", "mcfarlane") for p in _gwd_parts)):
                 errors.append(
-                    f"gravity_wave_drag {self.gravity_wave_drag!r} may only "
-                    f"composite e3sm_cam with e3sm_cam_source='background'; "
-                    f"got e3sm_cam_source={_e3sm_src!r} "
-                    f"(orographic double-counts topographic drag against "
-                    f"lindzen/mcfarlane; frontal/convective need per-column "
-                    f"source fields the composite does not carry)"
+                    f"composite gravity_wave_drag {self.gravity_wave_drag!r} "
+                    f"pairs e3sm_cam's orographic source with lindzen/mcfarlane "
+                    f"(e3sm_cam_source={_e3sm_src!r}): topographic drag would "
+                    f"be double-counted; use frontal/convective/background "
+                    f"sources there, or run e3sm_cam alone with "
+                    f"'orographic+frontal+convective'"
                 )
             # Mirror get_gwd_fn's runtime rule so a duplicate composite
             # fails HERE, not later during physics construction.
@@ -3558,6 +3746,10 @@ class ExperimentConfig(NamedTuple):
             sic_scale=amip_cfg.sic_scale,
             radiation=amip_cfg.radiation,
             rad_update_steps=amip_cfg.rad_update_steps,
+            physics_update_steps=amip_cfg.physics_update_steps,
+            cld_macmic_num_steps=amip_cfg.cld_macmic_num_steps,
+            morrison_sed_cfl_substeps=amip_cfg.morrison_sed_cfl_substeps,
+            morrison_sed_cfl_substeps_strict=amip_cfg.morrison_sed_cfl_substeps_strict,
             unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
@@ -3779,6 +3971,10 @@ class ExperimentConfig(NamedTuple):
             sic_scale=self.sic_scale,
             radiation=self.radiation,
             rad_update_steps=self.rad_update_steps,
+            physics_update_steps=self.physics_update_steps,
+            cld_macmic_num_steps=self.cld_macmic_num_steps,
+            morrison_sed_cfl_substeps=self.morrison_sed_cfl_substeps,
+            morrison_sed_cfl_substeps_strict=self.morrison_sed_cfl_substeps_strict,
             diurnal_cycle=self.diurnal_cycle,
             co2_ppmv=self.co2_ppmv,
             ch4_ppbv=self.ch4_ppbv,

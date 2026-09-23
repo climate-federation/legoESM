@@ -32,7 +32,6 @@ from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
     TerrainMetric,
-    pressure_from_sigma,
 )
 from legoesm import constants
 
@@ -591,8 +590,8 @@ def _make_hydrostatic_turbulence(
         shape_2d = p_s.shape
 
         # Pressure
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
@@ -781,8 +780,8 @@ def _make_mpas_turbulence(
         u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
 
         # Pressures
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (nCells, nlev)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)  # (nCells, nlev+1)
+        p_full = sigma_coord.pressure_at_full(p_s)  # (nCells, nlev)
+        p_half = sigma_coord.pressure_at_half(p_s)  # (nCells, nlev+1)
 
         # Column-format inputs (already 1D × nlev, so reshape is a no-op).
         T_col = T.reshape(nCells, nlev)
@@ -1267,10 +1266,8 @@ def _make_spectral_pe_turbulence(
         n_lat, n_lon = p_s.shape
 
         # Pressure at full and half levels
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = n_lat * n_lon
