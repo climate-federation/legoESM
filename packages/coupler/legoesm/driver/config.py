@@ -1769,6 +1769,24 @@ class ExperimentConfig(NamedTuple):
         can carry ``CLUBBConfig(liquid_partition=True)`` without it ever being
         set, and that route reached a validated, built model with both
         radiative condensate floors still active (codex).
+
+        OPEN BEFORE THIS IS ENABLED ANYWHERE, both from the round-3 reviews and
+        neither closed here:
+
+        * the optics cover accounting.  The arm this lever targets carries MORE
+          cloud cover than the baseline (61.5 % against 52.2 % over the arms'
+          identical first 20 days) and still reflects 14.5 W/m2 LESS sunlight,
+          with clear-sky fluxes matching to 0.3.  Under the standard accounting
+          more cover at fixed grid-mean water should reflect MORE, so either the
+          liquid mass really is the deficit (which this lever addresses) or the
+          radiation is fed an in-cloud optical depth and treats it as a
+          grid-mean one (which it does not).  Read where cover enters optical
+          depth versus albedo before crediting any radiative effect to this.
+        * ``clubb_dt`` reconciliation across the host sub-steps, which becomes
+          load-bearing because the guard above forces the macro/micro sub-cycle
+          on wherever this is enabled.
+
+        A future change that turns this on has to confront both.
         """
         if self.clubb_liquid_partition:
             return True
