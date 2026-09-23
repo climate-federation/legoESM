@@ -24,11 +24,11 @@ measured mechanism in this pair.
 **Order B.  The T-point ratio is innocent too.**  Installing the ratio NEMO's
 own recorded stage height implies, in the one place the ratio at the now level
 enters the velocity-indicator continuity solve, moves the developed stage-2
-residual from `2.334682468902387e-13` to `2.334682468820876e-13` m/s — it
-removes `3.49e-11` of it, and its whole influence on the scored field is
-`3.228417925758222e-22` m/s, which is `1.4e-09` of the residual.  Five
-operands of that producer have now been substituted one at a time and none of
-them owns it.
+residual from `2.334682468902387e-13` to `2.3346824689582235e-13` m/s — it
+makes it `2.39e-11` WORSE rather than better — and its whole influence on the
+scored field is `3.362782104179888e-22` m/s, which is `1.4e-09` of the
+residual.  Five operands of that producer have now been substituted one at a
+time and none of them owns it.
 
 **Order C.  The stage sea surface height is measured, and round 161's
 arithmetic was right.**  legoESM's stage-2 `Kmm` height differs from the
@@ -134,7 +134,18 @@ in the vertical-diffusion path does NOT trigger, and nothing there is named.
 |---|---|
 | production arm reproduces round 152's six published rows | PASS, to 1e-6 relative, enforced before anything is reported |
 | the combined row decomposes into the two rows the ranking scored | residual `0.0` on every one of the 18,000 cells, against an allowance of `8.67e-19` K |
-| that control can fail | its plant is below |
+| that control can fail | its plant is below: mis-wired, the residual is `0.0398` K on all 18,000 |
+
+**Why that residual is a HARD zero rather than a few last places, explained
+rather than quoted.**  Every row is one temperature boundary minus another at
+the same few tens of kelvin, so each row is an exact integer multiple of that
+temperature's own last place — about `3.55e-15` K at 20 K — and so is every
+sum and difference of them, because none of them leaves that grid.  The
+identity the control checks is then exact by construction.  A committed test
+builds four rows the same way and finds the residual zero on essentially every
+cell, and builds four independent numbers of the same magnitude and finds it
+non-zero on most of them, so the zero is a property of how the rows are made
+and not of the check.
 
 ## Order B — the T-point ratio
 
@@ -181,16 +192,17 @@ vertical velocity, whose root mean square is `2.3968803420671446e-06` m/s.
 | arm | vertical velocity (rms, m/s) | as a fraction of the field | residual removed |
 |---|---:|---:|---:|
 | corrected (round 160's second solve) | `2.334682468902387e-13` | `9.740504888487189e-08` | — |
-| corrected + the oracle's T-point ratio | `2.334682468820876e-13` | `9.740504888147118e-08` | **`3.4913062409732493e-11`** |
+| corrected, legoESM's own height through the same statement | `2.334682468902387e-13` | `9.740504888487189e-08` | **BIT**, 0 of 18,000 |
+| corrected + the oracle's T-point ratio | `2.3346824689582235e-13` | `9.740504888720145e-08` | **`-2.3916190563377753e-11`** |
 | shared velocity form (round 159's arm) | `2.334682468902387e-13` | `9.740504888487189e-08` | — |
-| shared + the oracle's T-point ratio | `2.334682468820876e-13` | `9.740504888147118e-08` | **`3.4913062409732493e-11`** |
+| shared + the oracle's T-point ratio | `2.3346824689582235e-13` | `9.740504888720145e-08` | **`-2.3916190563377753e-11`** |
 
-The two arms agree to every digit printed, which is what the one-producer claim
-predicts.
+A negative number is a worsening.  The two arms agree to every digit printed,
+which is what the one-producer claim predicts.
 
 The magnitude bound is again the cleaner statement.  The substitution's WHOLE
-effect on the scored field is `3.228417925758222e-22` m/s root mean square,
-maximum `4.235164736271502e-21`, on 3,927 of the 18,000 interfaces.  That is
+effect on the scored field is `3.362782104179888e-22` m/s root mean square,
+maximum `6.829203137237796e-21`, on 3,679 of the 18,000 interfaces.  That is
 `1.4e-09` of the residual: even a substitution that happened to point the
 right way could not have removed more than a billionth of it.
 
@@ -218,9 +230,16 @@ against the oracle's recorded `ssh(Kmm)` on the same T window.
 | difference, maximum | `1.875196477263419e-09` m |
 | the oracle's own height, root mean square | `0.12221990649579682` m |
 | relative | `5.137862445221475e-09` |
-| the T-point ratio it implies | `1.4601055758923643e-13` |
+| the T-point ratio the height difference implies | `1.4601055758923643e-13` |
 | round 161's measured face ratio difference (u) | `1.4516405645036015e-13` |
 | ratio of the two | `1.0058313411706412` |
+
+The last three rows compare a T-point quantity with a u-point one, and that is
+why they agree to `0.6%` rather than exactly: the face ratio is a
+surface-weighted average of two neighbouring cells' heights divided by a face
+reference depth, so it is the same difference seen through one averaging
+step.  Agreement to half a percent is what that predicts, and it is what the
+preregistration's factor-of-two threshold was set for.
 
 **C1 CONFIRMED**: `6.28e-10` m, inside the preregistered `1e-10` to `5e-09`
 band and on round 161's predicted order.  **C2 CONFIRMED**: the height
@@ -274,6 +293,36 @@ the field's own size, and that is still four orders above the compiled
 rounding floor this campaign has measured.  So the walk is not finished after
 round 163 either, and the receipt says so now rather than later.
 
+## The defect this round's own plant found, and disclosed
+
+**The round's first Order B measurement was WRONG, and the walk's inert plant
+is what refused it.**  The substitution hands the divergence block one level
+of the substituted thickness per call, selected by a counter.  The counter was
+carried across model runs instead of being reset per call, so from the SECOND
+substituted arm onward every level was handed the index of a level that does
+not exist.  The array library CLAMPS an out-of-range integer index instead of
+raising, so what came back was the deepest level's thickness on every level —
+a plausible small number rather than an error.
+
+The first scored arms of this round were therefore measuring a thickness
+column that no stage ever builds, and they reported a residual removal of
+`+3.49e-11` and a liveness of 3,927 cells, both meaningless — the re-run gives
+`-2.39e-11` and 3,679 cells.  What caught it:
+the `t-r3-inert` plant installs legoESM's OWN height and claims it is the
+oracle's, and the liveness control must see zero cells move.  It saw 3,831
+cells move at `4.24e-21`, so the plant was NOT caught, the walk raised
+`PLANT-BLIND` and exited 2 — the fail-closed path Order D was going to
+demonstrate deliberately, fired for real first.
+
+Three things changed and all three are in the diff: the level counter is per
+call, it is checked against the number of levels rather than trusted, and the
+calibration arm is now repeated AFTER every other substituted arm, because a
+calibration that runs only first was bit-exact and still missed this.  A
+committed test pins the clamping behaviour that made the defect silent.  Every
+Order B number in this receipt is from the re-run.  Orders A and C are
+unaffected: neither touches this code path, and the height was sunk in a run
+with no substitution at all.
+
 ## Controls, before any attribution
 
 | control | result |
@@ -281,9 +330,11 @@ round 163 either, and the receipt says so now rather than later.
 | observer passivity, substitution OFF | **0 bytes** moved on every state leaf — a hard zero, not a bound |
 | height-sink passivity | **0 bytes** moved on every state leaf, so reading the height out did not change the step |
 | statement calibration, legoESM's own height through the substituted statement | **BIT**, 0 of 18,000 cells |
-| substitution liveness | 3,927 of 18,000 interfaces move, at `3.228417925758222e-22` m/s |
+| the same calibration REPEATED after every other substituted arm | **BIT**, 0 of 18,000 cells |
+| substitution liveness | 3,679 of 18,000 interfaces move, at `3.362782104179888e-22` m/s |
 | tracer identity | 0 of 18,000 on the tracer's own vertical velocity |
 | call ledger, corrected arm | 6 producer calls, 2 velocity-indicator, exactly 1 substituted, exactly 30 levels inside it |
+| the height sink | fired exactly once, on the stage-2 velocity indicator |
 | call ledger, shared arm | 4 producer calls, 1 velocity-indicator, exactly 1 substituted |
 | authority | both baselines reproduce round 160's residual to `5e-22` |
 | combined-row decomposition | residual `0.0` on 18,000 cells against `8.67e-19` K allowed |
@@ -311,11 +362,11 @@ operand.
 4. **A4, the production arm reproduces round 152's table to 1e-6** —
    **CONFIRMED**, enforced by the walk before anything is reported.
 5. **B1, the T-point ratio does not own the residual** — **CONFIRMED.**  It
-   removes `3.49e-11` against a 10% threshold, and its whole influence on the
-   scored field is `1.4e-09` of the residual.
+   removes `-2.39e-11` — it is marginally worse — against a 10% threshold, and
+   its whole influence on the scored field is `1.4e-09` of the residual.
 6. **B2, the two arms agree** — **CONFIRMED**, to every digit printed.
 7. **B3, the observer is passive and live** — **CONFIRMED** both ways: 0 bytes
-   with the substitution off (and 0 bytes with the height sink on), 3,927 of
+   with the substitution off (and 0 bytes with the height sink on), 3,679 of
    18,000 cells with it on.
 8. **B4, the substitution does not reach the tracers** — **CONFIRMED**,
    0 of 18,000.
@@ -337,3 +388,140 @@ substitution at the `1e-06`-and-below level ran while a `55%` row sat in round
 159's own published table.  The cheap check that would have caught it is
 reading the previous walk's arm table rather than its OPEN section, and it is
 written into round 163's order below.
+
+## Plants
+
+A control that CATCHES its plant returns and the walk exits 1 with
+`STATUS PLANT-FIRED`; a control that does NOT catch it raises with its own
+marker and exits 2 with `STATUS PLANT-BLIND`.
+
+* `t-r3-inert` claims the oracle's height is installed while handing the ratio
+  statement legoESM's OWN height.  The liveness control refuses it: 0 of
+  18,000 interfaces move, the walk prints `STATUS PLANT-FIRED: t-r3-inert` and
+  exits 1.
+
+  > STATUS PLANT-FIRED: t-r3-inert: {'cells_scored': 21120,
+  > 'cells_unequal': 0, 'active_cells_scored': 18000,
+  > 'active_cells_unequal': 0, 'active_max_abs': 0.0, 'active_rms': 0.0}
+
+* `t-r3-tracer` wires the substitution into the SHARED producer that the
+  tracers also read.  The tracer-identity control refuses it: the tracer field
+  moves, the walk prints `STATUS PLANT-FIRED: t-r3-tracer` and exits 1.
+
+  > STATUS PLANT-FIRED: t-r3-tracer: {'cells_scored': 21120,
+  > 'cells_unequal': 3679, 'active_cells_scored': 18000,
+  > 'active_cells_unequal': 3679, 'active_max_abs': 6.829203137237796e-21,
+  > 'active_rms': 3.362782104179888e-22}
+
+* `rank-combined-mispair` wires the combined row to the wrong recorded trend
+  while the two single rows keep the right one.  The decomposition control
+  refuses it, and its numbers also show the control is not perturbing a zero:
+  the residual goes from `0.0` on 0 cells to `0.0398` K on all 18,000, against
+  an allowance of `5.55e-17` K.
+
+  > STATUS PLANT-FIRED: rank-combined-mispair: {'max_abs_residual_K':
+  > 0.03979497507367036, 'cells_with_a_residual': 18000,
+  > 'combined_error_max_abs_K': 0.03979746876204082, 'allowed_K':
+  > 5.551115123125783e-17, ..., 'holds': False}
+
+### Order D — the blind path, demonstrated at last
+
+Rounds 159, 160 and 161 each registered the `STATUS PLANT-BLIND` path as
+structurally distinct and each said out loud that it had not been exercised.
+It has now been exercised TWICE, once by accident and once on purpose, and
+both are reported.
+
+**By accident, and it caught a real defect.**  The first Order B run's
+`t-r3-inert` plant was NOT caught, because the level-index defect described
+above made the "inert" substitution move 3,831 cells.  The walk raised, printed
+`STATUS PLANT-BLIND: t-r3-inert` and exited 2, on the committed tree at
+`28dfe92ff`.  That is the strongest form of the demonstration: the path fired
+on a violation nobody planted.
+
+**On purpose.**  A deliberately blinded plant was committed at `d6711bfae`,
+run, and removed again at `136f10d35`, and the removal is an exact revert (the
+walk's source at `136f10d35` is byte-identical to its source at `a9dab4f96`).
+The plant installs the INERT substitution and hands it to the TRACER-IDENTITY
+control, which is scoped to the tracer's own vertical velocity and cannot see
+a violation on the momentum path.  The control passed, the plant was not
+caught, and the walk raised, printed its own marker and exited 2:
+
+> STATUS PLANT-BLIND: t-r3-blind: PLANT-BLIND: the tracer-identity control did
+> not refuse an inert substitution on the momentum path: {'cells_scored':
+> 21120, 'cells_unequal': 0, 'active_cells_scored': 18000,
+> 'active_cells_unequal': 0, 'active_max_abs': 0.0, 'active_rms': 0.0}
+
+The marker a caught plant prints was never printed, and the exit code was 2,
+not 1.  **This item is now CLOSED and no longer carried.**
+
+## Cards
+
+Nothing in the model changed, so no card's numbers can move and none was
+re-measured for a change.  The census is reported for the STATEMENT under
+test, which is the velocity-indicator continuity solve: GYRE-zco resolves it,
+both tanks take the flux-form momentum advection and the generic continuity
+solve, the generic NEMO-GYRE recipe takes the generic solve, and both DINO
+cards take the Euler momentum integrator and never enter the RK3 stage
+program.
+
+**That census is round 160's, RESTATED here and not re-measured, because no
+production line changed.**  Round 161's receipt said the same census was
+"re-asserted by this round's own tests"; its test file contains no card or
+census assertion, so this receipt does not repeat that claim.  The census
+stands on round 160's own measurement and is labelled as such.
+
+**ORCA2 stays UNMEASURED-WITH-SPEC**: repeat this walk on the ocean-only ORCA2
+card before transferring any verdict.
+
+**DINO** is not executed by the statement under test — both DINO cards take
+the Euler momentum integrator and never enter the RK3 stage program — and
+nothing changed in the model, so there is nothing to measure on it.
+
+## OPEN — Round 163
+
+1. **THE RESIDUAL'S OWNER IS ALREADY MEASURED AND IT IS THE STAGE-2 ENTRY
+   VELOCITY.**  Round 159's committed evidence file, not its prose, says:
+   the velocity-indicator call form alone leaves `2.334682468902387e-13` m/s,
+   and the call form WITH the oracle's own recorded `uu(Kmm)`/`vv(Kmm)` leaves
+   `1.0492082366460718e-13` m/s.  That is `55.06%` of the residual by root
+   mean square and `67.33%` by maximum, against `1.4e-09` for the T-point
+   ratio and `1.5e-05` for the face ratio.  Round 163 walks that velocity:
+   it is the stage-1 OUTPUT velocity, which the stage program hands the
+   momentum continuity solve at
+   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:360`.
+   **Run the missing null first.**  Round 159's passivity control for the
+   entry-override mechanism was run in the TRANSPORT-form arm only, where it
+   moves `2.6e-13` of a `1.2326857e-08` m/s residual — `3.2e-21` m/s absolute,
+   eight orders below the `1.2855e-13` m/s the entry velocity removes in the
+   velocity-form arm.  That makes the `55.06%` robust, but the velocity-form
+   null itself has never been run, so round 163 runs it before anything else
+   and reports it.
+2. **READ THE PREVIOUS WALK'S ARM TABLE, NOT ITS OPEN SECTION.**  Rounds 160,
+   161 and 162 each substituted an operand at the `1e-06`-and-below level
+   while a `55%` row sat in a committed evidence file, because round 161's
+   OPEN section quoted the entry-velocity number from the wrong arm and the
+   two rounds after it inherited that summary.  From now on, before choosing
+   an operand to substitute, the round opens the previous walk's own JSON and
+   ranks every arm in it.  That is a one-command check and it is the cheapest
+   thing in this receipt.
+3. **What is left after the entry velocity, so the walk is not declared
+   finished early.**  `1.0492082366460718e-13` m/s is `4.377e-08` of the
+   field's own root mean square, four orders above the compiled-rounding floor
+   this campaign has measured many times.  So round 163 ends with a residual
+   too, and the rounds after it should expect one.
+4. **The stage sea surface height is measured and is NOT this residual's
+   owner.**  It differs from the oracle's by `6.279490676432346e-10` m and it
+   owns the ratio difference to nine digits, but both of its consumers inside
+   this producer are now measured inert.  It stays on the board for round
+   138's barotropic boundary, where the height is consumed directly, and it is
+   NOT round 163's target.
+5. **Decision 55 gets Order A's answer and nothing more.**  The cancellation
+   that would have made round 160's split innocent is REFUTED: at the
+   developed state the split makes the pair of tracer rows that carries the
+   year MORE exact, by `3.15e-11` K, and the two error fields are essentially
+   uncorrelated (`+0.0027`).  So the year's refusal of the split has no
+   measured mechanism at the one-step level.  This round does not propose a
+   change to the decision; it removes the story that was going to be offered
+   in support of one.
+6. **ORCA2 stays UNMEASURED-WITH-SPEC**: repeat this walk on the ocean-only
+   ORCA2 card before transferring any verdict.
