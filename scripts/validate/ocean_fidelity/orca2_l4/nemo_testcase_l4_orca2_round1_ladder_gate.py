@@ -800,6 +800,44 @@ UNBUILT_STATEMENTS = {
 }
 
 
+def _attribute_stage_row(stage, field, candidate, oracle, surface_fields):
+    """Name the statement that owns a stage row -- by MEASUREMENT, not a map.
+
+    Round 12 REFUTED the hard-coded rule this replaced.  It bound every
+    stage-1 temperature or salinity row to NEMO's river-runoff tracer source,
+    and that statement can only reach a column where the runoff is non-zero
+    and only the top cell of it: with the runoff channel transcribed and
+    deposited bit-exactly (round-12 runoff gate, 0 of 799,200 unequal at every
+    stage), 191,282 of the 233,341 disagreeing cells still lie off EVERY
+    runoff column and the count does not move.  A citation that survives its
+    own statement being satisfied is not an attribution.
+
+    So the runoff is named only when the disagreement is confined to where it
+    can act; otherwise the row is UNATTRIBUTED and says what was ruled out.
+    """
+    if stage != 1 or field not in ("T", "S"):
+        return {"source_citation": TRAJECTORY_CITATIONS["stage_dump"]}
+    unequal = np.asarray(candidate[field]) != np.asarray(oracle[field])
+    runoff = np.asarray(surface_fields["rnf"])[:unequal.shape[0],
+                                               :unequal.shape[1]] != 0.0
+    reach = np.zeros_like(unequal)
+    reach[..., 0] = runoff                      # nk_rnf = 1, the top cell
+    off_reach = int((unequal & ~reach).sum())
+    if off_reach == 0:
+        return {"source_citation": TRAJECTORY_CITATIONS["runoff_tracer"]}
+    return {
+        "source_citation": "UNATTRIBUTED",
+        "ruled_out": {
+            "statement": TRAJECTORY_CITATIONS["runoff_tracer"],
+            "why": ("the river-runoff tracer source reaches only the top cell "
+                    "of a column carrying a non-zero runoff, and the "
+                    "disagreement is not confined there"),
+            "unequal_cells": int(unequal.sum()),
+            "unequal_cells_the_runoff_cannot_reach": off_reach,
+        },
+    }
+
+
 def unbuilt_statement_blocker(exc: Exception, kt: int) -> dict[str, object]:
     """Classify a deliberate "not built" refusal, or refuse to label it."""
 
@@ -980,11 +1018,9 @@ def candidate_trajectory(
                     "kt": kt,
                     "checkpoint": f"stage{stage}",
                     "field": first_field,
-                    "source_citation": (
-                        TRAJECTORY_CITATIONS["runoff_tracer"]
-                        if stage == 1 and first_field in ("T", "S") else
-                        TRAJECTORY_CITATIONS["stage_dump"]
-                    ),
+                    **_attribute_stage_row(
+                        stage, first_field, candidate_stage, oracle_stage,
+                        surface_fields),
                 }
         state = trace.state_after
 
