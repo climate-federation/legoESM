@@ -202,6 +202,17 @@ which discards exactly those values.  Round 9's own gate already measures the
 size: **48,287 of 799,200** F cells where NEMO's coefficient is non-zero and
 legoESM's vertex mask zeroes it.
 
+**The mask is not the only difference in that operator, and landing it alone
+would be a partial fix.**  NEMO's `zwf` also carries the live vertex thickness
+and the inverse cell area, `ahmf * e3f*(1+r3f*fe3mask) * r1_e1e2f`
+(`dynldf_lev.f90:123`), and `zwt` divides by the live T thickness
+(`dynldf_lev.f90:127`).  legoESM's shared div-curl applies NEITHER — its own
+docstring says so, as a documented deviation
+(`packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:1426-1431`).
+So the ORCA2 lateral-viscosity operator has at least TWO unmatched statements,
+and the one round 9 measured is the smaller of them to name.  Any round that
+lands the mask must say which of the two it closed.
+
 It is NOT landed here, for two stated reasons:
 
 1. **No record can gate it.**  The admitted 10-step records carry no isolated
@@ -230,6 +241,23 @@ in this diff.
 | R10-P5 | **CONFIRMED** — `dynldf_lev.f90:123` carries `ahmf` and no mask factor, and round 9's count of 48,287 reproduces. |
 | R10-P6 | **NOT TESTED** — the fix is not landed (section 6), so neither half of the prediction was measured.  It is not counted as confirmed. |
 | R10-P7 | **CONFIRMED** — no lateral-viscosity tendency stream exists in the admitted records. |
+
+## 7a. CORRECTION to rounds 8 and 9: their citation-gate plant never fired
+
+Both receipts record a row reading "citation gate with a rigid two-line plant:
+refuses, exit 2".  That is a misreading of the tool.  The gate's `--plant`
+argument takes an EXACT citation key and shifts that citation's lines by two;
+its exit codes are **1 when the plant correctly made the gate fail** and **2
+when the plant did NOT fire**, which the source says in as many words.
+
+Round 8 passed `--plant 2` and round 9 passed `--plant shift`.  Neither string
+is a citation key, so nothing was planted, the gate passed unchanged, and exit
+2 was recorded as success.  Their plant rows therefore prove NOTHING and are
+withdrawn.  (Round 7's plant used a real key and did fire, status FAIL.)
+
+This round's plant uses a real key, `BLD/ppsrc/nemo/dynhpg.f90:378,397`, and
+fires: exit 1, status FAIL, the planted citation named.  The gate's own nine
+built-in self-test controls fire as well.
 
 ## 8. Independent review
 
@@ -292,6 +320,6 @@ The external stage's non-NEMO RGB callers keep the behaviour they had.
 | ORCA2 ladder gate at the final tip | past that stop; refused by the raw-mesh guard of section 4, no magnitude registered |
 | DINO card, same kernel | 128 passed |
 | GYRE identity, base vs tip | section 5 |
-| receipt citation gate | CITATION_GATE |
-| citation gate with a rigid two-line plant | CITATION_PLANT |
-| the named push gates plus this round's new tests, at the final tip | PUSH_BATTERY |
+| receipt citation gate | **PASS**, 274 citations, 0 failures, 0 map-audit failures, 0 unmapped |
+| citation gate with a rigid two-line plant | **fires**, exit 1, status FAIL, the planted citation named |
+| the named push gates plus this round's new tests, at the final tip | **175 passed in 517.84 s** |
