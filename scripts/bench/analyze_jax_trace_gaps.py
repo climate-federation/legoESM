@@ -415,7 +415,7 @@ def main() -> int:
                          "event count disagrees is refused rather than "
                          "indexed with the wrong period.")
     ap.add_argument("--end-tol-us", type=float, default=5.0,
-                    help="reject a pair whose END-residual p90 exceeds this "
+                    help="reject a pair whose WORST END-residual exceeds this "
                          "many microseconds. Matched participants finish "
                          "together, so the residual is bounded by timestamp "
                          "jitter, which is absolute and does not grow with "
