@@ -49,6 +49,14 @@ mean rate is -5.2e-04 kg/m2/day against an instantaneous -2.8e-01, a factor of
 amount of extra terms changes that.  Use this probe to compare PROCESSES
 between arms, never to close a multi-day inventory.
 
+WHAT "SUM" IS NOT (codex review, 2026-09-23).  It is a sum of instantaneous
+process tendencies, NOT the band inventory derivative.  It omits q*d(dp)/dt,
+the change in which layers fall inside the band as surface pressure moves, the
+tracer vertical damper, and post-step adjustment and repair increments.  The
+band is also selected by layer MIDPOINT pressure, so the 32- and 36-level grids
+integrate slightly different effective pressure intervals; the sign and size of
+that bias are unmeasured and it affects every term and the reservoir alike.
+
 UPSTREAM TERMS.  ``--upstream`` adds the non-microphysical terms that change
 band cloud water, so the band budget can be closed rather than only its
 microphysics part: horizontal advection of q_c, vertical advection of q_c

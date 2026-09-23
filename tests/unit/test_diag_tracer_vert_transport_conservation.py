@@ -107,6 +107,11 @@ if __name__ == "__main__":
 def test_conservative_operator_is_not_positivity_preserving_on_sparse_condensate():
     """Why routing tracers through 'sb' is NOT a one-line fix (codex, 2026-09-23).
 
+    SYNTHETIC case, not a production dycore step: an idealised single-layer
+    profile with a uniform interface mass flux, integrated once by forward
+    Euler.  It demonstrates that the operator lacks a positivity guarantee, not
+    that a production step produces this magnitude.
+
     The Simmons-Burridge form uses centered interface values and carries no
     limiter, so a single cloudy layer between empty ones goes NEGATIVE in one
     physics step.  The upwind form in use is monotone and does not.  Any
