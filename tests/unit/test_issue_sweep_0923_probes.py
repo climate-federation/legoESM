@@ -96,6 +96,121 @@ def test_seed_actually_changes_the_initial_state():
 
 
 # ----------------------------------------------------------------------
+# #1029 -- the all-NaN argmax trap in the blow-up localisation
+# ----------------------------------------------------------------------
+
+def _load_matrix_module():
+    """Import the matrix runner as a module so its helpers can be called.
+
+    It has to be registered in ``sys.modules`` BEFORE ``exec_module``: the
+    runner defines NamedTuples at module scope, and typing resolves their
+    annotations through ``sys.modules[cls.__module__]``, which is ``None``
+    for a module that is being executed but has not been registered.
+    """
+    import importlib.util
+    name = "_matrix_runner_1029"
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(name, MATRIX)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        del sys.modules[name]
+        raise
+    return mod
+
+
+def test_argmax_location_refuses_to_localise_a_wholly_nonfinite_field():
+    """The bug this guard exists for, stated as a test.
+
+    Measured: ``jnp.argmax`` returns index 0 on a wholly non-finite field.  A
+    blow-up diagnostic samples the state after it has gone non-finite, so the
+    unguarded version localised twelve held_suarez_topo arms -- every mountain
+    height, both failure timescales -- to that one coordinate, which on a
+    lat-lon grid unravels to the southernmost row at the model top and reads
+    exactly like one of the physical suspects.
+    """
+    mod = _load_matrix_module()
+    f = jnp.full((4, 5, 6), jnp.nan)
+    assert mod._argmax_location(f, f.shape) is None, (
+        "a wholly non-finite field must not be localised; the unguarded "
+        "argmax returns (0, 0, 0), a plausible-looking corner of the domain")
+
+
+def test_argmax_location_still_finds_a_real_maximum():
+    """Non-vacuity: the guard must not blind the diagnostic on healthy fields."""
+    mod = _load_matrix_module()
+    f = np.zeros((3, 4, 5))
+    f[2, 1, 3] = 7.0
+    assert mod._argmax_location(jnp.asarray(f), f.shape) == (2, 1, 3)
+
+
+def test_a_partly_nan_field_is_refused_because_its_argmax_is_meaningless():
+    """The conservative branch, kept because a measurement said to keep it.
+
+    A review argued the opposite -- that NaN never wins a comparison reduction,
+    so a mixed field localises to its largest finite element and refusing it
+    throws away the informative case.  Measured on jax 0.9.1, a NaN DOES win,
+    exactly as in NumPy: a field with one NaN away from index 0 and a clear
+    finite maximum elsewhere returns the NaN's index.  So the argmax of a
+    partially non-finite field points at the corruption, not the physics, and
+    is not a localisation.  See the argmax_nan_semantics probe for the table.
+    """
+    mod = _load_matrix_module()
+    f = np.zeros((3, 4))
+    f[1, 1] = 5.0
+    f[2, 3] = np.nan          # neither index 0 nor the finite maximum
+    raw = tuple(int(x) for x in
+                jnp.unravel_index(jnp.argmax(jnp.asarray(f)), f.shape))
+    assert raw == (2, 3), (
+        f"raw argmax returned {raw}; measured behaviour on jax 0.9.1 is that "
+        f"the NaN at (2, 3) wins. If this is now (1, 1) the backend has "
+        f"changed and the guard can be narrowed to all-non-finite")
+    assert mod._argmax_location(jnp.asarray(f), f.shape) is None
+
+
+def test_first_nonfinite_location_finds_the_earliest_bad_cell():
+    """The quantity a postmortem actually wants, and it is not an argmax.
+
+    An Inf usually appears before the NaNs in a divergence, so the first
+    non-finite cell is the earliest spatial signal a tripped state still
+    carries.
+    """
+    mod = _load_matrix_module()
+    f = np.zeros((3, 4))
+    f[2, 1] = np.inf
+    f[2, 3] = np.nan
+    assert mod._first_nonfinite_location(jnp.asarray(f), f.shape) == (2, 1)
+
+
+def test_first_nonfinite_location_is_none_on_a_clean_field():
+    """Non-vacuity: it must stay silent when there is nothing to report."""
+    mod = _load_matrix_module()
+    f = np.arange(12, dtype=np.float64).reshape(3, 4)
+    assert mod._first_nonfinite_location(jnp.asarray(f), f.shape) is None
+
+
+def test_blowup_check_interval_override_is_parsed_and_validated():
+    """The override must reject a non-positive stride rather than hang.
+
+    ``step % 0`` raises ZeroDivisionError from inside the time loop, thousands
+    of steps after the typo; ``step % -1`` is always 0 and would trip the
+    blow-up check on the very first step. Both are caught at parse time.
+    """
+    src = MATRIX.read_text()
+    assert 'os.environ.get("LEGOESM_BLOWUP_CHECK_INTERVAL")' in src
+    assert "must be a positive integer" in src
+    # the guard has to run BEFORE the loop that consumes the value
+    i_guard = src.index('LEGOESM_BLOWUP_CHECK_INTERVAL')
+    i_use = src.index("if step % blowup_check_interval == 0:")
+    assert i_guard < i_use, (
+        "the override is parsed after the loop that reads it")
+
+
+# ----------------------------------------------------------------------
 # #1675 site 1 -- the CG mixed-precision probe
 # ----------------------------------------------------------------------
 

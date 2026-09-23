@@ -22,6 +22,23 @@ export JAX_ENABLE_X64=1
 echo "########## the new tests ##########"
 "$PY" -m pytest -q -rA --tb=short tests/unit/test_issue_sweep_0923_probes.py 2>&1 | tail -60
 
+echo "########## NON-VACUITY: drop the argmax guard, the trap test must go red ##########"
+cp scripts/matrix/run_atmosphere_test_matrix.py /tmp/_matrix_argmax_$$.py
+python3 - <<'ARGMAXPY'
+import pathlib
+p = pathlib.Path("scripts/matrix/run_atmosphere_test_matrix.py")
+s = p.read_text()
+old = ("    if not bool(jnp.isfinite(jnp.max(field))):\n"
+       "        return None\n")
+assert s.count(old) == 1, s.count(old)
+p.write_text(s.replace(old, "", 1))
+print("SABOTAGED: argmax all-NaN guard removed")
+ARGMAXPY
+"$PY" -m pytest -q tests/unit/test_issue_sweep_0923_probes.py -k "argmax or nonfinite" 2>&1 | tail -8
+cp -f /tmp/_matrix_argmax_$$.py scripts/matrix/run_atmosphere_test_matrix.py
+rm -f /tmp/_matrix_argmax_$$.py
+echo "RESTORED argmax guard"
+"$PY" -m pytest -q tests/unit/test_issue_sweep_0923_probes.py -k "argmax or nonfinite" 2>&1 | tail -4
 echo "########## NON-VACUITY: break one lane, the AST guard must go red ##########"
 cp scripts/matrix/run_atmosphere_test_matrix.py /tmp/_matrix_backup_$$.py
 python3 - <<'PY'

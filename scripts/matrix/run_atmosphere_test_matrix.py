@@ -81,6 +81,60 @@ GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 DEFAULT_NLEV = int(os.environ.get("LEGOESM_MATRIX_NLEV", "40"))
 
 
+def _argmax_location(field, shape):
+    """Index of the maximum, or ``None`` when NOTHING in the field is finite.
+
+    Why the guard exists (#1029).  A blow-up diagnostic samples the state AFTER
+    it has gone non-finite, and ``argmax`` on a non-finite field does not
+    return what its name suggests.  Measured on jax 0.9.1 / CPU
+    (``scripts/cluster/issue_sweep_0923/argmax_nan_semantics.sbatch``):
+
+        NaN at (2,3), finite max at (1,1)   -> (2, 3)   NaN wins
+        NaN at (0,0), finite max at (1,1)   -> (0, 0)   NaN wins
+        +Inf at (2,3), finite max at (1,1)  -> (2, 3)   Inf is the max
+        wholly NaN                          -> (0, 0)   nothing wins
+
+    So the returned index is the location of a NON-FINITE cell whenever one
+    exists, and index 0 when the whole field has gone -- never the location of
+    the physical maximum.  jax agrees with NumPy here; a review that argued the
+    opposite (that a NaN can never win a comparison reduction, so a mixed field
+    localises to its largest finite element) was refuted by this measurement
+    and by the production runs below, and the narrow guard written from that
+    claim has been reverted.
+
+    What it cost: twelve held_suarez_topo arms -- every mountain height,
+    survival times from 0.46 to 79.6 days -- all reported
+    ``max_wind_lat_deg = -88.75, max_wind_lon_deg = 0, max_wind_k = 0``.  On a
+    lat-lon grid that is the southernmost row, the prime meridian and the model
+    top: a perfectly plausible-looking answer that happens to match one of the
+    three suspects the localisation exists to discriminate between.
+
+    Hence the conservative test.  ``jnp.max`` propagates NaN, so
+    ``isfinite(max(field))`` is false as soon as ANY cell is non-finite, which
+    is exactly when the argmax stops meaning anything.
+    """
+    if not bool(jnp.isfinite(jnp.max(field))):
+        return None
+    return tuple(int(x) for x in jnp.unravel_index(jnp.argmax(field), shape))
+
+
+def _first_nonfinite_location(field, shape):
+    """Index of the first non-finite cell, or ``None`` if the field is clean.
+
+    This is the quantity a blow-up postmortem actually wants, and it is not the
+    argmax of anything: an Inf usually appears BEFORE the NaNs in a divergence,
+    so the first non-finite cell is the earliest spatial signal available in a
+    state that has already tripped.  Reported alongside the wind maximum so a
+    reader can tell "one bad cell over the ridge" from "the whole field has
+    gone", which the extremum alone can never say.
+    """
+    finite = jnp.isfinite(field)
+    if bool(jnp.all(finite)):
+        return None
+    return tuple(int(x) for x in
+                 jnp.unravel_index(jnp.argmin(finite.astype(jnp.int32)), shape))
+
+
 def _matrix_vcoord(declared: str) -> str:
     """Vertical coordinate for a case, with a probe override (#1029).
 
@@ -1588,6 +1642,26 @@ def _run_timeloop(
 
     Returns (final_state, snapshots, diag, wall_time, ok).
     """
+    # #1029: the blow-up CHECK interval bounds how much of a state can go
+    # non-finite before anyone looks at it.  At the default of 100 steps the
+    # lat-lon held_suarez_topo case is already 99.99% NaN by the time the trip
+    # fires (414,700 of 414,720 wind cells, measured), so no per-step statistic
+    # can localise the burst -- the same defect class as reporting a failure
+    # step that is really the first DIAGNOSTIC SAMPLE.  This override lets a
+    # localisation arm run the check every step without editing the file while
+    # another run is reading it.  Unset -> the caller's value, unchanged.
+    _iv = os.environ.get("LEGOESM_BLOWUP_CHECK_INTERVAL")
+    if _iv:
+        _iv_i = int(_iv)
+        if _iv_i < 1:
+            raise ValueError(
+                f"LEGOESM_BLOWUP_CHECK_INTERVAL must be a positive integer "
+                f"number of steps; got {_iv!r}.")
+        if _iv_i != blowup_check_interval:
+            print(f"  #1029 LEGOESM_BLOWUP_CHECK_INTERVAL override: checking "
+                  f"every {_iv_i} steps (default {blowup_check_interval})")
+        blowup_check_interval = _iv_i
+
     snap_targets = _snapshot_steps(n_steps, n_snaps)
     snapshots: dict[int, dict[str, np.ndarray]] = {0: extract_fn(state)}
     # Record step-0 diagnostics so conservation plots have the true
@@ -4586,14 +4660,32 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             # (primitive_eq_latlon_cgrid module docstring), and grid.lat /
             # grid.lon are the 1-D centre axes -- so axis 0 indexes LAT.
             _spd = jnp.sqrt(u_c ** 2 + v_c ** 2)
-            _at = jnp.unravel_index(jnp.argmax(_spd), _spd.shape)
-            _ilat, _ilon, _k = int(_at[0]), int(_at[1]), int(_at[2])
+            _nan = float("nan")
+
+            def _deg(at):
+                if at is None:
+                    return _nan, _nan, _nan
+                return (float(lat_deg[at[0]]), float(lon_deg[at[1]]),
+                        float(at[2]))
+
+            _lat_d, _lon_d, _k_d = _deg(_argmax_location(_spd, _spd.shape))
+            _bad_lat, _bad_lon, _bad_k = _deg(
+                _first_nonfinite_location(_spd, _spd.shape))
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(_spd)),
-                "max_wind_lat_deg": float(lat_deg[_ilat]),
-                "max_wind_lon_deg": float(lon_deg[_ilon]),
-                "max_wind_k": float(_k),
+                "max_wind_lat_deg": _lat_d,
+                "max_wind_lon_deg": _lon_d,
+                "max_wind_k": _k_d,
+                # Where the state FIRST stopped being finite, and how much of
+                # it went (#1029): the extremum cannot distinguish one bad cell
+                # from a wholly non-finite field, and that distinction is the
+                # whole postmortem.
+                "first_nonfinite_lat_deg": _bad_lat,
+                "first_nonfinite_lon_deg": _bad_lon,
+                "first_nonfinite_k": _bad_k,
+                "n_nonfinite_wind": float(
+                    jnp.sum(~jnp.isfinite(_spd))),
                 "mean_T": _area_weighted_mean(s.T, grid.area),
             }
 
@@ -6395,14 +6487,24 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             from legoesm.core.conservation import compute_nh_dry_mass
             _u_abs = jnp.abs(s.u.data)
             _w_abs = jnp.abs(s.w.data)
-            _u_at = jnp.unravel_index(jnp.argmax(_u_abs), _u_abs.shape)
-            _w_at = jnp.unravel_index(jnp.argmax(_w_abs), _w_abs.shape)
+            # Same all-NaN argmax trap as the lat-lon series (#1029): without
+            # the guard a blown-up cube state localises every burst to
+            # face 0, corner (0, 0), model top.
+            _nan4 = (float("nan"),) * 4
+            _u_at = _argmax_location(_u_abs, _u_abs.shape) or _nan4
+            _w_at = _argmax_location(_w_abs, _w_abs.shape) or _nan4
+            _u_bad = _first_nonfinite_location(_u_abs, _u_abs.shape) or _nan4
             return {
                 "max_abs_u": float(jnp.max(_u_abs)),
                 "u_argmax_face": float(_u_at[0]), "u_argmax_i": float(_u_at[1]),
                 "u_argmax_j": float(_u_at[2]), "u_argmax_k": float(_u_at[3]),
                 "w_argmax_face": float(_w_at[0]), "w_argmax_i": float(_w_at[1]),
                 "w_argmax_j": float(_w_at[2]), "w_argmax_k": float(_w_at[3]),
+                "u_first_nonfinite_face": float(_u_bad[0]),
+                "u_first_nonfinite_i": float(_u_bad[1]),
+                "u_first_nonfinite_j": float(_u_bad[2]),
+                "u_first_nonfinite_k": float(_u_bad[3]),
+                "n_nonfinite_u": float(jnp.sum(~jnp.isfinite(_u_abs))),
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, grid.area),
