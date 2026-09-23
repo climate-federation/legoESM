@@ -4538,33 +4538,40 @@ def _bc_external_surface_forcing(
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * inv_rho_csw_dz * mask
                 )
-                from legoesm.ocean.physics.shortwave_penetration import (
-                    apply_shortwave_penetration,
-                    ShortwavePenetrationConfig,
-                )
-                # ``h_k`` is the live (z*/partial-cell) thickness; a dry cell
-                # carries h_k = 0, which is both the wet mask and the safe
-                # denominator guard inside the RGB kernel.
-                wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
-                sw_tend = apply_shortwave_penetration(
-                    ShortwavePenetrationConfig(
-                        scheme=("nemo_qsr_rgb" if shortwave_scheme
-                                == "nemo_qsr_rgb" else "rgb_chl"),
-                        nemo_time_step_s=shortwave_time_step_s,
-                    ),
-                    sw_T,
-                    chl=jnp.asarray(_sf_chl, dtype=T.dtype),
-                    dz_live=h_k,
-                    wet_cell=wet_cell,
-                    gdepw_bottom_live=(
-                        -jnp.asarray(z_coord.z_half_ref[1:], dtype=T.dtype)
-                        * J[..., jnp.newaxis]
-                    ),
-                    gdepw_ref=-jnp.asarray(z_coord.z_half_ref, dtype=T.dtype),
-                    e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=T.dtype),
-                    rho_0=float(rho_0),
-                )
-                dT_target = dT_target + sw_tend * mask_3d
+                if shortwave_scheme != "nemo_qsr_rgb":
+                    from legoesm.ocean.physics.shortwave_penetration import (
+                        apply_shortwave_penetration,
+                        ShortwavePenetrationConfig,
+                    )
+                    # ``h_k`` is the live (z*/partial-cell) thickness; a dry
+                    # cell carries h_k = 0, which is both the wet mask and the
+                    # safe denominator guard inside the RGB kernel.
+                    wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
+                    sw_tend = apply_shortwave_penetration(
+                        ShortwavePenetrationConfig(
+                            scheme="rgb_chl",
+                            nemo_time_step_s=shortwave_time_step_s,
+                        ),
+                        sw_T,
+                        chl=jnp.asarray(_sf_chl, dtype=T.dtype),
+                        dz_live=h_k,
+                        wet_cell=wet_cell,
+                        gdepw_bottom_live=(
+                            -jnp.asarray(z_coord.z_half_ref[1:], dtype=T.dtype)
+                            * J[..., jnp.newaxis]
+                        ),
+                        gdepw_ref=-jnp.asarray(
+                            z_coord.z_half_ref, dtype=T.dtype),
+                        e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=T.dtype),
+                        rho_0=float(rho_0),
+                    )
+                    dT_target = dT_target + sw_tend * mask_3d
+                # On the NEMO RGB selector the shared physics pipeline owns
+                # the one and only qsr deposit, exactly as it owns the
+                # two-band one below: NEMO calls ``tra_qsr`` once per step
+                # (traqsr.f90:213).  Repeating the kernel here would
+                # double-count qsr while the column-integrated heat budget
+                # stayed misleadingly close through the qns subtraction.
             elif _sf_sw is not None:
                 # NEMO qsr_2BD consumes the complete qsr after sbcmod removes
                 # that same complete flux from qns (traqsr.F90:665-712;

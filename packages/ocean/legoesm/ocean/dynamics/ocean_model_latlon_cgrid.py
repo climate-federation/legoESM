@@ -6423,12 +6423,71 @@ class LatLonCGridOceanModel:
             _stage3_T_rate = (
                 tend.dT_dt.data * h_k_old
                 / jnp.maximum(_h_live_one_half, 1.0e-10))
-            if (
+            _sw_pen_scheme_ws = getattr(
                 getattr(
-                    getattr(
-                        getattr(_cfg_b, "physics", None),
-                        "shortwave_penetration", None),
-                    "scheme", None) == "nemo_qsr_2bd"
+                    getattr(_cfg_b, "physics", None),
+                    "shortwave_penetration", None),
+                "scheme", None)
+            if (
+                _sw_pen_scheme_ws == "nemo_qsr_rgb"
+                and surface_forcing is not None
+                and getattr(surface_forcing, "sw_down", None) is not None
+            ):
+                # Same seam as the two-band arm below, for NEMO's three-band
+                # chlorophyll penetration.  ``tra_qsr`` runs ONCE per step, at
+                # stage 3, with Kmm (stprk3_stg.F90:581; traqsr.f90:213 ->
+                # qsr_RGBc, whose live operands are ``e3t_0*(1+r3t(Kmm))`` and
+                # ``gdepw_1d*(1+r3t(Kmm))``, traqsr.f90:349,386).  The shared
+                # pipeline already deposited the SAME kernel on the step-entry
+                # (Kbb) ladder; rebuild that field with the pipeline's own two
+                # operands so the subtraction below removes it exactly, then
+                # add the Kmm evaluation.  No second RGB implementation.
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    apply_shortwave_penetration,
+                )
+                _rgb_cfg = _cfg_b.physics.shortwave_penetration
+                _rgb_chl = getattr(surface_forcing, "chl", None)
+                if _rgb_chl is None:
+                    raise ValueError(
+                        "physics.shortwave_penetration.scheme='nemo_qsr_rgb' "
+                        "needs a chlorophyll field; "
+                        "OceanSurfaceForcing.chl is None")
+                _rgb_dtype = h_k_old.dtype
+                _rgb_sw = jnp.asarray(surface_forcing.sw_down, dtype=_rgb_dtype)
+                _rgb_chl = jnp.asarray(_rgb_chl, dtype=_rgb_dtype)
+                _rgb_gdepw_ref = -jnp.asarray(_zc.z_half_ref, dtype=_rgb_dtype)
+                _rgb_e3t_ref = jnp.asarray(_zc.dz_ref, dtype=_rgb_dtype)
+                # The pipeline's Kbb stretch is ``compute_ocean_jacobian`` on
+                # the step-entry sea surface (physics/combined.py); use the
+                # identical expression here so the two cancel bit for bit.
+                _rgb_stretch_b = jnp.asarray(
+                    compute_ocean_jacobian(
+                        state.eta.data, state.H_bathy.data, _zc),
+                    dtype=_rgb_dtype)
+                _rgb_stretch_m = _h_live_one_half[..., 0] / jnp.maximum(
+                    _h_ref_ws[..., 0], 1.0e-10)
+
+                def _rgb_qsr(h_live, stretch):
+                    return apply_shortwave_penetration(
+                        _rgb_cfg, _rgb_sw,
+                        chl=_rgb_chl,
+                        dz_live=h_live,
+                        wet_cell=jnp.asarray(h_live > 0.0, dtype=_rgb_dtype),
+                        gdepw_bottom_live=(
+                            _rgb_gdepw_ref[1:] * stretch[..., jnp.newaxis]),
+                        gdepw_ref=_rgb_gdepw_ref,
+                        e3t_ref=_rgb_e3t_ref,
+                        rho_0=_cfg_b.rho_0,
+                        c_sw=_cfg_b.physics.constants.c_sw,
+                    )
+
+                _stage3_T_rate = _nemo_qsr_stage3_rate(
+                    tend.dT_dt.data,
+                    _rgb_qsr(h_k_old, _rgb_stretch_b),
+                    _rgb_qsr(_h_live_one_half, _rgb_stretch_m),
+                    h_k_old, _h_live_one_half)
+            elif (
+                _sw_pen_scheme_ws == "nemo_qsr_2bd"
                 and surface_forcing is not None
                 and getattr(surface_forcing, "sw_down", None) is not None
             ):
