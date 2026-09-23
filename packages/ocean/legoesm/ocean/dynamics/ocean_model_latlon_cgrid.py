@@ -1286,6 +1286,27 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # indicator at stage 2 only, so the two call forms can be compared
     # with every other operand held.  No card constructs it.
     stage2_wzv_velocity_form: bool = False
+    # Round 160: private ONE-VARIABLE arm that restores the SINGLE per-stage
+    # continuity solve, so the before arm of the split can be measured in the
+    # same binary.  ``True`` hands the one transport-form field to both
+    # consumers again, which is what production did before round 160.  No card
+    # constructs it.
+    legacy_shared_stage_wzv: bool = False
+    # Round 160 WRITE-only exposure: make ``expose_tracer_transport_stage``
+    # return the MOMENTUM vertical velocity (slot 11, stprk3_stg.f90:360)
+    # instead of the tracer transport's own field, so the two solves can be
+    # scored separately against the oracle's recorded array.
+    expose_stage_momentum_w: bool = False
+    # Round 160 WRITE-only exposure: the stage's own U/V free-surface ratios
+    # r3u(Kmm)/r3v(Kmm), the operand divhor.f90:126-130 rebuilds each face
+    # transport from.  Stage 1, 2 or 3; 0 is off.
+    expose_stage_face_r3: int = 0
+    # Round 160 private ONE-VARIABLE arm for the stage-2 momentum solve's
+    # quasi-Eulerian stretching term: NEMO's stage clock rDt = rn_Dt/2
+    # (stprk3_stg.f90:221-222) with the matching HALF after-level
+    # (stprk3_stg.f90:254).  The pair is inseparable -- moving one without the
+    # other is a factor of two, not a control -- so one flag selects both.
+    stage2_momentum_wzv_clock_pair: bool = False
     nemo_stage_rhs_accumulation_order_arm: object = False
     # WRITE-only transport exposure for the ordered tracer boundary walk.
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
@@ -1606,11 +1627,32 @@ def _nemo_stage_corrected_velocity(
     return corrected
 
 
+def nemo_stage_momentum_wzv_executes(config) -> bool:
+    """Does this card run NEMO's SECOND per-stage continuity solve?
+
+    ``stprk3_stg.f90:356`` takes the vector-invariant arm, ``:358`` skips the
+    solve at stage 1, and ``:360`` solves continuity on the RAW stage velocity
+    for the momentum vertical advection, while ``traadv.f90:274`` re-solves it
+    on the barotropically corrected transports for the tracers.  A card runs
+    that two-solve program only when it takes the RK3-WS stage program, the
+    vector-invariant momentum advection and the literal continuity solve
+    together.  This predicate IS the model's condition: the Decision-43 card
+    census imports it rather than restating it (operator note AR, finding 2).
+    """
+    return (
+        getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
+        and getattr(config, "momentum_advection", "flux_form")
+        == "vector_invariant"
+        and getattr(config, "wzv_call2_evaluation", "generic")
+        == "nemo_literal")
+
+
 def _nemo_ws_stage_transport(
     stage_velocity, h_stage, stage_index, *, eta_stage, h_ref, Hu_avg, Hv_avg,
     u_mask_3d, v_mask_3d, grid, z_coord, H_bathy, config, dt,
     legacy_min_face_thickness=False, eta_before=None, eta_after=None,
     literal_wzv=False, barotropic_velocity=None, velocity_form_wzv=False,
+    momentum_velocity_form_w=False, momentum_wzv_clock=None,
     legacy_wzv_rederived_transport=False,
     legacy_aimp_midpoint_w_metric=False, runoff_mass_flux=None,
 ):
@@ -1629,7 +1671,11 @@ def _nemo_ws_stage_transport(
     ``wi = 0`` (:287).  ONE triplet per stage feeds both ``dyn_adv``
     (:315,331-334) and ``tra_adv`` (:456-519).  Returns
     ``(mf_u, mf_v, w_explicit, h_stage, hu_stage, hv_stage, wi_stage, zFu,
-    zFv, corrected_u, corrected_v)``.  The native pair retains NEMO's product association;
+    zFv, corrected_u, corrected_v, w_momentum)``.  ``w_explicit`` is the
+    TRACER transport's field (``traadv.f90:274``, the transport indicator) and
+    ``w_momentum`` is the momentum vertical advection's own solve on the raw
+    stage velocity (``stprk3_stg.f90:360``, the velocity indicator), or
+    ``None`` on cards that do not run that second solve.  The native pair retains NEMO's product association;
     dividing it back to a metric-free flux and multiplying again is not
     bitwise equivalent on the rotated GYRE grid.
     """
@@ -1681,6 +1727,7 @@ def _nemo_ws_stage_transport(
     zfv_stage = _nemo_metric_stage_transport(
         jnp.asarray(grid.dx_v), hv_stage, v_stage_corr)
     stage_div = divergence_cgrid(mf_u, mf_v, grid)
+    w_momentum = None
     if literal_wzv:
         # sshwzv.F90:331-336 (qco arm), entered from stprk3_stg.F90:297 as
         # ``wzv(kstp, Kbb, Kmm, Kaa, zFu, zFv, ww, np_transport)``: the SAME
@@ -1707,12 +1754,43 @@ def _nemo_ws_stage_transport(
                 None if (legacy_wzv_rederived_transport or velocity_form_wzv)
                 else (zfu_stage, zfv_stage)),
             runoff_mass_flux=runoff_mass_flux)
+        if momentum_velocity_form_w:
+            # THE SECOND SOLVE.  stprk3_stg.f90:360 hands wzv the raw stage
+            # velocity under the velocity indicator and the momentum vertical
+            # advection reads the result; traadv.f90:274 then re-solves
+            # continuity on the corrected transports and overwrites the same
+            # array before the tracer's vertical transport is formed at :280.
+            # ``w_stage`` above is that second, tracer-owned field and is left
+            # byte for byte as it was; this is the first one.
+            # The private clock arm replaces NEMO's (rDt, r3t(Kaa)) PAIR at
+            # once; production passes the step clock with the barotropic
+            # after level, which is the same product algebraically.
+            _w_dt, _w_eta_after = (
+                (dt, eta_after) if momentum_wzv_clock is None
+                else momentum_wzv_clock)
+            w_momentum, _, _ = nemo_qco_wzv_operands(
+                eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
+                u_mask_3d, v_mask_3d, _tmask3, _w_dt,
+                eta_after_override=_w_eta_after,
+                volume_transport_override=None,
+                runoff_mass_flux=runoff_mass_flux)
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)
     wi_stage = jnp.zeros_like(w_stage)
     if (stage_index == 2
             and getattr(config, "adaptive_implicit_vertadv", False)):
+        if w_momentum is not None:
+            # stprk3_stg.f90:362 partitions the MOMENTUM pair under the
+            # velocity indicator and traadv.f90:277 partitions the TRACER pair
+            # under the transport indicator: two partitions, not one.  Only
+            # one is transcribed, so refuse loudly rather than hand one
+            # partition to two consumers.
+            raise ValueError(
+                "NEMO's second continuity solve and adaptive-implicit "
+                "vertical advection need TWO stage-3 partitions "
+                "(stprk3_stg.f90:362 and traadv.f90:277); only the transport "
+                "one is transcribed, so this pair is refused")
         if not legacy_aimp_midpoint_w_metric:
             from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
 
@@ -1735,7 +1813,7 @@ def _nemo_ws_stage_transport(
         w_stage, wi_stage = split.w_explicit, split.w_implicit
     return (
         mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage, wi_stage,
-        zfu_stage, zfv_stage, u_stage_corr, v_stage_corr)
+        zfu_stage, zfv_stage, u_stage_corr, v_stage_corr, w_momentum)
 
 
 class _NEMOWSBarotropicTrace(NamedTuple):
@@ -1885,9 +1963,17 @@ def _nemo_ws_rk3_tracer_pair_step(
         elif len(stage_geom) == 11:
             (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
              wi_stage, zfu_stage, zfv_stage, _, _) = stage_geom
+        elif len(stage_geom) == 12:
+            # Slot 11 is the MOMENTUM vertical velocity of NEMO's first
+            # per-stage continuity solve (stprk3_stg.f90:360).  The tracer
+            # transport re-solves continuity for itself (traadv.f90:274), so
+            # this path keeps reading slot 2 and never slot 11.
+            (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
+             wi_stage, zfu_stage, zfv_stage, _, _, _) = stage_geom
         else:
             raise ValueError(
-                "each stage transport geometry needs 6, 7, 9, or 11 arrays")
+                "each stage transport geometry needs 6, 7, 9, 11, or 12 "
+                "arrays")
         # NEMO key_RK3 runs the FCT limiter at stage 3 ONLY: traadv.F90:281-282
         # forces ``ll_dofct = .FALSE.`` for ``kstg /= 3`` and :361-364 then
         # dispatches ``np_FCT`` to ``tra_adv_cen(nn_fct_h, nn_fct_v)``, the
@@ -2540,6 +2626,25 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "stage2_zad_operand_override must be a (w, h_u, h_v) tuple; "
                 "a None slot keeps the live stage operand")
+        _face_r3_stage = self._nemo_ws_test_hooks.expose_stage_face_r3
+        if (not isinstance(_face_r3_stage, int)
+                or isinstance(_face_r3_stage, bool)
+                or _face_r3_stage not in (0, 1, 2, 3)):
+            # A float or a bool here would index the wrong stage's ratios and
+            # score them against the oracle's stage 2 under its name.
+            raise ValueError(
+                "expose_stage_face_r3 must be the int 0, 1, 2, or 3")
+        if not isinstance(
+                self._nemo_ws_test_hooks.stage2_momentum_wzv_clock_pair, bool):
+            raise ValueError(
+                "stage2_momentum_wzv_clock_pair must be a bool")
+        if not isinstance(
+                self._nemo_ws_test_hooks.legacy_shared_stage_wzv, bool):
+            # At CONSTRUCTION: anything truthy would silently put the two
+            # consumers back on one field and the walk would score the
+            # single-solve program under the split program's name.
+            raise ValueError(
+                "legacy_shared_stage_wzv must be a bool")
         if not isinstance(
                 self._nemo_ws_test_hooks.stage2_wzv_velocity_form, bool):
             # At CONSTRUCTION: anything truthy would silently select NEMO's
@@ -5613,6 +5718,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_tracer_stage = None
         _nemo_ws_exposed_tracer_boundary = None
         _nemo_ws_exposed_tracer_transport = None
+        _nemo_ws_exposed_stage_face_r3 = None
         _nemo_ws_exposed_stage1_wzv = None
         _nemo_ws_exposed_stage1_transport_operand = None
         _nemo_ws_exposed_momentum_operator = None
@@ -6602,6 +6708,12 @@ class LatLonCGridOceanModel:
                 getattr(_cfg_b, "momentum_advection", "flux_form")
                 == "vector_invariant"
                 and not self._nemo_ws_test_hooks.legacy_vector_stage_qco_weights)
+            # stprk3_stg.f90:356-360: the vector-invariant deck solves
+            # continuity a SECOND time, on the raw stage velocity, for the
+            # momentum vertical advection at every stage after the first.
+            _momentum_wzv_split = (
+                nemo_stage_momentum_wzv_executes(_cfg_b)
+                and not self._nemo_ws_test_hooks.legacy_shared_stage_wzv)
             _wall_live = (
                 _active_live
                 if getattr(_cfg_b, "tracer_wall_neumann_fill", True)
@@ -6740,19 +6852,28 @@ class LatLonCGridOceanModel:
                     _qt_b, _qt_12, _qt_aa,
                     h_k_old, _h_live_one_half, _h_live_new)
 
+            def _momentum_stage_w(geom):
+                # NEMO's momentum consumers read the field its OWN continuity
+                # solve produced (stprk3_stg.f90:360); the tracer transport
+                # re-solves and overwrites it (traadv.f90:274).  Slot 11 is
+                # None on cards that do not run the first solve, and then both
+                # consumers read the one field legoESM builds, as before.
+                return geom[2] if geom[11] is None else geom[11]
+
             def _stage_vertical_up3(u_stage, v_stage, geom):
                 # dynadv_up3.F90:239-358: vertical flux of the stage Kmm
                 # velocity on the stage transport's explicit ww, divided by
                 # e3u(Kmm).  Identically zero from rest (kt=1 stage 1).
                 if _omit_vert or not _aimp_vertadv_ws:
                     return None
+                w_mom = _momentum_stage_w(geom)
                 return (
                     nemo_up3_vertical_momentum_advection(
-                        u_stage * u_mask_3d, interp_cell_to_uface(geom[2]),
+                        u_stage * u_mask_3d, interp_cell_to_uface(w_mom),
                         geom[4], face_active=_u_live_mask),
                     nemo_up3_vertical_momentum_advection(
                         v_stage * v_mask_3d,
-                        interp_cell_to_vface(geom[2], _grid),
+                        interp_cell_to_vface(w_mom, _grid),
                         geom[5], face_active=_v_live_mask),
                 )
 
@@ -6795,6 +6916,7 @@ class LatLonCGridOceanModel:
                     zfw / jnp.asarray(_grid.area_T)[..., None],
                     geometry[3], geometry[4], geometry[5], geometry[6],
                     zfu, zfv, geometry[9], geometry[10],
+                    *geometry[11:],
                 )
 
             def _stage_hpg_operands(T_stage, S_stage, eta_stage):
@@ -6980,6 +7102,12 @@ class LatLonCGridOceanModel:
                         (target_u, target_v))),
                 velocity_form_wzv=(
                     self._nemo_ws_test_hooks.stage2_wzv_velocity_form),
+                momentum_velocity_form_w=_momentum_wzv_split,
+                momentum_wzv_clock=(
+                    (dt / 2.0,
+                     0.5 * (state.eta.data + state_new.eta.data))
+                    if self._nemo_ws_test_hooks
+                    .stage2_momentum_wzv_clock_pair else None),
                 **_stage_transport_kw)
             p1u_corr, p1v_corr = _mom_pert_ws(
                 u1_corr, v1_corr, True, _transport_target,
@@ -6988,7 +7116,7 @@ class LatLonCGridOceanModel:
                 _stage_vertical_up3(u1_corr, v1_corr, _g1),
                 stage_face_thickness=_stage_face_thickness(_eta_live_one_third),
                 stage_zad_operands=_stage2_zad_operands(
-                    (_g1[2], _g1[4], _g1[5])),
+                    (_momentum_stage_w(_g1), _g1[4], _g1[5])),
                 stage_index=2)
             _stage2_rhs_production = (p1u_corr, p1v_corr)
             if self._nemo_ws_test_hooks.stage2_momentum_rhs_override is not None:
@@ -7036,6 +7164,7 @@ class LatLonCGridOceanModel:
                          else (jnp.zeros_like(target_u),
                                jnp.zeros_like(target_v))),
                         (target_u, target_v))),
+                momentum_velocity_form_w=_momentum_wzv_split,
                 **_stage_transport_kw)
             _g2_override = self._nemo_ws_test_hooks.stage3_transport_override
             _g2 = _tracer_transport_geometry_override(_g2, _g2_override)
@@ -7050,7 +7179,8 @@ class LatLonCGridOceanModel:
                 _stage3_hpg_operands,
                 _stage3_vertical_up3,
                 stage_face_thickness=_stage3_face_thickness,
-                stage_zad_operands=(_g2[2], _g2[4], _g2[5]),
+                stage_zad_operands=(
+                    _momentum_stage_w(_g2), _g2[4], _g2[5]),
                 stage_index=3)
             _expose_stage3_rhs = (
                 self._nemo_ws_test_hooks.expose_stage3_momentum_rhs)
@@ -7066,7 +7196,8 @@ class LatLonCGridOceanModel:
                     _stage3_hpg_operands,
                     _stage3_vertical_up3,
                     stage_face_thickness=_stage3_face_thickness,
-                    stage_zad_operands=(_g2[2], _g2[4], _g2[5]),
+                    stage_zad_operands=(
+                    _momentum_stage_w(_g2), _g2[4], _g2[5]),
                     stage_index=3)
             elif _expose_stage3_rhs:
                 raise ValueError(
@@ -7118,14 +7249,23 @@ class LatLonCGridOceanModel:
                     raise ValueError(
                         "expose_tracer_transport_stage must be 0, 1, 2, or 3")
                 _exposed_geom = _nemo_ws_live_stage_geometry[_stage_index]
+                _exposed_w = (
+                    _momentum_stage_w(_exposed_geom)
+                    if self._nemo_ws_test_hooks.expose_stage_momentum_w
+                    else _exposed_geom[2])
                 _nemo_ws_exposed_tracer_transport = (
                     _exposed_geom[7],
                     _exposed_geom[8],
-                    (_exposed_geom[2]
+                    (_exposed_w
                      if self._nemo_ws_test_hooks.expose_tracer_transport_as_ww
-                     else _exposed_geom[2]
+                     else _exposed_w
                      * jnp.asarray(_grid.area_T)[..., None]),
                 )
+            if self._nemo_ws_test_hooks.expose_stage_face_r3:
+                _r3_stage = _nemo_ws_live_stage_qco[
+                    self._nemo_ws_test_hooks.expose_stage_face_r3 - 1]
+                _nemo_ws_exposed_stage_face_r3 = (
+                    _r3_stage[1][..., 0], _r3_stage[2][..., 0])
             u3_corr = u3_corr.at[:, -1].set(u3_corr[:, 0])
             state_new = state_new._replace(
                 u=state_new.u.replace(data=u3_corr),
@@ -8954,6 +9094,18 @@ class LatLonCGridOceanModel:
                         ..., :state_new.T.data.shape[-1]
                     ]
                 )
+            )
+        if _nemo_ws_exposed_stage_face_r3 is not None:
+            # WRITE-only: the ordinary step has already completed and nothing
+            # downstream reads these slots.
+            _r3u, _r3v = _nemo_ws_exposed_stage_face_r3
+            state_new = state_new._replace(
+                u=state_new.u.replace(
+                    data=jnp.broadcast_to(
+                        _r3u[..., None], state_new.u.data.shape)),
+                v=state_new.v.replace(
+                    data=jnp.broadcast_to(
+                        _r3v[..., None], state_new.v.data.shape)),
             )
         if _nemo_ws_exposed_stage1_transport_operand is not None:
             _operand_u, _operand_v = _nemo_ws_exposed_stage1_transport_operand
