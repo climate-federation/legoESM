@@ -44,6 +44,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--config", required=True)
     ap.add_argument("--restart", required=True)
     ap.add_argument("--label", default="arm")
+    ap.add_argument("--clubb-nsub", type=int, default=1,
+                    help="macro/micro sub-steps for the closure call "
+                         "(the run's cld_macmic_num_steps; 3 => 600 s on an 1800 s step)")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
     return ap
 
@@ -143,10 +146,22 @@ def main():
             raise SystemExit("no CLUBB sub-config on this deck")
         dt_phys = float(config.dycore.dt) * int(getattr(config, "physics_update_steps", 1) or 1)
         moments = unpack_clubb_moments(jnp.asarray(moments_packed))
-        out = clubb_step(u_cell.reshape(nCells, nlev), v_cell.reshape(nCells, nlev),
-                         T, q_v, moments, p_full, p_half, z_full, z_half,
-                         T_sfc, q_sfc, rho, dt_phys, clubb_cfg)
-        diags = out[5]
+        _ns = max(1, int(a.clubb_nsub))
+        _dts = dt_phys / _ns
+        _u = u_cell.reshape(nCells, nlev); _v = v_cell.reshape(nCells, nlev)
+        _T = T; _q = q_v; _m = moments; _rho = rho
+        from legoesm.atmosphere.physics._shared import virtual_temperature
+        print(f"[{a.label}] closure call: {_ns} sub-step(s) of {_dts:.1f} s "
+              f"(the run's physics step is {dt_phys:.1f} s)")
+        for _i in range(_ns):
+            out = clubb_step(_u, _v, _T, _q, _m, p_full, p_half, z_full, z_half,
+                             T_sfc, q_sfc, _rho, _dts, clubb_cfg)
+            _du, _dv, _dT, _dq, _m, diags = out
+            if _i < _ns - 1:
+                _u = _u + _dts * _du; _v = _v + _dts * _dv
+                _T = _T + _dts * _dT; _q = _q + _dts * _dq
+                _tv = jnp.maximum(virtual_temperature(_T, _q), clubb_cfg.T0 * 0.5)
+                _rho = p_full / (constants.R_d * _tv)
         rcm_a = np.asarray(diags["rcm"])          # ascending (bottom-up)
         cf_a = np.asarray(diags["cloud_frac"])
         rcm = rcm_a[:, ::-1][:, :nlev] if rcm_a.shape[1] >= nlev else rcm_a[:, ::-1]
