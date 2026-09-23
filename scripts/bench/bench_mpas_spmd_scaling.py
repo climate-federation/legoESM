@@ -687,6 +687,14 @@ def main() -> int:
             "fix_mass": not args.no_fix_mass,
             "per_rank_median_ms": per_rank_median_ms,
             "per_rank_spread_ms": per_rank_spread_ms,
+            # The NCCL transport the arm ran with: the channel count moves
+            # the s9 ATMOSPHERE step 17% at 128 GPUs, so rows at different settings are
+            # different measurements (plot_nature_scaling.py refuses mixes).
+            "nccl_env": {
+                k: os.environ.get(k, "")
+                for k in ("NCCL_MIN_NCHANNELS", "NCCL_MAX_NCHANNELS",
+                          "NCCL_P2P_NET_CHUNKSIZE")
+            },
             "halo_knobs": {
                 k: os.environ.get(k, "")
                 for k in ("LEGOESM_MPAS_WIDE_HALO",

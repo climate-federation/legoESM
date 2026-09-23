@@ -15,8 +15,9 @@ reorder (~5e-8/stage, capstone diag 8512950): u_d/v_d corner stay tight; T/p_s c
 looser.  A real bug is O(1e-2)+.  NOT a wall-clock measurement (np>6 anti-scales
 on Ginsburg).  Covers sigma + hybrid.
 
-24 host CPU devices (kt=2) / 54 (kt=3):
-``XLA_FLAGS=--xla_force_host_platform_device_count=54``.
+Host CPU devices = 6*kt^2: 24 (kt=2) / 54 (kt=3) / 96 (kt=4) / 216 (kt=6) /
+384 (kt=8); ``XLA_FLAGS=--xla_force_host_platform_device_count=384`` covers all.
+kt above 3 is what _VALIDATED_KT grows on.
 """
 from __future__ import annotations
 
@@ -38,11 +39,12 @@ from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     fv3_hydrostatic_tendencies, CDGridPrimitiveEquationConfig,
 )
+from legoesm.parallel import tiled_production_cdgrid as tiled_mod
 from legoesm.parallel.tiled_production_cdgrid import (
     make_tiled_fv3_hydrostatic_step_stage_2d,
 )
 
-N = 24
+N = 48   # divisible by every validated kt {2,3,4,6,8}; nl >= 6 per tile
 NLEV = 6
 P_FLOOR = CDGridPrimitiveEquationConfig().p_floor
 DT = 100.0   # s — a small step; gentle inputs keep the per-stage clips inactive
@@ -113,13 +115,18 @@ def _rel_cc(t, g):
 
 
 @pytest.mark.parametrize("hybrid", [False, True])
-@pytest.mark.parametrize("KT", [2, 3])
-def test_tiled_step_matches_global(cdg, KT, hybrid):
+@pytest.mark.parametrize("KT", [2, 3, 4, 6, 8])
+def test_tiled_step_matches_global(cdg, KT, hybrid, monkeypatch):
     ndev = 6 * KT * KT
     if len(jax.devices()) < ndev:
         pytest.skip(
             f"kt={KT} needs {ndev} host devices "
             f"(--xla_force_host_platform_device_count={ndev})")
+    # This test IS the bit-identity receipt that _VALIDATED_KT is grown on, so
+    # it must run for a kt the deployment guard still refuses; the guard stays
+    # in force everywhere else.
+    monkeypatch.setattr(tiled_mod, "_VALIDATED_KT",
+                        tiled_mod._VALIDATED_KT | {KT})
     nl = N // KT
     coord = make_hybrid_levels(NLEV) if hybrid else create_sigma_coordinate(NLEV)
     u_d, v_d, T, p_s, phis = _inputs(N, NLEV, (80 if hybrid else 90) + KT)

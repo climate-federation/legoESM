@@ -306,9 +306,67 @@ class MPASOceanConfig(NamedTuple):
     # strategy ("standard" 2-dot PCG, or "single_reduce" Chronopoulos–Gear
     # with one batched allreduce per iteration — validated at solver entry,
     # ValueError on unknown).
-    barotropic_implicit_pcg_fixed_iters: int = 60
+    #
+    # 20 with the "poly" preconditioner below (owner decision 2026-09-20,
+    # A/B at 32 and 128 GPUs: step -8%/-14.5% f32, -6%/-11% f64 against
+    # Jacobi at 30, same residual).  The Jacobi history that set 30:
+    # measured on the REAL captured systems (scripts/validate/
+    # ocean_fidelity/barotropic_pcg_convergence.py) at subdivision 7, 8 and
+    # 9, in both precisions, after 200 spin-up steps at dt = 300 s.  Over
+    # the configurations tested, the mesh set the iteration count and the
+    # column did not: subdivision 9 at 10, 20 and 40 levels gives the same
+    # table, while subdivision 8 is at its floor ~10 iterations sooner than
+    # 9.  Timestep, bathymetry and state were NOT varied and could move it.
+    #
+    # At subdivision 9 (2.6M cells, the production/scaling mesh), relative
+    # residual and max|b - A eta|/dt.  That second column is the WORST LOCAL
+    # continuity-defect rate a cell carries in one step, not a measured
+    # global mass drift — the cell-to-cell and step-to-step cancellation is
+    # unmeasured, so read it as an upper bound on how wrong one cell's
+    # free-surface tendency can be, not as sea level lost per day:
+    #     M      float32              float64
+    #     20     1.0e-5  / 12 mm/day  3.0e-6  / 11 mm/day
+    #     30     3.2e-6  / 1.4        1.0e-7  / 0.30
+    #     40     3.3e-6  / 1.4        3.2e-9  / 0.011
+    #     60     3.3e-6  / 1.4        3.5e-12 / 5e-6
+    # float32 reaches its own precision floor at 30 and buys nothing after
+    # it.  float64 keeps descending, so 30 trades sea-level budget accuracy
+    # (0.3 mm/day per step, still 4x under the float32 floor the model
+    # already runs at) for ~1.8x on step time.  Owner decision 2026-09-19;
+    # raise to 40 if a long float64 integration shows mass drift.
+    #
+    # NOT covered by that measurement, and the two reasons to revisit this:
+    # no multi-rank convergence check (the probe replays the captured system
+    # on one process, where the halo exchange is the identity); and no
+    # gradient comparison through the unrolled adjoint, which is the use
+    # this most plausibly harms — reverse mode differentiates the TRUNCATED
+    # algorithm exactly, so a loose forward residual bounds nothing about
+    # the derivative, and a training run would degrade without any mass
+    # diagnostic firing.  A verification run that must hit the configured
+    # 1e-10 residual has to set the count back up explicitly.
+    # The lat-lon C-grid default (state.py) is a different operator on a
+    # different mesh and stays at 60 until measured.
+    barotropic_implicit_pcg_fixed_iters: int = 20
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     barotropic_implicit_pcg_variant: str = "standard"
+    # Distributed-only preconditioner for the fixed-iteration PCG.
+    # "jacobi" (default) or "poly": a communication-free Neumann-series
+    # polynomial in the device-local block of A (K local mat-vecs, no
+    # halo exchange, so it costs nothing in ppermute rounds and buys
+    # iterations back).  Measured on the real subdivision-9 systems,
+    # 128 emulated devices, f64, relative residual:
+    #                iters=10    15        20        30
+    #     jacobi       7.9e-05   1.5e-05   3.1e-06   9.9e-08
+    #     local poly4  2.0e-05   1.4e-06   8.9e-08   4.0e-10
+    #     local poly8  9.1e-06   4.0e-07   1.6e-08   2.6e-11
+    # Each PCG iteration still costs one cell-halo exchange plus two
+    # allreduces; the win is reaching the target residual at a smaller
+    # ``fixed_iters`` (30 -> 20 at poly4).
+    # Default "poly" since 2026-09-20 (owner decision, A/B above); "jacobi"
+    # is the pre-2026-09-20 solver and needs fixed_iters=30 for the same
+    # residual.
+    barotropic_implicit_pcg_precond: str = "poly"
+    barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global
                                         # area-weighted mean freshwater flux

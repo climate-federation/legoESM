@@ -2112,12 +2112,12 @@ def test_config_yaml_round_trips_authoritative_values():
     # red on main, and blind to any further drift while it was.  Values below
     # are the shipped deck: icosahedral level 6 (about 1.1 degrees, the
     # production default per the 2026-08-25 directive; level 5 remains the
-    # fast-iteration override), 30 sigma levels, dt 112.5 s (2026-08-25 dt
+    # fast-iteration override), 36 sigma levels (raised lid, efd827b76), dt 112.5 s (2026-08-25 dt
     # ladder).  The five keys are recipe-sensitive together (the YAML header
     # records that L40 + hybrid + automatic dt blew up on day one), so a change
     # here is a stability A/B, not an edit.
     assert args.resolution == 6
-    assert args.nlev == 30
+    assert args.nlev == 36
     assert args.discretization == "mpas"
     # The deck spells the mesh "voronoi"; the parser normalises the family's
     # spellings to one name, so assert the resolved value the run uses.
@@ -2127,9 +2127,9 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
     # orographic AND non-orographic; the orographic-only spelling is the
     # older deck's.
-    assert cfg.gravity_wave_drag == "mcfarlane+hines"
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     assert cfg.microphysics == "morrison"
-    assert cfg.cloud_scheme == "sundqvist"
+    assert cfg.cloud_scheme == "xu_randall"   # f82134793
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
     # Re-baselined 2026-09-13 (owner decision): the boundary layer moved from
     # the Louis first-order closure to CLUBB run PROGNOSTICALLY, so the scheme
@@ -2883,7 +2883,8 @@ def test_cloud_optics_inhomogeneity_validate():
 def test_cloud_saturation_scheme_round_trips_and_threads():
     """--cloud-saturation-scheme round-trips into ExperimentConfig and threads
     into the hot-loop CloudConfig (the cloud-fraction RH saturation curve,
-    #1521 ice-saturation fix); default 'liquid' = legacy byte-identical."""
+    #1521 ice-saturation fix); 'liquid' = legacy byte-identical, no longer
+    the default."""
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
@@ -2894,13 +2895,16 @@ def test_cloud_saturation_scheme_round_trips_and_threads():
     cc = build_cloud_config(
         cfg.cloud_scheme, saturation_scheme=cfg.cloud_saturation_scheme)
     assert cc.saturation_scheme == "mixed_phase"
-    # default: 'liquid' => CloudConfig default (legacy path).
+    # saying nothing => the field default, which is 'mixed_phase' since
+    # 2026-09-17 (the 'liquid' curve made cold cloud impossible: at 230 K /
+    # 900 hPa ice-saturated air reads RH 0.662 against rh_crit 0.85).
     d = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert d.cloud_saturation_scheme == "liquid"
+    assert d.cloud_saturation_scheme == "mixed_phase"
     assert build_cloud_config(
         d.cloud_scheme,
-        saturation_scheme=d.cloud_saturation_scheme).saturation_scheme == "liquid"
+        saturation_scheme=d.cloud_saturation_scheme
+    ).saturation_scheme == "mixed_phase"
 
 
 def test_cloud_saturation_scheme_validate():
@@ -3113,7 +3117,7 @@ def test_latlon24_production_variant_pins_polar_filter():
     # gained the non-orographic component; this assertion still named the
     # orographic-only spelling and so went red with it.
     assert cfg.convection == "sbm"
-    assert cfg.gravity_wave_drag == "mcfarlane+hines"
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
     # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
     # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
@@ -3997,6 +4001,64 @@ def test_sub_daily_diag_days_round_trips_and_never_disables_the_check():
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_default.output.diag_days == pytest.approx(5.0)
+
+
+_FV3_DUO_ARGV = ["--dataset", "analytical", "--grid-type", "cubed_sphere",
+                 "--discretization", "fv3_duo", "--resolution", "12",
+                 "--nlev", "5", "--precision", "fp64",
+                 "--radiation", "none", "--convection", "none",
+                 "--microphysics", "none", "--turbulence", "none",
+                 "--gravity-wave-drag", "none", "--allow-disabled-physics"]
+
+
+def _fv3_duo_cfg(extra):
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(_FV3_DUO_ARGV + extra), parser)
+    return build_config_from_args(args)
+
+
+def test_fv3_duo_windows_flags_round_trip_and_validate():
+    """--fv3-duo-windows KT + --fv3-duo-window-pad PAD reach DycoreConfig
+    and pass validate_strict together; the defaults are None (face
+    layout), so an unset pair changes nothing."""
+    cfg = _fv3_duo_cfg([])
+    assert cfg.dycore.fv3_duo_windows is None
+    assert cfg.dycore.fv3_duo_window_pad is None
+    cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2", "--fv3-duo-window-pad", "5"])
+    assert cfg.dycore.fv3_duo_windows == 2
+    assert cfg.dycore.fv3_duo_window_pad == 5
+    cfg.validate_strict()
+
+
+def test_fv3_duo_windows_without_pad_is_refused():
+    """The pad is a measured per-deck halo width, never defaulted."""
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2"])
+    with pytest.raises(ValueError, match="fv3_duo_window_pad is REQUIRED"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_window_pad_without_windows_is_refused():
+    cfg = _fv3_duo_cfg(["--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="without dycore.fv3_duo_windows"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_windows_below_two_is_refused():
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "1", "--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="int >= 2"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_windows_on_another_discretization_is_refused():
+    parser = build_arg_parser()
+    argv = [a if a != "fv3_duo" else "cdgrid" for a in _FV3_DUO_ARGV]
+    args = _postprocess_args(parser.parse_args(
+        argv + ["--fv3-duo-windows", "2", "--fv3-duo-window-pad", "5"]),
+        parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises(ValueError, match="only meaningful with"):
+        cfg.validate_strict()
 
 
 def test_cloud_cover_condensate_q_ref_round_trip_and_bounds():

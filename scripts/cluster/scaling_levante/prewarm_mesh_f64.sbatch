@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --account=bd1179
+#SBATCH --account=bb1596
 #SBATCH --partition=compute
 #SBATCH --nodes=1
 #SBATCH --mem=0

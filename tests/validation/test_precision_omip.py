@@ -50,18 +50,20 @@ def _restore_precision():
     set_policy(PrecisionPolicy.fp64())
 
 
-def test_mixed_is_refused():
-    # #1665 interim: mixed is refused loudly until it is consistent.
-    import pytest
-    with pytest.raises(NotImplementedError, match="disabled"):
-        apply_precision("mixed")
+def test_mixed_installs_ocean_fp64_overrides():
+    apply_precision("mixed")
+    overrides = get_module_overrides()
+    for mod in _OCEAN_SENSITIVE:
+        assert mod in overrides, f"{mod} missing from mixed overrides"
+        # precision-sensitive kernel must compute fp64 even under mixed storage
+        assert resolve_dtype(mod, "compute") == jnp.dtype("float64"), mod
 
 
-def test_mixed_storage_refused():
-    # #1665 interim: mixed refused (was: fp32 storage assertion).
-    import pytest
-    with pytest.raises(NotImplementedError, match="disabled"):
-        apply_precision("mixed")
+def test_mixed_storage_is_fp32():
+    apply_precision("mixed")
+    # a generic (non-overridden) module stores+computes in fp32 under mixed
+    assert resolve_dtype("tracer_advection", "storage") == jnp.dtype("float32")
+    assert resolve_dtype("tracer_advection", "compute") == jnp.dtype("float32")
 
 
 def test_fp64_mode_is_all_fp64():
@@ -84,15 +86,15 @@ def test_unknown_precision_mode_raises():
         apply_precision("bf16")
 
 
-def test_mode_switch_and_mixed_refused():
-    """#1665 interim: mixed (which pinned ocean fp64 overrides) is refused;
-    fp32<->fp64 switching still resolves correctly (apply_precision clears
-    overrides on every switch)."""
-    import pytest
-    with pytest.raises(NotImplementedError, match="disabled"):
-        apply_precision("mixed")
+def test_mode_switch_clears_prior_overrides():
+    """mixed -> fp32 must NOT leave the ocean kernels pinned fp64: a stale
+    override would make --precision fp32 silently non-fp32 in a long-lived
+    process (codex 2026-06-21). apply_precision clears overrides on every
+    switch."""
+    apply_precision("mixed")
+    assert resolve_dtype("barotropic_solver", "compute") == jnp.dtype("float64")
     apply_precision("fp32")
+    # overrides cleared -> the previously-pinned kernel is now fp32
     assert resolve_dtype("barotropic_solver", "compute") == jnp.dtype("float32")
     apply_precision("fp64")
     assert resolve_dtype("barotropic_solver", "compute") == jnp.dtype("float64")
-

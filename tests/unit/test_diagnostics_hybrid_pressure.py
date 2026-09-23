@@ -312,3 +312,62 @@ def test_tas_2m_follows_surface_bulk_scheme():
     np.testing.assert_array_equal(tas_default, tas_coare3)
     assert np.all(np.abs(tas_ly - tas_default) > 0.5), (tas_default, tas_ly)
     assert np.all(tas_ly >= 220.0) and np.all(tas_ly <= 300.0)
+
+
+# ---------------------------------------------------------------------------
+# _tas_2m over LAND.  The diagnostic built its surface from SST / sea ice only,
+# with a saturated humidity everywhere, so over land it published the
+# neighbouring OCEAN's temperature — a February Arctic land bias of -10 K could
+# not be read from this field because the field contained no land.
+# ---------------------------------------------------------------------------
+def _tas_land_for(**kw):
+    import jax.numpy as jnp
+
+    coord = create_sigma_coordinate(NLEV)
+    dc = DiagnosticCollector(nlev=NLEV, sigma_full=coord.sigma_full,
+                            dsigma=coord.dsigma, vcoord=coord)
+    state = _tas_stub_state(NLEV)
+    q_v = jnp.full((2, NLEV), 2e-3)
+    sst = jnp.full((2,), 220.0)
+    sic = jnp.zeros((2,))
+    return np.asarray(dc._tas_2m(state, q_v, sst, sic, T_ice=271.35, **kw))
+
+
+def test_tas_2m_over_land_follows_the_land_skin_not_the_ocean():
+    import jax.numpy as jnp
+    land = jnp.ones((2,))
+    warm = _tas_land_for(T_land=jnp.full((2,), 260.0), land_fraction=land)
+    cold = _tas_land_for(T_land=jnp.full((2,), 240.0), land_fraction=land)
+    assert np.all(warm > cold + 1.0), (warm, cold)
+
+
+def test_tas_2m_over_land_ignores_the_sea_surface():
+    """With land fraction 1 the SST must not reach the answer at all."""
+    import jax.numpy as jnp
+    coord = create_sigma_coordinate(NLEV)
+    dc = DiagnosticCollector(nlev=NLEV, sigma_full=coord.sigma_full,
+                            dsigma=coord.dsigma, vcoord=coord)
+    state = _tas_stub_state(NLEV)
+    q_v = jnp.full((2, NLEV), 2e-3)
+    kw = dict(T_land=jnp.full((2,), 250.0), land_fraction=jnp.ones((2,)))
+    a = np.asarray(dc._tas_2m(state, q_v, jnp.full((2,), 220.0),
+                              jnp.zeros((2,)), T_ice=271.35, **kw))
+    b = np.asarray(dc._tas_2m(state, q_v, jnp.full((2,), 300.0),
+                              jnp.zeros((2,)), T_ice=271.35, **kw))
+    np.testing.assert_allclose(a, b, rtol=0.0, atol=0.0)
+
+
+def test_tas_2m_zero_land_fraction_collapses_to_the_ocean_branch():
+    """A land fraction of zero must reproduce the no-land-arguments answer.
+
+    This pins the BLEND, not history: both sides run the current code, so it
+    cannot certify equality with the pre-land implementation.  That parity was
+    checked separately by executing the parent commit's ``_tas_2m`` beside this
+    one over stable, neutral and unstable fixtures (exact equality); the two
+    land tests above are what make this one able to fail.
+    """
+    import jax.numpy as jnp
+    legacy = _tas_land_for()
+    zero_land = _tas_land_for(T_land=jnp.full((2,), 240.0),
+                              land_fraction=jnp.zeros((2,)))
+    np.testing.assert_allclose(zero_land, legacy, rtol=0.0, atol=0.0)

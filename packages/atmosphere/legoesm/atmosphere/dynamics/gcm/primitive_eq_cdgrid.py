@@ -51,7 +51,7 @@ from legoesm.core.operators import (
     hyperdiffusion,
     laplacian_compact,
 )
-from legoesm.core.precision import resolve_dtype, cast_pytree
+from legoesm.core.precision import resolve_dtype, cast_pytree, finalize_to_storage
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -2031,7 +2031,15 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
-        state_out = cast_pytree(state_new, None, "storage")
+        # #1675: ``cast_pytree`` SKIPS downcasts by default, so in ``mixed``
+        # this line never rounded the mass fixer's float64 back out of the bulk
+        # state -- adversarial review traced winds, temperature and every
+        # tracer arriving float64 on step TWO.  ``finalize_to_storage`` is the
+        # downcasting version and keeps ``p_s`` at the accumulate dtype on
+        # purpose (the exact mass correction is load-bearing).  It is a no-op
+        # whenever storage and accumulate share a dtype, i.e. in every mode
+        # except mixed, so fp32/fp64 stay byte-identical.
+        state_out = finalize_to_storage(cast_pytree(state_new, None, "storage"))
 
         # Operator-split physics carry (issue #413): one extra physics
         # evaluation on the POST-STEP state produces the carry-out

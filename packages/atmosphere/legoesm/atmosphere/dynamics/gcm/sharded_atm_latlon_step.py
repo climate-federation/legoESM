@@ -34,7 +34,7 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
     FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
-    checked_shard_put,
+    checked_replicated_put, checked_shard_put,
     coerce_bool, coerce_count, config_digest48, name_digest48,
     tree_schema_digest48)
 
@@ -566,11 +566,20 @@ def _build_geometry_stacks(model, mesh, n_dev: int, shard_geometry: bool):
                          arrays=[raw[n] for n in ordered_names])
     # SHARDED mode: checked_shard_put replaces broadcast_checked +
     # device_put (the ocean walls, PR #1457) — owned slabs only, per-slab
-    # gate. REPLICATED mode (codex r22): keep the byte-CANONICAL
-    # process-0 broadcast — every device must hold identical replicated
-    # geometry (an rtol-gated per-process copy would let ULP drift into
-    # the replicated contract and process-dependent evolution); the
-    # walls are soft here (2-D ~MB fields), so canonical wins.
+    # gate. REPLICATED mode: still the byte-CANONICAL process-0 broadcast
+    # — every device must hold identical replicated geometry (an
+    # rtol-gated per-process copy would let ULP drift into the replicated
+    # contract and process-dependent evolution) — but placed with
+    # checked_replicated_put, which skips jax's whole-array device_put
+    # equality assert.
+    #
+    # An earlier version of this comment called the walls "soft here
+    # (2-D ~MB fields)". That was measured false: at 4096x8192 each field
+    # is 134 MB, the assert all-gathers ~P*N*(2s+1) bytes of it, and
+    # per-rank peak grew 12.7/22.2/41.1 GB (f32) and 24.6/41.5/73.4 GB
+    # (f64) at 32/64/128 ranks until the 128-rank f64 arm was OOM-killed.
+    # The assert is also redundant after broadcast_checked, which has
+    # already proven agreement and broadcast one canonical copy.
     spec_of = lat_spec if shard_geometry else (lambda _arr: P())
     if shard_geometry:
         stacks = {
@@ -582,11 +591,9 @@ def _build_geometry_stacks(model, mesh, n_dev: int, shard_geometry: bool):
         }
     else:
         stacks = {
-            name: jax.device_put(
-                jnp.asarray(broadcast_checked(
-                    raw[name], name,
-                    context="make_sharded_atm_latlon_step")),
-                NamedSharding(mesh, P()))
+            name: checked_replicated_put(
+                raw[name], name, NamedSharding(mesh, P()),
+                context="make_sharded_atm_latlon_step")
             for name in ordered_names
         }
     stacks_spec = {name: spec_of(arr) for name, arr in raw.items()}
@@ -1692,12 +1699,14 @@ def _build_geometry_stacks_2d(model, mesh, p_lat: int, p_lon: int,
             for name in ordered_names
         }
     else:
+        # Same reasoning as the 3-D lane above: broadcast_checked already
+        # proves agreement, so jax's whole-array equality assert is redundant
+        # and its all-gather is what made per-rank memory scale with the rank
+        # count.
         stacks = {
-            name: jax.device_put(
-                jnp.asarray(broadcast_checked(
-                    raw[name], name,
-                    context="make_sharded_atm_latlon_step_2d")),
-                NamedSharding(mesh, P()))
+            name: checked_replicated_put(
+                raw[name], name, NamedSharding(mesh, P()),
+                context="make_sharded_atm_latlon_step_2d")
             for name in ordered_names
         }
     stacks_spec = {name: spec_of(raw[name]) for name in ordered_names}
