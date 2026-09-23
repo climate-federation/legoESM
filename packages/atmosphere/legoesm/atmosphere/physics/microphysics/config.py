@@ -1347,16 +1347,24 @@ def apply_microphysics_experiment_flags(
                 "--microphysics morrison or drop the override.")
         scheme_config = scheme_config._replace(
             morrison_flavor=morrison_flavor)
-    if liquid_from_closure:
+    if liquid_from_closure and not hasattr(scheme_config,
+                                           "liquid_from_closure"):
         # Scheme gate, same shape as the Morrison-only knobs below: a deck that
         # asks for this on a scheme with no saturation adjustment to switch off
         # must be told, not silently ignored.
-        if not hasattr(scheme_config, "liquid_from_closure"):
-            raise ValueError(
-                f"liquid_from_closure=True is not supported by the {scheme!r} "
-                "microphysics scheme (it has no saturation adjustment to hand "
-                "over); use --microphysics morrison or drop it.")
-        scheme_config = scheme_config._replace(liquid_from_closure=True)
+        raise ValueError(
+            f"liquid_from_closure=True is not supported by the {scheme!r} "
+            "microphysics scheme (it has no saturation adjustment to hand "
+            "over); use --microphysics morrison or drop it.")
+    if hasattr(scheme_config, "liquid_from_closure"):
+        # Assigned UNCONDITIONALLY, unlike the opt-in knobs below.  This one is
+        # slaved to the closure: the driver passes what the closure resolved
+        # to, so passing False must CLEAR a directly-constructed True rather
+        # than leave it standing.  A sub-config that arrived with the flag set
+        # and a closure that is not delivering liquid would otherwise reach a
+        # built model with no liquid source at all (codex).
+        scheme_config = scheme_config._replace(
+            liquid_from_closure=bool(liquid_from_closure))
     if morrison_sed_cfl_substeps is not None:
         if scheme != "morrison":
             raise ValueError(

@@ -692,16 +692,79 @@ def test_liquid_from_closure_rejected_on_a_scheme_without_it():
             KesslerConfig(), "kessler", liquid_from_closure=True)
 
 
-def test_both_halves_move_together():
-    """One experiment flag drives the closure half AND the microphysics half.
+def test_helper_sets_AND_clears_the_flag():
+    """The flag is slaved to the closure, so False must CLEAR a set value.
 
-    The microphysics half ALONE would leave the model with no liquid source
-    at all, so they must not be separately reachable.
+    Every other knob in this helper is opt-in and only ever sets.  This one is
+    different: the driver passes whatever the closure resolved to, so a
+    sub-config that arrived with the flag already True and a closure that is
+    not delivering liquid must come back False -- otherwise the built model
+    has no liquid source at all (codex, who reproduced the leak).
     """
     from legoesm.atmosphere.physics.microphysics.config import (
         MorrisonConfig, apply_microphysics_experiment_flags,
     )
-    for resolved in (False, True):
-        out = apply_microphysics_experiment_flags(
-            MorrisonConfig(), "morrison", liquid_from_closure=resolved)
-        assert out.liquid_from_closure is resolved
+    preset = MorrisonConfig(liquid_from_closure=True)
+    assert apply_microphysics_experiment_flags(
+        preset, "morrison", liquid_from_closure=False
+    ).liquid_from_closure is False
+    for start in (MorrisonConfig(), preset):
+        assert apply_microphysics_experiment_flags(
+            start, "morrison", liquid_from_closure=True
+        ).liquid_from_closure is True
+
+
+def test_mixed_phase_liquid_sink_survives_the_gate():
+    """The WBF sink is the NEGATIVE branch, and it must not be switched off.
+
+    ``wbf_scheme="emergent"`` (the default) has no explicit Bergeron rate: the
+    mixed-phase cloud-water sink IS the evaporative branch of the saturation
+    adjustment, firing as ice deposition draws vapour below liquid saturation.
+    CAM's residual block is guarded by ``qtmp > qvn``
+    (micro_mg2_0.F90:2700), i.e. positive supersaturation only, so it has no
+    evaporation branch to switch off either.  An earlier version of the gate
+    zeroed the signed rate and deleted this sink outright.
+
+    NON-VACUITY: the sink must be LARGE here, so a gate that removed it would
+    change the number rather than leave it near zero.
+    """
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.atmosphere.physics.microphysics.morrison import (
+        morrison_microphysics,
+    )
+    from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+    from legoesm.thermo import (
+        saturation_mixing_ratio, saturation_mixing_ratio_ice,
+    )
+
+    # Mixed phase: above ice saturation, BELOW liquid saturation.
+    T, p, dt = 258.0, 60000.0, 600.0
+    qsl = float(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p)))
+    qsi = float(saturation_mixing_ratio_ice(jnp.asarray(T), jnp.asarray(p)))
+    assert qsi < qsl, "mixed-phase setup needs ice saturation below liquid"
+    q_v = 0.5 * (qsi + qsl)
+    rho = p / (constants.R_d * T)
+    one = lambda v: jnp.full((1, 1), float(v))
+    hm = HydrometeorState(
+        q_c=one(3.0e-4), q_r=one(0.0), q_i=one(5.0e-5), q_s=one(0.0),
+        q_g=one(0.0), N_c=one(1.0e8), N_r=one(0.0), N_i=one(1.0e4),
+        N_s=one(0.0), N_g=one(0.0),
+    )
+
+    def _run(cfg):
+        return morrison_microphysics(
+            one(T), one(q_v), hm, one(p), jnp.full((1, 2), p), one(rho),
+            one(260.0), dt, cfg)
+
+    off = _run(MorrisonConfig())
+    on = _run(MorrisonConfig(liquid_from_closure=True))
+
+    # The sink is large on the unmodified scheme...
+    assert float(off.dq_c_dt[0, 0]) < -1.0e-8, (
+        "no mixed-phase liquid sink in the control, so this test could not "
+        "detect one being deleted")
+    # ...and the gate must not have touched it: no positive supersaturation
+    # here, so there is nothing for the gate to remove.
+    assert float(on.dq_c_dt[0, 0]) == float(off.dq_c_dt[0, 0])
