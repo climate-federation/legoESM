@@ -1,6 +1,8 @@
 """The production AMIP launcher must wire a real subgrid-orography file (#1514).
 
-``config/amip/amip_production.yaml`` runs ``gravity_wave_drag: mcfarlane+hines``.
+``config/amip/amip_production.yaml`` runs an OROGRAPHIC gravity-wave member
+(``mcfarlane``, alone since the CAM6 suite became production on 2026-09-23;
+the tests below read the shipped value rather than assuming one).
 With ``subgrid_orography_path`` empty, the orographic member launches
 ``tau_0 ~ h_topo^2`` from the scalar fallback ``h_topo = 500 m`` on EVERY
 column — a fictional 500-m mountain over the open ocean.  Measured on the

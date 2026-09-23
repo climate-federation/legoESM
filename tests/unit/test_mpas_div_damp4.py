@@ -185,7 +185,7 @@ def test_cam6_deck_reaches_the_dycore_end_to_end():
     only thing that would have caught a deck key silently dropped on the way.
     """
     from legoesm.driver.run_config_yaml import load_yaml_config
-    deck = pathlib.Path(__file__).parents[2] / "config" / "amip" / "amip_cam6.yaml"
+    deck = pathlib.Path(__file__).parents[2] / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     keys = load_yaml_config(str(deck), parser)
     assert keys["mpas_div_damp4_scale"] == 1.0                  # deck -> loader
@@ -251,20 +251,30 @@ def test_conservative_hybrid_transport_is_selectable_and_conserves():
             base._replace(vert_advection_scheme="sb"))
 
 
-def test_cam6_deck_selects_both_levers_and_no_other_deck_does():
-    """The user approved both levers for the CAM6 deck on 2026-09-23 after the
-    three-arm physics-off A/B.  This pins that decision: the CAM6 deck carries
-    both, every other committed deck carries neither, and the code defaults stay
-    off.  It goes red if a lever leaks into another deck or into a default."""
+def test_production_deck_selects_both_levers_and_no_other_deck_does():
+    """The user approved both levers on 2026-09-23 after the three-arm
+    physics-off A/B, and on the same day made the CAM6 suite the production
+    default, so the levers now live in amip_production.yaml.  This pins that
+    decision: the production deck carries both, every other committed deck
+    carries neither, and the CODE defaults stay off -- the deck selects them,
+    a default is not a record.  It goes red if a lever leaks into another deck
+    or into a default.
+
+    The outgoing Sundqvist/L36 deck is named explicitly rather than matched by
+    exclusion, because it is the paired baseline of the run-1 comparison and
+    the whole point of keeping it is that it carries NEITHER lever."""
     import yaml
     cfgdir = pathlib.Path(__file__).parents[2] / "config"
-    doc = yaml.safe_load((cfgdir / "amip" / "amip_cam6.yaml").read_text())
+    doc = yaml.safe_load((cfgdir / "amip" / "amip_production.yaml").read_text())
     assert doc["mpas_div_damp4_scale"] == 1.0
     assert doc["mpas_vert_advection_scheme"] == "sb"
     assert DycoreConfig().mpas_div_damp4_scale == 0.0
     assert DycoreConfig().mpas_vert_advection_scheme == "upwind"
+    base = yaml.safe_load((cfgdir / "amip" / "amip_sundqvist_l36.yaml").read_text())
+    assert base.get("mpas_div_damp4_scale", 0.0) == 0.0   # silent -> code default
+    assert base["mpas_vert_advection_scheme"] == "van_leer"
     for deck in sorted(cfgdir.rglob("*.yaml")):
-        if deck.name == "amip_cam6.yaml":
+        if deck.name == "amip_production.yaml":
             continue
         other = yaml.safe_load(deck.read_text()) or {}
         if not isinstance(other, dict):

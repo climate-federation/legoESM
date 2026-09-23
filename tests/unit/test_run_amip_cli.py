@@ -2097,71 +2097,84 @@ def test_amip_sota_config_builds_valid_experiment_config():
 
 def test_config_yaml_round_trips_authoritative_values():
     """`run_amip.py --config config/amip/amip_production.yaml` reproduces the
-    production AMIP parametrization (Bechtold mass-flux + McFarlane GWD,
-    directive 2026-07-06; revalidation gate = the C24 physics-combo screen)."""
+    production AMIP parametrization.
+
+    Re-baselined 2026-09-23 (user decision): the production atmospheric physics
+    suite is CAM6 -- the CAM 32-level hybrid table, CLUBB cloud fraction,
+    the Zhang-McFarlane convection port, orographic-only gravity waves, the
+    CESM Large-Yeager surface fluxes and the 1800 s physics step with three
+    macro/micro sub-steps.  The outgoing Sundqvist/L36 deck is asserted
+    separately below so both remain pinned.
+
+    The grid keys are recipe-sensitive together, so a change here is a
+    stability A/B, not an edit."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
-    # grid geometry (resolution/nlev/discretization are CLI dests baked into
-    # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production lane moved off the cubed sphere on 2026-07-24 and this test
-    # was not moved with it, so it asserted the retired C48/L40 cube deck
-    # against a config that had been the icosahedral MPAS one for weeks --
-    # red on main, and blind to any further drift while it was.  Values below
-    # are the shipped deck: icosahedral level 6 (about 1.1 degrees, the
-    # production default per the 2026-08-25 directive; level 5 remains the
-    # fast-iteration override), 30 sigma levels, dt 112.5 s (2026-08-25 dt
-    # ladder).  The five keys are recipe-sensitive together (the YAML header
-    # records that L40 + hybrid + automatic dt blew up on day one), so a change
-    # here is a stability A/B, not an edit.
+    # resolution/nlev/discretization are CLI dests baked into cfg.grid, so
+    # assert them at the args level the YAML controls.
     assert args.resolution == 6
-    assert args.nlev == 30
+    assert args.nlev == 32                 # CAM6 L32 hybrid table
+    assert args.vertical_coord == "cam_l32"
     assert args.discretization == "mpas"
     # The deck spells the mesh "voronoi"; the parser normalises the family's
     # spellings to one name, so assert the resolved value the run uses.
     assert args.grid_type == "mpas"
     assert args.dt == 112.5
     cfg = build_config_from_args(args)
-    assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
-    # orographic AND non-orographic; the orographic-only spelling is the
-    # older deck's.
-    assert cfg.gravity_wave_drag == "mcfarlane+hines"
-    assert cfg.microphysics == "morrison"
-    assert cfg.cloud_scheme == "sundqvist"
-    assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
-    # Re-baselined 2026-09-13 (owner decision): the boundary layer moved from
-    # the Louis first-order closure to CLUBB run PROGNOSTICALLY, so the scheme
-    # carries the sub-grid total-water variance as state instead of
-    # re-diagnosing it from a mixing length each step. Both keys are asserted
-    # because the pair is what defines the baseline: CLUBB with the flag off is
-    # a different model from CLUBB with it on.
+    assert cfg.convection == "zhang_mcfarlane"   # CAM6 zm_conv port
+    # CAM6 f09 L32 (non-WACCM) runs OROGRAPHIC drag only: build-namelist sets
+    # use_gw_front and use_gw_convect_dp false below 60 levels.
+    assert cfg.gravity_wave_drag == "mcfarlane"
+    assert cfg.microphysics == "morrison"        # MG2 port is run 2
+    assert cfg.cloud_scheme == "cam6_clubb"
+    assert cfg.use_clubb_cloud_fraction is True
+    assert cfg.radiation == "rrtmg"              # rrtmgp builder alias
     assert cfg.turbulence == "clubb"
     assert cfg.clubb_prognostic is True
-    # No tiled surface on this lane -- the tiled port is open work, and the
-    # deck says so at the field.
+    assert cfg.surface_bulk_scheme == "large_yeager_cesm"
+    # CAM6 cadence: physics every 1800 s, radiation hourly, CLUBB+micro
+    # sub-cycled three times at 600 s inside each physics step.
+    assert args.physics_update_steps == 16
+    assert args.rad_update_steps == 32
+    assert args.cld_macmic_num_steps == 3
+    # No tiled surface on this lane -- the tiled port is open work.
     assert cfg.surface_tiled is False
     assert cfg.start_year == 1979
-    # convective_cloud OFF since 2026-08-22.  It was on to mirror the canonical
-    # tuned base, but the tropical-rain campaign runs that reproduced observed
-    # ocean rain (0.89 of observed) all ran with it OFF, and production runs
-    # with it on reached only 0.48-0.61.  Production now carries the campaign
-    # science configuration rather than leaving it to a side deck; see the
-    # folded-in block at the end of amip_production.yaml.
     assert cfg.convective_cloud is False
-    # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
     assert cfg.surface_gustiness_zi == 300.0
-    # PROVISIONAL cloud tuning (#899): rh_crit 0.85.
-    assert cfg.cloud_rh_crit == pytest.approx(0.85)
-    # q_c 5e-6, the campaign value, folded in 2026-08-22 with the rest of the
-    # tropical-rain configuration (production had 1e-4, twenty times larger).
-    # This assertion is the reason the divergence was found at all, so it is
-    # updated rather than removed.
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(5e-6)
-    # The detrained-condensate to convective-rain split, on since the
-    # bechtold rain-split landed.
     assert cfg.convective_precip_efficiency == pytest.approx(0.8)
+
+
+def test_sundqvist_l36_deck_still_round_trips():
+    """The outgoing production deck stays RUNNABLE and unchanged under its new
+    name, so every result measured against it reproduces -- including
+    cam6_base60, the paired baseline of the CAM6 run-1 comparison.  It must
+    carry NEITHER numerical lever, which is what makes it that baseline."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_sundqvist_l36.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
+    assert args.resolution == 6
+    assert args.nlev == 36
+    assert args.vertical_coord == "sigma"
+    assert args.discretization == "mpas"
+    assert args.dt == 112.5
+    assert args.mpas_vert_advection_scheme == "van_leer"
+    cfg = build_config_from_args(args)
+    # The deck is silent on the damper, so the CLI dest stays None and the
+    # CODE default is what the run gets.  Assert the RESOLVED value, which is
+    # what makes this deck the neither-lever baseline.
+    assert cfg.dycore.mpas_div_damp4_scale == 0.0
+    assert cfg.convection == "bechtold"
+    assert cfg.cloud_scheme == "sundqvist"
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
+    assert cfg.surface_bulk_scheme == "coare3"
+    assert cfg.cloud_rh_crit == pytest.approx(0.85)
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(5e-6)
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
