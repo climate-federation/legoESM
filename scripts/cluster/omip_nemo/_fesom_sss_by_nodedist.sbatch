@@ -88,25 +88,80 @@ R=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo
 G=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY
 STEM=$G/ORCA1_5d_20000101_20000331
 WORK=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/_nodedist_work
-DUMP=$WORK/cells_d30.npz
 
-TRP=$R/trp_pinned_d30/snapshot_final.npz
-FES=$R/fesom_orca1faithtint_d30/snapshot_day0030.npz
-MPS=$R/mpas_orca1faithtint_d30/snapshot_day0030.npz
+# DAY selects the mark. It defaults to 30, which is the comparison every
+# published number on this thread comes from, so an unset call is unchanged.
+#
+# DAY=0005 IS THE CONTROL THE THREAD NEVER RAN. Every finding so far --
+# 86% of the gap in one ring, interpolation eliminated, the restoring
+# treatment eliminated -- compares DAY-30 states and then reasons about which
+# model process built the difference. Nobody checked whether the difference
+# was there at the START. Five days is the earliest mark both lanes wrote and
+# it is far too short for a coastal salinity signal to be built by the physics
+# under test, so if the ring-1 ratio at day 5 is already near its day-30
+# value, no model process is responsible and the gap is INITIALISATION, not a
+# coastal model difference. If instead it is near 1.0 and grows, the model
+# really is building it and the thread's framing is right.
+DAY=${DAY:-0030}
+REC=$(( 10#$DAY / 5 - 1 ))
+# The day-30 call keeps its ORIGINAL dump and output paths so an unset DAY
+# reproduces the published comparison byte-for-byte, including where its
+# figures land; other marks get their own directories and cannot overwrite it.
+if [ "$DAY" = "0030" ]; then
+  DUMP=$WORK/cells_d30.npz; OUT=$WORK/score
+else
+  DUMP=$WORK/cells_d${DAY}.npz; OUT=$WORK/score_d${DAY}
+fi
+
+# A run that REACHES its target writes that day as snapshot_final.npz, so the
+# day-30 tripole is only findable under that name while its day-5 mark is not.
+TRP=$R/trp_pinned_d30/snapshot_day${DAY}.npz
+[ -r "$TRP" ] || TRP=$R/trp_pinned_d30/snapshot_final.npz
+FES=$R/fesom_orca1faithtint_d30/snapshot_day${DAY}.npz
+MPS=$R/mpas_orca1faithtint_d30/snapshot_day${DAY}.npz
 for f in "$TRP" "$FES" "$MPS" ${STEM}_grid_T.nc; do
   [ -r "$f" ] || { echo "FATAL: missing $f"; exit 1; }
 done
 mkdir -p "$WORK" || exit 1
+
+# The tripole fallback above can silently hand back day 30 when a mid-series
+# mark is missing, and the scorer pins the oracle record from DAY without ever
+# looking inside the snapshot -- so a wrong-day fallback would score day 30
+# against NEMO's day 5 and exit clean. Check the stamp inside each file.
+#
+# THE FESOM LANE WRITES NO TIME METADATA AT ALL. Its snapshots carry only the
+# fields (H_bathy, S, T, eta, ice, masks, coordinates), so the ONLY evidence of
+# when a FESOM snapshot was taken is its FILE NAME -- there is nothing to check
+# it against. That is reported here rather than either failing the comparison
+# or letting silence read as a pass: a disagreeing stamp is fatal, a missing
+# one is announced. The hazard this gate exists for is the tripole's
+# snapshot_final fallback, and the tripole does stamp, so the protection holds
+# where it is needed.
+for f in "$TRP" "$FES" "$MPS"; do
+  $PY - "$f" "$DAY" <<'GATE' || { echo "FATAL: $f is not day $DAY"; exit 1; }
+import sys
+import numpy as np
+d = np.load(sys.argv[1], allow_pickle=True)
+tag = "/".join(sys.argv[1].split("/")[-2:])
+if "time_days" not in d.files:
+    print(f"  {tag}: NO TIME STAMP -- day taken from the filename, unverified")
+    sys.exit(0)
+got = float(np.asarray(d["time_days"]).ravel()[0])
+want = float(sys.argv[2])
+print(f"  {tag}: day stamp {got:g} (want {want:g})")
+sys.exit(0 if abs(got - want) < 1e-6 else 1)
+GATE
+done
 
 # Same inputs, labels and options as the committed day-30 scorecard, recovered
 # from its own report.json, so the per-cell dump describes THAT comparison and
 # not a new one. --dump-cells changes no number the scorer prints.
 $PY -u scripts/validate/ocean_fidelity/compare_three_way_nemo.py \
   --tripole "$TRP" --mpas "$FES" --also-mask "$MPS" \
-  --nemo-gridt ${STEM}_grid_T.nc --nemo-time-idx 5 \
+  --nemo-gridt ${STEM}_grid_T.nc --nemo-time-idx "$REC" \
   --label-tripole tripole --label-mpas FESOM2 \
   --res-deg 1.0 --coast-cells 2 --mask-mode nearest \
-  --out-dir "$WORK/score" --dump-cells "$DUMP" 2>&1 | tail -80
+  --out-dir "$OUT" --dump-cells "$DUMP" 2>&1 | tail -80
 rc=${PIPESTATUS[0]}
 [ "$rc" -eq 0 ] || { echo "FATAL: scorer failed rc=$rc"; exit $rc; }
 
