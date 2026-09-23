@@ -5919,7 +5919,7 @@ cells on `u` and `2220` signed-zero flips on `v` (IEEE `-0.0 + 0.0 = +0.0`).
 legoESM was adding `8.256e-10` there because it evaluated the same operator on
 the STAGE velocity.  The shared seam for the BEFORE-level operand already
 existed and the leap-frog path already used it
-(`ocean_pe_latlon_cgrid.py:5343-5344`); the WS-RK3 stage RHS simply did not
+(`ocean_pe_latlon_cgrid.py:5369-5370`); the WS-RK3 stage RHS simply did not
 pass it.  Landed at `7521513a54c3` in that one shared place, no card switch,
 no new knob.  Stage 1 hands the helper the step-entry velocity already, so only
 the stage-3 call moves, and stage 2 never calls the operator.
@@ -6091,7 +6091,7 @@ thicknesses — `e3t`/`e3u`/`e3v` at `Kbb` inside the divergence
 (`dynldf_lev_rot_scheme.h90:28-29`), `e3f` carrying no time index at all
 (`dynldf_lev_rot_scheme.h90:24-25`), and `e3u`/`e3v` at `Kmm` in the final
 division.  legoESM's lateral operator receives ONE thickness: a single `h_k`
-argument at `ocean_pe_latlon_cgrid.py:5366`, built from the stage's own live
+argument at `ocean_pe_latlon_cgrid.py:5392`, built from the stage's own live
 `eta`, which at stage 3 is the `Kmm` sea level.  So after this round the
 velocity operand is NEMO's and the thickness operand is not.  **CONFIRMED by
 reading, UNMEASURED in size**: at kt=1 the whole term is exactly zero, so no
@@ -6512,7 +6512,7 @@ it moot.
 
 **legoESM cannot evaluate the changed operator on ORCA2 at all.**  The card
 selects `nemo_div_curl` with `A_h = 1e5`, and that branch refuses a tripolar
-grid: `ocean_pe_latlon_cgrid.py:3377-3380` raises unless the grid carries a
+grid: `ocean_pe_latlon_cgrid.py:3396-3399` raises unless the grid carries a
 positive scalar `dlon`, and ORCA2's is `0.0`.  That is why the existing ORCA2
 phase-2 gate zeroes `A_h` in its discarded tendency.  A second gap sits behind
 it: ORCA2 resolves `nn_ahm_ijk_t = -30`, i.e. `ahmt_3d`/`ahmf_3d` read from
