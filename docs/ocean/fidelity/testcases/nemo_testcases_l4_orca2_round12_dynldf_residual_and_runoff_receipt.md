@@ -181,14 +181,18 @@ out of the live-operand trace, which now carries them.  The compiled statement
 says the first must equal the second PLUS `rnf_tsc * (1/h_rnf)`, with
 `rnf_tsc` read from the RECORD and `h_rnf` the live top thickness that same
 stage divided by.  The only legoESM-supplied operand is that thickness, and it
-is gated separately.
+is gated separately **at stage 1** — the reviewer's point, recorded rather
+than glossed: stages 2 and 3 divide by legoESM's own intermediate
+thicknesses, which this gate does not cross-check against NEMO, so a
+thickness wrong the SAME way at every stage would not be caught here.
 
 | row | result |
 |---|---|
 | stage 1, temperature and salinity | **0 / 799,200 unequal each** |
 | stage 2, temperature and salinity | **0 / 799,200 unequal each** |
 | stage 3, temperature and salinity | **0 / 799,200 unequal each** |
-| the runoff depth operand — legoESM's live top thickness against NEMO's own | **0 / 16,433 wet cells unequal**, max 0.0 |
+| the runoff depth operand — legoESM's live top thickness against NEMO's own, at stage 1 | **0 / 16,433 wet cells unequal**, max 0.0 |
+| can the two spellings of the divisor be told apart on this card at all? | **yes, on 749 cells** — so the bitwise rows above ARE a reciprocal-first control and not a vacuous one |
 | control — the stage-2 thickness fed to the stage-1 row | **REFUSES**, 3,400 cells |
 | the gate at the round's BASE commit | **REFUSES** — "the ladder's surface forcing carries no runoff tracer content" |
 | one-representable-value plant | **FIRES** — "PLANT FIRED: the gate refuses a one-representable-value move" |
@@ -207,3 +211,208 @@ runoff frames).
 | largest runoff SALINITY content | **exactly 0.0** — `zrnf_sal = 0` |
 
 So the runoff adds heat at 3,400 surface cells and **no salt anywhere**.
+
+## 4. The landing makes the cells it touches WORSE, and that is the round's finding
+
+The deposit is bit-exact against NEMO's own runoff content.  It nevertheless
+moves the ORCA2 trajectory AWAY from NEMO on every cell it reaches.
+
+| stage-1 temperature, against NEMO's recorded stage-1 frame | whole field, max | on the top cell of a runoff column, max |
+|---|---|---|
+| WITHOUT the runoff channel (round 11's state) | 1.4764e-03 degC | **1.4655e-04 degC** |
+| WITH it (this landing) | 1.5287e-03 degC | **1.5287e-03 degC** — about **10x worse** |
+| with it, and the runoff's MASS paired in as well (measurement arm, nothing landed) | 1.4990e-03 degC | 1.4990e-03 degC |
+
+The deposit itself is the right size: it moves the stage-1 temperature on
+exactly **3,400 cells**, all of them top cells, by up to **5.5692e-03 degC**,
+which is `rnf_tsc / h_rnf` times the stage's own time increment.  So NEMO's
+stage-1 temperature at those river mouths behaves as if it had NOT received a
+5.6e-03 degC runoff kick, while the compiled source says it should have.
+
+**The obvious explanation was tested and REFUTED.**  NEMO pairs this heat with
+the runoff's MASS: the same runoff enters the sea-surface forcing and the
+horizontal divergence, thickening the top cell and diluting exactly what the
+heat adds.  Supplying the recorded runoff through legoESM's freshwater channel
+barely moves the row (1.5287e-03 -> 1.4990e-03).  **That arm is CONFOUNDED and
+is reported as confounded, not as a refutation of the mechanism**: legoESM's
+freshwater channel feeds BOTH the sea surface AND the stage dilution term
+(`_emp_stage_rate`), and NEMO's dilution term reads `emp`, which EXCLUDES the
+runoff — so adding the runoff there deposits a SECOND copy of the same heat
+instead of the compensating thickness.  Pairing the mass correctly needs the
+divergence source, not the freshwater channel, and that is round 13's order.
+
+So: the statement is transcribed and gated; the pairing it belongs to is not,
+and until it is, this channel costs about a factor of ten on 3,400 cells.
+**DECISION_NEEDED**: keep the landing, or hold it until its partner lands.
+
+## 5. What the ladder now says
+
+| row | before | after |
+|---|---|---|
+| ORCA2 ocean ladder, kt = 1 to 10 | `LADDER_MEASURED`, exit 0 | unchanged — `LADDER_MEASURED`, exit 0 |
+| first non-bit statement | kt=1 stage 1 temperature, cited to the runoff source | kt=1 stage 1 temperature, **UNATTRIBUTED** |
+| what is ruled out, and how | (nothing — the citation was a hard-coded map) | the runoff source, on **231,291 of 233,341** disagreeing cells it cannot reach |
+| kt=10, same field, step entry | 430,552 / 799,200, max 3.9436 degC | 430,552 / 799,200, max **3.9435** degC |
+| kt=10, stage 3 | 233,341 / 399,600, max 0.7713 degC | 233,341 / 399,600, max **0.7713** degC |
+
+Label: `INDEPENDENT_WITH_DECISION52_SSH`.
+
+**The ladder's attribution rule was a claim, and it is now a measurement.**  It
+bound every stage-1 temperature or salinity row to the runoff source.  With
+that source satisfied bit-exactly the row does not move at all, and 191,282 of
+its cells lie off every runoff column — places the statement cannot reach.
+A citation that survives its own statement being satisfied is not an
+attribution, so the ladder now names the runoff only when the disagreement is
+confined to where it can act, and otherwise reports the row as unattributed
+with what was ruled out and on how many cells.
+
+Ranked by magnitude the stage-1 kt=1 rows are: sea surface 8.17e-02 m on
+8,794 cells, zonal velocity 6.41e-02 m/s on 247,035, meridional velocity
+3.40e-02 m/s on 237,822, salinity 1.85e-03 on 233,341, temperature 1.53e-03
+degC on 233,341.  The temperature row is the SMALLEST of the five and is
+reported first only because the ladder walks the fields in a fixed order.
+
+## 6. Frozen predictions, resolved
+
+| ID | outcome |
+|---|---|
+| R12-P1 | **REFUTED** — the divisor is not the largest candidate; it is VACUOUS on the scored set (section 2d). |
+| R12-P2 | **CONFIRMED** — the slope-foot factor is the scalar 1.0. |
+| R12-P3 | **CONFIRMED, and more strongly than predicted** — the residual does not merely fall, it reaches machine precision (3.06e-16 / 2.72e-16). |
+| R12-P4 | **CONFIRMED, and sharpened** — exactly ONE of the six metrics differs, and it differs by a median of 5.4 percent. |
+| R12-P5 | **CONFIRMED** — 4,649 of 26,640 surface cells carry runoff and 3,400 carry runoff heat, against 233,341 disagreeing cells; 191,282 of them lie off every runoff column. |
+| R12-P6 | **CONFIRMED** — the recorded runoff salinity content is exactly 0.0. |
+| R12-P7 | **CONFIRMED** — 0 of 799,200 unequal at every stage, for both tracers, with a gate that refuses at the base commit and whose plant fires. |
+| R12-P8 | **HALF REFUTED** — the ladder still runs kt=1..10, but its first disagreement does NOT move.  That is what exposed the attribution defect. |
+| R12-P9 | **CONFIRMED** — GYRE is bit-identical (section 7). |
+
+## 7. GYRE is unchanged
+
+Proven at the round's base tip and at its final tip with the evaluation
+protocol byte-identical.
+
+| row | result |
+|---|---|
+| ten-step ladder, offline oracle-relative compare | **PASS** — 70 certified rows, 0 status changes, 0 violations, first-over-bar unmoved (`u`,`v` at kt=2) |
+| largest oracle-residual worsening | **0.0 ULP** |
+| residual arrays, elementwise equal | **210 / 210** |
+| thirty-day member, byte-identical daily snapshots | **30 / 30** |
+| day-30 digest | `14a7e64b4512860e...` — the same as rounds 7, 8, 9, 10 and 11 |
+
+**CORRECTION to round 11's receipt.**  It reported "max worsening 0 ULPs"
+against the comparator's `max_ulp_worsening` field.  That field reads **2** in
+round 11's own saved comparison and **2** here, on runs both proven
+byte-identical; the field that is zero, and the one that means what round 11
+said, is `largest_oracle_residual_worsening_ulps`.  Quoted correctly above.
+
+## 8. Independent review
+
+Codex is paused, so `codex exec` was NOT run and this round claims no
+independent codex verdict.  A fresh adversarial reviewer was run in its place.
+It read the compiled Fortran itself, traced the call chain into
+`sbc_rnf_div`, diffed every edited line, RAN the new tests, and spot-checked
+nine citations and the JSON numbers against the receipt.
+
+### 8a. Its verdict, verbatim
+
+> SHIP WITH FIXES — 2 reproducible test failures block merge as-is; the
+> physics transcription and GYRE isolation are otherwise sound.
+
+### 8b. What it found, and what was done
+
+| finding | what it was | what was done |
+|---|---|---|
+| B1 (blocking) | the gate cited the runoff switch to `sbcrnf.f90:184`, which is a blank comment line; the guard it meant is in `trasbc.f90` | re-pointed at `trasbc.f90:318`, the RK3 guard actually transcribed.  **The gate's own citation test had already caught this** — that is what that test is for |
+| B2 (blocking) | three of the five new controls never EXECUTED: they read the per-stage rates out of the live operand trace, which refuses on the lock-exchange card because it populates no turbulence operands | rewritten to read the per-stage tracer state through the stage exposure hook, which the card does support; all now run, and four of the six FAIL when the statement is reverted |
+| N1 | the runoff-depth operand is cross-checked against NEMO at stage 1 only, while the receipt read as full coverage | scope stated explicitly in section 3c and carried into OPEN |
+| N2 | the GYRE snapshot numbers were quoted but their output was never saved | re-run and saved (`gyre_snapshot_compare.log`); numbers reproduce exactly |
+
+What it verified INDEPENDENTLY and found correct: that `tra_sbc_RK3` and not
+the leapfrog `tra_sbc` is the right subroutine; that the runoff block is
+outside the stage switch and therefore runs at all three stages; the
+reciprocal-first spelling; `nk_rnf = 1` and the live top-cell depth, traced
+through `div_hor` to `sbc_rnf_div` to confirm it is recomputed per call at the
+live time level; the identically-zero salinity content; that a card supplying
+no runoff content skips the arithmetic rather than adding a zero, which is the
+signed-zero concern; that the two vacuity claims are MEASURED rather than
+inferred; and nine legoESM citations including the one whose extent changed.
+
+Two further things this round did on its own after the review: it added the
+row that shows the two spellings of the divisor ARE distinguishable on this
+card (749 cells), so the bitwise rows cannot be a vacuous reciprocal-first
+control; and it found that the top-cell control is only about this statement
+at stage 1, because by stage 2 the deposit has already been advected out of
+the top cell (1.3e-12 on the lock card).
+
+## 9. Gate and test results at the round's final tip
+
+| check | result |
+|---|---|
+| ORCA2 ladder, kt = 1 to 10 | **LADDER_MEASURED**, exit 0 |
+| round-12 runoff gate | **AT BAR**, exit 0 — 0 / 799,200 unequal on all six rows |
+| its base-commit control | **REFUSES** — "the ladder's surface forcing carries no runoff tracer content" |
+| its one-representable-value plant | **FIRES** — "PLANT FIRED: the gate refuses a one-representable-value move" |
+| its wrong-stage-thickness control | **FIRES** — 3,400 cells |
+| lateral-viscosity operator gate | **REFUSES**, exit 2 (nothing from statement A landed); round 11's rows reproduce exactly; the all-substitutions closure reaches 3.06e-16 / 2.72e-16 |
+| GYRE identity, base vs tip | section 7 |
+| receipt citation gate | **PASS**, 274 citations, 0 failures, 0 map-audit failures |
+| citation gate with a rigid two-line plant on a REAL receipt key | **FIRES** — exit 1, status FAIL, `dynldf_lev_rot_scheme.h90:24-25`, `SYMBOL-NOT-AT-LINE`, "that symbol identifies line 24", found at line 26 |
+| the operator push battery plus this round's tests | **156 passed in 584.05 s** |
+| this round's own tests | **13 passed in 213.45 s** |
+| the same tests with the landed statement reverted | **4 failed, 2 passed** — the controls are not vacuous; the model file was then restored and `git status --porcelain` printed nothing |
+
+**A BLIND SPOT IN THE CITATION GATE, found here and recorded.**  Planting a
+citation that exists only as a map key and is not rendered in the receipt's
+prose does NOT fire: the gate reports `status: PASS` and exits 2.  A plant
+must therefore name a citation the receipt itself renders, or it proves
+nothing — the same class of error round 10 withdrew two plant rows for.
+
+## Choices
+
+ASKED: the round's order asked for the runoff statement to be transcribed,
+gated and landed, and for statement A to be measured and NOT landed.  Both
+were followed.
+
+UNASKED: none STANDING.  Two decisions are RAISED rather than taken:
+
+1. The lateral-viscosity operator fix is now a THREE-part scoping question,
+   not round 11's two-part one (section 2e).
+2. The runoff landing degrades the cells it touches by about a factor of ten
+   until its partner statement lands (section 4), and is offered for revert.
+
+No scheme selection, selector default, tunable, threshold, cadence,
+resolution, timestep, carried state, data source or previously-tolerated
+condition moved.  The runoff MASS channel was deliberately NOT switched on.
+
+## 10. OPEN — round 13's order
+
+1. **Pair the runoff's MASS with its heat.**  NEMO feeds the same runoff into
+   the horizontal divergence and the sea-surface forcing; legoESM's freshwater
+   channel is the WRONG place to put it, because that channel also feeds the
+   stage dilution term and would deposit the heat twice.  Until this lands the
+   heat-only landing costs a factor of ten on 3,400 cells (section 4).
+2. **Name what owns the stage-1 disagreement.**  It is not the runoff.  It is
+   on 233,341 cells at every depth, and the three largest stage-1 rows are the
+   sea surface (8.2 cm) and the two velocities (6.4 and 3.4 cm/s) — an
+   upstream, momentum-or-barotropic owner, not a tracer source.
+3. **Decision 54 is now three-part** (section 2e): the extra vertex mask
+   (scopeable to ORCA2), the face and vertex thicknesses (not scopeable), and
+   the vertex CELL AREA (not scopeable, and the largest of the three by
+   residual).  Nothing lands until it is settled.
+4. **legoESM's vertex cell area is not NEMO's `e1f*e2f` on this grid**, and the
+   module docstring that records the two conventions estimates the gap at
+   4.1e-05 — right for a regular lat-lon grid, wrong by three orders of
+   magnitude for ORCA2 (median 5.4 percent).  That estimate should be
+   corrected wherever it is repeated.
+5. **The runoff depth operand is cross-checked against NEMO at stage 1 only**;
+   stages 2 and 3 divide by legoESM's own intermediate thicknesses, unchecked.
+6. **A citation planted only in the gate's map does not fire.**  Any future
+   plant must name a citation the receipt renders.
+7. Round 11's items that remain open: the tripolar `0.0 / 0.0` in the
+   meridional partial-cell pressure gradient (unreachable here, live for other
+   tripolar configurations); the 1-D reference ladder's one-representable-value
+   disagreement at levels 28-29; the barotropic vertex thickness, still
+   unmeasured; the independent sea-surface height's 1.55 cm on 16,433 cells,
+   owned by the initial sea-ice category configuration and out of scope.
+8. The wide ocean-fidelity battery has not been run at this round's final tip.
+   Operator action.
