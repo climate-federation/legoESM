@@ -1970,10 +1970,10 @@ CITATION_MAP = {
         ('IF( ln_sdw ) THEN', 1), 'wsd   (:,:,:) = 0._wp', 9],
     'ocean_pe_latlon_cgrid.py:1914-1948': [
         'elif config.ke_gradient_scheme == "c2":', 'dp_dy = _dKp_dy[..., 1]', 35],
-    'ocean_pe_latlon_cgrid.py:3095-3121': [
+    'ocean_pe_latlon_cgrid.py:3097-3123': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
-    'ocean_pe_latlon_cgrid.py:4959-4981': [
+    'ocean_pe_latlon_cgrid.py:4961-4983': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
         ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 23],
     'ocean_model_latlon_cgrid.py:6237-6247': [
@@ -2604,7 +2604,7 @@ CITATION_MAP = {
         3],
     'ocean_model_latlon_cgrid.py:10789': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
     'ocean_model_latlon_cgrid.py:10906': ('u_solve_in = u_solve_in - (', 1),
-    'ocean_pe_latlon_cgrid.py:3332-3335': [
+    'ocean_pe_latlon_cgrid.py:3334-3337': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
         4],
@@ -2671,8 +2671,8 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5321': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5298-5299': [
+    'ocean_pe_latlon_cgrid.py:5323': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5300-5301': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],
