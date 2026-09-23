@@ -196,5 +196,8 @@ def test_an_out_of_range_level_index_is_clamped_and_not_raised():
     the guard is never removed as unnecessary.
     """
     column = jnp.arange(30.0).reshape(1, 1, 30)
-    assert float(np.asarray(column[..., 35])) == 29.0
-    assert float(np.asarray(column[..., 29])) == 29.0
+    assert float(np.asarray(column[0, 0, 35])) == 29.0
+    assert float(np.asarray(column[0, 0, 29])) == 29.0
+    # The same silence under the trailing-axis form the walk actually writes.
+    assert np.array_equal(
+        np.asarray(column[..., 35]), np.asarray(column[..., 29]))
