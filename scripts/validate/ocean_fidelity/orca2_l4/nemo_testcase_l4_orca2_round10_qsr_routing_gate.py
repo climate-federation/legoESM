@@ -71,7 +71,7 @@ RESOLVED = {
     "rgb_chl_profile": ("morel_berthon", "nn_chlprfl = 1, ocean.output:1212"),
     "rgb_ir_fraction": (0.58, "rn_abs, ocean.output:1213"),
     "rgb_ir_extinction_m": (0.35, "rn_si0, ocean.output:1214"),
-    "nemo_time_step_s": (10800.0, "rn_Dt, ocean.output:151"),
+    "nemo_time_step_s": (10800.0, "rn_Dt, ocean.output:217"),
 }
 RESOLVED_RHO0 = (1026.0, "rho0, ocean.output:172")
 RESOLVED_RCP = (3991.8679571196299, "rcp, ocean.output:174")
