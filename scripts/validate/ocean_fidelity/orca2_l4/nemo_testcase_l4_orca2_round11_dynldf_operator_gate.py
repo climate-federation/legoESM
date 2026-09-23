@@ -617,6 +617,26 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
         for name in _nemo_metrics
     }
 
+    # Where the one differing metric differs, since "unequal almost
+    # everywhere" and "wrong almost everywhere" are different statements.
+    _rel_f = (np.abs(_lego_metrics["e1f_e2f"] - _nemo_metrics["e1f_e2f"])
+              / np.maximum(np.abs(_nemo_metrics["e1f_e2f"]), 1e-300))
+    _wet_f = np.max(mesh["tmask"], axis=-1) > 0.0
+    _arg = np.unravel_index(int(np.argmax(_rel_f)), _rel_f.shape)
+    rows["vertex_area_relative_difference"] = {
+        "note": ("legoESM's stored vertex area against the record's own "
+                 "e1f*e2f; the vorticity bracket divides by it"),
+        "cells": int(_rel_f.size),
+        "above_1e-6": int(np.count_nonzero(_rel_f > 1e-6)),
+        "above_1e-3": int(np.count_nonzero(_rel_f > 1e-3)),
+        "above_1e-1": int(np.count_nonzero(_rel_f > 1e-1)),
+        "above_1e-3_on_a_wet_column": int(
+            np.count_nonzero((_rel_f > 1e-3) & _wet_f)),
+        "median": float(np.median(_rel_f)),
+        "argmax_row_col": [int(_arg[0]), int(_arg[1])],
+        "argmax_is_on_a_wet_column": bool(_wet_f[_arg]),
+    }
+
     du_all, dv_all = nemo_dynldf_lev_lap_rot(
         mesh, ahmt, ahmf, entry["u"], entry["v"], entry["ssh"],
         ahmf_extra_mask=nemo_vertex_mask,
