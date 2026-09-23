@@ -708,6 +708,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 160: legoESM's own two-solve statements ---
+    'ocean_model_latlon_cgrid.py:1654-1665': [
+        ('def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:', 1),
+        ('and getattr(hooks, "nemo_stage_momentum_wzv_split", False))', 1), 12],
+    'ocean_model_latlon_cgrid.py:1789-1794': [
+        ('w_momentum, _, _ = nemo_qco_wzv_operands(', 1),
+        ('volume_transport_override=None,', 1), 6],
+    'ocean_model_latlon_cgrid.py:6872-6878': [
+        ('def _momentum_stage_w(geom):', 1),
+        ('return geom[2] if geom[11] is None else geom[11]', 1), 7],
     # --- round 160: the stage clock, the stage after-level and the two
     # adaptive-implicit partitions, on the build that wrote the record ---
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:52':
