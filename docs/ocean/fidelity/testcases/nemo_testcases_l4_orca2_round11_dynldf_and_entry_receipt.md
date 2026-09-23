@@ -54,6 +54,11 @@ call.  The three calls report, on the step's own operands:
 | implicit vertical mixing (post-Runge-Kutta) | **26,640 of 26,640** | 0 | 0 |
 | its companion call | **26,640 of 26,640** | 0 | 0 |
 
+Both probes were re-run against a clean clone at the round's BASE commit and
+their output saved, so these are reproducible pre-fix numbers rather than a
+transcript quotation (`base_probe_ssh_discriminator.log`,
+`base_probe_baro_substeps.log` in the round's evidence directory).
+
 So the sea surface the implicit vertical mixing receives is **entirely NaN**,
 the column depth and the raw mesh spacing are clean, and the entry sea surface
 — the record's own, through Decision 52's bridge — is clean.  Both
@@ -193,9 +198,15 @@ step-entry sea surface, so the comparison is controlled; NEMO's stage-three
 | **v momentum** | **412,537 of 412,537 unequal**, max 1.798e-05 m/s2, residual 0.614 in L2 |
 | ablation — legoESM's extra zero/one vertex mask alone | moves 31,399 u and 34,166 v cells; 0.769 / 0.612 in L2 |
 | ablation — legoESM's min-rule live thicknesses alone | moves every cell; 0.768 / 0.612 in L2 |
-| **closure — BOTH ablations applied to the compiled loops** | residual falls to **0.027 (u)** and **0.039 (v)** in L2: a 29x and 16x reduction |
+| **closure — BOTH ablations applied to the compiled loops** | residual falls to **0.027 (u)** and **0.019 (v)** in L2: a 29x and 32x reduction |
 | coefficient cells the extra mask zeroes | **48,287 of 799,200** |
 | gate exit | **2 — REFUSES** |
+
+Every row above is scored on ONE cell set — wet faces where the compiled
+transcription is defined — so the rows are comparable.  The reviewer found the
+closure row originally scored 1,319 more v cells than the row it was compared
+against (an ablation can define a cell the reference leaves undefined); with
+that closed the v closure improves from 0.039 to 0.019.
 
 **The gate binds.**  Its binding rows run `LatLonCGridOceanModel.
 tendencies_with_diagnostics` — the production momentum-tendency path — on the
@@ -209,7 +220,10 @@ latitude), the reciprocal is exact where the metric is positive, the
 transcription returns **exactly zero** on a field whose divergence and
 vorticity both vanish, and each ablation is shown to move the answer.  The
 preregistration's "agree to 1e-12 on a uniform case" control was replaced by
-these, which are stronger: the closure is run on the REAL card.
+these.  They are NOT strictly stronger — they catch a different failure class
+— and none of them independently reproduces the compiled arithmetic; what
+establishes that is the closure row and the independent reviewer's own
+line-by-line reading of the Fortran (section 9).
 
 The 48,287 count is an **independent reproduction of round 9's**, from a
 different direction — it falls out of the production mask construction, not out
@@ -228,7 +242,8 @@ term.  In this norm they are the same size (0.768 vs 0.769 for u; 0.612 vs
 0.612 for v) and they **OVERLAP almost completely** — neither is separable
 from the other, because both alter the same F-point contribution in the same
 places.  The honest statement is the closure: TOGETHER they account for about
-97 percent of the disagreement, and neither alone accounts for its own share.
+97 percent of the u disagreement and about 98 percent of the v disagreement,
+and neither alone accounts for its own share.
 
 **R11-P9 REFUTED**: the ladder does reach kt=10 (section 2d).
 
@@ -308,14 +323,24 @@ and raises it.  DECISION_NEEDED is in the final report.
 5. **The barotropic trace masks its own inverse face depth before printing it**,
    which is why round 10 could not see the NaN there.  The trace is a
    diagnostic, not the model, but it hid the defect for a round.
-6. The card's 1-D reference ladder still disagrees with NEMO by one
+6. **A SIBLING of the landed bug exists elsewhere and is NOT fixed**, found by
+   the independent reviewer: the meridional partial-cell pressure-gradient
+   correction zeroes its polar rows and then divides by the v-face width, which
+   on a tripolar grid is the same zero-extent wall row — that is `0.0 / 0.0`,
+   not the inert `0 / x` the neighbouring comment claims.  It is UNREACHABLE on
+   this lane (every NEMO-fidelity card is refused unless it selects the
+   `nemo_sco` pressure gradient, which takes the other branch), so it does not
+   touch this round's numbers; it is a live hazard for any OTHER tripolar
+   configuration on the default pressure gradient.  Verified unreachable, not
+   fixed.
+7. The card's 1-D reference ladder still disagrees with NEMO by one
    representable value at levels 28-29 (round 10's OPEN item 3).
-7. The independent sea-surface height still differs by up to 1.55 cm on 16,433
+8. The independent sea-surface height still differs by up to 1.55 cm on 16,433
    of 26,640 surface cells, owned by the initial sea-ice category configuration,
    out of scope on this lane.
-8. The barotropic vertex thickness is still unmeasured (round 8's OPEN item 6).
-9. Two of the three sites round 10 changed still carry no gate of their own.
-10. GitHub issue 1455 remains an operator-post action.
+9. The barotropic vertex thickness is still unmeasured (round 8's OPEN item 6).
+10. Two of the three sites round 10 changed still carry no gate of their own.
+11. GitHub issue 1455 remains an operator-post action.
 
 ## Choices
 
@@ -334,8 +359,41 @@ timestep, carried state, data source or previously-tolerated condition moved.
 ## 9. Independent review
 
 Codex is paused, so `codex exec` was NOT run and this round claims no
-independent codex verdict.  A fresh adversarial reviewer was run in its place;
-its verdict and what was done about each finding are recorded below.
+independent codex verdict.  A fresh adversarial reviewer was run in its place.
+
+### 9a. Its verdict, verbatim
+
+> VERDICT: SHIP WITH FIXES (no blocking defects found in either landed
+> statement; two non-blocking items should be closed before the round is
+> called fully done)
+
+It did not take the receipt's word for anything: it read the compiled Fortran
+line by line against the transcription, traced the barotropic root cause
+through the real consumer code, re-ran the GYRE byte-identity comparison and
+one geometry probe live against the repo, and cross-checked the numbers
+against the saved artifacts.
+
+### 9b. What it found, and what was done
+
+| finding | what it was | what was done |
+|---|---|---|
+| R1 | the closure row was scored on 1,319 MORE v cells than the row it is compared against, because an ablation can define a cell the reference transcription leaves undefined | every gate row now shares ONE cell set; the v closure improves from 0.039 to **0.019** and section 3d is re-stated on the new numbers |
+| R2 | a SIBLING of the landed bug exists elsewhere — the meridional partial-cell pressure-gradient correction zeroes its polar rows and then divides by the v-face width, which on a tripolar grid is `0.0 / 0.0` | verified UNREACHABLE on this lane (every NEMO-fidelity card is refused unless it selects the `nemo_sco` pressure gradient) and registered as OPEN item 6 rather than fixed out of scope |
+| R3 | the gate read the record's `fmask` and never used it | removed |
+| R4 | the receipt called the replacement controls "stronger" than the preregistered uniform-case one | weakened: they catch a DIFFERENT failure class, and what establishes the arithmetic is the closure row plus this reviewer's own reading of the Fortran |
+| R5 | the pre-fix numbers (the all-NaN sea surface, `drag_v` at 180 cells) could not be verified because the probe output was never saved | both probes re-run against a clean clone at the BASE commit and their output saved to the evidence directory; both numbers reproduce exactly |
+| R6 | this section promised the review's findings and did not carry them | it carries them now |
+
+What it verified INDEPENDENTLY and found correct: the whole compiled
+transcription term by term, including the two subtle points — NEMO's `hf_0`
+uses the product of a v mask with its eastern neighbour, and the thickness
+mask freezes from the FREE-SLIP mask before `rn_shlat` rewrites it (it checked
+the card's own namelist to confirm `rn_shlat = 2.0`, so that distinction is
+material and not moot here); that the stretches come from the Runge-Kutta
+variant of the stretch routine, matching the stage-three call; the
+non-vacuity of all six new tests; that the two other unguarded reciprocals in
+the changed module are genuinely safe; and every number in sections 2d, 3d, 4
+and 5 against the saved artifacts, re-deriving the GYRE digest itself.
 
 ## 10. Gate and test results at the round's final tip
 
