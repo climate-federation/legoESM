@@ -2,7 +2,7 @@
 #SBATCH --account=glab
 #SBATCH --partition=burst
 #SBATCH --job-name=amip_gb_prod
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=11:59:00
@@ -13,6 +13,13 @@
 # job is to run whatever the authoritative production configuration IS, not
 # to reproduce one past run.  Runs started before that date continued from a
 # checkpoint must name config/amip/amip_sundqvist_l36.yaml instead.
+# DEVICE COUNT raised 2 -> 4 on 2026-09-23, standing user directive: a
+# production AMIP arm runs on at least four GPUs.  UNVERIFIED ON THIS MACHINE:
+# the four-device evidence run was done on Levante, and this Ginsburg chain
+# does not launch run_amip under srun, so it relies on whatever multi-device
+# path the single process takes there.  Before the next Ginsburg production
+# run, repeat the one-day four-GPU smoke on that machine, and if it needs the
+# rank-per-GPU launch the Levante chain uses, port that too.
 # =============================================================================
 # Self-chaining PRODUCTION AMIP run on Ginsburg (Columbia) — authoritative C48/L40
 # config (config/amip/amip_production.yaml) with the REAL staged inputs (ERA5 IC +

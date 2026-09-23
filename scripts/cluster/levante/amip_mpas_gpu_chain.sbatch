@@ -2,10 +2,12 @@
 #SBATCH --account=bb1596
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:1
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-node=4
 #SBATCH --constraint=a100_80
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=0
 #SBATCH --time=12:00:00
 #SBATCH --output=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs/slurm_logs/%x-%j.out
 # FOLLOWS PRODUCTION, DELIBERATELY (2026-09-23): the production deck became
@@ -191,6 +193,59 @@ if [[ -n "${LATEST_CKPT}" && -f "${OUTDIR}/run_manifest.json" ]]; then
 fi
 
 cd "${REPO}"
+# ---------------------------------------------------------------------------
+# DEVICE COUNT.  Standing user directive 2026-09-23: a production AMIP arm runs
+# on AT LEAST FOUR GPUs, never one.  The CAM6 run-1 arm ran on a single device
+# at about four simulated days per hour, so a 60-day arm cost roughly fifteen
+# hours of wall clock that the sharded mesh did not require.
+#
+# EXPLICIT, not inherited: the count is named here and in the SBATCH request
+# above and in the self-resubmit below, because a default is not a record.
+# The MPAS lane federates with the mpi4jax halo backend -- distributed_mode
+# 'spmd' is cubed-sphere only (driver/config.py refuses it on a Voronoi mesh)
+# -- so this is ONE RANK PER GPU under srun, with --distributed.
+# CUDA-aware MPI stays OFF: MPI4JAX_USE_CUDA_MPI=1 segfaults on this cluster.
+: "${AMIP_N_GPUS:=4}"
+if (( AMIP_N_GPUS < 4 )); then
+    echo "[chain] REFUSING: AMIP_N_GPUS=${AMIP_N_GPUS} is below the floor of 4." >&2
+    echo "[chain] A production AMIP arm runs on at least four GPUs (user" >&2
+    echo "[chain] directive 2026-09-23).  Set AMIP_N_GPUS=4 or higher." >&2
+    exit 64
+fi
+
+# PAIR CONSISTENCY.  Both arms of a comparison MUST use the same device count:
+# the ocean solver converges to a tolerance at one device and runs a fixed
+# iteration count when sharded, and the halo path has had device-count
+# dependent defects, so a mismatch is a confound rather than a speed
+# difference.  The count is written into the run directory on the first link
+# and checked on every later one, which also catches a chain that is resumed
+# with a different request.  AMIP_PAIR_DIR names the partner arm when there is
+# one; give both arms of a pair the same value and neither can drift.
+_DEVCOUNT_FILE="${OUTDIR}/.device_count"
+if [[ -f "${_DEVCOUNT_FILE}" ]]; then
+    _PREV=$(cat "${_DEVCOUNT_FILE}")
+    if [[ "${_PREV}" != "${AMIP_N_GPUS}" ]]; then
+        echo "[chain] REFUSING: this run started on ${_PREV} GPU(s) and this" >&2
+        echo "[chain] link requests ${AMIP_N_GPUS}.  Continuing a run at a" >&2
+        echo "[chain] different device count changes the ocean solver and the" >&2
+        echo "[chain] halo path mid-stream.  Start a new run directory." >&2
+        exit 65
+    fi
+else
+    echo "${AMIP_N_GPUS}" > "${_DEVCOUNT_FILE}"
+fi
+if [[ -n "${AMIP_PAIR_DIR:-}" && -f "${AMIP_PAIR_DIR}/.device_count" ]]; then
+    _PARTNER=$(cat "${AMIP_PAIR_DIR}/.device_count")
+    if [[ "${_PARTNER}" != "${AMIP_N_GPUS}" ]]; then
+        echo "[chain] REFUSING: partner arm ${AMIP_PAIR_DIR} runs on" >&2
+        echo "[chain] ${_PARTNER} GPU(s), this arm requests ${AMIP_N_GPUS}." >&2
+        echo "[chain] A pair scored against itself must hold the device count" >&2
+        echo "[chain] fixed, or the difference is a confound." >&2
+        exit 66
+    fi
+fi
+echo "[chain] device count: ${AMIP_N_GPUS} GPU(s), one rank each${AMIP_PAIR_DIR:+ (pair ${AMIP_PAIR_DIR})}"
+
 # CONFIG_YAML override: debugging configs (e.g. sub-daily diag_days for NaN
 # localization) without touching the tracked production YAML.
 : "${CONFIG_YAML:=${REPO}/config/amip/amip_production.yaml}"
@@ -205,8 +260,11 @@ CMD=( "${PY}" -u scripts/run/run_amip.py
 # shellcheck disable=SC2206
 [[ -n "${EXTRA:-}" ]] && CMD+=( ${EXTRA} )
 
-echo "[chain] launching: ${CMD[*]}"
-"${CMD[@]}"
+CMD+=( --distributed )
+LAUNCH=( srun --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}"
+         --gpus-per-node="${AMIP_N_GPUS}" --gpu-bind=none --kill-on-bad-exit=1 )
+echo "[chain] launching on ${AMIP_N_GPUS} GPU(s): ${LAUNCH[*]} ${CMD[*]}"
+"${LAUNCH[@]}" "${CMD[@]}"
 RC=$?
 echo "[chain] run_amip exit=${RC}  $(date -u)"
 
@@ -218,8 +276,10 @@ if (( RC == 0 )); then
         NEXT=$(sbatch --account=bb1596 \
                  --dependency="afterok:${SLURM_JOB_ID}" \
                  --job-name="${SLURM_JOB_NAME:-amip_mpas}" \
-                 --time=12:00:00 --gres=gpu:1 --constraint=a100_80 --mem=64G \
-                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-}" \
+                 --time=12:00:00 --constraint=a100_80 --mem=0 \
+                 --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}" \
+                 --gpus-per-node="${AMIP_N_GPUS}" \
+                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-},AMIP_N_GPUS=${AMIP_N_GPUS},AMIP_PAIR_DIR=${AMIP_PAIR_DIR:-}" \
                  "$0" | awk '{print $NF}')
         echo "[chain] ${NEW_DAY}/${TARGET_DAYS} d done; queued next link: ${NEXT}"
     else
