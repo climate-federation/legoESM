@@ -235,6 +235,62 @@ def main():
         print(f"[{a.label}] tau floor-on = {float(np.sum(A*tau.sum(axis=1))):.4f}  "
               f"floor-off = {float(np.sum(A*tau0.sum(axis=1))):.4f}")
 
+    # ---- 2b. WHERE the condensate is lost between the tracer and the optics --
+    qcp = float(np.sum(A * np.asarray(jnp.sum(q_c * dp, axis=1) / constants.g))) if q_c is not None else float("nan")
+    qip = float(np.sum(A * np.asarray(jnp.sum(q_i * dp, axis=1) / constants.g))) if q_i is not None else float("nan")
+    cfg_raw = ccfg._replace(cloud_optics_inhomogeneity="constant",
+                            cloud_inhomogeneity_factor=1.0)
+    cpr = props(cfg_raw)
+    LWPr = float(np.sum(A * np.asarray(cpr.lwp).sum(axis=1)))
+    IWPr = float(np.sum(A * np.asarray(cpr.iwp).sum(axis=1)))
+    print(f"[{a.label}] RETENTION tracer -> optics:")
+    print(f"[{a.label}]   liquid: tracer {qcp:.6e} -> pre-thinning {LWPr:.6e} "
+          f"({100.0*LWPr/max(qcp,1e-30):.1f}%) -> optics {LWP:.6e} "
+          f"({100.0*LWP/max(qcp,1e-30):.1f}%); thinning keeps {100.0*LWP/max(LWPr,1e-30):.1f}%")
+    print(f"[{a.label}]   ice:    tracer {qip:.6e} -> pre-thinning {IWPr:.6e} "
+          f"({100.0*IWPr/max(qip,1e-30):.1f}%) -> optics {IWP:.6e} "
+          f"({100.0*IWP/max(qip,1e-30):.1f}%); thinning keeps {100.0*IWP/max(IWPr,1e-30):.1f}%")
+    _cfp = np.asarray(cp.cloud_fraction)
+    _m = _cfp > 0.0
+    print(f"[{a.label}]   cf used by optics: mean where>0 {_cfp[_m].mean():.4f}; "
+          f"in-cloud liquid tau proxy "
+          f"{float(np.mean(1.5*np.asarray(cpr.lwp)[_m]/np.maximum(_cfp[_m],1e-3)/(1000.0*np.maximum(np.asarray(cpr.r_eff_liq)[_m],1e-12)))):.3f}")
+
+    # ---- 2c. convective plume condensate the arms carry --------------------
+    for _n in ("conv_icwmr", "conv_mass_flux_up", "conv_precip"):
+        _v = carry(_n)
+        if _v is None:
+            print(f"[{a.label}]   carry {_n}: absent")
+            continue
+        _v = np.asarray(_v)
+        if _v.ndim == 2 and _v.shape[0] == nCells:
+            print(f"[{a.label}]   carry {_n}: area-mean {float(np.sum(A[:, None]*_v)/_v.shape[1]):.6e} "
+                  f"max {_v.max():.6e}  (column max area-mean {float(np.sum(A*_v.max(axis=1))):.6e})")
+        else:
+            print(f"[{a.label}]   carry {_n}: area-mean {float(np.sum(A*_v.reshape(nCells))):.6e} "
+                  f"max {_v.max():.6e}")
+
+    # ---- 2d. WHERE the water sits, on pressure so the two grids compare -----
+    _edges = np.array([0., 100., 200., 300., 400., 500., 600., 700., 800., 900., 1100.]) * 100.0
+    pm = np.asarray(p_full); dpn2 = np.asarray(dp)
+    qcn2 = np.asarray(q_c) if q_c is not None else np.zeros_like(pm)
+    qin2 = np.asarray(q_i) if q_i is not None else np.zeros_like(pm)
+    cfn2 = np.asarray(cp.cloud_fraction)
+    lwpn = np.asarray(cp.lwp)
+    _rcm_b = rcm if rcm_done else np.zeros_like(pm)
+    print(f"[{a.label}] pressure band | liquid path | ice path | mean cf where>0 | optics lwp | CLUBB rcm path")
+    for lo, hi in zip(_edges[:-1], _edges[1:]):
+        m = (pm >= lo) & (pm < hi)
+        if not m.any():
+            continue
+        lp = float(np.sum(A[:, None] * np.where(m, qcn2 * dpn2, 0.0)) / constants.g)
+        ip = float(np.sum(A[:, None] * np.where(m, qin2 * dpn2, 0.0)) / constants.g)
+        mm = m & (cfn2 > 0.0)
+        cfm = float(np.sum(A[:, None] * np.where(mm, cfn2, 0.0)) / max(np.sum(A[:, None] * mm), 1e-30))
+        ow = float(np.sum(A[:, None] * np.where(m, lwpn, 0.0)))
+        rp = float(np.sum(A[:, None] * np.where(m, _rcm_b * dpn2, 0.0)) / constants.g)
+        print(f"[{a.label}]   {lo/100:6.0f}-{hi/100:6.0f} hPa | {lp:.4e} | {ip:.4e} | {cfm:.4f} | {ow:.4e} | {rp:.4e}")
+
     # ---- 3. cover the sub-columns cannot see --------------------------------
     n_sub = int(getattr(config, "cloud_n_subcolumns", 0)
                 or getattr(ccfg, "n_subcolumns", 0) or 8)
