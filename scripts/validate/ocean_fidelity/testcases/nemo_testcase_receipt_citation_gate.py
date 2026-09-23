@@ -1424,9 +1424,14 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:1941-1994': [
         'h_one_third = h_k_old',
         '+ dt * h_one_half * stage_source_rates[2][1])', 54],
-    'ocean_model_latlon_cgrid.py:6482-6551': [
+    # ORCA2 round 10 WIDENED this range rather than moving it: the RGB arm of
+    # the stage-3 qsr seam was inserted INSIDE the cited block, so its first
+    # anchor did not move while its last one shifted by 59.  Stated here
+    # explicitly, with the new length, because a widening that is not declared
+    # is exactly what this map exists to refuse.
+    'ocean_model_latlon_cgrid.py:6423-6551': [
         '_stage3_T_rate = (',
-        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 70],
+        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 129],
     'ocean_model_latlon_cgrid.py:7464-7896': [
         'T_mid = state_new.T.data',
         'S_mid = S_mid + dt * dS_gm * active_3d', 433],
