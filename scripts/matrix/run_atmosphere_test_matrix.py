@@ -4208,6 +4208,27 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
               f"{_topo_h0} m (registry value "
               f"{float(tc.run_kwargs.get('h_0', 2000.0))} m)")
 
+    # #1029: the seed of the initial temperature perturbation, for ENSEMBLE
+    # spread.  Every arm of the nine-arm dt x level ladder is a single member,
+    # and a survival TIME in a nonlinear core scatters from member to member,
+    # so none of those arms has a width attached to it and differences between
+    # them cannot be read.  This override exists to measure that width: run the
+    # same configuration at several seeds and the spread is the resolution of
+    # every other arm.  Unset -> the init routine's own default seed, so no
+    # committed configuration moves.
+    _topo_seed = None
+    if _topo and "LEGOESM_TOPO_SEED" in os.environ:
+        _topo_seed = int(os.environ["LEGOESM_TOPO_SEED"])
+        print(f"  #1029 LEGOESM_TOPO_SEED override: IC perturbation seed = "
+              f"{_topo_seed} (init default otherwise)")
+
+    def _topo_init_kwargs():
+        """h_0 plus, when an ensemble is being run, the perturbation seed."""
+        kw = {"h_0": _topo_h0}
+        if _topo_seed is not None:
+            kw["seed"] = _topo_seed
+        return kw
+
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
@@ -4347,7 +4368,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
                 held_suarez_topo_init)
-            state = held_suarez_topo_init(grid, sigma, h_0=_topo_h0)
+            state = held_suarez_topo_init(grid, sigma, **_topo_init_kwargs())
         else:
             state = held_suarez_init(grid, sigma)
 
@@ -4531,7 +4552,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             from legoesm.atmosphere.idealized.held_suarez_topo import (
                 held_suarez_topo_init_latlon)
             state_cc = held_suarez_topo_init_latlon(
-                grid, sigma, h_0=_topo_h0)
+                grid, sigma, **_topo_init_kwargs())
         else:
             state_cc = held_suarez_init_latlon(grid, sigma)
         state = hydrostatic_to_cgrid(state_cc, grid)
@@ -4611,7 +4632,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
                 held_suarez_topo_init_mpas)
-            state = held_suarez_topo_init_mpas(mesh, sigma, h_0=_topo_h0)
+            state = held_suarez_topo_init_mpas(mesh, sigma, **_topo_init_kwargs())
         else:
             state = held_suarez_init_mpas(mesh, sigma)
         grid = mesh
@@ -4681,7 +4702,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             from legoesm.atmosphere.idealized.held_suarez_topo import (
                 held_suarez_topo_init_spectral)
             state = held_suarez_topo_init_spectral(
-                grid, sigma, h_0=_topo_h0, T_init=300.0)
+                grid, sigma, T_init=300.0, **_topo_init_kwargs())
         else:
             state = isothermal_rest_state_spectral(grid, sigma)
 
