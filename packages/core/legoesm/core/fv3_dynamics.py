@@ -761,6 +761,24 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             # -- the spec's own [face][iq] order. Passing the list
             # straight through made the callee see nq as the face axis.
             _q_in = jnp.stack(qq, axis=1)
+            # WINDOW lane: the tracer step is a phase of its own between
+            # the acoustic loop and the remap, and like every acoustic
+            # substep it needs its seam pads rebuilt from the owners at
+            # ENTRY (acoustic_loop_3d does this for state/nh/flux_cap).
+            # Without it the tracer's pad NaN (the outer stencil-reach
+            # cells, expected) survived into the next step and ate ~2
+            # cells inward per step, reaching owned cells at step 3
+            # (C24 kt=2 pad=5 n_split=8; gate jobs 9910440/1, probe
+            # 9912744; forced refresh before OR after the step confines
+            # it, jobs 9912821/2).  No-op on the six-face lane.
+            # One tracer per key (each (nb, W, W, km), the layout pt already
+            # relies on) in ONE firing -- NOT km*nq merged into the trailing
+            # axis, which can collide with a horizontal extent and trip the
+            # layout classifier (codex: nq=4, km=5 at C24 gives 20 = n_w+1).
+            _wc = getattr(getattr(ctx, "tab", None), "window_comm", None)
+            if _wc is not None:
+                _ref = _wc.refresh({f"q{i}": _q_in[:, i] for i in range(nq)})
+                _q_in = jnp.stack([_ref[f"q{i}"] for i in range(nq)], axis=1)
             _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1_delp, ac["flux_cap"],
                                        km=km, nq=nq, hord_tr=hord_tr,
                                        dt=mdt, q_split=tracer_q_split,

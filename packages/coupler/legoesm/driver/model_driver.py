@@ -8146,10 +8146,10 @@ class ModelDriver:
         tmp + os.replace).
 
         Refusals that REMAIN (each loud, none silent): no MPI, no
-        HELD-SUAREZ under multi-process SPMD (dry dynamics only there —
-        the HS step is single-process-only, see the guard above), no
-        ensemble.  Single- AND multi-process face SPMD (dry dynamics)
-        are both supported via --distributed-mode spmd; multi-process
+        ensemble.  Single- AND multi-process face SPMD are both supported
+        via --distributed-mode spmd, dry or with Held-Suarez (the
+        multi-process HS step is the face-stacked JAX twin, see
+        ``_fv3_duo_apply_held_suarez``); multi-process
         checkpoint/snapshot I/O goes through
         ``_fv3_duo_reshard_bundle_global`` / the gather-then-root-write
         helpers, not the single-process ``np.asarray`` path directly.
@@ -8199,23 +8199,6 @@ class ModelDriver:
                 "--distributed-mode spmd); MPI mode is not wired for "
                 "this lane. Launch one process, or pass "
                 "--distributed-mode spmd.")
-        if self._is_spmd_multiprocess() and cfg.held_suarez_forcing:
-            # _fv3_duo_apply_held_suarez round-trips the bundle through
-            # per-process NumPy (state_3d_to_numpy / np.asarray on each
-            # leaf), which is correct only when every leaf is fully
-            # host-addressable -- true single-process (all shards
-            # local), false under multi-process SPMD where each rank is
-            # addressable for only its own face shards (codex BLOCKER,
-            # mp-driver-io design review 2026-08-27). Multi-process SPMD
-            # runs dry dynamics only until that path is designed.
-            raise NotImplementedError(
-                "fv3_duo multi-process SPMD does not support "
-                "held_suarez_forcing: the certified 3-pass HS step is "
-                "single-process-only (it np.asarray's per-face leaves "
-                "of the bundle, which are not fully host-addressable "
-                "under multi-process SPMD). Run dry "
-                "(held_suarez_forcing=False), or drop --distributed for "
-                "a single-process HS run.")
         if cfg.distributed and cfg.distributed_mode != "spmd":
             raise NotImplementedError(
                 "fv3_duo distributed runs are SPMD-only "
@@ -8289,7 +8272,16 @@ class ModelDriver:
         # reshards ONCE, uniformly, for either origin (codex: "one
         # model/helper method shared by initialization and restart").
         # No-op single-process.
-        bundle = self._fv3_duo_reshard_bundle_global(bundle)
+        if self.model.window_layout is not None:
+            # WINDOW layout (--fv3-duo-windows): the fresh IC already comes
+            # out window-stacked on the window sharding (to_windows places
+            # each process's own shards via make_array_from_callback); a
+            # restart bundle is host FACES and takes the same road.  The
+            # face reshard does not apply to window stacks.
+            if restart_bundle is not None:
+                bundle = self.model.to_windows(bundle)
+        else:
+            bundle = self._fv3_duo_reshard_bundle_global(bundle)
         t0 = time.time()
         for step in range(loaded_step + 1, n_steps_total + 1):
             bundle = self.model.step(bundle, DT)
@@ -8322,6 +8314,13 @@ class ModelDriver:
     def _fv3_duo_apply_held_suarez(self, bundle: dict, dt: float) -> dict:
         """One certified Held-Suarez physics step on the duo bundle.
 
+        Multi-process SPMD dispatches to :meth:`_fv3_duo_apply_held_suarez_jax`
+        (the face-stacked pure-JAX twin, pinned to this NumPy path at 1e-11
+        in ``test_fv3_physics_coupling``): the per-face leaves of a
+        multi-process bundle are not host-addressable, so the NumPy
+        round-trip below cannot run there.  Single-process keeps this
+        path byte-identical (user call 2026-09-21: one variable moves).
+
         Thin adapter only — ALL numerics live in
         ``apply_held_suarez_step`` (the 3-pass orchestration gated at
         1.7645e-8 vs the Fortran oracle).  That function wants the
@@ -8349,6 +8348,21 @@ class ModelDriver:
         exchange), so the lane's "NO loop state" restart invariant
         survives.
         """
+        if self._is_spmd_multiprocess():
+            return self._fv3_duo_apply_held_suarez_jax(bundle, dt)
+        if self.model.window_layout is not None:
+            # single-process WINDOW layout: every window is host-addressable,
+            # so the certified NumPy step runs on the six faces (owned cells
+            # scattered back) and the result is re-windowed.  The NumPy
+            # authority stays THE single-process path, faces or windows.
+            faces = self._fv3_duo_apply_held_suarez_numpy(
+                self.model.to_flat(bundle), dt)
+            return self.model.to_windows(faces)
+        return self._fv3_duo_apply_held_suarez_numpy(bundle, dt)
+
+    def _fv3_duo_apply_held_suarez_numpy(self, bundle: dict, dt: float) -> dict:
+        """The certified NumPy Held-Suarez step on a FACE-stacked bundle
+        (the body of :meth:`_fv3_duo_apply_held_suarez`, unchanged)."""
         from legoesm.core.fv3_cgrid_phase_3d import state_3d_to_numpy
         from legoesm.core.fv3_native_physics_coupling import (
             apply_held_suarez_step,
@@ -8374,6 +8388,72 @@ class ModelDriver:
             new_state[nm] = jnp.asarray(
                 np.stack([face[nm] for face in state_np]))
         return {**bundle, "state": new_state}
+
+    def _fv3_duo_apply_held_suarez_jax(self, bundle: dict, dt: float) -> dict:
+        """Face-stacked JAX Held-Suarez step for the multi-process lane.
+
+        Jitted once per driver (metrics and halo tables are trace-time
+        constants); the three moved leaves are pinned to the step's face
+        sharding so the loop does not decay to replicated arrays.
+        """
+        from legoesm.core.fv3_native_physics_coupling import (
+            apply_held_suarez_step_sixface_jax, stack_held_suarez_metrics,
+        )
+        fn = getattr(self, "_fv3_duo_hs_jax_fn", None)
+        if fn is None:
+            from legoesm.grids.fv3_duo_windows import (gather_windows,
+                                                       scatter_owned)
+            grid = self.model.grid
+            n, ng, km = grid.n, grid.ng, self.model.config.km
+            tab = self.model.sixface_halo_tables
+            amat6, lat6, wv6 = stack_held_suarez_metrics(grid.ctx_np)
+            sh = self.model.step_out_shardings
+            lay = self.model.window_layout
+            moved = ("u", "v", "pt")
+
+            def _hs(state, press, dt):
+                if lay is not None:
+                    # window stacks -> six faces ON DEVICE (owned cells),
+                    # the twin, then back to windows (pads rebuilt from the
+                    # faces); untouched leaves keep their window arrays.
+                    faces = {k: scatter_owned(lay, state[k], jnp)
+                             for k in ("u", "v", "pt", "delp")}
+                    pressf = {k: scatter_owned(lay, press[k], jnp)
+                              for k in press}
+                    out6 = apply_held_suarez_step_sixface_jax(
+                        faces, pressf, tab, amat6, lat6, wv6, dt=dt, n=n,
+                        ng=ng, km=km, strat=True)
+                    out = dict(state)
+                    for nm in moved:
+                        out[nm] = gather_windows(lay, out6[nm], jnp)
+                else:
+                    out = apply_held_suarez_step_sixface_jax(
+                        state, press, tab, amat6, lat6, wv6, dt=dt, n=n,
+                        ng=ng, km=km, strat=True)
+                if sh is not None:
+                    for nm in moved:
+                        out[nm] = jax.lax.with_sharding_constraint(out[nm],
+                                                                   sh)
+                return out
+            fn = jax.jit(_hs)
+            self._fv3_duo_hs_jax_fn = fn
+        press = {nm: bundle["press"][nm] for nm in ("pe", "peln", "pkz")}
+        new_state = fn(bundle["state"], press, float(dt))
+        return {**bundle, "state": new_state}
+
+    def _fv3_duo_host_faces(self, bundle: dict) -> dict:
+        """Host-side, FACE-stacked copy of the bundle for every write.
+
+        Multi-process: a collective gather to identical host data on
+        every rank first.  Window layout: each window's OWNED cells are
+        scattered back into the six faces (``to_flat``).  Face layout:
+        ``to_flat`` is the identity, so the certified face path is
+        byte-identical.  ONE seam for snapshot, checkpoint and the
+        restart template, so no writer can see a window stack.
+        """
+        if self._is_spmd_multiprocess():
+            bundle = self._gather_spmd_tree_to_host(bundle)
+        return self.model.to_flat(bundle)
 
     def _fv3_duo_reshard_bundle_global(self, bundle: dict) -> dict:
         """Reconstruct every bundle leaf as a properly GSPMD-sharded
@@ -8495,6 +8575,7 @@ class ModelDriver:
         the ORIGINAL code, untouched (not even reordered).
         """
         if not self._is_spmd_multiprocess():
+            bundle = self.model.to_flat(bundle)   # identity on faces
             fields = {nm: np.asarray(v) for nm, v in bundle["state"].items()}
             fields["ps"] = np.asarray(bundle["press"]["ps"])
             for iq, qt in enumerate(bundle["q"]):
@@ -8527,7 +8608,7 @@ class ModelDriver:
             return None
 
         # ---- multi-process SPMD ----
-        bundle = self._gather_spmd_tree_to_host(bundle)
+        bundle = self._fv3_duo_host_faces(bundle)
         fields, bad, umax = self._fv3_duo_snapshot_fields_and_blowup(bundle)
         blown = bool(bad) or umax > self._FV3_DUO_BLOWUP_UMAX_MS
         err = None
@@ -8660,13 +8741,14 @@ class ModelDriver:
         mcfg = self.model.config
         path = self._output_dir / f"fv3duo_ckpt_step_{step:09d}.npz"
         if not self._is_spmd_multiprocess():
+            bundle = self.model.to_flat(bundle)   # identity on faces
             arrays = self._fv3_duo_flatten_bundle(bundle)
             self._fv3_duo_checkpoint_write(
                 arrays, mcfg, step, day, len(bundle["q"]), path)
             return
 
         # ---- multi-process SPMD ----
-        bundle = self._gather_spmd_tree_to_host(bundle)
+        bundle = self._fv3_duo_host_faces(bundle)
         arrays = self._fv3_duo_flatten_bundle(bundle)
         nq = len(bundle["q"])
         err = None
@@ -8982,8 +9064,8 @@ class ModelDriver:
             # -- built by EVERY rank (needed by all for broadcast
             # placeholders), inside this same try so a per-rank
             # failure here is caught too (GLM F1, round 2b).
-            template = self._fv3_duo_flatten_bundle(
-                self.model.dcmip16_initial_state(do_pert=True))
+            template = self._fv3_duo_flatten_bundle(self._fv3_duo_host_faces(
+                self.model.dcmip16_initial_state(do_pert=True)))
             if jax.process_index() == 0:
                 if not path.is_file():
                     raise FileNotFoundError(

@@ -463,6 +463,16 @@ class FV3DuoDynamicsModel:
             bundle)
         return self.to_windows(bundle) if self.window_layout else bundle
 
+    @property
+    def sixface_halo_tables(self):
+        """The six-face ``DuoHaloTables`` this model's exchanges are built
+        on (the flat context's tables under a window layout).  Public so
+        the driver's face-stacked physics step can reuse the certified
+        exchange tables instead of reaching into private context."""
+        ctx = (self._flat_ctx_jax if self.window_layout is not None
+               else self._ctx_jax)
+        return ctx.tab
+
     # ------------------------------------------------------------------
     # window layout conversions (M6)
     # ------------------------------------------------------------------
