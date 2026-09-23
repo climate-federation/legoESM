@@ -4267,3 +4267,64 @@ def test_clubb_trop_cloud_top_press_validate_strict_bounds_and_scheme():
     with pytest.raises(ValueError, match="CLUBB field"):
         base._replace(turbulence="louis",
                       clubb_trop_cloud_top_press=15000.0).validate_strict()
+
+
+def test_clubb_liquid_partition_flag_reaches_the_turbulence_kernel():
+    """--clubb-liquid-partition must round-trip AND reach the nested config.
+
+    Same two halves as the prognostic flag: a lever that lands on
+    ``ExperimentConfig`` but never on the CLUBB sub-config would report success
+    while the closure kept throwing its liquid away.
+    """
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.clubb_liquid_partition is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--turbulence", "clubb",
+        "--clubb-prognostic",
+        "--clubb-liquid-partition",
+    ]), parser))
+    assert cfg_on.clubb_liquid_partition is True
+    assert turbulence_config_for(cfg_on).clubb.liquid_partition is True
+
+    # ... and the default really is the other value on the same lane, so the
+    # assertion above cannot pass by the sub-config defaulting True.
+    cfg_plain = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb",
+        "--clubb-prognostic",
+    ]), parser))
+    plain_tc = materialize_sub_config(turbulence_config_for(cfg_plain))
+    assert plain_tc.clubb.liquid_partition is False
+
+
+def test_clubb_liquid_partition_requires_clubb_and_the_prognostic_path():
+    """The exchanged liquid is the POST-ADVANCE PDF's rcm.
+
+    Only CLUBB diagnoses one, and only the prognostic path advances the moments
+    it is computed from, so both are hard requirements rather than hints.
+    """
+    import pytest
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    wrong_closure = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--clubb-liquid-partition",
+    ]), parser))
+    with pytest.raises(ValueError, match="requires turbulence='clubb'"):
+        turbulence_config_for(wrong_closure)
+
+    diagnostic = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb",
+        "--clubb-liquid-partition",
+    ]), parser))
+    with pytest.raises(ValueError, match="requires clubb_prognostic=True"):
+        turbulence_config_for(diagnostic)

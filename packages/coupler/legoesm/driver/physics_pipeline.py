@@ -4343,6 +4343,27 @@ def turbulence_config_for(config):
             )
             tc = materialize_sub_config(tc)
             tc = tc._replace(clubb=tc.clubb._replace(prognostic=True))
+        # CLUBB's two-sided cloud-liquid exchange with the host (CAM
+        # clubb_intr.F90).  Same threading and the same refusal as the flag
+        # above, plus a prognostic requirement: the liquid the closure writes
+        # back is the POST-ADVANCE PDF's rcm, which only the prognostic path
+        # produces from advanced moments.
+        if getattr(config, "clubb_liquid_partition", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_liquid_partition=True requires turbulence='clubb', "
+                    f"got {tc.scheme!r}. The exchanged liquid is the CLUBB PDF's "
+                    f"own rcm; no other closure diagnoses one.")
+            if not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_liquid_partition=True requires clubb_prognostic=True: "
+                    "the liquid handed back is the post-advance PDF closure's "
+                    "rcm, which the diagnostic path does not produce.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(liquid_partition=True))
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => byte-identical: the scheme's own 0.0 (off) stands.
@@ -4438,6 +4459,20 @@ def turbulence_config_for(config):
                 f"{getattr(_sub, 'prognostic', None)!r}). The override is "
                 "authoritative, so set CLUBBConfig(prognostic=True) inside it "
                 "rather than relying on the experiment-level flag.")
+    if getattr(config, "clubb_liquid_partition", False):
+        # Same refusal, and it matters more here: swallowing this one silently
+        # would run a deck that asked for the liquid exchange with the closure
+        # still throwing its liquid away, which looks exactly like the defect
+        # the lever exists to remove.
+        _sub = getattr(tc, "clubb", None)
+        if tc.scheme != "clubb" or _sub is None or not _sub.liquid_partition:
+            raise ValueError(
+                "clubb_liquid_partition=True but an explicit turbulence_override "
+                "is in force and does not select it (override "
+                f"scheme={tc.scheme!r}, liquid_partition="
+                f"{getattr(_sub, 'liquid_partition', None)!r}). The override is "
+                "authoritative, so set CLUBBConfig(liquid_partition=True) inside "
+                "it rather than relying on the experiment-level flag.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the

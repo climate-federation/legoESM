@@ -651,6 +651,18 @@ class ExperimentConfig(NamedTuple):
     # than silently re-seeding it every step.  False (default) is the
     # byte-identical diagnostic path.
     clubb_prognostic: bool = False
+    # Whether CLUBB exchanges CLOUD LIQUID with the host, as CAM's
+    # ``clubb_intr.F90`` does (rt = q_v + q_c in, q_v = rt - rcm and
+    # q_c := rcm out).  False (default) keeps the historical bridge, which
+    # hands the advanced total water back wholly as vapour and so never gives
+    # the host the liquid the closure's own PDF diagnosed -- the host then
+    # takes cloud FRACTION from CLUBB and cloud WATER from a tracer CLUBB never
+    # wrote.  Requires turbulence='clubb' and the prognostic path, plus a
+    # condensate tracer to write into; the MPAS lane is the only one wired to
+    # route the liquid tendency, and the others refuse rather than drop it.
+    # Turning this on MOVES water between two host tracers and changes the
+    # cloud radiative state, so it is a prognostic change, not a diagnostic one.
+    clubb_liquid_partition: bool = False
     # CLUBB's upper domain limit [Pa] (CAM ``trop_cloud_top_press``): the
     # scheme's mixing is tapered to zero above this pressure.  None (default)
     # keeps the scheme's own 0.0 = no limit, byte-identical.
@@ -2714,6 +2726,45 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"cld_macmic_num_steps={_nmm} sub-cycles turbulence and "
                     "microphysics, but both are 'none'")
+        if self.clubb_liquid_partition:
+            # CLUBB's liquid exchange REPLACES the host's cloud water with the
+            # closure's equilibrium diagnosis, so the microphysics must read the
+            # REPLACED value; CAM guarantees that by sequential-update splitting
+            # inside its macmic loop (physpkg.F90:2097-2101).  This model uses
+            # that order only when the loop runs: at cld_macmic_num_steps=1 the
+            # combined physics takes the PARALLEL branch
+            # (combined.py ``_accumulate_step``), where every module is
+            # evaluated on the same start-of-step state and the tendencies are
+            # SUMMED.  The final liquid would then be the closure's equilibrium
+            # PLUS a microphysical increment computed from the stale, 2-3x
+            # smaller liquid -- and since autoconversion goes as roughly the
+            # 2.5th power of cloud water, that sink is wrong by nearly an order
+            # of magnitude.  Water is still conserved, so nothing would fail
+            # loudly; the climate would simply be wrong.  Refuse instead.
+            if _nmm is None or not isinstance(_nmm, int) or _nmm < 2:
+                errors.append(
+                    "clubb_liquid_partition=True needs cld_macmic_num_steps>=2: "
+                    "the closure REPLACES the host cloud water, so the "
+                    "microphysics has to run on the replaced value, and only "
+                    "the macro/micro sub-cycle applies the modules in sequence. "
+                    f"At cld_macmic_num_steps={_nmm!r} they are evaluated in "
+                    "parallel on the same state and summed, which leaves the "
+                    "microphysical sinks evaluated on the pre-exchange liquid")
+            # The diagnostic condensate floor exists to paper over the very
+            # defect this lever removes.  Left on, the two fight: the floor
+            # re-imposes liquid on top of the closure's rcm, and it materialises
+            # that liquid without a matching vapour sink, so it also breaks the
+            # exact total-water pairing the exchange guarantees.  It is a
+            # mechanism to switch OFF here, not a number to retune (GLM).
+            if self.cloud_q_c_diagnostic:
+                errors.append(
+                    "clubb_liquid_partition=True with "
+                    f"cloud_q_c_diagnostic={self.cloud_q_c_diagnostic!r}: the "
+                    "diagnostic condensate floor exists to compensate for the "
+                    "missing closure liquid this lever restores, it would be "
+                    "added on top of it, and it creates cloud water with no "
+                    "vapour sink, breaking the exchange's total-water pairing. "
+                    "Set cloud_q_c_diagnostic to 0 or None")
         if _is_mpas:
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
