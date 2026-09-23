@@ -767,17 +767,25 @@ class DiagnosticCollector:
         # large_yeager or grachev/gryanik run otherwise published a
         # coare3-native-default tas).  The 2 m value is set by stability, so
         # gustiness is left scheme-native here (pre-existing choice).
-        def _profile_to_2m(T_sfc, q_sfc):
-            """One surface's 2 m temperature, on the experiment's own scheme.
+        def _profile_to_2m(T_sfc, q_sfc, *, ocean: bool):
+            """One surface's 2 m temperature.
 
-            MERGE NOTE (#1773): the scheme dispatch lives HERE, inside the
-            per-surface helper, rather than once at the end of the function.
-            main added the ``large_yeager_cesm`` arm when this function had a
-            single surface; this branch split it into a land surface and a sea
-            surface. Leaving the dispatch outside would have given the CESM
-            ``tref`` arm to neither.
+            MERGE NOTE (#1773), and it is a physics decision, not a textual
+            one. ``main`` added a ``large_yeager_cesm`` arm that returns CESM
+            ``shr_flux_atmOcn``'s own ``tref`` instead of the MOST profile;
+            this branch split the diagnostic into a LAND surface and a SEA
+            surface. ``shr_flux_atmOcn`` is the atmosphere-OCEAN coupler law
+            (the module's own docstring: "SAM ocean surface fluxes"), with
+            Charnock roughness and a saturated surface, so handing it a land
+            skin would re-create the exact artifact this branch exists to
+            remove -- land ``tas`` computed as if the surface were ocean.
+
+            So the CESM arm applies to the SEA leg ONLY; the land leg keeps
+            the MOST profile on every scheme. Review (GLM) flagged the
+            alternative -- dispatching for both legs -- as a third scheme
+            neither side tested.
             """
-            if self.tas_profile_scheme == "large_yeager_cesm":
+            if ocean and self.tas_profile_scheme == "large_yeager_cesm":
                 # CESM shr_flux_atmOcn's own ``tref`` diagnostic (2 m).
                 from legoesm.core.bulk_flux import compute_sam_oceflx_fluxes
                 *_, T_2m = compute_sam_oceflx_fluxes(
@@ -787,7 +795,10 @@ class DiagnosticCollector:
                 return T_2m
             *_, T_2m = compute_most_fluxes(
                 u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
-                scheme=self.tas_profile_scheme, return_2m=True,
+                scheme=(self.tas_profile_scheme
+                        if self.tas_profile_scheme != "large_yeager_cesm"
+                        else "large_yeager"),
+                return_2m=True,
                 stability_scheme=self.surface_stability_scheme,
             )
             return T_2m
@@ -800,7 +811,7 @@ class DiagnosticCollector:
             # the neighbouring ocean's temperature and a saturated surface the
             # land does not have, so a caller that owns a land skin should pass
             # it — see the land branch below.
-            return _profile_to_2m(T_sfc_sea, q_sfc_sea)
+            return _profile_to_2m(T_sfc_sea, q_sfc_sea, ocean=True)
 
         # Land and sea get their OWN surface, then combine by land fraction.
         # Both branches keep the same bulk scheme and stability selector, so
@@ -811,8 +822,8 @@ class DiagnosticCollector:
         # frozen ground.
         q_sfc_land = (saturation_mixing_ratio(T_land, p_s) if q_land is None
                       else q_land)
-        T_2m_land = _profile_to_2m(T_land, q_sfc_land)
-        T_2m_sea = _profile_to_2m(T_sfc_sea, q_sfc_sea)
+        T_2m_land = _profile_to_2m(T_land, q_sfc_land, ocean=False)
+        T_2m_sea = _profile_to_2m(T_sfc_sea, q_sfc_sea, ocean=True)
         f_land = jnp.clip(jnp.asarray(land_fraction, dtype=T_2m_land.dtype),
                           0.0, 1.0)
         return f_land * T_2m_land + (1.0 - f_land) * T_2m_sea
