@@ -4132,6 +4132,11 @@ def main(argv=None) -> int:
                         default=None)
     parser.add_argument("--developed-transport-record-root", type=Path,
                         default=None)
+    parser.add_argument("--developed-stage2-walk", action="store_true",
+                        help="walk NEMO's compiled stage-2 momentum program "
+                             "across the admitted Round-156 record")
+    parser.add_argument("--developed-stage2-record-root", type=Path,
+                        default=None)
     parser.add_argument("--reference-process-trace", type=Path,
                         default=DEFAULT_REFERENCE_PROCESS_TRACE,
                         help="admitted Round-124 process trace that a new "
@@ -4182,6 +4187,28 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
+    if args.developed_stage2_walk:
+        require(args.expect_commit is not None,
+                "--developed-stage2-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-stage2-walk needs --daily-record-audit")
+        require(args.developed_stage2_record_root is not None,
+                "--developed-stage2-walk needs "
+                "--developed-stage2-record-root")
+        report = developed_stage2_rhs_walk(
+            args.daily_record_root, args.daily_record_audit,
+            args.expect_commit, args.developed_stage2_record_root,
+            args.root, plant=args.plant)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']['first_non_bit']}")
+            return 1
+        print("STATUS PASS: developed stage-2 first non-bit row "
+              f"{report['first_non_bit_row']}")
+        return 0
     if (args.developed_step_walk or args.developed_fct_walk
             or args.developed_transport_walk):
         require(args.expect_commit is not None,
@@ -6777,56 +6804,309 @@ def _developed_fct_mode_rows(
     }
 
 
-def developed_state_process_walk(
-        process_root: Path, vertical_root: Path, daily_root: Path,
-        daily_audit: Path, expected_commit: str, evidence_root: Path, *,
-        mesh_path: Path = DEFAULT_MESH, plant: str | None = None,
-        fct_record_root: Path | None = None,
-        transport_record_root: Path | None = None) -> dict:
-    """Run step 1081 through production JIT from NEMO's exact day-180 state."""
-    if plant in ("missing-day", "missing-process-row", "missing-branch",
-                 "missing-ranking-row"):
-        return _developed_registry_plant(plant)
-    require(plant in (None, "none", "entry-temperature-ulp",
-                      "fct-transport-ulp", "transport-un-adv-ulp",
-                      "stage2-uu-b-ulp"),
-            f"unknown developed-state plant {plant!r}")
+DEVELOPED_STAGE2_ROWS = (
+    "stage1_output", "after_hpg", "after_vor", "after_adv",
+    "stage2_rhs_total", "uu_Kaa_raw", "uu_Kaa_final",
+)
+
+
+def _developed_stage2_record(root: Path) -> dict:
+    """Read the admitted Round-156 stage-2 record on legoESM's face grid.
+
+    The window and the transpose are the SAME ones
+    ``_developed_transport_record`` uses, so the two records land on one grid
+    and no second index convention enters the campaign.
+    """
+    gate156 = _load(
+        "nemo_testcase_l2_gyre_round156_developed_stage2_gate",
+        "nemo_testcase_l2_gyre_round156_developed_stage2_gate.py")
+    admission_path = root / "round156_developed_stage2_admission.json"
+    admission = json.loads(admission_path.read_text(encoding="utf-8"))
+    require(admission["status"] == "PASS",
+            "Round-156 stage-2 record is not admitted")
+    record = gate156.read_record(root / gate156.RECORD)
+    require(record["sha256"] == admission["record"]["sha256"],
+            "Round-156 stage-2 record differs from its admission")
+    meta = record["meta"]
+    require(meta["kt"] == 1081 and meta["kstg"] == 2,
+            "Round-156 record is not step 1081 stage 2")
+    fields = record["fields"]
+
+    def owned3(name, index):
+        return np.ascontiguousarray(
+            fields[name][index][1:34, 2:24, :30].transpose(1, 0, 2))
+
+    rows = {}
+    for name in ("rhs_entry", "uu_vv_Kbb", "uu_vv_Kmm", "umask_vmask",
+                 "after_hpg", "after_vor", "after_adv", "uu_vv_Kaa_raw",
+                 "uu_vv_Kaa_final"):
+        rows[f"{name}_u"] = owned3(name, 0)
+        rows[f"{name}_v"] = owned3(name, 1)
+    rows["rDt"] = np.float64(fields["rDt_r1_Dt"][0])
+    rows["ln_dynadv_vec"] = float(fields["flags_vec_linssh"][0])
+    rows["lk_linssh"] = float(fields["flags_vec_linssh"][1])
+    # The compiled selector at stprk3_stg.f90:721 takes the VECTOR arm when
+    # either flag is set, and this deck sets ln_dynadv_vec.  A walk that
+    # assumed the thickness-weighted arm would calibrate the wrong statement,
+    # so the arm is read from the record and refused if it ever changes.
+    require(rows["ln_dynadv_vec"] == 1.0 and rows["lk_linssh"] == 0.0,
+            "Round-156 record does not carry the vector stage-update arm: "
+            f"ln_dynadv_vec={rows['ln_dynadv_vec']} "
+            f"lk_linssh={rows['lk_linssh']}")
+    return {"sha256": record["sha256"], "admission": admission,
+            "rows": rows, "meta": meta, "field_count": len(fields)}
+
+
+def _score_stage2_face(actual, expected, mask) -> dict:
+    """Score one face field over NEMO's own active faces, bitwise first."""
+    actual = np.ascontiguousarray(np.asarray(actual, dtype=np.float64))
+    expected = np.ascontiguousarray(np.asarray(expected, dtype=np.float64))
+    require(actual.shape == expected.shape,
+            f"stage-2 shapes differ: {actual.shape} vs {expected.shape}")
+    active = np.asarray(mask) != 0.0
+    different = actual.view(np.uint64) != expected.view(np.uint64)
+    delta = (actual - expected)[active]
+    return {
+        "cells_scored": int(actual.size),
+        "cells_unequal": int(np.count_nonzero(different)),
+        "active_cells_scored": int(np.count_nonzero(active)),
+        "active_cells_unequal": int(np.count_nonzero(different & active)),
+        "active_max_abs": float(np.max(np.abs(delta), initial=0.0)),
+        "active_rms": float(
+            np.sqrt(np.mean(delta * delta)) if delta.size else 0.0),
+    }
+
+
+def developed_stage2_rhs_walk(
+        daily_root: Path, daily_audit: Path, expected_commit: str,
+        stage2_record_root: Path, evidence_root: Path, *,
+        plant: str | None = None) -> dict:
+    """Walk NEMO's compiled stage-2 momentum program at the developed state.
+
+    Round 155 named the stage-2 velocity the magnitude owner of the stage-3
+    transport difference and round 156 measured that the external barotropic
+    half of the stage-2 program carries none of it.  This walk scores the
+    INTERNAL half -- the right-hand side at
+    ``GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:497,510,525``
+    and the vector-arm assignment at ``:721-724`` -- against NEMO's own
+    recorded snapshots, from NEMO's admitted day-180 entry, under production
+    JIT.
+    """
+    require(plant in (None, "none", "after-hpg-ulp"),
+            f"unknown developed stage-2 plant {plant!r}")
     _policy()
     import jax
     import jax.numpy as jnp
-    from legoesm.ocean import advection as advection_module
-    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
-    from legoesm.ocean.advection import NEMO_FCT_TRACE_FIELDS
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
-    from legoesm.ocean.fidelity.nemo_state_bridge import (
-        _u_east_to_face, _v_north_to_face)
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        build_nemo_testcase_card)
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+        rk3_stage_velocity_update)
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
     stamp = worktree_stamp()
     require(stamp["clean"],
-            f"developed-state walk requires clean tree: {stamp['dirty_paths']}")
+            f"stage-2 walk requires clean tree: {stamp['dirty_paths']}")
     require(stamp["commit"] == expected_commit,
-            "developed-state walk commit differs from --expect-commit")
-    process_root = Path(process_root)
-    vertical_root = Path(vertical_root)
-    daily_root = Path(daily_root)
-    daily_audit = Path(daily_audit)
+            "stage-2 walk commit differs from --expect-commit")
     evidence_root = Path(evidence_root)
-    fct_bundle = (
-        _developed_fct_record(Path(fct_record_root))
-        if fct_record_root is not None else None)
-    transport_bundle = (
-        _developed_transport_record(Path(transport_record_root))
-        if transport_record_root is not None else None)
+    oracle = _developed_stage2_record(Path(stage2_record_root))
+    rows = dict(oracle["rows"])
+    if plant == "after-hpg-ulp":
+        moved = np.array(rows["after_hpg_u"], copy=True)
+        index = tuple(
+            int(value) for value in
+            np.argwhere(np.asarray(rows["umask_vmask_u"]) != 0.0)[0])
+        moved[index] = np.nextafter(moved[index], np.inf)
+        rows["after_hpg_u"] = moved
 
-    process_admission = validate_process_record(
-        process_root, PROCESS_RECORD_COMMIT)
-    vertical_admission = validate_vertical_record(
-        vertical_root, DEVELOPED_VERTICAL_RECORD_COMMIT,
-        process_root=process_root)
+    bundle = _developed_entry_bundle(
+        daily_root, daily_audit, expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+
+    def run(**hook_kwargs):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hook_kwargs))
+        result = model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        jax.device_get(result)
+        # The hooks below deliberately substitute u/v AFTER the ordinary step
+        # completes, so passivity is judged on every OTHER prognostic field.
+        neutral = result._replace(u=ordinary.u, v=ordinary.v)
+        observer_unequal.append(_state_bit_mismatches(neutral, ordinary))
+        return (np.asarray(result.u.data), np.asarray(result.v.data))
+
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    ordinary = ordinary_model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=ssha)
+
+    observer_unequal: list[int] = []
+    production = {}
+    production["stage1_output"] = run(expose_momentum_stage=1)
+    production["uu_Kaa_final"] = run(expose_momentum_stage=2)
+    production["uu_Kaa_raw"] = run(expose_stage2_raw_momentum=True)
+    production["stage2_rhs_total"] = run(expose_stage2_momentum_rhs=True)
+    components = {
+        name: run(expose_momentum_operator=name,
+                  expose_momentum_operator_stage=2)
+        for name in ("hpg", "vorticity", "advection")
+    }
+    # NEMO's dyn_vor and dyn_adv ACCUMULATE into the slot dyn_hpg overwrote
+    # (stprk3_stg.f90:497,510,525), so the compiled-order snapshots are
+    # cumulative.  legoESM publishes the three components separately, so the
+    # two cumulative rows below carry ONE instrument-side addition each and
+    # are labelled as such; the ``stage2_rhs_total`` row is the production
+    # accumulation itself and carries none.
+    production["after_hpg"] = components["hpg"]
+    production["after_vor"] = tuple(
+        components["hpg"][i] + components["vorticity"][i] for i in (0, 1))
+    production["after_adv"] = tuple(
+        production["after_vor"][i] + components["advection"][i]
+        for i in (0, 1))
+
+    oracle_for_row = {
+        "stage1_output": "uu_vv_Kmm",
+        "after_hpg": "after_hpg",
+        "after_vor": "after_vor",
+        "after_adv": "after_adv",
+        "stage2_rhs_total": "after_adv",
+        "uu_Kaa_raw": "uu_vv_Kaa_raw",
+        "uu_Kaa_final": "uu_vv_Kaa_final",
+    }
+    walk = {}
+    for name in DEVELOPED_STAGE2_ROWS:
+        source = oracle_for_row[name]
+        for tag, index in (("u", 0), ("v", 1)):
+            walk[f"{name}_{tag}"] = _score_stage2_face(
+                production[name][index], rows[f"{source}_{tag}"],
+                rows[f"umask_vmask_{tag}"])
+            walk[f"{name}_{tag}"]["oracle_group"] = source
+            walk[f"{name}_{tag}"]["instrument_additions"] = (
+                {"after_vor": 1, "after_adv": 2}.get(name, 0))
+
+    # Calibration, the discipline rounds 155 and 156 established: legoESM's
+    # own transcription of the compiled assignment must rebuild NEMO's output
+    # bit for bit from NEMO's OWN operands before any statement is named.
+    @jax.jit
+    def isolated_assignment(before, rhs, mask):
+        return rk3_stage_velocity_update(
+            before, rhs, np.float64(rows["rDt"]), mask, vector_form=True)
+
+    calibration = {}
+    for tag, index in (("u", 0), ("v", 1)):
+        rebuilt = np.asarray(jax.device_get(isolated_assignment(
+            jnp.asarray(rows[f"uu_vv_Kbb_{tag}"]),
+            jnp.asarray(rows[f"after_adv_{tag}"]),
+            jnp.asarray(rows[f"umask_vmask_{tag}"]))))
+        calibration[tag] = _score_stage2_face(
+            rebuilt, rows[f"uu_vv_Kaa_raw_{tag}"],
+            rows[f"umask_vmask_{tag}"])
+
+    # Budget: the vector arm makes the raw stage-2 velocity difference
+    # exactly rDt times the right-hand-side difference, to one rounding.
+    budget = {}
+    for tag in ("u", "v"):
+        predicted = (float(rows["rDt"])
+                     * walk[f"stage2_rhs_total_{tag}"]["active_max_abs"])
+        observed = walk[f"uu_Kaa_raw_{tag}"]["active_max_abs"]
+        budget[tag] = {
+            "rDt": float(rows["rDt"]),
+            "predicted_max_abs": predicted,
+            "observed_max_abs": observed,
+            "relative_disagreement": (
+                abs(predicted - observed) / observed if observed else 0.0),
+        }
+
+    require(all(value == 0 for value in observer_unequal),
+            "a stage-2 exposure hook moved the production state outside "
+            f"u/v: {observer_unequal}")
+    first_non_bit = next(
+        (f"{name}_{tag}" for name in DEVELOPED_STAGE2_ROWS
+         for tag in ("u", "v")
+         if walk[f"{name}_{tag}"]["active_cells_unequal"] > 0), None)
+
+    if plant == "after-hpg-ulp":
+        require(walk["after_hpg_u"]["active_cells_unequal"] > 0,
+                "after-hpg ULP plant moved no row")
+        return {
+            "status": "PLANT-FIRED", "plant": plant,
+            "control": {"row": walk["after_hpg_u"],
+                        "first_non_bit": first_non_bit},
+        }
+
+    report = {
+        "status": "PASS",
+        "case": CASE,
+        "step": DEVELOPED_PROCESS_STEP,
+        "commit": expected_commit,
+        "record": {
+            "root": str(stage2_record_root),
+            "sha256": oracle["sha256"],
+            "field_count": oracle["field_count"],
+            "meta": oracle["meta"],
+            "ln_dynadv_vec": rows["ln_dynadv_vec"],
+            "lk_linssh": rows["lk_linssh"],
+        },
+        "compiled_citations": {
+            "rhs_entry": "stprk3_stg.f90:462",
+            "dyn_hpg": "stprk3_stg.f90:497",
+            "after_hpg": "stprk3_stg.f90:499",
+            "dyn_vor": "stprk3_stg.f90:510",
+            "after_vor": "stprk3_stg.f90:512",
+            "dyn_adv": "stprk3_stg.f90:525",
+            "after_adv": "stprk3_stg.f90:531",
+            "stage_update_selector": "stprk3_stg.f90:721",
+            "stage_update_vector_arm": "stprk3_stg.f90:723",
+            "uu_Kaa_raw": "stprk3_stg.f90:738",
+            "barotropic_correction": "stprk3_stg.f90:787",
+            "barotropic_correction_applied": "stprk3_stg.f90:810",
+        },
+        "walk": walk,
+        "assignment_calibration": calibration,
+        "budget": budget,
+        "first_non_bit_row": first_non_bit,
+        "observer_state_unequal_bytes": observer_unequal,
+        "predictions": {
+            "stage1_entry_non_bit_above_1e_7": (
+                walk["stage1_output_u"]["active_cells_unequal"] > 0
+                and walk["stage1_output_u"]["active_max_abs"] >= 1.0e-7),
+            "first_non_bit_family_is_hpg": (
+                walk["after_hpg_u"]["active_cells_unequal"] > 0),
+            "budget_closes_within_one_percent": all(
+                row["relative_disagreement"] < 0.01
+                for row in budget.values()),
+            "assignment_calibration_bit": all(
+                row["active_cells_unequal"] == 0
+                for row in calibration.values()),
+        },
+    }
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    return report
+
+
+def _developed_entry_bundle(daily_root, daily_audit, expected_commit):
+    """Build NEMO's admitted day-180 entry state for a developed walk.
+
+    Extracted from ``developed_state_process_walk`` so that a second
+    developed-state walk drives the SAME bridge, the same audit and the
+    same source checks instead of a second copy of them.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        _u_east_to_face, _v_north_to_face)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
     year = _year()
     audit, daily_hashes = year._daily_record_contract(
         daily_audit, daily_root, expected_commit)
@@ -6894,6 +7174,75 @@ def developed_state_process_walk(
             "restart bridge changed a mapped source: " + ", ".join(
                 f"{name}={value}" for name, value in source_checks.items()
                 if value))
+    return {
+        "audit": audit, "daily_hashes": daily_hashes,
+        "restart_path": restart_path, "payload": payload,
+        "card": card, "gate": gate, "wet": wet, "wet2": wet2,
+        "interface_wet": interface_wet, "state": state,
+        "inventory": inventory, "land": land,
+        "source_checks": source_checks,
+    }
+
+
+def developed_state_process_walk(
+        process_root: Path, vertical_root: Path, daily_root: Path,
+        daily_audit: Path, expected_commit: str, evidence_root: Path, *,
+        mesh_path: Path = DEFAULT_MESH, plant: str | None = None,
+        fct_record_root: Path | None = None,
+        transport_record_root: Path | None = None) -> dict:
+    """Run step 1081 through production JIT from NEMO's exact day-180 state."""
+    if plant in ("missing-day", "missing-process-row", "missing-branch",
+                 "missing-ranking-row"):
+        return _developed_registry_plant(plant)
+    require(plant in (None, "none", "entry-temperature-ulp",
+                      "fct-transport-ulp", "transport-un-adv-ulp",
+                      "stage2-uu-b-ulp"),
+            f"unknown developed-state plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean import advection as advection_module
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+    from legoesm.ocean.advection import NEMO_FCT_TRACE_FIELDS
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"developed-state walk requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "developed-state walk commit differs from --expect-commit")
+    process_root = Path(process_root)
+    vertical_root = Path(vertical_root)
+    daily_root = Path(daily_root)
+    daily_audit = Path(daily_audit)
+    evidence_root = Path(evidence_root)
+    fct_bundle = (
+        _developed_fct_record(Path(fct_record_root))
+        if fct_record_root is not None else None)
+    transport_bundle = (
+        _developed_transport_record(Path(transport_record_root))
+        if transport_record_root is not None else None)
+
+    process_admission = validate_process_record(
+        process_root, PROCESS_RECORD_COMMIT)
+    vertical_admission = validate_vertical_record(
+        vertical_root, DEVELOPED_VERTICAL_RECORD_COMMIT,
+        process_root=process_root)
+    bundle = _developed_entry_bundle(
+        daily_root, daily_audit, expected_commit)
+    audit = bundle["audit"]
+    payload = bundle["payload"]
+    card = bundle["card"]
+    gate = bundle["gate"]
+    wet = bundle["wet"]
+    wet2 = bundle["wet2"]
+    interface_wet = bundle["interface_wet"]
+    state = bundle["state"]
+    inventory = bundle["inventory"]
+    restart_path = bundle["restart_path"]
+    source_checks = bundle["source_checks"]
 
     record_path = (process_root
                    / f"oracle_process_budget_kt{DEVELOPED_PROCESS_STEP:08d}.bin")

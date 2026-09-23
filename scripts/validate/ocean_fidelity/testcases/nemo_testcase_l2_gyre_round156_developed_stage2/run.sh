@@ -45,6 +45,11 @@ if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
 fi
 readonly COMMIT=$(git rev-parse HEAD)
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+# The gate imports this repository's own legoesm, not the .venv editable
+# install that points at another working tree: without this the Round-154
+# reader the stage-3 alignment check loads fails on a lane-only module and
+# the plant exits non-zero without ever running.
+export PYTHONPATH=$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
 
 for path in "$WRITER" "$PATCH" "$GATE" "$PREREG" \
   "$SOURCE_ROOT/MY_SRC/stprk3_stg.F90" "$SOURCE_ROOT/BLD/bin/nemo.exe" \
@@ -155,6 +160,7 @@ if [[ -e "$TARGET_ROOT" || -e "$TARGET_RUN" ]]; then
   printf 'REFUSE: new target already exists: %s or %s\n' "$TARGET_ROOT" "$TARGET_RUN" >&2
   exit 67
 fi
+mkdir -p "$(dirname "$TARGET_RUN")"
 for mount in /tmp "$(dirname "$TARGET_RUN")" "$NEMO_ROOT"; do
   free_kb=$(df -Pk "$mount" | awk 'NR==2 {print $4}')
   if [[ "$free_kb" -lt 4194304 ]]; then
