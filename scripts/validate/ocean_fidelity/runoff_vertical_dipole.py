@@ -198,26 +198,42 @@ def main() -> int:
         (f"river mouths (>p{args.river_pct:g})", have & (rnf_full > hi)),
         (f"halo (p{args.low_pct:g}-p{args.river_pct:g})",
          have & (rnf_full > lo) & (rnf_full <= hi)),
-        (f"mouth+halo (>p{args.low_pct:g})", have & (rnf_full > lo)),
         (f"low runoff (<=p{args.low_pct:g})", have & (rnf_full > 0.0)
          & (rnf_full <= lo)),
+        ("no runoff at all", have & (rnf_full <= 0.0)),
+        ("ALL wet columns", have),
     ]
 
+    # Per-column salt anomaly [psu m] over the band, so strata can be compared
+    # by how much ocean they cover rather than only per column. A mean over
+    # 2463 river cells and a mean over 100k open-ocean cells are not
+    # commensurable, and the whole coastal framing of this thread rests on
+    # which of them carries the integral.
+    band = np.abs(z_center) <= args.spread_m
+    net_col = np.nansum(dS[..., band] * dz[band], axis=-1)
+    if "cell_area" not in T.files:
+        raise SystemExit("tripole snapshot lacks cell_area; cannot weight "
+                         "strata by the ocean they cover")
+    cell_area = np.asarray(T["cell_area"], dtype=np.float64)
+    tot_all = float(np.nansum(np.where(have, cell_area * net_col, 0.0)))
+    area_all = float(np.nansum(np.where(have, cell_area, 0.0)))
+
     print(f"shared vertical grid: {z_center.size} levels, "
-          f"spreading band z <= {args.spread_m:g} m "
-          f"({int((np.abs(z_center) <= args.spread_m).sum())} levels)")
-    print(f"{'stratum':28s} {'cols':>6s} {'surf dS':>9s} {'sub dS':>9s} "
-          f"{'net':>10s} {'gross':>10s} {'cancel':>8s}")
-    out = {}
+          f"spreading band z <= {args.spread_m:g} m ({int(band.sum())} levels)")
+    print(f"{'stratum':28s} {'cols':>6s} {'area%':>6s} {'surf dS':>9s} "
+          f"{'sub dS':>9s} {'net':>10s} {'cancel':>7s} {'% of total':>10s}")
     for name, sel in strata:
         n = int(sel.sum())
         if n == 0:
             raise SystemExit(f"stratum '{name}' is empty")
         prof = np.nanmean(dS[sel], axis=0)
         s = dipole_stats(prof, dz, z_center, args.spread_m)
-        out[name] = s
-        print(f"{name:28s} {n:6d} {s['surface']:+9.4f} {s['subsurface']:+9.4f} "
-              f"{s['net']:+10.3f} {s['gross']:10.3f} {s['cancel']:8.3f}")
+        tot = float(np.nansum(np.where(sel, cell_area * net_col, 0.0)))
+        afrac = float(np.nansum(np.where(sel, cell_area, 0.0))) / area_all
+        share = 100.0 * tot / tot_all if tot_all != 0.0 else float("nan")
+        print(f"{name:28s} {n:6d} {100.0 * afrac:6.2f} {s['surface']:+9.4f} "
+              f"{s['subsurface']:+9.4f} {s['net']:+10.3f} {s['cancel']:7.3f} "
+              f"{share:9.1f}%")
     return 0
 
 
