@@ -6411,8 +6411,24 @@ class LatLonCGridOceanModel:
             if freshwater is None:
                 _fw_eta_stage = jnp.zeros_like(state.eta.data)
             else:
+                # The dilution operand is NEMO's ``emp`` ALONE
+                # (trasbc.F90:282-288): the river runoff is NOT in it.  NEMO
+                # carries the same runoff's WATER in two other places -- the
+                # sea-surface forcing ``r1_rho0*(emp - rnf)``
+                # (stp2d.F90:278-281) and the horizontal divergence
+                # (sbcrnf.F90:279-283, called at divhor.F90:142) -- and the
+                # TRACER it carries in a third, ``rnf_tsc`` (the river-runoff
+                # block below).  legoESM's net freshwater is
+                # ``precip - evap + runoff + ice_fw (+ restoring)``, which is
+                # the right operand for the sea surface and the WRONG one
+                # here: leaving the runoff in deposits a second, nearly
+                # identical copy of the runoff's heat
+                # (``rnf*T_top/rho0/h`` against ``MAX(sst,0)*rnf/rho0/h``).
+                # Subtracting it is bitwise a no-op for every card that
+                # resolves no runoff, because ``x - 0.0`` is ``x``.
                 _fw_eta_stage = (
-                    net_freshwater_flux(freshwater) / _cfg_b.rho_0)
+                    (net_freshwater_flux(freshwater) - freshwater.runoff)
+                    / _cfg_b.rho_0)
 
             def _emp_stage_rate(tracer, h_stage):
                 top = (

@@ -142,17 +142,18 @@ def _stage_sources(deck_root: Path, root: Path, kt: int, *, with_runoff: bool,
             "this gate cannot bind on a channel that does not exist")
     if not with_runoff:
         surface = surface._replace(runoff_tracer_content=None)
+    # NEMO's sea-surface forcing is r1_rho0*(emp - rnf) (stp2d.f90:278-281)
+    # and the same runoff enters the horizontal divergence
+    # (sbcrnf.f90:279-283 at divhor.f90:142); legoESM reaches both from
+    # FreshwaterForcing.runoff.  Round 13 made the ladder supply it, so this
+    # switch must be able to WITHHOLD it as well as add it -- otherwise both
+    # arms would be the same run and the paired row would be vacuous.
     if with_runoff_mass:
-        # MEASUREMENT ARM ONLY -- nothing lands from it.  NEMO's sea-surface
-        # forcing is (emp - rnf)/rho0 (``sbcrnf.f90:263,275`` feeds the same
-        # runoff into the horizontal divergence); the ladder supplies only
-        # emp, so the runoff's MASS is absent while its HEAT is now present.
-        # legoESM's net freshwater is precip - evap + runoff, and the ladder
-        # sets evap = emp, so adding the recorded rnf here restores NEMO's
-        # pairing.  This arm asks whether the pairing is what the heat-only
-        # landing is missing.
         freshwater = freshwater._replace(
             runoff=jnp.asarray(surface_fields["rnf"]))
+    else:
+        freshwater = freshwater._replace(
+            runoff=jnp.zeros_like(jnp.asarray(surface_fields["rnf"])))
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(

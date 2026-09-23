@@ -748,7 +748,15 @@ def _surface_forcings(
     freshwater = FreshwaterForcing(
         precip=jnp.asarray(zeros),
         evap=jnp.asarray(fields["emp"]),
-        runoff=jnp.asarray(zeros),
+        # The runoff's WATER, exactly as recorded.  NEMO applies it in two
+        # places and legoESM reaches both from this one field: the barotropic
+        # sea-surface forcing ``r1_rho0*(emp - rnf)`` (stp2d.f90:278-281),
+        # which is legoESM's ``precip - evap + runoff + ice_fw``, and the
+        # horizontal divergence (sbcrnf.f90:279-283 at divhor.f90:142), which
+        # production reaches through ``runoff_mass_flux``.  It is deliberately
+        # NOT in the tracer dilution term: NEMO's emp excludes it
+        # (trasbc.f90:282-288).
+        runoff=jnp.asarray(fields["rnf"]),
         ice_fw=jnp.asarray(zeros),
         restoring=jnp.asarray(zeros),
     )
