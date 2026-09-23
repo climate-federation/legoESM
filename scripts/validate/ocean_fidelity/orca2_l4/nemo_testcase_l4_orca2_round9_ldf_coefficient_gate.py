@@ -7,7 +7,7 @@ The resolved ORCA2 run prints ``nn_ahm_ijk_t = -30`` (run
 (``ldfdyn.f90:348-353``), the read path completes each field with the lateral
 boundary exchange for its own grid-point nature (``iom.f90:958-975``), and the
 laplacian arm then multiplies levels one to ``jpkm1`` by ``tmask``/``fmask``
-(``ldfdyn.f90:388-396``).
+(``ldfdyn.f90:388-393``).
 
 This gate compares the card's carried coefficient against NEMO's own recorded
 ``ahmt``/``ahmf`` streams in ``output.init`` on EVERY owned cell of BOTH ranks,
@@ -41,8 +41,8 @@ VISCOSITY_SHA256 = (
 CITATIONS = {
     "read": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/ldfdyn.f90:348-353",
     "exchange": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iom.f90:958-975",
-    "mask": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/ldfdyn.f90:388-396",
-    "fold_t": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/lbcnfd.f90:583-639",
+    "mask": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/ldfdyn.f90:388-393",
+    "fold_t": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/lbcnfd.f90:584-638",
     "fold_f": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/lbcnfd.f90:722-746",
     "record": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/diawri.f90:639-641",
 }
@@ -118,7 +118,7 @@ def score(candidate: np.ndarray, oracle: np.ndarray) -> dict[str, object]:
 def fold_consistency(ahmt_file: np.ndarray, ahmf_file: np.ndarray) -> dict:
     """Is the input file already what the compiled T-pivot exchange would write?
 
-    ``lbcnfd.f90:583-639`` (a T-point field under a T pivot) rewrites the RIGHT
+    ``lbcnfd.f90:584-638`` (a T-point field under a T pivot) rewrites the RIGHT
     half of the last owned row from its mirrored left half; ``:722-746`` (an
     F-point field) rewrites the WHOLE last owned row from the row below at the
     reversed longitude.  If either already holds on the shipped file, omitting
@@ -224,7 +224,7 @@ def run_gate(deck_root: Path, record_root: Path, *, plant: str | None = None):
                 f"control {name!r} is vacuous: it did not change any cell")
 
     # Coverage NEMO carries and the card does not: level 31 is never masked
-    # (ldfdyn.f90:388-396 stops at jpkm1), and the card has no such level.
+    # (ldfdyn.f90:388-393 stops at jpkm1), and the card has no such level.
     coverage = {
         "nemo_level_31_is_the_raw_file_value": {
             "ahmt": score(file_t[..., ACTIVE_NZ], record_t[..., ACTIVE_NZ]),

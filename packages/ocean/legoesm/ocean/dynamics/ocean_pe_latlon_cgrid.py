@@ -3361,7 +3361,7 @@ def _bc_horizontal_viscosity(
             # computed.  ahmt/ahmf are READ from eddy_viscosity_3D.nc, lateral-
             # boundary-exchanged by the read path and then masked, and the card
             # carries that result here.  rn_Uv is inert in NEMO's own -30 arm
-            # (zah0, ldfdyn.f90:313, is never referenced inside it), so A_h is
+            # (zah0, ldfdyn.f90:314, is never referenced inside it), so A_h is
             # only the on/off switch tested above.
             _ahmt = getattr(z_coord, "nemo_ldf_ahmt", None)
             _ahmf = getattr(z_coord, "nemo_ldf_ahmf", None)

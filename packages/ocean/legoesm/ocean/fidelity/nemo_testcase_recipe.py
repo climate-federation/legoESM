@@ -1118,17 +1118,17 @@ def build_orca2_ldf_dyn_coefficients(
     (``iom.f90:958-975``).  Because the resolved operator is the laplacian
     (``ln_dynldf_lap = T``), levels one to ``jpkm1`` are then multiplied by
     ``tmask``/``fmask`` and the last level is left alone -- no square root,
-    which is the bilaplacian arm (``ldfdyn.f90:388-396``).
+    which is the bilaplacian arm (``ldfdyn.f90:388-393``).
 
     ``rn_Uv`` and ``rn_Lv`` are read and printed and this arm never consults
-    them: ``zah0`` (``ldfdyn.f90:313``) is not referenced inside the
+    them: ``zah0`` (``ldfdyn.f90:314``) is not referenced inside the
     ``CASE( -30 )`` block.
 
     The north-fold exchange is NOT applied here.  On the shipped input file it
     is the identity over the owned domain for both natures, and that is a
     MEASURED, gated statement rather than an assumption: the round-9 gate
     refuses unless the file's last owned T row is its own mirrored left half
-    (``lbcnfd.f90:583-639``) and its last owned F row is the row below at the
+    (``lbcnfd.f90:584-638``) and its last owned F row is the row below at the
     reversed longitude (``lbcnfd.f90:722-746``).
 
     Parameters
