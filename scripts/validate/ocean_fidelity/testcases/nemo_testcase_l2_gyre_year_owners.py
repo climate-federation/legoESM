@@ -4195,16 +4195,24 @@ def main(argv=None) -> int:
         require(args.developed_stage2_record_root is not None,
                 "--developed-stage2-walk needs "
                 "--developed-stage2-record-root")
-        report = developed_stage2_rhs_walk(
-            args.daily_record_root, args.daily_record_audit,
-            args.expect_commit, args.developed_stage2_record_root,
-            args.root, plant=args.plant)
+        try:
+            report = developed_stage2_rhs_walk(
+                args.daily_record_root, args.daily_record_audit,
+                args.expect_commit, args.developed_stage2_record_root,
+                args.root, plant=args.plant)
+        except GateError as error:
+            # A plant that trips a fail-closed check raises rather than
+            # returning a report; it still has to announce itself, because
+            # this campaign scrapes logs for the marker.
+            if args.plant in (None, "none"):
+                raise
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
         if report["status"] == "PLANT-FIRED":
-            print(f"STATUS PLANT-FIRED: {args.plant}: "
-                  f"{report['control']['first_non_bit']}")
+            print(f"STATUS PLANT-FIRED: {args.plant}: {report['control']}")
             return 1
         print("STATUS PASS: developed stage-2 first non-bit row "
               f"{report['first_non_bit_row']}")
@@ -6901,7 +6909,7 @@ def developed_stage2_rhs_walk(
     recorded snapshots, from NEMO's admitted day-180 entry, under production
     JIT.
     """
-    require(plant in (None, "none", "after-hpg-ulp"),
+    require(plant in (None, "none", "entry-kbb-ulp", "hpg-rank-scale"),
             f"unknown developed stage-2 plant {plant!r}")
     _policy()
     import jax
@@ -6919,13 +6927,21 @@ def developed_stage2_rhs_walk(
     evidence_root = Path(evidence_root)
     oracle = _developed_stage2_record(Path(stage2_record_root))
     rows = dict(oracle["rows"])
-    if plant == "after-hpg-ulp":
-        moved = np.array(rows["after_hpg_u"], copy=True)
-        index = tuple(
-            int(value) for value in
-            np.argwhere(np.asarray(rows["umask_vmask_u"]) != 0.0)[0])
+    active_u = np.asarray(rows["umask_vmask_u"]) != 0.0
+    if plant == "entry-kbb-ulp":
+        # The window control must refuse a before-level velocity that is not
+        # the entry state, which is what a wrong window or a moved record
+        # looks like.
+        moved = np.array(rows["uu_vv_Kbb_u"], copy=True)
+        index = tuple(int(value) for value in np.argwhere(active_u)[0])
         moved[index] = np.nextafter(moved[index], np.inf)
-        rows["after_hpg_u"] = moved
+        rows["uu_vv_Kbb_u"] = moved
+    if plant == "hpg-rank-scale":
+        # The magnitude ranking must not be an artefact of the row order: a
+        # pressure-gradient snapshot scaled by one part in a million has to
+        # take the top of the ranking away from the advection.
+        rows["after_hpg_u"] = np.asarray(
+            rows["after_hpg_u"]) * np.float64(1.0 + 1.0e-6)
 
     bundle = _developed_entry_bundle(
         daily_root, daily_audit, expected_commit)
@@ -7120,18 +7136,48 @@ def developed_stage2_rhs_walk(
     require(all(value == 0 for value in observer_unequal),
             "a stage-2 exposure hook moved the production state outside "
             f"u/v: {observer_unequal}")
+    # Decision 43 ranks by magnitude, so each family's DIFFERENCE is reported
+    # next to the size of the term it sits in.  NEMO's own increments are
+    # differences of its recorded cumulative snapshots and carry one rounding
+    # on the oracle side; they are context for the ranking, never a scored
+    # row.
+    oracle_terms = {}
+    for tag in ("u", "v"):
+        active = np.asarray(rows[f"umask_vmask_{tag}"]) != 0.0
+        hpg = np.asarray(rows[f"after_hpg_{tag}"])
+        vor = np.asarray(rows[f"after_vor_{tag}"]) - hpg
+        adv = np.asarray(rows[f"after_adv_{tag}"]) - np.asarray(
+            rows[f"after_vor_{tag}"])
+        for name, term, row in (("hpg", hpg, f"after_hpg_{tag}"),
+                                ("vorticity", vor, f"after_vor_{tag}"),
+                                ("advection", adv, f"after_adv_{tag}")):
+            values = term[active]
+            term_rms = float(np.sqrt(np.mean(values * values)))
+            oracle_terms[f"{name}_{tag}"] = {
+                "nemo_term_rms": term_rms,
+                "nemo_term_max_abs": float(np.max(np.abs(values), initial=0.0)),
+                "cumulative_row": row,
+                "cumulative_difference_rms": walk[row]["active_rms"],
+                "relative_difference_rms": (
+                    walk[row]["active_rms"] / term_rms if term_rms else 0.0),
+            }
+
     first_non_bit = next(
         (f"{name}_{tag}" for name in DEVELOPED_STAGE2_ROWS
          for tag in ("u", "v")
          if walk[f"{name}_{tag}"]["active_cells_unequal"] > 0), None)
+    ranking = sorted(
+        oracle_terms, key=lambda name: -oracle_terms[name][
+            "relative_difference_rms"])
 
-    if plant == "after-hpg-ulp":
-        require(walk["after_hpg_u"]["active_cells_unequal"] > 0,
-                "after-hpg ULP plant moved no row")
+    if plant == "hpg-rank-scale":
+        require(ranking[0].startswith("hpg"),
+                "the magnitude ranking did not move to the scaled "
+                f"pressure-gradient row: {ranking}")
         return {
             "status": "PLANT-FIRED", "plant": plant,
-            "control": {"row": walk["after_hpg_u"],
-                        "first_non_bit": first_non_bit},
+            "control": {"ranking": ranking,
+                        "row": oracle_terms["hpg_u"]},
         }
 
     report = {
@@ -7164,9 +7210,11 @@ def developed_stage2_rhs_walk(
         "walk": walk,
         "assignment_calibration": calibration,
         "entry_velocity_substitution": substitution,
+        "oracle_term_magnitudes": oracle_terms,
         "entry_window_control": entry_control,
         "budget": budget,
         "first_non_bit_row": first_non_bit,
+        "magnitude_ranked_families": ranking,
         "observer_state_unequal_bytes": observer_unequal,
         "predictions": {
             "stage1_entry_non_bit_above_1e_7": (

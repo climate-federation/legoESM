@@ -14,6 +14,7 @@ tested unconditionally, because those are the parts that can rot.
 from __future__ import annotations
 
 import importlib.util
+import json
 import struct
 import subprocess
 import sys
@@ -878,3 +879,78 @@ def test_forcing_gate_plants_all_exit_non_zero():
             capture_output=True, text=True, cwd=str(ROOT))
         assert result.returncode == 1, (plant, result.stdout, result.stderr)
         assert "DEBT" in result.stdout, plant
+
+
+def test_round157_stage2_face_score_is_bitwise_and_mask_aware(harness):
+    """The stage-2 scorer must see a last-bit move and ignore dry faces."""
+    rng = np.random.default_rng(157)
+    expected = rng.normal(size=(3, 4, 5))
+    mask = np.ones_like(expected)
+    mask[..., -1] = 0.0
+
+    same = harness._score_stage2_face(expected.copy(), expected, mask)
+    assert same["cells_unequal"] == 0
+    assert same["active_cells_unequal"] == 0
+    assert same["active_cells_scored"] == 3 * 4 * 4
+    assert same["active_max_abs"] == 0.0
+
+    # A one-unit-in-the-last-place move on an ACTIVE face is seen, and the
+    # difference is far below anything a tolerance would catch.
+    moved = expected.copy()
+    moved[1, 2, 0] = np.nextafter(moved[1, 2, 0], np.inf)
+    row = harness._score_stage2_face(moved, expected, mask)
+    assert row["active_cells_unequal"] == 1
+    assert 0.0 < row["active_max_abs"] < 1e-15
+
+    # The same move on a DRY face must leave every active number alone, or
+    # the walk would attribute land to a compiled statement.
+    dry = expected.copy()
+    dry[1, 2, -1] = dry[1, 2, -1] + 1.0
+    dry_row = harness._score_stage2_face(dry, expected, mask)
+    assert dry_row["cells_unequal"] == 1
+    assert dry_row["active_cells_unequal"] == 0
+    assert dry_row["active_max_abs"] == 0.0
+
+    with pytest.raises(harness.GateError, match="stage-2 shapes differ"):
+        harness._score_stage2_face(expected[:, :, :-1], expected, mask)
+
+
+def test_round157_stage2_record_refuses_the_wrong_assignment_arm(harness,
+                                                                 tmp_path,
+                                                                 monkeypatch):
+    """A record whose flags select the thickness-weighted arm is refused.
+
+    The walk calibrates NEMO's VECTOR stage assignment.  If a future deck
+    turned the vector form off, NEMO would take the thickness-weighted arm
+    and every calibration in the walk would be proving the wrong statement,
+    so the reader refuses instead of quietly scoring it.
+    """
+    groups = ("rhs_entry", "uu_vv_Kbb", "uu_vv_Kmm", "umask_vmask",
+              "after_hpg", "after_vor", "after_adv", "uu_vv_Kaa_raw",
+              "uu_vv_Kaa_final")
+    fields = {name: (np.zeros((36, 26, 31)), np.zeros((36, 26, 31)))
+              for name in groups}
+    fields["rDt_r1_Dt"] = (np.float64(7200.0), np.float64(1.0 / 7200.0))
+
+    class _Stub:
+        RECORD = "oracle_developed_stage2_kt00001081.bin"
+
+        @staticmethod
+        def read_record(path):
+            return {"meta": {"kt": 1081, "kstg": 2}, "sha256": "abc",
+                    "fields": dict(fields, **{
+                        "flags_vec_linssh": _Stub.flags})}
+
+    (tmp_path / "round156_developed_stage2_admission.json").write_text(
+        json.dumps({"status": "PASS", "record": {"sha256": "abc"}}))
+    monkeypatch.setattr(harness, "_load", lambda *args, **kwargs: _Stub)
+
+    _Stub.flags = (np.float64(1.0), np.float64(0.0))
+    good = harness._developed_stage2_record(tmp_path)
+    assert good["rows"]["uu_vv_Kbb_u"].shape == (22, 33, 30)
+    assert good["rows"]["uu_vv_Kbb_v"].shape == (23, 32, 30)
+
+    _Stub.flags = (np.float64(0.0), np.float64(0.0))
+    with pytest.raises(harness.GateError,
+                       match="vector stage-update arm"):
+        harness._developed_stage2_record(tmp_path)
