@@ -149,6 +149,8 @@ def main():
           f"{'conservative(sb)':>17s} {'difference':>13s} "
           f"{'GLOBAL adv':>13s} {'GLOBAL sb':>13s}")
     names = list(state.tracers.keys()) if state.tracers else []
+    cond = [n for n in names if n in ("q_c", "q_r", "q_i", "q_s", "q_g")]
+    band_tot = {"adv": 0.0, "sb": 0.0}
     for n in names:
         r = state.tracers[n]
         q = jnp.asarray(r.data if hasattr(r, "data") else r).reshape(ncol, nlev)
@@ -158,9 +160,27 @@ def main():
         b_s = masked_int(sb, dp, A, g, band) * _DAY
         g_a = masked_int(adv, dp, A, g, allm) * _DAY
         g_s = masked_int(sb, dp, A, g, allm) * _DAY
+        if n in cond:
+            band_tot["adv"] += b_a
+            band_tot["sb"] += b_s
+        if n.startswith("N_") and abs(g_a) == 0.0 and abs(b_a) == 0.0:
+            print(f"[{a.label}] {n:8s} identically zero in this state -- "
+                  f"inactive or masked field, reported rather than tabulated")
+            continue
         unit = "#/m2/day" if n.startswith("N_") else "kg/m2/day"
         print(f"[{a.label}] {n:8s} {b_a:+15.6e} {b_s:+17.6e} "
               f"{b_a - b_s:+13.6e} {g_a:+13.6e} {g_s:+13.6e}  [{unit}]")
+
+    # TOTAL CONDENSATE, because a single species can carry the opposite sign to
+    # the sum and a conclusion drawn from q_c alone will be wrong (GLM review,
+    # 2026-09-23: the q_c row says sb removes MORE, the condensate sum says sb
+    # ADDS more).
+    if cond:
+        print(f"[{a.label}] --- band TOTAL CONDENSATE "
+              f"({'+'.join(cond)}) [kg/m2/day]")
+        print(f"[{a.label}]   advective (in use) {band_tot['adv']:+13.6e}   "
+              f"conservative (sb) {band_tot['sb']:+13.6e}   "
+              f"difference {band_tot['sb'] - band_tot['adv']:+13.6e}")
 
     # Conservation test on the total water path, the quantity that must not be
     # created or destroyed by vertical transport.
