@@ -234,8 +234,29 @@ def assess_ic_map(archetypes_npz_path, *, n_years, dt=None, n_layers=None,
                  if "pft_names" in z.files else list(CLM5_PFT_NAMES))
     n_arch = int(table.pft_id.shape[0])
 
+    # Physics switches the archetypes were spun with (canopy + opt-in carbon
+    # flags).  Pre-v7 archetype files carry none: those built before
+    # 2026-08-20 were spun on the SimpleSEB default surface scheme, later ones
+    # on the two-leaf canopy, so no default reproduces both -- the builder's
+    # current defaults are used and the ambiguity is printed loudly (codex:
+    # provenance-less files cannot be re-integrated on a provably identical
+    # model).
+    physics = {k: (z[k].item() if k in z.files else d) for k, d in
+               (("stomatal_model", "ball_berry"),
+                ("nsc_gated_respiration", False),
+                ("cold_deciduous_dormancy", False),
+                ("leaf_c_resorption_frac", 0.0))}
+    missing = [k for k in physics if k not in z.files]
+    if missing:
+        print("[global_carbon_ic_map] WARNING: archetypes.npz lacks physics "
+              f"provenance for {missing} (pre-v7 build); re-integrating on the "
+              f"builder defaults {physics} -- drift numbers are NOT a "
+              "verification of the model that produced these pools if it "
+              "was built before 2026-08-20 (SimpleSEB default then).")
+    else:
+        print(f"[global_carbon_ic_map] physics switches from archetypes.npz: {physics}")
     batches = iter_archetype_batches(
-        table, n_layers=n_layers, soil_depth=soil_depth, dt=dt)
+        table, n_layers=n_layers, soil_depth=soil_depth, dt=dt, **physics)
 
     mapped_drift = np.full(n_arch, np.nan)
     cold_drift = np.full(n_arch, np.nan)

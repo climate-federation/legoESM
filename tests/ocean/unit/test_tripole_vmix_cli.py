@@ -75,13 +75,18 @@ def test_orca1_zdftke_namelist_mapping():
     # molecular by build_tripole so nothing is double-counted.
     assert cfg.kappaM_min == 1.2e-4             # rn_avm0
     assert cfg.kappaH_min == 1.2e-5             # rn_avt0
-    # ln_zdfiwm: zdfiwm_init forces avmb/avtb to molecular — the wave field
-    # is the interior background.
+    assert cfg.mxl_min == 1.0e-8                # non-IWM model default
+    # ln_zdfiwm: zdfiwm_init forces avmb/avtb to molecular (the wave field is the
+    # interior background) AND zdftke.F90:840-843 forces the TKE/mixing-length
+    # floors rn_emin -> 1e-10, rmxl_min -> 1e-3.
     cfg_iwm = r.orca1_zdftke_config(iwm_enabled=True)
     assert cfg_iwm.kappaM_min == constants.nu_ocean_molecular
     assert cfg_iwm.kappaH_min == 1.0e-10
+    assert cfg_iwm.tke_background == 1.0e-10    # rn_emin under ln_zdfiwm
+    assert cfg_iwm.mxl_min == 1.0e-3            # rmxl_min under ln_zdfiwm
     assert cfg_iwm._replace(
-        kappaM_min=cfg.kappaM_min, kappaH_min=cfg.kappaH_min) == cfg
+        kappaM_min=cfg.kappaM_min, kappaH_min=cfg.kappaH_min,
+        tke_background=cfg.tke_background, mxl_min=cfg.mxl_min) == cfg
     assert cfg.bg_diff_scale == 0.0             # nn_avb = 0 (no depth profile)
     # rn_ebb=67.83 has no config field: it is tke.py's module constant.
     from legoesm.ocean.physics.vertical_mixing import tke as tke_mod
@@ -170,12 +175,63 @@ def test_orca1_zdftke_surface_bc_override():
     # flagged veros_flux gap is closed); --tke-surface-bc veros_flux reverts.
     assert r.orca1_zdftke_config().surface_bc == "nemo_dirichlet"       # default
     assert r.orca1_zdftke_config(surface_bc=None).surface_bc == "nemo_dirichlet"
-    vf = r.orca1_zdftke_config(surface_bc="veros_flux")
+    # Since #1690 the card holds the surface value at the z=0 W-point, which
+    # needs a HELD Dirichlet value — so the legacy flux arm must also name the
+    # interior placement.  Both axes therefore appear in the run's own command
+    # line instead of one of them moving implicitly.
+    vf = r.orca1_zdftke_config(surface_bc="veros_flux",
+                               surface_bc_level="interior_pinned")
     assert vf.surface_bc == "veros_flux"
     # ONLY the surface BC changes — every other leaf is byte-identical.
-    assert vf._replace(surface_bc="nemo_dirichlet") == r.orca1_zdftke_config()
+    assert vf._replace(surface_bc="nemo_dirichlet",
+                       tke_surface_bc_level="nemo_z0") == r.orca1_zdftke_config()
     with pytest.raises(ValueError, match="surface_bc"):
         r.orca1_zdftke_config(surface_bc="dirichlet")     # typo must raise
+
+
+def test_orca1_card_holds_the_surface_tke_at_the_z0_w_point():
+    """The production card pins WHERE the Dirichlet surface TKE is held.
+
+    NEMO holds ``en(1)`` at the z=0 W-point and solves from jk=2, leaving the
+    first interior interface (~10 m) on the interior floor ``rn_emin``
+    (zdftke.F90:361,564-565).  The library default ``interior_pinned`` pins the
+    FULL surface value there instead -- the #1690 defect, ~66x the displacement
+    of the DINO floor bug fixed in #1689.  This test goes red if the card ever
+    silently falls back to the library default, which is exactly how the
+    defect survived: the card never named the field at all.
+    """
+    from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+    r = _runner()
+    assert TKEConfig().tke_surface_bc_level == "interior_pinned"   # the default
+    assert r.orca1_zdftke_config().tke_surface_bc_level == "nemo_z0"
+    # nemo_z0 is only meaningful with a held surface value, which the same card
+    # supplies -- the kernel raises otherwise (tke.py), so the pair must hold.
+    assert r.orca1_zdftke_config().surface_bc == "nemo_dirichlet"
+    # The legacy flux BC supplies no HELD surface value, and the z=0 placement
+    # exists to place one -- the closure raises on that pair deep inside the
+    # solver.  Refuse it at config build, naming the flag that resolves it,
+    # rather than quietly swapping the placement: that would move TWO axes on
+    # an arm whose purpose is to isolate ONE.  (codex found the crash on this
+    # diff; GLM argued the hard error over the quiet swap.)
+    with pytest.raises(ValueError, match="nemo_z0"):
+        r.orca1_zdftke_config(surface_bc="veros_flux")
+    _vf = r.orca1_zdftke_config(surface_bc="veros_flux",
+                                surface_bc_level="interior_pinned")
+    assert _vf.surface_bc == "veros_flux"
+    assert _vf.tke_surface_bc_level == "interior_pinned"
+    # An unknown placement raises instead of silently falling through.
+    with pytest.raises(ValueError, match="surface_bc_level"):
+        r.orca1_zdftke_config(surface_bc_level="z0")
+    # The knob reaches the closure through the builder too, and the builder
+    # refuses it when the TKE closure is not the selected scheme.
+    assert r.build_tripole_vmix_config(
+        "tke", tke_surface_bc_level="interior_pinned"
+    ).tke.tke_surface_bc_level == "interior_pinned"
+    with pytest.raises(ValueError, match="--tke-surface-bc-level"):
+        r.build_tripole_vmix_config("none",
+                                    tke_surface_bc_level="interior_pinned")
+    # It also rides through the builder onto the closure the run receives.
+    assert r.build_tripole_vmix_config("tke").tke.tke_surface_bc_level == "nemo_z0"
 
 
 def test_builder_tke_surface_bc_threads():
@@ -239,7 +295,10 @@ def test_orca1_zdftke_mxl_choice_override():
         with pytest.raises(ValueError, match="mxl_choice"):
             r.orca1_zdftke_config(mxl_choice=bad)
     # composes with surface_bc (both overrides apply, independent)
-    both = r.orca1_zdftke_config(surface_bc="veros_flux", mxl_choice=2)
+    # (the flux BC must name the interior placement since #1690 -- the z=0
+    # placement has no held value to place)
+    both = r.orca1_zdftke_config(surface_bc="veros_flux", mxl_choice=2,
+                                 surface_bc_level="interior_pinned")
     assert both.tke_mxl_choice == 2 and both.surface_bc == "veros_flux"
 
 
@@ -311,7 +370,8 @@ def test_orca1_zdftke_prognostic_override():
     assert cd._replace(prognostic=True) == r.orca1_zdftke_config()
     # composes with surface_bc + mxl_choice (all three independent overrides)
     allc = r.orca1_zdftke_config(surface_bc="veros_flux", mxl_choice=2,
-                                 prognostic=False)
+                                 prognostic=False,
+                                 surface_bc_level="interior_pinned")
     assert (allc.prognostic is False and allc.tke_mxl_choice == 2
             and allc.surface_bc == "veros_flux")
 
@@ -577,3 +637,36 @@ def test_mpas_tke_default_card_still_applies_without_knobs(monkeypatch):
     assert vm is not None
     reference = r.build_tripole_vmix_config("tke", iwm=None)
     assert vm.tke == reference.tke
+
+
+def test_resolved_surface_tke_pair_is_checked_not_just_the_card():
+    """The z=0 placement / held-value pair is validated on the RESOLVED config.
+
+    The card-level raise catches the CLI route, but a ``--config`` YAML replaces
+    the whole physics config AFTER the card is built, so a YAML could reinstate
+    the invalid pair and only hit the closure's own error mid-run. codex raised
+    this on round 2 of #1690; this pins the setup-time check that answers it.
+    """
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        TKEConfig, VerticalMixingConfig,
+    )
+    r = _runner()
+
+    bad = VerticalMixingConfig(
+        scheme="tke",
+        tke=TKEConfig(surface_bc="veros_flux",
+                      tke_surface_bc_level="nemo_z0"))
+    with pytest.raises(ValueError, match="nemo_z0"):
+        r.assert_tke_surface_pair_resolved(bad)
+
+    # Both valid pairings pass.
+    for _bc, _lvl in (("nemo_dirichlet", "nemo_z0"),
+                      ("veros_flux", "interior_pinned"),
+                      ("nemo_dirichlet", "interior_pinned")):
+        r.assert_tke_surface_pair_resolved(VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(surface_bc=_bc, tke_surface_bc_level=_lvl)))
+
+    # A non-TKE scheme (or no config at all) is not this check's business.
+    r.assert_tke_surface_pair_resolved(VerticalMixingConfig(scheme="kpp"))
+    r.assert_tke_surface_pair_resolved(None)

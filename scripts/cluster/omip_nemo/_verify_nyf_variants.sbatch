@@ -20,7 +20,7 @@
 # every other channel matches `base`.
 set -uo pipefail
 R=/burg-archive/glab/users/pg2328/legoESM; cd $R || exit 1
-export PYTHONPATH="$(ls -d $R/packages/*/ | sed 's:/$::' | tr '\n' ':')$R"
+export PYTHONPATH="$R/src:$(ls -d $R/packages/*/ | sed 's:/$::' | tr '\n' ':')$R"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 $PY - <<'PYEOF'
 import sys

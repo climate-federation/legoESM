@@ -465,7 +465,15 @@ PER_ELEMENT: dict[str, float] = {
     # for it.  The figure below is the conditioning-robust
     # err_norm = |lego-nemo| / RMS(nemo) = 4.322e-9 (p99 9.213e-7, max 3.103e-6).
     # Pointwise-relative for the same run was 1.956e-7 with zero >1% cells.
-    "bn2 (rn2b)": 5.880e-16,
+    # RETRACTION / DAY-180 PROMOTION 2026-08-28.  The prior 5.880e-16 entry was
+    # a bulk statistic and allowed the row to print AT-BAR.  The preregistered
+    # per-column census (zdf_chain_sweep.py, d180 kt=5761, all 9920 wet
+    # columns) finds max_k|delta|/RMS_wet(NEMO)=6.366585e-15 and 4630 columns
+    # above the POINTWISE 1e-15 bar.  Dumped-alpha and dumped-gdept
+    # substitutions do not move it; the dumped live-e3w divisor alone gives
+    # 5.968673e-16.  Keep the maximum here so the gate can no longer print the
+    # withdrawn AT-BAR claim.
+    "bn2 (rn2b)": 6.366585e-15,
     # alpha does NOT cross zero (signed range +9.27e-5..+3.22e-4), so its
     # pointwise-relative stats ARE valid.  max|rel| 1.605e-8, zero cells >1%.
     "eos_rab alpha": 0.0,

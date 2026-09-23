@@ -175,6 +175,12 @@ class HydrostaticTendencies(NamedTuple):
     # field set is unaffected.
     sw_up_toa_clr: Field | None = None
     lw_up_toa_clr: Field | None = None
+    # Per-column REQUIRED sedimentation sub-step count (int, unclipped) from
+    # MG2-style CFL sub-stepping in the microphysics
+    # (``MicrophysicsOutput.sed_substeps_required``); a value above the
+    # scheme's static cap means that column's fall was clamped.  None when the
+    # sub-stepping is off.  Diagnostic only; appended with a None default.
+    sed_substeps_required: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH

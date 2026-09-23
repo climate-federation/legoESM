@@ -42,6 +42,12 @@ UNREACHABLE_SCHEMES = {
     # rather than silently changed here.
 
     # --- verified gap, no legitimate use in this driver ---
+    ("run_coupled", "clouds", "cam6_clubb"):
+        "CAM6 cloud fraction on the CLUBB path is wired on the MPAS combined-"
+        "physics lane only (validate_strict requires discretization='mpas'); "
+        "run_coupled drives the FV pipeline, where the cloud call threads "
+        "neither lat nor the deep-convection carries, so the scheme cannot "
+        "function there. Offer it once the pipeline threads them.",
     ("run_coupled", "radiation", "none"):
         "run_coupled has NO --held-suarez-forcing lane (verified), so a "
         "coupled run with radiation off has no energy source at all -- it "

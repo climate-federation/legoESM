@@ -382,6 +382,24 @@ def resolve_fv3_duo_layout(*, world: int, n_local: int, n_global: int,
     return "single"
 
 
+def _ledger_level_weight(config, sigma):
+    """(nlev,) band weight for the budget ledger, or None for the full column.
+
+    Shared by the physics factory and the dycore so the two halves of the
+    ledger table cannot be banded differently.
+    """
+    band = getattr(getattr(config, "output", None), "budget_ledger_sigma_band", None)
+    if band is None:
+        return None
+    if not hasattr(sigma, "sigma_half"):
+        raise ValueError(
+            "budget_ledger_sigma_band needs a sigma vertical coordinate; this "
+            "run's coordinate has no sigma_half, so a single band does not "
+            "select one pressure range.")
+    from legoesm.diagnostics.process_ledger import sigma_band_weight
+    return sigma_band_weight(sigma.sigma_half, float(band[0]), float(band[1]))
+
+
 def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
     """Refuse EVERY non-default, non-allow-listed field, all at once.
 
@@ -722,6 +740,15 @@ def create_atmosphere_dycore(
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
+            sponge_del2_top_layers=int(dc.mpas_sponge_del2_top_layers),
+            sponge_del2_top_factor=float(dc.mpas_sponge_del2_top_factor),
+            # Budget-ledger vertical band. The dycore owns the SNAPSHOT-derived
+            # dynamics and clips rows, so it needs the SAME weight the physics
+            # rows use; without it those two rows stay full-column while the
+            # rest are banded and the table does not partition. Measured that
+            # way once: dynamics read 1.1504 identically in a full-column, a
+            # free-troposphere and a boundary-layer run.
+            budget_ledger_level_weight=_ledger_level_weight(config, sigma),
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 

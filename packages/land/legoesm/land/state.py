@@ -74,3 +74,12 @@ class MultiLayerLandState(NamedTuple):
     # keeps its own internal ``h2ocan`` store inside ``canopy_state`` and does
     # NOT use this field.
     W_canopy: jax.Array | None = None
+    # Warm-start cache for the two-leaf canopy Newton closure: the last
+    # CONVERGED solution per column, ``(ncol, 6)``, NaN where a column has never
+    # converged (which the canopy reads as "cold start").  NOT a prognostic
+    # variable — it carries no physics, only the seed the iteration starts from,
+    # and the fixed point it converges to is seed-independent (the solve's
+    # adjoint returns a zero cotangent for its seed).  Present iff the surface
+    # scheme is the two-leaf canopy; ``None`` otherwise, which restores the
+    # cold-start-every-step behaviour exactly.  Appended last (positional-ABI).
+    canopy_x: Any | None = None

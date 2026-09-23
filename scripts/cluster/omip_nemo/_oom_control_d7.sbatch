@@ -14,7 +14,7 @@
 # (covers the SH melt season; control = trpsbc_win_d90's own d60 snapshot).
 set +e
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; nvidia-smi --query-gpu=name,memory.total --format=csv,noheader; date
 git -C $ROOT log --oneline -1

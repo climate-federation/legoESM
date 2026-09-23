@@ -138,7 +138,8 @@ class ShortwavePenetrationConfig(NamedTuple):
     Parameters
     ----------
     scheme : str
-        ``"jerlov_2band"`` (default) or ``"rgb_chl"``.  See module docstring.
+        ``"jerlov_2band"`` (default), ``"rgb_chl"`` or ``"sweeney_2band"``
+        (FESOM2 / Sweeney 2005 chlorophyll two-band).  See module docstring.
     water_type : str
         Jerlov water type ("I", "IA", "IB", "II", "III") for the two-band
         scheme.  Type I = clearest open ocean, Type III = coastal/turbid.
@@ -425,19 +426,97 @@ def shortwave_penetration_rgb_tendency(
     I_blue = _interface_fraction(frac_rgb, k_blue)
     I_total = I_ir + I_red + I_green + I_blue                   # (..., nlev+1) fraction of qsr
 
-    # Wet mask on interfaces (NEMO wmask): surface face = top wet cell; an
-    # interior face is wet iff both adjacent cells are wet; the face below the
-    # deepest wet cell is dry -> all remaining light deposited in that cell.
+    return _absorbed_tendency_from_faces(I_total, sw_down, wet, dz_live, rho_0, c_sw)
+
+
+def _absorbed_tendency_from_faces(I_face, sw, wet, dz_live, rho_0, c_sw):
+    """dT/dt per cell from the interface flux fractions ``I_face`` (..., nlev+1).
+
+    Wet mask on interfaces (NEMO wmask): surface face = top wet cell; an
+    interior face is wet iff both adjacent cells are wet; the face below the
+    deepest wet cell is dry -> all remaining light deposited in that cell.
+    Shared by the rgb_chl and sweeney_2band kernels.
+    """
     face0 = wet[..., :1]
     face_interior = wet[..., :-1] * wet[..., 1:]               # (..., nlev-1)
     face_bottom = jnp.zeros_like(wet[..., :1])
     face_wet = jnp.concatenate([face0, face_interior, face_bottom], axis=-1)  # (..., nlev+1)
-    I_face = I_total * face_wet
+    I_face = I_face * face_wet
 
     frac_absorbed = I_face[..., :-1] - I_face[..., 1:]         # (..., nlev)
     dz_safe = jnp.where(dz_live > 0.0, dz_live, 1.0)
-    dT_dt = sw_down[..., jnp.newaxis] * frac_absorbed / (rho_0 * c_sw * dz_safe)
+    dT_dt = sw[..., jnp.newaxis] * frac_absorbed / (rho_0 * c_sw * dz_safe)
     return jnp.where(dz_live > 0.0, dT_dt, 0.0)
+
+
+# --- Sweeney et al. 2005 two-band visible attenuation (FESOM2 oce_shortwave_pene.F90,
+# fesom_bulk.c:389-413; polynomials in c = log10(chl), ascending powers) ---
+_SWEENEY_CHL_FLOOR_MG_M3 = 0.02
+_SWEENEY_V1_BASE = 0.321                    # v1 = base + poly(c)
+_SWEENEY_V2_BASE = 0.679                    # v2 = base - poly(c)   (v1 + v2 = 1)
+_SWEENEY_V1_COEFFS = (0.0, 0.008, 0.132, 0.038, -0.017, -0.007)
+_SWEENEY_SC1_COEFFS = (1.54, -0.197, 0.166, -0.252, -0.055, 0.042)   # [m]
+_SWEENEY_SC2_COEFFS = (7.925, -6.644, 3.662, -1.815, -0.218, 0.502)  # [m]
+# Fraction of the net surface shortwave each scheme routes through the column
+# (the rest heats the surface cell): FESOM's visible band, the MPAS/tripole
+# Jerlov skin split, and NEMO's RGB (IR band absorbed inside the kernel).
+SWEENEY_VISIBLE_FRACTION = 0.54
+JERLOV_PENETRATING_FRACTION = 0.94
+RGB_PENETRATING_FRACTION = 1.0
+
+
+def _poly(c, coeffs):
+    return sum(a * c ** i for i, a in enumerate(coeffs))
+
+
+def penetrating_fraction(config: ShortwavePenetrationConfig) -> float:
+    """Fraction of the NET surface shortwave that ``apply_shortwave_penetration``
+    expects as ``sw_down`` for ``config.scheme``; the caller keeps the rest as
+    non-solar surface heating so the column total stays q_net."""
+    if config.scheme == "jerlov_2band":
+        return JERLOV_PENETRATING_FRACTION
+    if config.scheme == "rgb_chl":
+        return RGB_PENETRATING_FRACTION
+    if config.scheme == "sweeney_2band":
+        return SWEENEY_VISIBLE_FRACTION
+    raise ValueError(
+        f"unknown shortwave penetration scheme {config.scheme!r} "
+        "(expected 'jerlov_2band', 'rgb_chl' or 'sweeney_2band')"
+    )
+
+
+def shortwave_penetration_sweeney_tendency(
+    sw_visible: jnp.ndarray,
+    chl: jnp.ndarray,
+    dz_live: jnp.ndarray,
+    wet_cell: jnp.ndarray,
+    rho_0: float = _RHO_0_DEFAULT,
+    c_sw: float = _C_SW_DEFAULT,
+) -> jnp.ndarray:
+    """FESOM2 (Sweeney et al. 2005) two-band chlorophyll-dependent penetration.
+
+    ``sw_visible`` (...,) is the VISIBLE net shortwave [W/m2]
+    (``SWEENEY_VISIBLE_FRACTION`` of the post-albedo flux); ``chl`` (...,)
+    mg/m3; ``dz_live``/``wet_cell`` (..., nlev).  Interface depths are the
+    cumulative live thicknesses.  FESOM zeroes the flux below the first
+    interface where the attenuation drops under 1e-5; here the remainder is
+    deposited in the deepest wet cell (conservative, <1e-5 difference).
+    """
+    dz_live = jnp.asarray(dz_live)
+    wet = jnp.asarray(wet_cell, dtype=dz_live.dtype)
+    sw_visible = jnp.asarray(sw_visible, dtype=dz_live.dtype)
+    chl = jnp.asarray(chl, dtype=dz_live.dtype)
+    z = -jnp.concatenate(
+        [jnp.zeros_like(dz_live[..., :1]), jnp.cumsum(dz_live, axis=-1)], axis=-1
+    )                                                          # (..., nlev+1), <= 0
+    c = jnp.log10(jnp.maximum(chl, _SWEENEY_CHL_FLOOR_MG_M3))
+    dv = _poly(c, _SWEENEY_V1_COEFFS)
+    v1 = (_SWEENEY_V1_BASE + dv)[..., jnp.newaxis]
+    v2 = (_SWEENEY_V2_BASE - dv)[..., jnp.newaxis]
+    sc1 = _poly(c, _SWEENEY_SC1_COEFFS)[..., jnp.newaxis]
+    sc2 = _poly(c, _SWEENEY_SC2_COEFFS)[..., jnp.newaxis]
+    I_face = v1 * jnp.exp(z / sc1) + v2 * jnp.exp(z / sc2)
+    return _absorbed_tendency_from_faces(I_face, sw_visible, wet, dz_live, rho_0, c_sw)
 
 
 def apply_shortwave_penetration(
@@ -476,9 +555,17 @@ def apply_shortwave_penetration(
         return shortwave_penetration_rgb_tendency(
             sw_down, chl, dz_live, wet_cell, config, rho_0, c_sw
         )
+    if config.scheme == "sweeney_2band":
+        if chl is None:
+            raise ValueError("sweeney_2band SW penetration requires a chlorophyll field (chl=)")
+        if dz_live is None or wet_cell is None:
+            raise ValueError("sweeney_2band SW penetration requires dz_live and wet_cell")
+        return shortwave_penetration_sweeney_tendency(
+            sw_down, chl, dz_live, wet_cell, rho_0, c_sw
+        )
     raise ValueError(
         f"unknown shortwave penetration scheme {config.scheme!r} "
-        "(expected 'jerlov_2band' or 'rgb_chl')"
+        "(expected 'jerlov_2band', 'rgb_chl' or 'sweeney_2band')"
     )
 
 
@@ -593,3 +680,37 @@ def shortwave_penetration_tendency(
         sw_down[..., jnp.newaxis] * frac_absorbed / (rho_0 * c_sw * dz_safe)
     )
     return jnp.where(dz_actual > 0.0, dT_dt_raw, 0.0)
+
+
+def top_layer_absorbed_fraction(dz_top, chl_surface=None,
+                                config: ShortwavePenetrationConfig | None = None):
+    """Fraction of the net surface shortwave absorbed in the TOP ocean layer
+    (NEMO ``fraqsr_1lev`` / ``frq_m``), from the same optics the ocean uses:
+    the RGB-chlorophyll kernel when ``chl_surface`` is given, else ``config``
+    (default two-band Jerlov).  Evaluated on a two-layer column
+    ``[dz_top, 1e4 m]`` with unit sw and unit rho*c, so the returned value is
+    dimensionless and independent of the model's full ladder.  Consumers:
+    the sea-ice lead heat budget (NEMO icesbc zqld adds ``(1-A)*qsr*frq_m``).
+    """
+    dz_top = jnp.asarray(dz_top, dtype=jnp.float64)
+    deep = 1.0e4
+    if chl_surface is not None:
+        chl = jnp.asarray(chl_surface, dtype=jnp.float64)
+        shape = jnp.broadcast_shapes(chl.shape, dz_top.shape)
+        dz_live = jnp.stack([jnp.broadcast_to(dz_top, shape),
+                             jnp.full(shape, deep)], axis=-1)
+        wet = jnp.ones(shape + (2,))
+        frac_per_m = shortwave_penetration_rgb_tendency(
+            jnp.ones(shape), jnp.broadcast_to(chl, shape), dz_live, wet,
+            config=(config if config is not None
+                    else ShortwavePenetrationConfig(scheme="rgb_chl")),
+            rho_0=1.0, c_sw=1.0)
+        return frac_per_m[..., 0] * dz_live[..., 0]
+    cfg = config if config is not None else ShortwavePenetrationConfig()
+    dz0 = float(jnp.asarray(dz_top).ravel()[0])  # ponytail: uniform top cell
+    dz_ref = jnp.asarray([dz0, deep])
+    z_half = jnp.asarray([0.0, -dz0, -dz0 - deep])
+    tend = shortwave_penetration_tendency(
+        jnp.ones(jnp.asarray(dz_top).shape), dz_ref, z_half,
+        jnp.ones(jnp.asarray(dz_top).shape), config=cfg, rho_0=1.0, c_sw=1.0)
+    return tend[..., 0] * dz0

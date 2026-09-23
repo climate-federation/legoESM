@@ -32,7 +32,6 @@ from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
     TerrainMetric,
-    pressure_from_sigma,
 )
 from legoesm import constants
 
@@ -92,6 +91,9 @@ class TurbulenceSchemeTraits(NamedTuple):
     carries_energy: bool
     energy_field: str | None
 
+
+# Sea-water saturation reduction of q_sat (coupler.py uses the same value).
+_Q_SAT_SALINE_FACTOR = constants.q_sat_saline_fraction
 
 _ENERGY_FIELD_BY_SCHEME = {
     "tke": "tke",
@@ -295,55 +297,142 @@ def _resolve_T_sfc(T_col, phys_state):
     return jnp.where(override > SFC_T_OVERRIDE_VALID_MIN, override, fallback)
 
 
+def fold_prescribed_surface_fluxes(scheme_config, *, shflx_w_m2=None,
+                                   lhflx_w_m2=None, tau_x_pa=None,
+                                   tau_y_pa=None):
+    """Fold prescribed energetic/stress surface fluxes into a scheme config.
+
+    Writes the given ALREADY-energetic / ALREADY-stress (ncol,) arrays into
+    ``scheme_config.surface.prescribed_shflx_w_m2 /
+    prescribed_lhflx_w_m2 / prescribed_tau_x_pa / prescribed_tau_y_pa`` so
+    the scheme kernel applies them as the diffusion's lower boundary
+    condition via ``surface_layer.compute_surface_fluxes`` ->
+    ``_apply_prescribed_scalar_fluxes`` (heat replaced, stress replaced and
+    ustar rebuilt) — never additionally as a forcing tendency (that would
+    count the flux twice).  This is the shared fold behind BOTH the training
+    path (``_resolve_prescribed_surface_fluxes``) and the production driver
+    path (``PhysicsPipeline.physics_step_no_rad`` folding coupler/ERA5
+    per-segment overrides into the kernel config for a single call).
+
+    Parameters
+    ----------
+    scheme_config : object
+        Scheme configuration NamedTuple with a ``surface`` field
+        (SurfaceLayerConfig).  Not mutated; a replaced copy is returned.
+    shflx_w_m2, lhflx_w_m2 : jnp.ndarray or None
+        Prescribed sensible / latent heat flux [W/m^2, positive UP], (ncol,).
+        No density conversion is applied.
+    tau_x_pa, tau_y_pa : jnp.ndarray or None
+        Prescribed surface stress [Pa, ON THE ATMOSPHERE], (ncol,).
+        No conversion is applied.
+
+    Returns
+    -------
+    object
+        ``scheme_config`` with ``surface.prescribed_*`` set for every present
+        flux; the input object unchanged (identity) when all are None.
+    """
+    if (shflx_w_m2 is None and lhflx_w_m2 is None
+            and tau_x_pa is None and tau_y_pa is None):
+        return scheme_config
+    surface = scheme_config.surface
+    if shflx_w_m2 is not None:
+        # Already W/m^2 (positive up): no rho conversion.
+        surface = surface._replace(prescribed_shflx_w_m2=shflx_w_m2)
+    if lhflx_w_m2 is not None:
+        # Already W/m^2 (positive up): no rho conversion.
+        surface = surface._replace(prescribed_lhflx_w_m2=lhflx_w_m2)
+    if tau_x_pa is not None:
+        # Already Pa, stress ON THE ATMOSPHERE: no conversion.
+        surface = surface._replace(prescribed_tau_x_pa=tau_x_pa)
+    if tau_y_pa is not None:
+        # Already Pa, stress ON THE ATMOSPHERE: no conversion.
+        surface = surface._replace(prescribed_tau_y_pa=tau_y_pa)
+    return scheme_config._replace(surface=surface)
+
+
 def _resolve_prescribed_surface_fluxes(scheme_config, phys_state, rho):
-    """Fold a per-step PRESCRIBED surface kinematic flux into the scheme config.
+    """Fold prescribed surface fluxes from the physics state into the config.
 
-    The sibling of :func:`_resolve_T_sfc`, and it exists for the same reason:
-    the nine closures share one signature that carries no clock, so a case
-    whose surface flux VARIES IN TIME (a diurnal cycle -- Wangara Day 33) has
-    no way to reach them through ``SurfaceLayerConfig``, which holds a single
-    run-constant scalar.  The SCM writes the current value into
-    ``phys_state.surface_wth_override`` / ``surface_wqv_override`` before every
-    tendency evaluation and this rewrites the config leaf the closure already
-    reads, so no closure signature changes and no scheme learns about time.
+    Two override families may ride on the physics state:
 
-    Units and the round trip: the overrides are KINEMATIC ([K m/s] and
-    [(kg/kg) m/s], positive UPWARD, the ``SCMForcing.w_th_s``/``w_qv_s``
-    convention) and are converted here with the SAME ``rho`` handed to the
-    closure, so a scheme that divides straight back out recovers exactly the
-    prescribed value -- ``ysu.py``'s ``wtheta_sfc = shflx / (rho[:, -1] *
-    c_pd)`` is the exact inverse of the line below.  NOT every consumer: HB
-    rebuilds its kinematic flux with a DRY-air ``rrho = R_d*T/p`` on purpose
-    (oracle fidelity, holtslag_boville.py), so it recovers ``wth`` times
-    ``rho_moist/rho_dry`` -- ~0.5 % at 8 g/kg, exactly 1 on a dry case. That
-    offset is the pre-existing convention gap the run-constant config scalar
-    already had; this route does not add to it.
+    * per-step KINEMATIC overrides, ``surface_wth_override`` [K m/s] and
+      ``surface_wqv_override`` [kg/kg m/s], converted to energetic fluxes
+      with the lowest-level density (``rho_sfc * c_pd * wth`` and
+      ``rho_sfc * L_v * wqv``); ``update_physics_state`` RESETS these to
+      None each step, so the caller re-injects them per step;
+    * window-constant ENERGETIC/STRESS overrides,
+      ``surface_shflx_override_w_m2`` / ``surface_lhflx_override_w_m2``
+      [W/m^2, positive UP] and ``surface_tau_x_override_pa`` /
+      ``surface_tau_y_override_pa`` [Pa, stress ON THE ATMOSPHERE], CARRIED
+      unchanged by ``update_physics_state``; the training rollout anchors
+      them once per window from ERA5, and NO density conversion is applied.
 
-    PRECEDENCE: an override present replaces the config scalar, because it is
-    the value for THIS step and the config's is the value for the whole run.
-    Absent (``None``, the default) the config passes through untouched, so
-    every existing run is byte-identical.
+    The overrides land in ``scheme_config.surface.prescribed_*`` so the
+    scheme kernel applies them as the diffusion's lower boundary condition
+    (never additionally as a forcing tendency -- that would count the flux
+    twice).  Scalars and momentum are independent; specifying both the
+    kinematic and the energetic override of the same scalar flux is a caller
+    bug, not a choice to make silently, and raises ValueError.  The final
+    write is delegated to :func:`fold_prescribed_surface_fluxes` (the shared
+    fold also used by the production driver path).
 
-    Static Python ``is None`` tests on pytree leaves -- the feature-gating
-    pattern, not a traced selection.
+    Parameters
+    ----------
+    scheme_config : object
+        Scheme configuration NamedTuple with a ``surface`` field
+        (SurfaceLayerConfig).
+    phys_state : PhysicsState or None
+        Threaded physics state carrying the override leaves; None disables
+        all overrides.
+    rho : jnp.ndarray
+        Full-column density (ncol, nlev); only the lowest level is used for
+        the kinematic conversions.
+
+    Returns
+    -------
+    object
+        ``scheme_config`` with ``surface.prescribed_*`` set for every
+        present override, unchanged when none is present.
     """
     if phys_state is None:
         return scheme_config
     wth = getattr(phys_state, "surface_wth_override", None)
     wqv = getattr(phys_state, "surface_wqv_override", None)
-    if wth is None and wqv is None:
+    shf = getattr(phys_state, "surface_shflx_override_w_m2", None)
+    lhf = getattr(phys_state, "surface_lhflx_override_w_m2", None)
+    tux = getattr(phys_state, "surface_tau_x_override_pa", None)
+    tuy = getattr(phys_state, "surface_tau_y_override_pa", None)
+    if (wth is None and wqv is None and shf is None and lhf is None
+            and tux is None and tuy is None):
         return scheme_config
-    surface = scheme_config.surface
-    # rho[:, -1] is the LOWEST FULL level, the same one whose wind and
-    # temperature compute_surface_fluxes is handed.
     rho_sfc = rho[:, -1]
     if wth is not None:
-        surface = surface._replace(
-            prescribed_shflx_w_m2=rho_sfc * constants.c_pd * wth)
+        if shf is not None:
+            raise ValueError(
+                "_resolve_prescribed_surface_fluxes: the physics state "
+                "carries BOTH the kinematic override "
+                "'surface_wth_override' and the energetic override "
+                "'surface_shflx_override_w_m2' for the sensible heat flux; "
+                "prescribe exactly one form (caller bug).")
+        # Kinematic [K m/s] -> energetic [W/m^2] with the lowest-level density.
+        shf = rho_sfc * constants.c_pd * wth
     if wqv is not None:
-        surface = surface._replace(
-            prescribed_lhflx_w_m2=rho_sfc * constants.L_v * wqv)
-    return scheme_config._replace(surface=surface)
+        if lhf is not None:
+            raise ValueError(
+                "_resolve_prescribed_surface_fluxes: the physics state "
+                "carries BOTH the kinematic override "
+                "'surface_wqv_override' and the energetic override "
+                "'surface_lhflx_override_w_m2' for the latent heat flux; "
+                "prescribe exactly one form (caller bug).")
+        # Kinematic [kg/kg m/s] -> energetic [W/m^2] with the lowest-level
+        # density.
+        lhf = rho_sfc * constants.L_v * wqv
+    # Energetic fluxes / stresses pass through unchanged (no rho conversion)
+    # into the shared fold.
+    return fold_prescribed_surface_fluxes(
+        scheme_config, shflx_w_m2=shf, lhflx_w_m2=lhf,
+        tau_x_pa=tux, tau_y_pa=tuy)
 
 
 def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):
@@ -412,6 +501,25 @@ def make_turbulence_physics(
             f"{model_type!r} pipeline has its own land tile (they would be "
             "silently inert here). Drop them or use model_type='mpas'."
         )
+    if model_type != "mpas":
+        _sub = getattr(materialize_sub_config(turbulence_config),
+                       turbulence_config.scheme, None)
+        _srf = getattr(_sub, "surface", None)
+        # z_ref_model_level now reaches EVERY lane: each turbulence kernel
+        # calls surface_fluxes_at_lowest_level, which honours it from the
+        # config with the level height the kernel already has.  The saline
+        # ocean humidity still cannot: it applies to the OCEAN fraction only,
+        # and the structured-grid lanes deliberately have no land fraction in
+        # the turbulence factory (see the f_land guard above), so applying it
+        # would put sea water under the continents.  Raise rather than ignore.
+        if _srf is not None and getattr(_srf, "ocean_q_sfc_saline", False):
+            raise NotImplementedError(
+                "SurfaceLayerConfig.ocean_q_sfc_saline needs a land fraction "
+                "to apply the sea-water humidity to the ocean tile only, and "
+                f"the {model_type!r} turbulence factory has none (f_land is "
+                "the MPAS bridge's knob). Pass surface=...\n"
+                "._replace(ocean_q_sfc_saline=False) on this lane, or extend "
+                "the lane to carry a land fraction.")
     if model_type == "hydrostatic":
         return _make_hydrostatic_turbulence(turbulence_config, dt)
     elif model_type == "nonhydrostatic":
@@ -482,8 +590,8 @@ def _make_hydrostatic_turbulence(
         shape_2d = p_s.shape
 
         # Pressure
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
@@ -642,7 +750,10 @@ def _make_mpas_turbulence(
     _accepts_surface_flux = kernel_accepts_surface_flux(turb_fn)
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
-        from legoesm.grids.voronoi import reconstruct_cell_velocity
+        from legoesm.grids.voronoi import (
+            cell_vector_to_edge_normal,
+            reconstruct_cell_velocity,
+        )
 
         tke_out = None
         if turb_fn is None:
@@ -669,8 +780,8 @@ def _make_mpas_turbulence(
         u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
 
         # Pressures
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (nCells, nlev)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)  # (nCells, nlev+1)
+        p_full = sigma_coord.pressure_at_full(p_s)  # (nCells, nlev)
+        p_half = sigma_coord.pressure_at_half(p_s)  # (nCells, nlev+1)
 
         # Column-format inputs (already 1D × nlev, so reshape is a no-op).
         T_col = T.reshape(nCells, nlev)
@@ -698,7 +809,14 @@ def _make_mpas_turbulence(
             T_sfc = jnp.asarray(forcing["T_sfc"]).reshape(nCells)
         else:
             T_sfc = _resolve_T_sfc(T_col, phys_state)
+        # Static switches from the scheme's surface sub-config (the per-step
+        # prescribed-flux fold below does not touch these fields).
+        _surf = scheme_config.surface
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        # The ocean correction is added AFTER the land paths below, on the
+        # ocean fraction only, so the land-beta / traced-land humidity keeps
+        # today's fresh-water base (codex whole-branch review, P1).
+        _q_sfc_fresh = q_sfc
         # MPAS land surface boundary: throttle the LAND fraction's surface
         # humidity gradient by a soil-moisture availability beta instead of
         # the saturated infinite-swamp value the nearest-ocean SST fill
@@ -763,6 +881,17 @@ def _make_mpas_turbulence(
             _f_land_col = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
             q_sfc = beta_limited_surface_humidity(
                 q_sfc, q_v_col[:, -1], _f_land_col, land_beta)
+        if getattr(_surf, "ocean_q_sfc_saline", False):
+            # Sea water at the SURFACE pressure (the coupled lane's convention)
+            # for the ocean fraction: replace that fraction's fresh-water share
+            # of the blend; the land share is untouched.
+            from legoesm.core.bulk_flux import ocean_surface_q_sat
+            _q_ocean = ocean_surface_q_sat(
+                T_sfc, p_s.reshape(nCells), thermo_convention=_surf.thermo_convention,
+                bulk_scheme=_surf.bulk_scheme, saline_factor=_Q_SAT_SALINE_FACTOR)
+            _fo = (1.0 - jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+                   if f_land is not None else 1.0)
+            q_sfc = q_sfc + _fo * (_q_ocean - _q_sfc_fresh)
 
         # A per-step prescribed surface flux (a diurnal cycle the run-constant
         # config scalar cannot carry) enters here; identity without one.
@@ -796,12 +925,19 @@ def _make_mpas_turbulence(
                     f"solved. Use one of {schemes_accepting_surface_flux()}, "
                     "or teach this scheme the argument.")
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
-                compute_surface_fluxes,
+                surface_fluxes_at_lowest_level,
             )
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
-            _tx, _ty, _sh, _lh, _us = compute_surface_fluxes(
+            # Through the shared helper rather than an inline copy: this
+            # branch had its own adjustment, which kept the warmed air while
+            # the bulk law dropped the height on a constant-coefficient
+            # scheme -- the same one-sided contrast the helper exists to
+            # prevent, surviving in the one place that did not call it
+            # (codex).  Height measured from the LOCAL surface.
+            _tx, _ty, _sh, _lh, _us = surface_fluxes_at_lowest_level(
                 u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
                 T_sfc, q_sfc, rho[:, -1], step_config.surface,
+                z_full[:, -1] - z_half[:, -1],
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
@@ -845,12 +981,7 @@ def _make_mpas_turbulence(
         # vectors (``cellsOnEdge[0]`` and ``cellsOnEdge[1]``).
         du_cell = turb_out.du_dt  # (nCells, nlev)
         dv_cell = turb_out.dv_dt
-        c0 = mesh.cellsOnEdge[0]  # (nEdges,)
-        c1 = mesh.cellsOnEdge[1]  # (nEdges,)
-        du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
-        dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
-        angle = mesh.angleEdge[:, None]
-        du_edge_normal = du_e_east * jnp.cos(angle) + dv_e_north * jnp.sin(angle)
+        du_edge_normal = cell_vector_to_edge_normal(du_cell, dv_cell, mesh)
 
         dT_cell = turb_out.dT_dt
 
@@ -1092,22 +1223,32 @@ def _make_spectral_pe_turbulence(
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
-    if carry_field in ("qke", "clubb_moments"):
-        # Phase C codex iter-3 high: spectral PE dynamics drops the
-        # returned ``PhysicsState`` (see spectral_pe.py:1556-1557), so an
-        # evolved prognostic carry (qke, or the prognostic-CLUBB moments)
-        # would silently re-initialise on every step.  Fail fast until
-        # phys_state is threaded through the spectral PE step.
-        _what = "MYNN-2.5" if carry_field == "qke" else "prognostic CLUBB"
+    if carry_field == "qke":
+        # MYNN-2.5 stays refused on this lane. The mechanism below is not
+        # carry-specific, so it would probably work -- but "probably" is not a
+        # measurement, and nothing exercises qke here. Lift it with its own
+        # continuity test, not as a side effect of the CLUBB one.
         raise NotImplementedError(
-            f"{_what} turbulence requires a dynamics driver that "
-            "persists PhysicsState across steps.  The current "
-            "spectral PE driver discards the returned phys_state, "
-            f"which would silently re-initialise the {carry_field} carry on "
-            f"every step.  Use ``model_type='hydrostatic'`` for {_what} (MPAS "
-            "turbulence is not yet wired up); tracking issue: thread "
-            "PhysicsState through the spectral PE step path."
-        )
+            "MYNN-2.5 turbulence carries a prognostic qke on a spectral PE "
+            "lane that has no test pinning the carry across steps. Use "
+            "``model_type='hydrostatic'``, or add the continuity test "
+            "(tests/unit/test_spectral_prognostic_clubb_carry.py is the "
+            "pattern) before enabling it here.")
+    # Prognostic CLUBB used to be refused alongside it, because the spectral
+    # lane dropped the returned PhysicsState and the moments would have
+    # re-initialised every step. What is true NOW, consumer by consumer:
+    #   * the TRAINING rollout threads it: spectral_rollout scans
+    #     (state, rad_cache, phys_state) whenever the physics_fn carries the
+    #     with_phys_state / init_phys_state markers, which the classical
+    #     factory attaches. This is the lane the AMIP-matched WB arm runs.
+    #   * the MODEL's step() threads it on the LEAPFROG path only; under
+    #     ssp_rk3 physics is evaluated per sub-stage, where a per-step carry is
+    #     ill-defined, and ``refuse_unthreaded_stateful_physics`` still refuses
+    #     there. That guard protects the RK3 model path, not this one.
+    #   * a caller that threads NOTHING is refused per step below, rather than
+    #     silently re-seeding.
+    # The NONHYDROSTATIC lane keeps its own refusal: that driver still drops
+    # the state.
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
         tke_out = None
@@ -1125,10 +1266,8 @@ def _make_spectral_pe_turbulence(
         n_lat, n_lon = p_s.shape
 
         # Pressure at full and half levels
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = n_lat * n_lon
@@ -1179,6 +1318,17 @@ def _make_spectral_pe_turbulence(
             scheme_config, phys_state, rho)
 
         if needs_tke:
+            if carry_field == "clubb_moments" and phys_state is None:
+                # Seeding fresh here would look like a working run and be a
+                # memoryless one: the moments would restart from the floor
+                # every step. A caller on this lane must thread the carry (the
+                # markers on the classical factory do).
+                raise ValueError(
+                    "prognostic CLUBB on the spectral PE lane was called "
+                    "without a physics state, so its moments would re-seed "
+                    "every step. Thread the carry (spectral_rollout does this "
+                    "through the with_phys_state/init_phys_state markers), or "
+                    "select diagnostic CLUBB.")
             tke_in = _read_turb_carry(
                 phys_state, carry_field, ncol, nlev, scheme_config, _state_dtype)
             turb_out, tke_new = turb_fn(

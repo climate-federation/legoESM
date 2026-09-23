@@ -214,9 +214,14 @@ class TestDistinctFromUniform:
 
 def test_equator_on_tpoint_matches_nemo_dino():
     """NEMO-faithful placement: equator ON a T-point (odd n_lat), the
-    ``usr_def_hgr`` convention.  Reproduces NEMO's DINO R1 grid (195x48,
-    φ = asin(tanh(Δλ·(j-97)))) — verified cell-for-cell against the mesh to
-    3e-6° in the DINO oracle harness.  Contrast the default equator-on-face."""
+    ``usr_def_hgr`` convention: φ(j) = asin(tanh(Δλ·(j - j_eq))).
+
+    This exercises the PLACEMENT RULE, not DINO's frame.  The 195×48 numbers
+    below are a generic odd-row case; DINO's real domain is 52×199 (see
+    ``legoesm.ocean.fidelity.nemo_dino_mesh``), and the DINO path no longer
+    goes through ``create_mercator_grid`` at all -- it is transcribed and
+    gated bit-for-bit by
+    ``scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py``."""
     import numpy as np
     # Default: equator on a FACE, even n_lat.
     gf = create_mercator_grid(n_lon=48, lat_max_deg=70.0,
@@ -363,10 +368,11 @@ class TestNemoIsotropicMetricConvention:
                 getattr(geom_default, f), getattr(geom_exact, f))
 
     def test_vface_metric_invariant_under_metric_convention(self):
-        """#516 constraint: the v-face metric (dx_v, dy_v, area_q,
-        cos_alpha_v) that ``vface_zonal_cos_lat`` and the strain/stress
-        adjoint pair depend on must be BIT-IDENTICAL between "exact" and
-        "nemo_isotropic" -- this flag only touches the T/u-face metric."""
+        """#516 scope: which v-face fields this flag may move, and which it
+        may not.  ``area_q``/``cos_alpha_v``/``sin_alpha_v`` must be
+        BIT-IDENTICAL between "exact" and "nemo_isotropic"; ``dx_v`` (NEMO's
+        e1v) and ``dy_v`` (NEMO's e2v) must both follow the convention, by the
+        recorded amount and no more.  See the narrowing notes below."""
         from legoesm.grids import create_latlon_geometry
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             vface_zonal_cos_lat,
@@ -393,22 +399,89 @@ class TestNemoIsotropicMetricConvention:
         # dy_v -- the MERIDIONAL v-point spacing -- was in this list
         # conservatively, not because the invariant consumes it.  It is NEMO's
         # e2v, and ldf_slp's vslp divides by it, so it MUST follow the
-        # convention (#1226: NEMO usrdef_hgr.F90:117 sets pe2v = pe1v).
-        for f in ("dx_v", "area_q", "cos_alpha_v", "sin_alpha_v"):
+        # convention (#1226: NEMO usrdef_hgr.F90:118 sets pe2v = pe1v).
+        #
+        # NARROWED AGAIN 2026-08-27 (#1455), for the SAME reason and with the
+        # same evidence, this time for dx_v itself.  dx_v was in this list on
+        # the identical conservative footing dy_v was: the sentence three lines
+        # up -- "both hold because every operator SHARES that metric, not
+        # because of its value" -- says outright that pinning its VALUE is
+        # stronger than the invariant being protected.  It is NEMO's e1v
+        # (usrdef_hgr.F90:113), evaluated at the V-point's own Mercator
+        # latitude gphiv, and legoESM was evaluating it at the arithmetic mean
+        # of the two adjacent TRACER latitudes -- 3.3e-05 relatively too large
+        # at DINO's walls.  Under "nemo_isotropic" it must therefore MOVE.
+        # The invariants are re-run on the corrected geometry, by measurement
+        # rather than by this argument, in
+        # tests/ocean/unit/test_dino_vface_zonal_width_nemo.py::
+        # TestInvariantsSurviveTheCorrectedWidth.
+        #
+        # NARROWED A THIRD TIME 2026-08-27 (#1455), for area_q, on the same
+        # footing and with the same evidence.  area_q is the VERTEX (F-cell)
+        # dual area -- it is not a v-face field at all, and it appears in
+        # neither invariant: strain_rate_cgrid / stress_divergence_cgrid take
+        # a LatLonGrid (no area_q), and the divergence/advection mass
+        # consistency is built from cell areas and face widths.  Its ONE role
+        # is as the divisor curl_vertex_cgrid forms vorticity with, and the
+        # sentence at the top of this block covers it exactly: the property
+        # holds because every operator SHARES the metric, not because of its
+        # value.  It is NEMO's e1f*e2f (usrdef_hgr.F90:114/:118), the product
+        # of two scale factors at the F-point's own Mercator latitude, where
+        # legoESM built the exact spherical cap between adjacent TRACER
+        # latitudes -- the exact interval integral of cos^2 against NEMO's
+        # midpoint value of it.  Under "nemo_isotropic" it must therefore
+        # MOVE.  Re-measured on the corrected geometry, by measurement rather
+        # than by this argument, in
+        # tests/ocean/unit/test_dino_vertex_area_nemo.py.
+        for f in ("cos_alpha_v", "sin_alpha_v"):
             np.testing.assert_array_equal(
                 getattr(geom_exact, f), getattr(geom_iso, f),
                 err_msg=f"v-face field {f!r} changed under metric_convention "
                         "-- #516 invariant violated",
             )
+        # area_q MUST change too, and by the recorded amount -- pinned so the
+        # narrowing above permits exactly the intended move and nothing else.
+        # The two END rows are the wall carve-out and stay identical.
+        _aq_e = np.asarray(geom_exact.area_q, dtype=np.float64)
+        _aq_i = np.asarray(geom_iso.area_q, dtype=np.float64)
+        np.testing.assert_array_equal(_aq_i[0], _aq_e[0])
+        np.testing.assert_array_equal(_aq_i[-1], _aq_e[-1])
+        _rel_aq = np.abs(_aq_i[1:-1] - _aq_e[1:-1]) / _aq_e[1:-1]
+        assert 1e-6 < float(_rel_aq.max()) < 1e-4, (
+            f"the vertex area moved by {_rel_aq.max():.3e} relative under "
+            f"metric_convention; the midpoint-rule gap it is permitted to "
+            f"close is 1e-6..1e-4 (4.1e-05 on the DINO R1 mesh)")
+        # dx_v MUST change too, and by the recorded amount -- pinned so the
+        # narrowing above permits exactly the intended move and nothing else.
+        _dxv_e = np.asarray(geom_exact.dx_v, dtype=np.float64)
+        _dxv_i = np.asarray(geom_iso.dx_v, dtype=np.float64)
+        _int = slice(1, -1)          # the two END faces are zero under both
+        _rel = np.abs(_dxv_i[_int] - _dxv_e[_int]) / _dxv_e[_int]
+        assert 1e-5 < float(_rel.max()) < 1e-4, (
+            f"dx_v moved by {float(_rel.max()):.3e} relative under "
+            "nemo_isotropic; the recorded v-face zonal-width correction on "
+            "this mesh is ~3.3e-05 (#1455) -- a different size means a "
+            "different change is being made")
+        # The END faces keep the #516 transport-metric convention (exactly 0)
+        # under BOTH conventions -- only the interior latitude moved.
+        np.testing.assert_array_equal(_dxv_i[0], _dxv_e[0])
+        np.testing.assert_array_equal(_dxv_i[-1], _dxv_e[-1])
+        assert float(np.abs(_dxv_i[0]).max()) == 0.0
+        assert float(np.abs(_dxv_i[-1]).max()) == 0.0
+        # Under nemo_isotropic the two v-face scale factors are ONE quantity
+        # (usrdef_hgr.F90:113 == :118), bit-for-bit on the interior.
+        np.testing.assert_array_equal(
+            _dxv_i[_int], np.asarray(geom_iso.dy_v, dtype=np.float64)[_int],
+            err_msg="nemo_isotropic must give e1v == e2v on the interior")
         # dy_v MUST change -- pin it, so the new behaviour is asserted rather
         # than merely permitted by the narrowing above.
         assert not np.array_equal(
             np.asarray(geom_exact.dy_v), np.asarray(geom_iso.dy_v)), (
             "dy_v is unchanged under nemo_isotropic -- NEMO's e2v = e1v "
-            "(usrdef_hgr.F90:117) is then NOT being reproduced, and vslp "
+            "(usrdef_hgr.F90:118) is then NOT being reproduced, and vslp "
             "cannot reach the bar")
         # It must equal NEMO's closed form e2v = ra*rad*COS(gphiv)*rn_e1_deg
-        # (usrdef_hgr.F90:117).  NOTE this is deliberately NOT compared against
+        # (usrdef_hgr.F90:118).  NOTE this is deliberately NOT compared against
         # geom.dx_v: dx_v is the #516 TRANSPORT metric and is hard-zeroed at
         # the poles (no meridional flux through the pole wall), whereas NEMO's
         # e2v carries no such zeroing.  Same closed form, different boundary
@@ -417,7 +490,7 @@ class TestNemoIsotropicMetricConvention:
         np.testing.assert_allclose(
             np.asarray(geom_iso.dy_v)[:, 0], expected, rtol=1e-6,
             err_msg="under nemo_isotropic, dy_v must be NEMO's e2v = "
-                    "R*dlon*cos(lat_v) (pe2v = pe1v, usrdef_hgr.F90:117)")
+                    "R*dlon*cos(lat_v) (pe2v = pe1v, usrdef_hgr.F90:118)")
         # The #516 helper itself: identical on grids that only differ by
         # metric_convention (it reads grid.lat, which this flag never
         # touches).

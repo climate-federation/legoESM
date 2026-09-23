@@ -36,7 +36,7 @@
 #        clamp in the thermocline, which is itself the defect to fix.
 set -uo pipefail
 REPO=/burg-archive/glab/users/pg2328/legoESM; cd $REPO || exit 1
-export PYTHONPATH="$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
+export PYTHONPATH="$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 echo "=== git SHA: $(git -C $REPO rev-parse HEAD) ==="
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python

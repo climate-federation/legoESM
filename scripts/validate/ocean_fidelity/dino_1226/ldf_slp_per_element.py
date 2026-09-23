@@ -24,7 +24,12 @@ Run::
 from __future__ import annotations
 
 import dataclasses
+import argparse
+import hashlib
+import json
 import os
+import subprocess
+from pathlib import Path
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -34,9 +39,11 @@ os.environ["LEGOESM_NEMO_E3T"] = "both"
 
 import importlib.util
 import sys
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import jax.numpy as jnp
+import zdf_chain_sweep as sweep
 
 # scripts/ is not a package -- import the sibling probe by path (same idiom
 # eos_rab_bn2_per_element.py uses) to reuse _read_dims/_load_haloed without
@@ -73,6 +80,12 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_nemo_native_slopes, gm_redi_density_and_jacobian,
     _nemo_native_active_3d,
 )
+from legoesm.ocean.eos import (
+    NemoSEOSConfig,
+    compute_buoyancy_frequency_nemo_bn2,
+    nemo_bn2_live_geometry,
+    nemo_r3t_stretch,
+)
 
 # STATE / DUMP CONSISTENCY: read the restart from the SAME run directory as
 # the dumps. probe_all4_slopes.py (the throwaway predecessor) read mesh_mask
@@ -84,6 +97,8 @@ RESTART = dump_lane.RESTART
 
 FLOOR = 1.0e-12
 OFFSETS = (-2, -1, 0, 1, 2)
+FOCUS = [(11, 1), (12, 1), (13, 1), (13, 23)]
+POINTWISE_BAR = 1.0e-15
 
 DUMP_META = {
     # component: (dump basename, lego-array-role)
@@ -152,6 +167,34 @@ def capture_locals(fn, target_code):
     finally:
         sys.settrace(old)
     return out, holder
+
+
+def capture_return_locals(fn, target_code):
+    """Run ``fn`` and retain locals plus return value for every target call.
+
+    ``compute_nemo_native_slopes`` calls its nested ``_uv_slp`` twice, first
+    for U and then for V. Row 30 needs both call frames without copying that
+    production algebra into the scorer. The tracer observes only; callers
+    must prove the returned model result is bit-identical to an untraced call.
+    """
+    calls = []
+
+    def tracer(frame, event, arg):
+        if event == "call" and frame.f_code is target_code:
+            def local_tracer(f, ev, value):
+                if ev == "return":
+                    calls.append((f.f_locals.copy(), value))
+                return local_tracer
+            return local_tracer
+        return None
+
+    old = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        out = fn()
+    finally:
+        sys.settrace(old)
+    return out, calls
 
 
 class _JnpCapture:
@@ -286,6 +329,43 @@ def build_state():
     env_override = os.environ.get("SLOPE_N2")
     slope_n2_used = env_override if env_override is not None else card_slope_n2
     gm_cfg = mc.gm_redi._replace(slope_n2=slope_n2_used)
+    slope_prd_geometry_stage = getattr(
+        gm_cfg, "slope_prd_geometry_stage", "current_step")
+    if slope_prd_geometry_stage == "before_step":
+        slope_prd_jacobian = nemo_r3t_stretch(
+            z_coord, jnp.asarray(np.asarray(bef.ssh).reshape(eta.shape)), H_bathy)
+    elif slope_prd_geometry_stage == "current_step":
+        slope_prd_jacobian = jacobian
+    else:
+        raise ValueError(
+            f"unknown slope_prd_geometry_stage {slope_prd_geometry_stage!r}")
+    slope_n2_evaluation = getattr(gm_cfg, "slope_n2_evaluation", "recompute")
+    slope_pn2 = None
+    slope_e3w = None
+    if slope_n2_evaluation == "carried_step_entry":
+        # Reuse the real step-entry producer. The prior duplicate omitted its
+        # below-seafloor extrapolation and made this measurement helper report
+        # every zbu column red even though the dispatched model bundle is
+        # exact. The standalone bridge keeps tb/sb separately, whereas the
+        # production twin installs them through --bridge-before; seed those
+        # same fields before invoking the production helper.
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        _model = SimpleNamespace(z_coord=z_coord, config=mc)
+        _model._n2_nemo_before_tracers = MethodType(
+            LatLonCGridOceanModel._n2_nemo_before_tracers, _model)
+        _bundle_state = state._replace(
+            T_before=state.T.replace(data=T),
+            S_before=state.S.replace(data=S))
+        _bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
+            _model, _bundle_state)
+        if _bundle is None:
+            raise ValueError("carried slope rn2b production bundle is disabled")
+        slope_pn2 = _bundle.rn2b
+        slope_e3w = _bundle.e3w_Kmm
+    elif slope_n2_evaluation != "recompute":
+        raise ValueError(f"unknown slope_n2_evaluation {slope_n2_evaluation!r}")
 
     # One argument bundle, called twice: once plain (stage B / the four rows)
     # and once under the _JnpCapture proxy (stage A / pre-Shapiro), so both
@@ -294,7 +374,10 @@ def build_state():
         return compute_nemo_native_slopes(
             rho, T, S, mask, u_mask, v_mask, z_coord, br.geometry, gm_cfg,
             eos_fn, rho_0=mc.constants.rho_0, g=mc.constants.g, active_3d=active_3d,
-            jacobian=jacobian,
+            jacobian=jacobian, eta=eta, H_bathy=H_bathy,
+            prd_jacobian=slope_prd_jacobian,
+            pn2_override=slope_pn2,
+            e3w_override=slope_e3w,
         )
 
     uslp, vslp, wslpi, wslpj = recall()
@@ -315,7 +398,15 @@ def build_state():
         eta=eta, H_bathy=H_bathy,      # section (L): live-ladder reconstruction
         # section (M): i-vs-j asymmetry + the ldf_eiv aeiu row
         grid=br.geometry, gm_cfg=gm_cfg, rho=rho, jacobian=jacobian,
+        prd_jacobian=slope_prd_jacobian,
+        slope_pn2=slope_pn2, slope_n2_evaluation=slope_n2_evaluation,
+        slope_e3w=slope_e3w,
+        slope_prd_geometry_stage=slope_prd_geometry_stage,
         omega=cfg.omega, active_3d=active_3d, g=mc.constants.g,
+        # Receipt-only handles used by ordered probes that must distinguish
+        # this helper's reconstruction from the real model step-entry bundle.
+        # Returning references changes no computed array or production call.
+        bridge_state=state, model_config=mc,
     )
 
 
@@ -493,6 +584,9 @@ def per_element_report(name, lego, nemo, wet, quiet=False):
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--round93-output", type=Path)
+    cli = parser.parse_args()
     print(dump_lane.banner())
     print(f"restart used  = {os.path.join(RUN_DIR, RESTART)}")
     print(f"dump dir used = {RUN_DIR}")
@@ -1180,7 +1274,8 @@ def main() -> int:
         # the closed path's N^2, via the SAME production function
         n2_closed = np.asarray(compute_buoyancy_frequency_nemo_bn2(
             st["T"], st["S"], jnp.asarray(gd_live, dtype=st["T"].dtype),
-            jnp.asarray(gdw_live, dtype=st["T"].dtype), _NSC(), g=g_slope))
+            jnp.asarray(gdw_live, dtype=st["T"].dtype), _NSC(), g=g_slope,
+            e3w_source="depth_difference"))
         nk2 = min(n2_closed.shape[-1] + 1, nkL)
         same = np.array_equal(pn2_our[:, :, 1:nk2], n2_closed[:, :, :nk2 - 1])
         print(f"      are the two N^2 arrays BIT-IDENTICAL? {same}")
@@ -1255,9 +1350,15 @@ def main() -> int:
         print(f"      near-zero fractions are {ru['frac_near0']*100:.1f}% (u) vs "
               f"{rv['frac_near0']*100:.1f}% (v) -- v is the LESS ill-conditioned "
               f"of the two, so its larger error is NOT a conditioning artifact.")
-        print(f"      median ratio v/u = {rv['med_en'] / ru['med_en']:.1f}x   "
-              f"p99 ratio v/u = {rv['p99_en'] / ru['p99_en']:.2f}x   "
-              f"max ratio v/u = {rv['max_en'] / ru['max_en']:.2f}x")
+        _uv_ratio = (rv["med_en"] / ru["med_en"]
+                     if ru["med_en"] > 0.0 else float("nan"))
+        _uv_p99_ratio = (rv["p99_en"] / ru["p99_en"]
+                         if ru["p99_en"] > 0.0 else float("nan"))
+        _uv_max_ratio = (rv["max_en"] / ru["max_en"]
+                         if ru["max_en"] > 0.0 else float("nan"))
+        print(f"      median ratio v/u = {_uv_ratio:.1f}x   "
+              f"p99 ratio v/u = {_uv_p99_ratio:.2f}x   "
+              f"max ratio v/u = {_uv_max_ratio:.2f}x")
         print("      -> the excess is concentrated in the MEDIAN (bulk), not the "
               "tail: a SYSTEMATIC term, not amplification of a few cells.")
         for c in ("uslp", "vslp"):
@@ -1543,7 +1644,10 @@ def main() -> int:
                                                    dtype=st["T"].dtype),
             st["u_mask"], st["v_mask"], st["z_coord"], st["grid"],
             st["gm_cfg"], st["eos_fn"], rho_0=st["rho_0"], g=st["g"],
-            active_3d=st["active_3d"], jacobian=st["jacobian"])
+            active_3d=st["active_3d"], jacobian=st["jacobian"],
+            eta=st["eta"], H_bathy=st["H_bathy"],
+            prd_jacobian=st["prd_jacobian"],
+            pn2_override=st["slope_pn2"], e3w_override=st["slope_e3w"])
         sub_fields = {"wslpi": wi_s, "wslpj": wj_s, "uslp": u_s, "vslp": v_s}
 
         # ---- THE NULL CONTROL (both 2026-08-21 reviewers asked for it, and
@@ -1560,7 +1664,10 @@ def main() -> int:
             jnp.asarray(st["mask"].astype(float), dtype=st["T"].dtype),
             st["u_mask"], st["v_mask"], st["z_coord"], st["grid"],
             st["gm_cfg"], st["eos_fn"], rho_0=st["rho_0"], g=st["g"],
-            active_3d=st["active_3d"], jacobian=st["jacobian"])
+            active_3d=st["active_3d"], jacobian=st["jacobian"],
+            eta=st["eta"], H_bathy=st["H_bathy"],
+            prd_jacobian=st["prd_jacobian"],
+            pn2_override=st["slope_pn2"], e3w_override=st["slope_e3w"])
         ctrl_fields = {"wslpi": wi_c, "wslpj": wj_c, "uslp": u_c, "vslp": v_c}
         ctrl_max = max(
             float(np.abs(np.asarray(ctrl_fields[c]) - st["lego"][c]).max())
@@ -1688,6 +1795,159 @@ def main() -> int:
               f"both read 0.0)")
     except NameError:
         pass
+    if cli.round93_output is not None:
+        if not raw_ok or "_shap" not in loc:
+            raise SystemExit("round93 requires the verified raw-W capture")
+        root = Path(__file__).resolve().parents[4]
+        tracked = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root, text=True).strip()
+        if tracked:
+            raise SystemExit("round93 requires a tracked-clean checkout")
+        session = os.environ.get("CODEX_SESSION_ID")
+        if not session:
+            raise SystemExit("CODEX_SESSION_ID must be exported")
+
+        def digest(path):
+            value = hashlib.sha256()
+            with open(path, "rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    value.update(block)
+            return value.hexdigest()
+
+        nlat, nlon, nlev = raw["wslpi"].shape
+        oracle_raw = {
+            name: _load_haloed(
+                os.path.join(RUN_DIR, RAW_DUMPS[name]), jpi, jpj, hls)
+            for name in RAW_DUMPS
+        }
+        oracle_final = {
+            name: _load_haloed(
+                os.path.join(RUN_DIR, DUMP_META[name]), jpi, jpj, hls)
+            for name in RAW_DUMPS
+        }
+        wmask = wet_w_mask(st["active"])
+        cof_w = loc["cof_w"]
+        factors = (loc["wmask3"], loc["_w_u"], loc["_w_v"], loc["quarter"])
+
+        def pad_oracle(value):
+            if value.shape[-1] == nlev:
+                return value
+            if value.shape[-1] != nlev - 1:
+                raise SystemExit("round93 W-slope level count changed")
+            return np.concatenate(
+                [value, np.zeros_like(value[..., :1])], axis=-1)
+
+        def host_shapiro(value, central_weight=4.0):
+            fp = np.pad(value, ((0, 0), (1, 1), (0, 0)), mode="wrap")
+            fp = np.pad(fp, ((1, 1), (0, 0), (0, 0)))
+            corners = ((fp[:nlat, :nlon] + fp[:nlat, 2:])
+                       + (fp[2:, :nlon] + fp[2:, 2:]))
+            cardinals = ((fp[:nlat, 1:nlon + 1]
+                          + fp[1:nlat + 1, :nlon])
+                         + (fp[1:nlat + 1, 2:]
+                            + fp[2:, 1:nlon + 1]))
+            acc = (corners + 2.0 * cardinals
+                   + central_weight * fp[1:nlat + 1, 1:nlon + 1])
+            zcof = np.asarray(1.0 / 16.0, dtype=value.dtype)
+            for factor in factors:
+                zcof = zcof * np.asarray(factor)
+            return acc * zcof
+
+        values = {}
+        arms = {}
+        raw_metrics = {}
+        for name in RAW_DUMPS:
+            raw_metrics[name] = {
+                "production": sweep.metrics(
+                    raw[name], oracle_raw[name], wmask,
+                    FOCUS, POINTWISE_BAR),
+                "oracle_identity": sweep.metrics(
+                    oracle_raw[name], oracle_raw[name], wmask,
+                    FOCUS, POINTWISE_BAR),
+            }
+        for use_raw in (0, 1):
+            for use_host in (0, 1):
+                arm = f"R{use_raw}S{use_host}"
+                values[arm] = {}
+                arms[arm] = {}
+                for name in RAW_DUMPS:
+                    source = (pad_oracle(oracle_raw[name]) if use_raw
+                              else raw[name])
+                    if use_host:
+                        value = host_shapiro(source)
+                    else:
+                        value = np.asarray(loc["_shap"](
+                            jnp.asarray(source), cof_w, factors))
+                    values[arm][name] = value[..., :35]
+                    arms[arm][name] = sweep.metrics(
+                        value[..., :35], oracle_final[name], wmask[..., :35],
+                        FOCUS, POINTWISE_BAR)
+
+        base = max(arms["R0S0"][name]["max_column_error"]
+                   for name in RAW_DUMPS)
+        max_errors = {
+            arm: max(metric["max_column_error"] for metric in terms.values())
+            for arm, terms in arms.items()
+        }
+        removal = {
+            arm: float((base - error) / base)
+            for arm, error in max_errors.items()
+        }
+        planted = host_shapiro(
+            pad_oracle(oracle_raw["wslpi"]), central_weight=5.0)[..., :35]
+        controls = {
+            "production_recomposes_final": all(
+                np.array_equal(values["R0S0"][name],
+                               st["lego"][name][..., :35])
+                for name in RAW_DUMPS),
+            "four_arms_present": len(arms) == 4,
+            "oracle_raw_identity": all(
+                raw_metrics[name]["oracle_identity"]["pass"]
+                for name in RAW_DUMPS),
+            "zonal_roll_plant_red": not sweep.metrics(
+                np.roll(oracle_final["wslpi"], 1, axis=1),
+                oracle_final["wslpi"], wmask[..., :35], FOCUS,
+                POINTWISE_BAR)["pass"],
+            "central_weight_plant_red": not sweep.metrics(
+                planted, oracle_final["wslpi"], wmask[..., :35], FOCUS,
+                POINTWISE_BAR)["pass"],
+        }
+        valid = all(controls.values())
+        passing = [arm for arm in arms
+                   if all(arms[arm][name]["pass"] for name in RAW_DUMPS)]
+        disposition = ("WSLOPE_ASSOCIATION_AT_BAR_" + passing[0]
+                       if valid and passing else
+                       "WSLOPE_ASSOCIATION_PROVEN_ORACLE_ARITHMETIC"
+                       if valid and removal["R1S1"] >= 0.90 else "INVALID")
+        receipt = {
+            "schema": "dino-split-explicit-momentum-chain-round93-wslp-v1",
+            "session_id": session,
+            "git_commit": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+            "disposition": disposition,
+            "bar": POINTWISE_BAR,
+            "raw_metrics": raw_metrics,
+            "arms": arms,
+            "max_error_removal_fraction": removal,
+            "interaction_RxS": float(
+                (max_errors["R1S0"] + max_errors["R0S1"]
+                 - max_errors["R1S1"] - max_errors["R0S0"]) / base),
+            "controls": controls,
+            "bindings": {
+                "preregistration": digest(
+                    root / "docs/ocean/fidelity/PREREG_split_explicit_momentum_chain_round93.md"),
+                **{RAW_DUMPS[name]: digest(os.path.join(RUN_DIR, RAW_DUMPS[name]))
+                   for name in RAW_DUMPS},
+                **{DUMP_META[name]: digest(os.path.join(RUN_DIR, DUMP_META[name]))
+                   for name in RAW_DUMPS},
+            },
+        }
+        cli.round93_output.write_text(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+        print(f"round93_wslp_disposition={disposition}")
+        if not valid:
+            return 2
     return 0
 
 

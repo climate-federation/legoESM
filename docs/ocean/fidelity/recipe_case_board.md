@@ -16,7 +16,7 @@ Reference kind = truth strength: 🔬 oracle (runnable model + data) · 📐 ana
 |---|---|---|---|---|---|---|
 | `baroclinic_adjustment` | stratified baroclinic instability; eddy growth + inverse cascade (unforced) | 🔬 oracle: Oceananigans WENOVectorInvariant(9)+ImplicitFreeSurface | latlon_cgrid (β-plane) | `oceananigans_v1 (+power_law)` | ✅ verified | EKE 0.86×, cascade k_e 5.11 vs 5.19, stable 40 d, no backstop — PR #672 |
 | `barotropic_gyre` | wind-driven barotropic gyre spin-up (steady, laminar window) | 🔬 oracle: Oceananigans ImplicitFreeSurface gyre | latlon_cgrid | `oceananigans_v1` | ✅ verified | surface-u pattern corr 0.93 days 1–20 (kinematic wind-stress unit fix) |
-| `internal_tide` | tidal flow over topography; internal-tide generation (Flat-y, free surface) | 🔬 oracle: Oceananigans internal_tide | latlon_cgrid (meridionally_flat) | `oceananigans_v1 (meridionally_flat+upwind3)` | ✅ verified | corr ≥0.6 through ~2 days; dispersion cleared by upwind3 — #576 |
+| `internal_tide` | tidal flow over topography; internal-tide generation (Flat-y, free surface) | 🔬 oracle: Oceananigans internal_tide | latlon_cgrid (meridionally_flat) | `oceananigans_v1 (meridionally_flat+oceananigans_up3)` | ✅ verified | corr ≥0.6 through ~2 days; dispersion cleared by the UP3 arm — #576 |
 | `silvestri_jet_forced` | forced (τ=50 d restoring) eddy-resolving baroclinic jet; Silvestri 2024 §5 | 🔬 oracle: Oceananigans Silvestri 2024 §5 | latlon_cgrid (spherical channel) | `oceananigans_v1 (+power_law)` | ⛔ blocked | over-energizes ~7× under sustained restoring (eddy-mean equilibration) — issue #673 |
 | `bickley_jet` | single-layer Bickley-jet barotropic instability; vortex roll-up (eddy dissipation) | 🔬 oracle: Oceananigans WENOVectorInvariant | latlon_cgrid (unit sphere) | `oceananigans_v1` | 🟡 partial | tracks oracle to t6 (corr 0.97) then under-dissipates; enstrophy ~1.2–1.9× late |
 | `acc_channel` | ACC-like re-entrant channel with ridge; eddy saturation + transport | 🔬 oracle: Veros ACC | latlon_cgrid | `veros_faithful_v1` | ⬜ todo | extensive Veros ACC work exists — re-confirm via scorecard (also intended: mpas) |
@@ -29,7 +29,7 @@ Reference kind = truth strength: 🔬 oracle (runnable model + data) · 📐 ana
 | `geostrophic_adjustment` | geostrophic adjustment from a temperature front; free-surface coupling | 🔬 oracle: Oceananigans | latlon_cgrid | `oceananigans_v1` | ⬜ todo | comparison driver exists; not re-assessed post-#501 (also intended: cubed_sphere, mpas) |
 | `global_barotropic_wind` | global 3-belt wind-stress barotropic circulation | — _(idealized — none)_ | latlon_cgrid | `default_wright_v1` | ⬜ todo | matrix-covered (also: mpas) |
 | `global_omip` | global forced (OMIP) ocean climate; SST/MOC vs reference GCM | 🔬 oracle: Veros / NEMO (OMIP) | latlon_cgrid | `veros_faithful_v1` | ⬜ todo | Veros global transfer (1°/4°/flexible) — re-confirm via scorecard |
-|  |  |  | latlon_cgrid | `nemo_v1` | ⬜ todo | NEMO-faithful dycore — re-confirm via scorecard |
+|  |  |  | latlon_cgrid | `legoesm_nemo_like_v1` | ⬜ todo | NEMO-style dycore (barotropic solver is legoESM's own generic arm, not NEMO's) — re-confirm via scorecard |
 |  |  |  | latlon_cgrid (tripole) | `omip_nemo_match_tripole_v1` | ⬜ todo | tripole eORCA025 NEMO-climate-match (SST RMSE ~1.15) |
 |  |  |  | mpas (ico6) | `omip_nemo_match_mpas_v1` | ⬜ todo | MPAS ico6 NEMO-climate-match (SST RMSE ~0.84, best grid) |
 | `global_overturning` | global baroclinic overturning (idealized THC) | 📄 published: Wolfe & Cessi 2010 (idealized THC) | latlon_cgrid | `legoesm_linear_v1` | ⬜ todo | idealized THC benchmark (also: mpas) |
@@ -50,7 +50,7 @@ Reference kind = truth strength: 🔬 oracle (runnable model + data) · 📐 ana
 Rows are `case @ grid` (grid + recipe = the numerical setup of a run); columns are recipes.
 Legend: ✅ verified · 🟩 works · 🟡 partial · ⛔ blocked · ⬜ todo · blank = not run
 
-| case @ grid | oceananigans_v1 (+power_law) | oceananigans_v1 | oceananigans_v1 (meridionally_flat+upwind3) | veros_faithful_v1 | mitgcm_v1 | nemo_v1 | omip_nemo_match_tripole_v1 | omip_nemo_match_mpas_v1 | default_wright_v1 | eady_weno5_v1 | legoesm_linear_v1 | nemo_dino_v1 |
+| case @ grid | oceananigans_v1 (+power_law) | oceananigans_v1 | oceananigans_v1 (meridionally_flat+oceananigans_up3) | veros_faithful_v1 | mitgcm_v1 | legoesm_nemo_like_v1 | omip_nemo_match_tripole_v1 | omip_nemo_match_mpas_v1 | default_wright_v1 | eady_weno5_v1 | legoesm_linear_v1 | nemo_dino_v1 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `baroclinic_adjustment` @ latlon_cgrid (β-plane) | ✅ |  |  |  |  |  |  |  |  |  |  |  |
 | `barotropic_gyre` @ latlon_cgrid |  | ✅ |  |  |  |  |  |  |  |  |  |  |

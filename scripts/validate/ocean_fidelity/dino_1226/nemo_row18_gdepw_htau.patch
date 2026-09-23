@@ -1,0 +1,65 @@
+--- a/cfgs/DINO/MY_SRC/zdftke.F90
++++ b/cfgs/DINO/MY_SRC/zdftke.F90
+@@ -100,6 +100,7 @@
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zdiag_pre_dump, zlw_pre_dump, en_pre_dump
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   en_postlc_dump
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   etau_arg_dump, etau_exp_dump, etau_inc_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   etau_gdepw_dump, etau_htau_dump
+ 
+    ! #1226 item-tke-chain: zmxlm/zmxld are T1Di(0)-shaped per-jj temporaries
+    ! inside tke_avn's DO_1Dj loop (tke_avn:615, overwritten every jj
+@@ -128,7 +129,8 @@
+          &      zdiag_pre_dump(A2D(0),jpk), zlw_pre_dump(A2D(0),jpk), en_pre_dump(A2D(0),jpk),   &
+          &      en_postlc_dump(A2D(0),jpk), etau_arg_dump(A2D(0),jpk),   &
+          &      etau_exp_dump(A2D(0),jpk),   &
+-         &      etau_inc_dump(A2D(0),jpk), STAT= zdf_tke_alloc )
++         &      etau_inc_dump(A2D(0),jpk), etau_gdepw_dump(A2D(0),jpk),   &
++         &      etau_htau_dump(A2D(0),jpk), STAT= zdf_tke_alloc )
+       !
+       CALL mpp_sum ( 'zdftke', zdf_tke_alloc )
+       IF( zdf_tke_alloc /= 0 )   CALL ctl_stop( 'STOP', 'zdf_tke_alloc: failed to allocate arrays' )
+@@ -219,6 +221,8 @@
+          OPEN( UNIT=9110, FILE='tke_dump_etau_exp.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+          OPEN( UNIT=9111, FILE='tke_dump_etau_increment.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+          OPEN( UNIT=9112, FILE='tke_dump_etau_argument.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=9113, FILE='tke_dump_etau_gdepw.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=9114, FILE='tke_dump_etau_htau.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+          DO jk = 1, jpk
+             WRITE(9103) ( ( en_postsolve_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
+             WRITE(9104) ( ( zdiag_forward_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
+@@ -230,6 +234,8 @@
+             WRITE(9110) ( ( etau_exp_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
+             WRITE(9111) ( ( etau_inc_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
+             WRITE(9112) ( ( etau_arg_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
++            WRITE(9113) ( ( etau_gdepw_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
++            WRITE(9114) ( ( etau_htau_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
+          END DO
+          CLOSE(9103)
+          CLOSE(9104)
+@@ -241,6 +247,8 @@
+          CLOSE(9110)
+          CLOSE(9111)
+          CLOSE(9112)
++         CLOSE(9113)
++         CLOSE(9114)
+       ENDIF
+       !
+       ! #1226 item-11 debug dump: after tke_tke (z_pdlr filled, p_avm still the
+@@ -391,6 +399,8 @@
+       etau_exp_dump(:,:,:) = 0._wp
+       etau_inc_dump(:,:,:) = 0._wp
+       etau_arg_dump(:,:,:) = 0._wp
++      etau_gdepw_dump(:,:,:) = 0._wp
++      etau_htau_dump(:,:,:) = 0._wp
+       IF( lldiag ) ALLOCATE( ztmp(T2D(0),jpk) )            ! ediss_k diagnostic
+       !
+       !                                               ! ================= !
+@@ -645,6 +655,8 @@
+          !
+          IF( nn_etau == 1 ) THEN           !* penetration below the mixed layer (rn_efr fraction)
+             DO_2Dik( 0, 0, 2, jpkm1, 1 )
++               etau_gdepw_dump(ji,jj,jk) = gdepw(ji,jj,jk,Kmm)
++               etau_htau_dump(ji,jj,jk) = htau(ji,jj)
+                etau_arg_dump(ji,jj,jk) = -gdepw(ji,jj,jk,Kmm) / htau(ji,jj)
+                etau_exp_dump(ji,jj,jk) = EXP( etau_arg_dump(ji,jj,jk) )
+                etau_inc_dump(ji,jj,jk) = rn_efr * en(ji,jj,1) * etau_exp_dump(ji,jj,jk)   &

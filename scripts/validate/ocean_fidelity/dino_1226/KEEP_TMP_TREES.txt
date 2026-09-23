@@ -1,0 +1,8 @@
+# DINO campaign cleanup denylist. A cleanup candidate that matches a non-comment
+# line exactly is load-bearing and must not be removed. Check with:
+#   grep -Fx -- "$candidate" scripts/validate/ocean_fidelity/dino_1226/KEEP_TMP_TREES.txt
+/tmp/nemo-row19-detwriter.kTFp14
+/tmp/nemo-redi-flux-round78-src.EYzfxX
+/tmp/nemo-tau-slot-eaef2a1e1
+/tmp/RUN_BN2_CERT_1R
+/tmp/RUN_LATERAL_ROW8_PU_ON.Qln5u8

@@ -120,10 +120,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--convection", type=str, default="sbm")
     parser.add_argument("--turbulence", type=str, default="louis")
     parser.add_argument("--clouds", type=str, default="sundqvist")
-    parser.add_argument("--cloud-rh-crit-bl", type=float, default=0.55,
-                        help="Critical RH for BL cloud (Sundqvist). Default 0.55 for AMIP.")
-    parser.add_argument("--cloud-sigma-bl", type=float, default=0.85,
-                        help="Sigma level above which BL rh_crit applies. Default 0.85.")
     parser.add_argument("--microphysics", type=str, default="sundqvist")
     parser.add_argument("--gravity-wave-drag", type=str, default="rayleigh")
     parser.add_argument("--diurnal-cycle", action="store_true", default=True)
@@ -273,8 +269,6 @@ def main(argv: list[str] | None = None) -> int:
         "--turbulence", args.turbulence,
         "--gravity-wave-drag", args.gravity_wave_drag,
         "--clouds", args.clouds,
-        "--cloud-rh-crit-bl", str(args.cloud_rh_crit_bl),
-        "--cloud-sigma-bl", str(args.cloud_sigma_bl),
         "--microphysics", args.microphysics,
     ]
 

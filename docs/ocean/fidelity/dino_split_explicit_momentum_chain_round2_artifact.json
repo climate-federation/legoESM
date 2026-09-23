@@ -1,0 +1,1139 @@
+{
+  "cancellation_pairs": {
+    "u": {
+      "cor_removal+wind": {
+        "residual_removal": 0.9653980846198076
+      },
+      "drag+wind": {
+        "residual_removal": 0.9928766949022818
+      },
+      "kinetic_energy_gradient+wind": {
+        "residual_removal": 0.9928767442771345
+      },
+      "lateral_friction+wind": {
+        "residual_removal": 0.997604359368721
+      },
+      "pressure_gradient+wind": {
+        "residual_removal": 0.9928767443744969
+      },
+      "vertical_advection+wind": {
+        "residual_removal": 0.9928779320718727
+      },
+      "vorticity+wind": {
+        "residual_removal": 0.9645972659919761
+      },
+      "wind+wind": {
+        "residual_removal": 0.9928767442771346
+      }
+    },
+    "v": {
+      "cor_removal+wind": {
+        "residual_removal": -0.061121304079415406
+      },
+      "drag+wind": {
+        "residual_removal": -1.1375916373346229e-06
+      },
+      "kinetic_energy_gradient+wind": {
+        "residual_removal": -0.0019262996905651253
+      },
+      "lateral_friction+wind": {
+        "residual_removal": 0.0687687868307687
+      },
+      "pressure_gradient+wind": {
+        "residual_removal": 0.6323591523535514
+      },
+      "vertical_advection+wind": {
+        "residual_removal": -8.344263019499643e-05
+      },
+      "vorticity+wind": {
+        "residual_removal": 0.04362368457418353
+      },
+      "wind+wind": {
+        "residual_removal": 0.0
+      }
+    }
+  },
+  "controls": {
+    "attribution_classifier": {
+      "confirming_score": {
+        "correlation_with_total_residual": 1.0,
+        "residual_removal": 1.0,
+        "rms_gain": 1.0,
+        "verdict": "CONFIRMS_CARRY"
+      },
+      "identity_confirms": true,
+      "orthogonal_refutes": true,
+      "refuting_score": {
+        "correlation_with_total_residual": -5.551115123125784e-17,
+        "residual_removal": -0.4142135623730949,
+        "rms_gain": 0.9999999999999999,
+        "verdict": "REFUTES_CARRY"
+      }
+    },
+    "base_reconstruction": {
+      "bar": 1e-12,
+      "planted_u_fires": true,
+      "planted_u_normalized_error": 1.0000000000050667e-06,
+      "u_pass": true,
+      "v_pass": true
+    },
+    "campaign_classifier_and_alignment": {
+      "actual_binding_campaign_gate": "DEBT",
+      "actual_binding_error": 0.0002740311743349557,
+      "actual_binding_perturbation_changes_score": true,
+      "alignment_best": {
+        "di": 0,
+        "dj": 0,
+        "normalized_rms_error": 0.0002740311743349557
+      },
+      "alignment_scan": [
+        {
+          "di": -1,
+          "dj": -1,
+          "normalized_rms_error": 0.8516081801088069
+        },
+        {
+          "di": 0,
+          "dj": -1,
+          "normalized_rms_error": 0.1519087309177422
+        },
+        {
+          "di": 1,
+          "dj": -1,
+          "normalized_rms_error": 0.6195845689627931
+        },
+        {
+          "di": -1,
+          "dj": 0,
+          "normalized_rms_error": 0.8443944756561844
+        },
+        {
+          "di": 0,
+          "dj": 0,
+          "normalized_rms_error": 0.0002740311743349557
+        },
+        {
+          "di": 1,
+          "dj": 0,
+          "normalized_rms_error": 0.6070870738151861
+        },
+        {
+          "di": -1,
+          "dj": 1,
+          "normalized_rms_error": 0.8458064471463069
+        },
+        {
+          "di": 0,
+          "dj": 1,
+          "normalized_rms_error": 0.12872651182641404
+        },
+        {
+          "di": 1,
+          "dj": 1,
+          "normalized_rms_error": 0.6071317831961214
+        }
+      ],
+      "identical_array_zero": true,
+      "identical_campaign_gate": "AT BAR",
+      "identical_error": 0.0,
+      "planted_actual_binding_campaign_gate": "DEBT",
+      "planted_actual_binding_error": 0.0002740603312831709,
+      "planted_identity_campaign_gate": "DEBT",
+      "planted_identity_error": 1.0000000000008017e-06,
+      "planted_identity_flips_campaign_gate": true,
+      "zero_shift_is_best": true
+    },
+    "donor_equalization": {
+      "changes_verdict_path": true,
+      "east_donor": [
+        49,
+        50
+      ],
+      "equalized_score": {
+        "corrected_residual_reduction": 0.02079651047885067,
+        "prediction_correlation": 0.2026900415810054,
+        "prediction_normalized_error": 0.9792034895211493,
+        "verdict": "UNRESOLVED_BRIDGE_WIND_SOURCE"
+      },
+      "faithful_score": {
+        "corrected_residual_reduction": 0.9928695526681799,
+        "prediction_correlation": 0.999974655141223,
+        "prediction_normalized_error": 0.007130447331820113,
+        "verdict": "CONFIRMS_BRIDGE_WIND_SOURCE"
+      },
+      "receiver": [
+        49,
+        49
+      ]
+    },
+    "entry_identity": {
+      "all_nonstress_exact": true,
+      "fields": [
+        {
+          "exact": true,
+          "field": "u"
+        },
+        {
+          "exact": true,
+          "field": "v"
+        },
+        {
+          "exact": true,
+          "field": "T"
+        },
+        {
+          "exact": true,
+          "field": "S"
+        },
+        {
+          "exact": true,
+          "field": "eta"
+        },
+        {
+          "exact": true,
+          "field": "H_bathy"
+        },
+        {
+          "exact": true,
+          "field": "land_mask"
+        },
+        {
+          "exact": true,
+          "field": "u_mask"
+        },
+        {
+          "exact": true,
+          "field": "v_mask"
+        },
+        {
+          "exact": true,
+          "field": "w"
+        },
+        {
+          "exact": true,
+          "field": "T_som"
+        },
+        {
+          "exact": true,
+          "field": "S_som"
+        },
+        {
+          "exact": true,
+          "field": "T_flux_div_prev"
+        },
+        {
+          "exact": true,
+          "field": "S_flux_div_prev"
+        },
+        {
+          "exact": true,
+          "field": "eke"
+        },
+        {
+          "exact": true,
+          "field": "tke"
+        },
+        {
+          "exact": true,
+          "field": "tke_avm"
+        },
+        {
+          "exact": true,
+          "field": "tke_avt"
+        },
+        {
+          "exact": true,
+          "field": "tke_dissl"
+        },
+        {
+          "exact": true,
+          "field": "tke_avm_surface"
+        },
+        {
+          "exact": true,
+          "field": "dtke"
+        },
+        {
+          "exact": true,
+          "field": "eke_diss"
+        },
+        {
+          "exact": true,
+          "field": "T_incr_prev"
+        },
+        {
+          "exact": true,
+          "field": "S_incr_prev"
+        },
+        {
+          "exact": true,
+          "field": "u_incr_prev"
+        },
+        {
+          "exact": true,
+          "field": "v_incr_prev"
+        },
+        {
+          "exact": true,
+          "field": "u_before"
+        },
+        {
+          "exact": true,
+          "field": "v_before"
+        },
+        {
+          "exact": true,
+          "field": "T_before"
+        },
+        {
+          "exact": true,
+          "field": "S_before"
+        },
+        {
+          "exact": true,
+          "field": "eta_before"
+        },
+        {
+          "exact": true,
+          "field": "F_slow_u_prev"
+        },
+        {
+          "exact": true,
+          "field": "F_slow_v_prev"
+        },
+        {
+          "exact": true,
+          "field": "psi"
+        },
+        {
+          "exact": true,
+          "field": "dpsi"
+        },
+        {
+          "exact": true,
+          "field": "dpsi_prev"
+        },
+        {
+          "exact": true,
+          "field": "dpsin"
+        },
+        {
+          "exact": true,
+          "field": "dpsin_prev"
+        },
+        {
+          "exact": true,
+          "field": "bt_hist"
+        },
+        {
+          "exact": true,
+          "field": "freshwater_eta_prev"
+        },
+        {
+          "exact": true,
+          "field": "mass_flux_u"
+        },
+        {
+          "exact": true,
+          "field": "mass_flux_v"
+        },
+        {
+          "exact": true,
+          "field": "mass_flux_w"
+        },
+        {
+          "exact": true,
+          "field": "salt_flux_u_int"
+        },
+        {
+          "exact": true,
+          "field": "salt_flux_v_int"
+        }
+      ]
+    },
+    "term_error_closure": {
+      "bar": 1e-10,
+      "planted_u_fires": true,
+      "planted_u_normalized_closure": 9.999999947495682e-07,
+      "u_pass": true,
+      "v_pass": true
+    }
+  },
+  "counterfactual": {
+    "u": {
+      "corrected_residual_reduction": 0.9928695526681799,
+      "prediction_correlation": 0.999974655141223,
+      "prediction_normalized_error": 0.007130447331820113,
+      "verdict": "CONFIRMS_BRIDGE_WIND_SOURCE"
+    },
+    "v": {
+      "corrected_residual_reduction": 3.9968028886505635e-15,
+      "prediction_correlation": 0.0033786124070260652,
+      "prediction_normalized_error": 0.999999999999996,
+      "verdict": "REFUTES_BRIDGE_WIND_SOURCE"
+    }
+  },
+  "derived_model_config_repr_sha256": "d5e8a11e67d2d8ed408a3c554b74719df3710e807749f71e72e8cbdb6749e0aa",
+  "dump_sha256": {
+    "drg_dump_zu_frc_inc.bin": "0dfaacca230287dd14338be073eceb7dc0d3c147317b946df16a96815624c053",
+    "drg_dump_zv_frc_inc.bin": "d01d083799bdd785477303a8304879771a445920fd682f7760f8ca4b9570ee4c",
+    "hpg_dump_du.bin": "0ccd1859c14bf65ca9a2f3b77f2a5fbf1d84db6567399645616d64d9de841950",
+    "hpg_dump_dv.bin": "60093e5906feda181c1613f8bd0f49cc24cba1970ea216ed673bf06bdcd7bc87",
+    "keg_dump_du.bin": "03d27e444d5c8f53650c7c6bb924084d9ca176f669f4384fc48c59cb208d792a",
+    "keg_dump_dv.bin": "b463386513308d4dd86c7934e5d11ed5a8eb7ae9634ed18da48009292fd9ca72",
+    "ldf_dump_du.bin": "7e5ad7c06e297e9e803df94107a62f2ba8afd7dd3f3d17b7466d7755c3dd2875",
+    "ldf_dump_dv.bin": "b49ea833a151284d167cc09cda34e8b3a9ff2f4d9ec4a6c40235b1467211232a",
+    "spg_dump_zu_frc.bin": "13138faa46149968c009f0d6c20956b8d2457a904667686a1f6cb1a93d7bcca6",
+    "spg_dump_zv_frc.bin": "81d01381ad5164b1a0cc3fb5f22590f471b0e24bb9b68084290e0cb9e2ef4c0e",
+    "stp_dump_06_dynhpg_kt00005761_du.bin": "a77ffe6bf45daa4b66f2b43dbd4fa89098b4e664681873f6420eeda8d38bd273",
+    "stp_dump_06_dynhpg_kt00005761_dv.bin": "b48d1e01babf415f3aeb6b93bab6528d001814a83cf7182be7d8ece42bc8ebfe",
+    "vor_dump_du.bin": "b2c778badfc9690758b70d84aaf47aa74f740f749f0b2f267091238b7edce601",
+    "vor_dump_dv.bin": "10f139210a9b9b369402ad1b3109c17bf71ebd867c18035252df56943ed008c0",
+    "wnd_dump_zu_frc_inc.bin": "d9692e3466b6fc9af72289266edf3b25ba26ec16c327fe505cd10bd6390d15b7",
+    "wnd_dump_zv_frc_inc.bin": "72ecf1fe2e778a7ece1b73d1713587f2d99d641cf47a3a196a8fb5f04acb7d4a",
+    "zad_dump_du.bin": "9899d5cdfcb3bb70f5910f773259a7e97c5b388ffcbe4cf4c05c0981929e26da",
+    "zad_dump_dv.bin": "b053c7d46c36dbd52d4e2da117e700ef5516ad1b519b525b62ee11aa49a7bf4e"
+  },
+  "effective_config_repr_sha256": "fc3aaa6596728aaa2c26640bea40af9fde363629d94f9d6e716b4616649eeabd",
+  "faithful_term_metrics": {
+    "u": {
+      "cor_removal": {
+        "attribution": {
+          "correlation_with_total_residual": 0.05782111491654701,
+          "residual_removal": -3.8528100525195788,
+          "rms_gain": 4.805808894124578,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999995508346,
+        "mean_abs_ratio": 0.9999940555895984,
+        "n": 9758,
+        "normalized_rms_error": 3.0103703762224332e-05,
+        "per_element_max_error_over_nemo_rms": 0.00041746518935854084,
+        "rms_ratio": 1.0000028141403068,
+        "structural_zero_reference": false
+      },
+      "drag": {
+        "attribution": {
+          "correlation_with_total_residual": -0.01679462268471043,
+          "residual_removal": -7.269551596467139e-06,
+          "rms_gain": 0.000414041044175515,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999999343457,
+        "mean_abs_ratio": 1.000003873406473,
+        "n": 9758,
+        "normalized_rms_error": 1.4180958638572103e-05,
+        "per_element_max_error_over_nemo_rms": 0.000617115985560495,
+        "rms_ratio": 1.0000083828300064,
+        "structural_zero_reference": false
+      },
+      "kinetic_energy_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": -0.06987885937523067,
+          "residual_removal": -2.731148640577885e-14,
+          "rms_gain": 3.8582650119099966e-13,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "NEAR-CLASS",
+        "correlation": 1.0,
+        "mean_abs_ratio": 1.0,
+        "n": 9758,
+        "normalized_rms_error": 2.2234356722727573e-16,
+        "per_element_max_error_over_nemo_rms": 6.8662038656038e-15,
+        "rms_ratio": 1.0,
+        "structural_zero_reference": false
+      },
+      "lateral_friction": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9426393223555646,
+          "residual_removal": 0.6612415045308856,
+          "rms_gain": 0.9133374285898909,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999997179094791,
+        "mean_abs_ratio": 0.9999392423778406,
+        "n": 9758,
+        "normalized_rms_error": 0.0007627548605278092,
+        "per_element_max_error_over_nemo_rms": 0.03398507125971282,
+        "rms_ratio": 0.9998658624617099,
+        "structural_zero_reference": false
+      },
+      "pressure_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": 0.01715948637943879,
+          "residual_removal": 1.3557164946220723e-08,
+          "rms_gain": 7.944289237647815e-07,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "NEAR-CLASS",
+        "correlation": 1.0,
+        "mean_abs_ratio": 0.9999999999999267,
+        "n": 9758,
+        "normalized_rms_error": 1.5699933824477664e-12,
+        "per_element_max_error_over_nemo_rms": 9.111571453469666e-12,
+        "rms_ratio": 0.9999999999999968,
+        "structural_zero_reference": false
+      },
+      "vertical_advection": {
+        "attribution": {
+          "correlation_with_total_residual": 0.021117257173451653,
+          "residual_removal": 0.00016906234742519732,
+          "rms_gain": 0.010037093280507435,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999979386693,
+        "mean_abs_ratio": 1.0000132839242575,
+        "n": 9758,
+        "normalized_rms_error": 6.428546225449931e-05,
+        "per_element_max_error_over_nemo_rms": 0.003153239406136063,
+        "rms_ratio": 1.0000033897239262,
+        "structural_zero_reference": false
+      },
+      "vorticity": {
+        "attribution": {
+          "correlation_with_total_residual": -0.02916631433044875,
+          "residual_removal": -3.9651538510810838,
+          "rms_gain": 4.835751370036012,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999995595733,
+        "mean_abs_ratio": 0.9999937902271908,
+        "n": 9758,
+        "normalized_rms_error": 2.9772907632867134e-05,
+        "per_element_max_error_over_nemo_rms": 0.0003757706282181867,
+        "rms_ratio": 1.0000022315525732,
+        "structural_zero_reference": false
+      },
+      "wind": {
+        "attribution": {
+          "correlation_with_total_residual": 0.052709305144290425,
+          "residual_removal": 0.0010085775295390897,
+          "rms_gain": 0.018951366790048163,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.999999999985726,
+        "mean_abs_ratio": 0.9999990854616556,
+        "n": 9758,
+        "normalized_rms_error": 5.224186399407866e-06,
+        "per_element_max_error_over_nemo_rms": 4.757809388319859e-05,
+        "rms_ratio": 0.9999984062342909,
+        "structural_zero_reference": false
+      }
+    },
+    "v": {
+      "cor_removal": {
+        "attribution": {
+          "correlation_with_total_residual": -0.2028852793282902,
+          "residual_removal": -0.0611213040794194,
+          "rms_gain": 0.19827879950509222,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999998571754,
+        "mean_abs_ratio": 0.9999720699121895,
+        "n": 9868,
+        "normalized_rms_error": 1.9875822500364538e-05,
+        "per_element_max_error_over_nemo_rms": 0.00045839541232547124,
+        "rms_ratio": 0.9999890477762328,
+        "structural_zero_reference": false
+      },
+      "drag": {
+        "attribution": {
+          "correlation_with_total_residual": -0.05352424551053234,
+          "residual_removal": -1.1375916371125783e-06,
+          "rms_gain": 1.8764104294133102e-05,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999999976743,
+        "mean_abs_ratio": 1.0000023597678278,
+        "n": 9868,
+        "normalized_rms_error": 2.8217795037969353e-06,
+        "per_element_max_error_over_nemo_rms": 0.000125266077452058,
+        "rms_ratio": 1.0000018274336318,
+        "structural_zero_reference": false
+      },
+      "kinetic_energy_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": -0.8208435738586591,
+          "residual_removal": -0.0019262996905651253,
+          "rms_gain": 0.002339918783242175,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999999338174,
+        "mean_abs_ratio": 0.9999850030258296,
+        "n": 9868,
+        "normalized_rms_error": 2.723148589093772e-05,
+        "per_element_max_error_over_nemo_rms": 0.00041701699857617594,
+        "rms_ratio": 0.9999752899892176,
+        "structural_zero_reference": false
+      },
+      "lateral_friction": {
+        "attribution": {
+          "correlation_with_total_residual": 0.3666841571421037,
+          "residual_removal": 0.06876878683076948,
+          "rms_gain": 0.36689745158929754,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999946779702827,
+        "mean_abs_ratio": 0.9999716846339282,
+        "n": 9868,
+        "normalized_rms_error": 0.003264637424358845,
+        "per_element_max_error_over_nemo_rms": 0.2397041953071723,
+        "rms_ratio": 0.9998769273642392,
+        "structural_zero_reference": false
+      },
+      "pressure_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9293208299298419,
+          "residual_removal": 0.6323591523535501,
+          "rms_gain": 0.9105717018954679,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.99999999985399,
+        "mean_abs_ratio": 0.9999988679855453,
+        "n": 9868,
+        "normalized_rms_error": 2.6942279645783727e-05,
+        "per_element_max_error_over_nemo_rms": 0.0003541831482071407,
+        "rms_ratio": 0.9999790735244436,
+        "structural_zero_reference": false
+      },
+      "vertical_advection": {
+        "attribution": {
+          "correlation_with_total_residual": -0.05360127376706648,
+          "residual_removal": -8.344263019499643e-05,
+          "rms_gain": 0.0015235955354167049,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999958113658,
+        "mean_abs_ratio": 0.9999630068758839,
+        "n": 9868,
+        "normalized_rms_error": 0.00010164128927886811,
+        "per_element_max_error_over_nemo_rms": 0.0066938382309014045,
+        "rms_ratio": 0.9999557757921441,
+        "structural_zero_reference": false
+      },
+      "vorticity": {
+        "attribution": {
+          "correlation_with_total_residual": 0.2944751927142418,
+          "residual_removal": 0.04362368457418231,
+          "rms_gain": 0.20960457488714487,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.999999999866454,
+        "mean_abs_ratio": 0.9999712972346754,
+        "n": 9868,
+        "normalized_rms_error": 2.043278464278322e-05,
+        "per_element_max_error_over_nemo_rms": 0.0004653663060988673,
+        "rms_ratio": 0.9999873500006962,
+        "structural_zero_reference": false
+      },
+      "wind": {
+        "attribution": {
+          "correlation_with_total_residual": null,
+          "residual_removal": 0.0,
+          "rms_gain": 0.0,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "UNMEASURED_ZERO_REFERENCE",
+        "correlation": null,
+        "max_abs_model": 0.0,
+        "model_rms": 0.0,
+        "normalized_rms_error": null,
+        "reference_rms": 0.0,
+        "sample_count": 9868,
+        "structural_zero_reference": true,
+        "zero_control": {
+          "identical_zero_gate": "UNMEASURED_ZERO_REFERENCE",
+          "model_exact_zero": true,
+          "oracle_exact_zero": true,
+          "planted_nonzero_fires": true,
+          "planted_nonzero_gate": "DEBT_NONZERO_AGAINST_ZERO_REFERENCE"
+        }
+      }
+    }
+  },
+  "git": {
+    "clean_after": true,
+    "clean_before": true,
+    "commit": "fdce09795a11370337fb0e93c4cccc72a40cc6d3"
+  },
+  "inferred_coriolis_ledger": {
+    "fp64_roundoff_envelope_pass_u": true,
+    "fp64_roundoff_envelope_pass_v": true,
+    "max_abs_difference_u": 6.776263578034403e-21,
+    "max_abs_difference_v": 3.3881317890172014e-21,
+    "max_roundoff_bound_u": 1.6869154654452874e-19,
+    "max_roundoff_bound_v": 1.9673854289471637e-19,
+    "planted_material_offset_fires": true,
+    "u": {
+      "correlation": 1.0,
+      "mean_abs_ratio": 1.0,
+      "n": 9758,
+      "normalized_rms_error": 6.078999455209472e-17,
+      "per_element_max_error_over_nemo_rms": 1.986642117040397e-15,
+      "rms_ratio": 1.0
+    },
+    "v": {
+      "correlation": 1.0,
+      "mean_abs_ratio": 1.0,
+      "n": 9868,
+      "normalized_rms_error": 4.767452751590189e-17,
+      "per_element_max_error_over_nemo_rms": 9.636470978348779e-16,
+      "rms_ratio": 1.0
+    }
+  },
+  "kt": 5761,
+  "lane": "d180",
+  "lateral_friction_levels": {
+    "lego_later_3d_dissipative_pass": "BEFORE_BAROTROPIC_RESULT_DISCARDED",
+    "lego_live_barotropic_first_pass": "NOW",
+    "lego_source": "ocean_model_latlon_cgrid.py:8950-9030",
+    "nemo_dynldf_operand": "BEFORE",
+    "nemo_source": "stpmlf.F90:319-322; dynldf.F90:69-119"
+  },
+  "nemo_base_reconstruction": {
+    "u": {
+      "correlation": 0.9999999999999998,
+      "mean_abs_ratio": 1.0,
+      "n": 336338,
+      "normalized_rms_error": 2.4953513352432546e-17,
+      "per_element_max_error_over_nemo_rms": 1.7006074038377268e-15,
+      "rms_ratio": 1.0
+    },
+    "v": {
+      "correlation": 1.0,
+      "mean_abs_ratio": 1.0,
+      "n": 340271,
+      "normalized_rms_error": 2.6937357892388752e-17,
+      "per_element_max_error_over_nemo_rms": 1.5642790948911082e-15,
+      "rms_ratio": 1.0
+    }
+  },
+  "oracle_runtime_flags": {
+    "ln_apr_dyn": "F",
+    "ln_bt_fw": "F",
+    "ln_drgice_imp": "F",
+    "ln_isfcav": "F"
+  },
+  "ordered_continuation": {
+    "row_1_1": "OPEN_SOURCE_LOCALIZED_FAITHFUL_TOTAL_DEBT",
+    "row_1_2": "ORDERED_BLOCKED_UNLESS_FAITHFUL_TOTAL_AT_BAR",
+    "row_1_3": "ORDERED_BLOCKED_UNLESS_FAITHFUL_TOTAL_AT_BAR",
+    "rows_2_to_6": "ORDERED_BLOCKED"
+  },
+  "provenance_sha256": {
+    "fidelity_bar_gate": "a3cb0db9533155ee828a3ec87035f553be1f040509823dd94c85a4f9eba7a76d",
+    "inherited_probe": "e35e323a5e90bf84d5370cd6389c38ca61edae4c333e7c03e1756fec4604a132",
+    "nemo_dynadv": "0e7702b24fd54f022806a10205298765d323573a095ae40d07064a30cba355d8",
+    "nemo_dynhpg": "514cb54883c2f802e015f77c7eb664b10f3f29e1f9faeb3027e9d06b03cf7a23",
+    "nemo_dynldf": "a40a637348c05bd9feba1e87ee9738a03c20c4189478e687c2d10630c5b1806f",
+    "nemo_dynspg_ts": "a64b32e7c9ce1c1be6c121597235b08f05c853961e83d52be6082ea7242f6275",
+    "nemo_dynvor": "f227e8b629bd491ac06ca1816fdffc2206a3ce1012c531f865de6120b0a7b5d7",
+    "nemo_dynzdf": "cb5b27ac93148deffc0bdf9c6927053dfd1678e095fedc6127b54c0f2aab08aa",
+    "nemo_stpmlf": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
+    "preregistration": "d6f12bb4538eb5b500f403387eebbea57013003a32b463a2d8bea6806373d69f",
+    "probe": "dab1dae2107cd61e7b1f2b98f5dd2f87d7586a0d0907d5814b4a61ec3d11320c",
+    "production_barotropic": "b837dea5562d5230401ee60c2f020b8146a20bcc266dbc5bf68738917a531598",
+    "production_bridge": "7b91414ff5c6de79366d7c6efe3c8966d3d889034d3341fe56ba4796b53367a7",
+    "production_dino_card": "faec0ce345f151573b36a2805ae1226cfd2e3381e442ee05934ef14e5ad5fcf4",
+    "production_ocean_model": "2a063281b528ca0740700b35204d4cedd9cd5dc298f1e98d96c79de77b267d7b",
+    "production_pe": "7c41be45f9dc30b295a61357fc8355f04b854c25bde65761a0470f434013f771",
+    "round1_wrapper": "19f1de44300c1e1119af03405af887a4bdf63d51af9c6dfb5998a74529c4cac9"
+  },
+  "restart_clock": {
+    "adatrj_days": 180.0,
+    "kt": 5760.0,
+    "seconds": 15552000.0
+  },
+  "run_dir": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R",
+  "run_input_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "namelist_cfg": "0e75f4cb32dad3ed3fc17b721651ec12e0366c2978df8c65a6e95ae80b48d68b",
+    "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+    "nemo": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "output.namelist.dyn": "1ebcbcc9bd3f91dede8153a297c1f9df906a262460476760a78a45be14b1176e"
+  },
+  "runtime": {
+    "backend": "cpu",
+    "cpu_device": "cpu:0",
+    "e3t_mode": "both",
+    "jax": "0.10.0",
+    "jax_enable_x64": true,
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+    "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+    "python": "3.13.0 | packaged by conda-forge | (main, Nov 27 2024, 19:18:50) [GCC 13.3.0]"
+  },
+  "schema": "dino-split-explicit-momentum-chain-round2-v1",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
+  "term_error_sum_closure": {
+    "u_normalized_to_total_residual": 1.0764362196730072e-12,
+    "v_normalized_to_total_residual": 9.973535071390227e-12
+  },
+  "term_metrics": {
+    "u": {
+      "cor_removal": {
+        "attribution": {
+          "correlation_with_total_residual": 0.10457612527611367,
+          "residual_removal": 0.003017988004865968,
+          "rms_gain": 0.034267567206347965,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999995508346,
+        "mean_abs_ratio": 0.9999940555895984,
+        "n": 9758,
+        "normalized_rms_error": 3.0103703762224332e-05,
+        "per_element_max_error_over_nemo_rms": 0.00041746518935854084,
+        "rms_ratio": 1.0000028141403068,
+        "structural_zero_reference": false
+      },
+      "drag": {
+        "attribution": {
+          "correlation_with_total_residual": 0.06101219712283536,
+          "residual_removal": 1.8104831500664886e-07,
+          "rms_gain": 2.9522978587053143e-06,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999999343457,
+        "mean_abs_ratio": 1.000003873406473,
+        "n": 9758,
+        "normalized_rms_error": 1.4180958638572103e-05,
+        "per_element_max_error_over_nemo_rms": 0.000617115985560495,
+        "rms_ratio": 1.0000083828300064,
+        "structural_zero_reference": false
+      },
+      "kinetic_energy_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": -0.025414490022975612,
+          "residual_removal": -2.220446049250313e-16,
+          "rms_gain": 2.7511155459628533e-15,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "NEAR-CLASS",
+        "correlation": 1.0,
+        "mean_abs_ratio": 1.0,
+        "n": 9758,
+        "normalized_rms_error": 2.2234356722727573e-16,
+        "per_element_max_error_over_nemo_rms": 6.8662038656038e-15,
+        "rms_ratio": 1.0,
+        "structural_zero_reference": false
+      },
+      "lateral_friction": {
+        "attribution": {
+          "correlation_with_total_residual": 0.00611416623003355,
+          "residual_removal": 1.986101073792046e-05,
+          "rms_gain": 0.0065125044307402305,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999997179094791,
+        "mean_abs_ratio": 0.9999392423778406,
+        "n": 9758,
+        "normalized_rms_error": 0.0007627548605278092,
+        "per_element_max_error_over_nemo_rms": 0.03398507125971282,
+        "rms_ratio": 0.9998658624617099,
+        "structural_zero_reference": false
+      },
+      "pressure_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": -0.00423279930571962,
+          "residual_removal": -2.371414176138842e-11,
+          "rms_gain": 5.66463359977931e-09,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "NEAR-CLASS",
+        "correlation": 1.0,
+        "mean_abs_ratio": 0.9999999999999267,
+        "n": 9758,
+        "normalized_rms_error": 1.5699933824477664e-12,
+        "per_element_max_error_over_nemo_rms": 9.111571453469666e-12,
+        "rms_ratio": 0.9999999999999968,
+        "structural_zero_reference": false
+      },
+      "vertical_advection": {
+        "attribution": {
+          "correlation_with_total_residual": 0.009092329507859289,
+          "residual_removal": 6.151671796406077e-07,
+          "rms_gain": 7.156896500122383e-05,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999979386693,
+        "mean_abs_ratio": 1.0000132839242575,
+        "n": 9758,
+        "normalized_rms_error": 6.428546225449931e-05,
+        "per_element_max_error_over_nemo_rms": 0.003153239406136063,
+        "rms_ratio": 1.0000033897239262,
+        "structural_zero_reference": false
+      },
+      "vorticity": {
+        "attribution": {
+          "correlation_with_total_residual": -0.11240729164218807,
+          "residual_removal": -0.004485479929123182,
+          "rms_gain": 0.034481070453818735,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999995595733,
+        "mean_abs_ratio": 0.9999937902271908,
+        "n": 9758,
+        "normalized_rms_error": 2.9772907632867134e-05,
+        "per_element_max_error_over_nemo_rms": 0.0003757706282181867,
+        "rms_ratio": 1.0000022315525732,
+        "structural_zero_reference": false
+      },
+      "wind": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9999746989494052,
+          "residual_removal": 0.9928767442771346,
+          "rms_gain": 1.0002839647648223,
+          "verdict": "CONFIRMS_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9991509537535733,
+        "mean_abs_ratio": 1.0050456519790958,
+        "n": 9758,
+        "normalized_rms_error": 0.038670933644919955,
+        "per_element_max_error_over_nemo_rms": 0.7753837465602055,
+        "rms_ratio": 1.006705274988988,
+        "structural_zero_reference": false
+      },
+      "wind_faithful": {
+        "attribution": {
+          "correlation_with_total_residual": 0.08496262129307089,
+          "residual_removal": 1.0143822877783926e-05,
+          "rms_gain": 0.00013513172276244324,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.999999999985726,
+        "mean_abs_ratio": 0.9999990854616556,
+        "n": 9758,
+        "normalized_rms_error": 5.224186399407866e-06,
+        "per_element_max_error_over_nemo_rms": 4.757809388319859e-05,
+        "rms_ratio": 0.9999984062342909,
+        "structural_zero_reference": false
+      }
+    },
+    "v": {
+      "cor_removal": {
+        "attribution": {
+          "correlation_with_total_residual": -0.20288527932829034,
+          "residual_removal": -0.061121304079415406,
+          "rms_gain": 0.19827879950508293,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999998571754,
+        "mean_abs_ratio": 0.9999720699121895,
+        "n": 9868,
+        "normalized_rms_error": 1.9875822500363684e-05,
+        "per_element_max_error_over_nemo_rms": 0.00045839541232547124,
+        "rms_ratio": 0.9999890477762328,
+        "structural_zero_reference": false
+      },
+      "drag": {
+        "attribution": {
+          "correlation_with_total_residual": -0.053524245510555,
+          "residual_removal": -1.1375916373346229e-06,
+          "rms_gain": 1.8764104294133028e-05,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999999976743,
+        "mean_abs_ratio": 1.0000023597678278,
+        "n": 9868,
+        "normalized_rms_error": 2.8217795037969353e-06,
+        "per_element_max_error_over_nemo_rms": 0.000125266077452058,
+        "rms_ratio": 1.0000018274336318,
+        "structural_zero_reference": false
+      },
+      "kinetic_energy_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": -0.8208435738586549,
+          "residual_removal": -0.0019262996905651253,
+          "rms_gain": 0.0023399187832421654,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999999338174,
+        "mean_abs_ratio": 0.9999850030258296,
+        "n": 9868,
+        "normalized_rms_error": 2.723148589093772e-05,
+        "per_element_max_error_over_nemo_rms": 0.00041701699857617594,
+        "rms_ratio": 0.9999752899892176,
+        "structural_zero_reference": false
+      },
+      "lateral_friction": {
+        "attribution": {
+          "correlation_with_total_residual": 0.3666841571421021,
+          "residual_removal": 0.0687687868307687,
+          "rms_gain": 0.3668974515892961,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999946779702827,
+        "mean_abs_ratio": 0.9999716846339282,
+        "n": 9868,
+        "normalized_rms_error": 0.003264637424358845,
+        "per_element_max_error_over_nemo_rms": 0.2397041953071723,
+        "rms_ratio": 0.9998769273642392,
+        "structural_zero_reference": false
+      },
+      "pressure_gradient": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9293208299298424,
+          "residual_removal": 0.6323591523535514,
+          "rms_gain": 0.9105717018954642,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.99999999985399,
+        "mean_abs_ratio": 0.9999988679855453,
+        "n": 9868,
+        "normalized_rms_error": 2.6942279645783727e-05,
+        "per_element_max_error_over_nemo_rms": 0.0003541831482071407,
+        "rms_ratio": 0.9999790735244436,
+        "structural_zero_reference": false
+      },
+      "vertical_advection": {
+        "attribution": {
+          "correlation_with_total_residual": -0.05360127376705641,
+          "residual_removal": -8.344263019499643e-05,
+          "rms_gain": 0.0015235955354166988,
+          "verdict": "REFUTES_CARRY"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.9999999958113658,
+        "mean_abs_ratio": 0.9999630068758839,
+        "n": 9868,
+        "normalized_rms_error": 0.00010164128927886811,
+        "per_element_max_error_over_nemo_rms": 0.0066938382309014045,
+        "rms_ratio": 0.9999557757921441,
+        "structural_zero_reference": false
+      },
+      "vorticity": {
+        "attribution": {
+          "correlation_with_total_residual": 0.29447519271424605,
+          "residual_removal": 0.04362368457418353,
+          "rms_gain": 0.20960457488714404,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "DEBT",
+        "correlation": 0.999999999866454,
+        "mean_abs_ratio": 0.9999712972346754,
+        "n": 9868,
+        "normalized_rms_error": 2.043278464278322e-05,
+        "per_element_max_error_over_nemo_rms": 0.0004653663060988673,
+        "rms_ratio": 0.9999873500006962,
+        "structural_zero_reference": false
+      },
+      "wind": {
+        "attribution": {
+          "correlation_with_total_residual": null,
+          "residual_removal": 0.0,
+          "rms_gain": 0.0,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "UNMEASURED_ZERO_REFERENCE",
+        "correlation": null,
+        "max_abs_model": 0.0,
+        "model_rms": 0.0,
+        "normalized_rms_error": null,
+        "reference_rms": 0.0,
+        "sample_count": 9868,
+        "structural_zero_reference": true,
+        "zero_control": {
+          "identical_zero_gate": "UNMEASURED_ZERO_REFERENCE",
+          "model_exact_zero": true,
+          "oracle_exact_zero": true,
+          "planted_nonzero_fires": true,
+          "planted_nonzero_gate": "DEBT_NONZERO_AGAINST_ZERO_REFERENCE"
+        }
+      },
+      "wind_faithful": {
+        "attribution": {
+          "correlation_with_total_residual": null,
+          "residual_removal": 0.0,
+          "rms_gain": 0.0,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_gate": "UNMEASURED_ZERO_REFERENCE",
+        "correlation": null,
+        "max_abs_model": 0.0,
+        "model_rms": 0.0,
+        "normalized_rms_error": null,
+        "reference_rms": 0.0,
+        "sample_count": 9868,
+        "structural_zero_reference": true,
+        "zero_control": {
+          "identical_zero_gate": "UNMEASURED_ZERO_REFERENCE",
+          "model_exact_zero": true,
+          "oracle_exact_zero": true,
+          "planted_nonzero_fires": true,
+          "planted_nonzero_gate": "DEBT_NONZERO_AGAINST_ZERO_REFERENCE"
+        }
+      }
+    }
+  },
+  "total_metrics": {
+    "faithful_u": {
+      "campaign_gate": "DEBT",
+      "correlation": 0.9999999999981174,
+      "mean_abs_ratio": 0.9999995140708735,
+      "n": 9758,
+      "normalized_rms_error": 1.9539648558722173e-06,
+      "per_element_max_error_over_nemo_rms": 8.315661699755067e-05,
+      "rms_ratio": 0.9999995840388566
+    },
+    "faithful_v": {
+      "campaign_gate": "DEBT",
+      "correlation": 0.9999999997944569,
+      "mean_abs_ratio": 0.9999986895970492,
+      "n": 9868,
+      "normalized_rms_error": 2.939336660178095e-05,
+      "per_element_max_error_over_nemo_rms": 0.0008011401797623365,
+      "rms_ratio": 0.9999785828768776
+    },
+    "legacy_u": {
+      "campaign_gate": "DEBT",
+      "correlation": 0.9999999661960921,
+      "mean_abs_ratio": 1.0000909532419107,
+      "n": 9758,
+      "normalized_rms_error": 0.0002740311743349557,
+      "per_element_max_error_over_nemo_rms": 0.005491879143984337,
+      "rms_ratio": 1.0000976381607058
+    },
+    "legacy_v": {
+      "campaign_gate": "DEBT",
+      "correlation": 0.9999999997944569,
+      "mean_abs_ratio": 0.9999986895970492,
+      "n": 9868,
+      "normalized_rms_error": 2.939336660178107e-05,
+      "per_element_max_error_over_nemo_rms": 0.0008011401797623365,
+      "rms_ratio": 0.9999785828768776
+    }
+  },
+  "vertical_friction": {
+    "legacy_u_max_abs": 0.0,
+    "legacy_v_max_abs": 0.0,
+    "nemo_source": "stpmlf.F90:332 before :396; dynzdf.F90:134-337",
+    "status": "STRUCTURAL_ZERO_NOT_AN_OPERAND"
+  }
+}

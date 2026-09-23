@@ -121,7 +121,10 @@ def _configure_jax(precision: str) -> None:
     JAX pick its default backend; respect any value the user / SLURM
     wrapper has already set.
     """
-    if precision == "float64":
+    # float64 and mixed both need x64 (mixed = fp32 storage/compute + fp64
+    # accumulate; the fp64 accumulator requires x64).  The ocean precision
+    # POLICY (storage dtype) is set per-arm by the ocean bench, not here.
+    if precision in ("float64", "mixed"):
         os.environ["JAX_ENABLE_X64"] = "1"
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")

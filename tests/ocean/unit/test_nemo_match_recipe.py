@@ -38,7 +38,17 @@ def test_mpas_factory_selects_canonical_blocks():
     assert mc.implicit_vertical_mixing is True
     assert mc.A_h == pytest.approx(1.0e5)
     assert mc.C_smag_lap == pytest.approx(0.33)
-    assert mc.K_zeta_bih == pytest.approx(1.0e14)
+    # Filter OFF by default (user decision 2026-09-06, level-8 blowup). The
+    # mesh-scaled rule main added is kept and still reproduces the tuned 1e14
+    # at its anchor spacing -- it is simply not the default.
+    from legoesm.ocean.mpas_config import resolution_scaled_k_zeta_bih
+    assert mc.K_zeta_bih == 0.0
+    # The mesh-scaled RULE main added is kept and still exercised -- but it
+    # only fires for an UNPINNED config, because the resolver returns a
+    # pinned value unchanged ("including 0.0 = the term off", its own
+    # docstring). Passing the pinned recipe would have tested nothing.
+    assert resolution_scaled_k_zeta_bih(
+        mc.K_zeta_bih_ref_dx_m, mc._replace(K_zeta_bih=None)) == 1.0e14
     assert mc.barotropic_implicit_pcg_maxiter == 300  # MPAS: flat (not grouped)
     assert mc.normalize_freshwater is True
     assert mc.gm_redi is not None
@@ -123,10 +133,17 @@ def test_gm_treguier_requires_gm_redi():
 
 
 def test_mpas_recipe_rejects_gm_treguier_at_config_build():
-    """gm_redi_mpas raises NotImplementedError for the Treguier block, but only
-    inside the first GM tendency -- after a full model build. The recipe must
-    reject the unsupported flag up front."""
-    with pytest.raises(NotImplementedError, match="lat-lon C-grid GM/Redi"):
+    """The MPAS recipe must still refuse the Treguier flag, for a NEW reason.
+
+    gm_redi_mpas CAN now compute a Treguier kappa_GM, so the old reason ("the
+    MPAS path cannot run it") no longer holds. What it implements is the
+    SHARED variant rather than the nemo_native one the ORCA1-faithful tripole
+    card runs, and no CLI flag selects it on this lane, so a recipe enabling
+    it would quietly compare two different discretisations. The refusal is
+    now a harmonization guard; this pins that it is still refused, and that
+    the message says why.
+    """
+    with pytest.raises(NotImplementedError, match="nemo_native"):
         nemo_match_mpas_model_config(
             NEMOMatchMPASRecipeConfig(gm_treguier=True))
 
@@ -199,9 +216,20 @@ def test_tripole_factory_builds_valid_model_and_one_step_is_finite():
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     from legoesm.ocean.vertical import create_ocean_z_star
 
+    from legoesm.ocean.state import resolution_scaled_lateral_viscosity
+
     grid = create_latlon_grid(8, 16)
     z_coord = create_ocean_z_star(n_levels=3, H_max=4000.0)
     config = nemo_match_tripole_model_config()
+    # The card leaves the lateral viscosity to be derived from the mesh, and
+    # the model refuses an unresolved one; this synthetic grid stands in for a
+    # mesh whose narrowest wet cell is the anchor's, so it keeps 1e5.
+    assert config.lateral_viscosity.A_h is None
+    _lv = config.lateral_viscosity
+    config = config._replace(lateral_viscosity=_lv._replace(
+        A_h=resolution_scaled_lateral_viscosity(_lv.A_h_ref_dx_m, _lv),
+        A_h_dx_m=_lv.A_h_ref_dx_m))
+    assert config.lateral_viscosity.A_h == 1.0e5
     model = LatLonCGridOceanModel(grid, z_coord, config)
     state = rest_state_latlon_cgrid_ocean(grid, z_coord)
     new_state = model.step(state, dt=60.0)

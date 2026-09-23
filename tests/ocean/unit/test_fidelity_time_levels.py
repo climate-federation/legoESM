@@ -5,10 +5,12 @@ in one day — comparing a before-level dump against now-level T/S.
 """
 from __future__ import annotations
 
-import pytest
+import inspect
 
+import pytest
+import legoesm.ocean.fidelity.time_levels as time_levels
 from legoesm.ocean.fidelity.time_levels import (
-    _DUMP_TIME_LEVEL,   # white-box: the citation string is part of the contract
+    _DUMP_TIME_LEVEL,  # white-box: the citation string is part of the contract
     register_dump,
     select_ts,
     time_level_for_dump,
@@ -44,6 +46,32 @@ def test_ldfslp_intermediate_chain_is_registered():
         assert time_level_for_dump(name) == "before", name
 
 
+def test_row30_uv_operand_ladder_is_registered():
+    """Every new U/V write-only slot consumes the BEFORE slope state."""
+    for name in (
+        "eiv_dump_zgru_iik.bin", "eiv_dump_zgru_iikm1.bin",
+        "eiv_dump_zau.bin", "eiv_dump_zav.bin",
+        "eiv_dump_zbu_pre.bin", "eiv_dump_zbv_pre.bin",
+        "eiv_dump_zbu_post.bin", "eiv_dump_zbv_post.bin",
+        "eiv_dump_uslp_raw.bin", "eiv_dump_vslp_raw.bin",
+        "eiv_dump_uslp_postshapiro.bin", "eiv_dump_vslp_postshapiro.bin",
+    ):
+        assert time_level_for_dump(name) == "before", name
+        assert "ldfslp.F90:" in _DUMP_TIME_LEVEL[name][1], name
+
+
+def test_row30_raw_u_continuation_is_registered():
+    before = (
+        "eiv_dump_iku.bin", "eiv_dump_zfi.bin",
+        "eiv_dump_zuslp_hml_pre.bin", "eiv_dump_sint_u.bin",
+        "eiv_dump_mlterm_u.bin", "eiv_dump_blend_u.bin",
+    )
+    for name in before:
+        assert time_level_for_dump(name) == "before", name
+    for name in ("eiv_dump_e3u_miku.bin", "eiv_dump_zdepu.bin"):
+        assert time_level_for_dump(name) == "now", name
+
+
 def test_atf_after_dumps_are_after_level():
     assert time_level_for_dump("atf_dump_tem_after.bin") == "after"
     assert time_level_for_dump("atf_dump_tem_before.bin") == "before"
@@ -53,10 +81,61 @@ def test_full_paths_are_accepted():
     assert time_level_for_dump("/a/b/RUN_GDB/dump_alpha_b.bin") == "before"
 
 
+def test_realized_vmix_dumps_are_current_zdf_phy_outputs():
+    """A10: closure copied then EVD-composited in the current zdf_phy call."""
+    for name in ("dump_avm.bin", "dump_avt.bin"):
+        assert time_level_for_dump(name) == "now"
+        src = _DUMP_TIME_LEVEL[name][1]
+        assert "zdfphy.F90:311" in src, src
+        assert "applies EVD" in src, src
+        assert "MY_SRC stpmlf.F90:210" in src, src
+        assert "MY_SRC ldftra.F90:95" in src, src
+
+
+def test_realized_vmix_registry_keys_are_source_unique():
+    """REBASE-RED: duplicate dict literals silently kept only the later value."""
+    src = inspect.getsource(time_levels)
+    assert src.count('"dump_avt.bin":') == 1
+    assert src.count('"dump_avm.bin":') == 1
+
+
 def test_unregistered_dump_raises_and_never_defaults():
     """Fail-closed: a silent 'now' default is the original bug."""
     with pytest.raises(ValueError, match="no registered NEMO time level"):
         time_level_for_dump("dump_something_new.bin")
+
+
+def test_row18_direct_operand_dumps_are_registered_at_now_level():
+    """The write-only operands are read in zdftke's live-Kmm etau block."""
+    for name in ("tke_dump_etau_gdepw.bin", "tke_dump_etau_htau.bin"):
+        assert time_level_for_dump(name) == "now", name
+        assert _DUMP_TIME_LEVEL[name][1].strip(), name
+
+
+def test_row21_base_coefficient_operands_are_registered_at_now_level():
+    """The five write-only captures all consume the current tke_avn state."""
+    for name in (
+        "tke_dump_zsqen_base.bin",
+        "tke_dump_zav_base.bin",
+        "tke_dump_avm_base.bin",
+        "tke_dump_avt_base.bin",
+        "tke_dump_dissl_postavn.bin",
+    ):
+        assert time_level_for_dump(name) == "now", name
+        assert "zdftke.F90:" in _DUMP_TIME_LEVEL[name][1], name
+
+
+def test_row28_turbocline_result_is_registered_at_now_level():
+    """The direct result uses current composed avt and the live Kmm ladder."""
+    name = "zdf_dump_hmld_turb.bin"
+    assert time_level_for_dump(name) == "now"
+    assert "zdfmxl.F90:145-152" in _DUMP_TIME_LEVEL[name][1]
+
+
+def test_composed_zdf_coefficients_are_registered_at_now_level():
+    for name in ("dump_avt.bin", "dump_avm.bin"):
+        assert time_level_for_dump(name) == "now", name
+        assert "zdfphy.F90:" in _DUMP_TIME_LEVEL[name][1]
 
 
 def test_select_ts_picks_before_for_an_eos_rab_dump():

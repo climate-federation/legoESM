@@ -22,7 +22,7 @@ set +e
 # vfs-tke-fix worktree, so a post-merge submission would validate stale code).
 ROOT=/burg-archive/glab/users/pg2328/legoESM
 cd $ROOT
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 ROOT2=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1
 RUN=$ROOT2/cfgs/ORCA1/EXP00/RUN_REF

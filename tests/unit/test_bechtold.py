@@ -2288,14 +2288,14 @@ def test_ifs_ztaures_matches_oracle_piecewise():
     capped at 3 beyond 125 km — pinned at the oracle's own branch points,
     and the turnover tau actually consumes it (integration toggle)."""
     import math
-    from legoesm.atmosphere.physics.convection.bechtold import _ifs_ztaures
-    assert _ifs_ztaures(0.0) == 1.0                          # legacy sentinel
-    assert _ifs_ztaures(-5.0) == 1.0
-    assert _ifs_ztaures(50.0) == _ifs_ztaures(100.0)         # 100 m floor
-    assert abs(_ifs_ztaures(4.0e3) - (1 + math.log(2.0) ** 2)) < 1e-12
-    assert abs(_ifs_ztaures(8.0e3) - (1 + 1.6 * 8e3 / 125e3)) < 1e-12
-    assert abs(_ifs_ztaures(50.0e3) - (1 + 1.6 * 50e3 / 125e3)) < 1e-12
-    assert _ifs_ztaures(200.0e3) == 3.0                      # coarse cap
+    from legoesm.atmosphere.physics.convection.mass_flux import ifs_ztaures
+    assert ifs_ztaures(0.0) == 1.0                          # legacy sentinel
+    assert ifs_ztaures(-5.0) == 1.0
+    assert ifs_ztaures(50.0) == ifs_ztaures(100.0)         # 100 m floor
+    assert abs(ifs_ztaures(4.0e3) - (1 + math.log(2.0) ** 2)) < 1e-12
+    assert abs(ifs_ztaures(8.0e3) - (1 + 1.6 * 8e3 / 125e3)) < 1e-12
+    assert abs(ifs_ztaures(50.0e3) - (1 + 1.6 * 50e3 / 125e3)) < 1e-12
+    assert ifs_ztaures(200.0e3) == 3.0                      # coarse cap
     # integration: dx changes the mass flux on a convecting column.  Probed
     # on the tau-only turnover path — under the full CAPE closure this
     # fixture's mb_scale is pinned by the column-uniform profile limiter

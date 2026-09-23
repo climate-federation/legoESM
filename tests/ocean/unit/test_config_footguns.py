@@ -88,7 +88,10 @@ def test_validate_config_accepts_every_valid_eos():
     """Each valid eos literal must pass construction validation — locking the
     validator's set to make_eos_fn's set (no fail-fast/lazy disagreement)."""
     for scheme in VALID_EOS_SCHEMES:
-        cfg = LatLonCGridOceanConfig.from_flat(eos=scheme)
+        cfg = LatLonCGridOceanConfig.from_flat(
+            eos=scheme,
+            eos_depth="geometric" if scheme == "nemo_teos10" else "insitu",
+        )
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise
 
 
@@ -238,6 +241,18 @@ def test_validate_config_rejects_unknown_momentum_flux_scheme():
         LatLonCGridOceanModel._validate_config(bad)
 
 
+def test_validate_config_rejects_unqualified_upwind3():
+    """The bare ``"upwind3"`` names no reference model — NEMO's dynadv_up3 and
+    Oceananigans' UpwindBiased(3) select the T-point upwind branch by different
+    quantities — so a caller must name the arm it claims (``nemo_up3`` /
+    ``oceananigans_up3``) or fail construction."""
+    bad = LatLonCGridOceanConfig.from_flat(
+        momentum_advection="flux_form", momentum_flux_scheme="upwind3",
+    )
+    with pytest.raises(ValueError, match="momentum_flux_scheme must be one of"):
+        LatLonCGridOceanModel._validate_config(bad)
+
+
 # ---------------------------------------------------------------------------
 # Footgun 4 — tracer_advection dispatch (validated only at runtime before)
 # ---------------------------------------------------------------------------
@@ -318,9 +333,110 @@ def test_valid_tracer_advection_matches_dispatch_branches():
 
 
 def test_validate_config_accepts_flux_form_with_valid_scheme():
-    """flux_form with a valid momentum_flux_scheme passes construction."""
-    for scheme in ("upwind", "centered"):
+    """flux_form with a valid momentum_flux_scheme passes construction.
+
+    The two UP3 arms are separate scheme names (``nemo_up3`` /
+    ``oceananigans_up3``) because their references pick the T-point upwind
+    branch differently; the unqualified ``"upwind3"`` names no reference and
+    is refused (see test below)."""
+    for scheme in ("upwind", "centered", "oceananigans_up3"):
         cfg = LatLonCGridOceanConfig.from_flat(
             momentum_advection="flux_form", momentum_flux_scheme=scheme,
+        )
+        LatLonCGridOceanModel._validate_config(cfg)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Footgun 5 — S-42 BBL: in-model hook is rk3_ws-only, not lane-agnostic
+# ---------------------------------------------------------------------------
+
+
+def test_validate_config_rejects_bbl_in_stage_off_the_rk3_ws_lane():
+    """bbl_adv_option=2 (NEMO's in-stage Campin-Goosse BBL, nn_bbl_adv=2) is
+    honoured ONLY on tracer_time_integrator='rk3_ws' -- the ``elif _tti ==
+    "rk3_ws":`` branch is the sole site that builds the BBL context and folds
+    bbl_transports/apply_bbl_adv_tendency into the stage-3 tracer RHS. On the
+    default euler lane (and ab2/rk3) the field resolves but is never read, so
+    a user setting it gets NO boundary layer with no warning
+    (docs/ocean/fidelity/nemo_branch_isomorphism_map.md, S-42). Must raise at
+    construction instead."""
+    bad = LatLonCGridOceanConfig.from_flat(
+        tracer_time_integrator="euler", bbl_adv_option=2, bbl_gamma_s=20.0,
+    )
+    with pytest.raises(ValueError, match="bbl_adv_option=2 is not honoured"):
+        LatLonCGridOceanModel._validate_config(bad)
+
+
+def test_validate_config_accepts_bbl_in_stage_on_the_rk3_ws_lane():
+    """The one lane that DOES honour bbl_adv_option=2 (rk3_ws, the certified
+    OVERFLOW-zps composition) must still construct cleanly."""
+    ok = LatLonCGridOceanConfig.from_flat(
+        tracer_time_integrator="rk3_ws", momentum_time_integrator="rk3_ws",
+        tracer_advection="fct2", momentum_advection="flux_form",
+        momentum_flux_scheme="nemo_up3", vertical_momentum_scheme="nemo_up3",
+        bbl_adv_option=2, bbl_gamma_s=20.0,
+    )
+    LatLonCGridOceanModel._validate_config(ok)  # must not raise
+
+
+def test_validate_config_accepts_bbl_off_on_any_lane():
+    """bbl_adv_option=0 (the default, off) is lane-agnostic -- the new guard
+    must not false-reject a config that simply never asked for in-model BBL."""
+    for lane in ("euler", "ab2", "rk3"):
+        cfg = LatLonCGridOceanConfig.from_flat(
+            tracer_time_integrator=lane, bbl_adv_option=0,
+        )
+        LatLonCGridOceanModel._validate_config(cfg)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Footgun 6 — S-46/S-47 nemo_up3 requires momentum_time_integrator='rk3_ws'
+# ---------------------------------------------------------------------------
+
+
+def test_validate_config_rejects_nemo_up3_off_the_rk3_ws_lane():
+    """momentum_flux_scheme='nemo_up3' selects NEMO's dyn_adv_up3 T-point
+    upwind SELECTOR on its own (S-46: keyed by the reference, not the time
+    integrator -- 9bbf9f7bd). But NEMO's own face THICKNESS for that same
+    routine, e3u(Kmm), is wired only inside the momentum_time_integrator=
+    'rk3_ws' stage program (S-47, 60d0c5420); every other integrator falls
+    back to the legacy min-of-stretched-face-thickness rule S-47 measured as
+    first-order wrong. nemo_up3 paired with any other momentum_time_integrator
+    is therefore a combination NEMO itself never runs, and must raise at
+    construction."""
+    for lane in ("euler", "rk3"):  # momentum_time_integrator has no "ab2" arm
+        bad = LatLonCGridOceanConfig.from_flat(
+            momentum_advection="flux_form", momentum_flux_scheme="nemo_up3",
+            momentum_time_integrator=lane, tracer_time_integrator=lane,
+        )
+        with pytest.raises(
+            ValueError, match="requires momentum_time_integrator='rk3_ws'"
+        ):
+            LatLonCGridOceanModel._validate_config(bad)
+
+
+def test_validate_config_accepts_nemo_up3_on_the_rk3_ws_lane():
+    """The one lane NEMO actually runs nemo_up3 on -- rk3_ws, which wires the
+    S-47 face-thickness fix -- must still construct cleanly."""
+    ok = LatLonCGridOceanConfig.from_flat(
+        tracer_time_integrator="rk3_ws", momentum_time_integrator="rk3_ws",
+        tracer_advection="fct2", momentum_advection="flux_form",
+        momentum_flux_scheme="nemo_up3", vertical_momentum_scheme="nemo_up3",
+    )
+    LatLonCGridOceanModel._validate_config(ok)  # must not raise
+
+
+def test_validate_config_accepts_oceananigans_up3_on_every_non_rk3_ws_lane():
+    """oceananigans_up3 is the OTHER UP3 reference arm (Silvestri/Oceananigans,
+    not NEMO) -- the new nemo_up3 x rk3_ws pairing guard must not false-reject
+    it on any lane. rk3_ws itself is excluded: it already requires
+    momentum_flux_scheme='nemo_up3' specifically (a separate, pre-existing
+    guard -- test_validate_config_accepts_nemo_up3_on_the_rk3_ws_lane above),
+    so oceananigans_up3 cannot pair with rk3_ws regardless of this guard."""
+    for lane in ("euler", "rk3"):  # momentum_time_integrator has no "ab2" arm
+        cfg = LatLonCGridOceanConfig.from_flat(
+            momentum_advection="flux_form",
+            momentum_flux_scheme="oceananigans_up3",
+            momentum_time_integrator=lane, tracer_time_integrator=lane,
         )
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise

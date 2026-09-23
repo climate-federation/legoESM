@@ -58,6 +58,7 @@ __param_spec__ = {
             "tke_surface_min": "numerics: floor/cap",
         },
         "params": {
+            "surface_flux_coeff": {"units": "1", "bounds": (0.5, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "FESOM2 namelist tke_cd (3.75) / Veros surface TKE flux (1.0)", "shape": None},
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "lc_coeff": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_lc / Axell 2002 Langmuir cells", "shape": None},
             "etau_frac": {"units": "1", "bounds": (0.01, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_efr sub-ML TKE penetration", "shape": None},
@@ -287,6 +288,10 @@ class TKEConfig(NamedTuple):
     #                             the implicit solve. ~60x larger surface TKE
     #                             than the flux BC under an ~0.07 Pa wind.
     surface_bc: str = "veros_flux"
+    # Multiplies the Veros wind-work surface TKE flux (|tau|/rho0)^1.5.
+    # FESOM2 applies cd = 3.75 (namelist tke_cd); Veros uses 1.0.
+    # Default 1.0 keeps existing runs bit-identical.
+    surface_flux_coeff: float = 1.0
     # Surface TKE BC PLACEMENT (Phase-2 #1317 T3 — the #1 ranked suspect).
     # NEMO holds en(1) at the z=0 W-POINT and SOLVES the tridiagonal from
     # jk=2, the first INTERIOR w-level (zdftke.F90:264,403-410).
@@ -349,6 +354,12 @@ class TKEConfig(NamedTuple):
     #   ``T_n2b``/``S_n2b`` to ``tke_vertical_mixing``; Prandtl zri and the
     #   Langmuir PE integral are evaluated on that TRUE Nbb level.
     tke_n2_time_level: str = "step_entry"
+    # Evaluation lifetime of NEMO's rn2/rn2b and live W-grid geometry.
+    # ``implicit_solve_state`` (default, BIT-IDENTICAL legacy) rebuilds them
+    # from the state presented to the implicit solve. ``step_entry`` consumes
+    # a frozen TKEEntryN2Bundle built before the explicit update, matching
+    # stpmlf.F90:204-210 -> zdf_phy. Complete DINO NEMO cards select it.
+    tke_n2_evaluation_stage: str = "implicit_solve_state"
     # ----- Veros vertical-metric slots (the TKE metric-consistency fix) -----
     # legoESM's historical TKE chain mixes vertical-metric conventions: it
     # uses the centre spacing ``dz_half`` (Veros dzw) in slots where Veros
@@ -572,6 +583,50 @@ class TKEConfig(NamedTuple):
     #   geometry; construction raises otherwise) and the same raw C-grid
     #   face state that mode already requires.
     tke_shear_avm_weighting: str = "tpoint"
+    # Which closure coefficients feed the PRE-solve zdftke chain.
+    # ``current_subiteration`` is the historical legoESM formulation.
+    # ``carried_previous_step`` is NEMO's avm_k/avt_k lifetime: the pair
+    # carried from the preceding step feeds zdf_sh2, Prandtl, the TKE matrix
+    # and RHS, and is overwritten only by post-solve tke_avn.
+    tke_preclosure_coeff_source: str = "current_subiteration"
+    # TKE diffusion-matrix evaluation. ``factored`` is the historical shared
+    # solver construction. ``nemo_literal`` evaluates zdftke.F90:499-510 in
+    # source order from carried avm/dissl and raw live e3t/e3w operands.
+    # Complete DINO NEMO cards select the literal form; every generic and
+    # non-oracle card retains the byte-identical factored default.
+    tke_matrix_evaluation: str = "factored"
+    # Solver recurrence. ``shared_thomas`` preserves the generic historical
+    # path; complete DINO NEMO cards select the literal zdftke scan order.
+    tke_solver_evaluation: str = "shared_thomas"
+    # Arithmetic used by the nn_etau penetration profile. ``jax_expression``
+    # is the historical single jnp.exp call. ``nemo_literal`` reproduces the
+    # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
+    # the two complete DINO oracle cards select it.
+    tke_etau_exponential_evaluation: str = "jax_expression"
+    # Latitude-profile arithmetic for nn_htau=1. ``jax_expression`` is the
+    # historical jnp.deg2rad+jnp.sin path. ``nemo_literal`` consumes native
+    # mesh degrees and transcribes glibc-2.34's two-lane vector SIN arithmetic.
+    # Only complete DINO oracle cards select it.
+    tke_htau_evaluation: str = "jax_expression"
+    # Raw nn_mxl buoyancy length. ``factored`` preserves the historical
+    # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses
+    # zdftke.F90 source association and NEMO's runtime rsmall.
+    tke_mxl_raw_evaluation: str = "factored"
+    # Langmuir source evaluation. ``vectorized`` is the historical shared
+    # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
+    # order, including the per-column mbkt+1 no-crossing fallback. Only the
+    # complete DINO NEMO cards select it; all other cards remain vectorized.
+    tke_langmuir_evaluation: str = "vectorized"
+    # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
+    # evaluates from the state handed to the implicit solve.  Complete DINO
+    # NEMO cards instead freeze p_sh2 from the step-entry NOW/BEFORE faces and
+    # carried avm_k, matching zdfphy.F90:268 before the explicit update reaches
+    # zdftke.F90.  Kept legacy by default so all other cards remain unchanged.
+    tke_shear_evaluation_stage: str = "implicit_solve_state"
+    # Vertical divisor in face-native zdf_sh2.  Historical legoESM uses one
+    # T-point dz_half(J_now) for both factors.  Complete DINO NEMO cards use
+    # the live QCO u/v-face metrics at NOW and BEFORE separately.
+    tke_shear_metric_source: str = "tpoint_jacobian"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
     #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor
@@ -974,3 +1029,76 @@ class VerticalMixingConfig(NamedTuple):
     # Unknown values raise (dispatch hardening); consulted only by
     # ``compute_vertical_K_profiles`` (k_profiles.py).
     vmix_background_mode: str = "additive"
+
+
+# --- FESOM2-JAX FORCA20 TKE constants (fesom_jax/config.py, fesom_jax/tke.py,
+#     fesom_jax/cvmix_tke.py; CORE2 namelist) ---
+_FESOM2_TKE_CD = 3.75           # namelist tke_cd: surface TKE flux coefficient
+_FESOM2_TKE_C66 = 6.6           # Prandtl law Pr = clamp(6.6 Ri, 1, 10)
+_FESOM2_A_VER = 1.0e-4          # background vertical viscosity [m^2/s]
+_FESOM2_K_VER = 1.0e-5          # background vertical diffusivity [m^2/s]
+_FESOM2_KAPPAM_MAX = 100.0      # KappaM ceiling [m^2/s]
+_FESOM2_TKE_MIN = 1.0e-6        # TKE floor [m^2/s^2]
+
+
+def tke_fesom2_card() -> TKEConfig:
+    """TKE constant set matching the FESOM2-JAX reference closure (TkeConfig).
+
+    Field-by-field mapping to FESOM2 (fesom_tke.c / cvmix_tke, TkeConfig):
+
+    - prognostic=True             FESOM2 carries prognostic TKE (one backward-
+                                   Euler step per model step); legoESM default
+                                   is the diagnostic Mode-B chain.
+    - prandtl_mode="richardson"   FESOM2 Pr = clamp(6.6*Ri, 1, 10); the Veros
+                                   "richardson" branch is clamp(prandtl_ri_coeff*Ri, 1, 10).
+    - prandtl_ri_coeff=6.6        FESOM2 TKE_C66.
+    - enable_kappaH_profile=False FESOM2 background Kv is a constant (no Bryan-Lewis).
+    - kappaM_min=1.0e-4           FESOM2 A_VER (background Av).
+    - kappaH_min=1.0e-5           FESOM2 K_VER (background Kv).
+    - kappaM_max=100.0            FESOM2 kappaM_max (binds only off the "unit" Prandtl path).
+    - tke_background=1.0e-6       FESOM2 tke_min (interior floor).
+    - tke_surface_min=1.0e-6      FESOM2 has ONE floor (tke_min); legoESM's
+                                   separate 1e-4 surface floor would hold 100x
+                                   FESOM's TKE under weak wind.
+    - surface_bc="veros_flux"     FESOM2 Neumann (flux) surface BC.
+    - surface_flux_coeff=3.75     FESOM2 namelist tke_cd multiplying (|tau|/rho0)^1.5.
+    - kappa_convention="veros_sqrte"  FESOM2 KappaM = c_k*mxl*sqrt(tke) (Veros);
+                                   the legacy Gaspar form uses sqrt(2 tke).
+    - n2_mode="nemo_bn2"          SIGNED N^2 from the locally linearised EOS
+                                   (NEMO bn2: alpha dT/dz - beta dS/dz), the same
+                                   construction as FESOM2's pressure_bv; a signed
+                                   mode also selects the Veros/FESOM2 single
+                                   buoyancy length with the wall recursion for
+                                   mxl_choice 2, where the legacy clipped in-situ
+                                   N^2 selects the two-cell Bougeault-Lacarrere
+                                   cap. ("adiabatic" is not wired on MPAS.)
+
+    Already equal by default and left untouched: c_k 0.1, c_eps 0.7,
+    alpha_tke 30, mxl_min 1e-8, tke_mxl_choice 2 (Blanke-Delecluse).
+
+    NOT matched: the surface-flux injection thickness -- FESOM2 divides the
+    flux by hnode/2 (cvmix_tke dzt_surf, Veros' 0.5*dzw_top) while the legacy
+    slots here divide by the interior centre spacing (half the source on
+    equal layers); the Veros slots (veros_dz_slots=True) are not wired on the
+    MPAS ocean, so the card keeps the legacy slots on BOTH lanes rather than
+    differ per lane. FESOM2 adds its Av/Kv backgrounds to the TKE-derived
+    diffusivities, legoESM applies kappaM_min/kappaH_min as floors (max), so
+    the two differ where the closure's K falls below the background; FESOM2's
+    tke_min is a per-step hard floor on the field, legoESM's tke_background is
+    the closure's seed/floor value, not a bit-identical implementation.
+    """
+    return TKEConfig(
+        prognostic=True,
+        prandtl_mode="richardson",
+        prandtl_ri_coeff=_FESOM2_TKE_C66,
+        enable_kappaH_profile=False,
+        kappaM_min=_FESOM2_A_VER,
+        kappaH_min=_FESOM2_K_VER,
+        kappaM_max=_FESOM2_KAPPAM_MAX,
+        tke_background=_FESOM2_TKE_MIN,
+        tke_surface_min=_FESOM2_TKE_MIN,
+        surface_bc="veros_flux",
+        surface_flux_coeff=_FESOM2_TKE_CD,
+        kappa_convention="veros_sqrte",
+        n2_mode="nemo_bn2",
+    )
