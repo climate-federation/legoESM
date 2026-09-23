@@ -262,6 +262,7 @@ def main():
             acc_ac = np.zeros_like(qcn)
             acc_au = np.zeros_like(qcn)
             acc_cd = np.zeros_like(qcn)
+            cd_available = [True]
             n_clamped = [0]
             for _ in range(nrep):
                 o = micro_fn(Tc, qvc, hy, p_full, p_half, rho, dz, dts, mcfg)
@@ -272,12 +273,16 @@ def main():
                 # Condensation SOURCE, published by the scheme, so the budget
                 # closes without re-deriving it.
                 _s = o.dq_v_to_qc_dt
-                if _s is not None:
+                if _s is None:
+                    cd_available[0] = False
+                else:
                     acc_cd = acc_cd + np.asarray(_s) * dts
-                # Is the donor clamp BINDING at this step length?  If the
-                # pre-clamp sink would remove more than the reservoir the
-                # recomputed rates above overstate the removal, and they would
-                # overstate it MORE at the long step.
+                # WARM-RAIN-ONLY reservoir exceedance count.  The scheme's
+                # actual donor clamp (morrison.py:985) scales a LARGER sink set
+                # -- evaporation, Bergeron, riming, homogeneous freezing -- so
+                # this is a lower bound on clamp activity, not the clamp itself.
+                # Where it binds, the per-term rates printed above are PRE-clamp
+                # and overstate the applied removal.
                 _tot = np.asarray(_au_i) + np.asarray(_ac_i)
                 clamped_cells = int(np.sum((_tot * dts > np.asarray(qcc))
                                            & (np.asarray(qcc) > 0.0) & band))
@@ -293,11 +298,17 @@ def main():
             vu = masked_rate(acc_au / tot, dp, A, g, band) * _DAY
             print(f"[{a.label}]   {label:26s} net sink over {tot:.1f} s: "
                   f"{v:12.6e} kg/m2/day in the band")
-            vc = masked_rate(acc_cd / tot, dp, A, g, band) * _DAY
+            vc = (f"{masked_rate(acc_cd / tot, dp, A, g, band) * _DAY:12.6e}"
+                  if cd_available[0] else "  UNAVAILABLE")
             print(f"[{a.label}]   {'':26s}   accretion alone: {va:12.6e}   "
                   f"autoconversion alone: {vu:12.6e} kg/m2/day")
-            print(f"[{a.label}]   {'':26s}   condensation SOURCE: {vc:12.6e} kg/m2/day; "
-                  f"donor clamp bound in {n_clamped[0]} band cell-steps")
+            print(f"[{a.label}]   {'':26s}   condensation SOURCE: {vc} kg/m2/day "
+                  f"(UNAVAILABLE = the scheme does not publish it; NOT zero)")
+            print(f"[{a.label}]   {'':26s}   warm-rain-only reservoir exceedances: "
+                  f"{n_clamped[0]} band cell-steps.  The scheme's donor clamp "
+                  f"(morrison.py:985) also carries evaporation, freezing and ice "
+                  f"collection, so this is a LOWER bound on clamp activity and "
+                  f"says nothing about how much mass each arm loses to limiting.")
 
 
 if __name__ == "__main__":
