@@ -4,7 +4,6 @@ The closure test is the point of the diagnostic: the accumulated terms must
 reproduce the ACTUAL change in band inventory, including the part caused by the
 grid moving under the tracer.  Everything else here is guard rails.
 """
-import numpy as np
 import pytest
 
 import jax
@@ -14,6 +13,17 @@ from legoesm.diagnostics.qc_band_budget import CloudWaterBandBudget
 from legoesm.diagnostics.process_ledger import pressure_band_weight
 
 P_LO, P_HI, G = 5.0e4, 8.0e4, 9.80616
+
+
+def _terms(key, i, ncol, nlev):
+    k = jax.random.fold_in(key, i)
+    return {
+        "condensation": jax.random.uniform(k, (ncol, nlev)) * 2.0e-7,
+        "accretion": -jax.random.uniform(
+            jax.random.fold_in(k, 1), (ncol, nlev)) * 1.0e-7,
+        "riming": -jax.random.uniform(
+            jax.random.fold_in(k, 2), (ncol, nlev)) * 5.0e-8,
+    }
 
 
 def _grid(ncol, nlev, p_s):
@@ -57,17 +67,11 @@ def test_budget_closes_against_the_actual_inventory_change():
         return jnp.full((ncol,), 1.0e5) + 3.0e3 * jnp.sin(
             jnp.arange(ncol) + i * 0.1)
 
+    q0 = q
     ph, dp = _grid(ncol, nlev, ps_at(0))
     bud.begin_window(q, dp, ph)
     for i in range(nstep):
-        k = jax.random.fold_in(key, i)
-        terms = {
-            "condensation": jax.random.uniform(k, (ncol, nlev)) * 2.0e-7,
-            "accretion": -jax.random.uniform(
-                jax.random.fold_in(k, 1), (ncol, nlev)) * 1.0e-7,
-            "riming": -jax.random.uniform(
-                jax.random.fold_in(k, 2), (ncol, nlev)) * 5.0e-8,
-        }
+        terms = _terms(key, i, ncol, nlev)
         ph_new, dp_new = _grid(ncol, nlev, ps_at(i + 1))
         bud.accumulate(terms, q, dp, ph, dp_new, ph_new, dt)
         q = q + dt * sum(terms.values())
@@ -82,17 +86,26 @@ def test_budget_closes_against_the_actual_inventory_change():
         f"against scale {scale:.3e}")
     assert out["window_days"] == pytest.approx(nstep * dt / 86400.0)
 
-    # Non-vacuity 1: drop a process term.
-    broken = (float(out["inventory_change"])
-              - (float(out["sum_of_terms"]) - float(out["terms"]["accretion"])))
-    assert abs(broken) > 1.0e-6 * scale
-    # Non-vacuity 2: drop the mass-redistribution term.
-    broken2 = (float(out["inventory_change"])
-               - (float(out["sum_of_terms"])
-                  - float(out["mass_redistribution"])))
-    assert abs(broken2) > 1.0e-6 * scale, (
-        "the moving grid must contribute, or this test cannot detect its "
-        "omission and the whole point of the term is untested")
+    # NON-VACUITY, behavioural: re-run the identical sequence while LYING to
+    # the accumulator about the grid, so it cannot form the mass term.  This is
+    # the failure a naive implementation actually has, and it must break
+    # closure rather than be caught by arithmetic on the result.
+    q2 = q0
+    bud2 = CloudWaterBandBudget(P_LO, P_HI, area, G, names)
+    ph2, dp2 = _grid(ncol, nlev, ps_at(0))
+    bud2.begin_window(q2, dp2, ph2)
+    for i in range(nstep):
+        terms = _terms(key, i, ncol, nlev)
+        ph_new, dp_new = _grid(ncol, nlev, ps_at(i + 1))
+        # the lie: claim the grid did not move
+        bud2.accumulate(terms, q2, dp2, ph2, dp2, ph2, dt)
+        q2 = q2 + dt * sum(terms.values())
+        ph2, dp2 = ph_new, dp_new
+    out2 = bud2.close_window(q2, dp2, ph2)
+    assert abs(float(out2["residual"])) > 1.0e-6 * scale, (
+        "a budget blind to the moving grid must FAIL to close; if it closes "
+        "anyway the mass-redistribution term is untested and the closure "
+        "proves nothing about it")
 
 
 def test_missing_or_unregistered_terms_raise_rather_than_pass_silently():
@@ -127,6 +140,8 @@ def test_state_round_trips_for_the_restart_chain():
                  q, dp, ph, dp, ph, 600.0)
     b = CloudWaterBandBudget(P_LO, P_HI, area, G, ("x", "y"))
     b.set_state(a.get_state())
+    with pytest.raises(KeyError):
+        b.set_state({"elapsed_s": jnp.asarray(1.0)})   # truncated sidecar
     assert float(b.terms["x"]) == pytest.approx(float(a.terms["x"]))
     assert float(b.terms["y"]) == pytest.approx(float(a.terms["y"]))
     assert b.elapsed_s == pytest.approx(a.elapsed_s)

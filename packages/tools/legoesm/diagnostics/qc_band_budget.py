@@ -25,6 +25,15 @@ change as surface pressure moves and the change in which layers lie in the
 band.  Without it the budget appears to close only when surface pressure is
 static and silently mis-attributes otherwise.
 
+WHAT THE CLOSURE DOES NOT PROVE.  The identity holds for ANY G used
+consistently, so a wrong band weight, a wrong ``g`` or a wrong area
+normalisation cancels exactly between the inventory, the terms and the
+redistribution and leaves the residual at round-off.  The closure detects
+INCONSISTENCY, not incorrectness.  The weights are validated separately, by the
+range and partition-of-unity test on ``pressure_band_weight``; the area
+normalisation is validated nowhere and a wrong one silently rescales every
+number while still closing.  Do not read "it closes" as "the weights are right".
+
 Band weights are FRACTIONAL (``process_ledger.pressure_band_weight``), so a
 band edge need not fall on a layer interface and two arms on different vertical
 grids integrate the same pressure interval.
@@ -75,8 +84,9 @@ class CloudWaterBandBudget:
         self.term_names = tuple(term_names)
         self.reset()
 
-    def _inventory(self, q, dp, p_half):
-        w = pressure_band_weight(p_half, self.p_lo, self.p_hi)
+    def _inventory(self, q, dp, p_half, w=None):
+        if w is None:
+            w = pressure_band_weight(p_half, self.p_lo, self.p_hi)
         return jnp.sum(self.area_w[:, None] * q * dp * w) / self.g
 
     def reset(self) -> None:
@@ -123,9 +133,10 @@ class CloudWaterBandBudget:
         for k in self.term_names:
             self.terms[k] = self.terms[k] + (
                 jnp.sum(aw * terms[k] * dp_new * w_new) / self.g * dt)
+        w_old = pressure_band_weight(p_half_old, self.p_lo, self.p_hi)
         self.mass_redistribution = self.mass_redistribution + (
-            self._inventory(q_c_old, dp_new, p_half_new)
-            - self._inventory(q_c_old, dp_old, p_half_old))
+            self._inventory(q_c_old, dp_new, p_half_new, w_new)
+            - self._inventory(q_c_old, dp_old, p_half_old, w_old))
         self.elapsed_s = self.elapsed_s + dt
 
     def close_window(self, q_c, dp, p_half) -> dict:
@@ -167,9 +178,18 @@ class CloudWaterBandBudget:
         return st
 
     def set_state(self, state: Mapping[str, jax.Array]) -> None:
+        # A truncated sidecar must NOT leave terms silently at zero: that
+        # surfaces only as a large residual after the window closes, long after
+        # the cause. The term set is fixed at construction, so absence is a
+        # real error (GLM review, 2026-09-23).
+        absent = [k for k in self.term_names if f"term.{k}" not in state]
+        if absent:
+            raise KeyError(
+                f"sidecar is missing accumulated terms {sorted(absent)}; "
+                f"restoring would silently zero them and the window would "
+                f"close with an unexplained residual")
         for k in self.term_names:
-            if f"term.{k}" in state:
-                self.terms[k] = jnp.asarray(state[f"term.{k}"])
+            self.terms[k] = jnp.asarray(state[f"term.{k}"])
         if "mass_redistribution" in state:
             self.mass_redistribution = jnp.asarray(state["mass_redistribution"])
         if "elapsed_s" in state:
