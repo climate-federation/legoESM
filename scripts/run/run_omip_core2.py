@@ -3424,9 +3424,13 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 and int(args.runoff_spread_passes) < 0:
             raise SystemExit("--runoff-spread-passes must be >= 0 "
                              f"(got {args.runoff_spread_passes})")
-        # Default 8 passes, matching the MPAS unstructured default (same
-        # mechanism: the IDW k=4 regrid concentrates each river into ~4
-        # cells; see the MPAS spread-passes sensitivity note in main()).
+        # Default 8 passes, now the default on EVERY grid rather than on the
+        # unstructured ones only (harmonized 2026-09-23, user decision; see
+        # the note at the main path's resolution). The mechanism argued here
+        # originally -- the IDW k=4 regrid concentrates each river into ~4
+        # cells -- is real but was reasoning by analogy from MPAS; the
+        # measured sensitivity is still MPAS's, and no equivalent sweep has
+        # ever been run on this lane.
         _spread = (int(args.runoff_spread_passes)
                    if args.runoff_spread_passes is not None else 8)
         # Wet mask for the spread = TOP-LAYER wet nodes
@@ -7353,11 +7357,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="HORIZONTAL coastal-spread passes for the regridded "
                         "runoff (ocean-masked neighbour-average; Voronoi-topology "
                         "on MPAS, structured laplacian elsewhere). Default None = "
-                        "8 on MPAS (big rivers over-concentrate in ~4 IDW cells; "
-                        "spread-passes sensitivity-tuned), "
-                        "2 on lat-lon/cube. The area-conservative renorm keeps the "
-                        "global total exact. Distinct from --runoff-depth-spread-m "
-                        "(VERTICAL spread).")
+                        "8 on EVERY grid, harmonized 2026-09-23: it was 8 on the "
+                        "unstructured meshes and 2 on the structured ones, which "
+                        "no run command ever selected, so the OMIP grids ran "
+                        "different river treatments by accident. 8 is the value "
+                        "with a measured sensitivity behind it (Amazon SSS bias "
+                        "-1.04 at 2 passes against -0.335 at 8; global SSS rmse "
+                        "1.046 against 0.990). The area-conservative renorm keeps "
+                        "the global total exact. Distinct from "
+                        "--runoff-depth-spread-m (VERTICAL spread).")
     p.add_argument("--river-mouth-restoring-gate",
                    # Also declares --no-river-mouth-restoring-gate.
                    action=argparse.BooleanOptionalAction, default=False,
@@ -9484,8 +9492,20 @@ def main() -> int:
             raise SystemExit(
                 "--runoff-spread-passes must be >= 0 "
                 f"(got {args.runoff_spread_passes})")
+        # HARMONIZED 2026-09-23 (user decision): 8 on EVERY grid, not 8 on
+        # MPAS and 2 elsewhere. The per-grid branch that used to live here was
+        # a hidden choice -- nothing in any run command selected either value,
+        # and the three OMIP grids therefore ran three different river
+        # treatments that nobody had picked. 8 is the value with measured
+        # support (the MPAS sensitivity recorded above), so the harmonization
+        # goes UP to it rather than down to 2.
+        #
+        # This also moves the lat-lon and cube lanes from 2 to 8. Said out
+        # loud because it is a behaviour change beyond the three OMIP grids
+        # the decision was about; the area-conservative renorm keeps the
+        # global total exact on every lane either way.
         _spread = int(args.runoff_spread_passes) if args.runoff_spread_passes is not None \
-            else (8 if app_grid_type == "mpas" else 2)
+            else 8
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread,
