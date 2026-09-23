@@ -281,14 +281,6 @@ classical:
   orbital_insolation: true
   convective_rain_to_surface: true
   rrtmgp_gpoint_batch_size: 8
-  # Radiation solves in blocks of this many columns, each block checkpointed,
-  # so the backward pass recomputes one block instead of holding them all.
-  # This deck's max-random overlap hands the solver 8 sub-columns per grid
-  # column -- 18432 x 8 = 147456 columns -- and the un-blocked gradient over
-  # them asked for 490 GiB on an 80 GB card (job 27605892 died there). 4608
-  # divides 147456 exactly (32 blocks) and brings that to ~15 GiB; the cost
-  # is one extra radiation forward per block.
-  rrtmgp_column_chunk_size: 4608
   # Where training STARTS: the production values, seeded into the trainable
   # leaves rather than pinned, so each one still trains from there.
   param_init:
