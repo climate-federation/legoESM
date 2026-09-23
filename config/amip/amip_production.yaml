@@ -27,13 +27,19 @@
 # observations.  Over its first twenty-five days it sits about 25 W/m2 out of
 # top-of-atmosphere energy balance, against about 2 W/m2 for the Sundqvist/L36
 # arm, because its clouds reflect far too little sunlight.  The cause is known
-# and is NOT yet fixed: cloud water is being rimed onto falling ice (71% of the
-# liquid deficit is below freezing, 70% of that lands in snow + graupel, and
-# graupel more than doubles).  See amip_runs/_cam6/PREREGISTRATION.md.
+# and is NOT yet fixed: cloud water is being rimed onto falling ice.  The
+# supporting measurement, on the two arms' day-5 states: 71% of the liquid
+# deficit lies below freezing, 70% of that cold deficit is accounted for by
+# the snow + graupel increase, and graupel more than doubles column-wide.
 #
-# Pair record: amip_runs/_cam6/PREREGISTRATION.md (cam6_base60 = the
+# EVIDENCE AND PAIR RECORD live in the RUN TREE, which is deliberately NOT in
+# this repository (runtime outputs are gitignored):
+#   /work/bd1083/b309178/diffESM/legoesm_pg/amip_runs/_cam6/PREREGISTRATION.md
+# on the Levante deployment.  It records the pair (cam6_base60 = the
 # Sundqvist/L36 deck, cam6_suite60 = this one; 60-day cold starts, scored
-# days 31-60 vs ERA5).
+# days 31-60 vs ERA5), the resolved-config diff, and every measurement cited
+# above.  A reader without that tree should treat the numbers here as
+# unverifiable rather than as repository facts.
 #
 # NOT YET CAM6 (run 2+): MG2 microphysics (Morrison mg flavour stands in),
 # ridge-based orographic drag (needs the ridge-statistics dataset), MAM4

@@ -8,6 +8,11 @@
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --output=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs/slurm_logs/%x-%j.out
+# FOLLOWS PRODUCTION, DELIBERATELY (2026-09-23): the production deck became
+# the CAM6 suite on that date and this script keeps naming it, because its
+# job is to run whatever the authoritative production configuration IS, not
+# to reproduce one past run.  Runs started before that date continued from a
+# checkpoint must name config/amip/amip_sundqvist_l36.yaml instead.
 #
 # MPAS-lane AMIP CMIP chain on DKRZ Levante GPU (2026-07-23), adapted from the
 # proven cube-lane /scratch/b/b309178/amip_decade/amip365_chain.sbatch with

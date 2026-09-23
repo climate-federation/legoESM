@@ -8,6 +8,11 @@
 #SBATCH --time=11:59:00
 #SBATCH --requeue
 #SBATCH --output=results/amip/prod_1979/slurm_%j.out
+# FOLLOWS PRODUCTION, DELIBERATELY (2026-09-23): the production deck became
+# the CAM6 suite on that date and this script keeps naming it, because its
+# job is to run whatever the authoritative production configuration IS, not
+# to reproduce one past run.  Runs started before that date continued from a
+# checkpoint must name config/amip/amip_sundqvist_l36.yaml instead.
 # =============================================================================
 # Self-chaining PRODUCTION AMIP run on Ginsburg (Columbia) — authoritative C48/L40
 # config (config/amip/amip_production.yaml) with the REAL staged inputs (ERA5 IC +

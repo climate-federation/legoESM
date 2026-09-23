@@ -263,20 +263,26 @@ def test_production_deck_selects_both_levers_and_no_other_deck_does():
     The outgoing Sundqvist/L36 deck is named explicitly rather than matched by
     exclusion, because it is the paired baseline of the run-1 comparison and
     the whole point of keeping it is that it carries NEITHER lever."""
-    import yaml
+    from legoesm.driver.run_config_yaml import read_yaml_with_includes
     cfgdir = pathlib.Path(__file__).parents[2] / "config"
-    doc = yaml.safe_load((cfgdir / "amip" / "amip_production.yaml").read_text())
+    doc = read_yaml_with_includes(cfgdir / "amip" / "amip_production.yaml")
     assert doc["mpas_div_damp4_scale"] == 1.0
     assert doc["mpas_vert_advection_scheme"] == "sb"
     assert DycoreConfig().mpas_div_damp4_scale == 0.0
     assert DycoreConfig().mpas_vert_advection_scheme == "upwind"
-    base = yaml.safe_load((cfgdir / "amip" / "amip_sundqvist_l36.yaml").read_text())
+    base = read_yaml_with_includes(cfgdir / "amip" / "amip_sundqvist_l36.yaml")
     assert base.get("mpas_div_damp4_scale", 0.0) == 0.0   # silent -> code default
     assert base["mpas_vert_advection_scheme"] == "van_leer"
+    # Walk the RESOLVED decks, not the raw files: a deck that inherits a lever
+    # through `include:` carries it just as surely as one that spells it out,
+    # and a raw-key walk cannot see that (GLM review 2026-09-23).
     for deck in sorted(cfgdir.rglob("*.yaml")):
         if deck.name == "amip_production.yaml":
             continue
-        other = yaml.safe_load(deck.read_text()) or {}
+        try:
+            other = read_yaml_with_includes(deck) or {}
+        except SystemExit:                      # not a run config (no parser here)
+            continue
         if not isinstance(other, dict):
             continue
         assert other.get("mpas_div_damp4_scale", 0.0) == 0.0, deck

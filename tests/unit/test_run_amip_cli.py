@@ -2143,6 +2143,10 @@ def test_config_yaml_round_trips_authoritative_values():
     # No tiled surface on this lane -- the tiled port is open work.
     assert cfg.surface_tiled is False
     assert cfg.start_year == 1979
+    # convective_cloud is a real scientific lever, not boilerplate: it was
+    # flipped OFF on 2026-08-22 because the tropical-rain runs that reproduced
+    # observed ocean rain all ran with it off.  cam6_clubb refuses it anyway
+    # (deepcu is CAM6's own deep-convective cloud term), so it stays pinned.
     assert cfg.convective_cloud is False
     assert cfg.surface_gustiness_zi == 300.0
     assert cfg.convective_precip_efficiency == pytest.approx(0.8)
