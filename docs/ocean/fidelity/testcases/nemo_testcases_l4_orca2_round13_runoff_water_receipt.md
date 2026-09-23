@@ -334,6 +334,20 @@ As round 12 recorded, the comparator's `max_ulp_worsening` field reads 2 on
 runs proven byte-identical; the field that means what this table says is
 `largest_oracle_residual_worsening_ulps`, quoted above.
 
+**Which tip GYRE was proven at, stated rather than implied.**  The candidate
+arm ran at `00e5201ce`, which already carries BOTH model commits of this round.
+`git diff --name-only 00e5201ce..HEAD` lists no file under `packages/`: every
+later commit is a gate, a probe, a test, a citation map or this receipt.  So
+the GYRE proof covers the landed model statement in full, and nothing after it
+could move a trajectory.
+
+**Which cards execute the changed code.**  The changed statement is inside the
+WS-RK3 branch of the shared lat-lon ocean model, which GYRE, DINO,
+LOCK_EXCHANGE, OVERFLOW and ORCA2 all select, so all five execute it.  Only
+ORCA2 supplies a non-zero runoff, so only ORCA2's numbers move; the other four
+subtract nothing and are bitwise unchanged, which is what the GYRE identity
+above and the 169-test card battery measure.
+
 ## 8. Independent review
 
 Codex is paused, so `codex exec` was NOT run and this round claims no
