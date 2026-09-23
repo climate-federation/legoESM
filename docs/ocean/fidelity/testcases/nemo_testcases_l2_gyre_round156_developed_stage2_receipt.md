@@ -306,6 +306,12 @@ test files were run together and reported exactly:
 
 > 178 passed in 1004.83s (0:16:44)
 
+The citation gate on this receipt reported `PASS` with 10 citations, zero
+failures, zero unmapped citations and zero map entries failing audit; its
+shifted-line plant on the barotropic-correction citation exited 1 with
+`SYMBOL-NOT-AT-LINE`.  The whole map was audited separately and is green at
+274 citations on the cumulative receipt.
+
 ## OPEN — Round 157
 
 The stage-2 velocity difference is owned by the internal 3-D half of NEMO's
