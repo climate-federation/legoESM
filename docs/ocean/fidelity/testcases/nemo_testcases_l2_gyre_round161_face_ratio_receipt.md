@@ -371,7 +371,32 @@ with 9 citations, and its own plant on
 `SYMBOL-NOT-AT-LINE`.
 
 The six-file push gate together with this round's own test file and round
-160's ran as one battery.  Quoted lines follow in the amendment below.
+160's ran as ONE battery, on the committed tree, and reported exactly:
+
+> 167 passed in 972.57s (0:16:12)
+
+An earlier run of that same battery, before the readout floor was found,
+reported `1 failed, 166 passed in 970.86s` — the failure was this round's own
+face-map guard, and chasing it is what produced the corrected statement row.
+Both runs are quoted so that the green one cannot be read as the only one.
+
+The walk's two plants were re-run on the final committed tree, and both still
+fire, each exiting 1:
+
+> STATUS PLANT-FIRED: face-r3-inert: {'cells_scored': 21120,
+> 'cells_unequal': 0, 'active_cells_scored': 18000, 'active_cells_unequal': 0,
+> 'active_max_abs': 0.0, 'active_rms': 0.0}
+
+> STATUS PLANT-FIRED: face-r3-tracer: {'cells_scored': 21120,
+> 'cells_unequal': 17997, 'active_cells_scored': 18000,
+> 'active_cells_unequal': 17997, 'active_max_abs': 3.912257247932441e-17,
+> 'active_rms': 3.461798022705186e-18}
+
+**Nothing in the model changed, and that is checked rather than asserted.**
+The round's whole range touches five files: the preregistration, this receipt,
+the instrument, the citation gate and one test file.  No file under
+`packages/` appears in it, so there is no production path to restore and no
+card whose numbers could have moved.
 
 ## OPEN — Round 162
 
