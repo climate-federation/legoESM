@@ -4137,6 +4137,10 @@ def main(argv=None) -> int:
                              "across the admitted Round-156 record")
     parser.add_argument("--developed-stage2-record-root", type=Path,
                         default=None)
+    parser.add_argument("--developed-stage2-adv-split", action="store_true",
+                        help="split NEMO's vector-invariant dyn_adv into its "
+                             "kinetic-energy gradient and vertical advection "
+                             "halves at the developed day-180 state")
     parser.add_argument("--reference-process-trace", type=Path,
                         default=DEFAULT_REFERENCE_PROCESS_TRACE,
                         help="admitted Round-124 process trace that a new "
@@ -4187,6 +4191,43 @@ def main(argv=None) -> int:
     report = None
     if args.self_check:
         return self_check()
+    if args.developed_stage2_adv_split:
+        require(args.expect_commit is not None,
+                "--developed-stage2-adv-split needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-stage2-adv-split needs --daily-record-audit")
+        require(args.developed_stage2_record_root is not None,
+                "--developed-stage2-adv-split needs "
+                "--developed-stage2-record-root")
+        try:
+            report = developed_stage2_advection_split(
+                args.daily_record_root, args.daily_record_audit,
+                args.expect_commit, args.developed_stage2_record_root,
+                args.root, plant=args.plant)
+        except GateError as error:
+            # A plant that trips a fail-closed check raises rather than
+            # returning a report; it still announces itself, because this
+            # campaign scrapes logs for the marker.
+            if args.plant in (None, "none"):
+                raise
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: {report['control']}")
+            return 1
+        for tag in ("u", "v"):
+            row = report["split"][tag]
+            print(f"  SPLIT {tag}: keg {row['keg_difference_rms']:.6e} "
+                  f"zad {row['zad_difference_rms']:.6e} "
+                  f"owner {row['owner']} ratio {row['owner_ratio']:.4g}")
+        for name, row in report["arms_scored_against_nemo_after_adv"].items():
+            print(f"  ARM {name}: u rms {row['u']['active_rms']:.6e} "
+                  f"v rms {row['v']['active_rms']:.6e}")
+        print("STATUS PASS: round-158 developed stage-2 advection split")
+        return 0
     if args.developed_stage2_walk:
         require(args.expect_commit is not None,
                 "--developed-stage2-walk needs --expect-commit")
@@ -6859,6 +6900,20 @@ def _developed_stage2_record(root: Path) -> dict:
                  "uu_vv_Kaa_final"):
         rows[f"{name}_u"] = owned3(name, "u")
         rows[f"{name}_v"] = owned3(name, "v")
+    # NEMO's ``ww`` is a T-point INTERFACE field over the full jpk, and it is
+    # the operand dyn_zad reads (stprk3_stg.f90:495 records it after wzv and
+    # before dyn_hpg, and nothing between there and dyn_zad writes it).  Its
+    # window is the T window the Round-153/154 readers already use, and all
+    # jpk levels are kept because legoESM's own vertical velocity carries one
+    # interface per level plus the bottom.
+    rows["ww_t"] = np.ascontiguousarray(
+        fields["rhd_ww"][1][1:33, 1:23, :].transpose(1, 0, 2))
+    rows["rhd_t"] = np.ascontiguousarray(
+        fields["rhd_ww"][0][1:33, 1:23, :30].transpose(1, 0, 2))
+    for name, index, tag in (("r3u_r3v_Kmm", 0, "u"), ("r3u_r3v_Kmm", 1, "v")):
+        i_window, j_window = WINDOWS[tag]
+        rows[f"r3_Kmm_{tag}"] = np.ascontiguousarray(
+            fields[name][index][i_window, j_window].T)
     rows["rDt"] = np.float64(fields["rDt_r1_Dt"][0])
     rows["ln_dynadv_vec"] = float(fields["flags_vec_linssh"][0])
     rows["lk_linssh"] = float(fields["flags_vec_linssh"][1])
@@ -7237,6 +7292,384 @@ def developed_stage2_rhs_walk(
             "assignment_calibration_bit": all(
                 row["active_cells_unequal"] == 0
                 for row in calibration.values()),
+        },
+    }
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    return report
+
+
+DEVELOPED_ADV_SPLIT_PLANTS = ("keg-zad-sum", "nemo-ww-ulp")
+
+
+def developed_stage2_advection_split(
+        daily_root: Path, daily_audit: Path, expected_commit: str,
+        stage2_record_root: Path, evidence_root: Path, *,
+        plant: str | None = None) -> dict:
+    """Split NEMO's vector-invariant ``dyn_adv`` into its two compiled halves.
+
+    Round 157 measured that the developed stage-2 velocity difference is
+    owned by ``dyn_adv`` at
+    ``GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:525``, entered
+    through the vector-invariant arm at ``:523``.  Under that arm
+    ``dynadv.f90:171`` calls ``dyn_keg`` (the kinetic-energy gradient,
+    ``dynkeg.f90:121-130`` with ``nn_dynkeg = 0``) and ``dynadv.f90:176``
+    calls ``dyn_zad`` (the explicit vertical advection,
+    ``dynzad.f90:112-126`` with the bottom statement at ``:134-137``), in that
+    order, into one shared ``Krhs`` accumulator.
+
+    The record has no boundary between the two halves, so NEMO's own split is
+    RECONSTRUCTED rather than read: the kinetic-energy gradient is a pure
+    function of ``puu/pvv(Kmm)`` and the static horizontal metrics, all of
+    which the record or the card carries, so driving legoESM's PRODUCTION
+    stage with NEMO's own entry velocity evaluates that half on NEMO's own
+    operands.  The vertical half is then NEMO's total advection increment
+    minus that, and the receipt states the assumption instead of hiding it.
+
+    Every arm runs through ``LatLonCGridOceanModel.step`` under production
+    just-in-time compilation from NEMO's admitted day-180 entry, never an
+    isolated closure (operator note L-amend).
+    """
+    require(plant in (None, "none") + DEVELOPED_ADV_SPLIT_PLANTS,
+            f"unknown developed stage-2 advection plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"advection split requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "advection split commit differs from --expect-commit")
+    evidence_root = Path(evidence_root)
+    oracle = _developed_stage2_record(Path(stage2_record_root))
+    rows = dict(oracle["rows"])
+    if plant == "nemo-ww-ulp":
+        # The vertical-velocity substitution must be a live operand of the
+        # arm that installs it: moving NEMO's recorded ww by one unit in the
+        # last place has to move that arm's vertical-advection row.
+        moved = np.array(rows["ww_t"], copy=True)
+        index = tuple(int(value) for value in
+                      np.argwhere(np.abs(moved) > 0.0)[0])
+        moved[index] = np.nextafter(moved[index], np.inf)
+        rows["ww_t"] = moved
+
+    bundle = _developed_entry_bundle(
+        daily_root, daily_audit, expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+
+    observer_unequal: list[int] = []
+
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    ordinary = ordinary_model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=ssha)
+
+    def run_uv(*, passive=True, **hook_kwargs):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hook_kwargs))
+        result = model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        jax.device_get(result)
+        if passive:
+            # A WRITE-only exposure substitutes its own slots AFTER the
+            # ordinary step completes, so passivity is judged on every OTHER
+            # prognostic field.  An operand-substitution arm changes the step
+            # itself and is not passive; it says so rather than being excused.
+            neutral = result._replace(u=ordinary.u, v=ordinary.v)
+            observer_unequal.append(_state_bit_mismatches(neutral, ordinary))
+        return (np.asarray(result.u.data), np.asarray(result.v.data))
+
+    # Window control.  NEMO's recorded before-level velocity is the step-entry
+    # level, which this walk loads from the same restart, so it must be BIT
+    # against legoESM's entry state.  A wrong window or transpose cannot
+    # survive it, and it is the only check that proves the two grids are one
+    # grid before any difference is attributed.
+    entry_control = {
+        tag: _score_stage2_face(
+            np.asarray(getattr(state, tag).data),
+            rows[f"uu_vv_Kbb_{tag}"], rows[f"umask_vmask_{tag}"])
+        for tag in ("u", "v")
+    }
+    require(all(row["cells_unequal"] == 0 for row in entry_control.values()),
+            "the Round-156 record window does not land on legoESM's face "
+            f"grid: {entry_control}")
+
+    def expose(name):
+        return run_uv(expose_momentum_operator=name,
+                      expose_momentum_operator_stage=2)
+
+    production = {
+        "keg": expose("keg"),
+        "zad": expose("zad"),
+        "advection": expose("advection"),
+        "after_vor": run_uv(expose_momentum_operator="vorticity",
+                            expose_momentum_operator_stage=2),
+        "after_adv": run_uv(expose_stage2_momentum_rhs=True),
+    }
+
+    # NEMO's own advection increment.  It is the difference of two recorded
+    # cumulative snapshots, so it carries one rounding on the oracle side and
+    # is context for the split, never a scored production row.
+    nemo_increment = {
+        tag: (np.asarray(rows[f"after_adv_{tag}"])
+              - np.asarray(rows[f"after_vor_{tag}"]))
+        for tag in ("u", "v")
+    }
+
+    # Authority control: this walk's production after-advection row must
+    # reproduce the round-157 row it is splitting, or its split is a split of
+    # a different number.
+    authority = {
+        tag: _score_stage2_face(
+            production["after_adv"][index], rows[f"after_adv_{tag}"],
+            rows[f"umask_vmask_{tag}"])
+        for tag, index in (("u", 0), ("v", 1))
+    }
+    ROUND157_AFTER_ADV_RMS = {"u": 3.844166e-12, "v": 6.428546e-12}
+    for tag, row in authority.items():
+        require(abs(row["active_rms"] - ROUND157_AFTER_ADV_RMS[tag])
+                <= 1.0e-18,
+                f"the production after-advection row moved from round 157 "
+                f"on {tag}: {row['active_rms']} vs "
+                f"{ROUND157_AFTER_ADV_RMS[tag]}")
+
+    # Split control: the two halves must reproduce the bucket they came out
+    # of, so the split adds no term of its own.
+    halves_sum = {
+        tag: production["keg"][index] + production["zad"][index]
+        for tag, index in (("u", 0), ("v", 1))
+    }
+    halves_control = {
+        tag: _score_stage2_face(
+            halves_sum[tag], production["advection"][index],
+            rows[f"umask_vmask_{tag}"])
+        for tag, index in (("u", 0), ("v", 1))
+    }
+    if plant == "keg-zad-sum":
+        # The control has to catch a half that is not the half it is named.
+        planted = {
+            tag: halves_sum[tag] * np.float64(1.0 + 1.0e-12)
+            for tag in ("u", "v")
+        }
+        planted_control = {
+            tag: _score_stage2_face(
+                planted[tag], production["advection"][index],
+                rows[f"umask_vmask_{tag}"])
+            for tag, index in (("u", 0), ("v", 1))
+        }
+        require(all(row["active_cells_unequal"] == 0
+                    for row in planted_control.values()),
+                "the halves-sum control caught a scaled sum: "
+                f"{planted_control}")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": planted_control}
+
+    # ARM E.  NEMO's own stage-2 entry velocity, which is the ONLY dynamic
+    # operand the kinetic-energy gradient reads (dynkeg.f90:121-124 takes
+    # puu/pvv(Kmm) and nothing else), with every other entry field left at
+    # legoESM's value.  This is round 157's substitution, re-run with the two
+    # halves exposed instead of the total.
+    stage1_out = run_uv(expose_momentum_stage=1)
+
+    def stage_entry_arm(velocity, *, name):
+        armed = {}
+        for component in ("keg", "zad", "advection"):
+            armed[component] = run_uv(
+                passive=False,
+                stage_entry_override=(2, velocity[0], velocity[1],
+                                      *_entry_tracers),
+                expose_momentum_operator=component,
+                expose_momentum_operator_stage=2)
+        armed["after_adv"] = run_uv(
+            passive=False,
+            stage_entry_override=(2, velocity[0], velocity[1],
+                                  *_entry_tracers),
+            expose_stage2_momentum_rhs=True)
+        armed["_name"] = name
+        return armed
+
+    _tracer_state = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_tracer_stage=1)).step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=ssha)
+    _entry_tracers = (_tracer_state.T.data, _tracer_state.S.data,
+                      _tracer_state.eta.data)
+
+    arms = {
+        "null": stage_entry_arm(
+            (jnp.asarray(stage1_out[0]), jnp.asarray(stage1_out[1])),
+            name="legoESM's own stage-1 output velocity"),
+        "nemo_entry_velocity": stage_entry_arm(
+            (jnp.asarray(rows["uu_vv_Kmm_u"]), jnp.asarray(rows["uu_vv_Kmm_v"])),
+            name="NEMO's recorded uu/vv(Kmm)"),
+    }
+
+    # ARM W.  NEMO's own recorded vertical velocity at the stage-2 dyn_zad
+    # call, every other stage input left at legoESM's value.  dyn_keg reads no
+    # vertical velocity, so its row in this arm is a CONTROL: it has to be
+    # byte-identical to the production row or the hook reaches further than
+    # dyn_zad.
+    ww_arm = {}
+    for component in ("keg", "zad", "advection"):
+        ww_arm[component] = run_uv(
+            passive=False,
+            stage2_zad_operand_override=(jnp.asarray(rows["ww_t"]), None, None),
+            expose_momentum_operator=component,
+            expose_momentum_operator_stage=2)
+    ww_arm["after_adv"] = run_uv(
+        passive=False,
+        stage2_zad_operand_override=(jnp.asarray(rows["ww_t"]), None, None),
+        expose_stage2_momentum_rhs=True)
+
+    def score_against_nemo_total(frame):
+        return {
+            tag: _score_stage2_face(
+                frame[index], rows[f"after_adv_{tag}"],
+                rows[f"umask_vmask_{tag}"])
+            for tag, index in (("u", 0), ("v", 1))
+        }
+
+    scored = {
+        "production": score_against_nemo_total(production["after_adv"]),
+        "null_entry": score_against_nemo_total(arms["null"]["after_adv"]),
+        "nemo_entry_velocity": score_against_nemo_total(
+            arms["nemo_entry_velocity"]["after_adv"]),
+        "nemo_stage2_ww": score_against_nemo_total(ww_arm["after_adv"]),
+    }
+    base = scored["null_entry"]
+    for name, row in scored.items():
+        for tag in ("u", "v"):
+            base_rms = base[tag]["active_rms"]
+            base_max = base[tag]["active_max_abs"]
+            row[tag]["rms_removed_fraction"] = (
+                float((base_rms - row[tag]["active_rms"]) / base_rms)
+                if base_rms > 0.0 else 0.0)
+            row[tag]["max_abs_removed_fraction"] = (
+                float((base_max - row[tag]["active_max_abs"]) / base_max)
+                if base_max > 0.0 else 0.0)
+    # The ww arm has its OWN null: it changes nothing but the vertical
+    # velocity, so its removed fractions are taken against the production
+    # row, which is the same program with the live operand.
+    for tag in ("u", "v"):
+        prod_rms = scored["production"][tag]["active_rms"]
+        scored["nemo_stage2_ww"][tag]["rms_removed_vs_production"] = (
+            float((prod_rms - scored["nemo_stage2_ww"][tag]["active_rms"])
+                  / prod_rms) if prod_rms > 0.0 else 0.0)
+
+    # dyn_keg reads no vertical velocity: the ww arm's kinetic-energy row is
+    # a hook-reach control, not a measurement.
+    keg_reach_control = {
+        tag: _score_stage2_face(
+            ww_arm["keg"][index], production["keg"][index],
+            rows[f"umask_vmask_{tag}"])
+        for tag, index in (("u", 0), ("v", 1))
+    }
+
+    # THE SPLIT.  NEMO's kinetic-energy half is legoESM's production stage
+    # driven by NEMO's own entry velocity; NEMO's vertical half is its total
+    # advection increment minus that.  The assumption -- that legoESM's
+    # transcription of dynkeg.f90:121-130 is NEMO's statement -- is stated in
+    # the receipt and is the only step in this split that is read off the
+    # source rather than measured.
+    split = {}
+    for tag, index in (("u", 0), ("v", 1)):
+        mask = rows[f"umask_vmask_{tag}"]
+        keg_nemo = arms["nemo_entry_velocity"]["keg"][index]
+        zad_nemo_implied = nemo_increment[tag] - np.asarray(keg_nemo)
+        d_keg = np.asarray(production["keg"][index]) - np.asarray(keg_nemo)
+        d_zad = np.asarray(production["zad"][index]) - zad_nemo_implied
+        active = np.asarray(mask) != 0.0
+        def rms(values):
+            picked = values[active]
+            return float(np.sqrt(np.mean(picked * picked))
+                         if picked.size else 0.0)
+        split[tag] = {
+            "nemo_increment_rms": rms(nemo_increment[tag]),
+            "production_keg_rms": rms(np.asarray(production["keg"][index])),
+            "production_zad_rms": rms(np.asarray(production["zad"][index])),
+            "keg_difference_rms": rms(d_keg),
+            "zad_difference_rms": rms(d_zad),
+            "keg_difference_max_abs": float(
+                np.max(np.abs(d_keg[active]), initial=0.0)),
+            "zad_difference_max_abs": float(
+                np.max(np.abs(d_zad[active]), initial=0.0)),
+            "sum_of_halves_rms": rms(d_keg + d_zad),
+            "total_difference_rms": scored["production"][tag]["active_rms"],
+            "owner": ("zad" if rms(d_zad) > rms(d_keg) else "keg"),
+            "owner_ratio": (rms(d_zad) / rms(d_keg)) if rms(d_keg) else
+                           float("inf"),
+        }
+        split[tag]["sum_reproduces_total"] = (
+            abs(split[tag]["sum_of_halves_rms"]
+                - split[tag]["total_difference_rms"])
+            / split[tag]["total_difference_rms"]
+            if split[tag]["total_difference_rms"] else 0.0)
+
+    require(all(value == 0 for value in observer_unequal),
+            "an advection-split exposure hook moved the production state "
+            f"outside u/v: {observer_unequal}")
+
+    report = {
+        "status": "PASS",
+        "case": CASE,
+        "step": DEVELOPED_PROCESS_STEP,
+        "commit": expected_commit,
+        "record": {
+            "root": str(stage2_record_root),
+            "sha256": oracle["sha256"],
+            "field_count": oracle["field_count"],
+            "meta": oracle["meta"],
+        },
+        "compiled_citations": {
+            "dyn_adv_call": "stprk3_stg.f90:525",
+            "vector_arm_selector": "stprk3_stg.f90:523",
+            "dynadv_vector_case": "dynadv.f90:153",
+            "dyn_keg_call": "dynadv.f90:171",
+            "dyn_zad_call": "dynadv.f90:176",
+            "keg_c2_energy": "dynkeg.f90:121-125",
+            "keg_c2_gradient": "dynkeg.f90:129-130",
+            "zad_transport": "dynzad.f90:112-114",
+            "zad_shear": "dynzad.f90:119-120",
+            "zad_update": "dynzad.f90:123-126",
+            "zad_bottom": "dynzad.f90:134-137",
+        },
+        "entry_window_control": entry_control,
+        "authority_control": authority,
+        "halves_control": halves_control,
+        "keg_hook_reach_control": keg_reach_control,
+        "arms_scored_against_nemo_after_adv": scored,
+        "split": split,
+        "observer_state_unequal_bytes": observer_unequal,
+        "predictions": {
+            "halves_sum_is_the_bucket": all(
+                row["active_cells_unequal"] == 0
+                for row in halves_control.values()),
+            "zad_owns_both_components": all(
+                split[tag]["owner"] == "zad" and split[tag]["owner_ratio"] >= 2.0
+                for tag in ("u", "v")),
+            "split_accounts_for_the_total": all(
+                split[tag]["sum_reproduces_total"] < 0.01
+                for tag in ("u", "v")),
+            "keg_hook_reach_is_zero": all(
+                row["cells_unequal"] == 0
+                for row in keg_reach_control.values()),
         },
     }
     evidence_root.mkdir(parents=True, exist_ok=True)

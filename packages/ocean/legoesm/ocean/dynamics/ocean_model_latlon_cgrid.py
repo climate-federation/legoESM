@@ -1271,6 +1271,13 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # the ZAD call boundary.  No card constructs either private control.
     # ``True`` retains the stage-2/3 association discriminator.
     stage1_zad_w_override: object = None
+    # Round 158: the same per-slot substitution at the STAGE-2 dyn_zad call.
+    # A ``(w, h_u, h_v)`` triple whose ``None`` slots keep the live stage
+    # operand, so one operand at a time can be replaced by NEMO's recorded
+    # value while every other stage input stays legoESM's.  It feeds the SAME
+    # ``nemo_stage_zad_operands`` seam stage 1 uses and reaches nothing else;
+    # no card constructs it.
+    stage2_zad_operand_override: object = None
     nemo_stage_rhs_accumulation_order_arm: object = False
     # WRITE-only transport exposure for the ordered tracer boundary walk.
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
@@ -1306,8 +1313,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # WRITE-only source-order exposure for one WS-RK3 momentum stage.  Empty
     # leaves the returned state untouched; ``hpg``, ``vorticity``, or
     # ``advection`` writes that already-computed production component into the
-    # returned u/v slots after the full step.  This is a diagnostic seam, not
-    # a constructible scheme selector.
+    # returned u/v slots after the full step.  ``keg`` and ``zad`` name the two
+    # compiled halves of the vector-invariant ``advection`` bucket -- NEMO's
+    # ``dyn_keg`` and ``dyn_zad``, which ``dyn_adv`` calls in that order under
+    # ``ln_dynadv_vec`` (``dynadv.f90:171,176``) -- and are the same already
+    # computed production components, published under their own names.  This
+    # is a diagnostic seam, not a constructible scheme selector.
     expose_momentum_operator: str = ""
     # Which WS-RK3 stage the exposure above reads.  Stage 2 is where the
     # source-order walk started and stays the default; stage 3 reads the
@@ -2512,10 +2523,10 @@ class LatLonCGridOceanModel:
         # once the stage is reached, so a gate asking for a bucket that does
         # not exist would compile and score whatever the returned slots held.
         if self._nemo_ws_test_hooks.expose_momentum_operator not in (
-                "", "hpg", "vorticity", "advection"):
+                "", "hpg", "vorticity", "advection", "keg", "zad"):
             raise ValueError(
-                "expose_momentum_operator must be empty, hpg, vorticity, or "
-                f"advection; got "
+                "expose_momentum_operator must be empty, hpg, vorticity, "
+                "advection, keg, or zad; got "
                 f"{self._nemo_ws_test_hooks.expose_momentum_operator!r}")
         if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary not in (
                 "", "after_advection", "after_sbc"):
@@ -5782,10 +5793,11 @@ class LatLonCGridOceanModel:
                 if _expose_operator:
                     _operator_name = (
                         self._nemo_ws_test_hooks.expose_momentum_operator)
-                    if _operator_name not in ("hpg", "vorticity", "advection"):
+                    if _operator_name not in (
+                            "hpg", "vorticity", "advection", "keg", "zad"):
                         raise ValueError(
                             "expose_momentum_operator must be empty, hpg, "
-                            "vorticity, or advection")
+                            "vorticity, advection, keg, or zad")
                     _op_u = _operator_components[f"{_operator_name}_u"].data
                     _op_v = _operator_components[f"{_operator_name}_v"].data
                     if _operator_name == "advection" and extra_rhs is not None:
@@ -6827,6 +6839,24 @@ class LatLonCGridOceanModel:
                 return _nemo_ws_qco_stage_faces(
                     eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)[:2]
 
+            def _stage2_zad_operands(live):
+                # Round 158.  Replace only the slots the private hook names,
+                # so one dyn_zad operand at a time can come from NEMO's
+                # recorded stage while every other stage input stays
+                # legoESM's.  ``None`` slots keep the live operand, which is
+                # the same contract the stage-1 W substitution already uses.
+                override = (
+                    self._nemo_ws_test_hooks.stage2_zad_operand_override)
+                if override is None:
+                    return live
+                if len(override) != 3:
+                    raise ValueError(
+                        "stage2_zad_operand_override must be a (w, h_u, h_v) "
+                        "triple; None keeps the live operand")
+                return tuple(
+                    live[index] if override[index] is None
+                    else override[index] for index in range(3))
+
             _face_thickness_kbb = (
                 None if _vector_velocity_stage_update
                 else _stage_face_thickness(state.eta.data))
@@ -6923,7 +6953,8 @@ class LatLonCGridOceanModel:
                     _T_stage1, _S_stage1, _eta_live_one_third),
                 _stage_vertical_up3(u1_corr, v1_corr, _g1),
                 stage_face_thickness=_stage_face_thickness(_eta_live_one_third),
-                stage_zad_operands=(_g1[2], _g1[4], _g1[5]),
+                stage_zad_operands=_stage2_zad_operands(
+                    (_g1[2], _g1[4], _g1[5])),
                 stage_index=2)
             _stage2_rhs_production = (p1u_corr, p1v_corr)
             if self._nemo_ws_test_hooks.stage2_momentum_rhs_override is not None:
