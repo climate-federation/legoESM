@@ -1,0 +1,50 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -1523,7 +1523,10 @@
+       ! Lane-4 EEN discriminator: writer-local storage is armed only for the
+       ! first rank-zero call.  Every slot starts at zero; model arrays are
+       ! never assigned by this block.
+-      ll_l4_een_dump = lwp .AND. kt == nit000 .AND. nvor_scheme == np_EEN
++      ! ROUND 8: the rank-zero guard is what left the other half of the north
++      ! fold row unrecorded.  Every rank now writes its OWN owned block into a
++      ! file tagged with narea, so the two halves together cover every longitude.
++      ll_l4_een_dump = kt == nit000 .AND. nvor_scheme == np_EEN
+       IF( ll_l4_een_dump ) THEN
+          IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane4 EEN primitive dumps require 64-bit wp' )
+          ALLOCATE( l4_e3f0vor(jpi,jpj,jpk), l4_e3fvor(jpi,jpj,jpk), l4_q(jpi,jpj,jpk), &
+@@ -1721,7 +1724,7 @@
+          l4_n3 = jpi * jpj * jpk
+ 
+          l4_magic = 'NEMO_L4_E3F0_1'
+-         WRITE(l4_filename,'("oracle_een_e3f0vor_kt",I8.8,".bin")') kt
++         WRITE(l4_filename,'("oracle_een_e3f0vor_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
+          OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+             & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_ios )
+          IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 e3f_0vor dump' )
+@@ -1730,7 +1733,7 @@
+          CLOSE(l4_unit)
+ 
+          l4_magic = 'NEMO_L4_E3FV_1'
+-         WRITE(l4_filename,'("oracle_een_e3fvor_kt",I8.8,".bin")') kt
++         WRITE(l4_filename,'("oracle_een_e3fvor_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
+          OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+             & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_ios )
+          IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 live e3f_vor dump' )
+@@ -1739,7 +1742,7 @@
+          CLOSE(l4_unit)
+ 
+          l4_magic = 'NEMO_L4_QEEN_1'
+-         WRITE(l4_filename,'("oracle_een_q_kt",I8.8,".bin")') kt
++         WRITE(l4_filename,'("oracle_een_q_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
+          OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+             & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_ios )
+          IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 EEN q dump' )
+@@ -1748,7 +1751,7 @@
+          CLOSE(l4_unit)
+ 
+          l4_magic = 'NEMO_L4_ZPVO_1'
+-         WRITE(l4_filename,'("oracle_een_zpvo_kt",I8.8,".bin")') kt
++         WRITE(l4_filename,'("oracle_een_zpvo_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
+          OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+             & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_ios )
+          IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 EEN zpvo dump' )
