@@ -6832,16 +6832,25 @@ def _developed_stage2_record(root: Path) -> dict:
             "Round-156 record is not step 1081 stage 2")
     fields = record["fields"]
 
-    def owned3(name, index):
+    # legoESM's U face grid is (n_lat, n_lon+1) with column 0 the west wall,
+    # and its V face grid is (n_lat+1, n_lon) with row 0 the south wall, so
+    # the two components take DIFFERENT windows out of NEMO's global array.
+    # The U window is the one ``_developed_transport_record`` already uses.
+    WINDOWS = {"u": (slice(1, 34), slice(2, 24)),
+               "v": (slice(2, 34), slice(1, 24))}
+
+    def owned3(name, tag):
+        index = 0 if tag == "u" else 1
+        i_window, j_window = WINDOWS[tag]
         return np.ascontiguousarray(
-            fields[name][index][1:34, 2:24, :30].transpose(1, 0, 2))
+            fields[name][index][i_window, j_window, :30].transpose(1, 0, 2))
 
     rows = {}
     for name in ("rhs_entry", "uu_vv_Kbb", "uu_vv_Kmm", "umask_vmask",
                  "after_hpg", "after_vor", "after_adv", "uu_vv_Kaa_raw",
                  "uu_vv_Kaa_final"):
-        rows[f"{name}_u"] = owned3(name, 0)
-        rows[f"{name}_v"] = owned3(name, 1)
+        rows[f"{name}_u"] = owned3(name, "u")
+        rows[f"{name}_v"] = owned3(name, "v")
     rows["rDt"] = np.float64(fields["rDt_r1_Dt"][0])
     rows["ln_dynadv_vec"] = float(fields["flags_vec_linssh"][0])
     rows["lk_linssh"] = float(fields["flags_vec_linssh"][1])
@@ -6949,6 +6958,21 @@ def developed_stage2_rhs_walk(
         state, dt=card.dt_s, freshwater=freshwater,
         surface_forcing=surface,
         _nemo_stage1_zad_eta_after_override=ssha)
+
+    # Window control.  NEMO's recorded Kbb velocity is the step-entry level,
+    # which this walk loads from the same restart, so it must be BIT against
+    # legoESM's entry state.  A wrong window or a wrong transpose cannot
+    # survive this, and it is the only check that proves the two grids are
+    # the same grid before any difference is attributed.
+    entry_control = {
+        tag: _score_stage2_face(
+            np.asarray(getattr(state, tag).data),
+            rows[f"uu_vv_Kbb_{tag}"], rows[f"umask_vmask_{tag}"])
+        for tag in ("u", "v")
+    }
+    require(all(row["cells_unequal"] == 0 for row in entry_control.values()),
+            "the Round-156 record window does not land on legoESM's face "
+            f"grid: {entry_control}")
 
     observer_unequal: list[int] = []
     production = {}
@@ -7073,6 +7097,7 @@ def developed_stage2_rhs_walk(
         },
         "walk": walk,
         "assignment_calibration": calibration,
+        "entry_window_control": entry_control,
         "budget": budget,
         "first_non_bit_row": first_non_bit,
         "observer_state_unequal_bytes": observer_unequal,
