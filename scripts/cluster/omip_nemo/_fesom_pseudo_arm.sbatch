@@ -30,20 +30,39 @@
 # THE CONTROL. Carry the ORACLE'S OWN FIELD through FESOM's mesh and mask and
 # then through the scorer's own path, and score it against the oracle. Model
 # error is zero by construction, so any rmse it produces was manufactured by
-# geometry. This is GLM's first-ranked test and it is the one that discriminates.
+# the scoring path. This was GLM's first-ranked test.
 #
-# ONE-SIDED BY CONSTRUCTION, AND THE READING MUST SAY SO. Putting the oracle on
-# FESOM's nodes needs an operator no real run applies (~111 km oracle cells to a
-# ~38 km node cloud), and that leg can itself draw across a barrier, so the
-# control can only be INFLATED. Therefore:
-#   * pseudo rmse WELL BELOW the tripole-to-FESOM excess in ring 1 -> geometry
-#     cannot account for the gap and is REFUTED; a coastal model difference
-#     stands, and the next question is which of the FESOM lane's missing
-#     settings acts at coasts.
-#   * pseudo rmse COMPARABLE TO the excess -> suggestive, NOT proof, precisely
-#     because of the extra leg. It would then need the leg's own contribution
-#     bounded before anything is claimed.
-# Do not report the number without the side it falls on.
+# WHAT IT TURNED OUT TO MEASURE, written after the fact and REPLACING an
+# earlier claim in this header that it was an UPPER BOUND on the geometry term
+# and that it discriminated the two hypotheses. It is neither.
+#   * NOT A BOUND. The oracle-to-node leg inflates the control (it can itself
+#     draw across a barrier) and deflates it (the pseudo field is band-limited
+#     to the oracle's resolution and shares the reference's kernel). The
+#     deflation half was then MEASURED and found absent -- pseudo error
+#     correlates with the tripole's at +0.04 in ring 1 -- but the label stays
+#     off. It is an estimate.
+#   * NOT A DISCRIMINATOR. This FESOM snapshot carries NO LAND, every node is
+#     wet, so the control wears the ORACLE'S coastline while the real arm
+#     carries its own. A disagreement about where the ocean ends is invisible
+#     to it by construction.
+#   * WHAT IT DID ANSWER: removing the scoring path's own error takes FESOM's
+#     ring-1 salinity rmse from 1.3917 to 1.2882 and its global figure from
+#     0.4650 to 0.4372. Six to seven per cent. Not the explanation. Note that
+#     the magnitude ratio pseudo/excess reads 0.20 and OVERSTATES this, because
+#     it ignores that the two error fields only partly point the same way.
+#
+# THE STENCIL-REACH TEST, added after all of the above and the reason this card
+# now also takes the tripole. FESOM's node cloud has no land, so nothing stops
+# the four-neighbour stencil at a coastal target cell from averaging in nodes
+# across a headland or a bay -- the failure the scorer's own docstring names
+# when it says a verdict there needs a topology-aware remapper. Narrowing each
+# arm to its SINGLE nearest source removes three of the four chances to do it.
+# ONE-SIDED: k=1 also drops the averaging, which alone would RAISE the error,
+# so a FALL in FESOM's ring 1 is evidence of cross-barrier contamination while
+# no change or a rise is ambiguous and must be reported as ambiguous. The
+# tripole is the control that makes it readable -- it shares the oracle's grid
+# and land mask, so both arms moving alike means the change is about averaging
+# rather than barriers.
 #
 # GATES, run before the control produces anything. The probe reproduces the
 # oracle and FESOM fields the dump already holds (if it cannot rebuild the
