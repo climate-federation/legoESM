@@ -7523,9 +7523,19 @@ def developed_stage2_advection_split(
         # accepted by the hook.  Install NEMO's recorded vertical velocity a
         # second time with one cell moved by a single unit in the last place;
         # the arm's vertical-advection field has to move with it.
+        # The cell has to be one the routine READS.  dynzad.f90:112-114 takes
+        # ww(jk+1) over jk = 1..jpk-2, so it reads the INTERIOR interfaces
+        # only: the surface interface and the bottom one are never touched.
+        # The first version of this plant moved the surface interface, which
+        # NEMO leaves non-zero, and it fired because nothing consumed the
+        # moved value -- a control that perturbs what the consumer does not
+        # read proves nothing.  This one moves the largest interior
+        # interface, which every downstream statement depends on.
         moved = np.array(rows["ww_t"], copy=True)
-        index = tuple(int(value) for value in
-                      np.argwhere(np.abs(moved) > 0.0)[0])
+        interior = np.abs(moved[..., 1:moved.shape[-1] - 1])
+        row, column, level = np.unravel_index(
+            int(np.argmax(interior)), interior.shape)
+        index = (int(row), int(column), int(level) + 1)
         moved[index] = np.nextafter(moved[index], np.inf)
         planted_zad = run_uv(
             passive=False,
