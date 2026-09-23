@@ -697,6 +697,8 @@ CITATION_MAP = {
         ('CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )', 1),
     'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:485':
         ('CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )', 1),
+    'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:497':
+        ('CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 1),
     'GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:697-699': [
         'uu(ji,jj,jk,Kaa) = (         ( 1._wp + r3u(ji,jj,Kbb) ) * uu(ji,jj,jk,Kbb )',
         '/           ( 1._wp + r3u(ji,jj,Kaa) ) * umask(ji,jj,jk)', 3],
