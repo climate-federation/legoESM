@@ -7171,9 +7171,18 @@ def developed_stage2_rhs_walk(
             "relative_difference_rms"])
 
     if plant == "hpg-rank-scale":
-        require(ranking[0].startswith("hpg"),
-                "the magnitude ranking did not move to the scaled "
-                f"pressure-gradient row: {ranking}")
+        # The scaled row must RISE, above both vorticity rows and above the
+        # unscaled pressure-gradient row.  It cannot reach the top: scaling by
+        # one part in a million puts it at about 1e-6 relative, which is four
+        # orders below the advection and two above the vorticity, and that is
+        # the whole point -- the ranking is a measurement, so the control has
+        # to predict where the planted row LANDS rather than assume the top.
+        require(ranking.index("hpg_u")
+                < min(ranking.index("vorticity_u"),
+                      ranking.index("vorticity_v"),
+                      ranking.index("hpg_v")),
+                "the magnitude ranking did not lift the scaled "
+                f"pressure-gradient row above the floor rows: {ranking}")
         return {
             "status": "PLANT-FIRED", "plant": plant,
             "control": {"ranking": ranking,
