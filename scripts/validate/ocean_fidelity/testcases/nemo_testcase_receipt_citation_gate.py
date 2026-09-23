@@ -1429,7 +1429,7 @@ CITATION_MAP = {
     # anchor did not move while its last one shifted by 59.  Stated here
     # explicitly, with the new length, because a widening that is not declared
     # is exactly what this map exists to refuse.
-    'ocean_model_latlon_cgrid.py:6466-6594': [
+    'ocean_model_latlon_cgrid.py:6466-6592': [
         '_stage3_T_rate = (',
         '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 129],
     'ocean_model_latlon_cgrid.py:7507-7939': [
