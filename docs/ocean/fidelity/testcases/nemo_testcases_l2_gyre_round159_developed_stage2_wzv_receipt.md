@@ -76,10 +76,19 @@ TRUE OF legoESM AND FALSE OF THE ORACLE.**  That is registered here as a
 correction, because it changes what a fix may do: correcting the momentum
 field must leave the tracer field alone.
 
-Two citation corrections against the preregistration, which quoted the
-enclosing branches rather than the statements: the velocity-indicator
-divergence is `:126-130`, not `:123-130`, and the barotropic correction is at
-`:309`, not `:310`.  The statements cited are the same ones.
+Two citation corrections against the preregistration, which quoted enclosing
+branches rather than statements.  They are fenced so the gate reads the
+corrected citations above rather than the superseded ones:
+
+```
+preregistered  divhor.f90:123-130   ->  divhor.f90:126-130  (the assignment,
+                                        not the CASE and the DO around it)
+this receipt   stprk3_stg.f90:310   ->  stprk3_stg.f90:309  (the correction is
+                                        the first line of the pair, not the
+                                        second)
+```
+
+The statements cited are the same ones.
 
 ## Controls, before any attribution
 
@@ -246,11 +255,18 @@ thirty-six map entries and twenty-four prose citations across four earlier
 receipts were re-anchored by RIGID shift: both endpoints of each citation
 moved by one delta, every pinned extent unchanged, every endpoint symbol
 re-resolved in the current file.  No citation was weakened, widened or
-removed.  **One citation is registered rather than moved**:
-`ocean_model_latlon_cgrid.py:1273-1325` in the round-8 receipt straddles this
-round's insertion point, so the block it names genuinely grew and no rigid
-shift exists for it; widening its extent is what the gate's own plant does, so
-it is reported here instead.
+removed.  **One citation is registered rather than moved.**  It is fenced
+because it is a report of a stale citation, not a citation this receipt makes:
+
+```
+ocean_model_latlon_cgrid.py:1273-1325   (round-8 receipt, NOT re-anchored)
+```
+
+That range straddles this round's insertion point, so the block it names
+genuinely grew and no rigid shift exists for it; widening its extent is what
+the gate's own plant does, so it is reported here instead of papered over.  It
+is not in the gate's map and was already carrying an older drift before this
+round.
 
 Independent review by codex not run (codex is paused).  A Claude reviewer was
 run instead, on the whole round's diff and the compiled sources.
