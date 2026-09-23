@@ -116,6 +116,19 @@ class PhysicsConfig(NamedTuple):
     gravity_wave_drag: GravityWaveDragConfig = GravityWaveDragConfig()
 
 
+def _micro_liquid_from_closure_on(microphysics_config) -> bool:
+    """True when the RESOLVED microphysics sub-config hands liquid to the closure.
+
+    Reads the materialized sub-config, not the top-level switch, so a
+    hand-built ``MicrophysicsConfig(morrison=MorrisonConfig(...))`` is seen.
+    """
+    if microphysics_config is None:
+        return False
+    sub = getattr(microphysics_config,
+                  getattr(microphysics_config, "scheme", ""), None)
+    return bool(getattr(sub, "liquid_from_closure", False))
+
+
 def _clubb_liquid_partition_on(turbulence_config) -> bool:
     """Is CLUBB's cloud-liquid exchange selected on this RESOLVED config?
 
@@ -248,6 +261,20 @@ def make_physics(
     # experiment-level flag is not the only way in: an authoritative
     # turbulence_override carrying CLUBBConfig(liquid_partition=True), or a
     # direct make_physics call, both reach this factory without it (codex).
+    # The MICROPHYSICS half alone deletes the model's only liquid source, so it
+    # is the more dangerous half to reach by itself -- the mirror of the
+    # turbulence-side guard below, and the same defect class both reviewers
+    # found on that side.  A direct ``make_physics`` call bypasses every
+    # ExperimentConfig guard, and they all key off the turbulence side.
+    if (_micro_liquid_from_closure_on(config.microphysics)
+            and not _clubb_liquid_partition_on(config.turbulence)):
+        raise ValueError(
+            "MorrisonConfig.liquid_from_closure=True without the CLUBB liquid "
+            "partition delivering liquid: the microphysics would stop "
+            "condensing and nothing would replace it, leaving the model with "
+            "NO cloud-liquid source at all. Enable both halves together "
+            "(ExperimentConfig.clubb_liquid_partition drives them), or "
+            "neither.")
     if _clubb_liquid_partition_on(config.turbulence) and cld_macmic_num_steps < 2:
         raise ValueError(
             "CLUBBConfig.liquid_partition needs cld_macmic_num_steps>=2: the "

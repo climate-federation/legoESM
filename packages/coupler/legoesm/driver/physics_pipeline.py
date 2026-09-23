@@ -4116,17 +4116,22 @@ def _resolve_microphysics(config):
     _hom_nuc = bool(getattr(config, "homogeneous_ice_nucleation", False))
     # Second half of the CLUBB liquid partition; see the MPAS call site.
     _liq_closure = bool(config._liquid_partition_resolved())
-    if _hs_thr is not None or _hs_cap is not None or _hom_nuc or _liq_closure:
-        from legoesm.atmosphere.physics.microphysics.config import (
-            apply_microphysics_experiment_flags,
-        )
-        micro_config = apply_microphysics_experiment_flags(
-            micro_config, scheme,
-            hard_sat_adjust_threshold=_hs_thr,
-            hard_sat_max_heating_K=_hs_cap,
-            homogeneous_ice_nucleation=_hom_nuc,
-            liquid_from_closure=_liq_closure,
-        )
+    # Called UNCONDITIONALLY.  The clearing assignment inside the helper is
+    # what stops a microphysics override that already carries
+    # liquid_from_closure=True from reaching a built model with no liquid
+    # source; gating the call on the other flags being set left exactly that
+    # leak standing (GLM).  All-None / all-False is a no-op on every other
+    # knob, so this is free.
+    from legoesm.atmosphere.physics.microphysics.config import (
+        apply_microphysics_experiment_flags,
+    )
+    micro_config = apply_microphysics_experiment_flags(
+        micro_config, scheme,
+        hard_sat_adjust_threshold=_hs_thr,
+        hard_sat_max_heating_K=_hs_cap,
+        homogeneous_ice_nucleation=_hom_nuc,
+        liquid_from_closure=_liq_closure,
+    )
 
     # Morrison ice-process tunables (flat ``morrison_*`` ExperimentConfig
     # scalars, declared with "MorrisonConfig.<field>" comments but NEVER

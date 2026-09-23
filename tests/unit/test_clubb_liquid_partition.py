@@ -601,7 +601,7 @@ def test_an_override_cannot_smuggle_the_lever_past_the_floor_guard():
 # MG2 with NO vapour-to-liquid condensation in a CLUBB configuration.
 # ===========================================================================
 
-def _super_saturated_column(cfg):
+def _super_saturated_column(cfg, rh=1.10):
     """One warm, supersaturated, already-cloudy cell."""
     import jax.numpy as jnp
     from legoesm import constants
@@ -621,7 +621,7 @@ def _super_saturated_column(cfg):
         N_s=one(0.0), N_g=one(0.0),
     )
     return morrison_microphysics(
-        one(T), one(1.10 * qs), hm, one(p), jnp.full((1, 2), p), one(rho),
+        one(T), one(rh * qs), hm, one(p), jnp.full((1, 2), p), one(rho),
         one(290.0), dt, cfg)
 
 
@@ -768,3 +768,74 @@ def test_mixed_phase_liquid_sink_survives_the_gate():
     # ...and the gate must not have touched it: no positive supersaturation
     # here, so there is nothing for the gate to remove.
     assert float(on.dq_c_dt[0, 0]) == float(off.dq_c_dt[0, 0])
+
+
+def test_gate_removes_the_latent_heating_with_the_water():
+    """Zeroing the water flux must zero its latent heating too.
+
+    The heating is computed from the same rate inside the adjustment
+    (``hard_sat_max_heating_K`` is a per-step cap passed INTO it), so if any
+    heating term came back separately the gate would keep phantom warming in
+    exactly the supersaturated layers it targets -- and no water-conservation
+    check would notice (GLM).  The identity pinned here is
+    ``dT_dt_off - dT_dt_on == (L_v/c_pd) * cond``.
+    """
+    import numpy as np
+    from legoesm import constants
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+
+    off = _super_saturated_column(MorrisonConfig())
+    on = _super_saturated_column(MorrisonConfig(liquid_from_closure=True))
+
+    cond = float(off.dq_c_dt[0, 0]) - float(on.dq_c_dt[0, 0])
+    assert cond > 1.0e-7, "no condensation removed, so the identity is vacuous"
+    np.testing.assert_allclose(
+        float(off.dT_dt[0, 0]) - float(on.dT_dt[0, 0]),
+        (constants.L_v / constants.c_pd) * cond, rtol=1e-9)
+
+
+def test_gate_also_covers_the_hard_adjustment_path():
+    """Above the hard trigger the lever must still leave no liquid source.
+
+    The hard (bracketed-bisection) branch fires only where
+    ``q_v > hard_sat_adjust_threshold * q_sat`` (default 1.1), so the 1.10
+    fixture sits exactly AT the trigger and never exercises it.  If the hard
+    adjustment applied condensation outside the gated variable, the lever-on
+    arm would still condense at high RH (GLM).
+    """
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+
+    cfg_on = MorrisonConfig(liquid_from_closure=True,
+                            hard_saturation_adjustment=True)
+    cfg_off = MorrisonConfig(hard_saturation_adjustment=True)
+    off = _super_saturated_column(cfg_off, rh=1.30)
+    on = _super_saturated_column(cfg_on, rh=1.30)
+
+    # The hard branch really is active in the control at this RH.
+    assert float(off.dq_c_dt[0, 0]) > 1.0e-7
+    # ...and the gate removes all of it: cloud water can only decrease.
+    assert float(on.dq_c_dt[0, 0]) < 0.0
+
+
+def test_microphysics_half_alone_is_refused_at_the_factory():
+    """The dangerous half must not be reachable by a direct make_physics call.
+
+    It deletes the model's only liquid source, so unlike the closure half it
+    fails CLOSED.  Both reviewers reached it this way.
+    """
+    import pytest
+    from legoesm.atmosphere.physics.combined import make_physics, PhysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig, MorrisonConfig,
+    )
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    with pytest.raises(ValueError, match="NO cloud-liquid source"):
+        make_physics(
+            PhysicsConfig(
+                turbulence=TurbulenceConfig(scheme="louis"),
+                microphysics=MicrophysicsConfig(
+                    scheme="morrison",
+                    morrison=MorrisonConfig(liquid_from_closure=True)),
+            ),
+            dt=600.0, model_type="mpas", cld_macmic_num_steps=1)
