@@ -260,12 +260,41 @@ def main() -> int:
         print(f"{lab:>12} {n:7d} {ra:9.4f} {rb:9.4f} {rp:9.4f} {ex:9.4f} "
               f"{frac:10.2f}")
 
-    print("\nPSEUDO is the oracle's own field carried through FESOM's mesh and "
-          "mask: zero model error by construction, so it is an UPPER BOUND on "
-          "what geometry alone can manufacture (the oracle-to-node leg is an "
-          "extra operator a real run never applies). Read one-sided: pseudo "
-          "well below the excess REFUTES the geometry explanation; pseudo "
-          "comparable to it is suggestive, not proof.")
+    # GLM's tightening, and the reason the word "bound" is not used above.
+    # The pseudo field is band-limited to the ORACLE's resolution and its
+    # interpolation kernel is built from the same wet oracle cells the
+    # reference uses, so part of the scoring path's bias cancels between them
+    # and the control is DEFLATED by an unknown amount. If that cancellation
+    # were absent the pseudo error would be uncorrelated with the tripole's.
+    # Correlation well away from zero means it is real and the control
+    # understates the geometry term.
+    def wcorr(x, y, m):
+        w = area[m]
+        tot = w.sum()
+        xm = (w * x[m]).sum() / tot
+        ym = (w * y[m]).sum() / tot
+        cov = (w * (x[m] - xm) * (y[m] - ym)).sum() / tot
+        sx = np.sqrt((w * (x[m] - xm) ** 2).sum() / tot)
+        sy = np.sqrt((w * (y[m] - ym) ** 2).sum() / tot)
+        return float(cov / (sx * sy)) if sx > 0 and sy > 0 else float("nan")
+
+    print(f"\narea-weighted correlation of the PSEUDO error field with")
+    print(f"  the tripole's error: ring 1 "
+          f"{wcorr(err_p, err_a, use & (ring == 1)):+.3f}, all "
+          f"{wcorr(err_p, err_a, use):+.3f}")
+    print(f"  FESOM's error:       ring 1 "
+          f"{wcorr(err_p, err_b, use & (ring == 1)):+.3f}, all "
+          f"{wcorr(err_p, err_b, use):+.3f}")
+
+    print("\nPSEUDO is the oracle's own field carried through FESOM's mesh: "
+          "zero model error by construction, so it measures what the SCORING "
+          "PATH alone manufactures. It is NOT a bound in either direction. "
+          "Leg 1 inflates it (the oracle-to-node step can draw across "
+          "barriers) and deflates it (shared kernel with the reference), and "
+          "both effects sit at coasts where the rings cannot separate them. "
+          "It also CANNOT see a coastline disagreement at all: this FESOM "
+          "snapshot carries no land, so the control stamps the ORACLE's "
+          "coastline while the real arm carries its own.")
     return 0
 
 
