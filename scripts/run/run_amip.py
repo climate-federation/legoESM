@@ -835,18 +835,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "only DIM). 'none'=legacy, byte-identical.")
     parser.add_argument("--cloud-saturation-scheme",
                         dest="cloud_saturation_scheme",
-                        choices=["liquid", "mixed_phase"], default="liquid",
+                        choices=["liquid", "mixed_phase"],
+                        default="mixed_phase",
                         help="Saturation curve for the cloud-fraction RH. "
-                             "'liquid' (legacy, byte-identical) measures RH "
-                             "against liquid (Tetens) saturation at every "
-                             "temperature, so ice-saturated TTL/anvil air "
-                             "(~205-245 K) reads RH ~0.55-0.75 < rh_crit and "
-                             "the RH cloud schemes diagnose NO cirrus where "
-                             "the model carries detrained ice (#1521). "
-                             "'mixed_phase' blends liquid/ice saturation by "
-                             "the scheme's own condensate ice-fraction ramp "
-                             "(IFS alpha(T) convention), warm cloud "
-                             "unchanged.")
+                             "'mixed_phase' (DEFAULT since 2026-09-17) blends "
+                             "liquid/ice saturation by the scheme's own "
+                             "condensate ice-fraction ramp (IFS alpha(T) "
+                             "convention); warm cloud is unchanged. 'liquid' "
+                             "(legacy, byte-identical) measures RH against "
+                             "liquid (Tetens) saturation at every temperature, "
+                             "so ice-saturated air reads RH well below "
+                             "rh_crit and the RH cloud schemes diagnose NO "
+                             "cloud where the model carries ice: ~0.55-0.75 in "
+                             "the TTL/anvil (#1521) and 0.662 at 230 K / "
+                             "900 hPa, which left the February Arctic with "
+                             "0.0 %% cover against 35-40 %% observed.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
                              "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
@@ -918,6 +921,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "against an observed 0.70-0.82. Pairs with "
                              "--snow-age-activation-K, which alone does not "
                              "move it.")
+    parser.add_argument("--cloud-cap-floor", dest="cloud_cap_floor_on",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="ATTRIBUTION LEVER (Arctic self-isolation A/B, arm 1): "
+                             "hand radiation a cloud floor poleward of "
+                             "--cloud-cap-floor-lat-deg below --cloud-cap-floor-p-max-pa "
+                             "(cloud fraction >= --cloud-cap-floor-cf, grid-mean liquid path "
+                             ">= cf * --cloud-cap-floor-q-c * dp/g). Radiation-only; "
+                             "prognostic condensate and diagnostics untouched. Off = production.")
+    parser.add_argument("--cloud-cap-floor-lat-deg", dest="cloud_cap_floor_lat_deg",
+                        type=float, default=None, help="[deg] None = scheme default 70")
+    parser.add_argument("--cloud-cap-floor-p-max-pa", dest="cloud_cap_floor_p_max_pa",
+                        type=float, default=None, help="[Pa] floor applies below this; None = 70000")
+    parser.add_argument("--cloud-cap-floor-cf", dest="cloud_cap_floor_cf",
+                        type=float, default=None, help="imposed cloud fraction; None = 0.8")
+    parser.add_argument("--cloud-cap-floor-q-c", dest="cloud_cap_floor_q_c",
+                        type=float, default=None, help="[kg/kg] imposed in-cloud liquid; None = 5e-5")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -2332,6 +2351,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
+        cloud_cap_floor_on=args.cloud_cap_floor_on,
+        cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
+        cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,
+        cloud_cap_floor_cf=args.cloud_cap_floor_cf,
+        cloud_cap_floor_q_c=args.cloud_cap_floor_q_c,
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
@@ -3017,6 +3041,9 @@ def _apply_aimip_classical_overrides(
     args._aimip_params = None
     if not getattr(args, "aimip_classical_checkpoint", None):
         return args
+    if getattr(args, "cloud_cap_floor_on", False):
+        raise SystemExit("--cloud-cap-floor cannot be combined with --aimip-classical-checkpoint: "
+                         "the trained cloud config is prebuilt and would not carry the floor")
     from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
     from legoesm.training.aimip_params import AIMIPClassicalParams
     _p = load_checkpoint_or_fail(

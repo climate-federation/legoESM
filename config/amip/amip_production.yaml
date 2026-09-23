@@ -111,7 +111,20 @@ mpas_vert_advection_scheme: van_leer
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
 rad_update_steps: 32        # exactly hourly at dt 112.5 (48 was hourly at dt 75)
-clouds: sundqvist
+# Cloud fraction: Xu-Randall (1996), owner decision 2026-09-17, replacing
+# Sundqvist.  Sundqvist is a pure RH closure with a HARD onset at rh_crit, and
+# it sees only the humidity: measured on this configuration, an Arctic layer at
+# 230 K holding 20 mg/kg of ice at RH 0.70 reports cover 0.000, and so does the
+# same layer in an anvil at 215 K.  Xu-Randall reads the CONDENSATE as well, so
+# an ice-bearing layer below rh_crit is cloudy - 0.311 and 0.357 in those two
+# cases - while a layer with no condensate still returns 0.000, so it does not
+# manufacture cover out of dry air.  That is the mixed/ice-phase behaviour this
+# model needs; see cloud_alpha_xr / cloud_p_xr below for its sensitivity.
+# The condensate it reads is the PROGNOSTIC one: this deck runs Morrison, so
+# physics_pipeline passes q_c/q_i from the microphysics and the constant
+# cloud_q_c_diagnostic is only the fallback for runs with no microphysics wired
+# (it would otherwise give a near-uniform cover wherever cloud exists).
+clouds: xu_randall
 microphysics: morrison
 morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
                                  # sedimentation (micro_mg2_0.F90 loop). The
@@ -217,6 +230,15 @@ hard_saturation_adjustment: true
 # convective_precip_efficiency 0.0.
 cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f376730e)
 cloud_q_c_diagnostic: 5.0e-6   # was 3.0e-4 ("thinner cloud" -> lower albedo)
+# Cloud cover is diagnosed from RH against the ICE-BLENDED saturation curve, not
+# the liquid one (the code default also moved on 2026-09-17; recorded here
+# because it is a scientific choice and a default is not a record).  With
+# "liquid", RH is measured against liquid saturation at every temperature: at
+# 230 K / 900 hPa ice-saturated air reads 0.662 against the 0.85 above, so no
+# cold cloud can form.  Measured in this deck's own February: 0.0 % cover north
+# of 80N and 19 % at 65N, against 35-60 % observed, with surface air 10-19 K
+# too cold underneath it.
+cloud_saturation_scheme: mixed_phase
 
 # --- Cloud-optics corrections (#1519) -----------------------------------------
 # WITHOUT these two the radiation solver sees ONE homogeneous overcast column at

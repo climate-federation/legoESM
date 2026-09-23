@@ -42,13 +42,14 @@ from legoesm.forcing.time_utils import day_to_calendar
 
 ROOT = pathlib.Path("/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs")
 FIELDS = ("rsut", "rlut", "rsutcs", "rlutcs", "clt", "clwvi", "clivi", "pr",
-          "prw", "tas", "hfls", "hfss")
-DERIVED = {"CRE_LW": ("rlutcs", "rlut"), "CRE_SW": ("rsutcs", "rsut")}
+          "evspsbl", "prw", "tas", "hfls", "hfss")
+DERIVED = {"CRE_LW": ("rlutcs", "rlut"), "CRE_SW": ("rsutcs", "rsut"),
+           "P-E": ("pr", "evspsbl")}
 # Rain and evaporation are accumulated in kg/m2/s, which prints as 0.000 at the
 # table's precision -- the precipitation gate was unreadable until this scaling
 # (a 4 mm/day tropical mean is 4.6e-5 kg/m2/s).
 SCALE = {"pr": 86400.0, "evspsbl": 86400.0}
-UNITS = {"pr": "mm/d", "evspsbl": "mm/d"}
+UNITS = {"pr": "mm/d", "evspsbl": "mm/d", "P-E": "mm/d"}
 # (lat_lo, lat_hi, lon_lo, lon_hi), longitudes in [0, 360) and allowed to wrap
 # past 360 (the Namibian box straddles the prime meridian).  The zonal bands
 # come first; the stratocumulus decks are included because the cloud bias
@@ -74,6 +75,11 @@ BANDS = {"GLOBAL": (-90.0, 90.0, 0.0, 360.0),
          # bare ice, so their albedo errors do not have the same size and a
          # single combined cap would average two different defects.
          "Arctic 60-90N": (60.0, 90.0, 0.0, 360.0),
+         # The polar-cap moisture import is P-E over the cap (plus the storage
+         # tendency, added by the caller); the two inner caps are the
+         # pre-registered scoring bands of the cap-cloud A/B.
+         "Arctic 72.5-90N": (72.5, 90.0, 0.0, 360.0),
+         "Arctic 75-90N": (75.0, 90.0, 0.0, 360.0),
          "Antarctic 60-90S": (-90.0, -60.0, 0.0, 360.0)}
 CADENCE_PER_DAY = 1.0
 
@@ -84,7 +90,7 @@ def bucket_key(day):
     differently from the sums it is subtracting."""
     doy, _ = day_to_calendar(float(day))
     return int(float(day) // 365.0), MonthlyAccumulator.day_to_month(doy)
-MIN_SPATIAL_CORR = 0.9
+MIN_SPATIAL_CORR = 0.8   # user 2026-09-21: 0.88 on a 5-vs-10-day cloud-cover window; a grid mismatch gives ~0
 
 
 def sidecar_sums(path):
