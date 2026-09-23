@@ -891,6 +891,37 @@ class MorrisonConfig(NamedTuple):
     hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
 
+    # --- Who supplies the cloud liquid: this scheme, or the turbulence closure
+    # Default False keeps this scheme's saturation adjustment as the liquid
+    # SOURCE, which is what every run before this field did.
+    #
+    # True says an assumed-PDF closure (CLUBB) already diagnosed the layer's
+    # cloud liquid and handed it to the host, so the saturation adjustment here
+    # is switched OFF ENTIRELY -- both signs.  This is the CAM6 arrangement, not
+    # an invention: micro_mg2_0.F90:2688-2730 carries a residual
+    # "remove any excess over-saturation" block, it is gated on
+    # ``allow_sed_supersat`` at :2700, and micro_mg_cam.F90:668-672 sets that
+    # flag ``.false.`` whenever ``do_clubb_sgs``.  Enumerating every write to
+    # ``qctend`` in MG2 (:2634 ice melt, :2680 homogeneous freezing -- a sink,
+    # :2718 the gated residual) leaves MG2 with NO vapour-to-liquid
+    # condensation at all in a CLUBB configuration.
+    #
+    # BOTH SIGNS, deliberately.  CAM switches the whole block with one flag, and
+    # the negative branch is not a microphysical sink -- it is the other half of
+    # the same adjustment, and CLUBB's PDF evaporates cloud liquid as readily as
+    # it condenses it.  Every genuine sink (autoconversion, accretion, Bergeron,
+    # riming, sedimentation) is untouched.
+    #
+    # WHY IT MATTERS: the adjustment removes the whole supersaturation on every
+    # call, so running microphysics N times inside one physics step adjusts N
+    # times.  A 3/6/15 sub-step sweep moved band liquid monotonically by 21%,
+    # which is a step-count sensitivity a liquid SOURCE should not have.
+    #
+    # Turning this on without the closure actually delivering liquid removes the
+    # model's only liquid source; ``ExperimentConfig.validate_strict`` refuses
+    # that pairing rather than letting it run.
+    liquid_from_closure: bool = False
+
     # --- IFS/SAM homogeneous-freezing ice-supersaturation allowance ---
     # gSAM cloud.f90 (Khairoutdinov 2023, after IFS): pristine air below
     # 235 K may stay ice-supersaturated up to rh_homo = 2.583 - T/207.8
@@ -1214,6 +1245,7 @@ def apply_microphysics_experiment_flags(
     morrison_scalars: dict | None = None,
     morrison_flavor: str | None = None,
     morrison_sed_cfl_substeps: bool | None = None,
+    liquid_from_closure: bool = False,
     morrison_sed_cfl_substeps_max: int | None = None,
     morrison_sed_cfl_substeps_strict: bool | None = None,
 ):
@@ -1315,6 +1347,16 @@ def apply_microphysics_experiment_flags(
                 "--microphysics morrison or drop the override.")
         scheme_config = scheme_config._replace(
             morrison_flavor=morrison_flavor)
+    if liquid_from_closure:
+        # Scheme gate, same shape as the Morrison-only knobs below: a deck that
+        # asks for this on a scheme with no saturation adjustment to switch off
+        # must be told, not silently ignored.
+        if not hasattr(scheme_config, "liquid_from_closure"):
+            raise ValueError(
+                f"liquid_from_closure=True is not supported by the {scheme!r} "
+                "microphysics scheme (it has no saturation adjustment to hand "
+                "over); use --microphysics morrison or drop it.")
+        scheme_config = scheme_config._replace(liquid_from_closure=True)
     if morrison_sed_cfl_substeps is not None:
         if scheme != "morrison":
             raise ValueError(

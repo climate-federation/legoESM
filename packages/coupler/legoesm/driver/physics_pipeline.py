@@ -4114,7 +4114,9 @@ def _resolve_microphysics(config):
     _hs_thr = getattr(config, "hard_sat_adjust_threshold", None)
     _hs_cap = getattr(config, "hard_sat_max_heating_K", None)
     _hom_nuc = bool(getattr(config, "homogeneous_ice_nucleation", False))
-    if _hs_thr is not None or _hs_cap is not None or _hom_nuc:
+    # Second half of the CLUBB liquid partition; see the MPAS call site.
+    _liq_closure = bool(config._liquid_partition_resolved())
+    if _hs_thr is not None or _hs_cap is not None or _hom_nuc or _liq_closure:
         from legoesm.atmosphere.physics.microphysics.config import (
             apply_microphysics_experiment_flags,
         )
@@ -4123,6 +4125,7 @@ def _resolve_microphysics(config):
             hard_sat_adjust_threshold=_hs_thr,
             hard_sat_max_heating_K=_hs_cap,
             homogeneous_ice_nucleation=_hom_nuc,
+            liquid_from_closure=_liq_closure,
         )
 
     # Morrison ice-process tunables (flat ``morrison_*`` ExperimentConfig

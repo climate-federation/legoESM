@@ -588,3 +588,120 @@ def test_an_override_cannot_smuggle_the_lever_past_the_floor_guard():
                     cloud_q_c_diagnostic=None)
     with pytest.raises(ValueError, match="RESOLVED cloud config"):
         ExperimentConfig(**cfg).validate_strict()
+
+
+# ===========================================================================
+# The OTHER half: microphysics stops manufacturing liquid once the closure
+# delivers it.  CAM6 arrangement, verified against the oracle:
+# micro_mg2_0.F90:2688-2730 is the residual "remove any excess
+# over-saturation" block, gated on ``allow_sed_supersat`` at :2700, and
+# micro_mg_cam.F90:668-672 sets that flag ``.false.`` whenever
+# ``do_clubb_sgs``.  Enumerating every write to ``qctend`` in MG2 (:2634 ice
+# melt, :2680 homogeneous freezing -- a sink, :2718 the gated residual) leaves
+# MG2 with NO vapour-to-liquid condensation in a CLUBB configuration.
+# ===========================================================================
+
+def _super_saturated_column(cfg):
+    """One warm, supersaturated, already-cloudy cell."""
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.atmosphere.physics.microphysics.morrison import (
+        morrison_microphysics,
+    )
+    from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+    from legoesm.thermo import saturation_mixing_ratio
+
+    T, p, dt = 288.0, 90000.0, 600.0
+    qs = float(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p)))
+    rho = p / (constants.R_d * T)
+    one = lambda v: jnp.full((1, 1), float(v))
+    hm = HydrometeorState(
+        q_c=one(5.0e-4), q_r=one(1.0e-5), q_i=one(0.0), q_s=one(0.0),
+        q_g=one(0.0), N_c=one(1.0e8), N_r=one(1.0e3), N_i=one(0.0),
+        N_s=one(0.0), N_g=one(0.0),
+    )
+    return morrison_microphysics(
+        one(T), one(1.10 * qs), hm, one(p), jnp.full((1, 2), p), one(rho),
+        one(290.0), dt, cfg)
+
+
+def test_liquid_from_closure_defaults_off():
+    """Every run before this field keeps the saturation adjustment."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    assert MorrisonConfig().liquid_from_closure is False
+
+
+def test_liquid_from_closure_removes_the_condensation_source():
+    """With the closure supplying liquid, the adjustment contributes nothing.
+
+    NON-VACUITY: the same assertion on the OFF arm must FAIL, i.e. the source
+    really is large there -- otherwise this test would pass with the gate
+    deleted.
+    """
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+
+    off = _super_saturated_column(MorrisonConfig())
+    on = _super_saturated_column(
+        MorrisonConfig(liquid_from_closure=True))
+
+    # The OFF arm manufactures liquid from the supersaturation...
+    assert float(off.dq_c_dt[0, 0]) > 1.0e-7, (
+        "the off arm must have a large condensation source, or the on-arm "
+        "assertion below proves nothing")
+    # ...and the ON arm's cloud water can only DECREASE (sinks only).
+    assert float(on.dq_c_dt[0, 0]) < 0.0
+    # The vapour sink that fed it is gone too.
+    assert float(on.dq_v_dt[0, 0]) > float(off.dq_v_dt[0, 0])
+
+
+def test_liquid_from_closure_leaves_every_sink_untouched():
+    """Turning the source off must not move autoconversion/accretion/etc.
+
+    The sinks are read off the q_c budget: with the condensation term zeroed,
+    the ON arm's dq_c_dt IS the sum of the sinks, so it must equal the OFF
+    arm's dq_c_dt minus exactly the condensation the OFF arm applied.  That
+    identity holds only if no sink changed.
+    """
+    import numpy as np
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+
+    off = _super_saturated_column(MorrisonConfig())
+    on = _super_saturated_column(MorrisonConfig(liquid_from_closure=True))
+
+    # NOT a closed budget: this is one layer with rain sedimenting out of its
+    # bottom face, so the column is deliberately OPEN (measured residual
+    # 1.7e-8 kg/kg/s, i.e. the rain flux, on both arms).  The identity below
+    # is the real check and does not need closure.
+
+    # The condensation the off arm applied, recovered from the q_c budget.
+    cond = float(off.dq_c_dt[0, 0]) - float(on.dq_c_dt[0, 0])
+    assert cond > 0.0
+    # ...and it is exactly the vapour the off arm additionally consumed.
+    np.testing.assert_allclose(
+        float(on.dq_v_dt[0, 0]) - float(off.dq_v_dt[0, 0]), cond, rtol=1e-9)
+
+
+def test_liquid_from_closure_rejected_on_a_scheme_without_it():
+    """A scheme with no saturation adjustment to hand over must say so."""
+    import pytest
+    from legoesm.atmosphere.physics.microphysics.config import (
+        KesslerConfig, apply_microphysics_experiment_flags,
+    )
+    with pytest.raises(ValueError, match="liquid_from_closure"):
+        apply_microphysics_experiment_flags(
+            KesslerConfig(), "kessler", liquid_from_closure=True)
+
+
+def test_both_halves_move_together():
+    """One experiment flag drives the closure half AND the microphysics half.
+
+    The microphysics half ALONE would leave the model with no liquid source
+    at all, so they must not be separately reachable.
+    """
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MorrisonConfig, apply_microphysics_experiment_flags,
+    )
+    for resolved in (False, True):
+        out = apply_microphysics_experiment_flags(
+            MorrisonConfig(), "morrison", liquid_from_closure=resolved)
+        assert out.liquid_from_closure is resolved

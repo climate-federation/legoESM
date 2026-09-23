@@ -281,6 +281,16 @@ def morrison_microphysics(
         hard_threshold=config.hard_sat_adjust_threshold,
         hard_max_heating_K=config.hard_sat_max_heating_K,
     )
+    # CAM6 arrangement: when the turbulence closure already diagnosed this
+    # layer's cloud liquid and handed it to the host, MG2 carries NO
+    # vapour-to-liquid condensation (micro_mg_cam.F90:668-672 switches the
+    # residual block at micro_mg2_0.F90:2688-2730 off under CLUBB).  Zero the
+    # signed rate and leave ``q_sat`` alone -- rain evaporation, the sub-grid
+    # cloud-fraction closure and the ice branch all still read it.  Static
+    # Python gate on a config bool, the documented feature-gating exception to
+    # ``jnp.where`` (tracing both branches would defeat the point).
+    if config.liquid_from_closure:
+        condensation = jnp.zeros_like(condensation)
     # Sub-grid in-cloud closure (Morrison & Gettelman 2008): evaluate the
     # warm-rain rates on the IN-CLOUD water q_c/cf and scale back by cf, so the
     # non-linear KK2000/SB rates see the (higher) in-cloud concentration rather
