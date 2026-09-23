@@ -304,6 +304,16 @@ the gate's own plant does, so it is reported here instead of papered over.  It
 is not in the gate's map and was already carrying an older drift before this
 round.
 
+The citation gate on this receipt reported `PASS` with 15 citations, zero
+failures, zero unmapped citations, zero map entries failing audit and all nine
+self-tests fired.  Its shifted-line plant on the named statement exited 1 with
+`SYMBOL-NOT-AT-LINE`.
+
+The six-file push gate plus this round's own tests were run together on the
+committed tree and reported exactly:
+
+> 144 passed in 1005.74s (0:16:45)
+
 Independent review by codex not run (codex is paused).  A Claude reviewer was
 run instead, on the whole round's diff and the compiled sources, and its
 verdict was **SHIP WITH CHANGES**, verbatim:
