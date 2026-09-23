@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import re
 import statistics
 from pathlib import Path
 
@@ -116,6 +117,122 @@ def _union_ms(evs: list[dict]) -> float:
     if cur_e is not None:
         total += cur_e - cur_s
     return total
+
+
+_FAMILY_TOKENS = {
+    "all-gather": "all-gather",
+    "allgather": "all-gather",
+    "all-to-all": "all-to-all",
+    "alltoall": "all-to-all",
+    "collective-permute": "permute",
+    "ppermute": "permute",
+    "all-reduce": "all-reduce",
+    "allreduce": "all-reduce",
+    "reduce-scatter": "reduce-scatter",
+    "reducescatter": "reduce-scatter",
+}
+
+# An HLO instruction name is the opcode plus optional numeric suffixes:
+# "all-to-all.18", "ppermute.1295", bare "collective-permute". Anchoring on
+# that shape instead of a substring search is what keeps a FUSION whose name
+# merely CONTAINS an opcode -- "fusion.all-gather.18" -- out of the gather
+# family, which codex demonstrated a substring match would swallow.
+_INSTR_RE = re.compile(r"^([a-z][a-z-]*)(?:\.\d+)*$")
+
+
+def collective_family(name: str) -> str | None:
+    """Which collective family an event name belongs to, or None.
+
+    Matched on the HLO instruction name the profiler emits, anchored whole,
+    so a capture whose names do not look like these returns nothing rather
+    than guessing. Callers must pair this with a census check: a family the
+    compiled program contains but this function never sees would otherwise
+    read as a confident zero.
+    """
+    n = name.strip().lower()
+    if n.startswith("end: "):
+        # The profiler emits a zero-width "end: <op>" marker beside each
+        # collective. Counting it would double the instruction count and
+        # contribute no duration, so it is not a separate event.
+        return None
+    m = _INSTR_RE.match(n)
+    if m is None:
+        return None
+    return _FAMILY_TOKENS.get(m.group(1))
+
+
+def time_by_family(evs: list[dict], steps: int, *,
+                   expect: dict[str, int] | None = None,
+                   devices_per_rank: int = 1) -> dict:
+    """Wall time per step in which each collective family was OCCUPIED.
+
+    WHAT THIS NUMBER IS. Per family, the UNION of that family's event
+    intervals over the capture, divided by the traced step count. The union
+    is used because events overlap -- summing durations double counts, which
+    is how a 1.5 s span once reported 33 s of "busy".
+
+    WHAT IT IS NOT. It is OBSERVED OCCUPANCY on the tracks this capture
+    holds. Naming the reference quantity each time, because "bound" on its
+    own gets the direction wrong (codex caught exactly that here):
+
+    * against the family's WIRE cost on the traced ranks it OVERSTATES,
+      because a collective's duration includes the time it spends waiting
+      for late participants, so a family that is cheap on the wire can
+      occupy most of a step;
+    * against the SUMMED per-device work it UNDERSTATES, because concurrent
+      events collapse into one interval -- twenty-four devices each running
+      10 ms of exchange report 10 ms, not 240;
+    * against the STEP'S CRITICAL PATH it is neither, because the capture
+      is rank-local and a collective on untraced ranks can delay a later
+      operation that IS traced.
+
+    Only a controlled intervention turns this into a cause.
+
+    ``expect`` is the compiled program's per-family instruction count. When
+    given, every family must appear with exactly
+    ``count * devices_per_rank * steps`` events or the result carries
+    ``census_ok=False`` and the reason -- a family renamed or fused away
+    would otherwise read as a confident zero.
+    """
+    if steps <= 0:
+        raise ValueError(f"steps must be positive, got {steps}")
+    if devices_per_rank <= 0:
+        raise ValueError(
+            f"devices_per_rank must be positive, got {devices_per_rank}")
+    buckets: dict[str, list[dict]] = {}
+    for e in evs:
+        fam = collective_family(e.get("name", ""))
+        if fam is not None:
+            buckets.setdefault(fam, []).append(e)
+    span_us = (max(e["ts"] + e["dur"] for e in evs)
+               - min(e["ts"] for e in evs)) if evs else 0.0
+    out = {"steps": steps, "devices_per_rank": devices_per_rank,
+           "span_ms_per_step": span_us / 1e3 / steps, "families": {}}
+    for fam, fevs in sorted(buckets.items()):
+        union_us = _union_ms(fevs)
+        out["families"][fam] = {
+            "instructions": len(fevs),
+            "ms_per_step": union_us / 1e3 / steps,
+            "share_of_span": (union_us / span_us) if span_us else None,
+        }
+    if expect is not None:
+        problems = []
+        for fam, hlo_count in sorted(expect.items()):
+            want = hlo_count * devices_per_rank * steps
+            got = out["families"].get(fam, {}).get("instructions", 0)
+            if got != want:
+                problems.append(
+                    f"{fam}: capture has {got} events, the compiled program "
+                    f"says {hlo_count} instructions x {devices_per_rank} "
+                    f"device(s) x {steps} steps = {want}")
+        for fam in sorted(out["families"]):
+            if fam not in expect:
+                problems.append(
+                    f"{fam}: present in the capture but absent from the "
+                    f"compiled census given")
+        out["census_ok"] = not problems
+        out["census_problems"] = problems
+    return out
 
 
 def per_rank_summary(evs: list[dict]) -> dict:
@@ -312,13 +429,101 @@ def main() -> int:
                          "the event count alone is degenerate, since two "
                          "fills with three reductions per step totals the "
                          "same as four fills with one.")
+    ap.add_argument("--time-by-family", action="store_true",
+                    help="report wall time per step in which each collective "
+                         "family was OCCUPIED, as the UNION of its intervals "
+                         "(overlapping events would otherwise double count). "
+                         "Observed occupancy, neither an upper nor a lower "
+                         "bound on cost -- see time_by_family.")
+    ap.add_argument("--expect-census", default=None, metavar="JSON",
+                    help="the compiled program's per-family instruction "
+                         "counts, e.g. '{\"permute\": 396, \"all-to-all\": "
+                         "12, \"all-gather\": 0}'. Every family must appear "
+                         "with count x devices x steps events or the run "
+                         "EXITS 3 and no number may be quoted: a family the "
+                         "profiler renamed reads as a confident zero.")
+    ap.add_argument("--expect-ranks", type=int, default=None, metavar="N",
+                    help="how many rank*/ directories the capture must "
+                         "hold. A capture missing ranks would otherwise be "
+                         "analysed and exit 0, and a family that lives only "
+                         "on the missing ranks would read as absent.")
+    ap.add_argument("--devices-per-rank", type=int, default=1,
+                    help="devices each traced process drives (1 under the "
+                         "multi-process launch, 24 in a virtual-CPU smoke)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+
+    # A flag that silently does nothing is a gate the caller thinks they
+    # armed (GLM). These two only act inside --time-by-family.
+    if not args.time_by_family:
+        unused = [n for n, v in (("--expect-ranks", args.expect_ranks),
+                                 ("--expect-census", args.expect_census),
+                                 ("--devices-per-rank",
+                                  args.devices_per_rank if
+                                  args.devices_per_rank != 1 else None))
+                  if v is not None]
+        if unused:
+            raise SystemExit(
+                f"{', '.join(unused)} only take effect with "
+                f"--time-by-family, and would be silently ignored here")
 
     ranks = sorted(d for d in args.trace_root.iterdir()
                    if d.is_dir() and d.name.startswith("rank"))
     if not ranks:
         raise SystemExit(f"no rank*/ dirs under {args.trace_root}")
+
+    if args.time_by_family:
+        # Descriptive mode: no skew model, no refusal gates — it reports
+        # per-family wall time and stops. Runs alone so its numbers are
+        # never read as a step budget.
+        expect = (json.loads(args.expect_census)
+                  if args.expect_census else None)
+        if args.expect_ranks is not None and len(ranks) != args.expect_ranks:
+            print(f"REFUSED: capture holds {len(ranks)} rank dir(s) "
+                  f"({', '.join(r.name for r in ranks)}), the launch was "
+                  f"told to expect {args.expect_ranks} — a family living "
+                  f"only on a missing rank would read as absent")
+            return 3
+        fam_out, bad = {}, []
+        for rd in ranks:
+            evs = device_events(load_trace(rd))
+            f = time_by_family(evs, args.steps, expect=expect,
+                               devices_per_rank=args.devices_per_rank)
+            fam_out[rd.name] = f
+            print(f"{rd.name}: span {f['span_ms_per_step']:.2f} ms/step")
+            if not f["families"]:
+                print("    NO COLLECTIVES NAMED in this capture — the "
+                      "profiler did not emit HLO instruction names, so "
+                      "nothing may be attributed from it")
+            for fam, d in f["families"].items():
+                # share_of_span is None for a zero-width capture; printing
+                # it as a percentage would crash a run whose numbers are
+                # otherwise fine (GLM).
+                share = ("  n/a % of span" if d["share_of_span"] is None
+                         else f"  {100 * d['share_of_span']:5.1f}% of span")
+                print(f"    {fam:<15} {d['instructions']:>6} instr  "
+                      f"{d['ms_per_step']:8.2f} ms/step{share}")
+            for pr in f.get("census_problems", []):
+                print(f"    CENSUS MISMATCH {pr}")
+                bad.append(f"{rd.name}: {pr}")
+        print("NOTE: union of intervals — OBSERVED OCCUPANCY on the traced "
+              "ranks only. It OVERSTATES the family's wire cost (duration "
+              "includes waiting for late participants), UNDERSTATES the "
+              "summed per-device work (concurrent events collapse), and "
+              "says nothing about the step's critical path (untraced ranks "
+              "are invisible and can delay traced ones). Only a controlled "
+              "intervention makes it a cause.")
+        if args.out:
+            Path(args.out).write_text(json.dumps(fam_out, indent=2))
+            print(f"wrote {args.out}")
+        if bad:
+            print(f"REFUSED: {len(bad)} census mismatch(es) — the capture is "
+                  "not the compiled program, so nothing above may be quoted")
+            return 3
+        if expect is None:
+            print("NO CENSUS GIVEN (--expect-census): a family the profiler "
+                  "renamed would read as zero and nothing here would notice")
+        return 0
 
     summaries = {}
     for rd in ranks:
