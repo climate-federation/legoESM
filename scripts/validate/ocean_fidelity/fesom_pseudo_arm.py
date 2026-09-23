@@ -12,17 +12,30 @@ cross-barrier draw is an OFFSET, not noise, so averaging does not remove it.
 THE CONTROL.  Push the ORACLE'S OWN FIELD through FESOM's geometry and then
 through the scorer's own path, and score the result against the oracle.  The
 model error is zero by construction, so whatever rmse comes out is
-manufactured entirely by mesh and mask.  If that reproduces FESOM's ring-1
-excess, the salinity "miss" is a scoring artifact.  If it is far smaller, the
-geometry is exonerated and a coastal model difference stands.
+manufactured entirely by the scoring path.
 
-WHY THIS IS AN UPPER BOUND, AND WHY THAT IS THE POINT.  Putting the oracle on
-FESOM's nodes needs one operator a real FESOM run never applies: an
-interpolation from ~111 km ORCA1 cells onto a ~38 km node cloud.  That leg can
-itself draw across a barrier, so it can only INFLATE the control.  The reading
-is therefore one-sided and honest in exactly one direction -- a small answer
-refutes the geometry explanation, a large one is suggestive but not proof.
-Say which of those you got; do not report the number without the side.
+WHAT THIS CONTROL CANNOT DO -- read before quoting any number from it.  An
+earlier version of this docstring called the result an UPPER BOUND on the
+geometry term, on the grounds that putting the oracle on FESOM's nodes needs
+one operator a real run never applies (~111 km oracle cells onto a ~38 km node
+cloud) which can itself draw across a barrier.  That is RETRACTED.  Adversarial
+review pointed out the same leg also DEFLATES the control, because the pseudo
+field is band-limited to the oracle's own resolution and its kernel is built
+from the same wet oracle cells the reference uses, so shared scoring-path bias
+cancels between them.  Both effects live at coasts, where the ring
+stratification cannot separate them.  The deflation half is now MEASURED and
+absent -- the pseudo error correlates with the tripole's at about +0.04 in
+ring 1 -- but the label stays off: this is an estimate, not a bound.
+
+MORE IMPORTANT, AND NOT FIXABLE HERE: this FESOM snapshot carries NO LAND, so
+every node is wet and the control stamps the ORACLE'S coastline through the
+node values while the real arm carries FESOM's own 38 km coastline.  A
+disagreement about where the ocean ENDS is therefore INVISIBLE to this control
+by construction -- and that is one of the two hypotheses it was written to
+separate.  It separates neither; what it measures is how much ring-1 error the
+scoring path alone manufactures for a node cloud whose field equals the
+oracle's, which bounds how much of ring 1 could ever be attributed to physics
+and nothing more.
 
 THREE GATES RUN BEFORE ANY NEW NUMBER IS PRODUCED, because a probe's first
 output is untrusted and this one reconstructs a path it does not own:
@@ -241,7 +254,7 @@ def main() -> int:
         raise SystemExit(f"VACUOUS: only {int(use.sum())} usable cells")
 
     print(f"\n{'edge ring':>12} {'cells':>7} {'tripole':>9} {'FESOM':>9} "
-          f"{'PSEUDO':>9} {'excess':>9} {'pseudo/ex':>10}")
+          f"{'PSEUDO':>9} {'FES-PSE':>9} {'excess':>9} {'pseudo/ex':>10}")
     rows = [(k, str(k)) for k in range(1, int(ring.max()) + 1)]
     rows.append((0, "interior"))
     rows.append((None, "ALL"))
@@ -252,13 +265,21 @@ def main() -> int:
             continue
         ra, rb, rp = (wrms(err_a, area, m), wrms(err_b, area, m),
                       wrms(err_p, area, m))
+        # FESOM's error with the geometry-only error REMOVED, on the model
+        # that the scoring path contributes additively. That model is an
+        # assumption, not a result; it is stated in the caveat below. The
+        # subtraction is the number that answers "how much of FESOM's coastal
+        # error is the scoring path", which neither the ratio nor the
+        # correlation answers on its own -- a pattern can correlate strongly
+        # and still carry little of the amplitude.
+        rr = wrms(err_b - err_p, area, m)
         # The excess is what the control has to explain: the part of FESOM's
         # scatter the tripole's does not account for.
         dd = rb ** 2 - ra ** 2
         ex = np.sqrt(dd) if dd > 0 else -np.sqrt(-dd)
         frac = rp / ex if ex > 0 else float("nan")
-        print(f"{lab:>12} {n:7d} {ra:9.4f} {rb:9.4f} {rp:9.4f} {ex:9.4f} "
-              f"{frac:10.2f}")
+        print(f"{lab:>12} {n:7d} {ra:9.4f} {rb:9.4f} {rp:9.4f} {rr:9.4f} "
+              f"{ex:9.4f} {frac:10.2f}")
 
     # GLM's tightening, and the reason the word "bound" is not used above.
     # The pseudo field is band-limited to the ORACLE's resolution and its
