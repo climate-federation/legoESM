@@ -1431,7 +1431,9 @@ CITATION_MAP = {
     # is exactly what this map exists to refuse.
     'ocean_model_latlon_cgrid.py:6466-6592': [
         '_stage3_T_rate = (',
-        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 129],
+        # 129 before round 12 wrapped the stage-3 pair in the river-runoff
+        # deposit: the closing anchor now sits four lines inside the block.
+        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 127],
     'ocean_model_latlon_cgrid.py:7507-7939': [
         'T_mid = state_new.T.data',
         'S_mid = S_mid + dt * dS_gm * active_3d', 433],
