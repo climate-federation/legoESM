@@ -1693,6 +1693,7 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     stage_raw_velocities: object
     barotropic_correction_geometry: object
     stage_outputs: object
+    stage_tracer_sources: object
 
 
 def _nemo_qsr_stage3_rate(
@@ -6420,6 +6421,48 @@ class LatLonCGridOceanModel:
                     * _active_live[..., 0])
                 return _zero_stage_source.at[..., 0].set(top)
 
+            # River-runoff tracer source (trasbc.F90's river-runoff block).
+            # It sits OUTSIDE the stage switch, so unlike the EMP/QNS block it
+            # runs at ALL THREE stages, and NEMO forms the reciprocal of the
+            # runoff depth FIRST (``zdep = 1/h_rnf``) and multiplies -- which
+            # is not the same fp64 value as dividing.  With neither
+            # ``ln_rnf_depth`` nor ``ln_rnf_depth_ini`` selected the runoff
+            # depth is the LIVE top-cell thickness at the stage's Kmm and
+            # ``nk_rnf = 1``, so the deposit is the top cell alone.
+            _rnf_content = (
+                None if surface_forcing is None
+                else getattr(surface_forcing, "runoff_tracer_content", None))
+            if _rnf_content is not None and len(_rnf_content) != 2:
+                raise ValueError(
+                    "surface_forcing.runoff_tracer_content must be the pair "
+                    "(temperature content, salinity content) in NEMO rnf_tsc "
+                    f"units; got {len(_rnf_content)} entries.")
+
+            def _add_rnf_stage_rate(rate, content, h_stage):
+                """``rate`` unchanged when the card carries no runoff.
+
+                Returned unchanged rather than summed with a zero array: on a
+                cell holding negative zero, ``-0.0 + 0.0`` is ``+0.0``, so a
+                "harmless" addition is not bit-identical and GYRE's byte
+                identity would turn on a signed zero.
+                """
+                if _rnf_content is None:
+                    return rate
+                zdep = 1.0 / jnp.maximum(h_stage[..., 0], 1.0e-10)
+                top = jnp.asarray(content) * zdep * _active_live[..., 0]
+                return rate.at[..., 0].add(top)
+
+            def _stage_tracer_sources(h_stage):
+                """EMP dilution then runoff, in the order NEMO accumulates."""
+                rate_t = _emp_stage_rate(state.T.data, h_stage)
+                rate_s = _emp_stage_rate(state.S.data, h_stage)
+                if _rnf_content is None:
+                    return rate_t, rate_s
+                return (
+                    _add_rnf_stage_rate(rate_t, _rnf_content[0], h_stage),
+                    _add_rnf_stage_rate(rate_s, _rnf_content[1], h_stage),
+                )
+
             _stage3_T_rate = (
                 tend.dT_dt.data * h_k_old
                 / jnp.maximum(_h_live_one_half, 1.0e-10))
@@ -6524,14 +6567,8 @@ class LatLonCGridOceanModel:
                     h_k_old, _h_live_one_half)
 
             _stage_source_rates = (
-                (
-                    _emp_stage_rate(state.T.data, h_k_old),
-                    _emp_stage_rate(state.S.data, h_k_old),
-                ),
-                (
-                    _emp_stage_rate(state.T.data, _h_live_one_third),
-                    _emp_stage_rate(state.S.data, _h_live_one_third),
-                ),
+                _stage_tracer_sources(h_k_old),
+                _stage_tracer_sources(_h_live_one_third),
                 # stprk3_stg.F90:565-600 clears Krhs, accumulates advection,
                 # nonlinear-SBC, QSR and LDF, then tra_zdf.F90 combines that
                 # stage-3 rate with Kbb using the Kmm QCO weight.  These rates
@@ -6546,9 +6583,15 @@ class LatLonCGridOceanModel:
                 # cancels the Kmm divisor, rather than spuriously weighting
                 # surface heat by h(Kmm)/h(Kbb).
                 (
-                    _stage3_T_rate,
-                    tend.dS_dt.data * h_k_old
-                    / jnp.maximum(_h_live_one_half, 1.0e-10),
+                    _add_rnf_stage_rate(
+                        _stage3_T_rate,
+                        None if _rnf_content is None else _rnf_content[0],
+                        _h_live_one_half),
+                    _add_rnf_stage_rate(
+                        tend.dS_dt.data * h_k_old
+                        / jnp.maximum(_h_live_one_half, 1.0e-10),
+                        None if _rnf_content is None else _rnf_content[1],
+                        _h_live_one_half),
                 ),
             )
             if _return_tracer_process_trace:
@@ -8874,6 +8917,14 @@ class LatLonCGridOceanModel:
                     (state_new.u.data, state_new.v.data,
                      state_new.T.data, state_new.S.data,
                      state_new.eta.data),
+                ),
+                # WRITE-only: the per-stage tracer source rates the stage
+                # helper consumes, each with the live top-cell thickness that
+                # stage divided by, so a gate can bind on the PRODUCTION
+                # statement instead of re-implementing it.
+                stage_tracer_sources=(
+                    _stage_source_rates,
+                    (h_k_old, _h_live_one_third, _h_live_one_half),
                 ),
             )
         if not _apply_implicit_vmix:

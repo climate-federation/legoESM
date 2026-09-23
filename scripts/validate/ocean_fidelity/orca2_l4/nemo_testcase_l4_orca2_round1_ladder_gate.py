@@ -763,6 +763,14 @@ def _surface_forcings(
         ice_concentration=jnp.asarray(fields["fr_i"]),
         tau_i_native=jnp.asarray(native_i),
         tau_j_native=jnp.asarray(native_j),
+        # The runoff's TRACER content, recorded exactly by the acquisition
+        # (surface-frame fields ``rnf_tsc``): NEMO's river-runoff tracer
+        # source.  Its MASS channel is NOT switched on here -- that is a
+        # separate statement and would move the sea surface.
+        runoff_tracer_content=(
+            jnp.asarray(fields["rnf_tsc"][..., 0]),
+            jnp.asarray(fields["rnf_tsc"][..., 1]),
+        ),
     )
     return freshwater, surface
 
@@ -1001,8 +1009,14 @@ def candidate_trajectory(
         "checkpoints": checkpoints,
         "unsupported_recorded_channels": {
             "rnf_tsc": (
-                "recorded exactly in every surface frame; the production step "
-                "has no channel for NEMO's runoff T/S source"
+                "TRANSCRIBED in round 12: the recorded runoff tracer content "
+                "is now the production step's runoff source, deposited at all "
+                "three Runge-Kutta stages"
+            ),
+            "rnf": (
+                "the runoff MASS channel is recorded but NOT switched on; it "
+                "forces the sea surface and the horizontal divergence and is "
+                "a separate statement"
             ),
             "rnf_tsc_b": "recorded carry; no production state field",
             "freshwater_budget_carry": "card registry remains UNMEASURED",

@@ -329,6 +329,22 @@ class OceanSurfaceForcing(NamedTuple):
                                        # nn_eice).  None ⇒ no attenuation.
     tau_i_native: object = None        # jnp.ndarray | None [Pa], on-ocean i
     tau_j_native: object = None        # jnp.ndarray | None [Pa], on-ocean j
+    runoff_tracer_content: object = None
+    # (T_content, S_content) pair | None -- the TRACER CONTENT carried by
+    # river runoff, NEMO ``rnf_tsc`` [K.m/s and PSU.m/s] (``sbcrnf.F90``
+    # ``rnf_tsc(:,:,jp_tem) = MAX(sst_m, 0)*rnf*r1_rho0`` and its salinity
+    # twin, which is ``zrnf_sal*rnf*r1_rho0`` with ``zrnf_sal = 0``).  The
+    # deposit is ``content / h_rnf`` on levels 1..nk_rnf (``trasbc.F90``
+    # river-runoff block), and with neither depth option selected NEMO's
+    # surface arm sets ``nk_rnf = 1`` and ``h_rnf`` = the LIVE top-cell
+    # thickness, so the whole content lands in the top cell.
+    #
+    # This is the runoff's HEAT/SALT channel and is DISTINCT from its MASS
+    # channel (``FreshwaterForcing.runoff`` -> the horizontal-divergence
+    # source, ``sbcrnf.F90:253-260``) and from the depth-spreading virtual
+    # salt helper (``freshwater.runoff_spread_virtual_salt_tendency_3d``).
+    # ``None`` -> no runoff tracer source, which is every card that does not
+    # supply one.
 
 
 class OceanConfig(NamedTuple):
