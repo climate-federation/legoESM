@@ -75,8 +75,31 @@ fi
 RESTART=()
 [ -n "$latest" ] && RESTART=(--restart-from "$latest")
 
-JAX_ENABLE_X64=1 "$PY" -u scripts/run/run_amip.py \
+# ONE RANK PER GPU, matching the Levante chain.  Requesting four GPUs and
+# then launching a SINGLE process would leave three idle and bill for them,
+# which is worse than the one-GPU run this replaces (GLM review).  So the
+# launch is changed with the request, not after it.  UNVERIFIED ON THIS
+# MACHINE: the four-device evidence run was done on Levante.  If this fails
+# here it fails LOUDLY on the first link rather than wasting a chain, and the
+# fix is to repeat the one-day smoke on Ginsburg and adjust the srun flags.
+: "${AMIP_N_GPUS:=4}"
+if (( AMIP_N_GPUS < 4 )); then
+  echo "[chain] REFUSING: AMIP_N_GPUS=${AMIP_N_GPUS} is below the floor of 4" >&2
+  echo "[chain] (production AMIP arms run on at least four GPUs, 2026-09-23)." >&2
+  exit 64
+fi
+# SLURM hands srun two conflicting cpus-per-task values on this cluster
+# (SLURM_CPUS_PER_TASK from the allocation vs SLURM_TRES_PER_TASK from the
+# --cpus-per-task request) and srun refuses to start: "cpus-per-task set by two
+# different environment variables".  Measured, job 27647178 died in 12 s on it.
+# Clear the inherited one and state the value on the srun line instead.
+unset SLURM_CPUS_PER_TASK
+_GPU_MAP=$(seq -s, 0 $((AMIP_N_GPUS - 1)))
+JAX_ENABLE_X64=1 srun --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}" \
+  --gpu-bind="map_gpu:${_GPU_MAP}" --cpus-per-task=8 --kill-on-bad-exit=1 \
+  "$PY" -u scripts/run/run_amip.py \
   --config config/amip/amip_production.yaml \
+  --distributed \
   "${AMIP_PATH_FLAGS[@]}" \
   --days "$TARGET_DAYS" \
   --checkpoint-days "$CHECKPOINT_DAYS" \

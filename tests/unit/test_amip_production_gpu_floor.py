@@ -81,3 +81,103 @@ def test_levante_chain_launches_one_rank_per_gpu() -> None:
     text = _LEVANTE.read_text()
     assert 'srun --ntasks="${AMIP_N_GPUS}"' in text
     assert "CMD+=( --distributed )" in text
+
+
+# ---------------------------------------------------------------------------
+# BEHAVIOURAL gates.  Codex round 1 proved the string assertions above are not
+# enough: replacing both consistency `exit`s with `echo` left all six passing.
+# These run the guards for real, in a shell, against a temporary run directory,
+# and assert the EXIT CODE -- so a guard that stops refusing goes red.
+# ---------------------------------------------------------------------------
+import subprocess
+import textwrap
+
+
+def _guard_block() -> str:
+    """The device-count guards, lifted from the chain between their markers.
+
+    Lifted rather than duplicated: if the script's guards are edited, these
+    tests run the edited ones.  A copy in the test would drift and bless
+    whatever it remembered.
+    """
+    text = _LEVANTE.read_text()
+    start = text.index('# DEVICE COUNT.  Standing user directive')
+    end = text.index('echo "[chain] device count:')
+    return text[start:end]
+
+
+def _run_guards(tmp_path, *, outdir, n_gpus, pair_dir=None, ntasks="4",
+                latest_ckpt=""):
+    script = textwrap.dedent(f"""
+        set -uo pipefail
+        OUTDIR={outdir}
+        LATEST_CKPT="{latest_ckpt}"
+        AMIP_N_GPUS={n_gpus}
+        SLURM_NTASKS={ntasks}
+        {"AMIP_PAIR_DIR=" + str(pair_dir) if pair_dir else ""}
+    """) + _guard_block() + "\nexit 0\n"
+    p = tmp_path / "guards.sh"
+    p.write_text(script)
+    return subprocess.run(["bash", str(p)], capture_output=True, text=True).returncode
+
+
+def test_guard_refuses_below_the_floor(tmp_path):
+    d = tmp_path / "arm"; d.mkdir()
+    assert _run_guards(tmp_path, outdir=d, n_gpus=1) == 64
+    assert _run_guards(tmp_path, outdir=d, n_gpus=4) == 0
+
+
+def test_guard_refuses_more_gpus_than_the_allocation(tmp_path):
+    d = tmp_path / "arm"; d.mkdir()
+    assert _run_guards(tmp_path, outdir=d, n_gpus=8, ntasks="4") == 67
+
+
+def test_guard_refuses_a_chain_resumed_at_a_different_count(tmp_path):
+    d = tmp_path / "arm"; d.mkdir()
+    assert _run_guards(tmp_path, outdir=d, n_gpus=4) == 0       # stamps 4
+    assert (d / ".device_count").read_text().strip() == "4"
+    assert _run_guards(tmp_path, outdir=d, n_gpus=8, ntasks="8") == 65
+
+
+def test_guard_refuses_checkpoints_with_no_provenance(tmp_path):
+    """A one-GPU checkpoint continued here must not be stamped as four."""
+    d = tmp_path / "arm"; d.mkdir()
+    (d / "checkpoint_day_0005.npz").write_text("")
+    rc = _run_guards(tmp_path, outdir=d, n_gpus=4,
+                     latest_ckpt=str(d / "checkpoint_day_0005.npz"))
+    assert rc == 69
+    assert not (d / ".device_count").exists(), "invented provenance anyway"
+
+
+def test_guard_refuses_a_pair_at_different_counts(tmp_path):
+    a = tmp_path / "armA"; a.mkdir()
+    b = tmp_path / "armB"; b.mkdir()
+    assert _run_guards(tmp_path, outdir=a, n_gpus=4) == 0
+    assert _run_guards(tmp_path, outdir=b, n_gpus=8, ntasks="8",
+                       pair_dir=a) == 66
+
+
+def test_guard_refuses_a_partner_that_has_not_started(tmp_path):
+    """A missing partner stamp cannot be told apart from agreement."""
+    a = tmp_path / "armA"; a.mkdir()
+    b = tmp_path / "armB"; b.mkdir()
+    assert _run_guards(tmp_path, outdir=b, n_gpus=4, pair_dir=a) == 68
+
+
+def test_guard_refuses_a_pair_that_does_not_point_both_ways(tmp_path):
+    """Otherwise 'the pair' can be one arm agreeing with itself."""
+    a = tmp_path / "armA"; a.mkdir()
+    b = tmp_path / "armB"; b.mkdir()
+    c = tmp_path / "armC"; c.mkdir()
+    assert _run_guards(tmp_path, outdir=a, n_gpus=4) == 0
+    (a / ".pair_dir").write_text(str(c) + "\n")      # A thinks its partner is C
+    assert _run_guards(tmp_path, outdir=b, n_gpus=4, pair_dir=a) == 70
+
+
+def test_a_matching_pair_is_accepted(tmp_path):
+    """The guards must not refuse a pair that genuinely agrees."""
+    a = tmp_path / "armA"; a.mkdir()
+    b = tmp_path / "armB"; b.mkdir()
+    assert _run_guards(tmp_path, outdir=a, n_gpus=4) == 0
+    (a / ".pair_dir").write_text(str(b) + "\n")
+    assert _run_guards(tmp_path, outdir=b, n_gpus=4, pair_dir=a) == 0

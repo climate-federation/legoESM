@@ -7,6 +7,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --constraint=a100_80
 #SBATCH --cpus-per-task=8
+#SBATCH --exclusive
 #SBATCH --mem=0
 #SBATCH --time=12:00:00
 #SBATCH --output=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs/slurm_logs/%x-%j.out
@@ -212,6 +213,14 @@ if (( AMIP_N_GPUS < 4 )); then
     echo "[chain] directive 2026-09-23).  Set AMIP_N_GPUS=4 or higher." >&2
     exit 64
 fi
+# ...and it must not exceed what SLURM actually gave us, or srun would
+# oversubscribe while .device_count recorded a number that never ran (GLM).
+if [[ -n "${SLURM_NTASKS:-}" ]] && (( AMIP_N_GPUS > SLURM_NTASKS )); then
+    echo "[chain] REFUSING: AMIP_N_GPUS=${AMIP_N_GPUS} exceeds the allocation" >&2
+    echo "[chain] of ${SLURM_NTASKS} task(s).  Raise --ntasks/--gpus-per-node" >&2
+    echo "[chain] on the sbatch request to match." >&2
+    exit 67
+fi
 
 # PAIR CONSISTENCY.  Both arms of a comparison MUST use the same device count:
 # the ocean solver converges to a tolerance at one device and runs a fixed
@@ -231,10 +240,52 @@ if [[ -f "${_DEVCOUNT_FILE}" ]]; then
         echo "[chain] halo path mid-stream.  Start a new run directory." >&2
         exit 65
     fi
+elif [[ -n "${LATEST_CKPT}" ]]; then
+    # A checkpoint exists but no stamp does: this run was started before the
+    # stamp existed, or its checkpoints were COPIED in from another run (the
+    # PREV_CKPT_DIR pattern).  Stamping it now would invent provenance -- a
+    # one-GPU checkpoint would be recorded as four and the pair guard would
+    # then bless a mismatch (codex review).  Refuse and make the operator say
+    # what it actually ran on.
+    echo "[chain] REFUSING: ${OUTDIR} has checkpoints but no .device_count." >&2
+    echo "[chain] Its device count is unknown, and guessing it would give the" >&2
+    echo "[chain] pair guard a number nothing measured.  If you know the run" >&2
+    echo "[chain] was made on N devices, write N into ${_DEVCOUNT_FILE}; if it" >&2
+    echo "[chain] was a one-GPU run, it cannot be continued under the four-GPU" >&2
+    echo "[chain] floor and needs a fresh directory." >&2
+    exit 69
 else
-    echo "${AMIP_N_GPUS}" > "${_DEVCOUNT_FILE}"
+    # Cold start: stamp ATOMICALLY (codex) so a reader never sees a half-written
+    # or empty file and aborts a pair that actually agrees.
+    printf '%s\n' "${AMIP_N_GPUS}" > "${_DEVCOUNT_FILE}.tmp.$$"
+    mv -f "${_DEVCOUNT_FILE}.tmp.$$" "${_DEVCOUNT_FILE}"
 fi
-if [[ -n "${AMIP_PAIR_DIR:-}" && -f "${AMIP_PAIR_DIR}/.device_count" ]]; then
+if [[ -n "${AMIP_PAIR_DIR:-}" ]]; then
+    # A MISSING partner stamp is a refusal, not a pass (GLM review): two arms
+    # submitted at the same moment would each see no partner file and both
+    # sail through, which is exactly the accident this guard exists to stop.
+    # So the partner arm must be started FIRST; it stamps its count, and this
+    # one then has something to agree with.
+    if [[ ! -f "${AMIP_PAIR_DIR}/.device_count" ]]; then
+        echo "[chain] REFUSING: AMIP_PAIR_DIR=${AMIP_PAIR_DIR} has no" >&2
+        echo "[chain] .device_count stamp yet.  Start the partner arm first so" >&2
+        echo "[chain] its device count is recorded, then start this one; a" >&2
+        echo "[chain] missing stamp cannot be distinguished from agreement." >&2
+        exit 68
+    fi
+    # RECIPROCAL: the partner must name this arm back, or "the pair" is one
+    # arm checking itself, which passes trivially (codex).
+    if [[ -f "${AMIP_PAIR_DIR}/.pair_dir" ]]; then
+        _BACK=$(cat "${AMIP_PAIR_DIR}/.pair_dir")
+        if [[ "$(readlink -f "${_BACK}")" != "$(readlink -f "${OUTDIR}")" ]]; then
+            echo "[chain] REFUSING: ${AMIP_PAIR_DIR} names ${_BACK} as ITS" >&2
+            echo "[chain] partner, not ${OUTDIR}.  A pair must point both ways" >&2
+            echo "[chain] or the check is an arm agreeing with itself." >&2
+            exit 70
+        fi
+    fi
+    printf '%s\n' "${AMIP_PAIR_DIR}" > "${OUTDIR}/.pair_dir.tmp.$$"
+    mv -f "${OUTDIR}/.pair_dir.tmp.$$" "${OUTDIR}/.pair_dir"
     _PARTNER=$(cat "${AMIP_PAIR_DIR}/.device_count")
     if [[ "${_PARTNER}" != "${AMIP_N_GPUS}" ]]; then
         echo "[chain] REFUSING: partner arm ${AMIP_PAIR_DIR} runs on" >&2
@@ -244,6 +295,12 @@ if [[ -n "${AMIP_PAIR_DIR:-}" && -f "${AMIP_PAIR_DIR}/.device_count" ]]; then
         exit 66
     fi
 fi
+# RESIDUAL GAP, stated rather than papered over: AMIP_PAIR_DIR is opt-in, so
+# an operator who simply does not set it gets no pair check at all.  The stamp
+# in each run directory is what survives that, and the real backstop belongs on
+# the SCORING side -- a comparison should refuse two arms whose stamps differ,
+# because that is where the confound actually bites and it cannot be skipped by
+# forgetting an environment variable.  Not built here.
 echo "[chain] device count: ${AMIP_N_GPUS} GPU(s), one rank each${AMIP_PAIR_DIR:+ (pair ${AMIP_PAIR_DIR})}"
 
 # CONFIG_YAML override: debugging configs (e.g. sub-daily diag_days for NaN
@@ -261,8 +318,33 @@ CMD=( "${PY}" -u scripts/run/run_amip.py
 [[ -n "${EXTRA:-}" ]] && CMD+=( ${EXTRA} )
 
 CMD+=( --distributed )
+# ONE GPU PER RANK, bound explicitly.  --gpu-bind=none would leave every rank
+# seeing all four devices, and whether the MPI lane then picks a different one
+# per rank is an inference about early_init rather than something the launcher
+# states (GLM review).  map_gpu gives each rank exactly one visible device,
+# which is also the convention early_init documents as the shim-pinned case
+# (CUDA_VISIBLE_DEVICES with one entry -> local_device_ids [0]), so there is
+# nothing left to infer.
+# SLURM hands srun two conflicting cpus-per-task values on this cluster
+# (SLURM_CPUS_PER_TASK from the allocation vs SLURM_TRES_PER_TASK from the
+# --cpus-per-task request) and srun refuses to start: "cpus-per-task set by two
+# different environment variables".  Measured, job 27647178 died in 12 s on it.
+# Clear the inherited one and state the value on the srun line instead.
+unset SLURM_CPUS_PER_TASK
+# MPI LIBRARY PATHS.  mpi4py needs libmpi and mpi4jax needs a newer libstdc++,
+# and each failure is misleading: without the first, "cannot load MPI library
+# ... libmpi.so.40" (measured, job 27647305 died on it in 16 s); without the
+# second, the mpi4jax import quietly falls back.  The openmpi module does not
+# survive into a batch step here, and the 4.1.6 paths segfault on import (ABI
+# mismatch), so the 4.1.2 path is pinned deliberately.
+export LD_LIBRARY_PATH="/sw/spack-levante/openmpi-4.1.2-mnmady/lib:/sw/spack-levante/gcc-13.4.0-c4mgfk/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# CUDA-aware MPI stays OFF: MPI4JAX_USE_CUDA_MPI=1 segfaults every data-parallel
+# run on this cluster.
+export MPI4JAX_USE_CUDA_MPI=0
+_GPU_MAP=$(seq -s, 0 $((AMIP_N_GPUS - 1)))
 LAUNCH=( srun --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}"
-         --gpus-per-node="${AMIP_N_GPUS}" --gpu-bind=none --kill-on-bad-exit=1 )
+         --gpus-per-node="${AMIP_N_GPUS}" --gpu-bind="map_gpu:${_GPU_MAP}"
+         --cpus-per-task=8 --kill-on-bad-exit=1 )
 echo "[chain] launching on ${AMIP_N_GPUS} GPU(s): ${LAUNCH[*]} ${CMD[*]}"
 "${LAUNCH[@]}" "${CMD[@]}"
 RC=$?
