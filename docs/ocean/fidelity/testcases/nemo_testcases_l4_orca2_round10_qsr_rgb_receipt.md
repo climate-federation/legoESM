@@ -80,7 +80,14 @@ Three sites changed, each mirroring the two-band arm that was already there:
 2. The Runge-Kutta stage-three seam gains the RGB twin of the existing
    `qsr_2BD` substitution: the pipeline's step-entry evaluation is removed and
    the `Kmm` evaluation added.  The removal arm reuses the pipeline's OWN
-   jacobian expression, so it is exact rather than approximate.
+   jacobian expression.  The two arms are NOT the same call — the pipeline's
+   live thickness is built with no minimum-water-column floor and the seam's
+   with a 0.5 m one — so the exactness of the removal is a MEASURED claim, not
+   a structural one: on the ORCA2 card the two thickness fields are
+   **0 of 799,200 bitwise unequal and their wet masks identical**, because
+   every one of the 10,207 columns where the floor binds is dry and the
+   shallowest WET column is 29.9 m.  It would stop being exact the day a wet
+   column is shallower than the floor; that is registered in OPEN.
 3. The external surface-forcing stage stops ALSO depositing under the NEMO RGB
    selector, exactly as it already declined to under the two-band one.  Without
    that, `qsr` would be counted twice while the column-integrated heat budget
@@ -100,11 +107,28 @@ underneath it.
 
 | row | result |
 |---|---|
-| the card's deposit vs the record's `qsr` increment, every owned wet cell | **AT_BAR**, 0 of 233,341 unequal |
+| **the SHARED PHYSICS PIPELINE's own deposit** vs the record's `qsr` increment, every owned wet cell | **AT_BAR**, 0 of 233,341 unequal |
+| the same gate run at the round's BASE commit | **REFUSES**, exit 2, with the pipeline's own two-band refusal text |
+| the operand-level deposit vs the same record | **AT_BAR**, 0 of 233,341 unequal |
 | control: the card's two-band sibling through the same dispatcher | fires, 149,842 unequal, max 4.81e-07 K/s |
 | control: the reference ladder instead of the live one | fires, 148,122 unequal, max 2.29e-08 K/s |
 | control: an unresolved chlorophyll profile | fires — REFUSED at the kernel, never substituted |
 | control: one representable value moved on one wet cell | fires, 1 unequal |
+
+The first row is the one that BINDS on the diff.  It calls
+`make_ocean_physics` — the production factory — with the card's own shortwave
+configuration and every other module switched off, so the only tendency it can
+return is the block this round changed.  The pipeline derives its own stretch
+from the sea surface, so the state is given the sea surface that carries the
+record's own `r3t`; that round trip is exact and the gate refuses if it ever
+stops being (measured: 0 of 16,433 wet surface columns unequal).
+
+**The gate was PROVEN to bind, not assumed to.**  A clean clone at the round's
+base commit, with this gate dropped in unchanged, refuses: the pipeline's own
+`shortwave_penetration_tendency is the two-band Jerlov kernel but got
+scheme='nemo_qsr_rgb'`.  An earlier draft of this gate did NOT bind — it
+re-implemented the operands and passed with the whole model diff absent — and
+the independent reviewer measured that.  See section 8a.
 
 Label: **given NEMO's entry** (the `qsr`, chlorophyll and `r3t` operands are
 the record's own recorded frames).
@@ -119,10 +143,11 @@ The card's 1-D reference ladder is not bit-identical to NEMO's:
 | `e3t_1d` vs the mesh mask | levels 28 and 29 | 9.094947e-13 m |
 | `e3t_0`, the 3-D partial-cell thickness that actually enters the deposit | none | 0 of the owned wet cells |
 
-Those two levels sit far below the blue extinction level, and the AT_BAR result
-was obtained with the card's OWN ladder — which is the proof that the
-disagreement cannot reach the deposit, rather than an argument that it should
-not.  It is carried into OPEN as its own statement.
+Those two levels sit far below the blue extinction level, where NEMO's deposit
+and legoESM's are BOTH exactly zero — so the AT_BAR result at those levels is a
+zero-against-zero comparison.  It shows the disagreement is inert **for this
+record at this step**; it is NOT a structural proof that a deeper-reaching
+band could never see it.  Carried into OPEN as its own statement.
 
 ## 4. Where the ladder stops now, and the control that says it is not this round's change
 
@@ -144,9 +169,12 @@ _step_jitted -> _step_impl -> _apply_implicit_vertical_mixing
 The divisor is the raw mesh `e3w_0` times the stretch `max(1+r3t, 1e-6)`.  The
 raw field is measured clean (0 of 799,200 non-positive or non-finite) and the
 floor cannot produce a non-positive value, so the guard can only fire on a
-**non-finite** stretch — that is, on a non-finite sea-surface height in the
-state the implicit vertical mixing receives, which is the post-Runge-Kutta
-working state.
+**non-finite divisor**.  That the sea-surface height itself is non-finite is
+**PLAUSIBLE, not CONFIRMED**: an overflow of `e3w_0 * stretch` from a
+finite-but-enormous sea surface fires the same guard, and the guard is a global
+`jnp.all` so it names no cell.  The discriminating measurement is one line —
+print the sea surface the implicit vertical mixing receives — and it was NOT
+run this round.
 
 **CONTROL, one variable:** the same step, same compiled graph, with the
 shortwave flux set identically to zero, fires the SAME guard.  With `qsr = 0`
@@ -172,8 +200,14 @@ and at its final tip with the evaluation protocol byte-identical:
 | thirty-day member, byte-identical daily snapshots | 30 / 30 |
 | day-30 digest | `14a7e64b4512860e...` — the same as rounds 7, 8 and 9 |
 
-DINO's card executes the same RGB kernel through its own `rgb_chl` selector:
-`tests/ocean/unit/test_dino_experiment.py` — **128 passed**, no movement.
+**CORRECTION.**  An earlier draft of this receipt said DINO executes the same
+RGB kernel through its own `rgb_chl` selector.  It does not: DINO's shortwave
+is `ShortwavePenetrationConfig(water_type=...)`, whose scheme defaults to
+`jerlov_2band`, and neither `dino.py` nor its test mentions a chlorophyll
+scheme.  DINO takes the unchanged two-band branch.
+`tests/ocean/unit/test_dino_experiment.py` — **128 passed** — is therefore a
+REGRESSION check that the branch DINO does take is untouched, not coverage of
+the RGB arm.  The RGB arm's coverage is this round's own gate and unit tests.
 
 ## 6. Round 9's OPEN item 3, transcribed and NOT landed
 
@@ -182,8 +216,14 @@ compiled operator says so in its own comment.  The shearing term of the
 resolved divergence-vorticity laplacian is
 
 ```
-zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk) * e3f * r1_e1e2f * ( d(e2v*v) - d(e1u*u) )
+zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk)
+   * ( e3f_3d(ji-1,jj-1,jk) * (1._wp + r3f(ji-1,jj-1)*fe3mask(ji-1,jj-1,jk)) )
+   * r1_e1e2f(ji-1,jj-1) * ( d(e2v*v) - d(e1u*u) )
 ```
+
+(`fe3mask` there is the key_qco THICKNESS substitution — it gates the stretch,
+not the viscosity — and is quoted in full so the sentence below is about the
+viscosity's mask and nothing else.)
 
 annotated `! ahmf already * by fmask`
 (`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynldf_lev.f90:123`); the
@@ -262,17 +302,44 @@ built-in self-test controls fire as well.
 ## 8. Independent review
 
 Codex is paused, so `codex exec` was NOT run and this round does not claim an
-independent codex verdict.  A fresh adversarial reviewer was run in its place;
-its verdict is quoted verbatim in section 8a.
+independent codex verdict.  A fresh adversarial reviewer was run in its place.
+
+### 8a. Its verdict, verbatim, and what was done about it
+
+> VERDICT: BLOCK — the round's one new gate passes with the round's code
+> reverted (measured), the pipeline branch was widened to an unpreregistered
+> scheme that can now double-count qsr, and the only coverage claimed for it
+> does not exist.
+
+Nine findings, every one of them this round's own.  All are fixed or recorded:
+
+| finding | what it was | what was done |
+|---|---|---|
+| D1 (blocking) | the new gate passed with the whole model diff ABSENT, because it re-implemented the operands instead of running the pipeline; and its unit test asserted that copy against an inline retyping of itself | the gate now runs `make_ocean_physics` — the production factory — and the same gate at the base commit REFUSES (section 3).  The tautological test is replaced by one that asserts the gate against `compute_layer_thickness` / `compute_ocean_jacobian`, the helpers the pipeline calls |
+| D2 (blocking) | the pipeline branch had been widened to the generic `rgb_chl` scheme as well, so a previously-refused configuration would deposit — and double-count with the external stage, which still deposits that scheme | narrowed to the NEMO identity selector alone; a new test pins that the generic scheme still refuses |
+| D3 | the claim that DINO covers the new arm is false | corrected in section 5 |
+| D4 | `traqsr.f90:386` is a bare comment; the cited statement is `:388` | fixed at all three sites, including inside the gate's own JSON |
+| D5 | the removal arm's exactness was asserted, not measured | measured: 0 of 799,200, with the condition under which it would stop holding (section 2) |
+| D6 | "the sea-surface height is non-finite" was stated as measured | relabelled PLAUSIBLE, with the discriminator named (section 4) |
+| D7 | a `PUSH_BATTERY` placeholder, a missing section 8a, a stale JSON artifact | all three fixed; the gate artifact re-run at the final tip |
+| D8 | section 3a's proof is a zero-against-zero comparison | weakened to what it actually shows |
+| D9 | section 6 elided the `fe3mask` factor from the quoted line | the line is now quoted in full |
+
+One further defect surfaced while fixing D1 and is fixed here: with shortwave
+penetration as the ONLY enabled physics module, the pipeline seeded the TRACER
+tendencies from `state.u`, which on a C-grid is one column wider than the
+tracer field.  Each zero slot now takes its own field's shape.  No card with
+any other module enabled is affected, and the round's GYRE proof covers it.
 
 ## 9. OPEN
 
-1. **The ladder now stops on a non-finite post-Runge-Kutta sea-surface height
-   at kt=1** (section 4), inside the implicit vertical mixing's
-   buoyancy-frequency divisor.  It is measured, its call chain is named, and a
-   one-variable control shows it is not this round's shortwave.  Localising
-   WHICH operator first produces the non-finite value is round 11's first job,
-   and it needs no new record.
+1. **The ladder now stops on a non-finite buoyancy-frequency divisor at kt=1**
+   (section 4), inside the implicit vertical mixing.  The refusal and its call
+   chain are MEASURED, and a one-variable control shows it is not this round's
+   shortwave.  That the SEA-SURFACE HEIGHT is the non-finite quantity is
+   PLAUSIBLE only; the discriminator (print the sea surface the implicit
+   vertical mixing receives, and split wet from dry) is round 11's first job
+   and needs no new record.
 2. **Round 9's OPEN item 3 — the second masking — is transcribed and cited but
    not landed** (section 6).  It needs either a new instrumented NEMO
    acquisition of the `dyn_ldf` increment, or a decision that an
@@ -295,7 +362,10 @@ its verdict is quoted verbatim in section 8a.
    jacobian expression).  This is a PRE-EXISTING GYRE statement, unmeasured,
    reported because it was read while transcribing beside it — it is NOT
    touched by this diff.
-8. GitHub issue 1455 remains an operator-post action because no GitHub
+8. **The stage-three seam's exact removal is conditional on no WET column
+   being shallower than the minimum water column** (section 2).  Measured true
+   on this card today; nothing enforces it.
+9. GitHub issue 1455 remains an operator-post action because no GitHub
    connector is installed in this environment.
 
 ## Choices
@@ -305,10 +375,25 @@ fixed by the record's resolved configuration and was read from it (section 1).
 One decision is RAISED rather than taken, in the final report: how round 9's
 OPEN item 3 should be gated before it lands (section 6).
 
-UNASKED: none.  No scheme selection, selector default, tunable, threshold,
-cadence, resolution, timestep, carried state, data source or
-previously-tolerated condition moved, and no stabiliser NEMO lacks was added.
-The external stage's non-NEMO RGB callers keep the behaviour they had.
+UNASKED: none STANDING.  One was made and then REVERTED before landing, and it
+is recorded rather than dropped: an earlier commit widened the pipeline's new
+branch to the generic `rgb_chl` scheme as well, which would have turned a
+previously-refused configuration into a silent (and double-counted) deposit.
+The independent reviewer caught it; the branch now admits only the NEMO
+identity selector, which is what the preregistration scoped.
+
+Two changes that are NOT configuration and are declared here anyway:
+- the pipeline's empty-module path now seeds each zero tendency from its own
+  field instead of from `state.u` — a shape fix with no effect on any card
+  that enables any other module, needed because the binding gate runs the
+  pipeline with shortwave alone;
+- the receipts of rounds 8 and 9 have their citation-gate plant rows withdrawn
+  (section 7a).
+
+No scheme selection, selector default, tunable, threshold, cadence,
+resolution, timestep, carried state, data source or previously-tolerated
+condition moved, and no stabiliser NEMO lacks was added.  The external stage's
+non-NEMO RGB callers keep the behaviour they had.
 
 ## 10. Gate and test results at the round's final tip
 
