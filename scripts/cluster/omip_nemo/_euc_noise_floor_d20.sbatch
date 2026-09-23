@@ -89,7 +89,26 @@ rc=0
 for TAG in $RUNS; do
   SNAP=${SNAPOF[$TAG]:-}
   [ -n "$SNAP" ] || { echo "FATAL: unknown run $TAG; known: ${!SNAPOF[*]}"; exit 1; }
-  [ -r "$SNAP" ] || { echo "FATAL: missing $SNAP"; rc=1; continue; }
+  # A run that REACHES its target writes that day as snapshot_final.npz, not
+  # snapshot_dayNNNN.npz, so the last day of every leg is invisible under the
+  # name above. Accept the other name -- and then verify the day STAMPED INSIDE
+  # the file, because the probe pins the oracle record from $DAY and never
+  # looks at the snapshot. Without the stamp check this fallback would happily
+  # score day 90 against NEMO's day 40 record and exit clean.
+  [ -r "$SNAP" ] || SNAP="$(dirname "$SNAP")/snapshot_final.npz"
+  [ -r "$SNAP" ] || { echo "FATAL: no day-$DAY snapshot for $TAG"; rc=1; continue; }
+  $PY - "$SNAP" "$DAY" <<'GATE' || { echo "FATAL: $SNAP is not day $DAY"; rc=1; continue; }
+import sys
+import numpy as np
+d = np.load(sys.argv[1], allow_pickle=True)
+if "time_days" not in d.files:
+    print(f"snapshot carries no time_days stamp: {sorted(d.files)[:8]}")
+    sys.exit(1)
+got = float(np.asarray(d["time_days"]).ravel()[0])
+want = float(sys.argv[2])
+print(f"day stamp: {got:g} (want {want:g})")
+sys.exit(0 if abs(got - want) < 1e-6 else 1)
+GATE
   echo "############ $TAG  day $DAY  (NEMO rec ${REC0}:${REC1}) ############"
   $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline.py \
     --legoesm-snapshot "$SNAP" --nemo-gridt ${STEM}_grid_T.nc \
