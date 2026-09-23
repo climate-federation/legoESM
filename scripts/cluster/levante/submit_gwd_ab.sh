@@ -24,17 +24,19 @@ set -euo pipefail
 
 ROOT=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs
 REPO=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
-# PINNED 2026-09-23: config/amip/amip_production.yaml became the CAM6 suite on
-# that date and the GPU chain's CONFIG_YAML default follows it.  This script is
-# a one-variable arm comparison whose baseline is the configuration it was
-# measured against, so it names the same deck under its new name explicitly.
-# Resolved against the SAME tree the chain runs, so it cannot drift apart.
-# ORDERING, stated because codex round 3 checked it: until this branch merges,
-# the target checkouts do not yet carry amip_sundqvist_l36.yaml, so running
-# this script before the merge fails loudly on a missing config rather than
-# silently running CAM6 physics.  Loud is the wanted failure; do not drop the
-# pin to make it run, that restores the silent wrong-physics hazard.
-export CONFIG_YAML="${CONFIG_YAML:-${REPO}/config/amip/amip_sundqvist_l36.yaml}"
+# BASELINE DECK, pinned 2026-09-23.  config/amip/amip_production.yaml became the
+# CAM6 suite on that date and the GPU chain's CONFIG_YAML default follows it.
+# This script is a one-variable arm comparison whose baseline is the
+# configuration it was measured against, so it names that configuration
+# explicitly instead of inheriting whatever production becomes.
+# CONDITIONAL on purpose (GLM round 3): the rename has not reached every
+# checkout, and in a tree that still predates it the production deck IS the
+# right baseline.  So prefer the renamed deck where it exists and fall back to
+# production where it does not - correct on both sides of the merge, and it
+# never breaks the script the way a hard pin would.
+BASELINE_DECK="${REPO}/config/amip/amip_sundqvist_l36.yaml"
+[[ -f "${BASELINE_DECK}" ]] || BASELINE_DECK="${REPO}/config/amip/amip_production.yaml"
+
 SRC="${ROOT}/century8"
 PIN="${SRC}/checkpoint_day_0080.npz"
 TARGET_DAYS=110          # absolute: 80 (pinned) + 30

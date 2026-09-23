@@ -276,6 +276,18 @@ def test_production_deck_selects_both_levers_and_no_other_deck_does():
     # Walk the RESOLVED decks, not the raw files: a deck that inherits a lever
     # through `include:` carries it just as surely as one that spells it out,
     # and a raw-key walk cannot see that (GLM review 2026-09-23).
+    _assert_no_other_deck_carries_a_lever(cfgdir)
+
+
+def _assert_no_other_deck_carries_a_lever(cfgdir):
+    """The walk itself, taking its config root as an argument.
+
+    Split out so the negative control below can run it against a COPY in a
+    temporary directory instead of planting a file in the real checkout: the
+    genuine gate walks the same tree, so a shared impostor would make it fail
+    spuriously under pytest-xdist and would survive a crash (GLM round 3).
+    """
+    from legoesm.driver.run_config_yaml import read_yaml_with_includes
     production = (cfgdir / "amip" / "amip_production.yaml").resolve()
     for deck in sorted(cfgdir.rglob("*.yaml")):
         # Exempt the canonical PATH, not the basename: a file named
@@ -295,30 +307,28 @@ def test_production_deck_selects_both_levers_and_no_other_deck_does():
         assert other.get("mpas_vert_advection_scheme", "upwind") != "sb", deck
 
 
-def test_the_lever_walk_exempts_a_path_not_a_basename(tmp_path, monkeypatch):
+def test_the_lever_walk_exempts_a_path_not_a_basename(tmp_path):
     """Negative control for the exemption, from codex round 2.
 
     A deck named amip_production.yaml somewhere OTHER than config/amip/ is not
     the production deck and must be walked like any other.  Before the fix it
     was skipped by basename, so a deck inheriting the levers could reach a run
     with the gate green.
+
+    Runs against a COPY of config/ under tmp_path, so it plants nothing in the
+    checkout, cannot collide with a parallel run of the real gate, and leaves
+    nothing behind if it dies mid-test.
     """
-    import os
     import shutil
     import pytest
-    cfgdir = pathlib.Path(__file__).parents[2] / "config"
-    # Unique per process: the walk only looks under config/, so the impostor
-    # has to live in the checkout, and a fixed name would collide with a
-    # parallel test run (codex round 3).  mkdir without exist_ok so a stale
-    # directory is a loud failure rather than a silently shared one.
-    impostor_dir = cfgdir / f"_negctl_{os.getpid()}"
-    impostor_dir.mkdir()
-    impostor = impostor_dir / "amip_production.yaml"
+    real = pathlib.Path(__file__).parents[2] / "config"
+    cfgdir = tmp_path / "config"
+    shutil.copytree(real, cfgdir)
+    # sanity: the copy passes before the impostor is planted, so a failure
+    # below is the impostor and not the copying.
+    _assert_no_other_deck_carries_a_lever(cfgdir)
+    impostor = cfgdir / "review" / "amip_production.yaml"
+    impostor.parent.mkdir(parents=True)
     impostor.write_text("include: ../amip/amip_production.yaml\n")
-    try:
-        with pytest.raises(AssertionError):
-            test_production_deck_selects_both_levers_and_no_other_deck_does()
-    finally:
-        shutil.rmtree(impostor_dir)
-    # and with it gone the gate is green again, so the control is not sticky
-    test_production_deck_selects_both_levers_and_no_other_deck_does()
+    with pytest.raises(AssertionError):
+        _assert_no_other_deck_carries_a_lever(cfgdir)
