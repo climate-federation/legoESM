@@ -380,6 +380,12 @@ reported `1 failed, 166 passed in 970.86s` — the failure was this round's own
 face-map guard, and chasing it is what produced the corrected statement row.
 Both runs are quoted so that the green one cannot be read as the only one.
 
+The green battery ran at `5bb50561a`; the commits after it change this receipt
+and nothing else.  The one battery member that reads a receipt — the citation
+gate's own test file — was re-run at the final tip together with this round's
+test file and reported `21 passed in 3.51s`, and the citation gate itself was
+re-run there and reported `PASS` with 15 citations and its plant exiting 1.
+
 The walk's two plants were re-run on the final committed tree, and both still
 fire, each exiting 1:
 
