@@ -1452,7 +1452,11 @@ def nemo_ldf_lap_viscosity_cgrid(
         return m
 
     def _bc(c):
-        # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev]
+        # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev].
+        # A coefficient that is already full (lat, lon, lev) -- NEMO's READ
+        # ahmt_3d/ahmf_3d, nn_ahm_ijk_t=-30 -- passes through unchanged.
+        if c.ndim == 3:
+            return c
         return c[:, None, None] if is_3d else c[:, None]
 
     u_eff = u if u_mask is None else u * _bm(u_mask)
@@ -1647,6 +1651,10 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         return m
 
     def _bc(c):
+        # A coefficient that is already full (lat, lon, lev) -- NEMO's READ
+        # ahmt_3d/ahmf_3d, nn_ahm_ijk_t=-30 -- passes through unchanged.
+        if c.ndim == 3:
+            return c
         return c[:, None, None] if is_3d else c[:, None]
 
     u_eff = u if u_mask is None else u * _bm(u_mask)

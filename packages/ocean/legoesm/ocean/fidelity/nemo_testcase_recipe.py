@@ -147,6 +147,12 @@ def _model_config(
             eos="nemo_eos80",
             physics=physics,
             vorticity_scheme="een_total",
+            # ORCA2 resolves nn_ahm_ijk_t = -30 (run ocean.output:1184), so the
+            # lateral momentum viscosity coefficient is READ whole from
+            # eddy_viscosity_3D.nc rather than built from the grid metrics
+            # (ldfdyn.f90:348-353).  GYRE resolves the metric formula and keeps
+            # the shared default.
+            lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
             # nn_e3f_typ=0 and ln_dynvor_msk=F, identical source meanings to
             # the already-shared literal EEN operands used by GYRE's ENE arm.
             een_e3f_scheme="nemo_avg4",
@@ -1098,6 +1104,66 @@ _ORCA2_ALBORAN_SALINITY_OFFSETS_PSU = ((13, 13, -0.15), (14, 15, -0.25),
 _ORCA2_RED_SEA_TEMPERATURES_C = ((4, 10, 7.0), (11, 13, 6.5), (14, 20, 6.0))
 
 
+def build_orca2_ldf_dyn_coefficients(
+    viscosity_path, tmask: np.ndarray, fmask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """NEMO ``ldf_dyn_init`` with ``nn_ahm_ijk_t = -30``: the coefficient is READ.
+
+    The resolved ORCA2 run prints ``nn_ahm_ijk_t = -30``, so the compiled
+    routine computes no coefficient at all.  It opens ``eddy_viscosity_3D.nc``
+    and reads the whole three-dimensional field at T points and at F points
+    (``ldfdyn.f90:348-353``), each read carrying its own grid-point nature and
+    north-fold sign (``'T'`` and ``'F'``, both ``+1``); the read path completes
+    the field with the ordinary lateral boundary exchange for that nature
+    (``iom.f90:958-975``).  Because the resolved operator is the laplacian
+    (``ln_dynldf_lap = T``), levels one to ``jpkm1`` are then multiplied by
+    ``tmask``/``fmask`` and the last level is left alone -- no square root,
+    which is the bilaplacian arm (``ldfdyn.f90:388-396``).
+
+    ``rn_Uv`` and ``rn_Lv`` are read and printed and this arm never consults
+    them: ``zah0`` (``ldfdyn.f90:313``) is not referenced inside the
+    ``CASE( -30 )`` block.
+
+    The north-fold exchange is NOT applied here.  On the shipped input file it
+    is the identity over the owned domain for both natures, and that is a
+    MEASURED, gated statement rather than an assumption: the round-9 gate
+    refuses unless the file's last owned T row is its own mirrored left half
+    (``lbcnfd.f90:583-639``) and its last owned F row is the row below at the
+    reversed longitude (``lbcnfd.f90:722-746``).
+
+    Parameters
+    ----------
+    viscosity_path : path to ``eddy_viscosity_3D.nc``.
+    tmask, fmask : the card's own ``(n_lat, n_lon, nlev)`` masks.
+
+    Returns
+    -------
+    ahmt : (n_lat, n_lon, nlev)      T-point coefficient [m2/s].
+    ahmf : (n_lat+1, n_lon+1, nlev)  F-point coefficient on legoESM's VERTEX
+        layout, where ``vertex[j, i]`` is NEMO's F point ``(j-1, (i-1) mod
+        n_lon)``; the south row has no NEMO source and is zero (a wall).
+    """
+
+    import netCDF4  # noqa: N813
+
+    path = Path(viscosity_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"missing ORCA2 eddy viscosity file: {path}")
+    nlev = tmask.shape[-1]
+    with netCDF4.Dataset(path, "r") as ds:
+        ds.set_auto_maskandscale(False)
+        raw_t = np.asarray(ds.variables["ahmt_3d"][0], dtype=np.float64)
+        raw_f = np.asarray(ds.variables["ahmf_3d"][0], dtype=np.float64)
+    # File axes are (z, y, x); the card's are (y, x, z).
+    ahmt = np.moveaxis(raw_t, 0, -1)[..., :nlev] * tmask
+    ahmf_native = np.moveaxis(raw_f, 0, -1)[..., :nlev] * fmask
+    n_lat, n_lon = ahmf_native.shape[0], ahmf_native.shape[1]
+    ahmf = np.zeros((n_lat + 1, n_lon + 1, nlev), dtype=np.float64)
+    columns = (np.arange(n_lon + 1) - 1) % n_lon
+    ahmf[1:] = ahmf_native[:, columns]
+    return ahmt, ahmf
+
+
 def _orca2_box(field, box):
     """Inner one-based ``(j0, j1, i0, i1)`` box as a mutable view."""
 
@@ -1188,7 +1254,11 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     domain_path = root / "ORCA_R2_zps_domcfg.nc"
     temperature_path = root / "data_1m_potential_temperature_nomask.nc"
     salinity_path = root / "data_1m_salinity_nomask.nc"
-    required = (domain_path, temperature_path, salinity_path)
+    # ldfdyn.f90:348-353 opens this exact file name in the run directory; the
+    # record's directory symlinks it to the deck, so the deck root is where it
+    # is read from here.
+    viscosity_path = root / "eddy_viscosity_3D.nc"
+    required = (domain_path, temperature_path, salinity_path, viscosity_path)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing ORCA2 deck files: {missing}")
@@ -1276,9 +1346,13 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_e1v_m=metric["e1v"],
         nemo_een_barotropic_m=operands,
     )
+    ahmt, ahmf = build_orca2_ldf_dyn_coefficients(
+        viscosity_path, tmask.astype(np.float64), fmask)
     z_coord = create_partial_cell_coordinate(
         z_ref, bathymetry, bottom_index_rule="nemo_tpoint"
     )._replace(
+        nemo_ldf_ahmt=jnp.asarray(ahmt, dtype=jnp.float64),
+        nemo_ldf_ahmf=jnp.asarray(ahmf, dtype=jnp.float64),
         h_partial=jnp.asarray(h_partial, dtype=jnp.float64),
         bottom_level=jnp.asarray(bottom - 1, dtype=jnp.int32),
         is_active=jnp.asarray(tmask),

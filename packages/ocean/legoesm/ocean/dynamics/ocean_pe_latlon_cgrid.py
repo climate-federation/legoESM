@@ -246,6 +246,13 @@ VALID_LATERAL_VISCOSITY_OPERATOR = frozenset(
 # weighting restored (nemo_ldf_lap_viscosity_e3_cgrid). Only valid when
 # lateral_viscosity_operator="nemo_div_curl" (validated at construction).
 VALID_LATERAL_VISCOSITY_E3_WEIGHTING = frozenset({"off", "nemo_e3"})
+# WHERE the "nemo_div_curl" coefficient comes from, mirroring NEMO's
+# namdyn_ldf nn_ahm_ijk_t: "nemo_ldf_c2d" (default, bit-identical) is the
+# nn_ahm_ijk_t=20 metric formula; "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30,
+# the whole 3-D field READ from eddy_viscosity_3D.nc and carried on the
+# vertical coordinate by the card (ldfdyn.f90:348-353).
+VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE = frozenset(
+    {"nemo_ldf_c2d", "nemo_ahm_3d_file"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
 # at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
 VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
@@ -3288,6 +3295,24 @@ def _bc_horizontal_viscosity(
             f"e3-weighting of THAT operator's div/curl); got "
             f"lateral_viscosity_operator={_visc_op!r}"
         )
+    # Mirrors NEMO's nn_ahm_ijk_t.  Same defense-in-depth as the two selectors
+    # above: also validated at LatLonCGridOceanModel construction, but this
+    # function is called directly by unit tests and other call sites.
+    _ahm_source = getattr(
+        config, "lateral_viscosity_coefficient_source", "nemo_ldf_c2d")
+    if _ahm_source not in VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE:
+        raise ValueError(
+            "lateral_viscosity_coefficient_source must be one of "
+            f"{sorted(VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE)}, "
+            f"got {_ahm_source!r}"
+        )
+    if _ahm_source != "nemo_ldf_c2d" and _visc_op != "nemo_div_curl":
+        raise ValueError(
+            "lateral_viscosity_coefficient_source != 'nemo_ldf_c2d' requires "
+            "lateral_viscosity_operator='nemo_div_curl' (it selects where THAT "
+            f"operator's ahmt/ahmf come from); got "
+            f"lateral_viscosity_operator={_visc_op!r}"
+        )
     _use_flux_div = _visc_op == "flux_divergence"
     _use_nemo_div_curl = _visc_op == "nemo_div_curl"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
@@ -3331,13 +3356,31 @@ def _bc_horizontal_viscosity(
                 "harmonic Laplacian (NEMO ln_dynldf_lap); B_h biharmonic is not "
                 "wired for this operator (DINO uses Laplacian only)."
             )
-        if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):
-            raise ValueError(
-                "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
-                "with a scalar dlon (got dlon<=0; tripolar unsupported)."
-            )
-        _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
-        _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
+        if _ahm_source == "nemo_ahm_3d_file":
+            # NEMO nn_ahm_ijk_t=-30 (ldfdyn.f90:348-353): no coefficient is
+            # computed.  ahmt/ahmf are READ from eddy_viscosity_3D.nc, lateral-
+            # boundary-exchanged by the read path and then masked, and the card
+            # carries that result here.  rn_Uv is inert in NEMO's own -30 arm
+            # (zah0, ldfdyn.f90:313, is never referenced inside it), so A_h is
+            # only the on/off switch tested above.
+            _ahmt = getattr(z_coord, "nemo_ldf_ahmt", None)
+            _ahmf = getattr(z_coord, "nemo_ldf_ahmf", None)
+            if _ahmt is None or _ahmf is None:
+                raise ValueError(
+                    "lateral_viscosity_coefficient_source='nemo_ahm_3d_file' "
+                    "requires the card to carry NEMO's read coefficient on the "
+                    "vertical coordinate (z_coord.nemo_ldf_ahmt / nemo_ldf_ahmf)."
+                )
+            _ahmt = jnp.asarray(_ahmt)
+            _ahmf = jnp.asarray(_ahmf)
+        else:
+            if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):
+                raise ValueError(
+                    "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
+                    "with a scalar dlon (got dlon<=0; tripolar unsupported)."
+                )
+            _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
+            _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
         # 3-D staircase vertex mask (NEMO fmask analogue, rn_shlat=0 free-slip):
         # a 2-D surface vertex mask broadcast over levels leaves zeta LIVE at
         # submerged staircase side walls, where it is computed against the dry

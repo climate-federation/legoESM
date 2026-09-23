@@ -2407,6 +2407,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # closing the topographic-step residual on the dyn_ldf gate rows. See
     # nemo_ldf_lap_viscosity_e3_cgrid.
     lateral_viscosity_e3_weighting: str = "off"
+    # WHERE the "nemo_div_curl" operator's ahmt/ahmf coefficient comes from,
+    # mirroring NEMO's namdyn_ldf nn_ahm_ijk_t.  "nemo_ldf_c2d" (default,
+    # bit-identical) is nn_ahm_ijk_t=20: ldf_c2d builds 1/2*rn_Uv*MAX(e1,e2)
+    # from the grid metrics.  "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30: the whole
+    # 3-D field is READ (ldfdyn.f90:348-353) and supplied by the card on
+    # z_coord.nemo_ldf_ahmt / nemo_ldf_ahmf; A_h then only switches the
+    # operator on, exactly as rn_Uv does in NEMO's own -30 arm.  Raises on
+    # anything else, and on the file source without those operands.
+    lateral_viscosity_coefficient_source: str = "nemo_ldf_c2d"
     # Lateral side boundary condition for the harmonic viscosity:
     #   "free_slip" (default) — viscous flux zeroed at walls (∂u_tang/∂n = 0).
     #   "no_slip"  — MITgcm no_slip_sides: adds the wall side-drag

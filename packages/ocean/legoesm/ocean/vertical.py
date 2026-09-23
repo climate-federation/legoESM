@@ -1231,6 +1231,14 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    # NEMO ldf_dyn_init's READ coefficient (nn_ahm_ijk_t = -30,
+    # ldfdyn.f90:348-353): the whole 3-D lateral momentum viscosity, already
+    # exchanged and masked as that routine leaves it.  ``nemo_ldf_ahmt`` is on
+    # the T grid, ``nemo_ldf_ahmf`` on legoESM's vertex layout.  Only the
+    # lateral_viscosity_coefficient_source="nemo_ahm_3d_file" arm reads them;
+    # every other card leaves them None and is bit-identical.
+    nemo_ldf_ahmt: jnp.ndarray | None = None
+    nemo_ldf_ahmf: jnp.ndarray | None = None
 
 
 def create_partial_cell_coordinate(

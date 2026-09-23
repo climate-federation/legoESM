@@ -3287,6 +3287,7 @@ class LatLonCGridOceanModel:
             VALID_VERTICAL_MOMENTUM_SCHEME,
             VALID_LATERAL_VISCOSITY_OPERATOR,
             VALID_LATERAL_VISCOSITY_E3_WEIGHTING,
+            VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE,
             VALID_CORIOLIS_SCHEME,
             VALID_AB2_SCOPE,
             VALID_WENO_SMOOTHNESS,
@@ -3358,6 +3359,24 @@ class LatLonCGridOceanModel:
                 "lateral_viscosity_e3_weighting != 'off' requires "
                 "lateral_viscosity_operator='nemo_div_curl' (it selects the "
                 f"e3-weighting of THAT operator's div/curl); got "
+                f"lateral_viscosity_operator={config.lateral_viscosity_operator!r}",
+            )
+        # Mirrors NEMO's namdyn_ldf nn_ahm_ijk_t (ldfdyn.f90:348-353 is the
+        # -30 arm); same guard as the e3-weighting selector above.
+        _ahm_src = getattr(
+            config, "lateral_viscosity_coefficient_source", "nemo_ldf_c2d")
+        if _ahm_src not in VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE:
+            raise ValueError(
+                f"lateral_viscosity_coefficient_source must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE)}, "
+                f"got {_ahm_src!r}",
+            )
+        if (_ahm_src != "nemo_ldf_c2d"
+                and config.lateral_viscosity_operator != "nemo_div_curl"):
+            raise ValueError(
+                "lateral_viscosity_coefficient_source != 'nemo_ldf_c2d' "
+                "requires lateral_viscosity_operator='nemo_div_curl' (it "
+                "selects where THAT operator's ahmt/ahmf come from); got "
                 f"lateral_viscosity_operator={config.lateral_viscosity_operator!r}",
             )
         _vert_mom_scheme = getattr(
