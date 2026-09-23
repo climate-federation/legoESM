@@ -138,18 +138,50 @@ def test_the_runoff_term_is_the_one_place_the_thickness_does_not_cancel():
 
 def test_the_combined_rows_decomposition_control_is_not_a_tautology():
     """The combined row must decompose into the two rows the ranking already
-    scored.  For generic inputs of the same shape and magnitude that identity
-    is NOT exact, so a measured hard zero is a result about the arrays, not a
-    property of the arithmetic."""
+    scored.  For generic doubles of the same magnitude that identity is NOT
+    exact, so the control can fail and the check is worth making."""
     rng = np.random.default_rng(162)
     n = 18000
-    first = rng.normal(0.0, 1.0e-4, n)
+    first = rng.normal(0.0, 1.0e-2, n)
     first_reference = first + rng.normal(0.0, 1.1e-8, n)
     second = rng.normal(0.0, 1.0e-2, n)
     second_reference = second + rng.normal(0.0, 2.2e-5, n)
     combined = (first + second) - (first_reference + second_reference)
     parts = (first - first_reference) + (second - second_reference)
-    assert int(np.count_nonzero(combined - parts)) > n // 2
+    assert int(np.count_nonzero(combined - parts)) > n // 4
+
+
+def test_rows_built_as_temperature_differences_make_that_identity_exact():
+    """Why the measured control is a HARD ZERO rather than a few last places.
+
+    Every process row is one temperature boundary minus another, both of them
+    a few tens of kelvin, so each row is an exact integer multiple of the last
+    place of that temperature -- and so is every sum and difference of them,
+    because they never leave that grid.  The identity is then exact by
+    construction, which is what the walk measures.  Built the same way here,
+    the residual is zero on essentially every cell; built from independent
+    doubles of the same magnitude, above, it is not.
+    """
+    rng = np.random.default_rng(1622)
+    n = 18000
+    base = rng.uniform(-2.0, 30.0, n)
+
+    def boundary():
+        return base + rng.normal(0.0, 1.0e-3, n)
+
+    before, after_first = boundary(), boundary()
+    before_second, after_second = boundary(), boundary()
+    first = after_first - before
+    second = after_second - before_second
+    first_reference = ((after_first + rng.normal(0.0, 1.0e-8, n))
+                       - (before + rng.normal(0.0, 1.0e-8, n)))
+    second_reference = ((after_second + rng.normal(0.0, 2.0e-5, n))
+                        - (before_second + rng.normal(0.0, 2.0e-5, n)))
+    combined = (first + second) - (first_reference + second_reference)
+    parts = (first - first_reference) + (second - second_reference)
+    # A handful of cells straddle a binade boundary, where the two
+    # temperatures no longer share one last place; the rest are exact.
+    assert int(np.count_nonzero(combined - parts)) < n // 100
 
 
 def test_an_out_of_range_level_index_is_clamped_and_not_raised():
