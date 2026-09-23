@@ -25,6 +25,25 @@ change as surface pressure moves and the change in which layers lie in the
 band.  Without it the budget appears to close only when surface pressure is
 static and silently mis-attributes otherwise.
 
+TWO EXACT CONVENTIONS, AND WHICH ONE THIS IS.  Weighting the process terms by
+the NEW grid and the mass term by the OLD tracer closes exactly; so does the
+mirror choice, OLD grid for the terms and NEW tracer for the mass term.  They
+differ in who is charged the cross term ``dq_process * dG``: here each process
+carries its own.  That is bookkeeping, not physics, and the difference is
+second order per step -- but it is a CONVENTION.  Measured over the same
+40-step synthetic window the test uses, with a surface pressure wandering by
+about 60 Pa a step, the two conventions differ by 8.8e-4 of the process total.
+That is far below the differences this instrument is built to resolve, and far
+above round-off, so it is a floor on what a small inter-arm difference means.
+
+RANK-LOCAL UNDER MPI.  Both reductions are plain sums over the arrays handed
+in.  On a sharded run they therefore give this rank's share, and a rank-local
+budget closes just as well as a global one -- the closure cannot detect the
+omission.  A distributed caller must reduce the closed window across ranks
+(``reduce_ledger_global`` in ``process_ledger`` does this for the ledger) and
+must do so for the inventory endpoints as well as the terms, or the window is
+one rank's weather.
+
 WHAT THE CLOSURE DOES NOT PROVE.  The identity holds for ANY G used
 consistently, so a wrong band weight, a wrong ``g`` or a wrong area
 normalisation cancels exactly between the inventory, the terms and the
@@ -139,11 +158,13 @@ class CloudWaterBandBudget:
             - self._inventory(q_c_old, dp_old, p_half_old, w_old))
         self.elapsed_s = self.elapsed_s + dt
 
-    def close_window(self, q_c, dp, p_half) -> dict:
+    def close_window(self, q_c, dp, p_half, rtol: float | None = None) -> dict:
         """Close against the ACTUAL inventory change.
 
-        The residual is the whole point: round-off when the accumulation is
-        right, a real number when a term is missing or mis-weighted.
+        The residual is the whole point: at the tolerance floor when the
+        accumulation is right, a real number when a term is missing or
+        mis-weighted.  Pass ``rtol`` to make a non-closing window RAISE instead
+        of returning a number a caller may not inspect.
         """
         if not self._open:
             raise RuntimeError("close_window() without begin_window()")
@@ -151,6 +172,15 @@ class CloudWaterBandBudget:
         dI = I1 - self._I0
         total = sum(self.terms.values()) + self.mass_redistribution
         days = self.elapsed_s / 86400.0
+        if rtol is not None:
+            scale = float(sum(abs(v) for v in self.terms.values())
+                          + abs(self.mass_redistribution))
+            if abs(float(dI - total)) > rtol * max(scale, 1e-300):
+                raise ValueError(
+                    f"cloud-water band budget did not close: residual "
+                    f"{float(dI - total):.6e} exceeds {rtol:g} of the term "
+                    f"scale {scale:.6e}.  A term is missing, mis-weighted, or "
+                    f"the arrays are rank-local rather than global.")
         out = {
             "window_days": days,
             "inventory_start": self._I0,

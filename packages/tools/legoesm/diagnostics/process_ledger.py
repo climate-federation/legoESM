@@ -148,9 +148,19 @@ def pressure_band_weight(p_half, p_lo_pa, p_hi_pa):
         raise ValueError(
             f"need p_lo < p_hi, got ({p_lo_pa}, {p_hi_pa})")
     top, bot = ph[..., :-1], ph[..., 1:]
+    # Interfaces MUST increase downward.  An inverted column returns zero
+    # weights and a non-monotonic one can count an interval twice, and in both
+    # cases the budget that uses these weights still CLOSES -- the error
+    # cancels between the inventory and the terms -- so it would be silently
+    # wrong rather than loudly wrong (codex review, 2026-09-23).  This is a
+    # static-shape check on a traced array, so it is expressed as a finite
+    # sentinel rather than a Python raise: non-monotonic layers yield NaN,
+    # which propagates into the budget and cannot be mistaken for a result.
+    bad = bot <= top
     overlap = jnp.clip(jnp.minimum(bot, p_hi_pa) - jnp.maximum(top, p_lo_pa),
                        0.0, None)
-    return overlap / jnp.maximum(bot - top, 1e-30)
+    w = overlap / jnp.maximum(bot - top, 1e-30)
+    return jnp.where(bad, jnp.nan, w)
 
 
 def apply_level_weight(field, level_weight):

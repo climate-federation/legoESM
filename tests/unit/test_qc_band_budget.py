@@ -159,3 +159,18 @@ def test_bad_band_edges_and_duplicate_terms_are_rejected():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_inverted_interfaces_poison_the_weight_instead_of_closing_quietly():
+    """A column whose interfaces do not increase downward must NOT yield a
+    plausible budget.  Before the guard it returned zero weights and the budget
+    still closed, so the run would report a silent zero over that column."""
+    import jax.numpy as jnp
+    from legoesm.diagnostics.process_ledger import pressure_band_weight
+
+    good = jnp.array([[2e4, 4e4, 6e4, 8e4, 1e5]])
+    bad = jnp.array([[2e4, 6e4, 4e4, 8e4, 1e5]])   # layer 2 inverted
+    w_good = pressure_band_weight(good, 5e4, 8e4)
+    w_bad = pressure_band_weight(bad, 5e4, 8e4)
+    assert bool(jnp.all(jnp.isfinite(w_good)))
+    assert bool(jnp.any(jnp.isnan(w_bad))), "inverted layer must poison, not zero"
