@@ -53,6 +53,9 @@ class EvalConfig(NamedTuple):
     init_stride_hours: int
     resolution_deg: float
     out: str
+    # None = scorecard only. A path also writes the case-mean forecast and
+    # verification fields, so a map and the numbers share one set of forecasts.
+    save_fields: str | None = None
 
 
 class _ModeCfg(NamedTuple):
@@ -96,6 +99,12 @@ def build_eval_config_from_args(argv=None) -> EvalConfig:
                    dest="resolution_deg",
                    help="WB2 target-grid resolution [deg] (default 1.5).")
     p.add_argument("--out", default="results/wb_eval/scorecard.json")
+    p.add_argument("--save-fields", default=None, dest="save_fields",
+                   help="Also write the case-mean forecast and ERA5 "
+                        "verification fields to this .npz, on the WB2 grid. "
+                        "They come from the SAME forecasts the scorecard "
+                        "scores, so a map drawn from them cannot disagree "
+                        "with the numbers beside it.")
     a = p.parse_args(argv)
 
     # v1: spectral core only. Hard SystemExit (not a silent fallback) on latlon,
@@ -116,7 +125,7 @@ def build_eval_config_from_args(argv=None) -> EvalConfig:
         checkpoint=a.checkpoint, leads_hours=_parse_leads(a.leads),
         eval_year=a.eval_year, n_inits=a.n_inits,
         init_stride_hours=a.init_stride_hours, resolution_deg=a.resolution_deg,
-        out=a.out)
+        out=a.out, save_fields=a.save_fields)
 
 
 def _assert_leads_on_dt_grid(leads_hours, dt):
@@ -226,7 +235,15 @@ def main(argv=None, ds=None):
         return carry_to_spectral_state(final_carry, grid)
 
     # --- ERA5 cases (ICs + forcing + WB2-grid verification) ---
-    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(zarr_store=yml["era5_zarr"])
+    # The eval's surface forcing must match training: the prescribed-flux
+    # planes and the land fraction are loaded iff the deck (and mode) ask.
+    from legoesm.training.scale_build import wb_needs_land_frac
+    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(
+        zarr_store=yml["era5_zarr"],
+        load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
+        load_land_frac=wb_needs_land_frac(cfg.mode, yml))
+    if "era5_flux_zarr" in yml:   # "" = the state store, as in training
+        era5_cfg = era5_cfg._replace(flux_zarr=str(yml["era5_flux_zarr"] or ""))
     cases = build_forecast_cases(
         era5_cfg, grid, sigma,
         leads_hours=cfg.leads_hours, eval_year=eval_year, n_inits=cfg.n_inits,
@@ -239,9 +256,11 @@ def main(argv=None, ds=None):
     clim = climatology_from_cases(cases)
 
     # --- model + persistence via the shared orchestrator (identical masking) ---
+    _field_sink = {} if cfg.save_fields else None
     model_sc = run_wb_forecast_eval(
         None, grid, sigma, None, dt, cases, cfg.leads_hours, clim,
-        resolution_deg=cfg.resolution_deg, rollout_fn=rollout_fn)
+        resolution_deg=cfg.resolution_deg, rollout_fn=rollout_fn,
+        field_sink=_field_sink)
     # Persistence = the t0 state held constant (identity rollout); the
     # orchestrator diagnoses t0 and scores it against each lead's verification.
     persist_sc = run_wb_forecast_eval(
@@ -290,6 +309,31 @@ def main(argv=None, ds=None):
     with open(cfg.out, "w") as fh:
         json.dump(out, fh, indent=2)
     log.info("wrote scorecard -> %s", cfg.out)
+
+    if _field_sink is not None:
+        import numpy as _np
+
+        from evaluations.wb_regrid import wb2_grid
+        # Case MEANS, over the cells that were scorable in every case: a cell
+        # that was below ground in one init contributes to neither the number
+        # nor the map, so the two cannot disagree about what was measured.
+        _arrays = {}
+        for (key, lead), slot in _field_sink.items():
+            n = slot["n"]
+            with _np.errstate(invalid="ignore", divide="ignore"):
+                _arrays[f"pred__{key}__{lead}"] = _np.where(
+                    n > 0, slot["pred"] / n, _np.nan)
+                _arrays[f"verif__{key}__{lead}"] = _np.where(
+                    n > 0, slot["verif"] / n, _np.nan)
+            _arrays[f"count__{key}__{lead}"] = n
+        _lat, _lon = (wb2_grid() if cfg.resolution_deg is None
+                      else wb2_grid(cfg.resolution_deg))
+        _arrays["wb2_lat_deg"] = _np.asarray(_lat)
+        _arrays["wb2_lon_deg"] = _np.asarray(_lon)
+        os.makedirs(
+            os.path.dirname(os.path.abspath(cfg.save_fields)), exist_ok=True)
+        _np.savez_compressed(cfg.save_fields, **_arrays)
+        log.info("wrote forecast/ERA5 fields -> %s", cfg.save_fields)
     _print_table(model_sc, persist_sc, cfg.leads_hours, log)
     return out
 

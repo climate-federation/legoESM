@@ -75,10 +75,16 @@ class TestGuards:
         monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", *argv])
         return run_omip_core2.main
 
-    def test_non_tripole_grid_rejected(self, monkeypatch):
+    def test_grid_without_gm_redi_rejected(self, monkeypatch):
+        """fesom has no GM/Redi block at all, so the flag would vanish there.
+
+        This used to assert the same for mpas. MPAS implements the Treguier
+        coefficient now (the SHARED variant), so the guard names tripole AND
+        mpas, and the test moved to a grid that still cannot honour it.
+        """
         main = self._main_with(
-            ["--grid", "mpas", "--mesh", "m.nc", "--gm-treguier"], monkeypatch)
-        with pytest.raises(SystemExit, match="tripole only"):
+            ["--grid", "fesom", "--mesh", "m.nc", "--gm-treguier"], monkeypatch)
+        with pytest.raises(SystemExit, match="tripole and --grid mpas"):
             main()
 
     def test_conflicts_with_no_gm_redi(self, monkeypatch):

@@ -32,10 +32,34 @@ _VALID: frozenset[str] = frozenset({"before", "now", "after"})
 # dump basename -> (time level of its T/S, NEMO source line that proves it).
 # The GEOMETRY level is separate and usually Nnn — see the module docstring.
 _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
+    # Certified idealised-testcase trajectory.  The write is the first action
+    # in stp_RK3 and names Nbb explicitly; kt=1 is therefore the native initial
+    # condition at first-step entry, not a now/after state.
+    "oracle_step_entry_kt00000001.bin": (
+        "before",
+        "tests/*_OMIP_L1/MY_SRC/stprk3.F90:88-100 writes "
+        "ts/uu/vv/ssh(...,Nbb) before forcing, stp_2D, and RK stages",
+    ),
     # eos_rab / bn2 family: T/S at Nbb, geometry at Nnn.
     "dump_alpha_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
     "dump_beta_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
     "tke_dump_rn2b.bin": ("before", "rn2b = bn2(ts(...,Nbb)); zdfmxl.F90:98 integrates rn2b"),
+    "bn2_dump_zrw.bin": ("before", "eosbn2.F90:1459-1460 zrw in the first "
+                                      "stpmlf bn2(ts(...,Nbb),rab_b,rn2b,Nnn) call"),
+    "bn2_dump_zaw.bin": ("before", "eosbn2.F90:1462 thermal interpolation in "
+                                      "the Nbb-tracer/Nnn-geometry bn2 call"),
+    "bn2_dump_zbw.bin": ("before", "eosbn2.F90:1463 saline interpolation in "
+                                      "the Nbb-tracer/Nnn-geometry bn2 call"),
+    "bn2_dump_numerator.bin": ("before", "eosbn2.F90:1465-1467 numerator in "
+                                            "the Nbb-tracer/Nnn-geometry bn2 call"),
+    "bn2_dump_result.bin": ("before", "eosbn2.F90:1465-1468 assigned rn2b in "
+                                         "the Nbb-tracer/Nnn-geometry bn2 call"),
+    # Geometry paired with the before T/S above is nevertheless Kmm=Nnn.
+    # ldftra's instrumentation writes the live arrays verbatim at the same
+    # step; register geometry by its own level instead of inheriting the T/S
+    # label from rn2b.
+    "eiv_dump_gdept.bin": ("now", "ldftra.F90:951 gdept(...,Kmm); Kmm=Nnn"),
+    "eiv_dump_e3w.bin": ("now", "ldftra.F90:951 e3w(...,Kmm); Kmm=Nnn"),
     # #1226 item-11 Prandtl-stage instrumentation (zdftke.F90:206-244, the
     # SAME "IF(kt==nit000.AND.nn_pdl==1)" dump block as tke_dump_rn2b.bin
     # above): sh2/avm_in are the INPUT p_sh2/p_avm arrays tke_tke receives
@@ -83,6 +107,45 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "eiv_dump_zgrv_iik.bin": ("before", "ldfslp.F90 zgrv rolling buffer, current level (unit 8846)"),
     "eiv_dump_zgrv_iikm1.bin": ("before", "ldfslp.F90 zgrv rolling buffer, level above (unit 8847)"),
     "eiv_dump_prd_arg.bin": ("before", "ldfslp.F90 prd argument as received (unit 8848)"),
+    # Row-30 U/V source-order write-only ladder (units 8900--8911). These
+    # preserve the same BEFORE density/rn2b state as the existing slope dumps.
+    "eiv_dump_zgru_iik.bin": (
+        "before", "ldfslp.F90:203/217 U gradient, current rolling slot"),
+    "eiv_dump_zgru_iikm1.bin": (
+        "before", "ldfslp.F90:203/217 U gradient, preceding rolling slot"),
+    "eiv_dump_zau.bin": ("before", "ldfslp.F90:242 metric-scaled U gradient"),
+    "eiv_dump_zav.bin": ("before", "ldfslp.F90:243 metric-scaled V gradient"),
+    "eiv_dump_zbu_pre.bin": (
+        "before", "ldfslp.F90:244 U denominator before bounds"),
+    "eiv_dump_zbv_pre.bin": (
+        "before", "ldfslp.F90:245 V denominator before bounds"),
+    "eiv_dump_zbu_post.bin": (
+        "before", "ldfslp.F90:248 U denominator after bounds"),
+    "eiv_dump_zbv_post.bin": (
+        "before", "ldfslp.F90:249 V denominator after bounds"),
+    "eiv_dump_uslp_raw.bin": (
+        "before", "ldfslp.F90:269 raw U slope before Shapiro"),
+    "eiv_dump_vslp_raw.bin": (
+        "before", "ldfslp.F90:270 raw V slope before Shapiro"),
+    "eiv_dump_uslp_postshapiro.bin": (
+        "before", "ldfslp.F90:279-285 U after Shapiro, before LBC"),
+    "eiv_dump_vslp_postshapiro.bin": (
+        "before", "ldfslp.F90:286-292 V after Shapiro, before LBC"),
+    # Row-30 raw-U composite continuation (units 8912--8919).
+    "eiv_dump_iku.bin": ("before", "ldfslp.F90:251 U mixed-layer index"),
+    "eiv_dump_zfi.bin": ("before", "ldfslp.F90:254 U integer ML switch"),
+    "eiv_dump_e3u_miku.bin": (
+        "now", "ldfslp.F90:261-264 live e3u(miku,Kmm) depth operand"),
+    "eiv_dump_zdepu.bin": (
+        "now", "ldfslp.F90:261-264 U live water-column depth"),
+    "eiv_dump_zuslp_hml_pre.bin": (
+        "before", "ldfslp.F90:269 carried U mixed-layer anchor before update"),
+    "eiv_dump_sint_u.bin": (
+        "before", "ldfslp.F90:269 U interior zau/(zbu-zeps)"),
+    "eiv_dump_mlterm_u.bin": (
+        "before", "ldfslp.F90:269 U mixed-layer depth-anchor product"),
+    "eiv_dump_blend_u.bin": (
+        "before", "ldfslp.F90:269 U raw blend before umask"),
     # Asselin filter dumps are explicit about their own level.
     "atf_dump_tem_before.bin": ("before", "traatf_qco.F90, pre-filter state"),
     "atf_dump_sal_before.bin": ("before", "traatf_qco.F90, pre-filter state"),
@@ -121,9 +184,40 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                    "(rn2 = now, ts(...,Nnn)); captured after ALL "
                                    "nn_mxl constraint sweeps (tke_avn nn_mxl SELECT "
                                    "CASE, DINO nn_mxl=3 branch) have run."),
+    "tke_dump_zmxlm_raw.bin": ("now", "write-only row-19 slot captured at "
+                                       "zdftke.F90:831-833 immediately after "
+                                       "MAX(rmxl_min,SQRT(2*en/MAX(rn2,rsmall))) "
+                                       "and before every nn_mxl=3 constraint scan; "
+                                       "en/rn2 and geometry are Kmm=Nnn."),
     "tke_dump_zmxld.bin": ("now", "same rn2(now) dependency as tke_dump_zmxlm.bin "
                                    "(zdftke.F90:740); captured after ALL nn_mxl "
                                    "constraint sweeps, same insertion point."),
+    "tke_dump_zsqen_base.bin": ("now", "write-only row-21 operand captured at "
+                                         "patched MY_SRC/zdftke.F90:930 from "
+                                         "the SQRT(en) evaluated at :924, "
+                                         "after the TKE solve and "
+                                         "row-20 mixing-length scans."),
+    "tke_dump_zav_base.bin": ("now", "write-only row-21 operand captured at "
+                                       "patched MY_SRC/zdftke.F90:931 from "
+                                       "the :925 expression "
+                                       "rn_ediff*zmxlm*SQRT(en), before either "
+                                       "coefficient floor."),
+    "tke_dump_avm_base.bin": ("now", "write-only row-21 base viscosity captured "
+                                       "at patched MY_SRC/zdftke.F90:932 from "
+                                       "the :926 assignment, before "
+                                       "the later zdfphy EVD/LBC assembly."),
+    "tke_dump_avt_base.bin": ("now", "write-only row-21 base diffusivity captured "
+                                       "at patched MY_SRC/zdftke.F90:933 from "
+                                       "the :927 assignment, before the nn_pdl "
+                                       "Prandtl overwrite at :944."),
+    "tke_dump_dissl_postavn.bin": ("now", "write-only row-21 dissipation carry "
+                                            "captured at patched MY_SRC/zdftke.F90:"
+                                            "934 from :928 SQRT(en)/zmxld, after the "
+                                            "current tke_avn update."),
+    "zdf_dump_hmld_turb.bin": ("now", "write-only row-28 turbocline depth "
+                                         "persisted after zdf_mxl_turb from "
+                                         "zdfmxl.F90:145-152; hmld uses the live "
+                                         "Kmm gdepw ladder and current composed avt."),
     "tke_dump_avt_final.bin": ("now", "base closure avt=MAX(zav,avtb) (tke_avn, "
                                         "zsqen=SQRT(en)/zmxlm branch) is now-derived "
                                         "(en, zmxlm both now per above); the nn_pdl==1 "
@@ -140,6 +234,19 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                         "IF(nn_pdl==1) block) -- purely now-derived "
                                         "(en, zmxlm). Captured at zdf_tke routine "
                                         "exit alongside tke_dump_avt_final.bin."),
+    # Realized coefficients consumed after the current step's closure+EVD
+    # assembly. stpmlf calls zdf_phy with Kmm=Nnn at MY_SRC stpmlf.F90:210;
+    # zdfphy.F90:311-323 copies closure outputs then applies EVD; ldftra writes
+    # those global arrays verbatim at MY_SRC ldftra.F90:955-956. EVD's
+    # MIN(rn2,rn2b) trigger mixes now/before, but the field is registered
+    # "now" for the current zdf_phy call that owns and publishes it.
+    "dump_avt.bin": ("now", "MY_SRC stpmlf.F90:210 calls zdf_phy(Kbb=Nbb,Kmm=Nnn); "
+                              "zdfphy.F90:311-323 copies avt_k then applies EVD; "
+                              "MY_SRC ldftra.F90:955 writes realized avt verbatim"),
+    "dump_avm.bin": ("now", "MY_SRC stpmlf.F90:210 calls zdf_phy(Kbb=Nbb,Kmm=Nnn); "
+                              "zdfphy.F90:311-344 copies avm_k, applies EVD, then "
+                              "the interior side of lbc_lnk; MY_SRC "
+                              "ldftra.F90:956 writes realized avm verbatim"),
 
     # --- #1226 batched-rebuild dumps (2026-07-30, MY_SRC line numbers). ---
     "tke_dump_rn2.bin": ("now", "rn2 = bn2(ts(...,Nnn), rab_n, Nnn) at MY_SRC "
@@ -161,6 +268,44 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                    "side. No leapfrog index of its own; 'now' "
                                    "for its governing en/rn2 stage, as for "
                                    "tke_dump_en.bin. Interior 52x199, jk=1..jpk."),
+    "tke_dump_en_postlc.bin": ("now", "MY_SRC zdftke.F90:505 captures en "
+                                      "immediately after the active base-source "
+                                      "Langmuir block at :401-468 (line :463 "
+                                      "updates en), before Prandtl/matrix/RHS; "
+                                      "en is the current TKE state."),
+    "tke_dump_zdiag_pre.bin": ("now", "MY_SRC zdftke.F90:583 captures zdiag "
+                                      "after literal matrix/RHS assembly and "
+                                      "before the Thomas forward recurrence."),
+    "tke_dump_zlw_pre.bin": ("now", "MY_SRC zdftke.F90:584 captures zd_lw "
+                                    "after literal matrix/RHS assembly and "
+                                    "before the Thomas forward recurrence."),
+    "tke_dump_en_pre.bin": ("now", "MY_SRC zdftke.F90:585 captures en after "
+                                   "Langmuir and the TKE budget, immediately "
+                                   "before the Thomas forward recurrence."),
+    "tke_dump_zdiag_forward.bin": ("now", "MY_SRC zdftke.F90:591 captures "
+                                          "the diagonal after NEMO's forward "
+                                          "Thomas recurrence."),
+    "tke_dump_zrhs_forward.bin": ("now", "MY_SRC zdftke.F90:599 captures "
+                                         "the forward-recurring RHS work held "
+                                         "in zd_lw."),
+    "tke_dump_en_postsolve.bin": ("now", "MY_SRC zdftke.F90:609 captures en "
+                                         "after back substitution, floor, and "
+                                         "wmask, before nn_etau penetration."),
+    "tke_dump_etau_argument.bin": ("now", "write-only row-18 operand slot for "
+                                           "-gdepw(Kmm)/htau in the active "
+                                           "nn_etau=1 block, zdftke.F90:590."),
+    "tke_dump_etau_exp.bin": ("now", "write-only row-18 operand slot for "
+                                      "EXP(-gdepw(Kmm)/htau) in the active "
+                                      "nn_etau=1 block, zdftke.F90:590."),
+    "tke_dump_etau_increment.bin": ("now", "write-only row-18 full additive "
+                                            "increment at zdftke.F90:590-591, "
+                                            "including ice/W/T masks."),
+    "tke_dump_etau_gdepw.bin": ("now", "write-only row-18 direct operand "
+                                         "gdepw(ji,jj,jk,Kmm) captured immediately "
+                                         "before the active nn_etau=1 division."),
+    "tke_dump_etau_htau.bin": ("now", "write-only row-18 direct operand "
+                                        "htau(ji,jj) captured at the same read "
+                                        "site and repeated over jk."),
     "wzv_dump_ww_call1.bin": ("now", "wzv_MLF diagnoses NOW w: pww integrated "
                                       "from hdiv with e3t(:,:,:,Kmm) (sshwzv."
                                       "F90:211), Kmm=Nnn. WRITE at MY_SRC "

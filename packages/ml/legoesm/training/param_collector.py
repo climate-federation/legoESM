@@ -212,10 +212,52 @@ def _resolve_shape(meta: ParamMeta, dims: dict[str, int] | None) -> tuple[int, .
     return (n,)
 
 
-def _seed_raw(meta: ParamMeta, shape: tuple[int, ...], dtype) -> jax.Array:
-    base = jnp.full(shape, meta.default, dtype=dtype) if shape else jnp.asarray(
-        meta.default, dtype=dtype
+# The clamp ``range_to_sigmoid_array`` applies in normalized coordinates. A
+# seed this close to either bound does not survive the round trip, and its leaf
+# has no usable gradient; kept next to the check that enforces it.
+_SIGMOID_SEED_MARGIN = 0.001
+
+
+def _seed_raw(meta: ParamMeta, shape: tuple[int, ...], dtype,
+              value: float | None = None) -> jax.Array:
+    """Raw (unconstrained) seed for one parameter.
+
+    ``value`` replaces the spec default, which is how a run starts training
+    from a TUNED configuration rather than from the library default: seeding
+    the raw leaf keeps the parameter trainable, where a static override would
+    freeze it.  It must lie inside the spec bounds -- the sigmoid inverse of
+    an out-of-range value is +-inf and would seed a dead leaf.
+    """
+    seed_value = meta.default if value is None else value
+    if value is not None:
+        lo, hi = meta.bounds
+        if not (lo <= float(value) <= hi):
+            raise ValueError(
+                f"init value {value!r} for {meta.qualified_name} is outside "
+                f"its spec bounds ({lo}, {hi})")
+    base = jnp.full(shape, seed_value, dtype=dtype) if shape else jnp.asarray(
+        seed_value, dtype=dtype
     )
+    if value is not None and meta.transform == "sigmoid":
+        # Tested in NORMALIZED coordinates, because that is where the transform
+        # actually clips: ``range_to_sigmoid_array`` clamps (v-lo)/(hi-lo) to
+        # [_SIGMOID_SEED_MARGIN, 1-_SIGMOID_SEED_MARGIN], so a value at or past
+        # that margin seeds a DIFFERENT number than the deck asked for, on a
+        # leaf whose gradient is saturated there anyway. An absolute tolerance
+        # on the round-trip would pass or fail with the parameter's UNITS
+        # rather than with its position in range (codex: q_c_diagnostic at its
+        # 1e-6 lower bound slipped through at 1e-6 absolute). A parameter
+        # wanted at its bound is a FIXED setting, not a starting point.
+        lo, hi = meta.bounds
+        t = (float(value) - lo) / (hi - lo)
+        if not (_SIGMOID_SEED_MARGIN < t < 1.0 - _SIGMOID_SEED_MARGIN):
+            raise ValueError(
+                f"init value {value!r} for {meta.qualified_name} sits at "
+                f"{t:.4g} of its range ({lo}, {hi}), within the transform's "
+                f"{_SIGMOID_SEED_MARGIN:g} clamp of the edge: it would seed a "
+                f"different value on a leaf whose gradient is saturated "
+                f"there. Pin it as a fixed setting instead of a starting "
+                f"value, or move it inside the range.")
     if meta.transform == "sigmoid":
         lo, hi = meta.bounds
         return range_to_sigmoid_array(base, lo, hi).astype(dtype)
@@ -244,6 +286,7 @@ def build_trainable_params(
     include_tier0: tuple[str, ...] = (),
     dims: dict[str, int] | None = None,
     dtype=None,
+    init_values: dict[str, float] | None = None,
 ) -> TrainablePhysicsParams:
     """Build a :class:`TrainablePhysicsParams` from the registered specs.
 
@@ -351,7 +394,10 @@ def build_trainable_params(
         elif not selected:
             continue
         shape = _resolve_shape(meta, dims)
-        raw[meta.qualified_name] = _seed_raw(meta, shape, dtype)
+        raw[meta.qualified_name] = _seed_raw(
+            meta, shape, dtype,
+            None if init_values is None
+            else init_values.get(meta.qualified_name))
         lo, hi = meta.bounds
         constraints.append(
             ParamConstraint(
@@ -364,4 +410,14 @@ def build_trainable_params(
                 field=meta.field,
             )
         )
+    if init_values:
+        # An init value naming a parameter this selection does not carry is a
+        # SILENT no-op otherwise: the deck says "start Bechtold's mass-flux cap
+        # at the tuned value" and the run trains from the library default.
+        unreached = sorted(set(init_values) - set(raw))
+        if unreached:
+            raise ValueError(
+                f"init value(s) for {unreached} reached no trainable "
+                f"parameter: the name is not in the registry, its scheme is "
+                f"not active, or its tier is outside this selection.")
     return TrainablePhysicsParams(raw_values=raw, constraints=constraints)

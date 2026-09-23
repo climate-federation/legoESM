@@ -33,6 +33,20 @@
 # 26791341: 33 CP / 3 fills). If it does not, the probe config drifted
 # from the census config and NEITHER number may be quoted.
 #
+#
+# THE KNOWN-ANSWER GATE PINS max_degree, NOT n_rounds -- and an earlier
+# version of this gate pinned the wrong one. The reference run (sha
+# 13ce1df4) recorded n_rounds 11 and max_degree 11 at depth 3. On current
+# code the same call returns n_rounds 12 with max_degree still 11, and
+# deterministically so over repeated trials. That is not drift in the
+# partition: the schedule builder now chooses a SIZE-AWARE colouring, which
+# deliberately spends one extra round to cut the padded payload (the
+# padding audit measured inflation falling from 2.93 to 2.16 that way), and
+# it reports the greedy alternative alongside -- greedy 11, size-aware 12.
+# So n_rounds is a POLICY OUTPUT and a gate on it fires whenever the policy
+# improves. max_degree is the property of the communication GRAPH that the
+# reference actually pinned, and it has not moved.
+#
 # SUBMIT: sbatch scripts/cluster/scaling_levante/mpas_wide_halo_rounds.sbatch
 # ===========================================================================
 set -uo pipefail
@@ -62,7 +76,8 @@ for depth in (3, 9):
            "n_rounds": cost["n_rounds"], "max_degree": cost["max_degree"],
            "coloring_method": cost.get("coloring_method")}
     for k in ("halo_cells_total", "halo_edges_total", "max_local_cells",
-              "max_local_edges", "production_strategy"):
+              "max_local_edges", "production_strategy", "n_rounds_greedy",
+              "partition_fingerprint"):
         if k in cost:
             row[k] = cost[k]
     rows.append(row)
@@ -73,12 +88,23 @@ with open(f"{outdir}/wide_halo_rounds.jsonl", "w") as f:
         f.write(json.dumps(r) + "\n")
 
 d3 = rows[0]
-if d3["n_rounds"] != 11:
-    print(f"KNOWN_ANSWER_FAILED: depth-3 rounds = {d3['n_rounds']}, "
-          "census says 11 — config drifted, quote NOTHING", flush=True)
+# GLM: pin the GREEDY round count beside the degree. max_degree pins only
+# the MAXIMUM vertex degree, so a split that redistributes edges at equal
+# maximum passes it; n_rounds_greedy is deterministic given the graph and
+# the builder, and is stable across the colouring-policy change that made
+# n_rounds itself unpinnable.
+if d3["max_degree"] != 11 or d3.get("n_rounds_greedy") != 11:
+    print(f"KNOWN_ANSWER_FAILED: depth-3 max_degree = {d3['max_degree']} "
+          f"and n_rounds_greedy = {d3.get('n_rounds_greedy')}, reference "
+          "13ce1df4 says 11 and 11 — the communication graph moved, so the "
+          "split is not the one the reference measured, quote NOTHING",
+          flush=True)
     sys.exit(4)
 d9 = rows[1]
-print(f"KNOWN_ANSWER_OK (depth3=11). depth9: rounds={d9['n_rounds']} "
+print(f"KNOWN_ANSWER_OK: depth3 max_degree={d3['max_degree']} "
+      f"greedy={d3['n_rounds_greedy']} rounds={d3['n_rounds']} "
+      f"(the last is a colouring-policy output and is NOT gated). "
+      f"depth9: rounds={d9['n_rounds']} "
       f"degree={d9['max_degree']} — step model: 33 -> {d9['n_rounds']} "
       "sequential collectives", flush=True)
 if d9["n_rounds"] >= 25:

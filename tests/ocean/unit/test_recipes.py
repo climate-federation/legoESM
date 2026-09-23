@@ -142,7 +142,9 @@ _FROZEN_MPAS_DYCORE = {
     "A_v": 1.0e-4,
     "K_v": 1.0e-5,
     "C_smag_lap": 0.33,
-    "K_zeta_bih": 1.0e14,
+    # Frozen as a literal again because the DEFAULT is off; main's mesh-scaled
+    # rule stays available via K_zeta_bih=None and is covered separately.
+    "K_zeta_bih": 0.0,
     "barotropic_solver": "implicit_cn",
     "barotropic_implicit_pcg_tol": 1.0e-10,
     "barotropic_implicit_pcg_maxiter": 300,
@@ -158,8 +160,12 @@ _FROZEN_MPAS_DYCORE = {
 }
 
 # Same FROZEN snapshot for the PROVEN tripole eORCA025 dycore (SST RMSE 1.15).
+# ``A_h`` is None = DERIVE from the mesh's narrowest wet cell: one value cannot
+# serve 1 degree and 1/12 degree (measured, 1e5 puts ORCA12 26x over the
+# explicit Laplacian limit).  The anchor mesh still derives 1e5, gated against
+# the real eORCA1.2 file in test_lateral_viscosity_resolution_scaling.py.
 _FROZEN_TRIPOLE_DYCORE = {
-    "A_h": 1.0e5,
+    "A_h": None,
     "A_v": 1.0e-4,
     "K_v": 1.0e-5,
     "B_h": 0.0,
@@ -211,6 +217,16 @@ class TestOMIPNemoMatchFactories:
         mc = nemo_match_mpas_model_config()
         for k, v in _FROZEN_MPAS_DYCORE.items():
             assert getattr(mc, k) == v, k
+        # The vorticity damping ships DERIVED (None) and reproduces the frozen
+        # 1e14 exactly at the ico6 mesh it was tuned on.
+        from legoesm.ocean.mpas_config import resolution_scaled_k_zeta_bih
+        assert mc.K_zeta_bih == 0.0
+        # The mesh-scaled RULE main added is kept and still exercised -- but it
+        # only fires for an UNPINNED config, because the resolver returns a
+        # pinned value unchanged ("including 0.0 = the term off", its own
+        # docstring). Passing the pinned recipe would have tested nothing.
+        assert resolution_scaled_k_zeta_bih(
+            mc.K_zeta_bih_ref_dx_m, mc._replace(K_zeta_bih=None)) == 1.0e14
         assert mc.gm_redi is not None
         assert mc.gm_redi.visbeck.enabled is False
         for k, v in _FROZEN_GM_REDI.items():
@@ -259,18 +275,35 @@ class TestOMIPNemoMatchFactories:
         )
         from legoesm.ocean.mpas_config import MPASOceanConfig
 
-        _, _, config, _, kind = R._create_setup(
+        mesh, _, config, _, kind = R._create_setup(
             grid_type="mpas", resolution="ico2", nlev=3, H_max=4000.0,
             physics_preset="none", water_type="jerlov_1",
             forcing_mode="restoring",
         )
         assert kind == "mpas"
         factory_mc = nemo_match_mpas_model_config()
-        # Every field EXCEPT physics (SETUP) must match the factory exactly.
+        # Every field EXCEPT physics (SETUP) and the mesh-DERIVED vorticity
+        # damping must match the factory exactly.
         for f in MPASOceanConfig._fields:
-            if f == "physics":
+            if f in ("physics", "K_zeta_bih", "K_zeta_bih_dx_m"):
                 continue
             assert getattr(config, f) == getattr(factory_mc, f), f
+        # The damping the driver runs is the factory's rule applied to THIS
+        # mesh (the factory itself ships the rule, i.e. ``None``).
+        import numpy as _np
+        from legoesm.ocean.mpas_config import resolution_scaled_k_zeta_bih
+        _dc = _np.asarray(mesh.dcEdge)
+        # Default is the PIN 0.0 (filter off, user decision 2026-09-06),
+        # not main's unpinned derivation; the factory must carry the pin
+        # through rather than deriving a coefficient behind it.
+        assert factory_mc.K_zeta_bih == 0.0
+        assert config.K_zeta_bih == 0.0
+        # Same rule, exercised where it actually fires: unpinned. A bare
+        # call on the pinned factory config would return 0.0 and assert
+        # nothing at all.
+        assert resolution_scaled_k_zeta_bih(
+            float(_dc[_dc > 0].mean()),
+            factory_mc._replace(K_zeta_bih=None)) > 0.0
         # ...and the run-dependent physics is the proven restoring-mode SETUP.
         assert config.physics is not None
         assert config.physics.surface_forcing.scheme == "combined"
@@ -284,13 +317,29 @@ class TestOMIPNemoMatchFactories:
         snapshot — proves the factory rewire changed NO dycore field."""
         from scripts.run import run_omip as R
 
-        _, _, config, _, _ = R._create_setup(
+        _mesh, _, config, _, _ = R._create_setup(
             grid_type="mpas", resolution="ico2", nlev=3, H_max=4000.0,
             physics_preset="none", water_type="jerlov_1",
             forcing_mode="restoring",
         )
         for k, v in _FROZEN_MPAS_DYCORE.items():
             assert getattr(config, k) == v, k
+        # _create_setup returns the config the MODEL runs, so the vorticity
+        # damping is already resolved for THIS mesh (ico2 here, far coarser
+        # than the ico6 anchor -> a larger coefficient, by the dx^3 rule).
+        import numpy as _np
+        from legoesm.ocean.mpas_config import (
+            MPASOceanConfig,
+            resolution_scaled_k_zeta_bih,
+        )
+        _dc = _np.asarray(_mesh.dcEdge)
+        _expect = resolution_scaled_k_zeta_bih(
+            float(_dc[_dc > 0].mean()), MPASOceanConfig(K_zeta_bih=None))
+        # The recipe pins the filter OFF, so the built config carries 0.0;
+        # _expect is what the mesh rule WOULD give for this mesh, kept so
+        # the derivation stays covered and a silent change to it goes red.
+        assert config.K_zeta_bih == 0.0
+        assert _expect > 0.0
         for k, v in _FROZEN_GM_REDI.items():
             assert getattr(config.gm_redi, k) == v, k
 

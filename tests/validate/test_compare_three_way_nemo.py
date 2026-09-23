@@ -327,3 +327,161 @@ def test_zonal_gate_uses_pre_dropout_availability_not_the_scored_mask():
     assert "avail = avail_row" in src
     assert "_MIN_ZONAL_CELLS_FLOOR" in src
     assert "avail_row" in inspect.signature(m._plot3).parameters
+
+
+# --------------------------------------------------------------------------
+# --also-mask: three grids scored on ONE cell set
+# --------------------------------------------------------------------------
+def test_build_ocean_mask_takes_any_number_of_sources():
+    """A fourth (mask-only) source that is land at a cell must drop it, exactly
+    as a scored source would -- the generic reduction --also-mask relies on."""
+    tgt_lat = np.array([0.0])
+    tgt_lon = np.array([90.0])
+    coverage = np.ones((1, 1), dtype=bool)
+    three_wet = [_one_degree_source(180.0) for _ in range(3)]
+    assert m.build_ocean_mask(coverage, three_wet, tgt_lat, tgt_lon, "nearest").any()
+    four = three_wet + [_one_degree_source(50.0)]      # extra source: land at 90E
+    assert not m.build_ocean_mask(coverage, four, tgt_lat, tgt_lon, "nearest").any()
+
+
+def test_main_intersects_also_mask_sources_into_both_footprints():
+    """REGRESSION TRIPWIRE: --also-mask must reach BOTH the SST/SSS common mask
+    (coverage AND the nearest-wet classification) and the MLD footprint;
+    a snapshot that only narrowed one of them would leave the pair runs on
+    different cell sets for the other field."""
+    import inspect
+    src = inspect.getsource(m.main)
+    assert "build_ocean_mask(coverage, (T, M, N, *X)" in src
+    assert "for _, ocX in sstX:\n        coverage &= ocX > 0.5" in src
+    assert "for x, mx in zip(X, mldX_raw):" in src
+    assert "mld_ok &= ocXm > 0.5" in src
+    # and a mask-only source without MLD geometry is refused, not skipped
+    assert "an --also-mask snapshot lacks z_center_ref" in src
+
+
+# --------------------------------------------------------------------------
+# node_cloud_extrapolation — exposure of a land-free source at the coast
+# --------------------------------------------------------------------------
+def test_node_cloud_check_is_none_for_a_source_that_carries_land():
+    src = _one_degree_source(180.0)             # half its cells are land
+    scored = np.ones((1, 4), dtype=bool)
+    assert m.node_cloud_extrapolation(src, scored, np.array([0.0]),
+                                      np.array([10.0, 20.0, 30.0, 40.0])) is None
+
+
+def test_node_cloud_check_measures_distance_to_the_nearest_node():
+    """Nodes every 1 deg along the equator from 0 to 90E (spacing ~111 km).
+    A scored cell at 95E is 5 deg (~556 km) from the last node: farther than
+    2x the spacing, so it must be counted as 'far'; a cell at 10.5E is not."""
+    lon = np.arange(0.0, 90.5, 1.0)
+    src = {"lat": np.zeros_like(lon), "lon": lon, "mask": np.ones_like(lon)}
+    tgt_lat = np.array([0.0])
+    tgt_lon = np.array([10.5, 95.0])
+    chk = m.node_cloud_extrapolation(src, np.ones((1, 2), dtype=bool), tgt_lat, tgt_lon)
+    assert abs(chk["median_node_spacing_km"] - 111.2) < 1.0
+    assert abs(chk["nearest_node_max_km"] - 5 * 111.2) < 2.0
+    assert chk["n_far"] == 1 and chk["n_scored"] == 2
+
+
+def test_main_runs_the_node_cloud_check_on_both_scored_slots():
+    import inspect
+    src = inspect.getsource(m.main)
+    assert "for lab, src in ((lab_a, T), (lab_b, M)):" in src
+    assert "node_cloud_extrapolation(src, ocean, tgt_lat, tgt_lon)" in src
+
+
+# --------------------------------------------------------------------------
+# snapshot_day — the day every snapshot must agree on
+# --------------------------------------------------------------------------
+def test_snapshot_day_prefers_the_time_stamp_over_the_file_name(tmp_path):
+    p = tmp_path / "snapshot_day0025.npz"
+    np.savez(p, time_days=np.asarray(30.0), T=np.zeros(1))
+    assert m.snapshot_day(p) == 30.0                    # stamp wins
+    q = tmp_path / "snapshot_day0025_nostamp.npz"
+    np.savez(q, T=np.zeros(1))
+    assert m.snapshot_day(q) is None                    # name pattern broken -> unknown
+    np.savez(tmp_path / "snapshot_day0015.npz", T=np.zeros(1))
+    assert m.snapshot_day(tmp_path / "snapshot_day0015.npz") == 15.0
+    assert m.snapshot_day(tmp_path / "snapshot_final.npz") is None   # absent file, no day
+
+
+def test_main_rejects_mixed_days_and_honours_expect_day():
+    import inspect
+    src = inspect.getsource(m.main)
+    assert "snap_days = {str(pth): snapshot_day(pth) for pth in (a.tripole, a.mpas, *a.also_mask)}" in src
+    assert "snapshots are from different days" in src
+    assert "not the expected day" in src
+
+
+# --------------------------------------------------------------------------
+# per-field finiteness must include the mask-only sources (codex, HIGH)
+# --------------------------------------------------------------------------
+def test_finite_gate_and_digest_include_mask_only_sources():
+    """Behavioural: the exact reduction main applies, on planted NaNs.  A NaN
+    carried by a mask-only source on a covered cell must drop that cell from
+    the scored set, and the digest must change with it -- otherwise two pair
+    runs could 'share' a mask while scoring different cells."""
+    import hashlib
+    Tg = np.ones((2, 3)); Mg = np.ones((2, 3)); Ng = np.ones((2, 3))
+    ar = np.ones((2, 3))
+    xf = np.ones((2, 3)); xf[1, 2] = np.nan            # mask-only source NaN
+    finite3 = np.isfinite(Tg) & np.isfinite(Mg) & np.isfinite(Ng)
+    for f in [xf]:
+        finite3 &= np.isfinite(f)
+    ar2 = np.where(finite3, ar, 0.0)
+    assert int((ar2 > 0).sum()) == 5
+    d_with = hashlib.sha1(np.ascontiguousarray(ar2 > 0).tobytes()).hexdigest()
+    d_without = hashlib.sha1(np.ascontiguousarray(ar > 0).tobytes()).hexdigest()
+    assert d_with != d_without
+    import inspect
+    src = inspect.getsource(m.main)
+    assert "for xf in xs:\n            finite3 &= np.isfinite(xf)" in src
+    assert 'report.setdefault("scored_mask_sha1", {})[name]' in src
+
+
+# --------------------------------------------------------------------------
+# _manifest_summary — the caveat must travel for BOTH manifest layouts
+# --------------------------------------------------------------------------
+def _write_manifest(dirpath, payload):
+    import json
+    dirpath.mkdir(parents=True, exist_ok=True)
+    (dirpath / "run_manifest.json").write_text(json.dumps(payload))
+    snap = dirpath / "snapshot_day0030.npz"
+    np.savez(snap, T=np.zeros(1))
+    return snap
+
+
+def test_manifest_summary_reads_the_nested_layout(tmp_path):
+    snap = _write_manifest(tmp_path / "trp", {
+        "run": {"command_line": "scripts/run/run_omip_core2.py --grid tripole",
+                "creation_time": "2026-09-06T16:21:00"},
+        "reproducibility": {"git_dirty": False, "legoesm_version": "0.1",
+                            "git_sha": "abc123"}})
+    s = m._manifest_summary(snap)
+    assert s["manifest_layout"] == "nested"
+    assert s["command_line"].endswith("--grid tripole")
+    assert s["git_sha"] == "abc123" and s["git_dirty"] is False
+    assert "note" not in s
+
+
+def test_manifest_summary_reads_the_flat_fesom_layout(tmp_path):
+    """REGRESSION: the FESOM lane writes argv + top-level git_sha and no
+    'run' block, so reading only run.command_line returned all-None for every
+    FESOM arm -- the provenance vanished for the grid it matters most for."""
+    snap = _write_manifest(tmp_path / "fesom", {
+        "lane": "fesom", "git_sha": "def456",
+        "argv": ["scripts/run/run_omip_core2.py", "--grid", "fesom",
+                 "--fesom-vmix", "legoesm_tke"]})
+    s = m._manifest_summary(snap)
+    assert s["manifest_layout"] == "flat"
+    assert s["command_line"] == ("scripts/run/run_omip_core2.py --grid fesom "
+                                 "--fesom-vmix legoesm_tke")
+    assert s["git_sha"] == "def456"
+    assert "note" not in s
+
+
+def test_manifest_summary_says_so_when_no_command_line_is_recorded(tmp_path):
+    snap = _write_manifest(tmp_path / "bare", {"lane": "mystery"})
+    s = m._manifest_summary(snap)
+    assert s["command_line"] is None
+    assert "NOT recorded" in s["note"]

@@ -1409,9 +1409,10 @@ class TestOperatorSplitLaneIsGuarded:
         fn = fns["make_sharded_operator_split_step"]
         called = {n.func.id for n in ast.walk(fn)
                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        assert "broadcast_checked" in called, (
+        assert "checked_replicated_put" in called, (
             "the per-process band-geometry stack must be agreed + broadcast "
-            "before the replicated device_put, or #1362 reproduces here")
+            "before it is placed, or #1362 reproduces here; that guarded "
+            "broadcast now lives INSIDE checked_replicated_put")
         assert "assert_schema_agrees" in called, (
             "the polar-mask fields are CONDITIONAL on model._polar_mask, so "
             "the field LIST itself can differ across processes — that must "
@@ -1419,8 +1420,19 @@ class TestOperatorSplitLaneIsGuarded:
             "per-field gathers")
 
     def test_no_replicated_device_put_of_unchecked_geometry(self):
-        """The broadcast must actually WRAP the value that is put, not sit
-        beside it."""
+        """The geometry must be placed by the guarded helper, never by a bare
+        whole-array ``device_put``.
+
+        Originally this asserted that a ``device_put`` WRAPPED a
+        ``broadcast_checked(...)`` value. That pairing was correct about the
+        guard but carried a second cost: an uncommitted argument makes jax run
+        its cross-process equality assert, which all-gathers the whole field
+        per process. On lat-lon 4096x8192 that made per-rank memory grow with
+        the rank count (12.7/22.2/41.1 GB f32 at 32/64/128) until the 128-rank
+        float64 arm was OOM-killed. ``checked_replicated_put`` keeps the guard
+        and drops the redundant assert, so the contract asserted here is now
+        "no bare device_put", not "device_put wrapping a broadcast".
+        """
         import ast
         fns = _top_level_functions(_module_tree(_opsplit_module()))
         fn = fns["make_sharded_operator_split_step"]
@@ -1428,12 +1440,63 @@ class TestOperatorSplitLaneIsGuarded:
                 if isinstance(n, ast.Call)
                 and isinstance(n.func, ast.Attribute)
                 and n.func.attr == "device_put"]
-        assert puts, "fixture: this lane must still device_put its geometry"
-        guarded = [p for p in puts
-                   if any(isinstance(c, ast.Call)
-                          and isinstance(c.func, ast.Name)
-                          and c.func.id == "broadcast_checked"
-                          for c in ast.walk(p))]
-        assert guarded, (
-            "every replicated geometry device_put must take a "
-            "broadcast_checked(...) value as its argument")
+        assert not puts, (
+            "replicated geometry must go through checked_replicated_put; a "
+            "whole-array jax.device_put here reintroduces jax's P-fold "
+            "equality all-gather")
+
+
+class TestCheckedReplicatedPut:
+    """The replicated geometry placement must not pay jax's whole-array
+    cross-process equality assert.
+
+    That assert all-gathers the entire field to every process and compares it
+    in NumPy, roughly ``P*N*(2s+1)`` bytes per field. It made per-rank peak
+    memory GROW with rank count on a fixed problem — 12.7/22.2/41.1 GB (f32)
+    and 24.6/41.5/73.4 GB (f64) at 32/64/128 ranks on lat-lon 4096x8192 — until
+    the 128-rank f64 arm was OOM-killed, while the cubed-sphere lane, which
+    never takes this path, stayed flat at 8.2 GB.
+    """
+
+    def test_single_process_is_byte_identical(self):
+        import jax
+        import jax.numpy as jnp
+        from jax.sharding import NamedSharding, PartitionSpec as P
+        from legoesm.parallel.geometry_consistency import checked_replicated_put
+
+        arr = (np.arange(24, dtype=np.float32).reshape(4, 6) * 0.1).copy()
+        mesh = jax.make_mesh((1,), ("d",))
+        sharding = NamedSharding(mesh, P())
+        out = checked_replicated_put(arr, "probe", sharding, context="test")
+        # The contract is byte-identity with the path this replaces, not
+        # mere closeness: every device must hold the SAME bytes.
+        ref = jax.device_put(jnp.asarray(arr), sharding)
+        assert out.dtype == ref.dtype
+        np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
+        assert out.sharding.is_equivalent_to(ref.sharding, ref.ndim)
+
+    def test_latlon_replicated_branch_does_not_device_put_whole_arrays(self):
+        """Non-vacuity: this is exactly the call shape that regressed, so the
+        assertion fails if the old broadcast_checked+device_put pair returns.
+        """
+        import ast
+        import legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step as m
+
+        fns = _top_level_functions(_module_tree(m))
+        fn = fns["_build_geometry_stacks"]
+        puts = [n for n in ast.walk(fn)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "device_put"]
+        assert not puts, (
+            "the replicated geometry branch must place bytes through "
+            "checked_replicated_put, never a whole-array jax.device_put: an "
+            "uncommitted argument there triggers jax's cross-process equality "
+            "assert, whose all-gather is what made per-rank memory scale with "
+            "the rank count")
+        names = {n.func.id for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "checked_replicated_put" in names
+        assert "broadcast_checked" not in names, (
+            "broadcast_checked now runs INSIDE checked_replicated_put; calling "
+            "it here as well would broadcast the field twice")

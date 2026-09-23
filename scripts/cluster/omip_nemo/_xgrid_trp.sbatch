@@ -57,7 +57,7 @@ cd $WT || exit 1
 [ "$(git -C $WT rev-parse HEAD)" = "$PIN" ] || { echo "FATAL: pin drift"; exit 1; }
 [ -r "$WT/data/grids/eORCA1.2_mesh_mask.nc" ] || { echo "FATAL: data/ not linked"; exit 1; }
 echo "=== pin $PIN  MXL=$MXL ==="
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 R=/burg-archive/glab/users/pg2328/legoESM
 NIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository

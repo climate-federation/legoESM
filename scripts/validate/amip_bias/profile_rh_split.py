@@ -141,6 +141,32 @@ def _era5_surface_pressure(months):
             np.asarray(clim["lon"], dtype=np.float64) % 360.0)
 
 
+FIG = None
+
+
+def _profile_figure(run, plev, below, Tm, Te, qm, qe, mlat, mlon):
+    """q model/ERA5 ratio and T bias per region against pressure (lowest 6 levels
+    emphasised: that is where the surface-layer/cloud-layer split lives)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(1, 2, figsize=(10, 5), sharey=True)
+    for reg in PROFILE_REGIONS[:4]:
+        box = rb.REGIONS[reg]
+        qr = [rb.region_mean(qm[k], mlat, mlon, box, ~below[k])
+              / rb.region_mean(qe[k], mlat, mlon, box, ~below[k]) for k in range(plev.size)]
+        dT = [rb.region_mean(Tm[k] - Te[k], mlat, mlon, box, ~below[k]) for k in range(plev.size)]
+        ax[0].plot(qr, plev / 100, "o-", label=reg)
+        ax[1].plot(dT, plev / 100, "o-", label=reg)
+    ax[0].axvline(1, color="k", lw=0.8); ax[1].axvline(0, color="k", lw=0.8)
+    ax[0].set_xlabel("q model / ERA5"); ax[1].set_xlabel("T model - ERA5 [K]")
+    ax[0].set_ylabel("p [hPa]"); ax[0].set_ylim(1000, 300); ax[0].set_xlim(0.5, 3)
+    ax[0].legend(); ax[0].grid(); ax[1].grid()
+    fig.suptitle(f"{run}: humidity ratio and temperature bias vs ERA5")
+    fig.tight_layout(); fig.savefig(FIG, dpi=110)
+    print(f"figure {FIG}")
+
+
 def main(runs):
     for run in runs:
         mt = rb._load_model(run, "ta")
@@ -199,6 +225,8 @@ def main(runs):
             print(f"{p / 100:7.0f}{100 * frac_masked[k]:5.0f}"
                   + "".join(f"{c:>16}" for c in cells))
         print("%bg = percent of cells masked as below ground at that level.")
+        if FIG:
+            _profile_figure(run, plev, below, Tm, Te, qm, qe, mlat, mlon)
 
         # --- RH decomposition ---------------------------------------------
         # EXACT and additive: RH_m - RH_e = (RH_m - RH_swapT) + (RH_swapT - RH_e)
@@ -251,4 +279,8 @@ def main(runs):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:] or ["ref1979"])
+    _a = sys.argv[1:]
+    if "--fig" in _a:
+        FIG = _a[_a.index("--fig") + 1]
+        _a = [x for i, x in enumerate(_a) if x != "--fig" and (i == 0 or _a[i - 1] != "--fig")]
+    main(_a or ["ref1979"])

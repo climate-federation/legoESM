@@ -4,9 +4,9 @@ barotropic_after_reconcile``).
 NEMO reconciles the 3-D momentum depth mean TWICE per step; legoESM reconciles
 it once, inside the barotropic solve, at the NOW-level thickness.  The second
 site (``cfgs/DINO/MY_SRC/stpmlf.F90:754-765``, called at ``:578`` after
-``dyn_zdf`` at ``:396``) enforces the column mean at the AFTER-level thickness
-and, in doing so, discards whatever column mean the implicit vertical solve
-deposited.  This file gates the option that builds it.
+``dyn_zdf`` at ``:396``) executes the live Kaa QCO thickness reduction and
+reciprocal post-factor and, in doing so, discards whatever column mean the
+implicit vertical solve deposited.  This file gates the option that builds it.
 
 NON-VACUITY, stated precisely and RE-COUNTED against a measured revert.
 Reverting the model-side insertion makes SIX of these fail: the two
@@ -20,12 +20,12 @@ dispatch and kernel tests never touch the model); the second said "exactly
 FOUR" (written before the guard above was added, and never re-counted).  The
 count is now measured, not reasoned.
 
-SEPARATELY GATED, because a review put the defect back and every test stayed
-green: WHICH vertical ladder the CALL SITE builds.  The kernel tests pin the
-kernel's use of the thickness it is handed, but nothing pinned the caller
-handing it a REFERENCE ladder rather than a live one -- and that distinction is
-the entire content of the correction in ``d27dc0909``.  See
-``test_call_site_hands_the_kernel_a_REFERENCE_ladder``.
+RETRACTED by registered round 49: the prior gate required the call site to
+cancel the live QCO factor and hand the kernel a reference-only ladder.  That
+is algebraically valid but not execution-equivalent at the last bit.  The new
+gates require the raw pre-projection Kaa state, the live thickness recurrence,
+and the independently materialized reciprocal; cancelled and stale-Kaa arms
+are planted violations.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.ocean.dynamics.barotropic_common import (
     AFTER_RECONCILE_SCHEMES,
     after_level_column_mean_reconcile,
+    nemo_literal_after_level_reconcile,
     validate_after_reconcile,
 )
 
@@ -265,7 +266,9 @@ def _channel(outer="leapfrog", after="off", partial=True, dino_drag=False,
         barotropic_time_filter="nemo_boxcar_centred",
         barotropic_after_reconcile=after)
     if outer == "nemo_mlf":
-        kw["implicit_vmix_e3t_now_divisor"] = True   # construction requirement
+        # construction requirement: nemo_mlf is a literal transcription, so it
+        # hard-requires the NEMO implicit-ZDF identity (which carries e3w(Kmm))
+        kw["zdf_implicit_solver_evaluation"] = "nemo_literal"
     if dino_drag:
         kw.update(bottom_drag_scheme="nemo_quadratic", zdf_drag_in_matrix=True,
                   zdf_baroclinic_only=True, barotropic_drag_substep=True)
@@ -273,11 +276,26 @@ def _channel(outer="leapfrog", after="off", partial=True, dino_drag=False,
 
 
 def _second_step(method, **kw):
-    """One production step to populate Nbb (the forward-Euler start), then the
-    real leap-frog step -- the option's site is in the leap-frog branch, and a
-    call on a fresh from-rest state would only exercise the Euler start."""
+    """One production step to populate Nbb (the Euler start), then the real
+    leap-frog step -- so the measurement lands on the LEAP-FROG site."""
     state, model = _channel(**kw)
     s1 = model._leapfrog_step(state, _DT)
+    return getattr(model, method)(s1, _DT)
+
+
+def _second_step_one_variable(method, outer, after, **kw):
+    """Step 2 with BOTH arms sharing a BIT-IDENTICAL step 1.
+
+    Since #1729 the option's site also runs on the Euler start, so stepping
+    each arm twice under its own setting compares TWO applications plus a
+    step of divergence -- a confound, not a result (oracle-fidelity Rule 7).
+    Take step 1 with the option OFF in both arms, then step 2 under the arm's
+    own setting, and the sole difference is one leap-frog-site
+    reconciliation.
+    """
+    _, model_off = _channel(outer=outer, after="off", **kw)
+    state, model = _channel(outer=outer, after=after, **kw)
+    s1 = model_off._leapfrog_step(state, _DT)
     return getattr(model, method)(s1, _DT)
 
 
@@ -286,9 +304,9 @@ _PATHS = [("_leapfrog_step", "leapfrog"), ("_nemo_mlf_step", "nemo_mlf")]
 
 @pytest.mark.parametrize("method,outer", _PATHS)
 def test_option_changes_the_after_state_on_both_step_paths(method, outer):
-    off = _second_step(method, outer=outer, after="off", dino_drag=True)
-    on = _second_step(method, outer=outer, after="nemo_mlf_baro_corr",
-                      dino_drag=True)
+    off = _second_step_one_variable(method, outer, "off", dino_drag=True)
+    on = _second_step_one_variable(method, outer, "nemo_mlf_baro_corr",
+                                   dino_drag=True)
     du = np.asarray(on.u.data - off.u.data)
     dv = np.asarray(on.v.data - off.v.data)
     assert np.max(np.abs(du)) > 1e-6, "the option is inert -- its site never ran"
@@ -299,9 +317,9 @@ def test_option_changes_the_after_state_on_both_step_paths(method, outer):
 def test_the_change_is_a_column_mean_replacement_and_nothing_else(method, outer):
     """On every wet column the option shifts EVERY level by the SAME number.
     Anything that touched the vertical structure would fail here."""
-    off = _second_step(method, outer=outer, after="off", dino_drag=True)
-    on = _second_step(method, outer=outer, after="nemo_mlf_baro_corr",
-                      dino_drag=True)
+    off = _second_step_one_variable(method, outer, "off", dino_drag=True)
+    on = _second_step_one_variable(method, outer, "nemo_mlf_baro_corr",
+                                   dino_drag=True)
     du = np.asarray(on.u.data - off.u.data)
     # WITHOUT this line the test passes on du == 0 -- i.e. it would survive the
     # option being removed entirely, proving nothing. ``checked > 10`` below
@@ -339,9 +357,11 @@ def test_unknown_scheme_raises_from_inside_each_step_path(method, outer):
     reachability proof for both call sites: a path that never reached the
     dispatch would return a state instead."""
     state, model = _channel(outer=outer, after="not_a_scheme", dino_drag=True)
-    s1 = model._leapfrog_step(state, _DT)   # Euler start: site not reached yet
+    # #1729: the Euler start reaches the site too, so the raise fires on the
+    # FIRST step. Both sites are still proved reachable -- the parametrisation
+    # runs each method, and each method's own first step is what raises here.
     with pytest.raises(ValueError, match="barotropic_after_reconcile"):
-        getattr(model, method)(s1, _DT)
+        getattr(model, method)(state, _DT)
 
 def test_zstar_makes_the_after_thickness_half_a_no_op():
     """A MEASURED BOUND on what this option can own -- asserted DIRECTLY.
@@ -406,86 +426,10 @@ def test_zstar_makes_the_after_thickness_half_a_no_op():
         "and every bound quoted against that fact must be re-measured")
 
 
-@pytest.mark.parametrize("method,outer", _PATHS)
-def test_call_site_hands_the_kernel_a_REFERENCE_ladder(method, outer):
-    """THE GATE ON THE CORRECTION ITSELF, and it exists because it was missing.
-
-    NEMO's ``mlf_baro_corr`` weights by the fixed reference ladder: under
-    ``key_qco`` the free-surface factor ``(1+r3u)`` multiplies ``e3u`` and
-    divides ``r1_hu``, so it cancels exactly and the reconciliation is
-    TIME-LEVEL INDEPENDENT (``WORK/domzgr_substitute.h90:127,137,46,51``).  The
-    first version of this option weighted by the LIVE after-level thickness
-    instead.  That defect was caught by review, corrected -- and an adversarial
-    re-review then put it BACK and watched all 24 tests stay green.  Nothing
-    constrained which ladder the CALLER builds; the kernel tests only constrain
-    what the kernel does with the one it is given.
-
-    So this captures the argument at the call site and pins it: the thickness
-    handed over must be the eta=0 reference ladder, and must NOT be the live
-    one.  Both are computed here, and the test asserts they are DISTINGUISHABLE
-    before asserting which one was used -- otherwise it would pass vacuously on
-    a card where the two coincide.
-    """
-    import unittest.mock as mock
-    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import interp_cell_to_uface
-    from legoesm.ocean.vertical import compute_layer_thickness
-
-    seen = {}
-    real = omlc.after_level_column_mean_reconcile
-
-    def _capture(field, h_face_ref, target_mean, face_mask3, min_water_col):
-        seen.setdefault("h", h_face_ref)
-        return real(field, h_face_ref, target_mean, face_mask3, min_water_col)
-
-    state, model = _channel(outer=outer, after="nemo_mlf_baro_corr",
-                            dino_drag=True)
-    s1 = model._leapfrog_step(state, _DT)
-    with mock.patch.object(omlc, "after_level_column_mean_reconcile", _capture):
-        naa = getattr(model, method)(s1, _DT)
-    assert "h" in seen, "the option's site never ran -- nothing to gate"
-
-    # WHAT THIS TEST DOES AND DOES NOT GATE, corrected after review.  The
-    # cell->face rule here is ``interp_cell_to_uface`` because that is what the
-    # call site uses, so assertion (b) below DOES constrain the weighting axis
-    # too -- an earlier version of this note said it "gates the LADDER axis
-    # alone", which was false and is RETRACTED.  What makes it a LADDER gate
-    # specifically is assertion (c): the captured thickness must differ from
-    # the LIVE (eta-carrying) ladder.  It rebuilds its baseline from the same
-    # operator the code calls, so on its own it cannot tell a changed weighting
-    # rule from a correct one; that axis is gated against HAND-COMPUTED values
-    # in the two tests below.
-    mwc = model.config.min_water_column_m
-    ref = interp_cell_to_uface(compute_layer_thickness(
-        jnp.zeros_like(naa.eta.data), state.H_bathy.data, model.z_coord,
-        min_water_column_m=mwc))
-    live = interp_cell_to_uface(compute_layer_thickness(
-        naa.eta.data, state.H_bathy.data, model.z_coord,
-        min_water_column_m=mwc))
-
-    # (a) the two candidates must actually differ, or this test proves nothing
-    spread = float(np.max(np.abs(np.asarray(ref - live))))
-    assert spread > 1e-6, (
-        f"reference and live ladders differ by only {spread:.3e} on this "
-        "fixture, so this test cannot tell them apart -- it would pass "
-        "vacuously and must be re-fixtured before it is trusted")
-    # (b) and the call site must have used the REFERENCE one
-    got = np.asarray(seen["h"])
-    assert np.max(np.abs(got - np.asarray(ref))) < 1e-12, (
-        "the call site handed the kernel a ladder that is not the eta=0 "
-        "reference ladder NEMO's mlf_baro_corr weights by")
-    assert np.max(np.abs(got - np.asarray(live))) > 1e-6, (
-        "the call site handed the kernel the LIVE after-level thickness -- "
-        "this is the exact defect corrected in d27dc0909 (the key_qco "
-        "free-surface factor cancels in NEMO, so the faithful weight carries "
-        "no eta at all)")
-
-
-# ------------------------------------- the WEIGHTING RULE (not the ladder) --
-# The ladder gate above (`..._hands_the_kernel_a_REFERENCE_ladder`) pins eta=0
-# vs live.  It could not pin MIN vs ARITHMETIC MEAN, because it rebuilt the min
-# rule as its own expected value -- it asserted the code against itself on this
-# axis.  These two tests are hand-computed and use the reviewer's worked case.
+# ----------------------- reference-weighting algebra (generic kernel only) --
+# These retain the hand-worked face interpolation check for callers of the
+# generic kernel.  Production DINO mlf_baro_corr now takes the literal live-QCO
+# path gated below; it no longer cites algebraic cancellation as execution.
 
 # Reviewer's counterexample, verified by hand and reproduced verbatim here.
 # Two levels; the two adjacent cells carry reference thicknesses [10, 1] and
@@ -570,167 +514,198 @@ def test_the_min_rule_leaves_a_NONZERO_reference_weighted_column_mean():
         f"16/33 = {_CX_RESIDUAL_OF_MIN_RULE:.6f}, got {resid_min:.6f}")
 
 
+def _literal_fixture(scale):
+    # Seed 49's first deterministic wide-dynamic-range column.  A uniform
+    # scale still cancels algebraically, but executing it changes the result
+    # by 1.07e-14, so the cancelled-arm control is provably non-vacuous.
+    field = jnp.asarray([[[
+        10.066808489312294, 0.00017757670918921292,
+        38.79867555221713, -14050.712749141732,
+    ]]], dtype=jnp.float64)
+    h0 = jnp.asarray([[[
+        1.2925695746815475, 2.1876066786437558e-05,
+        51488.5701886061, 32.577880395543055,
+    ]]], dtype=jnp.float64)
+    live = h0 * jnp.asarray(scale, dtype=jnp.float64)
+    reciprocal = 1.0 / jnp.sum(live, axis=-1)
+    target = jnp.asarray([[[1.0948981886035902]]], dtype=jnp.float64)
+    mask = jnp.ones_like(field)
+    return field, h0, live, reciprocal, target, mask
+
+
+def test_literal_kernel_matches_source_left_reference_eager_and_jit():
+    field, _, live, reciprocal, target, mask = _literal_fixture(1.0000000003)
+    expected = np.asarray(field)
+    transport = np.asarray(live)[..., 0] * expected[..., 0]
+    for jk in range(1, expected.shape[-1]):
+        transport = transport + np.asarray(live)[..., jk] * expected[..., jk]
+    expected = (expected - (transport * np.asarray(reciprocal))[..., None]
+                + np.asarray(target)) * np.asarray(mask)
+    eager = nemo_literal_after_level_reconcile(
+        field, live, reciprocal, target, mask)
+    compiled = jax.jit(nemo_literal_after_level_reconcile)(
+        field, live, reciprocal, target, mask)
+    assert np.array_equal(np.asarray(eager), expected)
+    assert np.array_equal(np.asarray(compiled), expected)
+
+
+def test_cancelled_association_is_a_planted_violation():
+    field, h0, live, reciprocal, target, mask = _literal_fixture(1.0000000003)
+    literal = np.asarray(nemo_literal_after_level_reconcile(
+        field, live, reciprocal, target, mask))
+    cancelled = np.asarray(after_level_column_mean_reconcile(
+        field, h0, target, mask, 1.0e-10))
+    assert not np.array_equal(literal, cancelled), (
+        "planted cancelled-association arm no longer fires")
+
+
+def test_stale_kaa_scale_is_a_planted_violation():
+    field, _, live, reciprocal, target, mask = _literal_fixture(1.0000000003)
+    faithful = np.asarray(nemo_literal_after_level_reconcile(
+        field, live, reciprocal, target, mask))
+    _, _, stale_live, stale_reciprocal, _, _ = _literal_fixture(0.9999999997)
+    stale = np.asarray(nemo_literal_after_level_reconcile(
+        field, stale_live, stale_reciprocal, target, mask))
+    assert not np.array_equal(faithful, stale), (
+        "planted stale-Kaa arm no longer fires")
+
+
 @pytest.mark.parametrize("method,outer", _PATHS)
-def test_call_site_weights_by_the_NEMO_ARITHMETIC_reference_face_thickness(
-        method, outer):
-    """THE CALL-SITE GATE ON THE WEIGHTING RULE.
-
-    Companion to ``test_call_site_hands_the_kernel_a_REFERENCE_ladder``, which
-    cannot gate this axis on its own because it rebuilds its baseline from the
-    same operator the code calls.  MEASURED on a revert of the call site to
-    ``min_cell_to_uface``/``min_cell_to_vface``: FOUR tests go red -- this one
-    on both parametrizations and the ladder test on both.  (An earlier version
-    of this docstring claimed the revert "leaves that one green"; that was
-    written from intent, not measured, and is RETRACTED.)
-
-    Both candidate face thicknesses are rebuilt here from the same cell ladder
-    and the test asserts they are DISTINGUISHABLE on this fixture before
-    asserting which one was used -- otherwise it would pass vacuously on a
-    horizontally uniform full-step card (where the two coincide bit-for-bit,
-    which is exactly why the shipped DINO card is unaffected by the fix)."""
+def test_call_site_carries_raw_kaa_and_executes_literal_kernel(method, outer):
     import unittest.mock as mock
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        interp_cell_to_uface, min_cell_to_uface,
-    )
-    from legoesm.ocean.vertical import compute_layer_thickness
 
-    seen = {}
-    real = omlc.after_level_column_mean_reconcile
+    seen = {"eta": [], "kernel": 0}
+    real_geometry = omlc.nemo_qco_live_face_geometry_from_operands
+    real_kernel = omlc.nemo_literal_after_level_reconcile
 
-    def _capture(field, h_face_ref, target_mean, face_mask3, min_water_col):
-        seen.setdefault("h", h_face_ref)
-        return real(field, h_face_ref, target_mean, face_mask3, min_water_col)
+    def capture_geometry(eta, *args, **kwargs):
+        seen["eta"].append(np.asarray(eta))
+        return real_geometry(eta, *args, **kwargs)
+
+    def capture_kernel(*args, **kwargs):
+        seen["kernel"] += 1
+        return real_kernel(*args, **kwargs)
 
     state, model = _channel(outer=outer, after="nemo_mlf_baro_corr",
                             dino_drag=True)
     s1 = model._leapfrog_step(state, _DT)
-    with mock.patch.object(omlc, "after_level_column_mean_reconcile", _capture):
+    with mock.patch.object(
+            omlc, "nemo_qco_live_face_geometry_from_operands",
+            capture_geometry), mock.patch.object(
+                omlc, "nemo_literal_after_level_reconcile", capture_kernel):
         naa = getattr(model, method)(s1, _DT)
-    assert "h" in seen, "the option's site never ran -- nothing to gate"
-
-    h_cell = compute_layer_thickness(
-        jnp.zeros_like(naa.eta.data), state.H_bathy.data, model.z_coord,
-        min_water_column_m=model.config.min_water_column_m)
-    nemo_rule = np.asarray(interp_cell_to_uface(h_cell))
-    min_rule = np.asarray(min_cell_to_uface(h_cell))
-
-    # (a) the two rules must actually differ here, or this proves nothing
-    spread = float(np.max(np.abs(nemo_rule - min_rule)))
-    assert spread > 1e-6, (
-        f"the arithmetic-mean and min face thicknesses differ by only "
-        f"{spread:.3e} on this fixture, so this test cannot tell them apart "
-        "-- it must be re-fixtured onto a partial-cell bathymetry before it "
-        "is trusted")
-    # (b) and the call site must have used NEMO's arithmetic mean
-    got = np.asarray(seen["h"])
-    assert np.max(np.abs(got - nemo_rule)) < 1e-12, (
-        "the call site handed the kernel a face thickness that is not NEMO's "
-        "arithmetic reference-face rule (e3u_0 = 0.5*(e3t_0(i)+e3t_0(i+1)), "
-        "zgr_lib.F90:231)")
-    assert np.max(np.abs(got - min_rule)) > 1e-6, (
-        "the call site handed the kernel the MIN-rule face thickness -- that "
-        "is the MOM6/MITgcm hFacW convention, a different quantity, and it "
-        "leaves a non-zero reference-weighted column mean (see "
-        "test_the_min_rule_leaves_a_NONZERO_reference_weighted_column_mean)")
+    assert len(seen["eta"]) == 1
+    assert seen["eta"][0].shape == np.asarray(naa.eta.data).shape
+    assert seen["kernel"] == 2
+    assert np.all(np.isfinite(np.asarray(naa.u.data)))
+    assert np.all(np.isfinite(np.asarray(naa.v.data)))
 
 
-# ---------------------------------- the Euler-start gap is no longer SILENT --
+# ------------------------------------------- the Euler start reconciles too --
+def _first_step(method, **kw):
+    """The FROM-REST first step -- NEMO's ``l_1st_euler``.
+
+    The companion ``_second_step`` deliberately steps once before measuring,
+    so nothing in this file used to score step one.  That is how #1729's gap
+    survived: the Euler start returned before the reconciliation site and
+    every test here stayed green.
+    """
+    state, model = _channel(**kw)
+    assert state.u_before is None, (
+        "fixture must start from rest, or this measures a leap-frog step")
+    return getattr(model, method)(state, _DT)
+
+
 @pytest.mark.parametrize("method,outer", _PATHS)
-def test_euler_start_warns_that_it_skips_the_reconciliation(method, outer):
-    """#1640 finding 3.  The forward-Euler start returns before the
-    reconciliation site, so on that one step legoESM COMMITS a depth-mean
-    deposit NEMO removes (NEMO runs mlf_baro_corr on l_1st_euler too).  That
-    was silent while the card claimed the reference's second-site behaviour on
-    every step.
+def test_the_euler_start_runs_the_reconciliation_too(method, outer):
+    """#1729.  ``mlf_baro_corr`` is guarded on ``ln_dynspg_ts`` ALONE
+    (stpmlf.f90:534), so NEMO runs it on its ``l_1st_euler`` step like any
+    other.  legoESM used to return before the site and merely WARN about it.
 
-    PARAMETRIZED OVER BOTH OUTER STEPS deliberately.  There are two separate
-    early-return branches, and an earlier version keyed the once-only flag on a
-    single process-wide bool -- so whichever path ran first consumed the
-    warning and the OTHER site was never observed to warn at all.  Review
-    caught it; this is the gate that keeps it caught.
-
-    Not a raise: a genuine FROM-REST run of a card that ships this option has
-    no before level to bridge, and the DINO twin's ``--legacy-euler-start``
-    exists to reproduce artifacts recorded before 2026-08-24.  (An earlier
-    version of this docstring justified that by the twin's default being
-    ``bridge_before=False`` -- RETRACTED, the default is the bridged start
-    since #1455; see the companion test below.)"""
-    import warnings
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
-
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    state, model = _channel(outer=outer, after="nemo_mlf_baro_corr",
-                            dino_drag=True)
-    assert state.u_before is None, "fixture must start on the Euler path"
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        getattr(model, method)(state, _DT)
-    msgs = [str(x.message) for x in w if issubclass(x.category, RuntimeWarning)]
-    assert any("forward-Euler start" in m and method in m for m in msgs), (
-        f"the Euler-start skip must announce itself from {method}, got {msgs}")
-
-    # once per site, not once per step
-    with warnings.catch_warnings(record=True) as w2:
-        warnings.simplefilter("always")
-        getattr(model, method)(state, _DT)
-    assert not [x for x in w2 if "forward-Euler start" in str(x.message)], (
-        "the warning must be emitted once per site, not on every Euler step")
+    This is the gate on the fix: on the very first step from rest, selecting
+    the option must move the velocity.  Restoring the early return makes it
+    red on both paths.
+    """
+    off = _first_step(method, outer=outer, after="off", dino_drag=True)
+    on = _first_step(method, outer=outer, after="nemo_mlf_baro_corr",
+                     dino_drag=True)
+    du = np.asarray(on.u.data - off.u.data)
+    dv = np.asarray(on.v.data - off.v.data)
+    assert np.max(np.abs(du)) > 1e-6, (
+        "the Euler start never reached the reconciliation site")
+    assert np.max(np.abs(dv)) > 1e-6
 
 
-def test_no_euler_warning_once_the_before_level_is_populated():
-    """#1455 (2026-08-24): under the twin's NEW default the warning must NOT
-    fire -- and that is a property of the model, not of the harness.
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_the_euler_start_change_is_a_column_mean_replacement(method, outer):
+    """Same claim the leap-frog step is held to: every level of a wet column
+    moves by the SAME number.  If the Euler start had grown its own kernel
+    instead of reaching the shared one, this is where it would show."""
+    off = _first_step(method, outer=outer, after="off", dino_drag=True)
+    on = _first_step(method, outer=outer, after="nemo_mlf_baro_corr",
+                     dino_drag=True)
+    du = np.asarray(on.u.data - off.u.data)
+    assert np.max(np.abs(du)) > 1e-6, "nothing moved -- this test is vacuous"
+    wet = (np.abs(np.asarray(off.u.data)) + np.abs(np.asarray(on.u.data))) > 0
+    checked = 0
+    for j in range(du.shape[0]):
+        for i in range(du.shape[1]):
+            col = du[j, i][wet[j, i]]
+            if col.size > 1:
+                assert np.max(np.abs(col - col[0])) < 1e-11
+                checked += 1
+    assert checked > 10, "no multi-level wet column was actually checked"
 
-    The bridged start hands ``model.step`` a populated ``u_before``, so the
-    early-return branch the warning lives on is never taken.  The fixture gets
-    there the same way the model does: step 1 is the Euler start (and warns),
-    step 2 runs with the before level populated and must be silent.  Without
-    this, "the default no longer warns" would be an assertion about a flag
-    default rather than about the code path it selects.
+
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_the_euler_start_reconciliation_moves_ONLY_velocity(method, outer):
+    """The claim the campaign actually relies on, asserted rather than argued.
+
+    ``mlf_baro_corr`` is called after ``tra_zdf`` (stpmlf.f90:534 vs :507) and
+    writes only puu/pvv, so on this step it can move NO tracer and NO sea
+    level. That is what lets the temperature row be attributed elsewhere; if
+    it were false, the whole #1729 attribution would be.
+
+    (This replaces a test that compared the option OFF against the unset
+    DEFAULT -- which IS off, so it compared a config with itself and could
+    not fail. Review caught it; the version here is the claim that test was
+    reaching for.)
+    """
+    off = _first_step(method, outer=outer, after="off", dino_drag=True)
+    on = _first_step(method, outer=outer, after="nemo_mlf_baro_corr",
+                     dino_drag=True)
+    for name in ("T", "S", "eta"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(on, name).data),
+            np.asarray(getattr(off, name).data),
+            err_msg=f"the reconciliation moved {name}, which it cannot touch")
+    # anti-vacuity: it DID run, it just did not reach the tracers
+    assert np.max(np.abs(np.asarray(on.u.data - off.u.data))) > 1e-6
+    assert np.max(np.abs(np.asarray(on.v.data - off.v.data))) > 1e-6
+
+
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_the_euler_start_no_longer_warns_because_it_no_longer_skips(
+        method, outer):
+    """The RuntimeWarning that used to announce this gap is DELETED, and this
+    test refuses to let that deletion be the whole change.
+
+    A test that only asserted silence would pass if someone removed the
+    warning and left the gap.  So it asserts silence AND, on the same step,
+    that the reconciliation moved the velocity.
     """
     import warnings
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
 
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    state, model = _channel(after="nemo_mlf_baro_corr", dino_drag=True)
-    s1 = model._leapfrog_step(state, _DT)          # the Euler start itself
-    assert s1.u_before is not None, (
-        "fixture must reach a populated before level, or this test passes "
-        "vacuously by staying on the Euler path")
-    # non-vacuity: the warning DID fire on the step that took the Euler branch
-    assert "_leapfrog_step" in LatLonCGridOceanModel._WARNED_EULER_SKIP
-
-    # ...and must not fire again now that the before level exists. Cleared, so
-    # a silent result cannot be the once-per-site latch instead of the branch.
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        model._leapfrog_step(s1, _DT)
+        on = _first_step(method, outer=outer, after="nemo_mlf_baro_corr",
+                         dino_drag=True)
     assert not [x for x in w if "forward-Euler start" in str(x.message)], (
-        "a leap-frog step with a populated before level must never claim to "
-        "be the Euler start")
-
-
-def test_no_euler_warning_when_the_option_is_off():
-    """Non-vacuity for the test above: a warning that fires unconditionally
-    would pass it while telling the operator nothing."""
-    import warnings
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
-
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    state, model = _channel(after="off", dino_drag=True)
-    assert state.u_before is None, (
-        "fixture must start on the Euler path, or this test passes vacuously "
-        "by never reaching the branch it is about")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        model._leapfrog_step(state, _DT)
-    assert not [x for x in w if "forward-Euler start" in str(x.message)], (
-        "the default (option off) must stay silent")
+        "the Euler start still claims to skip the reconciliation")
+    off = _first_step(method, outer=outer, after="off", dino_drag=True)
+    assert np.max(np.abs(np.asarray(on.u.data - off.u.data))) > 1e-6, (
+        "silent AND inert: the warning went away but the gap did not")
 
 
 def test_the_weighting_fix_is_bit_identical_on_the_SHIPPED_DINO_geometry():

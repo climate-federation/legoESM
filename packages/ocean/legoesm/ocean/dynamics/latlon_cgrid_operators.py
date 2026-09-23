@@ -127,7 +127,14 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
-        north = fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u,
+        # Layout-aware ghost: pivot-row-stored meshes (eORCA025) source the
+        # row BELOW the pivot with the U-stagger map; halo-row-stored keeps
+        # the legacy byte-identical formula (see fold_ghost_source_T).
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T, fold_perm_u,
+        )
+        north = fold_row(fold_ghost_source_T(interior, fold),
+                         fold_perm_u(fold), fold.vector_sign_u,
                          fold.perm_T.shape[0])
         padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
@@ -670,6 +677,26 @@ def streamfunction_vorticity_operator(
     return curl_vertex_cgrid(u_bt, v_bt, grid)
 
 
+def _stored_or_recomputed_vertex_area(grid, dtype=None):
+    """The ONE way a regular lat-lon operator gets its vertex dual-cell area
+    (#1455 adversarial review, MAJOR 4).
+
+    Prefer the geometry's STORED ``area_q``; fall back to the spherical-cap
+    recompute only for a bare ``LatLonGrid`` that has none.  Every consumer must
+    route through here, because the identities the vertex area appears in hold
+    by every operator SHARING one value -- and under
+    ``metric_convention="nemo_isotropic"`` the stored array is NEMO's
+    ``e1f*e2f`` while the recompute is the spherical cap, which differ by up to
+    4.1e-05.  Recording that hazard in prose (as the first version of this fix
+    did) leaves the next caller to trip over it.
+    """
+    if hasattr(grid, "area_q"):
+        A = jnp.abs(grid.area_q[:, 0])
+        return A if dtype is None else A.astype(dtype)
+    lat = grid.lat if dtype is None else jnp.asarray(grid.lat, dtype=dtype)
+    return _vertex_dual_area_interior(lat, grid.radius, grid.dlon)
+
+
 def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
     """Dual-cell area at vertex (corner) points, shape (n_lat+1, n_lon+1).
 
@@ -689,7 +716,20 @@ def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
         n_lon1 = A_int.shape[1]
         zero_row = jnp.zeros((1, n_lon1), dtype=A_int.dtype)
         return jnp.concatenate([zero_row, A_int, zero_row], axis=0)
-    A_lat = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)  # (n_lat+1,)
+    # Routed through the shared reader so this helper and ``curl_vertex_cgrid``
+    # cannot drift apart: the discrete-Stokes property in the docstring above
+    # is the statement that THIS area is the one the curl divided by.  Cast to
+    # the recompute's dtype so moving to the stored array cannot silently
+    # PROMOTE the caller -- this becomes ``RigidLidStaticData.A_vertex`` and
+    # enters the CG solve, and the stored ``area_q`` is fp64 under an fp32
+    # policy.  On the Cartesian beta-plane the recompute this replaces returned
+    # an all-but-zero area (it differences a pseudo-latitude that is not the
+    # Cartesian spacing) where the stored ``dx*dy`` is correct, so this is a fix
+    # on that grid too -- pinned in ``test_dino_vertex_area_nemo.py``.
+    A_lat = _stored_or_recomputed_vertex_area(
+        grid,
+        dtype=_vertex_dual_area_interior(
+            grid.lat, grid.radius, grid.dlon).dtype)
     # Interior rows carry area; pole rows (wall BC) zero — consistent with
     # curl_vertex_cgrid computing vorticity only on interior rows.
     A_lat = A_lat.at[0].set(0.0).at[-1].set(0.0)
@@ -1638,6 +1678,20 @@ def _vertex_dual_area_interior(lat, radius, dlon):
     """Raw vertex dual-cell area ``R**2 * dlon * |Δsin(lat)|`` of shape
     ``(n_lat+1,)`` (#515 consolidation).
 
+    SCOPE (#1455), recorded here rather than guarded, exactly as the analogous
+    ``dx_v`` hazard is recorded in ``vface_zonal_cos_lat``.  This builds the
+    ``metric_convention="exact"`` spherical cap.  A geometry built with
+    ``"nemo_isotropic"`` stores NEMO's ``e1f*e2f`` instead -- the midpoint
+    value of ``cos^2`` rather than its exact interval integral -- and the two
+    differ by up to 4.1e-05.  ``curl_vertex_cgrid`` and ``vertex_area_cgrid``
+    both read the STORED array and so never mix the two; the remaining callers
+    below (``strain_rate_cgrid``'s vertex floor and ``vertex_area_1d``)
+    recompute unconditionally and WOULD mix them.  Those are the Smagorinsky /
+    Leith / backscatter / lateral-friction paths, every one of which is off by
+    default and off on the DINO card, so the combination is unreached today.
+    Promote them to the stored array if any of those is ever switched on with
+    this convention selected.
+
     The single source for the interior of the regular (non-tripolar) lat-lon
     vertex/q-cell area, previously recomputed verbatim in ``vertex_area_cgrid``,
     ``strain_rate_cgrid`` and the Smagorinsky ``A_vertex`` floor.  Callers keep
@@ -1670,6 +1724,24 @@ def vface_zonal_cos_lat(grid: LatLonGrid) -> jnp.ndarray:
       mean-of-cos ``0.5·(cos lat[j-1] + cos lat[j])`` — they differ at
       O(dlat²) on a stretched grid because ``cos(½(a+b)) ≠
       ½(cos a + cos b)``);
+
+      SCOPE (#1455): that is the ``metric_convention="exact"``
+      construction, and it is what the RECOMPUTE branch below builds.
+      A rich geometry built with ``metric_convention="nemo_isotropic"``
+      instead stores a width evaluated at the TRUE v-face latitude
+      (NEMO's ``gphiv``, ``usrdef_hgr.F90:113``) — a different latitude,
+      because on a Mercator coordinate the midpoint of two latitudes is
+      not the latitude of the midpoint index.  Such a grid takes the
+      stored branch on any MERIDIONALLY-CLOSED topology, so it never
+      reaches the recompute and the two do not mix; the invariants
+      below hold either way, because they need every operator to share
+      ONE width, not a particular value.  SCOPED deliberately: under a
+      meridionally-PERIODIC topology this helper recomputes (see
+      ``reads_stored_vface_metric``) while direct readers of the stored
+      ``grid.dx_v`` would not, so that combination WOULD mix the two
+      constructions at 3.3e-05.  It is unreached today -- every card
+      selecting ``nemo_isotropic`` is a closed basin -- and is recorded
+      here rather than guarded;
     * the two polar walls ``j = 0`` and ``j = n_lat`` → EXACTLY ``0``
       (transport metric: no meridional flux through the pole wall).
 
@@ -2212,8 +2284,10 @@ def strain_rate_cgrid(
         _fdtype = jnp.result_type(float)
         lat_f = jnp.asarray(lat, dtype=_fdtype)
         cos_lat_f = jnp.asarray(cos_lat, dtype=_fdtype)
+        # Shared reader (#1455 MAJOR 4): the strain rate at a corner and the
+        # vorticity at the SAME corner must divide by the same area.
         A_vertex = jnp.maximum(
-            _vertex_dual_area_interior(lat_f, R, dlon), 1e-30)
+            _stored_or_recomputed_vertex_area(grid, dtype=_fdtype), 1e-30)
 
         dx_cell = R * cos_lat_f * dlon
         dy_h = jnp.asarray(grid.dy, dtype=_fdtype) * 0.5
@@ -2634,7 +2708,7 @@ def vertex_area_1d(grid: LatLonGrid) -> jnp.ndarray:
         Area of each vertex dual cell.  Pole rows are set to a small
         positive floor (1e-30) to avoid division by zero.
     """
-    A_v = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)
+    A_v = _stored_or_recomputed_vertex_area(grid)   # #1455 MAJOR 4
     return jnp.maximum(A_v, 1e-30)
 
 
@@ -3996,10 +4070,16 @@ def density_jacobian_pgf_smc03_y(
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        rho_F = rho_per_cell[-1:, fold.perm_T, :]
-        h_F = h_partial[-1:, fold.perm_T, :]
-        z_c_F = z_centroid[-1:, fold.perm_T, :]
-        sigma_F = sigma[-1:, fold.perm_T, :]
+        # Beyond-the-fold partner cells: halo layout permutes the stored top
+        # row (legacy); pivot layout permutes the row BELOW the pivot
+        # (crossing the fold from (i, J) lands on (perm_T(i), J-1);
+        # permuting the stored pivot row reads the land mirror twins —
+        # codex fold-fix RED 6).
+        _pj = -2 if bool(getattr(fold, "pivot_row_stored", False)) else -1
+        rho_F = rho_per_cell[_pj:_pj + 1 or None, fold.perm_T, :]
+        h_F = h_partial[_pj:_pj + 1 or None, fold.perm_T, :]
+        z_c_F = z_centroid[_pj:_pj + 1 or None, fold.perm_T, :]
+        sigma_F = sigma[_pj:_pj + 1 or None, fold.perm_T, :]
         z_c_L = z_centroid[-1:]
         z_target_fold = jnp.minimum(z_c_L, z_c_F)
         P_fold = compute_pressure_at_target_smc03(

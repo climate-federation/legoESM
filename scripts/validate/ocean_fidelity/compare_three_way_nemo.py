@@ -69,10 +69,21 @@ Usage:
         --mpas    results/omip_nemo/xgrid_mpas_d30/snapshot_final.npz \
         --nemo-gridt .../ORCA1_1m_20000101_20041231_grid_T.nc --nemo-month 1 \
         --out-dir results/omip_nemo/xgrid3_d30_m01
+
+THREE GRIDS ON ONE CELL SET.  The scorer has two legoESM slots; a third grid
+is compared by running the pairs (tripole, MPAS), (tripole, FESOM2) and
+(MPAS, FESOM2) with the remaining snapshot passed as ``--also-mask``, so
+every pair is scored on the SAME common mask.  The slot-A-vs-NEMO numbers of
+the first two runs must then agree bit for bit -- the built-in check that the
+cell sets really are shared (``_score_grids_vs_nemo.sbatch`` asserts it).
+GATEWAY 5-day record k (0-based) is the mean over run days 5k..5k+5, so the
+record that ENDS at snapshot day D is ``--nemo-time-idx D/5-1`` (measured
+from time_counter_bounds, 2026-09-15).
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import os
@@ -99,6 +110,19 @@ from compare_omip_nemo import (  # noqa: E402
 # the two regions this campaign keeps failing in.
 _ARCTIC_LAT_N = 60.0
 
+# Named boxes the campaign directive scores by name.  The latitude bands cannot
+# see them: "tropics" spans all longitudes, so an equatorial Pacific cold-tongue
+# error is averaged against the Indian and Atlantic basins.  Longitudes are on
+# the target grid's 0..360 convention; a box whose west edge exceeds its east
+# edge wraps the dateline.  Same box definitions as BOX_REGIONS in
+# compare_tendencies_nemo.py, converted to 0..360.
+_NAMED_BOXES = (
+    ("nino3", -5.0, 5.0, 210.0, 270.0),
+    ("eq_pacific", -2.0, 2.0, 180.0, 280.0),
+    ("southern_ocean", -70.0, -45.0, 0.0, 360.0),
+    ("off_north_america", 30.0, 45.0, 280.0, 310.0),
+)
+
 # A zonal-mean row is drawn only where the three sources jointly resolve at
 # least this FRACTION of the cells the common ocean mask offers in that row.
 # A bare cell count is not comparable across resolutions or latitudes (10 cells
@@ -116,6 +140,13 @@ def _manifest_summary(snapshot_path):
     The caveats on these numbers ("this arm dropped --iwm", "this arm ran a
     dirty tree") live in the run manifest, and a scorecard that only records
     the snapshot PATH loses them the moment the directory is renamed.
+
+    TWO LAYOUTS.  The tripole/MPAS writer nests everything under ``run`` and
+    ``reproducibility``; the FESOM lane writes a FLAT manifest whose command
+    line is ``argv`` and whose SHA is top-level ``git_sha``.  Reading only the
+    nested one returned all-None for every FESOM arm (measured 2026-09-16) --
+    the provenance silently vanished for exactly the grid whose configuration
+    differs most from the others, which is the case this caveat exists for.
     """
     mf = Path(snapshot_path).parent / "run_manifest.json"
     if not mf.exists():
@@ -124,12 +155,38 @@ def _manifest_summary(snapshot_path):
         m = json.loads(mf.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         return {"run_manifest": str(mf), "error": f"unreadable: {exc}"}
+    run = m.get("run", {})
     repro = m.get("reproducibility", {})
-    return {"run_manifest": str(mf),
-            "command_line": m.get("run", {}).get("command_line"),
-            "git_dirty": repro.get("git_dirty"),
-            "legoesm_version": repro.get("legoesm_version"),
-            "creation_time": m.get("run", {}).get("creation_time")}
+    argv = m.get("argv")
+    cmd = run.get("command_line")
+    if cmd is None and isinstance(argv, list):
+        cmd = " ".join(str(a) for a in argv)
+    out = {"run_manifest": str(mf),
+           "manifest_layout": "nested" if run else ("flat" if argv else "unknown"),
+           "command_line": cmd,
+           "git_dirty": repro.get("git_dirty"),
+           "git_sha": repro.get("git_sha", m.get("git_sha")),
+           "legoesm_version": repro.get("legoesm_version"),
+           "creation_time": run.get("creation_time", m.get("creation_time"))}
+    if out["command_line"] is None:
+        out["note"] = ("manifest carries no command line under run.command_line "
+                       "or argv; the run's flags are NOT recorded with these numbers")
+    return out
+
+
+def snapshot_day(path):
+    """Run day of a legoESM snapshot: the ``time_days`` stamp the driver
+    writes (newer snapshots), else the day in a ``snapshot_dayNNNN.npz``
+    name, else None (``snapshot_final.npz`` from an older writer)."""
+    path = Path(path)
+    try:
+        with np.load(path) as s:
+            if "time_days" in s.files:
+                return float(np.asarray(s["time_days"]))
+    except (OSError, ValueError):
+        pass
+    mm = re.match(r"snapshot_day(\d+)\.npz$", path.name)
+    return float(int(mm.group(1))) if mm else None
 
 
 def _nn_wet_mask(src_lat_deg, src_lon_deg, src_wet, tgt_lat_deg, tgt_lon_deg):
@@ -157,6 +214,43 @@ def _nn_wet_mask(src_lat_deg, src_lon_deg, src_wet, tgt_lat_deg, tgt_lon_deg):
     tlon2d, tlat2d = np.meshgrid(tgt_lon_deg, tgt_lat_deg)
     _, idx = tree.query(_xyz_deg(tlat2d.ravel(), tlon2d.ravel()), k=1)
     return wet[idx].reshape(tlat2d.shape)
+
+
+_EARTH_KM = 6371.0
+
+
+def node_cloud_extrapolation(src, scored, tgt_lat_deg, tgt_lon_deg, far_factor=2.0):
+    """How far the SCORED target cells sit from a source that carries no land.
+
+    A FESOM2 snapshot holds only ocean nodes (its ``land_mask`` is all ones),
+    so ``_nn_wet_mask`` can never call a target cell land on its account: the
+    common mask at the coast is decided by the other sources, and the node
+    cloud's IDW value there may be an extrapolation from nodes well offshore.
+    This does not change the mask; it MEASURES the exposure so a cross-grid
+    near-land number can be read with it.  Returns None for a source that
+    does carry land (its nearest-wet test is not vacuous).  ``n_far`` counts
+    scored cells whose nearest node is farther than ``far_factor`` times the
+    source's own median node spacing.
+    """
+    from scipy.spatial import cKDTree
+    wet = np.asarray(src["mask"]).ravel() > 0.5
+    if not wet.all():
+        return None
+    lat = np.asarray(src["lat"], dtype=np.float64).ravel()
+    lon = np.asarray(src["lon"], dtype=np.float64).ravel()
+    tree = cKDTree(_xyz_deg(lat, lon))
+    d_self, _ = tree.query(_xyz_deg(lat, lon), k=2)      # [:, 1] = nearest other node
+    spacing_km = float(np.median(d_self[:, 1])) * _EARTH_KM
+    tlon2d, tlat2d = np.meshgrid(tgt_lon_deg, tgt_lat_deg)
+    d_tgt, _ = tree.query(_xyz_deg(tlat2d.ravel(), tlon2d.ravel()), k=1)
+    d_km = d_tgt.reshape(tlat2d.shape)[scored] * _EARTH_KM   # chord ~ arc at these scales
+    return {"median_node_spacing_km": spacing_km,
+            "nearest_node_p50_km": float(np.median(d_km)),
+            "nearest_node_p99_km": float(np.percentile(d_km, 99)),
+            "nearest_node_max_km": float(d_km.max()),
+            "far_factor": far_factor,
+            "n_far": int((d_km > far_factor * spacing_km).sum()),
+            "n_scored": int(scored.sum())}
 
 
 def _xyz_deg(lat_deg, lon_deg):
@@ -413,14 +507,42 @@ def main() -> int:
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--label-tripole", default="tripole")
     p.add_argument("--label-mpas", default="MPAS")
+    p.add_argument("--expect-day", type=float, default=None,
+                   help="Run day every snapshot must carry (time_days stamp, "
+                        "else the day in its file name); the card passes the "
+                        "day whose oracle record it selected.")
+    p.add_argument("--also-mask", type=Path, nargs="*", default=[],
+                   help="Extra legoESM snapshots whose wet footprint (and MLD "
+                        "coverage) is INTERSECTED into the common mask without "
+                        "being scored.  Three grids need three pair runs, and "
+                        "two pair runs masked separately score different cell "
+                        "sets; with every third snapshot passed here, all pair "
+                        "runs share ONE cell set and the slot-A-vs-NEMO numbers "
+                        "must agree bit for bit across them.")
     a = p.parse_args()
     _validate_args(a)
 
     out = a.out_dir
     out.mkdir(parents=True, exist_ok=True)
-    for pth in (a.tripole, a.mpas, a.nemo_gridt):
+    for pth in (a.tripole, a.mpas, a.nemo_gridt, *a.also_mask):
         if not pth.exists():
             raise SystemExit(f"FATAL: missing input {pth}")
+    # A snapshot from another day (scored or mask-only) would put a
+    # state-dependent footprint -- the MLD one above all -- on a day nobody is
+    # scoring.  Every snapshot's day must agree, and match --expect-day when
+    # given; a snapshot with neither a time stamp nor a day in its name
+    # cannot be checked and is reported as such rather than trusted.
+    snap_days = {str(pth): snapshot_day(pth) for pth in (a.tripole, a.mpas, *a.also_mask)}
+    known = {round(d, 6) for d in snap_days.values() if d is not None}
+    unknown = [k for k, d in snap_days.items() if d is None]
+    if len(known) > 1:
+        raise SystemExit(f"FATAL: snapshots are from different days: {snap_days}")
+    if a.expect_day is not None and known and known != {round(float(a.expect_day), 6)}:
+        raise SystemExit(f"FATAL: snapshots are from day {sorted(known)}, "
+                         f"not the expected day {a.expect_day}: {snap_days}")
+    if unknown:
+        print(f"[day] WARNING: no time stamp or day in the name of {unknown}; "
+              "their day is TRUSTED, not checked")
 
     # Cell CENTRES of a global grid of spacing res_deg.  The previous
     # hard-coded -89.5/0.5 offsets are the centres only at 1 degree; at 2 they
@@ -431,8 +553,10 @@ def main() -> int:
     T = _load_legoesm(a.tripole)
     M = _load_legoesm(a.mpas)
     N = _load_nemo(a.nemo_gridt, a.nemo_time_idx, month=a.nemo_month)
+    X = [_load_legoesm(pth) for pth in a.also_mask]
     print(f"[load] tripole {T['sst'].shape}  MPAS {M['sst'].shape}  "
-          f"NEMO {N['sst'].shape} ({N['n_time']} records)")
+          f"NEMO {N['sst'].shape} ({N['n_time']} records)"
+          + "".join(f"  mask-only {x['sst'].shape}" for x in X))
 
     def rg(src, field, mask=None):
         return regrid_curv_to_latlon(field, src["lat"], src["lon"],
@@ -445,9 +569,16 @@ def main() -> int:
     sssT, _ = rg(T, T["sss"])
     sssM, _ = rg(M, M["sss"])
     sssN, _ = rg(N, N["sss"])
+    # Mask-only sources: their regridded fields are kept so the per-field
+    # FINITE intersection below sees them too -- a NaN they carry on a
+    # covered cell must drop that cell from every pair run alike (codex).
+    sstX = [rg(x, x["sst"]) for x in X]
+    sssX = [rg(x, x["sss"])[0] for x in X]
 
     coverage = (ocT > 0.5) & (ocM > 0.5) & (ocN > 0.5)
-    ocean = build_ocean_mask(coverage, (T, M, N), tgt_lat, tgt_lon, a.mask_mode)
+    for _, ocX in sstX:
+        coverage &= ocX > 0.5
+    ocean = build_ocean_mask(coverage, (T, M, N, *X), tgt_lat, tgt_lon, a.mask_mode)
     print(f"[mask] mode={a.mask_mode}: coverage-only would keep "
           f"{int(coverage.sum())} cells, scoring {int(ocean.sum())} "
           f"({int(coverage.sum() - ocean.sum())} dropped as land under the "
@@ -469,6 +600,16 @@ def main() -> int:
            "near_land": coastal,
            "near_land_arctic": coastal & arctic,
            "near_land_nonarctic": coastal & ~arctic}
+    lon2d = np.ones((tgt_lat.size, 1)) * tgt_lon[None, :]
+    for nm, la, lb, lo, hi in _NAMED_BOXES:
+        inlon = ((lon2d >= lo) & (lon2d <= hi) if lo <= hi
+                 else (lon2d >= lo) | (lon2d <= hi))
+        box = (lat2d >= la) & (lat2d <= lb) & inlon & ocean
+        if not box.any():
+            raise SystemExit(
+                f"FATAL: named box {nm!r} selects no ocean cell; its bounds "
+                "and the target grid's longitude convention disagree.")
+        sub[nm] = box
     print(f"[common] {n_common} cells on all three; "
           + ", ".join(f"{k} {int(v.sum())}" for k, v in sub.items()))
 
@@ -487,6 +628,7 @@ def main() -> int:
         "git_sha": _git_sha(_HERE.parents[3]),
         "label_a": lab_a, "label_b": lab_b,
         "tripole_snapshot": str(a.tripole), "mpas_snapshot": str(a.mpas),
+        "also_mask_snapshots": [str(pth) for pth in a.also_mask],
         "nemo_gridt": str(a.nemo_gridt), "nemo_month": a.nemo_month,
         "nemo_time_idx": None if a.nemo_month else a.nemo_time_idx,
         "res_deg": a.res_deg, "coast_cells": a.coast_cells,
@@ -508,21 +650,45 @@ def main() -> int:
             "coastline-resolved verdict needs a topology-aware remapper."),
         "fields": {},
     }
+    # A source without land (a node cloud) cannot veto a coastal cell, so its
+    # values at the common mask's coast may be extrapolated from offshore.
+    # Measured per such source and carried with the numbers; the mask is not
+    # changed by it.
+    for lab, src in ((lab_a, T), (lab_b, M)):
+        chk = node_cloud_extrapolation(src, ocean, tgt_lat, tgt_lon)
+        if chk is not None:
+            report.setdefault("node_cloud_check", {})[lab] = chk
+            print(f"[node-cloud] {lab}: no land in the snapshot, its nearest-wet "
+                  f"test is vacuous; nearest node over scored cells p50 "
+                  f"{chk['nearest_node_p50_km']:.0f} km, p99 "
+                  f"{chk['nearest_node_p99_km']:.0f} km, max "
+                  f"{chk['nearest_node_max_km']:.0f} km; {chk['n_far']} of "
+                  f"{chk['n_scored']} scored cells farther than "
+                  f"{chk['far_factor']:g}x the median node spacing "
+                  f"({chk['median_node_spacing_km']:.0f} km)")
 
     plot_fields = {}          # name -> (Tg, Mg, Ng, unit)
     # Each entry carries its OWN scoring area: MLD is resolved on
     # a smaller domain than SST/SSS, and reusing the SST area would score cells
     # where it does not exist on all three sources.
-    fields = [("SST", sstT, sstM, sstN, "degC", area),
-              ("SSS", sssT, sssM, sssN, "psu", area)]
+    # The last element lists the mask-only sources' regridded fields, which
+    # join the per-field finite intersection but are never scored.
+    fields = [("SST", sstT, sstM, sstN, "degC", area, [f for f, _ in sstX]),
+              ("SSS", sssT, sssM, sssN, "psu", area, sssX)]
 
     # --- MLD (density threshold, matched to NEMO mldr10_1) -------------------
     mldT_raw, mldM_raw = _lego_mld(T), _lego_mld(M)
+    mldX_raw = [_lego_mld(x) for x in X]
     if N.get("mld") is None:
         print("[MLD] SKIPPED: NEMO grid_T has no mldr10_1")
     elif mldT_raw is None or mldM_raw is None:
         which = [n for n, v in (("tripole", mldT_raw), ("MPAS", mldM_raw)) if v is None]
         print(f"[MLD] SKIPPED: snapshot(s) {which} lack z_center_ref/H_bathy")
+    elif any(v is None for v in mldX_raw):
+        # A mask-only source that cannot supply an MLD footprint would leave
+        # the MLD cell set different from the pair run it is meant to match.
+        raise SystemExit("FATAL: an --also-mask snapshot lacks z_center_ref/"
+                         "H_bathy, so the MLD footprint cannot be shared")
     else:
         mldT, ocTm = regrid_curv_to_latlon(np.nan_to_num(mldT_raw, nan=0.0),
                                            T["lat"], T["lon"],
@@ -539,6 +705,12 @@ def main() -> int:
         # MLD is scored on the intersection of the MLD coverage and the common
         # ocean, which can be smaller than `ocean`; carry its own area.
         mld_ok = ocean & (ocTm > 0.5) & (ocMm > 0.5) & (ocNm > 0.5)
+        mldX = []
+        for x, mx in zip(X, mldX_raw):
+            fx, ocXm = rg(x, np.nan_to_num(mx, nan=0.0),
+                          np.isfinite(mx).astype(np.float64))
+            mld_ok &= ocXm > 0.5
+            mldX.append(fx)
         if not mld_ok.any():
             raise SystemExit("FATAL: MLD has no cells resolved on all three sources")
         report["n_mld_cells"] = int(mld_ok.sum())
@@ -548,7 +720,7 @@ def main() -> int:
             "snapshot-state MLD, NOT a seasonal-mean MLD.")
         _mld_area = (np.cos(np.deg2rad(tgt_lat))[:, None]
                      * np.ones_like(tgt_lon)[None, :]) * mld_ok
-        fields.append(("MLD", mldT, mldM, mldN, "m", _mld_area))
+        fields.append(("MLD", mldT, mldM, mldN, "m", _mld_area, mldX))
     if a.smooth_radius_deg is not None:
         print(f"[smooth] common-footprint control ON: top-hat mean over "
               f"{a.smooth_radius_deg} deg great-circle radius, applied "
@@ -561,16 +733,18 @@ def main() -> int:
         report["mld_tails_suppressed_under_smoothing"] = True
         fields = [(n, *(_smooth_common_footprint(f, ar > 0, tgt_lat, tgt_lon,
                                                  a.smooth_radius_deg)
-                        for f in (Tg, Mg, Ng)), u, ar)
-                  for n, Tg, Mg, Ng, u, ar in fields]
+                        for f in (Tg, Mg, Ng)), u, ar, xs)
+                  for n, Tg, Mg, Ng, u, ar, xs in fields]
 
-    for name, Tg, Mg, Ng, unit, ar in fields:
+    for name, Tg, Mg, Ng, unit, ar, xs in fields:
         # PER-FIELD finite intersection.  Geometric coverage is not finiteness:
         # a source can be covered and still deliver a NaN (or, through the NEMO
         # loader's nan_to_num, a fabricated 0.0 that IDW spreads), and without
         # this gate a single NaN turns every statistic for the field into a bare
         # NaN in report.json that reads like a number.
         finite3 = np.isfinite(Tg) & np.isfinite(Mg) & np.isfinite(Ng)
+        for xf in xs:
+            finite3 &= np.isfinite(xf)
         n_drop = int(((ar > 0) & ~finite3).sum())
         if n_drop:
             print(f"  [{name}] WARNING: dropping {n_drop} covered cells that are "
@@ -579,6 +753,10 @@ def main() -> int:
         if not (ar > 0).any():
             raise SystemExit(f"FATAL: {name} has no finite cells on all three sources")
         report.setdefault("n_finite_cells", {})[name] = int((ar > 0).sum())
+        # Identity of the scored cell set, not just its size: two pair runs
+        # that claim one cell set must produce the same digest here.
+        report.setdefault("scored_mask_sha1", {})[name] = hashlib.sha1(
+            np.ascontiguousarray(ar > 0).tobytes()).hexdigest()
         sb = {k: (v & (ar > 0)) for k, v in sub.items()}
         # Tails are a COLUMN-COUNT statistic; a smoothed field cannot support
         # one (see the [smooth] note above).

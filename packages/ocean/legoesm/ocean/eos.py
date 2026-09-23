@@ -33,6 +33,9 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import equinox as eqx
+from jax import lax
+from jax.experimental import checkify
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -499,6 +502,42 @@ def nemo_seos_eos(
     return cfg.rho0 + zn
 
 
+def nemo_seos_prd_literal(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    depth_m: jnp.ndarray,
+    cfg: NemoSEOSConfig | None = None,
+) -> jnp.ndarray:
+    """NEMO simplified-EOS density anomaly ``prd`` in literal association.
+
+    This is the quantity written by ``eosbn2.F90:301-305``: NEMO forms
+    ``zn`` directly from conservative temperature, salinity, and geometric
+    ``gdept``, then stores ``zn * r1_rho0``.  It deliberately does *not* call
+    :func:`nemo_seos_eos` and recover the anomaly through
+    ``(rho0 + zn) / rho0 - 1``; that non-oracle round trip loses bits to the
+    large reference-density offset before the anomaly is consumed by
+    ``ldf_slp``.
+
+    The helper is pure JAX and retains the source expression's written order,
+    so it is safe under JIT and reverse-mode AD.
+    """
+    if cfg is None:
+        cfg = NemoSEOSConfig()
+    zt = lax.optimization_barrier(T - cfg.T0)
+    zs = lax.optimization_barrier(S - cfg.S0)
+    t_linear = lax.optimization_barrier(0.5 * cfg.lambda1 * zt)
+    t_depth = lax.optimization_barrier(cfg.mu1 * depth_m)
+    t_factor = lax.optimization_barrier(1.0 + t_linear + t_depth)
+    t_term = lax.optimization_barrier(-cfg.a0 * t_factor * zt)
+    s_linear = lax.optimization_barrier(0.5 * cfg.lambda2 * zs)
+    s_depth = lax.optimization_barrier(cfg.mu2 * depth_m)
+    s_factor = lax.optimization_barrier(1.0 - s_linear - s_depth)
+    s_term = lax.optimization_barrier(cfg.b0 * s_factor * zs)
+    cross = lax.optimization_barrier(cfg.nu * zt * zs)
+    zn = lax.optimization_barrier(t_term + s_term - cross)
+    return lax.optimization_barrier(zn * (1.0 / cfg.rho0))
+
+
 def nemo_seos_alpha_beta(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -549,6 +588,40 @@ def nemo_seos_alpha_beta(
     return alpha, beta
 
 
+def _nemo_bn2_zrw(
+    gdept: jnp.ndarray,
+    gdepw_int: jnp.ndarray,
+    *,
+    evaluation: str,
+    gdept_0: jnp.ndarray | None = None,
+    gdepw_0: jnp.ndarray | None = None,
+    stretch: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Evaluate eosbn2.F90:1459-1460 with a selectable rounding boundary."""
+    gd = jnp.asarray(gdept)
+    if evaluation == "preassembled_live":
+        if any(value is not None for value in (gdept_0, gdepw_0, stretch)):
+            raise ValueError(
+                "raw zrw operands require evaluation='nemo_literal'")
+        return ((jnp.asarray(gdepw_int) - gd[..., 1:])
+                / (gd[..., :-1] - gd[..., 1:]))
+    if evaluation != "nemo_literal":
+        raise ValueError(
+            f"unknown zrw_evaluation {evaluation!r}; expected "
+            "'preassembled_live' or 'nemo_literal'")
+    if any(value is None for value in (gdept_0, gdepw_0, stretch)):
+        raise ValueError(
+            "zrw_evaluation='nemo_literal' requires zrw_gdept_0, "
+            "zrw_gdepw_0, and zrw_stretch")
+    stretch3 = jnp.asarray(stretch)[..., jnp.newaxis]
+    gd0 = jnp.asarray(gdept_0)
+    gw0 = jnp.asarray(gdepw_0)
+    gd_up = lax.optimization_barrier(gd0[..., :-1] * stretch3)
+    gd_lo = lax.optimization_barrier(gd0[..., 1:] * stretch3)
+    gw = lax.optimization_barrier(gw0 * stretch3)
+    return (gw - gd_lo) / (gd_up - gd_lo)
+
+
 def compute_buoyancy_frequency_nemo_bn2(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -557,6 +630,13 @@ def compute_buoyancy_frequency_nemo_bn2(
     cfg: NemoSEOSConfig | None = None,
     g: float = constants.g,
     eos_form: str = "seos",
+    *,
+    e3w_int: jnp.ndarray | None = None,
+    e3w_source: str = "mesh_reference",
+    zrw_evaluation: str = "preassembled_live",
+    zrw_gdept_0: jnp.ndarray | None = None,
+    zrw_gdepw_0: jnp.ndarray | None = None,
+    zrw_stretch: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Brunt-Väisälä ``N²`` by NEMO's exact ``bn2``.
 
@@ -606,33 +686,121 @@ def compute_buoyancy_frequency_nemo_bn2(
     -------
     array : signed ``N²`` at interior interfaces [1/s²], shape ``(..., nlev-1)``.
     """
+    if e3w_source not in ("mesh_reference", "depth_difference"):
+        raise ValueError(
+            f"unknown e3w_source {e3w_source!r}; expected 'mesh_reference' "
+            "or 'depth_difference'")
+    if e3w_source == "mesh_reference":
+        if e3w_int is None:
+            raise ValueError(
+                "e3w_source='mesh_reference' requires raw-mesh e3w_int; "
+                "the depth-difference construction is legacy opt-in")
+        e3w = jnp.asarray(e3w_int)
+        if e3w.shape[-1] != T.shape[-1] - 1:
+            raise ValueError(
+                f"e3w_int trailing size {e3w.shape[-1]} != nlev-1="
+                f"{T.shape[-1] - 1}")
+        e3w = eqx.error_if(
+            e3w,
+            ~jnp.all(jnp.isfinite(e3w) & (e3w > 0.0)),
+            "raw-mesh e3w_int must contain only finite values > 0",
+        )
+    else:
+        if e3w_int is not None:
+            raise ValueError(
+                "e3w_int must be omitted when e3w_source='depth_difference'")
+        e3w = None
     if eos_form not in ("seos", "teos10"):
         raise ValueError(
             f"compute_buoyancy_frequency_nemo_bn2 eos_form={eos_form!r} "
             "invalid; expected 'seos' (the 3-term simplified EOS) or "
             "'teos10' (NEMO's Roquet polynomial with the TEOS-10 coefficient "
             "set, which is what ORCA1 runs: ln_teos10=.true.).")
+    eos_gdept = jnp.asarray(gdept)
+    if zrw_evaluation == "nemo_literal":
+        if zrw_gdept_0 is None or zrw_stretch is None:
+            raise ValueError(
+                "zrw_evaluation='nemo_literal' requires zrw_gdept_0 and "
+                "zrw_stretch for the literal eos_rab depth")
+        eos_gdept = lax.optimization_barrier(
+            jnp.asarray(zrw_gdept_0)
+            * jnp.asarray(zrw_stretch)[..., jnp.newaxis])
     if eos_form == "teos10":
         # NEMO's rab_3d takes the GEOMETRIC depth, and both alpha and beta come
         # from the polynomial rather than the 3-term fit. Everything below this
         # line -- the zrw interpolation, the /e3w, the sign convention -- is
         # unchanged, because NEMO's bn2_t is shared across EOS branches.
-        alpha, beta = nemo_roquet_alpha_beta(T, S, gdept)
+        alpha, beta = nemo_roquet_alpha_beta(T, S, eos_gdept)
     else:
         if cfg is None:
             cfg = NemoSEOSConfig()
-        alpha, beta = nemo_seos_alpha_beta(T, S, gdept, cfg)  # (..., nlev)
+        alpha, beta = nemo_seos_alpha_beta(
+            T, S, eos_gdept, cfg)  # (..., nlev)
     gd = jnp.asarray(gdept)
     gd_up = gd[..., :-1]                                       # cell i  (upper)
     gd_lo = gd[..., 1:]                                        # cell i+1 (lower)
-    # Geometric w-point weight (NEMO zrw); denominator < 0, numerator < 0 -> (0,1).
-    zrw = (gdepw_int - gd_lo) / (gd_up - gd_lo)               # (..., nlev-1)
+    zrw = _nemo_bn2_zrw(
+        gd, gdepw_int, evaluation=zrw_evaluation,
+        gdept_0=zrw_gdept_0, gdepw_0=zrw_gdepw_0,
+        stretch=zrw_stretch)
     a_w = alpha[..., 1:] * (1.0 - zrw) + alpha[..., :-1] * zrw
     b_w = beta[..., 1:] * (1.0 - zrw) + beta[..., :-1] * zrw
-    e3w = gd_lo - gd_up                                        # centre spacing (>0)
+    if e3w is None:
+        e3w = gd_lo - gd_up                                    # explicit legacy
     dT = T[..., :-1] - T[..., 1:]                              # T_upper - T_lower
     dS = S[..., :-1] - S[..., 1:]
-    return g * (a_w * dT - b_w * dS) / jnp.maximum(e3w, 1.0e-12)
+    return g * (a_w * dT - b_w * dS) / e3w
+
+
+def nemo_bn2_live_geometry(
+    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
+    *, r3t_evaluation: str = "quotient",
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return canonical live ``(gdept, gdepw_int, e3w_int)`` for NEMO bn2.
+
+    The faithful/default divisor is the raw mesh ``e3w_0(:,:,jk)`` multiplied
+    by NEMO's live ``1+r3t``.  ``depth_difference`` is an explicit legacy
+    coordinate option and reproduces the former ``diff(gdept)`` construction.
+    """
+    gdept, gdepw_int = nemo_bn2_live_ladders(
+        z_coord, eta, H_bathy, r3t_evaluation=r3t_evaluation)
+    stretch = (None if getattr(z_coord, "linear_free_surface", False)
+               else nemo_r3t_stretch(
+                   z_coord, eta, H_bathy,
+                   evaluation=r3t_evaluation))
+    e3w = nemo_e3w_from_live_gdept(
+        z_coord, gdept, stretch=stretch, interior=True)
+    return gdept, gdepw_int, e3w
+
+
+def nemo_e3w_from_live_gdept(
+    z_coord, live_gdept: jnp.ndarray, *, stretch: jnp.ndarray | None,
+    interior: bool = True,
+) -> jnp.ndarray:
+    """Select NEMO W spacing once for bn2 and every paired consumer."""
+    mesh_reference = getattr(z_coord, "nemo_e3w_mesh_reference", False)
+    if not mesh_reference:
+        if interior:
+            return jnp.diff(live_gdept, axis=-1)
+        return jnp.concatenate(
+            [2.0 * live_gdept[..., :1], jnp.diff(live_gdept, axis=-1)],
+            axis=-1)
+    raw = getattr(z_coord, "nemo_e3w_0", None)
+    if raw is None:
+        raise ValueError(
+            "nemo_e3w_source='mesh_reference' requires z_coord.nemo_e3w_0; "
+            "use the legacy option explicitly only when no raw mesh exists")
+    raw = jnp.asarray(raw)
+    if raw.shape[-1] != z_coord.n_levels:
+        raise ValueError(
+            f"z_coord.nemo_e3w_0 trailing size {raw.shape[-1]} != n_levels="
+            f"{z_coord.n_levels}")
+    # NEMO jk=2..jpk maps to Python raw[...,1:] for the interior bn2 rows;
+    # ldf_slp also needs jk=1 and requests the complete raw field.
+    e3w = raw[..., 1:] if interior else raw
+    if stretch is not None:
+        e3w = e3w * jnp.asarray(stretch)[..., None]
+    return e3w
 
 
 def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -659,7 +827,10 @@ def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
     return gdept, gdepw_int
 
 
-def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.ndarray:
+def nemo_r3t_stretch(
+    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
+    evaluation: str = "quotient",
+) -> jnp.ndarray:
     """NEMO ``key_qco`` T-point z* stretch factor ``(1 + r3t)``.
 
     ``r3t = ssh/ht_0`` (``domqco.F90:160``, ``dom_qco_r3c``), used throughout
@@ -689,6 +860,10 @@ def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.nda
     -------
     array ``(...)`` — the stretch factor ``(1 + r3t)``, floored at 1e-6.
     """
+    if evaluation not in ("quotient", "nemo_reciprocal"):
+        raise ValueError(
+            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
+            "or 'nemo_reciprocal'")
     if getattr(z_coord, "linear_free_surface", False):
         # NEMO key_linssh: domqco is NOT active, so r3t == 0 -- the column
         # never stretches.  Mirrors the same special case in
@@ -697,7 +872,15 @@ def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.nda
     # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
     # rather than eta/0 -> inf/NaN poisoning the downstream chain.
     H = jnp.asarray(H_bathy)
-    r3t = jnp.where(H > 0.0, jnp.asarray(eta) / jnp.where(H > 0.0, H, 1.0), 0.0)
+    wet_H = H > 0.0
+    safe_H = jnp.where(wet_H, H, 1.0)
+    if evaluation == "nemo_reciprocal":
+        # domain.F90:158 stores r1_ht_0 before domqco.F90:160 multiplies it
+        # by ssh.  The barrier preserves that fp64 boundary under JIT.
+        r1_H = lax.optimization_barrier(1.0 / safe_H)
+        r3t = jnp.where(wet_H, jnp.asarray(eta) * r1_H, 0.0)
+    else:
+        r3t = jnp.where(wet_H, jnp.asarray(eta) / safe_H, 0.0)
     # Safety floor on the stretch, NOT on r3t: a column driven to
     # eta + H_bathy <= 0 (unclamped restart/IC, wetting-drying) would give a
     # NON-POSITIVE geometric depth/thickness, which silently flips the sign
@@ -709,6 +892,7 @@ def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.nda
 
 def nemo_bn2_live_ladders(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
+    *, r3t_evaluation: str = "quotient",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """``(gdept, gdepw_int)`` at NEMO's LIVE ``gdept(Kmm)`` under z*.
 
@@ -743,7 +927,9 @@ def nemo_bn2_live_ladders(
         # review finding F1 regression guard,
         # test_linear_free_surface_column_never_stretches).
         return gdept, gdepw_int
-    stretch = nemo_r3t_stretch(z_coord, eta, H_bathy)[..., jnp.newaxis]
+    stretch = nemo_r3t_stretch(
+        z_coord, eta, H_bathy,
+        evaluation=r3t_evaluation)[..., jnp.newaxis]
     return gdept * stretch, gdepw_int * stretch
 
 
@@ -755,8 +941,9 @@ def nemo_bn2_live_ladders(
 # above, and from ``veros_gsw`` (a DIFFERENT TEOS-10 fit, the GSW 48-term
 # rational polynomial).  Transcribed verbatim from NEMO 5.0.2
 # ``src/OCE/TRA/eosbn2.F90``: normalization :2117-2120, coefficients :2122-2173,
-# Horner evaluation :260-288.  The TEOS-10 coefficient set (eosbn2.F90:1926-...,
-# Conservative Temperature + Absolute Salinity) is a separate follow-up.
+# Horner evaluation :260-288.  The selectable ``nemo_teos10`` branch below uses
+# the companion TEOS-10 coefficient set (eosbn2.F90:1920-2108, Conservative
+# Temperature + Absolute Salinity) with this same evaluator.
 # ==============================================================================
 _ROQUET_EOS80 = {
     # normalization
@@ -875,7 +1062,7 @@ def nemo_roquet_eos(
 # ``ln_eos80`` commented out, and NEMO then sets ``l_useCT = .TRUE.``
 # ("model temperature is Conservative temperature", eosbn2.F90:1924).
 #
-# Transcribed MECHANICALLY from NEMO 5.0.1 ``src/OCE/TRA/eosbn2.F90`` lines
+# Transcribed MECHANICALLY from NEMO 5.0.2 ``src/OCE/TRA/eosbn2.F90`` lines
 # 1926-2110, not by eye: a parser read the Fortran assignments and emitted this
 # dict, and the SAME parser was first run over the EOS-80 block (:2111-2300)
 # and required to reproduce every one of the 52 coefficients in
@@ -1089,7 +1276,20 @@ def unesco80_eos(
     Parameters
     ----------
     T : array
-        Potential temperature [°C]. Valid range: -2 to 40 °C.
+        IN-SITU temperature [°C] (IPTS-68). Valid range: -2 to 40 °C.
+
+        This said "Potential temperature" until 2026-09-11 and that was
+        WRONG. UNESCO 1980 is the in-situ standard; the potential-temperature
+        refit is Jackett & McDougall 1995, a different polynomial. Measured
+        against the published in-situ check value
+        ``rho(S=35, T=25, p=10000 dbar) = 1062.538``, this function returns
+        1062.5382 -- agreement to 2e-4 kg/m³, which it could not achieve if
+        it were a θ-form. Every prognostic tracer in this package is
+        POTENTIAL temperature, so callers must convert with
+        :func:`potential_temperature`'s inverse before using this EOS;
+        feeding θ straight in leaves the deep ocean too dense by roughly the
+        adiabatic compression term. The OMIP runner refuses to select it for
+        exactly this reason (``_OMIP_EOS_FORMS``).
     S : array
         Practical salinity [PSU]. Valid range: 0 to 42 PSU.
     p : array
@@ -1342,6 +1542,36 @@ def potential_temperature(
 
     xk = h * adiabatic_temperature_gradient(S, t, p)
     return t + (xk - 2.0 * q) / 6.0
+
+
+# Fixed numerical inverse iterations, not a physical closure parameter.
+_INSITU_ITERATIONS = 8
+
+
+def in_situ_temperature(S, theta_C, p_dbar):
+    """Invert surface-referenced :func:`potential_temperature`, in Celsius.
+
+    Reverse pressure integration supplies the initial estimate. Fixed residual
+    corrections invert the discrete forward conversion (reverse integration
+    alone has truncation error). JIT/grad-safe for seawater in the EOS regime.
+    Pressure is sea pressure in dbar, as in the forward conversion.
+    The final forward residual must be <= 1e-12 K (float64) or 1e-5 K
+    (float32). This guards the fixed iteration count's convergence assumption
+    for this EOS. Value checks are inert in eager/plain JIT execution: compile
+    ``jax.jit(checkify.checkify(fn))`` with user checks enabled (the default)
+    and call ``err.throw()`` outside JIT to enforce them.
+    """
+    initial = potential_temperature(S, theta_C, 0.0, p_dbar)
+
+    def correct(_, t):
+        return t + (theta_C - potential_temperature(S, t, p_dbar))
+
+    final = lax.fori_loop(0, _INSITU_ITERATIONS, correct, initial)
+    residual = jnp.abs(theta_C - potential_temperature(S, final, p_dbar))
+    tolerance = 1e-12 if final.dtype == jnp.float64 else 1e-5
+    checkify.debug_check(jnp.all(jnp.isfinite(residual) & (residual <= tolerance)),
+                         "EOS: in-situ temperature inverse residual exceeds tolerance")
+    return final
 
 
 # ==============================================================================
@@ -2220,7 +2450,7 @@ def veros_gsw_int_drhodTS_dynamic_enthalpy(
 # by both make_eos_fn (unknown-scheme ValueError) and config validators
 # (fail-fast at construction) so the valid set is never duplicated.
 VALID_EOS_SCHEMES = frozenset(
-    {"wright", "linear", "nemo_seos", "nemo_eos80", "unesco80",
+    {"wright", "linear", "nemo_seos", "nemo_eos80", "nemo_teos10", "unesco80",
      "veros_nonlin2", "veros_nonlin3", "veros_gsw"}
 )
 
@@ -2257,7 +2487,8 @@ def make_eos_fn(eos="wright", eos_linear=None,
         ``"wright"`` (default, Wright 1997), ``"linear"``,
         ``"nemo_seos"`` (NEMO simplified EOS, Roquet et al. 2015 —
         the DINO oracle EOS, defaults to the Kamm et al. 2025
-        coefficients), or
+        coefficients), ``"nemo_eos80"`` or ``"nemo_teos10"`` (NEMO's full
+        Roquet polynomial with the corresponding source coefficient set), or
         ``"unesco80"`` (UNESCO 1980 polynomial — close approximation
         to Veros's ``eq_of_state_type=3`` JM95 form, within ~0.001 kg/m³
         at typical ocean T/S; bit-exact Veros parity requires reading
@@ -2273,7 +2504,8 @@ def make_eos_fn(eos="wright", eos_linear=None,
         is ``"nemo_seos"``.  If ``None``, the DINO defaults are used.
     rho0 : float
         Boussinesq reference density [kg/m^3] for the depth reconstruction
-        ``zh = (p/(rho0*g))*r1_Z0`` in the ``"nemo_eos80"`` polynomial.
+        ``zh = (p/(rho0*g))*r1_Z0`` in the ``"nemo_eos80"`` and
+        ``"nemo_teos10"`` polynomials.
         Defaults to the module ``rho_0`` (1025) so the default call is
         BYTE-IDENTICAL; pass the config ``rho_0`` (e.g. NEMO's 1026) so it
         stays consistent with the pressure fed to the EOS — required for the
@@ -2316,6 +2548,12 @@ def make_eos_fn(eos="wright", eos_linear=None,
         def _nemo_eos80(T, S, p):
             return nemo_roquet_eos(T, S, p, coeffs=_ROQUET_EOS80, rho0=rho0)
         return _eos_compute_dtype_adapter(_nemo_eos80)
+    elif eos == "nemo_teos10":
+        # NEMO 5.0.2 eosbn2.F90:1920-2108 coefficient selection and :260-288
+        # Horner association. Fixed source coefficients; no bespoke config.
+        def _nemo_teos10(T, S, p):
+            return nemo_roquet_eos(T, S, p, coeffs=_ROQUET_TEOS10, rho0=rho0)
+        return _eos_compute_dtype_adapter(_nemo_teos10)
     elif eos == "unesco80":
         return _eos_compute_dtype_adapter(unesco80_eos)
     elif eos == "veros_nonlin2":
@@ -2754,7 +2992,13 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     ``T_f(S, z) = S · P(√(S/S0)) − 7.53e-4 · z`` with the eosbn2.F90
     polynomial ``P``; ``depth_m`` positive down (``None`` = surface).
     """
-    zs = jnp.sqrt(jnp.abs(jnp.asarray(S_psu)) / _NEMO_FZP_S0)
+    # At S=0 the full S*P(sqrt(abs(S)/S0)) has derivative P(0), but
+    # differentiating the unguarded square root produces 0*inf -> NaN.
+    # Guard inside sqrt as well as outside; retain the exact forward value.
+    sal_abs = jnp.abs(jnp.asarray(S_psu))
+    nonzero = sal_abs > 0.0
+    zs = jnp.where(nonzero, jnp.sqrt(jnp.where(
+        nonzero, sal_abs / _NEMO_FZP_S0, 1.0)), 0.0)
     poly = ((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs + _NEMO_FZP_C3) * zs
              + _NEMO_FZP_C2) * zs + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0
     tf = poly * jnp.asarray(S_psu)

@@ -1,0 +1,25 @@
+diff --git c/cfgs/DINO/MY_SRC/zdftke.F90 d/cfgs/DINO/MY_SRC/zdftke.F90
+index 1f45db5..84eb310 100644
+--- c/cfgs/DINO/MY_SRC/zdftke.F90
++++ d/cfgs/DINO/MY_SRC/zdftke.F90
+@@ -111 +111 @@ MODULE zdftke
+-   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zmxlm_dump, zmxld_dump, zmxlm_raw_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zmxlm_dump, zmxld_dump
+@@ -760 +760 @@ CONTAINS
+-            ALLOCATE( zmxlm_dump(jpi,jpj,jpk), zmxld_dump(jpi,jpj,jpk), zmxlm_raw_dump(jpi,jpj,jpk) )
++            ALLOCATE( zmxlm_dump(jpi,jpj,jpk), zmxld_dump(jpi,jpj,jpk) )
+@@ -764 +763,0 @@ CONTAINS
+-         zmxlm_raw_dump(:,:,:) = 0._wp
+@@ -843,5 +841,0 @@ CONTAINS
+-         IF( .NOT. l_1226_tke_mxl_dump_done ) THEN
+-            DO_2Dik( 0, 0, 1, jpkm1, 1 )
+-               zmxlm_raw_dump(ji,jj,jk) = zmxlm(ji,jk)
+-            END_2D
+-         ENDIF
+@@ -943 +936,0 @@ CONTAINS
+-         OPEN( UNIT=8892, FILE='tke_dump_zmxlm_raw.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+@@ -947 +939,0 @@ CONTAINS
+-            WRITE(8892) ( ( zmxlm_raw_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
+@@ -949 +941 @@ CONTAINS
+-         CLOSE(8890) ; CLOSE(8891) ; CLOSE(8892)
++         CLOSE(8890) ; CLOSE(8891)

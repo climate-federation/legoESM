@@ -54,7 +54,7 @@ def extract_atm_to_surface(
     p_s = state.p_s.data
 
     # Lowest-level pressure from sigma coordinate
-    p_lowest = sigma_coord.sigma_full[-1] * p_s
+    p_lowest = sigma_coord.pressure_at_full(p_s)[..., -1]
 
     # Lowest-level fields
     T_lowest = state.T.data[..., -1]

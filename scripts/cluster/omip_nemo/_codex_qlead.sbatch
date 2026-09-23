@@ -1,0 +1,18 @@
+#!/bin/bash
+#SBATCH --job-name=cdx_qlead
+#SBATCH --account=glab
+#SBATCH --partition=short
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
+#SBATCH --time=0:50:00
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/cdx_qlead_%j.out
+# Dual review (codex; GLM in parallel) of the NEMO lead-heat-budget change.
+set -u
+WT=/burg-archive/glab/users/pg2328/legoESM
+unset CODEX_HOME
+LOG=$WT/omip_nemo/cdx_qlead_${SLURM_JOB_ID}.log
+codex exec --sandbox read-only -C $WT "Adversarial review of the UNCOMMITTED working-tree diff (git diff) in packages/ice/legoesm/ice/sea_ice.py, packages/ice/legoesm/ice/config.py, scripts/run/run_omip_core2.py and the new tests/ice/unit/test_lead_freeze_nemo_qlead.py. MEASURED context: a 5-day MPAS run printed the heat the ocean receives under Arctic ice: at A>=0.99 q_net=-38 W/m2 = -ice_extract (basal flux 70 W/m2/K x 0.5 K above freezing); in leads (0.5<=A<0.99) q_net=-85..-92 W/m2 with ice_extract only 18-40, i.e. the coupler's (1-A)*q_open cooling is uncapped; by day 105 the polar top cell is -3 C (min -8 C) on both grids while NEMO never goes below freezing. Change: SeaIceConfig.lead_freeze_source ('ice_skin' legacy default | 'nemo_qlead'); in _thermo_v2 the lead block under nemo_qlead implements NEMO SI3 icesbc.F90:357-405: zqld=(1-A)*q_open_nonsolar*dt, zqfr=rho0*cp*dz_top*(Tf-SST), qlead=min(0,zqld-zqfr), delta_V_lead_freeze=-qlead/(rho_i L_f) (enable_lead_freeze gated), dh_dt_open=dV/(dt*max(lead_area,1e-6)) for the area update; the ocean_heat_extraction lead term flips sign (-L_f rho_i dV/dt, i.e. qlead/dt) so the ocean nets to at most the freezing deficit and a supercooled A=1 cell refreezes to Tf. step_sea_ice/_step_dynamic_v2/_thermo_v2 gain kwargs q_open_nonsolar, ocean_dz_top_m; legacy (non-v2) path raises for nemo_qlead; unknown literal raises. Driver: --ice-lead-freeze-source (default nemo_qlead) -> ice_config._replace at both build sites; both step_sea_ice call sites (host ~8750, fesom ~2527) pass q_open_nonsolar=sf.q_net - sf.sw_down (sf = unmasked raw_core2 bulk, q_net = q_non_sw + sw_down) and ocean_dz_top_m=z_coord.dz_ref[0]. Attack: (1) sign/units of each term vs NEMO (t_bo - sst_m vs our Tf - SST in K; e3t_m top-cell thickness; per open-area vs per cell); (2) energy closure across coupler+ice: ocean gets (1-A)*q_non_sw (blend) + q_ice=-extraction where extraction lead term = qlead/dt <= 0 -> net = zqld/dt - qlead/dt = max(zqld,zqfr)/dt: does anything ELSE in the blend or in _thermo_v2 also touch this energy (V_after_lead, brine salt/fw for the new volume, refreeze term, ice_concentration_thermo partition)? (3) the dh_dt_open/lead_area division at A=1 (frazil volume with no area growth) — any downstream consumer of dh_dt_open that now sees a huge value (1e-6 floor) e.g. dconc_growth capping, diag vlead_freeze; (4) enable_lead_freeze=(k==0) in multicat: qlead applies once (cat 0) — correct? and is zqfr double counted across categories?; (5) the SW share of zqld NEMO includes ((1-A)*qsr*frq_m) and we omit — sign of the error; (6) q_open_nonsolar = sf.q_net - sf.sw_down: is sf at the ice call the UNMASKED raw_core2 bulk in BOTH loops (check fesom loop builds sf with ice_albedo=None), and is sf.sw_down the raw downwelling (not net)?; (7) the driver default flip to nemo_qlead: which cards/tests assumed ice_skin behaviour; (8) tests: do the three analytic cases actually fail if the sign or zqfr were wrong? Rank CRITICAL/MAJOR/MINOR, file:line, CONFIRMED vs PLAUSIBLE, under 600 words." > $LOG 2>&1
+echo "codex rc=$?"
+grep -q "Failed to refresh token\|refresh token was already used" $LOG && echo "CODEX AUTH FAILURE"
+grep -vE "^\s*$" $LOG | tail -60
+echo DONE

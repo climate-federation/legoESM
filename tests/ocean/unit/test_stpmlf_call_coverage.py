@@ -48,7 +48,7 @@ def test_every_call_has_a_disposition():
     """Direct check on the data, independent of the CLI: _validate must
     return no errors for the shipped CALLS list."""
     mod = _load_module()
-    errors = mod._validate(mod.CALLS)
+    errors = mod._validate(mod.resolved_calls())
     assert errors == []
 
 
@@ -84,3 +84,24 @@ def test_zdf_mxl_turb_is_enumerated_and_covered():
     hits = [c for c in mod.CALLS if "zdf_mxl_turb" in c.routine]
     assert hits, "zdf_mxl_turb must be enumerated in the call list"
     assert all(c.disposition == mod.COVERED for c in hits)
+    assert all("row 28 VERIFIED 0/9920" in c.note for c in hits)
+
+
+def test_zdf_tail_import_notes_preserve_ordered_stop():
+    mod = _load_module()
+    by_name = {c.routine: c for c in mod.resolved_calls()}
+    assert by_name["dyn_zdf (dyn_zdf_imp, implicit)"].disposition == mod.COVERED
+    assert by_name["tra_zdf"].disposition == mod.COVERED
+    assert "LANE IMPORT" in by_name["tra_zdf"].note
+
+
+def test_lane_receipts_and_final_fraction():
+    mod = _load_module()
+    assert mod._validate_lane_receipts() == []
+    summary = mod.coverage_summary(mod.resolved_calls())
+    assert summary["lane_result_receipt_count"] == 34
+    assert summary["measured_active_calls"] == 34
+    assert summary["active_nonwaived_calls"] == 37
+    assert summary["measured_active_fraction"] == 34 / 37
+    assert [row["routine"] for row in summary["unmeasured"]] == [
+        "ldf_dyn", "tra_sbc", "tra_qsr"]

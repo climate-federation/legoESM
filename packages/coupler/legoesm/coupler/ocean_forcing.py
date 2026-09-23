@@ -55,6 +55,30 @@ from legoesm.ocean.state import OceanSurfaceForcing
 _SW_TRANSMITTANCE_ICE = 0.03    # [-] fraction of SW penetrating ice+snow to ocean
 
 
+def add_frazil_ice(ice_state, ice_config, ice_mass_kg_m2):
+    """Deposit frazil ice exported by the ocean column into the slab ice tile.
+
+    ``ice_mass_kg_m2`` is :func:`legoesm.ocean.physics.frazil.apply_frazil`'s
+    surface export (kg of ice per unit cell area, >= 0).  The ocean side has
+    already removed the liquid mass, rejected the salt at
+    ``ice_config.S_ice_new`` and kept the latent heat, so the tile only gains
+    volume, with the CICE ``add_new_ice`` convention the lead-freeze path in
+    :mod:`legoesm.ice.sea_ice` uses: new ice fills lead area at the nominal
+    thickness ``h_new_ice`` (capped at the open-water fraction) and the mean
+    thickness follows from volume conservation.  Single-category slab only.
+    """
+    h, A = ice_state.h_ice.data, ice_state.concentration.data
+    V_new = jnp.maximum(ice_mass_kg_m2, 0.0) / ice_config.rho_ice
+    dA = jnp.minimum(V_new / ice_config.h_new_ice, jnp.maximum(1.0 - A, 0.0))
+    A_new = jnp.clip(A + dA, 0.0, 1.0)
+    V_new_total = h * A + V_new
+    h_new = jnp.where(A_new > 0.0, V_new_total / jnp.maximum(A_new, 1e-12), 0.0)
+    return ice_state._replace(
+        h_ice=ice_state.h_ice.replace(data=h_new),
+        concentration=ice_state.concentration.replace(data=A_new),
+    )
+
+
 def ice_ocean_forcing_from_ice_response(
     ice_resp: TileResponse,
     fracs: TileFractions,

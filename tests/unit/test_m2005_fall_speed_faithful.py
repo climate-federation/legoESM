@@ -224,12 +224,11 @@ def _captured_speeds(hm, T, q_v, flavor):
     orig = _m.sedimentation_tendency
     caught: dict[str, float] = {}
 
-    def spy(q, rho, V_t, dz, dt=None, return_surface_flux=False, extra_sink=None):
+    def spy(q, rho, V_t, dz, *args, **kwargs):
         mq = float(jnp.max(jnp.abs(q)))
         if mq > 0.0:
             caught["mass" if mq < 1.0 else "number"] = float(V_t[0, -1])
-        return orig(q, rho, V_t, dz, dt=dt,
-                    return_surface_flux=return_surface_flux, extra_sink=extra_sink)
+        return orig(q, rho, V_t, dz, *args, **kwargs)
 
     _m.sedimentation_tendency = spy
     try:

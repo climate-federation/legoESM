@@ -56,15 +56,43 @@ def _write_synthetic_mesh_mask(path, ny=4, nx=5, nz=3):
     # H_bathy[j,i] = 100 * kbot[j,i].
     e3t0 = np.full((nz, ny, nx), 100.0, dtype=np.float64)
 
+    # T-point coordinates: rows 40.0..41.5N, columns 26.0..30.0E, so that
+    # exactly the cells (j=1..2, i=2..4) fall inside CLOSED_SEAS["marmara"].
+    gphit = np.repeat(np.array([[40.0], [40.5], [41.0], [41.5]]), nx, axis=1)
+    glamt = np.repeat(np.array([[26.0, 26.5, 27.0, 28.0, 30.0]]), ny, axis=0)
     ds = xr.Dataset(
         {
             "tmaskutil": (("y", "x"), tmaskutil),
             "tmask": (("z", "y", "x"), tmask),
             "e3t_0": (("z", "y", "x"), e3t0),
+            "gphit": (("y", "x"), gphit),
+            "glamt": (("y", "x"), glamt),
         }
     )
     ds.to_netcdf(path, engine="scipy")  # NETCDF3 via scipy (no netcdf4 dep)
     return tmaskutil, kbot
+
+
+def test_read_mesh_mask_bathy_closed_seas_become_land(tmp_path):
+    import pytest
+    from legoesm.ocean.init_tripole import CLOSED_SEAS, read_mesh_mask_bathy
+
+    mesh = tmp_path / "synthetic_mesh_mask.nc"
+    tmaskutil, kbot = _write_synthetic_mesh_mask(mesh)
+    lm0, hb0 = read_mesh_mask_bathy(str(mesh))
+    lm, hb = read_mesh_mask_bathy(str(mesh), closed_seas=("marmara",))
+    inside = np.zeros_like(tmaskutil, dtype=bool)
+    inside[1:3, 2:5] = True                       # 40.5-41.0N x 27-30E
+    assert CLOSED_SEAS["marmara"] == (40.3, 41.1, 26.9, 30.0)
+    assert np.all(lm[inside] == 0.0) and np.all(hb[inside] == 0.0)
+    np.testing.assert_array_equal(lm[~inside], lm0[~inside])
+    np.testing.assert_array_equal(hb[~inside], hb0[~inside])
+    # the wet count drops by exactly the wet cells inside the box (one of the
+    # six is already land: (2,3)); with the knob off nothing changes
+    assert int((lm0 > 0.5).sum()) - int((lm > 0.5).sum()) == 5
+    np.testing.assert_array_equal(read_mesh_mask_bathy(str(mesh), closed_seas=())[0], lm0)
+    with pytest.raises(ValueError, match="unknown closed_seas"):
+        read_mesh_mask_bathy(str(mesh), closed_seas=("caspian",))
 
 
 def test_read_mesh_mask_bathy(tmp_path):
@@ -127,3 +155,106 @@ def test_compute_woa_3d_analytic_profiles_masking_and_deepfill():
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# mask_to_nemo_domain: the wet domain follows the oracle's domain_cfg
+# ---------------------------------------------------------------------------
+
+def _write_mesh_with_halo(path, ny=6, nx=8, nz=2):
+    """Mesh frame = inner domain plus one cyclic halo column each side and a
+    north-fold row on top (eORCA1's (332, 362) around NEMO's (331, 360)).
+    Coordinates are a plain lat/lon ladder so the inner frame is identifiable
+    by coordinates alone. One inner cell (a 'lake') is wet here."""
+    import xarray as xr
+
+    lat = np.repeat(np.arange(ny, dtype=np.float64)[:, None] * 10.0 - 30.0, nx, 1)
+    lon = np.repeat(np.arange(nx, dtype=np.float64)[None, :] * 40.0 - 40.0, ny, 0)
+    lon = lon % 360.0
+    tmaskutil = np.ones((ny, nx), dtype=np.float64)
+    tmaskutil[:, 0] = 0.0
+    tmaskutil[:, -1] = 0.0          # raw halo columns are land (the seam wall)
+    tmaskutil[-1, :] = 0.0          # dead north-fold row
+    tmaskutil[2, 2] = 0.0           # an ordinary land cell
+    tmask = np.repeat(tmaskutil[None], nz, 0)
+    e3t0 = np.full((nz, ny, nx), 100.0)
+    xr.Dataset({
+        "tmaskutil": (("y", "x"), tmaskutil),
+        "tmask": (("z", "y", "x"), tmask),
+        "e3t_0": (("z", "y", "x"), e3t0),
+        "gphit": (("y", "x"), lat),
+        "glamt": (("y", "x"), lon),
+    }).to_netcdf(path, engine="scipy")
+    return tmaskutil, lat, lon
+
+
+def _write_domain_cfg(path, lat, lon, top_level):
+    import xarray as xr
+
+    xr.Dataset({
+        "top_level": (("y", "x"), top_level.astype(np.int32)),
+        "gphit": (("y", "x"), lat),
+        "glamt": (("y", "x"), lon),
+    }).to_netcdf(path, engine="scipy")
+
+
+def test_mask_to_nemo_domain_lands_the_lake_and_only_the_lake(tmp_path):
+    from legoesm.ocean.init_tripole import mask_to_nemo_domain, read_mesh_mask_bathy
+
+    mesh = tmp_path / "mesh_mask.nc"
+    tmaskutil, lat, lon = _write_mesh_with_halo(mesh)
+    ny, nx = tmaskutil.shape
+    inner = (slice(0, ny - 1), slice(1, nx - 1))   # drop fold row + halo cols
+    top = tmaskutil[inner].copy()
+    top[3, 4] = 0.0                                # NEMO runs this wet cell DRY
+    top[2, 1] = 1.0                                # NEMO wet where the mesh is dry
+    dc = tmp_path / "domain_cfg.nc"
+    _write_domain_cfg(dc, lat[inner], lon[inner], top)
+
+    out = mask_to_nemo_domain(tmaskutil, lat, lon, str(dc))
+    diff = np.argwhere(out != tmaskutil)
+    assert diff.tolist() == [[3, 5]]               # inner (3,4) -> mesh (3,5)
+    assert out[3, 5] == 0.0
+    assert out[2, 2] == 0.0                        # never wetted: no bathymetry
+    assert out.shape == tmaskutil.shape
+
+    # Through the loader: the lake column is land AND has zero depth; without
+    # the keyword it is wet with the analytic 200 m depth (non-vacuity).
+    m0, h0 = read_mesh_mask_bathy(str(mesh))
+    assert m0[3, 5] == 1.0 and h0[3, 5] == 200.0
+    m1, h1 = read_mesh_mask_bathy(str(mesh), nemo_domain_cfg=str(dc))
+    assert m1[3, 5] == 0.0 and h1[3, 5] == 0.0
+    assert np.array_equal(np.argwhere(m1 != m0), [[3, 5]])
+
+
+def test_mask_to_nemo_domain_refuses_a_foreign_domain_cfg(tmp_path):
+    from legoesm.ocean.init_tripole import mask_to_nemo_domain
+
+    mesh = tmp_path / "mesh_mask.nc"
+    tmaskutil, lat, lon = _write_mesh_with_halo(mesh)
+    ny, nx = tmaskutil.shape
+    inner = (slice(0, ny - 1), slice(1, nx - 1))
+    dc = tmp_path / "domain_cfg.nc"
+    # Same shape, coordinates shifted by half a cell: no offset can match.
+    _write_domain_cfg(dc, lat[inner] + 5.0, lon[inner], tmaskutil[inner])
+    with pytest.raises(ValueError, match="not the domain_cfg of this mesh"):
+        mask_to_nemo_domain(tmaskutil, lat, lon, str(dc))
+
+
+def test_mask_to_nemo_domain_finds_another_offset_across_a_360_wrap(tmp_path):
+    """Codex: one tested offset with copied coordinates would pass a hardcoded
+    (0, 1) or a plain (unwrapped) longitude difference. Here the domain frame
+    sits at offset (1, 2), its longitudes are written 360 deg lower, and the
+    lake maps through that offset."""
+    from legoesm.ocean.init_tripole import mask_to_nemo_domain
+
+    mesh = tmp_path / "mesh_mask.nc"
+    tmaskutil, lat, lon = _write_mesh_with_halo(mesh, ny=7, nx=9)
+    ny, nx = tmaskutil.shape
+    inner = (slice(1, ny - 1), slice(2, nx - 1))
+    top = tmaskutil[inner].copy()
+    top[2, 3] = 0.0                                # -> mesh (3, 5)
+    dc = tmp_path / "domain_cfg.nc"
+    _write_domain_cfg(dc, lat[inner], lon[inner] - 360.0, top)
+    out = mask_to_nemo_domain(tmaskutil, lat, lon, str(dc))
+    assert np.argwhere(out != tmaskutil).tolist() == [[3, 5]]

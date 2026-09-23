@@ -324,10 +324,10 @@ def _mpas_cfg(**kw):
     from legoesm.driver.config import (
         DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
     )
-    # turbulence + non-flat topography on by default so the land-boundary
+    # Turbulence + an elevation-file source by default so the land-boundary
     # knobs are non-inert (the inert corners are tested explicitly below).
     kw.setdefault("turbulence", "louis")
-    kw.setdefault("topography", "gaussian")
+    kw.setdefault("topography", "elevation.nc")
     kw.setdefault("radiation", "gray")
     return ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=1, nlev=8,
@@ -352,8 +352,15 @@ def _cdgrid_cfg(**kw):
     )
 
 
-def test_validate_mpas_accepts_land_boundary_knobs():
-    _mpas_cfg(mpas_land_lapse_K_per_km=6.5, mpas_land_beta=0.6).validate_strict()
+@pytest.mark.parametrize("knob", ["mpas_land_lapse_K_per_km", "mpas_land_beta"])
+def test_validate_mpas_accepts_land_boundary_knobs(knob):
+    cfg = _mpas_cfg(**{knob: 6.5 if knob == "mpas_land_lapse_K_per_km" else 0.6})
+    cfg.validate_strict()
+    for topography in ("flat", "gaussian"):
+        idealized = cfg._replace(topography=topography)
+        with pytest.raises(ValueError, match=f"topography={topography!r}.*all-zero"):
+            idealized.validate_strict()
+        idealized._replace(land_mask_path="land_mask.nc").validate_strict()
 
 
 @pytest.mark.parametrize("flag", ["slab_land_active", "land_soil_bucket",
@@ -384,8 +391,9 @@ def test_validate_refuses_inert_corners():
                   radiation="none").validate_strict()
     with pytest.raises(ValueError, match="silently inert"):
         _mpas_cfg(mpas_land_beta=0.6, turbulence="none").validate_strict()
-    with pytest.raises(ValueError, match="all-zero"):
-        _mpas_cfg(mpas_land_beta=0.6, topography="flat").validate_strict()
+    for topography in ("flat", "gaussian"):
+        with pytest.raises(ValueError, match=f"topography={topography!r}.*all-zero"):
+            _mpas_cfg(mpas_land_beta=0.6, topography=topography).validate_strict()
     # beta without radiation is fine (the turbulence anchor falls back but
     # the humidity throttle still applies).
     _mpas_cfg(mpas_land_beta=0.6, radiation="none").validate_strict()

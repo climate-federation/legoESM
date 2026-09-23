@@ -1060,14 +1060,25 @@ def test_prognostic_clubb_subcycling_raw_moisture_contract():
 
 
 def test_prognostic_clubb_blocked_on_non_persisting_drivers():
-    """Prognostic CLUBB needs a driver that persists PhysicsState; the
-    nonhydrostatic CD-grid + spectral PE factories drop it, so they fail fast
-    (like MYNN-2.5). Hydrostatic + mpas persist → allowed."""
+    """Prognostic CLUBB needs a driver that persists PhysicsState.
+
+    The NONHYDROSTATIC CD-grid driver still drops it, so that factory fails
+    fast. The SPECTRAL PE lane no longer does: its training rollout threads
+    (state, rad_cache, phys_state) and the model's leapfrog path feeds the
+    returned state back, so the factory builds and a caller that threads
+    nothing is refused per step instead (see
+    tests/unit/test_spectral_prognostic_clubb_carry.py). Hydrostatic and mpas
+    persist -> allowed.
+    """
     from legoesm.atmosphere.physics.turbulence.integration import make_turbulence_physics
     tc = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True))
-    for mt in ("nonhydrostatic", "spectral_pe"):
-        with pytest.raises(NotImplementedError, match="prognostic CLUBB"):
-            make_turbulence_physics(tc, mt, 300.0)
+    with pytest.raises(NotImplementedError, match="prognostic CLUBB"):
+        make_turbulence_physics(tc, "nonhydrostatic", 300.0)
+    assert make_turbulence_physics(tc, "spectral_pe", 300.0) is not None
+    # MYNN-2.5 keeps ITS spectral refusal: same mechanism, no continuity test.
+    tc_mynn = TurbulenceConfig(scheme="mynn25")
+    with pytest.raises(NotImplementedError, match="MYNN-2.5"):
+        make_turbulence_physics(tc_mynn, "spectral_pe", 300.0)
     # hydrostatic builds fine.
     assert make_turbulence_physics(tc, "hydrostatic", 300.0) is not None
     # diagnostic clubb is allowed on all (stateless wp2 in tke).
@@ -1959,24 +1970,22 @@ def test_prognostic_clubb_prescribed_heat_flux_applied_through_subcycling():
     assert np.all(rel < 5e-3), f"sub-cycled prescribed-flux budget off: rel={rel}"
 
 
-def test_prognostic_clubb_prescribed_momentum_flux_is_magnitude_only_drag():
-    """Pin the (CAM-faithful) momentum semantics of the prescribed-flux interface:
-    ``sfc_upwp``/``sfc_vpwp`` set only the surface-stress MAGNITUDE, not a vector.
+def test_prognostic_clubb_prescribed_momentum_flux_is_applied_as_a_vector():
+    """The prescribed-flux momentum semantics, AFTER the vector fix.
 
-    Unlike the scalar heat/moisture BCs (applied directionally + exactly via
-    ``advance_xm_wpxp``; see ``..._closes_column_budget``), CAM's
-    ``l_imp_sfc_momentum_flux=.true.`` wind advance (``advance_windm_edsclrm``)
-    consumes only the stress-vector magnitude ``u_*^2 = sqrt(u'w'_sfc^2 +
-    v'w'_sfc^2)`` (so ``u_* = (u'w'_sfc^2 + v'w'_sfc^2)^(1/4)``) and re-applies it
-    as a drag ANTIPARALLEL to the near-surface wind. The prescribed azimuth is
-    discarded.
-    Three discriminating checks:
-      (1) **Direction-independence:** prescribing ``(W, 0)`` and ``(0, W)`` (equal
-          magnitude, orthogonal direction) give BIT-IDENTICAL ``du_dt``/``dv_dt``
-          and identical ``ustar`` — proof that only the magnitude is used.
-      (2) **ustar round-trip:** ``ustar == (u'w'^2 + v'w'^2)^(1/4)``.
-      (3) **Magnitude scaling + drag sign:** a larger ``|tau|`` gives a larger
-          near-surface wind tendency, and the drag opposes the mean wind.
+    CAM's ``l_imp_sfc_momentum_flux=.true.`` wind advance consumes only the
+    stress MAGNITUDE and re-applies it antiparallel to the near-surface wind,
+    discarding the prescribed azimuth. That is exact for a bulk stress (which
+    is antiparallel by construction) and wrong for a PRESCRIBED one, which is
+    how this lane feeds ERA5's surface exchange to the model. A prescribed
+    stress is now applied as the vector it is, so:
+      (1) **direction matters**: prescribing ``(W, 0)`` and ``(0, W)`` — equal
+          magnitude, orthogonal direction — now give DIFFERENT tendencies, each
+          along its own axis. This is the assertion that inverts the old pin.
+      (2) ``ustar`` still round-trips as the fourth root of the stress-squared
+          magnitude (that diagnostic is unchanged).
+      (3) a larger prescribed magnitude still drags harder, and a stress
+          opposing the mean wind still decelerates it.
     """
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
@@ -2004,18 +2013,34 @@ def test_prognostic_clubb_prescribed_momentum_flux_is_magnitude_only_drag():
     out_y = run(0.0, -W)        # stress along -v (same magnitude)
     out_xy = run(-W, -W)        # larger magnitude (|tau| = sqrt(2)*W)
 
-    # (1) Orthogonal prescribed directions, equal magnitude → identical tendencies.
-    assert np.array_equal(np.asarray(out_x.du_dt), np.asarray(out_y.du_dt))
-    assert np.array_equal(np.asarray(out_x.dv_dt), np.asarray(out_y.dv_dt))
-    assert np.allclose(np.asarray(out_x.ustar), np.asarray(out_y.ustar), rtol=1e-12)
-    # (2) ustar is the fourth root of the prescribed stress-squared magnitude.
-    assert np.allclose(np.asarray(out_x.ustar), W ** 0.5, rtol=1e-6)   # (W^2)^(1/4)
-    # (3) A larger |tau| drags harder, and the drag opposes the (positive-mean) u.
+    # (1) The prescribed DIRECTION now reaches the column: an along-u stress
+    # decelerates u and leaves v alone, and vice versa.
+    assert np.all(np.asarray(out_x.du_dt)[:, -1] < 0.0)
+    assert np.all(np.asarray(out_y.dv_dt)[:, -1] < 0.0)
+    assert np.all(np.abs(np.asarray(out_x.du_dt)[:, -1])
+                  > np.abs(np.asarray(out_x.dv_dt)[:, -1]))
+    assert np.all(np.abs(np.asarray(out_y.dv_dt)[:, -1])
+                  > np.abs(np.asarray(out_y.du_dt)[:, -1]))
+    assert not np.array_equal(np.asarray(out_x.du_dt), np.asarray(out_y.du_dt))
+    # (2) ustar is still the fourth root of the prescribed stress-squared
+    # magnitude, and is direction-independent as a magnitude should be.
+    assert np.allclose(np.asarray(out_x.ustar), W ** 0.5, rtol=1e-6)
+    assert np.allclose(np.asarray(out_x.ustar), np.asarray(out_y.ustar),
+                       rtol=1e-12)
+    # (3) A larger prescribed |tau| moves the wind more -- in VECTOR magnitude.
+    # The u-component alone must NOT grow between (-W, 0) and (-W, -W): with the
+    # vector applied, u feels tau_x only, which is the same in both. That
+    # component-wise decoupling is the fix working, and asserting on du_dt alone
+    # here is what the old magnitude-only pin did.
+    def _tend_mag(out):
+        return np.hypot(np.asarray(out.du_dt)[:, -1],
+                        np.asarray(out.dv_dt)[:, -1])
+
     assert np.all(np.asarray(out_xy.ustar) > np.asarray(out_x.ustar))
-    assert np.all(np.asarray(u_f)[:, -1] > 0.0)                        # mean u > 0
-    assert np.all(np.asarray(out_x.du_dt)[:, -1] < 0.0)               # drag opposes u
-    assert np.all(np.abs(np.asarray(out_xy.du_dt)[:, -1])
-                  > np.abs(np.asarray(out_x.du_dt)[:, -1]))
+    assert np.all(np.asarray(u_f)[:, -1] > 0.0)
+    assert np.all(_tend_mag(out_xy) > _tend_mag(out_x))
+    np.testing.assert_allclose(np.asarray(out_xy.du_dt)[:, -1],
+                               np.asarray(out_x.du_dt)[:, -1], rtol=1e-10)
 
 
 # ===========================================================================
@@ -2298,3 +2323,254 @@ def test_prognostic_surface_theta_l_variance_is_physical():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_prognostic_clubb_publishes_its_pdf_cloud_fraction():
+    """The prognostic entry must hand out the cloud fraction it already computes.
+
+    It used to advance the moments -- carrying a real total-water variance --
+    and then drop the PDF cloud fraction on the floor, so the radiation route
+    refused prognostic CLUBB outright and the cloud scheme stayed on the
+    humidity diagnosis. Turning the closure on therefore changed the boundary
+    layer and nothing about clouds, which is the opposite of why one would
+    turn it on.
+
+    Asserted on a column whose lowest levels are saturated, so a published
+    all-zero array (indistinguishable from "wired but dead") cannot pass.
+    """
+    import numpy as np
+    from legoesm import constants
+    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        clubb_turbulence_prognostic, init_clubb_moments, pack_clubb_moments)
+
+    ncol, nlev = 2, 24
+    p_half = jnp.asarray(np.linspace(2.0e3, 1.0e5, nlev + 1)[None].repeat(ncol, 0))
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    z_half = jnp.asarray(np.linspace(16000.0, 0.0, nlev + 1)[None].repeat(ncol, 0))
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    T = jnp.asarray(220.0 + 85.0 * (p_full / 1.0e5))
+    rh = jnp.asarray(np.linspace(0.05, 1.05, nlev)[None].repeat(ncol, 0))
+    q_v = rh * saturation_mixing_ratio(T, p_full)
+    u = jnp.full((ncol, nlev), 4.0)
+    v = jnp.zeros((ncol, nlev))
+    rho = p_full / (constants.R_d * T)
+    cfg = CLUBBConfig(prognostic=True)
+    mom = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg, dtype=jnp.float64))
+    for _ in range(20):
+        out, mom = clubb_turbulence_prognostic(
+            u, v, T, q_v, mom, p_full, p_half, z_full, z_half,
+            jnp.full((ncol,), 302.0), jnp.full((ncol,), 0.024), rho, 112.5, cfg)
+
+    cf = out.cloud_fraction
+    assert cf is not None, "prognostic CLUBB published no cloud fraction"
+    assert cf.shape == (ncol, nlev)
+    a = np.asarray(cf)
+    assert np.all(np.isfinite(a)) and a.min() >= 0.0 and a.max() <= 1.0
+    # NON-VACUITY: a saturated boundary layer must produce real cloud.
+    assert a.max() > 0.1, f"published an all-but-zero field (max {a.max():.3g})"
+    # TOP-DOWN, like the diagnostic entry: index 0 is the model top, so the
+    # cloud belongs at the BOTTOM. Handing out the ascending array unflipped
+    # once put boundary-layer cloud at the model top.
+    assert a[0].argmax() >= nlev - 4, (
+        f"cloud peaks at level {a[0].argmax()} of {nlev}; orientation is flipped")
+    # The troposphere-top taper must be ported too, not just the formula: no
+    # stratospheric PDF cloud from a region the mixing no longer maintains.
+    assert float(a[:, :3].max()) == 0.0
+
+
+def test_pdf_variance_scale_is_live_and_monotonic():
+    """The variance multiplier must actually reach the PDF closure.
+
+    It exists to answer one question cheaply before a prognostic-closure
+    campaign is paid for: the diagnosed variance is a local-equilibrium
+    estimate (mixing length times local gradient) and is suspected of being far
+    too small in the tropical mid-troposphere. If scaling it moves nothing, a
+    prognostic variance will not move anything either.
+
+    A knob that silently does nothing would answer that question WRONG in the
+    most expensive direction -- it would read as "variance does not matter" --
+    so this asserts a strictly monotonic response, not merely a different one.
+    """
+    import numpy as np
+    from legoesm import constants
+    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.atmosphere.physics.turbulence.clubb import clubb_turbulence
+
+    ncol, nlev = 6, 30
+    p_half = jnp.asarray(np.linspace(2.0e3, 1.0e5, nlev + 1)[None].repeat(ncol, 0))
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    z_half = jnp.asarray(np.linspace(17000.0, 0.0, nlev + 1)[None].repeat(ncol, 0))
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    T = jnp.asarray(196.0 + 106.0 * (p_full / 1.0e5) ** 0.35)
+    rh = jnp.asarray(np.linspace(0.45, 0.95, ncol)[:, None] * np.ones((1, nlev)))
+    q_v = rh * saturation_mixing_ratio(T, p_full)
+    u = jnp.full((ncol, nlev), 6.0)
+    v = jnp.zeros((ncol, nlev))
+    rho = p_full / (constants.R_d * T)
+    band = np.asarray((p_full[0] >= 4.0e4) & (p_full[0] <= 7.0e4))
+
+    means = []
+    for scale in (1.0, 2.0, 4.0, 8.0):
+        out, _ = clubb_turbulence(
+            u, v, T, q_v, jnp.full((ncol, nlev), 0.1), p_full, p_half,
+            z_full, z_half, jnp.full((ncol,), 301.0), jnp.full((ncol,), 0.021),
+            rho, 112.5, CLUBBConfig(pdf_variance_scale=scale))
+        means.append(float(np.asarray(out.cloud_fraction)[:, band].mean()))
+
+    assert all(np.isfinite(means)), means
+    assert means == sorted(means), f"not monotonic in the variance: {means}"
+    assert means[-1] > means[0], f"8x the variance changed nothing: {means}"
+
+
+def test_the_config_route_reaches_the_vector_path_too():
+    """The route the TRAINING lane actually uses (codex P1).
+
+    The spectral turbulence bridge does not pass the kinematic arguments: it
+    folds the prescribed stress into ``SurfaceLayerConfig.prescribed_tau_*_pa``,
+    where the bulk formula returns it in place of its own. Keying the vector
+    path on the arguments alone left the ERA5 lane on the magnitude-only path,
+    with every test passing.
+    """
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        integrate_clubb_column,
+        pack_clubb_moments,
+    )
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    cfg_base = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg_base)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg_base.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    rho_s = rho[:, -1]
+
+    # Cross-wind stress, prescribed through the CONFIG, one scalar per axis as
+    # the fold writes it.
+    u_sfc, v_sfc = u_f[:, -1], v_f[:, -1]
+    vmag = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
+    tau_mag = float(np.asarray(rho_s * 1.5e-3 * vmag ** 2).mean())
+    tau_x = -tau_mag * float(np.asarray(-v_sfc / vmag).mean())
+    tau_y = -tau_mag * float(np.asarray(u_sfc / vmag).mean())
+    cfg = cfg_base._replace(surface=cfg_base.surface._replace(
+        prescribed_tau_x_pa=tau_x, prescribed_tau_y_pa=tau_y))
+
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, pack_clubb_moments(m_f), kw["p_full"], kw["p_half"],
+        kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 300.0, cfg)
+
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+    col_du = np.sum(mass * np.asarray(out.du_dt), axis=1)
+    col_dv = np.sum(mass * np.asarray(out.dv_dt), axis=1)
+    scale = abs(tau_x) + abs(tau_y)
+    assert np.all(np.abs(col_du - tau_x) / scale < 5e-2), (col_du, tau_x)
+    assert np.all(np.abs(col_dv - tau_y) / scale < 5e-2), (col_dv, tau_y)
+
+
+def test_a_mixed_stress_is_conserved_not_just_a_pure_cross_wind_one():
+    """A stress with BOTH an along-wind and a cross-wind part (codex P1).
+
+    The pure cross-wind case has zero along-wind projection, so it could not
+    see an error that scales with the drag. This one is rotated 45 degrees from
+    the wind: both parts are large, and the budget must still close on each
+    component.
+    """
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        integrate_clubb_column,
+        pack_clubb_moments,
+    )
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    rho_s = rho[:, -1]
+
+    u_sfc, v_sfc = u_f[:, -1], v_f[:, -1]
+    vmag = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
+    tau_mag = rho_s * 1.5e-3 * vmag ** 2
+    # 45 degrees from the wind: equal along- and cross-wind parts, the along
+    # part opposing the flow (a drag the implicit term WOULD have applied).
+    inv2 = 1.0 / jnp.sqrt(2.0)
+    e_along_u, e_along_v = u_sfc / vmag, v_sfc / vmag
+    e_cross_u, e_cross_v = -v_sfc / vmag, u_sfc / vmag
+    tau_x = tau_mag * (-inv2 * e_along_u + inv2 * e_cross_u)
+    tau_y = tau_mag * (-inv2 * e_along_v + inv2 * e_cross_v)
+    proj = np.asarray(tau_x * u_sfc + tau_y * v_sfc)
+    assert np.all(proj < 0.0), "the along-wind part must be a real drag"
+
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, pack_clubb_moments(m_f), kw["p_full"], kw["p_half"],
+        kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 300.0, cfg,
+        sfc_upwp=tau_x / rho_s, sfc_vpwp=tau_y / rho_s,
+        sfc_wpthlp=jnp.zeros_like(rho_s), sfc_wprtp=jnp.zeros_like(rho_s))
+
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+    col_du = np.sum(mass * np.asarray(out.du_dt), axis=1)
+    col_dv = np.sum(mass * np.asarray(out.dv_dt), axis=1)
+    want_x, want_y = np.asarray(tau_x), np.asarray(tau_y)
+    scale = np.abs(want_x) + np.abs(want_y)
+    assert np.all(np.abs(col_du - want_x) / scale < 5e-2), (col_du, want_x)
+    assert np.all(np.abs(col_dv - want_y) / scale < 5e-2), (col_dv, want_y)
+
+
+def test_prescribed_cross_wind_stress_is_applied_as_a_vector():
+    """A prescribed stress must set the DIRECTION of the surface drag too.
+
+    The reference scheme's implicit surface term can only pull antiparallel to
+    the model's own wind, so a reanalysis stress with a genuine cross-wind
+    component had its direction silently rotated onto the model wind (the
+    sibling test above certifies the magnitude-only form is exact for the tiled
+    BULK stress, which is antiparallel by construction — this one covers the
+    prescribed case it is NOT exact for). The column momentum budget must now
+    close against BOTH components of what was prescribed.
+    """
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        integrate_clubb_column,
+        pack_clubb_moments,
+    )
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    rho_s = rho[:, -1]
+
+    # Stress rotated 90 degrees from the wind: pure cross-wind, the case the
+    # magnitude-only form cannot represent at all.
+    u_sfc, v_sfc = u_f[:, -1], v_f[:, -1]
+    vmag = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
+    tau_mag = rho_s * 1.5e-3 * vmag ** 2
+    tau_x = -tau_mag * (-v_sfc / vmag)
+    tau_y = -tau_mag * (u_sfc / vmag)
+
+    # Purely cross-wind by construction: the projection on the wind is zero, so
+    # the magnitude-only form would apply the whole stress in the WRONG
+    # direction (along the wind) and none of it where it belongs.
+    assert np.allclose(np.asarray(tau_x * u_sfc + tau_y * v_sfc), 0.0, atol=1e-9)
+
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, pack_clubb_moments(m_f), kw["p_full"], kw["p_half"],
+        kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 300.0, cfg,
+        sfc_upwp=tau_x / rho_s, sfc_vpwp=tau_y / rho_s,
+        sfc_wpthlp=jnp.zeros_like(rho_s), sfc_wprtp=jnp.zeros_like(rho_s))
+
+    # Column momentum budget, as the sibling test forms it: the mass-weighted
+    # tendency equals the prescribed stress, component by component.
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+    col_du = np.sum(mass * np.asarray(out.du_dt), axis=1)
+    col_dv = np.sum(mass * np.asarray(out.dv_dt), axis=1)
+    want_x, want_y = np.asarray(tau_x), np.asarray(tau_y)
+    scale = np.abs(want_x) + np.abs(want_y)
+    assert np.all(np.abs(col_du - want_x) / scale < 5e-2), (col_du, want_x)
+    assert np.all(np.abs(col_dv - want_y) / scale < 5e-2), (col_dv, want_y)

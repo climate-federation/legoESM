@@ -51,7 +51,8 @@ class ForecastCase(NamedTuple):
 
 def run_wb_forecast_eval(physics_fn, grid, sigma_coord, pe_config, dt,
                          cases, leads_hours, clim_fields_wb2, *,
-                         resolution_deg=None, rollout_fn=None):
+                         resolution_deg=None, rollout_fn=None,
+                         field_sink=None):
     """Run the WB2 forecast protocol and return a lead-time scorecard.
 
     Parameters
@@ -69,6 +70,12 @@ def run_wb_forecast_eval(physics_fn, grid, sigma_coord, pe_config, dt,
     clim_fields_wb2 : dict[str, (n_lat,n_lon)]
         Climatology on the WB2 grid for ACC (same for all cases here; a
         valid-time climatology would be supplied per case by the caller).
+    field_sink : dict, optional
+        When given, the case-mean forecast and verification FIELDS are
+        accumulated into it as ``{(key, lead): {"pred", "verif", "valid"}}``,
+        on the WB2 grid. This is how a map of the forecast against ERA5 is
+        drawn from the SAME forecasts the scorecard scores, rather than from a
+        second rollout that could differ in protocol.
     rollout_fn : callable, optional
         Rollout with signature ``(state, physics_fn, grid, sigma_coord,
         pe_config, dt, n_steps) -> state``, plus an optional
@@ -152,6 +159,24 @@ def run_wb_forecast_eval(physics_fn, grid, sigma_coord, pe_config, dt,
                     case_scores[key].update(metrics)
             for key, metrics in case_scores.items():
                 accum.setdefault((key, int(lead)), []).append(metrics)
+            if field_sink is not None:
+                for key in pred_fields:
+                    # Sums + a count, averaged once at the end: keeping every
+                    # case's field would scale with n_inits for no gain.
+                    slot = field_sink.setdefault(
+                        (key, int(lead)),
+                        {"pred": np.zeros_like(np.asarray(pred_fields[key],
+                                                          dtype=float)),
+                         "verif": np.zeros_like(np.asarray(pred_fields[key],
+                                                           dtype=float)),
+                         "n": np.zeros_like(np.asarray(pred_fields[key],
+                                                       dtype=float))})
+                    v = np.asarray(verif["fields"][key], dtype=float)
+                    ok = np.asarray(combined_valid[key], dtype=bool)
+                    slot["pred"] += np.where(
+                        ok, np.asarray(pred_fields[key], dtype=float), 0.0)
+                    slot["verif"] += np.where(ok, v, 0.0)
+                    slot["n"] += ok.astype(float)
 
     scorecard: dict = {}
     for key_lead, per_case in accum.items():

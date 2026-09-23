@@ -82,6 +82,16 @@ class ConvectionOutput(NamedTuple):
     100% of convective condensate loads the grid-scale cloud and the
     radiation, which microphysics cannot drain fast enough
     (source-buffered)."""
+    # Appended LAST (positional constructors keep their field order).
+    mass_flux_up: jax.Array | None = None
+    """Optional deep-updraft mass flux on INTERFACES [kg/m^2/s], shape
+    (ncol, nlev+1), top->bottom (CAM ``cmfmc``).  Published into
+    ``PhysicsState.conv_mass_flux_up`` for the CAM6 ``cam6_clubb`` deep-
+    convective cloud fraction.  ``None`` (default) = the scheme does not
+    expose one; that cloud term is then exactly zero."""
+    icwmr: jax.Array | None = None
+    """Optional deep in-cloud condensate mixing ratio [kg/kg], shape
+    (ncol, nlev) (CAM ``dp_icwmr``); companion of ``mass_flux_up``."""
 
 
 def split_convective_rain(dq_c_conv_dt, precip_efficiency):
