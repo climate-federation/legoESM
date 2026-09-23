@@ -4245,13 +4245,31 @@ def main(argv=None) -> int:
                 "--developed-process-rank-split needs --expect-commit")
         require(args.daily_record_audit is not None,
                 "--developed-process-rank-split needs --daily-record-audit")
-        report = developed_process_rank_split(
-            args.developed_process_root, args.daily_record_root,
-            args.daily_record_audit, args.expect_commit, args.root)
+        try:
+            report = developed_process_rank_split(
+                args.developed_process_root, args.daily_record_root,
+                args.daily_record_audit, args.expect_commit, args.root,
+                plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            if str(error).startswith("PLANT-BLIND"):
+                # A control that did NOT catch its plant must never print the
+                # marker a caught one prints (round 103's defect).
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: {report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
         print(json.dumps(report["comparison"], indent=2))
+        print(json.dumps(report["cancellation"], indent=2))
         print("STATUS PASS")
         return 0
     if args.developed_stage2_wzv_split:
@@ -9186,9 +9204,16 @@ def developed_stage2_face_r3_walk(
     return report
 
 
+COMBINED_CANCELLATION_PAIR = ("advection", "vertical_diffusion")
+DEVELOPED_RANK_SPLIT_PLANTS = ("rank-combined-mispair",)
+# Round 129 measured the year harness's run-to-run temperature floor.
+RUN_TO_RUN_FLOOR_K = 2.0e-10
+
+
 def developed_process_rank_split(
         process_root: Path, daily_root: Path, daily_audit: Path,
-        expected_commit: str, evidence_root: Path) -> dict:
+        expected_commit: str, evidence_root: Path, *,
+        plant: str | None = None) -> dict:
     """Round 152's one-step magnitude ranking, in BOTH stage programs.
 
     Round 160's second continuity solve makes the developed stage-2 momentum
@@ -9198,7 +9223,20 @@ def developed_process_rank_split(
     gap, so the question "which day-240 owner does the corrected velocity
     feed" is answered by running the SAME ranking in both programs from the
     same developed entry and reading which row grew.
+
+    Round 162 adds the measurement that turns round 161's PLAUSIBLE
+    cancellation into a verdict.  Round 161 measured that the corrected
+    velocity collapses the tracer ADVECTION row by a factor of 1,776 and grows
+    the VERTICAL DIFFUSION row, i.e. the two move in opposite directions, and
+    named the discriminating measurement rather than running it: the COMBINED
+    one-step temperature increment of the two rows, scored against NEMO's
+    combined trend, in both arms, plus the cell-by-cell correlation of the two
+    error fields in production.  If the two errors cancel, the combined row is
+    below the vertical-diffusion row alone in production and GROWS in the
+    corrected arm even though the advection row alone collapses.
     """
+    require(plant in (None, "none") + DEVELOPED_RANK_SPLIT_PLANTS,
+            f"unknown developed rank-split plant {plant!r}")
     _policy()
     import jax
     import jax.numpy as jnp
@@ -9244,10 +9282,10 @@ def developed_process_rank_split(
             name: _score_developed_row(lego[name], nemo_increments[name], wet)
             for name in PROCESS_ROWS
         }
-        return increments, _rank_developed_process_rows(increments)
+        return increments, _rank_developed_process_rows(increments), lego
 
-    production_rows, production_rank = ranked()
-    corrected_rows, corrected_rank = ranked(
+    production_rows, production_rank, production_lego = ranked()
+    corrected_rows, corrected_rank, corrected_lego = ranked(
         nemo_stage_momentum_wzv_split=True)
 
     # AUTHORITY: the production arm must reproduce round 152's own table, or
@@ -9284,8 +9322,105 @@ def developed_process_rank_split(
         })
     grew = [row for row in comparison if row["grew"]]
     grew.sort(key=lambda row: row["change_K"], reverse=True)
+
+    # ---- ROUND 162: the discriminating measurement for the cancellation ---
+    first, second = COMBINED_CANCELLATION_PAIR
+    mask = np.asarray(wet, dtype=bool)
+    nemo_combined = nemo_increments[first] + nemo_increments[second]
+    if plant == "rank-combined-mispair":
+        # Wire the combined row to the WRONG NEMO trend while the two single
+        # rows keep the right one.  The decomposition control below must
+        # refuse it: a combined row that does not decompose into the two rows
+        # the ranking already scored is measuring a different pairing.
+        nemo_combined = (nemo_increments[first]
+                         + nemo_increments["lateral_diffusion"])
+
+    def combined_score(lego_rows):
+        return _score_developed_row(
+            lego_rows[first] + lego_rows[second], nemo_combined, mask)
+
+    combined = {"production": combined_score(production_lego),
+                "corrected": combined_score(corrected_lego)}
+
+    # The two error fields, on the production arm, over the wet cells.
+    e_first = (production_lego[first] - nemo_increments[first])[mask]
+    e_second = (production_lego[second] - nemo_increments[second])[mask]
+    combined_error = ((production_lego[first] + production_lego[second])
+                      - nemo_combined)[mask]
+    scale = float(np.max(np.abs(combined_error)))
+    residual = float(np.max(np.abs(combined_error - (e_first + e_second))))
+    decomposition = {
+        "max_abs_residual_K": residual,
+        "combined_error_max_abs_K": scale,
+        "allowed_K": 8.0 * float(np.spacing(scale)),
+    }
+    decomposition["holds"] = bool(
+        residual <= decomposition["allowed_K"])
+    if plant in DEVELOPED_RANK_SPLIT_PLANTS:
+        if decomposition["holds"]:
+            raise GateError(
+                "PLANT-BLIND: the decomposition control did not refuse a "
+                f"combined row wired to the wrong trend: {decomposition}")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": decomposition}
+    require(decomposition["holds"],
+            "the combined row does not decompose into the two scored rows: "
+            f"{decomposition}")
+
+    rms_first = float(np.sqrt(np.mean(e_first * e_first)))
+    rms_second = float(np.sqrt(np.mean(e_second * e_second)))
+    cross = float(2.0 * np.mean(e_first * e_second))
+    quadrature = float(np.sqrt(rms_first ** 2 + rms_second ** 2))
+    # The sum rule the verdict rests on, checked rather than assumed.
+    quadrature_identity = float(
+        combined["production"]["rms"] ** 2
+        - (rms_first ** 2 + cross + rms_second ** 2))
+    centred_first = e_first - float(np.mean(e_first))
+    centred_second = e_second - float(np.mean(e_second))
+    pearson = float(
+        np.sum(centred_first * centred_second)
+        / np.sqrt(np.sum(centred_first ** 2) * np.sum(centred_second ** 2)))
+    cosine = float(
+        np.sum(e_first * e_second)
+        / np.sqrt(np.sum(e_first ** 2) * np.sum(e_second ** 2)))
+    signed = e_first * e_second
+    opposite = float(np.count_nonzero(signed < 0.0) / signed.size)
+    growth = float(combined["corrected"]["rms"]
+                   - combined["production"]["rms"])
+    tests = {
+        "correlation_below_minus_point_one": bool(pearson < -0.1),
+        "production_combined_below_vertical_alone": bool(
+            combined["production"]["rms"] < production_rows[second]["rms"]),
+        "combined_grows_in_corrected": bool(
+            growth > 10.0 * RUN_TO_RUN_FLOOR_K),
+    }
+    if all(tests.values()):
+        verdict = "CONFIRMED"
+    elif pearson >= -0.1 or growth <= 0.0:
+        verdict = "REFUTED"
+    else:
+        verdict = "NEITHER"
+    cancellation = {
+        "pair": list(COMBINED_CANCELLATION_PAIR),
+        "cells_scored": int(np.count_nonzero(mask)),
+        "production_row_rms_K": {first: rms_first, second: rms_second},
+        "production_combined_rms_K": combined["production"]["rms"],
+        "corrected_combined_rms_K": combined["corrected"]["rms"],
+        "production_vertical_diffusion_rms_K": production_rows[second]["rms"],
+        "quadrature_reference_K": quadrature,
+        "quadrature_identity_residual_K2": quadrature_identity,
+        "cross_term_K2": cross,
+        "combined_growth_K": growth,
+        "run_to_run_floor_K": RUN_TO_RUN_FLOOR_K,
+        "pearson_correlation": pearson,
+        "uncentred_cosine": cosine,
+        "opposite_sign_fraction": opposite,
+        "decomposition_control": decomposition,
+        "tests": tests,
+        "verdict": verdict,
+    }
     report = {
-        "format": "gyre-round161-developed-process-rank-split-v1",
+        "format": "gyre-round162-developed-process-rank-split-v2",
         "status": "PASS",
         "worktree": stamp,
         "process_record_admission": process_admission["status"],
@@ -9299,6 +9434,8 @@ def developed_process_rank_split(
         "largest_growth": grew[0] if grew else None,
         "largest_owner_production": production_rank[0]["name"],
         "largest_owner_corrected": corrected_rank[0]["name"],
+        "combined_scored_rows": combined,
+        "cancellation": cancellation,
     }
     evidence_root.mkdir(parents=True, exist_ok=True)
     return report
