@@ -251,3 +251,38 @@ def test_serial_and_distributed_skins_agree_within_the_atmospheric_spread():
     assert diff < 0.25 * spread, (
         f"the skin difference {diff:.3g} K is a large fraction of the field's "
         f"own spatial spread {spread:.3g} K")
+
+
+def test_save_straight_after_a_load_is_refused_not_silently_skinless():
+    """A chain link that loads and checkpoints without stepping is REFUSED.
+
+    Raised by GLM in review: under MPI the save overwrites its rank-local field
+    with the global gather, and right after a load the live skin is cleared --
+    the loader stages it and only the run adopts it. The worry was that such a
+    link would write a checkpoint with no skin and the next one would restart
+    from the seed, silently re-running a multi-week spin-up.
+
+    Measured: it cannot. The driver already refuses to checkpoint a loaded-but-
+    unadopted carry at all, because writing one would launder a mismatched
+    restart into a plausible-looking file (#405/#413). The refusal is what
+    protects the skin here, so the refusal is what this pins -- if it were ever
+    relaxed, the skin path would need the staged-value handling on its own.
+    """
+    out = _shared_tmpdir("iceskin_relay_")
+    d = _build(True, output_dir=out)
+    d.run()
+    d.save_checkpoint(int(round(DAYS * 86400.0 / DT)), float(DAYS))
+    MPI.COMM_WORLD.Barrier()
+    first = os.path.join(out, f"checkpoint_day_{DAYS:04d}.npz")
+
+    relay = _build(True, output_dir=_shared_tmpdir("iceskin_relay2_"))
+    relay.load_checkpoint(first)
+    assert relay._ice_T_skin is None, (
+        "the loader adopted the skin directly, so this test no longer "
+        "exercises the staged-but-not-yet-adopted path it was written for")
+    assert np.asarray(relay._carry_aux["ice_T_skin"]).shape[0] == (
+        np.asarray(relay.state.T.data).shape[0]), (
+        "the staged skin is not this rank's length, so the scatter on load "
+        "did not happen")
+    with pytest.raises(ValueError, match="NOT adopted into the save channel"):
+        relay.save_checkpoint(int(round(DAYS * 86400.0 / DT)), float(DAYS))
