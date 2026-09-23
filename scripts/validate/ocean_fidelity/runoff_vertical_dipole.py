@@ -220,8 +220,15 @@ def main() -> int:
 
     print(f"shared vertical grid: {z_center.size} levels, "
           f"spreading band z <= {args.spread_m:g} m ({int(band.sum())} levels)")
+    # SIGNED TOTALS, never shares. The first version of this printed each
+    # stratum's percentage of the whole-ocean total and produced -1782%,
+    # +2162%, +395% -- not a bug, but a statistic that blows up precisely
+    # because the totals nearly CANCEL, which is the thing worth reporting.
+    # A share of a near-zero denominator hides the result it is computed from.
     print(f"{'stratum':28s} {'cols':>6s} {'area%':>6s} {'surf dS':>9s} "
-          f"{'sub dS':>9s} {'net':>10s} {'cancel':>7s} {'% of total':>10s}")
+          f"{'sub dS':>9s} {'net/col':>9s} {'cancel':>7s} "
+          f"{'TOTAL [psu km3]':>16s}")
+    acc = 0.0
     for name, sel in strata:
         n = int(sel.sum())
         if n == 0:
@@ -230,10 +237,16 @@ def main() -> int:
         s = dipole_stats(prof, dz, z_center, args.spread_m)
         tot = float(np.nansum(np.where(sel, cell_area * net_col, 0.0)))
         afrac = float(np.nansum(np.where(sel, cell_area, 0.0))) / area_all
-        share = 100.0 * tot / tot_all if tot_all != 0.0 else float("nan")
+        if name != "ALL wet columns":
+            acc += tot
         print(f"{name:28s} {n:6d} {100.0 * afrac:6.2f} {s['surface']:+9.4f} "
-              f"{s['subsurface']:+9.4f} {s['net']:+10.3f} {s['cancel']:7.3f} "
-              f"{share:9.1f}%")
+              f"{s['subsurface']:+9.4f} {s['net']:+9.3f} {s['cancel']:7.3f} "
+              f"{tot / 1e9:+16.4g}")
+    if not np.isclose(acc, tot_all, rtol=1e-9, atol=0.0):
+        raise SystemExit(f"FATAL: strata do not recombine: {acc:.10g} vs "
+                         f"{tot_all:.10g}")
+    print(f"recombine OK: parts {acc / 1e9:+.6g} == all "
+          f"{tot_all / 1e9:+.6g} psu km3")
     return 0
 
 
