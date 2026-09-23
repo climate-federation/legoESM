@@ -110,6 +110,35 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
 
     rows: dict[str, object] = {}
 
+    # --- CONTROL 0: are BOTH of the water's owners reachable on this card?
+    # The claim "legoESM already carries both owners" is only true where the
+    # predicates those owners sit behind hold, so read them from the CARD'S
+    # OWN resolved config rather than re-deriving them.  The divergence owner
+    # (sbcrnf.f90:279-282 via divhor.f90:142) is reached only through the
+    # literal WZV arm; the sea-surface owner (stp2d.f90:278-281) only when the
+    # freshwater closure is not "none".
+    _cfg = card.recipe.model_config
+    _wzv = getattr(_cfg, "wzv_call2_evaluation", "generic")
+    _closure = getattr(_cfg, "freshwater_closure", "virtual_salt_flux")
+    rows["control_both_water_owners_are_reachable_on_this_card"] = {
+        "wzv_call2_evaluation": _wzv,
+        "freshwater_closure": _closure,
+        "divergence_owner_reachable": _wzv == "nemo_literal",
+        "sea_surface_owner_reachable": _closure != "none",
+        "note": ("read from the production config, which is the same value "
+                 "the model branches on; a card resolving 'generic' would "
+                 "never reach sbc_rnf_div's transcription at all"),
+    }
+    print(f"CONTROL wzv_call2_evaluation={_wzv!r} "
+          f"freshwater_closure={_closure!r}", file=sys.stderr)
+    require(_wzv == "nemo_literal",
+            "this card does not select the literal WZV arm, so the runoff "
+            "never reaches the horizontal divergence and half the statement "
+            "is unreachable")
+    require(_closure != "none",
+            "this card switches the freshwater closure off, so the runoff "
+            "never reaches the sea-surface forcing")
+
     # --- CONTROL 1: is the stage-1 comparison controlled? -----------------
     # The two arms must divide by the SAME stage-1 thickness, or a moved
     # dilution rate would not be attributable to the operand.
