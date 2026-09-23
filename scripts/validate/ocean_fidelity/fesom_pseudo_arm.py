@@ -57,12 +57,21 @@ _REPRO_TOL = 1e-10          # gates 1-2: same arithmetic on the same inputs
 
 
 def _xyz_deg(lat_deg, lon_deg):
-    """Unit-sphere Cartesian from DEGREES, matching the regridder's helper."""
-    la = np.deg2rad(np.asarray(lat_deg, dtype=np.float64))
-    lo = np.deg2rad(np.asarray(lon_deg, dtype=np.float64))
-    return np.column_stack((np.cos(la) * np.cos(lo),
-                            np.cos(la) * np.sin(lo),
-                            np.sin(la)))
+    """Unit-sphere Cartesian from DEGREES, matching the regridder's helper.
+
+    DO NOT promote the coordinates to float64 here.  The regridder converts
+    whatever dtype the source carries -- and NEMO's nav_lat/nav_lon are
+    single precision -- so promoting builds a DIFFERENT tree, which breaks
+    near-ties differently and can select a different member of a coincident
+    pair.  On a tripole fold two coincident cells can hold different values,
+    so that is not a rounding difference, it is a different answer.  Found by
+    gate 3 on real data after the synthetic unit test (float64 throughout)
+    passed.
+    """
+    la = np.deg2rad(np.asarray(lat_deg))
+    lo = np.deg2rad(np.asarray(lon_deg))
+    cl = np.cos(la)
+    return np.stack([cl * np.cos(lo), cl * np.sin(lo), np.sin(la)], axis=-1)
 
 
 def idw_to_points(field, src_lat_deg, src_lon_deg, ocean_mask,
@@ -174,15 +183,40 @@ def main() -> int:
 
     # --- gate 3: the point-target sibling agrees on grid points --------------
     lon2d, lat2d = np.meshgrid(tgt_lon, tgt_lat)
+    print(f"[dtype] oracle lat {np.asarray(N['lat']).dtype} lon "
+          f"{np.asarray(N['lon']).dtype}; FESOM lat "
+          f"{np.asarray(F['lat']).dtype} -- the tree is built in whatever "
+          f"these carry, so they decide how near-ties break")
     ref, ref_cov = rg(N, N["sss"])
     pts, pts_cov = idw_to_points(N["sss"], N["lat"], N["lon"], N["mask"],
                                  lat2d.ravel(), lon2d.ravel())
-    err = float(np.max(np.abs(pts.reshape(ref.shape) - ref)))
+    diff = np.abs(pts.reshape(ref.shape) - ref)
+    err = float(np.max(diff))
     if not (err <= _EXACT_TOL):
+        # A bare max tells you the gate fired, not what to fix. Two very
+        # different faults produce a large max: a systematic difference in the
+        # weighting (then most cells disagree), or tie-breaking between
+        # coincident source cells that carry DIFFERENT values, which on a
+        # tripole fold is a handful of cells and a real hazard for both
+        # routines. Print enough to tell them apart before touching anything.
+        bad = diff > _EXACT_TOL
+        n_bad = int(bad.sum())
+        frac = n_bad / diff.size
+        qs = np.percentile(diff[bad], [50, 90, 99]) if n_bad else [0, 0, 0]
+        j, i = np.unravel_index(int(np.argmax(diff)), diff.shape)
+        worst = [(float(lat2d[y, x]), float(lon2d[y, x]), float(diff[y, x]))
+                 for y, x in zip(*np.unravel_index(
+                     np.argsort(diff.ravel())[-5:][::-1], diff.shape))]
+        loc = "; ".join(f"({la:.1f}N,{lo:.1f}E) {v:.3f}" for la, lo, v in worst)
         raise SystemExit(
             f"FATAL gate: idw_to_points disagrees with the grid regridder by "
             f"{err:.3e} on its own target points; the node leg cannot be "
-            f"trusted to use the same weighting.")
+            f"trusted to use the same weighting.\n"
+            f"  disagreeing cells: {n_bad} of {diff.size} ({frac:.3%}); "
+            f"median {qs[0]:.3e}, p90 {qs[1]:.3e}, p99 {qs[2]:.3e}\n"
+            f"  worst five: {loc}\n"
+            f"  worst cell is target ({j},{i}) at "
+            f"{float(lat2d[j, i]):.2f}N {float(lon2d[j, i]):.2f}E")
     if not np.array_equal(pts_cov.reshape(ref_cov.shape) > 0.5, ref_cov > 0.5):
         raise SystemExit("FATAL gate: idw_to_points coverage flag disagrees "
                          "with the grid regridder's.")
