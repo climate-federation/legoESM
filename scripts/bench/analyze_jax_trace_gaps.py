@@ -119,17 +119,32 @@ def _union_ms(evs: list[dict]) -> float:
     return total
 
 
+# Two naming schemes reach this table. GPU captures carry HLO instruction
+# names ("all-reduce", "collective-permute"); CPU captures carry the JAX-level
+# primitive names instead ("psum", "all_gather"), verified by tracing each one
+# on this stack. Both are listed because a name that is missing here does not
+# raise -- it reads as a confident ZERO for that family, and for a while the
+# CPU lanes reported no reductions at all for exactly that reason.
 _FAMILY_TOKENS = {
     "all-gather": "all-gather",
     "allgather": "all-gather",
+    "all_gather": "all-gather",
     "all-to-all": "all-to-all",
     "alltoall": "all-to-all",
+    "all_to_all": "all-to-all",
     "collective-permute": "permute",
     "ppermute": "permute",
     "all-reduce": "all-reduce",
     "allreduce": "all-reduce",
+    # psum/pmax/pmin are all all-reduces on the wire; they differ in the
+    # combiner, not in what they cost. pmax/pmin are diagnostics-only in this
+    # repo (they carry no gradient) but they still occupy the fabric.
+    "psum": "all-reduce",
+    "pmax": "all-reduce",
+    "pmin": "all-reduce",
     "reduce-scatter": "reduce-scatter",
     "reducescatter": "reduce-scatter",
+    "reduce_scatter": "reduce-scatter",
 }
 
 # An HLO instruction name is the opcode plus optional numeric suffixes:
@@ -137,7 +152,9 @@ _FAMILY_TOKENS = {
 # that shape instead of a substring search is what keeps a FUSION whose name
 # merely CONTAINS an opcode -- "fusion.all-gather.18" -- out of the gather
 # family, which codex demonstrated a substring match would swallow.
-_INSTR_RE = re.compile(r"^([a-z][a-z-]*)(?:\.\d+)*$")
+# Underscores are part of the name on CPU captures (all_gather.7);
+# a pattern without them silently rejects every such event.
+_INSTR_RE = re.compile(r"^([a-z][a-z_-]*)(?:\.\d+)*$")
 
 
 def collective_family(name: str) -> str | None:
