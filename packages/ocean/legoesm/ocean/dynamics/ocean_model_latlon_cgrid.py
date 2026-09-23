@@ -1286,12 +1286,13 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # indicator at stage 2 only, so the two call forms can be compared
     # with every other operand held.  No card constructs it.
     stage2_wzv_velocity_form: bool = False
-    # Round 160: private ONE-VARIABLE arm that restores the SINGLE per-stage
-    # continuity solve, so the before arm of the split can be measured in the
-    # same binary.  ``True`` hands the one transport-form field to both
-    # consumers again, which is what production did before round 160.  No card
+    # Round 160: private ONE-VARIABLE arm that selects NEMO's SECOND
+    # per-stage continuity solve (stprk3_stg.f90:360) for the momentum
+    # vertical advection while the tracer transport keeps its own field.
+    # HELD: the year refused it (day 240 and day 360 worsen), so production
+    # keeps the single shared solve and ``False`` is that path.  No card
     # constructs it.
-    legacy_shared_stage_wzv: bool = False
+    nemo_stage_momentum_wzv_split: bool = False
     # Round 160 WRITE-only exposure: make ``expose_tracer_transport_stage``
     # return the MOMENTUM vertical velocity (slot 11, stprk3_stg.f90:360)
     # instead of the tracer transport's own field, so the two solves can be
@@ -1627,17 +1628,20 @@ def _nemo_stage_corrected_velocity(
     return corrected
 
 
-def nemo_stage_momentum_wzv_executes(config) -> bool:
-    """Does this card run NEMO's SECOND per-stage continuity solve?
+def nemo_stage_momentum_wzv_resolved(config) -> bool:
+    """Does this card's configuration SELECT NEMO's two-solve stage program?
 
     ``stprk3_stg.f90:356`` takes the vector-invariant arm, ``:358`` skips the
     solve at stage 1, and ``:360`` solves continuity on the RAW stage velocity
     for the momentum vertical advection, while ``traadv.f90:274`` re-solves it
-    on the barotropically corrected transports for the tracers.  A card runs
-    that two-solve program only when it takes the RK3-WS stage program, the
+    on the barotropically corrected transports for the tracers.  A card is in
+    that program only when it takes the RK3-WS stage program, the
     vector-invariant momentum advection and the literal continuity solve
-    together.  This predicate IS the model's condition: the Decision-43 card
-    census imports it rather than restating it (operator note AR, finding 2).
+    together.
+
+    This is the BLAST RADIUS of the second solve, not what runs today: round
+    160 measured the split and the year refused it, so it is held behind a
+    private arm and ``nemo_stage_momentum_wzv_executes`` is what runs.
     """
     return (
         getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
@@ -1645,6 +1649,20 @@ def nemo_stage_momentum_wzv_executes(config) -> bool:
         == "vector_invariant"
         and getattr(config, "wzv_call2_evaluation", "generic")
         == "nemo_literal")
+
+
+def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:
+    """Does this run ACTUALLY take the second per-stage continuity solve?
+
+    The card has to select the two-solve program AND the private arm has to be
+    on.  With no hooks -- which is every card -- this is False, because round
+    160 is HELD.  This predicate IS the model's condition: the Decision-43
+    card census imports it rather than restating it (operator note AR,
+    finding 2).
+    """
+    return bool(
+        nemo_stage_momentum_wzv_resolved(config)
+        and getattr(hooks, "nemo_stage_momentum_wzv_split", False))
 
 
 def _nemo_ws_stage_transport(
@@ -2639,12 +2657,12 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "stage2_momentum_wzv_clock_pair must be a bool")
         if not isinstance(
-                self._nemo_ws_test_hooks.legacy_shared_stage_wzv, bool):
-            # At CONSTRUCTION: anything truthy would silently put the two
-            # consumers back on one field and the walk would score the
-            # single-solve program under the split program's name.
+                self._nemo_ws_test_hooks.nemo_stage_momentum_wzv_split, bool):
+            # At CONSTRUCTION: anything truthy would silently select the
+            # two-solve program and the walk would score one compiled program
+            # under the other's name.
             raise ValueError(
-                "legacy_shared_stage_wzv must be a bool")
+                "nemo_stage_momentum_wzv_split must be a bool")
         if not isinstance(
                 self._nemo_ws_test_hooks.stage2_wzv_velocity_form, bool):
             # At CONSTRUCTION: anything truthy would silently select NEMO's
@@ -6711,9 +6729,8 @@ class LatLonCGridOceanModel:
             # stprk3_stg.f90:356-360: the vector-invariant deck solves
             # continuity a SECOND time, on the raw stage velocity, for the
             # momentum vertical advection at every stage after the first.
-            _momentum_wzv_split = (
-                nemo_stage_momentum_wzv_executes(_cfg_b)
-                and not self._nemo_ws_test_hooks.legacy_shared_stage_wzv)
+            _momentum_wzv_split = nemo_stage_momentum_wzv_executes(
+                _cfg_b, self._nemo_ws_test_hooks)
             _wall_live = (
                 _active_live
                 if getattr(_cfg_b, "tracer_wall_neumann_fill", True)

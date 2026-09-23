@@ -8301,7 +8301,7 @@ def developed_stage2_wzv_split_walk(
     import jax.numpy as jnp
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
-        nemo_stage_momentum_wzv_executes)
+        nemo_stage_momentum_wzv_resolved)
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
     stamp = worktree_stamp()
@@ -8323,9 +8323,9 @@ def developed_stage2_wzv_split_walk(
         card, state, DEVELOPED_PROCESS_STEP)
     ssha = jnp.asarray(payload["ssha"])
 
-    require(nemo_stage_momentum_wzv_executes(card.recipe.model_config),
+    require(nemo_stage_momentum_wzv_resolved(card.recipe.model_config),
             "the GYRE card does not resolve NEMO's two-solve stage program, "
-            "so this walk would score a program the card never runs")
+            "so this walk would score a program the card cannot reach")
 
     nlev = int(np.asarray(state.T.data).shape[-1])
     nemo_ww = np.ascontiguousarray(np.asarray(rows["ww_t"])[..., :nlev])
@@ -8345,10 +8345,11 @@ def developed_stage2_wzv_split_walk(
         jax.device_get(result)
         return result
 
-    # The two ordinary steps: production (the split) and the before arm (the
-    # single shared solve production ran before round 160).
-    after_plain = step()
-    before_plain = step(legacy_shared_stage_wzv=True)
+    # The two ordinary steps: production (the single shared solve, which is
+    # what the tip runs because round 160 is HELD) and the candidate arm (the
+    # second solve, behind its private one-variable selector).
+    before_plain = step()
+    after_plain = step(nemo_stage_momentum_wzv_split=True)
 
     def run(base, *, passive=True, wrote=("u", "v", "T"), label="",
             **hook_kwargs):
@@ -8377,8 +8378,8 @@ def developed_stage2_wzv_split_walk(
         hooks = dict(expose_tracer_transport_stage=stage,
                      expose_tracer_transport_as_ww=True,
                      expose_stage_momentum_w=momentum)
-        if legacy:
-            hooks["legacy_shared_stage_wzv"] = True
+        if not legacy:
+            hooks["nemo_stage_momentum_wzv_split"] = True
         hooks.update(extra)
         arm_base = base if base is not None else (
             before_plain if legacy else after_plain)
@@ -8390,8 +8391,8 @@ def developed_stage2_wzv_split_walk(
 
     def stage2_rhs(*, legacy=False):
         hooks = dict(expose_stage2_momentum_rhs=True)
-        if legacy:
-            hooks["legacy_shared_stage_wzv"] = True
+        if not legacy:
+            hooks["nemo_stage_momentum_wzv_split"] = True
         base = before_plain if legacy else after_plain
         result = run(base, wrote=("u", "v"),
                      label="stage2-rhs-" + ("before" if legacy else "after"),
@@ -8400,8 +8401,8 @@ def developed_stage2_wzv_split_walk(
 
     def stage2_out(*, legacy=False):
         hooks = dict(expose_momentum_stage=2)
-        if legacy:
-            hooks["legacy_shared_stage_wzv"] = True
+        if not legacy:
+            hooks["nemo_stage_momentum_wzv_split"] = True
         base = before_plain if legacy else after_plain
         result = run(base, wrote=("u", "v"),
                      label="stage2-out-" + ("before" if legacy else "after"),
@@ -8485,11 +8486,11 @@ def developed_stage2_wzv_split_walk(
         before_stage = np.asarray(getattr(
             run(before_plain, wrote=("T", "S", "eta"),
                 label=f"stage2-tracer-{field}-before",
-                expose_tracer_stage=2,
-                legacy_shared_stage_wzv=True), field).data)
+                expose_tracer_stage=2), field).data)
         after_stage = np.asarray(getattr(
             run(after_plain, wrote=("T", "S", "eta"),
                 label=f"stage2-tracer-{field}-after",
+                nemo_stage_momentum_wzv_split=True,
                 expose_tracer_stage=2), field).data)
         tracer_identity[f"stage2_tracer_{field}"] = _score_stage2_face(
             after_stage, before_stage, cell_mask)
@@ -8610,6 +8611,7 @@ def developed_stage2_wzv_split_walk(
 
     # THE DISCRIMINATOR for the residual round 159 registered.
     clock_w = stage_w(2, momentum=True, base=after_plain,
+                      nemo_stage_momentum_wzv_split=True,
                       stage2_momentum_wzv_clock_pair=True)
     residual = {
         "after_momentum": scored["after_momentum"],
@@ -8623,6 +8625,7 @@ def developed_stage2_wzv_split_walk(
          - residual["oracle_stage_clock_pair"]["active_rms"])
         / scored["after_momentum"]["active_rms"])
     r3_result = run(after_plain, wrote=("u", "v"), label="stage2-face-r3",
+                    nemo_stage_momentum_wzv_split=True,
                     expose_stage_face_r3=2)
     r3_rows = {}
     for tag, field in (("u", "u"), ("v", "v")):

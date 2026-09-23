@@ -24,6 +24,7 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
     _NEMOWSRK3TestHooks,
     _nemo_ws_stage_transport,
     nemo_stage_momentum_wzv_executes,
+    nemo_stage_momentum_wzv_resolved,
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 
@@ -43,7 +44,19 @@ def test_the_gyre_card_resolves_the_two_solve_stage_program(card):
     """GYRE takes the RK3-WS stage program, the vector-invariant momentum
     advection and the literal continuity solve together, which is exactly
     NEMO's condition for running the solve twice."""
-    assert nemo_stage_momentum_wzv_executes(card.recipe.model_config) is True
+    assert nemo_stage_momentum_wzv_resolved(card.recipe.model_config) is True
+
+
+def test_no_card_takes_the_second_solve_while_the_round_is_held(card):
+    """The year refused the split, so production keeps the single shared
+    solve and nothing executes the second one without the private arm."""
+    config = card.recipe.model_config
+    assert nemo_stage_momentum_wzv_executes(config) is False
+    assert nemo_stage_momentum_wzv_executes(
+        config, _NEMOWSRK3TestHooks()) is False
+    assert nemo_stage_momentum_wzv_executes(
+        config, _NEMOWSRK3TestHooks(
+            nemo_stage_momentum_wzv_split=True)) is True
 
 
 @pytest.mark.parametrize("case", ["LOCK_EXCHANGE-zco", "OVERFLOW-zps"])
@@ -52,7 +65,7 @@ def test_the_tanks_do_not_resolve_the_two_solve_stage_program(case):
     ``ELSE`` arm: one solve, on the transports, for both consumers."""
     config = build_nemo_testcase_card(case).recipe.model_config
     assert config.momentum_advection == "flux_form"
-    assert nemo_stage_momentum_wzv_executes(config) is False
+    assert nemo_stage_momentum_wzv_resolved(config) is False
 
 
 def test_the_generic_nemo_gyre_recipe_does_not_resolve_it():
@@ -62,7 +75,7 @@ def test_the_generic_nemo_gyre_recipe_does_not_resolve_it():
 
     config = build_nemo_gyre_recipe().model_config
     assert config.wzv_call2_evaluation != "nemo_literal"
-    assert nemo_stage_momentum_wzv_executes(config) is False
+    assert nemo_stage_momentum_wzv_resolved(config) is False
 
 
 @pytest.mark.parametrize("recipe", ["nemo_dino_kamm", "nemo_dino_kamm_mlf"])
@@ -79,7 +92,7 @@ def test_dino_does_not_resolve_it(recipe):
     grid = dino_lat_lon_grid(dino, n_lon=10)
     config, _ = dino_lat_lon_model_config(grid, dino, physics=True)
     assert config.momentum_time_integrator != "rk3_ws"
-    assert nemo_stage_momentum_wzv_executes(config) is False
+    assert nemo_stage_momentum_wzv_resolved(config) is False
 
 
 class _Config:
@@ -154,12 +167,11 @@ def test_the_adaptive_implicit_pair_is_refused_rather_than_run_once(card):
 
 
 @pytest.mark.parametrize("bad", [1, 0, "true", "", (True,), None])
-def test_a_shared_solve_arm_that_is_not_a_bool_is_refused(card, bad):
-    """Anything truthy would silently put both consumers back on one field
-    and the walk would score the single-solve program under the split
-    program's name."""
-    with pytest.raises(ValueError, match="legacy_shared_stage_wzv"):
-        _model(card, legacy_shared_stage_wzv=bad)
+def test_a_split_arm_that_is_not_a_bool_is_refused(card, bad):
+    """Anything truthy would silently select the two-solve program and the
+    walk would score one compiled program under the other's name."""
+    with pytest.raises(ValueError, match="nemo_stage_momentum_wzv_split"):
+        _model(card, nemo_stage_momentum_wzv_split=bad)
 
 
 @pytest.mark.parametrize("bad", [1, 0, "true", (True,), None])
@@ -178,11 +190,11 @@ def test_an_out_of_range_face_ratio_exposure_is_refused(card, bad):
         _model(card, expose_stage_face_r3=bad)
 
 
-def test_the_production_defaults_keep_the_split_on_and_the_arms_off():
-    """No card constructs any of the private arms, and the split itself is
-    not an arm: it is selected by the card's own resolved configuration."""
+def test_the_production_defaults_keep_every_arm_off():
+    """Round 160 is HELD, so no card constructs any of the private arms and
+    the second continuity solve is off on every one of them."""
     hooks = _NEMOWSRK3TestHooks()
-    assert hooks.legacy_shared_stage_wzv is False
+    assert hooks.nemo_stage_momentum_wzv_split is False
     assert hooks.stage2_momentum_wzv_clock_pair is False
     assert hooks.expose_stage_momentum_w is False
     assert hooks.expose_stage_face_r3 == 0
@@ -207,8 +219,9 @@ def test_the_admission_gate_census_uses_the_model_s_own_predicate():
     spec.loader.exec_module(gate)
 
     rows = gate._card_execution("stage_momentum_wzv")
-    assert [name for name, row in rows.items() if row["executes_route"]] == [
-        "GYRE-zco"]
+    assert [name for name, row in rows.items() if row["executes_route"]] == []
+    assert [name for name, row in rows.items()
+            if row["resolves_two_solve_program"]] == ["GYRE-zco"]
 
     configs = {
         "GYRE-zco": build_nemo_testcase_card("GYRE-zco").recipe.model_config,
@@ -220,3 +233,5 @@ def test_the_admission_gate_census_uses_the_model_s_own_predicate():
     for name, config in configs.items():
         assert rows[name]["executes_route"] is (
             nemo_stage_momentum_wzv_executes(config))
+        assert rows[name]["resolves_two_solve_program"] is (
+            nemo_stage_momentum_wzv_resolved(config))

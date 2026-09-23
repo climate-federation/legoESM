@@ -254,12 +254,20 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             executes = (config.momentum_time_integrator == "rk3_ws"
                         and config.surface_stress_implicit)
         elif route == "stage_momentum_wzv":
-            # Round 160.  The census imports the model's OWN predicate rather
-            # than restating it, so the gate cannot encode a condition the
-            # code does not (operator note AR, finding 2).
+            # Round 160.  The census imports the model's OWN predicates rather
+            # than restating them, so the gate cannot encode a condition the
+            # code does not (operator note AR, finding 2).  Two rows, because
+            # they answer different questions: whether the card's
+            # configuration selects NEMO's two-solve stage program at all --
+            # the blast radius if the arm is ever landed -- and whether this
+            # run actually takes it, which is False everywhere while the round
+            # is HELD behind its private arm.
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-                nemo_stage_momentum_wzv_executes)
+                nemo_stage_momentum_wzv_executes,
+                nemo_stage_momentum_wzv_resolved)
 
+            values["resolves_two_solve_program"] = bool(
+                nemo_stage_momentum_wzv_resolved(config))
             executes = nemo_stage_momentum_wzv_executes(config)
         else:
             executes = (
