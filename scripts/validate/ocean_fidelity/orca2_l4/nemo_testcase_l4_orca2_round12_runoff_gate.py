@@ -259,6 +259,11 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
             "unequal_in_the_top_cell_of_a_runoff_column": int(
                 (scored & carries & top_only).sum()),
             "max_abs": float(delta[np.isfinite(delta)].max()),
+            # Does the landing improve the cells it actually touches?  The
+            # whole-field max is set by cells the runoff never reaches, so it
+            # cannot answer that; this restriction can.
+            "max_abs_in_the_top_cell_of_a_runoff_column": float(
+                delta[..., 0][(rnf[:ny1, :nx1] != 0.0)].max()),
         }
 
     # Does the landing move the TRAJECTORY, not only the rate?  A statement
