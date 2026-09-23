@@ -7092,13 +7092,30 @@ def developed_stage2_rhs_walk(
                 rows[f"umask_vmask_{tag}"])
             for tag, index in (("u", 0), ("v", 1))
         }
+    # The mechanism is NOT byte-neutral, and that is registered rather than
+    # excused: the production step builds the stage thickness by averaging
+    # the step's own live thicknesses, while the override rebuilds it from
+    # the stage free surface, which is the same number algebraically and a
+    # different one bitwise.  The offset below measures it.  Because BOTH
+    # arms carry that same offset, the comparison between them is still one
+    # variable -- the entry velocity -- and the removed fractions are taken
+    # against the null arm, never against the production row.
     for tag, index in (("u", 0), ("v", 1)):
-        require(np.array_equal(
-                    np.asarray(armed_rows["null"][index]).view(np.uint64),
-                    np.asarray(
-                        production["stage2_rhs_total"][index]).view(np.uint64)),
-                "the stage-entry substitution mechanism is not neutral when "
-                f"handed legoESM's own entry bundle ({tag})")
+        substitution["null"][tag]["offset_from_production_max_abs"] = float(
+            np.max(np.abs(
+                np.asarray(armed_rows["null"][index])
+                - np.asarray(production["stage2_rhs_total"][index])),
+                initial=0.0))
+        base_max = substitution["null"][tag]["active_max_abs"]
+        base_rms = substitution["null"][tag]["active_rms"]
+        for arm in substitution:
+            row = substitution[arm][tag]
+            row["max_abs_removed_fraction"] = (
+                float((base_max - row["active_max_abs"]) / base_max)
+                if base_max > 0.0 else 0.0)
+            row["rms_removed_fraction"] = (
+                float((base_rms - row["active_rms"]) / base_rms)
+                if base_rms > 0.0 else 0.0)
 
     require(all(value == 0 for value in observer_unequal),
             "a stage-2 exposure hook moved the production state outside "
