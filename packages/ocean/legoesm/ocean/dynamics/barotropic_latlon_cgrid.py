@@ -495,6 +495,31 @@ def _depth_average_to_faces(
     return U_bar, V_bar
 
 
+def _reciprocal_face_area(face_area):
+    """``1/(e1*e2)`` on a face, and exactly zero where that face has no area.
+
+    NEMO's ``r1_e1e2u``/``r1_e1e2v`` (``domain.f90:213``) are reciprocals of
+    metrics that are strictly positive everywhere in its own domain, so NEMO
+    has no statement to match here.  legoESM represents a CLOSED WALL row as a
+    v-face of zero extent -- the ORCA2 tripolar card's southernmost v-row has
+    ``e1v == e2v == 0`` on all 180 longitudes -- and a plain reciprocal makes
+    that row infinite.  The infinity then met the dry face's exactly-zero
+    ``r1_v0`` inside ``r3_v`` (``0 * inf``), so the entry inverse face depth
+    ``r1_v_entry`` was NaN on that whole row, the barotropic bottom-drag
+    statement multiplied it in, and within two substeps the sea surface, the
+    velocities and every downstream N2 divisor were NaN.
+
+    Zero is the only finite value a zero-area face can carry, and it is the
+    value the sibling statement already gives that row: ``ssh_avg_v`` is
+    zeroed on both polar rows a few lines below.  Wherever the face area is
+    positive this returns exactly ``1.0 / face_area``, so every card with a
+    non-degenerate metric is bit-identical.  The same guarded shape is already
+    used for the single metrics in this module (``r1_e2u``/``r1_e1v``).
+    """
+    positive = face_area > 0.0
+    return jnp.where(positive, 1.0 / jnp.where(positive, face_area, 1.0), 0.0)
+
+
 def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
     """Loop-invariant prep for :func:`_nemo_ssh_avg_apply` (geometry-only —
     matches NEMO's frozen ``hu_0``/``hv_0``/``r1_e1e2u``).  Hoisted OUTSIDE
@@ -509,8 +534,10 @@ def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
     H_u_ref, H_v_ref = _min_rule_face_depths(H_bathy * mask, mask, grid,
                                              _nfold_mask)
     _geom = ensure_geometry(grid)
-    _r1_e1e2u = (1.0 / (_geom.dx_u * _geom.dy_u)).astype(dtype)
-    _r1_e1e2v = (1.0 / (_geom.dx_v * _geom.dy_v)).astype(dtype)
+    _r1_e1e2u = _reciprocal_face_area(
+        _geom.dx_u * _geom.dy_u).astype(dtype)
+    _r1_e1e2v = _reciprocal_face_area(
+        _geom.dx_v * _geom.dy_v).astype(dtype)
     return H_u_ref, H_v_ref, _r1_e1e2u, _r1_e1e2v, _nfold_mask
 
 
