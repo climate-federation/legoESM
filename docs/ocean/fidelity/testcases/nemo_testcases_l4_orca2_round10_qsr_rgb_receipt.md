@@ -447,6 +447,7 @@ non-NEMO RGB callers keep the behaviour they had.
 | receipt citation gate | **PASS**, 274 citations, 0 failures, 0 map-audit failures, 0 unmapped |
 | citation gate with a rigid two-line plant | **fires**, exit 1, status FAIL, the planted citation named |
 | the named push gates plus this round's new tests, at the final tip | **177 passed in 577.69 s** |
-| the ocean-fidelity battery, once, with twelve workers | FIDELITY_BATTERY |
+| the ocean-fidelity battery, once, with twelve workers, at the final tip | **1 failed, 1,535 passed, 7 skipped in 2,372.00 s** -- the one failure is the listed pre-existing sea-ice scalar-math provenance red |
+| a first run of that battery, discarded | started against a DIRTY tree (an uncommitted receipt edit), so every gate that stamps the worktree refused and reported 24 failures; re-run clean, the number is the row above.  Recorded rather than dropped |
 | the new refusal test with the pipeline branch re-widened | **fails** (`DID NOT RAISE`), then the model file restored and the tree confirmed clean |
 | the same gate at the round's BASE commit, in a clean clone | **refuses**, exit 2 |
