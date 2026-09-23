@@ -2,7 +2,11 @@
 
 Date: 2026-09-23
 
-Starting tip: `4dfdd5a1cebc080e23eb38ff1ad31cbd57c19264`
+Starting tip: `4dfdd5a1cebc080e23eb38ff1ad31cbd57c19264`, rebased at the
+end onto `2c832edb2` — the lane moved by one receipt-only commit while
+this round ran (round 11's wide battery finished green and its receipt
+says so).  Nothing in this round's measurements depends on that commit;
+the citation gate was re-run after the rebase and still passes.
 
 Preregistration: `ac8b2539f`
 
