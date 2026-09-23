@@ -728,6 +728,16 @@ CITATION_MAP = {
         ('live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask', 1),
     'ocean_pe_latlon_cgrid.py:1699':
         ('flux_u, west, flux_v, south, r1_area_t, live_t[..., jk],', 1),
+    # Round 162's review disputed whether the multiply-back is on the
+    # vertical-velocity path.  It is: the statement writes the routine's own
+    # OUTPUT argument, and the vertical-velocity routine receives exactly that
+    # array.  Those two lines are cited, and so is legoESM's answering one.
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:101':
+        ('pe3divUh       ! e3t*div[Uh]', 2),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/sshwzv.f90:278':
+        ('CALL div_hor( kt, Kbb, Kmm, pu, pv, ze3div )', 1),
+    'ocean_pe_latlon_cgrid.py:1579':
+        ('return jax.lax.optimization_barrier(live_e3t * hdiv) * tmask', 1),
     'ocean_pe_latlon_cgrid.py:1717-1718': [
         ('r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)', 1),
         ('r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)', 1), 2],

@@ -477,6 +477,59 @@ card before transferring any verdict.
 the Euler momentum integrator and never enter the RK3 stage program — and
 nothing changed in the model, so there is nothing to measure on it.
 
+## The independent review
+
+Codex is paused, so a Claude reviewer was run instead, on the whole round's
+diff, the receipt, the preregistration, the evidence and the compiled sources,
+told to try to break the claims.  Its verdict was **SHIP WITH CHANGES**,
+verbatim:
+
+> SHIP WITH CHANGES
+
+It ran the test file rather than reading it, pulled round 159's evidence file
+itself to check the 55% correction, recomputed Order A's quadrature identity
+independently and matched it to the last digit, spot-checked more than five
+receipt numbers against the evidence, opened the cited compiled lines, and
+confirmed from the diff that no file under `packages/` is touched.  Its three
+findings and what was done with each:
+
+1. **BLOCKER — a new test could not reach its own assertion.**  CLOSED by a
+   fix.  The guard that pins the array library's silent index clamping read a
+   value off the trailing axis and converted it to a number; that leaves a
+   two-dimensional array, and the conversion raises before the comparison
+   runs.  The reviewer found it by RUNNING the file, which reading it would
+   not have done.  The guard now asserts on a true scalar and additionally
+   asserts the same silence in the trailing-axis form the walk itself writes.
+   This is the second instrument defect this round found and disclosed rather
+   than shipped.
+2. **MEDIUM — "the ratio enters twice" allegedly overstates the scored path.**
+   **REFUTED, measured against the compiled source rather than argued.**  The
+   reviewer read the multiply-back at
+   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:153` as a separate
+   downstream consumer that the vertical-velocity path never reaches, and read
+   legoESM's divergence helper as never re-multiplying.  Both are wrong, and
+   the source settles it: the array that statement writes is
+   `pe3divUh`, which is the routine's OWN output argument
+   (`GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:101`, declared
+   `INTENT(out)` and documented `e3t*div[Uh]`), and the vertical-velocity
+   routine receives exactly that array as `ze3div`
+   (`GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/sshwzv.f90:278`) before
+   consuming it at
+   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/sshwzv.f90:297-298`.  legoESM's
+   answering helper likewise ends by multiplying the live thickness back, at
+   `ocean_pe_latlon_cgrid.py:1579`.  The framing stands and the finding is
+   registered as refuted, with the lines, rather than quietly dropped.
+3. **LOW — the ordinal convention that selects which continuity call is
+   substituted is inherited, not re-verified.**  REGISTERED, not closed.  The
+   walk substitutes the FIRST velocity-indicator call of the step, which is
+   round 161's convention taken unchanged.  What stands behind it here is
+   indirect: both baselines are required to reproduce round 160's residual to
+   `5e-22` before anything is reported, so the scored field is the one those
+   rounds scored.  A future round should tag the call explicitly rather than
+   count it, and this is written into round 163's order.
+
+## The gates and the tests
+
 ## OPEN — Round 163
 
 1. **THE RESIDUAL'S OWNER IS ALREADY MEASURED AND IT IS THE STAGE-2 ENTRY
@@ -523,5 +576,11 @@ nothing changed in the model, so there is nothing to measure on it.
    measured mechanism at the one-step level.  This round does not propose a
    change to the decision; it removes the story that was going to be offered
    in support of one.
-6. **ORCA2 stays UNMEASURED-WITH-SPEC**: repeat this walk on the ocean-only
+6. **Tag the substituted continuity call instead of counting it.**  The
+   walk picks the FIRST velocity-indicator call of the step, a convention
+   inherited unchanged from round 161.  What stands behind it is indirect —
+   both baselines must reproduce round 160's residual to `5e-22` — and the
+   round's reviewer registered that as worth making explicit rather than
+   inheriting silently.  Round 163 tags the call.
+7. **ORCA2 stays UNMEASURED-WITH-SPEC**: repeat this walk on the ocean-only
    ORCA2 card before transferring any verdict.
