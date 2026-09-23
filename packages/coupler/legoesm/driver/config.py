@@ -3475,14 +3475,20 @@ class ExperimentConfig(NamedTuple):
             ("clubb_q_flux_scale", 0.1, 10.0),
         ):
             _v = getattr(self, _f)
-            # 0.0 means OFF for the two radiative condensate floors, and the
-            # liquid partition REQUIRES them off (it supplies the liquid they
-            # were compensating for).  Their ranges start above zero because a
-            # floor of 0 was previously unreachable; without this the guard
-            # below would demand a value this loop then rejects (codex).
-            if (self._liquid_partition_resolved() and _v == 0.0
-                    and _f in ("cloud_q_c_diagnostic",
-                               "cloud_conv_cloud_condensate")):
+            # 0.0 means OFF for the two radiative condensate floors.  Their
+            # declared ranges start above zero because a floor of 0 was
+            # previously unreachable, so without this the liquid-partition
+            # guard would demand a value this loop then rejects (codex).
+            #
+            # UNCONDITIONAL, deliberately.  Gating it on the partition made
+            # "floors off, partition off" unbuildable, which is exactly the
+            # control arm needed to attribute anything to the partition: the
+            # two would have had to move together and no measurement could
+            # separate them.  A guard that forbids the control is a defect in
+            # the guard.  This only ADDS a previously-refused configuration;
+            # every existing deck keeps its value and its behaviour.
+            if (_v == 0.0 and _f in ("cloud_q_c_diagnostic",
+                                     "cloud_conv_cloud_condensate")):
                 continue
             if _v is not None and not (_lo <= _v <= _hi):
                 errors.append(
