@@ -21,6 +21,16 @@ residual closed against the scheme's net tendency, so nothing is unaccounted for
 columns, once at the long step against five short steps of the same total
 elapsed time.  Autoconversion is non-linear in cloud water, so an apparent scheme
 difference can be a timestep difference.  NUMBERS ONLY -- no verdict.
+
+TRAP, 2026-09-23: this split originally printed ONLY the net cloud-water
+tendency, which carries the saturation-adjustment condensation SOURCE
+alongside the removal sinks (morrison.py:1418).  A 2.76x net difference was
+read as the warm-rain sinks over-stripping a long step; resolving the terms
+showed the gross sinks move by <=6.5%, and at the CAM6 deck's real 600 s step
+the band is a net cloud-water SOURCE at both step lengths.  The per-term
+columns below exist so that source can never again be mistaken for a sink.
+The per-term rates are PRE-donor-clamp, so the binding count is printed too:
+where the clamp binds the applied removal is smaller than the rate shown.
 """
 from __future__ import annotations
 import argparse, importlib.util, os, sys
@@ -168,15 +178,21 @@ def main():
         dq_au, _, _ = autoconversion_kk2000(q_c_ic, N_c_eff, rho, dt_micro)
         dq_au = dq_au * cf_eff
         dq_ac = accretion_kk2000(q_c_ic, q_r_ic) * cf_eff
-    elif scheme == "sb2001":
+    elif scheme == "seifert_beheng_sb2001":
         dq_au, _, _ = autoconversion_sb2001(q_c_ic, q_r_ic, N_c_eff, rho)
         dq_au = dq_au * cf_eff
         dq_ac = accretion_sb2001(q_c_ic, q_r_ic, rho) * cf_eff
-    else:
+    elif scheme == "seifert_beheng":
         dq_au, _, _ = autoconversion_sb(q_c_ic, N_c_eff, rho, cfg.k_au, cfg.x_star,
                                         cfg.autoconversion_sharpness)
         dq_au = dq_au * cf_eff
         dq_ac = accretion_sb_fn(q_c_ic, q_r_ic, rho, cfg.k_ac) * cf_eff
+    else:
+        # Dispatch hardening: the probe must never silently score a DIFFERENT
+        # closure than the scheme runs (morrison.py:301-338 raises likewise).
+        raise SystemExit(
+            f"diag_microphysics_liquid_sinks: unknown warm_rain_scheme "
+            f"{scheme!r}; the probe must mirror morrison.py's dispatch exactly")
     print(f"[{a.label}] warm-rain scheme = {scheme}; "
           f"sub-grid in-cloud closure {'ON' if getattr(cfg,'subgrid_autoconversion',False) else 'OFF'}")
 
@@ -227,7 +243,7 @@ def main():
         if scheme == "kk2000":
             d_au, _, _ = autoconversion_kk2000(qci, N_c_eff, rhox, dtx)
             d_ac = accretion_kk2000(qci, qri)
-        elif scheme == "sb2001":
+        elif scheme == "seifert_beheng_sb2001":
             d_au, _, _ = autoconversion_sb2001(qci, qri, N_c_eff, rhox)
             d_ac = accretion_sb2001(qci, qri, rhox)
         else:
@@ -245,12 +261,27 @@ def main():
             acc = np.zeros_like(qcn)
             acc_ac = np.zeros_like(qcn)
             acc_au = np.zeros_like(qcn)
+            acc_cd = np.zeros_like(qcn)
+            n_clamped = [0]
             for _ in range(nrep):
                 o = micro_fn(Tc, qvc, hy, p_full, p_half, rho, dz, dts, mcfg)
                 _au_i, _ac_i = _warm_rain_terms(Tc, qvc, qcc, qrc, rho, dts)
                 acc_au = acc_au + np.asarray(_au_i) * dts
                 acc_ac = acc_ac + np.asarray(_ac_i) * dts
                 acc = acc + np.asarray(o.dq_c_dt) * dts
+                # Condensation SOURCE, published by the scheme, so the budget
+                # closes without re-deriving it.
+                _s = o.dq_v_to_qc_dt
+                if _s is not None:
+                    acc_cd = acc_cd + np.asarray(_s) * dts
+                # Is the donor clamp BINDING at this step length?  If the
+                # pre-clamp sink would remove more than the reservoir the
+                # recomputed rates above overstate the removal, and they would
+                # overstate it MORE at the long step.
+                _tot = np.asarray(_au_i) + np.asarray(_ac_i)
+                clamped_cells = int(np.sum((_tot * dts > np.asarray(qcc))
+                                           & (np.asarray(qcc) > 0.0) & band))
+                n_clamped[0] += clamped_cells
                 Tc = Tc + dts * o.dT_dt
                 qvc = qvc + dts * o.dq_v_dt
                 qcc = qcc + dts * o.dq_c_dt
@@ -262,8 +293,11 @@ def main():
             vu = masked_rate(acc_au / tot, dp, A, g, band) * _DAY
             print(f"[{a.label}]   {label:26s} net sink over {tot:.1f} s: "
                   f"{v:12.6e} kg/m2/day in the band")
+            vc = masked_rate(acc_cd / tot, dp, A, g, band) * _DAY
             print(f"[{a.label}]   {'':26s}   accretion alone: {va:12.6e}   "
                   f"autoconversion alone: {vu:12.6e} kg/m2/day")
+            print(f"[{a.label}]   {'':26s}   condensation SOURCE: {vc:12.6e} kg/m2/day; "
+                  f"donor clamp bound in {n_clamped[0]} band cell-steps")
 
 
 if __name__ == "__main__":

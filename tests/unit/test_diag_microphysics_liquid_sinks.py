@@ -46,7 +46,36 @@ def test_masked_rate_selects_only_the_masked_layers():
                - m.weighted_rate(rate, dp, w, 10.0)) < 1e-12
 
 
-def test_warm_rain_rates_are_step_independent_by_construction():
+def test_warm_rain_mass_rates_do_not_depend_on_the_step():
+    """Both warm-rain MASS sinks must be functions of state, not of ``dt``.
+
+    Non-vacuous by construction: the assertions compare rates computed at
+    22.5 s, 112.5 s and 600 s from an IDENTICAL state, so any change that
+    introduces a ``dt`` factor into either mass rate -- which is exactly what a
+    sub-stepping "fix" for the (refuted) long-step over-stripping hypothesis
+    would do -- makes them differ and the test fails.  Verified to fail when
+    either rate is multiplied by ``dt`` (2026-09-23).
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as wr
+
+    q_c = jnp.array([[1.0e-3, 4.0e-4]])
+    q_r = jnp.array([[2.0e-4, 1.0e-4]])
+    rho = jnp.array([[0.9, 0.7]])
+    N_c = jnp.array([[1.0e8, 1.0e8]])
+    steps = (22.5, 112.5, 600.0)
+
+    ac = [wr.accretion_kk2000(q_c, q_r) for _ in steps]
+    au = [wr.autoconversion_kk2000(q_c, N_c, rho, d)[0] for d in steps]
+
+    assert float(jnp.min(ac[0])) > 0.0, "accretion must be active in this state"
+    assert float(jnp.min(au[0])) > 0.0, "autoconversion must be active here"
+    for k in range(1, len(steps)):
+        assert bool(jnp.all(ac[k] == ac[0])), "accretion became step-dependent"
+        assert bool(jnp.all(au[k] == au[0])), "autoconversion became step-dependent"
+
+
+def test_accretion_takes_no_timestep_argument():
     """The warm-rain sinks must not depend on the microphysics step length.
 
     This pins the refutation of the "our microphysics over-strips at a long
