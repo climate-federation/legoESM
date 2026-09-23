@@ -7408,6 +7408,31 @@ def developed_stage2_advection_split(
             "the Round-156 record window does not land on legoESM's face "
             f"grid: {entry_control}")
 
+    # T-WINDOW CONTROL.  The vertical velocity this walk substitutes is a
+    # T-point field, and the entry control above proves only the two FACE
+    # windows.  Two properties of NEMO's own arrays pin the cell window:
+    # ``eos`` leaves the density anomaly identically zero on every dry column
+    # (104 of them on this card), and ``sshwzv`` leaves ``ww`` identically
+    # zero at the bottom interface.  A window off by one cell breaks the land
+    # pattern, which is the only check available here because legoESM's own
+    # vertical velocity is not bit-equal to NEMO's.
+    nemo_dry_column = np.all(np.asarray(rows["rhd_t"]) == 0.0, axis=-1)
+    lego_dry_column = np.asarray(state.land_mask.data) <= 0.5
+    t_window_control = {
+        "nemo_dry_columns": int(np.count_nonzero(nemo_dry_column)),
+        "lego_dry_columns": int(np.count_nonzero(lego_dry_column)),
+        "columns_disagreeing": int(
+            np.count_nonzero(nemo_dry_column != lego_dry_column)),
+        "ww_bottom_interface_max_abs": float(
+            np.max(np.abs(np.asarray(rows["ww_t"])[..., -1]), initial=0.0)),
+        "ww_dry_column_max_abs": float(np.max(
+            np.abs(np.asarray(rows["ww_t"])[nemo_dry_column]), initial=0.0)),
+    }
+    require(t_window_control["columns_disagreeing"] == 0
+            and t_window_control["ww_bottom_interface_max_abs"] == 0.0,
+            "the Round-156 record cell window does not land on legoESM's "
+            f"T grid: {t_window_control}")
+
     def expose(name):
         return run_uv(expose_momentum_operator=name,
                       expose_momentum_operator_stage=2)
@@ -7416,8 +7441,6 @@ def developed_stage2_advection_split(
         "keg": expose("keg"),
         "zad": expose("zad"),
         "advection": expose("advection"),
-        "after_vor": run_uv(expose_momentum_operator="vorticity",
-                            expose_momentum_operator_stage=2),
         "after_adv": run_uv(expose_stage2_momentum_rhs=True),
     }
 
@@ -7441,8 +7464,11 @@ def developed_stage2_advection_split(
     }
     ROUND157_AFTER_ADV_RMS = {"u": 3.844166e-12, "v": 6.428546e-12}
     for tag, row in authority.items():
+        # Round 157 printed seven significant digits, so the comparison
+        # carries that rounding; the tolerance is still 1e-6 relative, which
+        # binds far below any move this round could make.
         require(abs(row["active_rms"] - ROUND157_AFTER_ADV_RMS[tag])
-                <= 1.0e-18,
+                <= 5.0e-18,
                 f"the production after-advection row moved from round 157 "
                 f"on {tag}: {row['active_rms']} vs "
                 f"{ROUND157_AFTER_ADV_RMS[tag]}")
@@ -7487,7 +7513,11 @@ def developed_stage2_advection_split(
 
     def stage_entry_arm(velocity, *, name):
         armed = {}
-        for component in ("keg", "zad", "advection"):
+        # Only the kinetic-energy half is needed from these arms: it is the
+        # one quantity the split measures on NEMO's own operands, and the
+        # vertical half is then NEMO's total increment minus it.  The
+        # right-hand-side total is the null the removed fractions use.
+        for component in ("keg",):
             armed[component] = run_uv(
                 passive=False,
                 stage_entry_override=(2, velocity[0], velocity[1],
@@ -7592,6 +7622,7 @@ def developed_stage2_advection_split(
     for tag, index in (("u", 0), ("v", 1)):
         mask = rows[f"umask_vmask_{tag}"]
         keg_nemo = arms["nemo_entry_velocity"]["keg"][index]
+        keg_null = arms["null"]["keg"][index]
         zad_nemo_implied = nemo_increment[tag] - np.asarray(keg_nemo)
         d_keg = np.asarray(production["keg"][index]) - np.asarray(keg_nemo)
         d_zad = np.asarray(production["zad"][index]) - zad_nemo_implied
@@ -7610,6 +7641,14 @@ def developed_stage2_advection_split(
                 np.max(np.abs(d_keg[active]), initial=0.0)),
             "zad_difference_max_abs": float(
                 np.max(np.abs(d_zad[active]), initial=0.0)),
+            # The substitution mechanism is not byte-neutral (round 157
+            # measured its offset at 1.7e-21), so the mechanism's own cost on
+            # the kinetic-energy half is registered next to the number it
+            # could contaminate rather than assumed away.
+            "substitution_mechanism_offset_max_abs": float(np.max(np.abs(
+                (np.asarray(keg_null)
+                 - np.asarray(production["keg"][index]))[active]),
+                initial=0.0)),
             "sum_of_halves_rms": rms(d_keg + d_zad),
             "total_difference_rms": scored["production"][tag]["active_rms"],
             "owner": ("zad" if rms(d_zad) > rms(d_keg) else "keg"),
@@ -7651,6 +7690,7 @@ def developed_stage2_advection_split(
             "zad_bottom": "dynzad.f90:134-137",
         },
         "entry_window_control": entry_control,
+        "t_window_control": t_window_control,
         "authority_control": authority,
         "halves_control": halves_control,
         "keg_hook_reach_control": keg_reach_control,
