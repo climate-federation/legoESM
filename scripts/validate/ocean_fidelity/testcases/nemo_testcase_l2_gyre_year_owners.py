@@ -8226,6 +8226,49 @@ def developed_stage2_wzv_walk(
     return report
 
 
+def _state_leaf_move(left, right) -> dict:
+    """Largest move between two state pytrees, in row-scale last places.
+
+    ``_state_bit_mismatches`` counts unequal bytes, which cannot tell a
+    scheduling difference in the last bits from a real perturbation.  This
+    reports both: how many bytes differ, and the largest difference expressed
+    in units of the last place of the field's own largest value -- the same
+    row-scale unit the ladder's move gate uses.
+    """
+    import jax
+
+    left_leaves, left_tree = jax.tree_util.tree_flatten(left)
+    right_leaves, right_tree = jax.tree_util.tree_flatten(right)
+    require(left_tree == right_tree, "production state pytree structures differ")
+    worst = {"unequal_bytes": 0, "max_abs": 0.0, "max_row_scale_ulps": 0.0,
+             "leaf": None}
+    for number, (left_leaf, right_leaf) in enumerate(
+            zip(left_leaves, right_leaves, strict=True)):
+        a = np.asarray(left_leaf)
+        b = np.asarray(right_leaf)
+        require(a.shape == b.shape and a.dtype == b.dtype,
+                f"production state leaf {number} shape/dtype differs")
+        unequal = int(np.count_nonzero(
+            a.view(np.uint8).reshape(-1) != b.view(np.uint8).reshape(-1)))
+        if unequal == 0:
+            continue
+        worst["unequal_bytes"] += unequal
+        if not np.issubdtype(a.dtype, np.floating):
+            # A non-float leaf that moves at all is a real perturbation.
+            worst.update(leaf=number, max_abs=float("inf"),
+                         max_row_scale_ulps=float("inf"))
+            continue
+        delta = float(np.max(np.abs(
+            a.astype(np.float64) - b.astype(np.float64)), initial=0.0))
+        scale = float(np.spacing(max(
+            float(np.max(np.abs(b.astype(np.float64)), initial=0.0)), 1.0)))
+        ulps = delta / scale
+        if ulps > worst["max_row_scale_ulps"]:
+            worst.update(leaf=number, max_abs=delta,
+                         max_row_scale_ulps=ulps)
+    return worst
+
+
 DEVELOPED_WZV_SPLIT_PLANTS = ("wzv-split-shared", "wzv-split-inert")
 
 
@@ -8307,7 +8350,8 @@ def developed_stage2_wzv_split_walk(
     after_plain = step()
     before_plain = step(legacy_shared_stage_wzv=True)
 
-    def run(base, *, passive=True, wrote=("u", "v", "T"), **hook_kwargs):
+    def run(base, *, passive=True, wrote=("u", "v", "T"), label="",
+            **hook_kwargs):
         result = step(**hook_kwargs)
         if passive:
             # A WRITE-only exposure substitutes its OWN slots AFTER the
@@ -8315,9 +8359,18 @@ def developed_stage2_wzv_split_walk(
             # field.  ``wrote`` names exactly the slots this exposure writes,
             # so an exposure that touches a field it did not declare is
             # caught rather than excused.
+            #
+            # Asking the compiler for an extra output changes how it schedules
+            # the rest, and the campaign has measured that floor many times
+            # (operator notes L and AL).  So the control is a MAGNITUDE, in
+            # the campaign's own row-scale units: no untouched field may move
+            # by more than MAX_ULP_MOVE units in the last place of its own
+            # largest value.  Every non-zero move is reported, never excused.
             neutral = result._replace(
                 **{name: getattr(base, name) for name in wrote})
-            observer_unequal.append(_state_bit_mismatches(neutral, base))
+            row = _state_leaf_move(neutral, base)
+            row["arm"] = label or ",".join(sorted(hook_kwargs))
+            observer_unequal.append(row)
         return result
 
     def stage_w(stage, *, momentum, legacy=False, base=None, **extra):
@@ -8329,15 +8382,20 @@ def developed_stage2_wzv_split_walk(
         hooks.update(extra)
         arm_base = base if base is not None else (
             before_plain if legacy else after_plain)
+        tag = "before" if legacy else "after"
+        kind = "momentum" if momentum else "tracer"
         return np.asarray(
-            run(arm_base, passive=not extra, **hooks).T.data)
+            run(arm_base, passive=not extra,
+                label=f"stage{stage}-{kind}-w-{tag}", **hooks).T.data)
 
     def stage2_rhs(*, legacy=False):
         hooks = dict(expose_stage2_momentum_rhs=True)
         if legacy:
             hooks["legacy_shared_stage_wzv"] = True
         base = before_plain if legacy else after_plain
-        result = run(base, wrote=("u", "v"), **hooks)
+        result = run(base, wrote=("u", "v"),
+                     label="stage2-rhs-" + ("before" if legacy else "after"),
+                     **hooks)
         return (np.asarray(result.u.data), np.asarray(result.v.data))
 
     def stage2_out(*, legacy=False):
@@ -8345,7 +8403,9 @@ def developed_stage2_wzv_split_walk(
         if legacy:
             hooks["legacy_shared_stage_wzv"] = True
         base = before_plain if legacy else after_plain
-        result = run(base, wrote=("u", "v"), **hooks)
+        result = run(base, wrote=("u", "v"),
+                     label="stage2-out-" + ("before" if legacy else "after"),
+                     **hooks)
         return (np.asarray(result.u.data), np.asarray(result.v.data))
 
     # FACE-WINDOW CONTROL, the same one round 159 used.
@@ -8424,10 +8484,12 @@ def developed_stage2_wzv_split_walk(
         # three are its declared slots and every other field is the control.
         before_stage = np.asarray(getattr(
             run(before_plain, wrote=("T", "S", "eta"),
+                label=f"stage2-tracer-{field}-before",
                 expose_tracer_stage=2,
                 legacy_shared_stage_wzv=True), field).data)
         after_stage = np.asarray(getattr(
             run(after_plain, wrote=("T", "S", "eta"),
+                label=f"stage2-tracer-{field}-after",
                 expose_tracer_stage=2), field).data)
         tracer_identity[f"stage2_tracer_{field}"] = _score_stage2_face(
             after_stage, before_stage, cell_mask)
@@ -8560,7 +8622,8 @@ def developed_stage2_wzv_split_walk(
         (scored["after_momentum"]["active_rms"]
          - residual["oracle_stage_clock_pair"]["active_rms"])
         / scored["after_momentum"]["active_rms"])
-    r3_result = run(after_plain, wrote=("u", "v"), expose_stage_face_r3=2)
+    r3_result = run(after_plain, wrote=("u", "v"), label="stage2-face-r3",
+                    expose_stage_face_r3=2)
     r3_rows = {}
     for tag, field in (("u", "u"), ("v", "v")):
         lego_r3 = np.asarray(getattr(r3_result, field).data)[..., 0]
@@ -8573,8 +8636,13 @@ def developed_stage2_wzv_split_walk(
             float(r3_rows[tag]["active_rms"] / own) if own > 0.0 else 0.0)
     residual["live_thickness_ratio_operand"] = r3_rows
 
-    require(all(count == 0 for count in observer_unequal),
-            f"a passive exposure moved production state: {observer_unequal}")
+    from legoesm.ocean.fidelity.ulp_move_gate import MAX_ULP_MOVE
+
+    over = [row for row in observer_unequal
+            if row["max_row_scale_ulps"] > MAX_ULP_MOVE]
+    require(not over,
+            "a passive exposure moved production state by more than "
+            f"{MAX_ULP_MOVE} row-scale units in the last place: {over}")
 
     report = {
         "format": "gyre-round160-developed-stage2-wzv-split-walk-v1",
