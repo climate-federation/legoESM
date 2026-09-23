@@ -93,7 +93,14 @@ def main() -> int:
         sp_prod = (max(at[PROD]) - min(at[PROD])) if len(at[PROD]) > 1 else 0.0
         sp_best = (max(at[bc]) - min(at[bc])) if len(at[bc]) > 1 else 0.0
         pen[s_] = t_prod / t_best
-        unc[s_] = pen[s_] * (sp_prod / t_prod + sp_best / t_best)
+        # When the production share IS the best, the ratio is 1 by
+        # construction: numerator and denominator are the same measurement,
+        # so the repeat spread cancels instead of accumulating. Deriving an
+        # uncertainty from it anyway invented a tolerance band around a
+        # number that cannot vary, and that band swallowed the clearest
+        # possible result -- 64 best at every size -- as INCONCLUSIVE.
+        unc[s_] = (0.0 if bc == PROD
+                   else pen[s_] * (sp_prod / t_prod + sp_best / t_best))
     if len(pen) < 2:
         print("INCONCLUSIVE: fewer than two mesh sizes carry the production "
               "share, so no trend in its penalty can be read.")

@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=05:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=cpu_thr_%j.log
 # ===========================================================================
 # WHY DOES ADDING NODES MAKE THE CPU ATMOSPHERE SLOWER?
@@ -32,8 +32,21 @@
 # where the local problem was large, then applied where it is small, is the
 # shape that produces exactly this curve.
 #
+# TRUNCATED 2026-09-23, on its own pre-registered rule. A one-node test
+# varied the MESH instead of the rank count, so cells per rank moved from
+# 164k down to 2.6k -- an eighth of what a rank holds at 128 ranks -- with the
+# partition and layout held fixed. More cores won at EVERY size, by a wide
+# margin and monotonically (at the smallest mesh: 46.6 ms on 8 cores, 28.5 on
+# 16, 19.8 on 32, 17.0 on 64). The production share was never beaten, so its
+# penalty cannot rise as the local problem shrinks: the LOCAL-SIZE mechanism
+# is dead.
+#
+# What survives is the part one node cannot see -- at 128 ranks the local
+# problem is small AND the inter-node exchange is expensive at once. So this
+# keeps the two shares that bracket the question and drops the rest.
+#
 # WHAT IS MEASURED. Step time at a FIXED 128 ranks on a FIXED 32 nodes, with
-# only the per-rank core share varied: 64 (current), 32, 16, 8, 4. Two
+# only the per-rank core share varied: 64 (current) and 32. Two
 # 16-rank arms at the current and the best-looking share are included as a
 # control, because the claim is not "64 is wrong" but "the right number
 # depends on the local problem size" -- if the optimum does not move between
@@ -41,10 +54,11 @@
 # setting.
 #
 # FALSIFIABILITY, WRITTEN BEFORE SUBMIT.
-#   CONFIRMS: at 128 ranks some share below 64 beats 64 by more than the
-#     repeat spread, AND the 16-rank control prefers a LARGER share than 128
-#     does. Then the per-rank thread pool is oversubscribed once the local
-#     problem shrinks, and the fix is to scale the share with local work.
+#   CONFIRMS something the one-node test could not see: 32 beats 64 at 128
+#     ranks by more than the repeat spread, even though more cores won at
+#     every local problem size on a single node. That would mean the cost is
+#     in the interaction between a small local problem and the inter-node
+#     exchange, not in the thread pool alone.
 #   REFUTES: 64 is fastest at 128 ranks, or every share lands inside the
 #     repeat spread. Then the thread pool is not the cause and the next
 #     suspects are the partition and halo at 128 ranks -- the schedule's own
@@ -126,11 +140,11 @@ run_arm() {   # $1=ranks  $2=cpus-per-task  $3=rep
 # instead of the ones that happened to run late.
 want=0; ok=0
 for REP in 1 2; do
-    for CPT in 64 32 16 8 4; do
+    for CPT in 64 32; do
         want=$(( want + 1 )); run_arm 128 "$CPT" "$REP" && ok=$(( ok + 1 ))
     done
     # The control: does the best share at 16 ranks differ from 128?
-    for CPT in 64 16; do
+    for CPT in 64; do
         want=$(( want + 1 )); run_arm 16 "$CPT" "$REP" && ok=$(( ok + 1 ))
     done
 done
