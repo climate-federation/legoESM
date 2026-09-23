@@ -68,6 +68,7 @@ def _write(path: Path, gate, *, groups=None, commit="c" * 40,
                             rng.normal(size=(JPI, JPJ))),
         "umask_vmask": (umask, vmask),
         "rDt_r1_Dt": (np.float64(7200.0), np.float64(1.0 / 7200.0)),
+        "flags_vec_linssh": (np.float64(1.0), np.float64(0.0)),
         "rhd_ww": _pair3(rng), "after_hpg": _pair3(rng),
         "after_vor": _pair3(rng), "after_adv": _pair3(rng),
         "uu_vv_Kaa_raw": (raw_u, raw_v), "zub_zvb": (zub, zvb),
@@ -165,6 +166,22 @@ def test_round156_gate_refuses_a_missing_group(tmp_path, gate):
     _restarts(root, baseline)
     with pytest.raises(gate.GateError, match="groups differ from the registry"):
         gate.audit(root, baseline, "c" * 40)
+
+
+def test_round156_gate_stage3_alignment_is_byte_exact_or_refuses(gate):
+    rng = np.random.default_rng(7)
+    u = rng.normal(size=(3, 4, 2))
+    v = rng.normal(size=(3, 4, 2))
+    stage2 = {"uu_vv_Kaa_final": (u, v)}
+    transport = {"uu_Kmm": u.copy(), "vv_Kmm": v.copy()}
+    rows = gate.compare_stage3_alignment(stage2, transport)
+    assert rows["u"]["cells_unequal"] == 0 and rows["v"]["cells_unequal"] == 0
+
+    moved = u.copy()
+    moved[0, 0, 0] = np.nextafter(moved[0, 0, 0], np.inf)
+    with pytest.raises(gate.GateError, match="not byte-identical"):
+        gate.compare_stage3_alignment(
+            {"uu_vv_Kaa_final": (moved, v)}, transport)
 
 
 @pytest.mark.parametrize("plant", ["stamp", "truncation", "restart-byte",

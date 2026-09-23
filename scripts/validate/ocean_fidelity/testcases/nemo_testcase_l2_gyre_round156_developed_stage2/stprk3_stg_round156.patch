@@ -8,7 +8,7 @@
     USE eosbn2, ONLY : eos_l2_dump_next ! config-local WRITE-only lane-2 instrument
     USE dynadv, ONLY : dyn_adv_round41_stage ! WRITE-only stage tag for the dyn_adv split
     USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
-@@ -453,6 +454,21 @@
+@@ -453,6 +454,24 @@
                 WRITE(l3_unit) 'before_v        '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
                 WRITE(l3_unit) vv(:,:,:,Krhs)
              ENDIF
@@ -26,11 +26,14 @@
 +               CALL r156_stage2_pair2( 'ssh_Kmm_ssh_Kaa ', ssh(:,:,Kmm), ssh(:,:,Kaa) )
 +               CALL r156_stage2_pair3( 'umask_vmask     ', umask, vmask )
 +               CALL r156_stage2_scal ( 'rDt_r1_Dt       ', rDt, r1_Dt )
++               CALL r156_stage2_scal ( 'flags_vec_linssh', &
++                  & MERGE( 1._wp, 0._wp, ln_dynadv_vec ), &
++                  & MERGE( 1._wp, 0._wp, lk_linssh ) )
 +            ENDIF
              CALL    eos    (        ts, Kmm, rhd, rhop )     ! Kmm in situ density anomaly for hpg computation
              !                                                ! and potential density for BGC 
              ! L2 GYRE write-only HPG operand stream.  Capture the exact
-@@ -471,7 +487,13 @@
+@@ -471,7 +490,13 @@
                 CLOSE(l2_tracer_unit)
                 WRITE(numout,*) 'L2_STAGE2_HPG_OPERAND_DUMP ', kstp, Kmm, TRIM(l1_filename)
              ENDIF
@@ -44,7 +47,7 @@
              IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
              IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
                 WRITE(l3_unit) 'after_hpg_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
-@@ -482,6 +504,9 @@
+@@ -482,6 +507,9 @@
              !
              !                             !* Coriolis / vorticity       ==> 3D RHS
              CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )
@@ -54,7 +57,7 @@
              IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
              IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
                 WRITE(l3_unit) 'after_vor_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
-@@ -498,6 +523,9 @@
+@@ -498,6 +526,9 @@
              ELSE                                            ! FF : advective transports used for momentum advection
                 CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )
              ENDIF
@@ -64,7 +67,7 @@
              IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) THEN
                 WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
                 CLOSE(l1_unit)
-@@ -711,6 +739,9 @@
+@@ -711,6 +742,9 @@
                 END_3D
              ENDIF
              !
@@ -74,7 +77,7 @@
              IF(sn_cfctl%l_prtctl)   CALL prt_ctl( tab3d_1=uu(:,:,:,Kaa), clinfo1='stp stg   - Ua: ', mask1=umask,   &
                 &                                  tab3d_2=vv(:,:,:,Kaa), clinfo2=           ' Va: ', mask2=vmask, clinfo3='dyn' )
              !
-@@ -780,6 +811,10 @@
+@@ -780,6 +814,10 @@
              zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
              zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3v_0(ji,jj,:)*vv(ji,jj,:,Kaa) ) * r1_hv_0(ji,jj)
           END_2D
@@ -85,7 +88,7 @@
           ! Phase-3 L2 WRITE-only stage-2 operand record.  The first payload
           ! ends at the raw Kaa state and the diagnosed column correction; the
           ! second payload below records the state after the ordinary source
-@@ -799,6 +834,11 @@
+@@ -799,6 +837,11 @@
              uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)
              vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)
           END_3D

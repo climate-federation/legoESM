@@ -12,12 +12,23 @@ operands.
 
 The calibration used here is NEMO's own corrected-velocity statement,
 ``GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90`` at the
-``uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)`` loop: one
-multiply and one add per cell, so it is order-independent and cannot fail for
-a reason other than a corrupt record.  The thickness-weighted assignment is
+``uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)`` loop.  A
+fused multiply-add would normally make that a bad thing to gate; it is safe
+ONLY because ``umask`` is exactly 0 or 1, so the product is exact and the
+rebuild has one rounding either way.  The thickness-weighted assignment is
 REPORTED, never gated: its Fortran association may be contracted by the
 compiler and the campaign proves that statement under production JIT, not
 here.
+
+NEMO's correction loop runs ``1..jpkm1``; the rebuild compares every level,
+which is equivalent only because ``umask`` is zero on the bottom level, and
+the mask is checked to be binary below.
+
+The record is also tied to the state the walk scores: NEMO binds stage 2's
+``uu(Kaa)`` to stage 3's ``uu(Kmm)``, so this record's final velocity must be
+byte-identical to the Round-154 transport record's ``uu_Kmm``.  That check is
+gated whenever the transport record is given, and it proves passivity AT step
+1081, which the restart comparison (steps 180..1080) cannot.
 
 Plants (each prints ``STATUS PLANT-FIRED: <name>`` and exits nonzero):
 ``stamp``, ``truncation``, ``restart-byte``, ``operand-ulp``.
@@ -26,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -37,12 +49,14 @@ MAGIC = b"NEMO_L2_R156ST2 "
 GROUPS = (
     "rhs_entry", "uu_vv_Kbb", "uu_vv_Kmm", "r3u_r3v_Kbb", "r3u_r3v_Kmm",
     "r3u_r3v_Kaa", "r3t_Kmm_r3f", "ssh_Kmm_ssh_Kaa", "umask_vmask",
-    "rDt_r1_Dt", "rhd_ww", "after_hpg", "after_vor", "after_adv",
+    "rDt_r1_Dt", "flags_vec_linssh", "rhd_ww", "after_hpg", "after_vor",
+    "after_adv",
     "uu_vv_Kaa_raw", "zub_zvb", "uu_b_vv_b_Kaa", "uu_vv_Kaa_final",
 )
 RESTARTS = tuple(f"GYRE_OMIP_L2_P3_{step:08d}_restart.nc"
                  for step in (180, 360, 540, 720, 900, 1080))
-PLANTS = ("stamp", "truncation", "restart-byte", "operand-ulp")
+PLANTS = ("stamp", "truncation", "restart-byte", "operand-ulp",
+          "stage3-alignment")
 
 
 class GateError(RuntimeError):
@@ -111,8 +125,53 @@ def read_record(path: Path, *, truncate: int = 0) -> dict:
             "bytes": len(raw)}
 
 
+def compare_stage3_alignment(stage2_fields: dict,
+                             transport_fields: dict) -> dict:
+    """Stage 2's ``uu(Kaa)`` IS stage 3's ``uu(Kmm)``; prove it byte for byte.
+
+    The restart comparison can only speak for steps 180..1080, all of them
+    BEFORE the only step at which this writer executes.  This ties the new
+    record to the state the walk already scores, and it is the check that
+    would see a writer that perturbs NEMO at step 1081 alone.
+    """
+    rows = {}
+    for tag, mine, theirs in (
+            ("u", stage2_fields["uu_vv_Kaa_final"][0],
+             transport_fields["uu_Kmm"]),
+            ("v", stage2_fields["uu_vv_Kaa_final"][1],
+             transport_fields["vv_Kmm"])):
+        mine = np.ascontiguousarray(mine, dtype=np.float64)
+        theirs = np.ascontiguousarray(theirs, dtype=np.float64)
+        require(mine.shape == theirs.shape,
+                f"stage-3 alignment {tag}: {mine.shape} vs {theirs.shape}")
+        unequal = int(np.count_nonzero(
+            mine.view(np.uint64) != theirs.view(np.uint64)))
+        rows[tag] = {
+            "cells_scored": int(mine.size), "cells_unequal": unequal,
+            "max_abs": float(np.max(np.abs(mine - theirs), initial=0.0)),
+        }
+    require(all(row["cells_unequal"] == 0 for row in rows.values()),
+            "stage-2 after-velocity is not byte-identical to the Round-154 "
+            "stage-3 Kmm velocity: the writer perturbs step 1081 or the two "
+            "records are not the same run")
+    return rows
+
+
+def _load_transport_gate(root: Path):
+    """Load the committed Round-154 reader; never re-derive its layout."""
+    path = (Path(__file__).resolve().parent
+            / "nemo_testcase_l2_gyre_round154_developed_transport_gate.py")
+    require(path.is_file(), f"missing Round-154 gate {path}")
+    spec = importlib.util.spec_from_file_location("_r154_gate", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def audit(root: Path, baseline: Path, expect_commit: str,
-          plant: str | None = None) -> dict:
+          plant: str | None = None, transport_record: Path | None = None
+          ) -> dict:
     root = Path(root)
     baseline = Path(baseline)
     record_path = root / RECORD
@@ -197,6 +256,19 @@ def audit(root: Path, baseline: Path, expect_commit: str,
             "in-run calibration failed: the recorded corrected velocity is "
             "not the recorded raw velocity plus the recorded correction")
 
+    alignment = None
+    if transport_record is not None:
+        gate154 = _load_transport_gate(Path(transport_record))
+        transport = gate154.read_record(
+            Path(transport_record) / gate154.RECORD)
+        fields = dict(record["fields"])
+        if plant == "stage3-alignment":
+            moved = np.array(fields["uu_vv_Kaa_final"][0], copy=True)
+            moved[0, 0, 0] = np.nextafter(moved[0, 0, 0], np.inf)
+            fields["uu_vv_Kaa_final"] = (
+                moved, fields["uu_vv_Kaa_final"][1])
+        alignment = compare_stage3_alignment(fields, transport["fields"])
+
     # REPORTED, never gated: the thickness-weighted assignment, whose Fortran
     # association the compiler may contract.
     assignment = {}
@@ -236,6 +308,7 @@ def audit(root: Path, baseline: Path, expect_commit: str,
         },
         "restarts": restarts,
         "in_run_calibration": calibration,
+        "stage3_alignment": alignment,
         "assignment_rebuild_reported": assignment,
         "inherited_stream_check": "WAIVED by operator note AS",
         "expect_commit": expect_commit,
@@ -248,11 +321,16 @@ def main(argv=None) -> int:
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--plant", choices=PLANTS)
+    parser.add_argument("--transport-record", type=Path,
+                        help="admitted Round-154 transport run directory; "
+                             "its stage-3 Kmm velocity must equal this "
+                             "record's stage-2 after-velocity")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
         report = audit(args.root, args.baseline, args.expect_commit,
-                       plant=args.plant)
+                       plant=args.plant,
+                       transport_record=args.transport_record)
     except GateError as error:
         if args.plant:
             print(f"STATUS PLANT-FIRED: {args.plant}: {error}")

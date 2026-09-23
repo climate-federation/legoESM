@@ -6563,9 +6563,24 @@ def _developed_stage2_velocity_split(production: dict, oracle: dict, *,
     ``:753,772`` -- the SAME function the production stage calls -- and it is
     driven here with NEMO's recorded ``uu_b(Kmm)``, ``e3u_0``, ``r1_hu_0``
     and ``umask``.  Installing NEMO's depth mean leaves the deviation, so the
-    difference that SURVIVES belongs to the internal half and the difference
-    that is REMOVED belongs to the external half.  The arms are an isolated
-    JIT of that shared statement and are never relabelled as production.
+    difference that is REMOVED belongs to the external half.  The arms are an
+    isolated JIT of that shared statement and are never relabelled as
+    production.
+
+    SCOPE, because the external half writes THREE fields at ``:217-256`` and
+    this arm installs ONE of them.  ``ssh(Kaa)`` reaches ``uu(Kaa)`` only
+    through ``r3u(Kaa)``, and ``r3u(Kaa)`` is the divisor of the INTERNAL
+    assignment at ``:699``, not of the correction, so neither is varied here.
+    ``r3u(Kaa)`` is stage 3's ``r3u(Kmm)`` and is measured non-bit at a
+    RELATIVE 6.522560269672795e-13; to first order its carry is that relative
+    difference times the velocity, five orders below the difference being
+    split.  That is a bound read off a measured operand, not a substitution
+    arm: what survives this arm is the internal half PLUS that bounded term,
+    and round 157's record settles it by substitution.
+
+    The removed part is an e3u-weighted column mean while the score is an
+    unweighted rms over faces, so the two are not orthogonal and the SIGN of
+    a near-zero removed fraction carries no meaning; only its magnitude does.
     """
     import jax
     import jax.numpy as jnp

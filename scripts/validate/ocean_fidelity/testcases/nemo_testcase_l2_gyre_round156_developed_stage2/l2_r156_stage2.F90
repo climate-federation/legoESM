@@ -41,7 +41,7 @@ CONTAINS
       IF( ios /= 0 ) ERROR STOP 'R156_STAGE2_OPEN_FAILED'
       WRITE(nunit) magic
       WRITE(nunit) 1, kt, kstg, Kbb, Kmm, Krhs, Kaa, jpi, jpj, jpk, &
-         & STORAGE_SIZE(1._wp), 18, ntsi, ntei, ntsj, ntej
+         & STORAGE_SIZE(1._wp), 19, ntsi, ntei, ntsj, ntej
       lopen = .TRUE.
    END SUBROUTINE r156_stage2_open
 

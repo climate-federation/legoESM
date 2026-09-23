@@ -91,25 +91,28 @@ check_layout() {
   adv=$(grep -n "r156_stage2_pair3( 'after_adv" "$source" | head -1 | cut -d: -f1)
   after_adv=$(grep -n 'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )' "$source" | head -1 | cut -d: -f1)
   [[ "$(grep -Fc 'kstp == 1081 .AND. kstg == 2' "$source")" -eq 8 ]] &&
-  [[ "$(grep -cE "CALL r156_stage2_(pair3|pair2|scal) ?\\(" "$source")" -eq 18 ]] &&
+  [[ "$(grep -cE "CALL r156_stage2_(pair3|pair2|scal) ?\\(" "$source")" -eq 19 ]] &&
   [[ -n "$opened" && -n "$closed" && -n "$entry" && -n "$adv" ]] &&
+  [[ -n "$hpg" && -n "$after_adv" ]] &&
   [[ "$entry" -gt "$opened" ]] && [[ "$entry" -lt "$hpg" ]] &&
   [[ "$adv" -gt "$after_adv" ]] && [[ "$closed" -gt "$adv" ]]
 }
 if ! check_layout "$dry/stprk3_stg.F90" || \
    [[ "$(grep -Fc "magic = 'NEMO_L2_R156ST2'" "$dry/l2_r156_stage2.F90")" -ne 1 ]] || \
-   [[ "$(grep -Fc 'STORAGE_SIZE(1._wp), 18, ntsi' "$dry/l2_r156_stage2.F90")" -ne 1 ]]; then
+   [[ "$(grep -Fc 'STORAGE_SIZE(1._wp), 19, ntsi' "$dry/l2_r156_stage2.F90")" -ne 1 ]]; then
   printf 'REFUSE: developed stage-2 writer layout is incomplete\n' >&2
   exit 66
 fi
 if [[ "$MODE" == --plant-layout ]]; then
-  planted=$dry/stprk3_stg.planted.F90
-  sed "/r156_stage2_pair3( 'rhs_entry/d" "$dry/stprk3_stg.F90" >"$planted"
-  if check_layout "$planted"; then
-    printf 'REFUSE: layout plant stayed green\n' >&2
-    exit 68
-  fi
-  printf 'STATUS PLANT-FIRED: layout\n'
+  for arm in rhs_entry after_adv; do
+    planted=$dry/stprk3_stg.planted.$arm.F90
+    sed "/r156_stage2_pair3( '$arm/d" "$dry/stprk3_stg.F90" >"$planted"
+    if check_layout "$planted"; then
+      printf 'REFUSE: layout plant %s stayed green\n' "$arm" >&2
+      exit 68
+    fi
+    printf 'STATUS PLANT-FIRED: layout %s\n' "$arm"
+  done
   printf 'REFUSE: intentional layout-plant exit\n' >&2
   exit 69
 fi
@@ -246,9 +249,9 @@ printf '%s %s %s\n' "$(sha256sum "$TARGET_RUN/$RECORD" | awk '{print $1}')" \
 
 gate() {
   "$PY" "$GATE" --root "$TARGET_RUN" --baseline "$DAILY_REF" \
-    --expect-commit "$COMMIT" "$@"
+    --transport-record "$SOURCE_RUN" --expect-commit "$COMMIT" "$@"
 }
-for plant in stamp truncation restart-byte operand-ulp; do
+for plant in stamp truncation restart-byte operand-ulp stage3-alignment; do
   if gate --plant "$plant" --output "$TARGET_RUN/round156_${plant}_plant.json" \
     >"$TARGET_RUN/round156_${plant}_plant.log" 2>&1; then
     printf 'REFUSE: round156 %s plant stayed green\n' "$plant" >&2
