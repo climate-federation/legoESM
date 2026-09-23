@@ -6424,10 +6424,14 @@ class LatLonCGridOceanModel:
                 # here: leaving the runoff in deposits a second, nearly
                 # identical copy of the runoff's heat
                 # (``rnf*T_top/rho0/h`` against ``MAX(sst,0)*rnf/rho0/h``).
-                # Subtracting it is bitwise a no-op for every card that
-                # resolves no runoff, because ``x - 0.0`` is ``x``.
+                # The runoff is left OUT OF THE SUM rather than subtracted
+                # from it: ``(x + r) - r`` is not bitwise ``x`` and on this
+                # record the two spellings differ on 328 cells.  For a card
+                # that resolves no runoff the two sums are bitwise equal,
+                # because ``x + 0.0`` is ``x`` for every value this sum can
+                # hold.
                 _fw_eta_stage = (
-                    (net_freshwater_flux(freshwater) - freshwater.runoff)
+                    net_freshwater_flux(freshwater, include_runoff=False)
                     / _cfg_b.rho_0)
 
             def _emp_stage_rate(tracer, h_stage):
