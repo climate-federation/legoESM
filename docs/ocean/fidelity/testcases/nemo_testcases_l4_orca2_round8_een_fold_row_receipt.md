@@ -262,7 +262,18 @@ with no behavioural change.
 | ORCA2 ladder gate | exit 4, `STOP_PRODUCTION_LDF_DYN_TRIPOLAR_COEFF_GAP` at kt=1, no magnitude registered |
 | receipt citation gate | PASS, 274 citations mapped, 0 failures, 0 map-audit failures, 0 unmapped |
 | citation gate with a rigid two-line plant | refuses, exit 2 |
-| the seven named push gates plus the new fold-row tests | **165 passed in 517.05 s** |
+| the seven named push gates plus the new fold-row tests, at the final tip | **182 passed in 504.69 s** |
+| the ocean-fidelity battery, once, with twelve workers | **3 failed, 1516 passed, 7 skipped in 2,389.81 s** |
+
+Two of those three failures were this round's own, and they are fixed: round
+7's stop tests named the refusal this round transcribed away, so they failed
+against the fix they were written to guard.  The expectation was stale, not the
+code.  They now exercise the stop REGISTRY instead of one hard-coded name, and
+they require the retired refusal to be rejected as unregistered, so the
+registry shrinking with the transcription is itself asserted; their file passes
+17 of 17 and the re-run push battery above is green at the final tip.  The
+third failure is the listed pre-existing sea-ice scalar-math provenance red
+(`A MY_SRC is not verbatim`); no other new failing identifier appeared.
 
 Six citations in an earlier receipt and in the citation map were rigidly
 re-anchored: the transcription inserted twenty-one lines above them in the same
