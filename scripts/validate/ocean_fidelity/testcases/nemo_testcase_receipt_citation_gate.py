@@ -1973,7 +1973,7 @@ CITATION_MAP = {
     'ocean_pe_latlon_cgrid.py:3095-3121': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
-    'ocean_pe_latlon_cgrid.py:4938-4960': [
+    'ocean_pe_latlon_cgrid.py:4959-4981': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
         ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 23],
     'ocean_model_latlon_cgrid.py:6237-6247': [
