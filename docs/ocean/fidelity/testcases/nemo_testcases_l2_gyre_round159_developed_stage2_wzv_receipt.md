@@ -26,7 +26,9 @@ The preregistration is
 `6e40cca43` before any round-159 measurement ran.  The authoritative
 measurement is `wzv_walk.json` under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round159/walk/`, produced on
-a clean tree at `ebcee8a8d`.  No card, no scheme selection, no tunable and no
+a clean tree at `545a9b8c4`, the tip after the independent review's findings
+were closed; the same rows were produced identically at `ebcee8a8d` before
+them.  No card, no scheme selection, no tunable and no
 carried field changed; the one model edit is a private diagnostic arm that no
 public configuration can construct and no production path reads.
 
@@ -229,20 +231,54 @@ about 8.60e-07 K, day-30 6.888194e-05 K, day-240 1.644671864e-02 K, day-360
 1.122345086e-02 K.  ORCA2 is **UNMEASURED-WITH-SPEC**: repeat this walk on the
 ocean-only ORCA2 card before transferring the verdict.
 
+## What is still wrong after the correction, registered
+
+The corrected arm does not reach this round's own declared floor.  The
+preregistration called 1e-08 relative the compiled-rounding floor; the
+velocity-form arm lands at 9.74e-08 and, with the oracle's own entry velocity
+as well, at 4.38e-08.  That is four to ten times the floor, so **a second
+operand of the producer is still wrong**, and it is registered here rather
+than carried silently into a landing round.
+
+The record already carries the operands that would separate it: the live
+thickness ratio at the stage level and the sea-surface-height pair.  The
+discriminating measurement for round 160, named in advance: substitute those
+two operand classes one at a time into the producer, with the call form
+already corrected, and report which of them closes the remaining 9.74e-08.
+The two candidates are the divergence's own live-thickness factor and the
+quasi-Eulerian stretching term's clock and level pair, which legoESM forms
+from the barotropic after-level and the oracle forms from the half-level with
+the stage time step.
+
 ## Plants, review and tests
 
-Two plants, each printing its own marker and exiting nonzero:
+Two plants.  A control that CATCHES its plant returns and the walk exits 1
+with `STATUS PLANT-FIRED`; a control that does NOT catch its plant raises and
+the walk exits 2 with `STATUS PLANT-BLIND`.  The two paths were the same
+marker in this round's first version, which the review caught — the campaign
+fixed that exact defect once before in a gate that printed success while
+firing — and the refusal messages also read as their own inverse.  Both are
+corrected.
 
-* `wzv-cell-window` shifts the oracle's dry-column pattern by one column and
-  requires the cell-window control to refuse it.  It does: 40 columns
-  disagree, and the walk prints `STATUS PLANT-FIRED: wzv-cell-window` and
-  exits 1.  Forty is the same count round 158 measured for the nearest
-  candidate window, which is independent evidence that the control
-  discriminates rather than merely fires.
+* `wzv-cell-window` shifts the oracle's dry-column pattern by one cell and
+  requires the cell-window control to refuse it, in BOTH directions
+  separately.  It does: 40 columns disagree one cell east and 60 one cell
+  north, and the walk prints
+  `STATUS PLANT-FIRED: wzv-cell-window: {'shifted_one_column_east': 40, 'shifted_one_row_north': 60}`
+  and exits 1.  Forty and sixty are the same two counts round 158 measured
+  for the two nearest candidate windows, which is independent evidence that
+  the control discriminates rather than merely fires.
 * `wzv-form-inert` claims the arm is on while leaving it off, and requires the
   liveness control to refuse a run that never selected the other call form.
   It does: 0 of 18,000 interfaces move, and the walk prints
   `STATUS PLANT-FIRED: wzv-form-inert` and exits 1.
+
+**Registered, not demonstrated:** the `STATUS PLANT-BLIND` path is structurally
+distinct — a raise with its own marker and its own exit code — but it was not
+exercised this round.  Exercising it needs a deliberately blinded plant in the
+tree, and the walk's fail-closed commit stamp refuses to run a modified tree,
+so the only way to show it would be to commit a blind plant.  That is a gate
+this round did NOT run, said out loud.
 
 Three new tests, each shown to FAIL when the guard it checks is removed: a
 continuity-form arm that is not a plain boolean is refused at construction,
@@ -269,5 +305,93 @@ is not in the gate's map and was already carrying an older drift before this
 round.
 
 Independent review by codex not run (codex is paused).  A Claude reviewer was
-run instead, on the whole round's diff and the compiled sources.
+run instead, on the whole round's diff and the compiled sources, and its
+verdict was **SHIP WITH CHANGES**, verbatim:
+
+> I could not break the claim. Every load-bearing statement checks out against
+> the compiled source, and the mechanism is confirmed by an arithmetic identity
+> rather than a fit.
+
+It read the compiled program independently and confirmed the ordering this
+receipt rests on: the momentum consumer runs before the tracer transport's own
+solve, so nothing overwrites the array between the stage solve and the vertical
+advection, and the record's capture point is on the momentum side of it.  It
+also accepted the arm as ONE variable, having checked that both call forms
+reach the same shared mesh-operand builder so no second face thickness changes
+underneath.
+
+Its findings and what was done with each:
+
+1. Originally BLOCKER, **RETRACTED BY THE REVIEWER** to HIGH: it read a live
+   capture of the running test log as a truncated run.  What survived was real
+   — a failing citation-gate test — and it is CLOSED: two map entries eighteen
+   lines apart were re-anchored in sequence and the second replacement
+   rewrote the first one's new key, so the map lost one line and carried the
+   next one twice.  Both keys are distinct again, the map audits clean, and
+   the suite is green.  Registered rather than quietly fixed, because a rigid
+   shift applied by text substitution can collide with itself and that is a
+   defect in the method, not a typo.
+2. HIGH, the corrected arm sits four to ten times above the floor this round
+   declared.  ACCEPTED AND REGISTERED, with the discriminating measurement
+   named, in its own section above.
+3. MEDIUM, both plants printed the fired marker on the path where the control
+   had NOT caught them.  FIXED: caught returns, blind raises with its own
+   marker and exit code.
+4. MEDIUM, the preregistration named a different pair of plants (a one-unit
+   operand move and a scaled scored field) than the round shipped.
+   REGISTERED, not argued away: the swap happened because the operand this
+   round substitutes is not a recorded array but a call form, so a one-unit
+   move of it has no meaning; what replaced it tests the same two properties,
+   that the window is the right window and that the arm is live.
+5. LOW, the cell window was planted in longitude only.  FIXED: both directions
+   now, each refused separately.  The review's own argument for the vertical
+   direction is recorded here: an off-by-one interface would give a difference
+   of order the field itself, not 0.51% of it.
+6. LOW, a landing note for round 160: if adaptive-implicit vertical advection
+   is ever on, stage 3 splits two implicit shares as well as two vertical
+   velocities, the momentum vertical-diffusion call runs before the tracer
+   solve, and no momentum solve may be added at stage 1, where the
+   vector-invariant arm deliberately skips it.  CARRIED into OPEN below.
+
+The review found nothing in the diff that changes public behaviour: the new
+arm defaults to the production transport form, is refused at construction
+unless it is a plain boolean, is wired at exactly one stage-2 site, and no card
+constructs it.
+
+## OPEN — Round 160
+
+1. **Build the second continuity solve.**  The candidate is not a one-line
+   swap.  The oracle runs the momentum solve on the raw stage velocity at
+   stages 2 and 3 and the tracer solve on the corrected transports, and
+   legoESM must do the same: two vertical velocities per stage, the momentum
+   one new and the tracer one exactly what it has today.  Prove the tracer
+   field is BYTE-IDENTICAL to today's before scoring anything, or the round
+   has changed two things.
+2. **Then the full gate.**  Decision 43/45: the month, day 240 and day 360 not
+   worse, the kt2 temperature and salinity rows at the bar, first-over-bar not
+   earlier, every moved row registered with the harness's run-to-run floor of
+   about 2e-10 K quoted next to it, DINO measured if the statement is shared,
+   the generic NEMO-GYRE card and the LOCK_EXCHANGE and OVERFLOW tanks per
+   operator note AR, the six-file push gate green, and a reviewer's verdict
+   quoted verbatim before LANDED.
+3. **Separate the 9.74e-08 residual first**, by the measurement named above.
+   A landing that leaves an unexplained residual four to ten times the floor
+   is a landing with an open operand inside it.
+4. **Do not add a momentum solve at stage 1.**  The oracle's vector-invariant
+   arm skips it deliberately, and stage 1's right-hand side is built
+   elsewhere.
+5. **Adaptive-implicit is off on this card and must be checked before the
+   change is transferred.**  Where it is on, the stage-3 partition splits the
+   vertical velocity into an explicit and an implicit share, so there are two
+   of each, and the momentum vertical-diffusion call reads them before the
+   tracer solve runs.
+6. **Do not walk the floor.**  The kinetic-energy gradient at 5e-09 relative,
+   the vorticity at 1e-08 and the pressure gradient at 1e-11 are the
+   compiled-rounding floor (operator notes L and AL).
+7. **Rank at day 240, quote the floor.**  This statement's day-240 carry is
+   unmeasured.  If it turns out to be within the harness's own run-to-run
+   floor of about 2e-10 K, say so and put the question to the user rather than
+   landing it as an improvement.
+8. **ORCA2 stays UNMEASURED-WITH-SPEC**: repeat this walk on the ocean-only
+   ORCA2 card before transferring the verdict.
 
