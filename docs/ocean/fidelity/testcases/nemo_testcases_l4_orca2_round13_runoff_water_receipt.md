@@ -479,5 +479,10 @@ freshwater-budget correction were NOT switched on.
    disagreement at levels 28-29; the barotropic vertex thickness, still
    unmeasured; the independent sea-surface height's 1.55 cm on 16,433 cells,
    owned by the initial sea-ice category configuration and out of scope.
-8. The wide ocean-fidelity battery has not been run at this round's final tip.
+8. **`emp`'s freedom from runoff is verified on the CITED paths only** — the
+   barotropic forcing, the dilution term and the `nn_fwb = 2` arm.  The
+   modules that BUILD `emp` (`sbcmod`, `sbcblk`, `sbcice_*`) were not read.
+   Nothing in this round depends on them, because the card is driven by the
+   record's own `emp` frames, but an independent surface-forcing lane would.
+9. The wide ocean-fidelity battery has not been run at this round's final tip.
    Operator action.
