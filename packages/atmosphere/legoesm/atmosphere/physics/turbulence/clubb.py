@@ -6179,6 +6179,24 @@ def clubb_turbulence(
     return output, wp2_new
 
 
+def virtual_potential_temperature_with_liquid(T, q_v, q_c, exner):
+    """Virtual potential temperature INCLUDING condensate loading.
+
+    ``clubb_intr.F90:1603``: ``thv = t*exner_clubb*(1 + zvir*q_v - q_cldliq)``,
+    where CAM's ``exner_clubb`` is the reciprocal of this module's ``exner``.
+    Suspended water is weight without vapour buoyancy, so dropping the ``q_c``
+    term makes a cloudy layer look too buoyant -- exactly the layers the liquid
+    partition creates.  Factored out so the loading can be tested on its own:
+    inside ``clubb_step`` it is confounded with the temperature and vapour that
+    the partition changes at the same time, and a two-run comparison there
+    cannot tell the loading apart from them.
+
+    Reduces to the historical ``virtual_temperature(T, q_v)/exner`` at
+    ``q_c = 0``.
+    """
+    return (virtual_temperature(T, q_v) - T * q_c) / exner
+
+
 def clubb_step(
     u: jax.Array,
     v: jax.Array,
@@ -6293,12 +6311,7 @@ def clubb_step(
     if config.liquid_partition:
         q_t = q_v + q_c
         T_l = T - (constants.L_v / constants.c_pd) * q_c
-        # Condensate LOADING, which the reference carries whenever the host has
-        # liquid to give it (clubb_intr.F90:1603,
-        # ``thv = t*exner*(1 + zvir*q_v - q_cldliq)``).  Suspended water is
-        # weight without vapour buoyancy, so omitting it makes a cloud layer
-        # look too buoyant -- exactly the layers this lever creates.
-        thv = (virtual_temperature(T, q_v) - T * q_c) / exner
+        thv = virtual_potential_temperature_with_liquid(T, q_v, q_c, exner)
     else:
         q_t = q_v
         T_l = T

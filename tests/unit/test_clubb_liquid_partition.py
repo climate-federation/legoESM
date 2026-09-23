@@ -438,6 +438,21 @@ def test_the_host_applies_the_subcycled_modules_in_sequence():
     from legoesm.atmosphere.physics import combined
 
     src = inspect.getsource(combined._make_hydrostatic_combined)
+    # The load-bearing claim, pinned on the ADVANCE ITSELF rather than only on
+    # the loop around it (GLM): the state advance between sub-steps has to
+    # carry the cloud liquid.  If it advanced only wind, temperature and
+    # vapour -- entirely plausible for a helper written before any module
+    # produced a q_c tendency -- the microphysics would read the stale liquid
+    # even at n>=2, this guard would certify protection that does not exist,
+    # and water would still be conserved so nothing would fail.
+    body = src[src.index("def _advance_state("):]
+    body = body[:body.index("\n    def ", 1)]
+    # It iterates the state's OWN tracers and applies any matching tendency,
+    # rather than naming a fixed list that q_c would be absent from.
+    assert "for k, f in state.tracers.items()" in body
+    assert "tracer_tends[k]" in body
+    assert "if k in tracer_tends else f" in body
+
     # One module at a time, with the state advanced between them.
     assert 'for _fr in sel["sub"]:' in src
     assert "r_sub = _run([_fr], state_m, ps_m)" in src
@@ -482,46 +497,41 @@ def test_an_override_cannot_smuggle_the_lever_past_the_ordering_guard():
     make_physics(off, model_type="mpas", cld_macmic_num_steps=1)
 
 
-def test_condensate_loading_reaches_the_buoyancy():
+def test_condensate_loading_is_carried_in_the_buoyancy():
     """CAM carries the suspended liquid's weight in thv (clubb_intr.F90:1603).
 
-    Suspended water is weight without vapour buoyancy, so omitting it makes a
-    cloud layer look too buoyant -- precisely the layers this lever creates.
-    Non-vacuity: the same column with and without host liquid must differ
-    through the buoyancy, not only through the water budget, so this compares
-    against a run whose liquid was folded into vapour instead (equal total
-    water, equal moist static energy, different condensate loading).
+    Tested on the formula directly.  A two-run comparison inside ``clubb_step``
+    cannot do it: the partition changes temperature and vapour at the same time,
+    so the two runs differ whether or not the loading term is present, and a
+    mutation that deletes ``- T*q_c`` still passes (codex demonstrated exactly
+    that against the first version of this test).
     """
-    from legoesm.atmosphere.physics.turbulence.clubb import clubb_step
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        virtual_potential_temperature_with_liquid as _thv,
+    )
+    from legoesm.atmosphere.physics._shared import virtual_temperature
 
-    col = _column(q_c_amp=5.0e-4)
-    dt = 300.0
-    moments = init_clubb_moments(_NCOL, _NLEV, _ON, dtype=jnp.float64)
-    out_liq = clubb_step(
-        col["u"], col["v"], col["T"], col["q_v"], moments,
-        col["p_full"], col["p_half"], col["z_full"], col["z_half"],
-        col["T_sfc"], col["q_sfc"], col["rho"], dt, _ON, q_c=col["q_c"])
-    # Same total water and same temperature, but presented as all-vapour, so
-    # the ONLY difference is that the closure is told none of it is condensate.
-    out_vap = clubb_step(
-        col["u"], col["v"],
-        col["T"] - (constants.L_v / constants.c_pd) * col["q_c"],
-        col["q_v"] + col["q_c"], moments,
-        col["p_full"], col["p_half"], col["z_full"], col["z_half"],
-        col["T_sfc"], col["q_sfc"], col["rho"], dt, _ON,
-        q_c=jnp.zeros_like(col["q_c"]))
-    # The advanced means see the same rt and thl in both, so any difference is
-    # the loading term in thv.  Compare the BUOYANCY FLUX, which is what thv
-    # feeds: the prognostic variances are floored at tke_min after one step from
-    # a fresh moment state and would compare equal for a reason that has nothing
-    # to do with the loading.
-    wpthvp_liq = np.asarray(out_liq[5]["wpthvp"])
-    wpthvp_vap = np.asarray(out_vap[5]["wpthvp"])
-    assert not np.allclose(wpthvp_liq, wpthvp_vap, rtol=1e-12, atol=0), (
-        "condensate loading did not reach the buoyancy")
-    # Loading is a NEGATIVE buoyancy contribution, so the column carrying its
-    # water as condensate must be the less buoyant of the two somewhere.
-    assert (wpthvp_liq < wpthvp_vap - 1e-14).any()
+    T = jnp.asarray([[288.0, 250.0]])
+    q_v = jnp.asarray([[1.0e-2, 2.0e-3]])
+    q_c = jnp.asarray([[5.0e-4, 0.0]])
+    exner = jnp.asarray([[0.98, 0.72]])
+
+    got = np.asarray(_thv(T, q_v, q_c, exner))
+    want = np.asarray((virtual_temperature(T, q_v) - T * q_c) / exner)
+    np.testing.assert_allclose(got, want, rtol=1e-14, atol=0)
+
+    # Non-vacuity: deleting the loading term changes the answer by exactly
+    # T*q_c/exner, which is what the mutation test has to see.
+    no_load = np.asarray(virtual_temperature(T, q_v) / exner)
+    # 1e-11: this is a difference of two nearly equal numbers, so it carries
+    # cancellation roundoff; the term itself is O(0.15 K) and unmistakable.
+    np.testing.assert_allclose(no_load - got,
+                               np.asarray(T * q_c / exner), rtol=1e-11, atol=0)
+    assert (no_load[0, 0] - got[0, 0]) > 1e-4, "loading must be resolvable"
+    # Loading is a NEGATIVE buoyancy contribution, and it vanishes with no
+    # liquid, so the lever-off path is unchanged.
+    assert got[0, 0] < no_load[0, 0]
+    assert got[0, 1] == no_load[0, 1]
 
 
 def test_mpas_lane_refuses_a_state_missing_either_tracer():
@@ -559,3 +569,22 @@ def test_public_wrapper_refuses_liquid_with_the_lever_off():
             col["p_full"], col["p_half"], col["z_full"], col["z_half"],
             col["T_sfc"], col["q_sfc"], col["rho"], 300.0, _OFF,
             q_c=col["q_c"])
+
+
+def test_an_override_cannot_smuggle_the_lever_past_the_floor_guard():
+    """The floor refusal has to key off the RESOLVED turbulence selection.
+
+    Codex reproduced a config with the experiment flag FALSE, an override
+    carrying the partition, and the sub-cycle on, validating and building with
+    both radiative condensate floors still active at 1e-3 and 1.5e-4.
+    """
+    import pytest
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    cfg = _mpas_cfg(clubb_liquid_partition=False,
+                    turbulence_override=TurbulenceConfig(
+                        scheme="clubb", clubb=_ON),
+                    cloud_q_c_diagnostic=None)
+    with pytest.raises(ValueError, match="RESOLVED cloud config"):
+        ExperimentConfig(**cfg).validate_strict()

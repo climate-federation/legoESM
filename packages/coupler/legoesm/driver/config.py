@@ -1762,6 +1762,22 @@ class ExperimentConfig(NamedTuple):
     # needs more sub-steps than the cap.
     morrison_sed_cfl_substeps_strict: bool = False
 
+    def _liquid_partition_resolved(self) -> bool:
+        """Is CLUBB's cloud-liquid exchange selected, by ANY route?
+
+        Not the experiment flag alone: an authoritative ``turbulence_override``
+        can carry ``CLUBBConfig(liquid_partition=True)`` without it ever being
+        set, and that route reached a validated, built model with both
+        radiative condensate floors still active (codex).
+        """
+        if self.clubb_liquid_partition:
+            return True
+        _ov = self.turbulence_override
+        if _ov is not None and getattr(_ov, "scheme", None) == "clubb":
+            return bool(getattr(getattr(_ov, "clubb", None),
+                                "liquid_partition", False))
+        return False
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -2726,7 +2742,7 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"cld_macmic_num_steps={_nmm} sub-cycles turbulence and "
                     "microphysics, but both are 'none'")
-        if self.clubb_liquid_partition:
+        if self._liquid_partition_resolved():
             # CLUBB's liquid exchange REPLACES the host's cloud water with the
             # closure's equilibrium diagnosis, so the microphysics must read the
             # REPLACED value; CAM guarantees that by sequential-update splitting
@@ -3446,7 +3462,7 @@ class ExperimentConfig(NamedTuple):
             # were compensating for).  Their ranges start above zero because a
             # floor of 0 was previously unreachable; without this the guard
             # below would demand a value this loop then rejects (codex).
-            if (self.clubb_liquid_partition and _v == 0.0
+            if (self._liquid_partition_resolved() and _v == 0.0
                     and _f in ("cloud_q_c_diagnostic",
                                "cloud_conv_cloud_condensate")):
                 continue
