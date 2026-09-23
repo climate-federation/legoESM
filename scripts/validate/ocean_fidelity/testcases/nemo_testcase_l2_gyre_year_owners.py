@@ -9244,7 +9244,7 @@ def developed_stage2_face_r3_walk(
     return report
 
 
-DEVELOPED_T_R3_PLANTS = ("t-r3-inert", "t-r3-tracer", "t-r3-blind")
+DEVELOPED_T_R3_PLANTS = ("t-r3-inert", "t-r3-tracer")
 
 
 def developed_stage2_t_r3_walk(
@@ -9479,36 +9479,6 @@ def developed_stage2_t_r3_walk(
     observer_passivity = _state_leaf_move(observed, plain)
     require(observer_passivity["unequal_bytes"] == 0,
             f"the producer observer is not passive: {observer_passivity}")
-
-    if plant == "t-r3-blind":
-        # DELIBERATELY BLINDED, committed for ONE round to demonstrate the
-        # fail-closed path that rounds 159, 160 and 161 each registered as
-        # structurally distinct and never exercised, and removed again in the
-        # next commit.  The violation is the one ``t-r3-inert`` plants -- an
-        # INERT substitution presented as the oracle's -- but it is handed to
-        # the TRACER-IDENTITY control, which is scoped to the tracer's own
-        # vertical velocity and therefore cannot see a violation that lives on
-        # the momentum path.  That control passes, the plant is NOT caught,
-        # and the walk must raise with its own marker and its own exit code
-        # rather than print the marker a caught plant prints.
-        height_source["mode"] = "identity"
-        blind = np.asarray(run(
-            "plant-blind", substitute_ordinal=0,
-            nemo_stage_momentum_wzv_split=True,
-            expose_tracer_transport_stage=2,
-            expose_tracer_transport_as_ww=True).T.data)
-        height_source["mode"] = "oracle"
-        blind_base = np.asarray(run(
-            "plant-blind-base",
-            nemo_stage_momentum_wzv_split=True,
-            expose_tracer_transport_stage=2,
-            expose_tracer_transport_as_ww=True).T.data)
-        caught = _score_stage2_face(blind, blind_base, cell_mask)
-        if caught["active_cells_unequal"] == 0:
-            raise GateError(
-                "PLANT-BLIND: the tracer-identity control did not refuse an "
-                f"inert substitution on the momentum path: {caught}")
-        return {"status": "PLANT-FIRED", "plant": plant, "control": caught}
 
     # ---- ORDER C: the stage height legoESM hands the producer -------------
     sunk_state = run("eta-sink", sink_ordinal=0,
