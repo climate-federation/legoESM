@@ -9394,12 +9394,24 @@ def developed_stage2_t_r3_walk(
                 row["substituted"] = True
                 thickness = substituted_thickness(args)
                 before = level_calls["count"]
+                level_index = {"jk": 0}
 
                 def substituted_level(flux_u, flux_u_west, flux_v,
                                       flux_v_south, r1_area_t, live_e3t,
                                       tmask, **level_kwargs):
-                    jk = level_calls["count"]
+                    jk = level_index["jk"]
+                    level_index["jk"] += 1
                     level_calls["count"] += 1
+                    # The level index is PER CALL, and it is checked.  JAX
+                    # CLAMPS an out-of-range integer index instead of raising,
+                    # so a counter carried across calls silently hands every
+                    # level the deepest thickness and returns a plausible
+                    # number.  That is what the first version of this walk did
+                    # from its second substituted arm onward, and the walk's
+                    # own inert plant is what caught it.
+                    require(0 <= jk < thickness.shape[-1],
+                            f"substituted level index {jk} is outside the "
+                            f"{thickness.shape[-1]} levels of the thickness")
                     return real_level(
                         flux_u, flux_u_west, flux_v, flux_v_south, r1_area_t,
                         thickness[..., jk], tmask, **level_kwargs)
@@ -9533,11 +9545,27 @@ def developed_stage2_t_r3_walk(
     arms["shared_velocity_form_oracle_r3t"] = stage2_momentum_w(
         SHARED, substitute_ordinal=0, label="shared-oracle-r3t")
 
+    # THE CALIBRATION AGAIN, AFTER EVERY OTHER SUBSTITUTED ARM.  The first
+    # version of this walk was bit-exact on its FIRST substituted arm and
+    # wrong on every one after it, because the per-level index was carried
+    # across calls.  A calibration that runs only first cannot see that, so
+    # the identity arm is repeated last and must still be bit-exact.
+    height_source["mode"] = "identity"
+    arms["corrected_identity_repeat"] = stage2_momentum_w(
+        CORRECTED, substitute_ordinal=0, label="corrected-identity-repeat")
+    height_source["mode"] = "oracle"
+    calibration_repeat = _score_stage2_face(
+        arms["corrected_identity_repeat"], arms["corrected_baseline"],
+        cell_mask)
+    require(calibration_repeat["cells_unequal"] == 0,
+            "the substituted ratio statement stopped reproducing the "
+            f"production step after other arms ran: {calibration_repeat}")
+
     for label in ("corrected-baseline", "shared-baseline"):
         require(ledger_summary(label)["substituted_calls"] == 0,
                 f"{label} substituted a call it should not have")
-    for label in ("corrected-identity", "corrected-oracle-r3t",
-                  "shared-oracle-r3t"):
+    for label in ("corrected-identity", "corrected-identity-repeat",
+                  "corrected-oracle-r3t", "shared-oracle-r3t"):
         require(ledger_summary(label)["substituted_calls"] == 1,
                 f"{label} did not substitute exactly one call: "
                 f"{ledger_summary(label)}")
@@ -9638,6 +9666,7 @@ def developed_stage2_t_r3_walk(
             "observer_passivity": observer_passivity,
             "height_sink_passivity": sink_passivity,
             "statement_calibration": calibration,
+            "statement_calibration_repeated_last": calibration_repeat,
             "call_ledgers": {label: ledger_summary(label)
                              for label in sorted(ledgers)},
             "substitution_liveness": liveness,
