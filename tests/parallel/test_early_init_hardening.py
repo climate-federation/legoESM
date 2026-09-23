@@ -621,3 +621,19 @@ def test_non_gpu_platform_selected_classifies_every_real_spelling(
         else:
             monkeypatch.setenv(var, val)
     assert ei._non_gpu_platform_selected() is expect_non_gpu
+
+
+def test_pin_local_gpu_skips_on_explicit_cpu_platform(monkeypatch):
+    """JAX_PLATFORMS=cpu on a GPU node with more ranks than GPUs: no pin,
+    no refusal -- the run never creates a CUDA backend (measured: the six-
+    process CPU duo parity died here on g[097,271], job 9902131)."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    assert ei.pin_local_gpu(local_rank=2, n_local=3) is None
+    # a pin that FITS still narrows on the cpu platform (existing contract)
+    assert ei.pin_local_gpu(local_rank=1, n_local=2) == "1"
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    # and the refusal is still live when a GPU platform is selected
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    with pytest.raises(RuntimeError, match="more local ranks than GPUs"):
+        ei.pin_local_gpu(local_rank=2, n_local=3)

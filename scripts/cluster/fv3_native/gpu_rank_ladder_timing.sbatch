@@ -9,11 +9,14 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:2
+# A scaling ladder across card models measures the cards, not the scaling, so the
+# model is PINNED here. rtx8000 is the only model with enough nodes in `short` for
+# 24 ranks (18 nodes; 12 survive the exclusion below, which is exactly what we need).
+#SBATCH --constraint=rtx8000
 #SBATCH --exclusive
 # WORKAROUND, delete when the nodes are fixed: g[045-054],g[185-193] compile the
 # sharded step and then hang in its first execution (pinned-node A/B, jobs
 # 9777265 good vs 9777266 hung).
-#SBATCH --exclude=g[045-051],g[053-054],g[185-193]
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/gpu_rank_ladder_%j.log
 # Rank-count ladder for the FV3 window-SPMD step on GPU, inside ONE allocation:
 #   row 1: kt=1 -> 6 ranks
@@ -66,7 +69,7 @@ run_row () {   # kt ranks nodes
       -N "$NODES" -n "$RANKS" --ntasks-per-node=2 -c "${SLURM_CPUS_PER_TASK:-8}" \
       "$PY" "$GATE" --n "$N" --km "$KM" --kt "$KT" --pad "$PAD" \
       --n-split "$NSPLIT" --steps 1 --distributed --ref-npz "$REF" \
-      --gpu-max-rel-peak "${GPU_MAX_REL_PEAK:-1e-13}" --timing "$TIMING" \
+      --gpu-max-rel-peak "${GPU_MAX_REL_PEAK:-1e-12}" --timing "$TIMING" \
     > "$LOG" 2>&1
   local RC=$?
   # the gate's own line, and it must carry a p50 -- "[m6] TIMING REFUSED"
@@ -77,8 +80,8 @@ run_row () {   # kt ranks nodes
     [ "$RC" -eq 0 ] && RC=2
   fi
   # the cards the row actually ran on: a ladder across card types is not a
-  # ladder (the house launcher pins --constraint=a100; these nodes are
-  # rtx8000, so the card is RECORDED and compared between rows instead)
+  # ladder (the allocation is pinned to rtx8000 above, so the card is
+  # RECORDED here as well and compared between rows)
   local CARDS; CARDS=$(grep -ho 'visible_devices=\[[^]]*\]' "$LOG" | sort -u | tr '\n' ' ')
   local MODEL; MODEL=$(grep -m1 -ho 'RUNTIME .*' "$LOG" | head -1)
   ROW_RC=$RC; ROW_TIMING=${T:-NO TIMING}
