@@ -65,3 +65,22 @@ def test_a_later_mention_does_not_steal_a_row(mod):
     out, drift = mod.retarget(lines)
     assert not drift, drift
     assert "  1. [line  5] First" in out   # NOT line 7, the later mention
+
+
+def test_toc_in_sync(mod):
+    """PYTEST is the invoker.
+
+    `--check` exits 1 on drift, but nothing runs it: this repo has no CI, so
+    the only thing that reliably executes is the suite. This is the door that
+    is actually open.
+    """
+    assert mod.check_toc() == []
+
+
+def test_the_checker_refuses_to_validate_nothing(mod, tmp_path):
+    """The silent pass: a TOC whose format drifted matches zero rows, and a
+    checker that then reports 'in sync' is worse than one reporting drift."""
+    f = tmp_path / "fake.py"
+    f.write_text('"""No TOC rows here at all."""\n# 1. First\n')
+    out = mod.check_toc(f)
+    assert out and "validating nothing" in out[0], out

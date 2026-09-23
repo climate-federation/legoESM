@@ -49,6 +49,12 @@ def true_positions(lines: list[str]) -> tuple[dict[int, int], int | None]:
     return headers, banner
 
 
+#: How many TOC rows the file is expected to carry. A checker that matches
+#: ZERO rows reports "in sync" after validating nothing, which is strictly
+#: worse than drift -- so the count is asserted, not discovered (review).
+EXPECTED_TOC_ROWS = 19
+
+
 def retarget(lines: list[str]) -> tuple[list[str], list[str]]:
     """Return (rewritten lines, list of human-readable drifts found)."""
     headers, banner = true_positions(lines)
@@ -75,6 +81,27 @@ def retarget(lines: list[str]) -> tuple[list[str], list[str]]:
                 drift.append(f"flag pointer: cites {cited}, banner at {banner}")
                 out[i] = line[:m2.start(2)] + str(banner) + line[m2.end(2):]
     return out, drift
+
+
+def check_toc(path=None) -> list[str]:
+    """Drift in the committed file, as a list of human-readable strings.
+
+    The importable form, so PYTEST is the invoker. A ``--check`` flag that
+    nothing runs is not a tripwire -- this repo has no CI, so the only thing
+    that reliably executes is the test suite. One implementation, two doors.
+
+    REFUSES a file whose TOC it cannot see: matching zero rows and reporting
+    "in sync" would be a checker that validates nothing while looking green.
+    """
+    path = pathlib.Path(path or _DEFAULT)
+    lines = path.read_text().split("\n")
+    n_rows = sum(1 for l in lines[:_TOC_SCAN_LINES]
+                 if re.match(r"  (\d+)\.\s+\[line\s+(\d+)\]", l))
+    if n_rows != EXPECTED_TOC_ROWS:
+        return [f"parsed {n_rows} TOC rows, expected {EXPECTED_TOC_ROWS} — the "
+                f"TOC format changed, so this checker is validating nothing; "
+                f"fix the pattern or EXPECTED_TOC_ROWS before trusting a green"]
+    return retarget(lines)[1]
 
 
 def main(argv=None) -> int:

@@ -80,6 +80,17 @@ _CLUBB_CONFIG_SCALAR_FIELDS = frozenset({
 })
 
 
+#: Flag-shaped leaves that ALREADY live in the pytree. Pre-existing debt, not
+#: policy: ``prognostic`` and ``cloud_buoyancy`` are bools and ``cloud_source``
+#: is a str selector, all three older than the rule they violate (they appear
+#: in the original leaf-count comment). Shrink-only, and
+#: ``test_the_bool_exemptions_have_not_outlived_their_reason`` deletes an entry
+#: the moment it stops describing reality. Moving one out of the pytree changes
+#: flatten structure and leaf order, so it belongs with the next
+#: serialization-format change, not a standalone commit.
+_BOOL_LEAF_EXEMPTIONS = frozenset({"prognostic", "cloud_buoyancy", "cloud_source"})
+
+
 def test_config_has_no_flag_leaves():
     """The config's leaves are exactly params + surface + the scalar fields.
 
@@ -126,15 +137,40 @@ def test_config_scalar_fields_are_not_flags():
     ``cloud_source`` is a str selector (a scheme name, not a toggle).
     """
     cfg = CLUBBConfig()
-    # Pre-existing, named, and deliberately not changed here -- see the
-    # docstring. A NEW bool is refused.
-    grandfathered = {"prognostic", "cloud_buoyancy", "cloud_source"}
-    bad = [f for f in _CLUBB_CONFIG_SCALAR_FIELDS - grandfathered
+    bad = [f for f in _CLUBB_CONFIG_SCALAR_FIELDS - _BOOL_LEAF_EXEMPTIONS
            if isinstance(getattr(cfg, f), bool)]
     assert not bad, (
         f"these CLUBBConfig fields are bools, i.e. model FLAGS living in the "
         f"pytree leaves, which is what CLUBBFlags was removed to prevent: "
         f"{bad}")
+
+
+def test_the_bool_exemptions_have_not_outlived_their_reason():
+    """An exemption that survives its justification is how debt becomes policy.
+
+    Review finding on the first version of this: naming ``cloud_buoyancy`` as
+    grandfathered makes it look deliberate forever unless something forces the
+    entry to expire. So the exemption list must describe reality -- every name
+    on it has to STILL be a flag-shaped leaf. The day someone gives
+    ``cloud_buoyancy`` a proper static home, this test fails and the exemption
+    is deleted in the same commit that earned the deletion.
+    """
+    cfg = CLUBBConfig()
+    stale = [f for f in _BOOL_LEAF_EXEMPTIONS
+             if not isinstance(getattr(cfg, f), (bool, str))]
+    assert not stale, (
+        f"these names are exempted from the no-flags rule but are no longer "
+        f"flag-shaped: {stale}. The exemption has outlived its reason — "
+        f"delete it from _BOOL_LEAF_EXEMPTIONS.")
+    # A ratchet, not a policy: the list may SHRINK, never grow. A fourth
+    # flag-shaped leaf has to be argued for, not appended.
+    assert len(_BOOL_LEAF_EXEMPTIONS) <= 3, (
+        f"_BOOL_LEAF_EXEMPTIONS grew to {len(_BOOL_LEAF_EXEMPTIONS)}. It is "
+        f"pre-existing debt with a permitted direction: shrink only.")
+    # ...and the two pinned structures cannot drift apart.
+    assert _BOOL_LEAF_EXEMPTIONS <= _CLUBB_CONFIG_SCALAR_FIELDS, (
+        f"exempted names that are not CLUBBConfig scalar fields at all: "
+        f"{sorted(_BOOL_LEAF_EXEMPTIONS - _CLUBB_CONFIG_SCALAR_FIELDS)}")
 
 
 def test_is_pytree_round_trip():
