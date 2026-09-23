@@ -101,6 +101,15 @@ class MicrophysicsOutput(NamedTuple):
     # convective vapour sink (both draw the same pre-physics q_v).  ``None`` for
     # schemes that do not expose it (the joint clamp then skips the micro term).
     dq_v_to_qc_dt: jax.Array | None = None
+    # Optional: the APPLIED (post-donor-clamp) cloud-water budget terms,
+    # [kg/kg/s], as a plain dict keyed by process name.  Populated only when
+    # ``MorrisonConfig.publish_qc_budget`` is set, which is a STATIC Python
+    # branch, so the default graph is untouched.  Exists because the aggregate
+    # ``dq_c_dt`` cannot be decomposed after the fact: the donor clamp scales
+    # every sink by a common factor, so a re-derivation outside the scheme
+    # reports PRE-clamp rates and cannot close the budget (codex review,
+    # 2026-09-23).  The terms sum to ``dq_c_dt`` by construction.
+    qc_budget: dict | None = None
     # MG2-style CFL sub-stepping (``sedimentation_tendency(n_substeps_max>1)``):
     # per-column max over species of the REQUIRED sub-step count, unclipped.
     # Above the scheme's static cap the loop clamped (mass conserved, the
