@@ -219,9 +219,12 @@ def test_the_admission_gate_census_uses_the_model_s_own_predicate():
     spec.loader.exec_module(gate)
 
     rows = gate._card_execution("stage_momentum_wzv")
-    assert [name for name, row in rows.items() if row["executes_route"]] == []
+    # What the candidate would reach if it were selected...
+    assert [name for name, row in rows.items() if row["executes_route"]] == [
+        "GYRE-zco"]
+    # ...and what reaches it today, which is nothing while the round is held.
     assert [name for name, row in rows.items()
-            if row["resolves_two_solve_program"]] == ["GYRE-zco"]
+            if row["executes_at_this_tip"]] == []
 
     configs = {
         "GYRE-zco": build_nemo_testcase_card("GYRE-zco").recipe.model_config,
@@ -232,6 +235,6 @@ def test_the_admission_gate_census_uses_the_model_s_own_predicate():
     }
     for name, config in configs.items():
         assert rows[name]["executes_route"] is (
-            nemo_stage_momentum_wzv_executes(config))
-        assert rows[name]["resolves_two_solve_program"] is (
             nemo_stage_momentum_wzv_resolved(config))
+        assert rows[name]["executes_at_this_tip"] is (
+            nemo_stage_momentum_wzv_executes(config))

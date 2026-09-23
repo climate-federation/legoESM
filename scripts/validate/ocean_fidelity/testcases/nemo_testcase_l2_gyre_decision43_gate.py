@@ -266,9 +266,15 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
                 nemo_stage_momentum_wzv_executes,
                 nemo_stage_momentum_wzv_resolved)
 
-            values["resolves_two_solve_program"] = bool(
-                nemo_stage_momentum_wzv_resolved(config))
-            executes = nemo_stage_momentum_wzv_executes(config)
+            # ``executes_route`` is what the gate scores: which cards run
+            # the CANDIDATE, i.e. with its arm selected.  That is the blast
+            # radius of the statement under test, and it is the question the
+            # admission gate exists to answer.  ``executes_at_this_tip``
+            # answers the other question -- what runs today -- which is
+            # nothing while round 160 is HELD behind its private arm.
+            values["executes_at_this_tip"] = bool(
+                nemo_stage_momentum_wzv_executes(config))
+            executes = nemo_stage_momentum_wzv_resolved(config)
         else:
             executes = (
                 config.momentum_time_integrator == "rk3_ws"
