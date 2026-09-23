@@ -73,7 +73,7 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 : "${AMIP_SURFDATA:=${REPO}/data/legoesm_surfdata_c260716.nc}"
 
 # --- subgrid orography for the orographic GWD launch (#1514) -----------------
-# amip_production.yaml runs gravity_wave_drag: mcfarlane+hines.  With
+# amip_production.yaml runs an orographic gravity-wave member.  With
 # subgrid_orography_path empty the orographic member launches tau_0 ~ h_topo^2
 # from the SCALAR fallback h_topo = 500 m on EVERY column -- a fictional 500 m
 # mountain over the open ocean, measured at -0.29 Pa of spurious zonal drag

@@ -22,7 +22,11 @@
 # The soil state is data/lmip_soil_ic/soil_ic_mpas5.npz, built by
 # scripts/data/regrid_land_ic.py from the published Zenodo state (PR #1624);
 # rebuild for any other mesh with that script.
-include: amip_production.yaml
+# Include repointed 2026-09-23: amip_production.yaml is now the CAM6 suite.
+# This deck's overrides and measurements describe the Sundqvist/L36
+# configuration, so it includes that file under its new name rather than
+# silently inheriting a different model.
+include: amip_sundqvist_l36.yaml
 
 resolution: 5
 land_ic: data/lmip_soil_ic/soil_ic_mpas5.npz

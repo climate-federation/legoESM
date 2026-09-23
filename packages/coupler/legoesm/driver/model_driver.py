@@ -5915,6 +5915,7 @@ class ModelDriver:
             # (mirrors the lat-lon band gather).  All ranks must participate in
             # each gather (collective); non-root ranks then bail before I/O.
             _land_ml_save = None      # set to the GLOBAL gather under MPI
+            _skin_save = None         # ditto for the prognostic ice skin
             if self._voronoi_layout is not None:
                 from legoesm.parallel.voronoi_mpi import gather_voronoi_field
                 part = self._voronoi_layout.partition
@@ -5981,6 +5982,25 @@ class ModelDriver:
 
                     _land_ml_save = jax.tree_util.tree_map(
                         _g, self._land_ml_state)
+                # Prognostic ice skin: a cell field, so it gathers like the
+                # rest — and it gathers HERE, with the other collectives and
+                # before the rank-0 bail, or every non-root rank hangs.  The
+                # Every rank must agree on whether to issue this collective or
+                # it deadlocks, and the selection below reads per-rank STATE,
+                # not the config flag -- so the agreement is worth stating.
+                # It holds because the live field is set for EVERY rank at the
+                # top of ``_run_mpas`` whenever the feature is on (seeded, not
+                # conditional on that rank owning ice), and the staged fallback
+                # comes from a checkpoint every rank loads. A future change
+                # that makes either one conditional on a rank's own cells would
+                # reintroduce the hang.
+                if getattr(self.config, "mpas_ice_skin_prognostic", False):
+                    _skin_local = getattr(self, "_ice_T_skin", None)
+                    if _skin_local is None and isinstance(self._carry_aux, dict):
+                        _skin_local = self._carry_aux.get("ice_T_skin")
+                    if _skin_local is not None:
+                        _skin_save = gather_voronoi_field(
+                            jnp.asarray(_skin_local).reshape(-1), part, "cell")
                 if self._mpi_rank != 0:
                     return
             else:
@@ -6095,6 +6115,11 @@ class ModelDriver:
                     # save with no step) must persist the staged value, not
                     # strip it (codex-2 finding 3).
                     _skin = self._carry_aux.get("ice_T_skin")
+                if self._voronoi_layout is not None:
+                    # Under MPI the live field is this rank's owned+halo band;
+                    # persist the GLOBAL gather taken above so the chain reads
+                    # one canonical checkpoint at any rank count.
+                    _skin = _skin_save
                 if _skin is not None:
                     _save["ice_T_skin"] = np.asarray(_skin)
             # #1353 (codex-2 finding 2): within-interval CMOR flux sums —
@@ -6802,12 +6827,24 @@ class ModelDriver:
                 del self._carry_aux[_stale]
             # Ice skin: same stale-persistence rule — drop any prior staging,
             # then stage this checkpoint's skin (if present) for the
-            # _run_mpas seed overlay.  Serial-only (the skin feature refuses
-            # the MPI-voronoi lane at setup).
+            # _run_mpas seed overlay.  The checkpoint is GLOBAL, so under
+            # cell-partition MPI scatter it to this rank's band first (mirror
+            # of the save-side gather); _run_mpas then shape-checks it against
+            # the LOCAL cell count like every other staged field.
             self._carry_aux.pop("ice_T_skin", None)
             self._ice_T_skin = None
             if "ice_T_skin" in d.files:
-                self._carry_aux["ice_T_skin"] = np.asarray(d["ice_T_skin"])
+                _skin_ck = np.asarray(d["ice_T_skin"]).reshape(-1)
+                if _mpi:
+                    if _skin_ck.shape[0] != part.nCells_global:
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} ice_T_skin length "
+                            f"{_skin_ck.shape[0]} != global mesh "
+                            f"({part.nCells_global},); rebuild with the same "
+                            f"--resolution.")
+                    _skin_ck = scatter_to_local(
+                        jnp.asarray(_skin_ck), part, "cell")
+                self._carry_aux["ice_T_skin"] = np.asarray(_skin_ck)
             # #1353 partial-interval CMOR flux sums: same stale-persistence
             # rule — drop prior staging, then stage this checkpoint's
             # payload for the _run_mpas accumulator restore.  WHITELISTED
@@ -10115,12 +10152,6 @@ class ModelDriver:
                 "surface forcing (radiation != 'none' and an SST source) — "
                 "there is no ice fraction to carry a skin on."
             )
-        if _ice_skin_on and self._voronoi_layout is not None:
-            raise ValueError(
-                "mpas_ice_skin_prognostic is not wired for the distributed "
-                "Voronoi (MPI) lane yet — the skin carry and its checkpoint "
-                "persistence are serial-only. Run single-process or disable."
-            )
         if _sst_forcing:
             from legoesm.forcing.surface_utils import (
                 blend_surface_temperature,
@@ -11431,44 +11462,46 @@ class ModelDriver:
                         _led_accum = (_ls if _led_accum is None
                                       else _led_accum + _ls)
                         _led_nsteps += 1
-                # Prognostic ice skin: advance ONE model step (dt=DT) with the
-                # freshly exported surface energy fluxes (sfc_diag slots
-                # 0 sw_net, 1 lw_net [W/m^2, +into surface]; 6 shflx, 7 lhflx
-                # [+upward]).  F_net_down = sw + lw - sh - lh (net downward gain
-                # of the skin).  Requires slots 0,1 present — radiation != none
-                # is enforced at setup, so they exist after the first (always
-                # full-radiation) step of each run/link.  Eager, serial-only
-                # (the feature refuses the MPI/voronoi lane, so this else branch
-                # is the only path).  See the daily-boundary note for why the
-                # advance is per-step rather than a once-daily snapshot.
-                if _ice_skin_on and _ice_sic_cur is not None:
-                    _sd = getattr(self.model, "_sfc_diag", None)
-                    _swn = (_sd[0].data if (_sd is not None and len(_sd) > 0
-                                            and _sd[0] is not None) else None)
-                    _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
-                                            and _sd[1] is not None) else None)
-                    if _swn is not None and _lwn is not None:
-                        _f_net = (jnp.asarray(_swn).reshape(-1)
-                                  + jnp.asarray(_lwn).reshape(-1))
-                        if len(_sd) > 6 and _sd[6] is not None:
-                            _f_net = _f_net - jnp.asarray(
-                                _sd[6].data).reshape(-1)
-                        if len(_sd) > 7 and _sd[7] is not None:
-                            _f_net = _f_net - jnp.asarray(
-                                _sd[7].data).reshape(-1)
-                        self._ice_T_skin = prognostic_ice_skin_temperature(
-                            self._ice_T_skin, _f_net, _ice_sic_cur,
-                            dt_s=DT, h_ice_m=_h_ice)
-                    # Re-anchor the NEXT step's T_sfc from the cached daily
-                    # SST/SIC against the (advanced) skin, so the physics
-                    # consumes the CURRENT skin every step (per-step feedback,
-                    # codex-2 finding 2) and a mid-day restart reproduces the
-                    # straight run's surface boundary (codex-2 finding 1).  Runs
-                    # every step the feature is active (even one that skipped
-                    # the advance for missing fluxes) so T_sfc stays consistent
-                    # with self._ice_T_skin.
-                    _forcing_daily["T_sfc"] = _blend_T_sfc(
-                        _ice_sst_cur, _ice_sic_cur)
+            # Prognostic ice skin: advance ONE model step (dt=DT) with the
+            # freshly exported surface energy fluxes (sfc_diag slots
+            # 0 sw_net, 1 lw_net [W/m^2, +into surface]; 6 shflx, 7 lhflx
+            # [+upward]).  F_net_down = sw + lw - sh - lh (net downward gain
+            # of the skin).  Requires slots 0,1 present — radiation != none
+            # is enforced at setup, so they exist after the first (always
+            # full-radiation) step of each run/link.  Eager, both lanes
+            # (the cell-partition MPI step publishes the same ``_sfc_diag``
+            # side channel post-jit, and the update is per-cell elementwise
+# with no neighbour stencil, so it needs no halo exchange).
+# See the daily-boundary note for why the
+            # advance is per-step rather than a once-daily snapshot.
+            if _ice_skin_on and _ice_sic_cur is not None:
+                _sd = getattr(self.model, "_sfc_diag", None)
+                _swn = (_sd[0].data if (_sd is not None and len(_sd) > 0
+                                        and _sd[0] is not None) else None)
+                _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
+                                        and _sd[1] is not None) else None)
+                if _swn is not None and _lwn is not None:
+                    _f_net = (jnp.asarray(_swn).reshape(-1)
+                              + jnp.asarray(_lwn).reshape(-1))
+                    if len(_sd) > 6 and _sd[6] is not None:
+                        _f_net = _f_net - jnp.asarray(
+                            _sd[6].data).reshape(-1)
+                    if len(_sd) > 7 and _sd[7] is not None:
+                        _f_net = _f_net - jnp.asarray(
+                            _sd[7].data).reshape(-1)
+                    self._ice_T_skin = prognostic_ice_skin_temperature(
+                        self._ice_T_skin, _f_net, _ice_sic_cur,
+                        dt_s=DT, h_ice_m=_h_ice)
+                # Re-anchor the NEXT step's T_sfc from the cached daily
+                # SST/SIC against the (advanced) skin, so the physics
+                # consumes the CURRENT skin every step (per-step feedback,
+                # codex-2 finding 2) and a mid-day restart reproduces the
+                # straight run's surface boundary (codex-2 finding 1).  Runs
+                # every step the feature is active (even one that skipped
+                # the advance for missing fluxes) so T_sfc stays consistent
+                # with self._ice_T_skin.
+                _forcing_daily["T_sfc"] = _blend_T_sfc(
+                    _ice_sst_cur, _ice_sic_cur)
             # Interactive multilayer land step (MPAS port): advance the soil/
             # snow columns with the surface fluxes this step just exported
             # (sw/lw down refresh on radiation steps; precip every step) and
