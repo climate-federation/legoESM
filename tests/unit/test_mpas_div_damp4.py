@@ -276,8 +276,14 @@ def test_production_deck_selects_both_levers_and_no_other_deck_does():
     # Walk the RESOLVED decks, not the raw files: a deck that inherits a lever
     # through `include:` carries it just as surely as one that spells it out,
     # and a raw-key walk cannot see that (GLM review 2026-09-23).
+    production = (cfgdir / "amip" / "amip_production.yaml").resolve()
     for deck in sorted(cfgdir.rglob("*.yaml")):
-        if deck.name == "amip_production.yaml":
+        # Exempt the canonical PATH, not the basename: a file named
+        # amip_production.yaml anywhere else under config/ would otherwise be
+        # skipped, and codex proved that bypass runnable -- an in-memory
+        # config/review/amip_production.yaml inheriting production passed both
+        # this walk and strict validation carrying 1.0/sb (round-2 review).
+        if deck.resolve() == production:
             continue
         # No catch: measured 2026-09-23, all 313 config/**/*.yaml resolve
         # without raising, so a swallowed error here would only be an escape
@@ -287,3 +293,27 @@ def test_production_deck_selects_both_levers_and_no_other_deck_does():
             continue
         assert other.get("mpas_div_damp4_scale", 0.0) == 0.0, deck
         assert other.get("mpas_vert_advection_scheme", "upwind") != "sb", deck
+
+
+def test_the_lever_walk_exempts_a_path_not_a_basename(tmp_path, monkeypatch):
+    """Negative control for the exemption, from codex round 2.
+
+    A deck named amip_production.yaml somewhere OTHER than config/amip/ is not
+    the production deck and must be walked like any other.  Before the fix it
+    was skipped by basename, so a deck inheriting the levers could reach a run
+    with the gate green.
+    """
+    import shutil
+    import pytest
+    cfgdir = pathlib.Path(__file__).parents[2] / "config"
+    impostor_dir = cfgdir / "review_negative_control"
+    impostor_dir.mkdir(exist_ok=True)
+    impostor = impostor_dir / "amip_production.yaml"
+    impostor.write_text("include: ../amip/amip_production.yaml\n")
+    try:
+        with pytest.raises(AssertionError):
+            test_production_deck_selects_both_levers_and_no_other_deck_does()
+    finally:
+        shutil.rmtree(impostor_dir)
+    # and with it gone the gate is green again, so the control is not sticky
+    test_production_deck_selects_both_levers_and_no_other_deck_does()
