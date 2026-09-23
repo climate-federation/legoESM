@@ -815,6 +815,14 @@ def test_gate_also_covers_the_hard_adjustment_path():
     assert float(off.dq_c_dt[0, 0]) > 1.0e-7
     # ...and the gate removes all of it: cloud water can only decrease.
     assert float(on.dq_c_dt[0, 0]) < 0.0
+    # The latent heating leaves with it on THIS branch too, which kills the
+    # residual "the hard path returns heating separately" hypothesis (GLM).
+    import numpy as np
+    from legoesm import constants
+    cond = float(off.dq_c_dt[0, 0]) - float(on.dq_c_dt[0, 0])
+    np.testing.assert_allclose(
+        float(off.dT_dt[0, 0]) - float(on.dT_dt[0, 0]),
+        (constants.L_v / constants.c_pd) * cond, rtol=1e-9)
 
 
 def test_microphysics_half_alone_is_refused_at_the_factory():

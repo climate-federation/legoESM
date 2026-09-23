@@ -124,8 +124,11 @@ def _micro_liquid_from_closure_on(microphysics_config) -> bool:
     """
     if microphysics_config is None:
         return False
+    # ``or ""`` because getattr(obj, None, default) raises TypeError rather
+    # than returning the default, and a None scheme would crash the guard
+    # itself (GLM).
     sub = getattr(microphysics_config,
-                  getattr(microphysics_config, "scheme", ""), None)
+                  getattr(microphysics_config, "scheme", "") or "", None)
     return bool(getattr(sub, "liquid_from_closure", False))
 
 
