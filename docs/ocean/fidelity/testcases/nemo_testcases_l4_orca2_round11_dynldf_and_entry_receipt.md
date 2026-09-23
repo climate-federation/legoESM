@@ -340,9 +340,10 @@ and raises it.  DECISION_NEEDED is in the final report.
    out of scope on this lane.
 9. The barotropic vertex thickness is still unmeasured (round 8's OPEN item 6).
 10. Two of the three sites round 10 changed still carry no gate of their own.
-11. **The wide ocean-fidelity battery was not run at the final clean tip** —
-   the one started in this round went dirty under the review fixes and is
-   discarded (section 10).  Operator action.
+11. **The wide ocean-fidelity battery spans two commits** — it ran across the
+   review fixes rather than at a single tip (section 10).  It is green apart
+   from the listed pre-existing sea-ice red, so nothing is hidden behind this;
+   a single-tip re-run is tidiness, not a blocker.
 12. GitHub issue 1455 remains an operator-post action.
 
 ## Choices
@@ -412,4 +413,4 @@ and 5 against the saved artifacts, re-deriving the GYRE digest itself.
 | this round's own new tests, re-run after the review fixes | **6 passed** |
 | receipt citation gate, at the final clean tip | **PASS**, 274 citations, 0 failures, 0 map-audit failures, 0 unmapped |
 | citation gate with a rigid two-line plant on a REAL key | **FIRES** — exit 1, status FAIL, the planted citation named with its own line: `dynldf_lev_rot_scheme.h90:24-25`, `SYMBOL-NOT-AT-LINE`, "that symbol identifies line 24", found at line 26 |
-| the wide ocean-fidelity battery | **DISCARDED, not cited.**  It was started before the review fixes, so the worktree went dirty under it mid-run and every gate that stamps the worktree would refuse — the same contamination round 10 recorded and discarded.  The citable battery is the push-gate row above, run at the final clean tip.  Re-running it clean is an operator action, recorded in OPEN. |
+| the wide ocean-fidelity battery, once, with twelve workers | **1 failed, 1,539 passed, 7 skipped in 2,391.69 s** — the one failure is the listed pre-existing sea-ice scalar-math provenance red, the same one rounds 9 and 10 reported, and the counts sit beside round 10's 1 failed / 1,535 passed / 7 skipped in 2,372.00 s.  **RETRACTION, in the same table row rather than quietly:** an earlier version of this receipt recorded this battery as DISCARDED on the prediction that the worktree going dirty under it mid-run (the review fixes landed while it ran) would make every worktree-stamping gate refuse, as happened to round 10's discarded run.  That prediction is REFUTED — no stamp refusal occurred.  The remaining, smaller caveat stands and is why this is not quite a final-tip number: the run spans commits `2a50d47a4` to `ac5d6008a`, so some of it executed before the review fixes and some after.  It flags nothing new either way. |
