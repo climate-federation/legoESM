@@ -73,6 +73,30 @@ export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' 
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_ENABLE_X64=1
 CMD=$(cat /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_ctl_trp_d90.txt)
+# ADOPTED 2026-09-23, BY THE USER, AFTER MEASUREMENT -- same change as the
+# 30-day pinned card, and the same assertion. This lane now restores surface
+# salinity as a real freshwater flux, the way the oracle does, instead of the
+# global default's virtual-salt edit. The pre-registered arm (job 9939797,
+# scored by 9948227) put ring-1 surface-salinity rmse at 0.5170 against the
+# control's 0.6666, a 22 per cent reduction concentrated at the coast. It is
+# three flags because the driver refuses water_flux without real_freshwater
+# (run_omip_core2.py:8006) -- the virtual-salt closure's tendency is built
+# from the NET freshwater, which already contains the restoring term.
+#
+# THE DAY-90 RESULTS ALREADY RECORDED WERE PRODUCED BEFORE THIS CHANGE. Any
+# re-run of this card starts a NEW baseline and its numbers are not
+# term-by-term comparable to the twelve-mark undercurrent series.
+#
+# The .txt is untracked, so the adoption is asserted rather than trusted; the
+# pre-adoption line is kept as _ctl_trp_d90.pre_fwadopt.txt.
+for _flag in "--sss-restore-channel water_flux" \
+             "--sss-restore-normalization live_s" \
+             "--freshwater-closure real_freshwater"; do
+  case "$CMD" in
+    *"$_flag"*) ;;
+    *) echo "FATAL: command line lacks the adopted treatment ($_flag)"; exit 1 ;;
+  esac
+done
 echo "CMD: $PY scripts/run/run_omip_core2.py $CMD"
 $PY -u scripts/run/run_omip_core2.py $CMD
 rc=$?

@@ -56,6 +56,36 @@ export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' 
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_ENABLE_X64=1
 CMD=$(cat /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_arm_trp_pinned_d30.txt)
+# ADOPTED 2026-09-23, BY THE USER, AFTER MEASUREMENT: this lane now restores
+# surface salinity the way the oracle does -- as a real freshwater flux --
+# instead of the global default's virtual-salt edit. The pre-registered arm
+# (job 9939797, scored by 9948227) put ring-1 surface-salinity rmse at 0.5170
+# against the control's 0.6666 on a common domain, a 22 per cent reduction
+# concentrated entirely at the coast (-0.150 in the edge ring, -0.057 in the
+# next, +0.003 in the open ocean). NEMO restores with water; we did not.
+#
+# IT IS THREE FLAGS AND THE DRIVER MAKES THAT CHOICE: water_flux is refused
+# without real_freshwater (run_omip_core2.py:8006), because the virtual-salt
+# closure derives its tendency from the NET freshwater, which already contains
+# the restoring term, so routing restoring as water under it would apply it
+# twice. live_s is forced for the same reason.
+#
+# EVERY NUMBER FROM THIS CARD IS NOW ON A NEW BASELINE and is not term-by-term
+# comparable to runs from before this date.
+#
+# The command line lives in an untracked .txt, so this asserts the adoption
+# rather than trusting it -- a regenerated or restored-from-backup .txt would
+# otherwise run the old treatment silently, which is exactly the class of
+# defect this campaign keeps paying for. The pre-adoption line is kept beside
+# it as _arm_trp_pinned_d30.pre_fwadopt.txt.
+for _flag in "--sss-restore-channel water_flux" \
+             "--sss-restore-normalization live_s" \
+             "--freshwater-closure real_freshwater"; do
+  case "$CMD" in
+    *"$_flag"*) ;;
+    *) echo "FATAL: command line lacks the adopted treatment ($_flag)"; exit 1 ;;
+  esac
+done
 echo "CMD: $PY scripts/run/run_omip_core2.py $CMD"
 $PY -u scripts/run/run_omip_core2.py $CMD
 rc=$?
