@@ -8,11 +8,14 @@ above it, it runs at ALL THREE Runge-Kutta stages.  With neither
 ``sbcrnf.F90``'s surface arm sets ``nk_rnf = 1`` and ``h_rnf`` to the LIVE
 top-cell thickness, so the whole content lands in the top cell.
 
-These are the controls for that statement, on the small lock-exchange card:
-the channel moves the step, it deposits in the top cell only, it is carried at
-every stage, it uses the reciprocal-first form NEMO writes, and -- the scoping
-claim the GYRE landing rests on -- withholding it leaves the step BIT-identical
-rather than merely close.
+These are the controls for that statement, on the small lock-exchange card,
+read through the per-stage tracer exposure hook.  The reciprocal-first
+spelling is NOT checked here: the stage helper maps the source rate into the
+state through the quasi-Eulerian weights, so a one-representable-value
+difference in the rate is not recoverable from the stage state.  What carries
+that claim is the round-12 runoff gate, which compares the production RATE
+bitwise against ``rnf_tsc * (1/h_rnf)`` on every cell and reports how many
+cells can tell the two spellings apart at all.
 """
 
 import numpy as np
@@ -20,12 +23,12 @@ import pytest
 
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 from legoesm.core.precision import PrecisionPolicy, set_policy
-from legoesm.ocean.state import OceanSurfaceForcing
-
-from tests.ocean.unit.test_nemo_ws_tracer_rk3 import _lock_model
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_lock_exchange_zco_card,
 )
+from legoesm.ocean.state import OceanSurfaceForcing
+
+from tests.ocean.unit.test_nemo_ws_tracer_rk3 import _lock_model
 
 
 def _content(shape, seed=3):
@@ -33,22 +36,20 @@ def _content(shape, seed=3):
     rng = np.random.default_rng(seed)
     field = np.zeros(shape, dtype=np.float64)
     flat = field.reshape(-1)
-    picks = rng.choice(flat.size, size=max(3, flat.size // 7), replace=False)
-    flat[picks] = rng.uniform(1.0e-6, 4.0e-5, size=picks.size)
+    flat[rng.choice(flat.size, size=max(3, flat.size // 7), replace=False)] = (
+        rng.uniform(1.0e-6, 4.0e-5, size=max(3, flat.size // 7)))
     return field
 
 
-def _stage_sources(content_pair):
+def _stage_state(stage, content_pair):
     set_policy(PrecisionPolicy.fp64())
     card = build_lock_exchange_zco_card()
-    state = card.recipe.initial_state
     model = _lock_model(model_module._NEMOWSRK3TestHooks(
-        expose_live_stage_operands=True))
+        expose_tracer_stage=stage))
     surface = (None if content_pair is None
                else OceanSurfaceForcing(runoff_tracer_content=content_pair))
-    trace = model.step(state, dt=card.dt_s, surface_forcing=surface)
-    rates, thicknesses = trace.stage_tracer_sources
-    return card, rates, thicknesses, trace
+    return card, model.step(card.recipe.initial_state, dt=card.dt_s,
+                            surface_forcing=surface)
 
 
 @pytest.fixture(scope="module")
@@ -58,82 +59,61 @@ def arms():
     content = (_content(shape), _content(shape, seed=11))
     return {
         "content": content,
-        "on": _stage_sources(content),
-        "off": _stage_sources(None),
+        **{stage: (_stage_state(stage, content)[1],
+                   _stage_state(stage, None)[1])
+           for stage in (1, 2, 3)},
     }
 
 
-def test_the_channel_moves_every_stage(arms):
-    """Non-vacuity: reverting the deposit makes the two arms identical."""
-    _, on, _, _ = arms["on"]
-    _, off, _, _ = arms["off"]
-    for stage in range(3):
-        for tracer in range(2):
-            delta = np.abs(np.asarray(on[stage][tracer])
-                           - np.asarray(off[stage][tracer]))
-            assert float(delta.max()) > 0.0, (
-                f"stage {stage + 1} tracer {tracer} did not move")
+@pytest.mark.parametrize("stage", (1, 2, 3))
+def test_the_channel_moves_every_stage(arms, stage):
+    """Non-vacuity: reverting the deposit makes the two arms identical.
 
-
-def test_the_deposit_is_the_top_cell_only(arms):
-    """nk_rnf = 1: no level below the surface may receive the runoff."""
-    _, on, _, _ = arms["on"]
-    _, off, _, _ = arms["off"]
-    for stage in range(3):
-        for tracer in range(2):
-            delta = (np.asarray(on[stage][tracer])
-                     - np.asarray(off[stage][tracer]))
-            np.testing.assert_array_equal(
-                delta[..., 1:], np.zeros_like(delta[..., 1:]))
-
-
-def test_the_deposit_is_the_reciprocal_first_form(arms):
-    """NEMO forms ``zdep = 1/h_rnf`` and multiplies.
-
-    ``content * (1/h)`` and ``content / h`` are different fp64 values on real
-    data, so a transcription that divides instead would fail this.
+    The deposit runs at every stage because NEMO's runoff block is outside
+    the stage switch -- a transcription that put it in the stage-3 arm alone
+    would leave stages 1 and 2 unmoved here.
     """
-    card, on, thicknesses, _ = arms["on"]
-    _, off, _, _ = arms["off"]
-    active = np.asarray(card.recipe.z_coord.is_active, dtype=np.float64) \
-        if hasattr(card.recipe.z_coord, "is_active") else None
-    for stage in range(3):
-        top = np.asarray(thicknesses[stage], dtype=np.float64)[..., 0]
-        zdep = 1.0 / np.maximum(top, 1.0e-10)
-        for tracer in range(2):
-            deposit = arms["content"][tracer] * zdep
-            if active is not None:
-                deposit = deposit * active[..., 0]
-            got = (np.asarray(on[stage][tracer])[..., 0]
-                   - np.asarray(off[stage][tracer])[..., 0])
-            np.testing.assert_allclose(got, deposit, rtol=0.0, atol=1.0e-18)
-    # And the divided form is genuinely a different number somewhere, so the
-    # check above is not satisfied by both spellings at once.
-    top = np.asarray(thicknesses[0], dtype=np.float64)[..., 0]
-    a = arms["content"][0] * (1.0 / np.maximum(top, 1.0e-10))
-    b = arms["content"][0] / np.maximum(top, 1.0e-10)
-    assert not np.array_equal(a, b), (
-        "this card's thicknesses cannot distinguish the two spellings; the "
-        "reciprocal-first control is vacuous here")
+    on, off = arms[stage]
+    for name in ("T", "S"):
+        delta = np.abs(np.asarray(getattr(on, name).data)
+                       - np.asarray(getattr(off, name).data))
+        assert float(delta.max()) > 0.0, f"stage {stage} {name} did not move"
+
+
+@pytest.mark.parametrize("stage", (1, 2))
+def test_the_deposit_reaches_only_the_top_cell(arms, stage):
+    """nk_rnf = 1.  Stages 1 and 2 carry no vertical mixing to spread it.
+
+    Stage 3 is excluded deliberately: NEMO runs ``tra_zdf`` there, so the
+    deposit legitimately reaches deeper levels by that stage and the check
+    would not be about this statement any more.
+    """
+    on, off = arms[stage]
+    for name in ("T", "S"):
+        delta = (np.asarray(getattr(on, name).data)
+                 - np.asarray(getattr(off, name).data))
+        np.testing.assert_array_equal(
+            delta[..., 1:], np.zeros_like(delta[..., 1:]))
+        assert float(np.abs(delta[..., 0]).max()) > 0.0
 
 
 def test_no_content_leaves_the_step_bit_identical():
-    """The scoping claim: a card that supplies no runoff content is untouched.
+    """The scoping claim GYRE's landing rests on.
 
-    Not "close" -- BIT-identical, including on cells holding a negative zero,
+    Not "close" -- BIT-identical, including on a cell holding a negative zero,
     which is why the deposit is skipped rather than added as a zero array.
     """
     set_policy(PrecisionPolicy.fp64())
     card = build_lock_exchange_zco_card()
     state = card.recipe.initial_state
     plain = _lock_model().step(state, dt=card.dt_s)
-    with_channel_none = _lock_model().step(
+    channel_none = _lock_model().step(
         state, dt=card.dt_s,
         surface_forcing=OceanSurfaceForcing(runoff_tracer_content=None))
     for name in ("T", "S", "u", "v", "eta"):
         np.testing.assert_array_equal(
             np.asarray(getattr(plain, name).data),
-            np.asarray(getattr(with_channel_none, name).data))
+            np.asarray(getattr(channel_none, name).data))
 
 
 def test_a_malformed_content_pair_raises():

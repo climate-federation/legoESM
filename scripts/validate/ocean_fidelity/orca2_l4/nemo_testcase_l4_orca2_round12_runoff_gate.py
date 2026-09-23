@@ -69,7 +69,7 @@ from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 NX_G, NY_G, NZ = 180, 148, 30
 _PP = "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
 CITATIONS = {
-    "runoff_on": f"{_PP}/sbcrnf.f90:184",
+    "runoff_on": f"{_PP}/trasbc.f90:318",
     "content_tem": f"{_PP}/sbcrnf.f90:221",
     "content_sal": f"{_PP}/sbcrnf.f90:227",
     "zero_salinity": f"{_PP}/sbcrnf.f90:175",
@@ -194,6 +194,22 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
                 candidate = _plant_one_value(candidate)
             rows[f"stage{stage + 1}_{name}"] = _bitwise_score(
                 candidate, oracle, np.ones_like(oracle, dtype=bool))
+
+    # Can this card's thicknesses tell the two spellings apart at all?  The
+    # ARITHMETIC rows above are a reciprocal-first control only if
+    # ``content * (1/h)`` and ``content / h`` are different fp64 values
+    # somewhere; if they were not, a transcription that divided would pass
+    # them vacuously.
+    _zdep0 = 1.0 / np.maximum(tops[0], 1.0e-10)
+    _mul = rnf_tsc[..., 0] * _zdep0
+    _div = rnf_tsc[..., 0] / np.maximum(tops[0], 1.0e-10)
+    rows["reciprocal_first_is_discriminable"] = {
+        "note": ("cells where multiplying by the reciprocal and dividing give "
+                 "different fp64 values; the bitwise rows above can only be a "
+                 "reciprocal-first control where this is non-zero"),
+        "cells": int(np.count_nonzero(_mul != _div)),
+        "max_abs_difference": float(np.abs(_mul - _div).max()),
+    }
 
     # --- CONTROL: the wrong stage's thickness must refuse ------------------
     zdep_wrong = 1.0 / np.maximum(tops[1], 1.0e-10)
