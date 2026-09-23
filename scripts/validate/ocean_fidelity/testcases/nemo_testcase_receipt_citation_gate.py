@@ -714,7 +714,7 @@ CITATION_MAP = {
         ('and getattr(hooks, "nemo_stage_momentum_wzv_split", False))', 1), 12],
     'ocean_model_latlon_cgrid.py:1789-1794': [
         ('w_momentum, _, _ = nemo_qco_wzv_operands(', 1),
-        ('volume_transport_override=None,', 1), 6],
+        ('runoff_mass_flux=runoff_mass_flux)', 2), 6],
     'ocean_model_latlon_cgrid.py:6872-6878': [
         ('def _momentum_stage_w(geom):', 1),
         ('return geom[2] if geom[11] is None else geom[11]', 1), 7],
