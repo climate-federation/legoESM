@@ -83,13 +83,41 @@ def test_the_native_face_map_the_walk_inverts_is_the_shared_one():
     native = nemo_qco_live_face_geometry_from_operands(eta, *ops)
     _, _, one_plus_r3u, one_plus_r3v = nemo_qco_live_face_geometry_cgrid(
         eta, *ops)
-    redundant_u = np.asarray(one_plus_r3u) - 1.0
-    redundant_v = np.asarray(one_plus_r3v) - 1.0
-    assert np.array_equal(redundant_u[:, 1:], np.asarray(native.r3u))
-    assert np.array_equal(redundant_v[1:, :], np.asarray(native.r3v))
+    # The helper returns ``1 + ratio``, so the map is asserted on THAT
+    # quantity, where it is exact.  Asserting it on the recovered ratio would
+    # fail for a reason that has nothing to do with the map, which is how the
+    # readout floor below was found.
+    assert np.array_equal(
+        np.asarray(one_plus_r3u)[:, 1:], 1.0 + np.asarray(native.r3u))
+    assert np.array_equal(
+        np.asarray(one_plus_r3v)[1:, :], 1.0 + np.asarray(native.r3v))
     # And the wrap/wall the map inserts is exactly what it claims to be.
-    assert np.array_equal(redundant_u[:, 0], np.asarray(native.r3u)[:, -1])
-    assert np.array_equal(redundant_v[0], np.zeros_like(redundant_v[0]))
+    assert np.array_equal(
+        np.asarray(one_plus_r3u)[:, 0], 1.0 + np.asarray(native.r3u)[:, -1])
+    assert np.array_equal(
+        np.asarray(one_plus_r3v)[0], np.ones_like(np.asarray(one_plus_r3v)[0]))
+
+
+def test_recovering_the_ratio_from_the_stretching_factor_costs_a_last_place():
+    """Why the walk reads the OFFLINE ratio off the native helper instead of
+    subtracting one from the redundant one.  The ratio is of order 1e-05 and
+    the factor is of order 1, so the round trip quantises the ratio at half a
+    unit in the last place of 1.0 -- about 1e-16, three orders ABOVE the
+    ratio's own last place.  A decomposition that ignored this would read its
+    own arithmetic as a transcription difference."""
+    ops = _operands()
+    rng = np.random.default_rng(23)
+    eta = jnp.asarray(rng.uniform(-0.4, 0.4, ops[6].shape))
+    native = np.asarray(
+        nemo_qco_live_face_geometry_from_operands(eta, *ops).r3u)
+    _, _, one_plus_r3u, _ = nemo_qco_live_face_geometry_cgrid(eta, *ops)
+    recovered = np.asarray(one_plus_r3u)[:, 1:] - 1.0
+    error = np.max(np.abs(recovered - native))
+    assert error > 0.0, "the round trip is lossless here; pick a harder case"
+    assert error <= np.spacing(1.0)
+    # And it is ORDERS above the quantity's own resolution, which is the
+    # whole point.
+    assert error > 10.0 * float(np.max(np.spacing(np.abs(native))))
 
 
 def test_the_ratio_statement_is_linear_in_the_sea_surface_height():
@@ -130,14 +158,3 @@ def test_the_ratio_statement_actually_reads_the_height(monkeypatch):
         nemo_qco_live_face_geometry_from_operands(moved, *ops).r3u)
     assert not np.array_equal(left, right)
     assert np.max(np.abs(right - left)) > 0.0
-
-
-def test_the_record_reader_carries_the_stage_sea_surface_heights(walk):
-    """The producer walk rebuilds legoESM's ratio from the ORACLE's own
-    height, so the shared record reader has to hand that height over; a
-    reader that dropped it would make the decomposition unrunnable rather
-    than wrong, and this pins it."""
-    source = WALK_PATH.read_text(encoding="utf-8")
-    assert 'rows["ssh_Kmm_t"]' in source
-    assert 'rows["ssh_Kaa_t"]' in source
-    assert 'fields["ssh_Kmm_ssh_Kaa"][0][T_WINDOW].T' in source

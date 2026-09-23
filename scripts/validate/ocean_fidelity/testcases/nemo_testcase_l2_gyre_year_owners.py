@@ -8791,7 +8791,9 @@ def developed_stage2_face_r3_walk(
         nemo_stage_momentum_wzv_resolved)
     from legoesm.ocean.fidelity.provenance import worktree_stamp
     from legoesm.ocean.vertical import (
-        nemo_qco_live_face_geometry_cgrid, nemo_qco_resolved_mesh_operands)
+        nemo_qco_live_face_geometry_cgrid,
+        nemo_qco_live_face_geometry_from_operands,
+        nemo_qco_resolved_mesh_operands)
     from legoesm.ocean.eos import nemo_source_round
 
     stamp = worktree_stamp()
@@ -9053,12 +9055,22 @@ def developed_stage2_face_r3_walk(
     live_r3 = {"u": np.asarray(live.u.data)[..., 0],
                "v": np.asarray(live.v.data)[..., 0]}
     def offline_ratio(mesh_ops):
-        _, _, ratio_u, ratio_v = nemo_qco_live_face_geometry_cgrid(
+        # The RATIO itself, not ``1 + ratio`` minus one.  The redundant-face
+        # helper returns the stretching factor, and recovering the ratio from
+        # it costs half a unit in the last place of 1.0 -- about 1.1e-16,
+        # which is three orders ABOVE the ratio's own last place and would be
+        # read as a statement difference.  So the native helper is called and
+        # the same wrap/wall map the redundant one writes is applied here.
+        native = nemo_qco_live_face_geometry_from_operands(
             jnp.asarray(rows["ssh_Kmm_t"]), mesh_ops.e3u_0, mesh_ops.e3v_0,
             mesh_ops.umask3, mesh_ops.vmask3, mesh_ops.hu_0, mesh_ops.hv_0,
             mesh_ops.area_t, mesh_ops.area_u, mesh_ops.area_v)
-        return {"u": np.asarray(ratio_u) - 1.0,
-                "v": np.asarray(ratio_v) - 1.0}
+        ratio_u = np.asarray(native.r3u)
+        ratio_v = np.asarray(native.r3v)
+        return {
+            "u": np.concatenate([ratio_u[:, -1:], ratio_u], axis=1),
+            "v": np.concatenate([np.zeros_like(ratio_v[:1]), ratio_v], axis=0),
+        }
 
     ops = nemo_qco_resolved_mesh_operands(
         card.recipe.z_coord, card.recipe.grid,
@@ -9086,6 +9098,21 @@ def developed_stage2_face_r3_walk(
             getattr(card.recipe.z_coord, "nemo_e1e2t", None) is not None),
         "u": _score_stage2_face(card_r3["u"], offline_r3["u"], face_mask["u"]),
         "v": _score_stage2_face(card_r3["v"], offline_r3["v"], face_mask["v"]),
+    }
+    # THE INSTRUMENT'S OWN FLOOR.  legoESM's LIVE stage ratio can only be read
+    # out of the model as the stretching factor ``1 + ratio``, so the exposure
+    # recovers it by subtracting one and carries that quantisation.  The
+    # offline rows above do NOT, and the rows that use the live ratio are
+    # reported next to this bound rather than below it.
+    _, _, round_trip_u, round_trip_v = nemo_qco_live_face_geometry_cgrid(
+        jnp.asarray(rows["ssh_Kmm_t"]), ops.e3u_0, ops.e3v_0, ops.umask3,
+        ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v)
+    live_readout_floor = {
+        "u": _score_stage2_face(
+            np.asarray(round_trip_u) - 1.0, offline_r3["u"], face_mask["u"]),
+        "v": _score_stage2_face(
+            np.asarray(round_trip_v) - 1.0, offline_r3["v"], face_mask["v"]),
+        "half_ulp_of_one": float(np.spacing(1.0) / 2.0),
     }
     producer = {}
     for tag in ("u", "v"):
@@ -9147,6 +9174,7 @@ def developed_stage2_face_r3_walk(
         "vertical_velocity_scored_against_nemo": scored,
         "producer_decomposition": producer,
         "producer_mesh_source_control": mesh_source,
+        "live_ratio_readout_floor": live_readout_floor,
         "round160_reference": {
             "corrected_ww_rms": ROUND160_CORRECTED_WW,
             "shared_ww_rms": 1.2326857042024439e-08,
