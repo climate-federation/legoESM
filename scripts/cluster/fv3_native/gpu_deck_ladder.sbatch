@@ -122,7 +122,7 @@ for d in "${DECKS[@]}"; do
       srun -N "$SNODES" -n "$RANKS" --ntasks-per-node=2 --gpus-per-task=1 --kill-on-bad-exit=0 -c "$CPUS" \
         "$PY" "$GATE" --n "$N" --km "$KM" --kt "$KT" --pad "$PAD" \
         --n-split "$NSPLIT" --dt "$DT" --steps "$STEPS" \
-        --distributed --ref-npz "$REF" --gpu-max-rel-peak "${GPU_MAX_REL_PEAK:-1e-13}" --timing 5 \
+        --distributed --ref-npz "$REF" --gpu-max-rel-peak "${GPU_MAX_REL_PEAK:-1e-12}" --timing 5 \
       > "$SLOG" 2>&1
     SCORE_RC=$?
     [ "$SCORE_RC" -eq 124 ] && echo "  step B TIMEOUT after ${SCORE_CAP}s"

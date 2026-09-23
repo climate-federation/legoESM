@@ -139,8 +139,10 @@ def main(argv=None):
                          "within this fraction of the leaf's peak. Two XLA:GPU "
                          "programs differ at rounding (measured 1.5e-14 of "
                          "peak on u/v, C24 kt=1 vs the 6-GPU flat reference, "
-                         "job 9789931); the launcher passes 1e-13. CPU rows "
-                         "leave it unset and stay bitwise")
+                         "job 9789931) and the gap grows with steps (2.6e-13 on "
+                         "C48 u/v at step 2, ladder 9922513); the launchers "
+                         "pass 1e-12 (user 2026-09-23). CPU rows leave it "
+                         "unset and stay bitwise")
     ap.add_argument("--n-split", type=int, default=3)
     ap.add_argument("--distributed", action="store_true",
                     help="MULTI-PROCESS run (jax.distributed.initialize via "

@@ -69,7 +69,7 @@ run_row () {   # kt ranks nodes
       -N "$NODES" -n "$RANKS" --ntasks-per-node=2 -c "${SLURM_CPUS_PER_TASK:-8}" \
       "$PY" "$GATE" --n "$N" --km "$KM" --kt "$KT" --pad "$PAD" \
       --n-split "$NSPLIT" --steps 1 --distributed --ref-npz "$REF" \
-      --gpu-max-rel-peak "${GPU_MAX_REL_PEAK:-1e-13}" --timing "$TIMING" \
+      --gpu-max-rel-peak "${GPU_MAX_REL_PEAK:-1e-12}" --timing "$TIMING" \
     > "$LOG" 2>&1
   local RC=$?
   # the gate's own line, and it must carry a p50 -- "[m6] TIMING REFUSED"
