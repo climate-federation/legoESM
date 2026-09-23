@@ -74,10 +74,21 @@ DAY=${DAY:-0020}
 REC0=$(( 10#$DAY / 5 - 1 )); REC1=$(( REC0 + 1 ))
 echo "### equatorial same-configuration null at day ${DAY} (NEMO rec ${REC0}:${REC1})"
 
+# WHICH RUNS TO SCORE. The default pairs both legs, which is what makes this a
+# NULL test: two same-configuration runs at the same day. Past day 30 only the
+# 90-day leg has snapshots, and demanding the 30-day one there would report
+# FAILURE for a card that did everything asked of it -- an exit code that lies
+# is worse than no exit code. So the caller names the runs:
+#   RUNS="d30run d90run"  (default) -- the null pair, days 5..30
+#   RUNS="d90run"                   -- the single-leg series, days 35..90
+# A run that is NAMED and missing is still fatal; only omission is allowed.
+RUNS=${RUNS:-"d30run d90run"}
+declare -A SNAPOF=( [d30run]="$R/trp_faithz0_d30/snapshot_day${DAY}.npz"
+                    [d90run]="$R/trp_faithz0_d90/snapshot_day${DAY}.npz" )
 rc=0
-for pair in "d30run:$R/trp_faithz0_d30/snapshot_day${DAY}.npz" \
-            "d90run:$R/trp_faithz0_d90/snapshot_day${DAY}.npz"; do
-  TAG=${pair%%:*}; SNAP=${pair#*:}
+for TAG in $RUNS; do
+  SNAP=${SNAPOF[$TAG]:-}
+  [ -n "$SNAP" ] || { echo "FATAL: unknown run $TAG; known: ${!SNAPOF[*]}"; exit 1; }
   [ -r "$SNAP" ] || { echo "FATAL: missing $SNAP"; rc=1; continue; }
   echo "############ $TAG  day $DAY  (NEMO rec ${REC0}:${REC1}) ############"
   $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline.py \
