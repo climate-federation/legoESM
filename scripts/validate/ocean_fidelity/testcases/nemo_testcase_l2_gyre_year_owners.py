@@ -6096,6 +6096,12 @@ DEVELOPED_TRANSPORT_U_ROWS = (
     "zub", "e2u", "e3u_0", "umask", "live_e3u_Kmm", "uu_Kmm",
     "corrected_u", "zFu",
 )
+DEVELOPED_STAGE2_SPLIT_ROWS = (
+    "calibration_nemo_reprojection",
+    "production_baseline",
+    "nemo_depth_mean_substituted",
+    "nemo_depth_mean_substituted_unmasked_weight",
+)
 
 
 def developed_record_availability() -> list[dict]:
@@ -6518,6 +6524,154 @@ def _developed_transport_mode_rows(actual: dict, expected: dict) -> dict:
     }
 
 
+def _score_developed_active(actual, expected, active) -> dict:
+    """Score one 3-D U field against NEMO's, whole-field and on wet faces."""
+    actual = np.ascontiguousarray(actual, dtype=np.float64)
+    expected = np.ascontiguousarray(expected, dtype=np.float64)
+    require(actual.shape == expected.shape == active.shape,
+            f"stage-2 split shapes differ: {actual.shape} vs "
+            f"{expected.shape} vs {active.shape}")
+    bits = actual.view(np.uint64) != expected.view(np.uint64)
+    delta = (actual - expected)[active]
+    return {
+        "cells_scored": int(actual.size),
+        "cells_unequal": int(np.count_nonzero(bits)),
+        "active_cells_scored": int(np.count_nonzero(active)),
+        "active_cells_unequal": int(np.count_nonzero(bits & active)),
+        "active_max_abs": float(np.max(np.abs(delta), initial=0.0)),
+        "active_rms": float(
+            np.sqrt(np.mean(delta * delta)) if delta.size else 0.0),
+        "bit_exact": not bool(np.any(bits)),
+    }
+
+
+def _developed_stage2_velocity_split(production: dict, oracle: dict, *,
+                                     plant_index=None) -> dict:
+    """Split the developed stage-2 U velocity difference in two.
+
+    Stage 2 binds Kaa = N+1/2 and stage 3 reads that field as its Kmm
+    (``GYRE_OMIP_L2_P3_SM_R154TRPWALK/BLD/ppsrc/nemo/stprk3_stg.f90:217-259``
+    and ``:261-277``).  Its program has an EXTERNAL half, which writes the
+    barotropic correction ``zub = uu_b(Kaa) - SUM(e3u_3d*uu(Kaa))*r1_hu_0``
+    at ``:753`` and applies it at ``:772``, and an INTERNAL 3-D half, the
+    stage RHS at ``:400-497`` and the thickness-weighted assignment at
+    ``:687-703``.  The admitted day-180 record carries every operand of the
+    external half and none of the internal one, so this is the split it can
+    make.
+
+    ``rk3_stage_barotropic_correction`` is legoESM's own transcription of
+    ``:753,772`` -- the SAME function the production stage calls -- and it is
+    driven here with NEMO's recorded ``uu_b(Kmm)``, ``e3u_0``, ``r1_hu_0``
+    and ``umask``.  Installing NEMO's depth mean leaves the deviation, so the
+    difference that SURVIVES belongs to the internal half and the difference
+    that is REMOVED belongs to the external half.  The arms are an isolated
+    JIT of that shared statement and are never relabelled as production.
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.barotropic_common import (
+        rk3_stage_barotropic_correction)
+
+    b = np.float64
+    umask = np.ascontiguousarray(oracle["umask"], dtype=b)
+    active3 = umask != 0.0
+    active2 = np.any(active3, axis=-1)
+    uu_nemo = np.ascontiguousarray(oracle["uu_Kmm"], dtype=b)
+    uu_lego = np.ascontiguousarray(production["uu_Kmm"], dtype=b)
+    e3u_0 = np.ascontiguousarray(oracle["e3u_0"], dtype=b)
+    r1_depth = np.ascontiguousarray(oracle["r1_hu_0"], dtype=b)
+    target = np.ascontiguousarray(oracle["uu_b_Kmm"], dtype=b)
+    planted = None
+    if plant_index is not None:
+        target = target.copy()
+        planted = tuple(int(value) for value in plant_index)
+        before = target[planted]
+        target[planted] = np.nextafter(before, np.inf)
+        require(target[planted] != before,
+                "stage-2 uu_b ULP plant rounded away")
+
+    @jax.jit
+    def reproject(field, mean, weight, reciprocal, mask):
+        return rk3_stage_barotropic_correction(
+            field, mean, weight, reciprocal, mask)
+
+    def run(field, weight):
+        return np.ascontiguousarray(jax.device_get(reproject(
+            jnp.asarray(field), jnp.asarray(target), jnp.asarray(weight),
+            jnp.asarray(r1_depth), jnp.asarray(umask))), dtype=b)
+
+    # NEMO's SUM at :753 carries no mask; production hands the helper a
+    # face-masked reference thickness.  Both arms are measured rather than
+    # argued equal, because legoESM's dry-face velocity is not asserted zero.
+    masked_weight = e3u_0 * umask
+    rows = {
+        "calibration_nemo_reprojection": _score_developed_active(
+            run(uu_nemo, masked_weight), uu_nemo, active3),
+        "production_baseline": _score_developed_active(
+            uu_lego, uu_nemo, active3),
+        "nemo_depth_mean_substituted": _score_developed_active(
+            run(uu_lego, masked_weight), uu_nemo, active3),
+        "nemo_depth_mean_substituted_unmasked_weight":
+            _score_developed_active(run(uu_lego, e3u_0), uu_nemo, active3),
+    }
+    require(set(rows) == set(DEVELOPED_STAGE2_SPLIT_ROWS),
+            "developed stage-2 split registry is incomplete")
+    baseline_max = rows["production_baseline"]["active_max_abs"]
+    baseline_rms = rows["production_baseline"]["active_rms"]
+    for name, row in rows.items():
+        row["active_max_abs_removed_fraction"] = (
+            float((baseline_max - row["active_max_abs"]) / baseline_max)
+            if baseline_max > 0.0 else 0.0)
+        row["active_rms_removed_fraction"] = (
+            float((baseline_rms - row["active_rms"]) / baseline_rms)
+            if baseline_rms > 0.0 else 0.0)
+
+    # KNOWN ANSWER.  What the substitution removes at each level is the
+    # depth-mean error the stage installed, so it must reproduce the
+    # separately recorded uu_b(Kmm) row of the same walk.
+    removed = uu_lego - run(uu_lego, masked_weight)
+    recorded = (np.ascontiguousarray(production["uu_b_Kmm"], dtype=b)
+                - np.ascontiguousarray(oracle["uu_b_Kmm"], dtype=b))
+    discrepancy = (removed - recorded[..., None])[active3]
+    external = {
+        "recorded_uu_b_active_max_abs": float(np.max(
+            np.abs(recorded[active2]), initial=0.0)),
+        "recorded_uu_b_active_columns_unequal": int(np.count_nonzero(
+            (np.ascontiguousarray(production["uu_b_Kmm"], dtype=b).view(
+                np.uint64)
+             != np.ascontiguousarray(oracle["uu_b_Kmm"], dtype=b).view(
+                np.uint64)) & active2)),
+        "removed_active_max_abs": float(np.max(
+            np.abs(removed[active3]), initial=0.0)),
+        "removed_minus_recorded_active_max_abs": float(np.max(
+            np.abs(discrepancy), initial=0.0)),
+    }
+
+    residual = run(uu_lego, masked_weight) - uu_nemo
+    base_delta = uu_lego - uu_nemo
+
+    def level_rms(field):
+        out = []
+        for level in range(field.shape[-1]):
+            selected = field[..., level][active3[..., level]]
+            out.append(float(
+                np.sqrt(np.mean(selected * selected))
+                if selected.size else 0.0))
+        return out
+
+    return {
+        "statement": "stprk3_stg.f90:753,772 via "
+                     "rk3_stage_barotropic_correction",
+        "mode": "isolated_closure_jit",
+        "scored_against": "NEMO recorded uu(Kmm) at stage 3",
+        "rows": rows,
+        "external_half_known_answer": external,
+        "baseline_level_active_rms": level_rms(base_delta),
+        "residual_level_active_rms": level_rms(residual),
+        "planted_uu_b_index": list(planted) if planted is not None else None,
+    }
+
+
 def _developed_fct_mode_rows(
         observed: dict[str, tuple[np.ndarray, ...]], bundle: dict,
         common_actual: dict[str, np.ndarray]) -> dict:
@@ -6616,7 +6770,8 @@ def developed_state_process_walk(
                  "missing-ranking-row"):
         return _developed_registry_plant(plant)
     require(plant in (None, "none", "entry-temperature-ulp",
-                      "fct-transport-ulp", "transport-un-adv-ulp"),
+                      "fct-transport-ulp", "transport-un-adv-ulp",
+                      "stage2-uu-b-ulp"),
             f"unknown developed-state plant {plant!r}")
     _policy()
     import jax
@@ -7159,6 +7314,31 @@ def developed_state_process_walk(
             key=lambda name: -transport_attribution[name][
                 "active_rms_removed_fraction"])
 
+        # Round 156: the magnitude owner of the transport difference is the
+        # stage-2 velocity, so the SAME production observation is split
+        # between the two halves of the compiled stage-2 program.
+        stage2_split = _developed_stage2_velocity_split(
+            production_transport, oracle_rows)
+        if plant == "stage2-uu-b-ulp":
+            oracle_active2 = np.any(oracle_active, axis=-1)
+            candidates = np.argwhere(
+                oracle_active2
+                & (np.asarray(oracle_rows["uu_b_Kmm"]) != 0.0))
+            require(candidates.size > 0,
+                    "no active nonzero uu_b column to plant")
+            index = tuple(int(value) for value in candidates[0])
+            planted_split = _developed_stage2_velocity_split(
+                production_transport, oracle_rows, plant_index=index)
+            before = stage2_split["rows"]["nemo_depth_mean_substituted"]
+            after = planted_split["rows"]["nemo_depth_mean_substituted"]
+            require(after["active_max_abs"] != before["active_max_abs"],
+                    "stage-2 uu_b ULP plant moved no reprojected velocity")
+            return {
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": {"uu_b_index": list(index),
+                            "before": before, "after": after},
+            }
+
     ordinary = ordinary_model.step(
         state, dt=card.dt_s, freshwater=freshwater,
         surface_forcing=surface,
@@ -7301,6 +7481,7 @@ def developed_state_process_walk(
                 "ranking_metric": "active_rms_removed_fraction",
                 "magnitude_owner": ranked[0],
             },
+            "stage2_velocity_split": stage2_split,
         }
     if plant == "entry-temperature-ulp":
         j, i, k = (int(value) for value in np.argwhere(wet)[0])
@@ -7555,6 +7736,25 @@ def developed_state_process_walk(
                 transport_walk["operand_attribution"]["magnitude_owner"]
                 == "uu_Kmm"),
         })
+        split_rows = transport_walk["stage2_velocity_split"]["rows"]
+        split_known = transport_walk["stage2_velocity_split"][
+            "external_half_known_answer"]
+        predictions.update({
+            "stage2_split_calibration_below_1e_15": (
+                split_rows["calibration_nemo_reprojection"]["active_max_abs"]
+                < 1.0e-15),
+            "stage2_split_baseline_reproduces_round155": (
+                split_rows["production_baseline"]["active_max_abs"]
+                == 1.30926020461275e-6
+                and split_rows["production_baseline"]["active_cells_unequal"]
+                == 17400),
+            "stage2_external_half_removes_under_1_percent": (
+                abs(split_rows["nemo_depth_mean_substituted"][
+                    "active_rms_removed_fraction"]) < 0.01),
+            "stage2_removed_matches_recorded_uu_b": (
+                split_known["removed_minus_recorded_active_max_abs"]
+                < split_known["recorded_uu_b_active_max_abs"] * 1.0e-3),
+        })
     report = {
         "format": "gyre-developed-state-process-walk-v1",
         "status": "PASS", "case": CASE,
@@ -7733,6 +7933,21 @@ def developed_state_process_walk(
                   f"{row['active_rms']:16.8e} "
                   f"{row['active_rms_removed_fraction']:8.4f}")
         print(f"  MAGNITUDE OWNER: {attribution['magnitude_owner']}")
+        split = transport_walk["stage2_velocity_split"]
+        print("\n  stage-2 velocity split (isolated JIT of the model's own "
+              "stprk3_stg.f90:753,772 statement, NEMO's operands):")
+        print(f"{'arm':>46} {'active unequal':>15} {'active max abs':>16} "
+              f"{'rms rm':>8}")
+        for name in DEVELOPED_STAGE2_SPLIT_ROWS:
+            row = split["rows"][name]
+            print(f"{name:>46} {row['active_cells_unequal']:>15} "
+                  f"{row['active_max_abs']:>16.8e} "
+                  f"{row['active_rms_removed_fraction']:>8.4f}")
+        known = split["external_half_known_answer"]
+        print(f"  EXTERNAL HALF removed max "
+              f"{known['removed_active_max_abs']:.8e}; recorded uu_b row "
+              f"{known['recorded_uu_b_active_max_abs']:.8e}; "
+              f"disagreement {known['removed_minus_recorded_active_max_abs']:.8e}")
     return report
 
 

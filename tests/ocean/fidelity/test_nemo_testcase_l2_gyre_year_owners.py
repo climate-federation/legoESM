@@ -335,6 +335,73 @@ def test_round155_transport_registry_and_first_operand_are_nonvacuous(harness):
         harness._developed_transport_mode_rows(incomplete, expected)
 
 
+def _stage2_split_inputs(harness):
+    """A small U column set whose depth mean is NEMO's own, by construction."""
+    rng = np.random.default_rng(156)
+    umask = np.ones((2, 3, 4), dtype=np.float64)
+    e3u_0 = np.full((2, 3, 4), 10.0, dtype=np.float64)
+    r1_hu_0 = np.full((2, 3), 1.0 / 40.0, dtype=np.float64)
+    uu = rng.normal(size=(2, 3, 4))
+    running = np.zeros((2, 3), dtype=np.float64)
+    for level in range(4):
+        running = running + uu[..., level] * e3u_0[..., level]
+    uu_b = running * r1_hu_0
+    oracle = {
+        "umask": umask, "e3u_0": e3u_0, "r1_hu_0": r1_hu_0,
+        "uu_Kmm": uu, "uu_b_Kmm": uu_b,
+    }
+    return oracle
+
+
+def test_round156_stage2_split_separates_barotropic_from_baroclinic(harness):
+    oracle = _stage2_split_inputs(harness)
+    uu = oracle["uu_Kmm"]
+
+    # A PURE depth-mean difference: installing NEMO's own depth mean must
+    # remove it.  If the split were not measuring the external half this
+    # residual would stay at the baseline.
+    offset = np.array([[1e-6, 2e-6, 3e-6], [4e-6, 5e-6, 6e-6]])
+    barotropic = {
+        "uu_Kmm": uu + offset[..., None],
+        "uu_b_Kmm": oracle["uu_b_Kmm"] + offset,
+    }
+    report = harness._developed_stage2_velocity_split(barotropic, oracle)
+    assert set(report["rows"]) == set(harness.DEVELOPED_STAGE2_SPLIT_ROWS)
+    rows = report["rows"]
+    assert rows["production_baseline"]["active_max_abs"] > 5e-7
+    assert rows["nemo_depth_mean_substituted"]["active_max_abs"] < 1e-15
+    assert rows["nemo_depth_mean_substituted"][
+        "active_rms_removed_fraction"] > 0.99
+    known = report["external_half_known_answer"]
+    assert known["removed_minus_recorded_active_max_abs"] < 1e-15
+
+    # A DEVIATION difference with zero depth mean: the same substitution must
+    # remove none of it.  Without both arms "it was removed" proves nothing.
+    deviation = np.zeros_like(uu)
+    deviation[..., 0] = 1e-6
+    deviation[..., 1] = -1e-6
+    baroclinic = {
+        "uu_Kmm": uu + deviation, "uu_b_Kmm": oracle["uu_b_Kmm"],
+    }
+    other = harness._developed_stage2_velocity_split(baroclinic, oracle)
+    assert other["rows"]["production_baseline"]["active_max_abs"] > 5e-7
+    assert other["rows"]["nemo_depth_mean_substituted"][
+        "active_rms_removed_fraction"] < 1e-6
+
+    # The calibration arm: NEMO's own field with NEMO's own depth mean.
+    same = harness._developed_stage2_velocity_split(
+        {"uu_Kmm": uu, "uu_b_Kmm": oracle["uu_b_Kmm"]}, oracle)
+    assert same["rows"]["calibration_nemo_reprojection"][
+        "active_max_abs"] < 1e-15
+
+    # The ULP plant path perturbs NEMO's recorded target, not the model's.
+    planted = harness._developed_stage2_velocity_split(
+        barotropic, oracle, plant_index=(0, 0))
+    assert planted["planted_uu_b_index"] == [0, 0]
+    assert (planted["rows"]["nemo_depth_mean_substituted"]["active_max_abs"]
+            != rows["nemo_depth_mean_substituted"]["active_max_abs"])
+
+
 def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
                                                               harness):
     record_path = tmp_path / "oracle_process_budget_kt00001081.bin"
