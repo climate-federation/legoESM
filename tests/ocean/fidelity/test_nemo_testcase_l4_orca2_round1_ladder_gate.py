@@ -253,24 +253,28 @@ def test_only_a_registered_refusal_may_be_labelled_as_an_unbuilt_statement():
 
     Found by the round-7 independent review: the first version labelled every
     refusal as the vertex-thickness gap and cited it to the compiled routine
-    that builds that field.  Round 8 transcribed that statement and registered
-    the next one, so this now exercises the registry rather than one name.
+    that builds that field.  Rounds 8 and 9 each transcribed the registered
+    statement and registered the next one, so this exercises the registry
+    rather than one name.
     """
     (only,) = gate.UNBUILT_STATEMENTS
     labelled = gate.unbuilt_statement_blocker(
         ValueError(gate.UNBUILT_STATEMENTS[only]["refusal"] +
-                   " (got dlon<=0; tripolar unsupported)."), kt=1)
-    assert labelled["status"] == only == (
-        "STOP_PRODUCTION_LDF_DYN_TRIPOLAR_COEFF_GAP")
+                   "; call apply_shortwave_penetration(...) to dispatch the "
+                   "rgb_chl scheme (needs chl/dz_live/wet_cell)."), kt=1)
+    assert labelled["status"] == only == "STOP_PRODUCTION_QSR_RGB_PIPELINE_GAP"
     assert labelled["kt"] == 1
-    assert "ldfdyn.f90:348-353" in labelled["nemo_source_citation"]
-    # the resolved setting that makes this a gap, not a tripolar port
-    assert "nn_ahm_ijk_t = -30" in labelled["resolved_setting"]
+    assert "traqsr.f90:213,258-468" in labelled["nemo_source_citation"]
+    # the resolved setting that makes this a gap, not a kernel choice
+    assert "ln_qsr_rgb = .true." in labelled["resolved_setting"]
 
-    # The statement round 8 transcribed is no longer registered, so its old
-    # refusal text cannot be labelled either -- the registry shrank with it.
+    # Every statement an earlier round transcribed is out of the registry, so
+    # its old refusal text cannot be labelled either -- the registry shrinks
+    # with each transcription.
     for stale in (
         "nemo_avg4 is not defined for a tripolar fold",
+        "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
+        "with a scalar dlon",
         "some other operator is not built",
     ):
         with pytest.raises(gate.GateError, match="unregistered"):
