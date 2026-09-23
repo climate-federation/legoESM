@@ -39,20 +39,43 @@
 # there is runoff, while an interpolated initial condition is wrong on every
 # coast, including the runoff-free ones.
 #
-# PRE-REGISTERED, on the share of the ring-1 gap carried by the cells with
-# EXACTLY ZERO regridded runoff (they are the majority of the ring by area,
-# so this is the stratum the hypothesis makes a sharp claim about):
-#   * zero-runoff share <= 25%  -> runoff placement LEADS. The excess needs
-#     rivers, and closing the depth-spread gap on the FESOM lane becomes the
-#     first thing to try.
-#   * zero-runoff share >= 55%  -> runoff placement is REFUTED as the leading
-#     term. The excess is on runoff-free coast too, and the initial condition
-#     carries it.
-#   * 25% to 55%  -> NO VERDICT, both contribute and neither leads.
-# The bands are set by area: runoff-free cells are most of the ring, so a gap
-# that simply followed area would land near the middle. A stratifier blind to
-# runoff reports the area share by construction, which is why the area share
-# is printed next to every row.
+# THE FIRST VERSION OF THIS PRE-REGISTRATION WAS VACUOUS, and it is left
+# described here rather than quietly replaced. It banded the zero-runoff
+# stratum's SHARE of the gap, on the stated premise that "runoff-free cells
+# are most of the ring by area". Measured, they were 289 of 4127 cells and
+# 1.5% OF THE AREA, because the first version averaged runoff over a
+# 2.5-degree radius and left almost no coastal cell at exactly zero. A stratum
+# that small cannot carry 55% of the gap under any hypothesis, so the refuting
+# branch was unreachable and the passing branch meant nothing. Withdrawn
+# before it was claimed. See 90111a318.
+#
+# TWO FIXES, and both are in the probe rather than in the wording:
+#   * runoff is carried to the target by its NEAREST SOURCE CELL, not an
+#     inverse-distance average, so "no river here" is a fact about the
+#     coastline instead of about the search radius.
+#   * the statistic is LIFT = the stratum's share of the gap divided by its
+#     share of the area. That is 1.0 for a gap that simply follows the
+#     coastline, whatever the stratum's size, and near 0 for a gap that needs
+#     rivers. It cannot be defeated by a stratum turning out small.
+#
+# PRE-REGISTERED, on the LIFT of the exactly-zero-runoff stratum in ring 1:
+#   * lift <= 0.25  -> runoff placement LEADS. River-free coast carries far
+#     less of the gap than its area, so the excess needs rivers, and closing
+#     the depth-spread gap on the FESOM lane is the first thing to try.
+#   * lift >= 0.75  -> runoff placement is REFUTED as the leading term. The
+#     excess is on river-free coast in proportion to its area, and the initial
+#     condition carries it.
+#   * 0.25 to 0.75  -> NO VERDICT, both contribute and neither leads.
+# A stratifier blind to runoff returns lift 1.0 everywhere by construction,
+# which is what the probe's own uniform-excess test asserts.
+#
+# READ THE WHOLE LIFT COLUMN, NOT ONLY THAT ROW. Lift rising monotonically
+# with runoff is the dose-response the hypothesis predicts. It is also, on its
+# own, CONFOUNDED: river-mouth cells carry the sharpest surface-salinity
+# gradients in the ocean and are therefore the hardest cells for any
+# interpolation, so "the IC interpolation is worst where gradients are
+# sharpest" predicts the same shape. The zero-runoff row is the one place the
+# two candidates genuinely disagree, which is why it alone is banded.
 #
 # The strata come from the ring's OWN nonzero runoff percentiles, so no
 # threshold is chosen by hand. Shares are computed on area-weighted SQUARED

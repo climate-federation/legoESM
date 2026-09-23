@@ -35,25 +35,9 @@ for magnitude. A recombination check is printed, and a mismatch is fatal.
 from __future__ import annotations
 
 import argparse
-import importlib.util
-import sys
 from pathlib import Path
 
 import numpy as np
-
-_THIS = Path(__file__).resolve()
-
-
-def _load_regridder():
-    """Reuse the scorer's own IDW regridder rather than writing a second one."""
-    path = _THIS.parent.parent / "compare_omip_nemo.py"
-    if not path.is_file():
-        raise SystemExit(f"cannot find the shared regridder at {path}")
-    spec = importlib.util.spec_from_file_location("_cmp_omip_nemo", path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["_cmp_omip_nemo"] = mod
-    spec.loader.exec_module(mod)
-    return mod.regrid_curv_to_latlon
 
 
 def wrms(err, area, sel):
@@ -70,8 +54,28 @@ def wsse(err, area, sel):
     return float((area[sel] * err[sel] * err[sel]).sum())
 
 
-def runoff_on_target(runoff_file, tgt_lat_1d, tgt_lon_1d, regrid, max_deg):
-    """Annual-maximum river runoff, regridded onto the scorer's target grid."""
+def _xyz(lat_rad, lon_rad):
+    c = np.cos(lat_rad)
+    return np.stack([c * np.cos(lon_rad), c * np.sin(lon_rad),
+                     np.sin(lat_rad)], axis=-1)
+
+
+def runoff_on_target(runoff_file, tgt_lat_1d, tgt_lon_1d, max_deg):
+    """Annual-maximum river runoff carried to the scorer's target grid by
+    NEAREST SOURCE CELL.
+
+    Deliberately not an inverse-distance average. Runoff is concentrated at a
+    handful of river mouths, and averaging it over a multi-degree radius
+    leaves almost no coastal cell at exactly zero -- which destroyed the first
+    version of this test, where the runoff-free stratum came out at 1.5% of
+    the ring's area and could not have carried the gap under any hypothesis.
+    Nearest-source keeps "there is no river here" a statement about the
+    coastline rather than about the search radius.
+
+    The shared regridder is not reused for this one lookup because it carries
+    a known axis-drop defect at k=1; the few lines below are the whole of what
+    is needed and their shape is explicit.
+    """
     import netCDF4 as nc
 
     with nc.Dataset(runoff_file) as f:
@@ -86,10 +90,23 @@ def runoff_on_target(runoff_file, tgt_lat_1d, tgt_lon_1d, regrid, max_deg):
     # river, and the depth-spread lever keys off the climatological maximum
     # exactly as NEMO's rn_rnf_max does.
     rnf_max = np.nan_to_num(rnf, nan=0.0).max(axis=0)
-    src_ok = np.isfinite(lat) & np.isfinite(lon)
-    out, flag = regrid(rnf_max, lat, lon, src_ok,
-                       tgt_lat_1d, tgt_lon_1d, k=4, max_deg=max_deg)
-    return np.where(flag > 0.5, out, 0.0)
+    src_ok = (np.isfinite(lat) & np.isfinite(lon)).ravel()
+    if not src_ok.any():
+        raise SystemExit("runoff file has no usable source coordinates")
+
+    from scipy.spatial import cKDTree
+
+    src = _xyz(np.deg2rad(lat.ravel()[src_ok]), np.deg2rad(lon.ravel()[src_ok]))
+    vals = rnf_max.ravel()[src_ok]
+    lon2d, lat2d = np.meshgrid(tgt_lon_1d, tgt_lat_1d)
+    tgt = _xyz(np.deg2rad(lat2d.ravel()), np.deg2rad(lon2d.ravel()))
+    dist, idx = cKDTree(src).query(tgt, k=1)
+    dist = np.asarray(dist).reshape(lat2d.shape)
+    idx = np.asarray(idx).reshape(lat2d.shape)
+    out = vals[idx]
+    # Chord length on the unit sphere for the max_deg cutoff.
+    cutoff = 2.0 * np.sin(np.deg2rad(max_deg) / 2.0)
+    return np.where(dist <= cutoff, out, 0.0)
 
 
 def main() -> int:
@@ -129,9 +146,8 @@ def main() -> int:
     if n_ring == 0:
         raise SystemExit(f"no scored cells in edge ring {args.ring}")
 
-    regrid = _load_regridder()
     rnf = runoff_on_target(args.runoff_file, lat2d[:, 0], lon2d[0, :],
-                           regrid, args.max_deg)
+                           args.max_deg)
     if rnf.shape != area.shape:
         raise SystemExit(f"regridded runoff {rnf.shape} does not match the "
                          f"dump's grid {area.shape}")
@@ -161,7 +177,8 @@ def main() -> int:
     print(f"runoff strata from the ring's OWN nonzero percentiles {qs} "
           f"= {np.array2string(cuts, precision=4)}")
     print(f"{'stratum':30s} {'cells':>6s} {'area':>7s} "
-          f"{label_a[:8]:>9s} {label_b[:8]:>9s} {'excess':>9s} {'% of gap':>9s}")
+          f"{label_a[:8]:>9s} {label_b[:8]:>9s} {'excess':>9s} "
+          f"{'% of gap':>9s} {'lift':>7s}")
     acc_a = acc_b = 0.0
     for name, sel in strata:
         n = int(sel.sum())
@@ -171,10 +188,19 @@ def main() -> int:
         sa, sb = wsse(err_a, area, sel), wsse(err_b, area, sel)
         acc_a += sa
         acc_b += sb
-        share = 100.0 * (sb - sa) / tot_gap if tot_gap != 0.0 else float("nan")
+        share = (sb - sa) / tot_gap if tot_gap != 0.0 else float("nan")
+        afrac = area[sel].sum() / area_ring
+        # LIFT = share of the gap divided by share of the area. A gap that
+        # simply follows the coastline gives 1.0 in every stratum whatever its
+        # size; a gap that needs rivers gives ~0 where there are none. This is
+        # the statistic the first version of this probe lacked, and its
+        # absence is what let a stratum holding 1.5% of the area be read as
+        # though it could have refuted anything.
+        lift = share / afrac if afrac > 0 else float("nan")
         ra, rb = wrms(err_a, area, sel), wrms(err_b, area, sel)
-        print(f"{name:30s} {n:6d} {area[sel].sum()/area_ring:7.3f} "
-              f"{ra:9.4f} {rb:9.4f} {rb - ra:+9.4f} {share:8.1f}%")
+        print(f"{name:30s} {n:6d} {afrac:7.3f} "
+              f"{ra:9.4f} {rb:9.4f} {rb - ra:+9.4f} "
+              f"{100.0 * share:8.1f}% {lift:7.2f}")
 
     # A stratification that loses error is not a stratification.
     for got, want, who in ((acc_a, tot_a, label_a), (acc_b, tot_b, label_b)):

@@ -112,23 +112,50 @@ def _run(dump, rf):
     return out.stdout
 
 
+def _zero_row(txt):
+    rows = [l for l in txt.splitlines() if l.startswith("zero runoff")]
+    assert rows, txt
+    f = rows[0].split()
+    # "zero runoff" is two words, so: cells area a b excess share% lift
+    return {"cells": int(f[2]), "area": float(f[3]),
+            "share": float(f[-2].rstrip("%")), "lift": float(f[-1])}
+
+
+def test_nearest_source_does_not_smear_rivers_across_the_ring(tmp_path):
+    """The fix that made this probe able to discriminate at all.
+
+    Only two of the ring's 24 cells carry a river. Under nearest-source the
+    other 22 must land in the zero stratum; an inverse-distance average over a
+    multi-degree radius puts a nonzero value nearly everywhere and collapses
+    that stratum, which is exactly how the first version of this test came out
+    vacuous on real data.
+    """
+    dump, rf = _write_case(tmp_path, excess_only_on_rivers=True)
+    z = _zero_row(_run(dump, rf))
+    assert z["cells"] == 22, z
+    assert z["area"] > 0.8, z
+
+
 def test_river_only_excess_is_attributed_to_the_river_stratum(tmp_path):
     dump, rf = _write_case(tmp_path, excess_only_on_rivers=True)
     txt = _run(dump, rf)
     assert "recombine OK" in txt
-    zero = [l for l in txt.splitlines() if l.startswith("zero runoff")]
-    assert zero, txt
-    # The runoff-free stratum is the bulk of the ring by area, so a stratifier
-    # that ignored runoff would park most of the gap here. It must get none.
-    assert float(zero[0].split()[-1].rstrip("%")) == pytest.approx(0.0, abs=1e-6)
+    z = _zero_row(txt)
+    # Runoff-free cells are most of the ring by area, so a stratifier blind to
+    # runoff would park most of the gap here. It must get none, and the lift
+    # says so independently of how big the stratum is.
+    assert z["share"] == pytest.approx(0.0, abs=1e-6)
+    assert z["lift"] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_uniform_excess_is_not_attributed_to_rivers(tmp_path):
     dump, rf = _write_case(tmp_path, excess_only_on_rivers=False)
     txt = _run(dump, rf)
     assert "recombine OK" in txt
-    zero = [l for l in txt.splitlines() if l.startswith("zero runoff")]
-    assert zero, txt
-    # Same planted magnitude, spread over the ring: now the runoff-free cells
-    # must carry most of it. The two tests differ ONLY in where the error sits.
-    assert float(zero[0].split()[-1].rstrip("%")) > 50.0
+    z = _zero_row(txt)
+    # Same planted magnitude, spread evenly over the ring: the runoff-free
+    # cells must now carry it in proportion to their area, i.e. lift 1. The
+    # two cases differ ONLY in where the error sits, so a probe that ignored
+    # runoff cannot pass both.
+    assert z["share"] > 0.5
+    assert z["lift"] == pytest.approx(1.0, abs=0.15)
