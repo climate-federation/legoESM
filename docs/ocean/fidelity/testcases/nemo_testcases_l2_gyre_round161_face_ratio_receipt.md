@@ -47,6 +47,14 @@ just-in-time compilation, never an isolated closure.  Oracle record sha256
 `004f8493a91fbb5a5fd69227e198bea531c6e945bc84f0a7dc8eb4ec3c9563f9`, read
 through the reader rounds 158-160 already share.
 
+**Registered, an amendment to a frozen document.**  One reference in the
+preregistration named the stage file without the compiled branch in front of
+it, so it resolved against no build and the citation gate refused the whole
+document.  It was respelled with the build that owns it, in its own commit,
+after the measurements were taken.  The line number, the statement and the
+claim are unchanged; only the build the citation binds to is now explicit.
+Nothing else in the preregistration was touched.
+
 ## The compiled program
 
 The stage program takes the vector-invariant arm
