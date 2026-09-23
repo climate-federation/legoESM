@@ -9052,14 +9052,41 @@ def developed_stage2_face_r3_walk(
                nemo_stage_momentum_wzv_split=True)
     live_r3 = {"u": np.asarray(live.u.data)[..., 0],
                "v": np.asarray(live.v.data)[..., 0]}
+    def offline_ratio(mesh_ops):
+        _, _, ratio_u, ratio_v = nemo_qco_live_face_geometry_cgrid(
+            jnp.asarray(rows["ssh_Kmm_t"]), mesh_ops.e3u_0, mesh_ops.e3v_0,
+            mesh_ops.umask3, mesh_ops.vmask3, mesh_ops.hu_0, mesh_ops.hv_0,
+            mesh_ops.area_t, mesh_ops.area_u, mesh_ops.area_v)
+        return {"u": np.asarray(ratio_u) - 1.0,
+                "v": np.asarray(ratio_v) - 1.0}
+
     ops = nemo_qco_resolved_mesh_operands(
         card.recipe.z_coord, card.recipe.grid,
         jnp.asarray(rows["umask_vmask_u"]), jnp.asarray(rows["umask_vmask_v"]),
         jnp.float64, nlev)
-    _, _, opu, opv = nemo_qco_live_face_geometry_cgrid(
-        jnp.asarray(rows["ssh_Kmm_t"]), ops.e3u_0, ops.e3v_0, ops.umask3,
-        ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v)
-    offline_r3 = {"u": np.asarray(opu) - 1.0, "v": np.asarray(opv) - 1.0}
+    offline_r3 = offline_ratio(ops)
+    # MESH-SOURCE CONTROL.  legoESM's LIVE stage ratio is built by the stage
+    # helper from the CARD's rebuilt mesh operands, while the continuity
+    # producer resolves NEMO's own raw ones.  If those two operand sets
+    # disagreed, the live-versus-statement row below would be measuring the
+    # mesh rather than the sea surface height, so both are evaluated on the
+    # SAME oracle ssh and scored against each other.
+    from legoesm.ocean.vertical import nemo_qco_card_mesh_operands
+
+    h_ref = jnp.asarray(card.recipe.z_coord.h_partial, dtype=jnp.float64)
+    if h_ref.ndim == 1:
+        h_ref = jnp.broadcast_to(
+            h_ref, (*np.asarray(state.T.data).shape[:2], h_ref.shape[-1]))
+    card_ops = nemo_qco_card_mesh_operands(
+        h_ref[..., :nlev], jnp.asarray(rows["umask_vmask_u"]),
+        jnp.asarray(rows["umask_vmask_v"]), card.recipe.grid, jnp.float64)
+    card_r3 = offline_ratio(card_ops)
+    mesh_source = {
+        "card_carries_raw_nemo_mesh": bool(
+            getattr(card.recipe.z_coord, "nemo_e1e2t", None) is not None),
+        "u": _score_stage2_face(card_r3["u"], offline_r3["u"], face_mask["u"]),
+        "v": _score_stage2_face(card_r3["v"], offline_r3["v"], face_mask["v"]),
+    }
     producer = {}
     for tag in ("u", "v"):
         own = float(np.sqrt(np.mean(oracle_r3[tag] ** 2)))
@@ -9075,11 +9102,21 @@ def developed_stage2_face_r3_walk(
             row["relative_to_own_rms"] = float(row["active_rms"] / own)
         producer[tag] = rows_for_tag
         producer[tag]["operand_own_rms"] = own
+        producer[tag]["statement_share_of_live"] = float(
+            rows_for_tag["statement_given_oracle_ssh"]["active_rms"]
+            / rows_for_tag["live_versus_oracle"]["active_rms"])
+        producer[tag]["operand_share_of_live"] = float(
+            rows_for_tag["live_versus_statement"]["active_rms"]
+            / rows_for_tag["live_versus_oracle"]["active_rms"])
 
     # ---- THE UNRELATED-ARM PASSIVITY CONTROL round 160's review asked for -
     # Round 160 loosened a zero-byte passivity requirement to two units in the
     # last place at row scale.  These two exposure arms are on code this round
     # did not write, and they answer whether that floor is general.
+    # The baseline is the ORDINARY production step -- no split, no observer --
+    # because these arms carry no split either; scoring them against the
+    # split arm would measure round 160's physics, not an exposure.
+    ordinary = run("ordinary-production", observe=False)
     unrelated = {}
     for label, wrote, hooks in (
             ("expose_momentum_stage=1", ("u", "v"),
@@ -9088,8 +9125,8 @@ def developed_stage2_face_r3_walk(
              {"expose_tracer_stage": 3})):
         exposed = run(f"unrelated-{label}", observe=False, **hooks)
         neutral = exposed._replace(
-            **{name: getattr(plain, name) for name in wrote})
-        unrelated[label] = _state_leaf_move(neutral, plain)
+            **{name: getattr(ordinary, name) for name in wrote})
+        unrelated[label] = _state_leaf_move(neutral, ordinary)
 
     report = {
         "format": "gyre-round161-developed-stage2-face-r3-walk-v1",
@@ -9109,6 +9146,7 @@ def developed_stage2_face_r3_walk(
         "nemo_ww_own_rms": own_rms,
         "vertical_velocity_scored_against_nemo": scored,
         "producer_decomposition": producer,
+        "producer_mesh_source_control": mesh_source,
         "round160_reference": {
             "corrected_ww_rms": ROUND160_CORRECTED_WW,
             "shared_ww_rms": 1.2326857042024439e-08,
