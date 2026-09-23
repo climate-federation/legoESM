@@ -1,4 +1,22 @@
-"""CLI coverage for the real AMIP entrypoint."""
+"""CLI coverage for the real AMIP entrypoint.
+
+WHY SO MANY FIXTURES PASS ``--land-mask-file lsm.nc``, and why removing it is
+not a simplification. A land tile (``--slab-land-active`` /
+``--use-multilayer-land``) gets its land fraction from the topography when no
+mask is named, and the IDEALIZED topographies derive none: ``flat`` is zero
+elevation everywhere, and ``gaussian`` is a dynamical forcing that the driver
+deliberately leaves all-ocean. So a land-tile fixture on the default ``flat``
+topography with no mask has ``f_land == 0`` in every cell -- the flags under
+test are inert in their own fixture, and the test asserts the plumbing of a
+no-op.
+
+``validate_strict`` refuses that combination (#1765), which is how it surfaced:
+nine tests here went red. They were not broken BY the guard -- they were
+vacuous before it existed, and the guard is what made that visible. The mask
+path is never opened by ``validate_strict`` (it is a truthiness check), so
+naming one costs no data file; what it buys is a fixture where the land flags
+are actually reachable.
+"""
 
 from __future__ import annotations
 
@@ -310,6 +328,7 @@ def test_multilayer_land_accepted_on_mpas():
         "--dataset", "analytical",
         "--grid-type", "mpas", "--discretization", "mpas",
         "--use-multilayer-land",
+        "--land-mask-file", "lsm.nc",
     ]), parser)
     cfg = build_config_from_args(args)
     assert cfg.use_multilayer_land is True
@@ -610,6 +629,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "two_leaf",
         "--use-multilayer-land",
+        "--land-mask-file", "lsm.nc",
     ]), parser))
     assert cfg.land_surface_scheme == "two_leaf"
 
@@ -619,6 +639,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
         "--use-multilayer-land",
+        "--land-mask-file", "lsm.nc",
     ]), parser))
     assert cfg_clm.land_surface_scheme == "clm_ml"
     cfg_clm.validate_strict()  # must not raise
@@ -1168,6 +1189,7 @@ def test_surface_tiled_flags_flow_to_config():
         "--slab-land-active",
         "--surface-tiled",
         "--surface-z0-land", "0.15",
+        "--land-mask-file", "lsm.nc",
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
@@ -1216,6 +1238,7 @@ def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
         "--surface-tiled",
+        "--land-mask-file", "lsm.nc",
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
@@ -1238,6 +1261,7 @@ def test_soil_bucket_flags_flow_to_config():
         "--land-k-infiltration", "3.3e-6",
         "--land-infil-suction-boost", "1.5",
         "--no-land-infiltration-excess",
+        "--land-mask-file", "lsm.nc",
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
@@ -1257,7 +1281,8 @@ def test_infiltration_params_reject_nan_and_negative():
     a bare ``x < 0`` would let NaN slip through and poison the infiltration cap)."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--slab-land-active", "--land-soil-bucket"]),
+        ["--dataset", "analytical", "--slab-land-active", "--land-soil-bucket",
+         "--land-mask-file", "lsm.nc"]),
         parser)
     base = build_config_from_args(args)
     assert base.validate_strict() is None          # baseline is valid
@@ -1300,6 +1325,7 @@ def test_land_stomatal_beta_flag_flows_to_config():
         "--slab-land-active",
         "--land-soil-bucket",
         "--land-stomatal-beta",
+        "--land-mask-file", "lsm.nc",
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
