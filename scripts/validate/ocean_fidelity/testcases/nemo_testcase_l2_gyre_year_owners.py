@@ -7352,15 +7352,6 @@ def developed_stage2_advection_split(
     evidence_root = Path(evidence_root)
     oracle = _developed_stage2_record(Path(stage2_record_root))
     rows = dict(oracle["rows"])
-    if plant == "nemo-ww-ulp":
-        # The vertical-velocity substitution must be a live operand of the
-        # arm that installs it: moving NEMO's recorded ww by one unit in the
-        # last place has to move that arm's vertical-advection row.
-        moved = np.array(rows["ww_t"], copy=True)
-        index = tuple(int(value) for value in
-                      np.argwhere(np.abs(moved) > 0.0)[0])
-        moved[index] = np.nextafter(moved[index], np.inf)
-        rows["ww_t"] = moved
 
     bundle = _developed_entry_bundle(
         daily_root, daily_audit, expected_commit)
@@ -7503,12 +7494,72 @@ def developed_stage2_advection_split(
                 rows[f"umask_vmask_{tag}"])
             for tag, index in (("u", 0), ("v", 1))
         }
-        require(all(row["active_cells_unequal"] == 0
+        require(any(row["active_cells_unequal"] > 0
                     for row in planted_control.values()),
-                "the halves-sum control caught a scaled sum: "
-                f"{planted_control}")
+                "the halves-sum control did NOT catch a sum scaled by one "
+                f"part in a million million: {planted_control}")
         return {"status": "PLANT-FIRED", "plant": plant,
                 "control": planted_control}
+
+    # ARM W.  NEMO's own recorded vertical velocity at the stage-2 dyn_zad
+    # call, every other stage input left at legoESM's value.  dyn_keg reads no
+    # vertical velocity, so its row in this arm is a CONTROL: it has to be
+    # byte-identical to the production row or the hook reaches further than
+    # dyn_zad.
+    ww_arm = {}
+    for component in ("keg", "zad", "advection"):
+        ww_arm[component] = run_uv(
+            passive=False,
+            stage2_zad_operand_override=(jnp.asarray(rows["ww_t"]), None, None),
+            expose_momentum_operator=component,
+            expose_momentum_operator_stage=2)
+    ww_arm["after_adv"] = run_uv(
+        passive=False,
+        stage2_zad_operand_override=(jnp.asarray(rows["ww_t"]), None, None),
+        expose_stage2_momentum_rhs=True)
+
+    if plant == "nemo-ww-ulp":
+        # The substituted operand must be LIVE inside dyn_zad, not merely
+        # accepted by the hook.  Install NEMO's recorded vertical velocity a
+        # second time with one cell moved by a single unit in the last place;
+        # the arm's vertical-advection field has to move with it.
+        moved = np.array(rows["ww_t"], copy=True)
+        index = tuple(int(value) for value in
+                      np.argwhere(np.abs(moved) > 0.0)[0])
+        moved[index] = np.nextafter(moved[index], np.inf)
+        planted_zad = run_uv(
+            passive=False,
+            stage2_zad_operand_override=(jnp.asarray(moved), None, None),
+            expose_momentum_operator="zad",
+            expose_momentum_operator_stage=2)
+        moved_rows = {
+            tag: _score_stage2_face(
+                planted_zad[component], ww_arm["zad"][component],
+                rows[f"umask_vmask_{tag}"])
+            for tag, component in (("u", 0), ("v", 1))
+        }
+        require(any(row["active_cells_unequal"] > 0
+                    for row in moved_rows.values()),
+                "a one-unit-in-the-last-place move of NEMO's recorded "
+                "vertical velocity did not reach the stage-2 vertical "
+                f"advection: {moved_rows}")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": {"moved_cell": list(index), "rows": moved_rows}}
+
+    # LIVENESS.  NEMO's vertical velocity is not legoESM's, so a substitution
+    # that reached dyn_zad must have moved its output.  An inert hook would
+    # otherwise report "the vertical velocity removes nothing" while never
+    # having been read.
+    ww_liveness = {
+        tag: _score_stage2_face(
+            ww_arm["zad"][index], production["zad"][index],
+            rows[f"umask_vmask_{tag}"])
+        for tag, index in (("u", 0), ("v", 1))
+    }
+    require(all(row["active_cells_unequal"] > 0
+                for row in ww_liveness.values()),
+            "the stage-2 vertical-velocity substitution left the vertical "
+            f"advection unchanged, so it was never read: {ww_liveness}")
 
     # ARM E.  NEMO's own stage-2 entry velocity, which is the ONLY dynamic
     # operand the kinetic-energy gradient reads (dynkeg.f90:121-124 takes
@@ -7556,23 +7607,6 @@ def developed_stage2_advection_split(
             (jnp.asarray(rows["uu_vv_Kmm_u"]), jnp.asarray(rows["uu_vv_Kmm_v"])),
             name="NEMO's recorded uu/vv(Kmm)"),
     }
-
-    # ARM W.  NEMO's own recorded vertical velocity at the stage-2 dyn_zad
-    # call, every other stage input left at legoESM's value.  dyn_keg reads no
-    # vertical velocity, so its row in this arm is a CONTROL: it has to be
-    # byte-identical to the production row or the hook reaches further than
-    # dyn_zad.
-    ww_arm = {}
-    for component in ("keg", "zad", "advection"):
-        ww_arm[component] = run_uv(
-            passive=False,
-            stage2_zad_operand_override=(jnp.asarray(rows["ww_t"]), None, None),
-            expose_momentum_operator=component,
-            expose_momentum_operator_stage=2)
-    ww_arm["after_adv"] = run_uv(
-        passive=False,
-        stage2_zad_operand_override=(jnp.asarray(rows["ww_t"]), None, None),
-        expose_stage2_momentum_rhs=True)
 
     def score_against_nemo_total(frame):
         return {
@@ -7700,6 +7734,7 @@ def developed_stage2_advection_split(
         "authority_control": authority,
         "halves_control": halves_control,
         "keg_hook_reach_control": keg_reach_control,
+        "ww_substitution_liveness": ww_liveness,
         "arms_scored_against_nemo_after_adv": scored,
         "split": split,
         "observer_state_unequal_bytes": observer_unequal,
