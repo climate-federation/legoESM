@@ -233,6 +233,14 @@ re-anchored: the transcription inserted twenty-one lines above them in the same
 file, the gate reported that same uniform shift for every one, and no cited
 text changed.
 
+**The other two vertex-thickness rules are unchanged on an ACTIVE fold.**  The
+control flow around the fold was restructured, and GYRE cannot catch a
+regression there because its fold is inactive.  So both other rules were run on
+a synthetic tripolar grid at the round's base tip and at its tip, with and
+without a reference ladder: all four digests are identical
+(`min` `20cb0bfc33954f7ad4b88d16`, `nemo_avg` `d5b9c3aef9be1279c5299028` and
+`a054ce29531259da2a7a82ba`).  The script is kept with the round's evidence.
+
 **Non-vacuity, measured.**  The seven new tests were run unchanged against the
 round's base tip, where the helper still refuses: **4 failed, 3 passed** — the
 four tripolar ones fail on the refusal itself, and the three that pass are the
