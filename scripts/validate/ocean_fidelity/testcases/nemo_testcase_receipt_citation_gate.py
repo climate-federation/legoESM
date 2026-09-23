@@ -681,6 +681,11 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90"),
     "GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/traadv.f90"),
+    # Round 161 walks the free-surface ratio's OWN producer, on that same
+    # build, because the ratio the velocity indicator reads is set by the
+    # stage program rather than rebuilt from the stage sea surface height.
+    "GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90"),
     # --- round 36 paths: THIS ROUND'S OWN BUILD ---
     # The R35TRAZDF card is the one that produced the round-35 record, and it
     # is the only build whose trazdf.f90 carries the instrument, so its line
@@ -708,6 +713,26 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 161: the stage face ratio, its producer and its composition ---
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:172':
+        ('ssh (:,:,Kaa) = r2_3 * ssh (:,:,Kbb) + r1_3 * ssha(:,:)', 2),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:185':
+        ('CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:211':
+        ('r3u(:,:,Kaa) = r2_3 * r3u(:,:,Kbb) + r1_3 * r3ua(:,:)', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:255':
+        ('r3u(:,:,Kaa) = r1_2 * ( r3u(:,:,Kbb) + r3ua(:,:) )', 2),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90:266-267': [
+        ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2),
+        ('&                    + e1e2t(ji+1,jj) * pssh(ji+1,jj)  ) '
+         '* r1_hu_0(ji,jj) * r1_e1e2u(ji,jj)', 2), 2],
+    'vertical.py:238-239': [
+        ('weighted_eta = b(area_t * eta)', 1),
+        ('num_u = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, '
+         'axis=1)))', 1), 2],
+    'vertical.py:247': ('r3u = b(b(num_u * r1_hu0) * r1_area_u)', 1),
+    'vertical.py:251':
+        ('e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))', 1),
     # --- round 160: legoESM's own two-solve statements ---
     'ocean_model_latlon_cgrid.py:1654-1665': [
         ('def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:', 1),
