@@ -49,12 +49,16 @@ def test_masked_rate_selects_only_the_masked_layers():
 def test_warm_rain_mass_rates_do_not_depend_on_the_step():
     """Both warm-rain MASS sinks must be functions of state, not of ``dt``.
 
-    Non-vacuous by construction: the assertions compare rates computed at
-    22.5 s, 112.5 s and 600 s from an IDENTICAL state, so any change that
-    introduces a ``dt`` factor into either mass rate -- which is exactly what a
+    The AUTOCONVERSION half carries the test: it takes ``dt`` as an argument,
+    so a change introducing a ``dt`` factor into its mass rate -- exactly what a
     sub-stepping "fix" for the (refuted) long-step over-stripping hypothesis
-    would do -- makes them differ and the test fails.  Verified to fail when
-    either rate is multiplied by ``dt`` (2026-09-23).
+    would do -- makes the three values differ and the test fails.  Verified to
+    fail under a ``* dt/112.5`` mutation (2026-09-23; factors 0.2 / 1.0 / 5.33).
+
+    The ACCRETION half is tautological here and is not claimed otherwise: the
+    KK2000 rate takes no ``dt``, so the three entries are the same computation.
+    Accretion's guarantee is the companion signature test below, which fails if
+    a ``dt`` parameter is ever added to it (GLM review nit, 2026-09-23).
     """
     import jax.numpy as jnp
     from legoesm.atmosphere.physics.microphysics import _warm_rain as wr
