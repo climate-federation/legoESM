@@ -2,7 +2,13 @@
 
 Every source and sink of ``q_c`` that the scheme applies, named, area- and
 mass-weighted over a pressure band, with the residual against the scheme's own
-``dq_c_dt`` printed so nothing can hide in it.  The terms are the APPLIED
+``dq_c_dt`` printed.  SCOPE, because the residual is easy to over-read: the
+closure proves the published terms reproduce the expression that assembles
+``dq_c_dt``, i.e. that no IMPLEMENTED term was left out of the publication.  It
+CANNOT detect a process missing from both -- MG2, for instance, sediments cloud
+droplets (micro_mg2_0.F90:2338) and this scheme's cloud-water tendency has no
+sedimentation term at all.  Nor does one call account for transport, the other
+parameterizations, or later state corrections.  The terms are the APPLIED
 (post-donor-clamp) ones published by ``MorrisonConfig.publish_qc_budget``; a
 re-derivation outside the scheme would report PRE-clamp rates and could not
 close (codex review, 2026-09-23).
@@ -12,7 +18,10 @@ candidate for the CAM6 arm's cloud-water deficit and each is cheap to test on
 the same state:
 
 1. MG2 caps in-cloud cloud water at 5e-3 kg/kg (micro_mg2_0.F90:1226); we do
-   not.  Where the cap would bite, our KK2000 rates (autoconversion ~ q_c^2.47)
+   not.  NOTE the divisor below is the MICROPHYSICS in-cloud fraction, which is
+   1.0 when the sub-grid closure is off -- it is not the diagnosed cloud cover,
+   and a null result here says nothing about the cap after a faithful in-cloud
+   coupling.  Where the cap would bite, our KK2000 rates (autoconversion ~ q_c^2.47)
    are evaluated at an in-cloud water content MG2 would never feed them.
 2. MG2 scales vapour deposition by the liquid-lifetime fraction its limiter
    produced (:1588-1592); our clamp does not couple to deposition.
@@ -142,8 +151,11 @@ def main():
     pfn = np.asarray(p_full)
     band = (pfn >= lo) & (pfn < hi)
 
-    # Temperature sectors: riming is gated below freezing, so a band-integrated
-    # comparison dilutes it with warm layers where it is structurally zero.
+    # Temperature sectors.  Riming is gated below freezing by a SIGMOID in the
+    # port (not a hard switch, so it is small but NOT structurally zero above
+    # 273.15 K), and a band-integrated comparison dilutes it with warm layers.
+    # The 273.15 K cut classifies supercooled liquid; mixed-phase physics spans
+    # roughly 235-273 K, so this split is coarse (codex review, 2026-09-23).
     Tn = np.asarray(T)
     T_FREEZE = float(constants.T_freeze)
     sectors = (("whole band", band),
@@ -167,8 +179,9 @@ def main():
             tot += v
             if v < 0.0:
                 sink_rate += -v / res
-            print(f"[{a.label}]     {name:22s} {v:+13.6e}   "
-                  f"{v / res:+9.4f} per day of the reservoir")
+            print(f"[{a.label}]     {name:22s} {v:+13.6e} kg/m2/day   "
+                  f"{v / res:+9.4f} /day of THIS ARM's reservoir "
+                  f"({res:.4e} kg/m2)")
         net = band_rate(np.asarray(out.dq_c_dt), dp, A, g, mask) * _DAY
         denom = max(abs(band_rate(np.asarray(t), dp, A, g, mask) * _DAY)
                     for t in out.qc_budget.values()) or 1.0
@@ -176,8 +189,14 @@ def main():
         print(f"[{a.label}]     {'scheme dq_c_dt':22s} {net:+13.6e}")
         print(f"[{a.label}]     {'RESIDUAL':22s} {tot - net:+13.6e}   "
               f"= {abs(tot - net) / denom:.3e} of the largest term")
-        print(f"[{a.label}]     total fractional sink {sink_rate:8.3f} per day "
-              f"=> cloud-water residence time {24.0 / max(sink_rate, 1e-30):.3f} h")
+        # NOT a residence time: the terms are summed over cells before their
+        # sign is classified, so a cell where a term is a source cancels one
+        # where it is a sink.  It is a band-integrated fractional turnover of
+        # the negative-signed terms, useful only for comparing the same term
+        # between arms (codex review, 2026-09-23).
+        print(f"[{a.label}]     negative-term fractional turnover "
+              f"{sink_rate:8.3f} per day  (NOT a gross sink, NOT a residence "
+              f"time -- signs are classified after summing over cells)")
 
     res = band_rate(np.asarray(q_c), dp, A, g, band)
     # --- departure 1: MG2 in-cloud cloud-water cap ------------------------

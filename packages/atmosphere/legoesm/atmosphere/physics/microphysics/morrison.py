@@ -1797,10 +1797,16 @@ def morrison_microphysics(
         # this guard exists to prevent; strict and non-strict arms are not
         # claimed bit-identical (GLM 2026-09-22).
         _bias = jnp.where(jnp.isnan(_sed_poison), jnp.nan, 0.0)
+        # ``qc_budget`` is a dict of arrays, not an array: ``jnp.asarray`` on a
+        # dict raises, so filter on type BEFORE probing the dtype.  The budget
+        # is a diagnostic and carries no gradient the guard needs to poison.
+        def _is_float_array(v):
+            if v is None or isinstance(v, dict):
+                return False
+            return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
+
         out = out._replace(**{
             _k: getattr(out, _k) * _sed_poison + _bias
             for _k in out._fields
-            if getattr(out, _k) is not None
-            and jnp.issubdtype(jnp.asarray(getattr(out, _k)).dtype,
-                               jnp.floating)})
+            if _is_float_array(getattr(out, _k))})
     return out

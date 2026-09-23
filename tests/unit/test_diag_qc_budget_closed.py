@@ -130,3 +130,24 @@ def test_graupel_riming_is_a_real_cloud_water_sink_that_do_graupel_removes():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_budget_publication_survives_strict_sedimentation_mode():
+    """Strict mode poisons every float output; the budget dict is not one.
+
+    Non-vacuous: before the type filter, this raised
+    ``ValueError`` from ``jnp.asarray`` on a dict (codex review, 2026-09-23).
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.microphysics.morrison import (
+        morrison_microphysics)
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+
+    s = _tiny_state(jnp)
+    cfg = MorrisonConfig(publish_qc_budget=True, sed_cfl_substeps=True,
+                         sed_cfl_substeps_strict=True)
+    o = morrison_microphysics(s["T"], s["q_v"], s["hyd"], s["p_full"],
+                              s["p_half"], s["rho"], s["dz"], 600.0, cfg)
+    assert o.qc_budget is not None
+    assert set(o.qc_budget) and all(
+        hasattr(v, "shape") for v in o.qc_budget.values())
