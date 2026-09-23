@@ -251,12 +251,23 @@ def test_conservative_hybrid_transport_is_selectable_and_conserves():
             base._replace(vert_advection_scheme="sb"))
 
 
-def test_cam6_deck_does_not_select_the_conservative_operator_yet():
-    """The rate and the conservative operator are BOTH pending user approval;
-    the deck carries the damper only.  This test is the record of that, and
-    goes red the moment someone turns the second lever on without asking."""
+def test_cam6_deck_selects_both_levers_and_no_other_deck_does():
+    """The user approved both levers for the CAM6 deck on 2026-09-23 after the
+    three-arm physics-off A/B.  This pins that decision: the CAM6 deck carries
+    both, every other committed deck carries neither, and the code defaults stay
+    off.  It goes red if a lever leaks into another deck or into a default."""
     import yaml
-    deck = pathlib.Path(__file__).parents[2] / "config" / "amip" / "amip_cam6.yaml"
-    doc = yaml.safe_load(deck.read_text())
+    cfgdir = pathlib.Path(__file__).parents[2] / "config"
+    doc = yaml.safe_load((cfgdir / "amip" / "amip_cam6.yaml").read_text())
     assert doc["mpas_div_damp4_scale"] == 1.0
-    assert doc["mpas_vert_advection_scheme"] == "upwind"
+    assert doc["mpas_vert_advection_scheme"] == "sb"
+    assert DycoreConfig().mpas_div_damp4_scale == 0.0
+    assert DycoreConfig().mpas_vert_advection_scheme == "upwind"
+    for deck in sorted(cfgdir.rglob("*.yaml")):
+        if deck.name == "amip_cam6.yaml":
+            continue
+        other = yaml.safe_load(deck.read_text()) or {}
+        if not isinstance(other, dict):
+            continue
+        assert other.get("mpas_div_damp4_scale", 0.0) == 0.0, deck
+        assert other.get("mpas_vert_advection_scheme", "upwind") != "sb", deck

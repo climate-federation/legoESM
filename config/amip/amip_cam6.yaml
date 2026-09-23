@@ -33,8 +33,16 @@ mpas_sponge_del2_top_layers: 2       # index-based sponge: 2 layers on L32 span
                                      # branches) -- 2 layers is the closest
                                      # offered setting (user 2026-09-21)
 mpas_sponge_del2_top_factor: 8.0
-mpas_vert_advection_scheme: upwind   # van Leer vertical advection is sigma-only
-                                     # on the MPAS lane; upwind runs on hybrid
+mpas_vert_advection_scheme: sb       # conservative Simmons-Burridge flux form
+                                     # of the hybrid theta transport (van Leer
+                                     # is sigma-only on this lane).  The
+                                     # advective upwind form violates the
+                                     # discrete product rule: measured column
+                                     # residual 3.8e-2 of the interfacial
+                                     # exchange on this L32 table against
+                                     # 6.7e-16 conservative.  USER-APPROVED
+                                     # 2026-09-23 for this deck only; the
+                                     # default stays 'upwind' everywhere else.
 mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
                                      # 4th-order DIVERGENCE damping at every
                                      # level (cd_core.F90 tau4 = 0.01/dt times
