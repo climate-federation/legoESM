@@ -6937,7 +6937,7 @@ def developed_stage2_rhs_walk(
         card, state, DEVELOPED_PROCESS_STEP)
     ssha = jnp.asarray(payload["ssha"])
 
-    def run(**hook_kwargs):
+    def run(*, exposed=("u", "v"), passive=True, **hook_kwargs):
         model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hook_kwargs))
@@ -6946,10 +6946,18 @@ def developed_stage2_rhs_walk(
             surface_forcing=surface,
             _nemo_stage1_zad_eta_after_override=ssha)
         jax.device_get(result)
-        # The hooks below deliberately substitute u/v AFTER the ordinary step
+        # A WRITE-only hook substitutes its own slots AFTER the ordinary step
         # completes, so passivity is judged on every OTHER prognostic field.
-        neutral = result._replace(u=ordinary.u, v=ordinary.v)
-        observer_unequal.append(_state_bit_mismatches(neutral, ordinary))
+        # An override arm changes the step itself and is not passive; it says
+        # so rather than being excused.
+        if passive:
+            neutral = result._replace(
+                **{name: getattr(ordinary, name) for name in exposed})
+            observer_unequal.append(_state_bit_mismatches(neutral, ordinary))
+        return result
+
+    def run_uv(**kwargs):
+        result = run(**kwargs)
         return (np.asarray(result.u.data), np.asarray(result.v.data))
 
     ordinary_model = LatLonCGridOceanModel(
@@ -6976,13 +6984,13 @@ def developed_stage2_rhs_walk(
 
     observer_unequal: list[int] = []
     production = {}
-    production["stage1_output"] = run(expose_momentum_stage=1)
-    production["uu_Kaa_final"] = run(expose_momentum_stage=2)
-    production["uu_Kaa_raw"] = run(expose_stage2_raw_momentum=True)
-    production["stage2_rhs_total"] = run(expose_stage2_momentum_rhs=True)
+    production["stage1_output"] = run_uv(expose_momentum_stage=1)
+    production["uu_Kaa_final"] = run_uv(expose_momentum_stage=2)
+    production["uu_Kaa_raw"] = run_uv(expose_stage2_raw_momentum=True)
+    production["stage2_rhs_total"] = run_uv(expose_stage2_momentum_rhs=True)
     components = {
-        name: run(expose_momentum_operator=name,
-                  expose_momentum_operator_stage=2)
+        name: run_uv(expose_momentum_operator=name,
+                     expose_momentum_operator_stage=2)
         for name in ("hpg", "vorticity", "advection")
     }
     # NEMO's dyn_vor and dyn_adv ACCUMULATE into the slot dyn_hpg overwrote
@@ -7051,6 +7059,47 @@ def developed_stage2_rhs_walk(
                 abs(predicted - observed) / observed if observed else 0.0),
         }
 
+    # OWNED or INHERITED.  The stage-2 entry velocity carries a difference of
+    # its own, so the right-hand-side rows above cannot say by themselves
+    # whether stage 2 makes the magnitude or merely passes it on.  One
+    # directed substitution settles it: replace the stage-2 entry velocity
+    # with NEMO's own recorded uu(Kmm)/vv(Kmm) and leave every other entry
+    # field at legoESM's value.  The null arm is the calibration of the
+    # substitution mechanism itself -- it hands the step legoESM's OWN entry
+    # bundle and must reproduce the production rows byte for byte.
+    entry_bundle = run(expose_tracer_stage=1, exposed=("T", "S", "eta"))
+    lego_entry = (
+        jnp.asarray(production["stage1_output"][0]),
+        jnp.asarray(production["stage1_output"][1]),
+        entry_bundle.T.data, entry_bundle.S.data, entry_bundle.eta.data)
+    substitution = {}
+    armed_rows = {}
+    for arm, velocity in (
+            ("null", (lego_entry[0], lego_entry[1])),
+            ("nemo_entry_velocity",
+             (jnp.asarray(rows["uu_vv_Kmm_u"]),
+              jnp.asarray(rows["uu_vv_Kmm_v"])))):
+        armed = run_uv(
+            passive=False,
+            stage_entry_override=(
+                2, velocity[0], velocity[1],
+                lego_entry[2], lego_entry[3], lego_entry[4]),
+            expose_stage2_momentum_rhs=True)
+        armed_rows[arm] = armed
+        substitution[arm] = {
+            tag: _score_stage2_face(
+                armed[index], rows[f"after_adv_{tag}"],
+                rows[f"umask_vmask_{tag}"])
+            for tag, index in (("u", 0), ("v", 1))
+        }
+    for tag, index in (("u", 0), ("v", 1)):
+        require(np.array_equal(
+                    np.asarray(armed_rows["null"][index]).view(np.uint64),
+                    np.asarray(
+                        production["stage2_rhs_total"][index]).view(np.uint64)),
+                "the stage-entry substitution mechanism is not neutral when "
+                f"handed legoESM's own entry bundle ({tag})")
+
     require(all(value == 0 for value in observer_unequal),
             "a stage-2 exposure hook moved the production state outside "
             f"u/v: {observer_unequal}")
@@ -7097,6 +7146,7 @@ def developed_stage2_rhs_walk(
         },
         "walk": walk,
         "assignment_calibration": calibration,
+        "entry_velocity_substitution": substitution,
         "entry_window_control": entry_control,
         "budget": budget,
         "first_non_bit_row": first_non_bit,
