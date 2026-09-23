@@ -708,6 +708,24 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 160: the stage clock, the stage after-level and the two
+    # adaptive-implicit partitions, on the build that wrote the record ---
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:52':
+        ('INTEGER  :: n_baro_upd =  np_HYB', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:221-222': [
+        ('rDt = r1_2 * rn_Dt', 1),
+        ('r1_Dt = 1._wp / rDt', 2), 2],
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:254':
+        ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:265-266': [
+        ('rDt = rn_Dt                   ! set time-step : rn_Dt', 1),
+        ('r1_Dt = 1._wp / rDt', 3), 2],
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:268':
+        ('ssh (:,:,Kaa) = ssha(:,:)     ! recover ssh and (uu_b,vv_b) at N + 1', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:362':
+        ('CALL wAimp( kstp, Kmm, uu(:,:,:,Kmm), vv(:,:,:,Kmm), ww, wi, np_velocity, ld_diag=.TRUE. )', 1),
+    'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/traadv.f90:277':
+        ('CALL wAimp( kt, Kmm, pFu, pFv, ww, wi, np_transport )', 1),
     # --- round 159: the two continuity call forms and the second solve the
     # tracer transport runs, on the build that wrote the admitted record ---
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:309':
