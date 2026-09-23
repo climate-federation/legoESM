@@ -2522,6 +2522,15 @@ class LatLonCGridOceanModel:
         # At CONSTRUCTION, not at trace time.  The inner guard raises only
         # once the stage is reached, so a gate asking for a bucket that does
         # not exist would compile and score whatever the returned slots held.
+        _zad2 = self._nemo_ws_test_hooks.stage2_zad_operand_override
+        if _zad2 is not None and (
+                not isinstance(_zad2, tuple) or len(_zad2) != 3):
+            # At CONSTRUCTION, like the other momentum seams: a pair or a bare
+            # array would substitute the wrong dyn_zad operand and the step
+            # would score a field under another field's name.
+            raise ValueError(
+                "stage2_zad_operand_override must be a (w, h_u, h_v) tuple; "
+                "a None slot keeps the live stage operand")
         if self._nemo_ws_test_hooks.expose_momentum_operator not in (
                 "", "hpg", "vorticity", "advection", "keg", "zad"):
             raise ValueError(
@@ -6849,10 +6858,6 @@ class LatLonCGridOceanModel:
                     self._nemo_ws_test_hooks.stage2_zad_operand_override)
                 if override is None:
                     return live
-                if len(override) != 3:
-                    raise ValueError(
-                        "stage2_zad_operand_override must be a (w, h_u, h_v) "
-                        "triple; None keeps the live operand")
                 return tuple(
                     live[index] if override[index] is None
                     else override[index] for index in range(3))
