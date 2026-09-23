@@ -74,15 +74,34 @@ def _ring(n, stride=1):
     return [(i, (i + stride) % n) for i in range(n)]
 
 
-def _build(mesh, n_dev, n_reps, stride=1):
-    """jit'd program doing n_reps back-to-back ring ppermutes on device."""
+def _build(mesh, n_dev, n_reps, stride=1, collective="ppermute"):
+    """jit'd program doing n_reps back-to-back collectives on device.
+
+    ``ppermute`` is the neighbour exchange the halo fill uses; ``allreduce``
+    is the global reduction the solvers use.  Both are timed here because
+    separating them is the whole question: a ring exchange talks to a fixed
+    number of partners at any deployment size, while a reduction is a global
+    operation whose cost is expected to grow with the rank count.  Measuring
+    only one of them cannot say which is responsible for a lane's growth.
+
+    The reduction is divided by the rank count each repetition.  Chaining raw
+    sums would multiply the value by ``n_dev`` per repetition and overflow
+    long before the loop ends, which would time an exception path rather than
+    a collective; the division holds the magnitude steady while keeping each
+    repetition dependent on the previous one, so none of them can be folded
+    away.
+    """
     perm = _ring(n_dev, stride)
 
     @jax.jit
     def run(x):
         def body(xl):
-            def one(_, v):
-                return jax.lax.ppermute(v, axis_name=AXIS, perm=perm)
+            if collective == "allreduce":
+                def one(_, v):
+                    return jax.lax.psum(v, AXIS) / n_dev
+            else:
+                def one(_, v):
+                    return jax.lax.ppermute(v, axis_name=AXIS, perm=perm)
 
             return jax.lax.fori_loop(0, n_reps, one, xl)
 
@@ -97,6 +116,38 @@ def _build(mesh, n_dev, n_reps, stride=1):
         return sm(x)
 
     return run
+
+
+def verify_allreduce(mesh, n_dev):
+    """Check the reduction actually reduces, before anything is timed.
+
+    Every device contributes its own index, so a correct sum is the same
+    known constant on all of them.  A reduction that silently covered only
+    the local shard would return the device's own index instead, and time
+    beautifully.
+
+    Returns the largest disagreement with that constant over all devices.
+    """
+    want = float(n_dev * (n_dev - 1) // 2)
+
+    @jax.jit
+    def run(x):
+        def body(xl):
+            me = jax.lax.axis_index(AXIS).astype(x.dtype)
+            got = jax.lax.psum(jnp.full_like(xl, me), AXIS)
+            return jnp.abs(got - want)
+
+        try:
+            sm = shard_map(body, mesh=mesh, in_specs=P(AXIS), out_specs=P(AXIS),
+                           check_vma=False)
+        except TypeError:  # pragma: no cover - JAX < 0.9 spelling
+            sm = shard_map(body, mesh=mesh, in_specs=P(AXIS), out_specs=P(AXIS),
+                           check_rep=False)
+        return sm(x)
+
+    out = run(jnp.zeros((n_dev,), dtype=jnp.float32))
+    return float(max(abs(float(v)) for sh in out.addressable_shards
+                     for v in np.asarray(sh.data).ravel()))
 
 
 def verify_ring(mesh, n_dev, stride):
@@ -134,6 +185,27 @@ def verify_ring(mesh, n_dev, stride):
                    for v in np.asarray(sh.data).ravel()))
 
 
+_HLO_TOKEN = {"ppermute": "collective-permute", "allreduce": "all-reduce"}
+
+
+def count_collectives(run, x, collective):
+    """How many of the expected collective the COMPILED program contains.
+
+    The timed program is a fori_loop, so the optimized HLO holds one
+    collective inside a while body rather than one per repetition -- this
+    counts what is there, and the only reading that matters is ZERO. A loop
+    whose collective was folded away, or lowered to something with a
+    different name than the one being attributed, would otherwise time
+    cleanly and be reported as a communication cost.
+    """
+    try:
+        text = jax.jit(run).lower(x).compile().as_text()
+    except Exception as exc:                    # pragma: no cover
+        print(f"  (HLO unavailable: {exc})", flush=True)
+        return -1
+    return text.count(_HLO_TOKEN[collective])
+
+
 def _median_us(run, x, n_warmup, n_iters):
     for _ in range(n_warmup):
         out = run(x)
@@ -148,7 +220,7 @@ def _median_us(run, x, n_warmup, n_iters):
 
 
 def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters, n_reps=64,
-             stride=1):
+             stride=1, collective="ppermute"):
     """Per-ppermute time with HOST DISPATCH SUBTRACTED.
 
     A single jit call per exchange measures dispatch + launch + wire, and on
@@ -163,8 +235,19 @@ def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters, n_reps=64,
     stays visible alongside the corrected one.
     """
     x = jnp.zeros((n_dev * n_elem,), dtype=dtype)
-    t1 = _median_us(_build(mesh, n_dev, 1, stride), x, n_warmup, n_iters)
-    tn = _median_us(_build(mesh, n_dev, n_reps, stride), x, n_warmup, n_iters)
+    t1 = _median_us(_build(mesh, n_dev, 1, stride, collective),
+                    x, n_warmup, n_iters)
+    tn = _median_us(_build(mesh, n_dev, n_reps, stride, collective),
+                    x, n_warmup, n_iters)
+    # n_reps repetitions cannot be faster than one. If they are, the loop was
+    # folded, the repetitions overlapped, or the timer is measuring noise --
+    # and the subtraction below would hand back a NEGATIVE communication cost
+    # that reads as a fast lane.
+    if tn <= t1:
+        raise SystemExit(
+            f"{collective} at {n_elem} elements: {n_reps} repetitions "
+            f"({tn:.1f} us) were not slower than one ({t1:.1f} us). The "
+            f"timed loop is not doing {n_reps} collectives.")
     per = (tn - t1) / (n_reps - 1)
     return per, t1
 
@@ -203,6 +286,14 @@ def main() -> int:
                         "network, and half the device count puts every link "
                         "across the whole allocation. Changes WHERE the "
                         "partner is without moving any process.")
+    p.add_argument("--collective", choices=["ppermute", "allreduce"],
+                   default="ppermute",
+                   help="which collective to time. ppermute is the halo "
+                        "fill's neighbour exchange, whose partner count does "
+                        "not depend on the deployment size; allreduce is the "
+                        "solvers' global reduction, whose cost is expected to "
+                        "grow with it. Attributing a lane's growth to one "
+                        "requires both.")
     p.add_argument("--out", default=None, help="Append one JSON line here.")
     args = p.parse_args()
 
@@ -225,15 +316,41 @@ def main() -> int:
 
     # The pattern has to be shown to deliver before any of its timings mean
     # anything: a silently degraded permutation still times cleanly.
-    mismatch = verify_ring(mesh, n_dev, args.ring_stride)
-    if mismatch != 0:
+    if args.collective == "allreduce":
+        mismatch = verify_allreduce(mesh, n_dev)
+        if mismatch != 0:
+            raise SystemExit(
+                f"the reduction on {n_dev} devices did not reduce: worst "
+                f"device is {mismatch} away from the known sum. Timings from "
+                f"it would be meaningless.")
+        if jax.process_index() == 0:
+            print(f"allreduce verified on {n_dev} devices", flush=True)
+    else:
+        mismatch = verify_ring(mesh, n_dev, args.ring_stride)
+        if mismatch != 0:
+            raise SystemExit(
+                f"ring stride {args.ring_stride} on {n_dev} devices did not "
+                f"deliver: worst device received an index {mismatch} away "
+                f"from its source. Timings from this pattern would be "
+                f"meaningless.")
+        if jax.process_index() == 0:
+            print(f"ring stride {args.ring_stride} verified on {n_dev} "
+                  f"devices", flush=True)
+
+    # The compiled program must actually contain the collective being
+    # attributed. Checked once, on the timed program at a mid sweep size.
+    probe_x = jnp.zeros((n_dev * 4096,), dtype=dtype)
+    n_hlo = count_collectives(
+        _build(mesh, n_dev, args.n_reps, args.ring_stride, args.collective),
+        probe_x, args.collective)
+    if n_hlo == 0:
         raise SystemExit(
-            f"ring stride {args.ring_stride} on {n_dev} devices did not "
-            f"deliver: worst device received an index {mismatch} away from "
-            f"its source. Timings from this pattern would be meaningless.")
+            f"the compiled program contains no "
+            f"{_HLO_TOKEN[args.collective]}: whatever this would time, it is "
+            f"not {args.collective}.")
     if jax.process_index() == 0:
-        print(f"ring stride {args.ring_stride} verified on {n_dev} devices",
-              flush=True)
+        print(f"optimized HLO contains {n_hlo} "
+              f"{_HLO_TOKEN[args.collective]} instruction(s)", flush=True)
 
     # Sweep from a latency-dominated message to a bandwidth-dominated one.
     elems = [1 << k for k in range(6, 23)]      # 64 .. 4M elements/device
@@ -242,7 +359,7 @@ def main() -> int:
     for n_elem in elems:
         t_us, t_single = time_one(mesh, n_dev, n_elem, dtype,
                                   args.n_warmup, args.n_iters, args.n_reps,
-                                  args.ring_stride)
+                                  args.ring_stride, args.collective)
         rows.append((n_elem * itemsize, t_us))
         dispatch_us.append(t_single)
         if jax.process_index() == 0:
@@ -264,7 +381,8 @@ def main() -> int:
 
     rec = {
         "component": "comm_microbench",
-        "collective": "ppermute_ring",
+        "collective": ("allreduce" if args.collective == "allreduce"
+                       else "ppermute_ring"),
         "n_devices": n_dev,
         "n_processes": jax.process_count(),
         "multicontroller": bool(args.multicontroller),
@@ -276,7 +394,8 @@ def main() -> int:
         "n_iters": args.n_iters,
         "n_warmup": args.n_warmup,
         "ring_stride": args.ring_stride,
-        "ring_verified": True,
+        "verified": args.collective,
+        "hlo_collective_count": n_hlo,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "dispatch_us_median": round(float(np.median(dispatch_us)), 2),
         "dispatch_subtracted": True,
