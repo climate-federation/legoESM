@@ -439,11 +439,14 @@ non-NEMO RGB callers keep the behaviour they had.
 | check | result |
 |---|---|
 | round-10 shortwave routing gate | **AT_BAR**, 0 of 233,341 unequal |
-| its four controls | all four fire |
+| its five controls | all five fire |
 | ORCA2 ladder gate at the base tip | exit 4, `STOP_PRODUCTION_QSR_RGB_PIPELINE_GAP` at kt=1 |
 | ORCA2 ladder gate at the final tip | past that stop; refused by the raw-mesh guard of section 4, no magnitude registered |
 | DINO card, same kernel | 128 passed |
 | GYRE identity, base vs tip | section 5 |
 | receipt citation gate | **PASS**, 274 citations, 0 failures, 0 map-audit failures, 0 unmapped |
 | citation gate with a rigid two-line plant | **fires**, exit 1, status FAIL, the planted citation named |
-| the named push gates plus this round's new tests, at the final tip | **175 passed in 517.84 s** |
+| the named push gates plus this round's new tests, at the final tip | **177 passed in 577.69 s** |
+| the ocean-fidelity battery, once, with twelve workers | FIDELITY_BATTERY |
+| the new refusal test with the pipeline branch re-widened | **fails** (`DID NOT RAISE`), then the model file restored and the tree confirmed clean |
+| the same gate at the round's BASE commit, in a clean clone | **refuses**, exit 2 |
