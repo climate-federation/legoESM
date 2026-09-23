@@ -303,11 +303,16 @@ def test_the_lever_walk_exempts_a_path_not_a_basename(tmp_path, monkeypatch):
     was skipped by basename, so a deck inheriting the levers could reach a run
     with the gate green.
     """
+    import os
     import shutil
     import pytest
     cfgdir = pathlib.Path(__file__).parents[2] / "config"
-    impostor_dir = cfgdir / "review_negative_control"
-    impostor_dir.mkdir(exist_ok=True)
+    # Unique per process: the walk only looks under config/, so the impostor
+    # has to live in the checkout, and a fixed name would collide with a
+    # parallel test run (codex round 3).  mkdir without exist_ok so a stale
+    # directory is a loud failure rather than a silently shared one.
+    impostor_dir = cfgdir / f"_negctl_{os.getpid()}"
+    impostor_dir.mkdir()
     impostor = impostor_dir / "amip_production.yaml"
     impostor.write_text("include: ../amip/amip_production.yaml\n")
     try:

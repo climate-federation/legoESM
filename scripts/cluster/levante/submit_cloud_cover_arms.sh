@@ -11,6 +11,11 @@ WT=/work/bd1083/b309178/diffESM/legoesm_pg/wt_cloudreview
 # a one-variable arm comparison whose baseline is the configuration it was
 # measured against, so it names the same deck under its new name explicitly.
 # Resolved against the SAME tree the chain runs, so it cannot drift apart.
+# ORDERING, stated because codex round 3 checked it: until this branch merges,
+# the target checkouts do not yet carry amip_sundqvist_l36.yaml, so running
+# this script before the merge fails loudly on a missing config rather than
+# silently running CAM6 physics.  Loud is the wanted failure; do not drop the
+# pin to make it run, that restores the silent wrong-physics hazard.
 MAIN=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
 ROOT=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs
 BASE="--resolution 6 --checkpoint-days 10 \
