@@ -1278,6 +1278,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # ``nemo_stage_zad_operands`` seam stage 1 uses and reaches nothing else;
     # no card constructs it.
     stage2_zad_operand_override: object = None
+    # Round 159: private ONE-VARIABLE arm for the stage-2 continuity
+    # solve.  NEMO's vector-invariant deck solves it on the RAW stage
+    # velocity (``stprk3_stg.f90:360``, velocity indicator) while the
+    # production path hands it the barotropically corrected volume
+    # transports (transport indicator).  ``True`` selects the velocity
+    # indicator at stage 2 only, so the two call forms can be compared
+    # with every other operand held.  No card constructs it.
+    stage2_wzv_velocity_form: bool = False
     nemo_stage_rhs_accumulation_order_arm: object = False
     # WRITE-only transport exposure for the ordered tracer boundary walk.
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
@@ -1602,7 +1610,7 @@ def _nemo_ws_stage_transport(
     stage_velocity, h_stage, stage_index, *, eta_stage, h_ref, Hu_avg, Hv_avg,
     u_mask_3d, v_mask_3d, grid, z_coord, H_bathy, config, dt,
     legacy_min_face_thickness=False, eta_before=None, eta_after=None,
-    literal_wzv=False, barotropic_velocity=None,
+    literal_wzv=False, barotropic_velocity=None, velocity_form_wzv=False,
     legacy_wzv_rederived_transport=False,
     legacy_aimp_midpoint_w_metric=False, runoff_mass_flux=None,
 ):
@@ -1693,10 +1701,11 @@ def _nemo_ws_stage_transport(
             barotropic_velocity_override=(
                 barotropic_velocity if legacy_wzv_rederived_transport else None),
             volume_transport_override=(
-                None if legacy_wzv_rederived_transport else (
-                    zfu_stage,
-                    zfv_stage,
-                )),
+                # divhor.f90:123-130 (velocity indicator) rebuilds each face
+                # transport from the raw stage velocity; :132-138 (transport
+                # indicator) differences the already corrected zFu/zFv.
+                None if (legacy_wzv_rederived_transport or velocity_form_wzv)
+                else (zfu_stage, zfv_stage)),
             runoff_mass_flux=runoff_mass_flux)
     else:
         w_stage = diagnose_w_from_flux_div(
@@ -2531,6 +2540,13 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "stage2_zad_operand_override must be a (w, h_u, h_v) tuple; "
                 "a None slot keeps the live stage operand")
+        if not isinstance(
+                self._nemo_ws_test_hooks.stage2_wzv_velocity_form, bool):
+            # At CONSTRUCTION: anything truthy would silently select NEMO's
+            # other continuity call form and the walk would score one program
+            # under another program's name.
+            raise ValueError(
+                "stage2_wzv_velocity_form must be a bool")
         if self._nemo_ws_test_hooks.expose_momentum_operator not in (
                 "", "hpg", "vorticity", "advection", "keg", "zad"):
             raise ValueError(
@@ -6962,6 +6978,8 @@ class LatLonCGridOceanModel:
                          else (jnp.zeros_like(target_u),
                                jnp.zeros_like(target_v))),
                         (target_u, target_v))),
+                velocity_form_wzv=(
+                    self._nemo_ws_test_hooks.stage2_wzv_velocity_form),
                 **_stage_transport_kw)
             p1u_corr, p1v_corr = _mom_pert_ws(
                 u1_corr, v1_corr, True, _transport_target,
