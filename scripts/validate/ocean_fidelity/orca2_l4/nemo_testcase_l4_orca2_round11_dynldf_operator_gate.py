@@ -584,6 +584,39 @@ def run_gate(deck_root: Path, root: Path, json_out: Path | None,
             or not np.array_equal(np.nan_to_num(dv_x),
                                   np.nan_to_num(dv_both)))
 
+    # The operands themselves, so "vacuous" is a MEASURED equality and not an
+    # inference from two tendencies happening to agree.
+    _r3t_ref = entry["ssh"] * (np.max(mesh["tmask"], axis=-1)
+                               / (np.sum(mesh["e3t_0"] * mesh["tmask"], axis=-1)
+                                  + 1.0 - np.max(mesh["tmask"], axis=-1)))
+    _e3t_nemo = mesh["e3t_0"] * (1.0 + _r3t_ref[..., None] * mesh["tmask"])
+    rows["e3t_operand_disagreement"] = {
+        "note": ("legoESM's live cell thickness against NEMO's own "
+                 "e3t_0*(1+r3t(Kbb)*tmask), the divisor at "
+                 "dynldf_lev.f90:127"),
+        "cells": int(_e3t_nemo.size),
+        "unequal": int(np.count_nonzero(h_t != _e3t_nemo)),
+        "max_abs": float(np.max(np.abs(h_t - _e3t_nemo))),
+    }
+    _lego_metrics = legoesm_metrics_on_nemo_index(card)
+    _nemo_metrics = {
+        "e1t_e2t": mesh["e1t"] * mesh["e2t"],
+        "e1f_e2f": mesh["e1f"] * mesh["e2f"],
+        "e1u": mesh["e1u"], "e2u": mesh["e2u"],
+        "e1v": mesh["e1v"], "e2v": mesh["e2v"],
+    }
+    rows["metric_operand_disagreement"] = {
+        name: {
+            "cells": int(_nemo_metrics[name].size),
+            "unequal": int(np.count_nonzero(
+                _lego_metrics[name] != _nemo_metrics[name])),
+            "max_rel": float(np.max(
+                np.abs(_lego_metrics[name] - _nemo_metrics[name])
+                / np.maximum(np.abs(_nemo_metrics[name]), 1e-300))),
+        }
+        for name in _nemo_metrics
+    }
+
     du_all, dv_all = nemo_dynldf_lev_lap_rot(
         mesh, ahmt, ahmf, entry["u"], entry["v"], entry["ssh"],
         ahmf_extra_mask=nemo_vertex_mask,
