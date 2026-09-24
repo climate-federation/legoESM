@@ -422,9 +422,15 @@ def top_ops(events: list[dict], steps: int, n: int = 25) -> list[dict]:
     CPU one op's work is spread over the worker threads."""
     from collections import defaultdict
     xs = [e for e in events if e.get("ph") == "X" and e.get("dur", 0) > 0]
+    # Prefer a GPU device track (kernels), as device_events does; the host
+    # track's PjRt/executor wrappers would otherwise rank first on GPU.
+    pid_name = {e.get("pid"): e.get("args", {}).get("name", "")
+                for e in events if e.get("name") == "process_name"}
+    gpu_pids = {q for q, nm in pid_name.items() if "GPU" in nm or "gpu" in nm}
     tot = defaultdict(float)
     for e in xs:
-        tot[e["pid"]] += e["dur"]
+        if not gpu_pids or e["pid"] in gpu_pids:
+            tot[e["pid"]] += e["dur"]
     if not tot:
         raise SystemExit("no complete events in trace")
     pid = max(tot, key=tot.get)
