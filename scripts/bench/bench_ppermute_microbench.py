@@ -268,6 +268,10 @@ def _mpi_modules():
     return require_mpi_stack()
 
 
+def _MPI():
+    return _mpi_modules()[1]
+
+
 def _build_mpi(comm, n_dev, n_reps, stride=1, collective="mpi_sendrecv"):
     """jit'd program doing n_reps back-to-back MPI ops on this rank.
 
@@ -371,10 +375,28 @@ def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters, n_reps=64,
     if collective.startswith("mpi_"):
         # mesh is the MPI communicator here; every rank holds n_elem elements.
         x = jnp.zeros((n_elem,), dtype=dtype)
-        t1 = _median_us(_build_mpi(mesh, n_dev, 1, stride, collective),
-                        x, n_warmup, n_iters)
-        tn = _median_us(_build_mpi(mesh, n_dev, n_reps, stride, collective),
-                        x, n_warmup, n_iters)
+        run1 = _build_mpi(mesh, n_dev, 1, stride, collective)
+        runn = _build_mpi(mesh, n_dev, n_reps, stride, collective)
+        if collective == "mpi_sendrecv":
+            # The chain's FINAL VALUE is checkable for a ring: after n_reps
+            # steps of stride s, rank r holds what rank (r - n_reps*s) mod n
+            # started with. A chain that dropped, aliased or reordered a
+            # repetition cannot land on that value; the HLO count alone only
+            # shows 64 call sites exist. Checked once per size, on the timed
+            # program itself, before it is timed.
+            rank = mesh.Get_rank()
+            seed = jnp.full((n_elem,), float(rank), dtype=dtype)
+            got = np.asarray(runn(seed))
+            want = float((rank - n_reps * stride) % n_dev)
+            bad = int(mesh.allreduce(int(np.any(got != want)), op=_MPI().MAX))
+            if bad:
+                raise SystemExit(
+                    f"mpi_sendrecv chain of {n_reps} at {n_elem} elements "
+                    f"did not deliver the ring's final value on every rank; "
+                    f"a repetition was dropped or reordered. Timings from it "
+                    f"would be meaningless.")
+        t1 = _median_us(run1, x, n_warmup, n_iters)
+        tn = _median_us(runn, x, n_warmup, n_iters)
     else:
         x = jnp.zeros((n_dev * n_elem,), dtype=dtype)
         t1 = _median_us(_build(mesh, n_dev, 1, stride, collective),
@@ -635,6 +657,10 @@ def main() -> int:
                  "--comm-bandwidth-gbs so t_bound is calibrated for THIS "
                  "lane."),
     }
+    if is_mpi:
+        # Every rank must have finished its last timed collective before the
+        # receipt exists, so a peer failing late cannot leave a receipt behind.
+        mesh.Barrier()
     if is_root:
         print(json.dumps(rec))
         print(f"\n==> --comm-latency-us {rec['latency_us']} "
@@ -646,5 +672,31 @@ def main() -> int:
     return 0
 
 
+def _main_abort_on_failure():
+    """Under MPI a failure on one rank must take the job down, not strand the
+    other ranks in a collective until the walltime expires (which also loses
+    the ladder its remaining arms). SystemExit(0) is a clean exit; anything
+    else aborts the communicator. Outside MPI this is a plain main()."""
+    import sys as _sys
+    try:
+        code = main()
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        if code and "--collective" in _sys.argv and any(
+                a.startswith("mpi_") for a in _sys.argv):
+            print(f"[abort] rank-local failure, aborting the MPI job: {e}",
+                  file=_sys.stderr, flush=True)
+            _MPI().COMM_WORLD.Abort(code)
+        raise
+    except BaseException:
+        if "--collective" in _sys.argv and any(
+                a.startswith("mpi_") for a in _sys.argv):
+            import traceback
+            traceback.print_exc()
+            _MPI().COMM_WORLD.Abort(1)
+        raise
+    return code
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_main_abort_on_failure())

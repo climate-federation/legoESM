@@ -115,8 +115,10 @@ COLLECTIVES="${COLLECTIVES:-ppermute allreduce mpi_sendrecv mpi_allreduce}"
 # iters) and lost their receipts; 4 MiB keeps five sizes in the bandwidth fit.
 MAX_KIB="${MAX_KIB:-4096}"
 # mpi4py/mpi4jax need the OpenMPI they were built against; the module system
-# does not prepend it from a batch shell (memory: mpi-tests-on-levante).
-export LD_LIBRARY_PATH="/sw/spack-levante/gcc-13.4.0-c4mgfk/lib64:/sw/spack-levante/openmpi-4.1.2-mnmady/lib:${LD_LIBRARY_PATH:-}"
+# does not prepend it from a batch shell (memory: mpi-tests-on-levante). It is
+# applied to the mpi_* arms ONLY: the gcc dir carries a libstdc++ that jaxlib
+# could pick up, and the gloo arms have to stay comparable to earlier runs.
+MPI_LIBS="/sw/spack-levante/gcc-13.4.0-c4mgfk/lib64:/sw/spack-levante/openmpi-4.1.2-mnmady/lib"
 want=0; ok=0
 for ND in $LADDER; do
     NN=$(( (ND + PPN - 1) / PPN ))
@@ -135,6 +137,7 @@ for ND in $LADDER; do
                 --ntasks="$ND" --ntasks-per-node="$PPN" --cpu-bind=cores \
                 --cpus-per-task="$(( ${SLURM_CPUS_ON_NODE:?} / PPN ))" \
                 --kill-on-bad-exit=1 \
+                env $( [[ "$C" == mpi_* ]] && echo "LD_LIBRARY_PATH=$MPI_LIBS:${LD_LIBRARY_PATH:-}" ) \
                 "$PY" "$REPO/scripts/bench/bench_ppermute_microbench.py" \
                 $( [[ "$C" == mpi_* ]] || echo "--multicontroller --n-devices $ND" ) \
                 --collective "$C" --max-kib "$MAX_KIB" \
