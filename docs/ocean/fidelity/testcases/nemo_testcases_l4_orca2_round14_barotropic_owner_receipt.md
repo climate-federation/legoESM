@@ -60,7 +60,7 @@ produced the record, not from a deck comment.
 | planetary Coriolis in the 3-D right-hand side | `explicit_ab2` | card `coriolis_scheme` |
 | barotropic bottom-drag correction | ON | card `barotropic_drag_substep` |
 | surface stress into the barotropic forcing | ON | card `surface_stress_implicit` |
-| ocean time step | `rn_Dt = 10800` s | run `ocean.output:217` |
+| ocean time step | `rn_Dt = 10800` s | run `ocean.output` line 217 |
 | the record's slow forcing | **RANK 0 ONLY** | record census: no `oracle_slow_forcing_rank0001_*` file exists |
 
 The last row was preregistered as a hard constraint, before measuring, so it
@@ -101,7 +101,8 @@ things already existed and were REUSED rather than rebuilt:
 |---|---|
 | reading the record | `read_slow_forcing` in the GYRE round-16 script, which already parses this exact layout with explicit size and EOF checks |
 | comparing candidate to oracle | `compare` in the same module |
-| the substitution point | `_NEMOWSRK3TestHooks.slow_forcing_incoming_override`, which already lands exactly where `dynspg_ts.f90:320-324` removes the 2-D Coriolis |
+| the substitution point | `_NEMOWSRK3TestHooks.slow_forcing_incoming_override`, which already lands exactly where
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynspg_ts.f90:320-324` removes the 2-D Coriolis |
 | legoESM's own ordered intermediates | the production step already exposes them through `expose_barotropic_substeps` and `expose_live_stage_operands` |
 | the card, entry state, recorded surface operands and stage frames | the round-1 ORCA2 ladder gate |
 
@@ -216,7 +217,8 @@ NEMO's entry**.
 
 ### 4a. The thickness convention is real, and it CANCELS
 
-`stp2d.f90:196-199` weights the sum with `e3u_3d`, the REFERENCE u-face scale
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:196-199`
+weights the sum with `e3u_3d`, the REFERENCE u-face scale
 factor — the same array
 `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/domain.f90:199` sums into
 `hu_0` — and divides by
@@ -381,7 +383,8 @@ its verdict and what was done about each finding are in section 8a.
    what NEMO's fold rule is.  It is worth at most 1.7e-06 m/s² of forcing and
    2.8e-07 m of sea surface, so it is not urgent — but it is structural, and
    a consumer that reads the face mask directly sees all 668.
-3. **The thickness convention** (`stp2d.f90:196-199` weights with the
+3. **The thickness convention** (`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:196-199`
+   weights with the
    reference thickness and divides by the reference depth; legoESM uses the
    live pair).  Measured, CANCELS in the depth mean, reported as vacuous
    HERE — but it is only vacuous where the two appear as a ratio, and any
