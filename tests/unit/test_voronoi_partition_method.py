@@ -313,6 +313,10 @@ def test_sharding_reorder_still_honours_an_explicit_method(monkeypatch):
 # Edge/vertex order inside an owner block follows the cells' Hilbert curve
 # ---------------------------------------------------------------------------
 
+def _xyz(m, kind):
+    return np.stack([np.array(getattr(m, f"{a}{kind}")) for a in "xyz"], 1)
+
+
 def _runs_are_sorted(owner, key):
     """True iff ``owner`` is non-decreasing and ``key`` is non-decreasing
     inside every constant-owner run."""
@@ -333,17 +337,15 @@ def test_reorder_sorts_edges_and_vertices_by_hilbert_within_owner(mesh):
     r = reorder_voronoi_for_sharding(mesh, n_dev, method="sfc")
     owner = vp.partition_cells_sfc(mesh, n_dev)
     key = vp.hilbert_cell_keys(mesh)
-    xyz = lambda m, k: np.stack([np.asarray(getattr(m, f"{a}{k}")) for a in "xyz"], 1)
-
-    pc = _row_perm(xyz(r, "Cell"), xyz(mesh, "Cell"))
+    pc = _row_perm(_xyz(r, "Cell"), _xyz(mesh, "Cell"))
     assert _runs_are_sorted(owner[pc], key[pc])
 
-    pe = _row_perm(xyz(r, "Edge"), xyz(mesh, "Edge"))
+    pe = _row_perm(_xyz(r, "Edge"), _xyz(mesh, "Edge"))
     coe = np.asarray(mesh.cellsOnEdge)
     ec = np.minimum(coe[0], coe[1])[pe]
     assert _runs_are_sorted(owner[ec], key[ec]), "edges not Hilbert-ordered within owner"
 
-    pv = _row_perm(xyz(r, "Vertex"), xyz(mesh, "Vertex"))
+    pv = _row_perm(_xyz(r, "Vertex"), _xyz(mesh, "Vertex"))
     cov = np.asarray(mesh.cellsOnVertex)
     cov = np.where(cov >= 0, cov, mesh.nCells)
     mc = cov.min(axis=0)
@@ -352,11 +354,6 @@ def test_reorder_sorts_edges_and_vertices_by_hilbert_within_owner(mesh):
     v_owner = np.where(mc < mesh.nCells, owner[np.minimum(mc, mesh.nCells - 1)], 0)[pv]
     v_key = key[np.minimum(mc, mesh.nCells - 1)][pv]
     assert _runs_are_sorted(v_owner, v_key), "vertices not Hilbert-ordered within owner"
-    # owner group sizes are untouched by the within-group sort
-    e_owner = owner[np.minimum(coe[0], coe[1])]
-    assert np.array_equal(np.bincount(e_owner[pe]), np.bincount(e_owner))
-    assert np.array_equal(np.bincount(np.where(mc < mesh.nCells, owner[np.minimum(mc, mesh.nCells - 1)], 0)[pv]),
-                          np.bincount(np.where(mc < mesh.nCells, owner[np.minimum(mc, mesh.nCells - 1)], 0)))
 
 
 def _row_perm(a_new, a_old):
@@ -385,29 +382,35 @@ def test_reorder_commutes_with_trisk_operators(mesh):
     the original, so a table left unpermuted or a neighbour slot reordered
     (sign/weight flip) fails."""
     from legoesm.core.operators_voronoi import (
-        curl_vertex, divergence_cell, gradient_edge, tangential_velocity,
+        curl_vertex,
+        divergence_cell,
+        gradient_edge,
+        tangential_velocity,
     )
-    xyz = lambda m, k: np.stack([np.array(getattr(m, f"{a}{k}")) for a in "xyz"], 1)
-    coords = {k: xyz(mesh, k) for k in ("Cell", "Edge", "Vertex")}
+    coords = {k: _xyz(mesh, k) for k in ("Cell", "Edge", "Vertex")}
     tables = {k: np.array(getattr(mesh, k)) for k in (
         "cellsOnEdge", "verticesOnEdge", "edgesOnCell", "cellsOnCell",
-        "edgesOnVertex", "cellsOnVertex", "edgesOnEdge", "weightsOnEdge")}
+        "edgesOnVertex", "cellsOnVertex", "verticesOnCell", "edgesOnEdge",
+        "weightsOnEdge")}
     r = reorder_voronoi_for_sharding(mesh, 2, method="sfc")
     assert r is not mesh
     for k, v in coords.items():
-        assert np.array_equal(xyz(mesh, k), v), "reorder mutated its input"
-    pc = _row_perm(xyz(r, "Cell"), coords["Cell"])
-    pe = _row_perm(xyz(r, "Edge"), coords["Edge"])
-    pv = _row_perm(xyz(r, "Vertex"), coords["Vertex"])
+        assert np.array_equal(_xyz(mesh, k), v), "reorder mutated its input"
+    for k, v in tables.items():
+        assert np.array_equal(np.asarray(getattr(mesh, k)), v), f"reorder mutated its input {k}"
+    pc = _row_perm(_xyz(r, "Cell"), coords["Cell"])
+    pe = _row_perm(_xyz(r, "Edge"), coords["Edge"])
+    pv = _row_perm(_xyz(r, "Vertex"), coords["Vertex"])
     inv = {}
     for name, p in (("c", pc), ("e", pe), ("v", pv)):
-        inv[name] = np.empty_like(p); inv[name][p] = np.arange(len(p))
+        inv[name] = np.empty_like(p)
+        inv[name][p] = np.arange(len(p))
     # Every table is the original's columns permuted by the source entity and
     # values relabelled by the target entity, slot order untouched.
     for tab, src, tgt in (("cellsOnEdge", pe, "c"), ("verticesOnEdge", pe, "v"),
                           ("edgesOnCell", pc, "e"), ("cellsOnCell", pc, "c"),
                           ("edgesOnVertex", pv, "e"), ("cellsOnVertex", pv, "c"),
-                          ("edgesOnEdge", pe, "e")):
+                          ("verticesOnCell", pc, "v"), ("edgesOnEdge", pe, "e")):
         assert np.array_equal(np.asarray(getattr(r, tab)),
                               _remap(tables[tab][:, src], inv[tgt])), tab
     assert np.array_equal(np.asarray(r.weightsOnEdge), tables["weightsOnEdge"][:, pe])
