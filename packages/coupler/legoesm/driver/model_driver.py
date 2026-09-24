@@ -2106,6 +2106,16 @@ class ModelDriver:
                 sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
                 try:
                     self.grid = self.grid._replace(subgrid_topo_stddev=sso)
+                    # The compiled MPI step closes over the layout's local
+                    # mesh (built before this attach), not ``self.grid`` --
+                    # same hazard as the land_frac refresh above.  Without
+                    # this the distributed lane silently launched the scalar
+                    # h_topo fallback (a 500 m mountain over every ocean
+                    # column) while the serial lane read the file.
+                    if self._voronoi_layout is not None:
+                        self._voronoi_layout = self._voronoi_layout._replace(
+                            local_mesh=self._voronoi_layout.local_mesh._replace(
+                                subgrid_topo_stddev=sso))
                 # NamedTuple._replace raises TypeError ("Got unexpected field
                 # names"), NOT ValueError/AttributeError -- so this guard never
                 # fired and a raw collections traceback escaped instead of the

@@ -74,11 +74,31 @@ VARIANTS = {
                 e3sm_cam_launch_p=50000.0, e3sm_cam_latitude_taper=False),
     "bechtold": dict(turbulence="none", convection="bechtold",
                      bechtold_M_b_max=0.05),
+    # Orographic GWD reading a per-column SSO file: the MPI step closes over
+    # the layout's local mesh, so the file must reach it, not only self.grid.
+    "sso": dict(turbulence="none", gravity_wave_drag="mcfarlane",
+                subgrid_orography_path="__SSO_FILE__"),
 }
+
+
+def _sso_file() -> str:
+    """Deterministic synthetic SSO field (m) on a 2-degree lat-lon grid."""
+    import xarray as xr
+    path = os.path.join(tempfile.gettempdir(),
+                        f"legoesm_parity_sso_{os.getpid()}.nc")
+    lat = np.arange(-89.0, 90.0, 2.0)
+    lon = np.arange(0.0, 360.0, 2.0)
+    la, lo = np.meshgrid(np.radians(lat), np.radians(lon), indexing="ij")
+    sso = 300.0 * (1.0 + np.sin(2 * la) * np.cos(lo))
+    xr.Dataset({"SSO_STDH": (("lat", "lon"), sso)},
+               coords={"lat": lat, "lon": lon}).to_netcdf(path)
+    return path
 
 
 def _build(distributed: bool, variant: str, n_steps: int):
     kw = dict(VARIANTS[variant])
+    if kw.get("subgrid_orography_path") == "__SSO_FILE__":
+        kw["subgrid_orography_path"] = _sso_file()
     dyn = {k: kw.pop(k) for k in list(kw) if k in DycoreConfig._fields}
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=RES, nlev=NLEV,
