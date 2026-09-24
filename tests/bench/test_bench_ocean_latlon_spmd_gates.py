@@ -51,8 +51,25 @@ def test_gate_symbols_and_flags_exist():
     # Parser accepts the gate flags (argparse would SystemExit on unknowns).
     import argparse  # noqa: F401  (documents the surface under test)
     for flag in ("--parity-gate", "--check-conservation", "--cons-rtol",
-                 "--multicontroller", "--coordinator"):
+                 "--multicontroller", "--coordinator", "--pcg-precond",
+                 "--cheb-degree"):
         assert flag in Path(_BENCH).read_text()
+
+
+def test_pcg_precond_flags_reach_the_barotropic_config():
+    """--pcg-precond / --cheb-degree land on the two config fields the
+    implicit_cn solver dispatches on; jacobi (the default) leaves the
+    scheme default untouched and the degree refuses to ride any other
+    preconditioner."""
+    mod = _load_bench()
+    m, _ = mod.build_model_and_state(8, 16, 3, tripole=False,
+                                     pcg_precond="chebyshev", cheb_degree=3)
+    assert m.config.barotropic.barotropic_implicit_preconditioner == "chebyshev"
+    assert int(m.config.barotropic.barotropic_chebyshev_degree) == 3
+    m, _ = mod.build_model_and_state(8, 16, 3, tripole=False)
+    assert m.config.barotropic.barotropic_implicit_preconditioner == "jacobi"
+    with pytest.raises(SystemExit):
+        mod.build_model_and_state(8, 16, 3, tripole=False, cheb_degree=3)
 
 
 # Budget: the smoke compiles the serial reference, the SPMD step, the fused
