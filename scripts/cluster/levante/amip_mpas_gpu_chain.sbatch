@@ -305,6 +305,13 @@ echo "[chain] device count: ${AMIP_N_GPUS} GPU(s), one rank each${AMIP_PAIR_DIR:
 
 # CONFIG_YAML override: debugging configs (e.g. sub-daily diag_days for NaN
 # localization) without touching the tracked production YAML.
+#
+# CARRIED THROUGH THE SELF-RESUBMIT BELOW, and that is load-bearing since
+# 2026-09-23: amip_production.yaml became the CAM6 suite on that date, so a
+# chain started on any other deck whose continuation fell back to the default
+# would SWITCH MODEL at a segment boundary -- a 32-level hybrid grid continuing
+# a 36-level sigma run, from a checkpoint written by the other one. Resolved
+# here once and exported, because a default is not a record.
 : "${CONFIG_YAML:=${REPO}/config/amip/amip_production.yaml}"
 CMD=( "${PY}" -u scripts/run/run_amip.py
       --config "${CONFIG_YAML}"
@@ -361,7 +368,7 @@ if (( RC == 0 )); then
                  --time=12:00:00 --constraint=a100_80 --mem=0 \
                  --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}" \
                  --gpus-per-node="${AMIP_N_GPUS}" \
-                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-},AMIP_N_GPUS=${AMIP_N_GPUS},AMIP_PAIR_DIR=${AMIP_PAIR_DIR:-}" \
+                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-},AMIP_N_GPUS=${AMIP_N_GPUS},AMIP_PAIR_DIR=${AMIP_PAIR_DIR:-},CONFIG_YAML=${CONFIG_YAML}" \
                  "$0" | awk '{print $NF}')
         echo "[chain] ${NEW_DAY}/${TARGET_DAYS} d done; queued next link: ${NEXT}"
     else

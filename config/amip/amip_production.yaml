@@ -109,6 +109,11 @@ cld_macmic_num_steps: 3     # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_s
 
 # ---- radiation / clouds / microphysics --------------------------------------
 radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
+# Saturation curve the cloud-cover diagnosis measures RH against.  NAMED, not
+# inherited: the code default is "mixed_phase" and that is the value this deck
+# wants, but the default moved on 2026-09-17 and a default is not a record.
+# The preserved pre-CAM6 deck pins "liquid" for the same reason.
+cloud_saturation_scheme: mixed_phase
 clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
                             # deep-convective = clubb_intr deepcu from the
                             # scheme's updraft mass flux + in-cloud condensate
