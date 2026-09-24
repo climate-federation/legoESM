@@ -97,14 +97,17 @@ def test_dino_does_not_resolve_it(recipe):
     assert nemo_stage_momentum_wzv_resolved(config) is False
 
 
-def test_orca2_resolves_the_program_but_is_excluded_from_the_default(card):
+def test_orca2_resolves_the_program_but_its_own_config_excludes_it(card):
     """Round-163 review BLOCKER: ORCA2-zps specializes the same shared
     ``gyre_vector_ene_c2`` base GYRE-zco does and never overrides
     ``momentum_time_integrator``/``momentum_advection``/
     ``wzv_call2_evaluation``, so it resolves the SAME two-solve program --
-    but it has never been measured under this route.  The default policy
-    excludes it via its own EOS (``nemo_eos80`` vs GYRE's ``nemo_teos10``);
-    this test is the non-vacuity control for that exclusion, using the same
+    but it has never been measured under this route.  The exclusion is an
+    EXPLICIT per-card config choice (``nemo_stage_momentum_wzv_split=False``
+    on ORCA2-zps's own resolved config), never an inference from EOS or any
+    other unrelated field -- keying it on EOS was the review's finding,
+    closed by making this a real config choice each card states.  This test
+    is the non-vacuity control for that config choice, using the same
     lightweight construction (``_model_config`` directly, no deck files)
     the round-163 review used to find the gap."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import _model_config
@@ -114,19 +117,37 @@ def test_orca2_resolves_the_program_but_is_excluded_from_the_default(card):
         bbl_adv_option=0, bbl_gamma_s=0.0, bbl_diffusive_option=1,
         bbl_aht_m2_s=1000.0, whole_step_identity="orca2_vector_een_c2",
         tke_langmuir_evaluation="vectorized")
-    assert orca2_config.eos == "nemo_eos80"
     assert nemo_stage_momentum_wzv_resolved(orca2_config) is True
+    assert orca2_config.nemo_stage_momentum_wzv_split is False
     assert nemo_stage_momentum_wzv_executes(orca2_config) is False
-    # GYRE's own config, for contrast: same resolution, different EOS,
-    # lands.
+    # GYRE's own config, for contrast: same resolution, its own config sets
+    # the opposite explicit choice.
     gyre_config = card.recipe.model_config
-    assert gyre_config.eos == "nemo_teos10"
+    assert gyre_config.nemo_stage_momentum_wzv_split is True
     assert nemo_stage_momentum_wzv_executes(gyre_config) is True
-    # The exclusion is a default only, not a hard block: an explicit hook
-    # can still select it on ORCA2's config for a future measurement round.
+    # The exclusion is ORCA2's own card config, not a hard block: an
+    # explicit hook can still select it for a future measurement round.
     assert nemo_stage_momentum_wzv_executes(
         orca2_config, _NEMOWSRK3TestHooks(
             nemo_stage_momentum_wzv_split=True)) is True
+
+
+def test_a_card_that_resolves_the_program_without_a_config_choice_raises():
+    """Round-163 fail-closed control: a config that reaches the nemo_literal
+    branch without setting ``nemo_stage_momentum_wzv_split`` explicitly must
+    refuse rather than guess -- that is what closes the review's BLOCKER for
+    every FUTURE card too, not just ORCA2-zps."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import _model_config
+
+    bare_config = _model_config(
+        barotropic_time_filter="nemo_ab3am4", n_barotropic_substeps=65,
+        bbl_adv_option=0, bbl_gamma_s=0.0, bbl_diffusive_option=1,
+        bbl_aht_m2_s=1000.0, whole_step_identity="gyre_vector_ene_c2",
+        tke_langmuir_evaluation="vectorized"
+    )._replace(nemo_stage_momentum_wzv_split=None)
+    assert nemo_stage_momentum_wzv_resolved(bare_config) is True
+    with pytest.raises(ValueError, match="nemo_stage_momentum_wzv_split"):
+        nemo_stage_momentum_wzv_executes(bare_config)
 
 
 class _Config:

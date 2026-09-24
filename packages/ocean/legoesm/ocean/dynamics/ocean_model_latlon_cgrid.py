@@ -1292,16 +1292,17 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # a NEMO statement that is one-variable and takes a certified row from
     # DEBT to AT-BAR lands even though day 240/360 move outside the noise
     # floor, provided the move is under 1e-3 relative -- see the round-163
-    # receipt.  ``None`` (the default) defers to
-    # ``nemo_stage_momentum_wzv_executes``'s own default policy, which
-    # lands it only for a card whose resolved identity also carries
-    # ``eos == "nemo_teos10"`` (GYRE's own EOS) -- round 163's review found
-    # ORCA2-zps resolves the same three base conditions but was never
-    # measured under this route, so it is EXCLUDED from the default until
-    # measured (DECISION_NEEDED, round-163 receipt).  Explicit ``True`` or
-    # ``False`` always wins over the policy, subject only to
-    # ``nemo_stage_momentum_wzv_resolved`` -- the one-variable way a test
-    # reaches either arm on any card, unchanged from rounds 159-162.
+    # receipt.  THIS is the TEST-ONLY hook, unchanged in spirit from rounds
+    # 159-162: explicit ``True``/``False`` always wins, subject only to
+    # ``nemo_stage_momentum_wzv_resolved``, the one-variable way a test
+    # reaches either arm on any card.  ``None`` (the default) defers to the
+    # CARD's own explicit choice on ``LatLonCGridOceanConfig`` (same field
+    # name, a different object) -- GYRE-zco sets it ``True``, ORCA2-zps sets
+    # it ``False``, both explicitly, neither inferred from EOS or any other
+    # field (round-163 review BLOCKER: an EOS-keyed inference was a hidden
+    # coupling between unrelated choices).  A card that resolves the
+    # two-solve program without setting the config field raises rather than
+    # guessing.
     nemo_stage_momentum_wzv_split: bool | None = None
     # Round 160 WRITE-only exposure: make ``expose_tracer_transport_stage``
     # return the MOMENTUM vertical velocity (slot 11, stprk3_stg.f90:360)
@@ -1649,10 +1650,12 @@ def nemo_stage_momentum_wzv_resolved(config) -> bool:
     vector-invariant momentum advection and the literal continuity solve
     together.
 
-    This is the BLAST RADIUS of the second solve: every card this returns
-    True for takes it by default as of round 163 (Decision 55, note AT).
-    ``nemo_stage_momentum_wzv_executes`` is what a given run actually takes,
-    which agrees with this predicate unless a test opts out explicitly.
+    This is the BLAST RADIUS of the second solve, not its execution: a card
+    this returns True for MUST set its own explicit
+    ``nemo_stage_momentum_wzv_split`` choice (round 163, Decision 55/note
+    AT) -- GYRE-zco's is ``True``, ORCA2-zps's is ``False``, both explicit,
+    neither inferred.  ``nemo_stage_momentum_wzv_executes`` is what a given
+    run actually takes, reading that explicit choice (or a test hook).
     """
     return (
         getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
@@ -1666,24 +1669,24 @@ def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:
     """Does this run ACTUALLY take the second per-stage continuity solve?
 
     The card has to select the two-solve program.  An EXPLICIT
-    ``nemo_stage_momentum_wzv_split`` hook (``True`` or ``False``) always
+    ``nemo_stage_momentum_wzv_split`` HOOK (``True`` or ``False``) always
     wins, subject only to ``nemo_stage_momentum_wzv_resolved`` -- that is
     the private one-variable arm rounds 159-162 used to test the candidate
-    regardless of any card's production default, unchanged.
+    regardless of any card's production choice, unchanged.
 
-    With NO explicit hook (``None``, the field's own default, which is also
-    what a bare ``_NEMOWSRK3TestHooks()`` carries) the DEFAULT POLICY
-    (round 163, Decision 55/note AT) selects it only for a card whose
-    resolved identity also matches ``eos == "nemo_teos10"``, GYRE's own EOS
-    selection (``nemo_testcase_recipe.py``'s ``gyre_vector_ene_c2`` branch).
-    Round 163's own review found that ORCA2-zps resolves the SAME three
-    base conditions (rk3_ws, vector_invariant, nemo_literal) by specializing
-    that same branch, but has never been measured under this route -- its
-    certified ladder has not been run against it.  The EOS check is what
-    keeps ORCA2 (``eos == "nemo_eos80"``) on the pre-round-160 single shared
-    solve by default until an ORCA2-focused round measures and lands it
-    separately; this is a DECISION_NEEDED the round-163 receipt raises
-    explicitly, not a silent scope call.  This predicate IS the model's
+    With no hook, the choice is the CARD's own, read off
+    ``config.nemo_stage_momentum_wzv_split`` (round 163, Decision 55/note
+    AT) -- an EXPLICIT per-card config field, never inferred from EOS or any
+    other unrelated selector (round-163 review BLOCKER: keying it on
+    ``eos`` would have been a hidden coupling between unrelated choices).
+    GYRE-zco's own resolved config sets it ``True`` (measured, landed);
+    ORCA2-zps resolves the SAME three base conditions by specializing the
+    identical config branch but sets it explicitly ``False`` (never
+    measured under this route).  A card that resolves the two-solve program
+    WITHOUT setting this field explicitly (``None``, the field's own
+    construction default) is a configuration gap, not a silent choice: this
+    raises rather than guessing, so the next such card either sets the
+    field or is caught before it ships.  This predicate IS the model's
     condition: the Decision-43 card census imports it rather than restating
     it (operator note AR, finding 2).
     """
@@ -1692,7 +1695,14 @@ def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:
     split = getattr(hooks, "nemo_stage_momentum_wzv_split", None)
     if split is not None:
         return bool(split)
-    return bool(getattr(config, "eos", None) == "nemo_teos10")
+    config_split = getattr(config, "nemo_stage_momentum_wzv_split", None)
+    if config_split is None:
+        raise ValueError(
+            "card resolves NEMO's second per-stage continuity solve "
+            "(rk3_ws + vector_invariant + wzv_call2_evaluation=nemo_literal) "
+            "but its config does not set nemo_stage_momentum_wzv_split "
+            "explicitly -- True or False, never inferred")
+    return bool(config_split)
 
 
 def _nemo_ws_stage_transport(

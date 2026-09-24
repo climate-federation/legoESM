@@ -261,8 +261,9 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             # answer different questions: whether the card's configuration
             # selects NEMO's two-solve stage program at all -- the blast
             # radius of the statement -- and whether this run actually takes
-            # it, which now agrees with the blast radius on every card
-            # (GYRE-zco) unless a test opts out explicitly.
+            # it, which is each card's OWN explicit config choice (GYRE-zco
+            # True, ORCA2-zps False) and can disagree with the blast radius,
+            # unless a test opts out/in explicitly via a hook.
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 nemo_stage_momentum_wzv_executes,
                 nemo_stage_momentum_wzv_resolved)
