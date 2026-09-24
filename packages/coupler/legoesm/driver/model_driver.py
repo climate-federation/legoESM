@@ -165,6 +165,27 @@ def _scatter_1based_voronoi_columns(arr, partition):
     return jnp.concatenate([arr[:1], body], axis=0)
 
 
+def _land_columns_to_local(arr, partition):
+    """Cut ONE global per-column land array down to this rank's cells.
+
+    Land state written by anything global -- a gathered checkpoint, an offline
+    spin-up restart -- arrives at ``nCells_global`` while everything the run
+    holds is already rank-local.  Both per-column leaf shapes the land tile
+    uses are handled here, including the CLM 1-based one whose row 0 is not a
+    column, so no caller has to know which is which.  A no-op when there is no
+    partition (serial) or the leaf is not per-column, so callers can map it
+    over a whole pytree.
+    """
+    if partition is None or not hasattr(arr, "shape") or arr.ndim < 1:
+        return arr
+    n_global = int(partition.nCells_global)
+    if int(arr.shape[0]) == n_global:
+        return _scatter_voronoi_columns(arr, partition)
+    if int(arr.shape[0]) == n_global + 1:          # CLM 1-based
+        return _scatter_1based_voronoi_columns(arr, partition)
+    return arr
+
+
 def _map_flat_column_leaves(tree, n_tile, global_ncol, fn):
     """Apply ``fn(leaf, n_tile)`` to every array leaf of ``tree`` whose leading
     axis equals ``global_ncol`` (a per-column field); leave all other leaves
@@ -1649,14 +1670,7 @@ class ModelDriver:
         _part = _vl.partition if _vl is not None else None
 
         def _to_local(arr):
-            if _part is None or not hasattr(arr, "shape") or arr.ndim < 1:
-                return arr
-            n_global = int(_part.nCells_global)
-            if int(arr.shape[0]) == n_global:
-                return _scatter_voronoi_columns(arr, _part)
-            if int(arr.shape[0]) == n_global + 1:          # CLM 1-based
-                return _scatter_1based_voronoi_columns(arr, _part)
-            return arr
+            return _land_columns_to_local(arr, _part)
 
         fields = {}
         for name, val in popped.items():
@@ -3569,9 +3583,21 @@ class ModelDriver:
             # 3 m at growth 1.5 and 8 over 6.375 m at growth 2 both pass the
             # shape check while placing every soil value at a different depth.
             # Pass the thicknesses so a spin-up on the wrong column is refused.
+            # Under MPAS cell-partition MPI the spin-up file holds the GLOBAL
+            # columns while ``ncol`` is already this rank's band, so the file is
+            # checked against the GLOBAL count and then cut down -- the mirror
+            # of what a gathered checkpoint restore does, through the same
+            # helper.  Checking it against the local count instead made the
+            # loader raise with a different number on every rank, which is what
+            # forced any spun-up-land arm back to a single device.
+            _vl_ic = getattr(self, "_voronoi_layout", None)
+            _part_ic = _vl_ic.partition if _vl_ic is not None else None
+            _expect_ncol = (int(_part_ic.nCells_global)
+                            if _part_ic is not None else ncol)
             _ic_state, _ic_meta = load_land_restart(
                 _land_ic_path, expected_land_mode="multilayer",
-                expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers,
+                expected_ncol=_expect_ncol,
+                expected_n_layers=cfg.soil_grid.n_layers,
                 # Same quantity this driver's PRE-LOAD check already carries
                 # (``load_land_restart_soil_dz`` returns thicknesses), so the
                 # column travels one form through both checks.
@@ -3581,6 +3607,12 @@ class ModelDriver:
                 # wrong one: refuse it rather than warn.
                 require_soil_dz=bool(getattr(
                     self.config, "land_calibrated_physics", False)))
+            # Scatter BEFORE the graft: the template is rank-local, so a global
+            # restart grafted onto it would carry the whole globe's columns into
+            # a rank-local state.
+            if _part_ic is not None:
+                _ic_state = jax.tree_util.tree_map(
+                    lambda a: _land_columns_to_local(a, _part_ic), _ic_state)
             # Graft the restart's prognostic columns onto the canonical template
             # (fixes the pytree structure), then cast the array leaves to the
             # run's storage precision (the restart deserialises float64).

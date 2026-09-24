@@ -69,6 +69,18 @@ from legoesm.driver.model_driver import ModelDriver  # noqa: E402
 RES, NLEV, DT, DAYS = 3, 20, 300.0, 1     # level 3 = 642 cells; days is an int
 N_SOIL = 6
 
+# The land surface scheme defaulted to two-leaf after this file was written,
+# and a canopy run refuses to start without the harmonized surfdata its
+# per-PFT parameters come from -- so every test here had been failing on that
+# refusal, unrelated to what they assert. Point them at the staged file.
+SURFDATA = os.environ.get(
+    "LEGOESM_TEST_SURFDATA",
+    "/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/data/"
+    "legoesm_surfdata_c260716.nc")
+pytestmark = pytest.mark.skipif(
+    not os.path.exists(SURFDATA),
+    reason=f"no CLM surfdata at {SURFDATA}; set LEGOESM_TEST_SURFDATA")
+
 
 def _land_mask_path():
     """A deterministic, spatially varying land mask, written once by rank 0.
@@ -110,7 +122,7 @@ def _shared_tmpdir(prefix):
     return comm.bcast(d, root=0)
 
 
-def _build(distributed, mask_path, output_dir=None, fix_mass=True):
+def _build(distributed, mask_path, output_dir=None, fix_mass=True, land_ic=""):
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=RES, nlev=NLEV,
                         vertical_coord="sigma"),
@@ -120,7 +132,9 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True):
         days=DAYS, dataset="analytical", radiation="gray",
         convection="none", turbulence="none", precision="fp64",
         land_mask_path=mask_path, use_multilayer_land=True,
+        surfdata_path=SURFDATA,
         multilayer_n_layers=N_SOIL, multilayer_soil_depth=2.5,
+        land_ic_path=land_ic,
         distributed=distributed,
     )
     d = ModelDriver(cfg, output_dir=output_dir or tempfile.mkdtemp())
@@ -388,9 +402,81 @@ def test_mpas_multilayer_land_checkpoint_round_trip_under_mpi():
               f"{len(before)} per-column land leaves")
 
 
+def test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets():
+    """A global spun-up land state must load on every rank, at the right columns.
+
+    The second thing blocking a multi-device production arm, and the mirror of
+    the sea-ice one: that file is written once for the whole globe, but the
+    loader was handed THIS RANK's column count and refused the file with a
+    different number on every rank. So any arm started from a spun-up land
+    state was forced back to a single device.
+
+    A test that only checked it no longer crashes would pass on a scatter that
+    hands every rank the wrong slice, so this compares values: each rank's
+    owned columns against the SERIAL run's columns at the same global indices,
+    and exactly -- loading and cutting a file is pure data movement with no
+    atmosphere in it, so there is no tolerance to hide behind.
+    """
+    mask = _land_mask_path()
+    shared = _shared_tmpdir("land_ic_")
+    ic_path = os.path.join(shared, "spinup_land.npz")
+
+    # The spun-up file is the serial cold-start state, which the aridity seed
+    # already makes spatially varying -- checked below, because a uniform state
+    # would match under ANY permutation.
+    seed = _build(False, mask)
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        from legoesm.land.restart import save_land_restart
+        from legoesm.land.soil_grid import make_soil_grid
+        save_land_restart(
+            ic_path, seed._land_ml_state, land_mode="multilayer",
+            t_end_s=0.0, n_steps_completed=0,
+            soil_dz=np.asarray(
+                make_soil_grid(seed.physics.land_ml_cfg.soil_grid).dz))
+    MPI.COMM_WORLD.Barrier()
+    assert os.path.exists(ic_path), "the spun-up land state was never written"
+
+    ref = _build(False, mask, land_ic=ic_path)
+    d = _build(True, mask, land_ic=ic_path)
+    assert d._voronoi_layout is not None, (
+        "the distributed run built no Voronoi partition, so nothing was "
+        "scattered and this test is not exercising the lane")
+
+    part = d._voronoi_layout.partition
+    n_owned = part.n_owned_cells
+    gids = np.asarray(part.local_cells[:n_owned])
+    n_global = np.asarray(ref.state.T.data).shape[0]
+    assert n_owned < n_global, "this rank was given every global cell"
+
+    ref_cols, _ = _column_leaves(ref._land_ml_state, n_global)
+    mpi_cols, _ = _column_leaves(d._land_ml_state, part.n_local_cells)
+    assert set(ref_cols) == set(mpi_cols), (
+        f"the runs disagree on which land leaves are per-column: "
+        f"serial-only {set(ref_cols) - set(mpi_cols)}, "
+        f"mpi-only {set(mpi_cols) - set(ref_cols)}")
+    for required in ("T_soil", "theta_soil"):
+        assert required in ref_cols, f"{required} is not being compared"
+
+    varying = [k for k in ref_cols if float(np.ptp(ref_cols[k])) > 0.0]
+    assert varying, (
+        "every per-column land leaf is spatially uniform, so a wrong slice "
+        "would be invisible and this test would prove nothing")
+
+    for name, a_ref in ref_cols.items():
+        np.testing.assert_array_equal(
+            mpi_cols[name][:n_owned], a_ref[gids],
+            err_msg=f"land leaf {name!r} landed on the wrong columns after "
+                    f"the spun-up state was cut to this rank")
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        print(f"\n[land IC] {len(ref_cols)} per-column leaves scattered "
+              f"exactly, {len(varying)} of them spatially varying")
+
+
 if __name__ == "__main__":
     test_land_advance_on_the_voronoi_partition_is_bit_exact()
     test_mpas_multilayer_land_end_to_end_inherits_only_the_atmosphere_residual()
     test_mpas_multilayer_land_checkpoint_round_trip_under_mpi()
+    test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets()
     if MPI.COMM_WORLD.Get_rank() == 0:
         print("OK")
