@@ -85,13 +85,20 @@ for f in T U V; do
     echo "FATAL: missing trd1h_$f"; exit 1; }
 done
 
-OUT=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/eq_avm_prod_mxl3
+# Extra arguments are passed straight through, so the same card serves as its
+# own one-variable arm: with no arguments it is the production configuration,
+# and `sbatch <card> --prandtl-mode nemo_ri` differs from it in that flag and
+# nothing else. TAG names the output directory so an arm cannot overwrite the
+# control it is compared against.
+TAG="${TAG:-prod_mxl3}"
+OUT=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/eq_avm_$TAG
 mkdir -p "$OUT"
+echo "ARGS: --mxl-choice 3 $*"
 $PY -u scripts/validate/ocean_fidelity/compare_tendencies_nemo.py \
   --tfile $D/ORCA1_1h_20010101_20010101_trd1h_T.nc \
   --ufile $D/ORCA1_1h_20010101_20010101_trd1h_U.nc \
   --vfile $D/ORCA1_1h_20010101_20010101_trd1h_V.nc \
-  --rec 1 --skip-maps --mxl-choice 3 \
+  --rec 1 --skip-maps --mxl-choice 3 "$@" \
   --output-dir "$OUT"
 rc=$?
 echo "=== card exit: $rc ==="
