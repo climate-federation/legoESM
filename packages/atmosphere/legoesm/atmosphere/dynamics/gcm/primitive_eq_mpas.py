@@ -33,7 +33,7 @@ from legoesm.core.conservation import (
     conservative_positive_clip_global,
     is_borrow_eligible_tracer,
 )
-from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import cast_pytree, finalize_to_storage
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
@@ -1307,7 +1307,13 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 (_s_phy - _s_dyn) / dt
                 - _led_phys_rows.astype(_s_pre.dtype).sum(axis=1))
 
-        return (cast_pytree(state_new, None, "storage"), phys_state_out,
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+        return (finalize_to_storage(
+                    cast_pytree(state_new, None, "storage")), phys_state_out,
                 sfc_diag, _led_step)
 
     # integrate() and integrate_scan() inherited from IntegrationMixin

@@ -1946,7 +1946,18 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
 # surfaced as an opaque 83 GB arg-size error at 96 GPUs (issue #1360)
 # after a 24-node allocation — the guard turns that into an instant,
 # named error. Grow ONLY with a new bit-identity receipt.
-_VALIDATED_KT = frozenset({2, 3})
+# kt=4 added 2026-09-17: tests/parallel/test_tiled_fv3_hydrostatic_step.py
+# at N=48 on 96 host devices, sigma + hybrid, both passed.  NOTE the receipt
+# is an FMA-ROBUST RELATIVE match (u_d/v_d corner rel < 1e-9, T/p_s < 1e-7),
+# not literal bit equality — the RK3 accumulation reorders — plus a real
+# multi-controller 96-GPU C768 run (the host-device test alone does not
+# exercise NCCL or device memory, which is where #1360 actually bit).
+# kt=6 (216) and kt=8 (384) added the same day from the same test, host
+# devices only: both counts exceed this machine's 192-GPU ceiling, so their
+# only production use is the CPU rank ladder, whose multi-process run is
+# itself the multi-controller half of the receipt.  A GPU run at those
+# counts would need its own.
+_VALIDATED_KT = frozenset({2, 3, 4, 6, 8})
 
 
 def _validate_tiled_step_factory_args(where, mesh, cdgrid, coord, n, kt,

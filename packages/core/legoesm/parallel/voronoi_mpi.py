@@ -39,7 +39,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import cast_pytree, finalize_to_storage
 from legoesm.core.state import (
     MPAS_SFC_DIAG_EXTRA_KEYS,
     MPAS_SFC_DIAG_MPI_UNPUBLISHED,
@@ -1252,7 +1252,14 @@ def make_voronoi_mpi_step(
 
         # (mass fixer moved above the floors — codex round-2 finding 5.)
 
-        return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+        return (finalize_to_storage(
+                    cast_pytree(state_new, None, "storage")),
+                phys_state_out, sfc_diag)
 
     logger.info(
         "Voronoi MPI step ready: rank=%d/%d, %d owned cells, %d local cells",
