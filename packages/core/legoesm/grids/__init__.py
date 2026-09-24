@@ -53,6 +53,7 @@ from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     create_hybrid_coordinate,
     make_hybrid_levels,
+    assert_hybrid_valid_for_surface_pressure,
     standard_hybrid_levels,
     hybrid_from_sigma,
 )

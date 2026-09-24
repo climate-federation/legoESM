@@ -157,6 +157,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="cam_l32 = CAM6's 32-level hybrid table (nlev must be 32)")
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
+    parser.add_argument("--transition-exponent", type=int, default=None,
+                        choices=[2, 3],
+                        help="hybrid B(eta)=eta**n exponent. 3 (default) carries "
+                             "NEGATIVE layer mass below 664 hPa, i.e. above ~3450 m "
+                             "of orography -- 0.92%% of the planet by area. 2 moves "
+                             "that to ~498 hPa / ~5870 m and covers all of ETOPO, at "
+                             "the cost of different level placement (#1029).")
     # ``mpas`` is the canonical name for the SCVT Voronoi mesh + TRiSK
     # discretization (Ringler 2010 / Thuburn 2009), matching the ocean
     # side which has always used this name.  Legacy aliases
@@ -2165,6 +2172,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         vertical_coord=args.vertical_coord,
         p_top_Pa=args.p_top if args.p_top is not None else 200.0,
         stretching=args.stretching if args.stretching is not None else 2.0,
+        transition_exponent=(args.transition_exponent
+                             if args.transition_exponent is not None else 3),
         tropopause_refine=(args.tropopause_refine
                            if args.tropopause_refine is not None else 1.0),
         sigma_top=(args.sigma_top if args.sigma_top is not None else 0.01),

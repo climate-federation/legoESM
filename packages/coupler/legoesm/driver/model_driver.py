@@ -1760,6 +1760,7 @@ class ModelDriver:
             from legoesm.grids.vertical import make_hybrid_levels
             self.sigma = make_hybrid_levels(
                 gc.nlev, p_top_Pa=gc.p_top_Pa, stretching=gc.stretching,
+                transition_exponent=getattr(gc, "transition_exponent", 3),
             )
         elif gc.vertical_coord == "cam_l32":
             from legoesm.grids.vertical import make_cam6_l32_levels
@@ -1916,6 +1917,47 @@ class ModelDriver:
             )
             if _msg is not None:
                 logger.warning("  %s", _msg)
+
+        self._assert_vertical_coordinate_supports_this_orography()
+
+    def _assert_vertical_coordinate_supports_this_orography(self) -> None:
+        """Refuse a hybrid coordinate that inverts over this run's terrain.
+
+        The check belongs here because this is the first point where BOTH the
+        coordinate and the orography exist.  The surface pressure it tests is
+        the hydrostatic reduction the driver itself uses to seed p_s over
+        terrain (``p_s = p_ref * exp(-phis / (R_d * T_init))``, see the
+        initial-state branches below) -- not an invented estimate, and not the
+        seed field, which the MPAS lane deliberately leaves flat.
+
+        Why it is fatal rather than a warning: see
+        ``assert_hybrid_valid_for_surface_pressure``.  Short version, measured:
+        the default L40 coordinate forbids orography above about 3450 m, which
+        is 0.92% of the planet by area, and two cells inside that regime killed
+        a 200-day idealized run in 200 steps (#1029).
+        """
+        gc = self.config.grid
+        if getattr(gc, "vertical_coord", None) != "hybrid":
+            return
+        phis = getattr(self, "_phis_data", None)
+        if phis is None:
+            return
+        phis_max = float(jnp.max(phis))
+        if not (phis_max > 0.0):
+            return          # flat: every column sits at p_ref
+
+        from legoesm.grids.vertical import (
+            assert_hybrid_valid_for_surface_pressure)
+        from legoesm import constants
+
+        T_init = float(getattr(self.config, "T_init", 288.0))
+        p_s_min = float(constants.p_ref
+                        * jnp.exp(-phis_max / (constants.R_d * T_init)))
+        assert_hybrid_valid_for_surface_pressure(
+            self.sigma, p_s_min,
+            context=(f"{gc.grid_type} {gc.resolution}, {gc.nlev} hybrid levels"
+                     f", topography={self.config.topography}"),
+        )
 
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
