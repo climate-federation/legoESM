@@ -346,43 +346,78 @@ def test_reorder_sorts_edges_and_vertices_by_hilbert_within_owner(mesh):
     pv = _row_perm(xyz(r, "Vertex"), xyz(mesh, "Vertex"))
     cov = np.asarray(mesh.cellsOnVertex)
     cov = np.where(cov >= 0, cov, mesh.nCells)
-    vc = np.minimum(cov.min(axis=0), mesh.nCells - 1)[pv]
-    assert _runs_are_sorted(owner[vc], key[vc]), "vertices not Hilbert-ordered within owner"
+    mc = cov.min(axis=0)
+    # production: an all-sentinel vertex is owned by rank 0 and keyed on the
+    # last cell (voronoi_partition.reorder_voronoi_for_sharding)
+    v_owner = np.where(mc < mesh.nCells, owner[np.minimum(mc, mesh.nCells - 1)], 0)[pv]
+    v_key = key[np.minimum(mc, mesh.nCells - 1)][pv]
+    assert _runs_are_sorted(v_owner, v_key), "vertices not Hilbert-ordered within owner"
+    # owner group sizes are untouched by the within-group sort
+    e_owner = owner[np.minimum(coe[0], coe[1])]
+    assert np.array_equal(np.bincount(e_owner[pe]), np.bincount(e_owner))
+    assert np.array_equal(np.bincount(np.where(mc < mesh.nCells, owner[np.minimum(mc, mesh.nCells - 1)], 0)[pv]),
+                          np.bincount(np.where(mc < mesh.nCells, owner[np.minimum(mc, mesh.nCells - 1)], 0)))
 
 
 def _row_perm(a_new, a_old):
-    """perm with a_new[i] == a_old[perm[i]] for row-unique coordinate arrays."""
-    old = {tuple(np.round(row, 9)): i for i, row in enumerate(np.asarray(a_old))}
-    return np.array([old[tuple(np.round(row, 9))] for row in np.asarray(a_new)])
+    """perm with a_new[i] == a_old[perm[i]], recovered from row-unique
+    coordinates (exact, not rounded); asserts a bijection."""
+    a_new, a_old = np.asarray(a_new), np.asarray(a_old)
+    old = {tuple(row): i for i, row in enumerate(a_old)}
+    assert len(old) == len(a_old), "coordinates are not row-unique"
+    perm = np.array([old[tuple(row)] for row in a_new])
+    assert np.array_equal(np.sort(perm), np.arange(len(a_old))), "not a permutation"
+    return perm
+
+
+def _remap(conn, inv):
+    """Connectivity relabel that keeps -1 sentinels."""
+    conn = np.asarray(conn)
+    return np.where(conn >= 0, inv[np.maximum(conn, 0)], -1)
 
 
 def test_reorder_commutes_with_trisk_operators(mesh):
     """Relabelling cells, edges and vertices must not change any TRiSK
     operator: div/grad/curl/tangential reconstruction on the reordered mesh
-    equal the original results mapped through the recovered permutations.
-    Catches a connectivity table or weight/sign array left unpermuted, or a
-    neighbour slot reordered (which would flip signs / weights)."""
+    are BITWISE equal to the original results mapped through the recovered
+    permutations (a pure relabel runs the same float ops in the same slot
+    order). Also pins every connectivity/weight table as the plain relabel of
+    the original, so a table left unpermuted or a neighbour slot reordered
+    (sign/weight flip) fails."""
     from legoesm.core.operators_voronoi import (
         curl_vertex, divergence_cell, gradient_edge, tangential_velocity,
     )
+    xyz = lambda m, k: np.stack([np.array(getattr(m, f"{a}{k}")) for a in "xyz"], 1)
+    coords = {k: xyz(mesh, k) for k in ("Cell", "Edge", "Vertex")}
+    tables = {k: np.array(getattr(mesh, k)) for k in (
+        "cellsOnEdge", "verticesOnEdge", "edgesOnCell", "cellsOnCell",
+        "edgesOnVertex", "cellsOnVertex", "edgesOnEdge", "weightsOnEdge")}
     r = reorder_voronoi_for_sharding(mesh, 2, method="sfc")
-    xyz = lambda m, k: np.stack([np.asarray(getattr(m, f"{a}{k}")) for a in "xyz"], 1)
-    pc = _row_perm(xyz(r, "Cell"), xyz(mesh, "Cell"))
-    pe = _row_perm(xyz(r, "Edge"), xyz(mesh, "Edge"))
-    pv = _row_perm(xyz(r, "Vertex"), xyz(mesh, "Vertex"))
+    assert r is not mesh
+    for k, v in coords.items():
+        assert np.array_equal(xyz(mesh, k), v), "reorder mutated its input"
+    pc = _row_perm(xyz(r, "Cell"), coords["Cell"])
+    pe = _row_perm(xyz(r, "Edge"), coords["Edge"])
+    pv = _row_perm(xyz(r, "Vertex"), coords["Vertex"])
+    inv = {}
+    for name, p in (("c", pc), ("e", pe), ("v", pv)):
+        inv[name] = np.empty_like(p); inv[name][p] = np.arange(len(p))
+    # Every table is the original's columns permuted by the source entity and
+    # values relabelled by the target entity, slot order untouched.
+    for tab, src, tgt in (("cellsOnEdge", pe, "c"), ("verticesOnEdge", pe, "v"),
+                          ("edgesOnCell", pc, "e"), ("cellsOnCell", pc, "c"),
+                          ("edgesOnVertex", pv, "e"), ("cellsOnVertex", pv, "c"),
+                          ("edgesOnEdge", pe, "e")):
+        assert np.array_equal(np.asarray(getattr(r, tab)),
+                              _remap(tables[tab][:, src], inv[tgt])), tab
+    assert np.array_equal(np.asarray(r.weightsOnEdge), tables["weightsOnEdge"][:, pe])
     rng = np.random.default_rng(0)
     u = rng.standard_normal(mesh.nEdges)
     phi = rng.standard_normal(mesh.nCells)
-    # The reorder must not flip any edge's cellsOnEdge orientation, or the
-    # plain permutation of a signed edge field would be wrong.
-    pc_inv = np.empty_like(pc); pc_inv[pc] = np.arange(len(pc))
-    assert np.array_equal(np.asarray(r.cellsOnEdge), pc_inv[np.asarray(mesh.cellsOnEdge)[:, pe]])
-    for name, f_old, f_new in [
-        ("div", divergence_cell(u, mesh), divergence_cell(u[pe], r)),
-        ("grad", gradient_edge(phi, mesh), gradient_edge(phi[pc], r)),
-        ("curl", curl_vertex(u, mesh), curl_vertex(u[pe], r)),
-        ("tangential", tangential_velocity(u, mesh), tangential_velocity(u[pe], r)),
+    for name, f_old, f_new, p in [
+        ("div", divergence_cell(u, mesh), divergence_cell(u[pe], r), pc),
+        ("grad", gradient_edge(phi, mesh), gradient_edge(phi[pc], r), pe),
+        ("curl", curl_vertex(u, mesh), curl_vertex(u[pe], r), pv),
+        ("tangential", tangential_velocity(u, mesh), tangential_velocity(u[pe], r), pe),
     ]:
-        f_old, f_new = np.asarray(f_old), np.asarray(f_new)
-        p = {"div": pc, "grad": pe, "curl": pv, "tangential": pe}[name]
-        assert np.allclose(f_new, f_old[p], rtol=1e-6, atol=1e-6), name
+        assert np.array_equal(np.asarray(f_new), np.asarray(f_old)[p]), name
