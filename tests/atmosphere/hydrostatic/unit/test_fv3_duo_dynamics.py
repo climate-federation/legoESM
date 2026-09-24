@@ -775,6 +775,24 @@ class TestModelDriverLane:
         # the humidity slot is the DCMIP16 field, not a passenger copy
         assert float(np.abs(np.asarray(driver.state["q"][0])).max()) > 1e-3
 
+    def test_kessler_hook_keeps_a_passenger_once(self, tmp_path):
+        """Face layout: a fourth tracer beyond the Kessler slots rides
+        through the driver hook unchanged and exactly once (codex
+        2026-09-24: the bridge already keeps it, and the hook appended
+        it again -- four became five, then seven)."""
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path),
+                              microphysics="kessler")
+        driver = ModelDriver(cfg, output_dir=tmp_path)
+        driver.setup()
+        b = driver._fv3_duo_fresh_ic()
+        b = {**b, "q": list(b["q"]) + [b["q"][0] * 0.5]}
+        out = driver._fv3_duo_apply_kessler(b, float(cfg.dycore.dt))
+        assert len(out["q"]) == 4
+        assert np.array_equal(np.asarray(out["q"][3]), np.asarray(b["q"][3]))
+        out2 = driver._fv3_duo_apply_kessler(out, float(cfg.dycore.dt))
+        assert len(out2["q"]) == 4
+
     def test_kessler_restart_template_carries_three_tracers(self, tmp_path):
         """The multi-process restart validator sizes a checkpoint against
         the deck's OWN fresh IC; with Kessler on that IC carries three
@@ -1002,15 +1020,21 @@ class TestFV3DuoRestart:
         with pytest.raises(ValueError, match="load_checkpoint"):
             drv._run_fv3_duo(start_step=7)
 
-    @pytest.mark.parametrize("model_type,hs", [
-        ("hydrostatic", False),
-        ("nonhydrostatic", False),
+    @pytest.mark.parametrize("model_type,hs,micro", [
+        ("hydrostatic", False, "none"),
+        ("nonhydrostatic", False, "none"),
         # HS-on restart: the adapter is stateless (bundle -> bundle) and
         # checkpoints persist the post-HS bundle, so the chain must stay
         # bitwise exactly like the dry lane (codex MINOR 2026-08-24).
-        ("hydrostatic", True),
+        ("hydrostatic", True, "none"),
+        # Kessler (moist, three tracers): the checkpoint carries nq=3 and
+        # the loader must take it back without refusing or re-deriving
+        # the tracer list (codex 2026-09-24: the template test alone
+        # could not tell).
+        ("hydrostatic", False, "kessler"),
     ])
-    def test_restart_roundtrip_bitwise(self, tmp_path, model_type, hs):
+    def test_restart_roundtrip_bitwise(self, tmp_path, model_type, hs,
+                                       micro):
         """PRE-REGISTERED acceptance (non-negotiable): run A = 2 days
         straight; run B = fresh driver loading A's day-1 checkpoint,
         then the remaining day.  Final bundles must be BITWISE identical
@@ -1021,7 +1045,7 @@ class TestFV3DuoRestart:
         dir_a, dir_b = tmp_path / "a", tmp_path / "b"
         dir_a.mkdir(), dir_b.mkdir()
         mk = dict(days=2, checkpoint_days=1, model_type=model_type,
-                  held_suarez_forcing=hs)
+                  held_suarez_forcing=hs, microphysics=micro)
         cfg_a = _fv3_duo_config(output_dir=str(dir_a), **mk)
         drv_a = ModelDriver(cfg_a, output_dir=dir_a)
         drv_a.setup()

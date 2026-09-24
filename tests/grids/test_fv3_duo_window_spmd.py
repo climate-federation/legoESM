@@ -445,3 +445,61 @@ def test_tracer_multi_subcycle_matches_faces(setup):
     for nm in ("u", "v", "pt", "delp"):
         assert _bytes_equal(np.asarray(ref["state"][nm]),
                             np.asarray(flat["state"][nm])), nm
+
+
+def _duo_driver(tmp_path, **over):
+    from legoesm.driver.config import (DycoreConfig, ExperimentConfig,
+                                       GridConfig, OutputConfig)
+    from legoesm.driver.model_driver import ModelDriver
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=N, nlev=KM),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="fv3_duo",
+                            dt=300.0, fv3_duo_windows=KT,
+                            fv3_duo_window_pad=PAD),
+        days=1, radiation="none", convection="none", turbulence="none",
+        gravity_wave_drag="none", precision="fp64",
+        output=OutputConfig(diag_days=1, checkpoint_days=0,
+                            output_dir=str(tmp_path)),
+        **over)
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    return drv
+
+
+def test_kessler_hook_on_windows_matches_the_face_bridge(setup, tmp_path):
+    """The driver's Kessler hook under a WINDOW layout (scatter the owned
+    block to faces, bridge, gather back, pin sharding) equals the plain
+    six-face bridge on the same state to 1e-13 of peak, on pt and all
+    three tracers; a fourth passenger rides through unchanged and is NOT
+    duplicated (codex 2026-09-24: the face branch appended it twice)."""
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
+        apply_kessler_step_sixface_jax)
+    drv = _duo_driver(tmp_path, microphysics="kessler")
+    assert drv.model.window_layout is not None
+    win = drv._fv3_duo_fresh_ic()             # a window model's IC IS windows
+    # the DCMIP16 IC is sub-saturated (no condensation on step 1): seed
+    # cloud water so evaporation and autoconversion have work to do
+    q = list(win["q"])
+    q[1] = jnp.full_like(q[1], 2e-3)
+    win = {**win, "q": q + [q[0] * 0.5]}                         # a passenger
+    faces = drv.model.to_flat(win)
+    out = drv._fv3_duo_apply_kessler(win, 300.0)
+    assert len(out["q"]) == 4
+    flat = drv.model.to_flat(out)
+    g = drv.model.grid
+    ref_state, ref_q = apply_kessler_step_sixface_jax(
+        faces["state"], faces["press"], faces["q"], dt=300.0,
+        n=g.n, ng=g.ng, km=KM)
+    cs = slice(g.ng, g.ng + g.n)
+
+    def _close(x, y):
+        x, y = np.asarray(x)[:, cs, cs], np.asarray(y)[:, cs, cs]
+        return np.abs(x - y).max() <= 1e-13 * max(np.abs(x).max(), 1e-300)
+    assert _close(flat["state"]["pt"], ref_state["pt"])
+    for i in range(4):
+        assert _close(flat["q"][i], ref_q[i]), i
+    assert np.array_equal(np.asarray(flat["q"][3])[:, cs, cs],
+                          np.asarray(faces["q"][3])[:, cs, cs])
+    moved = np.abs(np.asarray(flat["state"]["pt"])
+                   - np.asarray(faces["state"]["pt"]))[:, cs, cs].max()
+    assert moved > 0.0, "vacuous: the hook moved nothing"

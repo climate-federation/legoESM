@@ -62,9 +62,13 @@ def duo_bundle():
     from legoesm.core.fv3_dynamics import p_var_hydrostatic
     from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
     rng = np.random.default_rng(11)
-    ptop, ps = 100.0, 1.0e5
+    ptop = 100.0
+    # surface pressure varies per FACE and per COLUMN (codex 2026-09-24:
+    # a uniform profile cannot see a pe slice shifted by one cell or a
+    # swapped horizontal axis), stretched layers so p_full != sigma * p_s
+    ps = 1.0e5 + 2.0e3 * rng.random((6, M, M))
     delp = np.empty((6, M, M, KM))
-    for k in range(KM):        # stretched layers so p_full != sigma * p_s
+    for k in range(KM):
         delp[..., k] = (ps - ptop) * (k + 1) / (KM * (KM + 1) / 2)
     press = p_var_hydrostatic(delp, ptop=ptop, akap=FV3_KAPPA, n=N, ng=NG,
                               km=KM)

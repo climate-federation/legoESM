@@ -8495,12 +8495,18 @@ class ModelDriver:
                     out6, q6 = apply_kessler_step_sixface_jax(
                         faces, pressf, qf, dt=dt, n=n, ng=ng, km=km)
                     pt = gather_windows(lay, out6["pt"], jnp)
-                    q_new = [gather_windows(lay, qi, jnp) for qi in q6]
+                    # only the three Kessler slots went through the
+                    # bridge; passengers beyond them ride unchanged
+                    q_new = [gather_windows(lay, qi, jnp) for qi in q6] \
+                        + list(q[3:])
                 else:
+                    # the bridge returns the FULL list (passengers kept)
+                    # -- codex 2026-09-24: appending q[3:] here too
+                    # duplicated every passenger each step
                     out6, q_new = apply_kessler_step_sixface_jax(
                         state, press, q, dt=dt, n=n, ng=ng, km=km)
                     pt = out6["pt"]
-                q_new = list(q_new) + list(q[3:])
+                    q_new = list(q_new)
                 if sh is not None:
                     pt = jax.lax.with_sharding_constraint(pt, sh)
                     q_new = [jax.lax.with_sharding_constraint(qi, sh)
