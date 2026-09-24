@@ -64,6 +64,16 @@ class GridConfig(NamedTuple):
     vertical_coord: str = "hybrid"   # sigma, hybrid, cam_l32 (CAM6 32-level table)
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+    # B(eta) = eta**transition_exponent on the hybrid lane.  Default 3 is
+    # UNCHANGED -- no committed run moves by this field existing.  It exists
+    # because 3 makes the coordinate carry NEGATIVE layer mass below 663.9 hPa,
+    # i.e. above ~3450 m of orography, which is 0.92% of the planet by area
+    # (Tibet, the altiplano, the Greenland and Antarctic domes) and is fatal
+    # where it bites: two such cells killed a 200-day idealized run in 200
+    # steps (#1029).  2 moves that threshold to ~498 hPa / ~5870 m, which
+    # covers all of ETOPO.  Selecting it CHANGES LEVEL PLACEMENT, so it is a
+    # new baseline, not a comparison against existing runs.
+    transition_exponent: int = 3
     # SIGMA-coordinate layer redistribution toward the tropopause, at FIXED
     # nlev (grids/vertical.tropopause_refined_sigma_half).  1.0 = the uniform
     # grid, bit-identical.  Uniform sigma gives ~33 hPa layers everywhere at
@@ -1847,6 +1857,20 @@ class ExperimentConfig(NamedTuple):
                     "grid.p_top_Pa and grid.stretching are hybrid-only fields and are inert "
                     "on the sigma lane; leave them at their defaults (200.0, 2.0) and set "
                     "grid.sigma_top instead")
+            if g.transition_exponent != 3:
+                errors.append(
+                    "grid.transition_exponent is a hybrid-only field and is inert on the "
+                    f"sigma lane; leave it at its default 3 (got {g.transition_exponent})")
+        elif (g.vertical_coord == "hybrid"
+                and g.transition_exponent not in (2, 3)):
+            # 1 is pure sigma spelled as a hybrid (use vertical_coord='sigma'
+            # instead, which is the tested lane); >3 makes the negative-mass
+            # threshold worse, not better.
+            errors.append(
+                "grid.transition_exponent must be 2 or 3 on the hybrid lane "
+                f"(got {g.transition_exponent}); 2 admits p_s down to ~498 hPa "
+                "(~5870 m of orography), 3 only to ~664 hPa (~3450 m). For a "
+                "pure sigma coordinate use vertical_coord='sigma'.")
         elif g.vertical_coord == "hybrid" and g.sigma_top != 0.01:
             errors.append(
                 "grid.sigma_top is inert on the hybrid lane, which uses p_top_Pa/"

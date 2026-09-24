@@ -1485,6 +1485,90 @@ def make_cam6_l32_levels(p_ref: float = CAM6_L32_P0) -> HybridSigmaPressureCoord
     return create_hybrid_coordinate(len(CAM6_L32_HYAI) - 1, A_half, B_half, p_ref)
 
 
+def assert_hybrid_valid_for_surface_pressure(
+    coord, p_s_min_Pa: float, *, context: str = "",
+) -> None:
+    """Refuse a hybrid coordinate that would carry NEGATIVE layer mass.
+
+    ``B(eta) = eta**transition_exponent`` makes ``dB/deta -> exponent`` at the
+    surface, so a near-surface layer has positive mass only while ``p_s`` stays
+    above a threshold the coordinate alone fixes.  Below it ``dp_from_hybrid``
+    returns negative thicknesses, and that feeds the dycore -- not a
+    diagnostic.
+
+    Why this is an error and not a warning (#1029).  The warning has existed,
+    nothing passed ``p_s_min_Pa``, and the default L40 coordinate forbids
+    surface pressures under 663.9 hPa, i.e. elevations above about 3450 m.
+    Measured against 1-degree ETOPO that is **0.92% of the planet by area** --
+    the Tibetan Plateau, the Andean altiplano, the Greenland and Antarctic
+    domes -- and the figure is the same at 30, 32 and 40 levels.  On the
+    idealized ``held_suarez_topo`` reproducer, TWO cells in that regime killed
+    a 200-day run inside 200 steps.  A condition that lethal, silently active
+    over a percent of the globe, is not something to keep warning about.
+
+    Remedies, measured on the same probe
+    (``scripts/validate/hybrid_negative_layer_mass_exposure.py``):
+
+    * ``transition_exponent=2`` admits p_s down to ~498 hPa (~5870 m) and is
+      valid over 100% of ETOPO;
+    * ``vertical_coord='sigma'`` has no such threshold at all;
+    * a coarser ``nlev`` does NOT help -- the threshold barely moves with it.
+
+    Parameters
+    ----------
+    coord : HybridSigmaPressureCoordinate
+        The coordinate to validate.  Objects without ``A_half``/``B_half``
+        (sigma, the CAM table) are not hybrid in this sense and pass.
+    p_s_min_Pa : float
+        The lowest surface pressure this run will actually produce.
+    context : str, optional
+        Prepended to the message, e.g. the grid and level count, so the error
+        names the run rather than only the coordinate.
+
+    Raises
+    ------
+    ValueError
+        If the coordinate inverts at or above ``p_s_min_Pa``.
+    """
+    import numpy as np
+
+    A_half = getattr(coord, "A_half", None)
+    B_half = getattr(coord, "B_half", None)
+    if A_half is None or B_half is None:
+        return
+    if not np.isfinite(p_s_min_Pa) or p_s_min_Pa <= 0.0:
+        raise ValueError(
+            f"p_s_min_Pa must be a positive, finite pressure in Pa; "
+            f"got {p_s_min_Pa!r}. A non-finite minimum usually means the "
+            f"surface geopotential has not been built yet."
+        )
+
+    thr = float(hybrid_min_valid_surface_pressure(
+        np.asarray(A_half), np.asarray(B_half), constants.p_ref))
+    if thr <= 0.0 or p_s_min_Pa > thr:
+        return
+
+    # Make the threshold legible: "663.9 hPa" does not obviously read as
+    # "forbids the Tibetan Plateau".
+    z_thr = float(constants.R_d * 288.0 / constants.g
+                  * np.log(constants.p_ref / thr))
+    z_run = float(constants.R_d * 288.0 / constants.g
+                  * np.log(constants.p_ref / p_s_min_Pa))
+    where = f"{context}: " if context else ""
+    raise ValueError(
+        f"{where}this hybrid coordinate carries NEGATIVE layer mass below "
+        f"p_s = {thr / 100:.1f} hPa (about {z_thr:.0f} m of orography), and "
+        f"this run reaches p_s = {p_s_min_Pa / 100:.1f} hPa (about "
+        f"{z_run:.0f} m). The near-surface layers invert there and the "
+        f"negative thicknesses go into the dycore, not just a diagnostic "
+        f"(#1029: two such cells killed a 200-day idealized run in 200 "
+        f"steps). Fix by setting grid.transition_exponent=2 (valid to "
+        f"~498 hPa / ~5870 m, i.e. all of ETOPO), or "
+        f"grid.vertical_coord='sigma' (no threshold). Raising nlev does not "
+        f"help; the threshold barely moves with it."
+    )
+
+
 def standard_hybrid_levels(
     n_levels: int = 40,
     p_ref: float = constants.p_ref,
