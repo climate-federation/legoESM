@@ -579,7 +579,10 @@ The commits after that battery change this receipt and the citation map and
 nothing else.  The two battery members that read a receipt — the citation
 gate's own test file and this round's — were re-run at the final tip together
 with round 161's, and the citation gate itself was re-run there and reported
-`PASS` with 12 citations and its plant exiting 1.
+`PASS` with 12 citations and its plant exiting 1.  That focused run reported
+exactly:
+
+> 28 passed in 4.04s
 
 The three plant runs are quoted verbatim in the Plants section above, each
 with its own exit code: `t-r3-inert` and `t-r3-tracer` exit 1 with
