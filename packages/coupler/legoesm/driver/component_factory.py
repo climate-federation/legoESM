@@ -920,6 +920,10 @@ def create_atmosphere_dycore(
             km=km,
             hydrostatic=(model_type == "hydrostatic"),
             storage_dtype=_storage_dtype,
+            # Kessler => MOIST dynamics (user 2026-09-24): a moist scheme
+            # on the adiabatic core is the misleading configuration GLM
+            # flagged, so the coupling follows the scheme, never a knob.
+            moist=(config.microphysics == "kessler"),
         )
         # AUTO-ADAPT the execution layout to the VISIBLE devices (user
         # 2026-08-28: "adjust automatically to the number of devices").

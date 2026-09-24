@@ -344,6 +344,51 @@ class TestFV3DuoDynamicsModel:
         assert float(np.abs(np.asarray(out["state"]["w"])).max()) > 0.0
 
 
+    def test_moist_arm_routes_zvir_into_ic_and_step(self, bundle):
+        """``moist=True`` = the oracle's zvir with tracer 0 as humidity:
+        (1) the IC's pt is the dry IC's pt divided by (1 + zvir*q) on
+        the compute window (test_cases.F90:6762), bitwise; (2) the
+        wrapper's step is the CORE's own moist step (zvir, sphum_index=0)
+        bitwise -- the routing is that and nothing else; (3) it differs
+        from the dry step on the same moist IC (non-vacuous)."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoConfig,
+            FV3DuoDynamicsModel,
+        )
+        from legoesm.core.fv3_dynamics import make_fv_dynamics_step_jit
+        from legoesm.grids.fv3_native_gridstruct import (
+            FV3_CP_AIR, FV3_KAPPA, FV3_RDGAS, FV3_RVGAS)
+        dry = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2))
+        wet = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2,
+                                                       moist=True))
+        assert dry.zvir == 0.0
+        assert wet.zvir == FV3_RVGAS / FV3_RDGAS - 1.0
+        ic_d, ic_w = dry.dcmip16_initial_state(), wet.dcmip16_initial_state()
+        cs = slice(NG, NG + N)
+        q = np.asarray(ic_w["q"][0])
+        exp_pt = np.asarray(ic_d["state"]["pt"])[:, cs, cs] \
+            / (1.0 + wet.zvir * q[:, cs, cs])
+        assert np.asarray(ic_w["state"]["pt"])[:, cs, cs].tobytes() \
+            == exp_pt.tobytes()
+        assert np.array_equal(q, np.asarray(ic_d["q"][0]))
+        out_w = wet.step(ic_w, BDT)
+        core = make_fv_dynamics_step_jit(
+            wet._ctx_jax, KM, k_split=1, n_split=2, ptop=wet._ptop,
+            ak=wet._ak, bk=wet._bk, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+            kord_mt=9, kord_tm=-9, kord_tr=9, hydrostatic=True,
+            w_limiter=None, out_shardings=None, batched=False,
+            zvir=wet.zvir, sphum_index=0)
+        ref = core(ic_w["state"], ic_w["press"], ic_w["q"], BDT,
+                   ic_w["omga"], ic_w["nh"])
+        for nm in ("delp", "pt", "u", "v"):
+            assert np.asarray(out_w["state"][nm]).tobytes() == \
+                np.asarray(ref["state"][nm]).tobytes(), nm
+        out_d = dry.step(ic_w, BDT)
+        d = float(np.abs(np.asarray(out_w["state"]["pt"])
+                         - np.asarray(out_d["state"]["pt"])).max())
+        assert d > 1e-6, "moist step identical to dry step on the same IC"
+
+
 # ---------------------------------------------------------------------
 # 4. Component-factory dispatch + refusals
 # ---------------------------------------------------------------------
@@ -446,6 +491,13 @@ class TestComponentFactoryDispatch:
         model = create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                          create_sigma_coordinate(KM))
         assert isinstance(model, FV3DuoDynamicsModel)
+        # Kessler selects MOIST dynamics (user 2026-09-24); the dry deck
+        # does not
+        assert model.config.moist is True and model.zvir > 0.0
+        dry = create_atmosphere_dycore(_fv3_duo_config(),
+                                       create_cubed_sphere(N),
+                                       create_sigma_coordinate(KM))
+        assert dry.config.moist is False and dry.zvir == 0.0
 
     def test_held_suarez_hydrostatic_constructs(self):
         """hydro + held_suarez_forcing passes the wall AND the specific
