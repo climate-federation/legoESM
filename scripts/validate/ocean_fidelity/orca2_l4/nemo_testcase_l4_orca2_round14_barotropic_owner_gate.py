@@ -154,6 +154,33 @@ def _oracle_arrays(oracle, face: str) -> dict[str, np.ndarray]:
     return out
 
 
+def _localize(delta, active) -> dict[str, object]:
+    """WHERE a disagreement lives: the fold row, the rim, or the interior.
+
+    A field-wide maximum says nothing about whether a difference is a
+    boundary-row artefact or a basin-wide operator error, and on a tripolar
+    grid the last row is the fold.  This reports the row histogram rather
+    than leaving the reader to assume.
+    """
+    delta = np.where(np.asarray(active, dtype=bool),
+                     np.asarray(delta, dtype=np.float64), 0.0)
+    nonzero = delta != 0.0
+    rows = nonzero.reshape(delta.shape[0], -1).sum(axis=1)
+    total = int(nonzero.sum())
+    order = np.argsort(rows)[::-1][:5]
+    flat = int(np.argmax(np.abs(delta)))
+    return {
+        "differing_cells": total,
+        "on_the_last_row_the_tripolar_fold": int(rows[-1]),
+        "on_the_first_row": int(rows[0]),
+        "rows_carrying_any_difference": int((rows > 0).sum()),
+        "total_rows": int(delta.shape[0]),
+        "five_worst_rows": [[int(r), int(rows[r])] for r in order],
+        "argmax_index": [int(i) for i in np.unravel_index(flat, delta.shape)],
+        "argmax_value": float(delta.reshape(-1)[flat]),
+    }
+
+
 def compare(candidate, oracle, active) -> dict[str, object]:
     from nemo_testcase_state_ulp_probe import ulp_distance
 
@@ -264,8 +291,17 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         "ssh_is_the_decision52_bridge": bool(not np.array_equal(
             np.asarray(state0.eta.data), entry["ssh"])),
     }
+    entry_velocity = {
+        "max_abs_entry_u_m_s": float(np.abs(entry["u"]).max()),
+        "max_abs_entry_v_m_s": float(np.abs(entry["v"]).max()),
+    }
+    entry_velocity["kt1_is_a_rest_step"] = bool(
+        entry_velocity["max_abs_entry_u_m_s"] == 0.0
+        and entry_velocity["max_abs_entry_v_m_s"] == 0.0)
     print("CONTROL entry operands other than the sea surface are already "
           f"bit-identical: {entry_identity}")
+    print("CONTROL the kt=1 entry velocity, which decides whether the "
+          f"velocity-dependent operators are reachable at all: {entry_velocity}")
     require(all(entry_identity[name] for name in ("T", "S", "u", "v")),
             "an entry operand other than the sea surface is not bit-identical; "
             "seeding it would make the substitution a two-variable arm")
@@ -375,6 +411,34 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
                 orc["depth_mean"], active2),
             "live_divisor_differs_from_the_reference_divisor": compare(
                 cand["r1_h0"], orc["r1_h0"], active2),
+            # ONE-VARIABLE ARMS on the record's own written operands: each
+            # replays NEMO's own statement with exactly ONE operand family
+            # swapped for legoESM's, so the depth-mean disagreement is split
+            # between the three-dimensional right-hand side and the metric it
+            # is weighted with.  No model run, no other operand moves.
+            "only_the_rhs_is_legoesms": compare(
+                _source_sum(orc["e3"], cand["krhs"], orc["mask"],
+                            orc["r1_h0"]),
+                orc["depth_mean"], active2),
+            "only_the_metric_is_legoesms": compare(
+                _source_sum(cand["e3"], orc["krhs"], card_masks[face],
+                            cand["r1_h0"]),
+                orc["depth_mean"], active2),
+            "both_are_legoesms_replayed_in_nemos_association": compare(
+                _source_sum(cand["e3"], cand["krhs"], card_masks[face],
+                            cand["r1_h0"]),
+                orc["depth_mean"], active2),
+            # The mask the vertical sum EFFECTIVELY applies is the support of
+            # legoESM's own face thickness, not a separately stored array.
+            "effective_weight_support_against_nemos_mask": compare(
+                (cand["e3"] > 0.0).astype(np.float64),
+                (orc["mask"] > 0.0).astype(np.float64),
+                np.ones_like(active3, dtype=bool)),
+            "where_the_first_boundary_lives": _localize(
+                cand["e3"] - orc["e3"], active3),
+            "where_the_mask_disagrees": _localize(
+                card_masks[face] - orc["mask"],
+                np.ones_like(active3, dtype=bool)),
         }
     print("CONTROL the record's own operands replay its own depth mean: "
           + json.dumps({
@@ -467,6 +531,39 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         for stage in (1, 2, 3)
     }
 
+    # THE CAUSAL MEASURE, and the first draft of this gate got it wrong.
+    # Comparing the two arms' MAXIMA against the oracle is a difference of
+    # maxima, which can stay flat while the field moves elsewhere.  What the
+    # substitution actually does is the maximum of the DIFFERENCE between the
+    # two arms' own sea surfaces.
+    def _end_of_step(trace):
+        return np.asarray(ladder._stage_candidate_fields(
+            trace.stage_outputs[2])["ssh"], dtype=np.float64)[
+                :, :RANK0_COLUMNS]
+
+    base_ssh = _end_of_step(baseline)
+    sub_ssh = _end_of_step(substituted)
+    noop_ssh = _end_of_step(noop)
+    arm_delta = np.abs(sub_ssh - base_ssh)
+    arm_to_arm = {
+        "max_abs_move_m": float(arm_delta.max()),
+        "cells_moved": int(np.count_nonzero(arm_delta)),
+        "scored_cells": int(arm_delta.size),
+        "argmax_index": [int(i) for i in
+                         np.unravel_index(int(np.argmax(arm_delta)),
+                                          arm_delta.shape)],
+        "per_column_max_abs_m": [float(v) for v in arm_delta.max(axis=0)],
+        "the_noop_control_moves_nothing": bool(
+            np.array_equal(noop_ssh, base_ssh)),
+        "move_over_the_baseline_disagreement": float(
+            arm_delta.max() / baseline_rows[3]["max_abs_m"]),
+    }
+    print("MEASURE substituting NEMO's own slow forcing over rank 0 moves the "
+          f"end-of-step sea surface by at most {arm_to_arm['max_abs_move_m']:.6e} m "
+          f"on {arm_to_arm['cells_moved']} of {arm_to_arm['scored_cells']} cells; "
+          "the baseline disagreement is "
+          f"{baseline_rows[3]['max_abs_m']:.6e} m")
+
     # The gravity-wave margin, measured on the card's own metric rather than
     # assumed: how far the external mode travels in one baroclinic step, and
     # how many rank-0 columns that is at the baseline row that owns the
@@ -517,10 +614,11 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
             / contamination["baseline_interior_max_abs_m"]),
     }
 
-    verdict = ("THE_FORCING_IS_A_MAJORITY_OWNER"
-               if interior_summary["closed_fraction"] >= 0.5 else
-               ("THE_FORCING_IS_A_CONTRIBUTOR"
-                if interior_summary["closed_fraction"] >= 0.1 else
+    # The verdict is read from how far the substitution MOVES the sea
+    # surface, relative to the disagreement it would have to close.
+    share = arm_to_arm["move_over_the_baseline_disagreement"]
+    verdict = ("THE_FORCING_IS_A_MAJORITY_OWNER" if share >= 0.5 else
+               ("THE_FORCING_IS_A_CONTRIBUTOR" if share >= 0.1 else
                 "THE_FORCING_IS_NOT_THE_OWNER"))
 
     result = {
@@ -543,6 +641,8 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
             "injection_landed": landed,
         },
         "substituted_sea_surface_by_stage": substituted_rows,
+        "arm_to_arm_sea_surface_movement": arm_to_arm,
+        "entry_velocity": entry_velocity,
         "whole_rank0_half": whole,
         "contamination_margin": contamination,
         "interior_only": interior_summary,
