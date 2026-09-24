@@ -548,8 +548,11 @@ def apply_kessler_step_sixface_jax(state, press, q, *, dt, n, ng, km,
     in and gathers it out exactly as the Held-Suarez twin does.
 
     Bridge (each read off the code, not assumed):
-      * ``state["pt"]`` is TEMPERATURE [K] between steps (post-remap
-        ``T_v``; the duo wrapper runs ``zvir = 0`` so it is ``T``).
+      * ``state["pt"]`` is TEMPERATURE [K] between steps on BOTH the
+        dry and the moist deck: the remap's closing step divides
+        ``pt*pkz`` by ``(1 + r_vir*q_sphum)`` (fv_mapz.F90:975,
+        ``close_out_pt``), so a moist run hands physics ``T``, not
+        ``T_v``.
       * ``p_half`` = ``press["pe"]`` (6, n, n, km+1), sliced and
         transposed as the HS twin does; ``p_full`` = ``delp / d(peln)``,
         FV3's own layer-mean pressure for physics.

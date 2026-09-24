@@ -857,6 +857,7 @@ def _write_duo_ckpt(path, drv, **over):
         "_hydrostatic": np.bool_(drv.model.config.hydrostatic),
         "_km": np.int64(drv.model.config.km),
         "_resolution": np.int64(drv.model.grid.n),
+        "_zvir": np.float64(drv.model.zvir),
         "_git_sha": "test",
     }
     meta.update(over)
@@ -895,6 +896,9 @@ class TestFV3DuoRestart:
         ("_resolution", 24, "resolution mismatch"),
         ("_hydrostatic", False, "hydrostatic mismatch"),
         ("_dt", 7.0, "dt mismatch"),
+        # a MOIST checkpoint on the dry driver (codex 2026-09-24: the
+        # tracer count alone cannot tell the two thermodynamic modes)
+        ("_zvir", 0.6078, "thermodynamic-mode mismatch"),
     ])
     def test_deck_mismatch_refused(self, restart_driver, field, value,
                                    frag):

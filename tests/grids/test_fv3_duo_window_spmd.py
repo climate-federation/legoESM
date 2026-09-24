@@ -503,3 +503,52 @@ def test_kessler_hook_on_windows_matches_the_face_bridge(setup, tmp_path):
     moved = np.abs(np.asarray(flat["state"]["pt"])
                    - np.asarray(faces["state"]["pt"]))[:, cs, cs].max()
     assert moved > 0.0, "vacuous: the hook moved nothing"
+
+
+def test_moist_dynamics_on_windows_matches_faces(setup):
+    """MOIST dynamics (zvir routed, tracer 0 = humidity) on the window
+    layout equals the face-sharded, face-batched reference bitwise over
+    two steps on every dynamics leaf and every tracer -- humidity
+    feedback must survive the window tracer packing (codex 2026-09-24:
+    the Kessler hook test alone could not tell).  Every window output
+    stays window-sharded (no leaf decays to replicated), and the moist
+    step is NOT the dry step (non-vacuous)."""
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel)
+    from legoesm.grids.factory import create_fv3_duo_grid
+    grid = create_fv3_duo_grid(N)
+    cfg = FV3DuoConfig(km=KM, hydrostatic=True, n_split=8, moist=True)
+    sh6 = NamedSharding(Mesh(np.array(jax.devices()[:6]), ("face",)),
+                        P("face"))
+    ref_model = FV3DuoDynamicsModel(grid, cfg, step_out_shardings=sh6,
+                                    step_face_batched=True)
+    ref = ref_model.dcmip16_initial_state(do_pert=True, n_tracers=2)
+    ref = jax.tree_util.tree_map(
+        lambda a: jax.device_put(a, sh6) if hasattr(a, "ndim")
+        and a.ndim >= 3 and a.shape[0] == 6 else a, ref)
+    mesh = Mesh(np.array(jax.devices()[:6 * KT * KT]).reshape(6, KT, KT),
+                ("face", "tile_i", "tile_j"))
+    win_model = FV3DuoDynamicsModel(grid, cfg, step_spmd_mesh=mesh,
+                                    step_windows=(KT, 5))
+    win = win_model.dcmip16_initial_state(do_pert=True, n_tracers=2)
+    dry_model = FV3DuoDynamicsModel(grid, cfg._replace(moist=False),
+                                    step_out_shardings=sh6,
+                                    step_face_batched=True)
+    dry = ref
+    for _ in range(2):
+        ref = ref_model.step(ref, 300.0)
+        win = win_model.step(win, 300.0)
+        dry = dry_model.step(dry, 300.0)
+    for path, v in jax.tree_util.tree_leaves_with_path(win):
+        if getattr(v, "sharding", None) is not None and v.ndim >= 3:
+            assert not v.sharding.is_fully_replicated, path
+    flat = win_model.to_flat(win)
+    for nm in ("u", "v", "pt", "delp"):
+        assert _bytes_equal(np.asarray(ref["state"][nm]),
+                            np.asarray(flat["state"][nm])), nm
+    for i in range(2):
+        assert _bytes_equal(np.asarray(ref["q"][i]), np.asarray(flat["q"][i])), i
+    d = float(np.abs(np.asarray(ref["state"]["pt"])
+                     - np.asarray(dry["state"]["pt"])).max())
+    assert d > 1e-6, "moist step identical to the dry step"

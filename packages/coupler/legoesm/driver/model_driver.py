@@ -8773,6 +8773,11 @@ class ModelDriver:
                 _day=np.float64(day),
                 _dt=np.float64(self.config.dycore.dt),
                 _hydrostatic=np.bool_(mcfg.hydrostatic),
+                # the thermodynamic mode is CONTRACT too (codex
+                # 2026-09-24): a dry checkpoint resumed moist would gain
+                # humidity feedback silently, and the tracer count alone
+                # cannot tell the two apart
+                _zvir=np.float64(self.model.zvir),
                 _km=np.int64(mcfg.km),
                 _resolution=np.int64(self.model.grid.n),
                 # nq is CONTRACT, not decoration: the loader checks the
@@ -8882,6 +8887,17 @@ class ModelDriver:
                         f"{nm}={want!r}; restarting would reinterpret "
                         f"the bundle on the wrong deck. Match the config "
                         f"to the checkpoint.")
+            # _zvir: absent on checkpoints written before the moist arm
+            # existed -- those were dry by construction (zvir = 0.0)
+            zvir_ck = float(d["_zvir"]) if "_zvir" in files else 0.0
+            if zvir_ck != float(self.model.zvir):
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name} thermodynamic-mode "
+                    f"mismatch: checkpoint zvir={zvir_ck!r} vs constructed "
+                    f"model zvir={self.model.zvir!r} (moist="
+                    f"{mcfg.moist}); resuming would switch humidity "
+                    f"feedback on or off mid-run. Match the config to "
+                    f"the checkpoint.")
             dt_ck, dt_now = float(d["_dt"]), float(self.config.dycore.dt)
             if dt_ck != dt_now:
                 raise ValueError(
