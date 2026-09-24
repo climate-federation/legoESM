@@ -224,15 +224,16 @@ def pin_gloo_interface() -> str | None:
     impl = str(jax.config.jax_cpu_collectives_implementation)
     if impl != "gloo":
         return _decline(client, pid, impl)
-    iface = resolve_gloo_interface()
-    if iface is None:
-        return _decline(client, pid, "default")
-    lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lst = None
     try:
         # Everything that can fail BEFORE this rank has voted: tell the
         # peers why, pass both barriers, then raise — otherwise they wait
         # out the barrier and see only a mismatch.
         try:
+            iface = resolve_gloo_interface()
+            if iface is None:
+                return _decline(client, pid, "default")
+            lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             if xb._backends:
                 raise RuntimeError(
                     "pin_gloo_interface() called after a backend was created; "
@@ -254,7 +255,8 @@ def pin_gloo_interface() -> str | None:
         rows = _agree_and_probe(client, pid, global_state.num_processes,
                                 iface, addr, port, lst)
     finally:
-        lst.close()
+        if lst is not None:
+            lst.close()
     if pid == 0:
         names = sorted({r[0] for r in rows.values()})
         print(f"[gloo] collectives pinned to {iface} ({addr}); "

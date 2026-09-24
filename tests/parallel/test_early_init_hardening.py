@@ -837,6 +837,27 @@ def test_inherited_env_stamp_does_not_stand_in_for_an_installation(distributed, 
     assert client.kv["legoesm/gloo_iface/1"].startswith("error ")
     assert client.barriers == ["legoesm_gloo_iface_publish",
                                "legoesm_gloo_iface_probed"]
+    # a listener that cannot bind (address not on this host) and an
+    # interface resolver that raises are pre-vote failures too
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    monkeypatch.setattr(xb, "_backends", {})
+    real_ipv4 = ei.interface_ipv4
+    monkeypatch.setattr(ei, "interface_ipv4", lambda n: "203.0.113.7")
+    with pytest.raises(OSError):
+        ei.pin_gloo_interface()
+    assert client.kv["legoesm/gloo_iface/1"].startswith("error ")
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    monkeypatch.setattr(ei, "interface_ipv4", real_ipv4)
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "lo" + "x" * 14)
+    with pytest.raises(ValueError, match="exceeds 15 bytes"):
+        ei.pin_gloo_interface()
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "lo")
     # a stale coordinator key that does not parse is caught after the vote
     # and the rank still reaches the second barrier
     client = _FakeClient({"legoesm/gloo_iface/x": "junk"})
