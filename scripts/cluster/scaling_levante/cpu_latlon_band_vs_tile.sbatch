@@ -102,7 +102,17 @@ NLEV=26
 # holds this job to. The fused lane ignores --warmup: it times blocks after a
 # separate compile and probe call.
 STEPS=60
+BLOCKS=2
 WARMUP=3
+# The discriminator arms are compared only against EACH OTHER, so they are not
+# held to the reference protocol and split the same total work into 8 short
+# blocks instead of 2 long ones. Two run-level numbers per arm is a terrible
+# uncertainty estimate -- the range of two samples is itself mostly noise, and
+# a step time that is a max over 512 ranks has a straggler tail that two
+# samples either miss entirely (falsely tight) or catch once (falsely wide).
+# Eight blocks x two repeats gives sixteen samples per arm to bootstrap from.
+DISC_STEPS=15
+DISC_BLOCKS=8
 # Per arm: one precompile scan plus two timed scans of 60 steps, plus first-
 # call compilation. 19 arms at this cap is 6.3 h inside an 8 h wall.
 ARM_TIMEOUT=1200
@@ -134,15 +144,17 @@ echo "reference  band ${BAND_REF_128} ms at 128, ${BAND_REF_512} ms at 512, tole
 
 want=0; ok=0
 
-# run_arm TAG ND P_LON PACKED NOCOMM BALLAST SEGSTEPS REP
+# run_arm TAG ND P_LON PACKED NOCOMM BALLAST SEGSTEPS REP [STEPS] [BLOCKS]
 run_arm() {
     local tag=$1 nd=$2 plon=$3 packed=$4 nocomm=$5 ballast=$6 seg=$7 rep=$8
+    local steps=${9:-$STEPS} blocks=${10:-$BLOCKS}
     local nn=$(( nd / 4 ))
     local -a extra=()
     [ "$seg" != 0 ] && extra=(--segment-steps "$seg")
     want=$(( want + 1 ))
     echo "=== ${tag} rep${rep} nd=${nd} p_lon=${plon} packed=${packed}" \
-         "nocomm=${nocomm} ballast=${ballast} seg=${seg} $(date +%T)"
+         "nocomm=${nocomm} ballast=${ballast} seg=${seg}" \
+         "steps=${steps} blocks=${blocks} $(date +%T)"
     if timeout --kill-after=30 "$ARM_TIMEOUT" srun --export=ALL \
             --nodes="$nn" --ntasks="$nd" --ntasks-per-node=4 \
             --cpus-per-task=64 --cpu-bind=cores --kill-on-bad-exit=1 \
@@ -153,8 +165,8 @@ run_arm() {
             "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
             --multicontroller --n-devices "$nd" --mode strong \
             --n-lat "$N_LAT" --n-lon "$N_LON" --nlev "$NLEV" \
-            --p-lon "$plon" --steps "$STEPS" --warmup "$WARMUP" \
-            "${extra[@]}" \
+            --p-lon "$plon" --steps "$steps" --blocks "$blocks" \
+            --warmup "$WARMUP" "${extra[@]}" \
             --out "$OUTDIR/${tag}_r${rep}.jsonl"; then
         ok=$(( ok + 1 ))
     else
@@ -167,20 +179,20 @@ run_arm() {
 # repeats so a warm-up or a thermal drift cannot land on the same arm twice.
 for rep in 1 2; do
     if [ "$rep" = 1 ]; then
-        run_arm skip_b1  512 1            0 1    1 0 "$rep"
-        run_arm wire_b1  512 1            0 wire 1 0 "$rep"
-        run_arm skip_b4  512 1            0 1    4 0 "$rep"
-        run_arm wire_b4  512 1            0 wire 4 0 "$rep"
+        run_arm skip_b1  512 1            0 1    1 0 "$rep" "$DISC_STEPS" "$DISC_BLOCKS"
+        run_arm wire_b1  512 1            0 wire 1 0 "$rep" "$DISC_STEPS" "$DISC_BLOCKS"
+        run_arm skip_b4  512 1            0 1    4 0 "$rep" "$DISC_STEPS" "$DISC_BLOCKS"
+        run_arm wire_b4  512 1            0 wire 4 0 "$rep" "$DISC_STEPS" "$DISC_BLOCKS"
         run_arm band_512 512 1            1 0    1 0 "$rep"
         run_arm unpk_512 512 1            0 0    1 0 "$rep"
         run_arm tile_512 512 "$P_LON_512" 0 0    1 0 "$rep"
         run_arm band_128 128 1            1 0    1 0 "$rep"
         run_arm tile_128 128 "$P_LON_128" 0 0    1 0 "$rep"
     else
-        run_arm wire_b4  512 1            0 wire 4 0 "$rep"
-        run_arm skip_b4  512 1            0 1    4 0 "$rep"
-        run_arm wire_b1  512 1            0 wire 1 0 "$rep"
-        run_arm skip_b1  512 1            0 1    1 0 "$rep"
+        run_arm wire_b4  512 1            0 wire 4 0 "$rep" "$DISC_STEPS" "$DISC_BLOCKS"
+        run_arm skip_b4  512 1            0 1    4 0 "$rep" "$DISC_STEPS" "$DISC_BLOCKS"
+        run_arm wire_b1  512 1            0 wire 1 0 "$rep" "$DISC_STEPS" "$DISC_BLOCKS"
+        run_arm skip_b1  512 1            0 1    1 0 "$rep" "$DISC_STEPS" "$DISC_BLOCKS"
         run_arm tile_512 512 "$P_LON_512" 0 0    1 0 "$rep"
         run_arm unpk_512 512 1            0 0    1 0 "$rep"
         run_arm band_512 512 1            1 0    1 0 "$rep"
@@ -198,7 +210,7 @@ echo "=== arms: $ok of $want completed ==="
 
 $PY - "$OUTDIR" "$BAND_REF_128" "$BAND_REF_512" "$WALL_TOL" \
      "$P_LON_128" "$P_LON_512" <<'PYEOF'
-import glob, json, math, os, sys
+import glob, json, math, os, random, statistics, sys
 
 out_dir = sys.argv[1]
 ref128, ref512, tol = float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
@@ -210,18 +222,24 @@ WRONG_BY_DESIGN = {"skip_b1", "skip_b4", "wire_b1", "wire_b4"}
 
 
 def arm(tag, expect_reps):
-    """Mean of each repeat's last ACCEPTED steady median, or a refusal reason.
+    """Pooled per-BLOCK step times across the repeats, or a refusal reason.
+
+    The fused lane times whole blocks, so a run yields one sample per block
+    rather than one per step. Pooling every block of every repeat is what
+    makes an uncertainty statement possible at all: the range of two run-level
+    numbers is itself mostly noise, and a step time that is a max over 512
+    ranks has a straggler tail that two samples either miss (falsely tight) or
+    catch once (falsely wide).
 
     A receipt counts only if it is not marked invalid, not marked non-finite,
-    and its median is finite and strictly positive -- and only if every
+    and its block times are finite and strictly positive -- and only if every
     expected repeat produced one. A run that crashed after writing a line, a
     non-finite state, and a half-finished arm each have to REFUSE rather than
-    contribute: the failure worth paying to avoid here is a wrong number, not
-    a missing one.
+    contribute: the failure worth paying to avoid here is a wrong number.
     """
-    vals, rejected = [], []
+    samples, seen, rejected = [], 0, []
     for f in sorted(glob.glob(os.path.join(out_dir, f"{tag}_r*.jsonl"))):
-        last = None
+        got_one = False
         for line in open(f):
             line = line.strip()
             if not line:
@@ -230,8 +248,7 @@ def arm(tag, expect_reps):
                 d = json.loads(line)
             except Exception:
                 continue
-            v = d.get("steady_median_ms")
-            if v is None:
+            if d.get("steady_median_ms") is None:
                 continue
             base = os.path.basename(f)
             if d.get("valid") is False:
@@ -240,18 +257,50 @@ def arm(tag, expect_reps):
             if d.get("finite_ok") is False:
                 rejected.append(f"{base}: finite_ok=false")
                 continue
-            v = float(v)
-            if not math.isfinite(v) or v <= 0.0:
-                rejected.append(f"{base}: median {v!r}")
+            steps = d.get("steps") or 0
+            blocks = d.get("block_ms") or []
+            if steps and blocks:
+                per_step = [b / steps for b in blocks]
+            else:
+                per_step = [float(d["steady_median_ms"])]
+            per_step = [float(v) for v in per_step]
+            if not all(math.isfinite(v) and v > 0.0 for v in per_step):
+                rejected.append(f"{base}: a block time is {per_step!r}")
                 continue
-            last = v
-        if last is not None:
-            vals.append(last)
+            samples.extend(per_step)
+            got_one = True
+        if got_one:
+            seen += 1
     if rejected:
         return None, "; ".join(rejected)
-    if len(vals) != expect_reps:
-        return None, f"{len(vals)} of {expect_reps} repeats produced a receipt"
-    return (sum(vals) / len(vals), len(vals), max(vals) - min(vals)), None
+    if seen != expect_reps:
+        return None, f"{seen} of {expect_reps} repeats produced a receipt"
+    if len(samples) < 2:
+        return None, f"only {len(samples)} block sample(s)"
+    return samples, None
+
+
+def med(samples):
+    return statistics.median(samples)
+
+
+def boot(samples, n=2000, lo_q=0.05, hi_q=0.95):
+    """Percentile bootstrap interval of the median."""
+    rng = random.Random(20260924)
+    k = len(samples)
+    meds = sorted(statistics.median(rng.choices(samples, k=k))
+                  for _ in range(n))
+    return (meds[int(lo_q * n)], meds[min(n - 1, int(hi_q * n))])
+
+
+def boot_diff(a, b, n=2000, lo_q=0.05, hi_q=0.95):
+    """Percentile bootstrap interval of median(a) - median(b)."""
+    rng = random.Random(20260925)
+    ka, kb = len(a), len(b)
+    ds = sorted(statistics.median(rng.choices(a, k=ka))
+                - statistics.median(rng.choices(b, k=kb))
+                for _ in range(n))
+    return (ds[int(lo_q * n)], ds[min(n - 1, int(hi_q * n))])
 
 
 SPEC = [("skip_b1", 2), ("wire_b1", 2), ("skip_b4", 2), ("wire_b4", 2),
@@ -265,9 +314,12 @@ print("\n== arms ==")
 for tag, _ in SPEC:
     v = got[tag]
     mark = "  [WRONG BY DESIGN -- not physics]" if tag in WRONG_BY_DESIGN else ""
-    print(f"  {tag:<9} " + (f"REFUSED ({why[tag]})" if v is None
-                            else f"{v[0]:8.1f} ms  (n={v[1]}, "
-                                 f"spread {v[2]:.1f})") + mark)
+    if v is None:
+        print(f"  {tag:<9} REFUSED ({why[tag]})" + mark)
+    else:
+        lo, hi = boot(v)
+        print(f"  {tag:<9} {med(v):8.1f} ms  "
+              f"(90% CI {lo:.1f}-{hi:.1f} from {len(v)} block samples)" + mark)
 
 fail = []
 
@@ -280,7 +332,7 @@ if cert is None:
           f"trajectory.")
     fail.append("no finiteness certificate")
 else:
-    print(f"\nfiniteness certificate: the production band ran {cert[0]:.1f} "
+    print(f"\nfiniteness certificate: the production band ran {med(cert):.1f} "
           f"ms/step on the lane that refuses to serialize a diverging run as "
           f"valid, so the fused-lane timings are not describing a blown-up "
           f"state.")
@@ -291,8 +343,8 @@ for tag, ref in (("band_128", ref128), ("band_512", ref512)):
     if v is None:
         fail.append(f"{tag} refused ({why[tag]})")
         continue
-    off = abs(v[0] - ref) / ref
-    print(f"known answer {tag}: {v[0]:.0f} ms against {ref:.0f} ms recorded at "
+    off = abs(med(v) - ref) / ref
+    print(f"known answer {tag}: {med(v):.0f} ms against {ref:.0f} ms recorded at "
           f"the same step protocol, {off * 100:.0f}% off -- "
           f"{'ok' if off <= tol else 'OUT OF TOLERANCE'}")
     if off > tol:
@@ -314,41 +366,63 @@ if None in (s1, w1, s4, w4):
     print(f"\n== the payload question is UNANSWERED: {', '.join(missing)} "
           f"refused. Nothing below may be read as a mechanism. ==")
 else:
-    c1, c4 = w1[0] - s1[0], w4[0] - s4[0]
-    # Worst-case propagation of the repeat spreads through both differences.
-    e1 = w1[2] + s1[2]
-    e4 = w4[2] + s4[2]
     print("\n== does payload bind? collective cost at 1x and 4x halo bytes, "
           "unpacked band, 512 ranks ==")
-    print(f"  wire - skip at 1x bytes: {c1:8.1f} ms  (+/- {e1:.1f})")
-    print(f"  wire - skip at 4x bytes: {c4:8.1f} ms  (+/- {e4:.1f})")
+
+    # LIVENESS CHECK, and it comes first because failing it would manufacture
+    # the payload verdict. The skip arm is supposed to still pay for building
+    # the N-times-larger buffer; that only holds if the barrier carries a DATA
+    # dependence on it. If the compiler instead eliminated the buffer build in
+    # the skip arm alone, then skip(4) - skip(1) is zero and that missing
+    # build cost lands in wire(4) - wire(1) instead -- which is exactly the
+    # signature of a payload-bound collective, whatever the wire is doing.
+    d_skip = med(s4) - med(s1)
+    dlo, dhi = boot_diff(s4, s1)
+    print(f"  liveness: skip(4) - skip(1) = {d_skip:7.1f} ms "
+          f"(90% CI {dlo:.1f} to {dhi:.1f}). The skip arm still builds the "
+          f"4x buffer, so this should be clearly positive.")
+    liveness_ok = dlo > 0.0
+    if not liveness_ok:
+        print("  LIVENESS FAILED: the no-wire arm did not get more expensive "
+              "when its buffer quadrupled, so the compiler probably deleted "
+              "the buffer build there. The build cost then appears only in "
+              "the wire arm and imitates a payload-bound collective exactly. "
+              "No mechanism verdict is read from this job.")
+
+    c1, c4 = med(w1) - med(s1), med(w4) - med(s4)
+    c1lo, c1hi = boot_diff(w1, s1)
+    c4lo, c4hi = boot_diff(w4, s4)
+    print(f"  wire - skip at 1x bytes: {c1:8.1f} ms  "
+          f"(90% CI {c1lo:.1f} to {c1hi:.1f})")
+    print(f"  wire - skip at 4x bytes: {c4:8.1f} ms  "
+          f"(90% CI {c4lo:.1f} to {c4hi:.1f})")
     print("  The device-side packing the multiplier itself adds is present in "
           "BOTH terms of each subtraction and cancels; that is why the two "
           "knobs are composed rather than used alone.")
-    if c1 <= 0 or c1 <= e1:
+
+    if not liveness_ok:
+        pass
+    elif c1 <= 0 or c1lo <= 0:
         print("  INCONCLUSIVE: the collective's own cost at 1x is not "
-              "resolved above the repeat spread, so a ratio against it means "
+              "resolved above zero, so a fraction computed against it means "
               "nothing.")
     else:
         # c(N) = L + N*B solved on the two measurements. The reported quantity
         # is the PAYLOAD FRACTION at production bytes, not the ratio
-        # c(4)/c(1): under this model a collective that is half latency and
-        # half bytes gives a ratio of exactly 2.5, so a ratio cut at 2.5 would
-        # call everything less payload-bound than one-half "per-operation".
+        # c(4)/c(1): the two are related by ratio = 1 + 3*fraction, so a ratio
+        # cut at 2.5 is a fraction cut at exactly one half and would call
+        # everything less payload-bound than that "per-operation".
         def split(a1, a4):
-            b = (a4 - a1) / 3.0
-            return b / a1 if a1 > 0 else float("nan")
+            return ((a4 - a1) / 3.0) / a1 if a1 > 0 else float("nan")
 
         frac = split(c1, c4)
-        # Worst case in each direction, moving both measurements against the
-        # quantity being estimated.
-        lo = split(c1 + e1, c4 - e4)
-        hi = split(max(1e-9, c1 - e1), c4 + e4)
-        lo, hi = min(lo, hi), max(lo, hi)
+        cands = [split(a, b) for a in (c1lo, c1, c1hi)
+                 for b in (c4lo, c4, c4hi) if a > 0]
+        lo, hi = (min(cands), max(cands)) if cands else (float("nan"),) * 2
         print(f"  fitted latency {(4 * c1 - c4) / 3.0:8.1f} ms, "
               f"per-copy bytes term {(c4 - c1) / 3.0:8.1f} ms")
         print(f"  payload fraction of the collective at production bytes: "
-              f"{frac:.2f}, worst-case bounds [{lo:.2f}, {hi:.2f}]")
+              f"{frac:.2f}, bounds [{lo:.2f}, {hi:.2f}]")
         if lo >= 0.5:
             payload_live = True
             print("  PAYLOAD DOMINATES: at least half the collective's cost "
@@ -365,15 +439,27 @@ else:
                   "collective. Cutting them helps by less than the boundary "
                   "ratio suggests.")
         else:
-            print("  INCONCLUSIVE: the bounds straddle a registered cut. More "
-                  "repeats, or a larger payload multiple, would be needed to "
-                  "separate the two mechanisms.")
+            print("  INCONCLUSIVE: the bounds straddle a registered cut. A "
+                  "larger payload multiple, or more blocks per arm, would be "
+                  "needed to separate the two mechanisms.")
         if not (0.0 <= frac <= 1.5):
             print(f"  WARNING: a payload fraction of {frac:.2f} is outside "
                   f"what the model c = L + N*B can produce. gloo may switch "
                   f"algorithm between the two message sizes, in which case "
                   f"the two points do not lie on one line and neither term "
                   f"is trustworthy.")
+
+        # The fraction is a share of the COLLECTIVE, not of the step, and it
+        # is not by itself a prediction. Both candidate fixes trade bytes for
+        # message count, so the decision needs the two slopes applied to each
+        # fix's change in bytes and in message count.
+        if got["band_512"]:
+            print(f"  For scale: the whole production step at 512 ranks is "
+                  f"{med(got['band_512']):.0f} ms, so this collective's own "
+                  f"cost at production bytes is "
+                  f"{100 * c1 / med(got['band_512']):.0f}% of it. A 2-D mesh "
+                  f"cuts bytes AND multiplies message count, so neither "
+                  f"number predicts the fix on its own.")
 
 # ---- band vs tile, controlled on packing
 print(f"\n== band vs tile (tiles {4096 // (128 // pl128)} x {8192 // pl128} at "
@@ -387,18 +473,23 @@ for nd, bt, ut, tt in ((128, "band_128", None, "tile_128"),
     b, t = got[bt], got[tt]
     u = got[ut] if ut else None
     if b and t:
-        line = f"  {nd:>4} ranks: band(packed) {b[0]:7.1f}   tile {t[0]:7.1f}"
+        line = (f"  {nd:>4} ranks: band(packed) {med(b):7.1f}   "
+                f"tile {med(t):7.1f}")
         if u:
-            line += (f"   band(unpacked) {u[0]:7.1f}   "
-                     f"unpacked/tile {u[0] / t[0]:.2f}x   "
-                     f"packing is worth {100 * (u[0] - b[0]) / u[0]:.0f}%")
+            line += (f"   band(unpacked) {med(u):7.1f}   "
+                     f"unpacked/tile {med(u) / med(t):.2f}x   "
+                     f"packing is worth "
+                     f"{100 * (med(u) - med(b)) / med(u):.0f}%")
         else:
             line += "   (no unpacked control at this rank count)"
         print(line)
 
 # ---- verdict
 if got["unpk_512"] and got["tile_512"]:
-    s = got["unpk_512"][0] / got["tile_512"][0]
+    s = med(got["unpk_512"]) / med(got["tile_512"])
+    rlo, rhi = boot_diff(got["unpk_512"], got["tile_512"])
+    print(f"\n  unpacked band minus tile: {med(got['unpk_512']) - med(got['tile_512']):.1f} ms "
+          f"(90% CI {rlo:.1f} to {rhi:.1f})")
     print("\n== verdict, pre-registered, judged at 512 ranks on the "
           "packing-matched pair ==")
     if s >= 1.25:
