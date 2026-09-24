@@ -30,11 +30,15 @@ the NEW grid and the mass term by the OLD tracer closes exactly; so does the
 mirror choice, OLD grid for the terms and NEW tracer for the mass term.  They
 differ in who is charged the cross term ``dq_process * dG``: here each process
 carries its own.  That is bookkeeping, not physics, and the difference is
-second order per step -- but it is a CONVENTION.  Measured over the same
-40-step synthetic window the test uses, with a surface pressure wandering by
-about 60 Pa a step, the two conventions differ by 8.8e-4 of the process total.
-That is far below the differences this instrument is built to resolve, and far
-above round-off, so it is a floor on what a small inter-arm difference means.
+second order per step -- but it is a CONVENTION.  On ONE synthetic window of
+40 steps, with a surface pressure wandering by 60 Pa a step and a tendency
+uncorrelated with it, the two conventions differed by 8.8e-4 of the process
+total.  That is NOT the test's window (the test moves the surface pressure
+several times harder) and it is NOT a production number: the difference is a
+sum of dq*dG, so it depends on how the tendency correlates with the pressure
+change, which in a real run it certainly does.  Treat 8.8e-4 as an existence
+proof that the two conventions differ measurably, and measure it on the run
+before reading anything into a small difference between two arms.
 
 RANK-LOCAL UNDER MPI.  Both reductions are plain sums over the arrays handed
 in.  On a sharded run they therefore give this rank's share, and a rank-local
@@ -42,7 +46,9 @@ budget closes just as well as a global one -- the closure cannot detect the
 omission.  A distributed caller must reduce the closed window across ranks
 (``reduce_ledger_global`` in ``process_ledger`` does this for the ledger) and
 must do so for the inventory endpoints as well as the terms, or the window is
-one rank's weather.
+one rank's weather.  Nothing in this package does that reduction for you --
+``reduce_ledger_global`` averages the columns it is handed and performs no
+collective -- so the caller owns it.
 
 WHAT THE CLOSURE DOES NOT PROVE.  The identity holds for ANY G used
 consistently, so a wrong band weight, a wrong ``g`` or a wrong area
@@ -61,6 +67,8 @@ OFF BY DEFAULT.  Nothing constructs this unless a run asks for it.
 """
 
 from __future__ import annotations
+
+import math
 
 from typing import Mapping
 
@@ -103,10 +111,20 @@ class CloudWaterBandBudget:
         self.term_names = tuple(term_names)
         self.reset()
 
-    def _inventory(self, q, dp, p_half, w=None):
+    @staticmethod
+    def _dp(p_half):
+        """Layer thickness DERIVED from the interfaces, never taken as an
+        argument.  Accepting a caller's dp alongside p_half admitted a whole
+        failure class: a dp inconsistent with the interfaces scales the
+        inventory and the process terms by the SAME wrong factor, so the
+        residual stays exactly zero and the acceptance check passes on a budget
+        that is uniformly wrong (codex reproduced this with dp = 2*diff)."""
+        return p_half[..., 1:] - p_half[..., :-1]
+
+    def _inventory(self, q, p_half, w=None):
         if w is None:
             w = pressure_band_weight(p_half, self.p_lo, self.p_hi)
-        return jnp.sum(self.area_w[:, None] * q * dp * w) / self.g
+        return jnp.sum(self.area_w[:, None] * q * self._dp(p_half) * w) / self.g
 
     def reset(self) -> None:
         self.terms = {k: jnp.asarray(0.0) for k in self.term_names}
@@ -115,14 +133,14 @@ class CloudWaterBandBudget:
         self._I0 = None
         self._open = False
 
-    def begin_window(self, q_c, dp, p_half) -> None:
+    def begin_window(self, q_c, p_half) -> None:
         """Record the inventory the window's terms must account for."""
         self.reset()
-        self._I0 = self._inventory(q_c, dp, p_half)
+        self._I0 = self._inventory(q_c, p_half)
         self._open = True
 
-    def accumulate(self, terms: Mapping[str, jax.Array], q_c_old, dp_old,
-                   p_half_old, dp_new, p_half_new, dt: float) -> None:
+    def accumulate(self, terms: Mapping[str, jax.Array], q_c_old,
+                   p_half_old, p_half_new, dt: float) -> None:
         """Add one step.
 
         ``terms`` are cloud-water tendencies [kg/kg/s], positive = source,
@@ -151,14 +169,15 @@ class CloudWaterBandBudget:
         aw = self.area_w[:, None]
         for k in self.term_names:
             self.terms[k] = self.terms[k] + (
-                jnp.sum(aw * terms[k] * dp_new * w_new) / self.g * dt)
+                jnp.sum(aw * terms[k] * self._dp(p_half_new) * w_new)
+                / self.g * dt)
         w_old = pressure_band_weight(p_half_old, self.p_lo, self.p_hi)
         self.mass_redistribution = self.mass_redistribution + (
-            self._inventory(q_c_old, dp_new, p_half_new, w_new)
-            - self._inventory(q_c_old, dp_old, p_half_old, w_old))
+            self._inventory(q_c_old, p_half_new, w_new)
+            - self._inventory(q_c_old, p_half_old, w_old))
         self.elapsed_s = self.elapsed_s + dt
 
-    def close_window(self, q_c, dp, p_half, rtol: float | None = None) -> dict:
+    def close_window(self, q_c, p_half, rtol: float | None = None) -> dict:
         """Close against the ACTUAL inventory change.
 
         The residual is the whole point: at the tolerance floor when the
@@ -168,17 +187,25 @@ class CloudWaterBandBudget:
         """
         if not self._open:
             raise RuntimeError("close_window() without begin_window()")
-        I1 = self._inventory(q_c, dp, p_half)
+        I1 = self._inventory(q_c, p_half)
         dI = I1 - self._I0
         total = sum(self.terms.values()) + self.mass_redistribution
         days = self.elapsed_s / 86400.0
+        residual = float(dI - total)
         if rtol is not None:
             scale = float(sum(abs(v) for v in self.terms.values())
                           + abs(self.mass_redistribution))
-            if abs(float(dI - total)) > rtol * max(scale, 1e-300):
+            # NaN > tol is FALSE, so a poisoned window would sail through an
+            # ordinary tolerance test.  Non-finite is checked FIRST and always.
+            if not math.isfinite(residual) or not math.isfinite(scale):
+                raise ValueError(
+                    "cloud-water band budget is not finite: residual "
+                    f"{residual}, term scale {scale}.  A column's interfaces "
+                    "do not increase downward, or an input carried NaN.")
+            if abs(residual) > rtol * max(scale, 1e-300):
                 raise ValueError(
                     f"cloud-water band budget did not close: residual "
-                    f"{float(dI - total):.6e} exceeds {rtol:g} of the term "
+                    f"{residual:.6e} exceeds {rtol:g} of the term "
                     f"scale {scale:.6e}.  A term is missing, mis-weighted, or "
                     f"the arrays are rank-local rather than global.")
         out = {
