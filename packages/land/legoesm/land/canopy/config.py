@@ -653,6 +653,10 @@ class CLMMLCanopyConfig(NamedTuple):
     # Using 2000 s/m as a round number.  Previous default (100 s/m) matched
     # saturated conditions only and was ~20× too low for the new dry default.
     soilresis_default_s_m: float = 2000.0
+    # How the soil evaporative resistance is set: "constant" = soilresis_default_s_m; "sl14" = CLM's own
+    # calc_soil_resistance_sl14 (Swenson & Lawrence 2014 dry surface layer, as CLM-ml's clm_driver calls it every step)
+    # from the top soil layer's water content and Clapp-Hornberger parameters (needs Clapp-Hornberger hydraulics).
+    soilresis_scheme: str = "constant"
 
     # Default fine root biomass per unit ground area [g/m²].
     # Used by CLM-ML SoilResistance to compute root length density and soil
@@ -820,6 +824,10 @@ class CLMMLCanopyConfig(NamedTuple):
                 "CLM-ML canopy-airspace turbulence scheme must be one of "
                 f"{VALID_CLM_ML_TURBULENCE_SCHEMES} ('rsl_bonan'=Harman & "
                 "Finnigan roughness sublayer, 'most'=Monin-Obukhov only)")
+        if self.soilresis_scheme not in ("constant", "sl14"):
+            raise ValueError(
+                f"unknown soilresis_scheme {self.soilresis_scheme!r}; one of "
+                "('constant', 'sl14')")
         # Layering: integral, non-boolean counts (the backend allocates arrays
         # of this size and ``int()``-casts silently truncate a float).
         for _nm, _v in (("nlevmlcan", self.nlevmlcan),

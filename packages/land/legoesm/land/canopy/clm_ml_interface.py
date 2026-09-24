@@ -1171,6 +1171,26 @@ def _build_stubs(
     # replacing the previous 100 s/m (matched to saturated soil only).
     _rs_base = float(canopy_config.soilresis_default_s_m)
     soilresis_col = jnp.full(np_, _rs_base, dtype=jnp.float64)
+    if canopy_config.soilresis_scheme == "sl14":
+        # CLM's calc_soil_resistance_sl14 (SurfaceResistanceMod, Fortran lines 96-107) on the top legoESM layer, no ice:
+        # dsl = 15 max(0.001, 0.8 watsat - vwc) / max(0.001, 0.8 watsat - aird) mm in [0, 200], rs = dsl / (d0 tort 1e3) + 20
+        if (soil_hydraulics is None or theta_soil is None
+                or soil_hydraulics.retention_curve not in ("clapp_hornberger", "campbell")):
+            raise ValueError("soilresis_scheme 'sl14' needs Clapp-Hornberger soil hydraulics and the soil water state")
+        _ws = jnp.asarray(soil_hydraulics.theta_sat, dtype=jnp.float64)
+        _suc = -jnp.asarray(soil_hydraulics.psi_sat, dtype=jnp.float64) * 1000.0        # saturated suction [mm], positive
+        _b = jnp.asarray(soil_hydraulics.b_ch, dtype=jnp.float64)
+        _aird = _ws * (_suc / 1.0e7) ** (1.0 / _b)
+        _eps = _ws - _aird
+        _tort = _eps * _eps * (_eps / _ws) ** (3.0 / jnp.maximum(3.0, _b))
+        _T_top = T_soil_all[:, 0] if (T_soil_all is not None and T_soil_all.shape[1] >= 1) else jnp.ravel(T_soil_top)
+        for i in range(ncol):
+            _vwc = jnp.maximum(theta_soil[i, 0], 1.0e-6)
+            _d0 = 2.12e-5 * (_T_top[i] / 273.15) ** 1.75
+            _dsl = jnp.clip(15.0 * jnp.maximum(0.001, 0.8 * _ws - _vwc) / jnp.maximum(0.001, 0.8 * _ws - _aird), 0.0, 200.0)
+            soilresis_col = soilresis_col.at[i + 1].set(jnp.minimum(_dsl / (_d0 * _tort * 1.0e3) + 20.0, 1.0e6))
+    elif canopy_config.soilresis_scheme != "constant":
+        raise ValueError(f"unknown soilresis_scheme {canopy_config.soilresis_scheme!r}")
 
     # ---- Temperature ----
     # t_a10_patch is the 10-day running mean canopy air temperature [K].
