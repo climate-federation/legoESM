@@ -29,7 +29,7 @@ not execute the route and do not move: 170 tests, identical count to round
 the new route, unmeasured** (BLOCKER, closed same round — see Review). The
 fix that closes it does not touch any code path GYRE-zco's own resolved
 config reaches, and a direct predicate check at the final commit confirms
-GYRE-zco still executes the route (`test_orca2_resolves_the_program_but_is_excluded_from_the_default`,
+GYRE-zco still executes the route (`test_orca2_resolves_the_program_but_its_own_config_excludes_it`,
 part of the green push-gate battery below) — so the numbers above, measured
 at the pre-fix commit, are unchanged at the commit that ships. This is
 argued from the code, not re-measured through a second 40-minute model
@@ -59,23 +59,34 @@ from DEBT to AT-BAR, LANDS even when day-240/360 T rms move by less than 1e-3
 relative. Round 160 already proved all three; round 163 flips the production
 default.
 
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py`. First
-attempt (`af15e39c4`): `_NEMOWSRK3TestHooks.nemo_stage_momentum_wzv_split`
-default `False` → `True`, and `nemo_stage_momentum_wzv_executes`'s no-hooks
-`getattr` fallback `False` → `True` to match. Review found this was too
-broad — see the BLOCKER below. Final shape (`29abe4973`): the field is a
-`bool | None` sentinel, default `None`. An explicit hook (`True` or `False`)
-always wins, subject only to `nemo_stage_momentum_wzv_resolved` — the private
-one-variable arm rounds 159-162 already used, unchanged. With no explicit
-hook, a default POLICY applies: land it only when the card's resolved
-config also carries `eos == "nemo_teos10"`, GYRE's own EOS selection. Grepped:
-the only `_NEMOWSRK3TestHooks(` call anywhere in `packages/` is the model's
-own `_nemo_ws_test_hooks or _NEMOWSRK3TestHooks()` default, so this remains
-the whole production change. The arm stays, not deleted: an explicit
-`nemo_stage_momentum_wzv_split=False` (or `=True`) remains the one-variable
-way to force either arm on any card, and four of this round's own structural
-tests (in the round-160 test file, updated this round) use exactly that to
-prove both the opt-out and the ORCA2 exclusion.
+Three shapes, in order, the last one shipped. **First attempt** (`af15e39c4`):
+`_NEMOWSRK3TestHooks.nemo_stage_momentum_wzv_split` default `False` → `True`
+in `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py`, so
+every card resolving the program landed it. Review found this too broad (the
+BLOCKER below). **Second attempt** (`29abe4973`): kept the flat default but
+excluded ORCA2 by INFERRING from `eos == "nemo_teos10"`. The coordinator
+rejected this: EOS says nothing about continuity, so keying one on the other
+is a hidden coupling between unrelated choices, and the rule is that every
+scientific choice appears in the run's config, not in a default. **Final
+shape** (this commit range's last edits): `nemo_stage_momentum_wzv_split` is
+now a real field on `LatLonCGridOceanConfig` (`state.py`, next to the
+`wzv_call2_evaluation` field it depends on) — an EXPLICIT per-card choice.
+GYRE-zco's own config branch (`nemo_testcase_recipe.py`) sets it `True`;
+ORCA2-zps's branch, which specializes the identical base and resolves the
+same program, sets it `False`. Neither is inferred from anything else.
+`nemo_stage_momentum_wzv_executes(config, hooks=None)` reads
+`config.nemo_stage_momentum_wzv_split`; if a resolving card leaves it unset
+(`None`, the field's construction default), the model RAISES rather than
+guessing — fail-closed for every future card, not only ORCA2. The
+TEST-ONLY hook (a *different* object, `_NEMOWSRK3TestHooks`, same field
+name) is unchanged from rounds 159-162: an explicit hook still always wins,
+subject only to `nemo_stage_momentum_wzv_resolved`. Grepped: the only
+`_NEMOWSRK3TestHooks(` call anywhere in `packages/` is the model's own
+`_nemo_ws_test_hooks or _NEMOWSRK3TestHooks()` default, so the card-level
+config field is the whole production mechanism. Five of this round's own
+structural tests (in the round-160 test file, updated this round) cover the
+opt-out hook, the ORCA2 config exclusion, and the fail-closed raise for an
+unset config.
 
 ### The compiled statement, re-cited
 
@@ -88,15 +99,15 @@ here rather than only referenced, per note AT item 1.
 
 ### Card census, re-verified from each card's resolved configuration
 
-| card | momentum integrator | momentum advection | continuity solve | eos | resolves the program | executes (default policy) |
+| card | momentum integrator | momentum advection | continuity solve | resolves the program | own config choice | executes |
 |---|---|---|---|---|---|---|
-| GYRE-zco | rk3_ws | vector_invariant | nemo_literal | nemo_teos10 | **yes** | **yes** |
-| ORCA2-zps | rk3_ws | vector_invariant | nemo_literal | **nemo_eos80** | **yes** | **no (excluded)** |
-| LOCK_EXCHANGE-zco | rk3_ws | flux_form | generic | — | no | no |
-| OVERFLOW-zps | rk3_ws | flux_form | generic | — | no | no |
-| NEMO-GYRE recipe | rk3_ws | vector_invariant | generic | — | no | no |
-| DINO nemo_dino_kamm | euler | vector_invariant | nemo_literal | — | no | no |
-| DINO nemo_dino_kamm_mlf | euler | vector_invariant | nemo_literal | — | no | no |
+| GYRE-zco | rk3_ws | vector_invariant | nemo_literal | **yes** | `nemo_stage_momentum_wzv_split=True` | **yes** |
+| ORCA2-zps | rk3_ws | vector_invariant | nemo_literal | **yes** | `nemo_stage_momentum_wzv_split=False` | **no** |
+| LOCK_EXCHANGE-zco | rk3_ws | flux_form | generic | no | — (never reached; resolved() is False) | no |
+| OVERFLOW-zps | rk3_ws | flux_form | generic | no | — | no |
+| NEMO-GYRE recipe | rk3_ws | vector_invariant | generic | no | — | no |
+| DINO nemo_dino_kamm | euler | vector_invariant | nemo_literal | no | — | no |
+| DINO nemo_dino_kamm_mlf | euler | vector_invariant | nemo_literal | no | — | no |
 
 **ORCA2-zps is NOT a card the decision43_45 gate's own `_card_execution`
 enumerates** (it never has — round 160's table omitted it too, and round
@@ -106,10 +117,12 @@ three base conditions GYRE-zco does by specializing the identical
 overriding `momentum_time_integrator`/`momentum_advection`/
 `wzv_call2_evaluation` — checked directly against its resolved config, built
 via `_model_config(whole_step_identity="orca2_vector_een_c2", ...)`, no deck
-files needed. Two cards now resolve the program; only GYRE-zco executes it
-by default, because GYRE-zco is the only one whose resolved `eos` is
-`nemo_teos10`. Re-run this round via
-`tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round160_wzv_split.py::test_orca2_resolves_the_program_but_is_excluded_from_the_default`
+files needed. Two cards now resolve the program; each states its OWN
+explicit `nemo_stage_momentum_wzv_split` choice on its resolved config —
+GYRE-zco `True`, ORCA2-zps `False` — and neither choice is inferred from any
+other field. Re-run this round via
+`tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round160_wzv_split.py::test_orca2_resolves_the_program_but_its_own_config_excludes_it`,
+`::test_a_card_that_resolves_the_program_without_a_config_choice_raises`
 and `::test_the_admission_gate_census_uses_the_model_s_own_predicate`
 (updated: `executes_at_this_tip` asserts `["GYRE-zco"]`). The tanks, generic
 recipe and both DINO recipes are out on the momentum integrator, the
@@ -248,6 +261,17 @@ SHIP.** One BLOCKER, closed this round; everything else checked out.
    **DECISION_NEEDED for the operator**: should ORCA2 take this route once
    measured, in its own round, or is there a reason to hold it back longer?
    Not decided here — this round only refuses to ship it silently.
+   **AMENDED after the reviewer's pass, by the coordinator**: the EOS-keyed
+   default policy above was itself a hidden coupling between unrelated
+   choices (EOS says nothing about continuity) and violated "every
+   scientific choice appears in the run's config, not in a default." Final
+   shape replaces it: `nemo_stage_momentum_wzv_split` is a real field on
+   `LatLonCGridOceanConfig`, set explicitly `True` on GYRE-zco's own config
+   branch and explicitly `False` on ORCA2-zps's — see "The flip" above. A
+   card resolving the program without setting the field raises. The
+   non-vacuity test is renamed
+   (`test_orca2_resolves_the_program_but_its_own_config_excludes_it`) and now
+   asserts the config field, not EOS; a second test proves the raise.
 2. **MEDIUM — dual-review not met.** Only one reviewer ran (codex is
    paused; GLM was not invoked). REGISTERED, not closed: recommend a GLM
    pass before this lands upstream of the operator, given the single pass
@@ -270,18 +294,20 @@ citations verified against the actual oracle build tree; the round-160 test
 file correctly asserts the landed state including the opt-out; push/card-gate
 pass counts verified against the actual `N passed` lines, not exit codes.
 
-### What was re-verified vs. reused, after the fix
+### What was re-verified vs. reused, after the fixes
 
-The ORCA2 fix (`29abe4973`) touches only the no-hook DEFAULT branch of
-`nemo_stage_momentum_wzv_executes` for configs where `eos != "nemo_teos10"`.
-GYRE-zco's resolved config has `eos == "nemo_teos10"`, so its branch is
-untouched: `getattr(hooks, "nemo_stage_momentum_wzv_split", None)` still
-resolves to `None` for GYRE-zco's production hooks (field default), and the
-policy still returns `True` because the `eos` check still passes — the SAME
-boolean feeds the SAME `LatLonCGridOceanModel.step` trace either way. This
-is checked directly, not just argued: `test_orca2_resolves_the_program_but_is_excluded_from_the_default`
-asserts `nemo_stage_momentum_wzv_executes(gyre_config) is True` against
-GYRE-zco's actual `card.recipe.model_config`, and that assertion is part of
+Both the ORCA2 fix (`29abe4973`) and the coordinator's config-choice
+redesign that replaced its EOS inference touch only HOW
+`nemo_stage_momentum_wzv_executes` decides for a card with no explicit test
+hook. GYRE-zco's own resolved config sets `nemo_stage_momentum_wzv_split`
+explicitly `True` in every one of these shapes — its branch of the decision
+never depended on ORCA2's exclusion mechanism, whether that mechanism was a
+flat default, an EOS check, or (final shape) ORCA2's own separate config
+choice. The SAME boolean (`True`) feeds the SAME `LatLonCGridOceanModel.step`
+trace across all three shapes. This is checked directly, not just argued:
+`test_orca2_resolves_the_program_but_its_own_config_excludes_it` asserts
+`nemo_stage_momentum_wzv_executes(gyre_config) is True` against GYRE-zco's
+actual `card.recipe.model_config`, and that assertion is part of
 the green 162-test push-gate battery quoted below, run AFTER the fix. The
 full 40-minute model battery (ladder, day-30/240/360 member runs, day-240
 decomposition, other-cards gate) was NOT re-run after the fix — it was run
@@ -314,27 +340,29 @@ failures, zero map-audit failures, all self-tests fired.
 
 ## What changed in the citation map, mechanically
 
-Two rounds of edits to `ocean_model_latlon_cgrid.py` — the initial flip and
-the ORCA2-exclusion fix, each growing the field-default comment and the
-`nemo_stage_momentum_wzv_executes` docstring/body — shifted lines below each
-edit point by a RIGID delta (computed from `git diff --unified=0` each time,
-verified against the actual pre/post line counts of every hunk): +5/+9 after
-the first edit, an additional +5/+21/+22 after the second (the exact
-boundaries differ because the two edits are at different points in the same
-region). 39 `CITATION_MAP` entries keyed on this file needed a RIGID shift
-(same delta on both endpoints, same pinned extent, same anchor text) —
-applied by a small script, not by hand, and checked by re-running
-`audit_map()` before committing after EACH of the two edits. One entry's
-cited TEXT itself changed each time, because it anchors on
-`nemo_stage_momentum_wzv_executes`'s own final statement: first
-`getattr(..., False))` → `..., True))` at range `1660-1674`, then (once
-that whole return became the three-line resolved/split/eos-policy body) the
-anchor moved to the function's new last line,
-`return bool(getattr(config, "eos", None) == "nemo_teos10")`, at its final
-range `1665-1695`. Nine citations into this same file inside the round-8
-master receipt (the citation gate's `DEFAULT_RECEIPT`) needed the identical
-shift in prose each time; fixed the same way, verified the same way, both
-times.
+THREE rounds of edits to `ocean_model_latlon_cgrid.py` — the initial flip,
+the (rejected) EOS-exclusion fix, and the final explicit-config-choice
+redesign — each growing the field-default comment and the
+`nemo_stage_momentum_wzv_executes` docstring/body, and the last also adding
+`nemo_stage_momentum_wzv_resolved`'s docstring paragraph and shifting
+`nemo_testcase_recipe.py` (two pure-insertion hunks, +7 and +6 lines, for
+the two cards' explicit config choices). Each round shifted lines below its
+own edit point(s) by a RIGID delta, computed fresh from `git diff
+--unified=0` and verified against the actual pre/post line count of every
+hunk — never assumed constant across rounds. Every `CITATION_MAP` entry
+keyed on either file needed the shift (same delta on both endpoints, same
+pinned extent, same anchor text where the text itself did not change) —
+applied by a small script each time, never by hand, and checked by
+re-running `audit_map()` (zero failing rows over the FULL map, not just the
+touched entries) before committing after EVERY edit. One entry's cited TEXT
+itself changed each round, because it anchors on
+`nemo_stage_momentum_wzv_executes`'s own final statement: `getattr(...,
+False))` → `..., True))`, then → `return bool(getattr(config, "eos", ...))`,
+then (final shape) → `return bool(config_split)` at its shipped range
+`1668-1705`. Nine citations into `ocean_model_latlon_cgrid.py` plus one into
+`nemo_testcase_recipe.py` inside the round-8 master receipt (the citation
+gate's `DEFAULT_RECEIPT`) needed the identical shift in prose each round;
+fixed the same way, verified the same way, every time.
 
 ## OPEN — Round 164
 
@@ -365,14 +393,16 @@ times.
    re-measured this round.
 4. **ORCA2-zps: measure it, then answer the DECISION_NEEDED above.** This
    round's review upgraded ORCA2 from "unmeasured-with-spec" (round 160's
-   disclosure) to "resolves the exact same program, actively excluded by an
-   EOS-scoped default until measured" (round 163's fix). The next ORCA2
-   round should run this route's certified ladder against ORCA2's own
-   oracle record (same instrument this round used for GYRE, `--trajectory-only`
-   comparison) and report whether it helps, hurts, or is inert there — then
-   the operator decides whether to flip ORCA2's own default. Do not flip it
-   without that measurement; the eos-scoped guard is what prevents that from
-   happening by accident.
+   disclosure) to "resolves the exact same program, actively excluded by its
+   own explicit config choice (`nemo_stage_momentum_wzv_split=False`) until
+   measured" (round 163's fix). The next ORCA2 round should run this route's
+   certified ladder against ORCA2's own oracle record (same instrument this
+   round used for GYRE, `--trajectory-only` comparison) and report whether it
+   helps, hurts, or is inert there — then the operator decides whether to
+   flip ORCA2's own config field to `True`. Do not flip it without that
+   measurement; the explicit `False` on ORCA2's own card config is what
+   prevents that from happening by accident, and any card that later forgets
+   to set the field at all is caught by a raise, not a guess.
 5. **Add ORCA2-zps as its own row in `nemo_testcase_l2_gyre_decision43_gate.py`'s
    `_card_execution`.** It has never been in that census (round 160's gap,
    not introduced by round 163), and this round's fix worked around that by
