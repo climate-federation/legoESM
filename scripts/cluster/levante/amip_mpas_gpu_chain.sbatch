@@ -2,12 +2,20 @@
 #SBATCH --account=bb1596
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:1
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-node=4
 #SBATCH --constraint=a100_80
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --exclusive
+#SBATCH --mem=0
 #SBATCH --time=12:00:00
 #SBATCH --output=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs/slurm_logs/%x-%j.out
+# FOLLOWS PRODUCTION, DELIBERATELY (2026-09-23): the production deck became
+# the CAM6 suite on that date and this script keeps naming it, because its
+# job is to run whatever the authoritative production configuration IS, not
+# to reproduce one past run.  Runs started before that date continued from a
+# checkpoint must name config/amip/amip_sundqvist_l36.yaml instead.
 #
 # MPAS-lane AMIP CMIP chain on DKRZ Levante GPU (2026-07-23), adapted from the
 # proven cube-lane /scratch/b/b309178/amip_decade/amip365_chain.sbatch with
@@ -186,8 +194,124 @@ if [[ -n "${LATEST_CKPT}" && -f "${OUTDIR}/run_manifest.json" ]]; then
 fi
 
 cd "${REPO}"
+# ---------------------------------------------------------------------------
+# DEVICE COUNT.  Standing user directive 2026-09-23: a production AMIP arm runs
+# on AT LEAST FOUR GPUs, never one.  The CAM6 run-1 arm ran on a single device
+# at about four simulated days per hour, so a 60-day arm cost roughly fifteen
+# hours of wall clock that the sharded mesh did not require.
+#
+# EXPLICIT, not inherited: the count is named here and in the SBATCH request
+# above and in the self-resubmit below, because a default is not a record.
+# The MPAS lane federates with the mpi4jax halo backend -- distributed_mode
+# 'spmd' is cubed-sphere only (driver/config.py refuses it on a Voronoi mesh)
+# -- so this is ONE RANK PER GPU under srun, with --distributed.
+# CUDA-aware MPI stays OFF: MPI4JAX_USE_CUDA_MPI=1 segfaults on this cluster.
+: "${AMIP_N_GPUS:=4}"
+if (( AMIP_N_GPUS < 4 )); then
+    echo "[chain] REFUSING: AMIP_N_GPUS=${AMIP_N_GPUS} is below the floor of 4." >&2
+    echo "[chain] A production AMIP arm runs on at least four GPUs (user" >&2
+    echo "[chain] directive 2026-09-23).  Set AMIP_N_GPUS=4 or higher." >&2
+    exit 64
+fi
+# ...and it must not exceed what SLURM actually gave us, or srun would
+# oversubscribe while .device_count recorded a number that never ran (GLM).
+if [[ -n "${SLURM_NTASKS:-}" ]] && (( AMIP_N_GPUS > SLURM_NTASKS )); then
+    echo "[chain] REFUSING: AMIP_N_GPUS=${AMIP_N_GPUS} exceeds the allocation" >&2
+    echo "[chain] of ${SLURM_NTASKS} task(s).  Raise --ntasks/--gpus-per-node" >&2
+    echo "[chain] on the sbatch request to match." >&2
+    exit 67
+fi
+
+# PAIR CONSISTENCY.  Both arms of a comparison MUST use the same device count:
+# the ocean solver converges to a tolerance at one device and runs a fixed
+# iteration count when sharded, and the halo path has had device-count
+# dependent defects, so a mismatch is a confound rather than a speed
+# difference.  The count is written into the run directory on the first link
+# and checked on every later one, which also catches a chain that is resumed
+# with a different request.  AMIP_PAIR_DIR names the partner arm when there is
+# one; give both arms of a pair the same value and neither can drift.
+_DEVCOUNT_FILE="${OUTDIR}/.device_count"
+if [[ -f "${_DEVCOUNT_FILE}" ]]; then
+    _PREV=$(cat "${_DEVCOUNT_FILE}")
+    if [[ "${_PREV}" != "${AMIP_N_GPUS}" ]]; then
+        echo "[chain] REFUSING: this run started on ${_PREV} GPU(s) and this" >&2
+        echo "[chain] link requests ${AMIP_N_GPUS}.  Continuing a run at a" >&2
+        echo "[chain] different device count changes the ocean solver and the" >&2
+        echo "[chain] halo path mid-stream.  Start a new run directory." >&2
+        exit 65
+    fi
+elif [[ -n "${LATEST_CKPT}" ]]; then
+    # A checkpoint exists but no stamp does: this run was started before the
+    # stamp existed, or its checkpoints were COPIED in from another run (the
+    # PREV_CKPT_DIR pattern).  Stamping it now would invent provenance -- a
+    # one-GPU checkpoint would be recorded as four and the pair guard would
+    # then bless a mismatch (codex review).  Refuse and make the operator say
+    # what it actually ran on.
+    echo "[chain] REFUSING: ${OUTDIR} has checkpoints but no .device_count." >&2
+    echo "[chain] Its device count is unknown, and guessing it would give the" >&2
+    echo "[chain] pair guard a number nothing measured.  If you know the run" >&2
+    echo "[chain] was made on N devices, write N into ${_DEVCOUNT_FILE}; if it" >&2
+    echo "[chain] was a one-GPU run, it cannot be continued under the four-GPU" >&2
+    echo "[chain] floor and needs a fresh directory." >&2
+    exit 69
+else
+    # Cold start: stamp ATOMICALLY (codex) so a reader never sees a half-written
+    # or empty file and aborts a pair that actually agrees.
+    printf '%s\n' "${AMIP_N_GPUS}" > "${_DEVCOUNT_FILE}.tmp.$$"
+    mv -f "${_DEVCOUNT_FILE}.tmp.$$" "${_DEVCOUNT_FILE}"
+fi
+if [[ -n "${AMIP_PAIR_DIR:-}" ]]; then
+    # A MISSING partner stamp is a refusal, not a pass (GLM review): two arms
+    # submitted at the same moment would each see no partner file and both
+    # sail through, which is exactly the accident this guard exists to stop.
+    # So the partner arm must be started FIRST; it stamps its count, and this
+    # one then has something to agree with.
+    if [[ ! -f "${AMIP_PAIR_DIR}/.device_count" ]]; then
+        echo "[chain] REFUSING: AMIP_PAIR_DIR=${AMIP_PAIR_DIR} has no" >&2
+        echo "[chain] .device_count stamp yet.  Start the partner arm first so" >&2
+        echo "[chain] its device count is recorded, then start this one; a" >&2
+        echo "[chain] missing stamp cannot be distinguished from agreement." >&2
+        exit 68
+    fi
+    # RECIPROCAL: the partner must name this arm back, or "the pair" is one
+    # arm checking itself, which passes trivially (codex).
+    if [[ -f "${AMIP_PAIR_DIR}/.pair_dir" ]]; then
+        _BACK=$(cat "${AMIP_PAIR_DIR}/.pair_dir")
+        if [[ "$(readlink -f "${_BACK}")" != "$(readlink -f "${OUTDIR}")" ]]; then
+            echo "[chain] REFUSING: ${AMIP_PAIR_DIR} names ${_BACK} as ITS" >&2
+            echo "[chain] partner, not ${OUTDIR}.  A pair must point both ways" >&2
+            echo "[chain] or the check is an arm agreeing with itself." >&2
+            exit 70
+        fi
+    fi
+    printf '%s\n' "${AMIP_PAIR_DIR}" > "${OUTDIR}/.pair_dir.tmp.$$"
+    mv -f "${OUTDIR}/.pair_dir.tmp.$$" "${OUTDIR}/.pair_dir"
+    _PARTNER=$(cat "${AMIP_PAIR_DIR}/.device_count")
+    if [[ "${_PARTNER}" != "${AMIP_N_GPUS}" ]]; then
+        echo "[chain] REFUSING: partner arm ${AMIP_PAIR_DIR} runs on" >&2
+        echo "[chain] ${_PARTNER} GPU(s), this arm requests ${AMIP_N_GPUS}." >&2
+        echo "[chain] A pair scored against itself must hold the device count" >&2
+        echo "[chain] fixed, or the difference is a confound." >&2
+        exit 66
+    fi
+fi
+# RESIDUAL GAP, stated rather than papered over: AMIP_PAIR_DIR is opt-in, so
+# an operator who simply does not set it gets no pair check at all.  The stamp
+# in each run directory is what survives that, and the real backstop belongs on
+# the SCORING side -- a comparison should refuse two arms whose stamps differ,
+# because that is where the confound actually bites and it cannot be skipped by
+# forgetting an environment variable.  Not built here.
+echo "[chain] device count: ${AMIP_N_GPUS} GPU(s), one rank each${AMIP_PAIR_DIR:+ (pair ${AMIP_PAIR_DIR})}"
+
 # CONFIG_YAML override: debugging configs (e.g. sub-daily diag_days for NaN
 # localization) without touching the tracked production YAML.
+#
+# CARRIED THROUGH THE SELF-RESUBMIT BELOW, and that is load-bearing since
+# 2026-09-23: amip_production.yaml became the CAM6 suite on that date, so a
+# chain started on any other deck whose continuation fell back to the default
+# would SWITCH MODEL at a segment boundary -- a 32-level hybrid grid continuing
+# a 36-level sigma run, from a checkpoint written by the other one. Resolved
+# here once and exported, because a default is not a record.
 : "${CONFIG_YAML:=${REPO}/config/amip/amip_production.yaml}"
 CMD=( "${PY}" -u scripts/run/run_amip.py
       --config "${CONFIG_YAML}"
@@ -200,8 +324,36 @@ CMD=( "${PY}" -u scripts/run/run_amip.py
 # shellcheck disable=SC2206
 [[ -n "${EXTRA:-}" ]] && CMD+=( ${EXTRA} )
 
-echo "[chain] launching: ${CMD[*]}"
-"${CMD[@]}"
+CMD+=( --distributed )
+# ONE GPU PER RANK, bound explicitly.  --gpu-bind=none would leave every rank
+# seeing all four devices, and whether the MPI lane then picks a different one
+# per rank is an inference about early_init rather than something the launcher
+# states (GLM review).  map_gpu gives each rank exactly one visible device,
+# which is also the convention early_init documents as the shim-pinned case
+# (CUDA_VISIBLE_DEVICES with one entry -> local_device_ids [0]), so there is
+# nothing left to infer.
+# SLURM hands srun two conflicting cpus-per-task values on this cluster
+# (SLURM_CPUS_PER_TASK from the allocation vs SLURM_TRES_PER_TASK from the
+# --cpus-per-task request) and srun refuses to start: "cpus-per-task set by two
+# different environment variables".  Measured, job 27647178 died in 12 s on it.
+# Clear the inherited one and state the value on the srun line instead.
+unset SLURM_CPUS_PER_TASK
+# MPI LIBRARY PATHS.  mpi4py needs libmpi and mpi4jax needs a newer libstdc++,
+# and each failure is misleading: without the first, "cannot load MPI library
+# ... libmpi.so.40" (measured, job 27647305 died on it in 16 s); without the
+# second, the mpi4jax import quietly falls back.  The openmpi module does not
+# survive into a batch step here, and the 4.1.6 paths segfault on import (ABI
+# mismatch), so the 4.1.2 path is pinned deliberately.
+export LD_LIBRARY_PATH="/sw/spack-levante/openmpi-4.1.2-mnmady/lib:/sw/spack-levante/gcc-13.4.0-c4mgfk/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# CUDA-aware MPI stays OFF: MPI4JAX_USE_CUDA_MPI=1 segfaults every data-parallel
+# run on this cluster.
+export MPI4JAX_USE_CUDA_MPI=0
+_GPU_MAP=$(seq -s, 0 $((AMIP_N_GPUS - 1)))
+LAUNCH=( srun --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}"
+         --gpus-per-node="${AMIP_N_GPUS}" --gpu-bind="map_gpu:${_GPU_MAP}"
+         --cpus-per-task=8 --kill-on-bad-exit=1 )
+echo "[chain] launching on ${AMIP_N_GPUS} GPU(s): ${LAUNCH[*]} ${CMD[*]}"
+"${LAUNCH[@]}" "${CMD[@]}"
 RC=$?
 echo "[chain] run_amip exit=${RC}  $(date -u)"
 
@@ -213,8 +365,10 @@ if (( RC == 0 )); then
         NEXT=$(sbatch --account=bb1596 \
                  --dependency="afterok:${SLURM_JOB_ID}" \
                  --job-name="${SLURM_JOB_NAME:-amip_mpas}" \
-                 --time=12:00:00 --gres=gpu:1 --constraint=a100_80 --mem=64G \
-                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-}" \
+                 --time=12:00:00 --constraint=a100_80 --mem=0 \
+                 --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}" \
+                 --gpus-per-node="${AMIP_N_GPUS}" \
+                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-},AMIP_N_GPUS=${AMIP_N_GPUS},AMIP_PAIR_DIR=${AMIP_PAIR_DIR:-},CONFIG_YAML=${CONFIG_YAML}" \
                  "$0" | awk '{print $NF}')
         echo "[chain] ${NEW_DAY}/${TARGET_DAYS} d done; queued next link: ${NEXT}"
     else

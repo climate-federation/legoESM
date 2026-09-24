@@ -64,6 +64,16 @@ class GridConfig(NamedTuple):
     vertical_coord: str = "hybrid"   # sigma, hybrid, cam_l32 (CAM6 32-level table)
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+    # B(eta) = eta**transition_exponent on the hybrid lane.  Default 3 is
+    # UNCHANGED -- no committed run moves by this field existing.  It exists
+    # because 3 makes the coordinate carry NEGATIVE layer mass below 663.9 hPa,
+    # i.e. above ~3450 m of orography, which is 0.92% of the planet by area
+    # (Tibet, the altiplano, the Greenland and Antarctic domes) and is fatal
+    # where it bites: two such cells killed a 200-day idealized run in 200
+    # steps (#1029).  2 moves that threshold to ~498 hPa / ~5870 m, which
+    # covers all of ETOPO.  Selecting it CHANGES LEVEL PLACEMENT, so it is a
+    # new baseline, not a comparison against existing runs.
+    transition_exponent: int = 3
     # SIGMA-coordinate layer redistribution toward the tropopause, at FIXED
     # nlev (grids/vertical.tropopause_refined_sigma_half).  1.0 = the uniform
     # grid, bit-identical.  Uniform sigma gives ~33 hPa layers everywhere at
@@ -312,6 +322,17 @@ class DycoreConfig(NamedTuple):
     # in the top n layers (raised-lid experiment); 0 / 1.0 = off.
     mpas_sponge_del2_top_layers: int = 0
     mpas_sponge_del2_top_factor: float = 1.0
+    # FV3 duo window SPMD (M6): split every face into kt x kt windows, one
+    # per device (6*kt*kt ranks).  Both EXPLICIT, no auto-selection and no
+    # default pad: the pad is a measured, per-deck halo width (11 at C48
+    # with 3 acoustic substeps), not a formula, so it must appear in the
+    # run's config (user call 2026-09-21).  None = the face layout.
+    # MERGE NOTE: appended AFTER main's sponge pair, so main's positional
+    # layout is untouched and these two land at the new tuple end -- the same
+    # invariant both sides were preserving independently.
+    fv3_duo_windows: int | None = None
+    fv3_duo_window_pad: int | None = None
+
     # Divergence-SELECTIVE biharmonic damping on the MPAS hydrostatic lane,
     # as a multiple of CAM-FV's own ldiv4 coefficient 0.01*area^2/dt
     # (cd_core.F90:655-683; fv_div24del2flag=4 is the CAM6 physics default at
@@ -724,11 +745,22 @@ class ExperimentConfig(NamedTuple):
     cloud_vertical_overlap_optics: str = "none"
     cloud_n_subcolumns: int = 8
     # Saturation curve for the cloud-fraction RH (CloudConfig.saturation_scheme):
-    # "liquid" (legacy/byte-identical, liquid Tetens saturation at all T) or
-    # "mixed_phase" (RH against the ice-fraction-blended liquid/ice curve, IFS
-    # alpha(T) convention — ice-saturated TTL/anvil air then reads RH ~1 and
-    # the RH cloud schemes see the cirrus the model already carries, #1521).
-    cloud_saturation_scheme: str = "liquid"
+    # "mixed_phase" (DEFAULT since 2026-09-17: RH against the
+    # ice-fraction-blended liquid/ice curve, IFS alpha(T) convention — so
+    # ice-saturated TTL/anvil/POLAR air reads RH ~1 and the RH cloud schemes see
+    # the cirrus the model already carries, #1521) or "liquid" (legacy, liquid
+    # Tetens saturation at all T; byte-identical reproduction of pre-2026-09-17
+    # runs only).
+    #
+    # Why the default moved, and it is a defect report rather than a preference:
+    # cover is zero below rh_crit (0.85 in production) and "liquid" measured RH
+    # against the LIQUID curve at every temperature.  At 230 K and 900 hPa,
+    # ice-saturated air has RH_liquid = 0.662, so reaching 0.85 needs ~28 % ice
+    # SUPERsaturation — Arctic cloud was arithmetically impossible, and the
+    # measured February cover north of 80N was 0.0 % against 35-40 % observed.
+    # Zero cover then also removes EXPLICIT ice condensate from the radiative
+    # subcolumns, so the model's own cirrus was radiatively invisible there.
+    cloud_saturation_scheme: str = "mixed_phase"
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -738,6 +770,15 @@ class ExperimentConfig(NamedTuple):
     # RH-diagnosed schemes (CloudConfig.cover_condensate_q_ref).  None => scheme
     # default (0.0 = off).  Paired-arm lever for the invisible-ice defect.
     cloud_cover_condensate_q_ref: float | None = None
+    # Polar-cap radiative cloud floor (CloudConfig.cap_floor_*): an attribution
+    # lever for the 2026-09 Arctic self-isolation A/B, radiation-only, MPAS /
+    # spectral standalone radiation path only (the FV pipeline refuses it).
+    # Off in production; None on the floats => CloudConfig defaults.
+    cloud_cap_floor_on: bool = False
+    cloud_cap_floor_lat_deg: float | None = None
+    cloud_cap_floor_p_max_pa: float | None = None
+    cloud_cap_floor_cf: float | None = None
+    cloud_cap_floor_q_c: float | None = None
     # Snow grain-growth activation temperature [K] (BATS ~5000): the snow-age
     # clock accumulates dt*exp(A*(1/T_freeze - 1/T_snow)) so cold dry snow keeps
     # its fresh albedo. None => LandAlbedoConfig default (0.0 = off, the
@@ -1862,6 +1903,20 @@ class ExperimentConfig(NamedTuple):
                     "grid.p_top_Pa and grid.stretching are hybrid-only fields and are inert "
                     "on the sigma lane; leave them at their defaults (200.0, 2.0) and set "
                     "grid.sigma_top instead")
+            if g.transition_exponent != 3:
+                errors.append(
+                    "grid.transition_exponent is a hybrid-only field and is inert on the "
+                    f"sigma lane; leave it at its default 3 (got {g.transition_exponent})")
+        elif (g.vertical_coord == "hybrid"
+                and g.transition_exponent not in (2, 3)):
+            # 1 is pure sigma spelled as a hybrid (use vertical_coord='sigma'
+            # instead, which is the tested lane); >3 makes the negative-mass
+            # threshold worse, not better.
+            errors.append(
+                "grid.transition_exponent must be 2 or 3 on the hybrid lane "
+                f"(got {g.transition_exponent}); 2 admits p_s down to ~498 hPa "
+                "(~5870 m of orography), 3 only to ~664 hPa (~3450 m). For a "
+                "pure sigma coordinate use vertical_coord='sigma'.")
         elif g.vertical_coord == "hybrid" and g.sigma_top != 0.01:
             errors.append(
                 "grid.sigma_top is inert on the hybrid lane, which uses p_top_Pa/"
@@ -1911,6 +1966,27 @@ class ExperimentConfig(NamedTuple):
                 "silently ignore it.")
         if d.dt <= 0:
             errors.append(f"dycore.dt must be > 0, got {d.dt}")
+        if d.fv3_duo_windows is not None:
+            if d.discretization != "fv3_duo":
+                errors.append(
+                    "dycore.fv3_duo_windows is only meaningful with "
+                    f"dycore.discretization='fv3_duo', got {d.discretization!r}")
+            if not isinstance(d.fv3_duo_windows, int) or d.fv3_duo_windows < 2:
+                errors.append(
+                    "dycore.fv3_duo_windows must be an int >= 2 (kt, for "
+                    f"6*kt*kt ranks), got {d.fv3_duo_windows!r}")
+            if d.fv3_duo_window_pad is None:
+                errors.append(
+                    "dycore.fv3_duo_window_pad is REQUIRED with "
+                    "dycore.fv3_duo_windows (the pad is a measured per-deck "
+                    "halo width, never defaulted)")
+            elif not isinstance(d.fv3_duo_window_pad, int) or d.fv3_duo_window_pad < 1:
+                errors.append(
+                    "dycore.fv3_duo_window_pad must be an int >= 1, got "
+                    f"{d.fv3_duo_window_pad!r}")
+        elif d.fv3_duo_window_pad is not None:
+            errors.append(
+                "dycore.fv3_duo_window_pad given without dycore.fv3_duo_windows")
         if d.hyperdiff_scale < 0:
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
@@ -2991,6 +3067,14 @@ class ExperimentConfig(NamedTuple):
         # surface fluxes (radiation channel), so radiation="none" would leave
         # it frozen at its seed forever; a thickness override without the
         # boolean gate would be silently inert.
+        # "rrtmg" is this driver's alias for the RRTMGP builder (the production
+        # deck spells it that way); both reach the standalone radiation path.
+        if self.cloud_cap_floor_on and (self.cloud_scheme == "none"
+                                        or self.radiation not in ("rrtmgp", "rrtmg")):
+            errors.append(
+                "cloud_cap_floor_on requires an active cloud scheme and rrtmgp/rrtmg "
+                f"radiation (cloud_scheme={self.cloud_scheme!r}, radiation={self.radiation!r}); "
+                "otherwise the polar-cap radiative floor would be a silent no-op.")
         if self.mpas_ice_skin_prognostic and self.radiation == "none":
             errors.append(
                 "mpas_ice_skin_prognostic integrates the surface energy "
@@ -3462,6 +3546,10 @@ class ExperimentConfig(NamedTuple):
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
             ("cloud_cover_condensate_q_ref", 1.0e-6, 1.0e-3),
+            ("cloud_cap_floor_lat_deg", 40.0, 89.0),
+            ("cloud_cap_floor_p_max_pa", 20000.0, 100000.0),
+            ("cloud_cap_floor_cf", 0.1, 1.0),
+            ("cloud_cap_floor_q_c", 1.0e-6, 1.0e-3),
             ("snow_age_activation_K", 0.0, 20000.0),
             # 0.5 d = melting spring snow; 400 d spans the cold-plateau
             # timescale the literature supports (Warren & Wiscombe 1980).

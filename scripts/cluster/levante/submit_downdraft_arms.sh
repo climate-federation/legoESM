@@ -43,6 +43,19 @@
 # day-80 checkpoint cannot seed its moments (see sc_clubbp's note).
 set -euo pipefail
 WT=/work/bd1083/b309178/diffESM/legoesm_pg/wt_cloudreview
+# BASELINE DECK, pinned 2026-09-23.  config/amip/amip_production.yaml became the
+# CAM6 suite on that date and the GPU chain's CONFIG_YAML default follows it.
+# This script is a one-variable arm comparison whose baseline is the
+# configuration it was measured against, so it names that configuration
+# explicitly instead of inheriting whatever production becomes.
+# CONDITIONAL on purpose (GLM round 3): the rename has not reached every
+# checkout, and in a tree that still predates it the production deck IS the
+# right baseline.  So prefer the renamed deck where it exists and fall back to
+# production where it does not - correct on both sides of the merge, and it
+# never breaks the script the way a hard pin would.
+BASELINE_DECK="${WT}/config/amip/amip_sundqvist_l36.yaml"
+[[ -f "${BASELINE_DECK}" ]] || BASELINE_DECK="${WT}/config/amip/amip_production.yaml"
+
 MAIN=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
 ROOT=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs
 BASE="--resolution 6 --checkpoint-days 10 \
@@ -57,7 +70,7 @@ declare -A ARMS=(
 for name in "${!ARMS[@]}"; do
   [[ -f ${ROOT}/${name}/checkpoint_day_0080.npz ]] || { echo "missing day-80 checkpoint in ${name}" >&2; exit 2; }
   jid=$(sbatch --account=bd1083 --job-name="${name}" --time=12:00:00 \
-        --export="ALL,REPO=${WT},PY=${MAIN}/.venv/bin/python,NAME=${name},TARGET_DAYS=110,MAX_WALLCLOCK_SECONDS=41400,EXTRA=${BASE} ${ARMS[$name]}" \
+        --export="ALL,REPO=${WT},CONFIG_YAML=${BASELINE_DECK},PY=${MAIN}/.venv/bin/python,NAME=${name},TARGET_DAYS=110,MAX_WALLCLOCK_SECONDS=41400,EXTRA=${BASE} ${ARMS[$name]}" \
         "${WT}/scripts/cluster/levante/amip_mpas_gpu_chain.sbatch" | awk '{print $NF}')
   echo "${name} ${jid}"
 done

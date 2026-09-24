@@ -307,7 +307,7 @@ def test_multilayer_land_accepted_on_mpas():
     (VoronoiMesh had no lat/lat2d) is retired — setup now reads latCell."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--grid-type", "mpas", "--discretization", "mpas",
         "--use-multilayer-land",
     ]), parser)
@@ -618,7 +618,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     # not here — single-point CLM-ML runs today via run_lmip).
     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
-        "--use-multilayer-land",
+        "--use-multilayer-land", "--land-mask-file", "lsm.nc",
     ]), parser))
     assert cfg_clm.land_surface_scheme == "clm_ml"
     cfg_clm.validate_strict()  # must not raise
@@ -1162,7 +1162,7 @@ def test_surface_tiled_flags_flow_to_config():
     and validate together with --slab-land-active + --turbulence louis."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
@@ -1211,7 +1211,7 @@ def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
     CLUBB family (clubb routes it through clubb_step's kinematic interface)."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", scheme,
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
@@ -1228,7 +1228,7 @@ def test_soil_bucket_flags_flow_to_config():
     and validate together with an active land tile."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
@@ -1257,7 +1257,7 @@ def test_infiltration_params_reject_nan_and_negative():
     a bare ``x < 0`` would let NaN slip through and poison the infiltration cap)."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--slab-land-active", "--land-soil-bucket"]),
+        ["--dataset", "analytical", "--land-mask-file", "land_mask.nc", "--slab-land-active", "--land-soil-bucket"]),
         parser)
     base = build_config_from_args(args)
     assert base.validate_strict() is None          # baseline is valid
@@ -1295,7 +1295,7 @@ def test_land_stomatal_beta_flag_flows_to_config():
     """--land-stomatal-beta round-trips and validates with the bucket on."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
@@ -2097,71 +2097,88 @@ def test_amip_sota_config_builds_valid_experiment_config():
 
 def test_config_yaml_round_trips_authoritative_values():
     """`run_amip.py --config config/amip/amip_production.yaml` reproduces the
-    production AMIP parametrization (Bechtold mass-flux + McFarlane GWD,
-    directive 2026-07-06; revalidation gate = the C24 physics-combo screen)."""
+    production AMIP parametrization.
+
+    Re-baselined 2026-09-23 (user decision): the production atmospheric physics
+    suite is CAM6 -- the CAM 32-level hybrid table, CLUBB cloud fraction,
+    the Zhang-McFarlane convection port, orographic-only gravity waves, the
+    CESM Large-Yeager surface fluxes and the 1800 s physics step with three
+    macro/micro sub-steps.  The outgoing Sundqvist/L36 deck is asserted
+    separately below so both remain pinned.
+
+    The grid keys are recipe-sensitive together, so a change here is a
+    stability A/B, not an edit."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
-    # grid geometry (resolution/nlev/discretization are CLI dests baked into
-    # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production lane moved off the cubed sphere on 2026-07-24 and this test
-    # was not moved with it, so it asserted the retired C48/L40 cube deck
-    # against a config that had been the icosahedral MPAS one for weeks --
-    # red on main, and blind to any further drift while it was.  Values below
-    # are the shipped deck: icosahedral level 6 (about 1.1 degrees, the
-    # production default per the 2026-08-25 directive; level 5 remains the
-    # fast-iteration override), 30 sigma levels, dt 112.5 s (2026-08-25 dt
-    # ladder).  The five keys are recipe-sensitive together (the YAML header
-    # records that L40 + hybrid + automatic dt blew up on day one), so a change
-    # here is a stability A/B, not an edit.
+    # resolution/nlev/discretization are CLI dests baked into cfg.grid, so
+    # assert them at the args level the YAML controls.
     assert args.resolution == 6
-    assert args.nlev == 30
+    assert args.nlev == 32                 # CAM6 L32 hybrid table
+    assert args.vertical_coord == "cam_l32"
     assert args.discretization == "mpas"
     # The deck spells the mesh "voronoi"; the parser normalises the family's
     # spellings to one name, so assert the resolved value the run uses.
     assert args.grid_type == "mpas"
     assert args.dt == 112.5
     cfg = build_config_from_args(args)
-    assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
-    # orographic AND non-orographic; the orographic-only spelling is the
-    # older deck's.
-    assert cfg.gravity_wave_drag == "mcfarlane+hines"
-    assert cfg.microphysics == "morrison"
-    assert cfg.cloud_scheme == "sundqvist"
-    assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
-    # Re-baselined 2026-09-13 (owner decision): the boundary layer moved from
-    # the Louis first-order closure to CLUBB run PROGNOSTICALLY, so the scheme
-    # carries the sub-grid total-water variance as state instead of
-    # re-diagnosing it from a mixing length each step. Both keys are asserted
-    # because the pair is what defines the baseline: CLUBB with the flag off is
-    # a different model from CLUBB with it on.
+    assert cfg.convection == "zhang_mcfarlane"   # CAM6 zm_conv port
+    # CAM6 f09 L32 (non-WACCM) runs OROGRAPHIC drag only: build-namelist sets
+    # use_gw_front and use_gw_convect_dp false below 60 levels.
+    assert cfg.gravity_wave_drag == "mcfarlane"
+    assert cfg.microphysics == "morrison"        # MG2 port is run 2
+    assert cfg.cloud_scheme == "cam6_clubb"
+    assert cfg.use_clubb_cloud_fraction is True
+    assert cfg.radiation == "rrtmg"              # rrtmgp builder alias
     assert cfg.turbulence == "clubb"
     assert cfg.clubb_prognostic is True
-    # No tiled surface on this lane -- the tiled port is open work, and the
-    # deck says so at the field.
+    assert cfg.surface_bulk_scheme == "large_yeager_cesm"
+    # CAM6 cadence: physics every 1800 s, radiation hourly, CLUBB+micro
+    # sub-cycled three times at 600 s inside each physics step.
+    assert args.physics_update_steps == 16
+    assert args.rad_update_steps == 32
+    assert args.cld_macmic_num_steps == 3
+    # No tiled surface on this lane -- the tiled port is open work.
     assert cfg.surface_tiled is False
     assert cfg.start_year == 1979
-    # convective_cloud OFF since 2026-08-22.  It was on to mirror the canonical
-    # tuned base, but the tropical-rain campaign runs that reproduced observed
-    # ocean rain (0.89 of observed) all ran with it OFF, and production runs
-    # with it on reached only 0.48-0.61.  Production now carries the campaign
-    # science configuration rather than leaving it to a side deck; see the
-    # folded-in block at the end of amip_production.yaml.
+    # convective_cloud is a real scientific lever, not boilerplate: it was
+    # flipped OFF on 2026-08-22 because the tropical-rain runs that reproduced
+    # observed ocean rain all ran with it off.  cam6_clubb refuses it anyway
+    # (deepcu is CAM6's own deep-convective cloud term), so it stays pinned.
     assert cfg.convective_cloud is False
-    # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
     assert cfg.surface_gustiness_zi == 300.0
-    # PROVISIONAL cloud tuning (#899): rh_crit 0.85.
-    assert cfg.cloud_rh_crit == pytest.approx(0.85)
-    # q_c 5e-6, the campaign value, folded in 2026-08-22 with the rest of the
-    # tropical-rain configuration (production had 1e-4, twenty times larger).
-    # This assertion is the reason the divergence was found at all, so it is
-    # updated rather than removed.
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(5e-6)
-    # The detrained-condensate to convective-rain split, on since the
-    # bechtold rain-split landed.
     assert cfg.convective_precip_efficiency == pytest.approx(0.8)
+
+
+def test_sundqvist_l36_deck_still_round_trips():
+    """The outgoing production deck stays RUNNABLE and unchanged under its new
+    name, so every result measured against it reproduces -- including
+    cam6_base60, the paired baseline of the CAM6 run-1 comparison.  It must
+    carry NEITHER numerical lever, which is what makes it that baseline."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_sundqvist_l36.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
+    assert args.resolution == 6
+    assert args.nlev == 36
+    assert args.vertical_coord == "sigma"
+    assert args.discretization == "mpas"
+    assert args.dt == 112.5
+    assert args.mpas_vert_advection_scheme == "van_leer"
+    cfg = build_config_from_args(args)
+    # The deck is silent on the damper, so the CLI dest stays None and the
+    # CODE default is what the run gets.  Assert the RESOLVED value, which is
+    # what makes this deck the neither-lever baseline.
+    assert cfg.dycore.mpas_div_damp4_scale == 0.0
+    assert cfg.convection == "bechtold"
+    assert cfg.cloud_scheme == "sundqvist"
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
+    assert cfg.surface_bulk_scheme == "coare3"
+    assert cfg.cloud_rh_crit == pytest.approx(0.85)
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(5e-6)
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -2883,7 +2900,8 @@ def test_cloud_optics_inhomogeneity_validate():
 def test_cloud_saturation_scheme_round_trips_and_threads():
     """--cloud-saturation-scheme round-trips into ExperimentConfig and threads
     into the hot-loop CloudConfig (the cloud-fraction RH saturation curve,
-    #1521 ice-saturation fix); default 'liquid' = legacy byte-identical."""
+    #1521 ice-saturation fix); 'liquid' = legacy byte-identical, no longer
+    the default."""
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
@@ -2894,13 +2912,16 @@ def test_cloud_saturation_scheme_round_trips_and_threads():
     cc = build_cloud_config(
         cfg.cloud_scheme, saturation_scheme=cfg.cloud_saturation_scheme)
     assert cc.saturation_scheme == "mixed_phase"
-    # default: 'liquid' => CloudConfig default (legacy path).
+    # saying nothing => the field default, which is 'mixed_phase' since
+    # 2026-09-17 (the 'liquid' curve made cold cloud impossible: at 230 K /
+    # 900 hPa ice-saturated air reads RH 0.662 against rh_crit 0.85).
     d = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert d.cloud_saturation_scheme == "liquid"
+    assert d.cloud_saturation_scheme == "mixed_phase"
     assert build_cloud_config(
         d.cloud_scheme,
-        saturation_scheme=d.cloud_saturation_scheme).saturation_scheme == "liquid"
+        saturation_scheme=d.cloud_saturation_scheme
+    ).saturation_scheme == "mixed_phase"
 
 
 def test_cloud_saturation_scheme_validate():
@@ -3113,7 +3134,7 @@ def test_latlon24_production_variant_pins_polar_filter():
     # gained the non-orographic component; this assertion still named the
     # orographic-only spelling and so went red with it.
     assert cfg.convection == "sbm"
-    assert cfg.gravity_wave_drag == "mcfarlane+hines"
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
     # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
     # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
@@ -3999,6 +4020,64 @@ def test_sub_daily_diag_days_round_trips_and_never_disables_the_check():
     assert cfg_default.output.diag_days == pytest.approx(5.0)
 
 
+_FV3_DUO_ARGV = ["--dataset", "analytical", "--grid-type", "cubed_sphere",
+                 "--discretization", "fv3_duo", "--resolution", "12",
+                 "--nlev", "5", "--precision", "fp64",
+                 "--radiation", "none", "--convection", "none",
+                 "--microphysics", "none", "--turbulence", "none",
+                 "--gravity-wave-drag", "none", "--allow-disabled-physics"]
+
+
+def _fv3_duo_cfg(extra):
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(_FV3_DUO_ARGV + extra), parser)
+    return build_config_from_args(args)
+
+
+def test_fv3_duo_windows_flags_round_trip_and_validate():
+    """--fv3-duo-windows KT + --fv3-duo-window-pad PAD reach DycoreConfig
+    and pass validate_strict together; the defaults are None (face
+    layout), so an unset pair changes nothing."""
+    cfg = _fv3_duo_cfg([])
+    assert cfg.dycore.fv3_duo_windows is None
+    assert cfg.dycore.fv3_duo_window_pad is None
+    cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2", "--fv3-duo-window-pad", "5"])
+    assert cfg.dycore.fv3_duo_windows == 2
+    assert cfg.dycore.fv3_duo_window_pad == 5
+    cfg.validate_strict()
+
+
+def test_fv3_duo_windows_without_pad_is_refused():
+    """The pad is a measured per-deck halo width, never defaulted."""
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2"])
+    with pytest.raises(ValueError, match="fv3_duo_window_pad is REQUIRED"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_window_pad_without_windows_is_refused():
+    cfg = _fv3_duo_cfg(["--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="without dycore.fv3_duo_windows"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_windows_below_two_is_refused():
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "1", "--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="int >= 2"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_windows_on_another_discretization_is_refused():
+    parser = build_arg_parser()
+    argv = [a if a != "fv3_duo" else "cdgrid" for a in _FV3_DUO_ARGV]
+    args = _postprocess_args(parser.parse_args(
+        argv + ["--fv3-duo-windows", "2", "--fv3-duo-window-pad", "5"]),
+        parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises(ValueError, match="only meaningful with"):
+        cfg.validate_strict()
+
+
 def test_cloud_cover_condensate_q_ref_round_trip_and_bounds():
     """--cloud-cover-condensate-q-ref threads into ExperimentConfig (None by
     default = scheme default, off); out-of-range refused by validate_strict."""
@@ -4328,3 +4407,22 @@ def test_clubb_liquid_partition_requires_clubb_and_the_prognostic_path():
     ]), parser))
     with pytest.raises(ValueError, match="requires clubb_prognostic=True"):
         turbulence_config_for(diagnostic)
+
+
+def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
+    """``--microphysics kessler`` on the duo argv reaches the config and
+    passes the lane's default-deny wall (Kessler alone is the one routed
+    scheme); a second active scheme next to it is still refused."""
+    from legoesm.driver.component_factory import _refuse_fv3_duo_non_default
+    cfg = _fv3_duo_cfg(["--microphysics", "kessler"])
+    assert cfg.microphysics == "kessler"
+    cfg.validate_strict()
+    _refuse_fv3_duo_non_default(cfg)
+    cfg = _fv3_duo_cfg(["--microphysics", "kessler", "--turbulence", "louis"])
+    _refuse_fv3_duo_non_default(cfg)          # the wall allows the field...
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    with pytest.raises(ValueError, match="silently inert"):   # ...the guard does not
+        create_atmosphere_dycore(cfg, create_cubed_sphere(12),
+                                 create_sigma_coordinate(5))

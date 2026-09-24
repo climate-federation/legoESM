@@ -157,6 +157,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="cam_l32 = CAM6's 32-level hybrid table (nlev must be 32)")
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
+    parser.add_argument("--transition-exponent", type=int, default=None,
+                        choices=[2, 3],
+                        help="hybrid B(eta)=eta**n exponent. 3 (default) carries "
+                             "NEGATIVE layer mass below 664 hPa, i.e. above ~3450 m "
+                             "of orography -- 0.92%% of the planet by area. 2 moves "
+                             "that to ~498 hPa / ~5870 m and covers all of ETOPO, at "
+                             "the cost of different level placement (#1029).")
     # ``mpas`` is the canonical name for the SCVT Voronoi mesh + TRiSK
     # discretization (Ringler 2010 / Thuburn 2009), matching the ocean
     # side which has always used this name.  Legacy aliases
@@ -845,18 +852,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "only DIM). 'none'=legacy, byte-identical.")
     parser.add_argument("--cloud-saturation-scheme",
                         dest="cloud_saturation_scheme",
-                        choices=["liquid", "mixed_phase"], default="liquid",
+                        choices=["liquid", "mixed_phase"],
+                        default="mixed_phase",
                         help="Saturation curve for the cloud-fraction RH. "
-                             "'liquid' (legacy, byte-identical) measures RH "
-                             "against liquid (Tetens) saturation at every "
-                             "temperature, so ice-saturated TTL/anvil air "
-                             "(~205-245 K) reads RH ~0.55-0.75 < rh_crit and "
-                             "the RH cloud schemes diagnose NO cirrus where "
-                             "the model carries detrained ice (#1521). "
-                             "'mixed_phase' blends liquid/ice saturation by "
-                             "the scheme's own condensate ice-fraction ramp "
-                             "(IFS alpha(T) convention), warm cloud "
-                             "unchanged.")
+                             "'mixed_phase' (DEFAULT since 2026-09-17) blends "
+                             "liquid/ice saturation by the scheme's own "
+                             "condensate ice-fraction ramp (IFS alpha(T) "
+                             "convention); warm cloud is unchanged. 'liquid' "
+                             "(legacy, byte-identical) measures RH against "
+                             "liquid (Tetens) saturation at every temperature, "
+                             "so ice-saturated air reads RH well below "
+                             "rh_crit and the RH cloud schemes diagnose NO "
+                             "cloud where the model carries ice: ~0.55-0.75 in "
+                             "the TTL/anvil (#1521) and 0.662 at 230 K / "
+                             "900 hPa, which left the February Arctic with "
+                             "0.0 %% cover against 35-40 %% observed.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
                              "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
@@ -940,6 +950,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "against an observed 0.70-0.82. Pairs with "
                              "--snow-age-activation-K, which alone does not "
                              "move it.")
+    parser.add_argument("--cloud-cap-floor", dest="cloud_cap_floor_on",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="ATTRIBUTION LEVER (Arctic self-isolation A/B, arm 1): "
+                             "hand radiation a cloud floor poleward of "
+                             "--cloud-cap-floor-lat-deg below --cloud-cap-floor-p-max-pa "
+                             "(cloud fraction >= --cloud-cap-floor-cf, grid-mean liquid path "
+                             ">= cf * --cloud-cap-floor-q-c * dp/g). Radiation-only; "
+                             "prognostic condensate and diagnostics untouched. Off = production.")
+    parser.add_argument("--cloud-cap-floor-lat-deg", dest="cloud_cap_floor_lat_deg",
+                        type=float, default=None, help="[deg] None = scheme default 70")
+    parser.add_argument("--cloud-cap-floor-p-max-pa", dest="cloud_cap_floor_p_max_pa",
+                        type=float, default=None, help="[Pa] floor applies below this; None = 70000")
+    parser.add_argument("--cloud-cap-floor-cf", dest="cloud_cap_floor_cf",
+                        type=float, default=None, help="imposed cloud fraction; None = 0.8")
+    parser.add_argument("--cloud-cap-floor-q-c", dest="cloud_cap_floor_q_c",
+                        type=float, default=None, help="[kg/kg] imposed in-cloud liquid; None = 5e-5")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -975,6 +1001,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "only adds planetary albedo (amip_production.yaml A/B: "
                              "OFF 0.295 vs ON 0.370).")
     parser.add_argument("--held-suarez-forcing", action="store_true", default=False)
+    parser.add_argument(
+        "--fv3-duo-windows", type=int, default=None, metavar="KT",
+        help=("fv3_duo window SPMD: split every face into KT x KT windows, one "
+              "per device (6*KT*KT ranks, --distributed --distributed-mode "
+              "spmd). Explicit only; the device count must match exactly. "
+              "Requires --fv3-duo-window-pad. Default: the face layout."))
+    parser.add_argument(
+        "--fv3-duo-window-pad", type=int, default=None, metavar="PAD",
+        help=("Window halo width for --fv3-duo-windows (a measured per-deck "
+              "value, e.g. 11 at C48 with 3 acoustic substeps; no default)."))
     parser.add_argument("--allow-disabled-physics", action="store_true",
                         default=False,
                         help="Permit a parameterization slot set to 'none' (an "
@@ -1306,6 +1342,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Static land-albedo NetCDF (e.g. ICON-extpar ALB). "
                              "When set (with --land-mask-file), overrides the "
                              "latitude-vegetation albedo on the land tile.")
+    parser.add_argument("--land-model", choices=("none", "slab", "multilayer"),
+                        default=None,
+                        help="Select the land surface model BY NAME, the same "
+                             "three names the coupled driver and run_lmip_smoke "
+                             "already use (CoupledESMConfig.land_mode): 'none' "
+                             "= NO land surface model at all (land temperature "
+                             "falls back to the neighbouring prescribed SST "
+                             "minus a lapse rate, and there is no soil, no "
+                             "water store and no stomatal control), 'slab' = "
+                             "the slab surface-energy-balance tile, "
+                             "'multilayer' = slab plus the Richards multilayer "
+                             "soil and CLM texture/PFT maps. Sets "
+                             "--slab-land-active and --use-multilayer-land for "
+                             "you; passing this together with either of those "
+                             "is an error rather than a silent override. "
+                             "Omitting it leaves those two flags in charge, so "
+                             "existing decks are unaffected.")
     parser.add_argument("--use-multilayer-land", default=False,
                         action=argparse.BooleanOptionalAction,
                         help="Replace the slab land tile with the differentiable "
@@ -2059,6 +2112,71 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_land_model(args, parser=None, argv=None):
+    """Apply ``--land-model`` to the two land switches, or report what they mean.
+
+    The AMIP driver has selected its land surface with two independent booleans
+    while every other driver has selected it by name.  Four boolean combinations
+    encode three states, and the all-false one means NO LAND SURFACE MODEL —
+    not a simpler one.  This routes the named choice onto the switches through
+    the land package's own vocabulary, so there is one spelling of the concept
+    rather than two.
+
+    Passing --land-model together with --slab-land-active or
+    --use-multilayer-land is refused outright: silently overriding one with the
+    other is how a run ends up not being the run its deck describes.
+
+    Always returns the RESOLVED model name so the caller can print it. What the
+    run resolved to is the thing worth logging; the flags are not.
+    """
+    from legoesm.land.config import describe_land_model, land_model_switches
+
+    # Detect which switches the USER actually typed, not which came out true.
+    # Truthiness cannot see an explicit negative: ``--no-use-multilayer-land``
+    # sets False, which is also the default, so a truthiness test would let
+    # ``--land-model multilayer`` silently overrule a flag the user wrote down.
+    # Both spellings of each switch are checked, ``=value`` forms included.
+    _switches = ("slab-land-active", "use-multilayer-land")
+    _typed = [] if argv is None else [
+        f"--{name}" for name in _switches
+        if any(a == f"--{name}" or a.startswith(f"--{name}=")
+               or a == f"--no-{name}" or a.startswith(f"--no-{name}=")
+               for a in argv)]
+    # argv unavailable (direct call): fall back to truthiness, which still
+    # catches the positive forms.
+    explicit = _typed if argv is not None else [
+        f for f, v in (("--slab-land-active", args.slab_land_active),
+                       ("--use-multilayer-land", args.use_multilayer_land))
+        if v]
+    if args.land_model is not None:
+        # A mask file activates the land tile on its own, so "none" alongside
+        # one is a contradiction: the run would have land while its own
+        # selector said it did not.  Refuse rather than print a name that is
+        # not what the run resolves to.
+        if args.land_model == "none" and getattr(args, "land_mask_file", ""):
+            msg = ("--land-model none conflicts with --land-mask-file "
+                   f"{args.land_mask_file!r}: a land-mask file activates the "
+                   "land tile by itself, so the run would have a land surface "
+                   "while asking for none. Drop one of the two.")
+            if parser is not None:
+                parser.error(msg)
+            raise SystemExit(msg)
+        if explicit:
+            msg = (f"--land-model {args.land_model} conflicts with "
+                   f"{' and '.join(explicit)}; pass either the named model or "
+                   "the individual switches, not both.")
+            if parser is not None:
+                parser.error(msg)
+            raise SystemExit(msg)
+        for field, value in land_model_switches(args.land_model).items():
+            setattr(args, field, value)
+
+    return describe_land_model(
+        slab_land_active=args.slab_land_active,
+        use_multilayer_land=args.use_multilayer_land,
+        has_land_mask=bool(getattr(args, "land_mask_file", "")))
+
+
 def _default_discretization_for_grid(grid_type: str) -> str:
     """The dycore discretization to use when the user gave a grid but no
     ``--discretization``.  The SCVT Voronoi mesh supports only 'mpas'; every
@@ -2086,6 +2204,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         vertical_coord=args.vertical_coord,
         p_top_Pa=args.p_top if args.p_top is not None else 200.0,
         stretching=args.stretching if args.stretching is not None else 2.0,
+        transition_exponent=(args.transition_exponent
+                             if args.transition_exponent is not None else 3),
         tropopause_refine=(args.tropopause_refine
                            if args.tropopause_refine is not None else 1.0),
         sigma_top=(args.sigma_top if args.sigma_top is not None else 0.01),
@@ -2099,6 +2219,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     dycore_config = DycoreConfig(
         discretization=args.discretization,
         dt=args.dt,
+        fv3_duo_windows=args.fv3_duo_windows,
+        fv3_duo_window_pad=args.fv3_duo_window_pad,
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
         k_h_scale=args.k_h_scale,
@@ -2273,6 +2395,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
+        cloud_cap_floor_on=args.cloud_cap_floor_on,
+        cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
+        cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,
+        cloud_cap_floor_cf=args.cloud_cap_floor_cf,
+        cloud_cap_floor_q_c=args.cloud_cap_floor_q_c,
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
@@ -2959,6 +3086,9 @@ def _apply_aimip_classical_overrides(
     args._aimip_params = None
     if not getattr(args, "aimip_classical_checkpoint", None):
         return args
+    if getattr(args, "cloud_cap_floor_on", False):
+        raise SystemExit("--cloud-cap-floor cannot be combined with --aimip-classical-checkpoint: "
+                         "the trained cloud config is prebuilt and would not carry the floor")
     from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
     from legoesm.training.aimip_params import AIMIPClassicalParams
     _p = load_checkpoint_or_fail(
@@ -3189,6 +3319,20 @@ def main(argv: list[str] | None = None):
         parser.set_defaults(_config_keys=frozenset(_cfg_keys))
 
     args = parser.parse_args(argv)
+    # Land surface: map --land-model onto the two switches (and refuse the
+    # contradictory combination) BEFORE anything reads them.  The returned name
+    # is what the run actually resolved to, which is the thing worth logging —
+    # "none" here means there is no land surface model at all, so it is printed
+    # whether or not the flag was used.
+    # ``main(argv=None)`` means "read sys.argv", so resolve it here — passing
+    # the bare None would drop the resolver back to truthiness on the ordinary
+    # command-line path, i.e. exactly where the explicit-negative check matters.
+    _land_model = _resolve_land_model(
+        args, parser, argv if argv is not None else sys.argv[1:])
+    print(f"[run_amip] Land surface model: {_land_model} "
+          f"(slab_land_active={args.slab_land_active}, "
+          f"use_multilayer_land={args.use_multilayer_land}, "
+          f"land_mask_file={getattr(args, 'land_mask_file', '') or '<none>'})")
     # Postprocess FIRST: it resolves the grid/discretization sentinels
     # (``--truncation 21`` alone sets discretization="spectral" only there),
     # and the spectral fallback keys off ``args.discretization == "spectral"``

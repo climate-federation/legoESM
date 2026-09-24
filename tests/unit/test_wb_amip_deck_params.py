@@ -180,3 +180,49 @@ def test_a_pinned_field_is_not_also_a_trained_leaf():
     assert not (trained & pinned), (
         f"pinned AND trainable: {sorted(trained & pinned)} — the pin wins, so "
         f"these leaves would train against nothing")
+
+
+def test_the_radiation_column_block_size_is_a_deck_key_that_reaches_the_solver():
+    """A deck can bound the backward pass's radiation scratch.
+
+    Max-random overlap hands the solver ``n_sub * ncol`` sub-columns, and the
+    gradient of the un-blocked solve over them asked for 490 GiB at T63/L32.
+    The block size has to be settable from the deck AND arrive on the solver's
+    config: it was briefly readable in the builder while still missing from
+    the deck validator, so a deck that set it was rejected outright.
+
+    Non-vacuity: drop ``rrtmgp_column_chunk_size`` from ``_WB_CLASSICAL_KEYS``
+    and the first half fails; stop forwarding it in
+    ``make_aimip_classical_spectral_physics`` and the second half fails.
+    """
+    import yaml
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_params import (
+        AIMIPTrainableBundle,
+        make_aimip_classical_spectral_physics,
+    )
+    from legoesm.training.model_registry import build_variant
+    from legoesm.training.scale_build import validate_wb_campaign_yaml
+
+    deck = yaml.safe_load(open("config/wb/campaign/spectral_t63_amip.yaml"))
+    deck["classical"]["rrtmgp_column_chunk_size"] = 4608
+    validate_wb_campaign_yaml(deck)          # the deck key is accepted...
+
+    cl = deck["classical"]
+    bundle = AIMIPTrainableBundle(
+        classical=build_variant(
+            "classical", nlev=8,
+            overrides={"spatial_surface": False, "spatial_init_std": 0.0,
+                       "spatial_seed": 0}),
+        schemes=_build(dict(cl["param_init"]), cl["param_fixed"]))
+    _, rad = make_aimip_classical_spectral_physics(
+        bundle, create_gaussian_grid(8), 1800.0, radiation="rrtmgp",
+        split_rad=True, rad_update_interval_steps=6,
+        rrtmgp_gpoint_batch_size=8, rrtmgp_column_chunk_size=4608,
+        param_overrides={k: dict(v) for k, v in cl["param_fixed"].items()},
+        convection_scheme=cl["convection"], turbulence_scheme=cl["turbulence"],
+        gwd_scheme=cl["gwd"], microphysics_scheme=cl["microphysics"],
+        cloud_scheme=cl["cloud"], surface_bulk_scheme=cl["surface_bulk"])
+
+    # ...and it is what radiation will actually block the column axis by.
+    assert int(rad.radiation_config.rrtmgp.column_chunk_size) == 4608

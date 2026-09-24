@@ -185,7 +185,7 @@ def test_cam6_deck_reaches_the_dycore_end_to_end():
     only thing that would have caught a deck key silently dropped on the way.
     """
     from legoesm.driver.run_config_yaml import load_yaml_config
-    deck = pathlib.Path(__file__).parents[2] / "config" / "amip" / "amip_cam6.yaml"
+    deck = pathlib.Path(__file__).parents[2] / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     keys = load_yaml_config(str(deck), parser)
     assert keys["mpas_div_damp4_scale"] == 1.0                  # deck -> loader
@@ -251,23 +251,84 @@ def test_conservative_hybrid_transport_is_selectable_and_conserves():
             base._replace(vert_advection_scheme="sb"))
 
 
-def test_cam6_deck_selects_both_levers_and_no_other_deck_does():
-    """The user approved both levers for the CAM6 deck on 2026-09-23 after the
-    three-arm physics-off A/B.  This pins that decision: the CAM6 deck carries
-    both, every other committed deck carries neither, and the code defaults stay
-    off.  It goes red if a lever leaks into another deck or into a default."""
-    import yaml
+def test_production_deck_selects_both_levers_and_no_other_deck_does():
+    """The user approved both levers on 2026-09-23 after the three-arm
+    physics-off A/B, and on the same day made the CAM6 suite the production
+    default, so the levers now live in amip_production.yaml.  This pins that
+    decision: the production deck carries both, every other committed deck
+    carries neither, and the CODE defaults stay off -- the deck selects them,
+    a default is not a record.  It goes red if a lever leaks into another deck
+    or into a default.
+
+    The outgoing Sundqvist/L36 deck is named explicitly rather than matched by
+    exclusion, because it is the paired baseline of the run-1 comparison and
+    the whole point of keeping it is that it carries NEITHER lever."""
+    from legoesm.driver.run_config_yaml import read_yaml_with_includes
     cfgdir = pathlib.Path(__file__).parents[2] / "config"
-    doc = yaml.safe_load((cfgdir / "amip" / "amip_cam6.yaml").read_text())
+    doc = read_yaml_with_includes(cfgdir / "amip" / "amip_production.yaml")
     assert doc["mpas_div_damp4_scale"] == 1.0
     assert doc["mpas_vert_advection_scheme"] == "sb"
     assert DycoreConfig().mpas_div_damp4_scale == 0.0
     assert DycoreConfig().mpas_vert_advection_scheme == "upwind"
+    base = read_yaml_with_includes(cfgdir / "amip" / "amip_sundqvist_l36.yaml")
+    assert base.get("mpas_div_damp4_scale", 0.0) == 0.0   # silent -> code default
+    assert base["mpas_vert_advection_scheme"] == "van_leer"
+    # Walk the RESOLVED decks, not the raw files: a deck that inherits a lever
+    # through `include:` carries it just as surely as one that spells it out,
+    # and a raw-key walk cannot see that (GLM review 2026-09-23).
+    _assert_no_other_deck_carries_a_lever(cfgdir)
+
+
+def _assert_no_other_deck_carries_a_lever(cfgdir):
+    """The walk itself, taking its config root as an argument.
+
+    Split out so the negative control below can run it against a COPY in a
+    temporary directory instead of planting a file in the real checkout: the
+    genuine gate walks the same tree, so a shared impostor would make it fail
+    spuriously under pytest-xdist and would survive a crash (GLM round 3).
+    """
+    from legoesm.driver.run_config_yaml import read_yaml_with_includes
+    production = (cfgdir / "amip" / "amip_production.yaml").resolve()
     for deck in sorted(cfgdir.rglob("*.yaml")):
-        if deck.name == "amip_cam6.yaml":
+        # Exempt the canonical PATH, not the basename: a file named
+        # amip_production.yaml anywhere else under config/ would otherwise be
+        # skipped, and codex proved that bypass runnable -- an in-memory
+        # config/review/amip_production.yaml inheriting production passed both
+        # this walk and strict validation carrying 1.0/sb (round-2 review).
+        if deck.resolve() == production:
             continue
-        other = yaml.safe_load(deck.read_text()) or {}
+        # No catch: measured 2026-09-23, all 313 config/**/*.yaml resolve
+        # without raising, so a swallowed error here would only be an escape
+        # hatch for a deck that stopped resolving (GLM round-2 review).
+        other = read_yaml_with_includes(deck) or {}
         if not isinstance(other, dict):
             continue
         assert other.get("mpas_div_damp4_scale", 0.0) == 0.0, deck
         assert other.get("mpas_vert_advection_scheme", "upwind") != "sb", deck
+
+
+def test_the_lever_walk_exempts_a_path_not_a_basename(tmp_path):
+    """Negative control for the exemption, from codex round 2.
+
+    A deck named amip_production.yaml somewhere OTHER than config/amip/ is not
+    the production deck and must be walked like any other.  Before the fix it
+    was skipped by basename, so a deck inheriting the levers could reach a run
+    with the gate green.
+
+    Runs against a COPY of config/ under tmp_path, so it plants nothing in the
+    checkout, cannot collide with a parallel run of the real gate, and leaves
+    nothing behind if it dies mid-test.
+    """
+    import shutil
+    import pytest
+    real = pathlib.Path(__file__).parents[2] / "config"
+    cfgdir = tmp_path / "config"
+    shutil.copytree(real, cfgdir)
+    # sanity: the copy passes before the impostor is planted, so a failure
+    # below is the impostor and not the copying.
+    _assert_no_other_deck_carries_a_lever(cfgdir)
+    impostor = cfgdir / "review" / "amip_production.yaml"
+    impostor.parent.mkdir(parents=True)
+    impostor.write_text("include: ../amip/amip_production.yaml\n")
+    with pytest.raises(AssertionError):
+        _assert_no_other_deck_carries_a_lever(cfgdir)

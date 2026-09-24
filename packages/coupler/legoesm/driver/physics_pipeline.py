@@ -890,7 +890,7 @@ class PhysicsPipeline:
         ``step_multilayer_land`` with the pipeline's land config / per-column params.
         Pure + differentiable w.r.t. the land params (the whole point of the refactor).
         Deferred land imports avoid a core->land top-level cross-package cycle."""
-        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface, lowest_level_height
         from legoesm.land.multilayer_land import step_multilayer_land
         from legoesm.thermo import saturation_mixing_ratio
         ad = self.adapter
@@ -907,6 +907,9 @@ class PhysicsPipeline:
         # a shared faithful-zenith upgrade for those is a separate follow-up).
         _cosz = cos_zenith_col if cos_zenith_col is not None else 0.5 * ones
         forcing = AtmToSurface(
+            z_lowest=lowest_level_height(
+                T_air, self.sigma_coord.pressure_at_half(p_s_col),
+                self.sigma_coord.pressure_at_full(p_s_col)),
             sw_down=sw_down_col, lw_down=lw_down_col, precip_total=precip,
             precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
             T_lowest=T_air, q_lowest=q_air, u_lowest=u_low, v_lowest=v_low,
@@ -4191,6 +4194,36 @@ def apply_surface_flux_config(tc, config):
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
     zml = getattr(config, "surface_z_ref_model_level", None)
+
+    # #1783: the unified land-flux law pins the reference height OFF.
+    #
+    # The height correction tells the MOST solver the real height of the lowest
+    # full level (~135 m instead of a nominal 10 m) and brings the air down
+    # dry-adiabatically, ~1.5 K.  Against the unified land interface that
+    # manufactures an air-surface contrast that is not there: with it on, five
+    # tests of TestUnifiedLaneOneFluxLaw fail with sensible heat at
+    # -1.13 .. -7.94 W/m^2 where the blended law wants +43.6 .. -16.9, i.e. a
+    # downward flux out of nothing.  Forcing it off takes that class to 7
+    # passed and the whole module to 29 passed -- measured, one constructor
+    # field, job 9946756.
+    #
+    # Only when the run does not state it.  An explicit request is never
+    # silently inverted; the two settings genuinely disagree, so asking for
+    # both is refused rather than resolved behind the caller's back.
+    if getattr(config, "land_interface_flux", None) == "unified":
+        if zml is None:
+            zml = False
+        elif bool(zml):
+            raise ValueError(
+                "land_interface_flux='unified' with "
+                "surface_z_ref_model_level=True is not a supported "
+                "combination (#1783): the lowest-level height correction "
+                "invents an air-surface contrast that the unified flux law "
+                "then debits, producing a downward sensible heat flux out of "
+                "nothing. Set surface_z_ref_model_level=False or leave it "
+                "unset (the unified lane pins it off), or select a different "
+                "land_interface_flux."
+            )
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
     # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
     # sea-water surface humidity needs a path that separates the ocean from
@@ -4704,6 +4737,25 @@ def _validated_C_land(value):
             f"[1e4, 1e8]; got {value!r}."
         )
     return value
+
+
+def cap_floor_lane_applies(config) -> bool:
+    """True on the lanes whose radiation goes through the standalone backend
+    (MPAS grid, spectral dycore), the only place the polar-cap cloud floor is
+    applied; every other lane runs this pipeline's own radiation."""
+    return (config.grid.grid_type == "mpas"
+            or config.dycore.discretization == "spectral")
+
+
+def refuse_cap_floor_on_fv(config) -> None:
+    """Refuse an enabled polar-cap cloud floor on any lane that would never
+    apply it.  Called at the top of ModelDriver.run (the pipeline object is
+    built on all lanes, so the refusal cannot live in build_physics_pipeline)."""
+    if getattr(config, "cloud_cap_floor_on", False) and not cap_floor_lane_applies(config):
+        raise ValueError(
+            "cloud_cap_floor_on is applied only in the standalone radiation path "
+            "(MPAS / spectral); the finite-volume PhysicsPipeline does not apply it "
+            "and refuses rather than silently running without it.")
 
 
 def build_physics_pipeline(grid, sigma, config):

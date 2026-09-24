@@ -297,3 +297,84 @@ def test_half_level_convention_puts_the_surface_at_the_last_index():
     assert np.all(z_low > 0.0), z_low
     # and it is a plausible lowest-level height, not a half-layer sliver
     assert np.all(z_low < 1000.0), z_low
+
+
+# ----------------------------------------------------------------------
+# #1783 -- the unified land-flux law pins the reference height off
+# ----------------------------------------------------------------------
+
+def test_unified_land_flux_pins_the_reference_height_off_when_unset():
+    """The regression fix, as a test.
+
+    With the height correction on, five tests of ``TestUnifiedLaneOneFluxLaw``
+    report sensible heat at -1.13 .. -7.94 W/m^2 where the blended law wants
+    +43.6 .. -16.9 -- a downward flux out of nothing, because supplying the
+    real height of the lowest full level and bringing the air down
+    dry-adiabatically manufactures an air-surface contrast the unified law then
+    debits. Forcing it off takes that class to 7 passed and its module to 29.
+    """
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    class _Cfg:
+        turbulence = "louis"
+        surface_bulk_scheme = "coare3"
+        land_interface_flux = "unified"
+        surface_z_ref_model_level = None
+
+    out = turbulence_config_for(_Cfg())
+    assert getattr(out, out.scheme).surface.z_ref_model_level is False
+
+
+def test_a_non_unified_lane_keeps_the_scheme_default():
+    """Non-vacuity: the pin must be scoped to the lane that needs it.
+
+    If this also came back False the test above would pass for the wrong
+    reason -- it would be measuring the scheme default, not the pin.
+    """
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+
+    class _Cfg:
+        turbulence = "louis"
+        surface_bulk_scheme = "coare3"
+        land_interface_flux = "legacy_dual"
+        surface_z_ref_model_level = None
+
+    out = turbulence_config_for(_Cfg())
+    assert SurfaceLayerConfig().z_ref_model_level is True       # the default
+    assert getattr(out, out.scheme).surface.z_ref_model_level is True
+
+
+def test_an_explicit_off_is_honoured_on_the_unified_lane():
+    """Stating the same thing the pin does is not an error."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    class _Cfg:
+        turbulence = "louis"
+        surface_bulk_scheme = "coare3"
+        land_interface_flux = "unified"
+        surface_z_ref_model_level = False
+
+    out = turbulence_config_for(_Cfg())
+    assert getattr(out, out.scheme).surface.z_ref_model_level is False
+
+
+def test_explicitly_asking_for_both_is_refused_not_silently_inverted():
+    """A stated request is never inverted behind the caller's back.
+
+    The two settings genuinely disagree -- that is what the measurement on
+    #1783 showed -- so a run that asks for both gets a message naming the
+    conflict rather than a config that quietly does the opposite of what it
+    was handed.
+    """
+    import pytest
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    class _Cfg:
+        turbulence = "louis"
+        surface_bulk_scheme = "coare3"
+        land_interface_flux = "unified"
+        surface_z_ref_model_level = True
+
+    with pytest.raises(ValueError, match="not a supported combination"):
+        turbulence_config_for(_Cfg())

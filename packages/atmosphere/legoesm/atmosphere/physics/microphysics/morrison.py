@@ -1781,6 +1781,24 @@ def morrison_microphysics(
         dN_g_dt=dN_g_dt,
         sed_substeps_required=sed_substeps_required,
     )
+    if getattr(config, "publish_qc_budget", False):
+        # APPLIED terms: every sink below already carries ``qc_scale`` (the
+        # donor clamp), and ``condensation`` is the saturation-adjustment
+        # source.  They reconstruct ``dq_c_dt`` exactly -- the probe asserts
+        # the residual, so a term added to ``dq_c_dt`` without being listed
+        # here is caught rather than hidden.  Sedimentation of cloud water is
+        # NOT a q_c term in this scheme (cloud droplets do not sediment); it
+        # appears in the rain budget instead.
+        out = out._replace(qc_budget={
+            "condensation": condensation,
+            "autoconversion": -dq_c_au,
+            "accretion": -dq_c_ac,
+            "bergeron": -bergeron,
+            "riming_ice": -riming_i,
+            "riming_snow": -riming_s,
+            "riming_graupel": -riming_g,
+            "homogeneous_freezing": -homo_freeze_c,
+        })
     if _sed_poison is not None:
         # Strict mode: every FLOAT field carries the overflow guard (the
         # count stays a usable integer).  Static Python branch -- the
@@ -1799,10 +1817,16 @@ def morrison_microphysics(
         # this guard exists to prevent; strict and non-strict arms are not
         # claimed bit-identical (GLM 2026-09-22).
         _bias = jnp.where(jnp.isnan(_sed_poison), jnp.nan, 0.0)
+        # ``qc_budget`` is a dict of arrays, not an array: ``jnp.asarray`` on a
+        # dict raises, so filter on type BEFORE probing the dtype.  The budget
+        # is a diagnostic and carries no gradient the guard needs to poison.
+        def _is_float_array(v):
+            if v is None or isinstance(v, dict):
+                return False
+            return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
+
         out = out._replace(**{
             _k: getattr(out, _k) * _sed_poison + _bias
             for _k in out._fields
-            if getattr(out, _k) is not None
-            and jnp.issubdtype(jnp.asarray(getattr(out, _k)).dtype,
-                               jnp.floating)})
+            if _is_float_array(getattr(out, _k))})
     return out

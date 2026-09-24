@@ -964,6 +964,14 @@ class MorrisonConfig(NamedTuple):
     # (``MicrophysicsOutput.sed_substeps_required``).
     sed_cfl_substeps_strict: bool = False
 
+    # DIAGNOSTIC ONLY.  Publish the APPLIED (post-donor-clamp) cloud-water
+    # budget terms on ``MicrophysicsOutput.qc_budget``.  Static Python branch,
+    # so the default graph and every existing run are untouched; nothing in the
+    # model reads it.  Exists because the donor clamp scales all q_c sinks by a
+    # common factor, so terms re-derived outside the scheme are PRE-clamp and
+    # cannot close the budget.  NOT a tunable: it selects no physics.
+    publish_qc_budget: bool = False
+
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
 # ExperimentConfig): the loop cost is LINEAR in the cap, so a typo ("2560")

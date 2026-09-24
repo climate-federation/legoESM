@@ -68,6 +68,32 @@ SPEC = {
 _DISPLAY_SCALE = {"evspsbl": 86400.0, "pr": 86400.0}
 
 
+# Minimum time-mean incoming solar flux [W m-2] for a meaningful TOA albedo.
+# The ratio rsut/rsdt is undefined where the sun does not rise, and the old code
+# floored the denominator at 1.0 W m-2 instead of masking, so polar-night cells
+# came back as a finite near-zero albedo rather than missing — which draws a
+# zonal STRIPE at the edge of the sunlit region that is a property of the
+# denominator, not of the model.  The 20 W m-2 cutoff (about 1.5 % of the solar
+# constant) is OUR analysis choice of a conservative floor, not a published
+# observability limit: CERES documents twilight contamination near the
+# terminator, but sets no such threshold.  Any value that removes the
+# terminator ring serves; this one is round and errs towards discarding cells.
+TOA_ALBEDO_MIN_RSDT = 20.0
+
+
+def _toa_albedo(up, dn):
+    """TOA albedo where the sun actually shines, NaN elsewhere.
+
+    Returns ``(albedo, valid)``.  The caller must apply the SAME validity mask
+    to the model, the reference and their difference, or the difference map
+    reintroduces the artefact this function exists to remove.
+    """
+    up = np.asarray(up, dtype=np.float64)
+    dn = np.asarray(dn, dtype=np.float64)
+    valid = dn > TOA_ALBEDO_MIN_RSDT
+    return np.where(valid, up / np.where(valid, dn, 1.0), np.nan), valid
+
+
 def _model_clim(run, var):
     """Model climatology over ALL published months, plus (lat, lon, months).
 
@@ -84,8 +110,8 @@ def _model_clim(run, var):
         # Ratio of the TIME MEANS, not the mean of the ratios: the monthly
         # ratio is undefined in polar night (rsdt -> 0) and a mean over it
         # would be dominated by that noise.
-        field = np.asarray(up["rsut"]).mean(axis=0) / np.maximum(
-            np.asarray(dn["rsdt"]).mean(axis=0), 1.0)
+        field, _valid = _toa_albedo(np.asarray(up["rsut"]).mean(axis=0),
+                                    np.asarray(dn["rsdt"]).mean(axis=0))
         return field, np.asarray(up.lat), np.asarray(up.lon) % 360.0, months
     d = rb._load_model(run, var)
     if d is None:
@@ -101,7 +127,8 @@ def _ref_clim(var, months, mlat, mlon, src):
         dn = rb._ref_clim("rsdt", months, mlat, mlon, src=src)
         if up is None or dn is None:
             return None
-        return up / np.maximum(dn, 1.0)
+        ref, _valid = _toa_albedo(up, dn)
+        return ref
     out = rb._ref_clim(var, months, mlat, mlon, src=src)
     if out is None:
         return None
@@ -121,11 +148,23 @@ def grid_scale_residual(f):
     """
     n = (np.roll(f, 1, 0) + np.roll(f, -1, 0)
          + np.roll(f, 1, 1) + np.roll(f, -1, 1)) / 4.0
-    return float(np.mean(np.abs(f - n)[1:-1]) / np.std(f))
+    # nan-aware because a masked field (TOA albedo in polar night) is missing by
+    # construction there; the caller prints the valid fraction next to the
+    # ratio so an unexpectedly empty field cannot pass as a small number.
+    return float(np.nanmean(np.abs(f - n)[1:-1]) / np.nanstd(f))
 
 
 def _gm(field, lat, lon):
-    return rb.region_mean(field, lat, lon, rb.REGIONS["GLOBAL"])
+    """Global area mean over the cells that carry a value.
+
+    ``region_mean`` takes the validity mask and RENORMALISES the weights, which
+    is what a partially masked field needs — and it raises on an empty region
+    rather than returning a silent NaN, so a field that is unexpectedly all
+    missing is loud instead of averaging to nothing.
+    """
+    valid = np.isfinite(np.asarray(field))
+    return rb.region_mean(field, lat, lon, rb.REGIONS["GLOBAL"],
+                          valid=valid if not valid.all() else None)
 
 
 def _panel(ax, lon, lat, field, title, cmap, vmin, vmax, units):
@@ -138,6 +177,17 @@ def _panel(ax, lon, lat, field, title, cmap, vmin, vmax, units):
     ax.set_global()
     ax.set_title(title, fontsize=8)
     return m
+
+
+def _common_mask(field, ref):
+    """Both sides restricted to the cells where BOTH carry a value.
+
+    Any statistic taken separately on the two fields — a global mean, a colour
+    percentile, a grid-scale roughness ratio — otherwise describes a different
+    region on each side, and only their difference sees the intersection.
+    """
+    both = np.isfinite(field) & np.isfinite(ref)
+    return np.where(both, field, np.nan), np.where(both, ref, np.nan)
 
 
 def maps(run, variables, out_dir):
@@ -159,8 +209,14 @@ def maps(run, variables, out_dir):
             print(f"  {var}: no {label} reference -- skipped")
             continue
         scale = _DISPLAY_SCALE.get(var, 1.0)
-        rows.append((var, field * scale, ref * scale, mlat, mlon, label, cmap,
-                     blim, units))
+        # Both sides describe the SAME cells or neither number is comparable:
+        # the TOA albedo is masked where the sun does not rise, and that mask is
+        # not identical on the two sides.  Intersect ONCE here, so the panel
+        # means, the colour percentiles and the grid-scale ratio below all speak
+        # about the region the bias is computed over.
+        _f, _r = _common_mask(np.asarray(field, dtype=float) * scale,
+                              np.asarray(ref, dtype=float) * scale)
+        rows.append((var, _f, _r, mlat, mlon, label, cmap, blim, units))
     if not rows:
         raise SystemExit(f"{run}: nothing to plot")
 
@@ -171,18 +227,28 @@ def maps(run, variables, out_dir):
     axes = np.atleast_2d(axes)
 
     for i, (var, field, ref, lat, lon, label, cmap, blim, units) in enumerate(rows):
+        # Say out loud how much of the map carries a value.  The TOA albedo is
+        # masked where the sun does not rise, and a silently empty field would
+        # otherwise average to a plausible-looking number.
+        _cov = float(np.isfinite(np.asarray(field) - np.asarray(ref)).mean())
+        if _cov < 1.0:
+            _note = (f" [valid on {_cov:.0%} of cells"
+                     + (f"; TOA albedo needs rsdt > {TOA_ALBEDO_MIN_RSDT:g} "
+                        "W m-2 on both sides]" if var == "albedo" else "]"))
+            print(f"  {var}: {_note.strip()}")
+        _vname = "TOA albedo" if var == "albedo" else var
         lo = float(min(np.nanpercentile(field, 2), np.nanpercentile(ref, 2)))
         hi = float(max(np.nanpercentile(field, 98), np.nanpercentile(ref, 98)))
         m1 = _panel(axes[i, 0], lon, lat, field,
-                    f"legoESM {var}   global {_gm(field, lat, lon):.3g} {units}",
+                    f"legoESM {_vname}   global {_gm(field, lat, lon):.3g} {units}",
                     cmap, lo, hi, units)
         _panel(axes[i, 1], lon, lat, ref,
-               f"{label} {var}   global {_gm(ref, lat, lon):.3g} {units}",
+               f"{label} {_vname}   global {_gm(ref, lat, lon):.3g} {units}",
                cmap, lo, hi, units)
         d = field - ref
         m3 = _panel(axes[i, 2], lon, lat, d,
                     f"bias   global {_gm(d, lat, lon):+.3g} {units}   "
-                    f"RMS {np.sqrt(np.mean(d ** 2)):.3g}",
+                    f"RMS {np.sqrt(np.nanmean(d ** 2)):.3g}",
                     "RdBu_r", -blim, blim, units)
         fig.colorbar(m1, ax=axes[i, :2], shrink=0.85, pad=0.01)
         fig.colorbar(m3, ax=axes[i, 2], shrink=0.85, pad=0.01)

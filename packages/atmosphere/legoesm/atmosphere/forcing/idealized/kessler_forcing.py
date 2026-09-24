@@ -90,12 +90,23 @@ def kessler_column_tendencies(T, p_s, q_v, q_c, q_r, sigma_coord, *, dt, config)
     (dT_dt, dq_v_dt, dq_c_dt, dq_r_dt) : tuple of jax.Array ``(ncol, nlev)``
         Latent-heating and vapor / cloud / rain mixing-ratio rates.
     """
+    p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)   # (ncol, nlev)
+    p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)   # (ncol, nlev+1)
+    return kessler_column_tendencies_pressure(
+        T, p_full, p_half, q_v, q_c, q_r, dt=dt, config=config)
+
+
+def kessler_column_tendencies_pressure(T, p_full, p_half, q_v, q_c, q_r, *,
+                                       dt, config):
+    """Pressure-native body of :func:`kessler_column_tendencies`: the
+    tracer floor, the shared rho/dz thermo and the shared Kessler core,
+    for a caller that already holds its layer and interface pressures
+    (a hybrid-eta dycore such as FV3, where sigma*p_s is not the layer
+    pressure).  Same ``(ncol, nlev)`` contract and return tuple; the
+    sigma adapter above is this plus ``pressure_from_sigma``."""
     q_v = jnp.maximum(q_v, 0.0)
     q_c = jnp.maximum(q_c, 0.0)
     q_r = jnp.maximum(q_r, 0.0)
-
-    p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)   # (ncol, nlev)
-    p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)   # (ncol, nlev+1)
     rho = compute_rho(T, p_full, q_v)        # moist ideal-gas density
     dz = compute_layer_dz(T, p_half, q_v)    # moist hypsometric thickness
 
@@ -519,3 +530,77 @@ def make_kessler_column_physics_fn(sigma_coord, dt,
                 dq_r.reshape(shp))
 
     return fn
+
+
+KESSLER_TRACER_SLOTS = ("q_v", "q_c", "q_r")   # duo tracer list slots 0, 1, 2
+
+
+def apply_kessler_step_sixface_jax(state, press, q, *, dt, n, ng, km,
+                                   config=None):
+    """One operator-split Kessler warm-rain step on the six-face duo bundle.
+
+    The FV3 duo adapter of the shared column core above
+    (``kessler_column_tendencies_pressure``: the same tracer floor, the
+    same rho/dz thermo, the same ``kessler_microphysics``) -- a layout
+    bridge, not a scheme, living with the other grid adapters because
+    ``legoesm.core`` may not import upward.  Column-local, so it needs no halo
+    exchange on any lane; the window SPMD lane scatters the owned block
+    in and gathers it out exactly as the Held-Suarez twin does.
+
+    Bridge (each read off the code, not assumed):
+      * ``state["pt"]`` is TEMPERATURE [K] between steps on BOTH the
+        dry and the moist deck: the remap's closing step divides
+        ``pt*pkz`` by ``(1 + r_vir*q_sphum)`` (fv_mapz.F90:975,
+        ``close_out_pt``), so a moist run hands physics ``T``, not
+        ``T_v``.
+      * ``p_half`` = ``press["pe"]`` (6, n, n, km+1), sliced and
+        transposed as the HS twin does; ``p_full`` = ``delp / d(peln)``,
+        FV3's own layer-mean pressure for physics.
+      * tendencies applied on the compute block only, as the existing
+        cube Kessler forcing lanes do: ``pt += dT*dt``, ``q += dq*dt``;
+        ``delp`` and the winds untouched.  Precipitated water therefore
+        leaves the column with NO mass adjustment (GLM 2026-09-23: the
+        dry-air mass gains the accumulated precipitation) -- the same
+        convention as the other lanes, stated here so it is a known
+        limitation and not a hidden one.
+      * tracer list slots ``KESSLER_TRACER_SLOTS`` = q_v, q_c, q_r.
+
+    Returns ``(state_new, q_new)`` with the same layouts as the inputs.
+    """
+    n, ng, km = int(n), int(ng), int(km)
+    m = n + 2 * ng
+    ci = slice(ng, ng + n)
+    cfg = config if config is not None else KesslerConfig()
+    if len(q) < len(KESSLER_TRACER_SLOTS):
+        raise ValueError(
+            f"Kessler needs {len(KESSLER_TRACER_SLOTS)} tracers "
+            f"{KESSLER_TRACER_SLOTS} in list slots 0..2; the bundle carries "
+            f"{len(q)}")
+    pt6 = jnp.asarray(state["pt"])
+    delp6 = jnp.asarray(state["delp"])
+    if pt6.shape != (6, m, m, km):
+        raise ValueError(f"pt6 must be (6, m, m, km)={(6, m, m, km)}, got "
+                         f"{pt6.shape}")
+    peln6 = jnp.transpose(jnp.asarray(press["peln"]), (0, 1, 3, 2))
+    pe6 = jnp.transpose(jnp.asarray(press["pe"])[:, 1:n + 1, :, 1:n + 1],
+                        (0, 1, 3, 2))
+    if pe6.shape != (6, n, n, km + 1) or peln6.shape != (6, n, n, km + 1):
+        raise ValueError(f"pe/peln must reach (6, n, n, km+1)="
+                         f"{(6, n, n, km + 1)}, got {pe6.shape}/{peln6.shape}")
+    T_c = pt6[:, ci, ci]                                  # (6, n, n, km)
+    p_full = delp6[:, ci, ci] / (peln6[..., 1:] - peln6[..., :-1])
+    qv_c, qc_c, qr_c = (jnp.asarray(q[i])[:, ci, ci] for i in range(3))
+    ncol = 6 * n * n
+
+    dT, dqv, dqc, dqr = kessler_column_tendencies_pressure(
+        T_c.reshape(ncol, km), p_full.reshape(ncol, km),
+        pe6.reshape(ncol, km + 1),
+        qv_c.reshape(ncol, km), qc_c.reshape(ncol, km), qr_c.reshape(ncol, km),
+        dt=dt, config=cfg)
+    blk = (6, n, n, km)
+    pt2 = pt6.at[:, ci, ci].set(T_c + dT.reshape(blk) * dt)
+    q2 = list(q)
+    for i, dq in enumerate((dqv, dqc, dqr)):
+        qi = jnp.asarray(q[i])
+        q2[i] = qi.at[:, ci, ci].set(qi[:, ci, ci] + dq.reshape(blk) * dt)
+    return {**state, "pt": pt2}, q2

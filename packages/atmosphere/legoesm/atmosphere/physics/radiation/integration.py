@@ -926,6 +926,9 @@ def _call_radiation_backend(
             conv_icwmr=conv_icwmr,
             p_half=p_half,
         )
+        if cloud_config.cap_floor_on:
+            from legoesm.atmosphere.physics.clouds.cloud_fraction import apply_cap_cloud_floor
+            cloud_props = apply_cap_cloud_floor(cloud_props, lat, p_full, dp, cloud_config)
         # ``to_rrtmg_kwargs`` builds the kwargs without ``cloud_fraction``
         # (commit 4c9591bb, lost in AIMIP-#312 merge, restored iter-15
         # in ``physics_pipeline.py`` and iter-16 here) — see docstring

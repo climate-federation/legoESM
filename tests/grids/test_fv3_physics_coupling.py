@@ -532,3 +532,110 @@ def test_apply_held_suarez_step_refuses_unknown_backend(hs_case):
     with pytest.raises(ValueError, match="backend"):
         apply_held_suarez_step(ctx, state, press, dt=1800.0, n=N, ng=NG,
                                km=KM_HS, backend="fortran")
+
+
+# ---------------------------------------------------------------------------
+# apply_held_suarez_step_sixface_jax: the face-stacked pure-JAX twin used
+# where the NumPy authority cannot run (multi-process SPMD, whose leaves are
+# not host-addressable).  Pinned to the authority on the SAME synthetic
+# six-face case; the authority keeps the certified score.
+# ---------------------------------------------------------------------------
+from legoesm.core.fv3_native_physics_coupling import (  # noqa: E402
+    apply_held_suarez_step_sixface_jax,
+    stack_held_suarez_metrics,
+)
+
+
+@pytest.fixture(scope="module")
+def hs_sixface_case(hs_case):
+    from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
+    ctx, state, press = hs_case
+    tab = build_jax_duo_stepper_context(ctx).tab
+    state6 = {nm: np.stack([face[nm] for face in state])
+              for nm in ("u", "v", "pt", "delp")}
+    press6 = {nm: np.stack([np.asarray(face[nm]) for face in press])
+              for nm in ("pe", "peln", "pkz")}
+    amat6, lat6, wv6 = stack_held_suarez_metrics(ctx)
+    return ctx, state, press, tab, state6, press6, amat6, lat6, wv6
+
+
+def _numpy_authority_result(ctx, state, press):
+    st = [{k: np.array(v) for k, v in face.items()} for face in state]
+    pr = [{k: np.asarray(v) for k, v in face.items()} for face in press]
+    apply_held_suarez_step(ctx, st, pr, dt=1800.0, n=N, ng=NG, km=KM_HS,
+                           strat=True, backend="numpy")
+    return {nm: np.stack([face[nm] for face in st]) for nm in ("u", "v", "pt")}
+
+
+def test_sixface_jax_matches_the_numpy_authority(hs_sixface_case):
+    ctx, state, press, tab, state6, press6, amat6, lat6, wv6 = hs_sixface_case
+    ref = _numpy_authority_result(ctx, state, press)
+    out = apply_held_suarez_step_sixface_jax(
+        state6, press6, tab, amat6, lat6, wv6, dt=1800.0, n=N, ng=NG,
+        km=KM_HS, strat=True)
+    for nm in ("u", "v", "pt"):
+        got = np.asarray(out[nm])
+        assert got.dtype == np.float64, nm
+        assert np.isfinite(got).all(), nm
+        err = np.abs(got - ref[nm]).max()
+        assert np.allclose(got, ref[nm], atol=1e-11, rtol=1e-12), (nm, err)
+    # non-vacuous: the step moved every prognostic it owns
+    for nm in ("u", "v", "pt"):
+        assert np.abs(np.asarray(out[nm]) - state6[nm]).max() > 0.0, nm
+    # delp is read-only to HS and comes back untouched (same object)
+    assert out["delp"] is state6["delp"]
+
+
+def test_sixface_jax_jit_equals_eager(hs_sixface_case):
+    import jax
+    ctx, state, press, tab, state6, press6, amat6, lat6, wv6 = hs_sixface_case
+
+    def f(state6, press6):
+        return apply_held_suarez_step_sixface_jax(
+            state6, press6, tab, amat6, lat6, wv6, dt=1800.0, n=N, ng=NG,
+            km=KM_HS, strat=True)
+    eager = f(state6, press6)
+    jitted = jax.jit(f)(state6, press6)
+    for nm in ("u", "v", "pt"):
+        np.testing.assert_allclose(np.asarray(jitted[nm]),
+                                   np.asarray(eager[nm]), rtol=0, atol=1e-13,
+                                   err_msg=nm)
+
+
+def test_sixface_jax_refuses_wrong_pt_shape(hs_sixface_case):
+    ctx, state, press, tab, state6, press6, amat6, lat6, wv6 = hs_sixface_case
+    bad = {**state6, "pt": state6["pt"][:, :, :, :KM_HS - 1]}
+    with pytest.raises(ValueError, match="pt"):
+        apply_held_suarez_step_sixface_jax(
+            bad, press6, tab, amat6, lat6, wv6, dt=1800.0, n=N, ng=NG,
+            km=KM_HS)
+
+
+def test_stack_held_suarez_metrics_refuses_missing_ectx(hs_case):
+    ctx, _, _ = hs_case
+    with pytest.raises(ValueError, match="ectx"):
+        stack_held_suarez_metrics({**ctx, "ectx": None})
+
+
+@pytest.mark.parametrize("pass_name,target", [
+    ("PASS0-dgrid", "exchange_dgrid_vector_halos"),
+    ("PASS2-agrid", "exchange_agrid_scalar_halos"),
+])
+def test_sixface_jax_match_is_not_vacuous(hs_sixface_case, monkeypatch,
+                                          pass_name, target):
+    """Non-vacuity: with either halo exchange replaced by the identity the
+    twin must LEAVE the 1e-11 envelope of the authority -- otherwise the
+    match test above could not detect a dropped pass."""
+    import legoesm.grids.fv3_duo_halos as halos
+    ctx, state, press, tab, state6, press6, amat6, lat6, wv6 = hs_sixface_case
+    ref = _numpy_authority_result(ctx, state, press)
+    if target == "exchange_dgrid_vector_halos":
+        monkeypatch.setattr(halos, target, lambda u, v, tab: (u, v))
+    else:
+        monkeypatch.setattr(halos, target, lambda f, tab, ring="stepper": f)
+    out = apply_held_suarez_step_sixface_jax(
+        state6, press6, tab, amat6, lat6, wv6, dt=1800.0, n=N, ng=NG,
+        km=KM_HS, strat=True)
+    worst = max(np.abs(np.asarray(out[nm]) - ref[nm]).max()
+                for nm in ("u", "v", "pt"))
+    assert worst > 1e-11, (pass_name, worst)

@@ -135,6 +135,9 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # Distributed PCG preconditioner selection ("jacobi" | "poly"):
+        # an unknown name must raise, never fall back to Jacobi.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_mpas.py", "barotropic_implicit_mpas"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "create_model"),
         # kt whitelist: an unvalidated 6*kt^2 tile count must raise, not
         # silently replicate the global state per device (#1360).

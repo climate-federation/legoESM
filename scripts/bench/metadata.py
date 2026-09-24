@@ -535,6 +535,13 @@ def scaling_metadata(
         or os.environ.get("SLURMD_NODENAME", ""),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
         "git_sha": git_sha(),
+        # Hardware threads this rank may run on.  A ladder step launched
+        # without --cpus-per-task binds each rank to ONE core (2 here), and
+        # every CPU row before 2026-09-21 was measured that way; the plotter
+        # refuses CPU rows below CPU_AFFINITY_MIN.  None where the platform
+        # has no sched_getaffinity (macOS): unknown, never a machine count.
+        "cpu_affinity": (len(os.sched_getaffinity(0))
+                         if hasattr(os, "sched_getaffinity") else None),
     }
     md.update(gpu_direct_mode(backend, transport=resolved_transport))
     if partition_metrics:

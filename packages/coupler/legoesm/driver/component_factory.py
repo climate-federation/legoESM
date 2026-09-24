@@ -340,6 +340,7 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # guard above refuses every other mode). The three engineering knobs
     # it selects are dual-reviewed and parity-gated (PR #1656).
     "distributed", "distributed_mode",
+    "dycore.fv3_duo_windows", "dycore.fv3_duo_window_pad",
     # Output cadence + destination -- the OutputConfig fields the lane's
     # snapshot + checkpoint writers read (checkpoint_days: slice-2
     # restart, the shared cube/MPAS cadence field -> fv3duo_ckpt_v1).
@@ -842,13 +843,29 @@ def create_atmosphere_dycore(
                          "turbulence", "gravity_wave_drag")
             if getattr(config, name) != "none"
         }
-        if _physics_on:
+        # The ONE routed scheme: Kessler warm rain, the shared column core
+        # applied by _run_fv3_duo._fv3_duo_apply_kessler after each step
+        # (apply_kessler_step_sixface_jax).  Alone -- with Held-Suarez the
+        # ordering of two operator-split forcings is an uncertified choice.
+        kessler_alone = _physics_on == {"microphysics": "kessler"}
+        if kessler_alone and config.held_suarez_forcing:
+            raise ValueError(
+                "fv3_duo: microphysics='kessler' together with "
+                "held_suarez_forcing is not certified (two operator-split "
+                "forcings, unmeasured ordering); choose one.")
+        if kessler_alone and model_type != "hydrostatic":
+            raise ValueError(
+                "fv3_duo Kessler is hydrostatic-only: the bridge reads "
+                "pt as temperature on the hydrostatic post-remap state; "
+                f"model_type={model_type!r} + kessler is uncertified.")
+        if _physics_on and not kessler_alone:
             raise ValueError(
                 f"fv3_duo runs DRY dynamics: the certified fv_dynamics "
                 f"lane refuses moist coupling (fv3_dynamics.py:301-311) "
                 f"and the driver lane routes no scheme tendencies (the "
                 f"only physics it runs is the certified Held-Suarez step, "
-                f"--held-suarez-forcing), so these active schemes would "
+                f"--held-suarez-forcing, or Kessler microphysics ALONE), "
+                f"so these active schemes would "
                 f"be silently inert: {_physics_on}. Set them all to "
                 f"'none' (with --allow-disabled-physics in run_amip).")
         if config.held_suarez_forcing and model_type != "hydrostatic":
@@ -948,6 +965,10 @@ def create_atmosphere_dycore(
             km=km,
             hydrostatic=(model_type == "hydrostatic"),
             storage_dtype=_storage_dtype,
+            # Kessler => MOIST dynamics (user 2026-09-24): a moist scheme
+            # on the adiabatic core is the misleading configuration GLM
+            # flagged, so the coupling follows the scheme, never a knob.
+            moist=(config.microphysics == "kessler"),
         )
         # AUTO-ADAPT the execution layout to the VISIBLE devices (user
         # 2026-08-28: "adjust automatically to the number of devices").
@@ -985,6 +1006,31 @@ def create_atmosphere_dycore(
         # unit-tested in test_fv3_duo_layout_policy.
         multiprocess = config.distributed
         devs = jax.devices() if multiprocess else jax.local_devices()
+        kt = config.dycore.fv3_duo_windows
+        if kt is not None:
+            # EXPLICIT window SPMD (M6 in the driver): 6*kt*kt devices, one
+            # window each, on a (face, tile_i, tile_j) mesh.  No auto-
+            # selection and no tolerance on the count: a mismatch is a
+            # mis-built launch, refused (user call 2026-09-21).
+            pad = config.dycore.fv3_duo_window_pad
+            need = 6 * kt * kt
+            if len(devs) != need:
+                raise ValueError(
+                    f"fv3_duo_windows={kt} needs exactly {need} "
+                    f"{'global' if multiprocess else 'local'} devices "
+                    f"(6*kt*kt, one window each); found {len(devs)}. Launch "
+                    f"{need} ranks with --distributed --distributed-mode "
+                    f"spmd, or drop --fv3-duo-windows for the face layout.")
+            mesh = Mesh(np.array(devs).reshape(6, kt, kt),
+                        ("face", "tile_i", "tile_j"))
+            logger.info(
+                "  fv3_duo layout: WINDOW-sharded, kt=%d pad=%d over %d %s "
+                "device(s) (one window each) + face-batched%s", kt, pad,
+                len(devs), "global" if multiprocess else "local",
+                " [multi-process SPMD]" if multiprocess else "")
+            return FV3DuoDynamicsModel(
+                bundle, cfg, step_spmd_mesh=mesh, step_windows=(kt, pad),
+                step_face_batched=True)
         layout = resolve_fv3_duo_layout(
             world=max(jax.process_count(), launcher_world_size()),
             n_local=jax.local_device_count(),

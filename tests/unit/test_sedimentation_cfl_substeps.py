@@ -636,8 +636,12 @@ def test_new_config_fields_sit_at_the_tuple_end():
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.driver.config import ExperimentConfig
     from legoesm.forcing.amip_config import AMIPExperimentConfig
-    assert MorrisonConfig._fields[-3:] == (
+    # The sedimentation trio is no longer LAST: the in-run cloud-water budget
+    # appended ``publish_qc_budget`` after it, which is the correct end-append,
+    # so the trio is pinned where it now sits rather than at the tail.
+    assert MorrisonConfig._fields[-4:-1] == (
         "sed_cfl_substeps", "sed_cfl_substeps_max", "sed_cfl_substeps_strict")
+    assert MorrisonConfig._fields[-1] == "publish_qc_budget"
     for cls in (ExperimentConfig, AMIPExperimentConfig):
         assert cls._fields[-4:] == (
             "cld_macmic_num_steps", "morrison_sed_cfl_substeps",
@@ -645,7 +649,7 @@ def test_new_config_fields_sit_at_the_tuple_end():
     # ... AND the field before the block is pinned, so an insertion just
     # ahead of it (which re-binds every stored positional value) goes red
     # too (GLM round 4)
-    assert MorrisonConfig._fields[-4] == "homogeneous_ice_supersaturation"
+    assert MorrisonConfig._fields[-5] == "homogeneous_ice_supersaturation"
     assert ExperimentConfig._fields[-5] == "bechtold_rhebc_land_deep"
     assert AMIPExperimentConfig._fields[-5] == "physics_parameterization_seed"
     # full field ORDER, hashed: an insertion anywhere (not just before the
@@ -653,8 +657,17 @@ def test_new_config_fields_sit_at_the_tuple_end():
     # (recompute deliberately when a field is added AT THE END)
     import hashlib
     for cls, n, digest in (
-            (MorrisonConfig, 116, "7c53729bd19b02a1"),
-            (ExperimentConfig, 283, "3ff6c466165774e9"),
+            # 116 -> 117 when the in-run cloud-water budget appended
+            # publish_qc_budget at the END, which is the convention this guard
+            # protects rather than a violation of it.
+            (MorrisonConfig, 117, "22176757db31d564"),
+            # 283 -> 288 at the 2026-09-23 merge of main: main inserted five
+            # cloud_cap_floor_* fields MID-tuple (idx ~65-69), which is exactly
+            # what this guard is for.  Recomputed, not relaxed -- the audit
+            # that accompanied it found no positional construction of this
+            # tuple anywhere and its serialization is name-keyed (_asdict),
+            # so nothing re-binds.
+            (ExperimentConfig, 288, "f4655d1685936e55"),
             (AMIPExperimentConfig, 125, "9f3b43eb47f505b6")):
         assert len(cls._fields) == n, (cls.__name__, len(cls._fields))
         assert hashlib.sha256(",".join(cls._fields).encode()).hexdigest()[:16] \
@@ -666,7 +679,7 @@ def test_new_config_fields_sit_at_the_tuple_end():
     )
     from legoesm.core.physics_output import PhysicsOutput
     from legoesm.core.state import HydrostaticTendencies
-    for cls, digest in ((MicrophysicsOutput, "03de81f5c836cd5b"),
+    for cls, digest in ((MicrophysicsOutput, "7b2002c93c5b0f66"),  # +qc_budget
                         (HydrostaticTendencies, "660c90d9a469cba4"),
                         (PhysicsOutput, "90eef946c1e51a5f")):
         assert cls._fields[-1] == "sed_substeps_required", cls.__name__

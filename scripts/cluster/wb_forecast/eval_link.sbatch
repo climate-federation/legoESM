@@ -15,7 +15,7 @@
 # one the checkpoint was trained with: the eval builds the model from it.
 #SBATCH --job-name=wbeval
 #SBATCH --partition=gpu
-#SBATCH --account=bd1083_gpu
+#SBATCH --account=bb1596_gpu
 #SBATCH --constraint=a100_80
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=32

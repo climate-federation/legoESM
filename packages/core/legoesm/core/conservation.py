@@ -395,11 +395,15 @@ def conservation_accumulator():
       float32; ``p_s`` stays fp32.
     * **fp64**: ``p_s`` is already f64; no promotion.
     * **mixed** (fp32 storage + x64): the f64 correction added to an fp32 ``p_s``
-      DOES promote it to f64 — a real state-affecting inconsistency. This is one
-      reason ``mixed`` is refused at
-      :func:`runtime.precision.apply_precision` in the interim; the durable fix
-      (a mixed scheme that keeps the f64 correction but stores at fp32 without
-      losing exactness) is the tracked mixed-consistency campaign.
+      promotes it to f64, and that promotion is now DELIBERATE and documented
+      rather than accidental (#1675). ``p_s`` is one 2-D field, so keeping it at
+      the accumulate dtype costs almost nothing in memory and buys the
+      ~1e-12 global mass the exact correction is there for; the fp32 saving in
+      ``mixed`` comes from the 3-D bulk state. What used to leak is the
+      CONTAGION — the promoted ``p_s`` flowed into the tracer mass rescale and
+      brought the 3-D tracers up with it — and that is closed at the step
+      boundary by :func:`core.precision.finalize_to_storage`, which re-casts
+      bulk state to storage while leaving ``p_s`` at accumulate.
     """
     if jax.config.read("jax_enable_x64"):
         return jnp.float64

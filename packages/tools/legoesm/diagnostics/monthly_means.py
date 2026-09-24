@@ -793,6 +793,8 @@ class SpatialDailyAccumulator:
         self._data: dict[tuple[int, int], dict] = {}
         self._call_counts: dict[tuple[int, int], int] = {}
         self._max_count_ever: int = 0
+        self._extreme_counts: dict[tuple[int, int], int] = {}
+        self._extreme_max_count_ever: int = 0
 
     @staticmethod
     def _key(day_of_year: float, year: int) -> tuple[int, int]:
@@ -832,14 +834,40 @@ class SpatialDailyAccumulator:
                 np.minimum(entry[2], arr, out=entry[2])
                 np.maximum(entry[3], arr, out=entry[3])
 
+    def add_extremes_2d(self, day_of_year: float, year: int,
+                        fields: dict[str, np.ndarray]) -> None:
+        """Update tracked extrema only; leave mean sums and mean sample counts intact."""
+        arrays = {}
+        for name, field in fields.items():
+            if name not in self.track_extremes:
+                raise ValueError(f"Extremes are not tracked for {name!r}")
+            arr = np.asarray(field, dtype=np.float64)
+            if arr.shape != (self.nlat, self.nlon):
+                raise ValueError(f"Expected {(self.nlat, self.nlon)}, got {arr.shape}")
+            arrays[name] = arr
+        if not arrays:
+            return
+        key = self._key(day_of_year, year)
+        count = self._extreme_counts.get(key, 0) + 1
+        self._extreme_counts[key] = count
+        self._extreme_max_count_ever = max(self._extreme_max_count_ever, count)
+        bucket = self._data.setdefault(key, {})
+        for name, arr in arrays.items():
+            if name not in bucket:
+                bucket[name] = [np.zeros_like(arr), 0, arr.copy(), arr.copy()]
+            else:
+                entry = bucket[name]
+                np.minimum(entry[2], arr, out=entry[2])
+                np.maximum(entry[3], arr, out=entry[3])
+
     def finalize(self, min_sample_fraction: float = 0.5) -> dict:
         """Compute daily means (and extremes where tracked).
 
         Partial-day buckets (< ``min_sample_fraction`` of the maximum
-        sample count across all days) are dropped so the tail of a run
-        ending mid-day does not produce a spurious daily mean with too
-        few samples. Setting ``min_sample_fraction=0`` disables the
-        guard.
+        sample count across all days) are dropped. Hourly extrema have
+        independent coverage counts: a day with sufficient extrema samples
+        survives even without a mean sample (its mean stays missing).
+        Setting ``min_sample_fraction=0`` disables the guard.
 
         Returns
         -------
@@ -859,11 +887,14 @@ class SpatialDailyAccumulator:
                 default=0,
             )
             max_count = max(live_max, self._max_count_ever)
-            if max_count > 0:
-                threshold = min_sample_fraction * max_count
+            extreme_max = self._extreme_max_count_ever
+            if max_count > 0 or extreme_max > 0:
                 days = [
                     k for k in all_days
-                    if self._call_counts.get(k, 0) >= threshold
+                    if ((max_count > 0 and self._call_counts.get(k, 0)
+                         >= min_sample_fraction * max_count)
+                        or (extreme_max > 0 and self._extreme_counts.get(k, 0)
+                            >= min_sample_fraction * extreme_max))
                 ]
             else:
                 days = all_days
@@ -962,6 +993,7 @@ class SpatialDailyAccumulator:
         for key in completed:
             self._data.pop(key, None)
             self._call_counts.pop(key, None)
+            self._extreme_counts.pop(key, None)
 
         return result
 
@@ -1001,6 +1033,9 @@ class SpatialDailyAccumulator:
                 [int(yr), int(doy), int(c)]
                 for (yr, doy), c in self._call_counts.items()
             ],
+            "extreme_counts": [[int(yr), int(doy), int(c)]
+                               for (yr, doy), c in self._extreme_counts.items()],
+            "extreme_max_count_ever": self._extreme_max_count_ever,
             "data": entries,
         }
         out: dict[str, np.ndarray] = {"__manifest__": _encode_manifest(manifest)}
@@ -1025,13 +1060,17 @@ class SpatialDailyAccumulator:
                 f"SpatialDailyAccumulator.set_state: dims mismatch — saved "
                 f"(nlat, nlon)={saved} vs current {(self.nlat, self.nlon)}"
             )
+        self._extreme_counts = {
+            (int(yr), int(doy)): int(c)
+            for yr, doy, c in manifest.get("extreme_counts", [])}
+        self._extreme_max_count_ever = int(manifest.get("extreme_max_count_ever", 0))
         self.track_extremes = set(manifest["track_extremes"])
         self._max_count_ever = int(manifest["max_count_ever"])
         self._call_counts = {
             (int(yr), int(doy)): int(c) for yr, doy, c in manifest["call_counts"]
         }
-        # Pre-create every bucket (incl. empties) so the day key set round-trips
-        # (``_data`` and ``_call_counts`` share their key set by construction).
+        # Pre-create mean buckets (incl. empties); extrema-only buckets are
+        # reconstructed from their saved entries below.
         self._data = {key: {} for key in self._call_counts}
         for yr, doy, name, fcount, skey, mnkey, mxkey in manifest["data"]:
             fmin = None if mnkey is None else np.array(state[mnkey], dtype=np.float64)

@@ -257,6 +257,32 @@ def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
     return carry if carry.shape == (ncol, nlev) else floor
 
 
+def _prognostic_clubb_rad_kwargs(carry_field, phys_state, nCells, nlev, dtype):
+    """Radheating kwargs for the ``turb_fn`` call, prognostic CLUBB only.
+
+    Returns ``{"rad_dT_dt": array}`` when the resolved scheme is prognostic
+    CLUBB (``carry_field == "clubb_moments"``, a STATIC build-time decision)
+    and the host hands a ``phys_state`` whose cached ``rad_heating`` slot is
+    populated; otherwise ``{}`` so every other scheme and the diagnostic
+    CLUBB path stay byte-identical (their kernels do not accept the kwarg).
+    The decision never depends on array values, only on ``carry_field`` and
+    None-ness, so it is a pure Python branch resolved at trace time.
+
+    CACHE LAG NOTE: ``combined.py`` updates ``PhysicsState.rad_heating`` AFTER
+    the turbulence step runs, so the array seen here is from the PRECEDING
+    radiation solve (one step stale).  That is the documented contract: the
+    thlp2 budget's radiative source term uses the latest cached heating
+    available at turbulence time.
+    """
+    if carry_field != "clubb_moments":
+        return {}
+    rad_heating = (getattr(phys_state, "rad_heating", None)
+                   if phys_state is not None else None)
+    if rad_heating is None:
+        return {}
+    return {"rad_dT_dt": jnp.asarray(rad_heating, dtype=dtype).reshape(nCells, nlev)}
+
+
 from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma as _compute_heights_from_sigma,
     compute_rho as _compute_rho,
@@ -996,6 +1022,14 @@ def _make_mpas_turbulence(
         if _liquid_partition:
             _sfc_kw = dict(_sfc_kw, q_c=_qc_col)
 
+        # Radiative-heating kwargs: prognostic CLUBB only, and only when the
+        # host cached a rad_heating.  CACHE LAG: combined.py refreshes the
+        # cache AFTER turbulence, so this is the PRECEDING radiation solve's
+        # heating.  {} (no kwarg at all) for every other scheme and the
+        # diagnostic CLUBB path — their turb_fn signatures do not accept it.
+        _rad_kw = _prognostic_clubb_rad_kwargs(
+            carry_field, phys_state, nCells, nlev, _state_dtype)
+
         if needs_tke:
             tke_in = _read_turb_carry(
                 phys_state, carry_field, nCells, nlev, scheme_config, _state_dtype)
@@ -1003,7 +1037,7 @@ def _make_mpas_turbulence(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
-                **_sfc_kw,
+                **_sfc_kw, **_rad_kw,
             )
             tke_out = tke_new
         else:
