@@ -679,6 +679,7 @@ def _setup_clm_topology(
             zi_np[c, j] = cum
         nbedrock_np[c] = n_layers
 
+    _old_col, _old_grc = _col_mod.col, _grc_mod.grc   # for rebinding the modules that imported them by name (below)
     _col_mod.col = column_type(
         snl=jnp.array(snl_np, dtype=jnp.int32),
         dz=jnp.array(dz_np, dtype=jnp.float64),
@@ -699,6 +700,21 @@ def _setup_clm_topology(
         latdeg=jnp.array(latdeg_np, dtype=jnp.float64),
         londeg=jnp.array(londeg_np, dtype=jnp.float64),
     )
+
+    # The CLM-ML modules bind ``col`` / ``grc`` by name at import (``from ...ColumnType import col`` in MLCanopyFluxesMod,
+    # MLSoilTemperatureMod, MLPlantHydraulicsMod, SoilWaterMovementMod, SurfaceResistanceMod, ...). Replacing the module
+    # attribute above does not reach those names, so they kept the ``init_column(1, 1)`` placeholder: nbedrock = ispval, every
+    # soil layer "below bedrock", zero root uptake, rsoil ~ LAI x 1e30, lsc = 0, and the leaf water potential frozen at its
+    # cold-start -0.1 MPa (no soil-water stress on gs); the ground-heat path read the placeholder z / zi. Rebind every
+    # already-imported backend module that still holds the previous object (DifferBESS legoesm_ml branch, 2026-09-24).
+    import sys as _sys
+    for _mname, _m in list(_sys.modules.items()):
+        if _m is None or not _mname.startswith("legoesm.land.canopy.clm_ml_backend") or _m is _col_mod or _m is _grc_mod:
+            continue
+        if getattr(_m, "col", None) is _old_col:
+            _m.col = _col_mod.col
+        if getattr(_m, "grc", None) is _old_grc:
+            _m.grc = _grc_mod.grc
 
 
 def _setup_clm_time(dt: float, doy: float, step_count: int) -> None:
