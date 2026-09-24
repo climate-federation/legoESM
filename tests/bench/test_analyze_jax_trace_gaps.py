@@ -335,3 +335,15 @@ def test_top_ops_reports_span_thread_time_and_parallelism():
     assert abs(parallel["mean_threads"] - 4.0) < 1e-9
     assert abs(parallel["thread_ms_per_step"] - 10.0) < 1e-9
     assert abs(parallel["span_ms_per_step"] - 2.5) < 1e-9
+
+
+def test_top_ops_prefers_the_gpu_device_track_over_the_host_track():
+    """On GPU the host track carries PjRt wrapper spans longer than any
+    kernel; the ranking must come from the device track."""
+    evs = [{"ph": "M", "name": "process_name", "pid": 1, "args": {"name": "/host:CPU"}},
+           {"ph": "M", "name": "process_name", "pid": 7, "args": {"name": "/device:GPU:0"}},
+           {"ph": "X", "pid": 1, "tid": 1, "name": "PjRt wrapper", "ts": 0, "dur": 9000},
+           {"ph": "X", "pid": 7, "tid": 1, "name": "kernel_a", "ts": 0, "dur": 3000},
+           {"ph": "X", "pid": 7, "tid": 2, "name": "kernel_b", "ts": 0, "dur": 1000}]
+    rows = mod.top_ops(evs, steps=1, n=5)
+    assert [r["name"] for r in rows] == ["kernel_a", "kernel_b"]
