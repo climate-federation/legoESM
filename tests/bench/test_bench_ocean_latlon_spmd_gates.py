@@ -146,3 +146,18 @@ def test_parity_gate_refuses_long_windows(tmp_path):
     )
     assert proc.returncode != 0
     assert "smoke gate" in (proc.stdout + proc.stderr)
+
+
+def test_profile_dir_flag_defaults_off_and_reaches_the_block_timer():
+    """A trace on by default would slow every tripole ladder receipt; with
+    the flag the directory must reach timed_scan_blocks' trace_dir (the
+    shared timer already knows how to trace) on ranks 0-3 only."""
+    import inspect
+    mod = _load_bench()
+    p = mod.build_parser() if hasattr(mod, "build_parser") else None
+    src = inspect.getsource(mod)
+    assert 'add_argument("--profile-dir"' in src
+    assert "trace_dir=_trace_dir" in src
+    assert "jax.process_index() < 4" in src
+    if p is not None:
+        assert p.parse_args(["--n-lat", "8", "--n-lon", "16"]).profile_dir is None

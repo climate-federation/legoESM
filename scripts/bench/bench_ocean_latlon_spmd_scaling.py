@@ -225,6 +225,11 @@ def main() -> int:
                         "separates compile/probe/blocks explicitly).")
     p.add_argument("--blocks", type=int, default=2,
                    help="Timed fused blocks (per-block times expose drift).")
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="Trace the timed fused blocks from ranks 0-3 into "
+                        "<dir>/rank<k>/ (timed_scan_blocks' trace_dir); "
+                        "analyze_jax_trace_gaps.py --top-ops / "
+                        "--time-by-family read it. Keep --steps small.")
     p.add_argument("--probe-steps", type=int, default=3,
                    help="Individually-synced steps for the SEPARATE "
                         "dispatch-latency probe (step_latency_ms).")
@@ -569,12 +574,17 @@ def main() -> int:
     # an ARGUMENT (outer-trace constants of non-addressable arrays are
     # unfetchable — see make_sharded_ocean_step's aux note).
     _aux = getattr(step, "aux", None)
+    # Ranks 0-3 only (one node, shared clock), same layout as the MPAS
+    # ocean bench so analyze_jax_trace_gaps.py reads both.
+    _trace_dir = None
+    if args.profile_dir is not None and jax.process_index() < 4:
+        _trace_dir = f"{args.profile_dir}/rank{jax.process_index()}"
     s, timing = timed_scan_blocks(
         (lambda st, aux: step(st, args.dt, aux=aux)) if _aux is not None
         else (lambda st: step(st, args.dt)),
         s,
         block_steps=_blk, n_blocks=_nblk, probe_steps=_probe,
-        sync_label="ocean_latlon_spmd_bench", aux=_aux)
+        sync_label="ocean_latlon_spmd_bench", trace_dir=_trace_dir, aux=_aux)
 
     # Post-run ZERO-FORCING residual probe eligibility (audit item 6):
     # needs the gathered global final state on ONE process; multicontroller
