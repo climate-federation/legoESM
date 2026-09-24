@@ -48,6 +48,7 @@ Run under MPI::
 from __future__ import annotations
 
 import os
+import pathlib
 import tempfile
 
 import jax
@@ -73,13 +74,33 @@ N_SOIL = 6
 # and a canopy run refuses to start without the harmonized surfdata its
 # per-PFT parameters come from -- so every test here had been failing on that
 # refusal, unrelated to what they assert. Point them at the staged file.
-SURFDATA = os.environ.get(
-    "LEGOESM_TEST_SURFDATA",
-    "/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/data/"
-    "legoesm_surfdata_c260716.nc")
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(SURFDATA),
-    reason=f"no CLM surfdata at {SURFDATA}; set LEGOESM_TEST_SURFDATA")
+#
+# The path is resolved against THIS checkout's data directory, not one
+# developer's absolute path, with an environment override for a shared copy.
+SURFDATA = os.environ.get("LEGOESM_TEST_SURFDATA") or str(
+    pathlib.Path(__file__).resolve().parents[2]
+    / "data" / "legoesm_surfdata_c260716.nc")
+# A module-level skip would turn these three tests from LOUDLY FAILING into
+# SILENTLY GREEN wherever the file is absent, which is how a gate rots (GLM
+# raised exactly this). So the absence is a FAILURE with an actionable message,
+# and only an explicit opt-out skips -- someone who knowingly has no surfdata
+# says so once, in the environment, instead of every machine quietly passing.
+if not os.path.exists(SURFDATA):
+    pytestmark = (
+        pytest.mark.skip(reason=(
+            f"LEGOESM_TEST_SKIP_NO_SURFDATA set and no surfdata at {SURFDATA}"))
+        if os.environ.get("LEGOESM_TEST_SKIP_NO_SURFDATA")
+        else pytest.mark.usefixtures("_surfdata_required"))
+
+
+@pytest.fixture
+def _surfdata_required():
+    raise AssertionError(
+        f"the multilayer land tests need the harmonized surfdata and none is "
+        f"at {SURFDATA}. The land surface scheme defaults to two-leaf, and a "
+        f"canopy run refuses to start without the per-PFT parameters that "
+        f"file carries. Stage it, point LEGOESM_TEST_SURFDATA at a copy, or "
+        f"set LEGOESM_TEST_SKIP_NO_SURFDATA=1 to skip deliberately.")
 
 
 def _land_mask_path():
@@ -462,11 +483,26 @@ def test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets():
         "every per-column land leaf is spatially uniform, so a wrong slice "
         "would be invisible and this test would prove nothing")
 
+    # Compare the WHOLE local band, halo included, not just the owned prefix:
+    # the scatter fills halo columns too and the land tile integrates them, so
+    # a scatter that got the halo wrong would pass an owned-only check.
+    all_gids = np.asarray(part.local_cells[:part.n_local_cells])
     for name, a_ref in ref_cols.items():
         np.testing.assert_array_equal(
-            mpi_cols[name][:n_owned], a_ref[gids],
+            mpi_cols[name], a_ref[all_gids],
             err_msg=f"land leaf {name!r} landed on the wrong columns after "
                     f"the spun-up state was cut to this rank")
+
+    # A per-column leaf whose column axis is NOT leading would be skipped by
+    # both the scatter and this comparison, so refuse to leave one uninspected.
+    _, ref_other = _column_leaves(ref._land_ml_state, n_global)
+    for name, v in ref_other.items():
+        if v is None:
+            continue
+        assert n_global not in tuple(np.asarray(v).shape), (
+            f"land leaf {name!r} carries a global-length axis that is not "
+            f"leading, so nothing cut it to this rank and nothing here "
+            f"compared it")
 
     if MPI.COMM_WORLD.Get_rank() == 0:
         print(f"\n[land IC] {len(ref_cols)} per-column leaves scattered "
