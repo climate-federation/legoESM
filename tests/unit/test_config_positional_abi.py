@@ -37,7 +37,8 @@ from legoesm.driver.config import DycoreConfig, ExperimentConfig
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 _ROOTS = ("packages", "src", "scripts", "tests")
-_GUARDED = ("DycoreConfig", "ExperimentConfig")
+_GUARDED = ("DycoreConfig", "ExperimentConfig", "AMIPExperimentConfig",
+            "OutputConfig", "GridConfig")
 
 
 def _positional_construction_sites():
@@ -58,6 +59,16 @@ def _positional_construction_sites():
                 fn = node.func
                 name = (fn.id if isinstance(fn, ast.Name)
                         else fn.attr if isinstance(fn, ast.Attribute) else None)
+                # ``Cfg._make(row)`` re-materializes POSITIONALLY just as
+                # ``Cfg(*row)`` does, but its call name is ``_make``, so the
+                # check above cannot see it (merge review, 2026-09-23).
+                if (isinstance(fn, ast.Attribute) and fn.attr == "_make"
+                        and isinstance(fn.value, ast.Name)
+                        and fn.value.id in _GUARDED):
+                    hits.append(
+                        f"{path.relative_to(_REPO)}:{node.lineno} "
+                        f"{fn.value.id}._make")
+                    continue
                 if name not in _GUARDED or not node.args:
                     continue
                 hits.append(f"{path.relative_to(_REPO)}:{node.lineno} {name}")
@@ -116,3 +127,15 @@ def test_dycore_window_and_sponge_fields_coexist_at_the_end():
     assert d.fv3_duo_windows is None and d.fv3_duo_window_pad is None
     assert d.mpas_sponge_del2_top_layers == 0
     assert d.mpas_sponge_del2_top_factor == 1.0
+
+
+def test_the_restart_codec_stays_name_keyed():
+    """The path a run's own checkpoints take, which is what makes the layout
+    shift survivable: the driver serializes the config by FIELD NAME into
+    sorted JSON, never as a bare value tuple.  Measured on the 2026-09-23 main
+    merge, which unioned two independent field-order changes; if this ever
+    becomes a pickle, every artifact written before that merge re-binds."""
+    restart = (_REPO / "packages/coupler/legoesm/driver/restart.py").read_text()
+    assert "experiment_config_to_dict" in restart
+    assert "json.dumps" in restart
+    assert "pickle.dump" not in restart
