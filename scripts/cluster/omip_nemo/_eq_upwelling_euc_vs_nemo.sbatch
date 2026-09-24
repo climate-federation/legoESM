@@ -74,13 +74,33 @@ rc=0
 # but its MEAN circulation is not readable -- it sits inside a measured wind
 # relaxation (our nino3 stress falls 0.0780 to 0.0356, NEMO's 0.0834 to
 # 0.0533) and its upwelling ratio reads 1.54 against 1.00 on every other day.
-for pair in "d05:0:1:snapshot_day0005.npz" "d10:1:2:snapshot_day0010.npz" \
-            "d15:2:3:snapshot_day0015.npz" "d20:3:4:snapshot_day0020.npz" \
-            "d25:4:5:snapshot_day0025.npz" "d30:5:6:snapshot_final.npz"; do
+#
+# THE RUN AND THE SAMPLE DAYS ARE NOW PARAMETERS, defaulting to exactly what
+# this card has always done. RUN_DIR picks the run; PAIRS is a list of
+# tag:rec0:rec1:snapshot entries. The 90-day extension of this same recipe
+# lives in trp_faithz0_d90 -- a manifest diff of the two resolved configs
+# shows ONE differing row, total_days, so its series continues this one
+# rather than being a separate experiment -- and reading it answers the
+# question a 30-day window cannot:
+#
+#   * the core-speed ratio RECOVERS toward 1 by day 90 -> the day-30 gap is
+#     SPIN-UP RATE, the undercurrent simply equilibrates more slowly here
+#     than in the oracle, and every day-30 equatorial conclusion in this
+#     campaign is scoring rate rather than fidelity.
+#   * it STAYS near 0.35 or falls further -> an equilibrium error, and the
+#     vertical-momentum thread is worth the instrument work it needs.
+#   * it OVERSHOOTS above about 1.3 -> adjustment overshoot, a third reading
+#     that is neither of the above and would need its own explanation.
+# Records follow the campaign convention REC = DAY/5 - 1, so day 90 is
+# record 17 and the file's 18 records make "17:18" the last valid window.
+RUN_DIR="${RUN_DIR:-trp_faithz0_d30}"
+PAIRS="${PAIRS:-d05:0:1:snapshot_day0005.npz d10:1:2:snapshot_day0010.npz d15:2:3:snapshot_day0015.npz d20:3:4:snapshot_day0020.npz d25:4:5:snapshot_day0025.npz d30:5:6:snapshot_final.npz}"
+echo "RUN_DIR=$RUN_DIR"
+for pair in $PAIRS; do
   TAG=${pair%%:*}; rest=${pair#*:}
   R0=${rest%%:*}; rest=${rest#*:}
   R1=${rest%%:*}; SNAPNAME=${rest#*:}
-  SNAP=$R/trp_faithz0_d30/$SNAPNAME
+  SNAP=$R/$RUN_DIR/$SNAPNAME
   [ -r "$SNAP" ] || { echo "FATAL: missing $SNAP"; rc=1; continue; }
   echo "############ control nemo_z0  $TAG  (NEMO recs $R0:$R1) ############"
   $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline.py \
