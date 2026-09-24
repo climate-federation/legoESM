@@ -413,6 +413,48 @@ def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
                   f"   | kernel median {kernel:7.1f} us")
     return quoted > 0
 
+def top_ops(events: list[dict], steps: int, n: int = 25) -> list[dict]:
+    """Per-op-name totals over ALL threads of the busiest process: thread
+    time per step, executions per step, and the mean number of threads
+    busy on that op while any thread is (thread time / union span). A
+    parallel op shows a mean near the pool size; a serial one shows ~1.
+    Uses every tid, unlike device_events' single-track view, because on
+    CPU one op's work is spread over the worker threads."""
+    from collections import defaultdict
+    xs = [e for e in events if e.get("ph") == "X" and e.get("dur", 0) > 0]
+    tot = defaultdict(float)
+    for e in xs:
+        tot[e["pid"]] += e["dur"]
+    if not tot:
+        raise SystemExit("no complete events in trace")
+    pid = max(tot, key=tot.get)
+    by = defaultdict(list)
+    for e in xs:
+        # XLA ops only: the CPU host track also carries Python frames
+        # ("$file:line fn") and the executor's own bookkeeping spans.
+        if e["pid"] == pid and not e["name"].startswith("$") \
+                and not e["name"].startswith("ThunkExecutor"):
+            by[e["name"]].append(e)
+    rows = []
+    for name, evs in by.items():
+        thread_ms = sum(e["dur"] for e in evs) / 1e3
+        iv = sorted((e["ts"], e["ts"] + e["dur"]) for e in evs)
+        span_us, cur_s, cur_e = 0.0, iv[0][0], iv[0][1]
+        for a, b in iv[1:]:
+            if a > cur_e:
+                span_us += cur_e - cur_s
+                cur_s, cur_e = a, b
+            else:
+                cur_e = max(cur_e, b)
+        span_ms = (span_us + cur_e - cur_s) / 1e3
+        rows.append({"name": name, "thread_ms_per_step": thread_ms / steps,
+                     "span_ms_per_step": span_ms / steps,
+                     "count_per_step": len(evs) / steps,
+                     "mean_threads": thread_ms / span_ms if span_ms else 0.0})
+    rows.sort(key=lambda r: -r["span_ms_per_step"])
+    return rows[:n]
+
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -468,7 +510,24 @@ def main() -> int:
                     help="devices each traced process drives (1 under the "
                          "multi-process launch, 24 in a virtual-CPU smoke)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--top-ops", type=int, default=0, metavar="N",
+                    help="Print the N op names with the largest wall span "
+                         "per step on rank 0 with their thread time, count "
+                         "and mean threads busy (CPU parallel-efficiency "
+                         "view; span is per op name so it does not add up "
+                         "across names). Then exit.")
     args = ap.parse_args()
+    if args.top_ops:
+        rank0 = sorted(args.trace_root.glob("rank*"))[0]
+        evs = load_trace(rank0)
+        rows = top_ops(evs, args.steps, args.top_ops)
+        print(f"{'op':44s} {'span ms/step':>12s} {'thr ms/step':>12s} "
+              f"{'n/step':>7s} {'threads':>8s}")
+        for r in rows:
+            print(f"{r['name'][:44]:44s} {r['span_ms_per_step']:12.1f} "
+                  f"{r['thread_ms_per_step']:12.1f} {r['count_per_step']:7.1f} "
+                  f"{r['mean_threads']:8.1f}")
+        return 0
 
     # A flag that silently does nothing is a gate the caller thinks they
     # armed (GLM). These two only act inside --time-by-family.
