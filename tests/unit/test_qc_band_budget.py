@@ -9,10 +9,13 @@ import pytest
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.diagnostics.qc_band_budget import CloudWaterBandBudget
 from legoesm.diagnostics.process_ledger import pressure_band_weight
 
-P_LO, P_HI, G = 5.0e4, 8.0e4, 9.80616
+# Band edges are a CHOICE of analysis window, not physics, so they stay literal.
+P_LO, P_HI = 5.0e4, 8.0e4      # const-ok: analysis band edges [Pa], not a constant
+G = constants.g
 
 
 def _terms(key, i, ncol, nlev):
