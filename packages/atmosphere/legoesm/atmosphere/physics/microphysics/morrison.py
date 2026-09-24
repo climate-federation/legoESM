@@ -281,6 +281,26 @@ def morrison_microphysics(
         hard_threshold=config.hard_sat_adjust_threshold,
         hard_max_heating_K=config.hard_sat_max_heating_K,
     )
+    # CAM6 arrangement: when the turbulence closure already diagnosed this
+    # layer's cloud liquid and handed it to the host, MG2 carries no
+    # vapour-to-liquid CONDENSATION (micro_mg_cam.F90:668-672 switches the
+    # residual block at micro_mg2_0.F90:2688-2730 off under CLUBB).
+    #
+    # POSITIVE BRANCH ONLY.  An earlier version of this gate zeroed the signed
+    # rate, which was wrong twice over.  CAM's residual block is guarded by
+    # ``qtmp > qvn`` at micro_mg2_0.F90:2700, i.e. it fires only on positive
+    # supersaturation and has no evaporation branch to switch off in the first
+    # place.  And our default ``wbf_scheme="emergent"`` has NO explicit
+    # Bergeron rate (see the WBF section below): the mixed-phase cloud-water
+    # sink IS the negative branch here, evaporating liquid as ice deposition
+    # draws vapour below liquid saturation.  Zeroing it deleted that sink
+    # outright on any ice-supersaturated, liquid-subsaturated cell.
+    #
+    # ``q_sat`` is untouched -- rain evaporation, the sub-grid cloud-fraction
+    # closure and the ice branch all still read it.  Static Python gate on a
+    # config bool, the documented feature-gating exception to ``jnp.where``.
+    if config.liquid_from_closure:
+        condensation = jnp.minimum(condensation, 0.0)
     # Sub-grid in-cloud closure (Morrison & Gettelman 2008): evaluate the
     # warm-rain rates on the IN-CLOUD water q_c/cf and scale back by cf, so the
     # non-linear KK2000/SB rates see the (higher) in-cloud concentration rather

@@ -672,6 +672,18 @@ class ExperimentConfig(NamedTuple):
     # than silently re-seeding it every step.  False (default) is the
     # byte-identical diagnostic path.
     clubb_prognostic: bool = False
+    # Whether CLUBB exchanges CLOUD LIQUID with the host, as CAM's
+    # ``clubb_intr.F90`` does (rt = q_v + q_c in, q_v = rt - rcm and
+    # q_c := rcm out).  False (default) keeps the historical bridge, which
+    # hands the advanced total water back wholly as vapour and so never gives
+    # the host the liquid the closure's own PDF diagnosed -- the host then
+    # takes cloud FRACTION from CLUBB and cloud WATER from a tracer CLUBB never
+    # wrote.  Requires turbulence='clubb' and the prognostic path, plus a
+    # condensate tracer to write into; the MPAS lane is the only one wired to
+    # route the liquid tendency, and the others refuse rather than drop it.
+    # Turning this on MOVES water between two host tracers and changes the
+    # cloud radiative state, so it is a prognostic change, not a diagnostic one.
+    clubb_liquid_partition: bool = False
     # CLUBB's upper domain limit [Pa] (CAM ``trop_cloud_top_press``): the
     # scheme's mixing is tapered to zero above this pressure.  None (default)
     # keeps the scheme's own 0.0 = no limit, byte-identical.
@@ -1791,6 +1803,40 @@ class ExperimentConfig(NamedTuple):
     # needs more sub-steps than the cap.
     morrison_sed_cfl_substeps_strict: bool = False
 
+    def _liquid_partition_resolved(self) -> bool:
+        """Is CLUBB's cloud-liquid exchange selected, by ANY route?
+
+        Not the experiment flag alone: an authoritative ``turbulence_override``
+        can carry ``CLUBBConfig(liquid_partition=True)`` without it ever being
+        set, and that route reached a validated, built model with both
+        radiative condensate floors still active (codex).
+
+        OPEN BEFORE THIS IS ENABLED ANYWHERE, both from the round-3 reviews and
+        neither closed here:
+
+        * the optics cover accounting.  The arm this lever targets carries MORE
+          cloud cover than the baseline (61.5 % against 52.2 % over the arms'
+          identical first 20 days) and still reflects 14.5 W/m2 LESS sunlight,
+          with clear-sky fluxes matching to 0.3.  Under the standard accounting
+          more cover at fixed grid-mean water should reflect MORE, so either the
+          liquid mass really is the deficit (which this lever addresses) or the
+          radiation is fed an in-cloud optical depth and treats it as a
+          grid-mean one (which it does not).  Read where cover enters optical
+          depth versus albedo before crediting any radiative effect to this.
+        * ``clubb_dt`` reconciliation across the host sub-steps, which becomes
+          load-bearing because the guard above forces the macro/micro sub-cycle
+          on wherever this is enabled.
+
+        A future change that turns this on has to confront both.
+        """
+        if self.clubb_liquid_partition:
+            return True
+        _ov = self.turbulence_override
+        if _ov is not None and getattr(_ov, "scheme", None) == "clubb":
+            return bool(getattr(getattr(_ov, "clubb", None),
+                                "liquid_partition", False))
+        return False
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -2790,6 +2836,73 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"cld_macmic_num_steps={_nmm} sub-cycles turbulence and "
                     "microphysics, but both are 'none'")
+        if self._liquid_partition_resolved():
+            # CLUBB's liquid exchange REPLACES the host's cloud water with the
+            # closure's equilibrium diagnosis, so the microphysics must read the
+            # REPLACED value; CAM guarantees that by sequential-update splitting
+            # inside its macmic loop (physpkg.F90:2097-2101).  This model uses
+            # that order only when the loop runs: at cld_macmic_num_steps=1 the
+            # combined physics takes the PARALLEL branch
+            # (combined.py ``_accumulate_step``), where every module is
+            # evaluated on the same start-of-step state and the tendencies are
+            # SUMMED.  The final liquid would then be the closure's equilibrium
+            # PLUS a microphysical increment computed from the stale, 2-3x
+            # smaller liquid -- and since autoconversion goes as roughly the
+            # 2.5th power of cloud water, that sink is wrong by nearly an order
+            # of magnitude.  Water is still conserved, so nothing would fail
+            # loudly; the climate would simply be wrong.  Refuse instead.
+            if _nmm is None or not isinstance(_nmm, int) or _nmm < 2:
+                errors.append(
+                    "clubb_liquid_partition=True needs cld_macmic_num_steps>=2: "
+                    "the closure REPLACES the host cloud water, so the "
+                    "microphysics has to run on the replaced value, and only "
+                    "the macro/micro sub-cycle applies the modules in sequence. "
+                    f"At cld_macmic_num_steps={_nmm!r} they are evaluated in "
+                    "parallel on the same state and summed, which leaves the "
+                    "microphysical sinks evaluated on the pre-exchange liquid")
+            # The diagnostic condensate floors exist to compensate for the very
+            # liquid this lever restores, so with it on they are added on top of
+            # the closure's own water and the clouds are opaque twice over.
+            # They act on the RADIATIVE condensate, not on the prognostic
+            # tracers, so this is an opacity error rather than a break in the
+            # exchange's tracer-water pairing (codex corrected the rationale) --
+            # but it is still a mechanism to switch OFF, not a number to retune.
+            #
+            # Checked against the RESOLVED cloud config, because ``None`` here
+            # does not mean "no floor": it means "take the scheme's default",
+            # which is non-zero.  Both floors count: the stratiform
+            # ``q_c_diagnostic`` and the independent convective
+            # ``conv_cloud_condensate`` term in cloud_fraction.py.
+            try:
+                from legoesm.atmosphere.physics.clouds.config import (
+                    build_cloud_config,
+                )
+                _cc = build_cloud_config(
+                    self.cloud_scheme,
+                    q_c_diagnostic=self.cloud_q_c_diagnostic,
+                    conv_cloud_condensate=self.cloud_conv_cloud_condensate,
+                    convective_cloud=bool(self.convective_cloud))
+            except Exception:                       # pragma: no cover
+                _cc = None                          # reported by its own check
+            if _cc is not None:
+                _floors = [
+                    (n, v) for n, v in
+                    (("q_c_diagnostic", getattr(_cc, "q_c_diagnostic", 0.0)),
+                     ("conv_cloud_condensate",
+                      getattr(_cc, "conv_cloud_condensate", 0.0)
+                      if bool(self.convective_cloud) else 0.0))
+                    if v
+                ]
+                if _floors:
+                    errors.append(
+                        "clubb_liquid_partition=True leaves a diagnostic "
+                        "condensate floor active in the RESOLVED cloud config "
+                        f"({', '.join(f'{n}={v!r}' for n, v in _floors)}). "
+                        "Those floors exist to compensate for the missing "
+                        "closure liquid this lever restores, so they would be "
+                        "imposed on top of it and the clouds would be made "
+                        "opaque twice. Set them to 0 explicitly (None means "
+                        "the scheme's non-zero default, not 'off')")
         if _is_mpas:
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
@@ -3450,6 +3563,21 @@ class ExperimentConfig(NamedTuple):
             ("clubb_q_flux_scale", 0.1, 10.0),
         ):
             _v = getattr(self, _f)
+            # 0.0 means OFF for the two radiative condensate floors.  Their
+            # declared ranges start above zero because a floor of 0 was
+            # previously unreachable, so without this the liquid-partition
+            # guard would demand a value this loop then rejects (codex).
+            #
+            # UNCONDITIONAL, deliberately.  Gating it on the partition made
+            # "floors off, partition off" unbuildable, which is exactly the
+            # control arm needed to attribute anything to the partition: the
+            # two would have had to move together and no measurement could
+            # separate them.  A guard that forbids the control is a defect in
+            # the guard.  This only ADDS a previously-refused configuration;
+            # every existing deck keeps its value and its behaviour.
+            if (_v == 0.0 and _f in ("cloud_q_c_diagnostic",
+                                     "cloud_conv_cloud_condensate")):
+                continue
             if _v is not None and not (_lo <= _v <= _hi):
                 errors.append(
                     f"{_f}={_v!r} out of range [{_lo}, {_hi}]"

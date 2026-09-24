@@ -9821,6 +9821,14 @@ class ModelDriver:
                     subgrid_autoconversion=cfg.subgrid_autoconversion,
                     homogeneous_ice_nucleation=getattr(
                         cfg, "homogeneous_ice_nucleation", False),
+                    # The OTHER half of the CLUBB liquid partition: once the
+                    # closure hands its diagnosed liquid to the host, the
+                    # microphysics must stop manufacturing its own, exactly as
+                    # CAM6 switches MG2's residual adjustment off under CLUBB
+                    # (micro_mg_cam.F90:668-672).  One flag drives both halves
+                    # so they can never be enabled apart -- the microphysics
+                    # half alone would leave the model no liquid source at all.
+                    liquid_from_closure=cfg._liquid_partition_resolved(),
                     # NOTE: hard_saturation_adjustment is INTENTIONALLY NOT
                     # threaded in-scheme on the MPAS path.  The integration
                     # trial showed the in-scheme placement cannot correct the

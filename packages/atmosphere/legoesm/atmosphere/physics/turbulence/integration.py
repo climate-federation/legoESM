@@ -538,6 +538,17 @@ def make_turbulence_physics(
         # and the structured-grid lanes deliberately have no land fraction in
         # the turbulence factory (see the f_land guard above), so applying it
         # would put sea water under the continents.  Raise rather than ignore.
+        # The liquid partition hands back a cloud-liquid tendency PAIRED with a
+        # vapour tendency that has had that liquid removed. Only the MPAS lane
+        # routes it to a tracer today; dropping it on a lane that cannot would
+        # destroy exactly that much water every step, silently. Refuse instead.
+        if _sub is not None and getattr(_sub, "liquid_partition", False):
+            raise NotImplementedError(
+                "CLUBBConfig.liquid_partition returns a cloud-liquid tendency "
+                f"(TurbulenceOutput.dq_c_dt) that the {model_type!r} turbulence "
+                "lane does not route to a condensate tracer, so the liquid the "
+                "closure removed from vapour would be destroyed. Use "
+                "model_type='mpas', or extend this lane to apply dq_c_dt.")
         if _srf is not None and getattr(_srf, "ocean_q_sfc_saline", False):
             raise NotImplementedError(
                 "SurfaceLayerConfig.ocean_q_sfc_saline needs a land fraction "
@@ -774,6 +785,9 @@ def _make_mpas_turbulence(
     # raises with its own name on the first step instead of as a TypeError
     # inside a traced column.
     _accepts_surface_flux = kernel_accepts_surface_flux(turb_fn)
+    # Static feature gate (build-time closure constant, not traced): with it off
+    # the liquid exchange below is absent from the trace entirely.
+    _liquid_partition = bool(getattr(scheme_config, "liquid_partition", False))
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
         from legoesm.grids.voronoi import (
@@ -823,6 +837,31 @@ def _make_mpas_turbulence(
             q_v_col = _qv_data.reshape(nCells, nlev)
         else:
             q_v_col = jnp.zeros((nCells, nlev), dtype=_state_dtype)
+
+        # Host cloud liquid, for the CLUBB liquid partition only.  Absent the
+        # lever this stays None and nothing below it is traced.  The tracer must
+        # EXIST: with the lever on, a missing q_c would seed the closure with no
+        # liquid and then write its rcm back over a tracer nobody carries, which
+        # is the one-way ratchet the seeding exists to prevent.
+        _qc_col = None
+        if _liquid_partition:
+            # BOTH halves of the pair, not just the liquid: the vapour block
+            # above substitutes zeros for a missing 'q_v' and the tendency
+            # section below then emits no vapour tendency, so a state carrying
+            # liquid but no vapour would evaporate liquid into a tendency
+            # nothing applies -- water destroyed, silently (codex).
+            _missing = [n for n in ("q_v", "q_c")
+                        if state.tracers is None or n not in state.tracers]
+            if _missing:
+                raise ValueError(
+                    "CLUBBConfig.liquid_partition exchanges water between the "
+                    f"vapour and liquid tracers, and {_missing} is not carried "
+                    "by this state. Both must exist, or the half that is "
+                    "missing is destroyed. Carry them, or switch the partition "
+                    "off.")
+            _qc_raw = state.tracers["q_c"]
+            _qc_col = (_qc_raw.data if hasattr(_qc_raw, "data")
+                       else _qc_raw).reshape(nCells, nlev)
 
         z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
         rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
@@ -980,6 +1019,8 @@ def _make_mpas_turbulence(
         # would drop the land coupling for exactly those two.
         _sfc_kw = ({"surface_flux": _surface_flux}
                    if _surface_flux is not None else {})
+        if _liquid_partition:
+            _sfc_kw = dict(_sfc_kw, q_c=_qc_col)
 
         # Radiative-heating kwargs: prognostic CLUBB only, and only when the
         # host cached a rad_heating.  CACHE LAG: combined.py refreshes the
@@ -1006,6 +1047,11 @@ def _make_mpas_turbulence(
                 T_sfc, q_sfc, rho, dt, step_config,
                 **_sfc_kw,
             )
+        if _liquid_partition and turb_out.dq_c_dt is None:
+            raise ValueError(
+                f"turbulence scheme {scheme_name!r} accepted the liquid "
+                "partition but returned no dq_c_dt, so the liquid removed from "
+                "vapour would vanish. This is a scheme bug, not a config one.")
 
         # Cell → edge tendency projection.  Average the cell tendencies
         # of the two cells flanking each edge, then project onto the
@@ -1031,6 +1077,17 @@ def _make_mpas_turbulence(
                 )
             else:
                 tracer_tends["q_v"] = turb_out.dq_v_dt.reshape(_qv_raw.shape)
+        if _liquid_partition:
+            # Paired with the vapour tendency above: together they conserve
+            # total water, so this must land wherever that one did.
+            _qc_raw = state.tracers["q_c"]
+            if hasattr(_qc_raw, "replace"):
+                tracer_tends["q_c"] = _qc_raw.replace(
+                    data=turb_out.dq_c_dt.reshape(_qc_raw.data.shape),
+                    name="dq_c_dt_turb",
+                )
+            else:
+                tracer_tends["q_c"] = turb_out.dq_c_dt.reshape(_qc_raw.shape)
 
         zero_ps = jnp.zeros_like(p_s)
         # Surface turbulent fluxes for the CMOR hfss/hfls feed [W/m^2,
