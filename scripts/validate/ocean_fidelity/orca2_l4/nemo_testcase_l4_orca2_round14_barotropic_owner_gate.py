@@ -64,14 +64,27 @@ if str(_TESTCASES) not in sys.path:
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 
 _PP = "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+# EVERY value here is a key of the campaign citation map, is checked to
+# identify its line, and is checked to FAIL under a two-line shift, by
+# ``tests/ocean/fidelity/test_nemo_testcase_l4_orca2_round14_receipt_citations.py``.
+# That test used to read only the RECEIPT, so this dict -- which is copied
+# verbatim into every evidence JSON this gate writes -- was unchecked, and it
+# carried a wrong line range: ``dynspg_ts.f90:296-300`` is a comment banner
+# and the coefficient-setup call, NOT the statement that removes the 2-D
+# Coriolis trend.  That is at :320-324, and the review that caught it is the
+# reason the test now covers this dict too.
 CITATIONS = {
     "rhs_3d_evaluation": f"{_PP}/stp2d.f90:139-147",
-    "rhs_3d_advection": f"{_PP}/stp2d.f90:162-167",
-    "vertical_average_reference_reciprocal": f"{_PP}/stp2d.f90:196-200",
+    "rhs_3d_advection": f"{_PP}/stp2d.f90:162-166",
+    "vertical_average_reference_reciprocal": f"{_PP}/stp2d.f90:196-199",
     "baroclinic_drag": f"{_PP}/stp2d.f90:218-221",
-    "wind_forcing": f"{_PP}/stp2d.f90:228-231",
+    "wind_forcing": f"{_PP}/stp2d.f90:229-230",
     "handoff_to_the_external_solver": f"{_PP}/stp2d.f90:302-303",
-    "external_solver_removes_the_2d_coriolis": f"{_PP}/dynspg_ts.f90:296-300",
+    "external_solver_copies_it": f"{_PP}/dynspg_ts.f90:287-291",
+    "external_solver_removes_the_2d_coriolis": f"{_PP}/dynspg_ts.f90:320-324",
+    "external_solver_substep_update": f"{_PP}/dynspg_ts.f90:668-671",
+    "reference_depth_is_built_from_the_same_thickness":
+        f"{_PP}/domain.f90:199",
     "stage_sea_surface_interpolation": f"{_PP}/stprk3_stg.f90:137,152-154",
 }
 

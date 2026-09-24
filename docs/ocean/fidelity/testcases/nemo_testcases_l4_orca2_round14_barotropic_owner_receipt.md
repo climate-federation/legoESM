@@ -32,7 +32,11 @@ rounding.
 The sea-surface disagreement is **not** a fold artefact and this receipt says
 so with the measurement rather than the impression: it stands on 8,794 of
 13,320 cells across 147 of 148 rows, and with the fold row excluded entirely
-it is still 0.2126 m.
+it is still 0.2126 m.  **Its single worst cell is nevertheless ON the fold
+row** — row 147, column 38 — and the review was right to insist that be said
+out loud rather than left in a JSON field.  The honest statement is therefore
+BOTH: the disagreement is basin-wide, and its peak sits on the one row that
+also carries this round's mask defect.
 
 Two things this round found in its OWN instrument and corrected before
 reporting anything are in section 3.  One of them would have produced the same
@@ -264,6 +268,16 @@ this particular sum sees; the 15 is the number that bounds THIS statement,
 and the 668 is the number that matters for any consumer that reads the face
 mask directly.  Both are reported.
 
+**And the fold row is also where the sea surface is worst, which is a
+coincidence this receipt is not allowed to leave unremarked.**  The end-of-step
+disagreement's own maximum is at row 147, column 38.  The fold-row mask cannot
+OWN that peak through the forcing channel, because the substitution in section
+2c bounds the entire momentum forcing — mask defect included — at 2.76e-07 m.
+But the same three-dimensional face mask is read by consumers other than this
+vertical sum, and nothing in this round measured those.  That is stated as a
+limit on the attribution, not waved away, and it is round 15's first stop
+after the solver's two unchecked inputs.
+
 ### 4c. Which half of the depth mean owns its disagreement
 
 Three one-variable arms, each replaying NEMO's own written statement with
@@ -347,8 +361,33 @@ exactly the code they ran at `0501c06f4`.
 ## 8. Independent review
 
 Codex is paused, so `codex exec` was NOT run and this round claims no
-independent codex verdict.  A fresh adversarial reviewer was run in its place;
-its verdict and what was done about each finding are in section 8a.
+independent codex verdict.  A fresh adversarial reviewer was run in its place.
+It read the compiled Fortran itself, traced the substitution hook to its
+landing point in the model source, checked the array slicing against the
+existing ladder gate's own convention, and re-derived the thickness
+cancellation rather than accepting it.
+
+### 8a. Its verdict, verbatim
+
+> SHIP WITH FIXES
+
+### 8b. What it found, and what was done
+
+| finding | what it was | what was done |
+|---|---|---|
+| 1 (MEDIUM) | The GATE SCRIPT's own citation dictionary — which is copied verbatim into every evidence JSON it writes — carried `dynspg_ts.f90:296-300` labelled as the statement that removes the 2-D Coriolis trend.  Those lines are a comment banner and the coefficient-setup call; the removal is at `:320-324`, which is what the receipt's own prose says.  Nothing checked the dictionary, because the citation test read only the strings the RECEIPT renders. | **VERIFIED IN THE COMPILED SOURCE AND FIXED.**  The wrong range is corrected, three other entries are narrowed to the audited ranges, three statements the receipt cites are added, and the citation test now checks EVERY value in the gate's dictionary the same way it checks the receipt: it must be a map key, it must identify its line, and it must FAIL under a two-line shift.  50 tests pass |
+| 2 (MEDIUM) | "The sea-surface disagreement is not a fold artefact" is supported by the row coverage, but the receipt never said that its own headline maximum sits on the fold row — the same row it separately flags as carrying a live mask defect. | **ACCEPTED IN FULL.**  The headline paragraph and section 4b now say both things: the disagreement is basin-wide (147 of 148 rows, 0.2126 m with the fold row removed) AND its peak is at row 147, column 38.  The limit on the attribution is stated with it |
+| 3 (LOW) | The gravity-wave contamination margin computes its column reach from the grid spacing at row 147, whose metric is atypical on a tripolar grid. | Carried into OPEN.  It does not move any number here — the prediction it serves was refuted and the interior maximum equals the whole-half maximum to nine figures — but an interior row is the right choice for any round that needs the margin to bind |
+
+What it verified INDEPENDENTLY and found correct: that the gate's array
+slicing is character-for-character the existing ladder gate's convention, so
+the rank-0 window is right; that the substitution hook lands at the same
+boundary as NEMO's copy-then-remove, so the arm is not a confound; that the
+replacement plant is non-vacuous and targets the channel the conclusion rests
+on; that the kt=1 rest-step reasoning is sound and consistently scoped; that
+the thickness cancellation is mathematically correct and backed by the
+measured residual rather than asserted; that both new test files would fail if
+what they test were broken; and that no file under `packages/` changed.
 
 ## 9. Gate and test results at the round's final tip
 
@@ -406,7 +445,12 @@ its verdict and what was done about each finding are in section 8a.
    owned by the initial sea-ice category configuration and out of scope.
 10. `emp`'s freedom from runoff is still verified on the CITED paths and the
     `nn_fwb = 2` arm only.
-11. The wide ocean-fidelity battery has not been run at this round's final
+11. **The contamination margin is computed on the fold row's grid spacing.**
+    Round 14's review item 3.  Immaterial here — the prediction it served was
+    refuted and the interior maximum equals the whole-half maximum to nine
+    figures — but any round that needs the margin to BIND should compute it
+    on an interior row, because the fold row's metric is atypical.
+12. The wide ocean-fidelity battery has not been run at this round's final
     tip.  Operator action.
 
 ## Choices

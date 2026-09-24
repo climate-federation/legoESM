@@ -59,3 +59,43 @@ def test_a_two_line_shift_makes_each_one_fail(citation):
     gate = _gate()
     row = gate.check(citation, gate.CITATION_MAP[citation], shift=2)
     assert row["status"] != "OK", row
+
+
+# --- the gate script's OWN citation dict -----------------------------------
+# It is copied verbatim into every evidence JSON the gate writes, and nothing
+# checked it: this test used to read only the receipt's rendered strings, and
+# the dict carried a range that pointed at a comment banner instead of the
+# statement it named.  A citation nobody checks is exactly what this campaign's
+# gate exists to prevent, so the dict is checked the same way the receipt is.
+OWNER_GATE = (REPO / "scripts/validate/ocean_fidelity/orca2_l4"
+              / "nemo_testcase_l4_orca2_round14_barotropic_owner_gate.py")
+
+
+def _gate_citations() -> list[str]:
+    spec = importlib.util.spec_from_file_location("_r14_gate", OWNER_GATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return sorted(set(module.CITATIONS.values()))
+
+
+def test_the_gate_stamps_only_compiled_citations_from_the_record_branch():
+    """Non-vacuity: an entry from another build would go red here."""
+    citations = _gate_citations()
+    assert len(citations) == 11, citations
+    assert all(c.startswith(PREFIX) for c in citations), citations
+
+
+@pytest.mark.parametrize("citation", _gate_citations())
+def test_each_gate_citation_is_mapped_and_still_identifies_its_line(citation):
+    gate = _gate()
+    assert citation in gate.CITATION_MAP, (
+        f"{citation} is stamped into this gate's evidence JSON but is in no "
+        "map entry, so nothing checks it")
+    assert gate.check(citation, gate.CITATION_MAP[citation])["status"] == "OK"
+
+
+@pytest.mark.parametrize("citation", _gate_citations())
+def test_a_two_line_shift_makes_each_gate_citation_fail(citation):
+    gate = _gate()
+    row = gate.check(citation, gate.CITATION_MAP[citation], shift=2)
+    assert row["status"] != "OK", row
