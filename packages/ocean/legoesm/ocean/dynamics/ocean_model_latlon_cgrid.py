@@ -1292,12 +1292,17 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # a NEMO statement that is one-variable and takes a certified row from
     # DEBT to AT-BAR lands even though day 240/360 move outside the noise
     # floor, provided the move is under 1e-3 relative -- see the round-163
-    # receipt.  Default is now ``True`` on every card whose resolved
-    # configuration is the RK3-WS vector-invariant literal-continuity deck
-    # (``nemo_stage_momentum_wzv_resolved``); explicit ``False`` remains the
-    # one-variable way to reach the pre-round-160 single shared solve for a
-    # test that needs it.
-    nemo_stage_momentum_wzv_split: bool = True
+    # receipt.  ``None`` (the default) defers to
+    # ``nemo_stage_momentum_wzv_executes``'s own default policy, which
+    # lands it only for a card whose resolved identity also carries
+    # ``eos == "nemo_teos10"`` (GYRE's own EOS) -- round 163's review found
+    # ORCA2-zps resolves the same three base conditions but was never
+    # measured under this route, so it is EXCLUDED from the default until
+    # measured (DECISION_NEEDED, round-163 receipt).  Explicit ``True`` or
+    # ``False`` always wins over the policy, subject only to
+    # ``nemo_stage_momentum_wzv_resolved`` -- the one-variable way a test
+    # reaches either arm on any card, unchanged from rounds 159-162.
+    nemo_stage_momentum_wzv_split: bool | None = None
     # Round 160 WRITE-only exposure: make ``expose_tracer_transport_stage``
     # return the MOMENTUM vertical velocity (slot 11, stprk3_stg.f90:360)
     # instead of the tracer transport's own field, so the two solves can be
@@ -1660,18 +1665,34 @@ def nemo_stage_momentum_wzv_resolved(config) -> bool:
 def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:
     """Does this run ACTUALLY take the second per-stage continuity solve?
 
-    The card has to select the two-solve program, and the arm defaults to on
-    (round 163, Decision 55/note AT): with no hooks -- which is every
-    production card -- this agrees with ``nemo_stage_momentum_wzv_resolved``.
-    A test may still opt out with an explicit
-    ``nemo_stage_momentum_wzv_split=False`` hook to reach the pre-round-160
-    single shared solve.  This predicate IS the model's condition: the
-    Decision-43 card census imports it rather than restating it (operator
-    note AR, finding 2).
+    The card has to select the two-solve program.  An EXPLICIT
+    ``nemo_stage_momentum_wzv_split`` hook (``True`` or ``False``) always
+    wins, subject only to ``nemo_stage_momentum_wzv_resolved`` -- that is
+    the private one-variable arm rounds 159-162 used to test the candidate
+    regardless of any card's production default, unchanged.
+
+    With NO explicit hook (``None``, the field's own default, which is also
+    what a bare ``_NEMOWSRK3TestHooks()`` carries) the DEFAULT POLICY
+    (round 163, Decision 55/note AT) selects it only for a card whose
+    resolved identity also matches ``eos == "nemo_teos10"``, GYRE's own EOS
+    selection (``nemo_testcase_recipe.py``'s ``gyre_vector_ene_c2`` branch).
+    Round 163's own review found that ORCA2-zps resolves the SAME three
+    base conditions (rk3_ws, vector_invariant, nemo_literal) by specializing
+    that same branch, but has never been measured under this route -- its
+    certified ladder has not been run against it.  The EOS check is what
+    keeps ORCA2 (``eos == "nemo_eos80"``) on the pre-round-160 single shared
+    solve by default until an ORCA2-focused round measures and lands it
+    separately; this is a DECISION_NEEDED the round-163 receipt raises
+    explicitly, not a silent scope call.  This predicate IS the model's
+    condition: the Decision-43 card census imports it rather than restating
+    it (operator note AR, finding 2).
     """
-    return bool(
-        nemo_stage_momentum_wzv_resolved(config)
-        and getattr(hooks, "nemo_stage_momentum_wzv_split", True))
+    if not nemo_stage_momentum_wzv_resolved(config):
+        return False
+    split = getattr(hooks, "nemo_stage_momentum_wzv_split", None)
+    if split is not None:
+        return bool(split)
+    return bool(getattr(config, "eos", None) == "nemo_teos10")
 
 
 def _nemo_ws_stage_transport(
@@ -2665,13 +2686,14 @@ class LatLonCGridOceanModel:
                 self._nemo_ws_test_hooks.stage2_momentum_wzv_clock_pair, bool):
             raise ValueError(
                 "stage2_momentum_wzv_clock_pair must be a bool")
-        if not isinstance(
-                self._nemo_ws_test_hooks.nemo_stage_momentum_wzv_split, bool):
-            # At CONSTRUCTION: anything truthy would silently select the
-            # two-solve program and the walk would score one compiled program
-            # under the other's name.
+        _wzv_split = self._nemo_ws_test_hooks.nemo_stage_momentum_wzv_split
+        if _wzv_split is not None and not isinstance(_wzv_split, bool):
+            # At CONSTRUCTION: anything truthy-but-not-bool would silently
+            # select the two-solve program and the walk would score one
+            # compiled program under the other's name.  ``None`` is the
+            # legal sentinel for "defer to the default policy" (round 163).
             raise ValueError(
-                "nemo_stage_momentum_wzv_split must be a bool")
+                "nemo_stage_momentum_wzv_split must be a bool or None")
         if not isinstance(
                 self._nemo_ws_test_hooks.stage2_wzv_velocity_form, bool):
             # At CONSTRUCTION: anything truthy would silently select NEMO's

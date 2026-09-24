@@ -97,6 +97,38 @@ def test_dino_does_not_resolve_it(recipe):
     assert nemo_stage_momentum_wzv_resolved(config) is False
 
 
+def test_orca2_resolves_the_program_but_is_excluded_from_the_default(card):
+    """Round-163 review BLOCKER: ORCA2-zps specializes the same shared
+    ``gyre_vector_ene_c2`` base GYRE-zco does and never overrides
+    ``momentum_time_integrator``/``momentum_advection``/
+    ``wzv_call2_evaluation``, so it resolves the SAME two-solve program --
+    but it has never been measured under this route.  The default policy
+    excludes it via its own EOS (``nemo_eos80`` vs GYRE's ``nemo_teos10``);
+    this test is the non-vacuity control for that exclusion, using the same
+    lightweight construction (``_model_config`` directly, no deck files)
+    the round-163 review used to find the gap."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import _model_config
+
+    orca2_config = _model_config(
+        barotropic_time_filter="nemo_ab3am4", n_barotropic_substeps=65,
+        bbl_adv_option=0, bbl_gamma_s=0.0, bbl_diffusive_option=1,
+        bbl_aht_m2_s=1000.0, whole_step_identity="orca2_vector_een_c2",
+        tke_langmuir_evaluation="vectorized")
+    assert orca2_config.eos == "nemo_eos80"
+    assert nemo_stage_momentum_wzv_resolved(orca2_config) is True
+    assert nemo_stage_momentum_wzv_executes(orca2_config) is False
+    # GYRE's own config, for contrast: same resolution, different EOS,
+    # lands.
+    gyre_config = card.recipe.model_config
+    assert gyre_config.eos == "nemo_teos10"
+    assert nemo_stage_momentum_wzv_executes(gyre_config) is True
+    # The exclusion is a default only, not a hard block: an explicit hook
+    # can still select it on ORCA2's config for a future measurement round.
+    assert nemo_stage_momentum_wzv_executes(
+        orca2_config, _NEMOWSRK3TestHooks(
+            nemo_stage_momentum_wzv_split=True)) is True
+
+
 class _Config:
     """The two fields the stage transport reads off the card's config."""
 
@@ -168,10 +200,12 @@ def test_the_adaptive_implicit_pair_is_refused_rather_than_run_once(card):
             momentum_velocity_form_w=True, **kwargs)
 
 
-@pytest.mark.parametrize("bad", [1, 0, "true", "", (True,), None])
+@pytest.mark.parametrize("bad", [1, 0, "true", "", (True,)])
 def test_a_split_arm_that_is_not_a_bool_is_refused(card, bad):
-    """Anything truthy would silently select the two-solve program and the
-    walk would score one compiled program under the other's name."""
+    """Anything truthy-but-not-bool would silently select the two-solve
+    program and the walk would score one compiled program under the
+    other's name.  ``None`` is legal (round 163): it defers to the default
+    policy rather than forcing either arm."""
     with pytest.raises(ValueError, match="nemo_stage_momentum_wzv_split"):
         _model(card, nemo_stage_momentum_wzv_split=bad)
 
@@ -193,12 +227,15 @@ def test_an_out_of_range_face_ratio_exposure_is_refused(card, bad):
 
 
 def test_the_production_defaults():
-    """Round 163 lands the second continuity solve (Decision 55, note AT), so
-    its arm now defaults on; the other private arms this round used to
-    isolate it (the clock pair, the exposures) remain off, and no card
-    constructs any of them directly."""
+    """Round 163 lands the second continuity solve (Decision 55, note AT)
+    for cards whose resolved identity matches GYRE's own EOS -- the arm's
+    OWN default is ``None`` (defer to that policy), not ``True``, because a
+    flat ``True`` default would also select it on ORCA2-zps (round-163
+    review BLOCKER: same three base conditions, never measured).  The other
+    private arms this round used to isolate it (the clock pair, the
+    exposures) remain off, and no card constructs any of them directly."""
     hooks = _NEMOWSRK3TestHooks()
-    assert hooks.nemo_stage_momentum_wzv_split is True
+    assert hooks.nemo_stage_momentum_wzv_split is None
     assert hooks.stage2_momentum_wzv_clock_pair is False
     assert hooks.expose_stage_momentum_w is False
     assert hooks.expose_stage_face_r3 == 0
