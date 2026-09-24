@@ -254,14 +254,15 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             executes = (config.momentum_time_integrator == "rk3_ws"
                         and config.surface_stress_implicit)
         elif route == "stage_momentum_wzv":
-            # Round 160.  The census imports the model's OWN predicates rather
-            # than restating them, so the gate cannot encode a condition the
-            # code does not (operator note AR, finding 2).  Two rows, because
-            # they answer different questions: whether the card's
-            # configuration selects NEMO's two-solve stage program at all --
-            # the blast radius if the arm is ever landed -- and whether this
-            # run actually takes it, which is False everywhere while the round
-            # is HELD behind its private arm.
+            # Round 160 built it, round 163 LANDED it (Decision 55, note AT).
+            # The census imports the model's OWN predicates rather than
+            # restating them, so the gate cannot encode a condition the code
+            # does not (operator note AR, finding 2).  Two rows, because they
+            # answer different questions: whether the card's configuration
+            # selects NEMO's two-solve stage program at all -- the blast
+            # radius of the statement -- and whether this run actually takes
+            # it, which now agrees with the blast radius on every card
+            # (GYRE-zco) unless a test opts out explicitly.
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 nemo_stage_momentum_wzv_executes,
                 nemo_stage_momentum_wzv_resolved)
@@ -270,8 +271,8 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             # the CANDIDATE, i.e. with its arm selected.  That is the blast
             # radius of the statement under test, and it is the question the
             # admission gate exists to answer.  ``executes_at_this_tip``
-            # answers the other question -- what runs today -- which is
-            # nothing while round 160 is HELD behind its private arm.
+            # answers the other question -- what runs today -- which is the
+            # production default as of round 163.
             values["executes_at_this_tip"] = bool(
                 nemo_stage_momentum_wzv_executes(config))
             executes = nemo_stage_momentum_wzv_resolved(config)

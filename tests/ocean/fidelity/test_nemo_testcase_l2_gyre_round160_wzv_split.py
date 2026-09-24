@@ -47,16 +47,18 @@ def test_the_gyre_card_resolves_the_two_solve_stage_program(card):
     assert nemo_stage_momentum_wzv_resolved(card.recipe.model_config) is True
 
 
-def test_no_card_takes_the_second_solve_while_the_round_is_held(card):
-    """The year refused the split, so production keeps the single shared
-    solve and nothing executes the second one without the private arm."""
+def test_the_gyre_card_takes_the_second_solve_by_default(card):
+    """Round 163 (Decision 55, note AT) lands the split: GYRE-zco takes it
+    with no hooks at all, and an explicit ``False`` is the one-variable way
+    back to the pre-round-160 single shared solve for a test that needs
+    it."""
     config = card.recipe.model_config
-    assert nemo_stage_momentum_wzv_executes(config) is False
+    assert nemo_stage_momentum_wzv_executes(config) is True
     assert nemo_stage_momentum_wzv_executes(
-        config, _NEMOWSRK3TestHooks()) is False
+        config, _NEMOWSRK3TestHooks()) is True
     assert nemo_stage_momentum_wzv_executes(
         config, _NEMOWSRK3TestHooks(
-            nemo_stage_momentum_wzv_split=True)) is True
+            nemo_stage_momentum_wzv_split=False)) is False
 
 
 @pytest.mark.parametrize("case", ["LOCK_EXCHANGE-zco", "OVERFLOW-zps"])
@@ -190,11 +192,13 @@ def test_an_out_of_range_face_ratio_exposure_is_refused(card, bad):
         _model(card, expose_stage_face_r3=bad)
 
 
-def test_the_production_defaults_keep_every_arm_off():
-    """Round 160 is HELD, so no card constructs any of the private arms and
-    the second continuity solve is off on every one of them."""
+def test_the_production_defaults():
+    """Round 163 lands the second continuity solve (Decision 55, note AT), so
+    its arm now defaults on; the other private arms this round used to
+    isolate it (the clock pair, the exposures) remain off, and no card
+    constructs any of them directly."""
     hooks = _NEMOWSRK3TestHooks()
-    assert hooks.nemo_stage_momentum_wzv_split is False
+    assert hooks.nemo_stage_momentum_wzv_split is True
     assert hooks.stage2_momentum_wzv_clock_pair is False
     assert hooks.expose_stage_momentum_w is False
     assert hooks.expose_stage_face_r3 == 0
@@ -222,9 +226,9 @@ def test_the_admission_gate_census_uses_the_model_s_own_predicate():
     # What the candidate would reach if it were selected...
     assert [name for name, row in rows.items() if row["executes_route"]] == [
         "GYRE-zco"]
-    # ...and what reaches it today, which is nothing while the round is held.
+    # ...and what reaches it today: the same card, since round 163 landed it.
     assert [name for name, row in rows.items()
-            if row["executes_at_this_tip"]] == []
+            if row["executes_at_this_tip"]] == ["GYRE-zco"]
 
     configs = {
         "GYRE-zco": build_nemo_testcase_card("GYRE-zco").recipe.model_config,

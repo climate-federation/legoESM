@@ -1286,13 +1286,18 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # indicator at stage 2 only, so the two call forms can be compared
     # with every other operand held.  No card constructs it.
     stage2_wzv_velocity_form: bool = False
-    # Round 160: private ONE-VARIABLE arm that selects NEMO's SECOND
-    # per-stage continuity solve (stprk3_stg.f90:360) for the momentum
-    # vertical advection while the tracer transport keeps its own field.
-    # HELD: the year refused it (day 240 and day 360 worsen), so production
-    # keeps the single shared solve and ``False`` is that path.  No card
-    # constructs it.
-    nemo_stage_momentum_wzv_split: bool = False
+    # Round 160 built, round 163 LANDED: NEMO's SECOND per-stage continuity
+    # solve (stprk3_stg.f90:360) for the momentum vertical advection, while
+    # the tracer transport keeps its own field.  Under Decision 55 (note AT)
+    # a NEMO statement that is one-variable and takes a certified row from
+    # DEBT to AT-BAR lands even though day 240/360 move outside the noise
+    # floor, provided the move is under 1e-3 relative -- see the round-163
+    # receipt.  Default is now ``True`` on every card whose resolved
+    # configuration is the RK3-WS vector-invariant literal-continuity deck
+    # (``nemo_stage_momentum_wzv_resolved``); explicit ``False`` remains the
+    # one-variable way to reach the pre-round-160 single shared solve for a
+    # test that needs it.
+    nemo_stage_momentum_wzv_split: bool = True
     # Round 160 WRITE-only exposure: make ``expose_tracer_transport_stage``
     # return the MOMENTUM vertical velocity (slot 11, stprk3_stg.f90:360)
     # instead of the tracer transport's own field, so the two solves can be
@@ -1639,9 +1644,10 @@ def nemo_stage_momentum_wzv_resolved(config) -> bool:
     vector-invariant momentum advection and the literal continuity solve
     together.
 
-    This is the BLAST RADIUS of the second solve, not what runs today: round
-    160 measured the split and the year refused it, so it is held behind a
-    private arm and ``nemo_stage_momentum_wzv_executes`` is what runs.
+    This is the BLAST RADIUS of the second solve: every card this returns
+    True for takes it by default as of round 163 (Decision 55, note AT).
+    ``nemo_stage_momentum_wzv_executes`` is what a given run actually takes,
+    which agrees with this predicate unless a test opts out explicitly.
     """
     return (
         getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
@@ -1654,15 +1660,18 @@ def nemo_stage_momentum_wzv_resolved(config) -> bool:
 def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:
     """Does this run ACTUALLY take the second per-stage continuity solve?
 
-    The card has to select the two-solve program AND the private arm has to be
-    on.  With no hooks -- which is every card -- this is False, because round
-    160 is HELD.  This predicate IS the model's condition: the Decision-43
-    card census imports it rather than restating it (operator note AR,
-    finding 2).
+    The card has to select the two-solve program, and the arm defaults to on
+    (round 163, Decision 55/note AT): with no hooks -- which is every
+    production card -- this agrees with ``nemo_stage_momentum_wzv_resolved``.
+    A test may still opt out with an explicit
+    ``nemo_stage_momentum_wzv_split=False`` hook to reach the pre-round-160
+    single shared solve.  This predicate IS the model's condition: the
+    Decision-43 card census imports it rather than restating it (operator
+    note AR, finding 2).
     """
     return bool(
         nemo_stage_momentum_wzv_resolved(config)
-        and getattr(hooks, "nemo_stage_momentum_wzv_split", False))
+        and getattr(hooks, "nemo_stage_momentum_wzv_split", True))
 
 
 def _nemo_ws_stage_transport(
