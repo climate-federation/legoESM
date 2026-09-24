@@ -131,6 +131,9 @@ class DiffusionCoeffs(NamedTuple):
     # smoothing that stabilizes vertical computational modes (the cldG abs-145
     # tropical sawtooth died with BOTH scaled 0.25).
     K_h_A: float = None
+    # Divergence-SELECTIVE biharmonic damping [m^4/s] (CAM-FV ldiv4).  Only
+    # the MPAS hydrostatic lane consumes it; 0.0 = off, byte-identical.
+    div_damp4: float = 0.0
 
 
 def _grid_min_dx(grid) -> float:
@@ -155,6 +158,17 @@ def _grid_min_dx(grid) -> float:
         # dycore is needed for stable 2deg global runs (TODO).
         return float(jnp.min(jnp.asarray(grid.dx))) / 2.0
     return 1e5
+
+
+def _grid_cell_area(grid, dx_min: float) -> float:
+    """Smallest cell area [m^2], the ``L^2`` of CAM-FV's divergence damping.
+
+    MPAS/Voronoi carries ``areaCell`` directly; every other grid falls back
+    to ``dx_min**2``, which is the same quantity for a quasi-uniform mesh.
+    """
+    if hasattr(grid, 'areaCell'):
+        return float(jnp.min(jnp.asarray(grid.areaCell)))
+    return float(dx_min) ** 2
 
 
 def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
@@ -196,8 +210,34 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
 
     _khs = getattr(dc, "k_h_scale", None)
     K_h_A = A_h if _khs is None else _khs * 3.0e-3 * dx_min ** 2 / DT
+
+    # Divergence-selective biharmonic damping, scaled from CAM-FV's ``ldiv4``
+    # (cd_core.F90:620-684): CAM sets tau4 = 0.01/dt and multiplies by the
+    # SQUARE of the cell area, so nu_div4 = 0.01 * L^4 / dt with L^2 the cell
+    # area.  The Earth-radius factors are consistent (CAM's angular divergence
+    # supplies one ae, its angular Laplacian two, cdtau4 the fourth), verified
+    # in review -- no metric factor is missing.
+    #
+    # CAM-INSPIRED, NOT IDENTICAL, and the difference is not a detail:
+    #  * CAM applies this once per ACOUSTIC substep, we apply it once per
+    #    dycore step, so matching the nondimensional 0.01 matches the per-
+    #    APPLICATION damping fraction, never the damping per simulated second.
+    #  * CAM's coefficient is per-cell and sits INSIDE the final gradient;
+    #    ours is one global scalar outside it, built from the SMALLEST cell.
+    #    On the res6 mesh areaCell spans a factor 1.60, so the coarsest cells
+    #    receive 1/1.60^2 = 39% of the nominal rate.  Quasi-uniform meshes
+    #    only; a variable-resolution mesh needs the per-cell form.
+    #  * The discrete eigenvalues and the SSP-RK54 stability function differ
+    #    from CAM's, so the realised per-step damping differs too (measured
+    #    21.8% of the strongest scalar-Laplacian mode, against CAM's nominal
+    #    1% per application before its own integrator).
+    # The scale is therefore a CALIBRATION KNOB whose 1.0 means "CAM's own
+    # nondimensional rate", not "CAM's behaviour".  res6 at dt=112.5 s gives
+    # 7.235e15 m^4/s at scale 1.0.
+    nu_div4_cam = 0.01 * _grid_cell_area(grid, dx_min) ** 2 / DT
+    div_damp4 = getattr(dc, "mpas_div_damp4_scale", 0.0) * nu_div4_cam
     return DiffusionCoeffs(A_h=A_h, hyperdiff=hyperdiff, div_damp=div_damp,
-                           K_h_A=K_h_A)
+                           K_h_A=K_h_A, div_damp4=div_damp4)
 
 
 # Solvers that apply the EXPLICIT biharmonic hyperdiff / divergence damping
@@ -742,6 +782,11 @@ def create_atmosphere_dycore(
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
             sponge_del2_top_layers=int(dc.mpas_sponge_del2_top_layers),
             sponge_del2_top_factor=float(dc.mpas_sponge_del2_top_factor),
+            # Divergence-selective biharmonic damping (CAM-FV ldiv4).  The
+            # vector del2/del4 above damp rotational and divergent modes
+            # alike; this one is the piece CAM applies at every level and we
+            # had computed (``div_damp``) but never handed to this core.
+            nu_div4=diff.div_damp4,
             # Budget-ledger vertical band. The dycore owns the SNAPSHOT-derived
             # dynamics and clips rows, so it needs the SAME weight the physics
             # rows use; without it those two rows stay full-column while the

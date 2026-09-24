@@ -7,6 +7,11 @@
 #SBATCH --mem=64G
 #SBATCH --time=04:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/results/dycore_1354/ledger_%j.out
+# REPOINTED 2026-09-23: config/amip/amip_production.yaml became the CAM6
+# suite on that date.  This script exists to reproduce a SPECIFIC recorded
+# analysis, so it now names config/amip/amip_sundqvist_l36.yaml -- the same
+# deck under its new name, byte-unchanged -- rather than silently running a
+# different model.
 #
 # #1354 ATTRIBUTION RUN -- which physics process creates the +18.2 W/m2?
 #
@@ -68,7 +73,7 @@ echo "sha=$(git rev-parse --short HEAD)$([ -n "$(git status --porcelain)" ] && e
 "$PY" -c "import jax; print('jax', jax.__version__, jax.devices())"
 
 JAX_ENABLE_X64=1 "$PY" -u scripts/run/run_amip.py \
-    --config config/amip/amip_production.yaml \
+    --config config/amip/amip_sundqvist_l36.yaml \
     "${AMIP_PATH_FLAGS[@]}" \
     --resolution 5 \
     --budget-ledger \

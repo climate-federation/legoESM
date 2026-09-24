@@ -705,7 +705,10 @@ def _vertical_advection_upwind_sigma(
     return -sigma_dot_full * grad
 
 
-VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer")
+# "sb" is the conservative Simmons-Burridge flux form, HYBRID-lane only
+# (:func:`vertical_advection_hybrid_sb`); "van_leer" is SIGMA-lane only.
+# Each lane refuses the other's scheme rather than run it silently inert.
+VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer", "sb")
 
 
 def van_leer_face_values_sigma(
@@ -2998,6 +3001,8 @@ def vertical_advection_theta_hybrid(
     mass_flux: jax.Array,
     p_s: jax.Array,
     coord: HybridSigmaPressureCoordinate,
+    *,
+    conservative: bool = False,
 ) -> jax.Array:
     """Combined vertical advection + adiabatic mass-flux term for T (hybrid).
 
@@ -3043,8 +3048,13 @@ def vertical_advection_theta_hybrid(
     # Potential temperature θ = T / exner = T·(p₀/p)^κ
     theta = T / exner
 
-    # Advect θ with the SAME upwind operator, then convert back: -exner·F·∂θ/∂p
-    return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
+    # Advect θ, then convert back: -exner·F·∂θ/∂p.  ``conservative=True``
+    # swaps the upwind advective operator for the Simmons-Burridge flux form,
+    # which satisfies the discrete product rule (column residual 6.7e-16
+    # against the advective form's 3.8e-2 of the interfacial exchange on the
+    # CAM L32 table); the exner round-trip is identical either way.
+    _op = vertical_advection_hybrid_sb if conservative else vertical_advection_hybrid
+    return exner * _op(theta, mass_flux, p_s, coord)
 
 
 def sb81_omega_over_p_dyn(

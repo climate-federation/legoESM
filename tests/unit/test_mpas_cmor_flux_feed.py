@@ -178,7 +178,10 @@ def _tend_with_extras():
         shflx_sfc=_f("shflx", 7.0), lhflx_sfc=_f("lhflx", 8.0),
         sw_down_sfc=_f("sw_down_sfc", 9.0), lw_down_sfc=_f("lw_down_sfc", 10.0),
         sw_up_toa_clr=_f("sw_up_toa_clr", 11.0),
-        lw_up_toa_clr=_f("lw_up_toa_clr", 12.0))
+        lw_up_toa_clr=_f("lw_up_toa_clr", 12.0),
+        sed_substeps_required=Field(
+            data=np.full(3, 13, dtype=np.int32), name="sed_substeps_required",
+            dims=("cell",), units="1"))
 
 
 # The ONE slot contract both producers build from (core.state).  Spelled out
@@ -188,7 +191,11 @@ def _tend_with_extras():
 _EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "shflx_sfc", "lhflx_sfc",
                 "sw_down_sfc", "lw_down_sfc",
-                "sw_up_toa_clr", "lw_up_toa_clr")
+                "sw_up_toa_clr", "lw_up_toa_clr",
+                # slot 12 (2026-09-22): the microphysics' required CFL
+                # sedimentation sub-step count, so an overflow is visible in
+                # a real run on BOTH producers.
+                "sed_substeps_required")
 
 
 class TestSfcDiagContract:
@@ -247,9 +254,14 @@ class TestSfcDiagContract:
             else getattr(_pt, _k, None)
             for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
         sfc = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc) == 12
+        assert len(sfc) == 13
         assert sfc[10].name == "sw_up_toa_clr"   # rsutcs
         assert sfc[11].name == "lw_up_toa_clr"   # rlutcs
+        # the MPI producer publishes the sub-step count at the same slot the
+        # serial one does, so the driver's overflow report works on both
+        from legoesm.driver.model_driver import _sed_substeps_slot
+        assert _sed_substeps_slot() == 12
+        assert sfc[12].name == "sed_substeps_required"
         # #1321: the land downwelling pair is now PUBLISHED at slots 8/9.
         # While it was withheld, ``_marshal_land_forcing``'s ``_sd[8] is None``
         # guard declined every step and the Richards soil never advanced.
@@ -260,7 +272,7 @@ class TestSfcDiagContract:
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 12
+        assert len(sfc_diag) == 13
         # Consumer (_feed_mpas_cmip_accumulators): slot 3->rlut, 4->rsut,
         # 5->rsdt, 6->hfss, 7->hfls, 10->rsutcs, 11->rlutcs; slots 8/9 are
         # the _marshal_land_forcing downwelling pair.

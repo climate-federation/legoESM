@@ -323,6 +323,15 @@ class DycoreConfig(NamedTuple):
     fv3_duo_windows: int | None = None
     fv3_duo_window_pad: int | None = None
 
+    # Divergence-SELECTIVE biharmonic damping on the MPAS hydrostatic lane,
+    # as a multiple of CAM-FV's own ldiv4 coefficient 0.01*area^2/dt
+    # (cd_core.F90:655-683; fv_div24del2flag=4 is the CAM6 physics default at
+    # every horizontal grid).  1.0 = CAM's strength, 0.0 = off and
+    # byte-identical.  The existing nu_del2/nu_del4 are VECTOR Laplacians and
+    # damp balanced flow together with the divergent mode; this term does not.
+    # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION.
+    mpas_div_damp4_scale: float = 0.0
+
 
 class EvaluationConfig(NamedTuple):
     """Post-run ClimateEval configuration.
@@ -496,6 +505,20 @@ def parse_gwd_spec(value: str) -> str:
 VALID_SURFACE_BULK = ("constant", "coare3", "large_yeager", "large_yeager_cesm")
 
 
+# Hard ceiling of ``morrison_sed_cfl_substeps_max``, imported from the leaf
+# config that owns the field so the two validators cannot drift apart (GLM
+# 2026-09-22).  The loop cost is LINEAR in the cap, so a typo ("2560")
+# silently decouples a run's cost from its physics; the largest configured
+# lane needs 269 (CAM L32 at 1800 s).
+def _sed_substeps_cap_limit() -> int:
+    """The leaf config's hard ceiling (deferred import: this module must not
+    pull the atmosphere package at import time)."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        SED_CFL_SUBSTEPS_MAX_LIMIT,
+    )
+    return SED_CFL_SUBSTEPS_MAX_LIMIT
+
+
 class ExperimentConfig(NamedTuple):
     """Top-level experiment configuration.
 
@@ -543,11 +566,6 @@ class ExperimentConfig(NamedTuple):
     # (byte-identical to before).  MPAS lane only; ``rad_update_steps`` must
     # be a multiple of it so radiation stays on physics steps.
     physics_update_steps: int = 1
-    # CAM6 ``cld_macmic_num_steps``: turbulence (macrophysics) and
-    # microphysics run N times sequentially at dt_phys/N inside each
-    # physics step, after the convective increment (CAM tphysbc macmic
-    # loop).  1 = the parallel split (byte-identical).  MPAS lane.
-    cld_macmic_num_steps: int = 1
     # Un-fuse radiation from the compiled-segment scan (issue: ~3h XLA
     # compile).  Static Python gate (NOT trainable); default OFF keeps
     # every existing run byte-identical.  When True AND
@@ -1687,13 +1705,6 @@ class ExperimentConfig(NamedTuple):
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
                                                 # "mg" (E3SM MG, GCM default) |
                                                 # "sam" (gSAM M2005 anvil tune)
-    morrison_sed_cfl_substeps: bool = True      # MorrisonConfig.sed_cfl_substeps:
-                                                # MG2 CFL sub-stepped sedimentation
-                                                # (default ON, user 2026-09-22;
-                                                # False = legacy one-pass form)
-    morrison_sed_cfl_substeps_strict: bool = False  # MorrisonConfig.sed_cfl_substeps_strict:
-                                                # runtime error when a column
-                                                # needs more sub-steps than the cap
     # Flux law the SLAB-land skin energy balance debits at the land-air
     # interface (physics_pipeline._step_slab_land):
     #   "legacy_dual" (default, byte-identical): the slab debits its OWN
@@ -1747,6 +1758,28 @@ class ExperimentConfig(NamedTuple):
     bechtold_subcloud_evap_scale: float = 1.0
     bechtold_rhebc_land: float = 0.75
     bechtold_rhebc_land_deep: float = 0.70
+
+    # --- CAM6 macro/micro sub-cycle + MG2 CFL sedimentation --------------
+    # APPENDED AT THE TUPLE END to preserve the positional ABI (a field
+    # inserted mid-tuple silently re-binds every positional construction and
+    # every pickle written before it).
+    # CAM6 ``cld_macmic_num_steps``: turbulence (macrophysics) and
+    # microphysics run N times sequentially at dt_phys/N inside each physics
+    # step, after the convective increment (CAM tphysbc macmic loop).  1 =
+    # the parallel split (byte-identical).  MPAS lane.
+    cld_macmic_num_steps: int = 1
+    # MorrisonConfig.sed_cfl_substeps: MG2 CFL sub-stepped sedimentation
+    # (default ON, user 2026-09-22; False = the legacy one-pass form).
+    morrison_sed_cfl_substeps: bool = True
+    # MorrisonConfig.sed_cfl_substeps_max: static bound of the sub-step loop.
+    # The loop cost is LINEAR in it (2048 columns, CPU x64, whole Morrison
+    # call: one pass 10 ms, 16 -> 24 ms, 96 -> 59 ms, 256 -> 131 ms), and the
+    # required counts are 8 on production sigma-36 at 112.5 s and 90 on CAM
+    # L32 at 600 s, so a deck should size it instead of paying for 256.
+    morrison_sed_cfl_substeps_max: int = 256
+    # MorrisonConfig.sed_cfl_substeps_strict: runtime error when a column
+    # needs more sub-steps than the cap.
+    morrison_sed_cfl_substeps_strict: bool = False
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1888,6 +1921,16 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
+        # NaN/inf must die here: the scale multiplies a coefficient that goes
+        # straight into a momentum tendency, so a non-finite value does not
+        # raise anywhere downstream -- it silently turns the whole wind field
+        # non-finite on the first step (codex review 2026-09-22).
+        _dd4 = getattr(d, "mpas_div_damp4_scale", 0.0)
+        if (not isinstance(_dd4, (int, float)) or isinstance(_dd4, bool)
+                or not math.isfinite(_dd4) or _dd4 < 0):
+            errors.append(
+                "dycore.mpas_div_damp4_scale must be a finite number >= 0, "
+                f"got {_dd4!r}")
         # Dynamical-core axis membership.  Mirror the gate in
         # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
         # config-validation time, instead of deep in the solver factory at JIT.
@@ -3040,7 +3083,7 @@ class ExperimentConfig(NamedTuple):
                     "Unset it or use the MPAS lane.")
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
-        _vert_adv_options = ("upwind", "van_leer")
+        _vert_adv_options = ("upwind", "van_leer", "sb")
         _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
             errors.append(
@@ -3061,6 +3104,14 @@ class ExperimentConfig(NamedTuple):
                 "dycore.mpas_sponge_del2_top_layers > 0 is silently inert when "
                 f"a_h_scale={d.a_h_scale!r} turns the del2 viscosity off; use a_h_scale > 0 "
                 "or set mpas_sponge_del2_top_layers=0")
+        _dd4s = getattr(d, "mpas_div_damp4_scale", 0.0)
+        if (isinstance(_dd4s, (int, float)) and not isinstance(_dd4s, bool)
+                and _dd4s > 0
+                and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
+            errors.append(
+                "dycore.mpas_div_damp4_scale is wired into the hydrostatic MPAS dycore "
+                f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
+                "it would be silently inert")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
@@ -3072,7 +3123,17 @@ class ExperimentConfig(NamedTuple):
                     "MPAS dycore; on discretization="
                     f"{d.discretization!r} it would be silently inert. "
                     "Leave it at 'upwind' or use the MPAS lane.")
-            if g.vertical_coord != "sigma":
+            # 'van_leer' is sigma-only; 'sb' (conservative Simmons-Burridge
+            # flux form) is HYBRID-only.  Each lane refuses the other's scheme
+            # rather than run it silently inert.
+            _sb = d.mpas_vert_advection_scheme == "sb"
+            if _sb and g.vertical_coord == "sigma":
+                errors.append(
+                    "dycore.mpas_vert_advection_scheme='sb' is the conservative "
+                    "flux form of the HYBRID vertical transport; on "
+                    "vertical_coord='sigma' it would be silently inert. "
+                    "Use a hybrid vertical_coord, or 'upwind'/'van_leer'.")
+            if not _sb and g.vertical_coord != "sigma":
                 errors.append(
                     "dycore.mpas_vert_advection_scheme is implemented for the "
                     "sigma vertical coordinate only; on vertical_coord="
@@ -3278,6 +3339,18 @@ class ExperimentConfig(NamedTuple):
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} unknown; choose "
                 "'mg' (E3SM MG, default) or 'sam' (gSAM M2005).")
+        _nmm_max = self.morrison_sed_cfl_substeps_max
+        if (not isinstance(_nmm_max, int) or isinstance(_nmm_max, bool)
+                or not 1 <= _nmm_max <= _sed_substeps_cap_limit()):
+            errors.append(
+                "morrison_sed_cfl_substeps_max must be an int in "
+                f"[1, {_sed_substeps_cap_limit()}] (the sub-step loop costs "
+                f"linearly in it), got {_nmm_max!r}")
+        if (_nmm_max != ExperimentConfig._field_defaults[
+                "morrison_sed_cfl_substeps_max"] and self.microphysics != "morrison"):
+            errors.append(
+                f"morrison_sed_cfl_substeps_max={_nmm_max} requires "
+                f"microphysics='morrison' (got {self.microphysics!r})")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict"):
             _v = getattr(self, _nm)
             if not isinstance(_v, bool):
@@ -3812,6 +3885,7 @@ class ExperimentConfig(NamedTuple):
             physics_update_steps=amip_cfg.physics_update_steps,
             cld_macmic_num_steps=amip_cfg.cld_macmic_num_steps,
             morrison_sed_cfl_substeps=amip_cfg.morrison_sed_cfl_substeps,
+            morrison_sed_cfl_substeps_max=amip_cfg.morrison_sed_cfl_substeps_max,
             morrison_sed_cfl_substeps_strict=amip_cfg.morrison_sed_cfl_substeps_strict,
             unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
@@ -4037,6 +4111,7 @@ class ExperimentConfig(NamedTuple):
             physics_update_steps=self.physics_update_steps,
             cld_macmic_num_steps=self.cld_macmic_num_steps,
             morrison_sed_cfl_substeps=self.morrison_sed_cfl_substeps,
+            morrison_sed_cfl_substeps_max=self.morrison_sed_cfl_substeps_max,
             morrison_sed_cfl_substeps_strict=self.morrison_sed_cfl_substeps_strict,
             diurnal_cycle=self.diurnal_cycle,
             co2_ppmv=self.co2_ppmv,
