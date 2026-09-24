@@ -40,9 +40,25 @@ _LEGACY_COORDINATOR_PORT = 1234
 # management Ethernet (measured: 0.11 GB/s cross-node, 0.9 Gbit/s) while
 # ib0 is 100 Gb/s. Every SPMD CPU lane plateaued on that link.
 
-def fastest_up_interface(sysfs: str = "/sys/class/net") -> str | None:
-    """Name of the non-loopback interface that is up with the highest
-    advertised link speed, or None when nothing reports a speed."""
+def interface_ipv4(name: str) -> str | None:
+    """IPv4 address bound to ``name`` (SIOCGIFADDR), or None."""
+    import fcntl
+    import struct
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+        try:
+            raw = fcntl.ioctl(sk.fileno(), 0x8915,
+                              struct.pack("256s", name.encode()[:15]))
+        except OSError:
+            return None
+    return socket.inet_ntoa(raw[20:24])
+
+
+def fastest_up_interface(sysfs: str = "/sys/class/net",
+                         has_addr=interface_ipv4) -> str | None:
+    """Name of the non-loopback interface that is up, carries an IPv4
+    address and has the highest advertised link speed; None when nothing
+    qualifies. A fast link without an address (a bare bond member, an
+    unconfigured port) can never be advertised to peers, so it is skipped."""
     best, best_speed = None, 0
     try:
         names = sorted(os.listdir(sysfs))
@@ -59,39 +75,77 @@ def fastest_up_interface(sysfs: str = "/sys/class/net") -> str | None:
                 speed = int(f.read().strip())
         except (OSError, ValueError):
             continue
-        if speed > best_speed:
+        if speed > best_speed and has_addr(name) is not None:
             best, best_speed = name, speed
     return best
 
 
 def resolve_gloo_interface() -> str | None:
     """LEGOESM_GLOO_IFACE: an interface name, or ``default`` to leave JAX's
-    hostname-derived choice alone; unset selects the fastest interface."""
+    hostname-derived choice alone; unset selects the fastest addressed
+    interface (user's chosen default, 2026-09-24)."""
     v = os.environ.get("LEGOESM_GLOO_IFACE", "").strip()
     if v.lower() == "default":
         return None
     return v or fastest_up_interface()
 
 
+_GLOO_IFACE_BARRIER_MS = 120_000
+
+
 def pin_gloo_interface() -> str | None:
     """Re-register JAX's CPU backend factory so its gloo collectives bind
     the chosen interface. Must run after jax.distributed.initialize() and
-    before the first backend use; returns the interface pinned, or None."""
+    before the first backend use. Returns the interface pinned, or None
+    when the hook declines (single process, non-gloo collectives, or
+    ``default``); LEGOESM_GLOO_IFACE_PINNED records the outcome either way
+    so a receipt can tell "declined" from "never ran".
+
+    Every rank publishes its choice through the coordination service and
+    the ranks must agree: a rank advertising an address on a different
+    network than its peers hangs at the first collective with no message
+    naming the cause (GLM review 2026-09-24).
+    """
     import jax
     from jax._src import xla_bridge as xb  # no public factory hook
     from jax._src.distributed import global_state
     from jax._src.lib import xla_client
     if global_state.client is None:
+        os.environ["LEGOESM_GLOO_IFACE_PINNED"] = "declined:single-process"
         return None
-    if str(jax.config.jax_cpu_collectives_implementation) != "gloo":
+    impl = str(jax.config.jax_cpu_collectives_implementation)
+    if impl != "gloo":
+        os.environ["LEGOESM_GLOO_IFACE_PINNED"] = f"declined:{impl}"
         return None
     iface = resolve_gloo_interface()
     if iface is None:
+        os.environ["LEGOESM_GLOO_IFACE_PINNED"] = "default"
         return None
+    if os.environ.get("LEGOESM_GLOO_IFACE_PINNED") == iface:
+        return iface  # already installed by an earlier init path
     if xb._backends:
         raise RuntimeError(
             "pin_gloo_interface() called after a backend was created; the "
             "gloo transport is already bound to the default interface.")
+    addr = interface_ipv4(iface)
+    if addr is None:
+        raise RuntimeError(
+            f"LEGOESM_GLOO_IFACE={iface!r}: interface has no IPv4 address on "
+            f"{socket.gethostname()}; gloo could not advertise it to peers.")
+
+    client = global_state.client
+    pid = global_state.process_id
+    client.key_value_set(f"legoesm/gloo_iface/{pid}", f"{iface} {addr}")
+    client.wait_at_barrier("legoesm_gloo_iface", _GLOO_IFACE_BARRIER_MS)
+    choices = {k.rsplit("/", 1)[-1]: v.split()[0]
+               for k, v in client.key_value_dir_get("legoesm/gloo_iface/")}
+    if len(set(choices.values())) != 1:
+        raise RuntimeError(
+            "ranks disagree on the gloo interface (a rank whose fastest "
+            f"link differs would hang at the first collective): {choices}")
+    if pid == 0:
+        print(f"[gloo] collectives pinned to {iface} ({addr}) on "
+              f"{len(choices)} process(es)", flush=True)
 
     def _cpu_client_on_iface():
         coll = xla_client._xla.make_gloo_tcp_collectives(

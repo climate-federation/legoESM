@@ -360,6 +360,22 @@ def detect_launcher() -> str:
     return "none"
 
 
+def _gloo_iface_stamp(transport, process_count):
+    """What legoesm.parallel.early_init.pin_gloo_interface did: an interface
+    name, "default" (JAX's hostname-derived choice, explicitly kept) or
+    "declined:<why>". A multi-process gloo run with NO stamp means the pin
+    never ran, i.e. the launcher bypassed early_init: refuse to write a
+    receipt whose transport cannot be attributed to a link."""
+    stamp = os.environ.get("LEGOESM_GLOO_IFACE_PINNED")
+    if stamp is None and transport == "gloo" and (process_count or 0) > 1:
+        raise RuntimeError(
+            "gloo transport with more than one process but "
+            "pin_gloo_interface() never ran (LEGOESM_GLOO_IFACE_PINNED unset): "
+            "initialise through legoesm.parallel.early_init so the receipt "
+            "records which link carried the collectives.")
+    return stamp if stamp is not None else "n/a"
+
+
 def resolve_transport(
     transport: str | None,
     *,
@@ -533,7 +549,7 @@ def scaling_metadata(
         # Interface the gloo transport was pinned to by
         # legoesm.parallel.early_init.pin_gloo_interface; "default" = JAX's
         # hostname-derived choice (the 1 GbE link on Levante).
-        "gloo_iface": os.environ.get("LEGOESM_GLOO_IFACE_PINNED", "default"),
+        "gloo_iface": _gloo_iface_stamp(resolved_transport, process_count),
         "virtual_cpu_devices": detect_virtual_cpu_devices(backend),
         "launcher": detect_launcher(),
         "hostname": os.environ.get("HOSTNAME")
