@@ -3,9 +3,16 @@
 Date: 2026-09-23
 Status: **HELD** — nothing landed, and no production line changed: the round's
 whole range touches no file under `packages/`, so there is nothing to restore.
-Three of the four measurements it was ordered to make are in and each answers
-its question, and the round also found a MISREAD in the campaign's own summary
-of where the stage-2 residual lives.
+All four measurements it was ordered to make are in and each answers its
+question, the round also found a MISREAD in the campaign's own summary of
+where the stage-2 residual lives, and it found and disclosed two defects in
+its own instrument, each caught by one of its own controls.
+
+Decision 55 was answered by the user while this round was measuring — LAND
+round 160's split, under an amended year gate — so Order A is reported below
+as what it measured rather than as an input to a pending decision, and what it
+does and does not support in that decision's stated rationale is said plainly
+in the Order A section.
 
 **Order A, first, because Decision 55 is waiting on it.  THE CANCELLATION IS
 REFUTED.**  The one-step tracer advection error and the vertical-diffusion
@@ -110,7 +117,7 @@ orders down, so the decomposition is exact to the precision of the claim.
 **VERDICT: CANCELLATION REFUTED.**  All three preregistered tests fail in the
 same direction.
 
-### What this says about Decision 55, which is NOT reopened here
+### What this says about Decision 55, WHICH WAS ANSWERED WHILE THIS ROUND RAN
 
 Round 160's second continuity solve was refused by the year gate (day 240
 `1.6446718648e-02` -> `1.6448360701e-02` K, day 360 `1.1223450850e-02` ->
@@ -127,6 +134,30 @@ holding it rather than landing it on a story that has now been refuted.
 
 Per the preregistration, the conditional naming of a first non-bit statement
 in the vertical-diffusion path does NOT trigger, and nothing there is named.
+
+**Decision 55 was answered by the user on 2026-09-24, while this round was
+measuring: LAND round 160's second continuity solve, under an amended year
+gate.**  A statement that is NEMO's own and cited, proven one-variable, and
+takes at least one certified trajectory row from debt to the bar now lands
+even if the day-240 or day-360 temperature root-mean-square moves by less than
+one part in a thousand.  Round 160's split qualifies on the numbers already
+measured: day 240 moves `9.98e-05` relative and day 360 `1.97e-04` relative,
+both inside that bar.
+
+**What this round's measurement does and does not support in that decision's
+stated rationale, said plainly because the decision cites this round.**  The
+rationale reads "the year cost is the vertical-diffusion term's OWN error being
+exposed, not a defect in the split".  The first half of that — no defect in the
+split — is what this round's measurement supports: at the developed state the
+split leaves the pair of tracer rows that carries day 240 MORE exact, by
+`3.15e-11` K.  The second half is NOT supported by this measurement and is not
+refuted by it either: at the one-step level the vertical-diffusion row grows by
+only `5.36e-12` K, a thousandth of what would be needed to account for
+`1.64e-06` K at day 240, and the combined row moves the other way.  So the
+one-step state carries no mechanism for the year cost in EITHER direction, and
+the year cost remains unexplained.  That is a statement about what has been
+measured, not an argument against the decision, which rests on the relative
+year bar and not on a mechanism.
 
 ### Controls
 
@@ -530,6 +561,32 @@ findings and what was done with each:
 
 ## The gates and the tests
 
+The citation gate on this receipt reported `PASS` with zero failures, zero
+unmapped citations, zero map entries failing audit, and all nine self-tests
+fired.  Its shifted-line plant, on `ocean_pe_latlon_cgrid.py:1699`, exited 1
+with `SYMBOL-NOT-AT-LINE`.  The same gate on the preregistration reported
+`PASS` with 8 citations and its own plant, on
+`GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90:257`, exited 1 with
+`SYMBOL-NOT-AT-LINE`.
+
+The six-file push gate together with this round's own test file and round
+161's ran as ONE battery, on the committed tree at `036392846`, and reported
+exactly:
+
+> 147 passed in 1014.52s (0:16:54)
+
+The three plant runs are quoted verbatim in the Plants section above, each
+with its own exit code: `t-r3-inert` and `t-r3-tracer` exit 1 with
+`STATUS PLANT-FIRED`, `rank-combined-mispair` exits 1 with
+`STATUS PLANT-FIRED`, and the deliberately blinded `t-r3-blind` exits 2 with
+`STATUS PLANT-BLIND`.
+
+**Nothing in the model changed, and that is checked rather than asserted.**
+The round's whole range touches five files: the preregistration, this receipt,
+the walk, the citation gate and one test file.  No file under `packages/`
+appears in it, so there is no production path to restore and no card whose
+numbers could have moved.
+
 ## OPEN — Round 163
 
 1. **THE RESIDUAL'S OWNER IS ALREADY MEASURED AND IT IS THE STAGE-2 ENTRY
@@ -568,14 +625,18 @@ findings and what was done with each:
    this producer are now measured inert.  It stays on the board for round
    138's barotropic boundary, where the height is consumed directly, and it is
    NOT round 163's target.
-5. **Decision 55 gets Order A's answer and nothing more.**  The cancellation
-   that would have made round 160's split innocent is REFUTED: at the
-   developed state the split makes the pair of tracer rows that carries the
-   year MORE exact, by `3.15e-11` K, and the two error fields are essentially
-   uncorrelated (`+0.0027`).  So the year's refusal of the split has no
-   measured mechanism at the one-step level.  This round does not propose a
-   change to the decision; it removes the story that was going to be offered
-   in support of one.
+5. **Decision 55 is ANSWERED and round 163's first job is the operator's, not
+   this receipt's.**  The user decided on 2026-09-24 to LAND round 160's
+   second continuity solve under an amended year gate, and the order for round
+   163 is to flip that default, register the day-240 and day-360 change with
+   the `2e-10` K floor quoted, and then walk the vertical-diffusion chain as
+   the day-240 owner.  That comes first.  Items 1 to 4 and 6 above are the
+   CONTINUATION of the residual walk and are for after it — except item 2,
+   which costs one command and should be done before any operand is chosen.
+   One thing to carry into the flip: this round measured that the one-step
+   state shows NO mechanism for the year cost in either direction, so the
+   day-240 re-ranking the amended gate asks for should not be expected to
+   reproduce the "exposure" reading without its own measurement.
 6. **Tag the substituted continuity call instead of counting it.**  The
    walk picks the FIRST velocity-indicator call of the step, a convention
    inherited unchanged from round 161.  What stands behind it is indirect —
