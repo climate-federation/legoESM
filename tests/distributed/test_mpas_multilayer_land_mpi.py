@@ -184,6 +184,25 @@ def _column_leaves(state, ncol):
     return per_col, other
 
 
+def _stamp_columns(state, ncol):
+    """Write each column's GLOBAL index into every per-column leaf.
+
+    Values stay in a physically harmless range (the state is only ever used to
+    check index bookkeeping, never stepped), but every column is unique, so any
+    mis-indexed scatter shows up as an exact mismatch rather than surviving
+    because two columns happened to hold the same profile.
+    """
+    def _leaf(v):
+        if v is None or not hasattr(v, "shape") or v.ndim < 1:
+            return v
+        if int(v.shape[0]) != ncol:
+            return v
+        ids = np.arange(ncol, dtype=np.float64).reshape(
+            (ncol,) + (1,) * (v.ndim - 1))
+        return jnp.asarray(np.asarray(v) + ids * 1e-3)
+    return jax.tree_util.tree_map(_leaf, state)
+
+
 def _run_pair(mask_path, fix_mass):
     """Serial-global and MPI runs of one config; returns both drivers.
 
@@ -446,6 +465,15 @@ def test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets():
     # already makes spatially varying -- checked below, because a uniform state
     # would match under ANY permutation.
     seed = _build(False, mask)
+    # Stamp every per-column leaf with its own GLOBAL column index before
+    # writing the file, so a wrong index is observable by construction.
+    # Codex raised this against the first version, which only required the
+    # state to be "spatially varying": the cold-start soil profile varies with
+    # DEPTH, so a field could satisfy that while every column was identical,
+    # and a scatter that handed a rank the wrong columns would still compare
+    # equal. A per-column fingerprint cannot be fooled that way.
+    seed._land_ml_state = _stamp_columns(
+        seed._land_ml_state, np.asarray(seed.state.T.data).shape[0])
     if MPI.COMM_WORLD.Get_rank() == 0:
         from legoesm.land.restart import save_land_restart
         from legoesm.land.soil_grid import make_soil_grid
@@ -478,10 +506,22 @@ def test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets():
     for required in ("T_soil", "theta_soil"):
         assert required in ref_cols, f"{required} is not being compared"
 
-    varying = [k for k in ref_cols if float(np.ptp(ref_cols[k])) > 0.0]
-    assert varying, (
-        "every per-column land leaf is spatially uniform, so a wrong slice "
-        "would be invisible and this test would prove nothing")
+    # Variation ACROSS COLUMNS, not across all axes: a profile that varies only
+    # with depth is uniform in the dimension this test is about.
+    varying = [k for k in ref_cols
+               if float(np.ptp(np.asarray(ref_cols[k]).reshape(n_global, -1),
+                               axis=0).max()) > 0.0]
+    # Require the fingerprint on the fields the RESTART carries. Leaves the
+    # restart does not restore (a canopy solver seed, say) come from the
+    # cold-start template on both sides and are legitimately uniform; they are
+    # still compared, they just cannot carry the proof.
+    from legoesm.land.restart import _MULTILAYER_FIELDS
+    restored = [k for k in ref_cols if k in _MULTILAYER_FIELDS]
+    assert restored, "none of the restart's own fields are being compared"
+    assert set(restored) <= set(varying), (
+        f"these RESTORED land leaves are identical in every column, so a wrong "
+        f"slice would be invisible in them: "
+        f"{sorted(set(restored) - set(varying))}")
 
     # Compare the WHOLE local band, halo included, not just the owned prefix:
     # the scatter fills halo columns too and the land tile integrates them, so
@@ -499,7 +539,8 @@ def test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets():
     for name, v in ref_other.items():
         if v is None:
             continue
-        assert n_global not in tuple(np.asarray(v).shape), (
+        _shape = tuple(np.asarray(v).shape)
+        assert n_global not in _shape and (n_global + 1) not in _shape, (
             f"land leaf {name!r} carries a global-length axis that is not "
             f"leading, so nothing cut it to this rank and nothing here "
             f"compared it")
