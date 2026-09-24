@@ -171,6 +171,8 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
     if cheb_degree:
         if pcg_precond != "chebyshev":
             raise SystemExit("--cheb-degree needs --pcg-precond chebyshev.")
+        if int(cheb_degree) < 1:
+            raise SystemExit("--cheb-degree must be >= 1 (0 = scheme default).")
         flat["barotropic_chebyshev_degree"] = int(cheb_degree)
     if wide_halo:
         if baro_solver != "explicit_substep":
@@ -677,8 +679,6 @@ def main() -> int:
     if _pcg_fixed_path:
         solver_iters = int(_baro_cfg.barotropic_implicit_pcg_fixed_iters)
         _pc = str(_baro_cfg.barotropic_implicit_preconditioner)
-        if _pc == "chebyshev":
-            _pc += f"{int(_baro_cfg.barotropic_chebyshev_degree)}"
         solver_iters_mode = (
             f"fixed_pcg[{_baro_cfg.barotropic_implicit_pcg_variant},{_pc}]")
     elif args.baro_solver == "implicit_cn":
@@ -857,6 +857,11 @@ def main() -> int:
     rec.update(
         solver_iters=solver_iters,
         solver_iters_mode=solver_iters_mode,
+        # Resolved from the CONFIG (default 4 when --cheb-degree is 0/unset),
+        # so the receipt names the degree the solver actually ran.
+        chebyshev_degree=(int(model.config.barotropic.barotropic_chebyshev_degree)
+                          if str(model.config.barotropic.barotropic_implicit_preconditioner) == "chebyshev"
+                          else None),
         # Canonical residual of the TIMED solve: never captured (the fixed-
         # iteration PCG hot path exposes none) — honest null, never the
         # zero-forcing probe in disguise (codex batch4).
