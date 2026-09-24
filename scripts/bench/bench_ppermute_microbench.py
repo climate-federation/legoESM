@@ -74,7 +74,7 @@ def _ring(n, stride=1):
     return [(i, (i + stride) % n) for i in range(n)]
 
 
-def _build(mesh, n_dev, n_reps, stride=1, collective="ppermute"):
+def _build(mesh, n_dev, n_reps, stride=1, collective="ppermute", unroll=False):
     """jit'd program doing n_reps back-to-back collectives on device.
 
     ``ppermute`` is the neighbour exchange the halo fill uses; ``allreduce``
@@ -103,6 +103,15 @@ def _build(mesh, n_dev, n_reps, stride=1, collective="ppermute"):
                 def one(_, v):
                     return jax.lax.ppermute(v, axis_name=AXIS, perm=perm)
 
+            if unroll:
+                # Same program shape as the MPI arm: a Python-unrolled chain
+                # with a data dependency between repetitions. Looped-vs-
+                # unrolled on ONE transport isolates the loop-shape overhead
+                # that would otherwise be confounded with the transport gap.
+                v = xl
+                for i in range(n_reps):
+                    v = one(i, v)
+                return v
             return jax.lax.fori_loop(0, n_reps, one, xl)
 
         # check_vma is the current spelling of the old check_rep (matches
@@ -207,17 +216,19 @@ def transport_of(collective):
     """
     if collective.startswith("mpi_"):
         return "mpi4jax"
+    # Called only AFTER any jax.distributed.initialize(): touching the backend
+    # earlier breaks multi-process startup (the previous version did this at
+    # import and the gloo arms could not start).
     backend = jax.default_backend()
     if backend == "cpu":
-        impl = os.environ.get("JAX_CPU_COLLECTIVES_IMPLEMENTATION", "").lower()
-        return f"xla-cpu/{impl or 'gloo'}"
+        # The RESOLVED configuration, not the environment variable that may
+        # or may not have been applied to it.
+        impl = str(jax.config.jax_cpu_collectives_implementation or "gloo")
+        return f"xla-cpu/{impl.lower()}"
     return f"xla-{backend}"
 
 
-# Kept for the test that checks every --collective choice has a lane; the
-# runtime label comes from transport_of().
-TRANSPORT = {c: transport_of(c) for c in
-             ("ppermute", "allreduce", "mpi_sendrecv", "mpi_allreduce")}
+COLLECTIVE_CHOICES = ("ppermute", "allreduce", "mpi_sendrecv", "mpi_allreduce")
 
 
 def sweep_elems(max_kib, itemsize, lo_pow=6, hi_pow=23):
@@ -358,7 +369,7 @@ def _median_us(run, x, n_warmup, n_iters):
 
 
 def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters, n_reps=64,
-             stride=1, collective="ppermute"):
+             stride=1, collective="ppermute", unroll=False):
     """Per-ppermute time with HOST DISPATCH SUBTRACTED.
 
     A single jit call per exchange measures dispatch + launch + wire, and on
@@ -399,9 +410,9 @@ def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters, n_reps=64,
         tn = _median_us(runn, x, n_warmup, n_iters)
     else:
         x = jnp.zeros((n_dev * n_elem,), dtype=dtype)
-        t1 = _median_us(_build(mesh, n_dev, 1, stride, collective),
+        t1 = _median_us(_build(mesh, n_dev, 1, stride, collective, unroll),
                         x, n_warmup, n_iters)
-        tn = _median_us(_build(mesh, n_dev, n_reps, stride, collective),
+        tn = _median_us(_build(mesh, n_dev, n_reps, stride, collective, unroll),
                         x, n_warmup, n_iters)
     # n_reps repetitions cannot be faster than one. If they are, the loop was
     # folded, the repetitions overlapped, or the timer is measuring noise --
@@ -450,9 +461,7 @@ def main() -> int:
                         "network, and half the device count puts every link "
                         "across the whole allocation. Changes WHERE the "
                         "partner is without moving any process.")
-    p.add_argument("--collective",
-                   choices=["ppermute", "allreduce",
-                            "mpi_sendrecv", "mpi_allreduce"],
+    p.add_argument("--collective", choices=list(COLLECTIVE_CHOICES),
                    default="ppermute",
                    help="which collective to time. ppermute is the halo "
                         "fill's neighbour exchange, whose partner count does "
@@ -466,6 +475,11 @@ def main() -> int:
                         "--multicontroller; each rank is a single-process JAX "
                         "program, exactly how the one CPU lane that scales "
                         "runs.")
+    p.add_argument("--unroll", action="store_true",
+                   help="XLA arms only: compile the repetitions as a Python-"
+                        "unrolled chain (the MPI arm's program shape) instead "
+                        "of a fori_loop. Looped vs unrolled on ONE transport "
+                        "isolates loop-shape overhead from the transport gap.")
     p.add_argument("--max-kib", type=int, default=None,
                    help="cap the sweep's largest message (KiB). A slow "
                         "transport at 8 MiB x n_reps x n_iters can outrun a "
@@ -490,6 +504,9 @@ def main() -> int:
         init_multicontroller_distributed(args.coordinator)
 
     is_mpi = args.collective.startswith("mpi_")
+    if is_mpi and args.unroll:
+        raise SystemExit("--unroll applies to the XLA arms; the MPI arm is "
+                         "always unrolled.")
     if is_mpi:
         if args.multicontroller:
             raise SystemExit(
@@ -577,7 +594,7 @@ def main() -> int:
         probe_x = jnp.zeros((n_dev * 4096,), dtype=dtype)
         n_hlo = count_collectives(
             _build(mesh, n_dev, args.n_reps, args.ring_stride,
-                   args.collective),
+                   args.collective, args.unroll),
             probe_x, args.collective)
     if n_hlo < 0:
         raise SystemExit(
@@ -586,7 +603,7 @@ def main() -> int:
     # The gloo arm is a fori_loop (one collective in a while body); the MPI
     # arm is unrolled (one per repetition). Anything else means the chain was
     # folded, split, or lowered under another name.
-    expect = args.n_reps if is_mpi else 1
+    expect = args.n_reps if (is_mpi or args.unroll) else 1
     if n_hlo != expect:
         raise SystemExit(
             f"the compiled program contains {n_hlo} "
@@ -604,7 +621,8 @@ def main() -> int:
     for n_elem in elems:
         t_us, t_single = time_one(mesh, n_dev, n_elem, dtype,
                                   args.n_warmup, args.n_iters, args.n_reps,
-                                  args.ring_stride, args.collective)
+                                  args.ring_stride, args.collective,
+                                  args.unroll)
         rows.append((n_elem * itemsize, t_us))
         dispatch_us.append(t_single)
         if is_root:
@@ -630,6 +648,7 @@ def main() -> int:
                        "mpi_allreduce": "mpi_allreduce",
                        "mpi_sendrecv": "mpi_sendrecv_ring"}[args.collective],
         "transport": transport_of(args.collective),
+        "program_shape": ("unrolled" if (is_mpi or args.unroll) else "loop"),
         "n_devices": n_dev,
         "n_processes": n_dev if is_mpi else jax.process_count(),
         "max_kib": args.max_kib,

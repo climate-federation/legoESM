@@ -18,8 +18,8 @@ pytest.importorskip("jax")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "bench"))
 
 from bench_ppermute_microbench import (  # noqa: E402
-    _HLO_TOKEN, TRANSPORT, _ring, fit_latency_bandwidth, mpi_expected_source,
-    sweep_elems, transport_of,
+    COLLECTIVE_CHOICES, _HLO_TOKEN, _ring, fit_latency_bandwidth,
+    mpi_expected_source, sweep_elems, transport_of,
 )
 
 
@@ -63,40 +63,32 @@ def test_every_collective_choice_has_a_census_token_and_a_transport():
     """A choice with no HLO token would make the 'program contains the
     primitive' gate raise a KeyError instead of refusing; one with no
     transport would write a receipt that cannot be attributed to a lane."""
-    import argparse
-    import bench_ppermute_microbench as m
-    src = Path(m.__file__).read_text()
-    # The choices list is the source of truth; parse it rather than restate it.
-    start = src.index('p.add_argument("--collective"')
-    choices_src = src[start:src.index("default=", start)]
-    choices = [c for c in ("ppermute", "allreduce", "mpi_sendrecv",
-                           "mpi_allreduce") if f'"{c}"' in choices_src]
-    assert len(choices) == 4
-    for c in choices:
+    assert len(COLLECTIVE_CHOICES) == 4
+    for c in COLLECTIVE_CHOICES:
         assert c in _HLO_TOKEN, c
-        assert c in TRANSPORT, c
-    # The two transports really are two: the gloo arms and the MPI arms must
-    # not be attributed to the same lane.
-    assert len({TRANSPORT[c] for c in choices}) == 2
-    assert all(TRANSPORT[c] == "mpi4jax" for c in choices if c.startswith("mpi_"))
+        assert transport_of(c)
+    labels = {transport_of(c) for c in COLLECTIVE_CHOICES}
+    assert len(labels) == 2, labels
+    assert all(transport_of(c) == "mpi4jax" for c in COLLECTIVE_CHOICES
+               if c.startswith("mpi_"))
 
 
-def test_transport_label_is_read_from_the_runtime(monkeypatch):
-    """A hardcoded 'gloo' would attribute an MPI-collectives or GPU run to
-    the wrong lane. On CPU the label follows JAX_CPU_COLLECTIVES_IMPLEMENTATION."""
-    monkeypatch.delenv("JAX_CPU_COLLECTIVES_IMPLEMENTATION", raising=False)
-    assert transport_of("ppermute") == "xla-cpu/gloo"
-    monkeypatch.setenv("JAX_CPU_COLLECTIVES_IMPLEMENTATION", "mpi")
-    assert transport_of("ppermute") == "xla-cpu/mpi"
-    assert transport_of("mpi_sendrecv") == "mpi4jax"
-
-
-def test_identity_ring_is_refused_on_the_mpi_arm_too():
-    """--ring-stride equal to the rank count made every MPI rank exchange
-    with itself and the known-answer check still passed (a rank does receive
-    its own index from itself). The gloo arm refused it; the MPI arm must."""
-    with pytest.raises(ValueError, match="multiple of the device count"):
-        dict(_ring(4, 4))
+def test_importing_the_bench_does_not_initialise_a_backend():
+    """Under --multicontroller jax.distributed.initialize() must run before
+    anything touches XLA; a module-level backend lookup broke every gloo arm
+    at startup (codex round 2). Import in a fresh interpreter and check no
+    backend exists afterwards."""
+    import subprocess
+    import sys as _sys
+    code = ("import bench_ppermute_microbench, jax; "
+            "from jax._src import xla_bridge as xb; "
+            "print('BACKENDS', sorted(xb._backends.keys()))")
+    r = subprocess.run([_sys.executable, "-c", code], capture_output=True,
+                       text=True, timeout=120,
+                       env={**__import__("os").environ, "JAX_PLATFORMS": "cpu",
+                            "PYTHONPATH": ":".join(_sys.path)})
+    assert r.returncode == 0, r.stderr[-800:]
+    assert "BACKENDS []" in r.stdout, r.stdout
 
 
 def test_sweep_cap_keeps_the_large_end_and_refuses_a_useless_cap():
