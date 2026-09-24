@@ -2113,6 +2113,12 @@ class ModelDriver:
                     # h_topo fallback (a 500 m mountain over every ocean
                     # column) while the serial lane read the file.
                     if self._voronoi_layout is not None:
+                        _lm = self._voronoi_layout.local_mesh
+                        if sso.shape[0] != int(_lm.nCells):
+                            raise ValueError(
+                                f"subgrid orography has {sso.shape[0]} "
+                                f"columns but the rank-local mesh has "
+                                f"{int(_lm.nCells)}")
                         self._voronoi_layout = self._voronoi_layout._replace(
                             local_mesh=self._voronoi_layout.local_mesh._replace(
                                 subgrid_topo_stddev=sso))

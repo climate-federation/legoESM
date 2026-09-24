@@ -46,7 +46,7 @@ from legoesm.driver.config import (  # noqa: E402
 from legoesm.driver.model_driver import ModelDriver  # noqa: E402
 
 RES, NLEV, DT = 3, 20, 300.0  # level 3 = 642 cells
-REL_RMS_TOL = 1e-6
+REL_RMS_TOL = 1e-12  # fp64; measured 24-step residual ~7e-15 (2026-09-24)
 # A wind-bearing initial state: the analytical IC is at rest, so an edge
 # wind of 1e-2 m/s makes a relative measure meaningless.  ERA5 on this
 # mesh is the production cold start; skip when the snapshot is absent.
@@ -63,7 +63,7 @@ DECK_DYN = dict(
 )
 VARIANTS = {
     "none": dict(turbulence="none"),
-    "louis": dict(turbulence="louis"),
+    "louis": dict(turbulence="louis", mpas_div_damp4_scale=1.0),
     "deck": dict(turbulence="louis", **DECK_DYN),
     # Production-deck physics, one component at a time (amip_sundqvist_l36).
     "clubb": dict(turbulence="clubb", clubb_prognostic=True,
@@ -84,8 +84,7 @@ VARIANTS = {
 def _sso_file() -> str:
     """Deterministic synthetic SSO field (m) on a 2-degree lat-lon grid."""
     import xarray as xr
-    path = os.path.join(tempfile.gettempdir(),
-                        f"legoesm_parity_sso_{os.getpid()}.nc")
+    path = os.path.join(tempfile.mkdtemp(), "sso.nc")
     lat = np.arange(-89.0, 90.0, 2.0)
     lon = np.arange(0.0, 360.0, 2.0)
     la, lo = np.meshgrid(np.radians(lat), np.radians(lon), indexing="ij")
@@ -150,6 +149,14 @@ def test_mpas_mpi_one_step_momentum_matches_serial(turbulence, n_steps):
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
 
+    if turbulence != "none":
+        # Component-activity gate: the named component must move the serial
+        # state, or the parity below is vacuous for it.
+        base = _build(False, "none", n_steps)
+        base.run()
+        u_base = np.asarray(base.state.u.data)
+        T_base = np.asarray(base.state.T.data)
+        del base
     ref = _build(False, turbulence, n_steps)
     assert int(ref.config.days * 86400.0 / DT) == n_steps, "config must give n_steps"
     u0_ref = np.asarray(ref.state.u.data)
@@ -159,6 +166,17 @@ def test_mpas_mpi_one_step_momentum_matches_serial(turbulence, n_steps):
     u_ref = np.asarray(ref.state.u.data)
     T_ref = np.asarray(ref.state.T.data)
     ps_ref = np.asarray(ref.state.p_s.data)
+    _tr = ref.state.tracers
+    qv_ref = np.asarray(_tr["q_v"].data) if _tr else None
+    if turbulence != "none":
+        assert (np.max(np.abs(u_ref - u_base)) > 1e-6
+                or np.max(np.abs(T_ref - T_base)) > 1e-6), (
+            f"[{turbulence}] variant left the serial state unchanged vs none")
+    # Bit-identical serial reference on every rank, or rank-to-rank
+    # differences below are meaningless.
+    for _arr in (u_ref, T_ref, ps_ref) + ((qv_ref,) if qv_ref is not None else ()):
+        assert np.array_equal(_arr, comm.bcast(_arr, root=0)), \
+            "serial reference differs across ranks"
 
     # Cross-rank consistency of the SERIAL reference: every rank builds its
     # own; they must agree to the bit or the comparison below is meaningless.
@@ -178,6 +196,11 @@ def test_mpas_mpi_one_step_momentum_matches_serial(turbulence, n_steps):
         _a = getattr(d.model.config, _k, None); _b = getattr(ref.model.config, _k, None)
         if _a is not None or _b is not None:
             print(f"[{turbulence} x{n_steps}] rank{rank} config.{_k}: mpi={_a} serial={_b}")
+            assert _a == _b, f"rank {rank} {_k}: mpi={_a} serial={_b}"
+    if turbulence == "sso":
+        _sso_lm = getattr(_lm, "subgrid_topo_stddev", None)
+        assert _sso_lm is not None and float(jnp.max(_sso_lm)) > 100.0, \
+            "SSO field did not reach the partition's local mesh"
     part = d._voronoi_layout.partition
     n_owned = part.n_owned_cells
     owned_cells = np.asarray(part.local_cells[:n_owned])
@@ -256,6 +279,10 @@ def test_mpas_mpi_one_step_momentum_matches_serial(turbulence, n_steps):
     print(f"[{turbulence} x{n_steps}] rank{rank} |du| by ring (max, rms, n): "
           + ", ".join(f"{k}:({v[0]:.1e},{v[1]:.1e},{v[2]})" for k, v in loc.items()))
 
+    if qv_ref is not None:
+        qv_mpi = np.asarray(d.state.tracers["q_v"].data[:n_owned])
+        r_qv = _rel_rms(qv_mpi, qv_ref[owned_cells])
+        assert r_qv < REL_RMS_TOL, f"q_v parity broken: {r_qv:.3e}"
     assert r_T < REL_RMS_TOL, f"T parity broken: {r_T:.3e}"
     assert r_ps < REL_RMS_TOL, f"p_s parity broken: {r_ps:.3e}"
     assert r_u < REL_RMS_TOL, (
