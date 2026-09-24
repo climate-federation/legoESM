@@ -3,12 +3,24 @@
 Runs on CPU virtual devices — the FIT logic and the refusals are what these
 gate, not the hardware constants.
 """
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 pytest.importorskip("jax")
 
-from bench_ppermute_microbench import fit_latency_bandwidth  # noqa: E402
+# The script under test lives in scripts/bench, which is not a package and is
+# not on the path pytest builds from `testpaths`; without this line the module
+# fails to COLLECT (ModuleNotFoundError) and the whole file silently
+# contributes nothing.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "bench"))
+
+from bench_ppermute_microbench import (  # noqa: E402
+    _HLO_TOKEN, TRANSPORT, _ring, fit_latency_bandwidth, mpi_expected_source,
+    sweep_elems,
+)
 
 
 def test_fit_recovers_known_latency_and_bandwidth():
@@ -45,3 +57,60 @@ def test_single_device_is_refused():
     )
     assert out.returncode != 0
     assert "needs >=2 devices" in (out.stderr + out.stdout)
+
+
+def test_every_collective_choice_has_a_census_token_and_a_transport():
+    """A choice with no HLO token would make the 'program contains the
+    primitive' gate raise a KeyError instead of refusing; one with no
+    transport would write a receipt that cannot be attributed to a lane."""
+    import argparse
+    import bench_ppermute_microbench as m
+    src = Path(m.__file__).read_text()
+    # The choices list is the source of truth; parse it rather than restate it.
+    start = src.index('p.add_argument("--collective"')
+    choices_src = src[start:src.index("default=", start)]
+    choices = [c for c in ("ppermute", "allreduce", "mpi_sendrecv",
+                           "mpi_allreduce") if f'"{c}"' in choices_src]
+    assert len(choices) == 4
+    for c in choices:
+        assert c in _HLO_TOKEN, c
+        assert c in TRANSPORT, c
+    # The two transports really are two: the gloo arms and the MPI arms must
+    # not be attributed to the same lane.
+    assert {TRANSPORT[c] for c in choices} == {"gloo/xla", "mpi4jax"}
+
+
+def test_sweep_cap_keeps_the_large_end_and_refuses_a_useless_cap():
+    full = sweep_elems(None, 4)
+    assert full[0] == 64 and full[-1] == 1 << 22
+    capped = sweep_elems(4096, 4)                 # 4 MiB cap, float32
+    assert capped[-1] * 4 == 4096 * 1024
+    assert capped[-1] < full[-1]
+    assert capped[:8] == full[:8]                 # the small end is untouched
+    with pytest.raises(SystemExit, match="smallest usable cap is 512"):
+        sweep_elems(256, 4)   # one size >= 256 KiB: the slope has one point
+    assert sweep_elems(512, 4)[-1] * 4 == 512 * 1024   # two points: allowed
+
+
+def test_too_few_repetitions_are_refused_up_front():
+    """With n_reps below the floor a fast transport's per-op cost sits inside
+    the timer noise and the fold guard misreports a working loop as folded
+    (seen on the on-node MPI arm at n_reps=3)."""
+    import subprocess
+    import sys as _sys
+    script = (Path(__file__).resolve().parents[2]
+              / "scripts" / "bench" / "bench_ppermute_microbench.py")
+    r = subprocess.run([_sys.executable, str(script), "--n-reps", "3"],
+                       capture_output=True, text=True, timeout=120,
+                       env={**__import__("os").environ, "JAX_PLATFORMS": "cpu",
+                            "PYTHONPATH": ":".join(_sys.path)})
+    assert r.returncode != 0
+    assert "too few to resolve" in (r.stdout + r.stderr)
+
+
+def test_mpi_expected_source_inverts_the_ring():
+    """The MPI arm's known-answer check must expect exactly what the gloo
+    arm's ring sends: for every (src, dst) pair in _ring, dst expects src."""
+    for n, stride in ((4, 1), (8, 3), (12, 5)):
+        for src, dst in _ring(n, stride):
+            assert mpi_expected_source(dst, n, stride) == src

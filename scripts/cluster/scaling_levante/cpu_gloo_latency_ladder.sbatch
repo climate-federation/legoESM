@@ -105,7 +105,18 @@ echo "sha=$(git -C "$REPO" rev-parse --short HEAD) ppn=$PPN outdir=$OUTDIR"
 # that can be re-run in a single node-hour, not the 64-node arms that are the
 # whole reason for the allocation.
 LADDER="${LADDER:-128 64 32 16 8}"
-COLLECTIVES="${COLLECTIVES:-ppermute allreduce}"
+# The mpi_* arms are the SAME ring and reduction on mpi4jax (one single-process
+# JAX program per rank, no jax.distributed) -- the transport the one CPU lane
+# that scales 62x actually uses. Running both transports in ONE job on the
+# SAME ranks is what makes the comparison controlled.
+COLLECTIVES="${COLLECTIVES:-ppermute allreduce mpi_sendrecv mpi_allreduce}"
+# Caps the sweep's largest message. Both 8-rank gloo arms outran the 900 s
+# per-arm cap at 8 MiB (~75 ms per message at 0.11 GB/s x 64 reps x 50
+# iters) and lost their receipts; 4 MiB keeps five sizes in the bandwidth fit.
+MAX_KIB="${MAX_KIB:-4096}"
+# mpi4py/mpi4jax need the OpenMPI they were built against; the module system
+# does not prepend it from a batch shell (memory: mpi-tests-on-levante).
+export LD_LIBRARY_PATH="/sw/spack-levante/gcc-13.4.0-c4mgfk/lib64:/sw/spack-levante/openmpi-4.1.2-mnmady/lib:${LD_LIBRARY_PATH:-}"
 want=0; ok=0
 for ND in $LADDER; do
     NN=$(( (ND + PPN - 1) / PPN ))
@@ -125,7 +136,8 @@ for ND in $LADDER; do
                 --cpus-per-task="$(( ${SLURM_CPUS_ON_NODE:?} / PPN ))" \
                 --kill-on-bad-exit=1 \
                 "$PY" "$REPO/scripts/bench/bench_ppermute_microbench.py" \
-                --multicontroller --n-devices "$ND" --collective "$C" \
+                $( [[ "$C" == mpi_* ]] || echo "--multicontroller --n-devices $ND" ) \
+                --collective "$C" --max-kib "$MAX_KIB" \
                 --out "$OUTDIR/${C}_nd${ND}.jsonl"; then
             ok=$(( ok + 1 ))
         else
