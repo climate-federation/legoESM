@@ -826,10 +826,23 @@ def test_inherited_env_stamp_does_not_stand_in_for_an_installation(distributed, 
     importlib.reload(ei)   # a fresh process pops the inherited stamp at import
     assert "LEGOESM_GLOO_IFACE_PINNED" not in os.environ
     monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "lo")
-    monkeypatch.setattr(_d.global_state, "client", _FakeClient({}))
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
     monkeypatch.setattr(xb, "_backends", {"cpu": object()})
     with pytest.raises(RuntimeError, match="after a backend was created"):
         ei.pin_gloo_interface()
+    # a pre-vote refusal still tells the peers and passes both barriers
+    assert client.kv["legoesm/gloo_iface/1"].startswith("error ")
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
+    # a stale coordinator key that does not parse is caught after the vote
+    # and the rank still reaches the second barrier
+    client = _FakeClient({"legoesm/gloo_iface/x": "junk"})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    monkeypatch.setattr(xb, "_backends", {})
+    with pytest.raises(ValueError):
+        ei.pin_gloo_interface()
+    assert client.barriers[-1] == "legoesm_gloo_iface_probed"
 
 
 def test_pin_refuses_unreachable_peers_missing_ranks_and_no_address(distributed, monkeypatch):

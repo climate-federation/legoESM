@@ -114,39 +114,29 @@ def _cpu_is_the_platform() -> bool:
     return plats.split(",")[0].strip().lower() == "cpu"
 
 
-def _agree_and_probe(client, pid, n_procs, iface, addr):
+def _agree_and_probe(client, pid, n_procs, iface, addr, port, lst):
     """Publish this rank's choice, wait for every rank, then prove the
     address is reachable: each rank listens on its address and connects
     to the next rank's. Interface NAMES agreeing proves nothing (two
     fabrics can both be called ib0); a completed connection does. Every
     rank passes both barriers whatever it decides, so a failure surfaces
     as its own message on every rank, not as a barrier timeout."""
-    lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.key_value_set(f"legoesm/gloo_iface/{pid}",
+                         f"{iface} {addr} {port}", allow_overwrite=True)
+    client.wait_at_barrier("legoesm_gloo_iface_publish", _GLOO_IFACE_BARRIER_MS)
     try:
-        lst.bind((addr, 0))
-        lst.listen(1)
-        lst.settimeout(_GLOO_PROBE_TIMEOUT_S)
-        port = lst.getsockname()[1]
-        client.key_value_set(f"legoesm/gloo_iface/{pid}",
-                             f"{iface} {addr} {port}", allow_overwrite=True)
-        client.wait_at_barrier("legoesm_gloo_iface_publish",
-                               _GLOO_IFACE_BARRIER_MS)
         rows = {int(k.rsplit("/", 1)[-1]): v.split()
                 for k, v in client.key_value_dir_get("legoesm/gloo_iface/")}
-        try:
-            _check_vote_and_probe(client, pid, n_procs, iface, addr, port,
-                                  lst, rows)
-        finally:
-            # Arrive at the second barrier on every outcome so no peer
-            # waits out the timeout for a rank that already knows why.
-            client.wait_at_barrier("legoesm_gloo_iface_probed",
-                                   _GLOO_IFACE_BARRIER_MS)
+        _check_vote_and_probe(pid, n_procs, iface, addr, port, lst, rows)
     finally:
-        lst.close()
+        # Arrive at the second barrier on every outcome so no peer waits
+        # out the timeout for a rank that already knows why.
+        client.wait_at_barrier("legoesm_gloo_iface_probed",
+                               _GLOO_IFACE_BARRIER_MS)
     return rows
 
 
-def _check_vote_and_probe(client, pid, n_procs, iface, addr, port, lst, rows):
+def _check_vote_and_probe(pid, n_procs, iface, addr, port, lst, rows):
     if set(rows) != set(range(n_procs)):
         raise RuntimeError(
             f"gloo interface vote has ranks {sorted(rows)}, expected "
@@ -237,22 +227,34 @@ def pin_gloo_interface() -> str | None:
     iface = resolve_gloo_interface()
     if iface is None:
         return _decline(client, pid, "default")
-    if xb._backends:
-        raise RuntimeError(
-            "pin_gloo_interface() called after a backend was created; the "
-            "gloo transport is already bound to the default interface.")
+    lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        addr = interface_ipv4(iface)
-        if addr is None:
-            raise RuntimeError(
-                f"LEGOESM_GLOO_IFACE={iface!r}: interface has no IPv4 address "
-                f"on {socket.gethostname()}; gloo could not advertise it.")
-    except (RuntimeError, ValueError) as e:
-        # Tell the peers WHY before raising, or they wait out the barrier
-        # and see only a vote mismatch.
-        _decline(client, pid, f"error {e}".replace("\n", " "))
-        raise
-    rows = _agree_and_probe(client, pid, global_state.num_processes, iface, addr)
+        # Everything that can fail BEFORE this rank has voted: tell the
+        # peers why, pass both barriers, then raise — otherwise they wait
+        # out the barrier and see only a mismatch.
+        try:
+            if xb._backends:
+                raise RuntimeError(
+                    "pin_gloo_interface() called after a backend was created; "
+                    "the gloo transport is already bound to the default "
+                    "interface.")
+            addr = interface_ipv4(iface)
+            if addr is None:
+                raise RuntimeError(
+                    f"LEGOESM_GLOO_IFACE={iface!r}: interface has no IPv4 "
+                    f"address on {socket.gethostname()}; gloo could not "
+                    "advertise it.")
+            lst.bind((addr, 0))
+            lst.listen(1)
+            lst.settimeout(_GLOO_PROBE_TIMEOUT_S)
+            port = lst.getsockname()[1]
+        except Exception as e:
+            _decline(client, pid, f"error {e}".replace("\n", " "))
+            raise
+        rows = _agree_and_probe(client, pid, global_state.num_processes,
+                                iface, addr, port, lst)
+    finally:
+        lst.close()
     if pid == 0:
         names = sorted({r[0] for r in rows.values()})
         print(f"[gloo] collectives pinned to {iface} ({addr}); "
