@@ -24,7 +24,8 @@ from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     beta_limited_surface_humidity,
 )
-from legoesm.core.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.core.bulk_flux import (
+    simple_bulk_fluxes, compute_most_fluxes, surface_reference_state)
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.land.carbon.config import CarbonState
@@ -184,12 +185,14 @@ def compute_simple_seb_fluxes(
             f"expected one of {_valid_bulk}."
         )
     rho = forcing.rho_lowest
+    T_ref, z_ref = surface_reference_state(
+        forcing.T_lowest, land_config.z_ref, forcing.z_lowest)
     if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
+            T_ref, forcing.q_lowest,
             T_surface, q_sfc, rho,
-            z_ref=land_config.z_ref,
+            z_ref=z_ref,
             z0_init=z0,
             scheme=land_config.bulk_scheme,
             n_iter=land_config.bulk_n_iter,
@@ -267,9 +270,9 @@ def compute_simple_seb_fluxes(
     if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
         _, _, shflx_lin, lhflx_lin, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
+            T_ref, forcing.q_lowest,
             T_sfc_lin, q_sfc_lin, rho,
-            z_ref=land_config.z_ref, z0_init=z0,
+            z_ref=z_ref, z0_init=z0,
             scheme=land_config.bulk_scheme, n_iter=land_config.bulk_n_iter,
             L_latent=L_eff, max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
         )

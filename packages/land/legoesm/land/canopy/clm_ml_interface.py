@@ -571,6 +571,31 @@ def resolve_num_ml_steps(canopy_config: CLMMLCanopyConfig, dt: float) -> int:
     return n_sub
 
 
+def refresh_reference_height(mlcanopy, z_ref):
+    """Refresh a warm canopy's forcing geometry without changing layer counts.
+
+    The backend initializes this geometry only once. Model-level height moves
+    with temperature/pressure, so retain its within-canopy grid and rebuild the
+    uniformly spaced above-canopy layers at each coupling step (as initVertical
+    does). All arrays keep their shapes, including the unused 1-based row zero.
+    """
+    levels = jnp.arange(mlcanopy.zw_profile.shape[1])[None, :]
+    ntop = mlcanopy.ntop_canopy[:, None]
+    ncan = mlcanopy.ncan_canopy[:, None]
+    above = (levels > ntop) & (levels <= ncan)
+    above = above & (jnp.arange(z_ref.shape[0])[:, None] > 0)
+    fraction = (levels - ntop) / jnp.maximum(ncan - ntop, 1)
+    top = mlcanopy.ztop_canopy[:, None]
+    zw = jnp.where(above, top + fraction * (z_ref[:, None] - top),
+                   mlcanopy.zw_profile)
+    dz = mlcanopy.dz_profile.at[:, 1:].set(jnp.where(
+        above[:, 1:], zw[:, 1:] - zw[:, :-1], mlcanopy.dz_profile[:, 1:]))
+    zs = mlcanopy.zs_profile.at[:, 1:].set(jnp.where(
+        above[:, 1:], 0.5 * (zw[:, 1:] + zw[:, :-1]), mlcanopy.zs_profile[:, 1:]))
+    return mlcanopy._replace(zref_forcing=z_ref, zw_profile=zw,
+                             dz_profile=dz, zs_profile=zs)
+
+
 def _setup_clm_topology(
     ncol: int,
     lat_deg: np.ndarray,
@@ -1034,6 +1059,8 @@ def _build_stubs(
     forc_po2 = _pad1(o2_pa)
     forc_solad_col = swskyb_col_jax   # (np_, 3)  direct SW
     forc_solai_grc = swskyd_grc_jax   # (np_, 3)  diffuse SW
+    # CLM MLGetAtmForcing computes thref = tref + (g/cp)*zref itself.
+    # Keep physical T here so that paired correction is applied exactly once.
     forc_t = _pad1(forcing.T_lowest)
     forc_pbot = _pad1(forcing.p_surface)
     forc_lwrad = _pad1(forcing.lw_down)
@@ -1225,7 +1252,8 @@ def _build_stubs(
         esai_patch = esai_patch.at[p].set(sai_v)
 
     # ---- frictionvel ----
-    forc_hgt_u_patch = jnp.full(np_, float(land_config.z_ref), dtype=jnp.float64)
+    z_ref = land_config.z_ref if forcing.z_lowest is None else forcing.z_lowest
+    forc_hgt_u_patch = _pad1(jnp.broadcast_to(z_ref, forcing.T_lowest.shape))
 
     # ---- Build stub namespaces ----
     atm2lnd = SimpleNamespace(
@@ -2179,6 +2207,9 @@ def compute_clm_ml_canopy_fluxes(
         mlcanopy = _init_mlcanopy(ncol, stubs, canopy_config)
     else:
         mlcanopy = canopy_state.mlcanopy
+        if forcing.z_lowest is not None:
+            mlcanopy = refresh_reference_height(
+                mlcanopy, stubs["frictionvel"].forc_hgt_u_patch)
 
     # ---- Decomposition bounds ----
     bounds = bounds_type(begg=1, endg=ncol, begl=1, endl=ncol,

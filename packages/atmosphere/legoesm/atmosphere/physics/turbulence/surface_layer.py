@@ -21,6 +21,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import (
+    surface_reference_state,
     compute_most_fluxes,
     compute_sam_oceflx_fluxes,
     simple_bulk_fluxes,
@@ -115,9 +116,9 @@ def surface_fluxes_at_lowest_level(u, v, T, q_v, T_sfc, q_sfc, rho, config,
             or z_low is None
             or config.bulk_scheme not in _STABILITY_SCHEMES):
         return compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, config)
+    T_ref, z_ref = surface_reference_state(T, config.z_ref, z_low)
     return compute_surface_fluxes(
-        u, v, T + (constants.g / constants.c_pd) * z_low, q_v,
-        T_sfc, q_sfc, rho, config, z_ref=z_low)
+        u, v, T_ref, q_v, T_sfc, q_sfc, rho, config, z_ref=z_ref)
 
 
 def compute_surface_fluxes(
