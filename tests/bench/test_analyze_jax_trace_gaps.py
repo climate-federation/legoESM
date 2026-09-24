@@ -316,3 +316,22 @@ def test_cpu_capture_collective_names_are_recognised():
     # is not that collective, and the zero-width end markers are not events.
     assert mod.collective_family("fusion.all_gather.18") is None
     assert mod.collective_family("end: psum.7") is None
+
+
+def test_top_ops_reports_span_thread_time_and_parallelism():
+    """A serial op (one thread, back to back) must show mean_threads ~1 and
+    a parallel op (four threads at once) ~4; the wall-span ranking must put
+    the serial 10 ms op above the parallel 4 x 2.5 ms op."""
+    evs = [{"ph": "X", "pid": 1, "tid": 1, "name": "serial", "ts": 0, "dur": 10000}]
+    evs += [{"ph": "X", "pid": 1, "tid": t, "name": "parallel", "ts": 20000,
+             "dur": 2500} for t in range(1, 5)]
+    evs.append({"ph": "X", "pid": 2, "tid": 1, "name": "other-process", "ts": 0,
+                "dur": 1})
+    rows = mod.top_ops(evs, steps=1, n=5)
+    names = [r["name"] for r in rows]
+    assert names == ["serial", "parallel"], names
+    serial, parallel = rows
+    assert abs(serial["mean_threads"] - 1.0) < 1e-9
+    assert abs(parallel["mean_threads"] - 4.0) < 1e-9
+    assert abs(parallel["thread_ms_per_step"] - 10.0) < 1e-9
+    assert abs(parallel["span_ms_per_step"] - 2.5) < 1e-9
