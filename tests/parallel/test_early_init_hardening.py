@@ -770,18 +770,22 @@ def _rank0_row(client):
     delivers RST instead)."""
     import threading
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.bind(("127.0.0.1", 0)); srv.listen(1); srv.settimeout(10)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    srv.settimeout(10)
     port = srv.getsockname()[1]
     accepted = threading.Event()
 
     def rank0():
-        c, _ = srv.accept(); c.close()          # rank 1 connected to rank 0
+        c, _ = srv.accept()
+        c.close()          # rank 1 connected to rank 0
         me = client.kv["legoesm/gloo_iface/1"].split()   # rank 0 -> rank 1
         with socket.create_connection((me[1], int(me[2])), timeout=10) as s1:
             s1.settimeout(10)
             if s1.recv(1) == b"":
                 accepted.set()
-    t = threading.Thread(target=rank0, daemon=True); t.start()
+    t = threading.Thread(target=rank0, daemon=True)
+    t.start()
     client.kv["legoesm/gloo_iface/0"] = f"lo 127.0.0.1 {port}"
     return accepted, t
 
