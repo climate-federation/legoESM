@@ -1113,7 +1113,11 @@ def reorder_voronoi_for_sharding(
     c0 = cellsOnEdge_np[0]
     c1 = cellsOnEdge_np[1]
     edge_owner = cell_owner[np.minimum(c0, c1)]
-    edge_perm = np.argsort(edge_owner, kind="stable")
+    # Within each owner group, order edges along the same Hilbert curve as the
+    # cells (key = the min cell's key).  A stable sort by owner alone leaves the
+    # generator's order inside the group, and the 10-neighbour edgesOnEdge
+    # gather then jumps ~190k rows between consecutive edges on the s9 mesh.
+    edge_perm = np.lexsort((hkeys[np.minimum(c0, c1)], edge_owner))
     edge_inv = np.empty_like(edge_perm)
     edge_inv[edge_perm] = np.arange(len(edge_perm))
 
@@ -1126,7 +1130,8 @@ def reorder_voronoi_for_sharding(
         cell_owner[np.minimum(min_cell_v, mesh.nCells - 1)],
         0,
     ).astype(np.int32)
-    vert_perm = np.argsort(vertex_owner, kind="stable")
+    vert_perm = np.lexsort(
+        (hkeys[np.minimum(min_cell_v, mesh.nCells - 1)], vertex_owner))
     vert_inv = np.empty_like(vert_perm)
     vert_inv[vert_perm] = np.arange(len(vert_perm))
 
