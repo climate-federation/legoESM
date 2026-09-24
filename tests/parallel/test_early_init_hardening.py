@@ -7,11 +7,11 @@ covered by the multicontroller self-spawn suites.
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import types
 
 import pytest
-
 from legoesm.parallel import early_init as ei
 
 _ALL_ENV = (
@@ -696,8 +696,6 @@ class _FakeClient:
     def key_value_dir_get(self, prefix):
         return [(k, v) for k, v in self.kv.items() if k.startswith(prefix)]
 
-
-import socket
 
 
 @pytest.fixture
