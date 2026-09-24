@@ -123,9 +123,8 @@ def test_extremes_only_preserves_means_counts_sparse_days_and_restart():
     np.testing.assert_array_equal(result['field_2d_tas_max'][0], [[293., 300.]])
     dc = DiagnosticCollector.__new__(DiagnosticCollector)
     dc._spatial_daily = restored
-    dc.cmip_snapshot_vars = {'tas'}
-    attrs = dc._daily_snapshot_attrs()
-    assert attrs['tas']['cell_methods'] == 'time: point'
+    attrs = dc._daily_extreme_attrs()
+    assert 'tas' not in attrs
     assert attrs['tasmin']['cell_methods'] == 'time: minimum'
     assert attrs['tasmax']['cell_methods'] == 'time: maximum'
     assert 'hourly' in attrs['tasmax']['comment']
@@ -150,7 +149,7 @@ def test_actual_mpas_loop_samples_hourly_across_restart():
         env['step'] = step
         exec(code, env)
     assert len(samples) == 25
-    assert all(kw == {'extremes_only': True} for day, kw in samples)
+    assert all(kw == {'state_only': True} for day, kw in samples)
     hours = np.arange(10, 35)
     times = np.array([day * 24 for day, kw in samples])
     assert np.all(times >= hours)
@@ -184,15 +183,15 @@ def test_skin_temperature_blend_reaches_native_accumulator():
     assert entry['units'] == 'K'
     assert entry['long_name'] == 'Surface Temperature'
     assert 'time: mean' in entry['cell_methods']
-    # Hourly feed reuses the SAME tas diagnostic, without touching monthly means.
+    # Hourly feed reuses the SAME surface diagnostics and preserves flux sums.
     calls = dc._spatial_daily._call_counts.copy()
     driver.diagnostics = dc
     resets = []
     driver._mpas_sfc_accum = NS(reset=lambda **kw: resets.append(kw))
-    ModelDriver._feed_mpas_cmip_accumulators(driver, .6, extremes_only=True)
+    ModelDriver._feed_mpas_cmip_accumulators(driver, .6, state_only=True)
     assert dc._spatial_daily._extreme_counts  # swallowed feed errors must fail
     assert resets == []
-    assert dc._spatial_daily._call_counts == calls
+    assert sum(dc._spatial_daily._call_counts.values()) == sum(calls.values()) + 1
     np.testing.assert_array_equal(
         dc._spatial_monthly.finalize(min_sample_fraction=0)['field_2d_ts'][0], actual)
 

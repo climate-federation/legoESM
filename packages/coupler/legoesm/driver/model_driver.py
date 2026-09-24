@@ -733,8 +733,7 @@ class _MPASSfcFluxAccum:
     plus the clear-sky TOA pair (10 rsutcs, 11 rlutcs; #843 lean-lane
     port), which is only ever non-None when ``--clear-sky-diag`` is on
     (empty slots add nothing: dump/restore stay byte-identical when off).
-    State-derived fields (tas/ta/ua/...) stay snapshots; the collector
-    labels them honestly via ``cmip_snapshot_vars``.
+    State-derived fields (tas/ta/ua/...) use the independent hourly feed.
 
     Sums stay on device (lazy ``jnp`` adds, no per-step host sync); the one
     device->host transfer happens in :meth:`mean` at diag cadence.  Upstream,
@@ -7691,7 +7690,8 @@ class ModelDriver:
             f"LEGOESM_ALLOW_EMPTY_CMOR=1 to proceed anyway and accept empty "
             f"CMOR files.")
 
-    def _feed_mpas_cmip_accumulators(self, day: float, *, extremes_only=False) -> None:
+    def _feed_mpas_cmip_accumulators(self, day: float, *, state_only=False,
+                                     flux_only=False) -> None:
         """Feed the CMOR monthly/daily/zonal accumulators from the current
         MPAS (Voronoi) state at a diagnostic interval.
 
@@ -7733,14 +7733,19 @@ class ModelDriver:
         try:
             if _is_mpas_cell_partitioned(self):
                 self._feed_mpas_cmip_multirank(
-                    day, diag, self._voronoi_layout, extremes_only=extremes_only)
+                    day, diag, self._voronoi_layout, state_only=state_only,
+                    flux_only=flux_only)
             else:
-                if extremes_only:
-                    _kw = self._mpas_cmip_native_kwargs(day, diag, extremes_only=True)
-                    diag.feed_daily_extremes_native(day, tas=_kw["tas"])
+                if state_only:
+                    _kw = self._mpas_cmip_native_kwargs(day, diag, state_only=True)
+                    # Associate the right-end hourly sample with the hour it covers.
+                    sample_bin = (np.floor(day * 24.0 + 1e-9) - 0.5) / 24.0
+                    diag.feed_cmip_accumulators_native(sample_bin, **_kw)
+                    diag.feed_daily_extremes_native(sample_bin, tas=_kw["tas"])
                 else:
                     _kw = self._mpas_cmip_native_kwargs(day, diag)
-                    diag.feed_cmip_accumulators_native(day, **_kw)
+                    diag.feed_cmip_accumulators_native(
+                        day, include_state=not flux_only, **_kw)
                     self._feed_mpas_moisture_budget(day, diag, _kw)
         except Exception as exc:  # pragma: no cover - defensive diag guard
             logger.error(
@@ -7752,7 +7757,7 @@ class ModelDriver:
             # failed feed — a stale sum would smear across intervals).  The
             # new window begins at THIS feed's day.
             _acc = getattr(self, "_mpas_sfc_accum", None)
-            if _acc is not None and not extremes_only:
+            if _acc is not None and not state_only:
                 _acc.reset(window_start_day=day)
 
     def _feed_mpas_moisture_budget(self, day: float, diag, kw: dict) -> None:
@@ -7876,7 +7881,7 @@ class ModelDriver:
         return (state.T.data[..., -1] if tas is None else tas), ts
 
     def _mpas_cmip_native_kwargs(self, day: float, diag,
-                                 u_override=None, *, extremes_only=False) -> dict:
+                                 u_override=None, *, state_only=False) -> dict:
         """Build the NATIVE (rank-local) cell-field kwargs for
         :meth:`DiagnosticCollector.feed_cmip_accumulators_native`.
 
@@ -7916,13 +7921,9 @@ class ModelDriver:
         state = self.state
         # Geographic cell-centre winds from the edge-normal velocity.
         u_edges = state.u.data if u_override is None else u_override
-        if extremes_only:
-            u_edges = u_edges[..., -1:]
         u_east, v_north = reconstruct_cell_velocity(u_edges, self.grid)
         tas, ts = ModelDriver._mpas_surface_temperatures(
             self, day, diag, u_east, v_north)
-        if extremes_only:
-            return dict(tas=tas)
 
         # Pressure vertical velocity, for the subsidence the scorecard could
         # previously only guess at.  Built from the SAME halo-refreshed edge
@@ -7981,14 +7982,14 @@ class ModelDriver:
         # step's instantaneous value (pre-#1353 fallback).  None on
         # runs without radiation/turbulence; the collector skips
         # absent fields.
-        _sfc_diag = getattr(self.model, "_sfc_diag", None)
-        _accum = getattr(self, "_mpas_sfc_accum", None)
+        _sfc_diag = None if state_only else getattr(self.model, "_sfc_diag", None)
+        _accum = None if state_only else getattr(self, "_mpas_sfc_accum", None)
         # A SHORT window (first interval after an off-cadence restart or
         # a feed-off link) covers less time than its label claims, so
         # WITHHOLD the flux fields entirely rather than publish a
         # partial-window mean — and do NOT fall back to the
         # instantaneous slots, which is the very defect #1353 fixes
-        # (codex-6).  The state snapshots still feed normally.
+        # (codex-6). The independent hourly state feed is unaffected.
         _accum_partial = (_accum is not None and _accum.has_samples()
                           and not _accum.is_complete())
         if _accum_partial:
@@ -8095,7 +8096,7 @@ class ModelDriver:
         )
 
     def _feed_mpas_cmip_multirank(self, day: float, diag, vlayout,
-                                  *, extremes_only=False) -> None:
+                                  *, state_only=False, flux_only=False) -> None:
         """Multi-rank CMOR feed: OWNED-cell -> global gather, commit on rank 0.
 
         Design
@@ -8246,9 +8247,9 @@ class ModelDriver:
         flux_days = None
         err = None
         try:
-            if extremes_only:
+            if state_only:
                 kw = self._mpas_cmip_native_kwargs(
-                    day, diag, u_override=u_ex, extremes_only=True)
+                    day, diag, u_override=u_ex, state_only=True)
             else:
                 kw = self._mpas_cmip_native_kwargs(day, diag, u_override=u_ex)
             flux_days = kw.pop("flux_interval_days", None)
@@ -8306,7 +8307,7 @@ class ModelDriver:
             flux_days = None
         else:
             flux_days = _fd[0]
-        required = {"tas"} if extremes_only else {"T", "p_s"}
+        required = {"T", "p_s", "tas"} if state_only else {"T", "p_s"}
         if errors or not required.issubset(names):
             # Unanimous: every rank computed this from the same ``status``.
             if rank == 0:
@@ -8328,11 +8329,14 @@ class ModelDriver:
 
         # --- PHASE 4: commit on rank 0 only; no collectives beyond here. -----
         if rank == 0:
-            if extremes_only:
-                diag.feed_daily_extremes_native(day, tas=gathered["tas"])
+            if state_only:
+                sample_bin = (np.floor(day * 24.0 + 1e-9) - 0.5) / 24.0
+                diag.feed_cmip_accumulators_native(sample_bin, **gathered)
+                diag.feed_daily_extremes_native(sample_bin, tas=gathered["tas"])
             else:
                 diag.feed_cmip_accumulators_native(
-                    day, flux_interval_days=flux_days, **gathered)
+                    day, flux_interval_days=flux_days,
+                    include_state=not flux_only, **gathered)
 
     def _finalize_mpas_cmip(self, final_day: float | None = None) -> None:
         """Write the CMOR NetCDF (``Amon`` / ``day`` / ``fx``) from the fed
@@ -9544,7 +9548,7 @@ class ModelDriver:
                 self._mpas_cmip_feed_on
                 and getattr(_diag, "_spatial_monthly", None) is not None),
             # First feed lands ``_rem`` steps in — the SAME arithmetic the
-            # snapshot-phase label below and the feed trigger itself use.
+            # flux feed trigger uses.
             # If that is past the end of the run the loop never fires.
             feed_steps_reached=(
                 DIAG_INTERVAL > 0
@@ -9557,18 +9561,8 @@ class ModelDriver:
                 "radiation pass is DISABLED rather than run and discarded.",
                 _cs_why)
 
-        # #1353: per-step flux accumulation so the CMOR feed hands interval
-        # MEANS (not the 00 UTC end-of-interval snapshot) for the strongly
-        # diurnal fields pr/rlut/rsut/rsdt/hfss/hfls.  State-derived fields
-        # (tas, ps, psl, prw, ta/hus/ua/va) remain per-interval snapshots —
-        # at diag_days == 1 that is one fixed-phase 00 UTC sample per day,
-        # so their CMOR files get the CF-truthful
-        # ``time: point within days time: mean over days`` label + comment
-        # (Amon) and ``time: point`` (day table) instead of the table
-        # default ``time: mean``.  Sub-daily diag_days gives genuine
-        # multi-sample means, so the table default stands there; a
-        # nonstandard diag_days > 1 keeps table defaults too (the runtime
-        # warning below the segment builder already flags that mode).
+        # Per-step flux means retain the diagnostic interval. State means
+        # and daily extremes use the independent hourly hook below.
         self._mpas_sfc_accum = (
             _MPASSfcFluxAccum(expected_steps=DIAG_INTERVAL,
                               window_start_day=START_DAY, dt_s=DT)
@@ -9604,46 +9598,6 @@ class ModelDriver:
                         "or this is a multi-rank cell partition (the per-cell "
                         "sums are rank-local), so those samples cannot be "
                         "continued consistently across this link.")
-        # Sampling-honesty metadata.  The state fields are SNAPSHOTS at every
-        # cadence >= 1 day AND under the ``diag_days <= 0`` sentinel (which
-        # on this lane is "one feed at the end of the link", not "no
-        # diagnostics" — codex-11), so both must disclose it; only sub-daily
-        # cadences give genuine multi-sample means and keep table defaults.
-        _true_cad_days = (DIAG_INTERVAL * DT / 86400.0 if DIAG_INTERVAL > 0
-                          else float(cfg.output.diag_days))
-        if (self._mpas_cmip_feed_on and _diag is not None
-                and (float(cfg.output.diag_days) <= 0.0
-                     or _true_cad_days >= 1.0)):
-            _diag.cmip_snapshot_vars = {
-                "tas", "ts", "ps", "psl", "prw", "ta", "hus", "ua", "va", "wap"}
-            if cfg.output.clear_sky_diag:
-                # The cloud-diagnostic trio (fed only with --clear-sky-diag,
-                # see _feed_mpas_cmip_accumulators) is state-derived => same
-                # once-per-interval snapshot sampling caveat as tas/ps/prw.
-                _diag.cmip_snapshot_vars |= {"clt", "clwvi", "clivi"}
-            # Label with the TRUE sampling cadence (integer steps x dt), not
-            # the requested diag_days the step arithmetic truncated — e.g.
-            # diag_days=1 at dt=10000 s samples every 0.926 d, and claiming
-            # "once-daily 00 UTC" there would be false (codex-8).
-            _diag.cmip_snapshot_cadence_days = _true_cad_days
-            # Time of day the snapshots actually land at: the FIRST sample of
-            # this run is a full interval after the current position when the
-            # restart sits exactly on a boundary (``_rem`` counts the steps
-            # to the next feed, never 0).  A fractional start_day /
-            # --restart-start-day moves it off 00 UTC — derive, never assert
-            # (codex-10/11).
-            if DIAG_INTERVAL > 0:
-                # Key the phase off DIAG_PHASE — the SAME variable the
-                # trigger uses — so the two can never disagree: the periodic
-                # path is absolute-phased (DIAG_PHASE = start_step), the
-                # sentinel is job-local (DIAG_PHASE = 0, one sample a full
-                # local interval after the restart).  Deriving from
-                # start_step unconditionally mis-stated the sentinel's phase
-                # on an off-boundary restart (codex-12).
-                _rem = DIAG_INTERVAL - (DIAG_PHASE % DIAG_INTERVAL)
-                _first = START_DAY + _rem * DT / 86400.0
-                _diag.cmip_snapshot_phase_frac = float(_first) % 1.0
-
         # Build MPAS-compatible physics via make_physics (same code path as
         # cubed-sphere/lat-lon).  Includes RRTMGP + Held-Suarez forcing
         # when radiation is configured.
@@ -11921,15 +11875,15 @@ class ModelDriver:
                     int(_sed_cap_effective), step, running=_sed_req_window)
                 _sed_req_window = None
 
-            # Hourly extrema use absolute simulated time (restart phase is kept).
+            # Hourly state means and extrema keep absolute time across restarts.
             # A non-divisor dt samples on the first step crossing each hour.
-            # This feed never changes mean counts or resets the flux accumulator.
+            # Flux means keep their independent per-step sums and diagnostic cadence.
             _sample_day = START_DAY + (step + 1) * DT / 86400.0
             _previous_day = START_DAY + step * DT / 86400.0
             if (self._mpas_cmip_feed_on
                     and int(np.floor(_sample_day * 24.0 + 1e-9))
                     > int(np.floor(_previous_day * 24.0 + 1e-9))):
-                self._feed_mpas_cmip_accumulators(_sample_day, extremes_only=True)
+                self._feed_mpas_cmip_accumulators(_sample_day, state_only=True)
 
             # Diagnostics at intervals — phased by DIAG_PHASE (= start_step
             # for a real periodic cadence, 0 for the once-at-the-end
@@ -12314,9 +12268,11 @@ class ModelDriver:
                 # pollutes the accumulators (the guard ``break``s first).  The
                 # day is ABSOLUTE (START_DAY + elapsed) so multi-link restart
                 # chains keep monotonic calendar months (matches the cube
-                # path).  Feed cost is host-side numpy at diag cadence only.
+                # path). This interval feed adds flux means only; state
+                # means were already sampled by the independent hourly hook.
                 if self._mpas_cmip_feed_on:
-                    self._feed_mpas_cmip_accumulators(START_DAY + elapsed_day)
+                    self._feed_mpas_cmip_accumulators(
+                        START_DAY + elapsed_day, flux_only=True)
 
             # Periodic checkpoint for the 100-yr restart chain — cadence is
             # independent of the diagnostic interval.  ``day`` is the
