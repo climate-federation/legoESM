@@ -23,6 +23,8 @@ import zlib
 # "must be called before any JAX calls that might initialise the XLA backend"
 # (issue #693: every multi-node run died here).
 _INITIALIZED = False
+# A stamp inherited from a parent process says nothing about THIS process.
+os.environ.pop("LEGOESM_GLOO_IFACE_PINNED", None)
 
 # Legacy fixed coordinator port, kept as the last-resort fallback when no
 # scheduler job id is present (matches the historical hardcoded value so
@@ -118,38 +120,59 @@ def _agree_and_probe(client, pid, n_procs, iface, addr):
     to the next rank's. Interface NAMES agreeing proves nothing (two
     fabrics can both be called ib0); a completed connection does."""
     lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    lst.bind((addr, 0))
-    lst.listen(1)
-    lst.settimeout(_GLOO_PROBE_TIMEOUT_S)
-    port = lst.getsockname()[1]
-    client.key_value_set(f"legoesm/gloo_iface/{pid}", f"{iface} {addr} {port}",
-                         allow_overwrite=True)
-    client.wait_at_barrier("legoesm_gloo_iface_publish", _GLOO_IFACE_BARRIER_MS)
-    rows = {int(k.rsplit("/", 1)[-1]): v.split()
-            for k, v in client.key_value_dir_get("legoesm/gloo_iface/")}
-    if set(rows) != set(range(n_procs)):
-        raise RuntimeError(
-            f"gloo interface vote has ranks {sorted(rows)}, expected "
-            f"0..{n_procs - 1} (stale coordinator keys or a missing rank)")
-    if n_procs > 1:
-        nxt = rows[(pid + 1) % n_procs]
-        if nxt[0] == "declined":
+    try:
+        lst.bind((addr, 0))
+        lst.listen(1)
+        lst.settimeout(_GLOO_PROBE_TIMEOUT_S)
+        port = lst.getsockname()[1]
+        client.key_value_set(f"legoesm/gloo_iface/{pid}",
+                             f"{iface} {addr} {port}", allow_overwrite=True)
+        client.wait_at_barrier("legoesm_gloo_iface_publish",
+                               _GLOO_IFACE_BARRIER_MS)
+        rows = {int(k.rsplit("/", 1)[-1]): v.split()
+                for k, v in client.key_value_dir_get("legoesm/gloo_iface/")}
+        if set(rows) != set(range(n_procs)):
             raise RuntimeError(
-                f"rank {(pid + 1) % n_procs} declined the gloo pin "
-                f"({' '.join(nxt)}) while rank {pid} pinned {iface}: mixed "
-                "configuration, the collectives would bind different links")
-        peer = (nxt[1], int(nxt[2]))
-        try:
-            with socket.create_connection(peer, timeout=_GLOO_PROBE_TIMEOUT_S):
-                pass
-            lst.accept()[0].close()
-        except OSError as e:
+                f"gloo interface vote has ranks {sorted(rows)}, expected "
+                f"0..{n_procs - 1} (stale coordinator keys or a missing rank)")
+        bad = {r: v for r, v in rows.items() if v[0] == "error"}
+        if bad:
             raise RuntimeError(
-                f"rank {pid} on {socket.gethostname()} cannot reach rank "
-                f"{(pid + 1) % n_procs} at {peer[0]} (its {nxt[0]}) from "
-                f"{iface} {addr}: {e}. The chosen interfaces are not on one "
-                "network; set LEGOESM_GLOO_IFACE explicitly.") from e
-    lst.close()
+                "gloo pin failed on another rank: " +
+                "; ".join(f"rank {r}: {' '.join(v[1:])}" for r, v in bad.items()))
+        if n_procs > 1:
+            succ = (pid + 1) % n_procs
+            nxt = rows[succ]
+            if nxt[0] == "declined":
+                raise RuntimeError(
+                    f"rank {succ} declined the gloo pin ({' '.join(nxt)}) "
+                    f"while rank {pid} pinned {iface}: mixed configuration, "
+                    "the collectives would bind different links")
+            peer = (nxt[1], int(nxt[2]))
+            # Source-bound so the connection really leaves through the
+            # pinned address, as gloo's will; the default route might not.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as out:
+                out.settimeout(_GLOO_PROBE_TIMEOUT_S)
+                try:
+                    out.bind((addr, 0))
+                    out.connect(peer)
+                except OSError as e:
+                    raise RuntimeError(
+                        f"rank {pid} on {socket.gethostname()} cannot reach "
+                        f"rank {succ} at {peer[0]} (its {nxt[0]}) from {iface} "
+                        f"{addr}: {e}. The chosen interfaces are not on one "
+                        "network; set LEGOESM_GLOO_IFACE explicitly.") from e
+                try:
+                    lst.accept()[0].close()
+                except OSError as e:
+                    prev = (pid - 1) % n_procs
+                    raise RuntimeError(
+                        f"rank {pid} reached rank {succ} but rank {prev} "
+                        f"({' '.join(rows[prev][:2])}) never connected to "
+                        f"{iface} {addr}:{port}: {e}. Reachability is one-way; "
+                        "set LEGOESM_GLOO_IFACE explicitly.") from e
+    finally:
+        lst.close()
     client.wait_at_barrier("legoesm_gloo_iface_probed", _GLOO_IFACE_BARRIER_MS)
     return rows
 
@@ -158,8 +181,9 @@ def _decline(client, pid, why):
     """A rank that does not pin still votes and still arrives at both
     barriers; otherwise a pinning peer would wait out the timeout."""
     os.environ["LEGOESM_GLOO_IFACE_PINNED"] = f"declined:{why}"
+    row = why if why.startswith("error ") else f"declined {why}"
     if client is not None:
-        client.key_value_set(f"legoesm/gloo_iface/{pid}", f"declined {why}",
+        client.key_value_set(f"legoesm/gloo_iface/{pid}", row,
                              allow_overwrite=True)
         client.wait_at_barrier("legoesm_gloo_iface_publish", _GLOO_IFACE_BARRIER_MS)
         client.wait_at_barrier("legoesm_gloo_iface_probed", _GLOO_IFACE_BARRIER_MS)
@@ -204,11 +228,17 @@ def pin_gloo_interface() -> str | None:
         raise RuntimeError(
             "pin_gloo_interface() called after a backend was created; the "
             "gloo transport is already bound to the default interface.")
-    addr = interface_ipv4(iface)
-    if addr is None:
-        raise RuntimeError(
-            f"LEGOESM_GLOO_IFACE={iface!r}: interface has no IPv4 address on "
-            f"{socket.gethostname()}; gloo could not advertise it to peers.")
+    try:
+        addr = interface_ipv4(iface)
+        if addr is None:
+            raise RuntimeError(
+                f"LEGOESM_GLOO_IFACE={iface!r}: interface has no IPv4 address "
+                f"on {socket.gethostname()}; gloo could not advertise it.")
+    except (RuntimeError, ValueError) as e:
+        # Tell the peers WHY before raising, or they wait out the barrier
+        # and see only a vote mismatch.
+        _decline(client, pid, f"error {e}".replace("\n", " "))
+        raise
     rows = _agree_and_probe(client, pid, global_state.num_processes, iface, addr)
     if pid == 0:
         names = sorted({r[0] for r in rows.values()})

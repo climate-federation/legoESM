@@ -370,8 +370,8 @@ def _gloo_iface_stamp(transport, process_count):
     # resolve_transport spells "gloo" only for process_count > 1.
     if stamp is None and transport == "gloo":
         raise RuntimeError(
-            "gloo transport with more than one process but "
-            "pin_gloo_interface() never ran (LEGOESM_GLOO_IFACE_PINNED unset): "
+            "gloo transport but pin_gloo_interface() never ran in this "
+            "process (LEGOESM_GLOO_IFACE_PINNED unset): "
             "initialise through legoesm.parallel.early_init so the receipt "
             "records which link carried the collectives.")
     return stamp if stamp is not None else "n/a"

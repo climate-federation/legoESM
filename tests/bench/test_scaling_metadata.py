@@ -487,6 +487,8 @@ def test_unstamped_multiprocess_gloo_receipt_is_refused(monkeypatch):
     monkeypatch.delenv("LEGOESM_GLOO_IFACE_PINNED", raising=False)
     with pytest.raises(RuntimeError, match="pin_gloo_interface\\(\\) never ran"):
         md._gloo_iface_stamp("gloo", 8)
+    with pytest.raises(RuntimeError, match="never ran"):
+        md._gloo_iface_stamp("gloo", 1)
     assert md._gloo_iface_stamp("mpi4jax", 8) == "n/a"
     assert md._gloo_iface_stamp("xla-local", 1) == "n/a"
     monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "ib0")

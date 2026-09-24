@@ -751,11 +751,12 @@ def test_declining_ranks_still_vote_and_arrive_at_both_barriers(distributed, mon
                                "legoesm_gloo_iface_probed"]
     assert xb._backend_factories["cpu"] is before
     client.barriers.clear()
+    prior = jax.config.jax_platforms
     jax.config.update("jax_platforms", "cuda,cpu")   # the resolved config, not the env
     try:
         assert ei.pin_gloo_interface() is None
     finally:
-        jax.config.update("jax_platforms", "cpu")
+        jax.config.update("jax_platforms", prior)
     assert os.environ["LEGOESM_GLOO_IFACE_PINNED"] == "declined:platform-not-cpu"
     assert len(client.barriers) == 2
     monkeypatch.setenv("LEGOESM_GLOO_IFACE", "default")
@@ -764,19 +765,27 @@ def test_declining_ranks_still_vote_and_arrive_at_both_barriers(distributed, mon
 
 
 def _rank0_row(client):
-    """Rank 0's published row with a live loopback listener behind it."""
+    """Rank 0's published row with a live loopback listener behind it.
+    Returns an Event set when rank 0's connection back to rank 1 was
+    ACCEPTED (an accepted-then-closed connection delivers FIN, so recv()
+    returns b""; a listener closed with the connection still queued
+    delivers RST instead)."""
     import threading
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.bind(("127.0.0.1", 0)); srv.listen(1); srv.settimeout(10)
     port = srv.getsockname()[1]
+    accepted = threading.Event()
 
     def rank0():
         c, _ = srv.accept(); c.close()          # rank 1 connected to rank 0
         me = client.kv["legoesm/gloo_iface/1"].split()   # rank 0 -> rank 1
-        with socket.create_connection((me[1], int(me[2])), timeout=10):
-            pass
-    threading.Thread(target=rank0, daemon=True).start()
+        with socket.create_connection((me[1], int(me[2])), timeout=10) as s1:
+            s1.settimeout(10)
+            if s1.recv(1) == b"":
+                accepted.set()
+    t = threading.Thread(target=rank0, daemon=True); t.start()
     client.kv["legoesm/gloo_iface/0"] = f"lo 127.0.0.1 {port}"
+    return accepted, t
 
 
 def test_pin_registers_a_factory_bound_to_the_interface(distributed, monkeypatch):
@@ -786,10 +795,12 @@ def test_pin_registers_a_factory_bound_to_the_interface(distributed, monkeypatch
     process-local state (an inherited env stamp is never trusted)."""
     _d, xb = distributed
     client = _FakeClient({})
-    _rank0_row(client)
+    accepted, thread = _rank0_row(client)
     monkeypatch.setattr(_d.global_state, "client", client)
     saved = xb._backend_factories["cpu"]
     assert ei.pin_gloo_interface() == "lo"
+    thread.join(10)
+    assert accepted.is_set(), "rank 0's connection to rank 1 was never accepted"
     assert client.barriers == ["legoesm_gloo_iface_publish",
                                "legoesm_gloo_iface_probed"]
     assert client.kv["legoesm/gloo_iface/1"].startswith("lo 127.0.0.1 ")
@@ -811,6 +822,10 @@ def test_pin_registers_a_factory_bound_to_the_interface(distributed, monkeypatch
 def test_inherited_env_stamp_does_not_stand_in_for_an_installation(distributed, monkeypatch):
     _d, xb = distributed
     monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "lo")   # from a parent
+    import importlib
+    importlib.reload(ei)   # a fresh process pops the inherited stamp at import
+    assert "LEGOESM_GLOO_IFACE_PINNED" not in os.environ
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "lo")
     monkeypatch.setattr(_d.global_state, "client", _FakeClient({}))
     monkeypatch.setattr(xb, "_backends", {"cpu": object()})
     with pytest.raises(RuntimeError, match="after a backend was created"):
@@ -834,7 +849,17 @@ def test_pin_refuses_unreachable_peers_missing_ranks_and_no_address(distributed,
                         _FakeClient({"legoesm/gloo_iface/0": "declined mpi"}))
     with pytest.raises(RuntimeError, match="mixed configuration"):
         ei.pin_gloo_interface()
-    monkeypatch.setattr(_d.global_state, "client", _FakeClient({}))
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
     monkeypatch.setattr(ei, "interface_ipv4", lambda n: None)
     with pytest.raises(RuntimeError, match="no IPv4 address"):
+        ei.pin_gloo_interface()
+    # the cause was published for the peers before raising
+    assert client.kv["legoesm/gloo_iface/1"].startswith("error ")
+    assert len(client.barriers) == 2
+    # and a peer that sees such a row names the failing rank, not a mismatch
+    monkeypatch.setattr(ei, "interface_ipv4", lambda n: "127.0.0.1")
+    monkeypatch.setattr(_d.global_state, "client",
+                        _FakeClient({"legoesm/gloo_iface/0": "error boom"}))
+    with pytest.raises(RuntimeError, match="failed on another rank: rank 0: boom"):
         ei.pin_gloo_interface()
