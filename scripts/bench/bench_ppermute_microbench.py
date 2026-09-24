@@ -298,13 +298,13 @@ def _build_mpi(comm, n_dev, n_reps, stride=1, collective="mpi_sendrecv"):
     the rank count each repetition for the same overflow reason as the gloo
     arm.
     """
+    rank = comm.Get_rank()
+    dest = dict(_ring(n_dev, stride))[rank]      # _ring refuses the identity
+    source = mpi_expected_source(rank, n_dev, stride)
     mpi4jax, MPI = _mpi_modules()
     from legoesm.parallel.halo_exchange import get_sendrecv_vjp
     from legoesm.parallel.reductions import mpi4jax_array_result
     sendrecv = get_sendrecv_vjp(mpi4jax)
-    rank = comm.Get_rank()
-    dest = dict(_ring(n_dev, stride))[rank]      # _ring refuses the identity
-    source = mpi_expected_source(rank, n_dev, stride)
 
     @jax.jit
     def run(x):
@@ -323,11 +323,11 @@ def _build_mpi(comm, n_dev, n_reps, stride=1, collective="mpi_sendrecv"):
 def verify_mpi(comm, n_dev, stride, collective):
     """Known-answer check for the MPI arms; returns the worst disagreement
     over ALL ranks (reduced with a max so every rank agrees on the verdict)."""
+    rank = comm.Get_rank()
+    dest = dict(_ring(n_dev, stride))[rank]      # _ring refuses the identity
     mpi4jax, MPI = _mpi_modules()
     from legoesm.parallel.halo_exchange import get_sendrecv_vjp
     from legoesm.parallel.reductions import mpi4jax_array_result
-    rank = comm.Get_rank()
-    dest = dict(_ring(n_dev, stride))[rank]      # _ring refuses the identity
     me = jnp.full((8,), rank, dtype=jnp.int32)
     if collective == "mpi_allreduce":
         got = mpi4jax_array_result(mpi4jax.allreduce(me, op=MPI.SUM, comm=comm))

@@ -18,8 +18,8 @@ pytest.importorskip("jax")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "bench"))
 
 from bench_ppermute_microbench import (  # noqa: E402
-    COLLECTIVE_CHOICES, _HLO_TOKEN, _ring, fit_latency_bandwidth,
-    mpi_expected_source, sweep_elems, transport_of,
+    COLLECTIVE_CHOICES, _HLO_TOKEN, _build_mpi, _ring, fit_latency_bandwidth,
+    mpi_expected_source, sweep_elems, transport_of, verify_mpi,
 )
 
 
@@ -114,8 +114,16 @@ def test_identity_ring_is_refused_on_the_mpi_arm_too():
     """--ring-stride equal to the rank count made every MPI rank exchange
     with itself and the known-answer check still passed (a rank does receive
     its own index from itself). The gloo arm refused it; the MPI arm must."""
+    class FakeComm:
+        def Get_rank(self):
+            return 0
+
+    # Both MPI entry points refuse BEFORE touching the MPI stack, so this
+    # runs without an MPI runtime and a bypass of _ring in either one fails.
     with pytest.raises(ValueError, match="multiple of the device count"):
-        dict(_ring(4, 4))
+        _build_mpi(FakeComm(), 4, 8, stride=4)
+    with pytest.raises(ValueError, match="multiple of the device count"):
+        verify_mpi(FakeComm(), 4, 4, "mpi_sendrecv")
 
 
 def test_sweep_cap_keeps_the_large_end_and_refuses_a_useless_cap():
