@@ -2106,22 +2106,6 @@ class ModelDriver:
                 sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
                 try:
                     self.grid = self.grid._replace(subgrid_topo_stddev=sso)
-                    # The compiled MPI step closes over the layout's local
-                    # mesh (built before this attach), not ``self.grid`` --
-                    # same hazard as the land_frac refresh above.  Without
-                    # this the distributed lane silently launched the scalar
-                    # h_topo fallback (a 500 m mountain over every ocean
-                    # column) while the serial lane read the file.
-                    if self._voronoi_layout is not None:
-                        _lm = self._voronoi_layout.local_mesh
-                        if sso.shape[0] != int(_lm.nCells):
-                            raise ValueError(
-                                f"subgrid orography has {sso.shape[0]} "
-                                f"columns but the rank-local mesh has "
-                                f"{int(_lm.nCells)}")
-                        self._voronoi_layout = self._voronoi_layout._replace(
-                            local_mesh=self._voronoi_layout.local_mesh._replace(
-                                subgrid_topo_stddev=sso))
                 # NamedTuple._replace raises TypeError ("Got unexpected field
                 # names"), NOT ValueError/AttributeError -- so this guard never
                 # fired and a raw collections traceback escaped instead of the
@@ -2133,6 +2117,20 @@ class ModelDriver:
                         f"field (supported: CubedSphereGrid, GaussianGrid, "
                         f"VoronoiMesh)"
                     ) from e
+                # The compiled MPI step closes over the layout's local mesh
+                # (built before this attach), not ``self.grid`` -- same
+                # hazard as the land_frac refresh above.  Without this the
+                # distributed lane silently launched the scalar h_topo
+                # fallback (a 500 m mountain over every ocean column) while
+                # the serial lane read the file.
+                if self._voronoi_layout is not None:
+                    _lm = self._voronoi_layout.local_mesh
+                    if sso.shape[0] != int(_lm.nCells):
+                        raise ValueError(
+                            f"subgrid orography has {sso.shape[0]} columns "
+                            f"but the rank-local mesh has {int(_lm.nCells)}")
+                    self._voronoi_layout = self._voronoi_layout._replace(
+                        local_mesh=_lm._replace(subgrid_topo_stddev=sso))
                 logger.info(
                     f"  Subgrid orography: {sso_path} "
                     f"(stddev max={float(jnp.max(sso)):.0f} m, "
@@ -2198,6 +2196,12 @@ class ModelDriver:
                      f", topography={self.config.topography}"),
         )
 
+    def _coeff_grid(self):
+        """Grid that global scalars (diffusion coefficients, mean cell size)
+        are derived from: the GLOBAL mesh under a partition, else the grid."""
+        g = getattr(self, "_grid_global", None)
+        return self.grid if g is None else g
+
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
 
@@ -2213,7 +2217,7 @@ class ModelDriver:
         # mesh's min(dcEdge)/min(areaCell) differ per rank (measured +0.09 %
         # nu_del2 on rank 0 of a 2-rank res-3 split), so each rank would run
         # a different viscosity.
-        coeff_grid = self._grid_global if self._grid_global is not None else self.grid
+        coeff_grid = self._coeff_grid()
         self.model = create_atmosphere_dycore(
             self.config, self.grid, self.sigma, coeff_grid=coeff_grid)
 
@@ -9981,8 +9985,7 @@ class ModelDriver:
             convection=convection_config_for(
                 cfg,
                 grid_dx_m=float(np.sqrt(np.mean(np.asarray(
-                    (self._grid_global if self._grid_global is not None
-                     else self.grid).areaCell))))),
+                    self._coeff_grid().areaCell))))),
             turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=gwd_config_for(cfg),
