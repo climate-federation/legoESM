@@ -855,6 +855,7 @@ def test_inherited_env_stamp_does_not_stand_in_for_an_installation(distributed, 
     monkeypatch.setenv("LEGOESM_GLOO_IFACE", "lo" + "x" * 14)
     with pytest.raises(ValueError, match="exceeds 15 bytes"):
         ei.pin_gloo_interface()
+    assert client.kv["legoesm/gloo_iface/1"].startswith("error ")
     assert client.barriers == ["legoesm_gloo_iface_publish",
                                "legoesm_gloo_iface_probed"]
     monkeypatch.setenv("LEGOESM_GLOO_IFACE", "lo")

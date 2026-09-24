@@ -224,15 +224,20 @@ def pin_gloo_interface() -> str | None:
     impl = str(jax.config.jax_cpu_collectives_implementation)
     if impl != "gloo":
         return _decline(client, pid, impl)
+    # Everything that can fail BEFORE this rank has voted: tell the peers
+    # why, pass both barriers, then raise — otherwise they wait out the
+    # barrier and see only a mismatch. The "default" decline sits outside
+    # that guard so a failure inside _decline cannot re-enter the barriers.
+    try:
+        iface = resolve_gloo_interface()
+    except Exception as e:
+        _decline(client, pid, f"error {e}".replace("\n", " "))
+        raise
+    if iface is None:
+        return _decline(client, pid, "default")
     lst = None
     try:
-        # Everything that can fail BEFORE this rank has voted: tell the
-        # peers why, pass both barriers, then raise — otherwise they wait
-        # out the barrier and see only a mismatch.
         try:
-            iface = resolve_gloo_interface()
-            if iface is None:
-                return _decline(client, pid, "default")
             lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             if xb._backends:
                 raise RuntimeError(
