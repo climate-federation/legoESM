@@ -8,10 +8,15 @@
 #SBATCH --time=11:59:00
 #SBATCH --requeue
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM_chunk/results/amip/convcmp/slurm_%j.out
+# REPOINTED 2026-09-23: config/amip/amip_production.yaml became the CAM6
+# suite on that date.  This script exists to reproduce a SPECIFIC recorded
+# analysis, so it now names config/amip/amip_sundqvist_l36.yaml -- the same
+# deck under its new name, byte-unchanged -- rather than silently running a
+# different model.
 # =============================================================================
 # C48/L40 AMIP convection-scheme comparison — self-chaining, one job per scheme.
 #
-# Runs the AUTHORITATIVE production config (config/amip/amip_production.yaml)
+# Runs the AUTHORITATIVE production config (config/amip/amip_sundqvist_l36.yaml)
 # with ONLY the convection scheme + GWD swapped:
 #   --convection $CONV                      (sbm control | tiedtke | bechtold | edmf)
 #   --gravity-wave-drag hines+mcfarlane     (production non-oro Hines + McFarlane
@@ -92,7 +97,7 @@ echo "[convcmp] OUTDIR=$OUTDIR cur_day=$cur_day target=$TARGET_DAYS extra=${EXTR
 RESTART=(); [ -n "$latest" ] && RESTART=(--restart-from "$latest")
 
 JAX_ENABLE_X64=1 "$PY" -u "$CODE/scripts/run/run_amip.py" \
-  --config "$CODE/config/amip/amip_production.yaml" \
+  --config "$CODE/config/amip/amip_sundqvist_l36.yaml" \
   "${AMIP_PATH_FLAGS[@]}" \
   "${SCHEME_FLAGS[@]}" \
   ${EXTRA[@]+"${EXTRA[@]}"} \

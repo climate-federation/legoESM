@@ -314,7 +314,7 @@ def test_cam6_deck_reaches_the_config_through_the_yaml_route():
     from legoesm.driver.run_config_yaml import load_yaml_config
 
     from scripts.run.run_amip import build_arg_parser
-    deck = pathlib.Path(__file__).resolve().parents[2] / "config" / "amip" / "amip_cam6.yaml"
+    deck = pathlib.Path(__file__).resolve().parents[2] / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     keys = load_yaml_config(str(deck), parser)
     assert keys["cld_macmic_num_steps"] == 3 and keys["morrison_sed_cfl_substeps"] is True
