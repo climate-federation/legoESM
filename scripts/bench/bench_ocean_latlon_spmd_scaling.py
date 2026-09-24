@@ -95,7 +95,8 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                           wide_halo=False, wide_halo_chunk=0,
                           tripole=False, baro_solver="implicit_cn",
                           force_pcg=False, pcg_variant="standard",
-                          pcg_fixed_iters=0):
+                          pcg_fixed_iters=0, pcg_precond="jacobi",
+                          cheb_degree=0):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -161,6 +162,16 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                 "--pcg-variant only affects the implicit_cn fixed-M PCG; "
                 "drop it for explicit_substep arms.")
         flat["barotropic_implicit_pcg_variant"] = pcg_variant
+    if pcg_precond != "jacobi":
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--pcg-precond only affects the implicit_cn fixed-M PCG; "
+                "drop it for explicit_substep arms.")
+        flat["barotropic_implicit_preconditioner"] = pcg_precond
+    if cheb_degree:
+        if pcg_precond != "chebyshev":
+            raise SystemExit("--cheb-degree needs --pcg-precond chebyshev.")
+        flat["barotropic_chebyshev_degree"] = int(cheb_degree)
     if wide_halo:
         if baro_solver != "explicit_substep":
             raise SystemExit(
@@ -262,6 +273,18 @@ def main() -> int:
                         "it trades solver convergence for sync points — "
                         "check zero_forcing_probe_residual in the output "
                         "before believing any speedup.")
+    p.add_argument("--pcg-precond",
+                   choices=["jacobi", "zonal_line", "chebyshev", "multigrid"],
+                   default="jacobi",
+                   help="Preconditioner of the implicit_cn fixed-M PCG "
+                        "(barotropic_implicit_preconditioner; jacobi = "
+                        "scheme default). chebyshev is reduction-free per "
+                        "iteration and composes with --pcg-variant "
+                        "single_reduce.")
+    p.add_argument("--cheb-degree", type=int, default=0,
+                   help="Chebyshev polynomial degree for --pcg-precond "
+                        "chebyshev (0 = scheme default, "
+                        "barotropic_chebyshev_degree).")
     p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
                    default="standard",
                    help="Fixed-M PCG recurrence for the implicit_cn "
@@ -507,7 +530,8 @@ def main() -> int:
             wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
             tripole=args.tripole, baro_solver=args.baro_solver,
             force_pcg=args.force_pcg, pcg_variant=args.pcg_variant,
-            pcg_fixed_iters=args.pcg_fixed_iters)
+            pcg_fixed_iters=args.pcg_fixed_iters,
+            pcg_precond=args.pcg_precond, cheb_degree=args.cheb_degree)
         # Prime the build-once vertex-mask cache from the CONCRETE state so
         # the wrapper can build the per-band vertex masks host-side (global
         # 2-D — stays on the host under the nd>1 context).
@@ -652,9 +676,11 @@ def main() -> int:
                             or bool(_baro_cfg.barotropic_implicit_force_pcg)))
     if _pcg_fixed_path:
         solver_iters = int(_baro_cfg.barotropic_implicit_pcg_fixed_iters)
+        _pc = str(_baro_cfg.barotropic_implicit_preconditioner)
+        if _pc == "chebyshev":
+            _pc += f"{int(_baro_cfg.barotropic_chebyshev_degree)}"
         solver_iters_mode = (
-            f"fixed_pcg[{_baro_cfg.barotropic_implicit_pcg_variant},"
-            f"{_baro_cfg.barotropic_implicit_preconditioner}]")
+            f"fixed_pcg[{_baro_cfg.barotropic_implicit_pcg_variant},{_pc}]")
     elif args.baro_solver == "implicit_cn":
         solver_iters = None
         solver_iters_mode = (
