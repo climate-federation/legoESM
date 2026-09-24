@@ -154,7 +154,15 @@ run_arm() {
       fi
       args+=(--steps "$STEPS" --warmup "$WARMUP") ;;
     omps)
-      export NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=131072
+      # 8, NOT the atmosphere's 32. Same machine, same binary, same mesh
+      # family, opposite answer: at 128 GPUs the atmosphere mesh is fastest at
+      # 32 channels (4.65 ms) while the ocean mesh produced no output at all
+      # and was killed at the arm limit, twice, then a third time under a
+      # doubled limit. 8 channels completed twice in the same job (36.83 and
+      # 36.92 ms). At 32 GPUs both work and 32 is only ~2.4% faster, so this
+      # costs the low end almost nothing and is the only setting that makes
+      # the high end runnable. Chosen by the user 2026-09-24.
+      export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
       export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
       bench=scripts/bench/bench_ocean_mpas_spmd_scaling.py
       args+=(--nlev 40 --lloyd 0 --block-steps 20 --blocks 3)
