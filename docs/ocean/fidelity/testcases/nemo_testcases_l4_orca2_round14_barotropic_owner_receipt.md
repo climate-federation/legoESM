@@ -391,8 +391,10 @@ what they test were broken; and that no file under `packages/` changed.
 
 ## 9. Gate and test results at the round's final tip
 
-Every row below was produced at `fc4a4c147`, the tip after the review fixes,
-on a clean worktree.
+Every measured row below was produced at `fc4a4c147`, the tip after the
+review fixes, on a clean worktree.  The two citation rows were re-run once
+more after this section was written, because editing a receipt changes what
+its own citation gate reads — the numbers they report are from the final tip.
 
 | check | result |
 |---|---|
