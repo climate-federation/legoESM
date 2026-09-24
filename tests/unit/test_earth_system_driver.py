@@ -74,7 +74,7 @@ class TestAtmToSurfaceConstruction:
     """Ensure AtmToSurface is always constructed with all required fields."""
 
     def test_all_fields_present(self):
-        """AtmToSurface must have exactly 15 fields."""
+        """AtmToSurface must have exactly 16 fields (height appended)."""
         from legoesm.core.coupling_fields import AtmToSurface
 
         shape = (6, 4, 4)
@@ -98,7 +98,13 @@ class TestAtmToSurfaceConstruction:
             has_radiation=ones,
             has_precipitation=zeros,
         )
-        assert len(forcing) == 15
+        assert len(forcing) == 16
+        # Append-only ABI: all fifteen existing positional slots stay fixed.
+        assert forcing._fields == (
+            "sw_down", "lw_down", "precip_total", "precip_snow", "T_lowest",
+            "q_lowest", "u_lowest", "v_lowest", "p_lowest", "p_surface",
+            "rho_lowest", "cos_zenith", "co2_ppmv", "has_radiation",
+            "has_precipitation", "z_lowest")
         assert hasattr(forcing, 'has_precipitation')
         assert hasattr(forcing, 'has_radiation')
 

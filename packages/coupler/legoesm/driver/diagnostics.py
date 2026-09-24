@@ -1583,6 +1583,16 @@ class DiagnosticCollector:
             'mean_lw_sfc': mean_lw_sfc,
         }
 
+    def feed_daily_extremes_native(self, day: float, *, tas) -> None:
+        """Regrid an hourly temperature sample without feeding any means."""
+        if self._spatial_daily is None:
+            return
+        field = self._regrid_to_latlon_2d(np.asarray(tas, dtype=np.float64))
+        if field is not None:
+            doy, _ = day_to_calendar(day)
+            self._spatial_daily.add_extremes_2d(
+                doy, int(day // 365.0), {"tas": field})
+
     def feed_cmip_accumulators_native(
         self,
         day: float,
@@ -1601,6 +1611,7 @@ class DiagnosticCollector:
         precip=None,
         phis=None,
         tas=None,
+        ts=None,
         rlut=None,
         rsut=None,
         rsdt=None,
@@ -1643,10 +1654,9 @@ class DiagnosticCollector:
           sample, not an interval mean.  At the common ``diag_days=1`` cadence
           their monthly means average one fixed-phase snapshot per day
           (diurnally aliased — the same alias :meth:`collect`'s ``t_low_mean``
-          mitigation targets) and the daily-table extremes
-          ``tasmin``/``tasmax`` collapse to that single sample; the driver
-          marks them ``cell_methods = "time: point"`` via
-          ``cmip_snapshot_vars`` (#1353).  The FLUX fields
+          mitigation targets). Daily temperature extremes receive a separate
+          hourly feed via :meth:`feed_daily_extremes_native`; it leaves these
+          mean accumulations untouched. The FLUX fields
           (``precip``/``rlut``/``rsut``/``rsdt``/``hfss``/``hfls``) are fed as
           per-step interval MEANS by the MPAS driver's ``_MPASSfcFluxAccum``
           (#1353), so their ``time: mean`` label is true at any diag cadence.
@@ -1693,6 +1703,8 @@ class DiagnosticCollector:
             2 m air temperature [K] (MOST similarity, computed by the caller
             from sst/sic + surface-layer winds).  Falls back to the lowest
             model level when ``None`` so the field is never dropped.
+        ts : array, shape ``(nCells,)``, optional
+            Whole-cell land/sea/ice blended surface skin temperature [K].
         rsutcs, rlutcs : array, shape ``(nCells,)``, optional
             CLEAR-SKY TOA outgoing SW / LW flux [W/m2, positive up — the same
             CMOR sign as rsut/rlut] from the clouds-off second radiation pass
@@ -1802,6 +1814,7 @@ class DiagnosticCollector:
         # shape check below) so the field is never dropped.
         _f64 = np.float64
         tas_field = None if tas is None else np.asarray(tas, dtype=_f64)
+        ts_field = None if ts is None else np.asarray(ts, dtype=_f64)
         q_v_np = None if q_v is None else np.asarray(q_v, dtype=_f64)
         q_c_np = None if q_c is None else np.asarray(q_c, dtype=_f64)
         q_i_np = None if q_i is None else np.asarray(q_i, dtype=_f64)
@@ -1833,6 +1846,7 @@ class DiagnosticCollector:
             ("precip", precip_np, (_ncol,)),
             ("phis", phis_np, (_ncol,)),
             ("tas", tas_field, (_ncol,)),
+            ("ts", ts_field, (_ncol,)),
             ("rlut", rlut_np, (_ncol,)),
             ("rsut", rsut_np, (_ncol,)),
             ("rsdt", rsdt_np, (_ncol,)),
@@ -1882,6 +1896,7 @@ class DiagnosticCollector:
             evspsbl_np = None if hfls_np is None else hfls_np / _c.L_v
             for _name, _src in (
                 ('tas', tas_field),
+                ('ts', ts_field),
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
                 ('psl', psl),
@@ -2457,12 +2472,22 @@ class DiagnosticCollector:
         """Per-var honesty overrides for the CMIP ``day`` table on the
         snapshot-sampled feed (#1353 codex-1 MAJOR 3): tas/psl/ua850/va850
         "daily means" are a single fixed-phase sample per diag interval and
-        tasmin/tasmax are extrema OF that sample — label ``time: point``.
+        Without an hourly feed, tasmin/tasmax are extrema OF that sample.
+        With hourly samples (including restored ones), use minimum/maximum.
         ``pr`` is a true interval mean (per-step accumulator) and keeps the
         table's ``time: mean``.  None when the feed is not snapshot-mode
         (cube/lat-lon path, or sub-daily sampling)."""
+        hourly = {}
+        if (self._spatial_daily is not None
+                and self._spatial_daily._extreme_max_count_ever > 0):
+            hourly = {
+                name: {"cell_methods": f"time: {method}",
+                       "comment": "Daily extremum of hourly instantaneous samples "
+                                  "(first model step at or after each hour)."}
+                for name, method in (("tasmin", "minimum"), ("tasmax", "maximum"))
+            }
         if not self.cmip_snapshot_vars:
-            return None
+            return hourly or None
         _cad = float(getattr(self, "cmip_snapshot_cadence_days", 1.0))
         # The day-table time axis is the shared writer's day-midpoint with
         # whole-day bounds; the sample itself is taken at the interval END
@@ -2509,6 +2534,7 @@ class DiagnosticCollector:
         # day-fields are snapshot-sampled under this mode.
         out = {v: _pt for v in ("tas", "psl", "ua850", "va850")}
         out.update({"tasmin": _ext, "tasmax": _ext})
+        out.update(hourly)
         return out
 
     def _write_cmip_daily_files(self) -> None:

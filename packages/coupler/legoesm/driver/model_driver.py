@@ -7691,7 +7691,7 @@ class ModelDriver:
             f"LEGOESM_ALLOW_EMPTY_CMOR=1 to proceed anyway and accept empty "
             f"CMOR files.")
 
-    def _feed_mpas_cmip_accumulators(self, day: float) -> None:
+    def _feed_mpas_cmip_accumulators(self, day: float, *, extremes_only=False) -> None:
         """Feed the CMOR monthly/daily/zonal accumulators from the current
         MPAS (Voronoi) state at a diagnostic interval.
 
@@ -7733,11 +7733,15 @@ class ModelDriver:
         try:
             if _is_mpas_cell_partitioned(self):
                 self._feed_mpas_cmip_multirank(
-                    day, diag, self._voronoi_layout)
+                    day, diag, self._voronoi_layout, extremes_only=extremes_only)
             else:
-                _kw = self._mpas_cmip_native_kwargs(day, diag)
-                diag.feed_cmip_accumulators_native(day, **_kw)
-                self._feed_mpas_moisture_budget(day, diag, _kw)
+                if extremes_only:
+                    _kw = self._mpas_cmip_native_kwargs(day, diag, extremes_only=True)
+                    diag.feed_daily_extremes_native(day, tas=_kw["tas"])
+                else:
+                    _kw = self._mpas_cmip_native_kwargs(day, diag)
+                    diag.feed_cmip_accumulators_native(day, **_kw)
+                    self._feed_mpas_moisture_budget(day, diag, _kw)
         except Exception as exc:  # pragma: no cover - defensive diag guard
             logger.error(
                 "  CMOR accumulator feed FAILED at day %.2f (run continues; "
@@ -7748,7 +7752,7 @@ class ModelDriver:
             # failed feed — a stale sum would smear across intervals).  The
             # new window begins at THIS feed's day.
             _acc = getattr(self, "_mpas_sfc_accum", None)
-            if _acc is not None:
+            if _acc is not None and not extremes_only:
                 _acc.reset(window_start_day=day)
 
     def _feed_mpas_moisture_budget(self, day: float, diag, kw: dict) -> None:
@@ -7810,8 +7814,69 @@ class ModelDriver:
             dp=_p_half[..., 1:] - _p_half[..., :-1],
         )
 
+    def _mpas_surface_temperatures(self, day, diag, u_east, v_north):
+        """Shared native whole-cell tas and skin ts for both sample cadences."""
+        state = self.state
+        q_v = (state.tracers["q_v"].data
+               if state.tracers is not None and "q_v" in state.tracers else None)
+        # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
+        # this path (``get_sst_sic`` set for a radiation+SST run) — matches
+        # the cube-path collect() ``tas`` instead of a bare lowest-level
+        # proxy.  Uses the RECONSTRUCTED cell winds (``state.u`` is
+        # edge-normal on MPAS, not cell-collocated).  A failure falls back
+        # to the lowest model level (logged once) so a tas-only glitch never
+        # drops the whole CMOR feed.
+        tas = None
+        ts = None
+        _get_sst_sic = getattr(self, "get_sst_sic", None)
+        if _get_sst_sic is not None:
+            try:
+                _sst, _sic = _get_sst_sic(day)
+                _sst = jnp.asarray(_sst).reshape(-1)
+                _sic = jnp.asarray(_sic).reshape(-1)
+                # Report tas off the SAME ice surface the radiation +
+                # turbulence saw: the per-cell prognostic skin when the
+                # feature is on, else the constant T_ice.  Otherwise the
+                # scorecard's 2 m extrapolation uses a 271.35 K ice surface
+                # while the model cooled the skin (codex-1 finding 3).
+                _tas_ice = getattr(self.config, "T_ice", None)
+                if (getattr(self.config, "mpas_ice_skin_prognostic", False)
+                        and getattr(self, "_ice_T_skin", None) is not None):
+                    _tas_ice = self._ice_T_skin
+                # Give the diagnostic the LAND surface too where the
+                # interactive tile has produced one, else its profile is
+                # anchored on the ocean/ice skin over land as well and the
+                # published land tas is not the model's land at all.
+                _tas_land_T = getattr(self, "_land_T_skin_last", None)
+                _tas_land_q = getattr(self, "_land_qsfc_last", None)
+                _tas_f_land = getattr(self, "_f_land", None)
+                _tas_kw = {}
+                if _tas_land_T is not None and _tas_f_land is not None:
+                    _tas_kw = dict(
+                        T_land=jnp.asarray(_tas_land_T).reshape(-1),
+                        q_land=(None if _tas_land_q is None
+                                else jnp.asarray(_tas_land_q).reshape(-1)),
+                        land_fraction=jnp.asarray(_tas_f_land).reshape(-1))
+                from legoesm.forcing.surface_utils import blend_surface_temperature
+                ts = blend_surface_temperature(_sst, _sic, _tas_ice)
+                if _tas_land_T is not None and _tas_f_land is not None:
+                    f_land = jnp.clip(jnp.asarray(_tas_f_land).reshape(-1), 0.0, 1.0)
+                    ts = (f_land * jnp.asarray(_tas_land_T).reshape(-1)
+                          + (1.0 - f_land) * ts)
+                tas = diag._tas_2m(
+                    state, q_v, _sst, _sic, _tas_ice,
+                    u_low=u_east[..., -1], v_low=v_north[..., -1], **_tas_kw)
+            except Exception as exc:
+                if not getattr(self, "_logged_tas2m_fallback", False):
+                    logger.warning(
+                        "  CMOR tas: 2 m MOST calc failed (%s); using the "
+                        "lowest model level as the tas proxy.", exc)
+                    self._logged_tas2m_fallback = True
+                tas = None
+        return (state.T.data[..., -1] if tas is None else tas), ts
+
     def _mpas_cmip_native_kwargs(self, day: float, diag,
-                                 u_override=None) -> dict:
+                                 u_override=None, *, extremes_only=False) -> dict:
         """Build the NATIVE (rank-local) cell-field kwargs for
         :meth:`DiagnosticCollector.feed_cmip_accumulators_native`.
 
@@ -7850,8 +7915,15 @@ class ModelDriver:
         from legoesm.grids.voronoi import reconstruct_cell_velocity
         state = self.state
         # Geographic cell-centre winds from the edge-normal velocity.
-        u_east, v_north = reconstruct_cell_velocity(
-            state.u.data if u_override is None else u_override, self.grid)
+        u_edges = state.u.data if u_override is None else u_override
+        if extremes_only:
+            u_edges = u_edges[..., -1:]
+        u_east, v_north = reconstruct_cell_velocity(u_edges, self.grid)
+        tas, ts = ModelDriver._mpas_surface_temperatures(
+            self, day, diag, u_east, v_north)
+        if extremes_only:
+            return dict(tas=tas)
+
         # Pressure vertical velocity, for the subsidence the scorecard could
         # previously only guess at.  Built from the SAME halo-refreshed edge
         # field, through the pair the column-forcing extractor already
@@ -7948,53 +8020,6 @@ class ModelDriver:
         # CMOR output, byte-identical) in the default configuration.
         rsutcs = _sfc_slot(10)
         rlutcs = _sfc_slot(11)
-        # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
-        # this path (``get_sst_sic`` set for a radiation+SST run) — matches
-        # the cube-path collect() ``tas`` instead of a bare lowest-level
-        # proxy.  Uses the RECONSTRUCTED cell winds (``state.u`` is
-        # edge-normal on MPAS, not cell-collocated).  A failure falls back
-        # to the lowest model level (logged once) so a tas-only glitch never
-        # drops the whole CMOR feed.
-        tas = None
-        _get_sst_sic = getattr(self, "get_sst_sic", None)
-        if _get_sst_sic is not None:
-            try:
-                _sst, _sic = _get_sst_sic(day)
-                _sst = jnp.asarray(_sst).reshape(-1)
-                _sic = jnp.asarray(_sic).reshape(-1)
-                # Report tas off the SAME ice surface the radiation +
-                # turbulence saw: the per-cell prognostic skin when the
-                # feature is on, else the constant T_ice.  Otherwise the
-                # scorecard's 2 m extrapolation uses a 271.35 K ice surface
-                # while the model cooled the skin (codex-1 finding 3).
-                _tas_ice = getattr(self.config, "T_ice", None)
-                if (getattr(self.config, "mpas_ice_skin_prognostic", False)
-                        and getattr(self, "_ice_T_skin", None) is not None):
-                    _tas_ice = self._ice_T_skin
-                # Give the diagnostic the LAND surface too where the
-                # interactive tile has produced one, else its profile is
-                # anchored on the ocean/ice skin over land as well and the
-                # published land tas is not the model's land at all.
-                _tas_land_T = getattr(self, "_land_T_skin_last", None)
-                _tas_land_q = getattr(self, "_land_qsfc_last", None)
-                _tas_f_land = getattr(self, "_f_land", None)
-                _tas_kw = {}
-                if _tas_land_T is not None and _tas_f_land is not None:
-                    _tas_kw = dict(
-                        T_land=jnp.asarray(_tas_land_T).reshape(-1),
-                        q_land=(None if _tas_land_q is None
-                                else jnp.asarray(_tas_land_q).reshape(-1)),
-                        land_fraction=jnp.asarray(_tas_f_land).reshape(-1))
-                tas = diag._tas_2m(
-                    state, q_v, _sst, _sic, _tas_ice,
-                    u_low=u_east[..., -1], v_low=v_north[..., -1], **_tas_kw)
-            except Exception as exc:
-                if not getattr(self, "_logged_tas2m_fallback", False):
-                    logger.warning(
-                        "  CMOR tas: 2 m MOST calc failed (%s); using the "
-                        "lowest model level as the tas proxy.", exc)
-                    self._logged_tas2m_fallback = True
-                tas = None
         lat_deg = np.degrees(np.asarray(self.grid.latCell))
         # Interval-mean flux fields carry their averaging window so the
         # feed can calendar-bin them at the interval MIDPOINT (#1353
@@ -8057,6 +8082,7 @@ class ModelDriver:
             precip=precip,
             phis=state.phis.data,
             tas=tas,
+            ts=ts,
             rlut=rlut,
             rsut=rsut,
             rsdt=rsdt,
@@ -8068,7 +8094,8 @@ class ModelDriver:
             flux_interval_days=_flux_days,
         )
 
-    def _feed_mpas_cmip_multirank(self, day: float, diag, vlayout) -> None:
+    def _feed_mpas_cmip_multirank(self, day: float, diag, vlayout,
+                                  *, extremes_only=False) -> None:
         """Multi-rank CMOR feed: OWNED-cell -> global gather, commit on rank 0.
 
         Design
@@ -8219,7 +8246,11 @@ class ModelDriver:
         flux_days = None
         err = None
         try:
-            kw = self._mpas_cmip_native_kwargs(day, diag, u_override=u_ex)
+            if extremes_only:
+                kw = self._mpas_cmip_native_kwargs(
+                    day, diag, u_override=u_ex, extremes_only=True)
+            else:
+                kw = self._mpas_cmip_native_kwargs(day, diag, u_override=u_ex)
             flux_days = kw.pop("flux_interval_days", None)
             for name, val in kw.items():
                 if val is None:
@@ -8275,7 +8306,8 @@ class ModelDriver:
             flux_days = None
         else:
             flux_days = _fd[0]
-        if errors or not {"T", "p_s"}.issubset(names):
+        required = {"tas"} if extremes_only else {"T", "p_s"}
+        if errors or not required.issubset(names):
             # Unanimous: every rank computed this from the same ``status``.
             if rank == 0:
                 logger.error(
@@ -8296,8 +8328,11 @@ class ModelDriver:
 
         # --- PHASE 4: commit on rank 0 only; no collectives beyond here. -----
         if rank == 0:
-            diag.feed_cmip_accumulators_native(
-                day, flux_interval_days=flux_days, **gathered)
+            if extremes_only:
+                diag.feed_daily_extremes_native(day, tas=gathered["tas"])
+            else:
+                diag.feed_cmip_accumulators_native(
+                    day, flux_interval_days=flux_days, **gathered)
 
     def _finalize_mpas_cmip(self, final_day: float | None = None) -> None:
         """Write the CMOR NetCDF (``Amon`` / ``day`` / ``fx``) from the fed
@@ -9580,7 +9615,7 @@ class ModelDriver:
                 and (float(cfg.output.diag_days) <= 0.0
                      or _true_cad_days >= 1.0)):
             _diag.cmip_snapshot_vars = {
-                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va", "wap"}
+                "tas", "ts", "ps", "psl", "prw", "ta", "hus", "ua", "va", "wap"}
             if cfg.output.clear_sky_diag:
                 # The cloud-diagnostic trio (fed only with --clear-sky-diag,
                 # see _feed_mpas_cmip_accumulators) is state-derived => same
@@ -10839,7 +10874,12 @@ class ModelDriver:
                 # canopy now runs on this lane and its radiation partitioning
                 # is zenith-driven -- a fixed sun would give the canopy neither
                 # a diurnal cycle nor night.
+                from legoesm.core.coupling_fields import lowest_level_height
+                z_lowest = lowest_level_height(
+                    T_air, self.sigma.pressure_at_half(p_s),
+                    self.sigma.pressure_at_full(p_s))
                 return AtmToSurface(
+                    z_lowest=z_lowest,
                     sw_down=sw_down, lw_down=lw_down,
                     precip_total=precip,
                     precip_snow=jnp.where(
@@ -11880,6 +11920,16 @@ class ModelDriver:
                     getattr(self.model, "_sfc_diag", None),
                     int(_sed_cap_effective), step, running=_sed_req_window)
                 _sed_req_window = None
+
+            # Hourly extrema use absolute simulated time (restart phase is kept).
+            # A non-divisor dt samples on the first step crossing each hour.
+            # This feed never changes mean counts or resets the flux accumulator.
+            _sample_day = START_DAY + (step + 1) * DT / 86400.0
+            _previous_day = START_DAY + step * DT / 86400.0
+            if (self._mpas_cmip_feed_on
+                    and int(np.floor(_sample_day * 24.0 + 1e-9))
+                    > int(np.floor(_previous_day * 24.0 + 1e-9))):
+                self._feed_mpas_cmip_accumulators(_sample_day, extremes_only=True)
 
             # Diagnostics at intervals — phased by DIAG_PHASE (= start_step
             # for a real periodic cadence, 0 for the once-at-the-end

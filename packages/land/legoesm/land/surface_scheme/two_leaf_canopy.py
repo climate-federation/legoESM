@@ -26,6 +26,7 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.bulk_flux import surface_reference_state
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy.config import (
@@ -370,7 +371,8 @@ def compute_two_leaf_canopy_fluxes(
     # ---- Aerodynamics ----
     z0m, displa = compute_aerodynamics(hc, LAI, rz0m, rd)
     # Lift reference height above the displacement + roughness sub-layer.
-    z_ref_base = jnp.full(ncol, land_config.z_ref)
+    Ta, z_ref_base = surface_reference_state(
+        forcing.T_lowest, land_config.z_ref, forcing.z_lowest)
     z_ref = jnp.maximum(z_ref_base, displa + 10.0 * z0m + 2.0)
 
     # ---- SW decomposition ----
@@ -388,7 +390,6 @@ def compute_two_leaf_canopy_fluxes(
         Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
 
     # ---- Thermodynamic / atmosphere variables ----
-    Ta    = forcing.T_lowest
     Ps    = forcing.p_surface
     q_atm = forcing.q_lowest
     rhoa  = forcing.rho_lowest
@@ -527,6 +528,7 @@ def compute_two_leaf_canopy_fluxes(
     Rn_Soil_d = fluxes_per_col["Rn_Soil"]
 
     LE_tot = LE_Sun + LE_Sh + LE_Soil
+    # Positive UPWARD: leaf/soil heat warms air; land loses H_tot in Rn-H-LE.
     H_tot  = H_Sun  + H_Sh  + H_Soil
     # GPP is GROSS carbon uptake (BEFORE leaf dark respiration).  The carbon
     # model (carbon_cycle.step_carbon) re-charges foliar MAINTENANCE

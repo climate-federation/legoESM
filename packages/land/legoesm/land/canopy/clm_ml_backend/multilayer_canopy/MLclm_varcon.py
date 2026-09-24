@@ -30,7 +30,9 @@ visc0: float = 13.3e-6  # Kinematic viscosity at 0 °C and 1013.25 hPa (m2/s)
 dh0: float = 18.9e-6  # Molecular diffusivity, heat, at 0 °C and 1013.25 hPa (m2/s)
 dv0: float = 21.8e-6  # Molecular diffusivity, H2O,  at 0 °C and 1013.25 hPa (m2/s)
 dc0: float = 13.8e-6  # Molecular diffusivity, CO2,  at 0 °C and 1013.25 hPa (m2/s)
-lapse_rate: float = 0.0098  # Temperature lapse rate (K/m)
+from legoesm import constants
+
+lapse_rate: float = constants.g / constants.c_pd  # Dry adiabatic lapse rate (K/m)
 
 
 # ---------------------------------------------------------------------------
