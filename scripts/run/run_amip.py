@@ -908,6 +908,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "sub-grid variance the cloud PDF otherwise has to "
                              "guess. Requires --turbulence clubb. Default off "
                              "= the diagnostic path (byte-identical).")
+    parser.add_argument("--clubb-liquid-partition", dest="clubb_liquid_partition",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Let CLUBB exchange CLOUD LIQUID with the host, as "
+                             "CAM does: the closure's total water carries the "
+                             "existing cloud water in, and its own diagnosed "
+                             "liquid is written back to the condensate tracer "
+                             "instead of being returned as vapour. Without it "
+                             "the host takes its cloud FRACTION from CLUBB and "
+                             "its cloud WATER from a tracer CLUBB never wrote, "
+                             "and the two disagree. Requires --turbulence clubb "
+                             "and --clubb-prognostic. Default off = the "
+                             "historical bridge (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -2339,6 +2351,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_scheme=args.clouds,
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
+        clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)

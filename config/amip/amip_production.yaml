@@ -134,13 +134,24 @@ morrison_sed_cfl_substeps_strict: false # the abort path is an equinox error_if,
                                         # reported as a diagnostic.
                                  # (L32 at 600 s needs ~90 for graupel; a clamp
                                  # would silently slow the fall)
-hard_saturation_adjustment: true
+hard_saturation_adjustment: false  # CAM6 clubb_do_liqsupersat = .false.
+                                   # (namelist_defaults_cam.xml:1225): no
+                                   # supersaturation removal after the physics
+                                   # step.  On this lane the flag is the
+                                   # POST-STEP drain (model_driver
+                                   # _mpas_hard_saturation_poststep), which is
+                                   # our counterpart of CAM's post-CLUBB
+                                   # "iceadj" block (clubb_intr.F90:2258).
+                                   # Was true; user table 2026-09-24, row 2.
 cloud_partial_coverage_optics: none
 cloud_optics_inhomogeneity: two_region
 cloud_fsd: 1.0
 cloud_vertical_overlap_optics: max_random
 cloud_n_subcolumns: 8
-hard_sat_ice_curve: true
+hard_sat_ice_curve: false          # the ice-curve blend of that same
+                                   # post-step drain; inert once the drain
+                                   # is off, set explicitly so no row rests
+                                   # on a default.  User table row 3.
 homogeneous_ice_nucleation: true
 aerosol_ccn: true
 energy_consistent_moisture_clip: true
@@ -162,6 +173,19 @@ convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
 # ---- turbulence ---------------------------------------------------------------
 turbulence: clubb
 clubb_prognostic: true
+clubb_liquid_partition: true       # CAM6 clubb_intr: the closure's diagnosed
+                                   # cloud liquid is handed to the host as a
+                                   # tendency, and the Morrison saturation
+                                   # adjustment stops condensing (MG2
+                                   # allow_sed_supersat = .false. under CLUBB,
+                                   # micro_mg_cam.F90:668-672).  One flag,
+                                   # both halves.  User table row 1.
+# The partition REFUSES an active radiative condensate floor (it would be
+# imposed on top of the liquid the closure now supplies, making clouds opaque
+# twice).  Both floors default to a non-zero scheme value when unset, so they
+# are pinned to 0 here.  Not in the user's three-row table: REQUIRED BY ROW 1.
+cloud_q_c_diagnostic: 0.0
+conv_cloud_condensate: 0.0
 clubb_trop_cloud_top_press: 15000.0
 
 # ---- gravity-wave drag ---------------------------------------------------------

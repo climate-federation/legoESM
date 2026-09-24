@@ -116,6 +116,39 @@ class PhysicsConfig(NamedTuple):
     gravity_wave_drag: GravityWaveDragConfig = GravityWaveDragConfig()
 
 
+def _micro_liquid_from_closure_on(microphysics_config) -> bool:
+    """True when the RESOLVED microphysics sub-config hands liquid to the closure.
+
+    Reads the materialized sub-config, not the top-level switch, so a
+    hand-built ``MicrophysicsConfig(morrison=MorrisonConfig(...))`` is seen.
+    """
+    if microphysics_config is None:
+        return False
+    # ``or ""`` because getattr(obj, None, default) raises TypeError rather
+    # than returning the default, and a None scheme would crash the guard
+    # itself (GLM).
+    sub = getattr(microphysics_config,
+                  getattr(microphysics_config, "scheme", "") or "", None)
+    return bool(getattr(sub, "liquid_from_closure", False))
+
+
+def _clubb_liquid_partition_on(turbulence_config) -> bool:
+    """Is CLUBB's cloud-liquid exchange selected on this RESOLVED config?
+
+    Reads the sub-config dispatch will actually run, not the experiment-level
+    flag: ``TurbulenceConfig.clubb`` defaults to None and the factory
+    substitutes a fresh ``CLUBBConfig()``, and an authoritative
+    ``turbulence_override`` can carry the lever without the flag ever being set.
+    """
+    if getattr(turbulence_config, "scheme", None) != "clubb":
+        return False
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+    sub = getattr(materialize_sub_config(turbulence_config), "clubb", None)
+    return bool(getattr(sub, "liquid_partition", False))
+
+
 def make_physics(
     config: PhysicsConfig,
     model_type: str = "hydrostatic",
@@ -219,6 +252,41 @@ def make_physics(
         raise ValueError(
             "cld_macmic_num_steps > 1 (CAM macrophysics/microphysics sub-cycle) is "
             f"wired into the hydrostatic/MPAS combined physics only; got {model_type!r}")
+    # CLUBB's liquid exchange REPLACES the host's cloud water, so the
+    # microphysics has to read the replaced value.  That ordering exists only in
+    # the macmic branch of ``_accumulate_step`` below: at N=1 it returns the
+    # PARALLEL ``_accumulate``, where every module is evaluated on the same
+    # start-of-step state and the tendencies are summed, leaving the
+    # microphysical sinks computed from the pre-exchange liquid.  Autoconversion
+    # goes as roughly the 2.5th power of cloud water, so that sink is wrong by
+    # nearly an order of magnitude -- and water is still conserved, so nothing
+    # fails.  Checked HERE, against the RESOLVED turbulence config, because the
+    # experiment-level flag is not the only way in: an authoritative
+    # turbulence_override carrying CLUBBConfig(liquid_partition=True), or a
+    # direct make_physics call, both reach this factory without it (codex).
+    # The MICROPHYSICS half alone deletes the model's only liquid source, so it
+    # is the more dangerous half to reach by itself -- the mirror of the
+    # turbulence-side guard below, and the same defect class both reviewers
+    # found on that side.  A direct ``make_physics`` call bypasses every
+    # ExperimentConfig guard, and they all key off the turbulence side.
+    if (_micro_liquid_from_closure_on(config.microphysics)
+            and not _clubb_liquid_partition_on(config.turbulence)):
+        raise ValueError(
+            "MorrisonConfig.liquid_from_closure=True without the CLUBB liquid "
+            "partition delivering liquid: the microphysics would stop "
+            "condensing and nothing would replace it, leaving the model with "
+            "NO cloud-liquid source at all. Enable both halves together "
+            "(ExperimentConfig.clubb_liquid_partition drives them), or "
+            "neither.")
+    if _clubb_liquid_partition_on(config.turbulence) and cld_macmic_num_steps < 2:
+        raise ValueError(
+            "CLUBBConfig.liquid_partition needs cld_macmic_num_steps>=2: the "
+            "closure REPLACES the host cloud water, so the microphysics must "
+            "run on the replaced value, and only the macro/micro sub-cycle "
+            f"applies the modules in sequence. At cld_macmic_num_steps="
+            f"{cld_macmic_num_steps} they are evaluated in parallel on the same "
+            "state and summed, leaving the microphysical sinks evaluated on the "
+            "pre-exchange liquid.")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
             config, dt, column_mesh=column_mesh, need_rad=need_rad,
