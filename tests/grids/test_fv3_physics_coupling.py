@@ -639,3 +639,107 @@ def test_sixface_jax_match_is_not_vacuous(hs_sixface_case, monkeypatch,
     worst = max(np.abs(np.asarray(out[nm]) - ref[nm]).max()
                 for nm in ("u", "v", "pt"))
     assert worst > 1e-11, (pass_name, worst)
+
+
+# ---------------------------------------------------------------------
+# fv_update_phys, nwat > 0 (the moist scalar block): analytic gates --
+# every oracle deck runs nwat = 0, so there is no Fortran receipt
+# ---------------------------------------------------------------------
+
+def _moist_case(seed=5):
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_C_LIQ, FV3_CP_AIR, FV3_CP_VAPOR)
+    rng = np.random.default_rng(seed)
+    n, ng, km = 4, 3, 3
+    m = n + 2 * ng
+    pt = 250.0 + 40.0 * rng.random((m, m, km))
+    delp = 1.0e4 + 2.0e3 * rng.random((m, m, km))
+    q = [1e-2 * rng.random((m, m, km)), 1e-3 * rng.random((m, m, km)),
+         1e-3 * rng.random((m, m, km))]
+    # small enough that q + dt*q_dt stays positive (moist_cp is only
+    # meaningful for non-negative water)
+    q_dt = [1e-7 * rng.standard_normal((m, m, km)) for _ in range(3)]
+    t_dt = 1e-3 * rng.standard_normal((m, m, km))
+    kw = dict(n=n, ng=ng, cp_air=FV3_CP_AIR, cp_vapor=FV3_CP_VAPOR,
+              c_liq=FV3_C_LIQ)
+    return pt, delp, q, q_dt, t_dt, kw, slice(ng, ng + n)
+
+
+def test_moist_update_identity_at_zero_tendency():
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    pt, delp, q, _, _, kw, _ = _moist_case()
+    z = [np.zeros_like(a) for a in q]
+    pt2, delp2, q2, ps_dt = fv_update_phys_moist_duo_jax(
+        pt, delp, q, np.zeros_like(pt), z, 600.0, **kw)
+    assert np.array_equal(np.asarray(ps_dt), np.ones_like(np.asarray(ps_dt)))
+    assert np.array_equal(np.asarray(pt2), pt)
+    assert np.array_equal(np.asarray(delp2), delp)
+    for a, b in zip(q2, q):
+        assert np.array_equal(np.asarray(a), b)
+
+
+def test_moist_update_conserves_dry_air_mass_and_moves_total_water():
+    """delp*(1 - sum q) -- the DRY air in the layer -- is invariant
+    (that is what ``delp *= ps_dt`` + ``q /= ps_dt`` encode), while the
+    layer's total water changes by exactly delp*dt*sum(q_dt)."""
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    pt, delp, q, q_dt, t_dt, kw, ci = _moist_case()
+    dt = 600.0
+    _, delp2, q2, _ = fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt,
+                                                   dt, **kw)
+    delp2 = np.asarray(delp2); q2 = [np.asarray(a) for a in q2]
+    dry_before = (delp * (1.0 - sum(q)))[ci, ci]
+    dry_after = (delp2 * (1.0 - sum(q2)))[ci, ci]
+    assert np.allclose(dry_after, dry_before, rtol=1e-13, atol=0)
+    water_before = (delp * sum(q))[ci, ci]
+    water_after = (delp2 * sum(q2))[ci, ci]
+    assert np.allclose(water_after - water_before,
+                       (delp * dt * sum(q_dt))[ci, ci], rtol=1e-12, atol=0)
+    assert np.abs(delp2 - delp)[ci, ci].max() > 0.0
+    # halos untouched
+    halo = np.ones(delp.shape[:2], bool); halo[ci, ci] = False
+    assert np.array_equal(delp2[halo], delp[halo])
+
+
+def test_moist_update_heating_carries_cp_over_moist_cp():
+    """pt moves by t_dt*dt*cp_air/cvm with cvm from moist_cp on the
+    UPDATED, renormalised tracers (fv_update_phys.F90:367-371) -- the
+    dry twin's factor of exactly 1 is the special case q = 0."""
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax, moist_cp_warm_rain)
+    pt, delp, q, q_dt, t_dt, kw, ci = _moist_case()
+    dt = 600.0
+    pt2, _, _, _ = fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt, dt,
+                                                **kw)
+    # expectation written out INDEPENDENTLY of the twin and of
+    # moist_cp_warm_rain (codex 2026-09-24: deriving it from the twin's
+    # own q2 made the gate circular): the renormalised tracers and the
+    # nwat=4 heat capacity straight from the Fortran formulas
+    ps_dt = 1.0 + dt * (q_dt[0] + q_dt[1] + q_dt[2])
+    qa = [(a + dt * b) / ps_dt for a, b in zip(q, q_dt)]
+    qd = qa[1] + qa[2]
+    cvm = ((1.0 - (qa[0] + qd)) * 1004.6 + qa[0] * (4.0 * 461.5)  # const-ok: FV3 oracle values, written out so the gate is independent of the constants module
+           + qd * 4218.0)  # const-ok: gfdl_mp.F90:89
+    exp = pt + t_dt * dt * 1004.6 / cvm  # const-ok: gfs_constants.h:47
+    assert np.allclose(np.asarray(pt2)[ci, ci], exp[ci, ci], rtol=1e-14, atol=0)
+    # the factor is genuinely below one where there is water (cp_vapor,
+    # c_liq > cp_air), so a dry-factor twin cannot pass this
+    assert (1004.6 / cvm)[ci, ci].max() < 1.0  # const-ok: as above
+    assert np.allclose(np.asarray(moist_cp_warm_rain(
+        qa[0], qa[1], qa[2], cp_air=kw["cp_air"], cp_vapor=kw["cp_vapor"],
+        c_liq=kw["c_liq"])), cvm, rtol=1e-15, atol=0)
+    z = [np.zeros_like(a) for a in q]
+    pt_dry, _, _, _ = fv_update_phys_moist_duo_jax(pt, delp, z, t_dt, z, dt,
+                                                   **kw)
+    assert np.allclose(np.asarray(pt_dry)[ci, ci], (pt + t_dt * dt)[ci, ci],
+                       rtol=1e-15, atol=0)
+
+
+def test_moist_update_refuses_the_wrong_tracer_count():
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    pt, delp, q, q_dt, t_dt, kw, _ = _moist_case()
+    with pytest.raises(ValueError, match="warm-rain tracers"):
+        fv_update_phys_moist_duo_jax(pt, delp, q[:2], t_dt, q_dt, 600.0, **kw)

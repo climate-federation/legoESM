@@ -466,40 +466,76 @@ def _duo_driver(tmp_path, **over):
     return drv
 
 
+def _saturate_and_seed_rain(faces, g, q_c=2e-3, q_r=2e-2):
+    """Six-face bundle with humidity AT saturation (compute window) plus
+    uniform cloud and rain and a half-humidity passenger tracer."""
+    from legoesm.thermo import saturation_mixing_ratio
+    n, ng = g.n, g.ng
+    cs = slice(ng, ng + n)
+    peln = jnp.transpose(jnp.asarray(faces["press"]["peln"]), (0, 1, 3, 2))
+    p_full = (jnp.asarray(faces["state"]["delp"])[:, cs, cs]
+              / (peln[..., 1:] - peln[..., :-1]))
+    q = [jnp.asarray(a) for a in faces["q"]]
+    q[0] = q[0].at[:, cs, cs].set(saturation_mixing_ratio(
+        jnp.asarray(faces["state"]["pt"])[:, cs, cs], p_full))
+    q[1] = jnp.full_like(q[1], q_c)
+    q[2] = jnp.full_like(q[2], q_r)
+    return {**faces, "q": q + [q[0] * 0.5]}
+
+
 def test_kessler_hook_on_windows_matches_the_face_bridge(setup, tmp_path):
     """The driver's Kessler hook under a WINDOW layout (scatter the owned
     block to faces, bridge, gather back, pin sharding) equals the plain
-    six-face bridge on the same state to 1e-13 of peak, on pt and all
-    three tracers; a fourth passenger rides through unchanged and is NOT
-    duplicated (codex 2026-09-24: the face branch appended it twice)."""
+    six-face bridge on the same state to 1e-13 of peak, on pt, delp, the
+    pressures and all tracers; a fourth passenger is NOT duplicated
+    (codex 2026-09-24: the face branch appended it twice) and its MASS
+    delp*q is conserved through the renormalisation."""
     from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
         apply_kessler_step_sixface_jax)
     drv = _duo_driver(tmp_path, microphysics="kessler")
     assert drv.model.window_layout is not None
     win = drv._fv3_duo_fresh_ic()             # a window model's IC IS windows
-    # the DCMIP16 IC is sub-saturated (no condensation on step 1): seed
-    # cloud water so evaporation and autoconversion have work to do
-    q = list(win["q"])
-    q[1] = jnp.full_like(q[1], 2e-3)
-    win = {**win, "q": q + [q[0] * 0.5]}                         # a passenger
-    faces = drv.model.to_flat(win)
+    # seed cloud AND rain on a SATURATED column so rain reaches the
+    # surface: without surface rain the column keeps its mass and the
+    # renormalisation is the identity (the passenger gate would be
+    # vacuous).  Saturated, because the shared core's rain evaporation is
+    # capped by the rain present, not by the saturation deficit, so on
+    # the dry DCMIP16 column ANY seed evaporates within the step and the
+    # joint donor cap then lets none of it fall (probe 9964021)
+    faces = _saturate_and_seed_rain(drv.model.to_flat(win), drv.model.grid)
+    win = drv.model.to_windows(faces)
     out = drv._fv3_duo_apply_kessler(win, 300.0)
     assert len(out["q"]) == 4
     flat = drv.model.to_flat(out)
     g = drv.model.grid
-    ref_state, ref_q = apply_kessler_step_sixface_jax(
-        faces["state"], faces["press"], faces["q"], dt=300.0,
-        n=g.n, ng=g.ng, km=KM)
+    from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+    # the JITTED bridge is the hook's contract (the hook wraps it under
+    # jit); the eager bridge sits 2e-12 of peak away on this heavy-rain
+    # state from XLA's own fusion rounding (probe 9964057), which is not
+    # what this test measures
+    ref_state, ref_press, ref_q = jax.jit(
+        lambda st, pr, qq: apply_kessler_step_sixface_jax(
+            st, pr, qq, dt=300.0, n=g.n, ng=g.ng, km=KM, ptop=drv.model._ptop,
+            akap=FV3_KAPPA))(faces["state"], faces["press"], faces["q"])
     cs = slice(g.ng, g.ng + g.n)
 
-    def _close(x, y):
+    def _rel(x, y, x_in):
+        # scaled by the INPUT peak: the seeded rain eats every gram of
+        # cloud, so the cloud OUTPUT is +-4e-19 roundoff on both sides
+        # and scaling by it would read as a 2x gap (probe 9963802)
         x, y = np.asarray(x)[:, cs, cs], np.asarray(y)[:, cs, cs]
-        return np.abs(x - y).max() <= 1e-13 * max(np.abs(x).max(), 1e-300)
-    assert _close(flat["state"]["pt"], ref_state["pt"])
+        return np.abs(x - y).max() / max(np.abs(np.asarray(x_in)).max(), 1e-300)
+    assert _rel(flat["state"]["pt"], ref_state["pt"], faces["state"]["pt"]) <= 1e-13
+    assert _rel(flat["state"]["delp"], ref_state["delp"], faces["state"]["delp"]) <= 1e-13
+    assert np.abs(np.asarray(flat["press"]["pe"]) - np.asarray(ref_press["pe"])
+                  ).max() <= 1e-13 * np.abs(np.asarray(ref_press["pe"])).max()
     for i in range(4):
-        assert _close(flat["q"][i], ref_q[i]), i
-    assert np.array_equal(np.asarray(flat["q"][3])[:, cs, cs],
-                          np.asarray(faces["q"][3])[:, cs, cs])
+        r = _rel(flat["q"][i], ref_q[i], faces["q"][i])
+        assert r <= 1e-13, (i, r)
+    m_before = (np.asarray(faces["state"]["delp"]) * np.asarray(faces["q"][3]))[:, cs, cs]
+    m_after = (np.asarray(flat["state"]["delp"]) * np.asarray(flat["q"][3]))[:, cs, cs]
+    assert np.allclose(m_after, m_before, rtol=1e-12, atol=0)
+    assert np.abs(np.asarray(flat["q"][3]) - np.asarray(faces["q"][3]))[:, cs, cs].max() > 0.0
     moved = np.abs(np.asarray(flat["state"]["pt"])
                    - np.asarray(faces["state"]["pt"]))[:, cs, cs].max()
     assert moved > 0.0, "vacuous: the hook moved nothing"

@@ -31,7 +31,10 @@ not part of the ``physics_fn`` signature, so it is bound at build time via
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
+
+from legoesm import constants
 
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticTendencies, MPASHydrostaticTendencies
@@ -39,7 +42,8 @@ from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     pressure_from_sigma,
 )
-from legoesm.atmosphere.physics._shared import compute_layer_dz, compute_rho
+from legoesm.atmosphere.physics._shared import (compute_layer_dz, compute_rho,
+                                                virtual_temperature)
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
@@ -97,18 +101,27 @@ def kessler_column_tendencies(T, p_s, q_v, q_c, q_r, sigma_coord, *, dt, config)
 
 
 def kessler_column_tendencies_pressure(T, p_full, p_half, q_v, q_c, q_r, *,
-                                       dt, config):
+                                       dt, config, dz=None):
     """Pressure-native body of :func:`kessler_column_tendencies`: the
     tracer floor, the shared rho/dz thermo and the shared Kessler core,
     for a caller that already holds its layer and interface pressures
     (a hybrid-eta dycore such as FV3, where sigma*p_s is not the layer
     pressure).  Same ``(ncol, nlev)`` contract and return tuple; the
-    sigma adapter above is this plus ``pressure_from_sigma``."""
+    sigma adapter above is this plus ``pressure_from_sigma``.
+
+    ``dz`` (optional, ``(ncol, nlev)``) overrides the shared
+    ``compute_layer_dz`` (arithmetic mid-layer pressure).  A dycore whose
+    layer mass is ``delp/g`` with ``p_full = delp/dln(p)`` must pass its
+    OWN hypsometric thickness so that ``rho*dz == delp/g`` and the
+    sedimentation mass the core moves is the mass the dycore removes
+    (FV3: 10 % apart on the km=5 deck's thick layers, probe 9963150).
+    """
     q_v = jnp.maximum(q_v, 0.0)
     q_c = jnp.maximum(q_c, 0.0)
     q_r = jnp.maximum(q_r, 0.0)
     rho = compute_rho(T, p_full, q_v)        # moist ideal-gas density
-    dz = compute_layer_dz(T, p_half, q_v)    # moist hypsometric thickness
+    if dz is None:
+        dz = compute_layer_dz(T, p_half, q_v)  # moist hypsometric thickness
 
     ncol, nlev = T.shape
     hydro = make_zero_hydrometeors(ncol, nlev, dtype=T.dtype)._replace(
@@ -536,7 +549,7 @@ KESSLER_TRACER_SLOTS = ("q_v", "q_c", "q_r")   # duo tracer list slots 0, 1, 2
 
 
 def apply_kessler_step_sixface_jax(state, press, q, *, dt, n, ng, km,
-                                   config=None):
+                                   ptop, akap, config=None):
     """One operator-split Kessler warm-rain step on the six-face duo bundle.
 
     The FV3 duo adapter of the shared column core above
@@ -556,17 +569,27 @@ def apply_kessler_step_sixface_jax(state, press, q, *, dt, n, ng, km,
       * ``p_half`` = ``press["pe"]`` (6, n, n, km+1), sliced and
         transposed as the HS twin does; ``p_full`` = ``delp / d(peln)``,
         FV3's own layer-mean pressure for physics.
-      * tendencies applied on the compute block only, as the existing
-        cube Kessler forcing lanes do: ``pt += dT*dt``, ``q += dq*dt``;
-        ``delp`` and the winds untouched.  Precipitated water therefore
-        leaves the column with NO mass adjustment (GLM 2026-09-23: the
-        dry-air mass gains the accumulated precipitation) -- the same
-        convention as the other lanes, stated here so it is a known
-        limitation and not a hidden one.
+      * the tendencies are applied by FV3's OWN moist physics update
+        (``fv_update_phys_moist_duo_jax``, fv_update_phys.F90:318-372):
+        ``q += dq*dt``; the layer mass follows the net water change
+        (``delp *= 1 + dt*sum(dq)``) and the tracers are renormalised to
+        it; ``pt += dT*dt*cp_air/cvm`` with the moist heat capacity.  So
+        rain that sediments out of the column bottom REMOVES its mass
+        (2026-09-24; before this the dry air gained it, GLM HIGH).
+        Winds untouched.  The pressures are then rebuilt from the new
+        ``delp`` with ``p_var_hydrostatic`` -- the producer that built
+        them at the IC -- as the Fortran does at :662-686.
       * tracer list slots ``KESSLER_TRACER_SLOTS`` = q_v, q_c, q_r.
 
-    Returns ``(state_new, q_new)`` with the same layouts as the inputs.
+    Returns ``(state_new, press_new, q_new)`` with the inputs' layouts;
+    tracers beyond the three Kessler slots come back renormalised to the
+    new layer mass (their mass is conserved), never untouched.
     """
+    from legoesm.core.fv3_dynamics import p_var_hydrostatic
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_C_LIQ, FV3_CP_AIR, FV3_CP_VAPOR, FV3_GRAV)
     n, ng, km = int(n), int(ng), int(km)
     m = n + 2 * ng
     ci = slice(ng, ng + n)
@@ -588,19 +611,51 @@ def apply_kessler_step_sixface_jax(state, press, q, *, dt, n, ng, km,
         raise ValueError(f"pe/peln must reach (6, n, n, km+1)="
                          f"{(6, n, n, km + 1)}, got {pe6.shape}/{peln6.shape}")
     T_c = pt6[:, ci, ci]                                  # (6, n, n, km)
-    p_full = delp6[:, ci, ci] / (peln6[..., 1:] - peln6[..., :-1])
+    dlnp = peln6[..., 1:] - peln6[..., :-1]
+    p_full = delp6[:, ci, ci] / dlnp
     qv_c, qc_c, qr_c = (jnp.asarray(q[i])[:, ci, ci] for i in range(3))
+    # FV3's own hypsometric thickness (init_hydro.F90:178-184, delz =
+    # -rdgas/grav * T_v * dpeln), with the shared moist rho (same R_d,
+    # cancels) this makes rho*dz == delp/FV3_GRAV exactly -- the
+    # dycore's column mass -- so the rain the core sediments out is the
+    # mass fv_update_phys removes below.  The shared compute_layer_dz
+    # (arithmetic mid-layer pressure) is 10 % off on this deck's thick
+    # layers (probe 9963150); legoESM's g is 5e-5 off FV3's (codex).
+    dz_c = (constants.R_d * virtual_temperature(T_c, jnp.maximum(qv_c, 0.0))
+            / FV3_GRAV) * dlnp
     ncol = 6 * n * n
 
     dT, dqv, dqc, dqr = kessler_column_tendencies_pressure(
         T_c.reshape(ncol, km), p_full.reshape(ncol, km),
         pe6.reshape(ncol, km + 1),
         qv_c.reshape(ncol, km), qc_c.reshape(ncol, km), qr_c.reshape(ncol, km),
-        dt=dt, config=cfg)
+        dt=dt, config=cfg, dz=dz_c.reshape(ncol, km))
     blk = (6, n, n, km)
-    pt2 = pt6.at[:, ci, ci].set(T_c + dT.reshape(blk) * dt)
+    zeros = jnp.zeros((6, m, m, km), dtype=pt6.dtype)
+    # the core's dT is L_v*dq/c_pd (legoESM cp); fv_update_phys re-scales
+    # by cp_air/cvm, so hand it dT in FV3's cp_air convention and the
+    # latent energy L_v*dq lands on cvm exactly (codex 2026-09-24)
+    t_dt6 = zeros.at[:, ci, ci].set(
+        dT.reshape(blk) * (constants.c_pd / FV3_CP_AIR))
+    q_dt6 = [zeros.at[:, ci, ci].set(d.reshape(blk)) for d in (dqv, dqc, dqr)]
+    q3 = [jnp.asarray(q[i]) for i in range(3)]
+
+    def _upd(pt, delp, qv, qc, qr, tdt, dqv_, dqc_, dqr_):
+        pt_n, delp_n, q_n, ps_dt = fv_update_phys_moist_duo_jax(
+            pt, delp, [qv, qc, qr], tdt, [dqv_, dqc_, dqr_], dt, n=n, ng=ng,
+            cp_air=FV3_CP_AIR, cp_vapor=FV3_CP_VAPOR, c_liq=FV3_C_LIQ)
+        return pt_n, delp_n, q_n[0], q_n[1], q_n[2], ps_dt
+    pt2, delp2, qv2, qc2, qr2, ps_dt6 = jax.vmap(_upd)(
+        pt6, delp6, q3[0], q3[1], q3[2], t_dt6, *q_dt6)
+    press2 = p_var_hydrostatic(delp2, ptop=ptop, akap=akap, n=n, ng=ng,
+                               km=km)
     q2 = list(q)
-    for i, dq in enumerate((dqv, dqc, dqr)):
-        qi = jnp.asarray(q[i])
-        q2[i] = qi.at[:, ci, ci].set(qi[:, ci, ci] + dq.reshape(blk) * dt)
-    return {**state, "pt": pt2}, q2
+    q2[0], q2[1], q2[2] = qv2, qc2, qr2
+    # every OTHER mass tracer rides the same layer mass and is
+    # renormalised with it (fv_update_phys.F90:349-357 adjusts all of
+    # them; codex 2026-09-24: leaving a passenger's mixing ratio while
+    # delp moves changes its mass without a source)
+    for i in range(3, len(q2)):
+        qi = jnp.asarray(q2[i])
+        q2[i] = qi.at[:, ci, ci].set(qi[:, ci, ci] / ps_dt6)
+    return {**state, "pt": pt2, "delp": delp2}, press2, q2
