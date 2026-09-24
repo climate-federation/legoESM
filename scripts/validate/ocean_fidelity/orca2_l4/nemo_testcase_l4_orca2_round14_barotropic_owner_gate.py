@@ -212,10 +212,16 @@ def _ssh_row(stage_outputs, oracle_ssh, stage: int) -> dict[str, object]:
     return {
         "stage": stage,
         "max_abs_m": float(np.abs(delta).max()),
+        # The last row of a tripolar grid is the FOLD.  Reporting only a
+        # field-wide maximum would let a fold-row artefact be read as a
+        # basin-wide solver error, which is the difference between two very
+        # different next rounds.
+        "max_abs_excluding_the_fold_row_m": float(np.abs(delta[:-1]).max()),
         "argmax_column": int(np.argmax(per_column)),
         "unequal_cells": int(np.count_nonzero(delta)),
         "scored_cells": int(delta.size),
         "per_column_max_abs_m": [float(value) for value in per_column],
+        "where": _localize(delta, np.ones_like(delta, dtype=bool)),
     }
 
 
