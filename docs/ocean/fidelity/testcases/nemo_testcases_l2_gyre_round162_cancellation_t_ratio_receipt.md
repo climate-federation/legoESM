@@ -561,9 +561,9 @@ findings and what was done with each:
 
 ## The gates and the tests
 
-The citation gate on this receipt reported `PASS` with zero failures, zero
-unmapped citations, zero map entries failing audit, and all nine self-tests
-fired.  Its shifted-line plant, on `ocean_pe_latlon_cgrid.py:1699`, exited 1
+The citation gate on this receipt reported `PASS` with 12 citations, zero
+failures, zero unmapped citations, zero map entries failing audit, and all
+nine self-tests fired.  Its shifted-line plant, on `ocean_pe_latlon_cgrid.py:1699`, exited 1
 with `SYMBOL-NOT-AT-LINE`.  The same gate on the preregistration reported
 `PASS` with 8 citations and its own plant, on
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90:257`, exited 1 with
@@ -574,6 +574,12 @@ The six-file push gate together with this round's own test file and round
 exactly:
 
 > 147 passed in 1014.52s (0:16:54)
+
+The commits after that battery change this receipt and the citation map and
+nothing else.  The two battery members that read a receipt — the citation
+gate's own test file and this round's — were re-run at the final tip together
+with round 161's, and the citation gate itself was re-run there and reported
+`PASS` with 12 citations and its plant exiting 1.
 
 The three plant runs are quoted verbatim in the Plants section above, each
 with its own exit code: `t-r3-inert` and `t-r3-tracer` exit 1 with
