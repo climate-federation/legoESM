@@ -43,7 +43,7 @@ from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
-from legoesm.land.richards import solve_richards
+from legoesm.land.richards import RichardsOutput, solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
@@ -1063,12 +1063,19 @@ def _step_multilayer_land_impl(
     sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
 
     # --- Richards equation (+ coupled surface ponding cell, #671) ---
-    richards_out = solve_richards(
-        psi, theta, grid,
-        config.hydraulics, config.richards,
-        flux_top, sink, dt,
-        surface_water=state.surface_water,
-    )
+    if config.prescribed_soil_water:
+        # CLM-ml's offline design: soil water is prescribed by the caller every step, not time-stepped; the state keeps
+        # the incoming psi / theta (surface_water passes through unchanged, None stays None so the state structure holds)
+        _zero = jnp.zeros(psi.shape[0], dtype=psi.dtype)
+        richards_out = RichardsOutput(psi_new=psi, theta_new=theta, runoff_surface=_zero, runoff_subsurface=_zero,
+                                      n_iter=_zero, surface_water=state.surface_water)
+    else:
+        richards_out = solve_richards(
+            psi, theta, grid,
+            config.hydraulics, config.richards,
+            flux_top, sink, dt,
+            surface_water=state.surface_water,
+        )
     # NB (#671): the former "evaporation water budget closure" — a clip of
     # theta_new to [theta_r, theta_sat] — is removed.  It was a non-conservative
     # band-aid for the old infiltration/evap mismatch; theta_from_psi is now

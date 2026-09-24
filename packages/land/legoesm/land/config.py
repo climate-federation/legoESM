@@ -187,6 +187,11 @@ class MultiLayerLandConfig(NamedTuple):
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()
     thermal: SoilThermalConfig = SoilThermalConfig()
     richards: RichardsConfig = RichardsConfig(fc_drain_saturation=0.5)
+    # Prescribed soil water, CLM-ml's offline design (its driver reads H2OSOI from a CLM history file every time step and
+    # only diagnoses matric potential and conductivity from it): when True the Richards solve is skipped, the step
+    # carries the incoming psi_soil / theta_soil unchanged (the caller sets them each step), and no infiltration,
+    # drainage or runoff is computed. The soil water budget is then not closed, by construction.
+    prescribed_soil_water: bool = False
     # Carbon cycle
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
