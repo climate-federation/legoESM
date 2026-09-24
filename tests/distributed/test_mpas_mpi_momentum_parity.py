@@ -45,7 +45,8 @@ from legoesm.driver.config import (  # noqa: E402
 )
 from legoesm.driver.model_driver import ModelDriver  # noqa: E402
 
-RES, NLEV, DT = 3, 20, 300.0  # level 3 = 642 cells
+RES = int(os.environ.get("LEGOESM_PARITY_RES", "3"))
+NLEV, DT = 20, 300.0
 REL_RMS_TOL = 1e-12  # fp64; measured 24-step residual ~7e-15 (2026-09-24)
 # A wind-bearing initial state: the analytical IC is at rest, so an edge
 # wind of 1e-2 m/s makes a relative measure meaningless.  ERA5 on this
