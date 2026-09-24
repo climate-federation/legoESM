@@ -40,14 +40,20 @@ _LEGACY_COORDINATOR_PORT = 1234
 # management Ethernet (measured: 0.11 GB/s cross-node, 0.9 Gbit/s) while
 # ib0 is 100 Gb/s. Every SPMD CPU lane plateaued on that link.
 
+_IFNAMSIZ = 16  # Linux kernel interface-name field, NUL included
+
+
 def interface_ipv4(name: str) -> str | None:
-    """IPv4 address bound to ``name`` (SIOCGIFADDR), or None."""
-    import fcntl
+    """IPv4 address bound to ``name`` (SIOCGIFADDR), or None. Names the
+    kernel cannot hold are rejected rather than silently prefix-matched."""
+    import fcntl  # Linux only, like SIOCGIFADDR itself
     import struct
+    if len(name.encode()) >= _IFNAMSIZ:
+        raise ValueError(f"interface name {name!r} exceeds {_IFNAMSIZ - 1} bytes")
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
         try:
             raw = fcntl.ioctl(sk.fileno(), 0x8915,
-                              struct.pack("256s", name.encode()[:15]))
+                              struct.pack("256s", name.encode()))
         except OSError:
             return None
     return socket.inet_ntoa(raw[20:24])
@@ -91,38 +97,109 @@ def resolve_gloo_interface() -> str | None:
 
 
 _GLOO_IFACE_BARRIER_MS = 120_000
+_GLOO_PROBE_TIMEOUT_S = 10.0
+_PINNED_IFACE: str | None = None   # process-local; the env stamp is write-only
+
+
+def _cpu_is_the_platform() -> bool:
+    """The gloo collectives only matter when XLA will run on CPU. Reading
+    the backend here is forbidden (it would create it), so decide from
+    jax_platforms: unset (auto) counts as CPU-possible."""
+    import jax
+    plats = jax.config.jax_platforms
+    if not plats:
+        return True
+    return plats.split(",")[0].strip().lower() == "cpu"
+
+
+def _agree_and_probe(client, pid, n_procs, iface, addr):
+    """Publish this rank's choice, wait for every rank, then prove the
+    address is reachable: each rank listens on its address and connects
+    to the next rank's. Interface NAMES agreeing proves nothing (two
+    fabrics can both be called ib0); a completed connection does."""
+    lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lst.bind((addr, 0))
+    lst.listen(1)
+    lst.settimeout(_GLOO_PROBE_TIMEOUT_S)
+    port = lst.getsockname()[1]
+    client.key_value_set(f"legoesm/gloo_iface/{pid}", f"{iface} {addr} {port}",
+                         allow_overwrite=True)
+    client.wait_at_barrier("legoesm_gloo_iface_publish", _GLOO_IFACE_BARRIER_MS)
+    rows = {int(k.rsplit("/", 1)[-1]): v.split()
+            for k, v in client.key_value_dir_get("legoesm/gloo_iface/")}
+    if set(rows) != set(range(n_procs)):
+        raise RuntimeError(
+            f"gloo interface vote has ranks {sorted(rows)}, expected "
+            f"0..{n_procs - 1} (stale coordinator keys or a missing rank)")
+    if n_procs > 1:
+        nxt = rows[(pid + 1) % n_procs]
+        if nxt[0] == "declined":
+            raise RuntimeError(
+                f"rank {(pid + 1) % n_procs} declined the gloo pin "
+                f"({' '.join(nxt)}) while rank {pid} pinned {iface}: mixed "
+                "configuration, the collectives would bind different links")
+        peer = (nxt[1], int(nxt[2]))
+        try:
+            with socket.create_connection(peer, timeout=_GLOO_PROBE_TIMEOUT_S):
+                pass
+            lst.accept()[0].close()
+        except OSError as e:
+            raise RuntimeError(
+                f"rank {pid} on {socket.gethostname()} cannot reach rank "
+                f"{(pid + 1) % n_procs} at {peer[0]} (its {nxt[0]}) from "
+                f"{iface} {addr}: {e}. The chosen interfaces are not on one "
+                "network; set LEGOESM_GLOO_IFACE explicitly.") from e
+    lst.close()
+    client.wait_at_barrier("legoesm_gloo_iface_probed", _GLOO_IFACE_BARRIER_MS)
+    return rows
+
+
+def _decline(client, pid, why):
+    """A rank that does not pin still votes and still arrives at both
+    barriers; otherwise a pinning peer would wait out the timeout."""
+    os.environ["LEGOESM_GLOO_IFACE_PINNED"] = f"declined:{why}"
+    if client is not None:
+        client.key_value_set(f"legoesm/gloo_iface/{pid}", f"declined {why}",
+                             allow_overwrite=True)
+        client.wait_at_barrier("legoesm_gloo_iface_publish", _GLOO_IFACE_BARRIER_MS)
+        client.wait_at_barrier("legoesm_gloo_iface_probed", _GLOO_IFACE_BARRIER_MS)
+    return None
 
 
 def pin_gloo_interface() -> str | None:
     """Re-register JAX's CPU backend factory so its gloo collectives bind
     the chosen interface. Must run after jax.distributed.initialize() and
     before the first backend use. Returns the interface pinned, or None
-    when the hook declines (single process, non-gloo collectives, or
-    ``default``); LEGOESM_GLOO_IFACE_PINNED records the outcome either way
-    so a receipt can tell "declined" from "never ran".
+    when the hook declines (single process, non-CPU platform, non-gloo
+    collectives, or ``default``). LEGOESM_GLOO_IFACE_PINNED records the
+    outcome for receipts; it is never read back (an inherited stamp must
+    not stand in for an installation in THIS process).
 
-    Every rank publishes its choice through the coordination service and
-    the ranks must agree: a rank advertising an address on a different
-    network than its peers hangs at the first collective with no message
-    naming the cause (GLM review 2026-09-24).
+    Every rank votes through the coordination service and proves its
+    address reachable from a peer before anything is installed; a rank
+    advertising an address on another network would otherwise hang at the
+    first collective with no message naming the cause (reviews 2026-09-24).
     """
+    global _PINNED_IFACE
     import jax
     from jax._src import xla_bridge as xb  # no public factory hook
     from jax._src.distributed import global_state
     from jax._src.lib import xla_client
-    if global_state.client is None:
-        os.environ["LEGOESM_GLOO_IFACE_PINNED"] = "declined:single-process"
-        return None
+    if _PINNED_IFACE is not None:
+        os.environ["LEGOESM_GLOO_IFACE_PINNED"] = _PINNED_IFACE
+        return _PINNED_IFACE
+    client = global_state.client
+    pid = global_state.process_id
+    if client is None:
+        return _decline(None, pid, "single-process")
+    if not _cpu_is_the_platform():
+        return _decline(client, pid, "platform-not-cpu")
     impl = str(jax.config.jax_cpu_collectives_implementation)
     if impl != "gloo":
-        os.environ["LEGOESM_GLOO_IFACE_PINNED"] = f"declined:{impl}"
-        return None
+        return _decline(client, pid, impl)
     iface = resolve_gloo_interface()
     if iface is None:
-        os.environ["LEGOESM_GLOO_IFACE_PINNED"] = "default"
-        return None
-    if os.environ.get("LEGOESM_GLOO_IFACE_PINNED") == iface:
-        return iface  # already installed by an earlier init path
+        return _decline(client, pid, "default")
     if xb._backends:
         raise RuntimeError(
             "pin_gloo_interface() called after a backend was created; the "
@@ -132,20 +209,12 @@ def pin_gloo_interface() -> str | None:
         raise RuntimeError(
             f"LEGOESM_GLOO_IFACE={iface!r}: interface has no IPv4 address on "
             f"{socket.gethostname()}; gloo could not advertise it to peers.")
-
-    client = global_state.client
-    pid = global_state.process_id
-    client.key_value_set(f"legoesm/gloo_iface/{pid}", f"{iface} {addr}")
-    client.wait_at_barrier("legoesm_gloo_iface", _GLOO_IFACE_BARRIER_MS)
-    choices = {k.rsplit("/", 1)[-1]: v.split()[0]
-               for k, v in client.key_value_dir_get("legoesm/gloo_iface/")}
-    if len(set(choices.values())) != 1:
-        raise RuntimeError(
-            "ranks disagree on the gloo interface (a rank whose fastest "
-            f"link differs would hang at the first collective): {choices}")
+    rows = _agree_and_probe(client, pid, global_state.num_processes, iface, addr)
     if pid == 0:
-        print(f"[gloo] collectives pinned to {iface} ({addr}) on "
-              f"{len(choices)} process(es)", flush=True)
+        names = sorted({r[0] for r in rows.values()})
+        print(f"[gloo] collectives pinned to {iface} ({addr}); "
+              f"{len(rows)} process(es), interfaces {names}, ring probe ok",
+              flush=True)
 
     def _cpu_client_on_iface():
         coll = xla_client._xla.make_gloo_tcp_collectives(
@@ -154,6 +223,7 @@ def pin_gloo_interface() -> str | None:
 
     xb.register_backend_factory("cpu", _cpu_client_on_iface, priority=0,
                                 fail_quietly=False)
+    _PINNED_IFACE = iface
     os.environ["LEGOESM_GLOO_IFACE_PINNED"] = iface
     return iface
 

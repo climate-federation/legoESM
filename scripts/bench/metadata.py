@@ -367,7 +367,8 @@ def _gloo_iface_stamp(transport, process_count):
     never ran, i.e. the launcher bypassed early_init: refuse to write a
     receipt whose transport cannot be attributed to a link."""
     stamp = os.environ.get("LEGOESM_GLOO_IFACE_PINNED")
-    if stamp is None and transport == "gloo" and (process_count or 0) > 1:
+    # resolve_transport spells "gloo" only for process_count > 1.
+    if stamp is None and transport == "gloo":
         raise RuntimeError(
             "gloo transport with more than one process but "
             "pin_gloo_interface() never ran (LEGOESM_GLOO_IFACE_PINNED unset): "
