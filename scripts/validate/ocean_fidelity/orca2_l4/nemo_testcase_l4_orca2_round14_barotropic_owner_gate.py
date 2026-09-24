@@ -379,28 +379,33 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     for face in ("u", "v"):
         cand = _face_arrays(operands, face)
         orc = _oracle_arrays(oracle, face)
-        if plant and face == "u":
-            cand = dict(cand)
-            cand["e3"] = np.array(cand["e3"], copy=True)
-            index = tuple(np.argwhere(orc["mask"] > 0.0)[0])
-            cand["e3"][index] = np.nextafter(cand["e3"][index], np.inf)
         active3 = orc["mask"] > 0.0
         active2 = active3[..., 0]
-        ladder_rows[face] = {
-            "e3": compare(cand["e3"], orc["e3"], active3),
-            "Krhs": compare(cand["krhs"], orc["krhs"], active3),
-            "mask": compare(card_masks[face], orc["mask"], np.ones_like(
-                active3, dtype=bool)),
-            "r1_h0": compare(cand["r1_h0"], orc["r1_h0"], active2),
-            "depth_mean": compare(
-                cand["depth_mean"], orc["depth_mean"], active2),
-            "drag_increment": compare(
+        everywhere = np.ones_like(active3, dtype=bool)
+        pairs = {
+            "e3": (cand["e3"], orc["e3"], active3),
+            "Krhs": (cand["krhs"], orc["krhs"], active3),
+            "mask": (card_masks[face], orc["mask"], everywhere),
+            "r1_h0": (cand["r1_h0"], orc["r1_h0"], active2),
+            "depth_mean": (cand["depth_mean"], orc["depth_mean"], active2),
+            "drag_increment": (
                 cand["drag_increment"], orc["drag_increment"], active2),
-            "wind_increment": compare(
+            "wind_increment": (
                 cand["wind_increment"], orc["wind_increment"], active2),
-            "wind_tau": compare(cand["tau"], orc["tau"], active2),
-            "final": compare(cand["final"], orc["final"], active2),
+            "wind_tau": (cand["tau"], orc["tau"], active2),
+            "final": (cand["final"], orc["final"], active2),
         }
+        ladder_rows[face] = {}
+        for name, (left, right, active) in pairs.items():
+            row = compare(left, right, active)
+            # WHERE, not just how big.  On a tripolar grid a field-wide
+            # maximum cannot tell a fold-row artefact from a basin-wide
+            # operator error, and this round found rows of both kinds.
+            if not row["bit_exact"]:
+                row["where"] = _localize(
+                    np.asarray(left, dtype=np.float64)
+                    - np.asarray(right, dtype=np.float64), active)
+            ladder_rows[face][name] = row
         # INSTRUMENT CONTROL: replay NEMO's own written SUM from NEMO's own
         # written operands.  If this is not bit-exact, the reader or the
         # transcription of the statement is wrong and no row above is
@@ -434,11 +439,6 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
                 (cand["e3"] > 0.0).astype(np.float64),
                 (orc["mask"] > 0.0).astype(np.float64),
                 np.ones_like(active3, dtype=bool)),
-            "where_the_first_boundary_lives": _localize(
-                cand["e3"] - orc["e3"], active3),
-            "where_the_mask_disagrees": _localize(
-                card_masks[face] - orc["mask"],
-                np.ones_like(active3, dtype=bool)),
         }
     print("CONTROL the record's own operands replay its own depth mean: "
           + json.dumps({
@@ -459,27 +459,6 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
             row = ladder_rows[face][boundary]
             if first_boundary is None and not row["bit_exact"]:
                 first_boundary = {"boundary": boundary, "face": face, **row}
-
-    plant_control = {
-        "requested": plant,
-        "first_boundary": None if first_boundary is None
-        else first_boundary["boundary"],
-    }
-    if plant:
-        fired = (first_boundary is not None
-                 and first_boundary["boundary"] == "e3"
-                 and first_boundary["face"] == "u")
-        plant_control["fires"] = bool(fired)
-        if fired:
-            print("PLANT FIRED: the ladder's first non-bit boundary is the "
-                  "planted one-representable-value face thickness, U face, "
-                  f"{first_boundary['differing_cells']} differing cell(s), "
-                  f"max {first_boundary['absolute_max']:.6e}")
-        else:
-            print("PLANT DID NOT FIRE: first boundary is "
-                  f"{plant_control['first_boundary']}")
-        require(fired, "the one-representable-value plant did not become the "
-                       "ladder's first non-bit boundary")
 
     # --- 2. the substitution ----------------------------------------------
     producer = jax.device_get(baseline.slow_forcing_producer)
@@ -621,6 +600,50 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
                ("THE_FORCING_IS_A_CONTRIBUTOR" if share >= 0.1 else
                 "THE_FORCING_IS_NOT_THE_OWNER"))
 
+    # THE PLANT, and the first version of it was VACUOUS.  It planted a
+    # one-representable-value change in the candidate face thickness and
+    # required that to become the ladder's first non-bit boundary -- which it
+    # already was, so the plant could not fail.  What this round's conclusion
+    # actually rests on is that the substitution CHANNEL can carry the
+    # smallest possible change into the solver: "the forcing barely moves the
+    # sea surface" means nothing if the channel is deaf.  So the plant adds
+    # ONE unit in the last place to ONE injected value and requires the
+    # end-of-step sea surface to change.
+    plant_control = {"requested": plant}
+    if plant:
+        planted_u = np.array(injected_u, dtype=np.float64, copy=True)
+        window = planted_u[:, 1:1 + RANK0_COLUMNS]
+        index = tuple(np.argwhere(window != 0.0)[0])
+        before = window[index]
+        window[index] = np.nextafter(before, np.inf)
+        planted_u[:, 1:1 + RANK0_COLUMNS] = window
+        moved = int(np.count_nonzero(planted_u - injected_u))
+        require(moved == 1, "the plant changed more than one value")
+        planted = _stage_trace(
+            (jnp.asarray(planted_u), jnp.asarray(injected_v)))
+        planted_ssh = _end_of_step(planted)
+        delta = np.abs(planted_ssh - sub_ssh)
+        fired = bool(delta.max() > 0.0)
+        plant_control.update({
+            "one_value_changed_by_one_unit_in_the_last_place": True,
+            "planted_index": [int(i) for i in index],
+            "sea_surface_cells_moved": int(np.count_nonzero(delta)),
+            "sea_surface_max_abs_move_m": float(delta.max()),
+            "fires": fired,
+        })
+        if fired:
+            print("PLANT FIRED: the gate refuses a one-representable-value "
+                  "move in the injected slow forcing -- it changes the "
+                  f"end-of-step sea surface on {int(np.count_nonzero(delta))} "
+                  f"of {delta.size} cells, max {delta.max():.6e} m")
+        else:
+            print("PLANT DID NOT FIRE: a one-representable-value move in the "
+                  "injected slow forcing left the sea surface bit-identical, "
+                  "so the substitution channel is deaf and no substituted "
+                  "number in this gate is interpretable")
+        require(fired, "the one-representable-value plant did not reach the "
+                       "end-of-step sea surface")
+
     result = {
         "gate": "nemo_testcase_l4_orca2_round14_barotropic_owner_gate",
         "kt": 1,
@@ -672,6 +695,11 @@ def main() -> int:
         if key not in ("baseline_sea_surface_by_stage",
                        "substituted_sea_surface_by_stage")
     }, indent=2, sort_keys=True))
+    if args.plant:
+        # A planted control exits NONZERO: 1 when it correctly fired, 2 when
+        # it did not, which would mean the channel is deaf and this gate's
+        # substituted numbers are not interpretable.
+        return 1 if result["plant"].get("fires") else 2
     return 0
 
 
