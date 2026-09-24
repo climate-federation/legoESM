@@ -68,8 +68,18 @@ def test_pcg_precond_flags_reach_the_barotropic_config():
     assert int(m.config.barotropic.barotropic_chebyshev_degree) == 3
     m, _ = mod.build_model_and_state(8, 16, 3, tripole=False)
     assert m.config.barotropic.barotropic_implicit_preconditioner == "jacobi"
-    with pytest.raises(SystemExit):
+    # chebyshev without a degree runs the scheme default, which is 4, not 0
+    m, _ = mod.build_model_and_state(8, 16, 3, tripole=False,
+                                     pcg_precond="chebyshev")
+    assert int(m.config.barotropic.barotropic_chebyshev_degree) == 4
+    m, _ = mod.build_model_and_state(8, 16, 3, tripole=False,
+                                     pcg_precond="zonal_line")
+    assert m.config.barotropic.barotropic_implicit_preconditioner == "zonal_line"
+    with pytest.raises(SystemExit, match="needs --pcg-precond chebyshev"):
         mod.build_model_and_state(8, 16, 3, tripole=False, cheb_degree=3)
+    with pytest.raises(SystemExit, match=">= 1"):
+        mod.build_model_and_state(8, 16, 3, tripole=False,
+                                  pcg_precond="chebyshev", cheb_degree=-3)
 
 
 # Budget: the smoke compiles the serial reference, the SPMD step, the fused
