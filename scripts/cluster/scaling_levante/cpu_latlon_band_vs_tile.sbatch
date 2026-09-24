@@ -50,14 +50,23 @@
 # as payload. So the quantity to read is
 #
 #     c(N) = wire(N) - skip(N)          the collective alone, at N x bytes
-#     r    = c(4) / c(1)
 #
 # with the packing cost present on BOTH sides of each subtraction and
-# therefore cancelled.
-#     r near 4 -> payload binds      -> cutting bytes is a real lever
-#     r near 1 -> per-operation cost -> cutting bytes cannot help
-# Anything between, with the repeat spreads propagated, is INCONCLUSIVE and
-# is reported as such rather than resolved in either direction.
+# therefore cancelled. A collective costs latency plus bytes over bandwidth,
+# so model c(N) = L + N*B and solve the two measurements for both terms:
+#
+#     B = (c4 - c1) / 3        L = (4*c1 - c4) / 3
+#     payload fraction at production bytes = B / c(1)
+#
+# The FRACTION is what is reported, not a ratio. An earlier version gated on
+# r = c(4)/c(1) with a payload cut at 2.5, which is wrong: under this model a
+# collective whose cost is HALF latency and HALF bytes gives r = 5B/2B = 2.5
+# exactly, so every collective less payload-bound than one-half would have
+# been reported as per-operation. The fraction has no such bias.
+#     fraction >= 0.5 -> payload dominates      -> cutting bytes is a lever
+#     fraction <= 0.2 -> per-operation dominates -> cutting bytes cannot help
+# Anything between, or bounds that straddle a cut, is MIXED or INCONCLUSIVE
+# and is reported as such rather than resolved in either direction.
 #
 # THE DISCRIMINATOR RUNS UNPACKED, matching the packing state of the tile arm
 # it informs. LEGOESM_LATLON_PACKED_EXCHANGE=1 is production for the band,
@@ -321,25 +330,50 @@ else:
               "resolved above the repeat spread, so a ratio against it means "
               "nothing.")
     else:
-        r = c4 / c1
-        # Worst-case ratio bounds from the same spreads.
-        lo = max(0.0, (c4 - e4)) / (c1 + e1)
-        hi = (c4 + e4) / max(1e-9, (c1 - e1)) if c1 > e1 else float("inf")
-        print(f"  ratio {r:.2f}x, worst-case bounds [{lo:.2f}, {hi:.2f}]. "
-              f"Pure payload predicts 4.00; pure per-operation predicts 1.00.")
-        if lo >= 2.5:
+        # c(N) = L + N*B solved on the two measurements. The reported quantity
+        # is the PAYLOAD FRACTION at production bytes, not the ratio
+        # c(4)/c(1): under this model a collective that is half latency and
+        # half bytes gives a ratio of exactly 2.5, so a ratio cut at 2.5 would
+        # call everything less payload-bound than one-half "per-operation".
+        def split(a1, a4):
+            b = (a4 - a1) / 3.0
+            return b / a1 if a1 > 0 else float("nan")
+
+        frac = split(c1, c4)
+        # Worst case in each direction, moving both measurements against the
+        # quantity being estimated.
+        lo = split(c1 + e1, c4 - e4)
+        hi = split(max(1e-9, c1 - e1), c4 + e4)
+        lo, hi = min(lo, hi), max(lo, hi)
+        print(f"  fitted latency {(4 * c1 - c4) / 3.0:8.1f} ms, "
+              f"per-copy bytes term {(c4 - c1) / 3.0:8.1f} ms")
+        print(f"  payload fraction of the collective at production bytes: "
+              f"{frac:.2f}, worst-case bounds [{lo:.2f}, {hi:.2f}]")
+        if lo >= 0.5:
             payload_live = True
-            print("  PAYLOAD BINDS: the collective tracks its bytes. Cutting "
-                  "them is a real lever and a 2-D mesh should pay.")
-        elif hi <= 1.5:
+            print("  PAYLOAD DOMINATES: at least half the collective's cost "
+                  "is its bytes. Cutting them is a real lever and a 2-D mesh "
+                  "should pay.")
+        elif hi <= 0.2:
             payload_live = False
-            print("  PER-OPERATION: quadrupling the bytes did not move the "
-                  "collective. The non-shrinking cost is latency and "
-                  "synchronization, so cutting halo bytes cannot recover it.")
+            print("  PER-OPERATION DOMINATES: a fifth or less of the "
+                  "collective's cost is its bytes. The non-shrinking cost is "
+                  "latency and synchronization, so cutting halo bytes cannot "
+                  "recover it.")
+        elif lo >= 0.2 and hi <= 0.5:
+            print("  MIXED: the bytes are a real but minority share of the "
+                  "collective. Cutting them helps by less than the boundary "
+                  "ratio suggests.")
         else:
-            print("  INCONCLUSIVE: the bounds straddle the registered cuts. "
-                  "More repeats, or a larger payload multiple, would be "
-                  "needed to separate the two mechanisms.")
+            print("  INCONCLUSIVE: the bounds straddle a registered cut. More "
+                  "repeats, or a larger payload multiple, would be needed to "
+                  "separate the two mechanisms.")
+        if not (0.0 <= frac <= 1.5):
+            print(f"  WARNING: a payload fraction of {frac:.2f} is outside "
+                  f"what the model c = L + N*B can produce. gloo may switch "
+                  f"algorithm between the two message sizes, in which case "
+                  f"the two points do not lie on one line and neither term "
+                  f"is trustworthy.")
 
 # ---- band vs tile, controlled on packing
 print(f"\n== band vs tile (tiles {4096 // (128 // pl128)} x {8192 // pl128} at "
