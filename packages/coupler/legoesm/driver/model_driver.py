@@ -8242,14 +8242,16 @@ class ModelDriver:
             start_day = cfg.start_day
 
         hs_on = bool(cfg.held_suarez_forcing)
+        kessler_on = cfg.microphysics == "kessler"
         logger.info(
-            "FV3 duo lane: C%d km=%d %s, Held-Suarez %s, dt=%.1fs, %d "
+            "FV3 duo lane: C%d km=%d %s, Held-Suarez %s, Kessler %s, "
+            "dt=%.1fs, %d "
             "steps (%.2f total days, %d this job%s), snapshots every %d "
             "steps, checkpoints every %s steps",
             cfg.grid.resolution, self.model.config.km,
             "hydrostatic" if self.model.config.hydrostatic
             else "nonhydrostatic",
-            "ON" if hs_on else "off",
+            "ON" if hs_on else "off", "ON" if kessler_on else "off",
             DT, n_steps_total, cfg.days, n_this_job,
             f", RESTART from step {loaded_step}" if loaded_step else "",
             diag_interval, ckpt_interval or "never")
@@ -8262,7 +8264,7 @@ class ModelDriver:
         if restart_bundle is not None:
             bundle = restart_bundle
         else:
-            bundle = self.model.dcmip16_initial_state(do_pert=True)
+            bundle = self._fv3_duo_fresh_ic()
         # Multi-process SPMD: BOTH a fresh IC and a restart-loaded bundle
         # come out of the above as fully-addressable arrays (dcmip16_
         # initial_state builds identically on every rank; the restart
@@ -8291,6 +8293,8 @@ class ModelDriver:
                 # certified parity arm does.  Stateless — bundle in,
                 # bundle out; the restart invariant is untouched.
                 bundle = self._fv3_duo_apply_held_suarez(bundle, DT)
+            if kessler_on:
+                bundle = self._fv3_duo_apply_kessler(bundle, DT)
             # start_day is the ABSOLUTE day at loaded_step (the day the
             # checkpoint was written; cfg.start_day on a fresh run), so
             # `day` is absolute simulated time on both arms of a chain.
@@ -8440,6 +8444,80 @@ class ModelDriver:
         press = {nm: bundle["press"][nm] for nm in ("pe", "peln", "pkz")}
         new_state = fn(bundle["state"], press, float(dt))
         return {**bundle, "state": new_state}
+
+    def _fv3_duo_fresh_ic(self) -> dict:
+        """This deck's initial bundle -- the ONE builder for the fresh
+        run AND the restart template, so the tracer count a checkpoint
+        is validated against is the count the run actually carries.
+
+        Kessler on: tracer slots ``KESSLER_TRACER_SLOTS`` -- the IC's own
+        DCMIP16 specific humidity is slot 0; cloud and rain start at
+        zero, as DCMIP 2016 test 161 does (NOT the lon-modulated
+        passenger copies ``n_tracers > 1`` would build).
+        """
+        bundle = self.model.dcmip16_initial_state(do_pert=True)
+        if self.config.microphysics == "kessler":
+            q0 = bundle["q"][0]
+            bundle = {**bundle,
+                      "q": [q0, jnp.zeros_like(q0), jnp.zeros_like(q0)]}
+        return bundle
+
+    def _fv3_duo_apply_kessler(self, bundle: dict, dt: float) -> dict:
+        """One operator-split Kessler step on the duo bundle, every lane.
+
+        The bridge (``apply_kessler_step_sixface_jax``) is column-local
+        and pure JAX, so ONE jitted function serves single-process faces,
+        single-process windows and multi-process SPMD alike: under a
+        window layout the owned block is scattered to faces and gathered
+        back exactly as the Held-Suarez twin does.  pt and the three
+        Kessler tracers are pinned to the step's face sharding.  Stateless
+        -- the restart invariant is untouched.
+        """
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
+            apply_kessler_step_sixface_jax,
+        )
+        fn = getattr(self, "_fv3_duo_kessler_jax_fn", None)
+        if fn is None:
+            from legoesm.grids.fv3_duo_windows import (gather_windows,
+                                                       scatter_owned)
+            grid = self.model.grid
+            n, ng, km = grid.n, grid.ng, self.model.config.km
+            sh = self.model.step_out_shardings
+            lay = self.model.window_layout
+
+            def _kessler(state, press, q, dt):
+                if lay is not None:
+                    faces = {k: scatter_owned(lay, state[k], jnp)
+                             for k in ("pt", "delp")}
+                    pressf = {k: scatter_owned(lay, press[k], jnp)
+                              for k in press}
+                    qf = [scatter_owned(lay, qi, jnp) for qi in q[:3]]
+                    out6, q6 = apply_kessler_step_sixface_jax(
+                        faces, pressf, qf, dt=dt, n=n, ng=ng, km=km)
+                    pt = gather_windows(lay, out6["pt"], jnp)
+                    # only the three Kessler slots went through the
+                    # bridge; passengers beyond them ride unchanged
+                    q_new = [gather_windows(lay, qi, jnp) for qi in q6] \
+                        + list(q[3:])
+                else:
+                    # the bridge returns the FULL list (passengers kept)
+                    # -- codex 2026-09-24: appending q[3:] here too
+                    # duplicated every passenger each step
+                    out6, q_new = apply_kessler_step_sixface_jax(
+                        state, press, q, dt=dt, n=n, ng=ng, km=km)
+                    pt = out6["pt"]
+                    q_new = list(q_new)
+                if sh is not None:
+                    pt = jax.lax.with_sharding_constraint(pt, sh)
+                    q_new = [jax.lax.with_sharding_constraint(qi, sh)
+                             for qi in q_new]
+                return {**state, "pt": pt}, q_new
+            fn = jax.jit(_kessler)
+            self._fv3_duo_kessler_jax_fn = fn
+        press = {nm: bundle["press"][nm] for nm in ("pe", "peln")}
+        new_state, new_q = fn(bundle["state"], press, list(bundle["q"]),
+                              float(dt))
+        return {**bundle, "state": new_state, "q": new_q}
 
     def _fv3_duo_host_faces(self, bundle: dict) -> dict:
         """Host-side, FACE-stacked copy of the bundle for every write.
@@ -8695,6 +8773,11 @@ class ModelDriver:
                 _day=np.float64(day),
                 _dt=np.float64(self.config.dycore.dt),
                 _hydrostatic=np.bool_(mcfg.hydrostatic),
+                # the thermodynamic mode is CONTRACT too (codex
+                # 2026-09-24): a dry checkpoint resumed moist would gain
+                # humidity feedback silently, and the tracer count alone
+                # cannot tell the two apart
+                _zvir=np.float64(self.model.zvir),
                 _km=np.int64(mcfg.km),
                 _resolution=np.int64(self.model.grid.n),
                 # nq is CONTRACT, not decoration: the loader checks the
@@ -8804,6 +8887,17 @@ class ModelDriver:
                         f"{nm}={want!r}; restarting would reinterpret "
                         f"the bundle on the wrong deck. Match the config "
                         f"to the checkpoint.")
+            # _zvir: absent on checkpoints written before the moist arm
+            # existed -- those were dry by construction (zvir = 0.0)
+            zvir_ck = float(d["_zvir"]) if "_zvir" in files else 0.0
+            if zvir_ck != float(self.model.zvir):
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name} thermodynamic-mode "
+                    f"mismatch: checkpoint zvir={zvir_ck!r} vs constructed "
+                    f"model zvir={self.model.zvir!r} (moist="
+                    f"{mcfg.moist}); resuming would switch humidity "
+                    f"feedback on or off mid-run. Match the config to "
+                    f"the checkpoint.")
             dt_ck, dt_now = float(d["_dt"]), float(self.config.dycore.dt)
             if dt_ck != dt_now:
                 raise ValueError(
@@ -9065,7 +9159,7 @@ class ModelDriver:
             # placeholders), inside this same try so a per-rank
             # failure here is caught too (GLM F1, round 2b).
             template = self._fv3_duo_flatten_bundle(self._fv3_duo_host_faces(
-                self.model.dcmip16_initial_state(do_pert=True)))
+                self._fv3_duo_fresh_ic()))
             if jax.process_index() == 0:
                 if not path.is_file():
                     raise FileNotFoundError(
