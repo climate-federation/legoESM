@@ -73,7 +73,7 @@ OUTDIR="${OUTDIR:-/scratch/b/b381103/legoesm_scaling/ranks_nodes_j${SLURM_JOB_ID
 [ -e "$OUTDIR" ] && { echo "REFUSING: $OUTDIR exists" >&2; exit 1; }
 mkdir -p "$OUTDIR"
 echo "provenance: $($PY -c 'import legoesm.parallel.sharded_dynamics as m; print(m.__file__)')"
-echo "sha=$(git -C "$REPO" rev-parse --short HEAD) ppn=$PPN nlev=$NLEV outdir=$OUTDIR"
+echo "sha=$(git -C "$REPO" rev-parse --short HEAD) nodes=$NN nlev=$NLEV outdir=$OUTDIR"
 
 want=0; ok=0
 for REP in 1 2; do
