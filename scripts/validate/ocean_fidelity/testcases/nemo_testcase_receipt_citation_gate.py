@@ -622,6 +622,13 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    # --- ORCA2 round 14: the barotropic slow forcing and its solver ---
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/domain.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/domain.f90"),
     "trazdf.f90": _R35 / "trazdf.f90",
     "zdf_oce.f90": _R35 / "zdf_oce.f90",
     "stprk3_stg.f90": _R35 / "stprk3_stg.f90",
@@ -643,6 +650,40 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 card round 14: the barotropic slow forcing, in stp2d's order
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:139-147': [
+        '!*  hydrostatic pressure gradient (HPG))  *!',
+        'CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )', 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:162-166': [
+        'CASE( np_VEC_c2  )',
+        'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:196-199': [
+        'CASE( np_VEC_c2, np_LIN_dyn )',
+        'Ve_rhs(ji,jj) = SUM( e3v_3d', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:218-221': [
+        '!* baroclinic drag forcing *!',
+        "l4_canon_2d(CdU_u,'U'), l4_canon_2d(CdU_v,'V')", 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:229-230': [
+        'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj)',
+        'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj)', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:302-303': [
+        'IF( ln_dynspg_ts )',
+        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )',
+        2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:287-291': [
+        'ssh_frc(:,:) = sshe_rhs(:,:)',
+        'zCdU_v  (:,:) = CdU_v   (:,:)', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:320-324': [
+        'CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )',
+        'zv_frc(ji,jj) = zv_frc(ji,jj) - zv_trd(ji,jj) * ssvmask(ji,jj)', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:668-671': [
+        'ua_e(ji,jj) = (                                 un_e(ji,jj)',
+        '+ zu_frc(ji,jj) ) &', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/domain.f90:199':
+        'hu_0(:,:) = hu_0(:,:) + e3u_3d(:,:,jk) * umask(:,:,jk)',
     # --- ORCA2 card round 13: the river runoff's WATER and NEMO's emp ---
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/divhor.f90:142':
         '!==  + runoffs divergence  ==!',
