@@ -307,3 +307,82 @@ def test_sharding_reorder_still_honours_an_explicit_method(monkeypatch):
             monkeypatch.setattr(vp, name, _tap)
         vp.reorder_voronoi_for_sharding(mesh, 4, method=method)
         assert used == [expect], f"method={method!r} used {used}"
+
+
+# ---------------------------------------------------------------------------
+# Edge/vertex order inside an owner block follows the cells' Hilbert curve
+# ---------------------------------------------------------------------------
+
+def _runs_are_sorted(owner, key):
+    """True iff ``owner`` is non-decreasing and ``key`` is non-decreasing
+    inside every constant-owner run."""
+    if np.any(np.diff(owner) < 0):
+        return False
+    same = owner[1:] == owner[:-1]
+    return not np.any(np.diff(key)[same] < 0)
+
+
+def test_reorder_sorts_edges_and_vertices_by_hilbert_within_owner(mesh):
+    """A stable sort by owner alone leaves the generator's order inside each
+    block; the reorder must place edges and vertices along the same Hilbert
+    curve as the cells (key = the key of the min ORIGINAL-index cell, the
+    same cell that defines the entity's owner). Fails on the owner-only
+    sort: the level-1 mesh's generator order is not Hilbert order."""
+    from legoesm.parallel import voronoi_partition as vp
+    n_dev = 2
+    r = reorder_voronoi_for_sharding(mesh, n_dev, method="sfc")
+    owner = vp.partition_cells_sfc(mesh, n_dev)
+    key = vp.hilbert_cell_keys(mesh)
+    xyz = lambda m, k: np.stack([np.asarray(getattr(m, f"{a}{k}")) for a in "xyz"], 1)
+
+    pc = _row_perm(xyz(r, "Cell"), xyz(mesh, "Cell"))
+    assert _runs_are_sorted(owner[pc], key[pc])
+
+    pe = _row_perm(xyz(r, "Edge"), xyz(mesh, "Edge"))
+    coe = np.asarray(mesh.cellsOnEdge)
+    ec = np.minimum(coe[0], coe[1])[pe]
+    assert _runs_are_sorted(owner[ec], key[ec]), "edges not Hilbert-ordered within owner"
+
+    pv = _row_perm(xyz(r, "Vertex"), xyz(mesh, "Vertex"))
+    cov = np.asarray(mesh.cellsOnVertex)
+    cov = np.where(cov >= 0, cov, mesh.nCells)
+    vc = np.minimum(cov.min(axis=0), mesh.nCells - 1)[pv]
+    assert _runs_are_sorted(owner[vc], key[vc]), "vertices not Hilbert-ordered within owner"
+
+
+def _row_perm(a_new, a_old):
+    """perm with a_new[i] == a_old[perm[i]] for row-unique coordinate arrays."""
+    old = {tuple(np.round(row, 9)): i for i, row in enumerate(np.asarray(a_old))}
+    return np.array([old[tuple(np.round(row, 9))] for row in np.asarray(a_new)])
+
+
+def test_reorder_commutes_with_trisk_operators(mesh):
+    """Relabelling cells, edges and vertices must not change any TRiSK
+    operator: div/grad/curl/tangential reconstruction on the reordered mesh
+    equal the original results mapped through the recovered permutations.
+    Catches a connectivity table or weight/sign array left unpermuted, or a
+    neighbour slot reordered (which would flip signs / weights)."""
+    from legoesm.core.operators_voronoi import (
+        curl_vertex, divergence_cell, gradient_edge, tangential_velocity,
+    )
+    r = reorder_voronoi_for_sharding(mesh, 2, method="sfc")
+    xyz = lambda m, k: np.stack([np.asarray(getattr(m, f"{a}{k}")) for a in "xyz"], 1)
+    pc = _row_perm(xyz(r, "Cell"), xyz(mesh, "Cell"))
+    pe = _row_perm(xyz(r, "Edge"), xyz(mesh, "Edge"))
+    pv = _row_perm(xyz(r, "Vertex"), xyz(mesh, "Vertex"))
+    rng = np.random.default_rng(0)
+    u = rng.standard_normal(mesh.nEdges)
+    phi = rng.standard_normal(mesh.nCells)
+    # The reorder must not flip any edge's cellsOnEdge orientation, or the
+    # plain permutation of a signed edge field would be wrong.
+    pc_inv = np.empty_like(pc); pc_inv[pc] = np.arange(len(pc))
+    assert np.array_equal(np.asarray(r.cellsOnEdge), pc_inv[np.asarray(mesh.cellsOnEdge)[:, pe]])
+    for name, f_old, f_new in [
+        ("div", divergence_cell(u, mesh), divergence_cell(u[pe], r)),
+        ("grad", gradient_edge(phi, mesh), gradient_edge(phi[pc], r)),
+        ("curl", curl_vertex(u, mesh), curl_vertex(u[pe], r)),
+        ("tangential", tangential_velocity(u, mesh), tangential_velocity(u[pe], r)),
+    ]:
+        f_old, f_new = np.asarray(f_old), np.asarray(f_new)
+        p = {"div": pc, "grad": pe, "curl": pv, "tangential": pe}[name]
+        assert np.allclose(f_new, f_old[p], rtol=1e-6, atol=1e-6), name
