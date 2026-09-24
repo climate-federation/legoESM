@@ -3,12 +3,13 @@
 Date: 2026-09-24
 
 Status: **LANDED, for GYRE-zco only** — round 160's second per-stage
-continuity solve is now the production default for the GYRE card, under
-Decision 55 (note AT, the amended year gate). The review below found a real
-BLOCKER first (ORCA2-zps would have silently taken the same route,
-unmeasured); it is fixed, and the fix scopes the default to GYRE's own
-resolved identity rather than to "every card that resolves the three base
-conditions."
+continuity solve is now GYRE-zco's own explicit production config choice,
+under Decision 55 (note AT, the amended year gate). The review below found a
+real BLOCKER first (ORCA2-zps would have silently taken the same route,
+unmeasured); it is fixed twice — first with an EOS-keyed default the
+coordinator then rejected as a hidden coupling between unrelated choices,
+then with the shipped shape: each card that resolves the two-solve program
+states its own explicit choice on its own config.
 
 ## Outcome first
 
@@ -47,9 +48,13 @@ are reused unchanged, since rounds 161 and 162 both touched zero files under
 round 162's measurement/test-only commits). The candidate arm's full model
 battery (ladder, day-30/240/360, day-240 decomposition, other-cards gate) was
 measured at `8ec2fba50296ffe51dab7c0c960ff8c9c5b6f4f1`. The review then found
-and this round fixed the ORCA2 BLOCKER (`29abe4973`, citation re-anchor
-`a7138998b`); the round ships at `a7138998b`, the tip of this range. Evidence
-root: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round163/`.
+the ORCA2 BLOCKER; this round fixed it twice (`29abe4973`, an EOS-keyed
+exclusion, then `3103c9862`, the coordinator-directed explicit per-card
+config choice that replaced it), with a citation re-anchor after each
+(`a7138998b`, `dc77a4e5b`) and the receipt trued up after each
+(`b2deb94d4`, `84864a095`). The round ships at `84864a095`, the tip of this
+range. Evidence root:
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round163/`.
 
 ## The flip
 
@@ -308,22 +313,25 @@ trace across all three shapes. This is checked directly, not just argued:
 `test_orca2_resolves_the_program_but_its_own_config_excludes_it` asserts
 `nemo_stage_momentum_wzv_executes(gyre_config) is True` against GYRE-zco's
 actual `card.recipe.model_config`, and that assertion is part of
-the green 162-test push-gate battery quoted below, run AFTER the fix. The
+the green 163-test push-gate battery quoted below, run after BOTH fixes. The
 full 40-minute model battery (ladder, day-30/240/360 member runs, day-240
-decomposition, other-cards gate) was NOT re-run after the fix — it was run
-once, at `8ec2fba50296`, and this argument is offered in place of a second
-run. The receipt's physics numbers above are measured at that commit; the
-shipped commit is `a7138998b`, three commits later, none of which touch
-GYRE-zco's code path.
+decomposition, other-cards gate) was NOT re-run after either fix — it was
+run once, at `8ec2fba50296`, and this argument is offered in place of a
+second run. The receipt's physics numbers above are measured at that
+commit; the shipped commit is `84864a095`, six commits later, none of which
+touch GYRE-zco's code path (its own config choice, `True`, is set once and
+never overridden by the redesign).
 
 ## Push gate and this round's own tests
 
 Citation gate plus the five push-gate files plus this round's own updated
-structural test file (now 28 tests, including the ORCA2 non-vacuity test),
-run three times as the round's own edits landed — the number below is the
-FINAL run, on the shipped tree at `a7138998b`:
+structural test file (now 29 tests, including the ORCA2 config-choice
+non-vacuity test and the fail-closed raise test), run FOUR times as the
+round's own edits landed, including the coordinator's config-choice
+redesign — the number below is the FINAL run, on the shipped tree at
+`84864a095`:
 
-> 162 passed in 938.20s (0:15:38)
+> 163 passed in 936.66s (0:15:36)
 
 An intermediate run (after the initial flip, before the round-8 receipt's
 citations were re-anchored a second time for the ORCA2 fix's own line shift)
