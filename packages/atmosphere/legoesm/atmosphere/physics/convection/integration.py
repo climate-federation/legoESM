@@ -1734,6 +1734,32 @@ def _make_spectral_pe_convection(
             )
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
 
+        # CAM6 deep-convective cloud-fraction inputs (clubb_intr deepcu):
+        # publish the interface updraft mass flux and in-cloud water into
+        # the lagged PhysicsState carry when the scheme exposes them, exactly
+        # as the hydrostatic bridge does.  Schemes without an updraft mass
+        # flux publish nothing and the carry stays zero (deepcu exactly 0).
+        if conv_fn is not None:
+            if (conv_out.mass_flux_up is None) != (conv_out.icwmr is None):
+                raise ValueError(
+                    "ConvectionOutput.mass_flux_up and icwmr must be published "
+                    "together (the CAM6 deepcu consumer refuses one without "
+                    f"the other); got mass_flux_up={conv_out.mass_flux_up is not None}, "
+                    f"icwmr={conv_out.icwmr is not None}.")
+            if conv_out.mass_flux_up is not None:
+                _mf_pub = {
+                    "conv_mass_flux_up":
+                        conv_out.mass_flux_up.reshape(ncol, nlev + 1),
+                    "conv_icwmr": conv_out.icwmr.reshape(ncol, nlev),
+                }
+                if isinstance(conv_prog_out, dict):
+                    conv_prog_out = {**conv_prog_out, **_mf_pub}
+                elif conv_prog_out is not None:
+                    conv_prog_out = {"conv_prog_profile": conv_prog_out,
+                                     **_mf_pub}
+                else:
+                    conv_prog_out = _mf_pub
+
         # Transform T tendency to spectral space.
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
