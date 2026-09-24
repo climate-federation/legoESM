@@ -43,7 +43,7 @@ def _coastal_problem(seed=7):
     diagonal, cross-device couplings dropped.  Dots run over ALL cells,
     which is what the owned-masked partial sums add up to under MPI."""
     mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(LEVEL), N_DEV,
-                                        method="sfc")
+                                        method="sfc", edge_order="owner")
     n_cells = int(mesh.nCells)
     n_edges = int(mesh.cellsOnEdge.shape[1])
     rng = np.random.default_rng(seed)

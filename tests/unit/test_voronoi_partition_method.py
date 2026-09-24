@@ -356,6 +356,36 @@ def test_reorder_sorts_edges_and_vertices_by_hilbert_within_owner(mesh):
     assert _runs_are_sorted(v_owner, v_key), "vertices not Hilbert-ordered within owner"
 
 
+def test_reorder_owner_edge_order_keeps_generator_order_within_owner(mesh):
+    """edge_order="owner" (the ocean MPAS lanes) must reproduce the
+    pre-relabel layout: edges and vertices in ascending ORIGINAL index inside
+    each owner block, cells still Hilbert-ordered."""
+    from legoesm.parallel import voronoi_partition as vp
+    r = reorder_voronoi_for_sharding(mesh, 2, method="sfc", edge_order="owner")
+    owner = vp.partition_cells_sfc(mesh, 2)
+    key = vp.hilbert_cell_keys(mesh)
+    pc = _row_perm(_xyz(r, "Cell"), _xyz(mesh, "Cell"))
+    assert _runs_are_sorted(owner[pc], key[pc])
+    pe = _row_perm(_xyz(r, "Edge"), _xyz(mesh, "Edge"))
+    coe = np.asarray(mesh.cellsOnEdge)
+    e_owner = owner[np.minimum(coe[0], coe[1])]
+    assert np.array_equal(pe, np.argsort(e_owner, kind="stable"))
+    pv = _row_perm(_xyz(r, "Vertex"), _xyz(mesh, "Vertex"))
+    cov = np.asarray(mesh.cellsOnVertex)
+    mc = np.where(cov >= 0, cov, mesh.nCells).min(axis=0)
+    v_owner = np.where(mc < mesh.nCells, owner[np.minimum(mc, mesh.nCells - 1)], 0)
+    assert np.array_equal(pv, np.argsort(v_owner, kind="stable"))
+    # and it differs from the default, or the switch would be inert here
+    rh = reorder_voronoi_for_sharding(mesh, 2, method="sfc")
+    assert not np.array_equal(np.asarray(rh.xEdge), np.asarray(r.xEdge))
+
+
+def test_reorder_rejects_unknown_edge_order(mesh):
+    for n in (1, 2):
+        with pytest.raises(ValueError, match="edge_order"):
+            reorder_voronoi_for_sharding(mesh, n, method="sfc", edge_order="bogus")
+
+
 def _row_perm(a_new, a_old):
     """perm with a_new[i] == a_old[perm[i]], recovered from row-unique
     coordinates (exact, not rounded); asserts a bijection."""
