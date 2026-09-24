@@ -471,6 +471,7 @@ def create_atmosphere_dycore(
     config: ExperimentConfig,
     grid,
     sigma,
+    coeff_grid=None,
 ) -> Any:
     """Resolve and instantiate the configured atmosphere dynamical core.
 
@@ -482,6 +483,12 @@ def create_atmosphere_dycore(
         Horizontal grid (cubed-sphere, Gaussian, lat-lon, etc.).
     sigma
         Vertical coordinate.
+    coeff_grid
+        Grid the diffusion coefficients are derived from.  Under a cell
+        partition ``grid`` is the rank-local mesh; its min(dcEdge) /
+        min(areaCell) are rank-dependent, so the GLOBAL mesh must be passed
+        here or every rank integrates a different viscosity.  ``None`` means
+        ``grid``.
 
     Returns
     -------
@@ -514,8 +521,10 @@ def create_atmosphere_dycore(
         _fail_unsupported(model_type, discretization, grid_type)
 
     solver_name = _DRIVER_SUPPORTED[key]
-    diff = compute_diffusion(grid, dc)
-    warn_if_diffusion_unstable(solver_name, diff, grid, dc.dt)
+    if coeff_grid is None:
+        coeff_grid = grid
+    diff = compute_diffusion(coeff_grid, dc)
+    warn_if_diffusion_unstable(solver_name, diff, coeff_grid, dc.dt)
 
     logger.info(
         "Atmosphere: model_type=%s, discretization=%s, grid=%s -> %s",

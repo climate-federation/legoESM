@@ -2117,6 +2117,20 @@ class ModelDriver:
                         f"field (supported: CubedSphereGrid, GaussianGrid, "
                         f"VoronoiMesh)"
                     ) from e
+                # The compiled MPI step closes over the layout's local mesh
+                # (built before this attach), not ``self.grid`` -- same
+                # hazard as the land_frac refresh above.  Without this the
+                # distributed lane silently launched the scalar h_topo
+                # fallback (a 500 m mountain over every ocean column) while
+                # the serial lane read the file.
+                if self._voronoi_layout is not None:
+                    _lm = self._voronoi_layout.local_mesh
+                    if sso.shape[0] != int(_lm.nCells):
+                        raise ValueError(
+                            f"subgrid orography has {sso.shape[0]} columns "
+                            f"but the rank-local mesh has {int(_lm.nCells)}")
+                    self._voronoi_layout = self._voronoi_layout._replace(
+                        local_mesh=_lm._replace(subgrid_topo_stddev=sso))
                 logger.info(
                     f"  Subgrid orography: {sso_path} "
                     f"(stddev max={float(jnp.max(sso)):.0f} m, "
@@ -2182,6 +2196,12 @@ class ModelDriver:
                      f", topography={self.config.topography}"),
         )
 
+    def _coeff_grid(self):
+        """Grid that global scalars (diffusion coefficients, mean cell size)
+        are derived from: the GLOBAL mesh under a partition, else the grid."""
+        g = getattr(self, "_grid_global", None)
+        return self.grid if g is None else g
+
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
 
@@ -2193,7 +2213,13 @@ class ModelDriver:
             create_atmosphere_dycore, compute_diffusion,
         )
 
-        self.model = create_atmosphere_dycore(self.config, self.grid, self.sigma)
+        # Coefficients from the GLOBAL mesh under a cell partition: the local
+        # mesh's min(dcEdge)/min(areaCell) differ per rank (measured +0.09 %
+        # nu_del2 on rank 0 of a 2-rank res-3 split), so each rank would run
+        # a different viscosity.
+        coeff_grid = self._coeff_grid()
+        self.model = create_atmosphere_dycore(
+            self.config, self.grid, self.sigma, coeff_grid=coeff_grid)
 
         # Stage 3-B: under lat-lon band MPI the dycore model needs its
         # config's ``pole_v_bc`` flags set per this rank's pole-touch
@@ -2255,7 +2281,7 @@ class ModelDriver:
             )
 
         # Keep hyperdiffusion coefficient for moisture smoothing later.
-        diff = compute_diffusion(self.grid, self.config.dycore)
+        diff = compute_diffusion(coeff_grid, self.config.dycore)
         self._hyperdiff = diff.hyperdiff
 
         dc = self.config.dycore
@@ -9966,7 +9992,8 @@ class ModelDriver:
             # areaCell is physical, sums to 4*pi*R^2).
             convection=convection_config_for(
                 cfg,
-                grid_dx_m=float(np.sqrt(np.mean(np.asarray(self.grid.areaCell))))),
+                grid_dx_m=float(np.sqrt(np.mean(np.asarray(
+                    self._coeff_grid().areaCell))))),
             turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=gwd_config_for(cfg),
