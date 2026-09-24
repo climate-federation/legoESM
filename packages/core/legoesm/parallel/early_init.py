@@ -118,7 +118,9 @@ def _agree_and_probe(client, pid, n_procs, iface, addr):
     """Publish this rank's choice, wait for every rank, then prove the
     address is reachable: each rank listens on its address and connects
     to the next rank's. Interface NAMES agreeing proves nothing (two
-    fabrics can both be called ib0); a completed connection does."""
+    fabrics can both be called ib0); a completed connection does. Every
+    rank passes both barriers whatever it decides, so a failure surfaces
+    as its own message on every rank, not as a barrier timeout."""
     lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         lst.bind((addr, 0))
@@ -131,50 +133,61 @@ def _agree_and_probe(client, pid, n_procs, iface, addr):
                                _GLOO_IFACE_BARRIER_MS)
         rows = {int(k.rsplit("/", 1)[-1]): v.split()
                 for k, v in client.key_value_dir_get("legoesm/gloo_iface/")}
-        if set(rows) != set(range(n_procs)):
-            raise RuntimeError(
-                f"gloo interface vote has ranks {sorted(rows)}, expected "
-                f"0..{n_procs - 1} (stale coordinator keys or a missing rank)")
-        bad = {r: v for r, v in rows.items() if v[0] == "error"}
-        if bad:
-            raise RuntimeError(
-                "gloo pin failed on another rank: " +
-                "; ".join(f"rank {r}: {' '.join(v[1:])}" for r, v in bad.items()))
-        if n_procs > 1:
-            succ = (pid + 1) % n_procs
-            nxt = rows[succ]
-            if nxt[0] == "declined":
-                raise RuntimeError(
-                    f"rank {succ} declined the gloo pin ({' '.join(nxt)}) "
-                    f"while rank {pid} pinned {iface}: mixed configuration, "
-                    "the collectives would bind different links")
-            peer = (nxt[1], int(nxt[2]))
-            # Source-bound so the connection really leaves through the
-            # pinned address, as gloo's will; the default route might not.
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as out:
-                out.settimeout(_GLOO_PROBE_TIMEOUT_S)
-                try:
-                    out.bind((addr, 0))
-                    out.connect(peer)
-                except OSError as e:
-                    raise RuntimeError(
-                        f"rank {pid} on {socket.gethostname()} cannot reach "
-                        f"rank {succ} at {peer[0]} (its {nxt[0]}) from {iface} "
-                        f"{addr}: {e}. The chosen interfaces are not on one "
-                        "network; set LEGOESM_GLOO_IFACE explicitly.") from e
-                try:
-                    lst.accept()[0].close()
-                except OSError as e:
-                    prev = (pid - 1) % n_procs
-                    raise RuntimeError(
-                        f"rank {pid} reached rank {succ} but rank {prev} "
-                        f"({' '.join(rows[prev][:2])}) never connected to "
-                        f"{iface} {addr}:{port}: {e}. Reachability is one-way; "
-                        "set LEGOESM_GLOO_IFACE explicitly.") from e
+        try:
+            _check_vote_and_probe(client, pid, n_procs, iface, addr, port,
+                                  lst, rows)
+        finally:
+            # Arrive at the second barrier on every outcome so no peer
+            # waits out the timeout for a rank that already knows why.
+            client.wait_at_barrier("legoesm_gloo_iface_probed",
+                                   _GLOO_IFACE_BARRIER_MS)
     finally:
         lst.close()
-    client.wait_at_barrier("legoesm_gloo_iface_probed", _GLOO_IFACE_BARRIER_MS)
     return rows
+
+
+def _check_vote_and_probe(client, pid, n_procs, iface, addr, port, lst, rows):
+    if set(rows) != set(range(n_procs)):
+        raise RuntimeError(
+            f"gloo interface vote has ranks {sorted(rows)}, expected "
+            f"0..{n_procs - 1} (stale coordinator keys or a missing rank)")
+    bad = {r: v for r, v in rows.items() if v[0] == "error"}
+    if bad:
+        raise RuntimeError(
+            "gloo pin failed on another rank: " +
+            "; ".join(f"rank {r}: {' '.join(v[1:])}" for r, v in bad.items()))
+    if n_procs > 1:
+        succ = (pid + 1) % n_procs
+        nxt = rows[succ]
+        if nxt[0] == "declined":
+            raise RuntimeError(
+                f"rank {succ} declined the gloo pin ({' '.join(nxt)}) "
+                f"while rank {pid} pinned {iface}: mixed configuration, "
+                "the collectives would bind different links")
+        peer = (nxt[1], int(nxt[2]))
+        # Source-bound to the pinned ADDRESS, as gloo's connections
+        # are. This proves the address is reachable both ways; the
+        # kernel's route lookup still picks the egress interface.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as out:
+            out.settimeout(_GLOO_PROBE_TIMEOUT_S)
+            try:
+                out.bind((addr, 0))
+                out.connect(peer)
+            except OSError as e:
+                raise RuntimeError(
+                    f"rank {pid} on {socket.gethostname()} cannot reach "
+                    f"rank {succ} at {peer[0]} (its {nxt[0]}) from {iface} "
+                    f"{addr}: {e}. The chosen interfaces are not on one "
+                    "network; set LEGOESM_GLOO_IFACE explicitly.") from e
+            try:
+                lst.accept()[0].close()
+            except OSError as e:
+                prev = (pid - 1) % n_procs
+                raise RuntimeError(
+                    f"rank {pid} reached rank {succ} but rank {prev} "
+                    f"({' '.join(rows[prev][:2])}) never connected to "
+                    f"{iface} {addr}:{port}: {e}. Reachability is one-way; "
+                    "set LEGOESM_GLOO_IFACE explicitly.") from e
 
 
 def _decline(client, pid, why):

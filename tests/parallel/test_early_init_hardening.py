@@ -835,9 +835,14 @@ def test_inherited_env_stamp_does_not_stand_in_for_an_installation(distributed, 
 def test_pin_refuses_unreachable_peers_missing_ranks_and_no_address(distributed, monkeypatch):
     _d, xb = distributed
     # vote lacks rank 0 (stale/missing) -> refused before any probe
-    monkeypatch.setattr(_d.global_state, "client", _FakeClient({}))
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
     with pytest.raises(RuntimeError, match="expected 0..1"):
         ei.pin_gloo_interface()
+    # a rank that refuses after the vote still passes the second barrier,
+    # so the peers that also refuse are not stranded until the timeout
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
     # rank 0 published an address nobody listens on -> probe fails loudly
     monkeypatch.setattr(_d.global_state, "client",
                         _FakeClient({"legoesm/gloo_iface/0": "ib0 127.0.0.1 1"}))
@@ -845,10 +850,11 @@ def test_pin_refuses_unreachable_peers_missing_ranks_and_no_address(distributed,
     with pytest.raises(RuntimeError, match="cannot reach rank 0"):
         ei.pin_gloo_interface()
     # rank 0 declined while rank 1 pins -> mixed configuration refused
-    monkeypatch.setattr(_d.global_state, "client",
-                        _FakeClient({"legoesm/gloo_iface/0": "declined mpi"}))
+    client = _FakeClient({"legoesm/gloo_iface/0": "declined mpi"})
+    monkeypatch.setattr(_d.global_state, "client", client)
     with pytest.raises(RuntimeError, match="mixed configuration"):
         ei.pin_gloo_interface()
+    assert client.barriers[-1] == "legoesm_gloo_iface_probed"
     client = _FakeClient({})
     monkeypatch.setattr(_d.global_state, "client", client)
     monkeypatch.setattr(ei, "interface_ipv4", lambda n: None)
