@@ -2150,6 +2150,28 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.convective_cloud is False
     assert cfg.surface_gustiness_zi == 300.0
     assert cfg.convective_precip_efficiency == pytest.approx(0.8)
+    # User table 2026-09-24, "production now, matches CAM6", three rows set
+    # EXPLICITLY so nothing rests on a code default (the defaults are the
+    # opposite of all three): the closure's liquid handed to cloud water; the
+    # post-step supersaturation drain off (CAM clubb_do_liqsupersat=.false.);
+    # and the drain's ice-curve blend off.  Plus the two floors the partition's
+    # own guard forces to zero.  Pinned THROUGH the driver on every config the
+    # lever reaches, because a row that lands on ExperimentConfig but not on
+    # the nested scheme config would report success while changing nothing.
+    assert cfg.clubb_liquid_partition is True
+    assert cfg.hard_saturation_adjustment is False
+    assert cfg.hard_sat_ice_curve is False
+    assert cfg.cloud_q_c_diagnostic == 0.0
+    assert cfg.cloud_conv_cloud_condensate == 0.0
+    from legoesm.driver.physics_pipeline import (
+        _resolve_microphysics, turbulence_config_for,
+    )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+    assert materialize_sub_config(
+        turbulence_config_for(cfg)).clubb.liquid_partition is True
+    assert _resolve_microphysics(cfg)[1].liquid_from_closure is True
 
 
 def test_sundqvist_l36_deck_still_round_trips():
@@ -2179,6 +2201,23 @@ def test_sundqvist_l36_deck_still_round_trips():
     assert cfg.surface_bulk_scheme == "coare3"
     assert cfg.cloud_rh_crit == pytest.approx(0.85)
     assert cfg.cloud_q_c_diagnostic == pytest.approx(5e-6)
+    # This deck RUNS PROGNOSTIC CLUBB, so the 2026-09-24 three-row decision
+    # could reach it -- it must not.  The campaign pair's pre-registration
+    # rests on this deck resolving to the OPPOSITE of all three rows, through
+    # the driver, on every config the lever reaches.
+    assert cfg.turbulence == "clubb" and cfg.clubb_prognostic is True
+    assert cfg.clubb_liquid_partition is False
+    assert cfg.hard_saturation_adjustment is True
+    assert cfg.hard_sat_ice_curve is True
+    from legoesm.driver.physics_pipeline import (
+        _resolve_microphysics, turbulence_config_for,
+    )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+    assert materialize_sub_config(
+        turbulence_config_for(cfg)).clubb.liquid_partition is False
+    assert _resolve_microphysics(cfg)[1].liquid_from_closure is False
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
