@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "bench"
 
 from bench_ppermute_microbench import (  # noqa: E402
     _HLO_TOKEN, TRANSPORT, _ring, fit_latency_bandwidth, mpi_expected_source,
-    sweep_elems,
+    sweep_elems, transport_of,
 )
 
 
@@ -77,7 +77,26 @@ def test_every_collective_choice_has_a_census_token_and_a_transport():
         assert c in TRANSPORT, c
     # The two transports really are two: the gloo arms and the MPI arms must
     # not be attributed to the same lane.
-    assert {TRANSPORT[c] for c in choices} == {"gloo/xla", "mpi4jax"}
+    assert len({TRANSPORT[c] for c in choices}) == 2
+    assert all(TRANSPORT[c] == "mpi4jax" for c in choices if c.startswith("mpi_"))
+
+
+def test_transport_label_is_read_from_the_runtime(monkeypatch):
+    """A hardcoded 'gloo' would attribute an MPI-collectives or GPU run to
+    the wrong lane. On CPU the label follows JAX_CPU_COLLECTIVES_IMPLEMENTATION."""
+    monkeypatch.delenv("JAX_CPU_COLLECTIVES_IMPLEMENTATION", raising=False)
+    assert transport_of("ppermute") == "xla-cpu/gloo"
+    monkeypatch.setenv("JAX_CPU_COLLECTIVES_IMPLEMENTATION", "mpi")
+    assert transport_of("ppermute") == "xla-cpu/mpi"
+    assert transport_of("mpi_sendrecv") == "mpi4jax"
+
+
+def test_identity_ring_is_refused_on_the_mpi_arm_too():
+    """--ring-stride equal to the rank count made every MPI rank exchange
+    with itself and the known-answer check still passed (a rank does receive
+    its own index from itself). The gloo arm refused it; the MPI arm must."""
+    with pytest.raises(ValueError, match="multiple of the device count"):
+        dict(_ring(4, 4))
 
 
 def test_sweep_cap_keeps_the_large_end_and_refuses_a_useless_cap():

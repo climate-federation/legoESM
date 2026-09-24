@@ -196,10 +196,28 @@ _HLO_TOKEN = {
     "mpi_sendrecv": "mpi_sendrecv_ffi",
     "mpi_allreduce": "mpi_allreduce_ffi",
 }
-TRANSPORT = {
-    "ppermute": "gloo/xla", "allreduce": "gloo/xla",
-    "mpi_sendrecv": "mpi4jax", "mpi_allreduce": "mpi4jax",
-}
+def transport_of(collective):
+    """The transport a receipt is attributed to, READ from the runtime.
+
+    The XLA arms are gloo only on CPU with the default collectives
+    implementation; JAX_CPU_COLLECTIVES_IMPLEMENTATION can select MPI for the
+    same program, and on a GPU backend they are NCCL. A hardcoded label would
+    attribute a run to the wrong lane, which is a wrong number, not a missing
+    one.
+    """
+    if collective.startswith("mpi_"):
+        return "mpi4jax"
+    backend = jax.default_backend()
+    if backend == "cpu":
+        impl = os.environ.get("JAX_CPU_COLLECTIVES_IMPLEMENTATION", "").lower()
+        return f"xla-cpu/{impl or 'gloo'}"
+    return f"xla-{backend}"
+
+
+# Kept for the test that checks every --collective choice has a lane; the
+# runtime label comes from transport_of().
+TRANSPORT = {c: transport_of(c) for c in
+             ("ppermute", "allreduce", "mpi_sendrecv", "mpi_allreduce")}
 
 
 def sweep_elems(max_kib, itemsize, lo_pow=6, hi_pow=23):
@@ -265,7 +283,7 @@ def _build_mpi(comm, n_dev, n_reps, stride=1, collective="mpi_sendrecv"):
     from legoesm.parallel.reductions import mpi4jax_array_result
     sendrecv = get_sendrecv_vjp(mpi4jax)
     rank = comm.Get_rank()
-    dest = (rank + stride) % n_dev
+    dest = dict(_ring(n_dev, stride))[rank]      # _ring refuses the identity
     source = mpi_expected_source(rank, n_dev, stride)
 
     @jax.jit
@@ -289,6 +307,7 @@ def verify_mpi(comm, n_dev, stride, collective):
     from legoesm.parallel.halo_exchange import get_sendrecv_vjp
     from legoesm.parallel.reductions import mpi4jax_array_result
     rank = comm.Get_rank()
+    dest = dict(_ring(n_dev, stride))[rank]      # _ring refuses the identity
     me = jnp.full((8,), rank, dtype=jnp.int32)
     if collective == "mpi_allreduce":
         got = mpi4jax_array_result(mpi4jax.allreduce(me, op=MPI.SUM, comm=comm))
@@ -297,7 +316,7 @@ def verify_mpi(comm, n_dev, stride, collective):
         sendrecv = get_sendrecv_vjp(mpi4jax)
         got = sendrecv(me, jnp.zeros_like(me),
                        mpi_expected_source(rank, n_dev, stride),
-                       (rank + stride) % n_dev, 0, 0, comm)
+                       dest, 0, 0, comm)
         want = mpi_expected_source(rank, n_dev, stride)
     local = int(np.max(np.abs(np.asarray(got) - want)))
     return int(comm.allreduce(local, op=MPI.MAX))
@@ -484,6 +503,11 @@ def main() -> int:
         # communicator's rank instead.
         is_root = jax.process_index() == 0
     dtype = jnp.float64 if args.dtype == "float64" else jnp.float32
+    if args.dtype == "float64" and not jax.config.read("jax_enable_x64"):
+        raise SystemExit(
+            "--dtype float64 without JAX x64 enabled: the arrays would be "
+            "float32 on the wire while the receipt records 8-byte elements, "
+            "which corrupts every byte count. Set JAX_ENABLE_X64=1.")
     itemsize = jnp.dtype(dtype).itemsize
 
     # The pattern has to be shown to deliver before any of its timings mean
@@ -533,11 +557,20 @@ def main() -> int:
             _build(mesh, n_dev, args.n_reps, args.ring_stride,
                    args.collective),
             probe_x, args.collective)
-    if n_hlo == 0:
+    if n_hlo < 0:
         raise SystemExit(
-            f"the compiled program contains no "
-            f"{_HLO_TOKEN[args.collective]}: whatever this would time, it is "
-            f"not {args.collective}.")
+            "the optimized HLO could not be read, so the program cannot be "
+            "shown to contain the collective being attributed.")
+    # The gloo arm is a fori_loop (one collective in a while body); the MPI
+    # arm is unrolled (one per repetition). Anything else means the chain was
+    # folded, split, or lowered under another name.
+    expect = args.n_reps if is_mpi else 1
+    if n_hlo != expect:
+        raise SystemExit(
+            f"the compiled program contains {n_hlo} "
+            f"{_HLO_TOKEN[args.collective]} instruction(s); {expect} "
+            f"expected for this arm. Whatever this would time, it is not "
+            f"{args.n_reps} x {args.collective}.")
     if is_root:
         print(f"optimized HLO contains {n_hlo} "
               f"{_HLO_TOKEN[args.collective]} instruction(s)", flush=True)
@@ -574,7 +607,7 @@ def main() -> int:
         "collective": {"allreduce": "allreduce", "ppermute": "ppermute_ring",
                        "mpi_allreduce": "mpi_allreduce",
                        "mpi_sendrecv": "mpi_sendrecv_ring"}[args.collective],
-        "transport": TRANSPORT[args.collective],
+        "transport": transport_of(args.collective),
         "n_devices": n_dev,
         "n_processes": n_dev if is_mpi else jax.process_count(),
         "max_kib": args.max_kib,
