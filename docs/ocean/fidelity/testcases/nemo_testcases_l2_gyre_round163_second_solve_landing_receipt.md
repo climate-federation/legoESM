@@ -212,7 +212,9 @@ Decision-55 rule. Verdict: **SHIP**. Findings and disposition:
    each of 9 already-identified stale citations) and was verified against
    `audit_map()` returning zero failures both before and after.
 3. No finding on the physics: the reviewer opened
-   `stprk3_stg.f90:360`/`divhor.f90:126-130`/`traadv.f90:274` directly and
+   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:360`,
+   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:126-130` and
+   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/traadv.f90:274` directly and
    confirmed the receipt's citations still say what the receipt says they
    say; confirmed the arm-off path (`nemo_stage_momentum_wzv_split=False`)
    is unreachable from any card's resolved configuration going through
@@ -253,7 +255,8 @@ fixed the same way, verified the same way.
 1. **Walk the stage-2 entry velocity.** Round 162 retracted the campaign's
    own prior summary: round 159's evidence JSON (not its prose) shows the
    oracle's stage-2 ENTRY velocity — the stage-1 output velocity handed to
-   the momentum continuity solve at `stprk3_stg.f90:360` — removes 55.06% of
+   the momentum continuity solve at
+   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:360` — removes 55.06% of
    the remaining `2.334682e-13` m/s residual by rms and 67.33% by max, not
    the ~1.5e-06 (transport-form) number round 161's OPEN misquoted. Run the
    VELOCITY-FORM null control FIRST (round 159's null ran only in the
