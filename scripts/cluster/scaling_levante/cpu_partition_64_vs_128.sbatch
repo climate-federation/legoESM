@@ -50,22 +50,31 @@ echo "provenance: $($PY -c 'import legoesm.parallel.sharded_dynamics as m; print
 echo "sha=$(git -C "$REPO" rev-parse --short HEAD)"
 
 srun "$PY" - <<'PYEOF'
-import numpy as np
-from legoesm.grids.mpas_voronoi import build_icosahedral_voronoi_mesh
+from legoesm.grids.voronoi import create_voronoi_mesh
+from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
 from legoesm.parallel.sharded_dynamics import spmd_schedule_cost
 
-NLEV = 26
-mesh = build_icosahedral_voronoi_mesh(subdivisions=9, lloyd_iterations=0)
-print(f"mesh cells={mesh.n_cells}", flush=True)
+NLEV, SUB, METHOD = 26, 9, "sfc"
+
+# The SAME construction the bench does, in the same order: build, then reorder
+# for the rank count, which is what the ladder's arms ran (reorder_for
+# defaults to the device count). Scoring an unreordered mesh would describe a
+# partition no run used, and the cost function must then be told the ownership
+# is already baked in.
+base = create_voronoi_mesh(subdivision_level=SUB, lloyd_iterations=0)
+print(f"mesh nCells={base.nCells} nEdges={base.nEdges}", flush=True)
+
 rows = []
 for nd in (32, 64, 128, 256):
-    c = spmd_schedule_cost(mesh, nd, method="sfc", reorder_target=nd,
+    mesh = reorder_voronoi_for_sharding(base, nd, method=METHOD)
+    c = spmd_schedule_cost(mesh, nd, method=METHOD, already_reordered=True,
                            cell_width=NLEV + 2, edge_width=NLEV)
-    mean_cells = mesh.n_cells / nd
+    mean = mesh.nCells / nd
     rows.append((nd, c["n_rounds"], c.get("n_rounds_greedy"), c["max_degree"],
-                 c["max_local_cells"], mean_cells,
-                 c["max_local_cells"] / mean_cells, c["n_neighbour_pairs"]))
-    print(f"nd={nd} done", flush=True)
+                 c["max_local_cells"], mean, c["max_local_cells"] / mean,
+                 c["n_neighbour_pairs"]))
+    print(f"nd={nd} rounds={c['n_rounds']} degree={c['max_degree']} "
+          f"max_cells={c['max_local_cells']}", flush=True)
 
 print(f"\n{'ranks':>6}{'rounds':>8}{'greedy':>8}{'degree':>8}"
       f"{'max_cells':>11}{'mean':>10}{'max/mean':>10}{'pairs':>8}")
@@ -75,9 +84,20 @@ for r in rows:
 
 a = {r[0]: r for r in rows}
 if 64 in a and 128 in a:
+    worse = []
     for i, name in ((1, "rounds"), (3, "max degree"), (6, "max/mean cells")):
         lo, hi = a[64][i], a[128][i]
-        verdict = "WORSE" if hi > lo else ("same" if hi == lo else "better")
-        print(f"64 -> 128 {name:>15}: {lo} -> {hi}  {verdict}")
+        tag = "WORSE" if hi > lo else ("same" if hi == lo else "better")
+        if tag == "WORSE":
+            worse.append(name)
+        print(f"64 -> 128 {name:>15}: {lo} -> {hi}  {tag}")
+    if worse:
+        print(f"\nThe split DEGRADES at 128 in: {', '.join(worse)}. That is a "
+              f"candidate cause of the 822 -> 1240 ms kink and it is not the "
+              f"thread pool.")
+    else:
+        print("\nThe split does NOT degrade at 128 on any of these measures, "
+              "so the leading alternative to the thread-pool explanation is "
+              "refuted and the kink is elsewhere.")
 print("PART_AB_DONE")
 PYEOF
