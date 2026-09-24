@@ -134,6 +134,13 @@ mpas_vert_advection_scheme: van_leer
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
 rad_update_steps: 32        # exactly hourly at dt 112.5 (48 was hourly at dt 75)
 clouds: sundqvist
+# PINNED, not inherited (2026-09-24).  This key was UNSET here and took the code
+# default, which was "liquid" when cam6_base60 ran and which main moved to
+# "mixed_phase" on 2026-09-17.  Leaving it unset would silently give this deck a
+# different cloud-cover saturation curve from the run it exists to reproduce --
+# a default is not a record.  Set "mixed_phase" deliberately if you want the
+# newer curve; that is a different experiment.
+cloud_saturation_scheme: liquid
 microphysics: morrison
 morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
                                  # sedimentation (micro_mg2_0.F90 loop). The

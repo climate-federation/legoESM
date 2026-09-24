@@ -164,11 +164,16 @@ def _surfdata_or_none():
 
     The canopy schemes REFUSE to run without it (they would otherwise run on
     generic constants with every tuned per-PFT value inert), so the canopy
-    coverage below is opt-in on the file being present rather than a hard
-    dependency that would make this module unrunnable again.
+    coverage below is opt-in on the file being present.
+
+    It resolves the SAME path the module-level policy and ``_build`` use, which
+    is the repository's staged copy with an environment override.  Consulting
+    only the override was a merge artifact: with the file staged at the default
+    path and no variable set, this returned None and the canopy rows SKIPPED
+    while _build was handing the solver a perfectly good file (codex, merge
+    review 2026-09-24).
     """
-    cand = os.environ.get("LEGOESM_TEST_SURFDATA", "")
-    return cand if cand and os.path.isfile(cand) else None
+    return SURFDATA if SURFDATA and os.path.isfile(SURFDATA) else None
 
 
 def _build(distributed, mask_path, output_dir=None, fix_mass=True,

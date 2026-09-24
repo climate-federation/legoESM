@@ -41,11 +41,18 @@ _GUARDED = ("DycoreConfig", "ExperimentConfig", "AMIPExperimentConfig",
             "OutputConfig", "GridConfig")
 
 
-def _positional_construction_sites():
-    """Every call to a guarded config with a positional or *starred argument."""
+def _positional_construction_sites(repo=None, roots=None):
+    """Every call to a guarded config with a positional or *starred argument.
+
+    ``repo``/``roots`` are parameters ONLY so the non-vacuity test can run this
+    exact function over a planted violation.  A negative control that
+    reimplements the visitor proves nothing about the visitor that ships
+    (codex, merge review 2026-09-24).
+    """
+    repo = _REPO if repo is None else repo
     hits = []
-    for root in _ROOTS:
-        base = _REPO / root
+    for root in (_ROOTS if roots is None else roots):
+        base = repo / root
         if not base.is_dir():
             continue
         for path in base.rglob("*.py"):
@@ -66,12 +73,12 @@ def _positional_construction_sites():
                         and isinstance(fn.value, ast.Name)
                         and fn.value.id in _GUARDED):
                     hits.append(
-                        f"{path.relative_to(_REPO)}:{node.lineno} "
+                        f"{path.relative_to(repo)}:{node.lineno} "
                         f"{fn.value.id}._make")
                     continue
                 if name not in _GUARDED or not node.args:
                     continue
-                hits.append(f"{path.relative_to(_REPO)}:{node.lineno} {name}")
+                hits.append(f"{path.relative_to(repo)}:{node.lineno} {name}")
     return hits
 
 
@@ -91,13 +98,16 @@ def test_the_audit_is_not_vacuous(tmp_path):
     A test that reports 'zero hits' is worth nothing until it is shown to
     report a nonzero one, so plant a call and re-run the same visitor over it.
     """
-    planted = tmp_path / "planted.py"
-    planted.write_text("DycoreConfig(600.0, 'hydrostatic')\n")
-    tree = ast.parse(planted.read_text(), str(planted))
-    found = [n for n in ast.walk(tree)
-             if isinstance(n, ast.Call)
-             and getattr(n.func, "id", None) in _GUARDED and n.args]
-    assert len(found) == 1, "the visitor cannot see a positional call at all"
+    pkg = tmp_path / "packages"
+    pkg.mkdir()
+    (pkg / "planted.py").write_text(
+        "DycoreConfig(600.0, 'hydrostatic')\n"      # positional
+        "ExperimentConfig(*row)\n"                  # star-unpack
+        "DycoreConfig._make(row)\n"                 # positional re-materialize
+        "DycoreConfig(dt=600.0)\n")                 # keyword-only: NOT a hit
+    found = _positional_construction_sites(repo=tmp_path, roots=("packages",))
+    assert len(found) == 3, f"the shipped visitor missed a violation: {found}"
+    assert any("_make" in h for h in found), found
 
 
 @pytest.mark.parametrize("cls", [DycoreConfig, ExperimentConfig])
