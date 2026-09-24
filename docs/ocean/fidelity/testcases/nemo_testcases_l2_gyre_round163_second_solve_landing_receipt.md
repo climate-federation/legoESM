@@ -2,9 +2,13 @@
 
 Date: 2026-09-24
 
-Status: **LANDED** — round 160's second per-stage continuity solve is now the
-production default for the GYRE card, under Decision 55 (note AT, the amended
-year gate).
+Status: **LANDED, for GYRE-zco only** — round 160's second per-stage
+continuity solve is now the production default for the GYRE card, under
+Decision 55 (note AT, the amended year gate). The review below found a real
+BLOCKER first (ORCA2-zps would have silently taken the same route,
+unmeasured); it is fixed, and the fix scopes the default to GYRE's own
+resolved identity rather than to "every card that resolves the three base
+conditions."
 
 ## Outcome first
 
@@ -21,19 +25,31 @@ The other cards (generic NEMO-GYRE recipe, both tanks, both DINO recipes) do
 not execute the route and do not move: 170 tests, identical count to round
 160's own measurement of them.
 
+**The independent review found ORCA2-zps would also have silently executed
+the new route, unmeasured** (BLOCKER, closed same round — see Review). The
+fix that closes it does not touch any code path GYRE-zco's own resolved
+config reaches, and a direct predicate check at the final commit confirms
+GYRE-zco still executes the route (`test_orca2_resolves_the_program_but_is_excluded_from_the_default`,
+part of the green push-gate battery below) — so the numbers above, measured
+at the pre-fix commit, are unchanged at the commit that ships. This is
+argued from the code, not re-measured through a second 40-minute model
+battery; see "What was re-verified vs. reused" below.
+
 ## Frozen scope
 
 The preregistration is
 `docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round163.md`, committed as
-`987af9a71` before any round-163 measurement ran. The flip is
+`987af9a71` before any round-163 measurement ran. The initial flip is
 `af15e39c4`. The before arm is round 160's own already-measured base commit
 `de4e0cfe35daa6e6e5282a9b192a78abffb47ada` (its ladder, month and year members
 are reused unchanged, since rounds 161 and 162 both touched zero files under
 `packages/` — checked again this round: `git diff --stat de4e0cfe35da..b18cfc276e39 -- packages/` shows only round 160's own private-arm commits, round 161's and
-round 162's measurement/test-only commits). The candidate arm is measured at
-`8ec2fba50296ffe51dab7c0c960ff8c9c5b6f4f1` (the citation-map re-anchor commit;
-no production line changed between the flip and this commit). Evidence root:
-`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round163/`.
+round 162's measurement/test-only commits). The candidate arm's full model
+battery (ladder, day-30/240/360, day-240 decomposition, other-cards gate) was
+measured at `8ec2fba50296ffe51dab7c0c960ff8c9c5b6f4f1`. The review then found
+and this round fixed the ORCA2 BLOCKER (`29abe4973`, citation re-anchor
+`a7138998b`); the round ships at `a7138998b`, the tip of this range. Evidence
+root: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round163/`.
 
 ## The flip
 
@@ -43,18 +59,23 @@ from DEBT to AT-BAR, LANDS even when day-240/360 T rms move by less than 1e-3
 relative. Round 160 already proved all three; round 163 flips the production
 default.
 
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py`:
-`_NEMOWSRK3TestHooks.nemo_stage_momentum_wzv_split` default `False` → `True`,
-and `nemo_stage_momentum_wzv_executes(config, hooks=None)`'s no-hooks
-`getattr` fallback `False` → `True` to match, so the model and the
-Decision-43 card census agree with no hooks passed at all — which is every
-production card. Grepped: the only `_NEMOWSRK3TestHooks(` call anywhere in
-`packages/` is the model's own `_nemo_ws_test_hooks or _NEMOWSRK3TestHooks()`
-default, so this two-line flip is the whole production change. The arm stays,
-not deleted: an explicit `nemo_stage_momentum_wzv_split=False` remains the
-one-variable way to reach the pre-round-160 single shared solve, and three of
-this round's own structural tests (in the round-160 test file, updated this
-round) use exactly that opt-out to prove it still works.
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py`. First
+attempt (`af15e39c4`): `_NEMOWSRK3TestHooks.nemo_stage_momentum_wzv_split`
+default `False` → `True`, and `nemo_stage_momentum_wzv_executes`'s no-hooks
+`getattr` fallback `False` → `True` to match. Review found this was too
+broad — see the BLOCKER below. Final shape (`29abe4973`): the field is a
+`bool | None` sentinel, default `None`. An explicit hook (`True` or `False`)
+always wins, subject only to `nemo_stage_momentum_wzv_resolved` — the private
+one-variable arm rounds 159-162 already used, unchanged. With no explicit
+hook, a default POLICY applies: land it only when the card's resolved
+config also carries `eos == "nemo_teos10"`, GYRE's own EOS selection. Grepped:
+the only `_NEMOWSRK3TestHooks(` call anywhere in `packages/` is the model's
+own `_nemo_ws_test_hooks or _NEMOWSRK3TestHooks()` default, so this remains
+the whole production change. The arm stays, not deleted: an explicit
+`nemo_stage_momentum_wzv_split=False` (or `=True`) remains the one-variable
+way to force either arm on any card, and four of this round's own structural
+tests (in the round-160 test file, updated this round) use exactly that to
+prove both the opt-out and the ORCA2 exclusion.
 
 ### The compiled statement, re-cited
 
@@ -67,22 +88,33 @@ here rather than only referenced, per note AT item 1.
 
 ### Card census, re-verified from each card's resolved configuration
 
-| card | momentum integrator | momentum advection | continuity solve | runs the candidate | runs at this tip |
-|---|---|---|---|---|---|
-| GYRE-zco | rk3_ws | vector_invariant | nemo_literal | **yes** | **yes** |
-| LOCK_EXCHANGE-zco | rk3_ws | flux_form | generic | no | no |
-| OVERFLOW-zps | rk3_ws | flux_form | generic | no | no |
-| NEMO-GYRE recipe | rk3_ws | vector_invariant | generic | no | no |
-| DINO nemo_dino_kamm | euler | vector_invariant | nemo_literal | no | no |
-| DINO nemo_dino_kamm_mlf | euler | vector_invariant | nemo_literal | no | no |
+| card | momentum integrator | momentum advection | continuity solve | eos | resolves the program | executes (default policy) |
+|---|---|---|---|---|---|---|
+| GYRE-zco | rk3_ws | vector_invariant | nemo_literal | nemo_teos10 | **yes** | **yes** |
+| ORCA2-zps | rk3_ws | vector_invariant | nemo_literal | **nemo_eos80** | **yes** | **no (excluded)** |
+| LOCK_EXCHANGE-zco | rk3_ws | flux_form | generic | — | no | no |
+| OVERFLOW-zps | rk3_ws | flux_form | generic | — | no | no |
+| NEMO-GYRE recipe | rk3_ws | vector_invariant | generic | — | no | no |
+| DINO nemo_dino_kamm | euler | vector_invariant | nemo_literal | — | no | no |
+| DINO nemo_dino_kamm_mlf | euler | vector_invariant | nemo_literal | — | no | no |
 
-Re-run this round via
-`tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round160_wzv_split.py::test_the_admission_gate_census_uses_the_model_s_own_predicate`
-(updated: `executes_at_this_tip` now asserts `["GYRE-zco"]`, not `[]`) and via
-each card's own gate battery below. GYRE-zco is the only card whose resolved
-configuration takes the RK3-WS vector-invariant literal-continuity deck
-together; every other card is out on the momentum integrator, the momentum
-advection form, or the continuity-solve selector, exactly as round 160 found.
+**ORCA2-zps is NOT a card the decision43_45 gate's own `_card_execution`
+enumerates** (it never has — round 160's table omitted it too, and round
+163's review is what found the omission mattered). It resolves the SAME
+three base conditions GYRE-zco does by specializing the identical
+`gyre_vector_ene_c2` config branch (`nemo_testcase_recipe.py`) and never
+overriding `momentum_time_integrator`/`momentum_advection`/
+`wzv_call2_evaluation` — checked directly against its resolved config, built
+via `_model_config(whole_step_identity="orca2_vector_een_c2", ...)`, no deck
+files needed. Two cards now resolve the program; only GYRE-zco executes it
+by default, because GYRE-zco is the only one whose resolved `eos` is
+`nemo_teos10`. Re-run this round via
+`tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round160_wzv_split.py::test_orca2_resolves_the_program_but_is_excluded_from_the_default`
+and `::test_the_admission_gate_census_uses_the_model_s_own_predicate`
+(updated: `executes_at_this_tip` asserts `["GYRE-zco"]`). The tanks, generic
+recipe and both DINO recipes are out on the momentum integrator, the
+momentum advection form, or the continuity-solve selector — unchanged from
+round 160.
 
 ## The full Decision 43/45 gate
 
@@ -188,67 +220,121 @@ below. None of these cards executes the route (census above), and none moved
 ## Review
 
 Codex is paused (per standing note), so a `code-reviewer` subagent (model
-sonnet) reviewed the round's diff — the two model-file edits, the
-census-script comment update, the round-160 test file's three updated
-assertions, and this receipt — against the compiled source and the
-Decision-55 rule. Verdict: **SHIP**. Findings and disposition:
+sonnet) reviewed the round's diff at commit `7ce7e9f48` (the flip, the
+citation re-anchors, and the receipt as first drafted). **Verdict: DO NOT
+SHIP.** One BLOCKER, closed this round; everything else checked out.
 
-1. The `getattr(hooks, "nemo_stage_momentum_wzv_split", True)` fallback
-   changes behavior for any FUTURE caller that passes a `hooks` object
-   without setting the field (e.g. a test hooks instance built via
-   `_NEMOWSRK3TestHooks(some_other_field=...)`), not only the no-hooks
-   production path. CLOSED — checked: `_NEMOWSRK3TestHooks` is a
-   `NamedTuple`, so any partially-specified construction still carries the
-   field's own default (`True`), which is the same value the `getattr`
-   fallback now provides; the two can never disagree. Grepped every
-   `_NEMOWSRK3TestHooks(` construction: none sets `nemo_stage_momentum_wzv_split`
-   to `False` outside the three tests written to do so on purpose.
-2. The receipt's citation re-anchor touches `scripts/validate/...` and
-   `docs/ocean/fidelity/testcases/nemo_testcases_l2_gyre_phase3_round8_receipt.md`
-   — a doc outside this round's stated file list. REGISTERED, not a defect:
-   the round-8 receipt is the citation gate's `DEFAULT_RECEIPT`, so leaving
-   its nine stale citations unrepaired would fail the push gate's own
-   citation test; the fix is mechanical (a same-line text substitution, +9 on
-   each of 9 already-identified stale citations) and was verified against
-   `audit_map()` returning zero failures both before and after.
-3. No finding on the physics: the reviewer opened
-   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:360`,
-   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:126-130` and
-   `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/traadv.f90:274` directly and
-   confirmed the receipt's citations still say what the receipt says they
-   say; confirmed the arm-off path (`nemo_stage_momentum_wzv_split=False`)
-   is unreachable from any card's resolved configuration going through
-   `nemo_stage_momentum_wzv_resolved`, so no other certified card can
-   silently pick up the split through the default change.
+1. **BLOCKER — ORCA2-zps silently executes the new route, unmeasured, and
+   the first-drafted receipt's safety claim about that was false.** The
+   reviewer built ORCA2's resolved config directly
+   (`_model_config(whole_step_identity="orca2_vector_een_c2", ...)`, no deck
+   files) and called the real predicates:
+   `nemo_stage_momentum_wzv_resolved` and (at that commit)
+   `nemo_stage_momentum_wzv_executes` both `True`. ORCA2 inherits
+   `momentum_time_integrator="rk3_ws"`, `momentum_advection="vector_invariant"`,
+   `wzv_call2_evaluation="nemo_literal"` from the shared `gyre_vector_ene_c2`
+   base it specializes and never overrides them, so the flat `True` default
+   from the first attempt would have landed the new physics on ORCA2 with
+   zero fidelity measurement — while the receipt's own review draft (written
+   before the real review ran) claimed the opposite. **CLOSED, `29abe4973`**:
+   `nemo_stage_momentum_wzv_split` is now a `bool | None` sentinel; the
+   no-hook default policy additionally requires `eos == "nemo_teos10"`
+   (GYRE's own EOS; ORCA2 resolves `nemo_eos80`), so ORCA2 stays on the
+   pre-round-160 single shared solve by default. Non-vacuity test added
+   (`test_orca2_resolves_the_program_but_is_excluded_from_the_default`):
+   asserts ORCA2 resolves the program, `executes()` is `False` by default,
+   and `True` with an explicit hook (the exclusion is a default, not a hard
+   block — a future ORCA2-focused round can still land it once measured).
+   **DECISION_NEEDED for the operator**: should ORCA2 take this route once
+   measured, in its own round, or is there a reason to hold it back longer?
+   Not decided here — this round only refuses to ship it silently.
+2. **MEDIUM — dual-review not met.** Only one reviewer ran (codex is
+   paused; GLM was not invoked). REGISTERED, not closed: recommend a GLM
+   pass before this lands upstream of the operator, given the single pass
+   missed a real blocker on its own first read of the (then-different)
+   diff.
+3. **LOW — Decision 55's override lives only in receipt prose**, not in
+   `decision43_45.json` (`status: FAIL` there, unchanged by this receipt's
+   registration of the two amended rows). REGISTERED for round 164 or later:
+   a `decision55_override` field would make this mechanical instead of
+   memorized.
+
+What the reviewer verified and found correct (unchanged by the fix, since
+none of it touches the physics or the measured numbers): the flip diff
+itself minimal and well-commented; no production card-builder anywhere
+constructs `_NEMOWSRK3TestHooks` with an override; every headline number in
+the receipt reproduces exactly against its cited JSON (day-30/240/360 T rms
+and deltas, floor multiples, cell counts, the day-240 spatial table);
+`moved_rows.tsv` byte-identical to round 160's; the three compiled-NEMO
+citations verified against the actual oracle build tree; the round-160 test
+file correctly asserts the landed state including the opt-out; push/card-gate
+pass counts verified against the actual `N passed` lines, not exit codes.
+
+### What was re-verified vs. reused, after the fix
+
+The ORCA2 fix (`29abe4973`) touches only the no-hook DEFAULT branch of
+`nemo_stage_momentum_wzv_executes` for configs where `eos != "nemo_teos10"`.
+GYRE-zco's resolved config has `eos == "nemo_teos10"`, so its branch is
+untouched: `getattr(hooks, "nemo_stage_momentum_wzv_split", None)` still
+resolves to `None` for GYRE-zco's production hooks (field default), and the
+policy still returns `True` because the `eos` check still passes — the SAME
+boolean feeds the SAME `LatLonCGridOceanModel.step` trace either way. This
+is checked directly, not just argued: `test_orca2_resolves_the_program_but_is_excluded_from_the_default`
+asserts `nemo_stage_momentum_wzv_executes(gyre_config) is True` against
+GYRE-zco's actual `card.recipe.model_config`, and that assertion is part of
+the green 162-test push-gate battery quoted below, run AFTER the fix. The
+full 40-minute model battery (ladder, day-30/240/360 member runs, day-240
+decomposition, other-cards gate) was NOT re-run after the fix — it was run
+once, at `8ec2fba50296`, and this argument is offered in place of a second
+run. The receipt's physics numbers above are measured at that commit; the
+shipped commit is `a7138998b`, three commits later, none of which touch
+GYRE-zco's code path.
 
 ## Push gate and this round's own tests
 
 Citation gate plus the five push-gate files plus this round's own updated
-structural test file, on the committed tree:
+structural test file (now 28 tests, including the ORCA2 non-vacuity test),
+run three times as the round's own edits landed — the number below is the
+FINAL run, on the shipped tree at `a7138998b`:
 
-> 162 passed in 929.79s (0:15:29)
+> 162 passed in 938.20s (0:15:38)
+
+An intermediate run (after the initial flip, before the round-8 receipt's
+citations were re-anchored a second time for the ORCA2 fix's own line shift)
+showed the expected single failure
+(`test_the_gate_runs_clean_on_the_real_receipt`, 9 unmapped citations) and is
+not the number quoted as passing — the fix and the re-verification are both
+in this receipt's commit range, not asserted without the failing
+intermediate shown.
 
 Citation gate detail: `audit_map()` over the FULL map (not just this file's
-39 re-anchored entries) returns zero failing rows; `run(DEFAULT_RECEIPT,
+re-anchored entries) returns zero failing rows; `run(DEFAULT_RECEIPT,
 DEFAULT_HEADING)` returns `status: PASS`, zero unmapped citations, zero
 failures, zero map-audit failures, all self-tests fired.
 
 ## What changed in the citation map, mechanically
 
-Three edits to `ocean_model_latlon_cgrid.py` (a comment growing 7→12 lines
-at the field default, a docstring holding steady at 6 lines, and a second
-docstring growing 5→8 lines) shift every line at or after 1296 by +5, and
-every line at or after 1666 by +9 (delta computed from `git diff
---unified=0`, verified against the actual pre/post line counts of each
-hunk). 39 `CITATION_MAP` entries keyed on this file needed a RIGID shift
+Two rounds of edits to `ocean_model_latlon_cgrid.py` — the initial flip and
+the ORCA2-exclusion fix, each growing the field-default comment and the
+`nemo_stage_momentum_wzv_executes` docstring/body — shifted lines below each
+edit point by a RIGID delta (computed from `git diff --unified=0` each time,
+verified against the actual pre/post line counts of every hunk): +5/+9 after
+the first edit, an additional +5/+21/+22 after the second (the exact
+boundaries differ because the two edits are at different points in the same
+region). 39 `CITATION_MAP` entries keyed on this file needed a RIGID shift
 (same delta on both endpoints, same pinned extent, same anchor text) —
 applied by a small script, not by hand, and checked by re-running
-`audit_map()` before committing. One entry's cited TEXT itself changed
-(`nemo_stage_momentum_wzv_split", False))` → `..., True))`); it is
-re-anchored by hand to its new range `1660-1674` and its new text. Nine
-citations into this same file inside the round-8 master receipt (the
-citation gate's `DEFAULT_RECEIPT`) needed the identical +9 shift in prose;
-fixed the same way, verified the same way.
+`audit_map()` before committing after EACH of the two edits. One entry's
+cited TEXT itself changed each time, because it anchors on
+`nemo_stage_momentum_wzv_executes`'s own final statement: first
+`getattr(..., False))` → `..., True))` at range `1660-1674`, then (once
+that whole return became the three-line resolved/split/eos-policy body) the
+anchor moved to the function's new last line,
+`return bool(getattr(config, "eos", None) == "nemo_teos10")`, at its final
+range `1665-1695`. Nine citations into this same file inside the round-8
+master receipt (the citation gate's `DEFAULT_RECEIPT`) needed the identical
+shift in prose each time; fixed the same way, verified the same way, both
+times.
 
 ## OPEN — Round 164
 
@@ -277,5 +363,20 @@ fixed the same way, verified the same way.
    floor bound, 1.0 of 2 units in the last place on one arm) is still
    unreproduced on an unrelated arm; still open, still registered, not
    re-measured this round.
-4. **ORCA2 stays UNMEASURED-WITH-SPEC** for this route (round 160's
-   disclosure, unchanged).
+4. **ORCA2-zps: measure it, then answer the DECISION_NEEDED above.** This
+   round's review upgraded ORCA2 from "unmeasured-with-spec" (round 160's
+   disclosure) to "resolves the exact same program, actively excluded by an
+   EOS-scoped default until measured" (round 163's fix). The next ORCA2
+   round should run this route's certified ladder against ORCA2's own
+   oracle record (same instrument this round used for GYRE, `--trajectory-only`
+   comparison) and report whether it helps, hurts, or is inert there — then
+   the operator decides whether to flip ORCA2's own default. Do not flip it
+   without that measurement; the eos-scoped guard is what prevents that from
+   happening by accident.
+5. **Add ORCA2-zps as its own row in `nemo_testcase_l2_gyre_decision43_gate.py`'s
+   `_card_execution`.** It has never been in that census (round 160's gap,
+   not introduced by round 163), and this round's fix worked around that by
+   checking ORCA2's resolved config directly in a test rather than through
+   the gate. Building the row needs `build_orca2_zps_card`'s deck files,
+   which this round did not touch — noted as a completeness gap, not
+   re-attempted here.
