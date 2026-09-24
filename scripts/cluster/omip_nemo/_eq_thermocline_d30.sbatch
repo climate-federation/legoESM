@@ -79,7 +79,12 @@ rc=${PIPESTATUS[0]}
 # The oracle record convention for this campaign is REC = DAY/5 - 1, so day 30
 # is record 5 and day 15 is record 2.
 ARGS=""
-for a in tripole=trp_pinned_d30 mpas=mpas_orca1faithtint_d30 fesom=fesom_orca1faithtint_d30; do
+# evdarm is the enhanced-diffusion arm (job 9959646). It is listed IMMEDIATELY
+# after the tripole because those two are the controlled pair -- identical
+# command lines but for the convection flags, verified by diffing the line the
+# run itself echoed -- so the verdict is read from ADJACENT rows of one table,
+# scored by the same probe on the same box against the same oracle record.
+for a in tripole=trp_pinned_d30 evdarm=trp_evdeq_d30 mpas=mpas_orca1faithtint_d30 fesom=fesom_orca1faithtint_d30; do
   lab=${a%%=*}; dir=${a#*=}
   late=$R/$dir/snapshot_day0030.npz
   [ -r "$late" ] || late=$R/$dir/snapshot_final.npz
@@ -88,6 +93,24 @@ for a in tripole=trp_pinned_d30 mpas=mpas_orca1faithtint_d30 fesom=fesom_orca1fa
     echo "FATAL: missing a snapshot for $lab ($dir)"; exit 1
   fi
   echo "  $lab: late=$(basename $late) early=$(basename $early)"
+  # A run scored before it reaches day 30 would be compared against the
+  # oracle's day-30 record and silently read as a result. Lanes that stamp
+  # their day must therefore AGREE with the mark; lanes that stamp nothing
+  # (the node-based one does not) are reported as unverified rather than
+  # blocked, so this cannot turn into a lane-specific gate nobody notices.
+  $PY - "$late" "$early" "$lab" <<'STAMP' || { echo "FATAL: $lab snapshot is not at the expected day"; exit 1; }
+import sys
+import numpy as np
+for path, want in ((sys.argv[1], 30.0), (sys.argv[2], 15.0)):
+    d = np.load(path, allow_pickle=True)
+    if "time_days" not in d.files:
+        print(f"    {want:g}: NO STAMP (unverified)")
+        continue
+    got = float(np.asarray(d["time_days"]).ravel()[0])
+    print(f"    stamp {got:g} (want {want:g})")
+    if abs(got - want) > 1e-6:
+        sys.exit(1)
+STAMP
   ARGS="$ARGS --snapshot $late --label $lab --snapshot-early $early"
 done
 
