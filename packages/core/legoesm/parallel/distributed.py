@@ -204,6 +204,8 @@ def initialize_jax_distributed_multiprocess(
 
     try:
         jax.distributed.initialize(**_init_kwargs)
+        from legoesm.parallel.early_init import pin_gloo_interface
+        pin_gloo_interface()
     except RuntimeError as e:
         raise RuntimeError(
             f"jax.distributed.initialize() failed on rank {rank}/{n_processes} "

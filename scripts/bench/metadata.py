@@ -79,6 +79,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "gpu_direct_active",
     "host_staged_halo",
     "transport",
+    "gloo_iface",
     "virtual_cpu_devices",
     "launcher",
 )
@@ -529,6 +530,10 @@ def scaling_metadata(
         "backend": backend,
         "precision_knobs": precision_knobs(),
         "transport": resolved_transport,
+        # Interface the gloo transport was pinned to by
+        # legoesm.parallel.early_init.pin_gloo_interface; "default" = JAX's
+        # hostname-derived choice (the 1 GbE link on Levante).
+        "gloo_iface": os.environ.get("LEGOESM_GLOO_IFACE_PINNED", "default"),
         "virtual_cpu_devices": detect_virtual_cpu_devices(backend),
         "launcher": detect_launcher(),
         "hostname": os.environ.get("HOSTNAME")

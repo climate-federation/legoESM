@@ -654,6 +654,7 @@ def main() -> int:
                        "mpi_allreduce": "mpi_allreduce",
                        "mpi_sendrecv": "mpi_sendrecv_ring"}[args.collective],
         "transport": transport_of(args.collective),
+        "gloo_iface": os.environ.get("LEGOESM_GLOO_IFACE_PINNED"),
         "program_shape": ("unrolled" if (is_mpi or args.unroll) else "loop"),
         "n_devices": n_dev,
         "n_processes": n_dev if is_mpi else jax.process_count(),

@@ -30,6 +30,80 @@ _INITIALIZED = False
 _LEGACY_COORDINATOR_PORT = 1234
 
 
+# ---------------------------------------------------------------------------
+# CPU collectives transport: put gloo on the fast fabric, not the hostname's
+# interface.
+# ---------------------------------------------------------------------------
+# JAX builds its CPU (gloo) collectives with make_gloo_tcp_collectives(
+# distributed_client) and never passes the ``interface`` argument, so gloo
+# binds whatever the hostname resolves to. On Levante that is the 1 Gb/s
+# management Ethernet (measured: 0.11 GB/s cross-node, 0.9 Gbit/s) while
+# ib0 is 100 Gb/s. Every SPMD CPU lane plateaued on that link.
+
+def fastest_up_interface(sysfs: str = "/sys/class/net") -> str | None:
+    """Name of the non-loopback interface that is up with the highest
+    advertised link speed, or None when nothing reports a speed."""
+    best, best_speed = None, 0
+    try:
+        names = sorted(os.listdir(sysfs))
+    except OSError:
+        return None
+    for name in names:
+        if name == "lo":
+            continue
+        try:
+            with open(os.path.join(sysfs, name, "operstate")) as f:
+                if f.read().strip() != "up":
+                    continue
+            with open(os.path.join(sysfs, name, "speed")) as f:
+                speed = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        if speed > best_speed:
+            best, best_speed = name, speed
+    return best
+
+
+def resolve_gloo_interface() -> str | None:
+    """LEGOESM_GLOO_IFACE: an interface name, or ``default`` to leave JAX's
+    hostname-derived choice alone; unset selects the fastest interface."""
+    v = os.environ.get("LEGOESM_GLOO_IFACE", "").strip()
+    if v.lower() == "default":
+        return None
+    return v or fastest_up_interface()
+
+
+def pin_gloo_interface() -> str | None:
+    """Re-register JAX's CPU backend factory so its gloo collectives bind
+    the chosen interface. Must run after jax.distributed.initialize() and
+    before the first backend use; returns the interface pinned, or None."""
+    import jax
+    from jax._src import xla_bridge as xb  # no public factory hook
+    from jax._src.distributed import global_state
+    from jax._src.lib import xla_client
+    if global_state.client is None:
+        return None
+    if str(jax.config.jax_cpu_collectives_implementation) != "gloo":
+        return None
+    iface = resolve_gloo_interface()
+    if iface is None:
+        return None
+    if xb._backends:
+        raise RuntimeError(
+            "pin_gloo_interface() called after a backend was created; the "
+            "gloo transport is already bound to the default interface.")
+
+    def _cpu_client_on_iface():
+        coll = xla_client._xla.make_gloo_tcp_collectives(
+            distributed_client=global_state.client, interface=iface)
+        return xb.make_cpu_client(collectives=coll)
+
+    xb.register_backend_factory("cpu", _cpu_client_on_iface, priority=0,
+                                fail_quietly=False)
+    os.environ["LEGOESM_GLOO_IFACE_PINNED"] = iface
+    return iface
+
+
 def resolve_coordinator_port(default: int = _LEGACY_COORDINATOR_PORT) -> int:
     """Deterministic ``jax.distributed`` coordinator port for THIS job.
 
@@ -484,6 +558,7 @@ def init_jax_distributed_with_fallback() -> None:
     # silent-fallback hazard (codex).
     if jax.distributed.is_initialized():
         _INITIALIZED = True
+        pin_gloo_interface()
         check_no_silent_process_fallback()
         return
 
@@ -502,6 +577,7 @@ def init_jax_distributed_with_fallback() -> None:
             local_device_ids=_pals_local_device_ids(),
         )
         _INITIALIZED = True
+        pin_gloo_interface()
         check_no_silent_process_fallback()
         return
     try:
@@ -509,10 +585,12 @@ def init_jax_distributed_with_fallback() -> None:
     except RuntimeError as e:
         if "already" in str(e).lower():
             _INITIALIZED = True
+            pin_gloo_interface()
             check_no_silent_process_fallback()
             return
         raise
     _INITIALIZED = True
+    pin_gloo_interface()
     check_no_silent_process_fallback()
 
 
@@ -579,6 +657,7 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
     # initialize() raises (codex).  Still verify the federation size.
     if jax.distributed.is_initialized():
         _INITIALIZED = True
+        pin_gloo_interface()
         check_no_silent_process_fallback()
         return
 
@@ -598,6 +677,7 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
         # to GPU 0 (codex).
         local_device_ids=_pals_local_device_ids())
     _INITIALIZED = True
+    pin_gloo_interface()
     check_no_silent_process_fallback()
     _warn_missing_nccl_plugin(rank=proc_id)
 
@@ -824,5 +904,6 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
         local_device_ids=device_ids,
     )
     _INITIALIZED = True
+    pin_gloo_interface()
     check_no_silent_process_fallback()
     return True

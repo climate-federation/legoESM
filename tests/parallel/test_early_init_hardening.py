@@ -621,3 +621,83 @@ def test_non_gpu_platform_selected_classifies_every_real_spelling(
         else:
             monkeypatch.setenv(var, val)
     assert ei._non_gpu_platform_selected() is expect_non_gpu
+
+
+def _fake_sysfs(tmp_path, ifaces):
+    for name, state, speed in ifaces:
+        d = tmp_path / name
+        d.mkdir()
+        (d / "operstate").write_text(state + "\n")
+        if speed is not None:
+            (d / "speed").write_text(str(speed) + "\n")
+    return str(tmp_path)
+
+
+def test_fastest_up_interface_picks_the_fabric_not_the_hostname_link(tmp_path):
+    """Levante shape: 1 GbE management link (what the hostname resolves to),
+    a down second port reporting -1, loopback, and a 100 Gb/s ib0."""
+    root = _fake_sysfs(tmp_path, [("enp225s0f0", "up", 1000),
+                                  ("enp225s0f1", "down", -1),
+                                  ("lo", "unknown", None),
+                                  ("ib0", "up", 100000)])
+    assert ei.fastest_up_interface(root) == "ib0"
+
+
+def test_fastest_up_interface_none_when_nothing_reports_a_speed(tmp_path):
+    root = _fake_sysfs(tmp_path, [("lo", "unknown", None),
+                                  ("veth0", "up", None),
+                                  ("eth0", "down", 1000)])
+    assert ei.fastest_up_interface(root) is None
+    assert ei.fastest_up_interface(str(tmp_path / "missing")) is None
+
+
+def test_resolve_gloo_interface_env_contract(monkeypatch, tmp_path):
+    """'default' keeps JAX's own choice (the measured 1 GbE path), a name is
+    taken verbatim, unset falls through to the fastest interface."""
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "default")
+    assert ei.resolve_gloo_interface() is None
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "ib3")
+    assert ei.resolve_gloo_interface() == "ib3"
+    monkeypatch.delenv("LEGOESM_GLOO_IFACE")
+    monkeypatch.setattr(ei, "fastest_up_interface", lambda: "ibX")
+    assert ei.resolve_gloo_interface() == "ibX"
+
+
+def test_pin_gloo_interface_is_a_noop_without_a_distributed_client():
+    """Single-process runs have no gloo at all; the hook must not touch the
+    backend registry (and must not initialise a backend)."""
+    from jax._src import xla_bridge as xb
+    before = xb._backend_factories["cpu"]
+    assert ei.pin_gloo_interface() is None
+    assert xb._backend_factories["cpu"] is before
+
+
+def test_pin_gloo_interface_registers_a_factory_bound_to_the_interface(monkeypatch):
+    """With a distributed client present the CPU factory is replaced by one
+    that builds gloo on the chosen interface; a created backend is refused
+    because the transport would already be bound to the wrong link."""
+    import types as _t
+    from jax._src import xla_bridge as xb
+    from jax._src import distributed as _d
+    monkeypatch.setattr(_d.global_state, "client", object())
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "ibT")
+    saved = xb._backend_factories["cpu"]
+    try:
+        monkeypatch.setattr(xb, "_backends", {"cpu": object()})
+        with pytest.raises(RuntimeError, match="after a backend was created"):
+            ei.pin_gloo_interface()
+        monkeypatch.setattr(xb, "_backends", {})
+        assert ei.pin_gloo_interface() == "ibT"
+        assert xb._backend_factories["cpu"] is not saved
+        assert os.environ["LEGOESM_GLOO_IFACE_PINNED"] == "ibT"
+        seen = {}
+        from jax._src.lib import xla_client
+        monkeypatch.setattr(xla_client._xla, "make_gloo_tcp_collectives",
+                            lambda **kw: seen.update(kw) or "COLL")
+        monkeypatch.setattr(xb, "make_cpu_client",
+                            lambda collectives=None: ("CLIENT", collectives))
+        assert xb._backend_factories["cpu"].factory() == ("CLIENT", "COLL")
+        assert seen["interface"] == "ibT"
+    finally:
+        xb._backend_factories["cpu"] = saved
+        os.environ.pop("LEGOESM_GLOO_IFACE_PINNED", None)
