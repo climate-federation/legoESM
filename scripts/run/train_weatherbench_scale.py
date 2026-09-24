@@ -818,6 +818,16 @@ def _main(argv=None):
     # multi_step_hours lead, default 6 h).  A fixed 24 h single_day_rollout here
     # would score a 24 h forecast against a 6 h target.
     roll_steps = int(rollout_hours(cfg, yml) * 3600.0 / dt)
+    # MEMORY PROBE ONLY: override the scan trip count so the compiled gradient
+    # can be measured at several rollout lengths with EVERY other thing --
+    # shapes, physics, dt, loss -- held identical. The only difference between
+    # arms is how many times the remat'd step is scanned, which is exactly the
+    # variable that separates "the unrolled rollout holds the memory" from
+    # "one step's physics does". Never set in a training run; the forecast it
+    # produces would no longer match the target's lead.
+    if _os.environ.get("LEGOESM_WB_ROLL_STEPS"):
+        roll_steps = int(_os.environ["LEGOESM_WB_ROLL_STEPS"])
+        print(f"MEMPROBE roll_steps OVERRIDDEN to {roll_steps}", flush=True)
 
     def _loss(trainable, sample):
         ic, target, forcing = sample
@@ -1023,8 +1033,6 @@ def _main(argv=None):
             # epoch write would otherwise re-measure on every chained resume
             # (job 27194893 died exactly there). Fingerprint-gated on read.
             if rank == 0:
-                import os as _os
-
                 _os.makedirs(cfg.out_dir, exist_ok=True)
                 _pf_payload = {
                     "schema": _MANIFEST_SCHEMA,
