@@ -1014,7 +1014,13 @@ def test_wall_default_surface_is_frozen():
 # Recorded because it is main's, not this branch's, and someone should look at
 # it there: `forcing/amip.py` still declares `albedo_ice: float = 0.65`, so the
 # two declarations of that quantity now disagree.
-_WALL_SURFACE_SHA256 = "8851a6fe84378ee1fbda9dc96fd238895a493dc7e74a4e3350727f49066d3842"
+#
+# 2026-09-23 re-review (job 9952079, old vs new surface): five new
+# cloud_cap_floor_* fields (all off) and cloud_saturation_scheme moving
+# 'liquid' -> 'mixed_phase'.  Both are cloud diagnostics the duo execution
+# loop never evaluates (the cloud_scheme allow-list entry's own argument);
+# non-default values stay refused, so the allow-list is unchanged.
+_WALL_SURFACE_SHA256 = "71129e0044383074ff9fb65d9eddef903a21419dbba9a7941fbd90adcf0796a0"
 
 
 def test_wall_leaf_types_are_scalar():
