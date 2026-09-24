@@ -391,14 +391,55 @@ what they test were broken; and that no file under `packages/` changed.
 
 ## 9. Gate and test results at the round's final tip
 
+Every row below was produced at `fc4a4c147`, the tip after the review fixes,
+on a clean worktree.
+
 | check | result |
 |---|---|
-| round-14 barotropic owner gate | exit 0 |
-| its one-representable-value plant | **FIRES** — exit 1, and the quoted line is in section 2d |
+| round-14 barotropic owner gate | **exit 0** |
+| its one-representable-value plant | **FIRES** — exit 1; the quoted line is in section 2d |
 | ORCA2 ladder, kt = 1 to 10 | **LADDER_MEASURED**, exit 0 |
 | round-13 stage-1 owner probe, re-run at this tip | exit 0, every published number reproduced |
-| receipt citation gate | section 9a |
-| batteries | section 9b |
+| GYRE round-8 receipt citation gate (the campaign gate) | **PASS**, 274 citations, 0 unmapped, 0 failures, 0 map-audit failures |
+| this receipt's own citation gate | **PASS**, 10 citations, 0 unmapped, 0 failures, 0 map-audit failures |
+| its plant, on a REAL key this receipt renders | **FIRES** — exit 1, status FAIL, `stp2d.f90:196-199`, `SYMBOL-NOT-AT-LINE`, "that symbol identifies line 196", checked against line 198 |
+
+### 9a. The gate re-run after the review, and what it reproduced
+
+The review's first finding changed a citation that the gate stamps into every
+evidence file, so both arms were re-run rather than edited in place.  **Every
+number reproduces EXACTLY**: the forcing ladder, the instrument controls, the
+arm-to-arm movement, all six sea-surface stage rows, the round-13
+reproduction, the entry velocity, the contamination margin, the substitution
+controls and the first non-bit boundary are byte-identical between the two
+runs, and only the citation strings moved.  That is the check that the review
+fix touched metadata and not a measurement.
+
+Three earlier runs are kept in the evidence directory on purpose, and named
+for what they are: `owner_firstdraft_defective.json` (the difference-of-maxima
+measure), `owner_prelocalize.json` (before the fold-row localization) and
+`owner_prereview.json`.  A superseded number this campaign deleted would be a
+number nobody could check.
+
+### 9b. Batteries
+
+| battery | result |
+|---|---|
+| the operator push list plus round 13's and round 14's citation tests and this round's gate tests | **191 passed in 362.44 s** |
+| DINO, lock exchange and overflow | **169 passed in 509.91 s** |
+
+Both exited 0.  The card battery's 169 is the same count round 13 recorded,
+which is expected: no card executes a validation script, and no file under
+`packages/` changed.
+
+**Non-vacuity, since no model statement was landed and so none could be
+reverted.**  Four separate checks are shown to FAIL when what they test is
+broken: the substitution plant (one unit in the last place reaches the sea
+surface, section 2d); each of the 10 receipt citations and each of the 11 the
+gate stamps (a two-line shift makes every one of them fail); the record
+reader's default (it REFUSES the ORCA2 extent, so the new argument is not
+decorative); and the injection window (a window of the wrong extent is
+refused).
 
 ## 10. OPEN — round 15's order
 
