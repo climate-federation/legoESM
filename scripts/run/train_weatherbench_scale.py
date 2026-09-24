@@ -17,6 +17,7 @@ and JAX-free (unit-tested on the login node); all heavy imports live inside
 from __future__ import annotations
 
 import argparse
+import os as _os
 from typing import NamedTuple
 
 VALID_MODES = ("physics", "neural_gcm", "sfno")
@@ -1008,6 +1009,12 @@ def _main(argv=None):
             n_probe_used = None          # nothing was probed; it was restored
             arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
         else:
+            if _os.environ.get("LEGOESM_WB_MEM_PROBE") == "1":
+                import sys as _sys
+                _sys.path.insert(0, "scripts/tmp")
+                import _probe_wb_mem_total as _pm
+                _pm.run(_probe_vg, eqx.partition(params, eqx.is_inexact_array)[0],
+                        local[0], label=_os.environ.get("LEGOESM_WB_MEM_ARM", "?"))
             arr, static, frozen_names, n_probe_used = freeze_unreachable(
                 params, _probe_vg, local, n_probe=None, num_processes=nproc)
             arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
