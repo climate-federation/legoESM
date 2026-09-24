@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=06:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=latlon_band_vs_tile_%j.log
 # ===========================================================================
 # WHY DOES THE LAT-LON LANE STOP SCALING ON CPU, AND CAN A 2-D MESH FIX IT?
@@ -17,7 +17,7 @@
 # doubling with essentially no residual constant, so ~86-90% of the 512-rank
 # step is cost that does not shrink with rank count.
 #
-# TWO MECHANISMS EXPLAIN THAT SHAPE AND THEY IMPLY OPPOSITE FIXES.
+# TWO MECHANISMS FIT THAT SHAPE AND THEY IMPLY OPPOSITE FIXES.
 #
 #   PAYLOAD. With --p-lon 1 (the default, and what the production ladder
 #   passes) the mesh is 1-D over latitude, so every rank's halo ships two
@@ -25,47 +25,62 @@
 #   while local work falls as 1/n. Fix: a 2-D mesh, which ships tile
 #   boundaries instead.
 #
-#   PER-OPERATION COST. Constant bytes produce a CONSTANT term, not a term
-#   that grows with log2(n). Growth with rank count is the signature of
-#   latency and synchronization depth. A 2-D mesh CUTS BYTES BUT ADDS
-#   COLLECTIVES, so under this mechanism tiling is neutral at best and can
-#   lose.
+#   PER-OPERATION COST. Constant bytes give a CONSTANT term, not one growing
+#   with log2(n). Growth with rank count is the signature of latency and
+#   synchronization depth. A 2-D mesh CUTS BYTES BUT ADDS COLLECTIVES, so
+#   under this mechanism tiling is neutral at best and can lose.
 #
-# The fitted curve prefers the second reading, and the repo's own ballast
-# knob docstring already records a measurement pointing the same way (halo
-# time doubling between 32 and 64 devices at constant bytes). That number is
-# three orders of magnitude below this plateau and was taken on a different
-# instrument, so it is treated here as a pointer, not as a fact.
+# THE DISCRIMINATOR: wire(N) MINUS skip(N), AT TWO PAYLOAD MULTIPLES.
 #
-# THE DISCRIMINATOR IS THE BALLAST ARM AND IT RUNS FIRST.
-# LEGOESM_LATLON_HALO_BALLAST=N sends each halo message N times and drops the
-# copies: bytes scale, while the collective count, the schedule, the
-# arithmetic AND THE ANSWER do not. It is bit-identical, unlike the nocomm
-# knobs. The step's response to N IS the bandwidth term.
-#   response proportional to N  -> payload binds  -> tiling should win
-#   response flat in N          -> per-operation  -> tiling cannot win by
-#                                                    cutting bytes
+# Three measurement knobs, all documented as never-production:
+#   LEGOESM_LATLON_HALO_BALLAST=N sends each halo message N times and drops
+#     the copies. Bit-identical: bytes scale, collective count, schedule,
+#     arithmetic and answer do not.
+#   LEGOESM_LATLON_HALO_NOCOMM='1' replaces the collective with an
+#     optimization barrier -- the extra concatenate and slice are still paid,
+#     the wire is not.
+#   ...='wire' runs the collective and discards the result, following the SAME
+#     wrong trajectory as '1'.
 #
-# THE BAND/TILE PAIR IS MATCHED ON PACKING. LEGOESM_LATLON_PACKED_EXCHANGE=1
-# is production for the band lane, but packed_exchange_mesh() returns None
-# for a 2-D mesh, so the tile arm silently runs UNPACKED. Comparing the
-# production band against the tile would therefore compare two things at
-# once. A band_unpacked arm is included and IT, not the production band, is
-# the tile's control. (The tiled packed body exists in the library and has no
-# caller anywhere under packages/ -- it is dead code, which is a finding in
-# its own right and is why the confound cannot simply be switched off.)
+# The knobs COMPOSE, and the library says so explicitly: the payload multiple
+# is built BEFORE the no-comm branch precisely so that skip-at-N pays the
+# multiplier's device-side packing with no wire at all. That matters because
+# the raw ballast delta came out LARGER than the whole communication term in
+# an earlier measurement, which is only possible if packing was being counted
+# as payload. So the quantity to read is
 #
-# The nocomm arms ('1' = collective replaced by a barrier; 'wire' = collective
-# runs, result discarded) are NUMERICALLY WRONG BY DESIGN. wire-minus-skip
-# differs by the collective alone; full-minus-skip is a confounded difference
-# whose sign is not established, so it is not reported as a bound.
+#     c(N) = wire(N) - skip(N)          the collective alone, at N x bytes
+#     r    = c(4) / c(1)
+#
+# with the packing cost present on BOTH sides of each subtraction and
+# therefore cancelled.
+#     r near 4 -> payload binds      -> cutting bytes is a real lever
+#     r near 1 -> per-operation cost -> cutting bytes cannot help
+# Anything between, with the repeat spreads propagated, is INCONCLUSIVE and
+# is reported as such rather than resolved in either direction.
+#
+# THE DISCRIMINATOR RUNS UNPACKED, matching the packing state of the tile arm
+# it informs. LEGOESM_LATLON_PACKED_EXCHANGE=1 is production for the band,
+# but packed_exchange_mesh() returns None for a 2-D mesh, so the tile arm
+# runs unpacked whatever is asked of it. The unpacked band is therefore the
+# tile's control; the packed band appears only as the known-answer arm.
+# (The tiled packed body exists in the library with no caller anywhere under
+# packages/. That is dead code and a finding in its own right; it is also why
+# the confound cannot simply be switched off.)
+#
+# FINITENESS. The fused timing lane carries no in-graph finite check and
+# stamps finite_ok=null with valid=true, so a positive elapsed time could in
+# principle describe a diverged trajectory. The reference receipts were taken
+# on that lane, so the timed arms stay on it to keep the comparison honest,
+# and ONE segment-lane arm runs the production band as a finiteness
+# certificate -- that lane carries the in-graph scalar and refuses to
+# serialize a diverging run as valid.
 # ===========================================================================
 set -uo pipefail
 
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
-# _env.sh defaults JAX_PLATFORMS to cuda. This is a CPU job on a partition
-# with no GPUs, so it is pinned BEFORE the source, which honours an existing
-# value.
+# _env.sh defaults JAX_PLATFORMS to cuda; this is a CPU partition. Pinned
+# before the source, which honours an existing value.
 export JAX_PLATFORMS=cpu
 export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
@@ -74,21 +89,22 @@ cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 N_LAT=4096
 N_LON=8192
 NLEV=26
-# 60-step blocks, matching the protocol of the receipts this job is held to.
-# The fused lane ignores --warmup: it times blocks after separate compile and
-# probe calls. A 12-step block would be a different experiment and the
-# reference medians would no longer certify anything.
+# 60-step blocks, matching the protocol of the receipts the known-answer gate
+# holds this job to. The fused lane ignores --warmup: it times blocks after a
+# separate compile and probe call.
 STEPS=60
 WARMUP=3
-ARM_TIMEOUT=900
+# Per arm: one precompile scan plus two timed scans of 60 steps, plus first-
+# call compilation. 19 arms at this cap is 6.3 h inside an 8 h wall.
+ARM_TIMEOUT=1200
 WALL_TOL=0.15
 BAND_REF_128=1110
 BAND_REF_512=997
 
-# Closest-to-square tiles subject to an EVEN lon split, n_lat % p_lat == 0 and
-# n_lon % p_lon == 0:
-#   128 ranks, p_lon 16 -> 8 x 16 -> 512 x 512 cells per tile
-#   512 ranks, p_lon 32 -> 16 x 32 -> 256 x 256 cells per tile
+# Closest-to-square tiles with an EVEN lon split (the tiled packed body raises
+# on an odd one), n_lat % p_lat == 0 and n_lon % p_lon == 0:
+#   128 ranks, 8 x 16  -> 512 x 512 cells per tile
+#   512 ranks, 16 x 32 -> 256 x 256 cells per tile
 P_LON_128=16
 P_LON_512=32
 
@@ -109,13 +125,15 @@ echo "reference  band ${BAND_REF_128} ms at 128, ${BAND_REF_512} ms at 512, tole
 
 want=0; ok=0
 
-# run_arm TAG ND P_LON PACKED NOCOMM BALLAST REP
+# run_arm TAG ND P_LON PACKED NOCOMM BALLAST SEGSTEPS REP
 run_arm() {
-    local tag=$1 nd=$2 plon=$3 packed=$4 nocomm=$5 ballast=$6 rep=$7
+    local tag=$1 nd=$2 plon=$3 packed=$4 nocomm=$5 ballast=$6 seg=$7 rep=$8
     local nn=$(( nd / 4 ))
+    local -a extra=()
+    [ "$seg" != 0 ] && extra=(--segment-steps "$seg")
     want=$(( want + 1 ))
     echo "=== ${tag} rep${rep} nd=${nd} p_lon=${plon} packed=${packed}" \
-         "nocomm=${nocomm} ballast=${ballast} $(date +%T)"
+         "nocomm=${nocomm} ballast=${ballast} seg=${seg} $(date +%T)"
     if timeout --kill-after=30 "$ARM_TIMEOUT" srun --export=ALL \
             --nodes="$nn" --ntasks="$nd" --ntasks-per-node=4 \
             --cpus-per-task=64 --cpu-bind=cores --kill-on-bad-exit=1 \
@@ -127,6 +145,7 @@ run_arm() {
             --multicontroller --n-devices "$nd" --mode strong \
             --n-lat "$N_LAT" --n-lon "$N_LON" --nlev "$NLEV" \
             --p-lon "$plon" --steps "$STEPS" --warmup "$WARMUP" \
+            "${extra[@]}" \
             --out "$OUTDIR/${tag}_r${rep}.jsonl"; then
         ok=$(( ok + 1 ))
     else
@@ -134,36 +153,37 @@ run_arm() {
     fi
 }
 
-# The BALLAST arms lead: they decide whether the payload mechanism is live at
-# all, and if it is not, the band/tile pair is answering a question whose
-# premise is already dead. Arm order alternates between repeats so a warm-up
-# or a thermal drift cannot land on the same arm every time.
+# The four discriminator arms lead: they decide whether the payload premise is
+# alive before any tile arm is interpreted. Arm order alternates between the
+# repeats so a warm-up or a thermal drift cannot land on the same arm twice.
 for rep in 1 2; do
     if [ "$rep" = 1 ]; then
-        run_arm ball1_512  512 1            1 0    1 "$rep"
-        run_arm ball4_512  512 1            1 0    4 "$rep"
-        run_arm ball2_512  512 1            1 0    2 "$rep"
-        run_arm band_512   512 1            1 0    1 "$rep"
-        run_arm unpk_512   512 1            0 0    1 "$rep"
-        run_arm tile_512   512 "$P_LON_512" 0 0    1 "$rep"
-        run_arm band_128   128 1            1 0    1 "$rep"
-        run_arm unpk_128   128 1            0 0    1 "$rep"
-        run_arm tile_128   128 "$P_LON_128" 0 0    1 "$rep"
+        run_arm skip_b1  512 1            0 1    1 0 "$rep"
+        run_arm wire_b1  512 1            0 wire 1 0 "$rep"
+        run_arm skip_b4  512 1            0 1    4 0 "$rep"
+        run_arm wire_b4  512 1            0 wire 4 0 "$rep"
+        run_arm band_512 512 1            1 0    1 0 "$rep"
+        run_arm unpk_512 512 1            0 0    1 0 "$rep"
+        run_arm tile_512 512 "$P_LON_512" 0 0    1 0 "$rep"
+        run_arm band_128 128 1            1 0    1 0 "$rep"
+        run_arm tile_128 128 "$P_LON_128" 0 0    1 0 "$rep"
     else
-        run_arm tile_512   512 "$P_LON_512" 0 0    1 "$rep"
-        run_arm unpk_512   512 1            0 0    1 "$rep"
-        run_arm band_512   512 1            1 0    1 "$rep"
-        run_arm ball2_512  512 1            1 0    2 "$rep"
-        run_arm ball4_512  512 1            1 0    4 "$rep"
-        run_arm tile_128   128 "$P_LON_128" 0 0    1 "$rep"
-        run_arm unpk_128   128 1            0 0    1 "$rep"
-        run_arm band_128   128 1            1 0    1 "$rep"
+        run_arm wire_b4  512 1            0 wire 4 0 "$rep"
+        run_arm skip_b4  512 1            0 1    4 0 "$rep"
+        run_arm wire_b1  512 1            0 wire 1 0 "$rep"
+        run_arm skip_b1  512 1            0 1    1 0 "$rep"
+        run_arm tile_512 512 "$P_LON_512" 0 0    1 0 "$rep"
+        run_arm unpk_512 512 1            0 0    1 0 "$rep"
+        run_arm band_512 512 1            1 0    1 0 "$rep"
+        run_arm tile_128 128 "$P_LON_128" 0 0    1 0 "$rep"
+        run_arm band_128 128 1            1 0    1 0 "$rep"
     fi
 done
-# The wrong-answer controls run once each, last: they bound the halo's share
-# but decide nothing on their own.
-run_arm skip_512 512 1 1 1    1 1
-run_arm wire_512 512 1 1 wire 1 1
+# Finiteness certificate, production band, the lane that carries the in-graph
+# scalar and refuses to serialize a diverging run as valid. Not compared
+# against anything -- it exists so the fused-lane timings above cannot be
+# describing a trajectory that has blown up.
+run_arm cert_512 512 1 1 0 1 10 1
 
 echo "=== arms: $ok of $want completed ==="
 
@@ -177,18 +197,18 @@ pl128, pl512 = int(sys.argv[5]), int(sys.argv[6])
 
 # Arms whose numbers are meaningless as physics: they deliberately give every
 # rank its OWN edge rows instead of the neighbour's.
-WRONG_BY_DESIGN = {"skip_512", "wire_512"}
+WRONG_BY_DESIGN = {"skip_b1", "skip_b4", "wire_b1", "wire_b4"}
 
 
 def arm(tag, expect_reps):
     """Mean of each repeat's last ACCEPTED steady median, or a refusal reason.
 
-    A receipt is accepted only if it is marked valid, its median is finite and
-    strictly positive, and the expected number of repeats is present. A run
-    that crashed after writing one line, a non-finite state reported with
-    valid=true, and a half-finished arm all have to REFUSE rather than
-    contribute a number -- the failure mode worth paying for here is a wrong
-    number, not a missing one.
+    A receipt counts only if it is not marked invalid, not marked non-finite,
+    and its median is finite and strictly positive -- and only if every
+    expected repeat produced one. A run that crashed after writing a line, a
+    non-finite state, and a half-finished arm each have to REFUSE rather than
+    contribute: the failure worth paying to avoid here is a wrong number, not
+    a missing one.
     """
     vals, rejected = [], []
     for f in sorted(glob.glob(os.path.join(out_dir, f"{tag}_r*.jsonl"))):
@@ -204,15 +224,16 @@ def arm(tag, expect_reps):
             v = d.get("steady_median_ms")
             if v is None:
                 continue
+            base = os.path.basename(f)
             if d.get("valid") is False:
-                rejected.append(f"{os.path.basename(f)}: valid=false")
+                rejected.append(f"{base}: valid=false")
                 continue
             if d.get("finite_ok") is False:
-                rejected.append(f"{os.path.basename(f)}: finite_ok=false")
+                rejected.append(f"{base}: finite_ok=false")
                 continue
             v = float(v)
             if not math.isfinite(v) or v <= 0.0:
-                rejected.append(f"{os.path.basename(f)}: median {v!r}")
+                rejected.append(f"{base}: median {v!r}")
                 continue
             last = v
         if last is not None:
@@ -224,10 +245,9 @@ def arm(tag, expect_reps):
     return (sum(vals) / len(vals), len(vals), max(vals) - min(vals)), None
 
 
-SPEC = [("ball1_512", 1), ("ball2_512", 2), ("ball4_512", 2),
+SPEC = [("skip_b1", 2), ("wire_b1", 2), ("skip_b4", 2), ("wire_b4", 2),
         ("band_512", 2), ("unpk_512", 2), ("tile_512", 2),
-        ("band_128", 2), ("unpk_128", 2), ("tile_128", 2),
-        ("skip_512", 1), ("wire_512", 1)]
+        ("band_128", 2), ("tile_128", 2), ("cert_512", 1)]
 got, why = {}, {}
 for tag, reps in SPEC:
     got[tag], why[tag] = arm(tag, reps)
@@ -235,90 +255,112 @@ for tag, reps in SPEC:
 print("\n== arms ==")
 for tag, _ in SPEC:
     v = got[tag]
-    mark = "  [WRONG BY DESIGN]" if tag in WRONG_BY_DESIGN else ""
-    print(f"  {tag:<10} " + (f"REFUSED ({why[tag]})" if v is None
-                             else f"{v[0]:8.1f} ms  (n={v[1]}, "
-                                  f"spread {v[2]:.1f})") + mark)
+    mark = "  [WRONG BY DESIGN -- not physics]" if tag in WRONG_BY_DESIGN else ""
+    print(f"  {tag:<9} " + (f"REFUSED ({why[tag]})" if v is None
+                            else f"{v[0]:8.1f} ms  (n={v[1]}, "
+                                 f"spread {v[2]:.1f})") + mark)
+
+fail = []
+
+# ---- finiteness certificate
+cert = got["cert_512"]
+if cert is None:
+    print(f"\nfiniteness certificate: REFUSED ({why['cert_512']}). The timed "
+          f"lane carries no in-graph finite check, so without this arm a "
+          f"positive elapsed time cannot be distinguished from a diverged "
+          f"trajectory.")
+    fail.append("no finiteness certificate")
+else:
+    print(f"\nfiniteness certificate: the production band ran {cert[0]:.1f} "
+          f"ms/step on the lane that refuses to serialize a diverging run as "
+          f"valid, so the fused-lane timings are not describing a blown-up "
+          f"state.")
 
 # ---- known answer, and it must fail on a WRONG value, not only a missing one
-suspect = []
 for tag, ref in (("band_128", ref128), ("band_512", ref512)):
     v = got[tag]
     if v is None:
-        suspect.append(f"{tag} refused ({why[tag]})")
+        fail.append(f"{tag} refused ({why[tag]})")
         continue
     off = abs(v[0] - ref) / ref
-    print(f"\nknown answer {tag}: {v[0]:.0f} ms against {ref:.0f} ms recorded "
-          f"at the same step protocol, {off * 100:.0f}% off -- "
+    print(f"known answer {tag}: {v[0]:.0f} ms against {ref:.0f} ms recorded at "
+          f"the same step protocol, {off * 100:.0f}% off -- "
           f"{'ok' if off <= tol else 'OUT OF TOLERANCE'}")
     if off > tol:
-        suspect.append(f"{tag} is {off * 100:.0f}% off its recorded median")
+        fail.append(f"{tag} is {off * 100:.0f}% off its recorded median")
 
-if suspect:
-    print("\nHARNESS SUSPECT: " + "; ".join(suspect) + ".")
-    print("No ratio is read off this job. Resolve before interpreting.")
+if fail:
+    print("\nHARNESS SUSPECT: " + "; ".join(fail) + ".")
+    print("No mechanism verdict and no ratio are read off this job.")
     print("LATLON_BVT_DONE")
     raise SystemExit(3)
 
-# ---- the discriminator, reported before anything that depends on it
-b1, b2, b4 = got["ball1_512"], got["ball2_512"], got["ball4_512"]
+# ---- the discriminator
+s1, w1, s4, w4 = (got["skip_b1"], got["wire_b1"],
+                  got["skip_b4"], got["wire_b4"])
 payload_live = None
-if b1 and b2 and b4:
-    print("\n== does payload bind? (bit-identical ballast, 512 ranks) ==")
-    for n, v in ((1, b1), (2, b2), (4, b4)):
-        print(f"  {n}x halo bytes: {v[0]:8.1f} ms  "
-              f"({v[0] / b1[0]:.3f}x of the 1x arm)")
-    slope = (b4[0] - b1[0]) / b1[0] / 3.0     # fractional rise per extra copy
-    spread = max(b1[2], b2[2], b4[2]) / b1[0]
-    print(f"  fractional rise per extra copy of the halo: {slope:.3f}; "
-          f"worst repeat spread {spread:.3f} of the step")
-    if slope <= max(0.02, spread):
-        payload_live = False
-        print("  PER-OPERATION: quadrupling the bytes did not move the step "
-              "beyond its own repeat spread. The non-shrinking cost is "
-              "latency and synchronization, NOT payload, so cutting halo "
-              "bytes cannot recover it.")
-    elif slope >= 0.10:
-        payload_live = True
-        print("  PAYLOAD: the step tracks the halo bytes. Cutting them is a "
-              "real lever and a 2-D mesh should pay.")
-    else:
-        print("  PARTIAL: the step responds to bytes, but weakly. Payload is "
-              "part of the cost and not the whole of it.")
+if None in (s1, w1, s4, w4):
+    missing = [t for t in ("skip_b1", "wire_b1", "skip_b4", "wire_b4")
+               if got[t] is None]
+    print(f"\n== the payload question is UNANSWERED: {', '.join(missing)} "
+          f"refused. Nothing below may be read as a mechanism. ==")
 else:
-    print("\n== ballast arms incomplete; the payload question is unanswered ==")
+    c1, c4 = w1[0] - s1[0], w4[0] - s4[0]
+    # Worst-case propagation of the repeat spreads through both differences.
+    e1 = w1[2] + s1[2]
+    e4 = w4[2] + s4[2]
+    print("\n== does payload bind? collective cost at 1x and 4x halo bytes, "
+          "unpacked band, 512 ranks ==")
+    print(f"  wire - skip at 1x bytes: {c1:8.1f} ms  (+/- {e1:.1f})")
+    print(f"  wire - skip at 4x bytes: {c4:8.1f} ms  (+/- {e4:.1f})")
+    print("  The device-side packing the multiplier itself adds is present in "
+          "BOTH terms of each subtraction and cancels; that is why the two "
+          "knobs are composed rather than used alone.")
+    if c1 <= 0 or c1 <= e1:
+        print("  INCONCLUSIVE: the collective's own cost at 1x is not "
+              "resolved above the repeat spread, so a ratio against it means "
+              "nothing.")
+    else:
+        r = c4 / c1
+        # Worst-case ratio bounds from the same spreads.
+        lo = max(0.0, (c4 - e4)) / (c1 + e1)
+        hi = (c4 + e4) / max(1e-9, (c1 - e1)) if c1 > e1 else float("inf")
+        print(f"  ratio {r:.2f}x, worst-case bounds [{lo:.2f}, {hi:.2f}]. "
+              f"Pure payload predicts 4.00; pure per-operation predicts 1.00.")
+        if lo >= 2.5:
+            payload_live = True
+            print("  PAYLOAD BINDS: the collective tracks its bytes. Cutting "
+                  "them is a real lever and a 2-D mesh should pay.")
+        elif hi <= 1.5:
+            payload_live = False
+            print("  PER-OPERATION: quadrupling the bytes did not move the "
+                  "collective. The non-shrinking cost is latency and "
+                  "synchronization, so cutting halo bytes cannot recover it.")
+        else:
+            print("  INCONCLUSIVE: the bounds straddle the registered cuts. "
+                  "More repeats, or a larger payload multiple, would be "
+                  "needed to separate the two mechanisms.")
 
 # ---- band vs tile, controlled on packing
 print(f"\n== band vs tile (tiles {4096 // (128 // pl128)} x {8192 // pl128} at "
       f"128 ranks, {4096 // (512 // pl512)} x {8192 // pl512} at 512) ==")
-print("  The tile arm CANNOT use the packed exchange (packed_exchange_mesh "
-      "returns None for a 2-D mesh, and the tiled packed body has no caller), "
-      "so the unpacked band is the tile's control. The production band is "
-      "shown for scale only.")
-for nd, bt, ut, tt in ((128, "band_128", "unpk_128", "tile_128"),
+print("  The tile arm cannot use the packed exchange, so the UNPACKED band is "
+      "its control. Tiling also changes local array shapes, pole handling and "
+      "the communication schedule, so a ratio here says which implementation "
+      "is faster -- it is not by itself a payload measurement.")
+for nd, bt, ut, tt in ((128, "band_128", None, "tile_128"),
                        (512, "band_512", "unpk_512", "tile_512")):
-    b, u, t = got[bt], got[ut], got[tt]
-    if b and u and t:
-        print(f"  {nd:>4} ranks: band(packed) {b[0]:7.1f}   "
-              f"band(unpacked) {u[0]:7.1f}   tile {t[0]:7.1f}   "
-              f"unpacked/tile {u[0] / t[0]:.2f}x   "
-              f"packing is worth {100 * (u[0] - b[0]) / u[0]:.0f}%")
-
-# ---- the wire controls
-skip, wire, band = got["skip_512"], got["wire_512"], got["band_512"]
-if skip and wire and band:
-    wire_ms = wire[0] - skip[0]
-    print(f"\n== halo cost at 512 ranks (BOTH arms are numerically wrong by "
-          f"design) ==")
-    print(f"  wire minus skip = {wire_ms:.1f} ms, "
-          f"{100 * wire_ms / band[0]:.0f}% of the band step. These two arms "
-          f"follow the SAME wrong trajectory and differ by the collective "
-          f"alone, which is why this subtraction is quotable.")
-    print(f"  full minus skip would say "
-          f"{100 * (band[0] - skip[0]) / band[0]:.0f}%, which is NOT a bound "
-          f"in either direction: the skip arm carries different fields, so "
-          f"its local work differs too and the sign of that difference is "
-          f"not established.")
+    b, t = got[bt], got[tt]
+    u = got[ut] if ut else None
+    if b and t:
+        line = f"  {nd:>4} ranks: band(packed) {b[0]:7.1f}   tile {t[0]:7.1f}"
+        if u:
+            line += (f"   band(unpacked) {u[0]:7.1f}   "
+                     f"unpacked/tile {u[0] / t[0]:.2f}x   "
+                     f"packing is worth {100 * (u[0] - b[0]) / u[0]:.0f}%")
+        else:
+            line += "   (no unpacked control at this rank count)"
+        print(line)
 
 # ---- verdict
 if got["unpk_512"] and got["tile_512"]:
@@ -326,25 +368,25 @@ if got["unpk_512"] and got["tile_512"]:
     print("\n== verdict, pre-registered, judged at 512 ranks on the "
           "packing-matched pair ==")
     if s >= 1.25:
-        print(f"  TILING WINS: the tile is {100 * (s - 1):.0f}% faster. The "
-              f"one-dimensional decomposition is a real floor.")
+        print(f"  TILING WINS: the tile is {100 * (s - 1):.0f}% faster.")
     elif s >= 1.10:
         print(f"  PARTIAL: the tile is {100 * (s - 1):.0f}% faster -- real, "
-              f"but far below the 6x that the boundary-cell ratio alone "
-              f"would give, so most of the cost is not payload.")
+              f"but far below the ~16x boundary-cell ratio, so most of the "
+              f"cost is not boundary volume.")
     elif s >= 0.90:
-        print(f"  TILING NEUTRAL: {s:.2f}x, inside the registered band. "
-              f"Cutting halo bytes does not move this lane.")
+        print(f"  TILING NEUTRAL: {s:.2f}x, inside the registered band.")
     else:
         print(f"  TILING LOSES: the tile is {100 * (1.0 / s - 1):.0f}% "
-              f"SLOWER. The extra collectives cost more than the saved bytes.")
+              f"SLOWER.")
     if payload_live is False and s >= 1.25:
-        print("  DISAGREEMENT: the ballast arm said payload does not bind, "
-              "yet tiling won. Those cannot both be right about the same "
-              "cost; do not report either until it is resolved.")
+        print("  DISAGREEMENT: the collective did not track its bytes, yet "
+              "tiling won. Those cannot both be about the same cost -- the "
+              "tile's other changes (shapes, pole handling, schedule) are the "
+              "first thing to count. Report neither as a mechanism until it "
+              "is resolved.")
     if payload_live is True and s < 1.10:
-        print("  DISAGREEMENT: the ballast arm said payload binds, yet "
-              "tiling did not pay. The tile's extra collectives are the "
-              "first thing to count.")
+        print("  DISAGREEMENT: the collective tracked its bytes, yet tiling "
+              "did not pay. Count the tile's extra collectives before "
+              "reporting either.")
 print("LATLON_BVT_DONE")
 PYEOF
