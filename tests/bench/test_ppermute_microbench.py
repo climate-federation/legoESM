@@ -68,7 +68,7 @@ def test_every_collective_choice_has_a_census_token_and_a_transport():
         assert c in _HLO_TOKEN, c
         assert transport_of(c)
     labels = {transport_of(c) for c in COLLECTIVE_CHOICES}
-    assert len(labels) == 2, labels
+    assert labels == {"mpi4jax", "xla-cpu/local"}, labels
     assert all(transport_of(c) == "mpi4jax" for c in COLLECTIVE_CHOICES
                if c.startswith("mpi_"))
 
@@ -89,6 +89,33 @@ def test_importing_the_bench_does_not_initialise_a_backend():
                             "PYTHONPATH": ":".join(_sys.path)})
     assert r.returncode == 0, r.stderr[-800:]
     assert "BACKENDS []" in r.stdout, r.stdout
+
+
+def test_transport_label_follows_the_active_client(monkeypatch):
+    """A hardcoded 'gloo' would attribute an MPI-collectives or GPU run to
+    the wrong lane, and a label read from the option alone attributes a
+    single-process virtual-device run to a transport JAX never built (codex
+    round 3). The label follows the resolved option only when a second
+    process exists."""
+    import jax
+    assert jax.process_count() == 1
+    assert transport_of("ppermute") == "xla-cpu/local"
+    monkeypatch.setattr(jax, "process_count", lambda *a, **k: 2)
+    assert transport_of("ppermute") == "xla-cpu/gloo"
+    jax.config.update("jax_cpu_collectives_implementation", "mpi")
+    try:
+        assert transport_of("ppermute") == "xla-cpu/mpi"
+    finally:
+        jax.config.update("jax_cpu_collectives_implementation", "gloo")
+    assert transport_of("mpi_sendrecv") == "mpi4jax"
+
+
+def test_identity_ring_is_refused_on_the_mpi_arm_too():
+    """--ring-stride equal to the rank count made every MPI rank exchange
+    with itself and the known-answer check still passed (a rank does receive
+    its own index from itself). The gloo arm refused it; the MPI arm must."""
+    with pytest.raises(ValueError, match="multiple of the device count"):
+        dict(_ring(4, 4))
 
 
 def test_sweep_cap_keeps_the_large_end_and_refuses_a_useless_cap():

@@ -221,10 +221,15 @@ def transport_of(collective):
     # import and the gloo arms could not start).
     backend = jax.default_backend()
     if backend == "cpu":
-        # The RESOLVED configuration, not the environment variable that may
-        # or may not have been applied to it.
-        impl = str(jax.config.jax_cpu_collectives_implementation or "gloo")
-        return f"xla-cpu/{impl.lower()}"
+        # JAX builds the gloo/MPI collectives ONLY when a distributed client
+        # exists (xla_bridge.make_cpu_client); a single-process run with
+        # virtual devices exchanges through local memory whatever the option
+        # says, so its label must not name a transport it never used.
+        if jax.process_count() == 1:
+            return "xla-cpu/local"
+        # The RESOLVED option, not the environment variable that may or may
+        # not have been applied to it.
+        return f"xla-cpu/{str(jax.config.jax_cpu_collectives_implementation).lower()}"
     return f"xla-{backend}"
 
 
@@ -600,9 +605,10 @@ def main() -> int:
         raise SystemExit(
             "the optimized HLO could not be read, so the program cannot be "
             "shown to contain the collective being attributed.")
-    # The gloo arm is a fori_loop (one collective in a while body); the MPI
-    # arm is unrolled (one per repetition). Anything else means the chain was
-    # folded, split, or lowered under another name.
+    # The XLA arm is a fori_loop (one collective in a while body) unless
+    # --unroll; the MPI arm and the unrolled XLA arm carry one per repetition.
+    # Anything else means the chain was folded, split, or lowered under
+    # another name.
     expect = args.n_reps if (is_mpi or args.unroll) else 1
     if n_hlo != expect:
         raise SystemExit(
