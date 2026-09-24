@@ -105,7 +105,7 @@ def main() -> int:
     if nd > 1:
         from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
         from legoesm.parallel.voronoi_spmd_ocean import n_real_cells
-        mesh = reorder_voronoi_for_sharding(mesh, nd, method="sfc")
+        mesh = reorder_voronoi_for_sharding(mesh, nd, method="sfc", edge_order="owner")
         n_real = n_real_cells(mesh)
     # Device block of each cell under the production contiguous ownership.
     cells_per = int(mesh.nCells) // nd

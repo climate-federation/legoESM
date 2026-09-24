@@ -177,7 +177,8 @@ def main() -> int:
                                lloyd_iterations=args.lloyd)
     n_cells_orig = int(mesh.nCells)
     if nd > 1:
-        mesh = reorder_voronoi_for_sharding(mesh, nd, method=args.partition_method)
+        mesh = reorder_voronoi_for_sharding(mesh, nd, method=args.partition_method,
+                                            edge_order="owner")
     n_real = n_real_cells(mesh)
     state = perturbed_rest_state(mesh, z_coord, n_cells_real=n_real)
     model = MPASOceanModel(mesh, z_coord, config)
