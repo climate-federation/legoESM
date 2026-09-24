@@ -286,6 +286,7 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
                           surface_forcing=surface)
 
     # --- 0. the baseline, and round 13's number reproduced -----------------
+    print("STEP baseline production step")
     baseline = _stage_trace()
     oracle_ssh = {
         stage: ladder.read_state_frame(
@@ -316,13 +317,26 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True),
     )
+    print("STEP slow-forcing operand trace")
     operand_trace = model_ops.step(
         state, dt=card.dt_s, freshwater=freshwater, surface_forcing=surface)
     operands = jax.device_get(operand_trace.slow_forcing_operands)
 
+    # The model's OWN three-dimensional face masks, built by the same helper
+    # the WS-RK3 stage program uses, against NEMO's ``umask``/``vmask``.  The
+    # two-dimensional ``state.u_mask`` is a surface face mask and would not be
+    # the operand NEMO's vertical sum multiplies.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,
+    )
+
+    _u_mask3, _v_mask3 = compute_face_masks_3d(
+        card.recipe.z_coord.is_active, card.recipe.grid)
     card_masks = {
-        "u": _rank0(_native_u(card.recipe.initial_state.u_mask.data)),
-        "v": _rank0(_native_v(card.recipe.initial_state.v_mask.data)),
+        "u": _rank0(_native_u(np.asarray(_u_mask3, dtype=np.float64)))[
+            ..., :30],
+        "v": _rank0(_native_v(np.asarray(_v_mask3, dtype=np.float64)))[
+            ..., :30],
     }
     ladder_rows: dict[str, dict[str, dict]] = {}
     instrument_rows: dict[str, dict] = {}
@@ -410,6 +424,7 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
 
     # CONTROL: the hook itself must be inert when it is fed legoESM's own
     # values.  Without this, any movement below could be the hook.
+    print("STEP no-op substitution control")
     noop = _stage_trace((jnp.asarray(own_u), jnp.asarray(own_v)))
     noop_row = _ssh_row(noop.stage_outputs, oracle_ssh[3], 3)
     noop_identical = bool(np.array_equal(
@@ -425,6 +440,7 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     injected_u, injected_v = _inject(
         own_u, own_v, _oracle_arrays(oracle, "u")["final"],
         _oracle_arrays(oracle, "v")["final"])
+    print("STEP substituted arm")
     substituted = _stage_trace(
         (jnp.asarray(injected_u), jnp.asarray(injected_v)))
     substituted_producer = jax.device_get(substituted.slow_forcing_producer)
