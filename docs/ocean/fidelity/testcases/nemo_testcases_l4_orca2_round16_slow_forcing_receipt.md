@@ -157,13 +157,29 @@ The required separate command was attempted at the committed measurement tip:
 its app-server client could not initialize on the read-only filesystem.
 Verdict: **independent review unavailable in-sandbox**.
 
-The clean gate exits 0.  The plant gate prints `PLANT FIRED` and exits 1.  The
-ORCA2 ladder exits 0 with `LADDER_MEASURED`.  Evidence is under
-`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round16/codex`.
+The clean gate exits 0.  The one-ULP gate prints `PLANT FIRED` and exits 1.
+The ORCA2 ladder exits 0 with `LADDER_MEASURED`.  The receipt citation gate
+passes all 3 rendered compiled citations with 0 unmapped and 0 failures.  Its
+rigid two-line shift of the rendered vector-update citation fails with
+`SYMBOL-NOT-AT-LINE`, as required.
 
-The gate's direct synthetic tests pass 3 / 3 before measurement.  Final
-focused tests and this receipt's citation gate are recorded after the receipt
-commit.
+The round-16 gate and receipt-citation tests pass **8 / 8**.  The required
+`tests/ocean/fidelity -n 12` battery was launched exactly once: 1,648 tests
+were collected, it reached 99%, and its final worker did not complete after a
+bounded tail wait, so the run was interrupted with exit 130 and has no passing
+summary.  Three failure IDs appeared before the hang and all three reproduce
+in isolation:
+
+| failure | disposition |
+|---|---|
+| GYRE round-129 record-backed gate | pre-existing worktree/record-certification ratchet: "the certified phase-3 stepping gate moved after the members ran" |
+| SI3 scalar-math v2 gate | supplied known red: `A MY_SRC is not verbatim` |
+| GYRE round-51 live-operand field-order assertion | pre-existing stale assertion against the current trace tuple |
+
+`git diff 956fd11fc..HEAD` is empty for all six failing test/implementation
+paths and for every file under `packages/`; none is caused by round 16.  The
+wide battery is **not represented as green**.  Evidence is under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round16/codex`.
 
 ## OPEN — round 17's order
 
