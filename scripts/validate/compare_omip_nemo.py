@@ -389,6 +389,10 @@ def main() -> int:
     args = p.parse_args()
     out = args.output_dir; out.mkdir(parents=True, exist_ok=True)
 
+    if args.use_mean_fields and args.nemo_month is not None:
+        raise SystemExit("--use-mean-fields scores a 5-day window mean against one "
+                         "5-day NEMO record; it is not defined against the --nemo-month "
+                         "monthly climatology (drop one of the two)")
     L = _load_legoesm(args.legoesm_snapshot, use_mean=args.use_mean_fields)
     fields_mode = require_window(L, args.use_mean_fields, NEMO_RECORD_DAYS)
     N = _load_nemo(args.nemo_gridt, args.nemo_time_idx, month=args.nemo_month)
@@ -543,6 +547,7 @@ def main() -> int:
               "MLD comparison.")
 
     report = {
+        "fields_mode": fields_mode,
         "legoesm_snapshot": str(args.legoesm_snapshot),
         "nemo_gridt": str(args.nemo_gridt), "nemo_time_idx": args.nemo_time_idx,
         "sst_supercooled_cells": n_below, "sst_raw_min_C": sst_min,

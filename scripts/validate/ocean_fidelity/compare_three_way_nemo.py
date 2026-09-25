@@ -602,6 +602,9 @@ def main() -> int:
     tgt_lat = -90.0 + a.res_deg / 2.0 + a.res_deg * np.arange(int(180.0 / a.res_deg))
     tgt_lon = a.res_deg / 2.0 + a.res_deg * np.arange(int(360.0 / a.res_deg))
 
+    if a.use_mean_fields and a.nemo_month is not None:
+        raise SystemExit("--use-mean-fields scores 5-day window means against one 5-day "
+                         "NEMO record; not defined against --nemo-month (drop one)")
     T = _load_legoesm(a.tripole, use_mean=a.use_mean_fields)
     M = _load_legoesm(a.mpas, use_mean=a.use_mean_fields)
     N = _load_nemo(a.nemo_gridt, a.nemo_time_idx, month=a.nemo_month)
