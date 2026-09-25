@@ -42,6 +42,7 @@ def test_localization_finds_only_the_unrecorded_west_face():
     assert result["column_histogram"] == {"0": 2}
     assert result["right_operand_on_support"]["bit_exact"]
     assert result["left_and_subtraction_support_identical"]
+    assert result["mismatch_support_explained_by_left"]
     assert result["candidate_operand_replay"]["bit_exact"]
     assert result["oracle_inversion_replay"]["bit_exact"]
 

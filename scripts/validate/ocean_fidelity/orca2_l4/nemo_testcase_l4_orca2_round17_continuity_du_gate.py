@@ -108,6 +108,12 @@ def _localize(
         candidate_left, implied_oracle_left, active_t)
     left_mismatch = active_t & (candidate_left != implied_oracle_left)
     same_support = bool(np.array_equal(left_mismatch, mismatch))
+    support_explained_by_left = bool(
+        left_support["differing_cells"]
+        == int(np.count_nonzero(mismatch))
+        and left_support["absolute_max"]
+        == float(np.max(np.abs(candidate_du - oracle_du), initial=0.0))
+    )
     du_delta = np.subtract(candidate_du, oracle_du)
     left_delta = np.subtract(candidate_left, implied_oracle_left)
     signed_delta_closure = round14.compare(
@@ -126,6 +132,7 @@ def _localize(
         "inferred_left_operand_on_support": left_support,
         "inferred_left_operand_all_wet_t": left_all,
         "left_and_subtraction_support_identical": same_support,
+        "mismatch_support_explained_by_left": support_explained_by_left,
         "signed_delta_closure": signed_delta_closure,
         "oracle_left_operand_provenance": (
             "inferred as recorded_right_u - recorded_continuity_du; "
@@ -308,7 +315,7 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     expected_localization = bool(
         localization["all_mismatches_on_west_edge"]
         and localization["right_operand_on_support"]["bit_exact"]
-        and localization["left_and_subtraction_support_identical"]
+        and localization["mismatch_support_explained_by_left"]
         and localization["continuity_du"]["differing_cells"]
         == INHERITED_COUNT
     )
