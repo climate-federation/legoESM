@@ -518,16 +518,25 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
 
     plant_result = {"requested": plant, "fires": None}
     if plant:
-        planted = np.array(slow["cd_u"], copy=True)
-        index = tuple(np.argwhere(masks["u"] & (planted != 0.0))[0])
-        planted[index] = np.nextafter(planted[index], np.inf)
-        row = round14.compare(
-            planted, slow["cd_u"], masks["u"])
-        fired = bool(not row["bit_exact"] and row["differing_cells"] == 1
-                     and row["ulp_max"] == 1)
-        plant_result.update({"fires": fired, "index": list(index), "row": row})
+        channels = {}
+        for name, source, active in (
+                ("freshwater_forcing", oracle["continuity_forcing"][0],
+                 masks["t"]),
+                ("drag_coefficient_u", slow["cd_u"], masks["u"])):
+            planted = np.array(source, copy=True)
+            index = tuple(np.argwhere(
+                active & np.isfinite(planted) & (planted != 0.0))[0])
+            planted[index] = np.nextafter(planted[index], np.inf)
+            row = round14.compare(planted, source, active)
+            fired = bool(
+                not row["bit_exact"] and row["differing_cells"] == 1
+                and row["ulp_max"] == 1)
+            channels[name] = {
+                "fires": fired, "index": list(index), "row": row}
+        fired = all(channel["fires"] for channel in channels.values())
+        plant_result.update({"fires": fired, "channels": channels})
         print("PLANT FIRED" if fired else "PLANT DID NOT FIRE")
-        require(fired, "one-ULP drag-coefficient plant did not fire")
+        require(fired, "one-ULP input-channel plant did not fire")
 
     result = {
         "gate": "nemo_testcase_l4_orca2_round15_barotropic_solver_gate",

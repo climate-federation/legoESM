@@ -650,6 +650,42 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 card round 15: source-ordered split-explicit solver walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:339-347': [
+        '! Initialize barotropic variables:', ('ENDIF', 10), 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:355-364': [
+        ('IF( ln_bt_fw ) THEN', 2),
+        'hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kmm)))', 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:460-493': [
+        '!* Set extrapolation coefficients for predictor step:',
+        'zsshp2_e(:,:) = za1 * sshn_e(:,:)', 34],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:505-536': [
+        ('DO jj = ntsj-( 0), ntej+(  1 ) ; DO ji = ntsi-( 0), ntei+(  1)', 1),
+        ('END DO   ;   END DO', 8), 32],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:550-558': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
+        ('END DO   ;   END DO', 9), 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:601-616': [
+        '! Half-step back interpolation of SSH for surface pressure computation',
+        ('END DO   ;   END DO', 14), 16],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:618-652': [
+        '! Add Coriolis trend:',
+        ('& l4_canon_2d(zu_trd,\'U\'), l4_canon_2d(zv_trd,\'V\')', 1), 35],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:666-679': [
+        ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN', 1),
+        ('END DO   ;   END DO', 17), 14],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:755-779': [
+        ('IF( lwp .AND. kt == nit000 .AND. jn <= 2 ) THEN', 3),
+        ('& l4_canon_2d(ffv_nw,\'V\'), l4_canon_2d(ffv_ne,\'V\')', 2), 25],
     # --- ORCA2 card round 14: the barotropic slow forcing, in stp2d's order
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:139-147': [
         '!*  hydrostatic pressure gradient (HPG))  *!',
