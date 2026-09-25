@@ -223,10 +223,14 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     require(route in {
         "ldf_stage3", "fct_metric_upstream", "wind_qco",
         "momentum_ldf_live_geometry", "stage_momentum_wzv",
+        "tke_shear_step_entry_eta",
     },
             f"unknown Decision-43 source route {route!r}")
 
     def row(config, **extra):
+        vertical_mixing = getattr(
+            getattr(config, "physics", None), "vertical_mixing", None)
+        tke = getattr(vertical_mixing, "tke", None)
         values = {
             "tracer_time_integrator": config.tracer_time_integrator,
             "momentum_time_integrator": config.momentum_time_integrator,
@@ -242,6 +246,15 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
                 config, "momentum_advection", "flux_form"),
             "wzv_call2_evaluation": getattr(
                 config, "wzv_call2_evaluation", "generic"),
+            "vertical_mixing_scheme": getattr(
+                vertical_mixing, "scheme", None),
+            "tke_prognostic": bool(getattr(tke, "prognostic", False)),
+            "tke_shear_evaluation_stage": getattr(
+                tke, "tke_shear_evaluation_stage", None),
+            "tke_shear_production": getattr(
+                tke, "tke_shear_production", None),
+            "tke_shear_metric_source": getattr(
+                tke, "tke_shear_metric_source", None),
         }
         values.update(extra)
         if route == "ldf_stage3":
@@ -278,6 +291,17 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             values["executes_at_this_tip"] = bool(
                 nemo_stage_momentum_wzv_executes(config))
             executes = nemo_stage_momentum_wzv_resolved(config)
+        elif route == "tke_shear_step_entry_eta":
+            executes = (
+                config.momentum_time_integrator == "rk3_ws"
+                and getattr(vertical_mixing, "scheme", None) == "tke"
+                and bool(getattr(tke, "prognostic", False))
+                and getattr(tke, "tke_shear_evaluation_stage", None)
+                == "step_entry"
+                and getattr(tke, "tke_shear_production", None) in (
+                    "nemo_face_native_now2", "nemo_face_native_nbb2")
+                and getattr(tke, "tke_shear_metric_source", None)
+                == "nemo_qco_live_face")
         else:
             executes = (
                 config.momentum_time_integrator == "rk3_ws"
@@ -695,7 +719,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--route", choices=(
             "ldf_stage3", "fct_metric_upstream", "wind_qco",
-            "momentum_ldf_live_geometry", "stage_momentum_wzv"),
+            "momentum_ldf_live_geometry", "stage_momentum_wzv",
+            "tke_shear_step_entry_eta"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],

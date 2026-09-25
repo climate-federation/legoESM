@@ -190,6 +190,22 @@ def test_stage_momentum_census_builds_real_orca2_card():
     assert orca2["unmeasured_features"]
 
 
+def test_tke_shear_step_entry_eta_execution_is_recipe_derived():
+    module = _module()
+    cards = module._card_execution("tke_shear_step_entry_eta")
+    executing = {
+        name for name, row in cards.items() if row["executes_route"]}
+
+    assert executing == {"GYRE-zco", "ORCA2-zps"}
+    assert cards["GYRE-zco"]["tke_shear_production"] == (
+        "nemo_face_native_now2")
+    assert cards["ORCA2-zps"]["tke_shear_production"] == (
+        "nemo_face_native_nbb2")
+    assert not cards["NEMO-GYRE-recipe"]["executes_route"]
+    assert not cards["DINO:nemo_dino_kamm"]["executes_route"]
+    assert not cards["DINO:nemo_dino_kamm_mlf"]["executes_route"]
+
+
 def test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured():
     module = _module()
     cards = module._card_execution("fct_metric_upstream")
