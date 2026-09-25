@@ -728,6 +728,49 @@ def spmd_reduce_axis() -> str | None:
     return None
 
 
+def _resolve_tree_psum(env_value: str) -> bool:
+    """LEGOESM_SPMD_TREE_PSUM: ``'1'`` sums with a butterfly of ppermutes,
+    ``''``/``'0'`` with ``jax.lax.psum`` (default). Anything else raises."""
+    if env_value in ("", "0"):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_SPMD_TREE_PSUM must be '', '0' or '1'; got {env_value!r}")
+
+
+def _spmd_sum(x: jax.Array, axis_name) -> jax.Array:
+    """Sum ``x`` over the shard_map axis ``axis_name``.
+
+    Default: ``jax.lax.psum``. With ``LEGOESM_SPMD_TREE_PSUM=1`` and a single
+    axis of power-of-two size, a recursive-doubling butterfly of ``log2(n)``
+    ppermute rounds instead: on CPU, XLA's gloo allreduce is a ring whose
+    cost grows with the rank count (measured on Derecho across nodes: 1.14 ms
+    at 8 ranks, 4.4 ms at 32, while one neighbour exchange is ~70 us).
+    Every rank adds the same two operands in each round (a + b == b + a), so
+    all ranks hold bit-identical sums; the summation ORDER differs from
+    psum's, so results differ from the psum path in the last bit. Linear in
+    ``x`` (ppermute transposes to its inverse), so it is AD-safe like psum.
+
+    Scope: meant for the small packed PCG scalars (each round ships the
+    whole buffer, so a large buffer would pay log2(n) times its bytes). The
+    flag is read at trace time, so it is fixed per compiled program; compare
+    the two paths in separate processes. Non-power-of-two axis sizes and
+    multi-axis names always take psum.
+    """
+    tree = _resolve_tree_psum(os.environ.get("LEGOESM_SPMD_TREE_PSUM", ""))
+    if not tree or isinstance(axis_name, (tuple, list)):
+        return jax.lax.psum(x, axis_name)
+    n = int(jax.lax.axis_size(axis_name))
+    if n & (n - 1):
+        return jax.lax.psum(x, axis_name)
+    k = 1
+    while k < n:
+        x = x + jax.lax.ppermute(x, axis_name, [(i, i ^ k) for i in range(n)])
+        k *= 2
+    return x
+
+
 def batch_psum_spmd(
     values: list[jax.Array],
     axis_name: str | tuple[str, ...],
@@ -783,7 +826,7 @@ def batch_psum_spmd(
     flat_parts = [v.reshape(-1) for v in promoted]
     packed = jnp.concatenate(flat_parts, axis=0)
 
-    global_packed = jax.lax.psum(packed, axis_name)
+    global_packed = _spmd_sum(packed, axis_name)
 
     results = []
     offset = 0
