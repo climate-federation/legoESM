@@ -269,11 +269,11 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     substeps = trace.substeps
     masks = _masks(card)
-    candidate = _candidate_ordered(card, substeps)
+    candidate_before = _candidate_ordered(card, substeps)
 
     input_rows = {
         "freshwater_forcing": round14.compare(
-            candidate["continuity_forcing"][0],
+            candidate_before["continuity_forcing"][0],
             oracle["continuity_forcing"][0], masks["t"]),
         "drag_coefficient_u": round14.compare(
             _trace_native(substeps, "drag_coefficient_u", "u", 1)[0],
@@ -284,24 +284,97 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     }
     print("INPUTS " + json.dumps(input_rows, sort_keys=True))
 
-    # The substitution is literally an identity when the candidate is already
-    # bit-exact.  If either input is non-bit, STOP rather than walking a solver
-    # fed different operands; a follow-up revision must add a private boundary
-    # injection and re-run this committed gate.
-    inputs_bit_exact = all(row["bit_exact"] for row in input_rows.values())
+    # The freshwater replacement is already an identity.  Substitute the two
+    # non-bit NEMO drag coefficients over rank 0's owned window, leaving rank 1
+    # and every other solver input untouched.  The production trace exposes
+    # NEMO's signed coefficients; the solver accepts legoESM's positive-rate
+    # convention, hence the explicit minus sign on both sides.
+    own_rate_u = -np.asarray(substeps["drag_coefficient_u"][0])
+    own_rate_v = -np.asarray(substeps["drag_coefficient_v"][0])
+    injected_rate_u, injected_rate_v = round14._inject(
+        own_rate_u, own_rate_v, -slow["cd_u"], -slow["cd_v"])
+
+    print("STEP no-op drag substitution control")
+    noop_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            barotropic_drag_rate_override=(own_rate_u, own_rate_v)))
+    noop = jax.device_get(noop_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    noop_identical = bool(np.array_equal(
+        np.asarray(noop.state_after_barotropic.eta.data),
+        np.asarray(trace.state_after_barotropic.eta.data)))
+    require(noop_identical,
+            "drag substitution hook is not inert on legoESM's own rates")
+
+    print("STEP recorded drag substitution trace")
+    substituted_trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            barotropic_drag_rate_override=(
+                injected_rate_u, injected_rate_v)))
+    substituted_trace = jax.device_get(substituted_trace_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    substituted_substeps = substituted_trace.substeps
+    candidate = _candidate_ordered(card, substituted_substeps)
+    landed_rows = {
+        "drag_coefficient_u": round14.compare(
+            _trace_native(
+                substituted_substeps, "drag_coefficient_u", "u", 1)[0],
+            slow["cd_u"], masks["u"]),
+        "drag_coefficient_v": round14.compare(
+            _trace_native(
+                substituted_substeps, "drag_coefficient_v", "v", 1)[0],
+            slow["cd_v"], masks["v"]),
+    }
+    require(all(row["bit_exact"] for row in landed_rows.values()),
+            "recorded drag substitution did not land at the traced boundary")
+
+    print("STEP recorded drag substitution production stage")
+    substituted_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True,
+            barotropic_drag_rate_override=(
+                injected_rate_u, injected_rate_v)))
+    substituted = jax.device_get(substituted_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    substituted_ssh = round14._ssh_row(
+        substituted.stage_outputs, oracle_ssh3, 3)
+    baseline_field = np.asarray(baseline.stage_outputs[2][4])[
+        :, :RANK0_COLUMNS]
+    substituted_field = np.asarray(substituted.stage_outputs[2][4])[
+        :, :RANK0_COLUMNS]
+    arm_delta = np.abs(substituted_field - baseline_field)
+    movement = {
+        "max_abs_move_m": float(arm_delta.max()),
+        "cells_moved": int(np.count_nonzero(arm_delta)),
+        "scored_cells": int(arm_delta.size),
+        "move_over_baseline_disagreement": float(
+            arm_delta.max() / baseline_ssh["max_abs_m"]),
+        "baseline_max_abs_m": baseline_ssh["max_abs_m"],
+        "substituted_max_abs_m": substituted_ssh["max_abs_m"],
+    }
+    print("MEASURE recorded drag substitution moves end-of-step sea surface "
+          + json.dumps(movement, sort_keys=True))
+
+    inputs_ready = (
+        input_rows["freshwater_forcing"]["bit_exact"]
+        and all(row["bit_exact"] for row in landed_rows.values()))
     substitution = {
         "freshwater_replacement_is_identity":
             input_rows["freshwater_forcing"]["bit_exact"],
-        "drag_u_replacement_is_identity":
-            input_rows["drag_coefficient_u"]["bit_exact"],
-        "drag_v_replacement_is_identity":
-            input_rows["drag_coefficient_v"]["bit_exact"],
-        "combined_replacement_is_identity": inputs_bit_exact,
+        "drag_replacement_is_identity": False,
+        "noop_control_solver_eta_bit_exact": noop_identical,
+        "replacement_landed": landed_rows,
+        "end_of_step_sea_surface_movement": movement,
     }
 
     walk_rows = []
     first_non_bit = None
-    if inputs_bit_exact:
+    if inputs_ready:
         for name, stagger, citation in SOURCE_ORDER:
             active = np.broadcast_to(masks[stagger], candidate[name].shape)
             row = round14.compare(candidate[name], oracle[name], active)
@@ -310,21 +383,21 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
             if first_non_bit is None and not row["bit_exact"]:
                 first_non_bit = dict(row)
     else:
-        print("STOP_INPUT_SUBSTITUTION_REQUIRED: at least one copied solver "
-              "input is non-bit; no downstream row is attributed")
+        print("STOP_INPUT_SUBSTITUTION_FAILED: a recorded solver input did "
+              "not reach the traced boundary; no downstream row is attributed")
 
     plant_result = {"requested": plant, "fires": None}
     if plant:
-        planted = np.array(oracle["continuity_forcing"][0], copy=True)
-        index = tuple(np.argwhere(masks["t"])[0])
+        planted = np.array(slow["cd_u"], copy=True)
+        index = tuple(np.argwhere(masks["u"] & (planted != 0.0))[0])
         planted[index] = np.nextafter(planted[index], np.inf)
         row = round14.compare(
-            planted, oracle["continuity_forcing"][0], masks["t"])
+            planted, slow["cd_u"], masks["u"])
         fired = bool(not row["bit_exact"] and row["differing_cells"] == 1
                      and row["ulp_max"] == 1)
         plant_result.update({"fires": fired, "index": list(index), "row": row})
         print("PLANT FIRED" if fired else "PLANT DID NOT FIRE")
-        require(fired, "one-ULP freshwater comparison plant did not fire")
+        require(fired, "one-ULP drag-coefficient plant did not fire")
 
     result = {
         "gate": "nemo_testcase_l4_orca2_round15_barotropic_solver_gate",
@@ -335,11 +408,12 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         "resolved": resolved,
         "round14_reproduction": reproduction,
         "baseline_end_of_step_sea_surface": baseline_ssh,
+        "substituted_end_of_step_sea_surface": substituted_ssh,
         "solver_input_rows": input_rows,
         "substitution": substitution,
         "walk_status": (
-            "WALKED_TO_FIRST_NON_BIT" if inputs_bit_exact
-            else "STOP_INPUT_SUBSTITUTION_REQUIRED"),
+            "WALKED_TO_FIRST_NON_BIT" if inputs_ready
+            else "STOP_INPUT_SUBSTITUTION_FAILED"),
         "first_non_bit_statement": first_non_bit,
         "source_ordered_rows": walk_rows,
         "plant": plant_result,

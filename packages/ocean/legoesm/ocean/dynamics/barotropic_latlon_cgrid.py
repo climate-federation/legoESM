@@ -2440,6 +2440,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
     _nemo_raw_history_test_override=None,
+    _nemo_drag_rate_test_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -2721,7 +2722,24 @@ def barotropic_substeps_latlon_cgrid(
     # Static config gate: flag off ⇒ None ⇒ the substep loop's drag branch
     # is not built ⇒ byte-identical.
     _drag_r_u = _drag_r_v = _drag_r_t = None
-    if getattr(config, "barotropic_drag_substep", False):
+    if _nemo_drag_rate_test_override is not None:
+        if not getattr(config, "barotropic_drag_substep", False):
+            raise ValueError(
+                "barotropic drag-rate substitution requires "
+                "barotropic_drag_substep=True")
+        if len(_nemo_drag_rate_test_override) != 2:
+            raise ValueError(
+                "barotropic drag-rate substitution requires U and V arrays")
+        _drag_r_u = jnp.asarray(
+            _nemo_drag_rate_test_override[0], dtype=_dt)
+        _drag_r_v = jnp.asarray(
+            _nemo_drag_rate_test_override[1], dtype=_dt)
+        if _drag_r_u.shape != U_bar.shape or _drag_r_v.shape != V_bar.shape:
+            raise ValueError(
+                "barotropic drag-rate substitution shape mismatch: "
+                f"got {_drag_r_u.shape}/{_drag_r_v.shape}, expected "
+                f"{U_bar.shape}/{V_bar.shape}")
+    elif getattr(config, "barotropic_drag_substep", False):
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             nemo_bottom_drag_rate_faces,
         )
@@ -2745,7 +2763,6 @@ def barotropic_substeps_latlon_cgrid(
             _drag_r_t = _drag_values[4]
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
-
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype, substep_scale=substep_scale)
     w_transport, _transport_divisor = _transport_accumulator_weights(

@@ -1029,6 +1029,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # are test-only arrays, never constructible configuration selectors.
     slow_forcing_incoming_override: object = None
     barotropic_slow_forcing_override: object = None
+    # Substitute the two frozen positive face drag-rate arrays at the external
+    # solver boundary.  Private fidelity measurement only: NEMO has no
+    # selector for these coefficients and no public config can reach this.
+    barotropic_drag_rate_override: object = None
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
     # leaving legoESM's deviation-form carried state untouched.  Private
     # decision-33 measurement only.
@@ -6068,6 +6072,15 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_legacy_seed_faces_test_override=True)
+                if (
+                    self._nemo_ws_test_hooks
+                    .barotropic_drag_rate_override is not None
+                ):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_drag_rate_test_override=(
+                            self._nemo_ws_test_hooks
+                            .barotropic_drag_rate_override))
                 if (self._nemo_ws_test_hooks
                         .barotropic_raw_history_override is not None):
                     _baro_seed = dict(

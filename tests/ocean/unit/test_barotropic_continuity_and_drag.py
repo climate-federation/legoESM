@@ -318,6 +318,40 @@ class TestBottomDragSingleOwner:
             "barotropic drag closer to the DOUBLE-counted rate than the "
             "single-owner rate (finding #6 regression)")
 
+    def test_private_drag_rate_override_reaches_the_substep(self):
+        """Round-15 fidelity hook substitutes rates, never configuration."""
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16)
+        u0 = jnp.full(state.u.data.shape, 0.2) \
+            * state.u_mask.data[..., None]
+        state = state._replace(u=state.u.replace(data=u0))
+        cfg = _cfg(
+            barotropic_time_filter="box", barotropic_drag_substep=True)
+        cfg = cfg._replace(constants=cfg.constants._replace(g=0.0))
+        zero = (jnp.zeros_like(state.u_mask.data),
+                jnp.zeros_like(state.v_mask.data))
+        active = (jnp.full_like(state.u_mask.data, 1.0e-3),
+                  jnp.full_like(state.v_mask.data, 1.0e-3))
+        no_drag, _ = barotropic_substeps_latlon_cgrid(
+            state, 30.0, 2, grid, z, cfg, add_barotropic_coriolis=False,
+            _nemo_drag_rate_test_override=zero)
+        with_drag, _ = barotropic_substeps_latlon_cgrid(
+            state, 30.0, 2, grid, z, cfg, add_barotropic_coriolis=False,
+            _nemo_drag_rate_test_override=active)
+        wet = np.asarray(state.u_mask.data) > 0.0
+        assert np.max(np.abs(
+            np.asarray(with_drag.u.data)[..., 0][wet]
+            - np.asarray(no_drag.u.data)[..., 0][wet])) > 0.0
+
+    def test_private_drag_rate_override_refuses_bad_shapes(self):
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16)
+        cfg = _cfg(
+            barotropic_time_filter="box", barotropic_drag_substep=True)
+        bad = (jnp.zeros((1, 1)), jnp.zeros_like(state.v_mask.data))
+        with pytest.raises(ValueError, match="shape mismatch"):
+            barotropic_substeps_latlon_cgrid(
+                state, 30.0, 2, grid, z, cfg,
+                _nemo_drag_rate_test_override=bad)
+
 
 class TestBarotropicFaceDepthNemoSshAvg:
     """#1226 ``barotropic_face_depth="nemo_ssh_avg"`` (dynspg_ts.F90:568-592
