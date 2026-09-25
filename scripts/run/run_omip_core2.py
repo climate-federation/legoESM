@@ -5765,6 +5765,15 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True
         print(f"[transports] MHT diag skipped: {type(e).__name__}: {e}")
 
 
+def _day_tag(day: float) -> str:
+    """Snapshot tag: ``dayNNNN`` on whole days (unchanged for every existing
+    consumer), ``dayNNNN.fff`` for a sub-daily cadence, which previously
+    rounded to the integer and OVERWROTE the earlier snapshots of that day."""
+    if abs(day - round(day)) < 1e-6:
+        return f"day{int(round(day)):04d}"
+    return f"day{day:08.3f}"
+
+
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
                    io_proc: bool = True, ice_state=None, grid=None,
                    step: int | None = None, day: float | None = None,
@@ -10011,7 +10020,7 @@ def main() -> int:
                     _close_csv()
                     return 1
             if snap_every > 0 and step % snap_every == 0 and step != n_steps:
-                _save_snapshot(out_dir, f"day{int(round(day)):04d}",
+                _save_snapshot(out_dir, _day_tag(day),
                                state, lat2d, lon2d, z_coord=z_coord,
                                io_proc=_is_io_proc(), grid=grid,
                                step=step, day=day)
@@ -11036,7 +11045,7 @@ def main() -> int:
             # state is gathered here (counted) and re-sharded lazily at the
             # next step's _ensure_sharded_state.
             state = _ensure_global_state(state)
-            _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d,
+            _save_snapshot(out_dir, _day_tag(day), state, lat2d,
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state, grid=grid,
                            step=step, day=day,
