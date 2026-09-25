@@ -4143,6 +4143,11 @@ def main(argv=None) -> int:
     parser.add_argument("--developed-rhs-root", type=Path, default=None)
     parser.add_argument("--developed-rhs-family-root", type=Path,
                         default=None)
+    parser.add_argument("--developed-tke-walk", action="store_true",
+                        help="walk the developed step-1081 TKE closure across "
+                             "the admitted Round-164 records")
+    parser.add_argument("--developed-tke-record-root", type=Path,
+                        default=None)
     parser.add_argument("--developed-stage2-adv-split", action="store_true",
                         help="split NEMO's vector-invariant dyn_adv into its "
                              "kinetic-energy gradient and vertical advection "
@@ -4314,6 +4319,29 @@ def main(argv=None) -> int:
                 f"plant {args.plant!r} did not fire")
         print("DEVELOPED STAGE-1 OUTPUT FIRST NON-BIT: "
               f"{report['first_non_bit']}")
+        print("STATUS PASS")
+        return 0
+    if args.developed_tke_walk:
+        require(args.expect_commit is not None,
+                "--developed-tke-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-tke-walk needs --daily-record-audit")
+        require(args.developed_tke_record_root is not None,
+                "--developed-tke-walk needs --developed-tke-record-root")
+        report = developed_tke_statement_walk(
+            args.daily_record_root, args.daily_record_audit,
+            args.expect_commit, args.developed_tke_record_root,
+            args.root, plant=args.plant)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: {report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print("DEVELOPED TKE FIRST NON-BIT: "
+              f"{report['first_non_bit_statement']}")
         print("STATUS PASS")
         return 0
     if args.developed_process_rank_split:
@@ -7234,6 +7262,303 @@ def _score_stage2_face(actual, expected, mask) -> dict:
         "active_rms": float(
             np.sqrt(np.mean(delta * delta)) if delta.size else 0.0),
     }
+
+
+def _developed_tke_records(root: Path) -> dict:
+    """Admit the two Round-164 streams and their same-build duplicates."""
+    root = Path(root)
+    operands_path = root / "oracle_tke_operands_kt00001081.bin"
+    statements_path = root / "oracle_tke_statement_walk_kt00001081.bin"
+    producer_path = root / "producer_commit.txt"
+    require(producer_path.is_file(), f"missing {producer_path}")
+    producer = producer_path.read_text(encoding="utf-8").strip()
+    require(re.fullmatch(r"[0-9a-f]{40}", producer) is not None,
+            f"malformed developed-TKE producer commit {producer!r}")
+    for path in (operands_path, statements_path):
+        stamp = Path(str(path) + ".stamp")
+        require(path.is_file() and stamp.is_file(),
+                f"developed-TKE stream or stamp is missing: {path}")
+        parts = stamp.read_text(encoding="utf-8").strip().split()
+        require(parts == [_sha256(path), producer, path.name],
+                f"developed-TKE stamp disagrees for {path.name}: {parts}")
+
+    round54 = _load(
+        "nemo_testcase_l2_gyre_round54_tke_operands",
+        "nemo_testcase_l2_gyre_round54_tke_operands.py")
+    stage_gate = _load(
+        "nemo_testcase_l2_gyre_round46_kt2_stage_gate",
+        "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py")
+    operands = round54.read_record(
+        operands_path, expected_kt=DEVELOPED_PROCESS_STEP,
+        expected_slots=(1, 1))
+    statements = stage_gate.read_tke_statement_walk_record(
+        statements_path, expected_kt=DEVELOPED_PROCESS_STEP,
+        expected_slots=(1, 1))
+
+    duplicate_rows = {}
+    for name in ("en_entry", "rhs_pre_sweep", "en_post_sweep"):
+        left = np.asarray(statements["arrays"][name])[..., :PROCESS_JPK - 1]
+        right = np.asarray(operands["arrays"][name])[..., :PROCESS_JPK - 1]
+        require(left.shape == right.shape,
+                f"developed-TKE duplicate {name} shapes differ")
+        different = left.view(np.uint64) != right.view(np.uint64)
+        duplicate_rows[name] = {
+            "cells": int(left.size),
+            "cells_unequal": int(np.count_nonzero(different)),
+            "max_abs": float(np.max(np.abs(left - right), initial=0.0)),
+            "bit_exact": not bool(np.any(different)),
+        }
+    require(all(row["bit_exact"] for row in duplicate_rows.values()),
+            f"same-build developed-TKE duplicates moved: {duplicate_rows}")
+    return {
+        "producer_commit": producer,
+        "operand_path": str(operands_path),
+        "statement_path": str(statements_path),
+        "operand_sha256": _sha256(operands_path),
+        "statement_sha256": _sha256(statements_path),
+        "operands": operands,
+        "statements": statements,
+        "duplicate_rows": duplicate_rows,
+    }
+
+
+def developed_tke_statement_walk(
+        daily_root: Path, daily_audit: Path, expected_commit: str,
+        record_root: Path, evidence_root: Path, *,
+        plant: str | None = None) -> dict:
+    """Walk step-1081 TKE through the existing production-jitted program."""
+    require(plant in (None, "none", "developed-tke-entry-ulp"),
+            f"unknown developed-TKE plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    from legoesm.ocean.physics.vertical_mixing import tke as tke_module
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"developed-TKE walk requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "developed-TKE walk commit differs from --expect-commit")
+    records = _developed_tke_records(record_root)
+    bundle = _developed_entry_bundle(daily_root, daily_audit, expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    state = bundle["state"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(bundle["payload"]["ssha"])
+
+    mixing_calls = []
+    real_mixing = tke_module.compute_mixing_lengths
+
+    def capture_mixing(*args, **kwargs):
+        momentum, dissipation = real_mixing(*args, **kwargs)
+
+        def sink(left, right):
+            mixing_calls.append((np.asarray(left), np.asarray(right)))
+
+        jax.debug.callback(sink, momentum, dissipation, ordered=True)
+        return momentum, dissipation
+
+    hooks = _NEMOWSRK3TestHooks(expose_live_stage_operands=True)
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks)
+    tke_module.compute_mixing_lengths = capture_mixing
+    try:
+        trace = trace_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        jax.device_get(trace)
+        jax.effects_barrier()
+    finally:
+        tke_module.compute_mixing_lengths = real_mixing
+    require(len(mixing_calls) == 1,
+            f"production step observed {len(mixing_calls)} mixing-length calls")
+    ordinary = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config).step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+    observer_bytes = _state_bit_mismatches(trace.state_after, ordinary)
+    require(observer_bytes == 0,
+            f"developed-TKE observer moved {observer_bytes} state bytes")
+
+    if plant == "developed-tke-entry-ulp":
+        planted = np.asarray(state.tke.data).copy()
+        candidates = np.argwhere(np.isfinite(planted) & (planted != 0.0))
+        require(candidates.size > 0,
+                "developed-TKE plant found no nonzero entry energy")
+        index = tuple(int(value) for value in candidates[
+            int(np.argmax(np.abs(planted[tuple(candidates.T)])))])
+        before = planted[index]
+        planted[index] = np.nextafter(before, np.inf)
+        planted_state = state._replace(
+            tke=state.tke.replace(data=jnp.asarray(planted)))
+        planted_trace = trace_model.step(
+            planted_state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        jax.device_get(planted_trace)
+        clean_fields = trace.tke_statement_trace
+        moved_fields = planted_trace.tke_statement_trace
+        moved = {}
+        for name in (
+                "en_entry", "en_after_boundaries", "en_after_langmuir",
+                "rhs_pre_sweep", "en_post_sweep"):
+            left = np.asarray(getattr(clean_fields, name))
+            right = np.asarray(getattr(moved_fields, name))
+            moved[name] = int(np.count_nonzero(
+                left.view(np.uint64) != right.view(np.uint64)))
+        require(any(value > 0 for value in moved.values()),
+                f"developed-TKE entry ULP moved no registered row: {moved}")
+        return {
+            "status": "PLANT-FIRED", "plant": plant,
+            "control": {"index": list(index), "baseline": float(before),
+                        "moved_rows": moved},
+        }
+
+    oracle = records["operands"]["arrays"]
+    statement_oracle = records["statements"]["arrays"]
+    production = trace.tke_statement_trace
+
+    def yx(name, *, statement=False):
+        source = statement_oracle if statement else oracle
+        return np.asarray(source[name], dtype=np.float64).swapaxes(0, 1)
+
+    wet30 = yx("wmask")[..., :PROCESS_JPK - 1] != 0.0
+    wet29 = yx("wmask")[..., 1:PROCESS_JPK - 1] != 0.0
+
+    def scored(actual, expected, mask, citation):
+        row = _score_developed_row(
+            np.asarray(actual, dtype=np.float64),
+            np.asarray(expected, dtype=np.float64), np.asarray(mask))
+        row["nemo_statement"] = citation
+        return row
+
+    statement_rows = {
+        "en_entry": scored(
+            production.en_entry, yx("en_entry", statement=True)[..., 1:30],
+            wet29, "zdftke.f90:267"),
+        "en_after_boundaries": scored(
+            production.en_after_boundaries,
+            yx("en_after_boundaries", statement=True)[..., :30], wet30,
+            "zdftke.f90:283-323"),
+        "en_after_langmuir": scored(
+            production.en_after_langmuir,
+            yx("en_after_langmuir", statement=True)[..., :30], wet30,
+            "zdftke.f90:325-394"),
+        "matrix_upper": scored(
+            production.matrix_upper, yx("matrix_upper")[..., 1:30], wet29,
+            "zdftke.f90:424-433"),
+        "matrix_lower": scored(
+            production.matrix_lower, yx("matrix_lower")[..., 1:30], wet29,
+            "zdftke.f90:424-434"),
+        "matrix_diagonal": scored(
+            production.matrix_diag, yx("matrix_diag")[..., 1:30], wet29,
+            "zdftke.f90:424-435"),
+        "rhs_pre_sweep": scored(
+            production.rhs_pre_sweep,
+            yx("rhs_pre_sweep", statement=True)[..., :30], wet30,
+            "zdftke.f90:438-441"),
+        "en_post_sweep": scored(
+            production.en_post_sweep,
+            yx("en_post_sweep", statement=True)[..., :30], wet30,
+            "zdftke.f90:475-494"),
+    }
+    operand_rows = {
+        "entry_en": scored(
+            trace.tke_entry, yx("en_entry")[..., 1:30], wet29,
+            "zdftke.f90:267"),
+        "p_sh2": scored(
+            production.rhs_shear, yx("sh2")[..., 1:30], wet29,
+            "zdftke.f90:438"),
+        "entry_avm": scored(
+            state.tke_avm.data, yx("avm_entry")[..., 1:30], wet29,
+            "zdftke.f90:428-431,435"),
+        "entry_avt": scored(
+            state.tke_avt.data, yx("avt_entry")[..., 1:30], wet29,
+            "zdftke.f90:439"),
+        "entry_dissl": scored(
+            state.tke_dissl.data, yx("dissl_entry")[..., 1:30], wet29,
+            "zdftke.f90:435,440"),
+        "rn2": scored(
+            production.bn2_output, yx("rn2")[..., 1:30], wet29,
+            "zdftke.f90:439"),
+    }
+    mixing_momentum, mixing_dissipation = mixing_calls[0]
+    closure_rows = {
+        "mxl_momentum": scored(
+            mixing_momentum, yx("mxl_momentum")[..., 1:30], wet29,
+            "zdftke.f90:611-693"),
+        "mxl_dissipation": scored(
+            mixing_dissipation, yx("mxl_dissipation")[..., 1:30], wet29,
+            "zdftke.f90:611-693"),
+        "avm_closure": scored(
+            trace.state_after.tke_avm.data,
+            yx("avm_closure")[..., 1:30], wet29,
+            "zdftke.f90:700-704"),
+        "avt_closure": scored(
+            trace.state_after.tke_avt.data,
+            yx("avt_closure")[..., 1:30], wet29,
+            "zdftke.f90:700-712"),
+        "dissl_output": scored(
+            trace.state_after.tke_dissl.data,
+            yx("dissl_output")[..., 1:30], wet29,
+            "zdftke.f90:700-705"),
+        "zdfphy_avt_copy": scored(
+            trace.state_after.tke_avt.data,
+            yx("avt_pre_evd")[..., 1:30], wet29,
+            "zdfphy.f90:348-354"),
+    }
+    ordered = (
+        "en_entry", "en_after_boundaries", "en_after_langmuir",
+        "matrix_upper", "matrix_lower", "matrix_diagonal",
+        "rhs_pre_sweep", "en_post_sweep")
+    first_statement = next(
+        (name for name in ordered if not statement_rows[name]["bit_exact"]),
+        "NONE")
+    operand_order = (
+        "entry_en", "entry_avm", "entry_dissl", "p_sh2", "entry_avt",
+        "rn2")
+    first_operand = next(
+        (name for name in operand_order if not operand_rows[name]["bit_exact"]),
+        "NONE")
+    report = {
+        "format": "gyre-round165-developed-tke-statement-walk-v1",
+        "status": "PASS", "worktree": stamp,
+        "entry_step": DEVELOPED_ENTRY_STEP,
+        "process_step": DEVELOPED_PROCESS_STEP,
+        "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
+        "admission": {
+            key: value for key, value in records.items()
+            if key not in ("operands", "statements")},
+        "observer_state_unequal_bytes": observer_bytes,
+        "statement_order": list(ordered),
+        "statement_rows": statement_rows,
+        "operand_order": list(operand_order),
+        "operand_rows": operand_rows,
+        "closure_rows": closure_rows,
+        "first_non_bit_statement": first_statement,
+        "first_non_bit_operand": first_operand,
+        "predictions": {
+            "entry_boundary_langmuir_bit": all(
+                statement_rows[name]["bit_exact"] for name in
+                ("en_entry", "en_after_boundaries", "en_after_langmuir")),
+            "first_non_bit_statement_is_rhs": (
+                first_statement == "rhs_pre_sweep"),
+            "first_non_bit_rhs_operand_is_sh2": first_operand == "p_sh2",
+        },
+    }
+    report["all_frozen_predictions_confirmed"] = all(
+        report["predictions"].values())
+    Path(evidence_root).mkdir(parents=True, exist_ok=True)
+    return report
 
 
 def developed_stage1_output_walk(

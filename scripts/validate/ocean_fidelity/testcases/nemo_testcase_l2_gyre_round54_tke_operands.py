@@ -199,7 +199,13 @@ def _calibrate_en_and_mixing(arrays: dict, head: dict) -> dict[str, int]:
     return counts
 
 
-def read_record(path: Path, *, plant: str | None = None) -> dict:
+def read_record(
+    path: Path,
+    *,
+    plant: str | None = None,
+    expected_kt: int = 2,
+    expected_slots: tuple[int, int] = (3, 3),
+) -> dict:
     raw = path.read_bytes()
     if plant == "truncation":
         raw = raw[:-8]
@@ -222,10 +228,13 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     head = dict(zip(keys, header, strict=True))
     if plant == "slot":
         head["Kbb"] = 1
+    expected_clock = (2, expected_kt, *expected_slots)
     require(
         (head["version"], head["kt"], head["Kbb"], head["Kmm"])
-        == (2, 2, 3, 3),
-        "TKE record slot mismatch: expected version=2/kt=2/Kbb=3/Kmm=3, "
+        == expected_clock,
+        "TKE record slot mismatch: expected "
+        f"version=2/kt={expected_kt}/Kbb={expected_slots[0]}/"
+        f"Kmm={expected_slots[1]}, "
         f"got version={head['version']}/kt={head['kt']}/"
         f"Kbb={head['Kbb']}/Kmm={head['Kmm']}",
     )
