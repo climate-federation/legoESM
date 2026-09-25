@@ -94,6 +94,12 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynvor.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/dynvor.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo/in_out_manager.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo"
+        "/in_out_manager.f90"),
     # --- round 40 paths: the stage-3 momentum operators and zdf_mxl ---
     "dynvor.F90": _DYN / "dynvor.F90",
     "dynkeg.F90": _DYN / "dynkeg.F90",
@@ -650,6 +656,30 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 card round 18: ranked halo admission and operand walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:445-455': [
+        '! Round-17 WRITE-only per-rank stream.',
+        ('ENDIF', 14), 11],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:539-544': [
+        '! values of zhup2_e and zhvp2_e on the halo are not needed in bdy_vol2d',
+        'zhU(ji,jj) = e2u(ji,jj) * ua_e(ji,jj) * zhup2_e(ji,jj)', 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:562-569': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
+        'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 8],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:571-574': [
+        'IF( kt == nit000 .AND. jn <= 2 ) THEN',
+        ('ENDIF', 21), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:845-848': [
+        ('IF( kt == nit000 ) THEN', 4),
+        ('ENDIF', 41), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/in_out_manager.f90:180-180':
+        'lwp      = .FALSE.    !: boolean : true on the 1st processor only',
     # --- ORCA2 card round 15: source-ordered split-explicit solver walk ---
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
     '/dynspg_ts.f90:339-347': [
