@@ -12362,7 +12362,7 @@ def developed_vertical_day240_sensitivity(
 
     final_states = {}
     identity_bytes = 0
-    arms = (["free", "identity", "heat_K"]
+    arms = (["heat_K"]
             if plant == "developed-vertical-avt-ulp" else
             ["free", "identity", "heat_K", "effective_K"])
     for arm in arms:
@@ -12371,6 +12371,25 @@ def developed_vertical_day240_sensitivity(
         if arm_state is None:
             break
         final_states[arm] = arm_state
+
+    if plant == "developed-vertical-avt-ulp":
+        planted_state, _ = run_arm("heat_K_ulp", plant_first_heat=True)
+        baseline_matrix = first_step["heat_K"]["vertical"]
+        planted_matrix = first_step["heat_K_ulp"]["vertical"]
+        matrix_moved = sum(
+            _different_cells(baseline_matrix[name], planted_matrix[name], wet)
+            for name in ("lower", "diagonal", "upper"))
+        final_t_moved = _different_cells(
+            gate.lego_fields(final_states["heat_K"])["T"],
+            gate.lego_fields(planted_state)["T"], wet)
+        if matrix_moved == 0 or final_t_moved == 0:
+            raise GateError(
+                "PLANT-BLIND: one-ULP recorded avt moved "
+                f"matrix={matrix_moved}, day240_T={final_t_moved}")
+        raise GateError(
+            "one-ULP recorded avt was caught: "
+            f"index={first_step['plant']['index_jik']}, "
+            f"matrix_cells={matrix_moved}, day240_T_cells={final_t_moved}")
 
     year = _year()
     final_restart = year._daily_restart_path(daily_root, PROCESS_END_STEP)
@@ -12422,25 +12441,6 @@ def developed_vertical_day240_sensitivity(
             nemo_effective, interface_wet)
     require(identity_bytes == 0,
             "identity coefficient arm moved the production trajectory")
-
-    if plant == "developed-vertical-avt-ulp":
-        planted_state, _ = run_arm("heat_K_ulp", plant_first_heat=True)
-        baseline_matrix = first_step["heat_K"]["vertical"]
-        planted_matrix = first_step["heat_K_ulp"]["vertical"]
-        matrix_moved = sum(
-            _different_cells(baseline_matrix[name], planted_matrix[name], wet)
-            for name in ("lower", "diagonal", "upper"))
-        final_t_moved = _different_cells(
-            gate.lego_fields(final_states["heat_K"])["T"],
-            gate.lego_fields(planted_state)["T"], wet)
-        if matrix_moved == 0 or final_t_moved == 0:
-            raise GateError(
-                "PLANT-BLIND: one-ULP recorded avt moved "
-                f"matrix={matrix_moved}, day240_T={final_t_moved}")
-        raise GateError(
-            "one-ULP recorded avt was caught: "
-            f"index={first_step['plant']['index_jik']}, "
-            f"matrix_cells={matrix_moved}, day240_T_cells={final_t_moved}")
 
     historical = {}
     for name, item in ROUND167_HISTORICAL_ARTIFACTS.items():
