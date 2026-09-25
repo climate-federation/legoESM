@@ -117,3 +117,18 @@ def test_refused_row_without_device_count_does_not_crash(tmp_path):
         json.dumps(_tri(8, 100.0, n_devices=None)) + "\n"
         + json.dumps(_tri(8, 100.0)) + "\n")
     assert _main(tmp_path) == 0
+
+
+def test_pbs_float64_rows_are_dated_not_crashed(tmp_path):
+    """A PBS/PALS receipt stamps slurm_job_id="" -- the float64 filter keys a
+    job-less row on its timestamp instead of crashing on int(""): rows after
+    the fp64-state fix pair up, older (or undated) ones are refused (here: no common row, exit 2)."""
+    new = {"slurm_job_id": "", "timestamp_utc": "2026-09-25T08:00:00+00:00"}
+    old = {"slurm_job_id": "", "timestamp_utc": "2026-08-20T08:00:00+00:00"}
+    _write(tmp_path / "b", "tri_d8", _tri(8, 100.0, precision="float64", metadata=new))
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, precision="float64", metadata=new))
+    assert _main(tmp_path, nlev="26") == 0
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, precision="float64", metadata=old))
+    assert _main(tmp_path, nlev="26") == 2
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, precision="float64", metadata={}))
+    assert _main(tmp_path, nlev="26") == 2
