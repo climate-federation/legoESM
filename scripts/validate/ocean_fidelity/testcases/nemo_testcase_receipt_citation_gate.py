@@ -1865,9 +1865,12 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:6807-6876': [
         '_stage3_T_rate = (',
         '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 70],
+    # Extent 433 -> 434 at the 2026-09-25 merge: main added one line inside
+    # this span (``omega=_cfg_b.omega,`` on the isoneutral K33 call), so the
+    # two pinned endpoint statements are one line further apart than before.
     'ocean_model_latlon_cgrid.py:7834-8267': [
         'T_mid = state_new.T.data',
-        'S_mid = S_mid + dt * dS_gm * active_3d', 433],
+        'S_mid = S_mid + dt * dS_gm * active_3d', 434],
     'ocean_model_latlon_cgrid.py:8461-8502': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
         'return_final_content=True,', 42],
