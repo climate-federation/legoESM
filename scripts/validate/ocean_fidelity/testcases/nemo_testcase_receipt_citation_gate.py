@@ -745,9 +745,8 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdftke.f90:700-705': [
         'DO jk =  1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)   !* vertical eddy viscosity',
         'dissl(ji,jj,jk) = zsqen / zmxld(ji,jk)', 6],
-    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdftke.f90:711-712': [
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdftke.f90:711':
         'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk)',
-        '& wmask(ji,jj,jk)', 2],
     # --- round 162: the T-point ratio, its statement and its two readers ---
     # The ratio at the T point is a single product of the stage sea surface
     # height, and it is the ONE operand of the velocity-indicator continuity
@@ -3143,7 +3142,7 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:542-553': [
         '!     Compute Sea Level at step jit+1',
         'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
-        15],
+        12],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:593-607': [
         '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
         'zv_spg(ji,jj) = - zldg * ( zsshp2_e(ji,jj+1) - zsshp2_e(ji,jj) ) * r1_e2v(ji,jj)',
