@@ -7292,11 +7292,13 @@ def developed_stage1_output_walk(
     if plant == "stage1-entry-u-ulp":
         planted_u = np.array(state.u.data, copy=True)
         active = np.asarray(state.u_mask.data) != 0.0
-        candidates = np.argwhere(active & np.isfinite(planted_u)
-                                 & (planted_u != 0.0))
+        candidate_mask = (active[..., None] & np.isfinite(planted_u)
+                          & (planted_u != 0.0))
+        candidates = np.argwhere(candidate_mask)
         require(candidates.size > 0, "stage-1 entry plant found no live U")
+        candidate_values = planted_u[tuple(candidates.T)]
         index = tuple(int(value) for value in candidates[
-            int(np.argmax(np.abs(planted_u[active])))])
+            int(np.argmax(np.abs(candidate_values)))])
         planted_u[index] = np.nextafter(planted_u[index], np.inf)
         planted_state = state._replace(
             u=state.u.replace(data=jnp.asarray(planted_u)))
