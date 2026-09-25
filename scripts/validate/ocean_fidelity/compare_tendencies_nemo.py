@@ -390,7 +390,8 @@ def _bathy_kwargs(T_raw, e3t_raw, cfg):
 
 
 def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
-                        ice_frac=None, use_bathy=False):
+                        ice_frac=None, use_bathy=False,
+                        n_iterations=1, dt_s=3600.0):
     # The closure gates bottom_dirichlet behind TKEConfig.bottom_tke_bc and
     # raises if the value is supplied with the gate off -- a second
     # silent-no-op guard, and it fired. Enabling it is part of THIS arm's one
@@ -438,8 +439,13 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
         tau_x_surface=jnp.asarray(taum),
         tau_y_surface=jnp.zeros_like(jnp.asarray(taum)),
         taum_surface=jnp.asarray(taum),
-        dt=3600.0, cfg=cfg_prog, rho_0=constants.rho_ocean, g=constants.g,
-        n_iterations=1,
+        # One 3600 s step is the closure-vs-closure test. Many steps on the
+        # SAME frozen state, seeded from NEMO's own en, ask a different
+        # question: does our TKE EQUATION hold the oracle's energy on the
+        # oracle's state, or drain it -- the prognostic equation, not the
+        # diagnostic K(en), which is all one step can see.
+        dt=float(dt_s), cfg=cfg_prog, rho_0=constants.rho_ocean, g=constants.g,
+        n_iterations=int(n_iterations),
         z_interface=jnp.asarray(z_interface),
         lat_deg=jnp.asarray(lat_deg),
         # NEMO's OWN ice concentration at this instant when supplied. Passing
@@ -1038,6 +1044,13 @@ def main():
                          "between OUR Mode-A closure and NEMO's ttrd_zdf on "
                          "NEMO's OWN state. Needs the mesh for e1t*e2t: "
                          "an unweighted integral on a tripole grid is wrong.")
+    ap.add_argument("--mode-a-iterations", type=int, default=1,
+                    help="Mode-A: number of backward-Euler TKE steps taken on "
+                         "the frozen restart state from NEMO's own en "
+                         "(default 1 = the closure-vs-closure test). Large "
+                         "values integrate to the equation's own fixed point.")
+    ap.add_argument("--mode-a-dt", type=float, default=3600.0,
+                    help="Mode-A step length [s] (default 3600 = NEMO's).")
     ap.add_argument("--use-bathy", action="store_true",
                     help="Tell the closure where each column's seafloor is "
                          "(bottom_level + w_active, derived from the state's "
@@ -1177,7 +1190,28 @@ def main():
         (K_H2, K_M2, n2_ours, e3w_a2, leps2, enew2,
          eseed2) = run_stage_a2_mode_a(
             d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm, ice_frac=_ice,
-            use_bathy=args.use_bathy)
+            use_bathy=args.use_bathy,
+            n_iterations=args.mode_a_iterations, dt_s=args.mode_a_dt)
+        # SEED vs STEPPED turbulent energy, per interface, cold-tongue calm
+        # columns. Under one step this is a near-identity; under many steps
+        # it is the prognostic-equation test: a ratio near 1 through the upper
+        # 30 m means our equation holds NEMO's energy on NEMO's own state.
+        _lon_col = d["lon"].reshape(-1) % 360.0
+        _box = (wet_pair.any(axis=1) & (np.abs(lat_col) <= 2.0)
+                & (_lon_col >= 220.0) & (_lon_col <= 240.0) & ~evd_cols)
+        print(f"\n[mode-a-en] {int(_box.sum())} calm columns 220-240E |lat|<=2; "
+              f"{args.mode_a_iterations} step(s) x {args.mode_a_dt:g} s = "
+              f"{args.mode_a_iterations * args.mode_a_dt / 3600.0:.1f} h on the "
+              "frozen restart state, seeded from NEMO's own en")
+        print("[mode-a-en]  depth m   en_seed(NEMO)   en_stepped(ours)   ratio")
+        _zi_med = np.nanmedian(np.where(_box[:, None], _z_iface, np.nan), axis=0)
+        for k in range(min(30, eseed2.shape[1])):
+            _sel = _box & np.isfinite(eseed2[:, k]) & (eseed2[:, k] > 0)
+            if not _sel.any():
+                continue
+            _s = float(np.median(eseed2[_sel, k])); _e = float(np.median(enew2[_sel, k]))
+            print(f"[mode-a-en]  {_zi_med[k]:7.1f}   {_s:12.3e}   {_e:14.3e}   "
+                  f"{_e / _s if _s > 0 else float('nan'):7.3f}")
         result["stage_a2_mode_a"] = region_report(
             # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
             # d["avt"], and load_pair(--rec 1) puts NEMO's RECORD 1 avt there —
