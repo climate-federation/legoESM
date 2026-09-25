@@ -66,3 +66,22 @@ configuration or a production physics branch.
 This is a developed-state sensitivity, not a landing candidate.  No production
 physics, configuration, carried state, immutable before arm, or pending user
 decision changes.  No NEMO acquisition is authorized.
+
+## Control re-preregistration after the frozen ULP prediction failed
+
+The first plant was run only after the scientific arms.  Its frozen prediction
+5 is **REFUTED** and remains part of the record: advancing one recorded
+`e3w_Kmm` value by one binary64 ULP on step 1081 moved two registered matrix
+cells but zero day-240 temperature cells.  The gate printed
+`STATUS PLANT-BLIND` and exited 2, so the scientific endpoint is withheld until
+a consumed control reaches it.
+
+Before running another plant, freeze this replacement control.  On step 1081
+only, multiply every finite positive active recorded `e3w_Kmm` interface by
+the exactly representable factor `1 + 2**-20`; all later steps use the
+unmodified record.  This is a synthetic violation, not a scientific arm.  It
+must move at least one registered matrix coefficient and at least one wet
+day-240 temperature cell, print `STATUS PLANT-FIRED`, and exit 1.  Any zero
+count, success marker, or exit 0 invalidates the instrument.  The ordinary
+baseline inside that plant run must still reproduce the already-recorded
+`complete_K_e3w` arm; no normal-arm arithmetic is changed.
