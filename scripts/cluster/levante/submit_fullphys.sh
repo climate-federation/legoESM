@@ -30,6 +30,19 @@
 set -euo pipefail
 
 REPO=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
+# BASELINE DECK for the MPAS arm, pinned 2026-09-23.  This script was built to
+# the 2026-07-30 directive that names Bechtold convection, and its MPAS arm
+# inherited the chain's CONFIG_YAML default, which became the CAM6 suite.  It
+# now names the configuration it was measured on.  ARM-SCOPED rather than a
+# script-global export (GLM round 3): a global export would also reach any arm
+# added later that is meant to follow production, which is the same class of
+# silent re-pointing this pin exists to prevent.  The lat-lon arm below sets
+# its own CONFIG_YAML and is untouched.
+# CONDITIONAL on purpose: the rename has not reached every checkout, and in a
+# tree that predates it the production deck IS the right baseline.
+BASELINE_DECK="${REPO}/config/amip/amip_sundqvist_l36.yaml"
+[[ -f "${BASELINE_DECK}" ]] || BASELINE_DECK="${REPO}/config/amip/amip_production.yaml"
+
 : "${TARGET_DAYS:=1825}"      # 5 yr first; extend once stable
 
 # Physics switches shared by BOTH grids.
@@ -56,6 +69,7 @@ MPAS_EXTRA="--grid-type voronoi --discretization mpas --resolution 5 --nlev 30 \
 --mpas-qv-smooth-del2-m2s 2e5 ${SHARED}"
 
 NAME=fullphys_mpas TARGET_DAYS="${TARGET_DAYS}" CENTURY_DECK=1 START_YEAR=1923 \
+CONFIG_YAML="${BASELINE_DECK}" \
 EXTRA="${MPAS_EXTRA}" \
 sbatch --job-name=fullphys_mpas --time=08:00:00 \
        "${REPO}/scripts/cluster/levante/amip_mpas_gpu_chain.sbatch"

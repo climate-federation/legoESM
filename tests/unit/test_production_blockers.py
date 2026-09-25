@@ -479,7 +479,7 @@ class TestMixedPrecisionSemantics:
             assert policy.accumulate == jnp.float64
             assert policy.control == jnp.float64
 
-    @pytest.mark.parametrize("mode", ["fp32", "fp64"])  # #1665: mixed refused
+    @pytest.mark.parametrize("mode", ["fp32", "fp64", "mixed"])  # #1675: mixed re-enabled
     def test_apply_precision_activates_policy(self, mode):
         """apply_precision must set global policy and enable x64 when needed."""
         from legoesm.runtime.precision import apply_precision
@@ -533,7 +533,7 @@ class TestMixedPrecisionSemantics:
         policy = get_runtime_precision_policy()
         assert policy["ml"] == jnp.bfloat16
 
-    @pytest.mark.parametrize("mode", ["fp32", "fp64"])  # #1665: mixed refused
+    @pytest.mark.parametrize("mode", ["fp32", "fp64", "mixed"])  # #1675: mixed re-enabled
     def test_precision_policy_matches_mode(self, mode):
         """PrecisionPolicy must match the requested mode.
 

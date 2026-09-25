@@ -1147,6 +1147,27 @@ class FoldDescriptor(NamedTuple):
         Sign flip for u-component across the fold (typically -1.0).
     vector_sign_v : float
         Sign flip for v-component across the fold (typically -1.0).
+    pivot_row_stored : bool
+        Storage layout of the mesh's top row (measured, not assumed — see
+        ``check_tripole_fold_pairing.py``).  ``False`` (eORCA1.2-style,
+        "halo row stored"): the stored top row IS the duplicated fold-halo
+        row (top = permuted copy of the row below), so a ghost built from
+        the stored top row is consistent.  ``True`` (eORCA025-style,
+        "de-haloed"): the stored top row is the SELF-SYMMETRIC T-pivot row
+        (cell ``(i, j_max)`` and ``(perm_T[i], j_max)`` are the SAME
+        physical cell), the halo row was stripped, and the fold BC must
+        (a) build ghost rows from the rows BELOW the pivot
+        (``J+k <- J-k``) and (b) enforce the pivot row's half-mirror
+        self-duplication every step — otherwise the two mirror copies of
+        each wet fold cell evolve independently and the run blows up
+        (the eORCA025 step-23 NaN, 2026-08-26).
+    perm_u : jax.Array | None
+        (n_lon,) int32 — i-permutation for U stagger points (NEMO T-pivot:
+        ``(-i-1) % n_lon`` de-haloed, ``n_lon-2-i`` halo-stored).  ``None``
+        (legacy descriptors) falls back to ``perm_T``.
+    perm_f : jax.Array | None
+        (n_lon,) int32 — i-permutation for F/vertex stagger points.
+        ``None`` falls back to ``perm_v``.
     """
     is_active: bool
     fold_j: int
@@ -1155,6 +1176,9 @@ class FoldDescriptor(NamedTuple):
     perm_v: jax.Array
     vector_sign_u: float
     vector_sign_v: float
+    pivot_row_stored: bool = False
+    perm_u: jax.Array | None = None
+    perm_f: jax.Array | None = None
 
 
 def _inactive_fold(n_lon: int) -> FoldDescriptor:

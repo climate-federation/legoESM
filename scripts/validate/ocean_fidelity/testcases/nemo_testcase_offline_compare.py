@@ -66,6 +66,7 @@ def main(argv=None) -> int:
     result.update({
         "reference": str(args.reference), "candidate": str(args.candidate),
         "plant": args.plant, "row_filter_substring": substring,
+        "worktree": candidate.get("worktree"),
         "reference_worktree": reference.get("worktree", {}).get("commit"),
         "candidate_worktree": candidate.get("worktree", {}).get("commit"),
     })

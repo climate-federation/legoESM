@@ -24,7 +24,7 @@ REPO=/burg-archive/glab/users/pg2328/legoESM
 PREFIX_SHA=b9334f9b8
 cd $REPO || exit 1
 echo "=== HEAD $(git -C $REPO rev-parse HEAD)"
-export PYTHONPATH="$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
+export PYTHONPATH="$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python

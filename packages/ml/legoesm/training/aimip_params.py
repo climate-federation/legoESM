@@ -398,7 +398,14 @@ class AIMIPClassicalParams(eqx.Module):
             ``legoesm.core.bulk_flux.validate_bulk_scheme``.
         """
         d = self.as_dict()
-        base = SurfaceLayerConfig()
+        # The AIMIP lanes substitute the lowest air temperature for the
+        # surface wherever no surface is supplied (free-running spectral
+        # physics; NaN over land in the SST-anchored forcing), and the MOST
+        # height adjustment against such a "surface" invents an air-surface
+        # contrast and a downward sensible heat flux out of nothing.  Keep it
+        # off here (the scheme default is True) until this lane carries a
+        # real surface temperature everywhere.
+        base = SurfaceLayerConfig(z_ref_model_level=False)
         return base._replace(
             Cd_neutral=d["surface_Cd_neutral"],
             Ch_neutral=d["surface_Ch_neutral"],
@@ -1148,9 +1155,16 @@ def make_aimip_classical_spectral_physics(
     # training does not (see validate_classical_scheme_set).
     allow_unfilled_families: bool = False,
     land_mask: "jax.Array | None" = None,
+    # Production AMIP settings that live on the FAMILY config rather than on a
+    # scheme's own -- so the registry-keyed override route cannot address them,
+    # and they would otherwise sit silently at their library defaults while a
+    # deck claimed to match production.
+    orbital_insolation: bool = False,
+    convective_rain_to_surface: bool = False,
     split_rad: bool = False,
     rrtmgp_gpoint_checkpoint: bool = True,
     rrtmgp_gpoint_batch_size: int = 16,
+    rrtmgp_column_chunk_size: int = 0,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
@@ -1199,9 +1213,18 @@ def make_aimip_classical_spectral_physics(
     # without knowing which shape it holds.
     params, _bundle_overrides = unpack_aimip_params(params)
     if _bundle_overrides is not None:
-        param_overrides = {**_bundle_overrides, **(param_overrides or {})}
+        # MERGED PER FIELD, not per scheme_key: both sides address the same
+        # config by key, so a shallow merge silently DROPPED every trained
+        # field of any config the caller also pinned a fixed value on -- the
+        # cloud config being exactly that case (tuned overlap/sub-columns
+        # alongside trained rh_crit). The caller's value wins field by field.
+        merged = {k: dict(v) for k, v in _bundle_overrides.items()}
+        for key, fields in (param_overrides or {}).items():
+            merged.setdefault(key, {}).update(fields)
+        param_overrides = merged
 
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.radiation.solar import earth_orbit
     from legoesm.atmosphere.physics.radiation.config import (
         GrayRadiationConfig, RadiationConfig,
     )
@@ -1227,6 +1250,10 @@ def make_aimip_classical_spectral_physics(
     # property, not a radiation-scheme knob.)  Default ``gray`` keeps the
     # AIMIP harness tractable on a single GPU; bump to ``rrtmgp``
     # for production-grade physics realism.
+    # Realistic (elliptical) orbit, as the production AMIP deck runs; None
+    # keeps the circular-orbit default every earlier caller had.
+    _orbit = earth_orbit() if orbital_insolation else None
+
     # ---- Cloud config (trained when xu_randall, defaults otherwise) ----
     if cloud_scheme == "xu_randall":
         cloud_cfg_trained = params.to_cloud_config()
@@ -1311,6 +1338,7 @@ def make_aimip_classical_spectral_physics(
             include_clouds=(cloud_scheme != "none"),
             gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
             gpoint_batch_size=rrtmgp_gpoint_batch_size,
+            column_chunk_size=rrtmgp_column_chunk_size,
         )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",
@@ -1319,6 +1347,7 @@ def make_aimip_classical_spectral_physics(
             cloud_config=cloud_cfg_trained,
             update_interval_steps=rad_update_interval_steps,
             diurnal_cycle=True,
+            orbit=_orbit,
         )
     elif radiation == "gray":
         # Gray radiation runs at its published defaults — it is NOT
@@ -1342,6 +1371,7 @@ def make_aimip_classical_spectral_physics(
             scheme="gray",
             gray=gray_cfg,
             diurnal_cycle=True,
+            orbit=_orbit,
         )
     else:
         raise ValueError(
@@ -1360,6 +1390,12 @@ def make_aimip_classical_spectral_physics(
         )
     else:
         conv_cfg = ConvectionConfig(scheme=convection_scheme)
+    if convective_rain_to_surface:
+        # Production routes convective rain straight to the surface instead of
+        # detraining it into the resolved rain field for the microphysics to
+        # re-handle; the two give different surface precipitation and
+        # different re-evaporation.
+        conv_cfg = conv_cfg._replace(rain_to_surface=True)
 
     # ---- Turbulence (with optional spatial surface params) ----
     # When the surface knobs (``Cd_neutral``, ``Ch_neutral``, ``z0``)
@@ -1564,6 +1600,7 @@ def make_aimip_classical_spectral_physics(
         combined_fn.with_phys_state = combined_fn_with_phys_state
         combined_fn.init_phys_state = _init_phys_state_combined
         combined_fn.seed_phys_state = _seed_phys_state_combined
+        combined_fn.physics_config = physics_config
         return combined_fn
 
     # Rad-split path: separate non-radiative and radiative callables.
@@ -1661,6 +1698,13 @@ def make_aimip_classical_spectral_physics(
     non_rad_fn.with_phys_state = non_rad_fn_with_phys_state
     non_rad_fn.init_phys_state = _init_phys_state
     non_rad_fn.seed_phys_state = _seed_phys_state
+    # What each callable ACTUALLY runs, so a caller can assert that the deck's
+    # trained values, pinned settings, orbit and rain routing reached the model
+    # instead of trusting that they did. On this path the two halves carry
+    # DIFFERENT configurations -- the non-radiative families here, radiation on
+    # the rad callable below -- and exposing the pre-split whole would let a
+    # test pass on a config this lane never evaluates.
+    non_rad_fn.physics_config = non_rad_cfg
 
     def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None):
         # ``make_radiation_physics`` returns the per-module physics_fn
@@ -1696,4 +1740,5 @@ def make_aimip_classical_spectral_physics(
             rad_out = rad_out._replace(tracers=zero_tracers)
         return rad_out
 
+    rad_fn.radiation_config = rad_cfg
     return non_rad_fn, rad_fn

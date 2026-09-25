@@ -161,7 +161,7 @@ def test_sharding_padded_mesh_derives_the_same_coefficient():
     z = create_ocean_z_star(n_levels=3, H_max=1000.0)
     plain = MPASOceanModel(mesh, z, MPASOceanConfig(K_zeta_bih=None)).config
 
-    padded = reorder_voronoi_for_sharding(mesh, 7)   # 7 does not divide this mesh
+    padded = reorder_voronoi_for_sharding(mesh, 7, edge_order="owner")  # 7 does not divide this mesh
     n_ghost = int(np.asarray(padded.dvEdge).size) - int(np.asarray(mesh.dvEdge).size)
     assert n_ghost > 0, "this mesh/device count must actually pad, or the gate is vacuous"
     assert float(np.asarray(padded.dcEdge).min()) == pytest.approx(1.0), \

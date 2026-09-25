@@ -15,6 +15,7 @@ unrecognized schemes raise ``NotImplementedError`` rather than no-op.
 from __future__ import annotations
 
 import pytest
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -555,3 +556,44 @@ class TestConvectionDispatch:
         land_idx = land_idx[land_idx >= 0]
         if land_idx.size > 0:
             assert float(jnp.max(jnp.abs(tend.dT_dt.data[land_idx]))) == 0.0
+
+
+class TestExternalRGBChlPenetration:
+    """--sw-rgb-chl on the MPAS lane: when the coupler attaches a surface
+    chlorophyll field the 'external' scheme MUST route the penetrating SW
+    through the SHARED NEMO RGB kernel (apply_shortwave_penetration,
+    scheme='rgb_chl') instead of the fixed two-band Jerlov profile.  The
+    decisive no-silent-no-op check: the SW temperature tendency DIFFERS
+    between chl=None (Jerlov) and a nonzero chl (RGB), proving chl reaches
+    the MPAS penetration kernel."""
+
+    def _sw_sf(self, state, *, chl):
+        from legoesm.ocean.state import OceanSurfaceForcing
+        mask = state.land_mask.data
+        return OceanSurfaceForcing(
+            sw_down=mask * 200.0,        # W/m^2 incident SW
+            q_net=mask * 100.0,          # W/m^2 net heat
+            tau_x=None, tau_y=None,
+            freshwater=None, salt_flux=None,
+            chl=chl)
+
+    def test_chl_changes_mpas_sw_penetration(self, mesh, z_coord, state):
+        fn = make_mpas_ocean_physics(_physics_config("external"))
+        mask = state.land_mask.data
+
+        dT_jerlov = fn(state, mesh, z_coord,
+                       surface_forcing=self._sw_sf(state, chl=None)).dT_dt.data
+        dT_rgb = fn(state, mesh, z_coord,
+                    surface_forcing=self._sw_sf(
+                        state, chl=mask * 0.3)).dT_dt.data  # 0.3 mg/m^3
+
+        assert bool(jnp.all(jnp.isfinite(dT_jerlov)))
+        assert bool(jnp.all(jnp.isfinite(dT_rgb)))
+        # Both schemes must actually heat the column (SW is nonzero).
+        assert float(jnp.max(jnp.abs(dT_jerlov))) > 0.0, "Jerlov SW did not heat"
+        assert float(jnp.max(jnp.abs(dT_rgb))) > 0.0, "RGB SW did not heat"
+        # Non-vacuity: chl must reach the kernel -> the two profiles DIFFER.
+        max_diff = float(jnp.max(jnp.abs(dT_rgb - dT_jerlov)))
+        assert max_diff > 1e-9, (
+            "chl did not change the MPAS SW penetration profile — the RGB "
+            "kernel was not reached (silent no-op)")

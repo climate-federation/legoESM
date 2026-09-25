@@ -371,7 +371,7 @@ def emanuel_convection(
     # surrogate leaves a nonzero ln(2)/sharpness mass-flux floor; in RCE
     # that floor drove persistent heating even after CAPE was exhausted.
     cbmf_new = jnp.maximum(cbmf_new, 0.0)
-    # See ZhangMcFarlaneConfig.M_b_max.
+    # Hard cap on the cloud-base mass flux [kg/m^2/s] (config.M_b_max).
     M_b = jnp.clip(cbmf_new, 0.0, config.M_b_max)
 
     if config.use_genuine_mixing:

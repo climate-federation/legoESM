@@ -353,6 +353,25 @@ def test_nemo_gyre_coordinate_is_consistent_clean_w_bc():
     assert np.max(np.abs(w[:, :, -1])) == 0.0
 
 
+def test_generic_gyre_vector_ldf_does_not_execute_nemo_e3_builder(monkeypatch):
+    """The native vector-Laplacian card must not execute dead NEMO-e3 geometry."""
+    from legoesm.ocean import vertical
+
+    recipe = build_nemo_gyre_recipe()
+    assert recipe.model_config.lateral_viscosity_operator == "vector_laplacian"
+    assert recipe.model_config.lateral_viscosity_e3_weighting == "off"
+
+    def refuse_dead_geometry(*args, **kwargs):
+        raise AssertionError("vector-Laplacian card executed NEMO-e3 geometry")
+
+    monkeypatch.setattr(
+        vertical, "nemo_qco_live_vorticity_e3f_cgrid", refuse_dead_geometry)
+    model = LatLonCGridOceanModel(
+        recipe.grid, recipe.z_coord, recipe.model_config)
+    stepped = model.step(recipe.initial_state, dt=_NEMO_GYRE_DT_S)
+    assert bool(jnp.all(jnp.isfinite(stepped.u.data)))
+
+
 def test_nemo_gyre_forced_trajectory_is_finite_and_stable():
     """A runnable forced step (model.step + the post-step thermal applicator +
     the step-level wind) is finite and physically bounded — the whole point of

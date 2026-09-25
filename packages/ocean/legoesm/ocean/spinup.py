@@ -659,7 +659,15 @@ def compute_mht_from_state(v_face, theta, h_partial, mask, grid):
     (ρ0·cp·Σ v·θ_v·h_v·dx_v) and reduces the MHT(lat) curve to the NH poleward
     peak and SH poleward min.  Sibling of :func:`compute_amoc_from_state`; uses
     the WOA/CORE convention (degC, reference-independent at full zonal integral),
-    matching the NEMO reader ``nemo_transports.mht_core``.  NH peak obs ~1.8 PW.
+    matching the NEMO reader ``nemo_transports.mht_core``.
+
+    NO OBSERVED NUMBER BELONGS NEXT TO THIS OUTPUT.  The curve is a GLOBAL
+    zonal integral of whatever state it is handed, so on an instantaneous
+    snapshot the NH peak lands wherever the tropical overturning nearly
+    cancels -- measured at 18.74 PW at 1degN on a day-30 ORCA1 state.  The
+    "~1.8 PW" this docstring used to quote is a multi-year mean, and the
+    RAPID value is Atlantic-only as well as time-averaged; either comparison
+    needs a basin mask and time-averaging that this function does not do.
     """
     from legoesm.ocean.diagnostics_streamfunction import meridional_heat_transport
     mht_PW, lat_deg = meridional_heat_transport(

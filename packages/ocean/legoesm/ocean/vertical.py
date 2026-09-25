@@ -294,30 +294,37 @@ def nemo_fe3mask_from_tmask(tmask, *, grid=None):
 
 
 def nemo_qco_live_vorticity_e3f_cgrid(
-    eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None,
+    eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
 ):
-    """Build literal NEMO ``e3f_vor(Kmm)`` on legoESM's vertex layout.
+    """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
 
     ``dyn_vor_init`` freezes ``e3f_0vor`` from masked reference T-cell
     thicknesses (``dynvor.F90:918-950``); ``dom_qco_r3c_RK3`` builds live
     ``r3f`` (``domqco.F90:233-246``); and
     ``domzgr_substitute.h90:130`` applies it through ``fe3mask``.
+
+    ``e3t_0`` and ``tmask`` default to the coordinate's bridge fields, but
+    callers may provide the same operands from their own state.  Horizontal
+    areas and F-depth are always rebuilt from that mesh; bridge-carried ENE
+    operands are an oracle check, not a production dependency.
     """
     if nn_e3f_typ not in (0, 1):
         raise ValueError("nn_e3f_typ must be 0 or 1")
-    raw = getattr(z_coord, "nemo_een_barotropic", None)
-    e3t0 = getattr(z_coord, "nemo_e3t_0", None)
-    active = getattr(z_coord, "is_active", None)
-    if raw is None or e3t0 is None or active is None:
+    if e3t_0 is None:
+        e3t_0 = getattr(z_coord, "nemo_e3t_0", None)
+    if tmask is None:
+        tmask = getattr(z_coord, "is_active", None)
+    if e3t_0 is None or tmask is None or grid is None:
         raise ValueError(
-            "literal NEMO e3f_vor requires bridge-carried e3t_0, masks, "
-            "and NEMO ENE metric operands")
+            "literal NEMO e3f_vor requires e3t_0, tmask, and grid operands")
+    from legoesm.grids.latlon import ensure_geometry
+    geom_grid = ensure_geometry(grid)
     b = lax.optimization_barrier
     one = jnp.asarray(1.0, dtype=dtype)
     quarter = jnp.asarray(0.25, dtype=dtype)
     eta = jnp.asarray(eta, dtype=dtype)
-    e3t0 = jnp.asarray(e3t0, dtype=dtype)
-    tmask = jnp.asarray(active, dtype=dtype)
+    e3t0 = jnp.asarray(e3t_0, dtype=dtype)
+    tmask = jnp.asarray(tmask, dtype=dtype)
 
     def east(value):
         return jnp.roll(value, -1, axis=1)
@@ -334,24 +341,26 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
                else jnp.maximum(wet_sum, one))
     e3f0vor = b(ref_sum / divisor)
-    e3f0vor = jnp.where(
-        e3f0vor == 0.0, jnp.asarray(raw.e3f_0, dtype=dtype), e3f0vor)
+    ref_n = north(e3t0)
+    e3f_0 = b(quarter * b(b(e3t0 + east(e3t0))
+                            + b(ref_n + east(ref_n))))
+    e3f0vor = jnp.where(e3f0vor == 0.0, e3f_0, e3f0vor)
 
     # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain the
     # historical path byte-for-byte.
     e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
 
-    area_eta = b(
-        b(jnp.asarray(raw.e1t, dtype=dtype)
-          * jnp.asarray(raw.e2t, dtype=dtype)) * eta)
+    area_eta = b(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
     area_eta_n = north(area_eta)
     quad = b(b(area_eta + east(area_eta))
              + b(area_eta_n + east(area_eta_n)))
-    hf0 = jnp.asarray(raw.hf_0, dtype=dtype)
+    fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
+    hf0 = jnp.sum(e3f0vor * fe3mask, axis=-1)
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
-    area_f = b(jnp.asarray(raw.e1f, dtype=dtype)
-               * jnp.asarray(raw.e2f, dtype=dtype))
+    # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
+    # area at that same boundary so production JIT cannot fuse it into /area_f.
+    area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
     r3f = b(b(quarter * quad) * r1_hf0 / area_f)
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
@@ -361,8 +370,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     # mask.  The later lateral-slip/strait changes at :207-243 affect fmask
     # only.  domzgr_substitute.h90:48,130 therefore consumes fe3mask here;
     # using the vorticity fmask silently stretches partial-cell bottom faces.
-    e3f_native = b(e3f0vor * b(
-        one + r3f[..., None] * jnp.asarray(raw.fe3mask, dtype=dtype)))
+    e3f_native = b(e3f0vor * b(one + r3f[..., None] * fe3mask))
 
     # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
     # south/west rows are inert walls for this closed-box identity.

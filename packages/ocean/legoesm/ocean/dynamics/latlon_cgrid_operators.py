@@ -129,7 +129,14 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
-        north = fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u,
+        # Layout-aware ghost: pivot-row-stored meshes (eORCA025) source the
+        # row BELOW the pivot with the U-stagger map; halo-row-stored keeps
+        # the legacy byte-identical formula (see fold_ghost_source_T).
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T, fold_perm_u,
+        )
+        north = fold_row(fold_ghost_source_T(interior, fold),
+                         fold_perm_u(fold), fold.vector_sign_u,
                          fold.perm_T.shape[0])
         padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
@@ -4431,10 +4438,16 @@ def density_jacobian_pgf_smc03_y(
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        rho_F = rho_per_cell[-1:, fold.perm_T, :]
-        h_F = h_partial[-1:, fold.perm_T, :]
-        z_c_F = z_centroid[-1:, fold.perm_T, :]
-        sigma_F = sigma[-1:, fold.perm_T, :]
+        # Beyond-the-fold partner cells: halo layout permutes the stored top
+        # row (legacy); pivot layout permutes the row BELOW the pivot
+        # (crossing the fold from (i, J) lands on (perm_T(i), J-1);
+        # permuting the stored pivot row reads the land mirror twins —
+        # codex fold-fix RED 6).
+        _pj = -2 if bool(getattr(fold, "pivot_row_stored", False)) else -1
+        rho_F = rho_per_cell[_pj:_pj + 1 or None, fold.perm_T, :]
+        h_F = h_partial[_pj:_pj + 1 or None, fold.perm_T, :]
+        z_c_F = z_centroid[_pj:_pj + 1 or None, fold.perm_T, :]
+        sigma_F = sigma[_pj:_pj + 1 or None, fold.perm_T, :]
         z_c_L = z_centroid[-1:]
         z_target_fold = jnp.minimum(z_c_L, z_c_F)
         P_fold = compute_pressure_at_target_smc03(

@@ -46,6 +46,7 @@ def test_raw_history_mapping_preserves_b_then_bb_order_and_face_layouts():
 
 def test_live_trace_and_raw_history_arms_are_private_and_off_by_default():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanConfig,
         _NEMOWSLiveOperandTrace,
         _NEMOWSRK3TestHooks,
     )
@@ -55,6 +56,13 @@ def test_live_trace_and_raw_history_arms_are_private_and_off_by_default():
     assert default.barotropic_raw_history_override is None
     assert default.slow_forcing_incoming_override is None
     assert default.barotropic_slow_forcing_override is None
+    def sink(*values):
+        return values
+    observed = _NEMOWSRK3TestHooks(
+        barotropic_slow_forcing_override=sink)
+    assert observed.barotropic_slow_forcing_override is sink
+    assert "barotropic_slow_forcing_override" not in (
+        LatLonCGridOceanConfig._fields)
     assert "slow_forcing_producer" in _NEMOWSLiveOperandTrace._fields
     assert _NEMOWSLiveOperandTrace._fields[-6:] == (
         "stage_rhs", "stage1_full_rhs", "stage1_rhs_walk",

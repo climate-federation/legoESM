@@ -327,7 +327,8 @@ def read_stage1_r3_operand_record(path: Path) -> dict:
 
 
 def read_tke_statement_walk_record(
-    path: Path, *, plant: str | None = None,
+    path: Path, *, plant: str | None = None, expected_kt: int = 2,
+    expected_slots: tuple[int, int] = (3, 3),
 ) -> dict:
     """Read the fixed kt=2 TKE statement-boundary stream through EOF."""
     raw = path.read_bytes()
@@ -353,7 +354,7 @@ def read_tke_statement_walk_record(
     )
     header = dict(zip(keys, values, strict=True))
     require((header["version"], header["kt"], header["Kbb"],
-             header["Kmm"]) == (1, 2, 3, 3),
+             header["Kmm"]) == (1, expected_kt, *expected_slots),
             f"{path}: wrong version/clock/slots {header}")
     require((header["jpi"], header["jpj"], header["jpk"],
              header["jpkm1"]) == (*DIMS, 30),

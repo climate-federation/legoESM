@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 
 SCRIPT = (
@@ -140,3 +141,28 @@ def test_pytree_identity_detects_one_ulp_without_changing_structure() -> None:
     assert changed["bit_exact"] is False
     assert changed["differing_cells"] == 1
     assert changed["absolute_max"] == np.spacing(np.float64(1.0))
+
+
+def test_developed_registry_refuses_a_missing_compiled_boundary() -> None:
+    WALK._validate_developed_registry()
+    with pytest.raises(RuntimeError, match="registry changed"):
+        WALK._validate_developed_registry(WALK.SOURCE_ORDER[:-1])
+
+
+def test_developed_comparison_counts_signed_zero_and_first_index() -> None:
+    actual = np.array([[0.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+    expected = np.array([[-0.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+    mask = np.ones((2, 2), dtype=bool)
+
+    row = WALK._developed_comparison(actual, expected, mask)
+
+    assert row["bit_exact"] is False
+    assert row["differing_cells"] == 1
+    assert row["absolute_max"] == 0.0
+    assert row["rms"] == 0.0
+    assert row["first_unequal_index"] == [0, 0]
+
+    scalar = WALK._developed_comparison(
+        np.float64(1.0), np.float64(1.0), np.ones((), dtype=bool))
+    assert scalar["bit_exact"] is True
+    assert scalar["cells_scored"] == 1

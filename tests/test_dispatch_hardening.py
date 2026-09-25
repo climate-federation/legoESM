@@ -135,6 +135,9 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # Distributed PCG preconditioner selection ("jacobi" | "poly"):
+        # an unknown name must raise, never fall back to Jacobi.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_mpas.py", "barotropic_implicit_mpas"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "create_model"),
         # kt whitelist: an unvalidated 6*kt^2 tile count must raise, not
         # silently replicate the global state per device (#1360).
@@ -227,6 +230,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "build_physics_pipeline"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_bulk_flux_dispatch"),
         ("packages/ice/legoesm/ice/sea_ice.py", "step_sea_ice"),
+        ("packages/ice/legoesm/ice/sea_ice.py", "_closing_rate_from_velocity"),
         ("packages/ice/legoesm/ice/shortwave.py", "compute_ice_sw"),
         ("packages/land/legoesm/land/carbon/carbon_cycle.py", "step_carbon"),
         # The multilayer-land bulk dispatch moved into the pluggable surface

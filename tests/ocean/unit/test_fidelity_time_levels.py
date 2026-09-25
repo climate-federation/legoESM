@@ -189,6 +189,14 @@ def test_gyre_whole_step_rk3_dump_registry_is_complete_and_fail_closed():
         time_level_for_dump("oracle_stage_kt00000002_s1.bin")
 
 
+def test_round139_developed_slow_forcing_split_is_before_level():
+    name = "oracle_slow_forcing_split_kt00001081.bin"
+    assert time_level_for_dump(name) == "before"
+    source = _DUMP_TIME_LEVEL[name][1]
+    assert "dynspg_ts.f90:289-325" in source
+    assert "Kmm=Nbb" in source
+
+
 def test_cor2d_substep1_dumps_are_before_level():
     """The four dyn_cor_2D substep-1 dumps (dynspg_ts.F90:794-806) are
     BEFORE-level: with DINO's ln_bt_fw=.false. + nn_bt_flt=2 the substep loop

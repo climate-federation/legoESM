@@ -14,7 +14,7 @@
 # the day-90 snapshot; 5:6 = days 26-30 for day-30).
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 EXP=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00

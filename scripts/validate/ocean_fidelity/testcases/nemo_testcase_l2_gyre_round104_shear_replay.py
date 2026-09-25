@@ -323,7 +323,10 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-def model_operands(z_coord, u_face, v_face, eta, avm, u_mask, v_mask):
+def model_operands(
+    z_coord, u_face, v_face, eta, avm, u_mask, v_mask, *,
+    return_intermediates=False,
+):
     """MIRROR of legoESM's own ``zdf_sh2`` operand construction.
 
     This is deliberately a mirror and not a second implementation to be
@@ -371,7 +374,7 @@ def model_operands(z_coord, u_face, v_face, eta, avm, u_mask, v_mask):
     eps = np.float64(1e-30)               # coeff-ok: the helper's own floor
     e3u = np.maximum(ref_u * (1.0 + r3u[..., None]), eps)
     e3v = np.maximum(ref_v * (1.0 + r3v[..., None]), eps)
-    return {
+    operands = {
         # nemo_face_native_now2: Kbb and Kmm are the SAME slot, so the two
         # factors of zdfsh2.f90:100-102 are the same array.
         "u_now": u_face, "u_before": u_face,
@@ -386,6 +389,24 @@ def model_operands(z_coord, u_face, v_face, eta, avm, u_mask, v_mask):
         "wvmask": v_mask[..., :-1] * v_mask[..., 1:],
         "coast_u": 2.0 - u_mask[:, :-1, 1:] * u_mask[:, 1:, 1:],
         "coast_v": 2.0 - v_mask[:-1, :, 1:] * v_mask[1:, :, 1:],
+    }
+    if not return_intermediates:
+        return operands
+    du = u_face[..., :-1] - u_face[..., 1:]
+    dv = v_face[..., :-1] - v_face[..., 1:]
+    zsh2u = (operands["avm_face_u"] * du * du
+             / operands["divisor_u"] * operands["wumask"])
+    zsh2v = (operands["avm_face_v"] * dv * dv
+             / operands["divisor_v"] * operands["wvmask"])
+    return operands, {
+        "r3u": r3u,
+        "r3v": r3v,
+        "e3u": e3u,
+        "e3v": e3v,
+        "du": du,
+        "dv": dv,
+        "zsh2u": zsh2u,
+        "zsh2v": zsh2v,
     }
 
 

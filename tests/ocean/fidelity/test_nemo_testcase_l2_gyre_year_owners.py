@@ -14,6 +14,7 @@ tested unconditionally, because those are the parts that can rot.
 from __future__ import annotations
 
 import importlib.util
+import json
 import struct
 import subprocess
 import sys
@@ -171,6 +172,240 @@ def test_round123_process_record_layout_and_reader(tmp_path, harness):
         harness.read_process_record(record_path, truncate=True)
 
 
+def test_round136_record_availability_refuses_endpoint_relabeling(harness):
+    rows = harness.developed_record_availability()
+    assert [row["day"] for row in rows] == [30, 90, 180, 240]
+    assert [row["status"] for row in rows] == [
+        "UNAVAILABLE_BY_RECORD", "UNAVAILABLE_BY_RECORD", "MEASURED",
+        "UNAVAILABLE_BY_RECORD"]
+    assert rows[2]["entry_step"] == 1080
+    assert rows[2]["process_step"] == 1081
+    assert rows[3]["entry_step"] == 1440
+    assert rows[3]["process_step"] is None
+    assert "step-1439" in rows[3]["reason"]
+
+
+def test_round136_cumulative_boundaries_follow_recorded_write_order(
+        tmp_path, harness):
+    path = tmp_path / "oracle_process_budget_kt00001081.bin"
+    _synthetic_process_record(path, harness)
+    record = harness.read_process_record(path)
+    rows = harness._process_cumulative_boundaries(record)
+    assert tuple(rows) == harness.PROCESS_ROWS
+    # qbb=qmm=qaa=1 in the synthetic record, so B = Tbb + dt*RHS.
+    expected = {
+        "geometry": 2.0,
+        "advection": 2.0 + harness.DT_S * 0.10,
+        "surface_boundary": 2.0 + harness.DT_S * 0.20,
+        "shortwave": 2.0 + harness.DT_S * 0.30,
+        "lateral_diffusion": 2.0 + harness.DT_S * 0.40,
+        "vertical_diffusion": 2.75,
+    }
+    for name, value in expected.items():
+        assert np.all(rows[name] == value), name
+
+
+def test_round136_registry_and_signed_zero_controls_are_nonvacuous(harness):
+    report = {
+        "availability": harness.developed_record_availability(),
+        "cumulative_boundaries": {
+            name: {} for name in harness.PROCESS_ROWS},
+        "geometry_operands": {
+            name: {} for name in harness.DEVELOPED_GEOMETRY_OPERANDS},
+        "increment_rows": {name: {} for name in harness.PROCESS_ROWS},
+        "branches": {name: {} for name in harness.DEVELOPED_BRANCHES},
+        "first_non_bit_process_call": "advection",
+        "process_ranking": [
+            {"rank": rank, "name": name}
+            for rank, name in enumerate(harness.PROCESS_ROWS, 1)],
+    }
+    harness._validate_developed_registry(report)
+    for plant, message in (
+            ("missing-day", "requested-day registry"),
+            ("missing-process-row", "process-row registry"),
+            ("missing-branch", "branch registry"),
+            ("missing-ranking-row", "process ranking")):
+        with pytest.raises(harness.GateError, match=message):
+            harness._validate_developed_registry(report, plant=plant)
+
+    positive = np.asarray([[[0.0]]], dtype=np.float64)
+    negative = np.asarray([[[-0.0]]], dtype=np.float64)
+    row = harness._score_developed_row(
+        positive, negative, np.ones_like(positive, dtype=bool))
+    assert row["cells_unequal"] == 1
+    assert row["max_abs"] == 0.0
+    assert row["first_unequal_jik"] == [0, 0, 0]
+
+    contiguous = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
+    noncontiguous = np.transpose(contiguous, (1, 0, 2))
+    assert not noncontiguous.flags.c_contiguous
+    assert harness._bit_mismatch_count(
+        noncontiguous, np.array(noncontiguous, order="C")) == 0
+
+
+def test_round152_process_ranking_is_complete_and_uses_one_step_rms(harness):
+    rows = {
+        name: {"cells_unequal": index + 1,
+               "max_abs": float(index + 1),
+               "rms": float(index + 1)}
+        for index, name in enumerate(harness.PROCESS_ROWS)
+    }
+    ranking = harness._rank_developed_process_rows(rows)
+    assert [row["name"] for row in ranking] == list(
+        reversed(harness.PROCESS_ROWS))
+    assert [row["rank"] for row in ranking] == [1, 2, 3, 4, 5, 6]
+    assert ranking[0]["rms_effective_tendency_K_s"] == (
+        ranking[0]["rms_temperature_contribution_K"] / harness.DT_S)
+    with pytest.raises(harness.GateError, match="ranking input is incomplete"):
+        harness._rank_developed_process_rows(
+            {name: rows[name] for name in harness.PROCESS_ROWS[:-1]})
+
+
+def test_round154_fct_registry_and_first_statement_are_nonvacuous(harness):
+    from legoesm.ocean.advection import NEMO_FCT_TRACE_FIELDS
+
+    scalar = np.ones((1,), dtype=np.float64)
+    common_expected = {
+        name: scalar.copy()
+        for name in harness.DEVELOPED_FCT_COMMON_FIELDS
+    }
+    common_expected["e3t_3d"] = np.ones((1, 1, 1), dtype=np.float64)
+    for name in ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa"):
+        common_expected[name] = np.zeros((1, 1), dtype=np.float64)
+    tracer_expected = {
+        name: scalar.copy() for name in harness.DEVELOPED_FCT_TRACER_FIELDS
+    }
+    tracer_expected["rhs_entry"] = np.zeros_like(scalar)
+    bundle = {
+        "common": common_expected,
+        "tracers": {name: {key: value.copy()
+                            for key, value in tracer_expected.items()}
+                    for name in ("T", "S")},
+    }
+    common_actual = {name: scalar.copy()
+                     for name in harness.DEVELOPED_FCT_COMMON_FIELDS}
+    common_actual["e3t_3d"] = np.ones((1, 1, 1), dtype=np.float64)
+    for name in ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa"):
+        common_actual[name] = np.ones((1, 1, 1), dtype=np.float64)
+    observed_tracer = tuple(scalar.copy() for _ in range(
+        13 + len(NEMO_FCT_TRACE_FIELDS)))
+    observed = {"T": observed_tracer, "S": observed_tracer}
+    exact = harness._developed_fct_mode_rows(
+        observed, bundle, common_actual)
+    assert exact["rows_scored"] == 61
+    assert exact["bit_exact_rows"] == 61
+    assert exact["first_non_bit_context"] == "NONE"
+    assert exact["first_non_bit_statement"] == "NONE"
+
+    first_u = 13 + NEMO_FCT_TRACE_FIELDS.index("first_u")
+    planted_values = list(observed_tracer)
+    planted_values[first_u] = np.nextafter(
+        planted_values[first_u], np.inf)
+    planted = harness._developed_fct_mode_rows(
+        {"T": tuple(planted_values), "S": observed_tracer},
+        bundle, common_actual)
+    assert planted["first_non_bit_statement"] == "T.first_u"
+    assert planted["tracers"]["T"]["rows"]["first_u"][
+        "cells_unequal"] == 1
+
+
+def test_round155_transport_registry_and_first_operand_are_nonvacuous(harness):
+    fields_3d = {
+        "e3u_0", "umask", "live_e3u_Kmm", "uu_Kmm", "corrected_u", "zFu",
+    }
+    expected = {
+        name: np.ones((1, 1, 1) if name in fields_3d else (1, 1),
+                      dtype=np.float64)
+        for name in harness.DEVELOPED_TRANSPORT_U_ROWS
+    }
+    exact = harness._developed_transport_mode_rows(expected, expected)
+    assert exact["rows_scored"] == len(harness.DEVELOPED_TRANSPORT_U_ROWS)
+    assert exact["bit_exact_rows"] == exact["rows_scored"]
+    assert exact["first_non_bit_row"] == "NONE"
+
+    planted = {name: value.copy() for name, value in expected.items()}
+    planted["un_adv"][0, 0] = np.nextafter(
+        planted["un_adv"][0, 0], np.inf)
+    moved = harness._developed_transport_mode_rows(planted, expected)
+    assert moved["first_non_bit_row"] == "un_adv"
+    assert moved["rows"]["un_adv"]["cells_unequal"] == 1
+
+    incomplete = dict(planted)
+    incomplete.pop("zFu")
+    with pytest.raises(harness.GateError, match="registry is incomplete"):
+        harness._developed_transport_mode_rows(incomplete, expected)
+
+
+def _stage2_split_inputs(harness):
+    """A small U column set whose depth mean is NEMO's own, by construction."""
+    rng = np.random.default_rng(156)
+    umask = np.ones((2, 3, 4), dtype=np.float64)
+    e3u_0 = np.full((2, 3, 4), 10.0, dtype=np.float64)
+    r1_hu_0 = np.full((2, 3), 1.0 / 40.0, dtype=np.float64)
+    uu = rng.normal(size=(2, 3, 4))
+    running = np.zeros((2, 3), dtype=np.float64)
+    for level in range(4):
+        running = running + uu[..., level] * e3u_0[..., level]
+    uu_b = running * r1_hu_0
+    oracle = {
+        "umask": umask, "e3u_0": e3u_0, "r1_hu_0": r1_hu_0,
+        "uu_Kmm": uu, "uu_b_Kmm": uu_b,
+    }
+    return oracle
+
+
+def test_round156_stage2_split_separates_barotropic_from_baroclinic(harness):
+    oracle = _stage2_split_inputs(harness)
+    uu = oracle["uu_Kmm"]
+
+    # A PURE depth-mean difference: installing NEMO's own depth mean must
+    # remove it.  If the split were not measuring the external half this
+    # residual would stay at the baseline.
+    offset = np.array([[1e-6, 2e-6, 3e-6], [4e-6, 5e-6, 6e-6]])
+    barotropic = {
+        "uu_Kmm": uu + offset[..., None],
+        "uu_b_Kmm": oracle["uu_b_Kmm"] + offset,
+    }
+    report = harness._developed_stage2_velocity_split(barotropic, oracle)
+    assert set(report["rows"]) == set(harness.DEVELOPED_STAGE2_SPLIT_ROWS)
+    rows = report["rows"]
+    assert rows["production_baseline"]["active_max_abs"] > 5e-7
+    assert rows["nemo_depth_mean_substituted"]["active_max_abs"] < 1e-15
+    assert rows["nemo_depth_mean_substituted"][
+        "active_rms_removed_fraction"] > 0.99
+    known = report["external_half_known_answer"]
+    assert known["removed_minus_recorded_active_max_abs"] < 1e-15
+
+    # A DEVIATION difference with zero depth mean: the same substitution must
+    # remove none of it.  Without both arms "it was removed" proves nothing.
+    deviation = np.zeros_like(uu)
+    deviation[..., 0] = 1e-6
+    deviation[..., 1] = -1e-6
+    baroclinic = {
+        "uu_Kmm": uu + deviation, "uu_b_Kmm": oracle["uu_b_Kmm"],
+    }
+    other = harness._developed_stage2_velocity_split(baroclinic, oracle)
+    assert other["rows"]["production_baseline"]["active_max_abs"] > 5e-7
+    assert other["rows"]["nemo_depth_mean_substituted"][
+        "active_rms_removed_fraction"] < 1e-6
+
+    # The calibration arm: NEMO's own field with NEMO's own depth mean.
+    same = harness._developed_stage2_velocity_split(
+        {"uu_Kmm": uu, "uu_b_Kmm": oracle["uu_b_Kmm"]}, oracle)
+    assert same["rows"]["calibration_nemo_reprojection"][
+        "active_max_abs"] < 1e-15
+
+    # The ULP plant path perturbs NEMO's recorded target, not the model's.
+    planted = harness._developed_stage2_velocity_split(
+        barotropic, oracle, plant_index=(0, 0))
+    assert planted["planted_uu_b_index"] == [0, 0]
+    # A one-unit-in-the-last-place change to one column moves about thirty
+    # cells by about 1e-16, which no maximum over the field can see, so the
+    # control is the fingerprint of the whole reprojected field.
+    assert (planted["reprojection_sha256"]
+            != report["reprojection_sha256"])
+
+
 def test_round123_process_budget_closes_and_ulp_control_moves(tmp_path,
                                                               harness):
     record_path = tmp_path / "oracle_process_budget_kt00001081.bin"
@@ -292,11 +527,21 @@ def test_round124_process_hook_is_private_and_card_guarded():
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 vertical_solve_trace=True))
+    with pytest.raises(ValueError, match="requires tracer_process_trace"):
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                tracer_process_branch_activity=True))
     vertical = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             tracer_process_trace=(), vertical_solve_trace=True))
     assert vertical._nemo_ws_test_hooks.vertical_solve_trace is True
+    branch = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(), tracer_process_branch_activity=True))
+    assert branch._nemo_ws_test_hooks.tracer_process_branch_activity is True
 
 
 def test_round126_literal_matrix_and_solve_controls_are_nonvacuous(harness):
@@ -634,3 +879,103 @@ def test_forcing_gate_plants_all_exit_non_zero():
             capture_output=True, text=True, cwd=str(ROOT))
         assert result.returncode == 1, (plant, result.stdout, result.stderr)
         assert "DEBT" in result.stdout, plant
+
+
+def test_round157_stage2_face_score_is_bitwise_and_mask_aware(harness):
+    """The stage scorer broadcasts a 2-D face mask through every level."""
+    rng = np.random.default_rng(157)
+    expected = rng.normal(size=(3, 4, 5))
+    mask = np.ones(expected.shape[:2])
+    mask[1, 2] = 0.0
+
+    same = harness._score_stage2_face(expected.copy(), expected, mask)
+    assert same["cells_unequal"] == 0
+    assert same["active_cells_unequal"] == 0
+    assert same["active_cells_scored"] == (3 * 4 - 1) * 5
+    assert same["active_max_abs"] == 0.0
+
+    # A one-unit-in-the-last-place move on an ACTIVE face is seen, and the
+    # difference is far below anything a tolerance would catch.
+    moved = expected.copy()
+    moved[1, 1, 0] = np.nextafter(moved[1, 1, 0], np.inf)
+    row = harness._score_stage2_face(moved, expected, mask)
+    assert row["active_cells_unequal"] == 1
+    assert 0.0 < row["active_max_abs"] < 1e-15
+
+    # The same move on a DRY face must leave every active number alone, or
+    # the walk would attribute land to a compiled statement.
+    dry = expected.copy()
+    dry[1, 2, -1] = dry[1, 2, -1] + 1.0
+    dry_row = harness._score_stage2_face(dry, expected, mask)
+    assert dry_row["cells_unequal"] == 1
+    assert dry_row["active_cells_unequal"] == 0
+    assert dry_row["active_max_abs"] == 0.0
+
+    with pytest.raises(harness.GateError, match="stage-2 shapes differ"):
+        harness._score_stage2_face(expected[:, :, :-1], expected, mask)
+
+
+def test_round157_stage2_record_refuses_the_wrong_assignment_arm(harness,
+                                                                 tmp_path,
+                                                                 monkeypatch):
+    """A record whose flags select the thickness-weighted arm is refused.
+
+    The walk calibrates NEMO's VECTOR stage assignment.  If a future deck
+    turned the vector form off, NEMO would take the thickness-weighted arm
+    and every calibration in the walk would be proving the wrong statement,
+    so the reader refuses instead of quietly scoring it.
+    """
+    groups = ("rhs_entry", "uu_vv_Kbb", "uu_vv_Kmm", "umask_vmask",
+              "after_hpg", "after_vor", "after_adv", "uu_vv_Kaa_raw",
+              "uu_vv_Kaa_final")
+    fields = {name: (np.zeros((36, 26, 31)), np.zeros((36, 26, 31)))
+              for name in groups}
+    fields["rhd_ww"] = (
+        np.zeros((36, 26, 31)), np.zeros((36, 26, 31)))
+    fields["r3u_r3v_Kmm"] = (
+        np.zeros((36, 26)), np.zeros((36, 26)))
+    fields["ssh_Kmm_ssh_Kaa"] = (
+        np.zeros((36, 26)), np.zeros((36, 26)))
+    fields["rDt_r1_Dt"] = (np.float64(7200.0), np.float64(1.0 / 7200.0))
+
+    class _Stub:
+        RECORD = "oracle_developed_stage2_kt00001081.bin"
+
+        @staticmethod
+        def read_record(path):
+            return {"meta": {"kt": 1081, "kstg": 2}, "sha256": "abc",
+                    "fields": dict(fields, **{
+                        "flags_vec_linssh": _Stub.flags})}
+
+    (tmp_path / "round156_developed_stage2_admission.json").write_text(
+        json.dumps({"status": "PASS", "record": {"sha256": "abc"}}))
+    monkeypatch.setattr(harness, "_load", lambda *args, **kwargs: _Stub)
+
+    _Stub.flags = (np.float64(1.0), np.float64(0.0))
+    good = harness._developed_stage2_record(tmp_path)
+    assert good["rows"]["uu_vv_Kbb_u"].shape == (22, 33, 30)
+    assert good["rows"]["uu_vv_Kbb_v"].shape == (23, 32, 30)
+
+    _Stub.flags = (np.float64(0.0), np.float64(0.0))
+    with pytest.raises(harness.GateError,
+                       match="vector stage-update arm"):
+        harness._developed_stage2_record(tmp_path)
+
+
+def test_round167_vertical_sensitivity_ranking_is_complete_and_signed(harness):
+    """The magnitude ranking sees benefit, harm, and a missing real arm."""
+    rows = {
+        "free": {"T": {"rms": 2.0}},
+        "heat_K": {"T": {"rms": 1.5}},
+        "complete_K": {"T": {"rms": 2.25}},
+    }
+    ranked = harness._rank_vertical_sensitivity(rows)
+    assert [row["arm"] for row in ranked] == ["heat_K", "complete_K"]
+    assert ranked[0]["day240_T3D_rms_removed_K"] == 0.5
+    assert ranked[0]["removed_fraction"] == 0.25
+    assert ranked[1]["day240_T3D_rms_removed_K"] == -0.25
+
+    broken = dict(rows)
+    broken.pop("complete_K")
+    with pytest.raises(harness.GateError, match="no complete_K arm"):
+        harness._rank_vertical_sensitivity(broken)

@@ -33,7 +33,7 @@ Its two source readings were then checked independently:
   Thus stage 2 consumes stage-1 `Kaa` T/S/ssh through the rotated `Kmm`, and
   stage 3 consumes stage-2 `Kaa` T/S/ssh.
 * legoESM computes `_geom_density` once from the step-entry state and passes it
-  into the initial tendency (`ocean_model_latlon_cgrid.py:3832-3847`).  Its
+  into the initial tendency (`ocean_model_latlon_cgrid.py:3937-3952`).  Its
   `_mom_pert_ws` replaces only u/v and reuses that bundle at every stage
   (`:4158-4183`); `tendencies` also reads eta from that unchanged state before
   accepting the precomputed bundle (`ocean_pe_latlon_cgrid.py:4370-4389`).
@@ -42,7 +42,7 @@ Its two source readings were then checked independently:
   path deliberately omits explicit vertical momentum advection
   (`ocean_pe_latlon_cgrid.py:2679-2684,2700-2737`).  The WS path instead adds
   one stage-3 vertical increment after the momentum program
-  (`ocean_model_latlon_cgrid.py:5027-5064`).  NEMO calls the full `dyn_adv`
+  (`ocean_model_latlon_cgrid.py:5132-5169`).  NEMO calls the full `dyn_adv`
   package in every stage at the sites above.  This confirms the second source
   difference.
 

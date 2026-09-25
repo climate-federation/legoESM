@@ -1961,3 +1961,45 @@ class TestFreeSurfaceInitialCondition:
         with pytest.raises(ValueError, match="vertical_coordinate"):
             with_fields(state, flat_mesh, eta=self._bump(flat_mesh),
                         vertical_coordinate="z-star")
+
+
+def test_no_undefined_global_names():
+    """Every global name any function in the adapter reads must exist.
+
+    A rename that misses a call site leaves a NameError that only fires when
+    that branch runs -- here, two survivors of the private-to-public rename of
+    ``require_fesom_jax`` (1c8777e45) sat on the ice-coupling path and killed a
+    30-day FESOM run four minutes in, on a machine where the import gate they
+    guard was satisfied anyway.  Static, so it needs neither fesom_jax nor a
+    mesh, and it covers every function in the module rather than the two that
+    happened to break.
+    """
+    import builtins
+    import dis
+    import types
+
+    from legoesm.ocean.dynamics import ocean_model_fesom as mod
+
+    known = set(vars(mod)) | set(dir(builtins))
+
+    def _codes(obj):
+        yield obj
+        for const in obj.co_consts:
+            if isinstance(const, types.CodeType):
+                yield from _codes(const)
+
+    # LOAD_GLOBAL only: co_names also holds ATTRIBUTE names, so a plain
+    # co_names scan would flag every state._replace in the file.
+    missing = set()
+    for value in vars(mod).values():
+        fn = getattr(value, "__func__", value)
+        code = getattr(fn, "__code__", None)
+        if code is None or getattr(fn, "__module__", None) != mod.__name__:
+            continue
+        for code_obj in _codes(code):
+            for ins in dis.get_instructions(code_obj):
+                if ins.opname == "LOAD_GLOBAL" and ins.argval not in known:
+                    missing.add(ins.argval)
+
+    assert not missing, (
+        f"these module-level names are read but never defined: {sorted(missing)}")

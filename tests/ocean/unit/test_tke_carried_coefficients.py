@@ -742,6 +742,28 @@ def test_live_qco_step_entry_helper_exposes_consumed_face_metrics():
         state.v.data.shape[-1] - 1,)
 
 
+def test_now2_shear_metric_changes_when_routed_eta_changes():
+    """GYRE's step-entry ssh and half-step solver ssh are distinct inputs."""
+    tke_cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke._replace(
+            tke_shear_production="nemo_face_native_now2")
+    model, state = _step_entry_helper_fixture(tke_cfg)
+    half_step_eta = 0.5 * (state.eta.data + 0.3)
+
+    step_entry, step_metrics = LatLonCGridOceanModel._tke_step_entry_p_sh2(
+        model, state, eta_now=state.eta.data, return_face_metrics=True)
+    half_step, half_metrics = LatLonCGridOceanModel._tke_step_entry_p_sh2(
+        model, state, eta_now=half_step_eta, return_face_metrics=True)
+
+    assert np.array_equal(np.asarray(step_metrics[0]),
+                          np.asarray(step_metrics[1]))
+    assert np.array_equal(np.asarray(step_metrics[2]),
+                          np.asarray(step_metrics[3]))
+    assert not np.array_equal(np.asarray(step_entry), np.asarray(half_step))
+    assert any(not np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(step_metrics, half_metrics))
+
+
 def test_live_face_metric_product_matches_hand_computed_sh2():
     # Two identical U faces, no V shear. du_now=[-2,-3], du_before=[-4,-6],
     # avm face sums=[6,10]. The 0.25 two-face collapse gives [24,90]
@@ -1352,10 +1374,16 @@ def test_carried_coefficients_are_jittable_and_differentiable():
     assert all(bool(jnp.all(jnp.isfinite(grad))) for grad in grads)
 
 
-def test_cold_start_carry_uses_nemo_wmask_on_partial_depth_columns():
+def _carry_seed_fixture(surface_bc_level="interior_pinned", mxl_choice=3):
     cfg = TKEConfig(
         prognostic=True,
         tke_preclosure_coeff_source="carried_previous_step",
+        tke_surface_bc_level=surface_bc_level,
+        # nemo_z0 has no meaning without a held surface value, so the fixture
+        # describes a configuration that could actually run (codex [MEDIUM]).
+        surface_bc=("nemo_dirichlet" if surface_bc_level == "nemo_z0"
+                    else "veros_flux"),
+        tke_mxl_choice=mxl_choice,
         kappaM_min=3.0, kappaH_min=5.0)
     State = namedtuple(
         "CarryState", "T land_mask tke_avm tke_avt tke_avm_surface")
@@ -1373,6 +1401,11 @@ def test_cold_start_carry_uses_nemo_wmask_on_partial_depth_columns():
         z_coord=SimpleNamespace(is_active=is_active),
         _tke_prognostic_active=lambda: True,
     )
+    return dummy, state
+
+
+def test_cold_start_carry_uses_nemo_wmask_on_partial_depth_columns():
+    dummy, state = _carry_seed_fixture("nemo_z0")
     out = LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, state)
     np.testing.assert_array_equal(out.tke_avm.data, [[[3.0, 0.0, 0.0],
                                                        [0.0, 0.0, 0.0]]])
@@ -1383,6 +1416,55 @@ def test_cold_start_carry_uses_nemo_wmask_on_partial_depth_columns():
     partial = state._replace(tke_avm=out.tke_avm)
     with pytest.raises(ValueError, match="partially populated"):
         LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, partial)
+
+
+def test_nemo_z0_without_the_mxl0_anchor_also_leaves_the_surface_slot_alone():
+    """codex 9693003 [HIGH]: the closure builds _K_M_surface only when the
+    ln_mxl0 anchor exists, and the anchor needs tke_mxl_choice 3 or 4. Keying
+    the guard on the boundary alone left nemo_z0 + choice 2 crashing on its
+    second step exactly as before."""
+    dummy, state = _carry_seed_fixture("nemo_z0", mxl_choice=2)
+    out = LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, state)
+    assert out.tke_avm is not None and out.tke_avt is not None
+    assert out.tke_avm_surface is None
+    # and the state the writeback produces must be accepted on the next step
+    again = LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, out)
+    assert again.tke_avm is out.tke_avm
+
+
+def test_interior_pinned_does_not_seed_a_surface_avm_it_never_consumes():
+    """The closure builds _K_M_surface only under the nemo_z0 face assembly,
+    and the post-solve writeback stores None for it otherwise. Seeding it here
+    therefore produced a state the model could never reproduce."""
+    dummy, state = _carry_seed_fixture("interior_pinned")
+    out = LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, state)
+    assert out.tke_avm is not None and out.tke_avt is not None
+    assert out.tke_avm_surface is None
+
+
+def test_a_second_step_accepts_the_state_the_first_step_produced():
+    """REGRESSION, job 9692852: the arm died on step 2 with "partially
+    populated". Step 1 seeded all three fields, the writeback stored None for
+    the surface one (correctly -- interior_pinned produces none), and the
+    guard then rejected the model's own output. carried_previous_step was
+    therefore unusable on every card except the nemo_z0 ones.
+
+    Reverting either half of the fix makes this raise."""
+    dummy, state = _carry_seed_fixture("interior_pinned")
+    after_step1 = LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, state)
+    # what step 1's post-solve writeback stores: the two coefficients, and
+    # None for the surface value the closure did not produce.
+    written_back = after_step1._replace(tke_avm_surface=None)
+    again = LatLonCGridOceanModel._seed_tke_preclosure_carry(
+        dummy, written_back)
+    assert again.tke_avm is written_back.tke_avm
+    assert again.tke_avt is written_back.tke_avt
+
+    # NON-VACUITY: a genuinely partial state must still raise under this same
+    # boundary setting, or the test above would pass on a guard that never fires.
+    with pytest.raises(ValueError, match="partially populated"):
+        LatLonCGridOceanModel._seed_tke_preclosure_carry(
+            dummy, state._replace(tke_avm=after_step1.tke_avm))
 
 
 def test_postsolve_carry_is_closure_output_not_evd_composite():

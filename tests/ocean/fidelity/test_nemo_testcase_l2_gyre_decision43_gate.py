@@ -180,6 +180,32 @@ def test_real_cards_resolve_the_source_condition():
     assert cards["DINO:nemo_dino_kamm_mlf"]["executes_route"] is False
 
 
+def test_stage_momentum_census_builds_real_orca2_card():
+    module = _module()
+    cards = module._card_execution("stage_momentum_wzv")
+    orca2 = cards["ORCA2-zps"]
+    assert orca2["recipe_source"] == "build_orca2_zps_card"
+    assert orca2["executes_route"] is True
+    assert orca2["executes_at_this_tip"] is False
+    assert orca2["unmeasured_features"]
+
+
+def test_tke_shear_step_entry_eta_execution_is_recipe_derived():
+    module = _module()
+    cards = module._card_execution("tke_shear_step_entry_eta")
+    executing = {
+        name for name, row in cards.items() if row["executes_route"]}
+
+    assert executing == {"GYRE-zco", "ORCA2-zps"}
+    assert cards["GYRE-zco"]["tke_shear_production"] == (
+        "nemo_face_native_now2")
+    assert cards["ORCA2-zps"]["tke_shear_production"] == (
+        "nemo_face_native_nbb2")
+    assert not cards["NEMO-GYRE-recipe"]["executes_route"]
+    assert not cards["DINO:nemo_dino_kamm"]["executes_route"]
+    assert not cards["DINO:nemo_dino_kamm_mlf"]["executes_route"]
+
+
 def test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured():
     module = _module()
     cards = module._card_execution("fct_metric_upstream")
@@ -199,15 +225,68 @@ def test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured():
         expected_before_year_commit="b" * 40,
         route="fct_metric_upstream", registered_rows=_registry())
     assert report["status"] == "FAIL"
-    assert report["unmeasured_executing_cards"] == ["NEMO-GYRE-recipe"]
+    assert report["unmeasured_executing_cards"] == [
+        "NEMO-GYRE-recipe", "ORCA2-zps"]
     measured = module.evaluate(
         _comparison(), _day(1.0), _day(0.1),
         _year(1.0, "b" * 40), _year(0.1, "c" * 40),
         expected_candidate_commit="c" * 40,
         expected_before_year_commit="b" * 40,
         route="fct_metric_upstream",
-        measured_cards=("NEMO-GYRE-recipe",), registered_rows=_registry())
+        measured_cards=("NEMO-GYRE-recipe", "ORCA2-zps"),
+        registered_rows=_registry())
     assert measured["status"] == "PASS"
+
+
+def test_wind_qco_route_is_derived_from_every_recipe():
+    module = _module()
+    cards = module._card_execution("wind_qco")
+    assert cards["GYRE-zco"]["executes_route"] is True
+    assert cards["NEMO-GYRE-recipe"]["executes_route"] is True
+    assert cards["LOCK_EXCHANGE-zco"]["surface_stress_implicit"] is False
+    assert cards["LOCK_EXCHANGE-zco"]["executes_route"] is False
+    assert cards["OVERFLOW-zps"]["surface_stress_implicit"] is False
+    assert cards["OVERFLOW-zps"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm"]["surface_stress_implicit"] is False
+    assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm_mlf"]["surface_stress_implicit"] is False
+    assert cards["DINO:nemo_dino_kamm_mlf"]["executes_route"] is False
+
+
+def test_momentum_ldf_live_geometry_route_is_derived_from_every_recipe():
+    module = _module()
+    cards = module._card_execution("momentum_ldf_live_geometry")
+    assert cards["GYRE-zco"]["executes_route"] is True
+    assert cards["NEMO-GYRE-recipe"]["lateral_viscosity_operator"] == (
+        "vector_laplacian")
+    assert cards["NEMO-GYRE-recipe"]["executes_route"] is False
+    assert cards["LOCK_EXCHANGE-zco"]["lateral_viscosity_operator"] == (
+        "vector_laplacian")
+    assert cards["LOCK_EXCHANGE-zco"]["executes_route"] is False
+    assert cards["OVERFLOW-zps"]["lateral_viscosity_operator"] == (
+        "vector_laplacian")
+    assert cards["OVERFLOW-zps"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm"]["momentum_time_integrator"] == "euler"
+    assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm_mlf"]["momentum_time_integrator"] == "euler"
+    assert cards["DINO:nemo_dino_kamm_mlf"]["executes_route"] is False
+
+
+def test_generic_comparison_registers_an_unchanged_card(tmp_path):
+    module = _module()
+    snapshot = tmp_path / "same.npz"
+    np.savez(snapshot, step1_T=np.ones((2,), dtype=np.float64))
+    report = {
+        "format": "nemo-gyre-generic-card-three-step-v1",
+        "status": "PASS",
+        "worktree": {"commit": "a" * 40},
+        "certifications": {"finite": True},
+    }
+    compared = module.compare_generic_nemo_gyre(
+        report, snapshot, report, snapshot)
+    assert compared["status"] == "PASS"
+    assert compared["moved_row_count"] == 0
+    assert compared["rows"][0]["cells_unequal"] == 0
 
 
 def test_year_member_admission_requires_the_registered_harness_and_fp64(

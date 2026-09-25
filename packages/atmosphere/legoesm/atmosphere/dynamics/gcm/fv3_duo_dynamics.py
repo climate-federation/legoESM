@@ -8,11 +8,10 @@ applied by the driver lane (``_run_fv3_duo``) when
 dynamics-only.  Every restriction is the certified lane's own contract,
 enforced loudly here and at the component factory rather than assumed:
 
-* moist coupling is not routed by THIS wrapper: it passes neither
-  ``zvir`` nor a humidity index, so ``dp1`` is never formed.  The core
-  itself now SUPPORTS ``zvir != 0`` on both arms; ``consv_te != 0`` is
-  still refused there.  Slice 1 is dry by construction here, not by the
-  core's refusal, and the config wall below is what enforces it;
+* moist coupling is routed ONLY by ``FV3DuoConfig.moist`` (2026-09-24):
+  it passes the oracle's ``zvir`` with tracer 0 as specific humidity and
+  builds the moist IC; the default deck stays adiabatic (``zvir = 0``,
+  ``dp1`` never formed).  ``consv_te != 0`` is still refused by the core;
 * f64 is the DEFAULT and certified storage dtype (``storage_dtype``);
   the phase gates enforce dtype UNIFORMITY and ``step`` enforces the
   configured storage dtype at the boundary. fp32/mixed storage is
@@ -59,7 +58,8 @@ from legoesm.core.fv3_native_dcmip16_ic import (
 from legoesm.core.fv3_native_eta import set_eta_analytic
 from legoesm.core.fv3_native_state_3d import field_shape
 from legoesm.core.fv3_tracer2d import check_nsplt_schedule
-from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
+from legoesm.grids.fv3_native_gridstruct import (FV3_CP_AIR, FV3_KAPPA,
+                                                 FV3_RDGAS, FV3_RVGAS)
 
 #: The bundled-pytree keys ``step`` threads — the ``fv_dynamics_step``
 #: return keys minus its non-array metadata.
@@ -94,6 +94,15 @@ class FV3DuoConfig(NamedTuple):
     # before an fp32 step passes the uniformity gates. Setting "float32"
     # today fails LOUDLY at the first fp64 workspace, by design.
     storage_dtype: str = "float64"
+    #: MOIST coupling (2026-09-24): ``True`` routes the oracle's own
+    #: ``zvir = rvgas/rdgas - 1`` with tracer 0 as specific humidity into
+    #: the step (virtual temperature in pt_to_theta_v and the remap; the
+    #: core arm certified at 1.19e-09 vs the Fortran moist deck) and
+    #: builds the MOIST DCMIP16 IC (pt divided by 1 + zvir*q).  ``False``
+    #: is the certified adiabatic deck: humidity a passenger.  Selected
+    #: automatically by Kessler in the driver (user 2026-09-24), never a
+    #: knob there.
+    moist: bool = False
 
 
 def lon_modulated_tracer(sphum, agrid_lon, n: int, ng: int, iq: int):
@@ -310,7 +319,14 @@ class FV3DuoDynamicsModel:
             w_limiter=(None if config.hydrostatic else True),
             out_shardings=step_out_shardings,
             batched=step_face_batched,
+            zvir=self.zvir, sphum_index=(0 if config.moist else None),
         )
+
+    @property
+    def zvir(self) -> float:
+        """``rvgas/rdgas - 1`` with the oracle's gas constants when the
+        deck is moist (atmosphere.F90:156-161), else exactly 0.0."""
+        return (FV3_RVGAS / FV3_RDGAS - 1.0) if self.config.moist else 0.0
 
     # ------------------------------------------------------------------
     # DycoreProtocol
@@ -414,7 +430,7 @@ class FV3DuoDynamicsModel:
         cfg = self.config
         st6, sphum6 = dcmip16_bc_six_face_state(
             self.grid.ctx_np, self._ak, self._bk, cfg.km,
-            hydrostatic=cfg.hydrostatic, do_pert=do_pert)
+            hydrostatic=cfg.hydrostatic, do_pert=do_pert, zvir=self.zvir)
         jstate = state_3d_to_jax(st6)
         n, ng = self.grid.n, self.grid.ng
         flat_ctx = (self._flat_ctx_jax if self.window_layout is not None
@@ -462,6 +478,16 @@ class FV3DuoDynamicsModel:
                                          jnp.inexact) else a),
             bundle)
         return self.to_windows(bundle) if self.window_layout else bundle
+
+    @property
+    def sixface_halo_tables(self):
+        """The six-face ``DuoHaloTables`` this model's exchanges are built
+        on (the flat context's tables under a window layout).  Public so
+        the driver's face-stacked physics step can reuse the certified
+        exchange tables instead of reaching into private context."""
+        ctx = (self._flat_ctx_jax if self.window_layout is not None
+               else self._ctx_jax)
+        return ctx.tab
 
     # ------------------------------------------------------------------
     # window layout conversions (M6)

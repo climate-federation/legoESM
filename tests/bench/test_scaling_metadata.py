@@ -7,6 +7,8 @@ run falsifiable from the record alone.
 
 from __future__ import annotations
 
+import os
+
 import importlib.util
 from pathlib import Path
 
@@ -56,9 +58,13 @@ def test_record_carries_roadmap_item9_fields():
         "devices_per_rank", "decomposition", "solver_variant",
         "solver_residual", "cells_per_rank", "scaling_kind",
         "gpu_direct_requested", "gpu_direct_active", "host_staged_halo",
-        "schema_version", "timestamp_utc",
+        "schema_version", "timestamp_utc", "cpu_affinity",
     ):
         assert k in rec, f"item-9 field {k!r} absent"
+    if hasattr(os, "sched_getaffinity"):
+        assert rec["cpu_affinity"] == len(os.sched_getaffinity(0)) > 0
+    else:
+        assert rec["cpu_affinity"] is None
     assert rec["solver_variant"] == "single_reduce_pcg"
     assert rec["solver_residual"] == pytest.approx(3.2e-11)
     assert rec["scaling_kind"] == "strong"
@@ -471,3 +477,21 @@ def test_hlo_collective_census_lowers_and_is_error_safe():
         def _boom(x):
             raise RuntimeError("unlowerable")
         assert md.hlo_collective_census(_boom, jnp.arange(4.0)) is None
+
+
+def test_unstamped_multiprocess_gloo_receipt_is_refused(monkeypatch):
+    """A gloo run over several processes whose launcher bypassed
+    legoesm.parallel.early_init has no gloo_iface stamp; such a receipt
+    cannot say which link carried the collectives and must not be written.
+    Single-process and explicitly stamped runs pass through."""
+    monkeypatch.delenv("LEGOESM_GLOO_IFACE_PINNED", raising=False)
+    with pytest.raises(RuntimeError, match="pin_gloo_interface\\(\\) never ran"):
+        md._gloo_iface_stamp("gloo", 8)
+    with pytest.raises(RuntimeError, match="never ran"):
+        md._gloo_iface_stamp("gloo", 1)
+    assert md._gloo_iface_stamp("mpi4jax", 8) == "n/a"
+    assert md._gloo_iface_stamp("xla-local", 1) == "n/a"
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "ib0")
+    assert md._gloo_iface_stamp("gloo", 8) == "ib0"
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "default")
+    assert md._gloo_iface_stamp("gloo", 8) == "default"

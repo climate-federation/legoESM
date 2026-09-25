@@ -262,6 +262,39 @@ class SurfaceLayerConfig(NamedTuple):
     Ch_neutral: float = 1.5e-3
     bulk_scheme: str = "constant"
     z_ref: float = 10.0
+    # The MOST solver is told the actual per-column height of the lowest full
+    # level (~135 m on L30) instead of labelling its inputs as z_ref (10 m).
+    # Labelling a 135 m level as 10 m inflates ocean latent heat 16-18% and
+    # stress 16-54% (measured offline over the tropical and trade oceans).
+    #
+    # Production default, and it lives HERE (one default): the driver's
+    # ExperimentConfig.surface_z_ref_model_level and the run_amip flag are
+    # None = "leave the scheme's value alone", so an untouched run resolves to
+    # this value and a dry-dynamics deck (fv3_duo) sees no non-default field.
+    # Only the MOST schemes (most/coare3/large_yeager) honour it, and only
+    # when the caller supplies the level height (surface_fluxes_at_lowest_level);
+    # the constant-coefficient path is byte-identical either way.  The
+    # dry-adiabatic adjustment is meaningful only against a REAL surface
+    # temperature: a lane that substitutes the lowest air temperature for a
+    # missing surface and still selects a MOST scheme must set this False,
+    # or the adjustment invents an air-surface contrast and a downward
+    # sensible heat flux out of nothing.
+    z_ref_model_level: bool = True
+    # Ocean q_sfc = 0.98 * q_sat(SST, p_s) (sea water at the surface pressure)
+    # via core.bulk_flux.ocean_surface_q_sat.  The coupler tile ALWAYS applies
+    # this factor, so leaving it off makes the two sides of one air-sea
+    # interface disagree: the ocean evaporates sea water while the atmosphere
+    # evaporates fresh water.  It is also what the reference algorithm does
+    # (COARE 3.0, Fairall et al. 2003).
+    #
+    # It stays False HERE and is turned on by the driver
+    # (ExperimentConfig.surface_ocean_q_sfc_saline, default True since
+    # 2026-09-20) rather than at the scheme, because it needs an ocean to
+    # apply to.  The structured-grid turbulence lanes carry no land fraction
+    # and their T_sfc defaults to the lowest air temperature -- there is no
+    # sea surface there to be saline, so a scheme-level True would be a
+    # sea-water correction applied to a column with no sea.
+    ocean_q_sfc_saline: bool = False
     bulk_n_iter: int = 5
     # COARE 3.0 convective-gustiness BL depth z_i [m] (compute_most_fluxes).
     # None (default) = scheme-native: 600 m for bulk_scheme "coare3" (gustiness

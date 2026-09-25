@@ -36,7 +36,7 @@ satisfied: no AT-BAR row leaves the bar and first-over-bar does not move.
 | commit | reviewed result |
 |---|---|
 | `cb5028d2dd2f` | GYRE alone selects face-native production, face `avm`, and live QCO metric. Its initial `nemo_face_native` spelling was not RK3-constructible; the next commit repairs that intermediate state. |
-| `138de77eb757` | Adds/selects the explicit RK3 `nemo_face_native_now2` variant. Final card selectors are pinned at `nemo_testcase_recipe.py:242-244`. |
+| `138de77eb757` | Adds/selects the explicit RK3 `nemo_face_native_now2` variant. Final card selectors are pinned at `nemo_testcase_recipe.py:249-251`. |
 | `f78547b752f7` | The live Kbb face metric is statically selected from step-entry eta for `now2`; the leap-frog `nemo_face_native` arm still requires the carried eta and has no presence-based fallback (`ocean_model_latlon_cgrid.py:8917-8934`, `ocean_model_latlon_cgrid.py:8955-9028`). |
 
 Statement walk: the helper forms `wumask/wvmask`, the live two-factor
@@ -63,7 +63,7 @@ is non-vacuous: it passes at the after tip (`1 passed`) and, in a clean
 same-tip clone with only `f78547b752f7`'s model hunk reversed, fails nonzero at
 kt=2 with the old `eta_before` `ValueError`. The operand walk is a real
 production measurement: it requires fp64, constructs the printed card, and
-enters the production routines (`nemo_testcase_l2_gyre_round54_tke_operands.py:505-543`);
+enters the production routines (`nemo_testcase_l2_gyre_round54_tke_operands.py:514-552`);
 its after artifact is clean-stamped `f78547b752f7`, and its plants fail.
 
 Review verdict: **no blocking finding on the final three-commit stack**.

@@ -613,3 +613,114 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True,
             wv["vlon"], wv["vlat"], wv["es1"], wv["ew2"], ng)
         state[t]["u"], state[t]["v"], state[t]["pt"] = u2, v2, pt2
     return None
+
+
+def stack_held_suarez_metrics(ctx):
+    """Face-stack the per-face metric inputs of the Held-Suarez step once.
+
+    Returns ``(amat6, agrid_lat6, wind_vectors6)`` for
+    :func:`apply_held_suarez_step_sixface_jax`: ``amat6`` a 4-tuple of
+    ``(6, m, m)`` arrays, ``agrid_lat6`` ``(6, m, m)``, ``wind_vectors6``
+    a dict of ``(6, ...)`` stacks -- exactly the arrays the NumPy
+    authority reads per face from ``ctx["ectx"]["amat6"]``,
+    ``ctx["gs6"]`` and ``compute_fv3_native_wind_vectors``.
+    """
+    from legoesm.grids.fv3_native_metrics import compute_fv3_native_wind_vectors
+    ectx = ctx.get("ectx")
+    if ectx is None:
+        raise ValueError(
+            "stack_held_suarez_metrics needs ctx['ectx'] (build the duo "
+            "context with use_ext_bundle=True) for the c2l Earth-frame winds")
+    amat6 = tuple(np.stack([np.asarray(ectx["amat6"][t][c]) for t in range(6)])
+                  for c in range(4))
+    agrid_lat6 = np.stack([np.asarray(ctx["gs6"][t]["agrid_lat"])
+                           for t in range(6)])
+    wvs = []
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        wvs.append(compute_fv3_native_wind_vectors(
+            gs["grid_lon"], gs["grid_lat"], gs["agrid_lon"], gs["agrid_lat"]))
+    wind_vectors6 = {k: np.stack([np.asarray(wv[k]) for wv in wvs])
+                     for k in ("vlon", "vlat", "es1", "ew2")}
+    return amat6, agrid_lat6, wind_vectors6
+
+
+def apply_held_suarez_step_sixface_jax(state, press, tab, amat6, agrid_lat6,
+                                       wind_vectors6, *, dt, n, ng, km,
+                                       strat=True):
+    """Face-stacked, pure-JAX twin of :func:`apply_held_suarez_step`.
+
+    Same three passes on ``(6, ...)`` stacks; the NumPy path stays the
+    authority.  Returns a new ``state`` dict with ``u``/``v``/``pt``
+    replaced; inputs are never mutated.
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm.grids.fv3_duo_halos import (
+        exchange_agrid_scalar_halos, exchange_dgrid_vector_halos)
+    from legoesm.grids.fv3_native_ext_vector import c2l_ord4_face_jax
+
+    n, ng, km = int(n), int(ng), int(km)
+    m = n + 2 * ng
+    ci = slice(ng, ng + n)
+    u6 = jnp.asarray(state["u"])
+    v6 = jnp.asarray(state["v"])
+    pt6 = jnp.asarray(state["pt"])
+    delp6 = jnp.asarray(state["delp"])
+    if pt6.shape != (6, m, m, km):
+        raise ValueError(
+            f"apply_held_suarez_step_sixface_jax: pt {pt6.shape} != "
+            f"{(6, m, m, km)}")
+
+    # PASS 0: D-grid u/v halo strips (DGRID_NE), one level at a time
+    ex_d = jax.vmap(lambda u, v: exchange_dgrid_vector_halos(u, v, tab),
+                    in_axes=(-1, -1), out_axes=(-1, -1))
+    u6, v6 = ex_d(u6, v6)
+
+    # PASS 1: Earth-frame A-grid winds (per face, per level), then the
+    # Held-Suarez tendencies on the compute domain, embedded in zero halos
+    c2l_k = jax.vmap(lambda u, v, a: c2l_ord4_face_jax(u, v, a, n, ng),
+                     in_axes=(-1, -1, None), out_axes=(-1, -1))
+    c2l_6 = jax.vmap(c2l_k, in_axes=(0, 0, 0), out_axes=(0, 0))
+    ua6, va6 = c2l_6(u6, v6, tuple(jnp.asarray(a) for a in amat6))
+    # c2l leaves the halo NaN by contract; the authority's bare
+    # np.nan_to_num(nan=0.0) also clamps +-inf to the float64 extrema, and
+    # jnp.nan_to_num's defaults do the same -- port its exclusions verbatim.
+    ua6 = jnp.nan_to_num(ua6, nan=0.0)
+    va6 = jnp.nan_to_num(va6, nan=0.0)
+
+    peln6 = jnp.transpose(jnp.asarray(press["peln"]), (0, 1, 3, 2))
+    pe6 = jnp.transpose(jnp.asarray(press["pe"])[:, 1:n + 1, :, 1:n + 1],
+                        (0, 1, 3, 2))
+    pkz6 = jnp.asarray(press["pkz"])
+    lat6 = jnp.asarray(agrid_lat6)[:, ci, ci]
+
+    def _tend(pt, ua, va, delp, peln, pkz, pe, lat):
+        return held_suarez_tend_jax(pt, ua, va, delp, peln, pkz, pe, lat, dt,
+                                    strat=strat)
+    t_dt_c, u_dt_c, v_dt_c = jax.vmap(_tend)(
+        pt6[:, ci, ci], ua6[:, ci, ci], va6[:, ci, ci], delp6[:, ci, ci],
+        peln6, pkz6, pe6, lat6)
+    zeros = jnp.zeros((6, m, m, km), dtype=pt6.dtype)
+    t_dt6 = zeros.at[:, ci, ci].set(t_dt_c)
+    u_dt6 = zeros.at[:, ci, ci].set(u_dt_c)
+    v_dt6 = zeros.at[:, ci, ci].set(v_dt_c)
+
+    # PASS 2: A-grid halo strips of the vector tendencies, per level
+    ex_a = jax.vmap(lambda f: exchange_agrid_scalar_halos(f, tab),
+                    in_axes=-1, out_axes=-1)
+    u_dt6 = ex_a(u_dt6)
+    v_dt6 = ex_a(v_dt6)
+
+    # PASS 3: apply (per face)
+    wv = {k: jnp.asarray(wind_vectors6[k]) for k in ("vlon", "vlat", "es1",
+                                                     "ew2")}
+
+    def _upd(u, v, pt, ua, va, u_dt, v_dt, t_dt, vlon, vlat, es1, ew2):
+        u2, v2, pt2, _, _ = fv_update_phys_dry_duo_jax(
+            u, v, pt, ua, va, u_dt, v_dt, t_dt, dt, vlon, vlat, es1, ew2, ng)
+        return u2, v2, pt2
+    u2, v2, pt2 = jax.vmap(_upd)(
+        u6, v6, pt6, ua6, va6, u_dt6, v_dt6, t_dt6,
+        wv["vlon"], wv["vlat"], wv["es1"], wv["ew2"])
+    return {**state, "u": u2, "v": v2, "pt": pt2}

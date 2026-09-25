@@ -21,6 +21,7 @@ import nemo_testcase_l2_gyre_phase3_gate as gate  # noqa: E402
 import nemo_testcase_l2_gyre_round46_kt2_stage_gate as round46  # noqa: E402
 import nemo_testcase_l2_gyre_round78_uamid_walk as round78  # noqa: E402
 import nemo_testcase_l2_gyre_round81_btstep_gate as round81  # noqa: E402
+import nemo_testcase_l2_gyre_year_owners as year_owners  # noqa: E402
 from legoesm.core.precision import (  # noqa: E402
     PrecisionPolicy,
     get_policy,
@@ -37,6 +38,17 @@ STAGE_ROOT = ROOT / "round46/oracle_kt2_stage"
 ENTRY_ROOT = ROOT / "round75/oracle_advmean_kt2"
 STAGE_CLOSURE_ROOT = ROOT / "round94/oracle_stage_closure"
 PREREG_FINAL_SSH_MAX = np.float64(7.072560112143626e-7)
+DEVELOPED_RECORD_COMMIT = "4be746b6f8022672458a8349624cbb2f65b497f2"
+DEVELOPED_ENTRY_STEP = 1080
+DEVELOPED_PROCESS_STEP = 1081
+DEVELOPED_RESTART_SHA256 = (
+    "6c0c7a950b30b9d59dbf2673833ddf462a5f8ea5650f496f2f772e1e17092976")
+DEVELOPED_PROCESS_SHA256 = (
+    "526d1fc73faeda990c661f2363a5bb328168bae17d4aea315daf05c35b4cd7b0")
+DEVELOPED_RECORD_SHA256 = (
+    "6bc0f990ccba183a48ad09549b72b549603694e917389eb4f8b9c03c88ceaf09")
+DEVELOPED_QCO_SHA256 = (
+    "626d21e229f7ced8f606f6385e04224fb2e086cef92d81d95dff7e2ef3e90878")
 
 TRACE_KEYS = {
     "u_b": "u_history_b",
@@ -101,7 +113,8 @@ def _native(trace, record_name: str) -> np.ndarray:
     return gate._trace_native(trace[key], key)
 
 
-def _execute_step(model, state, dt, freshwater, surface, execution_mode: str):
+def _execute_step(model, state, dt, freshwater, surface, execution_mode: str,
+                  *, eta_after_override=None):
     """Run the complete production closure with or without production JIT."""
     require(
         execution_mode in ("production-jit", "production-eager"),
@@ -109,7 +122,8 @@ def _execute_step(model, state, dt, freshwater, surface, execution_mode: str):
     )
     if execution_mode == "production-jit":
         return model.step(
-            state, dt, freshwater=freshwater, surface_forcing=surface)
+            state, dt, freshwater=freshwater, surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=eta_after_override)
     state = jax.tree_util.tree_map(
         lambda value: jnp.asarray(value)
         if isinstance(value, (np.ndarray, np.generic)) else value,
@@ -129,7 +143,8 @@ def _execute_step(model, state, dt, freshwater, surface, execution_mode: str):
     model.prime_step_caches(state)
     with jax.disable_jit():
         return model_module.LatLonCGridOceanModel._step_jitted.__wrapped__(
-            model, state, dt, freshwater, surface)
+            model, state, dt, freshwater, surface,
+            _nemo_stage1_zad_eta_after_override=eta_after_override)
 
 
 def _pytree_identity(left, right) -> dict:
@@ -171,9 +186,18 @@ def _pytree_identity(left, right) -> dict:
 
 
 def _context(args):
-    """Capture substeps inside the complete closure and prove non-interference."""
+    """Build the inherited kt=2 entry, then use the shared capture path."""
     base, context = round78.round72._capture_seeded_context(args)
     card, seeded, freshwater, surface, _ = context
+    return _capture_external_context(
+        args, card, seeded, freshwater, surface, base=base)
+
+
+def _capture_external_context(args, card, seeded, freshwater, surface, *,
+                              base=None, eta_after_override=None,
+                              traced_hooks=None, plain_hooks=None,
+                              require_state_identity=True):
+    """Capture all external substeps in one complete production closure."""
     captures = []
     real_barotropic = model_module.barotropic_substeps_latlon_cgrid
 
@@ -208,6 +232,7 @@ def _context(args):
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
+        _nemo_ws_test_hooks=traced_hooks,
     )
     traced_model.prime_step_caches(seeded)
     model_module.barotropic_substeps_latlon_cgrid = capture_barotropic
@@ -215,7 +240,7 @@ def _context(args):
     try:
         traced_state = jax.device_get(_execute_step(
             traced_model, seeded, card.dt_s, freshwater, surface,
-            args.execution_mode))
+            args.execution_mode, eta_after_override=eta_after_override))
         jax.effects_barrier()
     finally:
         model_module.barotropic_substeps_latlon_cgrid = real_barotropic
@@ -225,14 +250,16 @@ def _context(args):
         require(_pytree_identity(duplicate, captures[0])["bit_exact"],
                 "full-step barotropic callbacks differ")
     plain_model = model_module.LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=plain_hooks)
     plain_model.prime_step_caches(seeded)
     plain_state = jax.device_get(_execute_step(
         plain_model, seeded, card.dt_s, freshwater, surface,
-        args.execution_mode))
+        args.execution_mode, eta_after_override=eta_after_override))
     trace_identity = _pytree_identity(traced_state, plain_state)
-    require(trace_identity["bit_exact"],
-            "full-step substep capture moved the returned production state")
+    if require_state_identity:
+        require(trace_identity["bit_exact"],
+                "full-step substep capture moved the returned production state")
     captured = captures[0]
     trace = SimpleNamespace(
         state_after=traced_state,
@@ -562,6 +589,489 @@ def _admit(args) -> dict:
     return fields
 
 
+def _developed_comparison(actual, expected, mask) -> dict:
+    """Bit and norm census with signed-zero sensitivity and a first index."""
+    actual = np.array(actual, dtype=np.float64, copy=True, order="C")
+    expected = np.array(expected, dtype=np.float64, copy=True, order="C")
+    mask = np.asarray(mask, dtype=bool)
+    require(actual.shape == expected.shape == mask.shape,
+            "developed comparison extents differ: "
+            f"actual={actual.shape}, expected={expected.shape}, "
+            f"mask={mask.shape}")
+    unequal = (actual.view(np.uint64) != expected.view(np.uint64)) & mask
+    delta = actual[mask] - expected[mask]
+    first = ([int(value) for value in np.argwhere(unequal)[0]]
+             if np.any(unequal) else None)
+    return {
+        "bit_exact": not bool(np.any(unequal)),
+        "cells_scored": int(np.count_nonzero(mask)),
+        "differing_cells": int(np.count_nonzero(unequal)),
+        "absolute_max": float(np.max(np.abs(delta), initial=0.0)),
+        "rms": float(np.sqrt(np.mean(delta * delta))) if delta.size else 0.0,
+        "first_unequal_index": first,
+    }
+
+
+def _developed_unequal_mask(actual, expected, mask) -> np.ndarray:
+    actual = np.array(actual, dtype=np.float64, copy=True, order="C")
+    expected = np.array(expected, dtype=np.float64, copy=True, order="C")
+    mask = np.asarray(mask, dtype=bool)
+    require(actual.shape == expected.shape == mask.shape,
+            "developed mismatch-mask extents differ")
+    return (actual.view(np.uint64) != expected.view(np.uint64)) & mask
+
+
+def _validate_developed_registry(boundaries=SOURCE_ORDER) -> None:
+    require(tuple(boundaries) == SOURCE_ORDER,
+            "developed external boundary registry changed")
+    require(len(SOURCE_ORDER) == len(set(SOURCE_ORDER)),
+            "developed external boundary registry contains duplicates")
+    require(set(TRACE_KEYS) <= set(round81.ARRAY_FIELDS),
+            "developed trace mapping names an unrecorded field")
+
+
+def _verify_manifest(root: Path) -> dict:
+    manifest = root / "round137_outputs.sha256"
+    require(manifest.is_file(), "Round-137 closed SHA manifest is missing")
+    entries = {}
+    for line in manifest.read_text().splitlines():
+        digest, name = line.split()
+        path = root / name
+        require(path.is_file(), f"Round-137 manifest member is missing: {name}")
+        require(round81.sha256(path) == digest,
+                f"Round-137 manifest member changed: {name}")
+        entries[name] = digest
+    return entries
+
+
+def _admit_developed(args) -> tuple[dict, dict, dict]:
+    """Re-admit the developed external/QCO pair and passive twin controls."""
+    root = args.record_root
+    producer = (root / "producer_commit.txt").read_text().strip()
+    require(producer == DEVELOPED_RECORD_COMMIT,
+            "Round-137 producer commit changed")
+    manifest = _verify_manifest(root)
+    record_path = root / round81.DEVELOPED_RECORD
+    qco_path = root / round81.DEVELOPED_QCO_RECORD
+    require(record_path.stat().st_size == round81.EXPECTED_DEVELOPED_SIZE,
+            "developed external record size changed")
+    require(qco_path.stat().st_size == round81.EXPECTED_QCO_SIZE,
+            "developed QCO record size changed")
+    require(round81.sha256(record_path) == DEVELOPED_RECORD_SHA256,
+            "developed external record digest changed")
+    require(round81.sha256(qco_path) == DEVELOPED_QCO_SHA256,
+            "developed QCO record digest changed")
+    for path, digest in ((record_path, DEVELOPED_RECORD_SHA256),
+                         (qco_path, DEVELOPED_QCO_SHA256)):
+        stamp = path.with_name(path.name + ".stamp")
+        require(stamp.read_text().split() == [digest, producer, path.name],
+                f"developed record stamp changed: {stamp.name}")
+
+    fields = round81.read_record(
+        record_path, expected_kt=DEVELOPED_PROCESS_STEP,
+        has_final_pssh=True)
+    qco = round81.read_qco_record(
+        qco_path, expected_kt=DEVELOPED_PROCESS_STEP)
+    replay = round81.validate_fields(fields)
+    boundary = round81.validate_developed_boundary(fields, qco)
+    require(all(value["bit_exact"] for value in boundary.values()),
+            "Round-137 developed boundary admission changed")
+
+    restart = root / "GYRE_OMIP_L2_P3_00001080_restart.nc"
+    process = root / "oracle_process_budget_kt00001081.bin"
+    require(round81.sha256(restart) == DEVELOPED_RESTART_SHA256,
+            "Round-137 passive restart identity changed")
+    require(round81.sha256(process) == DEVELOPED_PROCESS_SHA256,
+            "Round-137 passive process identity changed")
+    ocean_lines = [line.strip() for line in (
+        root / "ocean.output").read_text().splitlines() if line.strip()]
+    require(ocean_lines and ocean_lines[-1] == "AAAAAAAA",
+            "Round-137 NEMO ocean log lacks its terminal completion marker")
+    plants = {}
+    plant_files = {
+        "final-pssh-ulp": "final-pssh-ulp",
+        "header": "header",
+        "passive-admission": "passive_admission",
+        "qco-ulp": "qco-ulp",
+        "replay-ulp": "replay-ulp",
+        "stamp": "stamp",
+        "swap-ulp": "swap-ulp",
+        "truncation": "truncation",
+    }
+    for name, file_stem in plant_files.items():
+        path = root / f"round137_{file_stem}_plant.log"
+        require(path.is_file(), f"Round-137 {name} plant log is missing")
+        marker = f"STATUS PLANT-FIRED: {name}"
+        require(path.read_text().splitlines()[-1] == marker,
+                f"Round-137 {name} plant marker changed")
+        plants[name] = marker
+    require(manifest[record_path.name] == DEVELOPED_RECORD_SHA256,
+            "closed manifest external digest changed")
+    require(manifest[qco_path.name] == DEVELOPED_QCO_SHA256,
+            "closed manifest QCO digest changed")
+    return fields, qco, {
+        "producer_commit": producer,
+        "record_sha256": DEVELOPED_RECORD_SHA256,
+        "qco_record_sha256": DEVELOPED_QCO_SHA256,
+        "restart_sha256": DEVELOPED_RESTART_SHA256,
+        "process_sha256": DEVELOPED_PROCESS_SHA256,
+        "record_local_replay_rows": replay,
+        "developed_boundary": boundary,
+        "plants": plants,
+        "closed_manifest_members": len(manifest),
+    }
+
+
+def _developed_inputs(args):
+    """Map the admitted step-1080 restart onto the certified GYRE card."""
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        _u_east_to_face, _v_north_to_face)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    year = year_owners._year()
+    audit_json = json.loads(args.daily_audit.read_text())
+    audit_commit = audit_json["tool"]["commit"]
+    audit, daily_hashes = year._daily_record_contract(
+        args.daily_audit, args.daily_root, audit_commit)
+    restart_path = year._daily_restart_path(
+        args.daily_root, DEVELOPED_ENTRY_STEP)
+    payload = year._load_daily_reset_payload(restart_path, 30)
+    expected_digest = daily_hashes.get(restart_path.name)
+    require(expected_digest is not None,
+            "step-1080 restart is absent from the daily SHA manifest")
+    year._require_payload_digest(payload, expected_digest)
+    require(payload["sha256"] == DEVELOPED_RESTART_SHA256,
+            "daily and Round-137 step-1080 restarts differ")
+
+    card = build_nemo_testcase_card(year_owners.CASE)
+    state, _ = year_owners._gyre_checkpoint_state(card, restart_path)
+    history = (
+        jnp.asarray(year._face_history(payload["ub_e"], "u")),
+        jnp.asarray(year._face_history(payload["ubb_e"], "u")),
+        jnp.asarray(year._face_history(payload["vb_e"], "v")),
+        jnp.asarray(year._face_history(payload["vbb_e"], "v")),
+        jnp.asarray(payload["sshb_e"]),
+        jnp.asarray(payload["sshbb_e"]),
+    )
+    state = state._replace(bt_hist=history)
+    land = np.asarray(state.land_mask.data) > 0.5
+    checks = {
+        "T": year_owners._bit_mismatch_count(
+            state.T.data, payload["tn"], gate.expected_masks(card)["T"]),
+        "S": year_owners._bit_mismatch_count(
+            state.S.data, payload["sn"], gate.expected_masks(card)["T"]),
+        "u": year_owners._bit_mismatch_count(
+            state.u.data, _u_east_to_face(payload["un"])),
+        "v": year_owners._bit_mismatch_count(
+            state.v.data, _v_north_to_face(payload["vn"])),
+        "eta": year_owners._bit_mismatch_count(
+            state.eta.data, payload["sshn"]),
+    }
+    for index, (actual, expected) in enumerate(zip(
+            state.bt_hist, history, strict=True)):
+        checks[f"bt_hist_{index}"] = year_owners._bit_mismatch_count(
+            actual, expected)
+    expected_tke = np.where(land[..., None], payload["en"][..., 1:], 0.0)
+    expected_avm = np.where(land[..., None], payload["avm_k"][..., 1:], 0.0)
+    expected_avt = np.where(land[..., None], payload["avt_k"][..., 1:], 0.0)
+    expected_dissl = np.where(
+        land[..., None], payload["dissl"][..., 1:], 0.0)
+    expected_surface = np.where(land, payload["avm_k"][..., 0], 0.0)
+    for name, expected in (
+            ("tke", expected_tke), ("tke_avm", expected_avm),
+            ("tke_avt", expected_avt), ("tke_dissl", expected_dissl),
+            ("tke_avm_surface", expected_surface)):
+        checks[name] = year_owners._bit_mismatch_count(
+            getattr(state, name).data, expected)
+    require(all(value == 0 for value in checks.values()),
+            "developed restart bridge changed a mapped field: "
+            + ", ".join(f"{name}={value}" for name, value in checks.items()
+                        if value))
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    return card, state, freshwater, surface, payload, {
+        "daily_audit": str(args.daily_audit),
+        "daily_audit_commit": audit_commit,
+        "daily_record_count": audit["inventory"]["observed_count"],
+        "restart": str(restart_path),
+        "restart_sha256": payload["sha256"],
+        "source_mapping_cells_unequal": checks,
+    }
+
+
+def _developed_rows(fields, trace, active) -> tuple[list[dict], dict]:
+    live_arrays = {
+        name: np.asarray(_native(trace, name), dtype=np.float64)
+        for name in round81.ARRAY_FIELDS
+    }
+    live_mid = np.stack(
+        [np.asarray(trace[f"mid_weight_{index}"], dtype=np.float64)
+         for index in (1, 2, 3)], axis=-1)
+    live_back = np.stack(
+        [np.asarray(trace[f"back_weight_{index}"], dtype=np.float64)
+         for index in (0, 1, 2, 3)], axis=-1)
+    rows = []
+    scalar = np.ones((), dtype=bool)
+    for substep in range(round81.N_CYCLE):
+        row = {"substep": substep + 1}
+        for index in range(3):
+            row[f"mid_coefficient_{index + 1}"] = _developed_comparison(
+                live_mid[substep, index],
+                fields["mid_coefficients"][substep, index], scalar)
+        for name in round81.ARRAY_FIELDS[:19]:
+            row[name] = _developed_comparison(
+                live_arrays[name][substep], fields[name][substep],
+                active[_stagger(name)])
+        for index in range(4):
+            row[f"back_coefficient_{index}"] = _developed_comparison(
+                live_back[substep, index],
+                fields["back_coefficients"][substep, index], scalar)
+        for name in round81.ARRAY_FIELDS[19:]:
+            row[name] = _developed_comparison(
+                live_arrays[name][substep], fields[name][substep],
+                active[_stagger(name)])
+        require(set(row) == {"substep", *SOURCE_ORDER},
+                f"substep {substep + 1} omitted a registered boundary")
+        rows.append(row)
+    return rows, live_arrays
+
+
+def _process_qco_arm(card, state, freshwater, surface, eta_override,
+                     transport_average, zad_eta, active, qco) -> dict:
+    """Direct one external endpoint through the production-JIT QCO path."""
+    hooks = model_module._NEMOWSRK3TestHooks(
+        external_mode_result_override=(
+            jnp.asarray(eta_override),
+            jnp.asarray(transport_average[0]),
+            jnp.asarray(transport_average[1])),
+        tracer_process_trace=(),
+    )
+    trace_model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks)
+    trace_model.prime_step_caches(state)
+    trace = jax.device_get(trace_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=jnp.asarray(zad_eta)))
+    plain_hooks = hooks._replace(tracer_process_trace=None)
+    plain_model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=plain_hooks)
+    plain_model.prime_step_caches(state)
+    plain = jax.device_get(plain_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=jnp.asarray(zad_eta)))
+    observer = _pytree_identity(trace.state_after, plain)
+    require(observer["bit_exact"],
+            "production QCO observer changed the directed returned state")
+    q_actual = np.asarray(trace.q_Kaa, dtype=np.float64)
+    owned_r1 = qco["r1_ht_0"][
+        round81.NTSJ - 1:round81.NTEJ,
+        round81.NTSI - 1:round81.NTEI]
+    expected = np.float64(1.0) + np.asarray(eta_override) * owned_r1
+    return {
+        "observer_state_identity": observer,
+        "consumed_q_Kaa_vs_one_plus_input_times_recorded_r1_ht_0": (
+            _developed_comparison(q_actual, expected, active)),
+        "q_Kaa": q_actual,
+    }
+
+
+def _standard_process_qco(card, state, freshwater, surface, zad_eta) -> dict:
+    hooks = model_module._NEMOWSRK3TestHooks(tracer_process_trace=())
+    model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks)
+    model.prime_step_caches(state)
+    return jax.device_get(model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=jnp.asarray(zad_eta)))
+
+
+def measure_developed(args) -> dict:
+    """Measure the Round-137 day-180 external solve in compiled order."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64 libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-138 measurement worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-138 measurement commit mismatch")
+    if args.plant == "missing-boundary":
+        fired = False
+        try:
+            _validate_developed_registry(SOURCE_ORDER[:-1])
+        except RuntimeError:
+            fired = True
+        require(fired, "missing-boundary plant did not trip the registry")
+        return {"format": "gyre-developed-external-walk-v1",
+                "status": "PLANT-FIRED", "plant": args.plant,
+                "plant_fires": True, "worktree": stamp}
+    _validate_developed_registry()
+    fields, qco, admission = _admit_developed(args)
+    card, state, freshwater, surface, payload, entry = _developed_inputs(args)
+    masks = gate.expected_masks(card)
+    active = {
+        "t": masks["ssh"],
+        "u": masks["u"][..., 0],
+        "v": masks["v"][..., 0],
+    }
+    for name, expected in (("t_mask", active["t"]),
+                           ("u_mask", active["u"]),
+                           ("v_mask", active["v"])):
+        require(np.array_equal(fields[name] != 0.0, expected),
+                f"{name} differs from the developed live mask")
+
+    if args.plant == "entry-ssh-ulp":
+        location = tuple(int(value) for value in np.argwhere(active["t"])[0])
+        planted_eta = np.array(state.eta.data, copy=True)
+        planted_eta[location] = np.nextafter(
+            planted_eta[location], np.float64(np.inf))
+        planted_state = state._replace(
+            eta=state.eta.replace(data=jnp.asarray(planted_eta)))
+        _, _, _, _, _, planted = _capture_external_context(
+            args, card, planted_state, freshwater, surface,
+            eta_after_override=jnp.asarray(payload["ssha"]))
+        entry_row = _developed_comparison(
+            _native(planted.substeps, "eta_entry")[0],
+            fields["eta_entry"][0], active["t"])
+        require(entry_row["differing_cells"] > 0,
+                "entry-SSH ULP plant moved no registered entry row")
+        return {"format": "gyre-developed-external-walk-v1",
+                "status": "PLANT-FIRED", "plant": args.plant,
+                "plant_fires": True, "location": list(location),
+                "entry_row": entry_row, "worktree": stamp}
+
+    (_, _, _, _, _, captured) = _capture_external_context(
+        args, card, state, freshwater, surface,
+        eta_after_override=jnp.asarray(payload["ssha"]))
+    rows, live_arrays = _developed_rows(fields, captured.substeps, active)
+    first = first_non_bit(rows)
+    # The callback's barotropic state retains its solver halo, whereas the
+    # registered substep trace and NEMO stream both use the owned native box.
+    # The final swap is the exact pssh field returned by that solve.
+    live_final = np.asarray(live_arrays["swap_eta"][-1], dtype=np.float64)
+    oracle_final = np.array(fields["final_pssh"], copy=True)
+    if args.plant == "final-pssh-ulp":
+        location = tuple(int(value) for value in np.argwhere(active["t"])[0])
+        oracle_final[location] = np.nextafter(
+            oracle_final[location], np.float64(np.inf))
+    final_row = _developed_comparison(live_final, oracle_final, active["t"])
+    if args.plant == "final-pssh-ulp":
+        baseline = _developed_comparison(
+            live_final, fields["final_pssh"], active["t"])
+        require(final_row != baseline,
+                "final-pssh ULP plant moved no registered final row")
+        return {"format": "gyre-developed-external-walk-v1",
+                "status": "PLANT-FIRED", "plant": args.plant,
+                "plant_fires": True, "final_row": final_row,
+                "baseline_final_row": baseline, "worktree": stamp}
+
+    final_mask = _developed_unequal_mask(
+        live_final, fields["final_pssh"], active["t"])
+    first_appearance = np.zeros(active["t"].shape, dtype=np.int16)
+    ssh_first_non_bit = None
+    for substep in range(round81.N_CYCLE):
+        mismatch = _developed_unequal_mask(
+            live_arrays["eta_continuity"][substep],
+            fields["eta_continuity"][substep], active["t"])
+        if ssh_first_non_bit is None and np.any(mismatch):
+            ssh_first_non_bit = substep + 1
+        first_appearance[(first_appearance == 0) & mismatch] = substep + 1
+    appearances = [
+        {"j": int(j), "i": int(i),
+         "first_unequal_substep": int(first_appearance[j, i])}
+        for j, i in np.argwhere(final_mask)
+    ]
+
+    qco_proof = None
+    qco_set_equal = None
+    if args.execution_mode == "production-jit":
+        standard = _standard_process_qco(
+            card, state, freshwater, surface, payload["ssha"])
+        standard_identity = _pytree_identity(
+            standard.state_after, captured.plain_state)
+        require(standard_identity["bit_exact"],
+                "process-QCO observer changed the ordinary production state")
+        owned_r3ta = qco["r3ta"][
+            round81.NTSJ - 1:round81.NTEJ,
+            round81.NTSI - 1:round81.NTEI]
+        nemo_q = np.float64(1.0) + owned_r3ta
+        standard_q = np.asarray(standard.q_Kaa, dtype=np.float64)
+        standard_mask = _developed_unequal_mask(
+            standard_q, nemo_q, active["t"])
+        qco_set_equal = bool(np.array_equal(final_mask, standard_mask))
+        model_arm = _process_qco_arm(
+            card, state, freshwater, surface, live_final,
+            captured.transport_average, payload["ssha"], active["t"], qco)
+        nemo_arm = _process_qco_arm(
+            card, state, freshwater, surface, fields["final_pssh"],
+            captured.transport_average, payload["ssha"], active["t"], qco)
+        nemo_vs_record = _developed_comparison(
+            nemo_arm.pop("q_Kaa"), nemo_q, active["t"])
+        model_arm.pop("q_Kaa")
+        qco_proof = {
+            "standard_observer_state_identity": standard_identity,
+            "standard_q_Kaa_vs_recorded_NEMO_one_plus_r3ta": (
+                _developed_comparison(standard_q, nemo_q, active["t"])),
+            "standard_q_Kaa_unequal_set_equals_final_pssh_set": qco_set_equal,
+            "model_pssh_directed_arm": model_arm,
+            "NEMO_pssh_directed_arm": {
+                **nemo_arm,
+                "consumed_q_Kaa_vs_recorded_NEMO_one_plus_r3ta": (
+                    nemo_vs_record),
+            },
+        }
+
+    predictions = {
+        "final_pssh_599_columns": final_row["differing_cells"] == 599,
+        "final_pssh_set_equals_round136_q_Kaa_set": qco_set_equal is True,
+        "first_boundary_is_substep1_slow_momentum": bool(
+            first is not None and first["substep"] == 1
+            and first["boundary"] in ("slow_u", "slow_v")),
+        "substep1_ssh_is_bit": rows[0]["eta_continuity"]["bit_exact"],
+        "ssh_first_diff_no_earlier_than_substep2": bool(
+            ssh_first_non_bit is not None and ssh_first_non_bit >= 2),
+        "all_final_columns_appear_inside_substeps": bool(
+            appearances and all(
+                row["first_unequal_substep"] > 0 for row in appearances)),
+    }
+    if args.execution_mode == "production-eager":
+        predictions["final_pssh_set_equals_round136_q_Kaa_set"] = None
+    return {
+        "format": "gyre-developed-external-walk-v1",
+        "status": "MEASURED",
+        "worktree": stamp,
+        "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
+        "entry": entry,
+        "admission": admission,
+        "observer_state_identity": captured.trace_state_identity,
+        "first_non_bit_statement": first,
+        "first_ssh_non_bit_substep": ssh_first_non_bit,
+        "weighted_final_pssh_vs_NEMO": final_row,
+        "final_pssh_unequal_columns": [
+            [int(j), int(i)] for j, i in np.argwhere(final_mask)],
+        "final_pssh_column_first_appearance": appearances,
+        "qco_exact_input_proof": qco_proof,
+        "rows": rows,
+        "predictions": predictions,
+        "all_applicable_frozen_predictions_confirmed": all(
+            value for value in predictions.values() if value is not None),
+        "plant": args.plant,
+        "plant_fires": False,
+        "scope": {
+            "production_physics_changed": False,
+            "DINO": "NO-PRODUCTION-CHANGE",
+            "LOCK_EXCHANGE": "NO-PRODUCTION-CHANGE",
+            "OVERFLOW": "NO-PRODUCTION-CHANGE",
+            "ORCA2": "UNMEASURED-WITH-SPEC; diagnostic-only round",
+        },
+    }
+
+
 def measure(args) -> dict:
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(
@@ -785,6 +1295,9 @@ def measure(args) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--developed", action="store_true",
+        help="score the admitted Round-137 step-1081 developed record")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -808,16 +1321,36 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--plant", choices=(
             "none", "history-ulp", "slow-u-ulp", "null-slow-u",
-            "handoff-ssh-ulp"),
+            "handoff-ssh-ulp", "missing-boundary", "entry-ssh-ulp",
+            "final-pssh-ulp"),
         default="none")
+    parser.add_argument(
+        "--daily-root", type=Path,
+        default=ROOT / "round132/oracle_daily_restarts")
+    parser.add_argument(
+        "--daily-audit", type=Path,
+        default=ROOT / "round136/daily_record_audit.json")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        report = measure(args)
+        report = measure_developed(args) if args.developed else measure(args)
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
+    if args.developed:
+        if args.plant != "none":
+            print(
+                f"ROUND138 {args.plant.upper()} PLANT STATUS "
+                f"{'PLANT-FIRED' if report['plant_fires'] else 'PLANT-INERT'}"
+            )
+            return 1
+        print(
+            "ROUND138 DEVELOPED BTSTEP MEASURED: "
+            f"first={report['first_non_bit_statement']} "
+            f"final={report['weighted_final_pssh_vs_NEMO']}"
+        )
+        return 0
     if args.plant != "none":
         print(
             f"ROUND116 {args.plant.upper()} PLANT STATUS "

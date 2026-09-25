@@ -146,6 +146,13 @@ def _model_config(
         return base._replace(
             eos="nemo_eos80",
             physics=physics,
+            # Round 163 (Decision 55, note AT): ORCA2-zps resolves the SAME
+            # rk3_ws+vector_invariant+nemo_literal program GYRE-zco does (via
+            # this shared base), but has never been measured under the
+            # second continuity solve -- explicit False, not an inference
+            # from `eos` (round-163 review BLOCKER, closed by making this an
+            # explicit per-card config choice instead).
+            nemo_stage_momentum_wzv_split=False,
             vorticity_scheme="een_total",
             # ORCA2 resolves nn_ahm_ijk_t = -30 (run ocean.output:1184), so the
             # lateral momentum viscosity coefficient is READ whole from
@@ -286,6 +293,12 @@ def _model_config(
             zad_bottom_face_mask="nemo_faithful",
             zad_qco_evaluation="nemo_literal",
             wzv_call2_evaluation="nemo_literal",
+            # Round 163 (Decision 55, note AT): GYRE-zco's own measured,
+            # landed choice -- explicit here, not inferred from EOS or any
+            # other field.  ORCA2-zps specializes this SAME branch below and
+            # overrides it back to False, because it resolves the identical
+            # program but has never been measured under it.
+            nemo_stage_momentum_wzv_split=True,
             vorticity_scheme="ene_total",
             # key_qco e3f_vor = e3f_0vor*(1+r3f); dom_qco_r3c_RK3 builds
             # r3f from the four-cell surface-weighted SSH average

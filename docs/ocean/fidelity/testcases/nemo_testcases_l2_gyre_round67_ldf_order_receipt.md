@@ -8,10 +8,10 @@ change remains**. Oracle producer `3b3b045bd9e03b60330204e7590e4c4470b7a0ca`;
 
 | Boundary | legoESM parent | compiled NEMO GYRE |
 |---|---|---|
-| SBC and QSR | Builds the stage-3 physical rate and replaces the Kbb QSR by its Kmm evaluation (`ocean_model_latlon_cgrid.py:6137-6206`). | Krhs already contains advection/SBC; stage 3 calls QSR (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:917-965`). |
+| SBC and QSR | Builds the stage-3 physical rate and replaces the Kbb QSR by its Kmm evaluation (`ocean_model_latlon_cgrid.py:6243-6312`). | Krhs already contains advection/SBC; stage 3 calls QSR (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:917-965`). |
 | LDF | Computes GM/Redi and adds `dt*dT_gm/dS_gm` to `T_mid/S_mid` in concentration form (`ocean_model_latlon_cgrid.py:7048-7480`). | Calls `tra_ldf` after QSR and before ZDF (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:917-965`). |
-| Content | The final WS call restarts from Kbb/saved stage 2 (`ocean_model_latlon_cgrid.py:7639-7677`); its content is advection content plus only `stage_source_rates[2]` (`ocean_model_latlon_cgrid.py:1861-1911`). The earlier LDF concentration update is therefore replaced, not post-solve. | ZDF forms `h(Kbb)*T(Kbb)+p2dt*h(Kmm)*Krhs` (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:547-565`). |
-| Implicit ZDF | K33 is added to the tracer matrix (`ocean_model_latlon_cgrid.py:9993-9999`), then the captured content is passed to the literal solve (`ocean_model_latlon_cgrid.py:8038-8150`, `ocean_model_latlon_cgrid.py:10417-10438`). | `avt/avs + ah_wslp2` is assembled first (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:416-443`), then the tridiagonal matrix (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:463-479`) and content/solve. |
+| Content | The final WS call restarts from Kbb/saved stage 2 (`ocean_model_latlon_cgrid.py:7779-7817`); its content is advection content plus only `stage_source_rates[2]` (`ocean_model_latlon_cgrid.py:1861-1911`). The earlier LDF concentration update is therefore replaced, not post-solve. | ZDF forms `h(Kbb)*T(Kbb)+p2dt*h(Kmm)*Krhs` (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:547-565`). |
+| Implicit ZDF | K33 is added to the tracer matrix (`ocean_model_latlon_cgrid.py:10145-10151`), then the captured content is passed to the literal solve (`ocean_model_latlon_cgrid.py:8178-8290`, `ocean_model_latlon_cgrid.py:10569-10590`). | `avt/avs + ah_wslp2` is assembled first (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:416-443`), then the tridiagonal matrix (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:463-479`) and content/solve. |
 
 Thus moving the already-computed LDF rate into pre-solve Krhs is NEMO's order,
 not a tuning choice. The final tree deliberately retains the parent behavior
@@ -54,8 +54,8 @@ unequal wet cells; RMS differs `1.18e-17`). Report
 | card | statement/scope | Rule-12 disposition |
 |---|---|---|
 | GYRE | executes LDF + shared WS content | **HELD** at exact kt3 gate; kt1--10/day 1--30 after arms unreached |
-| LOCK_EXCHANGE | same WS helper; NEMO LDF OFF and legoESM `gm_redi=None` (`lock_kt1_10/ocean.output:578`, `nemo_testcase_recipe.py:377-461`) | association trajectory unreached |
-| OVERFLOW | same; LDF OFF/`gm_redi=None` (`overflow_kt1_10/ocean.output:690`, `nemo_testcase_recipe.py:377-461`) | association trajectory unreached |
+| LOCK_EXCHANGE | same WS helper; NEMO LDF OFF and legoESM `gm_redi=None` (`lock_kt1_10/ocean.output:578`, `nemo_testcase_recipe.py:390-474`) | association trajectory unreached |
+| OVERFLOW | same; LDF OFF/`gm_redi=None` (`overflow_kt1_10/ocean.output:690`, `nemo_testcase_recipe.py:390-474`) | association trajectory unreached |
 | DINO | separate modified-leapfrog program | source-inert; execution gate unreached |
 | ORCA2 | topology/record absent | **UNMEASURED WITH SPEC**: resolve native card, record stage-3 post-SBC/QSR/LDF Krhs and pre/post-ZDF T/S at kt1--10, run this cumulative gate plus trajectory comparison; require exact statement replay, registered moves, and no earlier first-over-bar |
 

@@ -98,7 +98,7 @@ The first production over-bar boundary is therefore
 forms `zub/zvb` at `stprk3_stg.F90:259-270`, then materializes
 `metric*e3(Kmm)*(velocity+barotropic correction)` at `:272-275`.  legoESM's
 single shared helper is `_nemo_ws_stage_transport` at
-`ocean_model_latlon_cgrid.py:1316-1413`, with the corresponding reciprocal,
+`ocean_model_latlon_cgrid.py:1337-1434`, with the corresponding reciprocal,
 subtract, corrected-velocity, and metric-product statements at `:1364-1387`.
 The V2 record is
 `oracle_stage1_wzv_operands_kt00000001.bin`, SHA-256
@@ -128,7 +128,7 @@ NEMO first materializes the HYB stage SSH
 `rDt=rn_Dt/3` at `:118-124`, and consumes the pair in
 `sshwzv.F90:330-336`.  legoESM instead builds a full endpoint delta and passes
 the full step through `_stage_transport_kw` at
-`ocean_model_latlon_cgrid.py:5745-5760`.  These are algebraically the same
+`ocean_model_latlon_cgrid.py:5851-5866`.  These are algebraically the same
 real quotient, with different source association.
 
 Phase 2k's 233,341 / 233,341, 7.329623319094706e-05 m/s arm held the
@@ -201,7 +201,7 @@ are printed at `ocean.output:1273-1276`.  Under RK3,
 `traadv.F90:280-283` disables the limiter at stages 1 and 2 and
 `:355-365` executes the centered FCT2 precursor; the two-step FCT operator in
 `traadv_fct.F90:153-189` is executed only at stage 3.  The shared legoESM
-precursor is `ocean_model_latlon_cgrid.py:1560-1599`.
+precursor is `ocean_model_latlon_cgrid.py:1581-1620`.
 
 | stage-1 centered precursor | unequal / n | maximum absolute difference | result |
 |---|---:|---:|---|

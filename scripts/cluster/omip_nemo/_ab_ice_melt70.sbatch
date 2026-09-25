@@ -21,7 +21,7 @@
 # Wall time: ~22 min/model-day measured on rtx8000 => ~33 h for 90 d.
 set +e
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; nvidia-smi -L | head -1; date
 git -C $ROOT log --oneline -1

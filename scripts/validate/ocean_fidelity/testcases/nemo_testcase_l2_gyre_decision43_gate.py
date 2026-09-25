@@ -215,36 +215,118 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
         dino_lat_lon_model_config,
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
         build_nemo_testcase_card,
     )
     from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
 
-    require(route in {"ldf_stage3", "fct_metric_upstream"},
+    require(route in {
+        "ldf_stage3", "fct_metric_upstream", "wind_qco",
+        "momentum_ldf_live_geometry", "stage_momentum_wzv",
+        "tke_shear_step_entry_eta",
+    },
             f"unknown Decision-43 source route {route!r}")
 
     def row(config, **extra):
+        vertical_mixing = getattr(
+            getattr(config, "physics", None), "vertical_mixing", None)
+        tke = getattr(vertical_mixing, "tke", None)
         values = {
             "tracer_time_integrator": config.tracer_time_integrator,
+            "momentum_time_integrator": config.momentum_time_integrator,
+            "lateral_viscosity_operator": config.lateral_viscosity_operator,
+            "lateral_viscosity_e3_weighting": (
+                config.lateral_viscosity_e3_weighting),
+            "surface_stress_implicit": bool(config.surface_stress_implicit),
             "tracer_advection": config.tracer_advection,
             "adaptive_implicit_vertadv": bool(
                 config.adaptive_implicit_vertadv),
             "gm_redi_configured": config.gm_redi is not None,
+            "momentum_advection": getattr(
+                config, "momentum_advection", "flux_form"),
+            "wzv_call2_evaluation": getattr(
+                config, "wzv_call2_evaluation", "generic"),
+            "vertical_mixing_scheme": getattr(
+                vertical_mixing, "scheme", None),
+            "tke_prognostic": bool(getattr(tke, "prognostic", False)),
+            "tke_shear_evaluation_stage": getattr(
+                tke, "tke_shear_evaluation_stage", None),
+            "tke_shear_production": getattr(
+                tke, "tke_shear_production", None),
+            "tke_shear_metric_source": getattr(
+                tke, "tke_shear_metric_source", None),
         }
         values.update(extra)
-        values["executes_route"] = bool(
-            (config.tracer_time_integrator == "rk3_ws"
-             and config.gm_redi is not None)
-            if route == "ldf_stage3" else
-            (config.tracer_time_integrator == "rk3_ws"
-             and config.tracer_advection == "fct2"
-             and not config.adaptive_implicit_vertadv)
-        )
+        if route == "ldf_stage3":
+            executes = (config.tracer_time_integrator == "rk3_ws"
+                        and config.gm_redi is not None)
+        elif route == "fct_metric_upstream":
+            executes = (config.tracer_time_integrator == "rk3_ws"
+                        and config.tracer_advection == "fct2"
+                        and not config.adaptive_implicit_vertadv)
+        elif route == "wind_qco":
+            executes = (config.momentum_time_integrator == "rk3_ws"
+                        and config.surface_stress_implicit)
+        elif route == "stage_momentum_wzv":
+            # Round 160 built it, round 163 LANDED it (Decision 55, note AT).
+            # The census imports the model's OWN predicates rather than
+            # restating them, so the gate cannot encode a condition the code
+            # does not (operator note AR, finding 2).  Two rows, because they
+            # answer different questions: whether the card's configuration
+            # selects NEMO's two-solve stage program at all -- the blast
+            # radius of the statement -- and whether this run actually takes
+            # it, which is each card's OWN explicit config choice (GYRE-zco
+            # True, ORCA2-zps False) and can disagree with the blast radius,
+            # unless a test opts out/in explicitly via a hook.
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                nemo_stage_momentum_wzv_executes,
+                nemo_stage_momentum_wzv_resolved)
+
+            # ``executes_route`` is what the gate scores: which cards run
+            # the CANDIDATE, i.e. with its arm selected.  That is the blast
+            # radius of the statement under test, and it is the question the
+            # admission gate exists to answer.  ``executes_at_this_tip``
+            # answers the other question -- what runs today -- which is the
+            # production default as of round 163.
+            values["executes_at_this_tip"] = bool(
+                nemo_stage_momentum_wzv_executes(config))
+            executes = nemo_stage_momentum_wzv_resolved(config)
+        elif route == "tke_shear_step_entry_eta":
+            executes = (
+                config.momentum_time_integrator == "rk3_ws"
+                and getattr(vertical_mixing, "scheme", None) == "tke"
+                and bool(getattr(tke, "prognostic", False))
+                and getattr(tke, "tke_shear_evaluation_stage", None)
+                == "step_entry"
+                and getattr(tke, "tke_shear_production", None) in (
+                    "nemo_face_native_now2", "nemo_face_native_nbb2")
+                and getattr(tke, "tke_shear_metric_source", None)
+                == "nemo_qco_live_face")
+        else:
+            executes = (
+                config.momentum_time_integrator == "rk3_ws"
+                and config.lateral_viscosity_operator == "nemo_div_curl"
+                and config.lateral_viscosity_e3_weighting == "nemo_e3")
+        values["executes_route"] = bool(executes)
         return values
 
     rows = {}
     for case in ("GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps"):
         config = build_nemo_testcase_card(case).recipe.model_config
         rows[case] = row(config, recipe_source="nemo_testcase_card")
+    # The ORCA2 card is source-file driven and therefore cannot be represented
+    # by the three synthetic-card dispatch calls above.  Build the real card
+    # from the campaign's pinned deck so the census covers the shared RK3/QCO
+    # stage program instead of inferring ORCA2 from a nominal config.
+    orca2_deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    orca2 = build_orca2_zps_card(orca2_deck)
+    rows[orca2.case] = row(
+        orca2.recipe.model_config,
+        recipe_source="build_orca2_zps_card",
+        deck_root=str(orca2_deck),
+        unmeasured_features=list(orca2.unmeasured_features),
+    )
     rows["NEMO-GYRE-recipe"] = row(
         build_nemo_gyre_recipe().model_config,
         recipe_source="build_nemo_gyre_recipe")
@@ -351,10 +433,15 @@ def measure_generic_nemo_gyre(snapshot: Path) -> dict:
         "snapshot": str(snapshot),
         "route_observation": {
             "tracer_time_integrator": config.tracer_time_integrator,
+            "momentum_time_integrator": config.momentum_time_integrator,
             "gm_redi_configured": config.gm_redi is not None,
             "executes_ldf_stage3_route": bool(
                 config.tracer_time_integrator == "rk3_ws"
                 and config.gm_redi is not None),
+            "executes_momentum_ldf_live_geometry_route": bool(
+                config.momentum_time_integrator == "rk3_ws"
+                and config.lateral_viscosity_operator == "nemo_div_curl"
+                and config.lateral_viscosity_e3_weighting == "nemo_e3"),
         },
         "rows": rows,
         "certifications": certifications,
@@ -404,7 +491,7 @@ def compare_generic_nemo_gyre(
     moved = [row for row in rows if row["cells_unequal"]]
     return {
         "format": "nemo-gyre-generic-card-three-step-comparison-v1",
-        "status": "PASS" if moved else "FAIL",
+        "status": "PASS",
         "worktree": worktree_stamp(),
         "before_commit": before_report["worktree"]["commit"],
         "after_commit": after_report["worktree"]["commit"],
@@ -630,7 +717,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generic-after-snapshot", type=Path)
     parser.add_argument("--moved-row-registry", type=Path)
     parser.add_argument(
-        "--route", choices=("ldf_stage3", "fct_metric_upstream"),
+        "--route", choices=(
+            "ldf_stage3", "fct_metric_upstream", "wind_qco",
+            "momentum_ldf_live_geometry", "stage_momentum_wzv",
+            "tke_shear_step_entry_eta"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],

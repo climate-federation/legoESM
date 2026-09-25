@@ -2394,6 +2394,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     # second Kmm hdiv with actual barotropic Kaa r3t; depends on the coupled
     # call-1 QCO operands above. Generic default is byte-compatible.
     wzv_call2_evaluation: str = "generic"
+    # Round 163 (Decision 55, note AT): NEMO's SECOND per-stage continuity
+    # solve for the momentum vertical advection (stprk3_stg.f90:360), only
+    # meaningful when ``wzv_call2_evaluation == "nemo_literal"``. This is an
+    # EXPLICIT per-card choice, not inferred from any other field (EOS
+    # included) -- every card whose resolved configuration reaches the
+    # nemo_literal branch MUST set it, ``True`` or ``False``, or the model
+    # raises rather than guessing. GYRE-zco sets ``True`` (measured, landed,
+    # round-163 receipt); ORCA2-zps sets ``False`` (resolves the same
+    # program, never measured under it). ``None`` here is a construction
+    # default only, refused by the model at STEP-TIME if the card also
+    # resolves ``nemo_literal`` without overriding it.
+    nemo_stage_momentum_wzv_split: bool | None = None
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
