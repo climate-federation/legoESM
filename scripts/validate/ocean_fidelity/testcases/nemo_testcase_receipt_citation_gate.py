@@ -686,6 +686,10 @@ CITATION_MAP = {
     '/dynspg_ts.f90:755-779': [
         ('IF( lwp .AND. kt == nit000 .AND. jn <= 2 ) THEN', 3),
         ('& l4_canon_2d(ffv_nw,\'V\'), l4_canon_2d(ffv_ne,\'V\')', 2), 25],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:1533-1563': [
+        'FUNCTION l4_canon_2d( pfield, cdgrid ) RESULT( zfield )',
+        'END FUNCTION l4_canon_2d', 31],
     # --- ORCA2 card round 14: the barotropic slow forcing, in stp2d's order
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:139-147': [
         '!*  hydrostatic pressure gradient (HPG))  *!',
