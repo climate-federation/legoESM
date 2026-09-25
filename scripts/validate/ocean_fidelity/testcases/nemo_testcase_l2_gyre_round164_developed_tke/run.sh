@@ -21,8 +21,8 @@ refuse() {
 # gfortran syntax proof without invoking makenemo or mpirun.
 readonly MODE=${1:---run}
 case "$MODE" in
-  --run|--preflight-only|--plant-layout|--admit-existing) ;;
-  *) refuse 64 "usage: $0 [--run|--preflight-only|--plant-layout|--admit-existing]" ;;
+  --run|--preflight-only|--plant-layout|--plant-admission|--admit-existing) ;;
+  *) refuse 64 "usage: $0 [--run|--preflight-only|--plant-layout|--plant-admission|--admit-existing]" ;;
 esac
 
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH
@@ -161,38 +161,45 @@ validate_existing() {
   cmp -s "$REFERENCE_RESTART" "$CANDIDATE_RESTART" || \
     refuse 71 "instrumented day-180 restart differs from the uninstrumented Round-132 restart"
   printf 'TWIN_ADMISSION_PASS restart_kt1080_byte_identical=1\n'
-  "$PY" - "$TARGET_RUN/$OPERANDS" "$TARGET_RUN/$STATEMENTS" <<'PYRECORD'
+  "$PY" - "$TARGET_RUN/$OPERANDS" "$TARGET_RUN/$STATEMENTS" "$MODE" <<'PYRECORD'
 import struct
 import sys
 from pathlib import Path
 
 for raw, magic, expected in (
-    (sys.argv[1], b"NEMO_L2_R56TKE2", 4546636),
-    (sys.argv[2], b"NEMO_L2_R101TKE", 873028),
+    (sys.argv[1], b"NEMO_L2_R56TKE2 ", 4546636),
+    (sys.argv[2], b"NEMO_L2_R101TKE ", 873028),
 ):
     path = Path(raw)
     blob = path.read_bytes()
     if len(blob) != expected:
         raise SystemExit(f"REFUSE: {path.name} has {len(blob)} bytes, expected {expected}")
-    if blob[:16] != magic:
+    expected_magic = (b"X" + magic[1:]
+                      if sys.argv[3] == "--plant-admission" else magic)
+    if blob[:16] != expected_magic:
         raise SystemExit(f"REFUSE: {path.name} magic is {blob[:16]!r}")
     ints = struct.unpack_from("=13i", blob, 16)
     if ints[1] != 1081 or ints[4:8] != (32, 22, 31, 30):
         raise SystemExit(f"REFUSE: {path.name} header is {ints}")
     print(f"RECORD_LAYOUT_PASS {path.name} bytes={len(blob)} kt={ints[1]}")
 PYRECORD
-  local name digest stamped_digest stamped_commit stamped_name
+  local name digest stamped_digest stamped_commit stamped_name producer_commit
+  producer_commit=$(<"$TARGET_RUN/producer_commit.txt")
+  [[ "$producer_commit" =~ ^[0-9a-f]{40}$ ]] || \
+    refuse 66 "producer_commit.txt is not a full commit"
   for name in "$OPERANDS" "$STATEMENTS"; do
     digest=$(sha256sum "$TARGET_RUN/$name" | awk '{print $1}')
     read -r stamped_digest stamped_commit stamped_name <"$TARGET_RUN/$name.stamp"
-    [[ "$digest" == "$stamped_digest" && "$stamped_commit" == "$COMMIT" \
+    [[ "$digest" == "$stamped_digest" && "$stamped_commit" == "$producer_commit" \
        && "$stamped_name" == "$name" ]] || \
       refuse 66 "commit stamp disagrees for $name"
   done
+  [[ "$MODE" != --plant-admission ]] || \
+    refuse 2 "record-magic plant stayed green"
   printf 'ROUND164_DEVELOPED_TKE_READY %s\n' "$TARGET_RUN"
 }
 
-if [[ "$MODE" == --admit-existing ]]; then
+if [[ "$MODE" == --admit-existing || "$MODE" == --plant-admission ]]; then
   validate_existing
   exit 0
 fi
