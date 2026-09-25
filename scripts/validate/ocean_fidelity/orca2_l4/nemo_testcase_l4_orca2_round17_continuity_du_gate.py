@@ -181,7 +181,7 @@ def _localize(
 
 
 def run(deck_root: Path, root: Path, json_out: Path | None,
-        plant: bool = False) -> dict[str, object]:
+        plant: bool = False, _extension=None) -> dict[str, object]:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -338,6 +338,15 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         },
         "localization": localization,
     }
+    if _extension is not None:
+        result["extension"] = _extension(
+            card=card,
+            trace=substituted_trace.substeps,
+            candidate=candidate,
+            oracle=oracle,
+            masks=masks,
+            inherited_first=inherited_first,
+        )
     if json_out:
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

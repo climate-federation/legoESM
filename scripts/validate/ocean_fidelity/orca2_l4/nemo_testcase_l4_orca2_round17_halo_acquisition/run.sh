@@ -13,8 +13,8 @@ trap refuse_unexpected ERR
 
 readonly MODE=${1:---run}
 case "$MODE" in
-  --preflight-only|--run) ;;
-  *) printf 'REFUSE: usage: %s [--preflight-only|--run]\n' "$0" >&2; exit 64 ;;
+  --preflight-only|--admit-existing|--run) ;;
+  *) printf 'REFUSE: usage: %s [--preflight-only|--admit-existing|--run]\n' "$0" >&2; exit 64 ;;
 esac
 
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -133,8 +133,24 @@ admit() {
       exit 69
     }
   done
-  [[ "$(grep -c 'LANE4_BT_HALO_DUMP' "$RUN_A/ocean.output")" -eq 2 ]] || {
-    printf 'REFUSE: ocean.output does not carry two ranked halo dump markers\n' >&2
+  grep -Fxq 'MPIRUN_RC=0' "$RUN_A/run.user.time.log" || {
+    printf 'REFUSE: completed run does not carry MPIRUN_RC=0\n' >&2
+    exit 69
+  }
+  grep -Fxq 'RUN DONE' "$RUN_A/run.user.time.log" || {
+    printf 'REFUSE: completed run does not carry RUN DONE\n' >&2
+    exit 69
+  }
+  grep -Fxq 'STOP 0' "$RUN_A/run.user.stdout.log" || {
+    printf 'REFUSE: completed run does not carry STOP 0\n' >&2
+    exit 69
+  }
+  [[ "$(grep -c 'LANE4_BT_HALO_DUMP.* 0 oracle_bt_halo_operands_kt00000001_r0000.bin' "$RUN_A/ocean.output")" -eq 1 ]] || {
+    printf 'REFUSE: ocean.output does not carry the rank-0 halo dump marker\n' >&2
+    exit 69
+  }
+  [[ "$(grep -c 'LANE4_BT_HALO_DUMP.* 1 oracle_bt_halo_operands_kt00000001_r0001.bin' "$RUN_A/run.user.stdout.log")" -eq 1 ]] || {
+    printf 'REFUSE: captured MPI stdout does not carry the rank-1 halo dump marker\n' >&2
     exit 69
   }
   (cd "$RUN_A" && sha256sum oracle_bt_halo_operands_kt00000001_r*.bin >round17_halo_outputs.sha256)
@@ -142,6 +158,10 @@ admit() {
 }
 
 preflight
+if [[ "$MODE" == --admit-existing ]]; then
+  admit
+  exit 0
+fi
 [[ "$MODE" == --run ]] || exit 0
 
 [[ ! -e "$TARGET_ROOT" && ! -e "$RUN_A" ]] || {
