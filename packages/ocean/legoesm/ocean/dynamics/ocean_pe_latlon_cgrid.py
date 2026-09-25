@@ -2409,18 +2409,18 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
         pivot_row_stored = bool(getattr(fold, "pivot_row_stored", False))
         h_vtx_north = None
         if een_e3f_scheme == "nemo_avg4":
-            if pivot_row_stored:
-                # The GYRE lane hoisted a refusal above every tripolar fold
-                # because nemo_avg4's fold row was undefined there.  The ORCA2
-                # lane has since transcribed that row from NEMO (below), so the
-                # refusal narrows to the ONE layout neither lane measured: a
-                # stored-pivot mesh.  NEMO's own completion is the F-point
-                # north-fold exchange, and lbcnfd.F90:722-746 reads the LAST
-                # OWNED row, which a stored-pivot mesh does not hold in the
-                # same place.  Raising keeps the silent-physics hole closed.
-                raise NotImplementedError(
-                    "nemo_avg4 is not defined for a stored-pivot tripolar "
-                    "fold; no card has been measured on that layout")
+            # The GYRE lane refused this scheme on EVERY tripolar fold, because
+            # its fold row was not built there and main had just added a second
+            # fold branch that would have bypassed the refusal.  The ORCA2 lane
+            # has since transcribed that row from NEMO, below, and measured it
+            # against NEMO's own ten-step ORCA2 record, so the refusal is
+            # RETIRED rather than narrowed: ORCA2's mesh classifies as
+            # stored-pivot under the exact classifier main brought with it
+            # (its perm_f is exactly the reversed index this transcription
+            # uses), so a pivot-keyed refusal would fire on the one card the
+            # transcription was written for.  main's pivot-row branch keeps its
+            # precedence for every OTHER scheme, below.
+            #
             # NEMO gives the fold row NO formula of its own.  ``dyn_vor_init``
             # evaluates the same masked four-cell average over the owned
             # domain (dynvor.F90:913-919) and then completes the field with
