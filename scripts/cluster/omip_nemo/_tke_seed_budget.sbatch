@@ -48,13 +48,14 @@ if [ ! -s "$NEXT" ]; then
     --pattern "$D/ORCA1_00008784_restart_oce_*.nc" --fields en --out "$NEXT" || exit 1
 fi
 DT=${DT:-150}
-OUT=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/eq_avm_seed_budget_dt${DT}
+MXL=${MXL:-3}
+OUT=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/eq_avm_seed_budget_dt${DT}_mxl${MXL}
 mkdir -p "$OUT"
 $PY -u scripts/validate/ocean_fidelity/compare_tendencies_nemo.py \
   --tfile $D/ORCA1_1h_20010101_20010101_trd1h_T.nc \
   --ufile $D/ORCA1_1h_20010101_20010101_trd1h_U.nc \
   --vfile $D/ORCA1_1h_20010101_20010101_trd1h_V.nc \
-  --rec 1 --skip-maps --mxl-choice 3 --iwm-backgrounds \
+  --rec 1 --skip-maps --mxl-choice $MXL --iwm-backgrounds \
   --restart-npz $D/restart_8760_full.npz --restart-next-npz "$NEXT" \
   --mode-a-iterations 1 --mode-a-dt $DT --mode-a-budget \
   --output-dir "$OUT"
