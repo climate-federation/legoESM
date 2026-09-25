@@ -230,11 +230,12 @@ def _operand_walk(*, card, trace, candidate, oracle, masks, inherited_first,
     require(int(np.count_nonzero(mismatch_t)) == round17.INHERITED_COUNT,
             "direct record changed the inherited mismatch support")
     support = _face_support(mismatch_t)
-    rows = {
+    rows_by_substep = [{
         name: round14.compare(
-            candidate_fields[name][1], recorded[name][1], support)
+            candidate_fields[name][substep], recorded[name][substep], support)
         for name in FIELD_NAMES
-    }
+    } for substep in range(NROWS)]
+    rows = rows_by_substep[1]
 
     candidate_partial = np.multiply(candidate_fields["e2u"][1],
                                     candidate_fields["ua_e"][1])
@@ -274,6 +275,10 @@ def _operand_walk(*, card, trace, candidate, oracle, masks, inherited_first,
         "recorded_zhup2_e_continuity_vs_oracle": round14.compare(
             np.subtract(depth_substituted[:, 1:], depth_substituted[:, :-1]),
             oracle["continuity_du"][1], mismatch_t),
+        "candidate_substep1_u_exit_vs_recorded_substep2_ua_e":
+            round14.compare(
+                _candidate_u_window(trace["u_exit"])[0],
+                recorded["ua_e"][1], support),
     }
 
     payload_plant = {"requested": plant, "fires": None}
@@ -298,6 +303,7 @@ def _operand_walk(*, card, trace, candidate, oracle, masks, inherited_first,
         "mismatch_t_cells": int(np.count_nonzero(mismatch_t)),
         "mismatch_face_cells": int(np.count_nonzero(support)),
         "operand_rows_on_mismatch_faces": rows,
+        "operand_rows_by_substep_on_mismatch_faces": rows_by_substep,
         "arithmetic_replays": arithmetic,
         "first_non_bit_operand": first_non_bit_operand,
         "causal_substitutions": causal,
