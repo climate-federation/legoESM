@@ -154,8 +154,10 @@ MPAS_NCCL_CHANNELS = "32"
 # passes --cpus-per-task = node threads / ranks-per-node = 64 since
 # 2026-09-21); rows stamped below this, or unstamped, were 1-core ranks
 # (7.4x slower per rank) and are refused -- single-rank rows included, the
-# old launch bound a one-task step to one core just the same.
-CPU_AFFINITY_MIN = 16
+# old launch bound a one-task step to one core just the same.  The floor is
+# 4, not 16: the Derecho CPU ladder runs 16 ranks x 8 cores per node
+# (affinity 8, 2026-09-25), while a one-core rank reads 1 or 2.
+CPU_AFFINITY_MIN = 4
 MPAS_NCCL_CHUNK = "131072"
 
 

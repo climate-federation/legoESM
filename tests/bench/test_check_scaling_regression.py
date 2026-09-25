@@ -132,3 +132,14 @@ def test_pbs_float64_rows_are_dated_not_crashed(tmp_path):
     assert _main(tmp_path, nlev="26") == 2
     _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, precision="float64", metadata={}))
     assert _main(tmp_path, nlev="26") == 2
+
+
+def test_cpu_rows_refuse_one_core_ranks_keep_eight_core_ranks(tmp_path):
+    """16 ranks x 8 cores per node stamps cpu_affinity 8 and must pair; a
+    one-core rank (affinity 1 or 2) is refused as before."""
+    meta = {"slurm_job_id": "", "timestamp_utc": "2026-09-25T08:00:00+00:00"}
+    _write(tmp_path / "b", "tri_d8", _tri(8, 100.0, platform="cpu", metadata={**meta, "cpu_affinity": 8}))
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, platform="cpu", metadata={**meta, "cpu_affinity": 8}))
+    assert _main(tmp_path) == 0
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, platform="cpu", metadata={**meta, "cpu_affinity": 2}))
+    assert _main(tmp_path) == 2
