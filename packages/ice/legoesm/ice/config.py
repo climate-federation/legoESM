@@ -489,14 +489,6 @@ class SeaIceConfig(NamedTuple):
     # APPENDED at the tail (after every pre-existing field) so positional
     # SeaIceConfig(...) constructors keep their meaning (codex L1-r1 #3).
     sw_transmittance_const: float = 0.0
-    # Layered SI3 is an option inside this existing model.  Appended at the
-    # tail to preserve all positional SeaIceConfig constructors.
-    thermo_scheme: str = "zero_layer"
-    si3: SI3ThermoConfig = SI3ThermoConfig()
-    ice_constants: IceConstantsConfig = IceConstantsConfig()
-    # Appended to preserve positional constructors.  NEMO distinguishes the
-    # Dalton (Ce) and Stanton (Ch) coefficients even when ORCA1 makes them equal.
-    Ce_ice: float = constants.bulk_transfer_ice_default
     # Lead / open-water ice formation source (new-physics path only):
     #  * "ice_skin" (legacy): lead ice grows from the ICE-skin atmospheric
     #    deficit max(-Q_sfc, 0) x (1-A), gated on SST <= T_freeze_ocean, and
@@ -514,3 +506,18 @@ class SeaIceConfig(NamedTuple):
     #    to Tf (frazil).  Needs q_open_top + ocean_dz_top_m from the
     #    caller (step_sea_ice kwargs); the OMIP driver passes them.
     lead_freeze_source: str = "ice_skin"
+    # Layered SI3 is an option inside this existing model.
+    # ORDER, decided at the 2026-09-25 merge: both sides appended fields at
+    # the tail claiming to preserve positional SeaIceConfig constructors, and
+    # only one of the two claims can survive.  main's lead_freeze_source keeps
+    # its own index (immediately after sw_transmittance_const) because main is
+    # the shared tree; the four fidelity-lane fields below move one place
+    # later.  No positional SeaIceConfig(...) call exists anywhere in the
+    # tree -- every call site is keyword-only -- so nothing is broken either
+    # way, and this comment replaces two claims that could not both be true.
+    thermo_scheme: str = "zero_layer"
+    si3: SI3ThermoConfig = SI3ThermoConfig()
+    ice_constants: IceConstantsConfig = IceConstantsConfig()
+    # NEMO distinguishes the Dalton (Ce) and Stanton (Ch) coefficients even
+    # when ORCA1 makes them equal.
+    Ce_ice: float = constants.bulk_transfer_ice_default

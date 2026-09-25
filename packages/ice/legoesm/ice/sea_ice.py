@@ -258,6 +258,21 @@ def step_sea_ice(
     response : TileResponse
     """
     if ocean_freezing_temperature_K is not None:
+        # Refused rather than silently ignored on the layered branch: the
+        # override lands on config.T_freeze_ocean, which the zero-layer
+        # thermodynamics reads but _si3_step_with_trace never does -- it takes
+        # its bottom boundary from the SI3 forcing instead.  Neither parent of
+        # the 2026-09-25 merge could express this combination (main has no
+        # layered branch, and no caller on this lane passes the argument), so
+        # this refusal closes a fail-quiet seam the merge would otherwise have
+        # opened.  Routing the liquidus into SI3's bottom boundary is a
+        # physics decision for the SI3 lane, not for a merge.
+        if config.thermo_scheme == "si3_bl99":
+            raise ValueError(
+                "ocean_freezing_temperature_K is not routed into the layered "
+                "SI3 thermodynamics (thermo_scheme='si3_bl99'); pass the "
+                "liquidus through the SI3 forcing's bottom boundary instead "
+                "of the ocean-side override")
         liquidus = jnp.asarray(ocean_freezing_temperature_K)
         if liquidus.shape != jnp.shape(ocean_sst):
             raise ValueError("ocean_freezing_temperature_K must have the ocean SST shape")
