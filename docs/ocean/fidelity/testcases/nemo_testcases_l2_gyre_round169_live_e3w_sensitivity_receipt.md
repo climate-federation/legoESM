@@ -103,9 +103,20 @@ read-only`.  Its exact disposition is:
 The terminal error was `failed to initialize in-process app-server client:
 Read-only file system`; it emitted no SHIP or DO NOT SHIP verdict.
 
-The pre-receipt literal-solver and focused owner checks report `11 passed`.
-Final citation and focused/full-tree results are recorded below after their
-post-receipt runs.
+The final focused year-owner, literal-solver, and citation-map suite reports
+`63 passed in 45.69s`.  The receipt citation gate reports PASS with three
+citations, zero unmapped citations, zero failures, and zero map-audit failures.
+Its shifted `trazdf.f90:468-469` plant reports FAIL and exits 1 as required.
+
+The mandated single `tests/ocean/fidelity tests/ocean/unit -n 12` battery was
+run once.  Eight JAX workers aborted during compilation and were replaced; the
+run then remained at 95% without output for more than ten minutes and was
+interrupted.  It emitted **no terminal pytest summary line** and no
+`FAILED <node-id>` lines, so its interspersed failure/error counts cannot be
+classified against the historical known-red set.  This is incomplete
+full-tree coverage, not a pass.  The directly changed owner, literal-solver,
+and citation files are covered by the clean 63-test focused result and were not
+rerun after the one mandated full-tree attempt.
 
 ## Evidence hashes
 
@@ -116,6 +127,10 @@ post-receipt runs.
 | `e3w_ulp_plant.log` | `be9ea1e7333a70286b52c69045df1cf716a498d64729590af2e7030bbcbd1105` |
 | `e3w_scale_plant.log` | `e6efe963c4fdc2069499e2cbc4873449f48afd0947b328508fb6bd3ac7999c51` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `citation_gate.log` | `6bd5651808e081babb67e0df996a40441a5ddd2ca97f1b280df22ca5cbf3a4d1` |
+| `citation_gate_shifted_plant.log` | `8794b6927191adfb00424d73430a8ef479ef1befe1eaf68cf0c25c4847f56c71` |
+| `focused_tests.log` | `69f609030dedc86f711332c0b9e54b1ed73f6858cc6552b44868b68e95e9dff7` |
+| `full_fidelity_unit_tests.log` | `78c5494986efeb1d084113ff264ea7ae5c188955259fc3393427b6f40ca6586a` |
 
 ## OPEN — round 170
 
