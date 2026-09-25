@@ -744,7 +744,7 @@ CITATION_MAP = {
         '&         * wvmask(ji,jj,jk)', 5],
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:111-114': [
         ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
-        '&                       + ( zsh2v(ji,jj-1) + zsh2v(ji,jj) )', 4],
+        ('END DO   ;   END DO', 3), 4],
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:116-119': [
         'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0) ! set p_sh2',
         ('END DO   ;   END DO', 4), 4],
