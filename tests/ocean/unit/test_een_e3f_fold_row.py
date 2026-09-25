@@ -23,7 +23,9 @@ import numpy as np
 import pytest
 
 from legoesm.grids.latlon import create_latlon_geometry
-from legoesm.grids.tripole import create_synthetic_tripole
+from legoesm.grids.tripole import (
+    create_synthetic_tripole, create_synthetic_tripole_pivot,
+)
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import een_e3f_h_vtx
 
 jax.config.update("jax_enable_x64", True)
@@ -129,7 +131,7 @@ def test_a_stored_pivot_mesh_routes_each_scheme_to_its_own_fold_branch():
     """
     from legoesm.grids.operators_latlon_cgrid import fold_perm_f
 
-    grid = create_synthetic_tripole(N_LAT, N_LON)
+    grid = create_synthetic_tripole_pivot(N_LAT, N_LON)
     assert bool(grid.fold.pivot_row_stored), "fixture must be a pivot mesh"
     thickness = _thickness(N_LAT, N_LON)
 
@@ -161,7 +163,8 @@ def test_nemo_avg4_fold_row_does_not_depend_on_the_storage_layout():
     the mesh stored-pivot.  If that ever stops being true, keying a refusal
     on the layout would become meaningful again and this fails.
     """
-    pivot = create_synthetic_tripole(N_LAT, N_LON)
+    pivot = create_synthetic_tripole_pivot(N_LAT, N_LON)
+    assert bool(pivot.fold.pivot_row_stored), "fixture must be a pivot mesh"
     legacy = pivot._replace(fold=pivot.fold._replace(
         pivot_row_stored=False, perm_u=None, perm_f=None))
     thickness = _thickness(N_LAT, N_LON)
