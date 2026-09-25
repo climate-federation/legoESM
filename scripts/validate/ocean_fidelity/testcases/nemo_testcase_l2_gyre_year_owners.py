@@ -7393,7 +7393,9 @@ def developed_stage1_output_walk(
     output_rows = {}
     for index, face in enumerate(("u", "v")):
         before = np.asarray(getattr(state, face).data)
-        mask = np.asarray(getattr(state, f"{face}_mask").data)[..., None]
+        mask = np.broadcast_to(
+            np.asarray(getattr(state, f"{face}_mask").data)[..., None],
+            before.shape)
         rhs_full = np.array(trace.stage1_full_rhs[index], copy=True)
         if face == "u":
             rhs_full[:, 1:, :] = rhs_fields["rhs_u"]
