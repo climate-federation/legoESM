@@ -86,6 +86,7 @@ _EN_CANDS = ("en",)
 _AVTK_CANDS = ("avt_k",)
 _AVMK_CANDS = ("avm_k",)
 _SSH_CANDS = ("sshn", "ssh", "ssh_m")
+_DISSL_CANDS = ("dissl",)
 _TAUM_CANDS = ("taum", "taum_oce")
 
 
@@ -203,7 +204,7 @@ def centre_uv_collocated(un, vn):
 def _var_candidates(v):
     return {"T": _T_CANDS, "S": _S_CANDS, "U": _U_CANDS, "V": _V_CANDS,
             "en": _EN_CANDS, "avt_k": _AVTK_CANDS, "avm_k": _AVMK_CANDS,
-            "ssh": _SSH_CANDS}[v]
+            "ssh": _SSH_CANDS, "dissl": _DISSL_CANDS}[v]
 
 
 def reassemble_restart(glob_pat, varnames, twins):
@@ -320,8 +321,39 @@ def load_sbc_taum(sbc_path, rec, twins):
 # ===========================================================================
 # the DIRECT closure-K read (instant-in, K-out; no solve)
 # ===========================================================================
+def state_profile_rows(zk, depth_max, **cols):
+    """Per-interface box MEDIANS of closure-state columns, down to depth_max.
+
+    ``cols`` are (ncol, nk) arrays sharing the interface ladder ``zk``; each
+    row is (depth, {name: median over finite entries}).  Interfaces with no
+    finite entry in a column set carry NaN for that name.  Pure numpy so the
+    reduction is testable without a snapshot or a restart.
+    """
+    zk = np.abs(np.asarray(zk, dtype=np.float64))
+    rows = []
+    for k in range(zk.size):
+        if zk[k] > depth_max:
+            break
+        row = {}
+        for name, a in cols.items():
+            v = np.asarray(a, dtype=np.float64)[:, k]
+            v = v[np.isfinite(v)]
+            row[name] = float(np.median(v)) if v.size else float("nan")
+        rows.append((float(zk[k]), row))
+    return rows
+
+
+def print_state_profile(tag, rows):
+    names = list(rows[0][1]) if rows else []
+    print(f"[profile:{tag}] per-interface box medians (depth m, then "
+          + ", ".join(names) + ")")
+    for d, row in rows:
+        print(f"[profile:{tag}] {d:7.1f}  "
+              + "  ".join(f"{row[n]:10.3e}" for n in names))
+
+
 def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
-             cfg, eos_name, rho0, g):
+             cfg, eos_name, rho0, g, profile_depth_max=None, profile_tag=""):
     """(avm, avt) at interior interfaces from a GIVEN en — no en advance.
 
     Replicates the pre-loop inputs of ``tke_vertical_mixing`` (tke.py:2018-2231)
@@ -403,6 +435,14 @@ def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
         print(f"[state] band 65-105 m: en={_bm(_en):.3e}  N2={_bm(_n2):.3e}  "
               f"S2={_bm(_s2):.3e}  Ri={_ri:.3f}  l_k={_bm(_lk):.3e} m  "
               f"sqrt(2en)={_bm(np.sqrt(2*np.abs(_en))):.3e}")
+    if profile_depth_max is not None:
+        # The SAME columns the band line reduces, printed per interface: the
+        # energy the closure is fed, what it makes of it, and both lengths.
+        _ri_cols = np.where(_s2 > 0, _n2 / np.where(_s2 > 0, _s2, np.nan), np.nan)
+        print_state_profile(profile_tag, state_profile_rows(
+            zk, profile_depth_max, en=_en, N2=_n2, S2=_s2, Ri=_ri_cols,
+            l_k=_lk, l_eps=np.asarray(_l_eps)[0],
+            K_M=np.asarray(K_M)[0], K_H=np.asarray(K_H)[0]))
     return np.asarray(K_M)[0], np.asarray(K_H)[0], zk, np.asarray(N2)[0]
 
 
@@ -505,7 +545,10 @@ def run_control(args, oracle, twins):
             en=np.asarray(z["tke"])[band][None] * en_scale, taum=tau_cols[None, :],
             eta=np.asarray(z["eta"])[band][None], lat=lat[band][None, :],
             dz_ref=dz_ref, t_depth_ref=t_depth_ref, cfg=cfg,
-            eos_name=eos, rho0=rho0, g=g)
+            eos_name=eos, rho0=rho0, g=g,
+            profile_depth_max=(args.profile_depth_max if en_scale == 1.0
+                               else None),
+            profile_tag="ours")
 
     Tc = np.asarray(z["T"], dtype=np.float64)
     Sc = np.asarray(z["S"], dtype=np.float64)
@@ -565,9 +608,10 @@ def run_nemo(args, oracle, twins):
     cfg, eos, rho0, g = load_resolved_config(Path(args.manifest))
     _echo_cfg(cfg, eos, rho0, g)
 
-    R = reassemble_restart(
-        args.restart_glob, ("T", "S", "U", "V", "en", "avt_k", "avm_k", "ssh"),
-        twins)
+    fields = ["T", "S", "U", "V", "en", "avt_k", "avm_k", "ssh"]
+    if args.profile_depth_max is not None:
+        fields.append("dissl")
+    R = reassemble_restart(args.restart_glob, tuple(fields), twins)
     nav_lat, nav_lon = R["nav_lat"], R["nav_lon"]
     wet = np.isfinite(R["T"][..., 0])
     band = _box(nav_lat, nav_lon, args) & wet
@@ -595,11 +639,19 @@ def run_nemo(args, oracle, twins):
         u_cell=u_cell[band][None], v_cell=v_cell[band][None],
         en=R["en"][band][:, 1:][None], taum=tau_cols[None, :], eta=eta,
         lat=nav_lat[band][None, :], dz_ref=dz_ref, t_depth_ref=t_depth_ref,
-        cfg=cfg, eos_name=eos, rho0=rho0, g=g)
+        cfg=cfg, eos_name=eos, rho0=rho0, g=g,
+        profile_depth_max=args.profile_depth_max, profile_tag="ours_on_nemo")
 
     # NEMO's OWN closure diffusivities (w-points; drop surface k=0 -> interior).
     n_avmk = R["avm_k"][band][:, 1:]
     n_avtk = R["avt_k"][band][:, 1:]
+    if args.profile_depth_max is not None:
+        # NEMO's own instantaneous closure state on ITS interior ladder: the
+        # energy, its dissipation length, and the coefficients it wrote.
+        print_state_profile("nemo", state_profile_rows(
+            w_interior, args.profile_depth_max,
+            en=R["en"][band][:, 1:], dissl=R["dissl"][band][:, 1:],
+            avm_k=n_avmk, avt_k=n_avtk))
     ok_all = True
     for name, lo, hi in (("SURFACE 5-65 m", SURFACE_LO, SURFACE_HI),
                          ("ENTRAINMENT 65-105 m", ENTRAINMENT_LO, ENTRAINMENT_HI)):
@@ -654,6 +706,11 @@ def build_arg_parser():
                         "STEP-1 closure/stored band assertion must then FAIL "
                         "(real gate)")
     p.add_argument("--control-tol", type=float, default=1.5)
+    p.add_argument("--profile-depth-max", type=float, default=None,
+                   help="Also print per-interface box medians of the closure "
+                        "state (en, N2, S2, Ri, l_k, l_eps, K_M, K_H) down to "
+                        "this depth [m]; in nemo mode also NEMO's own en, "
+                        "dissl, avm_k, avt_k. Default off: output unchanged.")
     p.add_argument("--restart-glob", type=str, default=None)
     p.add_argument("--nemo-meshmask", type=Path, default=None,
                    help="an ORCA1 mesh_mask tile (native gdept_1d/gdepw_1d/e3t_1d)")
