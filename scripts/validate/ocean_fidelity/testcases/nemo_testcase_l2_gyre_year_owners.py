@@ -7410,10 +7410,10 @@ def developed_stage1_output_walk(
         raw_rows[face] = _score_stage2_face(
             model_raw, oracle_raw, mask)
         correction_rows[face] = _score_stage2_face(
-            native(model_final - model_raw, face),
-            oracle_final - native(oracle_raw, face), masks[face])
+            model_final - model_raw, oracle_final - oracle_raw,
+            stage_rows[f"umask_vmask_{face}"])
         output_rows[face] = _score_stage2_face(
-            native(model_final, face), oracle_final, masks[face])
+            model_final, oracle_final, stage_rows[f"umask_vmask_{face}"])
 
     ordered = [
         *(f"{family}_{face}" for family in round146.FAMILIES
