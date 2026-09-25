@@ -141,6 +141,16 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/l2_r54_tke.f90"),
     "GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/l2_r101_tke_walk.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/l2_r101_tke_walk.f90"),
+    "GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfphy.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfphy.f90"),
+    "GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90"),
+    "GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/dommsk.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/dommsk.f90"),
+    "GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/domqco.f90"),
     # Round 47 must bind to the actual widened build, not its R41 source.
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90"),
@@ -719,6 +729,31 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 166: developed-state shear statement walk ---
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/stprk3.f90:167-168': [
+        'CALL zdf_phy( kstp, Nbb, Nnn, Nrhs )',
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 2],
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfphy.f90:317-320': [
+        'IF( l_zdfsh2 ) THEN',
+        '&                      sh2    )', 4],
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:97-103': [
+        'ELSE',
+        '&         * wumask(ji,jj,jk)', 7],
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:104-108': [
+        'zsh2v(ji,jj) = ( p_avm(ji,jj+1,jk) + p_avm(ji,jj,jk) )',
+        '&         * wvmask(ji,jj,jk)', 5],
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:111-114': [
+        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)',
+        '&                       + ( zsh2v(ji,jj-1) + zsh2v(ji,jj) )', 4],
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:116-119': [
+        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0) ! set p_sh2',
+        ('END DO   ;   END DO', 4), 4],
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/dommsk.f90:234-242': [
+        'Ocean/land mask at wu-, wv- and w points',
+        'wvmask(:,:,jk) = vmask(:,:,jk) * vmask(:,:,jk-1)', 9],
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/domqco.f90:211-218': [
+        'ratio at u-,v-point',
+        ('END DO   ;   END DO', 2), 8],
     # --- round 165: developed-state TKE statement walk ---
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/l2_r54_tke.f90:128-130': [
         'WRITE(r54_unit) r54_magic',
