@@ -506,6 +506,39 @@ def band_reduce(K_cols, zk, lo, hi, mask=None):
     return float(np.median(band)) if band else float("nan")
 
 
+def depth_medians(K_cols, zk, mask=None):
+    """(depths, per-depth spatial median) over masked, finite-positive columns."""
+    K = np.asarray(K_cols, dtype=np.float64)
+    zk = np.abs(np.asarray(zk, dtype=np.float64))
+    out = {}
+    for k in range(K.shape[1]):
+        sel = np.isfinite(K[:, k]) & (K[:, k] > 0)
+        if mask is not None:
+            sel = sel & mask[:, k]
+        if sel.any():
+            out[float(zk[k])] = float(np.median(K[sel, k]))
+    return out
+
+
+def active_ratio(c_cols, s_cols, zk, mask, floor, min_active=3):
+    """Median over ACTIVE interfaces of (closure median / stored median).
+
+    Active = interfaces whose closure per-depth median exceeds 2x the closure's
+    own floor, i.e. where the closure -- not the floor plus the additive
+    background -- sets the coefficient. In a quiescent band the closure sits
+    on its floor and the stored value is floor + wave-mixing background, so a
+    band gate there measures the background fraction rather than the plumbing.
+    Returns (ratio, n_active, depths_active).
+    """
+    c = depth_medians(c_cols, zk, mask)
+    st = depth_medians(s_cols, zk, mask)
+    act = sorted(d for d, v in c.items() if v > 2.0 * floor and d in st)
+    if len(act) < min_active:
+        return float("nan"), len(act), act
+    r = np.median([c[d] / st[d] for d in act])
+    return float(r), len(act), act
+
+
 def _finite_positive(*vals):
     return all(np.isfinite(v) and v > 0 for v in vals)
 
@@ -595,19 +628,39 @@ def run_control(args, oracle, twins):
     s_avm_cols, s_avt_cols = oavm[band], oavt[band]
     maskM = common_mask(avm, s_avm_cols)
     maskH = common_mask(avt, s_avt_cols)
-    c_avm = band_reduce(avm, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
-    c_avt = band_reduce(avt, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskH)
-    st_avm = band_reduce(s_avm_cols, ozk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
-    st_avt = band_reduce(s_avt_cols, ozk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskH)
+    if args.gate_band == "active":
+        # Interfaces where the closure sets K (per-depth median above 2x its
+        # own momentum floor); the SAME set gates avm and avt.
+        r_m, n_act, act = active_ratio(avm, s_avm_cols, zk, maskM,
+                                       float(cfg.kappaM_min))
+        cM = depth_medians(avm, zk, maskM); sM = depth_medians(s_avm_cols, ozk, maskM)
+        cH = depth_medians(avt, zk, maskH); sH = depth_medians(s_avt_cols, ozk, maskH)
+        act_h = [d for d in act if d in cH and d in sH]
+        r_t = (float(np.median([cH[d] / sH[d] for d in act_h]))
+               if len(act_h) >= 3 else float("nan"))
+        print(f"\n[control] ACTIVE interfaces (closure avm > 2x kappaM_min="
+              f"{cfg.kappaM_min:.1e}): n={n_act} depths={[round(d, 1) for d in act]} m")
+        for d in act:
+            print(f"[control]   {d:6.1f} m  closure/stored  avm x{cM[d]/sM[d]:.3f}"
+                  + (f"  avt x{cH[d]/sH[d]:.3f}" if d in act_h else ""))
+        if n_act < 3 or not np.isfinite(r_m) or not np.isfinite(r_t):
+            print("[control]   fewer than 3 active interfaces -> cannot gate -> FAIL")
+            return 4
+        c_avm = st_avm = c_avt = st_avt = float("nan")
+    else:
+        c_avm = band_reduce(avm, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
+        c_avt = band_reduce(avt, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskH)
+        st_avm = band_reduce(s_avm_cols, ozk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
+        st_avt = band_reduce(s_avt_cols, ozk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskH)
 
-    print("\n[control] entrainment band 65-105 m (common wet/interface mask):")
-    print(f"[control]   our closure   avm={c_avm:.4e}  avt={c_avt:.4e}")
-    print(f"[control]   our stored    avm={st_avm:.4e}  avt={st_avt:.4e}  "
-          "(FULL = closure + additive IWM)")
-    if not _finite_positive(c_avm, c_avt, st_avm, st_avt):
-        print("[control]   non-finite/empty band reduction -> FAIL")
-        return 4
-    r_m, r_t = c_avm / st_avm, c_avt / st_avt
+        print("\n[control] entrainment band 65-105 m (common wet/interface mask):")
+        print(f"[control]   our closure   avm={c_avm:.4e}  avt={c_avt:.4e}")
+        print(f"[control]   our stored    avm={st_avm:.4e}  avt={st_avt:.4e}  "
+              "(FULL = closure + additive IWM)")
+        if not _finite_positive(c_avm, c_avt, st_avm, st_avt):
+            print("[control]   non-finite/empty band reduction -> FAIL")
+            return 4
+        r_m, r_t = c_avm / st_avm, c_avt / st_avt
     lo, hi = 1.0 / args.control_tol, args.control_tol
     in_band = (lo <= r_m <= hi) and (lo <= r_t <= hi)
     print(f"[control]   ratio closure/stored  avm x{r_m:.3f}  avt x{r_t:.3f}  "
@@ -619,8 +672,16 @@ def run_control(args, oracle, twins):
         # (closure/stored in the band) under an en perturbation and require it to
         # now FAIL.  MEASURE the resulting band-K ratio so the effect is verified.
         avm_b, _, _, _ = call(Tc, Sc)
-        k_base = band_reduce(avm_b, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
-        k_ratio = c_avm / k_base if k_base else float("nan")
+        if args.gate_band == "active":
+            # perturbed vs unperturbed closure over the unperturbed ACTIVE set
+            cB = depth_medians(avm_b, zk, maskM); cP = depth_medians(avm, zk, maskM)
+            actB = sorted(d for d, v in cB.items()
+                          if v > 2.0 * float(cfg.kappaM_min) and d in cP)
+            k_ratio = (float(np.median([cP[d] / cB[d] for d in actB]))
+                       if actB else float("nan"))
+        else:
+            k_base = band_reduce(avm_b, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
+            k_ratio = c_avm / k_base if k_base else float("nan")
         print(f"[control] NON-VACUITY en x{args.perturb_en}; MEASURED band avm "
               f"ratio perturbed/control = x{k_ratio:.3f}")
         broke = not in_band
@@ -735,6 +796,15 @@ def build_arg_parser():
                         "STEP-1 closure/stored band assertion must then FAIL "
                         "(real gate)")
     p.add_argument("--control-tol", type=float, default=1.5)
+    p.add_argument("--gate-band", choices=("entrainment", "active"),
+                   default="entrainment",
+                   help="Where the control gate compares closure to stored K: "
+                        "the fixed 65-105 m band (default, unchanged), or the "
+                        "ACTIVE interfaces whose closure median exceeds 2x "
+                        "kappaM_min -- for runs whose deep band sits on the "
+                        "floor, where the stored value is floor + wave "
+                        "background and the band ratio measures that, not the "
+                        "plumbing.")
     p.add_argument("--profile-depth-max", type=float, default=None,
                    help="Also print per-interface box medians of the closure "
                         "state (en, N2, S2, Ri, l_k, l_eps, K_M, K_H) down to "

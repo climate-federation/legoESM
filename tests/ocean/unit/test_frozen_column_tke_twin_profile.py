@@ -49,3 +49,27 @@ def test_print_state_profile_emits_one_line_per_row(capsys):
     _MOD.print_state_profile("x", rows)
     out = capsys.readouterr().out.splitlines()
     assert len(out) == 3 and out[1].startswith("[profile:x]")
+
+
+def test_active_ratio_excludes_floor_interfaces():
+    zk = np.array([1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 40.0])
+    floor = 1.4e-6
+    # closure: three active interfaces, four on the floor
+    c = np.array([[1e-4, 5e-5, 1e-5, floor, floor, floor, floor]] * 4)
+    # stored: closure x1.25 where active; floor + background where quiescent
+    s = np.array([[1.25e-4, 6.25e-5, 1.25e-5, 2.9e-6, 2.9e-6, 2.9e-6, 2.9e-6]] * 4)
+    r, n, act = _MOD.active_ratio(c, s, zk, None, floor)
+    assert n == 3 and act == [1.0, 2.0, 3.0]
+    assert abs(r - 0.8) < 1e-12
+    # over ALL interfaces the floor rows dominate the median (0.48) -- the
+    # active gate must not see them
+    r_all = np.median(c[0] / s[0])
+    assert r_all < 0.7 < r
+
+
+def test_active_ratio_refuses_below_min_active():
+    zk = np.array([1.0, 2.0, 3.0])
+    c = np.array([[1e-4, 1.4e-6, 1.4e-6]] * 2)
+    s = np.array([[1e-4, 2.9e-6, 2.9e-6]] * 2)
+    r, n, _ = _MOD.active_ratio(c, s, zk, None, 1.4e-6)
+    assert n == 1 and np.isnan(r)

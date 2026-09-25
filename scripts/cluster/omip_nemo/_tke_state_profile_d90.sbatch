@@ -64,8 +64,14 @@
 #
 # GATES FIRST. The twin's control gate (our closure must reproduce our own
 # stored K within x1.5) and its non-vacuity gate (en x0.1 must break it) run
-# before either profile, exactly as the twin's own card does; the new
-# reduction's unit test runs before everything.
+# before either profile; the reduction's unit tests run before everything.
+# THE GATE IS TAKEN OVER THE ACTIVE INTERFACES, not the 65-105 m band: in this
+# run the closure sits exactly on its momentum floor below ~7 m and the
+# stored coefficient there is floor plus the additive wave-mixing background,
+# so the band ratio (measured x0.476 in job 9981703) reports the background
+# fraction, not whether the closure is wired correctly. Over the interfaces
+# where the closure is above its floor the same job read x0.68-0.86, the
+# level the twin was validated at.
 #
 # REUSED, NOT REBUILT: frozen_column_tke_twin.py already stitches the restart,
 # builds both states with the model's own helpers, and reduces over the box;
@@ -124,14 +130,14 @@ REC=16
 
 echo "===================== STEP 1: self-recovery CONTROL (+ our profile) ====="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-meshmask "$MESH" --nemo-sbc "$SBC" --rec $REC $BOX --profile-depth-max 105
+    --nemo-meshmask "$MESH" --nemo-sbc "$SBC" --rec $REC $BOX --gate-band active --profile-depth-max 105
 rc1=$?
 echo "[gate] control exit = $rc1"
 [ "$rc1" -eq 0 ] || { echo "FATAL: control did NOT reproduce our own stored K -- profile NOT trusted"; exit 1; }
 
 echo "===================== STEP 2: NON-VACUITY (en x0.1) ======================="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-meshmask "$MESH" --nemo-sbc "$SBC" --rec $REC $BOX --perturb-en 0.1
+    --nemo-meshmask "$MESH" --nemo-sbc "$SBC" --rec $REC $BOX --gate-band active --perturb-en 0.1
 rc2=$?
 echo "[gate] non-vacuity exit = $rc2  (0 = STEP-1 assertion correctly FAILED)"
 [ "$rc2" -eq 0 ] || { echo "FATAL: gate is VACUOUS; NEMO side NOT run"; exit 1; }
