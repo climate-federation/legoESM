@@ -205,7 +205,51 @@ modified.  This is not a landing claim.
 
 ## Controls, tests, citation gate and review
 
-To be finalized after the independent read-only review and final batteries.
+Controls:
+
+- daily-record admission: 360/360 boundaries, 12/12 monthly overlaps,
+  `STATUS ADMITTED`;
+- stage-1 entry ULP: exit 1, `STATUS PLANT-FIRED`, one active cell moved;
+- vertical heat-coefficient ULP: exit 1, `GATE FAILED: vertical effect plant
+  moved an upstream process boundary`;
+- acquisition preflight: four syntax proofs and
+  `ROUND164_DEVELOPED_TKE_PREFLIGHT_READY`; source-layout plant exit 69;
+- receipt citation gate: PASS, 11/11 citations mapped, zero map-audit
+  failures, all nine internal self-tests fired; the explicit `stprk3_stg`
+  shifted-line plant exited 1.
+
+The focused final battery (year-owner harness, Decision-43 gate, round-160
+route predicate, citation gate and generic NEMO recipe) reports exactly:
+
+> 122 passed in 33.83s
+
+The first focused attempt reported `3 failed, 119 passed`: the expanded
+stage-record reader had outgrown its synthetic fixture, and the old route
+tests still expected ORCA2 to be absent.  Both were fixed fail-closed.  A
+three-test intermediate rerun then had one expected dirty-stamp refusal; the
+clean final battery above is the authoritative result.
+
+The preregistered full `tests/ocean/fidelity tests/ocean/unit` battery was
+attempted once with 12 workers.  At 93% one worker died in the documented
+per-process JAX/compiler failure mode (`gw12 node down: Not properly
+terminated`); xdist replaced it, but the battery stopped making progress at
+96% and was terminated without a summary.  Following the repository rule,
+the fidelity tree was retried alone.  It likewise stopped making progress at
+96% (1,634 collected; six skips visible, two failures visible but no failure
+IDs or summary emitted) and was terminated rather than given a larger
+timeout.  These incomplete logs are retained as `full_ocean_pytest.log` and
+`full_fidelity_pytest.log`; they are **not called green**.  No production
+physics landed, and the relevant clean focused battery is green.
+
+The required read-only command was attempted verbatim with `codex exec
+--sandbox read-only`.  It produced no review verdict.  Its terminal error,
+quoted verbatim, is:
+
+> Error: failed to initialize in-process app-server client: Read-only file
+> system (os error 30)
+
+Therefore: **independent review unavailable in-sandbox**.  No `DO NOT SHIP`
+verdict was ignored.
 
 ## OPEN — Round 165
 
