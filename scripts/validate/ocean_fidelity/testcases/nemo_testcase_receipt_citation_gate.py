@@ -103,6 +103,15 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo"
         "/dynspg_ts.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo/lbclnk.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo"
+        "/lbclnk.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo"
+        "/stp2d.f90"),
     # --- round 40 paths: the stage-3 momentum operators and zdf_mxl ---
     "dynvor.F90": _DYN / "dynvor.F90",
     "dynkeg.F90": _DYN / "dynkeg.F90",
@@ -659,6 +668,42 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 card round 20: exact MPI transfer and slow-forcing owner ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:291-294': [
+        '!                          ! set values computed in RK3_ssh',
+        'zv_frc(:,:) =   Ve_rhs(:,:)', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:325-330': [
+        'CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )',
+        ('END DO   ;   END DO', 1), 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:766-786': [
+        ('IF( kt == nit000 .AND. jn <= 2 ) THEN', 3),
+        "CALL lbc_lnk( 'dynspg_ts', ua_e , 'U', -1._wp, va_e , 'V', -1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 21],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/lbclnk.f90:623-627': [
+        ('IF( nn_comm <= 1 ) THEN', 4), ('ENDIF', 4), 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/lbclnk.f90:1889-1909': [
+        ('!                       !                       ________________________', 3),
+        ('ishtRj(1:4,jf) = (/ ip1j, ip1j, ip0j, im0j /)', 3), 21],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/lbclnk.f90:1960-1979': [
+        ('! ----------------------------------------------- !', 3),
+        ('CALL MPI_ISEND( buffsnd_dp(ishtS(jn)+1)', 1), 20],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/lbclnk.f90:2055-2073': [
+        ('DO jn = 1, 2   ! next: do the MPI_RECV part', 2),
+        ('ENDIF', 90), 19],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/stp2d.f90:189-210': [
+        "WRITE(l2_slow_unit) l4_canon_3d(e3u_3d,'U')",
+        "& l4_canon_2d(r1_hu_0,'U'), l4_canon_2d(r1_hv_0,'V')", 22],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/stp2d.f90:218-233': [
+        '!* baroclinic drag forcing *!',
+        ("WRITE(l2_slow_unit) l4_canon_2d(Ue_rhs,'U'), l4_canon_2d(Ve_rhs,'V')", 2), 16],
     # --- ORCA2 card round 19: ranked histories and exchange-boundary walk ---
     'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
     '/dynspg_ts.f90:180-182': [

@@ -1,0 +1,45 @@
+--- stp2d.F90
++++ stp2d.F90
+@@ -178,14 +178,14 @@
+          !
+          ! Lane-2 round-16 slow-forcing operand instrument.  WRITE-only:
+          ! no model operand is assigned or reordered by this block.
+-         IF( lwp .AND. kt == nit000 ) THEN
++         IF( kt == nit000 ) THEN
+             IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane2 slow forcing requires 64-bit wp' )
+-            WRITE(l2_slow_filename,'("oracle_slow_forcing_kt",I8.8,".bin")') kt
++            WRITE(l2_slow_filename,'("oracle_slow_forcing_ranked_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
+             OPEN( NEWUNIT=l2_slow_unit, FILE=TRIM(l2_slow_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+                &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l2_slow_ios )
+             IF( l2_slow_ios /= 0 )   CALL ctl_stop( 'cannot open lane2 slow-forcing dump' )
+-            l2_slow_magic = 'NEMO_L2_SLOW_2'
+-            WRITE(l2_slow_unit) l2_slow_magic, 2, kt, Kbb, Krhs, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++            l2_slow_magic = 'NEMO_L4_SLOW_R1'
++            WRITE(l2_slow_unit) l2_slow_magic, 1, kt, Kbb, Krhs, narea - 1, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
+             WRITE(l2_slow_unit) SIZE(e3u_3d), SIZE(uu(:,:,:,Krhs)), SIZE(umask), &
+                & SIZE(e3v_3d), SIZE(vv(:,:,:,Krhs)), SIZE(vmask), SIZE(Ue_rhs)
+             WRITE(l2_slow_unit) l4_canon_3d(e3u_3d,'U'), l4_canon_3d(uu(:,:,:,Krhs),'U'), &
+@@ -208,7 +208,7 @@
+             END_2D
+          END SELECT
+ 
+-         IF( lwp .AND. kt == nit000 ) THEN
++         IF( kt == nit000 ) THEN
+             WRITE(l2_slow_unit) l4_canon_2d(Ue_rhs,'U'), l4_canon_2d(Ve_rhs,'V'), &
+                & l4_canon_2d(r1_hu_0,'U'), l4_canon_2d(r1_hv_0,'V')
+          ENDIF
+@@ -222 +222 @@
+-         IF( lwp .AND. kt == nit000 )   WRITE(l2_slow_unit) l4_canon_2d(Ue_rhs,'U'), &
++         IF( kt == nit000 )   WRITE(l2_slow_unit) l4_canon_2d(Ue_rhs,'U'), &
+@@ -226 +226 @@
+-         IF( lwp .AND. kt == nit000 ) THEN
++         IF( kt == nit000 ) THEN
+@@ -231,7 +231,7 @@
+             Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * r1_hu(ji,jj,Kbb)
+             Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj) * r1_hv(ji,jj,Kbb)
+          END_2D
+-         IF( lwp .AND. kt == nit000 ) THEN
++         IF( kt == nit000 ) THEN
+             WRITE(l2_slow_unit) l4_canon_2d(Ue_rhs,'U'), l4_canon_2d(Ve_rhs,'V')
+             CLOSE(l2_slow_unit)
+             WRITE(numout,*) 'LANE2_SLOW_FORCING_DUMP ', kt, TRIM(l2_slow_filename)
