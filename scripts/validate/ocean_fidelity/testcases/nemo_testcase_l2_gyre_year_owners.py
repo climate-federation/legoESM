@@ -4377,6 +4377,9 @@ def main(argv=None) -> int:
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
+        if report["status"] == "REFUTED":
+            print("STATUS REFUTED: " + report["conclusion"])
+            return 1
         require(args.plant in (None, "none"),
                 f"plant {args.plant!r} did not fire")
         print(json.dumps(report["ranking"], indent=2))
@@ -12245,8 +12248,10 @@ def developed_vertical_day240_sensitivity(
             _nemo_stage1_zad_eta_after_override=ssha)
 
     first_step: dict[str, dict] = {}
+    effective_failure = None
 
     def run_arm(name: str, *, plant_first_heat: bool = False):
+        nonlocal effective_failure
         state = initial_state
         identity_mismatched_bytes = 0
         for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1):
@@ -12327,16 +12332,22 @@ def developed_vertical_day240_sensitivity(
                             interface_wet) == 0,
                             "heat-K seam did not consume NEMO avt")
                     if name == "effective_K":
-                        require(_different_cells(
+                        effective_row = _score_developed_row(
                             selected_vertical["effective_K"], nemo_effective,
-                            interface_wet) == 0,
-                            "effective-K preimage did not reproduce NEMO "
-                            "zwt bit for bit")
+                            interface_wet)
                     first_step[name] = {
                         "upstream_cells_moved": upstream,
                         "vertical": selected_vertical,
                         "target_heat_K": target,
                     }
+                    if name == "effective_K" and not effective_row["bit_exact"]:
+                        effective_failure = {
+                            "prediction": "effective_K first-step complete "
+                                          "coefficient is BIT",
+                            "status": "REFUTED",
+                            "row": effective_row,
+                        }
+                        return None, identity_mismatched_bytes
             if step == PROCESS_START_STEP and name == "free":
                 first_step[name] = {
                     "vertical": _vertical_trace_frame(selected),
@@ -12351,9 +12362,15 @@ def developed_vertical_day240_sensitivity(
 
     final_states = {}
     identity_bytes = 0
-    for arm in ("free", "identity", "heat_K", "effective_K"):
-        final_states[arm], arm_identity = run_arm(arm)
+    arms = (["free", "identity", "heat_K"]
+            if plant == "developed-vertical-avt-ulp" else
+            ["free", "identity", "heat_K", "effective_K"])
+    for arm in arms:
+        arm_state, arm_identity = run_arm(arm)
         identity_bytes += arm_identity
+        if arm_state is None:
+            break
+        final_states[arm] = arm_state
 
     year = _year()
     final_restart = year._daily_restart_path(daily_root, PROCESS_END_STEP)
@@ -12398,10 +12415,11 @@ def developed_vertical_day240_sensitivity(
         "heat_arm_effective_K": _score_developed_row(
             first_step["heat_K"]["vertical"]["effective_K"],
             nemo_effective, interface_wet),
-        "effective_arm_effective_K": _score_developed_row(
-            first_step["effective_K"]["vertical"]["effective_K"],
-            nemo_effective, interface_wet),
     }
+    if "effective_K" in first_step:
+        first_rows["effective_arm_effective_K"] = _score_developed_row(
+            first_step["effective_K"]["vertical"]["effective_K"],
+            nemo_effective, interface_wet)
     require(identity_bytes == 0,
             "identity coefficient arm moved the production trajectory")
 
@@ -12441,24 +12459,43 @@ def developed_vertical_day240_sensitivity(
     historical["round134_daily_tke_reset"].update(tke_reset)
     historical["round126_vertical_subowners"].update(round126["headline"])
 
-    ranking = _rank_vertical_sensitivity(final_rows)
+    if "effective_K" in final_rows:
+        ranking = _rank_vertical_sensitivity(final_rows)
+    else:
+        free_value = final_rows["free"]["T"]["rms"]
+        heat_value = final_rows["heat_K"]["T"]["rms"]
+        ranking = [{
+            "arm": "heat_K",
+            "day240_T3D_rms_K": heat_value,
+            "day240_T3D_rms_removed_K": free_value - heat_value,
+            "removed_fraction": ((free_value - heat_value) / free_value
+                                 if free_value else 0.0),
+            "ranking_status": "BOUNDED_ONLY_EFFECTIVE_ARM_REFUTED",
+        }]
     free_rms = final_rows["free"]["T"]["rms"]
     heat_removed = next(
         row["day240_T3D_rms_removed_K"] for row in ranking
         if row["arm"] == "heat_K")
-    effective_removed = next(
-        row["day240_T3D_rms_removed_K"] for row in ranking
-        if row["arm"] == "effective_K")
-    conclusion = (
-        "TKE/closure heat diffusivity carries the ranked developed-state "
-        "day-240 sensitivity"
-        if heat_removed > 0.0 and heat_removed >= effective_removed else
-        "TKE/closure heat diffusivity is not the ranked developed-state "
-        "day-240 owner; continue at the complete implicit tracer solve")
+    if effective_failure is not None:
+        conclusion = (
+            "frozen complete-coefficient preimage prediction is REFUTED; "
+            "heat-only day-240 sensitivity is bounded but the requested "
+            "TKE-versus-solve ranking is incomplete")
+    else:
+        effective_removed = next(
+            row["day240_T3D_rms_removed_K"] for row in ranking
+            if row["arm"] == "effective_K")
+        conclusion = (
+            "TKE/closure heat diffusivity carries the ranked developed-state "
+            "day-240 sensitivity"
+            if heat_removed > 0.0 and heat_removed >= effective_removed else
+            "TKE/closure heat diffusivity is not the ranked developed-state "
+            "day-240 owner; continue at the complete implicit tracer solve")
     evidence_root.mkdir(parents=True, exist_ok=True)
     return {
         "format": "gyre-round167-developed-vertical-sensitivity-v1",
-        "status": "PASS", "case": CASE,
+        "status": "REFUTED" if effective_failure is not None else "PASS",
+        "case": CASE,
         "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
         "worktree": stamp,
         "interval": {"entry_step": DEVELOPED_ENTRY_STEP,
@@ -12479,6 +12516,7 @@ def developed_vertical_day240_sensitivity(
             "first_step_compiled_calibration_cells_unequal":
                 _vertical_calibration(first_vertical_record),
             "first_step_rows": first_rows,
+            "effective_preimage_prediction": effective_failure,
             "historical": historical,
         },
         "interventions": {
@@ -12493,7 +12531,9 @@ def developed_vertical_day240_sensitivity(
         "registered_row_count": sum(
             len(rows) for rows in final_rows.values()),
         "all_moved_rows_registered": set(final_rows)
-            == {"free", "identity", "heat_K", "effective_K"},
+            == ({"free", "identity", "heat_K"}
+                if effective_failure is not None else
+                {"free", "identity", "heat_K", "effective_K"}),
         "free_day240_T3D_rms_K": free_rms,
         "ranking": ranking,
         "winner": ranking[0],
