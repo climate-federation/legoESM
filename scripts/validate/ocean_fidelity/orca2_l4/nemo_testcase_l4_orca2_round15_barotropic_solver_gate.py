@@ -483,15 +483,23 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     def score_walk(candidate_fields):
         rows = []
         first = None
-        for name, stagger, citation in SOURCE_ORDER:
-            active = np.broadcast_to(
-                masks[stagger], candidate_fields[name].shape)
-            row = round14.compare(
-                candidate_fields[name], oracle[name], active)
-            row.update({"boundary": name, "citation": CITATIONS[citation]})
-            rows.append(row)
-            if first is None and not row["bit_exact"]:
-                first = dict(row)
+        # Execution order is every statement in sub-step 1, then every
+        # statement in sub-step 2.  Aggregating the two rows hid which loop
+        # iteration first diverged (the original gate reported 8568/17136 U
+        # entries without saying all 8568 belonged to only one sub-step).
+        for substep in range(2):
+            for name, stagger, citation in SOURCE_ORDER:
+                row = round14.compare(
+                    candidate_fields[name][substep],
+                    oracle[name][substep], masks[stagger])
+                row.update({
+                    "substep": substep + 1,
+                    "boundary": name,
+                    "citation": CITATIONS[citation],
+                })
+                rows.append(row)
+                if first is None and not row["bit_exact"]:
+                    first = dict(row)
         return rows, first
 
     walk_rows = []
