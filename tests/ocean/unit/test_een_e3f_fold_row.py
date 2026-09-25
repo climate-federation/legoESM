@@ -116,3 +116,58 @@ def test_a_closed_grid_takes_no_fold_branch_at_all():
         _thickness(N_LAT, N_LON), None, None, flat, "nemo_avg4",
         dz_ref=_dz_ref())
     assert bool(jnp.all(jnp.isfinite(built)))
+
+
+def test_a_stored_pivot_mesh_routes_each_scheme_to_its_own_fold_branch():
+    """The 2026-09-25 merge had to choose between two fold-row statements.
+
+    One lane refused ``nemo_avg4`` on every tripolar fold; the other had
+    transcribed the row from NEMO.  A third statement arrived with GitHub
+    main: a branch for a STORED-PIVOT mesh, which is what the ORCA2 mesh
+    classifies as.  This pins the routing that resolution produced, so a
+    later edit cannot quietly send one scheme down the other's branch.
+    """
+    from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+
+    grid = create_synthetic_tripole(N_LAT, N_LON)
+    assert bool(grid.fold.pivot_row_stored), "fixture must be a pivot mesh"
+    thickness = _thickness(N_LAT, N_LON)
+
+    avg4 = np.asarray(een_e3f_h_vtx(
+        thickness, None, None, grid, "nemo_avg4", dz_ref=_dz_ref())[0])
+    avg = np.asarray(een_e3f_h_vtx(
+        thickness, None, None, grid, "nemo_avg", dz_ref=_dz_ref())[0])
+
+    # nemo_avg4 keeps NEMO's own F-origin pairing in the shifted vertex
+    # columns, on a pivot mesh exactly as on any other.
+    assert np.array_equal(avg4[-1, :N_LON], avg4[-2, :N_LON][
+        _compiled_pairing(N_LON)])
+    # nemo_avg on the same mesh takes main's pivot-row branch instead: the
+    # row below permuted with the descriptor's own F map, no column shift.
+    assert np.array_equal(avg[-1, :N_LON],
+                          avg[-2, :N_LON][np.asarray(fold_perm_f(grid.fold))])
+    # The two index maps really are different statements on this mesh, so
+    # neither assertion above can be satisfied by the other's branch.
+    assert not np.array_equal(_compiled_pairing(N_LON),
+                              np.asarray(fold_perm_f(grid.fold)))
+
+
+def test_nemo_avg4_fold_row_does_not_depend_on_the_storage_layout():
+    """Why the merge retires the refusal rather than keying it on the layout.
+
+    ``nemo_t_fold_f_owned`` reads NEMO's F origin directly instead of the
+    storage convention detected for generic scalar exchange, so the ORCA2
+    transcription is the same statement whether or not the classifier calls
+    the mesh stored-pivot.  If that ever stops being true, keying a refusal
+    on the layout would become meaningful again and this fails.
+    """
+    pivot = create_synthetic_tripole(N_LAT, N_LON)
+    legacy = pivot._replace(fold=pivot.fold._replace(
+        pivot_row_stored=False, perm_u=None, perm_f=None))
+    thickness = _thickness(N_LAT, N_LON)
+    a = een_e3f_h_vtx(thickness, None, None, pivot, "nemo_avg4",
+                      dz_ref=_dz_ref())[0]
+    b = een_e3f_h_vtx(thickness, None, None, legacy, "nemo_avg4",
+                      dz_ref=_dz_ref())[0]
+    assert np.array_equal(np.asarray(a).view(np.uint64),
+                          np.asarray(b).view(np.uint64))
