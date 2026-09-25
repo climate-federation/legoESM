@@ -734,16 +734,16 @@ CITATION_MAP = {
         'CALL zdf_phy( kstp, Nbb, Nnn, Nrhs )',
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 2],
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfphy.f90:317-320': [
-        'IF( l_zdfsh2 ) THEN',
+        ('IF( l_zdfsh2 ) THEN', 1),
         '&                      sh2    )', 4],
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:97-103': [
         'ELSE',
         '&         * wumask(ji,jj,jk)', 7],
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:104-108': [
-        'zsh2v(ji,jj) = ( p_avm(ji,jj+1,jk) + p_avm(ji,jj,jk) )',
+        ('zsh2v(ji,jj) = ( p_avm(ji,jj+1,jk) + p_avm(ji,jj,jk) )', 2),
         '&         * wvmask(ji,jj,jk)', 5],
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:111-114': [
-        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)',
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
         '&                       + ( zsh2v(ji,jj-1) + zsh2v(ji,jj) )', 4],
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdfsh2.f90:116-119': [
         'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0) ! set p_sh2',
@@ -752,7 +752,7 @@ CITATION_MAP = {
         'Ocean/land mask at wu-, wv- and w points',
         'wvmask(:,:,jk) = vmask(:,:,jk) * vmask(:,:,jk-1)', 9],
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/domqco.f90:211-218': [
-        'ratio at u-,v-point',
+        ('ratio at u-,v-point', 1),
         ('END DO   ;   END DO', 2), 8],
     # --- round 165: developed-state TKE statement walk ---
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/l2_r54_tke.f90:128-130': [
