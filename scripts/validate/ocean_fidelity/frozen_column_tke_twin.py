@@ -134,6 +134,16 @@ def load_resolved_config(manifest_path: Path):
                          f"{base}.physics.vertical_mixing.tke")
     fields = {k: v for k, v in tke_d.items() if k in TKEConfig._fields}
     cfg = TKEConfig(**fields)
+    # The run's precision policy, from its own recorded command line
+    # (run_omip_core2.py: fp32 only under --fp32, else fp64). The module
+    # default is fp32, and under it the raw mesh ladders are cast to float32
+    # before the coordinate's exact-identity check, which then fails on
+    # rounding the fp64 run never sees. Set it BEFORE any array is built.
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    argv = str(_get(m, "run.command_line")).split()
+    set_policy(PrecisionPolicy.fp32() if "--fp32" in argv else PrecisionPolicy.fp64())
+    print(f"[cfg] precision policy = {'fp32' if '--fp32' in argv else 'fp64'} "
+          "(from the run's command line)")
     eos = str(_get(m, base + ".eos"))
     rho0 = float(_get(m, base + ".constants.rho_0"))
     g = float(_get(m, base + ".constants.g"))
