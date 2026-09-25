@@ -882,22 +882,22 @@ def test_forcing_gate_plants_all_exit_non_zero():
 
 
 def test_round157_stage2_face_score_is_bitwise_and_mask_aware(harness):
-    """The stage-2 scorer must see a last-bit move and ignore dry faces."""
+    """The stage scorer broadcasts a 2-D face mask through every level."""
     rng = np.random.default_rng(157)
     expected = rng.normal(size=(3, 4, 5))
-    mask = np.ones_like(expected)
-    mask[..., -1] = 0.0
+    mask = np.ones(expected.shape[:2])
+    mask[1, 2] = 0.0
 
     same = harness._score_stage2_face(expected.copy(), expected, mask)
     assert same["cells_unequal"] == 0
     assert same["active_cells_unequal"] == 0
-    assert same["active_cells_scored"] == 3 * 4 * 4
+    assert same["active_cells_scored"] == (3 * 4 - 1) * 5
     assert same["active_max_abs"] == 0.0
 
     # A one-unit-in-the-last-place move on an ACTIVE face is seen, and the
     # difference is far below anything a tolerance would catch.
     moved = expected.copy()
-    moved[1, 2, 0] = np.nextafter(moved[1, 2, 0], np.inf)
+    moved[1, 1, 0] = np.nextafter(moved[1, 1, 0], np.inf)
     row = harness._score_stage2_face(moved, expected, mask)
     assert row["active_cells_unequal"] == 1
     assert 0.0 < row["active_max_abs"] < 1e-15
