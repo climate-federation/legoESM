@@ -728,6 +728,25 @@ def van_leer_face_values_sigma(
     :func:`_vertical_advection_van_leer_sigma` for the derivation, the
     boundary treatment and the monotonicity scope.
     """
+    return _van_leer_face_values(field, sigma_coord.dsigma_full,
+                                 sigma_coord.dsigma)
+
+
+def _pad_last(x: jax.Array, before: int, after: int) -> jax.Array:
+    return jnp.pad(x, ((0, 0),) * (x.ndim - 1) + ((before, after),), mode="edge")
+
+
+def _van_leer_face_values(
+    field: jax.Array,
+    dc_full: jax.Array,
+    d_layer: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Metric-aware van-Leer face values on any monotone vertical coordinate.
+
+    ``dc_full`` (..., nlev-1) are centre-to-centre spacings and ``d_layer``
+    (..., nlev) layer thicknesses, in the same unit (sigma or Pa); both may be
+    1-D (sigma) or carry the column axes (hybrid pressure).
+    """
     from legoesm.core.flux_limiters import (
         grad_safe_ratio, ratio_grad_floor, van_leer_limiter,
     )
@@ -735,7 +754,7 @@ def van_leer_face_values_sigma(
     nlev = field.shape[-1]
     if nlev < 4:
         raise ValueError(
-            f"the van-Leer sigma reconstruction needs at least 4 vertical "
+            f"the van-Leer vertical reconstruction needs at least 4 vertical "
             f"levels for its 4-cell stencil; got nlev={nlev}."
         )
     # Linear-extrapolation ghosts: f_{-1} = 2f_0 - f_1 places the ghost one
@@ -754,12 +773,14 @@ def van_leer_face_values_sigma(
     f_jp1 = fp[..., 3:nlev + 4]
     # Centre-to-centre spacings, edge-padded: dc_up/dc_loc/dc_dn at face j are
     # sigma_full[j-1]-sigma_full[j-2], [j]-[j-1], [j+1]-[j].
-    dcp = jnp.pad(sigma_coord.dsigma_full, (2, 2), mode="edge")  # (nlev+3,)
-    dc_up, dc_loc, dc_dn = dcp[0:nlev + 1], dcp[1:nlev + 2], dcp[2:nlev + 3]
+    dcp = _pad_last(dc_full, 2, 2)  # (..., nlev+3)
+    dc_up = dcp[..., 0:nlev + 1]
+    dc_loc = dcp[..., 1:nlev + 2]
+    dc_dn = dcp[..., 2:nlev + 3]
     # MUSCL face weights: donor half-thickness / centre-to-centre distance.
     # Exactly 0.5 each on a uniform grid.
-    dsp = jnp.pad(sigma_coord.dsigma, (1, 1), mode="edge")  # (nlev+2,)
-    d_above, d_below = dsp[:-1], dsp[1:]                    # (nlev+1,)
+    dsp = _pad_last(d_layer, 1, 1)  # (..., nlev+2)
+    d_above, d_below = dsp[..., :-1], dsp[..., 1:]          # (..., nlev+1)
     d_sum = d_above + d_below
 
     eps = 1e-30
@@ -3078,6 +3099,48 @@ def vertical_advection_hybrid_sb(
     upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # mdot_{k-1/2}(f_k - f_{k-1})
     lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # mdot_{k+1/2}(f_{k+1} - f_k)
     return -(upper + lower) / (2.0 * jnp.clip(dp, 1e-10, None))
+
+
+def vertical_advection_hybrid_van_leer(
+    field: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Conservative, slope-limited (van Leer) tracer vertical advection, hybrid.
+
+    Face-minus-cell increment form of :func:`_vertical_advection_van_leer_sigma`
+    with the interface mass flux ``mdot`` [Pa/s, > 0 downward, 0 at top and
+    surface] and the column's own layer thickness ``dp_k``::
+
+        -[mdot_{k+1/2}(q_{k+1/2} - f_k) - mdot_{k-1/2}(q_{k-1/2} - f_k)] / dp_k
+
+    This is the flux divergence minus ``f_k (mdot_{k+1/2}-mdot_{k-1/2})/dp_k``,
+    so paired with the continuity that built ``mdot`` the column sum of
+    ``dp*f`` telescopes to the zero boundary fluxes -- the property
+    :func:`vertical_advection_hybrid` (advective upwind on half->full averaged
+    fluxes) lacks.  A constant field has zero tendency at every level.
+
+    Face values: the metric-aware van-Leer reconstruction in pressure,
+    clipped to the two adjacent cells.  The faces next to the top and bottom
+    layers use the donor cell instead: a reconstructed value there is downwind
+    of the boundary layer for inflow into the domain interior (see the sigma
+    kernel's docstring for the instability), and a face shared by two cells
+    must carry ONE value for the telescoping to hold.
+    """
+    dp = dp_from_hybrid(coord, p_s)                                  # (..., nlev)
+    dc = jnp.diff(pressure_from_hybrid(coord, p_s, full=True), axis=-1)
+    q_pos, q_neg = _van_leer_face_values(field, dc, dp)              # (..., nlev+1)
+    donor_pos = jnp.concatenate([field[..., :1], field], axis=-1)    # cell above
+    donor_neg = jnp.concatenate([field, field[..., -1:]], axis=-1)   # cell below
+    nlev = field.shape[-1]
+    edge = jnp.zeros(nlev + 1, dtype=bool).at[jnp.array([1, nlev - 1])].set(True)
+    q_pos = jnp.where(edge, donor_pos, q_pos)
+    q_neg = jnp.where(edge, donor_neg, q_neg)
+    q_face = jnp.where(mass_flux > 0, q_pos, q_neg)
+    inc_top = mass_flux[..., :-1] * (q_face[..., :-1] - field)
+    inc_bot = mass_flux[..., 1:] * (q_face[..., 1:] - field)
+    return -(inc_bot - inc_top) / jnp.clip(dp, 1e-10, None)
 
 
 def vertical_advection_theta_hybrid(

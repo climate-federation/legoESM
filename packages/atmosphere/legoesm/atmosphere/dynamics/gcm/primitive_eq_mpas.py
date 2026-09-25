@@ -71,6 +71,7 @@ from legoesm.grids.vertical import (
     VERTICAL_ADVECTION_SCHEMES,
     vertical_advection,
     vertical_advection_hybrid,
+    vertical_advection_hybrid_van_leer,
     vertical_advection_theta,
     vertical_advection_theta_hybrid,
 )
@@ -780,7 +781,8 @@ def mpas_hydrostatic_tendencies(
     # vertical mass flux (mass_flux for hybrid / sigma_dot for σ), so moisture
     # transport is MASS-CONSISTENT with the thermodynamics — same horizontal
     # operator (shared ``tracer_horizontal_advection``) and the SAME vertical
-    # operator the dycore uses for T.  Physics (microphysics/convection)
+    # operator the dycore uses for T (on the hybrid lane: the conservative
+    # limited tracer operator, T takes its theta form).  Physics (microphysics/convection)
     # tracer tendencies add on.  ``tracers=None`` ⇒ dry, no extra work.
     tracer_tends_out = None
     if state.tracers is not None and len(state.tracers) > 0:
@@ -792,7 +794,8 @@ def mpas_hydrostatic_tendencies(
         dq = tracer_horizontal_advection(q, u_3d, mesh)
         if _hybrid:
             dq = dq + jax.vmap(
-                lambda qk: vertical_advection_hybrid(qk, mass_flux, p_s, sigma_coord),
+                lambda qk: vertical_advection_hybrid_van_leer(
+                    qk, mass_flux, p_s, sigma_coord),
                 in_axes=-1, out_axes=-1)(q)
         else:
             dq = dq + jax.vmap(

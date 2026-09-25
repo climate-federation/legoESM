@@ -56,6 +56,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--label", default="arm")
     ap.add_argument("--band", nargs=2, type=float, default=[500.0, 800.0],
                     metavar=("P_LO_HPA", "P_HI_HPA"))
+    ap.add_argument("--profile-lat", type=float, default=None,
+                    help="also print the per-level q_v transport profile over "
+                         "|lat| <= this [deg]")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
     return ap
 
@@ -190,6 +193,8 @@ def main():
                  for n in water)
         adv = np.asarray(vertical_advection_hybrid(qt, mass_flux, p_s, sc))
         sb = np.asarray(vertical_advection_hybrid_sb(qt, mass_flux, p_s, sc))
+        from legoesm.grids.vertical import vertical_advection_hybrid_van_leer
+        vl = np.asarray(vertical_advection_hybrid_van_leer(qt, mass_flux, p_s, sc))
         # The conservative property is of the FLUX FORM, i.e. of
         #   adv_k - f_k * (mdot_{k+1/2} - mdot_{k-1/2}) / dp_k
         # (vertical.py, vertical_advection_hybrid_sb docstring).  Testing the
@@ -201,16 +206,70 @@ def main():
         qtn = np.asarray(qt)
         flux_adv = adv - qtn * dmdot / np.clip(dp, 1e-10, None)
         flux_sb = sb - qtn * dmdot / np.clip(dp, 1e-10, None)
+        flux_vl = vl - qtn * dmdot / np.clip(dp, 1e-10, None)
         scale = masked_int(np.abs(adv), dp, A, g, allm) * _DAY
         print(f"[{a.label}] --- total water ({'+'.join(water)}): GLOBAL column "
               f"integral of the FLUX-FORM vertical tendency [kg/m2/day].  A "
               f"conservative operator must give ~0 here; the advection term "
               f"alone is NOT a conservation test for either form.")
         for nm, fl in (("advective (in use now)", flux_adv),
-                       ("conservative (sb)", flux_sb)):
+                       ("conservative (sb)", flux_sb),
+                       ("limited conservative (vl)", flux_vl)):
             v = masked_int(fl, dp, A, g, allm) * _DAY
             print(f"[{a.label}]   {nm:24s} {v:+13.6e}   "
                   f"= {abs(v) / max(scale, 1e-30):.3e} of gross transport")
+
+    if a.profile_lat is not None and "q_v" in names:
+        profile_vapour(a.label, state, mesh, sc, mass_flux, p_s, pfn, dp, g,
+                       ncol, nlev, a.profile_lat)
+
+
+def flux_form_residual(adv, q, mass_flux, dp):
+    """``adv_k - q_k*(mdot_{k+1/2}-mdot_{k-1/2})/dp_k``: what the operator
+    adds on top of a flux divergence -- zero column integral iff conservative."""
+    mf = np.asarray(mass_flux)
+    return np.asarray(adv) - np.asarray(q) * (mf[..., 1:] - mf[..., :-1]) / np.clip(dp, 1e-10, None)
+
+
+def profile_vapour(label, state, mesh, sc, mass_flux, p_s, pfn, dp, g,
+                   ncol, nlev, lat_max):
+    """Per-level water-vapour vertical-transport terms, mass-weighted over
+    |lat| <= lat_max [g/kg/day]: in-use upwind, conservative SB, their
+    difference, and each operator's flux-form residual (the part that creates
+    or destroys vapour rather than moving it)."""
+    import jax.numpy as jnp
+    from legoesm.grids.vertical import (
+        vertical_advection_hybrid, vertical_advection_hybrid_sb)
+    q = jnp.asarray(state.tracers["q_v"].data).reshape(ncol, nlev)
+    adv = np.asarray(vertical_advection_hybrid(q, mass_flux, p_s, sc))
+    sb = np.asarray(vertical_advection_hybrid_sb(q, mass_flux, p_s, sc))
+    res_adv = flux_form_residual(adv, q, mass_flux, dp)
+    res_sb = flux_form_residual(sb, q, mass_flux, dp)
+    area = np.asarray(mesh.areaCell).reshape(ncol)
+    sel = np.abs(np.rad2deg(np.asarray(mesh.latCell).reshape(ncol))) <= lat_max
+    w = area[sel, None] * dp[sel]                        # mass weight per level
+    k = 1e3 * _DAY
+    mean = lambda x: np.sum(x[sel] * w, axis=0) / np.sum(w, axis=0)
+    print(f"[{label}] --- q_v vertical transport, |lat|<={lat_max:g}, "
+          f"mass-weighted per level [g/kg/day]")
+    print(f"[{label}] {'p[hPa]':>7s} {'q[g/kg]':>8s} {'upwind':>9s} {'sb':>9s} "
+          f"{'up-sb':>9s} {'resid_up':>9s} {'resid_sb':>9s}")
+    for j in range(nlev):
+        print(f"[{label}] {mean(pfn)[j] / 100:7.1f} {mean(np.asarray(q))[j] * 1e3:8.3f} "
+              f"{mean(adv)[j] * k:+9.4f} {mean(sb)[j] * k:+9.4f} "
+              f"{mean(adv - sb)[j] * k:+9.4f} {mean(res_adv)[j] * k:+9.4f} "
+              f"{mean(res_sb)[j] * k:+9.4f}")
+    col = lambda x: float(np.sum(x[sel] * dp[sel] * area[sel, None])
+                          / np.sum(area[sel]) / g * _DAY)
+    print(f"[{label}] column flux-form residual |lat|<={lat_max:g} [kg/m2/day]: "
+          f"upwind {col(res_adv):+.4f}  sb {col(res_sb):+.4e}")
+    mf = np.abs(np.asarray(mass_flux))
+    rate = (mf[..., :-1] + mf[..., 1:]) / np.clip(dp, 1e-10, None)   # 1/s
+    kmax = np.argmax(rate.max(axis=0))
+    print(f"[{label}] vertical Courant rate (|F_top|+|F_bot|)/dp, all cells: "
+          f"max {rate.max():.3e} 1/s at level {kmax} "
+          f"(p~{np.median(pfn[:, kmax]) / 100:.1f} hPa); multiply by the "
+          f"dynamics dt for the per-step Courant sum")
 
 
 if __name__ == "__main__":
