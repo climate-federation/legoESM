@@ -34,6 +34,7 @@
 # SUBMIT (from the nature worktree): sbatch scripts/cluster/scaling_levante/cpu_mpas_route_ab.sbatch
 # ===========================================================================
 set -uo pipefail
+export LEGOESM_PYTHON="${LEGOESM_PYTHON:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python}"
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 export JAX_PLATFORMS=cpu
 export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
@@ -44,6 +45,7 @@ export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
 export LEGOESM_GLOO_IFACE=ib0
 export LEGOESM_VORONOI_PARTITION=sfc
 export JAX_ENABLE_X64=0
+"$PY" -c 'import legoesm.parallel.voronoi_partition as m; print("provenance", m.__file__)' || { echo "PY cannot import legoesm"; exit 2; }
 OUTDIR="${OUTDIR:-/scratch/b/b381103/legoesm_scaling/mpas_route_ab_j${SLURM_JOB_ID}}"
 [ -e "$OUTDIR" ] && { echo "REFUSING: $OUTDIR exists" >&2; exit 1; }
 mkdir -p "$OUTDIR"

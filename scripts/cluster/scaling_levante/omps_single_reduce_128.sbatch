@@ -30,6 +30,7 @@
 # replicate spread. Offline cannot answer: it is collective latency at 128.
 # ===========================================================================
 set -uo pipefail
+export LEGOESM_PYTHON="${LEGOESM_PYTHON:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python}"
 export LEGOESM_REPO=/work/bd1083/b309178/diffESM/legoesm_pr_edgeorder
 export JAX_PLATFORMS=cuda,cpu
 export SCRATCH="${SCRATCH:-/scratch/${USER:0:1}/$USER}"
@@ -38,6 +39,7 @@ cd "$REPO" || exit 2
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false"
 export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
 export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
+"$PY" -c 'import legoesm.parallel.voronoi_partition as m; print("provenance", m.__file__)' || { echo "PY cannot import legoesm"; exit 2; }
 OUTDIR="$SCRATCH/legoesm_scaling/omps_sr128_j${SLURM_JOB_ID}"
 [ -e "$OUTDIR" ] && { echo "REFUSING: $OUTDIR exists" >&2; exit 1; }
 mkdir -p "$OUTDIR"
