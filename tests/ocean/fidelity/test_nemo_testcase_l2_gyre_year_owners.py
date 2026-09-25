@@ -930,6 +930,12 @@ def test_round157_stage2_record_refuses_the_wrong_assignment_arm(harness,
               "uu_vv_Kaa_final")
     fields = {name: (np.zeros((36, 26, 31)), np.zeros((36, 26, 31)))
               for name in groups}
+    fields["rhd_ww"] = (
+        np.zeros((36, 26, 31)), np.zeros((36, 26, 31)))
+    fields["r3u_r3v_Kmm"] = (
+        np.zeros((36, 26)), np.zeros((36, 26)))
+    fields["ssh_Kmm_ssh_Kaa"] = (
+        np.zeros((36, 26)), np.zeros((36, 26)))
     fields["rDt_r1_Dt"] = (np.float64(7200.0), np.float64(1.0 / 7200.0))
 
     class _Stub:

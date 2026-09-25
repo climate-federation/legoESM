@@ -283,7 +283,7 @@ def test_the_admission_gate_census_uses_the_model_s_own_predicate():
     rows = gate._card_execution("stage_momentum_wzv")
     # What the candidate would reach if it were selected...
     assert [name for name, row in rows.items() if row["executes_route"]] == [
-        "GYRE-zco"]
+        "GYRE-zco", "ORCA2-zps"]
     # ...and what reaches it today: the same card, since round 163 landed it.
     assert [name for name, row in rows.items()
             if row["executes_at_this_tip"]] == ["GYRE-zco"]

@@ -209,14 +209,16 @@ def test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured():
         expected_before_year_commit="b" * 40,
         route="fct_metric_upstream", registered_rows=_registry())
     assert report["status"] == "FAIL"
-    assert report["unmeasured_executing_cards"] == ["NEMO-GYRE-recipe"]
+    assert report["unmeasured_executing_cards"] == [
+        "NEMO-GYRE-recipe", "ORCA2-zps"]
     measured = module.evaluate(
         _comparison(), _day(1.0), _day(0.1),
         _year(1.0, "b" * 40), _year(0.1, "c" * 40),
         expected_candidate_commit="c" * 40,
         expected_before_year_commit="b" * 40,
         route="fct_metric_upstream",
-        measured_cards=("NEMO-GYRE-recipe",), registered_rows=_registry())
+        measured_cards=("NEMO-GYRE-recipe", "ORCA2-zps"),
+        registered_rows=_registry())
     assert measured["status"] == "PASS"
 
 
