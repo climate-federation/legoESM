@@ -2629,6 +2629,53 @@ class ModelDriver:
             # the ERA5 initial wind field.  Proper ETOPO-in-dynamics requires
             # building a balanced IC on ETOPO from the outset (future work).
 
+        self._assert_vertical_coordinate_supports_this_state()
+
+    def _assert_vertical_coordinate_supports_this_state(self) -> None:
+        """Re-check the coordinate against the surface pressure that EXISTS.
+
+        The topography-time check (see
+        ``_assert_vertical_coordinate_supports_this_orography``) runs before
+        the initial state is built and can only estimate ``p_s`` from the
+        orography, isothermally at ``T_init``.  Both reviewers of #1029 pointed
+        out independently that the estimate is not conservative: an isothermal
+        288-300 K column decays pressure more slowly than a real lapse-rate
+        one, so a cold polar or plateau column sits BELOW the estimate, and
+        ``ic='standard'`` then recomputes ``p_s`` with latitude-dependent
+        temperatures that are colder still.  A guard that under-fires is worse
+        than no guard, because it reads as a clearance.
+
+        So this runs after every initial-state path -- analytic, standard
+        atmosphere, ERA5, restart -- on the actual ``state.p_s``.
+
+        KNOWN GAP, deliberately not papered over: this is still the state at
+        step 0.  A deep cyclone over a plateau can drop ``p_s`` tens of hPa
+        below its initial value mid-run, and nothing here sees that.  Closing
+        it needs a check inside the step, which is a hot-loop cost and a
+        separate decision; no margin is invented here to pretend otherwise.
+        """
+        gc = self.config.grid
+        if getattr(gc, "vertical_coord", None) != "hybrid":
+            return
+        state = getattr(self, "state", None)
+        p_s = getattr(getattr(state, "p_s", None), "data", None)
+        if p_s is None:
+            return
+        p_s_min = float(jnp.min(p_s))
+        if not jnp.isfinite(p_s_min):
+            raise ValueError(
+                "the initial surface-pressure field is non-finite; the "
+                "vertical-coordinate validity check cannot run on it."
+            )
+
+        from legoesm.grids.vertical import (
+            assert_hybrid_valid_for_surface_pressure)
+        assert_hybrid_valid_for_surface_pressure(
+            self.sigma, p_s_min,
+            context=(f"initial state on {gc.grid_type} {gc.resolution}, "
+                     f"{gc.nlev} hybrid levels, ic={self.config.ic!r}"),
+        )
+
     def _create_ensemble(self) -> None:
         """Create ensemble members if ensemble_size > 1.
 

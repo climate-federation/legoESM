@@ -4167,35 +4167,23 @@ def apply_surface_flux_config(tc, config):
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
     zml = getattr(config, "surface_z_ref_model_level", None)
 
-    # #1783: the unified land-flux law pins the reference height OFF.
+    # #1783: a pin was added here and then RETRACTED, because the measurement
+    # that justified it did not say what it was read as saying.
     #
-    # The height correction tells the MOST solver the real height of the lowest
-    # full level (~135 m instead of a nominal 10 m) and brings the air down
-    # dry-adiabatically, ~1.5 K.  Against the unified land interface that
-    # manufactures an air-surface contrast that is not there: with it on, five
-    # tests of TestUnifiedLaneOneFluxLaw fail with sensible heat at
-    # -1.13 .. -7.94 W/m^2 where the blended law wants +43.6 .. -16.9, i.e. a
-    # downward flux out of nothing.  Forcing it off takes that class to 7
-    # passed and the whole module to 29 passed -- measured, one constructor
-    # field, job 9946756.
+    # The failing class asserts that both production sides equal its reference
+    # ``_law_fluxes``, and that reference calls the BARE surface-flux routine
+    # -- no reference height, no dry-adiabatic bring-down. Measured on the
+    # class's own fixture (job 9981365): the helper with the switch OFF equals
+    # the bare law to 0.000e+00, and with it ON sensible heat moves from
+    # -16.896 to -7.939 W/m^2. Those two numbers are the last entries of the
+    # "ref" and "got" lists in the issue, exactly. So both production sides
+    # moved together and only the reference stayed behind; the two sides were
+    # never shown to disagree with EACH OTHER, which is what "one law" means.
     #
-    # Only when the run does not state it.  An explicit request is never
-    # silently inverted; the two settings genuinely disagree, so asking for
-    # both is refused rather than resolved behind the caller's back.
-    if getattr(config, "land_interface_flux", None) == "unified":
-        if zml is None:
-            zml = False
-        elif bool(zml):
-            raise ValueError(
-                "land_interface_flux='unified' with "
-                "surface_z_ref_model_level=True is not a supported "
-                "combination (#1783): the lowest-level height correction "
-                "invents an air-surface contrast that the unified flux law "
-                "then debits, producing a downward sensible heat flux out of "
-                "nothing. Set surface_z_ref_model_level=False or leave it "
-                "unset (the unified lane pins it off), or select a different "
-                "land_interface_flux."
-            )
+    # Pinning the switch off would therefore have disabled a correction that
+    # the helper's own precondition says applies here -- the unified lane's
+    # T_sfc is a real slab temperature, not a stand-in -- in order to satisfy
+    # a stale reference. The fix belongs in the test, not in this lane.
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
     # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
     # sea-water surface humidity needs a path that separates the ocean from
