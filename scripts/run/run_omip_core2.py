@@ -2857,7 +2857,7 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
 
 
 def _write_ocean_run_manifest(args, model, dt, total_days, out_dir,
-                              *, mesh=None, nlev=None):
+                              *, mesh=None, nlev=None, io_proc: bool):
     """Write the STANDARD run manifest (resolved config + command line).
 
     Shared by every grid.  It used to live inline in ``main()``, which the
@@ -2880,7 +2880,7 @@ def _write_ocean_run_manifest(args, model, dt, total_days, out_dir,
         from legoesm.ocean.forcing import core2_nyf_cache_dir
         _resolved_forcing_path = str(core2_nyf_cache_dir())
     print(f"[setup] CORE-II forcing cache: {_resolved_forcing_path}")
-    if not _is_io_proc():
+    if not io_proc:
         return None
     try:
         from legoesm.driver.restart import (
@@ -3034,7 +3034,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
     _write_ocean_run_manifest(
         args, model, dt, total_days, out,
         mesh=str(args.fesom_mesh_dir),
-        nlev=int(np.asarray(state.inner.T).shape[-1]))
+        nlev=int(np.asarray(state.inner.T).shape[-1]),
+        io_proc=True)
     if n_steps <= 0:
         raise SystemExit(f"fesom forced loop: non-positive duration "
                          f"({total_days} days at dt={dt}s -> {n_steps} "
@@ -9686,7 +9687,7 @@ def main() -> int:
     # this is the same default the loader takes, and the two cannot drift
     # because both call core2_nyf_cache_dir().
     manifest_path = _write_ocean_run_manifest(
-        args, model, dt, total_days, out_dir)
+        args, model, dt, total_days, out_dir, io_proc=_is_io_proc())
 
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
