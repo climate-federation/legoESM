@@ -141,6 +141,7 @@ sys.path.insert(0, str(_HERE.parents[1]))  # scripts/validate
 from compare_omip_nemo import (  # noqa: E402
     _band_breakdown,
     _load_legoesm,
+    require_window,
     _load_nemo,
     _wstats,
     regrid_curv_to_latlon,
@@ -626,6 +627,10 @@ def main() -> int:
               f"({_expect:g}); no --expect-day was given")
     check_oracle_record(_expect, a.nemo_time_idx, N["n_time"], a.nemo_month)
     X = [_load_legoesm(pth, use_mean=a.use_mean_fields) for pth in a.also_mask]
+    fields_mode = require_window(T, a.use_mean_fields, what="tripole")
+    for _nm, _L in [("MPAS", M)] + [(f"also-mask {p}", x) for p, x in zip(a.also_mask, X)]:
+        require_window(_L, a.use_mean_fields, what=_nm)
+    print(f"[fields] {fields_mode}")
     print(f"[load] tripole {T['sst'].shape}  MPAS {M['sst'].shape}  "
           f"NEMO {N['sst'].shape} ({N['n_time']} records)"
           + "".join(f"  mask-only {x['sst'].shape}" for x in X))
@@ -695,7 +700,7 @@ def main() -> int:
             f"--label-tripole and --label-mpas are both {lab_a!r}; the report "
             "keys would collide and one arm's scores would overwrite the "
             "other's.")
-    report = {
+    report = {"fields_mode": fields_mode,
         "generated_by": str(_HERE),
         "git_sha": _git_sha(_HERE.parents[3]),
         "label_a": lab_a, "label_b": lab_b,
@@ -789,7 +794,9 @@ def main() -> int:
         report["mld_note"] = (
             f"MLD scored on its own coverage intersection ({int(mld_ok.sum())} "
             f"cells vs {n_common} for SST/SSS); dsigma=0.01 to match NEMO mldr10_1; "
-            "snapshot-state MLD, NOT a seasonal-mean MLD.")
+            + ("window-mean of per-step MLDs (mld_mean), as mldr10_1 is."
+               if a.use_mean_fields else
+               "snapshot-state MLD, NOT a seasonal-mean MLD."))
         _mld_area = (np.cos(np.deg2rad(tgt_lat))[:, None]
                      * np.ones_like(tgt_lon)[None, :]) * mld_ok
         fields.append(("MLD", mldT, mldM, mldN, "m", _mld_area, mldX))

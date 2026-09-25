@@ -96,13 +96,15 @@ def _write_snapshot(tmp_path, with_means):
               land_mask=np.ones((2, 3)))
     if with_means:
         kw.update(T_mean=T + 1.0, S_mean=T + 31.0, T_mean_hw=T + 2.0,
-                  S_mean_hw=T + 32.0, mld_mean=np.full((2, 3), 17.0))
+                  S_mean_hw=T + 32.0, mld_mean=np.full((2, 3), 17.0),
+                  flux_mean_window_s=np.asarray(5 * 86400.0))
     p = tmp_path / "snapshot_day0005.npz"
     np.savez(p, **kw)
     return p, T
 
 
 def test_loader_use_mean_reads_the_window_means_not_the_instantaneous_state(tmp_path):
+    import pytest
     """NEMO's 5-day files are window means; the loader must hand the scorers
     the plain means at the surface, the thickness-weighted means for the
     columns and the window-mean MLD -- and the instantaneous state otherwise."""
@@ -113,6 +115,12 @@ def test_loader_use_mean_reads_the_window_means_not_the_instantaneous_state(tmp_
     np.testing.assert_array_equal(L["T3d"], T + 2.0)
     np.testing.assert_array_equal(L["S3d"], T + 32.0)
     np.testing.assert_array_equal(L["mld_mean"], 17.0)
+    assert L["window_days"] == 5.0
+    assert _c.require_window(L, True) == "window_mean(5d)"
+    assert _c.require_window(L, False) == "instantaneous"
+    L["window_days"] = 1.0
+    with pytest.raises(SystemExit, match="not window-matched"):
+        _c.require_window(L, True)
     L0 = _c._load_legoesm(p)
     np.testing.assert_array_equal(L0["sst"], T[..., 0])
     np.testing.assert_array_equal(L0["T3d"], T)
