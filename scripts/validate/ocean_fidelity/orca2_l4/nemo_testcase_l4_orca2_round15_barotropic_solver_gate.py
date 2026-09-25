@@ -143,15 +143,15 @@ def _candidate_ordered(card, trace: dict) -> dict[str, np.ndarray]:
 
 
 SOURCE_ORDER = (
-    ("eta_entry", "t", "solver_initializes_entry"),
-    ("u_entry", "u", "solver_initializes_entry"),
-    ("v_entry", "v", "solver_initializes_entry"),
     ("u_history_b", "u", "cold_history_initialization"),
     ("v_history_b", "v", "cold_history_initialization"),
     ("u_history_bb", "u", "cold_history_initialization"),
     ("v_history_bb", "v", "cold_history_initialization"),
     ("eta_history_b", "t", "cold_history_initialization"),
     ("eta_history_bb", "t", "cold_history_initialization"),
+    ("eta_entry", "t", "solver_initializes_entry"),
+    ("u_entry", "u", "solver_initializes_entry"),
+    ("v_entry", "v", "solver_initializes_entry"),
     ("u_mid", "u", "predictor_weights"),
     ("v_mid", "v", "predictor_weights"),
     ("eta_mid", "t", "predictor_weights"),

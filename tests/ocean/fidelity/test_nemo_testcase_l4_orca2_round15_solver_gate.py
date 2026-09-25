@@ -40,5 +40,9 @@ def test_source_walk_has_no_duplicate_boundaries():
     gate = _gate()
     names = [name for name, _, _ in gate.SOURCE_ORDER]
     assert len(names) == len(set(names))
-    assert names[:3] == ["eta_entry", "u_entry", "v_entry"]
+    assert names[:6] == [
+        "u_history_b", "v_history_b", "u_history_bb", "v_history_bb",
+        "eta_history_b", "eta_history_bb",
+    ]
+    assert names[6:9] == ["eta_entry", "u_entry", "v_entry"]
     assert names[-2:] == ["u_exit", "v_exit"]
