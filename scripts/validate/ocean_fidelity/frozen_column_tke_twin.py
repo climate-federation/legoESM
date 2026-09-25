@@ -145,8 +145,11 @@ def load_resolved_config(manifest_path: Path):
         unsupported.append(f"tke_shear_production={cfg.tke_shear_production}")
     if getattr(cfg, "tke_shear_avm_weighting", "tpoint") != "tpoint":
         unsupported.append(f"tke_shear_avm_weighting={cfg.tke_shear_avm_weighting}")
-    if getattr(cfg, "tke_surface_bc_level", "interior_pinned") == "nemo_z0":
-        unsupported.append("tke_surface_bc_level=nemo_z0")
+    # tke_surface_bc_level is read only inside the en ADVANCE
+    # (_solve_tke_backward_euler and the face assembly in tke_vertical_mixing);
+    # the K-from-given-en pair this harness replicates never sees it, so
+    # nemo_z0 arms are admitted and the control gate (closure must recover the
+    # stored K) remains the check that would catch this being wrong.
     if bool(getattr(cfg, "bottom_tke_bc", False)):
         unsupported.append("bottom_tke_bc=True")
     if cfg.n2_mode not in ("insitu", "nemo_bn2"):
