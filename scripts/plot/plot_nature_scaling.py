@@ -139,7 +139,9 @@ OCEAN_MPAS_PCG_PRECOND = ("poly", 4)
 # rows at any other count or chunk size, or without the stamp, are refused.
 # The 32-channel gain is ATMOSPHERE evidence; the ocean lane (PCG-dominated,
 # 2M+9 allreduces/step) is pinned by decision and A/B-checked separately.
-MPAS_NCCL_CHANNELS = "32"
+MPAS_NCCL_CHANNELS = {"icosahedral": "64", "mpas": "32"}
+# Atmosphere moved 32 -> 64 on 2026-09-25 (s9 at 128 GPUs: -7%, both run
+# orders, jobs 27627022 / 27670098); 32-channel atmosphere rows are refused.
 # Multi-rank CPU rows need each rank's full core share (nature_ladder.sbatch
 # passes --cpus-per-task = node threads / ranks-per-node = 64 since
 # 2026-09-21); rows stamped below this, or unstamped, were 1-core ranks
@@ -218,7 +220,8 @@ def load(dirs):
                     env = r.get("metadata", {}).get("extra", {}).get("nccl_env") or {}
                     ch = (env.get("NCCL_MIN_NCHANNELS"), env.get("NCCL_MAX_NCHANNELS"),
                           env.get("NCCL_P2P_NET_CHUNKSIZE"))
-                    if ch != (MPAS_NCCL_CHANNELS, MPAS_NCCL_CHANNELS, MPAS_NCCL_CHUNK):
+                    pin = MPAS_NCCL_CHANNELS.get(grid)
+                    if pin is None or ch != (pin, pin, MPAS_NCCL_CHUNK):
                         dropped_nccl.append((f, int(r["n_devices"]), ch))
                         continue
                 mode = _mode(r, f)

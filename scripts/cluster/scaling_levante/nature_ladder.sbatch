@@ -131,7 +131,10 @@ run_arm() {
       fi
       args+=(--nlev "$ATM_NLEV" --steps "$STEPS" --warmup "$WARMUP") ;;
     mpas)
-      export NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=131072
+      # 64 channels (was 32; owner decision 2026-09-25): s9 L26 at 128 GPUs
+      # 3.41/3.38 -> 3.15/3.16 ms with the 64-channel arms run FIRST (job
+      # 27670098), -6.9% with them run second (27627022); equal at 32 GPUs.
+      export NCCL_MIN_NCHANNELS=64 NCCL_MAX_NCHANNELS=64 NCCL_P2P_NET_CHUNKSIZE=131072
       export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
       bench=scripts/bench/bench_mpas_spmd_scaling.py
       args+=(--subdivision "$res" --nlev "$ATM_NLEV" --lloyd 0 --wide-halo --partition-method sfc
