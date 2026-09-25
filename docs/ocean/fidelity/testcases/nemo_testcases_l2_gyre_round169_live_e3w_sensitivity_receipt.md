@@ -106,7 +106,7 @@ Read-only file system`; it emitted no SHIP or DO NOT SHIP verdict.
 The final focused year-owner, literal-solver, and citation-map suite reports
 `63 passed in 45.69s`.  The receipt citation gate reports PASS with three
 citations, zero unmapped citations, zero failures, and zero map-audit failures.
-Its shifted `trazdf.f90:468-469` plant reports FAIL and exits 1 as required.
+Its shifted compiled-source plant reports FAIL and exits 1 as required.
 
 The mandated single `tests/ocean/fidelity tests/ocean/unit -n 12` battery was
 run once.  Eight JAX workers aborted during compilation and were replaced; the
