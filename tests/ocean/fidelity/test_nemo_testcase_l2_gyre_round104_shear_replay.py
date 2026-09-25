@@ -131,3 +131,35 @@ def test_mirror_free_surface_ratio_is_nemos_statement():
     want = (ref_u * (1.0 + r3u_full[..., None])) ** 2
     assert np.array_equal(
         np.asarray(ops["divisor_u"]).view(np.uint64), want.view(np.uint64))
+
+
+def test_mirror_intermediates_close_to_the_registered_endpoint():
+    """The optional statement rows reconstruct the ordinary mirror exactly."""
+
+    class Z:
+        nemo_hu_0 = np.full((NLAT, NLON), 4000.0)
+        nemo_hv_0 = np.full((NLAT, NLON), 4000.0)
+        nemo_e1e2t = np.full((NLAT, NLON), 1.0e9)
+        nemo_e1e2u = np.full((NLAT, NLON), 1.1e9)
+        nemo_e1e2v = np.full((NLAT, NLON), 1.2e9)
+        nemo_e3w_0 = np.broadcast_to(
+            np.arange(1.0, NK), (NLAT, NLON, NK - 1)).copy()
+
+    rng = np.random.default_rng(11)
+    u = rng.normal(size=(NLAT, NLON + 1, NK - 1))
+    v = rng.normal(size=(NLAT + 1, NLON, NK - 1))
+    eta = rng.normal(scale=0.1, size=(NLAT, NLON))
+    avm = rng.uniform(1.0e-5, 1.0e-3, size=(NLAT, NLON, NK - 2))
+    umask = np.ones_like(u)
+    vmask = np.ones_like(v)
+    operands, rows = mod.model_operands(
+        Z, u, v, eta, avm, umask, vmask,
+        return_intermediates=True)
+    expected = 0.25 * (
+        (rows["zsh2u"][:, :-1] + rows["zsh2u"][:, 1:])
+        * operands["coast_u"]
+        + (rows["zsh2v"][:-1] + rows["zsh2v"][1:])
+        * operands["coast_v"])
+    assert np.array_equal(
+        mod.rebuild_sh2(operands).view(np.uint64),
+        expected.view(np.uint64))

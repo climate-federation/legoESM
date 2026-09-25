@@ -7327,7 +7327,8 @@ def developed_tke_statement_walk(
         record_root: Path, evidence_root: Path, *,
         plant: str | None = None) -> dict:
     """Walk step-1081 TKE through the existing production-jitted program."""
-    require(plant in (None, "none", "developed-tke-entry-ulp"),
+    require(plant in (None, "none", "developed-tke-entry-ulp",
+                      "developed-shear-velocity-ulp"),
             f"unknown developed-TKE plant {plant!r}")
     _policy()
     import jax
@@ -7485,6 +7486,188 @@ def developed_tke_statement_walk(
         row["nemo_statement"] = citation
         return row
 
+    # Extend the existing Round-104/105 shear walk at the same developed
+    # entry.  The restart bridge supplies NEMO's U/V/SSH exactly; the
+    # Round-164 record supplies the viscosity and final p_sh2 that the TKE
+    # RHS above consumes.  The source-literal replay must reproduce that
+    # recorded endpoint before any production operand row is interpreted.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d)
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        _u_east_to_face, _v_north_to_face)
+    from nemo_testcase_l2_gyre_round104_shear_replay import (
+        model_operands, rebuild_sh2)
+
+    u_mask, v_mask = compute_face_masks_3d(card.recipe.z_coord.is_active)
+    reference_u = _u_east_to_face(bundle["payload"]["un"])
+    reference_v = _v_north_to_face(bundle["payload"]["vn"])
+    reference_eta = np.asarray(bundle["payload"]["sshn"], dtype=np.float64)
+    reference_avm = yx("avm_entry")[..., 1:30]
+    reference_operands, reference_shear = model_operands(
+        card.recipe.z_coord, reference_u, reference_v, reference_eta,
+        reference_avm, u_mask, v_mask, return_intermediates=True)
+    model_shear_operands, model_shear = model_operands(
+        card.recipe.z_coord, state.u.data, state.v.data, state.eta.data,
+        state.tke_avm.data, u_mask, v_mask, return_intermediates=True)
+    recorded_sh2 = yx("sh2")[..., 1:30]
+    replayed_sh2 = rebuild_sh2(reference_operands)
+    captured_metrics = production.shear_face_metrics
+    require(captured_metrics is not None and len(captured_metrics) == 4,
+            "developed shear walk did not capture four production metrics")
+    e3u_now, e3u_before, e3v_now, e3v_before = (
+        np.asarray(value, dtype=np.float64) for value in captured_metrics)
+
+    def all_cells(value):
+        return np.ones(np.shape(value), dtype=bool)
+
+    shear_rows = {
+        "reference_replay_p_sh2": scored(
+            replayed_sh2, recorded_sh2, all_cells(recorded_sh2),
+            "zdfsh2.f90:97-114"),
+        "u_face_entry": scored(
+            state.u.data, reference_u, all_cells(reference_u),
+            "zdfsh2.f90:100-101"),
+        "v_face_entry": scored(
+            state.v.data, reference_v, all_cells(reference_v),
+            "zdfsh2.f90:105-106"),
+        "u_vertical_difference": scored(
+            model_shear["du"], reference_shear["du"],
+            all_cells(reference_shear["du"]), "zdfsh2.f90:100-101"),
+        "v_vertical_difference": scored(
+            model_shear["dv"], reference_shear["dv"],
+            all_cells(reference_shear["dv"]), "zdfsh2.f90:105-106"),
+        "avm_entry": scored(
+            state.tke_avm.data, reference_avm, all_cells(reference_avm),
+            "zdfsh2.f90:99,104"),
+        "avm_face_u": scored(
+            model_shear_operands["avm_face_u"],
+            reference_operands["avm_face_u"],
+            all_cells(reference_operands["avm_face_u"]),
+            "zdfsh2.f90:99"),
+        "avm_face_v": scored(
+            model_shear_operands["avm_face_v"],
+            reference_operands["avm_face_v"],
+            all_cells(reference_operands["avm_face_v"]),
+            "zdfsh2.f90:104"),
+        "r3u_step_entry": scored(
+            model_shear["r3u"], reference_shear["r3u"],
+            all_cells(reference_shear["r3u"]), "domqco.f90:213-215"),
+        "r3v_step_entry": scored(
+            model_shear["r3v"], reference_shear["r3v"],
+            all_cells(reference_shear["r3v"]), "domqco.f90:213,216-217"),
+        "e3u_now": scored(
+            e3u_now, reference_shear["e3u"],
+            all_cells(reference_shear["e3u"]), "zdfsh2.f90:102"),
+        "e3u_before": scored(
+            e3u_before, reference_shear["e3u"],
+            all_cells(reference_shear["e3u"]), "zdfsh2.f90:102"),
+        "e3v_now": scored(
+            e3v_now, reference_shear["e3v"],
+            all_cells(reference_shear["e3v"]), "zdfsh2.f90:107"),
+        "e3v_before": scored(
+            e3v_before, reference_shear["e3v"],
+            all_cells(reference_shear["e3v"]), "zdfsh2.f90:107"),
+        "divisor_u_from_captured_metrics": scored(
+            e3u_now * e3u_before, reference_operands["divisor_u"],
+            all_cells(reference_operands["divisor_u"]),
+            "zdfsh2.f90:102"),
+        "divisor_v_from_captured_metrics": scored(
+            e3v_now * e3v_before, reference_operands["divisor_v"],
+            all_cells(reference_operands["divisor_v"]),
+            "zdfsh2.f90:107"),
+        "wumask": scored(
+            model_shear_operands["wumask"], reference_operands["wumask"],
+            all_cells(reference_operands["wumask"]),
+            "dommsk.f90:237-242"),
+        "wvmask": scored(
+            model_shear_operands["wvmask"], reference_operands["wvmask"],
+            all_cells(reference_operands["wvmask"]),
+            "dommsk.f90:237-242"),
+        "coast_u": scored(
+            model_shear_operands["coast_u"], reference_operands["coast_u"],
+            all_cells(reference_operands["coast_u"]),
+            "zdfsh2.f90:112"),
+        "coast_v": scored(
+            model_shear_operands["coast_v"], reference_operands["coast_v"],
+            all_cells(reference_operands["coast_v"]),
+            "zdfsh2.f90:113"),
+        "zsh2u_isolated_replay": scored(
+            model_shear["zsh2u"], reference_shear["zsh2u"],
+            all_cells(reference_shear["zsh2u"]), "zdfsh2.f90:99-103"),
+        "zsh2v_isolated_replay": scored(
+            model_shear["zsh2v"], reference_shear["zsh2v"],
+            all_cells(reference_shear["zsh2v"]), "zdfsh2.f90:104-108"),
+        "model_isolated_replay_vs_production": scored(
+            rebuild_sh2(model_shear_operands), production.rhs_shear,
+            all_cells(recorded_sh2), "zdfsh2.f90:97-114"),
+        "production_p_sh2": scored(
+            production.rhs_shear, recorded_sh2, wet29,
+            "zdfsh2.f90:111-114"),
+    }
+    require(shear_rows["reference_replay_p_sh2"]["bit_exact"],
+            "developed NEMO shear replay does not reproduce recorded p_sh2")
+
+    if plant == "developed-shear-velocity-ulp":
+        # Start from the face carrying the largest nonzero source-literal U
+        # contribution.  Try its two consumed levels and both one-ULP
+        # directions; the first production run that moves p_sh2 is the
+        # discriminating control.  Every trial changes exactly one bit-level
+        # neighbour of one nonzero consumed velocity value.
+        order = np.argsort(np.abs(reference_shear["zsh2u"]), axis=None)[::-1]
+        fired = None
+        clean_p_sh2 = np.asarray(production.rhs_shear)
+        clean_du = np.asarray(model_shear["du"])
+        for flat in order:
+            face_index = np.unravel_index(
+                int(flat), reference_shear["zsh2u"].shape)
+            if reference_shear["zsh2u"][face_index] == 0.0:
+                break
+            j, i, k = (int(value) for value in face_index)
+            for level in (k, k + 1):
+                for direction in (np.inf, -np.inf):
+                    planted_u = np.asarray(state.u.data).copy()
+                    index = (j, i, level)
+                    baseline = planted_u[index]
+                    if baseline == 0.0 or not np.isfinite(baseline):
+                        continue
+                    planted_u[index] = np.nextafter(baseline, direction)
+                    planted_state = state._replace(
+                        u=state.u.replace(data=jnp.asarray(planted_u)))
+                    planted_trace = trace_model.step(
+                        planted_state, dt=card.dt_s,
+                        freshwater=freshwater, surface_forcing=surface,
+                        _nemo_stage1_zad_eta_after_override=ssha)
+                    jax.device_get(planted_trace)
+                    moved_p = int(np.count_nonzero(
+                        clean_p_sh2.view(np.uint64) != np.asarray(
+                            planted_trace.tke_statement_trace.rhs_shear
+                        ).view(np.uint64)))
+                    planted_du = (planted_u[..., :-1]
+                                  - planted_u[..., 1:])
+                    moved_du = int(np.count_nonzero(
+                        clean_du.view(np.uint64)
+                        != planted_du.view(np.uint64)))
+                    if moved_p and moved_du:
+                        fired = {
+                            "u_index_jik": list(index),
+                            "baseline_velocity_m_s": float(baseline),
+                            "planted_velocity_m_s": float(planted_u[index]),
+                            "vertical_difference_cells_moved": moved_du,
+                            "production_p_sh2_cells_moved": moved_p,
+                        }
+                        break
+                if fired is not None:
+                    break
+            if fired is not None:
+                break
+        require(fired is not None,
+                "PLANT-BLIND: no one-ULP consumed velocity perturbation "
+                "moved both the vertical difference and production p_sh2")
+        return {
+            "status": "PLANT-FIRED", "plant": plant,
+            "control": fired,
+        }
+
     statement_rows = {
         "en_entry": scored(
             production.en_entry, yx("en_entry", statement=True)[..., 1:30],
@@ -7592,6 +7775,23 @@ def developed_tke_statement_walk(
         "operand_order": list(operand_order),
         "operand_rows": operand_rows,
         "closure_rows": closure_rows,
+        "shear_walk": {
+            "compiled_order": [
+                "u/v vertical differences", "avm face sums",
+                "live e3 face factors and divisors", "W-face masks",
+                "U/V face shear", "T-point p_sh2"],
+            "rows": shear_rows,
+            "production_rows": [
+                "u_face_entry", "v_face_entry", "e3u_now",
+                "e3u_before", "e3v_now", "e3v_before",
+                "production_p_sh2"],
+            "isolated_diagnostics": [
+                "r3u_step_entry", "r3v_step_entry",
+                "divisor_u_from_captured_metrics",
+                "divisor_v_from_captured_metrics",
+                "zsh2u_isolated_replay", "zsh2v_isolated_replay",
+                "model_isolated_replay_vs_production"],
+        },
         "first_non_bit_statement": first_statement,
         "first_non_bit_operand": first_operand,
         "predictions": {
