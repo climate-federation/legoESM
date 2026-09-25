@@ -182,10 +182,15 @@ Every summary line below is pytest's own last line.
 **Push gate** (the six files in `autopilot_max.sh`, `JAX_ENABLE_X64=1
 JAX_PLATFORMS=cpu`, lane `PYTHONPATH`), at the final tip:
 
-> `135 passed in 992.87s (0:16:32)`
+> `135 passed in 939.22s (0:15:39)`
 
-Run twice at the final tip, independently: `135 passed in 1038.30s` and
-`135 passed in 992.87s`, same count both times.
+Run three times, the last of them at the FINAL tip `6007a41dc` on a clean
+committed tree: `135 passed in 1038.30s`, `135 passed in 992.87s`,
+`135 passed in 939.22s`.  Same count every time.
+
+The citation gate was re-run at that same final tip: `status PASS`, 274
+citations, 0 failures, 0 map entries failing audit, 0 unmapped, 9 of 9 plants
+fired, worktree `clean: true` at `6007a41dc`.
 
 **Card gates** — the same five files round 163 ran, so the counts are
 comparable:
