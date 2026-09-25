@@ -188,16 +188,16 @@ divergence is divided by it at
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:126-130` and the same
 live thickness multiplies the divergence back at
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:153`.  legoESM forms the
-ratio at `ocean_pe_latlon_cgrid.py:1674`, forms the thickness at
-`ocean_pe_latlon_cgrid.py:1675` and hands it to the divergence block at
-`ocean_pe_latlon_cgrid.py:1699`, so replacing that one operand replaces both
+ratio at `ocean_pe_latlon_cgrid.py:1681`, forms the thickness at
+`ocean_pe_latlon_cgrid.py:1682` and hands it to the divergence block at
+`ocean_pe_latlon_cgrid.py:1706`, so replacing that one operand replaces both
 compiled occurrences and nothing else.
 
 **The order for this round named a second home for it and the compiled source
 refutes that.**  The stretching term at
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/sshwzv.f90:297-298` reads the ratio
 at the AFTER and BEFORE levels, not the now level; legoESM's answering pair is
-`ocean_pe_latlon_cgrid.py:1717-1718`.  Round 160 already measured the
+`ocean_pe_latlon_cgrid.py:1724-1725`.  Round 160 already measured the
 after-level pair inert, and the before level is the entry state's own sea
 surface height, which this round's entry bridge loads from NEMO's restart with
 zero mismatches.  So the stretching term is accounted for and needs no
@@ -284,8 +284,8 @@ difference matters.**  Round 161 said that if C1 held, the walk should move to
 the barotropic step that produces the after height.  It should not, for this
 residual.  The stage height's only consumers inside the velocity-indicator
 producer are the two ratios it feeds — the face ratio at
-`ocean_pe_latlon_cgrid.py:1674` through the face geometry, and the T-point
-ratio at the same line into `ocean_pe_latlon_cgrid.py:1675` — and both are now
+`ocean_pe_latlon_cgrid.py:1681` through the face geometry, and the T-point
+ratio at the same line into `ocean_pe_latlon_cgrid.py:1682` — and both are now
 measured inert, at `1.5e-05` and `1.4e-09` of the residual respectively.  A
 `6.28e-10` m height error is a real difference in the model's own stage state
 and it will matter wherever the height is consumed directly, but it cannot be
@@ -548,7 +548,7 @@ findings and what was done with each:
    consuming it at
    `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/sshwzv.f90:297-298`.  legoESM's
    answering helper likewise ends by multiplying the live thickness back, at
-   `ocean_pe_latlon_cgrid.py:1579`.  The framing stands and the finding is
+   `ocean_pe_latlon_cgrid.py:1586`.  The framing stands and the finding is
    registered as refuted, with the lines, rather than quietly dropped.
 3. **LOW — the ordinal convention that selects which continuity call is
    substituted is inherited, not re-verified.**  REGISTERED, not closed.  The
@@ -563,7 +563,7 @@ findings and what was done with each:
 
 The citation gate on this receipt reported `PASS` with 12 citations, zero
 failures, zero unmapped citations, zero map entries failing audit, and all
-nine self-tests fired.  Its shifted-line plant, on `ocean_pe_latlon_cgrid.py:1699`, exited 1
+nine self-tests fired.  Its shifted-line plant, on `ocean_pe_latlon_cgrid.py:1706`, exited 1
 with `SYMBOL-NOT-AT-LINE`.  The same gate on the preregistration reported
 `PASS` with 8 citations and its own plant, on
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90:257`, exited 1 with
