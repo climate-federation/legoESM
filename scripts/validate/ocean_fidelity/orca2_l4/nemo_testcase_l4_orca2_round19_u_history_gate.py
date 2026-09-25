@@ -281,9 +281,18 @@ def _history_walk(*, card, trace, candidate, oracle, masks, inherited_first,
     interior_support = support[:, 1:]
     interior_active = recorded["ssumask"][0, :, 1:] != 0.0
     rows = []
+    raw_full_update_rows = []
     midpoint_replays = []
     vector_replays = []
     for substep in range(NROWS):
+        raw_full_update_rows.append({
+            "substep": substep + 1,
+            **{
+                name: round14.compare(
+                    candidate_full[name][substep], recorded[name][substep], support)
+                for name in ("zu_spg", "zu_trd", "ssumask")
+            },
+        })
         row = {
             "substep": substep + 1,
             **{
@@ -296,8 +305,13 @@ def _history_walk(*, card, trace, candidate, oracle, masks, inherited_first,
                 name: round14.compare(
                     candidate_full[name][substep], recorded[name][substep], support)
                 for name in (
-                    "un_e", "ub_e", "ubb_e", "ua_mid", "zu_spg", "zu_trd",
-                    "ssumask", "ua_exit")
+                    "un_e", "ub_e", "ubb_e", "ua_mid", "ua_exit")
+            },
+            **{
+                name: round14.compare(
+                    candidate_full[name][substep, :, 1:],
+                    recorded[name][substep, :, 1:], interior_support)
+                for name in ("zu_spg", "zu_trd", "ssumask")
             },
             "rDt_e": _scalar_row(
                 candidate_rdt[substep], history_record["rDt_e"][substep]),
@@ -396,7 +410,9 @@ def _history_walk(*, card, trace, candidate, oracle, masks, inherited_first,
     return {
         "label": "given NEMO's entry",
         "halo_reproduction": halo_walk,
-        "rows_on_mismatch_adjacent_faces": rows,
+        "live_rows_in_compiled_source_order": rows,
+        "raw_full_update_arrays_on_mismatch_adjacent_faces":
+            raw_full_update_rows,
         "first_non_bit_statement": first,
         "midpoint_replays": midpoint_replays,
         "vector_replays_on_recorded_interior": vector_replays,
