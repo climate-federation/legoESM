@@ -105,8 +105,22 @@ app-server client could not initialize on a read-only filesystem.  Verdict:
 **independent review unavailable in-sandbox**.
 
 The clean localization gate exits 0 with `STOP_UNRECORDED_HALO_OPERAND`; its
-one-ULP plant fires and exits 1.  Focused and wide-battery results are recorded
-in the final test-ledger commit following this receipt.
+one-ULP plant fires and exits 1.  The receipt citation gate passes all three
+rendered compiled citations with zero failures and zero unmapped citations;
+its rigid two-line shift of the rendered `:1533-1563` citation fails with
+`SYMBOL-NOT-AT-LINE`.
+
+The focused round-17 battery passes **10 / 10**.  The required
+`tests/ocean/fidelity -n 12` battery was launched exactly once: it collected
+1,658 tests, reached 99% with three failures and seven skips, then its final
+worker produced no output for a bounded ten-minute tail and the run was
+interrupted with exit 130.  It is not represented as green.  The three failure
+IDs reproduce together in isolation and are exactly Round 16's pre-existing
+reds: the GYRE round-129 certified-record stamp says the stepping gate moved;
+the SI3 scalar-math gate says `A MY_SRC is not verbatim`; and the GYRE
+round-51 assertion expects the stale final six trace fields.  No file in any
+of those three implementation/test paths, and no file under `packages/`,
+changed in round 17.
 
 Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round17/codex`.
@@ -132,5 +146,5 @@ production statement was made.
 4. The independent ORCA2 year still depends on the scheduled independent
    initial-state completion; this round's solver result is only given NEMO's
    entry.
-5. The interrupted wide ocean-fidelity battery tail from round 15 remains an
-   operator action unless this round's single permitted wide battery finishes.
+5. The wide ocean-fidelity battery's hung final tail remains an operator
+   action; this round's interrupted run is not represented as green.
