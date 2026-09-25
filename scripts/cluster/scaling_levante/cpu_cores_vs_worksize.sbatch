@@ -55,6 +55,11 @@
 # arm durations differ 16x here, so a fixed skip lands inside compile for the
 # small arm and inside steady state for the large one -- which would manufacture
 # reading (a) on its own.
+# SUBMIT LINE (this worktree has no .venv of its own, so the bare python on a
+# compute node has no jax and the job dies in 8 seconds):
+#   sbatch --export=ALL,LEGOESM_REPO=$PWD,\
+#     LEGOESM_PYTHON=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python \
+#     scripts/cluster/scaling_levante/cpu_cores_vs_worksize.sbatch
 # ===========================================================================
 set -u
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
