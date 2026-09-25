@@ -1259,9 +1259,17 @@ def run_single_benchmark(
         _pdir = pathlib.Path(profile_dir) / f"rank{jax.process_index()}"
         _pdir.mkdir(parents=True, exist_ok=True)
         jax.profiler.start_trace(str(_pdir))
+    # Wall-clock markers around the timed region ONLY. An external sampler
+    # (scripts/bench/sample_cpu_cores.py) needs to know which of its samples
+    # fall inside the steady-state measurement; a fixed "skip the first N
+    # seconds" guess cannot know, and at small problem sizes it lands in
+    # compile instead. Printed on every rank so a per-rank sampler can window
+    # on its own rank's phase.
+    print(f"[phase] timing-start rank={rank} epoch={time.time():.3f}", flush=True)
     t0 = time.perf_counter()
     state = _scan_run(state)
     jax.block_until_ready(jax.tree.leaves(state))
+    print(f"[phase] timing-end rank={rank} epoch={time.time():.3f}", flush=True)
     if _tracing:
         jax.profiler.stop_trace()
 
