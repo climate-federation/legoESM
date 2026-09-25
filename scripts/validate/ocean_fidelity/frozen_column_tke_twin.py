@@ -273,8 +273,13 @@ def native_ladders_meshmask(mesh_path, twins):
     dz_ref = g1d("e3t_1d")
     t_depth = g1d("gdept_1d")
     gdepw = g1d("gdepw_1d")
+    # The four raw 1-D mesh ladders the production coordinate carries
+    # (nemo_state_bridge.py:194-200); nemo_bn2's live geometry reads e3w_0
+    # off the coordinate and refuses without it.
+    raw = {"nemo_gdept_0_m": t_depth, "nemo_gdepw_0_m": gdepw,
+           "nemo_e3t_0_m": dz_ref, "nemo_e3w_0_m": g1d("e3w_1d")}
     d.close()
-    return dz_ref, t_depth, gdepw[1:]                # interior W-depths (nlev-1)
+    return dz_ref, t_depth, gdepw[1:], raw           # interior W-depths (nlev-1)
 
 
 def native_ladders_snapshot(z):
@@ -356,7 +361,8 @@ def print_state_profile(tag, rows):
 
 
 def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
-             cfg, eos_name, rho0, g, profile_depth_max=None, profile_tag=""):
+             cfg, eos_name, rho0, g, mesh_raw=None, profile_depth_max=None,
+             profile_tag=""):
     """(avm, avt) at interior interfaces from a GIVEN en — no en advance.
 
     Replicates the pre-loop inputs of ``tke_vertical_mixing`` (tke.py:2018-2231)
@@ -379,7 +385,8 @@ def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
     )
 
     dz_ref_j = jnp.asarray(dz_ref)
-    z_coord = create_z_star_from_thicknesses(dz_ref_j, jnp.asarray(t_depth_ref))
+    z_coord = create_z_star_from_thicknesses(
+        dz_ref_j, jnp.asarray(t_depth_ref), **(mesh_raw or {}))
     Tj = jnp.asarray(T); Sj = jnp.asarray(S)
     uj = jnp.asarray(u_cell); vj = jnp.asarray(v_cell)
     etaj = jnp.asarray(eta)
@@ -534,6 +541,12 @@ def run_control(args, oracle, twins):
         raise SystemExit(f"only {ncol} columns in box (< {MIN_COLUMNS}) — FAIL")
 
     dz_ref, t_depth_ref, _wint = native_ladders_snapshot(z)
+    mesh_raw = None
+    if cfg.n2_mode == "nemo_bn2":
+        if args.nemo_meshmask is None:
+            raise SystemExit("control mode with n2_mode=nemo_bn2 needs "
+                             "--nemo-meshmask (the raw e3w_0 ladder)")
+        _, _, _, mesh_raw = native_ladders_meshmask(args.nemo_meshmask, twins)
     u_cell, v_cell = centre_uv_extra_column(z["u"], z["v"])
     taum, sbc_lat, sbc_lon = load_sbc_taum(args.nemo_sbc, args.rec, twins)
     tau_cols = sample_at_columns(taum, sbc_lat, sbc_lon, lat[band], lon[band],
@@ -551,7 +564,7 @@ def run_control(args, oracle, twins):
             en=np.asarray(z["tke"])[band][None] * en_scale, taum=tau_cols[None, :],
             eta=np.asarray(z["eta"])[band][None], lat=lat[band][None, :],
             dz_ref=dz_ref, t_depth_ref=t_depth_ref, cfg=cfg,
-            eos_name=eos, rho0=rho0, g=g,
+            eos_name=eos, rho0=rho0, g=g, mesh_raw=mesh_raw,
             profile_depth_max=(args.profile_depth_max if en_scale == 1.0
                                else None),
             profile_tag="ours")
@@ -626,7 +639,7 @@ def run_nemo(args, oracle, twins):
         raise SystemExit(f"only {ncol} NEMO columns in box (< {MIN_COLUMNS}) — FAIL")
     print(f"[nemo] {ncol} equatorial columns")
 
-    dz_ref, t_depth_ref, w_interior = native_ladders_meshmask(
+    dz_ref, t_depth_ref, w_interior, mesh_raw = native_ladders_meshmask(
         args.nemo_meshmask, twins)
     u_cell, v_cell = centre_uv_collocated(R["U"], R["V"])
     if "ssh" not in R or np.isnan(R["ssh"][band]).all():
@@ -645,7 +658,7 @@ def run_nemo(args, oracle, twins):
         u_cell=u_cell[band][None], v_cell=v_cell[band][None],
         en=R["en"][band][:, 1:][None], taum=tau_cols[None, :], eta=eta,
         lat=nav_lat[band][None, :], dz_ref=dz_ref, t_depth_ref=t_depth_ref,
-        cfg=cfg, eos_name=eos, rho0=rho0, g=g,
+        cfg=cfg, eos_name=eos, rho0=rho0, g=g, mesh_raw=mesh_raw,
         profile_depth_max=args.profile_depth_max, profile_tag="ours_on_nemo")
 
     # NEMO's OWN closure diffusivities (w-points; drop surface k=0 -> interior).

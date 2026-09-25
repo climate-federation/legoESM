@@ -36,20 +36,25 @@
 # question; the two length scales beside it say whether the closure turns
 # equal energy into equal mixing.
 #
-# PRE-REGISTERED, on the depth at which our en first falls below one tenth
-# of the oracle's, reading the profile from the top:
-#   * already below 0.1 at the FIRST interior interface (~1 m) -> the SURFACE
-#     SOURCE is short: the energy injected by the wind boundary condition is
-#     not arriving, and the 2026-09-20 "surface source is right" reading (made
-#     from viscosity, not energy) is overturned.
-#   * within 0.1..1.0 at the top and below 0.1 somewhere in 5-30 m -> the
-#     DECAY is the defect: energy arrives and dies within the lens, and the
-#     TKE equation's own terms (transport, dissipation length, buoyancy sink)
-#     between those depths are the next measurement.
-#   * never below 0.1 down to 65 m -> the energy matches and the coefficient
-#     gap is not an energy gap; the closure's length scale (l_eps vs dissl,
-#     printed beside it) or the additive terms carry it instead.
-# All three are reachable and none is favoured by the instrument.
+# PRE-REGISTERED (as AMENDED in 4c5cc7a8d after dual review, before any
+# result), on the FIRST interface, reading from the top, where ours/nemo en
+# falls below 0.1:
+#   * the first interior interface (~1 m) -> the SURFACE SOURCE is short: the
+#     energy injected by the wind boundary condition is not arriving, and the
+#     2026-09-20 "surface source is right" reading (made from viscosity, not
+#     energy) is overturned.
+#   * any interface in (1 m, 65 m], the top being >= 0.1 (a top ratio ABOVE 1
+#     followed by a crossing belongs here too) -> the DECAY is the defect;
+#     report the crossing depth, and the TKE equation's own terms between the
+#     top and that depth are the next measurement.
+#   * no crossing down to 65 m -> NO ORDER-OF-MAGNITUDE energy gap; report the
+#     per-interface ratio, which is the finding ("energy matches" is not a
+#     label this branch earns -- a ninefold deficit would sit in it).
+#   * a zero or non-finite denominator at an interface -> that interface is
+#     unresolved and excluded from the crossing search.
+# Read the energy in LOG with l_eps beside it: K ~ e/N, so a 250-1000x
+# coefficient gap needs an energy gap of order 400-1500x and the crossing will
+# sit shallow. Every branch is reachable and none is favoured by the instrument.
 #
 # THE ONE CAVEAT NAMED IN ADVANCE: both models are read at mid-afternoon in
 # the cold tongue, peak stratification, the daily minimum of near-surface
@@ -119,14 +124,14 @@ REC=16
 
 echo "===================== STEP 1: self-recovery CONTROL (+ our profile) ====="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-sbc "$SBC" --rec $REC $BOX --profile-depth-max 105
+    --nemo-meshmask "$MESH" --nemo-sbc "$SBC" --rec $REC $BOX --profile-depth-max 105
 rc1=$?
 echo "[gate] control exit = $rc1"
 [ "$rc1" -eq 0 ] || { echo "FATAL: control did NOT reproduce our own stored K -- profile NOT trusted"; exit 1; }
 
 echo "===================== STEP 2: NON-VACUITY (en x0.1) ======================="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-sbc "$SBC" --rec $REC $BOX --perturb-en 0.1
+    --nemo-meshmask "$MESH" --nemo-sbc "$SBC" --rec $REC $BOX --perturb-en 0.1
 rc2=$?
 echo "[gate] non-vacuity exit = $rc2  (0 = STEP-1 assertion correctly FAILED)"
 [ "$rc2" -eq 0 ] || { echo "FATAL: gate is VACUOUS; NEMO side NOT run"; exit 1; }
