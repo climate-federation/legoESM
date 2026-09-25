@@ -169,6 +169,8 @@ are the campaign-state pre-existing debts
 `test_step_entry_n2_bundle_matches_live_geometry_construction` and
 `test_step_entry_n2_bundle_fails_closed_without_raw_w_mesh`; the new shear,
 card-census, offline-provenance, and movement-registry tests pass.
+The final retained diagnostic/gate set, excluding those two known-red TKE
+fixtures, reports `51 passed in 20.03s`.
 
 The required combined `tests/ocean/fidelity` plus `tests/ocean/unit` run was
 started once with 12 workers.  It reached 92%, eight workers terminated
@@ -187,6 +189,10 @@ disposition is:
 The terminal diagnostic was `Error: failed to initialize in-process
 app-server client: Read-only file system (os error 30)`.  There is no hidden
 SHIP or DO NOT SHIP verdict.
+
+The receipt citation gate reports PASS on all nine citations with zero
+failures and zero unmapped citations.  Its shifted U-statement plant reports
+`SYMBOL-NOT-AT-LINE`, FAIL, and exits 1 as required.
 
 ## Canonical evidence hashes
 
