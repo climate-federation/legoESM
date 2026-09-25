@@ -1164,6 +1164,7 @@ def make_aimip_classical_spectral_physics(
     split_rad: bool = False,
     rrtmgp_gpoint_checkpoint: bool = True,
     rrtmgp_gpoint_batch_size: int = 16,
+    rrtmgp_column_chunk_size: int = 0,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
@@ -1337,6 +1338,7 @@ def make_aimip_classical_spectral_physics(
             include_clouds=(cloud_scheme != "none"),
             gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
             gpoint_batch_size=rrtmgp_gpoint_batch_size,
+            column_chunk_size=rrtmgp_column_chunk_size,
         )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",

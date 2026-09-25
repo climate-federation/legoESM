@@ -3764,7 +3764,7 @@ def make_voronoi_sharded_step(
             )
         return model.step
 
-    from legoesm.core.precision import cast_pytree
+    from legoesm.core.precision import cast_pytree, finalize_to_storage
     from legoesm.core.state import MPASHydrostaticState
     from legoesm.parallel.mesh import multiprocess_safe_device_put
     from legoesm.parallel.shard_map_compat import shard_map
@@ -4721,7 +4721,14 @@ def make_voronoi_sharded_step(
                 state_new = state_new._replace(
                     tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
-            return cast_pytree(state_new, None, "storage"), phys_state_out
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+            return (finalize_to_storage(
+                        cast_pytree(state_new, None, "storage")),
+                    phys_state_out)
 
         return _step
 

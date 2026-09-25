@@ -26,6 +26,14 @@ ADDRESSED
   branches (freeze_N_to_graupel = SAM NNUCCR; dN_g_melt = NGMLTG).
 
 KNOWN, DELIBERATE departures (documented where they occur)
+- Sedimentation acts on the PRE-source pools: every species is sedimented
+  from its input mixing ratio with the same-step in-column sinks RESERVED
+  in the flux cap (``extra_sink``), so precipitation produced by this call's
+  process rates cannot fall until the next call.  MG2 (micro_mg2_0.F90:2204)
+  first applies the process tendencies (``dum = q + qtend*deltat``) and
+  sediments the POST-source hydrometeors.  This is Morrison's inherited
+  operator split; the MG2-style CFL sub-stepping
+  (``MorrisonConfig.sed_cfl_substeps``) ports only the loop, not this order.
 - Default (no prognostic N_s/N_g): bulk q-power snow fall speed and the
   fixed-N0G Marshall-Palmer graupel closure — outside the SAM oracle
   scope, which is inherently two-moment (departure #5 of the fall-speed
@@ -42,6 +50,7 @@ from __future__ import annotations
 
 import math
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
@@ -76,7 +85,10 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     donor_clamp_scale,
 )
 from legoesm.atmosphere.physics._shared import safe_divide
-from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+from legoesm.atmosphere.physics.microphysics.config import (
+    SED_CFL_SUBSTEPS_MAX_LIMIT,
+    MorrisonConfig,
+)
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
@@ -90,6 +102,35 @@ _FALL_RHO_EXP = 0.54             # (rho_su/rho)^0.54 fall-speed density correcti
 _FALL_RHO_EXP_ICE = 0.35         # ice fall-speed density correction exponent
 _VT_CAP_RAIN = 9.1               # rain fall-speed cap [m/s]
 _VT_CAP_GRAUPEL = 20.0           # graupel fall-speed cap [m/s]
+# Static cap on MG2-style sedimentation sub-steps per call: a loop bound for
+# the fixed-shape AD-safe loop, not a tunable (MG2's count is unbounded).
+# Required count = 1 + floor(max_k V dt/dz) with V INCLUDING the
+# (rho_su/rho)^0.54 density multiplier the caps carry (dum ~0.94 in the
+# surface layer, where dz is smallest).  ISA column (288 K surface), layer
+# thickness from the coordinate tables (grids/vertical.py CAM6_L32_HYAI/HYBI:
+# bottom interface hybi 0.9851 -> 1.49 kPa -> 126 m; an earlier "62 m" figure
+# in this branch's history was an unverified guess):
+#   CAM L32 (bottom layer 126 m), dt = 600 s (macmic N=3):
+#       rain 9.1 m/s -> 41, graupel 20 m/s -> 90, snow/ice 1.2 m/s -> 6
+#   CAM L32, dt = 1800 s (N=1 at the 1800 s cadence): rain 123, graupel 269
+#   sigma-36 l30_trop_logstrat (bottom 281 m), dt = 112.5 s (production):
+#       rain 4, graupel 8, snow/ice 1
+# The count is sized from max(mass-, number-weighted) speed; in the default
+# m2005_psd branch both carry the SAME caps (_VT_CAP_RAIN·dum,
+# _VT_CAP_SNOW_ICE·dum, _VT_CAP_GRAUPEL·dum), so the numbers above bound it.
+# The legacy bulk_qpower branch clips rain at _VT_CLIP_RAIN = 20 m/s without
+# the density factor: 1 + 20·1800/126 = 286 at 1800 s (rain 96 at 600 s).
+# A cold column (220 K surface) raises these ~13 % (CFL ~ T^-0.46).  256 holds
+# every configured lane with >2x margin EXCEPT N=1 at 1800 s (graupel 269),
+# which the required-count diagnostic / strict mode makes visible: when the
+# cap binds the flux cap fires and the species falls slower than its terminal
+# speed (mass conserved, transport wrong).  A NON-FINITE fall speed reports
+# the int32 ceiling, so the strict gate fires on it too.
+# ^ the DEFAULT of ``MorrisonConfig.sed_cfl_substeps_max``, which a deck sizes
+# per lane; the loop cost is LINEAR in it (that field's comment has the
+# measured milliseconds).  The hard ceiling of that field lives with the
+# field, in ``microphysics.config.SED_CFL_SUBSTEPS_MAX_LIMIT``.
+_SEDIMENTATION_SUBSTEPS_MAX = 256
 _VT_CLIP_RAIN = 20.0             # rain fall-speed clip ceiling [m/s]
 _VT_CLIP_FROZEN = 5.0            # snow/ice fall-speed clip ceiling [m/s]
 _VT_CAP_SNOW_ICE = 1.2           # snow/ice-cap fall-speed factor [m/s]
@@ -240,6 +281,26 @@ def morrison_microphysics(
         hard_threshold=config.hard_sat_adjust_threshold,
         hard_max_heating_K=config.hard_sat_max_heating_K,
     )
+    # CAM6 arrangement: when the turbulence closure already diagnosed this
+    # layer's cloud liquid and handed it to the host, MG2 carries no
+    # vapour-to-liquid CONDENSATION (micro_mg_cam.F90:668-672 switches the
+    # residual block at micro_mg2_0.F90:2688-2730 off under CLUBB).
+    #
+    # POSITIVE BRANCH ONLY.  An earlier version of this gate zeroed the signed
+    # rate, which was wrong twice over.  CAM's residual block is guarded by
+    # ``qtmp > qvn`` at micro_mg2_0.F90:2700, i.e. it fires only on positive
+    # supersaturation and has no evaporation branch to switch off in the first
+    # place.  And our default ``wbf_scheme="emergent"`` has NO explicit
+    # Bergeron rate (see the WBF section below): the mixed-phase cloud-water
+    # sink IS the negative branch here, evaporating liquid as ice deposition
+    # draws vapour below liquid saturation.  Zeroing it deleted that sink
+    # outright on any ice-supersaturated, liquid-subsaturated cell.
+    #
+    # ``q_sat`` is untouched -- rain evaporation, the sub-grid cloud-fraction
+    # closure and the ice branch all still read it.  Static Python gate on a
+    # config bool, the documented feature-gating exception to ``jnp.where``.
+    if config.liquid_from_closure:
+        condensation = jnp.minimum(condensation, 0.0)
     # Sub-grid in-cloud closure (Morrison & Gettelman 2008): evaluate the
     # warm-rain rates on the IN-CLOUD water q_c/cf and scale back by cf, so the
     # non-linear KK2000/SB rates see the (higher) in-cloud concentration rather
@@ -1221,26 +1282,82 @@ def morrison_microphysics(
     # melt_ice for q_i, melt_snow for q_s, evaporation for q_r) ALREADY
     # consume up to q/dt, AND sed independently can drain another q/dt
     # — driving the pool negative.  Mirrors the iter-29 q_r/evap fix.
-    sed_r, precip_r = sedimentation_tendency(
+    # MG2 CFL sub-stepping (static gate; 1 = the one-pass flux-capped form).
+    # One nstep per species from max(mass-, number-weighted) fall speed, as
+    # micro_mg2_0.F90 does, so mass and number fall in lock-step.
+    if config.sed_cfl_substeps_strict and not config.sed_cfl_substeps:
+        raise ValueError(
+            "MorrisonConfig.sed_cfl_substeps_strict=True needs "
+            "sed_cfl_substeps=True (nothing to check otherwise)")
+    if (not isinstance(config.sed_cfl_substeps_max, int)
+            or isinstance(config.sed_cfl_substeps_max, bool)
+            or not 1 <= config.sed_cfl_substeps_max
+            <= SED_CFL_SUBSTEPS_MAX_LIMIT):
+        raise ValueError(
+            "MorrisonConfig.sed_cfl_substeps_max must be an int in "
+            f"[1, {SED_CFL_SUBSTEPS_MAX_LIMIT}] (the sub-step loop cost is "
+            f"linear in it), got {config.sed_cfl_substeps_max!r}")
+    _nsub_max = int(config.sed_cfl_substeps_max)
+    _nsub = (_nsub_max if config.sed_cfl_substeps else 1)
+    sed_r, precip_r, _req_r = sedimentation_tendency(
         q_r, rho, V_t_r, dz, dt=dt,
         return_surface_flux=True,
         extra_sink=evaporation + freeze_rain + pracg,
+        n_substeps_max=_nsub, cfl_speed=V_n_r, return_substeps=True,
     )
-    sed_i, precip_i = sedimentation_tendency(
+    sed_i, precip_i, _req_i = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
         extra_sink=aggregation + melt_ice + jnp.maximum(-dq_i_dep, 0.0),
+        n_substeps_max=_nsub, cfl_speed=V_n_i, return_substeps=True,
     )
-    sed_s, precip_s = sedimentation_tendency(
+    sed_s, precip_s, _req_s = sedimentation_tendency(
         q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
         extra_sink=melt_snow + jnp.maximum(-prds, 0.0),
+        n_substeps_max=_nsub, cfl_speed=V_n_s, return_substeps=True,
     )
     # Graupel sedimentation. In-column q_g sinks sharing the step are melting
     # AND sublimation (the negative PRDG branch); both reserve mass so sed +
     # melt + sublimation ≤ q_g/dt (deposition is a SOURCE, not in the clamp).
-    sed_g, precip_g = sedimentation_tendency(
+    sed_g, precip_g, _req_g = sedimentation_tendency(
         q_g, rho, V_t_g, dz, dt=dt, return_surface_flux=True,
         extra_sink=melt_graupel + jnp.maximum(-prdg, 0.0),
+        n_substeps_max=_nsub, cfl_speed=V_n_g, return_substeps=True,
     )
+    # Required (unclipped) count, max over species; the number calls below
+    # share each species' count (cfl_speed pairs mass and number speeds).
+    _sed_poison = None
+    if config.sed_cfl_substeps:
+        sed_substeps_required = jnp.maximum(
+            jnp.maximum(_req_r, _req_i), jnp.maximum(_req_s, _req_g))
+        if config.sed_cfl_substeps_strict:
+            # equinox error_if: a custom_jvp puts the check outside AD, so the
+            # gate is jit- and gradient-safe (equinox/_errors.py).  It is
+            # attached to the SEDIMENTATION TENDENCIES and surface fluxes, not
+            # only to the diagnostic count: a caller that discards the count
+            # let XLA eliminate the check as dead code (codex 2026-09-22
+            # reproduced exactly that, under jit AND under grad).
+            _overflow = jnp.any(sed_substeps_required > _nsub_max)
+            (sed_substeps_required, sed_r, sed_i, sed_s, sed_g,
+             precip_r, precip_i, precip_s, precip_g) = eqx.error_if(
+                (sed_substeps_required, sed_r, sed_i, sed_s, sed_g,
+                 precip_r, precip_i, precip_s, precip_g),
+                _overflow,
+                "Morrison sedimentation: a column needs more CFL sub-steps "
+                f"than MorrisonConfig.sed_cfl_substeps_max={_nsub_max} (the "
+                "loop clamps and the species falls slower than its terminal "
+                "speed); shorten the physics sub-step or raise the cap")
+            # ``error_if`` alone is not enough: its check sits OUTSIDE AD (a
+            # custom_jvp), so ``jit(grad(f))`` keeps the gradient and drops
+            # the abort, and a caller reading an output that does not descend
+            # from sedimentation (``dq_v_dt``) never touches it at all (codex
+            # 2026-09-22 reproduced both).  ``_sed_poison`` is exactly 1.0
+            # unless the cap is exceeded and multiplies EVERY returned field
+            # below, so the guard is a real data dependency of every consumer
+            # and of its derivative: on overflow the outputs and their
+            # gradients are NaN, which no caller can silently ignore.
+            _sed_poison = jnp.where(_overflow, jnp.nan, 1.0)
+    else:
+        sed_substeps_required = None
     # NUMBER sedimentation (so the rain/ice number falls WITH the mass and the
     # PSD stays consistent in a column). N_i is per-mass ⇒ the same flux form
     # as q (sedimentation_tendency directly). N_r is per-VOLUME ⇒ sediment
@@ -1251,7 +1368,8 @@ def morrison_microphysics(
     # dN_r/dt and the per-volume flux divergence is exact.
     rho_eff = jnp.maximum(rho, _RHO_FLOOR)
     sed_N_r = rho_eff * sedimentation_tendency(
-        jnp.clip(N_r, 0.0) / rho_eff, rho_eff, V_n_r, dz, dt=dt)
+        jnp.clip(N_r, 0.0) / rho_eff, rho_eff, V_n_r, dz, dt=dt,
+        n_substeps_max=_nsub, cfl_speed=V_t_r)
     # Ice-NUMBER sinks sharing this step with number sedimentation — melt,
     # sublimation (both mass-proportional; melt_ice / dq_i_dep are FINAL
     # donor-clamped values here) and the ice->snow autoconversion number
@@ -1278,15 +1396,18 @@ def morrison_microphysics(
         dN_i_autoconv = aggregation * _ni_pos / _qi_floor
     sed_N_i = sedimentation_tendency(
         jnp.clip(N_i, 0.0), rho, V_n_i, dz, dt=dt,
-        extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv)
+        extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv,
+        n_substeps_max=_nsub, cfl_speed=V_t_i)
     if snow_double_moment:
         # N_s is per-mass ⇒ same flux form as q (UNS number-weighted speed).
         sed_N_s = sedimentation_tendency(
-            jnp.clip(N_s, 0.0), rho, V_n_s, dz, dt=dt)
+            jnp.clip(N_s, 0.0), rho, V_n_s, dz, dt=dt,
+            n_substeps_max=_nsub, cfl_speed=V_t_s)
     if graupel_double_moment:
         # N_g per-mass ⇒ same flux form as q (UNG number-weighted speed).
         sed_N_g = sedimentation_tendency(
-            jnp.clip(N_g, 0.0), rho, V_n_g, dz, dt=dt)
+            jnp.clip(N_g, 0.0), rho, V_n_g, dz, dt=dt,
+            n_substeps_max=_nsub, cfl_speed=V_t_g)
 
     # === LATENT HEATING ===
     L_v = constants.L_v
@@ -1644,7 +1765,7 @@ def morrison_microphysics(
     # (No placeholder outputs here — every MicrophysicsOutput field below is
     # a computed tendency, so no dtype pin is needed; a former bare
     # ``jnp.zeros(...)`` expression at this point was dead code.)
-    return MicrophysicsOutput(
+    out = MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
         dq_c_dt=dq_c_dt,
@@ -1658,4 +1779,54 @@ def morrison_microphysics(
         precipitation=precipitation,
         dN_s_dt=dN_s_dt,
         dN_g_dt=dN_g_dt,
+        sed_substeps_required=sed_substeps_required,
     )
+    if getattr(config, "publish_qc_budget", False):
+        # APPLIED terms: every sink below already carries ``qc_scale`` (the
+        # donor clamp), and ``condensation`` is the saturation-adjustment
+        # source.  They reconstruct ``dq_c_dt`` exactly -- the probe asserts
+        # the residual, so a term added to ``dq_c_dt`` without being listed
+        # here is caught rather than hidden.  Sedimentation of cloud water is
+        # NOT a q_c term in this scheme (cloud droplets do not sediment); it
+        # appears in the rain budget instead.
+        out = out._replace(qc_budget={
+            "condensation": condensation,
+            "autoconversion": -dq_c_au,
+            "accretion": -dq_c_ac,
+            "bergeron": -bergeron,
+            "riming_ice": -riming_i,
+            "riming_snow": -riming_s,
+            "riming_graupel": -riming_g,
+            "homogeneous_freezing": -homo_freeze_c,
+        })
+    if _sed_poison is not None:
+        # Strict mode: every FLOAT field carries the overflow guard (the
+        # count stays a usable integer).  Static Python branch -- the
+        # non-strict graph is untouched.  BOTH a multiply and an add: the
+        # multiply propagates the poison into derivatives, the add reaches a
+        # field that is structurally ZERO (dN_c_dt with predict_Nc=False),
+        # where a multiply alone still leaves 0 * NaN unevaluated in some
+        # simplifications.  Residual, documented limit: a loss reading ONLY a
+        # field that does not depend on the differentiated input at all has
+        # no AD path, so jit(grad) of it returns zeros with no abort -- the
+        # forward value is NaN and the reported count still shows the
+        # overflow (codex 2026-09-22).  A ``where`` would be bit-neutral on
+        # the clean path (the ADD turns -0.0 into +0.0; the multiply by 1.0
+        # does not) but its
+        # DERIVATIVE on overflow is 0, not NaN, which is the silent failure
+        # this guard exists to prevent; strict and non-strict arms are not
+        # claimed bit-identical (GLM 2026-09-22).
+        _bias = jnp.where(jnp.isnan(_sed_poison), jnp.nan, 0.0)
+        # ``qc_budget`` is a dict of arrays, not an array: ``jnp.asarray`` on a
+        # dict raises, so filter on type BEFORE probing the dtype.  The budget
+        # is a diagnostic and carries no gradient the guard needs to poison.
+        def _is_float_array(v):
+            if v is None or isinstance(v, dict):
+                return False
+            return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
+
+        out = out._replace(**{
+            _k: getattr(out, _k) * _sed_poison + _bias
+            for _k in out._fields
+            if _is_float_array(getattr(out, _k))})
+    return out

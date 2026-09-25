@@ -13,7 +13,11 @@
 #     auto-clamp (dt 60-145 s -> 600 s, ~10x throughput; 30-day soak clean).
 # Physics/forcing/diagnostics inherit the production set via `include`.
 # Pinned by the production-YAML round-trip test (test_run_amip_cli).
-include: amip_production.yaml
+# Include repointed 2026-09-23: amip_production.yaml is now the CAM6 suite.
+# This deck's overrides and measurements describe the Sundqvist/L36
+# configuration, so it includes that file under its new name rather than
+# silently inheriting a different model.
+include: amip_sundqvist_l36.yaml
 grid_type: latlon
 discretization: latlon_cgrid
 # The base deck's van_leer vertical advection is wired into the MPAS sigma lane

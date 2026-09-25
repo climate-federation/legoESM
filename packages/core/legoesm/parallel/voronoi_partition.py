@@ -1029,6 +1029,7 @@ def reorder_voronoi_for_sharding(
     n_devices: int,
     *,
     method: str = "auto",
+    edge_order: str = "hilbert",
 ) -> VoronoiMesh:
     """Reorder a Voronoi mesh so that JAX NamedSharding gives spatial locality.
 
@@ -1048,6 +1049,13 @@ def reorder_voronoi_for_sharding(
         ``"auto"`` -> ``"sfc"`` on THIS path (see below), ``"geometric"``
         (RCB), ``"metis"``, or ``"sfc"`` (Hilbert space-filling-curve
         contiguous chunks).
+    edge_order : str
+        Order of edges and vertices INSIDE each owner block: ``"hilbert"``
+        (along the cells' Hilbert curve; faster MPAS atmosphere step) or
+        ``"owner"`` (generator order, the layout before the Hilbert relabel).
+        The ocean MPAS lanes pass ``"owner"``: the relabel slowed the ocean
+        GPU step, and restarts written under the old order stay loadable.
+        Values are identical either way; only the layout differs.
 
     Returns
     -------
@@ -1086,6 +1094,10 @@ def reorder_voronoi_for_sharding(
     method = resolve_partition_method(method)
     if method not in ("geometric", "metis", "sfc"):
         raise ValueError(f"Unknown partitioning method: {method!r}")
+    if edge_order not in ("hilbert", "owner"):
+        raise ValueError(
+            f"reorder_voronoi_for_sharding: edge_order must be 'hilbert' or "
+            f"'owner', got {edge_order!r}")
     if n_devices <= 1:
         return mesh
 
@@ -1119,7 +1131,10 @@ def reorder_voronoi_for_sharding(
     # the last cell).  A stable sort by owner alone leaves the generator's
     # order inside the group, and the 10-neighbour edgesOnEdge gather then
     # jumps ~190k rows between consecutive edges on the s9 mesh.
-    edge_perm = np.lexsort((hkeys[np.minimum(c0, c1)], edge_owner))
+    if edge_order == "hilbert":
+        edge_perm = np.lexsort((hkeys[np.minimum(c0, c1)], edge_owner))
+    else:
+        edge_perm = np.argsort(edge_owner, kind="stable")
     edge_inv = np.empty_like(edge_perm)
     edge_inv[edge_perm] = np.arange(len(edge_perm))
 
@@ -1132,8 +1147,11 @@ def reorder_voronoi_for_sharding(
         cell_owner[np.minimum(min_cell_v, mesh.nCells - 1)],
         0,
     ).astype(np.int32)
-    vert_perm = np.lexsort(
-        (hkeys[np.minimum(min_cell_v, mesh.nCells - 1)], vertex_owner))
+    if edge_order == "hilbert":
+        vert_perm = np.lexsort(
+            (hkeys[np.minimum(min_cell_v, mesh.nCells - 1)], vertex_owner))
+    else:
+        vert_perm = np.argsort(vertex_owner, kind="stable")
     vert_inv = np.empty_like(vert_perm)
     vert_inv[vert_perm] = np.arange(len(vert_perm))
 

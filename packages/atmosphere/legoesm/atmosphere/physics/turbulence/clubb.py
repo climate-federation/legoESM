@@ -660,6 +660,47 @@ class CLUBBConfig(NamedTuple):
         isolating CLUBB's PDF-cloud advantage from its higher-order closure. Static
         dispatch: validated at ``diagnose_cloud_and_buoyancy`` entry (raises on
         unknown), never a traced branch.
+    liquid_partition : bool
+        Whether the host exchanges CLOUD LIQUID with the closure, as CAM does.
+        ``False`` (default) reproduces the historical bridge: the advanced total
+        water ``rtm`` is handed back WHOLLY as vapour and ``thlm`` wholly as
+        temperature, so the closure's own ``rcm`` — the liquid its PDF diagnoses
+        — never reaches the host. The host then takes its cloud FRACTION from
+        this closure and its cloud WATER from a tracer the closure never wrote,
+        and the two disagree; since in-cloud water is grid-mean water over
+        fraction, that inflates in-cloud optical depth and the sub-grid
+        inhomogeneity correction then removes most of it.
+
+        ``True`` ports ``clubb_intr.F90``'s two-sided exchange:
+
+        * IN (``clubb_intr.F90:1546,1550``) — ``rt = q_v + q_c`` and
+          ``thl = (T − (L_v/c_pd)·q_c)/Π``, so the host's existing cloud liquid
+          is part of the conserved variable the closure advances and can
+          EVAPORATE back;
+        * OUT (``clubb_intr.F90:2159,2160``) — ``q_v = rt − rcm``,
+          ``T = Π·thl + (L_v/c_pd)·rcm`` and the host cloud liquid is REPLACED
+          by ``rcm`` (``ptend q(ixcldliq) = (rcm − q_cldliq)/dt``), not added to.
+
+        Replace-semantics REQUIRE the input seeding: without it the closure never
+        sees the liquid already present, so a repeated one-way condensation
+        ratchet replaces a reversible partition. The two halves ship together and
+        are not separately selectable.
+
+        Note the ``thl`` convention here is this port's own (``tl = thl·Π``,
+        i.e. ``T = Π·thl + (L_v/c_pd)·rcm``; see
+        :func:`calc_pdf_liquid_cloud_frac_components`, which forms ``tl_i =
+        thl_i·exner``), NOT CAM's ``T = Π·(thl + (L_v/c_pd)·rcm)``. The inverse
+        used here is the one this closure's own saturation calculation assumes,
+        so the round trip is exact; adopting CAM's would be inconsistent with
+        every ``rsatl`` in the PDF.
+
+        Total water is conserved either way — the historical path simply keeps
+        all of it in the vapour slot. Turning this on therefore MOVES water
+        between two host tracers and changes the cloud radiative state; it is a
+        prognostic change, not a diagnostic one. A static Python feature gate, so
+        runs that leave it off are byte-identical. The consuming lane must accept
+        ``TurbulenceOutput.dq_c_dt``; lanes that cannot are refused at
+        integration entry rather than silently dropping the liquid.
     trop_cloud_top_press : float
         Pressure [Pa] above which the scheme's mixing is tapered to zero —
         CAM's ``ref_pres`` namelist knob of the same name ("Troposphere cloud
@@ -696,6 +737,7 @@ class CLUBBConfig(NamedTuple):
     prognostic: bool = False
     cloud_buoyancy: bool = True
     cloud_source: str = "native"
+    liquid_partition: bool = False
     trop_cloud_top_press: float = 0.0
     trop_cloud_taper_lnp_width: float = 0.15
     # Multiplier on the DIAGNOSED sub-grid variances entering the PDF closure
@@ -5447,6 +5489,15 @@ def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
     # converts the grid-mean cloud into sky cover + in-cloud water
     # (CAM ``l_use_cloud_cover = .true.``).
     rcm = clip_rcm(rtm, zt_trap["rcm"])
+    # The GRID-MEAN cloud water, before compute_cloud_cover converts it to the
+    # in-layer (in-cloud) value.  The reference keeps these as two separate
+    # outputs (``rcm`` and ``rcm_in_layer``); this port overwrote one with the
+    # other, which is harmless while the only consumer is the buoyancy term but
+    # NOT when a host tracer is written from it -- in-cloud water is grid-mean
+    # water divided by a vertical cloud fraction <= 1, so it is the larger
+    # number, and it is no longer bounded by rtm the way clip_rcm just made the
+    # grid mean.  ``liquid_partition`` consumes this key, not ``rcm``.
+    rcm_grid = rcm
     chi_mean = (zt_out["mixt_frac"] * zt_out["chi_1"]
                 + (1.0 - zt_out["mixt_frac"]) * zt_out["chi_2"])
     cloud_frac, rcm = compute_cloud_cover(chi_mean, zt_trap["cloud_frac"], rcm, gr)
@@ -5462,7 +5513,8 @@ def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
         wpthvp=zm_trap["wpthvp"], wp2thvp=zt_trap["wp2thvp"],
         rtpthvp=zm_trap["rtpthvp"], thlpthvp=zm_trap["thlpthvp"],
         rc_coef_zm=zm_out["rc_coef"],
-        cloud_frac=cloud_frac, rcm=rcm,
+        cloud_frac=cloud_frac, rcm=rcm, rcm_grid=rcm_grid,
+        rcm_zm=zm_out["rcm"],
         wprcp=zm_out["wprcp"], rtprcp=zm_out["rtprcp"],
         thlprcp=zm_out["thlprcp"], uprcp=zm_out["uprcp"],
         vprcp=zm_out["vprcp"],
@@ -5664,12 +5716,25 @@ def calc_sfc_varnce(wp2, up2, vp2, thlp2, rtp2, rtpthlp,
             rtp2.at[:, 0].set(rtp2_sfc), rtpthlp.at[:, 0].set(rtpthlp_sfc))
 
 
+def thlp2_rad_source(radht_zm, rcm_zm, thlprcp, coef):
+    """Radiative ``thlp2`` forcing [K^2/s] on momentum levels.
+
+    Port of ``advance_clubb_core_module.F90:calculate_thlp2_rad``:
+    ``thlp2_rad_coef * 2 * radht_zm / rcm_zm * thlprcp`` where ``rcm_zm > rc_tol``,
+    zero elsewhere.  The division uses the floored cloud water so the masked
+    operand stays finite under autodiff.
+    """
+    denom = jnp.maximum(rcm_zm, _RC_TOL)
+    src = coef * 2.0 * radht_zm / denom * thlprcp
+    return jnp.where(rcm_zm > _RC_TOL, src, 0.0)
+
+
 def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                        Lscale, brunt_vaisala_freq_sqd, exner_zt, p_in_Pa_zt,
                        p_sfc, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
                        invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm,
                        sfc_elevation, fcor, ug, vg, dt, gr: CLUBBGrid, config,
-                       vector_sfc_stress=False):
+                       radht_zt=None, vector_sfc_stress=False):
     """One prognostic CLUBB step (the CAM-default ``advance_clubb_core`` core).
 
     Runs, in the CAM order, ``compute_clubb_diagnostics`` -> the pre-advance ADG1
@@ -5700,6 +5765,15 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         for the momentum-level PDF closure).
     dt : float
         Time step [s].
+    radht_zt : jax.Array | None
+        Radiative theta-l tendency on the (ascending) thermodynamic grid,
+        ``(ngrdcol, nzt)`` [K/s]. When given (and the tunable coefficient
+        ``params.thlp2_rad_coef`` is not a static Python ``0.0``), the
+        ``calculate_thlp2_rad`` source ``thlp2_rad_coef * 2 * radht_zm / rcm_zm *
+        thlprcp`` (where ``rcm_zm > rc_tol``) is added to the ``thlp2`` forcing
+        of ``advance_xp2_xpyp``. ``None`` leaves the core byte-identical to the
+        un-forced path.
+
 
     Returns
     -------
@@ -5739,6 +5813,22 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     state = state._replace(
         wp2=sfc_wp2, up2=sfc_up2, vp2=sfc_vp2,
         thlp2=sfc_thlp2, rtp2=sfc_rtp2, rtpthlp=sfc_rtpthlp)
+
+    # ---- (2c) radiative thlp2 source (calculate_thlp2_rad) ----
+    # Port of advance_clubb_core_module.F90:calculate_thlp2_rad:
+    #     thlp2_forcing += thlp2_rad_coef * 2 * radht_zm / rcm_zm * thlprcp
+    # applied only where rcm_zm > rc_tol, all on the zm grid. The division uses
+    # the floored rcm (max with rc_tol), so the masked ("inactive") operand stays
+    # finite under autodiff; the where() then zeroes it. The static-zero Python
+    # short-circuit keeps a non-trainable coefficient of 0.0 byte-identical to
+    # the un-forced path while a traced (trainable) coefficient still runs the
+    # differentiable branch.
+    coef_rad = config.params.thlp2_rad_coef
+    if radht_zt is not None and not (isinstance(coef_rad, float)
+                                     and coef_rad == 0.0):
+        src = thlp2_rad_source(zt2zm(radht_zt, gr), pdf["rcm_zm"], pdf["thlprcp"],
+                               coef_rad)
+        forcing = forcing._replace(thlp2=forcing.thlp2 + src)
 
     # ---- (3) advance_xm_wpxp: rtm/wprtp + thlm/wpthlp ----
     wprtp, rtm, wpthlp, thlm = advance_xm_wpxp(
@@ -5809,6 +5899,7 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
 
     diagnostics = dict(
         cloud_frac=pdf_post["cloud_frac"], rcm=pdf_post["rcm"],
+        rcm_grid=pdf_post["rcm_grid"],
         wpthvp=pdf_post["wpthvp"], Kh_zt=diag["Kh_zt"], Kh_zm=diag["Kh_zm"])
     return new_state, diagnostics
 
@@ -6127,6 +6218,24 @@ def clubb_turbulence(
     return output, wp2_new
 
 
+def virtual_potential_temperature_with_liquid(T, q_v, q_c, exner):
+    """Virtual potential temperature INCLUDING condensate loading.
+
+    ``clubb_intr.F90:1603``: ``thv = t*exner_clubb*(1 + zvir*q_v - q_cldliq)``,
+    where CAM's ``exner_clubb`` is the reciprocal of this module's ``exner``.
+    Suspended water is weight without vapour buoyancy, so dropping the ``q_c``
+    term makes a cloudy layer look too buoyant -- exactly the layers the liquid
+    partition creates.  Factored out so the loading can be tested on its own:
+    inside ``clubb_step`` it is confounded with the temperature and vapour that
+    the partition changes at the same time, and a two-run comparison there
+    cannot tell the loading apart from them.
+
+    Reduces to the historical ``virtual_temperature(T, q_v)/exner`` at
+    ``q_c = 0``.
+    """
+    return (virtual_temperature(T, q_v) - T * q_c) / exner
+
+
 def clubb_step(
     u: jax.Array,
     v: jax.Array,
@@ -6146,6 +6255,8 @@ def clubb_step(
     sfc_wprtp: jax.Array | None = None,
     sfc_upwp: jax.Array | None = None,
     sfc_vpwp: jax.Array | None = None,
+    radht_zt: jax.Array | None = None,
+    q_c: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6202,22 +6313,55 @@ def clubb_step(
     the stress-squared magnitude, so prescribed-``u_*`` LES forcing reads the
     same. See test_prognostic_clubb_prescribed_momentum_flux_is_applied_as_a_vector.
 
+    ``q_c`` is the host's CLOUD LIQUID [kg/kg], top-down, and is consumed only
+    when ``config.liquid_partition`` is set; see that field. Passing it with the
+    lever off is an error rather than a silent no-op, because the caller would
+    then believe the liquid was exchanged.
+
     Returns ``(du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diagnostics)`` — the
     four mean tendencies (top-down ``(ncol, nlev)``), the advanced moment state,
-    and the ``cloud_frac``/``rcm``/``wpthvp``/``Kh_*`` diagnostics dict.
+    and the ``cloud_frac``/``rcm``/``wpthvp``/``Kh_*`` diagnostics dict. With the
+    liquid partition on, ``diagnostics["dq_c_dt"]`` carries the cloud-liquid
+    tendency (top-down) that REPLACES the host's liquid with the closure's.
     """
     ncol, nlev = T.shape
     params = config.params
 
+    if config.liquid_partition:
+        if q_c is None:
+            raise ValueError(
+                "clubb_step: liquid_partition=True requires the host cloud "
+                "liquid q_c. Without it the closure cannot seed rt = q_v + q_c, "
+                "and replacing the host liquid with a closure that never saw it "
+                "is a one-way condensation ratchet (clubb_intr.F90:1546,2160)."
+            )
+    elif q_c is not None:
+        raise ValueError(
+            "clubb_step: q_c was supplied but liquid_partition=False, so the "
+            "cloud liquid would be silently ignored. Enable the partition or "
+            "stop passing q_c."
+        )
+
     # ---- Thermodynamics (top-down) ----
     exner = exner_function(p_full)
-    theta = T / exner
-    thv = virtual_temperature(T, q_v) / exner
+    # CAM's two-sided liquid exchange (clubb_intr.F90:1546,1550): the conserved
+    # variables the closure advances are TOTAL water and LIQUID-water potential
+    # temperature, so the host's existing cloud liquid enters both. With the
+    # lever off, q_c is absent and these reduce to the historical q_v / theta.
+    if config.liquid_partition:
+        q_t = q_v + q_c
+        T_l = T - (constants.L_v / constants.c_pd) * q_c
+        thv = virtual_potential_temperature_with_liquid(T, q_v, q_c, exner)
+    else:
+        q_t = q_v
+        T_l = T
+        thv = virtual_temperature(T, q_v) / exner
+    theta = T_l / exner
 
     # ---- Ascending CLUBB grid + means on zt ----
     gr = make_clubb_grid_from_levels(z_full, z_half)
     thlm = flip_vertical(theta)          # thl ~ theta (zt)
-    rtm = flip_vertical(q_v)             # rt ~ q_v   (zt)
+    rtm = flip_vertical(q_t)             # rt = q_v (+ q_c with the partition)
     um = flip_vertical(u)
     vm = flip_vertical(v)
     exner_zt = flip_vertical(exner)
@@ -6315,7 +6459,7 @@ def clubb_step(
         invrs_rho_ds_zm=invrs_rho_ds_zm, invrs_rho_ds_zt=invrs_rho_ds_zt,
         wm_zt=zeros_zt, wm_zm=zeros_zm, sfc_elevation=sfc_elevation,
         fcor=jnp.zeros((ncol,), dtype=T.dtype), ug=um, vg=vm, dt=dt, gr=gr,
-        config=config,
+        config=config, radht_zt=radht_zt,
         # A PRESCRIBED surface stress is a vector boundary condition, so it is
         # applied as one. A stress the scheme computed itself from this wind is
         # already antiparallel to it, and takes the reference path unchanged.
@@ -6333,10 +6477,23 @@ def clubb_step(
     # ---- Map advanced means back to top-down tendencies ----
     u_new = flip_vertical(new_state.um)
     v_new = flip_vertical(new_state.vm)
-    T_new = flip_vertical(new_state.thlm) * exner    # thl ~ theta -> T = theta*exner
-    q_new = flip_vertical(new_state.rtm)
     du_dt = (u_new - u) / dt
     dv_dt = (v_new - v) / dt
+    if config.liquid_partition:
+        # CAM's outbound split (clubb_intr.F90:2159,2160): the post-advance PDF
+        # closure's rcm IS the new cloud liquid, so vapour is the remainder of
+        # total water and the temperature carries that liquid's latent heat.
+        # rcm is clip_rcm'd against rtm inside the closure, so q_v stays >= 0.
+        rcm_new = flip_vertical(diags["rcm_grid"])
+        q_new = flip_vertical(new_state.rtm) - rcm_new
+        T_new = (flip_vertical(new_state.thlm) * exner
+                 + (constants.L_v / constants.c_pd) * rcm_new)
+        # REPLACES the host liquid, matching the reference; the seeding above is
+        # what makes that reversible rather than a one-way ratchet.
+        diags = dict(diags, dq_c_dt=(rcm_new - q_c) / dt)
+    else:
+        T_new = flip_vertical(new_state.thlm) * exner  # thl ~ theta, no liquid
+        q_new = flip_vertical(new_state.rtm)
     dT_dt = (T_new - T) / dt
     dq_v_dt = (q_new - q_v) / dt
     diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx)
@@ -6364,6 +6521,8 @@ def clubb_turbulence_prognostic(
     sfc_vpwp: jax.Array | None = None,
     surface_flux: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
     | None = None,
+    rad_dT_dt: jax.Array | None = None,
+    q_c: jax.Array | None = None,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -6403,6 +6562,17 @@ def clubb_turbulence_prognostic(
     production exactly like Louis.  Mutually exclusive with the explicit ``sfc_*``
     prescriptions (raises if both are given).
 
+    **Radiative thlp2 source** (``rad_dT_dt``, ``(ncol, nlev)`` TOP-DOWN
+    radiative TEMPERATURE tendency [K/s], as the host caches it) feeds CLUBB's
+    ``calculate_thlp2_rad`` closure: it is converted ONCE to a theta-l tendency
+    on the ascending thermodynamic grid via ``rad_dT_dt / exner`` (thl ~ theta in
+    this port) and forwarded to every (sub-)step, held constant across the
+    sub-cycle. Inside the core it becomes
+    ``thlp2_rad_coef * 2 * radht_zm / rcm_zm * thlprcp`` where ``rcm_zm >
+    rc_tol``. ``None`` (default) leaves the scheme byte-identical to the
+    un-forced path; a static Python ``thlp2_rad_coef == 0.0`` likewise
+    short-circuits to the identical result.
+
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
     """
@@ -6413,6 +6583,16 @@ def clubb_turbulence_prognostic(
             f"(got {config.q_flux_scale}).")
     moments = unpack_clubb_moments(clubb_moments)
     n_sub = max(1, math.ceil(dt / config.clubb_dt))
+
+    # Radiative theta-l tendency on the ascending zt grid for the thlp2 rad
+    # source (calculate_thlp2_rad). The host caches a TOP-DOWN TEMPERATURE
+    # tendency; thl ~ theta in this port, so dthl/dt = dT/dt / exner. Converted
+    # ONCE here (before the branches) and held constant across the sub-cycle.
+    if rad_dT_dt is None:
+        radht_zt = None
+    else:
+        exner = exner_function(p_full)
+        radht_zt = flip_vertical(rad_dT_dt / exner)
 
     # When the driver injects the tiled (mosaic) surface flux — the DYNAMIC
     # convention identical to compute_surface_fluxes / louis: (tau_x, tau_y [Pa],
@@ -6453,42 +6633,68 @@ def clubb_turbulence_prognostic(
             tau_y_sf / rho_s,                                  # v'w'   [m^2/s^2]
         )
 
+    # Only forwarded when the partition is on; clubb_step rejects the mismatched
+    # pairing either way, so a lane that forgets q_c fails loudly at trace time.
+    # The off-with-q_c case has to be caught HERE as well, or this wrapper would
+    # drop the argument before clubb_step ever saw it and quietly break the
+    # promise that supplying liquid without the lever is an error (codex).
+    if q_c is not None and not config.liquid_partition:
+        raise ValueError(
+            "clubb_turbulence_prognostic: q_c was supplied but "
+            "liquid_partition=False, so the cloud liquid would be silently "
+            "ignored. Enable the partition or stop passing q_c.")
+    _liq_kw = {"q_c": q_c} if config.liquid_partition else {}
+
     if n_sub == 1:
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho))
+            T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
+            radht_zt=radht_zt, **_liq_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         Kh_full = flip_vertical(diags["Kh_zt"])
         cloud_frac_a = diags["cloud_frac"]
+        dq_c_dt = diags.get("dq_c_dt")
     else:
         dt_sub = dt / n_sub
         tv_floor = config.T0 * 0.5
 
+        # The liquid is part of the sub-cycle state when the partition is on:
+        # each sub-step REPLACES it, and the next must seed rt from the replaced
+        # value, not from the host's original. Carrying a zero placeholder with
+        # the lever off keeps one scan body for both paths without changing it.
+        _liq_on = config.liquid_partition
+        qc_init = q_c if _liq_on else jnp.zeros_like(q_v)
+
         def _sub(carry, _):
-            u_c, v_c, T_c, q_c, m_c = carry
+            u_c, v_c, T_c, q_c_col, ql_c, m_c = carry
             # Density floor (only) guards a strictly-positive rho if q_c dips
             # slightly negative mid-cycle; q itself is NOT clipped — the host
             # applies the RAW integrated CLUBB tendency, identical to the n_sub=1
             # contract (positivity limiting is the host/moisture-fixer's job, not
             # folded into the physics tendency). clubb_step floors rt internally
             # (rt_tol), so a slightly-negative mean rtm is robust (cloud → 0).
-            tv = jnp.maximum(virtual_temperature(T_c, q_c), tv_floor)
+            tv = jnp.maximum(virtual_temperature(T_c, q_c_col), tv_floor)
             rho_c = p_full / (constants.R_d * tv)
             # Re-derive the kinematic BC from the (constant) injected DYNAMIC flux
             # at THIS sub-step's density so the applied W/m^2 / Pa flux is exact.
             du, dv, dT, dq, m_new, diag = clubb_step(
-                u_c, v_c, T_c, q_c, m_c, p_full, p_half, z_full, z_half,
-                T_sfc, q_sfc, rho_c, dt_sub, config, *_sfc_bcs(rho_c))
+                u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
+                T_sfc, q_sfc, rho_c, dt_sub, config, *_sfc_bcs(rho_c),
+                radht_zt=radht_zt,
+                **({"q_c": ql_c} if _liq_on else {}))
+            ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c
             carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,
-                     q_c + dt_sub * dq, m_new)
+                     q_c_col + dt_sub * dq, ql_new, m_new)
             return carry, diag
 
-        (u_f, v_f, T_f, q_f, new_moments), diag_stk = jax.lax.scan(
-            _sub, (u, v, T, q_v, moments), xs=None, length=n_sub)
+        (u_f, v_f, T_f, q_f, ql_f, new_moments), diag_stk = jax.lax.scan(
+            _sub, (u, v, T, q_v, qc_init, moments), xs=None, length=n_sub)
         du_dt = (u_f - u) / dt
         dv_dt = (v_f - v) / dt
         dT_dt = (T_f - T) / dt
         dq_v_dt = (q_f - q_v) / dt
+        # Net over the whole host step, like every other tendency here.
+        dq_c_dt = (ql_f - q_c) / dt if _liq_on else None
         # Net surface exchange = sub-cycle-mean flux; Kh from the final sub-step.
         shflx = jnp.mean(diag_stk["shflx"], axis=0)
         lhflx = jnp.mean(diag_stk["lhflx"], axis=0)
@@ -6527,7 +6733,7 @@ def clubb_turbulence_prognostic(
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
         Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx, ustar=ustar,
-        h_pbl=h_pbl, cloud_fraction=cloud_fraction_td)
+        h_pbl=h_pbl, cloud_fraction=cloud_fraction_td, dq_c_dt=dq_c_dt)
     return output, pack_clubb_moments(new_moments)
 
 

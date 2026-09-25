@@ -134,8 +134,7 @@ class EarthSystemDriver:
         u_low = state.u.data[..., -1]
         v_low = state.v.data[..., -1]
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
-        sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
-        p_low = p_s * sigma_full[-1]
+        p_low = self._atm.sigma.pressure_at_full(p_s)[..., -1]
         # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).
         # The dry form rho = p/(R_d*T) underestimates density by ~0.6% in the
         # tropics and biases every downstream bulk-flux surface stress /
@@ -273,7 +272,11 @@ class EarthSystemDriver:
         else:
             cos_zen = jnp.full_like(p_s, 0.5)
 
+        from legoesm.core.coupling_fields import lowest_level_height
         return AtmToSurface(
+            z_lowest=lowest_level_height(
+                T_low, self._atm.sigma.pressure_at_half(p_s),
+                self._atm.sigma.pressure_at_full(p_s)),
             sw_down=sw_down,
             lw_down=lw_down,
             precip_total=precip_total,

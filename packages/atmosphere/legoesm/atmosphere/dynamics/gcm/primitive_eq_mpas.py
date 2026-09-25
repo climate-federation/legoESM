@@ -33,7 +33,7 @@ from legoesm.core.conservation import (
     conservative_positive_clip_global,
     is_borrow_eligible_tracer,
 )
-from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import cast_pytree, finalize_to_storage
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
@@ -53,6 +53,7 @@ from legoesm.core.operators_voronoi import (
     pv_flux_enstrophy_conserving_3d,
     vector_laplacian_del2_3d,
     vector_laplacian_del4_3d,
+    div_damp_del4_3d,
     cell_to_edge_avg_3d,
     apvm_correction_3d,
 )
@@ -198,6 +199,17 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # layer gets the full factor), 1 below.  0 / 1.0 = off, byte-identical.
     sponge_del2_top_layers: int = 0
     sponge_del2_top_factor: float = 1.0
+    # Divergence-SELECTIVE biharmonic damping [m⁴/s], CAM-FV's ``ldiv4``
+    # (``fv_div24del2flag=4``, the CAM6 physics default at every horizontal
+    # grid).  ``nu_del2``/``nu_del4`` above are VECTOR Laplacians: they damp
+    # the rotational and divergent modes together, so cranking them to quiet
+    # a noisy divergence field also crushes the jets.  This term damps only
+    # the curl-free part.  It matters most on a hybrid table with
+    # pure-pressure (B=0) layers, whose fixed mass leaves continuity no
+    # choice but to convert horizontal divergence into vertical mass flux.
+    # 0.0 = off, byte-identical.  Appended at the tuple END: preserves
+    # POSITIONAL CONSTRUCTION by existing callers.
+    nu_div4: float = 0.0
 
 
 # ============================================================================
@@ -379,12 +391,19 @@ def mpas_hydrostatic_tendencies(
             f"unknown vert_advection_scheme {_vert_scheme!r}; expected one of "
             f"{VERTICAL_ADVECTION_SCHEMES}"
         )
-    if _hybrid and _vert_scheme != "upwind":
+    if _hybrid and _vert_scheme not in ("upwind", "sb"):
         raise ValueError(
             f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
             "sigma vertical coordinate only; the hybrid lane advects with "
             "vertical_advection_hybrid, where it would be silently inert. "
-            "Use vertical_coord='sigma' or leave the scheme at 'upwind'."
+            "Use vertical_coord='sigma', or 'upwind'/'sb' on the hybrid lane."
+        )
+    if not _hybrid and _vert_scheme == "sb":
+        raise ValueError(
+            "vert_advection_scheme='sb' (conservative Simmons-Burridge flux "
+            "form) is wired into the HYBRID lane only; on the sigma lane it "
+            "would be silently inert. Use vertical_coord='cam_l32'/'hybrid', "
+            "or 'upwind'/'van_leer' on sigma."
         )
 
     u_3d = state.u.data        # (nEdges, nlev)
@@ -554,6 +573,12 @@ def mpas_hydrostatic_tendencies(
     elif config.nu_del4 > 0:
         du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
 
+    # Divergence-selective biharmonic damping (CAM-FV ldiv4).  Same sign
+    # convention as the vector biharmonic above: the del4 term enters with a
+    # minus sign, del2 with a plus.
+    if config.nu_div4 > 0:
+        du_dt_3d = du_dt_3d - config.nu_div4 * div_damp_del4_3d(u_3d, mesh)
+
     # Batched divergences.  ``divergence_cell_3d`` shares the same
     # MPAS edgesOnCell gather + reduce on the leading edge axis (the
     # trailing nlev axis is purely passive), so all the divergences
@@ -634,8 +659,12 @@ def mpas_hydrostatic_tendencies(
         # Advecting θ cancels the two large near-equal terms BEFORE
         # discretization, killing the 2Δz residual the 1/p prefactor
         # amplified at the stretched top levels.  See the σ branch below.
+        # scheme='sb' swaps the upwind advective operator inside the θ
+        # round-trip for the conservative Simmons-Burridge flux form, which
+        # satisfies the discrete product rule the advective one violates.
         vert_thermo_T = vertical_advection_theta_hybrid(
-            T_3d, mass_flux, p_s, sigma_coord)
+            T_3d, mass_flux, p_s, sigma_coord,
+            conservative=(_vert_scheme == "sb"))
         # Hybrid carries a mass flux, not a coordinate velocity; the
         # diagnostic reports the equivalent dsigma/dt so the two branches are
         # comparable (dp/dt per unit layer mass).
@@ -1278,7 +1307,13 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 (_s_phy - _s_dyn) / dt
                 - _led_phys_rows.astype(_s_pre.dtype).sum(axis=1))
 
-        return (cast_pytree(state_new, None, "storage"), phys_state_out,
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+        return (finalize_to_storage(
+                    cast_pytree(state_new, None, "storage")), phys_state_out,
                 sfc_diag, _led_step)
 
     # integrate() and integrate_scan() inherited from IntegrationMixin

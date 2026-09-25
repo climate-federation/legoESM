@@ -1639,8 +1639,7 @@ class CoupledESMDriver:
                 u_low = _u_cell[..., -1]
                 v_low = _v_cell[..., -1]
             q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
-        sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
-        p_low = p_s * sigma_full[-1]
+        p_low = self._atm.sigma.pressure_at_full(p_s)[..., -1]
         # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).
         # The dry form rho = p/(R_d*T) underestimates density by ~0.6% in the
         # tropics (q_v ~ 17 g/kg) and biases every downstream bulk-flux surface
@@ -1795,7 +1794,11 @@ class CoupledESMDriver:
         else:
             co2_ppmv = jnp.full_like(p_s, self.atm_config.co2_ppmv)
 
+        from legoesm.core.coupling_fields import lowest_level_height
         return AtmToSurface(
+            z_lowest=lowest_level_height(
+                T_low, self._atm.sigma.pressure_at_half(p_s),
+                self._atm.sigma.pressure_at_full(p_s)),
             sw_down=sw_down,
             lw_down=lw_down,
             precip_total=precip_total,
@@ -2293,9 +2296,8 @@ class CoupledESMDriver:
 
         co2_flux = self._last_sfc_response.co2_flux  # kgCO2/m2/s, +up
         p_s = self._atm.state.p_s.data
-        dsigma = jnp.asarray(self._atm.sigma.dsigma)
         # Layer mass of lowest level: dp / g [kg/m2]
-        dp = p_s * dsigma[-1]
+        dp = self._atm.sigma.layer_thickness_dp(p_s)[..., -1]
         mass_air = dp / constants.g
         dco2 = co2_flux / jnp.maximum(mass_air, 1.0) * dt
         self._co2_field = self._co2_field.at[..., -1].add(dco2)

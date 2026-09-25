@@ -1996,7 +1996,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 reorder_voronoi_for_sharding,
             )
             _n0 = mesh.nCells
-            mesh = reorder_voronoi_for_sharding(mesh, spmd_n_devices)
+            mesh = reorder_voronoi_for_sharding(mesh, spmd_n_devices, edge_order="owner")
             print(f"  MPAS SPMD mesh: reordered for {spmd_n_devices} devices, "
                   f"{_n0} -> {mesh.nCells} cells ({mesh.nCells - _n0} padded "
                   f"ghosts, land)")

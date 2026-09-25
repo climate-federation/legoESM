@@ -21,10 +21,17 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import (
+    surface_reference_state,
     compute_most_fluxes,
+    compute_sam_oceflx_fluxes,
     simple_bulk_fluxes,
     validate_bulk_scheme,
 )
+
+# Bulk schemes that solve a stability-dependent surface layer (and therefore
+# honour the ``z_ref_model_level`` height correction); the constant-coefficient
+# path ignores z_ref.
+_STABILITY_SCHEMES = ("most", "coare3", "large_yeager", "large_yeager_cesm")
 
 
 __physics_contract__ = {
@@ -107,11 +114,11 @@ def surface_fluxes_at_lowest_level(u, v, T, q_v, T_sfc, q_sfc, rho, config,
     # warns about, arriving through a different door.
     if (not getattr(config, "z_ref_model_level", False)
             or z_low is None
-            or config.bulk_scheme not in ("most", "coare3", "large_yeager")):
+            or config.bulk_scheme not in _STABILITY_SCHEMES):
         return compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, config)
+    T_ref, z_ref = surface_reference_state(T, config.z_ref, z_low)
     return compute_surface_fluxes(
-        u, v, T + (constants.g / constants.c_pd) * z_low, q_v,
-        T_sfc, q_sfc, rho, config, z_ref=z_low)
+        u, v, T_ref, q_v, T_sfc, q_sfc, rho, config, z_ref=z_ref)
 
 
 def compute_surface_fluxes(
@@ -173,6 +180,18 @@ def compute_surface_fluxes(
     # uses the local roughness ``config.z0`` via the neutral log law and the
     # selectable ``stability_scheme`` stable branch; without this it would fall
     # through to the constant-Cd path and silently ignore z0 and stability.
+    if config.bulk_scheme == "large_yeager_cesm":
+        # CESM/CIME ``shr_flux_atmOcn`` (CAM6 coupler air-sea law): its own
+        # fixed-iteration solver, not the generic MOST loop.  ``T`` is the
+        # lane's lowest-level temperature (potential-temperature corrected by
+        # the caller when ``z_ref_model_level`` is on), as for the other schemes.
+        tau_x, tau_y, shflx, lhflx, ustar = compute_sam_oceflx_fluxes(
+            u, v, T, q_v, T_sfc, q_sfc, rho,
+            z_bot=(config.z_ref if z_ref is None else z_ref),
+            variant="cesm",
+        )
+        return _apply_prescribed_scalar_fluxes(
+            config, tau_x, tau_y, shflx, lhflx, ustar, rho)
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
@@ -425,6 +444,12 @@ def _single_tile_flux(
     routines (no re-derived flux numerics).
     """
     validate_bulk_scheme(config.bulk_scheme)
+    if config.bulk_scheme == "large_yeager_cesm":
+        return compute_sam_oceflx_fluxes(
+            u, v, T, q_v, T_sfc, q_sfc, rho,
+            z_bot=(config.z_ref if z_ref is None else z_ref),
+            variant="cesm",
+        )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
@@ -516,7 +541,7 @@ def compute_tiled_surface_fluxes(
         """
         if (z_low is None
                 or not getattr(cfg, "z_ref_model_level", False)
-                or cfg.bulk_scheme not in ("most", "coare3", "large_yeager")):
+                or cfg.bulk_scheme not in _STABILITY_SCHEMES):
             return _single_tile_flux(u, v, T, q_v, T_sfc_tile, q_sfc_tile,
                                      rho, cfg)
         return _single_tile_flux(

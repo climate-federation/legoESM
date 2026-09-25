@@ -30,9 +30,12 @@ Faithfulness scope / departures:
 * ``theta`` reuses the shared Exner helper (``theta = T / exner_function(p)``
   with ``constants.p_ref = 1e5 Pa``), the same form as E3SM's
   ``T*(psurf_ref/p)^kappa`` (HOMME ``p0 = 1e5 Pa``).
-* Supported grid families (Phase A): single-column (zeros — no horizontal
-  gradients), spectral Gaussian, and UNIFORM GLOBAL lat-lon (array-checked:
-  uniform spacing + periodic longitude).  Cubed-sphere, MPAS, and the
+* Supported grid families: single-column (zeros — no horizontal
+  gradients), spectral Gaussian, UNIFORM GLOBAL lat-lon (array-checked:
+  uniform spacing + periodic longitude), and the MPAS Voronoi mesh (cell
+  scalar gradient = Ringler edge gradient ``gradient_edge_3d`` reconstructed
+  to cell (east, north) components by the Perot ``reconstruct_cell_velocity``
+  — the mesh's own second-order gradient operator).  Cubed-sphere and the
   regional/stretched lat-lon builders return
   ``frontogenesis_supported(grid) == False`` and the coupled pipeline keeps
   its loud frontal-source rejection there (no silent no-op, no wrong
@@ -154,7 +157,23 @@ def frontogenesis_supported(grid) -> bool:
         getattr(grid, "grid_n_columns", None) == 1
         or (hasattr(grid, "n_max") and hasattr(grid, "Pnm"))
         or _is_uniform_global_latlon(grid)
+        or _is_voronoi(grid)
     )
+
+
+def _is_voronoi(grid) -> bool:
+    return all(hasattr(grid, a) for a in
+               ("cellsOnEdge", "dcEdge", "edgesOnCell", "latCell", "lonCell"))
+
+
+def _voronoi_gradient(mesh, f):
+    """Cell-centred (east, north) gradient of ``f`` (nCells, 1, K) [1/m]."""
+    from legoesm.core.operators_voronoi import gradient_edge_3d
+    from legoesm.grids.voronoi import reconstruct_cell_velocity
+
+    g_edge = gradient_edge_3d(f[:, 0, :], mesh)           # (nEdges, K)
+    gx, gy = reconstruct_cell_velocity(g_edge, mesh)      # (nCells, K) each
+    return gx[:, None, :], gy[:, None, :]
 
 
 # ---------------------------------------------------------------------------
@@ -296,11 +315,19 @@ def compute_frontogenesis(
     elif _is_uniform_global_latlon(grid):
         grad_fn = lambda f: _latlon_gradient(grid, f)     # noqa: E731
         lat2d, lon2d = grid.lat2d, grid.lon2d
+    elif _is_voronoi(grid):
+        # Column fields (nCells, K) -> the core's (n_lat, n_lon, K) layout
+        # with n_lon == 1; cell lat/lon play the 2-D coordinate arrays.
+        grad_fn = lambda f: _voronoi_gradient(grid, f)    # noqa: E731
+        lat2d = jnp.asarray(grid.latCell)[:, None]
+        lon2d = jnp.asarray(grid.lonCell)[:, None]
+        u_grid, v_grid = u_grid[:, None, :], v_grid[:, None, :]
+        theta = theta[:, None, :]
     else:
         raise TypeError(
             f"compute_frontogenesis: unsupported grid type {type(grid)!r}; "
-            "supported families are single-column, spectral Gaussian, and "
-            "UNIFORM GLOBAL lat-lon (regional/stretched lat-lon variants "
+            "supported families are single-column, spectral Gaussian, MPAS "
+            "Voronoi, and UNIFORM GLOBAL lat-lon (regional/stretched lat-lon variants "
             "would get a wrong stencil; guard with "
             "frontogenesis_supported(grid))."
         )

@@ -705,7 +705,10 @@ def _vertical_advection_upwind_sigma(
     return -sigma_dot_full * grad
 
 
-VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer")
+# "sb" is the conservative Simmons-Burridge flux form, HYBRID-lane only
+# (:func:`vertical_advection_hybrid_sb`); "van_leer" is SIGMA-lane only.
+# Each lane refuses the other's scheme rather than run it silently inert.
+VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer", "sb")
 
 
 def van_leer_face_values_sigma(
@@ -1433,6 +1436,137 @@ def make_hybrid_levels(
         )
 
     return create_hybrid_coordinate(n_levels, A_half, B_half, p_ref)
+
+
+# --- CAM6 L32 hybrid interface coefficients (CESM2.1 cam_vcoords_L32_c180105.nc) ---
+# p_half[k] = A_half[k] * P0 + B_half[k] * p_s with P0 = 1e5 Pa, top at 2.255 hPa
+# (CAM6 / CESM2 default 32-level grid, Danabasoglu et al. 2020).  Layer mass
+# is positive for every p_s >= 500 hPa (min dp = 277.6 Pa, independent of
+# p_s in the pure-pressure top), unlike make_hybrid_levels' analytic A(eta),
+# which inverts below ~656 hPa.  Values are the file's float64 contents.
+CAM6_L32_HYAI = (
+    0.00225523952394724, 0.00503169186413288, 0.0101579474285245,
+    0.0185553170740604, 0.0297346755951211, 0.0392730012536049,
+    0.0471144989132881, 0.0562404990196228, 0.0668004974722862,
+    0.0807014182209969, 0.0949410423636436, 0.11169321089983,
+    0.131401270627975, 0.154586806893349, 0.181863352656364,
+    0.17459799349308, 0.166050657629967, 0.155995160341263,
+    0.14416541159153, 0.130248308181763, 0.113875567913055,
+    0.0946138575673103, 0.0753444507718086, 0.0576589405536652,
+    0.0427346378564835, 0.0316426791250706, 0.0252212174236774,
+    0.0191967375576496, 0.0136180268600583, 0.00853108894079924,
+    0.00397881818935275, 0.0, 0.0,
+)
+CAM6_L32_HYBI = (
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0393548272550106, 0.0856537595391273, 0.140122056007385,
+    0.204201176762581, 0.279586911201477, 0.368274360895157,
+    0.47261056303978, 0.576988518238068, 0.672786951065063,
+    0.753628432750702, 0.813710987567902, 0.848494648933411,
+    0.881127893924713, 0.911346435546875, 0.938901245594025,
+    0.963559806346893, 0.985112190246582, 1.0,
+)
+CAM6_L32_P0 = 1.0e5
+
+
+def make_cam6_l32_levels(p_ref: float = CAM6_L32_P0) -> HybridSigmaPressureCoordinate:
+    """CAM6's 32-level hybrid grid from its published interface coefficients.
+
+    ``p_ref`` must equal the table's own P0 (1e5 Pa): the A coefficients
+    are defined against it, so another reference pressure would silently
+    move every interface.
+    """
+    if p_ref != CAM6_L32_P0:
+        raise ValueError(
+            f"CAM6 L32 coefficients are defined against P0 = {CAM6_L32_P0} Pa; "
+            f"got p_ref={p_ref}")
+    A_half = jnp.asarray(CAM6_L32_HYAI, dtype=jnp.float64)
+    B_half = jnp.asarray(CAM6_L32_HYBI, dtype=jnp.float64)
+    return create_hybrid_coordinate(len(CAM6_L32_HYAI) - 1, A_half, B_half, p_ref)
+
+
+def assert_hybrid_valid_for_surface_pressure(
+    coord, p_s_min_Pa: float, *, context: str = "",
+) -> None:
+    """Refuse a hybrid coordinate that would carry NEGATIVE layer mass.
+
+    ``B(eta) = eta**transition_exponent`` makes ``dB/deta -> exponent`` at the
+    surface, so a near-surface layer has positive mass only while ``p_s`` stays
+    above a threshold the coordinate alone fixes.  Below it ``dp_from_hybrid``
+    returns negative thicknesses, and that feeds the dycore -- not a
+    diagnostic.
+
+    Why this is an error and not a warning (#1029).  The warning has existed,
+    nothing passed ``p_s_min_Pa``, and the default L40 coordinate forbids
+    surface pressures under 663.9 hPa, i.e. elevations above about 3450 m.
+    Measured against 1-degree ETOPO that is **0.92% of the planet by area** --
+    the Tibetan Plateau, the Andean altiplano, the Greenland and Antarctic
+    domes -- and the figure is the same at 30, 32 and 40 levels.  On the
+    idealized ``held_suarez_topo`` reproducer, TWO cells in that regime killed
+    a 200-day run inside 200 steps.  A condition that lethal, silently active
+    over a percent of the globe, is not something to keep warning about.
+
+    Remedies, measured on the same probe
+    (``scripts/validate/hybrid_negative_layer_mass_exposure.py``):
+
+    * ``transition_exponent=2`` admits p_s down to ~498 hPa (~5870 m) and is
+      valid over 100% of ETOPO;
+    * ``vertical_coord='sigma'`` has no such threshold at all;
+    * a coarser ``nlev`` does NOT help -- the threshold barely moves with it.
+
+    Parameters
+    ----------
+    coord : HybridSigmaPressureCoordinate
+        The coordinate to validate.  Objects without ``A_half``/``B_half``
+        (sigma, the CAM table) are not hybrid in this sense and pass.
+    p_s_min_Pa : float
+        The lowest surface pressure this run will actually produce.
+    context : str, optional
+        Prepended to the message, e.g. the grid and level count, so the error
+        names the run rather than only the coordinate.
+
+    Raises
+    ------
+    ValueError
+        If the coordinate inverts at or above ``p_s_min_Pa``.
+    """
+    import numpy as np
+
+    A_half = getattr(coord, "A_half", None)
+    B_half = getattr(coord, "B_half", None)
+    if A_half is None or B_half is None:
+        return
+    if not np.isfinite(p_s_min_Pa) or p_s_min_Pa <= 0.0:
+        raise ValueError(
+            f"p_s_min_Pa must be a positive, finite pressure in Pa; "
+            f"got {p_s_min_Pa!r}. A non-finite minimum usually means the "
+            f"surface geopotential has not been built yet."
+        )
+
+    thr = float(hybrid_min_valid_surface_pressure(
+        np.asarray(A_half), np.asarray(B_half), constants.p_ref))
+    if thr <= 0.0 or p_s_min_Pa > thr:
+        return
+
+    # Make the threshold legible: "663.9 hPa" does not obviously read as
+    # "forbids the Tibetan Plateau".
+    z_thr = float(constants.R_d * 288.0 / constants.g
+                  * np.log(constants.p_ref / thr))
+    z_run = float(constants.R_d * 288.0 / constants.g
+                  * np.log(constants.p_ref / p_s_min_Pa))
+    where = f"{context}: " if context else ""
+    raise ValueError(
+        f"{where}this hybrid coordinate carries NEGATIVE layer mass below "
+        f"p_s = {thr / 100:.1f} hPa (about {z_thr:.0f} m of orography), and "
+        f"this run reaches p_s = {p_s_min_Pa / 100:.1f} hPa (about "
+        f"{z_run:.0f} m). The near-surface layers invert there and the "
+        f"negative thicknesses go into the dycore, not just a diagnostic "
+        f"(#1029: two such cells killed a 200-day idealized run in 200 "
+        f"steps). Fix by setting grid.transition_exponent=2 (valid to "
+        f"~498 hPa / ~5870 m, i.e. all of ETOPO), or "
+        f"grid.vertical_coord='sigma' (no threshold). Raising nlev does not "
+        f"help; the threshold barely moves with it."
+    )
 
 
 def standard_hybrid_levels(
@@ -2951,6 +3085,8 @@ def vertical_advection_theta_hybrid(
     mass_flux: jax.Array,
     p_s: jax.Array,
     coord: HybridSigmaPressureCoordinate,
+    *,
+    conservative: bool = False,
 ) -> jax.Array:
     """Combined vertical advection + adiabatic mass-flux term for T (hybrid).
 
@@ -2996,8 +3132,13 @@ def vertical_advection_theta_hybrid(
     # Potential temperature θ = T / exner = T·(p₀/p)^κ
     theta = T / exner
 
-    # Advect θ with the SAME upwind operator, then convert back: -exner·F·∂θ/∂p
-    return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
+    # Advect θ, then convert back: -exner·F·∂θ/∂p.  ``conservative=True``
+    # swaps the upwind advective operator for the Simmons-Burridge flux form,
+    # which satisfies the discrete product rule (column residual 6.7e-16
+    # against the advective form's 3.8e-2 of the interfacial exchange on the
+    # CAM L32 table); the exner round-trip is identical either way.
+    _op = vertical_advection_hybrid_sb if conservative else vertical_advection_hybrid
+    return exner * _op(theta, mass_flux, p_s, coord)
 
 
 def sb81_omega_over_p_dyn(
