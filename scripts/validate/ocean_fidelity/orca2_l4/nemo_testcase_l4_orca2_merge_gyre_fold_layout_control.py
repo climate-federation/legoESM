@@ -47,11 +47,11 @@ def install_parent_layout() -> None:
     tripole._detect_fold = detect
 
 
-def main(argv: list[str] | None = None) -> int:
+def main() -> int:
     install_parent_layout()
     sys.path.insert(0, str(HERE.parent))
     import nemo_testcase_l4_orca2_round1_ladder_gate as gate
-    return gate.main(argv)
+    return gate.main()
 
 
 if __name__ == "__main__":
