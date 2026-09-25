@@ -90,6 +90,11 @@ def _masks(card) -> dict[str, np.ndarray]:
     }
 
 
+def _json_index(index) -> list[int]:
+    """Return a NumPy-discovered coordinate as JSON-native integers."""
+    return [int(coordinate) for coordinate in index]
+
+
 def _candidate_ordered(card, trace: dict) -> dict[str, np.ndarray]:
     two = 2
     stagger = {
@@ -532,7 +537,10 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
                 not row["bit_exact"] and row["differing_cells"] == 1
                 and row["ulp_max"] == 1)
             channels[name] = {
-                "fires": fired, "index": list(index), "row": row}
+                "fires": fired,
+                "index": _json_index(index),
+                "row": row,
+            }
         fired = all(channel["fires"] for channel in channels.values())
         plant_result.update({"fires": fired, "channels": channels})
         print("PLANT FIRED" if fired else "PLANT DID NOT FIRE")

@@ -46,3 +46,12 @@ def test_source_walk_has_no_duplicate_boundaries():
     ]
     assert names[6:9] == ["eta_entry", "u_entry", "v_entry"]
     assert names[-2:] == ["u_exit", "v_exit"]
+
+
+def test_numpy_plant_coordinates_are_made_json_serializable():
+    import json
+
+    gate = _gate()
+    index = tuple(np.argwhere(np.eye(2, dtype=bool))[0])
+    encoded = json.dumps(gate._json_index(index))
+    assert encoded == "[0, 0]"
