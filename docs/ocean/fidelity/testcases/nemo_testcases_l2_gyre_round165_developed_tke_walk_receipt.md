@@ -153,11 +153,40 @@ parser/stage/year-owner battery reports:
 
 > 60 passed in 33.92s
 
-FINAL_TEST_RESULTS_PLACEHOLDER
+The required combined `tests/ocean/fidelity tests/ocean/unit` battery was run
+once with 12 workers.  Six workers died with the repository's documented
+`node down: Not properly terminated` compiler/resource failure and xdist
+eventually raised an internal crash-item assertion.  Its literal summary is:
 
-FINAL_CITATION_RESULTS_PLACEHOLDER
+> 605 failed, 6571 passed, 152 skipped, 2 xfailed, 41 warnings, 73 errors in
+> 1032.85s (0:17:12)
 
-FINAL_REVIEW_RESULTS_PLACEHOLDER
+This battery is **not called green**: after the first worker failure, xdist
+reported hundreds of untouched tests as failed.  A serial discriminator over
+the entire TKE-identity file, the citation tests, and the worktree-stamp tests
+then reports:
+
+> 1 failed, 91 passed in 43.99s
+
+All 66 TKE-identity tests and all 16 citation tests pass serially.  The sole
+failure is the known worktree-stamp ratchet, naming three report emitters;
+all three files are byte-unchanged from starting tip `9f53be73a`.  No new
+round-165 emitter appears in its offender set.
+
+The receipt citation gate passes all 10 cited compiled ranges, with zero
+unmapped citations, zero range failures, zero map-audit failures, and every
+internal self-test firing.  Shifting the four-line RHS citation by two lines
+exits 1 and produces `SYMBOL-NOT-AT-LINE`, proving the control is
+discriminating.
+
+The required read-only review command was attempted.  It produced no review
+verdict; its terminal error, quoted verbatim, is:
+
+> Error: failed to initialize in-process app-server client: Read-only file
+> system (os error 30)
+
+Therefore: **independent review unavailable in-sandbox**.  No `DO NOT SHIP`
+verdict was ignored.
 
 ## OPEN — Round 166
 
