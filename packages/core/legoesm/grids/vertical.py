@@ -3119,7 +3119,9 @@ def vertical_advection_hybrid_van_leer(
     so paired with the continuity that built ``mdot`` the column sum of
     ``dp*f`` telescopes to the zero boundary fluxes -- the property
     :func:`vertical_advection_hybrid` (advective upwind on half->full averaged
-    fluxes) lacks.  A constant field has zero tendency at every level.
+    fluxes) lacks.  A constant field has zero tendency at every level.  Scope:
+    this closes the VERTICAL term only; the MPAS horizontal tracer operator is
+    advective and not paired with the layer-thickness continuity.
 
     Face values: the metric-aware van-Leer reconstruction in pressure,
     clipped to the two adjacent cells.  The faces next to the top and bottom

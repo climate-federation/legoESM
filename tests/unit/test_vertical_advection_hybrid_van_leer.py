@@ -99,3 +99,23 @@ def test_mpas_hybrid_tracer_path_runs_the_conservative_operator(monkeypatch):
         state, mesh, coord, pe.MPASPrimitiveEquationConfig(nu_del2=1.0e5))
     assert calls, "the MPAS hybrid tracer path no longer calls the conservative operator"
     assert np.all(np.isfinite(np.asarray(out.tracer_tendencies["q_v"].data)))
+
+
+def test_boundary_donor_faces_keep_a_full_column_in_range():
+    """Load-bearing: without the donor faces next to the top and bottom layers
+    a non-constant column under steady descent leaves its starting range
+    (independent review measured 1.13..1.99 -> 0.44 after 2000 steps)."""
+    coord = make_cam6_l32_levels()
+    nlev = coord.A_full.shape[0]
+    p_s = jnp.array([1.0e5])
+    dp = dp_from_hybrid(coord, p_s)
+    q0 = jnp.asarray(1.13 + 0.86 * np.random.default_rng(3).random((1, nlev)))
+    for sign in (1.0, -1.0):
+        F = jnp.concatenate([jnp.zeros((1, 1)), jnp.full((1, nlev - 1), sign),
+                             jnp.zeros((1, 1))], axis=-1)
+        dt = 0.4 / float(jnp.max((jnp.abs(F[..., :-1]) + jnp.abs(F[..., 1:])) / dp))
+        q = q0
+        for _ in range(2000):
+            q = q + dt * vertical_advection_hybrid_van_leer(q, F, p_s, coord)
+        assert float(jnp.min(q)) >= float(jnp.min(q0)) - 1e-12
+        assert float(jnp.max(q)) <= float(jnp.max(q0)) + 1e-12

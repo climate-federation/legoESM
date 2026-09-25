@@ -188,9 +188,10 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # Measured global max of that pair on the target run (raw interface
     # velocities, 37 checkpoint snapshots, uniform grid): 0.0642, 15.6x inside
     # the uniform-grid bound.  Requires nlev >= 4.  Default keeps every
-    # existing MPAS result bit-identical.  NOT wired to the hybrid lane (which
-    # uses the separate ``vertical_advection_hybrid`` operator) — selecting it
-    # there RAISES rather than running silently inert.
+    # existing MPAS result bit-identical.  NOT wired to the hybrid lane's temperature
+    # (theta form, upwind or 'sb') — selecting it there RAISES rather than
+    # running silently inert.  Hybrid-lane TRACERS always take the conservative
+    # limited ``vertical_advection_hybrid_van_leer``, independent of this field.
     # Appended at the tuple END: this preserves POSITIONAL CONSTRUCTION by
     # existing callers, not full tuple ABI (exact unpacking / len() / _make
     # with a short tuple still break; no such caller exists in-repo).
@@ -395,8 +396,9 @@ def mpas_hydrostatic_tendencies(
     if _hybrid and _vert_scheme not in ("upwind", "sb"):
         raise ValueError(
             f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
-            "sigma vertical coordinate only; the hybrid lane advects with "
-            "vertical_advection_hybrid, where it would be silently inert. "
+            "sigma vertical coordinate only; the hybrid lane's temperature "
+            "takes 'upwind' or 'sb' (its tracers always use the conservative "
+            "limited operator), so it would be silently inert. "
             "Use vertical_coord='sigma', or 'upwind'/'sb' on the hybrid lane."
         )
     if not _hybrid and _vert_scheme == "sb":
