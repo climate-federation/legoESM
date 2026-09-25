@@ -259,7 +259,10 @@ _WB_SPECTRAL_KEYS = frozenset({
 # ``nn_hiden`` silently fell back to the default -- the inert-key defect class).
 _WB_CLASSICAL_KEYS = frozenset({
     "cloud", "clubb_top_press_hpa", "convection", "gwd", "microphysics",
-    "rad_update_interval_steps", "rrtmgp_gpoint_batch_size", "spatial_init_std",
+    "convective_rain_to_surface", "orbital_insolation",
+    "param_fixed", "param_init",
+    "rad_update_interval_steps", "rrtmgp_column_chunk_size",
+    "rrtmgp_gpoint_batch_size", "spatial_init_std",
     "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
     "turbulence",
 })
@@ -270,6 +273,21 @@ _WB_NEURAL_KEYS = frozenset({
     "nn_hidden", "nn_layers", "gauss_n_max", "sfno_embed_dim", "sfno_n_blocks",
     "sfno_mlp_expansion", "spatial_embedding",
 })
+
+
+def _pinned_trainable_names(param_fixed: dict) -> set:
+    """Deck-pinned fields that are ALSO registered trainable parameters.
+
+    Most pins are structural (an overlap choice, a sub-column count, a switch)
+    and have no leaf to exclude. The few that overlap must be excluded from the
+    trainable bundle: the pin is spliced after the trained value, so such a
+    leaf would be optimized, never reach the model, and still show up as
+    "trained" in the run's parameter report.
+    """
+    from legoesm.training.param_collector import build_registry
+    known = {m.qualified_name for m in build_registry()}
+    return {f"{key}.{field}" for key, fields in param_fixed.items()
+            for field in fields} & known
 
 
 def wb_needs_land_frac(mode: str, yml: dict) -> bool:
@@ -520,7 +538,19 @@ def _build_mode_components_spectral(cfg, yml):
         # ``aimip_trainable_schemes``; WB reads it from ``classical.trainable_
         # schemes`` and defaults to the same tier so the two campaigns train
         # the same thing for the same selection.
+        _param_init = dict(_cl.get("param_init", {}) or {})
+        # Static scheme-config values the deck pins: {scheme_key: {field: v}}.
+        # For settings that are NOT trainable parameters -- a cloud-overlap
+        # choice, a sub-column count, a switch -- so a training arm can run the
+        # same configuration a production run does.
+        _param_fixed = {k: dict(v) for k, v in
+                        (_cl.get("param_fixed", {}) or {}).items()}
         _tier = _cl.get("trainable_schemes", "extended")
+        if _param_init and not _tier:
+            raise ValueError(
+                "classical.param_init needs classical.trainable_schemes: with "
+                "no spec-driven bundle there is no leaf to seed, so every "
+                "starting value would be silently ignored.")
         if _tier:
             from legoesm.training.aimip_params import (
                 AIMIPTrainableBundle,
@@ -540,11 +570,23 @@ def _build_mode_components_spectral(cfg, yml):
             _scheme_params = build_trainable_params(
                 active_scheme_keys=_active,
                 tier=(_tier if isinstance(_tier, str) else "extended"),
+                # Deck-supplied starting values ("scheme_key.field": value),
+                # e.g. an arm that begins from the tuned AMIP configuration
+                # rather than from library defaults. Seeded rather than
+                # overridden, so the parameter still trains; a name that
+                # reaches no selected parameter raises.
+                init_values=_param_init,
                 # Only what the hand-written route cannot reach: the splice
                 # runs after it, so a doubly-covered field would silently zero
-                # the legacy leaf's gradient.
-                exclude=tuple(sorted(aimip_legacy_owned_fields(
-                    cloud_scheme=_schemes["cloud_scheme"]))),
+                # the legacy leaf's gradient. A field the deck PINS is excluded
+                # for the same reason one step later: the pin is applied after
+                # the trained value, so training it would optimize a leaf that
+                # never reaches the model, and the trained-parameter report
+                # would show it moving.
+                exclude=tuple(sorted(
+                    set(aimip_legacy_owned_fields(
+                        cloud_scheme=_schemes["cloud_scheme"]))
+                    | _pinned_trainable_names(_param_fixed))),
             )
             params = AIMIPTrainableBundle(
                 classical=params, schemes=_scheme_params)
@@ -578,6 +620,18 @@ def _build_mode_components_spectral(cfg, yml):
         # block halves the radiation activations the backward pass holds, at
         # the cost of more blocks to walk.  Exposed here so a run can be made
         # to fit without editing code.
+        # Radiation COLUMN block size: the solve is split into blocks of this
+        # many columns and each block is checkpointed, so the backward pass
+        # holds one block's activations instead of every column's.  Needed
+        # when max-random overlap expands the solver's column axis by the
+        # sub-column count (8 sub-columns at T63/L32 asks for 490 GiB
+        # otherwise).  0 = off, and the value must divide the solver's column
+        # count (n_sub * ncol when sub-columns are on).
+        _col_chunk = int(_cl.get("rrtmgp_column_chunk_size", 0))
+        if _col_chunk < 0:
+            raise ValueError(
+                "classical.rrtmgp_column_chunk_size must be >= 0, got "
+                f"{_col_chunk}; 0 disables column chunking.")
         _gpt_batch = int(_cl.get("rrtmgp_gpoint_batch_size", 16))
         if _gpt_batch < 1:
             raise ValueError(
@@ -590,6 +644,12 @@ def _build_mode_components_spectral(cfg, yml):
                 p, grid, dt, radiation=_radiation, split_rad=True,
                 rad_update_interval_steps=_rad_interval,
                 rrtmgp_gpoint_batch_size=_gpt_batch,
+                rrtmgp_column_chunk_size=_col_chunk,
+                param_overrides=(_param_fixed or None),
+                orbital_insolation=bool(
+                    _cl.get("orbital_insolation", False)),
+                convective_rain_to_surface=bool(
+                    _cl.get("convective_rain_to_surface", False)),
                 clubb_top_press=_clubb_top, **_schemes)
         # The sample's forcing carries ERA5 skin temperature and the scene's
         # real calendar.  It used to be dropped here: the surface then sat at

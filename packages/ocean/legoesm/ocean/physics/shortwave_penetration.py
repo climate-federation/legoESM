@@ -1051,3 +1051,37 @@ def shortwave_penetration_tendency(
         sw_down[..., jnp.newaxis] * frac_absorbed / (rho_0 * c_sw * dz_safe)
     )
     return jnp.where(dz_actual > 0.0, dT_dt_raw, 0.0)
+
+
+def top_layer_absorbed_fraction(dz_top, chl_surface=None,
+                                config: ShortwavePenetrationConfig | None = None):
+    """Fraction of the net surface shortwave absorbed in the TOP ocean layer
+    (NEMO ``fraqsr_1lev`` / ``frq_m``), from the same optics the ocean uses:
+    the RGB-chlorophyll kernel when ``chl_surface`` is given, else ``config``
+    (default two-band Jerlov).  Evaluated on a two-layer column
+    ``[dz_top, 1e4 m]`` with unit sw and unit rho*c, so the returned value is
+    dimensionless and independent of the model's full ladder.  Consumers:
+    the sea-ice lead heat budget (NEMO icesbc zqld adds ``(1-A)*qsr*frq_m``).
+    """
+    dz_top = jnp.asarray(dz_top, dtype=jnp.float64)
+    deep = 1.0e4
+    if chl_surface is not None:
+        chl = jnp.asarray(chl_surface, dtype=jnp.float64)
+        shape = jnp.broadcast_shapes(chl.shape, dz_top.shape)
+        dz_live = jnp.stack([jnp.broadcast_to(dz_top, shape),
+                             jnp.full(shape, deep)], axis=-1)
+        wet = jnp.ones(shape + (2,))
+        frac_per_m = shortwave_penetration_rgb_tendency(
+            jnp.ones(shape), jnp.broadcast_to(chl, shape), dz_live, wet,
+            config=(config if config is not None
+                    else ShortwavePenetrationConfig(scheme="rgb_chl")),
+            rho_0=1.0, c_sw=1.0)
+        return frac_per_m[..., 0] * dz_live[..., 0]
+    cfg = config if config is not None else ShortwavePenetrationConfig()
+    dz0 = float(jnp.asarray(dz_top).ravel()[0])  # ponytail: uniform top cell
+    dz_ref = jnp.asarray([dz0, deep])
+    z_half = jnp.asarray([0.0, -dz0, -dz0 - deep])
+    tend = shortwave_penetration_tendency(
+        jnp.ones(jnp.asarray(dz_top).shape), dz_ref, z_half,
+        jnp.ones(jnp.asarray(dz_top).shape), config=cfg, rho_0=1.0, c_sw=1.0)
+    return tend[..., 0] * dz0

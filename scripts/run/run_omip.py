@@ -1075,6 +1075,12 @@ def parse_args(argv: list[str] | None = None):
                         "ice partition; sponge, SSS restoring, freeze cap and "
                         "the ice tile itself are untouched. Isolates a blowup "
                         "from the forcing.")
+    p.add_argument("--frazil", action=argparse.BooleanOptionalAction, default=False,
+                   help="Frazil-ice closure on every supercooled ocean level after "
+                        "the dynamics step (ocean.physics.frazil): liquid mass, salt "
+                        "and cp*T enthalpy conserved, the ice exported into the slab "
+                        "sea-ice tile. Requires --jra55-sea-ice (single-category slab) "
+                        "and the virtual-salt-flux freshwater closure. Default off.")
     p.add_argument("--jra55-sea-ice", action="store_true", default=False,
                    dest="jra55_sea_ice",
                    help="Prognostic slab (thermodynamic) sea-ice tile coupled "
@@ -1679,7 +1685,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   vertical_mixing: VerticalMixingConfig | None = None,
                   forcing_mode: str = "restoring",
                   use_conservation_fixer: bool = True,
-                  dz_ref_override=None,
+                  dz_ref_override=None, t_depth_ref_override=None,
                   spmd_n_devices: int = 0,
                   mpas_lloyd: int = 50,
                   mpas_k_zeta_bih: float | None = None,
@@ -1714,8 +1720,14 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # generic MPAS/lat-lon route therefore opts into the documented legacy
         # construction explicitly; NEMO state bridges pass raw e3w_0 and keep
         # the faithful mesh-reference default.
+        # t_depth_ref_override carries NEMO's OWN gdept_1d when the caller has
+        # it. Thicknesses alone do not determine those depths, and the
+        # fidelity PGF (pgf_scheme="nemo_sco") telescopes against that exact
+        # ladder; None keeps the arithmetic-midpoint construction, which is
+        # the behaviour every existing run gets.
         z_coord = create_z_star_from_thicknesses(
-            dz_ref_override, nemo_e3w_source="depth_difference")
+            dz_ref_override, t_depth_ref_override,
+            nemo_e3w_source="depth_difference")
     elif use_bathymetry:
         # Partial cells with ETOPO: use the same vertical stretching
         # as the global-overturning production scripts (dz_surface=20,
@@ -1984,7 +1996,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 reorder_voronoi_for_sharding,
             )
             _n0 = mesh.nCells
-            mesh = reorder_voronoi_for_sharding(mesh, spmd_n_devices)
+            mesh = reorder_voronoi_for_sharding(mesh, spmd_n_devices, edge_order="owner")
             print(f"  MPAS SPMD mesh: reordered for {spmd_n_devices} devices, "
                   f"{_n0} -> {mesh.nCells} cells ({mesh.nCells - _n0} padded "
                   f"ghosts, land)")
@@ -2750,6 +2762,35 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
             grid if (_ice_dynamics != "none" or _ice_ncat > 1) else None)
     else:
         state["enable_sea_ice"] = False
+
+    # Frazil closure (opt-in --frazil): converts supercooling on every active
+    # level into ice mass handed to the slab tile.  Off (default) ⇒ the block
+    # scan is byte-identical.  The ice tile is the recipient, so the slab must
+    # be on; the slab exchanges fresh water, so the frazil ice is fresh (see
+    # below); the lane's freshwater closure must be the virtual salt
+    # flux (the module's salt rejection IS that closure; the liquid thickness
+    # is then not a prognostic to update).
+    state["enable_frazil"] = False
+    if getattr(args, "frazil", False):
+        from legoesm.ocean.physics.frazil import FrazilConfig
+        if not state["enable_sea_ice"]:
+            raise SystemExit("--frazil requires --jra55-sea-ice (the slab tile "
+                             "receives the frazil ice).")
+        if state["ice_config"].dynamics != "none" or int(args.ice_categories) != 1:
+            raise SystemExit("--frazil supports the single-category slab only "
+                             "(--ice-dynamics none --ice-categories 1).")
+        if z_coord is None:
+            raise SystemExit("--frazil needs the run's vertical coordinate.")
+        _ice = state["ice_config"]
+        state["enable_frazil"] = True
+        # The single-category slab exchanges FRESH water with the ocean
+        # (sea_ice.py: ``salt_flux=zeros`` on the slab path; melt returns
+        # freshwater), so the frazil ice must be fresh too or the salt budget
+        # would not close on melt.  ``constant`` = the slab's own T_freeze_ocean.
+        state["frazil_config"] = FrazilConfig(
+            enabled=True, freezing_scheme="constant",
+            ice_salinity_psu=0.0, L_f_j_kg=float(_ice.L_f))
+        state["frazil_z_coord"] = z_coord
 
     return state
 
@@ -3524,6 +3565,56 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     # None unless --ice-dynamics selects a rheology; the strain
     # rates need grid metrics, the slab path does not.
     ice_grid = jra55_state.get("ice_grid")
+    # Frazil (opt-in --frazil): static gate ⇒ frazil-off blocks are bit-identical.
+    enable_frazil = bool(jra55_state.get("enable_frazil", False))
+    if enable_frazil and not enable_sea_ice:
+        raise ValueError("frazil needs the slab sea-ice tile as its recipient")
+    if enable_frazil:
+        from legoesm.ocean.physics.frazil import apply_frazil
+        from legoesm.coupler.ocean_forcing import add_frazil_ice
+        from legoesm.ocean.vertical import compute_layer_thickness
+        frazil_cfg = jra55_state["frazil_config"]
+        # The coordinate the model integrates on (the lat-lon lane builds a
+        # partial-cell coordinate from the driver's reference one).
+        frazil_zc = getattr(model, "z_coord", None) or jra55_state["frazil_z_coord"]
+        frazil_rho0 = float(getattr(model.config, "rho_0", _const.rho_ocean))
+        if getattr(model.config, "freshwater_closure", "virtual_salt_flux") != "virtual_salt_flux":
+            raise ValueError("--frazil requires freshwater_closure='virtual_salt_flux' "
+                             f"(got {model.config.freshwater_closure!r}).")
+        # Reference hydrostatic sea pressure of each level centre [Pa]: under
+        # the "constant" liquidus pressure only enters the potential/in-situ
+        # conversion, and the z-star compression (eta/H ~ 1e-4) and the
+        # partial bottom cell (never supercooled) shift that by < 1e-3 K.
+        _dz_ref = np.asarray(frazil_zc.dz_ref, dtype=np.float64)
+        frazil_p_pa = jnp.asarray(_const.rho_ocean * _const.g
+                                  * (np.cumsum(_dz_ref) - 0.5 * _dz_ref))
+
+        def _frazil(new_state, new_ice):
+            T, S = new_state.T.data, new_state.S.data
+            h = compute_layer_thickness(new_state.eta.data, new_state.H_bathy.data, frazil_zc)
+            active = (h > 0.0) & (new_state.land_mask.data > 0.5)[..., None]
+            # The closure promotes to its widest input; keep the scan carry dtype.
+            res = apply_frazil(T, S, h.astype(T.dtype), active,
+                               frazil_p_pa.astype(T.dtype), frazil_cfg)
+            ice_mass = res.ice_mass_per_area_kg_m2
+            # The frozen liquid leaves the column the way the lane's freshwater
+            # fluxes do (freshwater_eta_tendency moves eta under the virtual-
+            # salt closure too): the z-star Jacobian carries the thickness
+            # loss the contract asks for, and the module's salinity update is
+            # the closure's virtual salt.  Same convention as the slab tile's
+            # own lead freezing (ice_fw < 0), so a later melt returns exactly
+            # this water.
+            # ponytail: the z-star rescale spreads the thickness loss over the
+            # whole column while the closure removed it from the frozen level,
+            # a per-layer inventory error of order x*dz_k/H (mm of water over
+            # a km column) -- the same approximation every surface freshwater
+            # flux makes on this coordinate; exact per-layer thickness needs
+            # the real_freshwater closure with a prognostic thickness.
+            eta = new_state.eta.data - (ice_mass / frazil_rho0).astype(new_state.eta.data.dtype)
+            new_state = new_state._replace(T=new_state.T.replace(data=res.T_C.astype(T.dtype)),
+                                           S=new_state.S.replace(data=res.S_psu.astype(S.dtype)),
+                                           eta=new_state.eta.replace(data=eta))
+            return new_state, add_frazil_ice(new_ice, ice_cfg, ice_mass.astype(new_ice.h_ice.data.dtype))
 
     sponge = _build_sponge_forcing(jra55_state) if enable_sponge else None
 
@@ -3727,6 +3818,9 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                     T=new_state.T.replace(data=T.at[..., 0].set(T_top_capped)),
                 )
 
+            if enable_frazil:
+                new_state, new_ice = _frazil(new_state, new_ice)
+
             # 3D velocity clip (MOM6 MAXVEL analog for full field).
             if enable_maxvel:
                 # MPAS carries the full velocity as edge-normal u (no v field).
@@ -3816,6 +3910,56 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     # None unless --ice-dynamics selects a rheology; the strain
     # rates need grid metrics, the slab path does not.
     ice_grid = jra55_state.get("ice_grid")
+    # Frazil (opt-in --frazil): static gate ⇒ frazil-off blocks are bit-identical.
+    enable_frazil = bool(jra55_state.get("enable_frazil", False))
+    if enable_frazil and not enable_sea_ice:
+        raise ValueError("frazil needs the slab sea-ice tile as its recipient")
+    if enable_frazil:
+        from legoesm.ocean.physics.frazil import apply_frazil
+        from legoesm.coupler.ocean_forcing import add_frazil_ice
+        from legoesm.ocean.vertical import compute_layer_thickness
+        frazil_cfg = jra55_state["frazil_config"]
+        # The coordinate the model integrates on (the lat-lon lane builds a
+        # partial-cell coordinate from the driver's reference one).
+        frazil_zc = getattr(model, "z_coord", None) or jra55_state["frazil_z_coord"]
+        frazil_rho0 = float(getattr(model.config, "rho_0", _const.rho_ocean))
+        if getattr(model.config, "freshwater_closure", "virtual_salt_flux") != "virtual_salt_flux":
+            raise ValueError("--frazil requires freshwater_closure='virtual_salt_flux' "
+                             f"(got {model.config.freshwater_closure!r}).")
+        # Reference hydrostatic sea pressure of each level centre [Pa]: under
+        # the "constant" liquidus pressure only enters the potential/in-situ
+        # conversion, and the z-star compression (eta/H ~ 1e-4) and the
+        # partial bottom cell (never supercooled) shift that by < 1e-3 K.
+        _dz_ref = np.asarray(frazil_zc.dz_ref, dtype=np.float64)
+        frazil_p_pa = jnp.asarray(_const.rho_ocean * _const.g
+                                  * (np.cumsum(_dz_ref) - 0.5 * _dz_ref))
+
+        def _frazil(new_state, new_ice):
+            T, S = new_state.T.data, new_state.S.data
+            h = compute_layer_thickness(new_state.eta.data, new_state.H_bathy.data, frazil_zc)
+            active = (h > 0.0) & (new_state.land_mask.data > 0.5)[..., None]
+            # The closure promotes to its widest input; keep the scan carry dtype.
+            res = apply_frazil(T, S, h.astype(T.dtype), active,
+                               frazil_p_pa.astype(T.dtype), frazil_cfg)
+            ice_mass = res.ice_mass_per_area_kg_m2
+            # The frozen liquid leaves the column the way the lane's freshwater
+            # fluxes do (freshwater_eta_tendency moves eta under the virtual-
+            # salt closure too): the z-star Jacobian carries the thickness
+            # loss the contract asks for, and the module's salinity update is
+            # the closure's virtual salt.  Same convention as the slab tile's
+            # own lead freezing (ice_fw < 0), so a later melt returns exactly
+            # this water.
+            # ponytail: the z-star rescale spreads the thickness loss over the
+            # whole column while the closure removed it from the frozen level,
+            # a per-layer inventory error of order x*dz_k/H (mm of water over
+            # a km column) -- the same approximation every surface freshwater
+            # flux makes on this coordinate; exact per-layer thickness needs
+            # the real_freshwater closure with a prognostic thickness.
+            eta = new_state.eta.data - (ice_mass / frazil_rho0).astype(new_state.eta.data.dtype)
+            new_state = new_state._replace(T=new_state.T.replace(data=res.T_C.astype(T.dtype)),
+                                           S=new_state.S.replace(data=res.S_psu.astype(S.dtype)),
+                                           eta=new_state.eta.replace(data=eta))
+            return new_state, add_frazil_ice(new_ice, ice_cfg, ice_mass.astype(new_ice.h_ice.data.dtype))
 
     # lat-lon nests the barotropic knobs (config.barotropic.*); MPASOceanConfig
     # carries them flat — read whichever the model has.
@@ -4041,6 +4185,8 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                     new_state = new_state._replace(
                         T=new_state.T.replace(
                             data=T.at[..., 0].set(T_top)))
+                if enable_frazil:
+                    new_state, new_ice = _frazil(new_state, new_ice)
                 if enable_maxvel:
                     new_state = new_state._replace(
                         u=new_state.u.replace(

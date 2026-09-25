@@ -52,6 +52,12 @@ class ScaleConfig(NamedTuple):
     # that data-starved the column MLP). --smoke still forces 1. Appended last
     # so positional construction in existing tests stays valid.
     n_days: int | None = None
+    # None = take the deck's ``warmup_steps``. An explicit value lets one
+    # campaign arm depart from a deck its sibling arms share. Appended last so
+    # positional construction in existing tests stays valid.
+    warmup_steps: int | None = None
+    # Held-out windows scored after every epoch (0 = no validation pass).
+    n_val_windows: int = 0
 
 
 # Scenes used for the POST-TRAINING reachability report.  A subsample, not the
@@ -278,6 +284,71 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
     }
 
 
+def _val_yaml(yml: dict, n_windows: int) -> dict:
+    """The deck, with its training windows replaced by HELD-OUT ones.
+
+    The windows are taken from ``eval_years`` -- the same years the scorecard
+    scores -- spread evenly over the calendar so the validation number is not
+    one season's weather. Everything else (grid, cadence, lead time, loss) is
+    the deck's own, because a validation loss computed under a different
+    protocol than the training loss is not comparable to it.
+    """
+    years = list(yml.get("eval_years") or [])
+    if not years:
+        raise SystemExit(
+            "--val-windows needs `eval_years` in the campaign YAML: there is "
+            "no held-out year to validate on.")
+    # Month starts, evenly spread, cycling the eval years.
+    starts = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    windows = []
+    for i in range(int(n_windows)):
+        year = int(years[i % len(years)])
+        windows.append([year, starts[(i * 5) % len(starts)], 1])
+    out = dict(yml)
+    out["train_windows"] = windows
+    out["train_years"] = years
+    return out
+
+
+def _device_sample(sample):
+    """One host-resident sample, moved to the device for a no-gradient score.
+
+    The training loop does exactly this per step (#1286 fix A keeps the shard
+    on the host); the validation pass must not diverge from it, or the two
+    losses would not be the same measurement.
+    """
+    import jax
+
+    return jax.device_put(sample)
+
+
+def _physical_params(params) -> dict:
+    """Every trained parameter in PHYSICAL units, by qualified name.
+
+    Read from the live pytree through each bundle's own constraint transforms,
+    so the recorded numbers are the ones the physics saw -- not raw sigmoid
+    pre-images that need the bounds to interpret.
+    """
+    out = {}
+    for _attr in ("classical", "schemes"):
+        _part = getattr(params, _attr, None)
+        _as_dict = getattr(_part, "as_dict", None)
+        if _as_dict is None:
+            continue
+        for _k, _v in _as_dict().items():
+            _arr = np.asarray(_v)
+            out[f"{_attr}.{_k}"] = (float(_arr) if _arr.ndim == 0
+                                    else _arr.reshape(-1).tolist())
+    if not out:
+        _as_dict = getattr(params, "as_dict", None)
+        if _as_dict is not None:
+            for _k, _v in _as_dict().items():
+                _arr = np.asarray(_v)
+                out[_k] = (float(_arr) if _arr.ndim == 0
+                           else _arr.reshape(-1).tolist())
+    return out
+
+
 def _probe_freeze_path(out_dir):
     import os
 
@@ -491,6 +562,19 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
     p.add_argument("--optimizer", default=None,
                    help="adamw|adam|muon|muon_partitioned. Default: YAML "
                         f"`optimizer`, else {_DEFAULT_OPTIMIZER}.")
+    p.add_argument("--val-windows", type=int, default=0, dest="n_val_windows",
+                   help="Held-out windows (from the deck's eval_years) scored "
+                        "WITHOUT gradient after every epoch, so the run has a "
+                        "generalisation curve rather than only a training "
+                        "one. 0 (default) keeps the historical behaviour: no "
+                        "validation pass.")
+    p.add_argument("--warmup-steps", type=int, default=None,
+                   dest="warmup_steps",
+                   help="Global-schedule warmup steps, overriding the deck's "
+                        "`warmup_steps`. Lets one campaign arm depart from a "
+                        "deck other arms share. Every link of a chained run "
+                        "must pass the same value (the resume fingerprint "
+                        "covers the schedule).")
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--out", default="results/wb_scale", dest="out_dir")
     p.add_argument("--resume", action="store_true")
@@ -510,6 +594,7 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
         mode=a.mode, config_path=a.config, resolution_deg=a.resolution_deg,
         n_epochs=a.n_epochs, multi_step_hours=_parse_hours(a.multi_step_hours),
         lr=a.lr, optimizer=a.optimizer, grad_accum=a.grad_accum,
+        warmup_steps=a.warmup_steps, n_val_windows=a.n_val_windows,
         out_dir=a.out_dir, resume=a.resume, eval_wb2=a.eval_wb2, smoke=a.smoke,
         training_core=a.training_core, n_days=a.n_days,
     )
@@ -556,12 +641,14 @@ def main(argv=None):
     # re-implementing the answer in shell. Handled before anything heavy is
     # imported: it runs once per link, on a login-class shell.
     args = list(sys.argv[1:] if argv is None else argv)
-    if "--print-latest-complete" in args:
-        i = args.index("--print-latest-complete") + 1
-        if i >= len(args):
+    # FIRST argument only: scanning the whole list let any OTHER option's VALUE
+    # select the query mode, so a job wrapper whose CONFIG/OUT happened to hold
+    # this token printed a signature and exited 0 having trained nothing.
+    if args[:1] == ["--print-latest-complete"]:
+        if len(args) < 2:
             print("--print-latest-complete needs a directory", file=sys.stderr)
             raise SystemExit(2)
-        print_latest_complete_signature(args[i])
+        print_latest_complete_signature(args[1])
         return 0
 
     from legoesm.training.data_parallel import mpi_abort_on_uncaught
@@ -747,7 +834,8 @@ def _main(argv=None):
     # total_steps (``_clamped_warmup``): the cosine schedule needs
     # decay_steps > 0, which the tiny --smoke run otherwise violates.
     warmup = _resolve_warmup(
-        yml.get("warmup_steps", TrainingConfig().warmup_steps),
+        cfg.warmup_steps if cfg.warmup_steps is not None
+        else yml.get("warmup_steps", TrainingConfig().warmup_steps),
         total_steps, nproc)
 
     # --- resume from the last completed epoch --------------------------------
@@ -986,9 +1074,65 @@ def _main(argv=None):
     import os
     os.makedirs(cfg.out_dir, exist_ok=True)
 
+    # --- held-out samples, scored without gradient after each epoch --------
+    # A training curve alone cannot say whether the parameters are learning
+    # the physics or the training scenes: both fall. These come from the
+    # deck's EVAL years, the same ones the scorecard uses, so the two agree
+    # about what "held out" means.
+    val_samples = []
+    if int(getattr(cfg, "n_val_windows", 0)) > 0:
+        # The reduction below is unconditional, so a rank with an empty shard is
+        # safe; this only keeps the WARNING visible rather than silent.
+        if nproc > int(cfg.n_val_windows):
+            log.warning(
+                "--val-windows %d with %d ranks: some ranks hold no validation "
+                "samples; the held-out loss is still a global mean over the "
+                "samples that exist.", int(cfg.n_val_windows), nproc)
+        val_samples = load_era5_samples(
+            cfg, _val_yaml(yml, int(cfg.n_val_windows)), grid, sigma,
+            rank=rank, nproc=nproc, host_resident=True)
+        log.info("validation samples: %d local/rank from eval years %s",
+                 len(val_samples), yml.get("eval_years"))
+
+    def _validation_loss(cur_arr):
+        # EVERY rank reaches the reduction, including one whose validation
+        # shard came out empty: returning early on that rank left the others
+        # blocked in the allreduce for the rest of the walltime (GLM). The
+        # per-rank sum and count are reduced together, so the mean is over the
+        # samples that exist rather than over the ranks that have any.
+        if not val_samples and nproc <= 1:
+            return None
+        total = 0.0
+        for _s in val_samples:
+            total += float(loss_fn(cur_arr, _device_sample(_s)))
+        if nproc <= 1:
+            return total / len(val_samples)
+        from mpi4py import MPI
+        g_total = float(MPI.COMM_WORLD.allreduce(total, op=MPI.SUM))
+        g_count = int(MPI.COMM_WORLD.allreduce(len(val_samples), op=MPI.SUM))
+        if g_count == 0:
+            return None
+        return g_total / g_count
+
+    _history_path = os.path.join(cfg.out_dir, "training_history.jsonl")
+
     def on_epoch(epoch, mean_loss, cur_arr, cur_opt_state):
+        # Every rank runs the validation pass: it ends in a collective.
+        val_loss = _validation_loss(cur_arr)
         if rank == 0:
-            log.info("Epoch %4d: loss=%.6f", epoch, mean_loss)
+            if val_loss is None:
+                log.info("Epoch %4d: loss=%.6f", epoch, mean_loss)
+            else:
+                log.info("Epoch %4d: loss=%.6f val=%.6f",
+                         epoch, mean_loss, val_loss)
+            # One line per epoch: the two losses and every trained parameter
+            # in PHYSICAL units, so the run's parameter trajectory can be read
+            # without loading a checkpoint and inverting the transforms.
+            _row = {"epoch": int(epoch), "train_loss": float(mean_loss),
+                    "val_loss": None if val_loss is None else float(val_loss),
+                    "params": _physical_params(eqx.combine(cur_arr, static))}
+            with open(_history_path, "a") as _fh:
+                _fh.write(json.dumps(_row) + "\n")
             ppath, opath, fpath = _checkpoint_paths(cfg.out_dir, epoch)
             # Parameters, optimizer state and the trainable set together --
             # any one of them missing makes the other two unresumable.

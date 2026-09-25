@@ -36,7 +36,6 @@ def _as_driver(ns):
     return ns
 
 
-
 @pytest.fixture(scope="module")
 def mesh():
     return create_grid("mpas", 2, lloyd_iterations=10)
@@ -178,7 +177,10 @@ def _tend_with_extras():
         shflx_sfc=_f("shflx", 7.0), lhflx_sfc=_f("lhflx", 8.0),
         sw_down_sfc=_f("sw_down_sfc", 9.0), lw_down_sfc=_f("lw_down_sfc", 10.0),
         sw_up_toa_clr=_f("sw_up_toa_clr", 11.0),
-        lw_up_toa_clr=_f("lw_up_toa_clr", 12.0))
+        lw_up_toa_clr=_f("lw_up_toa_clr", 12.0),
+        sed_substeps_required=Field(
+            data=np.full(3, 13, dtype=np.int32), name="sed_substeps_required",
+            dims=("cell",), units="1"))
 
 
 # The ONE slot contract both producers build from (core.state).  Spelled out
@@ -188,7 +190,11 @@ def _tend_with_extras():
 _EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "shflx_sfc", "lhflx_sfc",
                 "sw_down_sfc", "lw_down_sfc",
-                "sw_up_toa_clr", "lw_up_toa_clr")
+                "sw_up_toa_clr", "lw_up_toa_clr",
+                # slot 12 (2026-09-22): the microphysics' required CFL
+                # sedimentation sub-step count, so an overflow is visible in
+                # a real run on BOTH producers.
+                "sed_substeps_required")
 
 
 class TestSfcDiagContract:
@@ -247,9 +253,14 @@ class TestSfcDiagContract:
             else getattr(_pt, _k, None)
             for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
         sfc = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc) == 12
+        assert len(sfc) == 13
         assert sfc[10].name == "sw_up_toa_clr"   # rsutcs
         assert sfc[11].name == "lw_up_toa_clr"   # rlutcs
+        # the MPI producer publishes the sub-step count at the same slot the
+        # serial one does, so the driver's overflow report works on both
+        from legoesm.driver.model_driver import _sed_substeps_slot
+        assert _sed_substeps_slot() == 12
+        assert sfc[12].name == "sed_substeps_required"
         # #1321: the land downwelling pair is now PUBLISHED at slots 8/9.
         # While it was withheld, ``_marshal_land_forcing``'s ``_sd[8] is None``
         # guard declined every step and the Richards soil never advanced.
@@ -260,7 +271,7 @@ class TestSfcDiagContract:
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 12
+        assert len(sfc_diag) == 13
         # Consumer (_feed_mpas_cmip_accumulators): slot 3->rlut, 4->rsut,
         # 5->rsdt, 6->hfss, 7->hfls, 10->rsutcs, 11->rlutcs; slots 8/9 are
         # the _marshal_land_forcing downwelling pair.
@@ -498,11 +509,9 @@ class TestFeedUsesIntervalMeans:
         np.testing.assert_allclose(out["field_2d_pr"], 9.0e-5, rtol=1e-9)
 
 
-class TestSnapshotCellMethods:
-    def test_snapshot_vars_written_time_point(self, mesh, tmp_path):
-        """``cmip_snapshot_vars`` stamps ``cell_methods='time: point'`` on
-        snapshot-fed vars while accumulated vars keep the table's
-        ``time: mean`` — checked on the actual NetCDF files."""
+class TestMeanCellMethods:
+    def test_state_vars_written_time_mean(self, mesh, tmp_path):
+        """State and flux means retain time: mean in actual NetCDF files."""
         xr = pytest.importorskip("xarray")
         from legoesm.io.cmor_output import CFWriter
 
@@ -510,7 +519,6 @@ class TestSnapshotCellMethods:
         dc.cf_writer = CFWriter(
             output_dir=tmp_path, experiment_id="amip",
             model_id="legoESM", ref_date="1979-01-01")
-        dc.cmip_snapshot_vars = {"tas"}
 
         nlat, nlon = dc._cmip_nlat, dc._cmip_nlon
         data = {
@@ -528,16 +536,14 @@ class TestSnapshotCellMethods:
         # honesty override must not silently drop "area:".
         with xr.open_dataset(tas_files[0]) as ds:
             assert (ds["tas"].attrs["cell_methods"]
-                    == "area: mean time: point within days "
-                       "time: mean over days")
-            assert "aliased" in ds["tas"].attrs["comment"]
+                    == "area: time: mean")
+            assert "aliased" not in ds["tas"].attrs.get("comment", "")
         with xr.open_dataset(pr_files[0]) as ds:
             assert ds["pr"].attrs["cell_methods"] == "area: time: mean"
             assert "comment" not in ds["pr"].attrs
 
     def test_default_none_keeps_table_cell_methods(self, mesh, tmp_path):
-        """Cube/lat-lon segment-accumulated path: ``cmip_snapshot_vars``
-        unset -> table defaults untouched (regression guard)."""
+        """The shared writer keeps mean semantics for segment means too."""
         xr = pytest.importorskip("xarray")
         from legoesm.io.cmor_output import CFWriter
 
@@ -545,7 +551,7 @@ class TestSnapshotCellMethods:
         dc.cf_writer = CFWriter(
             output_dir=tmp_path, experiment_id="amip",
             model_id="legoESM", ref_date="1979-01-01")
-        assert dc.cmip_snapshot_vars is None
+        assert not hasattr(dc, "cmip_snapshot_vars")
 
         nlat, nlon = dc._cmip_nlat, dc._cmip_nlon
         data = {
@@ -727,18 +733,17 @@ class TestRound3:
         from legoesm.driver.model_driver import _MPASSfcFluxAccum
         assert _MPASSfcFluxAccum().dump() == {}
 
-    def test_wallclock_daily_write_carries_snapshot_attrs(self, mesh):
+    def test_wallclock_daily_write_carries_hourly_extreme_attrs(self, mesh):
         """finalize_cmip_daily (the wallclock-exit path) must pass the same
         per-var honesty overrides as the end-of-run writer (codex-2
         finding 4)."""
         dc, sigma_full = _make_collector(mesh)
         f = _base_fields(mesh, sigma_full)
         n = f["p_s"].shape[0]
-        dc.cmip_snapshot_vars = {"tas", "ps", "psl", "prw",
-                                 "ta", "hus", "ua", "va"}
         dc.feed_cmip_accumulators_native(
             15.0, **f, precip=np.full(n, 3.0e-5), flux_interval_days=1.0)
 
+        dc.feed_daily_extremes_native(15.0, tas=f["T"][:, -1])
         calls = {}
 
         class _W:
@@ -748,13 +753,13 @@ class TestRound3:
         dc.cf_writer = _W()
         dc.finalize_cmip_daily(current_day=16.0)
         assert calls["extra"] is not None
-        assert calls["extra"]["tas"]["cell_methods"] == "time: point"
+        assert "tas" not in calls["extra"]
         assert "tasmax" in calls["extra"]
         assert "pr" not in calls["extra"]     # true interval mean
 
-    def test_snapshot_attrs_none_without_snapshot_mode(self, mesh):
+    def test_extreme_attrs_none_without_hourly_samples(self, mesh):
         dc, _ = _make_collector(mesh)
-        assert dc._daily_snapshot_attrs() is None
+        assert dc._daily_extreme_attrs() is None
 
     def test_accum_roundtrip_through_npz(self, tmp_path):
         """The payload must survive an actual np.savez/np.load cycle (the
@@ -1165,59 +1170,10 @@ class TestBinningPhaseGate:
         src = inspect.getsource(ModelDriver._mpas_cmip_native_kwargs)
         assert "_phase" in src and "round(_phase)" in src
 
-    def test_driver_labels_true_sampling_cadence(self):
-        """The snapshot cadence label uses DIAG_INTERVAL*DT, not the
-        requested diag_days that step arithmetic truncated."""
-        import inspect
-        from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._run_mpas)
-        assert "DIAG_INTERVAL * DT / 86400.0" in src
 
+class TestFluxPhaseTolerance:
+    """Flux interval binning retains an absolute day tolerance."""
 
-class TestDriftingCadenceHonesty:
-    """Codex-9: a cadence that is not a whole number of days drifts through
-    the day, so the metadata must not claim a fixed 00 UTC phase or a
-    single sample per day."""
-
-    def test_daily_attrs_declare_drift(self, mesh):
-        dc, _ = _make_collector(mesh)
-        dc.cmip_snapshot_vars = {"tas"}
-        dc.cmip_snapshot_cadence_days = 8 * 10000.0 / 86400.0   # 0.9259 d
-        attrs = dc._daily_snapshot_attrs()
-        assert "DRIFTING" in attrs["tas"]["comment"]
-        assert "00 UTC" not in attrs["tas"]["comment"]
-        assert "0-2" in attrs["tas"]["comment"]
-        assert "drifting" in attrs["tasmax"]["comment"]
-        # A day cell that is a MEAN of 0-2 points is not a "point": keep the
-        # table's own cell_methods and disclose in the comment.
-        assert "cell_methods" not in attrs["tas"]
-        assert "cell_methods" not in attrs["tasmax"]
-
-    def test_daily_attrs_fixed_phase_when_whole_days(self, mesh):
-        dc, _ = _make_collector(mesh)
-        dc.cmip_snapshot_vars = {"tas"}
-        dc.cmip_snapshot_cadence_days = 2.0
-        dc.cmip_snapshot_phase_frac = 0.0        # integral start day
-        attrs = dc._daily_snapshot_attrs()
-        assert "00 UTC" in attrs["tas"]["comment"]
-        assert "DRIFTING" not in attrs["tas"]["comment"]
-        # Exactly one sample per day cell -> "time: point" is literally true.
-        assert attrs["tas"]["cell_methods"] == "time: point"
-
-    def test_monthly_comment_drops_fixed_phase_claim(self, mesh, tmp_path):
-        xr = pytest.importorskip("xarray")
-        from legoesm.io.cmor_output import CFWriter
-        dc, _ = _make_collector(mesh)
-        dc.cf_writer = CFWriter(output_dir=tmp_path, experiment_id="amip",
-                                model_id="legoESM", ref_date="1979-01-01")
-        dc.cmip_snapshot_vars = {"tas"}
-        dc.cmip_snapshot_cadence_days = 0.9259259259259259
-        nlat, nlon = dc._cmip_nlat, dc._cmip_nlon
-        dc._write_cmip_data({"months": [(0, 1)],
-                             "field_2d_tas": np.full((1, nlat, nlon), 288.0)})
-        with xr.open_dataset(sorted(tmp_path.rglob("tas_*.nc"))[0]) as ds:
-            assert "DRIFTING" in ds["tas"].attrs["comment"]
-            assert "fixed phase" not in ds["tas"].attrs["comment"]
 
     def test_phase_tolerance_is_absolute_in_days(self):
         """A relative phase tolerance would admit an off-grid window by ~an
@@ -1231,95 +1187,6 @@ class TestDriftingCadenceHonesty:
         day, win = 36500.0 + 3154.0 / 86400.0, 1.0
         phase = day / win
         assert abs(phase - round(phase)) * win >= 1e-9
-
-    def test_phase_text_derived_not_asserted(self, mesh):
-        """Codex-10: a fractional start_day shifts the sampling time of day;
-        the metadata must report the derived phase, not claim 00 UTC."""
-        dc, _ = _make_collector(mesh)
-        dc.cmip_snapshot_vars = {"tas"}
-        dc.cmip_snapshot_cadence_days = 1.0
-        dc.cmip_snapshot_phase_frac = 0.5          # noon start
-        attrs = dc._daily_snapshot_attrs()
-        assert "12:00 UTC" in attrs["tas"]["comment"]
-        assert "00 UTC," not in attrs["tas"]["comment"]
-        dc.cmip_snapshot_phase_frac = 0.0
-        assert "00 UTC" in dc._daily_snapshot_attrs()["tas"]["comment"]
-        dc.cmip_snapshot_phase_frac = None
-        assert "fixed time of day" in (
-            dc._daily_snapshot_attrs()["tas"]["comment"])
-
-    def test_driver_derives_phase_from_start_day(self):
-        import inspect
-        from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._run_mpas)
-        assert "cmip_snapshot_phase_frac" in src and "% 1.0" in src
-
-    def test_sentinel_cadence_still_declares_snapshots(self):
-        """Codex-11: diag_days<=0 is a once-at-end FEED on this lane, not
-        'no diagnostics' — its single end-of-run state sample must still be
-        disclosed, not written with the table's time: mean."""
-        import inspect
-        from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._run_mpas)
-        assert "float(cfg.output.diag_days) <= 0.0" in src
-        assert "_true_cad_days >= 1.0" in src
-
-    def test_phase_boundary_restart_uses_next_sample(self):
-        """On a restart exactly on a cadence boundary the next sample is a
-        FULL interval ahead, not the current position."""
-        import inspect
-
-        from legoesm.driver.model_driver import ModelDriver
-
-        src = inspect.getsource(ModelDriver._run_mpas)
-        assert "_rem = DIAG_INTERVAL - (DIAG_PHASE % DIAG_INTERVAL)" in src
-        # arithmetic: on-boundary start_step -> a full interval, never 0
-        for start_step, interval in ((0, 8), (8, 8), (16, 8), (3, 8)):
-            rem = interval - (start_step % interval)
-            assert 1 <= rem <= interval
-
-    def test_phase_text_rounds_across_midnight_to_00utc(self, mesh):
-        dc, _ = _make_collector(mesh)
-        dc.cmip_snapshot_phase_frac = 1.0 - 1e-7      # 8.6 ms before midnight
-        assert dc._snapshot_phase_text() == "00 UTC"
-
-    @staticmethod
-    def _phase_frac(diag_days, start_day, start_step, interval, dt):
-        """Mirror of the driver's phase derivation (both branches)."""
-        diag_phase = start_step if diag_days > 0 else 0
-        rem = interval - (diag_phase % interval)
-        return (start_day + rem * dt / 86400.0) % 1.0
-
-    def test_sentinel_phase_matches_actual_sample_day(self):
-        """Codex-12: the sentinel's trigger is job-LOCAL, so its single
-        sample lands a full local interval after the restart — the phase
-        must say so, not derive from start_step.
-
-        2-day link, dt=6 h (interval=8), start_step=10, START_DAY=2.5:
-        the sample is at day 4.5 = 12:00 UTC.
-        """
-        dt, interval, start_day, start_step = 21600.0, 8, 2.5, 10
-        frac = self._phase_frac(0.0, start_day, start_step, interval, dt)
-        assert abs(frac - 0.5) < 1e-12, "sentinel sample is at 12:00 UTC"
-        # The pre-fix derivation (start_step-based) claimed 00 UTC.
-        stale = (start_day
-                 + (interval - (start_step % interval)) * dt / 86400.0) % 1.0
-        assert abs(stale - 0.0) < 1e-12
-
-    def test_periodic_phase_still_absolute(self):
-        """The periodic path keeps its absolute phase (DIAG_PHASE =
-        start_step): same 2-day/6-h layout, first sample at day 4.0."""
-        dt, interval, start_day, start_step = 21600.0, 8, 2.5, 10
-        frac = self._phase_frac(2.0, start_day, start_step, interval, dt)
-        assert abs(frac - 0.0) < 1e-12
-
-    def test_phase_text_of_sentinel_case(self, mesh):
-        dc, _ = _make_collector(mesh)
-        dc.cmip_snapshot_vars = {"tas"}
-        dc.cmip_snapshot_cadence_days = 2.0
-        dc.cmip_snapshot_phase_frac = self._phase_frac(
-            0.0, 2.5, 10, 8, 21600.0)
-        assert "12:00 UTC" in dc._daily_snapshot_attrs()["tas"]["comment"]
 
 
 # ---------------------------------------------------------------------------
@@ -1426,7 +1293,6 @@ class TestCloudCmorFeed:
                 return lambda *a, **k: None
 
         dc.cf_writer = _W()
-        dc.cmip_snapshot_vars = set()        # sub-daily cadence: no snap label
         dc._write_cmip_data(
             {"months": [(0, 1)],
              "field_2d_clwvi": [np.zeros((dc._cmip_nlat, dc._cmip_nlon))],

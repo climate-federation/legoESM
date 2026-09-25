@@ -14,7 +14,7 @@
 # monthly snapshots (matches the reference's monthly grid_T cadence).
 set +e
 WT=/burg-archive/glab/users/pg2328/legoESM_worktrees/nemo-gaps-p4p5; cd $WT
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; nvidia-smi -L 2>/dev/null | head -1; date
 echo "=== worktree ==="; git -C $WT log --oneline -1

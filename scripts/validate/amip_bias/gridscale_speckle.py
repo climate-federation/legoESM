@@ -177,12 +177,30 @@ def main(argv=None):
                     help="report which operator makes the two-cell variance")
     ap.add_argument("--nu", type=float, default=2.0e5,
                     help="smoother diffusivity for --budget [m^2/s]")
+    ap.add_argument("--lat-band", nargs=2, type=float, metavar=("LO", "HI"),
+                    default=None,
+                    help="restrict the pair statistics to cells whose BOTH "
+                         "members lie in this latitude band [degrees]; the "
+                         "exponent is a ratio of means, so a regional answer "
+                         "needs regional pairs, not a global mean")
     ap.add_argument("--dt", type=float, default=112.5,
                     help="dynamics timestep for --budget [s]")
     args = ap.parse_args(argv)
 
     mesh = create_voronoi_mesh(args.subdivision)
     p1, p2 = ring_pairs(mesh)
+    if args.lat_band is not None:
+        lo, hi = args.lat_band
+        lat_deg = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
+        inband = (lat_deg >= lo) & (lat_deg < hi)
+        keep1 = inband[p1[0]] & inband[p1[1]]
+        keep2 = inband[p2[0]] & inband[p2[1]]
+        if keep1.sum() < 100 or keep2.sum() < 100:
+            raise SystemExit(f"latitude band {lo}..{hi} keeps only "
+                             f"{keep1.sum()} / {keep2.sum()} pairs")
+        p1, p2 = p1[:, keep1], p2[:, keep2]
+        print(f"latitude band {lo:g}..{hi:g}: {int(inband.sum())} cells, "
+              f"{p1.shape[1]} one-ring and {p2.shape[1]} two-ring pairs")
     d1 = float(separation(mesh, p1).mean())
     d2 = float(separation(mesh, p2).mean())
     print(f"mesh subdivision {args.subdivision}: {np.asarray(mesh.latCell).shape[0]} cells, "

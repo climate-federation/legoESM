@@ -14,6 +14,7 @@
 
 """Implementation of a radiative transfer solver."""
 
+import functools
 from pathlib import Path
 from typing import TypeAlias
 
@@ -1109,7 +1110,10 @@ class RRTMGP:
           raise ValueError(
               f"column_chunk_size {column_chunk_size} must divide ncol "
               f"{ncol} exactly (radiation columns are independent, but the "
-              "lax.map reshape requires equal-size blocks)."
+              "lax.map reshape requires equal-size blocks). Note that ncol "
+              "here is the SOLVER's column count: with max-random overlap "
+              "it is cloud_n_subcolumns * the grid's column count, so a "
+              "block size chosen against the grid alone need not divide it."
           )
       n_block = ncol // column_chunk_size
 
@@ -1169,6 +1173,22 @@ class RRTMGP:
           else:
               static[k] = v
 
+      # Checkpointed per block: lax.map is a scan, so without this the
+      # backward pass keeps every block's radiation activations at once and
+      # the chunking buys compile time but no memory.  With it the backward
+      # recomputes one block at a time, so reverse-mode scratch is bounded by
+      # ``column_chunk_size`` columns instead of ``ncol`` -- the AMIP WB arm
+      # needs it because max-random overlap hands the solver n_sub*ncol
+      # sub-columns (measured 490 GiB of scratch at 8 sub-columns, T63/L32).
+      # Forward-only callers are unaffected (checkpoint is a no-op there) and
+      # the values are unchanged either way.  prevent_cse=False because this
+      # body already runs inside a scan (same reason as the g-point block
+      # loop in rte/two_stream.py).
+      @functools.partial(
+          jax.checkpoint,
+          policy=jax.checkpoint_policies.nothing_saveable,
+          prevent_cse=False,
+      )
       def _one(chunk):
           return self.solve_columns(**chunk, **static)
 

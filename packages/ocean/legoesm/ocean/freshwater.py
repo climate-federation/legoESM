@@ -152,6 +152,147 @@ def virtual_salt_flux(
         net_freshwater_flux(fw), S_ref, dz_0, rho_0)
 
 
+def virtual_closure_temperature_twin(fw, T_top, dz_0, rho_0: float, mask=None):
+    """Top-cell temperature tendency [K/s] that the virtual-salt closure owes
+    for the water whose HEAT CONTENT the surface heat flux already carries.
+
+    Our OMIP heat flux is NEMO ``blk_oce_2``: ``-evap*cp*SST + rain*cp*theta_air``
+    (+ snow terms), and the SSS-restoring channel adds ``F*cp*SST``
+    (``sbcssr``).  Under a non-linear free surface that heat pairs with the
+    dilution of temperature by the entering/leaving water; the virtual
+    closure never dilutes temperature (the volume goes to eta only), so NEMO's
+    linear-free-surface branch adds the counterpart back in ``trasbc``
+    (``sbc_tsc(jp_tem) += emp*sst/rho0``).  Without it the virtual closure
+    carries a spurious surface heat flux ``-(E-P) cp SST`` (~2-6 W/m2,
+    cooling where evaporation exceeds rain; codex + GLM 2026-09-05).
+
+    Only the channels whose heat is in the heat flux enter: precip, evap,
+    restoring.  Runoff and ice melt water carry no heat-flux term in this
+    coupling (they arrive at the local temperature) and are excluded.
+
+        dT/dt|top = -(P - E + R_restore)/rho_0 * T_top / dz_0
+    """
+    F = jnp.asarray(fw.precip) - jnp.asarray(fw.evap)
+    rest = getattr(fw, "restoring", None)
+    if rest is not None:
+        F = F + jnp.asarray(rest)
+    dT = -(F / rho_0) * T_top / jnp.maximum(dz_0, 1.0e-3)
+    return dT if mask is None else dT * mask
+
+
+def real_freshwater_dilution_tendencies(
+    F_rate: jnp.ndarray,
+    S: jnp.ndarray,
+    T: jnp.ndarray,
+    h_k: jnp.ndarray,
+    mask: jnp.ndarray,
+    h_floor: float = 1e-10,
+    F_entry: jnp.ndarray | None = None,
+    entry_heat: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Surface-dilution tracer tendencies of the real (volume) freshwater
+    closure: the water enters the TOP cell, so the column stretch that the
+    z-star step spreads uniformly must be paired with a downward transport
+    of the resident water through every interface.
+
+    NEMO's non-linear free surface (``sshwzv``/``traadv`` with vvl, ``trasbc``
+    carrying no ``emp*sss`` term) dilutes the top cell by ``-S_1 F/(rho h_1)``
+    and leaves the layers below at constant salinity and temperature.  In a
+    z-star core the eta channel already thickens EVERY layer by
+    ``(h_k/H) F/rho`` and the tracer step keeps ``h S`` per layer, i.e. a
+    uniform dilution ``-S F/(rho H)`` that NEMO does not have.  The
+    difference is a vertical transport
+
+        W(k+1/2) = (F/rho) * H_below(k+1/2) / H        [m/s, downward]
+
+    (``H_below`` = thickness below the interface, so ``W`` = ``F/rho`` at the
+    surface and 0 at the bottom) carrying the UPWIND cell's tracer through
+    each interface (the cell above when water enters, the cell below when it
+    leaves); the surface interface carries S = 0 (pure water) and T = T_1
+    (NEMO's ``emp`` heat convention: water added or removed at the surface
+    temperature) for both signs.  Flux form per layer::
+
+        dC_k/dt = (W(k-1/2) C_up(k-1/2) - W(k+1/2) C_up(k+1/2)) / h_k
+
+    Column-integrated ``h S`` is unchanged (the fluxes telescope to the
+    zero-salt surface flux and the zero bottom flux); for a column of uniform
+    S the layers below the top keep S exactly and the top cell obtains
+    ``-S_1 F/(rho h_1)`` once the z-star stretch is added.  First-order
+    upwind in the vertical; the transport is ~1e-7 m/s so its CFL is ~1e-5.
+    ``F_rate`` is the SAME rate the eta channel receives (normalised,
+    including ice melt water and the water-flux SSS restoring); the ice SALT
+    flux stays on its own surface channel.
+
+    Parameters
+    ----------
+    F_rate : (...,) water flux into the ocean [m/s] (= ``freshwater_eta_tendency``)
+    S, T : (..., nlev) tracers AFTER the advective/z-star step
+    h_k : (..., nlev) live layer thickness (0 below the seafloor)
+    mask : (...,) wet mask (1 = ocean)
+    F_entry : (..., nlev) or None
+        Per-level water ENTRY rate [m/s] summing to ``F_rate`` per column
+        (NEMO ``sbc_rnf_div``: river water enters every level down to
+        ``h_rnf``, see :func:`runoff_entry_profile`).  None = everything
+        enters at the surface.  Each entering parcel dilutes its own layer
+        (S = 0); the transport
+        ``W(k+1/2) = sum_{j<=k} entry_j - F H_above(k+1/2)/H`` moves the
+        resident water so the uniform z-star stretch is undone.
+
+    entry_heat : (..., nlev) or None
+        Temperature content carried by the entering water, ``entry * T_in``
+        [K m/s].  None = ``entry * T`` of the receiving layer (the water
+        arrives at the local temperature: no heat change -- runoff at SST,
+        NEMO ``rnf_tsc``).  Channels whose heat content is ALREADY in the
+        surface heat flux (rain at air temperature, evaporation at SST, the
+        SSS-restoring water: NEMO ``blk_oce_2`` / ``sbcssr`` and our
+        ``compute_omip2_surface_forcing``) must pass 0 for their share, or
+        that heat is counted twice (codex review 2026-09-05).
+
+    Returns
+    -------
+    (dS_dt, dT_dt) : (..., nlev) tendencies [PSU/s, K/s], zero on land
+    """
+    F = jnp.asarray(F_rate) * mask
+    h = jnp.where(h_k > h_floor, h_k, 0.0)
+    H = jnp.sum(h, axis=-1, keepdims=True)
+    if F_entry is None:
+        # everything enters at the surface
+        entry = jnp.concatenate(
+            [F[..., None], jnp.zeros_like(h[..., 1:])], axis=-1)
+    else:
+        entry = jnp.asarray(F_entry) * mask[..., None]
+    # W(k+1/2) = water entered at or above cell k minus the uniform stretch
+    # of the column above the interface; = F H_below/H when all enters at
+    # the top; 0 at the bottom in every case (sum entry == F).
+    H_above_if = jnp.cumsum(h, axis=-1)                  # interface under cell k
+    W_below = (jnp.cumsum(entry, axis=-1)
+               - F[..., None] * H_above_if / jnp.maximum(H, h_floor))
+    # Interface tracer = UPWIND cell: the cell above for water entering
+    # (W > 0, downward), the cell below for water leaving (evaporation, ice
+    # growth: W < 0, upward).  Taking the cell above for both signs is
+    # anti-diffusive under evaporation and sharpens the halocline (GLM
+    # review 2026-09-05).  No transport crosses the SURFACE interface: the
+    # entering water is a per-layer SOURCE carrying S = 0 and the heat
+    # ``entry_heat`` (see the parameter docs).
+    S_below_cell = jnp.concatenate([S[..., 1:], S[..., -1:]], axis=-1)
+    T_below_cell = jnp.concatenate([T[..., 1:], T[..., -1:]], axis=-1)
+    S_at_below = jnp.where(W_below >= 0.0, S, S_below_cell)
+    T_at_below = jnp.where(W_below >= 0.0, T, T_below_cell)
+    flux_S_below = W_below * S_at_below
+    flux_T_below = W_below * T_at_below
+    # no transport crosses the surface: the entering water is a SOURCE in
+    # its layer (S = 0, T = that layer's T)
+    flux_S_above = jnp.concatenate(
+        [jnp.zeros_like(S[..., :1]), flux_S_below[..., :-1]], axis=-1)
+    flux_T_above = jnp.concatenate(
+        [jnp.zeros_like(T[..., :1]), flux_T_below[..., :-1]], axis=-1)
+    inv_h = jnp.where(h > h_floor, 1.0 / jnp.maximum(h, h_floor), 0.0)
+    heat_in = entry * T if entry_heat is None else jnp.asarray(entry_heat) * mask[..., None]
+    dS = (flux_S_above - flux_S_below) * inv_h
+    dT = (flux_T_above - flux_T_below + heat_in) * inv_h
+    return dS * mask[..., None], dT * mask[..., None]
+
+
 def virtual_salt_flux_from_net(
     F_fw: jnp.ndarray,
     S_ref: float | jnp.ndarray,
@@ -482,6 +623,70 @@ def resolve_runoff_spread_arg(config):
     return None
 
 
+def runoff_spread_layer_fractions(h_k, mask, spread):
+    """NEMO ``sbcrnf`` runoff depth weights: per-level FRACTION of each level
+    lying above the spread depth (a level straddling it counts its above-
+    depth part), zero on dry levels and land, and the resulting
+    ``h_rnf = min(spread, wet depth)``.  ``spread`` is a scalar or an
+    already-broadcast ``(..., 1)`` per-cell depth.  Shared by the virtual
+    (salt) and real (volume) closures so both spread a river over the same
+    levels."""
+    cum_above = jnp.cumsum(h_k, axis=-1) - h_k          # depth of level top
+    h_safe = jnp.maximum(h_k, 1.0e-3)
+    w_frac = jnp.clip((spread - cum_above) / h_safe, 0.0, 1.0)
+    wet_lvl = (h_k > 1.0e-3) & (mask[..., None] > 0.5)
+    w_frac = jnp.where(wet_lvl, w_frac, 0.0)
+    h_rnf = jnp.sum(w_frac * h_k, axis=-1)
+    return w_frac, h_rnf
+
+
+def runoff_entry_profile(fw, h_k, mask, rho_0: float, runoff_spread_m):
+    """Per-level water ENTRY rate [m/s] of the runoff channel under the real
+    closure: NEMO ``sbc_rnf_div`` injects ``rnf/(rho0 h_rnf)`` into the
+    divergence of every level down to ``h_rnf``, i.e. the river water enters
+    each level in proportion to its thickness inside ``h_rnf``.  Returns
+    ``(..., nlev)`` summing to ``runoff/rho_0`` per column (0 on land)."""
+    _spread = jnp.asarray(runoff_spread_m)
+    if _spread.ndim > 0:
+        _spread = _spread[..., None]
+    w_frac, h_rnf = runoff_spread_layer_fractions(h_k, mask, _spread)
+    R = jnp.asarray(fw.runoff) / rho_0 * mask
+    frac = w_frac * h_k / jnp.maximum(h_rnf, 1.0e-3)[..., None]
+    return R[..., None] * frac
+
+
+def real_freshwater_entry(fw, F_rate, h_k, mask, rho_0: float, T,
+                          runoff_spread_m=None):
+    """Per-level water entry ``(F_entry, entry_heat)`` for
+    :func:`real_freshwater_dilution_tendencies` on either core.
+
+    ``F_rate`` is the (normalised) total the eta channel received.  Runoff
+    enters over NEMO's ``h_rnf`` when a spread depth is configured, all else
+    at the surface.  Heat: rain/evaporation/restoring water carries ZERO
+    tracer temperature (their heat content is in the surface heat flux,
+    NEMO ``blk_oce_2`` / ``sbcssr``); runoff, ice melt water and the
+    normalisation residual enter at the local temperature (NEMO ``rnf_tsc``
+    at SST; no ice-melt heat-content term exists in our ice coupling either
+    -- PLAUSIBLE, review item).
+    """
+    F = jnp.asarray(F_rate) * mask
+    R = jnp.asarray(fw.runoff) / rho_0 * mask
+    if runoff_spread_m is not None:
+        R_entry = runoff_entry_profile(fw, h_k, mask, rho_0, runoff_spread_m)
+    else:
+        R_entry = jnp.concatenate(
+            [R[..., None], jnp.zeros_like(h_k[..., 1:])], axis=-1)
+    top_rest = F - jnp.sum(R_entry, axis=-1)
+    F_entry = R_entry.at[..., 0].add(top_rest)
+    # heat-in-flux channels (zero tracer temperature)
+    pe = (jnp.asarray(fw.precip) - jnp.asarray(fw.evap)) / rho_0 * mask
+    rest = getattr(fw, "restoring", None)
+    pe = pe if rest is None else pe + jnp.asarray(rest) / rho_0 * mask
+    # runoff enters at SST over the whole h_rnf (NEMO rnf_tsc = rnf*sst)
+    entry_heat = (R_entry * T[..., :1]).at[..., 0].add((top_rest - pe) * T[..., 0])
+    return F_entry, entry_heat
+
+
 def runoff_spread_virtual_salt_tendency_3d(
     fw,
     S_ref: float | jnp.ndarray,
@@ -597,12 +802,7 @@ def runoff_spread_virtual_salt_tendency_3d(
     # level always carries weight where wet, so shallow columns degrade
     # gracefully to the legacy single-cell form.  The conservation identity
     # is exact for any weights: sum_k (dS_col*w_k)*h_k = dS_col*h_rnf.
-    cum_above = jnp.cumsum(h_k, axis=-1) - h_k          # depth of level top
-    h_safe = jnp.maximum(h_k, 1.0e-3)
-    w_frac = jnp.clip((_spread - cum_above) / h_safe, 0.0, 1.0)
-    wet_lvl = (h_k > 1.0e-3) & (mask[..., None] > 0.5)
-    w_frac = jnp.where(wet_lvl, w_frac, 0.0)
-    h_rnf = jnp.sum(w_frac * h_k, axis=-1)
+    w_frac, h_rnf = runoff_spread_layer_fractions(h_k, mask, _spread)
     wet_col = (h_top > 1.0e-3) & (mask > 0.5)
     h_rnf_safe = jnp.maximum(h_rnf, 1.0e-3)
     dS_rnf_col = jnp.where(wet_col, -S_ref * R / (rho_0 * h_rnf_safe), 0.0)

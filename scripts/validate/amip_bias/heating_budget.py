@@ -95,6 +95,20 @@ def main(argv=None):
     ap.add_argument("--rad-detail", action="store_true",
                     help="LW/SW split of the top layers on the model T and on ERA5 T, "
                          "plus the ozone the radiation was given and the TOA fluxes")
+    ap.add_argument("--jacobian", nargs="*", type=int, default=None,
+                    metavar="LEVEL",
+                    help="radiative Jacobian: perturb each listed model level by "
+                         "--jac-delta K with the clouds FROZEN and record the net "
+                         "heating response in every level.  Separates the local "
+                         "Planck damping from the part supplied by neighbouring "
+                         "layers, which the whole-profile swap cannot.  Default "
+                         "levels are the UTLS band.")
+    ap.add_argument("--jac-delta", type=float, default=1.0,
+                    help="perturbation amplitude [K]; the response is reported per K "
+                         "and is also run at half amplitude as a linearity check")
+    ap.add_argument("--gwd-only", action="store_true",
+                    help="only the gravity-wave-drag momentum tendency: deposition per layer, "
+                         "global shares and the 5-degree-band profiles (saved to npz)")
     args = ap.parse_args(argv)
     t0 = time.time()
     out_dir = Path(args.out or (H.ROOT / "_tools" / "heating_budget"))
@@ -174,6 +188,49 @@ def main(argv=None):
 
     pf_full = real_make_physics(phys_cfg, *pargs, **pkw)
     T0 = np.asarray(state.T.data, dtype=np.float64)
+    if args.gwd_only:
+        from legoesm import constants
+        fn = fns["gwd"]
+        kw = {"phys_state": phys_state}
+        if getattr(fn, "_wants_forcing", False):
+            kw["forcing"] = forcing
+        res = fn(state, mesh, sig, **kw)
+        t = res if hasattr(res, "dT_dt") else res[0]
+        du = np.asarray(t.du_dt.data, dtype=np.float64).reshape(-1, T0.shape[1]) * 86400.0
+        p_s = np.asarray(state.p_s.data, dtype=np.float64)
+        dsig = np.asarray(sig.dsigma, dtype=np.float64)[None, :]
+        on_edges = du.shape[0] != T0.shape[0]
+        print(f"GWD tendency on {'edges' if on_edges else 'cells'}: {du.shape}")
+        if on_edges:                                        # edge-normal tendency (MPAS bridge)
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            ue, vn = reconstruct_cell_velocity(jnp.asarray(du), mesh)
+            du_east, dv_north = np.asarray(ue, dtype=np.float64), np.asarray(vn, dtype=np.float64)
+        else:
+            du_east, dv_north = du, np.zeros_like(du)
+        lat_deg = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
+        area = np.asarray(mesh.areaCell, dtype=np.float64)
+        dp = p_s[:, None] * dsig
+        du = du_east                                        # zonal force from here on
+        dep = np.hypot(du_east, dv_north) * dp / constants.g / 86400.0   # |momentum sink| per layer [Pa]
+        w = area / area.sum()
+        tot = dep.sum(1)
+        share_top1 = (dep[:, 0] * w).sum() / max((tot * w).sum(), 1e-30)
+        share_top2 = (dep[:, :2].sum(1) * w).sum() / max((tot * w).sum(), 1e-30)
+        print(f"\nGWD deposition: global-mean column sink {(tot * w).sum() * 1e3:.4f} mPa; "
+              f"share in top layer {share_top1:.3f}, top two {share_top2:.3f}")
+        zdu, zdep = band_mean(du, lat_deg, area), band_mean(dep, lat_deg, area)
+        p_mid = band_mean(p_s[:, None] * np.asarray(sig.sigma_full, dtype=np.float64)[None, :],
+                          lat_deg, area) / 100.0
+        np.savez(out_dir / f"gwd_{args.run}_d{args.day:04d}.npz", bands=BANDS,
+                 du_dt=zdu, deposition=zdep, p_hpa=p_mid, dt=DT)
+        for lo, hi, name in ((-90, -60, "60-90S"), (60, 90, "60-90N")):
+            sel = (BANDS[:-1] >= lo) & (BANDS[:-1] < hi)
+            cw = np.cos(np.deg2rad(0.5 * (BANDS[:-1] + BANDS[1:])))[sel]
+            cw = cw / cw.sum()
+            prof, pp = (zdu[sel] * cw[:, None]).sum(0), (p_mid[sel] * cw[:, None]).sum(0)
+            print(f"\n{name} GWD zonal du/dt [m/s/day] by level (p hPa):")
+            print("  " + " ".join(f"{pp[k]:6.1f}:{prof[k]:+6.2f}" for k in range(min(14, prof.size))))
+        return 0
     rec.clear()
     pf_full(state, mesh, sig, phys_state=phys_state, forcing=forcing)
     missing = [m for m in MODULES if m not in rec]
@@ -198,6 +255,56 @@ def main(argv=None):
     dyn = dyn - vfilt          # dynamics row = advection + adiabatic + horizontal mixing
     print(f"one step eager ({time.time() - t0:.0f}s), nu_vert4_T={nu4:g}", flush=True)
 
+    # Split the dynamics row into the three terms the dycore itself assembles
+    # (horizontal advection, the theta-form vertical term, the surface-pressure
+    # adiabatic term).  These are the dycore's own arrays, not a re-derivation:
+    # mpas_hydrostatic_tendencies returns them on request, which no production
+    # path does.  Called WITHOUT physics so the terms are the dry dynamics only.
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        mpas_hydrostatic_tendencies)
+    _tend_full, _terms = mpas_hydrostatic_tendencies(
+        state, mesh, sig, model.config, None, DT, return_thermo_terms=True)
+    dyn_terms = {
+        "dyn_horiz_adv": np.asarray(_terms.horiz_adv, dtype=np.float64),
+        "dyn_horiz_diff": np.asarray(_terms.horiz_diff, dtype=np.float64),
+        "dyn_vert_adv": np.asarray(_terms.vert_adv, dtype=np.float64),
+        "dyn_adiabatic": np.asarray(_terms.adiabatic_ps, dtype=np.float64),
+    }
+    # Coordinate vertical velocity as a descent rate in pressure units, so the
+    # cap mean can be read against the winter residual circulation's ~0.5-1
+    # hPa/day (GLM's closure test): if the model descends several times faster
+    # than that, the vertical warming is a circulation problem; if it descends
+    # at a physical rate while the tendency is 1-2 K/day, the vertical operator
+    # itself is.  sigma_dot is at interfaces; average to full levels.
+    _sd = np.asarray(_terms.sigma_dot, dtype=np.float64)
+    if _sd.shape[1] == T0.shape[1] + 1:
+        _sd = 0.5 * (_sd[:, :-1] + _sd[:, 1:])
+    # The pressure velocity is NOT p_s*sigma_dot alone: in a sigma coordinate
+    # omega = p_s*sigma_dot + sigma*(dp_s/dt + u.grad p_s).  Both reviewers
+    # flagged that dropping the surface-pressure terms lets a spinning-down
+    # global p_s bump read as "descent", which is exactly the failure mode in a
+    # cold start.  The material dp_s/dt the dycore reports already contains the
+    # advective part (it is the flux-form tendency), so it is added directly.
+    _p_s = np.asarray(state.p_s.data, dtype=np.float64)
+    _sig = np.asarray(sig.sigma_full, dtype=np.float64)[None, :]
+    _dps = np.asarray(_tend_full.dp_s_dt.data, dtype=np.float64)[:, None]
+    _omega = _sd * _p_s[:, None] + _sig * _dps
+    extra_rows = {"omega_hpa_day": _omega * 86400.0 / 100.0,
+                  # the piece that was being reported before, kept so the two
+                  # can be compared directly
+                  "omega_sigmadot_only_hpa_day": _sd * _p_s[:, None] * 86400.0 / 100.0,
+                  "omega_ps_term_hpa_day": _sig * _dps * 86400.0 / 100.0}
+    # NOT in dyn_terms: these are not K/day tendencies and must not enter the
+    # closure sum below.
+    print(f"horizontal T diffusion K_h = {float(model.config.K_h):.3e} m2/s "
+          f"({'ACTIVE' if float(model.config.K_h) > 0 else 'off'})", flush=True)
+    _closure = dyn - sum(dyn_terms.values())
+    print(f"dynamics split closure: max |dyn - (horiz+vert+adiab)| = "
+          f"{np.abs(_closure).max() * 86400.0:.3f} K/day "
+          f"(the remainder is the dycore's mass fixer and the p_s tendency's "
+          f"effect on T, which the residual row keeps)", flush=True)
+    dyn_terms["dyn_residual"] = _closure
+
     lat_deg = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
     area = np.asarray(mesh.areaCell, dtype=np.float64)
     p_s = np.asarray(state.p_s.data, dtype=np.float64)
@@ -205,8 +312,46 @@ def main(argv=None):
     run_cfg = json.load(open(H.ROOT / args.run / "experiment_config.json"))
     month = int(((int(run_cfg.get("start_month", 1)) - 1 + args.day // 30) % 12) + 1)
     Te = era5_on_columns(lat_deg, p_full, month)
+
+    # The same three dycore terms evaluated on ERA5's temperature field with the
+    # model's own winds.  The model's advection warming the cap could be a
+    # RESPONSE to the warm anomaly already there (a warm cap weakens the inflow
+    # gradient) rather than its cause; on a reanalysis temperature field that
+    # anomaly is absent, so a warming that survives is the flow and the operator,
+    # not the anomaly.  Winds, pressure and the mesh are the model's throughout.
+    _state_era5 = state._replace(
+        T=state.T.replace(data=jnp.asarray(Te, dtype=state.T.data.dtype)))
+    _, _terms_e = mpas_hydrostatic_tendencies(
+        _state_era5, mesh, sig, model.config, None, DT, return_thermo_terms=True)
+    dyn_terms.update({
+        "era5T_horiz_adv": np.asarray(_terms_e.horiz_adv, dtype=np.float64),
+        "era5T_horiz_diff": np.asarray(_terms_e.horiz_diff, dtype=np.float64),
+        "era5T_vert_adv": np.asarray(_terms_e.vert_adv, dtype=np.float64),
+        "era5T_adiabatic": np.asarray(_terms_e.adiabatic_ps, dtype=np.float64),
+    })
     w = area / area.sum()
     if args.rad_detail:
+        # Radiation rebuilds cloud properties from the temperature it is handed
+        # (compute_cloud_properties(T=T, ...)), and cloud fraction depends on T
+        # through saturation, so swapping the temperature ALSO swaps the clouds
+        # and the difference is not a pure temperature response (codex).  Record
+        # the cloud properties the model-temperature call produces and replay
+        # them, in call order, into the ERA5-temperature call.
+        import legoesm.atmosphere.physics.radiation.integration as _radint
+        _cloud_tape: list = []
+        _cloud_mode = {"m": "record"}
+        _orig_ccp = _radint.compute_cloud_properties
+
+        def _ccp(*a, **kw):
+            if _cloud_mode["m"] == "replay" and _cloud_tape:
+                return _cloud_tape.pop(0)
+            out = _orig_ccp(*a, **kw)
+            if _cloud_mode["m"] == "record":
+                _cloud_tape.append(out)
+            return out
+
+        _radint.compute_cloud_properties = _ccp
+
         def rad_on(T_arr):
             fn = fns["radiation"]
             kw = {"forcing": forcing} if getattr(fn, "_wants_forcing", False) else {}
@@ -218,9 +363,61 @@ def main(argv=None):
             lw, sw, olr, rsu = rad_calls[0]            # first call = all-sky
             print(f"    TOA global mean: rlut {float((olr * w).sum()):.2f}  rsut {float((rsu * w).sum()):.2f} W/m2")
             return lw.reshape(T0.shape) * 86400.0, sw.reshape(T0.shape) * 86400.0
+        _cloud_mode["m"] = "record"
         lw_m, sw_m = rad_on(T0)
+        _recorded = list(_cloud_tape)
+
+        if args.jacobian is not None:
+            levels = args.jacobian or [9, 10, 11, 12, 13, 14]
+            cap = lat_deg >= 60.0
+            wc = area[cap] / area[cap].sum()
+            base = (lw_m + sw_m)
+            print(f"\nradiative Jacobian, clouds frozen, {args.jac_delta:g} K "
+                  f"perturbation, 60-90N area-weighted [K/day per K]")
+            print("  perturbed | response in each level (rows = perturbed, cols = level)")
+            hdr = "   p_pert |" + "".join(f"{np.average(p_full[cap, L], weights=wc)/100:8.0f}"
+                                          for L in levels)
+            print(hdr)
+            jac = np.zeros((len(levels), len(levels)))
+            for a_i, L in enumerate(levels):
+                for amp, store in ((args.jac_delta, True), (0.5 * args.jac_delta, False)):
+                    Tp = T0.copy()
+                    Tp[:, L] += amp
+                    _cloud_mode["m"] = "replay"
+                    _cloud_tape[:] = list(_recorded)
+                    lw_p, sw_p = rad_on(Tp)
+                    resp = ((lw_p + sw_p) - base) / amp
+                    if store:
+                        row = [float(np.average(resp[cap, M], weights=wc)) for M in levels]
+                        jac[a_i] = row
+                    else:
+                        half = [float(np.average(resp[cap, M], weights=wc)) for M in levels]
+                print(f"{np.average(p_full[cap, L], weights=wc)/100:9.0f} |"
+                      + "".join(f"{v:8.4f}" for v in jac[a_i])
+                      + f"   (half-amplitude diagonal {half[a_i]:+.4f})")
+            diag = np.diag(jac)
+            print(f"\n  local damping -J_ii: " + " ".join(f"{-v:.4f}" for v in diag))
+            print(f"  column sum per perturbed layer (local + what neighbours return): "
+                  + " ".join(f"{v:.4f}" for v in jac.sum(axis=1)))
+            np.savez(out_dir / f"rad_jacobian_{args.run}_d{args.day:04d}.npz",
+                     jac=jac, levels=np.asarray(levels),
+                     p_hpa=np.asarray([np.average(p_full[cap, L], weights=wc) / 100
+                                       for L in levels]))
+            _cloud_mode["m"] = "off"
+
+        # clouds FROZEN at the model-temperature values: a pure temperature response
+        _cloud_mode["m"] = "replay"
+        _cloud_tape[:] = list(_recorded)
         lw_e, sw_e = rad_on(Te)
+        # and again with clouds free, so the cloud share of the response is visible
+        _cloud_mode["m"] = "off"
+        lw_e_freecld, sw_e_freecld = rad_on(Te)
+        _radint.compute_cloud_properties = _orig_ccp
+        print(f"    cloud tape: {len(_recorded)} call(s) recorded and replayed")
         o3 = np.asarray(forcing["o3_vmr"], dtype=np.float64).reshape(T0.shape) * 1e6
+        rad_bands = {"lw_model": lw_m, "sw_model": sw_m, "lw_era5": lw_e, "sw_era5": sw_e,
+                     "lw_era5_freecld": lw_e_freecld, "sw_era5_freecld": sw_e_freecld,
+                     "o3_ppmv": o3}
         gmp = (p_full * w[:, None]).sum(0) / 100.0
         print("\nradiation detail, global mean, K/day (model T | ERA5 T in the same columns), o3 ppmv given to radiation")
         print("  p[hPa]  T_mod  T_era   LW_m   SW_m  net_m |  LW_e   SW_e  net_e | o3")
@@ -231,11 +428,15 @@ def main(argv=None):
 
     rows = {**{k: v * 86400.0 for k, v in phys.items()},
             "vert_del4": vfilt * 86400.0, "dynamics": dyn * 86400.0,
+            **{k: v * 86400.0 for k, v in dyn_terms.items()},
+            **extra_rows,
             "total": total * 86400.0}
     zm = {k: band_mean(v, lat_deg, area) for k, v in rows.items()}
     zm["T_model"] = band_mean(T0, lat_deg, area)
     zm["T_era5"] = band_mean(Te, lat_deg, area)
     zm["p_hpa"] = band_mean(p_full, lat_deg, area) / 100.0
+    if args.rad_detail:
+        zm.update({k: band_mean(v, lat_deg, area) for k, v in rad_bands.items()})
     gm = {k: (v * w[:, None]).sum(0) for k, v in rows.items()}
     gm_p = (p_full * w[:, None]).sum(0) / 100.0
     gm_bias = ((T0 - Te) * w[:, None]).sum(0)
@@ -253,15 +454,30 @@ def main(argv=None):
         print(line)
     np.savez(out_dir / f"heating_budget_{args.run}_d{args.day:04d}.npz",
              bands=BANDS, month=month, dt=DT, **zm)
+    # Per-cell descent rate and terrain, so a cap-mean descent can be checked
+    # for whether it is cap-WIDE or concentrated near topography — a band mean
+    # cannot tell those apart, and they implicate different causes.
+    np.savez(out_dir / f"omega_cells_{args.run}_d{args.day:04d}.npz",
+             omega_hpa_day=extra_rows["omega_hpa_day"],
+             omega_sigmadot_only=extra_rows["omega_sigmadot_only_hpa_day"],
+             omega_ps_term=extra_rows["omega_ps_term_hpa_day"], lat_deg=lat_deg,
+             lon_deg=np.rad2deg(np.asarray(mesh.lonCell, dtype=np.float64)),
+             area=area, p_full=p_full,
+             phis=np.asarray(state.phis.data, dtype=np.float64))
 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     keys = list(rows) + ["T_model - T_era5"]
     zm["T_model - T_era5"] = zm["T_model"] - zm["T_era5"]
-    fig, axs = plt.subplots(3, 3, figsize=(16, 11), constrained_layout=True)
+    ncol_p = 3
+    nrow_p = -(-len(keys) // ncol_p)      # grew when the dynamics split landed
+    fig, axs = plt.subplots(nrow_p, ncol_p, figsize=(16, 3.7 * nrow_p),
+                            constrained_layout=True)
     latc = 0.5 * (BANDS[1:] + BANDS[:-1])
     pc = np.nanmean(zm["p_hpa"], axis=0)
+    for a in axs.ravel()[len(keys):]:
+        a.axis("off")
     for a, k in zip(axs.ravel(), keys):
         lim = 12.0 if k.startswith("T_model") else max(0.5, np.nanpercentile(np.abs(zm[k]), 98))
         m = a.contourf(latc, pc, zm[k].T, np.linspace(-lim, lim, 25), cmap="RdBu_r",

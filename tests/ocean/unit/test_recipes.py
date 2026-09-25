@@ -142,10 +142,9 @@ _FROZEN_MPAS_DYCORE = {
     "A_v": 1.0e-4,
     "K_v": 1.0e-5,
     "C_smag_lap": 0.33,
-    # K_zeta_bih is NOT frozen as a literal any more: it is derived from the
-    # mesh spacing (K_ref*(dx/dx_ref)^3, anchored on the ico6 mesh where 1e14
-    # was tuned), so its value depends on the grid the config is built for.
-    # The tests below check the RULE instead of a number.
+    # Frozen as a literal again because the DEFAULT is off; main's mesh-scaled
+    # rule stays available via K_zeta_bih=None and is covered separately.
+    "K_zeta_bih": 0.0,
     "barotropic_solver": "implicit_cn",
     "barotropic_implicit_pcg_tol": 1.0e-10,
     "barotropic_implicit_pcg_maxiter": 300,
@@ -221,8 +220,13 @@ class TestOMIPNemoMatchFactories:
         # The vorticity damping ships DERIVED (None) and reproduces the frozen
         # 1e14 exactly at the ico6 mesh it was tuned on.
         from legoesm.ocean.mpas_config import resolution_scaled_k_zeta_bih
-        assert mc.K_zeta_bih is None
-        assert resolution_scaled_k_zeta_bih(mc.K_zeta_bih_ref_dx_m, mc) == 1.0e14
+        assert mc.K_zeta_bih == 0.0
+        # The mesh-scaled RULE main added is kept and still exercised -- but it
+        # only fires for an UNPINNED config, because the resolver returns a
+        # pinned value unchanged ("including 0.0 = the term off", its own
+        # docstring). Passing the pinned recipe would have tested nothing.
+        assert resolution_scaled_k_zeta_bih(
+            mc.K_zeta_bih_ref_dx_m, mc._replace(K_zeta_bih=None)) == 1.0e14
         assert mc.gm_redi is not None
         assert mc.gm_redi.visbeck.enabled is False
         for k, v in _FROZEN_GM_REDI.items():
@@ -289,9 +293,17 @@ class TestOMIPNemoMatchFactories:
         import numpy as _np
         from legoesm.ocean.mpas_config import resolution_scaled_k_zeta_bih
         _dc = _np.asarray(mesh.dcEdge)
-        assert factory_mc.K_zeta_bih is None
-        assert config.K_zeta_bih == resolution_scaled_k_zeta_bih(
-            float(_dc[_dc > 0].mean()), factory_mc)
+        # Default is the PIN 0.0 (filter off, user decision 2026-09-06),
+        # not main's unpinned derivation; the factory must carry the pin
+        # through rather than deriving a coefficient behind it.
+        assert factory_mc.K_zeta_bih == 0.0
+        assert config.K_zeta_bih == 0.0
+        # Same rule, exercised where it actually fires: unpinned. A bare
+        # call on the pinned factory config would return 0.0 and assert
+        # nothing at all.
+        assert resolution_scaled_k_zeta_bih(
+            float(_dc[_dc > 0].mean()),
+            factory_mc._replace(K_zeta_bih=None)) > 0.0
         # ...and the run-dependent physics is the proven restoring-mode SETUP.
         assert config.physics is not None
         assert config.physics.surface_forcing.scheme == "combined"
@@ -323,7 +335,11 @@ class TestOMIPNemoMatchFactories:
         _dc = _np.asarray(_mesh.dcEdge)
         _expect = resolution_scaled_k_zeta_bih(
             float(_dc[_dc > 0].mean()), MPASOceanConfig(K_zeta_bih=None))
-        assert config.K_zeta_bih == _expect
+        # The recipe pins the filter OFF, so the built config carries 0.0;
+        # _expect is what the mesh rule WOULD give for this mesh, kept so
+        # the derivation stays covered and a silent change to it goes red.
+        assert config.K_zeta_bih == 0.0
+        assert _expect > 0.0
         for k, v in _FROZEN_GM_REDI.items():
             assert getattr(config.gm_redi, k) == v, k
 

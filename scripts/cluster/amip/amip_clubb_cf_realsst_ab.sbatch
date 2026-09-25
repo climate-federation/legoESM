@@ -1,4 +1,9 @@
 #!/bin/bash
+# REPOINTED 2026-09-23: config/amip/amip_production.yaml became the CAM6
+# suite on that date.  This script exists to reproduce a SPECIFIC recorded
+# analysis, so it now names config/amip/amip_sundqvist_l36.yaml -- the same
+# deck under its new name, byte-unchanged -- rather than silently running a
+# different model.
 # REAL-SST realism A/B for the CLUBB cloud-fraction -> radiation lever.
 # Calibrates the albedo/rsut effect under REAL AMIP forcing (observed SST/SIC +
 # CMIP6 solar/ozone/ghg/aerosol + ERA5 IC + ETOPO topography), so the marine-Sc
@@ -54,7 +59,7 @@ PATHS=(
   --aerosol-file "$FDIR/aerosol_amip_clim.nc"
 )
 COMMON=(
-  --config config/amip/amip_production.yaml
+  --config config/amip/amip_sundqvist_l36.yaml
   "${PATHS[@]}"
   --grid-type latlon --discretization latlon_cgrid --resolution 24 --nlev 40 --dt 60
   --turbulence clubb

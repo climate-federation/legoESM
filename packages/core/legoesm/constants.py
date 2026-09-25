@@ -58,6 +58,14 @@ T_min_atmosphere = 200.0        # Lower-bound floor for atmospheric temperature 
                                 # to avoid division by near-zero T in clear-sky columns.
                                 # Matches Held-Suarez T_MIN and DCMIP lower bounds.
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+# Saturation specific humidity over sea water, as a fraction of the value over
+# fresh water at the same temperature: the water activity of salt water at the
+# ocean's typical salinity (S ~ 35 psu) lowers the saturation vapour pressure
+# by ~2%.  Standard in every bulk air-sea flux algorithm (COARE 3.0, Fairall
+# et al. 2003; Liu-Katsaros-Businger 1979).  Regional salinity of 33-37 psu
+# moves this in the third decimal, which is why it is a constant and not a
+# function of a salinity field.
+q_sat_saline_fraction = 0.98
 T_hom_freeze = 233.15           # Homogeneous freezing threshold [K] (~-40 C): all
                                 # condensate is ice below; standard mixed-phase
                                 # partition ramp spans [T_hom_freeze, T_freeze]

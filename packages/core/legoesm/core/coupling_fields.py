@@ -1,6 +1,7 @@
 """Fixed-slot coupling field containers.
 
-All fields pre-allocated with fixed shape — no dicts, no Optional types.
+Physical fields are pre-allocated with fixed shape. The optional forcing height
+distinguishes observed reference-height input from model-level input.
 These NamedTuples define the strict interface between atmosphere and surface.
 """
 
@@ -9,6 +10,15 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax
+import jax.numpy as jnp
+
+from legoesm import constants
+
+
+def lowest_level_height(T_lowest, p_half, p_full):
+    """Hydrostatic lowest full-level height above the LOCAL surface [m]."""
+    return (constants.R_d * T_lowest / constants.g
+            * jnp.log(p_half[..., -1] / p_full[..., -1]))
 
 
 def require_surface_radiation_aux(aux, *, radiation_active: bool,
@@ -77,6 +87,9 @@ class AtmToSurface(NamedTuple):
     co2_ppmv: jax.Array          # CO2 concentration [ppmv]
     has_radiation: jax.Array     # 1.0 = radiation fields valid, 0.0 = not
     has_precipitation: jax.Array # 1.0 = precip fields valid, 0.0 = not
+    # Appended for positional compatibility. None denotes observed forcing
+    # at the land config reference height; model-level producers supply metres.
+    z_lowest: jax.Array | None = None
 
 
 class TileResponse(NamedTuple):

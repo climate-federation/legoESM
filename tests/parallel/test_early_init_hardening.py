@@ -7,11 +7,11 @@ covered by the multicontroller self-spawn suites.
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import types
 
 import pytest
-
 from legoesm.parallel import early_init as ei
 
 _ALL_ENV = (
@@ -621,3 +621,304 @@ def test_non_gpu_platform_selected_classifies_every_real_spelling(
         else:
             monkeypatch.setenv(var, val)
     assert ei._non_gpu_platform_selected() is expect_non_gpu
+
+
+def _fake_sysfs(tmp_path, ifaces):
+    for name, state, speed in ifaces:
+        d = tmp_path / name
+        d.mkdir()
+        (d / "operstate").write_text(state + "\n")
+        if speed is not None:
+            (d / "speed").write_text(str(speed) + "\n")
+    return str(tmp_path)
+
+
+def _addr_for(addressed):
+    return lambda name: "10.0.0.1" if name in addressed else None
+
+
+def test_fastest_up_interface_picks_the_fabric_not_the_hostname_link(tmp_path):
+    """Levante shape plus one candidate per guard, each removable only by
+    that guard: an up, fast, ADDRESSED down-state port (UP guard); an up,
+    faster, unaddressed port (address guard); an up, fast, addressed
+    loopback (lo guard)."""
+    root = _fake_sysfs(tmp_path, [("enp225s0f0", "up", 1000),
+                                  ("enp225s0f1", "down", 400000),
+                                  ("bond0", "up", 200000),
+                                  ("lo", "up", 1000000),
+                                  ("ib0", "up", 100000)])
+    pick = ei.fastest_up_interface(
+        root, has_addr=_addr_for({"enp225s0f0", "enp225s0f1", "lo", "ib0"}))
+    assert pick == "ib0"
+
+
+def test_fastest_up_interface_none_when_nothing_qualifies(tmp_path):
+    root = _fake_sysfs(tmp_path, [("lo", "unknown", None),
+                                  ("veth0", "up", None),
+                                  ("eth0", "down", 1000),
+                                  ("ib1", "up", 100000)])
+    assert ei.fastest_up_interface(root, has_addr=_addr_for(set())) is None
+    assert ei.fastest_up_interface(str(tmp_path / "missing")) is None
+
+
+def test_interface_ipv4_reads_loopback_rejects_unknown_and_overlong_names():
+    assert ei.interface_ipv4("lo") == "127.0.0.1"
+    assert ei.interface_ipv4("nope0") is None
+    with pytest.raises(ValueError, match="exceeds 15 bytes"):
+        ei.interface_ipv4("lo" + "x" * 14)   # a 16-byte name whose prefix exists
+
+
+def test_resolve_gloo_interface_env_contract(monkeypatch):
+    """'default' keeps JAX's own choice (the measured 1 GbE path), a name is
+    taken verbatim, unset falls through to the fastest interface."""
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "default")
+    assert ei.resolve_gloo_interface() is None
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "ib3")
+    assert ei.resolve_gloo_interface() == "ib3"
+    monkeypatch.delenv("LEGOESM_GLOO_IFACE")
+    monkeypatch.setattr(ei, "fastest_up_interface", lambda: "ibX")
+    assert ei.resolve_gloo_interface() == "ibX"
+
+
+class _FakeClient:
+    """Enough of DistributedRuntimeClient for the vote and the barriers."""
+
+    def __init__(self, others):
+        self.kv = dict(others)
+        self.barriers = []
+
+    def key_value_set(self, k, v, allow_overwrite=False):
+        self.kv[k] = v
+
+    def wait_at_barrier(self, name, timeout_ms, process_ids=None):
+        self.barriers.append(name)
+
+    def key_value_dir_get(self, prefix):
+        return [(k, v) for k, v in self.kv.items() if k.startswith(prefix)]
+
+
+
+@pytest.fixture
+def distributed(monkeypatch):
+    from jax._src import distributed as _d
+    from jax._src import xla_bridge as xb
+    monkeypatch.setattr(xb, "_backends", {})
+    monkeypatch.setattr(ei, "_PINNED_IFACE", None)
+    monkeypatch.delenv("LEGOESM_GLOO_IFACE_PINNED", raising=False)
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "lo")
+    monkeypatch.setattr(_d.global_state, "process_id", 1)
+    monkeypatch.setattr(_d.global_state, "num_processes", 2)
+    saved = xb._backend_factories["cpu"]
+    yield _d, xb
+    xb._backend_factories["cpu"] = saved
+
+
+def test_pin_declines_without_a_client_and_records_why(monkeypatch):
+    """Single-process runs have no gloo at all; the hook must not touch the
+    backend registry, and the stamp must say it declined (a missing stamp
+    means the hook never ran, which the receipt writer refuses)."""
+    from jax._src import distributed as _d
+    from jax._src import xla_bridge as xb
+    monkeypatch.setattr(_d.global_state, "client", None)
+    monkeypatch.setattr(ei, "_PINNED_IFACE", None)
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "lo")
+    monkeypatch.delenv("LEGOESM_GLOO_IFACE_PINNED", raising=False)
+    before = xb._backend_factories["cpu"]
+    assert ei.pin_gloo_interface() is None
+    assert xb._backend_factories["cpu"] is before
+    assert os.environ["LEGOESM_GLOO_IFACE_PINNED"] == "declined:single-process"
+
+
+def test_declining_ranks_still_vote_and_arrive_at_both_barriers(distributed, monkeypatch):
+    """A rank that declines (non-gloo collectives, non-CPU platform,
+    'default') must publish its decline and pass both barriers, or the
+    pinning peers wait out the timeout (round-2 P1)."""
+    _d, xb = distributed
+    import jax
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    before = xb._backend_factories["cpu"]
+    jax.config.update("jax_cpu_collectives_implementation", "mpi")
+    try:
+        assert ei.pin_gloo_interface() is None
+    finally:
+        jax.config.update("jax_cpu_collectives_implementation", "gloo")
+    assert os.environ["LEGOESM_GLOO_IFACE_PINNED"] == "declined:mpi"
+    assert client.kv["legoesm/gloo_iface/1"] == "declined mpi"
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
+    assert xb._backend_factories["cpu"] is before
+    client.barriers.clear()
+    prior = jax.config.jax_platforms
+    jax.config.update("jax_platforms", "cuda,cpu")   # the resolved config, not the env
+    try:
+        assert ei.pin_gloo_interface() is None
+    finally:
+        jax.config.update("jax_platforms", prior)
+    assert os.environ["LEGOESM_GLOO_IFACE_PINNED"] == "declined:platform-not-cpu"
+    assert len(client.barriers) == 2
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "default")
+    assert ei.pin_gloo_interface() is None
+    assert os.environ["LEGOESM_GLOO_IFACE_PINNED"] == "declined:default"
+
+
+def _rank0_row(client):
+    """Rank 0's published row with a live loopback listener behind it.
+    Returns an Event set when rank 0's connection back to rank 1 was
+    ACCEPTED (an accepted-then-closed connection delivers FIN, so recv()
+    returns b""; a listener closed with the connection still queued
+    delivers RST instead)."""
+    import threading
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    srv.settimeout(10)
+    port = srv.getsockname()[1]
+    accepted = threading.Event()
+
+    def rank0():
+        c, _ = srv.accept()
+        c.close()          # rank 1 connected to rank 0
+        me = client.kv["legoesm/gloo_iface/1"].split()   # rank 0 -> rank 1
+        with socket.create_connection((me[1], int(me[2])), timeout=10) as s1:
+            s1.settimeout(10)
+            if s1.recv(1) == b"":
+                accepted.set()
+    t = threading.Thread(target=rank0, daemon=True)
+    t.start()
+    client.kv["legoesm/gloo_iface/0"] = f"lo 127.0.0.1 {port}"
+    return accepted, t
+
+
+def test_pin_registers_a_factory_bound_to_the_interface(distributed, monkeypatch):
+    """With a distributed client present the CPU factory is replaced by one
+    that builds gloo on the chosen interface, after the ring probe over the
+    published ADDRESSES completes, and a second call is idempotent from
+    process-local state (an inherited env stamp is never trusted)."""
+    _d, xb = distributed
+    client = _FakeClient({})
+    accepted, thread = _rank0_row(client)
+    monkeypatch.setattr(_d.global_state, "client", client)
+    saved = xb._backend_factories["cpu"]
+    assert ei.pin_gloo_interface() == "lo"
+    thread.join(10)
+    assert accepted.is_set(), "rank 0's connection to rank 1 was never accepted"
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
+    assert client.kv["legoesm/gloo_iface/1"].startswith("lo 127.0.0.1 ")
+    assert xb._backend_factories["cpu"] is not saved
+    assert os.environ["LEGOESM_GLOO_IFACE_PINNED"] == "lo"
+    seen = {}
+    from jax._src.lib import xla_client
+    monkeypatch.setattr(xla_client._xla, "make_gloo_tcp_collectives",
+                        lambda **kw: seen.update(kw) or "COLL")
+    monkeypatch.setattr(xb, "make_cpu_client",
+                        lambda collectives=None: ("CLIENT", collectives))
+    assert xb._backend_factories["cpu"].factory() == ("CLIENT", "COLL")
+    assert seen["interface"] == "lo"
+    # A later init path (backend now created) sees the pin already installed.
+    monkeypatch.setattr(xb, "_backends", {"cpu": object()})
+    assert ei.pin_gloo_interface() == "lo"
+
+
+def test_inherited_env_stamp_does_not_stand_in_for_an_installation(distributed, monkeypatch):
+    _d, xb = distributed
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "lo")   # from a parent
+    import importlib
+    importlib.reload(ei)   # a fresh process pops the inherited stamp at import
+    assert "LEGOESM_GLOO_IFACE_PINNED" not in os.environ
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "lo")
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    monkeypatch.setattr(xb, "_backends", {"cpu": object()})
+    with pytest.raises(RuntimeError, match="after a backend was created"):
+        ei.pin_gloo_interface()
+    # a pre-vote refusal still tells the peers and passes both barriers
+    assert client.kv["legoesm/gloo_iface/1"].startswith("error ")
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
+    # a listener that cannot bind (address not on this host) and an
+    # interface resolver that raises are pre-vote failures too
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    monkeypatch.setattr(xb, "_backends", {})
+    real_ipv4 = ei.interface_ipv4
+    monkeypatch.setattr(ei, "interface_ipv4", lambda n: "203.0.113.7")
+    with pytest.raises(OSError):
+        ei.pin_gloo_interface()
+    assert client.kv["legoesm/gloo_iface/1"].startswith("error ")
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    monkeypatch.setattr(ei, "interface_ipv4", real_ipv4)
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "lo" + "x" * 14)
+    with pytest.raises(ValueError, match="exceeds 15 bytes"):
+        ei.pin_gloo_interface()
+    assert client.kv["legoesm/gloo_iface/1"].startswith("error ")
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE", "lo")
+    # a stale coordinator key that does not parse is caught after the vote
+    # and the rank still reaches the second barrier
+    client = _FakeClient({"legoesm/gloo_iface/x": "junk"})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    monkeypatch.setattr(xb, "_backends", {})
+    with pytest.raises(ValueError):
+        ei.pin_gloo_interface()
+    assert client.barriers[-1] == "legoesm_gloo_iface_probed"
+
+
+def test_pin_refuses_unreachable_peers_missing_ranks_and_no_address(distributed, monkeypatch):
+    _d, xb = distributed
+    # vote lacks rank 0 (stale/missing) -> refused before any probe
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    with pytest.raises(RuntimeError, match="expected 0..1"):
+        ei.pin_gloo_interface()
+    # a rank that refuses after the vote still passes the second barrier,
+    # so the peers that also refuse are not stranded until the timeout
+    assert client.barriers == ["legoesm_gloo_iface_publish",
+                               "legoesm_gloo_iface_probed"]
+    # rank 0 published an address nobody listens on -> probe fails loudly
+    monkeypatch.setattr(_d.global_state, "client",
+                        _FakeClient({"legoesm/gloo_iface/0": "ib0 127.0.0.1 1"}))
+    monkeypatch.setattr(ei, "_GLOO_PROBE_TIMEOUT_S", 2.0)
+    with pytest.raises(RuntimeError, match="cannot reach rank 0"):
+        ei.pin_gloo_interface()
+    # rank 0 declined while rank 1 pins -> mixed configuration refused
+    client = _FakeClient({"legoesm/gloo_iface/0": "declined mpi"})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    with pytest.raises(RuntimeError, match="mixed configuration"):
+        ei.pin_gloo_interface()
+    assert client.barriers[-1] == "legoesm_gloo_iface_probed"
+    client = _FakeClient({})
+    monkeypatch.setattr(_d.global_state, "client", client)
+    monkeypatch.setattr(ei, "interface_ipv4", lambda n: None)
+    with pytest.raises(RuntimeError, match="no IPv4 address"):
+        ei.pin_gloo_interface()
+    # the cause was published for the peers before raising
+    assert client.kv["legoesm/gloo_iface/1"].startswith("error ")
+    assert len(client.barriers) == 2
+    # and a peer that sees such a row names the failing rank, not a mismatch
+    monkeypatch.setattr(ei, "interface_ipv4", lambda n: "127.0.0.1")
+    monkeypatch.setattr(_d.global_state, "client",
+                        _FakeClient({"legoesm/gloo_iface/0": "error boom"}))
+    with pytest.raises(RuntimeError, match="failed on another rank: rank 0: boom"):
+        ei.pin_gloo_interface()
+
+
+def test_pin_local_gpu_skips_on_explicit_cpu_platform(monkeypatch):
+    """JAX_PLATFORMS=cpu on a GPU node with more ranks than GPUs: no pin,
+    no refusal -- the run never creates a CUDA backend (measured: the six-
+    process CPU duo parity died here on g[097,271], job 9902131)."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    assert ei.pin_local_gpu(local_rank=2, n_local=3) is None
+    # a pin that FITS still narrows on the cpu platform (existing contract)
+    assert ei.pin_local_gpu(local_rank=1, n_local=2) == "1"
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    # and the refusal is still live when a GPU platform is selected
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    with pytest.raises(RuntimeError, match="more local ranks than GPUs"):
+        ei.pin_local_gpu(local_rank=2, n_local=3)

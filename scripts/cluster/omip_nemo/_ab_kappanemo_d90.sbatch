@@ -83,7 +83,7 @@ if [ -s /tmp/kappa90_dirty.$$ ]; then
 fi
 rm -f /tmp/kappa90_dirty.$$
 
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader
 export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.free \

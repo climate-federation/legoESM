@@ -152,6 +152,22 @@ def strip_north_rows_raw(raw: dict, n: int) -> dict:
     return out
 
 
+def _detect_cap_j(gphit, n_lat, fold_j, cap_dlat_rel_deviation):
+    """Row where the grid starts deviating from regular lat-lon (bipolar
+    cap start): first row whose dlat deviates from the southern-half median
+    by more than ``cap_dlat_rel_deviation`` (relative)."""
+    n_lon = gphit.shape[1]
+    lat_col = gphit[:, n_lon // 4]  # sample column away from fold poles
+    dlat = jnp.diff(lat_col)
+    median_dlat = jnp.median(dlat[:n_lat // 2])  # use southern half
+    deviation = jnp.abs(dlat - median_dlat) / jnp.abs(median_dlat)
+    cap_candidates = jnp.where(deviation > cap_dlat_rel_deviation,
+                               size=n_lat - 1)
+    if len(cap_candidates[0]) > 0:
+        return int(cap_candidates[0][0])
+    return fold_j  # no cap detected (very regular grid)
+
+
 def _detect_fold(
     glamt: jax.Array,
     gphit: jax.Array,
@@ -215,6 +231,49 @@ def _detect_fold(
         "n_lon-1-i": jnp.arange(n_lon - 1, -1, -1, dtype=jnp.int32),
         "(n_lon-i)%n_lon": (n_lon - jnp.arange(n_lon, dtype=jnp.int32)) % n_lon,
     }
+
+    # --- EXACT storage-layout classification (measured convention, 2026-08-26;
+    # see scripts/validate/ocean_fidelity/check_tripole_fold_pairing.py and the
+    # NEMO T-pivot reference lbc_nfd_generic.h90).  Real ORCA meshes hit one of
+    # these to <1e-6 deg; synthetic/legacy grids fall through to the lat-only
+    # auto-detect below (byte-identical legacy behaviour).
+    #   pivot_row_stored (de-haloed, e.g. eORCA025): stored top T row is the
+    #     SELF-symmetric pivot row under P_T=(n_lon-i)%n_lon.
+    #   halo_row_stored (e.g. eORCA1.2): stored top T row == permuted copy of
+    #     the row below under n_lon-1-i.
+    def _wrap_dlon(a, b):
+        d = jnp.abs(a - b) % 360.0
+        return jnp.minimum(d, 360.0 - d)
+
+    lon_fold = glamt[fold_j]
+    _exact = 1.0e-5
+    _idx = jnp.arange(n_lon, dtype=jnp.int32)
+    _p_self = (n_lon - _idx) % n_lon
+    _m_self = _p_self != _idx
+    _self_ok = bool(
+        (jnp.max(jnp.where(_m_self, jnp.abs(lat_fold - lat_fold[_p_self]), 0.0))
+         < _exact)
+        and (jnp.max(jnp.where(_m_self,
+                               _wrap_dlon(lon_fold, lon_fold[_p_self]), 0.0))
+             < _exact))
+    if _self_ok:
+        # De-haloed T-pivot mesh (eORCA025 class): per-point-type maps from
+        # the measured coincidences (T/U self on the pivot row; V/F pair with
+        # the row below): P_T=(-i)%n, P_U=(-i-1)%n; V uses P_T, F uses P_U.
+        return FoldDescriptor(
+            is_active=True, fold_j=fold_j,
+            cap_j=_detect_cap_j(gphit, n_lat, fold_j, cap_dlat_rel_deviation),
+            perm_T=_p_self,
+            perm_v=_p_self,
+            vector_sign_u=-1.0, vector_sign_v=-1.0,
+            pivot_row_stored=True,
+            perm_u=(n_lon - _idx - 1) % n_lon,
+            perm_f=(n_lon - _idx - 1) % n_lon,
+        )
+    # Halo-row-stored meshes (eORCA1.2 class: stored top row duplicates the
+    # row below; validated by the 1-degree campaign) intentionally fall
+    # through to the LEGACY lat-symmetry auto-detect below — byte-identical
+    # behaviour for every existing working configuration.
     if fold_convention not in ("auto", *perm_candidates):
         raise ValueError(
             f"fold_convention must be 'auto' or one of {list(perm_candidates)}, "
@@ -285,18 +344,7 @@ def _detect_fold(
     # For v/q stagger the permutation is the same for the ORCA T-fold.
     perm_v = perm_T
 
-    # Detect cap latitude: where the grid starts deviating from regular
-    # lat-lon.  On ORCA1 this is around j where gphit starts to diverge
-    # significantly from a linear latitude progression.
-    lat_col = gphit[:, n_lon // 4]  # sample column away from fold poles
-    dlat = jnp.diff(lat_col)
-    median_dlat = jnp.median(dlat[:n_lat // 2])  # use southern half
-    deviation = jnp.abs(dlat - median_dlat) / jnp.abs(median_dlat)
-    cap_candidates = jnp.where(deviation > cap_dlat_rel_deviation, size=n_lat - 1)
-    if len(cap_candidates[0]) > 0:
-        cap_j = int(cap_candidates[0][0])
-    else:
-        cap_j = fold_j  # no cap detected (very regular grid)
+    cap_j = _detect_cap_j(gphit, n_lat, fold_j, cap_dlat_rel_deviation)
 
     return FoldDescriptor(
         is_active=True,
@@ -488,10 +536,28 @@ def create_tripole_grid(
     area_T = dx_T * dy_T
     total_area = jnp.sum(area_T)
 
-    # u-point metrics.  NEMO's native U(i) is the east face of T(i), while
-    # legoESM's redundant U index 0 is the west face of T(0).  Therefore the
-    # complete native array belongs at indices 1:, and index 0 is the periodic
-    # image of NEMO's last U face.  The two redundant endpoints are equal.
+    # u-point metrics.  NEMO e1u/e2u have shape (n_lat, n_lon) but on a C-grid
+    # u-points have shape (n_lat, n_lon+1).
+    #
+    # NEMO's u-point ``i`` lies EAST of T-cell ``i`` -- between T(i) and T(i+1).
+    # MEASURED off the mesh rather than taken from documentation: on the
+    # 1-degree part of eORCA1, ``glamu - glamt = +0.5000`` deg at four
+    # consecutive equatorial columns (and ``gphiv - gphit = +0.32`` deg, the
+    # matching statement for v).  Our face ``i`` lies WEST of cell ``i`` --
+    # ``f_u_inner`` just below averages ``f_T[i-1]`` and ``f_T[i]``, which is
+    # the same statement.  So our face ``i`` must take NEMO's ``e1u[i-1]``, and
+    # face 0 wraps to the LAST column by periodicity.
+    #
+    # This block previously appended ``e1u[:, 0:1]`` instead, which gave every
+    # face the metric of the face one column EAST.  That is exactly a no-op
+    # wherever the mesh does not vary along a row -- the whole southern
+    # hemisphere and the tropics -- which is why it survived; ORCA's
+    # quasi-isotropic northern grid begins near 20N, so it was a several- to
+    # twenty-percent error on every zonal face north of 30N, including the
+    # Gulf Stream and the Arctic.  Confirmed to reach the continuity operator
+    # (20-31% of the local divergence in the worst percentile north of 30N,
+    # and exactly zero in 30S-60S where the two builds are bit-identical) by
+    # ``scripts/validate/ocean_fidelity/tripole_metric_divergence.py``.
     e1u = raw["e1u"].astype(dtype)
     e2u = raw["e2u"].astype(dtype)
     dx_u = jnp.concatenate([e1u[:, -1:], e1u], axis=1)  # (n_lat, n_lon+1)
@@ -911,6 +977,44 @@ def create_synthetic_tripole(
     # Replace the inactive fold with the active one.
     # NamedTuple._replace creates a shallow copy with the specified
     # field changed.
+    return geom._replace(fold=fold)
+
+
+def create_synthetic_tripole_pivot(n_lat: int, n_lon: int | None = None,
+                                   radius: float = constants.R_earth,
+                                   omega: float = constants.Omega,
+                                   dtype=None):
+    """Synthetic tripole with the DE-HALOED pivot-row-stored fold layout.
+
+    The eORCA025 storage convention (measured 2026-08-26, see
+    ``check_tripole_fold_pairing.py``): the stored top T row is the
+    SELF-symmetric T-pivot row — cell ``(i, j_max)`` and
+    ``(perm_T[i], j_max)`` are the same physical cell under
+    ``perm_T = (n_lon - i) % n_lon`` — the duplicated halo row was
+    stripped, U points self-map under ``(n_lon - i - 1) % n_lon``, and
+    V/F rows pair with the row BELOW.  ``create_synthetic_tripole``
+    models the OTHER layout (eORCA1.2, halo row stored); the two fixtures
+    together pin both fold code paths.
+
+    Returns a regular lat-lon geometry with the pivot-layout fold
+    descriptor attached (same idealization as the halo-layout fixture:
+    metrics stay regular; only the fold BC dispatch is exercised).
+    """
+    geom = create_latlon_geometry(n_lat, n_lon, radius, omega, dtype)
+    n_lon_eff = geom.n_lon
+    idx = jnp.arange(n_lon_eff, dtype=jnp.int32)
+    fold = FoldDescriptor(
+        is_active=True,
+        fold_j=n_lat - 1,
+        cap_j=max(0, n_lat - n_lat // 4),
+        perm_T=(n_lon_eff - idx) % n_lon_eff,
+        perm_v=(n_lon_eff - idx) % n_lon_eff,
+        vector_sign_u=-1.0,
+        vector_sign_v=-1.0,
+        pivot_row_stored=True,
+        perm_u=(n_lon_eff - idx - 1) % n_lon_eff,
+        perm_f=(n_lon_eff - idx - 1) % n_lon_eff,
+    )
     return geom._replace(fold=fold)
 
 

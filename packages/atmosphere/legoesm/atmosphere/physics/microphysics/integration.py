@@ -32,7 +32,6 @@ from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
     TerrainMetric,
-    pressure_from_sigma,
 )
 from legoesm import constants
 
@@ -300,8 +299,8 @@ def _make_hydrostatic_microphysics(
             )
 
         # Pressure at full and half levels
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns generically across cubed-sphere
         # ``shape_2d=(6,n,n)``, lat-lon ``(n_lat,n_lon)``, and MPAS
@@ -466,6 +465,10 @@ def _make_hydrostatic_microphysics(
             precip=Field(
                 data=micro_out.precipitation.reshape(shape_2d).astype(p_s.dtype),
                 name="precip_micro", dims=dims_2d, units="kg/m^2/s"),
+            sed_substeps_required=(
+                None if micro_out.sed_substeps_required is None else Field(
+                    data=micro_out.sed_substeps_required.reshape(shape_2d),
+                    name="sed_substeps_required", dims=dims_2d, units="1")),
         )
 
     def reset_state():
@@ -1144,10 +1147,8 @@ def _make_spectral_pe_microphysics(
             )
 
         # Pressure at full and half levels
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = n_lat * n_lon

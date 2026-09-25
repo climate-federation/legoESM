@@ -160,13 +160,24 @@ def _helmholtz_apply_mpas(
     w.r.t. the operator parameters (``θ̄ = -(∂_θ A(θ)·x)ᵀ·λ``) via
     ``jax.vjp`` without closure-capturing tracers (scan-lowering safe;
     mirrors ``barotropic_implicit_latlon_cgrid._helmholtz_apply``).
+
+    ``fill_land_cells_mpas`` is deliberately NOT applied here, and its
+    absence is value-preserving rather than a behaviour change.
+    ``gradient_edge`` is the two-cell stencil
+    ``grad(e) = (phi[c2(e)] - phi[c1(e)]) / dcEdge`` and
+    ``edge_mask = mask[c1]*mask[c2]`` is zero on every edge with a land
+    endpoint; the fill only alters land cells, so any edge whose gradient
+    could see an altered value carries zero flux. The filled field cannot
+    reach the output. It was removed because this operator is the inner
+    matvec of the barotropic PCG — 60 applications per step — and the fill
+    costs several scatter-add passes in each one, which measured as dead
+    work in the lane's strong-scaling plateau. The routine is still used
+    where its output IS consumed: ``init_mpas``, ``ocean_pe_mpas``, and the
+    eta_old/eta_new fills elsewhere in this file.
     """
-    c1 = mesh.cellsOnEdge[0]
-    c2 = mesh.cellsOnEdge[1]
     H_e_face = H_e * edge_mask
     eta_m = eta_in * mask
-    eta_filled = fill_land_cells_mpas(eta_m, mask, c1, c2)
-    grad = gradient_edge(eta_filled, mesh)
+    grad = gradient_edge(eta_m, mesh)
     flux = H_e_face * grad
     div_grad = divergence_cell(flux, mesh) * mask
     return (eta_m - coeff * div_grad) * mask
@@ -447,6 +458,20 @@ def barotropic_implicit_mpas(
             "stock-CG solve and its mass projection would silently run "
             "rank-local.  Use 'explicit_substep' otherwise."
         )
+    # Preconditioner selection: validated on the static config string here,
+    # after the multi-rank refusal above so that guard keeps firing first.
+    _pcg_precond = str(config.barotropic_implicit_pcg_precond)
+    if _pcg_precond not in ("jacobi", "poly"):
+        raise ValueError(
+            f"Unknown barotropic PCG preconditioner variant {_pcg_precond!r}: "
+            "config.barotropic_implicit_pcg_precond must be one of "
+            "'jacobi' or 'poly'"
+        )
+    if int(config.barotropic_implicit_pcg_poly_sweeps) < 1:
+        raise ValueError(
+            "config.barotropic_implicit_pcg_poly_sweeps must be >= 1, got "
+            f"{int(config.barotropic_implicit_pcg_poly_sweeps)}"
+        )
     g = jnp.asarray(config.g)
     mask = state.land_mask.data
     H_bathy = state.H_bathy.data
@@ -613,8 +638,25 @@ def barotropic_implicit_mpas(
         def A_op_dist(eta_in: jnp.ndarray) -> jnp.ndarray:
             return A_op(_exchange_cells(eta_in))
 
-        def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
-            return r * inv_diag
+        if _pcg_precond == "jacobi":
+            def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
+                return r * inv_diag
+        else:
+            _poly_sweeps = int(config.barotropic_implicit_pcg_poly_sweeps)
+            _neumann_w = 2.0 / 3.0
+
+            def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
+                # SPD polynomial in the device-local block of A: TRUE
+                # diagonal (inv_diag), off-diagonals restricted to
+                # owned-owned couplings by zeroing the halo BEFORE the
+                # operator.  Applies A_op, never A_op_dist, so no halo
+                # exchange is composed in; pure jnp, reverse mode goes
+                # straight through.
+                z = _neumann_w * inv_diag * r * _owned
+                for _ in range(_poly_sweeps - 1):
+                    r_local = A_op(z) * _owned
+                    z = z + _neumann_w * inv_diag * (r - r_local) * _owned
+                return z
 
         _w_dots = _owned * mesh.areaCell.astype(eta_dtype) * mask
         eta_new, _solve_diag = solve_helmholtz_implicit(
@@ -698,14 +740,19 @@ def barotropic_implicit_mpas(
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to
     # well-resolved η).
+    # ``eta_floor_clamp_iters`` was declared on the config but never read
+    # here (the explicit-substep path honours it); the bench's
+    # --eta-clamp-iters knob was inert on this solver.  Default 3 is the
+    # value that was hard-wired, so nothing changes unless it is set.
+    _clamp_iters = int(config.eta_floor_clamp_iters)
     if _dist:
         eta_new = _clamp_redistribute(
-            eta_new, eta_floor, mask, mesh.areaCell,
+            eta_new, eta_floor, mask, mesh.areaCell, _clamp_iters,
             owned_weight=_owned, force_global=True,
         )
     else:
         eta_new = _clamp_redistribute(
-            eta_new, eta_floor, mask, mesh.areaCell,
+            eta_new, eta_floor, mask, mesh.areaCell, _clamp_iters,
         )
 
     # Residual diagnostic of the FINAL eta (post projection + clamp).

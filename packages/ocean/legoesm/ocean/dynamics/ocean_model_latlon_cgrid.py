@@ -116,6 +116,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     eke_3d_horizontal_transport,
     eke_3d_vertical_diffusion,
     gm_redi_tracer_tendency_latlon,
+    validate_redi_coefficient,
     gm_redi_density_and_jacobian,
     harmonic_lateral_kediss_eke_source,
     compute_isoneutral_K33_latlon,
@@ -2882,6 +2883,8 @@ class LatLonCGridOceanModel:
         # B_T operator (flux_divergence_viscosity_cgrid raises on tripolar);
         # fail at construction, not at the first traced step.
         _gm = self.config.gm_redi
+        if _gm is not None:
+            validate_redi_coefficient(_gm)
         if (_gm is not None and getattr(_gm, "eke", None) is not None
                 and _gm.eke.closure == "geometric"):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import is_tripolar
@@ -6092,6 +6095,7 @@ class LatLonCGridOceanModel:
 
         # Freshwater mass flux for barotropic continuity equation
         F_slow_eta = None
+        _F_fw_rate_now = None
         if freshwater is not None and _cfg_b.freshwater_closure != "none":
             F_slow_eta = freshwater_eta_tendency(
                 freshwater, _cfg_b.rho_0,
@@ -6149,6 +6153,9 @@ class LatLonCGridOceanModel:
             # F_slow_eta rate (same reduction, so the average is linear-exact
             # vs averaging the raw FreshwaterForcing first). None seeding:
             # same nit000 rule as the wind term above.
+            # The tracer dilution channel (block 8, real_freshwater) takes
+            # this NOW rate: NEMO centres only ssh_frc, tra_sbc stays at NOW.
+            _F_fw_rate_now = F_slow_eta
             if (getattr(_cfg_b, "barotropic_forcing_centred", False)
                     and getattr(state, "freshwater_eta_prev", None)
                     is not None):
@@ -8220,6 +8227,7 @@ class LatLonCGridOceanModel:
                     eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
                     mask=state.land_mask.data,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
+                    omega=_cfg_b.omega,
                     kappa_redi_override=kappa_redi_override,
                     kappa_redi_v_override=kappa_redi_v_override,
                     density_jacobian=_gm_dens_jac,
@@ -8838,8 +8846,50 @@ class LatLonCGridOceanModel:
                 S_fw = state_new.S.data.at[..., 0].add(
                     (dt * dS_fw * mask).astype(_S_dtype),
                 )
+            # Temperature twin (2026-09-05): the surface heat flux already
+            # carries the rain/evap/restoring heat content, so dilute T by
+            # the same water (NEMO linear-free-surface trasbc emp*sst term).
+            from legoesm.ocean.freshwater import virtual_closure_temperature_twin
+            _dT_twin = virtual_closure_temperature_twin(
+                freshwater, state_new.T.data[..., 0], dz_0, _cfg_b.rho_0, mask)
             state_new = state_new._replace(
                 S=state_new.S.replace(data=S_fw),
+                T=state_new.T.replace(data=state_new.T.data.at[..., 0].add(
+                    (dt * _dT_twin).astype(state_new.T.data.dtype))),
+            )
+        elif (freshwater is not None
+                and _cfg_b.freshwater_closure == "real_freshwater"
+                and _F_fw_rate_now is not None):
+            # 8-real. Surface dilution of the volume closure (2026-09-05):
+            # the water entered the TOP cell, the z-star step spread it over
+            # the column; pair that with the downward transport of the
+            # resident water so the top cell dilutes by -S_1 F/(rho h_1) and
+            # the layers below keep S and T (NEMO vvl: sshwzv/traadv, no
+            # emp*sss salt term).  Same NOW rate as the eta channel
+            # (normalised, restoring included); the ice SALT flux stays on
+            # surface_forcing.salt_flux.  Shared helper (MPAS core too).
+            from legoesm.ocean.freshwater import (
+                real_freshwater_dilution_tendencies,
+                real_freshwater_entry,
+                resolve_runoff_spread_arg,
+            )
+            _S_dtype = state_new.S.data.dtype
+            # NEMO sbc_rnf_div: river water enters every level down to
+            # h_rnf (same depth map the virtual closure spreads over); the
+            # remaining channels enter at the surface.  Static config gate.
+            _F_entry, _entry_heat = real_freshwater_entry(
+                freshwater, _F_fw_rate_now, h_k_new, mask, _cfg_b.rho_0,
+                state_new.T.data,
+                runoff_spread_m=resolve_runoff_spread_arg(_cfg_b))
+            _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
+                _F_fw_rate_now, state_new.S.data, state_new.T.data,
+                h_k_new, mask, F_entry=_F_entry, entry_heat=_entry_heat)
+            state_new = state_new._replace(
+                S=state_new.S.replace(
+                    data=state_new.S.data + (dt * _dS_dil).astype(_S_dtype)),
+                T=state_new.T.replace(
+                    data=state_new.T.data + (dt * _dT_dil).astype(
+                        state_new.T.data.dtype)),
             )
 
         # 8a'. AB2 "advective" scope: apply the weight-1.0 DISSIPATIVE increment.
@@ -9645,18 +9695,36 @@ class LatLonCGridOceanModel:
             return state
         literal_matrix = (getattr(tke_cfg, "tke_matrix_evaluation", "factored")
                           == "nemo_literal")
-        carry_fields = (state.tke_avm, state.tke_avt,
-                        state.tke_avm_surface) + (
-                            (getattr(state, "tke_dissl", None),)
-                            if literal_matrix else ())
+        # The surface avm_k is produced by the closure ONLY under the nemo_z0
+        # face assembly (tke.py: _K_M_surface stays None otherwise, and the
+        # carried path demands preclosure_K_M_surface only in that same case).
+        # Seeding it unconditionally made every step-2 state PARTIAL: the
+        # post-solve writeback correctly stores None for it under
+        # "interior_pinned", so the guard below then rejected the state the
+        # model had just produced. That made carried_previous_step unusable on
+        # any card except the nemo_z0 ones. Required set now matches what the
+        # closure actually emits, exactly as tke_dissl already did.
+        # codex 9693003 [HIGH]: nemo_z0 is necessary but NOT sufficient. The
+        # closure also needs the ln_mxl0 anchor, which _mxl0_surface_anchor
+        # returns only for tke_mxl_choice 3 or 4 (tke.py:176-177), so
+        # nemo_z0 + choice 1/2 writes None and hit the same partial-state
+        # crash this guard was meant to cure.
+        surface_z0 = (
+            getattr(tke_cfg, "tke_surface_bc_level",
+                    "interior_pinned") == "nemo_z0"
+            and int(getattr(tke_cfg, "tke_mxl_choice", 0)) in (3, 4))
+        carry_fields = (state.tke_avm, state.tke_avt) + (
+            (state.tke_avm_surface,) if surface_z0 else ()) + (
+                (getattr(state, "tke_dissl", None),)
+                if literal_matrix else ())
         n_present = sum(field is not None for field in carry_fields)
         if n_present == len(carry_fields):
             return state
         if n_present:
             raise ValueError(
                 "carried_previous_step coefficient memory is partially "
-                "populated: tke_avm, tke_avt, tke_avm_surface, and any "
-                "literal-matrix tke_dissl must be "
+                "populated: tke_avm, tke_avt, the nemo_z0 tke_avm_surface and "
+                "any literal-matrix tke_dissl must be "
                 "all present for a restart/continued state or all None for "
                 "a true cold start")
 
@@ -9688,7 +9756,7 @@ class LatLonCGridOceanModel:
             state = state._replace(tke_avt=Field(
                 data=jnp.where(wet_w, avt0, 0.0), name="tke_avt",
                 dims=("lat", "lon", "level"), units="m^2/s"))
-        if state.tke_avm_surface is None:
+        if surface_z0 and state.tke_avm_surface is None:
             avms0 = (jnp.asarray(tke_cfg.kappaM_min, dtype=dtype)
                      * lm.astype(dtype))
             state = state._replace(tke_avm_surface=Field(
@@ -13949,6 +14017,7 @@ class LatLonCGridOceanModel:
                     _grid, _zc, gm_cfg, eos=_cfg_b.eos,
                     eos_linear=_cfg_b.eos_linear, mask=cmask,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
+                    omega=_cfg_b.omega,
                     kappa_redi_override=_kri_static,
                     kappa_redi_v_override=_kri_v_static,
                     density_jacobian=_gm_dj,

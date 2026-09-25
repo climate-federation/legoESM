@@ -3,16 +3,17 @@
 Tests pin:
 
 * tendency shape / dtype hygiene;
-* energy-conservation budget over one step;
-* moisture-conservation budget (vapor + cloud-water source vs precip);
-* CAPE reduction over a single step in destabilized columns;
-* finite, non-zero gradient through the relaxation timescale and
-  through the smooth CAPE threshold (the AD-safety property);
-* CMT sign convention against a known shear / mass-flux setup;
-* the prognostic-profile carry layout (scalar packed at ``[:, -1]``,
-  zeros aloft) is preserved round-trip;
+* moisture-conservation budget (vapor + cloud-water + rain sources close);
+* the CAM6 scheme is diagnostic: the carry is not read, and the returned
+  carry packs the diagnosed cloud-base mass flux at ``[:, -1]`` only;
+* finite gradients through the CAM6 tunables (``tau``, ``capelmt``,
+  ``momcu``);
+* CMT switch and zero-shear behaviour of ``momtran``;
 * selection through ``make_physics(PhysicsConfig(...))`` works for
   every dycore type.
+
+The algorithm itself is pinned against the Fortran transcription in
+``tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py``.
 """
 
 from __future__ import annotations
@@ -73,6 +74,10 @@ def _synthetic_column(
     H = 8500.0
     z_full = -H * jnp.log(p_full / p_s)
     T_env = jnp.full((ncol,), T_sfc)[:, None] - lapse_rate * 1e-3 * z_full
+    # Isothermal above 12 km: CAM6's buoyan_dilute needs a level of neutral
+    # buoyancy inside the column (a parcel buoyant up to the model top has no
+    # tentative cloud top and hence CAPE = 0 in the oracle).
+    T_env = jnp.maximum(T_env, T_sfc - lapse_rate * 12.0)
     q_v_env = q_sfc * jnp.exp(-z_full / 3000.0)
 
     # Linear shear: u increases linearly from u_sfc (surface) to u_top (top).
@@ -130,99 +135,27 @@ def test_zm_cloud_water_source_non_negative():
 
 
 def test_zm_carry_layout_scalar_at_surface():
-    """Returned ``conv_prog_profile_new`` has the relaxed M_b at
+    """Returned ``conv_prog_profile_new`` has the diagnosed ``mb`` at
     ``[:, -1]`` and zeros aloft — the contract that PR 0 enforces."""
     T, q, pf, ph, u, v = _synthetic_column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
     _, cpp_new = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0)
     assert jnp.all(cpp_new[:, :-1] == 0.0)
-    # Surface slot is the relaxed M_b, non-negative.
+    # Surface slot is the diagnosed mb [kg/m^2/s], non-negative.
     assert jnp.all(cpp_new[:, -1] >= 0.0)
 
 
-def test_zm_implicit_relaxation_toward_equilibrium():
-    """Repeating the step with the same input drives M_b toward an
-    equilibrium fixed point (implicit Euler relaxation)."""
+def test_zm_carry_is_not_read():
+    """CAM6 ZM diagnoses ``mb`` every step (no CAPE-relaxation memory): the
+    tendencies and the returned carry are independent of the carry passed in."""
     T, q, pf, ph, u, v = _synthetic_column()
     ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
-    config = ZhangMcFarlaneConfig(tau_cape=1800.0)
-    M_b_history = []
-    for _ in range(20):
-        _, cpp = zhang_mcfarlane_convection(
-            T, q, pf, ph, u, v, cpp, dt=300.0, config=config,
-        )
-        M_b_history.append(float(cpp[0, -1]))
-    # Successive differences shrink (relaxation is convergent).
-    diffs = np.diff(M_b_history)
-    # Absolute differences must monotonically decay (implicit Euler
-    # contraction).
-    assert np.all(np.abs(diffs[1:]) <= np.abs(diffs[:-1]) + 1e-15), (
-        f"Relaxation should be monotone-contracting, diffs={diffs}"
-    )
-
-
-def test_zm_implicit_relaxation_steps_more_when_dt_exceeds_tau():
-    """Audit Codex finding: ``dt_over_tau = dt / max(tau, dt)`` clamped
-    the implicit-Euler ratio to ≤ 1, under-stepping the relaxation
-    when ``dt > tau``.  With the documented ``dt / tau`` formulation,
-    a single step at ``dt = 10 * tau`` should equilibrate ~91% of the
-    way (``r/(1+r) = 10/11 ≈ 0.909``) vs the buggy form's clamped 50%.
-
-    This test compares two single-step calls — one at ``dt = tau``
-    (50% equilibration) and one at ``dt = 10 * tau`` (91% expected).
-    The fractional approach to equilibrium must be larger for the
-    ``dt = 10 * tau`` step.  Under the buggy form both would give 50%
-    and the assertion would fail.
-    """
-    # Milder sounding so the equilibrium M_b stays well below
-    # ``M_b_max`` — the cap saturates both runs to the same value
-    # otherwise and the test cannot distinguish the two regimes.
-    T, q, pf, ph, u, v = _synthetic_column(T_sfc=296.0, q_sfc=10.0e-3, lapse_rate=6.0)
-    ncol, nlev = T.shape
-    tau = 600.0
-    # Raise the cap as well so M_b_eq is observable.
-    config = ZhangMcFarlaneConfig(tau_cape=tau, M_b_max=10.0)
-
-    # Single-step relaxation from M_b = 0 (cold start).  M_b after one
-    # step is ``r/(1+r) * M_b_eq``; we don't know M_b_eq absolutely
-    # but the *ratio* between the dt=tau and dt=10*tau cases must
-    # equal ``(10/11) / (1/2) ≈ 1.82``.  In the buggy form both would
-    # give 50% so the ratio would be 1.0 — well outside any reasonable
-    # tolerance.
-    cpp0 = jnp.zeros((ncol, nlev))
-    _, cpp_short = zhang_mcfarlane_convection(
-        T, q, pf, ph, u, v, cpp0, dt=tau, config=config,
-    )
-    _, cpp_long = zhang_mcfarlane_convection(
-        T, q, pf, ph, u, v, cpp0, dt=10.0 * tau, config=config,
-    )
-    M_b_short = float(cpp_short[0, -1])
-    M_b_long = float(cpp_long[0, -1])
-
-    # Both must be positive (equilibrium M_b > 0 on this CAPE-positive sounding)
-    assert M_b_short > 1e-12 and M_b_long > 1e-12, (
-        f"Test fixture broken — M_b_short={M_b_short:.3e}, "
-        f"M_b_long={M_b_long:.3e}; equilibrium M_b is zero."
-    )
-    # Long step must equilibrate further than short step
-    assert M_b_long > M_b_short, (
-        f"dt=10·tau step should equilibrate further than dt=tau step, "
-        f"but M_b_long={M_b_long:.3e} <= M_b_short={M_b_short:.3e}.  "
-        "Likely the dt/max(tau,dt) clamp has been re-introduced — "
-        "audit Codex finding 'documented implicit-Euler factor is "
-        "not what is implemented'."
-    )
-    # Quantitative check: ratio should be close to (10/11) / (1/2) = 1.818
-    # (not 1.0 as the buggy form would give).
-    ratio = M_b_long / M_b_short
-    assert ratio > 1.5, (
-        f"Expected dt=10·tau / dt=tau equilibration ratio ≈ 1.82 "
-        f"(=(10/11)/(1/2)), got {ratio:.3f}.  Buggy form clamps both "
-        "to 50% giving ratio = 1.0; values < 1.5 indicate the clamp "
-        "has been re-introduced."
-    )
+    out0, c0 = zhang_mcfarlane_convection(T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), dt=300.0)
+    out1, c1 = zhang_mcfarlane_convection(T, q, pf, ph, u, v, jnp.full((ncol, nlev), 0.3), dt=300.0)
+    assert jnp.array_equal(out0.dT_dt, out1.dT_dt)
+    assert jnp.array_equal(c0, c1)
+    assert float(jnp.max(c0[:, -1])) > 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -275,61 +208,58 @@ def test_zm_lapse_rate_stabilization():
 # Differentiability — the AD-safety property motivating smooth-everywhere
 # ---------------------------------------------------------------------------
 
-def test_zm_grad_through_tau_cape_finite():
-    """``d (sum dT_dt) / d tau_cape`` is finite — relaxation timescale
-    is a tunable parameter."""
+def test_zm_grad_through_tau_finite():
+    """``d (sum dT_dt) / d tau`` is finite and non-zero — the CAPE
+    consumption timescale is a tunable parameter."""
     T, q, pf, ph, u, v = _synthetic_column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
 
     def f(tau):
-        config = ZhangMcFarlaneConfig(tau_cape=tau)
+        config = ZhangMcFarlaneConfig(tau=tau)
         out, _ = zhang_mcfarlane_convection(
             T, q, pf, ph, u, v, cpp, dt=300.0, config=config,
         )
-        return jnp.sum(out.dT_dt)
+        return jnp.sum(out.dT_dt ** 2)
 
     g = float(jax.grad(f)(jnp.asarray(3600.0)))
-    assert np.isfinite(g)
+    assert np.isfinite(g) and g != 0.0
 
 
-def test_zm_grad_through_cape_threshold_finite_at_threshold():
-    """``d (sum dT_dt) / d cape_threshold`` is finite even when the
-    column sits exactly at the threshold — preserves training signal
-    that a hard ``CAPE > threshold`` step would zero out."""
-    # Build a column whose CAPE matches a target threshold to within
-    # the smooth-trigger half-width.
+def test_zm_grad_through_capelmt_finite():
+    """``d (sum dT_dt) / d capelmt`` is finite and non-zero on a convecting
+    column: the closure is ``mb ~ -(cape - capelmt)/tau/dadt``."""
     T, q, pf, ph, u, v = _synthetic_column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
 
     def f(threshold):
-        config = ZhangMcFarlaneConfig(cape_threshold=threshold)
+        config = ZhangMcFarlaneConfig(capelmt=threshold)
         out, _ = zhang_mcfarlane_convection(
             T, q, pf, ph, u, v, cpp, dt=300.0, config=config,
         )
-        return jnp.sum(out.dT_dt)
+        return jnp.sum(out.dT_dt ** 2)
 
     g = float(jax.grad(f)(jnp.asarray(70.0)))
-    assert np.isfinite(g)
+    assert np.isfinite(g) and g != 0.0
 
 
 def test_zm_grad_through_cmt_coefficient():
-    """``d (sum du_dt_conv) / d cmt_c_u`` is finite — Gregory et al.
-    1997 closure coefficient is tunable."""
+    """``d (sum du_dt_conv^2) / d momcu`` is finite and non-zero — the
+    Richter-Rasch pressure-gradient coefficient is tunable."""
     T, q, pf, ph, u, v = _synthetic_column(u_sfc=2.0, u_top=30.0)
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
 
     def f(c_u_arr):
-        config = ZhangMcFarlaneConfig(cmt_c_u=c_u_arr)
+        config = ZhangMcFarlaneConfig(momcu=c_u_arr)
         out, _ = zhang_mcfarlane_convection(
             T, q, pf, ph, u, v, cpp, dt=300.0, config=config,
         )
-        return jnp.sum(out.du_dt_conv)
+        return jnp.sum(out.du_dt_conv ** 2)
 
-    g = float(jax.grad(f)(jnp.asarray(0.55)))
-    assert np.isfinite(g)
+    g = float(jax.grad(f)(jnp.asarray(0.7)))
+    assert np.isfinite(g) and g != 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -365,72 +295,17 @@ def test_zm_cmt_zero_in_no_shear_column():
 # Stable column: tendencies near zero
 # ---------------------------------------------------------------------------
 
-def test_zm_M_b_matches_dimensional_formula():
-    """``M_b`` magnitude must equal the dimensionally-correct formula
-    ``rho_BL * (CAPE - threshold)+ / (g * tau)`` (kg/m^2/s).
-
-    Pre-fix the closure used ``(CAPE - threshold)+ / tau`` (units
-    m^2/s^3 — wrong by a factor of ``rho_BL / g``).  At sea level
-    (``rho_BL/g ≈ 0.122 s/m``) the pre-fix value is ~8.2× larger than
-    the dimensionally-correct one — the magnitude was masked
-    operationally only because ``M_b_max`` capped runaway values.
-
-    Test setup uses a long ``tau_cape`` and a relaxed ``M_b_max`` so
-    the equilibrium ``M_b`` is well below the cap and we are testing
-    the *formula*, not the cap.
-    """
-    T, q, pf, ph, u, v = _synthetic_column(
-        T_sfc=300.0, q_sfc=16e-3, lapse_rate=7.0,
-    )
-    ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
-    tau_cape = 1800.0
-    # Use small tau so equilibrium is reached quickly; use M_b_max=10 so
-    # the (post-fix) cap doesn't engage; ITERATE long enough for M_b to
-    # saturate at its (smooth-trigger-modulated) equilibrium.
-    config = ZhangMcFarlaneConfig(tau_cape=tau_cape, M_b_max=10.0)
-    for _ in range(200):
-        out, cpp = zhang_mcfarlane_convection(
-            T, q, pf, ph, u, v, cpp, dt=300.0, config=config,
-        )
-    M_b_actual = cpp[:, -1]
-    cape_excess_pos = jnp.clip(out.cape - config.cape_threshold, 0.0, None)
-    rho_BL = pf[:, -1] / (constants.R_d * T[:, -1])
-    # Post-fix dimensional formula:
-    M_b_post_fix = rho_BL * cape_excess_pos / (constants.g * tau_cape)
-    # Pre-fix wrong formula:
-    M_b_pre_fix = cape_excess_pos / tau_cape
-    # Both formulas include the smooth ``cape_trigger`` sigmoid as a
-    # multiplicative factor; with CAPE >> threshold this is ~1 and we
-    # can compare the bare formulas.  Test which formula M_b_actual
-    # matches.
-    err_post = float(jnp.max(jnp.abs(M_b_actual - M_b_post_fix) / jnp.maximum(M_b_post_fix, 1e-30)))
-    err_pre = float(jnp.max(jnp.abs(M_b_actual - M_b_pre_fix) / jnp.maximum(M_b_pre_fix, 1e-30)))
-    # Post-fix code: M_b matches the dimensional formula.
-    # Pre-fix code: M_b matches the WRONG formula and is ~8x larger.
-    assert err_post < err_pre, (
-        f"M_b matches WRONG formula: |M_b - M_b_pre| = {err_pre:.3f} "
-        f"(should be the larger error), |M_b - M_b_post| = {err_post:.3f}. "
-        "Closure must be rho_BL * cape_excess / (g * tau)."
-    )
-    assert err_post < 0.2, (
-        f"M_b vs dimensional formula: rel_err = {err_post:.3f} > 0.2"
-    )
-
-
 def test_zm_stable_column_tendencies_small():
-    """A statically stable, dry column should produce near-zero
-    tendencies — the smooth CAPE trigger suppresses spurious
-    activation."""
+    """A statically stable, dry column (CAPE <= capelmt) produces exactly
+    zero tendencies — the CAM6 ``ideep`` gate."""
     T, q, pf, ph, u, v = _synthetic_column(
         T_sfc=288.0, q_sfc=2.0e-3, lapse_rate=4.0,  # stable, very dry
     )
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
     out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0)
-    # In a sub-threshold column the tendencies are very small.
-    # Tolerance reflects the smoothness of the sigmoid trigger.
-    assert float(jnp.max(jnp.abs(out.dT_dt))) < 1e-3
+    assert float(jnp.max(jnp.abs(out.dT_dt))) == 0.0
+    assert float(jnp.max(out.convective_mask)) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +362,8 @@ def test_zm_orchestrator_one_step_finite():
 
 def test_zm_orchestrator_multi_step_stable():
     """Five orchestrator steps in a row — no NaN, carry threading
-    intact, M_b grows monotonically (no oscillation)."""
+    intact; with a fixed state the diagnosed ``mb`` is step-invariant
+    (CAM6 ZM has no relaxation memory)."""
     state, grid, sigma = _make_3d_state()
     cfg = _make_zm_only_config()
     n = 4; nlev = 12
@@ -502,46 +378,136 @@ def test_zm_orchestrator_multi_step_stable():
         assert jnp.all(jnp.isfinite(ps.conv_prog_profile))
         M_b_trajectory.append(float(jnp.max(ps.conv_prog_profile[:, -1])))
 
-    # M_b should increase monotonically as it relaxes toward equilibrium.
     assert all(
-        M_b_trajectory[i + 1] >= M_b_trajectory[i] - 1e-12
+        abs(M_b_trajectory[i + 1] - M_b_trajectory[i]) <= 1e-12
         for i in range(len(M_b_trajectory) - 1)
-    ), f"M_b trajectory non-monotone: {M_b_trajectory}"
+    ), f"mb must be step-invariant for a fixed state: {M_b_trajectory}"
 
 
 # ---------------------------------------------------------------------------
-# MSE conservation regression guard (currently expected to fail)
+# Column budgets
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "Standard mass-flux kernel (subsidence g/c_p + detrainment of "
-        "moist-adiabat T_u) does not conserve column MSE on a closed "
-        "(no-surface-flux) probe.  Currently ~98% non-conservation "
-        "residual; flagged xfail so any future kernel improvement that "
-        "closes this is detected."
-    ),
-    strict=True,
-)
-def test_zm_mse_conservation_within_tolerance():
-    """Column-integrated ``c_p ∫dT + L_v ∫(dq_v + dq_c_conv) dp/g`` should
-    be small relative to the heating magnitude on a CAPE-positive sounding.
-    """
-    T, q_v, p_full, p_half = _synthetic_column()
+def test_zm_column_water_closes_with_explicit_rain():
+    """``-sum dp (dq_v + dq_c)/g`` equals the column-integrated rain source
+    ``dq_r_conv_dt``: the CAM6 port emits its precipitation explicitly."""
+    T, q_v, p_full, p_half, u, v = _synthetic_column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
-    u = jnp.zeros((ncol, nlev))
-    v = jnp.zeros((ncol, nlev))
     out, _ = zhang_mcfarlane_convection(
         T=T, q_v=q_v, p_full=p_full, p_half=p_half,
         u=u, v=v, conv_prog_profile=cpp, dt=1800.0,
         config=ZhangMcFarlaneConfig(enable_cmt=False),
     )
     dp = p_half[:, 1:] - p_half[:, :-1]
-    H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
-    Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
-    assert rel < 0.30, (
-        f"ZM MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total)"
+    sink = -jnp.sum((out.dq_v_dt + out.dq_c_conv_dt) * dp, axis=1) / constants.g
+    rain = jnp.sum(out.dq_r_conv_dt * dp, axis=1) / constants.g
+    assert float(jnp.max(rain)) > 0.0
+    np.testing.assert_allclose(np.asarray(rain), np.asarray(sink), rtol=1e-9,
+                               atol=1e-12 * float(jnp.max(rain)))
+
+
+# ---------------------------------------------------------------------------
+# Hydrostatic bridge: CAM6 ZM's rain is a signed NET flux divergence
+# ---------------------------------------------------------------------------
+def _convecting_3d_state(n=4, nlev=12, land_frac=None):
+    """Held-Suarez state with a moist, conditionally unstable column in every
+    cell (lapse 6.5 K/km to 12 km, RH 0.85), so ZM fires everywhere."""
+    from legoesm.thermo import saturation_mixing_ratio
+
+    state, grid, sigma = _make_3d_state(n, nlev)
+    p_s = 1.0e5
+    p_full = sigma.sigma_full * p_s
+    z = -8000.0 * jnp.log(p_full / p_s)
+    T_col = jnp.maximum(300.0 - 6.5e-3 * z, 300.0 - 6.5 * 12.0)
+    q_col = 0.85 * saturation_mixing_ratio(T_col, p_full)
+    shape = (6, n, n, nlev)
+    state = state._replace(
+        T=state.T.replace(data=jnp.broadcast_to(T_col, shape)),
+        p_s=state.p_s.replace(data=jnp.full((6, n, n), p_s)),
+        tracers={
+            **state.tracers,
+            "q_v": state.tracers["q_v"].replace(data=jnp.broadcast_to(q_col, shape)),
+        },
     )
+    if land_frac is not None:
+        grid = grid._replace(land_frac=jnp.full((6 * n * n,), land_frac))
+    return state, grid, sigma
+
+
+def test_hydro_bridge_routes_zm_net_rain_to_surface_precip():
+    """``dq_r_conv_dt`` from CAM6 ZM is ``ntprprd``: production minus
+    evaporation of rain from above, NEGATIVE in evaporating layers.  Booked
+    per layer into ``q_c`` it would create condensate sinks where there is
+    no condensate (codex round 1, #3); the bridge must column-integrate it
+    to surface precipitation instead, with ``q_c`` receiving only the
+    detrained cloud water (``dlf >= 0``)."""
+    n, nlev = 4, 12
+    state, grid, sigma = _convecting_3d_state(n, nlev)
+    physics_fn = make_physics(_make_zm_only_config(), model_type="hydrostatic", dt=300.0)
+    ps = init_physics_state(6 * n * n, nlev, _make_zm_only_config())
+    tend, _ = physics_fn(state, grid, sigma, phys_state=ps)
+
+    assert tend.precip is not None, "ZM rain must leave through the surface precip field"
+    precip = tend.precip.data
+    assert float(precip.max()) > 0.0, "ZM must fire on this state"
+    tt = tend.tracer_tendencies
+    assert "q_r" not in tt
+    dq_c = tt["q_c"].data
+    assert bool((dq_c >= 0.0).all()), "q_c must receive only the detrained cloud water"
+    dq_v = tt["q_v"].data
+    dp = sigma.layer_thickness_dp(state.p_s.data)
+    sink = -jnp.sum((dq_v + dq_c) * dp, axis=-1) / constants.g
+    np.testing.assert_allclose(np.asarray(precip), np.asarray(sink), rtol=1e-9, atol=1e-14)
+
+
+def test_cubed_sphere_grid_carries_land_frac_to_zm():
+    """``land_fraction_for_columns`` reads ``grid.land_frac``; the cubed
+    sphere had no such field, so this standalone route ran ocean autoconversion
+    everywhere (codex round 1, #6).  A land grid must change the tendencies."""
+    from legoesm.atmosphere.physics.convection.integration import land_fraction_for_columns
+
+    n, nlev = 4, 12
+    ncol = 6 * n * n
+    grid = create_cubed_sphere(n)
+    assert land_fraction_for_columns(grid, ncol) is None
+    g_land = grid._replace(land_frac=jnp.ones((ncol,)))
+    lf = land_fraction_for_columns(g_land, ncol)
+    assert lf.shape == (ncol,) and bool((lf == 1.0).all())
+    leaves, tree = jax.tree_util.tree_flatten(g_land)
+    assert tree.unflatten(leaves).land_frac is not None
+
+    cfg = _make_zm_only_config()
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    ps = init_physics_state(ncol, nlev, cfg)
+    outs = []
+    for land in (0.0, 1.0):
+        state, grid_l, sigma = _convecting_3d_state(n, nlev, land_frac=land)
+        tend, _ = physics_fn(state, grid_l, sigma, phys_state=ps)
+        outs.append(tend.dT_dt.data)
+    assert float(jnp.abs(outs[0]).max()) > 0.0
+    assert float(jnp.abs(outs[1] - outs[0]).max()) > 0.0, (
+        "c0_lnd != c0_ocn: a land grid must change the ZM heating")
+
+
+def test_hydro_bridge_publishes_deepcu_inputs_into_the_carry():
+    """The bridge publishes ``mass_flux_up``/``icwmr`` into the lagged
+    ``PhysicsState`` carry only when the scheme sets both; before the port
+    set them the CAM6 deep-convective cloud fraction was exactly zero on the
+    CAM6 deck (GLM merged-suite review)."""
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import cam6_deep_convective_fraction
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+
+    n, nlev = 4, 12
+    ncol = 6 * n * n
+    cfg = _make_zm_only_config()
+    state, grid, sigma = _convecting_3d_state(n, nlev)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    ps = init_physics_state(ncol, nlev, cfg)
+    assert float(jnp.abs(ps.conv_mass_flux_up).max()) == 0.0
+    _, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
+    mf, icw = ps_out.conv_mass_flux_up, ps_out.conv_icwmr
+    assert mf.shape == (ncol, nlev + 1) and icw.shape == (ncol, nlev)
+    assert float(mf.max()) > 0.0 and float(icw.max()) > 0.0
+    deepcu = cam6_deep_convective_fraction(mf, icw, CloudConfig(scheme="cam6_clubb"))
+    assert float(deepcu.max()) > 0.0

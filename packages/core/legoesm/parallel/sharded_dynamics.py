@@ -77,6 +77,8 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import hashlib
+
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -1251,7 +1253,8 @@ SPMD_HALO_DEPTH = 3
 def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
                        already_reordered=False, halo_depth=SPMD_HALO_DEPTH,
                        ppermute_cells_per_device_threshold=2_000,
-                       round_profile_for_device=None):
+                       round_profile_for_device=None,
+                       cell_width=None, edge_width=None):
     """How much halo communication one ownership choice costs, computed offline.
 
     Scores a Voronoi ownership (mesh split) by the number of ``ppermute``
@@ -1392,10 +1395,46 @@ def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
     ) = _build_voronoi_partition_infra(prepared, n_dev, halo_depth=halo_depth)
     cells_per = n_cells // n_dev
     edges_per = n_edges // n_dev
+    # PRODUCTION WEIGHTS. make_voronoi_sharded_step passes
+    # cell_width=nlev+2, edge_width=nlev; the colouring is SIZE-AWARE and
+    # will admit an extra round when it buys more than ten per cent of
+    # padded weight, so the weights change WHICH schedule is chosen, not
+    # just its reported cost. Left unset this function colours at 1:1 and
+    # its round count is then NOT the one production builds (codex).
+    production_weighted = cell_width is not None and edge_width is not None
     sched = _build_ppermute_schedule(
         partitions, cell_owner, n_dev, cells_per, edges_per, max_lc, max_le,
+        **({"cell_width": int(cell_width), "edge_width": int(edge_width)}
+           if production_weighted else {}),
     )
+    # Partition fingerprint: max_degree alone does not pin the split --
+    # neighbours and payloads can change at equal degree -- so a gate that
+    # wants "the same split the reference measured" compares this (codex).
+    #
+    # It hashes the NEIGHBOUR SET, not cell_owner. Hashing ownership was
+    # measured vacuous: the partition methods reorder the MESH and then cut
+    # it into contiguous blocks, so sfc, metis and geometric all produce
+    # the same owner array while colouring to 13, 15 and 16 rounds. The
+    # directed pair set is what actually differs, and unlike the round
+    # assignment it does not move when the colouring policy changes.
+    _pairs = sorted({(int(s), int(d))
+                     for perm in sched["ppermute_perms"] for s, d in perm})
+    partition_fingerprint = hashlib.sha256(
+        repr((_pairs, int(max_lc), int(max_le), int(cells_per),
+              int(edges_per))).encode()
+    ).hexdigest()[:16]
     return {
+        "production_weighted": production_weighted,
+        "cell_width": cell_width,
+        "edge_width": edge_width,
+        "weights_note": (
+            None if production_weighted else
+            "coloured at 1:1: production passes cell_width=nlev+2, "
+            "edge_width=nlev, and the size-aware colouring can pick a "
+            "DIFFERENT schedule under those weights, so n_rounds here is "
+            "not production's round count"),
+        "partition_fingerprint": partition_fingerprint,
+        "n_neighbour_pairs": len(_pairs),
         "method": method,
         "resolved_method": resolved,
         "n_dev": n_dev,
@@ -3725,7 +3764,7 @@ def make_voronoi_sharded_step(
             )
         return model.step
 
-    from legoesm.core.precision import cast_pytree
+    from legoesm.core.precision import cast_pytree, finalize_to_storage
     from legoesm.core.state import MPASHydrostaticState
     from legoesm.parallel.mesh import multiprocess_safe_device_put
     from legoesm.parallel.shard_map_compat import shard_map
@@ -4682,7 +4721,14 @@ def make_voronoi_sharded_step(
                 state_new = state_new._replace(
                     tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
-            return cast_pytree(state_new, None, "storage"), phys_state_out
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+            return (finalize_to_storage(
+                        cast_pytree(state_new, None, "storage")),
+                    phys_state_out)
 
         return _step
 

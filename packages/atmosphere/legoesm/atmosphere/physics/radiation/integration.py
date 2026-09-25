@@ -780,6 +780,8 @@ def _call_radiation_backend(
     eccf: float | jnp.ndarray = 1.0,
     cloud_fraction_override: jnp.ndarray | None = None,
     conv_precip: jnp.ndarray | None = None,
+    conv_mass_flux_up: jnp.ndarray | None = None,
+    conv_icwmr: jnp.ndarray | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -919,7 +921,14 @@ def _call_radiation_backend(
             n_cloud=n_cloud,
             conv_precip=conv_precip,
             cloud_fraction_override=cloud_fraction_override,
+            lat=lat,
+            conv_mass_flux_up=conv_mass_flux_up,
+            conv_icwmr=conv_icwmr,
+            p_half=p_half,
         )
+        if cloud_config.cap_floor_on:
+            from legoesm.atmosphere.physics.clouds.cloud_fraction import apply_cap_cloud_floor
+            cloud_props = apply_cap_cloud_floor(cloud_props, lat, p_full, dp, cloud_config)
         # ``to_rrtmg_kwargs`` builds the kwargs without ``cloud_fraction``
         # (commit 4c9591bb, lost in AIMIP-#312 merge, restored iter-15
         # in ``physics_pipeline.py`` and iter-16 here) — see docstring
@@ -1136,10 +1145,10 @@ def make_radiation_physics(
     # dycores rather than silently ignoring the request (dispatch-hardening) —
     # the turbulence WRITE side is wired on all grids, so extend the matching
     # _make_*_radiation READ side before enabling it there.
-    if use_clubb_cloud_fraction and model_type != "hydrostatic":
+    if use_clubb_cloud_fraction and model_type not in ("hydrostatic", "mpas"):
         raise NotImplementedError(
             "RadiationConfig.use_clubb_cloud_fraction is only wired for "
-            f"model_type='hydrostatic', got {model_type!r}.  Extend the "
+            f"model_type='hydrostatic'/'mpas', got {model_type!r}.  Extend the "
             "corresponding _make_*_radiation builder (thread phys_state ->"
             " cloud_fraction_override) before enabling CLUBB-cf routing there."
         )
@@ -1217,7 +1226,8 @@ def make_radiation_physics(
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
                                      ml_ozone_coefs=ml_ozone_coefs,
                                      column_mesh=column_mesh,
-                                     nc_from_aerosol=nc_from_aerosol)
+                                     nc_from_aerosol=nc_from_aerosol,
+                                     use_clubb_cloud_fraction=use_clubb_cloud_fraction)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -1280,6 +1290,26 @@ def _make_hydrostatic_radiation(
         and bool(getattr(radiation_config.cloud_config,
                          "convective_cloud", False))
     )
+    # CAM6 ``cam6_clubb`` cloud fraction: needs the CLUBB carry (the flag
+    # above) plus the lagged deep-convection carries.  Static build-time gate;
+    # refuse a scheme whose only cloud-fraction source is not routed.
+    # The EFFECTIVE scheme is what radiation_column resolves: the nested
+    # cloud_config when present, else the bare cloud_scheme string (which
+    # builds ``CloudConfig(scheme=...)``); gate on the same resolution so
+    # ``cloud_scheme="cam6_clubb", cloud_config=None`` cannot slip past.
+    _cam6_cf_active = (
+        radiation_config.cloud_scheme != "none"
+        and (
+            getattr(radiation_config.cloud_config, "scheme", None)
+            if radiation_config.cloud_config is not None
+            else radiation_config.cloud_scheme
+        ) == "cam6_clubb"
+    )
+    if _cam6_cf_active and not use_clubb_cloud_fraction:
+        raise ValueError(
+            "cloud scheme 'cam6_clubb' takes its liquid cloud fraction from "
+            "the CLUBB carry, which is routed only with "
+            "RadiationConfig.use_clubb_cloud_fraction=True; got False.")
     # Clear-sky TOA diagnostic (#843 lean-lane port): a STATIC clouds-off
     # config variant for the second radiation pass.  ``cloud_scheme="none"``
     # skips the cloud diagnosis entirely (no cloud kwargs -> the solver's
@@ -1509,6 +1539,16 @@ def _make_hydrostatic_radiation(
             _conv_precip_col = getattr(phys_state, "conv_precip", None)
             if _conv_precip_col is not None:
                 _conv_precip_col = _conv_precip_col.reshape(ncol)
+        # CAM6 deepcu inputs (lagged carry, same convention as conv_precip).
+        _conv_mf_col = None
+        _conv_icwmr_col = None
+        if _cam6_cf_active and phys_state is not None:
+            _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
+            _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
+            if _conv_mf_col is not None:
+                _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
+            if _conv_icwmr_col is not None:
+                _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
 
         # Issue #273 follow-up: optionally shard the per-column radiation
         # workload across ``column_mesh`` so a 4×A100 (or any device
@@ -1588,6 +1628,8 @@ def _make_hydrostatic_radiation(
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
             conv_precip=_conv_precip_col,
+            conv_mass_flux_up=_conv_mf_col,
+            conv_icwmr=_conv_icwmr_col,
             solar_spectral_fraction=_ssf_ext,
         )
 

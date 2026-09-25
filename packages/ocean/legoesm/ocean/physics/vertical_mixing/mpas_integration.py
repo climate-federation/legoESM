@@ -107,7 +107,7 @@ _TKE_DIAGNOSTIC_N_ITER = 3       # backward-Euler sub-iterations (K within ~few 
 
 
 
-def _bn2_ladder_kwargs(cfg, z_coord, state):
+def bn2_ladder_kwargs(cfg, z_coord, state):
     """``t_depth``/``w_depth`` for ``n2_mode="nemo_bn2"``, else ``{}``.
 
     LIVE ladders, not static. NEMO evaluates bn2 on ``gdept(Kmm)`` =
@@ -572,7 +572,8 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None,
 
 
 def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
-                           constants_config=ConstantsConfig()) -> Callable:
+                           constants_config=ConstantsConfig(),
+                           iwm_applied_by_model: bool = False) -> Callable:
     """Build KPP profile-only function for MPAS implicit vertical mixing.
 
     Returns ``(A_v_cells, K_v_cells)`` at half-levels (nCells, nlev-1)
@@ -595,11 +596,13 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         ``profiles_fn(state, mesh, z_coord, surface_forcing=None)``
         returning ``(A_v_cells, K_v_cells)`` both shape (nCells, nlev-1).
     """
-    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
+    if (getattr(config, "iwm", None) is not None and config.iwm.enabled
+            and not iwm_applied_by_model):
         raise NotImplementedError(
-            "VerticalMixingConfig.iwm.enabled=True is not wired on the MPAS "
-            "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
-            "rather than silently drop the wave-driven mixing.")
+            "VerticalMixingConfig.iwm.enabled=True: this bridge does not add "
+            "zdfiwm itself — MPASOceanModel applies it additively at the "
+            "model level (pass iwm_applied_by_model=True from there); a "
+            "standalone caller would silently drop the wave-driven mixing.")
     cfg = config.kpp
     if int(getattr(config.kpp, "eice", 0)) != 0:
         raise NotImplementedError(
@@ -655,7 +658,8 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
 
 
 def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
-                           constants_config=ConstantsConfig()) -> Callable:
+                           constants_config=ConstantsConfig(),
+                           iwm_applied_by_model: bool = False) -> Callable:
     """Build a TKE profile function (diagnostic OR prognostic) for MPAS implicit vmix.
 
     Wires the grid-agnostic Gaspar (1990) / Burchard (2002) TKE closure
@@ -775,11 +779,13 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             "(the EKE-dissipation recycling source needs the eke_diss_iw / "
             "K_diss_bot routing that only the lat-lon model step threads). "
             "Set source_eke_diss=False.")
-    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
+    if (getattr(config, "iwm", None) is not None and config.iwm.enabled
+            and not iwm_applied_by_model):
         raise NotImplementedError(
-            "VerticalMixingConfig.iwm.enabled=True is not wired on the MPAS "
-            "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
-            "rather than silently drop the wave-driven mixing.")
+            "VerticalMixingConfig.iwm.enabled=True: this bridge does not add "
+            "zdfiwm itself — MPASOceanModel applies it additively at the "
+            "model level (pass iwm_applied_by_model=True from there); a "
+            "standalone caller would silently drop the wave-driven mixing.")
 
     def profiles_fn(
         state: MPASOceanState,
@@ -920,7 +926,7 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             # LIVE geometric depth ladders for n2_mode="nemo_bn2" -- the same
             # gdept_0*(1+eta/ht_0) stretch the C-grid path applies, so both
             # grids run the SAME stratification.
-            **_bn2_ladder_kwargs(cfg, z_coord, state),
+            **bn2_ladder_kwargs(cfg, z_coord, state),
         )
         A_v_cells = tke_out.K_M   # (nCells, nlev-1) momentum viscosity >= 0
         K_v_cells = tke_out.K_H   # (nCells, nlev-1) tracer diffusivity >= 0

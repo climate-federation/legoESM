@@ -13,6 +13,7 @@ import copy
 from pathlib import Path
 
 from scripts.validate.run_amip_climateeval import (
+    restrict_suite_def,
     build_arg_parser,
     cmor_nc_paths,
     obs_only_suite_def,
@@ -161,3 +162,100 @@ def test_build_arg_parser_multiple_suites_flow_through():
 def test_suite_db_path():
     out = suite_db_path(Path("/tmp/run"), "Tier2_atmosphere_monthly")
     assert out == Path("/tmp/run/climateeval_Tier2_atmosphere_monthly.ddb")
+
+
+def _two_block_suite():
+    return [
+        {"name": "annual_cycle", "diagnostic": "x.AnnualCycle",
+         "variables": [{"id": "tas", "var_name": "tas"}]},
+        {"name": "map", "diagnostic": "x.Map",
+         "variables": [{"id": "tas", "var_name": "tas"},
+                       {"id": "pr", "var_name": "pr",
+                        "additional_preprocessors": {"a.b": {"c": 1}}}]},
+    ]
+
+
+def test_restrict_suite_def_keeps_only_named_blocks():
+    out = restrict_suite_def(_two_block_suite(), "s", ["map"], [])
+    assert [b["name"] for b in out] == ["map"]
+
+
+def test_restrict_suite_def_unknown_diagnostic_is_a_hard_error():
+    import pytest
+    with pytest.raises(SystemExit, match="not in suite s"):
+        restrict_suite_def(_two_block_suite(), "s", ["map", "nope"], [])
+
+
+def test_restrict_suite_def_months_reach_every_variable_and_keep_existing():
+    out = restrict_suite_def(_two_block_suite(), "s", [], [1, 2])
+    for block in out:
+        for var in block["variables"]:
+            pre = var["additional_preprocessors"]
+            assert pre["run_amip_climateeval.extract_months_keep_time"] == {"months": [1, 2]}
+    assert out[1]["variables"][1]["additional_preprocessors"]["a.b"] == {"c": 1}
+
+
+def test_restrict_suite_def_noop_without_flags():
+    assert restrict_suite_def(_two_block_suite(), "s", [], []) == _two_block_suite()
+
+
+def test_restrict_suite_def_does_not_mutate_input():
+    src = _two_block_suite()
+    restrict_suite_def(src, "s", ["map"], [1])
+    assert src == _two_block_suite()
+
+
+def test_main_rejects_month_outside_1_12_before_any_work():
+    import pytest
+    from scripts.validate import run_amip_climateeval as bridge
+    with pytest.raises(SystemExit) as exc:
+        bridge.main(["--cmor-dir", "/nonexistent", "--data-root-dir", "/nonexistent",
+                     "--output-dir", "/nonexistent", "--month", "13"])
+    assert exc.value.code == 2  # argparse usage error, not a late ClimateEval failure
+
+
+def test_main_routes_the_suite_through_restrict_suite_def(monkeypatch, tmp_path):
+    """Regression guard for the wiring: deleting the restrict_suite_def call in
+    main() must fail this test (the fake Suite records the YAML it was given)."""
+    import sys
+    import types
+    from scripts.validate import run_amip_climateeval as bridge
+
+    seen = {}
+
+    class _FakeSuite:
+        def __init__(self, yml, **kw):
+            import yaml
+            with open(yml) as f:
+                seen["def"] = yaml.safe_load(f)
+
+        def get_database(self, *a, **kw):
+            raise RuntimeError("stop after suite load")
+
+    fake_ce = types.ModuleType("climateeval")
+    fake_suites = types.ModuleType("climateeval.suites"); fake_suites.Suite = _FakeSuite
+    fake_data = types.ModuleType("climateeval.data")
+    fake_data.DataSourceInformation = lambda **kw: None
+    fake_report = types.ModuleType("climateeval.report"); fake_report.serve = None
+    fake_iris = types.ModuleType("iris"); fake_iris.load = lambda paths: []
+    suite_dir = tmp_path / "suites"; suite_dir.mkdir()
+    (suite_dir / "toy.yml").write_text(
+        "- name: annual_cycle\n  diagnostic: x\n  variables: [{id: tas, var_name: tas}]\n"
+        "- name: map\n  diagnostic: y\n  variables: [{id: tas, var_name: tas}]\n")
+    for name, mod in (("climateeval", fake_ce), ("climateeval.suites", fake_suites),
+                      ("climateeval.data", fake_data), ("climateeval.report", fake_report),
+                      ("iris", fake_iris)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(bridge, "cmor_nc_paths", lambda d: [tmp_path / "x.nc"])
+    import importlib.resources as resources
+    monkeypatch.setattr(resources, "files", lambda pkg: suite_dir)
+    try:
+        bridge.main(["--cmor-dir", str(tmp_path), "--data-root-dir", str(tmp_path),
+                     "--output-dir", str(tmp_path), "--suite", "toy",
+                     "--diagnostic", "map", "--month", "1"])
+    except Exception:
+        pass
+    assert "def" in seen, "Suite was never constructed"
+    assert [b["name"] for b in seen["def"]] == ["map"]
+    assert "run_amip_climateeval.extract_months_keep_time" in \
+        seen["def"][0]["variables"][0]["additional_preprocessors"]

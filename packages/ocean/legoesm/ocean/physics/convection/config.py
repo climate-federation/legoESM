@@ -17,8 +17,12 @@ __param_spec__ = {
             "sigmoid_sharpness": "numerics: solver/CFL/smoothing parameter",
         },
         "params": {
-            "K_bg": {"units": "1", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion", "shape": None},
-            "K_conv": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion", "shape": None},
+            "K_bg": {"units": "m2/s", "bounds": (0.0, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion", "shape": None},
+            # Upper bound covers NEMO's own zdfevd coefficient (ORCA1
+            # rn_evd = 100 m2/s): the previous (0.33, 3.0) declared a range
+            # the oracle's setting sits 33x outside, i.e. two ranges for one
+            # parameter, with the namelist the authoritative one.
+            "K_conv": {"units": "m2/s", "bounds": (0.33, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion; NEMO zdfevd rn_evd", "shape": None},
         },
     },
     "PlumeConfig": {

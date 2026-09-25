@@ -244,36 +244,29 @@ class TestSpectralPECMT:
         assert float(jnp.max(jnp.abs(tendencies.vor_hat.data))) == 0.0
         assert float(jnp.max(jnp.abs(tendencies.div_hat.data))) == 0.0
 
-    def test_zm_with_zero_winds_quiescent_yields_small_cmt(
+    def test_zm_refused_without_surface_precip_sink(
         self, grid, sigma_coord, rest_state,
     ):
-        """ZM with zero winds + isothermal rest state → tiny CMT.
-
-        ZM's smooth-everywhere triggers produce ε-level tendencies even
-        at zero CAPE, but the spectral plumbing must not amplify those
-        beyond the leaf-level magnitude.  A K/s threshold of 1e-4 (well
-        above the ε-noise floor) suffices to confirm the wiring is
-        well-conditioned.
-        """
+        """CAM6 Zhang-McFarlane emits a SIGNED net rain-flux divergence that
+        only column-integrates to surface rain; this bridge has no surface
+        precip sink, so it must refuse loudly rather than book the field per
+        layer into a tracer (codex round 1, #3)."""
         physics_fn = make_convection_physics(
             ConvectionConfig(scheme="zhang_mcfarlane"),
             model_type="spectral_pe", dt=300.0,
         )
-        tendencies, _ = physics_fn(rest_state, grid, sigma_coord)
-        # T tendency may have a smooth-trigger floor; CMT inherits that.
-        # The spectral round-trip should preserve magnitude — so verify
-        # vor/div tendency magnitudes are consistent with T (no blow-up).
-        T_max = float(jnp.max(jnp.abs(tendencies.T_hat.data)))
-        vor_max = float(jnp.max(jnp.abs(tendencies.vor_hat.data)))
-        div_max = float(jnp.max(jnp.abs(tendencies.div_hat.data)))
-        assert T_max < 1e-3, f"T tendency too large in quiescent state: {T_max}"
-        assert vor_max < 1.0, f"vor tendency too large: {vor_max}"
-        assert div_max < 1.0, f"div tendency too large: {div_max}"
+        zeros = jnp.zeros((grid.n_lat, grid.n_lon, sigma_coord.n_levels))
+        state = _state_with_tracers(rest_state, {
+            "q_v": Field(data=zeros, name="q_v", dims=("lat", "lon", "level"), units="kg/kg"),
+            "q_c": Field(data=zeros, name="q_c", dims=("lat", "lon", "level"), units="kg/kg"),
+        })
+        with pytest.raises(ValueError, match="NET rain-flux"):
+            physics_fn(state, grid, sigma_coord)
 
-    def test_zm_with_cape_and_winds_yields_nonzero_cmt(
+    def test_tiedtke_with_cape_and_winds_yields_nonzero_cmt(
         self, grid, sigma_coord, rest_state,
     ):
-        """Inject CAPE + winds → ZM should fire and produce non-zero CMT.
+        """Inject CAPE + winds → the CMT scheme should fire and produce non-zero CMT.
 
         Constructs a state with non-zero u (solid-body rotation) and
         attaches a tracers dict with q_v close to saturation.  The
@@ -317,14 +310,14 @@ class TestSpectralPECMT:
             data=q_v_grid, name="q_v",
             dims=("lat", "lon", "level"), units="kg/kg",
         )
-        state_with_tracers = _state_with_tracers(
-            state_w_uT, {"q_v": q_v_field},
-        )
+        state_with_tracers = _state_with_tracers(state_w_uT, {"q_v": q_v_field})
 
+        # Tiedtke: the CMT-capable scheme this bridge can run (ZM's net rain
+        # flux needs a surface sink this bridge lacks; see the refusal test).
         physics_fn = make_convection_physics(
             ConvectionConfig(
-                scheme="zhang_mcfarlane",
-                zhang_mcfarlane=ZhangMcFarlaneConfig(enable_cmt=True),
+                scheme="tiedtke",
+                tiedtke=TiedtkeConfig(precip_efficiency=0.0),
             ),
             model_type="spectral_pe", dt=300.0,
         )
@@ -334,13 +327,13 @@ class TestSpectralPECMT:
         # Plume should fire somewhere — vor/div tendencies must be
         # non-zero in at least one mode/level.
         assert float(jnp.max(jnp.abs(tendencies.T_hat.data))) > 0.0, (
-            "ZM should produce non-zero T tendencies on a CAPE column"
+            "Tiedtke should produce non-zero T tendencies on a CAPE column"
         )
         assert float(jnp.max(jnp.abs(tendencies.vor_hat.data))) > 0.0, (
-            "ZM should produce non-zero vor_hat tendencies via CMT"
+            "Tiedtke should produce non-zero vor_hat tendencies via CMT"
         )
         assert float(jnp.max(jnp.abs(tendencies.div_hat.data))) > 0.0, (
-            "ZM should produce non-zero div_hat tendencies via CMT"
+            "Tiedtke should produce non-zero div_hat tendencies via CMT"
         )
 
     def test_tiedtke_responds_to_moisture_convergence(
@@ -586,7 +579,8 @@ class TestSpectralPECMT:
         holomorphic-input dance with a complex T_hat).
         """
         physics_fn = make_convection_physics(
-            ConvectionConfig(scheme="zhang_mcfarlane"),
+            ConvectionConfig(scheme="tiedtke",
+                             tiedtke=TiedtkeConfig(precip_efficiency=0.0)),
             model_type="spectral_pe", dt=300.0,
         )
 
@@ -620,13 +614,14 @@ class TestSpectralPECMT:
 @pytest.fixture(
     scope="module",
     params=[
-        ("zhang_mcfarlane", "zhang_mcfarlane", ZhangMcFarlaneConfig),
+        # zhang_mcfarlane is absent by design: CAM6 ZM's rain is a signed net
+        # flux divergence this bridge refuses (test_zm_refused_without_surface_precip_sink).
         ("kain_fritsch", "kain_fritsch", KainFritschConfig),
         ("emanuel", "emanuel", EmanuelConfig),
         ("tiedtke", "tiedtke", TiedtkeConfig),
         ("bechtold", "bechtold", BechtoldConfig),
     ],
-    ids=["zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold"],
+    ids=["kain_fritsch", "emanuel", "tiedtke", "bechtold"],
 )
 def profile_scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each new scheme."""

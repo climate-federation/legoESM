@@ -4,6 +4,20 @@
 User directive 2026-08-21: *"Be concise and clear — make this a default."*
 Eleventh ask. Default, not mode.
 
+**2026-09-08, NAMED AT OPUS 5 (and every Mythos/Fable-class model):
+*"Force opus 5 to be concise and clear as default."*** Twelfth ask. The
+long-session drift is the failure mode: replies start terse and grow back
+into paragraphs after an hour of tool calls. So the cap is not a mood, it
+is checked EVERY reply, and re-read whenever a session runs long.
+
+GATE (RULE 2 demands one, so here it is, mechanical, self-applied before
+send): count the rendered lines of the reply. **>5 lines, or any table
+the user did not ask to compare, or any header in a reply under ~500
+words → DELETE and rewrite.** Verdict first line; then at most 3 short
+bullets; then stop. A status report on background jobs is ONE line per
+job, no preamble. If it will not fit, the content wanted a table — keep
+the table, delete the prose.
+
 - **Verdict first line.** Then max 3 short bullets. Stop.
 - **~60 words.** Longer only if report/walkthrough asked.
 - **Plain words.** No file:line, function names, config keys, job ids, PR

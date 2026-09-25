@@ -592,9 +592,10 @@ def build_parser():
     # run_amip uses.  So this list had drifted, not narrowed on purpose: it was
     # missing zhang_mcfarlane / kain_fritsch / emanuel / tiedtke / bechtold --
     # every one of which resolves through the shared convection factory.
-    # tiedtke is run_amip's default and bechtold is the scheme pinned by
-    # config/amip/amip_production.yaml, so a coupled run could select NEITHER of
-    # the two the atmosphere is actually run with.  Derived from the canonical
+    # tiedtke is run_amip's default and the production deck pins one of these
+    # explicitly -- zhang_mcfarlane since it became the CAM6 suite on
+    # 2026-09-23, bechtold before that -- so a coupled run could select NEITHER
+    # of the two the atmosphere is actually run with.  Derived from the canonical
     # set so it cannot drift again.  (The default stays sbm: the comment above
     # documents the empirically coupled-stable suite, which is a statement about
     # the DEFAULT, not a reason to block the others.)

@@ -489,7 +489,12 @@ def tvd_to_v_points(
         # fold_is_local is False under SPMD, so key off north_fold_mask (tripole
         # + SPMD armed) — else this would edge-clamp the tripole fold seam.
         if fold_is_local(grid) or north_fold_mask(grid) is not None:
-            _fn = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+            # Pivot-layout meshes (eORCA025): the J+1 ghost is the row BELOW
+            # the pivot permuted (J+k <- J-k); permuting the stored pivot row
+            # itself reads the land mirror twins (codex fold-fix RED 5).
+            _src = (f[-2] if bool(getattr(grid.fold, "pivot_row_stored",
+                                          False)) else f[-1])
+            _fn = f_north2.at[n_lat - 1].set(_src[grid.fold.perm_T])
         else:
             _fn = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
         f_north2 = jnp.where(north_mask, _fn, f_north2)
@@ -499,7 +504,9 @@ def tvd_to_v_points(
             f_south2 = f_south2.at[1].set(f_south[1])
         if north_is_pole:
             if fold_is_local(grid):
-                f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+                _src = (f[-2] if bool(getattr(grid.fold, "pivot_row_stored",
+                                              False)) else f[-1])
+                f_north2 = f_north2.at[n_lat - 1].set(_src[grid.fold.perm_T])
             else:
                 f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
     t_grad = ratio_grad_floor(f.dtype)
@@ -2390,7 +2397,25 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        if een_e3f_scheme in ("nemo_avg", "nemo_avg4"):
+        if een_e3f_scheme == "nemo_avg4":
+            # Hoisted above BOTH fold branches: the lane declares nemo_avg4
+            # undefined on a tripolar fold, and main's pivot-row branch below
+            # is a tripolar fold too, so the guard must precede it rather than
+            # sit inside the nemo_avg body (where a pivot mesh would bypass it).
+            raise NotImplementedError(
+                "nemo_avg4 is not defined for a tripolar fold; its "
+                "certified NEMO GYRE use is a closed beta-plane box")
+        if bool(getattr(fold, "pivot_row_stored", False)):
+            # Pivot layout (eORCA025): the top F/vertex row is the MIRROR of
+            # the vertex row below (measured: F row J = perm_f(F row J-1)),
+            # so the completed row below permuted with the F map IS the top
+            # row — no partner-cell construction from the (half-land) stored
+            # pivot T row (codex fold-fix RED 6).
+            from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+            h_vtx_north = h_vtx[-2:-1][:, fold_perm_f(fold), :]
+            h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid,
+                                     north_mask=nmask)
+        elif een_e3f_scheme == "nemo_avg":
             h_k_partner = h_k[-1:, fold.perm_T, :]
             h_sw_partner = h_sw[-1:, fold.perm_T, :]
             t_k_partner = t_k[-1:, fold.perm_T, :]
@@ -2399,10 +2424,6 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
             wet_count_north = t_k[-1:] + t_sw[-1:] + t_k_partner + t_sw_partner
             # Same fully-dry-vertex fallback as the interior branch above
             # (dry_fallback: dz_ref[k] when available, else legacy BIG_H).
-            if een_e3f_scheme == "nemo_avg4":
-                raise NotImplementedError(
-                    "nemo_avg4 is not defined for a tripolar fold; its "
-                    "certified NEMO GYRE use is a closed beta-plane box")
             h_vtx_north = jnp.where(
                 wet_count_north > 0.0,
                 e3f_sum_north / jnp.maximum(wet_count_north, 1.0),
@@ -2415,7 +2436,9 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
                 jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
                 jnp.minimum(h_k_partner, h_sw_partner),
             )
-        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
+        if not bool(getattr(fold, "pivot_row_stored", False)):
+            h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid,
+                                     north_mask=nmask)
     h_vtx = jnp.concatenate(
         [h_vtx, h_vtx[:, 0:1, :]], axis=1,
     )  # (n_lat+1, n_lon+1, nlev)
@@ -2604,8 +2627,12 @@ def _bc_pv_flux(
     # Fu_ext padded in the fused exchange above; (n_lat+2, n_lon+1, nlev).
     if fold_is_local(grid) or nmask is not None:
         _f = grid.fold
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T, fold_perm_u,
+        )
         Fu_fold_row = fold_row(
-            Fu[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
+            fold_ghost_source_T(Fu, _f), fold_perm_u(_f),
+            _f.vector_sign_u, _f.perm_T.shape[0])
         Fu_ext = apply_north_fold(Fu_ext, Fu_fold_row, grid, north_mask=nmask)
     Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
                        + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
@@ -2635,8 +2662,11 @@ def _bc_pv_flux(
     # (``nmask`` computed at the Fu fold block above — same grid, same scope.)
     if fold_is_local(grid) or nmask is not None:
         _f = grid.fold
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T as _fgsT, fold_perm_u as _fpu,
+        )
         u_fold_row = fold_row(
-            u[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
+            _fgsT(u, _f), _fpu(_f), _f.vector_sign_u, _f.perm_T.shape[0])
         u_ext = apply_north_fold(u_ext, u_fold_row, grid, north_mask=nmask)
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)

@@ -25,7 +25,7 @@ set -uo pipefail
 REPO=/burg-archive/glab/users/pg2328/legoESM
 cd $REPO || exit 1
 echo "=== HEAD $(git -C $REPO rev-parse HEAD)"
-export PYTHONPATH="$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
+export PYTHONPATH="$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 R=$REPO/results/omip_nemo
 MESH=$REPO/data/grids/eORCA1.2_mesh_mask.nc

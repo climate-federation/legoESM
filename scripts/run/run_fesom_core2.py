@@ -139,10 +139,24 @@ def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
     wet = np.asarray(mesh.node_layer_mask[:, 0], dtype=np.float64)
     z_center = -np.asarray(mesh.Z, dtype=np.float64)        # positive-down
     H = -np.asarray(mesh.depth, dtype=np.float64)           # positive-down
+    # Geographic node velocity (east, north) per layer for the equatorial-
+    # undercurrent probe: element velocity -> nodes (fesom's own
+    # compute_vel_nodes), then the exact inverse of the mesh rotation.
+    _u_geo = {}
+    if getattr(state, "uv", None) is not None:
+        from fesom_jax.pp import compute_vel_nodes
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            rotated_to_geographic_node_vector,
+        )
+        _uvn = np.asarray(compute_vel_nodes(mesh, state.uv))       # (nod2D, nl, 2)
+        _cols = [rotated_to_geographic_node_vector(mesh, _uvn[:, k, 0], _uvn[:, k, 1])
+                 for k in range(nreal)]
+        _u_geo = {"u_east": np.stack([np.asarray(c[0]) for c in _cols], axis=1),
+                  "v_north": np.stack([np.asarray(c[1]) for c in _cols], axis=1)}
     path = out_dir / f"snapshot_{tag}.npz"
     np.savez_compressed(
         path,
-        T=T3, S=S3,
+        T=T3, S=S3, **_u_geo,
         eta=np.asarray(state.eta_n, dtype=np.float64),
         ice_concentration=np.asarray(state.a_ice, dtype=np.float64),
         ice_thickness=np.asarray(state.m_ice, dtype=np.float64),

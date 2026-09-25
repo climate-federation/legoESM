@@ -3870,6 +3870,102 @@ def _nemo_native_active_3d(
     ).astype(dtype)
 
 
+# NEMO 5.0.1 src/OCE/LDF/ldftra.F90:427: fixed fraction, not a namelist knob.
+NEMO21_REDI_FLOOR_FRACTION = 0.2
+
+
+def validate_redi_coefficient(cfg):
+    """Reject unsupported or inert Redi selections before tracing physics."""
+    if cfg.redi_coefficient not in ("constant", "nemo21"):
+        raise ValueError(f"unknown redi_coefficient {cfg.redi_coefficient!r}")
+    if cfg.redi_coefficient == "constant":
+        if cfg.redi_f_f is not None:
+            raise ValueError("redi_f_f requires redi_coefficient='nemo21'")
+        return
+    if (cfg.slope_scheme != "nemo_iso_lap"
+            or cfg.slope_positions != "nemo_native"):
+        raise ValueError("nemo21 requires nemo_iso_lap and nemo_native slopes")
+    if not cfg.treguier.enabled or cfg.visbeck.enabled or cfg.eke is not None:
+        raise ValueError("nemo21 requires Treguier alone (no Visbeck/EKE)")
+    validate_treguier_cfg(cfg.treguier)
+    if cfg.treguier.kappa_min != 0:
+        raise ValueError("nemo21 requires unfloored GM: gm_kappa_min=0")
+    if cfg.resolution_function or cfg.kappa_redi_lat_scaling:
+        raise ValueError("nemo21 conflicts with resolution/latitude scaling")
+    if cfg.redi_f_f is None:
+        raise ValueError("nemo21 requires exact mesh redi_f_f (no averaged-f fallback)")
+    if not isinstance(cfg.redi_aht0, jax.core.Tracer):
+        import math
+        if not math.isfinite(float(cfg.redi_aht0)) or cfg.redi_aht0 <= 0:
+            raise ValueError("redi_aht0 must be finite and positive")
+
+
+def nemo21_redi_from_gm(kappa_t, f_t, f_f, u_mask, v_mask, aht0, omega, *, grid=None):
+    """NEMO 5.0.1 ldftra:419-441, AFTER masked GM face averaging.
+
+    Inputs/outputs are cell-indexed east/north faces, m2/s, nonnegative.
+    f_t and f_f are signed Coriolis at T and NE F points, respectively.
+    The ABS makes the enhancement hemisphere-symmetric. Depth masking is
+    applied by the existing explicit tensor and implicit K33 consumers.
+    """
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        TREGUIER_TAPER_LAT_DEG,
+    )
+    if f_f.shape != kappa_t.shape or f_t.shape != kappa_t.shape:
+        raise ValueError("nemo21 Coriolis fields must match the local T grid")
+    if grid is None:
+        ku, kv = nemo_kappa_gm_to_faces(kappa_t, u_mask, v_mask)
+    else:
+        # Same two-point mean, with the existing scalar halo/fold handling.
+        ku = interp_cell_to_uface(kappa_t)[:, 1:] * u_mask
+        kv = interp_cell_to_vface(kappa_t, grid)[1:, :] * v_mask
+    floor = NEMO21_REDI_FLOOR_FRACTION * aht0
+    increment = aht0 - floor
+    f20 = 2.0 * omega * jnp.sin(jnp.deg2rad(TREGUIER_TAPER_LAT_DEG))
+    ku = (jnp.maximum(floor, ku)
+          + (1.0 - jnp.minimum(1.0, jnp.abs(f_t) / f20)) * increment)
+    kv = (jnp.maximum(floor, kv)
+          + (1.0 - jnp.minimum(1.0, jnp.abs(f_f) / f20)) * increment)
+    return ku * u_mask, kv * v_mask
+
+
+def native_treguier_kappa_for_state(
+    rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
+    jacobian, eta, H_bathy, prd_jacobian, prd_TS, pn2, e3w,
+    f_coriolis, rho_0, g, omega,
+):
+    """Shared native GM diagnosis for tracer fluxes and the Redi K33 split."""
+    _act_kgm = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
+    _uslp_kgm, _vslp_kgm, _wslpi_kgm, _wslpj_kgm = compute_nemo_native_slopes(
+        rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
+        jacobian=jacobian, eta=eta, H_bathy=H_bathy,
+        prd_jacobian=prd_jacobian,
+        prd_TS_override=prd_TS,
+        pn2_override=pn2,
+        e3w_override=e3w,
+        rho_0=rho_0, g=g, active_3d=_act_kgm,
+    )
+    kappa_GM = compute_treguier_kappa_gm_nemo_native(
+        rho, T, S, _wslpi_kgm, _wslpj_kgm, mask, z_coord, grid,
+        f_coriolis, cfg.treguier, eos_fn, rho_0=rho_0, g=g, active_3d=_act_kgm,
+        # slope_n2 lives on the PARENT GMRediConfig, not on cfg.treguier.
+        # Passing cfg.treguier alone made getattr(cfg,'slope_n2',..) silently
+        # fall back to 'adiabatic' while the slopes two lines above ran
+        # 'nemo_bn2' -- an internally INCONSISTENT kappa that carried a
+        # 1.6% aeiu deficit (#1226).  Explicit params, no fallback.
+        slope_n2=getattr(cfg, "slope_n2", "adiabatic"),
+        jacobian=jacobian,
+        omega=omega,
+        vertical_reduction_evaluation=getattr(
+            cfg, "treguier_vertical_reduction_evaluation", "tree"),
+        sqrt_evaluation=getattr(
+            cfg, "treguier_sqrt_evaluation", "guarded_floor"),
+        pn2_override=pn2,
+        e3w_override=e3w,
+    )
+    return kappa_GM
+
+
 def gm_redi_tracer_tendency_latlon(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -3949,6 +4045,11 @@ def gm_redi_tracer_tendency_latlon(
     -------
     dT_dt, dS_dt : (n_lat, n_lon, nlev)
     """
+    validate_redi_coefficient(cfg)
+    if cfg.redi_coefficient == "nemo21" and (
+            kappa_gm_override is not None or kappa_redi_override is not None
+            or kappa_redi_v_override is not None):
+        raise ValueError("nemo21 conflicts with runtime coefficient overrides")
     # Default masks: all ocean.
     if mask is None:
         mask = jnp.ones(T.shape[:2], dtype=T.dtype)
@@ -4047,33 +4148,11 @@ def gm_redi_tracer_tendency_latlon(
         # slope_positions combination keeps the byte-identical generic path.
         if (getattr(cfg, "slope_scheme", "triads") == "nemo_iso_lap"
                 and getattr(cfg, "slope_positions", "mode_b") == "nemo_native"):
-            _act_kgm = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
-            _uslp_kgm, _vslp_kgm, _wslpi_kgm, _wslpj_kgm = compute_nemo_native_slopes(
+            kappa_GM = native_treguier_kappa_for_state(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
-                jacobian=jacobian, eta=_kappa_native_eta, H_bathy=H_bathy,
-                prd_jacobian=_native_prd_J,
-                prd_TS_override=native_prd_TS,
-                pn2_override=native_slope_pn2,
-                e3w_override=native_slope_e3w,
-                rho_0=rho_0, g=g, active_3d=_act_kgm,
-            )
-            kappa_GM = compute_treguier_kappa_gm_nemo_native(
-                rho, T, S, _wslpi_kgm, _wslpj_kgm, mask, z_coord, grid,
-                f_coriolis, _treg, eos_fn, rho_0=rho_0, g=g, active_3d=_act_kgm,
-                # slope_n2 lives on the PARENT GMRediConfig, not on _treg.
-                # Passing _treg alone made getattr(cfg,'slope_n2',..) silently
-                # fall back to 'adiabatic' while the slopes two lines above ran
-                # 'nemo_bn2' -- an internally INCONSISTENT kappa that carried a
-                # 1.6% aeiu deficit (#1226).  Explicit params, no fallback.
-                slope_n2=getattr(cfg, "slope_n2", "adiabatic"),
-                jacobian=jacobian,
-                omega=omega,
-                vertical_reduction_evaluation=getattr(
-                    cfg, "treguier_vertical_reduction_evaluation", "tree"),
-                sqrt_evaluation=getattr(
-                    cfg, "treguier_sqrt_evaluation", "guarded_floor"),
-                pn2_override=native_slope_pn2,
-                e3w_override=native_slope_e3w,
+                jacobian, _kappa_native_eta, H_bathy, _native_prd_J,
+                native_prd_TS, native_slope_pn2, native_slope_e3w,
+                f_coriolis, rho_0, g, omega,
             )
         else:
             kappa_GM = compute_treguier_kappa_gm(
@@ -4141,6 +4220,11 @@ def gm_redi_tracer_tendency_latlon(
     # v-face analogue: None unless the static lat-scaling override supplied a
     # genuinely distinct ahtv (see nemo_iso_lap_tracer_tendency_latlon_cgrid).
     kappa_Redi_v_eff = kappa_redi_v_override
+    if cfg.redi_coefficient == "nemo21":
+        kappa_Redi_eff, kappa_Redi_v_eff = nemo21_redi_from_gm(
+            kappa_GM, jnp.broadcast_to(grid.f, mask.shape), cfg.redi_f_f,
+            u_mask[:, 1:], v_mask[1:, :], cfg.redi_aht0, omega, grid=grid)
+
 
     scheme = getattr(cfg, "slope_scheme", "triads")
     # Guard (codex r5-r7): msc_stabilize (ln_traldf_msc) is implemented ONLY
@@ -4454,6 +4538,7 @@ def compute_isoneutral_K33_latlon(
     mask: jnp.ndarray | None = None,
     rho_0: float = _RHO_0,
     g: float = constants.g,
+    omega: float = constants.Omega,
     kappa_redi_override: jnp.ndarray | None = None,
     kappa_redi_v_override: jnp.ndarray | None = None,
     density_jacobian: tuple[jnp.ndarray, jnp.ndarray] | None = None,
@@ -4483,6 +4568,10 @@ def compute_isoneutral_K33_latlon(
     vertical isoneutral diffusion backward-Euler-implicitly as in Veros rather than
     explicitly.  Density-independent of the tracer, so one call serves both T and S.
     """
+    validate_redi_coefficient(cfg)
+    if cfg.redi_coefficient == "nemo21" and (
+            kappa_redi_override is not None or kappa_redi_v_override is not None):
+        raise ValueError("nemo21 conflicts with runtime coefficient overrides")
     if mask is None:
         mask = jnp.ones(T.shape[:2], dtype=T.dtype)
     # Jacobian + density (2-iteration EOS coupling).  When the model step
@@ -4561,6 +4650,15 @@ def compute_isoneutral_K33_latlon(
             pn2_override=native_slope_pn2,
             e3w_override=native_slope_e3w,
             rho_0=rho_0, g=g, active_3d=_act)
+        if cfg.redi_coefficient == "nemo21":
+            _kgm = native_treguier_kappa_for_state(
+                _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
+                _J, eta, H_bathy, _native_prd_J,
+                native_prd_TS, native_slope_pn2, native_slope_e3w,
+                jnp.broadcast_to(grid.f, _m.shape), rho_0, g, omega)
+            kappa_redi_override, kappa_redi_v_override = nemo21_redi_from_gm(
+                _kgm, jnp.broadcast_to(grid.f, _m.shape), cfg.redi_f_f,
+                _um[:, 1:], _vm[1:, :], cfg.redi_aht0, omega, grid=grid)
         _kap = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
         # Center kappa broadcast IDENTICAL to the explicit operator's own
         # ``aht`` block, then the SHARED mask + a33 kappa-sum helpers — one

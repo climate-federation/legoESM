@@ -748,3 +748,101 @@ class TestPadCoversEveryGeometryField:
         assert got.shape == (n_lat + n_pad,)
         np.testing.assert_array_equal(got[n_pad:], np.asarray(seam))
         assert bool(np.all(got[:n_pad] == 1.0)), "new land rows must be walled"
+
+
+# -------------------------------------------------------------------------
+# u-point metric alignment (the NEMO C-grid index convention)
+# -------------------------------------------------------------------------
+def _write_mesh_with_varying_u_metrics(path, n_lat=8, n_lon=16):
+    """Mesh whose e1u/e2u VARY ALONG A ROW, with a curved (unambiguous) fold.
+
+    The shared fixture above writes uniform metrics, under which a one-column
+    shift of e1u/e2u is exactly the identity -- so it cannot see this bug.
+    Varying them along i is what makes the alignment observable at all, and is
+    the situation on a real ORCA mesh north of ~20N.
+    """
+    ds = netcdf4.Dataset(path, "w")
+    ds.createDimension("y", n_lat)
+    ds.createDimension("x", n_lon)
+    i = np.arange(n_lon)
+    glamt = np.broadcast_to(
+        np.linspace(0.0, 360.0, n_lon, endpoint=False)[None, :],
+        (n_lat, n_lon)).astype(np.float64)
+    gphit = np.array(np.broadcast_to(
+        np.linspace(-80.0, 80.0, n_lat)[:, None], (n_lat, n_lon)),
+        dtype=np.float64)
+    gphit[-1, :] = 80.0 + 5.0 * np.cos(2.0 * np.pi * i / n_lon)
+    ones = np.ones((n_lat, n_lon), dtype=np.float64)
+    # distinct along-i profiles for e1u and e2u so a swap cannot pass either
+    e1u = 1.0e4 * (1.0 + 0.10 * i)[None, :] * ones
+    e2u = 1.0e4 * (1.0 + 0.37 * i)[None, :] * ones
+    for name, arr in (
+        ("glamt", glamt), ("gphit", gphit),
+        ("glamu", glamt), ("gphiu", gphit),
+        ("glamv", glamt), ("gphiv", gphit),
+        ("e1t", ones * 1.0e4), ("e2t", ones * 1.0e4),
+        ("e1u", e1u), ("e2u", e2u),
+        ("e1v", ones * 1.0e4), ("e2v", ones * 1.0e4),
+        ("tmask", ones), ("umask", ones), ("vmask", ones),
+    ):
+        v = ds.createVariable(name, "f8", ("y", "x"))
+        v[:] = arr
+    ds.close()
+    return e1u, e2u
+
+
+class TestUPointMetricAlignment:
+    """NEMO's u-point ``i`` is EAST of T-cell ``i``; ours is WEST of cell ``i``.
+
+    MEASURED on the real mesh, not taken from documentation: on the 1-degree
+    part of eORCA1 ``glamu - glamt = +0.5000`` deg.  So our face ``i`` carries
+    NEMO's ``e1u[i-1]`` and face 0 wraps to the LAST column.
+
+    These tests FAIL against the previous construction, which appended
+    ``e1u[:, 0:1]`` and so handed every face the metric of the face one column
+    EAST -- a bug that is invisible on a uniform mesh and worth several to
+    twenty percent on every zonal face north of 30N of a real ORCA grid.
+    """
+
+    def _grid(self, tmp):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        path = os.path.join(tmp, "mesh_varying.nc")
+        e1u, e2u = _write_mesh_with_varying_u_metrics(path)
+        return create_tripole_grid(path), e1u, e2u
+
+    def test_u_face_takes_the_metric_of_the_face_to_its_west(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            grid, e1u, e2u = self._grid(tmp)
+            dx_u = np.asarray(grid.dx_u, dtype=np.float64)
+            dy_u = np.asarray(grid.dy_u, dtype=np.float64)
+            # face i (i>=1) carries NEMO's u-point i-1
+            np.testing.assert_allclose(dx_u[:, 1:], e1u, rtol=1e-6)
+            np.testing.assert_allclose(dy_u[:, 1:], e2u, rtol=1e-6)
+
+    def test_wrap_column_is_the_last_not_the_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            grid, e1u, e2u = self._grid(tmp)
+            dx_u = np.asarray(grid.dx_u, dtype=np.float64)
+            dy_u = np.asarray(grid.dy_u, dtype=np.float64)
+            np.testing.assert_allclose(dx_u[:, 0], e1u[:, -1], rtol=1e-6)
+            np.testing.assert_allclose(dy_u[:, 0], e2u[:, -1], rtol=1e-6)
+            # and NOT the first column, which is what the old build used
+            assert not np.allclose(dy_u[:, 0], e2u[:, 0], rtol=1e-6)
+
+    def test_metric_and_coriolis_reference_the_same_cell_pair(self):
+        """f at a u-face averages cells i-1 and i, so the metric must too.
+
+        This is the internal consistency the bug broke: the Coriolis
+        construction already used the WEST convention while the metric used the
+        EAST one.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            grid, _e1u, e2u = self._grid(tmp)
+            f_T = np.asarray(grid.f_T, dtype=np.float64)
+            f_u = np.asarray(grid.f_u, dtype=np.float64)
+            expected = 0.5 * (np.roll(f_T, 1, axis=1) + f_T)
+            np.testing.assert_allclose(f_u[:, :f_T.shape[1]], expected,
+                                       rtol=1e-6, atol=1e-12)
+            dy_u = np.asarray(grid.dy_u, dtype=np.float64)
+            np.testing.assert_allclose(dy_u[:, 1:], e2u, rtol=1e-6)

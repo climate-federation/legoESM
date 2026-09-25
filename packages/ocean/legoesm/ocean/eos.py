@@ -36,6 +36,7 @@ from typing import NamedTuple
 import equinox as eqx
 import jax
 from jax import lax
+from jax.experimental import checkify
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -1576,7 +1577,20 @@ def unesco80_eos(
     Parameters
     ----------
     T : array
-        Potential temperature [°C]. Valid range: -2 to 40 °C.
+        IN-SITU temperature [°C] (IPTS-68). Valid range: -2 to 40 °C.
+
+        This said "Potential temperature" until 2026-09-11 and that was
+        WRONG. UNESCO 1980 is the in-situ standard; the potential-temperature
+        refit is Jackett & McDougall 1995, a different polynomial. Measured
+        against the published in-situ check value
+        ``rho(S=35, T=25, p=10000 dbar) = 1062.538``, this function returns
+        1062.5382 -- agreement to 2e-4 kg/m³, which it could not achieve if
+        it were a θ-form. Every prognostic tracer in this package is
+        POTENTIAL temperature, so callers must convert with
+        :func:`potential_temperature`'s inverse before using this EOS;
+        feeding θ straight in leaves the deep ocean too dense by roughly the
+        adiabatic compression term. The OMIP runner refuses to select it for
+        exactly this reason (``_OMIP_EOS_FORMS``).
     S : array
         Practical salinity [PSU]. Valid range: 0 to 42 PSU.
     p : array
@@ -1829,6 +1843,36 @@ def potential_temperature(
 
     xk = h * adiabatic_temperature_gradient(S, t, p)
     return t + (xk - 2.0 * q) / 6.0
+
+
+# Fixed numerical inverse iterations, not a physical closure parameter.
+_INSITU_ITERATIONS = 8
+
+
+def in_situ_temperature(S, theta_C, p_dbar):
+    """Invert surface-referenced :func:`potential_temperature`, in Celsius.
+
+    Reverse pressure integration supplies the initial estimate. Fixed residual
+    corrections invert the discrete forward conversion (reverse integration
+    alone has truncation error). JIT/grad-safe for seawater in the EOS regime.
+    Pressure is sea pressure in dbar, as in the forward conversion.
+    The final forward residual must be <= 1e-12 K (float64) or 1e-5 K
+    (float32). This guards the fixed iteration count's convergence assumption
+    for this EOS. Value checks are inert in eager/plain JIT execution: compile
+    ``jax.jit(checkify.checkify(fn))`` with user checks enabled (the default)
+    and call ``err.throw()`` outside JIT to enforce them.
+    """
+    initial = potential_temperature(S, theta_C, 0.0, p_dbar)
+
+    def correct(_, t):
+        return t + (theta_C - potential_temperature(S, t, p_dbar))
+
+    final = lax.fori_loop(0, _INSITU_ITERATIONS, correct, initial)
+    residual = jnp.abs(theta_C - potential_temperature(S, final, p_dbar))
+    tolerance = 1e-12 if final.dtype == jnp.float64 else 1e-5
+    checkify.debug_check(jnp.all(jnp.isfinite(residual) & (residual <= tolerance)),
+                         "EOS: in-situ temperature inverse residual exceeds tolerance")
+    return final
 
 
 # ==============================================================================
@@ -3249,7 +3293,13 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     ``T_f(S, z) = S · P(√(S/S0)) − 7.53e-4 · z`` with the eosbn2.F90
     polynomial ``P``; ``depth_m`` positive down (``None`` = surface).
     """
-    zs = jnp.sqrt(jnp.abs(jnp.asarray(S_psu)) / _NEMO_FZP_S0)
+    # At S=0 the full S*P(sqrt(abs(S)/S0)) has derivative P(0), but
+    # differentiating the unguarded square root produces 0*inf -> NaN.
+    # Guard inside sqrt as well as outside; retain the exact forward value.
+    sal_abs = jnp.abs(jnp.asarray(S_psu))
+    nonzero = sal_abs > 0.0
+    zs = jnp.where(nonzero, jnp.sqrt(jnp.where(
+        nonzero, sal_abs / _NEMO_FZP_S0, 1.0)), 0.0)
     poly = ((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs + _NEMO_FZP_C3) * zs
              + _NEMO_FZP_C2) * zs + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0
     tf = poly * jnp.asarray(S_psu)
