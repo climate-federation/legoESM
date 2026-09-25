@@ -80,7 +80,7 @@ def main():
     toN = np.where(np.isfinite(toN) & (np.abs(toN) < 1e3), toN, np.nan)
     subN, ocN_sub = regrid_curv_to_latlon(np.nan_to_num(toN), N["lat"], N["lon"], N["mask"] * np.isfinite(toN), tgt_lat, tgt_lon)
     print(f"NEMO sub-surface level {dsN['deptht'].values[kN]:.2f} m; NEMO tos - T_sub CONTRAST (background stratification included) box means: "
-          + "  ".join(f"{b[0]} {float(np.sum((np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :])[m := ((ocN > 0.5) & np.isfinite(sstN) & np.isfinite(subN) & _box(tgt_lat, tgt_lon, *b[1:]))] * (sstN[m] - subN[m])) / np.sum((np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :])[m])):+.3f}" for b in BOXES))
+          + "  ".join(f"{b[0]} {float(np.sum((np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :])[m := ((ocN > 0.5) & (ocN_sub > 0.5) & np.isfinite(sstN) & np.isfinite(subN) & _box(tgt_lat, tgt_lon, *b[1:]))] * (sstN[m] - subN[m])) / np.sum((np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :])[m])):+.3f}" for b in BOXES))
     area = np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :]
     print(f"NEMO {Path(a.nemo_gridt).name} record {a.rec}; target {a.res_deg} deg")
     hdr = f"{'snapshot':28s} {'day':>6s} " + "".join(f"{b[0]+' bias':>14s}" for b in BOXES) \
@@ -101,6 +101,10 @@ def main():
             raise SystemExit(f"--use-mean-fields but {p} has no T_mean "
                              "(run the driver with --state-accumulate); no silent fallback")
         _T = np.asarray(s["T_mean" if a.use_mean_fields else "T"])
+        # tos is a PLAIN mean (surface from T_mean); to is @toce_e3t/@e3t, so
+        # the sub-surface level comes from T_mean_hw with its window h_mean.
+        _Tsub = np.asarray(s["T_mean_hw"]) if a.use_mean_fields else _T
+        _hsub = np.asarray(s["h_mean"])[..., k] if a.use_mean_fields else None
         if "time_days" not in s.files or not np.isfinite(float(s["time_days"])):
             raise SystemExit(f"{p}: no finite time_days; cannot place it in a window")
         day = float(s["time_days"])
@@ -108,7 +112,10 @@ def main():
         if a.use_mean_fields and not (np.isfinite(wsec) and wsec > 0):
             raise SystemExit(f"{p}: T_mean without a positive flux_mean_window_s")
         sstL, ocL = regrid_curv_to_latlon(_T[..., 0], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
-        subL, ocL_sub = regrid_curv_to_latlon(_T[..., k], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
+        subL, ocL_sub = regrid_curv_to_latlon(np.nan_to_num(_Tsub[..., k]), L["lat"], L["lon"],
+                                              L["mask"] * np.isfinite(_Tsub[..., k]), tgt_lat, tgt_lon)
+        hL = (regrid_curv_to_latlon(_hsub, L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)[0]
+              if _hsub is not None else np.ones_like(subL))
         if support is None:
             # Coverage masks of BOTH regrids on BOTH sides (the regridder
             # extrapolates finite values outside its radius, codex).
@@ -124,7 +131,7 @@ def main():
         if bad.any():
             raise SystemExit(f"{p}: {int(bad.sum())} support cells non-finite/land in this row")
         members.append((day, wsec, sstL, subL,
-                        Path(p).name + (" [T_mean]" if a.use_mean_fields else "")))
+                        Path(p).name + (" [T_mean]" if a.use_mean_fields else ""), hL))
 
     rows = list(members)
     if a.mean:
@@ -153,10 +160,13 @@ def main():
             label = (f"SAMPLE MEAN of {len(order)} snaps d{min(days):.2f}-{max(days):.2f} "
                      "(equal weight; NOT a window mean)")
         sstM = sum(w * members[o][2] for w, o in zip(wts, order)) / wts.sum()
-        subM = sum(w * members[o][3] for w, o in zip(wts, order)) / wts.sum()
-        rows.append((float("nan"), None, sstM, subM, label))
+        # Sub-surface: duration x thickness weights (the hw mean of a union
+        # of windows is Sum(T h dt)/Sum(h dt)); hL == 1 for instantaneous rows.
+        subM = (sum(w * members[o][5] * members[o][3] for w, o in zip(wts, order))
+                / sum(w * members[o][5] for w, o in zip(wts, order)))
+        rows.append((float("nan"), None, sstM, subM, label, None))
 
-    for day, _w, sstL, subL, label in rows:
+    for day, _w, sstL, subL, label, _h in rows:
         row = f"{label:28s} {day:6.2f} "
         biases, dl, n3 = [], [], 0
         for name, la0, la1, lo0, lo1 in BOXES:

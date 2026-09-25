@@ -10425,6 +10425,9 @@ def main() -> int:
                  if (args.flux_accumulate or args.mld_accumulate
                      or args.state_accumulate)
                  else None)
+    # Device-resident bathymetry for the per-step thickness (codex: the
+    # tripole builder returns NumPy; converting it every step is an upload).
+    _Hb_dev = jnp.asarray(H_bathy) if args.state_accumulate else None
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
@@ -11198,8 +11201,8 @@ def main() -> int:
                 _eta_acc = getattr(state, "eta", None)
                 _dz_acc = compute_layer_thickness(
                     (_eta_acc.data if _eta_acc is not None
-                     else jnp.zeros_like(jnp.asarray(H_bathy))),
-                    jnp.asarray(H_bathy), z_coord)
+                     else jnp.zeros_like(_Hb_dev)),
+                    _Hb_dev, z_coord)
             _flux_acc.add(sf if args.flux_accumulate else None,
                           mld=(_mld_now(state, z_coord)
                                if args.mld_accumulate else None),

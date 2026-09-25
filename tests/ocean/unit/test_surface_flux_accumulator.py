@@ -369,13 +369,15 @@ def test_thickness_weighted_mean_matches_nemo_definition():
     """T_mean_hw = Sum(T h)/Sum(h) over the window (NEMO @toce_e3t/@e3t),
     which differs from the plain mean when T and h co-vary in time."""
     acc = _driver()._SurfaceFluxAccumulator()
-    st = lambda t: SimpleNamespace(T=SimpleNamespace(data=np.full((1, 1, 2), t)),
-                                   S=SimpleNamespace(data=np.full((1, 1, 2), 35.0)))
-    acc.add(None, state=st(10.0), dz=np.full((1, 1, 2), 1.0))
-    acc.add(None, state=st(20.0), dz=np.full((1, 1, 2), 3.0))
+    st = lambda t, sal: SimpleNamespace(T=SimpleNamespace(data=np.full((1, 1, 2), t)),
+                                        S=SimpleNamespace(data=np.full((1, 1, 2), sal)))
+    # level 0 wet (h 1 then 3), level 1 DRY (h 0 both steps)
+    acc.add(None, state=st(10.0, 34.0), dz=np.array([[[1.0, 0.0]]]))
+    acc.add(None, state=st(20.0, 36.0), dz=np.array([[[3.0, 0.0]]]))
     out = acc.drain()
     np.testing.assert_allclose(out["T_mean"], 15.0, rtol=1e-12)
-    np.testing.assert_allclose(out["T_mean_hw"], (10 * 1 + 20 * 3) / 4.0, rtol=1e-12)
-    np.testing.assert_allclose(out["S_mean_hw"], 35.0, rtol=1e-12)
-    np.testing.assert_allclose(out["h_mean"], 2.0, rtol=1e-12)
+    np.testing.assert_allclose(out["T_mean_hw"][..., 0], (10 * 1 + 20 * 3) / 4.0, rtol=1e-12)
+    np.testing.assert_allclose(out["S_mean_hw"][..., 0], (34 * 1 + 36 * 3) / 4.0, rtol=1e-12)
+    assert np.isnan(out["T_mean_hw"][..., 1]).all() and np.isnan(out["S_mean_hw"][..., 1]).all()
+    np.testing.assert_allclose(out["h_mean"][..., 0], 2.0, rtol=1e-12)
     assert "T_h_mean" not in out
