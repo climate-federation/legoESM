@@ -391,7 +391,8 @@ def _bathy_kwargs(T_raw, e3t_raw, cfg):
 
 def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
                         ice_frac=None, use_bathy=False,
-                        n_iterations=1, dt_s=3600.0):
+                        n_iterations=1, dt_s=3600.0,
+                        budget=False, en_next=None):
     # The closure gates bottom_dirichlet behind TKEConfig.bottom_tke_bc and
     # raises if the value is supplied with the gate off -- a second
     # silent-no-op guard, and it fired. Enabling it is part of THIS arm's one
@@ -474,6 +475,7 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
         # bounded by the 6.6e-4 divisor error noted there. Required since the
         # card selects n2_mode="nemo_bn2"; without it the closure raises.
         e3w_int=jnp.asarray(dz_half),
+        return_budget=bool(budget),
     )
     K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
     # K_M too: Stage A (Mode-B, our own equilibrium TKE) measures K_M/avm 0.47
@@ -528,7 +530,76 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
     # both decomposes it instead of leaving it to argument.
     _leps = np.asarray(out.l_eps).reshape(ncol, z - 1)
     _enew = np.asarray(out.tke_new).reshape(ncol, z - 1)
-    return K_H, K_M, n2, dz_half, _leps, _enew, en_i
+    bud = None
+    if budget:
+        bud = _seed_budget_terms(out.budget, rst, cols, dz_c, dz_half, n2,
+                                 u_c, v_c, cfg_prog, float(dt_s), ncol, z,
+                                 en_next=en_next)
+    return K_H, K_M, n2, dz_half, _leps, _enew, en_i, bud
+
+
+def _seed_budget_terms(b, rst, cols, dz_c, dz_half, n2, u_c, v_c, cfg,
+                       dt_s, ncol, z, en_next=None):
+    """Per-term TKE rates [m2/s3] at NEMO's seed: OURS from the solver's own
+    :class:`TKEStepBudget` (one step, divided by dt), NEMO's from the restart
+    with the formulas of ``zdftke.F90`` (5.0.1) evaluated on the same en.
+
+    Interface index j of our arrays is NEMO W-level array index a = j+1
+    (``en_i = en[:, 1:]`` above), so a-1 = j is the row above (the z=0
+    surface row for j=0) and a+1 = j+2 the row below.
+    """
+    # NEMO's rn_ediss (namelist_ref:1226) must be the coefficient our
+    # dissipation used, or an eps mismatch is a constant, not an operator.
+    if abs(float(cfg.c_eps) - 0.7) > 1e-12:
+        raise SystemExit(f"cfg.c_eps={cfg.c_eps} != rn_ediss=0.7; the NEMO "
+                         "dissipation rebuild below assumes NEMO's own value")
+    r = lambda x: np.asarray(x).reshape(ncol, z - 1) / dt_s
+    ours = {k: r(getattr(b, k)) for k in b._fields}
+    # nn_etau is an INCREMENT per call with no dt (zdftke.F90:492-495), applied
+    # once per NEMO step: present it as increment / 3600 s, not / dt_s.
+    ours["etau"] = np.asarray(b.etau).reshape(ncol, z - 1) / 3600.0
+    en_f = np.nan_to_num(cols(rst["en"]), nan=0.0)        # (ncol, z) W-levels
+    avm_f = np.nan_to_num(cols(rst["avm_k"]), nan=0.0)
+    avt_f = np.nan_to_num(cols(rst["avt_k"]), nan=0.0)
+    dsl_f = np.nan_to_num(cols(rst["dissl"]), nan=0.0)
+    pad0 = lambda x: np.concatenate([x, np.zeros_like(x[:, :1])], axis=1)
+    e_prev, e_cur, e_next = en_f[:, :-1], en_f[:, 1:], pad0(en_f[:, 2:])
+    avm_prev, avm_cur, avm_next = avm_f[:, :-1], avm_f[:, 1:], pad0(avm_f[:, 2:])
+    # zdftke.F90:414 (1.5*rn_Dt*rn_ediss*dissl on the diagonal) and :419
+    # (+0.5*rn_ediss*dissl*en on the rhs): net rate -rn_ediss*dissl*en at the seed.
+    eps_n = -cfg.c_eps * dsl_f[:, 1:] * e_cur
+    # zdftke.F90:418  - p_avt * rn2 (rn2 from the same nemo_bn2 helper the
+    # closure ran on this state; the restart carries no rn2)
+    b_n = -avt_f[:, 1:] * n2
+    # zdftke.F90:417  + p_sh2. zdfsh2.F90:67-94 builds it from the U/V-point
+    # shear weighted by avm; here avm_k times the CENTRED T-point shear our
+    # closure also uses (production is ~1% of dissipation in the 2-8 m band).
+    du = np.diff(u_c, axis=1) / dz_half
+    dv = np.diff(v_c, axis=1) / dz_half
+    p_n = avm_cur * (du * du + dv * dv)
+    # zdftke.F90:404-414: zzd_up/zzd_lw = -0.5*dt*max(avm_a+avm_a+-1, 2e-5)
+    # / (e3t * e3w); rate = 0.5*[lw*(e_{a-1}-e_a) + up*(e_{a+1}-e_a)] with
+    # e3t[a-1] = dz_c[:, :-1], e3t[a] = dz_c[:, 1:], e3w[a] = dz_half.
+    lw = np.maximum(avm_cur + avm_prev, 2.0e-5) / (dz_c[:, :-1] * dz_half)
+    up = np.maximum(avm_cur + avm_next, 2.0e-5) / (dz_c[:, 1:] * dz_half)
+    t_n = 0.5 * (lw * (e_prev - e_cur) + up * (e_next - e_cur))
+    nemo = {"production": p_n, "buoyancy": b_n, "dissipation": eps_n,
+            "transport": t_n}
+    # NEMO's four reconstructed terms summed (its Langmuir and etau are NOT
+    # in the restart, so this is PARTIAL and not a closure test); the +24 h
+    # en change is printed only as the scale of NEMO's real tendency.
+    nemo["sum4_partial"] = p_n + b_n + eps_n + t_n
+    if en_next is not None:
+        e_next_f = np.nan_to_num(cols(en_next), nan=0.0)
+        nemo["d_en_dt_24h"] = (e_next_f[:, 1:] - e_cur) / 86400.0
+    # Dissipation length at matched energy: ours from the closure, NEMO's
+    # from dissl = sqrt(en)/zmxld (zdftke.F90:717) inverted on the same en.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        l_nemo = np.where(dsl_f[:, 1:] > 0, np.sqrt(e_cur) / dsl_f[:, 1:], np.nan)
+    return {"ours": ours, "nemo": nemo, "e3w": dz_half, "l_eps_nemo": l_nemo,
+            "avm_sfc": avm_f[:, 0], "avm_1": avm_f[:, 1],
+            "en_sfc": en_f[:, 0],
+            "dtype": str(np.asarray(b.transport).dtype)}
 
 
 def run_stage_b(d):
@@ -1051,6 +1122,15 @@ def main():
                          "values integrate to the equation's own fixed point.")
     ap.add_argument("--mode-a-dt", type=float, default=3600.0,
                     help="Mode-A step length [s] (default 3600 = NEMO's).")
+    ap.add_argument("--mode-a-budget", action="store_true",
+                    help="Mode-A: print the per-term TKE budget of ONE step at "
+                         "NEMO's seed (TKEStepBudget) beside NEMO's own terms "
+                         "from the restart, 2-8 m, cold-tongue calm columns. "
+                         "Requires --mode-a-iterations 1.")
+    ap.add_argument("--restart-next-npz", default=None,
+                    help="rebuild_nemo_restart.py output (field en) at the "
+                         "restart +24 h; bounds NEMO's own closure residual "
+                         "in the --mode-a-budget table.")
     ap.add_argument("--use-bathy", action="store_true",
                     help="Tell the closure where each column's seafloor is "
                          "(bottom_level + w_active, derived from the state's "
@@ -1187,11 +1267,22 @@ def main():
             _ice = np.clip(_ice, 0.0, 1.0)
             print(f"[ice] a_i: mean {_ice.mean():.4f}, "
                   f"frac>0.15 {(_ice > 0.15).mean():.4f}")
+        if args.mode_a_budget:
+            if args.mode_a_iterations != 1:
+                raise SystemExit("--mode-a-budget reads ONE step at the seed; "
+                                 "pass --mode-a-iterations 1")
+            # The closure identity is checked at 1e-12 relative; the solver
+            # must run in float64, not the policy default (Rule 1c).
+            from legoesm.core.precision import PrecisionPolicy, set_policy
+            set_policy(PrecisionPolicy.fp64())
+        _en_next = (dict(np.load(args.restart_next_npz))["en"]
+                    if args.restart_next_npz else None)
         (K_H2, K_M2, n2_ours, e3w_a2, leps2, enew2,
-         eseed2) = run_stage_a2_mode_a(
+         eseed2, bud2) = run_stage_a2_mode_a(
             d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm, ice_frac=_ice,
             use_bathy=args.use_bathy,
-            n_iterations=args.mode_a_iterations, dt_s=args.mode_a_dt)
+            n_iterations=args.mode_a_iterations, dt_s=args.mode_a_dt,
+            budget=args.mode_a_budget, en_next=_en_next)
         # SEED vs STEPPED turbulent energy, per interface, cold-tongue calm
         # columns. Under one step this is a near-identity; under many steps
         # it is the prognostic-equation test: a ratio near 1 through the upper
@@ -1212,6 +1303,107 @@ def main():
             _s = float(np.median(eseed2[_sel, k])); _e = float(np.median(enew2[_sel, k]))
             print(f"[mode-a-en]  {_zi_med[k]:7.1f}   {_s:12.3e}   {_e:14.3e}   "
                   f"{_e / _s if _s > 0 else float('nan'):7.3f}")
+        if bud2 is not None:
+            # Per-term rates at the seed, medians over the calm box, plus the
+            # median of per-column ratios (paired, not a ratio of medians).
+            print(f"\n[mode-a-budget] one {args.mode_a_dt:g} s step at NEMO's "
+                  f"seed; budget dtype {bud2['dtype']}; rates in m2/s3; "
+                  "median over the box; ratio = median of per-column ours/NEMO; "
+                  "nbias = median [IQR] of (ours-NEMO)/max|terms| per column")
+            print("[mode-a-budget] READ WITH: ours are the step's IMPLICIT terms "
+                  "(on e_new); NEMO's are explicit on the seed. They coincide "
+                  "only as dt -> 0 (use --mode-a-dt 1 for seed rates). NEMO P "
+                  "is avm_k*centred-shear, not p_sh2, so k=0 is not scoreable "
+                  "on P. 'NEMO den/dt24h' is a 24 h evolving-forcing tendency: "
+                  "a BOUND on NEMO's closure residual, not a closure check.")
+            _o, _n = bud2["ours"], bud2["nemo"]
+            _chk = _box[:, None] & (eseed2 > 0)
+            if not _chk.any():
+                raise SystemExit("[mode-a-budget] empty box selection")
+            for _side in (_o, _n):
+                for _f, _v in _side.items():
+                    if not np.all(np.isfinite(_v[_chk])):
+                        raise SystemExit(f"[mode-a-budget] non-finite {_f} inside the box")
+            _res_gate = np.abs(_o["residual"]) / np.maximum(
+                sum(np.abs(_o[f]) for f in ("production", "buoyancy",
+                                             "dissipation", "transport")), 1e-300)
+            if float(np.max(_res_gate[_chk])) > 1e-9:
+                raise SystemExit("[mode-a-budget] budget does not close: max "
+                                 f"residual/sum|terms| = {float(np.max(_res_gate[_chk])):.2e}")
+            print(f"[mode-a-budget] surface operands, box medians: en(1) "
+                  f"{float(np.median(bud2['en_sfc'][_box])):.3e}  avm_k(1) "
+                  f"{float(np.median(bud2['avm_sfc'][_box])):.3e}  avm_k(2) "
+                  f"{float(np.median(bud2['avm_1'][_box])):.3e}")
+            _sig = np.maximum.reduce([np.abs(_n[f]) for f in
+                                      ("production", "buoyancy", "dissipation",
+                                       "transport")] + [np.abs(_o["external"])])
+            _sig = np.maximum(_sig, 1e-300)
+            _res_rel = np.abs(_o["residual"]) / np.maximum(
+                np.abs(_o["dissipation"]) + np.abs(_o["transport"]), 1e-300)
+            print(f"[mode-a-budget] closure residual / (|eps|+|T|), box max: "
+                  f"{float(np.nanmax(np.where(_box[:, None], _res_rel, 0.0))):.2e}")
+            _rows = [("production", "production"), ("buoyancy", "buoyancy"),
+                     ("dissipation", "dissipation"), ("transport", "transport"),
+                     ("external(LC)", "external"), ("etau", "etau"),
+                     ("floor", "floor"), ("pin", "pin")]
+            for k in range(min(8, eseed2.shape[1])):
+                _sel = _box & np.isfinite(eseed2[:, k]) & (eseed2[:, k] > 0)
+                if not _sel.any():
+                    continue
+                print(f"[mode-a-budget] --- interface {k} at {_zi_med[k]:.1f} m, "
+                      f"en_seed median {float(np.median(eseed2[_sel, k])):.3e}, "
+                      f"n={int(_sel.sum())} ---")
+                print("[mode-a-budget]  term            ours          NEMO       ratio   nbias")
+                for lab, f in _rows:
+                    _ov = _o[f][_sel, k]
+                    if f in _n:
+                        _nv = _n[f][_sel, k]
+                        _ok = _nv != 0.0
+                        _ratio = (float(np.median(_ov[_ok] / _nv[_ok]))
+                                  if _ok.any() else float("nan"))
+                        _nb = (_ov - _nv) / _sig[_sel, k]
+                        _q = np.percentile(_nb, [25, 50, 75])
+                        _sd = float(np.mean(np.sign(_ov) != np.sign(_nv)))
+                        _nae = float(np.sum(np.abs(_ov - _nv)) / max(np.sum(np.abs(_nv)), 1e-300))
+                        print(f"[mode-a-budget]  {lab:13s} {float(np.median(_ov)):12.3e} "
+                              f"{float(np.median(_nv)):12.3e} {_ratio:9.3f}   "
+                              f"nbias {_q[1]:+7.3f} [{_q[0]:+7.3f},{_q[2]:+7.3f}]  "
+                              f"signdis {_sd:.2f}  nae {_nae:.3f}")
+                    else:
+                        print(f"[mode-a-budget]  {lab:13s} {float(np.median(_ov)):12.3e} "
+                              f"{'-':>12s} {'-':>9s}")
+                _os = sum(_o[f][_sel, k] for f in
+                          ("production", "external", "buoyancy", "dissipation",
+                           "transport", "pin", "floor", "etau"))
+                _ln = bud2["l_eps_nemo"][_sel, k]; _lo = leps2[_sel, k]
+                _okl = np.isfinite(_ln) & (_ln > 0)
+                print(f"[mode-a-budget]  {'l_eps [m]':13s} {float(np.median(_lo)):12.3e} "
+                      f"{float(np.median(_ln[_okl])):12.3e} "
+                      f"{float(np.median(_lo[_okl] / _ln[_okl])):9.3f}   (ours = closure; NEMO = sqrt(en)/dissl)")
+                print(f"[mode-a-budget]  {'net (ours)':13s} {float(np.median(_os)):12.3e}")
+                print(f"[mode-a-budget]  {'NEMO sum4 part':13s} "
+                      f"{float(np.median(_n['sum4_partial'][_sel, k])):12.3e}")
+                if "d_en_dt_24h" in _n:
+                    print(f"[mode-a-budget]  {'NEMO den/dt24h':13s} "
+                          f"{float(np.median(_n['d_en_dt_24h'][_sel, k])):12.3e}")
+            _bk = slice(1, 4)   # interfaces 1..3 = 2.1, 3.3, 4.5 m
+            _w = bud2["e3w"][:, _bk]
+            _selb = _box & np.all(eseed2[:, _bk] > 0, axis=1)
+            _tb_o = np.sum(_o["transport"][:, _bk] * _w, axis=1)[_selb]
+            _tb_n = np.sum(_n["transport"][:, _bk] * _w, axis=1)[_selb]
+            print(f"[mode-a-budget] transport INTO 2-5 m (sum_k T_k e3w_k, m3/s3): "
+                  f"ours {float(np.median(_tb_o)):.3e}  NEMO {float(np.median(_tb_n)):.3e}  "
+                  f"paired-median ratio {float(np.median(_tb_o / np.where(_tb_n == 0, np.nan, _tb_n))):.3f}  "
+                  f"signdis {float(np.mean(np.sign(_tb_o) != np.sign(_tb_n))):.2f}  n={int(_selb.sum())}")
+            result["stage_a2_mode_a_budget"] = {
+                "dt_s": args.mode_a_dt, "dtype": bud2["dtype"],
+                "box_n": int(_box.sum()),
+                "medians": {
+                    side: {f: [float(np.median(v[_box & (eseed2[:, k] > 0), k]))
+                               for k in range(min(8, eseed2.shape[1]))]
+                           for f, v in terms.items()}
+                    for side, terms in (("ours", _o), ("nemo", _n))},
+            }
         result["stage_a2_mode_a"] = region_report(
             # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
             # d["avt"], and load_pair(--rec 1) puts NEMO's RECORD 1 avt there —

@@ -325,6 +325,32 @@ def _safe_stress_modulus(tx: jnp.ndarray, ty: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(t2 > 0.0, jnp.sqrt(jnp.where(t2 > 0.0, t2, 1.0)), 0.0)
 
 
+class TKEStepBudget(NamedTuple):
+    """Per-interface energy budget of ONE backward-Euler TKE step [m²/s²].
+
+    Every term is the amount of energy the solved system attributed to it
+    over the step, evaluated with the SAME linearised operands the matrix
+    was built from, so that
+
+        production + external + buoyancy + dissipation + transport
+        + pin + floor + etau == tke_new - tke_old      (to round-off)
+
+    ``residual`` is that identity's defect and is the closure gate a
+    consumer must check before quoting any term. Diagnostic only: never
+    carried, never traced into a loss.
+    """
+    production: jnp.ndarray    # dt·P_s (explicit shear production)
+    external: jnp.ndarray      # dt·external_source (Langmuir, recycling)
+    buoyancy: jnp.ndarray      # dt·(buoy_source − buoy_sink_rate·e_new)
+    dissipation: jnp.ndarray   # −dt·c_eps·√e_old/l_eps·(w·e_new − a·e_old)
+    transport: jnp.ndarray     # −(a·e_{k−1} + b_diff·e_k + c·e_{k+1}), incl. the
+    #                            z=0 face flux under nemo_z0 / the Neumann injection
+    pin: jnp.ndarray           # e_new − e_old on held (Dirichlet) rows, else 0
+    floor: jnp.ndarray         # post-solve floors / masks: e_final − e_solved
+    etau: jnp.ndarray          # nn_etau injection applied after the solve
+    residual: jnp.ndarray      # (tke_new − tke_old) − Σ(all of the above)
+
+
 class TKEOutput(NamedTuple):
     """Output of :func:`tke_vertical_mixing`."""
     K_M: jnp.ndarray       # (..., nlev-1) momentum eddy viscosity at interfaces
@@ -333,6 +359,7 @@ class TKEOutput(NamedTuple):
     l_eps: jnp.ndarray     # (..., nlev-1) dissipation mixing length (diagnostic)
     K_M_surface: jnp.ndarray | None = None  # (...) post-tke_avn surface avm_k
     dissl: jnp.ndarray | None = None  # (...) carried post-tke_avn sqrt(en)/zmxld
+    budget: TKEStepBudget | None = None  # last step's terms (return_budget=True)
 
 
 class TKEEntryN2Bundle(NamedTuple):
@@ -1048,8 +1075,14 @@ def _solve_tke_backward_euler(
     w_active: jnp.ndarray | None = None,
     nemo_e3t: jnp.ndarray | None = None,
     dissl_old: jnp.ndarray | None = None,
-) -> jnp.ndarray:
+    return_budget: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, TKEStepBudget]:
     """Backward-Euler tridiagonal solve for one TKE time step.
+
+    ``return_budget=True`` additionally returns a :class:`TKEStepBudget`
+    formed from the very matrix entries and right-hand side the step was
+    solved with (the primal ``e_new`` is unchanged). Not available on the
+    ``nemo_literal`` matrix, whose rows are not assembled term by term.
 
     Linearises ``-c_eps * e^{3/2} / l_eps`` as ``-c_eps * sqrt(e_old) / l_eps · e_new``
     so the resulting system is linear in e_new. ``P_b = -K_H * N^2`` is
@@ -1206,6 +1239,11 @@ def _solve_tke_backward_euler(
             "Unknown TKEConfig.tke_matrix_evaluation: expected 'factored' "
             f"or 'nemo_literal', got {matrix_evaluation!r}.")
     literal_matrix = matrix_evaluation == "nemo_literal"
+    if return_budget and literal_matrix:
+        raise ValueError(
+            "_solve_tke_backward_euler: return_budget is not available with "
+            "tke_matrix_evaluation='nemo_literal' (its rows are transcribed "
+            "whole, not assembled term by term).")
     solver_evaluation = getattr(cfg, "tke_solver_evaluation", "shared_thomas")
     if solver_evaluation not in ("shared_thomas", "nemo_literal"):
         raise ValueError(
@@ -1511,6 +1549,12 @@ def _solve_tke_backward_euler(
     if external_source is not None and not literal_matrix:
         rhs = rhs + dt * external_source
 
+    # Budget bookkeeping (return_budget): which rows are held Dirichlet and
+    # what the Neumann surface injection added to row 0. Zero-cost when the
+    # budget is not requested (plain array constants, folded by XLA).
+    pinned = jnp.zeros(e_old.shape, dtype=bool)
+    flux_inj = jnp.zeros_like(e_old)
+
     if bottom_dirichlet is not None:
         # NEMO bottom TKE BC (zdftke.F90:279-288): en(mbkt+1) =
         # MAX(0.001875·CdU_bot·|u_bot|, rn_emin)*ssmask, set the SAME way as
@@ -1526,6 +1570,7 @@ def _solve_tke_backward_euler(
             a_diff = a_diff.at[..., -1].set(0.0)
             diag = diag.at[..., -1].set(1.0)
             rhs = rhs.at[..., -1].set(_e_bd)
+            pinned = pinned.at[..., -1].set(True)
         else:
             # T15-exact: scatter the pin to the PER-COLUMN seafloor
             # interface (NEMO's mbkt), clamped into range so a dry column
@@ -1540,6 +1585,7 @@ def _solve_tke_backward_euler(
             c_diff = jnp.where(is_bottom, 0.0, c_diff)
             diag = jnp.where(is_bottom, 1.0, diag)
             rhs = jnp.where(is_bottom, _e_bd[..., jnp.newaxis], rhs)
+            pinned = pinned | is_bottom
 
     # Surface flux BC at interface k=0: add the flux divergence with
     # ``forc_tke_surface``-style energy input. Veros injects over the
@@ -1665,6 +1711,10 @@ def _solve_tke_backward_euler(
         else:
             e_new_ext = _tridiag_thomas(a_ext, b_ext, c_ext, rhs_ext)
             e_new = e_new_ext[..., 1:]
+        # The solved system, for the budget: rows 1..N of the extended
+        # matrix act on (e_sfc, e_0, ..., e_{N-1}).
+        _sys = (a_ext[..., 1:], b_ext[..., 1:], c_ext[..., 1:],
+                jnp.concatenate([e_sfc[..., None], e_new], axis=-1))
     elif surface_dirichlet is not None:
         # NEMO nn_bc_surf=1 Dirichlet surface TKE (zdftke.F90:264-269): hold
         # e_new[...,0] = e_sfc exactly by making row 0 an identity row (the
@@ -1675,13 +1725,22 @@ def _solve_tke_backward_euler(
         c_diff = c_diff.at[..., 0].set(0.0)
         rhs = rhs.at[..., 0].set(
             jnp.asarray(surface_dirichlet, dtype=e_old.dtype))
+        pinned = pinned.at[..., 0].set(True)
         e_new = _tridiag_thomas(a_diff, diag, c_diff, rhs)
+        _sys = (a_diff, diag, c_diff,
+                jnp.concatenate([jnp.zeros_like(e_new[..., :1]), e_new],
+                                axis=-1))
     else:
-        rhs = rhs.at[..., 0].add(dt * surface_flux / inj_vol)
+        flux_inj = flux_inj.at[..., 0].set(dt * surface_flux / inj_vol)
+        rhs = rhs + flux_inj
         e_new = _tridiag_thomas(a_diff, diag, c_diff, rhs)
+        _sys = (a_diff, diag, c_diff,
+                jnp.concatenate([jnp.zeros_like(e_new[..., :1]), e_new],
+                                axis=-1))
 
     if literal_solver:
         return e_new
+    e_solved = e_new
 
     if veros_positivity:
         # Veros tke.py:238-245: interior TKE MAY GO NEGATIVE (the debt is
@@ -1692,34 +1751,77 @@ def _solve_tke_backward_euler(
         # point is the topmost interior interface k=0. No
         # ``tke_background`` / ``tke_surface_min`` floors.
         e_new = e_new.at[..., 0].set(jnp.maximum(e_new[..., 0], 0.0))
+    else:
+        # Floor at background; clamp away from negative.
+        # NEMO: `en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)`
+        # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
+        # src/OCE/ZDF/zdftke.F90:469). legoESM historically kept the MAX and
+        # DROPPED the `* wmask`; ``w_active`` (TKEConfig.tke_dry_wmask)
+        # restores it. None ⇒ BIT-IDENTICAL legacy.
+        e_new = jnp.maximum(e_new, cfg.tke_background)
+        # The legoESM surface slot is interface 0 only for the historical
+        # ``interior_pinned`` layout.  Under ``nemo_z0`` the true surface is
+        # the separate virtual Dirichlet row assembled above: NEMO applies
+        # rn_emin0 there (MY_SRC/zdftke.F90:361), then applies only rn_emin
+        # to the solved interior jk=2..jpkm1 (:564-565).  Reapplying
+        # tke_surface_min here would incorrectly pin NEMO jk=2 to the
+        # surface floor.
+        if surface_bc_level == "interior_pinned":
+            e_new = e_new.at[..., 0].set(
+                jnp.maximum(e_new[..., 0], cfg.tke_surface_min),
+            )
+        if w_active is not None:
+            # LAST statement, exactly as at :565 (the `* wmask` closes
+            # tke_tke); this removes either post-solve floor on dry
+            # interfaces. With masking disabled, ``interior_pinned`` retains
+            # the historical unmasked surface floor, while ``nemo_z0`` now
+            # retains only tke_background at dry interface 0 instead of the
+            # formerly misplaced surface floor. Both shipped nemo_z0 DINO
+            # cards enable tke_dry_wmask.
+            e_new = e_new * jnp.asarray(w_active, dtype=e_new.dtype)
+    if not return_budget:
         return e_new
 
-    # Floor at background; clamp away from negative.
-    # NEMO: `en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)`
-    # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
-    # src/OCE/ZDF/zdftke.F90:469). legoESM historically kept the MAX and
-    # DROPPED the `* wmask`; ``w_active`` (TKEConfig.tke_dry_wmask) restores
-    # it. None ⇒ BIT-IDENTICAL legacy.
-    e_new = jnp.maximum(e_new, cfg.tke_background)
-    # The legoESM surface slot is interface 0 only for the historical
-    # ``interior_pinned`` layout.  Under ``nemo_z0`` the true surface is the
-    # separate virtual Dirichlet row assembled above: NEMO applies rn_emin0
-    # there (MY_SRC/zdftke.F90:361), then applies only rn_emin to the solved
-    # interior jk=2..jpkm1 (:564-565).  Reapplying tke_surface_min here would
-    # incorrectly pin NEMO jk=2 to the surface floor.
-    if surface_bc_level == "interior_pinned":
-        e_new = e_new.at[..., 0].set(
-            jnp.maximum(e_new[..., 0], cfg.tke_surface_min),
-        )
-    if w_active is not None:
-        # LAST statement, exactly as at :565 (the `* wmask` closes tke_tke);
-        # this removes either post-solve floor on dry interfaces. With masking
-        # disabled, ``interior_pinned`` retains the historical unmasked
-        # surface floor, while ``nemo_z0`` now retains only tke_background at
-        # dry interface 0 instead of the formerly misplaced surface floor.
-        # Both shipped nemo_z0 DINO cards enable tke_dry_wmask.
-        e_new = e_new * jnp.asarray(w_active, dtype=e_new.dtype)
-    return e_new
+    # ---- per-term budget of THIS solve, from the solved system itself ----
+    # Row k of the solved system reads
+    #   a_k e_{k-1} + (diag_sinks_k + b_diff_k) e_k + c_k e_{k+1} = rhs_k,
+    # with diag_sinks = 1 + dt(w·diss_rate + buoy_sink_rate), so
+    #   e_k - e_old_k = [rhs_k - e_old_k] - dt(w·diss_rate + buoy_sink_rate) e_k
+    #                   - (a_k e_{k-1} + b_diff_k e_k + c_k e_{k+1}).
+    # Each bracket below is one named term of that identity; on a held row
+    # the whole change is the pin. The identity is exact for the Thomas
+    # solve, so ``residual`` is round-off unless a term was mis-assigned.
+    a_sys, b_sys, c_sys, e_lo = _sys           # e_lo = (upper neighbour, e_0..)
+    e_prev = e_lo[..., :-1]                    # e_{k-1} (virtual/held row at k=0)
+    e_next = jnp.concatenate(
+        [e_solved[..., 1:], jnp.zeros_like(e_solved[..., :1])], axis=-1)
+    diss_w = 1.5 if _disc == "nemo_1p5_split" else 1.0  # coeff-ok: same split weight as the diagonal above
+    diag_sinks = 1.0 + dt * (diss_w * diss_rate + buoy_sink_rate)
+    b_diff_eff = b_sys - diag_sinks            # b_diff (+ the z=0 face at row 0)
+    transport = -(a_sys * e_prev + b_diff_eff * e_solved + c_sys * e_next) \
+        + flux_inj
+    production = dt * P_s
+    external = (dt * external_source if external_source is not None
+                else jnp.zeros_like(e_old))
+    buoyancy = dt * (buoy_source - buoy_sink_rate * e_solved)
+    dissipation = -dt * diss_w * diss_rate * e_solved
+    if _disc == "nemo_1p5_split":
+        dissipation = dissipation + dt * 0.5 * diss_rate * e_old
+    zero = jnp.zeros_like(e_old)
+    production = jnp.where(pinned, zero, production)
+    external = jnp.where(pinned, zero, external)
+    buoyancy = jnp.where(pinned, zero, buoyancy)
+    dissipation = jnp.where(pinned, zero, dissipation)
+    transport = jnp.where(pinned, zero, transport)
+    pin = jnp.where(pinned, e_solved - e_old, zero)
+    floor = e_new - e_solved
+    total = (production + external + buoyancy + dissipation + transport
+             + pin + floor)
+    budget = TKEStepBudget(
+        production=production, external=external, buoyancy=buoyancy,
+        dissipation=dissipation, transport=transport, pin=pin, floor=floor,
+        etau=zero, residual=(e_new - e_old) - total)
+    return e_new, budget
 
 
 # ---------------------------------------------------------------------------
@@ -2463,8 +2565,13 @@ def tke_vertical_mixing(
     preclosure_dissl: jnp.ndarray | None = None,
     precomputed_p_sh2: jnp.ndarray | None = None,
     precomputed_n2_bundle: TKEEntryN2Bundle | None = None,
+    return_budget: bool = False,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
+
+    ``return_budget=True`` fills ``TKEOutput.budget`` with the per-term
+    :class:`TKEStepBudget` of the LAST sub-iteration (plus the post-solve
+    nn_etau injection); ``tke_new`` is unchanged by the flag.
 
     Mode A — **prognostic** (recommended when state-pytree wiring is
     available): caller passes ``tke_old`` from the previous step and
@@ -3075,7 +3182,9 @@ def tke_vertical_mixing(
             raise ValueError(
                 "preclosure_K_M_surface must match the horizontal TKE shape; "
                 f"got {preclosure_K_M_surface.shape} vs {tke_old.shape[:-1]}.")
+    _budget = None
     for _ in range(max(1, int(n_iterations))):
+        _tke_iter_old = tke_curr
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
             dz_cell=dz_cell_mxl, boundary_cap=boundary_cap,
@@ -3119,7 +3228,10 @@ def tke_vertical_mixing(
                       if _matrix_eval == "nemo_literal" else None),
             dissl_old=(preclosure_dissl
                        if _matrix_eval == "nemo_literal" else None),
+            return_budget=return_budget,
         )
+        if return_budget:
+            tke_curr, _budget = tke_curr
 
     if _etau_on:
         # NEMO step order: the etau injection closes tke_tke (AFTER the
@@ -3128,9 +3240,18 @@ def tke_vertical_mixing(
         # Mode-B sub-iteration (that would triple the non-time-scaled
         # injection in the diagnostic n_iterations=3 chain; codex P1/P2
         # review finding #2). Prognostic mode (n_iterations=1) identical.
+        _tke_pre_etau = tke_curr
         tke_curr = nemo_etau_injection(
             tke_curr, taum, _depth_w, cfg, rho_0=rho_0, lat_deg=lat_deg,
             ice_frac=ice_frac)
+        if _budget is not None:
+            _etau_add = tke_curr - _tke_pre_etau
+            _budget = _budget._replace(
+                etau=_etau_add,
+                residual=(tke_curr - _tke_iter_old) - (
+                    _budget.production + _budget.external + _budget.buoyancy
+                    + _budget.dissipation + _budget.transport + _budget.pin
+                    + _budget.floor + _etau_add))
 
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
@@ -3150,7 +3271,7 @@ def tke_vertical_mixing(
         dissl_new = jnp.sqrt(tke_curr) / l_eps_final
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr,
                      l_eps=l_eps_final, K_M_surface=_K_M_surface,
-                     dissl=dissl_new)
+                     dissl=dissl_new, budget=_budget)
 
 
 # ---------------------------------------------------------------------------
