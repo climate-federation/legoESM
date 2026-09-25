@@ -100,6 +100,9 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo/in_out_manager.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo"
         "/in_out_manager.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
     # --- round 40 paths: the stage-3 momentum operators and zdf_mxl ---
     "dynvor.F90": _DYN / "dynvor.F90",
     "dynkeg.F90": _DYN / "dynkeg.F90",
@@ -656,6 +659,35 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 card round 19: ranked histories and exchange-boundary walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:180-182': [
+        'REAL(wp), DIMENSION(jpi,jpj) :: zu_trd, zu_spg',
+        'REAL(wp), DIMENSION(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0) ) :: zu_frc, zv_frc', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:458-467': [
+        '! Round-18 WRITE-only per-rank stream:',
+        'WRITE(l4_uhist_unit) l2_magic, 1, kt, 2, narea - 1, jpi, jpj, STORAGE_SIZE(1._wp)', 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:501-513': [
+        '!* Extrapolate barotropic velocities at mid-step (jn+1/2)',
+        'WRITE(l4_uhist_unit) un_e, ub_e, ubb_e, ua_e', 13],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:688-711': [
+        '! Set next velocities:',
+        '&   ) * ssvmask(ji,jj)', 24],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:754-770': [
+        'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
+        "CALL lbc_lnk( 'dynspg_ts', ua_e , 'U', -1._wp, va_e , 'V', -1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 17],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:814-822': [
+        ('IF( kt == nit000 .AND. jn <= 2 ) THEN', 3),
+        'un_e   (:,:) = ua_e  (:,:)', 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:866-870': [
+        ('IF( kt == nit000 ) THEN', 5),
+        "WRITE(numout,*) 'LANE4_BT_UHIST_DUMP ', kt, 2, narea - 1, TRIM(l4_uhist_filename)", 5],
     # --- ORCA2 card round 18: ranked halo admission and operand walk ---
     'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
     '/dynspg_ts.f90:445-455': [
