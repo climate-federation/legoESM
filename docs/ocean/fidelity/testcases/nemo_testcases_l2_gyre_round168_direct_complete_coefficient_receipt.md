@@ -114,9 +114,21 @@ read-only`.  Its exact disposition is:
 The terminal error was `failed to initialize in-process app-server client:
 Read-only file system`; it emitted no SHIP or DO NOT SHIP verdict.
 
-The focused year-owner, compiled tracer-matrix, implicit-mixing, and literal
-solver suites report `101 passed in 79.14s`.  The final citation-gate and full
-tree results are recorded below after the receipt is mapped.
+The final focused year-owner, compiled tracer-matrix, implicit-mixing, literal
+solver, and citation-map suites report `117 passed in 81.41s`.  The receipt
+citation gate reports `PASS`; its shifted compiled-source plant reports
+`FAIL` and exits 1 as required.
+
+The mandated single `tests/ocean/fidelity tests/ocean/unit -n 12` battery was
+run once.  It reached 93% before seven workers died and pytest itself exhausted
+memory.  Its exact terminal summary is `178 failed, 7600 passed, 155 skipped,
+2 xfailed, 71 warnings, 13 errors in 1353.94s (0:22:33)` followed by xdist
+`INTERNALERROR`/`MemoryError`, exit 3.  The 178 observed failure IDs are saved
+in `full_observed_failed_ids.txt`; none names the Round-168 year-owner,
+vertical-solver, or citation-gate files.  Because the run collapsed rather
+than completing, its apparent set cannot be classified as a clean delta
+against the 87-ID historical baseline.  The round-owned focused set above is
+green and was not rerun after this one mandated full-tree attempt.
 
 ## Evidence hashes
 
@@ -127,6 +139,11 @@ tree results are recorded below after the receipt is mapped.
 | `vertical_walk.json` | `aba4fb219743035b71ae9ebf0eb5f4a92a416b2d4a0a87577a3ec17c4d217043` |
 | `complete_K_ulp_plant.log` | `410fe15749f5da0c31f007f7f4f7ae2440d1cc40df5a34e19ea4df2f77237055` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `citation_gate.log` | `76d024bf767065f23af1a80a95eff0592e51807e96d8455b1326e05bd7e66886` |
+| `citation_gate_shifted_plant.log` | `30abcfb3fd702101dc276e908b305f4dbdcce5ba2333922f44d87fa5842910d2` |
+| `focused_tests_final.log` | `c88224a9463238af3b982ae04ea05520ed059d7fc63576cbda3c3b6fd36e996a` |
+| `full_fidelity_unit_tests.log` | `2d25ddef40df2b75c96a446869bbd52f6b497585dab94ce886cf737640c472ea` |
+| `full_observed_failed_ids.txt` | `4cc8333648c74d75ccc07a3afc345af66a0f76907343016c70f12997bac991ae` |
 
 ## OPEN — round 169
 
