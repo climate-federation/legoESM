@@ -187,8 +187,11 @@ def _load_legoesm(path, use_mean=False):
     # (corr ~0.1) and inflating the bias. Use the stored degrees as-is.
     keys = set(getattr(s, "files", []))
     if use_mean:
-        need = ("T_mean", "S_mean", "T_mean_hw", "S_mean_hw", "mld_mean",
-                "flux_mean_window_s")
+        # mld_mean is NOT required: a run with --state-accumulate but without
+        # --mld-accumulate still has matched T/S; its MLD is then SKIPPED
+        # loudly by the scorers (never MLD(mean state), which is biased
+        # shallow -- Jensen -- nor the instantaneous MLD).
+        need = ("T_mean", "S_mean", "T_mean_hw", "S_mean_hw", "flux_mean_window_s")
         missing = [k for k in need if k not in keys]
         if missing:
             raise SystemExit(f"{path}: use_mean requested but the snapshot lacks "
@@ -202,7 +205,8 @@ def _load_legoesm(path, use_mean=False):
         # (present only in snapshots written after _save_snapshot grew the MLD
         # geometry; None for older snapshots -> MLD comparison is skipped).
         "T3d": np.asarray(s[kT3]), "S3d": np.asarray(s[kS3]),
-        "mld_mean": np.asarray(s["mld_mean"]) if use_mean else None,
+        "mld_mean": (np.asarray(s["mld_mean"]) if (use_mean and "mld_mean" in keys)
+                     else None),
         # Window length of the means [days]; None for the instantaneous state.
         "window_days": (float(s["flux_mean_window_s"]) / 86400.0) if use_mean else None,
         "H_bathy": np.asarray(s["H_bathy"]) if "H_bathy" in keys else None,
@@ -484,7 +488,12 @@ def main() -> int:
     plot_fields = {"SST": (sstL, sstN), "SSS": (sssL, sssN)}
     mld_report = None
     _has_geom = L.get("z_center_ref") is not None and L.get("H_bathy") is not None
-    if N.get("mld") is not None and (L.get("mld_mean") is not None or _has_geom):
+    if args.use_mean_fields and L.get("mld_mean") is None and N.get("mld") is not None:
+        print("[MLD] SKIPPED: --use-mean-fields but the snapshot has no mld_mean "
+              "(run the driver with --mld-accumulate); the MLD of the mean state "
+              "would be biased shallow and is not computed")
+    if N.get("mld") is not None and (L.get("mld_mean") is not None
+                                     or (_has_geom and not args.use_mean_fields)):
         if L.get("mld_mean") is not None:
             # --use-mean-fields: the window-mean MLD (mean of MLDs, as NEMO's
             # mldr10_1 is), never the MLD of the mean state; needs no geometry.

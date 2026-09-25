@@ -401,9 +401,14 @@ def _coastal_mask(ocean, n_cells):
     return ocean & grown
 
 
-def _lego_mld(L):
+def _lego_mld(L, use_mean=False):
     """Density-threshold MLD of a legoESM snapshot, or None if the snapshot
-    predates the saved MLD geometry.  Same convention as compare_omip_nemo."""
+    predates the saved MLD geometry.  Same convention as compare_omip_nemo.
+    In window-mean mode only the driver's mld_mean is acceptable (None if
+    absent -> the caller SKIPS MLD loudly); MLD(mean state) is never computed."""
+    if use_mean:
+        return (None if L.get("mld_mean") is None
+                else np.asarray(L["mld_mean"], dtype=np.float64))
     if L.get("mld_mean") is not None:
         # --use-mean-fields: the driver's window-mean MLD (same threshold,
         # --mld-accumulate), NOT the MLD of the mean state -- the diagnostic is
@@ -757,13 +762,15 @@ def main() -> int:
               ("SSS", sssT, sssM, sssN, "psu", area, sssX)]
 
     # --- MLD (density threshold, matched to NEMO mldr10_1) -------------------
-    mldT_raw, mldM_raw = _lego_mld(T), _lego_mld(M)
-    mldX_raw = [_lego_mld(x) for x in X]
+    mldT_raw, mldM_raw = _lego_mld(T, a.use_mean_fields), _lego_mld(M, a.use_mean_fields)
+    mldX_raw = [_lego_mld(x, a.use_mean_fields) for x in X]
     if N.get("mld") is None:
         print("[MLD] SKIPPED: NEMO grid_T has no mldr10_1")
     elif mldT_raw is None or mldM_raw is None:
         which = [n for n, v in (("tripole", mldT_raw), ("MPAS", mldM_raw)) if v is None]
-        print(f"[MLD] SKIPPED: snapshot(s) {which} lack z_center_ref/H_bathy")
+        print(f"[MLD] SKIPPED: snapshot(s) {which} lack "
+              + ("mld_mean (run the driver with --mld-accumulate; MLD of the mean "
+                 "state is not computed)" if a.use_mean_fields else "z_center_ref/H_bathy"))
     elif any(v is None for v in mldX_raw):
         # A mask-only source that cannot supply an MLD footprint would leave
         # the MLD cell set different from the pair run it is meant to match.

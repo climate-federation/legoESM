@@ -127,6 +127,16 @@ def test_loader_use_mean_reads_the_window_means_not_the_instantaneous_state(tmp_
     assert L0["mld_mean"] is None
 
 
+def test_loader_use_mean_without_mld_mean_loads_with_mld_none(tmp_path):
+    """--state-accumulate without --mld-accumulate: T/S means are matched, the
+    MLD is None so the scorers SKIP it loudly (never MLD of the mean state)."""
+    p, T = _write_snapshot(tmp_path, with_means=True)
+    d = dict(np.load(p)); d.pop("mld_mean"); np.savez(p, **d)
+    L = _c._load_legoesm(p, use_mean=True)
+    np.testing.assert_array_equal(L["sst"], T[..., 0] + 1.0)
+    assert L["mld_mean"] is None
+
+
 def test_loader_use_mean_refuses_a_snapshot_without_means(tmp_path):
     """No silent fallback to the instantaneous state (the phase confound)."""
     import pytest
