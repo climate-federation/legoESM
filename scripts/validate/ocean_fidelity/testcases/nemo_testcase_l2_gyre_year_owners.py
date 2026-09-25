@@ -4157,8 +4157,8 @@ def main(argv=None) -> int:
                         default=None)
     parser.add_argument(
         "--developed-vertical-sensitivity", action="store_true",
-        help="rank the day-240 sensitivity to NEMO heat diffusivity and "
-             "the complete effective vertical tracer coefficient")
+        help="rank the day-240 sensitivity to NEMO's recorded vertical "
+             "tracer coefficient and live e3w(Kmm) divisor")
     parser.add_argument("--developed-stage2-adv-split", action="store_true",
                         help="split NEMO's vector-invariant dyn_adv into its "
                              "kinetic-energy gradient and vertical advection "
@@ -4382,7 +4382,7 @@ def main(argv=None) -> int:
             return 1
         require(args.plant in (None, "none"),
                 f"plant {args.plant!r} did not fire")
-        print(json.dumps(report["ranking"], indent=2))
+        print(json.dumps(report["sensitivity"], indent=2))
         print("STATUS PASS")
         return 0
     if args.developed_process_rank_split:
@@ -12163,14 +12163,15 @@ def developed_vertical_day240_sensitivity(
         process_root: Path, vertical_root: Path, daily_root: Path,
         daily_audit: Path, expected_commit: str, evidence_root: Path, *,
         plant: str | None = None) -> dict:
-    """Rank TKE heat-K versus complete-K at the developed solve boundary.
+    """Rank recorded coefficient and e3w at the developed solve boundary.
 
     Every arm starts from NEMO's admitted step-1080 state and runs the real
     production-jitted step through step 1440.  The only directed input is the
     private coefficient seam immediately before the implicit tracer solve.
     """
     require(plant in (None, "none", "developed-vertical-avt-ulp",
-                      "developed-vertical-complete-ulp"),
+                      "developed-vertical-complete-ulp",
+                      "developed-vertical-e3w-ulp"),
             f"unknown developed vertical-sensitivity plant {plant!r}")
     _policy()
     import jax.numpy as jnp
@@ -12213,7 +12214,8 @@ def developed_vertical_day240_sensitivity(
     ordinary_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
 
-    def recorded_vertical(step: int) -> tuple[dict, np.ndarray, np.ndarray]:
+    def recorded_vertical(
+            step: int) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
         path = vertical_root / (
             f"oracle_trazdf_matrix_kt{step:08d}.bin")
         record = _read_vertical_record(path, step)
@@ -12222,9 +12224,11 @@ def developed_vertical_day240_sensitivity(
                 f"step {step}: NEMO vertical calibration is not bit exact")
         heat = _vertical_field(record, "avt")[:, :, 1:nlev]
         effective = _vertical_field(record, "zwt_mix")[:, :, 1:nlev]
-        require(heat.shape == effective.shape == interface_wet.shape,
+        e3w = _vertical_field(record, "e3w_Kmm")[:, :, 1:nlev]
+        require(heat.shape == effective.shape == e3w.shape
+                == interface_wet.shape,
                 f"step {step}: recorded vertical coefficient shape differs")
-        return record, heat, effective
+        return record, heat, effective, e3w
 
     def forcing(state, step: int):
         freshwater, surface = gate._surface_forcings(card, state, step)
@@ -12262,11 +12266,14 @@ def developed_vertical_day240_sensitivity(
                 target = None
             else:
                 probe = traced_step(state, step)
-                record, nemo_heat, nemo_effective = recorded_vertical(step)
+                record, nemo_heat, nemo_effective, nemo_e3w = (
+                    recorded_vertical(step))
                 vertical = _vertical_trace_frame(probe)
                 viscosity = np.asarray(
                     probe.vertical_solve.viscosity_K, dtype=np.float64)
                 target_postadd = None
+                target_e3w = None
+                identity_reference = None
                 if name == "identity_postadd":
                     target = vertical["heat_K"]
                     target_postadd = vertical["effective_K"]
@@ -12315,11 +12322,49 @@ def developed_vertical_day240_sensitivity(
                             "new_uint64": int(np.asarray(
                                 target_postadd[index]).view(np.uint64)),
                         }
+                elif name in ("complete_K_e3w_identity",
+                               "complete_K_e3w",
+                               "complete_K_e3w_ulp"):
+                    target = vertical["heat_K"]
+                    target_postadd = np.array(nemo_effective, copy=True)
+                    target_e3w = (np.array(vertical["e3w_now"], copy=True)
+                                  if name == "complete_K_e3w_identity" else
+                                  np.array(nemo_e3w, copy=True))
+                    if name == "complete_K_e3w_identity":
+                        base_override = (
+                            jnp.asarray(target), jnp.asarray(viscosity),
+                            jnp.asarray(target_postadd))
+                        identity_reference = (
+                            traced_step(state, step, base_override)
+                            if step == PROCESS_START_STEP else
+                            production_step(state, step, base_override))
+                    if plant_first_coefficient and step == PROCESS_START_STEP:
+                        candidates = np.argwhere(
+                            interface_wet & np.isfinite(target_e3w)
+                            & (target_e3w > 0.0))
+                        require(candidates.size > 0,
+                                "PLANT-BLIND: no positive recorded e3w_Kmm")
+                        values = target_e3w[tuple(candidates.T)]
+                        index = tuple(int(value) for value in
+                                      candidates[int(np.argmax(values))])
+                        old = float(target_e3w[index])
+                        target_e3w[index] = np.nextafter(old, np.inf)
+                        require(target_e3w[index] != old,
+                                "PLANT-BLIND: recorded e3w_Kmm ULP was inert")
+                        first_step["plant"] = {
+                            "index_jik": list(index),
+                            "old_uint64": int(
+                                np.asarray(old).view(np.uint64)),
+                            "new_uint64": int(np.asarray(
+                                target_e3w[index]).view(np.uint64)),
+                        }
                 else:  # pragma: no cover - private caller registry
                     raise AssertionError(name)
                 override = (jnp.asarray(target), jnp.asarray(viscosity))
                 if target_postadd is not None:
                     override += (jnp.asarray(target_postadd),)
+                if target_e3w is not None:
+                    override += (jnp.asarray(target_e3w),)
                 selected = (traced_step(state, step, override)
                             if step == PROCESS_START_STEP
                             else production_step(state, step, override))
@@ -12331,6 +12376,16 @@ def developed_vertical_day240_sensitivity(
                     identity_mismatched_bytes += mismatch
                     require(mismatch == 0,
                             f"identity seam moved step {step} state by "
+                            f"{mismatch} bytes")
+                if name == "complete_K_e3w_identity":
+                    reference_state = (identity_reference.state_after
+                                       if step == PROCESS_START_STEP else
+                                       identity_reference)
+                    mismatch = _state_bit_mismatches(
+                        reference_state, selected_state)
+                    identity_mismatched_bytes += mismatch
+                    require(mismatch == 0,
+                            f"e3w identity seam moved step {step} state by "
                             f"{mismatch} bytes")
                 if step == PROCESS_START_STEP:
                     selected_vertical = _vertical_trace_frame(selected)
@@ -12351,20 +12406,31 @@ def developed_vertical_day240_sensitivity(
                             selected_vertical["heat_K"], nemo_heat,
                             interface_wet) == 0,
                             "heat-K seam did not consume NEMO avt")
-                    if name == "complete_K":
+                    if name in ("complete_K", "complete_K_e3w_identity",
+                                "complete_K_e3w"):
                         effective_row = _score_developed_row(
                             selected_vertical["effective_K"], nemo_effective,
+                            interface_wet)
+                    if name == "complete_K_e3w":
+                        e3w_row = _score_developed_row(
+                            selected_vertical["e3w_now"], nemo_e3w,
                             interface_wet)
                     first_step[name] = {
                         "upstream_cells_moved": upstream,
                         "vertical": selected_vertical,
                         "target_heat_K": target,
                         "target_complete_K": target_postadd,
+                        "target_e3w": target_e3w,
                     }
-                    if name == "complete_K":
+                    if name in ("complete_K", "complete_K_e3w_identity",
+                                "complete_K_e3w"):
                         require(effective_row["bit_exact"],
                                 "direct complete-K seam did not consume "
                                 "NEMO zwt_mix bit for bit")
+                    if name == "complete_K_e3w":
+                        require(e3w_row["bit_exact"],
+                                "direct e3w seam did not consume NEMO "
+                                "e3w_Kmm bit for bit")
             if step == PROCESS_START_STEP and name == "free":
                 first_step[name] = {
                     "vertical": _vertical_trace_frame(selected),
@@ -12373,7 +12439,8 @@ def developed_vertical_day240_sensitivity(
             state = (selected.state_after
                      if step == PROCESS_START_STEP else selected)
             if step % 60 == 0:
-                print(f"  round167 {name}: completed step {step}/1440",
+                print(f"  developed vertical {name}: completed step "
+                      f"{step}/1440",
                       flush=True)
         return state, identity_mismatched_bytes
 
@@ -12381,7 +12448,9 @@ def developed_vertical_day240_sensitivity(
     identity_bytes = 0
     arms = (["heat_K"] if plant == "developed-vertical-avt-ulp" else
             ["complete_K"] if plant == "developed-vertical-complete-ulp" else
-            ["free", "identity_postadd", "heat_K", "complete_K"])
+            ["complete_K_e3w"] if plant == "developed-vertical-e3w-ulp" else
+            ["free", "complete_K", "complete_K_e3w_identity",
+             "complete_K_e3w"])
     for arm in arms:
         arm_state, arm_identity = run_arm(arm)
         identity_bytes += arm_identity
@@ -12429,6 +12498,26 @@ def developed_vertical_day240_sensitivity(
             f"index={first_step['plant']['index_jik']}, "
             f"matrix_cells={matrix_moved}, day240_T_cells={final_t_moved}")
 
+    if plant == "developed-vertical-e3w-ulp":
+        planted_state, _ = run_arm(
+            "complete_K_e3w_ulp", plant_first_coefficient=True)
+        baseline_matrix = first_step["complete_K_e3w"]["vertical"]
+        planted_matrix = first_step["complete_K_e3w_ulp"]["vertical"]
+        matrix_moved = sum(
+            _different_cells(baseline_matrix[name], planted_matrix[name], wet)
+            for name in ("lower", "diagonal", "upper"))
+        final_t_moved = _different_cells(
+            gate.lego_fields(final_states["complete_K_e3w"])["T"],
+            gate.lego_fields(planted_state)["T"], wet)
+        if matrix_moved == 0 or final_t_moved == 0:
+            raise GateError(
+                "PLANT-BLIND: one-ULP recorded e3w_Kmm moved "
+                f"matrix={matrix_moved}, day240_T={final_t_moved}")
+        raise GateError(
+            "one-ULP recorded e3w_Kmm was caught: "
+            f"index={first_step['plant']['index_jik']}, "
+            f"matrix_cells={matrix_moved}, day240_T_cells={final_t_moved}")
+
     year = _year()
     final_restart = year._daily_restart_path(daily_root, PROCESS_END_STEP)
     final_payload = year._load_daily_reset_payload(final_restart, nlev)
@@ -12454,8 +12543,8 @@ def developed_vertical_day240_sensitivity(
     first_record = read_process_record(
         process_root
         / f"oracle_process_budget_kt{PROCESS_START_STEP:08d}.bin")
-    first_vertical_record, nemo_heat, nemo_effective = recorded_vertical(
-        PROCESS_START_STEP)
+    first_vertical_record, nemo_heat, nemo_effective, nemo_e3w = (
+        recorded_vertical(PROCESS_START_STEP))
     nemo_process_rows = process_temperature_rows(first_record)
     lego_process_rows = lego_process_temperature_rows(
         first_step["free"]["process"])
@@ -12469,13 +12558,16 @@ def developed_vertical_day240_sensitivity(
         "free_effective_K": _score_developed_row(
             first_step["free"]["vertical"]["effective_K"],
             nemo_effective, interface_wet),
-        "heat_arm_effective_K": _score_developed_row(
-            first_step["heat_K"]["vertical"]["effective_K"],
-            nemo_effective, interface_wet),
     }
     first_rows["complete_arm_effective_K"] = _score_developed_row(
         first_step["complete_K"]["vertical"]["effective_K"],
         nemo_effective, interface_wet)
+    first_rows["complete_e3w_arm_effective_K"] = _score_developed_row(
+        first_step["complete_K_e3w"]["vertical"]["effective_K"],
+        nemo_effective, interface_wet)
+    first_rows["complete_e3w_arm_e3w_Kmm"] = _score_developed_row(
+        first_step["complete_K_e3w"]["vertical"]["e3w_now"],
+        nemo_e3w, interface_wet)
     require(identity_bytes == 0,
             "identity coefficient arm moved the production trajectory")
 
@@ -12496,23 +12588,27 @@ def developed_vertical_day240_sensitivity(
     historical["round134_daily_tke_reset"].update(tke_reset)
     historical["round126_vertical_subowners"].update(round126["headline"])
 
-    ranking = _rank_vertical_sensitivity(final_rows)
     free_rms = final_rows["free"]["T"]["rms"]
-    heat_removed = next(
-        row["day240_T3D_rms_removed_K"] for row in ranking
-        if row["arm"] == "heat_K")
-    complete_removed = next(
-        row["day240_T3D_rms_removed_K"] for row in ranking
-        if row["arm"] == "complete_K")
+    complete_rms = final_rows["complete_K"]["T"]["rms"]
+    e3w_rms = final_rows["complete_K_e3w"]["T"]["rms"]
+    e3w_removed = complete_rms - e3w_rms
+    carries_remainder = e3w_removed >= 0.5 * complete_rms
+    sensitivity = {
+        "complete_K_day240_T3D_rms_K": complete_rms,
+        "complete_K_e3w_day240_T3D_rms_K": e3w_rms,
+        "e3w_day240_T3D_rms_removed_K": e3w_removed,
+        "e3w_removed_fraction_of_complete_K_remainder": (
+            e3w_removed / complete_rms if complete_rms else 0.0),
+        "e3w_carries_at_least_half_of_remainder": carries_remainder,
+    }
     conclusion = (
-        "TKE/closure heat diffusivity carries the ranked developed-state "
-        "day-240 sensitivity"
-        if heat_removed > 0.0 and heat_removed >= complete_removed else
-        "TKE/closure heat diffusivity is not the ranked developed-state "
-        "day-240 owner; continue at the complete implicit tracer solve")
+        "live e3w(Kmm) carries at least half of the complete-K remainder"
+        if carries_remainder else
+        "live e3w(Kmm) is exonerated by magnitude; rank e3t(Kaa) and the "
+        "content RHS next")
     evidence_root.mkdir(parents=True, exist_ok=True)
     return {
-        "format": "gyre-round168-developed-vertical-sensitivity-v1",
+        "format": "gyre-round169-developed-e3w-sensitivity-v1",
         "status": "PASS",
         "case": CASE,
         "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
@@ -12543,6 +12639,8 @@ def developed_vertical_day240_sensitivity(
                       "NEMO avt at every developed step",
             "complete_K": "replace only the already-formed temperature "
                           "coefficient with NEMO zwt_mix",
+            "complete_K_e3w": "complete-K arm plus replacement of only the "
+                               "tracer e3w(Kmm) divisor with NEMO e3w_Kmm",
             "viscosity": "model value in every arm",
             "all_other_inputs": "free-running arm state and forcing",
         },
@@ -12550,10 +12648,10 @@ def developed_vertical_day240_sensitivity(
         "registered_row_count": sum(
             len(rows) for rows in final_rows.values()),
         "all_moved_rows_registered": set(final_rows) == {
-            "free", "identity_postadd", "heat_K", "complete_K"},
+            "free", "complete_K", "complete_K_e3w_identity",
+            "complete_K_e3w"},
         "free_day240_T3D_rms_K": free_rms,
-        "ranking": ranking,
-        "winner": ranking[0],
+        "sensitivity": sensitivity,
         "conclusion": conclusion,
         "compiled_source": {
             "closure_to_avt": "zdftke.f90:681-712",

@@ -10863,12 +10863,19 @@ class LatLonCGridOceanModel:
                 )
 
         # Private causal seam: two arrays replace the post-closure heat and
-        # viscosity profiles; a third optionally replaces formed tracer K.
+        # viscosity profiles; a third optionally replaces formed tracer K;
+        # a fourth optionally replaces only the tracer e3w(Kmm) divisor.
         _formed_effective_K_override = None
+        _tracer_e3w_test_override = None
         if effective_K_test_override is not None:
+            if len(effective_K_test_override) not in (2, 3, 4):
+                raise ValueError(
+                    "vertical K test override requires 2, 3, or 4 arrays")
             K_v_cell, A_v_cell = effective_K_test_override[:2]
-            if len(effective_K_test_override) == 3:
+            if len(effective_K_test_override) >= 3:
                 _formed_effective_K_override = effective_K_test_override[2]
+            if len(effective_K_test_override) == 4:
+                _tracer_e3w_test_override = effective_K_test_override[3]
 
         # DIAGNOSTIC CAPTURE (return_K_profiles): the interface diffusivity
         # K_v_cell (heat, NEMO avt) and viscosity A_v_cell (momentum, avm) at
@@ -11410,6 +11417,8 @@ class LatLonCGridOceanModel:
         # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
         # object) ⇒ the shared-K pair fast path stays BYTE-IDENTICAL.
         K_s_cell = K_v_cell if dK_ddm_salt is None else (K_v_cell + dK_ddm_salt)
+        _tracer_e3w = (dz_half_cell if _tracer_e3w_test_override is None
+                       else _tracer_e3w_test_override)
         if _vmix_batched:
             T_new, S_new, u_new, v_new = (
                 implicit_vertical_diffusion_ocean_batched([
@@ -11439,7 +11448,7 @@ class LatLonCGridOceanModel:
                     _tracer_result = (
                         implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
                             T_solve_in, S_solve_in, _content_t, _content_s,
-                            K_v_cell, dz_cell, dz_half_cell, dt, _tracer_wet,
+                            K_v_cell, dz_cell, _tracer_e3w, dt, _tracer_wet,
                             evaluation="nemo_literal",
                             implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))
                     if return_tracer_solve_trace:
@@ -11455,7 +11464,7 @@ class LatLonCGridOceanModel:
                             isoneutral_K=_trace_isoneutral_K,
                             effective_K=K_v_cell,
                             e3t_after=dz_cell,
-                            e3w_now=dz_half_cell,
+                            e3w_now=_tracer_e3w,
                             wet=_tracer_wet,
                             content_T=_content_t,
                             lower=_trace_lower,
