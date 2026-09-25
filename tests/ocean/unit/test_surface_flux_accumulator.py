@@ -356,8 +356,8 @@ def test_state_sampled_once_after_every_update_of_the_step():
     assert len(adds) == 1, adds
     add = adds[0]
     loop = src.index("for step in range(start_step + 1, n_steps + 1):")
-    assert loop < src.index("state = model.step(") < add
-    assert loop < src.index("state = _ocean_step(") < add
+    assert loop < src.index("state = model.step(", loop) < add
+    assert loop < src.index("state = _ocean_step(", loop) < add
     snap = src.index("_snapshot_extra(args, model, state, sf, dt", add)
     between = src[add:snap]
     changing = [ln for ln in between.splitlines()
