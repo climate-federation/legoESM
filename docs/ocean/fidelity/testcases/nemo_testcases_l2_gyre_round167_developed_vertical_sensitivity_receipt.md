@@ -123,8 +123,22 @@ read-only`.  Its exact disposition is:
 The terminal error was `failed to initialize in-process app-server client:
 Read-only file system`; it emitted no SHIP or DO NOT SHIP verdict.
 
-The receipt citation gate and its shifted-citation plant are pending the final
-receipt commit.  Focused and complete-tree test summaries are pending.
+The receipt citation gate reports PASS: five citations, zero failures, zero
+unmapped citations, and zero map-audit failures.  Shifting the compiled
+closure citation produces `SYMBOL-NOT-AT-LINE`, FAIL, and exits 1 as
+required.
+
+The focused owner/citation suites report `53 passed in 33.60s`.  The required
+combined `tests/ocean/fidelity` plus `tests/ocean/unit` invocation was run once
+with 12 CPU workers.  At 39%, one worker aborted inside JAX compilation and
+was replaced.  At 48%, another worker hit `MemoryError` while pytest formatted
+a failure, and xdist terminated with an internal error (exit 3).  Its partial
+terminal summary is `18 failed, 4089 passed, 32 skipped, 2 xfailed, 12
+warnings in 500.96s`.  The internal error emitted no `FAILED <node-id>` lines,
+so those 18 partial failures cannot honestly be diffed against the recorded
+87-node known-red set.  This is **INCOMPLETE TREE COVERAGE**, not a pass and
+not evidence of a new round-167 failure; the two directly changed test files
+are covered by the clean focused result.
 
 ## Evidence hashes
 
@@ -132,6 +146,9 @@ receipt commit.  Focused and complete-tree test summaries are pending.
 |---|---|
 | `developed_vertical_sensitivity_v4.json` | `80b70f54bed456ce5a0f3fafe63cbaec1fe3e4b05021b34fd2431bf4bd2f97f1` |
 | `daily_record_audit_0736aca.json` | `081fabb44420c2e4444aab26d2c382713559f23c288566b2002ca01745b20eec` |
+| `developed_vertical_avt_ulp_plant.log` | `c30bd2eb1a0ee4bdbd6bac175fbce96541676663b4fcebc72da0211365dc0b80` |
+| `focused_tests.log` | `39b2f1854e9f358417553a39cc90446c107598097495b536f1274fbd03dce99f` |
+| `full_fidelity_unit_tests.log` | `fef8c7e812ae17049c10eff57cba63882553cda362d813ebcea01a54d31c182b` |
 
 ## OPEN — round 168
 
@@ -150,4 +167,3 @@ receipt commit.  Focused and complete-tree test summaries are pending.
    measured day-240 response.  Do not return to the `rn2` rounding floor.
 4. No NEMO acquisition, configuration decision, carried-state change, or
    pending decision 53/54/57/58 action is requested.
-
