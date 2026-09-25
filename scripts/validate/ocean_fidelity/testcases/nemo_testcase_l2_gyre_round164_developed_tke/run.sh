@@ -166,9 +166,11 @@ import struct
 import sys
 from pathlib import Path
 
-for raw, magic, expected in (
-    (sys.argv[1], b"NEMO_L2_R56TKE2 ", 4546636),
-    (sys.argv[2], b"NEMO_L2_R101TKE ", 873028),
+for raw, magic, expected, expected_header in (
+    (sys.argv[1], b"NEMO_L2_R56TKE2 ", 4546636,
+     (2, 1081, 1, 1, 32, 22, 31, 30, 1, 32, 1, 22, 64)),
+    (sys.argv[2], b"NEMO_L2_R101TKE ", 873028,
+     (1, 1081, 1, 1, 36, 26, 31, 30, 3, 34, 3, 24, 64)),
 ):
     path = Path(raw)
     blob = path.read_bytes()
@@ -179,8 +181,9 @@ for raw, magic, expected in (
     if blob[:16] != expected_magic:
         raise SystemExit(f"REFUSE: {path.name} magic is {blob[:16]!r}")
     ints = struct.unpack_from("=13i", blob, 16)
-    if ints[1] != 1081 or ints[4:8] != (32, 22, 31, 30):
-        raise SystemExit(f"REFUSE: {path.name} header is {ints}")
+    if ints != expected_header:
+        raise SystemExit(
+            f"REFUSE: {path.name} header is {ints}, expected {expected_header}")
     print(f"RECORD_LAYOUT_PASS {path.name} bytes={len(blob)} kt={ints[1]}")
 PYRECORD
   local name digest stamped_digest stamped_commit stamped_name producer_commit
