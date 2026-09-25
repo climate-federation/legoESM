@@ -8978,10 +8978,10 @@ class LatLonCGridOceanModel:
                     # NEMO e3w(Kmm) divisor: state_new is the post-update
                     # AFTER state; state.eta is NOW. Read only under the NEMO
                     # identity (zdf_implicit_solver_evaluation="nemo_literal").
-                    eta_now=(
-                        _nemo_ws_zdf_eta_kmm
-                        if _nemo_ws_zdf_eta_kmm is not None
-                        else state.eta.data),
+                    eta_now=(_nemo_ws_zdf_eta_kmm
+                             if _nemo_ws_zdf_eta_kmm is not None
+                             else state.eta.data),
+                    tke_shear_eta_now=(state.eta.data if _nemo_ws_zdf_eta_kmm is not None else None),
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -10516,7 +10516,7 @@ class LatLonCGridOceanModel:
         n2_tracers=None,
         n2_tracers_before=None,
         tke_n2_bundle=None,
-        eta_now=None,
+        eta_now=None, tke_shear_eta_now=None,
         u_now=None,
         v_now=None,
         nemo_tracer_content_rhs=None,
@@ -10780,8 +10780,8 @@ class LatLonCGridOceanModel:
                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
             if _tke_prognostic:
                 _tke_p_sh2_result = self._tke_step_entry_p_sh2(
-                    state, eta_now=eta_now, u_now=u_now, v_now=v_now,
-                    z_coord=_zc, config=_cfg_b, grid=_grid,
+                    state, eta_now=(eta_now if tke_shear_eta_now is None else tke_shear_eta_now),
+                    u_now=u_now, v_now=v_now, z_coord=_zc, config=_cfg_b, grid=_grid,
                     return_face_metrics=return_tke_entry)
                 if return_tke_entry:
                     _tke_p_sh2, _tke_shear_face_metrics_used = (

@@ -742,6 +742,28 @@ def test_live_qco_step_entry_helper_exposes_consumed_face_metrics():
         state.v.data.shape[-1] - 1,)
 
 
+def test_now2_shear_metric_changes_when_routed_eta_changes():
+    """GYRE's step-entry ssh and half-step solver ssh are distinct inputs."""
+    tke_cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke._replace(
+            tke_shear_production="nemo_face_native_now2")
+    model, state = _step_entry_helper_fixture(tke_cfg)
+    half_step_eta = 0.5 * (state.eta.data + 0.3)
+
+    step_entry, step_metrics = LatLonCGridOceanModel._tke_step_entry_p_sh2(
+        model, state, eta_now=state.eta.data, return_face_metrics=True)
+    half_step, half_metrics = LatLonCGridOceanModel._tke_step_entry_p_sh2(
+        model, state, eta_now=half_step_eta, return_face_metrics=True)
+
+    assert np.array_equal(np.asarray(step_metrics[0]),
+                          np.asarray(step_metrics[1]))
+    assert np.array_equal(np.asarray(step_metrics[2]),
+                          np.asarray(step_metrics[3]))
+    assert not np.array_equal(np.asarray(step_entry), np.asarray(half_step))
+    assert any(not np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(step_metrics, half_metrics))
+
+
 def test_live_face_metric_product_matches_hand_computed_sh2():
     # Two identical U faces, no V shear. du_now=[-2,-3], du_before=[-4,-6],
     # avm face sums=[6,10]. The 0.25 two-face collapse gives [24,90]
