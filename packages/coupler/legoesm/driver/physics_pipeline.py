@@ -2506,9 +2506,13 @@ class PhysicsPipeline:
                 # every structured-grid canopy run (codex).
                 _alb_veg = getattr(_lmp_rad, "albedo_veg", None)
                 if _alb_veg is None:
+                    # Soil bands at the tile's current top-layer water (the
+                    # land step rewets the same bounds with its own water).
+                    from legoesm.land.soil_albedo import rewet_soil_bands
+                    _lmp_alb = rewet_soil_bands(_lmp_rad, land_ml.theta_soil[:, 0])
                     alb_land = ad.unflatten_2d(
-                        _VIS_FRAC_SOLAR * _lmp_rad.ALB_VIS
-                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_rad.ALB_NIR)
+                        _VIS_FRAC_SOLAR * _lmp_alb.ALB_VIS
+                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_alb.ALB_NIR)
                 else:
                     alb_land = ad.unflatten_2d(_alb_veg)
                 emis_land = ad.unflatten_2d(_lmp_rad.emissivity)
