@@ -960,3 +960,22 @@ def test_round157_stage2_record_refuses_the_wrong_assignment_arm(harness,
     with pytest.raises(harness.GateError,
                        match="vector stage-update arm"):
         harness._developed_stage2_record(tmp_path)
+
+
+def test_round167_vertical_sensitivity_ranking_is_complete_and_signed(harness):
+    """The magnitude ranking sees benefit, harm, and a missing real arm."""
+    rows = {
+        "free": {"T": {"rms": 2.0}},
+        "heat_K": {"T": {"rms": 1.5}},
+        "effective_K": {"T": {"rms": 2.25}},
+    }
+    ranked = harness._rank_vertical_sensitivity(rows)
+    assert [row["arm"] for row in ranked] == ["heat_K", "effective_K"]
+    assert ranked[0]["day240_T3D_rms_removed_K"] == 0.5
+    assert ranked[0]["removed_fraction"] == 0.25
+    assert ranked[1]["day240_T3D_rms_removed_K"] == -0.25
+
+    broken = dict(rows)
+    broken.pop("effective_K")
+    with pytest.raises(harness.GateError, match="no effective_K arm"):
+        harness._rank_vertical_sensitivity(broken)
