@@ -186,8 +186,10 @@ def _face_support(t_support: np.ndarray) -> np.ndarray:
     return support
 
 
-def _operand_walk(*, card, trace, candidate, oracle, masks,
+def _operand_walk(*, card, trace, candidate, oracle, masks, inherited_first,
                   rank0_record: dict[str, object], plant: bool) -> dict[str, object]:
+    require(inherited_first["differing_cells"] == round17.INHERITED_COUNT,
+            "round-17 inherited boundary changed before the direct walk")
     recorded = {
         name: _rank0_u_window(values)
         for name, values in rank0_record["fields"].items()
