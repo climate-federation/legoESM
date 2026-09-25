@@ -527,7 +527,10 @@ ORACLE_BT_SUBSTEP_NAMES = (
 )
 
 
-def read_bt_substeps(path: Path) -> dict:
+def read_bt_substeps(
+    path: Path, *, expected_dims: tuple[int, int] = DIMS[:2],
+    expected_ncycle: int = 50,
+) -> dict:
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
         header = struct.unpack("=6i", handle.read(24))
@@ -545,7 +548,8 @@ def read_bt_substeps(path: Path) -> dict:
         _fields = (BT_PRE_MERGE_ORDER if version == 1
                    else ORACLE_BT_SUBSTEP_NAMES)
         require(
-            (version, kt, ncycle, nx, ny, bits) == (version, 1, 50, DIMS[0], DIMS[1], 64)
+            (version, kt, ncycle, nx, ny, bits)
+            == (version, 1, expected_ncycle, *expected_dims, 64)
             and version in (1, 2),
             f"{path}: bad header",
         )

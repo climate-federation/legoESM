@@ -123,7 +123,10 @@ def read_advmean(
     }
 
 
-def read_ordered(path: Path) -> dict:
+def read_ordered(
+    path: Path, *, expected_dims: tuple[int, int] = DIMS[:2],
+    expected_nrows: int = 2,
+) -> dict:
     """Read the config-local ``NEMO_L2_BTORD_1`` substep-1/2 stream."""
     from legoesm.ocean.fidelity.time_levels import time_level_for_dump
 
@@ -149,7 +152,7 @@ def read_ordered(path: Path) -> dict:
         version, kt, nrows, nx, ny, bits = struct.unpack("=6i", handle.read(24))
         require(
             (magic, version, kt, nrows, nx, ny, bits)
-            == ("NEMO_L2_BTORD_2", 2, 1, 2, *DIMS[:2], 64),
+            == ("NEMO_L2_BTORD_2", 2, 1, expected_nrows, *expected_dims, 64),
             f"{path}: bad header {(magic, version, kt, nrows, nx, ny, bits)}",
         )
         raw_dt = np.fromfile(handle, dtype=np.float64, count=1)

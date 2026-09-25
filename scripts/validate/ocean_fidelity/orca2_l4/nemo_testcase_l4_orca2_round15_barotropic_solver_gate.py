@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""ORCA2 round-15 gate: check the last two inputs, then walk dynspg_ts.
+
+The gate consumes the admitted rank-0 ``BTORD_2`` and ``SLOW_2`` records.
+It first scores NEMO's sea-surface forcing and frozen drag coefficients at the
+solver-copy boundary.  Only when those operands are bit-exact may it interpret
+the production-JIT substep trace statement by statement.  A non-bit input is a
+hard stop: walking the solver with a different input would misattribute an
+inherited difference to its first consumer.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+for _package in ("packages/core", "packages/ocean"):
+    if str(REPO_ROOT / _package) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / _package))
+_TESTCASES = REPO_ROOT / "scripts/validate/ocean_fidelity/testcases"
+if str(_TESTCASES) not in sys.path:
+    sys.path.insert(0, str(_TESTCASES))
+
+from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
+
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_round14_barotropic_owner_gate as round14,
+)
+
+_PP = "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+CITATIONS = {
+    "solver_copies_inputs": f"{_PP}/dynspg_ts.f90:287-291",
+    "predictor_weights": f"{_PP}/dynspg_ts.f90:460-493",
+    "midstep_face_depth_and_transport": f"{_PP}/dynspg_ts.f90:505-536",
+    "continuity_update": f"{_PP}/dynspg_ts.f90:550-558",
+    "back_interpolation_and_pressure_gradient":
+        f"{_PP}/dynspg_ts.f90:601-616",
+    "coriolis_and_drag": f"{_PP}/dynspg_ts.f90:618-652",
+    "vector_velocity_update": f"{_PP}/dynspg_ts.f90:666-679",
+    "record_write_order": f"{_PP}/dynspg_ts.f90:755-779",
+}
+
+RANK0_DIMS = (94, 152)
+RANK0_COLUMNS = 90
+ROUND14_END_OF_STEP_SSH_M = 0.2448430937728719
+
+
+class GateError(RuntimeError):
+    pass
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise GateError(message)
+
+
+def _native(values: np.ndarray, stagger: str) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    if stagger == "u":
+        values = values[:, 1:, ...]
+    elif stagger == "v":
+        values = values[1:, :, ...]
+    return values[:, :RANK0_COLUMNS, ...]
+
+
+def _trace_native(trace: dict, name: str, stagger: str, rows: int = 2):
+    values = np.asarray(trace[name], dtype=np.float64)[:rows]
+    if stagger == "u":
+        values = values[:, :, 1:]
+    elif stagger == "v":
+        values = values[:, 1:, :]
+    return values[:, :, :RANK0_COLUMNS]
+
+
+def _masks(card) -> dict[str, np.ndarray]:
+    return {
+        "t": np.asarray(card.recipe.initial_state.land_mask.data, dtype=bool)[
+            :, :RANK0_COLUMNS],
+        "u": _native(card.recipe.initial_state.u_mask.data, "u").astype(bool),
+        "v": _native(card.recipe.initial_state.v_mask.data, "v").astype(bool),
+    }
+
+
+def _candidate_ordered(card, trace: dict) -> dict[str, np.ndarray]:
+    two = 2
+    stagger = {
+        "u_entry": "u", "v_entry": "v",
+        "u_history_b": "u", "v_history_b": "v",
+        "u_history_bb": "u", "v_history_bb": "v",
+        "eta_entry": "t", "eta_history_b": "t", "eta_history_bb": "t",
+        "u_mid": "u", "v_mid": "v", "eta_mid": "t",
+        "face_depth_u_mid": "u", "face_depth_v_mid": "v",
+        "metric_transport_u": "u", "metric_transport_v": "v",
+        "continuity_du": "t", "continuity_dv": "t",
+        "continuity_divergence": "t", "continuity_forcing": "t",
+        "eta_exit": "t", "face_ssh_u_exit": "u",
+        "face_ssh_v_exit": "v", "eta_pgf": "t",
+        "pgf_u": "u", "pgf_v": "v", "cor_u": "u", "cor_v": "v",
+        "trd_u": "u", "trd_v": "v", "slow_u": "u", "slow_v": "v",
+        "u_exit": "u", "v_exit": "v",
+        "face_depth_u_exit": "u", "face_depth_v_exit": "v",
+        "r1_face_depth_u_exit": "u", "r1_face_depth_v_exit": "v",
+        "ffu_nw": "u", "ffu_ne": "u", "ffu_sw": "u", "ffu_se": "u",
+        "ffv_sw": "v", "ffv_se": "v", "ffv_nw": "v", "ffv_ne": "v",
+    }
+    trace_names = {
+        "face_depth_u_mid": "transport_face_depth_u",
+        "face_depth_v_mid": "transport_face_depth_v",
+        "metric_transport_u": "transport_metric_u",
+        "metric_transport_v": "transport_metric_v",
+        "eta_exit": "eta_exit",
+    }
+    out = {
+        name: _trace_native(trace, trace_names.get(name, name), kind, two)
+        for name, kind in stagger.items()
+    }
+    shape_t = (two, *out["eta_entry"].shape[1:])
+    out.update({
+        "metric_e2u": np.broadcast_to(
+            _native(card.recipe.grid.dy_u, "u"), out["u_entry"].shape),
+        "metric_e1v": np.broadcast_to(
+            _native(card.recipe.grid.dx_v, "v"), out["v_entry"].shape),
+        "r1_area": np.broadcast_to(
+            1.0 / np.asarray(card.recipe.grid.area)[:, :RANK0_COLUMNS],
+            shape_t),
+        "r1_dx_u": np.broadcast_to(
+            1.0 / _native(card.recipe.grid.dx_u, "u"),
+            out["u_entry"].shape),
+        "r1_dy_v": np.broadcast_to(
+            1.0 / _native(card.recipe.grid.dy_v, "v"),
+            out["v_entry"].shape),
+    })
+    return out
+
+
+SOURCE_ORDER = (
+    ("eta_entry", "t", "solver_copies_inputs"),
+    ("u_entry", "u", "solver_copies_inputs"),
+    ("v_entry", "v", "solver_copies_inputs"),
+    ("u_history_b", "u", "predictor_weights"),
+    ("v_history_b", "v", "predictor_weights"),
+    ("u_history_bb", "u", "predictor_weights"),
+    ("v_history_bb", "v", "predictor_weights"),
+    ("eta_history_b", "t", "predictor_weights"),
+    ("eta_history_bb", "t", "predictor_weights"),
+    ("u_mid", "u", "predictor_weights"),
+    ("v_mid", "v", "predictor_weights"),
+    ("eta_mid", "t", "predictor_weights"),
+    ("face_depth_u_mid", "u", "midstep_face_depth_and_transport"),
+    ("face_depth_v_mid", "v", "midstep_face_depth_and_transport"),
+    ("metric_transport_u", "u", "midstep_face_depth_and_transport"),
+    ("metric_transport_v", "v", "midstep_face_depth_and_transport"),
+    ("metric_e2u", "u", "midstep_face_depth_and_transport"),
+    ("metric_e1v", "v", "midstep_face_depth_and_transport"),
+    ("r1_area", "t", "continuity_update"),
+    ("continuity_du", "t", "continuity_update"),
+    ("continuity_dv", "t", "continuity_update"),
+    ("continuity_divergence", "t", "continuity_update"),
+    ("continuity_forcing", "t", "continuity_update"),
+    ("eta_exit", "t", "continuity_update"),
+    ("face_ssh_u_exit", "u", "back_interpolation_and_pressure_gradient"),
+    ("face_ssh_v_exit", "v", "back_interpolation_and_pressure_gradient"),
+    ("eta_pgf", "t", "back_interpolation_and_pressure_gradient"),
+    ("r1_dx_u", "u", "back_interpolation_and_pressure_gradient"),
+    ("r1_dy_v", "v", "back_interpolation_and_pressure_gradient"),
+    ("pgf_u", "u", "back_interpolation_and_pressure_gradient"),
+    ("pgf_v", "v", "back_interpolation_and_pressure_gradient"),
+    ("cor_u", "u", "coriolis_and_drag"),
+    ("cor_v", "v", "coriolis_and_drag"),
+    ("trd_u", "u", "coriolis_and_drag"),
+    ("trd_v", "v", "coriolis_and_drag"),
+    ("slow_u", "u", "vector_velocity_update"),
+    ("slow_v", "v", "vector_velocity_update"),
+    ("u_exit", "u", "vector_velocity_update"),
+    ("v_exit", "v", "vector_velocity_update"),
+)
+
+
+def run(deck_root: Path, root: Path, json_out: Path | None,
+        plant: bool = False) -> dict[str, object]:
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+    )
+    from nemo_testcase_l2_gyre_round14_advmean import read_ordered
+    from nemo_testcase_l2_gyre_round16_slow_forcing import read_slow_forcing
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
+    )
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is required")
+
+    ordered_path = root / "oracle_bt_ordered_operands_kt00000001.bin"
+    slow_path = root / "oracle_slow_forcing_kt00000001.bin"
+    require(ordered_path.is_file() and slow_path.is_file(),
+            "the admitted ordered/slow records are missing")
+    oracle = read_ordered(
+        ordered_path, expected_dims=RANK0_DIMS, expected_nrows=2)
+    slow = read_slow_forcing(slow_path, dims=(*RANK0_DIMS, 31))
+
+    _, card = ladder.card_fields(deck_root)
+    cfg = card.recipe.model_config
+    resolved = {
+        "dtype_eta": str(np.asarray(card.recipe.initial_state.eta.data).dtype),
+        "barotropic_solver": cfg.barotropic.barotropic_solver,
+        "n_barotropic_substeps": cfg.barotropic.n_barotropic_substeps,
+        "barotropic_time_filter": cfg.barotropic.barotropic_time_filter,
+        "barotropic_continuity_evaluation":
+            cfg.barotropic.barotropic_continuity_evaluation,
+        "barotropic_drag_substep": bool(cfg.barotropic_drag_substep),
+        "outer_integrator": cfg.outer_integrator,
+    }
+    print("RESOLVED " + json.dumps(resolved, sort_keys=True))
+    require(
+        resolved["barotropic_solver"] == "explicit_substep"
+        and resolved["n_barotropic_substeps"] == 65
+        and resolved["barotropic_time_filter"] == "nemo_ab3am4"
+        and resolved["barotropic_continuity_evaluation"] == "nemo_literal"
+        and resolved["barotropic_drag_substep"]
+        and resolved["outer_integrator"] == "forward_euler",
+        "the resolved ORCA2 solver no longer matches the preregistration")
+
+    entry = ladder.assemble_state_fields(root, 1, stage=None)
+    state = round14._seeded_state(card, entry)
+    surface_fields = ladder.assemble_surface_fields(root, 1)
+    freshwater, surface = ladder._surface_forcings(
+        card, deck_root, surface_fields, 1)
+
+    print("STEP baseline production stage")
+    baseline_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True))
+    baseline = jax.device_get(baseline_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    oracle_ssh3 = ladder.read_state_frame(
+        root / "oracle_stage_kt00000001_s3.bin", kt=1, stage=3)["ssh"]
+    baseline_ssh = round14._ssh_row(baseline.stage_outputs, oracle_ssh3, 3)
+    reproduction = {
+        "round14_end_of_step_max_abs_m": ROUND14_END_OF_STEP_SSH_M,
+        "measured_end_of_step_max_abs_m": baseline_ssh["max_abs_m"],
+        "exactly_reproduced": bool(
+            baseline_ssh["max_abs_m"] == ROUND14_END_OF_STEP_SSH_M),
+        "relative_departure": float(abs(
+            baseline_ssh["max_abs_m"] - ROUND14_END_OF_STEP_SSH_M)
+            / ROUND14_END_OF_STEP_SSH_M),
+    }
+    require(reproduction["relative_departure"] <= 5.0e-5,
+            "round 14's baseline sea-surface number did not reproduce")
+
+    print("STEP production-JIT barotropic trace")
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True))
+    trace = jax.device_get(trace_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    substeps = trace.substeps
+    masks = _masks(card)
+    candidate = _candidate_ordered(card, substeps)
+
+    input_rows = {
+        "freshwater_forcing": round14.compare(
+            candidate["continuity_forcing"][0],
+            oracle["continuity_forcing"][0], masks["t"]),
+        "drag_coefficient_u": round14.compare(
+            _trace_native(substeps, "drag_coefficient_u", "u", 1)[0],
+            slow["cd_u"], masks["u"]),
+        "drag_coefficient_v": round14.compare(
+            _trace_native(substeps, "drag_coefficient_v", "v", 1)[0],
+            slow["cd_v"], masks["v"]),
+    }
+    print("INPUTS " + json.dumps(input_rows, sort_keys=True))
+
+    # The substitution is literally an identity when the candidate is already
+    # bit-exact.  If either input is non-bit, STOP rather than walking a solver
+    # fed different operands; a follow-up revision must add a private boundary
+    # injection and re-run this committed gate.
+    inputs_bit_exact = all(row["bit_exact"] for row in input_rows.values())
+    substitution = {
+        "freshwater_replacement_is_identity":
+            input_rows["freshwater_forcing"]["bit_exact"],
+        "drag_u_replacement_is_identity":
+            input_rows["drag_coefficient_u"]["bit_exact"],
+        "drag_v_replacement_is_identity":
+            input_rows["drag_coefficient_v"]["bit_exact"],
+        "combined_replacement_is_identity": inputs_bit_exact,
+    }
+
+    walk_rows = []
+    first_non_bit = None
+    if inputs_bit_exact:
+        for name, stagger, citation in SOURCE_ORDER:
+            active = np.broadcast_to(masks[stagger], candidate[name].shape)
+            row = round14.compare(candidate[name], oracle[name], active)
+            row.update({"boundary": name, "citation": CITATIONS[citation]})
+            walk_rows.append(row)
+            if first_non_bit is None and not row["bit_exact"]:
+                first_non_bit = dict(row)
+    else:
+        print("STOP_INPUT_SUBSTITUTION_REQUIRED: at least one copied solver "
+              "input is non-bit; no downstream row is attributed")
+
+    plant_result = {"requested": plant, "fires": None}
+    if plant:
+        planted = np.array(oracle["continuity_forcing"][0], copy=True)
+        index = tuple(np.argwhere(masks["t"])[0])
+        planted[index] = np.nextafter(planted[index], np.inf)
+        row = round14.compare(
+            planted, oracle["continuity_forcing"][0], masks["t"])
+        fired = bool(not row["bit_exact"] and row["differing_cells"] == 1
+                     and row["ulp_max"] == 1)
+        plant_result.update({"fires": fired, "index": list(index), "row": row})
+        print("PLANT FIRED" if fired else "PLANT DID NOT FIRE")
+        require(fired, "one-ULP freshwater comparison plant did not fire")
+
+    result = {
+        "gate": "nemo_testcase_l4_orca2_round15_barotropic_solver_gate",
+        "label": "given NEMO's entry",
+        "record_root": str(root),
+        "provenance": worktree_stamp(),
+        "citations": CITATIONS,
+        "resolved": resolved,
+        "round14_reproduction": reproduction,
+        "baseline_end_of_step_sea_surface": baseline_ssh,
+        "solver_input_rows": input_rows,
+        "substitution": substitution,
+        "walk_status": (
+            "WALKED_TO_FIRST_NON_BIT" if inputs_bit_exact
+            else "STOP_INPUT_SUBSTITUTION_REQUIRED"),
+        "first_non_bit_statement": first_non_bit,
+        "source_ordered_rows": walk_rows,
+        "plant": plant_result,
+    }
+    if json_out:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--deck-root", type=Path, required=True)
+    parser.add_argument("--record-root", type=Path, required=True)
+    parser.add_argument("--json-out", type=Path)
+    parser.add_argument("--plant", action="store_true")
+    args = parser.parse_args()
+    try:
+        result = run(args.deck_root, args.record_root, args.json_out,
+                     plant=args.plant)
+    except GateError as exc:
+        print(f"REFUSE: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "gate": result["gate"],
+        "walk_status": result["walk_status"],
+        "solver_input_rows": result["solver_input_rows"],
+        "first_non_bit_statement": result["first_non_bit_statement"],
+        "round14_reproduction": result["round14_reproduction"],
+        "plant": result["plant"],
+    }, indent=2, sort_keys=True))
+    if args.plant:
+        return 1 if result["plant"]["fires"] else 2
+    return 0 if result["walk_status"] == "WALKED_TO_FIRST_NON_BIT" else 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
