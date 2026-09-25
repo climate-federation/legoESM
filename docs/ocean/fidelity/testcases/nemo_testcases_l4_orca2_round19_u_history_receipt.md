@@ -140,6 +140,16 @@ review output, and test logs are under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round19/codex`.
 The focused round-18/19 gate and citation tests pass **36 / 36**.
 
+The required `tests/ocean/fidelity -n 12` battery was launched exactly once.
+It collected 1,694 tests, recorded 1,676 passes and seven skips, and reached
+99% before eight final tests again stopped producing output. After a bounded
+tail it was interrupted and is not represented as green. Its three failures
+are the same pre-existing reds recorded in round 18: the SI3 scalar-math
+provenance gate says the instrumented source is not verbatim; the GYRE
+round-51 assertion expects stale final trace fields; and the GYRE round-129
+certified-record stamp says its stepping gate moved. No file in those paths,
+and no file under `packages/`, changed in round 19.
+
 ## Choices
 
 ASKED: admit the corrected ranked U-history record and walk its compiled
@@ -160,3 +170,5 @@ production statement was made.
    58 (second continuity solve) remain pending and untouched.
 4. The independent ORCA2 year remains dependent on the scheduled independent
    initial-state completion; this solver result is only given NEMO's entry.
+5. The wide ocean-fidelity battery's hung final tail remains an operator
+   action; this interrupted run is not represented as green.
