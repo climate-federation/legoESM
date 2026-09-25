@@ -2,7 +2,7 @@
 #SBATCH --job-name=gloo_lat
 #SBATCH --account=bb1596
 #SBATCH --partition=compute
-#SBATCH --nodes=64
+#SBATCH --nodes=32
 #SBATCH --ntasks-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
@@ -94,13 +94,31 @@ mkdir -p "$OUTDIR"
 echo "provenance: $($PY -c 'import legoesm.parallel.sharded_dynamics as m; print(m.__file__)')"
 echo "sha=$(git -C "$REPO" rev-parse --short HEAD) ppn=$PPN outdir=$OUTDIR"
 
+# TRIMMED to 128 ranks on 32 nodes 2026-09-23: the 64-node request sat
+# unscheduled for hours while three other jobs queued behind it, and the
+# question it serves is the 64 -> 128 kink, which 8 through 128 brackets. The
+# 256-rank arm was the only one needing 64 nodes.
+#
 # LARGEST FIRST, and the wall clock covers the worst case: twelve arms at the
 # 900 s per-arm timeout is three hours, which a two-hour job cannot hold. If
 # something still eats the budget, the arms lost are the cheap small ones
 # that can be re-run in a single node-hour, not the 64-node arms that are the
 # whole reason for the allocation.
-LADDER="${LADDER:-256 128 64 32 16 8}"
-COLLECTIVES="${COLLECTIVES:-ppermute allreduce}"
+LADDER="${LADDER:-128 64 32 16 8}"
+# The mpi_* arms are the SAME ring and reduction on mpi4jax (one single-process
+# JAX program per rank, no jax.distributed) -- the transport the one CPU lane
+# that scales 62x actually uses. Running both transports in ONE job on the
+# SAME ranks is what makes the comparison controlled.
+COLLECTIVES="${COLLECTIVES:-ppermute allreduce mpi_sendrecv mpi_allreduce}"
+# Caps the sweep's largest message. Both 8-rank gloo arms outran the 900 s
+# per-arm cap at 8 MiB (~75 ms per message at 0.11 GB/s x 64 reps x 50
+# iters) and lost their receipts; 4 MiB keeps five sizes in the bandwidth fit.
+MAX_KIB="${MAX_KIB:-4096}"
+# mpi4py/mpi4jax need the OpenMPI they were built against; the module system
+# does not prepend it from a batch shell (memory: mpi-tests-on-levante). It is
+# applied to the mpi_* arms ONLY: the gcc dir carries a libstdc++ that jaxlib
+# could pick up, and the gloo arms have to stay comparable to earlier runs.
+MPI_LIBS="/sw/spack-levante/gcc-13.4.0-c4mgfk/lib64:/sw/spack-levante/openmpi-4.1.2-mnmady/lib"
 want=0; ok=0
 for ND in $LADDER; do
     NN=$(( (ND + PPN - 1) / PPN ))
@@ -119,8 +137,10 @@ for ND in $LADDER; do
                 --ntasks="$ND" --ntasks-per-node="$PPN" --cpu-bind=cores \
                 --cpus-per-task="$(( ${SLURM_CPUS_ON_NODE:?} / PPN ))" \
                 --kill-on-bad-exit=1 \
+                env $( [[ "$C" == mpi_* ]] && echo "LD_LIBRARY_PATH=$MPI_LIBS:${LD_LIBRARY_PATH:-}" ) \
                 "$PY" "$REPO/scripts/bench/bench_ppermute_microbench.py" \
-                --multicontroller --n-devices "$ND" --collective "$C" \
+                $( [[ "$C" == mpi_* ]] || echo "--multicontroller --n-devices $ND" ) \
+                --collective "$C" --max-kib "$MAX_KIB" \
                 --out "$OUTDIR/${C}_nd${ND}.jsonl"; then
             ok=$(( ok + 1 ))
         else

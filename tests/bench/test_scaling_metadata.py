@@ -477,3 +477,21 @@ def test_hlo_collective_census_lowers_and_is_error_safe():
         def _boom(x):
             raise RuntimeError("unlowerable")
         assert md.hlo_collective_census(_boom, jnp.arange(4.0)) is None
+
+
+def test_unstamped_multiprocess_gloo_receipt_is_refused(monkeypatch):
+    """A gloo run over several processes whose launcher bypassed
+    legoesm.parallel.early_init has no gloo_iface stamp; such a receipt
+    cannot say which link carried the collectives and must not be written.
+    Single-process and explicitly stamped runs pass through."""
+    monkeypatch.delenv("LEGOESM_GLOO_IFACE_PINNED", raising=False)
+    with pytest.raises(RuntimeError, match="pin_gloo_interface\\(\\) never ran"):
+        md._gloo_iface_stamp("gloo", 8)
+    with pytest.raises(RuntimeError, match="never ran"):
+        md._gloo_iface_stamp("gloo", 1)
+    assert md._gloo_iface_stamp("mpi4jax", 8) == "n/a"
+    assert md._gloo_iface_stamp("xla-local", 1) == "n/a"
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "ib0")
+    assert md._gloo_iface_stamp("gloo", 8) == "ib0"
+    monkeypatch.setenv("LEGOESM_GLOO_IFACE_PINNED", "default")
+    assert md._gloo_iface_stamp("gloo", 8) == "default"

@@ -102,7 +102,10 @@ STEPS=6
 CELLS_PER_RANK=5120
 # (rank count, icosahedral subdivision) pairs that give exactly 5120 cells per
 # rank: 10*4^s+2 cells over P ranks.
-ARMS="8:6 32:7 128:8"
+# Overridable so the SAME instrument can take a strong-scaling pair. The
+# default is the weak ladder (constant cells per rank); the CPU regression
+# needs 64 and 128 ranks on ONE mesh, which is ARMS="64:9 128:9".
+ARMS="${ARMS:-8:6 32:7 128:8}"
 want=0; ok=0
 
 run_arm() {   # $1=lane  $2=nd  $3=subdivision

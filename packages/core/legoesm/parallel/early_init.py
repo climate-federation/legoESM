@@ -23,11 +23,261 @@ import zlib
 # "must be called before any JAX calls that might initialise the XLA backend"
 # (issue #693: every multi-node run died here).
 _INITIALIZED = False
+# A stamp inherited from a parent process says nothing about THIS process.
+os.environ.pop("LEGOESM_GLOO_IFACE_PINNED", None)
 
 # Legacy fixed coordinator port, kept as the last-resort fallback when no
 # scheduler job id is present (matches the historical hardcoded value so
 # launcher-less local runs keep working unchanged).
 _LEGACY_COORDINATOR_PORT = 1234
+
+
+# ---------------------------------------------------------------------------
+# CPU collectives transport: put gloo on the fast fabric, not the hostname's
+# interface.
+# ---------------------------------------------------------------------------
+# JAX builds its CPU (gloo) collectives with make_gloo_tcp_collectives(
+# distributed_client) and never passes the ``interface`` argument, so gloo
+# binds whatever the hostname resolves to. On Levante that is the 1 Gb/s
+# management Ethernet (measured: 0.11 GB/s cross-node, 0.9 Gbit/s) while
+# ib0 is 100 Gb/s. Every SPMD CPU lane plateaued on that link.
+
+_IFNAMSIZ = 16  # Linux kernel interface-name field, NUL included
+
+
+def interface_ipv4(name: str) -> str | None:
+    """IPv4 address bound to ``name`` (SIOCGIFADDR), or None. Names the
+    kernel cannot hold are rejected rather than silently prefix-matched."""
+    import fcntl  # Linux only, like SIOCGIFADDR itself
+    import struct
+    if len(name.encode()) >= _IFNAMSIZ:
+        raise ValueError(f"interface name {name!r} exceeds {_IFNAMSIZ - 1} bytes")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+        try:
+            raw = fcntl.ioctl(sk.fileno(), 0x8915,
+                              struct.pack("256s", name.encode()))
+        except OSError:
+            return None
+    return socket.inet_ntoa(raw[20:24])
+
+
+def fastest_up_interface(sysfs: str = "/sys/class/net",
+                         has_addr=interface_ipv4) -> str | None:
+    """Name of the non-loopback interface that is up, carries an IPv4
+    address and has the highest advertised link speed; None when nothing
+    qualifies. A fast link without an address (a bare bond member, an
+    unconfigured port) can never be advertised to peers, so it is skipped."""
+    best, best_speed = None, 0
+    try:
+        names = sorted(os.listdir(sysfs))
+    except OSError:
+        return None
+    for name in names:
+        if name == "lo":
+            continue
+        try:
+            with open(os.path.join(sysfs, name, "operstate")) as f:
+                if f.read().strip() != "up":
+                    continue
+            with open(os.path.join(sysfs, name, "speed")) as f:
+                speed = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        if speed > best_speed and has_addr(name) is not None:
+            best, best_speed = name, speed
+    return best
+
+
+def resolve_gloo_interface() -> str | None:
+    """LEGOESM_GLOO_IFACE: an interface name, or ``default`` to leave JAX's
+    hostname-derived choice alone; unset selects the fastest addressed
+    interface (user's chosen default, 2026-09-24)."""
+    v = os.environ.get("LEGOESM_GLOO_IFACE", "").strip()
+    if v.lower() == "default":
+        return None
+    return v or fastest_up_interface()
+
+
+_GLOO_IFACE_BARRIER_MS = 120_000
+_GLOO_PROBE_TIMEOUT_S = 10.0
+_PINNED_IFACE: str | None = None   # process-local; the env stamp is write-only
+
+
+def _cpu_is_the_platform() -> bool:
+    """The gloo collectives only matter when XLA will run on CPU. Reading
+    the backend here is forbidden (it would create it), so decide from
+    jax_platforms: unset (auto) counts as CPU-possible."""
+    import jax
+    plats = jax.config.jax_platforms
+    if not plats:
+        return True
+    return plats.split(",")[0].strip().lower() == "cpu"
+
+
+def _agree_and_probe(client, pid, n_procs, iface, addr, port, lst):
+    """Publish this rank's choice, wait for every rank, then prove the
+    address is reachable: each rank listens on its address and connects
+    to the next rank's. Interface NAMES agreeing proves nothing (two
+    fabrics can both be called ib0); a completed connection does. Every
+    rank passes both barriers whatever it decides, so a failure surfaces
+    as its own message on every rank, not as a barrier timeout."""
+    client.key_value_set(f"legoesm/gloo_iface/{pid}",
+                         f"{iface} {addr} {port}", allow_overwrite=True)
+    client.wait_at_barrier("legoesm_gloo_iface_publish", _GLOO_IFACE_BARRIER_MS)
+    try:
+        rows = {int(k.rsplit("/", 1)[-1]): v.split()
+                for k, v in client.key_value_dir_get("legoesm/gloo_iface/")}
+        _check_vote_and_probe(pid, n_procs, iface, addr, port, lst, rows)
+    finally:
+        # Arrive at the second barrier on every outcome so no peer waits
+        # out the timeout for a rank that already knows why.
+        client.wait_at_barrier("legoesm_gloo_iface_probed",
+                               _GLOO_IFACE_BARRIER_MS)
+    return rows
+
+
+def _check_vote_and_probe(pid, n_procs, iface, addr, port, lst, rows):
+    if set(rows) != set(range(n_procs)):
+        raise RuntimeError(
+            f"gloo interface vote has ranks {sorted(rows)}, expected "
+            f"0..{n_procs - 1} (stale coordinator keys or a missing rank)")
+    bad = {r: v for r, v in rows.items() if v[0] == "error"}
+    if bad:
+        raise RuntimeError(
+            "gloo pin failed on another rank: " +
+            "; ".join(f"rank {r}: {' '.join(v[1:])}" for r, v in bad.items()))
+    if n_procs > 1:
+        succ = (pid + 1) % n_procs
+        nxt = rows[succ]
+        if nxt[0] == "declined":
+            raise RuntimeError(
+                f"rank {succ} declined the gloo pin ({' '.join(nxt)}) "
+                f"while rank {pid} pinned {iface}: mixed configuration, "
+                "the collectives would bind different links")
+        peer = (nxt[1], int(nxt[2]))
+        # Source-bound to the pinned ADDRESS, as gloo's connections
+        # are. This proves the address is reachable both ways; the
+        # kernel's route lookup still picks the egress interface.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as out:
+            out.settimeout(_GLOO_PROBE_TIMEOUT_S)
+            try:
+                out.bind((addr, 0))
+                out.connect(peer)
+            except OSError as e:
+                raise RuntimeError(
+                    f"rank {pid} on {socket.gethostname()} cannot reach "
+                    f"rank {succ} at {peer[0]} (its {nxt[0]}) from {iface} "
+                    f"{addr}: {e}. The chosen interfaces are not on one "
+                    "network; set LEGOESM_GLOO_IFACE explicitly.") from e
+            try:
+                lst.accept()[0].close()
+            except OSError as e:
+                prev = (pid - 1) % n_procs
+                raise RuntimeError(
+                    f"rank {pid} reached rank {succ} but rank {prev} "
+                    f"({' '.join(rows[prev][:2])}) never connected to "
+                    f"{iface} {addr}:{port}: {e}. Reachability is one-way; "
+                    "set LEGOESM_GLOO_IFACE explicitly.") from e
+
+
+def _decline(client, pid, why):
+    """A rank that does not pin still votes and still arrives at both
+    barriers; otherwise a pinning peer would wait out the timeout."""
+    os.environ["LEGOESM_GLOO_IFACE_PINNED"] = f"declined:{why}"
+    row = why if why.startswith("error ") else f"declined {why}"
+    if client is not None:
+        client.key_value_set(f"legoesm/gloo_iface/{pid}", row,
+                             allow_overwrite=True)
+        client.wait_at_barrier("legoesm_gloo_iface_publish", _GLOO_IFACE_BARRIER_MS)
+        client.wait_at_barrier("legoesm_gloo_iface_probed", _GLOO_IFACE_BARRIER_MS)
+    return None
+
+
+def pin_gloo_interface() -> str | None:
+    """Re-register JAX's CPU backend factory so its gloo collectives bind
+    the chosen interface. Must run after jax.distributed.initialize() and
+    before the first backend use. Returns the interface pinned, or None
+    when the hook declines (single process, non-CPU platform, non-gloo
+    collectives, or ``default``). LEGOESM_GLOO_IFACE_PINNED records the
+    outcome for receipts; it is never read back (an inherited stamp must
+    not stand in for an installation in THIS process).
+
+    Every rank votes through the coordination service and proves its
+    address reachable from a peer before anything is installed; a rank
+    advertising an address on another network would otherwise hang at the
+    first collective with no message naming the cause (reviews 2026-09-24).
+    """
+    global _PINNED_IFACE
+    import jax
+    from jax._src import xla_bridge as xb  # no public factory hook
+    from jax._src.distributed import global_state
+    from jax._src.lib import xla_client
+    if _PINNED_IFACE is not None:
+        os.environ["LEGOESM_GLOO_IFACE_PINNED"] = _PINNED_IFACE
+        return _PINNED_IFACE
+    client = global_state.client
+    pid = global_state.process_id
+    if client is None:
+        return _decline(None, pid, "single-process")
+    if not _cpu_is_the_platform():
+        return _decline(client, pid, "platform-not-cpu")
+    impl = str(jax.config.jax_cpu_collectives_implementation)
+    if impl != "gloo":
+        return _decline(client, pid, impl)
+    # Everything that can fail BEFORE this rank has voted: tell the peers
+    # why, pass both barriers, then raise — otherwise they wait out the
+    # barrier and see only a mismatch. The "default" decline sits outside
+    # that guard so a failure inside _decline cannot re-enter the barriers.
+    try:
+        iface = resolve_gloo_interface()
+    except Exception as e:
+        _decline(client, pid, f"error {e}".replace("\n", " "))
+        raise
+    if iface is None:
+        return _decline(client, pid, "default")
+    lst = None
+    try:
+        try:
+            lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if xb._backends:
+                raise RuntimeError(
+                    "pin_gloo_interface() called after a backend was created; "
+                    "the gloo transport is already bound to the default "
+                    "interface.")
+            addr = interface_ipv4(iface)
+            if addr is None:
+                raise RuntimeError(
+                    f"LEGOESM_GLOO_IFACE={iface!r}: interface has no IPv4 "
+                    f"address on {socket.gethostname()}; gloo could not "
+                    "advertise it.")
+            lst.bind((addr, 0))
+            lst.listen(1)
+            lst.settimeout(_GLOO_PROBE_TIMEOUT_S)
+            port = lst.getsockname()[1]
+        except Exception as e:
+            _decline(client, pid, f"error {e}".replace("\n", " "))
+            raise
+        rows = _agree_and_probe(client, pid, global_state.num_processes,
+                                iface, addr, port, lst)
+    finally:
+        if lst is not None:
+            lst.close()
+    if pid == 0:
+        names = sorted({r[0] for r in rows.values()})
+        print(f"[gloo] collectives pinned to {iface} ({addr}); "
+              f"{len(rows)} process(es), interfaces {names}, ring probe ok",
+              flush=True)
+
+    def _cpu_client_on_iface():
+        coll = xla_client._xla.make_gloo_tcp_collectives(
+            distributed_client=global_state.client, interface=iface)
+        return xb.make_cpu_client(collectives=coll)
+
+    xb.register_backend_factory("cpu", _cpu_client_on_iface, priority=0,
+                                fail_quietly=False)
+    _PINNED_IFACE = iface
+    os.environ["LEGOESM_GLOO_IFACE_PINNED"] = iface
+    return iface
 
 
 def resolve_coordinator_port(default: int = _LEGACY_COORDINATOR_PORT) -> int:
@@ -490,6 +740,7 @@ def init_jax_distributed_with_fallback() -> None:
     # silent-fallback hazard (codex).
     if jax.distributed.is_initialized():
         _INITIALIZED = True
+        pin_gloo_interface()
         check_no_silent_process_fallback()
         return
 
@@ -508,6 +759,7 @@ def init_jax_distributed_with_fallback() -> None:
             local_device_ids=_pals_local_device_ids(),
         )
         _INITIALIZED = True
+        pin_gloo_interface()
         check_no_silent_process_fallback()
         return
     try:
@@ -515,10 +767,12 @@ def init_jax_distributed_with_fallback() -> None:
     except RuntimeError as e:
         if "already" in str(e).lower():
             _INITIALIZED = True
+            pin_gloo_interface()
             check_no_silent_process_fallback()
             return
         raise
     _INITIALIZED = True
+    pin_gloo_interface()
     check_no_silent_process_fallback()
 
 
@@ -585,6 +839,7 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
     # initialize() raises (codex).  Still verify the federation size.
     if jax.distributed.is_initialized():
         _INITIALIZED = True
+        pin_gloo_interface()
         check_no_silent_process_fallback()
         return
 
@@ -604,6 +859,7 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
         # to GPU 0 (codex).
         local_device_ids=_pals_local_device_ids())
     _INITIALIZED = True
+    pin_gloo_interface()
     check_no_silent_process_fallback()
     _warn_missing_nccl_plugin(rank=proc_id)
 
@@ -831,5 +1087,6 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
         local_device_ids=device_ids,
     )
     _INITIALIZED = True
+    pin_gloo_interface()
     check_no_silent_process_fallback()
     return True

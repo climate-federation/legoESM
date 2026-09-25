@@ -52,8 +52,28 @@ MARKERS = ["o", "s", "^", "D", "v", "P"]
 FIRST_REAL_F64_JOB = 27253192
 # canonical vertical levels per lane: receipts at other level counts are a
 # different problem and are dropped (e.g. the 32-level MPAS probe rows)
-NLEV = {("atmosphere", "latlon"): 26, ("atmosphere", "icosahedral"): 26,
-        ("atmosphere", "cubed-sphere"): 26, ("ocean", "tripole"): 75, ("ocean", "mpas"): 40}
+#: The vertical level count each lane's curve is built from.  This is a
+#: FILTER, not a label: a receipt at another count is refused rather than
+#: drawn, because the level count changes the cost per cell and mixing two
+#: of them in one curve would read as scaling.
+#:
+#: The atmosphere ladder moved from 26 levels to 40 on 2026-09-23 (26 was
+#: the most expensive count in the repo's measured table, 1.6x the per-level
+#: cost of 40 at subdivision 9, while production AMIP runs 40).  This still
+#: defaults to 26 so the existing curves keep plotting; pass --atm-nlev 40
+#: once enough receipts at the new count exist.  The two sets are NOT
+#: comparable and must not share a figure.
+ATM_NLEV_DEFAULT = 26
+
+
+def _nlev_map(atm_nlev: int) -> dict:
+    return {("atmosphere", "latlon"): atm_nlev,
+            ("atmosphere", "icosahedral"): atm_nlev,
+            ("atmosphere", "cubed-sphere"): atm_nlev,
+            ("ocean", "tripole"): 75, ("ocean", "mpas"): 40}
+
+
+NLEV = _nlev_map(ATM_NLEV_DEFAULT)
 
 
 def _component(r):
@@ -152,6 +172,10 @@ def load(dirs):
                     continue
                 if r.get("metadata", {}).get("virtual_cpu_devices"):
                     continue
+                # A row with no device count cannot sit on a scaling curve at
+                # all; probe/census receipts in the same trees carry none.
+                if r.get("n_devices") is None:
+                    continue
                 comp = _component(r)
                 grid = _grid(r, comp)
                 prec = r.get("precision") or r.get("metadata", {}).get("precision")
@@ -243,6 +267,14 @@ def load(dirs):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mode", choices=["strong", "weak"], default="strong")
+    ap.add_argument("--atm-nlev", type=int, default=ATM_NLEV_DEFAULT,
+                    help="vertical level count the ATMOSPHERE curves are "
+                         "built from. Receipts at any other count are "
+                         "refused, because the level count changes the cost "
+                         "per cell and mixing two of them in one curve reads "
+                         "as scaling. The ladder moved 26 -> 40 on "
+                         "2026-09-23; this still defaults to 26 so existing "
+                         "curves keep plotting.")
     ap.add_argument("--receipts", nargs="+", required=True)
     ap.add_argument("--out", default="fig_scaling.pdf")
     ap.add_argument("--png", default=None)
@@ -253,6 +285,8 @@ def main() -> int:
                          "performance-tuned (the cube slot carries the legend); "
                          "supp = the cubed-sphere panel alone; all = every panel")
     args = ap.parse_args()
+    global NLEV
+    NLEV = _nlev_map(args.atm_nlev)
 
     best = load(args.receipts)
     series = defaultdict(list)     # (comp,grid,backend,prec,res) -> [(nd, ms, job, file, steps)]
