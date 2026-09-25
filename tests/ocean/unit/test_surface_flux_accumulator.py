@@ -178,9 +178,10 @@ def test_flag_is_excluded_from_the_restart_fingerprint():
     # so only a real set member satisfies it.
     code = [ln.split("#", 1)[0] for ln in src[start:end + 1]]
     block = "\n".join(code)
-    assert '"flux_accumulate"' in block, (
-        "the read-only flux-accumulate flag must be excluded from the restart "
-        "fingerprint or enabling it makes a chained leg un-resumable")
+    for flag in ('"flux_accumulate"', '"mld_accumulate"', '"state_accumulate"'):
+        assert flag in block, (
+            f"the read-only {flag} flag must be excluded from the restart "
+            "fingerprint or enabling it makes a chained leg un-resumable")
 
 
 # ---------------------------------------------------------------------------
@@ -307,3 +308,49 @@ def test_the_online_mld_uses_the_scorer_threshold_not_the_library_default():
     assert float(np.asarray(deep).mean() - np.asarray(want).mean()) > 10.0, (
         "the two thresholds must disagree on this profile or the test is "
         "vacuous")
+
+
+def test_state_mean_is_the_window_mean_of_T_and_S():
+    """--state-accumulate: T_mean/S_mean are MEANS over the window of the 3-D
+    fields, shared with the flux window; snapshots without it carry no key."""
+    acc = _driver()._SurfaceFluxAccumulator()
+    st1 = SimpleNamespace(T=SimpleNamespace(data=np.full((2, 2, 3), 10.0)),
+                          S=SimpleNamespace(data=np.full((2, 2, 3), 34.0)))
+    st2 = SimpleNamespace(T=SimpleNamespace(data=np.full((2, 2, 3), 12.0)),
+                          S=SimpleNamespace(data=np.full((2, 2, 3), 36.0)))
+    acc.add(None, state=st1)
+    acc.add(None, state=st2)
+    out = acc.drain()
+    np.testing.assert_allclose(out["T_mean"], 11.0, rtol=1e-12)
+    np.testing.assert_allclose(out["S_mean"], 35.0, rtol=1e-12)
+    assert out["flux_mean_n_steps"] == 2
+    assert "q_net_mean" not in out
+    assert acc.drain() == {}
+
+
+def test_state_flag_round_trips_and_scan_lane_refuses_it():
+    from pathlib import Path
+    import scripts.run.run_omip_core2 as mod
+    p = _driver()._build_arg_parser()
+    assert p.parse_args(["--grid", "tripole"]).state_accumulate is False
+    assert p.parse_args(["--grid", "tripole", "--state-accumulate"]).state_accumulate is True
+    src = Path(mod.__file__).read_text()
+    # THIS guard's block only (up to the next top-level `if` in main), so a
+    # neighbouring guard's raise cannot satisfy it (codex).
+    guard = src.split("if args.state_accumulate and use_scan:", 1)[1]
+    guard = guard.split("\n    if ", 1)[0]
+    assert "raise SystemExit" in guard
+    assert "--state-accumulate" in guard
+
+
+def test_state_sampled_after_the_step_at_both_host_loop_sites():
+    """XIOS averages the completed state of each step; the add must follow
+    the step call at both host-loop call sites, not precede it."""
+    from pathlib import Path
+    import scripts.run.run_omip_core2 as mod
+    src = Path(mod.__file__).read_text()
+    sites = src.split("state=(state if args.state_accumulate else None))")[:-1]
+    assert len(sites) == 2, len(sites)
+    for site in sites:
+        tail = site[-900:]
+        assert ("state = model.step(" in tail) or ("state = _ocean_step(" in tail), tail

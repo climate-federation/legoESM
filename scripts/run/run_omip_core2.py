@@ -6012,8 +6012,13 @@ class _SurfaceFluxAccumulator:
         self._sums = {}
         self._n = 0
 
-    def add(self, sf, mld=None):
-        """Accumulate one step. ``mld`` is optional and shares the window.
+    _STATE_FIELDS = ("T", "S")
+
+    def add(self, sf, mld=None, state=None):
+        """Accumulate one step. ``mld`` and ``state`` are optional and share
+        the window; ``state`` contributes the 3-D T and S (the window mean the
+        oracle's 5-day output IS -- an instantaneous snapshot against it
+        aliases the diurnal cycle and the sampling phase).
 
         The step count is incremented ONCE here, so a caller that supplies
         only ``mld`` still gets a correctly normalised mean -- and a window
@@ -6033,7 +6038,15 @@ class _SurfaceFluxAccumulator:
             v = jnp.asarray(mld)
             prev = self._sums.get("mld")
             self._sums["mld"] = v if prev is None else prev + v
-        if sf is None and mld is None:
+        if state is not None:
+            # Sum in the widest available dtype: a float32 running sum of
+            # ~30 C over 2880 steps carries up to ~1e-3 C in the mean.
+            _acc_dtype = jax.dtypes.canonicalize_dtype(jnp.float64)
+            for name in self._STATE_FIELDS:
+                v = jnp.asarray(getattr(state, name).data, dtype=_acc_dtype)
+                prev = self._sums.get(name)
+                self._sums[name] = v if prev is None else prev + v
+        if sf is None and mld is None and state is None:
             return
         self._n += 1
 
@@ -7300,6 +7313,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "inputs are pinned by PATH, not by content hash.")
     p.add_argument("--mld-accumulate", action="store_true",
                    help="Accumulate the mixed-layer depth at every step and write the mean over each snapshot window as mld_mean. Uses the three-way scorer's own convention (delta_sigma 0.01, the NEMO mldr10_1 threshold) so the two are the same diagnostic. Without this, a snapshot MLD is compared against NEMO's 5-day mean -- the snapshot-versus-mean confound that has produced retracted numbers in this campaign twice. Read-only; excluded from the restart fingerprint.")
+    p.add_argument("--state-accumulate", action="store_true",
+                   help="Accumulate the 3-D temperature and salinity at every "
+                        "step and write their means over each snapshot window "
+                        "as T_mean / S_mean beside the instantaneous T / S. "
+                        "This is the quantity NEMO's 5-day output holds; an "
+                        "instantaneous 00 UTC snapshot against it carries the "
+                        "diurnal phase (nino3 SST +0.49 at 00 UTC vs +0.12 "
+                        "window-matched, 2026-09-25).")
     p.add_argument("--flux-accumulate", action="store_true",
                    help="Accumulate the APPLIED ocean surface heat flux "
                         "(q_net, sw_down) and wind stress (tau_x, tau_y) at "
@@ -9456,7 +9477,7 @@ def main() -> int:
         # Same class again: the surface-flux accumulator only READS the
         # forcing it is handed, so enabling it must not make a parent leg's
         # restart un-resumable.
-        "flux_accumulate", "mld_accumulate",
+        "flux_accumulate", "mld_accumulate", "state_accumulate",
         "restart_branch_from_different_config",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
@@ -10061,6 +10082,10 @@ def main() -> int:
             "--mld-accumulate is not wired into the --scan-block lane; "
             "drop --scan-block (the standard per-step loop accumulates the "
             "mixed-layer depth) or drop --mld-accumulate.")
+    if args.state_accumulate and use_scan:
+        raise SystemExit(
+            "--state-accumulate is not wired into the --scan-block lane; "
+            "drop --scan-block or drop --state-accumulate.")
     if _evd_occ_every is not None and use_scan:
         raise SystemExit(
             "--evd-occupancy-every-hours samples inside the per-step loop; "
@@ -10383,7 +10408,8 @@ def main() -> int:
                     & (np.abs(_evd_lat) <= 2.0)
                     & (_evd_lon >= 220.0) & (_evd_lon < 240.0))
     _flux_acc = (_SurfaceFluxAccumulator()
-                 if (args.flux_accumulate or args.mld_accumulate)
+                 if (args.flux_accumulate or args.mld_accumulate
+                     or args.state_accumulate)
                  else None)
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
@@ -10634,12 +10660,17 @@ def main() -> int:
                     u_oce=_u_oce, v_oce=_v_oce,
                     wind_current_feedback_vfac=_wind_vfac)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
-            if _flux_acc is not None:
-                _flux_acc.add(sf if args.flux_accumulate else None,
-                              mld=(_mld_now(state, z_coord)
-                                   if args.mld_accumulate else None))
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
+            if _flux_acc is not None:
+                # After the step: XIOS averages the COMPLETED state of every
+                # step (stprk3.F90:207-238), so the window is T_1..T_n and the
+                # snapshot's T_n is its last member; fluxes are those applied
+                # over the same n steps.
+                _flux_acc.add(sf if args.flux_accumulate else None,
+                              mld=(_mld_now(state, z_coord)
+                                   if args.mld_accumulate else None),
+                              state=(state if args.state_accumulate else None))
         else:
             fw = None
             # Build the freshwater struct if EITHER the atmospheric P-E/runoff is
@@ -10923,11 +10954,16 @@ def main() -> int:
             # Accumulated from the forcing HANDED TO THE STEP, so on the ice
             # lane this is the post-blend, ice-partitioned flux. MLD rides
             # the same window and the same single count.
+            state = _ocean_step(state, sf, fw, _t_sec)
             if _flux_acc is not None:
+                # After the step: XIOS averages the COMPLETED state of every
+                # step (stprk3.F90:207-238), so the window is T_1..T_n and the
+                # snapshot's T_n is its last member; fluxes are those applied
+                # over the same n steps.
                 _flux_acc.add(sf if args.flux_accumulate else None,
                               mld=(_mld_now(state, z_coord)
-                                   if args.mld_accumulate else None))
-            state = _ocean_step(state, sf, fw, _t_sec)
+                                   if args.mld_accumulate else None),
+                              state=(state if args.state_accumulate else None))
         if _gw_acc is not None:
             # READ-ONLY: `state` is never reassigned here, so the trajectory
             # is bit-identical to a run without the flag.
