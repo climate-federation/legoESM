@@ -122,7 +122,18 @@ Verdict: **independent review unavailable in-sandbox**.
 The clean operand gate exits 0 with `WALKED_TO_FIRST_NON_BIT_HALO_OPERAND`;
 both plants fire and the plant run exits 1. The receipt citation gate passes
 all six rendered compiled citations; a rigid two-line shift of every citation
-fails. Focused and wide-test results are recorded below after execution.
+fails. The focused round-17/18 and citation battery passes **20 / 20**.
+
+The required `tests/ocean/fidelity -n 12` battery was launched exactly once:
+it collected 1,675 tests, recorded 1,658 passes and seven skips, and reached
+99% before its final worker again stopped producing output. After the same
+bounded tail used by round 17, it was interrupted with exit 130 and is not
+represented as green. Its three failures are the same pre-existing reds named
+in the round-17 receipt: the GYRE round-129 certified-record stamp says the
+stepping gate moved; the SI3 scalar-math gate says `A MY_SRC is not verbatim`;
+and the GYRE round-51 assertion expects the stale final six trace fields. No
+file in those implementation/test paths, and no file under `packages/`,
+changed in round 18.
 
 Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round18/codex`.
@@ -147,3 +158,5 @@ production statement was made.
    58 (second continuity solve) remain pending and untouched.
 4. The independent ORCA2 year remains dependent on the scheduled independent
    initial-state completion; this solver result is only given NEMO's entry.
+5. The wide ocean-fidelity battery's hung final tail remains an operator
+   action; this interrupted run is not represented as green.
