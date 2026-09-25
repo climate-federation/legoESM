@@ -10862,13 +10862,13 @@ class LatLonCGridOceanModel:
                     eta_now=eta_now,
                 )
 
-        # Private GYRE causal arm: replace the EFFECTIVE profiles at the exact
-        # solve boundary, after prognostic TKE/EVD/background/IWM composition.
-        # Putting these values into K_v_phys/A_v_phys would take the surfaced-K
-        # fast path and double-count the closure; this hook deliberately leaves
-        # the prognostic TKE update intact and changes only the consumed pair.
+        # Private causal seam: two arrays replace the post-closure heat and
+        # viscosity profiles; a third optionally replaces formed tracer K.
+        _formed_effective_K_override = None
         if effective_K_test_override is not None:
-            K_v_cell, A_v_cell = effective_K_test_override
+            K_v_cell, A_v_cell = effective_K_test_override[:2]
+            if len(effective_K_test_override) == 3:
+                _formed_effective_K_override = effective_K_test_override[2]
 
         # DIAGNOSTIC CAPTURE (return_K_profiles): the interface diffusivity
         # K_v_cell (heat, NEMO avt) and viscosity A_v_cell (momentum, avm) at
@@ -11034,11 +11034,10 @@ class LatLonCGridOceanModel:
                 K_v_cell = K_v_cell * _wet_if_vmix
                 if dK_ddm_salt is not None:
                     dK_ddm_salt = dK_ddm_salt * _wet_if_vmix
-            # IMPLICIT surface TRACER forcing (Veros placement): add dt·S_surf
-            # (masked) to the solve INPUT so the backward-Euler tridiagonal solve
-            # realises ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0.  dt
-            # here is dt_tracer (the tracer timestep), matching Veros's
-            # ``dt_tracer·forc/dz[surface]`` RHS source.  No-op when None.
+            if _formed_effective_K_override is not None:
+                K_v_cell = _formed_effective_K_override
+            # IMPLICIT surface tracer forcing: add masked dt·S_surf to the
+            # solve input, matching Veros's dt_tracer·forc/dz[surface] RHS.
             T_solve_in = state.T.data
             S_solve_in = state.S.data
             if surface_tracer_forcing is not None:

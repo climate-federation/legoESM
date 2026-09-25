@@ -967,15 +967,15 @@ def test_round167_vertical_sensitivity_ranking_is_complete_and_signed(harness):
     rows = {
         "free": {"T": {"rms": 2.0}},
         "heat_K": {"T": {"rms": 1.5}},
-        "effective_K": {"T": {"rms": 2.25}},
+        "complete_K": {"T": {"rms": 2.25}},
     }
     ranked = harness._rank_vertical_sensitivity(rows)
-    assert [row["arm"] for row in ranked] == ["heat_K", "effective_K"]
+    assert [row["arm"] for row in ranked] == ["heat_K", "complete_K"]
     assert ranked[0]["day240_T3D_rms_removed_K"] == 0.5
     assert ranked[0]["removed_fraction"] == 0.25
     assert ranked[1]["day240_T3D_rms_removed_K"] == -0.25
 
     broken = dict(rows)
-    broken.pop("effective_K")
-    with pytest.raises(harness.GateError, match="no effective_K arm"):
+    broken.pop("complete_K")
+    with pytest.raises(harness.GateError, match="no complete_K arm"):
         harness._rank_vertical_sensitivity(broken)

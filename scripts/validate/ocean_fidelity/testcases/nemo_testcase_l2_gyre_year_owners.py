@@ -12144,7 +12144,7 @@ def _rank_vertical_sensitivity(final_rows: dict[str, dict]) -> list[dict]:
             "vertical sensitivity ranking has no free arm")
     free = float(final_rows["free"]["T"]["rms"])
     ranking = []
-    for name in ("heat_K", "effective_K"):
+    for name in ("heat_K", "complete_K"):
         require(name in final_rows,
                 f"vertical sensitivity ranking has no {name} arm")
         value = float(final_rows[name]["T"]["rms"])
@@ -12169,7 +12169,8 @@ def developed_vertical_day240_sensitivity(
     production-jitted step through step 1440.  The only directed input is the
     private coefficient seam immediately before the implicit tracer solve.
     """
-    require(plant in (None, "none", "developed-vertical-avt-ulp"),
+    require(plant in (None, "none", "developed-vertical-avt-ulp",
+                      "developed-vertical-complete-ulp"),
             f"unknown developed vertical-sensitivity plant {plant!r}")
     _policy()
     import jax.numpy as jnp
@@ -12248,10 +12249,7 @@ def developed_vertical_day240_sensitivity(
             _nemo_stage1_zad_eta_after_override=ssha)
 
     first_step: dict[str, dict] = {}
-    effective_failure = None
-
-    def run_arm(name: str, *, plant_first_heat: bool = False):
-        nonlocal effective_failure
+    def run_arm(name: str, *, plant_first_coefficient: bool = False):
         state = initial_state
         identity_mismatched_bytes = 0
         for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1):
@@ -12268,11 +12266,13 @@ def developed_vertical_day240_sensitivity(
                 vertical = _vertical_trace_frame(probe)
                 viscosity = np.asarray(
                     probe.vertical_solve.viscosity_K, dtype=np.float64)
-                if name == "identity":
+                target_postadd = None
+                if name == "identity_postadd":
                     target = vertical["heat_K"]
+                    target_postadd = vertical["effective_K"]
                 elif name in ("heat_K", "heat_K_ulp"):
                     target = np.array(nemo_heat, copy=True)
-                    if plant_first_heat and step == PROCESS_START_STEP:
+                    if plant_first_coefficient and step == PROCESS_START_STEP:
                         candidates = np.argwhere(
                             interface_wet & np.isfinite(target)
                             & (target > 0.0))
@@ -12292,20 +12292,40 @@ def developed_vertical_day240_sensitivity(
                             "new_uint64": int(
                                 np.asarray(target[index]).view(np.uint64)),
                         }
-                elif name == "effective_K":
-                    # The production closure adds isoneutral K after the
-                    # private heat-K seam.  This is the one-variable preimage
-                    # of NEMO's complete zwt coefficient.
-                    target = nemo_effective - vertical["isoneutral_K"]
+                elif name in ("complete_K", "complete_K_ulp"):
+                    target = vertical["heat_K"]
+                    target_postadd = np.array(nemo_effective, copy=True)
+                    if plant_first_coefficient and step == PROCESS_START_STEP:
+                        candidates = np.argwhere(
+                            interface_wet & np.isfinite(target_postadd)
+                            & (target_postadd > 0.0))
+                        require(candidates.size > 0,
+                                "PLANT-BLIND: no positive recorded zwt_mix")
+                        values = target_postadd[tuple(candidates.T)]
+                        index = tuple(int(value) for value in
+                                      candidates[int(np.argmax(values))])
+                        old = float(target_postadd[index])
+                        target_postadd[index] = np.nextafter(old, np.inf)
+                        require(target_postadd[index] != old,
+                                "PLANT-BLIND: recorded zwt_mix ULP was inert")
+                        first_step["plant"] = {
+                            "index_jik": list(index),
+                            "old_uint64": int(
+                                np.asarray(old).view(np.uint64)),
+                            "new_uint64": int(np.asarray(
+                                target_postadd[index]).view(np.uint64)),
+                        }
                 else:  # pragma: no cover - private caller registry
                     raise AssertionError(name)
                 override = (jnp.asarray(target), jnp.asarray(viscosity))
+                if target_postadd is not None:
+                    override += (jnp.asarray(target_postadd),)
                 selected = (traced_step(state, step, override)
                             if step == PROCESS_START_STEP
                             else production_step(state, step, override))
                 selected_state = (selected.state_after
                                   if step == PROCESS_START_STEP else selected)
-                if name == "identity":
+                if name == "identity_postadd":
                     mismatch = _state_bit_mismatches(
                         probe.state_after, selected_state)
                     identity_mismatched_bytes += mismatch
@@ -12331,7 +12351,7 @@ def developed_vertical_day240_sensitivity(
                             selected_vertical["heat_K"], nemo_heat,
                             interface_wet) == 0,
                             "heat-K seam did not consume NEMO avt")
-                    if name == "effective_K":
+                    if name == "complete_K":
                         effective_row = _score_developed_row(
                             selected_vertical["effective_K"], nemo_effective,
                             interface_wet)
@@ -12339,15 +12359,12 @@ def developed_vertical_day240_sensitivity(
                         "upstream_cells_moved": upstream,
                         "vertical": selected_vertical,
                         "target_heat_K": target,
+                        "target_complete_K": target_postadd,
                     }
-                    if name == "effective_K" and not effective_row["bit_exact"]:
-                        effective_failure = {
-                            "prediction": "effective_K first-step complete "
-                                          "coefficient is BIT",
-                            "status": "REFUTED",
-                            "row": effective_row,
-                        }
-                        return None, identity_mismatched_bytes
+                    if name == "complete_K":
+                        require(effective_row["bit_exact"],
+                                "direct complete-K seam did not consume "
+                                "NEMO zwt_mix bit for bit")
             if step == PROCESS_START_STEP and name == "free":
                 first_step[name] = {
                     "vertical": _vertical_trace_frame(selected),
@@ -12362,9 +12379,9 @@ def developed_vertical_day240_sensitivity(
 
     final_states = {}
     identity_bytes = 0
-    arms = (["heat_K"]
-            if plant == "developed-vertical-avt-ulp" else
-            ["free", "identity", "heat_K", "effective_K"])
+    arms = (["heat_K"] if plant == "developed-vertical-avt-ulp" else
+            ["complete_K"] if plant == "developed-vertical-complete-ulp" else
+            ["free", "identity_postadd", "heat_K", "complete_K"])
     for arm in arms:
         arm_state, arm_identity = run_arm(arm)
         identity_bytes += arm_identity
@@ -12373,7 +12390,8 @@ def developed_vertical_day240_sensitivity(
         final_states[arm] = arm_state
 
     if plant == "developed-vertical-avt-ulp":
-        planted_state, _ = run_arm("heat_K_ulp", plant_first_heat=True)
+        planted_state, _ = run_arm(
+            "heat_K_ulp", plant_first_coefficient=True)
         baseline_matrix = first_step["heat_K"]["vertical"]
         planted_matrix = first_step["heat_K_ulp"]["vertical"]
         matrix_moved = sum(
@@ -12388,6 +12406,26 @@ def developed_vertical_day240_sensitivity(
                 f"matrix={matrix_moved}, day240_T={final_t_moved}")
         raise GateError(
             "one-ULP recorded avt was caught: "
+            f"index={first_step['plant']['index_jik']}, "
+            f"matrix_cells={matrix_moved}, day240_T_cells={final_t_moved}")
+
+    if plant == "developed-vertical-complete-ulp":
+        planted_state, _ = run_arm(
+            "complete_K_ulp", plant_first_coefficient=True)
+        baseline_matrix = first_step["complete_K"]["vertical"]
+        planted_matrix = first_step["complete_K_ulp"]["vertical"]
+        matrix_moved = sum(
+            _different_cells(baseline_matrix[name], planted_matrix[name], wet)
+            for name in ("lower", "diagonal", "upper"))
+        final_t_moved = _different_cells(
+            gate.lego_fields(final_states["complete_K"])["T"],
+            gate.lego_fields(planted_state)["T"], wet)
+        if matrix_moved == 0 or final_t_moved == 0:
+            raise GateError(
+                "PLANT-BLIND: one-ULP recorded zwt_mix moved "
+                f"matrix={matrix_moved}, day240_T={final_t_moved}")
+        raise GateError(
+            "one-ULP recorded zwt_mix was caught: "
             f"index={first_step['plant']['index_jik']}, "
             f"matrix_cells={matrix_moved}, day240_T_cells={final_t_moved}")
 
@@ -12435,10 +12473,9 @@ def developed_vertical_day240_sensitivity(
             first_step["heat_K"]["vertical"]["effective_K"],
             nemo_effective, interface_wet),
     }
-    if "effective_K" in first_step:
-        first_rows["effective_arm_effective_K"] = _score_developed_row(
-            first_step["effective_K"]["vertical"]["effective_K"],
-            nemo_effective, interface_wet)
+    first_rows["complete_arm_effective_K"] = _score_developed_row(
+        first_step["complete_K"]["vertical"]["effective_K"],
+        nemo_effective, interface_wet)
     require(identity_bytes == 0,
             "identity coefficient arm moved the production trajectory")
 
@@ -12459,42 +12496,24 @@ def developed_vertical_day240_sensitivity(
     historical["round134_daily_tke_reset"].update(tke_reset)
     historical["round126_vertical_subowners"].update(round126["headline"])
 
-    if "effective_K" in final_rows:
-        ranking = _rank_vertical_sensitivity(final_rows)
-    else:
-        free_value = final_rows["free"]["T"]["rms"]
-        heat_value = final_rows["heat_K"]["T"]["rms"]
-        ranking = [{
-            "arm": "heat_K",
-            "day240_T3D_rms_K": heat_value,
-            "day240_T3D_rms_removed_K": free_value - heat_value,
-            "removed_fraction": ((free_value - heat_value) / free_value
-                                 if free_value else 0.0),
-            "ranking_status": "BOUNDED_ONLY_EFFECTIVE_ARM_REFUTED",
-        }]
+    ranking = _rank_vertical_sensitivity(final_rows)
     free_rms = final_rows["free"]["T"]["rms"]
     heat_removed = next(
         row["day240_T3D_rms_removed_K"] for row in ranking
         if row["arm"] == "heat_K")
-    if effective_failure is not None:
-        conclusion = (
-            "frozen complete-coefficient preimage prediction is REFUTED; "
-            "heat-only day-240 sensitivity is bounded but the requested "
-            "TKE-versus-solve ranking is incomplete")
-    else:
-        effective_removed = next(
-            row["day240_T3D_rms_removed_K"] for row in ranking
-            if row["arm"] == "effective_K")
-        conclusion = (
-            "TKE/closure heat diffusivity carries the ranked developed-state "
-            "day-240 sensitivity"
-            if heat_removed > 0.0 and heat_removed >= effective_removed else
-            "TKE/closure heat diffusivity is not the ranked developed-state "
-            "day-240 owner; continue at the complete implicit tracer solve")
+    complete_removed = next(
+        row["day240_T3D_rms_removed_K"] for row in ranking
+        if row["arm"] == "complete_K")
+    conclusion = (
+        "TKE/closure heat diffusivity carries the ranked developed-state "
+        "day-240 sensitivity"
+        if heat_removed > 0.0 and heat_removed >= complete_removed else
+        "TKE/closure heat diffusivity is not the ranked developed-state "
+        "day-240 owner; continue at the complete implicit tracer solve")
     evidence_root.mkdir(parents=True, exist_ok=True)
     return {
-        "format": "gyre-round167-developed-vertical-sensitivity-v1",
-        "status": "REFUTED" if effective_failure is not None else "PASS",
+        "format": "gyre-round168-developed-vertical-sensitivity-v1",
+        "status": "PASS",
         "case": CASE,
         "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
         "worktree": stamp,
@@ -12516,24 +12535,22 @@ def developed_vertical_day240_sensitivity(
             "first_step_compiled_calibration_cells_unequal":
                 _vertical_calibration(first_vertical_record),
             "first_step_rows": first_rows,
-            "effective_preimage_prediction": effective_failure,
+            "round167_effective_preimage_prediction": "REFUTED",
             "historical": historical,
         },
         "interventions": {
             "heat_K": "replace only pre-isoneutral heat diffusivity with "
                       "NEMO avt at every developed step",
-            "effective_K": "choose pre-isoneutral heat diffusivity so the "
-                           "production sum is NEMO zwt_mix bit for bit",
+            "complete_K": "replace only the already-formed temperature "
+                          "coefficient with NEMO zwt_mix",
             "viscosity": "model value in every arm",
             "all_other_inputs": "free-running arm state and forcing",
         },
         "day240_rows": final_rows,
         "registered_row_count": sum(
             len(rows) for rows in final_rows.values()),
-        "all_moved_rows_registered": set(final_rows)
-            == ({"free", "identity", "heat_K"}
-                if effective_failure is not None else
-                {"free", "identity", "heat_K", "effective_K"}),
+        "all_moved_rows_registered": set(final_rows) == {
+            "free", "identity_postadd", "heat_K", "complete_K"},
         "free_day240_T3D_rms_K": free_rms,
         "ranking": ranking,
         "winner": ranking[0],
