@@ -7356,11 +7356,14 @@ def developed_tke_statement_walk(
 
     def capture_mixing(*args, **kwargs):
         momentum, dissipation = real_mixing(*args, **kwargs)
+        energy = args[0]
 
-        def sink(left, right):
-            mixing_calls.append((np.asarray(left), np.asarray(right)))
+        def sink(source, left, right):
+            mixing_calls.append((np.asarray(source), np.asarray(left),
+                                 np.asarray(right)))
 
-        jax.debug.callback(sink, momentum, dissipation, ordered=True)
+        jax.debug.callback(
+            sink, energy, momentum, dissipation, ordered=True)
         return momentum, dissipation
 
     hooks = _NEMOWSRK3TestHooks(expose_live_stage_operands=True)
@@ -7377,8 +7380,8 @@ def developed_tke_statement_walk(
         jax.effects_barrier()
     finally:
         tke_module.compute_mixing_lengths = real_mixing
-    require(len(mixing_calls) == 1,
-            f"production step observed {len(mixing_calls)} mixing-length calls")
+    require(mixing_calls,
+            "production step observed no mixing-length calls")
     ordinary = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord,
         card.recipe.model_config).step(
@@ -7426,6 +7429,39 @@ def developed_tke_statement_walk(
     oracle = records["operands"]["arrays"]
     statement_oracle = records["statements"]["arrays"]
     production = trace.tke_statement_trace
+
+    # The full RK3 production step legitimately enters the TKE closure more
+    # than once.  Select the final closure belonging to the statement trace
+    # by its consumed post-sweep energy, never by callback order.  Duplicate
+    # matches are permitted only when their returned lengths are bitwise the
+    # same (for example, a repeated compiled invocation).
+    post_sweep_energy = np.asarray(production.en_post_sweep)[..., 1:]
+    entry_energy = np.asarray(production.en_entry)
+
+    def same_bits(left, right):
+        return (left.shape == right.shape
+                and np.array_equal(left.view(np.uint64),
+                                   right.view(np.uint64)))
+
+    final_calls = [call for call in mixing_calls
+                   if same_bits(call[0], post_sweep_energy)]
+    entry_calls = [call for call in mixing_calls
+                   if same_bits(call[0], entry_energy)]
+    require(final_calls,
+            "no production mixing-length call consumed the traced "
+            "post-sweep TKE")
+    require(all(same_bits(call[1], final_calls[0][1])
+                and same_bits(call[2], final_calls[0][2])
+                for call in final_calls[1:]),
+            "duplicate post-sweep mixing-length calls disagree")
+    mixing_momentum, mixing_dissipation = final_calls[0][1:]
+    mixing_call_classification = {
+        "observed": len(mixing_calls),
+        "entry_energy": len(entry_calls),
+        "post_sweep_energy": len(final_calls),
+        "other_energy": len(mixing_calls) - len(entry_calls) - len(final_calls),
+        "selection": "bitwise input match to traced en_post_sweep[...,1:]",
+    }
 
     def yx(name, *, statement=False):
         source = statement_oracle if statement else oracle
@@ -7491,7 +7527,6 @@ def developed_tke_statement_walk(
             production.bn2_output, yx("rn2")[..., 1:30], wet29,
             "zdftke.f90:439"),
     }
-    mixing_momentum, mixing_dissipation = mixing_calls[0]
     closure_rows = {
         "mxl_momentum": scored(
             mixing_momentum, yx("mxl_momentum")[..., 1:30], wet29,
@@ -7539,6 +7574,7 @@ def developed_tke_statement_walk(
             key: value for key, value in records.items()
             if key not in ("operands", "statements")},
         "observer_state_unequal_bytes": observer_bytes,
+        "mixing_call_classification": mixing_call_classification,
         "statement_order": list(ordered),
         "statement_rows": statement_rows,
         "operand_order": list(operand_order),
