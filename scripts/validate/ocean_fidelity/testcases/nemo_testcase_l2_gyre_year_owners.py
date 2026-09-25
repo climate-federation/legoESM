@@ -12339,8 +12339,8 @@ def developed_vertical_day240_sensitivity(
                     }
             if step == PROCESS_START_STEP and name == "free":
                 first_step[name] = {
-                    "vertical": _vertical_trace_frame(probe),
-                    "process": _trace_frame(probe),
+                    "vertical": _vertical_trace_frame(selected),
+                    "process": _trace_frame(selected),
                 }
             state = (selected.state_after
                      if step == PROCESS_START_STEP else selected)
