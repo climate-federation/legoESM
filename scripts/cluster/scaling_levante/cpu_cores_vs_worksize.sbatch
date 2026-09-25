@@ -119,7 +119,9 @@ med = inside[len(inside) // 2]
 if not 0.0 < med <= 256.0:
     raise SystemExit(f"R={R}: occupancy {med} is outside any physical range — "
                      "the instrument is wrong, not the model")
-step = re.search(r"time_per_step_ms[\"']?\s*[:=]\s*([\d.]+)", text)
+# The driver prints "Timing: 868.14 ms/step", not a json key; the earlier
+# pattern matched nothing and printed NOT FOUND beside a real occupancy.
+step = re.search(r"Timing:\s*([\d.]+)\s*ms/step", text)
 print(f"RESULT R={R} cores_busy_median={med:.2f} n={len(inside)} "
       f"window={t1 - t0:.1f}s threads={rows[-1]['threads']} "
       f"step_ms={step.group(1) if step else 'NOT FOUND'}")

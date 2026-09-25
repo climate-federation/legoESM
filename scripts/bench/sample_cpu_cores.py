@@ -78,9 +78,12 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--interval", type=float, default=5.0)
     ap.add_argument("--duration", type=float, default=3600.0)
+    ap.add_argument("--per-thread", action="store_true",
+                    help="also record per-thread busy fractions (cap vs partition)")
     args = ap.parse_args()
 
     prev: dict[int, tuple[float, int]] = {}
+    prev_tids: dict[int, dict[str, int]] = {}
     end = time.time() + args.duration
     n = 0
     with open(args.out, "w") as fh:
@@ -93,13 +96,33 @@ def main() -> int:
                     continue
                 ut, st = parse_cpu_ticks(line)
                 now, ticks = time.time(), ut + st
+                # Per-thread busy counts separate a fixed worker-pool cap from a
+                # decomposition limit: exactly K recurring busy threads means a cap,
+                # a broad tile-shaped set means the work is being split that way.
+                tid_busy = None
+                if args.per_thread:
+                    tid_busy = {}
+                    for tid in os.listdir(f"/proc/{pid}/task"):
+                        try:
+                            tl = Path(f"/proc/{pid}/task/{tid}/stat").read_text()
+                        except OSError:
+                            continue
+                        a, b = parse_cpu_ticks(tl)
+                        tid_busy[tid] = a + b
                 if pid in prev:
                     t0, c0 = prev[pid]
                     if now - t0 > 0:
-                        fh.write(json.dumps({
-                            "epoch": now, "pid": pid, "threads": nthreads,
-                            "cores_busy": round(cores_busy(c0, ticks, now - t0), 3),
-                        }) + "\n")
+                        rec = {"epoch": now, "pid": pid, "threads": nthreads,
+                               "cores_busy": round(cores_busy(c0, ticks, now - t0), 3)}
+                        if tid_busy is not None:
+                            prior = prev_tids.get(pid, {})
+                            deltas = sorted(
+                                (v - prior.get(k, v)) / CLK_TCK / (now - t0)
+                                for k, v in tid_busy.items())
+                            rec["tid_busy_top20"] = [round(x, 3) for x in deltas[-20:]]
+                            rec["tid_busy_over_10pct"] = sum(1 for x in deltas if x > 0.1)
+                            prev_tids[pid] = tid_busy
+                        fh.write(json.dumps(rec) + "\n")
                         fh.flush()
                         n += 1
                 prev[pid] = (now, ticks)
