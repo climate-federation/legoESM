@@ -180,6 +180,16 @@ def test_real_cards_resolve_the_source_condition():
     assert cards["DINO:nemo_dino_kamm_mlf"]["executes_route"] is False
 
 
+def test_stage_momentum_census_builds_real_orca2_card():
+    module = _module()
+    cards = module._card_execution("stage_momentum_wzv")
+    orca2 = cards["ORCA2-zps"]
+    assert orca2["recipe_source"] == "build_orca2_zps_card"
+    assert orca2["executes_route"] is True
+    assert orca2["executes_at_this_tip"] is False
+    assert orca2["unmeasured_features"]
+
+
 def test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured():
     module = _module()
     cards = module._card_execution("fct_metric_upstream")

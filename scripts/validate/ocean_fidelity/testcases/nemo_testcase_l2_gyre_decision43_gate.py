@@ -215,6 +215,7 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
         dino_lat_lon_model_config,
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
         build_nemo_testcase_card,
     )
     from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
@@ -289,6 +290,19 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     for case in ("GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps"):
         config = build_nemo_testcase_card(case).recipe.model_config
         rows[case] = row(config, recipe_source="nemo_testcase_card")
+    # The ORCA2 card is source-file driven and therefore cannot be represented
+    # by the three synthetic-card dispatch calls above.  Build the real card
+    # from the campaign's pinned deck so the census covers the shared RK3/QCO
+    # stage program instead of inferring ORCA2 from a nominal config.
+    orca2_deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    orca2 = build_orca2_zps_card(orca2_deck)
+    rows[orca2.case] = row(
+        orca2.recipe.model_config,
+        recipe_source="build_orca2_zps_card",
+        deck_root=str(orca2_deck),
+        unmeasured_features=list(orca2.unmeasured_features),
+    )
     rows["NEMO-GYRE-recipe"] = row(
         build_nemo_gyre_recipe().model_config,
         recipe_source="build_nemo_gyre_recipe")

@@ -4137,6 +4137,12 @@ def main(argv=None) -> int:
                              "across the admitted Round-156 record")
     parser.add_argument("--developed-stage2-record-root", type=Path,
                         default=None)
+    parser.add_argument("--developed-stage1-output-walk", action="store_true",
+                        help="walk the developed stage-1 momentum output "
+                             "through the admitted RHS and stage records")
+    parser.add_argument("--developed-rhs-root", type=Path, default=None)
+    parser.add_argument("--developed-rhs-family-root", type=Path,
+                        default=None)
     parser.add_argument("--developed-stage2-adv-split", action="store_true",
                         help="split NEMO's vector-invariant dyn_adv into its "
                              "kinetic-energy gradient and vertical advection "
@@ -4278,6 +4284,36 @@ def main(argv=None) -> int:
         print(json.dumps(report["vertical_velocity_scored_against_nemo"],
                          indent=2))
         print(json.dumps(report["stage_sea_surface_height"], indent=2))
+        print("STATUS PASS")
+        return 0
+    if args.developed_stage1_output_walk:
+        require(args.expect_commit is not None,
+                "--developed-stage1-output-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-stage1-output-walk needs --daily-record-audit")
+        require(args.developed_stage2_record_root is not None,
+                "--developed-stage1-output-walk needs "
+                "--developed-stage2-record-root")
+        require(args.developed_rhs_root is not None,
+                "--developed-stage1-output-walk needs --developed-rhs-root")
+        require(args.developed_rhs_family_root is not None,
+                "--developed-stage1-output-walk needs "
+                "--developed-rhs-family-root")
+        report = developed_stage1_output_walk(
+            args.daily_record_root, args.daily_record_audit,
+            args.expect_commit, args.developed_stage2_record_root,
+            args.developed_rhs_root, args.developed_rhs_family_root,
+            args.root, plant=args.plant)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: {report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print("DEVELOPED STAGE-1 OUTPUT FIRST NON-BIT: "
+              f"{report['first_non_bit']}")
         print("STATUS PASS")
         return 0
     if args.developed_process_rank_split:
@@ -7197,6 +7233,232 @@ def _score_stage2_face(actual, expected, mask) -> dict:
     }
 
 
+def developed_stage1_output_walk(
+        daily_root: Path, daily_audit: Path, expected_commit: str,
+        stage2_record_root: Path, rhs_root: Path, family_root: Path,
+        evidence_root: Path, *, plant: str | None = None) -> dict:
+    """Walk the developed stage-1 momentum output in compiled order.
+
+    This extends the shared developed-state bridge and live-operand trace.
+    NEMO's completed stage-1 RHS comes from the admitted round-140 record,
+    its five cumulative operator boundaries from round 146, and its corrected
+    stage output from round 156.  No new index convention or step driver is
+    introduced here.
+    """
+    require(plant in (None, "none", "stage1-entry-u-ulp"),
+            f"unknown developed stage-1 plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+        rk3_stage_velocity_update)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"stage-1 output walk requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "stage-1 output walk commit differs from --expect-commit")
+    oracle_stage = _developed_stage2_record(Path(stage2_record_root))
+    stage_rows = oracle_stage["rows"]
+    bundle = _developed_entry_bundle(daily_root, daily_audit, expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    state = bundle["state"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(bundle["payload"]["ssha"])
+
+    hooks = _NEMOWSRK3TestHooks(expose_live_stage_operands=True)
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks)
+    trace = trace_model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface,
+        _nemo_stage1_zad_eta_after_override=ssha)
+    jax.device_get(trace)
+    ordinary = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config).step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+    passivity = _state_bit_mismatches(trace.state_after, ordinary)
+    require(passivity == 0,
+            f"stage-1 live-operand trace moved {passivity} state bytes")
+
+    if plant == "stage1-entry-u-ulp":
+        planted_u = np.array(state.u.data, copy=True)
+        active = np.asarray(state.u_mask.data) != 0.0
+        candidates = np.argwhere(active & np.isfinite(planted_u)
+                                 & (planted_u != 0.0))
+        require(candidates.size > 0, "stage-1 entry plant found no live U")
+        index = tuple(int(value) for value in candidates[
+            int(np.argmax(np.abs(planted_u[active])))])
+        planted_u[index] = np.nextafter(planted_u[index], np.inf)
+        planted_state = state._replace(
+            u=state.u.replace(data=jnp.asarray(planted_u)))
+        planted = trace_model.step(
+            planted_state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        moved = _score_stage2_face(
+            np.asarray(planted.stage_outputs[0][0]),
+            np.asarray(trace.stage_outputs[0][0]),
+            np.asarray(state.u_mask.data))
+        require(moved["active_cells_unequal"] > 0,
+                f"stage-1 entry ULP moved no stage output: {moved}")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": {"index": list(index), "stage1_output_u": moved}}
+
+    round83 = _load(
+        "nemo_testcase_l2_gyre_round83_slow_forcing_walk",
+        "nemo_testcase_l2_gyre_round83_slow_forcing_walk.py")
+    rhs_path = Path(rhs_root) / round83.ROUND140_RHS_RECORD
+    rhs_record = round83.read_round140_rhs(rhs_path)
+    rhs_fields = rhs_record["fields"]
+    round146 = _load(
+        "nemo_testcase_l2_gyre_round146_rhs_family_gate",
+        "nemo_testcase_l2_gyre_round146_rhs_family_gate.py")
+    family_validation_path = (
+        Path(family_root) / "round146_rhs_family_validation.json")
+    family_validation = json.loads(
+        family_validation_path.read_text(encoding="utf-8"))
+    require(family_validation["status"] == "PASS",
+            "round-146 family record is not admitted")
+    family_path = Path(family_root) / round146.RECORD
+    require(family_validation["record_sha256"] == _sha256(family_path),
+            "round-146 family record differs from its admission")
+    family_record = round146.read_record_bytes(family_path.read_bytes())
+
+    def native(value, face):
+        data = np.asarray(value.data if hasattr(value, "dims") else value,
+                          dtype=np.float64)
+        return np.ascontiguousarray(
+            data[:, 1:, :] if face == "u" else data[1:, :, :])
+
+    def owned(value):
+        data = np.asarray(value, dtype=np.float64)
+        require(data.shape == (round146.NY, round146.NX, round146.NZ),
+                f"round-146 family extent changed: {data.shape}")
+        return np.ascontiguousarray(data[2:-2, 2:-2, :round146.NZ - 1])
+
+    previous = {
+        face: np.zeros_like(owned(
+            family_record["fields"][f"after_hpg_{face}"]))
+        for face in ("u", "v")
+    }
+    oracle_addends = {}
+    for family in round146.FAMILIES:
+        current = {
+            face: owned(family_record["fields"][f"after_{family}_{face}"])
+            for face in ("u", "v")
+        }
+        oracle_addends[family] = tuple(
+            current[face] - previous[face] for face in ("u", "v"))
+        previous = current
+
+    live_names = {"hpg": "hpg", "ldf": "ldf", "vor": "vorticity",
+                  "keg": "keg", "zad": "zad"}
+    operands = trace.operator_operands[0]
+    masks = {"u": rhs_fields["umask"], "v": rhs_fields["vmask"]}
+    family_rows = {}
+    for family in round146.FAMILIES:
+        family_rows[family] = {}
+        name = live_names[family]
+        for index, face in enumerate(("u", "v")):
+            family_rows[family][face] = _score_stage2_face(
+                native(operands[f"{name}_{face}"], face),
+                oracle_addends[family][index], masks[face])
+
+    full_rhs = {
+        "u": native(trace.stage1_full_rhs[0], "u"),
+        "v": native(trace.stage1_full_rhs[1], "v"),
+    }
+    rhs_rows = {
+        face: _score_stage2_face(
+            full_rhs[face], rhs_fields[f"rhs_{face}"], masks[face])
+        for face in ("u", "v")
+    }
+
+    @jax.jit
+    def raw_update(before, rhs, mask, coefficient):
+        return rk3_stage_velocity_update(
+            before, rhs, coefficient, mask, vector_form=True)
+
+    raw_rows = {}
+    correction_rows = {}
+    output_rows = {}
+    for index, face in enumerate(("u", "v")):
+        before = np.asarray(getattr(state, face).data)
+        mask = np.asarray(getattr(state, f"{face}_mask").data)
+        rhs_full = np.array(trace.stage1_full_rhs[index], copy=True)
+        if face == "u":
+            rhs_full[:, 1:, :] = rhs_fields["rhs_u"]
+        else:
+            rhs_full[1:, :, :] = rhs_fields["rhs_v"]
+        oracle_raw = np.asarray(jax.device_get(raw_update(
+            jnp.asarray(before), jnp.asarray(rhs_full), jnp.asarray(mask),
+            jnp.asarray(trace.stage_coefficients[0][0]))))
+        model_raw = np.asarray(trace.stage_raw_velocities[0][index])
+        oracle_final = np.asarray(stage_rows[f"uu_vv_Kmm_{face}"])
+        model_final = np.asarray(trace.stage_outputs[0][index])
+        raw_rows[face] = _score_stage2_face(
+            model_raw, oracle_raw, mask)
+        correction_rows[face] = _score_stage2_face(
+            native(model_final - model_raw, face),
+            oracle_final - native(oracle_raw, face), masks[face])
+        output_rows[face] = _score_stage2_face(
+            native(model_final, face), oracle_final, masks[face])
+
+    ordered = [
+        *(f"{family}_{face}" for family in round146.FAMILIES
+          for face in ("u", "v")),
+        "completed_rhs_u", "completed_rhs_v", "raw_update_u", "raw_update_v",
+        "barotropic_correction_u", "barotropic_correction_v",
+        "stage1_output_u", "stage1_output_v",
+    ]
+    flat = {
+        **{f"{family}_{face}": family_rows[family][face]
+           for family in round146.FAMILIES for face in ("u", "v")},
+        **{f"completed_rhs_{face}": rhs_rows[face]
+           for face in ("u", "v")},
+        **{f"raw_update_{face}": raw_rows[face] for face in ("u", "v")},
+        **{f"barotropic_correction_{face}": correction_rows[face]
+           for face in ("u", "v")},
+        **{f"stage1_output_{face}": output_rows[face]
+           for face in ("u", "v")},
+    }
+    first_non_bit = next(
+        (name for name in ordered
+         if flat[name]["active_cells_unequal"] > 0), "NONE")
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    return {
+        "format": "gyre-round164-developed-stage1-output-walk-v1",
+        "status": "PASS", "worktree": stamp,
+        "entry": {"step": DEVELOPED_ENTRY_STEP,
+                  "process_step": DEVELOPED_PROCESS_STEP},
+        "records": {
+            "rhs_sha256": _sha256(rhs_path),
+            "family_sha256": _sha256(family_path),
+            "stage_sha256": oracle_stage["sha256"],
+        },
+        "observer_state_unequal_bytes": passivity,
+        "compiled_order": ordered, "rows": flat,
+        "family_rows": family_rows, "completed_rhs": rhs_rows,
+        "raw_update": raw_rows, "barotropic_correction": correction_rows,
+        "stage1_output": output_rows, "first_non_bit": first_non_bit,
+        "compiled_citations": {
+            "family_order": "stp2d.f90:141-176",
+            "stage_call": "stprk3.f90:188-194",
+            "raw_update": "stprk3_stg.f90:668-674",
+            "barotropic_correction": "stprk3_stg.f90:734-759",
+        },
+    }
+
+
 def developed_stage2_rhs_walk(
         daily_root: Path, daily_audit: Path, expected_commit: str,
         stage2_record_root: Path, evidence_root: Path, *,
@@ -8283,16 +8545,20 @@ def developed_stage2_wzv_walk(
         "nemo_ww_ceiling": {"u": 1.121563e-14, "v": 1.308047e-14},
     }
     for tag in ("u", "v"):
-        # AUTHORITY: this walk's production row must reproduce the row round
-        # 158 split, or it is splitting a different number.
-        require(abs(rhs["production"][tag]["active_rms"]
-                    - ROUND158["production"][tag]) <= 5.0e-18,
-                f"the production after-advection row moved from round 158 on "
-                f"{tag}: {rhs['production'][tag]['active_rms']}")
+        # AUTHORITY after round 163: production now selects NEMO's second
+        # continuity solve.  It must sit on the independently measured
+        # round-158 oracle-ww ceiling, rather than reproduce round 158's old
+        # single-solve production row.  The historical value stays in the
+        # report as the before arm.
+        require(rhs["production"][tag]["active_rms"]
+                <= 1.01 * ROUND158["nemo_ww_ceiling"][tag],
+                "the landed production after-advection row exceeds the "
+                f"round-158 oracle-ww ceiling on {tag}: "
+                f"{rhs['production'][tag]['active_rms']}")
         rhs["velocity_form"][tag]["rms_removed_fraction"] = float(
-            (ROUND158["production"][tag]
+            (rhs["production"][tag]["active_rms"]
              - rhs["velocity_form"][tag]["active_rms"])
-            / ROUND158["production"][tag])
+            / rhs["production"][tag]["active_rms"])
         rhs["velocity_form"][tag]["times_the_nemo_ww_ceiling"] = float(
             rhs["velocity_form"][tag]["active_rms"]
             / ROUND158["nemo_ww_ceiling"][tag])
@@ -9763,9 +10029,15 @@ def developed_process_rank_split(
         }
         return increments, _rank_developed_process_rows(increments), lego
 
-    production_rows, production_rank, production_lego = ranked()
+    # Preserve round 152's historical one-solve authority explicitly now that
+    # round 163 made the two-solve arm the GYRE production default.  The
+    # no-hook call below is the current production row and must reproduce the
+    # explicit corrected arm bit for bit.
+    production_rows, production_rank, production_lego = ranked(
+        nemo_stage_momentum_wzv_split=False)
     corrected_rows, corrected_rank, corrected_lego = ranked(
         nemo_stage_momentum_wzv_split=True)
+    landed_rows, landed_rank, landed_lego = ranked()
 
     # AUTHORITY: the production arm must reproduce round 152's own table, or
     # this is ranking a different step.
@@ -9782,6 +10054,16 @@ def developed_process_rank_split(
                 <= 1.0e-6 * abs(value),
                 f"the production arm does not reproduce round 152's {name} "
                 f"row: {production_rows[name]['rms']} against {value}")
+
+    landed_identity = {
+        name: _score_developed_row(
+            landed_lego[name], corrected_lego[name], wet)
+        for name in PROCESS_ROWS
+    }
+    require(all(row["cells_unequal"] == 0
+                for row in landed_identity.values()),
+            "the landed no-hook production arm differs from the explicit "
+            f"two-solve arm: {landed_identity}")
 
     comparison = []
     for name in PROCESS_ROWS:
@@ -9918,6 +10200,9 @@ def developed_process_rank_split(
         "round152_reference": ROUND152,
         "production_ranking": production_rank,
         "corrected_ranking": corrected_rank,
+        "landed_production_ranking": landed_rank,
+        "landed_production_rows": landed_rows,
+        "landed_equals_explicit_corrected": landed_identity,
         "comparison": comparison,
         "rows_that_grew": grew,
         "largest_growth": grew[0] if grew else None,
@@ -10031,7 +10316,7 @@ def developed_state_process_walk(
         return _developed_registry_plant(plant)
     require(plant in (None, "none", "entry-temperature-ulp",
                       "fct-transport-ulp", "transport-un-adv-ulp",
-                      "stage2-uu-b-ulp"),
+                      "stage2-uu-b-ulp", "vertical-heat-ulp"),
             f"unknown developed-state plant {plant!r}")
     _policy()
     import jax
@@ -10764,6 +11049,38 @@ def developed_state_process_walk(
         vertical_root
         / f"oracle_trazdf_matrix_kt{DEVELOPED_PROCESS_STEP:08d}.bin",
         DEVELOPED_PROCESS_STEP)
+    nlev = wet.shape[-1]
+    vertical_expected = {
+        "heat_K": _vertical_field(vertical_record, "avt")[:, :, 1:nlev],
+        "isoneutral_K": _vertical_field(
+            vertical_record, "ah_wslp2")[:, :, 1:nlev],
+        "effective_K": (
+            _vertical_field(vertical_record, "avt")[:, :, 1:nlev]
+            + _vertical_field(vertical_record, "ah_wslp2")[:, :, 1:nlev]),
+        "e3t_after": _vertical_field(vertical_record, "e3t_Kaa", nlev),
+        "e3w_now": _vertical_field(vertical_record, "e3w_Kmm")[:, :, 1:nlev],
+        "content_T": _vertical_field(vertical_record, "rhs_T", nlev),
+        "lower": _vertical_field(vertical_record, "zwi"),
+        "diagonal": _vertical_field(vertical_record, "zwd"),
+        "upper": _vertical_field(vertical_record, "zws"),
+        "solved_T": _vertical_field(
+            vertical_record, "sol_T_pre_clamp", nlev),
+    }
+    vertical_rows = {}
+    for name in LEGO_VERTICAL_FIELDS:
+        selected = interface_wet if name in (
+            "heat_K", "isoneutral_K", "effective_K", "e3w_now") else wet
+        vertical_rows[name] = _score_developed_row(
+            lego_vertical_frame[name], vertical_expected[name], selected)
+    vertical_order = list(LEGO_VERTICAL_FIELDS)
+    first_vertical_non_bit = next(
+        (name for name in vertical_order
+         if not vertical_rows[name]["bit_exact"]), "NONE")
+    if plant == "vertical-heat-ulp":
+        control = _vertical_effect_control(
+            trace_model, state, freshwater, surface, trace, wet)
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": control}
     nemo_heat = _vertical_field(vertical_record, "avt")[
         :, :, 1:wet.shape[-1]]
     lego_heat = np.asarray(trace.vertical_solve.heat_K, dtype=np.float64)
@@ -11010,6 +11327,19 @@ def developed_state_process_walk(
         "geometry_operands": geometry_operands,
         "increment_rows": increment_rows,
         "process_ranking": process_ranking,
+        "vertical_chain": {
+            "compiled_order": vertical_order,
+            "rows": vertical_rows,
+            "first_non_bit": first_vertical_non_bit,
+            "first_observed_statement": (
+                "zdfphy.f90:352-354 avt=avt_k"
+                if first_vertical_non_bit == "heat_K" else
+                first_vertical_non_bit),
+            "upstream_TKE_operands_recorded": False,
+            "unrecorded_upstream_operands": [
+                "en", "sh2", "rn2", "rn2b", "avm_k", "avt_k",
+                "zdf_tke sweep intermediates"],
+        },
         "branches": branches,
         "branch_maps": {"path": str(maps_path),
                         "sha256": _sha256(maps_path)},
@@ -11108,6 +11438,14 @@ def developed_state_process_walk(
         print(f"  {row['rank']:2d} {row['name']:>20s} "
               f"{row['rms_temperature_contribution_K']:16.8e} K  "
               f"{row['rms_effective_tendency_K_s']:16.8e} K/s")
+    print("\nDEVELOPED TRACER ZDF -- compiled dataflow walk")
+    print(f"  {'row':>20s} {'unequal':>10s} {'max abs':>16s} {'bit':>6s}")
+    for name in vertical_order:
+        row = vertical_rows[name]
+        print(f"  {name:>20s} {row['cells_unequal']:10d} "
+              f"{row['max_abs']:16.8e} "
+              f"{'BIT' if row['bit_exact'] else 'DEBT':>6s}")
+    print(f"  FIRST NON-BIT VERTICAL ROW: {first_vertical_non_bit}")
     if fct_walk is not None:
         print("\nDEVELOPED FCT -- 61-field compiled-order walk")
         print(f"  {'mode':>24s} {'exact rows':>12s} "
