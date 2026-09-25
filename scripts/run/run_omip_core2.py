@@ -6014,7 +6014,7 @@ class _SurfaceFluxAccumulator:
 
     _STATE_FIELDS = ("T", "S")
 
-    def add(self, sf, mld=None, state=None):
+    def add(self, sf, mld=None, state=None, dz=None):
         """Accumulate one step. ``mld`` and ``state`` are optional and share
         the window; ``state`` contributes the 3-D T and S (the window mean the
         oracle's 5-day output IS -- an instantaneous snapshot against it
@@ -6042,10 +6042,18 @@ class _SurfaceFluxAccumulator:
             # Sum in the widest available dtype: a float32 running sum of
             # ~30 C over 2880 steps carries up to ~1e-3 C in the mean.
             _acc_dtype = jax.dtypes.canonicalize_dtype(jnp.float64)
+            h = None if dz is None else jnp.asarray(dz, dtype=_acc_dtype)
             for name in self._STATE_FIELDS:
                 v = jnp.asarray(getattr(state, name).data, dtype=_acc_dtype)
                 prev = self._sums.get(name)
                 self._sums[name] = v if prev is None else prev + v
+                if h is not None:
+                    # Sum(T h) / Sum(h) at drain = NEMO's @toce_e3t/@e3t.
+                    prev = self._sums.get(name + "_h")
+                    self._sums[name + "_h"] = v * h if prev is None else prev + v * h
+            if h is not None:
+                prev = self._sums.get("h")
+                self._sums["h"] = h if prev is None else prev + h
         if sf is None and mld is None and state is None:
             return
         self._n += 1
@@ -6064,7 +6072,13 @@ class _SurfaceFluxAccumulator:
         """
         if self._n == 0:
             return {}
-        out = {f"{k}_mean": np.asarray(v / self._n) for k, v in self._sums.items()}
+        out = {f"{k}_mean": np.asarray(v / self._n)
+               for k, v in self._sums.items() if not k.endswith("_h")}
+        if "h" in self._sums:
+            # Thickness-weighted window means (NaN where the column is dry).
+            for name in self._STATE_FIELDS:
+                out[f"{name}_mean_hw"] = np.asarray(
+                    self._sums[name + "_h"] / self._sums["h"])
         out["flux_mean_n_steps"] = np.asarray(self._n)
         if dt is not None:
             out["flux_mean_window_s"] = np.asarray(float(dt) * self._n)
@@ -10662,15 +10676,6 @@ def main() -> int:
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
-            if _flux_acc is not None:
-                # After the step: XIOS averages the COMPLETED state of every
-                # step (stprk3.F90:207-238), so the window is T_1..T_n and the
-                # snapshot's T_n is its last member; fluxes are those applied
-                # over the same n steps.
-                _flux_acc.add(sf if args.flux_accumulate else None,
-                              mld=(_mld_now(state, z_coord)
-                                   if args.mld_accumulate else None),
-                              state=(state if args.state_accumulate else None))
         else:
             fw = None
             # Build the freshwater struct if EITHER the atmospheric P-E/runoff is
@@ -10955,15 +10960,6 @@ def main() -> int:
             # lane this is the post-blend, ice-partitioned flux. MLD rides
             # the same window and the same single count.
             state = _ocean_step(state, sf, fw, _t_sec)
-            if _flux_acc is not None:
-                # After the step: XIOS averages the COMPLETED state of every
-                # step (stprk3.F90:207-238), so the window is T_1..T_n and the
-                # snapshot's T_n is its last member; fluxes are those applied
-                # over the same n steps.
-                _flux_acc.add(sf if args.flux_accumulate else None,
-                              mld=(_mld_now(state, z_coord)
-                                   if args.mld_accumulate else None),
-                              state=(state if args.state_accumulate else None))
         if _gw_acc is not None:
             # READ-ONLY: `state` is never reassigned here, so the trajectory
             # is bit-identical to a run without the flag.
@@ -11188,6 +11184,27 @@ def main() -> int:
             # honest accounting; device-side drag is scaling-M2 increment 2).
             _pers_res.count_leaf_full(gathers=len(_upd), uploads=len(_upd))
             state = state._replace(**_upd)
+        if _flux_acc is not None:
+            # After EVERY update of this step (step, SSS restoring, freezing
+            # relaxation, geothermal, ISF, BBL, nudging, drag): XIOS averages
+            # the COMPLETED state of each step (stprk3.F90:207-238), so the
+            # window is T_1..T_n and the snapshot's T_n is its last member.
+            # `sf` is the forcing applied over this same step.  The live
+            # thickness gives the thickness-weighted mean NEMO's 3-D to/so
+            # are (@toce_e3t/@e3t); tos/sos are plain means.
+            _dz_acc = None
+            if args.state_accumulate:
+                from legoesm.ocean.vertical import compute_layer_thickness
+                _eta_acc = getattr(state, "eta", None)
+                _dz_acc = compute_layer_thickness(
+                    (_eta_acc.data if _eta_acc is not None
+                     else jnp.zeros_like(jnp.asarray(H_bathy))),
+                    jnp.asarray(H_bathy), z_coord)
+            _flux_acc.add(sf if args.flux_accumulate else None,
+                          mld=(_mld_now(state, z_coord)
+                               if args.mld_accumulate else None),
+                          state=(state if args.state_accumulate else None),
+                          dz=_dz_acc)
         if _evd_occ_every is not None and step % _evd_occ_every == 0:
             # The TRIGGER, from a slice of the top levels: NEMO's bn2 there is
             # exactly what zdf_evd tests, so under the hard trigger this IS

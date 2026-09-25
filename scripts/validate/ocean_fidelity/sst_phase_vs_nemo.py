@@ -78,7 +78,7 @@ def main():
     kN = int(np.argmin(np.abs(dsN["deptht"].values - a.sub_depth_m)))
     toN = np.asarray(dsN["to"].isel(time_counter=a.rec, deptht=kN).values, dtype=float)
     toN = np.where(np.isfinite(toN) & (np.abs(toN) < 1e3), toN, np.nan)
-    subN, _ = regrid_curv_to_latlon(np.nan_to_num(toN), N["lat"], N["lon"], N["mask"] * np.isfinite(toN), tgt_lat, tgt_lon)
+    subN, ocN_sub = regrid_curv_to_latlon(np.nan_to_num(toN), N["lat"], N["lon"], N["mask"] * np.isfinite(toN), tgt_lat, tgt_lon)
     print(f"NEMO sub-surface level {dsN['deptht'].values[kN]:.2f} m; NEMO tos - T_sub CONTRAST (background stratification included) box means: "
           + "  ".join(f"{b[0]} {float(np.sum((np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :])[m := ((ocN > 0.5) & np.isfinite(sstN) & np.isfinite(subN) & _box(tgt_lat, tgt_lon, *b[1:]))] * (sstN[m] - subN[m])) / np.sum((np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :])[m])):+.3f}" for b in BOXES))
     area = np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :]
@@ -105,19 +105,22 @@ def main():
             raise SystemExit(f"{p}: no finite time_days; cannot place it in a window")
         day = float(s["time_days"])
         wsec = float(s["flux_mean_window_s"]) if a.use_mean_fields else None
-        if a.use_mean_fields and not (wsec > 0):
+        if a.use_mean_fields and not (np.isfinite(wsec) and wsec > 0):
             raise SystemExit(f"{p}: T_mean without a positive flux_mean_window_s")
         sstL, ocL = regrid_curv_to_latlon(_T[..., 0], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
-        subL, _ = regrid_curv_to_latlon(_T[..., k], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
+        subL, ocL_sub = regrid_curv_to_latlon(_T[..., k], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
         if support is None:
-            support = (ocL > 0.5) & (ocN > 0.5) & np.isfinite(sstN) & np.isfinite(subN)
+            # Coverage masks of BOTH regrids on BOTH sides (the regridder
+            # extrapolates finite values outside its radius, codex).
+            support = ((ocL > 0.5) & (ocN > 0.5) & (ocN_sub > 0.5) & (ocL_sub > 0.5)
+                       & np.isfinite(sstN) & np.isfinite(subN))
             for name, la0, la1, lo0, lo1 in BOXES:
                 bm = _box(tgt_lat, tgt_lon, la0, la1, lo0, lo1)
                 if not (support & bm).any():
                     raise SystemExit(f"empty box {name}")
                 print(f"support {name}: {100 * area[support & bm].sum() / area[bm & (ocN > 0.5)].sum():.1f}% "
                       f"of NEMO-ocean box area retained")
-        bad = support & ~(np.isfinite(sstL) & np.isfinite(subL) & (ocL > 0.5))
+        bad = support & ~(np.isfinite(sstL) & np.isfinite(subL) & (ocL > 0.5) & (ocL_sub > 0.5))
         if bad.any():
             raise SystemExit(f"{p}: {int(bad.sum())} support cells non-finite/land in this row")
         members.append((day, wsec, sstL, subL,
@@ -138,6 +141,12 @@ def main():
             gaps = starts[1:] - ends[:-1]
             if np.any(np.abs(gaps) > 1e-6):
                 raise SystemExit(f"T_mean windows do not tile the interval: gaps(days)={gaps}")
+            # ...and the tiled interval must BE the oracle record's window
+            # (both endpoints; run day 0 = NEMO record-0 start).
+            rec0, rec1 = 5.0 * a.rec, 5.0 * a.rec + 5.0
+            if abs(starts[0] - rec0) > 1e-6 or abs(ends[-1] - rec1) > 1e-6:
+                raise SystemExit(f"T_mean windows span d{starts[0]:.3f}-{ends[-1]:.3f} but NEMO "
+                                 f"record {a.rec} is d{rec0:.0f}-{rec1:.0f}; not window-matched")
             label = f"WINDOW MEAN d{starts[0]:.2f}-{ends[-1]:.2f} ({len(order)} windows)"
         else:
             wts = np.ones(len(order))

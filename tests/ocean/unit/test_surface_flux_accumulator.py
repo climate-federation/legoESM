@@ -343,14 +343,39 @@ def test_state_flag_round_trips_and_scan_lane_refuses_it():
     assert "--state-accumulate" in guard
 
 
-def test_state_sampled_after_the_step_at_both_host_loop_sites():
-    """XIOS averages the completed state of each step; the add must follow
-    the step call at both host-loop call sites, not precede it."""
+def test_state_sampled_once_after_every_update_of_the_step():
+    """XIOS averages the COMPLETED state of each step. The single add must
+    follow both lane step calls AND every later in-step update (SSS
+    restoring, geothermal, ISF, BBL, nudging, drag), with no state-changing
+    assignment between it and the snapshot (codex round 2)."""
+    import re
     from pathlib import Path
     import scripts.run.run_omip_core2 as mod
     src = Path(mod.__file__).read_text()
-    sites = src.split("state=(state if args.state_accumulate else None))")[:-1]
-    assert len(sites) == 2, len(sites)
-    for site in sites:
-        tail = site[-900:]
-        assert ("state = model.step(" in tail) or ("state = _ocean_step(" in tail), tail
+    adds = [m.start() for m in re.finditer(r"_flux_acc\.add\(", src)]
+    assert len(adds) == 1, adds
+    add = adds[0]
+    loop = src.index("for step in range(start_step + 1, n_steps + 1):")
+    assert loop < src.index("state = model.step(") < add
+    assert loop < src.index("state = _ocean_step(") < add
+    snap = src.index("_snapshot_extra(args, model, state, sf, dt", add)
+    between = src[add:snap]
+    changing = [ln for ln in between.splitlines()
+                if re.match(r"\s+state = (?!jax\.block_until_ready|_ensure_global_state)", ln)]
+    assert not changing, changing
+
+
+def test_thickness_weighted_mean_matches_nemo_definition():
+    """T_mean_hw = Sum(T h)/Sum(h) over the window (NEMO @toce_e3t/@e3t),
+    which differs from the plain mean when T and h co-vary in time."""
+    acc = _driver()._SurfaceFluxAccumulator()
+    st = lambda t: SimpleNamespace(T=SimpleNamespace(data=np.full((1, 1, 2), t)),
+                                   S=SimpleNamespace(data=np.full((1, 1, 2), 35.0)))
+    acc.add(None, state=st(10.0), dz=np.full((1, 1, 2), 1.0))
+    acc.add(None, state=st(20.0), dz=np.full((1, 1, 2), 3.0))
+    out = acc.drain()
+    np.testing.assert_allclose(out["T_mean"], 15.0, rtol=1e-12)
+    np.testing.assert_allclose(out["T_mean_hw"], (10 * 1 + 20 * 3) / 4.0, rtol=1e-12)
+    np.testing.assert_allclose(out["S_mean_hw"], 35.0, rtol=1e-12)
+    np.testing.assert_allclose(out["h_mean"], 2.0, rtol=1e-12)
+    assert "T_h_mean" not in out
