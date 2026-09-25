@@ -7350,6 +7350,14 @@ def developed_tke_statement_walk(
     freshwater, surface = gate._surface_forcings(
         card, state, DEVELOPED_PROCESS_STEP)
     ssha = jnp.asarray(bundle["payload"]["ssha"])
+    # Drive the TKE program from NEMO's recorded surface-stress modulus.  The
+    # shared forcing builder reconstructs this value from stress components;
+    # that is the chained-model lane, not a given-NEMO-entry statement walk.
+    # Existing stage twins use the same explicit operand substitution.
+    recorded_taum = jnp.asarray(
+        np.asarray(records["operands"]["arrays"]["taum_entry"])
+        .swapaxes(0, 1))
+    surface = surface._replace(taum=recorded_taum)
 
     mixing_calls = []
     real_mixing = tke_module.compute_mixing_lengths
@@ -7570,6 +7578,10 @@ def developed_tke_statement_walk(
         "entry_step": DEVELOPED_ENTRY_STEP,
         "process_step": DEVELOPED_PROCESS_STEP,
         "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
+        "entry_overrides": {
+            "surface_taum": "recorded operand taum_entry",
+            "stage1_zad_eta_after": "recorded restart ssha",
+        },
         "admission": {
             key: value for key, value in records.items()
             if key not in ("operands", "statements")},
