@@ -88,3 +88,40 @@ def test_sst_verdict_capped_by_enso_box():
     # empty/None boxes tolerated
     assert _c.capped_sst_verdict(0.94, {})[0] == "excellent"
     assert _c.capped_sst_verdict(0.94, {"b": None})[0] == "excellent"
+
+
+def _write_snapshot(tmp_path, with_means):
+    T = np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4)
+    kw = dict(T=T, S=T + 30.0, lat_T=np.zeros((2, 3)), lon_T=np.zeros((2, 3)),
+              land_mask=np.ones((2, 3)))
+    if with_means:
+        kw.update(T_mean=T + 1.0, S_mean=T + 31.0, T_mean_hw=T + 2.0,
+                  S_mean_hw=T + 32.0, mld_mean=np.full((2, 3), 17.0))
+    p = tmp_path / "snapshot_day0005.npz"
+    np.savez(p, **kw)
+    return p, T
+
+
+def test_loader_use_mean_reads_the_window_means_not_the_instantaneous_state(tmp_path):
+    """NEMO's 5-day files are window means; the loader must hand the scorers
+    the plain means at the surface, the thickness-weighted means for the
+    columns and the window-mean MLD -- and the instantaneous state otherwise."""
+    p, T = _write_snapshot(tmp_path, with_means=True)
+    L = _c._load_legoesm(p, use_mean=True)
+    np.testing.assert_array_equal(L["sst"], T[..., 0] + 1.0)
+    np.testing.assert_array_equal(L["sss"], T[..., 0] + 31.0)
+    np.testing.assert_array_equal(L["T3d"], T + 2.0)
+    np.testing.assert_array_equal(L["S3d"], T + 32.0)
+    np.testing.assert_array_equal(L["mld_mean"], 17.0)
+    L0 = _c._load_legoesm(p)
+    np.testing.assert_array_equal(L0["sst"], T[..., 0])
+    np.testing.assert_array_equal(L0["T3d"], T)
+    assert L0["mld_mean"] is None
+
+
+def test_loader_use_mean_refuses_a_snapshot_without_means(tmp_path):
+    """No silent fallback to the instantaneous state (the phase confound)."""
+    import pytest
+    p, _ = _write_snapshot(tmp_path, with_means=False)
+    with pytest.raises(SystemExit, match="T_mean"):
+        _c._load_legoesm(p, use_mean=True)

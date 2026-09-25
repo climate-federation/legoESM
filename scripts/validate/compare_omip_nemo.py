@@ -167,7 +167,18 @@ def _box_breakdown(fieldL, fieldN, area, tgt_lat, tgt_lon):
     return out
 
 
-def _load_legoesm(path):
+def _load_legoesm(path, use_mean=False):
+    """Fields of one legoESM snapshot.
+
+    ``use_mean=True`` reads the driver's ``--state-accumulate`` window means
+    instead of the instantaneous state: NEMO's 5-day files are window means
+    for EVERY field (tos/sos plain hourly means; to/so thickness-weighted
+    @toce_e3t/@e3t), and an instantaneous 00 UTC snapshot against them
+    carries the diurnal phase (nino3 SST +0.49 vs +0.12 window-matched,
+    2026-09-25). Surface fields come from the plain means, the 3-D columns
+    from the thickness-weighted ones, and the MLD from ``mld_mean``; a
+    snapshot lacking any of them is refused, never silently downgraded.
+    """
     s = np.load(path)
     # lat_T/lon_T are written by run_omip_core2._save_snapshot ALREADY IN DEGREES
     # (via _grid_lat2d_deg, which applies np.rad2deg at save time). Applying
@@ -175,12 +186,22 @@ def _load_legoesm(path):
     # mapped every cell to nonsense lat-lon, scrambling the SST/SSS pattern
     # (corr ~0.1) and inflating the bias. Use the stored degrees as-is.
     keys = set(getattr(s, "files", []))
+    if use_mean:
+        need = ("T_mean", "S_mean", "T_mean_hw", "S_mean_hw", "mld_mean")
+        missing = [k for k in need if k not in keys]
+        if missing:
+            raise SystemExit(f"{path}: use_mean requested but the snapshot lacks "
+                             f"{missing}; run the driver with --state-accumulate "
+                             "--mld-accumulate (no silent fallback to the instantaneous state)")
+    kT, kS = ("T_mean", "S_mean") if use_mean else ("T", "S")
+    kT3, kS3 = ("T_mean_hw", "S_mean_hw") if use_mean else ("T", "S")
     return {
-        "sst": np.asarray(s["T"])[..., 0], "sss": np.asarray(s["S"])[..., 0],
+        "sst": np.asarray(s[kT])[..., 0], "sss": np.asarray(s[kS])[..., 0],
         # Full T/S columns + geometry for the mixed-layer-depth diagnostic
         # (present only in snapshots written after _save_snapshot grew the MLD
         # geometry; None for older snapshots -> MLD comparison is skipped).
-        "T3d": np.asarray(s["T"]), "S3d": np.asarray(s["S"]),
+        "T3d": np.asarray(s[kT3]), "S3d": np.asarray(s[kS3]),
+        "mld_mean": np.asarray(s["mld_mean"]) if use_mean else None,
         "H_bathy": np.asarray(s["H_bathy"]) if "H_bathy" in keys else None,
         "z_center_ref": np.asarray(s["z_center_ref"]) if "z_center_ref" in keys else None,
         "lat": np.asarray(s["lat_T"]),
@@ -313,6 +334,11 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--legoesm-snapshot", type=Path, required=True)
+    p.add_argument("--use-mean-fields", action="store_true",
+                   help="score the driver's --state-accumulate/--mld-accumulate "
+                        "window means (the statistic NEMO's 5-day files hold) "
+                        "instead of the instantaneous snapshot; refuses "
+                        "snapshots that lack them")
     p.add_argument("--nemo-gridt", type=Path, required=True)
     p.add_argument("--nemo-time-idx", type=int, default=-1,
                    help="NEMO grid_T time record (default last).")
@@ -344,7 +370,7 @@ def main() -> int:
     args = p.parse_args()
     out = args.output_dir; out.mkdir(parents=True, exist_ok=True)
 
-    L = _load_legoesm(args.legoesm_snapshot)
+    L = _load_legoesm(args.legoesm_snapshot, use_mean=args.use_mean_fields)
     N = _load_nemo(args.nemo_gridt, args.nemo_time_idx, month=args.nemo_month)
     print(f"[load] legoESM {L['sst'].shape}, NEMO {N['sst'].shape} "
           f"({N['n_time']} time records)")
@@ -442,9 +468,14 @@ def main() -> int:
         wet = ((z_c[(None,) * Hb.ndim + (slice(None),)] < Hb[..., None])
                & (L["mask"][..., None] > 0.5)).astype(np.float64)
         bottom = Hb
-        mldL = np.asarray(mixed_layer_depth(
-            L["T3d"], L["S3d"], z_c, delta_sigma=0.01,
-            wet_mask=wet, bottom_depth=bottom))
+        if L.get("mld_mean") is not None:
+            # --use-mean-fields: the window-mean MLD (mean of MLDs, as NEMO's
+            # mldr10_1 is), never the MLD of the mean state.
+            mldL = np.asarray(L["mld_mean"], dtype=np.float64)
+        else:
+            mldL = np.asarray(mixed_layer_depth(
+                L["T3d"], L["S3d"], z_c, delta_sigma=0.01,
+                wet_mask=wet, bottom_depth=bottom))
         mldL_g, ocLm = regrid_curv_to_latlon(
             np.nan_to_num(mldL, nan=0.0), L["lat"], L["lon"],
             np.isfinite(mldL).astype(np.float64), tgt_lat, tgt_lon)

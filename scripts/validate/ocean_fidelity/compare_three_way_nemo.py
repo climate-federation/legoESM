@@ -403,6 +403,11 @@ def _coastal_mask(ocean, n_cells):
 def _lego_mld(L):
     """Density-threshold MLD of a legoESM snapshot, or None if the snapshot
     predates the saved MLD geometry.  Same convention as compare_omip_nemo."""
+    if L.get("mld_mean") is not None:
+        # --use-mean-fields: the driver's window-mean MLD (same threshold,
+        # --mld-accumulate), NOT the MLD of the mean state -- the diagnostic is
+        # nonlinear, and NEMO's mldr10_1 is a mean of MLDs.
+        return np.asarray(L["mld_mean"], dtype=np.float64)
     if L.get("z_center_ref") is None or L.get("H_bathy") is None:
         return None
     from legoesm.ocean.diagnostics import mixed_layer_depth
@@ -513,6 +518,12 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--tripole", type=Path, required=True)
+    p.add_argument("--use-mean-fields", action="store_true",
+                   help="score the driver's --state-accumulate/--mld-accumulate "
+                        "WINDOW MEANS (T_mean, S_mean, T_mean_hw, S_mean_hw, "
+                        "mld_mean) instead of the instantaneous snapshot -- the "
+                        "statistic NEMO's 5-day files hold. Refuses snapshots "
+                        "that lack them.")
     p.add_argument("--mpas", type=Path, required=True)
     p.add_argument("--nemo-gridt", type=Path, required=True)
     p.add_argument("--nemo-month", type=int, default=None,
@@ -590,8 +601,8 @@ def main() -> int:
     tgt_lat = -90.0 + a.res_deg / 2.0 + a.res_deg * np.arange(int(180.0 / a.res_deg))
     tgt_lon = a.res_deg / 2.0 + a.res_deg * np.arange(int(360.0 / a.res_deg))
 
-    T = _load_legoesm(a.tripole)
-    M = _load_legoesm(a.mpas)
+    T = _load_legoesm(a.tripole, use_mean=a.use_mean_fields)
+    M = _load_legoesm(a.mpas, use_mean=a.use_mean_fields)
     N = _load_nemo(a.nemo_gridt, a.nemo_time_idx, month=a.nemo_month)
     # The snapshot check above pins OUR day.  Nothing pinned the ORACLE's until
     # now: --nemo-time-idx defaults to the LAST record, so a card that forgot
@@ -614,7 +625,7 @@ def main() -> int:
         print(f"[oracle-record] gate armed from the snapshots' own day "
               f"({_expect:g}); no --expect-day was given")
     check_oracle_record(_expect, a.nemo_time_idx, N["n_time"], a.nemo_month)
-    X = [_load_legoesm(pth) for pth in a.also_mask]
+    X = [_load_legoesm(pth, use_mean=a.use_mean_fields) for pth in a.also_mask]
     print(f"[load] tripole {T['sst'].shape}  MPAS {M['sst'].shape}  "
           f"NEMO {N['sst'].shape} ({N['n_time']} records)"
           + "".join(f"  mask-only {x['sst'].shape}" for x in X))
