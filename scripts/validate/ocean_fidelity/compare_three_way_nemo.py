@@ -774,8 +774,10 @@ def main() -> int:
     elif any(v is None for v in mldX_raw):
         # A mask-only source that cannot supply an MLD footprint would leave
         # the MLD cell set different from the pair run it is meant to match.
-        raise SystemExit("FATAL: an --also-mask snapshot lacks z_center_ref/"
-                         "H_bathy, so the MLD footprint cannot be shared")
+        raise SystemExit("FATAL: an --also-mask snapshot lacks "
+                         + ("mld_mean (run it with --mld-accumulate)" if a.use_mean_fields
+                            else "z_center_ref/H_bathy")
+                         + ", so the MLD footprint cannot be shared")
     else:
         mldT, ocTm = regrid_curv_to_latlon(np.nan_to_num(mldT_raw, nan=0.0),
                                            T["lat"], T["lon"],
