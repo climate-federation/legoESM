@@ -63,7 +63,7 @@ is non-vacuous: it passes at the after tip (`1 passed`) and, in a clean
 same-tip clone with only `f78547b752f7`'s model hunk reversed, fails nonzero at
 kt=2 with the old `eta_before` `ValueError`. The operand walk is a real
 production measurement: it requires fp64, constructs the printed card, and
-enters the production routines (`nemo_testcase_l2_gyre_round54_tke_operands.py:505-543`);
+enters the production routines (`nemo_testcase_l2_gyre_round54_tke_operands.py:514-552`);
 its after artifact is clean-stamped `f78547b752f7`, and its plants fail.
 
 Review verdict: **no blocking finding on the final three-commit stack**.

@@ -745,9 +745,9 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdftke.f90:700-705': [
         'DO jk =  1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)   !* vertical eddy viscosity',
         'dissl(ji,jj,jk) = zsqen / zmxld(ji,jk)', 6],
-    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdftke.f90:709-712': [
-        ('IF( nn_pdl == 1 ) THEN', 2),
-        'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk)', 4],
+    'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/zdftke.f90:711-712': [
+        'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk)',
+        '& wmask(ji,jj,jk)', 2],
     # --- round 162: the T-point ratio, its statement and its two readers ---
     # The ratio at the T point is a single product of the stage sea surface
     # height, and it is the ONE operand of the velocity-indicator continuity
@@ -2052,32 +2052,32 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:384-454': [
         ('wumask = u_mask[..., :-1] * u_mask[..., 1:]', 2),
         ('+ (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v', 2), 71],
-    'nemo_testcase_l2_gyre_round54_tke_operands.py:505-543': [
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:514-552': [
         'def _model_substitution_walk(',
         'require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")',
         39],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1237-1424': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1238-1425': [
         'def _bridge_kt2_production_entry(',
         'return state, audit', 188],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1173-1207': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1174-1208': [
         'def _bridge_kt2_state(', ('return state', 1), 35],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:4626-4656': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:4627-4657': [
         'states = {1: _bridge_stage_context(',
         ('surface_forcing=surface))', 2), 31],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:545-562': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:546-563': [
         'observed_step = (header["kt"], header["stage"])',
         'f"Kmm={header[\'Kmm\']}",', 18],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1268-1272': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1269-1273': [
         'step_entry = read_entry(year_entry_path)',
         'f"kt=2/Nbb=3, got kt={step_entry[\'kt\']}/Nbb={step_entry[\'Nbb\']}",',
         5],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:4469-4490': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:4470-4491': [
         'if production_tke_post_sweep is not None:',
         'tke_module._solve_tke_backward_euler = inject_recorded_post_sweep',
         22],
-    'nemo_testcase_l2_gyre_round54_tke_operands.py:219-230': [
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:225-239': [
         'header = struct.unpack("=13i", take(13 * 4))',
-        'f"Kbb={head[\'Kbb\']}/Kmm={head[\'Kmm\']}",', 12],
+        'f"Kbb={head[\'Kbb\']}/Kmm={head[\'Kmm\']}",', 15],
     'ocean_model_latlon_cgrid.py:11667-11672': [
         'if _tke_coeff_new is not None:',
         'tke_avt=Field(data=_tke_coeff_new.K_H', 6],
@@ -2243,7 +2243,7 @@ CITATION_MAP = {
         ('REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: p_avm', 1), 5],
     'nemo_testcase_l2_gyre_round54_tke_operands.py:47-113': [
         'def _calibrate_closure', ('return counts', 1), 67],
-    'nemo_testcase_l2_gyre_round54_tke_operands.py:280-286': [
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:289-295': [
         'elif plant == "prandtl":', ('np.float64(np.inf))', 1), 7],
     # --- decision 35: the GYRE card drops fix_eta_drift (NEMO adds emp locally) ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/sshwzv.f90:137': (
@@ -3143,7 +3143,7 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:542-553': [
         '!     Compute Sea Level at step jit+1',
         'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
-        12],
+        15],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:593-607': [
         '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
         'zv_spg(ji,jj) = - zldg * ( zsshp2_e(ji,jj+1) - zsshp2_e(ji,jj) ) * r1_e2v(ji,jj)',

@@ -148,7 +148,7 @@ round-59 `taum_entry` is installed as the kt=2 TKE forcing as well.
 
 The row is therefore **kt=2 by record-validated construction**, not by a
 label alone. The TKE record reader requires `kt=2, Kbb=Kmm=3`
-(`nemo_testcase_l2_gyre_round54_tke_operands.py:219-230`); the stage reader
+(`nemo_testcase_l2_gyre_round54_tke_operands.py:225-239`); the stage reader
 checks each record's Kbb/Kmm against its kt/stage schedule
 (`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:525-542`); and the production
 bridge separately requires the step-entry record's `Nbb=3`

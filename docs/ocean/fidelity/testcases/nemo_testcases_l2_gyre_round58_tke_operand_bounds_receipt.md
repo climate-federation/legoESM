@@ -50,7 +50,7 @@ bounds and keeps `p_avm(jpi,jpj,jpk)` at
 The reader now reconstructs and bit-scores Prandtl plus `avm/avt/dissl` at
 `nemo_testcase_l2_gyre_round54_tke_operands.py:47-113`; a one-ULP mutation of
 one wet recorded `pdlr` cell is the non-vacuity plant at
-`nemo_testcase_l2_gyre_round54_tke_operands.py:280-286`. The corrected writer
+`nemo_testcase_l2_gyre_round54_tke_operands.py:289-295`. The corrected writer
 passes preprocessing and `gfortran -fsyntax-only`; the gate unit file passes
 9/9 tests.
 
