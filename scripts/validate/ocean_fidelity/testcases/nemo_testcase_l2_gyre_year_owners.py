@@ -12171,7 +12171,8 @@ def developed_vertical_day240_sensitivity(
     """
     require(plant in (None, "none", "developed-vertical-avt-ulp",
                       "developed-vertical-complete-ulp",
-                      "developed-vertical-e3w-ulp"),
+                      "developed-vertical-e3w-ulp",
+                      "developed-vertical-e3w-scale"),
             f"unknown developed vertical-sensitivity plant {plant!r}")
     _policy()
     import jax.numpy as jnp
@@ -12324,7 +12325,8 @@ def developed_vertical_day240_sensitivity(
                         }
                 elif name in ("complete_K_e3w_identity",
                                "complete_K_e3w",
-                               "complete_K_e3w_ulp"):
+                               "complete_K_e3w_ulp",
+                               "complete_K_e3w_scale"):
                     target = vertical["heat_K"]
                     target_postadd = np.array(nemo_effective, copy=True)
                     target_e3w = (np.array(vertical["e3w_now"], copy=True)
@@ -12344,20 +12346,37 @@ def developed_vertical_day240_sensitivity(
                             & (target_e3w > 0.0))
                         require(candidates.size > 0,
                                 "PLANT-BLIND: no positive recorded e3w_Kmm")
-                        values = target_e3w[tuple(candidates.T)]
-                        index = tuple(int(value) for value in
-                                      candidates[int(np.argmax(values))])
-                        old = float(target_e3w[index])
-                        target_e3w[index] = np.nextafter(old, np.inf)
-                        require(target_e3w[index] != old,
-                                "PLANT-BLIND: recorded e3w_Kmm ULP was inert")
-                        first_step["plant"] = {
-                            "index_jik": list(index),
-                            "old_uint64": int(
-                                np.asarray(old).view(np.uint64)),
-                            "new_uint64": int(np.asarray(
-                                target_e3w[index]).view(np.uint64)),
-                        }
+                        if name == "complete_K_e3w_scale":
+                            scale = np.float64(1.0 + 2.0 ** -20)
+                            index = tuple(candidates.T)
+                            old = np.array(target_e3w[index], copy=True)
+                            target_e3w[index] *= scale
+                            moved = int(np.count_nonzero(
+                                target_e3w[index].view(np.uint64)
+                                != old.view(np.uint64)))
+                            require(moved == candidates.shape[0],
+                                    "PLANT-BLIND: e3w scale did not move "
+                                    "every active interface")
+                            first_step["plant"] = {
+                                "active_interfaces_scaled": moved,
+                                "scale": float(scale),
+                            }
+                        else:
+                            values = target_e3w[tuple(candidates.T)]
+                            index = tuple(int(value) for value in
+                                          candidates[int(np.argmax(values))])
+                            old = float(target_e3w[index])
+                            target_e3w[index] = np.nextafter(old, np.inf)
+                            require(target_e3w[index] != old,
+                                    "PLANT-BLIND: recorded e3w_Kmm ULP was "
+                                    "inert")
+                            first_step["plant"] = {
+                                "index_jik": list(index),
+                                "old_uint64": int(
+                                    np.asarray(old).view(np.uint64)),
+                                "new_uint64": int(np.asarray(
+                                    target_e3w[index]).view(np.uint64)),
+                            }
                 else:  # pragma: no cover - private caller registry
                     raise AssertionError(name)
                 override = (jnp.asarray(target), jnp.asarray(viscosity))
@@ -12448,7 +12467,9 @@ def developed_vertical_day240_sensitivity(
     identity_bytes = 0
     arms = (["heat_K"] if plant == "developed-vertical-avt-ulp" else
             ["complete_K"] if plant == "developed-vertical-complete-ulp" else
-            ["complete_K_e3w"] if plant == "developed-vertical-e3w-ulp" else
+            ["complete_K_e3w"] if plant in (
+                "developed-vertical-e3w-ulp",
+                "developed-vertical-e3w-scale") else
             ["free", "complete_K", "complete_K_e3w_identity",
              "complete_K_e3w"])
     for arm in arms:
@@ -12516,6 +12537,27 @@ def developed_vertical_day240_sensitivity(
         raise GateError(
             "one-ULP recorded e3w_Kmm was caught: "
             f"index={first_step['plant']['index_jik']}, "
+            f"matrix_cells={matrix_moved}, day240_T_cells={final_t_moved}")
+
+    if plant == "developed-vertical-e3w-scale":
+        planted_state, _ = run_arm(
+            "complete_K_e3w_scale", plant_first_coefficient=True)
+        baseline_matrix = first_step["complete_K_e3w"]["vertical"]
+        planted_matrix = first_step["complete_K_e3w_scale"]["vertical"]
+        matrix_moved = sum(
+            _different_cells(baseline_matrix[name], planted_matrix[name], wet)
+            for name in ("lower", "diagonal", "upper"))
+        final_t_moved = _different_cells(
+            gate.lego_fields(final_states["complete_K_e3w"])["T"],
+            gate.lego_fields(planted_state)["T"], wet)
+        if matrix_moved == 0 or final_t_moved == 0:
+            raise GateError(
+                "PLANT-BLIND: scaled recorded e3w_Kmm moved "
+                f"matrix={matrix_moved}, day240_T={final_t_moved}")
+        raise GateError(
+            "scaled recorded e3w_Kmm was caught: "
+            f"interfaces={first_step['plant']['active_interfaces_scaled']}, "
+            f"scale={first_step['plant']['scale']:.17g}, "
             f"matrix_cells={matrix_moved}, day240_T_cells={final_t_moved}")
 
     year = _year()
