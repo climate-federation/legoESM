@@ -366,7 +366,7 @@ def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
     """
     import jax.numpy as jnp
     from legoesm.ocean.eos import (
-        compute_ocean_rho, make_eos_fn, nemo_bn2_live_ladders,
+        compute_ocean_rho, make_eos_fn, nemo_bn2_live_geometry,
     )
     from legoesm.ocean.vertical import (
         compute_ocean_jacobian, create_z_star_from_thicknesses,
@@ -398,14 +398,17 @@ def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
 
     dz_half = jnp.asarray(z_coord.dz_half_ref) * J[..., None]
     z_int = jnp.asarray(z_coord.z_half_ref[1:-1])
-    t_depth, w_depth = nemo_bn2_live_ladders(z_coord, etaj, H)
+    # The production TKE caller (k_profiles.py) threads all three live
+    # ladders; compute_N2 for nemo_bn2 requires e3w_int as well.
+    t_depth, w_depth, e3w_int = nemo_bn2_live_geometry(z_coord, etaj, H)
 
     # --- N2 exactly as the pre-loop block builds it (tke.py:2148) ---
     N2 = compute_N2(
         rho, dz_half, float(rho0), float(g),
         T_cell=Tj, S_cell=Sj, dz_ref=dz_ref_j, jacobian=J, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode, n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
-        adiabatic_over_dz_half=False, t_depth=t_depth, w_depth=w_depth)
+        adiabatic_over_dz_half=False, t_depth=t_depth, w_depth=w_depth,
+        e3w_int=e3w_int)
     signed_n2 = cfg.n2_mode in ("adiabatic", "nemo_bn2")
     # squared_centered shear (the only supported discretization here; tke.py:2105)
     shear_sq = vertical_shear_squared(uj, vj, dz_half)
