@@ -1034,8 +1034,8 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # selector for these coefficients and no public config can reach this.
     barotropic_drag_rate_override: object = None
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
-    # leaving legoESM's deviation-form carried state untouched.  Private
-    # decision-33 measurement only.
+    # leaving legoESM's carried state untouched.  This covers both a cold-start
+    # ll_init frame and a continuation frame; private fidelity measurement only.
     barotropic_raw_history_override: object = None
     # Stage-twin driver only: replace the completed external solve handoff
     # (eta, uu_b, vv_b, Hu_avg, Hv_avg) with a recorded NEMO handoff before

@@ -37,6 +37,8 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 _PP = "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
 CITATIONS = {
     "solver_copies_inputs": f"{_PP}/dynspg_ts.f90:287-291",
+    "solver_initializes_entry": f"{_PP}/dynspg_ts.f90:355-364",
+    "cold_history_initialization": f"{_PP}/dynspg_ts.f90:339-347",
     "predictor_weights": f"{_PP}/dynspg_ts.f90:460-493",
     "midstep_face_depth_and_transport": f"{_PP}/dynspg_ts.f90:505-536",
     "continuity_update": f"{_PP}/dynspg_ts.f90:550-558",
@@ -141,15 +143,15 @@ def _candidate_ordered(card, trace: dict) -> dict[str, np.ndarray]:
 
 
 SOURCE_ORDER = (
-    ("eta_entry", "t", "solver_copies_inputs"),
-    ("u_entry", "u", "solver_copies_inputs"),
-    ("v_entry", "v", "solver_copies_inputs"),
-    ("u_history_b", "u", "predictor_weights"),
-    ("v_history_b", "v", "predictor_weights"),
-    ("u_history_bb", "u", "predictor_weights"),
-    ("v_history_bb", "v", "predictor_weights"),
-    ("eta_history_b", "t", "predictor_weights"),
-    ("eta_history_bb", "t", "predictor_weights"),
+    ("eta_entry", "t", "solver_initializes_entry"),
+    ("u_entry", "u", "solver_initializes_entry"),
+    ("v_entry", "v", "solver_initializes_entry"),
+    ("u_history_b", "u", "cold_history_initialization"),
+    ("v_history_b", "v", "cold_history_initialization"),
+    ("u_history_bb", "u", "cold_history_initialization"),
+    ("v_history_bb", "v", "cold_history_initialization"),
+    ("eta_history_b", "t", "cold_history_initialization"),
+    ("eta_history_bb", "t", "cold_history_initialization"),
     ("u_mid", "u", "predictor_weights"),
     ("v_mid", "v", "predictor_weights"),
     ("eta_mid", "t", "predictor_weights"),
@@ -186,6 +188,7 @@ SOURCE_ORDER = (
 def run(deck_root: Path, root: Path, json_out: Path | None,
         plant: bool = False) -> dict[str, object]:
     import jax
+    import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
@@ -360,6 +363,111 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     print("MEASURE recorded drag substitution moves end-of-step sea surface "
           + json.dumps(movement, sort_keys=True))
 
+    # First non-bit boundary after the two requested input substitutions:
+    # NEMO starts the kt=1 external loop from the recorded puu_b/pvv_b pair;
+    # substitute that pair over the recorded half, then measure its causal
+    # leverage before walking onward.
+    entry_u, entry_v = round14._inject(
+        np.asarray(state.uu_b.data), np.asarray(state.vv_b.data),
+        oracle["u_entry"][0], oracle["v_entry"][0])
+    state_entry = state._replace(
+        uu_b=state.uu_b.replace(data=jnp.asarray(entry_u)),
+        vv_b=state.vv_b.replace(data=jnp.asarray(entry_v)))
+    entry_hooks = _NEMOWSRK3TestHooks(
+        expose_barotropic_substeps=True,
+        barotropic_drag_rate_override=(injected_rate_u, injected_rate_v))
+    print("STEP recorded entry-velocity substitution trace")
+    entry_trace = jax.device_get(LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=entry_hooks).step(
+            state_entry, card.dt_s, freshwater=freshwater,
+            surface_forcing=surface))
+    entry_candidate = _candidate_ordered(card, entry_trace.substeps)
+
+    print("STEP recorded entry-velocity substitution production stage")
+    entry_stage = jax.device_get(LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True,
+            barotropic_drag_rate_override=(
+                injected_rate_u, injected_rate_v))).step(
+                    state_entry, card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface))
+    entry_stage_field = np.asarray(entry_stage.stage_outputs[2][4])[
+        :, :RANK0_COLUMNS]
+    entry_delta = np.abs(entry_stage_field - substituted_field)
+    entry_movement = {
+        "max_abs_move_m": float(entry_delta.max()),
+        "cells_moved": int(np.count_nonzero(entry_delta)),
+        "move_over_baseline_disagreement": float(
+            entry_delta.max() / baseline_ssh["max_abs_m"]),
+    }
+    print("MEASURE recorded entry velocity moves end-of-step sea surface "
+          + json.dumps(entry_movement, sort_keys=True))
+
+    # The next source statement is the ll_init b/bb initialization.  Build a
+    # one-variable history arm from the record's own raw arrays.  Rank 1 stays
+    # on legoESM's own history because no rank-1 ordered record exists.
+    def inject_t(full, rank0):
+        out = np.array(full, dtype=np.float64, copy=True)
+        require(out[:, :RANK0_COLUMNS].shape == rank0.shape,
+                "T-point history injection window shape mismatch")
+        out[:, :RANK0_COLUMNS] = rank0
+        return out
+
+    hist = entry_trace.substeps
+    ub, vb = round14._inject(
+        np.asarray(hist["u_history_b"][0]),
+        np.asarray(hist["v_history_b"][0]),
+        oracle["u_history_b"][0], oracle["v_history_b"][0])
+    ubb, vbb = round14._inject(
+        np.asarray(hist["u_history_bb"][0]),
+        np.asarray(hist["v_history_bb"][0]),
+        oracle["u_history_bb"][0], oracle["v_history_bb"][0])
+    etab = inject_t(
+        np.asarray(hist["eta_history_b"][0]), oracle["eta_history_b"][0])
+    etabb = inject_t(
+        np.asarray(hist["eta_history_bb"][0]), oracle["eta_history_bb"][0])
+    raw_history = tuple(jnp.asarray(value) for value in (
+        ub, ubb, vb, vbb, etab, etabb))
+
+    print("STEP recorded cold-history substitution trace")
+    history_trace = jax.device_get(LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            barotropic_drag_rate_override=(
+                injected_rate_u, injected_rate_v),
+            barotropic_raw_history_override=raw_history)).step(
+                state_entry, card.dt_s, freshwater=freshwater,
+                surface_forcing=surface))
+    history_candidate = _candidate_ordered(card, history_trace.substeps)
+
+    print("STEP recorded cold-history substitution production stage")
+    history_stage = jax.device_get(LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True,
+            barotropic_drag_rate_override=(
+                injected_rate_u, injected_rate_v),
+            barotropic_raw_history_override=raw_history)).step(
+                state_entry, card.dt_s, freshwater=freshwater,
+                surface_forcing=surface))
+    history_stage_field = np.asarray(history_stage.stage_outputs[2][4])[
+        :, :RANK0_COLUMNS]
+    history_delta = np.abs(history_stage_field - entry_stage_field)
+    history_ssh = round14._ssh_row(
+        history_stage.stage_outputs, oracle_ssh3, 3)
+    history_movement = {
+        "max_abs_move_m": float(history_delta.max()),
+        "cells_moved": int(np.count_nonzero(history_delta)),
+        "move_over_baseline_disagreement": float(
+            history_delta.max() / baseline_ssh["max_abs_m"]),
+        "combined_substituted_max_abs_m": history_ssh["max_abs_m"],
+    }
+    print("MEASURE recorded cold histories move end-of-step sea surface "
+          + json.dumps(history_movement, sort_keys=True))
+
     inputs_ready = (
         input_rows["freshwater_forcing"]["bit_exact"]
         and all(row["bit_exact"] for row in landed_rows.values()))
@@ -372,16 +480,30 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         "end_of_step_sea_surface_movement": movement,
     }
 
+    def score_walk(candidate_fields):
+        rows = []
+        first = None
+        for name, stagger, citation in SOURCE_ORDER:
+            active = np.broadcast_to(
+                masks[stagger], candidate_fields[name].shape)
+            row = round14.compare(
+                candidate_fields[name], oracle[name], active)
+            row.update({"boundary": name, "citation": CITATIONS[citation]})
+            rows.append(row)
+            if first is None and not row["bit_exact"]:
+                first = dict(row)
+        return rows, first
+
     walk_rows = []
     first_non_bit = None
+    entry_walk_rows = []
+    first_after_entry = None
+    history_walk_rows = []
+    first_after_history = None
     if inputs_ready:
-        for name, stagger, citation in SOURCE_ORDER:
-            active = np.broadcast_to(masks[stagger], candidate[name].shape)
-            row = round14.compare(candidate[name], oracle[name], active)
-            row.update({"boundary": name, "citation": CITATIONS[citation]})
-            walk_rows.append(row)
-            if first_non_bit is None and not row["bit_exact"]:
-                first_non_bit = dict(row)
+        walk_rows, first_non_bit = score_walk(candidate)
+        entry_walk_rows, first_after_entry = score_walk(entry_candidate)
+        history_walk_rows, first_after_history = score_walk(history_candidate)
     else:
         print("STOP_INPUT_SUBSTITUTION_FAILED: a recorded solver input did "
               "not reach the traced boundary; no downstream row is attributed")
@@ -411,11 +533,19 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         "substituted_end_of_step_sea_surface": substituted_ssh,
         "solver_input_rows": input_rows,
         "substitution": substitution,
+        "entry_velocity_substitution": entry_movement,
+        "cold_history_substitution": history_movement,
         "walk_status": (
             "WALKED_TO_FIRST_NON_BIT" if inputs_ready
             else "STOP_INPUT_SUBSTITUTION_FAILED"),
         "first_non_bit_statement": first_non_bit,
         "source_ordered_rows": walk_rows,
+        "first_non_bit_after_entry_velocity_substitution": first_after_entry,
+        "source_ordered_rows_after_entry_velocity_substitution":
+            entry_walk_rows,
+        "first_non_bit_after_cold_history_substitution": first_after_history,
+        "source_ordered_rows_after_cold_history_substitution":
+            history_walk_rows,
         "plant": plant_result,
     }
     if json_out:
@@ -442,6 +572,12 @@ def main() -> int:
         "walk_status": result["walk_status"],
         "solver_input_rows": result["solver_input_rows"],
         "first_non_bit_statement": result["first_non_bit_statement"],
+        "first_non_bit_after_entry_velocity_substitution":
+            result["first_non_bit_after_entry_velocity_substitution"],
+        "first_non_bit_after_cold_history_substitution":
+            result["first_non_bit_after_cold_history_substitution"],
+        "entry_velocity_substitution": result["entry_velocity_substitution"],
+        "cold_history_substitution": result["cold_history_substitution"],
         "round14_reproduction": result["round14_reproduction"],
         "plant": result["plant"],
     }, indent=2, sort_keys=True))

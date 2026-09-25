@@ -2869,10 +2869,10 @@ def barotropic_substeps_latlon_cgrid(
     else:
         _ab3_za = _ab3_zb = _ab3_hist = None
     if _nemo_raw_history_test_override is not None:
-        if not _ab3 or _ab3_hist is None:
+        if not _ab3:
             raise ValueError(
                 "raw barotropic-history substitution requires an AB3/AM4 "
-                "continuation step with an existing carried history")
+                "barotropic filter")
         if len(_nemo_raw_history_test_override) != 6:
             raise ValueError(
                 "raw barotropic-history substitution requires six arrays")
