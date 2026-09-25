@@ -7220,6 +7220,9 @@ def _score_stage2_face(actual, expected, mask) -> dict:
     require(actual.shape == expected.shape,
             f"stage-2 shapes differ: {actual.shape} vs {expected.shape}")
     active = np.asarray(mask) != 0.0
+    while active.ndim < actual.ndim:
+        active = active[..., None]
+    active = np.broadcast_to(active, actual.shape)
     different = actual.view(np.uint64) != expected.view(np.uint64)
     delta = (actual - expected)[active]
     return {
