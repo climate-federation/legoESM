@@ -42,25 +42,50 @@ def main():
     ap.add_argument("--snapshots", nargs="+", required=True)
     ap.add_argument("--res-deg", type=float, default=1.0)
     ap.add_argument("--sub-depth-m", type=float, default=10.0)
+    ap.add_argument("--mean", action="store_true",
+                    help="also score the MEAN of all given snapshots (window-"
+                         "matched against NEMO's 5-day mean when the snapshots "
+                         "tile that window)")
     a = ap.parse_args()
     tgt_lat = -90.0 + a.res_deg / 2 + a.res_deg * np.arange(int(180 / a.res_deg))
     tgt_lon = a.res_deg / 2 + a.res_deg * np.arange(int(360 / a.res_deg))
     N = _load_nemo(a.nemo_gridt, a.rec)
     sstN, ocN = regrid_curv_to_latlon(N["sst"], N["lat"], N["lon"], N["mask"], tgt_lat, tgt_lon)
+    # NEMO's own 0-10 m stratification from its 5-day-mean 3-D field (to = the
+    # model's top-level temperature at deptht ~9.82 m), same regrid.
+    import xarray as xr
+    dsN = xr.open_dataset(a.nemo_gridt, decode_times=False)
+    kN = int(np.argmin(np.abs(dsN["deptht"].values - a.sub_depth_m)))
+    toN = np.asarray(dsN["to"].isel(time_counter=a.rec, deptht=kN).values, dtype=float)
+    toN = np.where(np.isfinite(toN) & (np.abs(toN) < 1e3), toN, np.nan)
+    subN, _ = regrid_curv_to_latlon(np.nan_to_num(toN), N["lat"], N["lon"], N["mask"] * np.isfinite(toN), tgt_lat, tgt_lon)
+    print(f"NEMO sub-surface level {dsN['deptht'].values[kN]:.2f} m; NEMO tos - T_sub box means: "
+          + "  ".join(f"{b[0]} {float(np.sum((np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :])[m := ((ocN > 0.5) & np.isfinite(sstN) & np.isfinite(subN) & _box(tgt_lat, tgt_lon, *b[1:]))] * (sstN[m] - subN[m])) / np.sum((np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :])[m])):+.3f}" for b in BOXES))
     area = np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones_like(tgt_lon)[None, :]
     print(f"NEMO {Path(a.nemo_gridt).name} record {a.rec} (5-day mean); target {a.res_deg} deg")
     hdr = f"{'snapshot':28s} {'day':>6s} " + "".join(f"{b[0]+' bias':>14s}" for b in BOXES) \
         + "".join(f"{b[0]+' SST-T'+str(int(a.sub_depth_m)):>16s}" for b in BOXES) + f"{'n nino3':>9s}"
     print(hdr)
-    for p in a.snapshots:
-        L = _load_legoesm(p)
-        s = np.load(p)
-        z = np.asarray(s["z_center_ref"])
-        k = int(np.argmin(np.abs(z - a.sub_depth_m)))
-        Tsub = np.asarray(s["T"])[..., k]
-        day = float(s["time_days"]) if "time_days" in s.files else float("nan")
-        sstL, ocL = regrid_curv_to_latlon(L["sst"], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
-        subL, _ = regrid_curv_to_latlon(Tsub, L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
+    acc = None
+    rows = list(a.snapshots) + (["MEAN"] if a.mean else [])
+    for p in rows:
+        if p == "MEAN":
+            sstL, subL, ocL = acc[0] / acc[3], acc[1] / acc[3], acc[2]
+            day = float("nan"); p = f"MEAN of {int(acc[3])} snapshots"
+        else:
+            L = _load_legoesm(p)
+            s = np.load(p)
+            z = np.asarray(s["z_center_ref"])
+            k = int(np.argmin(np.abs(z - a.sub_depth_m)))
+            Tsub = np.asarray(s["T"])[..., k]
+            day = float(s["time_days"]) if "time_days" in s.files else float("nan")
+            sstL, ocL = regrid_curv_to_latlon(L["sst"], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
+            subL, _ = regrid_curv_to_latlon(Tsub, L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
+            if a.mean:
+                if acc is None:
+                    acc = [np.zeros_like(sstL), np.zeros_like(subL), ocL.copy(), 0]
+                acc[0] += np.nan_to_num(sstL); acc[1] += np.nan_to_num(subL)
+                acc[2] = np.minimum(acc[2], ocL); acc[3] += 1
         ok = (ocL > 0.5) & (ocN > 0.5) & np.isfinite(sstL) & np.isfinite(sstN)
         row = f"{Path(p).name:28s} {day:6.2f} "
         biases, dl, n3 = [], [], 0
