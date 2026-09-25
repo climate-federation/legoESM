@@ -35,7 +35,9 @@ readonly EXPECTED_BASELINE_BINARY_SHA256=fb92a73521e630011ad790fa08034152929322c
 readonly EXPECTED_DECK_MANIFEST_SHA256=51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9
 readonly EXPECTED_INPUT_MANIFEST_SHA256=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
 readonly EXPECTED_PATCH_SHA256=205657bc19d10ef70e902553e67687f111e2fd2968476695c7bb580575b88962
-readonly RECORD_BYTES=$((16 + 7 * 4 + 2 * (4 + 4 * 8 + 9 * 94 * 152 * 8)))
+# Header; then per substep one integer, four scalars, eight full local arrays,
+# and zu_frc on NEMO's 90x148 interior data domain.
+readonly RECORD_BYTES=$((16 + 7 * 4 + 2 * (4 + 4 * 8 + 8 * 94 * 152 * 8 + 90 * 148 * 8)))
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly PATCH=$here/u_history_writer.patch
