@@ -48,6 +48,7 @@ def test_a_report_compared_against_itself_moves_nothing(tmp_path):
     code = driver.main([str(PAIR[0]), str(PAIR[0]), "--output", str(out)])
     result = json.loads(out.read_text())
     assert code == 0 and result["status"] == "PASS"
+    assert result["worktree"] == json.loads(PAIR[0].read_text())["worktree"]
     assert result["largest_oracle_residual_worsening_ulps"] == 0
     assert (result["first_over_bar_reference"]
             == result["first_over_bar_candidate"])
