@@ -12206,6 +12206,8 @@ def developed_vertical_day240_sensitivity(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             tracer_process_trace=(), vertical_solve_trace=True))
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
 
     def recorded_vertical(step: int) -> tuple[dict, np.ndarray, np.ndarray]:
         path = vertical_root / (
@@ -12234,17 +12236,29 @@ def developed_vertical_day240_sensitivity(
             _vertical_K_test_override=override,
             _nemo_stage1_zad_eta_after_override=ssha)
 
+    def production_step(state, step: int, override=None):
+        freshwater, surface, ssha = forcing(state, step)
+        return ordinary_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _vertical_K_test_override=override,
+            _nemo_stage1_zad_eta_after_override=ssha)
+
     first_step: dict[str, dict] = {}
 
     def run_arm(name: str, *, plant_first_heat: bool = False):
         state = initial_state
         identity_mismatched_bytes = 0
         for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1):
-            probe = traced_step(state, step)
             if name == "free":
-                selected = probe
+                # Only the first free step needs internal rows.  All later
+                # free steps use the ordinary production kernel directly.
+                selected = (traced_step(state, step)
+                            if step == PROCESS_START_STEP
+                            else production_step(state, step))
                 target = None
             else:
+                probe = traced_step(state, step)
                 record, nemo_heat, nemo_effective = recorded_vertical(step)
                 vertical = _vertical_trace_frame(probe)
                 viscosity = np.asarray(
@@ -12280,41 +12294,44 @@ def developed_vertical_day240_sensitivity(
                     target = nemo_effective - vertical["isoneutral_K"]
                 else:  # pragma: no cover - private caller registry
                     raise AssertionError(name)
-                selected = traced_step(
-                    state, step,
-                    (jnp.asarray(target), jnp.asarray(viscosity)))
-                selected_vertical = _vertical_trace_frame(selected)
-                probe_process = _trace_frame(probe)
-                selected_process = _trace_frame(selected)
-                upstream = {
-                    row: _different_cells(
-                        probe_process[row], selected_process[row],
-                        wet if probe_process[row].ndim == 3
-                        else np.any(wet, axis=-1))
-                    for row in LEGO_PROCESS_FIELDS if row != "Taa"
-                }
-                require(all(value == 0 for value in upstream.values()),
-                        f"{name} step {step}: coefficient intervention moved "
-                        "an upstream tracer boundary")
+                override = (jnp.asarray(target), jnp.asarray(viscosity))
+                selected = (traced_step(state, step, override)
+                            if step == PROCESS_START_STEP
+                            else production_step(state, step, override))
+                selected_state = (selected.state_after
+                                  if step == PROCESS_START_STEP else selected)
                 if name == "identity":
                     mismatch = _state_bit_mismatches(
-                        probe.state_after, selected.state_after)
+                        probe.state_after, selected_state)
                     identity_mismatched_bytes += mismatch
                     require(mismatch == 0,
                             f"identity seam moved step {step} state by "
                             f"{mismatch} bytes")
-                if name == "heat_K":
-                    require(_different_cells(
-                        selected_vertical["heat_K"], nemo_heat,
-                        interface_wet) == 0,
-                        f"step {step}: heat-K seam did not consume NEMO avt")
-                if name == "effective_K":
-                    require(_different_cells(
-                        selected_vertical["effective_K"], nemo_effective,
-                        interface_wet) == 0,
-                        f"step {step}: effective-K preimage did not reproduce "
-                        "NEMO zwt bit for bit")
                 if step == PROCESS_START_STEP:
+                    selected_vertical = _vertical_trace_frame(selected)
+                    probe_process = _trace_frame(probe)
+                    selected_process = _trace_frame(selected)
+                    upstream = {
+                        row: _different_cells(
+                            probe_process[row], selected_process[row],
+                            wet if probe_process[row].ndim == 3
+                            else np.any(wet, axis=-1))
+                        for row in LEGO_PROCESS_FIELDS if row != "Taa"
+                    }
+                    require(all(value == 0 for value in upstream.values()),
+                            f"{name}: coefficient intervention moved an "
+                            "upstream tracer boundary")
+                    if name == "heat_K":
+                        require(_different_cells(
+                            selected_vertical["heat_K"], nemo_heat,
+                            interface_wet) == 0,
+                            "heat-K seam did not consume NEMO avt")
+                    if name == "effective_K":
+                        require(_different_cells(
+                            selected_vertical["effective_K"], nemo_effective,
+                            interface_wet) == 0,
+                            "effective-K preimage did not reproduce NEMO "
+                            "zwt bit for bit")
                     first_step[name] = {
                         "upstream_cells_moved": upstream,
                         "vertical": selected_vertical,
@@ -12325,7 +12342,8 @@ def developed_vertical_day240_sensitivity(
                     "vertical": _vertical_trace_frame(probe),
                     "process": _trace_frame(probe),
                 }
-            state = selected.state_after
+            state = (selected.state_after
+                     if step == PROCESS_START_STEP else selected)
             if step % 60 == 0:
                 print(f"  round167 {name}: completed step {step}/1440",
                       flush=True)
