@@ -106,8 +106,19 @@ on the committed round diff.  It failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-Citation and pytest results are recorded in the final commit after their
-single-battery executions.
+The receipt citation gate passes all three compiled citations with zero
+failures, zero unmapped citations, and zero map-audit failures.  Its rigid
++2-line plant exits 1 with `SYMBOL-NOT-AT-LINE` (the anchor identifies line
+121, not the planted line 123); all nine citation self-tests fire.
+
+The focused outcome/citation battery reports **17 passed**.  The one required
+`tests/ocean/fidelity -n 12` battery collected 1,867 tests and reached the
+inherited final-tail hang after **1,848 passed, 7 skipped, 5 failed, and 7
+unfinished** were emitted.  It was interrupted after a bounded idle wait.
+Serial reruns reproduce the same five inherited failures as rounds 24--25:
+the round-129 stepping-gate stamp, SI3 scalar-math source provenance, the stale
+round-51 live-trace suffix assertion, three unstamped legacy report emitters,
+and the missing `hires_lane_surface` case-board row.  No round-26 path fails.
 
 No GYRE/DINO/lock-exchange/overflow landing gate is claimed: this round lands
 no model statement, and the final `packages/` tree is byte-identical to the
