@@ -111,6 +111,9 @@ record-backed plants are persisted in their round evidence)
   developed-content-rhs-ulp
                            moves the recorded complete content by one ULP and
                            requires the final registered row to change
+  developed-content-process-effect
+                           perturbs one wet production surface-rate cell and
+                           requires every downstream content boundary to move
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -198,6 +201,9 @@ PROCESS_RESTART_HASHES = {
 PROCESS_ROWS = (
     "geometry", "advection", "surface_boundary", "shortwave",
     "lateral_diffusion", "vertical_diffusion",
+)
+ACCUMULATED_CONTENT_PROCESS_ROWS = (
+    "advection", "surface_boundary", "shortwave", "lateral_diffusion",
 )
 LEGO_PROCESS_FIELDS = (
     "Tbb", "q_Kbb", "q_Kmm", "q_Kaa", "B0", "Badv", "Bsbc", "Bqsr",
@@ -4196,6 +4202,10 @@ def main(argv=None) -> int:
         "--developed-content-walk", action="store_true",
         help="walk the step-1081 temperature-content producer through the "
              "complete production step under JIT and eager execution")
+    parser.add_argument(
+        "--developed-content-process-walk", action="store_true",
+        help="decompose the step-1081 accumulated temperature content over "
+             "the directly observed process boundaries under JIT and eager")
     parser.add_argument("--solve-input-pair-root", type=Path,
                         default=DEFAULT_SOLVE_INPUT_PAIR_ROOT)
     parser.add_argument("--solve-input-baseline-root", type=Path,
@@ -4433,6 +4443,37 @@ def main(argv=None) -> int:
         require(args.plant in (None, "none"),
                 f"plant {args.plant!r} did not fire")
         print(json.dumps(report["ranking"], indent=2))
+        print("STATUS PASS")
+        return 0
+    if args.developed_content_process_walk:
+        require(args.expect_commit is not None,
+                "--developed-content-process-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-content-process-walk needs "
+                "--daily-record-audit")
+        try:
+            report = developed_accumulated_content_process_walk(
+                args.developed_process_root, args.developed_vertical_root,
+                args.daily_record_root, args.daily_record_audit,
+                args.expect_commit, plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            if str(error).startswith("PLANT-BLIND"):
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["modes"], indent=2))
         print("STATUS PASS")
         return 0
     if args.developed_content_walk:
@@ -12702,6 +12743,307 @@ def developed_content_producer_walk(
         "all_frozen_predictions_confirmed": all(predictions.values()),
         "compiled_source": {
             "content_rhs": "trazdf.f90:549-567",
+        },
+    }
+
+
+# -------- Round-176 developed accumulated-content process walk -----------
+ROUND175_ACCUMULATED_CONTENT_RMS_KM = 7.046353169355859e-04
+
+
+def _accumulated_content_process_rows(
+        actual_cumulative: dict[str, np.ndarray],
+        expected_cumulative: dict[str, np.ndarray],
+        actual_complete: np.ndarray, expected_complete: np.ndarray,
+        wet: np.ndarray) -> dict:
+    """Score cumulative and isolated explicit-content process boundaries."""
+    required = set(ACCUMULATED_CONTENT_PROCESS_ROWS)
+    require(set(actual_cumulative) == required,
+            "model accumulated-content boundary registry is incomplete")
+    require(set(expected_cumulative) == required,
+            "NEMO accumulated-content boundary registry is incomplete")
+    cumulative = {
+        name: _score_developed_row(
+            actual_cumulative[name], expected_cumulative[name], wet)
+        for name in ACCUMULATED_CONTENT_PROCESS_ROWS
+    }
+    cumulative["complete_accumulated_content"] = _score_developed_row(
+        actual_complete, expected_complete, wet)
+
+    actual_components = {}
+    expected_components = {}
+    previous_actual = np.zeros_like(actual_complete)
+    previous_expected = np.zeros_like(expected_complete)
+    for name in ACCUMULATED_CONTENT_PROCESS_ROWS:
+        actual_components[name] = actual_cumulative[name] - previous_actual
+        expected_components[name] = (
+            expected_cumulative[name] - previous_expected)
+        previous_actual = actual_cumulative[name]
+        previous_expected = expected_cumulative[name]
+
+    total_error = actual_complete - expected_complete
+    component_errors = {
+        name: actual_components[name] - expected_components[name]
+        for name in ACCUMULATED_CONTENT_PROCESS_ROWS
+    }
+    component_sum = np.zeros_like(total_error)
+    for name in ACCUMULATED_CONTENT_PROCESS_ROWS:
+        component_sum = component_sum + component_errors[name]
+    component_errors["rounding_closure"] = total_error - component_sum
+    reconstructed = component_sum + component_errors["rounding_closure"]
+    reconstruction = _score_developed_row(reconstructed, total_error, wet)
+
+    total_selected = total_error[wet]
+    denominator = float(np.sum(total_selected * total_selected))
+    require(denominator > 0.0,
+            "complete accumulated-content error is zero; projection undefined")
+    total_rms = float(np.sqrt(np.mean(total_selected * total_selected)))
+    components = {}
+    for name in (*ACCUMULATED_CONTENT_PROCESS_ROWS, "rounding_closure"):
+        row = (_score_developed_row(
+            actual_components[name], expected_components[name], wet)
+            if name != "rounding_closure" else
+            _score_developed_row(
+                component_errors[name], np.zeros_like(total_error), wet))
+        error = component_errors[name][wet]
+        row["signed_projection_Km"] = float(
+            np.sum(error * total_selected) / denominator * total_rms)
+        row["projection_fraction"] = float(
+            np.sum(error * total_selected) / denominator)
+        components[name] = row
+
+    ranked = sorted(
+        ({"name": name, **components[name]}
+         for name in ACCUMULATED_CONTENT_PROCESS_ROWS),
+        key=lambda row: row["rms"], reverse=True)
+    first_non_bit = next(
+        (name for name in ACCUMULATED_CONTENT_PROCESS_ROWS
+         if not cumulative[name]["bit_exact"]), "NONE")
+    return {
+        "registered_cumulative_order": [
+            *ACCUMULATED_CONTENT_PROCESS_ROWS,
+            "complete_accumulated_content"],
+        "cumulative_rows": cumulative,
+        "isolated_components": components,
+        "component_ranking_by_rms": ranked,
+        "first_non_bit_cumulative_boundary": first_non_bit,
+        "complete_error_rms_Km": total_rms,
+        "signed_projection_sum_Km": float(sum(
+            row["signed_projection_Km"] for row in components.values())),
+        "reconstruction": reconstruction,
+    }
+
+
+def developed_accumulated_content_process_walk(
+        process_root: Path, vertical_root: Path, daily_root: Path,
+        daily_audit: Path, expected_commit: str, *,
+        plant: str | None = None) -> dict:
+    """Decompose developed T(Krhs) over directly observed process writes."""
+    require(plant in (None, "none", "developed-content-process-effect"),
+            f"unknown developed content-process plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "developed content-process walk requires a clean committed tree")
+    require(stamp["commit"] == expected_commit,
+            "developed content-process walk commit differs from --expect-commit")
+    process_root = Path(process_root)
+    vertical_root = Path(vertical_root)
+    process_admission = validate_process_record(
+        process_root, PROCESS_RECORD_COMMIT)
+    vertical_admission = validate_vertical_record(
+        vertical_root, DEVELOPED_VERTICAL_RECORD_COMMIT,
+        process_root=process_root)
+    bundle = _developed_entry_bundle(
+        Path(daily_root), Path(daily_audit), expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    wet = bundle["wet"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    nlev = wet.shape[-1]
+    process_record = read_process_record(
+        process_root
+        / f"oracle_process_budget_kt{DEVELOPED_PROCESS_STEP:08d}.bin")
+    vertical_record = _read_vertical_record(
+        vertical_root
+        / f"oracle_trazdf_matrix_kt{DEVELOPED_PROCESS_STEP:08d}.bin",
+        DEVELOPED_PROCESS_STEP)
+    calibration = _vertical_calibration(vertical_record)
+    require(all(value == 0 for value in calibration.values()),
+            "Round-125 compiled calibration moved at step 1081")
+
+    dt = np.float64(vertical_record["arrays"]["rDt"])
+    e3t_kmm = _vertical_field(vertical_record, "e3t_Kmm", nlev)
+    expected_complete = (
+        (dt * e3t_kmm)
+        * _vertical_field(vertical_record, "T_Krhs_in", nlev))
+    record_fields = {
+        "advection": "rhs_after_advection",
+        "surface_boundary": "rhs_after_surface_boundary",
+        "shortwave": "rhs_after_shortwave",
+        "lateral_diffusion": "rhs_after_lateral_diffusion",
+    }
+    expected_cumulative = {
+        name: (dt * e3t_kmm) * np.asarray(
+            process_record[field][..., :nlev], dtype=np.float64)
+        for name, field in record_fields.items()
+    }
+    process_to_vertical = _score_developed_row(
+        expected_cumulative["lateral_diffusion"], expected_complete, wet)
+    require(process_to_vertical["bit_exact"],
+            "Round-123 final process RHS differs from Round-125 T(Krhs)")
+
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+    e3t_0 = _vertical_field(vertical_record, "e3t_0", nlev)
+
+    def execute_mode(*, eager: bool, hook=()):
+        hooks = _NEMOWSRK3TestHooks(
+            tracer_process_trace=hook, vertical_solve_trace=True)
+        trace_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config, _nemo_ws_test_hooks=hooks)
+        ordinary_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+
+        def execute(model):
+            if eager:
+                with jax.disable_jit():
+                    return jax.device_get(model._step_impl(
+                        state, card.dt_s, freshwater=freshwater,
+                        surface_forcing=surface,
+                        _nemo_stage1_zad_eta_after_override=ssha,
+                        _return_tracer_process_trace=(
+                            model is trace_model)))
+            model.prime_step_caches(state)
+            with jax.disable_jit(False):
+                return jax.device_get(model._step_jitted(
+                    state, card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface,
+                    _nemo_stage1_zad_eta_after_override=ssha))
+
+        trace = execute(trace_model)
+        ordinary = execute(ordinary_model)
+        moved = _state_bit_mismatches(trace.state_after, ordinary)
+        require(moved == 0,
+                f"content-process observer moved {moved} state bytes")
+        frame = _trace_frame(trace)
+        vertical = _vertical_trace_frame(trace)
+        before = (e3t_0 * frame["q_Kbb"][..., None]) * frame["Tbb"]
+        e3t_after = vertical["e3t_after"]
+        boundary_fields = {
+            "advection": "Badv", "surface_boundary": "Bsbc",
+            "shortwave": "Bqsr", "lateral_diffusion": "Bldf",
+        }
+        cumulative = {
+            name: e3t_after * frame[field] - before
+            for name, field in boundary_fields.items()
+        }
+        complete = vertical["content_T"] - before
+        return trace, cumulative, complete, moved
+
+    if plant == "developed-content-process-effect":
+        _baseline_trace, baseline, baseline_complete, _ = execute_mode(
+            eager=False)
+        index = tuple(int(value) for value in np.argwhere(wet)[0])
+        delta = float(np.ldexp(1.0, -40))
+        _planted_trace, planted, planted_complete, _ = execute_mode(
+            eager=False, hook=(*index, delta))
+        moved = {
+            name: _different_cells(planted[name], baseline[name], wet)
+            for name in ACCUMULATED_CONTENT_PROCESS_ROWS
+        }
+        moved["complete_accumulated_content"] = _different_cells(
+            planted_complete, baseline_complete, wet)
+        require(moved["advection"] == 0,
+                "content-process plant moved the upstream advection row")
+        require(all(moved[name] > 0 for name in (
+            "surface_boundary", "shortwave", "lateral_diffusion",
+            "complete_accumulated_content")),
+            "content-process plant failed to reach every downstream row")
+        return {
+            "status": "PLANT-FIRED", "plant": plant,
+            "control": {"index_jik": list(index),
+                        "rate_delta_K_s": delta,
+                        "cells_moved": moved},
+        }
+
+    modes = {}
+    for mode_name, eager in (("production_step_jit", False),
+                             ("production_eager", True)):
+        _trace, actual_cumulative, actual_complete, moved = execute_mode(
+            eager=eager)
+        mode = _accumulated_content_process_rows(
+            actual_cumulative, expected_cumulative,
+            actual_complete, expected_complete, wet)
+        mode["observer_state_unequal_bytes"] = moved
+        modes[mode_name] = mode
+
+    authoritative = modes["production_step_jit"]
+    predictions = {
+        "record_calibrations_bit_exact": (
+            process_to_vertical["bit_exact"]
+            and all(value == 0 for value in calibration.values())),
+        "observers_bit_exact": all(
+            mode["observer_state_unequal_bytes"] == 0
+            for mode in modes.values()),
+        "advection_first_non_bit_at_least_1000_cells": (
+            authoritative["first_non_bit_cumulative_boundary"]
+            == "advection"
+            and authoritative["cumulative_rows"]["advection"]
+            ["cells_unequal"] >= 1000),
+        "lateral_diffusion_largest_and_at_least_1e_4_Km": (
+            authoritative["component_ranking_by_rms"][0]["name"]
+            == "lateral_diffusion"
+            and authoritative["isolated_components"]["lateral_diffusion"]
+            ["rms"] >= 1.0e-4),
+        "reproduces_round175_accumulated_rms": abs(
+            authoritative["complete_error_rms_Km"]
+            - ROUND175_ACCUMULATED_CONTENT_RMS_KM) <= 1.0e-15,
+        "jit_and_eager_same_first_non_bit": (
+            authoritative["first_non_bit_cumulative_boundary"]
+            == modes["production_eager"]
+            ["first_non_bit_cumulative_boundary"]),
+    }
+    return {
+        "format": "gyre-round176-developed-content-process-walk-v1",
+        "status": "PASS", "case": CASE,
+        "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
+        "worktree": stamp, "precision": "fp64",
+        "step": DEVELOPED_PROCESS_STEP,
+        "wet_cells": int(np.count_nonzero(wet)),
+        "admission": {
+            "process": process_admission["status"],
+            "vertical": vertical_admission["status"],
+            "daily_audit": str(daily_audit),
+            "entry_restart": str(bundle["restart_path"]),
+            "source_checks": bundle["source_checks"],
+            "compiled_calibration_cells_unequal": calibration,
+            "process_to_vertical_final_rhs": process_to_vertical,
+        },
+        "modes": modes,
+        "authoritative_mode": "production_step_jit",
+        "first_non_bit_boundary": authoritative[
+            "first_non_bit_cumulative_boundary"],
+        "largest_component": authoritative[
+            "component_ranking_by_rms"][0]["name"],
+        "internal_statement_owner": (
+            "INHERITED_CONTEXT:stage3_FCT_transport"
+            if authoritative["first_non_bit_cumulative_boundary"]
+            == "advection" else "UNMEASURED"),
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "compiled_source": {
+            "process_order": "stprk3_stg.f90:861-869,930-970",
+            "content_consumer": "trazdf.f90:549-567",
         },
     }
 

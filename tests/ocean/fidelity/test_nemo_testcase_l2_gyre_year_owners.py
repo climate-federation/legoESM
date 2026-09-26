@@ -1094,3 +1094,58 @@ def test_round175_content_walk_refuses_dirty_worktree(
         harness.developed_content_producer_walk(
             tmp_path / "vertical", tmp_path / "daily",
             tmp_path / "audit", "0" * 40)
+
+
+def test_round176_content_process_registry_and_projection(harness):
+    """Every compiled process row contributes to the complete error."""
+    shape = (2, 2, 2)
+    wet = np.ones(shape, dtype=bool)
+    expected = {
+        "advection": np.full(shape, 1.0),
+        "surface_boundary": np.full(shape, 3.0),
+        "shortwave": np.full(shape, 6.0),
+        "lateral_diffusion": np.full(shape, 10.0),
+    }
+    actual = {name: values.copy() for name, values in expected.items()}
+    # One error in each isolated component; cumulative writes retain all
+    # earlier changes, exactly as the compiled Krhs accumulator does.
+    actual["advection"][0, 0, 0] += 0.25
+    actual["surface_boundary"][0, 0, 0] += 0.50
+    actual["shortwave"][0, 0, 0] += 1.00
+    actual["lateral_diffusion"][0, 0, 0] += 2.00
+    scored = harness._accumulated_content_process_rows(
+        actual, expected, actual["lateral_diffusion"],
+        expected["lateral_diffusion"], wet)
+    assert scored["first_non_bit_cumulative_boundary"] == "advection"
+    assert scored["registered_cumulative_order"] == [
+        "advection", "surface_boundary", "shortwave",
+        "lateral_diffusion", "complete_accumulated_content"]
+    assert set(scored["isolated_components"]) == {
+        "advection", "surface_boundary", "shortwave",
+        "lateral_diffusion", "rounding_closure"}
+    assert scored["reconstruction"]["bit_exact"] is True
+    assert np.isclose(
+        scored["signed_projection_sum_Km"],
+        scored["complete_error_rms_Km"])
+
+    incomplete = dict(actual)
+    incomplete.pop("shortwave")
+    with pytest.raises(harness.GateError, match="registry is incomplete"):
+        harness._accumulated_content_process_rows(
+            incomplete, expected, actual["lateral_diffusion"],
+            expected["lateral_diffusion"], wet)
+
+
+def test_round176_content_process_walk_refuses_dirty_worktree(
+        harness, tmp_path, monkeypatch):
+    """The process walk refuses before opening either oracle record."""
+    from legoesm.ocean.fidelity import provenance
+
+    monkeypatch.setattr(
+        provenance, "worktree_stamp",
+        lambda: {"clean": False, "commit": "synthetic-dirty"})
+    with pytest.raises(harness.GateError,
+                       match="requires a clean committed tree"):
+        harness.developed_accumulated_content_process_walk(
+            tmp_path / "process", tmp_path / "vertical",
+            tmp_path / "daily", tmp_path / "audit", "0" * 40)
