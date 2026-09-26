@@ -2842,7 +2842,7 @@ CITATION_MAP = {
     'ocean_pe_latlon_cgrid.py:3140-3166': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
-    'ocean_pe_latlon_cgrid.py:5073-5095': [
+    'ocean_pe_latlon_cgrid.py:5075-5097': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
         ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 23],
     'ocean_model_latlon_cgrid.py:6678-6688': [
@@ -3540,8 +3540,8 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5435': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5412-5413': [
+    'ocean_pe_latlon_cgrid.py:5437': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5414-5415': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],
