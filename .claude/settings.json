@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT": "0"
+  },
   "permissions": {
     "allow": [
       "Bash(*)",
@@ -39,10 +42,22 @@
   "enabledPlugins": {
     "codex@openai-codex": true,
     "ponytail@ponytail": true,
+    "caveman@caveman": true,
     "ralph-loop@claude-plugins-official": false,
     "superpowers@claude-plugins-official": true
   },
-  "env": {
-    "CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT": "0"
+  "extraKnownMarketplaces": {
+    "ponytail": {
+      "source": {
+        "source": "github",
+        "repo": "DietrichGebert/ponytail"
+      }
+    },
+    "caveman": {
+      "source": {
+        "source": "github",
+        "repo": "JuliusBrussee/caveman"
+      }
+    }
   }
 }

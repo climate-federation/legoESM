@@ -1479,8 +1479,12 @@ def _compute_lscale_up_col(
     grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
     dzm, invrs_dzm, zt, k_ub_zt_py, nzt,
 ):
-    """``Lscale_up`` for a single column (outer scan over launch levels)."""
-    def outer_step(max_alt, k_py):
+    """``Lscale_up`` for a single column.
+
+    Launch levels are independent, so they run together (``vmap``); only the
+    running-max smoother is sequential.
+    """
+    def lscale_k(k_py):
         tke_i_k = tke_i_col[k_py]
         tke_0 = tke_i_k + CAPE_incr_1_up[k_py + 1]
 
@@ -1513,15 +1517,18 @@ def _compute_lscale_up_col(
         frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
         frac_bc = jnp.where(exited_early, frac_inner, 0.0)
 
-        Lscale_up_k = jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
+        return jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
 
+    def smooth_step(max_alt, k_and_l):
+        k_py, Lscale_up_k = k_and_l
         k_alt = zt[k_py] + Lscale_up_k
         Lscale_up_k_smooth = jnp.where(k_alt < max_alt, max_alt - zt[k_py], Lscale_up_k)
         new_max_alt = jnp.where(k_alt < max_alt, max_alt, k_alt)
         return new_max_alt, Lscale_up_k_smooth
 
+    ks = jnp.arange(nzt - 2)
     _, vals = jax.lax.scan(
-        outer_step, jnp.zeros((), dtype=zt.dtype), jnp.arange(nzt - 2))
+        smooth_step, jnp.zeros((), dtype=zt.dtype), (ks, jax.vmap(lscale_k)(ks)))
     return jnp.concatenate([vals, jnp.full(2, _ZLMIN, dtype=zt.dtype)])
 
 
@@ -1579,10 +1586,12 @@ def _compute_lscale_down_col(
     grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
     dzm, invrs_dzm, zt, k_ub_zt_py, k_lb_zt_py, nzt,
 ):
-    """``Lscale_down`` for a single column (outer scan descending from the top)."""
-    def outer_step(min_alt, i):
-        k_py = nzt - 1 - i
+    """``Lscale_down`` for a single column.
 
+    Launch levels run together (``vmap``); only the running-min smoother,
+    descending from the top, is sequential.
+    """
+    def lscale_k(k_py):
         tke_i_k = tke_i_col[k_py]
         tke_0 = tke_i_k - CAPE_incr_1_down[k_py - 1]
 
@@ -1613,15 +1622,19 @@ def _compute_lscale_down_col(
         frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
         frac_bc = jnp.where(exited_early, frac_inner, 0.0)
 
-        Lscale_down_k = jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
+        return jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
 
+    def smooth_step(min_alt, k_and_l):
+        k_py, Lscale_down_k = k_and_l
         k_alt = zt[k_py] - Lscale_down_k
         Lscale_down_k_smooth = jnp.where(k_alt > min_alt, zt[k_py] - min_alt, Lscale_down_k)
         new_min_alt = jnp.where(k_alt > min_alt, min_alt, k_alt)
         return new_min_alt, (k_py, Lscale_down_k_smooth)
 
+    ks = nzt - 1 - jnp.arange(nzt - 1)
     init_min_alt = zt[k_ub_zt_py]
-    _, (k_indices, vals) = jax.lax.scan(outer_step, init_min_alt, jnp.arange(nzt - 1))
+    _, (k_indices, vals) = jax.lax.scan(
+        smooth_step, init_min_alt, (ks, jax.vmap(lscale_k)(ks)))
     col = jnp.full(nzt, _ZLMIN, dtype=zt.dtype)
     return col.at[k_indices].set(vals)
 
