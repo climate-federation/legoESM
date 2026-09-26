@@ -133,6 +133,9 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
         "/dynldf_lev.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/ldfdyn.f90"),
     # --- round 40 paths: the stage-3 momentum operators and zdf_mxl ---
     "dynvor.F90": _DYN / "dynvor.F90",
     "dynkeg.F90": _DYN / "dynkeg.F90",
@@ -1075,6 +1078,15 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:123-140': [
         ('zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk)', 1),
         ('+ ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 18],
+    # --- ORCA2 card round 24: held Decision-54 whole attribution ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:348-353': [
+        "CASE( -30  )",
+        "CALL iom_get ( inum, jpdom_global, 'ahmf_3d', ahmf, cd_type = 'F', psgn = 1._wp )",
+        6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:387-393': [
+        'IF( .NOT.l_ldfdyn_time ) THEN',
+        'ahmf(:,:,1:jpkm1) =       ahmf(:,:,1:jpkm1)   * fmask(:,:,1:jpkm1)',
+        7],
     # --- ORCA2 card round 23: Decision 58 second continuity solve ---
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stprk3_stg.f90:323-329': [
         ('IF( ln_dynadv_vec ) THEN', 1),
