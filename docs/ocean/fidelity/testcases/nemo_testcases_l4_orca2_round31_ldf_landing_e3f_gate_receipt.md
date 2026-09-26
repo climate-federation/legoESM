@@ -62,6 +62,16 @@ GYRE's differing cells are fully dry vertices, where the four-T-cell mask the
 coefficient already carries is zero.  That is a stronger statement than a
 ten-step comparison: it holds for every day, not only the scored ones.
 
+**The ten-step comparison agrees, to the byte.**  Two GYRE ladders, the
+parent from a clean detached worktree at `800602875` and the landed arm at
+`4fa07edc7`, differ in exactly three document leaves, all of them the
+artifact's own file NAME, plus the worktree stamp.  **Zero content leaves
+differ**, and the residual archive's SHA-256 is the same value
+`ccd6d39651d8b460...` on both sides.  The 360-day certified year was NOT
+re-run this round, so its pinned day 30 / 240 / 360 numbers are quoted
+nowhere here; the zero-coefficient argument above is what covers the days the
+ten-step ladder does not reach.
+
 ## 3. Part A — given NEMO's entry
 
 At NEMO's own recorded kt=2 entry, swapping only the reference moves the
@@ -168,7 +178,7 @@ flight after roughly two hours.
 | R31-P2 | **CONFIRMED** | the exposed stage-2 vorticity digest equals round 28's parent exactly while the lateral-diffusion tendency moves in 20,647 U and 20,730 V cells. |
 | R31-P3 | **CONFIRMED** | 40 checkpoints; U `15.365503106245665` to `0.4230544199344073` and V `42.669598831454074` to `0.6838675521949863`, factors of 36 and 62 against a predicted bar of 10. |
 | R31-P4 | **NOT MEASURED** | round 24's literal compiled-statement replay was not re-run this round; the given-entry control measured the tendency change and the vorticity inertness instead.  Carried to OPEN rather than claimed. |
-| R31-P5 | **CONFIRMED on the stated mechanism, trajectory arm OPEN** | GYRE's two references differ on 4,590 cells and the largest masked viscosity coefficient there is exactly `0.0`, so the reference cannot reach the tendency at any step.  The confirming ten-step GYRE pair was still running; the parent side completed, the arm side did not. |
+| R31-P5 | **CONFIRMED** | GYRE's two references differ on 4,590 cells and the largest masked viscosity coefficient there is exactly `0.0`, so the reference cannot reach the tendency at any step; the confirming ten-step pair differs in zero content leaves with the same residual digest.  The 360-day year was not re-run and its numbers are not claimed. |
 | R31-P6 | **HALF CONFIRMED, HALF REFUTED** | the substitution operand is the defect and repairing it alone reaches 0 unequal cells.  The predicted ORDER defect is REFUTED: substituting before or after the exchange leaves the array identical on this card. |
 | R31-P7 | **CONFIRMED** | the two arrays differ on 81,006 cells, maximum `651.2392608953055` m at [97, 40, 29], and the repaired builder equals the transcription everywhere.  The arithmetic tying that to rounds 29-30's live `651.2256783597969` m is labelled PLAUSIBLE. |
 | R31-P8 | **CONFIRMED** | every plant fires; see section 8. |
@@ -270,11 +280,10 @@ landing it would cost.  It is round 32's first item.
    `een_arm.log`.  Report whether the kt=4 raw-`e3w` refusal is gone and what
    the ten-step ladder does.  If it completes, landing that one statement is
    the rest of the vorticity half.
-2. **Finish the GYRE ten-step confirmation.**  Its parent side completed; the
-   arm side was still running.  The zero-coefficient proof stands on its own
-   and is stronger, but the pair should be read out.  The 360-day certified
-   year was NOT re-run this round and the pinned day 30 / 240 / 360 numbers
-   are NOT claimed here.
+2. **Re-run GYRE's 360-day certified year.**  The ten-step pair is
+   byte-identical and the zero-coefficient argument covers every step, but
+   the pinned day 30 / 240 / 360 numbers were not re-measured this round and
+   are not claimed anywhere in this receipt.
 3. **Re-run round 24's literal compiled-statement replay** on the landed
    operator, so R31-P4 stops being unmeasured.
 4. **Complete the card battery.**  59 tests ran; earlier rounds quote 170.
