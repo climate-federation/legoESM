@@ -920,3 +920,15 @@ def test_conservative_regrid_rejects_partial_longitude_source():
         field, src_lat, _uniform_centres(n_src_lon, 0.0, 360.0), dst_lat, dst_lon,
     )
     assert np.all(np.isfinite(out))
+
+
+def test_legacy_applicator_warns_it_is_known_defective():
+    """The legacy per-step applicator must say it applies no albedo and
+    leaves cube stress unrotated (review decision item 14 guard)."""
+    import inspect
+    from legoesm.ocean.coupler import omip2_applicator as A
+    src = inspect.getsource(A.apply_omip2_surface_fluxes)
+    body = src.split('"""', 2)[2]
+    assert body.lstrip().startswith("warnings.warn(")
+    assert "no shortwave albedo" in body and "unrotated" in body
+    assert "FutureWarning" in body
