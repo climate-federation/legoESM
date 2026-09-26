@@ -95,6 +95,8 @@ def _live_production_ldf(deck_root: Path, record_root: Path, kt: int):
         "e3u": np.asarray(e3u, dtype=np.float64)[:, 1:, :r11.NZ],
         "e3v": np.asarray(e3v, dtype=np.float64)[1:, :, :r11.NZ],
         "e3f": np.asarray(e3f, dtype=np.float64)[1:, 1:, :r11.NZ],
+        "r1_area_f": np.asarray(
+            metric_reciprocals[1], dtype=np.float64)[1:, 1:],
     }
     return du, dv, card, entry, live
 
@@ -123,9 +125,9 @@ def run(deck_root: Path, record_root: Path, kt: int, *, plant: bool) -> dict:
     score_v = r11.score(candidate_v, oracle_v, weight_v)
 
     raw = card.recipe.z_coord.nemo_een_barotropic
-    area = np.asarray(card.recipe.grid.area_q)[1:, 1:]
-    expected_area = np.asarray(raw.e1f) * np.asarray(raw.e2f)
-    area_exact = np.array_equal(area, expected_area)
+    expected_r1_area = 1.0 / (
+        np.asarray(raw.e1f) * np.asarray(raw.e2f))
+    area_exact = np.array_equal(live["r1_area_f"], expected_r1_area)
     predictions = {
         "R24-P1": True,
         "R24-P2": score_u["bit_identical"] and score_v["bit_identical"],
@@ -144,9 +146,10 @@ def run(deck_root: Path, record_root: Path, kt: int, *, plant: bool) -> dict:
             "curl_and_area": "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:121-125",
             "live_thickness": "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:127-140",
         },
-        "vertex_area": {
-            "cells": int(area.size),
-            "unequal": int(np.count_nonzero(area != expected_area)),
+        "vertex_area_reciprocal": {
+            "cells": int(expected_r1_area.size),
+            "unequal": int(np.count_nonzero(
+                live["r1_area_f"] != expected_r1_area)),
             "bit_identical": area_exact,
         },
         "u_momentum": score_u,
