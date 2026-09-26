@@ -93,6 +93,15 @@ This is **independent review unavailable in-sandbox**, not a SHIP verdict.
 The acquisition remains operator-gated and cannot produce a scientific claim
 until every admission and plant passes.
 
+## Mechanical gates and tests
+
+The receipt citation gate passes with 2 citations, 0 unmapped citations, 0
+failures, and 0 map-audit failures.  Its shifted-line plant exits 1 with gate
+status `FAIL`.  The focused citation suite reports **`16 passed in 2.46s`**.
+The acquisition preflight and source-layout plant results are recorded above.
+No Python or production model path changed, so no full ocean pytest battery was
+run in this acquisition-only round.
+
 ## Trajectory and card census
 
 There is no production candidate, so Decisions 43/45/55/59, the year run, and
@@ -119,6 +128,11 @@ configuration or carried-state decision is requested.
 | `preflight.log` | `dd901e9e13dcf14a6b3e29a45d67ad46c54293a2986541211d78acdb6f8b41f6` |
 | `layout_plant.log` | `831c68020af81934d5c23f7fa3d311cc859ede03422abc1b86cbbaaadecad29d` |
 | `codex_review.log` | `52e37095a196d69ea605b6b132ddf8ece1a9087cb75fdc3c3909f62877501da8` |
+
+Choices made: no scientific or configuration choice.  The preregistered
+acquisition-only end step and restart-output cadence do not alter NEMO's
+physical program, and the admission compares its resulting states against the
+unaltered Round-132 card byte for byte.
 
 ## OPEN — round 178
 
