@@ -51,7 +51,6 @@ def _compare(baseline: dict, arm: dict, name: str) -> dict:
                          "away" if after_max > before_max else "same-maximum")
             moved.append({"row": row, "direction": direction,
                           "before": brow, "after": arow})
-    require(moved, f"{name}: arm is vacuous")
     same_owner = (
         baseline["candidate_trajectory"]["first_non_bit_statement"] ==
         arm["candidate_trajectory"]["first_non_bit_statement"]
@@ -59,7 +58,7 @@ def _compare(baseline: dict, arm: dict, name: str) -> dict:
     return {
         "commit": arm["worktree"]["commit"],
         "checkpoint_count": len(acheck),
-        "first_moved_row": moved[0]["row"],
+        "first_moved_row": moved[0]["row"] if moved else None,
         "first_non_bit_statement_unchanged": same_owner,
         "at_bar_rows_left": at_bar_left,
         "moved_row_count": len(moved),

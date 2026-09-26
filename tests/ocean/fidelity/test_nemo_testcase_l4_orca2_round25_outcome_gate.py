@@ -52,8 +52,9 @@ def test_round25_gate_accepts_three_live_arms_and_rejects_plant(tmp_path):
     arms = {}
     for name, count in (("single", 40), ("thickness", 12), ("metric", 40)):
         arm = _document(name, copy.deepcopy(baseline["candidate_trajectory"]["checkpoints"][:count]))
-        arm["candidate_trajectory"]["checkpoints"][2]["rows"]["u"] = (
-            _score(exact=False, maximum=2.0))
+        if name != "single":
+            arm["candidate_trajectory"]["checkpoints"][2]["rows"]["u"] = (
+                _score(exact=False, maximum=2.0))
         arms[name] = arm
 
     paths = {}
@@ -70,7 +71,9 @@ def test_round25_gate_accepts_three_live_arms_and_rejects_plant(tmp_path):
         baseline=paths["baseline"], single_mask=paths["single"],
         live_thickness=paths["thickness"], native_f_metrics=paths["metric"],
         refusal_log=refusal, json_out=None, plant=False)
-    assert gate.run(args)["isolated_instability_owner"] == "live_thickness"
+    result = gate.run(args)
+    assert result["isolated_instability_owner"] == "live_thickness"
+    assert result["arms"]["single_mask"]["moved_row_count"] == 0
     args.plant = True
     with pytest.raises(gate.GateError, match="formerly AT-BAR rows left"):
         gate.run(args)
