@@ -546,3 +546,52 @@ def test_zm_land_fraction_is_an_explicit_choice():
     b, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0,
                                       land_frac=jnp.zeros(T.shape[0]))
     assert jnp.array_equal(a.dT_dt, b.dT_dt)
+
+
+def test_combined_physics_lane_aquaplanet_runs_under_none_and_refuses_land():
+    """Idealized grids carry an ALL-ZERO land mask on the combined-physics
+    lane (MPAS / spectral / hydrostatic bridges).  "none" must run there, as it
+    does on the column pipeline, and a mask with land must be refused."""
+    n, nlev = 4, 12
+    ncol = 6 * n * n
+    cfg = _make_zm_only_config("none")
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    ps = init_physics_state(ncol, nlev, cfg)
+    state, grid_ocean, sigma = _convecting_3d_state(n, nlev, land_frac=0.0)
+    assert grid_ocean.land_frac is not None
+    tend, _ = physics_fn(state, grid_ocean, sigma, phys_state=ps)
+    assert bool(jnp.isfinite(tend.dT_dt.data).all())
+    assert float(jnp.abs(tend.dT_dt.data).max()) > 0.0, "fixture must convect"
+    state, grid_land, sigma = _convecting_3d_state(n, nlev, land_frac=1.0)
+    with pytest.raises(ValueError, match="aquaplanet"):
+        physics_fn(state, grid_land, sigma, phys_state=ps)
+
+
+def _zm_driver_config(grid_type, resolution, dycore_kw):
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
+    )
+    dt = dycore_kw["dt"]
+    return ExperimentConfig(
+        grid=GridConfig(grid_type=grid_type, resolution=resolution, nlev=8),
+        dycore=DycoreConfig(**dycore_kw), output=OutputConfig(diag_days=1),
+        days=2.0 * dt / 86400.0, dataset="analytical", topography="flat",
+        convection="zhang_mcfarlane")
+
+
+@pytest.mark.parametrize("grid_type,resolution,dycore_kw", [
+    ("cubed_sphere", 8, {"dt": 1.0}),
+    ("mpas", 2, {"dt": 600.0, "discretization": "mpas"}),
+], ids=["column_pipeline", "mpas_combined"])
+def test_driver_zm_land_policy_means_the_same_on_every_lane(tmp_path, grid_type, resolution, dycore_kw):
+    """One rule, both driver lanes, on a flat (all-ocean) run: "required"
+    stops at setup, "none" runs to completion."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _zm_driver_config(grid_type, resolution, dycore_kw)
+    assert cfg.zm_land_fraction == "required"
+    with pytest.raises(ValueError, match="no land"):
+        ModelDriver(cfg, output_dir=tmp_path / "req").setup()
+    driver = ModelDriver(cfg._replace(zm_land_fraction="none"), output_dir=tmp_path / "none")
+    driver.setup()
+    assert driver.run() == "COMPLETED"
