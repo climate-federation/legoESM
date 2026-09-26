@@ -67,6 +67,7 @@ def main() -> int:
                     help="our T/S from the 5-day window mean (T_mean_hw/S_mean_hw); refused if absent")
     ap.add_argument("--nemo-dir", required=True, type=Path, help="directory of ORCA1_5d_*_grid_{T,U,V,W}.nc")
     ap.add_argument("--nemo-stem", default="ORCA1_5d_20000101_20000331")
+    ap.add_argument("--nemo-suffix", default="", help="file-name suffix after the grid letter, e.g. '_1h' for the hourly rerun")
     ap.add_argument("--rec", type=int, required=True)
     ap.add_argument("--lon-lo", type=float, default=220.0)
     ap.add_argument("--lon-hi", type=float, default=240.0)
@@ -147,13 +148,17 @@ def main() -> int:
 
     # ---- NEMO -------------------------------------------------------------
     def _nemo(grid, var):
-        d = nc.Dataset(a.nemo_dir / f"{a.nemo_stem}_grid_{grid}.nc")
+        d = nc.Dataset(a.nemo_dir / f"{a.nemo_stem}_grid_{grid}{a.nemo_suffix}.nc")
         x = np.ma.filled(np.ma.masked_invalid(d.variables[var][a.rec]), np.nan).astype(float)  # (nlev, y, x)
         la = np.asarray(d.variables["nav_lat"][:], float); lo = np.asarray(d.variables["nav_lon"][:], float) % 360.0
         dep = np.asarray(d.variables[[k for k in d.variables if k.startswith("depth") and not k.endswith("bounds")][0]][:], float)
         return np.transpose(x, (1, 2, 0)), la, lo, dep
     toN, laT, loT, gdept = _nemo("T", "to"); soN = _nemo("T", "so")[0]
-    uoN, laU, loU, _ = _nemo("U", "uo"); voN, laV, loV, _ = _nemo("V", "vo")
+    uoN, laU, loU, _ = _nemo("U", "uo")
+    if (a.nemo_dir / f"{a.nemo_stem}_grid_V{a.nemo_suffix}.nc").exists():
+        voN, laV, loV, _ = _nemo("V", "vo")
+    else:  # the hourly rerun writes no grid_V; meridional shear enters S2 as zero there
+        voN, laV, loV = np.zeros_like(uoN), laU, loU
     avtN, laW, loW, depthw = _nemo("W", "avt"); bn2N = _nemo("W", "bn2")[0]
     avmN = _nemo("W", "avm")[0]
     print(f"[NEMO] record {a.rec} (5-day means): to {toN.shape} uo {uoN.shape} avt {avtN.shape}; "
@@ -269,7 +274,7 @@ def main() -> int:
     tc_o = _turbocline(KH_w, zw_int, box_o, w_o)
     _hole_ctx = None
     tc_N_of_mean = _turbocline(avt_int, depthw[1:nlN], boxT, wT)
-    d5 = nc.Dataset(a.nemo_dir / f"{a.nemo_stem}_grid_T.nc")
+    d5 = nc.Dataset(a.nemo_dir / f"{a.nemo_stem}_grid_T{a.nemo_suffix}.nc")
     if "mldkz5" in d5.variables:
         mk = np.ma.filled(np.ma.masked_invalid(d5.variables["mldkz5"][a.rec]), np.nan).astype(float).ravel()
         tc_N = _box_mean(mk[:, None], wT, boxT)[0]
