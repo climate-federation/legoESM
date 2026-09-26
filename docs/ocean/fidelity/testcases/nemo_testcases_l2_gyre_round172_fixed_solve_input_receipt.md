@@ -105,8 +105,37 @@ landing gate is applicable this round.
 
 ## Review, citations, and tests
 
-Independent review, citation-gate, and focused-test results are recorded in
-the final committed revision of this receipt.
+The required separate review command was run with `codex exec --sandbox
+read-only`.  Its exact disposition is:
+
+> independent review unavailable in-sandbox
+
+The terminal error was `failed to initialize in-process app-server client:
+Read-only file system`; it emitted no SHIP or DO NOT SHIP verdict.  A direct
+audit then re-applied the patch with zero fuzz, read the complete acquisition
+script and source patch, and repeated the syntax/layout/truncation controls.
+
+The receipt citation gate reports PASS with three citations, zero failures,
+zero unmapped citations, and zero map-audit failures; all nine self-test
+plants fire.  Its shifted compiled-source plant reports FAIL and exits `1`.
+The private fixed contract shifted 39 existing Python map entries rigidly.
+One tracer-solve range grew by five lines because the new selector lies
+inside its two still-pinned endpoint symbols.  The nine affected citations in
+the cumulative receipt were shifted with their map entries.
+
+The focused year-owner, citation, literal-solve, and adaptive-implicit files
+report `83 passed in 77.13s`.  `bash -n` on the acquisition and `py_compile`
+on both edited gates pass.
+
+The mandated single `tests/ocean/fidelity tests/ocean/unit -n 12` battery was
+run once.  Four JAX/XLA workers aborted during unrelated compilations and were
+replaced; the 900-second bound interrupted the run at 70%.  Its exact terminal
+summary is `51 failed, 6019 passed, 121 skipped, 2 xfailed, 57 warnings in
+912.72s`, followed by `KeyboardInterrupt`.  Because collection did not finish,
+the emitted failure set is incomplete and cannot be certified against the
+historical 87-red list.  None of the four directly changed focused files
+failed in that run, and their clean 83-test rerun is the applicable result;
+the full-tree battery is incomplete coverage, not a pass.
 
 ## Evidence hashes
 
@@ -118,6 +147,11 @@ the final committed revision of this receipt.
 | `lego_solve_inputs_report.json` | `c18dd2168cf69c033b0bdb65faa7617064521d26f1b4b9ec9bbb38402897d907` |
 | `acquisition_preflight_fixed.log` | `a19547785d098d6cd88795c9a77fbc1b56e42d942f55c7ccb2de62b7949175b8` |
 | `acquisition_truncation_plant.log` | `6595ee6362a8d94361cb65d47064b92d147283b9927b0f148a57bdff3b64d5aa` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `citation_gate.json` | `368e30cf14981e4793a408a983043ee8f1b83cc2f9e3a26e6295813d62e3bac4` |
+| `citation_gate_shifted_plant.json` | `c27a3d2c37c9da73b8a0f68fb759da006fa6262bf1c647b698c922829d3ab79d` |
+| `focused_tests_final.log` | `0643ffddbb0dc9e68ed1291e2ed83b3061e27226cc02061deafb370af0255c6f` |
+| `full_fidelity_unit_tests.log` | `e1586d9b9e75e7b61801a9e7bb5b06051e371a0ba6f400b16d14d128a3742a66` |
 
 ## OPEN — round 173
 
