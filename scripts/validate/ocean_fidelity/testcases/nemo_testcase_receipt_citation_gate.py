@@ -1133,15 +1133,15 @@ CITATION_MAP = {
         ('END DO   ;   END DO   ;   END DO', 6), 7],
     # --- round 178: admitted developed tracer-LDF statement walk ---
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/stprk3.f90:173-180': [
-        'IF( l_ldfslp ) THEN', 'ENDIF', 8],
+        'IF( l_ldfslp ) THEN', ('ENDIF', 7), 8],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/stprk3_stg.f90:928-934': [
-        'IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 )',
+        ('IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 )', 5),
         'IF( ln_trabbl  )   CALL tra_bbl', 7],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf.f90:105-118': [
-        'SELECT CASE ( nldf_tra )',
+        ('SELECT CASE ( nldf_tra )', 2),
         'CALL traldf_iso_blp', 14],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/ldfslp.f90:222-268': [
-        'DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)',
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 4),
         '&                   * ( umask(ji,jj  ,jk) + umask(ji,jj  ,jk+1) ) * 0.5_wp',
         47],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/ldfslp.f90:262-268': [
@@ -1151,19 +1151,19 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:167': (
         'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:215-250': [
-        'IF( jk == 1 ) THEN',
+        ('IF( jk == 1 ) THEN', 1),
         'zdkt(ji,jj,ikp1) = 0._wp', 36],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:272-299': [
-        'DO jj = ntsj-( 0+1), ntej+(  0 ) ; DO ji = ntsi-( 0+1), ntei+(  0 )',
+        ('DO jj = ntsj-( 0+1), ntej+(  0 ) ; DO ji = ntsi-( 0+1), ntei+(  0 )', 1),
         'END DO   ;   END DO', 28],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:311-344': [
-        'IF( jk ==1 )   zfw',
+        ('IF( jk ==1 )   zfw', 1),
         'r177_fw_lower(ji,jj,jk) = zfw(ji,jj)', 34],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:346-367': [
-        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +',
+        ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
         '&                 * r1_e1e2t(ji,jj) / (e3t_3d', 22],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:403-419': [
-        'IF( lr177_write ) THEN',
+        ('IF( lr177_write ) THEN', 2),
         'WRITE(r177_unit) e3w_1d', 17],
     # --- round 131: completed-step boundary and daily-reset state schema ---
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:222-226': [
