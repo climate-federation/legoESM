@@ -5,6 +5,7 @@ import numpy as np
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round21_merge_owner_control as control,
+    nemo_testcase_l4_orca2_round21_merge_owner_gate as gate,
 )
 
 
@@ -45,3 +46,46 @@ def test_bridge_control_ignores_current_card_operands_and_can_fail():
     assert base.shape == (3, 3, 1)
     assert np.array_equal(base, repeated)
     assert np.count_nonzero(base.view(np.uint64) != planted.view(np.uint64)) > 0
+
+
+def _document(delta=0.0):
+    checkpoints = []
+    for kt in range(1, 11):
+        for checkpoint in gate.CHECKPOINTS:
+            rows = {}
+            for field in gate.FIELDS:
+                value = delta if (kt, checkpoint, field) == (1, "stage2", "u") else 0.0
+                rows[field] = {
+                    "bit_identical": value == 0.0,
+                    "count": 1,
+                    "first_unequal_index": None if value == 0.0 else [0],
+                    "max_abs": value,
+                    "mean_abs_over_unequal": value,
+                    "unequal": int(value != 0.0),
+                }
+            checkpoints.append({"kt": kt, "checkpoint": checkpoint, "rows": rows})
+    return {
+        "status": "LADDER_MEASURED",
+        "card": "ORCA2-zps",
+        "candidate_trajectory": {"checkpoints": checkpoints},
+        "worktree": {"commit": "ignored"},
+    }
+
+
+def test_result_gate_holds_when_combined_arm_retains_a_row():
+    round20 = _document()
+    moved = _document(1.0)
+    documents = {
+        "round20": round20,
+        "merge": moved,
+        "baseline": moved,
+        "fold": moved,
+        "e3f": moved,
+        "both": moved,
+        "plant": _document(2.0),
+    }
+    result = gate.analyze(documents)
+    assert result["status"] == "HELD_THIRD_OWNER"
+    assert result["rows_moved_from_round20"]["both"] == 1
+    assert result["first_combined_residual"]["field"] == "u"
+    assert result["plant_rows_changed_from_combined"] == 1
