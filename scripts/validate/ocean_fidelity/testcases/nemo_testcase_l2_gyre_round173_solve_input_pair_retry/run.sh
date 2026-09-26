@@ -55,7 +55,8 @@ for path in "$PREREG" "$BINARY" "$BASELINE_RUN/nemo" \
     "$INPUT_ROOT/content_T.npy" "$INPUT_ROOT/manifest.json" \
     "$INPUT_ROOT/trace_files.sha256" "$INPUT_ROOT/trace_files.stamp" \
     "$SOURCE_RUN/vertical_records.sha256" \
-    "$SOURCE_RUN/vertical_records.stamp"; do
+    "$SOURCE_RUN/vertical_records.stamp" \
+    "$FAILED_RUN/round172_solve_inputs.raw" "$FAILED_RUN/ocean.output"; do
   [[ -f "$path" ]] || refuse 64 "missing required input $path"
 done
 
@@ -69,10 +70,12 @@ cmp -s "$SOURCE_RUN/$RESTART_1080" "$BASELINE_RUN/$RESTART_1080" || \
   refuse 65 "existing baseline day-180 restart moved"
 cmp -s "$SOURCE_RUN/$RESTART_1440" "$BASELINE_RUN/$RESTART_1440" || \
   refuse 65 "existing baseline day-240 restart moved"
+grep -Fq 'kt 1082 |ssh| max' "$FAILED_RUN/ocean.output" || \
+  refuse 65 "failed e3t arm does not report its step-1082 NaN"
 
 readonly DRY=$(mktemp -d /tmp/gyre-r173-wet-input.XXXXXXXX)
 readonly RAW=$DRY/round172_solve_inputs.raw
-if "$PY" - "$REPO" "$SOURCE_RUN" "$INPUT_ROOT" "$RAW" "$MODE" <<'PYINPUT'
+if "$PY" - "$REPO" "$SOURCE_RUN" "$INPUT_ROOT" "$FAILED_RUN/round172_solve_inputs.raw" "$RAW" "$MODE" <<'PYINPUT'
 import hashlib
 import json
 import sys
@@ -80,9 +83,9 @@ from pathlib import Path
 
 import numpy as np
 
-repo, source_root, input_root, raw, mode = (
+repo, source_root, input_root, failed_raw, raw, mode = (
     Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]),
-    Path(sys.argv[4]), sys.argv[5])
+    Path(sys.argv[4]), Path(sys.argv[5]), sys.argv[6])
 sys.path.insert(0, str(repo))
 from scripts.validate.ocean_fidelity.testcases.nemo_testcase_l2_gyre_round35_trazdf_matrix import (  # noqa: E402
     read_trazdf_matrix,
@@ -159,6 +162,22 @@ with raw.open("wb") as handle:
         lego_content[2:34, 2:24, :30] = np.transpose(content[frame], (1, 0, 2))
         wet = np.zeros((36, 26, 31), dtype=bool)
         wet[:, :, :30] = mask
+        if frame == 0:
+            failed_e3t = np.fromfile(
+                failed_raw, dtype="<f8", count=36 * 26 * 31,
+            ).reshape((36, 26, 31), order="F")
+            dry_active = np.zeros((36, 26, 31), dtype=bool)
+            dry_active[:, :, :30] = retained
+            oracle_e3t = np.asarray(arrays["e3t_Kaa"], dtype="<f8")
+            dry_zero = int(np.count_nonzero(failed_e3t[dry_active] == 0.0))
+            dry_positive = int(np.count_nonzero(oracle_e3t[dry_active] > 0.0))
+            if (dry_zero, dry_positive) != (3120, 3120):
+                raise SystemExit(
+                    "REFUSE: failed-input dry-cell diagnosis does not close: "
+                    f"zero={dry_zero} oracle_positive={dry_positive}")
+            print(
+                "FAILED_INPUT_DIAGNOSIS step=1081 dry_zero_replacements=3120 "
+                "dry_oracle_positive=3120 failure_step=1082")
 
         outputs = []
         for label, oracle_name, lego in (
