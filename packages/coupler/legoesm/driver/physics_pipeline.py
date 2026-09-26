@@ -2269,6 +2269,7 @@ class PhysicsPipeline:
             snow_new, _, _ = update_snow(
                 snow, jnp.zeros_like(snow), T_land, precip_snow_diag, dt,
                 Q_net=None,
+                snow_age_activation_K=0.0,  # age output discarded below
             )
         else:
             snow_new = snow
