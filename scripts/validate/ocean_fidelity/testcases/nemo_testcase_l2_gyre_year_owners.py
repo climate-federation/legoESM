@@ -52,6 +52,9 @@ MODES
   --score-solve-input-pair
                      admits the Round-173 NEMO-side e3t/content pair and
                      ranks its day-240 wet-cell temperature leverage.
+  --developed-content-walk
+                     walks the two compiled temperature-content families at
+                     step 1081 through production JIT and eager execution.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -102,6 +105,9 @@ record-backed plants are persisted in their round evidence)
                            difference and requires its registered RMS to move
   solve-input-content-scale
                            does the same for the content arm
+  developed-content-krhs-ulp
+                           moves one recorded T(Krhs) operand by one ULP and
+                           requires both literal content rows to change
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -4183,6 +4189,10 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--score-solve-input-pair", action="store_true",
         help="admit and score the Round-173 NEMO-side e3t/content pair")
+    parser.add_argument(
+        "--developed-content-walk", action="store_true",
+        help="walk the step-1081 temperature-content producer through the "
+             "complete production step under JIT and eager execution")
     parser.add_argument("--solve-input-pair-root", type=Path,
                         default=DEFAULT_SOLVE_INPUT_PAIR_ROOT)
     parser.add_argument("--solve-input-baseline-root", type=Path,
@@ -4420,6 +4430,36 @@ def main(argv=None) -> int:
         require(args.plant in (None, "none"),
                 f"plant {args.plant!r} did not fire")
         print(json.dumps(report["ranking"], indent=2))
+        print("STATUS PASS")
+        return 0
+    if args.developed_content_walk:
+        require(args.expect_commit is not None,
+                "--developed-content-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-content-walk needs --daily-record-audit")
+        try:
+            report = developed_content_producer_walk(
+                args.developed_vertical_root, args.daily_record_root,
+                args.daily_record_audit, args.expect_commit,
+                plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            if str(error).startswith("PLANT-BLIND"):
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["modes"], indent=2))
         print("STATUS PASS")
         return 0
     if args.developed_vertical_sensitivity:
@@ -12393,6 +12433,250 @@ def score_nemo_solve_input_pair(
         "interpretation": (
             "forced-input magnitude sensitivity only; not source-exact "
             "landing proof"),
+    }
+
+
+# ---------------- Round-175 developed content producer walk ---------------
+def _content_walk_rows(observed: dict[str, np.ndarray], record: dict,
+                       wet: np.ndarray) -> dict:
+    """Score one complete-step execution against NEMO's written operands."""
+    nlev = wet.shape[-1]
+    dt = np.float64(record["arrays"]["rDt"])
+    nemo = {
+        "T_Kbb": _vertical_field(record, "T_Kbb_in", nlev),
+        "e3t_Kbb": _vertical_field(record, "e3t_Kbb", nlev),
+        "T_Krhs": _vertical_field(record, "T_Krhs_in", nlev),
+        "e3t_Kmm": _vertical_field(record, "e3t_Kmm", nlev),
+        "content": _vertical_field(record, "rhs_T", nlev),
+    }
+    nemo["before_content"] = nemo["e3t_Kbb"] * nemo["T_Kbb"]
+    nemo["accumulated_Krhs_content"] = (
+        (dt * nemo["e3t_Kmm"]) * nemo["T_Krhs"])
+    literal = (nemo["before_content"]
+               + nemo["accumulated_Krhs_content"])
+    calibration = _score_developed_row(literal, nemo["content"], wet)
+    require(calibration["bit_exact"],
+            "literal compiled-order content does not reproduce rhs_T")
+
+    registry = (
+        "T_Kbb", "e3t_Kbb", "before_content", "T_Krhs", "e3t_Kmm",
+        "accumulated_Krhs_content", "content",
+    )
+    require(set(observed) >= set(registry),
+            "developed content observer registry is incomplete")
+    rows = {
+        name: _score_developed_row(observed[name], nemo[name], wet)
+        for name in registry
+    }
+    first_non_bit = next(
+        (name for name in registry if not rows[name]["bit_exact"]), "NONE")
+    return {
+        "rows": rows,
+        "registered_order": list(registry),
+        "first_non_bit": first_non_bit,
+        "literal_nemo_rhs_calibration": calibration,
+        "model_content_rebuild": _score_developed_row(
+            observed["rebuilt_content"], observed["content"], wet),
+        "model_accumulator_components": {
+            "advection_cells_nonzero": int(np.count_nonzero(
+                observed["advection_increment"][wet])),
+            "source_cells_nonzero": int(np.count_nonzero(
+                observed["source_increment"][wet])),
+        },
+    }
+
+
+def developed_content_producer_walk(
+        vertical_root: Path, daily_root: Path, daily_audit: Path,
+        expected_commit: str, *, plant: str | None = None) -> dict:
+    """Walk NEMO's two temperature-content families at developed step 1081."""
+    require(plant in (None, "none", "developed-content-krhs-ulp"),
+            f"unknown developed-content plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "developed content walk requires a clean committed tree")
+    require(stamp["commit"] == expected_commit,
+            "developed content walk commit differs from --expect-commit")
+    vertical_root = Path(vertical_root)
+    vertical_admission = validate_vertical_record(
+        vertical_root, DEVELOPED_VERTICAL_RECORD_COMMIT,
+        process_root=DEFAULT_PROCESS_RECORD_ROOT)
+    bundle = _developed_entry_bundle(
+        Path(daily_root), Path(daily_audit), expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    wet = bundle["wet"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    nlev = wet.shape[-1]
+    record = _read_vertical_record(
+        vertical_root
+        / f"oracle_trazdf_matrix_kt{PROCESS_START_STEP:08d}.bin",
+        PROCESS_START_STEP)
+    calibration = _vertical_calibration(record)
+    require(all(value == 0 for value in calibration.values()),
+            "Round-125 compiled calibration moved at step 1081")
+
+    if plant == "developed-content-krhs-ulp":
+        dt = np.float64(record["arrays"]["rDt"])
+        tkrhs = _vertical_field(record, "T_Krhs_in", nlev)
+        e3t = _vertical_field(record, "e3t_Kmm", nlev)
+        before = (_vertical_field(record, "e3t_Kbb", nlev)
+                  * _vertical_field(record, "T_Kbb_in", nlev))
+        candidates = np.argwhere(wet & np.isfinite(tkrhs))
+        require(candidates.size > 0,
+                "PLANT-BLIND: no finite wet T(Krhs) operand")
+        index = tuple(int(value) for value in candidates[0])
+        planted = np.array(tkrhs, copy=True)
+        planted[index] = np.nextafter(planted[index], np.inf)
+        require(planted[index] != tkrhs[index],
+                "PLANT-BLIND: T(Krhs) ULP rounded away")
+        baseline_accum = (dt * e3t) * tkrhs
+        planted_accum = (dt * e3t) * planted
+        accum_moved = _different_cells(planted_accum, baseline_accum, wet)
+        rhs_moved = _different_cells(
+            before + planted_accum, before + baseline_accum, wet)
+        if accum_moved != 1 or rhs_moved != 1:
+            raise GateError(
+                "PLANT-BLIND: T(Krhs) ULP moved "
+                f"accum={accum_moved}, rhs={rhs_moved} cells")
+        return {
+            "status": "PLANT-FIRED", "plant": plant,
+            "control": {"index_jik": list(index),
+                        "accumulated_content_cells_moved": accum_moved,
+                        "complete_rhs_cells_moved": rhs_moved},
+        }
+
+    freshwater, surface = gate._surface_forcings(
+        card, state, PROCESS_START_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+    hooks = _NEMOWSRK3TestHooks(
+        tracer_process_trace=(), vertical_solve_trace=True)
+    real_pair_step = model_module._nemo_ws_rk3_tracer_pair_step
+
+    def run_mode(*, eager: bool) -> tuple[object, dict[str, np.ndarray]]:
+        def execute(model):
+            if eager:
+                with jax.disable_jit():
+                    result = model._step_impl(
+                        state, card.dt_s, freshwater=freshwater,
+                        surface_forcing=surface,
+                        _nemo_stage1_zad_eta_after_override=ssha)
+                    return jax.device_get(result)
+            result = model.step(
+                state, dt=card.dt_s, freshwater=freshwater,
+                surface_forcing=surface,
+                _nemo_stage1_zad_eta_after_override=ssha)
+            return jax.device_get(result)
+
+        control_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config, _nemo_ws_test_hooks=hooks)
+        control = execute(control_model)
+        captured = []
+
+        def sink(*values):
+            captured.append(tuple(np.asarray(value) for value in values))
+
+        def observed_pair_step(*values, **kwargs):
+            result = real_pair_step(*values, **kwargs)
+            if kwargs.get("return_final_content", False):
+                tr_a = values[0]
+                h_old = values[6]
+                h_new = values[7]
+                dt = jnp.asarray(values[11], dtype=h_old.dtype)
+                h_half = jnp.asarray(0.5, h_old.dtype) * (h_old + h_new)
+                before = h_old * tr_a
+                advection = result[4]
+                source_rate = kwargs["stage_source_rates"][2][0]
+                source_increment = dt * h_half * source_rate
+                advection_increment = advection - before
+                accumulated = advection_increment + source_increment
+                content = result[2]
+                recovered_krhs = accumulated / (dt * h_half)
+                rebuilt = before + accumulated
+                jax.debug.callback(
+                    sink, tr_a, h_old, before, recovered_krhs, h_half,
+                    accumulated, content, rebuilt, advection_increment,
+                    source_increment, ordered=True)
+            return result
+
+        model_module._nemo_ws_rk3_tracer_pair_step = observed_pair_step
+        try:
+            observed_model = LatLonCGridOceanModel(
+                card.recipe.grid, card.recipe.z_coord,
+                card.recipe.model_config, _nemo_ws_test_hooks=hooks)
+            observed = execute(observed_model)
+            jax.effects_barrier()
+        finally:
+            model_module._nemo_ws_rk3_tracer_pair_step = real_pair_step
+        require(len(captured) == 1,
+                f"content observer saw {len(captured)} final-stage calls")
+        moved = _state_bit_mismatches(
+            control.state_after, observed.state_after)
+        require(moved == 0,
+                f"content observer moved {moved} returned-state bytes")
+        names = (
+            "T_Kbb", "e3t_Kbb", "before_content", "T_Krhs", "e3t_Kmm",
+            "accumulated_Krhs_content", "content", "rebuilt_content",
+            "advection_increment", "source_increment",
+        )
+        return observed, dict(zip(names, captured[0], strict=True))
+
+    modes = {}
+    for name, eager in (("production_step_jit", False),
+                        ("production_eager", True)):
+        _trace, observed = run_mode(eager=eager)
+        modes[name] = _content_walk_rows(observed, record, wet)
+        modes[name]["observer_state_unequal_bytes"] = 0
+
+    authoritative = modes["production_step_jit"]
+    predictions = {
+        "literal_nemo_rhs_bit_exact": authoritative[
+            "literal_nemo_rhs_calibration"]["bit_exact"],
+        "before_family_bit_exact": all(
+            authoritative["rows"][name]["bit_exact"]
+            for name in ("T_Kbb", "e3t_Kbb", "before_content")),
+        "accumulated_family_at_least_1000_cells": authoritative["rows"][
+            "accumulated_Krhs_content"]["cells_unequal"] >= 1000,
+        "complete_content_max_at_least_1e_6_Km": authoritative["rows"][
+            "content"]["max_abs"] >= 1.0e-6,
+        "jit_and_eager_same_first_non_bit": (
+            authoritative["first_non_bit"]
+            == modes["production_eager"]["first_non_bit"]),
+    }
+    return {
+        "format": "gyre-round175-developed-content-walk-v1",
+        "status": "PASS",
+        "case": CASE,
+        "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
+        "worktree": stamp,
+        "precision": "fp64",
+        "step": PROCESS_START_STEP,
+        "wet_cells": int(np.count_nonzero(wet)),
+        "admission": {
+            "vertical": vertical_admission["status"],
+            "daily_audit": str(daily_audit),
+            "entry_restart": str(bundle["restart_path"]),
+            "source_checks": bundle["source_checks"],
+            "compiled_calibration_cells_unequal": calibration,
+        },
+        "modes": modes,
+        "authoritative_mode": "production_step_jit",
+        "first_non_bit": authoritative["first_non_bit"],
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "compiled_source": {
+            "content_rhs": "trazdf.f90:549-567",
+        },
     }
 
 

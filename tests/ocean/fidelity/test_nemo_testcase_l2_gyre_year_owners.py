@@ -1034,3 +1034,63 @@ def test_round174_solve_input_pair_refuses_dirty_worktree(
         harness.score_nemo_solve_input_pair(
             tmp_path / "pair", tmp_path / "baseline",
             tmp_path / "source", tmp_path / "mesh")
+
+
+def test_round175_content_rows_find_the_first_moved_family(
+        harness, monkeypatch):
+    """The content registry distinguishes before state from accumulated RHS."""
+    shape = (2, 3, 2)
+    wet = np.ones(shape, dtype=bool)
+    nemo = {
+        "T_Kbb_in": np.full(shape, 3.0),
+        "e3t_Kbb": np.full(shape, 4.0),
+        "T_Krhs_in": np.full(shape, 5.0),
+        "e3t_Kmm": np.full(shape, 6.0),
+    }
+    before = nemo["e3t_Kbb"] * nemo["T_Kbb_in"]
+    accumulated = (np.float64(2.0) * nemo["e3t_Kmm"]) * nemo["T_Krhs_in"]
+    nemo["rhs_T"] = before + accumulated
+    monkeypatch.setattr(
+        harness, "_vertical_field",
+        lambda _record, name, _nlev=None: np.array(nemo[name], copy=True))
+    observed = {
+        "T_Kbb": nemo["T_Kbb_in"].copy(),
+        "e3t_Kbb": nemo["e3t_Kbb"].copy(),
+        "before_content": before.copy(),
+        "T_Krhs": nemo["T_Krhs_in"].copy(),
+        "e3t_Kmm": nemo["e3t_Kmm"].copy(),
+        "accumulated_Krhs_content": accumulated.copy(),
+        "content": nemo["rhs_T"].copy(),
+        "rebuilt_content": nemo["rhs_T"].copy(),
+        "advection_increment": np.ones(shape),
+        "source_increment": accumulated - 1.0,
+    }
+    observed["accumulated_Krhs_content"][0, 0, 0] = np.nextafter(
+        observed["accumulated_Krhs_content"][0, 0, 0], np.inf)
+    observed["content"][0, 0, 0] = (
+        observed["before_content"][0, 0, 0]
+        + observed["accumulated_Krhs_content"][0, 0, 0])
+    observed["rebuilt_content"] = (
+        observed["before_content"]
+        + observed["accumulated_Krhs_content"])
+    scored = harness._content_walk_rows(
+        observed, {"arrays": {"rDt": 2.0}}, wet)
+    assert scored["first_non_bit"] == "accumulated_Krhs_content"
+    assert scored["rows"]["before_content"]["bit_exact"] is True
+    assert scored["rows"]["accumulated_Krhs_content"][
+        "cells_unequal"] == 1
+
+
+def test_round175_content_walk_refuses_dirty_worktree(
+        harness, tmp_path, monkeypatch):
+    """The developed walk refuses before opening either oracle record."""
+    from legoesm.ocean.fidelity import provenance
+
+    monkeypatch.setattr(
+        provenance, "worktree_stamp",
+        lambda: {"clean": False, "commit": "synthetic-dirty"})
+    with pytest.raises(harness.GateError,
+                       match="requires a clean committed tree"):
+        harness.developed_content_producer_walk(
+            tmp_path / "vertical", tmp_path / "daily",
+            tmp_path / "audit", "0" * 40)
