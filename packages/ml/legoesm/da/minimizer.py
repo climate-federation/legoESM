@@ -22,9 +22,9 @@ class MinimizationResult(NamedTuple):
     n_iter: jax.Array         # Number of iterations performed
     converged: jax.Array      # Boolean: converged?
     history: jax.Array        # Cost at each iteration, shape (max_iter,)
-    # L-BFGS only: True when it stopped because no step met the Armijo
-    # condition (x is the last accepted point). CG accepts such steps and
-    # always reports False.
+    # True when the minimizer stopped because the line search found no step
+    # meeting the Armijo condition (x is the last accepted point). L-BFGS stops
+    # on the first such failure; CG first retries a unit-length steepest step.
     line_search_failed: jax.Array = jnp.array(False)
 
 
@@ -308,22 +308,39 @@ def minimize_cg(
         k: jax.Array
         history: jax.Array
         converged: jax.Array
+        retry: jax.Array    # previous step was rejected; d = -z, tried at unit length
+        stalled: jax.Array  # line search failed on that unit-length retry
 
     init_state = CGState(
         x=x0, f=f0, g=g0, z=z0, d=d0,
         k=jnp.array(0),
         history=history,
         converged=jnp.array(False),
+        retry=jnp.array(False),
+        stalled=jnp.array(False),
     )
 
     def cond_fn(state):
-        return (jnp.linalg.norm(state.g) >= gtol) & (state.k < max_iter) & (~state.converged)
+        return ((jnp.linalg.norm(state.g) >= gtol) & (state.k < max_iter)
+                & (~state.converged) & (~state.stalled))
 
     def body_fn(state):
-        # Line search
-        _, f_new, g_new, x_new, _ = _backtracking_line_search(
-            cost_and_grad_fn, state.x, state.f, state.g, state.d,
+        # Line search. A step without sufficient decrease is rejected: keep
+        # the current point and retry along steepest descent scaled to unit
+        # length (a badly scaled cost can exhaust the backtracking from
+        # alpha = 1); if that retry also fails, stop (``stalled``). Steps that
+        # pass on the first try are unchanged.
+        d_try = jnp.where(
+            state.retry,
+            state.d / jnp.maximum(jnp.linalg.norm(state.d), _TINY),
+            state.d,
         )
+        _, f_ls, g_ls, x_ls, armijo_ok = _backtracking_line_search(
+            cost_and_grad_fn, state.x, state.f, state.g, d_try,
+        )
+        x_new = jnp.where(armijo_ok, x_ls, state.x)
+        f_new = jnp.where(armijo_ok, f_ls, state.f)
+        g_new = jnp.where(armijo_ok, g_ls, state.g)
 
         if preconditioner is not None:
             z_new = preconditioner(g_new)
@@ -335,6 +352,7 @@ def minimize_cg(
             jnp.sum(state.z * state.g), _TINY
         )
         beta = jnp.maximum(beta, 0.0)  # Restart if beta < 0
+        beta = jnp.where(armijo_ok, beta, 0.0)  # restart after a rejected step
 
         d_new = -z_new + beta * state.d
 
@@ -347,6 +365,8 @@ def minimize_cg(
             k=new_k,
             history=history_new,
             converged=converged,
+            retry=~armijo_ok,
+            stalled=(~armijo_ok) & state.retry,
         )
 
     final = jax.lax.while_loop(cond_fn, body_fn, init_state)
@@ -358,4 +378,5 @@ def minimize_cg(
         n_iter=final.k,
         converged=final.converged,
         history=final.history,
+        line_search_failed=final.stalled,
     )
