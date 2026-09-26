@@ -9,6 +9,11 @@ ClimateEval ERA5 input tree.  Per run, prints:
 - 20S-20N ocean (sftlf < 10 %) and land (> 90 %) means of prw, pr, evspsbl,
   and the q / RH / T profile beside ERA5 (ERA5 coarsened to the model grid).
 
+RAIN IS SCORED AGAINST GPCP ONLY (PI directive 2026-09-26: reanalysis rain is
+not trusted), same month AND year, area-weighted onto the model grid.  Outside
+the GPCP record rain is printed as NOT SCORED -- never a climatology or ERA5
+substitute.
+
 NUMBERS ONLY -- no verdict.  RH uses ``legoesm.thermo.relative_humidity`` on
 the monthly-mean q and T (not the mean of instantaneous RH) on both sides.
 """
@@ -20,6 +25,7 @@ import glob
 import numpy as np
 
 ERA5_ROOT = "/work/bd1179/b309141/climateeval_input/reanalysis_ERA5/mon"
+GPCP_ROOT = "/work/bd1179/b309141/climateeval_input/observation_GPCP/mon/pr"
 _DAY = 86400.0
 
 
@@ -47,10 +53,42 @@ def print_bands(run, lat, lon, area, lf, P, prw, P_ref, prw_ref):
     edges = list(range(-40, 41, 10))
     full = np.ones((lat.size, lon.size), bool)
     for name, mk in (("ocean", full & (lf < 0.1)), ("land", full & (lf > 0.9))):
-        for v, x, r in (("pr", P, P_ref), ("prw", prw, prw_ref)):
+        for v, x, r, src in (("pr", P, P_ref, "GPCP"), ("prw", prw, prw_ref, "ERA5")):
+            if r is None:
+                print(f"[{run}] bands {v} {name}: NOT SCORED (no {src} for this month)")
+                continue
             m, o = band_means(x, lat, area, mk, edges), band_means(r, lat, area, mk, edges)
-            print(f"[{run}] bands {v} {name} model-ERA5 " + " ".join(
+            print(f"[{run}] bands {v} {name} model-{src} " + " ".join(
                 f"{lo:+d}..{hi:+d}:{mm - oo:+.2f}" for lo, hi, mm, oo in zip(edges[:-1], edges[1:], m, o)))
+
+
+def block_area_mean(x, lat_fine, factor):
+    """cos(lat)-weighted mean of factor x factor blocks: the area-conservative
+    average of nested regular cells onto the coarse grid."""
+    w = np.cos(np.deg2rad(lat_fine))[:, None] * np.ones((1, x.shape[1]))
+    ny, nx = x.shape[0] // factor, x.shape[1] // factor
+    xs = (x * w).reshape(ny, factor, nx, factor).sum(axis=(1, 3))
+    return xs / w.reshape(ny, factor, nx, factor).sum(axis=(1, 3))
+
+
+def gpcp_pr_mm_day(lat, lon, year, month):
+    """GPCP monthly rain for year-month on the model grid [mm/d], or None when
+    the month is outside the record.  Requires the model cells to be exact
+    unions of GPCP cells (asserted)."""
+    import xarray as xr
+    g = xr.open_dataset(sorted(glob.glob(f"{GPCP_ROOT}/*.nc"))[0]).pr.sortby("lat")
+    if g.attrs.get("units") != "kg m-2 s-1":
+        raise ValueError(f"GPCP pr units {g.attrs.get('units')!r}, expected kg m-2 s-1")
+    sel = g.isel(time=np.flatnonzero((g.time.dt.year == year).values
+                                     & (g.time.dt.month == month).values))
+    if sel.time.size == 0:
+        return None
+    f = int(round(float(lat[1] - lat[0]) / float(g.lat[1] - g.lat[0])))
+    coarse_lat = g.lat.values.reshape(-1, f).mean(axis=1)
+    coarse_lon = g.lon.values.reshape(-1, f).mean(axis=1)
+    if not (np.allclose(coarse_lat, lat) and np.allclose(coarse_lon, lon)):
+        raise ValueError("model grid is not a nesting of the GPCP grid")
+    return block_area_mean(sel.isel(time=0).values, g.lat.values, f) * _DAY
 
 
 def _coarsen_to(x, lat, lon):
@@ -73,7 +111,7 @@ def main(argv=None):
     ap.add_argument("--month", type=int, default=2, help="1-based month index in the CMOR files")
     ap.add_argument("--year", type=int, default=1979)
     ap.add_argument("--bands", action="store_true",
-                    help="also print 10-degree zonal-band means (40S-40N) of pr and prw vs ERA5, ocean and land")
+                    help="also print 10-degree zonal-band means (40S-40N): pr vs GPCP, prw vs ERA5, ocean and land")
     a = ap.parse_args(argv)
 
     def era5(v, lat, lon, plev=None):
@@ -103,14 +141,19 @@ def main(argv=None):
         print(line)
         if a.bands:
             print_bands(run, lat, lon, area, lf, P, prw,
-                        era5("pr", lat, lon).values * _DAY, era5("prw", lat, lon).values)
+                        gpcp_pr_mm_day(lat, lon, a.year, a.month), era5("prw", lat, lon).values)
         trop = (np.abs(lat) <= 20)[:, None] & np.ones((1, lon.size), bool)
         regions = {"trop_ocean": trop & (lf < 0.1), "trop_land": trop & (lf > 0.9)}
-        ref = {"prw": era5("prw", lat, lon).values, "pr": era5("pr", lat, lon).values * _DAY,
+        gp = gpcp_pr_mm_day(lat, lon, a.year, a.month)
+        if gp is None:
+            print(f"[{run}] RAIN NOT SCORED: no GPCP for {a.year}-{a.month:02d} "
+                  f"(record 1983-01..2024-09)")
+            gp = np.full_like(P, np.nan)
+        ref = {"prw": era5("prw", lat, lon).values, "pr": gp,
                "evspsbl": era5("evspsbl", lat, lon).values * _DAY}
         for reg, mk in regions.items():
             print(f"[{run}] {reg}: prw {area_mean(prw, area, mk):.2f} (ERA5 {area_mean(ref['prw'], area, mk):.2f})"
-                  f"  pr {area_mean(P, area, mk):.2f} (ERA5 {area_mean(ref['pr'], area, mk):.2f})"
+                  f"  pr {area_mean(P, area, mk):.2f} (GPCP {area_mean(ref['pr'], area, mk) if np.isfinite(ref['pr']).any() else float('nan'):.2f})"
                   f"  E {area_mean(E, area, mk):.2f} (ERA5 {area_mean(ref['evspsbl'], area, mk):.2f})")
             print(f"[{run}] {reg}  p[hPa] q_model q_ERA5 [g/kg] | RH_model RH_ERA5 | dT[K]")
             for p in hus.plev.values:
