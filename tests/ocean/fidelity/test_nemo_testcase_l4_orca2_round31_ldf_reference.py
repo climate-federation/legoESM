@@ -19,6 +19,7 @@ import pytest
 from legoesm.ocean.vertical import (
     nemo_dynvor_e3f_0vor,
     nemo_ldf_reference_e3f,
+    nemo_qco_live_vorticity_e3f_cgrid,
 )
 
 
@@ -75,6 +76,24 @@ def test_the_zero_substitution_is_the_statement_that_separates_the_builders():
     assert np.array_equal(repaired[dry], np.full(int(dry.sum()), 77.0))
     assert np.array_equal(default[~dry], repaired[~dry])
     assert not np.array_equal(default, repaired)
+
+
+def test_the_live_vorticity_builder_uses_the_cards_mesh_zero_substitution():
+    grid = _grid()
+    tmask = jnp.zeros((4, 4, 2), dtype=jnp.float64).at[:2, :2].set(1.0)
+    e3t_0 = 10.0 * tmask
+    mesh = jnp.ones((4, 4, 2), dtype=jnp.float64) * 77.0
+    eta = jnp.zeros((4, 4), dtype=jnp.float64)
+
+    without_mesh = np.asarray(nemo_qco_live_vorticity_e3f_cgrid(
+        eta, _NoMesh(), jnp.float64, grid=grid, e3t_0=e3t_0, tmask=tmask))
+    with_mesh = np.asarray(nemo_qco_live_vorticity_e3f_cgrid(
+        eta, _WithMesh(mesh), jnp.float64, grid=grid,
+        e3t_0=e3t_0, tmask=tmask))
+
+    changed = without_mesh != with_mesh
+    assert changed.any()
+    assert np.array_equal(with_mesh[changed], np.full(changed.sum(), 77.0))
 
 
 def test_the_two_orders_agree_on_the_masked_average_statement():

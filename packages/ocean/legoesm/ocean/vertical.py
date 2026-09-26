@@ -433,8 +433,11 @@ def nemo_qco_live_vorticity_e3f_cgrid(
         # The certified GYRE use is a closed beta-plane box.
         return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
 
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    mesh_e3f = None if raw is None else getattr(raw, "e3f_0", None)
     e3f0vor = nemo_dynvor_e3f_0vor(
-        e3t0, tmask, grid=grid, dtype=dtype, nn_e3f_typ=nn_e3f_typ)
+        e3t0, tmask, grid=grid, dtype=dtype, nn_e3f_typ=nn_e3f_typ,
+        substitute_e3f=mesh_e3f)
 
     area_eta = b(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
     area_eta_n = north(area_eta)
