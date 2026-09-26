@@ -387,55 +387,6 @@ def nemo_qco_vorticity_f_cgrid(z_coord, dtype):
     return nemo_ff_f_to_vertex(jnp.asarray(raw.ff_f, dtype=dtype))
 
 
-def nemo_ldf_metric_reciprocals_cgrid(z_coord, grid, dtype):
-    """Map NEMO's stored ``dyn_ldf`` metric reciprocals to legoESM layouts."""
-    raw = getattr(z_coord, "nemo_een_barotropic", None)
-    if raw is None:
-        geom = getattr(grid, "area_T", getattr(grid, "area", None))
-        if geom is None:
-            raise ValueError("NEMO LDF metrics require grid area operands")
-        one = jnp.asarray(1.0, dtype=dtype)
-
-        def safe(value):
-            return jnp.where(value > 0.0, one / value, 0.0)
-
-        return (
-            safe(jnp.asarray(geom, dtype=dtype)),
-            safe(jnp.asarray(grid.area_q, dtype=dtype)),
-            safe(jnp.asarray(grid.dx_u, dtype=dtype)),
-            safe(jnp.asarray(grid.dy_v, dtype=dtype)),
-            safe(jnp.asarray(grid.dy_u, dtype=dtype)),
-            safe(jnp.asarray(grid.dx_v, dtype=dtype)),
-        )
-
-    b = lax.optimization_barrier
-    one = jnp.asarray(1.0, dtype=dtype)
-
-    def reciprocal(value):
-        value = b(jnp.asarray(value, dtype=dtype))
-        return b(jnp.where(value > 0.0, one / value, 0.0))
-
-    r1_t = reciprocal(b(jnp.asarray(raw.e1t, dtype=dtype)
-                        * jnp.asarray(raw.e2t, dtype=dtype)))
-    r1_f_native = reciprocal(b(jnp.asarray(raw.e1f, dtype=dtype)
-                               * jnp.asarray(raw.e2f, dtype=dtype)))
-    r1_e1u_native = reciprocal(raw.e1u)
-    r1_e2u_native = reciprocal(raw.e2u)
-    r1_e1v_native = reciprocal(raw.e1v)
-    r1_e2v_native = reciprocal(raw.e2v)
-
-    def west(value):
-        return jnp.concatenate([value[:, -1:], value], axis=1)
-
-    def south(value):
-        return jnp.concatenate([jnp.zeros_like(value[:1]), value], axis=0)
-
-    with_south = jnp.concatenate([r1_f_native[:1], r1_f_native], axis=0)
-    r1_f = west(with_south)
-    return (r1_t, r1_f, west(r1_e1u_native), south(r1_e2v_native),
-            west(r1_e2u_native), south(r1_e1v_native))
-
-
 def nemo_qco_mesh_operands(z_coord, dtype):
     """The raw NEMO ``hu_0/hv_0`` and ``e1e2t/e1e2u/e1e2v`` QCO operands.
 
