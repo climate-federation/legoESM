@@ -144,8 +144,24 @@ hard_saturation_adjustment: false  # CAM6 clubb_do_liqsupersat = .false.
                                    # "iceadj" block (clubb_intr.F90:2258).
                                    # Was true; user table 2026-09-24, row 2.
 cloud_partial_coverage_optics: none
-cloud_optics_inhomogeneity: two_region
-cloud_fsd: 1.0
+cloud_optics_inhomogeneity: constant  # CAM6: RRTMG applies NO in-cloud
+                                       # inhomogeneity factor (none anywhere
+                                       # in src/physics/rrtmg/).  "constant"
+                                       # with factor 1.0 is the no-thinning
+                                       # path (chi = 1, byte-identical).  Was
+                                       # two_region: on day-15 states it
+                                       # removed 52% of the liquid in run 1
+                                       # and 42% in run 3, so the water
+                                       # reaching radiation stayed ~14.5 g/m2
+                                       # across the liquid hand-off.  User
+                                       # decision 2026-09-25, for run 4.
+cloud_inhomogeneity_factor: 1.0        # the "constant" scheme's scalar: 1.0
+                                       # = homogeneous, no reduction.  Set
+                                       # explicitly so the no-thinning row
+                                       # rests on no default.
+cloud_fsd: 1.0                         # INERT under "constant" (consumed by
+                                       # two_region only); kept explicit so
+                                       # the old value is on record.
 cloud_vertical_overlap_optics: max_random
 cloud_n_subcolumns: 8
 hard_sat_ice_curve: false          # the ice-curve blend of that same
