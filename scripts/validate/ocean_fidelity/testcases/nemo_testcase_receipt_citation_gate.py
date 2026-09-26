@@ -1185,6 +1185,13 @@ CITATION_MAP = {
         '!* 1st recurrence:   Tk = Dk - Ik Sk-1 / Tk-1',
         'zwt(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwt(ji,jk-1)',
         5],
+    'GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:583-609': [
+        '!* 2nd recurrence:    Zk = Yk - Ik / Tk-1  Zk-1',
+        'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk) / zwt(ji,jk-1) * pt(ji,jj,jk-1,jn,Kaa)',
+        27],
+    'GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:619-624': [
+        '!* 3d recurrence:    Xk = (Zk - Sk Xk+1 ) / Tk',
+        '&             / zwt(ji,jk) * tmask(ji,jj,jk)', 6],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/zdfphy.f90:334-359': [
         'SELECT CASE ( nzdf_phy )',
         'IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )', 26],
