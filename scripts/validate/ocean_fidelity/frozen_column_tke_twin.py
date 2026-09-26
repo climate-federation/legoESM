@@ -344,7 +344,7 @@ def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
     )
 
     dz_ref_j = jnp.asarray(dz_ref)
-    z_coord = create_z_star_from_thicknesses(dz_ref_j, jnp.asarray(t_depth_ref))
+    z_coord = create_z_star_from_thicknesses(dz_ref_j, jnp.asarray(t_depth_ref), nemo_e3w_source="depth_difference")
     Tj = jnp.asarray(T); Sj = jnp.asarray(S)
     uj = jnp.asarray(u_cell); vj = jnp.asarray(v_cell)
     etaj = jnp.asarray(eta)
