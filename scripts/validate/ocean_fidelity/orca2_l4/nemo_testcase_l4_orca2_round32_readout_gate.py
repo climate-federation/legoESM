@@ -134,7 +134,8 @@ def evaluate_outcome(parent_path: Path, arm_path: Path,
 def capture_ldf_replay(deck_root: Path, record_root: Path,
                        *, plant: bool = False,
                        face_thickness_substitution: str = "none",
-                       use_carried_hf0: bool = False) -> dict:
+                       use_carried_hf0: bool = False,
+                       hf0_override=None) -> dict:
     """Re-run round 24's literal compiled LDF replay on the landed routing."""
     import jax.numpy as jnp
     from jax import lax
@@ -201,7 +202,7 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
     kmm_v = raw_e3v if face_thickness_substitution in {"kmm", "both"} else e3v
     e3f_builder = _hf0_builder(
         nemo_qco_live_vorticity_e3f_cgrid,
-        use_carried_hf0=use_carried_hf0)
+        use_carried_hf0=use_carried_hf0, hf0_override=hf0_override)
     e3f = e3f_builder(
         state.eta.data, zc, state.eta.data.dtype, grid=grid,
         e3t_0=h_ref, tmask=tmask, reference_e3f=nemo_ldf_reference_e3f(zc))
@@ -419,6 +420,14 @@ def capture_hf0(deck_root: Path, record_root: Path,
     fe3mask = nemo_fe3mask_from_tmask(tmask, grid=card.recipe.grid)
     reconstructed = np.asarray(jnp.sum(e3f0vor * fe3mask, axis=-1), np.float64)
     carried = np.asarray(raw.hf_0, np.float64)
+    literal = np.sum(
+        np.asarray(raw.e3f_0, np.float64)
+        * np.asarray(raw.vmask, np.float64)
+        * np.roll(np.asarray(raw.vmask, np.float64), -1, axis=1),
+        axis=-1,
+    )
+    n_lon = literal.shape[1]
+    literal[-1] = literal[-2, (n_lon - np.arange(n_lon) - 1) % n_lon]
     selected_hf0 = reconstructed if plant else carried
     parent = _capture_een_variant(
         deck_root, record_root, use_carried_hf0=False)
@@ -428,6 +437,7 @@ def capture_hf0(deck_root: Path, record_root: Path,
     if plant:
         carried = reconstructed
     hf_score = score(carried, reconstructed)
+    literal_score = score(carried, literal)
     require(hf_score["unequal"] > 0,
             "carried hf_0 equals the reconstructed column depth; the read-out is vacuous")
     first = {
@@ -448,6 +458,7 @@ def capture_hf0(deck_root: Path, record_root: Path,
         "status": "PASS",
         "claim_label": "independent with Decision-52 SSH",
         "hf_0_carried_vs_reconstructed": hf_score,
+        "hf_0_carried_vs_compiled_construction": literal_score,
         "first_raw_een_call": first,
         "exposed_stage2": exposed,
         "prediction_R32_P4": "CONFIRMED" if prediction else "REFUTED",

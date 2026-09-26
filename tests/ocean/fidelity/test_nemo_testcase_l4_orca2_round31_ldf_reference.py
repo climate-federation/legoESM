@@ -28,13 +28,14 @@ class _NoMesh:
 
 
 class _Raw:
-    def __init__(self, e3f_0):
+    def __init__(self, e3f_0, hf_0=None):
         self.e3f_0 = e3f_0
+        self.hf_0 = hf_0
 
 
 class _WithMesh:
-    def __init__(self, e3f_0):
-        self.nemo_een_barotropic = _Raw(e3f_0)
+    def __init__(self, e3f_0, hf_0=None):
+        self.nemo_een_barotropic = _Raw(e3f_0, hf_0)
 
 
 def _grid():
@@ -94,6 +95,23 @@ def test_the_live_vorticity_builder_uses_the_cards_mesh_zero_substitution():
     changed = without_mesh != with_mesh
     assert changed.any()
     assert np.array_equal(with_mesh[changed], np.full(changed.sum(), 77.0))
+
+
+def test_the_live_f_stretch_uses_the_cards_carried_column_depth():
+    grid = _grid()
+    tmask = jnp.ones((4, 4, 2), dtype=jnp.float64)
+    e3t_0 = jnp.ones_like(tmask) * 10.0
+    mesh = jnp.ones_like(tmask) * 10.0
+    eta = jnp.arange(16.0, dtype=jnp.float64).reshape(4, 4) * 1.0e-3
+
+    shallow = np.asarray(nemo_qco_live_vorticity_e3f_cgrid(
+        eta, _WithMesh(mesh, jnp.ones((4, 4)) * 20.0), jnp.float64,
+        grid=grid, e3t_0=e3t_0, tmask=tmask))
+    deep = np.asarray(nemo_qco_live_vorticity_e3f_cgrid(
+        eta, _WithMesh(mesh, jnp.ones((4, 4)) * 40.0), jnp.float64,
+        grid=grid, e3t_0=e3t_0, tmask=tmask))
+
+    assert not np.array_equal(shallow.view(np.uint64), deep.view(np.uint64))
 
 
 def test_the_two_orders_agree_on_the_masked_average_statement():

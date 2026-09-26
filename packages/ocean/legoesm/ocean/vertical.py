@@ -444,7 +444,14 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     quad = b(b(area_eta + east(area_eta))
              + b(area_eta_n + east(area_eta_n)))
     fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
-    hf0 = jnp.sum(e3f0vor * fe3mask, axis=-1)
+    # domain.f90:203-215 builds and stores hf_0 from the mesh e3f_3d and two
+    # V masks.  It is not the column sum of dyn_vor_init's distinct e3f_0vor
+    # array.  NEMO-identity cards carry that compiled operand; cards without
+    # one retain the generic reconstruction.
+    carried_hf0 = None if raw is None else getattr(raw, "hf_0", None)
+    hf0 = (jnp.sum(e3f0vor * fe3mask, axis=-1)
+           if carried_hf0 is None
+           else jnp.asarray(carried_hf0, dtype=dtype))
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
