@@ -112,12 +112,38 @@ read-only`.  Its exact disposition is:
 The terminal error was `failed to initialize in-process app-server client:
 Read-only file system`; it emitted no SHIP or DO NOT SHIP verdict.
 
-The receipt citation gate and focused/full test summaries are recorded below
-after their final runs.
+The receipt citation gate reports PASS with six citations, zero failures,
+zero unmapped citations, and zero map-audit failures; all nine self-test
+plants fire.  Its shifted compiled-source plant reports FAIL and exits `1`.
+
+The focused citation, Round-35 reader/stamp, and year-owner files report
+`111 passed in 62.17s`.
+
+The mandated single `tests/ocean/fidelity tests/ocean/unit -n 12` battery was
+run once.  Nine JAX/XLA workers aborted during unrelated compilations and were
+replaced.  The 1,500-second bound ended the run at 96%; it emitted no terminal
+pytest summary, so its interspersed failures and errors cannot be classified
+against the known-red set.  This is incomplete full-tree coverage, not a
+pass.  The directly relevant focused files have the clean 111-test summary
+above.
+
+The worktree-stamp file separately reports `1 failed, 9 passed in 3.07s`.
+Its three offenders are byte-for-byte the same list produced at base commit
+`821b2f82c` (`round50`, `round146`, and `round156` gates); the new acquisition
+adds no offender.
 
 ## Evidence hashes
 
-Evidence hashes are recorded after the final gates.
+| artifact | SHA-256 |
+|---|---|
+| `acquisition_preflight.log` | `386ebd69228344ee809ba59e5c18eb39e4e68b4d89ed8ba3f0ac9b4ab5e89f99` |
+| `acquisition_wet_mask_plant.log` | `21a8f44b4b95e0ae8204a378eb2946b2f204697b058afc0c6f637da160b73f81` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `focused_tests.log` | `c89a4598b515d0c429935bea25c01be03838382d988e1802d69f13008d81cc29` |
+| `full_fidelity_unit_tests.log` | `3d8020bed43992c05d6962d8262099943fea48919b4187cf962e146abc890192` |
+| `worktree_stamp_test.log` | `e3c49ec3252037006d844f7a15fec0232b54356fc63bcedd580a216875e2df47` |
+| `worktree_stamp_test_base.log` | `e16dff6dc9753378b4ef4960098651e609c63455fa7ce9434aa2089fa04466a3` |
+| retry `run.sh` | `5bc055793b6b344bb2a7f9de30e603cdf8756d69aa984a7bf87ade31b1c279bb` |
 
 ## OPEN — round 174
 
