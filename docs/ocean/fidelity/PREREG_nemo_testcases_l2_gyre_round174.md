@@ -12,9 +12,9 @@ The producing NEMO build reads one `e3t` and one temperature-content frame for
 steps 1081--1440 at
 `GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:136-150`.
 The `e3t_wet` arm selects the imported wet-cell diagonal factor at
-`trazdf.f90:490-504`.  The `content_wet` arm selects the imported temperature
-right-hand side at `trazdf.f90:583-609`.  Both arms consume the resulting
-matrix and content in NEMO's ordered solve at `trazdf.f90:619-624`.
+`:490-504`.  The `content_wet` arm selects the imported temperature
+right-hand side at `:583-609`.  Both arms consume the resulting matrix and
+content in NEMO's ordered solve at `:619-624`.
 
 The common reference is the admitted Round-125 step-1440 restart.  The
 baseline, `e3t_wet`, and `content_wet` step-1440 temperatures are scored with
