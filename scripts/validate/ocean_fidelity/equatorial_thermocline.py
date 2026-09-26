@@ -73,6 +73,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--legoesm-snapshot", required=True)
+    ap.add_argument("--use-mean-fields", action="store_true",
+                    help="upwelling block reads the driver's 5-day window-mean "
+                         "mass_flux_w_mean (--state-accumulate) instead of the "
+                         "instantaneous w; refuses snapshots without it")
     ap.add_argument("--nemo-gridt", required=True)
     ap.add_argument("--nemo-month", type=int, default=1)
     ap.add_argument("--nemo-t-recs", default=None,
@@ -949,7 +953,18 @@ def _upwelling_block(a, L, tgt_lat, tgt_lon, band, zc, regrid):
     import netCDF4 as nc
     from legoesm import constants  # noqa: F401  (unit conventions live there)
 
-    w_l = np.load(a.legoesm_snapshot).get("mass_flux_w")
+    _snapw = np.load(a.legoesm_snapshot)
+    # Prefer the driver's 5-day window mean when the snapshot carries it: NEMO's
+    # wo is a 5-day mean, and an instantaneous w read 6x at day 5 (2026-09-26).
+    if a.use_mean_fields:
+        if "mass_flux_w_mean" not in _snapw.files:
+            raise SystemExit("--use-mean-fields but the snapshot has no mass_flux_w_mean "
+                             "(run the driver with --state-accumulate); no silent fallback")
+        w_l = _snapw["mass_flux_w_mean"]
+        print("[upwelling] ours = mass_flux_w_mean (5-day WINDOW MEAN, matched to NEMO wo)")
+    else:
+        w_l = _snapw.get("mass_flux_w")
+        print("[upwelling] ours = mass_flux_w INSTANTANEOUS snapshot (NEMO wo is a 5-day mean)")
     if w_l is None:
         raise SystemExit("snapshot has no `mass_flux_w`; rerun with the mass "
                          "flux carry stored, or drop --nemo-wfile.")

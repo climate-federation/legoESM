@@ -85,7 +85,12 @@ def main() -> int:
     else:
         T, S = np.asarray(s["T"], float), np.asarray(s["S"], float)
         tsrc = "T/S instantaneous 00 UTC"
-    u, v = np.asarray(s["u"], float), np.asarray(s["v"], float)
+    if a.use_mean_fields and "u_mean" in s.files:
+        u, v = np.asarray(s["u_mean"], float), np.asarray(s["v_mean"], float)
+        usrc = "u_mean/v_mean (5-day window mean, same statistic as NEMO uo/vo)"
+    else:
+        u, v = np.asarray(s["u"], float), np.asarray(s["v"], float)
+        usrc = "u/v instantaneous 00 UTC (NEMO uo/vo are 5-day means: S2 of a mean is a lower bound)"
     KH = np.asarray(s["K_H_diag"], float)
     lat, lon = np.asarray(s["lat_T"], float), np.asarray(s["lon_T"], float) % 360.0
     wet = np.asarray(s["land_mask"], float) > 0.5
@@ -93,7 +98,7 @@ def main() -> int:
     area = np.asarray(s["cell_area"], float)
     nlev = zc.size
     print(f"[ours] {a.snapshot.name}: T {T.shape} u {u.shape} v {v.shape} K_H_diag {KH.shape} "
-          f"zc {zc.shape} zw {zw.shape}; T/S source = {tsrc}; u/v/K_H = instantaneous 00 UTC")
+          f"zc {zc.shape} zw {zw.shape}; T/S source = {tsrc}; u/v source = {usrc}; K_H = instantaneous 00 UTC")
     # C-grid: u on (ny, nx+1) east faces, v on (ny+1, nx) north faces ->
     # average the two faces of each cell onto the T point.
     if u.shape == (T.shape[0], T.shape[1] + 1, nlev):
