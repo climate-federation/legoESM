@@ -43,7 +43,7 @@ def test_drivers_forward_allow_synthetic(script, expected):
     assert {name for name, _, _ in calls} == expected
     assert all(kw == "args.allow_synthetic" for _, kw, _ in calls), calls
     # OMIP-2 years past the cache end (2000 + y) wrap into its window
-    assert all(cyc == "True" for name, _, cyc in calls
+    assert all(cyc == "not args.smoke" for name, _, cyc in calls
                if name == "load_jra55_do"), calls
     assert _has_flag(_DIR / script)
 

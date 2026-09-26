@@ -162,7 +162,7 @@ def main() -> int:
             year=(2000 + y) if not args.smoke else 0,
             cache_dir=args.jra55_cache,
             allow_synthetic=args.allow_synthetic,
-            cycle_years=True,   # OMIP-2 repeats the cache's year window
+            cycle_years=not args.smoke,   # OMIP-2 repeats the cache's year window
         )
         n_forc = forcing.u10.shape[0]
         for step in range(steps_per_year):

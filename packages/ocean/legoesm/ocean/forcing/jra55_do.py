@@ -188,6 +188,7 @@ def _load_from_builder_cache(store: Path, year: int,
     ]
     if problems:
         raise ValueError(f"{store}: malformed JRA55-do cache: " + "; ".join(problems))
+    requested = year
     if cycle_years:
         year = y0 + (year - y0) % (y1 - y0 + 1)
     elif not y0 <= year <= y1:
@@ -205,7 +206,8 @@ def _load_from_builder_cache(store: Path, year: int,
     lat, lon = f("lat"), f("lon")
     if lat.min() < -90.0 or lat.max() > 90.0 or lon.min() < 0.0 or lon.max() >= 360.0:
         raise ValueError(f"{store}: lat/lon not in degrees [-90, 90] x [0, 360)")
-    logger.info("JRA55-do: forcing year %d read from %s", year, store)
+    logger.info("JRA55-do: requested year %d -> forcing year %d read from %s",
+                requested, year, store)
     prra, prsn = f("prra"), f("prsn")
     return OceanForcing(
         lon=lon, lat=lat,

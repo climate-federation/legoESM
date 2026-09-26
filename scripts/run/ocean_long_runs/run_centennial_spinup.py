@@ -544,7 +544,7 @@ def main() -> int:
             year=(2000 + (y % 60)) if not args.smoke else 0,
             cache_dir=args.jra55_cache,
             allow_synthetic=args.allow_synthetic,
-            cycle_years=True,   # OMIP-2 repeats the cache's year window
+            cycle_years=not args.smoke,   # OMIP-2 repeats the cache's year window
         )
         n_forc = forcing.u10.shape[0]
         # Yearly tidal-κ accumulators (mean/max diagnostic only).
