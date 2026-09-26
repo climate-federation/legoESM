@@ -130,7 +130,11 @@ def _ldf_inputs(deck_root: Path, record_root: Path, kt: int):
             **common, thickness_operands=bundle)
         for name, bundle in bundles.items()
     }
-    return outputs, card, entry
+    operand_scores = {
+        "raw_face_u_vs_base": array_score(raw_u, base_u),
+        "raw_face_v_vs_base": array_score(raw_v, base_v),
+    }
+    return outputs, card, entry, operand_scores
 
 
 def _stage2_vorticity(deck_root: Path, record_root: Path):
@@ -186,11 +190,11 @@ def capture(deck_root: Path, record_root: Path, npz_out: Path,
     require(not bool(jax.config.jax_disable_jit),
             "production stage exposure requires JIT")
 
-    kt2, _, entry2 = _ldf_inputs(deck_root, record_root, 2)
+    kt2, _, entry2, operand_scores = _ldf_inputs(deck_root, record_root, 2)
     base_u, base_v, base_i = kt2["base"]
     kbb_u, kbb_v, kbb_i = kt2["kbb"]
     kmm_u, kmm_v, kmm_i = kt2["kmm"]
-    kt1, _, entry1 = _ldf_inputs(deck_root, record_root, 1)
+    kt1, _, entry1, _ = _ldf_inputs(deck_root, record_root, 1)
     ldf1_u, ldf1_v, _ = kt1["base"]
     vor_u, vor_v = _stage2_vorticity(deck_root, record_root)
 
@@ -203,7 +207,8 @@ def capture(deck_root: Path, record_root: Path, npz_out: Path,
     npz_out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(npz_out, **arrays)
 
-    direct = {
+    direct = dict(operand_scores)
+    direct.update({
         "kbb_vs_kmm_u": array_score(kbb_u, kmm_u),
         "kbb_vs_kmm_v": array_score(kbb_v, kmm_v),
         "kbb_output_vs_base_u": array_score(kbb_u, base_u),
@@ -222,7 +227,7 @@ def capture(deck_root: Path, record_root: Path, npz_out: Path,
             kmm_i["grad_div_v"], base_i["grad_div_v"]),
         "kmm_curl_u_vs_base": array_score(kmm_i["curl_u"], base_i["curl_u"]),
         "kmm_curl_v_vs_base": array_score(kmm_i["curl_v"], base_i["curl_v"]),
-    }
+    })
     return {
         "status": "CAPTURED",
         "claim_label": "given NEMO's entry",
@@ -291,17 +296,26 @@ def compare_captures(parent: dict, raw_f: dict, parent_arrays: dict,
             r["kt1_ldf_u"].flat[0], np.float64(np.inf))
 
     direct = parent["kt2_direct_ldf"]
-    p1 = (
+    p1_confirmed = (
         not direct["kbb_vs_kmm_u"]["bit_identical"]
         or not direct["kbb_vs_kmm_v"]["bit_identical"])
-    p1 = p1 and all(
+    p1_confirmed = p1_confirmed and all(
         not direct[name]["bit_identical"] for name in (
             "kbb_grad_div_u_vs_base", "kbb_grad_div_v_vs_base",
             "kmm_curl_u_vs_base", "kmm_curl_v_vs_base"))
-    p1 = p1 and all(
+    p1_confirmed = p1_confirmed and all(
         direct[name]["bit_identical"] for name in (
             "kbb_curl_u_vs_base", "kbb_curl_v_vs_base",
             "kmm_grad_div_u_vs_base", "kmm_grad_div_v_vs_base"))
+    p1_refuted_by_equal_operands = all(
+        direct[name]["bit_identical"] for name in (
+            "raw_face_u_vs_base", "raw_face_v_vs_base",
+            "kbb_vs_kmm_u", "kbb_vs_kmm_v",
+            "kbb_output_vs_base_u", "kbb_output_vs_base_v",
+            "kmm_output_vs_base_u", "kmm_output_vs_base_v"))
+    require(p1_confirmed or p1_refuted_by_equal_operands,
+            "Kbb/Kmm discriminator found neither distinct components nor "
+            "exact operand equality")
 
     ldf_u = array_score(r["kt1_ldf_u"], p["kt1_ldf_u"])
     ldf_v = array_score(r["kt1_ldf_v"], p["kt1_ldf_v"])
@@ -320,7 +334,6 @@ def compare_captures(parent: dict, raw_f: dict, parent_arrays: dict,
     if plant:
         require(p2, "planted kt=1 lateral-diffusion violation passed")
         raise GateError("planted kt=1 lateral-diffusion violation passed")
-    require(p1, "Kbb/Kmm direct component discriminator did not bind")
     require(p2, "kt=1 lateral-diffusion zero control failed")
     require(p3, "raw-F arm did not move the stage-2 EEN vorticity component")
     return {
@@ -330,14 +343,20 @@ def compare_captures(parent: dict, raw_f: dict, parent_arrays: dict,
             "round 26's F-curl-only attribution is withdrawn: its helper arm "
             "also moved the EEN potential-vorticity thickness"),
         "kbb_kmm_direct": {
+            "raw_face_u_vs_base": direct["raw_face_u_vs_base"],
+            "raw_face_v_vs_base": direct["raw_face_v_vs_base"],
             "u": direct["kbb_vs_kmm_u"],
             "v": direct["kbb_vs_kmm_v"],
-            "verdict": "distinct tendency components; trajectory summaries collided",
+            "verdict": (
+                "distinct tendency components; trajectory summaries collided"
+                if p1_confirmed else
+                "exact operand equality; both experimental LDF substitutions "
+                "were numerically vacuous"),
         },
         "kt1_ldf_parent_vs_raw_f": {"u": ldf_u, "v": ldf_v},
         "stage2_vorticity_parent_vs_raw_f": {"u": vor_u, "v": vor_v},
         "predictions": {
-            "R27-P1": "CONFIRMED",
+            "R27-P1": "CONFIRMED" if p1_confirmed else "REFUTED",
             "R27-P2": "CONFIRMED",
             "R27-P3": "CONFIRMED",
             "R27-P4": "CONFIRMED",
