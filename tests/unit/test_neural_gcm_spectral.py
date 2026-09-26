@@ -702,12 +702,22 @@ class TestPhysicsParamsSpectral:
         with pytest.raises(ValueError, match="C_H"):
             assert_spectral_physics_params_reachable(
                 TrainablePhysicsParams.from_defaults(), mk, _GRID, _SIGMA,
-                state)
+                [state])
         live = TrainablePhysicsParams.from_defaults(
             [c for c in DEFAULT_TRAINABLE
              if c.name in SPECTRAL_PHYSICS_TRAINABLE])
         assert set(live.raw_values) == set(SPECTRAL_PHYSICS_TRAINABLE)
-        assert_spectral_physics_params_reachable(live, mk, _GRID, _SIGMA, state)
+        assert_spectral_physics_params_reachable(
+            live, mk, _GRID, _SIGMA, [state])
+        # A dry IC alone leaves the SBM knobs gated off; the gate must judge
+        # every IC, so a dry FIRST IC followed by a convecting one passes.
+        dry = carry_to_spectral_state(
+            _make_gaussian_carry(T_val=250.0, q_v_val=1e-6), _GRID)
+        with pytest.raises(ValueError, match="sbm_"):
+            assert_spectral_physics_params_reachable(
+                live, mk, _GRID, _SIGMA, [dry])
+        assert_spectral_physics_params_reachable(
+            live, mk, _GRID, _SIGMA, [dry, state])
 
     def test_trainer_trains_only_consumed_params(self, monkeypatch):
         """Executed: the trainer hands the loop only the consumed parameters."""

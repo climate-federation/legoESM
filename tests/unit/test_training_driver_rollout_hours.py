@@ -332,3 +332,30 @@ def test_classical_trainer_trains_only_the_given_constraints(monkeypatch):
         n_epochs=1, dt=600.0, loss_config=LossConfig(), log_every=1000,
         constraints=live)
     assert set(trained.raw_values) == {"sbm_tau_c"}
+
+
+def test_classical_gate_uses_every_sample_not_the_first(monkeypatch):
+    """A leaf gated off on the first sample but live on a later one is not
+    inert: the gate must look at the whole training set."""
+    from legoesm.training.losses import LossConfig
+    from legoesm.training.trainable_params import DEFAULT_TRAINABLE
+
+    grid, sigma, ics, tgts, forc = _tiny_inputs()
+    pipe = _physics_fakes(monkeypatch)
+
+    class _Seg:
+        def __init__(self, kw):
+            self.kw = kw
+
+        def raw(self, carry, n_steps, forcing):
+            # C_E acts only where the forcing is non-zero (second sample).
+            return (carry * self.kw["sbm_tau_c"] / 7200.0
+                    + forcing * self.kw["C_E"])
+
+    monkeypatch.setattr(td, "build_segment_fn", lambda **kw: _Seg(kw))
+    live = [c for c in DEFAULT_TRAINABLE if c.name in ("sbm_tau_c", "C_E")]
+    trained, _ = td.train_physics_params(
+        object(), grid, sigma, pipe, ics * 2, tgts * 2,
+        [forc[0], forc[0] + 1.0], rollout_hours=6.0, n_epochs=1, dt=600.0,
+        loss_config=LossConfig(), log_every=1000, constraints=live)
+    assert set(trained.raw_values) == {"sbm_tau_c", "C_E"}

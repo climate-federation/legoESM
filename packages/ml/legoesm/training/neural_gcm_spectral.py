@@ -1003,24 +1003,31 @@ SPECTRAL_PHYSICS_TRAINABLE = ("sbm_tau_c", "sbm_RH_ref", "albedo_ocean")
 
 
 def assert_spectral_physics_params_reachable(params, make_physics_fn, grid,
-                                             sigma, ic_state):
+                                             sigma, ic_states):
     """No-inert-parameters gate for the spectral physics trainer.
 
-    Differentiates the sum of the physics output on one IC with respect to
-    every trainable leaf and raises (``assert_no_inert``) on a leaf the
-    forward does not consume.  The parameters act only through the physics
-    (the dycore reads none of them), so a zero here means the leaf is inert
-    in the training loss too.
+    Differentiates the sum of squares of the physics output on EVERY IC with
+    respect to each trainable leaf and raises (``assert_no_inert``) on a leaf
+    whose gradient is zero on all of them.  The parameters act only through
+    the physics (the dycore reads none of them), so a leaf zero on every IC
+    is inert in the training loss too; one zero IC is not evidence (the SBM
+    trigger may simply not fire there).
     """
     from legoesm.training.inert_params import assert_no_inert
 
-    def _probe(p):
+    def _probe(p, ic_state):
         out = make_physics_fn(p, grid)(ic_state, grid, sigma)
-        # Real + imaginary parts: spectral coefficients are complex.
-        return sum(jnp.sum(jnp.real(x)) + jnp.sum(jnp.imag(x)) for x in
+        # Squares, so tendencies cannot cancel in the sum; real + imaginary
+        # parts because spectral coefficients are complex.
+        return sum(jnp.sum(jnp.abs(x) ** 2) for x in
                    jax.tree.leaves(eqx.filter(out, eqx.is_inexact_array)))
 
-    assert_no_inert(eqx.filter_grad(_probe)(params).raw_values)
+    _grad = eqx.filter_grad(_probe)
+    absmax = None
+    for ic_state in ic_states:
+        g = jax.tree.map(jnp.abs, _grad(params, ic_state).raw_values)
+        absmax = g if absmax is None else jax.tree.map(jnp.fmax, absmax, g)
+    assert_no_inert(absmax)
 
 
 def make_physics_params_spectral_physics(params, grid, dt, *,
@@ -5933,7 +5940,7 @@ def train_physics_params_spectral(
         return make_physics_params_spectral_physics(p, grid_, dt)
 
     assert_spectral_physics_params_reachable(
-        params, _make_physics_fn, grid, sigma, ic_states[0])
+        params, _make_physics_fn, grid, sigma, ic_states)
 
     return _train_spectral_loop(
         params, _make_physics_fn,

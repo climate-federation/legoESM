@@ -211,7 +211,8 @@ def _slab_step(
     forcing: AtmToSurface,
     config: SimpleOceanConfig,
     dt: float,
-    q_flux: jnp.ndarray | None = None,    open_water_frac: jnp.ndarray | float = 1.0,
+    q_flux: jnp.ndarray | None = None,
+    open_water_frac: jnp.ndarray | float = 1.0,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single mixed-layer energy balance step.
 
@@ -291,7 +292,8 @@ def _two_layer_step(
     forcing: AtmToSurface,
     config: SimpleOceanConfig,
     dt: float,
-    q_flux: jnp.ndarray | None = None,    open_water_frac: jnp.ndarray | float = 1.0,
+    q_flux: jnp.ndarray | None = None,
+    open_water_frac: jnp.ndarray | float = 1.0,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Two-layer slab ocean: mixed layer + deep layer.
 
