@@ -914,3 +914,25 @@ def test_ocean_loader_reads_builder_cache(tmp_path):
         assert f.time_s[1] - f.time_s[0] == 3 * 3600.0
     with pytest.raises(FileNotFoundError):
         load_jra55_do(1959, cache_dir=cfg.cache_dir, allow_synthetic=False)
+
+
+def test_ocean_loader_rejects_record_window_outside_cache(tmp_path):
+    """A store whose ref_year puts the requested year outside its record axis
+    must raise, not wrap the negative slice onto the end of the cache."""
+    import zarr
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+
+    src_path = tmp_path / "synthetic_jra55.zarr"
+    _make_synthetic_jra55_zarr(src_path, n_lat=8, n_lon=16, cadence_hours=6)
+    cfg = JRA55DoConfig(
+        source_path=str(src_path), years=(1958, 1958),
+        target_lat_edges=np.deg2rad(np.linspace(-90.0, 90.0, 5)),
+        target_lon_edges=np.deg2rad(np.linspace(0.0, 360.0, 9)),
+        cache_dir=tmp_path / "cache",
+    )
+    cache_path = build_jra55_cache(cfg, overwrite=True, progress=False)
+    g = zarr.open_group(str(cache_path), mode="r+")
+    g.attrs["ref_year"] = 1959
+    zarr.consolidate_metadata(str(cache_path))
+    with pytest.raises(ValueError, match="malformed"):
+        load_jra55_do(1958, cache_dir=cache_path)

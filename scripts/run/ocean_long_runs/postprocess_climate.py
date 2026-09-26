@@ -135,16 +135,24 @@ def main() -> int:
 
     # SST bias vs WOA: only against the real climatology on the model grid;
     # a synthetic stand-in would print an observational score that is not one.
+    # Not scored (None) when the cache is missing or not on the model grid;
+    # AMOC/ACC are still reported.
     sst_K = np.asarray(state.T.data)[..., 0] + constants.T_freeze
-    sst_ref, _, _ = load_woa_sst(allow_synthetic=False)
-    if sst_ref.shape != sst_K.shape:
-        raise ValueError(
-            f"WOA SST cache is on a {sst_ref.shape} grid, the model SST on "
-            f"{sst_K.shape}; regrid the WOA file to the model grid before "
-            "scoring (no score is computed across grids).")
-    area = np.asarray(grid.area)
-    bias = sst_climatology_bias(sst_K, sst_ref, area, mask=mask)
-    print(f"   SST bias vs WOA = {bias.bias_K:6.2f} K (RMSE {bias.rmse_K:.2f})")
+    bias = None
+    try:
+        sst_ref, _, _ = load_woa_sst(allow_synthetic=False)
+    except FileNotFoundError as exc:
+        print(f"   SST bias vs WOA = NOT SCORED ({exc})")
+    else:
+        if sst_ref.shape != sst_K.shape:
+            print(f"   SST bias vs WOA = NOT SCORED (WOA cache on a "
+                  f"{sst_ref.shape} grid, model SST on {sst_K.shape}; regrid "
+                  "the WOA file to the model grid first)")
+        else:
+            area = np.asarray(grid.area)
+            bias = sst_climatology_bias(sst_K, sst_ref, area, mask=mask)
+            print(f"   SST bias vs WOA = {bias.bias_K:6.2f} K "
+                  f"(RMSE {bias.rmse_K:.2f})")
 
     out = {
         "restart": str(restart),
@@ -153,8 +161,8 @@ def main() -> int:
         "amoc_Sv": amoc.streamfunction_Sv,
         "amoc_depth_m": amoc.depth_of_max_m,
         "acc_Sv": acc.transport_Sv,
-        "sst_bias_K": bias.bias_K,
-        "sst_rmse_K": bias.rmse_K,
+        "sst_bias_K": None if bias is None else bias.bias_K,
+        "sst_rmse_K": None if bias is None else bias.rmse_K,
     }
     json_path = args.run_dir / "climate_diagnostics.json"
     json_path.write_text(json.dumps(out, indent=2))
@@ -166,7 +174,13 @@ def main() -> int:
         # SST bias < 1.5 K vs WOA.
         amoc_pass = abs(amoc.streamfunction_Sv - 15.0) <= 3.0
         acc_pass = abs(acc.transport_Sv - 130.0) <= 15.0
-        sst_pass = abs(bias.bias_K) < 1.5
+        if bias is None:
+            sst_row = "| SST bias vs WOA | not scored | < 1.5 K | N/A |"
+            rmse_row = "| SST RMSE | not scored | -- | -- |"
+        else:
+            sst_row = (f"| SST bias vs WOA | {bias.bias_K:.2f} K | < 1.5 K | "
+                       f"{'PASS' if abs(bias.bias_K) < 1.5 else 'FAIL'} |")
+            rmse_row = f"| SST RMSE | {bias.rmse_K:.2f} K | -- | -- |"
         md = [
             f"# Climate diagnostics -- {args.run_dir.name}",
             "",
@@ -178,9 +192,8 @@ def main() -> int:
             f"{'PASS' if amoc_pass else 'FAIL'} |",
             f"| ACC @ Drake | {acc.transport_Sv:.2f} Sv | 130 +/- 15 Sv | "
             f"{'PASS' if acc_pass else 'FAIL'} |",
-            f"| SST bias vs WOA | {bias.bias_K:.2f} K | < 1.5 K | "
-            f"{'PASS' if sst_pass else 'FAIL'} |",
-            f"| SST RMSE | {bias.rmse_K:.2f} K | -- | -- |",
+            sst_row,
+            rmse_row,
         ]
         args.report.write_text("\n".join(md) + "\n")
         print(f"=> {args.report}")

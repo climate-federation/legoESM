@@ -165,6 +165,12 @@ def _load_from_builder_cache(store: Path, year: int) -> Optional[OceanForcing]:
         return None
     per_year = NOLEAP_DAYS_PER_YEAR * RECORDS_PER_DAY
     start = (year - int(ds.attrs["ref_year"])) * per_year
+    if start < 0 or start + per_year > ds.sizes["time"]:
+        raise ValueError(
+            f"{store}: year {year} maps to records [{start}, "
+            f"{start + per_year}) outside the {ds.sizes['time']}-record axis "
+            f"(ref_year={ds.attrs['ref_year']}, window {y0}-{y1}); "
+            "the cache is malformed")
     ds = ds.isel(time=slice(start, start + per_year))
 
     def f(name):
