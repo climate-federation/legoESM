@@ -4459,11 +4459,8 @@ def main(argv=None) -> int:
         except GateError as error:
             if args.plant in (None, "none"):
                 raise
-            if str(error).startswith("PLANT-BLIND"):
-                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
-                return 2
-            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
-            return 1
+            print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+            return 2
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
@@ -12915,6 +12912,17 @@ def developed_accumulated_content_process_walk(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
 
         def execute(model):
+            if hook:
+                # The public production entry compiles the diagnostic and
+                # ordinary paths independently, then replaces the diagnostic
+                # trace's state_after with the ordinary result.  A direct
+                # _step_jitted call would expose the deliberately planted
+                # diagnostic state and make the passivity control fire before
+                # the registered downstream rows can be tested.
+                return jax.device_get(model.step(
+                    state, dt=card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface,
+                    _nemo_stage1_zad_eta_after_override=ssha))
             if eager:
                 with jax.disable_jit():
                     return jax.device_get(model._step_impl(
