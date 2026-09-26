@@ -1686,7 +1686,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   forcing_mode: str = "restoring",
                   use_conservation_fixer: bool = True,
                   dz_ref_override=None, t_depth_ref_override=None,
-                  nemo_gdepw_ref_override=None,
+                  attach_nemo_ladders=False,
                   spmd_n_devices: int = 0,
                   mpas_lloyd: int = 50,
                   mpas_k_zeta_bih: float | None = None,
@@ -1726,21 +1726,26 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # fidelity PGF (pgf_scheme="nemo_sco") telescopes against that exact
         # ladder; None keeps the arithmetic-midpoint construction, which is
         # the behaviour every existing run gets.
-        # nemo_gdepw_ref_override (the mesh's gdepw_1d with its surface zero)
-        # marks the caller that runs the literal zdftke step: it reads the raw
-        # NEMO gdept_0/gdepw_0/e3t_0 ladders at step entry, so the three 1-D
-        # reference ladders are attached as those fields. None (every other
-        # run) leaves the coordinate object exactly as before.
-        _raw = {}
-        if nemo_gdepw_ref_override is not None:
-            if t_depth_ref_override is None:
-                raise ValueError("nemo_gdepw_ref_override requires t_depth_ref_override (gdept_1d)")
-            _raw = dict(nemo_gdept_0_m=np.asarray(t_depth_ref_override, dtype=np.float64),
-                        nemo_gdepw_0_m=np.asarray(nemo_gdepw_ref_override, dtype=np.float64)[:nlev],
-                        nemo_e3t_0_m=np.asarray(dz_ref_override, dtype=np.float64))
         z_coord = create_z_star_from_thicknesses(
             dz_ref_override, t_depth_ref_override,
-            nemo_e3w_source="depth_difference", **_raw)
+            nemo_e3w_source="depth_difference")
+        if attach_nemo_ladders:
+            # The literal zdftke step reads raw NEMO gdept_0/gdepw_0/e3t_0 at
+            # step entry. Attach the coordinate's OWN 1-D ladders as those
+            # fields (T depths as built, W depths with the surface zero, the
+            # reference thicknesses) so the run's geometry is unchanged: the
+            # only difference from the same card without the flag is the TKE
+            # step. The vertical file carries no gdepw_1d, and reading the
+            # mesh's ladders instead would move every T point by 1-7 cm.
+            _t_ref = z_coord.t_depth_ref
+            _gdept = np.asarray(-z_coord.z_full_ref if _t_ref is None else _t_ref,
+                                dtype=np.float64)
+            z_coord = create_z_star_from_thicknesses(
+                dz_ref_override, t_depth_ref_override,
+                nemo_e3w_source="depth_difference",
+                nemo_gdept_0_m=_gdept,
+                nemo_gdepw_0_m=np.asarray(-z_coord.z_half_ref[:-1], dtype=np.float64),
+                nemo_e3t_0_m=np.asarray(z_coord.dz_ref, dtype=np.float64))
     elif use_bathymetry:
         # Partial cells with ETOPO: use the same vertical stretching
         # as the global-overturning production scripts (dz_surface=20,
