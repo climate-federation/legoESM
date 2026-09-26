@@ -8759,9 +8759,10 @@ def main() -> int:
                                       or args.kpp_cv is not None
                                       or args.kpp_eice is not None
                                       or args.tke_surface_bc is not None
-                                      or args.tke_surface_bc_level is not None):
+                                      or args.tke_surface_bc_level is not None
+                                      or args.tke_buoyancy_sink is not None):
                 raise ValueError(
-                    "--kpp-ri-crit/--kpp-cv/--kpp-eice conflict with a --config "
+                    "--kpp-ri-crit/--kpp-cv/--kpp-eice/--tke-buoyancy-sink conflict with a --config "
                     "ocean.physics block: the YAML physics config would overwrite "
                     "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
