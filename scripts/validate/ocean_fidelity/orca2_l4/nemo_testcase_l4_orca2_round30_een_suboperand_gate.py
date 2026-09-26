@@ -265,6 +265,44 @@ def evaluate(captures: dict[str, dict], arrays: dict[str, dict],
     }
 
 
+def evaluate_trajectory(owner: dict, prior: dict, refusal_text: str,
+                        *, plant: str | None = None) -> dict:
+    require(owner["status"] == prior["status"] == "LADDER_MEASURED",
+            "an owner trajectory is not measured")
+    require(owner["trajectory_claim"] == prior["trajectory_claim"] ==
+            "MEASURED_INDEPENDENT_WITH_DECISION52_SSH",
+            "trajectory claim labels differ")
+    owner_rows = owner["candidate_trajectory"]["checkpoints"]
+    prior_rows = prior["candidate_trajectory"]["checkpoints"]
+    if plant == "score":
+        owner_rows = json.loads(json.dumps(owner_rows))
+        owner_rows[0]["rows"]["T"]["unequal"] += 1
+    require(owner_rows == prior_rows,
+            "e3f0vor-only kt=1..3 scores differ from round 28 whole EEN arm")
+    require(owner["candidate_trajectory"]["first_non_bit_statement"] ==
+            prior["candidate_trajectory"]["first_non_bit_statement"],
+            "e3f0vor-only first non-bit statement differs from round 28")
+    refusal = "raw-mesh e3w_int must contain only finite values > 0"
+    if plant == "refusal":
+        refusal_text = refusal_text.replace(refusal, "PLANTED")
+    require(refusal in refusal_text, "e3f0vor-only kt=4 refusal is absent")
+    require("REFUSE: the production step raised an unregistered refusal" in
+            refusal_text, "kt=4 did not fail closed through the ladder gate")
+    return {
+        "status": "HELD",
+        "claim_label": "independent with Decision-52 SSH",
+        "checkpoint_count": len(owner_rows),
+        "kt1_through_kt3_score_document_bit_identical": True,
+        "first_non_bit_statement_unchanged": True,
+        "kt4_refusal": refusal,
+        "predictions": {
+            "R30-P4-trajectory": "CONFIRMED",
+            "R30-P5-trajectory-plant": (
+                "CONFIRMED" if plant is None else "REFUTED"),
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -281,18 +319,28 @@ def main() -> int:
     outcome.add_argument("--prior-raw-npz", type=Path, required=True)
     outcome.add_argument("--json-out", type=Path)
     outcome.add_argument("--plant", action="store_true")
+    trajectory = sub.add_parser("trajectory")
+    trajectory.add_argument("--owner", type=Path, required=True)
+    trajectory.add_argument("--prior", type=Path, required=True)
+    trajectory.add_argument("--refusal", type=Path, required=True)
+    trajectory.add_argument("--json-out", type=Path)
+    trajectory.add_argument("--plant", choices=("score", "refusal"))
     args = parser.parse_args()
     try:
         if args.command == "capture":
             result = capture(args.deck_root, args.record_root, args.variant,
                              args.npz_out)
-        else:
+        elif args.command == "outcome":
             captures = {name: _read_json(getattr(args, f"{name}_json"))
                         for name in VARIANTS}
             arrays = {name: _read_npz(getattr(args, f"{name}_npz"))
                       for name in VARIANTS}
             result = evaluate(captures, arrays,
                               _read_npz(args.prior_raw_npz), plant=args.plant)
+        else:
+            result = evaluate_trajectory(
+                _read_json(args.owner), _read_json(args.prior),
+                args.refusal.read_text(), plant=args.plant)
     except (GateError, KeyError, OSError, TypeError, ValueError) as exc:
         print(f"REFUSE: {exc}")
         return 1
