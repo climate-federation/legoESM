@@ -318,6 +318,19 @@ def test_saturation_curve_departure_is_small():
     assert rel.max() < 0.06, rel.max()
 
 
+def test_qsat_is_cam_specific_humidity_not_mixing_ratio():
+    """CAM ``wv_sat_svp_to_qsat``: ``ε·es/(p − (1−ε)·es)``, written out here
+    independently of any thermo conversion.  A port feeding the mixing ratio
+    ``ε·es/(p − es)`` is 0.8-2.3 % high over this range and fails."""
+    ts = np.array([240.0, 280.0, 300.0])
+    ps = np.array([300.0, 850.0, 1000.0])
+    es = np.array([float(saturation_vapor_pressure(jnp.float64(t))) for t in ts])
+    cam = constants.epsilon * es / (ps * 100.0 - (1.0 - constants.epsilon) * es)
+    port = np.asarray(Z._qsat_hpa(jnp.asarray(ts), jnp.asarray(ps)))
+    # 1e-6: the shared smooth cap shifts q by ~1e-10 kg/kg (measured <= 1.4e-7 relative)
+    np.testing.assert_allclose(port, cam, rtol=1e-6, atol=0.0)
+
+
 # ---------------------------------------------------------------------------
 # codex / GLM round-1 findings, each pinned by a test that fails on revert
 # ---------------------------------------------------------------------------
