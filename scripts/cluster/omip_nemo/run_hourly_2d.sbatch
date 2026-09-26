@@ -18,7 +18,7 @@
 set +e
 WS=/burg-archive/glab/users/pg2328/nemo_orca1
 SIF=$WS/morays_env_amd64.sif
-RUNREL=nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_HOURLY
+RUNREL=${RUNREL:-nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_HOURLY}
 echo "=== HOST ==="; hostname; date; echo "ntasks=$SLURM_NTASKS"
 module load singularity/3.7.1 2>&1 | tail -1
 # g188 (2026-09-26): module loaded silently, binary absent -> fail loudly so
