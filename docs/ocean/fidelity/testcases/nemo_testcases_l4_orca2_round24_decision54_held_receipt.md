@@ -108,7 +108,23 @@ at the committed final diff.  It failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-The citation gate and test results are recorded below after their final runs.
+The receipt citation gate passes all three compiled citations with zero
+failures and zero unmapped citations.  Its rigid +2-line plant exits nonzero
+with `SYMBOL-NOT-AT-LINE`; all nine citation-gate self-tests fire.
+
+The focused battery reports **75 passed, 2 failed**.  Both failures are the
+existing tripole south-padding `lat_v` shape assertions in
+`test_tripole_internals`; the final package and test trees are byte-identical
+to the parent and this round does not touch their implementation or tests.
+
+The one required `tests/ocean/fidelity -n 12` battery collected 1,865 tests
+and reached the inherited final-tail hang after **1,844 passed, 7 skipped,
+5 failed, and 9 unfinished**.  It was interrupted after a bounded wait.  The
+five failures were rerun without xdist and are the same inherited failures as
+round 23: the round-129 stepping-gate stamp, the stale round-51 live-trace
+suffix assertion, SI3 scalar-math source provenance, three unstamped legacy
+report emitters, and the missing `hires_lane_surface` case-board row.  The
+isolated rerun reports **8 passed, 5 failed**.  No round-24 path fails.
 
 Evidence:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round24/`.
