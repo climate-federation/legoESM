@@ -340,7 +340,7 @@ def compare_captures(parent: dict, raw_f: dict, parent_arrays: dict,
     require(p3, "raw-F arm did not move the stage-2 EEN vorticity component")
     return {
         "status": "HELD",
-        "claim_label": "independent with Decision-52 SSH",
+        "claim_label": "given NEMO's entry",
         "retraction": (
             "round 26's F-curl-only attribution is withdrawn: its helper arm "
             "also moved the EEN potential-vorticity thickness"),
