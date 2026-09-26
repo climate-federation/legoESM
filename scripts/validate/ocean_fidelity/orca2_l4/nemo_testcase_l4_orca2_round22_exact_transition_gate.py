@@ -213,6 +213,8 @@ def analyze(
     old_ladder: dict,
     combined_ladder: dict,
     restored_ladder: dict,
+    current_ladder: dict,
+    merge_ladder: dict,
 ) -> dict[str, object]:
     old = _load_arrays(old_npz)
     combined = _load_arrays(combined_npz)
@@ -245,8 +247,12 @@ def analyze(
     oracle_transition_exact = all(
         row["bit_identical"]
         for row in combined_capture["oracle_stage3_to_kt2_entry"].values())
+    current_matches_merge = (
+        current_ladder["candidate_trajectory"]
+        == merge_ladder["candidate_trajectory"])
     p1 = (_capture_reproduces(old_capture, old_ladder)
-          and _capture_reproduces(combined_capture, combined_ladder))
+          and _capture_reproduces(combined_capture, combined_ladder)
+          and current_matches_merge)
     p2 = first_key in ("candidate_stage1_u", "candidate_stage1_v")
     p3 = not restored_differences and all(
         _ladder_row(restored_ladder, kt, checkpoint, field)
@@ -279,6 +285,15 @@ def analyze(
         "plant_cells": plant_cells,
         "oracle_stage3_to_kt2_entry_bit_identical": oracle_transition_exact,
         "full_ladder_restored_to_round20": p3,
+        "current_ladder_matches_round21_merged_baseline": current_matches_merge,
+        "current_reference_targets": {
+            "kt1_stage2_u_max_abs": _ladder_row(
+                current_ladder, 1, "stage2", "u")["max_abs"],
+            "kt1_stage2_v_max_abs": _ladder_row(
+                current_ladder, 1, "stage2", "v")["max_abs"],
+            "kt10_entry_T_max_abs": _ladder_row(
+                current_ladder, 10, "entry", "T")["max_abs"],
+        },
         "predictions": predictions,
         "decision58_eligible_next_round": recertified,
     }
@@ -305,6 +320,8 @@ def main(argv=None) -> int:
     analyze_parser.add_argument("--old-ladder", type=Path, required=True)
     analyze_parser.add_argument("--combined-ladder", type=Path, required=True)
     analyze_parser.add_argument("--restored-ladder", type=Path, required=True)
+    analyze_parser.add_argument("--current-ladder", type=Path, required=True)
+    analyze_parser.add_argument("--merge-ladder", type=Path, required=True)
     analyze_parser.add_argument("--json-out", type=Path, required=True)
     args = parser.parse_args(argv)
 
@@ -323,6 +340,8 @@ def main(argv=None) -> int:
                 json.loads(args.old_ladder.read_text()),
                 json.loads(args.combined_ladder.read_text()),
                 json.loads(args.restored_ladder.read_text()),
+                json.loads(args.current_ladder.read_text()),
+                json.loads(args.merge_ladder.read_text()),
             )
             exit_code = 0 if report["status"] == "RECERTIFIED" else 2
     except (GateError, OSError, ValueError, KeyError) as exc:

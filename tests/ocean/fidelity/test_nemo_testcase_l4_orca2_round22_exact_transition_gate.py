@@ -65,11 +65,12 @@ def test_analyze_recertifies_only_when_third_owner_restores_every_array(tmp_path
     result = gate.analyze(
         paths["old"], paths["combined"], paths["restored"], paths["plant"],
         _capture(), _capture(1.0), _capture(),
-        _ladder(), _ladder(1.0), _ladder())
+        _ladder(), _ladder(1.0), _ladder(), _ladder(2.0), _ladder(2.0))
 
     assert result["status"] == "RECERTIFIED"
     assert result["first_exact_combined_difference"]["key"] == (
         "candidate_stage1_u")
     assert result["legacy_ldf_exact_arrays_different_from_old"] == 0
     assert result["plant_cells"] == 1
+    assert result["current_ladder_matches_round21_merged_baseline"]
     assert set(result["predictions"].values()) == {"CONFIRMED"}
