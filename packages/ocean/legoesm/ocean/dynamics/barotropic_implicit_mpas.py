@@ -528,7 +528,8 @@ def barotropic_implicit_mpas(
     # per iteration — audit table stage 4').
     if halo_refresh is not None:
         u_bar_old, F_slow_u = halo_refresh.edges(u_bar_old, F_slow_u)
-    eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2)
+    eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2,
+                                          mesh.edgesOnCell, mesh.nEdgesOnCell)
     grad_eta_old = gradient_edge(eta_filled_old, mesh).astype(eta_dtype)
     f_e = mesh.fEdge.astype(eta_dtype)
 
@@ -775,7 +776,8 @@ def barotropic_implicit_mpas(
     )
 
     # ----- Step 5: corrector for u_bar using new η gradient delta ------
-    eta_filled_new = fill_land_cells_mpas(eta_new, mask, c1, c2)
+    eta_filled_new = fill_land_cells_mpas(eta_new, mask, c1, c2,
+                                          mesh.edgesOnCell, mesh.nEdgesOnCell)
     grad_eta_new = gradient_edge(eta_filled_new, mesh).astype(eta_dtype)
     delta_grad = grad_eta_new - grad_eta_old
 
