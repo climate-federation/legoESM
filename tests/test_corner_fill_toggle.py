@@ -274,7 +274,44 @@ def test_model_driver_applies_config_corner_fill(monkeypatch):
     import legoesm.grids.halo as halo
     monkeypatch.delenv("LEGOESM_CORNER_FILL", raising=False)
     monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
+    monkeypatch.setattr(halo, "_corner_fill_claimed", None)
     from legoesm.driver.config import DycoreConfig, ExperimentConfig
     from legoesm.driver.model_driver import ModelDriver
     ModelDriver(ExperimentConfig(dycore=DycoreConfig(corner_fill="fv3_bgrid_xdir")))
     assert get_corner_fill_mode() == "fv3_bgrid_xdir"
+
+
+def test_second_model_with_other_corner_fill_raises(monkeypatch):
+    import legoesm.grids.halo as halo
+    monkeypatch.delenv("LEGOESM_CORNER_FILL", raising=False)
+    monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
+    monkeypatch.setattr(halo, "_corner_fill_claimed", None)
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    from legoesm.driver.model_driver import ModelDriver
+    ModelDriver(ExperimentConfig(dycore=DycoreConfig(corner_fill="fv3_bgrid_xdir")))
+    ModelDriver(ExperimentConfig(dycore=DycoreConfig(corner_fill="fv3_bgrid_xdir")))
+    with pytest.raises(ValueError, match="already built in this process"):
+        ModelDriver(ExperimentConfig(dycore=DycoreConfig(corner_fill="avg")))
+    assert get_corner_fill_mode() == "fv3_bgrid_xdir"
+
+
+def test_traced_corner_fill_mode_reaches_the_run_manifest(monkeypatch, tmp_path):
+    import legoesm.grids.halo as halo
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.driver.restart import read_run_manifest, write_run_manifest
+    monkeypatch.delenv("LEGOESM_CORNER_FILL", raising=False)
+    monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
+    monkeypatch.setattr(halo, "_corner_fill_claimed", None)
+    monkeypatch.setattr(halo, "_corner_fill_traced", set())
+    driver = ModelDriver(ExperimentConfig())
+    set_corner_fill_mode("fv3_agrid_xdir")          # changed after the build
+    jax.jit(halo.fill_corners_h1)(jnp.zeros((6, 6, 6)))
+    driver._output_dir = tmp_path
+    driver._mpi_rank = None
+    write_run_manifest(tmp_path, driver._input_config)
+    driver._record_final_state_digest()
+    manifest = read_run_manifest(tmp_path)
+    assert manifest["result"]["corner_fill_traced"] == ["fv3_agrid_xdir"]
+    from legoesm.driver.restart import validate_run_manifest
+    validate_run_manifest(manifest)               # the extra key stays valid

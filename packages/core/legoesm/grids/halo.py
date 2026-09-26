@@ -1737,16 +1737,37 @@ def get_corner_fill_mode() -> str:
     return _corner_fill_mode
 
 
+# Mode claimed by the first model built in this process, and every mode a
+# corner fill actually traced with (the fill reads the global at trace time).
+_corner_fill_claimed: str | None = None
+_corner_fill_traced: set[str] = set()
+
+
 def apply_corner_fill_config(mode: str) -> None:
     """Apply a run's configured corner fill.  A ``LEGOESM_CORNER_FILL`` that
     disagrees with the config raises, so the env var cannot silently override
-    (or be silently overridden by) the recorded run configuration."""
+    (or be silently overridden by) the recorded run configuration.  The mode is
+    process-global and read at trace time, so a second model built in the same
+    process with a different mode raises instead of retargeting the first."""
+    global _corner_fill_claimed
     env = _os.environ.get("LEGOESM_CORNER_FILL")
     if env is not None and env != mode:
         raise ValueError(
             f"LEGOESM_CORNER_FILL={env!r} disagrees with the run config "
             f"corner_fill={mode!r}; set the config field and unset the env var.")
+    if _corner_fill_claimed is not None and _corner_fill_claimed != mode:
+        raise ValueError(
+            f"corner_fill={mode!r} conflicts with corner_fill="
+            f"{_corner_fill_claimed!r} of a model already built in this "
+            f"process; the mode is process-global, so run them in separate "
+            f"processes.")
     set_corner_fill_mode(mode)
+    _corner_fill_claimed = mode
+
+
+def traced_corner_fill_modes() -> list[str]:
+    """Every corner fill mode a halo fill traced with in this process."""
+    return sorted(_corner_fill_traced)
 
 
 def fill_corners_h1(padded: jax.Array) -> jax.Array:
@@ -1789,6 +1810,7 @@ def fill_corners_h1(padded: jax.Array) -> jax.Array:
     ci = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
     cj = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
 
+    _corner_fill_traced.add(_corner_fill_mode)
     if _corner_fill_mode == "fv3_agrid_xdir":
         # FV3 AGRID-XDir: depth-1 mirror in XDir direction.
         # SW: q[0, 0] = q[0, 1]
@@ -1859,6 +1881,7 @@ def fill_corners_h2(padded: jax.Array) -> jax.Array:
     -------
     jax.Array, shape (6, n+4, n+4)
     """
+    _corner_fill_traced.add(_corner_fill_mode)
     if _corner_fill_mode == "fv3_agrid_xdir":
         # Vectorised FV3 AGRID-XDir for ng=2 (4 cells × 4 corners × 6 faces).
         # SW block (0..1, 0..1).

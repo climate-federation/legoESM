@@ -684,7 +684,8 @@ def validate_run_manifest(manifest: dict) -> None:
         )
 
 
-def record_state_digest(manifest_path, state_digest: str) -> Path:
+def record_state_digest(manifest_path, state_digest: str, *,
+                        corner_fill_traced: list[str] | None = None) -> Path:
     """Record the post-run final ``state_digest`` into an existing manifest.
 
     The run-start manifest is otherwise immutable; this is the single sanctioned
@@ -692,6 +693,8 @@ def record_state_digest(manifest_path, state_digest: str) -> Path:
     that ``legoesm reproduce --check`` has a reference to compare a rerun's final
     state against.  The manifest is validated, then rewritten atomically with the
     digest set — provenance (config/env) is never touched, only the result.
+    ``corner_fill_traced`` records the cube-vertex fill modes the run's halo
+    fills traced with (the mode is a process global read at trace time).
     """
     manifest_path = Path(manifest_path)
     if manifest_path.is_dir():
@@ -699,6 +702,8 @@ def record_state_digest(manifest_path, state_digest: str) -> Path:
     manifest = read_run_manifest(manifest_path)
     validate_run_manifest(manifest)
     manifest["result"]["state_digest"] = state_digest
+    if corner_fill_traced is not None:
+        manifest["result"]["corner_fill_traced"] = list(corner_fill_traced)
     tmp = manifest_path.with_name(f"{manifest_path.name}.{os.getpid()}.tmp")
     with open(tmp, "w") as f:
         json.dump(_json_safe(manifest), f, indent=2, sort_keys=True)
