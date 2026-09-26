@@ -291,15 +291,17 @@ def test_refuses_physics_without_the_meridional_tendency(dry):
         col.step(col.from_bundle(ic), DT, physics_fn=no_v)
 
 
-def test_refuses_a_tendency_on_an_unknown_or_non_warm_rain_tracer(moist):
+def test_uncarried_tracer_tendency_dropped_and_passenger_refused(moist):
     dyn, col, ic = moist
 
     def ice(state, mesh, coord, phys_state=None, forcing=None):
         t = _zero_physics(state, mesh, coord)
         return t._replace(tracer_tendencies={
-            "q_i": _fld(state.T, jnp.zeros_like(state.T.data), "q_i")})
-    with pytest.raises(KeyError, match="q_i"):
-        col.step(col.from_bundle(ic), DT, physics_fn=ice)
+            "q_i": _fld(state.T, jnp.ones_like(state.T.data), "q_i")})
+    # a tendency for a tracer the state does not carry is DROPPED, the
+    # MPAS model's contract (the integrations emit the full set)
+    out = col.step(col.from_bundle(ic), DT, physics_fn=ice)
+    _assert_bundle_equal(out.native, dyn.step(ic, DT))
 
     def passenger(state, mesh, coord, phys_state=None, forcing=None):
         t = _zero_physics(state, mesh, coord)
@@ -435,3 +437,117 @@ def test_louis_turbulence_runs_and_moves_both_wind_components(moist):
                                atol=1e-12 * np.abs(ps0).max())
     np.testing.assert_allclose((delp1 * (1.0 - qw1)).sum(axis=1),
                                (delp0 * (1.0 - qw0)).sum(axis=1), rtol=1e-12)
+
+
+# ---------------------------------------------------------------------
+# M3: the driver's MPAS lane with the duo as its dynamics operator
+# ---------------------------------------------------------------------
+
+def _driver_cfg(tmp_path, **over):
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig)
+    grid = GridConfig(grid_type="cubed_sphere", resolution=N, nlev=KM)
+    dycore = DycoreConfig(
+        model_type="hydrostatic", discretization="fv3_duo",
+        dt=over.pop("dt", 1920.0),
+        fv3_duo_column_lane=over.pop("column", True))
+    base = dict(
+        grid=grid, dycore=dycore, days=over.pop("days", 0.25),
+        radiation="none", convection="none", microphysics="none",
+        turbulence="none", gravity_wave_drag="none", precision="fp64",
+        output=OutputConfig(diag_days=over.pop("diag_days", 0),
+                            checkpoint_days=0, output_dir=str(tmp_path)))
+    base.update(over)
+    return ExperimentConfig(**base)
+
+
+def _run_driver(tmp_path, **over):
+    from legoesm.driver.model_driver import ModelDriver
+    cfg = _driver_cfg(tmp_path, **over)
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    status = drv.run()
+    assert status == "COMPLETED", status
+    return drv
+
+
+def test_driver_column_lane_is_the_closed_lane_bitwise(tmp_path):
+    """Rung 1 at the driver level: ``run()`` through the MPAS lane with the
+    duo column model and no physics reproduces the closed duo lane's
+    bundle bitwise after the same number of steps (same IC builder, same
+    dt), and the state the driver ends on is the column view."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel, FV3DuoColumnState)
+    col = _run_driver(tmp_path / "col")
+    assert isinstance(col.model, FV3DuoColumnModel)
+    assert isinstance(col.state, FV3DuoColumnState)
+    assert col.grid is col.model.mesh and col.sigma is col.model.sigma_coord
+    closed = _run_driver(tmp_path / "closed", column=False)
+    assert isinstance(closed.state, dict)
+    n_steps = int(0.25 * 86400.0 / 1920.0)
+    assert n_steps == 11
+    _assert_bundle_equal(col.state.native, closed.state)
+    assert np.abs(np.asarray(col.state.native["state"]["pt"])
+                  - np.asarray(closed.model.dcmip16_initial_state(
+                      do_pert=True)["state"]["pt"])).max() > 0.0
+
+
+def test_driver_column_lane_kessler_equals_the_closed_lane(tmp_path):
+    """Kessler through the MPAS lane's own physics package on the column
+    model vs the closed lane's bridge, same IC, same dt: the two runs
+    agree to 1e-12 of peak.  On the (unsaturated) DCMIP16 columns
+    Kessler's tendency is exactly zero on both lanes (MEASURED
+    2026-09-26), so this is the PLUMBING identity of the moist deck
+    (moist dycore arm, three tracers, the physics package called every
+    step, no fixer); the physics identity is the M2 rung.  The dry-mass
+    drift is the dycore's own on both lanes (the moist arm creates ~7e-7
+    of global water per step under pure advection -- a closed-lane
+    finding), so it is asserted EQUAL between the lanes, not zero."""
+    col = _run_driver(tmp_path / "col", microphysics="kessler")
+    closed = _run_driver(tmp_path / "closed", column=False,
+                         microphysics="kessler")
+    _assert_bundle_equal(col.state.native, closed.state, rel=1e-12)
+    area = np.asarray(col.model.mesh.areaCell).reshape(6, N, N)
+
+    def dry_mass(bb):
+        delp = np.asarray(bb["state"]["delp"])[:, CI, CI]
+        qw = sum(np.asarray(bb["q"][i])[:, CI, CI] for i in range(3))
+        return float(((delp * (1.0 - qw)).sum(axis=-1) * area).sum())
+    assert np.isclose(dry_mass(col.state.native), dry_mass(closed.state),
+                      rtol=1e-12)
+    for k in ("u", "v", "pt", "delp"):
+        assert np.isfinite(np.asarray(col.state.native["state"][k])).all(), k
+
+
+def test_driver_column_lane_refusals(tmp_path):
+    from legoesm.driver.model_driver import ModelDriver
+    for over, frag in ((dict(sponge_enabled=True), "sponge_enabled"),
+                       (dict(mpas_qv_smooth_del4_m4s=1e14),
+                        "MPAS-lane knob|smoothing"),
+                       (dict(held_suarez_forcing=True), "hswf"),
+                       (dict(topography="gaussian"), "column mesh"),
+                       (dict(microphysics="morrison"), "nwat=6"),
+                       (dict(convection="zhang_mcfarlane"), "nwat=6")):
+        drv = ModelDriver(_driver_cfg(tmp_path, **over), output_dir=tmp_path)
+        with pytest.raises(ValueError, match=frag):
+            drv.setup()
+
+
+def test_column_model_refuses_wind_edits_and_writes_back_T(dry):
+    dyn, col, ic = dry
+    st = col.from_bundle(ic)
+    edited = st._replace(u=st.u.replace(data=st.u.data * 0.5))
+    with pytest.raises(ValueError, match="state.u was edited"):
+        col.step(edited, DT, physics_fn=_zero_physics)
+    # a T + tracer edit (the hard-saturation drain's shape: T and a
+    # COPIED tracer dict, whose keys a jitted output leaves sorted)
+    # reaches the bundle
+    trc = {k: st.tracers[k] for k in sorted(st.tracers)}
+    trc["q_v"] = trc["q_v"].replace(data=trc["q_v"].data * 0.5)
+    warmed = st._replace(T=st.T.replace(data=st.T.data + 1.0), tracers=trc)
+    out = col.step(warmed, DT, physics_fn=_zero_physics)
+    ref = dyn.step({**ic, "state": {**ic["state"], "pt": jnp.asarray(
+        ic["state"]["pt"]).at[:, CI, CI].add(1.0)},
+        "q": [jnp.asarray(ic["q"][0]).at[:, CI, CI].multiply(0.5)]
+        + list(ic["q"][1:])}, DT)
+    _assert_bundle_equal(out.native, ref)

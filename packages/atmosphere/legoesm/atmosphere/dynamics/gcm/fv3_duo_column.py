@@ -122,6 +122,7 @@ class FV3DuoColumnModel:
             self.km, np.asarray(dyn.ak) / constants.p_ref, np.asarray(dyn.bk),
             p_ref=constants.p_ref, dtype=jnp.float64)
         self._post_fns = {}
+        self._last = None      # the column state this model last returned
 
     # ------------------------------------------------------------------
     # layouts
@@ -173,7 +174,51 @@ class FV3DuoColumnModel:
         if fn is None:
             fn = jax.jit(lambda b: self.column_view(b)[0])
             self._post_fns["view"] = fn
-        return fn(bundle)
+        self._last = fn(bundle)
+        return self._last
+
+    def _native_of(self, state):
+        """The bundle a column state stands for, with the driver's
+        post-step column edits (T, tracers -- e.g. a hard-saturation
+        drain) written back into it.  The columns are a VIEW: an edit
+        the bundle does not receive would be a silent no-op, so every
+        leaf is checked by object identity against the state this model
+        last returned; wind / p_s / phis edits are REFUSED (a wind edit
+        needs the D-grid lift, p_s follows the layer mass)."""
+        last = self._last
+        if last is None or state.native is not last.native:
+            raise ValueError(
+                "FV3DuoColumnModel.step: the column state is not the one "
+                "this model returned (build states with from_bundle and "
+                "thread step's output)")
+        for nm in ("u", "v", "p_s", "phis"):
+            if getattr(state, nm) is not getattr(last, nm):
+                raise ValueError(
+                    f"FV3DuoColumnModel.step: state.{nm} was edited outside "
+                    f"the model; the columns are a view of the duo bundle "
+                    f"and only T and the tracers can be written back "
+                    f"(a wind edit needs the D-grid lift)")
+        bundle = state.native
+        if state.T is last.T and state.tracers is last.tracers:
+            return bundle
+        ci = slice(self.ng, self.ng + self.n)
+        st = dict(bundle["state"])
+        if state.T is not last.T:
+            st["pt"] = jnp.asarray(bundle["state"]["pt"]).at[:, ci, ci].set(
+                self._faces(state.T.data))
+        q = list(bundle["q"])
+        if state.tracers is not last.tracers:
+            # key SET, not order: a jitted output dict comes back with
+            # its keys sorted (pytree flattening), the driver copies it
+            if set(state.tracers) != set(self.tracer_names):
+                raise ValueError(
+                    f"FV3DuoColumnModel.step: tracers {tuple(state.tracers)} "
+                    f"!= the model's {self.tracer_names}")
+            for i, nm in enumerate(self.tracer_names):
+                if state.tracers[nm] is not last.tracers[nm]:
+                    q[i] = jnp.asarray(q[i]).at[:, ci, ci].set(
+                        self._faces(state.tracers[nm].data))
+        return {**bundle, "state": st, "q": q}
 
     # ------------------------------------------------------------------
     # the MPAS lane's step contract
@@ -188,7 +233,7 @@ class FV3DuoColumnModel:
         FV3 conserves dry mass by construction."""
         refuse_unthreaded_stateful_physics(
             physics_fn, phys_state, where="FV3DuoColumnModel.step()")
-        bundle = self.dyn.step(state.native, dt)
+        bundle = self.dyn.step(self._native_of(state), dt)
         if physics_fn is None:
             return self.from_bundle(bundle)
         fn = self._post_fns.get(physics_fn)
@@ -198,6 +243,7 @@ class FV3DuoColumnModel:
             self._post_fns[physics_fn] = fn
         state_new, phys_out, sfc_diag = fn(bundle, float(dt), forcing,
                                            phys_state)
+        self._last = state_new
         if not any(isinstance(leaf, jax.core.Tracer)
                    for leaf in jax.tree_util.tree_leaves(phys_out)):
             self._phys_state = phys_out
@@ -236,6 +282,12 @@ class FV3DuoColumnModel:
         q_dt_c = {}
         if tend.tracer_tendencies is not None:
             for nm, tq in tend.tracer_tendencies.items():
+                if nm not in self.tracer_names:
+                    # the MPAS model's contract (primitive_eq_mpas.py:
+                    # tracer loop over state.tracers): a tendency for a
+                    # tracer the state does not carry is dropped (the
+                    # integrations emit the full warm/ice set)
+                    continue
                 q_dt_c[self._tracer_index(nm)] = self._faces(d(tq))
         if q_dt_c and not self.config.moist:
             raise ValueError(
@@ -253,4 +305,4 @@ class FV3DuoColumnModel:
                getattr(tend, "precip", None)) + tuple(
             getattr(tend, k, None) for k in MPAS_SFC_DIAG_EXTRA_KEYS)
         sfc_diag = sfc if any(s is not None for s in sfc) else None
-        return self.from_bundle(new_bundle), phys_out, sfc_diag
+        return self.column_view(new_bundle)[0], phys_out, sfc_diag

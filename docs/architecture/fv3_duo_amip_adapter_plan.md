@@ -130,6 +130,55 @@ M2 dual review (codex 4xP1 + 2xP2, GLM 5):
   `test_held_suarez_jax_differentiable_wrt_state` fails on untouched
   HEAD (FD gap/floor 18.4 vs 10) -- pre-existing, not M2's.
 
+## M3 landed (2026-09-26): the lane switch
+
+`dycore.fv3_duo_column_lane=True` (`--fv3-duo-column-lane`) routes
+`run()` to `_run_fv3_duo_column`: the driver's grid / vertical coordinate
+/ state become the column model's (`DuoColumnMesh`, the ak/bk hybrid
+coordinate, the closed lane's DCMIP16 IC through the view) and
+`_run_mpas` runs unchanged.  Edge-bound sites of the lane now go through
+`_cell_winds(state, grid)` (Perot reconstruction on a Voronoi mesh, the
+state's own cell winds on the column model): land tile, KE diagnostic,
+CMOR helper.  The column model writes the driver's post-step T / tracer
+edits back into the bundle and REFUSES wind / p_s / phis edits by object
+identity (a silent no-op on the view was the hazard).  Refused by name
+in the factory (nothing silently inert): top sponge, q_v smoothing,
+held_suarez_forcing (the MPAS lane's HS drops dv), distributed, NH,
+km outside {5, 10}, checkpoints (M5), ERA5 IC (M4), and every input the
+driver regrids onto `self.grid` in `setup()` -- dataset, topography,
+multilayer land, radiation -- because the driver's STANDARD cubed-sphere
+cell centres are NOT the duo's A-grid (MEASURED C12: 1.6 deg offsets on
+matching faces, faces 2-4 permuted; `scripts/tmp/_probe_cube_vs_duo_latlon.py`).
+M6 must build the forcings on the column mesh (build the duo grid in
+`_create_grid` and regrid there), not on the driver grid.
+
+Findings: the MPAS lane's generic Kessler integration computes dz with
+legoESM's g and arithmetic mid-layer pressure, not the closed lane's FV3
+hypsometric dz (10 % off on the thick km=5 layers per the 2026-09-24
+memory); so the driver-level Kessler run is gated on finiteness, rain
+removing mass and global dry-mass invariance, not on identity with the
+bridge.  Whether the generic integration should adopt the hypsometric
+dz on this lane is an ASK for the L32 deck.
+
+M3 review (codex: 2xP1 + 1xP2, all fixed): the tracer write-back keys
+by SET (a jitted output dict comes back sorted); ice-producing schemes
+(microphysics other than kessler, any convection) are REFUSED until the
+nwat=6 mass block is ported -- a warm-rain block would drop the ice
+Morrison hands it -- so **the nwat=6 port is a required milestone
+before rung 5 (CAM6 = Morrison/MG2 + Zhang-McFarlane)**; MPAS-dycore
+knobs (`dycore.mpas_*`) and `output.budget_ledger` are refused rather
+than inert.
+
+Closed-lane finding (MEASURED 2026-09-26, C12 km=5 moist arm, DCMIP16
+moist IC, `scripts/tmp/_probe_column_kessler_mass.py`): under pure
+advection the duo keeps TOTAL mass exact but creates ~7e-7 of global
+water per step (dry mass -4.5e-9/step), identical on the closed lane.
+Discriminating measurement (GLM): advect a uniform q == 1 through the
+same pipeline -- limiter, fillz and clipping are no-ops on it, so any
+drift convicts the remap / delp-weight coupling; bitwise exact there
+convicts the limiter / fill / passenger handling.  Own issue, not this
+PR.
+
 ## Certification ladder v3
 
 1. Zero-tendency physics through the column lane == closed duo lane
