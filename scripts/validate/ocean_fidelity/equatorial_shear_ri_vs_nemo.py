@@ -211,10 +211,15 @@ def main() -> int:
     # on this state; a 4-clock-phase mean of it is the daily mean. Also NEMO's
     # depth-of-the-MEAN-avt for the reduction caveat (mean of depths != depth
     # of mean).
+    # zdfmxl.F90:145-152: search from the bottom up to nlb10 (the first W level
+    # below 10 m), so the shallowest level AT OR BELOW 10 m with avt < avt_c;
+    # levels above 10 m never count; a column never below the threshold
+    # reports its bottom depth (imld = mbkt+1). Dry interfaces mark the bottom.
     kz_thr = 5e-4
     def _turbocline(K_w, zw, box_mask, w):
-        below = np.where(np.isfinite(K_w), K_w < kz_thr, True)         # dry = below threshold
-        first = np.argmax(below, axis=1)                               # first interface below thr
+        below = np.where(np.isfinite(K_w), K_w < kz_thr, True)         # dry = bottom
+        below[:, zw < 10.0] = False                                    # nlb10 floor
+        first = np.argmax(below, axis=1)                               # shallowest at/below 10 m
         never = ~below.any(axis=1)
         depth = np.where(never, zw[-1], zw[np.minimum(first, zw.size - 1)])
         depth = np.where(np.isfinite(K_w[:, 0]), depth, np.nan)
