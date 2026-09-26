@@ -724,6 +724,13 @@ class CLUBBConfig(NamedTuple):
     q_flux_scale: float = 1.0
     q_flux_scale_sigma_lo: float = 0.0
     q_flux_scale_sigma_hi: float = 1.0
+    # CAM6 clubb_intr moist host mapping (prognostic path only): CLUBB is fed
+    # total water rt = q_v + q_c and liquid potential temperature
+    # thl = (T - L_v/c_p q_c)/exner, and its PDF liquid rcm is handed back as
+    # the host cloud water (clubb_intr.F90 rtm/thlm set-up and the
+    # ptend q/cldliq/s tendencies).  False = the dry mapping rt ~ q_v,
+    # thl ~ theta, rcm discarded (byte-identical to the pre-2026-09-24 port).
+    liquid_handoff: bool = False
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -1437,8 +1444,12 @@ def _compute_lscale_up_col(
     grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
     dzm, invrs_dzm, zt, k_ub_zt_py, nzt,
 ):
-    """``Lscale_up`` for a single column (outer scan over launch levels)."""
-    def outer_step(max_alt, k_py):
+    """``Lscale_up`` for a single column.
+
+    Launch levels are independent, so they run together (``vmap``); only the
+    running-max smoother is sequential.
+    """
+    def lscale_k(k_py):
         tke_i_k = tke_i_col[k_py]
         tke_0 = tke_i_k + CAPE_incr_1_up[k_py + 1]
 
@@ -1471,15 +1482,18 @@ def _compute_lscale_up_col(
         frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
         frac_bc = jnp.where(exited_early, frac_inner, 0.0)
 
-        Lscale_up_k = jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
+        return jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
 
+    def smooth_step(max_alt, k_and_l):
+        k_py, Lscale_up_k = k_and_l
         k_alt = zt[k_py] + Lscale_up_k
         Lscale_up_k_smooth = jnp.where(k_alt < max_alt, max_alt - zt[k_py], Lscale_up_k)
         new_max_alt = jnp.where(k_alt < max_alt, max_alt, k_alt)
         return new_max_alt, Lscale_up_k_smooth
 
+    ks = jnp.arange(nzt - 2)
     _, vals = jax.lax.scan(
-        outer_step, jnp.zeros((), dtype=zt.dtype), jnp.arange(nzt - 2))
+        smooth_step, jnp.zeros((), dtype=zt.dtype), (ks, jax.vmap(lscale_k)(ks)))
     return jnp.concatenate([vals, jnp.full(2, _ZLMIN, dtype=zt.dtype)])
 
 
@@ -1537,10 +1551,12 @@ def _compute_lscale_down_col(
     grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
     dzm, invrs_dzm, zt, k_ub_zt_py, k_lb_zt_py, nzt,
 ):
-    """``Lscale_down`` for a single column (outer scan descending from the top)."""
-    def outer_step(min_alt, i):
-        k_py = nzt - 1 - i
+    """``Lscale_down`` for a single column.
 
+    Launch levels run together (``vmap``); only the running-min smoother,
+    descending from the top, is sequential.
+    """
+    def lscale_k(k_py):
         tke_i_k = tke_i_col[k_py]
         tke_0 = tke_i_k - CAPE_incr_1_down[k_py - 1]
 
@@ -1571,15 +1587,19 @@ def _compute_lscale_down_col(
         frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
         frac_bc = jnp.where(exited_early, frac_inner, 0.0)
 
-        Lscale_down_k = jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
+        return jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
 
+    def smooth_step(min_alt, k_and_l):
+        k_py, Lscale_down_k = k_and_l
         k_alt = zt[k_py] - Lscale_down_k
         Lscale_down_k_smooth = jnp.where(k_alt > min_alt, zt[k_py] - min_alt, Lscale_down_k)
         new_min_alt = jnp.where(k_alt > min_alt, min_alt, k_alt)
         return new_min_alt, (k_py, Lscale_down_k_smooth)
 
+    ks = nzt - 1 - jnp.arange(nzt - 1)
     init_min_alt = zt[k_ub_zt_py]
-    _, (k_indices, vals) = jax.lax.scan(outer_step, init_min_alt, jnp.arange(nzt - 1))
+    _, (k_indices, vals) = jax.lax.scan(
+        smooth_step, init_min_alt, (ks, jax.vmap(lscale_k)(ks)))
     col = jnp.full(nzt, _ZLMIN, dtype=zt.dtype)
     return col.at[k_indices].set(vals)
 
@@ -5447,6 +5467,7 @@ def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
     # converts the grid-mean cloud into sky cover + in-cloud water
     # (CAM ``l_use_cloud_cover = .true.``).
     rcm = clip_rcm(rtm, zt_trap["rcm"])
+    rcm_mean = rcm       # grid-mean liquid (CAM rcm_inout), before cloud cover
     chi_mean = (zt_out["mixt_frac"] * zt_out["chi_1"]
                 + (1.0 - zt_out["mixt_frac"]) * zt_out["chi_2"])
     cloud_frac, rcm = compute_cloud_cover(chi_mean, zt_trap["cloud_frac"], rcm, gr)
@@ -5462,7 +5483,7 @@ def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
         wpthvp=zm_trap["wpthvp"], wp2thvp=zt_trap["wp2thvp"],
         rtpthvp=zm_trap["rtpthvp"], thlpthvp=zm_trap["thlpthvp"],
         rc_coef_zm=zm_out["rc_coef"],
-        cloud_frac=cloud_frac, rcm=rcm,
+        cloud_frac=cloud_frac, rcm=rcm, rcm_mean=rcm_mean,
         rcm_zm=zm_out["rcm"],
         wprcp=zm_out["wprcp"], rtprcp=zm_out["rtprcp"],
         thlprcp=zm_out["thlprcp"], uprcp=zm_out["uprcp"],
@@ -5848,6 +5869,7 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
 
     diagnostics = dict(
         cloud_frac=pdf_post["cloud_frac"], rcm=pdf_post["rcm"],
+        rcm_mean=pdf_post["rcm_mean"],
         wpthvp=pdf_post["wpthvp"], Kh_zt=diag["Kh_zt"], Kh_zm=diag["Kh_zm"])
     return new_state, diagnostics
 
@@ -5995,6 +6017,9 @@ def clubb_turbulence(
     wp2_new : jax.Array
         Updated ``w'^2`` [m^2/s^2], ``(ncol, nlev)``, carried to the next step.
     """
+    if config.liquid_handoff:
+        raise ValueError("liquid_handoff is a prognostic-CLUBB mapping; the "
+                         "diagnostic closure does not carry it.")
     ncol, nlev = T.shape
     params = config.params
 
@@ -6186,6 +6211,7 @@ def clubb_step(
     sfc_upwp: jax.Array | None = None,
     sfc_vpwp: jax.Array | None = None,
     radht_zt: jax.Array | None = None,
+    q_c: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6198,8 +6224,19 @@ def clubb_step(
 
     Modelling choices (documented; refined as the scheme matures):
 
-      * Dry phase mapping ``thl ~ theta``, ``rt ~ q_v`` (``rcm`` enters only via
-        the PDF closure inside ``advance_clubb_core``).
+      * Phase mapping. ``q_c=None``: dry mapping ``thl ~ theta``, ``rt ~ q_v``
+        (``rcm`` enters only via the PDF closure and is discarded).  ``q_c``
+        given: CAM6 ``clubb_intr`` moist mapping ``rt = q_v + q_c``,
+        ``thl = (T - L_v/c_pd q_c)/exner``; afterwards ``q_c' = rcm``,
+        ``q_v' = rt' - rcm``, ``T' = thl' exner + L_v/c_pd rcm``, and
+        ``diags["dq_c_dt"]`` carries the cloud-water tendency.  ``rcm`` is the
+        GRID-MEAN PDF liquid (CAM ``rcm_inout``), not the in-layer liquid
+        behind the cloud-cover diagnostic.  Above ``trop_cloud_top_press`` the
+        host liquid is kept (CAM restores ``rcm = cldliq`` above its CLUBB top),
+        blended with the same log-pressure taper as the cloud fraction.  Any
+        such choice of the returned liquid conserves ``rt`` and
+        ``c_pd T + L_v q_v = c_pd thl exner + L_v rt`` exactly when CLUBB
+        conserves ``thl`` and ``rt``.  Ice is not part of ``rt`` (as in CAM6).
       * Mean vertical velocity ``wm = 0`` (grid-scale subsidence is the dycore's
         job, not the column closure).
       * Geostrophic wind ``ug = um``, ``vg = vm`` and ``fcor = 0`` → the
@@ -6256,8 +6293,13 @@ def clubb_step(
 
     # ---- Ascending CLUBB grid + means on zt ----
     gr = make_clubb_grid_from_levels(z_full, z_half)
-    thlm = flip_vertical(theta)          # thl ~ theta (zt)
-    rtm = flip_vertical(q_v)             # rt ~ q_v   (zt)
+    if q_c is None:
+        thlm = flip_vertical(theta)          # thl ~ theta (zt)
+        rtm = flip_vertical(q_v)             # rt ~ q_v   (zt)
+    else:
+        # clubb_intr.F90: rtm = q + ql, thlm = (T - latvap/cp ql)/exner
+        thlm = flip_vertical((T - constants.L_v / constants.c_pd * q_c) / exner)
+        rtm = flip_vertical(q_v + q_c)
     um = flip_vertical(u)
     vm = flip_vertical(v)
     exner_zt = flip_vertical(exner)
@@ -6373,13 +6415,30 @@ def clubb_step(
     # ---- Map advanced means back to top-down tendencies ----
     u_new = flip_vertical(new_state.um)
     v_new = flip_vertical(new_state.vm)
-    T_new = flip_vertical(new_state.thlm) * exner    # thl ~ theta -> T = theta*exner
-    q_new = flip_vertical(new_state.rtm)
     du_dt = (u_new - u) / dt
     dv_dt = (v_new - v) / dt
+    diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx)
+    if q_c is None:
+        T_new = flip_vertical(new_state.thlm) * exner    # thl ~ theta -> T = theta*exner
+        q_new = flip_vertical(new_state.rtm)
+    else:
+        # clubb_intr.F90 ptend: q = rtm - rcm, cldliq = rcm, s from thlm + L rcm.
+        # rcm is clipped to [0, rt] so neither phase goes negative.
+        rt_new = flip_vertical(new_state.rtm)
+        rcm_new = flip_vertical(diags["rcm_mean"])
+        if config.trop_cloud_top_press > 0.0:
+            w_top = jax.nn.sigmoid(
+                (jnp.log(jnp.clip(p_full, 1.0, None))
+                 - jnp.log(config.trop_cloud_top_press))
+                / config.trop_cloud_taper_lnp_width)
+            rcm_new = w_top * rcm_new + (1.0 - w_top) * q_c
+        rcm_new = jnp.clip(rcm_new, 0.0, jnp.maximum(rt_new, 0.0))
+        T_new = (flip_vertical(new_state.thlm) * exner
+                 + constants.L_v / constants.c_pd * rcm_new)
+        q_new = rt_new - rcm_new
+        diags["dq_c_dt"] = (rcm_new - q_c) / dt
     dT_dt = (T_new - T) / dt
     dq_v_dt = (q_new - q_v) / dt
-    diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx)
     return du_dt, dv_dt, dT_dt, dq_v_dt, new_state, diags
 
 
@@ -6405,6 +6464,7 @@ def clubb_turbulence_prognostic(
     surface_flux: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
     | None = None,
     rad_dT_dt: jax.Array | None = None,
+    q_c: jax.Array | None = None,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -6455,9 +6515,19 @@ def clubb_turbulence_prognostic(
     un-forced path; a static Python ``thlp2_rad_coef == 0.0`` likewise
     short-circuits to the identical result.
 
+    **Moist host mapping** (``config.liquid_handoff``): the host cloud water
+    ``q_c`` (required then, refused otherwise) is folded into CLUBB's total water
+    and handed back as ``rcm`` -- see :func:`clubb_step`; its net tendency is
+    ``TurbulenceOutput.dq_c_dt``.
+
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
     """
+    if config.liquid_handoff != (q_c is not None):
+        raise ValueError(
+            "clubb_turbulence_prognostic: liquid_handoff="
+            f"{config.liquid_handoff} needs q_c "
+            f"{'given' if config.liquid_handoff else 'absent'}.")
     if float(config.q_flux_scale) != 1.0:
         raise ValueError(
             "q_flux_scale is a diagnostic-CLUBB mechanism probe; the prognostic "
@@ -6519,7 +6589,8 @@ def clubb_turbulence_prognostic(
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
-            radht_zt=radht_zt)
+            radht_zt=radht_zt, q_c=q_c)
+        dq_c_dt = diags.get("dq_c_dt")
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         Kh_full = flip_vertical(diags["Kh_zt"])
         cloud_frac_a = diags["cloud_frac"]
@@ -6527,8 +6598,10 @@ def clubb_turbulence_prognostic(
         dt_sub = dt / n_sub
         tv_floor = config.T0 * 0.5
 
+        # ``ql_c`` is the host cloud water, carried only under the moist
+        # mapping (a static None otherwise, so the dry path is unchanged).
         def _sub(carry, _):
-            u_c, v_c, T_c, q_c, m_c = carry
+            u_c, v_c, T_c, q_c, ql_c, m_c = carry
             # Density floor (only) guards a strictly-positive rho if q_c dips
             # slightly negative mid-cycle; q itself is NOT clipped — the host
             # applies the RAW integrated CLUBB tendency, identical to the n_sub=1
@@ -6542,17 +6615,19 @@ def clubb_turbulence_prognostic(
             du, dv, dT, dq, m_new, diag = clubb_step(
                 u_c, v_c, T_c, q_c, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho_c, dt_sub, config, *_sfc_bcs(rho_c),
-                radht_zt=radht_zt)
+                radht_zt=radht_zt, q_c=ql_c)
+            ql_n = None if ql_c is None else ql_c + dt_sub * diag.pop("dq_c_dt")
             carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,
-                     q_c + dt_sub * dq, m_new)
+                     q_c + dt_sub * dq, ql_n, m_new)
             return carry, diag
 
-        (u_f, v_f, T_f, q_f, new_moments), diag_stk = jax.lax.scan(
-            _sub, (u, v, T, q_v, moments), xs=None, length=n_sub)
+        (u_f, v_f, T_f, q_f, ql_f, new_moments), diag_stk = jax.lax.scan(
+            _sub, (u, v, T, q_v, q_c, moments), xs=None, length=n_sub)
         du_dt = (u_f - u) / dt
         dv_dt = (v_f - v) / dt
         dT_dt = (T_f - T) / dt
         dq_v_dt = (q_f - q_v) / dt
+        dq_c_dt = None if q_c is None else (ql_f - q_c) / dt
         # Net surface exchange = sub-cycle-mean flux; Kh from the final sub-step.
         shflx = jnp.mean(diag_stk["shflx"], axis=0)
         lhflx = jnp.mean(diag_stk["lhflx"], axis=0)
@@ -6591,7 +6666,7 @@ def clubb_turbulence_prognostic(
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
         Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx, ustar=ustar,
-        h_pbl=h_pbl, cloud_fraction=cloud_fraction_td)
+        h_pbl=h_pbl, cloud_fraction=cloud_fraction_td, dq_c_dt=dq_c_dt)
     return output, pack_clubb_moments(new_moments)
 
 
@@ -6659,6 +6734,9 @@ def integrate_clubb_column(
     ``(nsteps, ...)``. The returned ``moments`` means (rtm/thlm/um/vm) are kept
     consistent with the returned ``(u, v, T, q_v)``.
     """
+    if config.liquid_handoff:
+        raise ValueError("integrate_clubb_column runs the dry mapping; "
+                         "liquid_handoff is not implemented here.")
     ncol, nlev = T.shape
     if moments is None:
         moments = init_clubb_moments(ncol, nlev, config, dtype=T.dtype)

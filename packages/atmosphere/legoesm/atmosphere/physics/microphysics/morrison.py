@@ -281,6 +281,9 @@ def morrison_microphysics(
         hard_threshold=config.hard_sat_adjust_threshold,
         hard_max_heating_K=config.hard_sat_max_heating_K,
     )
+    if not config.liquid_condensation:
+        # Another scheme (CLUBB, CAM6 macrophysics) owns liquid condensation.
+        condensation = jnp.zeros_like(condensation)
     # Sub-grid in-cloud closure (Morrison & Gettelman 2008): evaluate the
     # warm-rain rates on the IN-CLOUD water q_c/cf and scale back by cf, so the
     # non-linear KK2000/SB rates see the (higher) in-cloud concentration rather

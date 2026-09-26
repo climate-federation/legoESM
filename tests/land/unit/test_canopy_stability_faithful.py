@@ -73,6 +73,22 @@ _O_MOM_CONV = 1.14    # momentum free-convection coefficient
 _O_HEAT_CONV = 0.8    # heat free-convection coefficient
 _O_RIB_MAX = 0.19  # Zeng-1998 bulk-Ri init cap
 _O_ZETA_MAX_STABLE = 0.5  # stable-branch zeta clamp upper bound
+# Beljaars & Holtslag (1991) stable-side coefficients (the DEPARTURE from CLM5's
+# linear -5 zeta; b as rounded in the shared core implementation).
+_O_BH_A, _O_BH_B, _O_BH_C, _O_BH_D = 1.0, 0.667, 5.0, 0.35
+
+
+def _bh_psim(z):
+    """Beljaars & Holtslag (1991) stable momentum psi (z >= 0)."""
+    return -(_O_BH_A*z + _O_BH_B*(z - _O_BH_C/_O_BH_D)*math.exp(-_O_BH_D*z)
+             + _O_BH_B*_O_BH_C/_O_BH_D)
+
+
+def _bh_psih(z):
+    """Beljaars & Holtslag (1991) stable heat psi (z >= 0)."""
+    return -((1.0 + 2.0*_O_BH_A*z/3.0)**1.5
+             + _O_BH_B*(z - _O_BH_C/_O_BH_D)*math.exp(-_O_BH_D*z)
+             + _O_BH_B*_O_BH_C/_O_BH_D - 1.0)
 
 
 def _psim(z):
@@ -91,32 +107,28 @@ def _psih(z):
 
 
 def _ustar_oracle(zldis, z0m, obu, um):
-    """CLM5 FrictionVelocityMod 4-regime friction velocity."""
+    """CLM5 FrictionVelocityMod friction velocity (unstable); BH91 stable side."""
     zeta = zldis/obu
     if zeta < -_O_ZETAM:                                    # very unstable
         d = (math.log(-_O_ZETAM*obu/z0m) - _psim(-_O_ZETAM) + _psim(z0m/obu)
              + _O_MOM_CONV*((-zeta)**(1.0/3.0) - _O_ZETAM**(1.0/3.0)))
     elif zeta < 0.0:                                        # unstable
         d = math.log(zldis/z0m) - _psim(zeta) + _psim(z0m/obu)
-    elif zeta <= 1.0:                                       # stable
-        d = math.log(zldis/z0m) + _O_BETA*zeta - _O_BETA*z0m/obu
-    else:                                                   # very stable
-        d = math.log(obu/z0m) + _O_BETA - _O_BETA*z0m/obu + (_O_BETA*math.log(zeta) + zeta - 1.0)
+    else:                                                   # stable: BH91 (departure)
+        d = math.log(zldis/z0m) - _bh_psim(zeta) + _bh_psim(z0m/obu)
     return _O_KAPPA*um/d
 
 
 def _ch_oracle(zldis, z0h, obu):
-    """CLM5 FrictionVelocityMod 4-regime heat/scalar transfer (theta*/dtheta)."""
+    """CLM5 heat/scalar transfer (unstable); BH91 stable side (theta*/dtheta)."""
     zeta = zldis/obu
     if zeta < -_O_ZETAT:                                    # very unstable (INVERSE cbrt)
         d = (math.log(-_O_ZETAT*obu/z0h) - _psih(-_O_ZETAT) + _psih(z0h/obu)
              + _O_HEAT_CONV*(_O_ZETAT**(-1.0/3.0) - (-zeta)**(-1.0/3.0)))
     elif zeta < 0.0:                                        # unstable
         d = math.log(zldis/z0h) - _psih(zeta) + _psih(z0h/obu)
-    elif zeta <= 1.0:                                       # stable
-        d = math.log(zldis/z0h) + _O_BETA*zeta - _O_BETA*z0h/obu
-    else:                                                   # very stable
-        d = math.log(obu/z0h) + _O_BETA - _O_BETA*z0h/obu + (_O_BETA*math.log(zeta) + zeta - 1.0)
+    else:                                                   # stable: BH91 (departure)
+        d = math.log(zldis/z0h) - _bh_psih(zeta) + _bh_psih(z0h/obu)
     return _O_KAPPA/d
 
 
@@ -138,7 +150,7 @@ _REGIMES = [
 
 @pytest.mark.parametrize("name,obu", _REGIMES)
 def test_friction_velocity_matches_clm5_oracle(name, obu):
-    """ustar matches the CLM5 FrictionVelocityMod form in every regime."""
+    """ustar matches the oracle form in every regime (CLM5 unstable, BH91 stable)."""
     z0m, um = 0.1, 4.0
     got = float(_friction_velocity(_a(_ZLDIS), _a(z0m), _a(obu), _a(um)))
     exp = _ustar_oracle(_ZLDIS, z0m, obu, um)
@@ -147,7 +159,7 @@ def test_friction_velocity_matches_clm5_oracle(name, obu):
 
 @pytest.mark.parametrize("name,obu", _REGIMES)
 def test_heat_transfer_matches_clm5_oracle(name, obu):
-    """ch (theta*/dtheta) matches the CLM5 heat form in every regime."""
+    """ch matches the oracle heat form in every regime (CLM5 unstable, BH91 stable)."""
     z0h = 0.1
     got = float(_temperature_humidity_relation(_a(_ZLDIS), _a(obu), _a(z0h)))
     exp = _ch_oracle(_ZLDIS, z0h, obu)
@@ -203,21 +215,19 @@ def test_forms_continuous_across_free_convection_matches():
     assert c_lo == pytest.approx(c_hi, rel=1e-5)
 
 
-def test_stable_branch_resistance_is_linear_in_zeta():
-    """In the stable regime the resistance denom fm = kappa u / ustar is affine in
-    zeta (slope set by beta=5); the second difference vanishes (non-vacuous — a
-    non-linear branch would fail)."""
+def test_stable_branch_has_the_beljaars_holtslag_long_tail():
+    """Stable side is BH91, not CLM5's linear -5 zeta: the resistance denom
+    fm = kappa u / ustar grows with zeta but SLOWER than linear (the long tail),
+    and starts with the Businger-Dyer slope ~5 near neutral."""
     z0m, um = 0.05, 4.0
-    fm = []
-    for zeta in (0.3, 0.6, 0.9):
-        obu = _ZLDIS/zeta
-        u = float(_friction_velocity(_a(_ZLDIS), _a(z0m), _a(obu), _a(um)))
-        fm.append(_O_KAPPA*um/u)
-    second_diff = (fm[2] - fm[1]) - (fm[1] - fm[0])
-    assert abs(second_diff) < 1e-9
-    # slope = 5*(1 - z0m/zldis) (roughness term), and clearly nonzero
-    slope = (fm[2] - fm[0]) / (0.9 - 0.3)
-    assert slope == pytest.approx(_O_BETA*(1.0 - z0m/_ZLDIS), rel=1e-9)
+
+    def fm(zeta):
+        u = float(_friction_velocity(_a(_ZLDIS), _a(z0m), _a(_ZLDIS/zeta), _a(um)))
+        return _O_KAPPA*um/u
+    near = (fm(0.02) - fm(0.01)) / 0.01
+    far = (fm(3.0) - fm(2.0)) / 1.0
+    assert near == pytest.approx(_O_BETA, rel=0.05)
+    assert 0.0 < far < 0.8*near
 
 
 def test_very_unstable_heat_uses_clm5_inverse_cbrt_not_gsam():

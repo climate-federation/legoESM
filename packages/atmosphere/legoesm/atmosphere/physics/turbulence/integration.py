@@ -257,6 +257,14 @@ def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
     return carry if carry.shape == (ncol, nlev) else floor
 
 
+def _refuse_liquid_handoff(scheme_config, lane: str) -> None:
+    """The CLUBB moist host mapping is wired on the MPAS lane only."""
+    if getattr(scheme_config, "liquid_handoff", False):
+        raise ValueError(
+            f"CLUBB liquid_handoff is not wired on the {lane} turbulence lane "
+            "(MPAS only); it would be silently ignored here.")
+
+
 def _prognostic_clubb_rad_kwargs(carry_field, phys_state, nCells, nlev, dtype):
     """Radheating kwargs for the ``turb_fn`` call, prognostic CLUBB only.
 
@@ -596,6 +604,7 @@ def _make_hydrostatic_turbulence(
     and the moisture tendency ``dq_v_dt`` is returned via ``tracer_tendencies``.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
+    _refuse_liquid_handoff(scheme_config, "hydrostatic")
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
 
@@ -770,6 +779,10 @@ def _make_mpas_turbulence(
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
+    _liquid_handoff = bool(getattr(scheme_config, "liquid_handoff", False))
+    if _liquid_handoff and carry_field != "clubb_moments":
+        raise ValueError("CLUBB liquid_handoff requires the prognostic CLUBB "
+                         "closure (clubb_prognostic=True).")
     # Resolved once here from the static kernel, so an unsupported scheme
     # raises with its own name on the first step instead of as a TypeError
     # inside a traced column.
@@ -988,6 +1001,16 @@ def _make_mpas_turbulence(
         # diagnostic CLUBB path — their turb_fn signatures do not accept it.
         _rad_kw = _prognostic_clubb_rad_kwargs(
             carry_field, phys_state, nCells, nlev, _state_dtype)
+        # CAM6 moist host mapping: hand CLUBB the host cloud water (static
+        # Python branch; the dry mapping never reads q_c).
+        _liq_kw = {}
+        if _liquid_handoff:
+            if state.tracers is None or "q_c" not in state.tracers:
+                raise ValueError(
+                    "CLUBB liquid_handoff needs a q_c tracer on the MPAS state.")
+            _qc_raw = state.tracers["q_c"]
+            _liq_kw = {"q_c": (_qc_raw.data if hasattr(_qc_raw, "data")
+                               else _qc_raw).reshape(nCells, nlev)}
 
         if needs_tke:
             tke_in = _read_turb_carry(
@@ -996,7 +1019,7 @@ def _make_mpas_turbulence(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
-                **_sfc_kw, **_rad_kw,
+                **_sfc_kw, **_rad_kw, **_liq_kw,
             )
             tke_out = tke_new
         else:
@@ -1031,6 +1054,14 @@ def _make_mpas_turbulence(
                 )
             else:
                 tracer_tends["q_v"] = turb_out.dq_v_dt.reshape(_qv_raw.shape)
+        if _liquid_handoff:
+            _qc_raw = state.tracers["q_c"]
+            if hasattr(_qc_raw, "replace"):
+                tracer_tends["q_c"] = _qc_raw.replace(
+                    data=turb_out.dq_c_dt.reshape(_qc_raw.data.shape),
+                    name="dq_c_dt_turb")
+            else:
+                tracer_tends["q_c"] = turb_out.dq_c_dt.reshape(_qc_raw.shape)
 
         zero_ps = jnp.zeros_like(p_s)
         # Surface turbulent fluxes for the CMOR hfss/hfls feed [W/m^2,
@@ -1084,6 +1115,7 @@ def _make_nonhydrostatic_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
+    _refuse_liquid_handoff(scheme_config, "nonhydrostatic")
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
     if carry_field in ("qke", "clubb_moments"):
@@ -1255,6 +1287,7 @@ def _make_spectral_pe_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
+    _refuse_liquid_handoff(scheme_config, "spectral")
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
     if carry_field == "qke":

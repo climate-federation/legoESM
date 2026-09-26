@@ -727,7 +727,8 @@ class ExperimentConfig(NamedTuple):
     # VERTICAL overlap optics: "none" (legacy/byte-identical) or
     # "max_random" (n_sub deterministic maximum-random-overlap subcolumns,
     # measured -30% cloud albedo and +18 W/m2 OLR vs a Monte-Carlo
-    # reference; costs n_sub x the radiation time). MUTUALLY EXCLUSIVE with
+    # reference; costs n_sub x the radiation time) or "mcica" (CAM6: one
+    # such subcolumn per g-point, a single solve). MUTUALLY EXCLUSIVE with
     # cloud_partial_coverage_optics="two_column" -- both correct partial
     # coverage, so enabling both double-discounts the cloud.
     cloud_vertical_overlap_optics: str = "none"
@@ -1790,6 +1791,17 @@ class ExperimentConfig(NamedTuple):
     # MorrisonConfig.sed_cfl_substeps_strict: runtime error when a column
     # needs more sub-steps than the cap.
     morrison_sed_cfl_substeps_strict: bool = False
+    # MorrisonConfig.do_graupel: the prognostic graupel category (riming of
+    # cloud water and rain onto graupel, frozen rain -> graupel).  CAM6's MG2
+    # carries no graupel; False routes frozen rain to snow and drops the
+    # graupel riming sink.  Default equals the leaf (True).
+    morrison_do_graupel: bool = True
+    # CAM6 clubb_intr moist host mapping: CLUBB runs on total water and owns
+    # cloud-liquid condensation (its PDF liquid becomes q_c); Morrison's own
+    # liquid condensation is switched off so the two do not both act.
+    # Prognostic CLUBB + Morrison on the MPAS lane only.  False = the dry
+    # mapping (CLUBB liquid discarded), byte-identical.
+    clubb_liquid_handoff: bool = False
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -2207,7 +2219,7 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_partial_coverage_optics must be one of {_valid_cover}, "
                 f"got {self.cloud_partial_coverage_optics!r}"
             )
-        _valid_overlap = ("none", "max_random")
+        _valid_overlap = ("none", "max_random", "mcica")
         if self.cloud_vertical_overlap_optics not in _valid_overlap:
             errors.append(
                 f"cloud_vertical_overlap_optics must be one of "
@@ -3375,7 +3387,25 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"morrison_sed_cfl_substeps_max={_nmm_max} requires "
                 f"microphysics='morrison' (got {self.microphysics!r})")
-        for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict"):
+        if not isinstance(self.clubb_liquid_handoff, bool):
+            errors.append("clubb_liquid_handoff must be a bool, got "
+                          f"{self.clubb_liquid_handoff!r}")
+        elif self.clubb_liquid_handoff and not (
+                self.turbulence == "clubb"
+                and getattr(self, "clubb_prognostic", False)
+                and self.microphysics == "morrison"
+                and self.cld_macmic_num_steps >= 2):
+            # macmic >= 2 selects the SEQUENTIAL CLUBB -> microphysics loop;
+            # at 1 both would read the same cloud water in parallel and could
+            # overdraw it (CAM6 always runs them sequentially).
+            errors.append(
+                "clubb_liquid_handoff=True requires turbulence='clubb', "
+                "clubb_prognostic=True, microphysics='morrison' and "
+                "cld_macmic_num_steps >= 2 (got "
+                f"{self.turbulence!r}, {getattr(self, 'clubb_prognostic', None)!r}, "
+                f"{self.microphysics!r}, {self.cld_macmic_num_steps!r})")
+        for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
+                    "morrison_do_graupel"):
             _v = getattr(self, _nm)
             if not isinstance(_v, bool):
                 errors.append(f"{_nm} must be a bool, got {_v!r}")
@@ -3911,6 +3941,8 @@ class ExperimentConfig(NamedTuple):
             morrison_sed_cfl_substeps=amip_cfg.morrison_sed_cfl_substeps,
             morrison_sed_cfl_substeps_max=amip_cfg.morrison_sed_cfl_substeps_max,
             morrison_sed_cfl_substeps_strict=amip_cfg.morrison_sed_cfl_substeps_strict,
+            morrison_do_graupel=amip_cfg.morrison_do_graupel,
+            clubb_liquid_handoff=amip_cfg.clubb_liquid_handoff,
             unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
@@ -4137,6 +4169,8 @@ class ExperimentConfig(NamedTuple):
             morrison_sed_cfl_substeps=self.morrison_sed_cfl_substeps,
             morrison_sed_cfl_substeps_max=self.morrison_sed_cfl_substeps_max,
             morrison_sed_cfl_substeps_strict=self.morrison_sed_cfl_substeps_strict,
+            morrison_do_graupel=self.morrison_do_graupel,
+            clubb_liquid_handoff=self.clubb_liquid_handoff,
             diurnal_cycle=self.diurnal_cycle,
             co2_ppmv=self.co2_ppmv,
             ch4_ppbv=self.ch4_ppbv,

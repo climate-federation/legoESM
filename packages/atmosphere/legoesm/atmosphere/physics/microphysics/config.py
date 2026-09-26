@@ -938,6 +938,13 @@ class MorrisonConfig(NamedTuple):
     # cannot close the budget.  NOT a tunable: it selects no physics.
     publish_qc_budget: bool = False
 
+    # Grid-mean condensation/evaporation of CLOUD LIQUID (the saturation
+    # adjustment ``condensation`` term).  False when another scheme owns
+    # liquid condensation -- CAM6's macrophysics is CLUBB and MG2 does no
+    # condensation of its own -- so the two do not both create or remove the
+    # same cloud water.  Ice processes and rain evaporation are unaffected.
+    liquid_condensation: bool = True
+
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
 # ExperimentConfig): the loop cost is LINEAR in the cap, so a typo ("2560")
@@ -1224,6 +1231,8 @@ def apply_microphysics_experiment_flags(
     morrison_sed_cfl_substeps: bool | None = None,
     morrison_sed_cfl_substeps_max: int | None = None,
     morrison_sed_cfl_substeps_strict: bool | None = None,
+    morrison_do_graupel: bool | None = None,
+    morrison_liquid_condensation: bool | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1363,6 +1372,25 @@ def apply_microphysics_experiment_flags(
                 f"morrison microphysics scheme (got {scheme!r}).")
         scheme_config = scheme_config._replace(
             sed_cfl_substeps_strict=morrison_sed_cfl_substeps_strict)
+    if morrison_do_graupel is not None:
+        if not isinstance(morrison_do_graupel, bool):
+            raise TypeError(
+                f"morrison_do_graupel must be a bool, got {morrison_do_graupel!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_do_graupel is only supported by the morrison "
+                f"microphysics scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(do_graupel=morrison_do_graupel)
+    if morrison_liquid_condensation is not None:
+        if not isinstance(morrison_liquid_condensation, bool):
+            raise TypeError("morrison_liquid_condensation must be a bool, got "
+                            f"{morrison_liquid_condensation!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_liquid_condensation is only supported by the morrison "
+                f"microphysics scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(
+            liquid_condensation=morrison_liquid_condensation)
     if morrison_scalars:
         # Morrison ice-process tunables (``morrison_*`` ExperimentConfig flat
         # scalars).  HARD scheme gate, NOT field-presence: Thompson carries

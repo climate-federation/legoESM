@@ -3996,8 +3996,11 @@ def thread_morrison_scalars(config, scheme, micro_config):
                           _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"])
     _sed_max = getattr(config, "morrison_sed_cfl_substeps_max",
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"])
+    _graupel = getattr(config, "morrison_do_graupel",
+                       _ExpCfg._field_defaults["morrison_do_graupel"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
-                    ("morrison_sed_cfl_substeps_strict", _sed_strict)):
+                    ("morrison_sed_cfl_substeps_strict", _sed_strict),
+                    ("morrison_do_graupel", _graupel)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4014,8 +4017,17 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _sed_max = (None if _sed_max
                 == _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"]
                 else _sed_max)
+    _graupel = (None if _graupel
+                is _ExpCfg._field_defaults["morrison_do_graupel"] else _graupel)
+    # CLUBB owns cloud liquid under the moist mapping, so Morrison's own
+    # liquid condensation is switched off (CAM6: MG2 does no condensation).
+    _handoff = getattr(config, "clubb_liquid_handoff", False)
+    if not isinstance(_handoff, bool):
+        raise TypeError(f"clubb_liquid_handoff must be a bool, got {_handoff!r}")
+    _liq_cond = False if _handoff else None
     if (not _touched and _flavor is None and _sed_sub is None
-            and _sed_strict is None and _sed_max is None):
+            and _sed_strict is None and _sed_max is None and _graupel is None
+            and _liq_cond is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4024,7 +4036,9 @@ def thread_morrison_scalars(config, scheme, micro_config):
         micro_config, scheme, morrison_scalars=_touched,
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
         morrison_sed_cfl_substeps_max=_sed_max,
-        morrison_sed_cfl_substeps_strict=_sed_strict)
+        morrison_sed_cfl_substeps_strict=_sed_strict,
+        morrison_do_graupel=_graupel,
+        morrison_liquid_condensation=_liq_cond)
 
 
 def _resolve_microphysics(config):
@@ -4373,6 +4387,18 @@ def turbulence_config_for(config):
             )
             tc = materialize_sub_config(tc)
             tc = tc._replace(clubb=tc.clubb._replace(prognostic=True))
+        # CAM6 moist host mapping: CLUBB owns cloud liquid.  Same threading
+        # and refusal as the prognostic flag; False => byte-identical.
+        if getattr(config, "clubb_liquid_handoff", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_liquid_handoff requires turbulence='clubb', got "
+                    f"{tc.scheme!r}.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(liquid_handoff=True))
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => byte-identical: the scheme's own 0.0 (off) stands.
@@ -4468,6 +4494,16 @@ def turbulence_config_for(config):
                 f"{getattr(_sub, 'prognostic', None)!r}). The override is "
                 "authoritative, so set CLUBBConfig(prognostic=True) inside it "
                 "rather than relying on the experiment-level flag.")
+    _ovr_handoff = bool(getattr(getattr(tc, "clubb", None), "liquid_handoff", False))
+    if _ovr_handoff != bool(getattr(config, "clubb_liquid_handoff", False)):
+        # Morrison's liquid condensation is switched from the flat flag, so an
+        # override that disagrees would leave nobody, or two schemes, owning
+        # cloud-liquid condensation.
+        raise ValueError(
+            "clubb_liquid_handoff="
+            f"{getattr(config, 'clubb_liquid_handoff', False)} but the explicit "
+            f"turbulence_override has liquid_handoff={_ovr_handoff}; set both "
+            "the same.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the

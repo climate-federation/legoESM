@@ -120,6 +120,14 @@ clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
 use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
                                  # radiation (required by cam6_clubb)
 microphysics: morrison      # mg flavour (MG2 port = run 2)
+morrison_do_graupel: true   # NAMED, equals the code default: this deck's
+                            # measured behaviour.  CAM6's MG2 has NO graupel
+                            # (eight constituents, micro_mg_cam.F90:139); our
+                            # port rimes cloud water onto graupel, ~half the
+                            # cold-sector cloud-water sink on the day-5 state.
+                            # The graupel-off arm is this deck plus
+                            # --no-morrison-do-graupel; this value stays
+                            # until the user decides (2026-09-24).
 morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # nstep = 1 + int(max V dt/dz) per column,
                                  # so precipitation crosses >1 layer per 600 s.
@@ -134,13 +142,29 @@ morrison_sed_cfl_substeps_strict: false # the abort path is an equinox error_if,
                                         # reported as a diagnostic.
                                  # (L32 at 600 s needs ~90 for graupel; a clamp
                                  # would silently slow the fall)
-hard_saturation_adjustment: true
+hard_saturation_adjustment: false  # CAM6: clubb_do_liqsupersat = .false.
+                                   # (namelist_defaults_cam.xml) -- no
+                                   # post-CLUBB saturation removal.  The
+                                   # Levante CAM6 arms ran this TRUE (MPAS
+                                   # post-step drain).  User 2026-09-24:
+                                   # "very close to CAM6".
 cloud_partial_coverage_optics: none
 cloud_optics_inhomogeneity: two_region
 cloud_fsd: 1.0
-cloud_vertical_overlap_optics: max_random
-cloud_n_subcolumns: 8
-hard_sat_ice_curve: true
+cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
+                                     # g-point sees its own max-random cloud
+                                     # subcolumn in ONE solve (was max_random:
+                                     # 8 full solves, ~8.5x the radiation cost).
+                                     # Synthetic 512-column check vs a 64-subcolumn
+                                     # reference: bias within sampling noise,
+                                     # per-column scatter ~1.8x the 8-subcolumn one.
+cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
+hard_sat_ice_curve: false  # part of the drain above (refused without it).
+                           # Ice supersaturation is then only RELAXED
+                           # (homogeneous nucleation + finite-rate deposition),
+                           # not capped -- as in CAM6/MG2.  The drain was
+                           # adopted on Levante against a TTL moist/warm bias;
+                           # watch 100 hPa T and q in the first arm.
 homogeneous_ice_nucleation: true
 aerosol_ccn: true
 energy_consistent_moisture_clip: true
@@ -163,6 +187,13 @@ convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
 turbulence: clubb
 clubb_prognostic: true
 clubb_trop_cloud_top_press: 15000.0
+clubb_liquid_handoff: true  # CAM6 clubb_intr moist mapping: CLUBB runs on
+                            # total water q+ql and its grid-mean PDF liquid
+                            # becomes the cloud water; Morrison does no liquid
+                            # condensation of its own (MG2 does none).  The
+                            # Levante CAM6 arms ran FALSE (vapour-only CLUBB,
+                            # its liquid discarded).  User 2026-09-24: "very
+                            # close to CAM6".
 
 # ---- gravity-wave drag ---------------------------------------------------------
 # CAM6 f09 L32 (non-WACCM, nlev < 60) runs OROGRAPHIC drag ONLY: build-namelist
@@ -199,7 +230,11 @@ snow_age_activation_K: 5000.0
 
 # ---- land (unchanged) -----------------------------------------------------------
 use_multilayer_land: true
-land_update_seconds: 300.0
+land_update_seconds: 1800.0  # CAM6: CLM steps once per 1800 s coupling
+                             # interval (user 2026-09-25).  = 16 x 112.5 s,
+                             # forced with the interval-mean atmosphere; the
+                             # offline LMIP driver also runs the tile at 1800 s.
+                             # Was 300 (-> 337.5 s actual, every 3 steps).
 multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
 land_soil_moisture_init_frac: 0.25

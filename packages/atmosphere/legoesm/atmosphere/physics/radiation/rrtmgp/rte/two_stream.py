@@ -225,6 +225,17 @@ def _compute_optimal_lw_secant(
   return c0 * trans_total + c1
 
 
+def _gpoint_cloud_paths(igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn):
+  """Cloud water paths seen by g-point ``igpt``.
+
+  ``cloud_path_fn(igpt) -> (liq, ice)`` supplies McICA paths (each g-point
+  its own cloud subcolumn); without it every g-point sees the same paths.
+  """
+  if cloud_path_fn is None:
+    return cloud_path_liq, cloud_path_ice
+  return cloud_path_fn(igpt)
+
+
 def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
                              checkpoint=True):
   """Sum the per-g-point flux contributions produced by ``step_fn``.
@@ -340,6 +351,7 @@ def solve_lw(
     use_optimal_angle: bool = False,
     gpoint_batch_size: int = 0,
     gpoint_checkpoint: bool = True,
+    cloud_path_fn=None,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
 
@@ -416,6 +428,8 @@ def solve_lw(
     optimal_angle_fit = candidate
 
   def step_fn(igpt, cumulative_flux):
+    liq_g, ice_g = _gpoint_cloud_paths(
+        igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn)
     # Compute the LW optics once per g-point; reuse for both the
     # optimal-angle secant and the source-and-properties solve.
     # Without this, the optimal-angle path would call
@@ -424,8 +438,8 @@ def solve_lw(
     # smaller and the dependency obvious.
     precomputed_props = optics_lib.compute_lw_optical_properties(
         pressure, temperature, molecules, igpt, vmr_fields,
-        cloud_r_eff_liq, cloud_path_liq,
-        cloud_r_eff_ice, cloud_path_ice,
+        cloud_r_eff_liq, liq_g,
+        cloud_r_eff_ice, ice_g,
         cloud_fraction=cloud_fraction,
     )
     if aerosol_absorption_optical_depth is not None:
@@ -485,9 +499,9 @@ def solve_lw(
         vmr_fields,
         sfc_temperature,
         cloud_r_eff_liq,
-        cloud_path_liq,
+        liq_g,
         cloud_r_eff_ice,
-        cloud_path_ice,
+        ice_g,
         cloud_fraction=cloud_fraction,
         lw_diffusive_factor=lw_diffusive_factor,
         precomputed_lw_optical_props=precomputed_props,
@@ -773,6 +787,7 @@ def solve_sw(
     use_scan: bool | None = None,
     gpoint_batch_size: int = 0,
     gpoint_checkpoint: bool = True,
+    cloud_path_fn=None,
 ) -> dict[str, Array]:
   """Solves the two-stream radiative transfer equation for shortwave.
 
@@ -838,10 +853,12 @@ def solve_sw(
   any_day = jnp.any(is_day_col)
 
   def step_fn(igpt, partial_fluxes):
+    liq_g, ice_g = _gpoint_cloud_paths(
+        igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn)
     # Per-g-point gas+cloud+aerosol optics (shared with the MC ray tracer).
     sw_optical_props = compute_sw_optical_props_gpt(
         igpt, optics_lib, pressure, temperature, molecules, vmr_fields,
-        cloud_r_eff_liq, cloud_path_liq, cloud_r_eff_ice, cloud_path_ice,
+        cloud_r_eff_liq, liq_g, cloud_r_eff_ice, ice_g,
         cloud_fraction, aerosol_optical_depth,
         aerosol_single_scattering_albedo, aerosol_asymmetry_factor,
     )

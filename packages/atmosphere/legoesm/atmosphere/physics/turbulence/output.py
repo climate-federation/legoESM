@@ -59,6 +59,10 @@ class TurbulenceOutput(NamedTuple):
         NOT feed the tendencies (those come from the flux DIVERGENCE / implicit solve)
         and so cannot change any run. Consumed only by the LES-suite Q1 diagnostic
         score (``les_suite`` compares it to the LES flux at the LES mean state).
+    dq_c_dt : jax.Array or None
+        Cloud-liquid tendency [kg/kg/s], shape (ncol, nlev), from a closure that
+        owns liquid condensation (prognostic CLUBB with ``liquid_handoff``).
+        ``None`` for every other scheme and for the dry mapping.
     """
     du_dt: jax.Array
     dv_dt: jax.Array
@@ -72,3 +76,4 @@ class TurbulenceOutput(NamedTuple):
     h_pbl: jax.Array
     cloud_fraction: jax.Array | None = None
     wtheta_flux: jax.Array | None = None
+    dq_c_dt: jax.Array | None = None

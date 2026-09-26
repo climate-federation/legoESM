@@ -284,6 +284,29 @@ class TestLoadRealTopography(unittest.TestCase):
         self.assertEqual(phis.shape, (6, 8, 8))
         self.assertEqual(f_land.shape, (6, 8, 8))
 
+    def test_duplicated_periodic_end_column_dropped(self):
+        """A file with both -180 and 180 loads; the file's FIRST column wins."""
+        import xarray as xr
+
+        lat = np.linspace(-90.0, 90.0, 91)
+        lon = np.linspace(-180.0, 180.0, 181)
+        z = np.full((lat.size, lon.size), 1000.0)
+        z[:, -1] = 3000.0  # end column disagrees with the first one
+        path = str(Path(self.tmpdir) / "topo_dup.nc")
+        xr.Dataset({"z": (("lat", "lon"), z)},
+                   coords={"lat": lat, "lon": lon}).to_netcdf(path)
+
+        config = TopographyConfig(source="file", path=path,
+                                  smoothing_passes=0, edge_blend_strength=0.0)
+        # This lat-lon grid has cells ON 180 deg, where the kept column is read.
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(n_lat=24, radius=constants.R_earth,
+                                  omega=constants.Omega)
+        self.assertTrue(np.isclose(np.degrees(np.asarray(grid.lon)) % 360.0,
+                                   180.0).any())
+        phis, _ = load_real_topography(grid, config=config)
+        npt.assert_allclose(np.asarray(phis) / constants.g, 1000.0, rtol=1e-12)
+
     def test_phis_non_negative(self):
         """With clip_negative=True (default), phis should be >= 0."""
         path = str(Path(self.tmpdir) / "topo.nc")
