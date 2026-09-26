@@ -1499,6 +1499,11 @@ class CoupledESMDriver:
         a MIXED cell the atmosphere is correctly forced by the blended flux while
         the ocean gets the ocean component -- the air-sea (ocean) exchange still
         closes; land/ice/lake heat goes to those reservoirs, not the ocean.
+        This closure holds for the prognostic 3D ocean only: the slab /
+        two-layer ocean computes its own turbulent fluxes, albedo and
+        emissivity (``simple_ocean``) and never reads ``tile.shflx``/
+        ``tile.lhflx``, so with a slab the flag changes the atmosphere's
+        forcing without closing the air-sea budget.
 
         Sign convention: ``shflx``/``lhflx`` are [W/m2, positive UP =
         surface->atmosphere], exactly the convention the atmosphere's bulk

@@ -151,13 +151,16 @@ class CoupledConfig(NamedTuple):
     # effect on radiation is otherwise silently dropped.
     couple_surface_radiation: bool = False
 
-    # SHARED air-sea surface fluxes (close the air-sea heat+water budget).
+    # SHARED air-sea surface fluxes.
     # When True, the coupler's tile-blended surface sensible / latent heat flux
     # (computed with ITS bulk scheme, q_sfc = 0.98*q_sat mixing ratio, and the
     # ocean-tile C_H/C_E) is fed back to the ATMOSPHERE's surface tendency each
-    # segment, so the heat + water leaving the atmosphere EQUALS what the
-    # coupler feeds the ocean -- the model becomes flux-coupled, not just
-    # SST-coupled, and the air-sea budget closes.  Default False keeps existing
+    # segment.  With the prognostic 3D ocean, whose q_net sinks the same
+    # ocean-tile fluxes, the heat + water leaving the atmosphere then EQUALS
+    # what the ocean receives and the air-sea budget closes.  It does NOT close
+    # it for the slab / two-layer ocean: that ocean computes its own turbulent
+    # fluxes, albedo and emissivity from the atmosphere forcing and never reads
+    # the coupler's ocean-tile fluxes.  Default False keeps existing
     # coupled runs byte-identical (the atmosphere computes its own bulk surface
     # fluxes, independent of the ocean-driving fluxes); recommended ON after a
     # coupled validation run.  With a turbulence scheme the shared flux is
