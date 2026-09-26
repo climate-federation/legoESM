@@ -37,10 +37,11 @@ def _backtracking_line_search(
     alpha_init: float = 1.0,
     c1: float = 1e-4,
     max_backtracks: int = 20,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Backtracking line search with Armijo sufficient decrease.
 
-    Returns (alpha, f_new, g_new, x_new).
+    Returns (alpha, f_new, g_new, x_new, armijo_ok). ``armijo_ok`` is False
+    when ``max_backtracks`` ran out before sufficient decrease was reached.
     """
     slope = jnp.sum(g * d)
 
@@ -69,7 +70,8 @@ def _backtracking_line_search(
     )
 
     final = jax.lax.while_loop(ls_cond, ls_body, init_state)
-    return final.alpha, final.f_new, final.g_new, final.x_new
+    armijo_ok = final.f_new <= f + c1 * final.alpha * slope
+    return final.alpha, final.f_new, final.g_new, final.x_new, armijo_ok
 
 
 # ---------------------------------------------------------------------------
@@ -131,19 +133,21 @@ def minimize_lbfgs(
         Y: jax.Array
         rho: jax.Array
         k: jax.Array
-        n_stored: jax.Array
+        n_pairs: jax.Array  # correction pairs accepted so far (ring-buffer head)
         history: jax.Array
         converged: jax.Array
         f_prev: jax.Array
+        stalled: jax.Array  # line search found no sufficient decrease
 
     init_state = LBFGSState(
         x=x0, f=f0, g=g0,
         S=S, Y=Y, rho=rho,
         k=jnp.array(0),
-        n_stored=jnp.array(0),
+        n_pairs=jnp.array(0),
         history=history,
         converged=jnp.array(False),
         f_prev=jnp.array(jnp.inf),
+        stalled=jnp.array(False),
     )
 
     def cond_fn(state):
@@ -153,12 +157,13 @@ def minimize_lbfgs(
             / jnp.maximum(jnp.abs(state.f), 1.0)
             < ftol
         ) & (state.k > 0)
-        return (~grad_small) & (~f_decrease_small) & (state.k < max_iter) & (~state.converged)
+        return ((~grad_small) & (~f_decrease_small) & (state.k < max_iter)
+                & (~state.converged) & (~state.stalled))
 
     def body_fn(state):
         # L-BFGS two-loop recursion to compute search direction
         q = state.g
-        n_use = jnp.minimum(state.n_stored, m)
+        n_use = jnp.minimum(state.n_pairs, m)
 
         # Allocate alpha buffer for two-loop recursion
         alpha_buf = jnp.zeros(m)
@@ -166,7 +171,7 @@ def minimize_lbfgs(
         # First loop (backward)
         def first_loop_body(i, carry):
             q, alpha_buf = carry
-            idx = (state.k - 1 - i) % m
+            idx = (state.n_pairs - 1 - i) % m
             a = state.rho[idx] * jnp.sum(state.S[idx] * q)
             alpha_buf = alpha_buf.at[idx].set(a)
             q = q - a * state.Y[idx]
@@ -179,9 +184,9 @@ def minimize_lbfgs(
 
         # Initial Hessian approximation: gamma * I
         # gamma = (s_{k-1} . y_{k-1}) / (y_{k-1} . y_{k-1})
-        last_idx = (state.k - 1) % m
+        last_idx = (state.n_pairs - 1) % m
         gamma = jnp.where(
-            state.n_stored > 0,
+            state.n_pairs > 0,
             jnp.sum(state.S[last_idx] * state.Y[last_idx])
             / jnp.maximum(jnp.sum(state.Y[last_idx] * state.Y[last_idx]), _TINY),
             1.0,
@@ -190,7 +195,7 @@ def minimize_lbfgs(
 
         # Second loop (forward)
         def second_loop_body(i, r):
-            idx = (state.k - n_use + i) % m
+            idx = (state.n_pairs - n_use + i) % m
             beta = state.rho[idx] * jnp.sum(state.Y[idx] * r)
             update = state.S[idx] * (alpha_buf[idx] - beta)
             mask = i < n_use
@@ -199,21 +204,28 @@ def minimize_lbfgs(
         r = jax.lax.fori_loop(0, m, second_loop_body, r)
         d = -r
 
-        # Line search
-        _, f_new, g_new, x_new = _backtracking_line_search(
+        # Line search. A step without sufficient decrease is rejected: keep
+        # the current point and stop (the loop exits on ``stalled``).
+        _, f_ls, g_ls, x_ls, armijo_ok = _backtracking_line_search(
             cost_and_grad_fn, state.x, state.f, state.g, d,
         )
+        x_new = jnp.where(armijo_ok, x_ls, state.x)
+        f_new = jnp.where(armijo_ok, f_ls, state.f)
+        g_new = jnp.where(armijo_ok, g_ls, state.g)
 
-        # Update L-BFGS buffers
+        # Update L-BFGS buffers only with positive-curvature pairs, so the
+        # inverse-Hessian approximation stays positive definite and d is a
+        # descent direction.
         s_k = x_new - state.x
         y_k = g_new - state.g
         sy = jnp.sum(s_k * y_k)
-        rho_k = jnp.where(jnp.abs(sy) > _TINY, 1.0 / sy, 0.0)
+        keep = armijo_ok & (sy > _TINY)
+        rho_k = 1.0 / jnp.where(keep, sy, 1.0)
 
-        store_idx = state.k % m
-        S_new = state.S.at[store_idx].set(s_k)
-        Y_new = state.Y.at[store_idx].set(y_k)
-        rho_new = state.rho.at[store_idx].set(rho_k)
+        store_idx = state.n_pairs % m
+        S_new = jnp.where(keep, state.S.at[store_idx].set(s_k), state.S)
+        Y_new = jnp.where(keep, state.Y.at[store_idx].set(y_k), state.Y)
+        rho_new = jnp.where(keep, state.rho.at[store_idx].set(rho_k), state.rho)
 
         new_k = state.k + 1
         history_new = state.history.at[jnp.minimum(new_k, max_iter - 1)].set(f_new)
@@ -224,10 +236,11 @@ def minimize_lbfgs(
             x=x_new, f=f_new, g=g_new,
             S=S_new, Y=Y_new, rho=rho_new,
             k=new_k,
-            n_stored=jnp.minimum(state.n_stored + 1, m),
+            n_pairs=state.n_pairs + keep.astype(state.n_pairs.dtype),
             history=history_new,
             converged=converged,
             f_prev=state.f,
+            stalled=~armijo_ok,
         )
 
     final = jax.lax.while_loop(cond_fn, body_fn, init_state)
@@ -301,7 +314,7 @@ def minimize_cg(
 
     def body_fn(state):
         # Line search
-        _, f_new, g_new, x_new = _backtracking_line_search(
+        _, f_new, g_new, x_new, _ = _backtracking_line_search(
             cost_and_grad_fn, state.x, state.f, state.g, state.d,
         )
 
