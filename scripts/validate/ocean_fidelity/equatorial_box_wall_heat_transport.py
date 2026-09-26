@@ -70,6 +70,7 @@ def ours(a):
     z0 = np.load(sel[0])
     lat = z0["lat_T"]; lon = z0["lon_T"]
     j0, j1, i0, i1 = _box_indices(lat, lon, a.lon_lo, a.lon_hi, a.lat_halfwidth)
+    rows = list(range(j0 - 3, j1 + 5)); rowv = {gg: 0.0 for gg in rows}
     zc = np.abs(np.asarray(z0["z_center_ref"]))
     ks = [k for k in range(zc.size) if a.z_lo <= zc[k] < a.z_hi]
     dy_u = z0["dy_u"]; dx_v = z0["dx_v"]; A = z0["cell_area"]
@@ -98,6 +99,9 @@ def ours(a):
             fn = v[j1 + 1, i0:i1 + 1, k] * hf * dx_v[j1 + 1, i0:i1 + 1]
             tn = _upwind(fn, T[j1, i0:i1 + 1, k], T[j1 + 1, i0:i1 + 1, k])
             acc_v["N"] -= fn.sum(); acc_h["N"] -= (fn * tn).sum()
+            for gg in rows:
+                hf = 0.5 * (h[gg - 1, i0:i1 + 1, k] + h[gg, i0:i1 + 1, k])
+                rowv[gg] += (v[gg, i0:i1 + 1, k] * hf * dx_v[gg, i0:i1 + 1]).sum()
             vol += (h[j0:j1 + 1, i0:i1 + 1, k] * A[j0:j1 + 1, i0:i1 + 1]).sum()
             tb += (T[j0:j1 + 1, i0:i1 + 1, k] * h[j0:j1 + 1, i0:i1 + 1, k] * A[j0:j1 + 1, i0:i1 + 1]).sum()
         kt, kb = ks[0], ks[-1]
@@ -112,6 +116,9 @@ def ours(a):
     for w in acc_v:
         acc_v[w] /= n; acc_h[w] /= n
     vol /= n; tb /= n
+    print(f"  [v-rows] northward transport through each v-face row, band {a.z_lo:.0f}-{a.z_hi:.0f} m, zonal sum {a.lon_lo:.0f}-{a.lon_hi:.0f}E (Sv):")
+    for gg in rows:
+        print(f"    face lat {0.5 * (lat[gg - 1, i0] + lat[gg, i0]):+6.2f}  {rowv[gg] / n / 1e6:+7.3f}")
     band_budget(f"legoESM {a.snapshot_dir.rstrip('/').split('/')[-1]} hours {a.hours} ({n} windows)",
                 [f"{zc[k]:.1f}" for k in ks], acc_v, acc_h, vol, tb / vol)
 
@@ -130,6 +137,7 @@ def nemo(a):
     e2t = np.asarray(m.variables["e2t"][0])[0:lat.shape[0], 1:1 + lat.shape[1]]
     A = e1t * e2t
     j0, j1, i0, i1 = _box_indices(lat, lon, a.lon_lo, a.lon_hi, a.lat_halfwidth)
+    rows = list(range(j0 - 3, j1 + 5)); rowv = {gg: 0.0 for gg in rows}
     zc = np.asarray(t.variables["deptht"][:]).ravel()
     ks = [k for k in range(zc.size) if a.z_lo <= zc[k] < a.z_hi]
     r_lo, r_hi = (int(x) for x in a.recs.split("-"))
@@ -157,6 +165,9 @@ def nemo(a):
             hf = 0.5 * (e3[j1, i0:i1 + 1] + e3[j1 + 1, i0:i1 + 1])
             fn = vo[j1, i0:i1 + 1] * hf * e1v[j1, i0:i1 + 1]
             acc_v["N"] -= fn.sum(); acc_h["N"] -= (fn * _upwind(fn, T[j1, i0:i1 + 1], T[j1 + 1, i0:i1 + 1])).sum()
+            for gg in rows:  # same face convention as ours: face gg = south face of cell gg = NEMO V point gg-1
+                hf = 0.5 * (e3[gg - 1, i0:i1 + 1] + e3[gg, i0:i1 + 1])
+                rowv[gg] += (vo[gg - 1, i0:i1 + 1] * hf * e1v[gg - 1, i0:i1 + 1]).sum()
             vol += (e3[j0:j1 + 1, i0:i1 + 1] * A[j0:j1 + 1, i0:i1 + 1]).sum()
             tb += (T[j0:j1 + 1, i0:i1 + 1] * e3[j0:j1 + 1, i0:i1 + 1] * A[j0:j1 + 1, i0:i1 + 1]).sum()
             trd += (g(d.variables["ttrd_totad"], r, k)[j0:j1 + 1, i0:i1 + 1] * e3[j0:j1 + 1, i0:i1 + 1] * A[j0:j1 + 1, i0:i1 + 1]).sum()
@@ -170,6 +181,9 @@ def nemo(a):
     for w in acc_v:
         acc_v[w] /= n; acc_h[w] /= n
     vol /= n; tb /= n; trd /= n
+    print(f"  [v-rows] northward transport through each v-face row, band {a.z_lo:.0f}-{a.z_hi:.0f} m, zonal sum {a.lon_lo:.0f}-{a.lon_hi:.0f}E (Sv):")
+    for gg in rows:
+        print(f"    face lat {0.5 * (lat[gg - 1, i0] + lat[gg, i0]):+6.2f}  {rowv[gg] / n / 1e6:+7.3f}")
     band_budget(f"NEMO {a.nemo_t.split('/')[-2]} recs {a.recs} ({n} hourly means)", [f"{zc[k]:.1f}" for k in ks],
                 acc_v, acc_h, vol, tb / vol,
                 extra=f"CONTROL NEMO's own ttrd_totad band mean: {trd / vol * 86400:+8.4f} K/day")
