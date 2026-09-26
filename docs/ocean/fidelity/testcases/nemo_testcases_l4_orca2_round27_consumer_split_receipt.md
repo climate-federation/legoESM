@@ -105,7 +105,10 @@ Its one-representable-value kt=1 LDF plant exits 1 with
 `planted kt=1 lateral-diffusion violation passed`; the source-inventory plant
 is covered by the focused unit test.
 
-REVIEW_RESULT_PLACEHOLDER
+The required separate `codex exec --sandbox read-only` review was attempted
+on the committed round diff.  It failed before reading the diff with
+`failed to initialize in-process app-server client: Read-only file system`.
+Verdict: **independent review unavailable in-sandbox**.
 
 The receipt citation gate passes all six compiled citations with zero
 failures, zero unmapped citations, and zero map-audit failures.  Its rigid
