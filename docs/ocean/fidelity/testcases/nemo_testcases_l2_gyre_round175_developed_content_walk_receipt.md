@@ -148,6 +148,29 @@ This is **independent review unavailable in-sandbox**, not a SHIP verdict.
 Because the round lands no physics and its claims are controlled by committed
 tests and nonzero plants, the measurement and HELD conclusion remain usable.
 
+## Tests and mechanical gates
+
+* Focused harness plus citation tests:
+  **`57 passed in 33.99s`**.
+* Clean-tree citation gate: PASS, 3 citations, 0 unmapped, 0 failures, 0 map
+  audit failures (`citation_gate_v4.json`).
+* Shifted-citation plant: exit 1, `STATUS PLANT-FIRED`.
+* Both content plants: exit 1, `STATUS PLANT-FIRED`.
+* Required one-time full `tests/ocean/fidelity tests/ocean/unit` battery with
+  `-n 12`: started all 8,740 tests and progressed beyond 95%, but produced no
+  terminal pytest summary.  At least seven xdist workers aborted inside JAX
+  compilation (first at
+  `test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32`;
+  later examples include leapfrog, freshwater, EKE, WS-QCO, OMIP ice, and
+  mass-flux tests).  Xdist repeatedly replaced them, then the process tree
+  disappeared without closing the PTY or printing a summary.  The orphaned
+  PTY was closed only after `ps -eo comm=` showed no `pytest` process.  Full
+  log: `full_ocean_tests.log`.  Because there is no terminal failure-ID list,
+  this degraded run cannot honestly be diffed against the 87-known-red list
+  and is not represented as a completed pass.  No second full battery was
+  launched.  The two directly modified test modules completed in the focused
+  green run above.
+
 ## OPEN — round 176
 
 Stay at developed step 1081 and walk the producer of accumulated `T(Krhs)` in
@@ -159,4 +182,3 @@ production JIT and complete eager execution with a production plant.  Name the
 first non-bit compiled statement only if its direct operand is captured; if a
 boundary is inherited, continue upstream.  No acquisition is presently
 needed.
-
