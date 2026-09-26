@@ -1081,7 +1081,7 @@ CITATION_MAP = {
     # --- ORCA2 card round 24: held Decision-54 whole attribution ---
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:348-353': [
         "CASE( -30  )",
-        'CALL iom_close( inum )',
+        ('CALL iom_close( inum )', 2),
         6],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:387-393': [
         'IF( .NOT.l_ldfdyn_time ) THEN',
