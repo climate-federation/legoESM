@@ -779,7 +779,9 @@ class TestSingleReducePCG:
 
         cfg = MPASOceanConfig()
         # The exact attribute chain the distributed branch dereferences.
-        assert cfg.barotropic_implicit_pcg_variant == "standard"
+        # single_reduce since 2026-09-26 (mpas_config.py records the
+        # convergence and timing evidence); the lat-lon default stays standard.
+        assert cfg.barotropic_implicit_pcg_variant == "single_reduce"
         # 30 since the convergence measurement (scripts/validate/
         # ocean_fidelity/barotropic_pcg_convergence.py): on the real
         # captured systems at the production mesh, 30 iterations put
@@ -791,10 +793,10 @@ class TestSingleReducePCG:
         assert cfg.barotropic_implicit_pcg_residual_tol == 1.0e-10
         assert cfg.barotropic_implicit_pcg_tol == 1.0e-10
         assert cfg.barotropic_implicit_pcg_maxiter == 200
-        # Default mirrors the lat-lon contract (same variant literal set,
-        # validated at solver entry by solve_helmholtz_implicit).  The lat-lon
-        # side is NESTED post-#501 (config.barotropic.*); MPAS stays flat.
-        assert (cfg.barotropic_implicit_pcg_variant
-                == LatLonCGridOceanConfig()
-                .barotropic.barotropic_implicit_pcg_variant)
+        # Same variant literal set as the lat-lon contract (validated at
+        # solver entry by solve_helmholtz_implicit); the DEFAULTS differ since
+        # 2026-09-26 -- MPAS single_reduce (measured), lat-lon standard (not).
+        # The lat-lon side is NESTED post-#501 (config.barotropic.*).
+        assert (LatLonCGridOceanConfig().barotropic.barotropic_implicit_pcg_variant
+                == "standard")
 
