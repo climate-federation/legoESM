@@ -231,6 +231,20 @@ def main() -> int:
         depth = np.where(never, zw[-1], zw[np.minimum(first, zw.size - 1)])
         depth = np.where(np.isfinite(K_w[:, 0]), depth, np.nan)
         q = np.nanpercentile(depth[box_mask], [10, 25, 50, 75, 90])
+        # Patchiness check: how many sub-threshold interfaces sit ABOVE 30 m in
+        # each column, and is the first one an isolated hole (K back above the
+        # threshold at the next interface)? A checkerboard-in-depth K would make
+        # the turbocline shallow while every level's median looks fine.
+        sub = np.where(np.isfinite(K_w), K_w < kz_thr, False) & (zw >= 10.0) & (zw < 30.0)
+        nsub = sub[box_mask].sum(axis=1)
+        hist = np.bincount(np.minimum(nsub, 6), minlength=7)
+        Kb = K_w[box_mask]; fb = first[box_mask]
+        nxt = np.minimum(fb + 1, K_w.shape[1] - 1)
+        hole = (fb < K_w.shape[1] - 1) & np.isfinite(Kb[np.arange(fb.size), nxt]) & (Kb[np.arange(fb.size), nxt] >= kz_thr) & (zw[fb] < 30.0)
+        print(f"    interfaces with K<thr in 10-30 m per column, count histogram 0..6+: {hist.tolist()}; "
+              f"first sub-threshold interface is an ISOLATED hole (K>=thr right below) in {int(hole.sum())} of {fb.size} columns")
+        ic = np.where(box_mask)[0][fb.size // 2]
+        print("    example column K profile (interfaces 1-20):", " ".join(f"{v:.1e}" for v in K_w[ic, :20]))
         print(f"    turbocline per-column quantiles 10/25/50/75/90%: {q[0]:.1f} {q[1]:.1f} {q[2]:.1f} {q[3]:.1f} {q[4]:.1f} m; "
               f"columns {int(np.isfinite(depth[box_mask]).sum())}")
         return _box_mean(depth[:, None], w, box_mask)[0]
