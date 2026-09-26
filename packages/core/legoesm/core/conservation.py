@@ -498,7 +498,7 @@ def global_area_sum(
     differentiable_broadcast : bool, optional
         VJP semantics of the MPI reduction.  ``False`` (default) uses
         ``global_sum_mpi`` (IDENTITY VJP) — kept byte-identical for the
-        established callers.  ``True`` uses :func:`_broadcast_allreduce_sum`
+        established callers.  ``True`` uses :func:`legoesm.parallel.reductions.broadcast_allreduce_sum`
         (allreduce forward AND backward), REQUIRED when the reduced value is
         broadcast back and reused on every rank — e.g. a mass-fixer additive
         ``correction = (target - global_area_sum(p_s)) / area`` added to EVERY
@@ -538,7 +538,8 @@ def global_area_sum(
         return spmd_sums[0]
     if is_distributed():
         if differentiable_broadcast:
-            return _broadcast_allreduce_sum(local_sum)
+            from legoesm.parallel.reductions import broadcast_allreduce_sum
+            return broadcast_allreduce_sum(local_sum)
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
     # Cube GSPMD / single-device: use the shard-count-invariant per-face
@@ -648,7 +649,7 @@ def batch_global_area_sums(
     Falls back to individual ``jnp.sum`` when not distributed.
 
     ``differentiable_broadcast`` (default ``False``): see :func:`global_area_sum`
-    — ``True`` routes the batched reduction through :func:`_broadcast_allreduce_sum`
+    — ``True`` routes the batched reduction through :func:`legoesm.parallel.reductions.broadcast_allreduce_sum`
     (one stacked allreduce, allreduce VJP) instead of ``batch_allreduce_mpi``
     (identity VJP), for reduced values that scale every rank (the non-anchor p_s
     mass fixer's shared ``correction``; #811).  ``batch_allreduce_mpi`` is left
@@ -685,7 +686,8 @@ def batch_global_area_sums(
             # One stacked broadcast-allreduce (allreduce fwd AND bwd) — same
             # single-message batching as batch_allreduce_mpi, but the correct
             # transpose for a reused/broadcast reduced value.
-            reduced = _broadcast_allreduce_sum(jnp.stack(local_sums, axis=0))
+            from legoesm.parallel.reductions import broadcast_allreduce_sum
+            reduced = broadcast_allreduce_sum(jnp.stack(local_sums, axis=0))
             return [reduced[i] for i in range(len(local_sums))]
         from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
@@ -700,53 +702,6 @@ def batch_global_area_sums(
             stacked * weight[..., None], reduce_axes=(1, 2))
         return [inv[i] for i in range(len(arrays))]
     return local_sums
-
-
-@jax.custom_vjp
-def _broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
-    """``allreduce(SUM)`` whose VJP ALSO allreduces the cotangent — the correct
-    transpose for a reduced value that is BROADCAST and reused on every rank.
-
-    ``global_sum_mpi`` (mpi4jax ``allreduce``) has an IDENTITY VJP: each rank
-    keeps its LOCAL cotangent (``test_grad_nonzero``: "gradient 2*x, no
-    scaling").  That is right for a TOP-LEVEL loss reduction ``L =
-    global_sum_mpi(local)`` (each rank contributes 1:1 to ``L``), but WRONG for
-    an INTERMEDIATE global that is broadcast back and reused multiplicatively on
-    every face/rank — e.g. the flux-form ``scale = mass_in / mass_pos`` that
-    rescales EVERY owned face (#811).  There, ``field_in`` on rank ``r`` affects
-    the output on EVERY rank ``r'`` through the shared ``scale``, so the true
-    ``dL/d(mass)`` is the GLOBAL sum of every rank's local cotangent — i.e. the
-    reduction's transpose is ``allreduce(SUM)``, not identity.  Dropping it left
-    a UNIFORM ~1e-3 absolute cotangent error on every owned face (rel 1.1 on
-    faces far from the transported blob) in the scattered-vs-replicated gradient
-    gate.  Forward is byte-identical to ``global_sum_mpi`` (both are the same
-    ``allreduce(SUM)``); only the backward differs.
-    """
-    from legoesm.parallel.reductions import global_sum_mpi
-    return global_sum_mpi(local_sum)
-
-
-def _broadcast_allreduce_sum_fwd(local_sum):
-    from legoesm.parallel.reductions import global_sum_mpi
-    return global_sum_mpi(local_sum), None
-
-
-def _broadcast_allreduce_sum_bwd(_res, g):
-    # Transpose of ``y_r = Σ_r' x_r'`` (every rank gets the sum) is
-    # ``x̄_r = Σ_r' ȳ_r' = allreduce(SUM)(ȳ)``.
-    from legoesm.parallel.reductions import global_sum_mpi
-    return (global_sum_mpi(g),)
-
-
-_broadcast_allreduce_sum.defvjp(
-    _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
-
-#: Public name for the broadcast-correct allreduce(SUM) (VJP also allreduces
-#: the cotangent) — the ``sum_fn`` to pass to
-#: :func:`conservative_positive_clip_global` under MPI, where the summed
-#: scalar is broadcast into every rank's rescale factor.  Cross-module
-#: imports must use this name (no-private-cross-imports ratchet).
-broadcast_allreduce_sum = _broadcast_allreduce_sum
 
 
 def global_face_sum_if_scattered(
@@ -783,7 +738,7 @@ def global_face_sum_if_scattered(
     the scattered reduction.  ``False`` uses ``global_sum_mpi`` (mpi4jax
     ``allreduce``, IDENTITY VJP) — correct for a top-level loss reduction and the
     established mass-fixer callers (kept byte-identical).  ``True`` uses
-    :func:`_broadcast_allreduce_sum` (allreduce forward AND backward) — REQUIRED
+    :func:`legoesm.parallel.reductions.broadcast_allreduce_sum` (allreduce forward AND backward) — REQUIRED
     when the reduced value is broadcast back and reused multiplicatively on every
     rank, so the cross-rank cotangents are not silently dropped (the flux-form
     ``scale`` — #811).  Forward is identical either way; only the gradient differs.
@@ -801,7 +756,8 @@ def global_face_sum_if_scattered(
                 and hasattr(topo, "local_face_ids")
                 and area.shape[0] == len(topo.local_face_ids) < 6):
             if differentiable_broadcast:
-                return _broadcast_allreduce_sum(local_sum)
+                from legoesm.parallel.reductions import broadcast_allreduce_sum
+                return broadcast_allreduce_sum(local_sum)
             from legoesm.parallel.reductions import global_sum_mpi
 
             return global_sum_mpi(local_sum)

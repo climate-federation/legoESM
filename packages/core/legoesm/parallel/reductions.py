@@ -404,8 +404,12 @@ def mpi4jax_array_result(result):
 def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
     """Compute a global sum across all MPI ranks.
 
-    **Differentiable**: uses ``allreduce(SUM)`` which has full JVP and
-    VJP support in mpi4jax.  Safe to use inside ``jax.grad``.
+    **Gradient: IDENTITY VJP** (mpi4jax ``allreduce`` transpose returns the
+    local cotangent unchanged). Correct ONLY when the result is the final loss
+    that every rank seeds with the same cotangent. For an intermediate global
+    that is broadcast back and reused on every rank (fixer factors,
+    normalisations, inner products), use :func:`broadcast_allreduce_sum`;
+    this function drops the cross-rank cotangents there (#811).
 
     Parameters
     ----------
@@ -426,6 +430,43 @@ def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
             mpi4jax.allreduce(local_value, op=MPI.SUM, comm=comm),
         )
     return global_val
+
+
+@jax.custom_vjp
+def broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
+    """``allreduce(SUM)`` whose VJP ALSO allreduces the cotangent — the correct
+    transpose for a reduced value that is BROADCAST and reused on every rank.
+
+    :func:`global_sum_mpi` has an IDENTITY VJP: each rank keeps its LOCAL
+    cotangent (``test_grad_nonzero``: "gradient 2*x, no scaling"). That is right
+    for a TOP-LEVEL loss reduction ``L = global_sum_mpi(local)`` (each rank
+    contributes 1:1 to ``L``), but WRONG for an INTERMEDIATE global that is
+    broadcast back and reused on every face/rank — e.g. the flux-form ``scale =
+    mass_in / mass_pos`` that rescales EVERY owned face (#811). There,
+    ``field_in`` on rank ``r`` affects the output on EVERY rank ``r'`` through
+    the shared ``scale``, so the true cotangent is the GLOBAL sum of every
+    rank's local cotangent — the reduction's transpose is ``allreduce(SUM)``.
+    Dropping it left a UNIFORM ~1e-3 absolute cotangent error on every owned
+    face (rel 1.1) in the scattered-vs-replicated gradient gate. Forward is
+    byte-identical to :func:`global_sum_mpi`; only the backward differs. Do NOT
+    use it for the final loss: every rank seeds that cotangent, so the
+    allreduce would scale the gradient by the rank count.
+    """
+    return global_sum_mpi(local_sum)
+
+
+def _broadcast_allreduce_sum_fwd(local_sum):
+    return global_sum_mpi(local_sum), None
+
+
+def _broadcast_allreduce_sum_bwd(_res, g):
+    # Transpose of ``y_r = Σ_r' x_r'`` (every rank gets the sum) is
+    # ``x̄_r = Σ_r' ȳ_r' = allreduce(SUM)(ȳ)``.
+    return (global_sum_mpi(g),)
+
+
+broadcast_allreduce_sum.defvjp(
+    _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
 
 
 def is_multi_process() -> bool:
@@ -519,9 +560,9 @@ def global_sum_if_distributed(local_value: jax.Array) -> jax.Array:
     MPI/sharded distribution flag (see :func:`is_multi_process`); otherwise
     returns ``local_value`` unchanged so single-rank runs pay no reduction.
 
-    **Differentiable**: built on ``global_sum_mpi`` (allreduce SUM) which carries
-    a full VJP — safe inside ``jax.grad`` (cf. the halo-exchange ``custom_vjp``
-    notes).  Single canonical MPI-aware reduction (#177) shared by
+    **Gradient**: inherits the IDENTITY VJP of :func:`global_sum_mpi` — correct
+    only for a final-loss reduction; an intermediate global reused on every rank
+    needs :func:`broadcast_allreduce_sum`.  Single canonical MPI-aware reduction (#177) shared by
     ``ocean.conservation_mpas`` and ``ocean.dynamics.eta_floor``.
     """
     if is_multi_process():
@@ -628,6 +669,9 @@ def batch_allreduce_mpi(
     Instead of issuing N separate ``allreduce`` calls (each incurring
     MPI latency), this function packs all values into a single flat
     buffer, performs one ``allreduce``, and unpacks the results.
+
+    Gradient (``op="sum"``): IDENTITY VJP, as :func:`global_sum_mpi` — correct
+    only for final-loss reductions, not for values reused on every rank.
 
     Parameters
     ----------

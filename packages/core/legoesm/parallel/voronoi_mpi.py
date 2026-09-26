@@ -73,6 +73,7 @@ from legoesm.parallel.halo_exchange_voronoi import (
 from legoesm.parallel.reductions import (
     require_mpi_stack,
     batch_allreduce_mpi,
+    broadcast_allreduce_sum,
     global_min_mpi,
     global_max_mpi,
     global_sum_mpi,
@@ -1223,9 +1224,7 @@ def make_voronoi_mpi_step(
             # decomposition-independent; owned-mask weighting keeps halo cells
             # out of the budget exactly like the mass fixer.  dp = TRUE layer
             # mass (post-mass-fix p_s; non-positive dp zero-weighted).
-            from legoesm.core.conservation import (
-                apply_water_positivity, broadcast_allreduce_sum,
-            )
+            from legoesm.core.conservation import apply_water_positivity
             _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
             _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
             _owned = layout.owned_mask_cells[:, None]
