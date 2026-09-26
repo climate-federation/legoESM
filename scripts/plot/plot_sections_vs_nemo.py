@@ -114,7 +114,8 @@ def load_nemo_3d(path, tidx):
         raise SystemExit(f"FATAL: expected (depth, y, x) after time select, "
                          f"got T{T.shape} S{S.shape}")
     depth = np.asarray(ds[dname], dtype=np.float64).squeeze()
-    return {"T3d": T, "S3d": S, "depth": depth,
+    mld = sel("mldr10_1") if "mldr10_1" in ds.variables else None
+    return {"T3d": T, "S3d": S, "depth": depth, "mld": mld,
             "lat": np.asarray(ds["nav_lat"], dtype=np.float64),
             "lon": np.asarray(ds["nav_lon"], dtype=np.float64) % 360.0}
 
@@ -200,7 +201,7 @@ def _artifact_bound(name, label, unit, secs, z, dz_mis):
     FRACTION of section cells where the artifact exceeds the model difference
     at THAT SAME CELL.
     """
-    zN = secs[2]
+    zN = secs[-1]
     with np.errstate(invalid="ignore"):
         artifact = np.abs(np.gradient(zN, z, axis=-1)) * dz_mis[None, :]
         signal = np.abs(secs[0] - zN)
@@ -218,33 +219,52 @@ def _artifact_bound(name, label, unit, secs, z, dz_mis):
           f"vs {np.nanmedian(signal[both]):.4g} {unit}")
 
 
-def _plot_sections(out, name, unit, x, xlabel, z, secs, labels, title):
+def _plot_sections(out, name, unit, x, xlabel, z, secs, labels, title,
+                   mlds=None, max_depth_m=None):
+    """``secs`` = [ours_1, ..., ours_n, NEMO] (nx, nlev); ``labels`` the n
+    legoESM labels; ``mlds`` optional [mld_1, ..., mld_n, mld_NEMO] (nx,) lines
+    drawn on the matching panel (both on each difference panel), None = skip."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    Tm, Mm, Nm = secs
-    fin = np.isfinite(Tm) & np.isfinite(Mm) & np.isfinite(Nm)
+    *ours, Nm = secs
+    if len(ours) != len(labels):
+        raise ValueError(f"{len(ours)} sections for {len(labels)} labels")
+    fin = np.isfinite(Nm)
+    for o in ours:
+        fin &= np.isfinite(o)
     if not fin.any():
         raise SystemExit(f"FATAL: {name} {xlabel} section has no common cells")
-    stack = np.concatenate([Tm[fin], Mm[fin], Nm[fin]])
+    stack = np.concatenate([o[fin] for o in ours] + [Nm[fin]])
     vmin, vmax = np.percentile(stack, [1, 99])
-    dstack = np.concatenate([(Tm - Nm)[fin], (Mm - Nm)[fin]])
+    dstack = np.concatenate([(o - Nm)[fin] for o in ours])
     dmax = float(np.percentile(np.abs(dstack), 99)) or 1e-6
 
-    lab_t, lab_m = labels
-    panels = [(Tm, f"{lab_t} {name}", "RdYlBu_r", vmin, vmax),
-              (Mm, f"{lab_m} {name}", "RdYlBu_r", vmin, vmax),
-              (Nm, f"NEMO {name}", "RdYlBu_r", vmin, vmax),
-              (Tm - Nm, f"{lab_t} - NEMO", "RdBu_r", -dmax, dmax),
-              (Mm - Nm, f"{lab_m} - NEMO", "RdBu_r", -dmax, dmax)]
-    fig, ax = plt.subplots(1, 5, figsize=(28, 4.6))
-    for axi, (dat, ttl, cm, lo, hi) in zip(ax, panels):
+    if mlds is None:
+        mlds = [None] * len(secs)
+    mld_N = mlds[-1]
+    panels = [(o, f"{lab} {name}", "RdYlBu_r", vmin, vmax, [(m, lab, "k")])
+              for o, lab, m in zip(ours, labels, mlds[:-1])]
+    panels.append((Nm, f"NEMO {name}", "RdYlBu_r", vmin, vmax, [(mld_N, "NEMO", "k")]))
+    panels += [(o - Nm, f"{lab} - NEMO", "RdBu_r", -dmax, dmax,
+                [(m, lab, "k"), (mld_N, "NEMO", "m")])
+               for o, lab, m in zip(ours, labels, mlds[:-1])]
+    fig, ax = plt.subplots(1, len(panels), figsize=(5.6 * len(panels), 4.6))
+    for axi, (dat, ttl, cm, lo, hi, lines) in zip(np.atleast_1d(ax), panels):
         im = axi.pcolormesh(x, z, dat.T, vmin=lo, vmax=hi, cmap=cm,
                             shading="auto")
+        for m, lab, col in lines:
+            if m is not None and np.isfinite(m).any():
+                axi.plot(x, m, color=col, lw=1.2, ls="--" if lab == "NEMO" else "-",
+                         label=f"MLD {lab}")
+        if any(m is not None for m, _, _ in lines):
+            axi.legend(fontsize=7, loc="lower right")
         axi.set_title(ttl, fontsize=10)
         axi.set_xlabel(xlabel)
         axi.set_ylabel("depth [m]")
+        if max_depth_m is not None:
+            axi.set_ylim(0.0, max_depth_m)
         axi.invert_yaxis()
         plt.colorbar(im, ax=axi, shrink=0.85)
     fig.suptitle(title, fontsize=13)
@@ -258,7 +278,13 @@ def _plot_sections(out, name, unit, x, xlabel, z, secs, labels, title):
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--tripole", required=True)
-    p.add_argument("--mpas", required=True)
+    p.add_argument("--mpas", default=None,
+                   help="optional second legoESM snapshot; omitted = tripole vs NEMO only")
+    p.add_argument("--use-mean-fields", action="store_true",
+                   help="read the window-mean state (T_mean_hw/S_mean_hw, mld_mean) "
+                        "instead of the instantaneous one; NEMO's file is a window mean")
+    p.add_argument("--max-depth-m", type=float, default=None,
+                   help="clip the depth axis of every panel (e.g. 300 for the thermocline)")
     p.add_argument("--nemo-gridt", required=True)
     p.add_argument("--nemo-time-idx", type=int, default=-1)
     p.add_argument("--res-deg", type=float, default=1.0)
@@ -303,14 +329,18 @@ def main() -> int:
     tgt_lat = -90.0 + a.res_deg / 2.0 + a.res_deg * np.arange(int(180.0 / a.res_deg))
     tgt_lon = a.res_deg / 2.0 + a.res_deg * np.arange(int(360.0 / a.res_deg))
 
-    trp = _load_legoesm(a.tripole)
-    mps = _load_legoesm(a.mpas)
+    trp = _load_legoesm(a.tripole, use_mean=a.use_mean_fields)
+    mps = _load_legoesm(a.mpas, use_mean=a.use_mean_fields) if a.mpas else None
     nem = load_nemo_3d(a.nemo_gridt, a.nemo_time_idx)
+    print(f"[fields] {'WINDOW MEAN (T_mean_hw/S_mean_hw)' if a.use_mean_fields else 'INSTANTANEOUS'} "
+          f"vs NEMO record {a.nemo_time_idx} (a window mean)")
 
     z_ours = np.asarray(trp["z_center_ref"], dtype=np.float64)
-    z_mpas = np.asarray(mps["z_center_ref"], dtype=np.float64)
     z_nemo = np.asarray(nem["depth"], dtype=np.float64)
-    for tag, zz in (("MPAS", z_mpas), ("NEMO", z_nemo)):
+    checks = [("NEMO", z_nemo)]
+    if mps is not None:
+        checks.insert(0, ("MPAS", np.asarray(mps["z_center_ref"], dtype=np.float64)))
+    for tag, zz in checks:
         if zz.shape != z_ours.shape:
             raise SystemExit(f"FATAL: {tag} has {zz.shape} levels, tripole has "
                              f"{z_ours.shape} -- refusing to remap the vertical")
@@ -335,11 +365,40 @@ def main() -> int:
               f"  {dz_mis[k]:7.4f}")
     z = z_ours
 
-    wet_t = lego_wet_3d(trp, z)
-    wet_m = lego_wet_3d(mps, z)
-    print(f"[mask] wet cells: tripole {sum(int(w.sum()) for w in wet_t)}, "
-          f"MPAS {sum(int(w.sum()) for w in wet_m)}, "
-          f"NEMO {int(np.isfinite(nem['T3d']).sum())}")
+    sources = [(a.label_tripole, trp, lego_wet_3d(trp, z))]
+    if mps is not None:
+        sources.append((a.label_mpas, mps, lego_wet_3d(mps, z)))
+    labels = tuple(lab for lab, _, _ in sources)
+    print("[mask] wet cells: " + ", ".join(
+        f"{lab} {sum(int(w.sum()) for w in wet)}" for lab, _, wet in sources)
+        + f", NEMO {int(np.isfinite(nem['T3d']).sum())}")
+    who = " / ".join(labels) + " / NEMO"
+
+    # Mixed-layer depth lines: ours from mld_mean (window means only; the
+    # instantaneous snapshot carries no MLD), NEMO from mldr10_1. Regridded
+    # once as a 2-D field, section-averaged with the SURFACE common mask.
+    mld_src = []
+    for lab, src, wet in sources:
+        m = src.get("mld_mean") if a.use_mean_fields else None
+        if m is None:
+            print(f"[mld] {lab}: no {'mld_mean' if a.use_mean_fields else 'instantaneous MLD'} -> no line")
+            mld_src.append(None)
+            continue
+        v, ok = regrid_curv_to_latlon(np.nan_to_num(np.asarray(m, dtype=np.float64)),
+                                      src["lat"], src["lon"], wet[0].astype(np.float64),
+                                      tgt_lat, tgt_lon)
+        mld_src.append(np.where(ok > 0.5, v, np.nan))
+    if nem.get("mld") is not None:
+        v, ok = regrid_curv_to_latlon(np.nan_to_num(nem["mld"]), nem["lat"], nem["lon"],
+                                      np.isfinite(nem["mld"]).astype(np.float64), tgt_lat, tgt_lon)
+        mld_src.append(np.where(ok > 0.5, v, np.nan))
+    else:
+        print("[mld] NEMO file has no mldr10_1 -> no line")
+        mld_src.append(None)
+
+    def _mld_secs(sl2, common2, axis):
+        return [None if m is None else _sec_mean(m[sl2], common2[sl2], axis=axis)
+                for m in mld_src]
 
     lon0, lon1 = (float(v) for v in a.eq_lon_range.split(","))
     eqrow = np.abs(tgt_lat) <= a.eq_halfwidth
@@ -348,32 +407,35 @@ def main() -> int:
         raise SystemExit("FATAL: empty equatorial window")
 
     for name, unit, key in (("T", "degC", "T3d"), ("S", "psu", "S3d")):
-        Tg, okT = regrid_column(np.asarray(trp[key]), trp, wet_t, tgt_lat,
-                                tgt_lon, a.res_deg)
-        Mg, okM = regrid_column(np.asarray(mps[key]), mps, wet_m, tgt_lat,
-                                tgt_lon, a.res_deg)
+        fields = []
+        common = None
+        for lab, src, wet in sources:
+            G, ok = regrid_column(np.asarray(src[key]), src, wet, tgt_lat,
+                                  tgt_lon, a.res_deg)
+            fields.append(G)
+            c = (ok > 0.5) & np.isfinite(G)
+            common = c if common is None else (common & c)
         Ng, okN = regrid_nemo(nem[key], nem["lat"], nem["lon"], tgt_lat, tgt_lon)
-        common = ((okT > 0.5) & (okM > 0.5) & (okN > 0.5)
-                  & np.isfinite(Tg) & np.isfinite(Mg) & np.isfinite(Ng))
+        fields.append(Ng)
+        common &= (okN > 0.5) & np.isfinite(Ng)
         print(f"[{name}] common cells {int(common.sum())} of {common.size}")
+        common0 = common[..., 0]
 
-        zon = [_sec_mean(f, common, axis=1) for f in (Tg, Mg, Ng)]
-
+        zon = [_sec_mean(f, common, axis=1) for f in fields]
         _artifact_bound(name, "global zonal mean", unit, zon, z, dz_mis)
-        _plot_sections(out, name, unit, tgt_lat, "latitude", z, zon,
-                       (a.label_tripole, a.label_mpas),
-                       f"{name} [{unit}] global zonal-mean section — "
-                       f"{a.label_tripole} / {a.label_mpas} / NEMO "
-                       f"(common cells only)")
+        _plot_sections(out, name, unit, tgt_lat, "latitude", z, zon, labels,
+                       f"{name} [{unit}] global zonal-mean section — {who} "
+                       f"(common cells only)",
+                       mlds=_mld_secs(np.s_[:, :], common0, 1), max_depth_m=a.max_depth_m)
 
         sl = np.ix_(np.where(eqrow)[0], np.where(eqcol)[0], np.arange(z.size))
-        eq = [_sec_mean(f[sl], common[sl], axis=0) for f in (Tg, Mg, Ng)]
+        sl2 = np.ix_(np.where(eqrow)[0], np.where(eqcol)[0])
+        eq = [_sec_mean(f[sl], common[sl], axis=0) for f in fields]
         _artifact_bound(name, "equatorial Pacific", unit, eq, z, dz_mis)
-        _plot_sections(out, name, unit, tgt_lon[eqcol], "longitude degE", z, eq,
-                       (a.label_tripole, a.label_mpas),
+        _plot_sections(out, name, unit, tgt_lon[eqcol], "longitude degE", z, eq, labels,
                        f"{name} [{unit}] equatorial Pacific section, "
-                       f"{a.eq_halfwidth:g}S-{a.eq_halfwidth:g}N mean — "
-                       f"{a.label_tripole} / {a.label_mpas} / NEMO")
+                       f"{a.eq_halfwidth:g}S-{a.eq_halfwidth:g}N mean — {who}",
+                       mlds=_mld_secs(sl2, common0, 0), max_depth_m=a.max_depth_m)
 
         for spec in a.lat_section:
             lat0, lonspec, hw, label = spec.split(":")
@@ -395,18 +457,19 @@ def main() -> int:
                 raise SystemExit(f"FATAL: --lat-section {spec!r} selects "
                                  f"{int(rows.sum())} rows, {int(cols.sum())} cols")
             s2 = np.ix_(np.where(rows)[0], np.where(cols)[0], np.arange(z.size))
-            sec = [_sec_mean(f[s2], common[s2], axis=0) for f in (Tg, Mg, Ng)]
+            s22 = np.ix_(np.where(rows)[0], np.where(cols)[0])
+            sec = [_sec_mean(f[s2], common[s2], axis=0) for f in fields]
             nsup = int(np.isfinite(sec[0]).sum())
             print(f"[{name}] section {label}: {int(rows.sum())} rows x "
                   f"{int(cols.sum())} cols, {nsup} supported section cells")
             sec = [s[order] for s in sec]
+            ml = [None if m is None else m[order] for m in _mld_secs(s22, common0, 0)]
             _artifact_bound(name, label, unit, sec, z, dz_mis)
             _plot_sections(out, f"{name}_{label}", unit, xcoord[cols][order],
-                           "longitude degE", z, sec,
-                           (a.label_tripole, a.label_mpas),
+                           "longitude degE", z, sec, labels,
                            f"{name} [{unit}] {label} section at "
-                           f"{lat0:g} +/- {hw:g} deg, lon {lo:g}-{hi:g}E — "
-                           f"{a.label_tripole} / {a.label_mpas} / NEMO")
+                           f"{lat0:g} +/- {hw:g} deg, lon {lo:g}-{hi:g}E — {who}",
+                           mlds=ml, max_depth_m=a.max_depth_m)
 
         for spec in a.lon_section:
             lon0, latspec, hw, label = spec.split(":")
@@ -423,17 +486,17 @@ def main() -> int:
                 raise SystemExit(f"FATAL: --lon-section {spec!r} selects "
                                  f"{int(rows.sum())} rows, {int(cols.sum())} cols")
             s2 = np.ix_(np.where(rows)[0], np.where(cols)[0], np.arange(z.size))
-            sec = [_sec_mean(f[s2], common[s2], axis=1) for f in (Tg, Mg, Ng)]
+            s22 = np.ix_(np.where(rows)[0], np.where(cols)[0])
+            sec = [_sec_mean(f[s2], common[s2], axis=1) for f in fields]
             nsup = int(np.isfinite(sec[0]).sum())
             print(f"[{name}] section {label}: {int(rows.sum())} rows x "
                   f"{int(cols.sum())} cols, {nsup} supported section cells")
             _artifact_bound(name, label, unit, sec, z, dz_mis)
             _plot_sections(out, f"{name}_{label}", unit, tgt_lat[rows],
-                           "latitude", z, sec,
-                           (a.label_tripole, a.label_mpas),
+                           "latitude", z, sec, labels,
                            f"{name} [{unit}] {label} section at "
-                           f"{lon0:g} +/- {hw:g} deg, lat {la0:g}-{la1:g} — "
-                           f"{a.label_tripole} / {a.label_mpas} / NEMO")
+                           f"{lon0:g} +/- {hw:g} deg, lat {la0:g}-{la1:g} — {who}",
+                           mlds=_mld_secs(s22, common0, 1), max_depth_m=a.max_depth_m)
     print("DONE")
     return 0
 
