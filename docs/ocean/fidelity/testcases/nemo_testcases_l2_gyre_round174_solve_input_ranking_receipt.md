@@ -93,13 +93,36 @@ was:
 > Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
 
 Therefore the independent review was unavailable in-sandbox; the round
-continued under operator note C.  The receipt citation gate, shifted-citation
-plant, focused tests, and full-tree test result are recorded in the final
-commits and evidence hashes below.
+continued under operator note C.
+
+The receipt citation gate reports PASS with four citations, zero failures,
+zero unmapped citations, and zero map-audit failures; all nine self-test
+plants fire.  Shifting the content-assembly citation reports FAIL and exits
+`1`.
+
+The focused year-owner and citation-gate files report `54 passed in 34.33s`.
+The mandated single `tests/ocean/fidelity tests/ocean/unit -n 12` battery was
+run once.  Four JAX/XLA workers aborted during unrelated compilations and were
+replaced; a fifth crash item then produced an xdist internal error at 62%.
+Its exact terminal summary is `70 failed, 5331 passed, 124 skipped, 2 xfailed,
+59 warnings in 686.73s`.  The internal error suppressed the failed-ID summary,
+so those 70 partial-run failures cannot be classified against the historical
+87-red list.  This is incomplete full-tree coverage, not a pass; the directly
+changed focused files have the clean 54-test summary above.
 
 ## Evidence hashes
 
-Final artifact hashes are recorded after the closing gates.
+| artifact | SHA-256 |
+|---|---|
+| `acquisition_admission.log` | `1da2b20f353cc2eb9b4c01fdb3212a5757880795a01e5d866961260c4052aa10` |
+| `solve_input_pair_ranking.json` | `ee38b4dd5269f4640555aa60b4229d24e7f495d37269aa2014619964cea4d046` |
+| `solve-input-e3t-scale.log` | `ee106ee48e23b9a03b3dc032ff9e2c4dcbd5444cf062c357df1a7aee6a5f577f` |
+| `solve-input-content-scale.log` | `3daebfc1aed0871f156caefb76590664cc0541b466dc1be9906e4ef006da17d4` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `citation_gate.json` | `1988601642a12848cf9e9bd7cdecf154651ff67b8a026647532dfdedb09ba570` |
+| `citation_shifted_plant.json` | `db22d7ec486684ab7dc6fa4fb282df0856d8303ee85b63207392192a4b7c1def` |
+| `focused_tests.log` | `d101e51761fade473d468adf1ebdca1f4dbf5a1b1a34f4c44d91969f8c3a206b` |
+| `full_fidelity_unit_tests.log` | `dd6bbdf414737ec14c5881d3dc29dcbf51bee8dbe5825a94fe77788ade6f85d4` |
 
 ## OPEN — round 175
 
