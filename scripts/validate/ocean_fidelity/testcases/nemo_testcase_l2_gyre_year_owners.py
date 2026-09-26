@@ -12587,13 +12587,14 @@ def developed_content_producer_walk(
     e3t_0 = _vertical_field(record, "e3t_0", nlev)
 
     def run_mode(*, eager: bool) -> tuple[object, dict[str, np.ndarray]]:
-        def execute(model):
+        def execute(model, *, traced: bool):
             if eager:
                 with jax.disable_jit():
                     result = model._step_impl(
                         state, card.dt_s, freshwater=freshwater,
                         surface_forcing=surface,
-                        _nemo_stage1_zad_eta_after_override=ssha)
+                        _nemo_stage1_zad_eta_after_override=ssha,
+                        _return_tracer_process_trace=traced)
                     return jax.device_get(result)
             model.prime_step_caches(state)
             with jax.disable_jit(False):
@@ -12609,8 +12610,8 @@ def developed_content_producer_walk(
         ordinary_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord,
             card.recipe.model_config)
-        trace = execute(trace_model)
-        ordinary = execute(ordinary_model)
+        trace = execute(trace_model, traced=True)
+        ordinary = execute(ordinary_model, traced=False)
         trace_state = trace.state_after
         moved = _state_bit_mismatches(trace_state, ordinary)
         require(moved == 0,
