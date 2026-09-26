@@ -295,7 +295,6 @@ def nemo_fe3mask_from_tmask(tmask, *, grid=None):
 
 def nemo_qco_live_vorticity_e3f_cgrid(
     eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
-    use_bridge_raw=True,
 ):
     """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
 
@@ -334,33 +333,29 @@ def nemo_qco_live_vorticity_e3f_cgrid(
         # The certified GYRE use is a closed beta-plane box.
         return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
 
-    raw_f = (getattr(z_coord, "nemo_een_barotropic", None)
-             if use_bridge_raw else None)
-    if raw_f is None:
-        masked = b(e3t0 * tmask)
-        masked_n = north(masked)
-        ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
-        tmask_n = north(tmask)
-        wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
-        divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
-                   else jnp.maximum(wet_sum, one))
-        e3f0vor = b(ref_sum / divisor)
-        ref_n = north(e3t0)
-        e3f_0 = b(quarter * b(b(e3t0 + east(e3t0))
-                                + b(ref_n + east(ref_n))))
-        e3f0vor = jnp.where(e3f0vor == 0.0, e3f_0, e3f0vor)
-        e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
-        fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
-        hf0 = jnp.sum(e3f0vor * fe3mask, axis=-1)
-    else:
-        e3f0vor = jnp.asarray(raw_f.e3f_0, dtype=dtype)
-        fe3mask = jnp.asarray(raw_f.fe3mask, dtype=dtype)
-        hf0 = jnp.asarray(raw_f.hf_0, dtype=dtype)
+    masked = b(e3t0 * tmask)
+    masked_n = north(masked)
+    ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
+    tmask_n = north(tmask)
+    wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
+    divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
+               else jnp.maximum(wet_sum, one))
+    e3f0vor = b(ref_sum / divisor)
+    ref_n = north(e3t0)
+    e3f_0 = b(quarter * b(b(e3t0 + east(e3t0))
+                            + b(ref_n + east(ref_n))))
+    e3f0vor = jnp.where(e3f0vor == 0.0, e3f_0, e3f0vor)
+
+    # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain the
+    # historical path byte-for-byte.
+    e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
 
     area_eta = b(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
     area_eta_n = north(area_eta)
     quad = b(b(area_eta + east(area_eta))
              + b(area_eta_n + east(area_eta_n)))
+    fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
+    hf0 = jnp.sum(e3f0vor * fe3mask, axis=-1)
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
