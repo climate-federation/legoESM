@@ -155,10 +155,12 @@ def main() -> int:
         return np.transpose(x, (1, 2, 0)), la, lo, dep
     toN, laT, loT, gdept = _nemo("T", "to"); soN = _nemo("T", "so")[0]
     uoN, laU, loU, _ = _nemo("U", "uo")
-    if (a.nemo_dir / f"{a.nemo_stem}_grid_V{a.nemo_suffix}.nc").exists():
+    has_V = (a.nemo_dir / f"{a.nemo_stem}_grid_V{a.nemo_suffix}.nc").exists()
+    if has_V:
         voN, laV, loV, _ = _nemo("V", "vo")
-    else:  # the hourly rerun writes no grid_V; meridional shear enters S2 as zero there
+    else:  # no grid_V: meridional shear enters S2 as zero (a zero field would empty the V box below)
         voN, laV, loV = np.zeros_like(uoN), laU, loU
+        print("[NEMO] no grid_V file: S2 NEMO = zonal part only")
     avtN, laW, loW, depthw = _nemo("W", "avt"); bn2N = _nemo("W", "bn2")[0]
     avmN = _nemo("W", "avm")[0]
     print(f"[NEMO] record {a.rec} (5-day means): to {toN.shape} uo {uoN.shape} avt {avtN.shape}; "
@@ -187,7 +189,7 @@ def main() -> int:
     m = lambda f, w, b: _box_mean(f, w, b)
     S2_o_m = m(S2_o, w_o, box_o); N2_o_m = m(N2_o, w_o, box_o); KH_m = m(KH_w, w_o, box_o)
     KH_med = np.nanmedian(KH_w[box_o], axis=0)
-    S2_N_m = m(S2u, wU, boxU) + m(S2v, wV, boxV)
+    S2_N_m = m(S2u, wU, boxU) + (m(S2v, wV, boxV) if has_V else 0.0)
     N2_N_m = m(N2_N_recomp, wT, boxT); bn2_m = m(bn2_int, wT, boxT)
     avt_m = m(avt_int, wT, boxT); avt_med = np.nanmedian(avt_int[boxT], axis=0)
     # Instability occupancy: ours = area fraction of box interfaces with N2 below the
