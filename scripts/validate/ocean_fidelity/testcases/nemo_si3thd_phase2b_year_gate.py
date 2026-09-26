@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import struct
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -34,27 +35,35 @@ DH_OPERAND_SHA256 = "9efbcb9113c2748f9085c519092848596daf0f573ba8a4625d02ee3c08b
 DH_REMAP_SHA256 = "8fbeb7df70b3c66b4e7acdd7ab0df3ed8fc01bfaa6150dbc47e3b444638b40a5"
 REPORT_STEPS = (1, 10, 100, 1000, 3000, 5000, 8760)
 CONTINUOUS_FIELDS = ("t_su", "e_i", "e_s", "h_i", "h_s", "a_i", "sv_i")
-BASELINE_JSON = (
-    Path(__file__).resolve().parents[4]
-    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase2b_year_gate.json"
+
+# The seven l3thd year-gate JSONs (8-26 MB each) are runtime evidence, not
+# source -- they live on disk here, not in git (docs/ocean/fidelity/testcases/
+# keeps only a .gitignore rule naming them). LEGOESM_NEMO_EVIDENCE_ROOT lets a
+# caller point at a different copy (e.g. an empty dir, to exercise the
+# absent-file path); the default is this host's evidence store.
+EVIDENCE_ROOT_ENV = "LEGOESM_NEMO_EVIDENCE_ROOT"
+DEFAULT_EVIDENCE_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/evidence"
 )
+
+
+def evidence_path(basename: str) -> Path:
+    """Resolve a large SI3 l3thd year-gate JSON in the evidence store."""
+    root = Path(os.environ.get(EVIDENCE_ROOT_ENV, str(DEFAULT_EVIDENCE_ROOT)))
+    return root / "si3thd" / basename
+
+
+BASELINE_JSON = evidence_path("nemo_testcases_l3thd_phase2b_year_gate.json")
 BASELINE_JSON_SHA256 = "6c21d14f3c85d0fa99be7e31770a4a4dcad548d98f857ea78455bd6344622160"
-BASELINE_OPERATOR_JSON = (
-    Path(__file__).resolve().parents[4]
-    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase3_baseline_operator.json"
+BASELINE_OPERATOR_JSON = evidence_path(
+    "nemo_testcases_l3thd_phase3_baseline_operator.json"
 )
 BASELINE_OPERATOR_JSON_SHA256 = (
     "d642f532ed92910b49f29919dd5e4ae3fe84381ecd1536b7886a2c1f4b36f95f"
 )
-PHASE3_JSON = (
-    Path(__file__).resolve().parents[4]
-    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase3_year_gate.json"
-)
+PHASE3_JSON = evidence_path("nemo_testcases_l3thd_phase3_year_gate.json")
 PHASE3_JSON_SHA256 = "77c78a816b254484afe06632d77378336ddac1153ef9190d17c555f41c45a6e1"
-PHASE5_JSON = (
-    Path(__file__).resolve().parents[4]
-    / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase5_year_gate.json"
-)
+PHASE5_JSON = evidence_path("nemo_testcases_l3thd_phase5_year_gate.json")
 PHASE5_JSON_SHA256 = "d5cd3dc274687b56370075ea51b9df82cc01bf912727e25f2078b6c26fe95cc7"
 
 DH_OPERAND_REGISTRY = {
@@ -2120,6 +2129,11 @@ def main() -> None:
     parser.add_argument("--plant-dh-owner", action="store_true")
     parser.add_argument("--plant-entry-bridge", action="store_true")
     args = parser.parse_args()
+    for evidence_json in (BASELINE_JSON, BASELINE_OPERATOR_JSON, PHASE3_JSON,
+                          PHASE5_JSON):
+        if not evidence_json.exists():
+            print(f"REFUSED: evidence file not present: {evidence_json}")
+            raise SystemExit(1)
     result = run(root=args.root, plant_arithmetic=args.plant_arithmetic,
                  plant_truncate=args.plant_truncate,
                  plant_branch_census=args.plant_branch_census,

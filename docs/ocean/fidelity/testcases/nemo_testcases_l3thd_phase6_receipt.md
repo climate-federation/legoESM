@@ -280,6 +280,7 @@ threshold-amplified component.
 The committed evidence artifact is
 `nemo_testcases_l3thd_phase6_year_gate.json`, SHA-256
 `9571996d72875a3c312fb5b84170d5383bedc7d41fff8ebd9a75f38d3b2a0f9f`.
+Evidence path: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/evidence/si3thd/nemo_testcases_l3thd_phase6_year_gate.json`, SHA-256 `9571996d72875a3c312fb5b84170d5383bedc7d41fff8ebd9a75f38d3b2a0f9f` (see `SHA256SUMS`).
 
 ## Forcing and coupled-rung debt
 
