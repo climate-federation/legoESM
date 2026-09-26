@@ -668,6 +668,23 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/traadv_fct.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo"
         "/traadv_fct.f90"),
+    # Round 178 cites the acquired Round-177 build itself: the writer, active
+    # stage call, and slope producer whose first returned output is non-bit.
+    "GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo"
+        "/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo"
+        "/traldf.f90"),
+    "GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo"
+        "/traldf_iso.f90"),
+    "GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/ldfslp.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo"
+        "/ldfslp.f90"),
     # Round 154 reads the exact instrumented build that produced the admitted
     # developed FCT record; its added observation calls shift FCT line numbers.
     "GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -1114,6 +1131,40 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/sshwzv.f90:293-299': [
         ('ELSE                                            !==  Quasi-Eulerian vertical coordinate  ==!', 2),
         ('END DO   ;   END DO   ;   END DO', 6), 7],
+    # --- round 178: admitted developed tracer-LDF statement walk ---
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/stprk3.f90:173-180': [
+        'IF( l_ldfslp ) THEN', 'ENDIF', 8],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/stprk3_stg.f90:928-934': [
+        'IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 )',
+        'IF( ln_trabbl  )   CALL tra_bbl', 7],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf.f90:105-118': [
+        'SELECT CASE ( nldf_tra )',
+        'CALL traldf_iso_blp', 14],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/ldfslp.f90:222-268': [
+        'DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)',
+        '&                   * ( umask(ji,jj  ,jk) + umask(ji,jj  ,jk+1) ) * 0.5_wp',
+        47],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/ldfslp.f90:262-268': [
+        'uslp(ji,jj,jk) = z1_16',
+        '&                   * ( umask(ji,jj  ,jk) + umask(ji,jj  ,jk+1) ) * 0.5_wp',
+        7],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:167': (
+        'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:215-250': [
+        'IF( jk == 1 ) THEN',
+        'zdkt(ji,jj,ikp1) = 0._wp', 36],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:272-299': [
+        'DO jj = ntsj-( 0+1), ntej+(  0 ) ; DO ji = ntsi-( 0+1), ntei+(  0 )',
+        'END DO   ;   END DO', 28],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:311-344': [
+        'IF( jk ==1 )   zfw',
+        'r177_fw_lower(ji,jj,jk) = zfw(ji,jj)', 34],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:346-367': [
+        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +',
+        '&                 * r1_e1e2t(ji,jj) / (e3t_3d', 22],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:403-419': [
+        'IF( lr177_write ) THEN',
+        'WRITE(r177_unit) e3w_1d', 17],
     # --- round 131: completed-step boundary and daily-reset state schema ---
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:222-226': [
         'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs',
