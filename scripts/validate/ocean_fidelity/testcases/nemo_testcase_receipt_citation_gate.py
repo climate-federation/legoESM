@@ -1091,8 +1091,8 @@ CITATION_MAP = {
         'SUBROUTINE tra_ldf( kt, Kbb, Kmm, pts, Krhs )',
         'CALL traldf_iso_lap  ( kt, Kbb, Kmm, pts, Krhs, l_ptr, l_hst )', 42],
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/traldf_iso.f90:154-305': [
-        'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )',
-        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 152],
+        ('CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
+        ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 2), 152],
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/restart.f90:176-184': [
         "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )",
         "IF( PRESENT(Kaa) )   CALL iom_rstput( kt, nitrst, numrow, 'ssha', ssh(:,:,Kaa) )",
