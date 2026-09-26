@@ -678,7 +678,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                         shear_production: str | None = None,
                         lc: bool | None = None,
                         etau_mode: str | None = None,
-                        preclosure_coeff_source: str | None = None):
+                        preclosure_coeff_source: str | None = None,
+                        buoyancy_sink: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -1130,6 +1131,16 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 "'carried_previous_step' (NEMO's avm_k/avt_k lifetime).")
         _cfg = _cfg._replace(
             tke_preclosure_coeff_source=preclosure_coeff_source)
+    # Buoyancy sink discretisation (``--tke-buoyancy-sink``).  NEMO puts the
+    # whole -avt*rn2 term on the RHS explicitly (zdftke.F90:417-420, no
+    # Patankar split); the card's default 'implicit_linearized' charges the
+    # stable part against the NEW e on the diagonal.  None keeps the card.
+    if buoyancy_sink is not None:
+        if buoyancy_sink not in ("implicit_linearized", "nemo_explicit"):
+            raise ValueError(
+                f"orca1_zdftke_config buoyancy_sink {buoyancy_sink!r} invalid; "
+                "expected 'implicit_linearized' or 'nemo_explicit'.")
+        _cfg = _cfg._replace(tke_buoyancy_sink=buoyancy_sink)
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
     # value (2 = Veros Bougeault-Lacarrere, the current production).  3 selects
     # NEMO nn_mxl=3: the lup/ldown |dl/dz|<=e3t sweeps WITH the ln_mxl0 wind-
@@ -1473,7 +1484,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_shear_production=None, tke_lc=None,
                               tke_etau=None,
                               tke_preclosure_coeff_source=None,
-                              tke_kappah_min=None):
+                              tke_kappah_min=None, tke_buoyancy_sink=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -1512,7 +1523,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                     ("--tke-shear-production", tke_shear_production),
                     ("--tke-preclosure-coeff-source",
                      tke_preclosure_coeff_source),
-                    ("--tke-kappah-min", tke_kappah_min)):
+                    ("--tke-kappah-min", tke_kappah_min),
+                    ("--tke-buoyancy-sink", tke_buoyancy_sink)):
         if _v is not None and tripole_vmix != "tke":
             raise ValueError(
                 f"{_fl} {_v!r} requires --tripole-vmix tke; got --tripole-vmix "
@@ -1531,7 +1543,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    shear_production=tke_shear_production,
                                    lc=tke_lc, etau_mode=tke_etau,
                                    preclosure_coeff_source=(
-                                       tke_preclosure_coeff_source))
+                                       tke_preclosure_coeff_source),
+                                   buoyancy_sink=tke_buoyancy_sink)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 3):
                 raise ValueError(
@@ -1595,7 +1608,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_kappa_convention=None, tke_shear_production=None,
                   tke_lc=None, tke_etau=None,
                   tke_preclosure_coeff_source=None,
-                  tke_kappah_min=None,
+                  tke_kappah_min=None, tke_buoyancy_sink=None,
                   A_h_profile_file=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
@@ -1873,6 +1886,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tke_shear_production=tke_shear_production,
             tke_lc=tke_lc, tke_etau=tke_etau,
             tke_preclosure_coeff_source=tke_preclosure_coeff_source,
+            tke_buoyancy_sink=tke_buoyancy_sink,
             tke_kappah_min=tke_kappah_min)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
@@ -3873,6 +3887,7 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_n2_mode=None, tke_n2_eos_form=None,
                             tke_lc=None, tke_etau=None,
                             tke_preclosure_coeff_source=None,
+                            tke_buoyancy_sink=None,
                             mpas_vmix="kpp",
                             fesom_vmix="fesom"):
     """Reject the zdftke card knobs unless the tke closure is active.
@@ -3933,6 +3948,15 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
     # tke_dissl) and nowhere else, so on MPAS or FESOM the flag would be
     # accepted and then quietly do nothing -- the exact silent-no-op this
     # validator exists to prevent.
+    if tke_buoyancy_sink is not None and not (
+            (grid == "tripole" and tripole_vmix == "tke")
+            or (grid == "mpas" and mpas_vmix == "tke")):
+        raise SystemExit(
+            "--tke-buoyancy-sink selects how the TKE closure discretises its "
+            "-K_T*N2 term; it takes effect ONLY where that closure runs "
+            "(--grid tripole --tripole-vmix tke, or --grid mpas --mpas-vmix "
+            f"tke). Got --grid {grid!r} --tripole-vmix {tripole_vmix!r} "
+            f"--mpas-vmix {mpas_vmix!r}.")
     if tke_preclosure_coeff_source is not None and not (
             grid == "tripole" and tripole_vmix == "tke"):
         raise SystemExit(
@@ -7560,6 +7584,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "matrix) lives on LatLonCGridOceanState; the model "
                         "seeds it cold from zdf_phy_init's background-times-"
                         "wmask construction and bridges it across restarts.")
+    p.add_argument("--tke-buoyancy-sink", type=str, default=None,
+                   choices=["implicit_linearized", "nemo_explicit"],
+                   help="How the TKE closure discretises its buoyancy term "
+                        "-K_T*N2, where the tke closure runs. None (default) "
+                        "keeps the card value ('implicit_linearized': the "
+                        "stable part is charged against the NEW e on the "
+                        "diagonal). 'nemo_explicit' is zdftke.F90:417-420: the "
+                        "whole signed term on the RHS with the previous-step "
+                        "K_T, relying on the post-solve rn_emin floor.")
     p.add_argument("--tke-kappa-convention", type=str, default=None,
                    choices=["veros_sqrte", "gaspar_sqrt2e"],
                    help="Amplitude of K from TKE for --tripole-vmix tke. "
@@ -8148,6 +8181,7 @@ def main() -> int:
                             tke_lc=args.tke_lc, tke_etau=args.tke_etau,
                             tke_preclosure_coeff_source=(
                                 args.tke_preclosure_coeff_source),
+                            tke_buoyancy_sink=args.tke_buoyancy_sink,
                             mpas_vmix=args.mpas_vmix,
                             fesom_vmix=args.fesom_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
@@ -8454,6 +8488,7 @@ def main() -> int:
             tke_lc=(None if args.tke_lc is None else args.tke_lc == "on"),
             tke_etau=args.tke_etau,
             tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
+            tke_buoyancy_sink=args.tke_buoyancy_sink,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
@@ -8558,6 +8593,7 @@ def main() -> int:
                     tke_eice=args.tke_eice,
                     tke_surface_bc=args.tke_surface_bc,
                     tke_surface_bc_level=args.tke_surface_bc_level,
+                    tke_buoyancy_sink=args.tke_buoyancy_sink,
                     tke_mxl_choice=args.tke_mxl_choice,
                     tke_prognostic=args.tke_prognostic,
                     tke_n2_mode=args.tke_n2_mode,
