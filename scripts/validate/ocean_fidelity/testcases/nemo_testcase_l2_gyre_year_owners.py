@@ -57,7 +57,8 @@ MODES
                      step 1081 through production JIT and eager execution.
   --developed-tracer-ldf-walk
                      walks every recorded compiled-order tracer-LDF operand
-                     and write at step 1081 through that production step.
+                     and write at step 1081 through that production step;
+                     --developed-slope-root extends it through `ldf_slp`.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -4217,6 +4218,7 @@ def main(argv=None) -> int:
                         default=Path(
                             "/data/abyssal/dbalwada/nemo-testcases-l2/"
                             "phase3/round177/oracle_tracer_ldf_walk"))
+    parser.add_argument("--developed-slope-root", type=Path, default=None)
     parser.add_argument("--solve-input-pair-root", type=Path,
                         default=DEFAULT_SOLVE_INPUT_PAIR_ROOT)
     parser.add_argument("--solve-input-baseline-root", type=Path,
@@ -4493,7 +4495,7 @@ def main(argv=None) -> int:
             report = developed_tracer_ldf_statement_walk(
                 args.developed_tracer_ldf_root, args.daily_record_root,
                 args.daily_record_audit, args.expect_commit,
-                plant=args.plant)
+                slope_root=args.developed_slope_root, plant=args.plant)
         except GateError as error:
             if args.plant in (None, "none"):
                 raise
@@ -13108,6 +13110,20 @@ ROUND177_LDF_3D = (
 ROUND177_LDF_2D = (
     "r3t_Kmm", "r3u_Kmm", "r3v_Kmm", "e2_e1u", "e1_e2v", "e2u",
     "e1v", "e1t", "e2t", "e1e2t", "r1_e1e2t")
+ROUND179_SLOPE_MAGIC = b"NEMO_L2_R179SLP "
+ROUND179_SLOPE_HEADER = (1, 1081, 1, 1, 36, 26, 31, 30, 31, 17, 3, 0, 179)
+ROUND179_SLOPE_RECORD = "oracle_slope_walk_kt00001081.bin"
+ROUND179_SLOPE_3D = (
+    "prd", "pn2", "tmask", "umask", "vmask", "wmask", "e3u_live",
+    "e3v_live", "zgru", "zgrv", "zdzr", "zau", "zav", "zbu_raw",
+    "zbv_raw", "zbu_limited", "zbv_limited", "zfi", "zfj", "zmli",
+    "zmlj", "zdepu", "zdepv", "zwz", "zww", "zuslp_pre",
+    "zvslp_pre", "zuslp_post", "zvslp_post", "uslp", "vslp")
+ROUND179_SLOPE_2D = (
+    "r3t_Kmm", "r3u_Kmm", "r3v_Kmm", "zhmlpt", "r1_hmlu",
+    "r1_hmlv", "r1_hmlw", "hmlp", "ssmask", "r1_e1u", "r1_e2v",
+    "nmln", "miku", "mikv", "mikt", "iku", "ikv")
+ROUND179_SLOPE_1D = ("gdept_1d", "gdepw_1d", "e3w_1d")
 
 
 def _read_round177_ldf_record(root: Path) -> dict:
@@ -13156,11 +13172,60 @@ def _read_round177_ldf_record(root: Path) -> dict:
             "producer_commit": stamped[1], "arrays": arrays}
 
 
+def _read_round179_slope_record(root: Path) -> dict:
+    """Read the admitted developed native-slope causal stream fail-closed."""
+    root = Path(root)
+    path = root / ROUND179_SLOPE_RECORD
+    stamp_path = path.with_suffix(path.suffix + ".stamp")
+    require(path.is_file() and stamp_path.is_file(),
+            f"Round-179 record or stamp is missing under {root}")
+    blob = path.read_bytes()
+    require(len(blob) == 7_324_076,
+            f"Round-179 record has {len(blob)} bytes, expected 7324076")
+    require(blob[:16] == ROUND179_SLOPE_MAGIC,
+            f"Round-179 magic moved: {blob[:16]!r}")
+    header = struct.unpack_from("=13i", blob, 16)
+    require(header == ROUND179_SLOPE_HEADER,
+            f"Round-179 header is {header}, expected {ROUND179_SLOPE_HEADER}")
+    digest = hashlib.sha256(blob).hexdigest()
+    stamped = stamp_path.read_text().strip().split()
+    require(stamped == [digest,
+                        "1ead968a9eb5e6c4c52f1d0c04b46bc264bc0cbc",
+                        ROUND179_SLOPE_RECORD],
+            f"Round-179 record stamp disagrees: {stamped}")
+    offset = 16 + 13 * 4
+    arrays = {}
+    count3 = 36 * 26 * 31
+    count2 = 36 * 26
+    for name in ROUND179_SLOPE_3D:
+        raw = np.frombuffer(blob, dtype="=f8", count=count3,
+                            offset=offset).reshape((36, 26, 31), order="F")
+        arrays[name] = np.ascontiguousarray(raw.transpose(1, 0, 2))
+        offset += count3 * 8
+    for name in ROUND179_SLOPE_2D:
+        raw = np.frombuffer(blob, dtype="=f8", count=count2,
+                            offset=offset).reshape((36, 26), order="F")
+        arrays[name] = np.ascontiguousarray(raw.T)
+        offset += count2 * 8
+    for name in ROUND179_SLOPE_1D:
+        arrays[name] = np.frombuffer(
+            blob, dtype="=f8", count=31, offset=offset).copy()
+        offset += 31 * 8
+    require(offset == len(blob),
+            f"Round-179 parser stopped at {offset} of {len(blob)} bytes")
+    require(all(np.all(np.isfinite(value)) for value in arrays.values()),
+            "Round-179 record contains a non-finite value")
+    return {"path": str(path), "sha256": digest, "header": list(header),
+            "producer_commit": stamped[1], "arrays": arrays}
+
+
 def developed_tracer_ldf_statement_walk(
         ldf_root: Path, daily_root: Path, daily_audit: Path,
-        expected_commit: str, *, plant: str | None = None) -> dict:
+        expected_commit: str, *, slope_root: Path | None = None,
+        plant: str | None = None) -> dict:
     """Walk the developed tracer-LDF statement in the complete step graph."""
-    require(plant in (None, "none", "developed-ldf-e3u-ulp"),
+    require(plant in (None, "none", "developed-ldf-e3u-ulp",
+                      "developed-slope-first-ulp"),
             f"unknown developed tracer-LDF plant {plant!r}")
     _policy()
     import jax
@@ -13176,6 +13241,8 @@ def developed_tracer_ldf_statement_walk(
             "developed tracer-LDF walk commit differs from --expect-commit")
     oracle = _read_round177_ldf_record(Path(ldf_root))
     raw = oracle["arrays"]
+    slope_oracle = (_read_round179_slope_record(Path(slope_root))
+                    if slope_root is not None else None)
     bundle = _developed_entry_bundle(
         Path(daily_root), Path(daily_audit), expected_commit)
     card, gate = bundle["card"], bundle["gate"]
@@ -13201,7 +13268,9 @@ def developed_tracer_ldf_statement_walk(
     def execute_mode(*, eager: bool, override=None):
         hooks = _NEMOWSRK3TestHooks(
             tracer_process_trace=(), vertical_solve_trace=True,
-            tracer_ldf_diagnostics=(True if override is None else override))
+            tracer_ldf_diagnostics=(
+                "slope" if slope_oracle is not None and override is None
+                else (True if override is None else override)))
         trace_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord,
             card.recipe.model_config, _nemo_ws_test_hooks=hooks)
@@ -13228,11 +13297,18 @@ def developed_tracer_ldf_statement_walk(
         moved = _state_bit_mismatches(trace.state_after, ordinary)
         require(moved == 0,
                 f"tracer-LDF observer moved {moved} production-state bytes")
+        raw_diagnostics = trace.ldf_diagnostics
         diagnostics = {
             key: np.asarray(value, dtype=np.float64)
-            for key, value in trace.ldf_diagnostics.items()
+            for key, value in raw_diagnostics.items()
             if not isinstance(value, dict)
         }
+        if slope_oracle is not None:
+            require(isinstance(raw_diagnostics.get("slope"), dict),
+                    "production slope diagnostics are missing")
+            diagnostics["slope"] = {
+                key: np.asarray(value, dtype=np.float64)
+                for key, value in raw_diagnostics["slope"].items()}
         return diagnostics, moved
 
     # Compiled execution order, including the source rows which are dead in
@@ -13271,6 +13347,73 @@ def developed_tracer_ldf_statement_walk(
             1.0 + raw["r3v_Kmm"][2:-2, 2:-2, None]
             * reference["vmask"]),
     }
+    slope_reference = None
+    slope_row_spec = ()
+    if slope_oracle is not None:
+        slope_raw = slope_oracle["arrays"]
+        slope_reference = {
+            **{name: np.ascontiguousarray(
+                slope_raw[name][2:-2, 2:-2, :nlev])
+               for name in ROUND179_SLOPE_3D},
+            **{name: np.ascontiguousarray(slope_raw[name][2:-2, 2:-2])
+               for name in ROUND179_SLOPE_2D},
+            **{name: np.ascontiguousarray(slope_raw[name][:nlev])
+               for name in ROUND179_SLOPE_1D},
+        }
+        wet2 = np.any(slope_reference["tmask"] != 0.0, axis=-1)
+        level = np.ones(nlev, dtype=bool)
+        slope_row_spec = (
+            ("nmln", wet2, "inherited", "ldfslp.f90:187-194"),
+            ("gdept_1d", level, "inherited", "ldfslp.f90:196-199"),
+            ("r3t_Kmm", wet2, "inherited", "ldfslp.f90:196-199"),
+            ("ssmask", wet2, "inherited", "ldfslp.f90:196-199"),
+            ("zhmlpt", wet2, "owned", "ldfslp.f90:196-199"),
+            ("r1_hmlu", wet2, "owned", "ldfslp.f90:209-220"),
+            ("r1_hmlv", wet2, "owned", "ldfslp.f90:209-220"),
+            ("r3u_Kmm", wet2, "inherited", "ldfslp.f90:209-220"),
+            ("r3v_Kmm", wet2, "inherited", "ldfslp.f90:209-220"),
+            ("miku", wet2, "inherited", "ldfslp.f90:209-220"),
+            ("mikv", wet2, "inherited", "ldfslp.f90:209-220"),
+            ("hmlp", wet2, "inherited", "ldfslp.f90:223-229"),
+            ("gdepw_1d", level, "inherited", "ldfslp.f90:223-229"),
+            ("mikt", wet2, "inherited", "ldfslp.f90:223-229"),
+            ("r1_hmlw", wet2, "owned", "ldfslp.f90:223-229"),
+            ("prd", wet, "inherited", "ldfslp.f90:231-260"),
+            ("tmask", wet, "inherited", "ldfslp.f90:231-260"),
+            ("umask", umask, "inherited", "ldfslp.f90:231-260"),
+            ("vmask", vmask, "inherited", "ldfslp.f90:231-260"),
+            ("zgru", umask, "owned", "ldfslp.f90:231-251"),
+            ("zgrv", vmask, "owned", "ldfslp.f90:231-251"),
+            ("pn2", wmask, "inherited", "ldfslp.f90:252-261"),
+            ("zdzr", wet, "owned", "ldfslp.f90:252-261"),
+            ("r1_e1u", wet2, "inherited", "ldfslp.f90:270-276"),
+            ("r1_e2v", wet2, "inherited", "ldfslp.f90:270-276"),
+            ("zau", umask, "owned", "ldfslp.f90:270-276"),
+            ("zav", vmask, "owned", "ldfslp.f90:270-276"),
+            ("zbu_raw", umask, "owned", "ldfslp.f90:270-287"),
+            ("zbv_raw", vmask, "owned", "ldfslp.f90:270-287"),
+            ("e3u_live", umask, "inherited", "ldfslp.f90:278-291"),
+            ("e3v_live", vmask, "inherited", "ldfslp.f90:278-291"),
+            ("e3w_1d", level, "inherited", "ldfslp.f90:278-291"),
+            ("zbu_limited", umask, "owned", "ldfslp.f90:288-295"),
+            ("zbv_limited", vmask, "owned", "ldfslp.f90:288-295"),
+            ("iku", wet2, "owned", "ldfslp.f90:297-303"),
+            ("ikv", wet2, "owned", "ldfslp.f90:297-303"),
+            ("zfi", umask, "owned", "ldfslp.f90:304-309"),
+            ("zfj", vmask, "owned", "ldfslp.f90:304-309"),
+            ("zmli", umask, "owned", "ldfslp.f90:304-309"),
+            ("zmlj", vmask, "owned", "ldfslp.f90:304-309"),
+            ("zdepu", umask, "owned", "ldfslp.f90:311-327"),
+            ("zdepv", vmask, "owned", "ldfslp.f90:311-327"),
+            ("zuslp_pre", umask, "owned", "ldfslp.f90:325-340"),
+            ("zvslp_pre", vmask, "owned", "ldfslp.f90:325-340"),
+            ("zwz", umask, "owned", "ldfslp.f90:328-334"),
+            ("zww", vmask, "owned", "ldfslp.f90:328-334"),
+            ("zuslp_post", umask, "owned", "ldfslp.f90:335-341"),
+            ("zvslp_post", vmask, "owned", "ldfslp.f90:335-341"),
+            ("uslp", umask, "owned", "ldfslp.f90:345-361"),
+            ("vslp", vmask, "owned", "ldfslp.f90:345-361"),
+        )
 
     def score(diagnostics):
         rows = {}
@@ -13283,6 +13426,23 @@ def developed_tracer_ldf_statement_walk(
         first = next((name for name, row in rows.items()
                       if not row["bit_exact"]), None)
         return rows, first
+
+    def score_slope(diagnostics):
+        if slope_reference is None:
+            return {}, None, None
+        actual = diagnostics["slope"]
+        rows = {}
+        for name, mask, ownership, statement in slope_row_spec:
+            row = _score_developed_row(
+                actual[name], slope_reference[name], mask)
+            row.update({"ownership": ownership, "statement": statement})
+            rows[name] = row
+        first = next((name for name, row in rows.items()
+                      if not row["bit_exact"]), None)
+        first_owned = next((name for name, row in rows.items()
+                            if (row["ownership"] == "owned"
+                                and not row["bit_exact"])), None)
+        return rows, first, first_owned
 
     baseline_jit, moved_jit = execute_mode(eager=False)
     baseline_eager, moved_eager = execute_mode(eager=True)
@@ -13318,6 +13478,10 @@ def developed_tracer_ldf_statement_walk(
 
     jit_rows, jit_first = score(baseline_jit)
     eager_rows, eager_first = score(baseline_eager)
+    slope_jit_rows, slope_jit_first, slope_jit_first_owned = score_slope(
+        baseline_jit)
+    slope_eager_rows, slope_eager_first, slope_eager_first_owned = score_slope(
+        baseline_eager)
     statements = {
         "uslp": "ldfslp.f90:262-268",
         "vslp": "ldfslp.f90:269-275",
@@ -13349,15 +13513,23 @@ def developed_tracer_ldf_statement_walk(
                 "first_non_bit_row": jit_first,
                 "first_non_bit_statement": statements.get(jit_first),
                 "observer_state_unequal_bytes": moved_jit,
-                "rows": jit_rows},
+                "rows": jit_rows, "slope_first_non_bit": slope_jit_first,
+                "slope_first_owned_non_bit": slope_jit_first_owned,
+                "slope_rows": slope_jit_rows},
             "production_eager": {
                 "first_non_bit_row": eager_first,
                 "first_non_bit_statement": statements.get(eager_first),
                 "observer_state_unequal_bytes": moved_eager,
-                "rows": eager_rows}},
+                "rows": eager_rows, "slope_first_non_bit": slope_eager_first,
+                "slope_first_owned_non_bit": slope_eager_first_owned,
+                "slope_rows": slope_eager_rows}},
         "authoritative_mode": "production_step_jit",
-        "first_non_bit_row": jit_first,
-        "first_non_bit_statement": statements.get(jit_first),
+        "first_non_bit_row": (slope_jit_first if slope_oracle is not None
+                              else jit_first),
+        "first_non_bit_statement": (
+            slope_jit_rows[slope_jit_first]["statement"]
+            if slope_jit_first is not None else statements.get(jit_first)),
+        "first_owned_non_bit_row": slope_jit_first_owned,
         "predictions": predictions,
         "all_frozen_predictions_confirmed": all(predictions.values()),
         "compiled_source": {

@@ -1017,7 +1017,7 @@ def compute_nemo_native_slopes(
     prd_TS_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     prd_override: jnp.ndarray | None = None,
     pn2_override: jnp.ndarray | None = None,
-    e3w_override: jnp.ndarray | None = None,
+    e3w_override: jnp.ndarray | None = None, return_diagnostics: bool = False,
 ):
     """NEMO ldfslp native four-position isopycnal slopes (uslp, vslp, wslpi,
     wslpj) — a direct transcription of ``ldfslp.F90`` (ldf_slp, NEMO 5.0.2)
@@ -1103,7 +1103,7 @@ def compute_nemo_native_slopes(
             raise ValueError(
                 "slope_depth_evaluation='nemo_qco_live_literal' requires "
                 "NOW sea-surface height and local bathymetry")
-        _live_gdept, _live_gdepw, _ = _nemo_qco_live_slope_depths(
+        _live_gdept, _live_gdepw, _live_stretch = _nemo_qco_live_slope_depths(
             eta, H_bathy, z_coord, dtype)
 
     from legoesm.grids.latlon import ensure_geometry
@@ -1407,7 +1407,7 @@ def compute_nemo_native_slopes(
     wslpi = wslpi.at[:, :, 0].set(0.0)
     wslpj = wslpj.at[:, :, 0].set(0.0)
 
-    # --- Shapiro 1/16 + coastal decrease, native mask factors ---
+    _uslp_raw, _vslp_raw = uslp, vslp  # pre-Shapiro diagnostic rows
     def _shap(f, cof, literal_factors=None):
         # Lon (axis 1) ghost cells are PERIODIC: NEMO's slope loops compute
         # zwz/zww over the halo columns as well (DO_2D(1,1,1,1),
@@ -1483,7 +1483,7 @@ def compute_nemo_native_slopes(
     if _nemo_identity_association:
         uslp = uslp.at[..., 0].set(0.0)
         vslp = vslp.at[..., 0].set(0.0)
-    return uslp, vslp, wslpi, wslpj
+    return ((uslp, vslp, wslpi, wslpj, _nemo_native_slope_diagnostics(locals())) if return_diagnostics else (uslp, vslp, wslpi, wslpj))
 
 
 def _nemo_treguier_left_reductions(zn_term, zah_term, ze3w, zhw_offset):
@@ -4010,7 +4010,7 @@ def gm_redi_tracer_tendency_latlon(
     redi_flux_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
-    return_redi_diagnostics: bool = False,
+    return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False,
     redi_face_thickness_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -4428,8 +4428,8 @@ def gm_redi_tracer_tendency_latlon(
                 prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
-                e3w_override=native_slope_e3w)
-            _bolus_nat = None
+                e3w_override=native_slope_e3w, return_diagnostics=return_redi_slope_diagnostics)
+            _slope_diagnostics = _nat[4] if return_redi_slope_diagnostics else None; _nat = _nat[:4]; _bolus_nat = None
             if native_bolus_slope_eta is not None:
                 _bolus_nat = compute_nemo_native_slopes(
                     rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
@@ -4483,7 +4483,7 @@ def gm_redi_tracer_tendency_latlon(
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             elif return_redi_diagnostics:
-                dT_dt, _redi_diagnostics = _dT
+                dT_dt, _redi_diagnostics = _dT; _redi_diagnostics.update({"slope": _slope_diagnostics} if return_redi_slope_diagnostics else {})
             else:
                 dT_dt = _dT
             dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
@@ -5686,3 +5686,110 @@ def geometric_barotropic_production(
     # Depth integral with the cell-centre thickness measure; diss is already
     # centre-masked by the operator, the dz product re-applies the 2-D mask.
     return jnp.sum(diss * dz_actual, axis=-1) * mask
+
+
+def _nemo_native_slope_diagnostics(scope):
+    """Expose the native-slope causal rows only through the test hook."""
+    dtype = scope["dtype"]
+    zgru, zgrv = scope["zgru"], scope["zgrv"]
+    if scope["_metric_mode"] == "nemo_reciprocal":
+        r1_e1u = lax.optimization_barrier(
+            jnp.asarray(1.0, dtype=dtype) / scope["e1u"])
+        r1_e2v = lax.optimization_barrier(
+            jnp.asarray(1.0, dtype=dtype) / scope["e2v"])
+        zau = lax.optimization_barrier(zgru * r1_e1u[..., None])
+        zav = lax.optimization_barrier(zgrv * r1_e2v[..., None])
+    else:
+        r1_e1u = jnp.asarray(1.0, dtype=dtype) / scope["e1u"]
+        r1_e2v = jnp.asarray(1.0, dtype=dtype) / scope["e2v"]
+        zau = zgru / scope["e1u"][..., None]
+        zav = zgrv / scope["e2v"][..., None]
+
+    zbu_raw, zbv_raw = scope["zb_u"], scope["zb_v"]
+    zbu = jnp.minimum(
+        zbu_raw,
+        jnp.minimum(-scope["z1_slpmax"] * jnp.abs(zau),
+                    (-_NEMO_SLOPE_STAB_7E3 / scope["e3u_k"])
+                    * jnp.abs(zau)))
+    zbv = jnp.minimum(
+        zbv_raw,
+        jnp.minimum(-scope["z1_slpmax"] * jnp.abs(zav),
+                    (-_NEMO_SLOPE_STAB_7E3 / scope["e3v_k"])
+                    * jnp.abs(zav)))
+    s_int_u = zau / (zbu - scope["zeps"])
+    s_int_v = zav / (zbv - scope["zeps"])
+    iku, ikv, kidx = scope["iku"], scope["ikv"], scope["kidx"]
+    anchor_u = (jnp.take_along_axis(
+        s_int_u, iku[..., None], axis=-1)[..., 0] * scope["r1_hmlu"])
+    anchor_v = (jnp.take_along_axis(
+        s_int_v, ikv[..., None], axis=-1)[..., 0] * scope["r1_hmlv"])
+    valid = kidx > 0
+    pre_u = jnp.where((kidx < iku[..., None]) & valid,
+                      anchor_u[..., None], 0.0)
+    pre_v = jnp.where((kidx < ikv[..., None]) & valid,
+                      anchor_v[..., None], 0.0)
+    post_u = jnp.where((kidx <= iku[..., None]) & valid,
+                       anchor_u[..., None], 0.0)
+    post_v = jnp.where((kidx <= ikv[..., None]) & valid,
+                       anchor_v[..., None], 0.0)
+    zfi = (kidx >= iku[..., None]).astype(dtype) * valid
+    zfj = (kidx >= ikv[..., None]).astype(dtype) * valid
+    zmli = (kidx == iku[..., None]).astype(dtype) * valid
+    zmlj = (kidx == ikv[..., None]).astype(dtype) * valid
+
+    stretch = scope.get("_live_stretch")
+    if stretch is None:
+        stretch = jnp.ones_like(scope["mask"], dtype=dtype)
+    r3t = stretch - jnp.asarray(1.0, dtype=dtype)
+    hp = getattr(scope["z_coord"], "h_partial", None)
+    if hp is None:
+        base_u = scope["dz"][None, None, :]
+        base_v = base_u
+    else:
+        h3 = jnp.asarray(hp, dtype=dtype)
+        floor = jnp.asarray(1.0e-10, dtype=dtype)
+        base_u = jnp.maximum(jnp.minimum(h3, jnp.roll(h3, -1, axis=1)), floor)
+        base_v = jnp.maximum(jnp.minimum(h3, jnp.roll(h3, -1, axis=0)), floor)
+    r3u = jnp.where(scope["umask3"][..., 0] != 0.0,
+                    scope["e3u_k"][..., 0] / base_u[..., 0] - 1.0, 0.0)
+    r3v = jnp.where(scope["vmask3"][..., 0] != 0.0,
+                    scope["e3v_k"][..., 0] / base_v[..., 0] - 1.0, 0.0)
+    ones = jnp.ones_like(scope["first"], dtype=dtype)
+    gdept_0 = jnp.asarray(
+        getattr(scope["z_coord"], "nemo_gdept_0", scope["gdept"]),
+        dtype=dtype)
+    gdepw_0 = jnp.asarray(
+        getattr(scope["z_coord"], "nemo_gdepw_0", scope["gdepw_top"]),
+        dtype=dtype)
+    gdept_1d = gdept_0[0, 0] if gdept_0.ndim == 3 else gdept_0
+    gdepw_1d = gdepw_0[0, 0] if gdepw_0.ndim == 3 else gdepw_0
+    e3w = scope["e3w"]
+    e3w_1d = e3w[0, 0] / stretch[0, 0] if e3w.ndim == 3 else e3w
+
+    return {
+        "prd": scope["prd"], "pn2": scope["pn2"],
+        "tmask": scope["act"], "umask": scope["umask3"],
+        "vmask": scope["vmask3"], "wmask": scope["wmask3"],
+        "e3u_live": scope["e3u_k"], "e3v_live": scope["e3v_k"],
+        "zgru": zgru, "zgrv": zgrv, "zdzr": scope["zdzr"],
+        "zau": zau, "zav": zav, "zbu_raw": zbu_raw,
+        "zbv_raw": zbv_raw, "zbu_limited": zbu,
+        "zbv_limited": zbv, "zfi": zfi, "zfj": zfj,
+        "zmli": zmli, "zmlj": zmlj, "zdepu": scope["zdepu"],
+        "zdepv": scope["zdepv"], "zwz": scope["_uslp_raw"],
+        "zww": scope["_vslp_raw"], "zuslp_pre": pre_u,
+        "zvslp_pre": pre_v, "zuslp_post": post_u,
+        "zvslp_post": post_v, "uslp": scope["uslp"],
+        "vslp": scope["vslp"], "r3t_Kmm": r3t,
+        "r3u_Kmm": r3u, "r3v_Kmm": r3v,
+        "zhmlpt": scope["zhmlpt"], "r1_hmlu": scope["r1_hmlu"],
+        "r1_hmlv": scope["r1_hmlv"],
+        "r1_hmlw": 1.0 / jnp.maximum(scope["hml"], 10.0),
+        "hmlp": scope["hml"], "ssmask": scope["mask"],
+        "r1_e1u": r1_e1u, "r1_e2v": r1_e2v,
+        "nmln": (scope["first"] + 1).astype(dtype),
+        "miku": ones, "mikv": ones, "mikt": ones,
+        "iku": (iku + 1).astype(dtype), "ikv": (ikv + 1).astype(dtype),
+        "gdept_1d": gdept_1d, "gdepw_1d": gdepw_1d,
+        "e3w_1d": e3w_1d,
+    }
