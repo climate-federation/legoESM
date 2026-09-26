@@ -25,8 +25,15 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu
 R=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_evdocc_d5
 N=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY
-for S in $(ls $R/snapshot_day000[1-4]*.npz | sort); do
+for S in $(ls $R/snapshot_day000[1-4].500.npz | sort); do   # 12 UTC = 03 local at 230E
   echo "##### $(basename $S)"
-  $PY -u scripts/validate/ocean_fidelity/equatorial_shear_ri_vs_nemo.py --snapshot $S --nemo-dir $N --rec 0 --n-levels 16 2>&1 | grep -vi warning
+  $PY -u scripts/validate/ocean_fidelity/equatorial_shear_ri_vs_nemo.py --snapshot $S --nemo-dir $N --rec 0 --n-levels 14 2>&1 | grep -vi warning
 done
 echo "=== card exit: $? ==="
+# 2026-09-26 second pass (03 local only): at OUR post-step unstable interfaces,
+# does the model's own diagnosed K_H exceed 10 (EVD engaged), and is the
+# instability near-threshold (generated after the solve) or ~1e-5 (unmixed)?
+# Note: the first pass compared post-step residual instability with NEMO's
+# trigger-time fraction -- not the same quantity at 1-5 m, where the solve
+# removes what the trigger saw. NEMO's (mean-median)/rn_evd column saturates
+# to 0 wherever EVD fires >50% of the window (median = rn_evd); use avt/100.
