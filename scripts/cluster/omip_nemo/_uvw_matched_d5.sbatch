@@ -4,7 +4,7 @@
 #SBATCH --partition=short
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=01:30:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/uvw_match_%j.out
 # Matched-statistic day-5 read of the production control with window-mean
 # state AND velocities (trp_stmean_uvw_d5, one 5-day window) against NEMO
@@ -39,4 +39,8 @@ $PY -u scripts/validate/ocean_fidelity/sst_phase_vs_nemo.py --nemo-gridt $N --re
 echo "##### (5) full scorecard + maps, window means (5-day window matches the record)"
 $PY -u scripts/validate/compare_omip_nemo.py --legoesm-snapshot $S --nemo-gridt $N --nemo-time-idx 0 \
     --output-dir $R/compare_uvw_d5_mean --grid-label tripole --use-mean-fields 2>&1 | grep -vi warning
+echo "##### (6) cross sections T/S with MLD, window means (zonal mean, equatorial Pacific, 140W meridional, 26N Atlantic)"
+$PY -u scripts/plot/plot_sections_vs_nemo.py --tripole $S --use-mean-fields --nemo-gridt $N --nemo-time-idx 0 \
+    --out-dir $R/sections_uvw_d5_mean --max-depth-m 400 \
+    --lon-section=-140:-10,10:2:140W --lat-section=26:280,345:1:26N_Atlantic 2>&1 | grep -vi warning
 echo "=== card exit: $? ==="
