@@ -1,17 +1,19 @@
-# legoESM experiment template — AMIP (prescribed observed SST/sea-ice).
+# legoESM experiment template — idealized 1-year hydrostatic run (NOT AMIP;
+# formerly coupled/amip.yaml).  For AMIP use config/amip/amip_production.yaml.
 experiment:
   tier: tier3
   complexity: hydrostatic
   extent: global
-  maturity: init_only        # validates + constructs; needs SST forcing data to RUN
+  maturity: init_only
   description: >
-    AMIP-style run: hydrostatic atmosphere forced by prescribed observed SST +
-    sea-ice (operational tier). Requires an external SST/SIC forcing dataset
-    (fetch first); the config itself validates without the data present.
-  data: [amip_sst_sic]       # fetch_data.py stages this before a run
+    Idealized 1-year hydrostatic atmosphere on C48/L26: analytical forcing,
+    gray radiation, default column physics, no hyperdiffusion.  It does NOT
+    read observed SST/sea-ice: the listed amip_sst_sic dataset is staged by
+    fetch_data.py but not consumed by the resolved run.
+  data: [amip_sst_sic]       # staged by fetch_data.py; NOT read by this run
   conservation_gates: [mass, energy, moisture]
 model:
-  name: "AMIP"
+  name: "hydrostatic_gray_1yr"
   type: atmosphere_only
 grid:
   type: cubed_sphere
