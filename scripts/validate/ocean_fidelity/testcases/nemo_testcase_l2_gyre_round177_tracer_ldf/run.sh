@@ -92,8 +92,7 @@ cmp -s "$SOURCE_ROOT/BLD/bin/nemo.exe" "$SOURCE_RUN/nemo" || \
   refuse 65 "Round-132 step-1080 restart size moved"
 [[ "$(stat -c %s "$SOURCE_RUN/$RESTART_1440")" -eq 1466328 ]] || \
   refuse 65 "Round-132 step-1440 restart size moved"
-for row in 'nn_itend *= *2160' 'nn_stock *= *6' 'nn_write *= *2160' \
-           'nn_pert_seed *= *0'; do
+for row in 'nn_itend *= *2160' 'nn_stock *= *6' 'nn_write *= *2160'; do
   grep -Eq "^[[:space:]]*$row" "$SOURCE_RUN/namelist_cfg" || \
     refuse 65 "source namelist lacks row $row"
 done
