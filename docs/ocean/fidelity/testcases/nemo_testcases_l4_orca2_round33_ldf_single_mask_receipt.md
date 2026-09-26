@@ -133,7 +133,8 @@ No round-33 test fails.
 
 The final ORCA2 push battery runs the citation gate, TKE terms, recipe,
 freshwater closure and parallel-receipt gate against the committed receipt:
-**127/127 pass in 371.12 s**.
+**127/127 pass in 371.12 s**; its post-closing-commit repeat is also
+**127/127 in 422.59 s**.
 
 ## Choices
 
