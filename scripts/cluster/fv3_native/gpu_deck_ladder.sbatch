@@ -90,33 +90,47 @@ DECKS=(
 STALL_S=${STALL_S:-800}          # passing runs print step 1 by ~385 s (C48 km=10)
 STALL_RETRIES=${STALL_RETRIES:-2}
 STALLS=0
-run_watched() {   # run_watched <cap_s> <marker> <log> <srun args...>
+run_watched() {   # run_watched <cap_s> <marker> <log> <srun args...>; final log in WATCH_LOG
   local cap=$1 marker=$2 log=$3; shift 3
   local try rc t0 pid
   for try in $(seq 0 "$STALL_RETRIES"); do
     [ "$try" -gt 0 ] && { log="${log%.log}.retry${try}.log"; echo "  stall retry $try -> $log"; }
+    WATCH_LOG=$log
     t0=$SECONDS
-    timeout --kill-after=60 "$cap" "$@" > "$log" 2>&1 &
+    # own session+group so the teardown can kill timeout AND its srun tree
+    setsid timeout --kill-after=60 "$cap" "$@" > "$log" 2>&1 &
     pid=$!
-    while kill -0 "$pid" 2>/dev/null; do
+    rc=
+    while :; do
       sleep 20
+      # a process that exited (0, a crash, or timeout's 124) is NOT a stall:
+      # its own status is the result (codex 2026-09-26: 7 and 124 became 0)
+      if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; return $rc; fi
       if [ $((SECONDS - t0)) -ge "$STALL_S" ] && ! grep -q -- "$marker" "$log"; then
         STALLS=$((STALLS + 1))
         echo "  STALL #$STALLS: no '$marker' after $((SECONDS - t0))s -> gdb attach on every rank, then teardown"
-        srun --overlap -N "$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 bash -c '
+        timeout --kill-after=30 "${STALL_GDB_S:-300}" \
+          srun --overlap -N "$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 bash -c '
           for p in $(pgrep -u "$USER" -f tiled_m6_model_gate); do
-            gdb -p "$p" -batch -ex "set pagination off" -ex "thread apply all bt 25" \
+            timeout 120 gdb -p "$p" -batch -ex "set pagination off" -ex "thread apply all bt 25" \
               > "'"${log%.log}"'.gdb_$(hostname)_$p.txt" 2>&1
             echo "    $(hostname) pid $p gdb rc=$? ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)"
-          done' || true
-        kill -TERM "$pid" 2>/dev/null; sleep ${STALL_TEARDOWN_S:-30}; kill -KILL "$pid" 2>/dev/null
+          done' || echo "  gdb step rc=$? (bounded)"
+        # teardown the whole group (timeout + srun + its children), verify
+        kill -TERM -- "-$pid" 2>/dev/null
+        local w=0
+        while kill -0 "$pid" 2>/dev/null && [ "$w" -lt "${STALL_TEARDOWN_S:-30}" ]; do sleep 1; w=$((w + 1)); done
+        kill -KILL -- "-$pid" 2>/dev/null
         wait "$pid" 2>/dev/null
+        if pgrep -u "$USER" -f tiled_m6_model_gate > /dev/null; then
+          echo "  WARNING: gate processes survived the teardown -- scancel of this job's steps"
+          scancel --signal=KILL "$SLURM_JOB_ID.$(squeue -s -j "$SLURM_JOB_ID" -h -o %i | grep -v batch | tail -1 | cut -d. -f2)" 2>/dev/null || true
+          sleep 5
+        fi
         rc=125
         break
       fi
     done
-    if [ "${rc:-}" != 125 ]; then wait "$pid"; rc=$?; return $rc; fi
-    rc=
   done
   echo "  STALLED $((STALL_RETRIES + 1)) times in a row -- giving up on this step"
   return 125
@@ -152,7 +166,7 @@ for d in "${DECKS[@]}"; do
       "$PY" "$GATE" --n "$N" --km "$KM" --kt 1 --pad "$PAD" \
       --n-split "$NSPLIT" --dt "$DT" --steps "$STEPS" \
       --distributed --flat-ref --save-npz "$REF"
-  REF_RC=$?
+  REF_RC=$?; RLOG=$WATCH_LOG
   [ "$REF_RC" -eq 124 ] && echo "  step A TIMEOUT after ${REF_CAP}s"
   [ "$REF_RC" -eq 125 ] && echo "  step A STALLED (native stacks next to $RLOG)"
   if [ "$REF_RC" -eq 0 ] && [ ! -s "$REF" ]; then REF_RC=10; fi
@@ -169,7 +183,7 @@ for d in "${DECKS[@]}"; do
         "$PY" "$GATE" --n "$N" --km "$KM" --kt "$KT" --pad "$PAD" \
         --n-split "$NSPLIT" --dt "$DT" --steps "$STEPS" \
         --distributed --ref-npz "$REF" --gpu-max-rel-peak "${GPU_MAX_REL_PEAK:-1e-12}" --timing 5
-    SCORE_RC=$?
+    SCORE_RC=$?; SLOG=$WATCH_LOG
     [ "$SCORE_RC" -eq 124 ] && echo "  step B TIMEOUT after ${SCORE_CAP}s"
     [ "$SCORE_RC" -eq 125 ] && echo "  step B STALLED (native stacks next to $SLOG)"
     VERDICT=$(grep -m1 -F '[m6] VERDICT' "$SLOG" || true)
