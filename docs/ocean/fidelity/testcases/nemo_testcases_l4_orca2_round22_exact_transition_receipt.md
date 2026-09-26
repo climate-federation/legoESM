@@ -112,8 +112,18 @@ Verdict: **independent review unavailable in-sandbox**.
 
 The final round-22 classifier exits 0 with `RECERTIFIED`.  It binds the four
 exact snapshots, both admitted ladder documents, the restored ten-step ladder,
-and the fresh current-tip ladder.  The receipt citation gate and pytest results
-are recorded in the final committed revision of this section.
+and the fresh current-tip ladder.  The receipt citation gate exits 0 with all
+three compiled-source citations mapped and audited.  Its rigid-line plant
+exits 1 and reports `SYMBOL-NOT-AT-LINE` for the planted
+`stprk3_stg.f90:493-506` anchor.
+
+The final focused battery passes **11 / 11** tests.  The one required
+`tests/ocean/fidelity -n 12` battery completes with **1,843 passed, 7 skipped,
+5 failed** in 2,375.33 s.  All five failures are inherited and unrelated to
+the round-22 diff: the round-129 spread-floor record stamp, the round-51 live
+trace field suffix, SI3 scalar-math source provenance, the known three-emitter
+worktree-stamp ratchet, and the unregistered `hires_lane_surface` case-board
+row.  No round-22 test fails.
 
 No GYRE trajectory rerun is required: the parent-to-tip `packages/` diff is
 empty.  The certified GYRE reference remains ladder digest
