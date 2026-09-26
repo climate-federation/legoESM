@@ -728,10 +728,13 @@ def spmd_reduce_axis() -> str | None:
     return None
 
 
-def _resolve_tree_psum(env_value: str) -> bool:
-    """LEGOESM_SPMD_TREE_PSUM: ``'1'`` sums with a butterfly of ppermutes,
-    ``''``/``'0'`` with ``jax.lax.psum`` (default). Anything else raises."""
-    if env_value in ("", "0"):
+def _resolve_tree_psum(env_value: str, backend: str) -> bool:
+    """LEGOESM_SPMD_TREE_PSUM: unset/``''`` = butterfly on CPU, psum
+    elsewhere (owner-approved default 2026-09-25); ``'1'`` butterfly on any
+    backend; ``'0'`` psum everywhere. Anything else raises."""
+    if env_value == "":
+        return backend == "cpu"
+    if env_value == "0":
         return False
     if env_value == "1":
         return True
@@ -742,11 +745,17 @@ def _resolve_tree_psum(env_value: str) -> bool:
 def _spmd_sum(x: jax.Array, axis_name) -> jax.Array:
     """Sum ``x`` over the shard_map axis ``axis_name``.
 
-    Default: ``jax.lax.psum``. With ``LEGOESM_SPMD_TREE_PSUM=1`` and a single
-    axis of power-of-two size, a recursive-doubling butterfly of ``log2(n)``
-    ppermute rounds instead: on CPU, XLA's gloo allreduce is a ring whose
-    cost grows with the rank count (measured on Derecho across nodes: 1.14 ms
-    at 8 ranks, 4.4 ms at 32, while one neighbour exchange is ~70 us).
+    On the CPU backend (default, ``LEGOESM_SPMD_TREE_PSUM`` unset) and for a
+    single axis of power-of-two size: a recursive-doubling butterfly of
+    ``log2(n)`` ppermute rounds. XLA's gloo allreduce is a ring whose cost
+    grows with the rank count (measured on Derecho across nodes: 1.14 ms at
+    8 ranks, 4.4 ms at 32, 9.05 ms at 64; one neighbour exchange ~70 us);
+    MPAS ocean s7 at 16 ranks/node, psum -> butterfly: 335 -> 315 ms/step
+    at 1 node, 216 -> 171 at 2, 231 -> 118 at 4, 399 -> 97 at 8. Other
+    backends keep ``jax.lax.psum`` (NCCL's allreduce is not a ring of
+    latencies); ``=1`` / ``=0`` force either path. The choice keys on the
+    PROCESS default backend (``jax.default_backend()``), not the mesh
+    devices' platform.
     Every rank adds the same two operands in each round (a + b == b + a), so
     all ranks hold bit-identical sums; the summation ORDER differs from
     psum's, so results differ from the psum path in the last bit. Linear in
@@ -758,7 +767,8 @@ def _spmd_sum(x: jax.Array, axis_name) -> jax.Array:
     the two paths in separate processes. Non-power-of-two axis sizes and
     multi-axis names always take psum.
     """
-    tree = _resolve_tree_psum(os.environ.get("LEGOESM_SPMD_TREE_PSUM", ""))
+    tree = _resolve_tree_psum(os.environ.get("LEGOESM_SPMD_TREE_PSUM", ""),
+                              jax.default_backend())
     if not tree or isinstance(axis_name, (tuple, list)):
         return jax.lax.psum(x, axis_name)
     n = int(jax.lax.axis_size(axis_name))

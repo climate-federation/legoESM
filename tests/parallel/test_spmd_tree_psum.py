@@ -1,6 +1,6 @@
 """LEGOESM_SPMD_TREE_PSUM: the butterfly sum in batch_psum_spmd equals psum
-to rounding, is bit-identical on every device, differentiates like psum, and
-is off by default."""
+to rounding, is bit-identical on every device, differentiates like psum, is
+the CPU default, and '0' restores psum."""
 import os
 import subprocess
 import sys
@@ -46,8 +46,8 @@ def _run(env_val, ndev=8):
 
 def test_tree_sum_matches_psum_identical_on_all_devices_and_grad():
     import numpy as np
-    o_ps, ref, g_ps, ar_ps, _ = _run(None)             # unset = default psum
-    o_tr, _, g_tr, ar_tr, cp_tr = _run("1")
+    o_ps, ref, g_ps, ar_ps, _ = _run("0")              # forced psum
+    o_tr, _, g_tr, ar_tr, cp_tr = _run(None)           # unset = CPU default: tree
     assert ar_ps and not ar_tr and cp_tr >= 3             # the tree path really ran
     for o in (o_ps, o_tr):
         np.testing.assert_allclose(o, np.broadcast_to(ref, o.shape), rtol=1e-14)
@@ -57,10 +57,12 @@ def test_tree_sum_matches_psum_identical_on_all_devices_and_grad():
 
 def test_bad_value_raises():
     from legoesm.parallel.reductions import _resolve_tree_psum
-    assert _resolve_tree_psum("") is False and _resolve_tree_psum("0") is False
-    assert _resolve_tree_psum("1") is True
+    assert _resolve_tree_psum("", "cpu") is True
+    assert _resolve_tree_psum("", "gpu") is False
+    assert _resolve_tree_psum("0", "cpu") is False
+    assert _resolve_tree_psum("1", "gpu") is True
     with pytest.raises(ValueError):
-        _resolve_tree_psum("yes")
+        _resolve_tree_psum("yes", "cpu")
 
 
 def test_non_power_of_two_axis_keeps_psum():
