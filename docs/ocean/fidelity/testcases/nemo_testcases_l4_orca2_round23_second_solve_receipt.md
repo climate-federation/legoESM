@@ -103,7 +103,26 @@ at the committed implementation tip.  It failed before reading the diff:
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-Final citation and test results are recorded in the final receipt commit.
+The receipt citation gate passes: three citations, zero failures, zero
+unmapped citations, and zero map entries failing audit.  Its real two-line
+plant on the stage statement exits 1 with `SYMBOL-NOT-AT-LINE`; all nine
+self-tests fire.  The final focused battery passes **84 / 84**.
+
+The one required `tests/ocean/fidelity -n 12` battery collected 1,865 tests
+and reached the inherited final-tail hang after **1,840 passed, 7 skipped,
+5 failed, and 13 unfinished**.  It was interrupted after a five-minute
+bounded wait and is not represented as green.  Explicit isolated reruns
+identify the same five inherited failures recorded by the preceding round:
+
+1. the round-129 record refuses because the certified stepping-gate stamp
+   moved after its members ran;
+2. the round-51 live-trace suffix assertion is stale;
+3. the SI3 scalar-math gate says its retained `MY_SRC` is not verbatim;
+4. the worktree-stamp ratchet names the same three legacy unstamped emitters;
+5. the case board lacks the `hires_lane_surface` comparison-driver row.
+
+None reads a round-23 model, gate, citation, or receipt path.  No round-23
+focused test fails.
 
 Evidence:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round23/`.
