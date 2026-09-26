@@ -41,8 +41,9 @@ def _document(stage2_u=1.0):
 
 def _comparison():
     return {
-        "status": "PASS", "violations": [], "n_rows_compared": 70,
-        "max_worsening_ulps": 0,
+        "status": "PASS", "violations": [],
+        "n_certified_rows_compared": 70,
+        "largest_oracle_residual_worsening_ulps": 0,
     }
 
 
@@ -70,7 +71,7 @@ def test_one_ulp_like_entry_plant_holds_the_gate():
         "max_abs"] = 5e-324
     result = _analyze(before, planted)
     assert result["status"] == "HELD"
-    assert result["entry_or_stage1_rows_moved"] == [[1, "entry", "T"]]
+    assert result["kt1_entry_or_stage1_rows_moved"] == [[1, "entry", "T"]]
     assert result["predictions"]["R23-P2"] == "REFUTED"
 
 

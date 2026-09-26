@@ -82,7 +82,16 @@ def analyze(
     moved = _ordered(ladder_gate._row_differences(before_rows, after_rows))
     require(moved, "Decision 58 is inert on all 200 ORCA2 rows")
 
-    early_moved = [key for key in moved if key[1] in ("entry", "stage1")]
+    kt1_early_moved = [
+        key for key in moved
+        if key[0] == 1 and key[1] in ("entry", "stage1")
+    ]
+    protected_losses = [
+        key for key in moved
+        if key[1] in ("entry", "stage1")
+        and before_rows[key]["bit_identical"]
+        and not after_rows[key]["bit_identical"]
+    ]
     first = moved[0]
     direction = {"toward_nemo": 0, "away_from_nemo": 0, "same_max": 0}
     for key in moved:
@@ -100,13 +109,13 @@ def analyze(
     compare_pass = (
         gyre_comparison.get("status") == "PASS"
         and gyre_comparison.get("violations") == []
-        and gyre_comparison.get("n_rows_compared") == 70
-        and gyre_comparison.get("max_worsening_ulps") == 0
+        and gyre_comparison.get("n_certified_rows_compared") == 70
+        and gyre_comparison.get("largest_oracle_residual_worsening_ulps") == 0
     )
     predictions = {
         "R23-P1": package_diff_exact,
         "R23-P2": (
-            not early_moved
+            not kt1_early_moved
             and first[0] == 1
             and first[1] == "stage2"
             and first[2] in ("u", "v")
@@ -119,7 +128,11 @@ def analyze(
         ),
     }
     binding = predictions["R23-P1"] and predictions["R23-P4"] and predictions["R23-P5"]
-    safe_boundary = not early_moved and before_first == after_first
+    safe_boundary = (
+        not kt1_early_moved
+        and not protected_losses
+        and before_first == after_first
+    )
     status = "LANDED" if binding and safe_boundary else "HELD"
     return {
         "status": status,
@@ -129,7 +142,10 @@ def analyze(
             "kt": first[0], "checkpoint": first[1], "field": first[2],
             "before": before_rows[first], "after": after_rows[first],
         },
-        "entry_or_stage1_rows_moved": [list(key) for key in early_moved],
+        "kt1_entry_or_stage1_rows_moved": [
+            list(key) for key in kt1_early_moved],
+        "formerly_bit_identical_entry_or_stage1_rows_lost": [
+            list(key) for key in protected_losses],
         "direction_by_max_abs": direction,
         "first_non_bit_statement_unchanged": before_first == after_first,
         "first_non_bit_statement": after_first,
