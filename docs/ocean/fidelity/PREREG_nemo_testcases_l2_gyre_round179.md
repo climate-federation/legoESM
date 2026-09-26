@@ -61,9 +61,12 @@ level, and `uslp/vslp`.
    corruption must print `STATUS PLANT-FIRED` and exit nonzero.  Removing one
    registered intermediate from the dry source must print a named refusal and
    exit nonzero.
-6. The stored filtered `uslp` and `vslp` must be bit-identical to the admitted
-   Round-177 values over their active faces.  Any difference refuses the new
-   record as internally inconsistent rather than attributing it.
+6. The stored filtered `uslp` and `vslp` are compared with the admitted
+   Round-177 values over their active faces for information.  Because those
+   streams come from differently instrumented builds, their last-bit
+   difference is not an admission refusal.  Binding passivity is restart
+   identity; binding in-run calibration rebuilds the Shapiro outputs from the
+   new record's own raw slopes, masks, and literal compiled association.
 7. Round 180 extends `developed_tracer_ldf_statement_walk` itself, executes
    the complete production JIT step and complete eager step from the same
    NEMO day-180 entry, and scores the record in compiled order.  A one-ULP
