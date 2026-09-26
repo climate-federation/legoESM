@@ -5343,6 +5343,7 @@ class LatLonCGridOceanModel:
         _ws_face_thickness_kbb = None
         _ws_ldf_face_thickness_kbb = None
         _ws_ldf_thickness_kbb = None
+        _ws_ldf_metric_reciprocals = None
         _ws_uses_nemo_ldf_e3 = (
             _cfg_b.lateral_viscosity_operator == "nemo_div_curl"
             and _cfg_b.lateral_viscosity_e3_weighting == "nemo_e3")
@@ -5404,8 +5405,11 @@ class LatLonCGridOceanModel:
                         state.eta.data, _ws_h_ref, _ws_u_live_mask,
                         _ws_v_live_mask, _grid)[:2])
                 from legoesm.ocean.vertical import (
+                    nemo_ldf_metric_reciprocals_cgrid,
                     nemo_qco_live_vorticity_e3f_cgrid,
                 )
+                _ws_ldf_metric_reciprocals = nemo_ldf_metric_reciprocals_cgrid(
+                    _zc, _grid, state.eta.data.dtype)
                 _ws_t_live_mask = getattr(_zc, "is_active", None)
                 if _ws_t_live_mask is None:
                     _ws_t_live_mask = jnp.broadcast_to(
@@ -5428,6 +5432,8 @@ class LatLonCGridOceanModel:
                                up3_upwind_selector=_up3_selector_override,
                                momentum_flux_face_thickness=_ws_face_thickness_kbb,
                                ldf_thickness_operands=_ws_ldf_thickness_kbb,
+                               ldf_metric_reciprocal_operands=(
+                                   _ws_ldf_metric_reciprocals),
                                nemo_operator_association=self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm,
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
@@ -5987,6 +5993,8 @@ class LatLonCGridOceanModel:
                                          ) else stage_face_thickness),
                                      ldf_thickness_operands=(
                                          _stage_ldf_thickness),
+                                     ldf_metric_reciprocal_operands=(
+                                         _ws_ldf_metric_reciprocals),
                                      ene_generic_f_vtx=(
                                          self._nemo_ws_test_hooks
                                          .legacy_ene_vertex_coriolis),
