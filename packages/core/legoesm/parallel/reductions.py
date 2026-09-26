@@ -409,7 +409,8 @@ def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
     that every rank seeds with the same cotangent. For an intermediate global
     that is broadcast back and reused on every rank (fixer factors,
     normalisations, inner products), use :func:`broadcast_allreduce_sum`;
-    this function drops the cross-rank cotangents there (#811).
+    this function drops the cross-rank cotangents there (#811). PARTIAL FIX:
+    most existing intermediate-sum call sites still use it (open issue).
 
     Parameters
     ----------
@@ -450,7 +451,8 @@ def broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
     face (rel 1.1) in the scattered-vs-replicated gradient gate. Forward is
     byte-identical to :func:`global_sum_mpi`; only the backward differs. Do NOT
     use it for the final loss: every rank seeds that cotangent, so the
-    allreduce would scale the gradient by the rank count.
+    allreduce would scale the gradient by the rank count. PARTIAL FIX: most
+    existing intermediate-sum call sites do not use this yet (open issue).
     """
     return global_sum_mpi(local_sum)
 
@@ -562,7 +564,9 @@ def global_sum_if_distributed(local_value: jax.Array) -> jax.Array:
 
     **Gradient**: inherits the IDENTITY VJP of :func:`global_sum_mpi` — correct
     only for a final-loss reduction; an intermediate global reused on every rank
-    needs :func:`broadcast_allreduce_sum`.  Single canonical MPI-aware reduction (#177) shared by
+    needs :func:`broadcast_allreduce_sum`. PARTIAL FIX: most existing
+    intermediate-sum call sites still use it (open issue). Single canonical
+    MPI-aware reduction (#177) shared by
     ``ocean.conservation_mpas`` and ``ocean.dynamics.eta_floor``.
     """
     if is_multi_process():
@@ -672,6 +676,8 @@ def batch_allreduce_mpi(
 
     Gradient (``op="sum"``): IDENTITY VJP, as :func:`global_sum_mpi` — correct
     only for final-loss reductions, not for values reused on every rank.
+    PARTIAL FIX: most existing intermediate-sum call sites still use it
+    (open issue).
 
     Parameters
     ----------
