@@ -67,8 +67,12 @@ def main() -> int:
         Sf = np.where(np.abs(S) < 1e-6, np.nan, S).reshape(-1, S.shape[-1])[:, :nl]
         To, So = _box_mean(Tf, area, box), _box_mean(Sf, area, box)
         TN, SN = nemo_prof("to", rec), nemo_prof("so", rec)
-        if np.max(np.abs(zc - dep)) > 0.05:
+        # Our T points sit at mid-cell (e3t/2 = 0.512 m); NEMO's gdept_1d is the
+        # analytic value (0.506 m). A 1-2 cm offset in the top 30 m; tolerated,
+        # printed once, and a harmonization row on its own.
+        if np.max(np.abs(zc - dep)) > 0.1:
             raise SystemExit(f"vertical grids differ: ours {zc[:4]} vs NEMO {dep[:4]}")
+        print(f"  (T-level depth offset ours-NEMO, top {nl}: max {np.max(np.abs(zc - dep))*100:.1f} cm)")
         print(f"\n##### NEMO rec {rec} (UTC {rec:02d}-{rec+1:02d}h mean) vs ours {Path(snap).name} (t = {float(s['time_days'])*24:.1f} h); "
               f"{int(box.sum())} our cols")
         print("   z m |   T NEMO   T ours   T o-N |  dT_N(t-0)  dT_o(t-0)  ddT | S NEMO  S ours | dS_N e3 dS_o e3")
