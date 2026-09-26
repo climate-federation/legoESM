@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import pytest
 
 from legoesm.ocean.forcing.core2 import core2_nyf_path, load_core2_nyf
+from legoesm.ocean.forcing.dai_trenberth import load_dai_trenberth
 from legoesm.ocean.forcing.jra55_do import load_jra55_do
+from legoesm.ocean.forcing.woa import load_woa_sst
+from legoesm.ocean.forcing.woa_sss import load_woa_sss
 
 
 def test_core2_missing_cache_fails_loud_when_disallowed(tmp_path):
@@ -66,3 +70,32 @@ def test_core2_nyf_path_is_the_path_the_loader_reads(tmp_path):
     # which is the whole reason the resolved path has to be fingerprinted.
     assert core2_nyf_path() != core2_nyf_path(tmp_path)
     assert core2_nyf_path().name == "nyf.zarr"
+
+
+@pytest.mark.parametrize("loader,logger_name", [
+    (load_woa_sst, "legoesm.ocean.forcing.woa"),
+    (load_woa_sss, "legoesm.ocean.forcing.woa_sss"),
+    (load_dai_trenberth, "legoesm.ocean.forcing.dai_trenberth"),
+])
+def test_obs_synthetic_fallback_warns(tmp_path, caplog, loader, logger_name):
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        loader(cache_dir=tmp_path, allow_synthetic=True)
+    assert any("SYNTHETIC" in r.message for r in caplog.records)
+
+
+def test_woa_sss_real_file_surface_2d_and_lon_wrapped(tmp_path):
+    """WOA s_an is (time, depth, lat, lon) on a -179.5..179.5 axis; the
+    loader must return a 2-D surface field on [0, 360) ascending."""
+    xr = pytest.importorskip("xarray")
+    lat = np.arange(-89.5, 90.0, 1.0)
+    lon = np.arange(-179.5, 180.0, 1.0)
+    s = np.zeros((1, 3, lat.size, lon.size))
+    s[0, 0] = np.broadcast_to(np.mod(lon, 360.0), (lat.size, lon.size))
+    s[0, 1:] = -1.0                           # deeper levels must not leak
+    xr.Dataset({"s_an": (("time", "depth", "lat", "lon"), s)},
+               coords={"lat": lat, "lon": lon}).to_netcdf(
+        tmp_path / "woa_sss_annual.nc")
+    sss, _, lon_o = load_woa_sss(cache_dir=tmp_path, allow_synthetic=False)
+    assert sss.shape == (lat.size, lon.size)
+    assert np.all(np.diff(lon_o) > 0) and lon_o[0] >= 0.0 and lon_o[-1] < 360.0
+    np.testing.assert_array_equal(sss[0], lon_o)

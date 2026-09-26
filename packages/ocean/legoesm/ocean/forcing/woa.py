@@ -33,10 +33,13 @@ Usage
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 WOA_LON_NATIVE: int = 360
@@ -107,6 +110,10 @@ def load_woa_sst(*, cache_dir: Optional[Path] = None,
             f"WOA SST cache missing: {nc_path}; download from "
             "https://www.ncei.noaa.gov/products/world-ocean-atlas"
         )
+    logger.warning(
+        "WOA SST cache missing at %s — falling back to SYNTHETIC analytic "
+        "SST. Any 'bias vs WOA' computed from it is NOT an observational "
+        "comparison. Pass allow_synthetic=False to fail loudly.", nc_path)
     return synthetic_woa_sst(nlon=nlon, nlat=nlat, month=month)
 
 

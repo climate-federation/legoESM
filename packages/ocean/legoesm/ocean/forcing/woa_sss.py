@@ -32,10 +32,13 @@ Usage
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 WOA_LON_NATIVE: int = 360
@@ -133,12 +136,13 @@ def load_woa_sss(
         # then s_mn (monthly mean).
         var = "s_an" if "s_an" in ds.variables else "s_mn"
         sss = np.asarray(ds[var].values, dtype=np.float64)
-        # Strip any singleton depth dim — surface only.
-        if sss.ndim > 2:
-            sss = sss[0]
+        # WOA s_an is (time, depth, lat, lon): take the first record at
+        # the surface level (index 0 on every leading axis).
+        sss = sss.reshape((-1,) + sss.shape[-2:])[0]
         lat = np.asarray(ds["lat"].values, dtype=np.float64)
-        lon = np.asarray(ds["lon"].values, dtype=np.float64)
-        return sss, lat, lon
+        lon = np.mod(np.asarray(ds["lon"].values, dtype=np.float64), 360.0)
+        order = np.argsort(lon)
+        return sss[:, order], lat, lon[order]
 
     if not allow_synthetic:
         raise FileNotFoundError(
@@ -146,4 +150,8 @@ def load_woa_sss(
             "allow_synthetic=False"
         )
 
+    logger.warning(
+        "WOA SSS cache missing at %s — falling back to SYNTHETIC analytic "
+        "SSS. Salinity restoring and SSS scores use a made-up target. "
+        "Pass allow_synthetic=False to fail loudly.", nc_path)
     return synthetic_woa_sss(nlon=nlon, nlat=nlat, month=month)

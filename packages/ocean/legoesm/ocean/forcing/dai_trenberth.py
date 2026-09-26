@@ -27,10 +27,13 @@ plugs into ``FreshwaterForcing.runoff``.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import NamedTuple, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 SECONDS_PER_DAY = 86400.0
@@ -183,6 +186,10 @@ def load_dai_trenberth(
             f"Dai-Trenberth cache not found at {nc_path} and "
             "allow_synthetic=False"
         )
+    logger.warning(
+        "Dai-Trenberth cache missing at %s — falling back to the "
+        "SYNTHETIC 16-river climatology. Pass allow_synthetic=False to "
+        "fail loudly.", nc_path)
     return synthetic_dai_trenberth()
 
 
