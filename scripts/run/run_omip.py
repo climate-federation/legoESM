@@ -1686,6 +1686,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   forcing_mode: str = "restoring",
                   use_conservation_fixer: bool = True,
                   dz_ref_override=None, t_depth_ref_override=None,
+                  nemo_gdepw_ref_override=None,
                   spmd_n_devices: int = 0,
                   mpas_lloyd: int = 50,
                   mpas_k_zeta_bih: float | None = None,
@@ -1725,9 +1726,21 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # fidelity PGF (pgf_scheme="nemo_sco") telescopes against that exact
         # ladder; None keeps the arithmetic-midpoint construction, which is
         # the behaviour every existing run gets.
+        # nemo_gdepw_ref_override (the mesh's gdepw_1d with its surface zero)
+        # marks the caller that runs the literal zdftke step: it reads the raw
+        # NEMO gdept_0/gdepw_0/e3t_0 ladders at step entry, so the three 1-D
+        # reference ladders are attached as those fields. None (every other
+        # run) leaves the coordinate object exactly as before.
+        _raw = {}
+        if nemo_gdepw_ref_override is not None:
+            if t_depth_ref_override is None:
+                raise ValueError("nemo_gdepw_ref_override requires t_depth_ref_override (gdept_1d)")
+            _raw = dict(nemo_gdept_0_m=np.asarray(t_depth_ref_override, dtype=np.float64),
+                        nemo_gdepw_0_m=np.asarray(nemo_gdepw_ref_override, dtype=np.float64)[:nlev],
+                        nemo_e3t_0_m=np.asarray(dz_ref_override, dtype=np.float64))
         z_coord = create_z_star_from_thicknesses(
             dz_ref_override, t_depth_ref_override,
-            nemo_e3w_source="depth_difference")
+            nemo_e3w_source="depth_difference", **_raw)
     elif use_bathymetry:
         # Partial cells with ETOPO: use the same vertical stretching
         # as the global-overturning production scripts (dz_surface=20,
@@ -5902,7 +5915,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             from legoesm.ocean.vertical import (
                 create_partial_cell_coordinate, create_z_star_from_thicknesses,
             )
-            _e3t_1d, _gdept_1d, _gdepw_1d = read_mesh_vertical_1d(_mesh_files)
+            _e3t_1d, _gdept_1d, _ = read_mesh_vertical_1d(_mesh_files)
             if _e3t_1d.size != int(z_coord.n_levels):
                 raise SystemExit(
                     f"--grid tripole partial cells: mesh has {_e3t_1d.size} "
@@ -5929,20 +5942,8 @@ def run_omip_single(grid_type: str, args) -> dict:
                     f"--H-max {float(args.H_max):.6f} m disagrees with the "
                     f"tripole mesh's reference depth {_mesh_depth:.6f} m "
                     f"(sum of e3t_1d); pass --H-max {_mesh_depth:.6f}")
-            # The literal zdftke step (--tke-step-evaluation nemo_literal) reads
-            # NEMO's raw gdept_0/gdepw_0/e3t_0 ladders at step entry
-            # (ocean_model_latlon_cgrid: tke_n2_evaluation_stage="step_entry");
-            # hand it the mesh's own 1-D reference ladders, as the NEMO test-
-            # case recipe does (nemo_testcase_recipe.py). gdepw_0 keeps its
-            # zero-depth surface point (jpk entries). Off by default so the
-            # production card's geometry object is unchanged.
-            _lit = getattr(args, "tke_step_evaluation", None) == "nemo_literal"
-            _n_lev = int(_e3t_1d.size)
             z_coord = create_z_star_from_thicknesses(
-                _e3t_1d, _gdept_1d, nemo_e3w_source="depth_difference",
-                **({"nemo_gdept_0_m": _gdept_1d,
-                    "nemo_gdepw_0_m": np.asarray(_gdepw_1d, dtype=np.float64)[:_n_lev],
-                    "nemo_e3t_0_m": _e3t_1d} if _lit else {}))
+                _e3t_1d, _gdept_1d, nemo_e3w_source="depth_difference")
             _tripole_H_bathy, _tripole_land_mask = _snap_thin_partial_cells(
                 _tripole_H_bathy, _tripole_land_mask, z_coord)
             # Reassign z_coord, do not keep a second coordinate alive: the

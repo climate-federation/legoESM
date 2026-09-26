@@ -1627,6 +1627,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   freeze_floor=None, freezing=None, ew_cyclic_overlap=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
                   mle=None, dz_ref_override=None, t_depth_ref_override=None,
+                  nemo_gdepw_ref_override=None,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
@@ -1708,6 +1709,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         forcing_mode="jra55_do_tropical",
         dz_ref_override=dz_ref_override,
         t_depth_ref_override=t_depth_ref_override,
+        nemo_gdepw_ref_override=nemo_gdepw_ref_override,
     )
     # Optional dycore-stability overrides (for WOA cold-start tuning): rebuild
     # the config + model from run_omip's validated tripole base, changing only
@@ -3727,6 +3729,21 @@ def _load_nemo_e3t_1d(path: str):
     if dz.ndim != 1 or dz.size < 2 or not np.all(dz > 0):
         raise ValueError(f"{path}: bad e3t_1d (shape {dz.shape}, must be 1-D >0)")
     return dz
+
+
+def _load_nemo_gdepw_1d(path: str):
+    """Read NEMO's 1-D reference W-point depths ``gdepw_1d`` [m] (jpk entries,
+    first = 0 at the surface), the raw ``gdepw_0`` ladder the literal zdftke
+    step reads at step entry. Raises when absent: the caller only asks for it
+    under --tke-step-evaluation nemo_literal, where it is not optional."""
+    import xarray as xr
+    with xr.open_dataset(path, decode_times=False) as ds:
+        if "gdepw_1d" not in ds:
+            raise KeyError(f"{path}: no gdepw_1d (needed by --tke-step-evaluation nemo_literal)")
+        w = np.asarray(ds["gdepw_1d"].values, dtype=np.float64).ravel()
+    if w.ndim != 1 or w.size < 2 or w[0] != 0.0 or not np.all(np.diff(w) > 0):
+        raise ValueError(f"{path}: bad gdepw_1d (shape {w.shape}; must start at 0 and increase)")
+    return w
 
 
 def _load_nemo_gdept_1d(path: str):
@@ -8423,6 +8440,7 @@ def main() -> int:
     # are resolved comparably to NEMO. Overrides --nlev/--H-max to the NEMO column.
     _nemo_dz = None
     _nemo_t_depth = None
+    _nemo_gdepw = None
     if args.nemo_vertical:
         if args.grid == "cubed_sphere":
             raise ValueError(
@@ -8437,6 +8455,13 @@ def main() -> int:
         # found that --nemo-vertical alone left t_depth_ref=None, so the
         # option was still unreachable after it was given a CLI flag).
         _nemo_t_depth = _load_nemo_gdept_1d(_vfile)
+        if getattr(args, "tke_step_evaluation", None) == "nemo_literal":
+            # the literal zdftke step reads raw gdept_0/gdepw_0/e3t_0 at step
+            # entry; the mesh's 1-D reference ladders stand in for them here
+            # (as the NEMO test-case recipe does), gdepw with its surface zero.
+            _nemo_gdepw = _load_nemo_gdepw_1d(_vfile)[: _nemo_dz.size]
+            if _nemo_t_depth is None:
+                raise ValueError(f"{_vfile}: gdept_1d is required by --tke-step-evaluation nemo_literal")
         if _nemo_t_depth is not None and _nemo_t_depth.size != _nemo_dz.size:
             raise ValueError(
                 f"{_vfile}: gdept_1d has {_nemo_t_depth.size} levels but "
@@ -8525,6 +8550,7 @@ def main() -> int:
             tracer_advection=args.tracer_advection,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             t_depth_ref_override=_nemo_t_depth,
+            nemo_gdepw_ref_override=_nemo_gdepw,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,
