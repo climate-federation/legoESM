@@ -95,6 +95,7 @@ def main() -> int:
         u, v = np.asarray(s["u"], float), np.asarray(s["v"], float)
         usrc = "u/v instantaneous 00 UTC (NEMO uo/vo are 5-day means: S2 of a mean is a lower bound)"
     KH = np.asarray(s["K_H_diag"], float)
+    KM = np.asarray(s["K_M_diag"], float) if "K_M_diag" in s.files else None
     lat, lon = np.asarray(s["lat_T"], float), np.asarray(s["lon_T"], float) % 360.0
     wet = np.asarray(s["land_mask"], float) > 0.5
     zc = np.abs(np.asarray(s["z_center_ref"], float)); zw = np.abs(np.asarray(s["z_interface_ref"], float))
@@ -121,8 +122,12 @@ def main() -> int:
     Tf, Sf, uf, vf = (x.reshape(-1, nlev) for x in (T, S, u, v))
     Tf = np.where(np.abs(Tf) < 1e-6, np.nan, Tf)
     KHf = KH.reshape(box_o.size, -1)
+    KMf = KM.reshape(box_o.size, -1) if KM is not None else None
     # K_H staggering: nlev+1 -> W levels incl. the surface (index k = top of
     # cell k); nlev -> assumed W level at the top of cell k (NEMO avt(jk)).
+    KM_w = None
+    if KMf is not None:
+        KM_w = KMf[:, 1:nlev] if KMf.shape[1] in (nlev + 1, nlev) else KMf
     if KHf.shape[1] == nlev + 1:
         KH_w = KHf[:, 1:nlev]          # interior interfaces 1..nlev-1
         kh_note = "K_H_diag has nlev+1 W levels; interior = [1:nlev]"
@@ -150,6 +155,7 @@ def main() -> int:
     toN, laT, loT, gdept = _nemo("T", "to"); soN = _nemo("T", "so")[0]
     uoN, laU, loU, _ = _nemo("U", "uo"); voN, laV, loV, _ = _nemo("V", "vo")
     avtN, laW, loW, depthw = _nemo("W", "avt"); bn2N = _nemo("W", "bn2")[0]
+    avmN = _nemo("W", "avm")[0]
     print(f"[NEMO] record {a.rec} (5-day means): to {toN.shape} uo {uoN.shape} avt {avtN.shape}; "
           f"deptht[:3]={gdept[:3]} depthw[:3]={depthw[:3]}")
     if not np.allclose(gdept[:a.n_levels], zc[:a.n_levels], rtol=0.02, atol=0.02):
@@ -170,6 +176,7 @@ def main() -> int:
     N2_N_recomp = np.where(wet_iN, N2_N_recomp, np.nan)
     bn2_int = np.where(wet_iN, bn2F[:, 1:nlN], np.nan)      # avt/bn2(jk) at the top of cell jk
     avt_int = np.where(wet_iN, avtF[:, 1:nlN], np.nan)
+    avm_int = np.where(wet_iN, avmN.reshape(-1, nlN)[:, 1:nlN], np.nan)
 
     # ---- table ------------------------------------------------------------
     m = lambda f, w, b: _box_mean(f, w, b)
@@ -237,6 +244,22 @@ def main() -> int:
               f"| NEMO depth of the MEAN avt {tc_N_of_mean:.2f} m (reduction caveat)")
     else:
         print(f"\n[turbocline avt<5e-4] ours {tc_o:.2f} m | NEMO grid_T has no mldkz5; depth of the mean avt {tc_N_of_mean:.2f} m")
+
+    # Momentum vs tracer diffusivity: is K_M (the TKE itself) short, or only
+    # K_T through the Ri-Prandtl split (NEMO nn_pdl=1: avt = avm / clamp(4.5 Ri, 1, 10))?
+    if KM_w is not None:
+        KM_w = np.where(wet_i, KM_w, np.nan)
+        KM_m = m(KM_w, w_o, box_o); KM_med = np.nanmedian(KM_w[box_o], axis=0)
+        avm_m = m(avm_int, wT, boxT); avm_med = np.nanmedian(avm_int[boxT], axis=0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            pr_o = np.nanmedian((KM_w / KH_w)[box_o], axis=0)
+            pr_N = np.nanmedian((avm_int / avt_int)[boxT], axis=0)
+        print(f"\n{'k':>3}{'z_w m':>8} | {'KM ours':>9}{'KMmed':>9}{'avm NEMO':>9}{'avmmed':>9} | {'Pr ours':>8}{'Pr NEMO':>8}"
+              "   (Pr = per-column median of K_M/K_T; ours this snapshot, NEMO window means)")
+        for k in range(min(a.n_levels, nlev - 1)):
+            print(f"{k + 1:>3}{zw_int[k]:>8.2f} | {KM_m[k]:>9.2e}{KM_med[k]:>9.2e}{avm_m[k]:>9.2e}{avm_med[k]:>9.2e} | {pr_o[k]:>8.2f}{pr_N[k]:>8.2f}")
+    else:
+        print("\n[K_M] snapshot has no K_M_diag -> Prandtl split not shown")
 
     # box-mean u profile too: is the undercurrent itself weaker?
     u_o = m(uf, w_o, box_o); u_N = m(uoF, wU, boxU)
