@@ -327,6 +327,81 @@ def fv_update_phys_dry_duo_jax(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
     return u_new, v_new, pt_new, ua_new, va_new
 
 
+def moist_cp_warm_rain(q_v, q_c, q_r, *, cp_air, cp_vapor, c_liq):
+    """``moist_cp`` for ``nwat = 4`` (fv_mapz.F90:3704-3708, the
+    "K_warm_rain scheme with fake ice" case): the moist heat capacity
+    ``(1 - qv - qd)*cp_air + qv*cp_vapor + qd*c_liq`` with
+    ``qd = liq_wat + rainwat``.  Kessler carries no ice, so the fake ice
+    slot is zero and drops out."""
+    qd = q_c + q_r
+    return (1.0 - (q_v + qd)) * cp_air + q_v * cp_vapor + qd * c_liq
+
+
+def fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt, dt, *, n, ng,
+                                 cp_air, cp_vapor, c_liq):
+    """Port of FV3 ``fv_update_phys``'s ``nwat > 0`` scalar block on the
+    compute window, hydrostatic (fv_update_phys.F90:318-372), for the
+    Kessler tracer set ``q = [sphum, liq_wat, rainwat]`` (``nwat = 4``
+    with the fake-ice slot absent).  Winds are not touched here (the
+    D-grid increment is the dry twin's job and Kessler has none).
+
+    Per level k, compute window only:
+        q(m)   = q(m) + dt*q_dt(m)                          (:324)
+        ps_dt  = 1 + dt*sum(q_dt(1:nwat))                   (:335)
+        delp   = delp * ps_dt                               (:336)
+        q(m)   = q(m) / ps_dt        (every mass-adjusted tracer, :352)
+        pt     = pt + t_dt*dt*cp_air/cvm, cvm = moist_cp(q AFTER the
+                 update, :367-371 -- moist_cp reads ``q``, which :324
+                 has already advanced)
+
+    The pressures (pe/peln/pk/pkz/ps, :662-686) are NOT rebuilt here:
+    the caller rebuilds them from the returned delp with the lane's own
+    ``p_var_hydrostatic`` -- the same producer that built them at the IC.
+
+    WHY IT MATTERS (GLM 2026-09-24): condensation is layer-neutral
+    (``sum(q_dt) = 0``, ``ps_dt = 1``); rain SEDIMENTATION moves water
+    between layers and out of the column bottom, and only this block lets
+    the layer mass follow it.  Without it precipitated water becomes dry
+    air (~1 hPa of surface pressure per 100 mm accumulated rain).
+
+    NO ORACLE RECEIPT: every Fortran deck in the wdump runs ``nwat = 0``,
+    so this block is gated analytically (tests): identity at
+    ``q_dt = 0``; column mass change == -(bottom rain flux)*dt; the
+    dry-mass mixing ratio ``q/(1 - sum q)`` invariant under the
+    renormalisation; the cp/cvm factor reproduced from ``moist_cp``.
+
+    Shapes: pt, delp ``(m, m, npz)``; q, q_dt lists of three
+    ``(m, m, npz)``; t_dt ``(m, m, npz)``.  Halos untouched.  Returns
+    ``(pt_new, delp_new, [q_new x3], ps_dt)`` -- ``ps_dt`` on the compute
+    block ``(n, n, npz)`` so the caller can renormalise every OTHER
+    mass tracer it carries (:349-357 adjusts all of them); no input is
+    mutated.
+    """
+    import jax.numpy as jnp
+    pt, delp, t_dt = map(jnp.asarray, (pt, delp, t_dt))
+    q = [jnp.asarray(a) for a in q]
+    q_dt = [jnp.asarray(a) for a in q_dt]
+    if len(q) != 3 or len(q_dt) != 3:
+        raise ValueError(
+            f"fv_update_phys_moist_duo_jax: nwat = 3 warm-rain tracers "
+            f"[sphum, liq_wat, rainwat] expected, got {len(q)}/{len(q_dt)}")
+    ng = int(ng)
+    ci = slice(ng, ng + int(n))
+    qc = [a[ci, ci] for a in q]
+    dqc = [a[ci, ci] for a in q_dt]
+    q_upd = [a + dt * da for a, da in zip(qc, dqc)]          # :324
+    ps_dt = 1.0 + dt * (dqc[0] + dqc[1] + dqc[2])             # :335
+    delp_c = delp[ci, ci] * ps_dt                             # :336
+    q_adj = [a / ps_dt for a in q_upd]                        # :352
+    cvm = moist_cp_warm_rain(q_adj[0], q_adj[1], q_adj[2], cp_air=cp_air,
+                             cp_vapor=cp_vapor, c_liq=c_liq)  # :367
+    pt_c = pt[ci, ci] + t_dt[ci, ci] * dt * cp_air / cvm      # :371
+    pt_new = pt.at[ci, ci].set(pt_c)
+    delp_new = delp.at[ci, ci].set(delp_c)
+    q_new = [a.at[ci, ci].set(b) for a, b in zip(q, q_adj)]
+    return pt_new, delp_new, q_new, ps_dt
+
+
 def held_suarez_tend_jax(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
                          strat=True, radius=None):
     """JAX twin of :func:`held_suarez_tend` (~1e-12 vs the NumPy authority at

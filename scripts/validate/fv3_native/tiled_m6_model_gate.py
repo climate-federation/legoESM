@@ -196,6 +196,14 @@ def main(argv=None):
                          "exclusive nodes only) -- REFUSED unless the gated "
                          "steps were bitwise")
     args = ap.parse_args(argv)
+    # Hang autopsy (GLM 2026-09-24): LEGOESM_HANG_DUMP_S=<sec> makes every
+    # rank dump all Python thread stacks to stderr every <sec> seconds, so
+    # a first-dispatch stall shows WHERE each rank sits (block_until_ready
+    # vs a host-side collective) even when nothing else is printed.
+    _dump_s = os.environ.get("LEGOESM_HANG_DUMP_S", "")
+    if _dump_s:
+        import faulthandler
+        faulthandler.dump_traceback_later(float(_dump_s), repeat=True)
 
     if args.distributed and not args.flat_ref and not args.ref_npz:
         print("[m6] REFUSED: --distributed needs a reference -- either "
