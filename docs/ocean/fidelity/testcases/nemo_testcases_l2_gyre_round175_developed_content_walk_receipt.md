@@ -140,8 +140,10 @@ The required separate review was attempted with `codex exec --sandbox
 read-only`.  It was unavailable in this sandbox.  Its complete verdict is
 quoted verbatim:
 
-> WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)  
-> Reading additional input from stdin...  
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+>
+> Reading additional input from stdin...
+>
 > Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
 
 This is **independent review unavailable in-sandbox**, not a SHIP verdict.
