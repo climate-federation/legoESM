@@ -126,7 +126,14 @@ All run at `8cc499c5c`, binary64 on, CPU, one battery at a time.
 | `tests/ocean/unit/test_mpas_tke.py` (the red file, in full) | `37 passed, 6 warnings in 45.28s` |
 | the GYRE push gate — the six files the autopilot pushes on | `135 passed in 966.30s (0:16:06)` |
 | card gates, the same five files rounds 163 and the merge round ran | `160 passed, 9 warnings in 340.76s` plus `10 passed in 7.56s` = **170 passed**, the same count as both |
-| receipt citation gate | `status PASS`, 274 citations, 0 failures, 0 unmapped, 0 map entries failing audit, every self-test plant fired, worktree `clean: true` |
+| receipt citation gate | `status PASS`, 274 citations, 0 failures, 0 unmapped, 0 map entries failing audit, `9 of 9` self-test plants fired, worktree `clean: true` |
+
+Re-run at the FINAL tip `41d301613`, after the receipt itself was
+committed: the citation gate is again `status PASS`, 274 citations, 0
+failures, 0 unmapped, 0 map entries failing audit, 9 of 9 plants fired,
+worktree `clean: true`, 0 untracked.  No citation line shifted this round
+— the diff adds no source line to any cited file.  The two test files are
+unchanged since `8cc499c5c`, so the quoted pytest runs stand at the tip.
 
 ## Invariants
 
