@@ -508,11 +508,14 @@ def nemo_qco_resolved_mesh_operands(
         e3t0, hu0, hv0, area_t, area_u, area_v, e2u, e1v = (
             jnp.asarray(value, dtype=dtype) for value in raw)
         e3t0 = e3t0[..., :nlev]
-        # NEMO's own mesh: e3u_0/e3v_0 are e3t_0 on the full-step meshes this
-        # branch serves; keeping the raw statement preserves the certified
-        # DINO arithmetic bit for bit.
+        een = getattr(z_coord, "nemo_een_barotropic", None)
+        e3u0 = (e3t0 if een is None else
+                 jnp.asarray(een.e3u_0, dtype=dtype)[..., :nlev])
+        e3v0 = (e3t0 if een is None else
+                 jnp.asarray(een.e3v_0, dtype=dtype)[..., :nlev])
         return NemoQCOMeshOperands(
-            e3t_0=e3t0, e3u_0=e3t0, e3v_0=e3t0, umask3=umask3, vmask3=vmask3,
+            e3t_0=e3t0, e3u_0=e3u0, e3v_0=e3v0,
+            umask3=umask3, vmask3=vmask3,
             hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,
             e2u=e2u, e1v=e1v)
     if any(value is not None for value in raw):
