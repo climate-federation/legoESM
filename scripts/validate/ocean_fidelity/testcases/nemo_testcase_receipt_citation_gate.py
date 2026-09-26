@@ -1152,16 +1152,16 @@ CITATION_MAP = {
         'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:215-250': [
         ('IF( jk == 1 ) THEN', 1),
-        'zdkt(ji,jj,ikp1) = 0._wp', 36],
+        ('END DO   ;   END DO', 5), 36],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:272-299': [
         ('DO jj = ntsj-( 0+1), ntej+(  0 ) ; DO ji = ntsi-( 0+1), ntei+(  0 )', 1),
-        'END DO   ;   END DO', 28],
+        ('END DO   ;   END DO', 7), 28],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:311-344': [
         ('IF( jk ==1 )   zfw', 1),
-        'r177_fw_lower(ji,jj,jk) = zfw(ji,jj)', 34],
+        ('ENDIF', 5), 34],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:346-367': [
         ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
-        '&                 * r1_e1e2t(ji,jj) / (e3t_3d', 22],
+        ('&                 * r1_e1e2t(ji,jj) / (e3t_3d', 2), 22],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:403-419': [
         ('IF( lr177_write ) THEN', 2),
         'WRITE(r177_unit) e3w_1d', 17],

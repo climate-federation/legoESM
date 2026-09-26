@@ -13201,8 +13201,7 @@ def developed_tracer_ldf_statement_walk(
     def execute_mode(*, eager: bool, override=None):
         hooks = _NEMOWSRK3TestHooks(
             tracer_process_trace=(), vertical_solve_trace=True,
-            tracer_ldf_diagnostics=True,
-            tracer_ldf_face_thickness_override=override)
+            tracer_ldf_diagnostics=(True if override is None else override))
         trace_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord,
             card.recipe.model_config, _nemo_ws_test_hooks=hooks)
