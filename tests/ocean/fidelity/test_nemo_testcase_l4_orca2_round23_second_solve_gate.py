@@ -59,6 +59,8 @@ def test_gate_lands_only_the_stage2_momentum_change():
     result = _analyze(_document(1.0), _document(0.5))
     assert result["status"] == "LANDED"
     assert result["orca2_rows_moved"] == 1
+    assert len(result["moved_rows"]) == result["orca2_rows_moved"]
+    assert result["moved_rows"][0]["direction_by_max_abs"] == "toward_nemo"
     assert result["first_moved_row"]["checkpoint"] == "stage2"
     assert set(result["predictions"].values()) == {"CONFIRMED"}
 

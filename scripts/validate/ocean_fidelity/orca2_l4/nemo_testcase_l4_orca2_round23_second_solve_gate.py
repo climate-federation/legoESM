@@ -99,15 +99,22 @@ def analyze(
     ]
     first = moved[0]
     direction = {"toward_nemo": 0, "away_from_nemo": 0, "same_max": 0}
+    moved_rows = []
     for key in moved:
         old = before_rows[key]["max_abs"]
         new = after_rows[key]["max_abs"]
         if new < old:
-            direction["toward_nemo"] += 1
+            label = "toward_nemo"
         elif new > old:
-            direction["away_from_nemo"] += 1
+            label = "away_from_nemo"
         else:
-            direction["same_max"] += 1
+            label = "same_max"
+        direction[label] += 1
+        moved_rows.append({
+            "kt": key[0], "checkpoint": key[1], "field": key[2],
+            "direction_by_max_abs": label,
+            "before": before_rows[key], "after": after_rows[key],
+        })
 
     before_first = before["candidate_trajectory"]["first_non_bit_statement"]
     after_first = after["candidate_trajectory"]["first_non_bit_statement"]
@@ -143,6 +150,7 @@ def analyze(
         "status": status,
         "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
         "orca2_rows_moved": len(moved),
+        "moved_rows": moved_rows,
         "first_moved_row": {
             "kt": first[0], "checkpoint": first[1], "field": first[2],
             "before": before_rows[first], "after": after_rows[first],
