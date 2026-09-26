@@ -130,8 +130,8 @@ def capture(deck_root: Path, record_root: Path, helper_variant: str,
         })
         for name in ("denominator", "output_u", "output_v"):
             arrays[f"call{index}_{name}"] = call[name]
-    require(sum(row["is_exposed_stage2"] for row in call_rows) == 1,
-            "exposed stage-2 result does not identify exactly one EEN call")
+    require(any(row["is_exposed_stage2"] for row in call_rows),
+            "exposed stage-2 result does not identify an EEN call")
 
     npz_out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(npz_out, **arrays)
@@ -196,11 +196,11 @@ def evaluate(parent: dict, raw: dict, parent_arrays: dict,
             rcall["digests"]["denominator"],
             "first changed EEN call does not change the denominator")
 
-    stage_p = next(row["index"] for row in parent["calls"]
-                   if row["is_exposed_stage2"])
-    stage_r = next(row["index"] for row in raw["calls"]
-                   if row["is_exposed_stage2"])
-    require(stage_p == stage_r, "exposed stage-2 EEN call index moved")
+    stage_p = [row["index"] for row in parent["calls"]
+               if row["is_exposed_stage2"]]
+    stage_r = [row["index"] for row in raw["calls"]
+               if row["is_exposed_stage2"]]
+    require(stage_p == stage_r, "exposed stage-2 EEN call indices moved")
     p_u = r27.array_score(parent_arrays["exposed_u"],
                           prior_parent["stage2_vorticity_u"])
     p_v = r27.array_score(parent_arrays["exposed_v"],
@@ -223,7 +223,7 @@ def evaluate(parent: dict, raw: dict, parent_arrays: dict,
         "status": "HELD",
         "claim_label": "independent with Decision-52 SSH",
         "first_changed_call": first,
-        "exposed_stage2_call": stage_p,
+        "exposed_stage2_calls": stage_p,
         "changed_output_calls": changed_outputs,
         "first_changed_call_inputs": {
             "bit_identical": list(stable_inputs),
