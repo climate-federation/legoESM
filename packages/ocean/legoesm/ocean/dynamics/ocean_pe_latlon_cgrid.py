@@ -3478,9 +3478,7 @@ def _bc_horizontal_viscosity(
                 mask=mask, u_mask=u_mask, v_mask=v_mask,
                 vertex_mask=_visc_vmask,
                 thickness_operands=ldf_thickness_operands,
-                metric_reciprocal_operands=ldf_metric_reciprocal_operands,
-                coefficient_fmask_already_applied=(
-                    _ahm_source == "nemo_ahm_3d_file"))
+                metric_reciprocal_operands=ldf_metric_reciprocal_operands)
         else:
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
                 u, v, grid, _ahmt, _ahmf,

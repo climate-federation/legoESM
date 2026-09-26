@@ -583,9 +583,7 @@ def create_tripole_grid(
         e1f = raw["e1f"].astype(dtype)
         e2f = raw["e2f"].astype(dtype)
         area_q_inner = e1f * e2f  # (n_lat, n_lon)
-        # Pad to (n_lat+1, n_lon+1).  NEMO-identity operators that require
-        # native F-point staggering receive it through their explicit operand
-        # seams; ``area_q`` remains the shared tripolar geometry convention.
+        # Pad to (n_lat+1, n_lon+1)
         area_q = jnp.pad(area_q_inner, ((0, 1), (0, 1)), mode="edge")
     else:
         # Estimate from T-point areas

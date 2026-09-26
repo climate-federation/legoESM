@@ -1,4 +1,5 @@
 """Direct unit tests for tripole internals.
+
 Addresses PR #268 slopbuster REJECT #2: ``_detect_fold``,
 ``_compute_rotation_angles``, ``_read_nemo_mesh_mask`` were reachable
 only via the global-overturning tripolar runner.  These tests

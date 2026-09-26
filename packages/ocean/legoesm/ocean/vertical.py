@@ -304,9 +304,9 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     ``domzgr_substitute.h90:130`` applies it through ``fe3mask``.
 
     ``e3t_0`` and ``tmask`` default to the coordinate's bridge fields, but
-    callers may provide the same operands from their own state.  A card that
-    carries NEMO's native F-point mesh uses its stored ``e3f_0``, ``fe3mask``
-    and ``hf_0``; otherwise those operands are rebuilt from T cells.
+    callers may provide the same operands from their own state.  Horizontal
+    areas and F-depth are always rebuilt from that mesh; bridge-carried ENE
+    operands are an oracle check, not a production dependency.
     """
     if nn_e3f_typ not in (0, 1):
         raise ValueError("nn_e3f_typ must be 0 or 1")
@@ -333,46 +333,35 @@ def nemo_qco_live_vorticity_e3f_cgrid(
         # The certified GYRE use is a closed beta-plane box.
         return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
 
-    raw_f = getattr(z_coord, "nemo_een_barotropic", None)
-    if raw_f is None:
-        masked = b(e3t0 * tmask)
-        masked_n = north(masked)
-        ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
-        tmask_n = north(tmask)
-        wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
-        divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
-                   else jnp.maximum(wet_sum, one))
-        e3f0vor = b(ref_sum / divisor)
-        ref_n = north(e3t0)
-        e3f_0 = b(quarter * b(b(e3t0 + east(e3t0))
-                                + b(ref_n + east(ref_n))))
-        e3f0vor = jnp.where(e3f0vor == 0.0, e3f_0, e3f0vor)
-        # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain
-        # the historical path byte-for-byte.
-        e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
-        fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
-        hf0 = jnp.sum(e3f0vor * fe3mask, axis=-1)
-        area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
-    else:
-        e3f0vor = jnp.asarray(raw_f.e3f_0, dtype=dtype)
-        fe3mask = jnp.asarray(raw_f.fe3mask, dtype=dtype)
-        hf0 = jnp.asarray(raw_f.hf_0, dtype=dtype)
-        area_f = b(jnp.asarray(raw_f.e1f, dtype=dtype)
-                   * jnp.asarray(raw_f.e2f, dtype=dtype))
+    masked = b(e3t0 * tmask)
+    masked_n = north(masked)
+    ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
+    tmask_n = north(tmask)
+    wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
+    divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
+               else jnp.maximum(wet_sum, one))
+    e3f0vor = b(ref_sum / divisor)
+    ref_n = north(e3t0)
+    e3f_0 = b(quarter * b(b(e3t0 + east(e3t0))
+                            + b(ref_n + east(ref_n))))
+    e3f0vor = jnp.where(e3f0vor == 0.0, e3f_0, e3f0vor)
+
+    # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain the
+    # historical path byte-for-byte.
+    e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
 
     area_eta = b(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
     area_eta_n = north(area_eta)
     quad = b(b(area_eta + east(area_eta))
              + b(area_eta_n + east(area_eta_n)))
+    fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
+    hf0 = jnp.sum(e3f0vor * fe3mask, axis=-1)
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
     # area at that same boundary so production JIT cannot fuse it into /area_f.
-    # domqco.f90:281-285 multiplies the stored reciprocal ``r1_e1e2f``;
-    # spelling this as division is real-equivalent but moved 19 ORCA2 e3f
-    # cells and 24 wet-face LDF outputs in the last bits.
-    r1_area_f = b(one / area_f)
-    r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
+    area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
+    r3f = b(b(quarter * quad) * r1_hf0 / area_f)
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
     # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
@@ -396,58 +385,6 @@ def nemo_qco_vorticity_f_cgrid(z_coord, dtype):
         raise ValueError("literal NEMO F-point Coriolis requires raw ff_f")
     from legoesm.grids.latlon import nemo_ff_f_to_vertex
     return nemo_ff_f_to_vertex(jnp.asarray(raw.ff_f, dtype=dtype))
-
-
-def nemo_ldf_metric_reciprocals_cgrid(z_coord, grid, dtype):
-    """Map NEMO's stored ``dyn_ldf`` metric reciprocals to legoESM layouts.
-
-    The ORCA F point ``(j, i)`` is vertex ``[j+1, i+1]``; using the shared
-    tripolar ``area_q`` directly shifts that divisor.  This operand seam is
-    deliberately local to NEMO's LDF statement so other tripolar geometry
-    consumers keep their established convention.
-    """
-    raw = getattr(z_coord, "nemo_een_barotropic", None)
-    if raw is None:
-        geom = getattr(grid, "area_T", getattr(grid, "area", None))
-        if geom is None:
-            raise ValueError("NEMO LDF metrics require grid area operands")
-        one = jnp.asarray(1.0, dtype=dtype)
-        safe = lambda value: jnp.where(value > 0.0, one / value, 0.0)
-        return (
-            safe(jnp.asarray(geom, dtype=dtype)),
-            safe(jnp.asarray(grid.area_q, dtype=dtype)),
-            safe(jnp.asarray(grid.dx_u, dtype=dtype)),
-            safe(jnp.asarray(grid.dy_v, dtype=dtype)),
-            safe(jnp.asarray(grid.dy_u, dtype=dtype)),
-            safe(jnp.asarray(grid.dx_v, dtype=dtype)),
-        )
-
-    b = lax.optimization_barrier
-    one = jnp.asarray(1.0, dtype=dtype)
-
-    def reciprocal(value):
-        value = b(jnp.asarray(value, dtype=dtype))
-        return b(jnp.where(value > 0.0, one / value, 0.0))
-
-    r1_t = reciprocal(b(jnp.asarray(raw.e1t, dtype=dtype)
-                        * jnp.asarray(raw.e2t, dtype=dtype)))
-    r1_f_native = reciprocal(b(jnp.asarray(raw.e1f, dtype=dtype)
-                               * jnp.asarray(raw.e2f, dtype=dtype)))
-    r1_e1u_native = reciprocal(raw.e1u)
-    r1_e2u_native = reciprocal(raw.e2u)
-    r1_e1v_native = reciprocal(raw.e1v)
-    r1_e2v_native = reciprocal(raw.e2v)
-
-    def west(value):
-        return jnp.concatenate([value[:, -1:], value], axis=1)
-
-    def south(value):
-        return jnp.concatenate([jnp.zeros_like(value[:1]), value], axis=0)
-
-    with_south = jnp.concatenate([r1_f_native[:1], r1_f_native], axis=0)
-    r1_f = west(with_south)
-    return (r1_t, r1_f, west(r1_e1u_native), south(r1_e2v_native),
-            west(r1_e2u_native), south(r1_e1v_native))
 
 
 def nemo_qco_mesh_operands(z_coord, dtype):
@@ -571,14 +508,11 @@ def nemo_qco_resolved_mesh_operands(
         e3t0, hu0, hv0, area_t, area_u, area_v, e2u, e1v = (
             jnp.asarray(value, dtype=dtype) for value in raw)
         e3t0 = e3t0[..., :nlev]
-        een = getattr(z_coord, "nemo_een_barotropic", None)
-        e3u0 = (e3t0 if een is None else
-                 jnp.asarray(een.e3u_0, dtype=dtype)[..., :nlev])
-        e3v0 = (e3t0 if een is None else
-                 jnp.asarray(een.e3v_0, dtype=dtype)[..., :nlev])
+        # NEMO's own mesh: e3u_0/e3v_0 are e3t_0 on the full-step meshes this
+        # branch serves; keeping the raw statement preserves the certified
+        # DINO arithmetic bit for bit.
         return NemoQCOMeshOperands(
-            e3t_0=e3t0, e3u_0=e3u0, e3v_0=e3v0,
-            umask3=umask3, vmask3=vmask3,
+            e3t_0=e3t0, e3u_0=e3t0, e3v_0=e3t0, umask3=umask3, vmask3=vmask3,
             hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,
             e2u=e2u, e1v=e1v)
     if any(value is not None for value in raw):
