@@ -233,7 +233,7 @@ DINO, both tanks, the lock-exchange and the overflow cards are unchanged
 **Focused tests at the final tip** — the two new fold-routing tests and the
 citation-gate module:
 
-> PENDING-MEASUREMENT
+> `25 passed in 6.07s`
 
 **Broad ocean battery** — `tests/ocean/fidelity tests/ocean/unit
 tests/unit/test_run_omip_cli.py`, `-n 12`. THIS BATTERY IS NOT REPRESENTED AS
@@ -247,9 +247,14 @@ other agents' batteries shared the host. Two facts bound the reading: the
 flagged set spans fifty-four files and behaves like the documented
 worker-pressure artefact on this machine rather than like a merge defect, and
 every gate that IS quoted above passed at the same tip with the same counts
-both lanes report. The final attempt's outcome is recorded in the evidence
-directory; classifying its residue against both lanes' known-red lists is
-carried to OPEN rather than claimed here.
+both lanes report. All three logs are in the evidence directory; classifying their residue
+against both lanes' known-red lists is carried to OPEN rather than claimed
+here.
+
+**Non-vacuity of the two new tests.** With the retired refusal put back by
+hand, both fail and nothing else does — `2 failed, 7 passed in 3.83s` — and
+the revert was verified with `git status --porcelain`, which is empty. So the
+tests bind on the resolution this merge took, not on their own fixtures.
 
 ## 8. Independent reviews
 
