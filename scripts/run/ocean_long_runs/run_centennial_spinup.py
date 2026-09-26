@@ -199,7 +199,7 @@ def main() -> int:
         )
         print(
             f"==> Loading WOA SSS climatology "
-            f"(cache: {args.sss_cache or 'synthetic'})"
+            f"(cache: {args.sss_cache or 'default cache'})"
         )
         sss_woa, lat_woa, lon_woa = load_woa_sss(
             cache_dir=args.sss_cache, allow_synthetic=args.allow_synthetic)
@@ -256,7 +256,7 @@ def main() -> int:
         else:
             print(
                 f"==> Loading Dai-Trenberth rivers "
-                f"(cache: {args.runoff_cache or 'synthetic'})"
+                f"(cache: {args.runoff_cache or 'default cache'})"
             )
             rivers = load_dai_trenberth(
                 cache_dir=args.runoff_cache,

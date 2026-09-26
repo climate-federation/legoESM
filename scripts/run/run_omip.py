@@ -279,9 +279,17 @@ def with_kpp_cfl_dt(run_config: OMIPRunConfig, dt: float) -> OMIPRunConfig:
 
     ``KPPConfig.cfl_cap_dt_s`` must equal the ocean dynamics dt (its default
     300 s matched only the MPAS default dt), so the driver passes the value it
-    knows instead of leaving a default that disagrees with ``--dt``.
+    knows instead of leaving a default that disagrees with ``--dt``.  A value
+    already moved off the default (set explicitly upstream) that disagrees
+    with ``dt`` raises instead of being silently overwritten.
     """
     vm = run_config.vertical_mixing
+    current = float(vm.kpp.cfl_cap_dt_s)
+    default = float(KPPConfig._field_defaults["cfl_cap_dt_s"])
+    if current != default and current != float(dt):
+        raise ValueError(
+            f"KPPConfig.cfl_cap_dt_s was set to {current} s but the run "
+            f"timestep is {float(dt)} s; the KPP CFL cap must use the run dt")
     return run_config._replace(vertical_mixing=vm._replace(
         kpp=vm.kpp._replace(cfl_cap_dt_s=float(dt))))
 
@@ -5767,6 +5775,8 @@ def run_omip_single(grid_type: str, args) -> dict:
           f"dt={dt:.0f}s | {days:.0f} days ({n_steps} steps)")
     print(f"  Physics: {args.physics} | SW: {args.sw_down} W/m² | "
           f"Water type: {args.water_type}")
+    print(f"  KPP CFL cap timestep (from dt): "
+          f"{run_config.vertical_mixing.kpp.cfl_cap_dt_s:.0f} s")
     print(f"{'='*70}")
 
     t_setup = time.time()
@@ -6691,6 +6701,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         "resolution": resolution,
         "n_levels": int(z_coord.n_levels),
         "dt_seconds": float(dt),
+        "kpp_cfl_cap_dt_s": float(run_config.vertical_mixing.kpp.cfl_cap_dt_s),
         "days": float(args.days),
         "seed": int(run_config.seed),
         "forcing_mode": getattr(args, "forcing_mode", "restoring"),

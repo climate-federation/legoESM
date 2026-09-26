@@ -99,3 +99,23 @@ def test_woa_sss_real_file_surface_2d_and_lon_wrapped(tmp_path):
     assert sss.shape == (lat.size, lon.size)
     assert np.all(np.diff(lon_o) > 0) and lon_o[0] >= 0.0 and lon_o[-1] < 360.0
     np.testing.assert_array_equal(sss[0], lon_o)
+
+
+@pytest.mark.parametrize("bad,match", [
+    ("descending_lat", "latitude must be ascending"),
+    ("regional_lon", "longitude must be global"),
+])
+def test_woa_sss_real_file_rejects_layouts_the_interpolator_misreads(tmp_path, bad, match):
+    xr = pytest.importorskip("xarray")
+    lat = np.arange(-89.5, 90.0, 1.0)
+    lon = np.arange(0.5, 360.0, 1.0)
+    if bad == "descending_lat":
+        lat = lat[::-1]
+    else:
+        lon = np.arange(0.5, 180.0, 0.5)          # half the globe
+    s = np.full((1, 1, lat.size, lon.size), 35.0)
+    xr.Dataset({"s_an": (("time", "depth", "lat", "lon"), s)},
+               coords={"lat": lat, "lon": lon}).to_netcdf(
+        tmp_path / "woa_sss_annual.nc")
+    with pytest.raises(ValueError, match=match):
+        load_woa_sss(cache_dir=tmp_path, allow_synthetic=False)

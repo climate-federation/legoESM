@@ -143,7 +143,16 @@ def load_woa_sss(
         lat = np.asarray(ds["lat"].values, dtype=np.float64)
         lon = np.mod(np.asarray(ds["lon"].values, dtype=np.float64), 360.0)
         order = np.argsort(lon)
-        return sss[:, order], lat, lon[order]
+        lon = lon[order]
+        # interp_woa_sss_to_grid assumes ascending, uniform lat and a global,
+        # uniform lon axis: refuse a file it would silently misread.
+        if not np.all(np.diff(lat) > 0.0):
+            raise ValueError(f"{nc_path}: WOA SSS latitude must be ascending")
+        if not np.allclose(np.diff(lon), 360.0 / lon.size):
+            raise ValueError(
+                f"{nc_path}: WOA SSS longitude must be global with uniform "
+                f"spacing 360/{lon.size} deg")
+        return sss[:, order], lat, lon
 
     if not allow_synthetic:
         raise FileNotFoundError(
