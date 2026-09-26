@@ -1069,7 +1069,7 @@ CITATION_MAP = {
         5],
     # --- ORCA2 card round 29: EEN numerator/denominator split ---
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:741-779': [
-        'SELECT CASE( kvor )                 !==  vorticity considered  ==!',
+        ('SELECT CASE( kvor )                 !==  vorticity considered  ==!', 3),
         "CALL ctl_stop('STOP','dyn_vor: wrong value for kvor'  )",
         39],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:784-802': [
