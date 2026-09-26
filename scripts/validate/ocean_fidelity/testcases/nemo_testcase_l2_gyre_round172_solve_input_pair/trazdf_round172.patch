@@ -1,12 +1,11 @@
 --- a/trazdf.F90
 +++ b/trazdf.F90
-@@ -55,6 +55,9 @@
+@@ -55,6 +55,8 @@
     REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:)   ::   zl2_wi , zl2_wd , zl2_ws
     REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:,:) ::   zl2_rhs, zl2_fwd, zl2_sol
     REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:)   ::   zl2_tmp            ! macro scratch
 +   LOGICAL , SAVE ::   ll_r172_e3t = .FALSE., ll_r172_content = .FALSE.
 +   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zr172_e3t, zr172_content
-+   INTEGER(KIND=8), PARAMETER ::   ir172_frame_bytes = 2_8 * jpi * jpj * jpk * 8_8
     !!----------------------------------------------------------------------
     !! NEMO/OCE 5.0, NEMO Consortium (2024)
     !! Software governed by the CeCILL license (see ./LICENSE)
@@ -34,7 +33,7 @@
 +         OPEN( NEWUNIT=ir172_unit, FILE='round172_solve_inputs.raw', ACCESS='STREAM', &
 +            &  FORM='UNFORMATTED', STATUS='OLD', ACTION='READ', IOSTAT=ir172_ios )
 +         IF( ir172_ios /= 0 )   CALL ctl_stop( 'tra_zdf: cannot open Round-172 solve inputs' )
-+         ir172_pos = 1_8 + INT( kt - 1081, KIND=8 ) * ir172_frame_bytes
++         ir172_pos = 1_8 + INT( kt - 1081, KIND=8 ) * 2_8 * INT(jpi,8) * INT(jpj,8) * INT(jpk,8) * 8_8
 +         READ( ir172_unit, POS=ir172_pos, IOSTAT=ir172_ios ) zr172_e3t, zr172_content
 +         CLOSE( ir172_unit )
 +         IF( ir172_ios /= 0 )   CALL ctl_stop( 'tra_zdf: cannot read Round-172 solve-input frame' )
