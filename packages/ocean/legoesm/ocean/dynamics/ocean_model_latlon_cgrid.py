@@ -1524,8 +1524,7 @@ def rk3_stage_velocity_update(
 
 
 def _nemo_ws_qco_stage_faces(
-    eta, h_ref, u_mask_3d, v_mask_3d, grid, *, z_coord=None,
-    include_reciprocals=False,
+    eta, h_ref, u_mask_3d, v_mask_3d, grid, *, include_reciprocals=False,
 ):
     """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
 
@@ -1565,13 +1564,7 @@ def _nemo_ws_qco_stage_faces(
     # domain.F90:145 (hu_0 = SUM(e3u_0*umask)) and the C-grid metrics: ONE
     # builder, shared with the PE lane's wzv arm, so the two lanes cannot
     # drift apart in how they reconstruct NEMO's mesh from a card's grid.
-    if z_coord is None:
-        ops = nemo_qco_card_mesh_operands(
-            h_ref, u_mask_3d, v_mask_3d, grid, dtype)
-    else:
-        from legoesm.ocean.vertical import nemo_qco_resolved_mesh_operands
-        ops = nemo_qco_resolved_mesh_operands(
-            z_coord, grid, u_mask_3d, v_mask_3d, dtype, h_ref.shape[-1])
+    ops = nemo_qco_card_mesh_operands(h_ref, u_mask_3d, v_mask_3d, grid, dtype)
     return nemo_qco_live_face_geometry_cgrid(
         jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
@@ -5410,9 +5403,6 @@ class LatLonCGridOceanModel:
                     else _nemo_ws_qco_stage_faces(
                         state.eta.data, _ws_h_ref, _ws_u_live_mask,
                         _ws_v_live_mask, _grid)[:2])
-                _ws_ldf_divisor_faces_kmm = _nemo_ws_qco_stage_faces(
-                    state.eta.data, _ws_h_ref, _ws_u_live_mask,
-                    _ws_v_live_mask, _grid, z_coord=_zc)[:2]
                 from legoesm.ocean.vertical import (
                     nemo_qco_live_vorticity_e3f_cgrid,
                 )
@@ -5426,8 +5416,8 @@ class LatLonCGridOceanModel:
                 _ws_ldf_thickness_kbb = (
                     _geom_density[1], _ws_ldf_face_thickness_kbb[0],
                     _ws_ldf_face_thickness_kbb[1], _ws_e3f_kbb,
-                    _ws_ldf_divisor_faces_kmm[0],
-                    _ws_ldf_divisor_faces_kmm[1])
+                    _ws_ldf_face_thickness_kbb[0],
+                    _ws_ldf_face_thickness_kbb[1])
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
@@ -5943,17 +5933,13 @@ class LatLonCGridOceanModel:
                     from legoesm.ocean.vertical import (
                         nemo_qco_live_vorticity_e3f_cgrid,
                     )
-                    _stage_ldf_divisor_faces = _nemo_ws_qco_stage_faces(
-                        st.eta.data, _ws_h_ref, _ws_u_live_mask,
-                        _ws_v_live_mask, _grid, z_coord=_zc)[:2]
                     _stage_ldf_thickness = (
                         _geom_density[1], _ws_ldf_face_thickness_kbb[0],
                         _ws_ldf_face_thickness_kbb[1],
                         nemo_qco_live_vorticity_e3f_cgrid(
                             st.eta.data, _zc, st.eta.data.dtype, grid=_grid,
                             e3t_0=_ws_h_ref, tmask=_ws_t_live_mask),
-                        _stage_ldf_divisor_faces[0],
-                        _stage_ldf_divisor_faces[1])
+                        stage_face_thickness[0], stage_face_thickness[1])
                 td_result = self.tendencies(
                                      st, surface_forcing, sponge=sponge, dt=dt,
                                      momentum_only=True,
