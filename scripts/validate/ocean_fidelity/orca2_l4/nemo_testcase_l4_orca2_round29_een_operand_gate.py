@@ -192,6 +192,11 @@ def evaluate(parent: dict, raw: dict, parent_arrays: dict,
     require(pcall["digests"]["denominator"] !=
             rcall["digests"]["denominator"],
             "first changed EEN call does not change the denominator")
+    denominator = r27.array_score(
+        raw_arrays[f"call{first}_denominator"],
+        parent_arrays[f"call{first}_denominator"])
+    require(not denominator["bit_identical"],
+            "denominator digest differs but saved arrays are bit-identical")
 
     p_u = r27.array_score(parent_arrays["exposed_u"],
                           prior_parent["stage2_vorticity_u"])
@@ -220,6 +225,7 @@ def evaluate(parent: dict, raw: dict, parent_arrays: dict,
             "bit_identical": list(stable_inputs),
             "different": ["denominator"],
         },
+        "first_changed_call_denominator": denominator,
         "stage2_parent_vs_prior": {"u": p_u, "v": p_v},
         "stage2_raw_vs_prior": {"u": r_u, "v": r_v},
         "stage2_raw_vs_parent": {"u": moved_u, "v": moved_v},

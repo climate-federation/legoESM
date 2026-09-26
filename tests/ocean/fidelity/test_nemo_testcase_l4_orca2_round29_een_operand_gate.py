@@ -28,6 +28,7 @@ def _arrays(value):
     return {
         "exposed_u": np.array([value, 0.0]),
         "exposed_v": np.array([value, 0.0]),
+        "call0_denominator": np.array([value, 0.0]),
         "stage2_vorticity_u": np.array([value, 0.0]),
         "stage2_vorticity_v": np.array([value, 0.0]),
     }
@@ -35,6 +36,7 @@ def _arrays(value):
 
 def test_round29_gate_accepts_denominator_only(monkeypatch):
     scores = iter([
+        {"cells": 2, "unequal": 1, "bit_identical": False, "max_abs": 1.0},
         {"cells": 2, "unequal": 0, "bit_identical": True, "max_abs": 0.0},
         {"cells": 2, "unequal": 0, "bit_identical": True, "max_abs": 0.0},
         {"cells": 2, "unequal": 0, "bit_identical": True, "max_abs": 0.0},
