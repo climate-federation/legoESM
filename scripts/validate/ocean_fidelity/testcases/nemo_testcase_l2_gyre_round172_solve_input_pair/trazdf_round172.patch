@@ -1,0 +1,109 @@
+--- a/trazdf.F90
++++ b/trazdf.F90
+@@ -55,6 +55,9 @@
+    REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:)   ::   zl2_wi , zl2_wd , zl2_ws
+    REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:,:) ::   zl2_rhs, zl2_fwd, zl2_sol
+    REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:)   ::   zl2_tmp            ! macro scratch
++   LOGICAL , SAVE ::   ll_r172_e3t = .FALSE., ll_r172_content = .FALSE.
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zr172_e3t, zr172_content
++   INTEGER(KIND=8), PARAMETER ::   ir172_frame_bytes = 2_8 * jpi * jpj * jpk * 8_8
+    !!----------------------------------------------------------------------
+    !! NEMO/OCE 5.0, NEMO Consortium (2024)
+    !! Software governed by the CeCILL license (see ./LICENSE)
+@@ -78,6 +81,8 @@
+       INTEGER  ::   il2_unit, il2_ios
+       CHARACTER(LEN=16) ::   cl_l2_magic
+       CHARACTER(LEN=40) ::   cl_l2_file       ! round-38: one file per kt
++      INTEGER ::   ir172_unit, ir172_ios
++      INTEGER(KIND=8) ::   ir172_pos
+       !!---------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('tra_zdf')
+@@ -113,6 +118,25 @@
+       !     kt = nit000+1 is the first step whose Nbb state carries the
+       !     horizontal structure stage 3 of step 1 created, so it is the
+       !     first record in which ah_wslp2 can be non-zero.
++      INQUIRE( FILE='round172_e3t.arm', EXIST=ll_r172_e3t )
++      INQUIRE( FILE='round172_content.arm', EXIST=ll_r172_content )
++      IF( ll_r172_e3t .AND. ll_r172_content )   &
++         CALL ctl_stop( 'tra_zdf: Round-172 arms are mutually exclusive' )
++      IF( ( ll_r172_e3t .OR. ll_r172_content ) .AND. kt >= 1081 .AND. kt <= 1440 ) THEN
++         IF( l_istiled )   CALL ctl_stop( 'tra_zdf: Round-172 pair does not support tiling' )
++         IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'tra_zdf: Round-172 pair requires binary64 wp' )
++         ALLOCATE( zr172_e3t(jpi,jpj,jpk), zr172_content(jpi,jpj,jpk) )
++         OPEN( NEWUNIT=ir172_unit, FILE='round172_solve_inputs.raw', ACCESS='STREAM', &
++            &  FORM='UNFORMATTED', STATUS='OLD', ACTION='READ', IOSTAT=ir172_ios )
++         IF( ir172_ios /= 0 )   CALL ctl_stop( 'tra_zdf: cannot open Round-172 solve inputs' )
++         ir172_pos = 1_8 + INT( kt - 1081, KIND=8 ) * ir172_frame_bytes
++         READ( ir172_unit, POS=ir172_pos, IOSTAT=ir172_ios ) zr172_e3t, zr172_content
++         CLOSE( ir172_unit )
++         IF( ir172_ios /= 0 )   CALL ctl_stop( 'tra_zdf: cannot read Round-172 solve-input frame' )
++      ELSE
++         ll_r172_e3t = .FALSE.
++         ll_r172_content = .FALSE.
++      ENDIF
+       ll_l2_tra = ( lwp .AND. kt <= nit000 + 1 )
+       ! Round 125: reuse this write-only operand record over the admitted
+       ! day-180-to-day-240 magnitude interval.  The original two-step arm
+@@ -135,6 +159,7 @@
+       ENDIF
+       !
+       CALL tra_zdf_imp( 'TRA', rDt, Kbb, Kmm, Krhs, pts, Kaa, jpts )
++      IF( ALLOCATED(zr172_e3t) )   DEALLOCATE( zr172_e3t, zr172_content )
+ 
+ !!gm WHY here !   and I don't like that !
+       ! DRAKKAR SSS control {
+@@ -455,9 +480,15 @@
+                   DO_2Dik( 0, 0,   1, jpkm1, 1 )
+                      zzwi = - p2dt * zwt(ji,jk  ) / e3w(ji,jj,jk  ,Kmm)
+                      zzws = - p2dt * zwt(ji,jk+1) / e3w(ji,jj,jk+1,Kmm)
++                     IF( ll_r172_e3t ) THEN
++                        zwd(ji,jk) = zr172_e3t(ji,jj,jk) - ( zzwi + zzws )   &
++                           &              + p2dt * ( MAX( wi(ji,jj,jk  ) , 0._wp ) &
++                           &                      - MIN( wi(ji,jj,jk+1) , 0._wp ) )
++                     ELSE
+                      zwd(ji,jk) = e3t(ji,jj,jk,Kaa) - ( zzwi + zzws )   &
+                         &              + p2dt * ( MAX( wi(ji,jj,jk  ) , 0._wp ) &
+                         &                      - MIN( wi(ji,jj,jk+1) , 0._wp ) )
++                     ENDIF
+                      zwi(ji,jk) = zzwi + p2dt *   MIN( wi(ji,jj,jk  ) , 0._wp )
+                      zws(ji,jk) = zzws - p2dt *   MAX( wi(ji,jj,jk+1) , 0._wp )
+                   END_2D
+@@ -465,7 +496,11 @@
+                   DO_2Dik( 0, 0,   1, jpkm1, 1 )
+                      zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / e3w(ji,jj,jk,Kmm)
+                      zws(ji,jk) = - p2dt * zwt(ji,jk+1) / e3w(ji,jj,jk+1,Kmm)
++                     IF( ll_r172_e3t ) THEN
++                        zwd(ji,jk) = zr172_e3t(ji,jj,jk) - ( zwi(ji,jk) + zws(ji,jk) )
++                     ELSE
+                      zwd(ji,jk) = e3t(ji,jj,jk,Kaa) - ( zwi(ji,jk) + zws(ji,jk) )
++                     ENDIF
+                   END_2D
+                ENDIF
+                !
+@@ -535,8 +570,12 @@
+             ENDIF
+             !
+             DO_1Di( 0, 0 )             !* 2nd recurrence:    Zk = Yk - Ik / Tk-1  Zk-1
++               IF( ll_r172_content .AND. jn == jp_tem ) THEN
++                  pt(ji,jj,1,jn,Kaa) = zr172_content(ji,jj,1)
++               ELSE
+                pt(ji,jj,1,jn,Kaa) =       e3t(ji,jj,1,Kbb) * pt(ji,jj,1,jn,Kbb )    &
+                   &               + p2dt * e3t(ji,jj,1,Kmm) * pt(ji,jj,1,jn,Krhs)
++               ENDIF
+             END_1D
+ 
+             !                    !--- round-35 instrument: the surface right-hand side ---!
+@@ -548,8 +587,12 @@
+                END_1D
+             ENDIF
+             DO_2Dik( 0, 0,   2, jpkm1, 1 )
++               IF( ll_r172_content .AND. jn == jp_tem ) THEN
++                  zrhs = zr172_content(ji,jj,jk)
++               ELSE
+                zrhs =       e3t(ji,jj,jk,Kbb) * pt(ji,jj,jk,jn,Kbb )   &
+                   & + p2dt * e3t(ji,jj,jk,Kmm) * pt(ji,jj,jk,jn,Krhs)   ! zrhs=right hand side
++               ENDIF
+ 
+                IF( ll_l2_tra .AND. cdtype == 'TRA' )   zl2_rhs(ji,jj,jk,jn) = zrhs
+                pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk) / zwt(ji,jk-1) * pt(ji,jj,jk-1,jn,Kaa)
