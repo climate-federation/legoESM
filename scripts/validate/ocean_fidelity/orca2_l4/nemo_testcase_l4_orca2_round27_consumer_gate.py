@@ -232,7 +232,11 @@ def capture(deck_root: Path, record_root: Path, npz_out: Path,
     })
     return {
         "status": "CAPTURED",
-        "claim_label": "given NEMO's entry",
+        "claim_labels": {
+            "kt1_ldf": "given NEMO's entry",
+            "kt2_direct_ldf": "given NEMO's entry",
+            "stage2_vorticity": "independent with Decision-52 SSH",
+        },
         "helper_variant": helper_variant,
         "worktree": worktree_stamp(),
         "dtype": "float64",
@@ -340,7 +344,12 @@ def compare_captures(parent: dict, raw_f: dict, parent_arrays: dict,
     require(p3, "raw-F arm did not move the stage-2 EEN vorticity component")
     return {
         "status": "HELD",
-        "claim_label": "given NEMO's entry",
+        "claim_labels": {
+            "kbb_kmm_direct": "given NEMO's entry",
+            "kt1_ldf_parent_vs_raw_f": "given NEMO's entry",
+            "stage2_vorticity_parent_vs_raw_f": (
+                "independent with Decision-52 SSH"),
+        },
         "retraction": (
             "round 26's F-curl-only attribution is withdrawn: its helper arm "
             "also moved the EEN potential-vorticity thickness"),

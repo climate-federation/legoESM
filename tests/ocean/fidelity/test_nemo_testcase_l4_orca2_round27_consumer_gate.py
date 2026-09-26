@@ -56,7 +56,12 @@ def test_consumer_gate_retracts_confound_and_plants_bind():
     result = gate.compare_captures(
         parent, raw, _arrays(0.0), _arrays(1.0), plant=False)
     assert result["status"] == "HELD"
-    assert result["claim_label"] == "given NEMO's entry"
+    assert result["claim_labels"] == {
+        "kbb_kmm_direct": "given NEMO's entry",
+        "kt1_ldf_parent_vs_raw_f": "given NEMO's entry",
+        "stage2_vorticity_parent_vs_raw_f": (
+            "independent with Decision-52 SSH"),
+    }
     assert "withdrawn" in result["retraction"]
     with pytest.raises(gate.GateError, match="planted"):
         gate.compare_captures(
