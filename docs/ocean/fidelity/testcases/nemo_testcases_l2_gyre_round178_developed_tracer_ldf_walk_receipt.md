@@ -155,10 +155,27 @@ Evidence root: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round178/`.
 | `developed_tracer_ldf_plant_final.log` | `48d1474c1251bf2dd07c9ef5c7c7fb3dd2f0e1e724e8fa167739eaf0ea8e8b13` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
 
-Focused harness suite before the final receipt/citation commit: **45 passed,
-1 skipped**.  The final citation gate and its shifted-citation plant are run
-against the committed receipt; their exit statuses are carried in the final
-round report without rewriting this evidence-bearing receipt afterward.
+The final clean science producer is `f578d94cfdedbbd47d236cd9b25a92fd9d7995f1`.
+Its authoritative artifacts supersede the same-valued intermediate files:
+
+| final artifact | SHA-256 |
+|---|---|
+| `daily_record_audit_tip.json` | `246001c2c8fc5e7474f4eb7d8aab66dfdb787bdd90241ac2a9455d7cd7a7bb35` |
+| `developed_tracer_ldf_walk_tip.json` | `9f67ece20de4ae5b9688685534072991b2a9c672838ef52c96b2edb4e90b1422` |
+| `developed_tracer_ldf_plant_tip.log` | `48d1474c1251bf2dd07c9ef5c7c7fb3dd2f0e1e724e8fa167739eaf0ea8e8b13` |
+| `focused_tests_final.log` | `c05a34a92e75fae1f1046c4be62ea9a99eeea0a42c8cb89ac61cd41546568c8a` |
+| `citation_gate_tip.json` | `f586fdcaa739bf45f8d46962a69d8b06d21081eae6205e4f1d78e1baf23a85b8` |
+| `citation_gate_plant_tip.json` | `d99eabbc4cd88de1984e08974ce1f6ce93b683ec0fd53b0594971db94977f7c5` |
+| `codex_review_tip.log` | `a9c7a89f92b95192736f77740697ce10debbed71d683e559a59621b3dc0e5bad` |
+
+The final focused battery summary is **183 passed in 409.02s**.  It covers the
+year-owner harness, the complete receipt-citation tests, the Redi lat-lon
+operator tests, and the generic NEMO recipe tests.  An earlier battery exposed
+one observer-only compatibility defect (the legacy public diagnostic mapping
+had gained extra keys); the expanded statement table is now confined to the
+private operand-diagnostic request, and the complete final rerun is green.
+The final citation gate is **PASS** with zero unmapped citations, failures, or
+stale-map entries.  Its shifted-`uslp` plant exits 1.
 
 ## OPEN — Round 179
 
