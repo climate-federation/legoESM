@@ -12356,11 +12356,6 @@ def developed_vertical_day240_sensitivity(
                             if (name.endswith("_identity")
                                 or "_content" in name) else
                             np.array(nemo_e3t, copy=True))
-                    if "_e3t" in name:
-                        # Keep the sixth slot present and identity-valued so
-                        # e3t and content arms share one compiled signature.
-                        target_content = np.array(
-                            vertical["content_T"], copy=True)
                     if "_content" in name:
                         target_content = (
                             np.array(vertical["content_T"], copy=True)
@@ -12544,10 +12539,10 @@ def developed_vertical_day240_sensitivity(
             if plant == "developed-vertical-e3t-scale" else
             ["complete_K_e3w_content"]
             if plant == "developed-vertical-content-scale" else
-            ["free", "complete_K", "complete_K_e3w",
-             "complete_K_e3w_e3t_identity", "complete_K_e3w_e3t",
+            ["complete_K_e3w_e3t_identity",
              "complete_K_e3w_content_identity",
-             "complete_K_e3w_content"])
+             "free", "complete_K", "complete_K_e3w",
+             "complete_K_e3w_e3t", "complete_K_e3w_content"])
     for arm in arms:
         arm_state, arm_identity = run_arm(arm)
         identity_bytes += arm_identity
