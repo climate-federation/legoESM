@@ -183,30 +183,10 @@ def _build_train_step(make_run_seg, optimizer, sigma_full, grid, dt, loss_config
     """
     def _train_step(params, opt_state, ic, target, forcing):
         def loss_fn(trainable):
-            run_seg = make_run_seg(trainable)
-            # ``.raw`` = the non-JIT, non-donating segment variant.  Buffer
-            # donation conflicts with reverse-mode AD, so it MUST stay
-            # inside ``filter_value_and_grad`` (do not swap for a donating
-            # variant).
-            #
-            # Route through the SHARED rollout+loss instead of an inline
-            # ``single_day_rollout`` + ``combined_loss``. Two reasons:
-            #
-            # * the horizon MUST match the lead the targets were loaded at —
-            #   ``single_day_rollout`` defaults to 24 h, and the lat-lon driver
-            #   loads 6 h targets, a mismatch that trains without error and
-            #   forecasts badly;
-            # * ``multi_step_rollout_loss`` is documented as "shared by every
-            #   AIMIP trainer so the rollout+loss is defined ONCE", but nothing
-            #   in production called it — its only caller was its own unit test.
-            #   So ``loss_config.multi_step_hours`` was SILENTLY IGNORED: the
-            #   lat-lon driver built tuple-of-lead targets and passed them to a
-            #   loss that only ever did one rollout.
-            return multi_step_rollout_loss(
-                ic, forcing, run_seg.raw, dt=dt,
-                rollout_hours=rollout_hours, target=target,
-                sigma_full=sigma_full, grid=grid, loss_config=loss_config,
-            )
+            return _rollout_loss(
+                make_run_seg, trainable, ic, target, forcing, dt=dt,
+                rollout_hours=rollout_hours, sigma_full=sigma_full,
+                grid=grid, loss_config=loss_config)
 
         loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
         grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
@@ -219,6 +199,36 @@ def _build_train_step(make_run_seg, optimizer, sigma_full, grid, dt, loss_config
         return params, opt_state, loss, grad_norm
 
     return eqx.filter_jit(_train_step)
+
+
+def _rollout_loss(make_run_seg, trainable, ic, target, forcing, *, dt,
+                  rollout_hours, sigma_full, grid, loss_config):
+    """The differentiated objective of every driver mode (see
+    :func:`_build_train_step`)."""
+    run_seg = make_run_seg(trainable)
+    # ``.raw`` = the non-JIT, non-donating segment variant.  Buffer
+    # donation conflicts with reverse-mode AD, so it MUST stay
+    # inside ``filter_value_and_grad`` (do not swap for a donating
+    # variant).
+    #
+    # Route through the SHARED rollout+loss instead of an inline
+    # ``single_day_rollout`` + ``combined_loss``. Two reasons:
+    #
+    # * the horizon MUST match the lead the targets were loaded at —
+    #   ``single_day_rollout`` defaults to 24 h, and the lat-lon driver
+    #   loads 6 h targets, a mismatch that trains without error and
+    #   forecasts badly;
+    # * ``multi_step_rollout_loss`` is documented as "shared by every
+    #   AIMIP trainer so the rollout+loss is defined ONCE", but nothing
+    #   in production called it — its only caller was its own unit test.
+    #   So ``loss_config.multi_step_hours`` was SILENTLY IGNORED: the
+    #   lat-lon driver built tuple-of-lead targets and passed them to a
+    #   loss that only ever did one rollout.
+    return multi_step_rollout_loss(
+        ic, forcing, run_seg.raw, dt=dt,
+        rollout_hours=rollout_hours, target=target,
+        sigma_full=sigma_full, grid=grid, loss_config=loss_config,
+    )
 
 
 def _training_loop(
@@ -412,6 +422,7 @@ def train_physics_params(
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
     rad_stop_gradient: bool = False,
+    constraints=None,
     **segment_kwargs,
 ):
     """Train physics parameters via gradient descent through the dycore.
@@ -432,6 +443,13 @@ def train_physics_params(
         it implicit silently scores a 24 h forecast against a 6 h target.
     rad_stop_gradient : bool
         Treat radiation as a forcing (no gradient through it).
+    constraints : list[ParamConstraint] or None
+        The trainable set.  Pass
+        ``trainable_constraints_for_scheme(convection, radiation, turbulence)``
+        so parameters the configured schemes never read are frozen OUT (no
+        inert parameters); ``None`` = ``DEFAULT_TRAINABLE``.  Every remaining
+        parameter must get a non-zero gradient on the first sample, or the
+        run aborts (:func:`legoesm.training.inert_params.assert_no_inert`).
     **segment_kwargs
         Physics configuration of the rollout, forwarded verbatim to
         ``build_training_segment`` (``microphysics``, ``rad_update_steps``,
@@ -443,9 +461,10 @@ def train_physics_params(
     TrainablePhysicsParams — optimized parameters
     list[float] — loss history
     """
+    from legoesm.training.inert_params import assert_no_inert
     from legoesm.training.trainable_params import TrainablePhysicsParams
 
-    params = TrainablePhysicsParams.from_defaults()
+    params = TrainablePhysicsParams.from_defaults(constraints)
     step_unified = physics_pipeline.build_step_unified(
         rad_stop_gradient=rad_stop_gradient)
     sigma_full = jnp.asarray(sigma.sigma_full)
@@ -465,6 +484,14 @@ def train_physics_params(
         return build_training_segment(
             model, step_unified, grid, sigma, dt, **seg_kw,
         )
+
+    # No-inert-parameters gate on the first sample, before any update.
+    first_grads = eqx.filter_jit(eqx.filter_grad(
+        lambda t, ic, tgt, f: _rollout_loss(
+            make_run_seg, t, ic, tgt, f, dt=dt, rollout_hours=rollout_hours,
+            sigma_full=sigma_full, grid=grid, loss_config=loss_config)))(
+        params, initial_carries[0], target_carries[0], forcings[0])
+    assert_no_inert(first_grads.raw_values)
 
     optimizer = _make_driver_optimizer(
         lr, "adam", n_epochs, len(initial_carries),
