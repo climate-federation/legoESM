@@ -50,6 +50,7 @@ from legoesm.atmosphere.physics.turbulence.pbl_height import (
 )
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     diagnostic_heat_flux_full,
@@ -344,10 +345,9 @@ def louis_turbulence(
     if surface_flux is not None:
         tau_x, tau_y, shflx, lhflx, ustar = surface_flux
     else:
-        tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+        tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-            T_sfc, q_sfc, rho[:, -1], config.surface,
-        )
+            T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
 
     sflx_u = tau_x
     sflx_v = tau_y

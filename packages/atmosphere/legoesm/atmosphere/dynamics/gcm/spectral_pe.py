@@ -274,6 +274,15 @@ class SpectralPEConfig(NamedTuple):
     g: float = constants.g
     hyperdiff_coeff: float = 0.0
     hyperdiff_order: int = 2
+    # #1354/#1515: column-conserving tracer positivity BORROW (shared MPAS form).
+    # Default TRUE — this lane previously had NO tracer floor, so spectral
+    # transport (Gibbs ringing) left negative water; the borrow moves the
+    # deficit between levels, conserving each species' column integral and
+    # leaving the spectral T untouched (frozen-MSE-neutral for vapour AND
+    # condensate).  False restores the plain max(q,0).  The energy-consistent
+    # hard-floor T correction is not available here (T is spectral); the borrow
+    # is the energy-consistent path on this lane.
+    conservative_tracer_clamp: bool = True
     time_integrator: str = "ssp_rk3"  # "ssp_rk3", "ssp_rk34", or "ssp_rk54"
     semi_implicit: bool = False      # Use Hoskins-Simmons semi-implicit
     si_T_ref: float = 300.0         # Reference temperature for linearization [K]
@@ -1741,15 +1750,48 @@ class SpectralPrimitiveEquationModel:
         self._tracer_filter_dt = dt
 
     def _apply_tracer_filter(self, state):
-        """Apply the precomputed tracer filter to ``state.tracers`` (no-op
-        when filter or tracers are absent)."""
-        if self._tracer_filter is None or state.tracers is None:
+        """Apply the spectral tracer filter (if any) then the positivity stage.
+
+        #1354/#1515: this lane previously had NO tracer positivity — spectral
+        transport (Gibbs ringing at sharp moisture edges) leaves negative water
+        that microphysics reads as nonsense.  The conserving BORROW (default)
+        preserves each species' column integral and leaves the SPECTRAL T
+        untouched, so it is fully frozen-MSE-neutral here for vapour AND
+        condensate.  The energy-consistent hard-floor T correction is NOT wired
+        on this lane because T lives in spectral space (``T_hat``); the borrow
+        IS the energy-consistent path here, and the non-default hard floor stays
+        a plain ``max(q,0)``.
+        """
+        if state.tracers is None:
             return state
-        return state._replace(
-            tracers=apply_filter_to_tracers(
-                state.tracers, self._tracer_filter, self.grid,
+        if self._tracer_filter is not None:
+            state = state._replace(
+                tracers=apply_filter_to_tracers(
+                    state.tracers, self._tracer_filter, self.grid,
+                )
             )
-        )
+        return self._apply_tracer_positivity(state)
+
+    def _apply_tracer_positivity(self, state):
+        """Shared tracer positivity for the spectral lane (borrow / plain)."""
+        if state.tracers is None:
+            return state
+        from legoesm.core.conservation import apply_water_positivity
+        coord = self.sigma_coord
+        # Grid-space layer mass dp from lnps (one SH synthesis).  On pure sigma
+        # the per-column p_s cancels in the borrow rescale, but real dp is
+        # correct on hybrid too and keeps the global net-negative-column
+        # residual mass-weighted.
+        p_s = jnp.exp(sh_synthesis(self.grid, state.lnps_hat.data))
+        if isinstance(coord, HybridSigmaPressureCoordinate):
+            dp = jnp.maximum(dp_from_hybrid(coord, p_s), 0.0)  # +weight contract
+        else:
+            dp = p_s[..., None] * coord.dsigma.astype(p_s.dtype)
+        tracers_out, _ = apply_water_positivity(
+            state.tracers, None, dp,
+            conservative=self.config.conservative_tracer_clamp,
+            energy_consistent=False)  # T is spectral here — borrow is the E-C path
+        return state._replace(tracers=tracers_out)
 
     def _ensure_si_data_leapfrog(self, dt: float):
         """Precompute SI matrices for leapfrog (dt_eff = 2*dt)."""

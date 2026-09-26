@@ -162,6 +162,108 @@ def compute_nemo_boxcar_centred_weights(
     )
 
 
+def compute_nemo_boxcar_forward_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+):
+    """NEMO forward ``nn_bt_flt=1`` primary/secondary weights.
+
+    This is the live OVERFLOW testcase arm: ``ln_bt_fw=T`` makes
+    ``jic=nn_e`` and ``ts_wgt`` CASE(1) selects exactly those one-based
+    substeps satisfying ``abs(jn-jic)/nn_e < 1/2``
+    (NEMO 5.0.2 ``dynspg_ts.F90:1058-1080``).  The final in-window index is
+    also NEMO's loop bound.  Tail-sum transport weights implement
+    ``ts_wgt:1097-1102`` and are normalized by their sum.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_forward needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / n_substeps < 0.5
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    total = primary.sum(dtype=_np.float64)
+    averaged = primary / total
+    secondary = _np.cumsum(primary[::-1], dtype=_np.float64)[::-1]
+    secondary = secondary / secondary.sum(dtype=_np.float64)
+    return (
+        jnp.asarray(averaged, dtype=dtype),
+        jnp.asarray(1.0, dtype=dtype),
+        jnp.asarray(secondary, dtype=dtype),
+        n_loop,
+    )
+
+
+def compute_nemo_boxcar_raw_transport_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+    substep_scale: int = 1,
+):
+    """Return NEMO's unnormalised ``wgtbtp2`` and ``r1_wgt2s`` divisor.
+
+    ``dynspg_ts.F90:1227-1294`` builds a raw 0/1 primary boxcar, forms each
+    secondary weight by summing the remaining primary weights, accumulates
+    ``za2 * zhU * r1_e2u`` with that raw integer-like ``za2``, and divides the
+    completed transport once at :999-1000.  The shared filter helper above
+    deliberately returns pre-normalised SM2005 weights; these arrays preserve
+    the distinct source association needed by DINO's literal accumulator.
+
+    Returns ``(wgtbtp2, r1_wgt2s, n_loop)``.  Shape/window validation mirrors
+    :func:`compute_nemo_boxcar_centred_weights` without changing its generic
+    arithmetic or byte contract.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_centred needs n_substeps >= 2, got {n_substeps!r}")
+    if substep_scale < 1 or n_substeps % substep_scale != 0:
+        raise ValueError(
+            f"substep_scale={substep_scale!r} must be >=1 and divide "
+            f"n_substeps={n_substeps!r} (n_substeps = nn_e * substep_scale).")
+    half_width = n_substeps // substep_scale
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / half_width < 1.0
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    secondary = _np.cumsum(primary[::-1], dtype=_np.float64)[::-1]
+    divisor = secondary.sum(dtype=_np.float64)
+    return (
+        jnp.asarray(secondary, dtype=dtype),
+        jnp.asarray(divisor, dtype=dtype),
+        n_loop,
+    )
+
+
+def compute_nemo_forward_raw_transport_weights(
+    n_substeps: int, dtype: jnp.dtype,
+):
+    """Raw ``wgtbtp2`` for ln_bt_fw=T, nn_bt_flt=1.
+
+    Literal transcription of ``ts_wgt`` primary CASE(1), its tail sum at
+    dynspg_ts.F90:1097-1102, and the single post-accumulation divisor at
+    :999-1000.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_forward needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / n_substeps < 0.5
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    secondary = _np.cumsum(
+        primary[:n_loop][::-1], dtype=_np.float64)[::-1]
+    return (jnp.asarray(secondary, dtype=dtype),
+            jnp.asarray(secondary.sum(dtype=_np.float64), dtype=dtype),
+            n_loop)
+
+
 def nemo_auto_substeps(
     dt: float,
     H_max_wet: float,
@@ -180,10 +282,21 @@ def nemo_auto_substeps(
     can only increase the substep count).
     """
     import math as _math
-    zcmax = _math.sqrt(g * max(H_max_wet, 0.0)
-                       * inv_e1_sq_plus_inv_e2_sq_max)
+    if not all(_math.isfinite(value) for value in (
+        dt, H_max_wet, inv_e1_sq_plus_inv_e2_sq_max, g, cmax
+    )):
+        raise ValueError("nemo_auto_substeps inputs must all be finite.")
+    if dt <= 0.0 or g <= 0.0 or cmax <= 0.0:
+        raise ValueError(
+            "nemo_auto_substeps requires dt, g, and cmax to be positive."
+        )
+    if H_max_wet < 0.0 or inv_e1_sq_plus_inv_e2_sq_max < 0.0:
+        raise ValueError(
+            "nemo_auto_substeps requires non-negative depth and metric inputs."
+        )
+    zcmax = _math.sqrt(g * H_max_wet * inv_e1_sq_plus_inv_e2_sq_max)
     n = int(_math.ceil(dt / cmax * zcmax))
-    if n < 2:
+    if n < 1:
         raise ValueError(
             f"nemo_auto_substeps computed n={n!r} (dt={dt}, cmax={cmax}) — "
             "check the metric/H inputs.")
@@ -348,18 +461,17 @@ def after_level_column_mean_reconcile(
         e3u(i,j,k,t)  ->  e3u_0(i,j,k) * (1 + r3u(i,j,t)*umask(i,j,k))
         r1_hu(i,j,t)  ->  r1_hu_0(i,j) / (1 + r3u(i,j,t))
 
-    On a wet cell ``umask = 1``, so the ``(1 + r3u(Kaa))`` factor is CONSTANT
-    over ``k`` within a column and appears once in the sum and once, inverted,
-    in the divisor.  It CANCELS EXACTLY::
+    On a wet cell ``umask = 1``, the ``(1 + r3u(Kaa))`` factor is constant
+    over ``k`` and cancels as an algebraic identity::
 
         zue * r1_hu(Kaa) = SUM_k( e3u_0 * u * umask ) / hu_0
 
-    So NEMO's reconciliation is INDEPENDENT OF THE TIME LEVEL and weights by
-    the fixed REFERENCE ladder ``e3u_0 / hu_0``.  This kernel therefore takes
-    the reference face thickness, not a live one.  RETRACTED 2026-08-21: an
-    earlier revision took the live AFTER-level thickness and its docstring
-    called that "the after-level thickness NEMO divides by".  That was a true
-    reading of the Fortran text and a false reading of its arithmetic.
+    This generic kernel evaluates that cancelled identity with the reference
+    ladder.  It is not execution-equivalent at the final ULP: registered round
+    49 showed that NEMO's separately materialized live reduction and reciprocal
+    are required for a bit-exact DINO result.  Production DINO therefore calls
+    :func:`nemo_literal_after_level_reconcile`; this kernel remains the generic
+    algebraic operator and its direct callers keep their prior behavior.
 
     HOW THE CALLER MUST BUILD ``h_face_ref``, and one thing NOT to assume.
     NEMO builds ``e3u_0`` as an ARITHMETIC mean of the adjacent ``e3t_0``
@@ -413,6 +525,54 @@ def after_level_column_mean_reconcile(
     depth = jnp.maximum(jnp.sum(h, axis=-1, keepdims=True), min_water_col)
     own_mean = jnp.sum(h * f, axis=-1, keepdims=True) / depth
     return (field - own_mean + target_mean) * face_mask3
+
+
+def nemo_literal_after_level_reconcile(
+    field: jnp.ndarray,
+    h_face_live: jnp.ndarray,
+    r1_h_live: jnp.ndarray,
+    target_mean: jnp.ndarray,
+    face_mask3: jnp.ndarray,
+) -> jnp.ndarray:
+    """Execute DINO ``mlf_baro_corr`` without algebraic QCO cancellation.
+
+    This is ``cfgs/DINO/MY_SRC/stpmlf.F90:752-765`` in source order: form
+    each live-thickness transport, left-accumulate levels, multiply by the
+    independently materialized live reciprocal depth, then subtract that mean
+    and add the barotropic target.  ``h_face_live`` is positive downward; this
+    operation only replaces a depth mean, so no vertical sign enters it.
+    """
+    b = jax.lax.optimization_barrier
+    field = jnp.asarray(field)
+    h_face_live = jnp.asarray(h_face_live, dtype=field.dtype)
+    r1_h_live = jnp.asarray(r1_h_live, dtype=field.dtype)
+    target_mean = jnp.asarray(target_mean, dtype=field.dtype)
+    face_mask3 = jnp.asarray(face_mask3, dtype=field.dtype)
+    if field.shape != h_face_live.shape or field.shape != face_mask3.shape:
+        raise ValueError(
+            "literal after-level field/thickness/mask shapes must match; got "
+            f"{field.shape}/{h_face_live.shape}/{face_mask3.shape}")
+    if r1_h_live.shape != field.shape[:-1]:
+        raise ValueError(
+            "literal after-level reciprocal must omit only the level axis; "
+            f"got {r1_h_live.shape} for field {field.shape}")
+    if target_mean.shape == field.shape[:-1]:
+        target_mean = target_mean[..., None]
+    if target_mean.shape != field.shape[:-1] + (1,):
+        raise ValueError(
+            "literal after-level target must have a singleton level axis; "
+            f"got {target_mean.shape} for field {field.shape}")
+
+    first = b(b(h_face_live[..., 0] * field[..., 0]) * face_mask3[..., 0])
+    transport = first
+    for jk in range(1, field.shape[-1]):
+        term = b(
+            b(h_face_live[..., jk] * field[..., jk])
+            * face_mask3[..., jk])
+        transport = b(transport + term)
+    own_mean = b(transport * r1_h_live)
+    corrected = b(b(field - own_mean[..., None]) + target_mean)
+    return b(corrected * face_mask3)
 
 
 def bebt_blend(
@@ -602,33 +762,16 @@ def _global_dot_batch(
     # ``activate_latlon_spmd_halo`` (cube SPMD does not call this), so this
     # branch is inert for the serial and MPI paths.  ``psum`` is
     # self-transposing => AD-safe, same as ``allreduce(SUM)``.
-    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
-    if get_halo_backend() == "spmd":
-        mesh = get_spmd_mesh()
-        if mesh is None:
-            # backend armed "spmd" but no mesh set: an invalid state
-            # reachable only via the public set_halo_backend("spmd")
-            # without a matching set_spmd_mesh.  FAIL FAST rather than
-            # silently return unreduced partial sums inside a sharded
-            # solve (codex LOW) — the supported activators
-            # (activate_latlon_spmd_halo / the cube equivalent) always set
-            # the mesh together with the backend.
-            raise RuntimeError(
-                "_global_dot_batch: halo backend is 'spmd' but no SPMD mesh "
-                "is set; arm it via activate_latlon_spmd_halo(mesh).")
-        # Route to psum ONLY for the lat-band ocean SPMD mesh, keyed on the
-        # ``"lat"`` axis BY NAME (activate_latlon_spmd_halo guarantees it).
-        # The cube atm SPMD backend ALSO sets backend=="spmd" but with a
-        # ``("face", ...)`` mesh; in a coupled run that mesh could be armed
-        # while this ocean barotropic PCG runs, and psum'ing over a
-        # non-lat (or replicated) axis would multiply the dots by the
-        # device count or crash (codex HIGH).  When the armed SPMD mesh is
-        # not the lat-band one, fall through to the MPI/local logic below
-        # (ocean fields are never cube-sharded, so the local/allreduce sum
-        # is the correct reduction there).
-        if "lat" in tuple(mesh.axis_names):
-            from legoesm.parallel.reductions import batch_psum_spmd
-            return batch_psum_spmd(local, "lat")
+    # Ocean SPMD lanes (lat-lon "lat" bands / Voronoi "device" blocks): the
+    # canonical gate ``spmd_reduce_axis`` names the axis or returns None so the
+    # cube-atm SPMD mesh (no ocean axis) falls through to the MPI/local logic
+    # below (ocean fields are never cube-sharded); it raises on a backend
+    # armed "spmd" without a mesh rather than silently returning partial sums.
+    from legoesm.parallel.reductions import spmd_reduce_axis
+    _ax = spmd_reduce_axis()
+    if _ax is not None:
+        from legoesm.parallel.reductions import batch_psum_spmd
+        return batch_psum_spmd(local, _ax)
     # Function-scope import: ``reductions`` pulls in mpi4jax lazily and
     # ``core.operators`` (cross-package), so keep it out of module top.
     from legoesm.parallel.reductions import (

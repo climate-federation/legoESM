@@ -21,12 +21,15 @@ See :func:`make_step_land_params_updater` for the entry point.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 import jax.numpy as jnp
 
 from legoesm.land.param_providers import PFTParamProvider
 from legoesm.land.canopy.config import CanopyLandParams
-from legoesm.land.soil_albedo import soil_albedo, soil_albedo_broadband
+from legoesm.land.soil_albedo import (
+    soil_albedo_bounds, soil_albedo_broadband, wet_soil_albedo)
 from legoesm.land.global_surface_data import interp_annual, interp_monthly
 
 from legoesm.land.boundary_data._internals import (
@@ -65,6 +68,123 @@ def _cover_fracs_at_year(pft_years, years_jnp, year):
     bare = jnp.zeros_like(fracs).at[:, 0].set(1.0)
     fracs = jnp.where(zero, bare, fracs)
     return fracs / jnp.maximum(jnp.sum(fracs, axis=-1, keepdims=True), 1e-10)
+
+
+class CanopyUpdaterInputs(NamedTuple):
+    """Host-precomputed, step-invariant inputs of the canopy per-step updater —
+    a pytree of arrays, so a caller may hand it THROUGH a jitted function (an
+    offline calibrator batching over cells) instead of closing over it."""
+    lai_monthly: jnp.ndarray     # (12, ncol, npft)
+    htop_monthly: jnp.ndarray    # (12, ncol, npft)
+    soil_color: jnp.ndarray      # (ncol,)
+    glacier_col: jnp.ndarray     # (ncol,) 1.0 on glacier-dominant columns
+    covered: jnp.ndarray         # (ncol,) surfdata-covered mask
+    pft_years: jnp.ndarray       # (nyear, ncol, npft)
+    years: jnp.ndarray           # (nyear,)
+    lut_hc: jnp.ndarray          # per-PFT lookups (npft,)
+    lut_fc4: jnp.ndarray
+    lut_vc3: jnp.ndarray
+    lut_vc4: jnp.ndarray
+    lut_rz0m: jnp.ndarray
+    lut_rd: jnp.ndarray
+    lut_isveg: jnp.ndarray
+    glac_vis: jnp.ndarray        # () ice-surface albedo pair
+    glac_nir: jnp.ndarray
+    bare_fb: CanopyLandParams    # bare-column fallback template (gap fill)
+    lut_root_depth: jnp.ndarray | None = None   # optional per-PFT root tables
+    lut_theta_wp: jnp.ndarray | None = None
+    lut_theta_fc: jnp.ndarray | None = None
+
+
+def precompute_canopy_updater(gsd, *, glacier_alb=None,
+                              pft_root_params=None) -> CanopyUpdaterInputs:
+    """The static (host-side, once) half of the canopy per-step updater."""
+    _glac_vis = GLACIER_ALB_VIS if glacier_alb is None else float(glacier_alb[0])
+    _glac_nir = GLACIER_ALB_NIR if glacier_alb is None else float(glacier_alb[1])
+    lut = pft_lookup_arrays()
+    _rta = (None if pft_root_params is None
+            else {k: jnp.asarray(np.asarray(v, dtype=np.float64))
+                  for k, v in pft_root_params.items()})
+    pft_years = jnp.asarray(np.asarray(gsd.pft_frac))
+    ncol = int(pft_years.shape[1])
+    return CanopyUpdaterInputs(
+        lai_monthly=jnp.asarray(gsd.lai_monthly),
+        htop_monthly=jnp.asarray(gsd.htop_monthly),
+        soil_color=jnp.asarray(np.asarray(gsd.soil_color)),
+        glacier_col=jnp.asarray(glacier_mask(gsd).astype(np.float64)),
+        covered=jnp.asarray(surfdata_covered(gsd)),
+        pft_years=pft_years,
+        years=jnp.asarray(np.asarray(gsd.years, dtype=np.float64)),
+        lut_hc=jnp.asarray(lut["hc"]), lut_fc4=jnp.asarray(lut["fc4"]),
+        lut_vc3=jnp.asarray(lut["vc3"]), lut_vc4=jnp.asarray(lut["vc4"]),
+        lut_rz0m=jnp.asarray(lut["rz0m"]), lut_rd=jnp.asarray(lut["rd"]),
+        lut_isveg=jnp.asarray(lut["is_veg"]),
+        glac_vis=jnp.asarray(_glac_vis), glac_nir=jnp.asarray(_glac_nir),
+        bare_fb=bare_canopy_params(ncol, pft_root_params=pft_root_params,
+                                   soil_bounds=True),
+        lut_root_depth=None if _rta is None else _rta["root_depth"],
+        lut_theta_wp=None if _rta is None else _rta["theta_wp"],
+        lut_theta_fc=None if _rta is None else _rta["theta_fc"],
+    )
+
+
+def apply_canopy_updater(pre: CanopyUpdaterInputs, theta_top: jnp.ndarray,
+                         doy: jnp.ndarray, year: jnp.ndarray):
+    """The JAX-pure per-step half: ``(CanopyLandParams, lai_col)`` at the traced
+    ``theta_top`` / ``doy`` / ``year`` from the precomputed inputs."""
+    ncol = int(pre.soil_color.shape[0])
+    full = lambda v: jnp.full(ncol, v)
+    fracs = _cover_fracs_at_year(pre.pft_years, pre.years, year)      # (ncol, npft)
+    dom_idx = jnp.argmax(fracs, axis=-1)                              # (ncol,) traced
+    is_veg_col = pre.lut_isveg[dom_idx]
+    hc_default = pre.lut_hc[dom_idx]
+    fC4 = pre.lut_fc4[dom_idx]
+    Vcmax25_C3 = pre.lut_vc3[dom_idx]
+    Vcmax25_C4 = pre.lut_vc4[dom_idx]
+    rz0m = jnp.where(is_veg_col > 0.0, pre.lut_rz0m[dom_idx], RZ0M_BARE)
+    rd = jnp.where(is_veg_col > 0.0, pre.lut_rd[dom_idx], 0.0)
+
+    lai_m = interp_monthly(pre.lai_monthly, doy)                      # (ncol, npft)
+    htop_m = interp_monthly(pre.htop_monthly, doy)
+    LAI = jnp.take_along_axis(lai_m, dom_idx[:, None], axis=1)[:, 0]
+    hc_surf = jnp.take_along_axis(htop_m, dom_idx[:, None], axis=1)[:, 0]
+    LAI = jnp.where(is_veg_col > 0.0,
+                    jnp.where(jnp.isfinite(LAI), LAI, 0.0), 0.0)
+    hc = jnp.where(jnp.isfinite(hc_surf) & (hc_surf > 0.0),
+                   hc_surf, hc_default)
+    hc = jnp.maximum(hc, HC_MIN_M)
+    ice = pre.glacier_col > 0.0
+    is_veg = jnp.where(ice, 0.0, is_veg_col)
+    LAI = jnp.where(ice, 0.0, LAI)
+    # Same bounds as build_canopy_params (glacier: dry == sat == ice albedo).
+    dry_vis, dry_nir, sat_vis, sat_nir = (
+        jnp.where(ice, g, b) for g, b in zip(
+            (pre.glac_vis, pre.glac_nir, pre.glac_vis, pre.glac_nir),
+            soil_albedo_bounds(pre.soil_color)))
+    av = wet_soil_albedo(dry_vis, sat_vis, theta_top)
+    an = wet_soil_albedo(dry_nir, sat_nir, theta_top)
+    lp = CanopyLandParams(
+        LAI=LAI, hc=hc, fC4=fC4, FNonVeg=1.0 - is_veg,
+        CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
+        Vcmax25_C3_leaf=Vcmax25_C3, Vcmax25_C4_leaf=Vcmax25_C4,
+        m_C3=full(M_C3), m_C4=full(M_C4),
+        b0_C3=full(B0_C3), b0_C4=full(B0_C4),
+        alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
+        ALB_VIS=av, ALB_NIR=an,
+        emissivity=full(EMISS_VEG), rz0m=rz0m, rd=rd,
+        ALB_VIS_DRY=dry_vis, ALB_VIS_SAT=sat_vis,
+        ALB_NIR_DRY=dry_nir, ALB_NIR_SAT=sat_nir,
+        # None when not selected -> multilayer_land._get falls back to the
+        # scalar MultiLayerLandConfig values (behaviour-preserving).
+        root_depth=(None if pre.lut_root_depth is None
+                    else pre.lut_root_depth[dom_idx]),
+        theta_wp=(None if pre.lut_theta_wp is None
+                  else pre.lut_theta_wp[dom_idx]),
+        theta_fc=(None if pre.lut_theta_fc is None
+                  else pre.lut_theta_fc[dom_idx]),
+    )
+    lp_filled = gap_fill_tree(lp, pre.bare_fb, pre.covered)
+    return lp_filled, lp_filled.LAI
 
 
 def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None,
@@ -136,76 +256,14 @@ def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None,
     ncol = int(pft_years.shape[1])
 
     if is_canopy:
-        lut = pft_lookup_arrays()
-        # Per-PFT lookups as length-npft JAX arrays, gathered by the per-step
-        # dominant PFT (traced) rather than a precomputed static index.
-        lut_hc = jnp.asarray(lut["hc"])
-        lut_fc4 = jnp.asarray(lut["fc4"])
-        lut_vc3 = jnp.asarray(lut["vc3"])
-        lut_vc4 = jnp.asarray(lut["vc4"])
-        lut_rz0m = jnp.asarray(lut["rz0m"])
-        # Optional per-PFT root-zone params, gathered by the traced dominant PFT.
-        _rt = pft_root_params
-        _rta = (None if _rt is None
-                else {k: jnp.asarray(np.asarray(v, dtype=np.float64))
-                      for k, v in _rt.items()})
-        lut_root_depth = None if _rta is None else _rta["root_depth"]
-        lut_theta_wp = None if _rta is None else _rta["theta_wp"]
-        lut_theta_fc = None if _rta is None else _rta["theta_fc"]
-        lut_rd = jnp.asarray(lut["rd"])
-        lut_isveg = jnp.asarray(lut["is_veg"])
-        bare_fb = bare_canopy_params(ncol, pft_root_params=pft_root_params)
-        full = lambda v: jnp.full(ncol, v)
+        pre = precompute_canopy_updater(gsd, glacier_alb=glacier_alb,
+                                        pft_root_params=pft_root_params)
 
         def _update_canopy(theta_top: jnp.ndarray, doy: jnp.ndarray, year: jnp.ndarray):
             """Return ``(CanopyLandParams, lai_col)``: ``lai_col`` is the
             per-column dominant-PFT LAI used in the params, useful as a
             diagnostic in the scan body."""
-            fracs = _cover_fracs_at_year(pft_years, years_jnp, year)   # (ncol, npft)
-            dom_idx = jnp.argmax(fracs, axis=-1)                       # (ncol,) traced
-            is_veg_col = lut_isveg[dom_idx]
-            hc_default = lut_hc[dom_idx]
-            fC4 = lut_fc4[dom_idx]
-            Vcmax25_C3 = lut_vc3[dom_idx]
-            Vcmax25_C4 = lut_vc4[dom_idx]
-            rz0m = jnp.where(is_veg_col > 0.0, lut_rz0m[dom_idx], RZ0M_BARE)
-            rd = jnp.where(is_veg_col > 0.0, lut_rd[dom_idx], 0.0)
-
-            lai_m = interp_monthly(lai_monthly, doy)                   # (ncol, npft)
-            htop_m = interp_monthly(htop_monthly, doy)
-            LAI = jnp.take_along_axis(lai_m, dom_idx[:, None], axis=1)[:, 0]
-            hc_surf = jnp.take_along_axis(htop_m, dom_idx[:, None], axis=1)[:, 0]
-            LAI = jnp.where(is_veg_col > 0.0,
-                            jnp.where(jnp.isfinite(LAI), LAI, 0.0), 0.0)
-            hc = jnp.where(jnp.isfinite(hc_surf) & (hc_surf > 0.0),
-                           hc_surf, hc_default)
-            hc = jnp.maximum(hc, HC_MIN_M)
-            av, an = soil_albedo(soil_color, theta_top)
-            ice = glacier_col > 0.0
-            is_veg = jnp.where(ice, 0.0, is_veg_col)
-            LAI = jnp.where(ice, 0.0, LAI)
-            av = jnp.where(ice, _glac_vis, av)
-            an = jnp.where(ice, _glac_nir, an)
-            lp = CanopyLandParams(
-                LAI=LAI, hc=hc, fC4=fC4, FNonVeg=1.0 - is_veg,
-                CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
-                Vcmax25_C3_leaf=Vcmax25_C3, Vcmax25_C4_leaf=Vcmax25_C4,
-                m_C3=full(M_C3), m_C4=full(M_C4),
-                b0_C3=full(B0_C3), b0_C4=full(B0_C4),
-                alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
-                ALB_VIS=av, ALB_NIR=an,
-                emissivity=full(EMISS_VEG), rz0m=rz0m, rd=rd,
-                # None when not selected -> multilayer_land._get falls back to the
-                # scalar MultiLayerLandConfig values (behaviour-preserving).
-                root_depth=(None if lut_root_depth is None
-                            else lut_root_depth[dom_idx]),
-                theta_wp=(None if lut_theta_wp is None
-                          else lut_theta_wp[dom_idx]),
-                theta_fc=(None if lut_theta_fc is None
-                          else lut_theta_fc[dom_idx]),
-            )
-            lp_filled = gap_fill_tree(lp, bare_fb, covered_jnp)
-            return lp_filled, lp_filled.LAI
+            return apply_canopy_updater(pre, theta_top, doy, year)
 
         return _update_canopy
 

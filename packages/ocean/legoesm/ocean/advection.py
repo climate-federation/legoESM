@@ -837,6 +837,10 @@ def fct_tracer_advection(
     tracer_before: jnp.ndarray | None = None,
     active_mask: jnp.ndarray | None = None,
     fixed_thickness: bool = False,
+    low_order_predictor: str = "one_step",
+    base_thickness: jnp.ndarray | None = None,
+    after_thickness: jnp.ndarray | None = None,
+    implicit_w: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -918,6 +922,10 @@ def fct_tracer_advection(
         raise ValueError(
             f"Unknown FCT high_order scheme '{high_order}'; "
             f"expected one of {FCT_HIGH_ORDER_SCHEMES}")
+    if low_order_predictor not in ("one_step", "nemo_rk3_two_step"):
+        raise ValueError(
+            f"Unknown FCT low_order_predictor {low_order_predictor!r}; "
+            "expected 'one_step' or 'nemo_rk3_two_step'")
 
     eps = 1e-30
 
@@ -989,6 +997,44 @@ def fct_tracer_advection(
     F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
     vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
 
+    # NEMO key_RK3 does not use the ordinary one-step upstream predictor.
+    # traadv_fct.F90:493-537 first advances Kbb by pDt/2 with upstream
+    # fluxes to a Kmm-thickness midpoint.  Lines 560-607 then replace every
+    # upstream face flux by the arithmetic mean of the Kbb and midpoint
+    # upstream fluxes.  That averaged flux supplies BOTH the low-order guess
+    # and the antidiffusive difference consumed by nonosc.
+    h_base = h_k if base_thickness is None else base_thickness
+    if low_order_predictor == "nemo_rk3_two_step":
+        implicit_mass_div = 0.0
+        if implicit_w is not None:
+            if implicit_w.shape != tracer.shape[:-1] + (nlev + 1,):
+                raise ValueError("implicit_w must contain nlev+1 interfaces")
+            # Resolved nn_fct_imp=1: traadv_fct.F90:528-536 subtracts
+            # (wi_top-wi_bottom)*T(Kbb) in the half-step predictor; the same
+            # zero-order term is used again at :598-607 for the full predictor.
+            implicit_mass_div = (
+                implicit_w[..., :-1] - implicit_w[..., 1:]) * base
+        q_mid = grad_safe_ratio(
+            h_base * base - (0.5 * dt) * (
+                div_h_low + vert_div_low + implicit_mass_div),
+            jnp.maximum(h_k, eps),
+            h_k > ratio_grad_floor(tracer.dtype),
+        )
+        if active_mask is not None:
+            q_mid = jnp.where(active_mask > 0.5, q_mid, base)
+        qmid_u = upwind_to_u_points(q_mid, mass_flux_u)
+        qmid_v = upwind_to_v_points(q_mid, mass_flux_v)
+        flux_u_low = 0.5 * (flux_u_low + mass_flux_u * qmid_u)
+        flux_v_low = 0.5 * (flux_v_low + mass_flux_v * qmid_v)
+        div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
+        qmid_below = q_mid[..., 1:]
+        qmid_above = q_mid[..., :-1]
+        qmid_face = jnp.where(w_int > 0.0, qmid_below, qmid_above)
+        F_vert_low_int = 0.5 * (
+            F_vert_low_int + w_int * qmid_face)
+        F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
+        vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+
     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
     # Anti-diffusive face fluxes:
     ad_flux_u = flux_u_hi - flux_u_low      # (n_lat, n_lon+1, nlev)
@@ -1022,7 +1068,9 @@ def fct_tracer_advection(
     # certified; inner AB2 extrapolates this limited divergence with a
     # history term before the thickness division, which no single-step
     # certificate covers (the pre-existing AB2 limitation).
-    if fixed_thickness:
+    if after_thickness is not None:
+        h_new = after_thickness
+    elif fixed_thickness:
         h_new = h_k
     else:
         div_mf_h = divergence_cgrid(mass_flux_u, mass_flux_v, grid)
@@ -1033,7 +1081,10 @@ def fct_tracer_advection(
 
     # Provisional low-order (upwind) update in AFTER-thickness form.
     q_td = grad_safe_ratio(
-        h_k * base - dt * (div_h_low + vert_div_low),
+        h_base * base - dt * (
+            div_h_low + vert_div_low + (
+                (implicit_w[..., :-1] - implicit_w[..., 1:]) * base
+                if implicit_w is not None else 0.0)),
         jnp.maximum(h_new, eps),
         h_new > t_grad_h,
     )

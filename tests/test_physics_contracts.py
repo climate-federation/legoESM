@@ -48,7 +48,7 @@ import pytest
 from tests import _ratchet_audit as ra
 
 _VALID_CONSERVES = frozenset(
-    {"mass", "energy", "moisture", "momentum", "tracer", "salt", "none"}
+    {"mass", "energy", "moisture", "momentum", "tracer", "salt", "volume", "none"}
 )
 _REQUIRED_KEYS = frozenset(
     {
@@ -81,6 +81,9 @@ EXCLUDED: frozenset[str] = frozenset(
     {
         "packages/atmosphere/legoesm/atmosphere/physics/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/_shared.py",
+        # Not a tendency scheme: loads the LES-calibrated coefficients from the
+        # tracked YAML and splices them into an existing TurbulenceConfig.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/les_tuned.py",
         "packages/atmosphere/legoesm/atmosphere/physics/clouds/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/clouds/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/combined.py",
@@ -189,6 +192,9 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/surface_forcing/output.py",
         "packages/ocean/legoesm/ocean/physics/tendencies.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/__init__.py",
+        # Not a scheme: the exact binary64 byte table of glibc 2.34 exp,
+        # carried so the DINO oracle comparison is bit-reproducible.
+        "packages/ocean/legoesm/ocean/physics/vertical_mixing/_glibc234_exp_table.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/integration.py",

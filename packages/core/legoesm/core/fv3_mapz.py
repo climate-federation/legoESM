@@ -151,7 +151,7 @@ _IDX = jnp.int32
 
 
 def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """Static-dtype gate, the same one the JAX NH lane applies.
+    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
 
     Reads only ``.dtype`` (static under jit).  A float32 operand would
     otherwise be silently upcast -- or, with x64 disabled, the WHOLE
@@ -160,14 +160,36 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     the NH lane's copy is private and this repo forbids importing
     private symbols across modules.
     """
+    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
+    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype). The
+    # "no silent fp64->fp32 downcast" guarantee now lives at the model
+    # boundary; THIS gate catches an f64 metric/workspace leaking into an
+    # f32 phase (silent promotion / lax.scan carry mismatch).
+    seen = None
     for name, a in arrays.items():
         if a is None:
             continue
-        if jnp.asarray(a).dtype != jnp.float64:
+        _arr = jnp.asarray(a)
+        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
+            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
+            # timestep/coeff like dt/kgb): it is weak-promoting and not a
+            # field, so it is not part of the field uniformity invariant.
+            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
+            # "went strong") is NOT skipped -> it still trips this gate
+            # against f32 fields, closing the silent-promotion blind spot
+            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
+            continue
+        dt = _arr.dtype
+        if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
-                f"{fname}: {name} must be float64 (got "
-                f"{jnp.asarray(a).dtype}); enable jax_enable_x64 and pass "
-                f"f64 operands (oracle build is -fdefault-real-8)")
+                f"{fname}: {name} must be float32 or float64 (got {dt})")
+        if seen is None:
+            seen = dt
+        elif dt != seen:
+            raise TypeError(
+                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
+                f"a phase must be single-precision-uniform "
+                f"(FV3DuoConfig.storage_dtype).")
 
 
 def pad1(a):

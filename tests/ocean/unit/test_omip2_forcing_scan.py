@@ -74,10 +74,10 @@ def test_jax_kernel_matches_host():
     idx = 2
     sf_host = compute_omip2_surface_forcing(
         state, forcing=forc, idx_t=idx, grid=grid, grid_type="tripole")
-    stack, nn_i, nn_j, gshape = build_core2_forcing_device_stack(
+    stack, nn_i, nn_j, nn_w, gshape = build_core2_forcing_device_stack(
         forc, grid, "tripole")
     sf_jax = compute_omip2_surface_forcing_jax(
-        state, forcing_stack=stack, nn_i=nn_i, nn_j=nn_j,
+        state, forcing_stack=stack, nn_i=nn_i, nn_j=nn_j, nn_w=nn_w,
         grid_shape=gshape, idx_t=idx)
     for f in ("tau_x", "tau_y", "q_net", "sw_down"):
         np.testing.assert_allclose(
@@ -88,13 +88,13 @@ def test_jax_kernel_matches_host():
 def test_kernel_is_jit_traceable_with_traced_index():
     """The record index may be a traced JAX int (required for lax.scan)."""
     forc, grid, state = _synthetic(3)
-    stack, nn_i, nn_j, gshape = build_core2_forcing_device_stack(
+    stack, nn_i, nn_j, nn_w, gshape = build_core2_forcing_device_stack(
         forc, grid, "tripole")
 
     @jax.jit
     def go(it):
         sf = compute_omip2_surface_forcing_jax(
-            state, forcing_stack=stack, nn_i=nn_i, nn_j=nn_j,
+            state, forcing_stack=stack, nn_i=nn_i, nn_j=nn_j, nn_w=nn_w,
             grid_shape=gshape, idx_t=it)
         return sf.q_net
 
@@ -162,7 +162,7 @@ def test_scan_block_equals_manual_steps():
 
     block_fn = build_omip2_scan_block_fn(model, dt, gshape)
     s_scan = block_fn(
-        state, stack, nn_i, nn_j, jnp.asarray(idx, dtype=jnp.int32),
+        state, stack, nn_i, nn_j, None, jnp.asarray(idx, dtype=jnp.int32),
         jnp.int32(1))
 
     s = state

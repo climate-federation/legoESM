@@ -76,6 +76,14 @@ def _load_campaign():
 
 camp = _load_campaign()
 
+#: Top of the profile plots [km].  The tuning objective is tropospheric and
+#: everything worth reading -- boundary layer, cloud base, the detrainment
+#: layer -- sits below this; the stratosphere above compresses all of it into
+#: the bottom fifth of the axis.  Axis limit only: the scored data are
+#: unchanged.
+PROFILE_PLOT_TOP_KM = 15.0
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTDIR = Path("results/scm_rce_convection_intercomparison")
 # Convection schemes to intercompare (the campaign's convection sweep).
 CONVECTION_SCHEMES = camp.SCHEME_SWEEPS["convection"]
@@ -139,7 +147,7 @@ _SIGNATURE_FIELDS = (
     "surface_wind_m_s", "coriolis_s_inv",
     "scm_microphysics_substeps", "scm_convection_substeps",
     "subsidence_solve",
-    "reference_dir", "last_reference_files",
+    "reference_dir", "last_reference_files", "ssts",
     # The column's saturation treatment is part of the experiment: the ice
     # super-saturation allowance only exists in the ice-capable schemes, and
     # the in-scheme liquid guard changes the condensation rate every step.  A
@@ -465,6 +473,8 @@ def evaluate_scheme(
     scheme: str,
     ref,
     *,
+    joint_refs=None,
+    primary_sst_K: float = 300.0,
     days: float,
     dt: float,
     analysis_days: float,
@@ -480,6 +490,7 @@ def evaluate_scheme(
     subsidence_solve: str = "as_shipped",
     microphysics: str = camp.BASELINE_SCHEMES["microphysics"],
     hard_saturation_adjustment: bool = False,
+    tuned_defaults_dir=None,
     bl_anchor_top_m: float = camp.DEFAULT_SCM_RCE_BL_TOP_M,
     turbulence: str = camp.BASELINE_SCHEMES["turbulence"],
     tune_mode: str = "convection",
@@ -515,9 +526,17 @@ def evaluate_scheme(
         turbulence=turbulence,
         microphysics=microphysics,
         hard_saturation_adjustment=hard_saturation_adjustment,
+        sst_K=primary_sst_K,
     )
     base_cfg, solve_status = camp.apply_subsidence_solve_override(
         base_cfg, subsidence_solve, category="convection")
+    # SCM DEFAULT: apply the committed tuned preset for this scheme, so a basic
+    # (tune_evals=0) run reproduces the tuned parameters and a tuning run STARTS
+    # from them.  Opt out with tuned_defaults_dir=None.  The convection sub is
+    # the only category presets exist for; turbulence/microphysics are untouched.
+    if tuned_defaults_dir is not None:
+        base_cfg, _n_preset = camp.apply_tuned_preset(
+            base_cfg, scheme, tuned_defaults_dir)
     if emanuel_unsaturated_downdraft:
         # Emanuel's downdraft re-evaporation is a STATIC Python branch that
         # ships OFF, so its efficiency parameter is read by no executed code
@@ -551,7 +570,8 @@ def evaluate_scheme(
         subcloud_top_m=subcloud_top_m,
         thermo_humidity=thermo_humidity,
     )
-    prior = camp.run_cached(cache, base_cfg, ref, label=f"prior:{scheme}", **common)
+    prior = camp.run_cached(cache, base_cfg, ref, label=f"prior:{scheme}",
+                            sst_K=primary_sst_K, **common)
     if tune_mode == "focused":
         # The sub-cloud experiment: ONE named parameter set spanning the
         # boundary-layer scheme, the microphysics' rain re-evaporation and the
@@ -559,10 +579,15 @@ def evaluate_scheme(
         # default run are the same config, so they hit the same cache entry —
         # the a-priori column is not paid for twice.
         tune_stats = dict(camp.EMPTY_TUNE_STATS)
+        if joint_refs is not None:
+            raise SystemExit(
+                "focused (sub-cloud) tuning is single-SST only; --ssts with "
+                "more than one value is not supported in --tune-mode focused.")
         _best_cfg, records, _default_run, tuned = camp.tune_focused_params(
             base_cfg,
             ref,
             cache,
+            sst_K=primary_sst_K,
             categories=FOCUSED_TUNE_CATEGORIES,
             include=focused_include,
             tune_evals=tune_evals,
@@ -576,6 +601,8 @@ def evaluate_scheme(
             base_cfg,
             ref,
             cache,
+            joint_refs=joint_refs,
+            primary_sst_K=primary_sst_K,
             tune_evals=tune_evals,
             seed=seed,
             objective=objective,
@@ -1113,7 +1140,7 @@ def plot_scheme(path: Path, ref, res: SchemeResult) -> None:
         return
     plt = _plt()
     z_km = ref.z_m / _M_PER_KM
-    ztop = float(np.nanmax(z_km))
+    ztop = min(float(np.nanmax(z_km)), PROFILE_PLOT_TOP_KM)
     fig, axes = plt.subplots(1, 3, figsize=(11.5, 5.0))
     prior_panels = _panels(ref, res.prior)
     tuned_panels = _panels(ref, res.tuned)
@@ -1148,7 +1175,7 @@ def plot_all(path: Path, ref, results: list[SchemeResult]) -> None:
         return
     plt = _plt()
     z_km = ref.z_m / _M_PER_KM
-    ztop = float(np.nanmax(z_km))
+    ztop = min(float(np.nanmax(z_km)), PROFILE_PLOT_TOP_KM)
     n = len(ordered)
     fig, axes = plt.subplots(n, 3, figsize=(11.0, 3.1 * n), squeeze=False)
     for i, res in enumerate(ordered):
@@ -1184,7 +1211,20 @@ def build_parser() -> argparse.ArgumentParser:
     """The CLI surface, exposed so tests exercise the REAL parser (a hand-rolled
     namespace would keep passing after a flag is renamed or dropped)."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reference-dir", type=Path, default=camp.DEFAULT_REFERENCE_DIR)
+    parser.add_argument("--reference-dir", type=Path, default=camp.DEFAULT_REFERENCE_DIR,
+                        help="the PRIMARY (profile-reporting) reference; also the "
+                             "sole reference when --ssts is a single value.")
+    parser.add_argument(
+        "--ssts", default="300",
+        help="comma-separated SSTs [K] to tune JOINTLY for generalization "
+             "(e.g. '295,300,305'). Each candidate is scored at every SST and "
+             "the mean drives the search. Only the RCEMIP SSTs 295/300/305 have "
+             "an external CRM reference and a defined IC.")
+    parser.add_argument(
+        "--joint-reference-dirs", default=None,
+        help="comma-separated reference dirs matching --ssts, in the same "
+             "order. Default: sibling dirs named rcemip_ref_sam<SST> next to "
+             "--reference-dir.")
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
     parser.add_argument("--days", type=float, default=camp.DEFAULT_DAYS)
     parser.add_argument("--dt", type=float, default=camp.DEFAULT_DT_S)
@@ -1192,6 +1232,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--last-reference-files", type=int,
                         default=camp.DEFAULT_LAST_REFERENCE_FILES)
     parser.add_argument("--tune-evals", type=int, default=48)
+    parser.add_argument(
+        "--tuned-defaults-dir", type=Path,
+        default=_REPO_ROOT / "config" / "params" / "scm_rce_tuned_f0",
+        help="directory of committed per-scheme tuned-parameter YAMLs applied "
+             "to each scheme's base config BEFORE the a-priori run and tuning. "
+             "This is the SCM default so a basic run reproduces the tuned "
+             "parameters; AMIP is unaffected (it opts in via --params).")
+    parser.add_argument(
+        "--no-tuned-defaults", dest="tuned_defaults_dir",
+        action="store_const", const=None,
+        help="run each scheme at its shipped *Config defaults, not the tuned "
+             "preset.")
     parser.add_argument("--tune-seed", type=int, default=20260705)
     parser.add_argument(
         "--radiation", default="rrtmgp", choices=("rrtmgp", "gray"),
@@ -1436,6 +1488,61 @@ def main(argv: list[str] | None = None) -> int:
         precip_analysis_days=args.analysis_days,
     )
 
+    # JOINT multi-SST references. The primary SST is the one whose reference is
+    # --reference-dir (its basename's trailing digits, default 300); its ref is
+    # `ref` above so the profile record and albedo stay tied to it.
+    _ssts = [float(x) for x in str(args.ssts).split(",") if x.strip()]
+    if len(set(_ssts)) != len(_ssts):
+        raise SystemExit(
+            f"--ssts has duplicate values {_ssts}; a repeated SST silently "
+            "re-weights the joint mean.")
+    _primary_sst = 300.0
+    import re as _re
+    _m = _re.search(r"(\d{3})$", args.reference_dir.name)
+    if _m:
+        _primary_sst = float(_m.group(1))
+    if _primary_sst not in _ssts:
+        raise SystemExit(
+            f"--reference-dir implies primary SST {_primary_sst} K but --ssts "
+            f"is {_ssts}; the primary reference must be one of the tuned SSTs "
+            "(otherwise the profile/albedo are built for an SST not scored). "
+            "Point --reference-dir at a matching rcemip_ref_sam<SST> dir.")
+    if args.joint_reference_dirs:
+        _dirs = [Path(d) for d in args.joint_reference_dirs.split(",")]
+    else:
+        _dirs = [args.reference_dir.parent / f"rcemip_ref_sam{int(s)}"
+                 for s in _ssts]
+    if len(_dirs) != len(_ssts):
+        raise SystemExit(
+            f"--ssts has {len(_ssts)} entries but --joint-reference-dirs has "
+            f"{len(_dirs)}; they must match 1:1.")
+    for _s, _d in zip(_ssts, _dirs):
+        _dm = _re.search(r"(\d{3})$", Path(_d).name)
+        if args.joint_reference_dirs and _dm is None:
+            raise SystemExit(
+                f"--joint-reference-dirs entry {_d} has no trailing 3-digit "
+                f"SST, so it cannot be validated against its paired SST "
+                f"{_s} K; name it rcemip_ref_sam<SST> so a reversed list is "
+                "caught.")
+        if _dm and float(_dm.group(1)) != float(_s):
+            raise SystemExit(
+                f"--joint-reference-dirs mismatch: SST {_s} K paired with "
+                f"{_d} (trailing {_dm.group(1)}); reversing the list would "
+                "score a CRM profile against the wrong-SST column.")
+    joint_refs = []
+    for _s, _d in zip(_ssts, _dirs):
+        _r = (ref if float(_s) == _primary_sst and Path(_d) == args.reference_dir
+              else camp.build_reference_profiles(
+                  _d, args.last_reference_files,
+                  precip_analysis_days=args.analysis_days))
+        joint_refs.append((float(_s), _r))
+    # Multi-SST -> joint. A single SST keeps joint_refs=None and relies on
+    # primary_sst_K (threaded below) so a single 295 or 305 run tunes at the
+    # RIGHT SST, not the 300 K default.
+    joint_refs = joint_refs if len(joint_refs) > 1 else None
+    print(f"[joint] SSTs={_ssts} primary={_primary_sst} "
+          f"refs={[str(d) for d in _dirs]}", flush=True)
+
     meta = dict(
         radiation=args.radiation, dt=args.dt, days=args.days,
         analysis_days=args.analysis_days,
@@ -1473,6 +1580,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[scheme] convection={scheme} ...", flush=True)
             res = evaluate_scheme(
                 scheme, ref,
+                joint_refs=joint_refs, primary_sst_K=_primary_sst,
                 days=args.days, dt=args.dt, analysis_days=args.analysis_days,
                 tune_evals=args.tune_evals, seed=args.tune_seed,
                 scm_microphysics_substeps=args.scm_microphysics_substeps,
@@ -1485,6 +1593,7 @@ def main(argv: list[str] | None = None) -> int:
                 subsidence_solve=args.subsidence_solve,
                 microphysics=args.microphysics,
                 hard_saturation_adjustment=args.hard_saturation_adjustment,
+                tuned_defaults_dir=args.tuned_defaults_dir,
                 bl_anchor_top_m=args.bl_anchor_top_m,
                 turbulence=args.turbulence,
                 tune_mode=args.tune_mode,

@@ -14,7 +14,11 @@ from .omip2_applicator import (
     compute_omip2_freshwater_forcing,
     sample_omip2_forcing,
 )
-from .sss_apply import apply_sss_restoring_step, apply_sss_restoring_step_mpas
+from .sss_apply import (
+    apply_sss_restoring_step,
+    apply_sss_restoring_step_fesom,
+    apply_sss_restoring_step_mpas,
+)
 from .runoff_apply import apply_runoff_step, apply_runoff_step_mpas
 from .ice_shelf_apply import (
     apply_ice_shelf_basal_step,
@@ -29,6 +33,7 @@ __all__ = [
     "compute_omip2_freshwater_forcing",
     "sample_omip2_forcing",
     "apply_sss_restoring_step",
+    "apply_sss_restoring_step_fesom",
     "apply_sss_restoring_step_mpas",
     "apply_runoff_step",
     "apply_runoff_step_mpas",

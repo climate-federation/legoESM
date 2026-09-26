@@ -56,6 +56,8 @@ from legoesm.land.surface_scheme import (
     compute_simple_seb_fluxes,
     compute_two_leaf_canopy_fluxes,
 )
+from legoesm.land.canopy.radiative_transfer import broadband_albedo
+from legoesm.land.soil_albedo import rewet_soil_bands
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
@@ -542,6 +544,8 @@ def _step_multilayer_land_impl(
     # Surface scheme dispatch
     # =================================================================
     canopy_state_new = None  # updated only by CLMMLCanopyConfig branch
+    _alpha_applied = None    # set by the two-leaf branch: one albedo, absorbed + exported
+    _lp_soil = None          # two-leaf: params with soil bands at start-of-step water
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
         # advances soil thermal tentatively between passes.
@@ -593,6 +597,36 @@ def _step_multilayer_land_impl(
             _fwet_pre = interception_wetted_fraction(
                 state.W_canopy, _pai_i, config.interception)
 
+        # Soil-colour bands follow the START-of-step top-layer water (CTSM
+        # evaluates the soil albedo from the current h2osoi_vol); parameter
+        # sets without soil-colour bounds carry a prescribed albedo and pass
+        # through unchanged.
+        lp = rewet_soil_bands(lp, theta[:, 0])
+        _lp_soil = lp
+        # ONE surface albedo for absorption and for export.  The canopy RT's
+        # band albedos are the snow-free soil-colour background, so without
+        # this the land absorbed sunlight through ~0.15 while the atmosphere
+        # reflected the exported snow-aged 0.52 on the same cell -- nothing
+        # reconciled them (energy created on snow-covered tundra, lost on
+        # glacier).  Snow is layered on each band's own base, so snow-free
+        # columns absorb exactly as before and the calibrated glacier bands
+        # survive; the prognostic dry-soil brightening the old export added
+        # is NOT applied here because the bands carry the CTSM soil-colour
+        # moisture dependence (rewet above) and both reviewers flagged the
+        # double count.  Absorption this step is exactly (1 - broadband of
+        # these bands) * sw_down in daylight (the RT's own low-light fallback,
+        # sw_down < 1 W/m2, is the only exception).  With snow feedback on, the
+        # EXPORT (post-step block below) is the same construction on the
+        # post-step snow and soil water, i.e. what the NEXT step absorbs with,
+        # so the hand-off to the next radiation call is exact; within one step
+        # they differ by that step's snow and top-layer water change.
+        if (config.snow_albedo_feedback and lat is not None
+                and lp is not None and hasattr(lp, "ALB_VIS")):
+            _band = lambda a: compute_land_albedo(
+                lat, snow, snow_age, config.land_albedo,
+                base_albedo=jnp.broadcast_to(a, T_surface.shape))
+            lp = lp._replace(ALB_VIS=_band(lp.ALB_VIS), ALB_NIR=_band(lp.ALB_NIR))
+            _alpha_applied = broadband_albedo(lp.ALB_VIS, lp.ALB_NIR)
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -608,6 +642,9 @@ def _step_multilayer_land_impl(
             TgC_override=TgC_override,
             LAI_override=LAI_override,
             fwet=_fwet_pre,
+            # Warm start: the previous step's last converged canopy solution
+            # (None on a state that does not carry the cache -> cold start).
+            canopy_seed=state.canopy_x,
             # Bare-soil evaporation efficiency = TWO complementary top-layer
             # limiters, applied as a beta conductance efficiency in the canopy
             # soil energy balance (both tie evaporation to the fast-drying
@@ -799,6 +836,7 @@ def _step_multilayer_land_impl(
             snowfall_bands, dt,
             Q_net=band_rad.Rn_bands - shflx[:, None] - lhflx[:, None],
             cfg=bands, T_snow_melt=config.T_snow_melt,
+            snow_age_activation_K=config.land_albedo.snow_age_activation_K,
             precip_rain_bands=_precip_rain_bands, wind=wind_speed)
         snow_bands_new = band_step.swe_bands
         ice_bands_new = band_step.ice_bands
@@ -817,6 +855,7 @@ def _step_multilayer_land_impl(
             Q_net=G_surface,
             snow_melt_rate=config.snow_melt_rate,
             T_snow_melt=config.T_snow_melt,
+            snow_age_activation_K=config.land_albedo.snow_age_activation_K,
         )
         snow_bands_new = state.snow_bands
         snow_age_bands_new = state.snow_age_bands
@@ -1109,6 +1148,14 @@ def _step_multilayer_land_impl(
         # store (no ``None`` -> array carry-structure change under a scan).
         W_canopy=(_match(W_canopy_new, state.W_canopy)
                   if state.W_canopy is not None else None),
+        # Canopy warm-start cache.  Carried ONLY when the incoming state already
+        # carries it, so the pytree structure is invariant under a ``lax.scan``
+        # (a None -> array transition mid-scan would be a carry-structure
+        # change).  ``surface_out.canopy_x`` is None for every non-canopy
+        # surface scheme, in which case the cache is dropped.
+        canopy_x=(_match(surface_out.canopy_x, state.canopy_x)
+                  if (state.canopy_x is not None
+                      and surface_out.canopy_x is not None) else None),
     )
 
     # --- Post-step surface state for coupler ---
@@ -1144,7 +1191,25 @@ def _step_multilayer_land_impl(
         alpha_new = band_rad_new.alpha_eff
         lw_up_new = band_rad_new.lw_up_agg
     else:
-        if config.snow_albedo_feedback and lat is not None:
+        if _alpha_applied is not None:
+            # Same bands, same snow layering, POST-step snow and soil water:
+            # the export feeds the NEXT radiation call, whose canopy will
+            # absorb with the post-step state (codex).  Absorption this step
+            # used the pre-step bands (``_alpha_applied``); the two differ only
+            # by one step's snow and top-layer water change.
+            _lp_new = rewet_soil_bands(_lp_soil, richards_out.theta_new[:, 0])
+            _band_new = lambda a: compute_land_albedo(
+                lat, snow_new, snow_age_new, config.land_albedo,
+                base_albedo=jnp.broadcast_to(a, T_surface_new.shape))
+            alpha_new = broadband_albedo(_band_new(_lp_new.ALB_VIS),
+                                         _band_new(_lp_new.ALB_NIR))
+        elif getattr(_lp_soil, "ALB_VIS_DRY", None) is not None:
+            # Two-leaf without snow layering: the soil bands at the post-step
+            # water, i.e. what the next step absorbs with (same hand-off as
+            # above, minus snow).
+            _lp_new = rewet_soil_bands(_lp_soil, richards_out.theta_new[:, 0])
+            alpha_new = broadband_albedo(_lp_new.ALB_VIS, _lp_new.ALB_NIR)
+        elif config.snow_albedo_feedback and lat is not None:
             # Per-cell base albedo (CLM PFT / trainable), consistent with the SEB.
             alpha_new = compute_land_albedo(
                 lat, snow_new, snow_age_new, config.land_albedo,
@@ -1559,6 +1624,16 @@ def init_multilayer_land_state(
         canopy_state=canopy_state,
         # Dry canopy at start; carried only when interception is configured.
         W_canopy=(jnp.zeros(ncol) if config.interception is not None else None),
+        # Canopy warm-start cache, allocated (as "no converged solution yet")
+        # only for the scheme that has a Newton closure to seed.  It must be
+        # ALLOCATED here rather than left None and filled on the first step: a
+        # ``lax.scan`` carry cannot change pytree structure mid-scan.  All-NaN
+        # is the honest sentinel — the canopy tests it with ``isfinite`` and
+        # cold-starts every column on the first step, exactly as before.
+        canopy_x=(jnp.full((ncol, 6), jnp.nan, dtype=T_soil.dtype)
+                  if (isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+                      and not isinstance(config.surface_scheme,
+                                         CLMMLCanopyConfig)) else None),
     )
 
 
@@ -1608,3 +1683,41 @@ def aridity_theta_init(rh_surface, theta_wp, theta_fc):
     """
     rh = jnp.clip(rh_surface, 0.0, 1.0)
     return theta_wp + rh * (theta_fc - theta_wp)
+
+
+# --- Packed land columns (2026-08-25 step-cost profile) ---------------------
+# The coupled driver solves the tile only on the f_land > 0 columns and keeps
+# the full-grid state between calls; these three helpers are the whole
+# contract, factored here so the gather/scatter convention is testable
+# without a driver.  A leaf participates iff its LEADING axis is the full
+# column count — every other leaf (scalars, per-PFT tables) passes through.
+
+def gather_land_columns(tree, idx, ncol_full: int):
+    """Gather leading-``ncol_full`` leaves of ``tree`` onto columns ``idx``."""
+    return jax.tree_util.tree_map(
+        lambda x: (x[idx]
+                   if (hasattr(x, "shape") and getattr(x, "ndim", 0) >= 1
+                       and x.shape[0] == ncol_full)
+                   else x),
+        tree)
+
+
+def scatter_land_columns(full_tree, packed_tree, idx, ncol_full: int):
+    """Write packed leaves back into the full-grid tree at columns ``idx``.
+
+    Non-column leaves take the PACKED (advanced) value — they were passed
+    through the solve unpacked, so the solved value is the current one.
+    """
+    return jax.tree_util.tree_map(
+        lambda full, packed: (
+            full.at[idx].set(packed)
+            if (hasattr(full, "shape") and getattr(full, "ndim", 0) >= 1
+                and full.shape[0] == ncol_full)
+            else packed),
+        full_tree, packed_tree)
+
+
+def scatter_cells(v, idx, ncol_full: int):
+    """Packed per-column vector -> full-grid cells, zero fill (never NaN:
+    the consumers multiply by f_land, and 0 * NaN would contaminate them)."""
+    return jnp.zeros((ncol_full,), v.dtype).at[idx].set(v.reshape(-1))

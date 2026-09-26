@@ -1,0 +1,27 @@
+# SCM-RCE tuned parameters for convection=tiedtke
+# corrected nonrotating protocol (coriolis=0), median of 5 seeds.
+# NON-IDENTIFIABLE for multi-parameter schemes: the spread comment on each
+# line is how far the seeds disagreed. A large spread means the median is one
+# point in a flat basin, not a calibrated value. Opt in with --params; this
+# file never mutates a production *Config default.
+
+atm.conv.TiedtkeConfig.M_b_max: 0.0323192  # default 0.05, seed-spread 35% of range, kg/m^2/s
+atm.conv.TiedtkeConfig.autoconv_pe_max: 0.638534  # default 0.9, seed-spread 73% of range
+atm.conv.TiedtkeConfig.autoconv_q_c_crit: 0.000815085  # default 0.0005, seed-spread 90% of range, kg/kg
+atm.conv.TiedtkeConfig.cape_threshold: 154.57  # default 70, seed-spread 74% of range, J/kg
+atm.conv.TiedtkeConfig.cloud_depth_deep: 2901.93  # default 3000, seed-spread 15% of range, m
+atm.conv.TiedtkeConfig.cloud_depth_shallow_max: 2034.72  # default 1500, seed-spread 41% of range, m
+atm.conv.TiedtkeConfig.cmt_c_d: 1.15844  # default 0.7, seed-spread 47% of range
+atm.conv.TiedtkeConfig.cmt_c_u: 0.747444  # default 0.7, seed-spread 98% of range
+atm.conv.TiedtkeConfig.delta_deep: 0.000166188  # default 0.0001, seed-spread 80% of range, 1/m
+atm.conv.TiedtkeConfig.delta_midlevel: 0.000304161  # default 0.0002, seed-spread 67% of range, 1/m
+atm.conv.TiedtkeConfig.delta_shallow: 0.000719565  # default 0.0003, seed-spread 23% of range, 1/m
+atm.conv.TiedtkeConfig.downdraft_alpha: 0.0239947  # default 0.3, seed-spread 24% of range
+atm.conv.TiedtkeConfig.downdraft_evap_efficiency: 0.0631945  # default 0.05, seed-spread 46% of range
+atm.conv.TiedtkeConfig.mc_proxy_RH_crit: 0.510459  # default 0.6, seed-spread 81% of range
+atm.conv.TiedtkeConfig.midlevel_M_b_fraction: 0.702193  # default 0.5, seed-spread 67% of range
+atm.conv.TiedtkeConfig.moisture_convergence_threshold: 1.99324e-08  # default 1e-08, seed-spread 68% of range, kg/kg/s
+atm.conv.TiedtkeConfig.parcel_dq: 0.000369047  # default 0.001, seed-spread 12% of range, kg/kg
+atm.conv.TiedtkeConfig.tau_MC_proxy: 6128.99  # default 3600, seed-spread 65% of range, s
+atm.conv.TiedtkeConfig.tau_M_u_relax: 4285.58  # default 1800, seed-spread 82% of range, s
+atm.conv.TiedtkeConfig.tau_shallow_M_b: 6998.52  # default 3600, seed-spread 42% of range, s

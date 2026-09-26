@@ -178,6 +178,40 @@ sys.exit(0 if ok else 1)
 # pass — an instrument that misses the known answer cannot be trusted on the
 # unknown one.
 S8_EXPECT="sfc:64=12,sfc:128=14,metis:64=13,metis:128=19,geometric:64=16,geometric:128=21"
+# THESE SIX EXPECTATIONS ARE STALE AND THIS ARM IS EXPECTED TO GO RED.
+# They are left in place deliberately: a gate that fires is information,
+# an emptied gate is not, and this repo has lost weeks to checks nobody
+# ran. Two reasons they no longer hold, both measured 2026-09-23:
+#   1. The schedule builder gained a SIZE-AWARE colouring that admits an
+#      extra round when that buys more than ten per cent of padded weight.
+#      sfc:64 now colours to 12 rounds with greedy still at 11 and
+#      max_degree unchanged at 11 -- the schedule got BETTER, and a gate
+#      on the round count fires when it does.
+#   2. These were measured with the estimator colouring at 1:1 cell/edge
+#      weights, while production passes cell_width=nlev+2, edge_width=nlev.
+#      Under a size-aware colouring the weights change WHICH schedule is
+#      picked, so a 1:1 round count is not production's round count.
+# MEASURED REPLACEMENTS, 2026-09-23, subdivision 9, halo depth 3, with
+# production weights (cell_width=28, edge_width=26) passed straight to
+# spmd_schedule_cost. They are NOT pinned below because this launcher's
+# bench still calls the estimator UNWEIGHTED, so pinning them here would
+# make the arm fail for the opposite reason. Thread the weights through
+# bench_voronoi_partition_methods first, then pin these:
+#     sfc:64=13        greedy 13  degree 13  pairs 538   fp 67b04e349089e813
+#     sfc:128=14       greedy 14  degree 13  pairs 1112  fp bb5554ee886d43e4
+#     metis:64=15      greedy 15  degree 15  pairs 690   fp 7cd4dea3ab062747
+#     metis:128=18     greedy 18  degree 18  pairs 1266  fp 8ebe1328337e3859
+#     geometric:64=16  greedy 16  degree 16  pairs 652   fp 9b55d8f5c0d261e5
+#     geometric:128=17 greedy 17  degree 17  pairs 1376  fp f43aaf7f0045333d
+# Note what those say: under production weights the space-filling-curve
+# split is best at BOTH rank counts, and metis is worst at 128 despite
+# minimising edge cut -- the same opposite-movement this campaign has
+# measured before.
+#
+# TO RE-PIN: re-run this scan with cell_width/edge_width passed through,
+# record what it reports together with the ownership fingerprint
+# spmd_schedule_cost now returns, and replace the line below. Do not
+# delete it, and do not widen the tolerance.
 S9_EXPECT="sfc:64=11,sfc:128=13,metis:64=14,metis:128=18,geometric:64=14,geometric:128=18"
 
 run_arm 8 64,128 "1/3 VALIDATION s8" "$S8_EXPECT"; RC8=$?

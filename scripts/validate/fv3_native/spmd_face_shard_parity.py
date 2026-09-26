@@ -86,10 +86,32 @@ def main(argv=None):
     ap.add_argument("--n-shards", type=int, default=6, choices=(2, 3, 6),
                     help="devices the face axis is split over (6 % n == 0)")
     ap.add_argument("--dt", type=float, default=120.0)
+    ap.add_argument("--face-batched", action="store_true",
+                    help="arm B additionally routes the 3-D phases "
+                         "through their vmapped face-batched arms "
+                         "(step_face_batched=True) -- the fix for the "
+                         "per-face x[t] all-reduce storm.")
+    ap.add_argument("--ring", action="store_true",
+                    help="arm B additionally routes the step's halo "
+                         "exchanges through the M3 shard_map ring "
+                         "(step_spmd_mesh=mesh). Per-level ring parity "
+                         "is bitwise; the K-BATCHED ring (v2a) "
+                         "reassociates vmapped stencil dots, so expect "
+                         "the few-ulp floor (measured 6e-15 rel), NOT "
+                         "0.0. Gate with --gate-rtol/--gate-atol.")
     ap.add_argument("--max-abs", type=float, default=None,
                     help="gate: worst |sharded - single| over all fields. "
                          "Omit for report-only (first runs MEASURE the "
-                         "bound; pass it once pinned).")
+                         "bound; pass it once pinned). A single absolute "
+                         "bound is scale-unfair across fields (codex); "
+                         "prefer --gate-rtol/--gate-atol.")
+    ap.add_argument("--gate-rtol", type=float, default=None,
+                    help="per-field gate: |d|max <= gate-atol + "
+                         "gate-rtol * |field|max. The fair form across "
+                         "delp (1e4) and tracer (1e-2) scales.")
+    ap.add_argument("--gate-atol", type=float, default=1e-12,
+                    help="absolute floor for --gate-rtol (zero-scale "
+                         "fields like w/omga on the hydrostatic arm).")
     args = ap.parse_args(argv)
 
     import jax
@@ -132,7 +154,10 @@ def main(argv=None):
     mesh = Mesh(np.array(devs[:args.n_shards]), ("face",))
     shard = NamedSharding(mesh, P("face"))
     model_sh = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(km=args.km),
-                                   step_out_shardings=shard)
+                                   step_out_shardings=shard,
+                                   step_spmd_mesh=(mesh if args.ring
+                                                   else None),
+                                   step_face_batched=args.face_batched)
     model = model_sh                    # arm B steps below use the pinned jit
     b = _shard_bundle(ic, shard)
     b = model.step(b, args.dt)          # warmup: pays compile for this layout
@@ -175,16 +200,38 @@ def main(argv=None):
     # ---- compare: every field, worst |d| and its scale ----
     assert set(single) == set(sharded)
     worst, worst_name = 0.0, ""
+    rel_fail = []
     print(f"face-shard parity, C{args.resolution} km={args.km} "
           f"{args.n_steps} steps, {args.n_shards} shards "
-          f"({devs[0].platform}):")
+          f"({devs[0].platform})"
+          f"{', RING exchanges' if args.ring else ''}:")
     for name in sorted(single):
-        d = float(np.abs(single[name] - sharded[name]).max())
-        sc = float(np.abs(single[name]).max())
+        a, s2 = single[name], sharded[name]
+        # codex MAJOR: max() over a NaN diff never updates `worst`, so a
+        # NaN field could PASS the gate silently. Non-finite = hard fail.
+        if not (np.isfinite(a).all() and np.isfinite(s2).all()):
+            raise SystemExit(
+                f"NON-FINITE field {name}: single finite="
+                f"{bool(np.isfinite(a).all())}, sharded="
+                f"{bool(np.isfinite(s2).all())} -- parity is "
+                f"meaningless, refusing to gate")
+        d = float(np.abs(a - s2).max())
+        sc = float(np.abs(a).max())
         print(f"  {name:12s} |d|max={d:.3e}  scale={sc:.3e}")
+        if args.gate_rtol is not None and \
+                d > args.gate_atol + args.gate_rtol * sc:
+            rel_fail.append((name, d, sc))
         if d > worst:
             worst, worst_name = d, name
     print(f"WORST |d|max: {worst:.6e} at {worst_name}")
+    if args.gate_rtol is not None:
+        if rel_fail:
+            for name, d, sc in rel_fail:
+                print(f"GATE FAILED (rel): {name} |d|={d:.3e} > "
+                      f"{args.gate_atol:.1e} + {args.gate_rtol:.1e}*{sc:.3e}")
+            return 1
+        print(f"GATE PASSED (per-field): |d| <= {args.gate_atol:.1e} + "
+              f"{args.gate_rtol:.1e}*scale on all fields")
     print(f"wall: single {t_single:.2f}s, sharded {t_shard:.2f}s "
           f"(descriptive at this scale, NOT the scaling claim)")
     if args.max_abs is None:

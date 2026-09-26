@@ -194,6 +194,53 @@ PW_BC_PA = 34000.0       # pW   -- vertical moisture decay pressure
 PHIW_BC_RAD = 2.0 * np.pi / 9.0   # phiW -- meridional moisture width
 
 
+# --- DCMIP16 terminator toy-chemistry IC (test_cases.F90:4136-4205) ---
+# Filled by the oracle's cold start whenever the field_table lists
+# tracers named cl and cl2 (:6746-6750).  The REACTION lives in fv_phys
+# (:4155 "you will have to change it both here and in fv_phys") and never
+# runs on an adiabatic deck, so on it cl/cl2 are passive, longitude-
+# dependent, nonzero passengers with Cl + 2 Cl2 = qcly exactly.
+TERM_QCLY = 4.0e-6            # :4157
+TERM_LC = 5.0 * np.pi / 3.0   # :4158
+TERM_THC = np.pi / 9.0        # :4159
+TERM_K2 = 1.0                 # :4160
+
+
+def dcmip16_terminator_cl_cl2(agrid_lon, agrid_lat):
+    """``(cl, cl2)`` on cell centres, one level -- the oracle copies
+    level 1 to every level (:4174-4180).  Radians in, mixing ratio out."""
+    lon = np.asarray(agrid_lon, dtype=np.float64)
+    lat = np.asarray(agrid_lat, dtype=np.float64)
+    k1 = np.maximum(0.0, np.sin(lat) * np.sin(TERM_THC)
+                    + np.cos(lat) * np.cos(TERM_THC) * np.cos(lon - TERM_LC))
+    r = k1 / TERM_K2 * 0.25
+    d = np.sqrt(r * r + 2.0 * r * TERM_QCLY)
+    cl = d - r
+    cl2 = 0.5 * (TERM_QCLY - cl)
+    return cl, cl2
+
+
+def dcmip16_terminator_six_face(ctx: dict, km: int) -> list:
+    """Six ``[cl, cl2]`` padded ``(m_a, m_a, km)`` arrays, compute window
+    filled, halos zero (the caller's convention for every tracer)."""
+    from legoesm.core.fv3_native_state_3d import field_shape
+    n, ng = int(ctx["n"]), int(ctx["ng"])
+    cs = slice(ng, ng + n)
+    out = []
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        cl, cl2 = dcmip16_terminator_cl_cl2(
+            np.asarray(gs["agrid_lon"])[cs, cs],
+            np.asarray(gs["agrid_lat"])[cs, cs])
+        pair = []
+        for f in (cl, cl2):
+            q = np.zeros(field_shape("delp", n, ng, km), dtype=np.float64)
+            q[cs, cs, :] = f[:, :, None]
+            pair.append(q)
+        out.append(pair)
+    return out
+
+
 def dcmip16_bc_sphum(ak, bk, agrid_lat, km: int) -> np.ndarray:
     """``sphum`` on the DCMIP16_BC column -- test_cases.F90:6737-6744.
 

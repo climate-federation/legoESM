@@ -1,0 +1,1045 @@
+{
+  "base_round2_artifact_sha256": "ef96c97d44313cfb9456b18fcaf8d63834a1d0d1e9e4850a115842bb815a072a",
+  "base_round2_term_error_closure": {
+    "u_normalized_to_total_residual": 1.0764362196730072e-12,
+    "v_normalized_to_total_residual": 9.973535071390227e-12
+  },
+  "bits_order": [
+    "000",
+    "100",
+    "010",
+    "001",
+    "110",
+    "101",
+    "011",
+    "111"
+  ],
+  "components": {
+    "u": {
+      "all_eight_oracle_endpoint": {
+        "campaign_gate": "NEAR-CLASS",
+        "correlation": 1.0,
+        "mean_abs_ratio": 1.0,
+        "n": 9758,
+        "normalized_rms_error": 3.223189027629941e-16,
+        "per_element_max_error_over_nemo_rms": 5.95992635112119e-15,
+        "rms_ratio": 1.0
+      },
+      "all_eight_term_closure_normalized_rms": 1.583675240113074e-10,
+      "arms": {
+        "000": {
+          "attribution": {
+            "correlation_with_total_residual": null,
+            "residual_removal": 0.0,
+            "rms_gain": 0.0,
+            "verdict": "BASELINE"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999999981174,
+            "mean_abs_ratio": 0.9999995140708735,
+            "n": 9758,
+            "normalized_rms_error": 1.9539648558722173e-06,
+            "per_element_max_error_over_nemo_rms": 8.315661699755067e-05,
+            "rms_ratio": 0.9999995840388566
+          },
+          "normalized_residual_rms": 1.0,
+          "normalized_squared_residual_energy": 1.0,
+          "squared_energy_benefit": 0.0,
+          "substitutions": []
+        },
+        "001": {
+          "attribution": {
+            "correlation_with_total_residual": 0.05782111491654701,
+            "residual_removal": -3.8528100525195788,
+            "rms_gain": 4.805808894124578,
+            "verdict": "REFUTES_CARRY"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999999537968,
+            "mean_abs_ratio": 0.9999981247679492,
+            "n": 9758,
+            "normalized_rms_error": 9.482220294845932e-06,
+            "per_element_max_error_over_nemo_rms": 0.0001389550468275871,
+            "rms_ratio": 0.9999993471167634
+          },
+          "normalized_residual_rms": 4.852810052519579,
+          "normalized_squared_residual_energy": 23.54976540583508,
+          "squared_energy_benefit": -22.54976540583508,
+          "substitutions": [
+            "cor_removal"
+          ]
+        },
+        "010": {
+          "attribution": {
+            "correlation_with_total_residual": -0.02916631433044875,
+            "residual_removal": -3.9651538510810838,
+            "rms_gain": 4.835751370036012,
+            "verdict": "REFUTES_CARRY"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999999514155,
+            "mean_abs_ratio": 1.0000013594150392,
+            "n": 9758,
+            "normalized_rms_error": 9.701736129011628e-06,
+            "per_element_max_error_over_nemo_rms": 0.00019964065127117033,
+            "rms_ratio": 1.0000001605357416
+          },
+          "normalized_residual_rms": 4.965153851081084,
+          "normalized_squared_residual_energy": 24.65275276490532,
+          "squared_energy_benefit": -23.65275276490532,
+          "substitutions": [
+            "vorticity"
+          ]
+        },
+        "011": {
+          "attribution": {
+            "correlation_with_total_residual": 0.4126863163462953,
+            "residual_removal": 0.08652382878366294,
+            "rms_gain": 0.334979080379257,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999999983576,
+            "mean_abs_ratio": 0.9999999697339139,
+            "n": 9758,
+            "normalized_rms_error": 1.7849003352374393e-06,
+            "per_element_max_error_over_nemo_rms": 7.948898346609137e-05,
+            "rms_ratio": 0.9999999235252689
+          },
+          "normalized_residual_rms": 0.9134761712163371,
+          "normalized_squared_residual_energy": 0.8344387153800588,
+          "squared_energy_benefit": 0.16556128461994124,
+          "substitutions": [
+            "vorticity",
+            "cor_removal"
+          ]
+        },
+        "100": {
+          "attribution": {
+            "correlation_with_total_residual": 0.9426393223555646,
+            "residual_removal": 0.6612415045308856,
+            "rms_gain": 0.9133374285898909,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999999998356,
+            "mean_abs_ratio": 0.9999995384413901,
+            "n": 9758,
+            "normalized_rms_error": 6.619221947727662e-07,
+            "per_element_max_error_over_nemo_rms": 1.850538660224725e-05,
+            "rms_ratio": 0.9999996569244131
+          },
+          "normalized_residual_rms": 0.3387584954691144,
+          "normalized_squared_residual_energy": 0.114757318252498,
+          "squared_energy_benefit": 0.885242681747502,
+          "substitutions": [
+            "lateral_friction"
+          ]
+        },
+        "101": {
+          "attribution": {
+            "correlation_with_total_residual": 0.22943987934275234,
+            "residual_removal": -3.8351151874225913,
+            "rms_gain": 4.964252263621091,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999999540935,
+            "mean_abs_ratio": 0.9999981491384663,
+            "n": 9758,
+            "normalized_rms_error": 9.447645150319534e-06,
+            "per_element_max_error_over_nemo_rms": 0.00011926599447739837,
+            "rms_ratio": 0.9999994200036998
+          },
+          "normalized_residual_rms": 4.835115187422591,
+          "normalized_squared_residual_energy": 23.378338875644605,
+          "squared_energy_benefit": -22.378338875644605,
+          "substitutions": [
+            "lateral_friction",
+            "cor_removal"
+          ]
+        },
+        "110": {
+          "attribution": {
+            "correlation_with_total_residual": 0.1483978741798338,
+            "residual_removal": -3.8067621779483583,
+            "rms_gain": 4.8534656817026525,
+            "verdict": "REFUTES_CARRY"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999999544785,
+            "mean_abs_ratio": 1.0000013837470008,
+            "n": 9758,
+            "normalized_rms_error": 9.392244366247021e-06,
+            "per_element_max_error_over_nemo_rms": 0.00013016005074268343,
+            "rms_ratio": 1.0000002334199913
+          },
+          "normalized_residual_rms": 4.806762177948358,
+          "normalized_squared_residual_energy": 23.10496263535485,
+          "squared_energy_benefit": -22.10496263535485,
+          "substitutions": [
+            "lateral_friction",
+            "vorticity"
+          ]
+        },
+        "111": {
+          "attribution": {
+            "correlation_with_total_residual": 0.9997799204029159,
+            "residual_removal": 0.9784422314091638,
+            "rms_gain": 0.9988317908982405,
+            "verdict": "CONFIRMS_CARRY"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999999999993,
+            "mean_abs_ratio": 0.9999999941044307,
+            "n": 9758,
+            "normalized_rms_error": 4.2123122198759046e-08,
+            "per_element_max_error_over_nemo_rms": 9.63734599858255e-07,
+            "rms_ratio": 0.9999999964108984
+          },
+          "normalized_residual_rms": 0.021557768590836218,
+          "normalized_squared_residual_energy": 0.0004647373866160445,
+          "squared_energy_benefit": 0.999535262613384,
+          "substitutions": [
+            "lateral_friction",
+            "vorticity",
+            "cor_removal"
+          ]
+        }
+      },
+      "assembly_remainder": {
+        "bound": 0.1,
+        "bounded": true,
+        "disposition": "BOUNDED_MAGNITUDE",
+        "max_abs": 2.2530965244569577e-20,
+        "normalized_rms": 1.583675240113074e-10
+      },
+      "base_residual_rms": 6.664804280567314e-12,
+      "component": "u",
+      "energy_decomposition": {
+        "identities": {
+          "mobius_sum_minus_full_benefit": -5.995204332975845e-15,
+          "shapley_sum_minus_full_benefit": -3.219646771412954e-15
+        },
+        "main": {
+          "C": -22.54976540583508,
+          "L": 0.885242681747502,
+          "V": -23.65275276490532
+        },
+        "pair_interactions": {
+          "LxC": {
+            "label": "MATERIAL",
+            "value": -0.7138161515570296
+          },
+          "LxV": {
+            "label": "MATERIAL",
+            "value": 0.662547447802968
+          },
+          "VxC": {
+            "label": "MATERIAL",
+            "value": 46.36807945536034
+          }
+        },
+        "shapley": {
+          "cor_removal": {
+            "label": "OWNED_POSITIVE_CONTRIBUTOR",
+            "value": 0.277366246066574
+          },
+          "lateral_friction": {
+            "label": "OWNED_POSITIVE_CONTRIBUTOR",
+            "value": 0.8596083298704712
+          },
+          "vorticity": {
+            "label": "OWNED_CANCELLER",
+            "value": -0.13743931332366444
+          }
+        },
+        "triple_interaction": {
+          "label": "BOUNDED",
+          "value": 0.0
+        }
+      },
+      "field_linearity_normalized_rms": {
+        "LxC": 6.940768704312631e-18,
+        "LxV": 0.0,
+        "LxVxC": 6.940768704312631e-18,
+        "VxC": 0.0
+      },
+      "fully_disposed": true,
+      "group_confirms": true,
+      "noncandidate_bounds": {
+        "assembly_remainder": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 1.583675240113074e-10
+        },
+        "drag": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 0.000414041044175515
+        },
+        "kinetic_energy_gradient": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 3.8582650119099966e-13
+        },
+        "pressure_gradient": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 7.944289237647815e-07
+        },
+        "vertical_advection": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 0.010037093280507435
+        },
+        "wind": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 0.018951366790048163
+        }
+      },
+      "sample_count": 9758,
+      "term_dispositions": {
+        "assembly_remainder": "BOUNDED_MAGNITUDE",
+        "cor_removal": "OWNED_POSITIVE_CONTRIBUTOR",
+        "drag": "BOUNDED_MAGNITUDE",
+        "kinetic_energy_gradient": "BOUNDED_MAGNITUDE",
+        "lateral_friction": "OWNED_POSITIVE_CONTRIBUTOR",
+        "pressure_gradient": "BOUNDED_MAGNITUDE",
+        "vertical_advection": "BOUNDED_MAGNITUDE",
+        "vorticity": "OWNED_CANCELLER",
+        "wind": "BOUNDED_MAGNITUDE"
+      }
+    },
+    "v": {
+      "all_eight_oracle_endpoint": {
+        "campaign_gate": "NEAR-CLASS",
+        "correlation": 1.0,
+        "mean_abs_ratio": 1.0,
+        "n": 9868,
+        "normalized_rms_error": 2.966893099627973e-16,
+        "per_element_max_error_over_nemo_rms": 7.709176782679023e-15,
+        "rms_ratio": 1.0
+      },
+      "all_eight_term_closure_normalized_rms": 9.971477741582772e-12,
+      "arms": {
+        "000": {
+          "attribution": {
+            "correlation_with_total_residual": null,
+            "residual_removal": 0.0,
+            "rms_gain": 0.0,
+            "verdict": "BASELINE"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999997944569,
+            "mean_abs_ratio": 0.9999986895970492,
+            "n": 9868,
+            "normalized_rms_error": 2.939336660178095e-05,
+            "per_element_max_error_over_nemo_rms": 0.0008011401797623365,
+            "rms_ratio": 0.9999785828768776
+          },
+          "normalized_residual_rms": 1.0,
+          "normalized_squared_residual_energy": 1.0,
+          "squared_energy_benefit": 0.0,
+          "substitutions": []
+        },
+        "001": {
+          "attribution": {
+            "correlation_with_total_residual": -0.2028852793282902,
+            "residual_removal": -0.0611213040794194,
+            "rms_gain": 0.19827879950509222,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999997978877,
+            "mean_abs_ratio": 0.9999943380760477,
+            "n": 9868,
+            "normalized_rms_error": 3.118992749977166e-05,
+            "per_element_max_error_over_nemo_rms": 0.0008137357498991553,
+            "rms_ratio": 0.9999760681652223
+          },
+          "normalized_residual_rms": 1.0611213040794194,
+          "normalized_squared_residual_energy": 1.1259784219712075,
+          "squared_energy_benefit": -0.12597842197120745,
+          "substitutions": [
+            "cor_removal"
+          ]
+        },
+        "010": {
+          "attribution": {
+            "correlation_with_total_residual": 0.2944751927142418,
+            "residual_removal": 0.04362368457418231,
+            "rms_gain": 0.20960457488714487,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999997678919,
+            "mean_abs_ratio": 1.000003316967519,
+            "n": 9868,
+            "normalized_rms_error": 2.811111964856678e-05,
+            "per_element_max_error_over_nemo_rms": 0.0007880791593954356,
+            "rms_ratio": 0.9999817556342495
+          },
+          "normalized_residual_rms": 0.9563763154258177,
+          "normalized_squared_residual_energy": 0.9146556567074631,
+          "squared_energy_benefit": 0.08534434329253693,
+          "substitutions": [
+            "vorticity"
+          ]
+        },
+        "011": {
+          "attribution": {
+            "correlation_with_total_residual": 0.7839402999390541,
+            "residual_removal": 0.021164462594718603,
+            "rms_gain": 0.027083034461028218,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999997987151,
+            "mean_abs_ratio": 0.9999989654465173,
+            "n": 9868,
+            "normalized_rms_error": 2.8771271793803616e-05,
+            "per_element_max_error_over_nemo_rms": 0.0008006747295322543,
+            "rms_ratio": 0.9999792408949268
+          },
+          "normalized_residual_rms": 0.9788355374052814,
+          "normalized_squared_residual_energy": 0.9581190092874861,
+          "squared_energy_benefit": 0.041880990712513944,
+          "substitutions": [
+            "vorticity",
+            "cor_removal"
+          ]
+        },
+        "100": {
+          "attribution": {
+            "correlation_with_total_residual": 0.3666841571421037,
+            "residual_removal": 0.06876878683076948,
+            "rms_gain": 0.36689745158929754,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999998530534,
+            "mean_abs_ratio": 0.9999986104387745,
+            "n": 9868,
+            "normalized_rms_error": 2.7372020439704343e-05,
+            "per_element_max_error_over_nemo_rms": 0.0003588141518313428,
+            "rms_ratio": 0.9999785666995679
+          },
+          "normalized_residual_rms": 0.9312312131692305,
+          "normalized_squared_residual_energy": 0.8671915723806368,
+          "squared_energy_benefit": 0.13280842761936318,
+          "substitutions": [
+            "lateral_friction"
+          ]
+        },
+        "101": {
+          "attribution": {
+            "correlation_with_total_residual": 0.22872803920159646,
+            "residual_removal": 0.0033323835764690335,
+            "rms_gain": 0.4172583918765688,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999998564546,
+            "mean_abs_ratio": 0.9999942589177728,
+            "n": 9868,
+            "normalized_rms_error": 2.9295416629665836e-05,
+            "per_element_max_error_over_nemo_rms": 0.00037512344124670415,
+            "rms_ratio": 0.9999760519879481
+          },
+          "normalized_residual_rms": 0.996667616423531,
+          "normalized_squared_residual_energy": 0.9933463376273626,
+          "squared_energy_benefit": 0.0066536623726374255,
+          "substitutions": [
+            "lateral_friction",
+            "cor_removal"
+          ]
+        },
+        "110": {
+          "attribution": {
+            "correlation_with_total_residual": 0.4640852297260209,
+            "residual_removal": 0.11591554255917047,
+            "rms_gain": 0.4222628524943766,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999998265345,
+            "mean_abs_ratio": 1.0000032378092443,
+            "n": 9868,
+            "normalized_rms_error": 2.5986218564499925e-05,
+            "per_element_max_error_over_nemo_rms": 0.0003388713312055376,
+            "rms_ratio": 0.9999817394568866
+          },
+          "normalized_residual_rms": 0.8840844574408295,
+          "normalized_squared_residual_energy": 0.7816053278884459,
+          "squared_energy_benefit": 0.21839467211155406,
+          "substitutions": [
+            "lateral_friction",
+            "vorticity"
+          ]
+        },
+        "111": {
+          "attribution": {
+            "correlation_with_total_residual": 0.4228742233144335,
+            "residual_removal": 0.09157002265227521,
+            "rms_gain": 0.3678065698355632,
+            "verdict": "UNRESOLVED"
+          },
+          "campaign_metric": {
+            "campaign_gate": "DEBT",
+            "correlation": 0.9999999998573292,
+            "mean_abs_ratio": 0.9999988862882425,
+            "n": 9868,
+            "normalized_rms_error": 2.670181535623841e-05,
+            "per_element_max_error_over_nemo_rms": 0.00035080980256876936,
+            "rms_ratio": 0.9999792247175996
+          },
+          "normalized_residual_rms": 0.9084299773477248,
+          "normalized_squared_residual_energy": 0.8252450237439877,
+          "squared_energy_benefit": 0.17475497625601233,
+          "substitutions": [
+            "lateral_friction",
+            "vorticity",
+            "cor_removal"
+          ]
+        }
+      },
+      "assembly_remainder": {
+        "bound": 0.1,
+        "bounded": true,
+        "disposition": "BOUNDED_MAGNITUDE",
+        "max_abs": 2.4838993024048592e-20,
+        "normalized_rms": 9.971477741582772e-12
+      },
+      "base_residual_rms": 1.03345508945636e-10,
+      "component": "v",
+      "energy_decomposition": {
+        "identities": {
+          "mobius_sum_minus_full_benefit": 0.0,
+          "shapley_sum_minus_full_benefit": 0.0
+        },
+        "main": {
+          "C": -0.12597842197120745,
+          "L": 0.13280842761936318,
+          "V": 0.08534434329253693
+        },
+        "pair_interactions": {
+          "LxC": {
+            "label": "BOUNDED",
+            "value": -0.0001763432755182981
+          },
+          "LxV": {
+            "label": "BOUNDED",
+            "value": 0.00024190119965394885
+          },
+          "VxC": {
+            "label": "MATERIAL",
+            "value": 0.08251506939118447
+          }
+        },
+        "shapley": {
+          "cor_removal": {
+            "label": "DESCRIPTIVE_UNADMITTED_GROUP_UNRESOLVED",
+            "value": -0.08480905891337452
+          },
+          "lateral_friction": {
+            "label": "DESCRIPTIVE_UNADMITTED_GROUP_UNRESOLVED",
+            "value": 0.13284120658143087
+          },
+          "vorticity": {
+            "label": "DESCRIPTIVE_UNADMITTED_GROUP_UNRESOLVED",
+            "value": 0.126722828587956
+          }
+        },
+        "triple_interaction": {
+          "label": "BOUNDED",
+          "value": -4.440892098500626e-16
+        }
+      },
+      "field_linearity_normalized_rms": {
+        "LxC": 7.695522592743737e-18,
+        "LxV": 7.146957272875897e-18,
+        "LxVxC": 3.540739075762639e-17,
+        "VxC": 1.2589665581348278e-18
+      },
+      "fully_disposed": false,
+      "group_confirms": false,
+      "noncandidate_bounds": {
+        "assembly_remainder": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 9.971477741582772e-12
+        },
+        "drag": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 1.8764104294133102e-05
+        },
+        "kinetic_energy_gradient": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 0.002339918783242175
+        },
+        "pressure_gradient": {
+          "bound": 0.1,
+          "bounded": false,
+          "disposition": "UNBOUNDED_REMAINDER",
+          "rms_gain": 0.9105717018954679
+        },
+        "vertical_advection": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 0.0015235955354167049
+        },
+        "wind": {
+          "bound": 0.1,
+          "bounded": true,
+          "disposition": "BOUNDED_MAGNITUDE",
+          "rms_gain": 0.0
+        }
+      },
+      "sample_count": 9868,
+      "term_dispositions": {
+        "assembly_remainder": "BOUNDED_MAGNITUDE",
+        "cor_removal": "UNRESOLVED_IN_COMPOSITE",
+        "drag": "BOUNDED_MAGNITUDE",
+        "kinetic_energy_gradient": "BOUNDED_MAGNITUDE",
+        "lateral_friction": "UNRESOLVED_IN_COMPOSITE",
+        "pressure_gradient": "UNBOUNDED_REMAINDER",
+        "vertical_advection": "BOUNDED_MAGNITUDE",
+        "vorticity": "UNRESOLVED_IN_COMPOSITE",
+        "wind": "BOUNDED_MAGNITUDE"
+      }
+    }
+  },
+  "controls": {
+    "matrix": {
+      "bounded_label_reached": true,
+      "bounded_term_accepts_0p09": true,
+      "canceller_label_reached": true,
+      "group_confirm_reached": true,
+      "group_refute_reached": true,
+      "locked_corners_accept_exact": true,
+      "planted_0p11_term_rejected": true,
+      "planted_linearity_breach_rejected": true,
+      "planted_locked_corner_rejected": true,
+      "positive_label_reached": true
+    },
+    "round2": {
+      "attribution_classifier": {
+        "confirming_score": {
+          "correlation_with_total_residual": 1.0,
+          "residual_removal": 1.0,
+          "rms_gain": 1.0,
+          "verdict": "CONFIRMS_CARRY"
+        },
+        "identity_confirms": true,
+        "orthogonal_refutes": true,
+        "refuting_score": {
+          "correlation_with_total_residual": -5.551115123125784e-17,
+          "residual_removal": -0.4142135623730949,
+          "rms_gain": 0.9999999999999999,
+          "verdict": "REFUTES_CARRY"
+        }
+      },
+      "base_reconstruction": {
+        "bar": 1e-12,
+        "planted_u_fires": true,
+        "planted_u_normalized_error": 1.0000000000050667e-06,
+        "u_pass": true,
+        "v_pass": true
+      },
+      "campaign_classifier_and_alignment": {
+        "actual_binding_campaign_gate": "DEBT",
+        "actual_binding_error": 0.0002740311743349557,
+        "actual_binding_perturbation_changes_score": true,
+        "alignment_best": {
+          "di": 0,
+          "dj": 0,
+          "normalized_rms_error": 0.0002740311743349557
+        },
+        "alignment_scan": [
+          {
+            "di": -1,
+            "dj": -1,
+            "normalized_rms_error": 0.8516081801088069
+          },
+          {
+            "di": 0,
+            "dj": -1,
+            "normalized_rms_error": 0.1519087309177422
+          },
+          {
+            "di": 1,
+            "dj": -1,
+            "normalized_rms_error": 0.6195845689627931
+          },
+          {
+            "di": -1,
+            "dj": 0,
+            "normalized_rms_error": 0.8443944756561844
+          },
+          {
+            "di": 0,
+            "dj": 0,
+            "normalized_rms_error": 0.0002740311743349557
+          },
+          {
+            "di": 1,
+            "dj": 0,
+            "normalized_rms_error": 0.6070870738151861
+          },
+          {
+            "di": -1,
+            "dj": 1,
+            "normalized_rms_error": 0.8458064471463069
+          },
+          {
+            "di": 0,
+            "dj": 1,
+            "normalized_rms_error": 0.12872651182641404
+          },
+          {
+            "di": 1,
+            "dj": 1,
+            "normalized_rms_error": 0.6071317831961214
+          }
+        ],
+        "identical_array_zero": true,
+        "identical_campaign_gate": "AT BAR",
+        "identical_error": 0.0,
+        "planted_actual_binding_campaign_gate": "DEBT",
+        "planted_actual_binding_error": 0.0002740603312831709,
+        "planted_identity_campaign_gate": "DEBT",
+        "planted_identity_error": 1.0000000000008017e-06,
+        "planted_identity_flips_campaign_gate": true,
+        "zero_shift_is_best": true
+      },
+      "donor_equalization": {
+        "changes_verdict_path": true,
+        "east_donor": [
+          49,
+          50
+        ],
+        "equalized_score": {
+          "corrected_residual_reduction": 0.02079651047885067,
+          "prediction_correlation": 0.2026900415810054,
+          "prediction_normalized_error": 0.9792034895211493,
+          "verdict": "UNRESOLVED_BRIDGE_WIND_SOURCE"
+        },
+        "faithful_score": {
+          "corrected_residual_reduction": 0.9928695526681799,
+          "prediction_correlation": 0.999974655141223,
+          "prediction_normalized_error": 0.007130447331820113,
+          "verdict": "CONFIRMS_BRIDGE_WIND_SOURCE"
+        },
+        "receiver": [
+          49,
+          49
+        ]
+      },
+      "entry_identity": {
+        "all_nonstress_exact": true,
+        "fields": [
+          {
+            "exact": true,
+            "field": "u"
+          },
+          {
+            "exact": true,
+            "field": "v"
+          },
+          {
+            "exact": true,
+            "field": "T"
+          },
+          {
+            "exact": true,
+            "field": "S"
+          },
+          {
+            "exact": true,
+            "field": "eta"
+          },
+          {
+            "exact": true,
+            "field": "H_bathy"
+          },
+          {
+            "exact": true,
+            "field": "land_mask"
+          },
+          {
+            "exact": true,
+            "field": "u_mask"
+          },
+          {
+            "exact": true,
+            "field": "v_mask"
+          },
+          {
+            "exact": true,
+            "field": "w"
+          },
+          {
+            "exact": true,
+            "field": "T_som"
+          },
+          {
+            "exact": true,
+            "field": "S_som"
+          },
+          {
+            "exact": true,
+            "field": "T_flux_div_prev"
+          },
+          {
+            "exact": true,
+            "field": "S_flux_div_prev"
+          },
+          {
+            "exact": true,
+            "field": "eke"
+          },
+          {
+            "exact": true,
+            "field": "tke"
+          },
+          {
+            "exact": true,
+            "field": "tke_avm"
+          },
+          {
+            "exact": true,
+            "field": "tke_avt"
+          },
+          {
+            "exact": true,
+            "field": "tke_dissl"
+          },
+          {
+            "exact": true,
+            "field": "tke_avm_surface"
+          },
+          {
+            "exact": true,
+            "field": "dtke"
+          },
+          {
+            "exact": true,
+            "field": "eke_diss"
+          },
+          {
+            "exact": true,
+            "field": "T_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "S_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "u_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "v_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "u_before"
+          },
+          {
+            "exact": true,
+            "field": "v_before"
+          },
+          {
+            "exact": true,
+            "field": "T_before"
+          },
+          {
+            "exact": true,
+            "field": "S_before"
+          },
+          {
+            "exact": true,
+            "field": "eta_before"
+          },
+          {
+            "exact": true,
+            "field": "F_slow_u_prev"
+          },
+          {
+            "exact": true,
+            "field": "F_slow_v_prev"
+          },
+          {
+            "exact": true,
+            "field": "psi"
+          },
+          {
+            "exact": true,
+            "field": "dpsi"
+          },
+          {
+            "exact": true,
+            "field": "dpsi_prev"
+          },
+          {
+            "exact": true,
+            "field": "dpsin"
+          },
+          {
+            "exact": true,
+            "field": "dpsin_prev"
+          },
+          {
+            "exact": true,
+            "field": "bt_hist"
+          },
+          {
+            "exact": true,
+            "field": "freshwater_eta_prev"
+          },
+          {
+            "exact": true,
+            "field": "mass_flux_u"
+          },
+          {
+            "exact": true,
+            "field": "mass_flux_v"
+          },
+          {
+            "exact": true,
+            "field": "mass_flux_w"
+          },
+          {
+            "exact": true,
+            "field": "salt_flux_u_int"
+          },
+          {
+            "exact": true,
+            "field": "salt_flux_v_int"
+          }
+        ]
+      },
+      "term_error_closure": {
+        "bar": 1e-10,
+        "planted_u_fires": true,
+        "planted_u_normalized_closure": 9.999999947495682e-07,
+        "u_pass": true,
+        "v_pass": true
+      }
+    }
+  },
+  "dump_sha256": {
+    "drg_dump_zu_frc_inc.bin": "0dfaacca230287dd14338be073eceb7dc0d3c147317b946df16a96815624c053",
+    "drg_dump_zv_frc_inc.bin": "d01d083799bdd785477303a8304879771a445920fd682f7760f8ca4b9570ee4c",
+    "hpg_dump_du.bin": "0ccd1859c14bf65ca9a2f3b77f2a5fbf1d84db6567399645616d64d9de841950",
+    "hpg_dump_dv.bin": "60093e5906feda181c1613f8bd0f49cc24cba1970ea216ed673bf06bdcd7bc87",
+    "keg_dump_du.bin": "03d27e444d5c8f53650c7c6bb924084d9ca176f669f4384fc48c59cb208d792a",
+    "keg_dump_dv.bin": "b463386513308d4dd86c7934e5d11ed5a8eb7ae9634ed18da48009292fd9ca72",
+    "ldf_dump_du.bin": "7e5ad7c06e297e9e803df94107a62f2ba8afd7dd3f3d17b7466d7755c3dd2875",
+    "ldf_dump_dv.bin": "b49ea833a151284d167cc09cda34e8b3a9ff2f4d9ec4a6c40235b1467211232a",
+    "spg_dump_zu_frc.bin": "13138faa46149968c009f0d6c20956b8d2457a904667686a1f6cb1a93d7bcca6",
+    "spg_dump_zv_frc.bin": "81d01381ad5164b1a0cc3fb5f22590f471b0e24bb9b68084290e0cb9e2ef4c0e",
+    "stp_dump_06_dynhpg_kt00005761_du.bin": "a77ffe6bf45daa4b66f2b43dbd4fa89098b4e664681873f6420eeda8d38bd273",
+    "stp_dump_06_dynhpg_kt00005761_dv.bin": "b48d1e01babf415f3aeb6b93bab6528d001814a83cf7182be7d8ece42bc8ebfe",
+    "vor_dump_du.bin": "b2c778badfc9690758b70d84aaf47aa74f740f749f0b2f267091238b7edce601",
+    "vor_dump_dv.bin": "10f139210a9b9b369402ad1b3109c17bf71ebd867c18035252df56943ed008c0",
+    "wnd_dump_zu_frc_inc.bin": "d9692e3466b6fc9af72289266edf3b25ba26ec16c327fe505cd10bd6390d15b7",
+    "wnd_dump_zv_frc_inc.bin": "72ecf1fe2e778a7ece1b73d1713587f2d99d641cf47a3a196a8fb5f04acb7d4a",
+    "zad_dump_du.bin": "9899d5cdfcb3bb70f5910f773259a7e97c5b388ffcbe4cf4c05c0981929e26da",
+    "zad_dump_dv.bin": "b053c7d46c36dbd52d4e2da117e700ef5516ad1b519b525b62ee11aa49a7bf4e"
+  },
+  "git": {
+    "clean_after": true,
+    "clean_before": true,
+    "commit": "6d435fe1f532900b9429f607c51060ac2c9d707e"
+  },
+  "kt": 5761,
+  "lane": "d180",
+  "locked_u_removal": {
+    "000": 0.0,
+    "001": -3.8528100525195788,
+    "010": -3.9651538510810838,
+    "011": 0.08652382878366294,
+    "100": 0.6612415045308856,
+    "101": -3.8351151874225913,
+    "110": -3.8067621779483583
+  },
+  "matrix_axes": [
+    "lateral_friction",
+    "vorticity",
+    "cor_removal"
+  ],
+  "precedent": {
+    "preregistration": {
+      "commit": "19acf16b2f0",
+      "path": "scripts/validate/ocean_fidelity/dino_1226/PREREG_tcarry_een_omega_interaction.md",
+      "sha256": "40b0417ac2d8129386d72290e99796b52d244079e4860af1cca6b4f767a3ba7a"
+    },
+    "probe": {
+      "commit": "820e3500bf3",
+      "path": "scripts/validate/ocean_fidelity/dino_1226/tcarry_bridge_omega_score.py",
+      "sha256": "c82a4e9d87ea3fe89f0f066952da624ef1811e7f6d7f846101e2ea453481303e"
+    }
+  },
+  "provenance_sha256": {
+    "preregistration": "9a3a0eba55db0df8809d17c3d84b45d98ee39f3048e9dc745931add8bc52c7b5",
+    "probe": "08dd70da3aca6044e06cf47e383f52a7386e6eb8aaa9332c0321e8a8e3064dca",
+    "round2_preregistration": "d6f12bb4538eb5b500f403387eebbea57013003a32b463a2d8bea6806373d69f",
+    "round2_probe": "dab1dae2107cd61e7b1f2b98f5dd2f87d7586a0d0907d5814b4a61ec3d11320c",
+    "round3_artifact": "f102167ea9784644e5c86a2f761caad2eccba85f03b26ef8580f1e5c689334f9"
+  },
+  "row_1_1_fully_disposed": false,
+  "run_input_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "namelist_cfg": "0e75f4cb32dad3ed3fc17b721651ec12e0366c2978df8c65a6e95ae80b48d68b",
+    "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+    "nemo": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "output.namelist.dyn": "1ebcbcc9bd3f91dede8153a297c1f9df906a262460476760a78a45be14b1176e"
+  },
+  "runtime": {
+    "backend": "cpu",
+    "cpu_device": "cpu:0",
+    "e3t_mode": "both",
+    "jax": "0.10.0",
+    "jax_enable_x64": true,
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+    "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+    "python": "3.13.0 | packaged by conda-forge | (main, Nov 27 2024, 19:18:50) [GCC 13.3.0]"
+  },
+  "schema": "dino-split-explicit-momentum-chain-round4-v1",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
+  "slot": "NOT_ALLOCATED_EXISTING_DUMPS_ONLY"
+}

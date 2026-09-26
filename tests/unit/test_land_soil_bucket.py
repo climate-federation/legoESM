@@ -13,6 +13,7 @@ Covers the Manabe (1969) bucket added to ``PhysicsPipeline``:
 from __future__ import annotations
 
 import jax
+import pytest
 import jax.numpy as jnp
 
 from legoesm.driver.physics_pipeline import build_physics_pipeline
@@ -30,6 +31,15 @@ def _sigma(nlev=NLEV):
         sigma_full = jnp.linspace(0.1, 0.95, nlev)
         sigma_half = jnp.linspace(0.05, 1.0, nlev + 1)
         dsigma = jnp.diff(jnp.linspace(0.05, 1.0, nlev + 1))
+
+        def pressure_at_full(self, p_s):
+            return p_s[..., None] * self.sigma_full
+
+        def pressure_at_half(self, p_s):
+            return p_s[..., None] * self.sigma_half
+
+        def layer_thickness_dp(self, p_s):
+            return p_s[..., None] * self.dsigma
     return _S()
 
 
@@ -403,30 +413,16 @@ def test_land_stomatal_beta_allowed_with_multilayer_land():
     assert fired, "slab land must still require the bucket for stomata"
 
 
-def test_surface_tiled_allowed_with_multilayer_land_no_mask():
-    """surface_tiled needs an active land tile; use_multilayer_land IS one (its land
-    fraction comes from --topography elevation-derived f_land when no mask is given),
-    so validate_strict must accept surface_tiled + multilayer WITHOUT a land-mask
-    file or slab activation — else the SOTA config (config/amip/amip_sota.yaml) could
-    only run with a redundant explicit mask."""
-    # multilayer + tiled + REAL topography (gaussian -> f_land>0), no mask, no slab
-    # => validates cleanly (NOT rejected by the active-tile rule NOR the flat guard).
+@pytest.mark.parametrize("topography", ["flat", "gaussian"])
+def test_surface_tiled_multilayer_requires_named_land(topography):
+    """Idealized terrain needs a mask; file-derived land also enables the tile."""
     ml = ExperimentConfig(surface_tiled=True, turbulence="louis",
                           use_multilayer_land=True, slab_land_active=False,
-                          land_mask_path="", topography="gaussian")
-    ml.validate_strict()  # raises if the mask-free multilayer combo is rejected
-
-    # multilayer + tiled + FLAT topography + no mask => f_land==0 everywhere, so the
-    # flat guard must reject it (a real land tile was requested but there is no land).
-    flat = ExperimentConfig(surface_tiled=True, turbulence="louis",
-                            use_multilayer_land=True, slab_land_active=False,
-                            land_mask_path="", topography="flat")
-    try:
-        flat.validate_strict()
-        flat_fired = False
-    except ValueError as exc:
-        flat_fired = "topography='flat'" in str(exc)
-    assert flat_fired, "multilayer + tiled + flat topo + no mask must be rejected"
+                          land_mask_path="", topography=topography)
+    with pytest.raises(ValueError, match=f"topography={topography!r}.*NO land"):
+        ml.validate_strict()
+    ml._replace(land_mask_path="land_mask.nc").validate_strict()
+    ml._replace(topography="elevation.nc").validate_strict()
 
     # tiled + no land tile at all (no slab, no mask, no multilayer) => STILL fires
     none_tile = ExperimentConfig(surface_tiled=True, turbulence="louis",
@@ -438,3 +434,25 @@ def test_surface_tiled_allowed_with_multilayer_land_no_mask():
     except ValueError as exc:
         fired = "surface_tiled=True requires an active land tile" in str(exc)
     assert fired, "tiled surface with NO land tile must still be rejected"
+
+
+@pytest.mark.parametrize("topography", ["flat", "gaussian"])
+def test_slab_land_requires_named_land_on_idealized_terrain(topography):
+    """A SLAB land tile on idealized terrain with no mask has no land either.
+
+    The multilayer case above was guarded; the slab one was not, so
+    ``slab_land_active=True`` with ``topography='flat'`` validated cleanly and
+    then ran a land model over an all-ocean world -- the silently-inert land
+    tile that cost the AMIP campaign three tuning waves.  Tiling is NOT part of
+    the condition: an untiled slab over zero land is just as inert.
+    """
+    slab = ExperimentConfig(slab_land_active=True, land_mask_path="",
+                            topography=topography)
+    with pytest.raises(ValueError, match=f"topography={topography!r}.*NO land"):
+        slab.validate_strict()
+    slab._replace(land_mask_path="land_mask.nc").validate_strict()
+    slab._replace(topography="elevation.nc").validate_strict()
+
+    # An aquaplanet that asks for NO land tile keeps running on idealized
+    # terrain -- the guard must not fire on "no land wanted".
+    ExperimentConfig(topography=topography).validate_strict()

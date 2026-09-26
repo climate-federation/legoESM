@@ -1,0 +1,400 @@
+{
+  "bar": 1e-15,
+  "bracket": {
+    "controls": {
+      "missing_stream_inventory_fails": true,
+      "one_bit_shared_stream_fails": true,
+      "shared_streams_exact": true
+    },
+    "off_streams": 197,
+    "on_streams": 209,
+    "registered_input_names": [
+      "DINO_00005760_restart.nc",
+      "mesh_mask.nc",
+      "namelist_cfg",
+      "namelist_ref",
+      "layout.dat",
+      "layout.nc"
+    ],
+    "registered_inputs_exact": true,
+    "shared_streams_exact": 197
+  },
+  "capture": {
+    "capture_inert": true,
+    "uv_call_order": [
+      "u",
+      "v"
+    ]
+  },
+  "controls": {
+    "baseline_pass": true,
+    "nonfinite_fired": true,
+    "one_i_roll_fired": true,
+    "one_ulp_exact_identity_fired": true,
+    "one_ulp_ji_k": [
+      1,
+      1,
+      1
+    ],
+    "perturbation_fired": true,
+    "perturbed_ji_k": [
+      1,
+      1,
+      1
+    ]
+  },
+  "disposition": "DIVERGED",
+  "first_divergence": "zau",
+  "first_divergent_stage": "zau",
+  "focus_columns_ji": [
+    [
+      11,
+      1
+    ],
+    [
+      12,
+      1
+    ],
+    [
+      13,
+      1
+    ],
+    [
+      13,
+      23
+    ]
+  ],
+  "lane": "DUMP LANE: d180  run_dir=/tmp/row30-lane-root/RUN_SEQDUMP_D180_1R  restart=DINO_00005760_restart.nc  kt(nit000)=5761  t_seconds=15554700s (= day 180.03)",
+  "operands_in_source_order": {
+    "zau": {
+      "aggregate_bar_pass": true,
+      "bar": 1e-15,
+      "column_bar_pass": false,
+      "correlation": 1.0,
+      "direction": "u",
+      "dump": "eiv_dump_zau.bin",
+      "focus": [
+        {
+          "column_error": 2.5335647754683605e-17,
+          "i": 1,
+          "j": 11,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 5.067129550936721e-17,
+          "i": 1,
+          "j": 12,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 5.067129550936721e-17,
+          "i": 1,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 3.1669559693354506e-18,
+          "i": 23,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        }
+      ],
+      "localization_kind": "atomic_operand",
+      "max_column_error": 3.2429629125995014e-15,
+      "n_diverged_columns": 190,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 9568,
+      "n_wet_columns": 9758,
+      "n_wet_elements": 326580,
+      "nemo_source": "ldfslp.F90:242",
+      "pass": false,
+      "reference_rms": 5.101388050657504e-10,
+      "rms_ratio": 1.0,
+      "worst_column_ji": [
+        49,
+        49
+      ]
+    },
+    "zgru_iik": {
+      "aggregate_bar_pass": true,
+      "bar": 1e-15,
+      "column_bar_pass": true,
+      "correlation": 1.0,
+      "direction": "u",
+      "dump": "eiv_dump_zgru_iik.bin",
+      "focus": [
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 11,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 12,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 23,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        }
+      ],
+      "localization_kind": "atomic_operand",
+      "max_column_error": 0.0,
+      "n_diverged_columns": 0,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 9758,
+      "n_wet_columns": 9758,
+      "n_wet_elements": 326580,
+      "nemo_source": "ldfslp.F90:203,217",
+      "pass": true,
+      "reference_rms": 3.601579992311018e-05,
+      "rms_ratio": 1.0,
+      "worst_column_ji": [
+        1,
+        1
+      ]
+    },
+    "zgru_iikm1": {
+      "aggregate_bar_pass": true,
+      "bar": 1e-15,
+      "column_bar_pass": true,
+      "correlation": 1.0,
+      "direction": "u",
+      "dump": "eiv_dump_zgru_iikm1.bin",
+      "focus": [
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 11,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 12,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 23,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        }
+      ],
+      "localization_kind": "atomic_operand",
+      "max_column_error": 0.0,
+      "n_diverged_columns": 0,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 9758,
+      "n_wet_columns": 9758,
+      "n_wet_elements": 326580,
+      "nemo_source": "ldfslp.F90:203,217",
+      "pass": true,
+      "reference_rms": 3.65051379854658e-05,
+      "rms_ratio": 1.0,
+      "worst_column_ji": [
+        1,
+        1
+      ]
+    },
+    "zgrv_iik": {
+      "aggregate_bar_pass": true,
+      "bar": 1e-15,
+      "column_bar_pass": true,
+      "correlation": 0.9999999999999998,
+      "direction": "v",
+      "dump": "eiv_dump_zgrv_iik.bin",
+      "focus": [
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 11,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 12,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 23,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        }
+      ],
+      "localization_kind": "atomic_operand",
+      "max_column_error": 0.0,
+      "n_diverged_columns": 0,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 9868,
+      "n_wet_columns": 9868,
+      "n_wet_elements": 330403,
+      "nemo_source": "ldfslp.F90:204,218",
+      "pass": true,
+      "reference_rms": 3.705027362784663e-05,
+      "rms_ratio": 1.0,
+      "worst_column_ji": [
+        1,
+        1
+      ]
+    },
+    "zgrv_iikm1": {
+      "aggregate_bar_pass": true,
+      "bar": 1e-15,
+      "column_bar_pass": true,
+      "correlation": 1.0,
+      "direction": "v",
+      "dump": "eiv_dump_zgrv_iikm1.bin",
+      "focus": [
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 11,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 12,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 1,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        },
+        {
+          "column_error": 0.0,
+          "i": 23,
+          "j": 13,
+          "pass": true,
+          "wet": true
+        }
+      ],
+      "localization_kind": "atomic_operand",
+      "max_column_error": 0.0,
+      "n_diverged_columns": 0,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 9868,
+      "n_wet_columns": 9868,
+      "n_wet_elements": 330403,
+      "nemo_source": "ldfslp.F90:204,218",
+      "pass": true,
+      "reference_rms": 3.869321471514035e-05,
+      "rms_ratio": 1.0,
+      "worst_column_ji": [
+        1,
+        1
+      ]
+    }
+  },
+  "provenance_sha256": {
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/.nemo_binary_sha256": "cf43c11bd0055947ad8e9fb1e20013f8460ffe8e72cdaafc1a02ec9d5b3d1e87",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/DINO_00005761_restart.nc": "33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/domain_cfg_out.nc": "f8aac4bd319a120326aef108990561ca20fba6f020154a404a6abe4cc3892deb",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/layout.dat": "dd92af335506ae8d3ca2cd995404a57925e0ee6a82ac77ad5358da1d52fa335f",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/layout.nc": "8873bb53b20c166932f164a568424ad8a75929006089c95402e777ff6e75cc3a",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/namelist_cfg": "55f17d2344e5aaa58f7c6ef23e7d5dfebd9c351888c6499d5d312131b8515355",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/ocean.output": "f3370030a3751a3698ccdde7b41b5cf5c95e5eed26ebd47048922cc348c07dc6",
+    "/tmp/RUN_ZDF30_UV_OFF.75aJsW/run.attempt1.log": "ef785ca5c63e89d28f0582356c660e7b209d59269f850f1db4623dddb74dc873",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/.nemo_binary_sha256": "094ffabd5392589f0c24f7d5536100adc790618768121439863023167a325d4d",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/DINO_00005761_restart.nc": "33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/domain_cfg_out.nc": "f8aac4bd319a120326aef108990561ca20fba6f020154a404a6abe4cc3892deb",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_uslp_postshapiro.bin": "b332b6dc0535a1e039222a6dcc557044db4417a9b9af495a3fc8e9ed5a373b4e",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_uslp_raw.bin": "866a5fbfbc4c2993a990e441f46670302497848222c83da0a90c7470602275c9",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_vslp_postshapiro.bin": "1558e104c21b37ed64914abe3cba0a174599b2b34054b7dc7ea6f2487b510a56",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_vslp_raw.bin": "09848b07dd7e149463fe16b5eee5d7c91402ae536b6e7725847197726c9e2ea2",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zau.bin": "78f5d2159baad245f6c2fbb29f4cfbc24bc2724cfbd8b4077953e5b3576398b1",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zav.bin": "765cd58c5b109d6285319171ea2eeacfd4a2fbe7ba2f8ab4353261155282530b",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zbu_post.bin": "ed2079f378739d502967d13d99f37eda3282811185260cae890985cfef123e9c",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zbu_pre.bin": "df82610882fcc92c937ae0503b6ea45840731cebf16d9e2597400901e717f4ad",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zbv_post.bin": "74c0d4188a472267b22554a6c479e2028ba386910780101b5f9ea9afccf0767d",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zbv_pre.bin": "2111a89d91922e77019bc3085cbfaeed489a1100d5a90c0a5295dc2acebbbe4e",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zgru_iik.bin": "d9d8d91277ae3766d9240642fae2abe5199552fa95e59c6254eb8a6b50543136",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zgru_iikm1.bin": "0a90ae16f93e8395a31a8173e06866424bb73280b6badf51ceb6c7af49e38026",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zgrv_iik.bin": "f8d593bc6fb38f9f45afa51e2eb0f31cebfd8349ee6d3b97b6f024f9b9afc7eb",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/eiv_dump_zgrv_iikm1.bin": "2774e9e5c1ff223878941a46f4f2d4317e6fb6ed67e4bba904b0c617803f5e7f",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/layout.dat": "dd92af335506ae8d3ca2cd995404a57925e0ee6a82ac77ad5358da1d52fa335f",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/layout.nc": "8873bb53b20c166932f164a568424ad8a75929006089c95402e777ff6e75cc3a",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/namelist_cfg": "55f17d2344e5aaa58f7c6ef23e7d5dfebd9c351888c6499d5d312131b8515355",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/ocean.output": "f3370030a3751a3698ccdde7b41b5cf5c95e5eed26ebd47048922cc348c07dc6",
+    "/tmp/RUN_ZDF30_UV_ON.fYlRzG/run.attempt1.log": "ef785ca5c63e89d28f0582356c660e7b209d59269f850f1db4623dddb74dc873",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/ldf_slp_per_element.py": "1748a3959abb29e118b8e5d085a5ed094e9333e4beec35b16415b8de7fa8b3aa",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/nemo_row30_uv_operands.patch": "de6b46dc3fc1c347e79f9b44f49eda44f40e2edb938c7b7d0a82dfc0bbb7d110",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_row30_uv_operands.py": "6de213490a38352c2fa78f6db226b662ad5f72552c93d9ce6445fab627677d52",
+    "/tmp/dino_mld_audit_codex/mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0",
+    "/tmp/ldfslp-row30-on.F90": "8b4d8cffe35d66241eb77bdc508ef15d6dd90d8ff192fd60201ff83a7d523a29",
+    "/tmp/nemo-row19-detwriter-off.exe": "4f28b00205658781d7c2a6bbc35362a5a19eb8d57d245bad28a9fbe96ebfafae",
+    "/tmp/nemo-row19-detwriter.kTFp14/cfgs/DINO/MY_SRC/ldfslp.F90": "a4e65b80484423df67247e4b93ace08fd50fa929e325b2f2af113d4bb31ffd30",
+    "/tmp/nemo-row30-baseline-source-manifest.sha256": "6b1b1fdfcb4b4ac0999f3f7008ce6fddbaf3811edefa06f279a9bfc5de3d8fe7",
+    "/tmp/nemo-row30-on-source-manifest.sha256": "433067fd909cafe37b31d094e0f7326177c8628c4ee6d3d9ff31b528b2ec40c3",
+    "/tmp/nemo-row30-on.exe": "a77fbaa9e302e699acb76b89a4c4d8e04d4ec0a77e6b0bbee8b8a45180a6d20f",
+    "/tmp/row30-measured-dump-sha256.json": "2260d24103c64e8354be040cbfb0d317221fac2f2563e38429a91a761d0fe7cf"
+  },
+  "repo_sha": "c6c466658864d06bd8d9aa03cb0c818ef422d56d",
+  "schema": "dino-zdf-row30-uv-operands-v1",
+  "source_quotes": {
+    "bound": "zbu = MIN(  zbu, - z1_slpmax * ABS( zau ) , -7.e+3_wp/e3u(ji,jj,jk,Kmm)* ABS( zau )  )",
+    "bound_v": "zbv = MIN(  zbv, - z1_slpmax * ABS( zav ) , -7.e+3_wp/e3v(ji,jj,jk,Kmm)* ABS( zav )  )",
+    "gradient_u": "zgru(ji,jj,iikm1) = umask(ji,jj,jk-1) * ( prd(ji+1,jj  ,jk-1) - prd(ji,jj,jk-1) )",
+    "gradient_v": "zgrv(ji,jj,iikm1) = vmask(ji,jj,jk-1) * ( prd(ji  ,jj+1,jk-1) - prd(ji,jj,jk-1) )",
+    "metric_u": "zau = zgru(ji,jj,iik) * r1_e1u(ji,jj)",
+    "metric_v": "zav = zgrv(ji,jj,iik) * r1_e2v(ji,jj)",
+    "pre_bound": "zbu = 0.5_wp * ( zdzr(ji,jj) + zdzr(ji+1,jj  ) )",
+    "pre_bound_v": "zbv = 0.5_wp * ( zdzr(ji,jj) + zdzr(ji  ,jj+1) )",
+    "raw": "zwz(ji,jj) = ( zfi * zau / ( zbu - zeps ) + ( 1._wp - zfi ) * zdepu * zuslp_hml(ji,jj) ) * umask(ji,jj,jk)",
+    "raw_v": "zww(ji,jj) = ( zfj * zav / ( zbv - zeps ) + ( 1._wp - zfj ) * zdepv * zvslp_hml(ji,jj) ) * vmask(ji,jj,jk)",
+    "shapiro_u": "uslp(ji,jj,jk) = z1_16 *",
+    "shapiro_v": "vslp(ji,jj,jk) = z1_16 *"
+  }
+}

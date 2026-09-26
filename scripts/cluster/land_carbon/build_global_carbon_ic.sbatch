@@ -61,6 +61,7 @@ echo "provenance: $WORKDIR @ $(git rev-parse --short HEAD 2>/dev/null || echo NO
 test -f "$SURF" || { echo "MISSING surfdata $SURF"; exit 2; }
 test -f "$CLIM" || { echo "MISSING Stage-1 climatology $CLIM (run build_land_forcing_climatology.sbatch first)"; exit 2; }
 
+# CIC_EXTRA_ARGS: extra builder flags (e.g. "--stomatal-model medlyn").
 # clm5_surfdata preset -> native 1.9x2.5 grid (no cover regrid); the ERA5
 # climatology is conservatively regridded onto that grid by the driver.
 # Default --clim-*-var (tas/pr/rsds/netrad) match the Stage-1 output exactly.
@@ -69,7 +70,7 @@ test -f "$CLIM" || { echo "MISSING Stage-1 climatology $CLIM (run build_land_for
   --climatology "$CLIM" \
   --output "$OUTDIR" \
   --compilation-cache-dir "$CCACHE" \
-  --equilibrium-cache-dir "$ECACHE" 2>&1
+  --equilibrium-cache-dir "$ECACHE" ${CIC_EXTRA_ARGS:-} 2>&1
 # EXIT the build's status, not echo's: this script is the afterok gate for the
 # QC stage, and a trailing echo would make every failed build "succeed".
 RC=$?

@@ -108,6 +108,103 @@ def is_borrow_eligible_tracer(name: str) -> bool:
     return str(name).removeprefix("trc_") in BORROW_ELIGIBLE_TRACERS
 
 
+#: Per-species latent-heat coefficient in the frozen moist static energy
+#: ``h = c_pd*T + Phi + KE + L_v*q_v − L_f*q_frozen`` the energy tracker uses
+#: (LIQUID reference: ``q_c``/``q_r`` carry zero; vapour +L_v; ice −L_f).  When
+#: a HARD floor raises species X by ``deficit = max(-q_raw, 0)``, holding h
+#: fixed needs ``dT = -(coef_X / c_pd) * deficit``:
+#:   q_v          -> −L_v/c_pd * d   (cool: undo the phantom condensation heat)
+#:   q_c, q_r     -> 0               (liquid is the reference phase)
+#:   q_i,q_s,q_g  -> +L_f/c_pd * d   (warm: adding −L_f-mass needs +L_f heat)
+#: Signs confirmed 2026-08-25 (codex + GLM), against this exact h.  This is the
+#: HARD-floor certificate only; the BORROW is h-neutral for every species with
+#: no T change (it conserves each column integral), so it needs none of this.
+_FLOOR_LATENT_COEF = {
+    "q_v": constants.L_v,
+    "q_c": 0.0, "q_r": 0.0,
+    "q_i": -constants.L_f, "q_s": -constants.L_f, "q_g": -constants.L_f,
+}
+
+
+def energy_consistent_water_floor(tracers, T):
+    """Hard-floor every water tracer to zero, conserving frozen MSE.
+
+    Generalises :func:`energy_consistent_moisture_floor` (vapour only) to the
+    condensate species.  Each species is floored ``q_out = max(q_raw, 0)``; the
+    per-cell temperature is corrected by ``dT = -(coef/c_pd)*deficit`` with
+    ``coef`` from :data:`_FLOOR_LATENT_COEF`, so the model's frozen MSE
+    ``c_pd*T + L_v*q_v − L_f*(q_i+q_s+q_g)`` is unchanged pointwise (vapour
+    cools, ice warms, liquid unchanged).  Tracers with no coefficient (number
+    concentrations ``N_*``) get a plain floor and no T term.
+
+    NOTE (GLM 2026-08-25): this conserves ENERGY, not water — the floor still
+    CREATES the clipped mass.  It is the last-resort path; the column-conserving
+    BORROW (:func:`conservative_positive_clip_global`) is the primary one and
+    conserves both.  Do not call this the "conservative" clip.
+
+    Pure ``jnp``; differentiable (subgradient at the ``q_raw = 0`` kink).
+    Returns ``(tracers_out, T_out)`` mirroring the input container types.
+    """
+    inv_cpd = 1.0 / constants.c_pd
+    T_data = T.data if hasattr(T, "data") else T
+    dT = jnp.zeros_like(T_data)
+    out = {}
+    for name, f in tracers.items():
+        data = f.data if hasattr(f, "data") else f
+        floored = jnp.maximum(data, 0.0)
+        coef = _FLOOR_LATENT_COEF.get(str(name).removeprefix("trc_"))
+        if coef:  # non-zero coefficient only (liquid/None -> no heat term)
+            deficit = floored - data          # = max(-data, 0) >= 0
+            dT = dT - (coef * inv_cpd) * deficit
+        out[name] = f.replace(data=floored) if hasattr(f, "replace") else floored
+    T_out = (T.replace(data=T_data + dT) if hasattr(T, "replace")
+             else T_data + dT)
+    return out, T_out
+
+
+def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
+                           sum_fn=None):
+    """Single positivity stage for every atmospheric dycore (MPAS/cube/spectral/
+    lat-lon), so the three grids stay bit-equivalent by construction.
+
+    * ``conservative=True`` (DEFAULT everywhere): column-conserving BORROW for
+      per-mass species (:func:`conservative_positive_clip_global` with the
+      ``dp`` layer-mass weight), plain floor for anything not borrow-eligible.
+      ``T`` is returned untouched — the borrow is frozen-MSE-neutral for every
+      species (it preserves each column integral).  ``sum_fn`` defaults to
+      serial ``jnp.sum``; the MPI lane passes an allreduce-SUM reduction so the
+      redistribution factor is decomposition-independent.  Iterates SORTED so
+      every rank issues the per-tracer collectives in the same order.
+    * ``conservative=False`` + ``energy_consistent=True``: hard floor with the
+      per-species latent-heat T correction (:func:`energy_consistent_water_floor`).
+    * ``conservative=False`` + ``energy_consistent=False``: plain ``max(q,0)``.
+
+    Returns ``(tracers_out, T_out)``.
+    """
+    if conservative:
+        out = {}
+        for name in sorted(tracers):
+            f = tracers[name]
+            data = f.data if hasattr(f, "data") else f
+            if is_borrow_eligible_tracer(name):
+                clipped = conservative_positive_clip_global(
+                    data, dp, axis=-1, sum_fn=sum_fn)[0]
+            else:
+                clipped = jnp.maximum(data, 0.0)
+            out[name] = (f.replace(data=clipped) if hasattr(f, "replace")
+                         else clipped)
+        return out, T
+    if energy_consistent:
+        return energy_consistent_water_floor(tracers, T)
+    out = {
+        name: (f.replace(data=jnp.maximum(f.data, 0.0))
+               if hasattr(f, "replace")
+               else jnp.maximum(f, 0.0))
+        for name, f in tracers.items()
+    }
+    return out, T
+
+
 def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
     """Clip ``q`` to zero WITHOUT creating mass: borrow the deficit back.
 
@@ -286,6 +383,27 @@ def conservation_accumulator():
     precision and lets the "skip per-stage ``zero_mean_tendency`` when
     end-step fixer is on" scaling optimisation be lossless even in
     float32 storage/compute mode.
+
+    Returns f64 whenever x64 is enabled — a higher dtype than fp32 storage. The
+    mass fixers KEEP the correction in f64 and add it to ``p_s`` WITHOUT rounding
+    back to storage (this exact-arithmetic correction is load-bearing: it is what
+    delivers ~machine-precision mass fixing and the anchored ~1e-12 MPAS
+    guarantee — rounding it to fp32 would let sub-ULP corrections vanish and
+    destroy those). Consequences by mode (#1665):
+
+    * **strict fp32** (x64 off): the f64 branch is inactive; the correction is
+      float32; ``p_s`` stays fp32.
+    * **fp64**: ``p_s`` is already f64; no promotion.
+    * **mixed** (fp32 storage + x64): the f64 correction added to an fp32 ``p_s``
+      promotes it to f64, and that promotion is now DELIBERATE and documented
+      rather than accidental (#1675). ``p_s`` is one 2-D field, so keeping it at
+      the accumulate dtype costs almost nothing in memory and buys the
+      ~1e-12 global mass the exact correction is there for; the fp32 saving in
+      ``mixed`` comes from the 3-D bulk state. What used to leak is the
+      CONTAGION — the promoted ``p_s`` flowed into the tracer mass rescale and
+      brought the 3-D tracers up with it — and that is closed at the step
+      boundary by :func:`core.precision.finalize_to_storage`, which re-casts
+      bulk state to storage while leaving ``p_s`` at accumulate.
     """
     if jax.config.read("jax_enable_x64"):
         return jnp.float64

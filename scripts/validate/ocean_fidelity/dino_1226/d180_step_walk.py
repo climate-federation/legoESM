@@ -548,11 +548,11 @@ if _oi:
     # legoESM-vs-NEMO step composition -- both corrections are from the
     # 2026-08-20 adversarial review and are recorded here so the next reader
     # does not repeat the error:
-    #   (a) TWO fields move.  outer_integrator='nemo_mlf' HARD-REQUIRES
-    #       implicit_vmix_e3t_now_divisor=True at construction, and the DINO
-    #       card never sets that field (model default False), so the arm
-    #       carries a divisor change as well.  Attributing any difference to
-    #       the composition alone needs a third arm: leapfrog + divisor=True.
+    #   (a) HISTORICAL (kept for the record): outer_integrator='nemo_mlf'
+    #       used to ALSO force a divisor flag the DINO card did not set, so
+    #       the arm moved two fields at once.  That flag is gone -- NEMO's
+    #       e3w(Kmm) divisor now belongs to the NEMO implicit-ZDF identity,
+    #       which this card already selects, so the arm is one variable now.
     #   (b) _nemo_mlf_step's own docstring says it is IDENTICAL to
     #       _leapfrog_step except for how the dissipation pass is composed,
     #       and its verification rung is a bit-comparison against it.  Two
@@ -561,12 +561,12 @@ if _oi:
     if _oi not in ('leapfrog', 'nemo_mlf'):
         raise SystemExit('Unknown DINO_OUTER_INTEGRATOR=' + repr(_oi))
     mc = mc._replace(outer_integrator=_oi,
-                     implicit_vmix_e3t_now_divisor=(
-                         True if _oi == 'nemo_mlf'
-                         else mc.implicit_vmix_e3t_now_divisor))
+                     zdf_implicit_solver_evaluation=(
+                         'nemo_literal' if _oi == 'nemo_mlf'
+                         else mc.zdf_implicit_solver_evaluation))
     print('ABLATION: outer_integrator=' + str(mc.outer_integrator)
-          + ' implicit_vmix_e3t_now_divisor='
-          + str(mc.implicit_vmix_e3t_now_divisor))
+          + ' zdf_implicit_solver_evaluation='
+          + str(mc.zdf_implicit_solver_evaluation))
 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 sf = dino_step_surface_forcing(forcing) if bool(getattr(cfg,'wind_through_step',False)) else None

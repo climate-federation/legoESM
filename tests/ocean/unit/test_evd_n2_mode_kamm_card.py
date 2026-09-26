@@ -139,7 +139,8 @@ def _both_n2(z_coord, H_deep, T, S):
                  jnp.asarray(np.asarray(gdept))[None, None, :] * constants.g * rho_0)
     p_cell = compute_hydrostatic_pressure(rho, eta, z_coord.dz_ref, J, rho_0)
     n2_bn2 = compute_buoyancy_frequency_nemo_bn2(
-        Tj, Sj, gdept[None, None, :], gdepw[None, None, :], g=constants.g)
+        Tj, Sj, gdept[None, None, :], gdepw[None, None, :], g=constants.g,
+        e3w_source="depth_difference")
     n2_adia = compute_buoyancy_frequency_adiabatic(
         Tj, Sj, p_cell, z_coord.dz_ref, J, eos_fn=eos_fn, rho_ref=rho_0,
         g=constants.g)
@@ -186,7 +187,9 @@ def test_compensated_front_flips_the_convective_diffusivity():
         K, _, flag = convective_K_A_flag(
             rho, z_coord.dz_ref, J, cfg, T=Tj, S=Sj, p_cell=p_cell,
             eos_fn=eos_fn, t_depth=gdept[None, None, :],
-            w_depth=gdepw[None, None, :], g=constants.g, rho_ref=rho_0)
+            w_depth=gdepw[None, None, :],
+            e3w_int=jnp.diff(gdept, axis=-1)[None, None, :],
+            g=constants.g, rho_ref=rho_0)
         return float(np.asarray(K)[0, 0, _KTOP]), float(np.asarray(flag)[0, 0, _KTOP])
 
     K_nemo, flag_nemo = K_for("nemo_bn2")
@@ -242,6 +245,7 @@ def _evd_n2_column(n2_eos_form, smooth_transition=False):
     K, _, flag = convective_K_A_flag(
         rho, z_coord.dz_ref, J, cfg, T=Tj, S=Sj,
         t_depth=gdept[None, None, :], w_depth=gdepw[None, None, :],
+        e3w_int=jnp.diff(gdept, axis=-1)[None, None, :],
         g=constants.g, rho_ref=rho_0)
     return np.asarray(K)[0, 0], np.asarray(flag)[0, 0]
 
@@ -270,10 +274,12 @@ def test_evd_n2_eos_form_reaches_the_bn2_kernel():
                                          jnp.asarray(H_deep))
     n2_seos = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         Tj, Sj, gdept[None, None, :], gdepw[None, None, :],
-        g=constants.g, eos_form="seos"))[0, 0]
+        g=constants.g, eos_form="seos",
+        e3w_source="depth_difference"))[0, 0]
     n2_teos = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         Tj, Sj, gdept[None, None, :], gdepw[None, None, :],
-        g=constants.g, eos_form="teos10"))[0, 0]
+        g=constants.g, eos_form="teos10",
+        e3w_source="depth_difference"))[0, 0]
     assert not np.allclose(n2_seos, n2_teos, rtol=1e-3, atol=0), (
         "the two alpha/beta sets agree on this column -- the test below "
         "cannot detect a dropped forward")

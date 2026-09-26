@@ -695,6 +695,39 @@ def batch_allreduce_mpi(
     return results
 
 
+#: Device-shard axes an ocean SPMD step may be sharded over, by lane:
+#: ``"lat"`` = lat-lon band lane (``activate_latlon_spmd_halo``), ``"device"``
+#: = Voronoi/MPAS lane (``voronoi_spmd_ocean``).  Cube-atm SPMD meshes carry
+#: neither and fall through to the MPI / serial gates.
+_OCEAN_SPMD_AXES = ("lat", "device")
+
+
+def spmd_reduce_axis() -> str | None:
+    """The mesh axis an in-``shard_map`` ocean reduction must ``psum`` over,
+    or ``None`` when no ocean SPMD lane is armed.
+
+    Single canonical gate for the ``"spmd"`` halo-backend branch of every
+    ocean reduction site (barotropic PCG dots, eta-floor redistribution) —
+    previously each site re-implemented the ``get_halo_backend() == "spmd"``
+    + ``"lat" in mesh.axis_names`` check and so silently skipped the Voronoi
+    lane's ``"device"`` axis.  Raises when the backend says ``"spmd"`` but no
+    mesh is set (an invalid arming reachable only via the raw setter).
+    """
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return None
+    mesh = get_spmd_mesh()
+    if mesh is None:
+        raise RuntimeError(
+            "halo backend is 'spmd' but no SPMD mesh is set; arm it via "
+            "activate_latlon_spmd_halo(mesh) / build_mpas_ocean_spmd_layout.")
+    names = tuple(mesh.axis_names)
+    for ax in _OCEAN_SPMD_AXES:
+        if ax in names:
+            return ax
+    return None
+
+
 def batch_psum_spmd(
     values: list[jax.Array],
     axis_name: str | tuple[str, ...],

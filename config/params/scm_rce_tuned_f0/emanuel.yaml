@@ -1,0 +1,18 @@
+# SCM-RCE tuned parameters for convection=emanuel
+# corrected nonrotating protocol (coriolis=0), median of 5 seeds.
+# NON-IDENTIFIABLE for multi-parameter schemes: the spread comment on each
+# line is how far the seeds disagreed. A large spread means the median is one
+# point in a flat basin, not a calibrated value. Opt in with --params; this
+# file never mutates a production *Config default.
+
+atm.conv.EmanuelConfig.M_b_max: 0.102122  # default 0.05, seed-spread 68% of range, kg/m^2/s
+atm.conv.EmanuelConfig.alpha_closure: 0.150559  # default 0.2, seed-spread 40% of range
+atm.conv.EmanuelConfig.cape_threshold: 131.972  # default 70, seed-spread 60% of range, J/kg
+atm.conv.EmanuelConfig.cu_coefficient: 0.951704  # default 0.7, seed-spread 70% of range
+atm.conv.EmanuelConfig.damp_coefficient: 0.0768454  # default 0.1, seed-spread 28% of range
+atm.conv.EmanuelConfig.delta_0: 0.000284654  # default 0.0002, seed-spread 59% of range, 1/m
+atm.conv.EmanuelConfig.downdraft_sigd: 0.0587302  # default 0.05, seed-spread 71% of range
+atm.conv.EmanuelConfig.dtmax: 1.50075  # default 0.9, seed-spread 48% of range, K
+atm.conv.EmanuelConfig.elcrit: 0.000424901  # default 0.0011, seed-spread 64% of range, kg/kg
+atm.conv.EmanuelConfig.precip_efficiency_max: 0.502229  # default 0.999, seed-spread 41% of range
+atm.conv.EmanuelConfig.tlcrit: -68.8974  # default -55, seed-spread 80% of range, degC

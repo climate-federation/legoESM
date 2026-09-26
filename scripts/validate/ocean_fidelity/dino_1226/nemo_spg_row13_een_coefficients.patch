@@ -1,0 +1,43 @@
+--- a/cfgs/DINO/MY_SRC/dynspg_ts.F90
++++ b/cfgs/DINO/MY_SRC/dynspg_ts.F90
+@@ -783,6 +783,40 @@
+          ! Add Coriolis trend:
+          CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )
+          !
++         ! #1226 row 1.3: frozen EEN coefficient operands used by the live
++         ! substep-1 dyn_cor_2D call above.  This is write-only
++         ! instrumentation: the production arrays and call are untouched.
++         ! Units 9400:9407 are reserved by the round-22 full-tree inventory.
++         IF( ll_spg_dump .AND. jn == 1 ) THEN
++            OPEN( UNIT=9400, FILE='corcoef_dump_ffu_nw.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9401, FILE='corcoef_dump_ffu_ne.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9402, FILE='corcoef_dump_ffu_sw.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9403, FILE='corcoef_dump_ffu_se.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9404, FILE='corcoef_dump_ffv_nw.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9405, FILE='corcoef_dump_ffv_ne.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9406, FILE='corcoef_dump_ffv_sw.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9407, FILE='corcoef_dump_ffv_se.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            WRITE(9400) ( ( ffu_nw(ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(9401) ( ( ffu_ne(ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(9402) ( ( ffu_sw(ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(9403) ( ( ffu_se(ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(9404) ( ( ffv_nw(ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(9405) ( ( ffv_ne(ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(9406) ( ( ffv_sw(ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(9407) ( ( ffv_se(ji,jj), ji=1,jpi ), jj=1,jpj )
++            CLOSE(9400) ; CLOSE(9401) ; CLOSE(9402) ; CLOSE(9403)
++            CLOSE(9404) ; CLOSE(9405) ; CLOSE(9406) ; CLOSE(9407)
++            WRITE(numout,*) '#1226 dyn_cor_2D EEN coefficients written'
++         ENDIF
++         !
+          ! #1226 item 5 (TIER 1 sweep): dyn_cor_2D fires once per barotropic
+          ! substep (icycle ~ 68-69x/step for DINO); dump its OUTPUT (zu_trd/
+          ! zv_trd, the u/v Coriolis increment [m/s^2] at t=jn) for substep

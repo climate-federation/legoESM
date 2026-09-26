@@ -24,6 +24,7 @@ Gates (spec §5a rung (a), risk register #1 item 4 / #2 / #6):
 from __future__ import annotations
 
 import os
+from types import MethodType
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -180,6 +181,77 @@ def test_nemo_mlf_diverges_from_leapfrog_only_via_gm_redi_tracer_source():
     np.testing.assert_allclose(
         np.asarray(s2_mlf.v.data), np.asarray(s2_lf.v.data),
         rtol=1e-8, atol=3e-5)
+
+
+def test_shipped_leapfrog_second_step_threads_one_entry_n2_bundle_to_gm_redi():
+    """Both explicit-only passes retain the one bundle built at step entry."""
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
+
+    state, model = _channel(
+        K_h=2.0e4, A_h=2.0e4, zdf_implicit_solver_evaluation="nemo_literal",
+        gm_redi=GMRediConfig(
+            kappa_GM=0.0, kappa_Redi=1.0e3,
+            slope_scheme="nemo_iso_lap", slope_positions="nemo_native",
+            slope_n2_evaluation="carried_step_entry"))
+    shape = state.T.data.shape
+    w_shape = shape[:-1] + (shape[-1] - 1,)
+    bundle = TKEEntryN2Bundle(
+        rn2=jnp.full(w_shape, 1.0e-5),
+        rn2b=jnp.full(w_shape, 1.25e-5),
+        gdepw_Kmm=jnp.broadcast_to(
+            (jnp.cumsum(model.z_coord.dz_ref)
+             - model.z_coord.dz_ref)[1:], w_shape),
+        e3w_Kmm=jnp.broadcast_to(model.z_coord.dz_ref[1:], w_shape),
+        e3t_Kmm=jnp.broadcast_to(model.z_coord.dz_ref, shape),
+    )
+    calls = []
+
+    def entry_bundle(_self, step_state, **_kwargs):
+        calls.append(step_state)
+        return bundle
+
+    model._tke_step_entry_n2_bundle = MethodType(entry_bundle, model)
+    s1 = model._leapfrog_step(state, _DT)
+    calls.clear()
+    s2 = model._leapfrog_step(s1, _DT)
+    assert len(calls) == 1
+    assert np.all(np.isfinite(np.asarray(s2.T.data)))
+
+
+def test_prd_before_source_tracks_integrator_time_levels(monkeypatch):
+    """Forward Euler uses current entry state; leapfrog uses shifting Nbb."""
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_mod
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+
+    gm_cfg = GMRediConfig(
+        slope_prd_geometry_stage="before_step",
+        slope_prd_evaluation="nemo_literal")
+    seen = []
+
+    def capture_gm(T, S, *_args, **kwargs):
+        seen.append((kwargs["native_prd_TS"], T, S))
+        return jnp.zeros_like(T), jnp.zeros_like(S)
+
+    monkeypatch.setattr(model_mod, "gm_redi_tracer_tendency_latlon", capture_gm)
+    for integrator, use_before in (("forward_euler", False), ("leapfrog", True)):
+        state, model = _channel(
+            K_h=0.0, A_h=0.0, outer_integrator=integrator,
+            momentum_time_integrator=("rk3" if integrator == "forward_euler"
+                                      else "euler"),
+            gm_redi=gm_cfg)
+        before_T = state.T.replace(data=state.T.data + 7.0)
+        before_S = state.S.replace(data=state.S.data - 0.4)
+        before_eta = state.eta.replace(data=state.eta.data + 0.25)
+        state = state._replace(
+            T_before=before_T, S_before=before_S, eta_before=before_eta,
+            u_before=state.u, v_before=state.v)
+        model._step_impl(state, 1.0, _apply_implicit_vmix=False)
+        native_TS, _, _ = seen[-1]
+        expected_T = state.T_before.data if use_before else state.T.data
+        expected_S = state.S_before.data if use_before else state.S.data
+        np.testing.assert_array_equal(np.asarray(native_TS[0]), np.asarray(expected_T))
+        np.testing.assert_array_equal(np.asarray(native_TS[1]), np.asarray(expected_S))
 
 
 def test_nemo_mlf_runs_no_nan_multistep():
@@ -512,10 +584,10 @@ def test_finalize_lbc_masking_is_idempotent():
 
 def _nemo_mlf_channel(n_lat=8, n_lon=16, **cfg_kw):
     """Same IC/grid as ``_channel`` but wired to the REAL dispatch
-    (``outer_integrator="nemo_mlf"``, requiring the NEMO divisor per the
-    construction-time hard-require) -- exercises ``model.step()``/
-    ``_step_jitted``, not the private method directly."""
-    cfg_kw.setdefault("implicit_vmix_e3t_now_divisor", True)
+    (``outer_integrator="nemo_mlf"``, requiring the NEMO implicit-ZDF
+    identity per the construction-time hard-require) -- exercises
+    ``model.step()``/``_step_jitted``, not the private method directly."""
+    cfg_kw.setdefault("zdf_implicit_solver_evaluation", "nemo_literal")
     cfg_kw["outer_integrator"] = "nemo_mlf"
     return _channel(n_lat=n_lat, n_lon=n_lon, **cfg_kw)
 
@@ -543,14 +615,15 @@ def test_step_jitted_rejects_unknown_outer_integrator():
 
 def test_nemo_mlf_requires_nemo_kmm_divisor():
     """Resolved decision 4: ``outer_integrator="nemo_mlf"`` construction-time
-    HARD-REQUIRES ``implicit_vmix_e3t_now_divisor=True`` -- a transcription
-    that still permits a non-NEMO implicit-solve divisor stops being a
-    transcription at that row (stpmlf.F90 row 22/29). The standalone-A/B NULL
-    result governs only the EXISTING leapfrog card; it does not waive the
-    requirement here."""
-    with pytest.raises(ValueError, match="implicit_vmix_e3t_now_divisor"):
+    HARD-REQUIRES the NEMO implicit-ZDF identity
+    ``zdf_implicit_solver_evaluation="nemo_literal"`` -- a transcription that
+    still permits a non-NEMO implicit-solve divisor stops being a
+    transcription at that row (stpmlf.F90 row 22/29, trazdf.F90:219-221).
+    NEMO's e3w(Kmm) divisor is no longer a separate flag; it comes with that
+    identity, so this is the guard that carries it."""
+    with pytest.raises(ValueError, match="zdf_implicit_solver_evaluation"):
         _channel(K_h=2.0e4, A_h=2.0e4, outer_integrator="nemo_mlf",
-                 implicit_vmix_e3t_now_divisor=False)
+                 zdf_implicit_solver_evaluation="shared_thomas")
 
 
 def test_nemo_mlf_rejects_surface_stress_implicit():
@@ -561,7 +634,7 @@ def test_nemo_mlf_rejects_surface_stress_implicit():
     it rather than run an un-transcribed row 30."""
     with pytest.raises(ValueError, match="surface_stress_implicit"):
         _channel(K_h=2.0e4, A_h=2.0e4, outer_integrator="nemo_mlf",
-                 implicit_vmix_e3t_now_divisor=True,
+                 zdf_implicit_solver_evaluation="nemo_literal",
                  surface_stress_implicit=True)
 
 
@@ -682,17 +755,18 @@ def test_dino_outer_integrator_env_knob_roundtrips(monkeypatch, tmp_path):
                 raise SystemExit(
                     f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
                     "'leapfrog' or 'nemo_mlf'")
-            # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction
-            # (spec resolved decision 4) -- auto-force it so the env knob
-            # alone is sufficient, matching how the recipe would set both
-            # fields together on a real named-recipe A/B variant (P5).
+            # nemo_mlf HARD-REQUIRES the NEMO implicit-ZDF identity at
+            # construction (spec resolved decision 4; it carries NEMO's
+            # e3w(Kmm) divisor) -- auto-force it so the env knob alone is
+            # sufficient, matching how the recipe would set both fields
+            # together on a real named-recipe A/B variant (P5).
             mc = mc._replace(
                 outer_integrator=_OI,
-                implicit_vmix_e3t_now_divisor=(
-                    True if _OI == "nemo_mlf"
-                    else mc.implicit_vmix_e3t_now_divisor))
+                zdf_implicit_solver_evaluation=(
+                    "nemo_literal" if _OI == "nemo_mlf"
+                    else mc.zdf_implicit_solver_evaluation))
         RESULT_OUTER_INTEGRATOR = mc.outer_integrator
-        RESULT_DIVISOR = mc.implicit_vmix_e3t_now_divisor
+        RESULT_DIVISOR = mc.zdf_implicit_solver_evaluation
         """)
     script = tmp_path / "_snippet.py"
     script.write_text(snippet)
@@ -704,7 +778,7 @@ def test_dino_outer_integrator_env_knob_roundtrips(monkeypatch, tmp_path):
     monkeypatch.setenv("DINO_OUTER_INTEGRATOR", "nemo_mlf")
     ns = runpy.run_path(str(script))
     assert ns["RESULT_OUTER_INTEGRATOR"] == "nemo_mlf"
-    assert ns["RESULT_DIVISOR"] is True
+    assert ns["RESULT_DIVISOR"] == "nemo_literal"
 
     monkeypatch.setenv("DINO_OUTER_INTEGRATOR", "bogus")
     with pytest.raises(SystemExit, match="DINO_OUTER_INTEGRATOR"):

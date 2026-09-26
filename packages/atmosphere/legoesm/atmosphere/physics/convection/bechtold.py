@@ -88,6 +88,7 @@ from legoesm.atmosphere.physics.convection.output import (
     split_convective_rain,
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
+    ifs_ztaures,
     apply_mass_flux_kernel,
     release_detrained_condensate_latent,
     stratosphere_mass_flux_gate,
@@ -205,6 +206,24 @@ _DD_ORIGIN_SHARP_PER_M = 3.0e-3
 _DD_CFL_FRAC = 0.5
 
 
+
+def _downdraft_cfl_cap(dp_full: jax.Array, dt: float) -> jax.Array:
+    """Largest downdraft mass flux [kg m^-2 s^-1] a level may carry in one
+    step: ``_DD_CFL_FRAC`` of the thinner of the level and its two neighbours
+    over ``g dt`` (IFS: ZMFMAX = dp/(g dt), RMFCFL = 1).  The neighbour
+    minimum is what the 0.5-averaged interface flux needs -- a thick
+    neighbour must not lift a thin layer past its own limit -- and the
+    fraction is the safety margin for that centred, non-monotone average,
+    which can hand a level up to twice one cell's flux (GLM review)."""
+    dp_nb = jnp.minimum(
+        dp_full,
+        jnp.minimum(
+            jnp.concatenate([dp_full[:, :1], dp_full[:, :-1]], axis=1),
+            jnp.concatenate([dp_full[:, 1:], dp_full[:, -1:]], axis=1),
+        ),
+    )
+    return _DD_CFL_FRAC * dp_nb / (constants.g * dt)
+
 def _penetrative_downdraft_transport(
     T: jax.Array,
     q_v: jax.Array,
@@ -295,7 +314,18 @@ def _penetrative_downdraft_transport(
         -jnp.clip(z - z_sfc, 0.0, None) / jnp.maximum(detrain_scale_m, 1.0)
     )
     shape = below_origin * surface_taper * source_valid
-    m_d = -M_d_mag[:, None] * shape                      # [ncol, nlev], <=0
+    # CFL cap on the downdraft mass flux: the bound the shallow closure puts
+    # on its cloud-base flux (ZMFMAX = dp/(g*dt), RMFCFL = 1 for explicit T/q
+    # coupling), applied per LEVEL because the flux-divergence stencil below
+    # divides by the LOCAL dp.  Uncapped, a thin layer under a large
+    # cloud-base flux blew the model up on day 4 of a restart at both the
+    # default flux and a third of it.  The interface flux is the 0.5-average
+    # of the two adjacent cells, so the cap uses the thinner of a cell and its
+    # neighbours: a thick neighbour must not lift a thin layer past its own
+    # limit (codex).
+    m_cfl = _downdraft_cfl_cap(dp_full, dt)              # [ncol, nlev] >= 0
+    m_mag = jnp.minimum(M_d_mag[:, None] * shape, m_cfl)
+    m_d = -m_mag                                         # [ncol, nlev], <=0
 
     # Interface support: only interfaces with BOTH adjacent cells below the
     # origin carry flux.  This zeros the origin-STRADDLING interface so NO
@@ -335,12 +365,19 @@ def _penetrative_downdraft_transport(
     drying = jnp.maximum(-dq_v_dd, 0.0)                  # >0 only where drying
     # Only DRYING levels constrain the vapor limiter; a non-drying level (incl.
     # q_v==0 with drying==0) returns a huge value so it never disables a column.
+    # Defensive against a negative caller input (the MPAS and spectral
+    # dynamics floor their tracers before physics, so none is expected): a
+    # negative ratio here would flip and amplify the whole column's transport
+    # (r << 0), so the limiter reads max(q_v, 0) and clips r to [0, 1]; such a
+    # level shuts the column's transport off, conservatively.
     r_q = jnp.where(
-        drying > 0.0, _DD_CFL_FRAC * q_v / (drying * dt + tiny), 1.0e30
+        drying > 0.0,
+        _DD_CFL_FRAC * jnp.maximum(q_v, 0.0) / (drying * dt + tiny),
+        1.0e30,
     )
     r_t = _BECHTOLD_DTDT_MAX / (jnp.abs(dt_dd) + tiny)
-    r = jnp.minimum(
-        jnp.min(jnp.minimum(r_q, r_t), axis=1, keepdims=True), 1.0
+    r = jnp.clip(
+        jnp.min(jnp.minimum(r_q, r_t), axis=1, keepdims=True), 0.0, 1.0
     )
     return dt_dd * r, dq_v_dd * r
 
@@ -412,23 +449,6 @@ _IFS_RHEBC_LAND = 0.75
 _IFS_RHEBC_LAND_DEEP = 0.70
 
 
-def _ifs_ztaures(dx_m: float) -> float:
-    """IFS ZTAURES resolution factor for the turnover time (cumastrn.F90:713,762-768).
-
-    ``dx_m`` is the grid spacing (the oracle's ``ZDX = 2*RA*sqrt(RPI*PGAW)``
-    = sqrt(cell area)); 0 (the default) keeps the legacy resolution-agnostic
-    factor 1.0.  A STATIC Python float from config, so this runs at trace
-    time — no traced ops.  Piecewise exactly as the oracle: dx floored at
-    100 m; ``1 + ln(8km/dx)^2`` below 8 km; ``1 + 1.6*dx/125km`` above,
-    capped at 3 beyond 125 km (the oracle's own jump at 8 km included).
-    """
-    if dx_m <= 0.0:
-        return 1.0
-    dx = max(float(dx_m), 100.0)
-    if dx < 8.0e3:  # coeff-ok: IFS ZTAURES 8 km resolution break (cumastrn.F90:766)
-        return 1.0 + math.log(8.0e3 / dx) ** 2  # coeff-ok: IFS sub-8km ZTAURES fit (cumastrn.F90:767)
-    zt = 1.0 + 1.60 * dx / 125.0e3  # coeff-ok: IFS ZTAURES linear fit 1+1.6*dx/125km (cumastrn.F90:764)
-    return min(3.0, zt) if dx > 125.0e3 else zt  # coeff-ok: IFS coarse-cap MIN(3, ZTAURES) (cumastrn.F90:768)
 
 # --- IFS convective sub-cloud rain evaporation (cuflxn.F90:436-475, sucumf.F90) ---
 # Kessler-type evaporation of the convective rain flux below cloud base,
@@ -1991,6 +2011,71 @@ def _ifs_cloud_base_qsat(
     return jnp.sum(base_weight * q_sat_env, axis=-1, keepdims=True)
 
 
+# Fraction of a level's post-transport vapour the formation-local rain debit
+# may remove in one step (positivity margin; the legacy vapour-mass spread
+# needed none because every level lost the same small relative amount).
+_RAIN_SINK_CAPACITY_FRAC = 0.9
+_RAIN_SINK_ZERO_FLUX = 1e-12   # kg/m2/s; column flux below this is not rescaled (numerics floor)
+
+
+def distribute_rain_vapor_sink(dq_r_formation, q_v, dq_v_dt, dp_full, dt, scheme):
+    """Per-level vapour sink [kg/kg/s] paying for the in-plume rain, and the
+    per-column factor the rain source must be scaled by so rain == sink.
+
+    ``dq_r_formation`` is the rain-formation profile (precip_frac * M_u * g /
+    dp, the cuascn PDMFUP analogue); ``dq_v_dt`` holds the tendencies booked
+    so far (mass-flux transport), so ``q_v + dt*dq_v_dt`` is the vapour the
+    debit may draw on.  Fields are ``(ncol, nlev)``.
+
+    "formation": debit at the formation levels, capped per level at
+    ``_RAIN_SINK_CAPACITY_FRAC`` of the post-transport vapour; the capped
+    excess is redistributed over the remaining slack of the formation
+    support (levels with formation > 0); whatever still does not fit
+    reduces the rain (scale < 1) so rain, sink and heating stay paired and
+    no level goes negative.  Nothing is ever borrowed from levels where no
+    rain formed.
+    "vapour_mass": the legacy column-exact spread by q_v*dp.
+    """
+    g = constants.g
+    if scheme == "vapour_mass":
+        qv_mass = jnp.maximum(q_v, 0.0) * dp_full
+        w = qv_mass / jnp.maximum(jnp.sum(qv_mass, axis=-1, keepdims=True), 1e-30)
+        rain_total = jnp.sum(dq_r_formation * dp_full, axis=-1, keepdims=True) / g
+        return rain_total * g * w / dp_full, jnp.ones(q_v.shape[:-1], q_v.dtype)
+    if scheme != "formation":
+        raise ValueError(
+            f"unknown rain_vapor_sink {scheme!r}; expected 'formation' or 'vapour_mass'")
+    if not dt > 0.0:
+        raise ValueError(f"rain_vapor_sink='formation' needs dt > 0, got {dt!r}")
+    want = jnp.maximum(dq_r_formation, 0.0)
+    capacity = _RAIN_SINK_CAPACITY_FRAC * jnp.maximum(q_v + dt * dq_v_dt, 0.0) / dt
+    take = jnp.minimum(want, capacity)
+    support = want > 0.0
+    slack = jnp.where(support, jnp.maximum(capacity - take, 0.0), 0.0)
+    excess_col = jnp.sum((want - take) * dp_full, axis=-1, keepdims=True) / g
+    slack_col = jnp.sum(slack * dp_full, axis=-1, keepdims=True) / g
+    # Inactive denominators are 1.0, not a tiny floor: 1/x**2 of a 1e-30
+    # floor overflows the float32 backward pass (NaN gradients for zero-rain
+    # and exhausted-capacity columns, codex-confirmed), and 0*NaN from an
+    # unselected 0/0 branch poisons the gradient the same way.
+    # Masks use a physical floor, not the dtype's smallest normal: the
+    # backward pass of a/b carries 1/b**2, and a "normal" b of 1e-30 kg/m2/s
+    # (a soft-gated trace of formation) still overflows float32 there.  A
+    # column whose formation integrates to less than the floor (1e-7 mm/day)
+    # gets scale 0 AND sink 0, so rain == sink holds exactly there too.
+    tiny = _RAIN_SINK_ZERO_FLUX
+    has_slack = slack_col > tiny
+    add = jnp.where(has_slack, jnp.minimum(excess_col, slack_col) * slack
+                    / jnp.where(has_slack, slack_col, 1.0), 0.0)
+    sink = take + add
+    rain_total = jnp.sum(want * dp_full, axis=-1) / g
+    realized = jnp.sum(sink * dp_full, axis=-1) / g
+    has_rain = rain_total > tiny
+    scale = jnp.where(has_rain, realized / jnp.where(has_rain, rain_total, 1.0), 0.0)
+    sink = jnp.where(has_rain[:, None], sink, 0.0)
+    return sink, scale
+
+
 def bechtold_convection(
     T: jax.Array,
     q_v: jax.Array,
@@ -2063,6 +2148,35 @@ def bechtold_convection(
     conv_stoch_state_new : jax.Array, shape (ncol,)
         Updated AR1 noise state.
     """
+    # Faithful IFS chain, selected as a whole (user decision 2026-09-17):
+    # trigger -> first-guess cloud-base mass flux -> ascent launched at that
+    # flux -> cumastrn rescale -> cudtdqn tendencies.  Static python bool, so
+    # the legacy path below is not traced when this is on (and vice versa).
+    if config.use_ifs_ascent:
+        from legoesm.atmosphere.physics.convection._ifs_faithful import (
+            ifs_faithful_convection,
+        )
+        out, M_u_new = ifs_faithful_convection(
+            T, q_v, p_full, p_half, u, v, conv_prog_profile,
+            conv_stoch_state, prng_key, dt, config,
+            shf_w_m2=shf_w_m2, lhf_w_m2=lhf_w_m2, land_frac=land_frac,
+            dT_dt_adv=dT_dt_dyn, dq_dt_adv=dq_dt_dyn,
+            # PTENT/PTENQ: cumastrn's TOTAL model tendency, which in IFS holds
+            # dynamics + radiation + vertical diffusion accumulated before the
+            # convection call.  This pipeline is PROCESS-SPLIT (every scheme
+            # sees the same input state and the tendencies are summed
+            # afterwards) and turbulence runs after convection, so only the
+            # dynamics and radiative parts exist here.  The missing turbulent
+            # part is the dominant sub-cloud supply for SHALLOW convection --
+            # a declared gap, not an approximation anyone chose.
+            dT_dt_other=(dT_dt_dyn if dT_dt_rad is None else
+                         (dT_dt_rad if dT_dt_dyn is None
+                          else dT_dt_dyn + dT_dt_rad)),
+            dq_dt_other=dq_dt_dyn,
+            out_ctor=ConvectionOutput,
+        )
+        return out, M_u_new, conv_stoch_state
+
     ncol, nlev = T.shape
 
     # Static-config coherence (dispatch-hardening: a silently-inert flag is
@@ -2311,7 +2425,7 @@ def bechtold_convection(
     # under-scale a column whose uncapped flux exceeds the cap when the turnover
     # time lengthens.  The non-turnover path uses the capped value as before.
     M_b_uncapped = M_b_deterministic * jnp.maximum(stoch_factor, 0.0)
-    # See ZhangMcFarlaneConfig.M_b_max.
+    # Hard cap on the cloud-base mass flux [kg/m^2/s] (config.M_b_max).
     M_b = jnp.clip(M_b_uncapped, 0.0, config.M_b_max)
     if config.use_ifs_cape_closure:
         # IFS floors the triggered deep cloud-base flux at 0.001 kg/m^2/s
@@ -2520,13 +2634,13 @@ def bechtold_convection(
             plume.B_u, T, q_v, dz, eps_profile, dlt_profile, dp_full,
             above_base, in_cloud,
         )
-        # ZTAURES resolution factor (cumastrn.F90:762-768): static Python
-        # float from config.dx_m (0 = legacy 1.0), multiplied pre-clamp
+        # ZTAURES resolution factor (cumastrn.F90:762-768): shared helper
+        # (mass_flux.ifs_ztaures), 0 = legacy 1.0, multiplied pre-clamp
         # exactly like the oracle's ZTAU = depth/(2+w)*ZTAURES*RTAUA.
         # _tau_pure (the un-scaled, un-clamped turnover time) is shared by
         # the RCAPDCYCL land branch and the RCAPQADV ZDQCV scaling below.
         _tau_pure = cloud_depth / (2.0 + w_mean)
-        _ztaures = _ifs_ztaures(config.dx_m)
+        _ztaures = ifs_ztaures(config.dx_m)   # 0-d array, fine for clip/divide
         tau_conv = jnp.clip(
             _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
         )
@@ -2879,45 +2993,18 @@ def bechtold_convection(
             jnp.maximum(precip_frac, 0.0) * M_u_new * p_gate_qc
             * constants.g / dp_full
         )
-        # Water-budget coupling (codex R1 #2): the rain is a NEW environment
-        # source not carved from the detrained condensate, so it needs a
-        # matching vapor sink (a zero-detrainment plume must not rain with
-        # no compensating sink — column water creation).  The sink is
-        # COLUMN-exact but distributed over levels by MOISTURE MASS
-        # ``q_v*dp`` — NOT debited per-level at the formation level: the
-        # rain's water was collected by the plume across the whole ascent
-        # (entrained from the moist lower troposphere), and a per-level
-        # ``dq_v -= dq_r`` overdrew the dry upper-tropospheric formation
-        # levels into NEGATIVE q_v within a few steps (100-day RCE gate:
-        # min q_v = -1.4e-4 — positivity outranks the strict per-level
-        # pairing convention).  Mass-weighting by q_v gives every level the
-        # SAME small relative drying rate, so positivity is structurally
-        # safe for any dt with rain_total*g*dt << column vapor.
-        _qv_mass = jnp.maximum(q_v, 0.0) * dp_full          # [kg/kg * Pa]
-        _w_sink = _qv_mass / jnp.maximum(
-            jnp.sum(_qv_mass, axis=-1, keepdims=True), 1e-30,
-        )                                                    # sums to 1
-        _rain_flux_total = jnp.sum(
-            dq_r_conv_dt * dp_full, axis=-1, keepdims=True,
-        ) / constants.g                                      # [kg/m^2/s]
-        # sink_k [kg/kg/s]: sum(sink*dp/g) == rain flux total exactly.
-        _sink_rate = _rain_flux_total * constants.g * _w_sink / dp_full
+        # Water-budget coupling: the rain is a NEW environment source not
+        # carved from the detrained condensate, so it needs a matching vapour
+        # sink (a zero-detrainment plume must not rain with no compensating
+        # sink -- column water creation) and the matching latent release
+        # (the kernel never condensed this water; without the heating the
+        # column lost L_v*(rain formed) and net-cooled on a CAPE-positive
+        # sounding -- tier-2 net-heats gate).  WHERE the sink sits is
+        # ``config.rain_vapor_sink``; see ``distribute_rain_vapor_sink``.
+        _sink_rate, _rain_scale = distribute_rain_vapor_sink(
+            dq_r_conv_dt, q_v, dq_v_dt, dp_full, dt, config.rain_vapor_sink)
+        dq_r_conv_dt = dq_r_conv_dt * _rain_scale[:, None]
         dq_v_dt = dq_v_dt - _sink_rate
-        # ENERGY coupling for the same sink (sign convention: z up, latent
-        # release warms; budget in - out - storage = 0 on h = c_p*T + L_v*q_v):
-        # the vapor debited above CONDENSES into the rain, so each debited
-        # level gets the matching +L_v/c_p warming — the SAME per-level
-        # distribution, keeping the pairing local and h-exact.  Without this
-        # the rain left the column with its condensation enthalpy UNRELEASED:
-        # column h lost exactly L_v*(rain formed) (~1.4e2 W/m^2 on the tier-2
-        # destabilized column), and once sub-cloud evaporation returned the
-        # vapor (booking its cooling correctly) the column net-COOLED
-        # (-28 W/m^2) on a CAPE-positive sounding — convection running
-        # backwards; the tier-2 net-heats gate caught it.  (The plume's own
-        # kernel never condensed this water — the rain is synthesized at the
-        # environment level, so its latent heat must be synthesized with it;
-        # measured: this restores H + L_v*dq_v to the pre-inplume baseline
-        # exactly, no double-count with the kernel's detrainment heating.)
         dT_dt = dT_dt + (constants.L_v / constants.c_pd) * _sink_rate
         _split_done = True
     elif config.use_ifs_subcloud_evap or config.use_ifs_downdraft:

@@ -39,7 +39,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import cast_pytree, finalize_to_storage
 from legoesm.core.state import (
     MPAS_SFC_DIAG_EXTRA_KEYS,
     MPAS_SFC_DIAG_MPI_UNPUBLISHED,
@@ -469,6 +469,16 @@ class MPASOceanHaloRefresh(NamedTuple):
     cells: Callable
     both: Callable
     vertices: Callable
+    # Distributed-reduction context carried WITH the refresh so the step's
+    # reduction sites (barotropic PCG dots / mass projection, eta-floor
+    # redistribution, conservation fixer) need no transport-specific global
+    # accessor: ``owned_mask_*`` weight the local partial sums (halo rows
+    # excluded), ``global_sum(list) -> list`` is the cross-rank SUM
+    # (allreduce on the MPI lane, ``psum`` on the SPMD lane).  ``None`` keeps
+    # the historical layout-accessor / ``is_multi_process`` paths.
+    owned_mask_cells: jnp.ndarray | None = None
+    owned_mask_edges: jnp.ndarray | None = None
+    global_sum: Callable | None = None
 
 
 def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
@@ -504,8 +514,15 @@ def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
             return tuple(fields)
         return tuple(_vx.exchange_vertex_field(f) for f in fields)
 
+    def _global_sum(vals):
+        from legoesm.parallel.reductions import batch_allreduce_mpi
+        return batch_allreduce_mpi(list(vals), op="sum")
+
     return MPASOceanHaloRefresh(edges=_edges, cells=_cells, both=_both,
-                                vertices=_vertices)
+                                vertices=_vertices,
+                                owned_mask_cells=layout.owned_mask_cells,
+                                owned_mask_edges=layout.owned_mask_edges,
+                                global_sum=_global_sum)
 
 
 def gather_voronoi_field(
@@ -1195,70 +1212,54 @@ def make_voronoi_mpi_step(
             state_new = state_new._replace(
                 T=state_new.T.replace(data=T_clipped))
         if state_new.tracers is not None:
-            # Mirror the serial floors EXACTLY (codex 2026-07-26 review of
-            # fc7e7dce8: this block previously hard-coded the plain clamp, so
-            # ``conservative_tracer_clamp`` was SILENTLY INERT under MPI — the
-            # repo's recurring dropped-flag defect class).  The borrow is
-            # column-local, so it needs no halo/allreduce and is identical on
-            # owned and halo cells.
-            if getattr(config, "conservative_tracer_clamp", False):
-                from legoesm.core.conservation import (
-                    conservative_positive_clip_global,
-                    is_borrow_eligible_tracer,
-                )
-                # PER-MASS tracers borrowed (mixing ratios + N_i/N_s/N_g) —
-                # mirrors the serial floors exactly (see primitive_eq_mpas:
-                # the naive clip INVENTED per-mass number every step, x2.2/day
-                # measured -> N_i overflow NaN; per-volume N_c/N_r keep the
-                # plain clip pending density-aware repair).  GLOBAL residual
-                # redistribution over OWNED cells via allreduce-SUM (the one
-                # AD-safe collective) so the factor is decomposition-
-                # independent; owned-mask weighting keeps halo cells out of
-                # the budget exactly like the mass fixer.
-                # TRUE layer-mass dp weight (post-mass-fix p_s): identical
-                # rescale on pure sigma (per-column p_s cancels), correct on
-                # hybrid where dsigma is not the layer mass (codex
-                # 2026-07-28 round 2).  Non-positive dp zero-weighted.
-                _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
-                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
-                _owned = layout.owned_mask_cells[:, None]
-                # BROADCAST-allreduce VJP wrapper, NOT global_sum_mpi: the
-                # summed scalar is broadcast back into every rank's rescale
-                # factor, whose correct transpose is allreduce(SUM) of the
-                # cotangent — identity-VJP global_sum_mpi drops the cross-
-                # rank term (the #811 flux-form scale lesson; codex
-                # 2026-07-28 round 2).
-                from legoesm.core.conservation import (
-                    broadcast_allreduce_sum,
-                )
+            # ONE shared positivity stage, mirroring the serial MPAS floors
+            # EXACTLY (#1354/#1515; codex 2026-07-26 review of fc7e7dce8 — this
+            # block previously hard-coded the plain clamp, so the flag was
+            # SILENTLY INERT under MPI).  Borrow (default) is frozen-MSE-neutral
+            # for vapour AND condensate; the hard-floor fallback carries the
+            # per-species latent-heat T correction incl ice.  The borrow's
+            # GLOBAL residual redistribution runs over OWNED cells via an
+            # allreduce-SUM (the one AD-safe collective) so the factor is
+            # decomposition-independent; owned-mask weighting keeps halo cells
+            # out of the budget exactly like the mass fixer.  dp = TRUE layer
+            # mass (post-mass-fix p_s; non-positive dp zero-weighted).
+            from legoesm.core.conservation import (
+                apply_water_positivity, broadcast_allreduce_sum,
+            )
+            _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
+            _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+            _owned = layout.owned_mask_cells[:, None]
 
-                def _mpi_owned_sum(x, _o=_owned):
-                    return broadcast_allreduce_sum(
-                        jnp.sum(jnp.where(_o, x, 0.0)))
+            def _mpi_owned_sum(x, _o=_owned):
+                # BROADCAST-allreduce, NOT identity-VJP global_sum_mpi: the
+                # summed scalar broadcasts into every rank's rescale factor, so
+                # the correct transpose is allreduce(SUM) of the cotangent (the
+                # #811 flux-form scale lesson; codex 2026-07-28 round 2).
+                return broadcast_allreduce_sum(
+                    jnp.sum(jnp.where(_o, x, 0.0)))
 
-                # SORTED iteration: the closure issues collectives per
-                # tracer, so every rank must pair allreduces for the SAME
-                # tracer — dict insertion order is not a cross-rank contract
-                # (codex 2026-07-28: mismatched orders would silently corrupt
-                # every factor).
-                state_new = state_new._replace(tracers={
-                    k: state_new.tracers[k].replace(data=(
-                        conservative_positive_clip_global(
-                            state_new.tracers[k].data, _dp,
-                            sum_fn=_mpi_owned_sum)[0]
-                        if is_borrow_eligible_tracer(k)
-                        else jnp.maximum(state_new.tracers[k].data, 0.0)))
-                    for k in sorted(state_new.tracers)
-                })
-            else:
-                state_new = state_new._replace(tracers={
-                    k: f.replace(data=jnp.maximum(f.data, 0.0))
-                    for k, f in state_new.tracers.items()
-                })
+            # apply_water_positivity iterates SORTED, so every rank issues the
+            # per-tracer allreduces in the SAME order (a cross-rank contract).
+            _tr_out, _T_out = apply_water_positivity(
+                state_new.tracers, state_new.T.data, _dp,
+                conservative=getattr(
+                    config, "conservative_tracer_clamp", False),
+                energy_consistent=getattr(
+                    config, "energy_consistent_moisture_clip", False),
+                sum_fn=_mpi_owned_sum)
+            state_new = state_new._replace(
+                tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
         # (mass fixer moved above the floors — codex round-2 finding 5.)
 
-        return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+        return (finalize_to_storage(
+                    cast_pytree(state_new, None, "storage")),
+                phys_state_out, sfc_diag)
 
     logger.info(
         "Voronoi MPI step ready: rank=%d/%d, %d owned cells, %d local cells",

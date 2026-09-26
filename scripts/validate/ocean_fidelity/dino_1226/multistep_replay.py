@@ -181,6 +181,11 @@ def provenance(tag: str = "") -> str:
             # #1455 PHASE 1: the seasonal clock is a knob that changes the
             # answer on a forcing_annual_cycle=True card, so it is stamped.
             "DINO_1226_T_SECONDS",
+            # #1455 next-action 1: the two SUBSTITUTION ARMS. An arm map and a
+            # baseline map are well-formed arrays on an identical wet mask and
+            # no numerical guard could tell them apart, so which arm produced a
+            # map has to travel WITH the map.
+            "DINO_1455_SUB_VFACE", "DINO_1455_SUB_CORIOLIS",
         ))
     line = (f"[provenance{(' ' + tag) if tag else ''}] "
             f"git={sha}{'+dirty-TRACKED' if dirty else ''}"
@@ -279,9 +284,18 @@ def build_replay_ic(*, recipe: str = RECIPE, run_traj: str = RUN_TRAJ,
 
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
     s0 = nemo_now_state_at(IC_STEP, run_twin_step1=run_twin_step1)
-    br = bridge_nemo_to_legoesm_topo(g, s0, periodic_i=True, full_step=True)
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
                                lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
+    # THE CARD'S OWN CONSTANTS AND CONVENTIONS REACH THE GEOMETRY, not just the
+    # model config (#1455).  `omega` defaults to NEMO's Earth in the bridge now,
+    # but passing the card's value explicitly makes the routing visible at the
+    # call site rather than resting on a default; and `coriolis_placement` MUST
+    # be passed here, because ensure_geometry hands a pre-built geometry through
+    # unchanged -- setting it on the card alone would be silently ignored on
+    # this lane (the model refuses that case rather than running the default).
+    br = bridge_nemo_to_legoesm_topo(
+        g, s0, periodic_i=True, full_step=True, omega=cfg.omega,
+        coriolis_placement=cfg.coriolis_placement)
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
 
@@ -371,12 +385,14 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
             raise SystemExit(
                 f"Unknown DINO_OUTER_INTEGRATOR={_oi!r}: expected "
                 "'leapfrog' or 'nemo_mlf'")
-        mc = mc._replace(
-            outer_integrator=_oi,
-            implicit_vmix_e3t_now_divisor=(
-                True if _oi == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
-        print(f"ABLATION: outer_integrator={mc.outer_integrator} "
-              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+            mc = mc._replace(
+                outer_integrator=_oi,
+                zdf_implicit_solver_evaluation=(
+                    "nemo_literal" if _oi == "nemo_mlf"
+                    else mc.zdf_implicit_solver_evaluation))
+            print(f"ABLATION: outer_integrator={mc.outer_integrator} "
+                  "zdf_implicit_solver_evaluation="
+                  f"{mc.zdf_implicit_solver_evaluation}")
 
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
     forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)

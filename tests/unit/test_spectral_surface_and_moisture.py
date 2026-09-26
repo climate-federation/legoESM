@@ -313,6 +313,7 @@ def test_the_classical_arm_passes_its_sample_forcing():
     nlev = int(jnp.shape(sigma.sigma_full)[0])
     carry = _carry(grid.n_lat, grid.n_lon, nlev=nlev, extras=False)
     bad = {
+        "land_frac": jnp.zeros((grid.n_lat * grid.n_lon,)),
         "T_sfc": jnp.full((3,), 290.0),        # deliberately not ncol
         "sic": jnp.zeros((3,)),
         "day_of_year": jnp.asarray(244.0),
@@ -350,6 +351,7 @@ def test_a_warmer_prescribed_surface_warms_the_lowest_level():
 
     def _run(T_sfc):
         fc = {
+            "land_frac": jnp.zeros((ncol,)),
             "T_sfc": jnp.full((ncol,), T_sfc),
             "sic": jnp.zeros((ncol,)),
             "day_of_year": jnp.asarray(244.0),

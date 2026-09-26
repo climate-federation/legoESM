@@ -9,7 +9,7 @@
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/dino_pub_%j.out
 set +e
 WT=/burg-archive/glab/users/pg2328/legoESM; cd $WT
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
 export JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 flt() { grep -vE "FutureWarning|warnings.warn|XLA|cuda|CUDA|Plugin|tensorflow|TpuPlatform|Updating files"; }

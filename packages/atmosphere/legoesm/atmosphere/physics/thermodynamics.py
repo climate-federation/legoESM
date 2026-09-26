@@ -410,10 +410,10 @@ def compute_moist_adiabat(
         gamma_2 = moist_adiabat_lapse_rate(T_pred_moist, p_k)
         T_moist = T_moist_start + 0.5 * (gamma_1 + gamma_2) * dp_moist
 
-        # Dry adiabat exact: T = theta_dry * (p / p_ref)^kappa.
-        T_dry = theta_dry * (
-            jnp.clip(p_k, 1.0, None) / constants.p_ref
-        ) ** constants.kappa
+        # Dry adiabat exact: T = theta_dry * Pi(p), Pi from the canonical
+        # Exner helper (physics._shared) rather than an inline power.
+        from legoesm.atmosphere.physics._shared import exner_function
+        T_dry = theta_dry * exner_function(jnp.clip(p_k, 1.0, None))
 
         T_new = below_lcl_k * T_dry + (1.0 - below_lcl_k) * T_moist
         T_new = jnp.clip(T_new, 100.0, 350.0).astype(_dtype)  # coeff-ok: physical T clip [K]

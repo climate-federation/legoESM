@@ -393,8 +393,18 @@ def main() -> int:
     med_split = stats_split["median_rel"]
     print(f"\n  unpatched bn2 median|rel| = {med_base:.3e}")
     print(f"  patched(dumped-alpha/beta) bn2 median|rel| = {med_split:.3e}")
-    if med_split < 1.0e-12:
-        verdict_c = "bn2 is EXACT and its error is 100% INHERITED from eos_rab."
+    if med_base < 1.0e-12 and med_split < 1.0e-12:
+        # RETRACTION 2026-08-28: this branch used to print "bn2 is EXACT and
+        # its error is 100% INHERITED from eos_rab" merely because the MEDIAN
+        # residual and the dumped-alpha substitution were both below 1e-12.
+        # The ordered day-180 per-column census found max
+        # |delta|/RMS(NEMO)=6.366585e-15, above the POINTWISE 1e-15 bar in
+        # 4630/9920 columns; substituting NEMO's live e3w divisor alone reaches
+        # 5.968673e-16.  A small median cannot assign exactness or inheritance.
+        verdict_c = ("median-only split is INCONCLUSIVE: both medians are at "
+                     "roundoff, so this statistic cannot claim exactness or "
+                     "inheritance; use zdf_chain_sweep.py's per-column operand "
+                     "substitution")
     elif med_split >= 0.5 * med_base:
         verdict_c = "bn2 has its own INDEPENDENT defect (patching alpha/beta did not fix it)."
     else:

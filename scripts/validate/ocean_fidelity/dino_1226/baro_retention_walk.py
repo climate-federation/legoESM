@@ -50,7 +50,6 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 
 import numpy as np
 
@@ -250,7 +249,6 @@ def linear_window(rets: dict, names: list) -> list:
         # the window ends at the last day actually certified, so a trailing
         # run of uninformative days can never be scored as linear response.
     return list(range(last_certified + 1))
-    return out
 
 
 def accumulate(R: np.ndarray, per_step_sv: float) -> float:
@@ -514,7 +512,6 @@ def main(argv=None) -> int:
         s_all = acct[nm_s]["S_all"]
         need = GAP_FULL_SECTION
         v = verdict(s_coh, s_all, need, superposes_beyond_window=_superposes)
-        short = max(abs(need) / max(abs(s_all), 1e-300), 0.0)
         verdicts[nm_s] = v
         _scored = s_all if _superposes else s_coh
         _lbl = "all-days" if _superposes else "linear-window (all-days NOT scored)"

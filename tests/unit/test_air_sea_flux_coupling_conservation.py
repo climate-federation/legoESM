@@ -21,8 +21,9 @@ fix works (norms alone do not certify it):
      heat/water into the ocean for an all-ocean (aquaplanet) cell -- the air-sea
      energy AND water budgets close;
   3. override = None is byte-identical to the old self-flux path;
-  4. the override is incompatible with a turbulence scheme that owns surface
-     exchange -> the pipeline raises (no silent double-count).
+  4. with a turbulence scheme that owns surface exchange the override is
+     folded into the kernel's lower boundary condition (it replaces the
+     scheme's bulk flux; no double-count).
 """
 from __future__ import annotations
 
@@ -45,6 +46,15 @@ def _sigma(nlev=NLEV):
         sigma_full = jnp.linspace(0.1, 0.95, nlev)
         sigma_half = jnp.linspace(0.05, 1.0, nlev + 1)
         dsigma = jnp.diff(jnp.linspace(0.05, 1.0, nlev + 1))
+
+        def pressure_at_full(self, p_s):
+            return p_s[..., None] * self.sigma_full
+
+        def pressure_at_half(self, p_s):
+            return p_s[..., None] * self.sigma_half
+
+        def layer_thickness_dp(self, p_s):
+            return p_s[..., None] * self.dsigma
     return _S()
 
 
@@ -328,25 +338,35 @@ class TestAirSeaBudgetCloses:
                             rtol=1e-9, atol=1e-12)
 
 
-class TestTurbulenceIncompatibility:
-    """The shared-flux override must not silently double-count against a
-    turbulence scheme that owns the surface BC."""
+class TestTurbulenceLowerBC:
+    """The shared-flux override is the turbulence scheme's LOWER BOUNDARY
+    CONDITION (folded into the kernel's surface config for the call), so it
+    replaces the scheme's own bulk flux instead of double-counting it — and
+    the former "incompatible with a turbulence scheme" refusal is gone."""
 
-    def test_override_with_turbulence_raises(self):
-        pipe, _ = _pipeline(turbulence="louis")
-        inp, shape_2d = _base_inputs(pipe)
-        dt = 600.0
+    def _step(self, pipe, shape_2d, shf):
+        inp, _ = _base_inputs(pipe)
         held3 = jnp.zeros((*shape_2d, NLEV))
         held2 = jnp.zeros(shape_2d)
-        with pytest.raises(ValueError, match="surface-flux override"):
-            pipe.physics_step_no_rad(
-                inp["T"], inp["p_s"], inp["q_v"], inp["q_c"], inp["q_r"],
-                jnp.zeros((pipe.adapter.ncol,)),
-                inp["u"], inp["v"], inp["sst"], inp["sic"], inp["lat"], dt,
-                held3, held2, held2, held2, held2, held2,
-                sfc_shflx_override=jnp.full(shape_2d, 10.0),
-                sfc_lhflx_override=jnp.full(shape_2d, 10.0),
-            )
+        return pipe.physics_step_no_rad(
+            inp["T"], inp["p_s"], inp["q_v"], inp["q_c"], inp["q_r"],
+            jnp.zeros((pipe.adapter.ncol,)),
+            inp["u"], inp["v"], inp["sst"], inp["sic"], inp["lat"], 600.0,
+            held3, held2, held2, held2, held2, held2,
+            sfc_shflx_override=jnp.full(shape_2d, shf),
+            sfc_lhflx_override=jnp.zeros(shape_2d),
+        )
+
+    def test_override_with_turbulence_folds_into_the_kernel(self):
+        pipe, _ = _pipeline(turbulence="louis")
+        _, shape_2d = _base_inputs(pipe)
+        out_pos = self._step(pipe, shape_2d, 50.0)
+        out_neg = self._step(pipe, shape_2d, -50.0)
+        # the kernel echoes the prescribed flux (it IS its surface flux)
+        np.testing.assert_allclose(np.asarray(out_pos.shflx), 50.0)
+        np.testing.assert_allclose(np.asarray(out_neg.shflx), -50.0)
+        assert float(jnp.mean(out_pos.dT_dt[..., -1])) > float(
+            jnp.mean(out_neg.dT_dt[..., -1]))
 
 
 class TestCoupledDriverWiring:

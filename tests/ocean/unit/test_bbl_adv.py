@@ -28,14 +28,14 @@ import pytest
 
 from legoesm import constants
 from legoesm.ocean.eos import (
-    haline_contraction_coeff,
-    thermal_expansion_coeff,
+    nemo_roquet_alpha_beta,
     wright_eos,
 )
 from legoesm.ocean.physics.bbl_adv import (
     apply_bbl_adv_tendency,
     bbl_static_geometry,
     bbl_transports,
+    nemo_bbl_static_geometry,
 )
 
 RHO0 = 1025.0
@@ -67,16 +67,10 @@ def test_dense_shelf_transport_matches_closed_form():
                               gamma_s=GAMMA, rho_0=RHO0)
     # closed form: the EXACT NEMO eos_rab gating — alpha/beta per column at
     # ITS OWN bottom pressure, averaged across the face
-    p_sh = RHO0 * constants.g * 150.0     # shelf bottom mid-depth
-    p_dp = RHO0 * constants.g * 550.0     # deep bottom mid-depth
-    a_sh = float(thermal_expansion_coeff(jnp.asarray(4.0), jnp.asarray(36.0),
-                                         jnp.asarray(p_sh)))
-    b_sh = float(haline_contraction_coeff(jnp.asarray(4.0), jnp.asarray(36.0),
-                                          jnp.asarray(p_sh)))
-    a_dp = float(thermal_expansion_coeff(jnp.asarray(10.0), jnp.asarray(35.0),
-                                         jnp.asarray(p_dp)))
-    b_dp = float(haline_contraction_coeff(jnp.asarray(10.0), jnp.asarray(35.0),
-                                          jnp.asarray(p_dp)))
+    a_sh, b_sh = nemo_roquet_alpha_beta(
+        jnp.asarray(4.0), jnp.asarray(36.0), jnp.asarray(150.0), rho0=RHO0)
+    a_dp, b_dp = nemo_roquet_alpha_beta(
+        jnp.asarray(10.0), jnp.asarray(35.0), jnp.asarray(550.0), rho0=RHO0)
     zgdrho = max(0.0, 0.5 * (a_sh + a_dp) * (10.0 - 4.0)
                  - 0.5 * (b_sh + b_dp) * (35.0 - 36.0))
     expect = 5.0e4 * 100.0 * constants.g * GAMMA * zgdrho * 1.0
@@ -105,12 +99,12 @@ def test_thermobaric_gating_uses_own_pressure_rab():
                             jnp.zeros((0, 2)), gamma_s=GAMMA, rho_0=RHO0)
     # NEMO-form expectation
     dep_sh, dep_dp = 75.0, float(np.sum(h[0, 1]) - 0.5 * 350.0)
-    p_sh = RHO0 * constants.g * dep_sh
-    p_dp = RHO0 * constants.g * dep_dp
-    a_bar = 0.5 * (float(thermal_expansion_coeff(jnp.asarray(1.0), jnp.asarray(34.75), jnp.asarray(p_sh)))
-                   + float(thermal_expansion_coeff(jnp.asarray(2.0), jnp.asarray(34.7), jnp.asarray(p_dp))))
-    b_bar = 0.5 * (float(haline_contraction_coeff(jnp.asarray(1.0), jnp.asarray(34.75), jnp.asarray(p_sh)))
-                   + float(haline_contraction_coeff(jnp.asarray(2.0), jnp.asarray(34.7), jnp.asarray(p_dp))))
+    a_sh, b_sh = nemo_roquet_alpha_beta(
+        jnp.asarray(1.0), jnp.asarray(34.75), jnp.asarray(dep_sh), rho0=RHO0)
+    a_dp, b_dp = nemo_roquet_alpha_beta(
+        jnp.asarray(2.0), jnp.asarray(34.7), jnp.asarray(dep_dp), rho0=RHO0)
+    a_bar = 0.5 * (float(a_sh) + float(a_dp))
+    b_bar = 0.5 * (float(b_sh) + float(b_dp))
     zg_nemo = max(0.0, a_bar * (2.0 - 1.0) - b_bar * (34.7 - 34.75))
     expect = 5.0e4 * 150.0 * constants.g * GAMMA * zg_nemo
     assert float(utr[0, 0]) == pytest.approx(expect, rel=1e-10)
@@ -145,6 +139,59 @@ def test_land_adjacent_faces_inactive():
     mask = mask.at[0, 0].set(0.0)
     geom = bbl_static_geometry(h, mask)
     assert float(jnp.sum(geom.u_active)) == 0.0
+
+
+def test_nemo_reference_slope_mask_ignores_partial_centroid_with_same_bottom_level():
+    """trabbl.F90:517-533 keys mgrhu to gdept_0(mbkt), not bathymetry.
+
+    Two adjacent partial cells can have different thickness/centroid while
+    sharing one bottom index.  The legacy continuous-depth builder activates
+    that face; NEMO's reference-depth builder must leave it exactly inactive.
+    This is the planted synthetic violation behind the OVERFLOW census arm.
+    """
+    h = np.zeros((1, 2, 4), dtype=np.float64)
+    h[0, 0, :3] = (20.0, 20.0, 5.0)
+    h[0, 1, :3] = (20.0, 20.0, 15.0)
+    mask = np.ones((1, 2), dtype=np.float64)
+    gdept = np.asarray([10.0, 30.0, 50.0, 70.0])
+    e3u = np.full((1, 1, 4), 20.0)
+    e3v = np.empty((0, 2, 4))
+
+    legacy = bbl_static_geometry(jnp.asarray(h), jnp.asarray(mask))
+    nemo = nemo_bbl_static_geometry(
+        jnp.asarray(h), jnp.asarray(mask), jnp.asarray(gdept),
+        jnp.asarray(e3u), jnp.asarray(e3v))
+
+    assert float(legacy.u_active[0, 0]) == 1.0
+    assert float(nemo.mgrhu[0, 0]) == 0.0
+    assert float(nemo.u_active[0, 0]) == 0.0
+
+
+def test_nemo_reference_bbl_thickness_gathers_unmasked_face_metric():
+    """The deeper bottom index may be dry in the shelf T column.
+
+    trabbl.F90:529-531 nevertheless gathers the unmasked e3u_0 at both
+    bottom indices.  A min of masked T-cell thicknesses would return zero (or
+    the wrong partial thickness) and is therefore not an equivalent operand.
+    """
+    h = np.zeros((1, 2, 4), dtype=np.float64)
+    h[0, 0, :2] = (20.0, 7.0)
+    h[0, 1, :3] = (20.0, 20.0, 13.0)
+    mask = np.ones((1, 2), dtype=np.float64)
+    gdept = np.asarray([10.0, 30.0, 50.0, 70.0])
+    # Exact unmasked U-face metric at the shelf and deep bottom indices.
+    e3u = np.asarray([[[20.0, 7.0, 7.0, 20.0]]])
+    e3v = np.empty((0, 2, 4))
+    geom = nemo_bbl_static_geometry(
+        jnp.asarray(h), jnp.asarray(mask), jnp.asarray(gdept),
+        jnp.asarray(e3u), jnp.asarray(e3v))
+
+    assert int(geom.ku_s[0, 0]) == 1
+    assert int(geom.ku_d[0, 0]) == 2
+    assert float(geom.dep_bot[0, 0]) == 30.0
+    assert float(geom.dep_bot[0, 1]) == 50.0
+    assert float(geom.e3u_bbl[0, 0]) == 7.0
+    assert float(geom.u_active[0, 0]) == 1.0
 
 
 def test_exact_tracer_conservation_and_direction():
@@ -229,3 +276,184 @@ def test_host_wrapper_step_and_gating():
     assert np.abs(dT).max() > 0.0
     assert np.abs(dT).max() < 6.0                  # << the 6 K contrast
     assert np.all(dT[0, 0, 2:] == 0.0)             # below shelf seafloor
+
+
+# ---------------------------------------------------------------------------
+# S-42 branch-isomorphism collapse: one transcription, no oracle-less clamp
+# ---------------------------------------------------------------------------
+
+def _host_step_pieces(area_value):
+    """Active-slope fixture + the pieces the host wrapper is built from."""
+    h, mask, T, S = _two_column_setup()
+    T = T.at[0, 0, 1].set(4.0)                  # cold dense shelf bottom
+    geom = bbl_static_geometry(h, mask)
+    dy_u = jnp.full((1, 1), 5.0e4)
+    dx_v = jnp.zeros((0, 2))
+    area = jnp.full((1, 2), area_value)
+    utr, vtr = bbl_transports(T, S, geom, dy_u, dx_v,
+                              gamma_s=GAMMA, rho_0=RHO0)
+    return h, mask, T, S, geom, dy_u, dx_v, area, utr, vtr
+
+
+def _run_host_step(T, S, geom, dy_u, dx_v, area, dt):
+    from typing import NamedTuple
+
+    from legoesm.core.field import Field
+    from legoesm.ocean.physics.bbl_adv import apply_bbl_adv_step
+
+    class _S(NamedTuple):
+        T: object
+        S: object
+
+    st = _S(T=Field(T, name="T"), S=Field(S, name="S"))
+    out = apply_bbl_adv_step(
+        st, geom, dt=dt, gamma_s=GAMMA, rho_0=RHO0,
+        area_2d=area, dy_u_faces=dy_u, dx_v_faces=dx_v, nlev=6)
+    return np.asarray(out.T.data), np.asarray(out.S.data)
+
+
+def _deleted_cap_transports(geom, area, utr, vtr, dt):
+    """The 0.25*V_min/dt clamp that used to live inside the host wrapper.
+
+    Reproduced here (and ONLY here) so the deletion has a control: NEMO's
+    ``tra_bbl_adv`` (trabbl.F90:243-284) clamps neither ``utr_bbl`` nor
+    ``vtr_bbl``, so this arm exists as the thing the model must no longer do.
+    """
+    e3_bot = jnp.take_along_axis(
+        geom.h_ref, geom.bot_k[..., None], axis=-1)[..., 0]
+    V_bot = area * jnp.maximum(e3_bot, 1.0e-3)
+    cap_u = 0.25 * jnp.minimum(V_bot[:, :-1], V_bot[:, 1:]) / dt
+    cap_v = 0.25 * jnp.minimum(V_bot[:-1, :], V_bot[1:, :]) / dt
+    return (jnp.sign(utr) * jnp.minimum(jnp.abs(utr), cap_u),
+            jnp.sign(vtr) * jnp.minimum(jnp.abs(vtr), cap_v))
+
+
+def test_host_step_adds_no_arithmetic_of_its_own():
+    """The host post-step wrapper IS the shared operator plus one Euler step.
+
+    S-42's two paths must reduce to ONE transcription of
+    ``trabbl.F90:243-284``.  This pins the half that is checkable in
+    isolation: on a synthetic slope where the BBL is ACTIVE, calling
+    ``bbl_transports`` + ``apply_bbl_adv_tendency`` directly and stepping
+    ``pt += dt*d(pt)/dt`` reproduces ``apply_bbl_adv_step`` BIT-FOR-BIT, so
+    the wrapper contributes no arithmetic of its own once the non-NEMO
+    transport cap is gone.
+
+    What this does NOT show, stated so the name cannot be over-read: the
+    in-stage site is not bit-identical to the host step in a RUN, because it
+    feeds the operator LIVE stage thickness and LIVE bottom depth
+    (``ocean_model_latlon_cgrid.py:1290-1298``) where the host wrapper feeds
+    the REFERENCE ladder ``geom.h_ref`` and ``geom.dep_bot``.  That is the
+    placement difference S-42 still carries; it is not a second
+    transcription, and it is not what this test is about.
+    """
+    dt = 600.0
+    h, mask, T, S, geom, dy_u, dx_v, area, utr, vtr = _host_step_pieces(1.0e9)
+    assert float(jnp.sum(geom.u_active)) > 0.0        # the slope is active
+    assert float(jnp.abs(utr).max()) > 0.0            # and the BBL is running
+
+    # the in-stage operator, called directly, then advanced one Euler step
+    dT, dS = apply_bbl_adv_tendency(
+        jnp.zeros_like(T), jnp.zeros_like(S), T, S, geom.h_ref, area,
+        geom, utr, vtr, nlev=6)
+    T_ref = np.asarray(T) + dt * np.asarray(dT)
+    S_ref = np.asarray(S) + dt * np.asarray(dS)
+
+    T_host, S_host = _run_host_step(T, S, geom, dy_u, dx_v, area, dt)
+    assert np.array_equal(T_host, T_ref)
+    assert np.array_equal(S_host, S_ref)
+
+    # ... and again on the PATHOLOGICAL face, where the deleted clamp WOULD
+    # have bound.  Without this the assertion above is inert against the cap
+    # (at ocean cell volumes the clamp never engages, so a restored clamp
+    # leaves it green) and the whole guard rests on one other test.
+    _, _, T2, S2, geom2, dy_u2, dx_v2, area2, utr2, vtr2 = _host_step_pieces(
+        1.0e6)
+    dT2, dS2 = apply_bbl_adv_tendency(
+        jnp.zeros_like(T2), jnp.zeros_like(S2), T2, S2, geom2.h_ref, area2,
+        geom2, utr2, vtr2, nlev=6)
+    T2_host, S2_host = _run_host_step(T2, S2, geom2, dy_u2, dx_v2, area2, dt)
+    assert np.array_equal(T2_host, np.asarray(T2) + dt * np.asarray(dT2))
+    assert np.array_equal(S2_host, np.asarray(S2) + dt * np.asarray(dS2))
+
+
+def test_survivor_matches_trabbl_three_leg_formula():
+    """The surviving tendency IS ``tra_bbl_adv``'s three legs, term by term.
+
+    trabbl.F90:255-265 (i-direction), with ``zbtr = r1_e1e2t/e3t`` and
+    ``zu_bbl = ABS(utr_bbl)``:
+      shelf bottom  (iis, ikus): += zu*(pt[iid,ikus] - pt[iis,ikus])*zbtr
+      deep interior (iid, jk)  : += zu*(pt[iid,jk+1] - pt[iid,jk])*zbtr
+      deep bottom   (iid, ikud): += zu*(pt[iis,ikus] - pt[iid,ikud])*zbtr
+    """
+    _, _, T, S, geom, dy_u, dx_v, area, utr, vtr = _host_step_pieces(1.0e9)
+    dT, _ = apply_bbl_adv_tendency(
+        jnp.zeros_like(T), jnp.zeros_like(S), T, S, geom.h_ref, area,
+        geom, utr, vtr, nlev=6)
+    dT = np.asarray(dT)
+    t = np.asarray(T)
+    zu = abs(float(utr[0, 0]))
+    zbtr = 1.0 / (1.0e9 * 100.0)                    # r1_e1e2t / e3t
+    iis, iid, ikus, ikud = 0, 1, 1, 5               # shelf/deep, shelf/deep bottom
+    assert dT[0, iis, ikus] == pytest.approx(
+        zu * (t[0, iid, ikus] - t[0, iis, ikus]) * zbtr, rel=1e-12)
+    for jk in range(ikus, ikud):
+        assert dT[0, iid, jk] == pytest.approx(
+            zu * (t[0, iid, jk + 1] - t[0, iid, jk]) * zbtr, rel=1e-12)
+    assert dT[0, iid, ikud] == pytest.approx(
+        zu * (t[0, iis, ikus] - t[0, iid, ikud]) * zbtr, rel=1e-12)
+
+    # NEMO uses zu_bbl = ABS(utr_bbl) and picks shelf/deep off mgrh, so the
+    # tendency must be INVARIANT under flipping the slope (which flips both
+    # the sign of utr and the shelf/deep assignment).  With a down-slope
+    # transport of one sign only, `abs` is the identity and the mgrh<0 branch
+    # never runs, so neither is pinned by the rows above.
+    h_m = jnp.asarray(np.flip(np.asarray(geom.h_ref), axis=1))
+    T_m = jnp.asarray(np.flip(np.asarray(T), axis=1))
+    S_m = jnp.asarray(np.flip(np.asarray(S), axis=1))
+    geom_m = bbl_static_geometry(h_m, jnp.ones((1, 2)))
+    assert float(geom_m.mgrhu[0, 0]) == -float(geom.mgrhu[0, 0]) != 0.0
+    utr_m, vtr_m = bbl_transports(T_m, S_m, geom_m, dy_u, dx_v,
+                                  gamma_s=GAMMA, rho_0=RHO0)
+    assert float(utr_m[0, 0]) == pytest.approx(-float(utr[0, 0]), rel=1e-12)
+    dT_m, _ = apply_bbl_adv_tendency(
+        jnp.zeros_like(T_m), jnp.zeros_like(S_m), T_m, S_m, h_m, area,
+        geom_m, utr_m, vtr_m, nlev=6)
+    np.testing.assert_allclose(np.asarray(dT_m), np.flip(dT, axis=1),
+                               rtol=1e-12, atol=0.0)
+
+
+def test_transport_cap_is_gone_and_moved_nothing_at_ocean_scales():
+    """Rule 9: the removed clamp has no NEMO arm, and removing it is inert
+    where the driver actually runs.
+
+    * at ORCA1-like cell volumes the old clamp never bound, so the survivor
+      reproduces the pre-deletion state EXACTLY (the deletion is a no-op for
+      every production configuration);
+    * on a pathological tiny-area face the old clamp DID bind, and the
+      survivor now carries the uncapped NEMO transport — which is what makes
+      the first assertion non-vacuous.
+    """
+    dt = 600.0
+    # (a) ORCA1-like: 1e9 m^2 cells -> cap never binds -> deletion inert
+    _, _, T, S, geom, dy_u, dx_v, area, utr, vtr = _host_step_pieces(1.0e9)
+    utr_c, vtr_c = _deleted_cap_transports(geom, area, utr, vtr, dt)
+    assert np.array_equal(np.asarray(utr_c), np.asarray(utr))
+    dT_c, dS_c = apply_bbl_adv_tendency(
+        jnp.zeros_like(T), jnp.zeros_like(S), T, S, geom.h_ref, area,
+        geom, utr_c, vtr_c, nlev=6)
+    T_host, S_host = _run_host_step(T, S, geom, dy_u, dx_v, area, dt)
+    assert np.array_equal(T_host, np.asarray(T) + dt * np.asarray(dT_c))
+    assert np.array_equal(S_host, np.asarray(S) + dt * np.asarray(dS_c))
+
+    # (b) pathological 1e6 m^2 face: the deleted clamp WOULD have bound
+    _, _, T2, S2, geom2, dy_u2, dx_v2, area2, utr2, vtr2 = _host_step_pieces(
+        1.0e6)
+    utr2_c, _ = _deleted_cap_transports(geom2, area2, utr2, vtr2, dt)
+    assert float(jnp.abs(utr2_c).max()) < float(jnp.abs(utr2).max())
+    dT2_c, _ = apply_bbl_adv_tendency(
+        jnp.zeros_like(T2), jnp.zeros_like(S2), T2, S2, geom2.h_ref, area2,
+        geom2, utr2_c, jnp.zeros_like(vtr2), nlev=6)
+    T2_host, _ = _run_host_step(T2, S2, geom2, dy_u2, dx_v2, area2, dt)
+    assert not np.array_equal(
+        T2_host, np.asarray(T2) + dt * np.asarray(dT2_c))

@@ -43,16 +43,40 @@ from legoesm.grids.latlon import (
 # =========================================================================
 
 
-def _read_nemo_mesh_mask(path: str | Path) -> dict:
-    """Read a NEMO mesh_mask (or domain_cfg) NetCDF file.
+def mesh_file_list(path) -> list[str]:
+    """Normalise a NEMO mesh spec to a list of file paths.
+
+    Accepts one path, a sequence of paths, or a single string with
+    ``os.pathsep``-joined paths.  Older NEMO runs (e.g. NOC ORCA0083) ship
+    the grid as THREE files -- ``mesh_hgr.nc`` (metrics/coordinates),
+    ``mesh_zgr.nc`` (vertical scale factors) and ``mask.nc`` (masks) -- while
+    newer ones bake everything into one ``mesh_mask.nc``/``domain_cfg.nc``.
+    """
+    import os
+    if isinstance(path, (str, Path)):
+        parts = str(path).split(os.pathsep)
+    else:
+        parts = [str(p) for p in path]
+    parts = [p for p in parts if p]
+    if not parts:
+        raise ValueError("mesh path list is empty")
+    return parts
+
+
+def _read_nemo_mesh_mask(path) -> dict:
+    """Read a NEMO mesh_mask (or domain_cfg) NetCDF file, or a LIST of files
+    that together hold the mesh (``mesh_hgr.nc`` + ``mesh_zgr.nc`` + ``mask.nc``).
 
     Returns a flat dict of 2D JAX arrays keyed by NEMO variable name.
-    Only the surface-level slice of 3D fields is kept.
+    Only the surface-level slice of 3D fields is kept.  With several files
+    the FIRST file holding a variable wins; a variable in none of them is
+    simply absent (as before).
 
     Parameters
     ----------
-    path : str or Path
-        Path to a NEMO ``mesh_mask*.nc`` or ``domcfg*.nc`` file.
+    path : str, Path, or sequence of them
+        Path(s) to NEMO ``mesh_mask*.nc`` / ``domcfg*.nc`` / ``mesh_hgr.nc`` /
+        ``mesh_zgr.nc`` / ``mask.nc`` files (see :func:`mesh_file_list`).
 
     Returns
     -------
@@ -68,7 +92,6 @@ def _read_nemo_mesh_mask(path: str | Path) -> dict:
             "Install with: pip install netCDF4"
         ) from exc
 
-    ds = netCDF4.Dataset(str(path), "r")
     out: dict[str, jax.Array] = {}
 
     # Standard NEMO mesh_mask variables (2D or 3D with time/depth dims)
@@ -79,27 +102,66 @@ def _read_nemo_mesh_mask(path: str | Path) -> dict:
     ]
     wanted_masks = ["tmask", "umask", "vmask", "fmask"]
 
-    for name in wanted_2d:
-        # Try with and without _0 suffix (domain_cfg convention)
-        for suffix in ["", "_0"]:
-            key = name + suffix
-            if key in ds.variables:
-                arr = ds.variables[key][:]
-                # Squeeze singleton dims (time, depth)
+    for one in mesh_file_list(path):
+        ds = netCDF4.Dataset(one, "r")
+        for name in wanted_2d:
+            if name in out:
+                continue
+            # Try with and without _0 suffix (domain_cfg convention)
+            for suffix in ["", "_0"]:
+                key = name + suffix
+                if key in ds.variables:
+                    arr = ds.variables[key][:]
+                    # Squeeze singleton dims (time, depth)
+                    while arr.ndim > 2:
+                        arr = arr[0]
+                    out[name] = jnp.array(arr, dtype=jnp.float64)
+                    break
+
+        for name in wanted_masks:
+            if name in out:
+                continue
+            if name in ds.variables:
+                arr = ds.variables[name][:]
                 while arr.ndim > 2:
                     arr = arr[0]
                 out[name] = jnp.array(arr, dtype=jnp.float64)
-                break
+        ds.close()
 
-    for name in wanted_masks:
-        if name in ds.variables:
-            arr = ds.variables[name][:]
-            while arr.ndim > 2:
-                arr = arr[0]
-            out[name] = jnp.array(arr, dtype=jnp.float64)
-
-    ds.close()
     return out
+
+
+def strip_north_rows_raw(raw: dict, n: int) -> dict:
+    """Drop ``n`` rows from the NORTH (last axis-0 rows) of every 2-D mesh
+    field.  ``n == 0`` returns ``raw`` unchanged; negative raises."""
+    if n < 0:
+        raise ValueError(f"strip_north_rows must be >= 0, got {n}")
+    if n == 0:
+        return raw
+    out = {}
+    for k, v in raw.items():
+        if v.shape[0] <= n:
+            raise ValueError(
+                f"strip_north_rows={n} would remove every row of {k!r} "
+                f"(shape {tuple(v.shape)})")
+        out[k] = v[:-n]
+    return out
+
+
+def _detect_cap_j(gphit, n_lat, fold_j, cap_dlat_rel_deviation):
+    """Row where the grid starts deviating from regular lat-lon (bipolar
+    cap start): first row whose dlat deviates from the southern-half median
+    by more than ``cap_dlat_rel_deviation`` (relative)."""
+    n_lon = gphit.shape[1]
+    lat_col = gphit[:, n_lon // 4]  # sample column away from fold poles
+    dlat = jnp.diff(lat_col)
+    median_dlat = jnp.median(dlat[:n_lat // 2])  # use southern half
+    deviation = jnp.abs(dlat - median_dlat) / jnp.abs(median_dlat)
+    cap_candidates = jnp.where(deviation > cap_dlat_rel_deviation,
+                               size=n_lat - 1)
+    if len(cap_candidates[0]) > 0:
+        return int(cap_candidates[0][0])
+    return fold_j  # no cap detected (very regular grid)
 
 
 def _detect_fold(
@@ -165,15 +227,77 @@ def _detect_fold(
         "n_lon-1-i": jnp.arange(n_lon - 1, -1, -1, dtype=jnp.int32),
         "(n_lon-i)%n_lon": (n_lon - jnp.arange(n_lon, dtype=jnp.int32)) % n_lon,
     }
+
+    # --- EXACT storage-layout classification (measured convention, 2026-08-26;
+    # see scripts/validate/ocean_fidelity/check_tripole_fold_pairing.py and the
+    # NEMO T-pivot reference lbc_nfd_generic.h90).  Real ORCA meshes hit one of
+    # these to <1e-6 deg; synthetic/legacy grids fall through to the lat-only
+    # auto-detect below (byte-identical legacy behaviour).
+    #   pivot_row_stored (de-haloed, e.g. eORCA025): stored top T row is the
+    #     SELF-symmetric pivot row under P_T=(n_lon-i)%n_lon.
+    #   halo_row_stored (e.g. eORCA1.2): stored top T row == permuted copy of
+    #     the row below under n_lon-1-i.
+    def _wrap_dlon(a, b):
+        d = jnp.abs(a - b) % 360.0
+        return jnp.minimum(d, 360.0 - d)
+
+    lon_fold = glamt[fold_j]
+    _exact = 1.0e-5
+    _idx = jnp.arange(n_lon, dtype=jnp.int32)
+    _p_self = (n_lon - _idx) % n_lon
+    _m_self = _p_self != _idx
+    _self_ok = bool(
+        (jnp.max(jnp.where(_m_self, jnp.abs(lat_fold - lat_fold[_p_self]), 0.0))
+         < _exact)
+        and (jnp.max(jnp.where(_m_self,
+                               _wrap_dlon(lon_fold, lon_fold[_p_self]), 0.0))
+             < _exact))
+    if _self_ok:
+        # De-haloed T-pivot mesh (eORCA025 class): per-point-type maps from
+        # the measured coincidences (T/U self on the pivot row; V/F pair with
+        # the row below): P_T=(-i)%n, P_U=(-i-1)%n; V uses P_T, F uses P_U.
+        return FoldDescriptor(
+            is_active=True, fold_j=fold_j,
+            cap_j=_detect_cap_j(gphit, n_lat, fold_j, cap_dlat_rel_deviation),
+            perm_T=_p_self,
+            perm_v=_p_self,
+            vector_sign_u=-1.0, vector_sign_v=-1.0,
+            pivot_row_stored=True,
+            perm_u=(n_lon - _idx - 1) % n_lon,
+            perm_f=(n_lon - _idx - 1) % n_lon,
+        )
+    # Halo-row-stored meshes (eORCA1.2 class: stored top row duplicates the
+    # row below; validated by the 1-degree campaign) intentionally fall
+    # through to the LEGACY lat-symmetry auto-detect below — byte-identical
+    # behaviour for every existing working configuration.
     if fold_convention not in ("auto", *perm_candidates):
         raise ValueError(
             f"fold_convention must be 'auto' or one of {list(perm_candidates)}, "
             f"got {fold_convention!r}."
         )
-    asym_by_perm = {
-        name: float(jnp.max(jnp.abs(lat_fold - lat_fold[p])))
-        for name, p in perm_candidates.items()
-    }
+    # Unfilled cyclic-halo columns: NOC ORCA0083 mesh_hgr stores (lat, lon) =
+    # (0, 0) in the last two columns of its fold rows (NEMO never filled them).
+    # No Arctic fold row passes through (0 N, 0 E), so such a column is a
+    # placeholder, not geometry; it is excluded from the symmetry check (for
+    # itself and as a partner) and reported.  Real asymmetries still fail.
+    lon_fold = glamt[fold_j]
+    unset = (lat_fold == 0.0) & (lon_fold == 0.0)
+    n_unset = int(jnp.sum(unset))
+    if n_unset:
+        if n_unset > n_lon // 4:
+            raise ValueError(
+                f"Fold row j={fold_j}: {n_unset} of {n_lon} columns are unset "
+                "(0,0) placeholders -- more than a cyclic halo; this is not a "
+                "usable fold row (wrong strip_north_rows or a broken mesh).")
+        print(f"  tripole fold check: ignoring {n_unset} unset (0,0) placeholder "
+              f"column(s) on the fold row j={fold_j}")
+
+    def _asym(p):
+        keep = ~(unset | unset[p])
+        d = jnp.abs(lat_fold - lat_fold[p])
+        return float(jnp.max(jnp.where(keep, d, 0.0)))
+
+    asym_by_perm = {name: _asym(p) for name, p in perm_candidates.items()}
     if fold_convention == "auto":
         # Symmetry-based auto-detect. A near-tie means BOTH conventions fit the
         # fold-row latitude equally well (e.g. a near-constant fold-row
@@ -216,18 +340,7 @@ def _detect_fold(
     # For v/q stagger the permutation is the same for the ORCA T-fold.
     perm_v = perm_T
 
-    # Detect cap latitude: where the grid starts deviating from regular
-    # lat-lon.  On ORCA1 this is around j where gphit starts to diverge
-    # significantly from a linear latitude progression.
-    lat_col = gphit[:, n_lon // 4]  # sample column away from fold poles
-    dlat = jnp.diff(lat_col)
-    median_dlat = jnp.median(dlat[:n_lat // 2])  # use southern half
-    deviation = jnp.abs(dlat - median_dlat) / jnp.abs(median_dlat)
-    cap_candidates = jnp.where(deviation > cap_dlat_rel_deviation, size=n_lat - 1)
-    if len(cap_candidates[0]) > 0:
-        cap_j = int(cap_candidates[0][0])
-    else:
-        cap_j = fold_j  # no cap detected (very regular grid)
+    cap_j = _detect_cap_j(gphit, n_lat, fold_j, cap_dlat_rel_deviation)
 
     return FoldDescriptor(
         is_active=True,
@@ -326,22 +439,32 @@ def _compute_rotation_angles(
     return cos_alpha_u, sin_alpha_u, cos_alpha_v, sin_alpha_v
 
 
+# Floor clamped onto every per-cell length metric [m]: keeps degenerate
+# fold / land cells from producing zero or negative spacings.  Named so a
+# caller deriving a coefficient from the metrics can detect saturation on
+# it rather than pass a literal.
+DEFAULT_MIN_DX_M: float = 1000.0
+
+
 def create_tripole_grid(
-    grid_file: str | Path,
+    grid_file,
     *,
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
     dtype=None,
-    min_dx_m: float = 1000.0,
+    min_dx_m: float = DEFAULT_MIN_DX_M,
     fold_convention: str = "auto",
     allow_ambiguous_legacy_fold: bool = False,
+    strip_north_rows: int = 0,
 ) -> LatLonCGridGeometry:
     """Load a tripolar grid from a NEMO mesh_mask NetCDF file.
 
     Parameters
     ----------
-    grid_file : str or Path
-        Path to a NEMO ``mesh_mask*.nc`` or ``domcfg*.nc`` file.
+    grid_file : str, Path, or sequence of them
+        Path to a NEMO ``mesh_mask*.nc`` / ``domcfg*.nc`` file, or the list
+        ``[mesh_hgr.nc, mesh_zgr.nc, mask.nc]`` of an older split mesh (see
+        :func:`mesh_file_list`).
     radius : float
         Sphere radius [m].  Overrides grid-file values for consistency
         with the rest of legoESM.
@@ -358,6 +481,13 @@ def create_tripole_grid(
         with implicit barotropics. Default 1 000 m matches the
         runner-side floor used in the 20-yr ORCA1 production run.
         Pass 0.0 to disable.
+    strip_north_rows : int, default 0
+        Drop this many rows from the NORTH end of every mesh field before
+        building the geometry.  NEMO ``jperio=4`` (T-point pivot) meshes such
+        as ORCA0083/ORCA12 end with a DEAD halo row above the self-dual pivot
+        row; dropping it makes the pivot row the last row, which is the only
+        fold layout the operators implement (last row identified with its own
+        permutation).  0 = the mesh as stored (eORCA1.2 / eORCA025 layout).
     fold_convention : {"auto", "n_lon-1-i", "(n_lon-i)%n_lon"}, default "auto"
         T-fold index convention forwarded to ``_detect_fold``. ``"auto"``
         symmetry-detects it; on a genuinely ambiguous (near-constant) fold row
@@ -386,6 +516,7 @@ def create_tripole_grid(
             dtype = jnp.float32
 
     raw = _read_nemo_mesh_mask(grid_file)
+    raw = strip_north_rows_raw(raw, strip_north_rows)
 
     # Coordinates at T-points [degrees -> radians]
     glamt = raw["glamt"]
@@ -401,15 +532,32 @@ def create_tripole_grid(
     area_T = dx_T * dy_T
     total_area = jnp.sum(area_T)
 
-    # u-point metrics.  NEMO e1u/e2u have shape (n_lat, n_lon) but on
-    # a C-grid u-points have shape (n_lat, n_lon+1).  For NEMO, the
-    # u-point at index i is between T-cell (i-1) and T-cell i in the
-    # zonal direction, and e1u[j, i] is the zonal spacing there.
-    # The wrap column (i = n_lon) equals i = 0 by periodicity.
+    # u-point metrics.  NEMO e1u/e2u have shape (n_lat, n_lon) but on a C-grid
+    # u-points have shape (n_lat, n_lon+1).
+    #
+    # NEMO's u-point ``i`` lies EAST of T-cell ``i`` -- between T(i) and T(i+1).
+    # MEASURED off the mesh rather than taken from documentation: on the
+    # 1-degree part of eORCA1, ``glamu - glamt = +0.5000`` deg at four
+    # consecutive equatorial columns (and ``gphiv - gphit = +0.32`` deg, the
+    # matching statement for v).  Our face ``i`` lies WEST of cell ``i`` --
+    # ``f_u_inner`` just below averages ``f_T[i-1]`` and ``f_T[i]``, which is
+    # the same statement.  So our face ``i`` must take NEMO's ``e1u[i-1]``, and
+    # face 0 wraps to the LAST column by periodicity.
+    #
+    # This block previously appended ``e1u[:, 0:1]`` instead, which gave every
+    # face the metric of the face one column EAST.  That is exactly a no-op
+    # wherever the mesh does not vary along a row -- the whole southern
+    # hemisphere and the tropics -- which is why it survived; ORCA's
+    # quasi-isotropic northern grid begins near 20N, so it was a several- to
+    # twenty-percent error on every zonal face north of 30N, including the
+    # Gulf Stream and the Arctic.  Confirmed to reach the continuity operator
+    # (20-31% of the local divergence in the worst percentile north of 30N,
+    # and exactly zero in 30S-60S where the two builds are bit-identical) by
+    # ``scripts/validate/ocean_fidelity/tripole_metric_divergence.py``.
     e1u = raw["e1u"].astype(dtype)
     e2u = raw["e2u"].astype(dtype)
-    dx_u = jnp.concatenate([e1u, e1u[:, 0:1]], axis=1)  # (n_lat, n_lon+1)
-    dy_u = jnp.concatenate([e2u, e2u[:, 0:1]], axis=1)
+    dx_u = jnp.concatenate([e1u[:, -1:], e1u], axis=1)  # (n_lat, n_lon+1)
+    dy_u = jnp.concatenate([e2u[:, -1:], e2u], axis=1)
 
     # v-point metrics.  NEMO v-points have shape (n_lat, n_lon); the
     # extra row at the fold boundary needs special handling.
@@ -638,6 +786,21 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
     south_offsets = (jnp.arange(n_pad, 0, -1, dtype=dtype)[:, None]
                      * dlat_row[None, :])                           # (n_pad, n_lon)
     lat_new = (grid.lat_T[0:1] - south_offsets).astype(dtype)       # monotone south
+    # Past -90 deg the cosine goes NEGATIVE and the 1e-10 clamps below flatten
+    # it (GLM review 2026-08-24).  The pad's contract for LAND rows is only
+    # finite + positive, which the clamp preserves — and the synthetic
+    # full-sphere test grid legitimately extrapolates past the pole (12-deg
+    # rows), so this is a LOUD WARNING, not an error.  Production eORCA
+    # meshes (south edge ~-80 deg, <=3 pad rows of ~0.25 deg) never trigger
+    # it; if a run log shows this line, inspect the mesh before trusting any
+    # diagnostic that reads latitude off the padded rows.
+    _lat_min = float(jnp.min(lat_new))
+    if _lat_min <= -0.5 * float(jnp.pi):
+        print(f"[pad_tripole_grid_south] WARNING: extrapolated south "
+              f"latitude {_lat_min:.4f} rad crosses the pole; the {n_pad} "
+              f"pad rows are LAND and their clamped metrics stay finite and "
+              f"positive, but their latitude values are not physical.",
+              flush=True)
     lat_T_pad = _prepend_rows(grid.lat_T, lat_new)
     lon_T_pad = _edge_pad(grid.lon_T)                               # lon unchanged
 
@@ -657,6 +820,35 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
          jnp.asarray(grid.cos_lat, dtype)])
     sin_lat_pad = jnp.concatenate(
         [jnp.sin(lat_new_1d), jnp.asarray(grid.sin_lat, dtype)])
+
+    # cos_lat_v is the (n_lat+1,) v-FACE profile — it must grow with the v
+    # rows or the SPMD band slicer's [s:e+1] on the padded grid hands the
+    # NORTH band one row fewer than the interior bands, and the per-field
+    # band stack fails with "All input arrays must have the same shape"
+    # (the eORCA025 full-card 4-GPU smoke, job 9471878: this field was
+    # MISSED when it was added to the geometry after this pad was written,
+    # and eORCA1's n_lat=332 divides evenly so the pad — and the miss —
+    # never fired there).  New face values = clamped cos of the new rows'
+    # latitudes (land rows; finite + positive is all dynamics requires).
+    cos_lat_v_pad = jnp.concatenate(
+        [jnp.maximum(jnp.cos(lat_new_1d), 1e-10).astype(dtype),
+         jnp.asarray(grid.cos_lat_v, dtype)])
+
+    # seam_wall_rows is an OPTIONAL (n_lat,) per-row profile (None on the
+    # eORCA builds today, set by the DINO bridge).  If present it must grow
+    # too, or the same band-slice raggedness bites; the new rows are LAND,
+    # so the seam face there is WALLED (1.0).
+    seam_pad = grid.seam_wall_rows
+    if seam_pad is not None:
+        seam_pad = jnp.concatenate(
+            [jnp.ones((n_pad,), dtype=jnp.asarray(seam_pad).dtype),
+             jnp.asarray(seam_pad)])
+
+    native_lat_pad = grid.native_lat_T_deg
+    if native_lat_pad is not None:
+        native_lat_pad = jnp.concatenate(
+            [jnp.degrees(lat_new).astype(jnp.asarray(native_lat_pad).dtype),
+             jnp.asarray(native_lat_pad)], axis=0)
 
     return grid._replace(
         n_lat=n_lat + n_pad,
@@ -682,7 +874,10 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
                            cap_j=int(fold.cap_j) + n_pad),
         cos_lat=cos_lat_pad,
         sin_lat=sin_lat_pad,
+        cos_lat_v=cos_lat_v_pad,
         lat=lat_1d_pad,
+        seam_wall_rows=seam_pad,
+        native_lat_T_deg=native_lat_pad,
         # lon (n_lon,) unchanged; dlon/dlat sentinels unchanged.
     )
 
@@ -760,6 +955,44 @@ def create_synthetic_tripole(
     return geom._replace(fold=fold)
 
 
+def create_synthetic_tripole_pivot(n_lat: int, n_lon: int | None = None,
+                                   radius: float = constants.R_earth,
+                                   omega: float = constants.Omega,
+                                   dtype=None):
+    """Synthetic tripole with the DE-HALOED pivot-row-stored fold layout.
+
+    The eORCA025 storage convention (measured 2026-08-26, see
+    ``check_tripole_fold_pairing.py``): the stored top T row is the
+    SELF-symmetric T-pivot row — cell ``(i, j_max)`` and
+    ``(perm_T[i], j_max)`` are the same physical cell under
+    ``perm_T = (n_lon - i) % n_lon`` — the duplicated halo row was
+    stripped, U points self-map under ``(n_lon - i - 1) % n_lon``, and
+    V/F rows pair with the row BELOW.  ``create_synthetic_tripole``
+    models the OTHER layout (eORCA1.2, halo row stored); the two fixtures
+    together pin both fold code paths.
+
+    Returns a regular lat-lon geometry with the pivot-layout fold
+    descriptor attached (same idealization as the halo-layout fixture:
+    metrics stay regular; only the fold BC dispatch is exercised).
+    """
+    geom = create_latlon_geometry(n_lat, n_lon, radius, omega, dtype)
+    n_lon_eff = geom.n_lon
+    idx = jnp.arange(n_lon_eff, dtype=jnp.int32)
+    fold = FoldDescriptor(
+        is_active=True,
+        fold_j=n_lat - 1,
+        cap_j=max(0, n_lat - n_lat // 4),
+        perm_T=(n_lon_eff - idx) % n_lon_eff,
+        perm_v=(n_lon_eff - idx) % n_lon_eff,
+        vector_sign_u=-1.0,
+        vector_sign_v=-1.0,
+        pivot_row_stored=True,
+        perm_u=(n_lon_eff - idx - 1) % n_lon_eff,
+        perm_f=(n_lon_eff - idx - 1) % n_lon_eff,
+    )
+    return geom._replace(fold=fold)
+
+
 def download_orca1_grid(
     dest_dir: str | Path = "data/grids",
     *,
@@ -814,3 +1047,38 @@ def download_orca1_grid(
     tmp_path.rename(filepath)
     print(f"Download complete: {filepath}")
     return filepath
+
+
+def south_pad_rows(n_lat: int, n_devices: int) -> int:
+    """Number of LAND rows to prepend at the SOUTH so ``n_lat`` is a multiple
+    of ``n_devices`` (the lat-band SPMD step needs one uniform band per device).
+
+    eORCA025 ``n_lat=1207`` is odd: for ``n_devices=2`` this returns 1 (-> 1208).
+    Returns 0 when already divisible (or ``n_devices <= 1``).
+    """
+    if n_devices <= 1:
+        return 0
+    rem = n_lat % n_devices
+    return 0 if rem == 0 else (n_devices - rem)
+
+
+def pad_mask_bathy_south(land_mask, H_bathy, n_pad: int):
+    """Prepend ``n_pad`` LAND rows (mask=0, bathy=0) to the SOUTH of the cell
+    ``(n_lat, n_lon)`` land-mask + bathymetry arrays.
+
+    Pairs with :func:`pad_tripole_grid_south` (which pads the GRID geometry the
+    same way + keeps the north fold): the padded mask/bathy + grid are fed to
+    the SAME rest-state / WOA-fill path, so the state is built on the padded
+    grid with the added rows masked LAND (inert dynamics).  The wet rows are
+    preserved bit-exact, shifted ``+n_pad`` in the lat index.
+    """
+    import numpy as np
+    if n_pad <= 0:
+        return land_mask, H_bathy
+    lm = np.asarray(land_mask)
+    hb = np.asarray(H_bathy)
+    n_lon = lm.shape[1]
+    zeros_lm = np.zeros((n_pad, n_lon), dtype=lm.dtype)
+    zeros_hb = np.zeros((n_pad, n_lon), dtype=hb.dtype)
+    return (np.concatenate([zeros_lm, lm], axis=0),
+            np.concatenate([zeros_hb, hb], axis=0))

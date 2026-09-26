@@ -81,6 +81,7 @@ from legoesm.core.fv3_duo_stepper import (  # noqa: E402
 from legoesm.core.fv3_native_state_3d import build_state_3d  # noqa: E402
 
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
+    assert_batched_matches_loop,
     assert_fd_gap_at_roundoff_floor,
     assert_real,
     check_adjoint,
@@ -1239,3 +1240,94 @@ def test_require_real_area_refuses_the_builder_sentinel():
     nan[3, 3] = np.nan
     with pytest.raises(ValueError, match="not a real area"):
         require_real_area(nan, 5)
+
+
+# =====================================================================
+# 8. the face-batched arm (C2a -- face-batching ladder step 4)
+#
+# Same gates as the sibling files' batched sections: batched == loop at
+# the reassociation bound (sentinel cells as both-fills, NaNs by
+# position), defaults-off (RULE 3), one jit-vs-eager batched smoke at
+# the FMA-class 1e-12 bound.  BARRIER 2 and the NH zh/pkc exchanges are
+# NOT batched -- both arms run them on the full six-face stack -- so a
+# batched==loop pass here certifies only the vmapped face loops around
+# them, which is exactly the converted surface.
+# =====================================================================
+
+
+def test_tail_batched_matches_loop(jctx, jstate, jcsw, jdsw):
+    loop = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM)
+    bat = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM,
+                                  batched=True)
+    assert_batched_matches_loop(bat, loop, "dsw_tail_phase_3d")
+
+
+def test_tail_batched_matches_loop_nh(jctx, jstate_nh, nh_bundle):
+    """NH arm: exercises d_sw5's w/dw finalisation and the traced
+    per-face da_min_c in its damping coefficients.  Inputs are the NH
+    bundle's stacks -- identical to both arms, so the gate is
+    one-variable in `batched`."""
+    jcswn = stack_np(nh_bundle["csw"])
+    jdswn = dsw_transport_phase_3d(jctx, jstate_nh, jcswn, DT, KM,
+                                   hydrostatic=False)
+    loop = jtail.dsw_tail_phase_3d(jctx, jstate_nh, jcswn, jdswn, DT,
+                                   KM, hydrostatic=False)
+    bat = jtail.dsw_tail_phase_3d(jctx, jstate_nh, jcswn, jdswn, DT,
+                                  KM, hydrostatic=False, batched=True)
+    assert_batched_matches_loop(bat, loop, "dsw_tail_phase_3d[nh]")
+
+
+@pytest.mark.parametrize("remap_step", [False, True],
+                         ids=["plain", "remap"])
+def test_dgrid_pressure_batched_matches_loop(jctx, jstate, jcsw, jdsw,
+                                             remap_step):
+    """Both remap arms: remap_step=True adds the pk_remap snapshot key,
+    so the key-set assert inside the comparator covers its gating."""
+    tail = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM)
+    kw = dict(dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR,
+              remap_step=remap_step)
+    loop = jtail.dgrid_pressure_phase_3d(jctx, jdsw, tail, KM, **kw)
+    bat = jtail.dgrid_pressure_phase_3d(jctx, jdsw, tail, KM,
+                                        batched=True, **kw)
+    assert_batched_matches_loop(bat, loop, "dgrid_pressure_phase_3d")
+
+
+def test_dgrid_nh_pressure_batched_matches_loop(jctx, state_np_nh,
+                                                nh_bundle):
+    """The shipped duo cadence (remap_step=False, use_logp=False,
+    square_domain=True), through the same `_run_nh` path as the parity
+    gates, so both arms consume byte-identical inputs.  The returned
+    carry is NESTED (nh/press dicts); the comparator recurses."""
+    bundle = dict(nh_bundle, state=state_np_nh)
+    loop = _run_nh(jctx, bundle, "jax")
+    bat = _run_nh(jctx, bundle, "jax", batched=True)
+    assert_batched_matches_loop(bat, loop, "dgrid_nh_pressure_phase_3d")
+
+
+def test_tail_batched_defaults_off_and_bool(jctx, jstate, jcsw, jdsw):
+    """RULE 3 guard on all three converted phases: the certified loop
+    path is the DEFAULT; the vmap arm is opt-in (the acoustic assembler
+    passes no flag)."""
+    import inspect
+
+    for fn in (jtail.dsw_tail_phase_3d, jtail.dgrid_pressure_phase_3d,
+               jtail.dgrid_nh_pressure_phase_3d):
+        sig = inspect.signature(fn)
+        assert sig.parameters["batched"].default is False, fn.__name__
+    with pytest.raises(TypeError, match="batched"):
+        jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM,
+                                batched=1)
+
+
+def test_tail_batched_jit_matches_eager(jctx, jstate, jcsw, jdsw):
+    """jit-vs-eager on the batched arm, through the module's OWN
+    factory (batched baked static there).  FMA contraction under jit is
+    a LARGER class than batched-vs-loop reassociation, hence the cgrid
+    file's 1e-12 bound rather than 1e-13."""
+    eager = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM,
+                                    batched=True)
+    fast = jtail.make_dsw_tail_phase_3d_jit(jctx, KM, batched=True)
+    got = fast(jstate, jcsw, jdsw, DT)
+    assert_batched_matches_loop(got, eager,
+                                "dsw_tail_phase_3d[jit,batched]",
+                                rtol=1e-12, atol=1e-12)

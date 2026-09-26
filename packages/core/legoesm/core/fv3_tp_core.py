@@ -142,6 +142,8 @@ meaningful for xppm/yppm.
 """
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import numpy as np  # STATIC trace-time index arrays only, never traced
@@ -197,7 +199,7 @@ _SW_ORDS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
 
 
 def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """Static-dtype gate mirroring the NumPy lane's ``_require_f64``.
+    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
 
     Reads only ``.dtype`` (static under jit): a float32 operand would
     otherwise be silently upcast -- or worse, with x64 disabled the
@@ -210,14 +212,36 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     to a public shared one is an edit to another lane's file, i.e. out
     of this task's scope.  Flagged for a follow-up.)
     """
+    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
+    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype). The
+    # "no silent fp64->fp32 downcast" guarantee now lives at the model
+    # boundary; THIS gate catches an f64 metric/workspace leaking into an
+    # f32 phase (silent promotion / lax.scan carry mismatch).
+    seen = None
     for name, a in arrays.items():
         if a is None:
             continue
-        if jnp.asarray(a).dtype != jnp.float64:
+        _arr = jnp.asarray(a)
+        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
+            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
+            # timestep/coeff like dt/kgb): it is weak-promoting and not a
+            # field, so it is not part of the field uniformity invariant.
+            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
+            # "went strong") is NOT skipped -> it still trips this gate
+            # against f32 fields, closing the silent-promotion blind spot
+            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
+            continue
+        dt = _arr.dtype
+        if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
-                f"{fname}: {name} must be float64 (got "
-                f"{jnp.asarray(a).dtype}); enable jax_enable_x64 and pass "
-                f"f64 operands (oracle build is -fdefault-real-8)")
+                f"{fname}: {name} must be float32 or float64 (got {dt})")
+        if seen is None:
+            seen = dt
+        elif dt != seen:
+            raise TypeError(
+                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
+                f"a phase must be single-precision-uniform "
+                f"(FV3DuoConfig.storage_dtype).")
 
 
 def _rng(lo: int, hi: int, org: int, n: int, what: str) -> slice:
@@ -504,6 +528,7 @@ def xppm(q, c, iord: int, is_: int, ie: int, isd: int, ied: int,
     ``smt5``/``smt6``/``hi5``/``hi6`` limiter flags, which make the flux
     DISCONTINUOUS (they add or drop the whole ``fx1`` term).
     """
+    _nn = functools.partial(_nan, dtype=q.dtype)  # workspace follows storage dtype (fp32/fp64)
     _validate_ord("xppm", "iord", iord, _PPM_ORDS)
     _require_f64_jax("xppm", {"q": q, "c": c, "dxa": dxa})
     q = jnp.asarray(q)
@@ -563,7 +588,7 @@ def xppm(q, c, iord: int, is_: int, ie: int, isd: int, ied: int,
 
     if iord < 7:
         # ---------------------------------------------------- :341-478
-        al = _nan((n_al, nj))
+        al = _nn((n_al, nj))
         al = al.at[_rng(is1, ie3, o_al, n_al, "xppm al main"), :].set(
             TP_P1 * (q_w(is1 - 1, ie3 - 1) + q_w(is1, ie3))
             + TP_P2 * (q_w(is1 - 2, ie3 - 2) + q_w(is1 + 1, ie3 + 1)))
@@ -736,7 +761,7 @@ def xppm(q, c, iord: int, is_: int, ie: int, isd: int, ied: int,
     qc = q_w(is_ - 2, ie + 2)
     qp = q_w(is_ - 1, ie + 3)
     xt = 0.25 * (qp - qm)
-    dm = _nan((n_dm, nj)).at[
+    dm = _nn((n_dm, nj)).at[
         _rng(is_ - 2, ie + 2, o_dm, n_dm, "xppm dm main"), :].set(
         jnp.copysign(
             jnp.minimum(
@@ -746,15 +771,15 @@ def xppm(q, c, iord: int, is_: int, ie: int, isd: int, ied: int,
             xt))
 
     # :535-537 -- al over is1..ie1+1
-    al = _nan((n_al, nj)).at[
+    al = _nn((n_al, nj)).at[
         _rng(is1, ie1 + 1, o_al, n_al, "xppm al mono"), :].set(
         0.5 * (q_w(is1 - 1, ie1) + q_w(is1, ie1 + 1))
         + R3 * (dm_w(is1 - 1, ie1) - dm_w(is1, ie1 + 1)))
 
-    bl = _nan((n_b, nj))
-    br = _nan((n_b, nj))
+    bl = _nn((n_b, nj))
+    br = _nn((n_b, nj))
     w_b = _rng(is1, ie1, o_b, n_b, "xppm bl/br mono")
-    dq = _nan((n_dq, nj))
+    dq = _nn((n_dq, nj))
 
     if iord == 8:                                           # :539-545
         xt = 2.0 * dm_w(is1, ie1)
@@ -950,6 +975,7 @@ def yppm(q, c, jord: int, ifirst: int, ilast: int, isd: int, ied: int,
     list -- is as documented for :func:`xppm` and in the module
     docstring.
     """
+    _nn = functools.partial(_nan, dtype=q.dtype)  # workspace follows storage dtype (fp32/fp64)
     _validate_ord("yppm", "jord", jord, _PPM_ORDS)
     _require_f64_jax("yppm", {"q": q, "c": c, "dya": dya})
     q = jnp.asarray(q)
@@ -1011,7 +1037,7 @@ def yppm(q, c, jord: int, ifirst: int, ilast: int, isd: int, ied: int,
 
     if jord < 7:
         # ---------------------------------------------------- :717-949
-        al = _nan((ni, n_al))
+        al = _nn((ni, n_al))
         al = al.at[:, _rng(js1, je3, o_al, n_al, "yppm al main")].set(
             TP_P1 * (q_w(js1 - 1, je3 - 1) + q_w(js1, je3))
             + TP_P2 * (q_w(js1 - 2, je3 - 2) + q_w(js1 + 1, je3 + 1)))
@@ -1179,7 +1205,7 @@ def yppm(q, c, jord: int, ifirst: int, ilast: int, isd: int, ied: int,
     qc = q_w(js - 2, je + 2)
     qp = q_w(js - 1, je + 3)
     xt = 0.25 * (qp - qm)
-    dm = _nan((ni, n_dm)).at[
+    dm = _nn((ni, n_dm)).at[
         :, _rng(js - 2, je + 2, o_dm, n_dm, "yppm dm main")].set(
         jnp.copysign(
             jnp.minimum(
@@ -1189,15 +1215,15 @@ def yppm(q, c, jord: int, ifirst: int, ilast: int, isd: int, ied: int,
             xt))
 
     # :973-977 -- al over js1..je1+1
-    al = _nan((ni, n_al)).at[
+    al = _nn((ni, n_al)).at[
         :, _rng(js1, je1 + 1, o_al, n_al, "yppm al mono")].set(
         0.5 * (q_w(js1 - 1, je1) + q_w(js1, je1 + 1))
         + R3 * (dm_w(js1 - 1, je1) - dm_w(js1, je1 + 1)))
 
-    bl = _nan((ni, n_b))
-    br = _nan((ni, n_b))
+    bl = _nn((ni, n_b))
+    br = _nn((ni, n_b))
     w_b = _rng(js1, je1, o_b, n_b, "yppm bl/br mono")
-    dq = _nan((ni, n_dq))
+    dq = _nn((ni, n_dq))
 
     if jord == 8:                                           # :979-987
         xt = 2.0 * dm_w(js1, je1)
@@ -1395,6 +1421,7 @@ def deln_flux(nord: int, is_: int, ie: int, js: int, je: int, npx: int,
     a partial ``.at[window].set`` that carries the cells outside the
     window forward, exactly like the in-place lane.
     """
+    _nn = functools.partial(_nan, dtype=q.dtype)  # workspace follows storage dtype (fp32/fp64)
     _require_f64_jax("deln_flux", {
         "q": q, "fx": fx, "fy": fy, "del6_v": del6_v, "del6_u": del6_u,
         "rarea": rarea, "mass": mass, "damp_km": damp_km})
@@ -1429,9 +1456,9 @@ def deln_flux(nord: int, is_: int, ie: int, js: int, je: int, npx: int,
         return arr.at[_rng(a, b, ilo, ni, what + " i"),
                       _rng(cc, d, jlo, nj, what + " j")].set(val)
 
-    fx2 = _nan((n_di + 1, n_dj))          # fx2(isd:ied+1, jsd:jed)
-    fy2 = _nan((n_di, n_dj + 1))          # fy2(isd:ied, jsd:jed+1)
-    d2 = _nan((n_di, n_dj))               # d2(isd:ied, jsd:jed)
+    fx2 = _nn((n_di + 1, n_dj))          # fx2(isd:ied+1, jsd:jed)
+    fy2 = _nn((n_di, n_dj + 1))          # fy2(isd:ied, jsd:jed+1)
+    d2 = _nn((n_di, n_dj))               # d2(isd:ied, jsd:jed)
 
     i1 = is_ - 1 - nord                                     # :1247-1250
     i2 = ie + 1 + nord
@@ -1748,6 +1775,7 @@ def xtp_u(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
     ``bounded_domain=True, duogrid=True``, a combination ``d_sw``
     rejects.
     """
+    _nn = functools.partial(_nan, dtype=u.dtype)  # workspace follows storage dtype (fp32/fp64)
     _validate_ord("xtp_u", "iord", iord, _SW_ORDS)
     _require_f64_jax("xtp_u", {"c": c, "u": u, "dx": dx, "rdx": rdx})
     c = jnp.asarray(c)
@@ -1814,12 +1842,12 @@ def xtp_u(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
 
     if iord < 8:
         # ---------------------------------------------------- :2573-2810
-        al = _nan((n_al, nj)).at[
+        al = _nn((n_al, nj)).at[
             _rng(is3, ie3 + 1, o_al, n_al, "xtp_u al"), :].set(
             SW_P1 * (u_w(is3 - 1, ie3) + u_w(is3, ie3 + 1))
             + SW_P2 * (u_w(is3 - 2, ie3 - 1) + u_w(is3 + 1, ie3 + 2)))
-        bl = _nan((n_b, nj))
-        br = _nan((n_b, nj))
+        bl = _nn((n_b, nj))
+        br = _nn((n_b, nj))
         w3 = _rng(is3, ie3, o_b, n_b, "xtp_u bl/br")
         bl = bl.at[w3, :].set(al_w(is3, ie3) - u_w(is3, ie3))
         br = br.at[w3, :].set(al_w(is3 + 1, ie3 + 1) - u_w(is3, ie3))
@@ -1957,7 +1985,7 @@ def xtp_u(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
     uc = u_w(is_ - 2, ie + 2)
     up = u_w(is_ - 1, ie + 3)
     xt = 0.25 * (up - um)
-    dm = _nan((n_dm, nj)).at[
+    dm = _nn((n_dm, nj)).at[
         _rng(is_ - 2, ie + 2, o_dm, n_dm, "xtp_u dm"), :].set(
         jnp.copysign(
             jnp.minimum(
@@ -1965,13 +1993,13 @@ def xtp_u(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
                             jnp.maximum(jnp.maximum(um, uc), up) - uc),
                 uc - jnp.minimum(jnp.minimum(um, uc), up)),
             xt))
-    dq = _nan((n_dq, nj)).at[
+    dq = _nn((n_dq, nj)).at[
         _rng(is_ - 3, ie + 2, o_dq, n_dq, "xtp_u dq"), :].set(
         u_w(is_ - 2, ie + 3) - u_w(is_ - 3, ie + 2))
 
-    al = _nan((n_al, nj))
-    bl = _nan((n_b, nj))
-    br = _nan((n_b, nj))
+    al = _nn((n_al, nj))
+    bl = _nn((n_b, nj))
+    br = _nn((n_b, nj))
 
     if grid_type < 3:
         w_al = _rng(is3, ie3 + 1, o_al, n_al, "xtp_u al")
@@ -2134,6 +2162,7 @@ def ytp_v(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
     ``jord`` is validated against the same static set as :func:`xtp_u`
     (1..11, no ``abs()``, so negatives are rejected).
     """
+    _nn = functools.partial(_nan, dtype=v.dtype)  # workspace follows storage dtype (fp32/fp64)
     _validate_ord("ytp_v", "jord", jord, _SW_ORDS)
     _require_f64_jax("ytp_v", {"c": c, "v": v, "dy": dy, "rdy": rdy})
     c = jnp.asarray(c)
@@ -2194,9 +2223,9 @@ def ytp_v(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
     cpos = cw > 0.0
     cfl = jnp.where(cpos, cw * rdy_w(js - 1, je), cw * rdy_w(js, je + 1))
 
-    al = _nan((n_c, n_al))
-    bl = _nan((n_c, n_b))
-    br = _nan((n_c, n_b))
+    al = _nn((n_c, n_al))
+    bl = _nn((n_c, n_b))
+    br = _nn((n_c, n_b))
 
     if jord < 8:
         # ---------------------------------------------------- :2930-3193
@@ -2356,7 +2385,7 @@ def ytp_v(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
     vc = v_w(js - 2, je + 2)
     vp = v_w(js - 1, je + 3)
     xt = 0.25 * (vp - vm)
-    dm = _nan((n_c, n_dm)).at[
+    dm = _nn((n_c, n_dm)).at[
         :, _rng(js - 2, je + 2, o_dm, n_dm, "ytp_v dm")].set(
         jnp.copysign(
             jnp.minimum(
@@ -2364,7 +2393,7 @@ def ytp_v(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
                             jnp.maximum(jnp.maximum(vm, vc), vp) - vc),
                 vc - jnp.minimum(jnp.minimum(vm, vc), vp)),
             xt))
-    dq = _nan((n_c, n_dq)).at[
+    dq = _nn((n_c, n_dq)).at[
         :, _rng(js - 3, je + 2, o_dq, n_dq, "ytp_v dq")].set(
         v_w(js - 2, je + 3) - v_w(js - 3, je + 2))
 

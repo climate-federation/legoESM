@@ -1,0 +1,157 @@
+{
+  "backend": "cpu",
+  "bindings": {
+    "dump_sha256": {
+      "qco_dump_zhU_substep1.bin": "569efde6dafe959e6ad49ae93ab1886ff90e20e18bab8d087879dafa0f637c5e",
+      "qco_dump_zhV_substep1.bin": "59b5d450e2f3cbb9522a7b8313eab4d36e35fb203750a329622e15bc7891f8a7",
+      "qco_dump_zhdiv_substep1.bin": "2ab46c0d95144d69186be1a264401da2264abde92b1fd7ef41e293130d058b42",
+      "qco_dump_zhup2_substep1.bin": "50e9094d079bfb68ee687cbbd2fa556f4350577ec3ea363436ef49fbe1ada25a",
+      "qco_dump_zhvp2_substep1.bin": "eed7771cd319f6db60a915b81ddb1e77bae88b7a0ec330edf1c27fed01e5d39d",
+      "qco_dump_zsshp2_substep1.bin": "8d47f377ae40068a70f9f80b187d2c97d137f9916f884d37f94a4b3f52e3d0af"
+    },
+    "input_sha256": {
+      "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+      "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622"
+    },
+    "production_sha256": {
+      "barotropic": "583776857172334a1347d5b7425355f598d22076a9abe56888cb317ee022f812",
+      "core_grid": "b0f17a864a123021d572a9c2fa05fc935f62a45080b5ba4291e2b08b97109f2f",
+      "dino_card": "a72a7682488cab0ec46a5a57877c6ca33b5cdd047d1047d07fc128bfbcdca9a6",
+      "inherited_probe": "698831d6e79c7cc225fa65cff2f8170fe64d2c1b3fd602cbe0e7aeee9157a247",
+      "nemo_io": "cfa18c2991a4d6175a6e2f231031799aa00cebdb2ffe30b35b4ca6d076d804a2",
+      "round9_scorer": "dfd071b5cb9a3f5f9ccca2d745785f3b8a9a9dfd2a03afceab3425617741a1c4",
+      "state_bridge": "b23fcd68febf011776f1e8194c05377777dcfc0fe083b4b62e1639fd661ef8ba"
+    },
+    "round10_raw_sha256": "d2f2b8da84dffb6948f51a08f03327831ae3d5db9e5e812631c9f48e89b8822a",
+    "round11_sha256": "fffe3bfb1daa97ef6d9d85c1bb4eaa7541e6a71eb9f3376b835187a322b07e09",
+    "round12_sha256": "cc6dd626cdc37950164c9bdbe2cbf3678b3c3b31b5c2f4f53d12d9b030f54a0b"
+  },
+  "controls": {
+    "all_inherited_controls": true,
+    "identity_at_bar": true,
+    "plant_debt": true
+  },
+  "disposition": "ROW_1.3_ALL_OPERANDS_AT_BAR_RELEASE_1.4",
+  "first_diverged_subrow": null,
+  "git_commit": "50e2095d13d183fbe17b1f0052098613cb1ba585",
+  "jax_enable_x64": true,
+  "later_rows": {
+    "1.4": "RELEASED",
+    "2": "ORDERED_BLOCKED",
+    "3": "ORDERED_BLOCKED",
+    "4": "ORDERED_BLOCKED",
+    "5": "ORDERED_BLOCKED",
+    "6": "ORDERED_BLOCKED"
+  },
+  "measurements": [
+    {
+      "arithmetic_class": "POINTWISE",
+      "class_bar": 1e-15,
+      "correlation": 1.0,
+      "field": "zsshp2_e",
+      "gate_status": "AT BAR",
+      "mean_abs_ratio": 1.0,
+      "n": 9920,
+      "normalized_rms_error": 0.0,
+      "per_element_max_error_over_nemo_rms": 0.0,
+      "rms_ratio": 1.0,
+      "subrow": "9.1"
+    },
+    {
+      "arithmetic_class": "POINTWISE",
+      "class_bar": 1e-15,
+      "correlation": 1.0,
+      "field": "zhup2_e",
+      "gate_status": "AT BAR",
+      "mean_abs_ratio": 1.0,
+      "n": 9758,
+      "normalized_rms_error": 0.0,
+      "per_element_max_error_over_nemo_rms": 0.0,
+      "rms_ratio": 1.0,
+      "subrow": "9.2"
+    },
+    {
+      "arithmetic_class": "POINTWISE",
+      "class_bar": 1e-15,
+      "correlation": 0.9999999999999999,
+      "field": "zhvp2_e",
+      "gate_status": "AT BAR",
+      "mean_abs_ratio": 1.0,
+      "n": 9868,
+      "normalized_rms_error": 0.0,
+      "per_element_max_error_over_nemo_rms": 0.0,
+      "rms_ratio": 1.0,
+      "subrow": "9.3"
+    },
+    {
+      "arithmetic_class": "POINTWISE",
+      "class_bar": 1e-15,
+      "correlation": 1.0,
+      "field": "zhU",
+      "gate_status": "AT BAR",
+      "mean_abs_ratio": 1.0,
+      "n": 9758,
+      "normalized_rms_error": 0.0,
+      "per_element_max_error_over_nemo_rms": 0.0,
+      "rms_ratio": 1.0,
+      "subrow": "9.4"
+    },
+    {
+      "arithmetic_class": "POINTWISE",
+      "class_bar": 1e-15,
+      "correlation": 1.0,
+      "field": "zhV",
+      "gate_status": "AT BAR",
+      "mean_abs_ratio": 1.0,
+      "n": 9868,
+      "normalized_rms_error": 0.0,
+      "per_element_max_error_over_nemo_rms": 0.0,
+      "rms_ratio": 1.0,
+      "subrow": "9.5"
+    },
+    {
+      "arithmetic_class": "ACCUMULATING",
+      "class_bar": 1e-12,
+      "correlation": 1.0,
+      "field": "zhdiv",
+      "gate_status": "AT BAR",
+      "mean_abs_ratio": 1.0,
+      "n": 9920,
+      "normalized_rms_error": 0.0,
+      "per_element_max_error_over_nemo_rms": 0.0,
+      "rms_ratio": 1.0,
+      "subrow": "9.6"
+    },
+    {
+      "arithmetic_class": "ACCUMULATING",
+      "class_bar": 1e-12,
+      "correlation": 1.0,
+      "field": "ssha_e",
+      "gate_status": "AT BAR",
+      "mean_abs_ratio": 1.0,
+      "n": 9920,
+      "normalized_rms_error": 0.0,
+      "per_element_max_error_over_nemo_rms": 0.0,
+      "rms_ratio": 1.0,
+      "subrow": "9.7"
+    }
+  ],
+  "production_paths": {
+    "barotropic": "/tmp/codex-zdf-round9-adjudicate/packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py",
+    "core_grid": "/tmp/codex-zdf-round9-adjudicate/packages/core/legoesm/grids/latlon.py",
+    "dino_card": "/tmp/codex-zdf-round9-adjudicate/packages/ocean/legoesm/ocean/experiments/dino.py",
+    "inherited_probe": "/tmp/codex-zdf-round9-adjudicate/scripts/validate/ocean_fidelity/dino_1226/spg_substep_chain.py",
+    "nemo_io": "/tmp/codex-zdf-round9-adjudicate/packages/ocean/legoesm/ocean/fidelity/nemo_io.py",
+    "round9_scorer": "/tmp/codex-zdf-round9-adjudicate/scripts/validate/ocean_fidelity/dino_1226/split_explicit_momentum_chain_round9.py",
+    "state_bridge": "/tmp/codex-zdf-round9-adjudicate/packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py"
+  },
+  "runtime": {
+    "jax": "0.10.0",
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+    "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+    "python": "3.13.0 | packaged by conda-forge | (main, Nov 27 2024, 19:18:50) [GCC 13.3.0]"
+  },
+  "schema": "dino-split-explicit-momentum-chain-round13-v1",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246"
+}

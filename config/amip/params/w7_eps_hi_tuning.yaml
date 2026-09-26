@@ -2,3 +2,13 @@ atm.micro.MorrisonConfig.fall_a_i: 2100.0
 atm.conv.BechtoldConfig.rprcon: 5.6e-3
 atm.conv.BechtoldConfig.dnoprc: 1.0e-4
 atm.conv.BechtoldConfig.epsilon_deep: 3.0e-3
+# Less sub-cloud rain re-evaporation over land (IFS defaults 0.75/0.70).
+# pr30 screen 2026-08-24: the lever raises tropical land rain (+0.17 mm/day,
+# humid +0.27, t~10) with ocean untouched. prs value ladder 2026-08-26
+# (paired 30-day arms, IFS vs 0.65 vs 0.60): the humid gain is 75% realized
+# at 0.65 and saturates by 0.60, while the arid-land overshoot grows
+# ~linearly (1.77 at IFS -> 1.97 -> 2.06; the 1.77 base is a PRE-EXISTING
+# defect, filed separately). 0.65/0.60 ships: the 0.60 step bought +0.01
+# humid for +0.09 arid. Both reviewers concur (codex + GLM-5.2).
+atm.conv.BechtoldConfig.rhebc_land: 0.65
+atm.conv.BechtoldConfig.rhebc_land_deep: 0.60

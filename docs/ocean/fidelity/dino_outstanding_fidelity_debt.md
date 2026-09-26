@@ -82,6 +82,188 @@ Checked and closed by the same review, recorded so they are not re-opened:
 * **Calendar-indexed ancillary fields — none found.** T\* and Qsr are the only calendar-time consumers in the DINO forcing path and both already route through the corrected clock. Salinity restoring is allocated once and never recomputed; EMP/runoff is off (`ln_emp_field=.false.`); shortwave penetration uses a fixed Jerlov type with no chlorophyll climatology; wind stress is latitude-only.
 * **The "0.044 Sv margin vs an unvalidated floor" worry — superseded.** The 90-day floor has since been measured directly (`4e652b101`, `1dba0b733`, `5f173cfff`): single-run ACC spread is **1.15e-05 Sv**, so the margin is ~2700× the measured floor, not "less than one floor". The 0.091 Sv constant is a cross-model **tolerance**, not a 90-day noise floor, and is validated as the right scale only at the **1-year** horizon (`dino_verdict360_result.md`, P1 CONFIRMED).
 
+## D3. NEXT-ACTIONS REGISTER (2026-08-26) — the ranked queue after consolidation
+
+Authoritative ranking for the campaign as it stands after the wall-flicker
+stack. Full context and every citation:
+`docs/ocean/fidelity/dino_campaign_synthesis.md`. Nothing below is started.
+
+### #1 — The Coriolis PAIR. Fix both halves together, never one.
+
+**Ranked first.** legoESM builds the Coriolis parameter at the vertex as the
+average of the two adjacent tracer-row values; NEMO evaluates it at its own
+f-point latitude. Measured against NEMO's dumped `ff_f`
+(`dino_wall_fixed_bias.md`, "The sibling error this arm uncovered"):
+
+| | median | RMS | at the walls | at the equator |
+|---|---|---|---|---|
+| v-face zonal metric gap (the arm just run) | +1.86e-05 | 2.08e-05 | +3.35e-05 | +2.9e-09 |
+| **Coriolis at the vertex** | **−5.48e-05** | **6.15e-05** | −2.50e-05 | −9.19e-05 |
+
+The two sit in the **same** EEN rotation coefficient with **opposite sign** and
+**complementary latitude shape** — signed profiles correlate at +1.000, and in
+`e1v · f` they **partially cancel**. The override arm removed the **smaller**
+half and scored PARTIAL (16.2% basin / 24.9% wall rows). **Rule 8 applies: fix
+the pair together.** The registered design is three arms — f alone, `e1v` alone
+(done), and both together — with the verdict pre-registered on the **joint** arm.
+This campaign has four recorded faithful-but-worse instances from raising
+fidelity on one half of a cancelling pair; do not add a fifth.
+
+**Half of it is a constant, not a scheme.** The gap decomposes into a uniform
+−1.578e-05 and a latitude-varying −3.90e-05. legoESM's `constants.Omega` is
+**7.292e-05**; NEMO's is **7.2921150830e-05** (confirmed from `phycst.F90` and
+independently from the dumped `ff_f`). Tracer latitudes match NEMO's `gphit` to
+1.4e-14 degrees, so this is a constant, not a grid difference.
+
+**Free premise check first, before any compute** (code read, 2026-08-26, not a
+measurement): the DINO card already pins NEMO's rotation rate as a top-level
+`omega` field (`experiments/dino.py:1299`, from
+`NEMO_CONSTANTS_CONFIG.Omega = 7.292116e-05`, `ocean/constants_config.py:70`),
+and one consumer of the 4-significant-figure literal was already fixed earlier
+in the campaign (the eddy-coefficient path, where Ω is squared into κ_GM —
+status board fixed bug #14). Meanwhile `packages/core/legoesm/constants.py:12`
+still reads `Omega = 7.292e-5` and the lat-lon C-grid Coriolis builder reads
+`getattr(grid, "omega", constants.Omega)`
+(`ocean/dynamics/latlon_cgrid_operators.py:3278,3296`). **The run plausibly
+carries two rotation rates at once.** Establish by grep which f-consuming sites
+see the card's pin and which fall back, then decide between a `ConstantsConfig`
+pin, a card wiring change, or both.
+
+**Cost:** the same offline freeze-and-vary substitution as the completed metric
+arm, three arms. No new instrument.
+
+### #2–#8 — the rest of the queue
+
+| # | action | register item | cost |
+|---|---|---|---|
+| 2 | **Split the gate's ACC row into channel + basin, scored separately.** The full-section reducer sums a walled sub-polar gyre into a number labelled "circumpolar" and is **opposite in sign to the channel it nominally measures**. Reached independently by the substep lane and by the verdict run. **Proposal to the owner** — gate constants and reductions are not changed by a lane. | new | one gate-definition change + a re-score of recorded runs; no new compute |
+| 3 | **Phase sweep + reference-antiphase control** for the seasonal-clock attribution. | D2.2 (+ D2.3 subsumed) | 5 twin arms + 1 NEMO arm at 30 days each |
+| 4 | **Re-calibrate bottom drag against the corrected drag** (~2× weaker in open water, ~4× over stepped bathymetry after two independent fixes). | D2.1 | one coefficient sweep + a gate re-run |
+| 5 | **Close the step-1 reconciliation gap for real** — a return-contract change so `_step_impl` surfaces the barotropic depth mean on its `_apply_implicit_vmix=True` path. | D2.4 | ~8 call sites + their tests |
+| 6 | **fp64 snapshots on two ensemble members (days 30/90).** fp32 storage is a live confound twice over: it bounds the measured ensemble spread from above, and it manufactured the "NEMO convects more often" finding (casting NEMO to fp32 reproduces 98.7–99.9% of the apparent gap). Days 10–70 are currently unmeasurable at fp32. | new | rerun two existing members; no model change |
+| 7 | **The multi-year horizon.** Everything certified is one year from a common state; the deep ocean has not adjusted, and two verdict metrics are recorded as **upper bounds only** because their spread is still growing. **REGISTERED, NOT RUN (2026-08-30):** `PREREG_multi_year_climate_equivalence.md` freezes a six-member-per-side, horizon-matched 20-year climate-statistics ensemble; `dino_multi_year_climate_equivalence_handoff.md` carries the exact held arms. | registered / held | the largest compute item on the board |
+| 8 | **The from-rest raise decision.** Needs an owner's call, not a lane's. | carried | decision |
+
+### On the board, no work assigned
+
+- ~~**The wall-row RESCORE**~~ — **DONE. It landed 2026-08-23 and this entry was
+  stale on the day it was written**, quoting the source file's to-do list rather
+  than the section beneath it that had already executed it. Re-run at HEAD
+  2026-08-27: **nothing reopens.** Friction's mask-dimensionality leg is exactly
+  0.0 under both weightings and its magnitude leg moves 6.7541e-05 → 5.6500e-05
+  (16%, same order). Its ENRICHMENT leg does cross the 3× bar (2.35× → 5.16×) —
+  reported, not buried, and far too small to matter. **Lateral friction is
+  EXONERATED, not provisional.**
+- ~~**The VERTEX area is not NEMO's `e1f·e2f`**~~ — **CLOSED 2026-08-27, the
+  same day it was opened.** The construction diff is named and the fix shipped
+  inside `metric_convention="nemo_isotropic"`. legoESM built the vertex area as
+  the exact spherical cap between adjacent TRACER latitudes; NEMO forms it as
+  the product `e1f·e2f` of two scale factors taken at the F-point's own
+  Mercator latitude (`usrdef_hgr.F90` :97/:109/:114/:118). On a Mercator
+  coordinate `sin φ = tanh(Δλ·j)` gives `d(sin φ)/dj = Δλ·cos²φ`, so the cap is
+  the EXACT interval integral of `cos²φ` where NEMO's product is its MIDPOINT
+  value — **exact quadrature versus the midpoint rule**, gap
+  `(Δλ²/12)(3sin²φ − 1)`, reproduced to a measured/predicted ratio of
+  **0.999984** including the sign change at ±35.26°. The corrected area
+  reproduces NEMO's own closed form to **3.1e-15** relative, from 4.10e-05.
+  Because `pphif == pphiv` (:97 and :96 carry the same +0.5 offset), NEMO's
+  F-cell area IS the square of its v-face width, so this reuses the width the
+  previous fix corrected rather than deriving a second latitude.
+  **PAIR ANALYSIS: UNPAIRED-SAFE, measured not argued** (`vertex_area_pair_
+  analysis.py`). The area and the vertex Coriolis are the same defect at the
+  same point and meet in the F-point absolute vorticity `ζ + f`; on a
+  pre-registered bar of 1/10, the area half is **1.51e-04** of the Coriolis
+  half at the median (p99 6.9e-02), because `|ζ|` median 2.05e-08 sits four
+  orders below `|f|` median 1.02e-04. Removing it moves the total
+  absolute-vorticity error by +0.050%. In the other active channel — the
+  NEMO-faithful lateral viscosity, which divides by `e1f·e2f` — `f` does not
+  appear at all, so it is structurally unpaired there. The one genuinely
+  self-cancelling use of the vertex area (the Smagorinsky/om4p25 raw-stress
+  path) is INACTIVE on the DINO card.
+  **THE COST, named:** the (cap, cell-average) pair made the discrete curl of
+  solid-body rotation equal `f` EXACTLY; the fix lands that at +1.17e-05
+  median. NEMO's own pair is worse (−2.73e-05 median, 1.02e-04 max), so the
+  twin's internal consistency now sits between legoESM's and the oracle's.
+  **One-state response: INERT** — against a pre-registered 1% bar, the wall-row
+  fixed-bias residual moved −0.011% and the meridional deposit −0.040%, both
+  toward NEMO. No multi-state arm run.
+- **A pre-existing NaN in the adjoint of the sea-surface-height-average face
+  depth**, found by review while checking the v-face fix and NOT caused by it.
+  The barotropic face-depth helper divides by the v-face cell area without a
+  positivity guard, which is `inf` on the two zero-width end-wall rows; the
+  forward run is rescued by a later replace, but the reverse pass multiplies
+  that `inf` by a zero cotangent and yields **96 NaN gradient entries** (2 rows
+  × 48 columns), identical under both metric conventions. The repo already
+  guards the identical pattern correctly one file away with a
+  `where(width > 0, 1/width, 0)`. One-line fix; matters to anyone
+  differentiating through the barotropic solver. NOT actioned here — out of
+  scope for the register items, recorded so it is not lost.
+- **PLAUSIBLE, not confirmed — the overturning / heat-transport diagnostic's
+  v-face width.** One reviewer reported that this diagnostic reconstructs the
+  face metric rather than reading the model's own, at ~3e-03 relative on a
+  stretched grid (90x the gap just fixed). Reading the code, the primary branch
+  DOES read the stored width, and the fallback that does not is reached only
+  when the grid carries no face-latitude axis — which is not the DINO case, and
+  I did not reproduce the number. Recorded as a flagged path to check, NOT as a
+  measured defect, and pre-existing either way.
+- The **grown-noise census** at days 5/10 in both models — states already on
+  disk. The convective switch's ~300× rectification is established at ≳1e-10 and
+  **silent at 1e-14**, so on current evidence the edge does not explain the
+  models' amplification asymmetry at the ensemble kick amplitude.
+- The **wind-placement term**, now unlocked as measurable offline (its dump slot
+  is allocated and never written; the placement difference is real).
+- The **closed sub-basin mass budget** — the control volume nobody drew.
+- The **78–435× kick-amplification asymmetry** (computational-mode probe named).
+- **Eighteen of nineteen** DINO probes still call `tendencies_with_diagnostics`
+  without a before-level state (see §D3.1 below). Per-probe judgement, not a
+  mechanical sweep.
+
+### D3.1 — Instrument debt opened by the wall-flicker stack
+
+`LatLonCGridOceanModel.tendencies_with_diagnostics` silently dropped the
+before-level argument its sibling accepts, so every lateral-friction term in
+every oracle budget on this card compared now-level against before-level state.
+Fixed by adding an `ldf_state` parameter (`513339cba`); the term's difference
+fell **262×** (1.5947e-9 → 6.0875e-12 m/s²) against a registered bar of 50×.
+**Nineteen probes call the wrapper; eighteen still do not pass a before-level
+state.** Any budget result from those eighteen predating the fix is suspect for
+its lateral-friction term.
+
+### D3.2 — What is closed, so it is not re-opened
+
+Every row here was tested and eliminated with a decisive number. The full table
+with citations is `dino_campaign_synthesis.md` §2.3. Do not re-test:
+
+**Now ON this list — lateral friction (2026-08-27).** Free-slip is identical at
+0/372,528 corners and the viscosity ablation makes it a lever rather than an
+owner. The earlier caveat here — that this rested on the retracted layer-averaged
+instrument — is **RETRACTED twice over**: the rescore had already landed, and the
+ablation is scored on 90-day Sv transports, which carry no vertical weighting at
+all and so could never have been touched by that instrument. **Do not re-test.**
+
+surface forcing / wind (1e-10 per row, torque constant across all 36 windows) ·
+water masses (4e-5 kg/m³, with the density-*gradient* caveat) · bottom drag
+(coefficient bit-exact 0/9758; assembled increment 3.9e-18) · EEN vorticity scheme (fixed, transport-inert) · e3f at dry-neighbour
+vertices (95× too small, 0% closure) · face-depth divisor (fixed, 0.0000 Sv) ·
+every post-tendency stage at the matched step (wrong sign **and** wrong shape) ·
+salinity advection (improves at day 180 on every part) · isoneutral slopes
+(99.3–99.9% collapse on NEMO's own density) · the implicit vertical momentum
+solve (fixed; divisor-independent under the barotropic split, an exact reason) ·
+per-step barotropic injections (retention-corrected, 8–11× short and wrong sign)
+· the meridional sidewall flicker (transient, depleted in member differences) ·
+the half-step impulse lag (owned by the twin's Euler start; nothing
+re-baselines) · the convective switch as a *differential* rectifier (shared with
+NEMO; legoESM's fires **less**) · barotropic time filter (0.02%) · face-thickness
+convention (~1%, anti-aligned) · rigid meridional position error (0.8%).
+
+**And the conclusion drawn from the whole set:** the deficit is **not producible
+by any operator difference at a matched state**. It must be rectification —
+sub-floor per-step differences amplified through the basin's own feedback over
+the year. The next experiments are feedback-class, a different cost and design
+class from anything above.
+
+---
+
 ## E. `ldftra` isoneutral diffusivity (Redi, `nn_aht_ijk_t=20`) — instrumented 2026-07-27
 
 Investigated as the leading suspect for the 13%-too-weak upper-ocean meridional
@@ -168,6 +350,10 @@ residual was found and is now tracked, but it is far too small to explain 13%.
 - **9** terms labelled PASS/MATCHED with a non-unit ratio
 - **8** never verified at all
 - **4** unexplained anomalies
+
+(Counts above are the 2026-07-27 audit's and are unchanged; §D3 carries the
+current queue, and `dino_campaign_synthesis.md` carries the campaign-level
+ledger of fixes, retractions, PRs and review rounds.)
 
 The step-by-step methodology was created precisely to prevent this, and then I
 applied it with a tolerance it does not have. Nothing in A–C is known to be

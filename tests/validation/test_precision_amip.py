@@ -190,6 +190,44 @@ class TestPrecisionAMIPPhysicalBounds:
 
 
 @pytest.mark.slow
+class TestPrecisionAMIPEngagement:
+    """The mixed arm must genuinely BE mixed (#1675 review finding).
+
+    Every cross-comparison below is an upper bound on how far mixed may drift
+    from fp64 — which a mixed arm that silently ran fp64 satisfies perfectly,
+    with zero divergence. That is exactly the failure this whole issue is
+    about, so the agreement bounds are only meaningful next to a test that the
+    two arms are different runs and that the mixed one stores float32.
+    """
+
+    def test_mixed_state_is_fp32_storage(self, amip_runs):
+        # Read the RAW state dtype, not `_extract_T`: that helper casts to
+        # float64 on purpose so the cross-mode comparisons are done at one
+        # precision, and asserting float32 on its output would fail for every
+        # run including a correct one (review finding on the first draft of
+        # this test).
+        dtype = amip_runs["mixed"].state.T.data.dtype
+        assert dtype == np.float32, (
+            f"mixed AMIP temperature is stored as {dtype}, not float32 — the "
+            "mixed arm is not storing at fp32, so every agreement bound below "
+            "passes vacuously")
+        ps_dtype = amip_runs["mixed"].state.p_s.data.dtype
+        assert ps_dtype == np.float64, (
+            f"mixed AMIP surface pressure is stored as {ps_dtype}, not "
+            "float64 — p_s is the conservation field and is meant to stay at "
+            "the accumulate dtype in mixed (#1675); rounding it down silently "
+            "regresses global mass fixing")
+
+    def test_mixed_is_not_the_fp64_run(self, amip_runs):
+        T_ref = np.asarray(_extract_T(amip_runs["fp64"]), dtype=np.float64)
+        T_mix = np.asarray(_extract_T(amip_runs["mixed"]), dtype=np.float64)
+        rms = float(np.sqrt(np.mean((T_ref - T_mix) ** 2)))
+        assert rms > 0.0, (
+            "mixed and fp64 AMIP temperatures are bit-identical — the mixed "
+            "arm did not engage, and the RMS bounds below prove nothing")
+
+
+@pytest.mark.slow
 class TestPrecisionAMIPCrossComparison:
     """Cross-compare precision modes against the fp64 reference."""
 

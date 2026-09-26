@@ -759,10 +759,11 @@ def extract_point_forcing_series(forcing, lat_deg: float, lon_deg: float) -> dic
     """Column time series of the 9 CORE-II atmospheric-STATE channels.
 
     Pure array extraction (numpy only, ONCE per point — no JAX): the
-    nearest forcing cell is selected with
-    :func:`core2_forcing_nn_indices` (the EXACT nearest-neighbour
-    convention of the 3-D producers / ``_nn_interp_to_points``) and each
-    channel is sliced to a ``(n_rec, 1, 1)`` series, i.e. a single-point
+    point series is the 4-point BILINEAR sample via
+    :func:`_bilinear_point_maps` (the EXACT convention of the 3-D tripole
+    producers since the zonal-band fix — a column twin sampling nearest
+    would no longer match the forcing its 3-D counterpart sees), each
+    channel reduced to a ``(n_rec, 1, 1)`` series, i.e. a single-point
     ``forcing_stack`` consumable by :func:`compute_omip2_surface_forcing_jax`.
     Same layout as ``build_core2_forcing_device_stack`` — which lifts the
     FULL forcing grid to device (~2 GB) that a column driver does not need —
@@ -771,15 +772,16 @@ def extract_point_forcing_series(forcing, lat_deg: float, lon_deg: float) -> dic
     defaults, so jitted and closure paths see the same values).
     """
     from legoesm import constants
-    from legoesm.ocean.coupler.omip2_applicator import core2_forcing_nn_indices
+    from legoesm.ocean.coupler.omip2_applicator import _bilinear_point_maps
 
-    nn_i, nn_j = core2_forcing_nn_indices(
-        forcing, np.asarray([float(lat_deg)]), np.asarray([float(lon_deg)]),
+    i4, j4, w4 = _bilinear_point_maps(
+        np.asarray(forcing.lat), np.asarray(forcing.lon),
+        np.asarray([float(lat_deg)]), np.asarray([float(lon_deg)]),
     )
-    i0, j0 = int(nn_i[0]), int(nn_j[0])
+    i4 = i4[:, 0]; j4 = j4[:, 0]; w4 = w4[:, 0]          # (4,)
     series = {
-        name: np.asarray(getattr(forcing, name), dtype=np.float64)[:, i0, j0]
-        .reshape(-1, 1, 1)
+        name: (np.asarray(getattr(forcing, name), dtype=np.float64)[:, i4, j4]
+               * w4[None, :]).sum(axis=1).reshape(-1, 1, 1)
         for name in _FORCING_CHANNELS
         if getattr(forcing, name, None) is not None
     }

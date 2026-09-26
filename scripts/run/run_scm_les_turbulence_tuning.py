@@ -429,6 +429,7 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
                          bulk_ce: float | None = None,
                          surface=None,
                          clubb_prognostic: bool = True,
+                         smag_stability_form: str = "lilly",
                          simple_lw: bool = False) -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
 
@@ -464,6 +465,12 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
             clubb=clubb_cfg._replace(prognostic=bool(clubb_prognostic))
         )
     sub = getattr(turb, scheme)
+    if scheme == "smagorinsky" and smag_stability_form != "lilly":
+        # The Deardorff stable-length option (PR #1647): stratification shrinks
+        # the mixing length instead of driving a stability factor to zero. The
+        # Lilly default is untunable on stable cases (its sqrt cutoff has an
+        # unbounded gradient); "deardorff" is what makes smagorinsky trainable.
+        sub = sub._replace(stability_form=smag_stability_form)
     if surface is None:
         # Fallback for callers with no case in hand (tests): keep the scheme's
         # own default and only honour the prescribed-flux requirement.
@@ -808,12 +815,34 @@ def _raw_from_physical(value: float, constraint: ParamConstraint):
     return arr
 
 
-def _initial_params(scheme: str, tier: str) -> TrainablePhysicsParams:
-    return build_trainable_params(
+def _initial_params(scheme: str, tier: str, *, seed: int | None = None,
+                    jitter: float = 0.0) -> TrainablePhysicsParams:
+    """Initial trainable params for a scheme.
+
+    With ``seed is None`` (default) this is the deterministic prior, exactly as
+    before. With a seed AND ``jitter > 0`` each RAW (unconstrained, pre-sigmoid)
+    leaf gets additive Gaussian noise of scale ``jitter``, giving a different
+    but reproducible starting point per seed. The spread of the tuned results
+    across seeds is the optimization/landscape uncertainty -- the tuning itself
+    is full-batch deterministic gradient descent, so a jittered START is the
+    ONLY thing that makes distinct seeds explore distinct optima.
+    """
+    params = build_trainable_params(
         active_scheme_keys=_scheme_keys_for(scheme),
         tier=tier,
         dtype=jnp.float64,
     )
+    if seed is None or jitter <= 0.0 or not params.constraints:
+        return params
+    import jax
+    # One key per leaf, split from the seed, so adding/removing a param does not
+    # reshuffle the noise on the others (stable across tier changes).
+    key = jax.random.PRNGKey(seed)
+    raw = dict(params.raw_values)
+    for name, k in zip(sorted(raw), jax.random.split(key, len(raw))):
+        raw[name] = raw[name] + jitter * jax.random.normal(
+            k, raw[name].shape, dtype=raw[name].dtype)
+    return TrainablePhysicsParams(raw_values=raw, constraints=params.constraints)
 
 
 def _grad_stats(grads: TrainablePhysicsParams, tol: float) -> dict[str, dict]:
@@ -899,6 +928,7 @@ def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
         simple_lw=arm.name in _SIMPLE_LW_CASES,
         bulk_ch=arm.case.spec.bulk_ch, bulk_ce=arm.case.spec.bulk_ce,
         surface=arm.surface, clubb_prognostic=args.clubb_prognostic,
+        smag_stability_form=getattr(args, "smag_stability_form", "lilly"),
     )
 
 
@@ -1052,7 +1082,10 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
     result = SchemeResult(scheme=scheme, status="tuned")
     t0 = time.time()
 
-    params_all = _initial_params(scheme, args.tier)
+    params_all = _initial_params(
+        scheme, args.tier,
+        seed=getattr(args, "seed", None),
+        jitter=getattr(args, "init_jitter", 0.0))
     if not params_all.constraints:
         result.status = "no_tunable_params"
         result.wall_s = time.time() - t0
@@ -1066,13 +1099,16 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
     # JIT the value-and-grad and the line-search candidate score, with the
     # trainable params as the only traced argument (arms/cfgs/args captured as
     # compile-time constants). Without this the whole rollout + reverse-mode ran
-    # EAGERLY, dispatching every primitive op separately; for CLUBB (a 15-moment
-    # closure with implicit band solves) a step measured ~344 s, of which the
-    # jitted steady state recovers ~1.45x (238 s). NET over a full fit is
-    # smaller -- ~1.2x at 8 steps, ~1.4x at 40 -- because the fused-graph
-    # compile is a fixed cost that must amortize (below ~5 steps it is a wash).
-    # The algebraic schemes have few ops so their eager cost was already small;
-    # this is a CLUBB-dominated win.
+    # EAGERLY, dispatching every primitive op separately. The size of the win
+    # depends on whether a scheme is DISPATCH-bound or COMPUTE-bound, and the
+    # dispatch-bound (algebraic) schemes benefit FAR more:
+    #   louis (algebraic):  value_and_grad 14.4 s eager -> 0.36 s jit = ~40x
+    #                       (its real compute is tiny; eager was ~all dispatch).
+    #   CLUBB (15-moment, implicit band solves): 344 s -> 238 s = ~1.45x
+    #                       (genuinely compute-bound; little dispatch to save).
+    # A full 8-scheme cheap-tier seed dropped from 10.8 h to 1.84 h (~5.9x
+    # wall; the fused-graph compile, one per scheme, caps it below the per-eval
+    # 40x). NET is scheme-mix-dependent, biggest where eager dispatch dominated.
     #
     # Two compiles per scheme, not one (codex review): the preflight below
     # traces the FULL param set, then the loop traces the FILTERED trainable set
@@ -1344,6 +1380,20 @@ def parse_args(argv=None):
     p.add_argument("--analysis-hours", type=float,
                    default=DEFAULT_ANALYSIS_HOURS)
     p.add_argument("--chunk-steps", type=int, default=DEFAULT_CHUNK_STEPS)
+    p.add_argument("--seed", type=int, default=None,
+                   help="jitter the INITIAL params with this seed (default "
+                        "None = deterministic prior, unchanged). Distinct "
+                        "seeds explore distinct optima only when --init-jitter "
+                        ">0; use several to assess tuning uncertainty.")
+    p.add_argument("--init-jitter", type=float, default=0.25,
+                   help="Gaussian scale (raw/pre-sigmoid space) on the initial "
+                        "params when --seed is set. 0 disables jitter.")
+    p.add_argument("--smag-stability-form", default="lilly",
+                   choices=["lilly", "deardorff"],
+                   help="smagorinsky stable-stratification treatment. 'lilly' "
+                        "(default, unchanged) is untunable on stable cases; "
+                        "'deardorff' (PR #1647) shrinks the mixing length and "
+                        "is trainable.")
     p.add_argument("--tier", default="extended",
                    choices=("core", "extended", "aggressive"))
     p.add_argument("--steps", type=int, default=DEFAULT_STEPS)
@@ -1913,6 +1963,8 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
             "dt_s": {a.name: a.dt for a in arms},
             "cases": [a.name for a in arms],
             "tier": args.tier, "optimizer": args.optimizer, "lr": args.lr,
+            "seed": args.seed, "init_jitter": args.init_jitter,
+            "smag_stability_form": args.smag_stability_form,
             "steps": args.steps,
             # WHICH number the optimizer minimized. 'mean' weights every
             # regime's absolute normalized error equally and is therefore

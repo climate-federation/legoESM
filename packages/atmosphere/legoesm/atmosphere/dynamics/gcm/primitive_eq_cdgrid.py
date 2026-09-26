@@ -51,7 +51,7 @@ from legoesm.core.operators import (
     hyperdiffusion,
     laplacian_compact,
 )
-from legoesm.core.precision import resolve_dtype, cast_pytree
+from legoesm.core.precision import resolve_dtype, cast_pytree, finalize_to_storage
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -123,6 +123,18 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
+    # #1354/#1515: column-conserving tracer positivity BORROW (shared with the
+    # MPAS lane).  Default TRUE — the post-RK max(q,0) clamp CREATES water at
+    # every transport undershoot; the borrow moves the deficit between levels so
+    # the column integral is unchanged (frozen-MSE-neutral for vapour AND
+    # condensate).  False restores the legacy mass-creating clamp.
+    conservative_tracer_clamp: bool = True
+    # #1354/#1515: applies ONLY to the hard-floor path (conservative_tracer_clamp
+    # =False).  Then the floor also removes the per-species latent heat tied to
+    # the clipped water (vapour cools, ice warms, liquid unchanged) so frozen
+    # MSE is conserved instead of leaking spurious heat.  No-op under the borrow
+    # (already MSE-neutral) — must NOT be stacked on it.
+    energy_consistent_moisture_clip: bool = False
     time_integrator: str = "ssp_rk3"
     T_diss_coeff: float = 0.0
         # Velocity-dependent T diffusion: nu_T = coeff*|v|*dx. Typical 0.1-0.5 when used.
@@ -130,8 +142,6 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Apply zero_mean_tendency() to dp_s/dt every RK stage. Requires MPI allreduce.
     use_async_halo: bool = False
         # MPI interior/boundary split for compute-comm overlap.
-    use_fv3_lin_pgf: bool = False
-        # FV3 Lin (1997) cross-product PGF. FV3_3D iter 4: INERT — needs forward-backward stepping
         # for stability with RK3 (CFL-incompatible). Retained for future iter.
     div_damp_dddmp: float = 0.0
         # FV3_3D iter 5: adaptive Smag div damping. FV3 sw_core.F90:1720
@@ -351,8 +361,7 @@ def fv3_hydrostatic_tendencies(
     KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
 
     # --- 5. Bernoulli function B = KE + Phi (cell centres) ---
-    # FV3_3D iter 4: Lin (1997) cross-product PGF not stable with RK3 (needs forward-backward);
-    # use_fv3_lin_pgf flag inert here.
+    # Lin (1997) cross-product PGF is not stable with RK3 (needs forward-backward).
     B = KE + Phi
 
     # --- 6. D-grid vorticity at cell centres via circulation ---
@@ -1866,6 +1875,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             if self.config.implicit_grav_wave_use_pcg:
                 from legoesm.atmosphere.dynamics.gcm.semi_implicit_cdgrid import (
                     cg_helmholtz_solve,
+                    cg_metric_residual_floor,
                 )
                 # Production tolerance 1e-10 — CG reaches it in ~10
                 # iterations at α dt / dx² ≤ 5, two orders of
@@ -1889,7 +1899,12 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                     maxiter=200,
                     return_residual=True,
                 )
-                _converged = _rel_res <= _pcg_tol
+                # Accept a solve down to the metric-dtype backward-error floor
+                # (float32 metrics in mixed floor the residual at ~1e-7); a
+                # bare 1e-10 gate would reject every mixed-mode solve and drop
+                # the damping every step.  Byte-identical in fp64 (floor 0).
+                _converged = _rel_res <= max(
+                    _pcg_tol, cg_metric_residual_floor(self.cdgrid))
                 def _maybe_audit(rel_res):
                     def _warn(rel):
                         import warnings
@@ -1992,12 +2007,39 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # forcing's contract relies on).  Tracers are untouched by the
         # wind/sponge/vorticity-damping post-steps above.
         if state_new.tracers is not None:
-            state_new = state_new._replace(tracers={
-                _k: _f.replace(data=jnp.maximum(_f.data, 0.0))
-                for _k, _f in state_new.tracers.items()
-            })
+            # #1354/#1515: ONE shared positivity stage for every dycore.  Borrow
+            # (default) is frozen-MSE-neutral for vapour AND condensate; the
+            # hard-floor fallback adds the per-species latent-heat T correction
+            # incl ice.  dp = TRUE layer mass so the borrow conserves the
+            # physical column integral on hybrid as well as pure sigma.
+            # ponytail: serial sum_fn (jnp.sum).  Under face-scatter cube MPI
+            # the per-column borrow is still EXACT (a column lives on one face,
+            # never split); only the rare net-negative-column global rescue
+            # reduces per-rank — a #1354/#1515 follow-up (pass a face-scatter
+            # allreduce sum_fn), negligible on smooth water fields.
+            from legoesm.core.conservation import apply_water_positivity
+            _coord = self.sigma_coord
+            _ps = state_new.p_s.data
+            if isinstance(_coord, HybridSigmaPressureCoordinate):
+                _dp = jnp.maximum(dp_from_hybrid(_coord, _ps), 0.0)  # +weight contract
+            else:
+                _dp = _ps[..., jnp.newaxis] * _coord.dsigma.astype(_ps.dtype)
+            _tr_out, _T_out = apply_water_positivity(
+                state_new.tracers, state_new.T.data, _dp,
+                conservative=self.config.conservative_tracer_clamp,
+                energy_consistent=self.config.energy_consistent_moisture_clip)
+            state_new = state_new._replace(
+                tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
-        state_out = cast_pytree(state_new, None, "storage")
+        # #1675: ``cast_pytree`` SKIPS downcasts by default, so in ``mixed``
+        # this line never rounded the mass fixer's float64 back out of the bulk
+        # state -- adversarial review traced winds, temperature and every
+        # tracer arriving float64 on step TWO.  ``finalize_to_storage`` is the
+        # downcasting version and keeps ``p_s`` at the accumulate dtype on
+        # purpose (the exact mass correction is load-bearing).  It is a no-op
+        # whenever storage and accumulate share a dtype, i.e. in every mode
+        # except mixed, so fp32/fp64 stay byte-identical.
+        state_out = finalize_to_storage(cast_pytree(state_new, None, "storage"))
 
         # Operator-split physics carry (issue #413): one extra physics
         # evaluation on the POST-STEP state produces the carry-out

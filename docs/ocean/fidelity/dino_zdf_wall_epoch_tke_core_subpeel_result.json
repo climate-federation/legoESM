@@ -1,0 +1,15 @@
+{
+  "artifact_sha256": "6486740988f209f8dd8cb57dfbdf2d59d03039b2f61bf39ee71abf8954bdf8fa",
+  "component_closure_fraction": {
+    "langmuir_main_at_faithful_solver": {"ratio_first8": 5.866759685860936e-06, "wall_share_first8": 3.1707693465100684e-05},
+    "matrix_given_legacy_solver_and_langmuir": {"ratio_first8": 0.9962542465869475, "wall_share_first8": 1.0610246291143208},
+    "solver_main_at_faithful_langmuir": {"ratio_first8": -0.0020788946739741273, "wall_share_first8": -0.012148264794794496},
+    "solver_x_langmuir_at_faithful_matrix": {"ratio_first8": 9.974873681469226e-10, "wall_share_first8": -8.85428020159709e-08}
+  },
+  "disposition": "LOCALIZED_TO_MATRIX_GIVEN_LEGACY_SOLVER_AND_LANGMUIR",
+  "eta_shape": [160, 199, 52],
+  "producer_commit": "9ac2550d4f559b1c73c2b65174fc2e436025176a",
+  "scorer_commit": "74c442dd8166be4d88de8ad60f7d2eab3d576f7b",
+  "scorer_log_sha256": "f1eadc9bf9e9c568f3f3cf15761cdab175d5877e25fbbf1f5f9606bd075f8b87",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246"
+}

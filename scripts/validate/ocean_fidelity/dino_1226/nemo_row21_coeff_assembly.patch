@@ -1,0 +1,48 @@
+diff --git a/cfgs/DINO/MY_SRC/zdftke.F90 b/cfgs/DINO/MY_SRC/zdftke.F90
+index 84eb310..ed500ad 100644
+--- a/cfgs/DINO/MY_SRC/zdftke.F90
++++ b/cfgs/DINO/MY_SRC/zdftke.F90
+@@ -111,0 +112,2 @@ MODULE zdftke
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zsqen_base_dump, zav_base_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   avm_base_dump, avt_base_dump, dissl_post_dump
+@@ -760 +762,4 @@ CONTAINS
+-            ALLOCATE( zmxlm_dump(jpi,jpj,jpk), zmxld_dump(jpi,jpj,jpk) )
++            ALLOCATE( zmxlm_dump(jpi,jpj,jpk), zmxld_dump(jpi,jpj,jpk),   &
++               &      zsqen_base_dump(jpi,jpj,jpk), zav_base_dump(jpi,jpj,jpk),   &
++               &      avm_base_dump(jpi,jpj,jpk), avt_base_dump(jpi,jpj,jpk),   &
++               &      dissl_post_dump(jpi,jpj,jpk) )
+@@ -763,0 +769,5 @@ CONTAINS
++         zsqen_base_dump(:,:,:) = 0._wp
++         zav_base_dump(:,:,:) = 0._wp
++         avm_base_dump(:,:,:) = 0._wp
++         avt_base_dump(:,:,:) = 0._wp
++         dissl_post_dump(:,:,:) = 0._wp
+@@ -918,0 +929,7 @@ CONTAINS
++            IF( .NOT. l_1226_tke_mxl_dump_done ) THEN
++               zsqen_base_dump(ji,jj,jk) = zsqen
++               zav_base_dump(ji,jj,jk) = zav
++               avm_base_dump(ji,jj,jk) = p_avm(ji,jj,jk)
++               avt_base_dump(ji,jj,jk) = p_avt(ji,jj,jk)
++               dissl_post_dump(ji,jj,jk) = dissl(ji,jj,jk)
++            ENDIF
+@@ -919,0 +937,3 @@ CONTAINS
++         ! #1226 row 21: the five write-only operands above are captured after
++         ! literal base assembly and before the Prandtl overwrite below.  The
++         ! SAVE'd buffers are initialized in full, including halos and jpk.
+@@ -936,0 +957,5 @@ CONTAINS
++         OPEN( UNIT=8892, FILE='tke_dump_zsqen_base.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8893, FILE='tke_dump_zav_base.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8894, FILE='tke_dump_avm_base.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8895, FILE='tke_dump_avt_base.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8896, FILE='tke_dump_dissl_postavn.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+@@ -939,0 +965,5 @@ CONTAINS
++            WRITE(8892) ( ( zsqen_base_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
++            WRITE(8893) ( ( zav_base_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
++            WRITE(8894) ( ( avm_base_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
++            WRITE(8895) ( ( avt_base_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
++            WRITE(8896) ( ( dissl_post_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
+@@ -941,2 +971,2 @@ CONTAINS
+-         CLOSE(8890) ; CLOSE(8891)
+-         WRITE(numout,*) '#1226 tke zmxlm/zmxld dump written, ni/nj/jpk =', Nie0-Nis0+1, Nje0-Njs0+1, jpk
++         CLOSE(8890) ; CLOSE(8891) ; CLOSE(8892) ; CLOSE(8893) ; CLOSE(8894) ; CLOSE(8895) ; CLOSE(8896)
++         WRITE(numout,*) '#1226 tke zmxlm/zmxld/base-coeff dump written, ni/nj/jpk =', Nie0-Nis0+1, Nje0-Njs0+1, jpk

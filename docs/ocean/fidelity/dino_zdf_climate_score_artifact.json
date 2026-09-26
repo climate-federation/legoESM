@@ -1,0 +1,317 @@
+{
+  "acceptance_gate_5x": {
+    "faithful": {
+      "absolute_errors": {
+        "acc": 0.3030339243115634,
+        "deep": 2.8154240405819236e-06,
+        "smax": 7.538564091191802e-05,
+        "smean": 7.864172171534456e-05,
+        "up": 9.559953047744152e-05
+      },
+      "candidate": {
+        "acc": 65.06617045097593,
+        "deep": -0.011260904632677043,
+        "smax": 0.9092673400546119,
+        "smean": 0.8029941185757726,
+        "up": -0.28808648197581743
+      },
+      "fails_5x": 0,
+      "nemo": {
+        "acc": 65.3692043752875,
+        "deep": -0.011258089208636461,
+        "smax": 0.9093427256955238,
+        "smean": 0.8029154768540573,
+        "up": -0.2881820815062949
+      },
+      "passes_5x": 5,
+      "thresholds_5x": {
+        "acc": 0.45499999999999996,
+        "deep": 0.00022500000000000002,
+        "smax": 0.00047500000000000005,
+        "smean": 0.00047500000000000005,
+        "up": 0.00055
+      }
+    },
+    "legacy": {
+      "absolute_errors": {
+        "acc": 0.33645969731033176,
+        "deep": 3.180936834023748e-06,
+        "smax": 7.267165665325592e-05,
+        "smean": 0.00029702104441609034,
+        "up": 0.00023224398298887783
+      },
+      "candidate": {
+        "acc": 65.03274467797716,
+        "deep": -0.011261270145470485,
+        "smax": 0.9092700540388705,
+        "smean": 0.8026184558096412,
+        "up": -0.287949837523306
+      },
+      "fails_5x": 0,
+      "nemo": {
+        "acc": 65.3692043752875,
+        "deep": -0.011258089208636461,
+        "smax": 0.9093427256955238,
+        "smean": 0.8029154768540573,
+        "up": -0.2881820815062949
+      },
+      "passes_5x": 5,
+      "thresholds_5x": {
+        "acc": 0.45499999999999996,
+        "deep": 0.00022500000000000002,
+        "smax": 0.00047500000000000005,
+        "smean": 0.00047500000000000005,
+        "up": 0.00055
+      }
+    }
+  },
+  "acceptance_receipts": {
+    "faithful": {
+      "kind": "candidate_5x",
+      "path": "/tmp/zdf_faithful_acceptance5x.log",
+      "sha256": "73b7bd5c82947bdeb8ff9e95b57baaf3bb8ccd1faea5ef98b782813fa3d00dcb"
+    },
+    "legacy": {
+      "kind": "candidate_5x",
+      "path": "/tmp/zdf_legacy_acceptance5x.log",
+      "sha256": "8a4740f7cd88248c48ad4666374deb79c7fc28a9d797bc46d1aab5051d7c1055"
+    },
+    "self_test": {
+      "kind": "self_test",
+      "path": "/tmp/zdf_acceptance_selftest.log",
+      "sha256": "1874c57276eb81fd30f53c7735159b8630ec40cb4dc297416a5135756fe2a4a7"
+    }
+  },
+  "arms": {
+    "faithful": {
+      "dirty_tracked_files": 0,
+      "ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9",
+      "log": "/tmp/zdf_faithful_d90.log",
+      "log_sha256": "3f5c330c8dfdb6740c117c3d4a61e886aa0e1ebbd4c3d58e4d1d339cf36d123b",
+      "path": "/tmp/zdf_faithful_d90.npz",
+      "producer_head": "e4ab87b422f89bdbf46ddb4aaf0e9db892ec4443",
+      "registered_selector_count": 18,
+      "registered_selectors_exact": true,
+      "run_config": {
+        "bridge_before": true,
+        "bridge_tke": true,
+        "dino_wind_profile_evaluation": "nemo_literal",
+        "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
+        "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
+        "gm_redi_slope_n2_evaluation": "carried_step_entry",
+        "gm_redi_slope_prd_evaluation": "nemo_literal",
+        "n_days": 90,
+        "perturb_eps": 1e-14,
+        "perturb_seed": null,
+        "recipe": "nemo_dino_kamm_mlf",
+        "restart_file": "DINO_00005760_restart.nc",
+        "run_stepdump": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_STEPDUMP",
+        "run_traj": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ",
+        "surface_tendency_placement": null,
+        "tke_etau_exponential_evaluation": "nemo_literal",
+        "tke_htau_evaluation": "nemo_literal",
+        "tke_langmuir_evaluation": "nemo_literal",
+        "tke_matrix_evaluation": "nemo_literal",
+        "tke_mxl_raw_evaluation": "nemo_literal",
+        "tke_n2_evaluation_stage": "step_entry",
+        "tke_preclosure_coeff_source": "carried_previous_step",
+        "tke_shear_evaluation_stage": "step_entry",
+        "tke_shear_metric_source": "nemo_qco_live_face",
+        "tke_solver_evaluation": "nemo_literal",
+        "use_gm_redi": null,
+        "vmix_scheme": null,
+        "zdf_implicit_solver_evaluation": "nemo_literal"
+      },
+      "sha256": "daf1117e4a4151c4602947d763bdcf7ae9fadf224cbe7d50b70b2d8b4de80738"
+    },
+    "legacy": {
+      "dirty_tracked_files": 0,
+      "ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9",
+      "log": "/tmp/zdf_legacy_d90.log",
+      "log_sha256": "403fb626aa894cfc6aa413c505aeef69dd73a476fdf30b92dca92e2d5f16b86b",
+      "path": "/tmp/zdf_legacy_d90.npz",
+      "producer_head": "e4ab87b422f89bdbf46ddb4aaf0e9db892ec4443",
+      "registered_selector_count": 18,
+      "registered_selectors_exact": true,
+      "run_config": {
+        "bridge_before": true,
+        "bridge_tke": true,
+        "dino_wind_profile_evaluation": "factored_smoothstep",
+        "gm_redi_slope_depth_evaluation": "legacy_jacobian_t_surface",
+        "gm_redi_slope_face_thickness_evaluation": "static_face",
+        "gm_redi_slope_metric_evaluation": "division",
+        "gm_redi_slope_n2_evaluation": "recompute",
+        "gm_redi_slope_prd_evaluation": "density_roundtrip",
+        "n_days": 90,
+        "perturb_eps": 1e-14,
+        "perturb_seed": null,
+        "recipe": "nemo_dino_kamm_mlf",
+        "restart_file": "DINO_00005760_restart.nc",
+        "run_stepdump": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_STEPDUMP",
+        "run_traj": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ",
+        "surface_tendency_placement": null,
+        "tke_etau_exponential_evaluation": "jax_expression",
+        "tke_htau_evaluation": "jax_expression",
+        "tke_langmuir_evaluation": "vectorized",
+        "tke_matrix_evaluation": "factored",
+        "tke_mxl_raw_evaluation": "factored",
+        "tke_n2_evaluation_stage": "implicit_solve_state",
+        "tke_preclosure_coeff_source": "current_subiteration",
+        "tke_shear_evaluation_stage": "implicit_solve_state",
+        "tke_shear_metric_source": "tpoint_jacobian",
+        "tke_solver_evaluation": "shared_thomas",
+        "use_gm_redi": null,
+        "vmix_scheme": null,
+        "zdf_implicit_solver_evaluation": "shared_thomas"
+      },
+      "sha256": "0a4f40bfc37ff5cd6d05610a1e90b5784d3050ba02945277d8c2c53accef6b4b"
+    }
+  },
+  "controls": {
+    "decision": {
+      "planted_confirm_fired": true,
+      "planted_do_no_harm_refute_fired": true,
+      "planted_rms_refute_fired": true
+    },
+    "mld_audit": {
+      "reduction_poison": {
+        "dry_cell": [
+          0,
+          0
+        ],
+        "dry_poison_exactly_inert": true,
+        "wet_cell": [
+          99,
+          1
+        ],
+        "wet_poison_moves_equator": true
+      },
+      "synthetic": {
+        "baseline_base_index": 1,
+        "baseline_fraction": 0.99,
+        "baseline_mld_m": 20.0,
+        "false_expected_level_fired": true,
+        "planted_base_index": 0,
+        "planted_fraction": 1.01,
+        "planted_mld_m": 10.0,
+        "threshold_m_s2": 9.558138401559454e-05
+      }
+    }
+  },
+  "mld_day90": {
+    "faithful": {
+      "basin": {
+        "legoesm_mean_m": 3241.894894319148,
+        "mean_bias_m": -1.8992645783119255,
+        "nemo_mean_m": 3243.79415889746,
+        "rms_difference_m": 22.479521394093474,
+        "weight_sum_m2": 1205116706683.6353,
+        "wet_cells": 650
+      },
+      "channel": {
+        "legoesm_mean_m": 256.8180592126627,
+        "mean_bias_m": 0.6066700555478985,
+        "nemo_mean_m": 256.21138915711475,
+        "rms_difference_m": 8.9935564373742,
+        "weight_sum_m2": 7243558719844.468,
+        "wet_cells": 1820
+      },
+      "equator": {
+        "legoesm_mean_m": 12.287187121383708,
+        "mean_bias_m": -4.762796485024977e-07,
+        "nemo_mean_m": 12.287187597663356,
+        "rms_difference_m": 2.333494951488858e-06,
+        "weight_sum_m2": 618260028805.7776,
+        "wet_cells": 50
+      }
+    },
+    "legacy": {
+      "basin": {
+        "legoesm_mean_m": 3242.4327251767086,
+        "mean_bias_m": -1.3614337207514284,
+        "nemo_mean_m": 3243.79415889746,
+        "rms_difference_m": 18.686435517412004,
+        "weight_sum_m2": 1205116706683.6353,
+        "wet_cells": 650
+      },
+      "channel": {
+        "legoesm_mean_m": 253.552682736357,
+        "mean_bias_m": -2.6587064207577313,
+        "nemo_mean_m": 256.21138915711475,
+        "rms_difference_m": 10.152160164501753,
+        "weight_sum_m2": 7243558719844.468,
+        "wet_cells": 1820
+      },
+      "equator": {
+        "legoesm_mean_m": 12.287185763185887,
+        "mean_bias_m": -1.8344774687051312e-06,
+        "nemo_mean_m": 12.287187597663356,
+        "rms_difference_m": 2.9321890059591173e-06,
+        "weight_sum_m2": 618260028805.7776,
+        "wet_cells": 50
+      }
+    }
+  },
+  "provenance": {
+    "dirty_tracked_files": 0,
+    "input_sha256": {
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0000.nc": "f69c4d583466f5d5e310a4960af2adafb9c6b53684ba75cfa21a13012b9154e2",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0001.nc": "354791c6cc809c80f416214e0307deb06350e64041c23bbeda41ffe6638e7e1d",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0002.nc": "4f1912ecb74287334c567859d91a72f38ceb5a6af6c93ea92ce69162165ecf13",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0003.nc": "79d5b4f00f8b803ec58e816a55d7e1f6a05aab727a7ba6dc7e1c6ba8dbe76adb",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0004.nc": "dea6296f2c892d03fe85f343ced20cd782aa50a1cdbac6346a7ada8d7c93a0fa",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0005.nc": "4e76a26e2c2e56f161c944243085c49736552e3bbbb191eed3413d7c6fff3ad2",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0006.nc": "172d70cc3593932db65fb8a77d147efd2c345b6268bc60b8e07799a9d400f813",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0007.nc": "2a0e294cea862db9ba22e4cfcb6497b56a5e377448d917e7b2ba9ed1d2a412ed",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0008.nc": "0fbae8071000c11e089f71b5276b2c694267e07ee31de8a2515adfd7a21ff2ed",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0009.nc": "561eb2ea383c78a7c7130a230e9e647f7be71b810c4cb25f3e00ec62de13e7f6",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0010.nc": "fc2d9f1e18ba0e48594c55f7ac7e48bd872e9848990dc6939199bc25bab84b8e",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0011.nc": "b9156a1b4844abffd61133c1815ed3c3344df9414529e1efb7e948bb530e080e",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0012.nc": "11ec3a3bb7620286df68a6665af21ca2506d08b32c791ae8c3b4ecf314ed5891",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0013.nc": "f6357d39eb3f84fe11414542a2d378e281c36b3a6463360c5c583688de8bb5af",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0014.nc": "8e4a3426ad5539ed8e0d27fa7ecc5f5584b9de96fb7df4ca7594c898904d7638",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0015.nc": "0648c7c5219ae436132fe1e980b47b4408ef4374f94bb1923eb0bbfb4df97a28",
+      "/tmp/codex-mld-audit/docs/ocean/fidelity/dino_mld_climate_audit_artifact.json": "0f00f2c5bad331a871fbb2237aaddc75e789619ff0230c76a9fdd67b16657624",
+      "/tmp/codex-mld-audit/scripts/validate/ocean_fidelity/dino_1226/PREREG_mld_climate_audit.md": "7c4679398d3d2f029a5cfab1fbe4bbbdb970f305ec0b7d488cd3f62fb5afbfd0",
+      "/tmp/codex-mld-audit/scripts/validate/ocean_fidelity/dino_1226/mld_climate_audit.py": "cf1bcffb4ee7994bd4eb433f6b3fa3ba5ac0f2610463b9bb3133ea0c1762dc14",
+      "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/acceptance_gate_90d.py": "d95662dbfc8f2e48e29860168e2adf4e691f5915cfdce98261c075b8bf580584",
+      "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_climate_score.py": "e6a842a36b49dc88abcc9d7f700ce11703412118665ed971420c57f91f0bbede",
+      "/tmp/zdf_acceptance_selftest.log": "1874c57276eb81fd30f53c7735159b8630ec40cb4dc297416a5135756fe2a4a7",
+      "/tmp/zdf_faithful_acceptance5x.log": "73b7bd5c82947bdeb8ff9e95b57baaf3bb8ccd1faea5ef98b782813fa3d00dcb",
+      "/tmp/zdf_faithful_d90.log": "3f5c330c8dfdb6740c117c3d4a61e886aa0e1ebbd4c3d58e4d1d339cf36d123b",
+      "/tmp/zdf_faithful_d90.npz": "daf1117e4a4151c4602947d763bdcf7ae9fadf224cbe7d50b70b2d8b4de80738",
+      "/tmp/zdf_legacy_acceptance5x.log": "8a4740f7cd88248c48ad4666374deb79c7fc28a9d797bc46d1aab5051d7c1055",
+      "/tmp/zdf_legacy_d90.log": "403fb626aa894cfc6aa413c505aeef69dd73a476fdf30b92dca92e2d5f16b86b",
+      "/tmp/zdf_legacy_d90.npz": "0a4f40bfc37ff5cd6d05610a1e90b5784d3050ba02945277d8c2c53accef6b4b"
+    },
+    "jax_backend": "cpu",
+    "jax_x64": true,
+    "repo_head": "caa223aac550358f96cd989b286d7bc472122f55",
+    "vertical_ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9"
+  },
+  "registered_bands_m": {
+    "baseline": 22.479491,
+    "confirm_max": 11.2397455,
+    "legacy_tolerance": 0.001,
+    "published_unrounded_baseline": 22.47949083389064,
+    "refute_min": 20.2775
+  },
+  "registered_conditions": {
+    "acceptance_one_floor_do_no_harm": true,
+    "acceptance_worsening_faithful_minus_legacy": {
+      "acc": -0.033425772998768366,
+      "deep": -3.655127934418245e-07,
+      "smax": 2.7139842586620944e-06,
+      "smean": -0.00021837932270074578,
+      "up": -0.0001366444525114363
+    },
+    "five_x_pass_tally_not_decreased": true,
+    "legacy_baseline_ok": false,
+    "southern_surface_density_improves_one_floor": true
+  },
+  "schema": "dino-zdf-climate-score-v1",
+  "scope": "Offline climate-level DINO mixed-layer-depth audit against NEMO 5.0.2.",
+  "verdict": "REFUTE"
+}

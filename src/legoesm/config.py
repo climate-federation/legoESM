@@ -378,6 +378,11 @@ class Config:
                 "vertical_coord": grid.get("vertical_coord", "hybrid"),
                 "p_top_Pa": grid.get("p_top_Pa", 200.0),
                 "stretching": grid.get("stretching", 2.0),
+                "tropopause_refine": float(grid.get("tropopause_refine", 1.0)),
+                "sigma_top": float(grid.get("sigma_top", 0.01)),
+                "sigma_refine": float(grid.get("sigma_refine", 0.12)),
+                "sigma_refine_width": float(grid.get("sigma_refine_width", 0.45)),
+                "sigma_layout": str(grid.get("sigma_layout", "standard")),
             },
             "dycore": {
                 "model_type": _normalize_dynamics(atm.get("dynamics", "hydrostatic")),

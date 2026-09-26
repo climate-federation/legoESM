@@ -33,6 +33,12 @@ ROOT = os.environ.get(
     "LEGOESM_AMIP_RUNS", "/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs")
 CERES = "/work/bd1179/b309141/climateeval_input/observation_CERES-EBAF/mon"
 ERA5 = "/work/bd1179/b309141/climateeval_input/reanalysis_ERA5/mon"
+# Precipitation is scored against GPCP, not ERA5: ERA5's precipitation is a
+# model product with its own tropical bias, and GPCP is the reference the
+# sibling bias_maps.py already declares for pr.  Using two references for one
+# variable across two tools in the same directory is how a "bias" becomes a
+# comparison between two models.
+GPCP = "/work/bd1179/b309141/climateeval_input/observation_GPCP/mon"
 # Reference climatology period.  ERA5 monthly starts 1979-01; CERES-EBAF
 # 2000-03.  Each reference is averaged over ITS OWN full record restricted to
 # >=1979, and the model is compared to the SAME CALENDAR MONTHS it simulated.
@@ -40,8 +46,14 @@ REF_MIN_YEAR = 1979
 
 # TOA fluxes: CERES only (ERA5 has no rsut/rlut here).  Cloud state: ERA5.
 _SOURCE = {"rsut": CERES, "rlut": CERES, "rsutcs": CERES, "rlutcs": CERES,
-           "clt": ERA5, "lwp": ERA5, "clivi": ERA5, "prw": ERA5, "pr": ERA5,
+           "clt": ERA5, "lwp": ERA5, "clivi": ERA5, "prw": ERA5, "pr": GPCP,
            "tas": ERA5, "evspsbl": ERA5}
+
+# Display scale: the water fluxes are stored in kg m-2 s-1 on BOTH sides, so
+# the difference is ~1e-5 and prints as 0.00 at two decimals.  Scale to mm/day
+# for the table only -- the arithmetic stays in the stored unit.  Header
+# carries the unit so a reader cannot mistake the column.
+_DISPLAY = {"pr": (86400.0, "pr[mm/d]"), "evspsbl": (86400.0, "evap[mm/d]")}
 
 REGIONS = {           # (lat_lo, lat_hi, lon_lo, lon_hi) lon in [0,360)
     "ITCZ 10S-10N":     (-10, 10, 0, 360),
@@ -53,6 +65,8 @@ REGIONS = {           # (lat_lo, lat_hi, lon_lo, lon_hi) lon in [0,360)
     "SO stormtrack":    (-60, -30, 0, 360),
     "NH midlat":        (30, 60, 0, 360),
     "poles 60-90":      (None, None, 0, 360),  # handled specially (both caps)
+    "Arctic 60-90N":    (60, 90, 0, 360),
+    "Antarctic 60-90S": (-90, -60, 0, 360),
     "GLOBAL":           (-90, 90, 0, 360),
 }
 
@@ -221,7 +235,8 @@ def _region_mean(field, lat, lon, box):
 def main(runs, ctl=None):
     ctl_fields = {}
     if ctl is not None:
-        for var in ("rsut", "rlut", "rsutcs", "rsdt", "clt", "prw", "hfls"):
+        for var in ("rsut", "rlut", "rsutcs", "rsdt", "clt", "prw", "hfls",
+                    "pr", "evspsbl"):
             md = _load_model(ctl, var)
             if md is not None:
                 ctl_fields[var] = (np.asarray(md[var]).mean(axis=0),
@@ -257,8 +272,17 @@ def main(runs, ctl=None):
         print(f"\n=== {run} (model - CERES-EBAF climatology, matched months) ===")
         rows = {}
         for var in ("rsut", "rlut", "rsutcs", "rlutcs",
-                    "clt", "lwp", "clivi", "prw"):
+                    "clt", "lwp", "clivi", "prw", "pr", "evspsbl"):
             md = _load_model(run, var)
+            if md is None and var == "lwp":
+                # The runs publish clwvi (TOTAL condensed water path) and
+                # clivi, not lwp.  Liquid is their difference, and the row was
+                # silently absent from every scorecard until now -- which is
+                # how a precipitation-efficiency question went unanswerable.
+                tot, ice = _load_model(run, "clwvi"), _load_model(run, "clivi")
+                if tot is None or ice is None:
+                    continue
+                md = tot.assign(lwp=tot["clwvi"] - ice["clivi"])
             if md is None:
                 continue
             months = _month_labels(md)
@@ -278,9 +302,12 @@ def main(runs, ctl=None):
             rows["CRE_sw_bias"] = {r: rows["rsut"][r] - rows["rsutcs"][r]
                                    for r in REGIONS}
             hdr.append("CRE_sw_bias")
-        print(f"{'region':<16}" + "".join(f"{h:>13}" for h in hdr))
+        print(f"{'region':<16}"
+              + "".join(f"{_DISPLAY.get(h, (1.0, h))[1]:>13}" for h in hdr))
         for r in REGIONS:
-            print(f"{r:<16}" + "".join(f"{rows[h][r]:13.2f}" for h in hdr))
+            print(f"{r:<16}" + "".join(
+                f"{rows[h][r] * _DISPLAY.get(h, (1.0, h))[0]:13.2f}"
+                for h in hdr))
 
 
 if __name__ == "__main__":

@@ -592,9 +592,10 @@ def build_parser():
     # run_amip uses.  So this list had drifted, not narrowed on purpose: it was
     # missing zhang_mcfarlane / kain_fritsch / emanuel / tiedtke / bechtold --
     # every one of which resolves through the shared convection factory.
-    # tiedtke is run_amip's default and bechtold is the scheme pinned by
-    # config/amip/amip_production.yaml, so a coupled run could select NEITHER of
-    # the two the atmosphere is actually run with.  Derived from the canonical
+    # tiedtke is run_amip's default and the production deck pins one of these
+    # explicitly -- zhang_mcfarlane since it became the CAM6 suite on
+    # 2026-09-23, bechtold before that -- so a coupled run could select NEITHER
+    # of the two the atmosphere is actually run with.  Derived from the canonical
     # set so it cannot drift again.  (The default stays sbm: the comment above
     # documents the empirically coupled-stable suite, which is a statement about
     # the DEFAULT, not a reason to block the others.)
@@ -718,7 +719,7 @@ def build_parser():
                         help="Cloud-fraction scheme (default: sundqvist)")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
                         action="store_true", default=False,
-                        help="Add a bounded Slingo(1987) convective cumulus "
+                        help="Add a bounded Slingo-1987-inspired surrogate convective cumulus "
                              "cloud-fraction source driven by the (lagged) "
                              "convective precip — restores the tropical "
                              "cloud-radiative effect the adjustment convection "
@@ -751,7 +752,7 @@ def build_parser():
                              "adiabatic (None=default 1.5e-6; range 5e-7..3e-6).")
     parser.add_argument("--conv-cloud-max", dest="cloud_conv_cloud_max",
                         type=float, default=None,
-                        help="Override convective (Slingo) cloud-cover cap "
+                        help="Override convective (Slingo-1987-inspired surrogate) cloud-cover cap "
                              "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
                              "Default: CloudConfig default.")
     parser.add_argument("--conv-cloud-condensate",

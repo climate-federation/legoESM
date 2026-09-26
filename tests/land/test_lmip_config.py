@@ -364,3 +364,53 @@ def test_pft_root_lists_reject_nonsense(mutate, match):
     bad["physics"].update(r)
     with pytest.raises(ValueError, match=match):
         validate_config(bad)
+
+
+# --- prognostic carbon (opt-in) --------------------------------------------
+def _carbon_cfg(**physics):
+    """Minimal valid config with a physics-block override."""
+    d = _minimal()
+    d.setdefault("physics", {}).update(physics)
+    return d
+
+
+def test_carbon_prognostic_defaults_false_and_is_a_bool():
+    from legoesm.land.lmip_config import validate_config
+    cfg = validate_config(_carbon_cfg())
+    assert cfg.physics["carbon_prognostic"] is False
+    with pytest.raises(ValueError, match="carbon_prognostic must be a bool"):
+        validate_config(_carbon_cfg(carbon_prognostic="yes"))
+
+
+def test_carbon_ic_requires_prognostic_pools():
+    """A seed with prescribed pools would be overwritten every step -> reject."""
+    from legoesm.land.lmip_config import validate_config
+    d = _carbon_cfg(stomata_enabled=True)
+    d["restart"] = {"from": "", "carbon_ic": "/tmp/global_carbon_ic.npz"}
+    with pytest.raises(ValueError, match="carbon_prognostic is false"):
+        validate_config(d)
+    d["physics"]["carbon_prognostic"] = True
+    cfg = validate_config(d)
+    assert cfg.restart["carbon_ic"].endswith("global_carbon_ic.npz")
+
+
+def test_carbon_ic_defaults_empty():
+    from legoesm.land.lmip_config import validate_config
+    assert validate_config(_carbon_cfg()).restart["carbon_ic"] == ""
+
+
+def test_carbon_prognostic_requires_stomata_enabled():
+    """The pools only step on the interactive-stomata path — caught at LOAD,
+    not after the driver has staged a year of forcing (codex P2)."""
+    from legoesm.land.lmip_config import validate_config
+    with pytest.raises(ValueError, match="requires stomata_enabled"):
+        validate_config(_carbon_cfg(carbon_prognostic=True))
+    cfg = validate_config(_carbon_cfg(carbon_prognostic=True, stomata_enabled=True))
+    assert cfg.physics["carbon_prognostic"] is True
+
+
+def test_carbon_prognostic_rejects_slab():
+    from legoesm.land.lmip_config import validate_config
+    with pytest.raises(ValueError, match="requires land_mode 'multilayer'"):
+        validate_config(_carbon_cfg(carbon_prognostic=True, stomata_enabled=True,
+                                    land_mode="slab"))

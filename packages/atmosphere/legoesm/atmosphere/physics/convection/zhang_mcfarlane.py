@@ -1,74 +1,41 @@
-"""Zhang & McFarlane (1995) deep-convection scheme.
+"""Zhang-McFarlane deep convection: the CAM6 algorithm end to end.
 
-A single-plume mass-flux scheme with a quasi-equilibrium CAPE-relaxation
-closure: the cloud-base mass flux ``M_b`` is diagnosed from the column
-CAPE excess over a threshold and relaxed (implicit Euler) toward the
-diagnosed equilibrium value over a tunable timescale.  The plume itself
-is integrated using the shared
-:func:`legoesm.atmosphere.physics.convection._plume.entraining_detraining_plume`
-helper; the environmental tendencies (compensating subsidence +
-detrainment) are computed by the existing
-:func:`legoesm.atmosphere.physics.convection.mass_flux.apply_mass_flux_kernel`
-so this scheme reuses every piece of column physics rather than
-re-implementing it.
+``scheme="zhang_mcfarlane"`` runs the CESM2.1 ``zm_conv_tend`` sequence
+(``zm_conv_intr.F90``) on the faithful kernels of
+:mod:`legoesm.atmosphere.physics.convection._zm_cam6`:
 
-The scheme is **smooth-everywhere** in the AD sense:
+1. ``zm_convr`` -- dilute-parcel CAPE (``buoyan_dilute``), cloud model
+   (``cldprp``), quasi-equilibrium closure ``mb`` capped at the CFL bound,
+   ``q1q2_pjr`` heating/moistening/detrainment;
+2. ``physics_update`` -- the oracle applies the ``zm_convr`` tendencies to
+   the state BEFORE the evaporation step, so the evaporation below sees
+   ``T + heat/cp*dt`` and ``q + dqdt*dt``;
+3. ``zm_conv_evap`` -- Sundqvist rain evaporation with snow/melt fusion
+   heating (``cldfrc_fice``), on the updated state;
+4. ``momtran`` -- Richter-Rasch convective momentum transport with the
+   Boville-Bretherton kinetic-energy dissipation heating.
 
-* ``CAPE > threshold`` is replaced by ``cape_trigger`` (sigmoid).
-* ``(CAPE - threshold)+`` uses ``smooth_positive_part``.
-* Cloud-base / LFC / LNB localization uses the smooth-fractional
-  level diagnostics from ``_plume``.
-* The plume integrator's mass-flux profile is gated by a sigmoid on
-  buoyancy, not a hard cut.
+CAM6 has NO cloud-base mass-flux carry: ``mb`` is diagnosed every step, so
+``conv_prog_profile`` is not read.  The returned carry packs the diagnosed
+``mb`` [kg/m^2/s] at ``[:, -1]`` for diagnostics only (zeros aloft), which
+keeps the orchestrator's uniform carry schema.
 
-Convective momentum transport (CMT) is enabled by default via the
-Gregory et al. 1997 closure
-(:func:`legoesm.atmosphere.physics.convection._plume.cmt_gregory_1997`).
+Not wired (host contract): the oracle also runs ``convtran`` on cloud
+liquid/ice.  ``_zm_cam6.convtran`` is ported and pinned, but this scheme
+receives no ``q_c``/``q_i`` and ``ConvectionOutput`` has no signed cloud
+transport slot (``dq_c_conv_dt`` is a non-negative source), so that call is
+left out.  Departures inside the kernels are listed in ``_zm_cam6``.
 
-Faithfulness to Zhang-McFarlane (1995) / E3SM ``zm_conv.F90`` (oracle)
----------------------------------------------------------------------
-FAITHFUL (ports of / matched to the E3SM/CAM ``zm_conv.F90`` algorithm):
-  * The DILUTE-parcel CAPE (:func:`._zm_dilute.dilute_parcel_cape`) is a
-    faithful port of the oracle ``parcel_dilute``/``buoyan_dilute`` (Raymond &
-    Blyth 1992 entropy-conserving entraining plume): max-MSE PBL launch,
-    fractional-entrainment ascent, entropy inversion, condensate loading +
-    freezing. Its quantitative agreement with the compiled E3SM/CAM Fortran was
-    checked offline against a local, untracked oracle harness — no committed test
-    certifies a specific percentage (see the note in ``test_zm_dilute_parcel``).
-    What IS CI-pinned is the qualitative dilute-parcel behavior (dilute CAPE
-    strictly < undilute, < 0.6× on a tropical sounding) in
-    ``tests/unit/test_zm_dilute_parcel.py``.
-  * The dilute-parcel entrainment constants are the E3SM/CAM defaults:
-    ``dmpdz=-1e-3`` 1/m and ``tiedke_add=0.5`` K. (The ``cape_threshold=70`` J/kg
-    ZM95 value is a TRIGGER/closure setting, not a dilute-parcel constant.)
-DEPARTURES / SURROGATES (documented; NOT the ZM95 closed forms):
-  * The cloud-base mass-flux closure is a GENERIC first-order CAPE-relaxation
-    SURROGATE. With ``Δ = CAPE - cape_threshold`` and sharpness ``s``, the
-    equilibrium flux is
-    ``M_b_eq = sigmoid(s·Δ) · rho_BL · softplus(s·Δ)/(s · g · tau_cape)``
-    (a smooth trigger ``sigmoid(s·Δ)`` times the ``(Δ)+`` softplus positive part),
-    implicit-Euler relaxed toward ``M_b_eq`` and clipped to ``[0, M_b_max]``. This
-    is NOT the ZM95 cloud-work-function / quasi-equilibrium closure (which sets the
-    CAPE-consumption rate from a work-function sensitivity), and NOT a Kain-2004
-    iterated M_b. The ``g/rho_BL`` factor is a dimensional stand-in for the
-    CAPE-consumption sensitivity. See the inline note at the closure.
-  * The plume (single bulk entraining/detraining plume, constant ``epsilon_0``/
-    ``delta_0``) and the environmental subsidence+detrainment use the SHARED
-    ``_plume``/``mass_flux`` kernels (advective solve, conservative only to
-    truncation order on the default path), not a ZM-specific microphysics/
-    downdraft package. CMT is Gregory et al. (1997), not the ZM95 momentum term.
-Scheme-level use of the faithful dilute CAPE + the surrogate closure form are
-pinned in ``tests/atmosphere/hydrostatic/unit/test_zhang_mcfarlane_faithful.py``.
+The rain field ``dq_r_conv_dt`` is CAM's ``ntprprd``: the NET divergence of
+the falling-precipitation flux (``prdprec - evpprec``), negative where rain
+from above evaporates.  It column-integrates to the surface rain and is not
+a per-layer condensate source; hosts must sum it (the bridges do, or refuse).
 
-References
-----------
-- Zhang, G. J., & McFarlane, N. A. (1995). Sensitivity of climate
-  simulations to the parameterization of cumulus convection in the
-  Canadian Climate Centre general circulation model.  *Atmos.-Ocean*,
-  33(3), 407–446.
-- Gregory, D., Kershaw, R., & Inness, P. M. (1997). Parametrization of
-  momentum transport by convection. II.  *Quart. J. Roy. Meteor. Soc.*,
-  123, 1153–1183.
+Host inputs the oracle has that the convection contract lacks: ``pblh``
+(PBL height; ``None`` -> ``pbl_top_pa`` launch bound), the total cloud
+fraction for the evaporation (``cld_frac``; ``None`` -> 0, i.e. CAM's
+``(1 - cldfrc)`` factor at its maximum), and ``land_frac`` (``None`` -> 0,
+ocean coefficients everywhere; the bridge passes it when the grid has it).
 """
 
 from __future__ import annotations
@@ -77,33 +44,16 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import compute_rho
-from legoesm.atmosphere.physics.thermodynamics import (
-    parcel_profile_and_cape,
+from legoesm.atmosphere.physics.convection._zm_cam6 import (
+    Q_MIN_VAPOR,
+    momtran,
+    zm_conv_evap,
+    zm_convr,
 )
-
+from legoesm.atmosphere.physics.convection._zm_dilute import LWMAX
 from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
-from legoesm.atmosphere.physics.convection.output import (
-    ConvectionOutput,
-    split_convective_rain,
-)
-from legoesm.atmosphere.physics.convection.mass_flux import (
-    apply_mass_flux_kernel,
-    release_detrained_condensate_latent,
-    compute_column_geometry,
-)
-from legoesm.atmosphere.physics.convection._triggers import (
-    cape_trigger,
-    smooth_positive_part,
-)
-from legoesm.atmosphere.physics.convection._plume import (
-    cmt_gregory_1997,
-    compute_lcl,
-    entraining_detraining_plume,
-)
-from legoesm.atmosphere.physics.convection._zm_dilute import (
-    dilute_parcel_cape,
-)
+from legoesm.atmosphere.physics.convection.mass_flux import compute_column_geometry
+from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
 
 __all__ = ("zhang_mcfarlane_convection",)
@@ -111,51 +61,54 @@ __all__ = ("zhang_mcfarlane_convection",)
 
 __physics_contract__ = {
     "summary": (
-        "Zhang-McFarlane (1995) deep convection: a single entraining-detraining "
-        "plume with a dilute-CAPE quasi-equilibrium closure (M_b relaxed toward "
-        "the CAPE-consumption equilibrium) and optional Gregory-97 CMT. Uses "
-        "the shared subsidence+detrainment kernel; condensate handed to "
-        "microphysics. Smooth (differentiable)."
+        "CAM6 Zhang-McFarlane deep convection (zm_conv_tend port): dilute-"
+        "parcel CAPE, entraining/detraining updraft with downdraft, quasi-"
+        "equilibrium closure, rain evaporation, momentum transport."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
         "u": "m/s", "v": "m/s",
-        "conv_prog_profile": "kg/m^2/s (cloud-base mass-flux carry M_b at [:, -1])",
-        "dt": "s",
+        "conv_prog_profile": "unused (CAM6 ZM carries no state)",
+        "dt": "s", "land_frac": "1", "cld_frac": "1", "pblh": "m",
     },
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
-        "dq_c_conv_dt": "kg/kg/s (detrained cloud-water source to microphysics, >=0)",
-        "cape": "J/kg", "convective_mask": "1 (0-1 CAPE trigger)",
-        "du_dt_conv": "m/s^2 (CMT; None if disabled)",
-        "dv_dt_conv": "m/s^2 (CMT; None if disabled)",
-        "conv_prog_profile_new": "kg/m^2/s (relaxed M_b at [:, -1])",
+        "dq_c_conv_dt": "kg/kg/s (detrained cloud water dlf, >=0)",
+        "dq_r_conv_dt": "kg/kg/s (NET rain flux divergence: production minus "
+                        "evaporation of rain from above; signed per layer, "
+                        "column-integrates to the surface rain; never a "
+                        "per-layer tracer source)",
+        "cape": "J/kg", "convective_mask": "1 (cape > capelmt)",
+        "du_dt_conv": "m/s^2 (None if enable_cmt=False)",
+        "dv_dt_conv": "m/s^2 (None if enable_cmt=False)",
+        "conv_prog_profile_new": "kg/m^2/s (diagnosed mb at [:, -1])",
+        "mass_flux_up": "kg/m^2/s (CAM cmfmc: net deep mass flux mu+md on "
+                        "interfaces, top->bottom, bottom face 0)",
+        "icwmr": "kg/kg (CAM ICWMRDP: in-cloud updraft condensate, 0 outside "
+                 "convecting columns)",
     },
     "sign_convention": (
-        "z up; surface at [:, -1]. Where dilute CAPE>threshold the plume warms "
-        "aloft and dries the lower column via compensating subsidence + "
-        "detrainment; dq_c_conv_dt >= 0 is a cloud-water SOURCE to microphysics "
-        "(precip deferred). The kernel conserves column moist static energy and "
-        "total water (advective default: truncation order). Optional Gregory-97 "
-        "CMT redistributes momentum vertically (transport-dominant, not exactly "
-        "conserving, so momentum is not claimed)."
+        "z up; surface at [:, -1]. dT_dt > 0 warms (includes the fusion "
+        "heating of convective snow and the KE-dissipation heating); "
+        "dq_v_dt > 0 moistens; dq_c_conv_dt >= 0 is a cloud-water source; "
+        "dq_r_conv_dt integrates over the column to the surface convective "
+        "precipitation (kg/m^2/s = -sum dp (dq_v_dt + dq_c_conv_dt)/g)."
     ),
-    # The DEFAULT public path uses the shared kernel's advective subsidence
-    # solve, conservative only to TRUNCATION ORDER (exact only in the opt-in
-    # implicit_flux path), so no contract-level conservation is guaranteed; the
-    # column budget is closed downstream.
-    "conserves": ["none"],
+    # moisture: vapour + cloud + rain sources close the column to rounding,
+    # up to CAM's qneg3 floor (Q_MIN_VAPOR, 1e-12 kg/kg) applied to the
+    # state the kernels read, never to the returned tendency (as in CAM);
+    # momentum: momtran is flux-form (exact column conservation).
+    "conserves": ["moisture", "momentum"],
     "differentiable": True,
     "reference": (
-        "Zhang & McFarlane (1995), Atmos.-Ocean 33, 407-446; "
-        "Gregory et al. (1997), Q. J. R. Meteorol. Soc. 123, 1153-1183"
+        "Zhang & McFarlane (1995), Atmos.-Ocean 33; Neale, Richter & Jochum "
+        "(2008), J. Climate 21; Richter & Rasch (2008), J. Climate 21; "
+        "CESM2.1 zm_conv.F90 / zm_conv_intr.F90"
     ),
     "idealized_test": (
-        "tests/unit/test_zhang_mcfarlane.py; CAPE<=threshold -> zero mass flux "
-        "and zero tendency; a conditionally-unstable tropical column -> heating "
-        "aloft + low-level drying with a positive dq_c source and M_b relaxing "
-        "toward the CAPE-closure equilibrium; column MSE and total water "
-        "conserved by the shared kernel."
+        "tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py (Fortran "
+        "transcription pin, water closure, jit parity, gradients); "
+        "tests/unit/test_zhang_mcfarlane.py (host-level behaviour)."
     ),
 }
 
@@ -170,210 +123,98 @@ def zhang_mcfarlane_convection(
     conv_prog_profile: jax.Array,
     dt: float,
     config: ZhangMcFarlaneConfig = ZhangMcFarlaneConfig(),
+    *,
+    land_frac: jax.Array | None = None,
+    cld_frac: jax.Array | None = None,
+    pblh: jax.Array | None = None,
+    pref_edge: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array]:
-    """Zhang-McFarlane deep convection (smooth, differentiable).
+    """CAM6 Zhang-McFarlane deep convection tendencies for one step.
 
     Parameters
     ----------
-    T : jax.Array, shape (ncol, nlev)
-        Environmental temperature [K].  Surface at ``[:, -1]``.
-    q_v : jax.Array, shape (ncol, nlev)
-        Water-vapor specific humidity [kg/kg].
+    T, q_v : jax.Array, shape (ncol, nlev)
+        Temperature [K] and water vapour [kg/kg], surface at ``[:, -1]``.
     p_full, p_half : jax.Array
-        Full / half-level pressures [Pa].  Shapes ``(ncol, nlev)`` and
-        ``(ncol, nlev+1)`` respectively.
+        Full ``(ncol, nlev)`` / half ``(ncol, nlev+1)`` pressures [Pa].
     u, v : jax.Array, shape (ncol, nlev)
-        Environmental wind components [m/s].  Used by the Gregory et
-        al. 1997 CMT closure when ``config.enable_cmt = True``.
+        Winds [m/s] for ``momtran``.
     conv_prog_profile : jax.Array, shape (ncol, nlev)
-        Convection prognostic carry (PR-0 schema).  ZM uses only the
-        surface-adjacent slot ``[:, -1]`` to remember the previous
-        cloud-base mass flux ``M_b`` for implicit-Euler relaxation
-        toward the diagnosed equilibrium value; aloft slots are
-        unused (zeros in / zeros out).
+        Not read (CAM6 ZM is diagnostic); see the module docstring.
     dt : float
-        Time step [s].
+        Physics time step [s] (the oracle's ``ztodt``).
     config : ZhangMcFarlaneConfig
-        Scheme tunables — see :class:`ZhangMcFarlaneConfig`.
-
-    Returns
-    -------
-    out : ConvectionOutput
-        Tendencies on environment T, q_v, q_c plus the CAPE diagnostic
-        and (when CMT is enabled) du/dt, dv/dt.
-    conv_prog_profile_new : jax.Array, shape (ncol, nlev)
-        Updated carry with the relaxed ``M_b_new`` packed at
-        ``[:, -1]``; aloft entries are zero.
+    land_frac, cld_frac, pblh : optional
+        Column land fraction ``(ncol,)``, total cloud fraction
+        ``(ncol, nlev)`` and PBL height ``(ncol,)`` [m]; see the module
+        docstring for the defaults when absent.
+    pref_edge : optional
+        Reference interface pressures ``(nlev+1,)`` [Pa]; CAM's
+        40 hPa convection cap is fixed from these once.  ``None`` -> the cap
+        follows each column's own interfaces (see ``_zm_cam6.zm_convr``).
     """
     ncol, nlev = T.shape
+    dtype = T.dtype
+    q_v, p_full, p_half, u, v = (jnp.asarray(a, dtype) for a in (q_v, p_full, p_half, u, v))
+    cp = constants.c_pd
+    # CAM's physics_update floors Q at qmin before zm_conv_tend runs (qneg3);
+    # the host hands exact zeros, on which the Fortran itself would NaN.
+    q_v = jnp.maximum(q_v, Q_MIN_VAPOR)
 
-    # -- Column geometry, moist adiabat, CAPE --------------------------------
-    # Use virtual-T moist hydrostatic geometry (clean_physics iter-2 #2).
-    dz, rho, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
-    T_base = T[:, -1]
-    q_base = q_v[:, -1]
-    p_base = p_full[:, -1]
+    dz, _, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
+    zf = jnp.concatenate(
+        [jnp.cumsum(dz[:, ::-1], axis=1)[:, ::-1], jnp.zeros((ncol, 1), dtype)], axis=1)
+    lf = (jnp.zeros((ncol,), dtype) if land_frac is None
+          else jnp.asarray(land_frac, dtype).reshape(ncol))
+    cf = (jnp.zeros_like(T) if cld_frac is None
+          else jnp.asarray(cld_frac, dtype).reshape(ncol, nlev))
 
-    # ZM uses the CAPE of a DILUTE entraining plume (Raymond-Blyth 1992;
-    # ``buoyan_dilute``/``parcel_dilute`` in zm_conv.F90), NOT an undilute
-    # moist adiabat.  The launch parcel ascends entraining environmental
-    # air at fractional rate ``dmpdz`` [1/m]; CAPE is the buoyancy integral
-    # of that DILUTE parcel.  Entraining dry air reduces buoyancy and CAPE
-    # by a factor ~3 in a tropical sounding — the single most important ZM
-    # fidelity property (without it ZM over-fires in marginal columns).
-    # The dilute CAPE's quantitative agreement with the compiled E3SM/CAM
-    # Fortran oracle was checked offline against a local, untracked harness;
-    # CI pins only the qualitative bounds (see test_zm_dilute_parcel).
-    if config.use_dilute_cape:
-        dparcel = dilute_parcel_cape(
-            T, q_v, p_full, p_half, z,
-            dmpdz=config.dmpdz,
-            tiedke_add=config.tiedke_add,
-            tp_fac=config.tp_fac,
-            tpert=config.parcel_tpert,
-            pbl_top_pa=config.pbl_top_pa,
-        )
-        cape = dparcel.cape
-        # The dilute parcel temperature is the physically-correct cloud
-        # model temperature; keep it for diagnostics / future closure work.
-        T_moist = dparcel.T_parcel
-    else:
-        # Legacy undilute moist-adiabat CAPE (use_dilute_cape=False).
-        T_moist, cape = parcel_profile_and_cape(T, p_full, p_half, q_v=q_v)
+    conv = zm_convr(
+        T, q_v, p_full, p_half, z, zf, lf, dt,
+        pblh=None if pblh is None else jnp.asarray(pblh, dtype).reshape(ncol),
+        tpert=config.parcel_tpert, capelmt=config.capelmt, tau=config.tau,
+        num_cin=int(config.num_cin), dmpdz=config.dmpdz,
+        tiedke_add=config.tiedke_add, lwmax=LWMAX, c0_lnd=config.c0_lnd,
+        c0_ocn=config.c0_ocn, alfa=config.alfa, limcnv_p_pa=config.limcnv_p_pa,
+        pbl_top_pa=config.pbl_top_pa, pref_edge=pref_edge)
 
-    # -- Smooth CAPE trigger and cloud-base mass-flux closure ---------------
-    cape_weight = cape_trigger(
-        cape, config.cape_threshold, config.cape_sharpness,
-    )
-    # Generic first-order CAPE-relaxation SURROGATE (NOT a published
-    # closure).  This is *not* the Zhang-McFarlane (1995) closure, which
-    # consumes CAPE at a rate set by a cloud-work-function / quasi-equilibrium
-    # sensitivity, and it is *not* a Kain (2004) formula (Kain 2004 has no
-    # closed-form M_b — it iterates M_b to remove CAPE over TIMEC).  Here the
-    # ``g / rho_BL`` factor is a dimensional stand-in for that CAPE-consumption
-    # sensitivity, giving a kg/m^2/s mass flux:
-    #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
-    # The earlier formula ``(CAPE - threshold)+ / tau`` had units
-    # ``m^2/s^3`` — wrong by a factor of ``rho_BL/g``.  At sea level
-    # this made M_b ~8x larger than the dimensionally-correct value;
-    # the runaway was masked operationally only by the ``M_b_max`` cap,
-    # but the gradient w.r.t. CAPE was off by the same factor and ``M_b``
-    # did not scale with the surface air density at all.
-    # Dry boundary-layer density via the shared ideal-gas helper (same
-    # 1 K temperature clip as the previous inline form).
-    rho_BL = compute_rho(T[:, -1], p_full[:, -1])
-    M_b_eq = (
-        cape_weight
-        * rho_BL
-        * smooth_positive_part(
-            cape - config.cape_threshold, config.cape_sharpness,
-        )
-        / (constants.g * config.tau_cape)
-    )
-    # Implicit-Euler relaxation toward equilibrium — stable for any
-    # ratio ``r = dt / max(tau_cape, 1e-30)`` (the max() floors tau away
-    # from 0; see the final sentence):
-    #     M_b_new = (M_b_old + r * M_b_eq) / (1 + r).
-    # For ``dt >> tau`` this approaches ``M_b_eq`` (full
-    # equilibration); for ``dt << tau`` it approaches a small
-    # fractional adjustment ``r * (M_b_eq - M_b_old)``.  An
-    # earlier form ``dt / max(tau, dt)`` clamped the ratio to ≤ 1 —
-    # under-stepping by up to ``r/(r+1) - 1/2 ≈ 41%`` at ``r=10`` —
-    # which is *not* what the comment claims (audit Codex finding:
-    # "the documented implicit-Euler factor is not what is
-    # implemented").  Protect against ``tau == 0`` only.
-    M_b_old = conv_prog_profile[:, -1]
-    dt_over_tau = dt / jnp.maximum(config.tau_cape, 1e-30)
-    M_b = (M_b_old + dt_over_tau * M_b_eq) / (1.0 + dt_over_tau)
-    # Bound M_b to a fraction of the literature peak tropical value
-    # (config.M_b_max, default 0.05 kg/m²/s ~ half the ~0.1 peak).
-    # Without this cap a column with very large
-    # CAPE drives M_b unboundedly and emits column heating that breaks
-    # the next dynamics step on the lat-lon FV pole-cell CFL.
-    M_b = jnp.clip(M_b, 0.0, config.M_b_max)
+    # zm_conv_tend: physics_update before zm_conv_evap (zm_conv_intr.F90:686).
+    T1 = T + conv.heat / cp * dt
+    q1 = jnp.maximum(q_v + conv.dqdt * dt, Q_MIN_VAPOR)   # qneg3 after the update, too
+    pdel = p_half[:, 1:] - p_half[:, :-1]
+    evap = zm_conv_evap(T1, p_full, pdel, q1, conv.rprd, cf, dt, conv.prec, ke=config.ke)
 
-    # -- Plume launch / cloud-base index ------------------------------------
-    # Surface parcel perturbed slightly per Zhang & McFarlane 1995 §3a;
-    # this avoids zero-perturbation degeneracies and gives a smooth
-    # cloud-base diagnosis.
-    T_parcel = T_base + config.parcel_dT
-    q_parcel = q_base + config.parcel_dq
-    lcl = compute_lcl(T_parcel, q_parcel, p_base, p_full)
-    k_base_smooth = lcl.k_lcl_smooth
+    dT_dt = (conv.heat + evap.tend_s) / cp
+    dq_v_dt = conv.dqdt + evap.tend_q
 
-    # Constant entrainment / detrainment profiles in the surface-last
-    # convention (level index nlev-1 = surface, 0 = top).  Tunable per
-    # scheme but identical across levels in the standard Zhang-McFarlane
-    # bulk plume.
-    eps_profile = jnp.full_like(T, config.epsilon_0)
-    dlt_profile = jnp.full_like(T, config.delta_0)
-
-    plume = entraining_detraining_plume(
-        T, q_v, p_full, p_half, z,
-        T_parcel, q_parcel, k_base_smooth,
-        eps_profile, dlt_profile, M_b,
-        buoyancy_death_memory=config.buoyancy_death_memory,
-    )
-
-    # Cap plume.M_u once at the source so every downstream use (kernel
-    # tendencies, CMT, q_c sources) sees the same bounded value.  The
-    # kernel's internal cap is now redundant but kept for safety.
-    plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
-    plume = plume._replace(M_u=plume_M_u_capped)
-
-    # -- Environmental tendencies via the shared mass-flux kernel ----------
-    # Plume splits vapor (``plume.q_u`` — saturation-clipped per level)
-    # and cloud water (``plume.q_c_u`` — accumulated condensation)
-    # explicitly, so the kernel's ``q_c_conv_dt`` is now the correct
-    # detrainment of plume cloud water and we use it directly.
-    dT_dt, dq_v_dt, dq_c_conv_dt = apply_mass_flux_kernel(
-        T, q_v, p_full,
-        plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
-        z, rho, config.delta_0, M_u_max=config.M_b_max,
-        # Selectable vertical solve (config default "advective" = shipped
-        # behaviour, byte-identical).  ``p_half``/``dt`` are only consumed by
-        # the implicit_flux branch; the kernel raises on an unknown value
-        # (dispatch-hardening, static Python str).
-        subsidence_solve=config.subsidence_solve,
-        p_half=p_half, dt=dt, theta_implicit=config.theta_implicit,
-    )
-    dT_dt = release_detrained_condensate_latent(
-        dT_dt, dq_c_conv_dt, config.subsidence_solve)
-
-    # -- Convective momentum transport --------------------------------------
     if config.enable_cmt:
-        du_dt_conv, dv_dt_conv = cmt_gregory_1997(
-            u, v, plume.M_u, None,
-            p_full, p_half, rho,
-            c_u=config.cmt_c_u, c_d=config.cmt_c_d,
-        )
+        mom = momtran(u, v, conv.mu, conv.md, conv.du, conv.eu, conv.ed, conv.dp,
+                      conv.jt, conv.maxg, conv.msg, dt,
+                      momcu=config.momcu, momcd=config.momcd)
+        dT_dt = dT_dt + mom.seten / cp
+        du_dt_conv, dv_dt_conv = mom.dudt, mom.dvdt
     else:
-        du_dt_conv = None
-        dv_dt_conv = None
-
-    # -- Convective mask (column-mean diagnostic) ---------------------------
-    convective_mask = cape_weight  # already a smooth (ncol,) indicator
-
-    # In-updraft precipitation: shared rain-split (same knob + mass proof as
-    # Tiedtke/Bechtold). precip_efficiency=0 (default) => no split, byte-identical.
-    dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
-        dq_c_conv_dt, config.precip_efficiency)
+        du_dt_conv = dv_dt_conv = None
 
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        dq_c_conv_dt=dq_c_conv_dt,
-        cape=cape,
-        convective_mask=convective_mask,
+        dq_c_conv_dt=conv.dlf,
+        cape=conv.cape,
+        convective_mask=conv.ideep.astype(dtype),
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
-        dq_r_conv_dt=dq_r_conv_dt,
+        dq_r_conv_dt=evap.ntprprd,
+        # pbuf fields clubb_intr's deepcu reads (clubb_intr.F90:2501-2504):
+        # CMFMC = zm_convr's net mass flux mc (mu + md, mb-scaled) scattered
+        # to interface k = the top face of layer k, bottom face 0, hPa/s ->
+        # kg/m^2/s (zm_conv.F90:1189, zm_conv_intr.F90:661); ICWMRDP = the
+        # in-cloud updraft condensate ql, zeroed for every column before the
+        # gather (zm_conv.F90:538) and rewritten in gathered ones (:1193).
+        mass_flux_up=jnp.concatenate(
+            [conv.mc * 100.0 / constants.g, jnp.zeros((ncol, 1), dtype)], axis=1),
+        icwmr=jnp.where(conv.ideep[:, None], conv.ql, 0.0),
     )
-
-    # Pack the relaxed M_b back into the surface-adjacent carry slot
-    # for downstream visibility (training diagnostics, conservation
-    # checks).  Aloft slots are zero-filled — the orchestrator schema
-    # is uniform across all schemes.
-    conv_prog_profile_new = jnp.zeros_like(conv_prog_profile).at[:, -1].set(M_b)
-
+    mb_kg = conv.mb * 100.0 / constants.g
+    conv_prog_profile_new = jnp.zeros_like(conv_prog_profile).at[:, -1].set(mb_kg)
     return out, conv_prog_profile_new

@@ -478,3 +478,59 @@ def assert_fd_gap_at_roundoff_floor(name, f, primals, margin, eps=1.0e-4,
         f"<v,J^T w> = {ad:.6e}.  MEASURED gap/floor = "
         f"{gap / max(floor, 1e-300):.3f}")
     return gap, floor
+# ---------------------------------------------------------------------
+# face-batched arm vs certified loop arm (face-batching ladder)
+# ---------------------------------------------------------------------
+
+# Reassociation-class bound for batched-vs-loop: both arms run the SAME
+# kernels on the same device, so the only difference is XLA reassociating
+# across the added batch axis (a few ulp).  Copied from the cgrid gate
+# file's `_assert_batched_matches_loop` (test_fv3_cgrid_phase_3d.py),
+# which keeps its private copy -- converging it onto this one would touch
+# a certified gate file for no behavioural change, exactly the scope this
+# module's docstring declines.  New batched gates use THIS one.
+BATCH_RTOL, BATCH_ATOL = 1e-13, 1e-12
+
+
+def assert_batched_matches_loop(got_b, got_l, label, rtol=BATCH_RTOL,
+                                atol=BATCH_ATOL):
+    """Face-batched arm == loop arm, key by key, recursing into nested
+    containers (the NH D-grid pressure phase returns a nested carry).
+
+    BIG_NUMBER sentinel cells (1e30/1e25 fills in halo scratch) are
+    GARBAGE by contract: they are compared only for "both are fills",
+    with a became-real tripwire; real cells at the reassociation bound;
+    ``equal_nan`` keeps the structural halo NaNs comparable by POSITION
+    (same masking discipline as :func:`cmp_fields`).
+    """
+    if isinstance(got_l, dict):
+        assert isinstance(got_b, dict), (
+            f"{label}: batched arm returned {type(got_b).__name__}, "
+            f"loop arm a dict")
+        assert set(got_b) == set(got_l), (
+            f"{label}: batched arm returned keys {sorted(got_b)}, loop "
+            f"arm {sorted(got_l)}")
+        for name in got_l:
+            assert_batched_matches_loop(got_b[name], got_l[name],
+                                        f"{label}.{name}", rtol, atol)
+        return
+    if isinstance(got_l, (list, tuple)):
+        same_kind = isinstance(got_b, (list, tuple))
+        assert same_kind and len(got_b) == len(got_l), (
+            f"{label}: container mismatch ({type(got_b).__name__} of "
+            f"{len(got_b) if hasattr(got_b, '__len__') else '?'} vs "
+            f"{len(got_l)})")
+        for i, (bb, ll) in enumerate(zip(got_b, got_l)):
+            assert_batched_matches_loop(bb, ll, f"{label}[{i}]", rtol,
+                                        atol)
+        return
+    b, ref = np.asarray(got_b), np.asarray(got_l)
+    assert b.shape == ref.shape, (label, b.shape, ref.shape)
+    fill = np.abs(ref) >= 1.0e20
+    if fill.any():
+        assert (np.abs(b)[fill] >= 1.0e20).all(), (
+            f"{label}: a sentinel cell became a real value")
+    keep = ~fill
+    np.testing.assert_allclose(
+        b[keep], ref[keep], rtol=rtol, atol=atol, equal_nan=True,
+        err_msg=f"{label}: batched arm != loop arm")

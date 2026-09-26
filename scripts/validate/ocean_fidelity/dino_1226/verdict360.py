@@ -91,6 +91,7 @@ Usage
 import argparse
 import glob
 import itertools
+import json
 import os
 import shutil
 import subprocess
@@ -106,6 +107,7 @@ import acc_thermal_wind as A           # noqa: E402  mesh, masks, J0/J1
 import acceptance_gate_90d as G        # noqa: E402  the five gate metrics
 import acc_metric_reconciliation as R   # noqa: E402  NEMO_D90_ACC_SV, imported not pasted
 import floor90_ensemble as F           # noqa: E402  spread(), band reductions
+import kamm_twin_90d as _twin         # noqa: E402  snapshot_storage_dtypes
 import perturb_nemo_tn_90d as P        # noqa: E402  the committed NEMO kick
 
 # D._avg is the reduction the committed southern-basin numbers were produced
@@ -510,20 +512,68 @@ def two_sided_floor(rows, key, day, stat=1):
     return float(np.sqrt(ls ** 2 + ns ** 2)), ls, ns
 
 
-def fp32_quantum(st, wet):
+def fp32_quantum(st, wet, fp32_fields=("T", "S", "u")):
     """The metric change from round-tripping a state through float32.
 
-    legoESM snapshots are stored float32 and NEMO restarts are read float64, so
-    the two sides' spreads are measured at DIFFERENT precision.  Three of the
-    five recorded 90-day legoESM floors sit at or below this quantum -- they are
-    storage, not physics.  Measured on a real state rather than argued from
-    machine epsilon, because the metrics are integrals whose conditioning is
-    not the scalar eps (physics review B3, code review 8).
+    legoESM snapshots were stored float32 and NEMO restarts are read float64,
+    so the two sides' spreads were measured at DIFFERENT precision.  Three of
+    the five recorded 90-day legoESM floors sit at or below this quantum --
+    they are storage, not physics.  Measured on a real state rather than
+    argued from machine epsilon, because the metrics are integrals whose
+    conditioning is not the scalar eps (physics review B3, code review 8).
+
+    ``fp32_fields`` is the set of 3-D fields the CANDIDATE artifacts actually
+    stored in float32, read off their per-field ``storage_dtypes`` stamp (see
+    :func:`storage_fp32_fields`).  It defaults to all three, so an artifact
+    written before ``kamm_twin_90d --fp64-3d`` existed is scored exactly as
+    before; an fp64-stored field contributes no quantum, because there is none
+    to contribute, and passing an empty set gives an all-zero quantum -- no
+    metric is then downgraded for a storage limit the artifact does not have.
     """
+    fp32_fields = tuple(fp32_fields)
+    if not fp32_fields:
+        return {k: 0.0 for k in KEYS}
     lo = {k: (np.asarray(v, dtype=np.float32).astype(np.float64)
-              if k in ("T", "S", "u") else v) for k, v in st.items()}
+              if k in fp32_fields else v) for k, v in st.items()}
     a, b = all_metrics(st, wet), all_metrics(lo, wet)
     return {k: abs(a[k] - b[k]) for k in KEYS}
+
+
+def storage_fp32_fields(npzs):
+    """Which of T/S/u the legoESM members actually stored in float32.
+
+    EXTEND-ONLY.  An artifact with no ``storage_dtypes`` stamp predates the
+    per-field stamp and is treated as all-float32, which is what it was, so no
+    recorded artifact's score moves.  The members must AGREE: a mixed-precision
+    ensemble would have two different storage quanta under one floor, and the
+    floor is the denominator every verdict divides by.
+
+    ONLY the three scored 3-D fields are compared, never the whole stamp map.
+    Comparing the map falsely aborted a legitimate ensemble two ways (code
+    review): a recorded member resolves to a nine-entry legacy map while a new
+    single-precision member writes a ten-entry one, and two brand-new members
+    disagree if one member's reduction succeeded and the other's did not --
+    neither of which is a difference in storage precision.
+    """
+    seen = set()
+    for path in npzs:
+        d = np.load(path, allow_pickle=False)
+        st = _twin.snapshot_storage_dtypes(d)
+        # the gate reduces T3d/S3d/u3d; eta/v never enter a scored metric
+        # SAFE DIRECTION: a field counts as float32 unless the stamp says
+        # exactly "float64".  An unstamped artifact, and a stamp that says
+        # "absent" (a run that wrote no 3-D block at all), both keep today's
+        # quantum rather than being granted a waiver -- a wrongly-granted
+        # waiver removes a downgrade that exists, which is the failure that
+        # manufactures a false measurement.
+        seen.add(tuple(f for f, k in (("T", "T3d"), ("S", "S3d"), ("u", "u3d"))
+                       if st.get(k, "float32") != "float64"))
+    if len(seen) != 1:
+        raise SystemExit(
+            f"legoESM members stored their 3-D snapshots at different "
+            f"precisions {sorted(seen)} -- one floor cannot span two storage "
+            f"quanta")
+    return seen.pop()
 
 
 def permutation_p(rows, key, day):
@@ -656,7 +706,9 @@ def controls(out_dir):
                 f"configuration it ran; re-run the member.")
         stamps[member_name(i)] = (str(d["nemo_ladder_mode"]),
                                   float(d["seasonal_t0_seconds"]),
-                                  str(d["control_dtype"]))
+                                  str(d["control_dtype"]),
+                                  json.dumps(_twin.snapshot_storage_dtypes(d),
+                                             sort_keys=True))
     if len(set(shas.values())) != 1 or None in shas.values():
         raise SystemExit(f"legoESM members sit at different source SHAs: {shas}")
     print(f"[control] all legoESM members at one HEAD: {set(shas.values()).pop()}")
@@ -672,9 +724,9 @@ def controls(out_dir):
             "legoESM members do not share (vertical ladder, seasonal clock, "
             f"precision): {stamps}. A configuration difference between members "
             "inflates the floor the verdict divides by.")
-    lad, t0, dt = stamps["m0_control"]
+    lad, t0, dt, sto = stamps["m0_control"]
     print(f"[control] all legoESM members share ladder={lad!r} "
-          f"seasonal_t0={t0:.0f}s dtype={dt}")
+          f"seasonal_t0={t0:.0f}s build-dtype={dt} storage={sto}")
     for i in range(N_MEM):
         d = nemo_dir(i)
         ok, why = nemo_completed(d, i)
@@ -783,8 +835,19 @@ def separation_control(rows, quantum_by_day):
     earlier horizons two of four suffice and the tie count is PRINTED, per
     horizon, so a reader sees which numbers are dtype-limited.
     """
+    fp64_stored = not any(quantum_by_day[d][k]
+                          for d in HORIZONS for k in KEYS)
     print("\n--- SEPARATION / TIES (distinct members out of "
-          f"{N_MEM}; ties early are the float32 storage quantum, not a defect) ---")
+          f"{N_MEM}; " + ("ties are NOT a storage quantum here -- the "
+                          "snapshots are float64"
+                          if fp64_stored else
+                          "ties early are the float32 storage quantum, not a "
+                          "defect") + ") ---")
+    if fp64_stored:
+        print("[control] the legoESM members stored their 3-D snapshots at "
+              "float64, so there is no storage quantum to downgrade a metric "
+              "for; every `q` flag below is off by measurement, not by "
+              "assumption, and an early tie must separate like any other")
     print(f"{'metric':<38}" + "".join(f"{'d' + str(d) + ' L/N':>12}" for d in HORIZONS))
     for k in KEYS:
         cells = []
@@ -792,7 +855,12 @@ def separation_control(rows, quantum_by_day):
             dl = tie_report(rows, "lego", k, day)[0]
             dn = tie_report(rows, "nemo", k, day)[0]
             cells.append(f"{str(dl) + '/' + str(dn):>12}")
-            need = N_MEM if day == N_DAYS else 2
+            # The relaxed early-horizon rule exists ONLY because a float32
+            # max-type metric can tie at the storage quantum while the
+            # trajectories differ.  Remove the quantum and that excuse is
+            # gone, so every horizon requires full separation (physics
+            # review).
+            need = N_MEM if (day == N_DAYS or fp64_stored) else 2
             for side, dd in (("lego", dl), ("nemo", dn)):
                 if dd < need:
                     raise SystemExit(
@@ -938,14 +1006,15 @@ def unsaturated_table(table, day):
            "two-sided floor is legoESM's own dispersion.")
 
 
-def spread_curves(rows, quantum):
+def spread_curves(rows, quantum, fp32_fields=("T", "S", "u")):
     print("\n--- SPREAD(t): single-run ensemble spread by day ---")
     print("    std (primary) on the first line of each metric, max-pairwise "
           "range on the second.")
     print("    At n=4 the range is ~2x the std BY CONSTRUCTION; they are never "
           "compared across.")
-    print("    legoESM states are stored float32, NEMO states are read "
-          "float64 -- the quantum column is")
+    print(f"    legoESM 3-D fields stored float32: "
+          f"{list(fp32_fields) or 'none -- float64 snapshots'}; NEMO states "
+          f"are read float64 -- the quantum column is")
     print(f"    the metric's own float32 round-trip MEASURED AT DAY {N_DAYS} "
           f"-- ONE number labelling all")
     print("    columns, shown for scale only; the per-horizon quantum used by "
@@ -1204,13 +1273,16 @@ def window_table(rows, unsat):
               f"{_label(gap, fl_sd):>8}{_flags(k, set(), unsat, one):>5}")
 
 
-def growth_control(rows, out_dir):
+def growth_control(rows, out_dir, fp32_fields=("T", "S", "u")):
     """Did the kick reach the integrated state?  Read as max|dT| between each
     perturbed member and its own side's control, on the SAME side."""
     print("\n--- GROWTH CONTROL: max|dT| of each perturbed member vs its own "
           "side's control [K] ---")
     print("    (legoESM snapshots are float32: quantum ~2e-06 K on a ~20 K "
-          "field, so an early 0.0 is storage, not physics)")
+          "field, so an early 0.0 is storage, not physics)"
+          if "T" in fp32_fields else
+          "    (legoESM snapshots are float64: an early 0.0 here is NOT the "
+          "storage quantum and needs a physical explanation)")
     days = (10, 90, 180, 270, 360)
     from rebuild_nemo_restart import rebuild
     for side in ("lego", "nemo"):
@@ -1275,12 +1347,21 @@ def main(argv=None):
     # scored horizon rather than measured once at day 360 and stamped on all of
     # them: at day 90 three of the five gate metrics are dtype-dominated and a
     # day-360 quantum would not have flagged them (round-2 review).
-    quantum_by_day = {d: fp32_quantum(nemo_state(nemo_dir(0), d), A.tmask)
+    # WHICH storage quantum applies is a property of the CANDIDATE artifacts,
+    # not of this script's history: an ensemble run with --fp64-3d has none,
+    # and downgrading its metrics for one would manufacture a false
+    # UNMEASURABLE.  Read off the members' own per-field stamp; unstamped
+    # (every recorded artifact) resolves to all-float32, unchanged.
+    _fp32 = storage_fp32_fields([lego_npz(args.dir, i) for i in range(N_MEM)])
+    print(f"[control] legoESM 3-D fields stored in float32: "
+          f"{list(_fp32) or 'none (float64 snapshots)'}")
+    quantum_by_day = {d: fp32_quantum(nemo_state(nemo_dir(0), d), A.tmask,
+                                      _fp32)
                       for d in HORIZONS}
     thin = separation_control(rows, quantum_by_day)
     unsat = saturation_table(rows)
-    growth_control(rows, args.dir)
-    spread_curves(rows, quantum_by_day[N_DAYS])
+    growth_control(rows, args.dir, _fp32)
+    spread_curves(rows, quantum_by_day[N_DAYS], _fp32)
     frac, neg_ok, med = empirical_rule_controls(rows)
     verdict_table(rows, thin, unsat)
     window_table(rows, unsat)
@@ -1294,9 +1375,10 @@ def main(argv=None):
           f"{100 * positive_control_null(K_WELCH):.1f}%")
     print(f"  (the median is the stable statistic; the fraction is noisy at "
           f"this sample size and the comparisons are correlated),")
-    print(f"  and the two-lag self-mismatch negative control "
-          f"{'rejects every transport as required' if neg_ok else 'FAILS -- '
-          'the rule accepts a known-different state at BOTH lags somewhere'}.")
+    neg_msg = ('rejects every transport as required' if neg_ok else
+               'FAILS -- the rule accepts a known-different state at BOTH '
+               'lags somewhere')
+    print(f"  and the two-lag self-mismatch negative control {neg_msg}.")
     print("\nEvery number above is a measurement; the pre-registration "
           "(PREREG_verdict360.md) says which ones were predicted, and the "
           "result commit carries its corrections.")

@@ -11,6 +11,7 @@ from legoesm.parallel.reductions import (
     batch_allreduce_mpi,
     batch_psum_spmd,
     is_multi_process,
+    spmd_reduce_axis,
 )
 
 
@@ -38,25 +39,15 @@ def _global_sum_pair(a: jnp.ndarray, b: jnp.ndarray) -> tuple[jnp.ndarray, jnp.n
     cube-sharded).  ``psum`` is self-transposing ⇒ AD-safe.  Inert for serial /
     MPI / cube.
     """
-    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
-    if get_halo_backend() == "spmd":
-        mesh = get_spmd_mesh()
-        if mesh is None:
-            raise RuntimeError(
-                "_global_sum_pair: halo backend is 'spmd' but no SPMD mesh is "
-                "set; arm it via activate_latlon_spmd_halo(mesh).")
-        if "lat" in tuple(mesh.axis_names):
-            # ONE packed psum for the pair instead of two separate psums
-            # (M4 quick win: route through the canonical batched helper,
-            # the same message-aggregation lever as the MPI leg below and
-            # barotropic_implicit_latlon_cgrid's mass-fix reduction).
-            # Packing is BIT-identical: the per-element reduction order
-            # across the "lat" axis is unchanged by concatenation — gated
-            # by tests/parallel/test_latlon_spmd_fused_halo.py
-            # (test_global_sum_pair_spmd_batched_*).  psum stays
-            # self-transposing ⇒ AD-safe.
-            a_g, b_g = batch_psum_spmd([a, b], "lat")
-            return a_g, b_g
+    # Ocean SPMD lanes (lat-lon "lat" bands / Voronoi "device" blocks) via the
+    # canonical gate; ONE packed psum for the pair (bit-identical to two: the
+    # per-element reduction order along the axis is unchanged by packing —
+    # tests/parallel/test_latlon_spmd_fused_halo.py).  Cube-atm SPMD meshes
+    # carry no ocean axis and fall through to the MPI / serial gates below.
+    _ax = spmd_reduce_axis()
+    if _ax is not None:
+        a_g, b_g = batch_psum_spmd([a, b], _ax)
+        return a_g, b_g
     if is_multi_process():
         a_g, b_g = batch_allreduce_mpi([a, b], op="sum")
         return a_g, b_g
@@ -96,11 +87,13 @@ def clamp_and_redistribute(
         above_mask = above_floor.astype(eta_new.dtype)
         local_above_area = jnp.sum(area * above_mask * _ow)
         # One allreduce instead of two (hot in barotropic substeps).
-        if force_global:
+        if force_global and spmd_reduce_axis() is None:
             mass_added, above_area = batch_allreduce_mpi(
                 [local_mass_added, local_above_area], op="sum",
             )
         else:
+            # force_global on the Voronoi SPMD lane takes _global_sum_pair's
+            # psum branch (no mpi4jax inside a shard_map program).
             mass_added, above_area = _global_sum_pair(
                 local_mass_added, local_above_area,
             )

@@ -35,7 +35,10 @@ def main() -> int:
     p.add_argument("--mpas", required=True)
     p.add_argument("--fesom", required=True)
     p.add_argument("--nemo-gridt", required=True)
-    p.add_argument("--nemo-month", type=int, default=1)
+    p.add_argument("--nemo-month", type=int, default=None,
+                   help="climatological calendar month of the monthly file; "
+                        "omit to use --nemo-time-idx (GATEWAY 5-day means)")
+    p.add_argument("--nemo-time-idx", type=int, default=-1)
     p.add_argument("--res-deg", type=float, default=1.0)
     p.add_argument("--out-dir", required=True)
     a = p.parse_args()
@@ -48,7 +51,7 @@ def main() -> int:
     srcs = {"tripole": _load_legoesm(a.tripole),
             "MPAS": _load_legoesm(a.mpas),
             "FESOM2": _load_legoesm(a.fesom),
-            "NEMO": _load_nemo(a.nemo_gridt, -1, month=a.nemo_month)}
+            "NEMO": _load_nemo(a.nemo_gridt, a.nemo_time_idx, month=a.nemo_month)}
 
     def rg(S, field, mask=None):
         return regrid_curv_to_latlon(np.asarray(field), S["lat"], S["lon"],
@@ -130,7 +133,8 @@ def main() -> int:
         a4.legend(fontsize=8)
         a4.grid(alpha=0.3)
         fig.suptitle(
-            f"{name} [{unit}] — tripole / MPAS / FESOM2 / NEMO month {a.nemo_month} "
+            f"{name} [{unit}] — tripole / MPAS / FESOM2 / NEMO "
+            f"{'month ' + str(a.nemo_month) if a.nemo_month else 'rec ' + str(a.nemo_time_idx)} "
             "(cells resolved on all four; FESOM2 runs its published protocol — "
             "three-model comparison, not a controlled pair)", fontsize=13)
         fig.tight_layout()

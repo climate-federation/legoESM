@@ -589,3 +589,203 @@ class TestCreateTripoleGridFoldDefault:
                 _warnings.simplefilter("error")  # any warning becomes an error
                 geom = create_tripole_grid(path, fold_convention="n_lon-1-i")
         assert geom is not None
+
+
+class TestPadCoversEveryGeometryField:
+    """The pad must grow EVERY array field per its stagger — the tripwire.
+
+    ``cos_lat_v`` was added to the geometry after the pad was written and the
+    pad missed it; nothing failed until the eORCA025 full-card 4-GPU run,
+    where the SPMD band slicer handed the north band one fewer v-face row
+    than the interior bands and the per-field band stack died with "All input
+    arrays must have the same shape" (job 9471878).  eORCA1's n_lat divides
+    evenly, so the pad never fires there and the miss was invisible.  These
+    tests are generic over ``_fields`` so the NEXT field added to the
+    geometry cannot repeat this.
+    """
+
+    def _padded_pair(self, n_lat=15, n_lon=24, n_pad=5):
+        from legoesm.grids.tripole import (
+            create_synthetic_tripole, pad_tripole_grid_south,
+        )
+        g = create_synthetic_tripole(n_lat=n_lat, n_lon=n_lon)
+        return g, pad_tripole_grid_south(g, n_pad), n_lat, n_pad
+
+    def test_every_array_field_grows_with_its_stagger(self):
+        """Each axis that measured n_lat (or n_lat+1) must grow by n_pad;
+        every other axis is unchanged.  A field the pad forgot keeps its old
+        shape and fails here by construction."""
+        g, gp, n_lat, n_pad = self._padded_pair()
+        checked = 0
+        for name in g._fields:
+            a = getattr(g, name)
+            if not hasattr(a, "shape") or getattr(a, "ndim", 0) == 0:
+                continue                      # scalars / fold descriptor
+            expect = tuple(
+                d + n_pad if d in (n_lat, n_lat + 1) else d
+                for d in a.shape)
+            got = getattr(gp, name)
+            assert got is not None, f"{name} became None under the pad"
+            assert tuple(got.shape) == expect, (
+                f"{name}: pad missed it — {tuple(a.shape)} -> "
+                f"{tuple(got.shape)}, expected {expect}")
+            checked += 1
+        assert checked >= 20                  # the audit actually ran
+
+    def test_cos_lat_v_wet_entries_bit_exact_and_new_entries_sane(self):
+        """Shape alone cannot catch a SHIFTED or recomputed profile (codex +
+        GLM both flagged it): the original v-face entries must survive the
+        pad bit-exact at offset n_pad, and the new land-row entries must be
+        finite and positive."""
+        import numpy as np
+        g, gp, n_lat, n_pad = self._padded_pair()
+        a = np.asarray(g.cos_lat_v)
+        b = np.asarray(gp.cos_lat_v)
+        np.testing.assert_array_equal(
+            b[n_pad:], a, err_msg="cos_lat_v wet entries not preserved")
+        assert bool(np.all(np.isfinite(b[:n_pad])))
+        assert bool(np.all(b[:n_pad] > 0.0))
+
+    def test_past_pole_extrapolation_warns_but_keeps_the_contract(self, capsys):
+        """A past-the-pole extrapolation (the synthetic full-sphere grid does
+        this legitimately) must WARN loudly, and the land-row contract —
+        finite, positive metrics — must still hold via the clamp.  A hard
+        error was tried first and rejected: it broke the full-sphere fixture
+        the existing pad tests rely on."""
+        import numpy as np
+        _, gp, n_lat, n_pad = self._padded_pair()   # 12-deg rows cross -90
+        out = capsys.readouterr().out
+        assert "crosses the pole" in out
+        c = np.asarray(gp.cos_lat_v)
+        assert bool(np.all(np.isfinite(c))) and bool(np.all(c > 0.0))
+
+    def test_padded_grid_band_stacks_are_uniform(self):
+        """The exact operation that crashed at 1/4 degree: slice the padded
+        grid into N bands and stack every array field across them."""
+        import numpy as np
+        from legoesm.ocean.dynamics.sharded_ocean_step import (
+            _geom_array_field_names, build_band_grids,
+        )
+        _, gp, n_lat, n_pad = self._padded_pair()   # 15 + 5 = 20
+        n_dev = 4                                   # 20 % 4 == 0
+        bands = build_band_grids(gp, n_dev)
+        for name in _geom_array_field_names(bands[0]):
+            shapes = {tuple(np.shape(getattr(b, name))) for b in bands}
+            assert len(shapes) == 1, (
+                f"{name}: ragged across bands {sorted(shapes)} — the "
+                f"eORCA025 stack crash")
+            np.stack([np.asarray(getattr(b, name)) for b in bands])
+
+    def test_seam_wall_rows_grows_and_new_rows_are_walled(self):
+        from legoesm.grids.tripole import (
+            create_synthetic_tripole, pad_tripole_grid_south,
+        )
+        import jax.numpy as jnp
+        import numpy as np
+        n_lat, n_pad = 15, 5
+        g = create_synthetic_tripole(n_lat=n_lat, n_lon=24)
+        seam = jnp.zeros((n_lat,)).at[3:7].set(1.0)
+        g = g._replace(seam_wall_rows=seam)
+        gp = pad_tripole_grid_south(g, n_pad)
+        got = np.asarray(gp.seam_wall_rows)
+        assert got.shape == (n_lat + n_pad,)
+        np.testing.assert_array_equal(got[n_pad:], np.asarray(seam))
+        assert bool(np.all(got[:n_pad] == 1.0)), "new land rows must be walled"
+
+
+# -------------------------------------------------------------------------
+# u-point metric alignment (the NEMO C-grid index convention)
+# -------------------------------------------------------------------------
+def _write_mesh_with_varying_u_metrics(path, n_lat=8, n_lon=16):
+    """Mesh whose e1u/e2u VARY ALONG A ROW, with a curved (unambiguous) fold.
+
+    The shared fixture above writes uniform metrics, under which a one-column
+    shift of e1u/e2u is exactly the identity -- so it cannot see this bug.
+    Varying them along i is what makes the alignment observable at all, and is
+    the situation on a real ORCA mesh north of ~20N.
+    """
+    ds = netcdf4.Dataset(path, "w")
+    ds.createDimension("y", n_lat)
+    ds.createDimension("x", n_lon)
+    i = np.arange(n_lon)
+    glamt = np.broadcast_to(
+        np.linspace(0.0, 360.0, n_lon, endpoint=False)[None, :],
+        (n_lat, n_lon)).astype(np.float64)
+    gphit = np.array(np.broadcast_to(
+        np.linspace(-80.0, 80.0, n_lat)[:, None], (n_lat, n_lon)),
+        dtype=np.float64)
+    gphit[-1, :] = 80.0 + 5.0 * np.cos(2.0 * np.pi * i / n_lon)
+    ones = np.ones((n_lat, n_lon), dtype=np.float64)
+    # distinct along-i profiles for e1u and e2u so a swap cannot pass either
+    e1u = 1.0e4 * (1.0 + 0.10 * i)[None, :] * ones
+    e2u = 1.0e4 * (1.0 + 0.37 * i)[None, :] * ones
+    for name, arr in (
+        ("glamt", glamt), ("gphit", gphit),
+        ("glamu", glamt), ("gphiu", gphit),
+        ("glamv", glamt), ("gphiv", gphit),
+        ("e1t", ones * 1.0e4), ("e2t", ones * 1.0e4),
+        ("e1u", e1u), ("e2u", e2u),
+        ("e1v", ones * 1.0e4), ("e2v", ones * 1.0e4),
+        ("tmask", ones), ("umask", ones), ("vmask", ones),
+    ):
+        v = ds.createVariable(name, "f8", ("y", "x"))
+        v[:] = arr
+    ds.close()
+    return e1u, e2u
+
+
+class TestUPointMetricAlignment:
+    """NEMO's u-point ``i`` is EAST of T-cell ``i``; ours is WEST of cell ``i``.
+
+    MEASURED on the real mesh, not taken from documentation: on the 1-degree
+    part of eORCA1 ``glamu - glamt = +0.5000`` deg.  So our face ``i`` carries
+    NEMO's ``e1u[i-1]`` and face 0 wraps to the LAST column.
+
+    These tests FAIL against the previous construction, which appended
+    ``e1u[:, 0:1]`` and so handed every face the metric of the face one column
+    EAST -- a bug that is invisible on a uniform mesh and worth several to
+    twenty percent on every zonal face north of 30N of a real ORCA grid.
+    """
+
+    def _grid(self, tmp):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        path = os.path.join(tmp, "mesh_varying.nc")
+        e1u, e2u = _write_mesh_with_varying_u_metrics(path)
+        return create_tripole_grid(path), e1u, e2u
+
+    def test_u_face_takes_the_metric_of_the_face_to_its_west(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            grid, e1u, e2u = self._grid(tmp)
+            dx_u = np.asarray(grid.dx_u, dtype=np.float64)
+            dy_u = np.asarray(grid.dy_u, dtype=np.float64)
+            # face i (i>=1) carries NEMO's u-point i-1
+            np.testing.assert_allclose(dx_u[:, 1:], e1u, rtol=1e-6)
+            np.testing.assert_allclose(dy_u[:, 1:], e2u, rtol=1e-6)
+
+    def test_wrap_column_is_the_last_not_the_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            grid, e1u, e2u = self._grid(tmp)
+            dx_u = np.asarray(grid.dx_u, dtype=np.float64)
+            dy_u = np.asarray(grid.dy_u, dtype=np.float64)
+            np.testing.assert_allclose(dx_u[:, 0], e1u[:, -1], rtol=1e-6)
+            np.testing.assert_allclose(dy_u[:, 0], e2u[:, -1], rtol=1e-6)
+            # and NOT the first column, which is what the old build used
+            assert not np.allclose(dy_u[:, 0], e2u[:, 0], rtol=1e-6)
+
+    def test_metric_and_coriolis_reference_the_same_cell_pair(self):
+        """f at a u-face averages cells i-1 and i, so the metric must too.
+
+        This is the internal consistency the bug broke: the Coriolis
+        construction already used the WEST convention while the metric used the
+        EAST one.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            grid, _e1u, e2u = self._grid(tmp)
+            f_T = np.asarray(grid.f_T, dtype=np.float64)
+            f_u = np.asarray(grid.f_u, dtype=np.float64)
+            expected = 0.5 * (np.roll(f_T, 1, axis=1) + f_T)
+            np.testing.assert_allclose(f_u[:, :f_T.shape[1]], expected,
+                                       rtol=1e-6, atol=1e-12)
+            dy_u = np.asarray(grid.dy_u, dtype=np.float64)
+            np.testing.assert_allclose(dy_u[:, 1:], e2u, rtol=1e-6)

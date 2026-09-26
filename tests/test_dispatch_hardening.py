@@ -135,6 +135,9 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # Distributed PCG preconditioner selection ("jacobi" | "poly"):
+        # an unknown name must raise, never fall back to Jacobi.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_mpas.py", "barotropic_implicit_mpas"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "create_model"),
         # kt whitelist: an unvalidated 6*kt^2 tile count must raise, not
         # silently replicate the global state per device (#1360).
@@ -227,6 +230,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "build_physics_pipeline"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_bulk_flux_dispatch"),
         ("packages/ice/legoesm/ice/sea_ice.py", "step_sea_ice"),
+        ("packages/ice/legoesm/ice/sea_ice.py", "_closing_rate_from_velocity"),
         ("packages/ice/legoesm/ice/shortwave.py", "compute_ice_sw"),
         ("packages/land/legoesm/land/carbon/carbon_cycle.py", "step_carbon"),
         # The multilayer-land bulk dispatch moved into the pluggable surface
@@ -307,6 +311,18 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py", "pv_flux_al81_partial_cell"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
+        # bbl_adv_option=2 (in-stage Campin-Goosse BBL) x tracer_time_integrator
+        # lane guard (S-42, docs/ocean/fidelity/nemo_branch_isomorphism_map.md):
+        # the in-stage BBL hook is built ONLY on the rk3_ws tracer lane, so a
+        # typo/mismatch on euler/ab2/rk3 used to resolve bbl_adv_option=2 and
+        # silently run NO boundary layer. Lock the guard so it can't be
+        # silently deleted; test_config_footguns.py exercises it directly.
+        # Also guards momentum_flux_scheme="nemo_up3" x momentum_time_integrator
+        # pairing (S-46/S-47, same map doc): NEMO's e3u(Kmm) face thickness for
+        # dyn_adv_up3 is wired only inside the rk3_ws stage program, so nemo_up3
+        # on any other integrator would silently run the legacy (measured
+        # first-order-wrong) face-thickness rule instead -- a pairing NEMO
+        # itself never runs. test_config_footguns.py exercises it directly.
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),
         # outer_integrator dispatch (nemo_mlf P2, docs/ocean/fidelity/
         # nemo_mlf_step_transcription_spec.md §4/§7): a typo here would
@@ -321,6 +337,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # e3-weighting variant, and when paired with any operator other than
         # nemo_div_curl).
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_horizontal_viscosity"),
+        # shortwave_scheme guard of the external (JRA55 bulk) surface forcing
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_external_surface_forcing"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
         # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)

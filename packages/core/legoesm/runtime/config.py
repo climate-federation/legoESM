@@ -201,10 +201,12 @@ def bootstrap(
     # 2. X64 policy ----------------------------------------------------------
     need_x64 = x64
     if need_x64 is None:
-        # Infer: fp64, mixed, and mixed_fp64_storage all need x64.
+        # Infer: fp64 stores state in float64, and 'mixed' keeps float64
+        # accumulate/control roles — both are meaningless without x64, which
+        # would silently demote them to float32 (#1675; the #1665 interim
+        # refused 'mixed' here instead).
         need_x64 = precision.strip().lower() in (
-            "fp64", "float64", "mixed", "mixed_fp64_storage",
-        )
+            "fp64", "float64", "mixed", "mixed_fp64_storage")
 
     if need_x64:
         enable_x64(quiet=True)

@@ -48,6 +48,7 @@ def reconstruct_carbon_diagnostics(
     spatial: bool = False,
     land_params=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
+    gpp_override: jnp.ndarray | None = None,
 ):
     """Return the :class:`CarbonDiagnostics` for one coupled land step.
 
@@ -87,14 +88,23 @@ def reconstruct_carbon_diagnostics(
         losses, so an UNPROTECTED loss here would reset the protected spun-up
         SOM back down (and the verification segment would then drift).  ``None``
         (default) -> no protection, matching an unprotected coupled step.
+    gpp_override : jnp.ndarray or None
+        The GPP the coupled step ACTUALLY fed to its carbon update (the
+        surface scheme's ``SurfaceFluxOutput.gpp`` -- two-leaf canopy, CLM-ML
+        or SimpleSEB+stomata, with any P-model capacity active).  Pass it
+        whenever the caller has the step's surface output; the diagnostics
+        then use byte-identical GPP.  ``None`` re-derives GPP through the
+        big-leaf :func:`compute_effective_beta`, which is only consistent with
+        the coupled step when the surface scheme is SimpleSEB+stomata.
     """
     T_sfc_new = new_state.T_soil[:, 0]
     beta_soil_new, _ = root_zone_beta_soil(
         new_state.theta_soil, root_frac, theta_wp, theta_fc, beta_min,
         spatial=spatial)
-    _, gpp_override, _ = compute_effective_beta(
-        T_sfc_new, forcing, beta_soil_new, config, carbon_state, dt,
-        land_params=land_params)
+    if gpp_override is None:
+        _, gpp_override, _ = compute_effective_beta(
+            T_sfc_new, forcing, beta_soil_new, config, carbon_state, dt,
+            land_params=land_params)
     _, _, diag = step_carbon_differland(
         carbon_state, forcing.sw_down, T_sfc_new, forcing.co2_ppmv,
         beta_soil_new, lat, doy, forcing.precip_total, config.carbon, dt,

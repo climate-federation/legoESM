@@ -128,7 +128,7 @@ def _lat_spec(x):
 
 def _step_body(model, state, dt, *, grid, vertex_mask,
                freshwater=None, surface_forcing=None, sponge=None,
-               t_seconds=None):
+               t_seconds=None, z_coord=None, iwm_fields=None, config=None):
     """Run ONE ocean step via the model's NON-jitted body (``_step_impl`` /
     ``_ab2_step`` + the static-gated post-steps), the un-jitted twin of
     ``LatLonCGridOceanModel._step_jitted``.
@@ -161,12 +161,14 @@ def _step_body(model, state, dt, *, grid, vertex_mask,
         new_state = model._ab2_step(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
-            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
+            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+            z_coord=z_coord, iwm_fields=iwm_fields, config=config)
     else:
         new_state = model._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
-            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
+            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+            z_coord=z_coord, iwm_fields=iwm_fields, config=config)
     if model.config.polar_filter.use_polar_filter:
         new_state = model._apply_polar_filter(new_state, dt, grid=grid)
     if model.config.freeze_floor:
@@ -480,7 +482,7 @@ def append_vface_wall_row(v_lower):
     return jnp.concatenate([v_lower, wall], axis=0)
 
 
-def gather_state_latlon(state, mesh):
+def gather_state_latlon(state, mesh, *, to_host: bool = False):
     """Inverse of :func:`shard_state_latlon`: gather every leaf to a single device
     and rebuild the full ``(n_lat+1, ...)`` ``v`` / ``v_mask`` by appending the
     pole-wall row (zeros) the layout dropped.
@@ -510,7 +512,26 @@ def gather_state_latlon(state, mesh):
     _mp = jax.process_count() > 1
 
     def _gather_arr(a):
-        return replicate_leaf(a, rep, multiprocess=_mp)
+        out = replicate_leaf(a, rep, multiprocess=_mp)
+        if not to_host:
+            return out
+        # HOST-RESIDENT gather (the eORCA025 full-card memory fix): keeping
+        # every gathered leaf REPLICATED on every device holds a whole extra
+        # global state (~15-30 GB f64) resident per GPU, which is what pushed
+        # the 8-band full card over 48 GB even after the step's own live
+        # peak had scaled down to ~18 GiB (smoke 9474077).  Pull each leaf
+        # to host numpy and FREE the device copy immediately, so only ONE
+        # leaf (~1 GB) ever stages on the device at a time.  The host loop
+        # consumes numpy anyway, and shard_state_latlon device_puts from
+        # any backing on the way back in.  Collective count/order per rank
+        # is UNCHANGED (one replicate per leaf) -- the multiprocess safety
+        # contract above is untouched.
+        host = np.asarray(out)
+        try:
+            out.delete()
+        except Exception:               # pragma: no cover - non-deletable
+            pass
+        return host
 
     updates = {}
     for name in _V_STAGGERED_STATE_FIELDS:
@@ -519,8 +540,16 @@ def gather_state_latlon(state, mesh):
             updates[name] = None
             continue
         v_lower = _gather_arr(field.data)
-        # north pole-wall / cap row (the shared reconstruction helper)
-        updates[name] = field.replace(data=append_vface_wall_row(v_lower))
+        # north pole-wall / cap row (the shared reconstruction helper).
+        # Under to_host the append runs in numpy so the result STAYS on the
+        # host (jnp.concatenate would silently re-device-put the leaf).
+        if to_host:
+            wall = np.zeros((1,) + tuple(v_lower.shape[1:]),
+                            dtype=v_lower.dtype)
+            updates[name] = field.replace(
+                data=np.concatenate([np.asarray(v_lower), wall], axis=0))
+        else:
+            updates[name] = field.replace(data=append_vface_wall_row(v_lower))
     for name in state._fields:
         if name in _V_STAGGERED_STATE_FIELDS:
             continue
@@ -532,6 +561,49 @@ def gather_state_latlon(state, mesh):
         else:
             updates[name] = _gather_arr(jnp.asarray(val))
     return state._replace(**updates)
+
+
+def shard_cell_pytree_latlon(tree, mesh):
+    """Lay out a pytree of CELL-centred fields (leading dim ``n_lat``) for the
+    lat-band SPMD lane -- the prognostic sea-ice tile (``SeaIceState`` /
+    ``DynamicSeaIceState``: every leaf is ``(n_lat, n_lon[, n_cat])``).
+
+    Same layout as the cell fields of :func:`shard_state_latlon` (``P("lat")``
+    on axis 0, scalars replicated) so the ice tile the OMIP block scan carries
+    next to the ocean state is sharded consistently with it; ``None`` leaves
+    pass through.  NO staggered (``n_lat+1``) field may be in ``tree`` -- the
+    ice tile has none; a leading dim that is not the mesh's ``n_lat`` multiple
+    raises inside ``addressable_shard_put`` rather than silently replicating.
+    Inverse: :func:`gather_cell_pytree_latlon`.
+    """
+    _agree_ocean_mesh_entry(mesh, tree, where="shard_cell_pytree_latlon")
+    assert_pytree_bytes_equal(tree, "shard_cell_pytree_latlon")
+
+    def _put(leaf):
+        if leaf is None or not hasattr(leaf, "ndim"):
+            return leaf
+        arr = jnp.asarray(leaf)
+        spec = _lat_spec(arr) if arr.ndim >= 1 else P()
+        return addressable_shard_put(arr, NamedSharding(mesh, spec))
+
+    return jax.tree.map(_put, tree)
+
+
+def gather_cell_pytree_latlon(tree, mesh, *, to_host: bool = False):
+    """Inverse of :func:`shard_cell_pytree_latlon`: replicate every leaf to a
+    single-device / host array (route-B safe via ``replicate_leaf``)."""
+    _agree_ocean_mesh_entry(mesh, tree, where="gather_cell_pytree_latlon")
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+    rep = NamedSharding(mesh, P())
+    _mp = jax.process_count() > 1
+
+    def _get(leaf):
+        if leaf is None or not hasattr(leaf, "ndim"):
+            return leaf
+        out = replicate_leaf(leaf, rep, multiprocess=_mp)
+        return np.asarray(out) if to_host else out
+
+    return jax.tree.map(_get, tree)
 
 
 # Ordered flag names for the ocean SPMD entry gate. STATIC tuple: the payload
@@ -774,12 +846,143 @@ def make_sharded_ocean_step(model, mesh):
                    for name in array_field_names}
     vmask_stack = _replicated_put(_raw_vmask, "vertex_mask")
 
+    # --- FULL-CARD band stacks: z-coord per-cell fields + iwm forcing maps ---
+    # The body receives a band state and band geometry, but the model's
+    # z_coord and _iwm_forcing were GLOBAL — a --partial-cell run died with
+    # `mul (1208,1440,75) vs (302,1440,1)` in compute_frozen_geom_density
+    # (eORCA025 4-GPU smoke, job 9472667).  Band them exactly like the
+    # geometry: host-slice per band (slice_zcoord_to_band is the tested MPI
+    # slicer), stack on a leading band axis, shard P("lat"), index [0]
+    # in-body, and thread through _step_body's z_coord=/iwm_fields=
+    # overrides.  A z-star coordinate with no per-cell fields (and no iwm)
+    # produces EMPTY stacks and a None override — bit-identical to before.
+    from legoesm.parallel.latlon_mpi import (
+        make_latlon_band_layout, slice_zcoord_to_band,
+    )
+    n_lat_g = int(model.grid.n_lat)
+    nl_band = n_lat_g // n_dev
+    _zc_global = model.z_coord
+    zc_field_names = tuple(
+        n for n in ("h_partial", "bottom_level", "is_active")
+        if isinstance(getattr(_zc_global, n, None), (jax.Array, np.ndarray))
+        and getattr(_zc_global, n).ndim >= 2
+        and int(getattr(_zc_global, n).shape[0]) == n_lat_g)
+    if zc_field_names:
+        _band_layouts = [
+            make_latlon_band_layout(r, n_dev, n_lat_g,
+                                    int(model.grid.n_lon),
+                                    getattr(model.grid, "fold", None))
+            for r in range(n_dev)]
+        _band_zcs = [slice_zcoord_to_band(_zc_global, lay)
+                     for lay in _band_layouts]
+        _raw_zc = {n: jnp.stack(
+            [jnp.asarray(getattr(b, n)) for b in _band_zcs], axis=0)
+            for n in zc_field_names}
+    else:
+        _raw_zc = {}
+    _iwm_global = getattr(model, "_iwm_forcing", None)
+    if _iwm_global is not None:
+        def _stack_iwm_leaf(leaf):
+            arr = jnp.asarray(leaf)
+            if arr.ndim >= 2 and int(arr.shape[0]) == n_lat_g:
+                return jnp.stack(
+                    [arr[r * nl_band:(r + 1) * nl_band]
+                     for r in range(n_dev)], axis=0)
+            # scalars / profiles replicate: same value on every band row.
+            return jnp.stack([arr] * n_dev, axis=0)
+        _raw_iwm = jax.tree.map(_stack_iwm_leaf, _iwm_global)
+    else:
+        _raw_iwm = None
+    # CONFIG per-cell array leaves (the runoff-depth ln_rnf_depth_ini map,
+    # the A_h latitudinal profile, and any future config-carried map): the
+    # config must stay a STATIC closure -- its Python floats/bools gate
+    # trace-time branches, so it can never ride shard_map as data wholesale.
+    # Band-stack ONLY its ARRAY leaves whose leading dim is the latitude
+    # (n_lat rows -> [r*nl:(r+1)*nl]; n_lat+1 v-rows -> [s:e+1]); everything
+    # else is reconstructed in-body from the static leaf values (the
+    # geometry template._replace pattern applied to the whole config tree).
+    # A_h_lat_profile is a hashable TUPLE (static-config / jit-cache-key
+    # contract), so tree_flatten explodes it into scalar float leaves that the
+    # array-leaf band-stacker below SKIPS -- the band body then keeps the
+    # GLOBAL-length profile and raises `n_lat vs nl_band` on the eORCA025
+    # full-card SPMD path (#1666).  Present the profile to the flatten AS AN
+    # ARRAY (single lat-row leaf) so the generic stacker band-slices it exactly
+    # like z_coord; the in-body config is a TRACED closure (it already carries
+    # array slabs), so an array leaf there is consistent, and the outer static
+    # model.config keeps its tuple untouched.
+    #
+    # SEAM CORRECTNESS (codex+GLM #1666, both P1): a band derives its v-face
+    # profile from its LOCAL cell profile, which wall-copies the band edges and
+    # so gets interior band SEAMS wrong by the full row-to-row Δprof (first
+    # order; material for a sharp profile).  Fix: compute the EXACT global
+    # v-face profile here (n_lat+1) and inject it as `A_h_lat_profile_v` -- the
+    # generic stacker's `n_lat+1` branch slices it to each band's [s : e+1]
+    # v-faces (correct neighbour-averaged seam values), and the consumer uses
+    # it instead of deriving band-locally.
+    _config_for_bands = model.config
+    _lv_cfg = getattr(_config_for_bands, "lateral_viscosity", None)
+    _prof_tuple = (getattr(_lv_cfg, "A_h_lat_profile", None)
+                   if _lv_cfg is not None else None)
+    if _prof_tuple is not None:
+        _prof_u_arr = jnp.asarray(_prof_tuple)
+        _prof_v_arr = jnp.concatenate([          # exact serial v-faces (n_lat+1)
+            _prof_u_arr[:1],
+            0.5 * (_prof_u_arr[:-1] + _prof_u_arr[1:]),
+            _prof_u_arr[-1:]])
+        _config_for_bands = _config_for_bands._replace(
+            lateral_viscosity=_lv_cfg._replace(
+                A_h_lat_profile=_prof_u_arr,
+                A_h_lat_profile_v=_prof_v_arr))
+    _cfg_leaves, _cfg_treedef = jax.tree_util.tree_flatten(_config_for_bands)
+    _cfg_array_idx = []
+    _raw_cfg = {}
+    for _i, _leaf in enumerate(_cfg_leaves):
+        if not isinstance(_leaf, (jax.Array, np.ndarray)):
+            continue
+        shp = tuple(_leaf.shape)
+        if shp and shp[0] == n_lat_g:
+            _raw_cfg[_i] = jnp.stack(
+                [jnp.asarray(_leaf)[r * nl_band:(r + 1) * nl_band]
+                 for r in range(n_dev)], axis=0)
+            _cfg_array_idx.append(_i)
+        elif shp and shp[0] == n_lat_g + 1:
+            _raw_cfg[_i] = jnp.stack(
+                [jnp.asarray(_leaf)[r * nl_band:(r + 1) * nl_band + 1]
+                 for r in range(n_dev)], axis=0)
+            _cfg_array_idx.append(_i)
+    # Schema gate for the NEW stacks (same reason as the geometry gate: a
+    # process-dependent field list must fail loudly, not desynchronize the
+    # per-leaf collectives).  One fixed-shape collective every process
+    # reaches, even when both stacks are empty.
+    _iwm_leaves = ([] if _raw_iwm is None else
+                   jax.tree_util.tree_flatten_with_path(_raw_iwm)[0])
+    _aux_gate_names = [f"zc:{n}" for n in zc_field_names] + [
+        f"iwm:{jax.tree_util.keystr(pth)}" for pth, _ in _iwm_leaves] + [
+        f"cfg:{i}" for i in _cfg_array_idx]
+    assert_schema_agrees(
+        _aux_gate_names, n_dev, context="make_sharded_ocean_step.fullcard",
+        arrays=[*(_raw_zc[n] for n in zc_field_names),
+                *(leaf for _, leaf in _iwm_leaves),
+                *(_raw_cfg[i] for i in _cfg_array_idx)])
+    zc_stacks = {n: _replicated_put(_raw_zc[n], f"zc:{n}")
+                 for n in zc_field_names}
+    cfg_stacks = {i: _replicated_put(_raw_cfg[i], f"cfg:{i}")
+                  for i in _cfg_array_idx}
+    if _raw_iwm is not None:
+        iwm_stacks = jax.tree_util.tree_unflatten(
+            jax.tree_util.tree_structure(_raw_iwm),
+            [_replicated_put(leaf, f"iwm:{jax.tree_util.keystr(pth)}")
+             for pth, leaf in _iwm_leaves])
+    else:
+        iwm_stacks = None
+
     # Static perms for the v north-boundary-row ppermute (band r receives band
     # r+1's v_lower[0] = global v[e]; north band non-target receives 0).
     perm_north, _perm_south = latlon_band_perms(n_dev)
 
     def _body(state_local, forcing_local, geom_stacks_local,
-              vmask_stack_local, dt):
+              vmask_stack_local, zc_stacks_local, iwm_stacks_local,
+              cfg_stacks_local, dt):
         fw_local, sf_local, sponge_local, t_s_local = forcing_local
         r = jax.lax.axis_index(axis)
 
@@ -793,6 +996,26 @@ def make_sharded_ocean_step(model, mesh):
                        for name in array_field_names}
         band_geom = template._replace(**geom_arrays)
         band_vmask = vmask_stack_local[0]
+
+        # Rebuild this band's z-coordinate + iwm forcing the same way: index
+        # the local (1, ...) slab of each stacked per-cell field and overlay
+        # it on the GLOBAL object, whose reference profiles / static scalars
+        # are band-invariant.  Empty stacks (a z-star coordinate, no iwm)
+        # give a None override — the model then reads its own globals, which
+        # is only correct single-band, and multi-band configs without
+        # per-cell fields never consult them per row anyway.
+        band_zc = (model.z_coord._replace(
+            **{n: zc_stacks_local[n][0] for n in zc_field_names})
+            if zc_field_names else None)
+        band_iwm = (jax.tree.map(lambda s_: s_[0], iwm_stacks_local)
+                    if iwm_stacks_local is not None else None)
+        if cfg_stacks_local:
+            _leaves = list(_cfg_leaves)
+            for _i, _slab in cfg_stacks_local.items():
+                _leaves[_i] = _slab[0]
+            band_cfg = jax.tree_util.tree_unflatten(_cfg_treedef, _leaves)
+        else:
+            band_cfg = None
 
         # Reconstruct the band's nl+1 v-faces from the nl-row v_lower.  band r's
         # north boundary row is band r+1's v_lower[0] (= global v[e]); the north
@@ -844,7 +1067,9 @@ def make_sharded_ocean_step(model, mesh):
         result = _step_body(model, state_band, dt,
                             grid=band_geom, vertex_mask=band_vmask,
                             freshwater=fw_local, surface_forcing=sf_local,
-                            sponge=sponge_local, t_seconds=t_s_local)
+                            sponge=sponge_local, t_seconds=t_s_local,
+                            z_coord=band_zc, iwm_fields=band_iwm,
+                            config=band_cfg)
 
         out_updates = {name: _to_v_lower(getattr(result, name))
                        for name in _V_STAGGERED_STATE_FIELDS}
@@ -959,13 +1184,18 @@ def make_sharded_ocean_step(model, mesh):
             # indexes its local (1, ...) slab at [0]).
             geom_spec = jax.tree.map(lambda _x: P("lat"), geom_stacks)
             vmask_spec = P("lat")
+            zc_spec = jax.tree.map(lambda _x: P("lat"), zc_stacks)
+            cfg_spec = jax.tree.map(lambda _x: P("lat"), cfg_stacks)
+            iwm_spec = (jax.tree.map(lambda _x: P("lat"), iwm_stacks)
+                        if iwm_stacks is not None else None)
             # JAX >= 0.8 top-level shard_map takes ``check_vma`` (the
             # replication check); the band halo reads neighbour-rank data so
             # disable it (same as the validated PCG / halo-parity shard_maps).
             fn = jax.jit(shard_map(
                 _body,
                 mesh=mesh,
-                in_specs=(in_spec, forcing_spec, geom_spec, vmask_spec, P()),
+                in_specs=(in_spec, forcing_spec, geom_spec, vmask_spec,
+                          zc_spec, iwm_spec, cfg_spec, P()),
                 out_specs=in_spec,
                 check_vma=False,
             ))
@@ -991,16 +1221,20 @@ def make_sharded_ocean_step(model, mesh):
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
-            _geom, _vmask = aux if aux is not None else (geom_stacks,
-                                                        vmask_stack)
-            return fn(state, forcing, _geom, _vmask, jnp.asarray(dt))
+            _geom, _vmask, _zcS, _iwmS, _cfgS = (
+                aux if aux is not None
+                else (geom_stacks, vmask_stack, zc_stacks, iwm_stacks,
+                      cfg_stacks))
+            return fn(state, forcing, _geom, _vmask, _zcS, _iwmS, _cfgS,
+                      jnp.asarray(dt))
         finally:
             set_spmd_mesh(_prev_mesh)
             set_halo_backend(_prev_backend, _prev_topo)
 
     # Expose the stacks so outer-jit callers can pass them as arguments
     # (see the ``aux`` note in the signature).
-    sharded_step.aux = (geom_stacks, vmask_stack)
+    sharded_step.aux = (geom_stacks, vmask_stack, zc_stacks, iwm_stacks,
+                        cfg_stacks)
     return sharded_step
 
 
@@ -1042,6 +1276,6 @@ def make_sharded_ocean_step_global(model, mesh):
         ss = inner(ss, dt,
                    surface_forcing=shard_forcing_latlon(surface_forcing, mesh),
                    freshwater=shard_forcing_latlon(freshwater, mesh))
-        return gather_state_latlon(ss, mesh)
+        return gather_state_latlon(ss, mesh, to_host=True)
 
     return sharded_step_global

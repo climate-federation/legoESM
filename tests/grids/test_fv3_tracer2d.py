@@ -61,6 +61,7 @@ from legoesm.core.fv3_native_duo_stepper import (  # noqa: E402
 )
 
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
+    assert_batched_matches_loop,
     assert_real,
     cmp_fields,
 )
@@ -154,12 +155,12 @@ def _run_np(ctx, level_amp):
     return q_np, dp_np, cap_np
 
 
-def _run_jax(jctx, level_amp, *, check=True):
+def _run_jax(jctx, level_amp, *, check=True, batched=False):
     q_j = _tracers()[1]
     dp_j = _dp1()[1]
     cap_j = _caps(level_amp)[1]
     out = jtr.tracer_2d_1l_sixface(jctx, q_j, dp_j, cap_j, km=KM, nq=NQ,
-                                   hord_tr=HORD_TR, dt=DT)
+                                   hord_tr=HORD_TR, dt=DT, batched=batched)
     if check:
         jtr.check_nsplt_schedule(out)
     return out
@@ -426,3 +427,66 @@ def test_gradient_is_finite_and_carries_no_term_through_the_trip_count(jctx):
     assert np.isfinite(g).all(), (
         f"{int((~np.isfinite(g)).sum())} non-finite gradient entries")
     assert np.abs(g).max() > 0.0, "gradient is identically zero (vacuous)"
+
+
+# --------------------------------------------------------------------
+# 8.  The face-batched arm (C2a -- face-batching ladder step 6)
+#
+# The vmapped arm is an OPT-IN twin of the certified loop path: same
+# fv_tp_2d kernel, same NSPLT_MAX scan, the per-face Python loops
+# replaced by `jax.vmap` / face-stacked arithmetic over
+# `build_batched_gs`'s stacked view, with both halo exchanges and the
+# flux_adj seam blend untouched on the full six-face stack.  Gates
+# follow the DSW file's section H: (i) batched == loop per output at
+# the reassociation bound, on every schedule shape (single / split /
+# mixed -- the mixed one is what exercises the masked scan iterations
+# under vmap), with the RESOLVED schedules required identical; (ii)
+# defaults-off + bool guard (RULE 3: the loop path stays the default);
+# (iii) one jit-vs-eager batched smoke through the module's factory.
+# --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("label", sorted(_AMPS))
+def test_batched_matches_loop(jctx, label):
+    amp = _AMPS[label]
+    loop = _run_jax(jctx, amp)
+    bat = _run_jax(jctx, amp, batched=True)
+    # The schedule is exact arithmetic on exact max-reductions (max and
+    # abs never round), so it must match EXACTLY, not to a tolerance --
+    # a schedule off by one would sub-cycle a level differently and the
+    # field comparison below would mask it as a small norm.
+    assert _schedule(bat) == _schedule(loop), (
+        f"batched schedule {_schedule(bat)} != loop {_schedule(loop)}")
+    assert_batched_matches_loop(bat, loop,
+                                f"tracer_2d_1l_sixface[{label}]")
+
+
+def test_batched_defaults_off_and_bool(jctx):
+    """RULE 3 guard: the certified loop path is the DEFAULT; the vmap
+    arm is opt-in, and a truthy non-bool is refused rather than
+    silently selecting an arm."""
+    import inspect
+
+    sig = inspect.signature(jtr.tracer_2d_1l_sixface)
+    assert sig.parameters["batched"].default is False
+    with pytest.raises(TypeError, match="batched"):
+        _ = jtr.tracer_2d_1l_sixface(
+            jctx, _tracers()[1], _dp1()[1], _caps(_AMPS["mixed"])[1],
+            km=KM, nq=NQ, hord_tr=HORD_TR, dt=DT, batched=1)
+
+
+def test_batched_jit_matches_eager(jctx):
+    """jit-vs-eager on the batched arm, through the module's OWN
+    factory (batched baked into the partial).  FMA contraction under
+    jit is a LARGER class than batched-vs-loop reassociation, so the
+    bound is looser: START at 5e-12 (the sbatch measures; the loop
+    path's jit gate measured 1.571e-14 on this fixture)."""
+    amp = _AMPS["mixed"]
+    eager = _run_jax(jctx, amp, batched=True)
+    fn = jtr.make_tracer_2d_1l_sixface_jit(
+        jctx, km=KM, nq=NQ, hord_tr=HORD_TR, batched=True)
+    jitted = fn(_tracers()[1], _dp1()[1], _caps(amp)[1], DT)
+    assert _schedule(jitted) == _schedule(eager)
+    assert_batched_matches_loop(jitted, eager,
+                                "tracer_2d_1l_sixface[jit,batched]",
+                                rtol=5e-12, atol=5e-12)

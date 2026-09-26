@@ -68,7 +68,7 @@ HEAD=$(git rev-parse HEAD)
 DIRTY=$(git status --porcelain -uno -- packages src scripts/run scripts/validate)
 [ -z "$DIRTY" ] || { echo "FATAL: model tree dirty:"; echo "$DIRTY"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
-export PYTHONPATH="$(ls -d $R/packages/*/ | sed 's:/$::' | tr '\n' ':')$R:$R/scripts/validate"
+export PYTHONPATH="$R/src:$(ls -d $R/packages/*/ | sed 's:/$::' | tr '\n' ':')$R:$R/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository
 OUT=$R/results/omip_nemo/nemolev_mpas_tke_${ARM}_d30

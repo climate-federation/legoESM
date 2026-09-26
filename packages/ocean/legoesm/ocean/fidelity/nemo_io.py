@@ -67,6 +67,7 @@ class NemoGrid(NamedTuple):
     # unnoticed.
     e3t_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
     gdept_0: np.ndarray | None = None    # (n_lat, n_lon, nlev) [m]
+    gdepw_0: np.ndarray | None = None    # (n_lat, n_lon, nlev) [m]
     gphiv: np.ndarray | None = None
     # #1226 item 2 (dom_qco_r3c r3u/r3v): NEMO's reference u-/v-column depths
     # ``hu_0 = sum_k(e3u_0*umask)`` / ``hv_0 = sum_k(e3v_0*vmask)``
@@ -86,6 +87,18 @@ class NemoGrid(NamedTuple):
     # band) while the interior stays all-wet.  ``None`` = fully periodic
     # (no partial seam) or a config whose halo carries no wall.
     seam_wall_rows: np.ndarray | None = None
+    # Raw W-point scale factor used by eosbn2.F90.  Keep it 3-D and unaveraged:
+    # last-bit column variation is observable at the pointwise fidelity bar.
+    e3w_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
+    e2u: np.ndarray | None = None        # u-face meridional extent [m]
+    e1v: np.ndarray | None = None        # v-face zonal extent [m]
+    # Raw F-point/QCO operands used by dyn_spg_ts::dyn_cor_2D_init.  Keep
+    # these separate from reconstructed geometry: their last-bit arithmetic
+    # and wall rows are observable at the pointwise fidelity bar.
+    e3f_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
+    fmask: np.ndarray | None = None      # (n_lat, n_lon, nlev)
+    e1f: np.ndarray | None = None        # F-point zonal extent [m]
+    e2f: np.ndarray | None = None        # F-point meridional extent [m]
 
 
 class NemoState(NamedTuple):
@@ -195,9 +208,17 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
         tmask=m3("tmask"), umask=umask_3d, vmask=vmask_3d,
         e3t_0=(m3("e3t_0") if "e3t_0" in m else None),
         gdept_0=(m3("gdept_0") if "gdept_0" in m else None),
+        gdepw_0=(m3("gdepw_0") if "gdepw_0" in m else None),
         gphiv=(h2("gphiv") if "gphiv" in m else None),
         seam_wall_rows=_seam_wall,
         e3u_0=e3u_0_arr, e3v_0=e3v_0_arr, hu_0=hu_0_arr, hv_0=hv_0_arr,
+        e3w_0=(m3("e3w_0") if "e3w_0" in m else None),
+        e2u=(h2("e2u") if "e2u" in m else None),
+        e1v=(h2("e1v") if "e1v" in m else None),
+        e3f_0=(m3("e3f_0") if "e3f_0" in m else None),
+        fmask=(m3("fmask") if "fmask" in m else None),
+        e1f=(h2("e1f") if "e1f" in m else None),
+        e2f=(h2("e2f") if "e2f" in m else None),
     )
 
 
@@ -288,5 +309,22 @@ def read_nemo_restart_en(path: str, *, nn_hls: int = 1) -> np.ndarray:
     return _to_latlon_lev(np.asarray(r["en"].values).squeeze(), nn_hls)
 
 
+def read_nemo_restart_tke_coefficients(
+    path: str, *, nn_hls: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read restart ``avm_k``/``avt_k``/``dissl`` memory on all W levels."""
+    r = xr.open_dataset(path, decode_times=False)
+    missing = [name for name in ("avm_k", "avt_k", "dissl") if name not in r]
+    if missing:
+        raise ValueError(
+            f"NEMO restart lacks required TKE coefficient memory {missing}: "
+            f"{path}")
+    return tuple(
+        _to_latlon_lev(np.asarray(r[name].values).squeeze(), nn_hls)
+        for name in ("avm_k", "avt_k", "dissl")
+    )
+
+
 __all__ = ("NemoGrid", "NemoState", "NemoBeforeState", "read_nemo_mesh_mask",
-           "read_nemo_restart", "read_nemo_restart_before", "read_nemo_restart_en")
+           "read_nemo_restart", "read_nemo_restart_before", "read_nemo_restart_en",
+           "read_nemo_restart_tke_coefficients")

@@ -43,9 +43,6 @@ _DISAGREE: dict[str, str] = {
         "times the spec's upper bound",
     "bechtold_epsilon_deep":
         "driver (5.775e-04, 3.5e-03) vs spec (7.0e-04, 4.2e-03)",
-    "cloud_q_c_diagnostic":
-        "driver (1e-06, 1e-03) vs spec (5e-05, 1.5e-03) — the one that "
-        "prompted this test",
 }
 
 _TOL = 1e-12

@@ -415,3 +415,53 @@ def test_any_non_default_column_requires_a_stamp(tmp_path):
         load_land_restart(path, expected_land_mode="multilayer",
                           expected_ncol=_NCOL, expected_n_layers=_NLAY,
                           expected_soil_grid=_grid(total_depth=3.0))
+
+
+# --- prognostic carbon in the land restart (additive) -----------------------
+def test_restart_round_trips_carbon_pools_and_phi(tmp_path):
+    """Pools + permafrost phi survive a save/load cycle, and a biophysics-only
+    restart reports both as None rather than fabricating them."""
+    from legoesm.land.carbon.config import CarbonState
+
+    state, ncol = _fake_state(seed=3), _NCOL
+    kw = dict(land_mode="multilayer", t_end_s=1.0, n_steps_completed=1,
+              soil_grid=_grid())
+    carbon = CarbonState(**{f: jnp.asarray(np.full(ncol, 10.0 * (i + 1)))
+                            for i, f in enumerate(CarbonState._fields)})
+    phi = jnp.asarray(np.linspace(0.0, 1.0, ncol))
+
+    p = save_land_restart(tmp_path / "c.npz", state, carbon_state=carbon,
+                          soil_frozen_fraction=phi, **kw)
+    _s, meta = load_land_restart(p, expected_land_mode="multilayer",
+                                 expected_ncol=ncol)
+    got = meta["carbon_state"]
+    assert got is not None
+    for i, f in enumerate(CarbonState._fields):
+        np.testing.assert_allclose(np.asarray(getattr(got, f)), 10.0 * (i + 1))
+    np.testing.assert_allclose(np.asarray(meta["soil_frozen_fraction"]),
+                               np.linspace(0.0, 1.0, ncol))
+
+    # Biophysics-only: absent, not invented.
+    p2 = save_land_restart(tmp_path / "b.npz", state, **kw)
+    _s2, meta2 = load_land_restart(p2, expected_land_mode="multilayer",
+                                   expected_ncol=ncol)
+    assert meta2["carbon_state"] is None
+    assert meta2["soil_frozen_fraction"] is None
+
+
+def test_restart_with_partial_carbon_pools_raises(tmp_path):
+    """A half-written carbon state must fail loudly, not resume from whatever
+    pools happen to be present."""
+    from legoesm.land.carbon.config import CarbonState
+
+    state, ncol = _fake_state(seed=4), _NCOL
+    kw = dict(land_mode="multilayer", t_end_s=1.0, n_steps_completed=1,
+              soil_grid=_grid())
+    p = save_land_restart(tmp_path / "c.npz", state, **kw)
+    d = dict(np.load(p, allow_pickle=True))
+    for f in CarbonState._fields[:-1]:                 # drop ONE pool
+        d[f"carbon_{f}"] = np.full(ncol, 1.0)
+    np.savez_compressed(p, **d)
+    with pytest.raises(ValueError, match="missing"):
+        load_land_restart(p, expected_land_mode="multilayer",
+                          expected_ncol=ncol)

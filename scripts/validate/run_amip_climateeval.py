@@ -80,6 +80,73 @@ def obs_only_suite_def(
     return suite_def
 
 
+def extract_months_keep_time(cube: Any, months: list[int]) -> Any:
+    """``--month`` preprocessor: keep only ``months`` WITHOUT collapsing the
+    time dimension.  ESMValCore's ``extract_month`` returns a cube with a
+    scalar time coordinate when one month is left (a 1-month run), which
+    ClimateEval's loader then rejects (``source`` / ``destination`` axis
+    mismatch); indexing with a boolean mask keeps the length-1 dimension.
+    EVERY requested month must be present (a January-only run asked for
+    ``1 2`` against a reference that has both would silently compare
+    different seasons), and the month categorisation is always rebuilt from
+    ``time`` (a pre-existing ``month_number`` is not trusted).  Resolved by
+    ClimateEval through ``run_amip_climateeval.<name>``: the script directory
+    is ``sys.path[0]`` when run as a script; ``main()`` also puts it there so
+    an imported/``-m`` invocation resolves the same name."""
+    import numpy as np
+    from iris.coord_categorisation import add_month_number
+
+    bad = sorted(set(months) - set(range(1, 13)))
+    if bad:
+        raise ValueError(f"--month {bad}: months must be in 1..12")
+    if not cube.coords("time"):
+        return cube  # fixed fields (sftlf / areacella) have no time axis
+    if not cube.coords("time", dim_coords=True):
+        raise ValueError(
+            f"{cube.name()}: time is not a dimension coordinate (scalar or "
+            "auxiliary); cannot select months without collapsing it")
+    if cube.coords("month_number"):
+        cube.remove_coord("month_number")
+    add_month_number(cube, "time")
+    have = set(int(m) for m in cube.coord("month_number").points)
+    missing = sorted(set(months) - have)
+    if missing:
+        raise ValueError(
+            f"{cube.name()}: months {missing} absent (has {sorted(have)}); "
+            "model and reference must both cover every requested month")
+    keep = np.where(np.isin(cube.coord("month_number").points, months))[0]
+    (tdim,) = cube.coord_dims("time")
+    return cube[tuple(keep if d == tdim else slice(None) for d in range(cube.ndim))]
+
+
+def restrict_suite_def(
+    suite_def: list[Any], suite: str, diagnostics: list[str], months: list[int]
+) -> list[Any]:
+    """Apply ``--diagnostic`` (keep only the named blocks; unknown names are a
+    hard error, never a silent empty suite) and ``--month`` (every variable of
+    every kept block gets the time-dimension-preserving month filter, so model
+    and reference are both restricted to the same calendar months).  Returns
+    a new list; the caller's ``suite_def`` is not mutated."""
+    import copy
+    suite_def = copy.deepcopy(suite_def)
+    if diagnostics:
+        names = {b["name"] for b in suite_def}
+        missing = set(diagnostics) - names
+        if missing:
+            raise SystemExit(
+                f"--diagnostic {sorted(missing)} not in suite {suite}; "
+                f"available: {sorted(names)}")
+        suite_def = [b for b in suite_def if b["name"] in diagnostics]
+    if months:
+        extra = {"run_amip_climateeval.extract_months_keep_time":
+                 {"months": list(months)}}
+        for block in suite_def:
+            for var in block.get("variables", []):
+                var["additional_preprocessors"] = {
+                    **var.get("additional_preprocessors", {}), **extra}
+    return suite_def
+
+
 def suite_db_path(output_dir: Path, suite: str) -> Path:
     """Canonical per-suite DuckDB path under the run's output directory."""
     return output_dir / f"climateeval_{suite}.ddb"
@@ -117,6 +184,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root-dir", required=True,
                          help="ClimateEval reference-data root "
                               "(source_id/frequency/var layout).")
+    parser.add_argument("--diagnostic", dest="diagnostics", nargs="+", default=[],
+                        help="Keep only these suite diagnostic blocks (by their "
+                             "``name``), e.g. ``map zonal_line zonal_profile`` "
+                             "for a sub-year run that cannot feed the "
+                             "12-month annual-cycle diagnostics. Default: all.")
+    parser.add_argument("--month", dest="months", nargs="+", type=int, default=[],
+                        help="Score only these calendar months: every variable "
+                             "(model AND reference) gets a month-selection "
+                             "preprocessor, so a short run is compared with "
+                             "the reference's climatology of the SAME months "
+                             "rather than its all-months mean (and references "
+                             "that do not cover the run's year still score, "
+                             "unlike --timerange).  PROTOCOL: a short run's "
+                             "month is one year's draw plus spin-up against a "
+                             "multi-year climatology, so such scores rank ARMS "
+                             "scored the same way; they are not comparable with "
+                             "full-year annual-cycle scores and are not absolute "
+                             "skill.")
     parser.add_argument("--timerange", default="",
                          help="Variable timerange override, e.g. 19790101/19791231. "
                               "Empty = use the model output's own time span.")
@@ -138,8 +223,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # ``--month`` names this module by its script basename; make that
+    # resolvable however main() was reached (script, import, ``-m``).
+    _here = str(Path(__file__).resolve().parent)
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    bad = sorted(set(args.months) - set(range(1, 13)))
+    if bad:
+        parser.error(f"--month {bad}: months must be in 1..12")
 
     # Deferred: only the ClimateEval environment has these installed; keeping
     # them out of module scope lets era5_only_suite_def/suite_db_path/
@@ -195,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
                 suite_def = obs_only_suite_def(
                     yaml.safe_load(f), force_reference=args.force_reference
                 )
+            suite_def = restrict_suite_def(suite_def, suite, args.diagnostics, args.months)
             with tmp_yml.open("w") as f:
                 yaml.dump(suite_def, f)
             Suite(

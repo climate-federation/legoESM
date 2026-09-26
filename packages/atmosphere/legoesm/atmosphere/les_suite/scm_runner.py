@@ -162,14 +162,15 @@ def _liquid_water_theta(theta: Array, q_c: Array, p: Array) -> Array:
     """SCM-side θ_l: compute the Exner factor from the SCM pressure, then apply the ONE
     canonical reduction :func:`scm_coupling.liquid_water_theta` (shared with the LES recorder
     so θ_l(SCM) and θ_l(LES) use the same formula — no re-derivation). Π=(p/p_ref)^κ."""
-    exner = (jnp.asarray(p) / constants.p_ref) ** constants.kappa
+    exner = exner_function(jnp.asarray(p))
     return liquid_water_theta(theta, q_c, exner)
 
 
 def build_cbl_scm_from_artifact(
     artifact: LESReferenceArtifact,
-    turbulence: TurbulenceConfig,
+    turbulence: TurbulenceConfig | str,
     *,
+    les_tuned: bool = True,
     nlev: int = 32,
     sigma_top: float | None = None,
     dt: float = 5.0,
@@ -191,7 +192,34 @@ def build_cbl_scm_from_artifact(
     ``sigma_top=None`` (default) auto-sizes the SCM domain to sit ~30% above the LES
     domain top — a domain that ends at/below the LES top lets the CBL hit the model
     lid and the temperature collapses.
+
+    ``turbulence`` may be a scheme NAME (str) or an explicit ``TurbulenceConfig``.
+    A name builds the config via :func:`scm_turbulence_config`, which applies the
+    LES-tuned coefficients by DEFAULT (``les_tuned=True``); pass ``les_tuned=False``
+    for the library defaults. An explicit ``TurbulenceConfig`` is used verbatim --
+    the caller's own config always wins, and ``les_tuned`` is ignored for it.
     """
+    if isinstance(turbulence, str):
+        from legoesm.atmosphere.physics.turbulence.les_tuned import (
+            scm_turbulence_config,
+        )
+        turbulence = scm_turbulence_config(turbulence, les_tuned=les_tuned)
+    elif les_tuned:
+        # An explicit TurbulenceConfig is used verbatim (documented opt-out), but
+        # if the caller expected the LES-tuned default and its scheme HAS a tuned
+        # entry, the splice is silently bypassed — warn so name-vs-config paths
+        # don't diverge unnoticed (GLM review P2 #4). Pass a name to get tuning.
+        import logging
+        from legoesm.atmosphere.physics.turbulence.les_tuned import (
+            load_les_tuned_overrides,
+        )
+        _sub = getattr(turbulence, turbulence.scheme, None)
+        if _sub is not None and type(_sub).__name__ in load_les_tuned_overrides():
+            logging.getLogger(__name__).warning(
+                "run_scm: explicit TurbulenceConfig(scheme=%r) bypasses the "
+                "LES-tuned splice (its class has a tuned entry). Pass the scheme "
+                "NAME for the tuned default, or les_tuned=False to silence.",
+                turbulence.scheme)
     if artifact.w_theta_s is None:
         raise ValueError(
             f"{artifact.case_name}: CBL SCM requires a prescribed surface heat flux "

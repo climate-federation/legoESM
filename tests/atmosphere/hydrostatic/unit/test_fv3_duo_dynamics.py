@@ -228,6 +228,94 @@ class TestFV3DuoDynamicsModel:
         q1 = np.asarray(out["q"][0])
         assert np.isfinite(q1).all()
 
+    def test_extra_tracers_are_nonzero_distinct_and_lon_modulated(
+            self, model):
+        """n_tracers appends sphum*(1+0.5 sin(iq*lon)) passengers: tracer 0
+        untouched, every extra one nonzero, distinct from the others, and
+        zero in the halos like sphum. A zonally-shifted copy of the
+        zonally-symmetric sphum would be the SAME field -- this is what
+        makes a swapped or dropped tracer visible."""
+        one = model.dcmip16_initial_state(n_tracers=1)
+        ic = model.dcmip16_initial_state(n_tracers=3)
+        assert len(one["q"]) == 1 and len(ic["q"]) == 3
+        q0, q1, q2 = (np.asarray(q) for q in ic["q"])
+        assert np.array_equal(q0, np.asarray(one["q"][0]))
+        cs = slice(NG, NG + N)
+        halo = np.ones(q0.shape[1:3], bool)
+        halo[cs, cs] = False
+        gs6 = model.grid.ctx_np["gs6"]
+        win0 = q0[:, cs, cs, :]
+        assert (win0 > 0).all(), "sphum is not positive on the window"
+        for iq, q in ((1, q1), (2, q2)):
+            assert not q[:, halo, :].any(), f"tracer {iq} halo not zero"
+            assert (q[:, cs, cs, :] > 0).all(), f"tracer {iq} not positive"
+            for t in range(6):
+                lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
+                want = q0[t, cs, cs, :] * (1.0 + 0.5 * np.sin(iq * lon))[
+                    :, :, None]
+                # same float64 expression -> bit-equal, not "close" (GLM)
+                np.testing.assert_array_equal(q[t, cs, cs, :], want)
+        assert not np.array_equal(q1, q2)
+        assert not np.array_equal(q1, q0)
+
+    def test_agrid_lon_is_radians_on_the_axes_the_ic_assumes(self, bundle):
+        """Independent pin of what lon_modulated_tracer reads (GLM
+        2026-09-13: the tracer test re-reads the same agrid_lon the helper
+        consumed, so a degrees-valued or transposed longitude would pass
+        it). Radians: lon in [0, 2pi], lat in [-pi/2, pi/2] -- a lon<->lat
+        swap or degrees (~90 vs ~1.57) fails here. Axes: on the equatorial
+        faces the cell-centre longitude is NEARLY constant along one index
+        (the grid lines are meridians; the centres sit ~1e-4 rad off them,
+        measured 2026-09-13 at C12: max 2.6e-4 vs 1.2e-1 across) and varies
+        along the other; which index differs between faces 0/1 and 3/4. A
+        transposition swaps the two, three orders apart. sphum is built
+        from agrid_lat on the same [cs, cs] slice, so this is the
+        convention both share."""
+        n, ng = bundle.n, bundle.ng
+        cs = slice(ng, ng + n)
+        gs6 = bundle.ctx_np["gs6"]
+        for t in range(6):
+            lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
+            lat = np.asarray(gs6[t]["agrid_lat"])[cs, cs]
+            assert lon.shape == lat.shape == (n, n)
+            assert 0.0 <= lon.min() and lon.max() <= 2 * np.pi, f"face {t}"
+            assert np.abs(lat).max() <= np.pi / 2, f"face {t}"
+        for t, const_axis in ((0, 1), (1, 1), (3, 0), (4, 0)):
+            lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
+            along = np.abs(np.diff(lon, axis=const_axis)).max()
+            across = np.abs(np.diff(lon, axis=1 - const_axis)).min()
+            assert along < 1e-2 * across, (
+                f"face {t}: lon changes {along:.2e} along axis {const_axis} "
+                f"vs {across:.2e} across -- not the assumed axis convention")
+
+    def test_n_tracers_below_one_is_refused(self, model):
+        with pytest.raises(ValueError, match="n_tracers"):
+            model.dcmip16_initial_state(n_tracers=0)
+
+    def test_one_step_advects_every_tracer(self, model):
+        """Two passengers through one step: both come back, both finite,
+        both moved, and they did not collapse onto each other."""
+        ic = model.dcmip16_initial_state(n_tracers=2)
+        out = model.step(ic, BDT)
+        assert len(out["q"]) == 2
+        # codex 2026-09-13: scored on the COMPUTE WINDOW only -- a halo fill
+        # alone satisfied "moved", and a zeroed tracer passed every check.
+        cs = slice(NG, NG + N)
+        for iq in range(2):
+            a = np.asarray(ic["q"][iq])[:, cs, cs, :]
+            b = np.asarray(out["q"][iq])[:, cs, cs, :]
+            assert np.isfinite(b).all(), f"tracer {iq} went non-finite"
+            assert (b > 0).any(), f"tracer {iq} is zero after the step"
+            assert float(np.abs(b - a).max()) > 0.0, (
+                f"tracer {iq} did not move on the compute window")
+        b0 = np.asarray(out["q"][0])[:, cs, cs, :]
+        b1 = np.asarray(out["q"][1])[:, cs, cs, :]
+        assert not np.array_equal(b0, b1)
+        # the modulation must SURVIVE transport: tracer 1 is not a constant
+        # multiple of tracer 0 after the step (a copy or an index swap is)
+        ratio = b1[b0 > 0] / b0[b0 > 0]
+        assert ratio.max() - ratio.min() > 0.1
+
     def test_validate_dycore_contract(self, model):
         from legoesm.components.protocol import validate_dycore
         validate_dycore(model)
@@ -254,6 +342,51 @@ class TestFV3DuoDynamicsModel:
         assert float(np.abs(np.asarray(out["state"]["delz"])
                             - np.asarray(ic["state"]["delz"])).max()) > 0.0
         assert float(np.abs(np.asarray(out["state"]["w"])).max()) > 0.0
+
+
+    def test_moist_arm_routes_zvir_into_ic_and_step(self, bundle):
+        """``moist=True`` = the oracle's zvir with tracer 0 as humidity:
+        (1) the IC's pt is the dry IC's pt divided by (1 + zvir*q) on
+        the compute window (test_cases.F90:6762), bitwise; (2) the
+        wrapper's step is the CORE's own moist step (zvir, sphum_index=0)
+        bitwise -- the routing is that and nothing else; (3) it differs
+        from the dry step on the same moist IC (non-vacuous)."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoConfig,
+            FV3DuoDynamicsModel,
+        )
+        from legoesm.core.fv3_dynamics import make_fv_dynamics_step_jit
+        from legoesm.grids.fv3_native_gridstruct import (
+            FV3_CP_AIR, FV3_KAPPA, FV3_RDGAS, FV3_RVGAS)
+        dry = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2))
+        wet = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2,
+                                                       moist=True))
+        assert dry.zvir == 0.0
+        assert wet.zvir == FV3_RVGAS / FV3_RDGAS - 1.0
+        ic_d, ic_w = dry.dcmip16_initial_state(), wet.dcmip16_initial_state()
+        cs = slice(NG, NG + N)
+        q = np.asarray(ic_w["q"][0])
+        exp_pt = np.asarray(ic_d["state"]["pt"])[:, cs, cs] \
+            / (1.0 + wet.zvir * q[:, cs, cs])
+        assert np.asarray(ic_w["state"]["pt"])[:, cs, cs].tobytes() \
+            == exp_pt.tobytes()
+        assert np.array_equal(q, np.asarray(ic_d["q"][0]))
+        out_w = wet.step(ic_w, BDT)
+        core = make_fv_dynamics_step_jit(
+            wet._ctx_jax, KM, k_split=1, n_split=2, ptop=wet._ptop,
+            ak=wet._ak, bk=wet._bk, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+            kord_mt=9, kord_tm=-9, kord_tr=9, hydrostatic=True,
+            w_limiter=None, out_shardings=None, batched=False,
+            zvir=wet.zvir, sphum_index=0)
+        ref = core(ic_w["state"], ic_w["press"], ic_w["q"], BDT,
+                   ic_w["omga"], ic_w["nh"])
+        for nm in ("delp", "pt", "u", "v"):
+            assert np.asarray(out_w["state"][nm]).tobytes() == \
+                np.asarray(ref["state"][nm]).tobytes(), nm
+        out_d = dry.step(ic_w, BDT)
+        d = float(np.abs(np.asarray(out_w["state"]["pt"])
+                         - np.asarray(out_d["state"]["pt"])).max())
+        assert d > 1e-6, "moist step identical to dry step on the same IC"
 
 
 # ---------------------------------------------------------------------
@@ -306,7 +439,16 @@ class TestComponentFactoryDispatch:
         # step); the NH combination stays refused as uncertified.
         (dict(held_suarez_forcing=True, model_type="nonhydrostatic"),
          "hydrostatic-only"),
-        (dict(distributed=True), "single-process"),
+        # Kessler is routed ALONE on the hydrostatic arm; with HS or NH
+        # it stays refused, and any second scheme next to it is inert.
+        (dict(microphysics="kessler", held_suarez_forcing=True),
+         "choose one"),
+        (dict(microphysics="kessler", model_type="nonhydrostatic"),
+         "Kessler is hydrostatic-only"),
+        (dict(microphysics="kessler", turbulence="louis"), "silently inert"),
+        # distributed now legal with mode spmd; the DEFAULT mode (mpi)
+        # is refused with the SPMD-only message (PR #1656 driver wiring).
+        (dict(distributed=True), "SPMD-only"),
     ])
     def test_slice1_refusals_fire(self, bad, frag):
         """Every refusal raises BEFORE any (expensive) duo grid build,
@@ -319,6 +461,43 @@ class TestComponentFactoryDispatch:
         with pytest.raises(ValueError, match=frag):
             create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                      create_sigma_coordinate(KM))
+
+    def test_window_layout_refuses_wrong_device_count(self):
+        """--fv3-duo-windows KT needs EXACTLY 6*KT*KT devices; this test
+        process has far fewer, so the factory must refuse and NAME the
+        required count (no auto-fallback to the face layout)."""
+        import jax
+        from legoesm.driver.component_factory import create_atmosphere_dycore
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        cfg = _fv3_duo_config()
+        cfg = cfg._replace(dycore=cfg.dycore._replace(
+            fv3_duo_windows=2, fv3_duo_window_pad=5))
+        assert jax.local_device_count() != 24
+        with pytest.raises(ValueError, match="needs exactly 24"):
+            create_atmosphere_dycore(cfg, create_cubed_sphere(N),
+                                     create_sigma_coordinate(KM))
+
+    def test_kessler_hydrostatic_constructs(self):
+        """hydro + microphysics='kessler' (alone) passes the wall and
+        the specific guards: the one routed scheme on this lane."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        from legoesm.driver.component_factory import create_atmosphere_dycore
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        cfg = _fv3_duo_config(microphysics="kessler")
+        model = create_atmosphere_dycore(cfg, create_cubed_sphere(N),
+                                         create_sigma_coordinate(KM))
+        assert isinstance(model, FV3DuoDynamicsModel)
+        # Kessler selects MOIST dynamics (user 2026-09-24); the dry deck
+        # does not
+        assert model.config.moist is True and model.zvir > 0.0
+        dry = create_atmosphere_dycore(_fv3_duo_config(),
+                                       create_cubed_sphere(N),
+                                       create_sigma_coordinate(KM))
+        assert dry.config.moist is False and dry.zvir == 0.0
 
     def test_held_suarez_hydrostatic_constructs(self):
         """hydro + held_suarez_forcing passes the wall AND the specific
@@ -554,6 +733,99 @@ class TestModelDriverLane:
         assert (tmp_path / "fv3duo_status.txt").read_text().strip() \
             == "COMPLETED"
 
+    def test_kessler_run_is_dynamics_plus_the_bridge(self, tmp_path):
+        """Kessler-on driver run COMPLETEs with THREE tracers (DCMIP16
+        humidity + zero cloud + zero rain) and its final state is
+        bitwise the driver's own dynamics step composed with the shared
+        Kessler bridge after every step -- the routing is exactly that
+        and nothing else (and the bridge reads pe/peln of the SAME
+        step's press dict, not a stale one)."""
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
+            apply_kessler_step_sixface_jax)
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path),
+                              microphysics="kessler")
+        driver = ModelDriver(cfg, output_dir=tmp_path)
+        driver.setup()
+        status = driver.run()
+        assert status == "COMPLETED", f"Kessler driver lane returned {status!r}"
+        assert len(driver.state["q"]) == 3
+        dt = float(driver.config.dycore.dt)
+        n_steps = int(cfg.days * 86400.0 / dt)
+        bundle = driver.model.dcmip16_initial_state(do_pert=True)
+        q0 = bundle["q"][0]
+        bundle = {**bundle, "q": [q0, jnp.zeros_like(q0), jnp.zeros_like(q0)]}
+        from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+        g = driver.model.grid
+        for _ in range(n_steps):
+            bundle = driver.model.step(bundle, dt)
+            st, pr, q = apply_kessler_step_sixface_jax(
+                bundle["state"], bundle["press"], bundle["q"], dt=dt,
+                n=g.n, ng=g.ng, km=driver.model.config.km,
+                ptop=driver.model._ptop, akap=FV3_KAPPA)
+            bundle = {**bundle, "state": st, "press": pr, "q": q}
+        pt_drv = np.asarray(driver.state["state"]["pt"])
+        assert np.isfinite(pt_drv).all()
+        # the driver's bridge is jitted, this composition is eager: XLA
+        # fusion makes that rounding-level (1e-13 of peak), not bitwise
+        def _close(x, y):
+            x, y = np.asarray(x), np.asarray(y)
+            return np.abs(x - y).max() <= 1e-13 * max(np.abs(x).max(), 1e-300)
+        assert _close(pt_drv, bundle["state"]["pt"])
+        assert _close(driver.state["state"]["delp"], bundle["state"]["delp"])
+        assert _close(driver.state["press"]["pe"], bundle["press"]["pe"])
+        for i in range(3):
+            assert _close(driver.state["q"][i], bundle["q"][i]), i
+        # the humidity slot is the DCMIP16 field, not a passenger copy
+        assert float(np.abs(np.asarray(driver.state["q"][0])).max()) > 1e-3
+
+    def test_kessler_hook_keeps_a_passenger_once(self, tmp_path):
+        """Face layout: a fourth tracer beyond the Kessler slots rides
+        through the driver hook unchanged and exactly once (codex
+        2026-09-24: the bridge already keeps it, and the hook appended
+        it again -- four became five, then seven)."""
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path),
+                              microphysics="kessler")
+        driver = ModelDriver(cfg, output_dir=tmp_path)
+        driver.setup()
+        # rain on a SATURATED column so some reaches the surface and the
+        # renormalisation is NOT the identity (mass gate non-vacuous); on
+        # the dry IC the core evaporates any seed within the step
+        from tests.grids.test_fv3_duo_window_spmd import _saturate_and_seed_rain
+        b = _saturate_and_seed_rain(driver._fv3_duo_fresh_ic(),
+                                    driver.model.grid)
+        out = driver._fv3_duo_apply_kessler(b, float(cfg.dycore.dt))
+        assert len(out["q"]) == 4
+        # the passenger's MASS is conserved through the renormalisation
+        g = driver.model.grid
+        cs = slice(g.ng, g.ng + g.n)
+        m0 = (np.asarray(b["state"]["delp"]) * np.asarray(b["q"][3]))[:, cs, cs]
+        m1 = (np.asarray(out["state"]["delp"]) * np.asarray(out["q"][3]))[:, cs, cs]
+        assert np.allclose(m1, m0, rtol=1e-12, atol=0)
+        assert np.abs(np.asarray(out["q"][3]) - np.asarray(b["q"][3]))[:, cs, cs].max() > 0.0
+        out2 = driver._fv3_duo_apply_kessler(out, float(cfg.dycore.dt))
+        assert len(out2["q"]) == 4
+
+    def test_kessler_restart_template_carries_three_tracers(self, tmp_path):
+        """The multi-process restart validator sizes a checkpoint against
+        the deck's OWN fresh IC; with Kessler on that IC carries three
+        tracers, so a Kessler checkpoint (nq=3) is not refused as
+        foreign (GLM 2026-09-23).  Dry deck: one."""
+        from legoesm.driver.model_driver import ModelDriver
+        for micro, nq in (("kessler", 3), ("none", 1)):
+            cfg = _fv3_duo_config(output_dir=str(tmp_path / micro),
+                                  microphysics=micro)
+            driver = ModelDriver(cfg, output_dir=tmp_path / micro)
+            driver.setup()
+            flat = driver._fv3_duo_flatten_bundle(
+                driver._fv3_duo_host_faces(driver._fv3_duo_fresh_ic()))
+            assert sum(nm.startswith("q_") for nm in flat) == nq, micro
+            if micro == "kessler":
+                assert not np.asarray(flat["q_1"]).any()
+                assert not np.asarray(flat["q_2"]).any()
+                assert np.asarray(flat["q_0"]).any()
+
     def test_blowup_writes_explicit_status_marker(self, tmp_path):
         """A guard-tripped run leaves an EXPLICIT marker (not just a
         missing manifest digest).  Cheap: an identity step (no jit
@@ -599,6 +871,7 @@ def _write_duo_ckpt(path, drv, **over):
         "_hydrostatic": np.bool_(drv.model.config.hydrostatic),
         "_km": np.int64(drv.model.config.km),
         "_resolution": np.int64(drv.model.grid.n),
+        "_zvir": np.float64(drv.model.zvir),
         "_git_sha": "test",
     }
     meta.update(over)
@@ -637,6 +910,9 @@ class TestFV3DuoRestart:
         ("_resolution", 24, "resolution mismatch"),
         ("_hydrostatic", False, "hydrostatic mismatch"),
         ("_dt", 7.0, "dt mismatch"),
+        # a MOIST checkpoint on the dry driver (codex 2026-09-24: the
+        # tracer count alone cannot tell the two thermodynamic modes)
+        ("_zvir", 0.6078, "thermodynamic-mode mismatch"),
     ])
     def test_deck_mismatch_refused(self, restart_driver, field, value,
                                    frag):
@@ -762,15 +1038,21 @@ class TestFV3DuoRestart:
         with pytest.raises(ValueError, match="load_checkpoint"):
             drv._run_fv3_duo(start_step=7)
 
-    @pytest.mark.parametrize("model_type,hs", [
-        ("hydrostatic", False),
-        ("nonhydrostatic", False),
+    @pytest.mark.parametrize("model_type,hs,micro", [
+        ("hydrostatic", False, "none"),
+        ("nonhydrostatic", False, "none"),
         # HS-on restart: the adapter is stateless (bundle -> bundle) and
         # checkpoints persist the post-HS bundle, so the chain must stay
         # bitwise exactly like the dry lane (codex MINOR 2026-08-24).
-        ("hydrostatic", True),
+        ("hydrostatic", True, "none"),
+        # Kessler (moist, three tracers): the checkpoint carries nq=3 and
+        # the loader must take it back without refusing or re-deriving
+        # the tracer list (codex 2026-09-24: the template test alone
+        # could not tell).
+        ("hydrostatic", False, "kessler"),
     ])
-    def test_restart_roundtrip_bitwise(self, tmp_path, model_type, hs):
+    def test_restart_roundtrip_bitwise(self, tmp_path, model_type, hs,
+                                       micro):
         """PRE-REGISTERED acceptance (non-negotiable): run A = 2 days
         straight; run B = fresh driver loading A's day-1 checkpoint,
         then the remaining day.  Final bundles must be BITWISE identical
@@ -781,7 +1063,7 @@ class TestFV3DuoRestart:
         dir_a, dir_b = tmp_path / "a", tmp_path / "b"
         dir_a.mkdir(), dir_b.mkdir()
         mk = dict(days=2, checkpoint_days=1, model_type=model_type,
-                  held_suarez_forcing=hs)
+                  held_suarez_forcing=hs, microphysics=micro)
         cfg_a = _fv3_duo_config(output_dir=str(dir_a), **mk)
         drv_a = ModelDriver(cfg_a, output_dir=dir_a)
         drv_a.setup()
@@ -887,7 +1169,34 @@ def test_wall_default_surface_is_frozen():
 
 # ponytail: filled by the first CI run's failure message; the VALUE is
 # the reviewable artifact, the mechanism is above.
-_WALL_SURFACE_SHA256 = "7fb1bc3750cdf11d0ba437879c131a1b1edb8db5fa70550b9bec0caece2efb49"
+#
+# 2026-09-23, merging main into this branch (#1769). The gate fired and it
+# was RIGHT to: it failed on the merge commit and not on the pre-merge tip.
+# The review it demands, done rather than skipped -- the flattened surface was
+# dumped on both trees and differenced:
+#
+#   39 paths ADDED by main, 5 REMOVED, and exactly ONE default MOVED:
+#       albedo_ice: 0.65 -> 0.8
+#
+# An ADDED default cannot trip the wall (it refuses non-default VALUES, and a
+# new field arrives at its own default), and `test_wall_allowlist_paths_are_live`
+# passes on the merge, so none of the 5 removals left a stale allow-list entry.
+# The one MOVED default is the question the gate exists to force, and
+# `albedo_ice` is inert on this lane: it is read by `ice/sea_ice.py` and the
+# AMIP surface-albedo blend, and `_refuse_fv3_duo_non_default` admits only
+# grid / dycore / span / window / output-cadence / distributed paths -- the duo
+# lane has no radiation and no sea ice to read it.
+#
+# Recorded because it is main's, not this branch's, and someone should look at
+# it there: `forcing/amip.py` still declares `albedo_ice: float = 0.65`, so the
+# two declarations of that quantity now disagree.
+#
+# 2026-09-23 re-review (job 9952079, old vs new surface): five new
+# cloud_cap_floor_* fields (all off) and cloud_saturation_scheme moving
+# 'liquid' -> 'mixed_phase'.  Both are cloud diagnostics the duo execution
+# loop never evaluates (the cloud_scheme allow-list entry's own argument);
+# non-default values stay refused, so the allow-list is unchanged.
+_WALL_SURFACE_SHA256 = "71129e0044383074ff9fb65d9eddef903a21419dbba9a7941fbd90adcf0796a0"
 
 
 def test_wall_leaf_types_are_scalar():
@@ -950,3 +1259,109 @@ def test_the_driver_can_only_build_the_certified_split_counts():
     # And the defaults it therefore gets are the ones the parity was run at.
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig
     assert (FV3DuoConfig().k_split, FV3DuoConfig().n_split) == (1, 8)
+
+
+class TestFV3DuoSpmdDriver:
+    """--distributed --distributed-mode spmd on the duo lane: factory
+    builds the model with the three dual-reviewed SPMD knobs over the
+    local devices; mpi mode and multi-process are refused loudly."""
+
+    def _cfg(self, tmp_path, **over):
+        return _fv3_duo_config(output_dir=str(tmp_path),
+                               distributed=True,
+                               distributed_mode="spmd", **over)
+
+    def test_mpi_mode_refused(self, tmp_path):
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path), distributed=True,
+                              distributed_mode="mpi")
+        drv = ModelDriver(cfg, output_dir=tmp_path)
+        # Two loud exits, both correct: on envs WITH mpi4jax the factory's
+        # SPMD-only ValueError; on this venv the mpi runtime's ImportError
+        # fires first (mpi4jax lives only in the legoesm-mpi venv). Either
+        # way duo+mpi cannot run silently.
+        with pytest.raises((ValueError, ImportError),
+                           match="SPMD-only|mpi4jax"):
+            drv.setup()
+
+    def test_spmd_constructs_with_the_knobs(self, tmp_path):
+        """NON-VACUOUS (codex MAJOR: the first cut asserted something
+        true of the serial model too): the knobs must PROVABLY have
+        taken -- a ring-enabled context distinct from the bundle's, its
+        tables carrying a ring_comm whose mesh spans the local
+        devices."""
+        import jax
+        if len(jax.local_devices()) < 2 or 6 % len(jax.local_devices()):
+            pytest.skip("needs 2/3/6 local devices")
+        from legoesm.driver.model_driver import ModelDriver
+        drv = ModelDriver(self._cfg(tmp_path), output_dir=tmp_path)
+        drv.setup()
+        ctx = drv.model._ctx_jax
+        assert ctx is not drv.model.grid.ctx_jax, \
+            "spmd model reused the bundle's serial context"
+        rc = ctx.tab.ring_comm
+        assert rc is not None, "ring_comm not attached"
+        assert tuple(rc.mesh.axis_names) == ("face",)
+        assert rc.mesh.size == len(jax.local_devices())
+
+    def test_spmd_short_run_completes(self, tmp_path):
+        import jax
+        if len(jax.local_devices()) < 2 or 6 % len(jax.local_devices()):
+            pytest.skip("needs 2/3/6 local devices "
+                        "(xla_force_host_platform_device_count)")
+        from legoesm.driver.model_driver import ModelDriver
+        drv = ModelDriver(self._cfg(tmp_path), output_dir=tmp_path)
+        drv.setup()
+        assert drv.run() == "COMPLETED"
+
+
+class TestTerminatorTracers:
+    """The oracle's DCMIP16 terminator pair, ported from test_cases.F90:
+    4136-4205 -- passive on an adiabatic deck, longitude-dependent, and
+    Cl + 2 Cl2 == qcly EXACTLY by construction."""
+
+    def test_pair_is_nonzero_lon_dependent_and_conserves_qcly(self):
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            TERM_QCLY, dcmip16_terminator_cl_cl2)
+        lon = np.linspace(0.0, 2 * np.pi, 73)[None, :] * np.ones((5, 1))
+        lat = np.linspace(-1.2, 1.2, 5)[:, None] * np.ones((1, 73))
+        cl, cl2 = dcmip16_terminator_cl_cl2(lon, lat)
+        assert (cl >= 0).all() and (cl2 >= 0).all()
+        assert cl.max() > 0 and cl2.max() > 0
+        np.testing.assert_allclose(cl + 2 * cl2, TERM_QCLY, rtol=0, atol=4e-21)
+        # longitude dependence: along one latitude cl is not constant
+        assert cl[2].max() - cl[2].min() > 1e-7
+        # the night side (k1 = 0) is the pure Cl2 state: cl = 0, cl2 = qcly/2
+        night = cl == 0.0
+        assert night.any()
+        np.testing.assert_array_equal(cl2[night], TERM_QCLY / 2)
+
+    def test_six_face_pair_is_window_filled_and_level_independent(self, bundle):
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            TERM_QCLY, dcmip16_terminator_six_face)
+        pairs = dcmip16_terminator_six_face(bundle.ctx_np, KM)
+        cs = slice(NG, NG + N)
+        halo = np.ones((MA, MA), bool); halo[cs, cs] = False
+        for cl, cl2 in pairs:
+            assert cl.shape == cl2.shape == (MA, MA, KM)
+            assert not cl[halo].any() and not cl2[halo].any()
+            for k in range(1, KM):
+                np.testing.assert_array_equal(cl[..., k], cl[..., 0])
+            np.testing.assert_allclose(
+                cl[cs, cs, :] + 2 * cl2[cs, cs, :], TERM_QCLY, rtol=0, atol=4e-21)
+        assert not np.array_equal(pairs[0][0], pairs[3][0])
+
+    def test_model_appends_the_pair_after_the_passengers(self, model):
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            dcmip16_terminator_six_face)
+        ic = model.dcmip16_initial_state(n_tracers=2, terminator=True)
+        assert len(ic["q"]) == 4
+        pairs = dcmip16_terminator_six_face(model.grid.ctx_np, KM)
+        for iq in range(2):
+            np.testing.assert_array_equal(
+                np.asarray(ic["q"][2 + iq]),
+                np.stack([pairs[t][iq] for t in range(6)]))
+        plain = model.dcmip16_initial_state(n_tracers=2)
+        for iq in range(2):
+            np.testing.assert_array_equal(np.asarray(ic["q"][iq]),
+                                          np.asarray(plain["q"][iq]))

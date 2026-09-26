@@ -1,0 +1,75 @@
+{
+  "schema": "dino-zdf-row18-htau-operands-receipt-v1",
+  "date": "2026-08-28",
+  "probe_commit": "45fd95c244ac8f41e5c4be10b94f8a841ea8db71",
+  "full_artifact_sha256": "184853856783dfc159d19155c9ca6ddd956a769534c6892843413fb37289d3b7",
+  "bar": 1e-15,
+  "wet_columns": 9920,
+  "wet_elements": 332214,
+  "focus_columns_ji": [[1, 11], [1, 12], [1, 13], [23, 13]],
+  "disposition": "DIVERGED-DESIGN",
+  "row18_operand_owner": "htau",
+  "htau_owner": "native-gphit-degrees plus glibc-vector-SIN interaction",
+  "direct_operand_substitutions": {
+    "production_full_row_fail_columns": 21,
+    "gdepw_only_full_row_fail_columns": 21,
+    "htau_only_full_row_fail_columns": 0,
+    "both_full_row_fail_columns": 0,
+    "gdepw_unequal_wet_elements": 0,
+    "legacy_htau_unequal_wet_elements": 74005,
+    "legacy_htau_max_abs_error": 1.0658141036401503e-14
+  },
+  "htau_two_axis_substitutions": {
+    "captured_latitude_vs_native_gphit_unequal_wet_columns": 406,
+    "captured_latitude_vs_native_gphit_max_abs_degrees": 1.4210854715202004e-14,
+    "glibc_vector_sin_vs_jax_sin_unequal_wet_columns": 6252,
+    "legacy_latitude_plus_glibc_vector_sin": {
+      "htau_unequal_wet_elements": 3364,
+      "full_row_fail_columns": 0
+    },
+    "native_gphit_plus_jax_sin": {
+      "htau_unequal_wet_elements": 74005,
+      "full_row_fail_columns": 21
+    },
+    "native_gphit_plus_glibc_vector_sin": {
+      "htau_unequal_wet_elements": 0,
+      "full_row_fail_columns": 0,
+      "max_column_error": 0.0,
+      "focus_columns_pass": 4
+    }
+  },
+  "controls": {
+    "one_ulp_sensitive_phase_perturbed_ji": [3, 1],
+    "one_ulp_changed_wet_sine_elements": 1,
+    "one_j_row_htau_roll_fired": true,
+    "gdepw_one_i_roll_fired": true,
+    "literal_both_nonfinite_plant_fired": true,
+    "literal_both_value_plant_fired": true
+  },
+  "bracket": {
+    "restart_sha256": "33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c",
+    "restart_byte_identical": true,
+    "shared_tke_stream_count": 22,
+    "shared_tke_streams_byte_identical": true,
+    "excluded_oracle_diagnostic": {
+      "name": "cor2d_dump_zu_trd_substep1.bin",
+      "reason": "run-to-run nondeterministic under identical unpatched binary; likely uninitialized write-only buffer; not consumed by ZDF",
+      "first_difference_byte": 3,
+      "determinism_a_sha256": "fa5b20d5a6a03efd9a035b9d08c80d320b1394df1716bde6369f2619c9472108",
+      "determinism_b_sha256": "af126bdfb7b0caf6d154204f890bd587f4ed5dd3da0d2e8c3e77b9f7d43410d5"
+    }
+  },
+  "provenance": {
+    "glibc_version": "2.34",
+    "gdepw_dump_sha256": "fc601f5a4c0a9715245189fa10e9f354f0ad204f87bb5e5c31b5859107a01c3d",
+    "htau_dump_sha256": "3b1e2574a9ea37deb500f9f1a94a56d71b428f9be5b5558dfdf842df1eedfa0d",
+    "nemo_source_sha256": "77e89d625326f8e624b9a1b90d6fd369b01dce392eacb9d8b33798c7f009327e",
+    "nemo_binary_sha256": "57adb9957dd999e4b016377d7cc8b17de09176a0ba729aff0503d45e727ec116",
+    "vector_sin_wrapper_source_sha256": "058734aa645a209f8ad2a5e9ffdcf9dbd9edf7325425cb27c4e0afac05766d7f",
+    "vector_sin_wrapper_binary_sha256": "59496ebdf4bd80c1f6df60c46e28338de59a896666c976235365da45f1e33f9d"
+  },
+  "nemo_lines": {
+    "htau": "src/OCE/ZDF/zdftke.F90:870: htau=MAX(0.5,MIN(30,45*ABS(SIN(rpi/180*gphit))))",
+    "consumer": "cfgs/DINO/MY_SRC/zdftke.F90:664: en=en+rn_efr*en(1)*EXP(-gdepw(Kmm)/htau)*..."
+  }
+}

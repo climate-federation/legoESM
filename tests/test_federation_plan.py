@@ -43,7 +43,7 @@ FEDERATION_LOOSE_MODULES: dict[str, tuple[str, ...]] = {
     "legoesm-core": ("constants", "thermo", "registry", "surface_albedo"),
     "legoesm-ml": ("tuning",),
     "legoesm": ("cli", "config", "dycore_factory", "experiment_registry",
-                "supported_matrix", "taxonomy"),
+                "scaling_preflight", "supported_matrix", "taxonomy"),
 }
 
 #: The four mutually-independent Earth-system components (import-linter contract #2).

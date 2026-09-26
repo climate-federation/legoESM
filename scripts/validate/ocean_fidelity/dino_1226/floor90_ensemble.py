@@ -64,6 +64,7 @@ sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.dirname(_DIR))
 import acc_thermal_wind as A            # noqa: E402
 import acceptance_gate_90d as G         # noqa: E402
+import kamm_twin_90d as _twin          # noqa: E402  snapshot_storage_dtypes
 
 SEEDS = (None, 1, 2, 3)                 # member 0 is the unperturbed control
 N_MEM = len(SEEDS)
@@ -260,22 +261,27 @@ def banner():
     print("=" * 104)
 
 
-def growth_table(paths):
+def growth_table(paths, u_is_fp32=True):
     """Did the 1e-14 kick actually propagate, or is the tiny spread an artifact
     of a perturbation that never reached the integrated metrics?  This is the
     measurement that discriminates the two, and it must be read before the
     floor table is interpreted.
 
-    PRECISION BOUND, stated because it bounds what may be claimed: the 3-D
-    snapshots are stored float32, so on a ~20 K temperature the quantum is
-    ~2e-06 K.  The day-0 kick is ~1e-12 K and is therefore INVISIBLE here --
-    a 0.0 at day 0 is the storage precision, not the absence of a
-    perturbation (the harness's own PERTURB line records the real size).
-    Only differences above ~2e-06 K are resolved."""
+    PRECISION BOUND, stated because it bounds what may be claimed -- and
+    stated CONDITIONALLY, because it is only true of a float32-stored
+    ensemble.  On float32 storage a ~20 K temperature has a quantum of
+    ~2e-06 K, the day-0 kick is ~1e-12 K and is therefore INVISIBLE here, and
+    a 0.0 at day 0 is the storage precision rather than the absence of a
+    perturbation (the harness's own PERTURB line records the real size).  On a
+    --fp64-3d ensemble none of that applies and a 0.0 needs a physical
+    explanation; printing the float32 sentence there would be a false bound
+    printed next to the numbers it claims to bound."""
     print("\n--- GROWTH CONTROL: max|dT| of each perturbed member vs the "
           "control, by snapshot day [K] ---")
     print("    (float32 snapshots: quantum ~2e-06 K on a ~20 K field; day-0 "
-          "reads 0 by storage, not by physics)")
+          "reads 0 by storage, not by physics)" if u_is_fp32 else
+          "    (float64 snapshots: there is no storage quantum here, so a 0.0 "
+          "is NOT storage and needs a physical explanation)")
     ctrl = np.load(paths[0])
     print(f"{'member':<14}" + "".join(f"{'day ' + str(d):>16}"
                                       for d in (0, 30, 60, 90)))
@@ -374,6 +380,26 @@ def main(argv=None):
                              f"the control -- the members are not comparable")
     print(f"\n[control] land mask identical across all {N_MEM} members: OK")
 
+    # Which storage precision these artifacts were written at, from their own
+    # ONLY the three scored 3-D fields are compared, never the whole stamp
+    # map: a recorded member resolves to a nine-entry legacy map and a new
+    # member writes a ten-entry one, which is not a difference in storage
+    # precision (code review).
+    _sto = set()
+    for q in paths:
+        with np.load(q) as _z:
+            _m = _twin.snapshot_storage_dtypes(_z)
+        _sto.add(tuple(_m.get(f, "float32") for f in ("T3d", "S3d", "u3d")))
+    if len(_sto) != 1:
+        raise SystemExit(f"members stored their 3-D snapshots at different "
+                         f"precisions: {sorted(_sto)} -- one floor cannot "
+                         f"span two storage quanta")
+    # SAFE DIRECTION: anything that is not exactly "float64" keeps the float32
+    # bound, so an unstamped or "absent" field never earns a waiver.
+    _u_is_fp32 = _sto.pop()[2] != "float64"
+    print(f"[control] 3-D snapshot storage of u: "
+          f"{'float32' if _u_is_fp32 else 'float64'}")
+
     # CONTROL 4, mechanized: three DIFFERENT seeds must produce three DIFFERENT
     # day-90 states.  Identical values would mean the perturbation never
     # reached the integrator, and the "floor" would be exactly zero by
@@ -397,26 +423,38 @@ def main(argv=None):
                 f"construction, not by measurement")
         n_tied = N_MEM - len(set(vals))
         if n_tied:
-            print(f"[control] NOTE {k!r}: {n_tied} member value(s) tie at the "
-                  f"float32 storage quantum -- its floor is an UPPER bound")
+            print(f"[control] NOTE {k!r}: {n_tied} member value(s) tie"
+                  + (" at the float32 storage quantum -- its floor is an "
+                     "UPPER bound" if _u_is_fp32 else
+                     " -- the snapshots are float64, so this tie is NOT the "
+                     "storage quantum and the floor is not bounded by it"))
     print(f"[control] every metric separates at least two members: OK")
 
     # STORAGE-PRECISION BOUND on the whole measurement, printed next to the
-    # numbers it bounds.  The 3-D snapshots this scores are float32.  For the
-    # transport metrics the accumulated rounding of the stored u field is the
-    # same order as the spread being measured, so the floors below are UPPER
-    # BOUNDS on the true run-to-run spread -- they cannot be smaller than what
-    # the storage can represent.  (Every conclusion in the pre-registration is
-    # about the floor being FAR BELOW the gate's constant, and an upper bound
-    # is the right side of that inequality -- but the numbers are not to be
-    # read as resolved values.)
+    # numbers it bounds.  For a float32-stored u the accumulated rounding of
+    # the stored field is the same order as the spread being measured, so the
+    # floors below are UPPER BOUNDS on the true run-to-run spread -- they
+    # cannot be smaller than what the storage can represent.  (Every conclusion
+    # in the pre-registration is about the floor being FAR BELOW the gate's
+    # constant, and an upper bound is the right side of that inequality -- but
+    # the numbers are not to be read as resolved values.)
+    #
+    # EXTEND-ONLY: which precision applies is read off the artifacts' own
+    # per-field storage stamp, so a --fp64-3d ensemble is not bounded by a
+    # quantum it does not have, and every recorded (unstamped) artifact still
+    # gets exactly this bound.
     _u = np.abs(G.load_candidate(paths[0])["u"])
-    _q = float(np.max(_u)) * float(np.finfo(np.float32).eps)
-    print(f"[control] float32 storage quantum on u: ~{_q:.2e} m/s "
-          f"(max|u|={float(np.max(_u)):.3f}); the ACC floor below is an UPPER "
-          f"bound set partly by this, not a resolved value")
+    if _u_is_fp32:
+        _q = float(np.max(_u)) * float(np.finfo(np.float32).eps)
+        print(f"[control] float32 storage quantum on u: ~{_q:.2e} m/s "
+              f"(max|u|={float(np.max(_u)):.3f}); the ACC floor below is an "
+              f"UPPER bound set partly by this, not a resolved value")
+    else:
+        print(f"[control] the 3-D snapshots are float64 "
+              f"(max|u|={float(np.max(_u)):.3f}); no float32 storage quantum "
+              f"bounds the floors below")
 
-    growth_table(paths)
+    growth_table(paths, _u_is_fp32)
 
     print("\n--- member values ---")
     print(f"{'metric':<36}" + "".join(f"{member_name(i):>18}" for i in range(len(SEEDS)))

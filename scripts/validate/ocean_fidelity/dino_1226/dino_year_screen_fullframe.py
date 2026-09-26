@@ -138,18 +138,13 @@ if INIT_RESTART:
     verify_day0_matches_restart(st, s, br.land_mask)
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
-    # #1226 W1: NEMO-faithful implicit-solve gradient divisor (trazdf.F90:
-    # 219-220 e3w(...,Kmm), the NOW/pre-solve thickness) vs legoESM's default
-    # AFTER-solve midpoint divisor. LatLonCGridOceanConfig field (not a
-    # DINOConfig field, unlike the ablations above), set on mc post-
-    # construction. Opt-in measurement knob only -- NOT a recipe/kamm default.
-    _v = os.environ["DINO_NEMO_KMM_DIVISOR"]
-    if _v not in ("0", "1"):
-        raise SystemExit(
-            f"Unknown DINO_NEMO_KMM_DIVISOR={_v!r}: expected '0' or '1'")
-    # mc is a NamedTuple (LatLonCGridOceanConfig), not a dataclass -> _replace.
-    mc = mc._replace(implicit_vmix_e3t_now_divisor=(_v == "1"))
-    print(f"ABLATION: implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+    raise SystemExit(
+        "DINO_NEMO_KMM_DIVISOR is GONE. NEMO's e3w(Kmm) implicit-solve divisor "
+        "(trazdf.F90:219-221, dynzdf.F90:200-203) is no longer a flag: it is "
+        "unbranched inside the NEMO identity "
+        'zdf_implicit_solver_evaluation="nemo_literal", which this card already '
+        "selects. Compare across commits, not across this knob "
+        "(docs/ocean/fidelity/dino_zdf_divisor_arm_receipt.md).")
 # #1492 P2: NEMO-faithful step-composition A/B (docs/ocean/fidelity/
 # nemo_mlf_step_transcription_spec.md resolved decision 2). Default "" =
 # legacy (outer_integrator="leapfrog", i.e. _leapfrog_step, unchanged from
@@ -164,16 +159,17 @@ if _OI:
         raise SystemExit(
             f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
             "'leapfrog' or 'nemo_mlf'")
-    # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction (spec
-    # resolved decision 4: a transcription that permits a non-NEMO divisor
-    # stops being a transcription at that row) -- auto-force it here so the
-    # env knob alone is sufficient without also setting DINO_NEMO_KMM_DIVISOR.
+    # nemo_mlf HARD-REQUIRES the NEMO implicit-ZDF identity at construction
+    # (spec resolved decision 4: a transcription that permits a non-NEMO
+    # divisor stops being a transcription at that row) -- auto-force it here
+    # so the env knob alone is sufficient.
     mc = mc._replace(
         outer_integrator=_OI,
-        implicit_vmix_e3t_now_divisor=(
-            True if _OI == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
+        zdf_implicit_solver_evaluation=(
+            "nemo_literal" if _OI == "nemo_mlf"
+            else mc.zdf_implicit_solver_evaluation))
     print(f"ABLATION: outer_integrator={mc.outer_integrator} "
-          f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+          f"zdf_implicit_solver_evaluation={mc.zdf_implicit_solver_evaluation}")
 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 sf = dino_step_surface_forcing(forcing)   # WIND: tau_x/taum into the dycore external-tau block

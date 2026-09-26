@@ -147,6 +147,7 @@ The Beres (2004) convective source (``gw_convect.F90``) source-SPECTRUM table
 
 from __future__ import annotations
 
+import functools
 import math
 
 import jax
@@ -334,6 +335,22 @@ def gw_prof(
 # gw_oro_src: McFarlane orographic source
 # ---------------------------------------------------------------------------
 
+def _source_direction(usrc: jax.Array, vsrc: jax.Array):
+    """Source-wind magnitude and unit vector, safe at zero wind.
+
+    ``sqrt`` has an infinite derivative at 0, so ``sqrt(u**2 + v**2)`` returns a
+    finite 0.0 for a calm column but a non-finite reverse-mode cotangent that a
+    later ``where`` cannot repair; the argument is made strictly positive before
+    the sqrt rather than the result masked after it.
+    """
+    magsq = usrc * usrc + vsrc * vsrc
+    safe = magsq > 0.0
+    mag = jnp.where(safe, jnp.sqrt(jnp.where(safe, magsq, 1.0)), 0.0)
+    xv = jnp.where(safe, usrc / jnp.where(safe, mag, 1.0), 0.0)
+    yv = jnp.where(safe, vsrc / jnp.where(safe, mag, 1.0), 0.0)
+    return mag, xv, yv
+
+
 def gw_oro_src(
     u: jax.Array,
     v: jax.Array,
@@ -377,10 +394,7 @@ def gw_oro_src(
         u, v, rho_mid, hdsp, pint, dpm, zm, nm,
     )
 
-    mag = jnp.sqrt(usrc * usrc + vsrc * vsrc)
-    safe = mag > 0.0
-    xv = jnp.where(safe, usrc / jnp.where(safe, mag, 1.0), 0.0)
-    yv = jnp.where(safe, vsrc / jnp.where(safe, mag, 1.0), 0.0)
+    mag, xv, yv = _source_direction(usrc, vsrc)
 
     # Project winds onto source direction.
     ubm = u * xv[:, None] + v * yv[:, None]             # (ncol, nlev)
@@ -500,10 +514,7 @@ def gw_cm_src(
     gather = lambda a, idx: jnp.take(a, idx, axis=1)   # (ncol,) dynamic gather
     usrc = 0.5 * (gather(u, klo_i) + gather(u, kbot_i))
     vsrc = 0.5 * (gather(v, klo_i) + gather(v, kbot_i))
-    mag = jnp.sqrt(usrc * usrc + vsrc * vsrc)
-    safe = mag > 0.0
-    xv = jnp.where(safe, usrc / jnp.where(safe, mag, 1.0), 0.0)
-    yv = jnp.where(safe, vsrc / jnp.where(safe, mag, 1.0), 0.0)
+    mag, xv, yv = _source_direction(usrc, vsrc)
 
     ubm = u * xv[:, None] + v * yv[:, None]
     ubi = _interface_proj(ubm, mag)
@@ -641,10 +652,7 @@ def gw_beres_src(
     # --- Source-wind direction from the 700 hPa winds (E3SM uses u(:,k700)).
     u700 = jnp.take(u, k700_i, axis=1)                     # (ncol,)
     v700 = jnp.take(v, k700_i, axis=1)
-    mag700 = jnp.sqrt(u700 * u700 + v700 * v700)
-    safe = mag700 > 0.0
-    xv = jnp.where(safe, u700 / jnp.where(safe, mag700, 1.0), 0.0)
-    yv = jnp.where(safe, v700 / jnp.where(safe, mag700, 1.0), 0.0)
+    mag700, xv, yv = _source_direction(u700, v700)
 
     ubm = u * xv[:, None] + v * yv[:, None]                # (ncol, nlev)
     ubi = _interface_proj(ubm, mag700)                     # (ncol, nlev+1)
@@ -737,12 +745,14 @@ def gw_beres_src(
     cs_f = jnp.sign(ubm700) * jnp.maximum(
         jnp.abs(ubm700) - beres.storm_speed_min, 0.0
     )
-    cs = jnp.trunc(cs_f).astype(jnp.int32)                 # int(sign(...))
+    # E3SM truncates CS to an integer (``int(sign(...))``); CAM6
+    # (gw_convect.F90:217) keeps it real.  Static Python switch.
+    cs = jnp.trunc(cs_f) if beres.storm_speed_truncate else cs_f
 
     uh = jnp.sum(
         jnp.where(in_range, ubm, 0.0), axis=1
     ) / n_in.astype(dtype)
-    uh = uh - cs.astype(dtype)
+    uh = uh - cs
     uh = jnp.clip(uh, -float(maxuh), float(maxuh))
 
     # Speeds for critical-level filtering (min/max projected wind in range).
@@ -767,7 +777,18 @@ def gw_beres_src(
     # the gather is always valid and jit/grad-safe.  For the default
     # hdepth_scaling_factor == 1 this clip is a no-op and the lookup is
     # bit-identical to E3SM.
-    h_idx = _nint(hdepth)                                  # 1..maxh (km)
+    if beres.hd_index_rule == "nint":
+        h_idx = _nint(hdepth)                              # 1..maxh (km)
+    elif beres.hd_index_rule == "nearest_grid":
+        # CAM6 index_of_nearest on hd = 1..maxh km: interfaces at k + 0.5,
+        # idx = 1 + count(hdepth > interface)  (exact ties -> lower row).
+        interfaces = jnp.arange(1, maxh, dtype=dtype) + 0.5    # (maxh-1,)
+        h_idx = 1 + jnp.sum(hdepth[:, None] > interfaces[None, :], axis=1)
+    else:
+        raise ValueError(
+            f"Unknown E3SMBeresConfig.hd_index_rule {beres.hd_index_rule!r}; "
+            "expected 'nint' (E3SM) or 'nearest_grid' (CAM6)."
+        )
     h_idx = jnp.clip(h_idx, 1, maxh)
     h_row = (h_idx - 1).astype(jnp.int32)                  # 0-based table row
     uh_idx = _nint(uh)
@@ -776,9 +797,18 @@ def gw_beres_src(
     # gather per column: mfcc[h_row, uh_col, :] -> (ncol, nwav)
     tau0 = mfcc[h_row, uh_col, :]                          # (ncol, nwav)
 
-    # Doppler shift so the spectrum is ground-relative: cshift by -nint(CS/dc).
-    shift = -_nint(cs.astype(dtype) / dc).astype(jnp.int32)  # (ncol,)
-    tau0 = _cshift_rows(tau0, shift)
+    # Doppler shift so the spectrum is ground-relative by -nint(CS/dc):
+    # E3SM ``cshift`` (wraps) or CAM6 ``eoshift`` (zero fill).
+    shift = -_nint(cs / dc).astype(jnp.int32)              # (ncol,)
+    if beres.spectrum_shift == "circular":
+        tau0 = _cshift_rows(tau0, shift)
+    elif beres.spectrum_shift == "end_off":
+        tau0 = _eoshift_rows(tau0, shift)
+    else:
+        raise ValueError(
+            f"Unknown E3SMBeresConfig.spectrum_shift {beres.spectrum_shift!r}; "
+            "expected 'circular' (E3SM cshift) or 'end_off' (CAM6 eoshift)."
+        )
 
     # Adjust magnitude by q0^2/AL.
     tau0 = tau0 * (q0 * q0 / beres.al)[:, None]
@@ -787,8 +817,11 @@ def gw_beres_src(
     umini = jnp.maximum(_nint(umin / dc), -pgwv).astype(jnp.int32)  # (ncol,)
     umaxi = jnp.minimum(_nint(umax / dc), pgwv).astype(jnp.int32)
     ls = jnp.arange(-pgwv, pgwv + 1)[None, :]              # (1, nwav) wave index
+    # Fortran ``tau0(Umini:Umaxi) = 0`` is a non-empty slice for Umini <= Umaxi
+    # (equal bounds zero ONE bin); only Umini > Umaxi is empty (codex review:
+    # the earlier ``>`` skipped the equal-bounds bin).
     crit_mask = (
-        (umaxi[:, None] > umini[:, None])
+        (umaxi[:, None] >= umini[:, None])
         & (ls >= umini[:, None])
         & (ls <= umaxi[:, None])
     )                                                      # (ncol, nwav)
@@ -821,6 +854,87 @@ def gw_beres_src(
 def _nint(x: jax.Array) -> jax.Array:
     """Fortran NINT: round half away from zero (int32)."""
     return jnp.sign(x) * jnp.floor(jnp.abs(x) + 0.5)
+
+
+def _eoshift_rows(a: jax.Array, shift: jax.Array) -> jax.Array:
+    """Fortran ``eoshift(array, SHIFT)`` per row: element ``i`` receives
+    ``a[i + SHIFT]`` when that index exists, else 0 (no wrap).  Same index
+    arithmetic as :func:`_cshift_rows` with zero fill; gather-based so it is
+    jit/vmap/grad-safe."""
+    ncol, n = a.shape
+    cols = jnp.arange(n)[None, :]                          # (1, n)
+    src = cols + shift[:, None]                            # (ncol, n)
+    valid = (src >= 0) & (src < n)
+    src_safe = jnp.clip(src, 0, n - 1).astype(jnp.int32)
+    return jnp.where(valid, jnp.take_along_axis(a, src_safe, axis=1), 0.0)
+
+
+@functools.lru_cache(maxsize=4)
+def load_mfcc_table(path: str, pgwv: int):
+    """Load the offline Beres lookup table the way ``gw_init_beres`` does.
+
+    The netcdf (``newmfspectra40_dc25.nc``) stores ``mfcc(PS, MW, HD)`` in the
+    file's (C-order) dimension list, which Fortran reads column-major into
+    ``mfcc(HD, -maxuh:maxuh, -ngwv:ngwv)`` with the phase-speed axis SUBSET
+    ``start=[1, 1, ngwv_file-ngwv+1]`` (gw_drag.F90:1099-1101).  In NumPy the
+    same array is ``data[ps, mw, hd]``; the kernel wants
+    ``(maxh, 2*maxuh+1, 2*pgwv+1)`` indexed ``[hd-1, uh+maxuh, l+pgwv]``, so
+    this transposes to ``(hd, mw, ps)`` and slices ``ps`` to
+    ``[ngwv_file-pgwv, ngwv_file+pgwv]`` inclusive.  Cached per (path, pgwv);
+    returns a float64 NumPy array (a trace-time constant for the closures).
+    """
+    import numpy as np
+    import xarray as xr
+
+    with xr.open_dataset(path) as ds:
+        var = ds["mfcc"]
+        dims = tuple(var.dims)
+        if set(dims) != {"PS", "MW", "HD"}:
+            raise ValueError(
+                f"mfcc table {path!r}: expected dims (PS, MW, HD), got {dims}")
+        data = np.asarray(var.transpose("HD", "MW", "PS").values, dtype=np.float64)
+        hd = np.asarray(ds["HD"].values, dtype=np.float64)
+    maxh, n_mw, n_ps = data.shape
+    if n_mw % 2 != 1 or n_ps % 2 != 1:
+        raise ValueError(
+            f"mfcc table {path!r}: MW/PS dims must be odd (symmetric about 0), "
+            f"got MW={n_mw}, PS={n_ps}")
+    ngwv_file = (n_ps - 1) // 2
+    if ngwv_file < pgwv:
+        raise ValueError(
+            f"mfcc table {path!r}: PS half-width {ngwv_file} does not cover "
+            f"the model's pgwv={pgwv} (gw_init_beres shr_assert)")
+    if not np.allclose(hd, np.arange(1, maxh + 1)):
+        raise ValueError(
+            f"mfcc table {path!r}: HD axis must be 1..{maxh} km (the kernel "
+            f"indexes rows by NINT(hdepth [km])), got {hd}")
+    lo = ngwv_file - pgwv
+    tbl = np.ascontiguousarray(data[:, :, lo:lo + 2 * pgwv + 1])
+    tbl.setflags(write=False)                              # shared lru_cache object
+    return tbl
+
+
+def _source_level_index(pmid, pint, p_target, rule):
+    """0-based midpoint index of the Beres source wind level.
+
+    ``"nearest_midpoint"``: the midpoint whose column-mean pressure is nearest
+    ``p_target`` (E3SM).  ``"interface_below_p"``: CAM6 ``gw_drag.F90:871-874``
+    — the LOWEST midpoint whose top interface has ``p < p_target`` (the layer
+    straddling ``p_target``).  Static ``rule``; raises on an unknown one.
+    """
+    nlev = pmid.shape[1]
+    if rule == "nearest_midpoint":
+        pmean = jnp.mean(pmid, axis=0)
+        k = jnp.argmin(jnp.abs(pmean - p_target))
+    elif rule == "interface_below_p":
+        pint_mean = jnp.mean(pint, axis=0)                 # (nlev+1,) top-down
+        k = jnp.sum(pint_mean < p_target) - 1
+    else:
+        raise ValueError(
+            f"Unknown E3SMBeresConfig.source_level_rule {rule!r}; expected "
+            "'nearest_midpoint' (E3SM) or 'interface_below_p' (CAM6)."
+        )
+    return jnp.clip(k, 0, nlev - 1).astype(jnp.int32)
 
 
 def _cshift_rows(a: jax.Array, shift: jax.Array) -> jax.Array:
@@ -1073,7 +1187,12 @@ def gw_drag_prof(
     vtgw = vtgw.T
     gwut = jnp.transpose(gwut, (1, 0, 2))            # (ncol, nlev, nwav)
 
-    return tau_final, utgw, vtgw, gwut
+    # ``tau`` here is the saturation profile, i.e. the stress BEFORE the
+    # tendency loop re-derives it from the limited tendency.  E3SM accumulates
+    # taucd from exactly this profile (gw_common.F90:562-599, ahead of the
+    # tendency loop at :627), so it is returned alongside the limited stress for
+    # the column momentum fixer.
+    return tau_final, utgw, vtgw, gwut, tau_state0
 
 
 # ---------------------------------------------------------------------------
@@ -1439,6 +1558,23 @@ def momentum_energy_conservation(
 # Top-level driver
 # ---------------------------------------------------------------------------
 
+# CAM ``gw_tend`` runs its sources in this order (gw_drag.F90: Beres deep
+# 1406, frontal 1582, orographic 1743); each source's energy fixer sees the
+# tendencies ACCUMULATED so far, so the order is part of the answer.
+_CAM_SOURCE_ORDER = ("convective", "frontal", "background", "orographic")
+
+
+def _effgw_for_source(config: E3SMCAMConfig, source: str):
+    """Per-source efficiency: the sub-config's ``effgw`` when set (CAM
+    ``effgw_cm`` / ``effgw_beres_dp``), else ``config.effgw``.  No ``float()``
+    cast: ``effgw`` is a tier-1 tunable and may arrive as a traced leaf."""
+    if source == "frontal" and config.frontal.effgw is not None:
+        return config.frontal.effgw
+    if source == "convective" and config.beres.effgw is not None:
+        return config.beres.effgw
+    return config.effgw
+
+
 def e3sm_cam_gwd(
     u: jax.Array,
     v: jax.Array,
@@ -1457,7 +1593,95 @@ def e3sm_cam_gwd(
     mfcc_table: jax.Array | None = None,
     land_frac_col: jax.Array | None = None,
 ) -> GWDOutput:
-    """Faithful E3SM/CAM gravity-wave drag (gw_drag_prof solver).
+    """Faithful E3SM/CAM gravity-wave drag; ``config.source`` may be one
+    source or a ``+``-joined set (CAM6 f09: ``"orographic+frontal+convective"``).
+
+    Each source runs :func:`_e3sm_cam_gwd_one_source` with its own
+    efficiency (:func:`_effgw_for_source`) in CAM's ``gw_tend`` order
+    (``_CAM_SOURCE_ORDER``: convective, frontal, orographic) and the
+    tendencies are summed into ``ptend`` as CAM does.  CAM's per-source
+    energy closure (``energy_change``/``energy_fixer``, gw_common.F90:858)
+    is evaluated on the ACCUMULATED ``ptend``, so each source here receives
+    the wind tendency accumulated by the sources before it (``du_prior``)
+    and closes the MARGINAL discrete kinetic-energy change — summing
+    independently closed sources would leave the ``dt*du_a*du_b`` cross
+    terms open (codex review).  See the single-source docstring for the
+    arguments.
+
+    DOCUMENTED DEPARTURES from CAM6 ``gw_tend`` (dual review 2026-09-21):
+    * the orographic source keeps the E3SM LOCAL discrete-KE heating; CAM6
+      spreads ``energy_fixer(de - flx_heat)`` uniformly below ``tend_level``
+      (gw_drag.F90:1798-1817).  Column budgets agree, the vertical profile
+      of the orographic heating does not.
+    * the Beres source level and the frontal launch/trigger levels come from
+      the COLUMN-MEAN actual pressure, not CAM's fixed ``pref_edge`` reference
+      profile (identical when p_s == p_ref; rank-dependent under MPI).
+    * the compiled cube pipeline feeds Beres THIS step's convective heating,
+      the MPAS/hydrostatic factories the previous step's (``conv_heating``
+      carry); both are the TOTAL heating, not CAM's deep-only ``TTEND_DP``.
+    * CAM's ``vramp``/``gw_polar_taper`` and the ridge scheme are not ported.
+    """
+    sources = config.source.split("+")
+    if len(set(sources)) != len(sources):
+        raise ValueError(f"Duplicate E3SM GWD source in {config.source!r}.")
+    if len(sources) == 1:
+        return _e3sm_cam_gwd_one_source(
+            u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+            config._replace(effgw=_effgw_for_source(config, sources[0])),
+            h_topo_col=h_topo_col, frontgf_col=frontgf_col,
+            netdt_col=netdt_col, mfcc_table=mfcc_table,
+            land_frac_col=land_frac_col,
+        )
+    unknown = [x for x in sources if x not in _CAM_SOURCE_ORDER]
+    if unknown:
+        raise ValueError(
+            f"Unknown E3SM GWD source: {unknown[0]!r}. "
+            "Choose 'orographic', 'frontal', 'background', or 'convective'."
+        )
+    du = dv = dT = eps = None
+    for src in [x for x in _CAM_SOURCE_ORDER if x in sources]:
+        out = _e3sm_cam_gwd_one_source(
+            u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+            config._replace(source=src, effgw=_effgw_for_source(config, src)),
+            h_topo_col=h_topo_col, frontgf_col=frontgf_col,
+            netdt_col=netdt_col, mfcc_table=mfcc_table,
+            land_frac_col=land_frac_col,
+            du_prior=du, dv_prior=dv,
+        )
+        du = out.du_dt if du is None else du + out.du_dt
+        dv = out.dv_dt if dv is None else dv + out.dv_dt
+        dT = out.dT_dt if dT is None else dT + out.dT_dt
+        eps = out.eps_gwd if eps is None else eps + out.eps_gwd
+    return GWDOutput(du_dt=du, dv_dt=dv, dT_dt=dT, eps_gwd=eps)
+
+
+def _e3sm_cam_gwd_one_source(
+    u: jax.Array,
+    v: jax.Array,
+    T: jax.Array,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    z_full: jax.Array,
+    z_half: jax.Array,
+    rho: jax.Array,
+    lat: jax.Array,
+    dt: float,
+    config: E3SMCAMConfig,
+    h_topo_col: jax.Array | None = None,
+    frontgf_col: jax.Array | None = None,
+    netdt_col: jax.Array | None = None,
+    mfcc_table: jax.Array | None = None,
+    land_frac_col: jax.Array | None = None,
+    du_prior: jax.Array | None = None,
+    dv_prior: jax.Array | None = None,
+) -> GWDOutput:
+    """Faithful E3SM/CAM gravity-wave drag (gw_drag_prof solver), ONE source.
+
+    ``du_prior``/``dv_prior`` (ncol, nlev) are the wind tendencies already
+    accumulated by earlier sources of a multi-source call; the energy
+    closures below then act on ``u + dt*du_prior`` so they close the
+    MARGINAL discrete kinetic-energy change exactly as CAM's accumulated
+    ``ptend`` energy fixer does.  ``None`` (single source) = plain ``u``.
 
     Parameters
     ----------
@@ -1529,9 +1753,14 @@ def e3sm_cam_gwd(
         )
         orographic_only = True
         do_taper = False
-    elif config.source == "frontal":
-        if frontgf_col is None:
+    elif config.source in ("frontal", "background"):
+        if config.source == "background":
             frontgf_col = jnp.zeros((ncol, nlev), dtype=u.dtype)
+            frontgfc = -jnp.inf
+        else:
+            if frontgf_col is None:
+                frontgf_col = jnp.zeros((ncol, nlev), dtype=u.dtype)
+            frontgfc = config.frontal.frontgfc
         # E3SM picks kbot (launch, ~500 hPa) and kfront (trigger, ~600 hPa)
         # from the reference pressure grid — NOT a fixed fraction of nlev
         # (codex iter-1 #1/#2).  We locate the level whose column-mean
@@ -1550,7 +1779,7 @@ def e3sm_cam_gwd(
         tau0, src_level, tend_level, xv, yv, c, ubm, ubi = gw_cm_src(
             u, v, frontgf_col, config.pgwv, config.dc,
             config.frontal.c0, config.frontal.taubgnd,
-            config.frontal.frontgfc, kbot, kfront,
+            frontgfc, kbot, kfront,
             config.frontal.front_spectrum_dc_resolution,
         )
         orographic_only = False
@@ -1579,12 +1808,21 @@ def e3sm_cam_gwd(
             )
         else:
             mfcc = jnp.asarray(mfcc_table, dtype=u.dtype)
+            want = (config.beres.maxh, 2 * config.beres.maxuh + 1,
+                    2 * config.pgwv + 1)
+            if tuple(mfcc.shape) != want:
+                raise ValueError(
+                    f"mfcc_table shape {tuple(mfcc.shape)} does not match "
+                    f"E3SMBeresConfig (maxh, 2*maxuh+1, 2*pgwv+1) = {want}; "
+                    "CAM's gw_init_beres sizes maxh/maxuh from the file — set "
+                    "beres.maxh/maxuh to the table's HD and (MW-1)/2."
+                )
         # k700: 0-based midpoint index nearest the source-wind pressure
         # (~700 hPa; config.beres.source_wind_p).  Traced int, jit-safe.
-        pmean = jnp.mean(pmid, axis=0)                      # (nlev,)
-        k700 = jnp.clip(
-            jnp.argmin(jnp.abs(pmean - config.beres.source_wind_p)), 0, nlev - 1
-        ).astype(jnp.int32)
+        k700 = _source_level_index(
+            pmid, pint, config.beres.source_wind_p,
+            config.beres.source_level_rule,
+        )
         (tau0, src_level, tend_level, xv, yv, c, ubm, ubi,
          _hdepth, _maxq0) = gw_beres_src(
             u, v, netdt_col, zm, lat, k700, mfcc,
@@ -1596,7 +1834,7 @@ def e3sm_cam_gwd(
     else:
         raise ValueError(
             f"Unknown E3SM GWD source: {config.source!r}. "
-            "Choose 'orographic', 'frontal', or 'convective'."
+            "Choose 'orographic', 'frontal', 'background', or 'convective'."
         )
 
     # Newtonian-cooling profile (spectral path only; orographic uses uniform).
@@ -1605,7 +1843,7 @@ def e3sm_cam_gwd(
     else:
         alpha_iface = None
 
-    tau, utgw, vtgw, gwut = gw_drag_prof(
+    tau, utgw, vtgw, gwut, tau_sat = gw_drag_prof(
         tau0, c, src_level, tend_level, T, ti, piln, rhoi, nm, ni,
         ubm, ubi, xv, yv, dpm, rdpm, lat, config.effgw, dt, config,
         orographic_only=orographic_only, do_taper=do_taper,
@@ -1627,6 +1865,12 @@ def e3sm_cam_gwd(
         ).astype(u.dtype)[:, None]
         du_dt = du_dt * lfrac
         dv_dt = dv_dt * lfrac
+
+    # Wind the energy closures see: the state plus the tendencies accumulated
+    # by earlier sources (CAM ptend accumulation); the wave physics above
+    # always used the un-updated ``u``, as in CAM.
+    u_ke = u if du_prior is None else u + dt * du_prior
+    v_ke = v if dv_prior is None else v + dt * dv_prior
 
     # Temperature tendency (thermal deposition).
     #
@@ -1669,11 +1913,11 @@ def e3sm_cam_gwd(
     if config.source == "orographic":
         if config.use_discrete_ke_heating:
             dT_dt = -(
-                du_dt * (u + 0.5 * dt * du_dt)
-                + dv_dt * (v + 0.5 * dt * dv_dt)
+                du_dt * (u_ke + 0.5 * dt * du_dt)
+                + dv_dt * (v_ke + 0.5 * dt * dv_dt)
             ) / cpair
         else:
-            dT_dt = -(u * du_dt + v * dv_dt) / cpair
+            dT_dt = -(u_ke * du_dt + v_ke * dv_dt) / cpair
     else:
         if config.dttke_use_intrinsic:
             ceff = c[:, None, :] - ubm[:, :, None]      # (ncol, nlev, nwav)
@@ -1768,12 +2012,16 @@ def e3sm_cam_gwd(
         if config.do_energy_conservation:
             # Net penetrating stress at the source/tend interface (taucd sum),
             # redistributed as a uniform below-source body force.
-            tau_net = gw_taucd_net(tau, c, ubi, tend_level)
+            # Pre-limiter (saturation-profile) stress, as in E3SM: taucd is
+            # accumulated before the tendency loop bounds the stress, so a
+            # clipped layer must not turn a symmetric launch into a spurious
+            # below-source body force.
+            tau_net = gw_taucd_net(tau_sat, c, ubi, tend_level)
             # dsdt = cpair * dT_dt (dry-static-energy tendency).
             dsdt = cpair * dT_dt
             du_dt, dv_dt, dsdt = momentum_energy_conservation(
-                tend_level, dt, dpm, u, v, du_dt, dv_dt, dsdt, pint, gravit,
-                tau_net, xv, yv,
+                tend_level, dt, dpm, u_ke, v_ke, du_dt, dv_dt, dsdt, pint,
+                gravit, tau_net, xv, yv,
             )
             dT_dt = dsdt / cpair
 

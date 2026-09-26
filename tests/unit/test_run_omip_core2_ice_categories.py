@@ -288,3 +288,110 @@ def test_dynamic_to_slab_aggregates_lower_rank_multicat():
     assert slab.concentration.data.shape == (4, 6)
     assert float(slab.concentration.data[0, 0]) == pytest.approx(0.8)
     assert float(slab.h_ice.data[0, 0]) == pytest.approx(2.0)
+
+
+# Gap 3: the convergence-only subset must reach the actual tripole setup.
+def test_convergence_closing_flag_default_and_typo():
+    p = _build_arg_parser()
+    assert p.parse_args([]).ice_ridging_closing_scheme == "strain"
+    with pytest.raises(SystemExit):
+        p.parse_args(["--ice-ridging-closing-scheme", "typo"])
+
+
+@pytest.mark.parametrize("scheme", ["strain", "convergence"])
+def test_closing_flag_forwarding_through_actual_main_statements(scheme):
+    """Execute the actual main() validation and construction statements.
+
+    Reading just the resolver cannot catch a missing main -> resolver or
+    main -> RidgingConfig hop. Compile those production AST statements with
+    controlled inputs, omitting only unrelated ocean/file/cluster setup.
+    """
+    import ast
+    import inspect
+    import scripts.run.run_omip_core2 as runner
+    from legoesm.grids.latlon import create_latlon_geometry
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.ice import SeaIceConfig
+    from legoesm.ice.config import BrineConfig, RidgingConfig, SnowConfig
+    from legoesm.ice.sea_ice import grid_supports_ice_dynamics, grid_supports_ice_transport
+
+    args = _build_arg_parser().parse_args([
+        "--prognostic-sea-ice", "--ice-categories", "5", "--ice-ridging",
+        "--grid", "tripole" if scheme == "convergence" else "cubed_sphere",
+        "--ice-ridging-closing-scheme", scheme])
+    assert args.ice_ridging_closing_scheme == scheme
+    tree = ast.parse(inspect.getsource(runner.main))
+    guards = [n for n in ast.walk(tree) if isinstance(n, ast.Expr)
+              and isinstance(n.value, ast.Call)
+              and isinstance(n.value.func, ast.Name)
+              and n.value.func.id == "_require_prognostic_ice_for_itd_flags"]
+    assignments = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                   and isinstance(n.value, ast.Call)
+                   and isinstance(n.value.func, ast.Name)
+                   and (n.value.func.id == "_resolve_ice_categories"
+                        or (n.value.func.id == "SeaIceConfig"
+                            and any(k.arg == "ridging" for k in n.value.keywords)))]
+    assert len(guards) == 1 and len(assignments) == 2
+    code = compile(ast.Module(body=sorted(guards + assignments, key=lambda n: n.lineno),
+                              type_ignores=[]), inspect.getsourcefile(runner), "exec")
+    grid = create_latlon_geometry(8, 12) if scheme == "convergence" else create_cubed_sphere(4)
+    env = dict(args=args, grid=grid, _ice_dyn="free_drift", _transport="advect",
+               _supports_dyn=grid_supports_ice_dynamics(grid),
+               _supports_transport=grid_supports_ice_transport(grid),
+               _brine=BrineConfig(enabled=True), _snow=SnowConfig(), SeaIceConfig=SeaIceConfig,
+               _ice_sw_scheme="constant", _ice_sw_trans=args.ice_thermo_sw_trans,
+               RidgingConfig=RidgingConfig,
+               _resolve_ice_categories=_resolve_ice_categories,
+               _require_prognostic_ice_for_itd_flags=_require_prognostic_ice_for_itd_flags)
+    exec(code, env)
+    assert env["ice_config"].ridging == RidgingConfig(enabled=True, closing_scheme=scheme)
+    assert env["ice_config"].n_categories == 5
+    assert env["ice_config"].itd_remap == "lipscomb2001"
+    if scheme == "convergence":
+        # Same actual main guard must reject a flag that would be ignored.
+        args.ice_ridging = False
+        with pytest.raises(ValueError, match="requires --ice-ridging"):
+            exec(code, env)
+
+
+def test_fesom_existing_allowlist_refuses_new_unwired_selection():
+    """Exercise the real FESOM gate with only this nondefault ice selector.
+
+    Setting categories/ridging too would let their allowlist failures hide
+    whether the new selector itself is rejected.
+    """
+    from scripts.run.run_omip_core2 import validate_fesom_stage
+    p = _build_arg_parser()
+    args = p.parse_args(["--grid", "fesom", "--fesom-mesh-dir", "/unused",
+                         "--ice-ridging-closing-scheme", "convergence"])
+    with pytest.raises(SystemExit, match="ice-ridging-closing-scheme"):
+        validate_fesom_stage(args, p)
+
+
+@pytest.mark.parametrize("scheme", ["strain", "convergence"])
+def test_ridging_resolver_still_requires_operators(scheme):
+    with pytest.raises(SystemExit, match="strain-rate"):
+        _resolve_ice_categories(5, True, False, "unsupported",
+                                closing_scheme=scheme, supports_transport=False)
+
+
+def test_convergence_resolver_requires_multiple_categories():
+    with pytest.raises(SystemExit, match="--ice-categories >= 2"):
+        _resolve_ice_categories(1, True, False, "LatLonCGridGeometry",
+                                closing_scheme="convergence", supports_transport=True)
+
+
+def test_closing_resolver_unknown_raises_even_when_ridging_disabled():
+    with pytest.raises(ValueError, match="Unknown.*scheme"):
+        _resolve_ice_categories(1, False, True, "VoronoiMesh", closing_scheme="typo")
+
+
+@pytest.mark.parametrize("ridging,prognostic,scheme,match", [
+    (False, True, "convergence", "requires --ice-ridging"),
+    (True, False, "convergence", "require --prognostic-sea-ice"),
+    (False, False, "typo", "Unknown.*scheme"),
+])
+def test_closing_flag_refuses_inert_or_unknown_selection(ridging, prognostic, scheme, match):
+    with pytest.raises(ValueError, match=match):
+        _require_prognostic_ice_for_itd_flags(
+            5, ridging, prognostic, ice_ridging_closing_scheme=scheme)

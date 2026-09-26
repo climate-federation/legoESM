@@ -1,0 +1,51 @@
+diff --git a/cfgs/DINO/MY_SRC/traldf_iso.F90 b/cfgs/DINO/MY_SRC/traldf_iso.F90
+--- a/cfgs/DINO/MY_SRC/traldf_iso.F90
++++ b/cfgs/DINO/MY_SRC/traldf_iso.F90
+@@ -120,5 +120,6 @@ CONTAINS
+       REAL(wp), DIMENSION(T2D(0)    ) ::   zfw          ! INNER     domain
+       REAL(wp), DIMENSION(jpi,jpj,jpkm1) :: zround78_zfu, zround78_zfv, zround78_zfw
++      REAL(wp), DIMENSION(jpi,jpj,jpkm1) :: zround86_skew, zround86_a33
+       !!----------------------------------------------------------------------
+       ll_ptr = .FALSE. ; ll_hst = .FALSE.
+       ll_round78_dump = ( kt == nit000 ) .AND. ( .NOT. l_istiled .OR. ntile == 1 )
+@@ -144,1 +145,3 @@ CONTAINS
+          zround78_zfw(:,:,:) = 0._wp
++         zround86_skew(:,:,:) = 0._wp
++         zround86_a33(:,:,:) = 0._wp
+@@ -195,2 +198,17 @@ CONTAINS
+             WRITE(9455) zround78_zfw ; CLOSE(9455)
+          ENDIF
++         IF( ll_round78_dump .AND. jn == 1 ) THEN
++            OPEN( UNIT=9460, FILE='redi_dump_zfw_skew_tem.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9461, FILE='redi_dump_zfw_a33_tem.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            WRITE(9460) zround86_skew ; CLOSE(9460)
++            WRITE(9461) zround86_a33 ; CLOSE(9461)
++         ELSEIF( ll_round78_dump .AND. jn == 2 ) THEN
++            OPEN( UNIT=9462, FILE='redi_dump_zfw_skew_sal.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9463, FILE='redi_dump_zfw_a33_sal.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            WRITE(9462) zround86_skew ; CLOSE(9462)
++            WRITE(9463) zround86_a33 ; CLOSE(9463)
++         ENDIF
+diff --git a/src/OCE/TRA/traldf_iso_scheme.h90 b/src/OCE/TRA/traldf_iso_scheme.h90
+--- a/src/OCE/TRA/traldf_iso_scheme.h90
++++ b/src/OCE/TRA/traldf_iso_scheme.h90
+@@ -137,1 +137,15 @@
+ #endif
++#if defined iso_lap
++                  IF( ll_round78_dump ) THEN
++                     zround86_skew(ji,jj,jk) = zA31 * (  ( zdit(ji  ,jj,ik) + zdit(ji-1,jj,ikp1) )   &
++                        &                              + ( zdit(ji-1,jj,ik) + zdit(ji  ,jj,ikp1) )  )   &
++                        &                     + zA32 * (  ( zdjt(ji,jj  ,ik) + zdjt(ji,jj-1,ikp1) )   &
++                        &                              + ( zdjt(ji,jj-1,ik) + zdjt(ji,jj  ,ikp1) )  )
++                     zround86_a33(ji,jj,jk) = e1e2t(ji,jj) / e3w(ji,jj,jk+1,Kmm)   &
++                        &                   * wmask(ji,jj,jk+1)                     &
++                        &                   * ( ah_wslp2(ji,jj,jk+1)               &
++                        &                     - akz(ji,jj,jk+1) )                  &
++                        &                   * ( pt(ji,jj,jk,jn,Kbb)                &
++                        &                     - pt(ji,jj,jk+1,jn,Kbb) )
++                  ENDIF
++#endif

@@ -53,6 +53,7 @@ import jax
 import jax.numpy as jnp
 from legoesm.core.fv3_duo_stepper import SWConfig
 from legoesm.core.fv3_duo_sw_core import (
+    GridFlags,
     d_sw3_duo,
     d_sw4_duo,
     d_sw5_duo,
@@ -76,12 +77,15 @@ from legoesm.core.fv3_pgrad import (
     pln_halo,
 )
 from legoesm.core.fv3_phase3d_common import (
+    batch_size,
+    build_batched_gs,
     require_bool,
     require_f64_jax,
     require_km,
     require_nord,
     stack_faces,
     stack_levels,
+    stack_levels_batched,
     validate_stacked,
 )
 from legoesm.grids.fv3_duo_halos import (
@@ -99,7 +103,8 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
                       dt, km, *, cfg: SWConfig | None = None,
                       hydrostatic: bool = True,
                       remap_follows: bool = False,
-                      damp_w: float | None = None) -> dict:
+                      damp_w: float | None = None,
+                      batched: bool = False) -> dict:
     """``d_sw3`` -> BARRIER 2 -> ``d_sw4/5/6``, per level, all six faces.
 
     Stage observation is by RETURN (C6): the spec's ``stage_hook`` would
@@ -152,6 +157,7 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     km = require_km(fname, km)
     require_bool(fname, "hydrostatic", hydrostatic)
     require_bool(fname, "remap_follows", remap_follows)
+    require_bool(fname, "batched", batched)
     require_no_remap_needed(km, remap_follows=remap_follows)
     deck = _TAIL_DECK if cfg is None else cfg
     if not isinstance(deck, SWConfig):
@@ -189,7 +195,8 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
         # What IS checkable without a table: the face axis and the level
         # axis.  A face or level slip is the defect that would otherwise
         # broadcast silently; the stagger axes are the kernels' own.
-        if arr.ndim != 4 or arr.shape[0] != 6 or arr.shape[3] != km:
+        if (arr.ndim != 4 or arr.shape[0] != batch_size(ctx)
+                or arr.shape[3] != km):
             raise ValueError(
                 f"{fname}: d_sw outputs[{nm!r}] has shape {arr.shape}; "
                 f"expected (6, i, j, {km}) -- the face axis and the "
@@ -219,11 +226,17 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     nh_damp_w = 0.0 if hydrostatic else (
         deck.damp_v if damp_w is None else damp_w)
 
+    if batched:
+        return _dsw_tail_phase_3d_batched(
+            ctx, state, csw_outs, dsw_outs, dt, km, deck=deck,
+            hydrostatic=hydrostatic, nh_damp_w=nh_damp_w)
+
     # --- d_sw3 at every level, all faces (needed before barrier 2) -------
     # Python loops, not vmap (C2): each (t, k) body is independent, but
     # vectorising would be an optimisation, not a translation.
-    s3 = [[None] * km for _ in range(6)]    # per-face operands only (C1)
-    for t in range(6):
+    nb = batch_size(ctx)
+    s3 = [[None] * km for _ in range(nb)]   # per-face operands only (C1)
+    for t in range(nb):
         # PER-FACE flags.  The first draft of this module took
         # `GridFlags.from_gridstruct(ctx.gs6[0])` -- a constructor that
         # does not exist (it is `from_gs`), and a per-RUN rather than
@@ -251,15 +264,15 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     # a fresh value, there is no buffer to alias.
     ubb_bld, vbbtemp_bld = [], []
     for k in range(km):
-        xb6 = jnp.stack([s3[t][k]["ubb"] for t in range(6)], axis=0)
-        yb6 = jnp.stack([s3[t][k]["vbbtemp"] for t in range(6)], axis=0)
+        xb6 = jnp.stack([s3[t][k]["ubb"] for t in range(nb)], axis=0)
+        yb6 = jnp.stack([s3[t][k]["vbbtemp"] for t in range(nb)], axis=0)
         xb6, yb6 = average_shared_edge_bgrid(xb6, yb6, ctx.tab)
         ubb_bld.append(xb6)
         vbbtemp_bld.append(yb6)
 
     # --- d_sw4 / d_sw5 / d_sw6 on the blended ingredients ----------------
     per_face = []
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         gs_t, fl_t = ctx.gs6[t], ctx.flags6[t]
         u_lv, v_lv, w_lv = [], [], []
         ke_corner = []          # S12, the corner KE this phase assembles
@@ -341,21 +354,155 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     for nm in ("ubb", "vbb", "ubbtemp", "vbbtemp"):
         outs[nm + "_prebarrier"] = jnp.stack(
             [stack_levels(fname, nm, [s3[t][k][nm] for k in range(km)])
-             for t in range(6)], axis=0)
+             for t in range(batch_size(ctx))], axis=0)
     outs["ubb_postbarrier"] = jnp.stack(
         [stack_levels(fname, "ubb", [ubb_bld[k][t] for k in range(km)])
-         for t in range(6)], axis=0)
+         for t in range(batch_size(ctx))], axis=0)
     outs["vbbtemp_postbarrier"] = jnp.stack(
         [stack_levels(fname, "vbbtemp",
                       [vbbtemp_bld[k][t] for k in range(km)])
-         for t in range(6)], axis=0)
+         for t in range(batch_size(ctx))], axis=0)
+    return outs
+
+
+def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
+                               *, deck, hydrostatic, nh_damp_w) -> dict:
+    """The vmap-over-faces arm of :func:`dsw_tail_phase_3d` (C2a).
+
+    Entry gates already ran in the caller.  The ``d_sw3`` and
+    ``d_sw4/5/6`` FACE loops become one ``jax.vmap`` per level over
+    ``build_batched_gs``'s stacked view; the LEVEL loops stay Python;
+    and BARRIER 2 sits exactly where the loop path puts it -- between
+    d_sw3 and the KE assembly, one level at a time, on the full
+    six-face stack (dyn_core.F90:984).  It is a cross-face collective
+    and is not face-batched (its operands arrive already stacked from
+    the vmapped d_sw3, so the loop path's per-face ``jnp.stack`` is
+    simply absent -- a pure index copy either way).
+
+    ``da_min`` / ``da_min_c`` ride the vmap as traced per-face scalars
+    and are rebuilt into a ``GridFlags`` inside each batched body --
+    their consumers are arithmetic-only (d_sw5's ``dd8 =
+    (da_min_c*d4_bg)**(nord+1)`` / ``damp2 = da_min_c*max(...)`` and
+    ``fv_tp_2d``'s ``damp``; d_sw6's ``(damp_v*da_min_c)**(nord_v+1)``)
+    -- while every other flag field is face-invariant by the
+    common-mode gate and closes over as the one shared Python value.
+    ``d_sw4_duo`` reads no gridstruct array at all, only the flags.
+
+    in_axes: every per-face field plane, the d_sw3/barrier stage
+    planes, the gridstruct dict and the ``da_min6``/``da_min_c6``
+    scalars are 0 (per face); ``bd``/``npx``/the deck knobs/
+    ``nh_damp_w``/``hydrostatic`` are closed over (static Python
+    values), plus ``dt`` (traced but shared).  On the hydrostatic arm
+    the ``w``/``dw`` operands are ``None`` -- an empty pytree under
+    vmap, exactly the loop path's ``w=None``.
+    """
+    fname = "dsw_tail_phase_3d[batched]"
+    bview = build_batched_gs(ctx)
+    shared = bview["flags"]
+    da6, dac6 = bview["da_min6"], bview["da_min_c6"]
+    bd = ctx.bd
+    n, ng = ctx.n, ctx.ng
+    npx = ctx.npx
+    m_a = n + 2 * ng
+    ring = slice(ng, ng + npx)
+    fdt = state["u"].dtype
+
+    # --- d_sw3 at every level, faces vmapped (:961) -------------------
+    def one_face_sw3(u2, v2, uc2, vc2, gs_t, da_t, dac_t):
+        fl = GridFlags(da_min=da_t, da_min_c=dac_t, **shared)
+        return d_sw3_duo(u2, v2, uc2, vc2, gs_t, fl, bd, npx, npx,
+                         dt=dt, hord_mt=deck.hord_mt)
+
+    vf3 = jax.vmap(one_face_sw3, in_axes=(0,) * 7)
+    s3 = [vf3(state["u"][..., k], state["v"][..., k],
+              csw_outs["uc"][..., k], csw_outs["vc"][..., k],
+              bview["gs"], da6, dac6) for k in range(km)]
+
+    # --- BARRIER 2, verbatim blend, ALL LEVELS IN ONE CALL (M8-B) -----
+    # (dyn_core.F90:984, BGRID_NE; extent owned by
+    # average_shared_edge_bgrid.)  The blend at a cell reads only that
+    # level, so the levels ride as a trailing axis: the flat path vmaps
+    # the certified 2-D blend over it and the window arm fires ONE
+    # exchange instead of km (the exchange rounds were the measured
+    # overhead, 2026-09-06).
+    xb6, yb6 = average_shared_edge_bgrid(
+        jnp.stack([s3[k]["ubb"] for k in range(km)], axis=-1),
+        jnp.stack([s3[k]["vbbtemp"] for k in range(km)], axis=-1),
+        ctx.tab)
+    ubb_bld = [xb6[..., k] for k in range(km)]
+    vbbtemp_bld = [yb6[..., k] for k in range(km)]
+
+    # --- KE assembly + d_sw4/5/6, faces vmapped -----------------------
+    def one_face_tail(u_k, v_k, ut_k, vt_k, delp_k, uc_k, vc_k, ua_k,
+                      va_k, dg_k, crx_k, cry_k, xfx_k, yfx_k, rax_k,
+                      ray_k, ubbtemp_k, vbb_k, ubb_b, vbbtemp_b, w_k,
+                      dw_k, gs_t, da_t, dac_t):
+        fl = GridFlags(da_min=da_t, da_min_c=dac_t, **shared)
+        # S12 (dyn_core.F90:1015-1020): pre- x post-barrier product,
+        # identical formula and window to the loop path.
+        kee = ubbtemp_k * vbbtemp_b
+        ke = jnp.zeros((m_a + 1, m_a + 1), dtype=fdt).at[ring, ring].set(
+            0.5 * (kee + ubb_b * vbb_k))
+        s4 = d_sw4_duo(u_k, v_k, ut_k, vt_k, ke, fl, bd, npx, npx,
+                       dt=dt)
+        s5 = d_sw5_duo(delp_k, u_k, v_k, uc_k, vc_k, ua_k, va_k, dg_k,
+                       crx_k, cry_k, xfx_k, yfx_k, rax_k, ray_k,
+                       s4["ke"], gs_t, fl, bd, npx, npx, dt=dt,
+                       hord_vt=deck.hord_vt, nord=deck.nord,
+                       dddmp=deck.dddmp, d2_bg=deck.d2_bg,
+                       d4_bg=deck.d4_bg, d_con=0.0,
+                       hydrostatic=hydrostatic, w=w_k, dw=dw_k,
+                       damp_w=nh_damp_w)
+        s6 = d_sw6_duo(u_k, v_k, s5["ut"], s5["vt"], s5["ke"],
+                       s5["wk"], s5["vortfluxx"], s5["vortfluxy"],
+                       gs_t, fl, bd, npx, npx, nord_v=deck.nord_v,
+                       damp_v=deck.damp_v, d_con=0.0)
+        face = {"u": s6["u"], "v": s6["v"], "ke_corner": ke,
+                "ke": s5["ke"], "wk": s5["wk"],
+                "divg_d": s5["divg_d"], "delpc": s5["delpc"]}
+        if not hydrostatic:
+            face["w"] = s5["w"]
+        return face
+
+    vft = jax.vmap(one_face_tail, in_axes=(0,) * 25)
+    per_level = []
+    for k in range(km):
+        per_level.append(vft(
+            state["u"][..., k], state["v"][..., k],
+            dsw_outs["ut"][..., k], dsw_outs["vt"][..., k],
+            dsw_outs["delp"][..., k],
+            csw_outs["uc"][..., k], csw_outs["vc"][..., k],
+            csw_outs["ua"][..., k], csw_outs["va"][..., k],
+            csw_outs["divg_d"][..., k],
+            dsw_outs["crx_adv"][..., k], dsw_outs["cry_adv"][..., k],
+            dsw_outs["xfx_adv"][..., k], dsw_outs["yfx_adv"][..., k],
+            dsw_outs["ra_x"][..., k], dsw_outs["ra_y"][..., k],
+            s3[k]["ubbtemp"], s3[k]["vbb"], ubb_bld[k], vbbtemp_bld[k],
+            None if hydrostatic else dsw_outs["w"][..., k],
+            None if hydrostatic else dsw_outs["dw"][..., k],
+            bview["gs"], da6, dac6))
+
+    # --- assembly: identical keys and layouts to the loop path --------
+    names = ("u", "v", "ke_corner", "ke", "wk", "divg_d",
+             "delpc") + (() if hydrostatic else ("w",))
+    outs = {nm: stack_levels_batched(
+        fname, nm, [per_level[k][nm] for k in range(km)])
+        for nm in names}
+    for nm in ("ubb", "vbb", "ubbtemp", "vbbtemp"):
+        outs[nm + "_prebarrier"] = stack_levels_batched(
+            fname, nm, [s3[k][nm] for k in range(km)])
+    outs["ubb_postbarrier"] = stack_levels_batched(
+        fname, "ubb", ubb_bld)
+    outs["vbbtemp_postbarrier"] = stack_levels_batched(
+        fname, "vbbtemp", vbbtemp_bld)
     return outs
 
 
 def make_dsw_tail_phase_3d_jit(ctx, km, *, cfg: SWConfig | None = None,
                                hydrostatic: bool = True,
                                remap_follows: bool = False,
-                               damp_w: float | None = None):
+                               damp_w: float | None = None,
+                               batched: bool = False):
     """Pre-bound jit closure ``f(state, csw_outs, dsw_outs, dt) -> dict``.
 
     ``ctx``, ``km``, ``cfg`` and ``damp_w`` are baked in as STATIC
@@ -367,7 +514,7 @@ def make_dsw_tail_phase_3d_jit(ctx, km, *, cfg: SWConfig | None = None,
     """
     return jax.jit(partial(
         dsw_tail_phase_3d, ctx, km=km, cfg=cfg, hydrostatic=hydrostatic,
-        remap_follows=remap_follows, damp_w=damp_w))
+        remap_follows=remap_follows, damp_w=damp_w, batched=batched))
 
 
 # ============================================================================
@@ -380,7 +527,7 @@ def make_dsw_tail_phase_3d_jit(ctx, km, *, cfg: SWConfig | None = None,
 
 def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
                             cp_air, a2b_ord=4, d_ext=0.0, remap_step=False,
-                            remap_follows=False):
+                            remap_follows=False, batched=False):
     """D-grid ``geopk`` (dyn_core.F90:1401) then ``one_grad_p`` (:1531).
 
     JAX twin of the spec routine of the same name.  No numerics live
@@ -435,6 +582,7 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
     km = require_km(fname, km)
     require_bool(fname, "remap_step", remap_step)
     require_bool(fname, "remap_follows", remap_follows)
+    require_bool(fname, "batched", batched)
     # Rule 5: a2b_ord is a static scheme selector; one_grad_p's arms
     # are a2b_ord2 (the d_ext branch) and _a2b_ord4_k -- any other
     # value selects no arm.
@@ -465,15 +613,26 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
     # becomes getattr with the same None default.  Static either way.
     hs6 = getattr(ctx, "hs6", None)
 
+    if batched:
+        return _dgrid_pressure_phase_3d_batched(
+            ctx, dsw_outs, tail_outs, km, dt=dt, ptop=ptop, akap=akap,
+            cp_air=cp_air, a2b_ord=a2b_ord, d_ext=d_ext,
+            remap_step=remap_step)
+
     per_face = []
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         # C2: the face loop is a Python loop, not vmap.  The six bodies
         # are independent -- face t reads only its own slices and geopk
         # output, and writes only its own returned arrays; no face
         # reads what another wrote -- so batching would be legal but is
         # an optimisation, not a translation.
-        hs = (jnp.asarray(hs6[t], dtype=jnp.float64) if hs6 is not None
-              else jnp.zeros((m, m), dtype=jnp.float64))
+        # hs follows the run's storage dtype (fp32/mixed increment 2):
+        # ctx.hs6 is already cast by the context builder, so DON'T force
+        # f64 here (that would promote the f32 geopk column back to f64
+        # and trip the uniformity gate). fp64 default: hs6 is f64 ->
+        # byte-identical. The zeros fallback follows a field (delp).
+        hs = (jnp.asarray(hs6[t]) if hs6 is not None
+              else jnp.zeros((m, m), dtype=dsw_outs["delp"].dtype))
         got = geopk(dsw_outs["delp"][t], dsw_outs["pt"][t], hs, bd,
                     km=km, ptop=ptop, akap=akap, cp_air=cp_air,
                     cg=False, duogrid=True, computehalo=False,
@@ -488,7 +647,8 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
             # dyn_core.F90:1511-1519, taken BEFORE :1531 one_grad_p.
             pk_remap = pk_pre
         # divg2 freshly zero per face, exactly the spec's loop body.
-        divg2 = jnp.zeros((m + 1, m + 1), dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from dsw_outs["delp"]
+        divg2 = jnp.zeros((m + 1, m + 1), dtype=dsw_outs["delp"].dtype)
         u_t, v_t, pk_t, gz_t = one_grad_p(
             tail_outs["u"][t], tail_outs["v"][t], got["pk"], got["gz"],
             divg2, dsw_outs["delp"][t], ctx.gs6[t], bd,
@@ -506,9 +666,64 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
     return stack_faces(fname, per_face)
 
 
+def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
+                                     dt, ptop, akap, cp_air, a2b_ord,
+                                     d_ext, remap_step) -> dict:
+    """The vmap-over-faces arm of :func:`dgrid_pressure_phase_3d` (C2a).
+
+    Entry gates already ran in the caller.  One ``jax.vmap`` replaces
+    the face loop; the per-face body is IDENTICAL to the loop path's --
+    ``geopk`` (which takes no gridstruct at all), the ``remap_step``
+    snapshot, then ``one_grad_p``.  No GridFlags is involved on this
+    chain, so there is no da_min threading here.
+
+    in_axes: ``delp``/``pt``/``hs``/``u``/``v`` and the gridstruct dict
+    are 0 (per face).  Closed over (face-invariant): ``bd`` and every
+    static keyword (``ptop``/``akap``/``cp_air``/``a2b_ord``/``d_ext``/
+    ``remap_step`` -- all Python values, exactly the loop path's static
+    split), plus ``dt`` (traced but shared).  ``divg2`` is a fresh zero
+    inside the body, the spec's per-face allocation.
+    """
+    bview = build_batched_gs(ctx)
+    bd = ctx.bd
+    n, ng = ctx.n, ctx.ng
+    m = n + 2 * ng
+    hs6 = getattr(ctx, "hs6", None)
+    # follow storage dtype (ctx.hs6 already cast); zeros fallback -> field
+    hs_stack = (jnp.asarray(hs6) if hs6 is not None
+                else jnp.zeros((6, m, m), dtype=dsw_outs["delp"].dtype))
+
+    def one_face(delp_t, pt_t, hs_t, u_t, v_t, gs_t):
+        got = geopk(delp_t, pt_t, hs_t, bd, km=km, ptop=ptop,
+                    akap=akap, cp_air=cp_air, cg=False, duogrid=True,
+                    computehalo=False, npx=bd.ie + 1, npy=bd.je + 1,
+                    a2b_ord=a2b_ord, bounded_domain=False,
+                    sw_dynamics=False)
+        pk_pre, gz_pre = got["pk"], got["gz"]
+        # dtype follows storage (fp32/fp64), from delp_t
+        divg2 = jnp.zeros((m + 1, m + 1), dtype=delp_t.dtype)
+        u_o, v_o, pk_t, gz_t = one_grad_p(
+            u_t, v_t, got["pk"], got["gz"], divg2, delp_t, gs_t, bd,
+            npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
+            akap=akap, hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
+            ng=ng, duogrid=True)
+        face = {"pk": pk_t, "gz": gz_t,
+                "pe": got["pe"], "peln": got["peln"], "pkz": got["pkz"],
+                "u": u_o, "v": v_o,
+                "pk_pre_onegradp": pk_pre,
+                "gz_pre_onegradp": gz_pre}
+        if remap_step:   # static config value: stays a Python if
+            face["pk_remap"] = pk_pre
+        return face
+
+    return jax.vmap(one_face, in_axes=(0,) * 6)(
+        dsw_outs["delp"], dsw_outs["pt"], hs_stack,
+        tail_outs["u"], tail_outs["v"], bview["gs"])
+
+
 def make_dgrid_pressure_phase_3d_jit(ctx, km, *, ptop, akap, cp_air,
                                      a2b_ord=4, d_ext=0.0, remap_step=False,
-                                     remap_follows=False):
+                                     remap_follows=False, batched=False):
     """Build the jit-compiled :func:`dgrid_pressure_phase_3d`.
 
     Every STATIC operand is baked in here, so an invalid static value
@@ -525,6 +740,7 @@ def make_dgrid_pressure_phase_3d_jit(ctx, km, *, ptop, akap, cp_air,
     km = require_km(fname, km)
     require_bool(fname, "remap_step", remap_step)
     require_bool(fname, "remap_follows", remap_follows)
+    require_bool(fname, "batched", batched)
     a2b_ord = require_nord(fname, "a2b_ord", a2b_ord)
     if a2b_ord not in (2, 4):
         raise ValueError(f"{fname}: a2b_ord must be 2 or 4, got {a2b_ord!r}")
@@ -538,7 +754,8 @@ def make_dgrid_pressure_phase_3d_jit(ctx, km, *, ptop, akap, cp_air,
         return dgrid_pressure_phase_3d(
             ctx, dsw_outs, tail_outs, km, dt=dt, ptop=ptop, akap=akap,
             cp_air=cp_air, a2b_ord=a2b_ord, d_ext=d_ext,
-            remap_step=remap_step, remap_follows=remap_follows)
+            remap_step=remap_step, remap_follows=remap_follows,
+            batched=batched)
 
     return jax.jit(_phase)
 
@@ -603,11 +820,14 @@ def nh_exchanged_area6(ctx):
     # The gridstruct arrays are STATIC (concrete numpy on the ctx), so
     # this is a build-time check on the same values the authority lane
     # checks, not a data-dependent branch on a tracer.
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         require_real_area(ctx.gs6[t]["area"], t)
     return jnp.stack(
-        [jnp.asarray(ctx.gs6[t]["area"], dtype=jnp.float64)
-         for t in range(6)], axis=0)
+        # follow storage dtype: ctx.gs6 area is already cast by the
+        # context builder (fp64 default -> byte-identical); DON'T re-force
+        # f64 or it promotes the f32 divergence back to f64.
+        [jnp.asarray(ctx.gs6[t]["area"])
+         for t in range(batch_size(ctx))], axis=0)
 
 
 def _nh_tail_cfg(fname, cfg, hord_tm, nord_w, damp_w):
@@ -658,7 +878,8 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
                                use_logp=False, square_domain=True,
                                cfg=None, hord_tm=None, nord_w=None,
                                damp_w=None, remap_follows=False,
-                               return_stages: bool = False):
+                               return_stages: bool = False,
+                               batched: bool = False):
     """The NH D-grid tail (``dyn_core.F90:1403-1543``): ``update_dz_d`` ->
     ``Riem_Solver3`` -> ``pe_halo``/``pk3_halo`` (``pln_halo`` under
     ``use_logp``) -> zh/pkc duo exchanges -> ``gz = zh*grav`` ->
@@ -709,7 +930,8 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     km = require_km(fname, km)
     for nm, v in (("remap_step", remap_step), ("use_logp", use_logp),
                   ("square_domain", square_domain),
-                  ("remap_follows", remap_follows)):
+                  ("remap_follows", remap_follows),
+                  ("batched", batched)):
         require_bool(fname, nm, v)
     require_no_remap_needed(km, remap_follows=remap_follows)
     hord_v, nord_v, damp_vt = _nh_tail_cfg(fname, cfg, hord_tm, nord_w,
@@ -746,7 +968,8 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
                 f"{fname}: dsw_outs is missing {_nm!r}; keys are "
                 f"{sorted(dsw_outs)}")
         _a = jnp.asarray(dsw_outs[_nm])
-        if _a.ndim != 4 or _a.shape[0] != 6 or _a.shape[3] != km:
+        if (_a.ndim != 4 or _a.shape[0] != batch_size(ctx)
+                or _a.shape[3] != km):
             raise ValueError(
                 f"{fname}: dsw_outs[{_nm!r}] has shape {_a.shape}; "
                 f"expected (6, i, j, {km}) -- the face and level axes "
@@ -765,15 +988,16 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     # 9417598 raised "unknown field 'crx_adv'" and "unknown field 'zh'"
     # on the way to this).
     _m_a, _npx_c = ctx.n + 2 * ctx.ng, ctx.n
+    _nb = batch_size(ctx)
     _nh_shapes = {
-        "zh": (6, _m_a, _m_a, km + 1),
-        "gz": (6, _m_a, _m_a, km + 1),
-        "pk3": (6, _m_a, _m_a, km + 1),
-        "zs": (6, _m_a, _m_a),
-        "ws": (6, _npx_c, _npx_c),
-        "pk": (6, _npx_c, _npx_c, km + 1),
-        "pe": (6,) + field_shape("pe", ctx.n, ctx.ng, km),
-        "peln": (6,) + field_shape("peln", ctx.n, ctx.ng, km),
+        "zh": (_nb, _m_a, _m_a, km + 1),
+        "gz": (_nb, _m_a, _m_a, km + 1),
+        "pk3": (_nb, _m_a, _m_a, km + 1),
+        "zs": (_nb, _m_a, _m_a),
+        "ws": (_nb, _npx_c, _npx_c),
+        "pk": (_nb, _npx_c, _npx_c, km + 1),
+        "pe": (_nb,) + field_shape("pe", ctx.n, ctx.ng, km),
+        "peln": (_nb,) + field_shape("peln", ctx.n, ctx.ng, km),
     }
     _missing = [k for k in _nh_shapes if k not in nh]
     if _missing:
@@ -795,7 +1019,8 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     # interface axis shortened, which is what this check demanded --
     # measured (6, 12, 12, 3) against a required (6, 18, 18, 3) on the
     # first NH parity run (job 9417599).
-    _want_delz = (6,) + field_shape("delz", ctx.n, ctx.ng, km)
+    _want_delz = (batch_size(ctx),) + field_shape("delz", ctx.n, ctx.ng,
+                                                  km)
     if delz.shape != _want_delz:
         raise ValueError(
             f"{fname}: delz {delz.shape} must be {_want_delz} -- "
@@ -803,6 +1028,15 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
             f"NOT on nh['zh']'s padded footprint {nh['zh'].shape}")
     if dp0.shape != (km,):
         raise ValueError(f"{fname}: dp0 must be ({km},), got {dp0.shape}")
+
+    if batched:
+        return _dgrid_nh_pressure_phase_3d_batched(
+            ctx, csw_press, dsw_outs, tail_outs, nh, km, dt=dt,
+            ptop=ptop, akap=akap, cp_air=cp_air, p_fac=p_fac,
+            a_imp=a_imp, dp0=dp0, delz=delz, remap_step=remap_step,
+            use_logp=use_logp, square_domain=square_domain,
+            hord_v=hord_v, nord_v=nord_v, damp_vt=damp_vt,
+            return_stages=return_stages)
 
     # Pure Python constant; imported at the call site exactly as the spec
     # does, because the JAX callee list carries no grav of its own.
@@ -826,7 +1060,7 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     gs6 = ctx.gs6
     faces = []
     stage_zh: list = []
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         # The DSW1 advective fluxes are ALREADY (i, j, km) with km at
         # axis 2 on this lane -- the spec's np.stack(..., axis=2) is the
         # transport phase's own stacked layout, so this is a plain slice.
@@ -916,16 +1150,16 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     zh6 = upd["zh"]
     pkc6 = upd["pkc"]
 
-    # zh + pkc duo exchanges (:1482-1483), ONE interface level at a time
-    # with all six faces present for that level -- the spec's k loop and
-    # the same one-level-at-a-time discipline as barrier 2.  Each
-    # level's exchange reads and writes only its own plane, so no
-    # iteration reads another's write; source order is preserved.
-    for k in range(km + 1):
-        zh6 = zh6.at[:, :, :, k].set(
-            _ext_scalar_planes_6(zh6[:, :, :, k], ctx))
-        pkc6 = pkc6.at[:, :, :, k].set(
-            _ext_scalar_planes_6(pkc6[:, :, :, k], ctx))
+    # zh + pkc duo exchanges (:1482-1483).  Batched over the km+1
+    # interface levels via the allk public (M3 v2a; codex MAJOR -- these
+    # two loops were the un-batched stragglers behind the "60 -> 6"
+    # claim): the certified (ring_comm=None) path inside the allk fn is
+    # the SAME ascending-k per-level loop relocated verbatim, so
+    # statement order and per-level independence are unchanged; the ring
+    # path collapses 2*(km+1) collectives into 2.
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface_allk
+    zh6 = ext_scalar_sixface_allk(zh6, ctx.tab, "A")
+    pkc6 = ext_scalar_sixface_allk(pkc6, ctx.tab, "A")
 
     # gz = zh*grav over the two-cell halo box (:1487-1494).  The spec's
     # face loop vectorises over the leading axis of the IDENTICAL
@@ -942,16 +1176,14 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     # first exchange and it only gz changes, so it is idempotent -- kept
     # for statement-order fidelity, exactly as the spec gates it.
     if square_domain:
-        for k in range(km + 1):
-            pkc6 = pkc6.at[:, :, :, k].set(
-                _ext_scalar_planes_6(pkc6[:, :, :, k], ctx))
+        pkc6 = ext_scalar_sixface_allk(pkc6, ctx.tab, "A")
 
     # nh_p_grad (:1534-1543): beta = 0 on the deck.  It takes the
     # ORIGINAL ctx.gs6[t] (rdx/rdy metrics), not the exchanged-area
     # gridstruct, and returns (u, v, pp, pk3, gz) -- the B-grid corner
     # scratch of pp(=pkc)/pk3/gz rides the returned functional carry.
     pg_faces = []
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         u_t, v_t, pkc_t, pk3_t, gz_t = nh_p_grad(
             tail_outs["u"][t], tail_outs["v"][t], pkc6[t], gz6[t],
             delp6[t], upd["pk3"][t], gs6[t], bd,
@@ -979,12 +1211,161 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     }
 
 
+def _dgrid_nh_pressure_phase_3d_batched(ctx, csw_press, dsw_outs,
+                                        tail_outs, nh, km, *, dt, ptop,
+                                        akap, cp_air, p_fac, a_imp, dp0,
+                                        delz, remap_step, use_logp,
+                                        square_domain, hord_v, nord_v,
+                                        damp_vt,
+                                        return_stages) -> dict:
+    """The vmap-over-faces arm of :func:`dgrid_nh_pressure_phase_3d`.
+
+    Entry gates already ran in the caller (``hord_v``/``nord_v``/
+    ``damp_vt`` arrive resolved from ``_nh_tail_cfg``).  The two FACE
+    loops -- ``update_dz_d`` -> ``riem_solver3`` -> the pe/pk3 halos,
+    and ``nh_p_grad`` -- become one ``jax.vmap`` each; everything
+    BETWEEN them (the zh/pkc allk duo exchanges, the ``gz = zh*grav``
+    box, the ``square_domain`` second pkc exchange) is the loop path's
+    own six-face-stack code, repeated verbatim -- those are cross-face
+    collectives and are not face-batched.
+
+    No da_min threading here: the NH chain's kernels take no GridFlags
+    (``fv3_nh_core.py:1390`` records ``da_min`` UNREAD on this path);
+    the domain/corner selectors ``update_dz_d`` does take are
+    face-invariant by ``build_batched_gs``'s common-mode gate and close
+    over as the shared Python values, exactly the loop path's per-face
+    reads of an all-equal ``flags6``.
+
+    in_axes: the four advective flux planes, the nh-carry members, the
+    ``delz``/``pkc``/``pt``/``delp``/``w`` planes, the exchanged
+    ``area``/``rarea`` and the gridstruct dict are 0 (per face).
+    Closed over: ``bounds``/``km``/``npx``/the static branch selectors,
+    plus ``dt``/``ptop``/``akap``/``cp_air``/``p_fac``/``a_imp``/
+    ``dp0``/``rdt`` (traced but shared -- one column of reference
+    thicknesses and one time step for all six faces, exactly as on the
+    loop path).
+
+    ``return_stages`` rides through: the two zh stages come back as
+    extra vmapped outputs and are unstacked into the loop path's
+    list-of-six-dicts layout.
+    """
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface_allk
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV
+
+    bview = build_batched_gs(ctx)
+    flags = bview["flags"]
+    bd = ctx.bd
+    n, ng = ctx.n, ctx.ng
+    npx = ctx.npx
+    bounds = (bd.is_, bd.ie, bd.js, bd.je, int(ng))
+    area6 = nh_exchanged_area6(ctx)
+    rarea6 = 1.0 / area6
+    rdt = 1.0 / dt
+    ndif = (float(nord_v),) * (km + 1)
+    damp = (damp_vt,) * (km + 1)
+
+    # --- update_dz_d -> riem_solver3 -> halos, faces vmapped ----------
+    def one_face(crx_t, cry_t, xfx_t, yfx_t, zs_t, zh_t, ws_t, w_t,
+                 delz_t, pkc_t, pe_t, pk3_t, pk_t, peln_t, pt_t,
+                 delp_t, area_t, rarea_t, gs_t):
+        zh1, ws1 = update_dz_d(
+            ndif, damp, hord_v, bounds, km, npx, npx,
+            area_t, rarea_t, dp0, zs_t, zh_t,
+            crx_t, cry_t, xfx_t, yfx_t, ws_t, rdt,
+            gs_t["dxa"], gs_t["dya"], gs_t["del6_u"], gs_t["del6_v"],
+            lim_fac=1.0,
+            bounded_domain=flags["bounded_domain"],
+            grid_type=flags["grid_type"],
+            sw_corner=flags["sw_corner"], se_corner=flags["se_corner"],
+            nw_corner=flags["nw_corner"], ne_corner=flags["ne_corner"])
+        zh_after_dz = zh1 if return_stages else None
+        (w1, delz1, zh2, pe1, pkc1, pk3_1, pk1,
+         peln1) = riem_solver3(
+            0, dt, bounds, km, akap, cp_air, ptop, zs_t, w_t, delz_t,
+            pt_t, delp_t, zh1, pe_t, pkc_t, pk3_t, pk_t, peln_t,
+            ws1, p_fac, a_imp, use_logp=use_logp,
+            last_call=remap_step, fp_out=False)
+        if remap_step:
+            pe1 = pe_halo(pe1, delp_t, bd, npz=km, ptop=ptop)
+        if use_logp:
+            pk3_1 = pln_halo(pk3_1, delp_t, bd, npz=km, ptop=ptop)
+        else:
+            pk3_1 = pk3_halo(pk3_1, delp_t, bd, npz=km, ptop=ptop,
+                             akap=akap)
+        out = {"zh": zh2, "ws": ws1, "w": w1, "delz": delz1,
+               "pkc": pkc1, "pe": pe1, "pk3": pk3_1,
+               "pk": pk1, "peln": peln1}
+        if return_stages:
+            out["_stage_zh_after_update_dz_d"] = zh_after_dz
+            out["_stage_zh_after_riem_solver3"] = zh2
+        return out
+
+    upd = jax.vmap(one_face, in_axes=(0,) * 19)(
+        dsw_outs["crx_adv"], dsw_outs["cry_adv"],
+        dsw_outs["xfx_adv"], dsw_outs["yfx_adv"],
+        nh["zs"], nh["zh"], nh["ws"], tail_outs["w"], delz,
+        csw_press["pkc"], nh["pe"], nh["pk3"], nh["pk"], nh["peln"],
+        dsw_outs["pt"], dsw_outs["delp"], area6, rarea6, bview["gs"])
+
+    stage_zh: list = []
+    if return_stages:
+        a = upd.pop("_stage_zh_after_update_dz_d")
+        b = upd.pop("_stage_zh_after_riem_solver3")
+        stage_zh = [{"after_update_dz_d": a[t],
+                     "after_riem_solver3": b[t]}
+                    for t in range(batch_size(ctx))]
+
+    # --- zh/pkc duo exchanges, gz box, second pkc exchange: verbatim --
+    # (:1482-1483, :1487-1494, :1496-1502 -- the loop path's own
+    # six-face-stack code; cross-face collectives, not batched.)
+    zh6 = ext_scalar_sixface_allk(upd["zh"], ctx.tab, "A")
+    pkc6 = ext_scalar_sixface_allk(upd["pkc"], ctx.tab, "A")
+
+    i0 = bd.is_ - bd.isd
+    j0 = bd.js - bd.jsd
+    sl_i = slice(i0 - 2, i0 + n + 2)
+    sl_j = slice(j0 - 2, j0 + n + 2)
+    gz6 = nh["gz"].at[:, sl_i, sl_j, :].set(
+        zh6[:, sl_i, sl_j, :] * FV3_GRAV)
+
+    if square_domain:
+        pkc6 = ext_scalar_sixface_allk(pkc6, ctx.tab, "A")
+
+    # --- nh_p_grad (:1534-1543), faces vmapped ------------------------
+    def one_face_pg(u_t, v_t, pkc_t, gz_t, delp_t, pk3_t, gs_t):
+        return nh_p_grad(u_t, v_t, pkc_t, gz_t, delp_t, pk3_t, gs_t,
+                         bd, npx=npx, npy=npx, npz=km, dt=dt,
+                         ptop=ptop, akap=akap, use_logp=use_logp,
+                         ng=ng, duogrid=True)
+
+    u6, v6, pg_pkc6, pg_pk3_6, pg_gz6 = jax.vmap(
+        one_face_pg, in_axes=(0,) * 7)(
+        tail_outs["u"], tail_outs["v"], pkc6, gz6, dsw_outs["delp"],
+        upd["pk3"], bview["gs"])
+
+    nh_out = {"zh": zh6, "gz": pg_gz6, "zs": nh["zs"],
+              "pk3": pg_pk3_6, "pe": upd["pe"], "pk": upd["pk"],
+              "peln": upd["peln"], "ws": upd["ws"]}
+    return {
+        "nh": nh_out,
+        "delz": upd["delz"],
+        "w": upd["w"],
+        "pkc": pg_pkc6,
+        "u": u6,
+        "v": v6,
+        "press": {"pe": nh_out["pe"], "pk": nh_out["pk"],
+                  "peln": nh_out["peln"], "ws": nh_out["ws"]},
+        **({"stages": {"zh": stage_zh}} if return_stages else {}),
+    }
+
+
 def make_dgrid_nh_pressure_phase_3d_jit(ctx, km, *, remap_step=False,
                                         use_logp=False,
                                         square_domain=True, cfg=None,
                                         hord_tm=None, nord_w=None,
                                         damp_w=None,
-                                        remap_follows=False):
+                                        remap_follows=False,
+                                        batched=False):
     """jit factory for :func:`dgrid_nh_pressure_phase_3d`.
 
     Every STATIC selector is baked and validated ONCE here, so a bad
@@ -1005,7 +1386,8 @@ def make_dgrid_nh_pressure_phase_3d_jit(ctx, km, *, remap_step=False,
     km = require_km(fname, km)
     for nm, v in (("remap_step", remap_step), ("use_logp", use_logp),
                   ("square_domain", square_domain),
-                  ("remap_follows", remap_follows)):
+                  ("remap_follows", remap_follows),
+                  ("batched", batched)):
         require_bool(fname, nm, v)
     _nh_tail_cfg(fname, cfg, hord_tm, nord_w, damp_w)
     require_no_remap_needed(km, remap_follows=remap_follows)
@@ -1018,6 +1400,7 @@ def make_dgrid_nh_pressure_phase_3d_jit(ctx, km, *, remap_step=False,
             p_fac=p_fac, a_imp=a_imp, dp0=dp0, delz=delz,
             remap_step=remap_step, use_logp=use_logp,
             square_domain=square_domain, cfg=cfg, hord_tm=hord_tm,
-            nord_w=nord_w, damp_w=damp_w, remap_follows=remap_follows)
+            nord_w=nord_w, damp_w=damp_w, remap_follows=remap_follows,
+            batched=batched)
 
     return jax.jit(run)

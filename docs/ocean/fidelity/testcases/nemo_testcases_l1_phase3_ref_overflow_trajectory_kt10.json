@@ -1,0 +1,827 @@
+{
+  "bar": 1e-15,
+  "bbl_attribution": {
+    "bit_identical_bbl_on_off_kt2_T": true,
+    "classification": "ONE_SIDED",
+    "legoesm_side": "CONFIRMED_INACTIVE_AT_KT2",
+    "max_abs_initial_utr_m3_s": 0.0,
+    "max_abs_initial_vtr_m3_s": 0.0,
+    "max_abs_kt2_temperature_movement_K": 0.0,
+    "nemo_side": "PLAUSIBLE_INACTIVE_FROM_GEOMETRY_ONLY",
+    "reason": "legoESM's shipped initial density front does not intersect an active downslope face, so its option-2 transport is zero. The same NEMO conclusion is geometrically plausible but is not confirmed because utr_bbl was not read from NEMO",
+    "scaling_check_before_owner_label": true,
+    "source": "NEMO trabbl.F90:342-353,415-454; stage-3 calls at stprk3_stg.F90:468,588"
+  },
+  "case": "OVERFLOW-zps",
+  "first_over_bar": {
+    "fields": [
+      "T",
+      "u",
+      "ssh"
+    ],
+    "kt": 2
+  },
+  "format": "nemo-testcase-l1-phase3-trajectory-v1",
+  "growth_characterization": {
+    "T": {
+      "classification": "EXPONENTIAL_FIT_PREFERRED_OPEN_MODE_QUESTION",
+      "normalized_errors": [
+        1.1191048088221578e-14,
+        1.9480874691168992e-09,
+        1.8756195263591732e-08,
+        3.5274800502804725e-08,
+        5.003799454783574e-08,
+        5.897961070644439e-08,
+        5.995746201747917e-08,
+        6.169546669099187e-08,
+        7.711785263708742e-08
+      ],
+      "ratios_monotone_decreasing": false,
+      "status": "MEASURED",
+      "steps": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "successive_step_ratios": [
+        174075.5158730159,
+        9.628004676860957,
+        1.8807012833395802,
+        1.418519561687023,
+        1.1786965332925277,
+        1.0165794805920605,
+        1.028987295576421,
+        1.2499759994253739
+      ],
+      "tail_exponential_rate_per_step": 0.08330041180364813,
+      "tail_exponential_semilog_r2": 0.7375932040717801,
+      "tail_polynomial_loglog_r2": 0.693749930292545,
+      "tail_power_law_exponent_p": 0.679176149854052,
+      "tail_ratios_monotone_decreasing": false,
+      "tail_window_steps": [
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    "ssh": {
+      "classification": "POLYNOMIAL_FIT_PREFERRED",
+      "normalized_errors": [
+        1.049160758270773e-14,
+        3.7738218288188574e-09,
+        1.0715358736285152e-06,
+        1.480516708013413e-05,
+        3.9991351277357534e-05,
+        4.557948344854901e-05,
+        7.969142664032702e-05,
+        7.29419662242603e-05,
+        9.237390634442288e-05
+      ],
+      "ratios_monotone_decreasing": false,
+      "status": "MEASURED",
+      "steps": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "successive_step_ratios": [
+        359699.10226521164,
+        283.93917949324276,
+        13.816772209407942,
+        2.7011752762330343,
+        1.1397335171906378,
+        1.7484056555902883,
+        0.9153050622806742,
+        1.266402746265696
+      ],
+      "tail_exponential_rate_per_step": 0.20306626791139662,
+      "tail_exponential_semilog_r2": 0.7379036786328192,
+      "tail_polynomial_loglog_r2": 0.7658176319631703,
+      "tail_power_law_exponent_p": 1.7391734038906734,
+      "tail_ratios_monotone_decreasing": false,
+      "tail_window_steps": [
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    "u": {
+      "classification": "POLYNOMIAL_FIT_PREFERRED",
+      "normalized_errors": [
+        2.598797930308122e-07,
+        3.373690125138551e-06,
+        3.3542874244840704e-06,
+        3.2262451417353066e-06,
+        9.270102390497581e-06,
+        1.150210902620824e-05,
+        2.6688796622924282e-05,
+        3.218522550634678e-05,
+        2.644298236102044e-05
+      ],
+      "ratios_monotone_decreasing": false,
+      "status": "MEASURED",
+      "steps": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "successive_step_ratios": [
+        12.981733153599038,
+        0.9942488195611374,
+        0.9618272775868459,
+        2.8733409840987636,
+        1.2407747554113968,
+        2.320339388377581,
+        1.2059451747142977,
+        0.8215876056486229
+      ],
+      "tail_exponential_rate_per_step": 0.26846448182351657,
+      "tail_exponential_semilog_r2": 0.5688405825556171,
+      "tail_polynomial_loglog_r2": 0.620795746996741,
+      "tail_power_law_exponent_p": 2.3578065603300176,
+      "tail_ratios_monotone_decreasing": true,
+      "tail_window_steps": [
+        7,
+        8,
+        9,
+        10
+      ]
+    }
+  },
+  "jax_backend": "cpu",
+  "legoesm_git_sha": "9070cf2767bc679e31bd49c21471a497fb90f280",
+  "oracle_root": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10",
+  "overflow_t_owner_hunt": null,
+  "precision_policy": "fp64",
+  "selectors": {
+    "arm_literal_stage_wzv_test_hook": false,
+    "barotropic_time_filter": "nemo_boxcar1_ab3",
+    "bbl_adv_option": 2,
+    "bbl_gamma_s": 20.0,
+    "diagnostic_disable_bbl_test_hook": false,
+    "eos": "nemo_teos10",
+    "eos_depth": "geometric",
+    "n_barotropic_substeps": 3,
+    "rk3_ws_scheme_identity": "nemo_kmm+two_step_fct+stage_correction+transport_reconcile",
+    "tracer_time_integrator": "rk3_ws",
+    "vertical_momentum_scheme": "nemo_up3"
+  },
+  "status": "DEBT",
+  "steps": [
+    {
+      "Nbb": 1,
+      "exact_at_step": true,
+      "exact_prefix_entering": true,
+      "kt": 1,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt1.before.T",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt1.before.S",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt1.before.u",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt1.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt1.before.ssh",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": true,
+      "kt": 2,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt2.before.T",
+          "normalized_max_abs": 1.1191048088221578e-14,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt2.before.S",
+          "normalized_max_abs": 2.0301221021717148e-16,
+          "oracle_dtype": "float64",
+          "reason": "oracle salinity is spatially uniform (n_unique=1); this row cannot detect transport/time-level errors",
+          "status": "UNINFORMATIVE"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt2.before.u",
+          "normalized_max_abs": 2.598797930308122e-07,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt2.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt2.before.ssh",
+          "normalized_max_abs": 1.049160758270773e-14,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 1,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 3,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt3.before.T",
+          "normalized_max_abs": 1.9480874691168992e-09,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt3.before.S",
+          "normalized_max_abs": 2.0301221021717145e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt3.before.u",
+          "normalized_max_abs": 3.373690125138551e-06,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt3.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt3.before.ssh",
+          "normalized_max_abs": 3.7738218288188574e-09,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 4,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt4.before.T",
+          "normalized_max_abs": 1.8756195263591732e-08,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt4.before.S",
+          "normalized_max_abs": 4.060244204343429e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt4.before.u",
+          "normalized_max_abs": 3.3542874244840704e-06,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt4.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt4.before.ssh",
+          "normalized_max_abs": 1.0715358736285152e-06,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 1,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 5,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt5.before.T",
+          "normalized_max_abs": 3.5274800502804725e-08,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt5.before.S",
+          "normalized_max_abs": 6.090366306515144e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt5.before.u",
+          "normalized_max_abs": 3.2262451417353066e-06,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt5.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt5.before.ssh",
+          "normalized_max_abs": 1.480516708013413e-05,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 6,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt6.before.T",
+          "normalized_max_abs": 5.003799454783574e-08,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt6.before.S",
+          "normalized_max_abs": 6.090366306515144e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt6.before.u",
+          "normalized_max_abs": 9.270102390497581e-06,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt6.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt6.before.ssh",
+          "normalized_max_abs": 3.9991351277357534e-05,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 1,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 7,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt7.before.T",
+          "normalized_max_abs": 5.897961070644439e-08,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt7.before.S",
+          "normalized_max_abs": 4.060244204343429e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt7.before.u",
+          "normalized_max_abs": 1.150210902620824e-05,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt7.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt7.before.ssh",
+          "normalized_max_abs": 4.557948344854901e-05,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 8,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt8.before.T",
+          "normalized_max_abs": 5.995746201747917e-08,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt8.before.S",
+          "normalized_max_abs": 4.060244204343428e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt8.before.u",
+          "normalized_max_abs": 2.6688796622924282e-05,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt8.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt8.before.ssh",
+          "normalized_max_abs": 7.969142664032702e-05,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 1,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 9,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt9.before.T",
+          "normalized_max_abs": 6.169546669099187e-08,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt9.before.S",
+          "normalized_max_abs": 6.090366306515141e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt9.before.u",
+          "normalized_max_abs": 3.218522550634678e-05,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt9.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt9.before.ssh",
+          "normalized_max_abs": 7.29419662242603e-05,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 10,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt10.before.T",
+          "normalized_max_abs": 7.711785263708742e-08,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 17000,
+          "name": "OVERFLOW-zps.kt10.before.S",
+          "normalized_max_abs": 6.090366306515142e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 16900,
+          "name": "OVERFLOW-zps.kt10.before.u",
+          "normalized_max_abs": 2.644298236102044e-05,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 60600,
+          "name": "OVERFLOW-zps.kt10.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 200,
+          "name": "OVERFLOW-zps.kt10.before.ssh",
+          "normalized_max_abs": 9.237390634442288e-05,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    }
+  ],
+  "unmeasured": [
+    "NEMO per-term tendencies at the first divergent step",
+    "remaining OVERFLOW kt=2 T owner after registered arms"
+  ]
+}

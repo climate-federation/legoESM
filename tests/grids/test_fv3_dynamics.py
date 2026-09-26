@@ -79,6 +79,7 @@ from legoesm.grids.fv3_native_gridstruct import (  # noqa: E402
 )
 
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
+    assert_batched_matches_loop,
     assert_real,
     cmp_fields,
     deepcopy_faces,
@@ -229,7 +230,7 @@ def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
 
 
 def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
-             sphum_index=None, q_scale=1.0):
+             sphum_index=None, q_scale=1.0, batched=False, consv_te=0.0):
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(hydrostatic))
     # Tracer-major, matching this module's contract (nq entries, each
@@ -238,10 +239,11 @@ def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
     q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
          for iq in range(NQ)]
     press = _press_jax(jst, ptop)
-    return jdyn.fv_dynamics_step(jctx, jst, press, q=q,
+    _extra = {"consv_te": consv_te} if consv_te else {}
+    return jdyn.fv_dynamics_step(jctx, jst, press, q=q, batched=batched,
                                  **_common(ptop, ak, bk, hydrostatic,
                                            k_split, n_split),
-                                 **_moist(zvir, sphum_index))
+                                 **_moist(zvir, sphum_index), **_extra)
 
 
 def _out_state(got):
@@ -838,3 +840,114 @@ def test_gradient_through_a_whole_step_is_finite(jctx, eta):
     assert np.isfinite(g).all(), (
         f"{int((~np.isfinite(g)).sum())} non-finite gradient entries")
     assert np.abs(g).max() > 0.0, "gradient is identically zero (vacuous)"
+
+
+# --------------------------------------------------------------------
+# 9.  The face-batched arm (C2a -- face-batching ladder step 6)
+#
+# batched=True here turns on EVERY converted loop in the composed step:
+# the acoustic phases (ladders 1-5) AND this step's two additions --
+# the vertical-remap face loop (vmapped lagrangian_to_eulerian) and the
+# tracer transport's per-face kernels.  KM = 5 > REMAP_MIN_NPZ and
+# NQ = 2, so both new arms are live in this comparison, and k_split = 2
+# exercises the remap's non-last_step arm (theta_v back-conversion) as
+# well as the last_step one.  Gates follow the phase files' sections
+# G/H: batched == loop per output (START bound -- the composition
+# accumulates reassociation across n_split * k_split, so the phase-
+# level 1e-13 cannot be assumed; the sbatch measures), defaults-off,
+# and one jit-vs-eager batched smoke through the module's factory.
+# --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("hydrostatic", [True, False])
+def test_batched_matches_loop(jctx, eta, hydrostatic):
+    loop = _run_jax(jctx, eta, hydrostatic=hydrostatic, k_split=2)
+    bat = _run_jax(jctx, eta, hydrostatic=hydrostatic, k_split=2,
+                   batched=True)
+    # nsplt/nsplt_exceeded ride along: the tracer arm's schedule is
+    # exact arithmetic on exact max-reductions, so it must agree too.
+    keys = ["state", "press", "q", "omga", "nsplt",
+            "nsplt_exceeded"] + ([] if hydrostatic else ["nh"])
+    for nm in keys:
+        assert_batched_matches_loop(
+            bat[nm], loop[nm],
+            f"fv_dynamics_step[{nm},hydro={hydrostatic}]",
+            rtol=5e-12, atol=5e-12)
+
+
+def test_batched_matches_loop_consv_fixer(jctx, eta):
+    """Exercise the ENERGY FIXER's close_out_pt face loop (the last
+    dormant per-face x[t] site, batched here): hydrostatic + dry +
+    consv_te=1.0 + k_split=1 so the only step is last_step and the
+    fixer fires. Without consv_te the fixer branch never runs, so the
+    other batched tests never covered it."""
+    loop = _run_jax(jctx, eta, hydrostatic=True, k_split=1,
+                    consv_te=1.0)
+    bat = _run_jax(jctx, eta, hydrostatic=True, k_split=1,
+                   consv_te=1.0, batched=True)
+    for nm in ["state", "press", "q", "omga", "nsplt", "nsplt_exceeded"]:
+        assert_batched_matches_loop(
+            bat[nm], loop[nm], f"consv_fixer[{nm}]",
+            rtol=5e-12, atol=5e-12)
+    # NON-VACUITY (codex MINOR): prove the fixer actually MOVED pt, so
+    # this parity check cannot pass merely because dtmp happened to be
+    # 0 (a bug zeroing/mis-pairing dtmp would trivially agree with
+    # itself on both branches otherwise).
+    off = _run_jax(jctx, eta, hydrostatic=True, k_split=1, consv_te=0.0)
+    correction = float(jnp.abs(loop["state"]["pt"]
+                                - off["state"]["pt"]).max())
+    assert correction > 1e-6, (
+        f"consv_te=1.0 fixer produced a near-zero pt correction "
+        f"({correction:.3e}); the batched-vs-loop parity above would "
+        f"pass vacuously if the fixer were disabled or its dtmp "
+        f"mis-paired to zero.")
+    # NOTE (why there is no jit arm here): the consv_te total-energy
+    # fixer is EAGER-ONLY. Its energy integrals (fixer_energy_2d /
+    # _hs_face_jax) np.asarray traced arrays, so the whole consv_te>0
+    # branch raises TracerArrayConversionError under jit -- a
+    # PRE-EXISTING property, unrelated to this face-batching change.
+    # The duo lane's jitted step always runs consv_te=0 (the fixer is
+    # exercised only through the eager fv_dynamics_step spec path), so
+    # the vmapped close_out_pt arm never executes under jit in
+    # production; eager batched-vs-loop parity above is the whole of
+    # its reachable coverage.
+
+
+def test_batched_defaults_off(jctx, eta):
+    """RULE 3 guard: the certified loop path is the DEFAULT everywhere
+    -- the eager entry point and the factory."""
+    import inspect
+
+    assert inspect.signature(
+        jdyn.fv_dynamics_step).parameters["batched"].default is False
+    assert inspect.signature(
+        jdyn.make_fv_dynamics_step_jit).parameters["batched"].default \
+        is False
+
+
+def test_batched_jit_matches_eager(jctx, eta):
+    """jit-vs-eager on the fully batched composed step, through the
+    module's OWN factory (batched static by closure).  START bound
+    5e-12 (measured-x4 convention; the sbatch measures)."""
+    ak, bk, ptop = eta
+    jst = state_3d_to_jax(_state(True))
+    # Tracer-major, matching this module's contract (nq entries, each
+    # face-stacked) -- NOT module 5's single (6, nq, ...) stack.
+    _t = _tracers()
+    q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
+         for iq in range(NQ)]
+    press = _press_jax(jst, ptop)
+    kw = _common(ptop, ak, bk, True, 1, 2)
+
+    eager = jdyn.fv_dynamics_step(jctx, jst, press, q=q, batched=True,
+                                  **kw)
+    fn = jdyn.make_fv_dynamics_step_jit(
+        jctx, KM, k_split=1, n_split=2, ptop=ptop, ak=ak, bk=bk,
+        akap=AKAP, cp_air=CP_AIR, kord_mt=KORD_MT,
+        kord_tm=KORD_TM, kord_tr=KORD_TR, hydrostatic=True,
+        batched=True)
+    jitted = fn(jst, press, q, BDT)
+    for nm in ("state", "press", "q", "omga"):
+        assert_batched_matches_loop(
+            jitted[nm], eager[nm], f"fv_dynamics_step[jit,{nm}]",
+            rtol=5e-12, atol=5e-12)

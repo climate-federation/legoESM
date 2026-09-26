@@ -39,8 +39,14 @@ adding a routine here without a disposition is a hard failure, not a warning.
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
+import json
+import os
+import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 STPMLF = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
           "cfgs/DINO/MY_SRC/stpmlf.F90")
@@ -57,6 +63,66 @@ STPMLF = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
 # COVERED (a row exists, whether or not its own measurement clears the bar).
 COVERED, WAIVED, UNCOVERED, COVERED_UNMEASURED = (
     "COVERED", "WAIVED", "UNCOVERED", "COVERED (row UNMEASURED)")
+
+ROOT = Path(__file__).resolve().parents[4]
+MASTER_COVERAGE_GATE_TIP = "97d3d7188eb5"
+
+# The momentum-chain result documents are transitive receipts: each one binds
+# its machine artifacts and predecessor admissions. Hash every result document
+# produced by the lane so an edited, omitted, or stale receipt fails closed.
+LANE_RESULT_DOC_SHA256 = {
+    "dino_split_explicit_momentum_chain_round1_result.md": "1ca6a1d64ac71b43dbbeca52da307a87bb54557d84d736a42c748533ee356ea3",
+    "dino_split_explicit_momentum_chain_round2_result.md": "96ece6aba3165ec81a72da8ab499e05076a7e1f64546fddd7d0d83445f4a90f2",
+    "dino_split_explicit_momentum_chain_round3_result.md": "b41efed25d65254eff77c39b878db79835c4f0e7d893de50369d050e632f3f91",
+    "dino_split_explicit_momentum_chain_round4_result.md": "0a2d33bd90a447b9b62391d7311bbae87f8630bdd54d11d29027f52fe8b850b0",
+    "dino_split_explicit_momentum_chain_round5_result.md": "e12f609c6ff90a1bcde13a2b949dbfec6428435df9b93f7e42ac19eb3022447b",
+    "dino_split_explicit_momentum_chain_round8_result.md": "6ff917446072fb9b603f39c9a71acb28544f5268a14d4428fac23eb8f9d26c3b",
+    "dino_split_explicit_momentum_chain_round10_result.md": "a8961c2056b1e1c88c5ab47f3cec6fec84629a4ae03676ea13a36864639fab63",
+    "dino_split_explicit_momentum_chain_round14_result.md": "042ba645e1fcc8324912dc5c88f5c9109b7d145ffb07e6dc7aee2b4926c08d4c",
+    "dino_split_explicit_momentum_chain_round16_result.md": "45c175779c7bd30f9f2cbc655903197ffb4a87ed8e33c3af0b7b27d31b635fc2",
+    "dino_split_explicit_momentum_chain_round17_result.md": "d8062344d7faf31f34ba1ad785d34340f6132ca394fef0cf7d83c5e660a87ae0",
+    "dino_split_explicit_momentum_chain_round18_result.md": "575b0e9b16a869ba200233b906be1be93e44af72b9e6c10bfff4cb2e8dedf2d8",
+    "dino_split_explicit_momentum_chain_round21_result.md": "430dcbcbf3ed6cc6a0afca044971754d00dd7ffed6f252323a04e01ec5ffd758",
+    "dino_split_explicit_momentum_chain_round23_result.md": "5a0801fb2aa085cf120fbb520a3267154d8a57e02b8c9325cf07a0b62a0dc416",
+    "dino_split_explicit_momentum_chain_round24_result.md": "c9025c61aff375dc94bbe9bfadd0f491aee70dafbf7490d439455514969099f6",
+    "dino_split_explicit_momentum_chain_round25_result.md": "3062529cbcc1f72ee3251a328ca5fd0dd131f00ab5894b94a8591dd62345d0bc",
+    "dino_split_explicit_momentum_chain_round26_result.md": "4554e5e74eaa49e371c6bb3d3fc92766d95f7f71e9f9a4f47eff0a991144942e",
+    "dino_split_explicit_momentum_chain_round27_result.md": "a43e7e46d753367937bf86eaa36c0bd52bb75b28707753a1ceced0e8c114edbf",
+    "dino_split_explicit_momentum_chain_round28_result.md": "13f8dfeef515880022c2273061785f805a617c6660b5916e576a7368dbb7ecf6",
+    "dino_split_explicit_momentum_chain_round79_result.md": "379755107d831605612a6533668a98f74e7e6157333a6dfe17d224785b66923f",
+    "dino_split_explicit_momentum_chain_round80_result.md": "11e1aa978d5ad768adafd337af6c5582e5d80df2550cf616f52986b0d6732a6b",
+    "dino_split_explicit_momentum_chain_round81_result.md": "7232197e004e78b84fbcb30707437b63d46757473ce80b794a5e600cf3acdd4f",
+    "dino_split_explicit_momentum_chain_round82_result.md": "d234de9a812959b609a2e61b74d4c0c81e8d42536b147268a097bd8490e976b4",
+    "dino_split_explicit_momentum_chain_round83_result.md": "710af0051b243161b73906b2710d7e0e122fc624ae6ea4275a3d6b4552eb3728",
+    "dino_split_explicit_momentum_chain_round84_result.md": "40d9e20327c1b751d5ce2fc4ff20cd66922517ef2658ed6f0a59b8ffe3608502",
+    "dino_split_explicit_momentum_chain_round85_result.md": "ccb7f17df905926e0f7e052a284ace5b601ae81210ae5bc6d2029e0ab296f93b",
+    "dino_split_explicit_momentum_chain_round86_result.md": "0bb8265546822b037db110f4d13693a21b01aed54e595456dd050460cf82d79a",
+    "dino_split_explicit_momentum_chain_round87_result.md": "13f868bb18fa565c4f6f5940d3e27f8fb7385a4a7d6493598d3e7b60f8f1a4c9",
+    "dino_split_explicit_momentum_chain_round88_result.md": "90a308a88316fdf7700ae7a935413211079dd827d8daf611b6b19d82d6cebc10",
+    "dino_split_explicit_momentum_chain_round89_result.md": "b45357550908050e0831eb6c131cf06ab006b3d447275345e83c15efa14f0e16",
+    "dino_split_explicit_momentum_chain_round90_result.md": "d111161ffaf780d4809d7bbc6743a6be9a4b83e432b4ed66d03789a580cdeef6",
+    "dino_split_explicit_momentum_chain_round91_result.md": "117ddd5947ae26d58f2a517f8d6425eb3dc757c9b9c421da233159156347f0bc",
+    "dino_split_explicit_momentum_chain_round92_result.md": "b6867a2396309020c47e89d5431036482a9cfcf6f8fcd33b178bb19b2bf6e267",
+    "dino_split_explicit_momentum_chain_round93_result.md": "608f7408573434e07cba1ccccf1029a75abf45fd29cdf2af0374de2c4078d45b",
+    "dino_split_explicit_momentum_chain_round94_result.md": "38ab6fb2a799308520d704d0373cbe4d881c900bae9440f6777c28b326ac7e84",
+}
+
+ZDF_CHAIN_RECEIPT = (
+    "dino_zdf_chain_end_verified_artifact.json",
+    "ce6fff6690ff6fbfa1023b4cf3eafbd36d0b86938ef47c5f7524accc410d4975",
+)
+
+# Formerly COVERED_UNMEASURED calls promoted by this lane. Conditional
+# upstream-exact and Rule-1b qualifications remain named in their receipts;
+# COVERED here means measured/dispositioned, never silently bit-exact.
+LANE_PROMOTIONS = {
+    "wzv (Nnn cross-level velocity)": "round 40 call-1 QCO W is exact in the registered coupled ZAD path",
+    "dyn_zdf (dyn_zdf_imp, implicit)": "round 40/37 momentum solve output is measured and row 4 is at bar in the registered upstream frame",
+    "wzv (Naa cross-level velocity, 2nd call)": "round 46 call-2 Q/H/W is at the accumulating bar in the upstream-exact frame",
+    "ssh_atf": "round 51 ssh_atf and filtered r3t/r3u/r3v are bit-exact",
+    "tra_ldf -> traldf_iso_lap": "round 93 closes T zfu/zfv/zfw and S zfu/zfv; S zfw is Rule-1b proven-oracle-arithmetic",
+    "tra_zdf": "committed ZDF chain-end receipt verifies row 32 T/S production literal solve",
+}
 
 
 @dataclass(frozen=True)
@@ -135,7 +201,12 @@ CALLS: list[CallEntry] = [
               '"zdftke pdlr", "zdftke composite avt/avm" -- zdfphy.F90:286, '
               "nzdf_phy==np_TKE selected because DINO &namzdf sets ln_zdftke=.true. "
               "(the only True closure flag; ln_zdfric/ln_zdfgls/ln_zdfosm all "
-              "default False in namelist_ref and DINO does not set them)."),
+              "default False in namelist_ref and DINO does not set them). "
+              "IMPORT NOTE 2026-08-29: row 29 post-zdf_phy avm interior is "
+              "VERIFIED 0/9920 with its own controls; the census excludes "
+              "halos and does not claim legoESM executes NEMO's LBC. Import "
+              "dino_zdf_chain_end_artifact.json SHA256 "
+              "326540e6e642c55c1d925fa8e1a281c21f7f35784060b2b25438c83ceeaa0498."),
     CallEntry(190, "zdf_phy -> zdf_evd", COVERED,
               "part of the zdf_mxl/zdftke composite avt/avm gate rows above -- "
               "zdfphy.F90:323, DINO &namzdf sets ln_zdfevd=.true. (enhanced "
@@ -144,11 +215,11 @@ CALLS: list[CallEntry] = [
               "into, so this is COVERED as part of that composite, not as its "
               "own independently-measured term.", ),
     CallEntry(190, "zdf_phy -> zdf_mxl_turb", COVERED,
-              '"zdf_mxl_turb" (row exists, UNMEASURED None/None) -- zdfphy.F90:338, '
-              "unconditional. TASK B verdict: no DINO-active consumer of its "
-              "output (hmld/mldkz5) exists, so this row is a candidate WAIVE, "
-              "not a defect -- see this file's module docstring addendum and the "
-              "companion consumer-grep report."),
+              "IMPORT NOTE 2026-08-29: ZDF sweep row 28 VERIFIED 0/9920 "
+              "depth columns, index_fail=0, focus_fail=0; import receipt "
+              "dino_zdf_row28_turbocline_artifact.json and dump SHA "
+              "d3a62643bc8e5ea0370a784a6659cc386410baa516b270f86cacedd0603edad9 "
+              "when the full-step registry is regenerated."),
 
     # --- lateral physics: slopes + coefficients (lines 194-208) ---
     CallEntry(199, "eos (Nbb, in-situ density for ldf_slp)", WAIVED,
@@ -163,7 +234,12 @@ CALLS: list[CallEntry] = [
               "DINO nldf_tra==np_lap_i since &namtra_ldf sets "
               "ln_traldf_lap=.true./ln_traldf_iso=.true.) and ln_traldf_triad="
               "'.false.' (DINO &namtra_ldf) selects the ELSE branch "
-              "(eos+ldf_slp), not ldf_slp_triad."),
+              "(eos+ldf_slp), not ldf_slp_triad. IMPORT NOTE 2026-08-29: "
+              "row-30 prd and dumped j/W operands pass except one non-focus "
+              "wslpi column; complete uslp/vslp remains DIVERGED. Import "
+              "dino_zdf_chain_end_artifact.json without promoting this call "
+              "(SHA256 "
+              "326540e6e642c55c1d925fa8e1a281c21f7f35784060b2b25438c83ceeaa0498)."),
     CallEntry(203, "ldf_tra", COVERED,
               '"ldftra ahtu (Redi, nn_aht_ijk_t=20)", "ldftra ahtv (Redi, '
               'nn_aht_ijk_t=20)", "ldf_eiv kappa (aeiu)" -- l_ldftra_time/'
@@ -267,7 +343,13 @@ CALLS: list[CallEntry] = [
               "ln_drgimp.AND.ln_dynspg_ts dynzdf.F90:148-171, and vertical "
               "mixing into one solve) and the #1226 dump instrumentation "
               "(stp_dump_state_and_bt(dynzdf), line 312) exists specifically "
-              "because this stage was identified as needing scrutiny, yet no "
+              "because this stage was identified as needing scrutiny. IMPORT "
+              "NOTE 2026-08-29: targeting receipt reconstructs the production "
+              "solve at 89/9758 U and 265/9868 V failing columns while the "
+              "literal dynzdf recurrence is 0 for both; keep ordered-blocked "
+              "behind row 30 and import dino_zdf_chain_end_artifact.json. "
+              "Receipt SHA256 "
+              "326540e6e642c55c1d925fa8e1a281c21f7f35784060b2b25438c83ceeaa0498; "
               "probe closes the loop into a gate row."),
     CallEntry(315, "wzv (Naa cross-level velocity, 2nd call)", COVERED_UNMEASURED,
               'same routine as line 244 -- covered by the same "wzv '
@@ -404,7 +486,12 @@ CALLS: list[CallEntry] = [
               "as dyn_zdf: this is the FINAL tracer-state-producing step "
               "every timestep, and the #1226 instrumentation "
               "(stp_dump_ts_krhs 'trazdf', line 435) exists specifically to "
-              "support closing this gap."),
+              "support closing this gap. IMPORT NOTE 2026-08-29: targeting "
+              "volume-form receipt has 627/9920 T and 23/9920 S failing "
+              "columns, all focus columns passing; it remains ordered-blocked "
+              "behind row 30 and row 31. Import "
+              "dino_zdf_chain_end_artifact.json SHA256 "
+              "326540e6e642c55c1d925fa8e1a281c21f7f35784060b2b25438c83ceeaa0498."),
     CallEntry(436, "tra_npc", WAIVED, "ln_zdfnpc=.false. (namelist_ref default) -- dead branch."),
 
     # --- finalize: boundary conditions, filtering, restart (lines 457-482) ---
@@ -462,6 +549,84 @@ CALLS: list[CallEntry] = [
 ]
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _validate_lane_receipts() -> list[str]:
+    errors = []
+    docs = ROOT / "docs" / "ocean" / "fidelity"
+    for name, expected in LANE_RESULT_DOC_SHA256.items():
+        path = docs / name
+        if not path.is_file():
+            errors.append(f"missing lane result receipt: {path}")
+        elif _sha256(path) != expected:
+            errors.append(
+                f"lane result receipt SHA mismatch: {name}: "
+                f"{_sha256(path)} != {expected}")
+    zdf_name, zdf_expected = ZDF_CHAIN_RECEIPT
+    zdf_path = docs / zdf_name
+    if not zdf_path.is_file():
+        errors.append(f"missing ZDF chain receipt: {zdf_path}")
+    elif _sha256(zdf_path) != zdf_expected:
+        errors.append(
+            f"ZDF chain receipt SHA mismatch: {_sha256(zdf_path)} != "
+            f"{zdf_expected}")
+    return errors
+
+
+def resolved_calls() -> list[CallEntry]:
+    """Apply the hash-admitted lane promotions to the fetched master gate."""
+    return [
+        replace(
+            call,
+            disposition=COVERED,
+            note=(f"LANE IMPORT: {LANE_PROMOTIONS[call.routine]}. "
+                  "All momentum-chain result receipts and the ZDF chain-end "
+                  "artifact are hash-admitted by this gate."),
+        ) if call.routine in LANE_PROMOTIONS else call
+        for call in CALLS
+    ]
+
+
+def coverage_summary(calls: list[CallEntry]) -> dict[str, object]:
+    counts = {
+        kind: sum(call.disposition == kind for call in calls)
+        for kind in (COVERED, COVERED_UNMEASURED, WAIVED, UNCOVERED)
+    }
+    active = counts[COVERED] + counts[COVERED_UNMEASURED] + counts[UNCOVERED]
+    measured_fraction = counts[COVERED] / active if active else 1.0
+    return {
+        "schema": "dino-stpmlf-full-step-coverage-v2",
+        "total_calls": len(calls),
+        "counts": counts,
+        "active_nonwaived_calls": active,
+        "measured_active_calls": counts[COVERED],
+        "measured_active_fraction": measured_fraction,
+        "registry_accounted_calls": len(calls) - counts[UNCOVERED],
+        "registry_accounted_fraction": (
+            (len(calls) - counts[UNCOVERED]) / len(calls)),
+        "lane_result_receipt_count": len(LANE_RESULT_DOC_SHA256),
+        "unmeasured": [
+            {"line": call.line, "routine": call.routine, "note": call.note}
+            for call in calls if call.disposition == COVERED_UNMEASURED
+        ],
+        "waived": [
+            {"line": call.line, "routine": call.routine, "reason": call.note}
+            for call in calls if call.disposition == WAIVED
+        ],
+        "uncovered": [
+            {"line": call.line, "routine": call.routine, "rank": call.rank,
+             "note": call.note}
+            for call in calls if call.disposition == UNCOVERED
+        ],
+    }
+
+
 def _validate(calls: list[CallEntry]) -> list[str]:
     """Fail-closed check: every entry must have a real disposition and every
     UNCOVERED entry must carry a rank (so 'UNCOVERED' can never silently mean
@@ -509,6 +674,30 @@ def _print_table(calls: list[CallEntry]) -> None:
             print(f"       {c.note}")
         print()
 
+    summary = coverage_summary(calls)
+    print("FINAL COVERAGE FRACTION (active, non-waived): "
+          f"{summary['measured_active_calls']}/"
+          f"{summary['active_nonwaived_calls']} = "
+          f"{summary['measured_active_fraction']:.6%}")
+    print("REGISTRY ACCOUNTING FRACTION (waivers included): "
+          f"{summary['registry_accounted_calls']}/{summary['total_calls']} = "
+          f"{summary['registry_accounted_fraction']:.6%}\n")
+    print("RESIDUAL UNMEASURED")
+    print(f"{'line':>5}  routine")
+    print("-" * 72)
+    for row in summary["unmeasured"]:
+        print(f"{row['line']:>5}  {row['routine']}")
+    if not summary["unmeasured"]:
+        print("  (none)")
+    print("\nRESIDUAL WAIVED")
+    print(f"{'line':>5}  routine")
+    print("-" * 72)
+    for row in summary["waived"]:
+        print(f"{row['line']:>5}  {row['routine']}")
+    if not summary["waived"]:
+        print("  (none)")
+    print()
+
 
 def build_synthetic_violation() -> list[CallEntry]:
     """A CALL entry that has NO disposition at all (empty string) -- used by
@@ -518,10 +707,15 @@ def build_synthetic_violation() -> list[CallEntry]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if "--self-test" in argv:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--json-output", type=Path)
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    calls = resolved_calls()
+    receipt_errors = _validate_lane_receipts()
+    if args.self_test:
         # 1. The real table must validate clean.
-        real_errors = _validate(CALLS)
+        real_errors = _validate(calls) + receipt_errors
         if real_errors:
             print("SELF-TEST FAILED: the real CALL list itself has "
                   "unaccounted entries:")
@@ -530,25 +724,37 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         # 2. A synthetic unaccounted entry MUST be caught -- proves the gate
         #    is not vacuously green.
-        synthetic_errors = _validate(build_synthetic_violation())
+        synthetic_errors = _validate(
+            calls + [CallEntry(9999, "CALL_synthetic_unaccounted", "", "")])
         if not synthetic_errors:
             print("SELF-TEST FAILED: a synthetic unaccounted CALL entry was "
                   "NOT flagged -- the gate is vacuous.")
             return 1
         print("SELF-TEST PASSED:")
-        print(f"  real CALL list: 0 unaccounted entries ({len(CALLS)} total)")
+        print(f"  real CALL list: 0 unaccounted entries ({len(calls)} total)")
         print(f"  synthetic violation: caught ({len(synthetic_errors)} "
               f"error(s) raised as expected)")
         return 0
 
-    _print_table(CALLS)
-    errors = _validate(CALLS)
+    _print_table(calls)
+    errors = _validate(calls) + receipt_errors
     if errors:
         print("*** COVERAGE GATE FAILED -- unaccounted CALL entries ***")
         for e in errors:
             print(f"  {e}")
         return 1
-    print("COVERAGE GATE PASSED: every enumerated CALL has a disposition.")
+    summary = coverage_summary(calls)
+    if args.json_output is not None:
+        summary["producer_commit"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        summary["session_id"] = os.environ.get("CODEX_SESSION_ID", "")
+        summary["master_coverage_gate_tip"] = MASTER_COVERAGE_GATE_TIP
+        args.json_output.write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        print(f"coverage_json={args.json_output} "
+              f"sha256={_sha256(args.json_output)}")
+    print("COVERAGE GATE PASSED: every enumerated CALL has a disposition and "
+          "every lane receipt is hash-admitted.")
     return 0
 
 

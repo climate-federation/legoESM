@@ -11,7 +11,7 @@ All five paper schemes are selectable legoESM config (each adversarially reviewe
 |---|---|---|
 | **W9V** | `momentum_advection="weno9"` + `weno_smoothness="split"` | B1+B2 |
 | **W9D** | `weno9` + `weno_smoothness="standard"` | B2 |
-| **UP3** | `flux_form` + `momentum_flux_scheme="upwind3"` | B3 |
+| **UP3** | `flux_form` + `momentum_flux_scheme="oceananigans_up3"` (the paper's UP3 is Oceananigans `UpwindBiased(order=3)`; NEMO's `nemo_up3` arm picks the T-point upwind branch differently) | B3 |
 | **SM2** | `lateral_friction_scheme="om4p25"` | B4 |
 | **QG2** | `lateral_friction_scheme="qg_leith"` (BAROTROPIC approx — stretching omitted, see B5b) | B5 |
 

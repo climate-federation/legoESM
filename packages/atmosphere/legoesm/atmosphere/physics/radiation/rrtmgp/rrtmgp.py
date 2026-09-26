@@ -14,6 +14,7 @@
 
 """Implementation of a radiative transfer solver."""
 
+import functools
 from pathlib import Path
 from typing import TypeAlias
 
@@ -553,6 +554,7 @@ class RRTMGP:
       aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
+      mcica_cloud_fraction: jnp.ndarray | None = None,
       sw_optical_field_only: bool = False,
       lw_optical_field_only: bool = False,
   ):
@@ -618,6 +620,10 @@ class RRTMGP:
           Per-g-point solar source weights (ngpt_sw,).
       ghg_vmr_override : dict | None
           Runtime GHG VMR overrides (e.g. ``{"co2": 4.15e-4}``).
+      mcica_cloud_fraction : jnp.ndarray | None
+          ``(ncol, nlev)`` layer cloud fraction, index 0 = model top.  Given,
+          ``cloud_path_liq/ice`` are IN-CLOUD paths and each g-point solves
+          its own maximum-random subcolumn (McICA).
 
       Returns
       -------
@@ -635,6 +641,14 @@ class RRTMGP:
       # all inputs to match so that table lookups, lax.cond branches, and
       # lax.scan carries have consistent dtypes throughout the solver.
       _table_dtype = self.optics_lib.gas_optics_lw.kmajor.dtype
+      # McICA per-column table shift, seeded like CAM's mcica_subcol_gen:
+      # the fractional part of the lowest-layer pressure [Pa], taken before
+      # the cast to the table dtype.  State-derived, so it is independent of
+      # the domain decomposition and needs no PRNG.  Columns with IDENTICAL
+      # bottom pressure (idealized uniform states) share a shift, as they
+      # share a seed in CAM.
+      _mcica_shift = (None if mcica_cloud_fraction is None
+                      else jax.lax.stop_gradient(jnp.mod(p_full[:, -1], 1.0)))
       T = T.astype(_table_dtype)
       p_full = p_full.astype(_table_dtype)
       p_half = p_half.astype(_table_dtype)
@@ -671,6 +685,9 @@ class RRTMGP:
           cloud_r_eff_ice = jnp.asarray(cloud_r_eff_ice).astype(_table_dtype)
       if cloud_fraction is not None:
           cloud_fraction = jnp.asarray(cloud_fraction).astype(_table_dtype)
+      if mcica_cloud_fraction is not None:
+          mcica_cloud_fraction = jnp.asarray(
+              mcica_cloud_fraction).astype(_table_dtype)
       if ghg_vmr_override is not None:
           # Cast every numeric override (array, Python float/int, list)
           # to the working dtype; only floating leaves are retyped so
@@ -847,6 +864,36 @@ class RRTMGP:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
           cpl_lw_3d = cpi_lw_3d = None
 
+      # McICA (CAM6 mcica_subcol_gen): each g-point sees its own
+      # maximum-random cloud subcolumn.  The paths passed in are IN-CLOUD;
+      # the g-point's mask zeroes its clear cells, then the paths get the
+      # same halo + floor treatment as above.
+      lw_path_fn = sw_path_fn = None
+      if has_clouds and mcica_cloud_fraction is not None:
+          if (cloud_fraction is not None or cloud_path_liq_lw is not None
+                  or cloud_path_ice_lw is not None):
+              raise ValueError(
+                  "mcica_cloud_fraction takes in-cloud paths and its own "
+                  "sampling; it cannot be combined with cloud_fraction "
+                  "optical-depth scaling or separate longwave paths")
+          from legoesm.atmosphere.physics.clouds.subcolumns import (
+              generate_subcolumns)
+
+          def _mcica_paths(n_gpt):
+              mask = generate_subcolumns(mcica_cloud_fraction, n_gpt,
+                                         shift=_mcica_shift)
+
+              def paths(igpt):
+                  m = mask[igpt]
+                  return tuple(
+                      jnp.clip(_add_halos(
+                          jnp.where(m, x, 0.0)[:, None, ::-1]), 0.0, None)
+                      for x in (_cpl, _cpi))
+              return paths
+
+          lw_path_fn = _mcica_paths(optics_lib.n_gpt_lw)
+          sw_path_fn = _mcica_paths(optics_lib.n_gpt_sw)
+
       # Optional aerosol optical depth (shortwave).  Clip AFTER ``_add_halos``
       # (same fix class as q_v / o3 / cf / cloud paths): linear halo
       # extrapolation can drive a boundary aerosol OD negative, which is an
@@ -976,6 +1023,7 @@ class RRTMGP:
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
+          cloud_path_fn=lw_path_fn,
       )
 
       # --- 5. Solve SW ---
@@ -998,6 +1046,7 @@ class RRTMGP:
           use_scan=config.use_scan,
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
+          cloud_path_fn=sw_path_fn,
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---
@@ -1109,7 +1158,10 @@ class RRTMGP:
           raise ValueError(
               f"column_chunk_size {column_chunk_size} must divide ncol "
               f"{ncol} exactly (radiation columns are independent, but the "
-              "lax.map reshape requires equal-size blocks)."
+              "lax.map reshape requires equal-size blocks). Note that ncol "
+              "here is the SOLVER's column count: with max-random overlap "
+              "it is cloud_n_subcolumns * the grid's column count, so a "
+              "block size chosen against the grid alone need not divide it."
           )
       n_block = ncol // column_chunk_size
 
@@ -1169,6 +1221,22 @@ class RRTMGP:
           else:
               static[k] = v
 
+      # Checkpointed per block: lax.map is a scan, so without this the
+      # backward pass keeps every block's radiation activations at once and
+      # the chunking buys compile time but no memory.  With it the backward
+      # recomputes one block at a time, so reverse-mode scratch is bounded by
+      # ``column_chunk_size`` columns instead of ``ncol`` -- the AMIP WB arm
+      # needs it because max-random overlap hands the solver n_sub*ncol
+      # sub-columns (measured 490 GiB of scratch at 8 sub-columns, T63/L32).
+      # Forward-only callers are unaffected (checkpoint is a no-op there) and
+      # the values are unchanged either way.  prevent_cse=False because this
+      # body already runs inside a scan (same reason as the g-point block
+      # loop in rte/two_stream.py).
+      @functools.partial(
+          jax.checkpoint,
+          policy=jax.checkpoint_policies.nothing_saveable,
+          prevent_cse=False,
+      )
       def _one(chunk):
           return self.solve_columns(**chunk, **static)
 

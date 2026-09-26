@@ -175,7 +175,9 @@ from legoesm.grids.fv3_duo_halos import (
     average_shared_edge_bgrid,
     build_jax_duo_halo_tables,
     ext_scalar_sixface,
+    ext_scalar_sixface_allk,
     ext_vector_cgrid_sixface,
+    ext_vector_cgrid_sixface_allk,
     ext_vector_dgrid_sixface,
     stack6,
 )
@@ -193,6 +195,7 @@ __all__ = [
     "p_grad_c_1lev",
     "one_grad_p_1lev",
     "exchange_post_pgrad_sixface",
+    "exchange_post_pgrad_sixface_allk",
     "csw_step_sixface",
     "dsw12_step_sixface",
     "acoustic_step_sixface",
@@ -225,7 +228,7 @@ _STEPPER_NQ = 1
 
 
 def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """Static-dtype gate mirroring the NumPy lane's ``_require_f64``.
+    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
 
     Reads only ``.dtype`` (static under jit): a float32 operand would
     otherwise be silently upcast -- or, with ``jax_enable_x64``
@@ -239,14 +242,36 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     FOLLOW-UP: promote ONE definition to a public name and delete the
     copies -- tracked on the halo module's own copy.
     """
+    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
+    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype). The
+    # "no silent fp64->fp32 downcast" guarantee now lives at the model
+    # boundary; THIS gate catches an f64 metric/workspace leaking into an
+    # f32 phase (silent promotion / lax.scan carry mismatch).
+    seen = None
     for name, a in arrays.items():
         if a is None:
             continue
-        if jnp.asarray(a).dtype != jnp.float64:
+        _arr = jnp.asarray(a)
+        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
+            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
+            # timestep/coeff like dt/kgb): it is weak-promoting and not a
+            # field, so it is not part of the field uniformity invariant.
+            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
+            # "went strong") is NOT skipped -> it still trips this gate
+            # against f32 fields, closing the silent-promotion blind spot
+            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
+            continue
+        dt = _arr.dtype
+        if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
-                f"{fname}: {name} must be float64 (got "
-                f"{jnp.asarray(a).dtype}); enable jax_enable_x64 and pass "
-                f"f64 operands (oracle build is -fdefault-real-8)")
+                f"{fname}: {name} must be float32 or float64 (got {dt})")
+        if seen is None:
+            seen = dt
+        elif dt != seen:
+            raise TypeError(
+                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
+                f"a phase must be single-precision-uniform "
+                f"(FV3DuoConfig.storage_dtype).")
 
 
 # ---------------------------------------------------------------------
@@ -387,7 +412,7 @@ class DuoStepperContext:
     """
 
     __slots__ = ("n", "ng", "npx", "m_a", "bd", "tab", "gs6", "flags6",
-                 "hs6", "duogrid")
+                 "hs6", "duogrid", "_batched_gs")
 
     def __hash__(self):
         return id(self)
@@ -401,7 +426,10 @@ class DuoStepperContext:
 
 
 def build_jax_duo_stepper_context(ctx: dict, *,
-                                  skip_b_endpoints: bool = False
+                                  skip_b_endpoints: bool = False,
+                                  spmd_mesh=None,
+                                  dtype=None,
+                                  nq: int = _STEPPER_NQ,
                                   ) -> DuoStepperContext:
     """Convert the NumPy ``build_six_face_duo_context`` dict ONCE.
 
@@ -469,8 +497,33 @@ def build_jax_duo_stepper_context(ctx: dict, *,
             f"ctx['gs6'] holds {len(gs6)} faces, not 6 -- a short list "
             f"would silently step a subset of the cube")
 
-    tab = build_jax_duo_halo_tables(ctx["ectx"], gs6, nq=_STEPPER_NQ,
-                                    skip_b_endpoints=skip_b_endpoints)
+    # nq: how many passenger tracers the barrier stacks carry.  Default
+    # _STEPPER_NQ = 1, the frozen deck.  The tables are built PER nq (the
+    # allflux slot axis is 4+nq and tab.allflux_slots indexes it), so a
+    # different nq needs its own context -- it cannot be changed after.
+    if int(nq) < 1:
+        raise ValueError(f"nq={nq}: the duo lane carries at least one "
+                         f"passenger tracer")
+    tab = build_jax_duo_halo_tables(ctx["ectx"], gs6, nq=int(nq),
+                                    skip_b_endpoints=skip_b_endpoints,
+                                    dtype=dtype)
+    if spmd_mesh is not None:
+        # ENGINEERING knob (M3): route every step-side halo exchange
+        # through the SPMD arm built on this mesh.  The mesh SHAPE picks
+        # the arm -- ('face',) = the O(halo) whole-face shard_map ring;
+        # ('face','tile_i','tile_j') = the tiled port's (6,kt,kt) tile
+        # arm (duo_tiled_port_scope.md M3; kt=1 is the G0 bridge).  Any
+        # other axis layout is refused by the respective builder.
+        # Selects no scientific configuration; the SPMD exchanges are
+        # bitwise-equal to the certified path (test_fv3_duo_spmd /
+        # test_fv3_duo_tiled).  Default None keeps the certified
+        # single-device trace byte-identical.
+        if tuple(spmd_mesh.axis_names) == ("face",):
+            from legoesm.grids.fv3_duo_spmd import build_ring_comm
+            tab.ring_comm = build_ring_comm(tab, spmd_mesh)
+        else:
+            from legoesm.grids.fv3_duo_spmd import build_tile_comm
+            tab.tile_comm = build_tile_comm(tab, spmd_mesh)
 
     out = DuoStepperContext()
     out.n, out.ng = n, ng
@@ -481,7 +534,19 @@ def build_jax_duo_stepper_context(ctx: dict, *,
     # ARRAYS-ONLY gridstruct per face (the traced half of the NumPy
     # lane's mixed dict); the scalars/bools go to GridFlags, which is
     # hashable by value.  Both halves are constants in this lane.
-    out.gs6 = tuple({k: jnp.asarray(v) for k, v in gs.items()
+    # dtype (2026-08-28, fp32/mixed increment 2): the gridstruct METRICS
+    # (areas, cos/sin, edge lengths, rd*c, ...) are fp64 host constants.
+    # Under the coarse fp32 policy they enter kernels alongside f32 state
+    # and would silently promote it back to f64 (and trip the uniformity
+    # gates), so cast every INEXACT metric array to the run's storage
+    # dtype. Default None keeps f64 -> byte-identical certified path.
+    # (Integer index metrics are left untouched.)
+    def _metric(v):
+        a = jnp.asarray(v)
+        if dtype is not None and jnp.issubdtype(a.dtype, jnp.inexact):
+            return a.astype(dtype)
+        return a
+    out.gs6 = tuple({k: _metric(v) for k, v in gs.items()
                      if isinstance(v, np.ndarray)} for gs in gs6)
     out.flags6 = tuple(GridFlags.from_gs(gs) for gs in gs6)
     # duo requires bounded metrics: fv_arrays.F90:1512
@@ -497,18 +562,25 @@ def build_jax_duo_stepper_context(ctx: dict, *,
                 f"the context with oracle_conventions=True")
     hs6 = ctx.get("hs6")
     m_a = out.m_a
+    _hs_dtype = dtype if dtype is not None else jnp.float64
     if hs6 is None:
         # the NumPy twin's `np.zeros_like(delp)` default, materialised
         # once instead of per call (same values, same shape)
-        out.hs6 = jnp.zeros((6, m_a, m_a), dtype=jnp.float64)
+        out.hs6 = jnp.zeros((6, m_a, m_a), dtype=_hs_dtype)
     else:
-        # no cast: an f32 topography would silently halve the precision
-        # of every gz integral, so the f64 gate below must be able to see
-        # it (the NumPy adapter's np.asarray(hs6[t-1]) does not cast
-        # either)
-        out.hs6 = stack6([np.asarray(h) for h in hs6])
+        # Topography follows the run's storage dtype (increment 2). For
+        # fp64 (dtype=None) it is uncast, byte-identical. For fp32 it is
+        # cast so the gz integral and the NH carry it seeds are uniform;
+        # the per-op MIXED step (a later increment) keeps the gz/energy
+        # region fp64 and would pass an f64 hs6 view instead.
+        out.hs6 = stack6([np.asarray(h) for h in hs6]).astype(_hs_dtype)
     _require_f64_jax("build_jax_duo_stepper_context", {"hs6": out.hs6})
     out.duogrid = True
+    # Lazily filled by fv3_phase3d_common.build_batched_gs (the
+    # face-batched vmap arm's stacked view of gs6/flags6); None = not
+    # built.  Initialised here so slot-copying clones (the tests') never
+    # hit an unset-slot AttributeError.
+    out._batched_gs = None
     return out
 
 
@@ -684,18 +756,40 @@ def exchange_post_pgrad_sixface(ctx: DuoStepperContext, divgd6, uc6, vc6,
     Returns ``(divgd6, uc6, vc6)`` face-stacked.  Every face-stacked
     operand is ``(6, …)``.
     """
-    if nord != int(nord):
-        # a damping ORDER is integral by construction; the deck dicts
-        # mix ints and floats, so int() would round 2.7 to 2 without a
-        # word.  Reject instead (mirrors the NumPy guard).
-        raise ValueError(
-            f"nord must be an integral damping order, got {nord!r}")
-    nord = int(nord)
+    nord = _validated_nord(nord)
     tab = ctx.tab
     if nord > 0:
         divgd6 = ext_scalar_sixface(divgd6, tab, "B")
     uc6, vc6 = ext_vector_cgrid_sixface(uc6, vc6, tab)
     return divgd6, uc6, vc6
+
+
+def _validated_nord(nord) -> int:
+    """A damping ORDER is integral by construction; the deck dicts mix
+    ints and floats, so ``int()`` would round 2.7 to 2 without a word.
+    Reject instead (mirrors the NumPy guard)."""
+    if nord != int(nord):
+        raise ValueError(
+            f"nord must be an integral damping order, got {nord!r}")
+    return int(nord)
+
+
+def exchange_post_pgrad_sixface_allk(ctx: DuoStepperContext, divgd6k,
+                                     uc6k, vc6k, *, nord: int):
+    """k-batched :func:`exchange_post_pgrad_sixface` (v2a): the same
+    two exchanges -- ``ext_scalar(divgd, …, 1,1)`` gated on ``nord >
+    0``, ``ext_vector(uc, vc, …, 1,0,0,1)`` ungated -- over
+    ``(6, i, j, K)`` stacks with the level axis TRAILING, one batched
+    exchange call per operand instead of one per level.  The gate
+    semantics live here exactly as in the per-level helper; see its
+    docstring for the nord-not-nord_v argument.
+    """
+    nord = _validated_nord(nord)
+    tab = ctx.tab
+    if nord > 0:
+        divgd6k = ext_scalar_sixface_allk(divgd6k, tab, "B")
+    uc6k, vc6k = ext_vector_cgrid_sixface_allk(uc6k, vc6k, tab)
+    return divgd6k, uc6k, vc6k
 
 
 # ---------------------------------------------------------------------
@@ -834,6 +928,7 @@ def dsw12_step_sixface(ctx: DuoStepperContext, states: dict,
                     hord_tm=cfg.hord_tm, hord_dp=cfg.hord_dp,
                     nord_v=cfg.nord_v, nord_t=0,
                     damp_v=cfg.damp_v, damp_t=0.0,
+                    nq=int(ctx.tab.nq),
                     workspace_sentinel=0.0)
           for t in range(6)]
     s1s = _stack_faces(s1)

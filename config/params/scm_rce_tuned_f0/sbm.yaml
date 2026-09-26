@@ -1,0 +1,10 @@
+# SCM-RCE tuned parameters for convection=sbm
+# corrected nonrotating protocol (coriolis=0), median of 5 seeds.
+# NON-IDENTIFIABLE for multi-parameter schemes: the spread comment on each
+# line is how far the seeds disagreed. A large spread means the median is one
+# point in a flat basin, not a calibrated value. Opt in with --params; this
+# file never mutates a production *Config default.
+
+atm.conv.SBMConfig.cape_threshold: 23.2869  # default 70, seed-spread 95% of range, J/kg
+atm.conv.SBMConfig.rh_ref: 0.85  # default 0.7, seed-spread 9% of range
+atm.conv.SBMConfig.tau_c: 4230  # default 7200, seed-spread 35% of range, s

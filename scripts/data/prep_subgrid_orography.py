@@ -118,6 +118,146 @@ def subgrid_orography_stddev(
     return out
 
 
+def subgrid_orography_residual_stddev(
+    ds,
+    *,
+    var_name: str = "",
+    fine_res_deg: float = 0.25,
+    block_deg: float = 2.0,
+    resolved_cutoff_deg: float = 4.0,
+):
+    """Per-block stddev of the RESIDUAL terrain the model cannot resolve.
+
+    The classic construction above takes the stddev of terrain inside each
+    block, which mixes two different things: variance at scales the model
+    RESOLVES in its own topography (double-counted drag once the GWD launches
+    from it) and genuinely subgrid variance.  Issue #1712, measured: the block
+    size acts as an accidental scale decomposition with a ~33x lever on the
+    launch stress, and nothing ties it to the model grid.
+
+    This variant makes the decomposition EXPLICIT.  Terrain is smoothed with a
+    top-hat running mean of width ``resolved_cutoff_deg`` — the model's
+    effective resolution, ~3-4x its cell size, NOT its cell size — and the
+    stddev is taken of ``h - smooth(h)`` per block.  A wave much longer than
+    the cutoff contributes ~nothing (the model resolves it); a wave much
+    shorter contributes its full stddev; the block size keeps only the job of
+    LOCATING the answer on the output grid, and the physics lives in the
+    cutoff, named and stamped in the file's ``history``.
+
+    Same clipping (terrain >= 0), same area weighting, same output layout as
+    the classic construction, so ``load_subgrid_orography`` reads either.
+    The smoothing is lon-periodic; in lat the running mean is truncated at
+    the poles (renormalised, not padded).
+
+    COASTAL STEPS ARE KEPT, by design and by parity with the classic
+    construction (whose docstring says "coastal blocks keep their cliffs"):
+    with terrain clipped at 0 and no land mask, a coastal window mixes land
+    with sea zeros and the land-sea step contributes ~H^2 f(1-f) of variance
+    (GLM review).  A coastal cliff IS orographic forcing, so this is a
+    deliberate property, not an oversight -- but a masked variant (weight by
+    land fraction in the smooth AND the block moments) is the named follow-up
+    if coastal drag is ever tuned against this field.
+    """
+    import numpy as np
+    import xarray as xr
+
+    factor_f = float(block_deg) / float(fine_res_deg)
+    factor = int(round(factor_f))
+    if abs(factor_f - factor) > 1e-9 or factor < 2:
+        raise ValueError(
+            f"block_deg must be an integer multiple (>= 2x) of fine_res_deg; "
+            f"got block_deg={block_deg!r}, fine_res_deg={fine_res_deg!r}")
+    k_f = float(resolved_cutoff_deg) / float(fine_res_deg)
+    k = int(round(k_f))
+    if abs(k_f - k) > 1e-9 or k < 2:
+        raise ValueError(
+            f"resolved_cutoff_deg must be an integer multiple (>= 2x) of "
+            f"fine_res_deg; got {resolved_cutoff_deg!r} / {fine_res_deg!r}")
+    if resolved_cutoff_deg < block_deg:
+        raise ValueError(
+            f"resolved_cutoff_deg ({resolved_cutoff_deg}) < block_deg "
+            f"({block_deg}): the smooth would remove variance INSIDE a block "
+            "that the block-stddev is supposed to measure — the residual "
+            "construction needs cutoff >= block.")
+
+    fine = regrid_elevation_to_latlon(
+        ds, var_name=var_name, target_res_deg=float(fine_res_deg))
+    elev = np.asarray(fine["elevation"].values, dtype=np.float64)
+    lat = np.asarray(fine["lat"].values, dtype=np.float64)
+    lon = np.asarray(fine["lon"].values, dtype=np.float64)
+    n_lat, n_lon = elev.shape
+    if n_lat % factor or n_lon % factor:
+        raise ValueError(
+            f"global {n_lat}x{n_lon} grid at {fine_res_deg} deg does not "
+            f"tile into {block_deg} deg blocks (factor {factor})")
+
+    h = np.clip(elev, 0.0, None)
+
+    # AREA-WEIGHTED top-hat running mean, lon-periodic, lat-truncated.
+    # Weighting by cos(lat) keeps the smooth consistent with the block
+    # moments below (a plain boxcar would overweight poleward rows).
+    w_row = np.cos(np.deg2rad(lat))[:, None]
+    w2 = np.broadcast_to(w_row, h.shape)
+
+    def _running(a, n, axis, periodic):
+        csum = np.cumsum(
+            np.concatenate([np.zeros_like(np.take(a, [0], axis=axis)), a],
+                           axis=axis), axis=axis)
+        L = a.shape[axis]
+        # EXACTLY n cells per window (codex P1: the earlier 2*(n//2)+1 form
+        # smoothed n+1 cells for even n, so a "4 deg" cutoff smoothed
+        # 4.25 deg while the metadata claimed 4).  For even n the window is
+        # off-centre by half a cell, which is a pure registration shift
+        # (GLM: num and den share it, the mean stays exact).
+        half_lo = n // 2
+        half_hi = n - half_lo
+        idx_hi = np.clip(np.arange(L) + half_hi, 0, L)
+        idx_lo = np.clip(np.arange(L) - half_lo, 0, L)
+        hi = np.take(csum, idx_hi, axis=axis)
+        lo = np.take(csum, idx_lo, axis=axis)
+        out = hi - lo
+        if periodic:
+            wrap_hi = np.arange(L) + half_hi - L
+            wrap_lo = -(np.arange(L) - half_lo)
+            add_hi = np.take(csum, np.clip(wrap_hi, 0, L), axis=axis)
+            add_lo = (np.take(csum, [L], axis=axis)
+                      - np.take(csum, np.clip(L - wrap_lo, 0, L), axis=axis))
+            out = out + np.where(
+                np.expand_dims(wrap_hi > 0, 1 - axis) if a.ndim == 2
+                else (wrap_hi > 0), add_hi, 0.0)
+            out = out + np.where(
+                np.expand_dims(wrap_lo > 0, 1 - axis) if a.ndim == 2
+                else (wrap_lo > 0), add_lo, 0.0)
+        return out
+
+    num = _running(_running(w2 * h, k, 0, False), k, 1, True)
+    den = np.maximum(_running(_running(w2, k, 0, False), k, 1, True), 1e-12)
+    h_smooth = num / den
+    resid = h - h_smooth
+
+    rb = resid.reshape(n_lat // factor, factor, n_lon // factor, factor)
+    wb = np.broadcast_to(
+        w_row.reshape(n_lat // factor, factor, 1, 1), rb.shape)
+    w_sum = np.maximum(wb.sum(axis=(1, 3)), 1e-12)
+    mu = (wb * rb).sum(axis=(1, 3)) / w_sum
+    var = (wb * (rb - mu[:, None, :, None]) ** 2).sum(axis=(1, 3)) / w_sum
+    sso = np.sqrt(var)
+    lat_b = lat.reshape(-1, factor).mean(axis=1)
+    lon_b = lon.reshape(-1, factor).mean(axis=1)
+
+    out = xr.Dataset({"SSO_STDH": (("lat", "lon"), sso)},
+                     coords={"lat": lat_b, "lon": lon_b})
+    out["SSO_STDH"].attrs = {
+        "units": "m",
+        "long_name": ("standard deviation of RESIDUAL subgrid orography "
+                      "(terrain height >= 0 minus a "
+                      f"{resolved_cutoff_deg:g}-deg running mean)"),
+    }
+    out["lat"].attrs = {"units": "degrees_north"}
+    out["lon"].attrs = {"units": "degrees_east"}
+    return out
+
+
 def main(argv=None) -> int:
     import xarray as xr
 
@@ -131,19 +271,41 @@ def main(argv=None) -> int:
                    help="normalization grid the stddev is sampled on")
     p.add_argument("--block-deg", type=float, default=2.0,
                    help="block size ~ model cell size (2 deg ~ C48)")
+    p.add_argument("--resolved-cutoff-deg", type=float, default=None,
+                   help="EXPLICIT scale decomposition (#1712): smooth the "
+                        "terrain with a running mean of this width (the "
+                        "model's EFFECTIVE resolution, ~3-4x its cell size) "
+                        "and take the block stddev of the residual. Omitted "
+                        "(default) = the classic construction, unchanged.")
     args = p.parse_args(argv)
 
     with xr.open_dataset(args.input) as ds:
-        out = subgrid_orography_stddev(
-            ds,
-            var_name=args.elev_var,
-            fine_res_deg=args.fine_res_deg,
-            block_deg=args.block_deg,
-        )
+        if args.resolved_cutoff_deg is not None:
+            out = subgrid_orography_residual_stddev(
+                ds, var_name=args.elev_var,
+                fine_res_deg=args.fine_res_deg, block_deg=args.block_deg,
+                resolved_cutoff_deg=args.resolved_cutoff_deg)
+        else:
+            out = subgrid_orography_stddev(
+                ds, var_name=args.elev_var,
+                fine_res_deg=args.fine_res_deg, block_deg=args.block_deg)
     out.attrs["source"] = str(args.input)
+    # MACHINE-READABLE construction record (#1712).  The loader has to know the
+    # file's scale decomposition to tell whether it double-counts orography the
+    # model already resolves, and a free-text ``history`` is a pointer, not a
+    # citable fact -- it used to be the only record, and the loader ignored it.
+    out.attrs["block_deg"] = float(args.block_deg)
+    out.attrs["fine_res_deg"] = float(args.fine_res_deg)
+    out.attrs["construction"] = (
+        "residual_stddev" if args.resolved_cutoff_deg is not None
+        else "block_stddev")
+    if args.resolved_cutoff_deg is not None:
+        out.attrs["resolved_cutoff_deg"] = float(args.resolved_cutoff_deg)
     out.attrs["history"] = (
         f"prep_subgrid_orography.py --fine-res-deg {args.fine_res_deg} "
         f"--block-deg {args.block_deg}"
+        + (f" --resolved-cutoff-deg {args.resolved_cutoff_deg}"
+           if args.resolved_cutoff_deg is not None else "")
     )
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     out.to_netcdf(args.out)

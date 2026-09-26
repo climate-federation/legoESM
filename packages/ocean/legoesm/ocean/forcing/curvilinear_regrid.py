@@ -86,3 +86,23 @@ def coords_match(src_lat, src_lon, tgt_lat, tgt_lon,
         dlon = dlon[valid]
     return (float(np.max(dlat)) < tol_deg
             and float(np.max(dlon)) < tol_deg)
+
+
+def estimate_curvilinear_cell_area(lat_deg, lon_deg):
+    """Estimate per-cell areas [m^2] of a curvilinear grid from its 2-D nav
+    coordinates: R^2 cos(lat) |dlon| |dlat| with wrap-aware longitude
+    differences (an eORCA seam column jumps ~360 deg; the raw gradient there
+    would inflate the area by two orders of magnitude — codex 2026-09-01).
+
+    An estimate for RENORMALISATION WEIGHTS only (global integral scalars),
+    not a metric: tripolar fold rows keep O(1 deg) magnitudes and contribute
+    a few of ~300 rows to a global sum.
+    """
+    lat = np.asarray(lat_deg, dtype=np.float64)
+    lon = np.asarray(lon_deg, dtype=np.float64)
+    from legoesm import constants
+    dlon = np.abs(np.gradient(lon, axis=-1))
+    dlon = np.minimum(dlon, 360.0 - dlon)          # seam guard
+    dlat = np.abs(np.gradient(lat, axis=-2))
+    return (constants.R_earth ** 2 * np.cos(np.deg2rad(lat))
+            * np.deg2rad(dlon) * np.deg2rad(dlat))

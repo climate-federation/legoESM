@@ -1,0 +1,805 @@
+{
+  "bar": 1e-15,
+  "bbl_attribution": null,
+  "case": "LOCK_EXCHANGE-zco",
+  "first_over_bar": {
+    "fields": [
+      "T",
+      "u"
+    ],
+    "kt": 2
+  },
+  "format": "nemo-testcase-l1-phase3-trajectory-v1",
+  "growth_characterization": {
+    "T": {
+      "classification": "POLYNOMIAL_FIT_PREFERRED",
+      "normalized_errors": [
+        1.6277349838370963e-13,
+        4.046540880153771e-13,
+        8.400983612470251e-13,
+        1.1855405546157271e-12,
+        1.5311011717737225e-12,
+        1.9439265012503406e-12,
+        2.297895207448164e-12,
+        2.649732285438707e-12,
+        2.9973061070146887e-12
+      ],
+      "ratios_monotone_decreasing": true,
+      "status": "MEASURED",
+      "steps": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "successive_step_ratios": [
+        2.4859949072389957,
+        2.0760901375475562,
+        1.4111925570904988,
+        1.2914793726900409,
+        1.269626421223606,
+        1.182089552238806,
+        1.1531127602556175,
+        1.1311731843575417
+      ],
+      "tail_exponential_rate_per_step": 0.14414771045883615,
+      "tail_exponential_semilog_r2": 0.9953420010130464,
+      "tail_polynomial_loglog_r2": 0.9997675006980865,
+      "tail_power_law_exponent_p": 1.2145442614439932,
+      "tail_ratios_monotone_decreasing": true,
+      "tail_window_steps": [
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    "ssh": {
+      "classification": "POLYNOMIAL_FIT_PREFERRED",
+      "normalized_errors": [
+        5.595303667313737e-15,
+        2.2158793558184862e-14,
+        6.596592855086952e-14,
+        1.637523734773945e-13,
+        3.577032892571096e-13
+      ],
+      "ratios_monotone_decreasing": true,
+      "status": "MEASURED",
+      "steps": [
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "successive_step_ratios": [
+        3.9602486077083876,
+        2.9769639027348345,
+        2.4823780559856305,
+        2.18441590592572
+      ],
+      "tail_exponential_rate_per_step": 0.9253625265436629,
+      "tail_exponential_semilog_r2": 0.9944023869926337,
+      "tail_polynomial_loglog_r2": 0.9995210342028874,
+      "tail_power_law_exponent_p": 7.799541148211944,
+      "tail_ratios_monotone_decreasing": true,
+      "tail_window_steps": [
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    "u": {
+      "classification": "BOUNDED_OR_DECAYING_NO_AMPLIFYING_MODE",
+      "normalized_errors": [
+        2.1388041289210555e-10,
+        2.13879690976089e-10,
+        2.1386353983316592e-10,
+        2.1379009478537936e-10,
+        2.1357148693871078e-10,
+        2.1305893171692097e-10,
+        2.1202780313813244e-10,
+        2.1016398831733701e-10,
+        2.0705055942329964e-10
+      ],
+      "ratios_monotone_decreasing": true,
+      "status": "MEASURED",
+      "steps": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "successive_step_ratios": [
+        0.9999966246744768,
+        0.9999244849155646,
+        0.9996565798553421,
+        0.9989774650369652,
+        0.9976000765404752,
+        0.9951603597630043,
+        0.9912095734936178,
+        0.9851857165494202
+      ],
+      "tail_exponential_rate_per_step": -0.009464666114365874,
+      "tail_exponential_semilog_r2": 0.9459459706314634,
+      "tail_polynomial_loglog_r2": 0.9197414106127864,
+      "tail_power_law_exponent_p": -0.07845981103721333,
+      "tail_ratios_monotone_decreasing": true,
+      "tail_window_steps": [
+        7,
+        8,
+        9,
+        10
+      ]
+    }
+  },
+  "jax_backend": "cpu",
+  "legoesm_git_sha": "9070cf2767bc679e31bd49c21471a497fb90f280",
+  "oracle_root": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+  "overflow_t_owner_hunt": null,
+  "precision_policy": "fp64",
+  "selectors": {
+    "arm_literal_stage_wzv_test_hook": false,
+    "barotropic_time_filter": "nemo_ab3am4",
+    "bbl_adv_option": 0,
+    "bbl_gamma_s": 0.0,
+    "diagnostic_disable_bbl_test_hook": false,
+    "eos": "nemo_teos10",
+    "eos_depth": "geometric",
+    "n_barotropic_substeps": 1,
+    "rk3_ws_scheme_identity": "nemo_kmm+two_step_fct+stage_correction+transport_reconcile",
+    "tracer_time_integrator": "rk3_ws",
+    "vertical_momentum_scheme": "nemo_up3"
+  },
+  "status": "DEBT",
+  "steps": [
+    {
+      "Nbb": 1,
+      "exact_at_step": true,
+      "exact_prefix_entering": true,
+      "kt": 1,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt1.before.T",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt1.before.S",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt1.before.u",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt1.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt1.before.ssh",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": true,
+      "kt": 2,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt2.before.T",
+          "normalized_max_abs": 1.6277349838370963e-13,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt2.before.S",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "oracle salinity is spatially uniform (n_unique=1); this row cannot detect transport/time-level errors",
+          "status": "UNINFORMATIVE"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt2.before.u",
+          "normalized_max_abs": 2.1388041289210555e-10,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt2.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt2.before.ssh",
+          "normalized_max_abs": 4.782137916322191e-28,
+          "oracle_dtype": "float64",
+          "reason": "oracle SSH is identically zero; the row only bounds candidate absolute noise and cannot corroborate alignment",
+          "status": "UNINFORMATIVE"
+        }
+      ]
+    },
+    {
+      "Nbb": 1,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 3,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt3.before.T",
+          "normalized_max_abs": 4.046540880153771e-13,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt3.before.S",
+          "normalized_max_abs": 2.0301221021717148e-16,
+          "oracle_dtype": "float64",
+          "reason": "oracle salinity is spatially uniform (n_unique=1); this row cannot detect transport/time-level errors",
+          "status": "UNINFORMATIVE"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt3.before.u",
+          "normalized_max_abs": 2.13879690976089e-10,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt3.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt3.before.ssh",
+          "normalized_max_abs": 1.3552527156068805e-18,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 4,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt4.before.T",
+          "normalized_max_abs": 8.400983612470251e-13,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt4.before.S",
+          "normalized_max_abs": 2.0301221021717148e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt4.before.u",
+          "normalized_max_abs": 2.1386353983316592e-10,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt4.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt4.before.ssh",
+          "normalized_max_abs": 2.1602728286773676e-17,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        }
+      ]
+    },
+    {
+      "Nbb": 1,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 5,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt5.before.T",
+          "normalized_max_abs": 1.1855405546157271e-12,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt5.before.S",
+          "normalized_max_abs": 2.0301221021717145e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt5.before.u",
+          "normalized_max_abs": 2.1379009478537936e-10,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt5.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt5.before.ssh",
+          "normalized_max_abs": 8.123556830915053e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 6,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt6.before.T",
+          "normalized_max_abs": 1.5311011717737225e-12,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt6.before.S",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt6.before.u",
+          "normalized_max_abs": 2.1357148693871078e-10,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt6.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt6.before.ssh",
+          "normalized_max_abs": 5.595303667313737e-15,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 1,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 7,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt7.before.T",
+          "normalized_max_abs": 1.9439265012503406e-12,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt7.before.S",
+          "normalized_max_abs": 2.0301221021717145e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt7.before.u",
+          "normalized_max_abs": 2.1305893171692097e-10,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt7.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt7.before.ssh",
+          "normalized_max_abs": 2.2158793558184862e-14,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 8,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt8.before.T",
+          "normalized_max_abs": 2.297895207448164e-12,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt8.before.S",
+          "normalized_max_abs": 2.0301221021717145e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt8.before.u",
+          "normalized_max_abs": 2.1202780313813244e-10,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt8.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt8.before.ssh",
+          "normalized_max_abs": 6.596592855086952e-14,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 1,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 9,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt9.before.T",
+          "normalized_max_abs": 2.649732285438707e-12,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt9.before.S",
+          "normalized_max_abs": 2.0301221021717145e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt9.before.u",
+          "normalized_max_abs": 2.1016398831733701e-10,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt9.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt9.before.ssh",
+          "normalized_max_abs": 1.637523734773945e-13,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    },
+    {
+      "Nbb": 3,
+      "exact_at_step": false,
+      "exact_prefix_entering": false,
+      "kt": 10,
+      "rows": [
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt10.before.T",
+          "normalized_max_abs": 2.9973061070146887e-12,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 2560,
+          "name": "LOCK_EXCHANGE-zco.kt10.before.S",
+          "normalized_max_abs": 2.0301221021717145e-16,
+          "oracle_dtype": "float64",
+          "status": "AT-BAR"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 2540,
+          "name": "LOCK_EXCHANGE-zco.kt10.before.u",
+          "normalized_max_abs": 2.0705055942329964e-10,
+          "oracle_dtype": "float64",
+          "staggering_and_reduction": "oracle uu(:,:,:,Nbb) and legoESM prognostic u are both C-grid U-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "DEBT"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": true,
+          "frame": "instantaneous_prognostic_Nbb",
+          "n": 7800,
+          "name": "LOCK_EXCHANGE-zco.kt10.before.v",
+          "normalized_max_abs": 0.0,
+          "oracle_dtype": "float64",
+          "reason": "no active meridional velocity face in the three-row closed tank; all stored values were nevertheless checked against zero",
+          "staggering_and_reduction": "oracle vv(:,:,:,Nbb) and legoESM prognostic v are both C-grid V-face instantaneous 3-D fields; both use the same wet-face mask and an elementwise L-infinity reduction, with no depth or substep-time averaging",
+          "status": "UNMEASURED"
+        },
+        {
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "exact": false,
+          "n": 128,
+          "name": "LOCK_EXCHANGE-zco.kt10.before.ssh",
+          "normalized_max_abs": 3.577032892571096e-13,
+          "oracle_dtype": "float64",
+          "status": "DEBT"
+        }
+      ]
+    }
+  ],
+  "unmeasured": [
+    "NEMO per-term tendencies at the first divergent step",
+    "stage-coupled OVERFLOW BBL transport and tendency"
+  ]
+}

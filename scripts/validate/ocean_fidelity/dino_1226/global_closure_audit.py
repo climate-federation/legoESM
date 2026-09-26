@@ -259,12 +259,14 @@ def run_audit(out_path: str, n_days: int, *, fix_eta_drift: bool = True,
         # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction
         # (spec resolved decision 4) -- auto-force it so the env knob alone
         # is sufficient.
-        mc = mc._replace(
-            outer_integrator=_oi,
-            implicit_vmix_e3t_now_divisor=(
-                True if _oi == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
-        print(f"ABLATION: outer_integrator={mc.outer_integrator} "
-              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+            mc = mc._replace(
+                outer_integrator=_oi,
+                zdf_implicit_solver_evaluation=(
+                    "nemo_literal" if _oi == "nemo_mlf"
+                    else mc.zdf_implicit_solver_evaluation))
+            print(f"ABLATION: outer_integrator={mc.outer_integrator} "
+                  "zdf_implicit_solver_evaluation="
+                  f"{mc.zdf_implicit_solver_evaluation}")
     print(f"fix_eta_drift={mc.fix_eta_drift}  use_conservation_fixer={mc.use_conservation_fixer}")
     assert mc.use_conservation_fixer is False, (
         "use_conservation_fixer=True would force-conserve heat/salt every "

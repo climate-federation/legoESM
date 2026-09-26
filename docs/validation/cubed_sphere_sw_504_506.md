@@ -226,6 +226,21 @@ so they cannot drift — the #800 desync class): `use_duogrid=True` cube seams,
 `damp_v=0.010`, `hyperdiff_factor=1.0×`, and the **`(ref/n)^2` biharmonic law**
 (`MODON_HYPERDIFF_SCALING=2`).
 
+> **DIV-DAMP RETUNE 2026-08-25 — the 100-day claims below were earned at
+> `MODON_DIV_DAMP_FACTOR=8.0` and are HISTORICAL for that constant.** The
+> 8.0 background floor gave the divergent mode a ~5.5-minute e-fold at C36
+> and flattened the day-1 height dipole ~50× vs the equal-resolution
+> latlon/ico/spectral arms (this case is non-rotating: the dipole is BUILT
+> by the divergent component). The default is now **0.03** (~24.5 h
+> six-cell e-fold; dual-reviewed; ablation + arithmetic in the retune
+> commit). Re-validated at 0.03: **day-1 dipole recovery** (job 9499349)
+> and **100-day completion at C36 (job 9499350) and C48 (9499364), mass
+> drift 0** — with a bounded vertex-mode transient near the collision
+> (~days 40–80, louder than at 8.0, subsided by day 100 at C36 / day 70 at
+> C48). **C96 and C192 are NOT yet re-validated at 0.03**; their 100-day
+> rows below certify the `^2` hyperdiff law at factor 8.0 only. The
+> `LEGOESM_SW_MODON_DIV_DAMP_FACTOR` env knob restores any prior value.
+
 - **The (ref/n)^2 default (#753 item 1).** The earlier `(ref/n)^4`
   grid-scale-damping-time-constant law is under-damped at the C96+ face seams
   (the collision drives an enstrophy cascade whose grid-scale delivery rate

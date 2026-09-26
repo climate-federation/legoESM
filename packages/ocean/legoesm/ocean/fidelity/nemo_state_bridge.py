@@ -36,21 +36,23 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
-
-from legoesm import constants
 from legoesm.grids.latlon import (
     LatLonCGridGeometry,
     create_beta_plane_cgrid_geometry,
     create_latlon_geometry,
 )
+from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
 from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanState
 from legoesm.ocean.vertical import (
+    NemoEENBarotropicOperands,
     create_full_step_coordinate,
     create_z_star_from_thicknesses,
 )
+
+from legoesm import constants
 
 
 class NemoBridgeOutput(NamedTuple):
@@ -58,7 +60,27 @@ class NemoBridgeOutput(NamedTuple):
     z_coord: object
     state: LatLonCGridOceanState
     land_mask: np.ndarray          # (n_lat, n_lon) surface wet mask
-    f_match_max_abs: float         # max|geom.f_T - NEMO ff_t| — build self-check
+    # max|geom.f_T - selected reference ff_t|. The selected reference is NEMO
+    # by default; the registered bridge-Omega counterfactual scales NEMO ff_t
+    # by selected_omega/NEMO_OMEGA without relaxing the guard.
+    f_match_max_abs: float
+
+
+def _nemo_een_barotropic_operands(grid: NemoGrid):
+    """Return the raw dyn_cor_2D_init inputs when the mesh carries all of them."""
+    required = (grid.ff_f, grid.e3u_0, grid.e3v_0, grid.e3f_0,
+                grid.umask, grid.vmask, grid.fmask, grid.hu_0, grid.hv_0,
+                grid.e1t, grid.e2t, grid.e1u, grid.e2u,
+                grid.e1v, grid.e2v, grid.e1f, grid.e2f)
+    if any(value is None for value in required):
+        return None
+    hf_0 = (np.asarray(grid.e3f_0) * np.asarray(grid.fmask)).sum(axis=-1)
+    values = (grid.ff_f, grid.e3u_0, grid.e3v_0, grid.e3f_0,
+              grid.umask, grid.vmask, grid.fmask,
+              grid.hu_0, grid.hv_0, hf_0,
+              grid.e1t, grid.e2t, grid.e1u, grid.e2u,
+              grid.e1v, grid.e2v, grid.e1f, grid.e2f)
+    return NemoEENBarotropicOperands(*values)
 
 
 def _beta_plane_params(grid: NemoGrid):
@@ -172,6 +194,19 @@ def bridge_nemo_to_legoesm(
     z_coord = create_z_star_from_thicknesses(
         np.asarray(grid.e3t_1d),
         t_depth_ref_m=np.asarray(grid.gdept_1d).ravel(),
+        nemo_gdept_0_m=grid.gdept_0,
+        nemo_gdepw_0_m=grid.gdepw_0,
+        nemo_e3t_0_m=grid.e3t_0,
+        nemo_e3w_0_m=grid.e3w_0,
+        nemo_hu_0_m=grid.hu_0, nemo_hv_0_m=grid.hv_0,
+        nemo_e1e2t_m=np.asarray(grid.e1t) * np.asarray(grid.e2t),
+        nemo_e1e2u_m=(None if grid.e2u is None else
+                      np.asarray(grid.e1u) * np.asarray(grid.e2u)),
+        nemo_e1e2v_m=(None if grid.e1v is None else
+                      np.asarray(grid.e1v) * np.asarray(grid.e2v)),
+        nemo_e2u_m=grid.e2u, nemo_e1v_m=grid.e1v,
+        nemo_een_barotropic_m=_nemo_een_barotropic_operands(grid),
+        nemo_e3w_source="mesh_reference",
     )
     H_max = float(np.sum(np.asarray(grid.e3t_1d)[:n_wet]))   # depth of the n_wet wet cells
 
@@ -206,6 +241,26 @@ def bridge_nemo_to_legoesm(
 #: harness validates against THIS tuple instead of re-listing the literals and
 #: drifting out of step with the function that raises on them.
 NEMO_E3T_MODES = ("off", "e3t_only", "gdept_only", "both")
+
+
+def _level_value(v):
+    """One level's reference value: the EXACT value where the level is uniform.
+
+    ``np.mean`` over N identical float64 values is a sum-then-divide, and it
+    does not return the value.  Measured on NEMO's DINO R1 mesh before this
+    was written: the mean lands 1 ulp off the cell value on 3 of 35 ``e3t_0``
+    levels and on 18 of 35 ``gdept_0`` levels -- our reduction rounding the
+    ORACLE's own number, which a gate whose bar is "0 cells unequal" refuses.
+
+    DINO's ``e3t_0``/``gdept_0`` are horizontally uniform by construction:
+    ``usr_def_zgr`` calls ``zgr_sco_mi96`` on a FLAT column
+    (``zflat(:,:) = zHmax``, ``cfgs/DINO/MY_SRC/usrdef_zgr.F90:107-118``), so
+    there is a single value per level to take and averaging can only lose it.
+    A level that is NOT uniform keeps the mean it has always had, so no mesh
+    with real horizontal variation changes behaviour here.
+    """
+    lo = v.min()
+    return float(lo) if lo == v.max() else float(v.mean())
 
 
 def effective_vertical_scale_factors(grid, tmask, mode=None):
@@ -335,32 +390,52 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
         return e3t, t_depth, "e3t_1d"
     e3t3 = np.asarray(e3t3)
     nlev = e3t3.shape[-1]
+    # EVERY level takes NEMO's own value, the permanently-dry one included.
+    # A level with no wet cell used to keep the OTHER ladder's number, which
+    # left the deepest level 111.088 m away from NEMO's e3t_0 and its T-depth
+    # 55.544 m away.  Nothing on this card integrates that level, but it is
+    # still carried state -- it sets H_max and the three deepest reference
+    # interfaces -- and "NEMO's grid except one level" is not NEMO's grid.
+    # NEMO's e3t_0/gdept_0 are horizontally uniform at every level here, dry
+    # levels included, so a dry level HAS a well-defined NEMO value; the
+    # uniformity check below now covers those levels too rather than skipping
+    # them, so a partial-cell grid cannot slip through on a dry level.
+    # tmask arrives as float from the mesh_mask reader and as bool from some
+    # callers; a float array used as an index raises, so normalise once.
+    wet = np.asarray(tmask) > 0.5
+    lev_any = wet.any(axis=(0, 1))
+    everywhere = np.ones(wet.shape[:2], dtype=bool)
+
+    def _sel(k):
+        return wet[:, :, k] if lev_any[k] else everywhere
+
     spread = np.zeros(nlev)
     for k in range(nlev):
-        w = tmask[:, :, k]
-        if w.any():
-            v = e3t3[:, :, k][w]
-            spread[k] = float(v.max() - v.min())
+        v = e3t3[:, :, k][_sel(k)]
+        spread[k] = float(v.max() - v.min())
     if spread.max() > 1.0e-6:
         raise ValueError(
             f"mesh_mask e3t_0 varies horizontally (max spread {spread.max():.3e} "
-            "m over wet cells): this is a PARTIAL-CELL (ln_zps) grid, which "
+            "m over a level): this is a PARTIAL-CELL (ln_zps) grid, which "
             "bridge_nemo_to_legoesm_topo does not support."
         )
-    lev_any = tmask.any(axis=(0, 1))
     out_e3t = e3t.copy()
     for k in range(nlev):
-        if lev_any[k]:
-            out_e3t[k] = float(e3t3[:, :, k][tmask[:, :, k]].mean())
+        out_e3t[k] = _level_value(e3t3[:, :, k][_sel(k)])
     if _mode == "gdept_only":
         out_e3t = e3t.copy()            # keep the 1-D thickness ladder
     gd3 = getattr(grid, "gdept_0", None)
     out_td = t_depth.copy()
     if gd3 is not None and _mode in ("both", "gdept_only"):
         gd3 = np.asarray(gd3)
+        gspread = max(float(np.ptp(gd3[:, :, k][_sel(k)])) for k in range(nlev))
+        if gspread > 1.0e-6:
+            raise ValueError(
+                f"mesh_mask gdept_0 varies horizontally (max spread "
+                f"{gspread:.3e} m over a level): partial cells are not "
+                "supported by this bridge.")
         for k in range(nlev):
-            if lev_any[k]:
-                out_td[k] = float(gd3[:, :, k][tmask[:, :, k]].mean())
+            out_td[k] = _level_value(gd3[:, :, k][_sel(k)])
     return out_e3t, out_td, "e3t_0"
 
 
@@ -384,8 +459,8 @@ def _warn_if_not_fp64() -> None:
     global _FP32_BRIDGE_WARNED
     if _FP32_BRIDGE_WARNED:
         return
-    from legoesm.core.precision import get_policy
     import jax.numpy as _jnp
+    from legoesm.core.precision import get_policy
     if _jnp.dtype(get_policy().control) == _jnp.float64:
         return
     _FP32_BRIDGE_WARNED = True
@@ -435,12 +510,37 @@ def bridge_nemo_to_legoesm_topo(
     state: NemoState,
     *,
     periodic_i: bool = True,
-    omega: float = constants.Omega,
+    # A NEMO bridge defaults to NEMO'S EARTH.  It used to default to
+    # ``legoesm.constants.Omega``, a four-significant-figure rounding of the
+    # same physical constant, and no DINO caller overrode it -- so the ENTIRE
+    # oracle-matching lane (the 90-day twin and every fidelity probe in
+    # scripts/validate/ocean_fidelity/dino_1226/) built its Coriolis arrays on
+    # a planet 1.578e-05 away from the one the oracle integrated, while the
+    # card's own pinned rate reached the config-side consumers.  Two Earths in
+    # one run, and the config-vs-geometry split is exactly the one an oracle
+    # harness must not have.  Measured, per site, by
+    # coriolis_omega_routing_audit.py (#1455 next-action 1, STEP 0).
+    omega: float = NEMO_CONSTANTS_CONFIG.Omega,
     radius: float = constants.R_earth,
-    f_rtol: float = 1e-3,
+    # Tightened from 1e-3 once the rate above stopped being wrong.  The old
+    # bound was 63x too loose to see the 1.578e-05 rotation-rate gap, which is
+    # how a whole lane ran on the wrong planet with a green guard.  The
+    # built f_T now matches NEMO's ff_t to ~1e-16 relative on DINO; 1e-9 keeps
+    # four orders of headroom for a different NEMO mesh's own roundoff while
+    # still failing on any real constant or latitude error.
+    f_rtol: float = 1e-9,
+    # Counterfactual-only validation axis. ``nemo`` is the historical default
+    # and remains bit-identical. ``selected_omega`` validates against NEMO's
+    # own ff_t scaled by the explicitly supplied omega, so a registered old-
+    # Earth reproduction remains fail-closed instead of loosening f_rtol.
+    f_reference_mode: str = "nemo",
     full_step: bool = False,
     metric_convention: str = "auto",
+    vface_zonal_metric_evaluation: str = "nemo_vpoint",
+    coriolis_placement: str = "cell_average",
     e3t_mode: str | None = None,
+    nemo_e3w_source: str = "mesh_reference",
+    carry_native_lat_deg: bool = False,
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -484,8 +584,19 @@ def bridge_nemo_to_legoesm_topo(
     periodic_i : bool
         ``True`` for a zonally re-entrant grid (``ln_Iperio``); ``False`` closes
         the west/east boundaries with walls.
+    carry_native_lat_deg : bool
+        Opt in to carrying NEMO's native degree-valued ``gphit`` array for a
+        literal oracle consumer. The default is ``False`` so generic bridge
+        geometry retains its historical pytree structure.
     f_rtol : float
         Max relative error tolerance between the built ``f_T`` and NEMO ``ff_t``.
+    f_reference_mode : {"nemo", "selected_omega"}, optional
+        Reference used by the ``f_T`` guard. ``"nemo"`` (default) compares
+        directly with NEMO ``ff_t`` and is bit-identical to the prior bridge.
+        ``"selected_omega"`` compares with ``ff_t`` scaled by
+        ``omega / NEMO_CONSTANTS_CONFIG.Omega``. It exists only for explicit,
+        hash-stamped counterfactual reproduction and does not relax
+        ``f_rtol``.
     metric_convention : {"exact", "nemo_isotropic"}, optional (#1226)
         Forwarded to :func:`create_latlon_geometry`. Default ``"exact"``
         (the true finite-difference T/u-face metric legoESM has always
@@ -498,6 +609,10 @@ def bridge_nemo_to_legoesm_topo(
         more exact but less NEMO-faithful) reconstruction. Does not touch
         the v-face metric (#516) or the Coriolis/``f_rtol`` check below,
         which reads ``geom.f_T`` (unaffected by this flag).
+    vface_zonal_metric_evaluation : {"legacy_tracer_midpoint", "nemo_vpoint"}
+        Forwarded to :func:`create_latlon_geometry`.  This isolates only the
+        #1455 V-face zonal-width reconstruction while holding the detected
+        T/u metric convention and all other geometry fixed.
 
     ``e3t_mode`` selects which vertical ladder to build on, forwarded verbatim to
     :func:`effective_vertical_scale_factors`. ``None`` (the default, and the
@@ -527,10 +642,18 @@ def bridge_nemo_to_legoesm_topo(
     # Validate HERE, on the static argument, rather than ~180 lines further in
     # when the vertical grid is built: a typo should stop the call, not surface
     # after the geometry has been constructed.
+    if nemo_e3w_source not in ("mesh_reference", "depth_difference"):
+        raise ValueError(
+            f"unknown nemo_e3w_source {nemo_e3w_source!r}; expected "
+            "'mesh_reference' or 'depth_difference'")
     if e3t_mode is not None and e3t_mode not in NEMO_E3T_MODES:
         raise ValueError(
             f"unknown e3t_mode {e3t_mode!r}; expected None or one of "
             + ", ".join(repr(m) for m in NEMO_E3T_MODES))
+    if f_reference_mode not in ("nemo", "selected_omega"):
+        raise ValueError(
+            "f_reference_mode must be 'nemo' or 'selected_omega', got "
+            f"{f_reference_mode!r}")
     # metric_convention="auto" (DEFAULT): ASK THE ORACLE instead of assuming.
     # NEMO's mesh_mask carries e1t and e2t, so the convention is observable:
     # DINO's usr_def_hgr sets pe2t = pe1t (Mercator conformality imposed
@@ -564,7 +687,19 @@ def bridge_nemo_to_legoesm_topo(
         lat_1d=jnp.asarray(lat_1d), lon_1d=jnp.asarray(lon_1d),
         lat_face_1d=jnp.asarray(lat_face),
         metric_convention=metric_convention,
+        vface_zonal_metric_evaluation=vface_zonal_metric_evaluation,
+        # Where the vertex Coriolis is EVALUATED.  Default "cell_average" is
+        # bit-identical to every bridge caller; "face_latitude" reproduces
+        # NEMO's own ff_f convention (2*omega*sin(gphif)).  See
+        # create_latlon_geometry's docstring for the measured gap.
+        coriolis_placement=coriolis_placement,
     )
+    # Preserve native degrees only for an explicitly selected oracle card.
+    # Generic NEMO bridges retain the historical geometry pytree exactly;
+    # reconstructing degrees(lat_T) is nevertheless too lossy for DINO's
+    # literal latitude-dependent etau profile.
+    if carry_native_lat_deg:
+        geom = geom._replace(native_lat_T_deg=jnp.asarray(gphit))
     # Partial-periodic seam wall (NEMO DINO): ALL interior cells are wet,
     # but the zonal seam u-face is closed outside the ACC channel — carried
     # on the geometry so every mask derivation (2-D/3-D face, vertex,
@@ -591,15 +726,54 @@ def bridge_nemo_to_legoesm_topo(
     # O(100%)), loose enough to pass the reconstruction residual.
     f_built = np.asarray(geom.f_T)
     f_nemo = np.asarray(grid.ff_t)
-    f_scale = float(np.max(np.abs(f_nemo)))
-    f_err = float(np.max(np.abs(f_built - f_nemo)))
-    if f_err > f_rtol * f_scale:
+    if f_reference_mode == "nemo":
+        f_reference = f_nemo
+    else:
+        f_reference = f_nemo * (float(omega) / NEMO_CONSTANTS_CONFIG.Omega)
+    f_scale = float(np.max(np.abs(f_reference)))
+    f_err = float(np.max(np.abs(f_built - f_reference)))
+    # PRECISION-AWARE BOUND.  ``f_rtol`` is tight enough (1e-9) to catch a
+    # rotation-rate or latitude error in fp64, which is the precision every
+    # oracle comparison runs at.  The geometry is stored at the PRECISION
+    # POLICY's dtype, though, and in fp32 the array itself only carries ~1.2e-07
+    # relative -- so a fixed 1e-9 would be unsatisfiable by construction and
+    # would fail on rounding rather than on physics.  The effective bound is
+    # therefore the looser of the two, and it is REPORTED so nobody reads an
+    # fp32 pass as an fp64 one.
+    _eps = float(np.finfo(f_built.dtype).eps) if np.issubdtype(
+        f_built.dtype, np.floating) else 0.0
+    _bound = max(f_rtol, 8.0 * _eps)
+    if f_err > _bound * f_scale:
         raise ValueError(
-            f"Mercator Coriolis mismatch vs NEMO ff_t: max|Δ|={f_err:.3e} > "
-            f"{f_rtol:.1e}·{f_scale:.3e}. Check gphit/omega."
+            f"Mercator Coriolis mismatch vs {f_reference_mode} ff_t reference: "
+            f"max|Δ|={f_err:.3e} > "
+            f"{_bound:.1e}·{f_scale:.3e} (relative {f_err / f_scale:.3e}; "
+            f"f_rtol={f_rtol:.1e}, dtype={f_built.dtype}, 8*eps="
+            f"{8.0 * _eps:.1e}). Check gphit/omega -- a relative gap near "
+            "1.58e-05 is legoESM's rounded constants.Omega against NEMO's own "
+            "2*pi/rsiday, which is what this bound was tightened to catch."
         )
+    if f_reference_mode == "selected_omega":
+        f_nemo_scale = float(np.max(np.abs(f_nemo)))
+        unscaled_err = float(np.max(np.abs(f_built - f_nemo)))
+        print(
+            "BRIDGE OMEGA COUNTERFACTUAL: selected_omega validation PASS; "
+            f"omega={float(omega):.17g} reference_scale="
+            f"{float(omega) / NEMO_CONSTANTS_CONFIG.Omega:.17g} "
+            f"max|f_T-NEMO ff_t|={unscaled_err:.17g} "
+            f"relative={unscaled_err / f_nemo_scale:.17g}",
+            flush=True,
+        )
+    # SEPARATE BOUND, deliberately.  ``f_rtol`` was tightened from 1e-3 to 1e-9
+    # to catch a rotation-rate error in the CORIOLIS check above, and it was
+    # shared with THIS check (the ``dy_T`` guard below always carried its own
+    # hardcoded 5e-2 and was never affected -- an earlier version of this
+    # comment said "two others", which adversarial review corrected to one).
+    # 1e-9 is far tighter than the reconstruction residual this guard tolerates
+    # by design, so it keeps the bound it was calibrated on.
+    _metric_rtol = 1e-3
     dx_err = float(np.max(np.abs(np.asarray(geom.dx_T) - grid.e1t)))
-    if dx_err > f_rtol * float(np.max(np.abs(grid.e1t))):
+    if dx_err > _metric_rtol * float(np.max(np.abs(grid.e1t))):
         raise ValueError(
             f"Mercator dx_T mismatch vs NEMO e1t: max|Δ|={dx_err:.3e}. Check "
             "glamt (lon-separable?) / radius."
@@ -644,6 +818,19 @@ def bridge_nemo_to_legoesm_topo(
 
     z_coord = create_z_star_from_thicknesses(
         e3t_1d, t_depth_ref_m=_t_depth,
+        nemo_gdept_0_m=grid.gdept_0,
+        nemo_gdepw_0_m=grid.gdepw_0,
+        nemo_e3t_0_m=grid.e3t_0,
+        nemo_e3w_0_m=grid.e3w_0,
+        nemo_hu_0_m=grid.hu_0, nemo_hv_0_m=grid.hv_0,
+        nemo_e1e2t_m=np.asarray(grid.e1t) * np.asarray(grid.e2t),
+        nemo_e1e2u_m=(None if grid.e2u is None else
+                      np.asarray(grid.e1u) * np.asarray(grid.e2u)),
+        nemo_e1e2v_m=(None if grid.e1v is None else
+                      np.asarray(grid.e1v) * np.asarray(grid.e2v)),
+        nemo_e2u_m=grid.e2u, nemo_e1v_m=grid.e1v,
+        nemo_een_barotropic_m=_nemo_een_barotropic_operands(grid),
+        nemo_e3w_source=nemo_e3w_source,
     )
 
     # NEMO ln_zco FULL-STEP-z: fixed reference levels everywhere + a

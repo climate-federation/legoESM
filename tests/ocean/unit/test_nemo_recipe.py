@@ -98,7 +98,7 @@ def test_nemo_model_config_dispatches_upwind3_momentum_variant():
     )
 
     assert cfg.momentum_advection == "flux_form"
-    assert cfg.momentum_flux_scheme == "upwind3"
+    assert cfg.momentum_flux_scheme == "nemo_up3"
     assert cfg.ke_gradient_scheme == "centered"
 
 

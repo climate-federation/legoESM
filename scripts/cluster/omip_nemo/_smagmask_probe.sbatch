@@ -14,7 +14,7 @@
 # no 1/pi, so C_smag=3 on a 1-degree cell has a ~1e11 prefactor.
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu
 VISC=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc

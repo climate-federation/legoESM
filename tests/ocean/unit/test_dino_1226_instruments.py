@@ -5,6 +5,8 @@ session scratchpad (``scripts/validate/ocean_fidelity/dino_1226/``):
 mode projector). All synthetic -- no NEMO artifacts, CPU-fast.
 """
 import importlib
+import inspect
+import json
 import os
 import sys
 import types
@@ -25,13 +27,28 @@ def instruments():
         import validate.ocean_fidelity.dino_1226.heat_discriminator as heat_discriminator
         import validate.ocean_fidelity.dino_1226.kamm_twin_90d as kamm_twin_90d
         import validate.ocean_fidelity.dino_1226.mode_projection as mode_projection
+        import validate.ocean_fidelity.dino_1226.tcarry_baseline_reconcile as tcarry_reconcile
+        import validate.ocean_fidelity.dino_1226.tcarry_basin_floor90 as tcarry_floor
+        import validate.ocean_fidelity.dino_1226.tcarry_basin_reverdict as tcarry_reverdict
+        import validate.ocean_fidelity.dino_1226.tcarry_bridge_omega_score as tcarry_omega
+        import validate.ocean_fidelity.dino_1226.tcarry_een_off_discriminator as tcarry_een
         importlib.reload(mode_projection)
         importlib.reload(heat_discriminator)
         importlib.reload(kamm_twin_90d)
+        importlib.reload(tcarry_reconcile)
+        importlib.reload(tcarry_floor)
+        importlib.reload(tcarry_reverdict)
+        importlib.reload(tcarry_omega)
+        importlib.reload(tcarry_een)
         return types.SimpleNamespace(
             kamm_twin_90d=kamm_twin_90d,
             heat_discriminator=heat_discriminator,
             mode_projection=mode_projection,
+            tcarry_reconcile=tcarry_reconcile,
+            tcarry_floor=tcarry_floor,
+            tcarry_reverdict=tcarry_reverdict,
+            tcarry_omega=tcarry_omega,
+            tcarry_een=tcarry_een,
         )
     finally:
         try:
@@ -243,6 +260,27 @@ def test_bridge_tke_from_restart_mapping_round_trip(instruments):
     assert tke[0, 0, :].max() == 0.0
 
 
+def test_bridge_tke_coefficients_preserves_surface_and_interior(instruments):
+    kamm = instruments.kamm_twin_90d
+    n_lat, n_lon, jpk = 2, 3, 4
+    wet = np.ones((n_lat, n_lon))
+    en = np.arange(n_lat * n_lon * jpk, dtype=float).reshape(n_lat, n_lon, jpk)
+    avm = en + 100.0
+    avt = en + 200.0
+    dissl = en + 300.0
+    st = _fake_state(np.zeros((n_lat, n_lon, jpk)),
+                     np.zeros((n_lat, n_lon)),
+                     np.zeros((n_lat, n_lon + 1, jpk)),
+                     np.zeros((n_lat + 1, n_lon, jpk)))
+    out = kamm.bridge_tke_from_restart(
+        st, en, wet, restart_avm=avm, restart_avt=avt,
+        restart_dissl=dissl)
+    np.testing.assert_array_equal(out.tke_avm.data, avm[..., 1:])
+    np.testing.assert_array_equal(out.tke_avt.data, avt[..., 1:])
+    np.testing.assert_array_equal(out.tke_avm_surface.data, avm[..., 0])
+    np.testing.assert_array_equal(out.tke_dissl.data, dissl[..., 1:])
+
+
 def test_build_twin_state_default_bridge_tke_off(instruments, monkeypatch):
     """--bridge-tke defaults False: the module must not call
     read_nemo_restart_en/bridge_tke_from_restart on the default path -- the
@@ -276,7 +314,7 @@ def test_parse_args_bridge_tke_flag(instruments):
 # ---------------------------------------------------------------------------
 # kamm_twin_90d: --bridge-before (#1317 leap-frog before-level bridge)
 # ---------------------------------------------------------------------------
-def test_before_level_bridge_is_ON_by_default(instruments):
+def test_before_level_bridge_is_on_by_default(instruments):
     """#1455 (2026-08-24): the before-level bridge defaults ON, on BOTH the
     python surface and the CLI.
 
@@ -437,6 +475,148 @@ def test_print_before_bridge_verify_reports_zero_for_matched_state(instruments):
     # must not raise, and must print the zero-diff line (captured via capsys
     # in the caller if desired -- here just confirm no exception).
     kamm_twin_90d._print_before_bridge_verify(st, before, grid)
+
+
+# ---------------------------------------------------------------------------
+# kamm_twin_90d: --bridge-before-stress-tpoint (round-3 end-wall gate)
+# ---------------------------------------------------------------------------
+def test_tpoint_stress_selector_defaults_corrected_and_legacy_is_opt_in(instruments):
+    import inspect
+
+    k = instruments.kamm_twin_90d
+    build_sig = inspect.signature(k._build_twin_state)
+    run_sig = inspect.signature(k.run_twin)
+    assert build_sig.parameters["bridge_before_stress_tpoint"].default is True
+    assert run_sig.parameters["bridge_before_stress_tpoint"].default is True
+    base = k._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    explicit_corrected = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz", "--bridge-before-stress-tpoint"])
+    legacy = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz",
+        "--bridge-before-stress-legacy-u-as-t"])
+    legacy_euler = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz", "--legacy-euler-start"])
+    assert base.bridge_before_stress_tpoint is True
+    assert explicit_corrected.bridge_before_stress_tpoint is True
+    assert legacy.bridge_before_stress_tpoint is False
+    assert legacy_euler.bridge_before is False
+    assert legacy_euler.bridge_before_stress_tpoint is False
+    with pytest.raises(SystemExit):
+        k._parse_args([
+            "nemo_dino_kamm_mlf", "out.npz",
+            "--bridge-before-stress-tpoint",
+            "--bridge-before-stress-legacy-u-as-t"])
+
+
+def test_tpoint_stress_reconstruction_reuses_loader_and_changes_only_carry(
+        instruments, monkeypatch):
+    """Red if the selector inverts utau_b, edits a prognostic, or bypasses
+    either existing DINO forcing loader."""
+    from collections import namedtuple
+
+    k = instruments.kamm_twin_90d
+    calls = []
+    forcing_token = object()
+    expected_x = np.array([[-1.0, -2.0], [-3.0, -4.0]])
+    expected_y = np.zeros_like(expected_x)
+
+    def _arrays(grid, cfg):
+        calls.append(("arrays", grid, cfg))
+        return forcing_token
+
+    def _surface(forcing):
+        calls.append(("surface", forcing))
+        return types.SimpleNamespace(tau_x=expected_x, tau_y=expected_y)
+
+    monkeypatch.setattr(k, "dino_lat_lon_surface_forcing_arrays", _arrays)
+    monkeypatch.setattr(k, "dino_step_surface_forcing", _surface)
+    State = namedtuple(
+        "State", "T S u v eta tau_x_prev tau_y_prev tke")
+    sentinel_fields = [object() for _ in range(6)]
+    state = State(
+        *sentinel_fields[:5], np.full_like(expected_x, 99.0),
+        np.full_like(expected_y, 88.0), sentinel_fields[5])
+    grid, cfg = object(), object()
+
+    rebuilt, receipt = k.reconstruct_dino_before_stress_tpoint(
+        state, grid, cfg, t_seconds=15_552_000.0)
+    assert calls == [("arrays", grid, cfg), ("surface", forcing_token)]
+    assert np.array_equal(np.asarray(rebuilt.tau_x_prev), expected_x)
+    assert np.array_equal(np.asarray(rebuilt.tau_y_prev), expected_y)
+    # Exact sign is load-bearing: negating the analytic T field to mimic the
+    # raw NEMO face convention makes this assertion red.
+    assert float(np.asarray(rebuilt.tau_x_prev)[0, 0]) == -1.0
+    for name in ("T", "S", "u", "v", "eta", "tke"):
+        assert getattr(rebuilt, name) is getattr(state, name)
+    assert receipt["bridge_before_stress_stagger"] == "T"
+    assert receipt["bridge_before_stress_reconstruction_seconds"] == 15_552_000.0
+    assert receipt["bridge_before_stress_sha256"] == k._stress_content_sha256(
+        expected_x, expected_y)
+
+
+def test_tpoint_stress_hash_and_time_controls_can_fail(instruments):
+    k = instruments.kamm_twin_90d
+    x = np.arange(6.0).reshape(2, 3)
+    y = np.zeros_like(x)
+    planted = x.copy()
+    planted[0, 0] = np.nextafter(planted[0, 0], np.inf)
+    assert k._stress_content_sha256(x, y) != k._stress_content_sha256(planted, y)
+    with pytest.raises(ValueError, match="finite and >=0"):
+        k._analytic_dino_tpoint_stress(object(), object(), t_seconds=-1.0)
+
+
+def test_tpoint_stress_selector_refuses_euler_start_before_io(
+        instruments, monkeypatch):
+    k = instruments.kamm_twin_90d
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("selector must refuse before reading an oracle file")
+
+    monkeypatch.setattr(k, "read_nemo_mesh_mask", _boom)
+    with pytest.raises(SystemExit, match="requires --bridge-before"):
+        k._build_twin_state(
+            "nemo_dino_kamm_mlf", "/unused", "/unused",
+            bridge_before=False, bridge_before_stress_tpoint=True)
+    with pytest.raises(AssertionError, match="selector must refuse"):
+        k._build_twin_state(
+            "nemo_dino_kamm_mlf", "/unused", "/unused",
+            bridge_before=False, bridge_before_stress_tpoint=False)
+
+
+def test_tpoint_stress_selector_threads_and_stamps_receipts(
+        instruments, monkeypatch):
+    """Red if the CLI goes inert or artifacts omit any registered receipt."""
+    import inspect
+
+    k = instruments.kamm_twin_90d
+    seen = {}
+    src = inspect.getsource(k.run_twin)
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(k, "run_twin", _spy)
+    monkeypatch.setattr(k, "provenance_gate", lambda: None)
+    monkeypatch.setattr(k, "_precision_gate", lambda: None)
+    k.main(["nemo_dino_kamm_mlf", "out.npz"])
+    assert seen["bridge_before_stress_tpoint"] is True
+    seen.clear()
+    k.main([
+        "nemo_dino_kamm_mlf", "out.npz",
+        "--bridge-before-stress-legacy-u-as-t"])
+    assert seen["bridge_before_stress_tpoint"] is False
+    seen.clear()
+    k.main([
+        "nemo_dino_kamm_mlf", "out.npz", "--legacy-euler-start"])
+    assert seen["bridge_before"] is False
+    assert seen["bridge_before_stress_tpoint"] is False
+
+    assert 'bridge_before_stress_stagger = "T"' in src
+    assert "np.array_equal(np.asarray(st.tau_x_prev)" in src
+    assert "bridge_before_stress_stagger=np.str_(bridge_before_stress_stagger)" in src
+    assert "bridge_before_stress_reconstruction_seconds=np.float64(" in src
+    assert "bridge_before_stress_sha256=np.str_(bridge_before_stress_sha256)" in src
 
 
 # ---------------------------------------------------------------------------
@@ -1021,9 +1201,9 @@ def test_uncertified_gate_prints_no_verdict_token_anywhere(instruments):
     version that suppressed only the tally would still have issued one five
     times over.  This asserts no verdict token survives anywhere in the
     output, and (non-vacuity) that the certified call still emits them."""
+    import contextlib
     import importlib
     import io
-    import contextlib
     _dir = (Path(__file__).resolve().parents[3] / "scripts" / "validate"
             / "ocean_fidelity" / "dino_1226")
     stub = types.ModuleType("acc_thermal_wind")
@@ -1162,6 +1342,7 @@ def test_run_twin_refuses_a_start_mode_the_built_state_contradicts(instruments,
 
     monkeypatch.setattr(kamm_twin_90d, "_build_twin_state", _fake_build)
     monkeypatch.setattr(kamm_twin_90d, "seasonal_t0_seconds", lambda *a, **k: 0.0)
+    monkeypatch.setattr(kamm_twin_90d, "_git_provenance", lambda: ("a" * 40, 0))
     with pytest.raises(SystemExit, match="START-MODE MISMATCH"):
         kamm_twin_90d.run_twin("nemo_dino_kamm_mlf", "o.npz", bridge_before=True)
 
@@ -1429,6 +1610,625 @@ def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
     src = inspect.getsource(kamm_twin_90d.run_twin)
     assert "seasonal_t0_reference_seconds=" in src
     assert "run_config=" in src
+    for selector in (
+        "tke_preclosure_coeff_source",
+        "tke_shear_evaluation_stage",
+        "tke_shear_metric_source",
+        "tke_n2_evaluation_stage",
+        "tke_langmuir_evaluation",
+        "dino_wind_profile_evaluation",
+    ):
+        assert f'"{selector}"' in src
+    assert "producer_git_sha=" in src
+    assert "producer_dirty_tracked_files=" in src
     # the reference must come from the restart, not from the same override the
     # twin itself used -- otherwise the pair-check compares a value to itself
-    assert "_restart_elapsed_seconds(" in src
+    assert "restart_elapsed_seconds(" in src
+
+
+def test_corrected_stress_live_paths_use_public_clock_helper(instruments):
+    """REBASE-RED: main removed the private helper spelling, while two
+    corrected-stress call sites on this branch still used it."""
+    import inspect
+    k = instruments.kamm_twin_90d
+    src = inspect.getsource(k.run_twin)
+    assert "_restart_elapsed_seconds(" not in src
+    assert src.count("restart_elapsed_seconds(") == 2
+    assert k._restart_elapsed_seconds is k.restart_elapsed_seconds
+
+
+# ---------------------------------------------------------------------------
+# kamm_twin_90d -- fp64 snapshot storage and the always-on fp64 reduced series
+#
+# WHY THESE EXIST: the campaign's single-precision snapshot storage repeatedly
+# capped what was measurable (lego's early ensemble spread was 2 differing
+# cells of 342134 at day 10; ensemble members tie exactly on max-type metrics
+# at the storage quantum). The fix has two halves and each is tested here --
+# the opt-in float64 3-D block, and the always-on float64 REDUCED series that
+# is computed from the LIVE state before the storage cast.
+# ---------------------------------------------------------------------------
+def test_snapshot_storage_defaults_to_float32_and_the_flag_makes_it_float64(
+        instruments):
+    """REVERT-RED ON THE DEFAULT. Doubling every recorded twin's artifact by
+    accident is the one regression this feature could cause, so the default is
+    asserted as tightly as the flag."""
+    K = instruments.kamm_twin_90d
+    assert K.snapshot_dtype(False) is np.float32
+    assert K.snapshot_dtype(True) is np.float64
+    assert K._parse_args(["r", "o.npz"]).fp64_3d is False
+    assert K._parse_args(["r", "o.npz", "--fp64-3d"]).fp64_3d is True
+
+
+def test_storage_dtype_stamp_defaults_to_the_legacy_all_float32_map(instruments):
+    """EXTEND-ONLY. Every artifact recorded before the stamp existed was
+    all-float32, so an unstamped artifact must resolve to exactly that -- a
+    consumer reading it must not change any recorded score."""
+    K = instruments.kamm_twin_90d
+    assert K.snapshot_storage_dtypes({}) == K.LEGACY_STORAGE_DTYPES
+    assert all(v == "float32" for v in K.LEGACY_STORAGE_DTYPES.values())
+    stamped = {"storage_dtypes": np.str_(
+        '{"T3d": "float64", "S3d": "float64", "u3d": "float64", '
+        '"reduced": "float64"}')}
+    got = K.snapshot_storage_dtypes(stamped)
+    assert got["u3d"] == "float64" and got["reduced"] == "float64"
+
+
+_WET = np.ones((6, 5), dtype=np.float64)
+
+
+def _two_states_apart_by(delta):
+    """Two 3-D u fields differing by `delta` on ONE face, everything else
+    identical. `delta` is chosen sub-quantum by the caller."""
+    a = np.full((6, 5, 4), 0.25, dtype=np.float64)
+    b = a.copy()
+    b[2, 3, 1] += delta
+    return a, b
+
+
+def _sum_reducer(f64):
+    """A stand-in for the mesh-backed reducer: a masked weighted column sum,
+    i.e. the same SHAPE of reduction (a masked transport integral) the real one
+    takes, with no NEMO mesh required.
+
+    It reads ``land_mask`` deliberately. The real reducer needs the wet domain
+    for every one of its eleven metrics, and a 5-day verification run caught
+    the wiring gap where the harness handed it only the 3-D fields -- a stub
+    that ignored the mask would have kept that green.
+    """
+    w = np.arange(1, f64["u"].shape[2] + 1, dtype=np.float64)
+    m = f64["land_mask"] > 0.5
+    return {"x": float(np.einsum("jik,k->", np.where(m[:, :, None],
+                                                     f64["u"], 0.0), w))}
+
+
+def test_capture_snapshot_stores_at_the_requested_dtype(instruments):
+    K = instruments.kamm_twin_90d
+    a, _ = _two_states_apart_by(0.0)
+    fields = {"T": a, "S": a, "eta": a[:, :, 0], "u": a, "v": a}
+    for fp64, want in ((False, np.float32), (True, np.float64)):
+        stored, red, status = K.capture_snapshot(
+            fields, snap_dtype=K.snapshot_dtype(fp64), reducer=_sum_reducer,
+            land_mask=_WET)
+        assert status == "ok"
+        assert {v.dtype for v in stored.values()} == {np.dtype(want)}
+        # the land mask is a reducer INPUT, never a stored snapshot field --
+        # it is time-invariant and already written once per run
+        assert set(stored) == {"T", "S", "eta", "u", "v"}
+        assert red["x"] == pytest.approx(
+            _sum_reducer({"u": a, "land_mask": _WET})["x"])
+    stored, red, status = K.capture_snapshot(
+        fields, snap_dtype=np.float32, reducer=None, land_mask=_WET)
+    assert red is None and status == "no reducer"
+    # the mask is REQUIRED -- it was optional for one commit and a call site
+    # that forgot it shipped, crashing every snapshot run
+    with pytest.raises(TypeError):
+        K.capture_snapshot(fields, snap_dtype=np.float32,
+                           reducer=_sum_reducer)
+
+
+def test_the_reducer_is_handed_the_wet_domain(instruments):
+    """The reductions are all masked integrals, so a reducer that never sees
+    the land mask cannot produce the gate's quantity. A 5-day verification run
+    caught exactly this wiring gap after the first round of unit tests were
+    green, so it is pinned here."""
+    K = instruments.kamm_twin_90d
+    a, _ = _two_states_apart_by(0.0)
+    fields = {"T": a, "S": a, "eta": a[:, :, 0], "u": a, "v": a}
+    seen = {}
+
+    def spy(f64):
+        seen.update(f64)
+        return {"x": 0.0}
+
+    K.capture_snapshot(fields, snap_dtype=np.float32, reducer=spy,
+                       land_mask=_WET)
+    assert "land_mask" in seen, "the reducer was not handed the wet domain"
+    assert seen["land_mask"].dtype == np.float64
+    # masking must actually bite, or the check above is decorative
+    half = _WET.copy()
+    half[3:, :] = 0.0
+    full = K.capture_snapshot(fields, snap_dtype=np.float32,
+                              reducer=_sum_reducer, land_mask=_WET)[1]["x"]
+    part = K.capture_snapshot(fields, snap_dtype=np.float32,
+                              reducer=_sum_reducer, land_mask=half)[1]["x"]
+    assert part < full
+
+
+def test_the_fp64_reduced_series_resolves_a_perturbation_the_fp32_block_cannot(
+        instruments):
+    """THE POINT OF THE WHOLE CHANGE, stated as a measurement.
+
+    Plant a perturbation strictly BELOW the float32 storage quantum of the
+    field it perturbs. Then:
+
+      * the float32-stored 3-D block is BIT-IDENTICAL between the two states,
+        so ANY metric reduced from storage ties exactly -- this is the recorded
+        campaign's "2 differing cells of 342134" and its exact ensemble ties;
+      * the float64 REDUCED series, computed from the live state before the
+        cast, separates them -- so an ensemble spread built from it is a
+        measurement rather than a report of the npz dtype;
+      * with --fp64-3d the stored block separates them too.
+
+    The perturbation is checked to be genuinely sub-quantum first: a test that
+    planted a RESOLVABLE perturbation would pass while proving nothing.
+    """
+    K = instruments.kamm_twin_90d
+    a, _ = _two_states_apart_by(0.0)
+    quantum = np.spacing(np.float32(a[2, 3, 1]))
+    delta = 0.01 * float(quantum)
+    a, b = _two_states_apart_by(delta)
+    assert delta > 0.0, "the planted perturbation must be nonzero"
+    assert np.float32(a[2, 3, 1]) == np.float32(b[2, 3, 1]), (
+        "the perturbation is NOT sub-quantum -- this test would pass "
+        "vacuously")
+
+    def cap(state, fp64):
+        return K.capture_snapshot(
+            {"T": state, "S": state, "eta": state[:, :, 0],
+             "u": state, "v": state},
+            snap_dtype=K.snapshot_dtype(fp64), reducer=_sum_reducer,
+            land_mask=_WET)
+
+    s32a, r64a, _ = cap(a, False)
+    s32b, r64b, _ = cap(b, False)
+    # 1. float32 storage ties the two states, bit for bit.
+    assert np.array_equal(s32a["u"], s32b["u"])
+    # ... and therefore so does any metric reduced from the STORED field.
+    assert (_sum_reducer({"u": s32a["u"].astype(np.float64),
+                          "land_mask": _WET})["x"]
+            == _sum_reducer({"u": s32b["u"].astype(np.float64),
+                             "land_mask": _WET})["x"])
+    # 2. the fp64 reduced series does not.
+    assert r64a["x"] != r64b["x"]
+    assert r64b["x"] - r64a["x"] == pytest.approx(delta * 2.0, rel=1e-9)
+    # 3. --fp64-3d also separates the stored block.
+    s64a, _, _ = cap(a, True)
+    s64b, _, _ = cap(b, True)
+    assert not np.array_equal(s64a["u"], s64b["u"])
+
+
+def test_reduced_series_keys_cover_every_scored_metric(instruments):
+    """The stored series must cover what the scorers actually reduce. If
+    verdict360 grows a metric and the series does not, a future ensemble is
+    back to reducing float32 for that one -- so the two lists are pinned
+    against each other rather than maintained in parallel by hand."""
+    K = instruments.kamm_twin_90d
+    pytest.importorskip("netCDF4")
+    sys.path.insert(0, str(SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226"))
+    try:
+        import verdict360
+    except SystemExit as exc:                       # no NEMO mesh on this box
+        pytest.skip(f"NEMO mesh unavailable: {exc}")
+    finally:
+        try:
+            sys.path.remove(
+                str(SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226"))
+        except ValueError:
+            pass
+    assert tuple(K.REDUCED_KEYS) == tuple(verdict360.KEYS)
+
+
+def test_the_real_reducer_reproduces_the_recorded_scorers_exactly(instruments):
+    """IDENTITY, not similarity. The stored series is only trustworthy if it is
+    the SAME number the recorded scorer would produce from the same state at
+    the same precision -- otherwise it is a second spelling of ten reductions,
+    which is this campaign's most expensive defect class. Driven on a synthetic
+    but physically-ranged state, on the real NEMO mesh."""
+    K = instruments.kamm_twin_90d
+    pytest.importorskip("netCDF4")
+    d = str(SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226")
+    sys.path.insert(0, d)
+    try:
+        import acc_thermal_wind as A
+        import verdict360
+        reducer, status = K.build_snapshot_reducer(
+            os.path.dirname(A.mm.filepath()))
+    except SystemExit as exc:
+        pytest.skip(f"NEMO mesh unavailable: {exc}")
+    finally:
+        try:
+            sys.path.remove(d)
+        except ValueError:
+            pass
+    assert status == "ok" and reducer is not None
+    ny, nx, nz = A.tmask.shape
+    rng = np.random.default_rng(0)
+    z = np.arange(nz, dtype=np.float64)
+    T = 4.0 + 16.0 * np.exp(-z / 6.0)[None, None, :] + 0.05 * rng.standard_normal((ny, nx, nz))
+    S = 34.5 + 0.5 * np.exp(-z / 10.0)[None, None, :] + 0.01 * rng.standard_normal((ny, nx, nz))
+    u = 0.05 * rng.standard_normal((ny, nx + 1, nz))
+    mask = np.asarray(A.tmask[:, :, 0], dtype=np.float64)
+    got = reducer({"T": T, "S": S, "u": u, "land_mask": mask})
+    st = {"T": T, "S": S, "u": u[:, 1:nx + 1, :], "land_mask": mask}
+    want = verdict360.all_metrics(st, A.tmask & (mask > 0.5)[:, :, None])
+    for k in K.REDUCED_KEYS:
+        assert got[k] == want[k], k
+    # the per-row profile must PARTITION the metric it decomposes
+    rows = got[K.REDUCED_ROW_KEY]
+    assert rows.shape == (ny,)
+    assert float(rows.sum()) == pytest.approx(want["acc_mean"], rel=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# fp64_snapshot_contract_check.py -- the verification instrument itself
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def contract_check():
+    d = str(SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226")
+    sys.path.insert(0, d)
+    try:
+        import fp64_snapshot_contract_check as C
+        return C
+    except SystemExit as exc:                       # no NEMO mesh on this box
+        pytest.skip(f"NEMO mesh unavailable: {exc}")
+    finally:
+        try:
+            sys.path.remove(d)
+        except ValueError:
+            pass
+
+
+def test_the_contract_instrument_passes_its_own_self_check(contract_check):
+    """The instrument decides what we believe about the resolution claim, so
+    it is gated here rather than trusted from one run. Its self-check plants a
+    perturbation VERIFIED invisible to float32 storage on every field and
+    fails unless at least one metric that float32 ties is resolved at fp64."""
+    assert contract_check._self_check() == 0
+
+
+def test_a_metric_tied_at_both_precisions_is_not_counted_as_a_gain(
+        contract_check, monkeypatch):
+    """The instrument's first run scored four metrics as `UNMEASURABLE at
+    fp32` that were simply untouched by the perturbation -- tied in BOTH
+    columns. A metric the perturbation never reached is not a precision win,
+    and counting it would let this instrument report a result for doing
+    nothing."""
+    C = contract_check
+    keys = ("acc", "up", "deep")
+    monkeypatch.setattr(C.K, "REDUCED_KEYS", keys)
+    monkeypatch.setattr(C, "metrics_from_storage",
+                        lambda q, day, cast: {"acc": 1.0, "up": 2.0,
+                                              "deep": 3.0 + q})
+    monkeypatch.setattr(C, "stored_series",
+                        lambda q, day: {"acc": 1.0 + q, "up": 2.0,
+                                        "deep": 3.0 + q})
+    rows, gained = C.resolution_table(0.0, 1e-9, 5)
+    assert {k: (d32 == 0.0, d64 > 0.0) for k, d32, d64 in rows} == {
+        "acc": (True, True),      # tied at fp32, resolved at fp64 -> a gain
+        "up": (True, False),      # tied at BOTH -> not a gain
+        "deep": (False, True),    # resolved at both -> not a gain
+    }
+    assert gained == 1
+
+
+# ---------------------------------------------------------------------------
+# The artifact-assembly seams. Both reviews found real defects here that every
+# earlier test missed, because the earlier tests INJECT a reducer and never
+# cross the seam between the harness and the real one.
+# ---------------------------------------------------------------------------
+def test_the_stamp_never_promises_a_series_the_artifact_does_not_carry(
+        instruments):
+    """The stamp and the series keys must be built from ONE day list. They
+    were computed thirty lines apart, so a run whose snapshot grid excluded
+    day 0 and which then stopped before its first requested day stamped a
+    series as present while writing none."""
+    K = instruments.kamm_twin_90d
+    row = np.zeros(3)
+    made = {k: 1.0 for k in K.REDUCED_KEYS} | {K.REDUCED_ROW_KEY: row}
+    # day 0 was captured (it always is under --save-3d) but is NOT a requested
+    # snapshot day, and the run never reached day 30
+    kw = K.reduced_series_kwargs({0: made}, [30, 60, 90])
+    assert kw == {}, "a day outside the requested grid must not be written"
+    stamp = json.loads(K.storage_stamp("absent", "absent" if not kw else "x"))
+    assert stamp["reduced"] == "absent"
+    # and when a requested day IS present, the keys and the stamp agree
+    kw = K.reduced_series_kwargs({0: made, 30: made}, [30, 60, 90])
+    assert list(kw["reduced_days"]) == [30]
+    assert all(kw[f"reduced_{k}"].shape == (1,) for k in K.REDUCED_KEYS)
+    assert kw[f"reduced_{K.REDUCED_ROW_KEY}"].shape == (1, 3)
+    assert json.loads(K.storage_stamp("float32", "float64"))["reduced"] \
+        == "float64"
+
+
+def test_a_failing_reduction_loses_its_day_and_never_the_run(instruments):
+    """The reduction is a diagnostic written alongside the primary data, and
+    the artifact is only saved after the whole time loop. A reducer that
+    raised at day 90 of a 90-day twin would delete 90 days of compute to
+    protect a few kB of annotation."""
+    K = instruments.kamm_twin_90d
+
+    def boom(live):
+        raise SystemExit("the three latitude groups do not partition")
+
+    red, status = K.safe_reduce(boom, {"u": np.zeros(3)})
+    assert red is None
+    assert "SystemExit" in status and "partition" in status
+    # a SystemExit is an exception, so it must be caught like any other --
+    # this is the exact type the real reducer raises
+    stored, red, status = K.capture_snapshot(
+        {"u": np.zeros((2, 2, 2))}, snap_dtype=np.float32, reducer=boom,
+        land_mask=np.ones((2, 2)))
+    assert stored["u"].dtype == np.float32, "the 3-D block must still be kept"
+    assert red is None and status.startswith("reduction failed")
+
+
+def test_the_series_resolution_is_stamped_not_the_container(instruments):
+    """The series is ALWAYS stored in a float64 array, but its resolution is
+    the precision the arm was BUILT at. On a deliberate FP64=0 arm it is
+    float64-stored and float32-resolved, and a consumer told "float64" would
+    credit it with resolution it does not have."""
+    K = instruments.kamm_twin_90d
+    assert json.loads(K.storage_stamp("float32", "float32"))["reduced"] \
+        == "float32"
+    assert json.loads(K.storage_stamp("float32", "float64"))["reduced"] \
+        == "float64"
+
+
+def test_a_storage_only_flag_stays_out_of_the_run_config_string(instruments):
+    """The recorded configuration string is compared BYTE-FOR-BYTE between two
+    arms by the seasonal-clock A/B, which hard-aborts on any difference as a
+    confound. A key added for a storage-only setting would make every
+    recorded-arm-vs-new-arm comparison abort forever."""
+    K = instruments.kamm_twin_90d
+    src = inspect.getsource(K.run_twin)
+    cfg = src.split("run_config = json.dumps(")[1].split("}, sort_keys=True)")[0]
+    assert "fp64_3d" not in cfg
+    assert "perturb_seed" in cfg, "wrong block located -- this test is vacuous"
+
+
+def test_twin_cli_exposes_literal_and_legacy_langmuir_arms(instruments):
+    k = instruments.kamm_twin_90d
+    default = k._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    legacy = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz",
+        "--tke-langmuir-evaluation", "vectorized",
+    ])
+    assert default.tke_langmuir_evaluation is None
+    assert legacy.tke_langmuir_evaluation == "vectorized"
+
+
+# ---------------------------------------------------------------------------
+# paired corrected-T-carry basin verdict
+# ---------------------------------------------------------------------------
+def test_tcarry_basin_floor_has_priority_over_refute(instruments):
+    """Zero response was previously both REFUTE and floor-limited."""
+    score = instruments.tcarry_reverdict.classify
+    assert score(0.0, -1.0, 0.1, True) == "UNRESOLVED/FLOOR"
+    assert score(0.01, -1.0, 0.001, True) == "REFUTED"
+
+
+def test_tcarry_basin_floor_instrument_self_test_is_red_capable(instruments):
+    assert instruments.tcarry_floor._self_test() == 0
+
+
+def test_tcarry_basin_compensation_blocks_confirm(instruments):
+    score = instruments.tcarry_reverdict.classify
+    assert score(0.25, -1.0, 0.01, True) == "CONFIRMED"
+    assert score(0.25, -1.0, 0.01, False) == "UNRESOLVED/COMPENSATION"
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_tcarry_basin_nonfinite_classifier_is_fatal(instruments, bad):
+    with pytest.raises(SystemExit, match="non-finite"):
+        instruments.tcarry_reverdict.classify(bad, -1.0, 0.1, True)
+
+
+def test_tcarry_basin_day0_identity_rejects_nonfinite_and_changed_bits(instruments):
+    identical = instruments.tcarry_reverdict._bit_identical
+    assert identical(np.array([1.0]), np.array([1.0]))
+    assert not identical(np.array([1.0]), np.array([np.nan]))
+    assert not identical(np.array([0.0]), np.array([-0.0]))
+
+
+def test_tcarry_basin_baseline_gate_can_fail(instruments):
+    gate = instruments.tcarry_reverdict._check_baseline
+    assert instruments.tcarry_reverdict.BASELINE[90] == -0.43908550999203477
+    assert instruments.tcarry_reverdict.FLOOR[90] == 0.00015266693430725714
+    gate(instruments.tcarry_reverdict.BASELINE[90], 90)
+    with pytest.raises(SystemExit, match="misses registered"):
+        gate(instruments.tcarry_reverdict.BASELINE[90] + 3.0, 90)
+    gate(instruments.tcarry_reverdict.BASELINE[360], 360)
+    with pytest.raises(SystemExit, match="misses registered"):
+        gate(instruments.tcarry_reverdict.BASELINE[360] + 3.0, 360)
+
+
+def test_tcarry_basin_rejects_unregistered_common_config(instruments):
+    check = instruments.tcarry_reverdict._registered_config_errors
+    valid = {
+        "recipe": "nemo_dino_kamm_mlf", "n_days": 90,
+        "bridge_tke": False, "bridge_before": True,
+        "vmix_scheme": None, "use_gm_redi": None,
+        "surface_stress_implicit": False, "surface_tendency_placement": None,
+        "save_step_eta": False, "perturb_seed": None, "perturb_eps": 1e-14,
+        "perturb_baro": None, "perturb_baro_sha256": None,
+        "perturb_baro_key": "dU_avg", "perturb_baro_scale": 1.0,
+        "daily_acc": False, "u_m": None,
+    }
+    assert check(valid, "arm", 90) == []
+    planted = dict(valid, perturb_baro="/tmp/plant.npz",
+                   perturb_baro_sha256="0" * 64)
+    assert any("perturb_baro" in error for error in check(planted, "arm", 90))
+
+
+def test_tcarry_selftest_runs_every_receipt_plant_through_real_npz(
+        instruments, capsys):
+    """Regression for the Stage-1 crash: a dict-only test cannot expose an
+    NPZ overlay whose missing membership dunder triggers integer iteration."""
+    assert instruments.tcarry_reverdict._self_test() == 0
+    out = capsys.readouterr().out
+    assert "planted corrected-T -> U_AS_T_LEGACY" in out
+    assert "planted corrected float64 -> float32" in out
+    assert "planted corrected rn_Uv 0.27 -> 0.54" in out
+    assert "planted unregistered perturb_baro" in out
+    assert "every receipt plant passed through real NPZ files" in out
+
+
+def test_tcarry_retained_stage1_producer_is_independent_of_amended_scorer_head(
+        instruments):
+    scorer = "e" * 40
+    expected = instruments.tcarry_reverdict._expected_producer_sha
+    assert expected(90, scorer) == instruments.tcarry_reverdict.STAGE1_PRODUCER_GIT_SHA
+    assert expected(90, scorer) != scorer
+    assert expected(360, scorer) == scorer
+
+
+def test_tcarry_reconciliation_old_gap_receipt_is_numeric_and_red_capable(
+        instruments):
+    gate = instruments.tcarry_reconcile._old_gap_matches
+    expected = -0.010717232432999602
+    assert gate(expected + 8.9e-16, expected)
+    assert not gate(expected + 1.0e-6, expected)
+    assert not gate(np.nan, expected)
+
+
+def test_tcarry_reconciliation_clock_escape_is_scoped_to_historical_artifact(
+        instruments, monkeypatch):
+    reconcile = instruments.tcarry_reconcile
+    seen = []
+
+    def fake_load(_path, day):
+        seen.append((day, os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK")))
+        return {"u": np.zeros(1)}
+
+    monkeypatch.delenv("DINO_GATE_ALLOW_LEGACY_CLOCK", raising=False)
+    monkeypatch.setattr(reconcile.G, "load_candidate", fake_load)
+    monkeypatch.setattr(reconcile.R, "_reduce", lambda state: (0.0, np.zeros(14)))
+    nemo = {"u": np.zeros(1)}
+    reconcile._gap("old.npz", 30, nemo, historical=True)
+    reconcile._gap("current.npz", 30, nemo, historical=False)
+    assert seen == [(30, "1"), (30, None)]
+    assert "DINO_GATE_ALLOW_LEGACY_CLOCK" not in os.environ
+
+
+def test_tcarry_een_off_ownership_classifier_has_reachable_both_states(
+        instruments):
+    scorer = instruments.tcarry_een
+    assert scorer.classify_ownership(scorer.HISTORICAL_BASELINE) == (
+        "CONFIRMED_FULL_EEN_OWNERSHIP")
+    outside = scorer.HISTORICAL_BASELINE + 2.0 * scorer.OWNERSHIP_BAND
+    assert scorer.classify_ownership(outside) == "REFUTED_FULL_EEN_OWNERSHIP"
+    with pytest.raises(SystemExit, match="non-finite"):
+        scorer.classify_ownership(np.nan)
+
+
+def test_bridge_omega_cli_default_is_explicit_nemo_bit_identical(instruments):
+    harness = instruments.kamm_twin_90d
+    omitted = harness._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    explicit = harness._parse_args(
+        ["nemo_dino_kamm_mlf", "out.npz", "--bridge-omega", "nemo"])
+    assert vars(omitted) == vars(explicit)
+    assert omitted.bridge_omega == "nemo"
+
+
+def test_bridge_omega_selector_changes_only_registered_constant(instruments):
+    harness = instruments.kamm_twin_90d
+    config = harness.dino_config_for_recipe("nemo_dino_kamm_mlf")
+    nemo_omega, nemo_reference = harness.resolve_bridge_omega("nemo")
+    old_omega, old_reference = harness.resolve_bridge_omega("legacy-rounded")
+    assert nemo_omega == harness.NEMO_CONSTANTS_CONFIG.Omega
+    assert old_omega == harness.constants.Omega
+    assert nemo_reference == "nemo"
+    assert old_reference == "selected_omega"
+    assert old_omega != nemo_omega
+    assert config.omega == harness.NEMO_CONSTANTS_CONFIG.Omega
+    with pytest.raises(ValueError, match="bridge_omega"):
+        harness.resolve_bridge_omega("rounded-ish")
+
+
+def test_tcarry_bridge_omega_scorer_self_test_is_red_capable(instruments):
+    assert instruments.tcarry_omega._self_test() == 0
+
+
+def test_tcarry_bridge_omega_scorer_has_complete_committed_bindings(instruments):
+    scorer = instruments.tcarry_omega
+    assert scorer._require_bound() is None
+    assert scorer.BOUND_PRODUCER_SHA == (
+        "9e339ad1b2032bc47ec132fb2ad6f00ea071bbb9")
+    assert scorer.FOURTH_PRODUCER_SHA == (
+        "b14a17dd6f14592594daacc4b64c6a1de2a0a004")
+    assert scorer.FOURTH_ARTIFACT_SHA256 == (
+        "678a6a914367561596a259cc27a50f9294d14e7c0ed32c68aefe9ee6fff2a6f8")
+
+
+def test_tcarry_een_omega_interaction_decision_tree_is_red_capable(instruments):
+    scorer = instruments.tcarry_omega
+    locked = (scorer.LOCKED_A, scorer.LOCKED_B, scorer.LOCKED_C)
+    assert scorer.classify_interaction(
+        *locked, scorer.HISTORICAL_BASELINE) == (
+            "CONFIRMED_COMBINED_EEN_OMEGA_OWNERSHIP")
+    assert scorer.classify_interaction(
+        *locked, scorer.HISTORICAL_BASELINE + 2.0 * scorer.TWO_F) == (
+            "REFUTED_COMBINED_EEN_OMEGA_OWNERSHIP")
+    assert scorer.classify_interaction(
+        scorer.LOCKED_A + 2.0 * scorer.LOCKED_TOL,
+        scorer.LOCKED_B, scorer.LOCKED_C, scorer.HISTORICAL_BASELINE) == (
+            "INVALID_STOP_LOCKED_CORNER")
+    assert scorer.classify_additivity(0.0) == "ADDITIVE_BELOW_BAND"
+    assert scorer.classify_additivity(2.0 * scorer.TWO_F) == "NON_ADDITIVE"
+
+
+def test_kt1_record_twin_admission_refuses_a_drifted_record(tmp_path):
+    """The admission must FAIL when a record differs, not just when it errors.
+
+    A re-acquired NEMO record is only a substitute for the certified one if
+    every restart variable is bit-identical; the whole barotropic-ladder plan
+    rests on that. This plants a one-ulp change in a copied tile and requires
+    the script to exit non-zero and name the variable.
+    """
+    import shutil
+    import subprocess
+    import netCDF4 as nc
+
+    src = sorted(Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+                      "DINO/RUN_FROMREST_KT1").glob(
+                          "DINO_00000001_restart_*.nc"))
+    if not src:
+        pytest.skip("the certified kt=1 record is not on this machine")
+    dst = tmp_path / "planted"
+    dst.mkdir()
+    for p in src:
+        shutil.copy2(p, dst / p.name)
+    with nc.Dataset(dst / src[0].name, "a") as d:
+        v = d.variables["tn"]
+        a = v[:]
+        a[0, 0, 0, 0] = np.nextafter(float(a[0, 0, 0, 0]), np.inf)
+        v[:] = a
+
+    script = (Path(__file__).resolve().parents[3] / "scripts" / "validate" /
+              "ocean_fidelity" / "dino_1226" /
+              "kt1_record_twin_admission.py")
+    r = subprocess.run(
+        [sys.executable, str(script),
+         str(Path(src[0]).parent / "DINO_00000001_restart_*.nc"),
+         str(dst / "DINO_00000001_restart_*.nc")],
+        capture_output=True, text=True)
+    assert r.returncode != 0, r.stdout[-2000:]
+    assert "tn" in r.stdout, r.stdout[-2000:]
+    # and it must PASS on the untouched pair, or the test above proves nothing
+    ok = subprocess.run(
+        [sys.executable, str(script),
+         str(Path(src[0]).parent / "DINO_00000001_restart_*.nc"),
+         str(Path(src[0]).parent / "DINO_00000001_restart_*.nc")],
+        capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stdout[-2000:]
+    assert "ADMITTED" in ok.stdout

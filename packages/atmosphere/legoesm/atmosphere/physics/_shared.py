@@ -340,7 +340,7 @@ def exner_to_pressure(exner):
     return constants.p_ref * exner ** inverse_poisson_exponent
 
 
-def buoyancy_coefficient(theta):
+def buoyancy_coefficient(theta, *, gravity=None):
     """Buoyancy coefficient ``g / θ`` [m s⁻² K⁻¹] for buoyancy / N² terms.
 
     Canonical home for the gravity-over-potential-temperature factor that
@@ -355,13 +355,17 @@ def buoyancy_coefficient(theta):
     ----------
     theta : array
         (Virtual) potential temperature [K].
+    gravity : float, optional
+        Gravity to use [m/s²]; defaults to ``constants.g``. Only for callers
+        that expose gravity as a knob (the LES intercomparison diagnostics do,
+        for reproducing a reference run's value) — physics callers leave it.
 
     Returns
     -------
     array
         ``g / θ``, same shape as ``theta``.
     """
-    return constants.g / theta
+    return (constants.g if gravity is None else gravity) / theta
 
 
 def brunt_vaisala_n_squared_from_gradient(theta, dtheta_dz):

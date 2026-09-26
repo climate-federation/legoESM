@@ -25,6 +25,7 @@ The full 160×128×50 80-day survival of the cured stack is validated offline by
 tests pin the *mechanism* that makes that survival hold.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.core.field import Field
@@ -842,3 +843,91 @@ def test_real_solver_forwards_dz_ref_to_the_barotropic_e3f():
         f"barotropic path still passes dz_ref=None ({seen})")
     for d in seen:
         np.testing.assert_array_equal(np.asarray(d), np.asarray(z.dz_ref))
+
+
+def test_nemo_literal_een_builder_jit_gradient_and_face_mapping():
+    """Literal triad/reduction/post-factor arithmetic survives JIT intact."""
+    from types import SimpleNamespace
+
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_literal_een_coefficients,
+        een_barotropic_coriolis,
+    )
+    from legoesm.ocean.vertical import NemoEENBarotropicOperands
+
+    rng = np.random.default_rng(122628)
+    ny, nx, nz = 5, 8, 6
+    shape2, shape3 = (ny, nx), (ny, nx, nz)
+    e3u = 5.0 + rng.random(shape3)
+    e3v = 6.0 + rng.random(shape3)
+    e3f = 7.0 + rng.random(shape3)
+    ones3 = np.ones(shape3)
+    metric = lambda offset: offset + rng.random(shape2)
+    raw = NemoEENBarotropicOperands(
+        ff_f=jnp.asarray(1.0e-4 * rng.normal(size=shape2)),
+        e3u_0=jnp.asarray(e3u), e3v_0=jnp.asarray(e3v),
+        e3f_0=jnp.asarray(e3f), umask=jnp.asarray(ones3),
+        vmask=jnp.asarray(ones3), fmask=jnp.asarray(ones3),
+        hu_0=jnp.asarray(e3u.sum(axis=-1)),
+        hv_0=jnp.asarray(e3v.sum(axis=-1)),
+        hf_0=jnp.asarray(e3f.sum(axis=-1)),
+        e1t=jnp.asarray(metric(10.0)), e2t=jnp.asarray(metric(20.0)),
+        e1u=jnp.asarray(metric(30.0)), e2u=jnp.asarray(metric(40.0)),
+        e1v=jnp.asarray(metric(50.0)), e2v=jnp.asarray(metric(60.0)),
+        e1f=jnp.asarray(metric(70.0)), e2f=jnp.asarray(metric(80.0)),
+    )
+    z = SimpleNamespace(nemo_een_barotropic=raw)
+    eta = jnp.asarray(0.1 * rng.normal(size=shape2))
+    ua_native = jnp.asarray(rng.normal(size=shape2))
+    va_native = jnp.asarray(rng.normal(size=shape2))
+    ua = jnp.concatenate((ua_native[:, -1:], ua_native), axis=1)
+    va = jnp.concatenate((jnp.zeros_like(va_native[:1]), va_native), axis=0)
+
+    def evaluate(eta_arg, u_arg, v_arg):
+        coeff = _nemo_literal_een_coefficients(eta_arg, z, jnp.float64)
+        pre = {
+            "coefficient_evaluation": "nemo_literal",
+            "literal_coefficients": coeff,
+        }
+        cu, cv = een_barotropic_coriolis(u_arg, v_arg, pre)
+        return tuple(coeff[name] for name in sorted(coeff)) + (cu, cv)
+
+    eager = evaluate(eta, ua, va)
+    compiled = jax.jit(evaluate)(eta, ua, va)
+    for got, expected in zip(compiled, eager):
+        scale = max(float(np.sqrt(np.mean(np.asarray(expected) ** 2))),
+                    np.finfo(np.float64).tiny)
+        relative_max = (
+            float(np.max(np.abs(np.asarray(got) - np.asarray(expected))))
+            / scale)
+        assert relative_max <= 1.0e-15
+
+    cu, cv = compiled[-2:]
+    # Native east/north arrays are mapped only after application: periodic U
+    # gets a redundant west face; V gets an exactly zero south-wall face.
+    np.testing.assert_array_equal(np.asarray(cu[:, 0]), np.asarray(cu[:, -1]))
+    np.testing.assert_array_equal(np.asarray(cv[0]), 0.0)
+
+    direction = jnp.cos(jnp.arange(eta.size, dtype=jnp.float64)).reshape(shape2)
+
+    def loss(scale):
+        values = evaluate(eta + scale * direction, ua, va)
+        return sum(jnp.sum(value * value) for value in values)
+
+    assert np.isfinite(float(jax.grad(loss)(jnp.asarray(0.0))))
+
+
+def test_nemo_literal_een_builder_requires_complete_raw_bridge_bundle():
+    """The faithful selector fails red instead of rebuilding missing operands."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_literal_een_coefficients,
+    )
+
+    with pytest.raises(ValueError, match="bridge-carried raw NEMO"):
+        _nemo_literal_een_coefficients(
+            jnp.zeros((3, 4)),
+            SimpleNamespace(nemo_een_barotropic=None), jnp.float64)

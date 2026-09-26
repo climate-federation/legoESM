@@ -9,7 +9,7 @@
 set -uo pipefail
 WT=/burg-archive/glab/users/pg2328/legoESM
 cd $WT || exit 1
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python -m pytest -q \
   tests/unit/test_run_omip_core2_kappa_convention_cli.py \

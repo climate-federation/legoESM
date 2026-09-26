@@ -1378,3 +1378,166 @@ def test_csw_phase_3d_check_grads(jctx, jstate, order):
                       (one, one), order=order,
                       modes=("fwd", "rev"),
                       atol=1e-6, rtol=1e-6, eps=1e-4)
+
+
+# =====================================================================
+# G. the face-batched arm (C2a -- face-batching ladder steps 1-2)
+#
+# The vmapped arm is an OPT-IN twin of the certified loop path: same
+# kernels, same cadence, the `for t in range(6)` replaced by one
+# `jax.vmap` over `build_batched_gs`'s stacked view.  The gates are
+# (i) batched == loop per output at rtol 1e-13 / atol 1e-12 -- the
+# few-ulp slack is XLA reassociating across the added batch axis; NaN
+# masks (the halo tripwires) must agree in POSITION, which
+# `assert_allclose(equal_nan=True)` enforces -- (ii) the stacked view
+# round-trips the REAL context exactly, and (iii) the common-mode
+# assert fires from the phase on a synthetic flags6 with ONE differing
+# static field.  `build_batched_gs`'s own unit gates (key split, shape
+# skip, cache identity) live in test_fv3_phase3d_common.py.
+# =====================================================================
+
+from legoesm.core.fv3_phase3d_common import (  # noqa: E402
+    build_batched_gs,
+)
+
+# rtol/atol for batched-vs-loop: reassociation-class, NOT measured-x10
+# (no cross-lane comparison here -- both arms run the same kernels on
+# the same device); equal_nan keeps the structural halo NaNs comparable
+# by position.
+_BATCH_RTOL, _BATCH_ATOL = 1e-13, 1e-12
+
+
+def _assert_batched_matches_loop(got_b, got_l, label):
+    assert set(got_b) == set(got_l), (
+        f"{label}: batched arm returned keys {sorted(got_b)}, loop arm "
+        f"{sorted(got_l)}")
+    for name in got_l:
+        b, ref = np.asarray(got_b[name]), np.asarray(got_l[name])
+        assert b.shape == ref.shape, (label, name, b.shape, ref.shape)
+        # BIG_NUMBER sentinel cells (1e30/1e25 fills in halo scratch) are
+        # GARBAGE by contract: jit-vs-eager FMA differences on them are
+        # absolute-huge and meaningless. Compare them only for "both are
+        # fills"; real cells at the reassociation bound. (Same masking
+        # discipline as fv3_gate_helpers.cmp_fields.)
+        fill = np.abs(ref) >= 1.0e20
+        assert (np.abs(b)[fill] >= 1.0e20).all() if fill.any() else True, \
+            f"{label}.{name}: a sentinel cell became a real value"
+        keep = ~fill
+        np.testing.assert_allclose(
+            b[keep], ref[keep], rtol=_BATCH_RTOL, atol=_BATCH_ATOL,
+            equal_nan=True,
+            err_msg=f"{label}.{name}: batched arm != loop arm")
+
+
+def test_batched_gs_view_roundtrips_the_real_context(jctx):
+    """Every gridstruct key stacks (the six faces share shapes at one
+    resolution), and unstacking equals the per-face dicts BITWISE --
+    ``jnp.stack`` is a pure index copy."""
+    view = build_batched_gs(jctx)
+    assert view["unstacked_keys"] == ()
+    assert set(view["gs"]) == set(jctx.gs6[0])
+    for key in view["gs"]:
+        for t in range(6):
+            assert np.array_equal(np.asarray(view["gs"][key][t]),
+                                  np.asarray(jctx.gs6[t][key])), (key, t)
+    for t in range(6):
+        assert float(view["da_min6"][t]) == jctx.flags6[t].da_min
+        assert float(view["da_min_c6"][t]) == jctx.flags6[t].da_min_c
+    # built once: the second call must return the CACHED view
+    assert build_batched_gs(jctx) is view
+
+
+@pytest.mark.parametrize("hydrostatic", [True, False],
+                         ids=["hydro", "nh"])
+def test_csw_phase_3d_batched_matches_loop(jctx, jstate, hydrostatic):
+    loop = jphase.csw_phase_3d(jctx, jstate, DT2, KM, nord=2,
+                               duogrid=True, hydrostatic=hydrostatic)
+    bat = jphase.csw_phase_3d(jctx, jstate, DT2, KM, nord=2,
+                              duogrid=True, hydrostatic=hydrostatic,
+                              batched=True)
+    _assert_batched_matches_loop(bat, loop, "csw_phase_3d")
+
+
+def test_cgrid_pressure_phase_3d_batched_matches_loop(jctx, csw_np):
+    kw = dict(dt2=DT2, ptop=PTOP, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+              a2b_ord=4)
+    loop = jphase.cgrid_pressure_phase_3d(jctx, _stack_np(csw_np), KM,
+                                          **kw)
+    bat = jphase.cgrid_pressure_phase_3d(jctx, _stack_np(csw_np), KM,
+                                         batched=True, **kw)
+    _assert_batched_matches_loop(bat, loop, "cgrid_pressure_phase_3d")
+
+
+def test_cgrid_nh_pressure_phase_3d_batched_matches_loop(jctx_topo,
+                                                         csw_np_nh,
+                                                         nh_inputs):
+    dp0, zs6, gz6, ws6 = nh_inputs
+    args = (jctx_topo, _stack_np(csw_np_nh), jnp.asarray(np.stack(gz6)),
+            jnp.asarray(np.stack(ws6)), KM)
+    kw = dict(dt2=DT2, ptop=PTOP, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+              p_fac=P_FAC, a_imp=A_IMP, dp0=jnp.asarray(dp0),
+              zs6=jnp.asarray(np.stack(zs6)))
+    loop = jphase.cgrid_nh_pressure_phase_3d(*args, **kw)
+    bat = jphase.cgrid_nh_pressure_phase_3d(*args, batched=True, **kw)
+    _assert_batched_matches_loop(bat, loop, "cgrid_nh_pressure_phase_3d")
+
+
+def test_batched_jit_static_split_accepts_the_flag(jctx):
+    """The jit factories declare ``batched`` static; a km=1 column keeps
+    the compile to ONE vmapped c_sw trace.  jit-batched vs eager-batched
+    at the same reassociation-class bound (FMA contraction under jit is
+    the known, structural difference in this file)."""
+    st1 = jphase.state_3d_to_jax(_seeded_state(1, seed=7))
+    eager = jphase.csw_phase_3d(jctx, st1, DT2, 1, batched=True)
+    jitted = jphase.make_csw_phase_3d_jit()(jctx, st1, DT2, 1,
+                                            batched=True)
+    # jit-vs-eager FMA contraction is a LARGER class than batched-vs-loop
+    # reassociation: measured worst 2.7e-13 rel on one ut cell (job
+    # 9502342); bound = measured x4. The batched-vs-loop comparisons
+    # above stay at 1e-13.
+    for name in eager:
+        b, ref = np.asarray(jitted[name]), np.asarray(eager[name])
+        fill = np.abs(ref) >= 1.0e20
+        keep = ~fill
+        np.testing.assert_allclose(
+            b[keep], ref[keep], rtol=1.0e-12, atol=1e-12, equal_nan=True,
+            err_msg=f"csw_phase_3d[jit, batched].{name}")
+
+
+def test_batched_defaults_off_on_all_three_phases():
+    """RULE 3 guard: the certified loop path is the DEFAULT; the vmap
+    arm is opt-in.  A flipped default would silently move every caller
+    (the acoustic assembler passes no flag) onto the uncertified arm."""
+    import inspect
+
+    for fn in (jphase.csw_phase_3d, jphase.cgrid_pressure_phase_3d,
+               jphase.cgrid_nh_pressure_phase_3d):
+        assert inspect.signature(fn).parameters["batched"].default \
+            is False, fn.__name__
+
+
+def test_batched_must_be_a_bool(jctx, jstate):
+    with pytest.raises(TypeError, match="batched"):
+        jphase.csw_phase_3d(jctx, jstate, DT2, KM, batched=1)
+
+
+def test_batched_common_mode_assert_fires_from_the_phase(jctx, jstate):
+    """The GLM guard, exercised THROUGH a phase call: a ctx whose faces
+    disagree on ONE static GridFlags field must raise naming the field,
+    not broadcast face 1's value into the vmapped kernel.  The loop
+    path (control) still RUNS on the same ctx -- it reads the per-face
+    flags -- which is what makes this a batched-arm gate and not a
+    context-builder gate."""
+    bad = DuoStepperContext()
+    for slot in DuoStepperContext.__slots__:
+        setattr(bad, slot, getattr(jctx, slot))
+    # Flip face 3's flag relative to whatever the context carries
+    # (oracle-conventions gridstructs hold the corner flags False, so a
+    # hardcoded False would be a no-op and the gate vacuous).
+    bad.flags6 = tuple(
+        f._replace(ne_corner=not f.ne_corner) if t == 2 else f
+        for t, f in enumerate(jctx.flags6))
+    with pytest.raises(ValueError, match="ne_corner"):
+        jphase.csw_phase_3d(bad, jstate, DT2, KM, batched=True)
+    out = jphase.csw_phase_3d(bad, jstate, DT2, KM)   # control
+    assert np.isfinite(np.asarray(_win(out["delpc"]))).all()

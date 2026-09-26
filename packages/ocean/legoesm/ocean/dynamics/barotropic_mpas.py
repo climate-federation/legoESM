@@ -130,11 +130,18 @@ def barotropic_substeps_mpas(
     # arrays carry halo cells, which an unweighted sum double-counts.
     # Wire the owned mask explicitly (mesh-matched accessor; ``None``
     # on single-rank/global meshes keeps the legacy behavior).
-    from legoesm.parallel.voronoi_mpi import get_matching_voronoi_layout
-    _vl_clamp = get_matching_voronoi_layout(mesh)
-    _clamp_ow = (None if _vl_clamp is None
-                 else _vl_clamp.owned_mask_cells)
-    _clamp_fg = _vl_clamp is not None
+    # The refresh object carries the owned mask on BOTH distributed lanes
+    # (MPI layout / SPMD ppermute); the layout accessor stays as the fallback
+    # for callers that pass no halo_refresh (the historical MPI path).
+    _hr_ow = getattr(halo_refresh, "owned_mask_cells", None)
+    if _hr_ow is not None:
+        _clamp_ow, _clamp_fg = _hr_ow, True
+    else:
+        from legoesm.parallel.voronoi_mpi import get_matching_voronoi_layout
+        _vl_clamp = get_matching_voronoi_layout(mesh)
+        _clamp_ow = (None if _vl_clamp is None
+                     else _vl_clamp.owned_mask_cells)
+        _clamp_fg = _vl_clamp is not None
     if partial_cells:
         h_e_k = min_cell_to_edge(h_k, mesh)
     else:

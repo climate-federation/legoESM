@@ -679,8 +679,13 @@ class CoupledESMDriver:
             ),
             shortwave_penetration=None,
         )
+        # A_h=None = DERIVE from the mesh's narrowest wet cell, the same
+        # rule the forced-ocean recipe uses (resolved below, once the mask is
+        # read).  A fixed 1e5 m^2/s is a ~1 degree value: at 1/12 degree it is
+        # 26x over the explicit Laplacian limit and a cold start diverges at
+        # step 10, and this driver accepts an arbitrary tripole mesh.
         return LatLonCGridOceanConfig.from_flat(
-            A_h=1.0e5, A_v=1.0e-4, K_v=1.0e-5, B_h=0.0,
+            A_h=None, A_v=1.0e-4, K_v=1.0e-5, B_h=0.0,
             C_smag_lap=0.33,
             n_barotropic_substeps=30,
             barotropic_solver="implicit_cn",
@@ -745,6 +750,25 @@ class CoupledESMDriver:
             z_star, np.asarray(H_nemo), np.asarray(land_np),
         )
         land_mask = jnp.asarray(land_np, dtype=_sd)        # 1=ocean, 0=land
+
+        # Resolve the mesh-derived lateral viscosity now that the grid and its
+        # (snapped) land mask are both in hand; the model refuses an
+        # unresolved one.
+        if ocfg.lateral_viscosity.A_h is None:
+            from legoesm.grids.tripole import DEFAULT_MIN_DX_M
+            from legoesm.ocean.state import (
+                resolution_scaled_lateral_viscosity,
+                wet_min_spacing,
+            )
+            _lv = ocfg.lateral_viscosity
+            _dx_min = wet_min_spacing(self._ocean_grid, land_np,
+                                      clamp_floor_m=DEFAULT_MIN_DX_M)
+            ocfg = ocfg._replace(lateral_viscosity=_lv._replace(
+                A_h=resolution_scaled_lateral_viscosity(_dx_min, _lv),
+                A_h_dx_m=_dx_min))
+            print(f"  Coupled tripole ocean: lateral viscosity from the mesh, "
+                  f"A_h={ocfg.lateral_viscosity.A_h:.6g} m2/s "
+                  f"(narrowest wet cell {_dx_min:.1f} m)")
         _wet = np.asarray(land_np) > 0.5
         H_state = np.where(_wet, H_snap, cfg.ocean_H_max_m)
         base_state = rest_state_latlon_cgrid_ocean(
@@ -958,7 +982,7 @@ class CoupledESMDriver:
             from legoesm.land.clm_surface_map import (
                 download_clm_surfdata, load_clm_surface, clm_hydraulics_config,
                 clm_multilayer_thermal_config, clm_multilayer_ch,
-                _TUNED_PFT_SNOWMASK_MULTILAYER)
+                TUNED_PFT_SNOWMASK_MULTILAYER)
             lat = self._atm._grid_lat; lon = self._atm._grid_lon
             lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
             lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
@@ -977,7 +1001,7 @@ class CoupledESMDriver:
             _mask_cell = (
                 (1.0 - jnp.asarray(smap["glacier_frac"]))
                 * (jnp.asarray(smap["pft_fractions"])
-                   @ jnp.asarray(_TUNED_PFT_SNOWMASK_MULTILAYER))
+                   @ jnp.asarray(TUNED_PFT_SNOWMASK_MULTILAYER))
                 + jnp.asarray(smap["glacier_frac"])).astype(_sd)
             land_cfg = land_cfg._replace(
                 hydraulics=cast(clm_hydraulics_config(smap)),
@@ -1615,8 +1639,7 @@ class CoupledESMDriver:
                 u_low = _u_cell[..., -1]
                 v_low = _v_cell[..., -1]
             q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
-        sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
-        p_low = p_s * sigma_full[-1]
+        p_low = self._atm.sigma.pressure_at_full(p_s)[..., -1]
         # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).
         # The dry form rho = p/(R_d*T) underestimates density by ~0.6% in the
         # tropics (q_v ~ 17 g/kg) and biases every downstream bulk-flux surface
@@ -1771,7 +1794,11 @@ class CoupledESMDriver:
         else:
             co2_ppmv = jnp.full_like(p_s, self.atm_config.co2_ppmv)
 
+        from legoesm.core.coupling_fields import lowest_level_height
         return AtmToSurface(
+            z_lowest=lowest_level_height(
+                T_low, self._atm.sigma.pressure_at_half(p_s),
+                self._atm.sigma.pressure_at_full(p_s)),
             sw_down=sw_down,
             lw_down=lw_down,
             precip_total=precip_total,
@@ -2269,9 +2296,8 @@ class CoupledESMDriver:
 
         co2_flux = self._last_sfc_response.co2_flux  # kgCO2/m2/s, +up
         p_s = self._atm.state.p_s.data
-        dsigma = jnp.asarray(self._atm.sigma.dsigma)
         # Layer mass of lowest level: dp / g [kg/m2]
-        dp = p_s * dsigma[-1]
+        dp = self._atm.sigma.layer_thickness_dp(p_s)[..., -1]
         mass_air = dp / constants.g
         dco2 = co2_flux / jnp.maximum(mass_air, 1.0) * dt
         self._co2_field = self._co2_field.at[..., -1].add(dco2)

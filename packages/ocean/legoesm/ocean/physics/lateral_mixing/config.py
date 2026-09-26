@@ -275,6 +275,13 @@ class GMRediConfig(NamedTuple):
     # Treguier-1997 adaptive κ (NEMO nn_aei_ijk_t=21, the oracle scaling) —
     # mutually exclusive with visbeck.enabled (dispatch raises on both).
     treguier: TreguierConfig = TreguierConfig()
+    # Opt-in NEMO 5.0.1 ldftra.F90:415-441 (nn_aht_ijk_t=21).
+    # Requires unfloored Treguier and the native rotated-Laplacian path.
+    redi_coefficient: str = "constant"  # constant (existing overrides) | nemo21
+    redi_aht0: float = 900.0  # ORCA1: 0.5 * rn_Ud(0.018) * rn_Ld(100 km)
+    # Exact NEMO ff_f at the NE corner of each T cell, same shape as T[:,:,0].
+    # Supplied from mesh gphif for nemo21; no averaged-f fallback.
+    redi_f_f: object = None
     slope_scheme: str = "triads"     # "triads" (default), "centered", or "nemo_iso_lap"
     # GM eddy-induced (bolus) advection FORM for slope_scheme="nemo_iso_lap"
     # (NEMO ldf_eiv_trp): "centred" (default, BYTE-IDENTICAL) applies the bolus
@@ -381,6 +388,52 @@ class GMRediConfig(NamedTuple):
     # bit-identical.  Dispatch raises on an unknown value
     # (gm_redi_latlon_cgrid._nemo_wpoint_e3w_wmask_n2).
     slope_n2: str = "adiabatic"
+    # Lifetime of rn2b used by native ldf_slp.  ``recompute`` is the historical
+    # path.  ``carried_step_entry`` consumes the already-built pre-zdf_phy
+    # bundle, matching stpmlf.F90's single rn2b field and avoiding a second
+    # evaluation with different rounding boundaries.
+    slope_n2_evaluation: str = "recompute"
+    # Time level of the z-star geometry used by the native NEMO ldf_slp
+    # producer.  ``"current_step"`` is the byte-identical historical path.
+    # ``"before_step"`` reproduces stpmlf.F90's CALL eos(ts,Nbb,rhd): both
+    # its T/S and gdept operand come from Nbb.  The DINO NEMO cards opt in.
+    slope_prd_geometry_stage: str = "current_step"
+    # Construction of the dimensionless density anomaly entering ldf_slp.
+    # ``"density_roundtrip"`` preserves the historical rho/rho0-1 path.
+    # ``"nemo_literal"`` evaluates eosbn2.F90's zn*r1_rho0 directly and is
+    # selected only by the DINO NEMO cards.
+    slope_prd_evaluation: str = "density_roundtrip"
+    # Arithmetic form of ldfslp's horizontal metric application. ``division``
+    # is the historical path. ``nemo_reciprocal`` evaluates and carries the
+    # reciprocal as a separate fp64 value before multiplying, matching
+    # domhgr.F90:140 + ldfslp.F90:242-243. The DINO NEMO cards opt in.
+    slope_metric_evaluation: str = "division"
+    # Vertical face thickness used by ldfslp's 7 km stability limiter.
+    # ``static_face`` is the historical partial-cell min construction.
+    # ``nemo_qco_live`` applies NEMO's NOW-SSH r3u/r3v dilation to that raw
+    # full-step face thickness before the limiter. The DINO NEMO cards opt in.
+    slope_face_thickness_evaluation: str = "static_face"
+    # Horizontal face thickness used by traldf_iso's diagonal zA11/zA22
+    # flux coefficients. ``tpoint_jacobian`` preserves the historical e3t
+    # substitution. ``nemo_qco_live`` consumes the raw-mesh e3u_0/e3v_0
+    # dilated by NOW SSH, matching traldf_iso_scheme.h90:73/90. Only the two
+    # DINO NEMO cards opt in.
+    redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
+    # Live depths and U/V-point depth accumulation used by ldfslp's mixed-
+    # layer ramp. ``legacy_jacobian_t_surface`` preserves the historical
+    # Jacobian and T-column subtraction. ``nemo_qco_live_literal`` uses raw
+    # gdept/gdepw times NOW ssh*r1_ht_0 and NEMO's literal face expression.
+    slope_depth_evaluation: str = "legacy_jacobian_t_surface"
+    # Arithmetic topology of the three Treguier ldf_eiv column integrals.
+    # ``tree`` preserves the historical jnp.sum reductions byte-for-byte.
+    # ``nemo_left`` follows ldftra.F90's jk loop, carrying zn/zah/zhw from
+    # surface to bottom. Only the DINO NEMO cards opt in.
+    treguier_vertical_reduction_evaluation: str = "tree"
+    # Forward value used by ldf_eiv's sqrt(MAX(rn2b,0)) term. The guarded
+    # floor is the historical AD-safe path. ``nemo_forward_exact`` preserves
+    # NEMO's exact zero forward value and supplies a finite zero derivative.
+    # Only the two DINO NEMO cards opt in.
+    treguier_sqrt_evaluation: str = "guarded_floor"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops
@@ -392,6 +445,28 @@ class GMRediConfig(NamedTuple):
     # ½·U_d·R·dλ).  Applied by the lat-lon model as a per-column
     # kappa_redi_override; scalar-kappa paths (MPAS/cube) reject it.
     kappa_redi_lat_scaling: bool = False
+    # Arithmetic/source topology for nn_aht_ijk_t=20. ``cosine_scaled`` is
+    # the historical equatorial-kappa*cos(lat) path. ``nemo_metric_literal``
+    # evaluates 0.5*U_d*MAX(e1u,e2u) independently at U/V points, matching
+    # ldfc1d_c2d.F90:141-145. Only the two DINO NEMO cards opt in.
+    kappa_redi_horizontal_evaluation: str = "cosine_scaled"
+    kappa_redi_diffusive_velocity: float | None = None
+    # Arithmetic topology of traldf_iso's vertical A31/A32 skew flux.
+    # ``normalized_sums`` preserves the historical shared-sum construction.
+    # ``nemo_literal`` follows scheme.h90:109-125 pair-for-pair, including
+    # coefficient and four-gradient association. Only the DINO NEMO cards
+    # opt in.
+    redi_vertical_skew_evaluation: str = "normalized_sums"
+    # Arithmetic topology of traldf_iso's A33 slope-square coefficient.
+    # ``normalized_square`` preserves the historical exponent form;
+    # ``nemo_literal`` follows scheme.h90's left-associated zahu*wslpi*wslpi
+    # expression. Only the two DINO NEMO cards opt in.
+    redi_a33_evaluation: str = "normalized_square"
+    # Stage of the W-position native slopes consumed by the Redi vertical
+    # flux. ``redi_tuple`` preserves the historical all-Kmm tuple.
+    # ``nemo_post_slope_pair`` carries the separately computed post-stage
+    # wslpi/wslpj while retaining the certified Kmm uslp/vslp.
+    redi_w_slope_stage_evaluation: str = "redi_tuple"
     # --- Veros-faithful isoneutral options (oracle-matching; default off) ---
     implicit_K33: bool = False
     # ^ When True, the vertical isoneutral diagonal K_33 = kappa_Redi·S² (the

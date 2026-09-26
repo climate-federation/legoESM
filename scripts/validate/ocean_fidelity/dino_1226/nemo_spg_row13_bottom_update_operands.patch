@@ -1,0 +1,77 @@
+--- a/cfgs/DINO/MY_SRC/dynspg_ts.F90
++++ b/cfgs/DINO/MY_SRC/dynspg_ts.F90
+@@ -902,6 +902,31 @@
+          ENDIF
+          !
+          ! Add bottom stresses:
++         ! #1226 row 1.3: capture the live explicit-bottom operands at their
++         ! consuming site.  Full deterministic streams; production arrays
++         ! and arithmetic are untouched.  Units 9420:9431 are reserved by
++         ! the round-26 cumulative-tree inventory.
++         IF( ll_spg_dump .AND. jn == 1 ) THEN
++            OPEN( UNIT=9420, FILE='row13_dump_zCdU_u_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9421, FILE='row13_dump_zCdU_v_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9422, FILE='row13_dump_hu_e_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9423, FILE='row13_dump_hv_e_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9424, FILE='row13_dump_hur_e_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9425, FILE='row13_dump_hvr_e_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            CALL dino_dump_2d( 9420, zCdU_u(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9421, zCdU_v(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9422, hu_e  (Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9423, hv_e  (Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9424, hur_e (Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9425, hvr_e (Nis0:Nie0,Njs0:Nje0) )
++         ENDIF
++         !
+ !jth do implicitly instead
+          IF ( .NOT. ll_wd ) THEN ! Revert to explicit for bit comparison tests in non wad runs
+             DO_2D( 0, 0, 0, 0 )
+@@ -909,6 +934,17 @@
+                zv_trd(ji,jj) = zv_trd(ji,jj) + zCdU_v(ji,jj) * vn_e(ji,jj) * hvr_e(ji,jj)
+             END_2D
+          ENDIF
++         IF( ll_spg_dump .AND. jn == 1 ) THEN
++            OPEN( UNIT=9426, FILE='row13_dump_zu_trd_after_bottom_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9427, FILE='row13_dump_zv_trd_after_bottom_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            CALL dino_dump_2d( 9426, zu_trd(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9427, zv_trd(Nis0:Nie0,Njs0:Nje0) )
++            CLOSE(9420) ; CLOSE(9421) ; CLOSE(9422) ; CLOSE(9423)
++            CLOSE(9424) ; CLOSE(9425) ; CLOSE(9426) ; CLOSE(9427)
++            WRITE(numout,*) '#1226 row-1.3 bottom operands written'
++         ENDIF
+          !
+          ! Set next velocities:
+          !     Compute barotropic speeds at step jit+1    (h : total height of the water colomn)
+@@ -965,6 +1001,24 @@
+                     &                       +  hv(ji,jj,Kmm) * zv_frc (ji,jj)  )   ) * z1_hv
+             END_2D
+          ENDIF
++         ! #1226 row 1.3: active-vector update operands/output immediately
++         ! after the source expression and before W/D, LBC, AGRIF, or swap.
++         IF( ll_spg_dump .AND. jn == 1 ) THEN
++            OPEN( UNIT=9428, FILE='row13_dump_zu_spg_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9429, FILE='row13_dump_zv_spg_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9430, FILE='row13_dump_ua_e_after_update_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9431, FILE='row13_dump_va_e_after_update_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            CALL dino_dump_2d( 9428, zu_spg(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9429, zv_spg(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9430, ua_e (Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9431, va_e (Nis0:Nie0,Njs0:Nje0) )
++            CLOSE(9428) ; CLOSE(9429) ; CLOSE(9430) ; CLOSE(9431)
++            WRITE(numout,*) '#1226 row-1.3 vector update operands written'
++         ENDIF
+ !jth implicit bottom friction:
+          IF ( ll_wd ) THEN ! revert to explicit for bit comparison tests in non wad runs
+             DO_2D( 0, 0, 0, 0 )

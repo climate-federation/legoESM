@@ -1,0 +1,788 @@
+{
+  "classifications_day90": {
+    "basin_legacy": "DIFF",
+    "basin_stagger_corrected": "DIFF",
+    "euc_tke_floor_fix": "DIFF",
+    "euc_tke_prefix": "DIFF"
+  },
+  "controls": {
+    "day0_identity": {
+      "basin_legacy": {
+        "fp32_spacing_at_max_TS": 3.814697265625e-06,
+        "max_abs_S_difference": 1.9073464301300191e-06,
+        "max_abs_T_difference": 9.536630187767514e-07,
+        "tolerance": 1e-05
+      },
+      "basin_stagger_corrected": {
+        "fp32_spacing_at_max_TS": 3.814697265625e-06,
+        "max_abs_S_difference": 1.9073464301300191e-06,
+        "max_abs_T_difference": 9.536630187767514e-07,
+        "tolerance": 1e-05
+      },
+      "euc_tke_floor_fix": {
+        "fp32_spacing_at_max_TS": 3.814697265625e-06,
+        "max_abs_S_difference": 1.9073464301300191e-06,
+        "max_abs_T_difference": 9.536630187767514e-07,
+        "tolerance": 1e-05
+      },
+      "euc_tke_prefix": {
+        "fp32_spacing_at_max_TS": 3.814697265625e-06,
+        "max_abs_S_difference": 1.9073464301300191e-06,
+        "max_abs_T_difference": 9.536630187767514e-07,
+        "tolerance": 1e-05
+      }
+    },
+    "reduction_poison": {
+      "dry_cell": [
+        0,
+        0
+      ],
+      "dry_poison_exactly_inert": true,
+      "wet_cell": [
+        99,
+        1
+      ],
+      "wet_poison_moves_equator": true
+    },
+    "synthetic": {
+      "baseline_base_index": 1,
+      "baseline_fraction": 0.99,
+      "baseline_mld_m": 20.0,
+      "false_expected_level_fired": true,
+      "planted_base_index": 0,
+      "planted_fraction": 1.01,
+      "planted_mld_m": 10.0,
+      "threshold_m_s2": 9.558138401559454e-05
+    }
+  },
+  "diagnostic": {
+    "dino_vertical_closures": {
+      "DDM": false,
+      "EVD": true,
+      "TKE": true,
+      "internal_wave_mixing": false,
+      "surface_wave_mixing": false
+    },
+    "first_resolved_w_depth_m": 10.13875112538517,
+    "g_m_s2": 9.80665,
+    "rho0_kg_m3": 1026.0,
+    "rho_c_kg_m3": 0.01,
+    "scored": "symmetric offline NOW-state application of NEMO's exact zdf_mxl N2-integral density criterion",
+    "threshold_m_s2": 9.558138401559454e-05,
+    "turbocline_hmld": "UNMEASURED_INPUT_HAS_NO_AVT"
+  },
+  "post_review_unscored_nemo_time_level_sensitivity": {
+    "0": {
+      "basin": {
+        "changed_wet_columns": 1,
+        "max_abs_before_minus_now_m": 251.62959195248936,
+        "mean_before_minus_now_m": -0.43711163927780194,
+        "rms_before_minus_now_m": 10.487622391617512
+      },
+      "channel": {
+        "changed_wet_columns": 1,
+        "max_abs_before_minus_now_m": 114.81551898908697,
+        "mean_before_minus_now_m": -0.04264637384960804,
+        "rms_before_minus_now_m": 2.212795866442581
+      },
+      "equator": {
+        "changed_wet_columns": 0,
+        "max_abs_before_minus_now_m": 0.0,
+        "mean_before_minus_now_m": 0.0,
+        "rms_before_minus_now_m": 0.0
+      }
+    },
+    "30": {
+      "basin": {
+        "changed_wet_columns": 1,
+        "max_abs_before_minus_now_m": 251.62199472279008,
+        "mean_before_minus_now_m": -0.465716614847327,
+        "rms_before_minus_now_m": 10.825180996335803
+      },
+      "channel": {
+        "changed_wet_columns": 1,
+        "max_abs_before_minus_now_m": 114.8123494996562,
+        "mean_before_minus_now_m": -0.04397951653965768,
+        "rms_before_minus_now_m": 2.2470851394144122
+      },
+      "equator": {
+        "changed_wet_columns": 0,
+        "max_abs_before_minus_now_m": 0.0,
+        "mean_before_minus_now_m": 0.0,
+        "rms_before_minus_now_m": 0.0
+      }
+    },
+    "60": {
+      "basin": {
+        "changed_wet_columns": 2,
+        "max_abs_before_minus_now_m": 290.5053585828812,
+        "mean_before_minus_now_m": -1.0418577451253985,
+        "rms_before_minus_now_m": 17.397262588437428
+      },
+      "channel": {
+        "changed_wet_columns": 0,
+        "max_abs_before_minus_now_m": 0.0,
+        "mean_before_minus_now_m": 0.0,
+        "rms_before_minus_now_m": 0.0
+      },
+      "equator": {
+        "changed_wet_columns": 0,
+        "max_abs_before_minus_now_m": 0.0,
+        "mean_before_minus_now_m": 0.0,
+        "rms_before_minus_now_m": 0.0
+      }
+    },
+    "90": {
+      "basin": {
+        "changed_wet_columns": 0,
+        "max_abs_before_minus_now_m": 0.0,
+        "mean_before_minus_now_m": 0.0,
+        "rms_before_minus_now_m": 0.0
+      },
+      "channel": {
+        "changed_wet_columns": 1,
+        "max_abs_before_minus_now_m": 20.729462056340395,
+        "mean_before_minus_now_m": 0.008702162053757291,
+        "rms_before_minus_now_m": 0.42472477924120106
+      },
+      "equator": {
+        "changed_wet_columns": 0,
+        "max_abs_before_minus_now_m": 0.0,
+        "mean_before_minus_now_m": 0.0,
+        "rms_before_minus_now_m": 0.0
+      }
+    }
+  },
+  "provenance": {
+    "artifact_sha256": {
+      "mld_bias_day90.png": "c351ddec6f16ce95faef6b0aa407a5c008a7060a9ac465524a018d64f47f07c2",
+      "mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0"
+    },
+    "audit_repo": {
+      "dirty_tracked_files": 0,
+      "head": "931e02088ddb0ee24a3f73a1df712af3529a485a"
+    },
+    "input_sha256": {
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/stpmlf.F90": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0000.nc": "b4cbeb7b42af3632772bd660812314e538a0eab4e50dfd80d7403b5fea5afef0",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0001.nc": "bc49cfb00463c8e0c071ccb1f5383598c68aa58ca97d0ba5096c5c6542c98af1",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0002.nc": "a894c28e8c91d7e97c6369e6dfbc96cfd9e848442313baf5e931ed236d4fe5b4",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0003.nc": "6e5aded1ee10e37a4d57d1e1c1f5446fdfdc04a32457dab8ed77eb0c9de42686",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0004.nc": "03badedaca8367c560fe952341453d3dad9b370040a95dc286c29163b9572d27",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0005.nc": "7d9af34a89885ab6b63c91400901ac161fb9ab0adc6fd27e2e8b38a42e38c204",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0006.nc": "ede2cbe8ed70d70ab1c5d0bd62edbac7b3279db2f0f9d413404a0ca7d93b03ae",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0007.nc": "ff8b14d88aa762f18f50e1edb533cdededd018f4c2a008ec1217cb3c1c11dde9",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0008.nc": "c756f419f0cd08d8dc8d2bbf8884c0e446f6535035baf4bc8067f63fa4293a59",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0009.nc": "6a207ac5f89db0a64679efb723423135d15d54c6db7ca658da1b22c83b0c7a02",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0010.nc": "11f9975bb38a1192e8197009cf3611e163eaa5eb1d698aabd82d38f8d2d2fd55",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0011.nc": "3fbc0a58741939b29a5dac25c89fefa73d9d86ae72705b67d5d77626bfb1e714",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0012.nc": "81202edc7c2134157c3f61edf87d58bca1488de81edf693c7c9dee6f4dccd1a8",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0013.nc": "c8a0b7b370ee6a2f223dcd5a19776a0e46723721a1ca6cda5fcefa315b2a09a1",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0014.nc": "d87d33eb000894dc4800edcd889c2d1f1bbce60806a85d01401bf7abfab06b43",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00006720_restart_0015.nc": "bcb28283cf5a1ce08a76b2c3167655dca289bbc885629158a71cc76eb14720ee",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0000.nc": "9152214b7cf2ca9ae8454aab29b5246c47b92a8f435922bcbdc1f96daff8729a",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0001.nc": "ea1de0c5d01790d4fce6945b611d6b7bf0c16db20528e18dc038111eb2d62605",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0002.nc": "41be8ac43c7049b5cb9dce86ea7e997ad561e273eb115a5938d994fc688f6964",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0003.nc": "10f8a3f749e85cd9b1b15749dcc7d6bf53e320f708cfd0d565d670169e4c425a",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0004.nc": "44741bdc18b95bda521a09e1944bc5a082358e727445172a320a3afc791d60ec",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0005.nc": "b2454436872fe036271365adee4a808e1c0c60c23b296830c65ac2213a82ac21",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0006.nc": "217e656f94e7665b9939c15c07863fe625663ba90e0aa5235279920074fcf82d",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0007.nc": "859b0ad1a1979b02edbfe5072a3f1c76d94a6a196504f12a82b7f269ba552c1b",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0008.nc": "a7cd974cfa1774871f76d77e1916869d482a93fb7bd8f3a912034db456ff06bf",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0009.nc": "c15e93eaa51c0ff88d2c2a77e1f3f4b3d51e3c1a02640b50d5837af7a83b9022",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0010.nc": "5f9d69102898e34d9f9a8d0e12768a7264893b525d961cc65aca3a3f35e19d46",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0011.nc": "af81cff39d534ef381ddd779777940c0bdd87f5c3ca3c269b11576d985682396",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0012.nc": "27a823ab9d4894b4a526c75753a445d3c1244fc6e902542895b7552e5e68dc7b",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0013.nc": "3d399ba123d31f2eda73bbc218271a289b9766dc076b59394e2809b31f34d34c",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0014.nc": "300221e1fa23cd7a3b3ebfa0f81da1b15f3414f1d8e24d133da46d42a370e647",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0015.nc": "87fe44f64712dc2cd2ef416d0bf8586eae42d0cc9f2271debbdd95fb97299bb4",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0000.nc": "f69c4d583466f5d5e310a4960af2adafb9c6b53684ba75cfa21a13012b9154e2",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0001.nc": "354791c6cc809c80f416214e0307deb06350e64041c23bbeda41ffe6638e7e1d",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0002.nc": "4f1912ecb74287334c567859d91a72f38ceb5a6af6c93ea92ce69162165ecf13",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0003.nc": "79d5b4f00f8b803ec58e816a55d7e1f6a05aab727a7ba6dc7e1c6ba8dbe76adb",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0004.nc": "dea6296f2c892d03fe85f343ced20cd782aa50a1cdbac6346a7ada8d7c93a0fa",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0005.nc": "4e76a26e2c2e56f161c944243085c49736552e3bbbb191eed3413d7c6fff3ad2",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0006.nc": "172d70cc3593932db65fb8a77d147efd2c345b6268bc60b8e07799a9d400f813",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0007.nc": "2a0e294cea862db9ba22e4cfcb6497b56a5e377448d917e7b2ba9ed1d2a412ed",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0008.nc": "0fbae8071000c11e089f71b5276b2c694267e07ee31de8a2515adfd7a21ff2ed",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0009.nc": "561eb2ea383c78a7c7130a230e9e647f7be71b810c4cb25f3e00ec62de13e7f6",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0010.nc": "fc2d9f1e18ba0e48594c55f7ac7e48bd872e9848990dc6939199bc25bab84b8e",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0011.nc": "b9156a1b4844abffd61133c1815ed3c3344df9414529e1efb7e948bb530e080e",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0012.nc": "11ec3a3bb7620286df68a6665af21ca2506d08b32c791ae8c3b4ecf314ed5891",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0013.nc": "f6357d39eb3f84fe11414542a2d378e281c36b3a6463360c5c583688de8bb5af",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0014.nc": "8e4a3426ad5539ed8e0d27fa7ecc5f5584b9de96fb7df4ca7594c898904d7638",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00008640_restart_0015.nc": "0648c7c5219ae436132fe1e980b47b4408ef4374f94bb1923eb0bbfb4df97a28",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/namelist_cfg": "2303277440b197c4b7d3633a8a958f9f46d61e07dd5e0594ace7633a7b587b8f",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/ocean.output": "05b2d6cb2804d7235d5f8d26242addb4285469d2ed9a9fe135260866f1a4d4db",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/domzgr.F90": "986295ecb496759edc54df8bb0148e4492b08c250d8e92b70f2d2ffa02da7ce4",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/stpmlf.F90": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfmxl.F90": "3a9caebc8599e6e432bbd33d23bf5ef63f7a291cf093ad077e884162c7a5f732",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfphy.F90": "76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/DOM/domzgr.F90": "986295ecb496759edc54df8bb0148e4492b08c250d8e92b70f2d2ffa02da7ce4",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/ZDF/zdfmxl.F90": "3a9caebc8599e6e432bbd33d23bf5ef63f7a291cf093ad077e884162c7a5f732",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/ZDF/zdfphy.F90": "76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd",
+      "/tmp/codex-basin-rect/results/dino_1455/tcarry_basin90_corrected.log": "b94a3dcef2c617dae34c355f05de4d8da3a6dacc0666e63f352dc01c538f5815",
+      "/tmp/codex-basin-rect/results/dino_1455/tcarry_basin90_corrected.npz": "2f2e22fe3ca48bf9f923eccd412295a96b0d84b5781103f5f8fe71117532702e",
+      "/tmp/codex-basin-rect/results/dino_1455/tcarry_basin90_legacy.log": "88d4653d66c86ea5d6500ab54b61f6e7fa0244e769ac430b915f035b21302fa2",
+      "/tmp/codex-basin-rect/results/dino_1455/tcarry_basin90_legacy.npz": "ae114e7c71f530da253083e4f07f83e94bb66ed1d89c06c27909da9b36fc1e37",
+      "/tmp/codex-mld-audit/packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py": "a0ac4600010f5dd285a3023935db8c4f90abacfa7952291baa61862095917e55",
+      "/tmp/codex-mld-audit/scripts/validate/ocean_fidelity/dino_1226/PREREG_mld_climate_audit.md": "7c4679398d3d2f029a5cfab1fbe4bbbdb970f305ec0b7d488cd3f62fb5afbfd0",
+      "/tmp/codex-mld-audit/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py": "00b5f0d6c6c58ef984e010825239af27f768b83cf431e8763d236325c7cf68e6",
+      "/tmp/codex-mld-audit/scripts/validate/ocean_fidelity/dino_1226/mld_climate_audit.py": "cf1bcffb4ee7994bd4eb433f6b3fa3ba5ac0f2610463b9bb3133ea0c1762dc14",
+      "/tmp/codex-mld-audit/scripts/validate/ocean_fidelity/rebuild_nemo_restart.py": "be9ea8ebff313b82521021049728ee271c5c2fe3af5c3a949948004b5b23bcf0",
+      "/tmp/dino_euc_mechanism/twin90_fix.log": "897a51c52c32775c40149bc1c8bb1a5d219bbb4a19ce5a16db70c4f3df97f2c9",
+      "/tmp/dino_euc_mechanism/twin90_fix/twin90_fix.npz": "66d00735c22b3106c37eca3b91022d38477b578bef8cc2c997d215c2395f1f2d",
+      "/tmp/dino_euc_mechanism/twin90_prefix.log": "5ec5e02194fdca8033c9ac573659d714b3da30bb9c65dd086f6aaa82288d31ed",
+      "/tmp/dino_euc_mechanism/twin90_prefix/twin90_prefix.npz": "47e3fc69cf53c76d37b564d3bcbdcc691c945112d563e79ad05e9db0dcb037db"
+    },
+    "jax_backend": "cpu",
+    "jax_x64": true,
+    "nemo_repo": {
+      "dirty_tracked_files": 2,
+      "head": "dcc7fb8c1779fa8409e41e4ce3ab7d45b9ceb796"
+    },
+    "producer_stamps": {
+      "basin_legacy": {
+        "producer_dirty_tracked_files": 0,
+        "producer_git_sha": "d6dc89e91c9ae6b07d146991d2cb6c850f261bb0",
+        "run_config": {
+          "bridge_before": true,
+          "bridge_before_stress_tpoint": false,
+          "bridge_tke": false,
+          "daily_acc": false,
+          "n_days": 90,
+          "perturb_baro": null,
+          "perturb_baro_key": "dU_avg",
+          "perturb_baro_scale": 1.0,
+          "perturb_baro_sha256": null,
+          "perturb_eps": 1e-14,
+          "perturb_seed": null,
+          "recipe": "nemo_dino_kamm_mlf",
+          "restart_file": "DINO_00005760_restart.nc",
+          "run_stepdump": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_STEPDUMP",
+          "run_traj": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ",
+          "save_step_eta": false,
+          "surface_stress_implicit": false,
+          "surface_tendency_placement": null,
+          "u_m": null,
+          "use_gm_redi": null,
+          "vmix_scheme": null
+        },
+        "vertical_ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9"
+      },
+      "basin_stagger_corrected": {
+        "producer_dirty_tracked_files": 0,
+        "producer_git_sha": "d6dc89e91c9ae6b07d146991d2cb6c850f261bb0",
+        "run_config": {
+          "bridge_before": true,
+          "bridge_before_stress_tpoint": true,
+          "bridge_tke": false,
+          "daily_acc": false,
+          "n_days": 90,
+          "perturb_baro": null,
+          "perturb_baro_key": "dU_avg",
+          "perturb_baro_scale": 1.0,
+          "perturb_baro_sha256": null,
+          "perturb_eps": 1e-14,
+          "perturb_seed": null,
+          "recipe": "nemo_dino_kamm_mlf",
+          "restart_file": "DINO_00005760_restart.nc",
+          "run_stepdump": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_STEPDUMP",
+          "run_traj": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ",
+          "save_step_eta": false,
+          "surface_stress_implicit": false,
+          "surface_tendency_placement": null,
+          "u_m": null,
+          "use_gm_redi": null,
+          "vmix_scheme": null
+        },
+        "vertical_ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9"
+      },
+      "euc_tke_floor_fix": {
+        "producer_dirty_tracked_files": 0,
+        "producer_git_sha": "26d706b148f3e0748a9e0b595b522aa5f5862aef",
+        "run_config": {
+          "bridge_before": true,
+          "bridge_tke": false,
+          "n_days": 90,
+          "perturb_eps": 1e-14,
+          "perturb_seed": null,
+          "recipe": "nemo_dino_kamm_mlf",
+          "restart_file": "DINO_00005760_restart.nc",
+          "run_stepdump": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_STEPDUMP",
+          "run_traj": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ",
+          "surface_tendency_placement": null,
+          "use_gm_redi": null,
+          "vmix_scheme": null
+        },
+        "vertical_ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9"
+      },
+      "euc_tke_prefix": {
+        "producer_dirty_tracked_files": 0,
+        "producer_git_sha": "2cb678259b8ca6745e71a3e10e042998f3af050f",
+        "run_config": {
+          "bridge_before": true,
+          "bridge_tke": false,
+          "n_days": 90,
+          "perturb_eps": 1e-14,
+          "perturb_seed": null,
+          "recipe": "nemo_dino_kamm_mlf",
+          "restart_file": "DINO_00005760_restart.nc",
+          "run_stepdump": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_STEPDUMP",
+          "run_traj": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ",
+          "surface_tendency_placement": null,
+          "use_gm_redi": null,
+          "vmix_scheme": null
+        },
+        "vertical_ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9"
+      }
+    },
+    "vertical_ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9"
+  },
+  "registered_thresholds": {
+    "diff_abs_bias_min_m": 10.13875112538517,
+    "diff_rms_min_m": 20.27750225077034,
+    "matched_abs_bias_max_m": 5.069375562692585,
+    "matched_rms_max_m": 10.13875112538517,
+    "tke_direction_deadband_m": 1.0
+  },
+  "scope": {
+    "claim": "exact zdf_mxl criterion, not native online hmlp",
+    "native_online_time_level": "NEMO BEFORE T/S-derived rn2b with NOW geometry; unscored because legoesm snapshots lack BEFORE T/S",
+    "scored_time_level": "symmetric offline NOW T/S with NOW ssh"
+  },
+  "stats": {
+    "basin_legacy": {
+      "0": {
+        "basin": {
+          "legoesm_mean_m": 2872.351171518572,
+          "mean_bias_m": 9.974614651006979e-10,
+          "nemo_mean_m": 2872.351171517575,
+          "rms_difference_m": 1.5659974056281697e-08,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 222.83119251729852,
+          "mean_bias_m": -2.3348179808027234e-11,
+          "nemo_mean_m": 222.8311925173219,
+          "rms_difference_m": 1.8400148987881854e-09,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 10.139555616067632,
+          "mean_bias_m": 1.3433520962280454e-12,
+          "nemo_mean_m": 10.139555616066286,
+          "rms_difference_m": 2.1436392625818392e-11,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "30": {
+        "basin": {
+          "legoesm_mean_m": 3044.9079800264544,
+          "mean_bias_m": -1.3383178149800692,
+          "nemo_mean_m": 3046.246297841434,
+          "rms_difference_m": 25.254173956690344,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 237.74226648301556,
+          "mean_bias_m": -1.228042578212811,
+          "nemo_mean_m": 238.9703090612284,
+          "rms_difference_m": 5.999885101559707,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 10.565395030072178,
+          "mean_bias_m": -9.139454622442141e-07,
+          "nemo_mean_m": 10.565395944017638,
+          "rms_difference_m": 2.9795940193545886e-06,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "60": {
+        "basin": {
+          "legoesm_mean_m": 3130.9133934698443,
+          "mean_bias_m": -1.0415930588772238,
+          "nemo_mean_m": 3131.9549865287213,
+          "rms_difference_m": 17.397259518125338,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 247.13731563656737,
+          "mean_bias_m": -1.642346701225061,
+          "nemo_mean_m": 248.77966233779244,
+          "rms_difference_m": 8.607858790789104,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 11.209558941992245,
+          "mean_bias_m": -1.3386769379408743e-06,
+          "nemo_mean_m": 11.209560280669184,
+          "rms_difference_m": 2.954331023344867e-06,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "90": {
+        "basin": {
+          "legoesm_mean_m": 3241.8950561598117,
+          "mean_bias_m": -1.8991027376485465,
+          "nemo_mean_m": 3243.79415889746,
+          "rms_difference_m": 22.47949083389064,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 253.46932631344092,
+          "mean_bias_m": -2.742062843673851,
+          "nemo_mean_m": 256.21138915711475,
+          "rms_difference_m": 8.721262612009541,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 12.28718578799204,
+          "mean_bias_m": -1.8096713142767842e-06,
+          "nemo_mean_m": 12.287187597663356,
+          "rms_difference_m": 2.914463272084285e-06,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      }
+    },
+    "basin_stagger_corrected": {
+      "0": {
+        "basin": {
+          "legoesm_mean_m": 2872.351171518572,
+          "mean_bias_m": 9.974614651006979e-10,
+          "nemo_mean_m": 2872.351171517575,
+          "rms_difference_m": 1.5659974056281697e-08,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 222.83119251729852,
+          "mean_bias_m": -2.3348179808027234e-11,
+          "nemo_mean_m": 222.8311925173219,
+          "rms_difference_m": 1.8400148987881854e-09,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 10.139555616067632,
+          "mean_bias_m": 1.3433520962280454e-12,
+          "nemo_mean_m": 10.139555616066286,
+          "rms_difference_m": 2.1436392625818392e-11,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "30": {
+        "basin": {
+          "legoesm_mean_m": 3044.9079800995974,
+          "mean_bias_m": -1.3383177418365768,
+          "nemo_mean_m": 3046.246297841434,
+          "rms_difference_m": 25.254173955392478,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 237.742266487456,
+          "mean_bias_m": -1.2280425737723746,
+          "nemo_mean_m": 238.9703090612284,
+          "rms_difference_m": 5.999885100971804,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 10.565395030111,
+          "mean_bias_m": -9.139066383312408e-07,
+          "nemo_mean_m": 10.565395944017638,
+          "rms_difference_m": 2.979752826088887e-06,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "60": {
+        "basin": {
+          "legoesm_mean_m": 3130.9133938029704,
+          "mean_bias_m": -1.041592725750768,
+          "nemo_mean_m": 3131.9549865287213,
+          "rms_difference_m": 17.397259511099737,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 247.13731563631393,
+          "mean_bias_m": -1.642346701478482,
+          "nemo_mean_m": 248.77966233779244,
+          "rms_difference_m": 8.607858791341235,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 11.209558942006673,
+          "mean_bias_m": -1.338662509908772e-06,
+          "nemo_mean_m": 11.209560280669184,
+          "rms_difference_m": 2.9543095632980975e-06,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "90": {
+        "basin": {
+          "legoesm_mean_m": 3241.895056706574,
+          "mean_bias_m": -1.8991021908857302,
+          "nemo_mean_m": 3243.79415889746,
+          "rms_difference_m": 22.479490820479654,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 253.46035685179223,
+          "mean_bias_m": -2.7510323053225516,
+          "nemo_mean_m": 256.21138915711475,
+          "rms_difference_m": 8.731916075497507,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 12.287185787646173,
+          "mean_bias_m": -1.810017183743184e-06,
+          "nemo_mean_m": 12.287187597663356,
+          "rms_difference_m": 2.914519873137658e-06,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      }
+    },
+    "euc_tke_floor_fix": {
+      "0": {
+        "basin": {
+          "legoesm_mean_m": 2872.351171518572,
+          "mean_bias_m": 9.974614651006979e-10,
+          "nemo_mean_m": 2872.351171517575,
+          "rms_difference_m": 1.5659974056281697e-08,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 222.83119251729852,
+          "mean_bias_m": -2.3348179808027234e-11,
+          "nemo_mean_m": 222.8311925173219,
+          "rms_difference_m": 1.8400148987881854e-09,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 10.139555616067632,
+          "mean_bias_m": 1.3433520962280454e-12,
+          "nemo_mean_m": 10.139555616066286,
+          "rms_difference_m": 2.1436392625818392e-11,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "30": {
+        "basin": {
+          "legoesm_mean_m": 3044.9079565669795,
+          "mean_bias_m": -1.3383412744544914,
+          "nemo_mean_m": 3046.246297841434,
+          "rms_difference_m": 25.25417473263848,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 237.74226477491973,
+          "mean_bias_m": -1.2280442863086833,
+          "nemo_mean_m": 238.9703090612284,
+          "rms_difference_m": 5.999885353862339,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 11.192735296448177,
+          "mean_bias_m": 0.6273393524305371,
+          "nemo_mean_m": 10.565395944017638,
+          "rms_difference_m": 2.561103752891672,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "60": {
+        "basin": {
+          "legoesm_mean_m": 3130.913348198704,
+          "mean_bias_m": -1.0416383300175296,
+          "nemo_mean_m": 3131.9549865287213,
+          "rms_difference_m": 17.397260934252902,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 247.13731233779885,
+          "mean_bias_m": -1.6423499999935995,
+          "nemo_mean_m": 248.77966233779244,
+          "rms_difference_m": 8.607859205386427,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 11.426302050006754,
+          "mean_bias_m": 0.21674176933757008,
+          "nemo_mean_m": 11.209560280669184,
+          "rms_difference_m": 1.5326001947202856,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "90": {
+        "basin": {
+          "legoesm_mean_m": 3241.8949797778237,
+          "mean_bias_m": -1.8991791196365957,
+          "nemo_mean_m": 3243.79415889746,
+          "rms_difference_m": 22.47949582568555,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 253.4121168706167,
+          "mean_bias_m": -2.7992722864980797,
+          "nemo_mean_m": 256.21138915711475,
+          "rms_difference_m": 9.094336532112184,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 13.12360152986747,
+          "mean_bias_m": 0.8364139322041126,
+          "nemo_mean_m": 12.287187597663356,
+          "rms_difference_m": 2.957170037726712,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      }
+    },
+    "euc_tke_prefix": {
+      "0": {
+        "basin": {
+          "legoesm_mean_m": 2872.351171518572,
+          "mean_bias_m": 9.974614651006979e-10,
+          "nemo_mean_m": 2872.351171517575,
+          "rms_difference_m": 1.5659974056281697e-08,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 222.83119251729852,
+          "mean_bias_m": -2.3348179808027234e-11,
+          "nemo_mean_m": 222.8311925173219,
+          "rms_difference_m": 1.8400148987881854e-09,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 10.139555616067632,
+          "mean_bias_m": 1.3433520962280454e-12,
+          "nemo_mean_m": 10.139555616066286,
+          "rms_difference_m": 2.1436392625818392e-11,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "30": {
+        "basin": {
+          "legoesm_mean_m": 3044.9079800264544,
+          "mean_bias_m": -1.3383178149800692,
+          "nemo_mean_m": 3046.246297841434,
+          "rms_difference_m": 25.254173956690344,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 237.74226648301556,
+          "mean_bias_m": -1.228042578212811,
+          "nemo_mean_m": 238.9703090612284,
+          "rms_difference_m": 5.999885101559707,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 10.565395030072178,
+          "mean_bias_m": -9.139454622442141e-07,
+          "nemo_mean_m": 10.565395944017638,
+          "rms_difference_m": 2.9795940193545886e-06,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "60": {
+        "basin": {
+          "legoesm_mean_m": 3130.9133934698443,
+          "mean_bias_m": -1.0415930588772238,
+          "nemo_mean_m": 3131.9549865287213,
+          "rms_difference_m": 17.397259518125338,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 247.13731563656737,
+          "mean_bias_m": -1.642346701225061,
+          "nemo_mean_m": 248.77966233779244,
+          "rms_difference_m": 8.607858790789104,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 11.209558941992245,
+          "mean_bias_m": -1.3386769379408743e-06,
+          "nemo_mean_m": 11.209560280669184,
+          "rms_difference_m": 2.954331023344867e-06,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      },
+      "90": {
+        "basin": {
+          "legoesm_mean_m": 3241.8950561598117,
+          "mean_bias_m": -1.8991027376485465,
+          "nemo_mean_m": 3243.79415889746,
+          "rms_difference_m": 22.47949083389064,
+          "weight_sum_m2": 1205116706683.6353,
+          "wet_cells": 650
+        },
+        "channel": {
+          "legoesm_mean_m": 253.46932631344092,
+          "mean_bias_m": -2.742062843673851,
+          "nemo_mean_m": 256.21138915711475,
+          "rms_difference_m": 8.721262612009541,
+          "weight_sum_m2": 7243558719844.468,
+          "wet_cells": 1820
+        },
+        "equator": {
+          "legoesm_mean_m": 12.28718578799204,
+          "mean_bias_m": -1.8096713142767842e-06,
+          "nemo_mean_m": 12.287187597663356,
+          "rms_difference_m": 2.914463272084285e-06,
+          "weight_sum_m2": 618260028805.7776,
+          "wet_cells": 50
+        }
+      }
+    }
+  },
+  "tke_floor_equatorial_day90": {
+    "classification": "AWAY_FROM_NEMO",
+    "delta_rms_fix_minus_prefix_m": 2.95716712326344,
+    "fix_rms_m": 2.957170037726712,
+    "prefix_rms_m": 2.914463272084285e-06
+  }
+}

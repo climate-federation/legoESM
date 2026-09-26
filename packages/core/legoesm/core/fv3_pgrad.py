@@ -283,7 +283,7 @@ _A2B_GEOM_KEYS = ("grid_lon", "grid_lat", "agrid_lon", "agrid_lat",
 
 
 def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """Static-dtype gate mirroring the NumPy lane's ``_require_f64``.
+    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
 
     Replicated rather than imported from ``fv3_nh_core`` -- see deviation
     (6) in the module docstring.  Reads only ``.dtype`` (static under
@@ -291,12 +291,33 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     worse, with x64 disabled the whole chain would silently run in
     float32 -- and the oracle build is ``-fdefault-real-8``.
     """
+    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
+    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype).
+    seen = None
     for name, a in arrays.items():
-        if jnp.asarray(a).dtype != jnp.float64:
+        if a is None:
+            continue
+        _arr = jnp.asarray(a)
+        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
+            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
+            # timestep/coeff like dt/kgb): it is weak-promoting and not a
+            # field, so it is not part of the field uniformity invariant.
+            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
+            # "went strong") is NOT skipped -> it still trips this gate
+            # against f32 fields, closing the silent-promotion blind spot
+            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
+            continue
+        dt = _arr.dtype
+        if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
-                f"{fname}: {name} must be float64 (got "
-                f"{jnp.asarray(a).dtype}); enable jax_enable_x64 and pass "
-                f"f64 operands (oracle build is -fdefault-real-8)")
+                f"{fname}: {name} must be float32 or float64 (got {dt})")
+        if seen is None:
+            seen = dt
+        elif dt != seen:
+            raise TypeError(
+                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
+                f"a phase must be single-precision-uniform "
+                f"(FV3DuoConfig.storage_dtype).")
 
 
 def _w(lo: int, ia: int, ib: int) -> slice:
@@ -971,12 +992,14 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
     n_bi = ilast - ifirst + 1
     n_bj = jlast - jfirst + 1
 
-    pk = jnp.full((m_i, m_j, km + 1), unwritten_fill, dtype=jnp.float64)
-    gz = jnp.full((m_i, m_j, km + 1), unwritten_fill, dtype=jnp.float64)
+    # dtype follows storage (fp32/fp64), from delp (coarse policy; a
+    # later per-op mixed step pins this pressure column back to fp64)
+    pk = jnp.full((m_i, m_j, km + 1), unwritten_fill, dtype=delp.dtype)
+    gz = jnp.full((m_i, m_j, km + 1), unwritten_fill, dtype=delp.dtype)
     pe = jnp.full((n_i + 2, km + 1, n_j + 2), unwritten_fill,
-                  dtype=jnp.float64)
-    peln = jnp.full((n_i, km + 1, n_j), unwritten_fill, dtype=jnp.float64)
-    pkz = jnp.full((n_i, n_j, km), unwritten_fill, dtype=jnp.float64)
+                  dtype=delp.dtype)
+    peln = jnp.full((n_i, km + 1, n_j), unwritten_fill, dtype=delp.dtype)
+    pkz = jnp.full((n_i, n_j, km), unwritten_fill, dtype=delp.dtype)
 
     # --- seeds :2717-2739.  ptk uses the `**` OPERATOR (dyn_core.F90:248,
     # `ptk = ptop ** akap`) while the k loop below uses exp(akap*log(p))
@@ -1021,7 +1044,7 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
         logp = jnp.log(p1d)                          # :2746
         return p1d, (p1d, logp, jnp.exp(akap * logp))   # :2747
 
-    p1d0 = jnp.full((n_bi, n_bj), ptop, dtype=jnp.float64)
+    p1d0 = jnp.full((n_bi, n_bj), ptop, dtype=delp.dtype)
     _, (p1d_k, logp_k, pk_k) = lax.scan(
         _down, p1d0, jnp.moveaxis(delp[box_i, box_j, 0:km], 2, 0))
 
@@ -1279,9 +1302,10 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
     # branch writes exactly [is,ie+1]x[js,je+1]; the plain branch's
     # corner/edge writes land inside that same box).
     def _a2b_replace(planes):
+        # dtype follows storage (fp32/fp64), from pk (delp is del'd in the hydrostatic branch)
         scratch = jnp.full(
             (ied - isd + 1, jed - jsd + 1, planes.shape[2]), jnp.nan,
-            dtype=jnp.float64)
+            dtype=pk.dtype)
         qin, _ = _a2b_ord4_k(planes, scratch, geom, npx, npy, is_, ie, js,
                              je, ng, replace=True, duogrid=duogrid,
                              **flags)
@@ -1303,8 +1327,8 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
         wk1 = divg2[_w(is_, is_, ie + 1), _w(js, js, je)] \
             - divg2[_w(is_, is_, ie + 1), _w(js, js + 1, je + 1)]
     else:
-        wk2 = jnp.zeros((ie - is_ + 1, je - js + 2), dtype=jnp.float64)
-        wk1 = jnp.zeros((ie - is_ + 2, je - js + 1), dtype=jnp.float64)
+        wk2 = jnp.zeros((ie - is_ + 1, je - js + 2), dtype=pk.dtype)
+        wk1 = jnp.zeros((ie - is_ + 2, je - js + 1), dtype=pk.dtype)
 
     rdx = jnp.asarray(gs["rdx"])
     rdy = jnp.asarray(gs["rdy"])
@@ -1328,7 +1352,7 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
     # DEPENDENCE (the k nest): u/v are written at level k from pk/gz/wk
     # at levels k and k+1 of arrays this nest never writes.
     wk = jnp.full((ied - isd + 1, jed - jsd + 1, npz), jnp.nan,
-                  dtype=jnp.float64)
+                  dtype=pk.dtype)
     wk = wk.at[b_i, b_j, :].set(pk[b_i, b_j, 1:npz + 1]
                                 - pk[b_i, b_j, 0:npz])
 
@@ -1421,8 +1445,9 @@ def nh_p_grad(u, v, pp, gz, delp, pk3, gs: dict, bd, *, npx: int,
                  ne_corner=ne_corner, nw_corner=nw_corner)
 
     def _scratch(nk):
+        # dtype follows storage (fp32/fp64), from delp
         return jnp.full((ied - isd + 1, jed - jsd + 1, nk), jnp.nan,
-                        dtype=jnp.float64)
+                        dtype=delp.dtype)
 
     def _a2b_replace(planes):
         qin, _ = _a2b_ord4_k(planes, _scratch(planes.shape[2]), geom, npx,

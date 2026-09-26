@@ -425,8 +425,7 @@ def hard_saturation_drain(T, q_v, p_full, dt,
     ----------
     T, q_v, p_full : array
         Temperature [K], vapour mixing ratio [kg/kg], pressure [Pa] (the TRUE
-        pressure the caller uses; on the pure-sigma MPAS path this is
-        ``p_s * sigma_full``).
+        pressure the caller uses: ``sigma_coord.pressure_at_full(p_s)``).
     dt : float
         Physics/dycore step [s].
     hard_threshold : float, default 1.1

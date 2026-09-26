@@ -119,6 +119,10 @@ INVARIANT_A_BASELINE: tuple[tuple[str, str, str, str], ...] = (
     ('nemo_dino_kamm', 'model.gm_redi.slope_positions', 'model.physics.lateral_mixing.gm_redi.slope_positions', 'seeded'),
     ('nemo_dino_kamm', 'model.gm_redi.mld_criterion', 'model.physics.lateral_mixing.gm_redi.mld_criterion', 'seeded'),
     ('nemo_dino_kamm', 'model.gm_redi.slope_n2', 'model.physics.lateral_mixing.gm_redi.slope_n2', 'seeded'),
+    ('nemo_dino_kamm', 'model.gm_redi.slope_n2_evaluation', 'model.physics.lateral_mixing.gm_redi.slope_n2_evaluation', "inert disabled shadow: the active model.gm_redi card is carried_step_entry; physics.lateral_mixing.scheme='none', so its default GMRediConfig is never dispatched"),
+    ('nemo_dino_kamm', 'model.gm_redi.slope_prd_geometry_stage', 'model.physics.lateral_mixing.gm_redi.slope_prd_geometry_stage', "inert disabled shadow: the active model.gm_redi card is before_step; physics.lateral_mixing.scheme='none', so its default GMRediConfig is never dispatched"),
+    ('nemo_dino_kamm', 'model.gm_redi.slope_prd_evaluation', 'model.physics.lateral_mixing.gm_redi.slope_prd_evaluation', "inert disabled shadow: the active model.gm_redi card is nemo_literal; physics.lateral_mixing.scheme='none', so its default GMRediConfig is never dispatched"),
+    ('nemo_dino_kamm', 'model.gm_redi.slope_metric_evaluation', 'model.physics.lateral_mixing.gm_redi.slope_metric_evaluation', "inert disabled shadow: the active model.gm_redi card is nemo_reciprocal; physics.lateral_mixing.scheme='none', so its division-default GMRediConfig is never dispatched"),
     ('nemo_dino_kamm', 'model.gm_redi.kappa_redi_lat_scaling', 'model.physics.lateral_mixing.gm_redi.kappa_redi_lat_scaling', 'seeded'),
     ('nemo_dino_kamm', 'model.gm_redi.implicit_K33', 'model.physics.lateral_mixing.gm_redi.implicit_K33', 'seeded'),
     ('nemo_dino_kamm', 'model.freezing.scheme', 'model.physics.bottom_drag.scheme', 'seeded'),
@@ -153,6 +157,10 @@ INVARIANT_A_BASELINE: tuple[tuple[str, str, str, str], ...] = (
     ('nemo_dino_kamm_mlf', 'model.gm_redi.slope_positions', 'model.physics.lateral_mixing.gm_redi.slope_positions', 'seeded'),
     ('nemo_dino_kamm_mlf', 'model.gm_redi.mld_criterion', 'model.physics.lateral_mixing.gm_redi.mld_criterion', 'seeded'),
     ('nemo_dino_kamm_mlf', 'model.gm_redi.slope_n2', 'model.physics.lateral_mixing.gm_redi.slope_n2', 'seeded'),
+    ('nemo_dino_kamm_mlf', 'model.gm_redi.slope_n2_evaluation', 'model.physics.lateral_mixing.gm_redi.slope_n2_evaluation', "inert disabled shadow: the active model.gm_redi card is carried_step_entry; physics.lateral_mixing.scheme='none', so its default GMRediConfig is never dispatched"),
+    ('nemo_dino_kamm_mlf', 'model.gm_redi.slope_prd_geometry_stage', 'model.physics.lateral_mixing.gm_redi.slope_prd_geometry_stage', "inert disabled shadow: the active model.gm_redi card is before_step; physics.lateral_mixing.scheme='none', so its default GMRediConfig is never dispatched"),
+    ('nemo_dino_kamm_mlf', 'model.gm_redi.slope_prd_evaluation', 'model.physics.lateral_mixing.gm_redi.slope_prd_evaluation', "inert disabled shadow: the active model.gm_redi card is nemo_literal; physics.lateral_mixing.scheme='none', so its default GMRediConfig is never dispatched"),
+    ('nemo_dino_kamm_mlf', 'model.gm_redi.slope_metric_evaluation', 'model.physics.lateral_mixing.gm_redi.slope_metric_evaluation', "inert disabled shadow: the active model.gm_redi card is nemo_reciprocal; physics.lateral_mixing.scheme='none', so its division-default GMRediConfig is never dispatched"),
     ('nemo_dino_kamm_mlf', 'model.gm_redi.kappa_redi_lat_scaling', 'model.physics.lateral_mixing.gm_redi.kappa_redi_lat_scaling', 'seeded'),
     ('nemo_dino_kamm_mlf', 'model.gm_redi.implicit_K33', 'model.physics.lateral_mixing.gm_redi.implicit_K33', 'seeded'),
     ('nemo_dino_kamm_mlf', 'model.freezing.scheme', 'model.physics.bottom_drag.scheme', 'seeded'),
@@ -249,6 +257,13 @@ INVARIANT_A_BASELINE: tuple[tuple[str, str, str, str], ...] = (
 # consuming code before being added (see PR description for the exact
 # call-site line numbers).
 HARNESS_ONLY: dict[str, str] = {
+    "dino_wind_profile_evaluation": (
+        "consumed by dino_wind_stress through "
+        "dino_lat_lon_surface_forcing_arrays, a forcing-construction call "
+        "site outside dino_lat_lon_model_config; the selector chooses the "
+        "NEMO literal versus historical factored cubic and is not a model-"
+        "config leaf (dino.py:2052-2114, 3815-3856)"
+    ),
     "vertical_coordinate": (
         "branch selector consumed inside dino_lat_lon_model_config / "
         "dino_mpas_model_config construction (zstar vs masked_zco chooses "

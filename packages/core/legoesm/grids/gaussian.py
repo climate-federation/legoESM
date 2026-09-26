@@ -254,6 +254,7 @@ class GaussianGrid(NamedTuple):
     lap: jax.Array          # Spectral Laplacian = -n(n+1)/a^2, (n_sh,)
     ilap: jax.Array         # Inverse Laplacian (0 for n=0), (n_sh,)
     subgrid_topo_stddev: object = None  # jax.Array (n_lat, n_lon) [m] | None — oro-GWD launch h_topo
+    land_frac: jax.Array | None = None  # (n_lat * n_lon,) [0-1], optional physics mask
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -302,7 +303,9 @@ class GaussianGrid(NamedTuple):
 
     @property
     def grid_total_area(self):
-        return jnp.sum(self.grid_area)
+        # Retained-f64 reduction: sphere-wide area sum in float64 so an fp32
+        # grid does not lose precision in the mass-integral normaliser.
+        return jnp.sum(self.grid_area.astype(jnp.float64))
 
     @property
     def grid_coriolis(self) -> jax.Array:
@@ -337,6 +340,7 @@ def create_gaussian_grid(
     dealiasing: str = "quadratic",
     allow_unsupported_backend: bool = False,
     legoesm_config=None,
+    run_dtype=jnp.float64,
 ) -> GaussianGrid:
     """Create a Gaussian grid with precomputed SH transform matrices.
 
@@ -375,27 +379,29 @@ def create_gaussian_grid(
     processes, consider caching grid instances or implementing lazy loading
     strategies if memory becomes a bottleneck.
     """
-    # Hard guard: spectral transforms require float64/complex128
+    # IFS-inspired f32 runtime: tables are built in numpy float64 (the Legendre
+    # recurrence is precision-sensitive) and cast to run_dtype for storage +
+    # runtime transforms (complex64 at run_dtype=float32 — the 2x win).  BOTH
+    # runtimes require JAX x64: float64 for its arithmetic, and float32 because
+    # the mass/energy/enstrophy REDUCTIONS are kept in float64 (the retained
+    # set) which needs x64.  A pure no-x64 f32 mode is deferred (needs the
+    # structural h00 mean-mode fix).  See spectral-f32-feasibility.
+    import warnings
+    _run_dtype = jnp.dtype(run_dtype)
+    _f32_run = (_run_dtype == jnp.float32)
+    if _run_dtype not in (jnp.float32, jnp.float64):
+        raise ValueError(
+            f"create_gaussian_grid: run_dtype must be float32 or float64, "
+            f"got {_run_dtype}.")
+
+    # Hard guard: spectral grids require JAX_ENABLE_X64 (both runtimes).
     if not jax.config.jax_enable_x64:
         raise RuntimeError(
             "Spectral/Gaussian grids require JAX_ENABLE_X64=True. "
             "Set the environment variable JAX_ENABLE_X64=1 or call "
-            "jax.config.update('jax_enable_x64', True) before importing."
+            "jax.config.update('jax_enable_x64', True) before importing. "
+            "run_dtype=jnp.float32 still needs x64 for the float64 reductions."
         )
-    # Precision policy guard: spectral paths are float64-only.
-    try:
-        from legoesm.core.precision import get_policy
-        policy = get_policy()
-        if policy.compute == jnp.float32 and policy.storage == jnp.float32:
-            import warnings
-            warnings.warn(
-                "Spectral/Gaussian grid created under fp32 precision policy. "
-                "Spectral transforms require float64; grid arrays will be "
-                "float64 regardless of the global policy.",
-                stacklevel=2,
-            )
-    except Exception:
-        pass
 
     # Extract allow_unsupported from global config if provided
     if legoesm_config is not None:
@@ -424,7 +430,8 @@ def create_gaussian_grid(
             )
         allow_unsupported_backend = True
 
-    # Guard: spectral code requires float64/complex128
+    # Guard: spectral code requires float64/complex128 backend support (both
+    # runtimes — the float32 runtime keeps its reductions in float64).
     check_spectral_backend(allow_unsupported=allow_unsupported_backend)
 
     # Grid dimensions based on dealiasing rule
@@ -503,31 +510,37 @@ def create_gaussian_grid(
     wPnm_oc2_np = Pnm_oc2_np * w_col
     wDnm_np = Dnm_np * w_col
 
+    # Tables were BUILT in float64 (precision-sensitive Legendre recurrence);
+    # store them at the runtime dtype.  The exact-IC pseudo-inverse
+    # (_vordiv_pinv_operators) rebuilds its own operators in float64 from these,
+    # so a float32 runtime gives an fp32-precision IC wind recovery — fine for
+    # an fp32 run, flagged for the PE slice where the pinv is exercised.
+    _rt_np = np.float32 if _f32_run else np.float64
     return GaussianGrid(
         n_lat=n_lat,
         n_lon=n_lon,
         n_max=n_max,
         radius=float(radius),
-        lat=_to_jax(lat_np, np.float64),
-        lon=_to_jax(lon_np, np.float64),
-        lat2d=_to_jax(lat2d_np, np.float64),
-        lon2d=_to_jax(lon2d_np, np.float64),
-        cos_lat=_to_jax(cos_lat_np, np.float64),
-        sin_lat=_to_jax(sin_lat_np, np.float64),
-        f=_to_jax(f_np, np.float64),
-        weights=_to_jax(w_gauss, np.float64),
-        Pnm=_to_jax(Pnm_np, np.float64),
-        Hnm=_to_jax(Hnm_np, np.float64),
-        Pnm_oc2=_to_jax(Pnm_oc2_np, np.float64),
-        Dnm=_to_jax(Dnm_np, np.float64),
-        wPnm=_to_jax(wPnm_np, np.float64),
-        wPnm_oc2=_to_jax(wPnm_oc2_np, np.float64),
-        wDnm=_to_jax(wDnm_np, np.float64),
+        lat=_to_jax(lat_np, _rt_np),
+        lon=_to_jax(lon_np, _rt_np),
+        lat2d=_to_jax(lat2d_np, _rt_np),
+        lon2d=_to_jax(lon2d_np, _rt_np),
+        cos_lat=_to_jax(cos_lat_np, _rt_np),
+        sin_lat=_to_jax(sin_lat_np, _rt_np),
+        f=_to_jax(f_np, _rt_np),
+        weights=_to_jax(w_gauss, _rt_np),
+        Pnm=_to_jax(Pnm_np, _rt_np),
+        Hnm=_to_jax(Hnm_np, _rt_np),
+        Pnm_oc2=_to_jax(Pnm_oc2_np, _rt_np),
+        Dnm=_to_jax(Dnm_np, _rt_np),
+        wPnm=_to_jax(wPnm_np, _rt_np),
+        wPnm_oc2=_to_jax(wPnm_oc2_np, _rt_np),
+        wDnm=_to_jax(wDnm_np, _rt_np),
         n_sh=n_sh,
         ls=_to_jax(ls_np, np.int32),
         ms=_to_jax(ms_np, np.int32),
-        lap=_to_jax(lap_np, np.float64),
-        ilap=_to_jax(ilap_np, np.float64),
+        lap=_to_jax(lap_np, _rt_np),
+        ilap=_to_jax(ilap_np, _rt_np),
     )
 
 
@@ -737,7 +750,7 @@ def sh_synthesis(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
     ).T  # (n_lat, n_max + 1)
 
     # Inverse FFT in longitude.
-    f_hat_full = jnp.zeros((n_lat, n_lon // 2 + 1), dtype=jnp.complex128)
+    f_hat_full = jnp.zeros((n_lat, n_lon // 2 + 1), dtype=f_m.dtype)
     f_hat_full = f_hat_full.at[:, :n_max + 1].set(f_m)
 
     field_grid = jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1)
@@ -849,7 +862,10 @@ def uv_from_vordiv(
     dpsi_dtheta = pc_dtheta[..., 0]
     dchi_dtheta = pc_dtheta[..., 1]
 
-    pc_dlon = sh_synthesis_3d(grid, (1j * grid.ms)[:, None] * pc_hat) / a
+    # 1j is a weak complex128; cast the zonal-derivative operator to the
+    # coefficient dtype so a complex64 runtime is not promoted to complex128.
+    _im_ms = (1j * grid.ms).astype(pc_hat.dtype)[:, None]
+    pc_dlon = sh_synthesis_3d(grid, _im_ms * pc_hat) / a
     dpsi_dlon = pc_dlon[..., 0]
     dchi_dlon = pc_dlon[..., 1]
 
@@ -885,7 +901,7 @@ def sh_synthesis_H(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
         num_segments=n_max + 1,
     ).T  # (n_lat, n_max + 1)
 
-    f_hat_full = jnp.zeros((n_lat, n_lon // 2 + 1), dtype=jnp.complex128)
+    f_hat_full = jnp.zeros((n_lat, n_lon // 2 + 1), dtype=f_m.dtype)
     f_hat_full = f_hat_full.at[:, :n_max + 1].set(f_m)
 
     field_grid = jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1)
@@ -926,7 +942,10 @@ def spectral_hyperdiffusion(
     eig = nn * (nn + 1.0) / a2  # n(n+1)/a^2
     damping = -nu * eig ** order
     damping = jnp.where(jnp.isfinite(damping), damping, 0.0)
-    return damping * coeffs
+    # Damping built in f64 (accurate at high n); apply at the coefficient's
+    # real dtype so a complex64 runtime is not promoted to complex128.
+    _rdt = jnp.float32 if coeffs.dtype == jnp.complex64 else jnp.float64
+    return damping.astype(_rdt) * coeffs
 
 
 def dealiasing_mask(grid: GaussianGrid, fraction: float = 0.667) -> jax.Array:
@@ -973,9 +992,9 @@ def dealiasing_mask(grid: GaussianGrid, fraction: float = 0.667) -> jax.Array:
       J. Atmos. Sci., 28, 1074.
     """
     if fraction <= 0.0:
-        return jnp.ones((grid.n_sh,), dtype=jnp.float64)
+        return jnp.ones((grid.n_sh,), dtype=grid.Pnm.dtype)
     n_cut = int(fraction * grid.n_max)
-    return jnp.where(grid.ls <= n_cut, 1.0, 0.0).astype(jnp.float64)
+    return jnp.where(grid.ls <= n_cut, 1.0, 0.0).astype(grid.Pnm.dtype)
 
 
 # =============================================================================
@@ -1048,7 +1067,7 @@ def _synthesis_3d_with_matrix(
             )
         nlev_chunk = coeffs.shape[-1]
         f_hat_full = jnp.zeros(
-            (n_lat, n_lon // 2 + 1, nlev_chunk), dtype=jnp.complex128,
+            (n_lat, n_lon // 2 + 1, nlev_chunk), dtype=f_m.dtype,
         )
         f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
         return jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1).real
@@ -1226,7 +1245,8 @@ def spectral_gradient_3d(
     a = grid.radius
     ims = grid.ms.astype(jnp.float64)
     cos_lat = jnp.clip(grid.cos_lat[:, None], _GRADIENT_COS_LAT_MIN, None)[..., None]
-    dfdx = sh_synthesis_3d(grid, (1j * ims)[:, None] * coeffs_3d) / (a * cos_lat)
+    _im = (1j * ims).astype(coeffs_3d.dtype)[:, None]
+    dfdx = sh_synthesis_3d(grid, _im * coeffs_3d) / (a * cos_lat)
     dfdy = -sh_synthesis_H_3d(grid, coeffs_3d) / (a * cos_lat)
     return dfdx, dfdy
 
@@ -1588,4 +1608,6 @@ def spectral_hyperdiffusion_3d(
     eig = nn * (nn + 1.0) / a2
     damping = -nu * eig ** order  # (n_sh,)
     damping = jnp.where(jnp.isfinite(damping), damping, 0.0)
-    return damping[:, None] * coeffs_3d
+    # f64 damping, applied at the coefficient real dtype (no c64->c128 promote).
+    _rdt = jnp.float32 if coeffs_3d.dtype == jnp.complex64 else jnp.float64
+    return damping[:, None].astype(_rdt) * coeffs_3d

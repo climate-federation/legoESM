@@ -39,14 +39,61 @@ def _stacked(name, *, n=N, ng=NG, km=KM):
 
 # ---------------------------------------------------------------- dtype
 
-def test_require_f64_accepts_f64_and_skips_none():
+def test_require_uniform_accepts_f64_and_skips_none():
     common.require_f64_jax("t", {"a": jnp.zeros(3, dtype=jnp.float64),
                                  "b": None})
 
 
-def test_require_f64_rejects_f32():
-    with pytest.raises(TypeError, match="must be float64"):
-        common.require_f64_jax("t", {"a": jnp.zeros(3, dtype=jnp.float32)})
+def test_require_uniform_accepts_uniform_f32():
+    # The gate is now a UNIFORMITY gate (coarse fp32/fp64 policy,
+    # 2026-08-28): a uniformly-f32 phase is ACCEPTED (was rejected under
+    # the old strict-f64 gate).
+    common.require_uniform_float_jax(
+        "t", {"a": jnp.zeros(3, dtype=jnp.float32),
+              "b": jnp.zeros(2, dtype=jnp.float32)})
+
+
+def test_require_uniform_rejects_mixed_dtypes():
+    # The real hazard the gate now catches: an f64 operand (a leaked
+    # metric/workspace) mixed into an f32 phase -> silent promotion.
+    with pytest.raises(TypeError, match="MIXED float dtypes"):
+        common.require_uniform_float_jax(
+            "t", {"a": jnp.zeros(3, dtype=jnp.float32),
+                  "b": jnp.zeros(3, dtype=jnp.float64)})
+
+
+def test_require_uniform_rejects_non_float():
+    with pytest.raises(TypeError, match="float32 or float64"):
+        common.require_uniform_float_jax(
+            "t", {"a": jnp.zeros(3, dtype=jnp.int32)})
+
+
+def test_require_uniform_skips_only_WEAK_0d_scalars():
+    # A WEAK-typed 0-dim scalar (a python-float timestep dt / damping
+    # coeff kgb) is weak-promoting and NOT part of the field uniformity
+    # invariant: it must NOT trip the gate among f32 fields.
+    common.require_uniform_float_jax(
+        "t", {"delp": jnp.zeros(3, dtype=jnp.float32),
+              "dt": jnp.asarray(120.0),          # weak f64 (python float)
+              "kgb": jnp.asarray(0.15)})         # weak f64
+    # ...but a STRONG-f64 0-dim (an f64 constant that "went strong") among
+    # f32 fields STILL trips it -- the blind spot the wholesale 0-dim skip
+    # left, now closed (codex+GLM+Claude, increment 2).
+    with pytest.raises(TypeError, match="MIXED float dtypes"):
+        common.require_uniform_float_jax(
+            "t", {"delp": jnp.zeros(3, dtype=jnp.float32),
+                  "coeff": jnp.asarray(0.15, dtype=jnp.float64)})  # STRONG
+    # ...and a 1-D f64 field among f32 fields STILL trips it.
+    with pytest.raises(TypeError, match="MIXED float dtypes"):
+        common.require_uniform_float_jax(
+            "t", {"delp": jnp.zeros(3, dtype=jnp.float32),
+                  "metric": jnp.zeros(3, dtype=jnp.float64)})
+
+
+def test_require_f64_alias_points_at_uniform_gate():
+    # Back-compat: the historical name is an alias, so the ~40 call sites
+    # and the private copies keep working.
+    assert common.require_f64_jax is common.require_uniform_float_jax
 
 
 # ----------------------------------------------------------------- bool
@@ -271,3 +318,113 @@ def test_csw_out_like_is_the_same_object_the_cgrid_module_exports():
 
     assert cg.CSW_OUT_LIKE is common.CSW_OUT_LIKE
     assert "CSW_OUT_LIKE" in cg.__all__
+
+
+# ------------------------------------------- build_batched_gs (C2a view)
+#
+# Gates for the face-batched context view the vmap arms consume.  Same
+# shape as everything above: one PASS and one RAISE per gate, and the
+# raising side is what makes the common-mode assert non-vacuous -- a
+# silent broadcast of face 1's statics would be plausible wrong physics,
+# not an error message.
+
+from legoesm.core.fv3_duo_sw_core import GridFlags  # noqa: E402
+
+
+class _BatchCtx:
+    """The three attributes ``build_batched_gs`` touches on a real ctx
+    (``gs6``, ``flags6``, and a settable cache attribute)."""
+
+    def __init__(self, gs6, flags6):
+        self.gs6 = tuple(gs6)
+        self.flags6 = tuple(flags6)
+
+
+def _fake_gs6():
+    """Six tiny per-face metric dicts, DISTINCT per face so a face
+    mix-up in the stack cannot hide behind symmetry."""
+    return [
+        {"dx": jnp.asarray(np.arange(12.0).reshape(3, 4) + 100.0 * t),
+         "dy": jnp.asarray(np.arange(20.0).reshape(4, 5) + 100.0 * t)}
+        for t in range(6)
+    ]
+
+
+def _fake_flags6(**overrides):
+    base = dict(bounded_domain=True, grid_type=0)
+    base.update(overrides)
+    return [GridFlags(da_min=0.1 + 0.01 * t, da_min_c=0.2 + 0.01 * t,
+                      **base) for t in range(6)]
+
+
+def test_batched_gs_roundtrip_is_exact():
+    """Unstacking the batched view equals the per-face dicts EXACTLY --
+    ``jnp.stack`` is a pure index copy, so bitwise, not allclose."""
+    gs6 = _fake_gs6()
+    view = common.build_batched_gs(_BatchCtx(gs6, _fake_flags6()))
+    assert set(view["gs"]) == {"dx", "dy"}
+    assert view["unstacked_keys"] == ()
+    for key in ("dx", "dy"):
+        assert view["gs"][key].shape == (6,) + gs6[0][key].shape
+        for t in range(6):
+            assert np.array_equal(np.asarray(view["gs"][key][t]),
+                                  np.asarray(gs6[t][key])), (key, t)
+
+
+def test_batched_gs_da_min_arrays_are_per_face():
+    """The two per-face flag fields batch as (6,) f64 -- and DIFFERING
+    per-face values must NOT trip the common-mode gate (the control that
+    keeps that gate from over-firing)."""
+    flags6 = _fake_flags6()
+    view = common.build_batched_gs(_BatchCtx(_fake_gs6(), flags6))
+    assert view["da_min6"].shape == (6,)
+    assert view["da_min_c6"].shape == (6,)
+    assert view["da_min6"].dtype == jnp.float64
+    for t in range(6):
+        assert float(view["da_min6"][t]) == flags6[t].da_min
+        assert float(view["da_min_c6"][t]) == flags6[t].da_min_c
+    # the shared statics carry every OTHER GridFlags field, once
+    assert set(view["flags"]) == (set(GridFlags._fields)
+                                  - set(common.PER_FACE_FLAG_FIELDS))
+    assert view["flags"]["bounded_domain"] is True
+
+
+def test_batched_gs_refuses_a_per_face_key_split():
+    gs6 = _fake_gs6()
+    del gs6[3]["dy"]
+    with pytest.raises(KeyError, match=r"gs6\[3\].*dy"):
+        common.build_batched_gs(_BatchCtx(gs6, _fake_flags6()))
+
+
+def test_batched_gs_common_mode_assert_fires_and_names_the_field():
+    """Non-vacuity of the GLM guard: ONE differing static flag on ONE
+    face must raise, naming the field -- not broadcast face 1's value."""
+    flags6 = _fake_flags6()
+    flags6[4] = flags6[4]._replace(grid_type=4)
+    with pytest.raises(ValueError, match="grid_type"):
+        common.build_batched_gs(_BatchCtx(_fake_gs6(), flags6))
+
+
+def test_batched_gs_skips_a_shape_mismatched_key_and_records_it():
+    """A key whose shape differs across faces cannot share a batch axis;
+    it stays loop-path-only and is NAMED in ``unstacked_keys`` (a
+    vmapped kernel needing it then fails loudly with a KeyError, never
+    with broadcast face-1 values)."""
+    gs6 = _fake_gs6()
+    gs6[2]["dx"] = jnp.zeros((5, 4), dtype=jnp.float64)
+    view = common.build_batched_gs(_BatchCtx(gs6, _fake_flags6()))
+    assert view["unstacked_keys"] == ("dx",)
+    assert "dx" not in view["gs"]
+    assert "dy" in view["gs"]
+
+
+def test_batched_gs_is_cached_by_identity_of_gs6_and_flags6():
+    """Built once per context; a clone that swaps in a FRESH flags6
+    tuple must get a FRESH view (the stale-cache hazard the identity
+    check exists for)."""
+    ctx = _BatchCtx(_fake_gs6(), _fake_flags6())
+    v1 = common.build_batched_gs(ctx)
+    assert common.build_batched_gs(ctx) is v1
+    ctx.flags6 = tuple(_fake_flags6())   # equal values, new tuple
+    v3 = common.build_batched_gs(ctx)
+    assert v3 is not v1

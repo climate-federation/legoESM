@@ -1,5 +1,39 @@
 # DINO setup audit — legoESM vs NEMO `usrdef_*` (code-read, term-by-term)
 
+> **2026-09-08 — ROWS 1, 9 AND 10 ARE SUPERSEDED.** Everything below was
+> written on the halo-strip-era **48×195** frame. NEMO's DINO domain is
+> **52×199** (`usrdef_nam.F90:141-155`; the haloless `mesh_mask.nc` is 52×199,
+> and `ocean.output`'s `jpiglo=56`/`jpjglo=203` are those plus `2*nn_hls`), and
+> `run_dino.py --nemo-faithful-grid` now builds it by TRANSCRIBING NEMO's own
+> construction (`packages/ocean/legoesm/ocean/fidelity/nemo_dino_mesh.py`)
+> instead of approximating it. What that changes here:
+>
+> | row | was | now |
+> |---|---|---|
+> | 1 Horizontal grid | "reproduced to 3e-6°" | **bit-exact** — 0 cells unequal on `glamt/u/v/f`, `gphit/u/v/f`, `e1*`, `e2*` |
+> | 9 Bowl bathymetry extent | corr 0.92, "precise cause not isolated" | **RESOLVED** — the cause WAS `zgr_get_boundaries`. On the true frame it returns `pminlam=0`, `pmaxlam=51`, `pminphi=-69.678802541192084`, `pmaxphi=70.023256525040722` (printed by `RUN_TRAJ/ocean.output:382-385`), and `distPhi = cos(rad·pmaxphi)·distLam`. With those, `tmask` matches with **0 cells unequal** |
+> | 10 Seam wall placement | MISMATCH, 9201 wet vs "NEMO's 9360" | **RESOLVED for this path** — it uses NEMO's own mask: land ring on columns 0 and 51 outside the ACC band (`usrdef_zgr.F90:150-163`) plus the closed first/last row (`domzgr.F90:308-314`). **9920** surface wet, 342134 3-D wet, `umask`/`vmask` exact. (The 9360 figure was itself measured on the wrong frame.) legoESM's own analytic seam wall, described below, still applies to the NON-faithful DINO recipes. |
+>
+> The `glamu ∈ [2.00, 49.00]` / `gphiv ∈ [−68.97, 69.33]` extents quoted in row
+> 9's discussion are likewise halo-strip-era; the true ones are `glamu ∈ [0, 51]`
+> and `gphiv ∈ [−69.6788, 70.0233]`.
+>
+> Gate: `scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py` —
+> every one of the 45 variables in `mesh_mask.nc` is VERIFIED or WAIVED with a
+> reason, and it exits non-zero on any inequality (`--plant` proves it can).
+>
+> **The one remaining inequality**, and it is the oracle's: `ff_t`/`ff_f` differ
+> by ≤3 ulp (2.7e-20 absolute). `-O3` vectorised `usr_def_hgr.F90:152-153`'s two
+> whole-array Coriolis assignments into glibc's 2-wide vector sine — 14
+> `_ZGVbN2v_sin@plt` calls in `usr_def_hgr`, against scalar `asin`/`cos`/`tanh`
+> for the loop body — which is accurate to 4 ulp rather than correctly rounded.
+> legoESM never reads `ff_t` (the bridge builds Coriolis from `gphit` and reads
+> `ff_t` only to check itself), so this is bounded and waived rather than
+> chased. To close it on the oracle's side, run
+> `scripts/experiment/dino/nemo_scalar_math_rebuild.sh` (it pre-registers what
+> confirms and what refutes the diagnosis) and re-run the gate against the
+> regenerated mesh.
+
 A line-by-line verification of legoESM's DINO *experiment setup* (domain,
 bathymetry, vertical coordinate, masks) against NEMO's `usrdef_*.F90` source on
 our NEMO 5.0.2 build (`cfgs/DINO/MY_SRC`). This complements the *operator*

@@ -35,6 +35,7 @@ def update_snow(
     Q_net: jnp.ndarray | None = None,
     snow_melt_rate: float = _SNOW_MELT_RATE_DEFAULT,
     T_snow_melt: float = constants.T_freeze,
+    snow_age_activation_K: float = 0.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Update snow depth and age, returning the melt amount.
 
@@ -92,9 +93,31 @@ def update_snow(
 
     snow_new = jnp.maximum(snow_available - snow_melt, 0.0)
 
-    snow_age_new = update_snow_age(snow_new, snow_age, precip_snow, dt)
+    snow_age_new = update_snow_age(
+        snow_new, snow_age, precip_snow, dt,
+        T_snow=T_sfc, age_activation_K=snow_age_activation_K)
 
     return snow_new, snow_age_new, snow_melt
+
+
+def metamorphism_rate(T_snow: jnp.ndarray, activation_K: float) -> jnp.ndarray:
+    """Temperature scaling of snow grain growth, BATS/CLM form.
+
+    ``r(T) = exp(A * (1/T_freeze - 1/T))``, the Arrhenius-like grain-growth term
+    of Dickinson et al. (1993) BATS with activation temperature ``A`` [K]
+    (BATS uses 5000 K).  It is 1 at the freezing point and falls steeply as the
+    snow cools: 0.08 at 240 K, 0.03 at 230 K, so cold dry polar snow ages ~12-30
+    times more slowly than melting snow.  Bounded to (0, 1]: snow never ages
+    FASTER than at the melting point, which keeps the effective age monotone in
+    real time whatever the surface temperature does.
+
+    ``activation_K = 0`` returns exactly 1.0 (the temperature-independent clock).
+    """
+    if activation_K == 0.0:
+        return jnp.ones_like(T_snow)
+    T = jnp.maximum(T_snow, 1.0)                       # guard the 1/T at T -> 0
+    return jnp.clip(
+        jnp.exp(activation_K * (1.0 / constants.T_freeze - 1.0 / T)), 0.0, 1.0)
 
 
 def update_snow_age(
@@ -102,6 +125,9 @@ def update_snow_age(
     snow_age: jnp.ndarray,
     precip_snow: jnp.ndarray,
     dt: float,
+    *,
+    T_snow: jnp.ndarray | None = None,
+    age_activation_K: float = 0.0,
 ) -> jnp.ndarray:
     """Snow-age clock: mass-weighted grain-age mixing of fresh + existing snow.
 
@@ -131,7 +157,16 @@ def update_snow_age(
     fresh_swe = jnp.maximum(precip_snow, 0.0) * dt           # kg/m2 fresh this step
     swe_old = jnp.maximum(snow_new - fresh_swe, 0.0)         # kg/m2 old snow surviving melt
     denom = swe_old + fresh_swe                              # kg/m2 (== snow_new where >=0)
-    aged = snow_age + dt                                     # existing snow ages by dt
+    # The clock accumulates METAMORPHIC EXPOSURE, not calendar time: the
+    # increment is dt scaled by the grain-growth rate at the snow temperature
+    # (BATS/CLM).  Cold dry snow therefore stays near its fresh albedo for
+    # months, while melting snow darkens on the same timescale as before.  The
+    # state stays in SECONDS of melting-point-equivalent age, so restarts and
+    # every downstream albedo consumer are unchanged in meaning.
+    # ``age_activation_K = 0`` (default) gives rate 1 => byte-identical.
+    _rate = (1.0 if (T_snow is None or age_activation_K == 0.0)
+             else metamorphism_rate(T_snow, age_activation_K))
+    aged = snow_age + dt * _rate                             # existing snow ages
     # Guard the divide (denom>0 whenever snow_new>0; the snow_new==0 rows are masked
     # out below, so the where only prevents a 0/0 NaN gradient on those dead rows).
     mixed = aged * swe_old / jnp.where(denom > 0.0, denom, 1.0)

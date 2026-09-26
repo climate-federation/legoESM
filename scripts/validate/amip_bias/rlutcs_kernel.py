@@ -122,6 +122,8 @@ def main(argv=None):
     ap.add_argument("--day", type=int, default=1155)
     ap.add_argument("--ncol", type=int, default=2048)
     ap.add_argument("--n-tod", type=int, default=4)
+    ap.add_argument("--res", type=int, default=5,
+                    help="Icosahedral level of --run's mesh (res6 = 40962 cells).")
     ap.add_argument("--target", type=float, default=-19.6,
                     help="The rlutcs error to be explained [W/m2].")
     args = ap.parse_args(argv)
@@ -129,6 +131,7 @@ def main(argv=None):
     hh = _load(_HARNESS, "hh")
     if args.run:
         hh.RUN = f"{hh.RUN.rsplit('/', 1)[0]}/{args.run}"
+    hh.RES = args.res
     plev, dT, ratio = bias_profiles(args.ref_run)
     print(f"perturbation profile from {args.ref_run} (global mean, "
           f"below-ground masked):")

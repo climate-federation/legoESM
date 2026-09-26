@@ -208,6 +208,40 @@ def qco_r3(ssh: np.ndarray, e1t: np.ndarray, e2t: np.ndarray,
     return r3u, r3v
 
 
+def zdf_sh2_reconstruct(
+    u_Kmm, v_Kmm, u_Kbb, v_Kbb, avm,
+    e3uw_Kmm, e3uw_Kbb, e3vw_Kmm, e3vw_Kbb,
+    umask, vmask,
+):
+    """Literal no-Stokes ``zdfsh2.F90:78-95`` reconstruction.
+
+    Promoted from ``main`` so ordered matched-state sweeps reuse the already
+    reviewed operator instead of carrying a second transcription.
+    """
+    ny, nx, jpk = avm.shape
+    wumask = build_wmask_from_uv(umask)
+    wvmask = build_wmask_from_uv(vmask)
+    p_sh2 = np.zeros((ny, nx, jpk), dtype=np.result_type(
+        u_Kmm, v_Kmm, u_Kbb, v_Kbb, avm))
+    for k in range(1, jpk - 1):
+        du_Kmm = u_Kmm[..., k - 1] - u_Kmm[..., k]
+        du_Kbb = u_Kbb[..., k - 1] - u_Kbb[..., k]
+        dv_Kmm = v_Kmm[..., k - 1] - v_Kmm[..., k]
+        dv_Kbb = v_Kbb[..., k - 1] - v_Kbb[..., k]
+        avm_face_u = np.roll(avm[..., k], -1, axis=1) + avm[..., k]
+        avm_face_v = np.roll(avm[..., k], -1, axis=0) + avm[..., k]
+        zsh2u = (avm_face_u * du_Kmm * du_Kbb
+                 / (e3uw_Kmm[..., k] * e3uw_Kbb[..., k])) * wumask[..., k]
+        zsh2v = (avm_face_v * dv_Kmm * dv_Kbb
+                 / (e3vw_Kmm[..., k] * e3vw_Kbb[..., k])) * wvmask[..., k]
+        coast_u = 2.0 - np.roll(umask[..., k], 1, axis=1) * umask[..., k]
+        coast_v = 2.0 - np.roll(vmask[..., k], 1, axis=0) * vmask[..., k]
+        p_sh2[..., k] = 0.25 * (
+            (np.roll(zsh2u, 1, axis=1) + zsh2u) * coast_u
+            + (np.roll(zsh2v, 1, axis=0) + zsh2v) * coast_v)
+    return p_sh2
+
+
 def main() -> int:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
@@ -338,30 +372,6 @@ def main() -> int:
     # run's own dumps/restart/mesh_mask -- NOTHING borrowed from an assumed
     # "should be equivalent" formula.
     # =====================================================================
-    def zdf_sh2_reconstruct(u_Kmm, v_Kmm, u_Kbb, v_Kbb, avm, e3uw_Kmm_, e3uw_Kbb_,
-                             e3vw_Kmm_, e3vw_Kbb_):
-        p_sh2 = np.zeros((ny, nx, jpk))
-        for k in range(1, jpk - 1):     # NEMO jk=2..jpkm1 (1-based) -> 0-based 1..jpk-2
-            du_Kmm = u_Kmm[..., k - 1] - u_Kmm[..., k]
-            du_Kbb = u_Kbb[..., k - 1] - u_Kbb[..., k]
-            dv_Kmm = v_Kmm[..., k - 1] - v_Kmm[..., k]
-            dv_Kbb = v_Kbb[..., k - 1] - v_Kbb[..., k]
-            avm_face_u = np.roll(avm[..., k], -1, axis=1) + avm[..., k]   # avm(i+1)+avm(i)
-            avm_face_v = np.roll(avm[..., k], -1, axis=0) + avm[..., k]   # avm(j+1)+avm(j)
-            zsh2u = (avm_face_u * du_Kmm * du_Kbb
-                     / (e3uw_Kmm_[..., k] * e3uw_Kbb_[..., k])) * wumask[..., k]
-            zsh2v = (avm_face_v * dv_Kmm * dv_Kbb
-                     / (e3vw_Kmm_[..., k] * e3vw_Kbb_[..., k])) * wvmask[..., k]
-            zsh2u_im1 = np.roll(zsh2u, 1, axis=1)   # zsh2u(i-1,j)
-            zsh2v_jm1 = np.roll(zsh2v, 1, axis=0)   # zsh2v(i,j-1)
-            umask_im1 = np.roll(umask[..., k], 1, axis=1)
-            vmask_jm1 = np.roll(vmask[..., k], 1, axis=0)
-            coast_u = 2.0 - umask_im1 * umask[..., k]
-            coast_v = 2.0 - vmask_jm1 * vmask[..., k]
-            p_sh2[..., k] = 0.25 * ((zsh2u_im1 + zsh2u) * coast_u
-                                     + (zsh2v_jm1 + zsh2v) * coast_v)
-        return p_sh2
-
     print("\n" + "=" * 100)
     print("A/B: reconstruct p_sh2, one candidate factor swapped at a time")
     print("=" * 100)
@@ -372,7 +382,7 @@ def main() -> int:
     # avm average, now x before, wet-mask coast weighting) ----
     sh2_faithful = zdf_sh2_reconstruct(
         u_Kmm_pre, v_Kmm_pre, u_Kbb, v_Kbb, avm_in,
-        e3uw_Kmm, e3uw_Kbb, e3vw_Kmm, e3vw_Kbb)
+        e3uw_Kmm, e3uw_Kbb, e3vw_Kmm, e3vw_Kbb, umask, vmask)
     r = corr_ratio(sh2_faithful, sh2_nemo, wet_w)
     en = err_norm(sh2_faithful, sh2_nemo, wet_w)
     results["BASELINE (fully faithful)"] = (r, en)

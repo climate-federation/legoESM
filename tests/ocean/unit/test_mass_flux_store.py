@@ -1014,7 +1014,7 @@ def test_core2_scan_block_seeds_its_own_carry(monkeypatch):
     block = oa.build_omip2_scan_block_fn(
         model, _DT, np.asarray(state.eta.data).shape)
     dummy = jnp.zeros((1,))
-    out = block(p, dummy, dummy, dummy,
+    out = block(p, dummy, dummy, dummy, None,
                 jnp.arange(2, dtype=jnp.int32), jnp.int32(0))
     for nm in _NEW_SLOTS:
         f = getattr(out, nm)

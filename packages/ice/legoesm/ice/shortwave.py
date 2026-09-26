@@ -2,7 +2,7 @@
 
 Three schemes share a common ``compute_ice_sw`` entry point:
 
-- ``"constant"`` — single broadband albedo, no penetration.
+- ``"constant"`` — single broadband albedo, optional fixed transmission.
 - ``"maykut_untersteiner"`` — thin-ice α(T_sfc, h_ice) ramp.
 - ``"delta_eddington"`` — two-band (VIS + NIR) Briegleb & Light
   (2007) albedo with snow + pond modifications and an interior
@@ -152,13 +152,22 @@ def _band_albedo_snow(
     alpha_melt_vis: float,
     alpha_cold_nir: float,
     alpha_melt_nir: float,
+    alpha_underlying_vis: jnp.ndarray,
+    alpha_underlying_nir: jnp.ndarray,
     h_snow_sat: float = _H_SNOW_SAT_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Snow-surface albedo per band, with a thin-snow ramp."""
+    """Interpolate from underlying ice to optically thick snow per band.
+
+    The existing empirical depth ramp must approach the ice albedo as snow
+    vanishes, not zero (black). Coverage is applied separately by the caller.
+    This repairs the surrogate's thin-snow darkening without changing its
+    band endpoints or ramp lengths; it is not the SI3 exponential snow fit.
+    """
     ramp = jnp.clip(h_snow / jnp.maximum(h_snow_sat, 1e-6), 0.0, 1.0)
     alpha_vis = (1.0 - melt_fraction) * alpha_cold_vis + melt_fraction * alpha_melt_vis
     alpha_nir = (1.0 - melt_fraction) * alpha_cold_nir + melt_fraction * alpha_melt_nir
-    return alpha_vis * ramp, alpha_nir * ramp
+    return (alpha_underlying_vis + (alpha_vis - alpha_underlying_vis) * ramp,
+            alpha_underlying_nir + (alpha_nir - alpha_underlying_nir) * ramp)
 
 
 def _band_albedo_bare_ice(
@@ -271,19 +280,20 @@ def delta_eddington_albedo(
     # melting albedos were never fully reached).
     melt_fraction = jnp.clip(1.0 + (T_sfc - T_melt) / T_width, 0.0, 1.0)
 
-    snow_vis, snow_nir = _band_albedo_snow(
-        melt_fraction, h_snow,
-        alpha_cold_vis=constants.alpha_snow_cold_vis,
-        alpha_melt_vis=constants.alpha_snow_melt_vis,
-        alpha_cold_nir=constants.alpha_snow_cold_nir,
-        alpha_melt_nir=constants.alpha_snow_melt_nir,
-    )
     ice_vis, ice_nir = _band_albedo_bare_ice(
         melt_fraction, h_ice,
         alpha_cold_vis=constants.alpha_ice_cold_vis,
         alpha_melt_vis=constants.alpha_ice_melt_vis,
         alpha_cold_nir=constants.alpha_ice_cold_nir,
         alpha_melt_nir=constants.alpha_ice_melt_nir,
+    )
+    snow_vis, snow_nir = _band_albedo_snow(
+        melt_fraction, h_snow,
+        alpha_underlying_vis=ice_vis, alpha_underlying_nir=ice_nir,
+        alpha_cold_vis=constants.alpha_snow_cold_vis,
+        alpha_melt_vis=constants.alpha_snow_melt_vis,
+        alpha_cold_nir=constants.alpha_snow_cold_nir,
+        alpha_melt_nir=constants.alpha_snow_melt_nir,
     )
     pond_vis, pond_nir = _band_albedo_pond(
         pond_depth, ice_vis, ice_nir,

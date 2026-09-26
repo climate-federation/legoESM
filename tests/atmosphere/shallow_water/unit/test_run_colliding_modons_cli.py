@@ -44,8 +44,12 @@ def test_defaults_match_shared_modon_constants():
     assert args.use_duogrid is True
     # And the canonical values are the validated stable ones.  hd_scaling == 2
     # (the #753 item-1 default flip: (ref/n)^2 keeps C96 stable at the seams;
-    # ^4 erupts).  Validated 100 days at C36/C48/C96 (mass drift 0).
-    assert (hd_factor, hd_scaling, div_damp, damp_v) == (1.0, 2, 8.0, 0.010)
+    # ^4 erupts).  div_damp == 0.03 (2026-08-25 retune, dual-reviewed: 8.0
+    # gave the divergent mode a ~5.5-minute e-fold at C36 and flattened the
+    # day-1 dipole ~50x vs the other grids; 0.03 = ~one-day six-cell e-fold,
+    # day-1 recovery + 100-day C36/C48 completion re-validated, jobs
+    # 9499349/9499350/9499364).
+    assert (hd_factor, hd_scaling, div_damp, damp_v) == (1.0, 2, 0.03, 0.010)
 
 
 def test_default_scaling_law_coefficient_ratios_c36_c48_c96():

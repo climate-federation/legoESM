@@ -58,7 +58,7 @@ def main():
     for k, name, prec in (("pft_vcmax", "_TUNED_PFT_VCMAX_MULTILAYER", 2),
                           ("pft_g1", "_TUNED_PFT_G1_MULTILAYER", 3),
                           ("pft_lcma", "_TUNED_PFT_LCMA_MULTILAYER", 2),
-                          ("pft_snowmask", "_TUNED_PFT_SNOWMASK_MULTILAYER", 3)):
+                          ("pft_snowmask", "TUNED_PFT_SNOWMASK_MULTILAYER", 3)):
         if k in cal:
             print(_tuple(name, g(k), prec=prec))
 

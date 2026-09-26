@@ -138,7 +138,7 @@ def main(argv: list[str]) -> int:
     for f in ("tracer_advection", "outer_integrator",
               "surface_tendency_placement", "wind_through_step"):
         print(f"  CFG {f} = {getattr(cfg, f, '<absent>')!r}")
-    for f in ("implicit_vmix_dzw_slot", "implicit_vmix_e3t_now_divisor"):
+    for f in ("implicit_vmix_dzw_slot", "zdf_implicit_solver_evaluation"):
         print(f"  MC  {f} = {getattr(mc0, f, '<absent>')!r}")
     _placement = getattr(cfg, "surface_tendency_placement", None)
     _wind = bool(getattr(cfg, "wind_through_step", False))

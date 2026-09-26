@@ -63,9 +63,11 @@ WAIVED = {
     "time_counter": "file time axis, not geometry.",
     "misf": "ice-shelf draft index; DINO has no ice shelves (ln_isf=F).",
     "stiffness": "Haney stiffness DIAGNOSTIC only; not used in any NEMO tendency.",
-    "e3uw_0": "UW-point thickness: used only by NEMO's implicit vertical "
-              "friction assembly, which legoESM builds from h_u directly.",
-    "e3vw_0": "VW-point thickness: as e3uw_0, for the v-column.",
+    "e3uw_0": "UW-point thickness: NEMO's implicit vertical friction divisor "
+              "(dynzdf.F90:200-203). On DINO's zco branch zgr_lib.F90:111-112 "
+              "sets pe3uw = pe3w, so it IS e3w_0, which is verified below; "
+              "legoESM divides by the same object via nemo_e3w_kmm.",
+    "e3vw_0": "VW-point thickness: as e3uw_0 (pe3vw = pe3w), for the v-column.",
     "glamu": "U-point longitude: legoESM derives U metrics from e1u/e2u, "
              "which ARE verified below.",
     "glamv": "V-point longitude: as glamu.",

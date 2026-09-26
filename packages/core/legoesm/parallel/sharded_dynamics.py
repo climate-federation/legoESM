@@ -77,6 +77,8 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import hashlib
+
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -1251,7 +1253,8 @@ SPMD_HALO_DEPTH = 3
 def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
                        already_reordered=False, halo_depth=SPMD_HALO_DEPTH,
                        ppermute_cells_per_device_threshold=2_000,
-                       round_profile_for_device=None):
+                       round_profile_for_device=None,
+                       cell_width=None, edge_width=None):
     """How much halo communication one ownership choice costs, computed offline.
 
     Scores a Voronoi ownership (mesh split) by the number of ``ppermute``
@@ -1392,10 +1395,46 @@ def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
     ) = _build_voronoi_partition_infra(prepared, n_dev, halo_depth=halo_depth)
     cells_per = n_cells // n_dev
     edges_per = n_edges // n_dev
+    # PRODUCTION WEIGHTS. make_voronoi_sharded_step passes
+    # cell_width=nlev+2, edge_width=nlev; the colouring is SIZE-AWARE and
+    # will admit an extra round when it buys more than ten per cent of
+    # padded weight, so the weights change WHICH schedule is chosen, not
+    # just its reported cost. Left unset this function colours at 1:1 and
+    # its round count is then NOT the one production builds (codex).
+    production_weighted = cell_width is not None and edge_width is not None
     sched = _build_ppermute_schedule(
         partitions, cell_owner, n_dev, cells_per, edges_per, max_lc, max_le,
+        **({"cell_width": int(cell_width), "edge_width": int(edge_width)}
+           if production_weighted else {}),
     )
+    # Partition fingerprint: max_degree alone does not pin the split --
+    # neighbours and payloads can change at equal degree -- so a gate that
+    # wants "the same split the reference measured" compares this (codex).
+    #
+    # It hashes the NEIGHBOUR SET, not cell_owner. Hashing ownership was
+    # measured vacuous: the partition methods reorder the MESH and then cut
+    # it into contiguous blocks, so sfc, metis and geometric all produce
+    # the same owner array while colouring to 13, 15 and 16 rounds. The
+    # directed pair set is what actually differs, and unlike the round
+    # assignment it does not move when the colouring policy changes.
+    _pairs = sorted({(int(s), int(d))
+                     for perm in sched["ppermute_perms"] for s, d in perm})
+    partition_fingerprint = hashlib.sha256(
+        repr((_pairs, int(max_lc), int(max_le), int(cells_per),
+              int(edges_per))).encode()
+    ).hexdigest()[:16]
     return {
+        "production_weighted": production_weighted,
+        "cell_width": cell_width,
+        "edge_width": edge_width,
+        "weights_note": (
+            None if production_weighted else
+            "coloured at 1:1: production passes cell_width=nlev+2, "
+            "edge_width=nlev, and the size-aware colouring can pick a "
+            "DIFFERENT schedule under those weights, so n_rounds here is "
+            "not production's round count"),
+        "partition_fingerprint": partition_fingerprint,
+        "n_neighbour_pairs": len(_pairs),
         "method": method,
         "resolved_method": resolved,
         "n_dev": n_dev,
@@ -3588,6 +3627,33 @@ def _ragged_halo_fill(cell_pack, u_shard, ragged_sl, max_lc, max_le):
     return cell_local[:max_lc], u_local[:max_le]
 
 
+def _assert_sharded_ps_carry_f64(p_s_dtype):
+    """Loud guard for the deferred sharded p_s carry-seed (decision A).
+
+    In mixed/fp64 the surface pressure ``p_s`` is the intentional always-f64
+    conservation field.  On the SHARDED Voronoi path the per-step mass fixer
+    casts ``p_s`` back to the scan carry dtype to hold the ``lax.scan``
+    carry-dtype contract — so ``p_s`` can only be f64 if the scan's INITIAL
+    carry is already f64, which requires seeding at state construction (IC
+    builder / driver).  That seeding is NOT yet implemented.  Without this
+    guard a mixed+sharded run would silently carry ``p_s`` in float32 for the
+    whole integration.  Fail loudly instead.  Fires only for mixed/fp64
+    (accumulate == float64); an fp32/x64-off sharded run correctly keeps
+    ``p_s`` float32 and is unaffected.
+    """
+    from legoesm.core.precision import resolve_dtype
+    if (resolve_dtype(None, "accumulate") == jnp.float64
+            and jnp.dtype(p_s_dtype) != jnp.float64):
+        raise RuntimeError(
+            f"mixed/fp64 + sharded Voronoi step: p_s carry is "
+            f"{jnp.dtype(p_s_dtype)} but the policy accumulate dtype is "
+            f"float64. p_s must be seeded float64 in the scan INITIAL carry "
+            f"(decision A) — the IC-builder seeding is not implemented, so "
+            f"mixed+sharded MPAS is unsupported until it lands. Use fp32 "
+            f"(x64 off) for sharded runs, or run serial for mixed."
+        )
+
+
 def make_voronoi_sharded_step(
     model,
     dev_config: DeviceConfig,
@@ -3698,7 +3764,7 @@ def make_voronoi_sharded_step(
             )
         return model.step
 
-    from legoesm.core.precision import cast_pytree
+    from legoesm.core.precision import cast_pytree, finalize_to_storage
     from legoesm.core.state import MPASHydrostaticState
     from legoesm.parallel.mesh import multiprocess_safe_device_put
     from legoesm.parallel.shard_map_compat import shard_map
@@ -4444,6 +4510,11 @@ def make_voronoi_sharded_step(
         @jax.jit
         def _step(state, dt, forcing, phys_state,
                   mesh_arg, halo_arg, area_arg, wide_arg, rim_arg):
+            # Loud guard: the incoming scan-carry p_s must be float64 in
+            # mixed/fp64 (decision A); the sharded carry-seed is deferred, so a
+            # float32 p_s here would be silently carried the whole run.
+            # Trace-time check — the dtype is static.
+            _assert_sharded_ps_carry_f64(state.p_s.data.dtype)
             # Canonical tracer wire order — static at trace time (part
             # of the state's pytree structure).
             tkeys = (tuple(sorted(state.tracers))
@@ -4595,11 +4666,6 @@ def make_voronoi_sharded_step(
                 state_new = state_new._replace(
                     T=state_new.T.replace(
                         data=jnp.maximum(state_new.T.data, cfg.T_min)))
-            if state_new.tracers is not None:
-                state_new = state_new._replace(tracers={
-                    k: f.replace(data=jnp.maximum(f.data, 0.0))
-                    for k, f in state_new.tracers.items()
-                })
 
             # --- 4. Global mass fixer ---
             if cfg.fix_mass:
@@ -4632,7 +4698,37 @@ def make_voronoi_sharded_step(
                     p_s=state_new.p_s.replace(
                         data=(_ps + correction).astype(_ps.dtype)))
 
-            return cast_pytree(state_new, None, "storage"), phys_state_out
+            # --- 5. Tracer positivity AFTER the mass fixer (#1354/#1515) ---
+            # dp must be the FINAL layer mass, so this runs post-fix (the serial
+            # MPAS lane likewise mass-fixes before its floors).  ONE shared
+            # positivity stage: under GSPMD the borrow's global residual is a
+            # plain jnp.sum over the sharded cells axis — XLA lowers it to a
+            # single allreduce, exactly like the mass fixer above, so
+            # sum_fn=None is decomposition-independent (no halo duplication on
+            # this lane).  Borrow (default) is frozen-MSE-neutral for vapour AND
+            # condensate; the hard-floor fallback carries the per-species
+            # latent-heat T correction incl ice.
+            if state_new.tracers is not None:
+                from legoesm.core.conservation import apply_water_positivity
+                _ph = sigma.pressure_at_half(state_new.p_s.data)
+                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                _tr_out, _T_out = apply_water_positivity(
+                    state_new.tracers, state_new.T.data, _dp,
+                    conservative=getattr(
+                        cfg, "conservative_tracer_clamp", False),
+                    energy_consistent=getattr(
+                        cfg, "energy_consistent_moisture_clip", False))
+                state_new = state_new._replace(
+                    tracers=_tr_out, T=state_new.T.replace(data=_T_out))
+
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+            return (finalize_to_storage(
+                        cast_pytree(state_new, None, "storage")),
+                    phys_state_out)
 
         return _step
 
@@ -4782,3 +4878,14 @@ def check_sharding(state, config: DeviceConfig, verbose: bool = False) -> dict:
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Public names for the Voronoi partition / ppermute machinery shared with the
+# MPAS OCEAN SPMD lane (``legoesm.parallel.voronoi_spmd_ocean``).  Aliases, not
+# copies: the ocean lane must exchange exactly the rows the atmosphere lane
+# does (no private cross-module imports — tests/test_no_private_cross_imports).
+# ---------------------------------------------------------------------------
+build_voronoi_partition_infra = _build_voronoi_partition_infra
+build_ppermute_schedule = _build_ppermute_schedule
+ppermute_halo_fill = _ppermute_halo_fill

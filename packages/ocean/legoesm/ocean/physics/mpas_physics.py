@@ -16,7 +16,9 @@ from legoesm.core.field import Field
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.eos import rho_0 as rho_0_ref
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate, compute_ocean_jacobian, compute_layer_thickness,
+)
 from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 
@@ -321,6 +323,7 @@ def make_mpas_ocean_physics(
             _sf_tau_x = getattr(surface_forcing, "tau_x", None)
             _sf_tau_y = getattr(surface_forcing, "tau_y", None)
             _sf_q_net = getattr(surface_forcing, "q_net", None)
+            _sf_chl = getattr(surface_forcing, "chl", None)
 
             if _sf_tau_x is not None and _sf_tau_y is not None:
                 dz_0_cell = z_coord.dz_ref[0] * jacobian  # (nCells,)
@@ -343,7 +346,45 @@ def make_mpas_ocean_physics(
                 from legoesm.ocean.eos import c_sw
                 _sf_sw = getattr(surface_forcing, "sw_down", None)
 
-                if _sf_sw is not None:
+                if _sf_sw is not None and _sf_chl is not None:
+                    # NEMO RGB chlorophyll penetration (ln_qsr_rgb), the SAME
+                    # shared kernel the lat-lon C-grid PE step selects when chl
+                    # is attached (ocean_pe_latlon_cgrid).  NEMO partitions 100%
+                    # of net SW across IR + R/G/B bands, so there is NO 0.94
+                    # "skin" pre-split here: the FULL sw is the penetrating qsr
+                    # and the non-solar surface flux is q_net - sw.
+                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
+                    inv_rho_csw_dz = 1.0 / (
+                        rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
+                    q_nonsolar = _sf_q_net - _sf_sw
+                    dT_dt = dT_dt.at[:, 0].add(
+                        q_nonsolar * inv_rho_csw_dz * mask)
+                    from legoesm.ocean.physics.shortwave_penetration import (
+                        apply_shortwave_penetration,
+                        ShortwavePenetrationConfig,
+                    )
+                    # Live (z*/partial-cell) layer thickness, (nCells, nlev):
+                    # dispatches on the coordinate type, so on --partial-cell it
+                    # returns the per-column partial thicknesses with ZERO below
+                    # each seabed (codex: dz_ref*jacobian would invent wet layers
+                    # below the bottom, leaking RGB light past the seabed and
+                    # breaking the q_net closure).  For a plain z* coordinate it
+                    # reduces exactly to dz_ref*jacobian, so non-partial runs are
+                    # unchanged.  wet_cell = h_k>0 excludes below-seabed cells and
+                    # is the RGB kernel's safe-denominator guard; a dry column has
+                    # thickness 0 -> wet_cell 0 (masked anyway).
+                    dz_live = compute_layer_thickness(eta, H_bathy, z_coord)
+                    wet_cell = jnp.asarray(dz_live > 0.0, dtype=T_3d.dtype)
+                    sw_tend = apply_shortwave_penetration(
+                        ShortwavePenetrationConfig(scheme="rgb_chl"),
+                        _sf_sw,
+                        chl=jnp.asarray(_sf_chl, dtype=T_3d.dtype),
+                        dz_live=dz_live,
+                        wet_cell=wet_cell,
+                        rho_0=rho_0_ref, c_sw=c_sw,
+                    )
+                    dT_dt = dT_dt + sw_tend * mask[:, None]
+                elif _sf_sw is not None:
                     # VERTICAL split of the surface heat flux (NOT an albedo):
                     # ``q_net`` carries 100% of the incident sw_down; here 94% is
                     # routed through the Jerlov penetration profile and the
@@ -353,24 +394,74 @@ def make_mpas_ocean_physics(
                     # SW is reflected/lost here.  Any SURFACE ALBEDO is applied
                     # UPSTREAM in compute_omip2_surface_forcing (--ice-albedo),
                     # which reduces sw_down -> sw_net in BOTH q_net and this field.
-                    sw_absorbed = _sf_sw * _SW_PENETRATION_FRACTION  # 94% penetrates; 6% surface skin
+                    # Static dispatch on the config string: only one scheme's
+                    # ops enter the jaxpr.  "auto" is the lane's historical
+                    # path (byte-identical); the column total is q_net in every
+                    # scheme because the penetrating part is withheld from the
+                    # surface cell and re-deposited by the kernel.
+                    from legoesm.ocean.physics.shortwave_penetration import (
+                        ShortwavePenetrationConfig,
+                        apply_shortwave_penetration,
+                        penetrating_fraction,
+                        shortwave_penetration_tendency,
+                    )
+                    _sw_scheme = getattr(sf_config, "shortwave_scheme", "auto")
+                    _sf_chl = getattr(surface_forcing, "chl", None)
+                    if _sw_scheme == "auto":
+                        sw_absorbed = _sf_sw * _SW_PENETRATION_FRACTION  # 94% penetrates; 6% surface skin
+                        _sw_cfg = None
+                    elif _sw_scheme == "jerlov_2band":
+                        _sw_cfg = ShortwavePenetrationConfig(
+                            scheme="jerlov_2band",
+                            water_type=sf_config.shortwave_water_type)
+                        sw_absorbed = _sf_sw * penetrating_fraction(_sw_cfg)
+                    elif _sw_scheme == "sweeney_2band":
+                        if _sf_chl is None:
+                            raise ValueError(
+                                "surface_forcing.shortwave_scheme='sweeney_2band' "
+                                "requires OceanSurfaceForcing.chl (nCells,); got None")
+                        _sw_cfg = ShortwavePenetrationConfig(scheme="sweeney_2band")
+                        sw_absorbed = _sf_sw * penetrating_fraction(_sw_cfg)
+                    else:
+                        raise ValueError(
+                            f"unknown surface_forcing.shortwave_scheme {_sw_scheme!r}; "
+                            "expected 'auto', 'jerlov_2band' or 'sweeney_2band'")
                     q_nonsolar = _sf_q_net - sw_absorbed
 
+                    if _sw_scheme == "sweeney_2band":
+                        # Live thickness of the lane's coordinate (z-star OR
+                        # partial cells with ETOPO): dry levels carry h = 0,
+                        # so wetness and the deposit of the remainder in the
+                        # deepest wet cell follow the same geometry the
+                        # dynamics integrate against.
+                        from legoesm.ocean.vertical import compute_layer_thickness
+                        _h_live = compute_layer_thickness(
+                            state.eta.data, state.H_bathy.data, z_coord)
+                        _wet_live = jnp.asarray(_h_live > 0.0, dtype=_h_live.dtype)
+                        dz_0_cell_q = _h_live[:, 0]
+                    else:
+                        dz_0_cell_q = z_coord.dz_ref[0] * jacobian
+
                     # Non-solar part: surface cell only
-                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
                     inv_rho_csw_dz = 1.0 / (
                         rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
                     dT_dt = dT_dt.at[:, 0].add(
                         q_nonsolar * inv_rho_csw_dz * mask)
 
-                    # Solar part: Jerlov penetration through column
-                    from legoesm.ocean.physics.shortwave_penetration import (
-                        shortwave_penetration_tendency,
-                    )
-                    sw_tend = shortwave_penetration_tendency(
-                        sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref,
-                        jacobian, rho_0=rho_0_ref, c_sw=c_sw,
-                    )
+                    if _sw_scheme == "sweeney_2band":
+                        sw_tend = apply_shortwave_penetration(
+                            _sw_cfg, sw_absorbed, chl=_sf_chl, dz_live=_h_live,
+                            wet_cell=_wet_live, rho_0=rho_0_ref, c_sw=c_sw)
+                    elif _sw_scheme == "jerlov_2band":
+                        sw_tend = shortwave_penetration_tendency(
+                            sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref,
+                            jacobian, _sw_cfg, rho_0=rho_0_ref, c_sw=c_sw)
+                    else:
+                        # Solar part: Jerlov penetration through column
+                        sw_tend = shortwave_penetration_tendency(
+                            sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref,
+                            jacobian, rho_0=rho_0_ref, c_sw=c_sw,
+                        )
                     dT_dt = dT_dt + sw_tend * mask[:, None]
                 else:
                     # No SW field — all heat into surface (legacy)

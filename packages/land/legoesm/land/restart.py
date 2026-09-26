@@ -16,8 +16,10 @@ overwrites::
         --restart-from $SCRATCH/spinup_yr01/restart_1921_d000h00.npz \\
         --output $SCRATCH/spinup_yr02
 
-Biophysics-only restarts (this branch's driver runs ``carbon.scheme="none"``).
-Carbon-pool restarts are additive (append ``carbon_*`` fields to the same npz)
+Biophysics restarts by default; the prognostic-carbon lane
+(``physics.carbon_prognostic``) additionally writes ``carbon_*`` pool fields
+plus ``soil_frozen_fraction`` into the same npz (purely additive, so a
+biophysics-only reader is unaffected)
 when we enable DALEC in a later push.
 """
 
@@ -168,6 +170,8 @@ def save_land_restart(
     metadata: dict[str, Any] | None = None,
     soil_grid=None,
     soil_dz=None,
+    carbon_state=None,
+    soil_frozen_fraction=None,
 ) -> Path:
     """Write ``state`` and its bookkeeping to a compressed ``.npz`` restart file.
 
@@ -242,6 +246,17 @@ def save_land_restart(
         val = getattr(state, field, None)
         if val is not None:
             payload[field] = np.asarray(val)
+
+    # --- optional prognostic carbon (additive; absent = biophysics-only) -----
+    # Written as flat ``carbon_<field>`` arrays so a biophysics-only reader is
+    # unaffected, and the permafrost phi alongside them: phi is NOT part of the
+    # land state, so without it a resumed run loses the SOM protection that the
+    # seeded high-latitude carbon was equilibrated under and the pools decay.
+    if carbon_state is not None:
+        for field in carbon_state._fields:
+            payload[f"carbon_{field}"] = np.asarray(getattr(carbon_state, field))
+    if soil_frozen_fraction is not None:
+        payload["soil_frozen_fraction"] = np.asarray(soil_frozen_fraction)
 
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -416,12 +431,28 @@ def load_land_restart(
         TgC=jnp.asarray(data["TgC"]) if "TgC" in data.files else None,
         **optional,
     )
+    # Prognostic carbon, when the writer had it.  Returned through ``meta`` so the
+    # (state, meta) contract every existing caller unpacks is unchanged; both
+    # entries are None for a biophysics-only restart.
+    from legoesm.land.carbon.config import CarbonState
+    _cfields = CarbonState._fields
+    carbon = None
+    if all(f"carbon_{f}" in data.files for f in _cfields):
+        carbon = CarbonState(**{f: jnp.asarray(data[f"carbon_{f}"]) for f in _cfields})
+    elif any(f"carbon_{f}" in data.files for f in _cfields):
+        _missing = [f for f in _cfields if f"carbon_{f}" not in data.files]
+        raise ValueError(
+            f"{path}: restart carries SOME carbon pools but is missing {_missing}; "
+            "refusing to resume from a partially-written carbon state.")
     meta = {
         "restart_version": version,
         "land_mode": land_mode,
         "t_end_s": float(data["t_end_s"]),
         "n_steps_completed": int(data["n_steps_completed"]),
         "metadata": json.loads(str(data["metadata_json"])) if "metadata_json" in data.files else {},
+        "carbon_state": carbon,
+        "soil_frozen_fraction": (jnp.asarray(data["soil_frozen_fraction"])
+                                 if "soil_frozen_fraction" in data.files else None),
     }
     return state, meta
 

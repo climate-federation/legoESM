@@ -120,9 +120,7 @@ def cbl_diagnostics(
     z_i_m : inversion height [m]; if ``None`` it is diagnosed as the height of
         maximum ∂⟨θ⟩/∂z above the surface layer.
     """
-    if g is None:
-        from legoesm import constants
-        g = float(constants.g)
+    g_override = None if g is None else float(g)
     z = np.asarray(z, dtype=float)
     theta_mean = np.asarray(theta_mean, dtype=float)
     w_variance = np.asarray(w_variance, dtype=float)
@@ -145,7 +143,11 @@ def cbl_diagnostics(
         z_i = float(z_i_m)
         k_inv = int(np.argmin(np.abs(z - z_i)))
 
-    w_star = (g / theta0 * Q0 * z_i) ** (1.0 / 3.0)
+    # g/θ₀ from the canonical helper (physics._shared.buoyancy_coefficient),
+    # which takes the gravity so an explicit override stays bit-exact.
+    from legoesm.atmosphere.physics._shared import buoyancy_coefficient
+    g_over_theta0 = float(buoyancy_coefficient(theta0, gravity=g_override))
+    w_star = (g_over_theta0 * Q0 * z_i) ** (1.0 / 3.0)
     sigma_w = np.sqrt(np.maximum(w_variance, 0.0))
     sigma_w_over_wstar_max = float(np.max(sigma_w) / w_star)
 

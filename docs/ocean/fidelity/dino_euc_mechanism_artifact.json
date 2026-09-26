@@ -1,0 +1,1430 @@
+{
+  "round6_review_record": {
+    "code_followups": {
+      "dead_knob": {
+        "commit": "b127bc29ae88b74ba523eb5f2031f2117e713c47",
+        "result": "cfg.tke_surface_min now feeds the nemo_z0 virtual Dirichlet row; coupled-solve liveness test added",
+        "status": "COMPLETE"
+      },
+      "dry_mask_comment": {
+        "result": "documents both layouts and the non-shipped nemo_z0+tke_dry_wmask=False dry-column change; shipped nemo_z0 cards set True",
+        "status": "COMPLETE"
+      },
+      "spied_component_assertion": {
+        "max_abs_error": 0.0,
+        "result": "selected masked TKE constructor output asserted identical to returned production A_v",
+        "status": "COMPLETE"
+      },
+      "substitution_runner": {
+        "committed_sha256": "6ad54b78cfaef762e199abe6b6d324cebe2d227f099d189df15f5a7157cb2fd4",
+        "executor_sha256": "b2de13ca7039a6954a7c3e115af249e834dc4b9be83343cc0188e56893d12845",
+        "path": "scripts/validate/ocean_fidelity/dino_1226/euc_substitution_run.py",
+        "print_verdict": "SUPERSEDED_FROZEN_AVM_UNINFORMATIVE",
+        "status": "COMPLETE"
+      },
+      "two_sided_replay_gate": {
+        "lower": 1.0542750040242836,
+        "observed": 1.054275004129711,
+        "status": "PASS",
+        "upper": 1.0542750042351385
+      }
+    },
+    "fix_review_disposition": "SHIP_BY_BOTH_REVIEWERS_NO_BLOCKERS",
+    "live_ab_day10_day90": {
+      "artifacts_sha256": {
+        "ab_fix.json": "b64ac051be2bcd96de9a4cdaa555b651f335ebe389eb255bd680708a59ab6083",
+        "ab_fix.log": "0db236bf77a17efdc0127cf690bb25bba19ae973fe7be1e5067e941c3353ed41",
+        "ab_prefix.json": "9f261792280c37a8d0e588bf4cd0df59f0bcb72110cf092e8be7bfc65cac49a0",
+        "ab_prefix.log": "94369cb116b5a7a1256887f1ce5f1a7e003fc1f2169a927fa20a5b880c6a451d"
+      },
+      "fix": {
+        "commit": "26d706b148f3e0748a9e0b595b522aa5f5862aef",
+        "shear_5_26_per_s": 0.02351156396539821,
+        "top_depth_m": 33.10293274657967
+      },
+      "nemo_control": {
+        "shear_5_26_per_s": 0.024217492894003795,
+        "top_depth_m": 32.74356907880807
+      },
+      "prefix": {
+        "commit": "2cb678259b8ca6745e71a3e10e042998f3af050f",
+        "reproduced_prior_baseline_bit_level": true,
+        "shear_5_26_per_s": 0.017059881624837042,
+        "top_depth_m": 34.83624117663979
+      },
+      "preregistered_bars": {
+        "P1_top4_velocity_error_rms": {
+          "bar": "CONFIRM <= 0.70",
+          "fix_m_s": 0.00614,
+          "prefix_m_s": 0.05612,
+          "ratio": 0.109,
+          "verdict": "CONFIRM"
+        },
+        "P2_shear_error": {
+          "bar": "CONFIRM <= 0.50",
+          "ratio": 0.099,
+          "verdict": "CONFIRM"
+        },
+        "P3_per_level_errors": {
+          "fix_minus_nemo_m_s": [
+            0.0074,
+            -0.0053,
+            -0.0074,
+            -0.0036
+          ],
+          "result": "all improved, same-sign pattern",
+          "verdict": "CONFIRM"
+        },
+        "P4_crossing": {
+          "fix_top_depth_m": 33.103,
+          "frozen_arm_overshoot_top_depth_m": 28.27,
+          "result": "NO_OVERSHOOT",
+          "verdict": "CONFIRM"
+        },
+        "global_do_no_harm": {
+          "acceptance_gate": "acceptance_gate_90d level 5x",
+          "acc_sv": {
+            "fix": 64.9876,
+            "nemo": 65.3692,
+            "prefix": 64.9838,
+            "result": "FIX moved toward NEMO"
+          },
+          "fix_gate": "CERTIFIED exit 0 PASS 5 | FAIL 0",
+          "prefix_gate": "CERTIFIED exit 0 PASS 5 | FAIL 0",
+          "prefix_to_fix_absolute_deltas_vs_threshold": {
+            "acc_sv": {
+              "delta": 0.00382,
+              "threshold": 0.455
+            },
+            "deep_contrast_kg_m3": {
+              "delta_approx": 1e-09,
+              "threshold": 0.000225
+            },
+            "s_band_sigma_max_kg_m3": {
+              "delta_approx": 1e-06,
+              "threshold": 0.000475
+            },
+            "s_band_sigma_mean_kg_m3": {
+              "delta_upper_bound": 1e-06,
+              "threshold": 0.000475
+            },
+            "upper_contrast_kg_m3": {
+              "delta": 2e-06,
+              "threshold": 0.00055
+            }
+          },
+          "result": "every PREFIX-to-FIX move is 2-5 orders inside tolerance",
+          "self_test": "PASS: synthetic violation fails all 5 metrics",
+          "verdict": "CONFIRM"
+        },
+        "persistence_day90": {
+          "bar": "CONFIRM ratio in [0.85,1.20]; approximately 0.70 REFUTE",
+          "extraction": "regional-audit probe imported at 91153f2aa; equator-row wet zonal-mean u, 5-26 m shear",
+          "fix_over_nemo": 0.9731,
+          "nemo_reference": "RUN_VERDICT360_M0 kt=8640",
+          "prefix_over_nemo": 0.7106,
+          "prefix_instrument_check": "reproduces recorded approximately 0.70",
+          "verdict": "CONFIRM"
+        }
+      },
+      "day90_executor_provenance": {
+        "artifacts": {
+          "fix_npz": {
+            "path": "/tmp/dino_euc_mechanism/twin90_fix/twin90_fix.npz",
+            "sha256": "66d00735c22b3106c37eca3b91022d38477b578bef8cc2c997d215c2395f1f2d"
+          },
+          "fix_run_log": {
+            "path": "/tmp/dino_euc_mechanism/twin90_fix.log",
+            "sha256": "897a51c52c32775c40149bc1c8bb1a5d219bbb4a19ce5a16db70c4f3df97f2c9"
+          },
+          "fix_gate_log": {
+            "path": "/tmp/dino_euc_mechanism/gate_fix.log",
+            "sha256": "4bc8489be90b327c114ca885e036582e0b22d3695b96b650b7a09f95760e7078"
+          },
+          "prefix_npz": {
+            "path": "/tmp/dino_euc_mechanism/twin90_prefix/twin90_prefix.npz",
+            "sha256": "47e3fc69cf53c76d37b564d3bcbdcc691c945112d563e79ad05e9db0dcb037db"
+          },
+          "prefix_run_log": {
+            "path": "/tmp/dino_euc_mechanism/twin90_prefix.log",
+            "sha256": "5ec5e02194fdca8033c9ac573659d714b3da30bb9c65dd086f6aaa82288d31ed"
+          },
+          "prefix_gate_log": {
+            "path": "/tmp/dino_euc_mechanism/gate_prefix.log",
+            "sha256": "d5b18df09be08672c29593f40389889ef2317d57dcc3391c3e2eca3cf7ae06d6"
+          }
+        },
+        "control_dtype": "float64",
+        "day0_gate": "all maxima exactly zero",
+        "dirty_tracked_files_both": 0,
+        "harness": "kamm_twin_90d.py verified byte-identical across arms",
+        "harness_sha256": "00b5f0d6c6c58ef984e010825239af27f768b83cf431e8763d236325c7cf68e6",
+        "invocation": "kamm_twin_90d.py nemo_dino_kamm_mlf <out>.npz --days 90 --save-3d --bridge-before",
+        "ladder": "both",
+        "ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9",
+        "source": "coordinator executor",
+        "stable_finite_both": true,
+        "start": "bridged",
+        "steps_each": 2880,
+        "worktrees": "clean"
+      },
+      "runner_sha256_both_arms": "b2de13ca7039a6954a7c3e115af249e834dc4b9be83343cc0188e56893d12845",
+      "state_controls": "day-0 identity and all bridge maxima exactly zero",
+      "verdict": "CONFIRMED_DAY10_DAY90_DO_NO_HARM"
+    },
+    "residual_owner": {
+      "label": "PLAUSIBLE_MOMENTUM_SHEAR_RESIDUAL",
+      "measured_en_ratio": 1.054275004129711,
+      "production_ratio": 1.0468337609462448,
+      "self_limiting_prediction_en_proportional_P_to_2_over_3": 1.031,
+      "statement": "remaining momentum/shear-field difference is plausibly downstream of the same prior over-mixing"
+    },
+    "retractions": {
+      "frozen_avm_arm": {
+        "base_top4_error_m_s": [
+          0.0553,
+          -0.0173,
+          -0.0953,
+          -0.0124
+        ],
+        "base_top4_rms_m_s": 0.0561,
+        "nemo_avm_top4_error_m_s": [
+          0.052,
+          0.0697,
+          0.0689,
+          0.0333
+        ],
+        "nemo_avm_top4_rms_m_s": 0.0579,
+        "retracted_claim": "89 percent of gap closed / scalar shear improvement",
+        "statement": "UNINFORMATIVE about the fix: upper-37-m RMS degraded about 3 percent; apparent shear win was sign cancellation; top_depth and shear_5_26 are both dominated by u(26 m)",
+        "status": "RETRACTED_LOUD"
+      },
+      "one_term_replays": {
+        "arm_max_abs_change_at_10m": 0.0,
+        "factor_ratios_remain_evidence": [
+          1.0468337609462448,
+          0.9663188638317978,
+          1.000198950360976,
+          1.0
+        ],
+        "statement": "all replay responses saturated at the misplaced 1e-4 clamp; zero closure cannot exonerate any term",
+        "status": "SATURATED_NOT_EVIDENCE"
+      },
+      "test_receipts": {
+        "statement": "prior 127-pass aggregate and 1-failed red receipt are retracted; exact-command ledger is faithful_surface_floor_fix.tests; reviewer reproduced 2 red failures at 2cb678259",
+        "status": "RETRACTED_AND_REPLACED"
+      }
+    },
+    "scope_extra_consumer": {
+      "kind": "auditor expectation, not shipped card",
+      "path": "scripts/validate/ocean_fidelity/audit_orca1_tke_card.py",
+      "tke_surface_bc_level_expectation": "nemo_z0"
+    }
+  },
+  "controls": {
+    "correct_nrms": 0.6886528366932417,
+    "day0_identity": "verified by _build_twin_state; max dT,deta,du,dv,dbefore,dTKE all 0 in log",
+    "dry_cell_plant_count": 86,
+    "dry_cell_plant_detected": true,
+    "empty_mask_raises": true,
+    "evd_nonvacuity_max_abs_Kv_prod_minus_closure": 99.99896739300415,
+    "wrong_shift_fails": true,
+    "wrong_shift_nrms": 1.2686120575106166
+  },
+  "equator": {
+    "depth_window_m": [
+      10.0,
+      40.0
+    ],
+    "latitude_deg": 0.0,
+    "row_zero_based": 99,
+    "weighting": "interface 0.5*(e3t_0[k]+e3t_0[k+1])"
+  },
+  "faithful_surface_floor_fix": {
+    "columns_energy_moved_toward_nemo_fraction": 1.0,
+    "configuration_reachability": {
+      "behavior_change": "Only nemo_dino_kamm and inherited nemo_dino_kamm_mlf ship nemo_z0. Generic programmatic/audit overrides selecting nemo_z0 also receive the corrected interior floor. All other shipped cards remain interior_pinned and byte-pinned.",
+      "resolved_cards": {
+        "legoesm_default": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "kpp"
+        },
+        "mitgcm": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "kpp"
+        },
+        "nemo_dino_kamm": {
+          "tke_surface_bc_level": "nemo_z0",
+          "vmix_scheme": "tke"
+        },
+        "nemo_dino_kamm_mlf": {
+          "tke_surface_bc_level": "nemo_z0",
+          "vmix_scheme": "tke"
+        },
+        "nemo_paper": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "tke"
+        },
+        "oceananigans": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "catke"
+        },
+        "veros": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "tke"
+        }
+      },
+      "shipped_nemo_z0_cards": [
+        "nemo_dino_kamm",
+        "nemo_dino_kamm_mlf"
+      ]
+    },
+    "depth_m": 10.13875112538517,
+    "energy_ratio_fixed_over_nemo": {
+      "geometric_mean": 1.054275004129711,
+      "iqr": [
+        1.0348545881944946,
+        1.0569215364364002
+      ],
+      "max": 1.1722186616315895,
+      "median": 1.0417783653443824,
+      "min": 1.024404728244825
+    },
+    "expected_replay_energy_ratio": 1.054275004129711,
+    "fix_commit": "d86d97d496463b9317764426573af958fe5f20b9",
+    "legacy_energy_ratio_reconstruction": 2.2556351135780925,
+    "mixing_length_ratio_fixed_over_nemo": {
+      "geometric_mean": 1.0267789447030766,
+      "iqr": [
+        1.0172780319051424,
+        1.0280665216422582
+      ],
+      "max": 1.0826904712693655,
+      "median": 1.0206754440334969,
+      "min": 1.0121288085924474
+    },
+    "momentum_viscosity_ratio_fixed_over_nemo": {
+      "geometric_mean": 1.0542750027076373,
+      "iqr": [
+        1.034854591277218,
+        1.056921530603507
+      ],
+      "max": 1.1722186591045354,
+      "median": 1.041778363698679,
+      "min": 1.024404726713796
+    },
+    "n_columns": 47,
+    "per_column": [
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1722186591045354,
+        "fixed_en_over_nemo": 1.1722186616315895,
+        "fixed_mxl_over_nemo": 1.0826904712693655,
+        "legacy_en_over_nemo": 3.552439122097292,
+        "longitude_deg": 2.5,
+        "x_index_zero_based": 3
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1369060989589088,
+        "fixed_en_over_nemo": 1.1369061027072223,
+        "fixed_mxl_over_nemo": 1.0662579871731772,
+        "legacy_en_over_nemo": 3.1899441801573913,
+        "longitude_deg": 3.5,
+        "x_index_zero_based": 4
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1338761799155055,
+        "fixed_en_over_nemo": 1.1338761847305463,
+        "fixed_mxl_over_nemo": 1.0648362198481345,
+        "legacy_en_over_nemo": 2.305932650626343,
+        "longitude_deg": 4.5,
+        "x_index_zero_based": 5
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1210422426353344,
+        "fixed_en_over_nemo": 1.1210422474036141,
+        "fixed_mxl_over_nemo": 1.058792821031128,
+        "legacy_en_over_nemo": 2.089613225672512,
+        "longitude_deg": 5.5,
+        "x_index_zero_based": 6
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1065059076440613,
+        "fixed_en_over_nemo": 1.106505912934628,
+        "fixed_mxl_over_nemo": 1.0519058429125179,
+        "legacy_en_over_nemo": 2.0506105895290703,
+        "longitude_deg": 6.5,
+        "x_index_zero_based": 7
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0933188882858944,
+        "fixed_en_over_nemo": 1.0933188937453673,
+        "fixed_mxl_over_nemo": 1.0456188994210183,
+        "legacy_en_over_nemo": 2.1007843038166025,
+        "longitude_deg": 7.5,
+        "x_index_zero_based": 8
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0840180513479423,
+        "fixed_en_over_nemo": 1.0840180564929893,
+        "fixed_mxl_over_nemo": 1.0411618731988292,
+        "legacy_en_over_nemo": 2.1190271333876813,
+        "longitude_deg": 8.5,
+        "x_index_zero_based": 9
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0772522049904503,
+        "fixed_en_over_nemo": 1.0772522097814126,
+        "fixed_mxl_over_nemo": 1.0379076067740753,
+        "legacy_en_over_nemo": 2.1390830045069347,
+        "longitude_deg": 9.5,
+        "x_index_zero_based": 10
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0716549500507895,
+        "fixed_en_over_nemo": 1.0716549546550302,
+        "fixed_mxl_over_nemo": 1.0352076822775944,
+        "legacy_en_over_nemo": 2.1611524072976738,
+        "longitude_deg": 10.5,
+        "x_index_zero_based": 11
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0667964568910149,
+        "fixed_en_over_nemo": 1.0667964616271066,
+        "fixed_mxl_over_nemo": 1.032858389206828,
+        "legacy_en_over_nemo": 2.1882814009897293,
+        "longitude_deg": 11.5,
+        "x_index_zero_based": 12
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0624762008699284,
+        "fixed_en_over_nemo": 1.06247620602427,
+        "fixed_mxl_over_nemo": 1.0307648595657435,
+        "legacy_en_over_nemo": 2.222262656993156,
+        "longitude_deg": 12.5,
+        "x_index_zero_based": 13
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0587043874578228,
+        "fixed_en_over_nemo": 1.0587043930804496,
+        "fixed_mxl_over_nemo": 1.0289336139106333,
+        "legacy_en_over_nemo": 2.2386312825525954,
+        "longitude_deg": 13.5,
+        "x_index_zero_based": 14
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.055138673749191,
+        "fixed_en_over_nemo": 1.0551386797923508,
+        "fixed_mxl_over_nemo": 1.0271994293738833,
+        "legacy_en_over_nemo": 2.2300788988119105,
+        "longitude_deg": 14.5,
+        "x_index_zero_based": 15
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0515219585714148,
+        "fixed_en_over_nemo": 1.0515219648312544,
+        "fixed_mxl_over_nemo": 1.025437444367805,
+        "legacy_en_over_nemo": 2.2141384077445694,
+        "longitude_deg": 15.5,
+        "x_index_zero_based": 16
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0486497158225978,
+        "fixed_en_over_nemo": 1.048649721976743,
+        "fixed_mxl_over_nemo": 1.0240359904165734,
+        "legacy_en_over_nemo": 2.2167394078666893,
+        "longitude_deg": 16.5,
+        "x_index_zero_based": 17
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0482224730995666,
+        "fixed_en_over_nemo": 1.048222478771113,
+        "fixed_mxl_over_nemo": 1.0238273621211833,
+        "legacy_en_over_nemo": 2.148210587810033,
+        "longitude_deg": 17.5,
+        "x_index_zero_based": 18
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0486868654066819,
+        "fixed_en_over_nemo": 1.0486868702594694,
+        "fixed_mxl_over_nemo": 1.0240541296991554,
+        "legacy_en_over_nemo": 2.0934636588109,
+        "longitude_deg": 18.5,
+        "x_index_zero_based": 19
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0480148782994188,
+        "fixed_en_over_nemo": 1.0480148822439743,
+        "fixed_mxl_over_nemo": 1.0237259762040147,
+        "legacy_en_over_nemo": 2.110333892179083,
+        "longitude_deg": 19.5,
+        "x_index_zero_based": 20
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0472175390138017,
+        "fixed_en_over_nemo": 1.0472175421640537,
+        "fixed_mxl_over_nemo": 1.0233364724583744,
+        "legacy_en_over_nemo": 2.1001651389902265,
+        "longitude_deg": 20.5,
+        "x_index_zero_based": 21
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0463260105027155,
+        "fixed_en_over_nemo": 1.0463260130548444,
+        "fixed_mxl_over_nemo": 1.0229007810880713,
+        "legacy_en_over_nemo": 2.1071281859299007,
+        "longitude_deg": 21.5,
+        "x_index_zero_based": 22
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0453616676644746,
+        "fixed_en_over_nemo": 1.045361669857604,
+        "fixed_mxl_over_nemo": 1.0224292960744745,
+        "legacy_en_over_nemo": 2.1106934974456064,
+        "longitude_deg": 22.5,
+        "x_index_zero_based": 23
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0444137070943025,
+        "fixed_en_over_nemo": 1.0444137091183454,
+        "fixed_mxl_over_nemo": 1.0219656085555224,
+        "legacy_en_over_nemo": 2.103548918358442,
+        "longitude_deg": 23.5,
+        "x_index_zero_based": 24
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0432726848458922,
+        "fixed_en_over_nemo": 1.0432726867500397,
+        "fixed_mxl_over_nemo": 1.0214072072105935,
+        "legacy_en_over_nemo": 2.0822824985582473,
+        "longitude_deg": 24.5,
+        "x_index_zero_based": 25
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.041778363698679,
+        "fixed_en_over_nemo": 1.0417783653443824,
+        "fixed_mxl_over_nemo": 1.0206754440334969,
+        "legacy_en_over_nemo": 2.064809018488128,
+        "longitude_deg": 25.5,
+        "x_index_zero_based": 26
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0405668927694496,
+        "fixed_en_over_nemo": 1.0405668939091652,
+        "fixed_mxl_over_nemo": 1.0200818063418904,
+        "legacy_en_over_nemo": 2.0639680538341296,
+        "longitude_deg": 26.5,
+        "x_index_zero_based": 27
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0403407538375984,
+        "fixed_en_over_nemo": 1.040340754209325,
+        "fixed_mxl_over_nemo": 1.019970957167836,
+        "legacy_en_over_nemo": 2.037311469817539,
+        "longitude_deg": 27.5,
+        "x_index_zero_based": 28
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.040233218779851,
+        "fixed_en_over_nemo": 1.040233218216496,
+        "fixed_mxl_over_nemo": 1.019918241499389,
+        "legacy_en_over_nemo": 2.027963035268895,
+        "longitude_deg": 28.5,
+        "x_index_zero_based": 29
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0398861076437755,
+        "fixed_en_over_nemo": 1.0398861060895714,
+        "fixed_mxl_over_nemo": 1.0197480616299202,
+        "legacy_en_over_nemo": 2.041713498101163,
+        "longitude_deg": 29.5,
+        "x_index_zero_based": 30
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0396948268351591,
+        "fixed_en_over_nemo": 1.039694824459215,
+        "fixed_mxl_over_nemo": 1.0196542694517112,
+        "legacy_en_over_nemo": 2.0503147548061014,
+        "longitude_deg": 30.5,
+        "x_index_zero_based": 31
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0395431356554405,
+        "fixed_en_over_nemo": 1.0395431327188072,
+        "fixed_mxl_over_nemo": 1.0195798833794603,
+        "legacy_en_over_nemo": 2.05576409351705,
+        "longitude_deg": 31.5,
+        "x_index_zero_based": 32
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0390640330337764,
+        "fixed_en_over_nemo": 1.0390640298628193,
+        "fixed_mxl_over_nemo": 1.0193449054195218,
+        "legacy_en_over_nemo": 2.060028428348294,
+        "longitude_deg": 32.5,
+        "x_index_zero_based": 33
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0380774454580943,
+        "fixed_en_over_nemo": 1.0380774423356411,
+        "fixed_mxl_over_nemo": 1.0188608583023238,
+        "legacy_en_over_nemo": 2.075202246688665,
+        "longitude_deg": 33.5,
+        "x_index_zero_based": 34
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0367111689391175,
+        "fixed_en_over_nemo": 1.0367111658657524,
+        "fixed_mxl_over_nemo": 1.0181901453129876,
+        "legacy_en_over_nemo": 2.1111731962774694,
+        "longitude_deg": 34.5,
+        "x_index_zero_based": 35
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0354921219608306,
+        "fixed_en_over_nemo": 1.035492119062397,
+        "fixed_mxl_over_nemo": 1.0175913348978873,
+        "legacy_en_over_nemo": 2.1568426499838877,
+        "longitude_deg": 35.5,
+        "x_index_zero_based": 36
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0347302869588606,
+        "fixed_en_over_nemo": 1.0347302842260322,
+        "fixed_mxl_over_nemo": 1.0172169334471821,
+        "legacy_en_over_nemo": 2.169584364883363,
+        "longitude_deg": 36.5,
+        "x_index_zero_based": 37
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.033930560999343,
+        "fixed_en_over_nemo": 1.0339305581778984,
+        "fixed_mxl_over_nemo": 1.0168237624194212,
+        "legacy_en_over_nemo": 2.2228773185109345,
+        "longitude_deg": 37.5,
+        "x_index_zero_based": 38
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.03387308617567,
+        "fixed_en_over_nemo": 1.0338730830699108,
+        "fixed_mxl_over_nemo": 1.0167955002267808,
+        "legacy_en_over_nemo": 2.2467744068306637,
+        "longitude_deg": 38.5,
+        "x_index_zero_based": 39
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0348805779018473,
+        "fixed_en_over_nemo": 1.0348805746962746,
+        "fixed_mxl_over_nemo": 1.0172908045919906,
+        "legacy_en_over_nemo": 2.1781228945008464,
+        "longitude_deg": 39.5,
+        "x_index_zero_based": 40
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0348286046525887,
+        "fixed_en_over_nemo": 1.0348286016927144,
+        "fixed_mxl_over_nemo": 1.0172652592182942,
+        "legacy_en_over_nemo": 2.2186633631113843,
+        "longitude_deg": 40.5,
+        "x_index_zero_based": 41
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0342461343304323,
+        "fixed_en_over_nemo": 1.03424613181511,
+        "fixed_mxl_over_nemo": 1.0169789264511606,
+        "legacy_en_over_nemo": 2.240903621788162,
+        "longitude_deg": 41.5,
+        "x_index_zero_based": 42
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0340905532681548,
+        "fixed_en_over_nemo": 1.0340905513922196,
+        "fixed_mxl_over_nemo": 1.0169024314771253,
+        "legacy_en_over_nemo": 2.272689480234098,
+        "longitude_deg": 42.5,
+        "x_index_zero_based": 43
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0341005878851641,
+        "fixed_en_over_nemo": 1.0341005867669828,
+        "fixed_mxl_over_nemo": 1.0169073650059504,
+        "legacy_en_over_nemo": 2.323991819570637,
+        "longitude_deg": 43.5,
+        "x_index_zero_based": 44
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0346495705265752,
+        "fixed_en_over_nemo": 1.0346495702495384,
+        "fixed_mxl_over_nemo": 1.0171772563342203,
+        "legacy_en_over_nemo": 2.3374738678992015,
+        "longitude_deg": 44.5,
+        "x_index_zero_based": 45
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0339517839546775,
+        "fixed_en_over_nemo": 1.0339517843884702,
+        "fixed_mxl_over_nemo": 1.0168341966716525,
+        "legacy_en_over_nemo": 2.3028077577270993,
+        "longitude_deg": 45.5,
+        "x_index_zero_based": 46
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0292789061475756,
+        "fixed_en_over_nemo": 1.0292789073292994,
+        "fixed_mxl_over_nemo": 1.0145338362843555,
+        "legacy_en_over_nemo": 2.608770934249898,
+        "longitude_deg": 46.5,
+        "x_index_zero_based": 47
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.024404726713796,
+        "fixed_en_over_nemo": 1.024404728244825,
+        "fixed_mxl_over_nemo": 1.0121288085924474,
+        "legacy_en_over_nemo": 3.267465725409393,
+        "longitude_deg": 47.5,
+        "x_index_zero_based": 48
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0323134476424756,
+        "fixed_en_over_nemo": 1.0323134494179542,
+        "fixed_mxl_over_nemo": 1.0160282702105277,
+        "legacy_en_over_nemo": 4.489353050467041,
+        "longitude_deg": 48.5,
+        "x_index_zero_based": 49
+      }
+    ],
+    "provenance": {
+      "input_sha256": {
+        "fixed_tke_source": "608d4f55fe935382881ed6c584befc905de20baf7d730db344abe1cad3902fea",
+        "mesh_mask": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+        "nemo_avm": "1240ccb86e674edd1309831e2292a244aaabc3bca2f245b530fd3b88b59c275f",
+        "nemo_en": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
+        "nemo_zmxlm": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830",
+        "regression_test": "a19cfc2d45c5c3009f0f242057c789cd42604c0cab26eb2683640c94279e60b4",
+        "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+        "verifier": "48ab1f76fd571deba7f0cbf755a6bd467fdfd561c68b9ee29dde9cd76a8c7559"
+      },
+      "pinned_reducers": {
+        "bn2_alpha_compare.py": "2ac9e4a457c4dded55a116d67938dfda035e79a3a98ccbb070d9a0ec3d11e40e",
+        "dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
+        "euc_mechanism.py": "7cf83a31ee4ede6fff6ae7dc095e215ce155809a74d0620288a6cbf55e5621d5",
+        "kamm_twin_90d.py": "00b5f0d6c6c58ef984e010825239af27f768b83cf431e8763d236325c7cf68e6",
+        "zdftke_avm_offset_scan.py": "7ec40312dba6d70b7d6bb9ed5349b5861c7fa1b1ab4859b7c2f9c5c785300feb"
+      },
+      "repo": {
+        "branch": "fidelity/dino-euc-mechanism-codex",
+        "dirty": false,
+        "head": "90046fc107442528cc66d921907394000f02b8ce"
+      }
+    },
+    "replay_match_two_sided_band": {
+      "lower": 1.0542750040242836,
+      "relative_tolerance": 1e-10,
+      "upper": 1.0542750042351385
+    },
+    "source_contract": {
+      "lego_fix": "tke.py: surface-min clamp guarded by surface_bc_level == 'interior_pinned'",
+      "nemo_interior": "cfgs/DINO/MY_SRC/zdftke.F90:564-565 rn_emin at jk=2..jpkm1",
+      "nemo_surface": "cfgs/DINO/MY_SRC/zdftke.F90:361 rn_emin0 at surface jk=1"
+    },
+    "spied_component_pick": {
+      "assertion_tolerance": 2.1570576469956052e-12,
+      "matching_shape_calls": 2,
+      "max_abs_error": 0.0,
+      "selected_zero_based": 1
+    },
+    "state": "shared NEMO day-180 restart; first matched step kt=5761",
+    "surface_knob_followup_commit": "b127bc29ae88b74ba523eb5f2031f2117e713c47",
+    "tests": {
+      "focused_identity_and_prognostic": {
+        "command": "env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=\"$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_tke_nemo_identity.py tests/ocean/unit/test_tke_prognostic.py",
+        "result": "76 passed in 129.34s"
+      },
+      "focused_surface_terms": {
+        "command": "env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=\"$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_tke_nemo_terms.py",
+        "result": "52 passed in 37.95s"
+      },
+      "mpas_forced_x64_diagnostic_not_a_pass": {
+        "cause": "forced process-global x64 makes scan inputs float64 against the MPAS float32 policy; the supported clean policy command above passes",
+        "command": "env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=\"$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_mpas_tke.py",
+        "result": "34 passed, 2 failed, 9 warnings in 39.41s"
+      },
+      "red_before_fix": {
+        "result": "reviewer reproduction at 2cb678259: 2 failed; the prior report's 1-failed count is retracted"
+      },
+      "vertical_mixing_consumers_mpas": {
+        "command": "env -u JAX_ENABLE_X64 CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu PYTHONPATH=\"$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_mpas_tke.py",
+        "result": "36 passed, 9 warnings in 43.05s"
+      },
+      "vertical_mixing_consumers_non_mpas": {
+        "command": "env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=\"$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_tke_integration.py tests/ocean/unit/test_combined_pipeline_tke_evd_gate.py tests/ocean/unit/test_implicit_vertical_mixing.py tests/ocean/unit/test_tke_post_mixing.py tests/ocean/unit/test_tke_dry_wmask.py tests/ocean/unit/test_tke_n2_before_advection.py",
+        "result": "57 passed in 110.32s"
+      }
+    },
+    "verdict": "CONFIRM_REAL_FIX_MATCHES_OFFLINE_REPLAY",
+    "verification_producer_head": "90046fc107442528cc66d921907394000f02b8ce"
+  },
+  "headline_verdict": "CONFIRM_VISCOSITY_PRIME_SUSPECT",
+  "import_receipt": {
+    "module": "/tmp/euc-mechanism-localgit/packages/ocean/legoesm/ocean/physics/vertical_mixing/__init__.py",
+    "within_worktree": true
+  },
+  "input_sha256": {
+    "mesh_mask": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "namelist": "0e75f4cb32dad3ed3fc17b721651ec12e0366c2978df8c65a6e95ae80b48d68b",
+    "nemo_avm_closure": "1240ccb86e674edd1309831e2292a244aaabc3bca2f245b530fd3b88b59c275f",
+    "nemo_avm_realized": "ad8104d352838ff36c1c09cb3b21231eacabeb00ce7bd2b5477cc40ead4faed0",
+    "nemo_avt_closure": "6f34238727e142e4036a629ed20fde47220e290d2f11f20618aef34e72d91c34",
+    "nemo_avt_realized": "a6cc3fca6348c10c73ab0bf3bf4081c38be8d20a6f2cbdd00de521e21252eeca",
+    "nemo_binary": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "nemo_buoyancy_frequency": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
+    "nemo_carried_dissipation": "facba1529b41577cf12b5d4cf5f43dc0ec9fed63ec4b073de17748204e8e15df",
+    "nemo_mixing_length": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830",
+    "nemo_shear_production": "2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53",
+    "nemo_surface_utau": "9c6943a02c5221feeb5b56d023418e69860d31d5ea0ded51437e7886811641f8",
+    "nemo_tke_energy": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
+    "nemo_tke_self_diffusion_input": "f05299d26b198ffad1449bf29bebfa8f2035de0b339be030bbf1c4eba0bce5bd",
+    "ocean_output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "probe_source": "7cf83a31ee4ede6fff6ae7dc095e215ce155809a74d0620288a6cbf55e5621d5",
+    "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "time_level_registry": "a0f0a16702ac4ce1b2c9ac63e19df1fbef154031cf6f2e2df71c6cc779f21fad"
+  },
+  "lane": {
+    "kt": 5761,
+    "name": "d180",
+    "restart": "DINO_00005760_restart.nc",
+    "run_dir": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R"
+  },
+  "oracle_repo": {
+    "branch": "master",
+    "dirty": true,
+    "head": "0f6b6ac34b9e07425f47dc97eaf35838a5327532"
+  },
+  "pinned_reducers": {
+    "bn2_alpha_compare.py": "2ac9e4a457c4dded55a116d67938dfda035e79a3a98ccbb070d9a0ec3d11e40e",
+    "dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
+    "kamm_twin_90d.py": "00b5f0d6c6c58ef984e010825239af27f768b83cf431e8763d236325c7cf68e6",
+    "zdftke_avm_offset_scan.py": "7ec40312dba6d70b7d6bb9ed5349b5861c7fa1b1ab4859b7c2f9c5c785300feb"
+  },
+  "precision": {
+    "jax_enable_x64": "1",
+    "state_dtype": "float64"
+  },
+  "repo": {
+    "branch": "fidelity/dino-euc-mechanism-codex",
+    "dirty": false,
+    "head": "5673a51e98b2aff668558e8ef028ed85e8bf63f8"
+  },
+  "review_retraction": {
+    "cuda_integrity_accusation": "WITHDRAWN_BY_REVIEWER; original no-CUDA status was honest",
+    "old_headline": "vertical mixing not supported at core depth",
+    "reason": "the 10.14 m interface sets the audited 5-26 m shear; its 2.05x avm excess predicts both weaker shear and a deeper core",
+    "status": "RETRACTED"
+  },
+  "schema": "dino-euc-mechanism-v3-faithful-fix",
+  "scores": {
+    "closure_avm": {
+      "diagnostic_nrms_20_40m": 0.03184802669844877,
+      "diagnostic_nrms_26_40m": 0.032383569149015384,
+      "lego_level_mean_m2_s": [
+        0.0014776672106566041,
+        0.00030048746523774557,
+        0.00044753764745197845
+      ],
+      "lego_over_nemo": [
+        2.05144215158544,
+        0.9861809374330623,
+        1.0141563340212072
+      ],
+      "level_depth_m": [
+        10.13875112538517,
+        20.593063338905267,
+        31.428849032898142
+      ],
+      "nemo_level_mean_m2_s": [
+        0.0007203065460630227,
+        0.00030469810744860535,
+        0.0004412905904531085
+      ],
+      "nrms": 0.6886528366932417,
+      "original_verdict": "UNRESOLVED_CLOSURE_DIFFERENCE",
+      "review_reissued_verdict": "CONFIRM_VISCOSITY_PRIME_SUSPECT"
+    },
+    "closure_avt": {
+      "diagnostic_nrms_20_40m": 0.04606982852006467,
+      "diagnostic_nrms_26_40m": 0.04395277901735231,
+      "lego_level_mean_m2_s": [
+        0.0013262584135499101,
+        0.0002677249395727572,
+        0.0003784983937106147
+      ],
+      "lego_over_nemo": [
+        2.2715923394819257,
+        0.9731380424272813,
+        1.0215143258815558
+      ],
+      "level_depth_m": [
+        10.13875112538517,
+        20.593063338905267,
+        31.428849032898142
+      ],
+      "nemo_level_mean_m2_s": [
+        0.0005838452571346429,
+        0.00027511506888064466,
+        0.0003705267602429116
+      ],
+      "nrms": 0.8204455094775336,
+      "original_verdict": "UNRESOLVED_CLOSURE_DIFFERENCE",
+      "review_reissued_verdict": "CONFIRM_VISCOSITY_PRIME_SUSPECT"
+    },
+    "realized_avm": {
+      "diagnostic_nrms_20_40m": 5.512835849377933e-07,
+      "diagnostic_nrms_26_40m": 4.932712174529429e-07,
+      "lego_level_mean_m2_s": [
+        0.0014776672106566041,
+        0.00030048746523774557,
+        20.00021231867003
+      ],
+      "lego_over_nemo": [
+        2.05144215158544,
+        0.9861809374330623,
+        1.0000002890771267
+      ],
+      "level_depth_m": [
+        10.13875112538517,
+        20.593063338905267,
+        31.428849032898142
+      ],
+      "nemo_evd_fraction_by_level": [
+        0.0,
+        0.0,
+        0.19230769230769232
+      ],
+      "nemo_level_mean_m2_s": [
+        0.0007203065460630227,
+        0.00030469810744860535,
+        20.000206537067793
+      ],
+      "nrms": 1.883166136202312e-05,
+      "original_verdict": "UNRESOLVED_CLOSURE_DIFFERENCE",
+      "review_reissued_verdict": "UNRESOLVED_VISCOSITY_PRIME_SUSPECT"
+    },
+    "realized_avt": {
+      "diagnostic_nrms_20_40m": 7.752730774304767e-07,
+      "diagnostic_nrms_26_40m": 6.590544541665125e-07,
+      "lego_level_mean_m2_s": [
+        0.0013262584135499101,
+        0.0002677249395727572,
+        20.00014327941629
+      ],
+      "lego_over_nemo": [
+        2.2715923394819257,
+        0.9731380424272813,
+        1.0000003753063875
+      ],
+      "level_depth_m": [
+        10.13875112538517,
+        20.593063338905267,
+        31.428849032898142
+      ],
+      "nemo_evd_fraction_by_level": [
+        0.0,
+        0.0,
+        0.19230769230769232
+      ],
+      "nemo_level_mean_m2_s": [
+        0.0005838452571346429,
+        0.00027511506888064466,
+        20.00013577323758
+      ],
+      "nrms": 1.7819341061642592e-05,
+      "original_verdict": "UNRESOLVED_CLOSURE_DIFFERENCE",
+      "review_reissued_verdict": "UNRESOLVED_VISCOSITY_PRIME_SUSPECT"
+    }
+  },
+  "short_run": {
+    "arm": "at every legoESM step replace only non-EVD momentum viscosity K_m passed to the implicit vertical momentum solve by frozen NEMO day-180 tke_dump_avm_final[jk=2..36]; retain legoESM K_v, TKE evolution, surface forcing, and cells where the native EVD trigger sets K_m=100 m2/s",
+    "base": "shipped nemo_dino_kamm_mlf",
+    "confirm": "Cz >= 0.50 toward NEMO and shear absolute error worsens by no more than 10%",
+    "controls": [
+      "day-0 BASE/arm state identity bit-for-bit",
+      "hook returns bit-identical K_v and TKE to BASE and changes K_m only outside native EVD cells",
+      "dry/wet-mask plant and one-level vertical-shift plant must fail",
+      "2x K_m plant must change first-step momentum tendency",
+      "BASE must reproduce the archived verdict360 control at day 10",
+      "read and re-record every NPZ provenance stamp and all coefficient/source hashes"
+    ],
+    "cost": {
+      "basis": "archived shipped m0_control.log reports day 10 wall=93 s and day 360 wall=637 s on one GPU; separate BASE/arm processes each compile",
+      "gpu_seconds_pair_estimate_including_separate_jit": 186,
+      "gpu_seconds_per_arm_estimate_including_jit": 93,
+      "steady_state_gpu_seconds_per_10_day_arm": 18,
+      "storage_estimate": "roughly 25 MiB per arm with only day-0/day-10 3-D snapshots"
+    },
+    "device": "CUDA_VISIBLE_DEVICES=0",
+    "duration_days": 10,
+    "initial_state": "bit-identical NEMO/legoESM day-180 now,before,TKE restart bridge",
+    "readout": "daily equatorial wet-zonal-mean u(z); shallowest 0-100 m zero crossing and 2-level shear",
+    "refute": "Cz <= 0.10 or response is away from NEMO",
+    "retraction": "Frozen NEMO_AVM shifted the whole upper 37 m eastward and degraded top-four-level velocity-error RMS from 0.0561 to 0.0579; its shear scalar win was sign cancellation. Cz and its historical REFUTE are superseded and uninformative about the faithful clamp fix.",
+    "runner": "scripts/validate/ocean_fidelity/dino_1226/euc_substitution_run.py",
+    "status": "SUPERSEDED_FROZEN_AVM_UNINFORMATIVE",
+    "steps": 320,
+    "unmeasurable": "BASE day-10 core-depth error < 0.5 m"
+  },
+  "source_trace": {
+    "lego_call_path": "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6347-6519",
+    "lego_closure": "packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py:108",
+    "lego_config": "packages/ocean/legoesm/ocean/experiments/dino.py:2890-2941,3234-3259",
+    "nemo_dispatch": "src/OCE/ZDF/zdfphy.F90:264-286,311-323",
+    "nemo_evd": "src/OCE/ZDF/zdfevd.F90:92-120",
+    "nemo_namelist": "RUN_VERDICT360_M0/namelist_cfg:384-401 (TKE+EVD, nn_evdm=1)",
+    "nemo_tke_mixing_length": "src/OCE/ZDF/zdftke.F90:575-724"
+  },
+  "state": "shared day-180, first matched step kt=5761",
+  "tke_closure_attribution_10m": {
+    "depth_m": 10.13875112538517,
+    "direct_zonal_mean_ratio": 2.051442151585441,
+    "eligible_fraction": 0.98,
+    "executed_branch": "MY_SRC/zdftke.F90:832-837: zsqen=SQRT(en); zav=rn_ediff*zmxlm*zsqen; p_avm=MAX(zav,avmb)*wmask. No pdlr/stability multiplier acts on avm; :841-844 updates avt only.",
+    "label": "DISTRIBUTED_OR_UNRESOLVED",
+    "max_direct_reconstruction_relative_error": 0.0,
+    "max_log_factor_closure_error": 2.220446049250313e-16,
+    "n_eligible": 49,
+    "n_excess": 47,
+    "n_wet": 50,
+    "round6_interpretation": "The nominal 50/50 energy/mixing-length log split is an algebraic identity on the active buoyancy limb zmxlm=sqrt(2*en/N2), hence avm is proportional to en. It is a consistency check, not an independent decomposition result.",
+    "pieces": {
+      "coefficient_stability": {
+        "factor_iqr": [
+          1.0,
+          1.0
+        ],
+        "geometric_mean_factor": 1.0,
+        "median_abs_log_score": 0.0,
+        "score_share": 0.0,
+        "sign_agreement_fraction": 0.0
+      },
+      "mixing_length": {
+        "factor_iqr": [
+          1.4462149002158422,
+          1.4965851654848727
+        ],
+        "geometric_mean_factor": 1.5018771945445477,
+        "median_abs_log_score": 0.3843227108986063,
+        "score_share": 0.5000000018207927,
+        "sign_agreement_fraction": 1.0
+      },
+      "tke_energy": {
+        "factor_iqr": [
+          1.4462149066377044,
+          1.4965851676390733
+        ],
+        "geometric_mean_factor": 1.5018771965703763,
+        "median_abs_log_score": 0.38432270809951824,
+        "score_share": 0.4999999981792072,
+        "sign_agreement_fraction": 1.0
+      }
+    },
+    "time_levels": {
+      "dump_avm.bin": "now",
+      "dump_avt.bin": "now",
+      "sbc_dump_utau.bin": "now",
+      "tke_dump_avm_final.bin": "now",
+      "tke_dump_avm_in.bin": "before",
+      "tke_dump_dissl.bin": "now",
+      "tke_dump_en.bin": "now",
+      "tke_dump_rn2.bin": "now",
+      "tke_dump_sh2.bin": "before",
+      "tke_dump_zmxlm.bin": "now"
+    }
+  },
+  "tke_energy_single_root_10m": {
+    "active_limb": {
+      "lego_buoyancy_limited_fraction": 1.0,
+      "lego_distance_bounded_fraction": 0.0,
+      "nemo_buoyancy_limited_fraction": 1.0,
+      "nemo_distance_bounded_fraction": 0.0,
+      "relative_equality_tolerance": 1e-08
+    },
+    "depth_m": 10.13875112538517,
+    "energy_ratio": {
+      "geometric_mean": 2.2556351135780925,
+      "iqr": [
+        2.0915384422417063,
+        2.239767452170379
+      ],
+      "median": 2.1568426499838877
+    },
+    "executed_nemo_branch": "cfgs/DINO/MY_SRC/zdftke.F90:757-760 raw zmxlm=MAX(rmxl_min,SQRT(2*en/MAX(rn2,rsmall))); nn_mxl=3 distance bounds at :799-812",
+    "n_excess": 47,
+    "next_target": {
+      "cost": "one offline matched-step pass; approximately 60 CPU-s and <10 MiB",
+      "design": "At the same 47 excess columns, substitute NEMO one term at a time into legoESM's single TKE solve, report closure of the 2.26x en gap, and preserve all other dumped operands. No trajectory integration.",
+      "name": "TKE-equation term decomposition",
+      "status": "EXECUTED_IN_THIS_FOLLOWUP",
+      "terms_and_same_step_dumps": {
+        "buoyancy_sink": "tke_dump_rn2.bin",
+        "carried_dissipation": "tke_dump_dissl.bin",
+        "energy_response": "tke_dump_en.bin",
+        "shear_production": "tke_dump_sh2.bin",
+        "surface_boundary": "tke_dump_en.bin jk=1 + tke_dump_zmxlm.bin jk=1; stress receipt sbc_dump_utau.bin and analytical DINO taum"
+      }
+    },
+    "normalized_mxl_over_sqrt_en_ratio": {
+      "geometric_mean": 0.9999999986511358,
+      "iqr": [
+        0.9999999956320352,
+        1.0000000020496618
+      ],
+      "median": 0.9999999982800973
+    },
+    "normalized_ratio_in_0p90_1p10_fraction": 1.0,
+    "verdict": "CONFIRM_TKE_ENERGY_SINGLE_ROOT"
+  },
+  "tke_equation_decomposition_10m": {
+    "combined_physics_owner": "legoESM_misplaced_surface_min_clamp_at_first_interior_interface",
+    "controls": {
+      "base_final_energy_reconstruction_max_relative_error": 7.756466684383205e-16,
+      "base_solve_replay_max_relative_error": 8.478109567956923e-16,
+      "correct_level_mean_abs_log_gap": 0.8134315801191752,
+      "double_production_plant_live": true,
+      "double_production_plant_max_abs_energy_change": 0.0004555580261575362,
+      "one_level_shift_fails": true,
+      "one_level_shift_mean_abs_log_gap": 1.697109321024835
+    },
+    "depth_m": 10.14,
+    "energy_ratio": {
+      "eligible_fraction": 1.0,
+      "en_ratio_over_factor_geometric_mean": 1.0,
+      "en_ratio_over_factor_in_0p80_1p20_fraction": 1.0,
+      "geometric_mean": 2.2556351135780925,
+      "iqr": [
+        2.0915384422417063,
+        2.239767452170379
+      ],
+      "label": "MATCHES_EN_EXCESS",
+      "median": 2.1568426499838877,
+      "n_eligible": 47,
+      "n_population": 47
+    },
+    "executed_equation": "cfgs/DINO/MY_SRC/zdftke.F90:499-516: p_sh2 - p_avt*rn2 + 0.5*rn_ediss*dissl*en on RHS; 1.5*dt*rn_ediss*dissl on diagonal",
+    "factors": {
+      "buoyancy_sink_rn2": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.334255490608656,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 0.9663188638317978,
+        "iqr": [
+          0.9639333901358681,
+          0.9828846178822178
+        ],
+        "label": "NEAR_UNITY",
+        "median": 0.9784170985937456,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "dissipation_dissl": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2551864434211057,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.000198950360976,
+        "iqr": [
+          1.0000175804362241,
+          1.0001000277502585
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.000047005400678,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "production_sh2": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.154721406328354,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.0468337609462448,
+        "iqr": [
+          1.0326009129153242,
+          1.0495832750124894
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0383371054513268,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "surface_boundary_condition": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2556351135780925,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.0,
+        "iqr": [
+          1.0,
+          1.0
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0,
+        "n_eligible": 47,
+        "n_population": 47
+      }
+    },
+    "n_excess": 47,
+    "one_term_replays": {
+      "buoyancy_sink_rn2": {
+        "arm_over_nemo_geometric_mean": 2.2556351135780925,
+        "closure_iqr": [
+          0.0,
+          0.0
+        ],
+        "median_log_gap_closure": 0.0,
+        "moves_toward_nemo_fraction": 0.0,
+        "n_eligible": 47,
+        "review_label": "SATURATED_NOT_EVIDENCE"
+      },
+      "dissipation_dissl": {
+        "arm_over_nemo_geometric_mean": 2.2556351135780925,
+        "closure_iqr": [
+          0.0,
+          0.0
+        ],
+        "median_log_gap_closure": 0.0,
+        "moves_toward_nemo_fraction": 0.0,
+        "n_eligible": 47,
+        "review_label": "SATURATED_NOT_EVIDENCE"
+      },
+      "production_sh2": {
+        "arm_over_nemo_geometric_mean": 2.2556351135780925,
+        "closure_iqr": [
+          0.0,
+          0.0
+        ],
+        "median_log_gap_closure": 0.0,
+        "moves_toward_nemo_fraction": 0.0,
+        "n_eligible": 47,
+        "review_label": "SATURATED_NOT_EVIDENCE"
+      },
+      "surface_boundary_condition": {
+        "arm_over_nemo_geometric_mean": 2.2556351135780925,
+        "closure_iqr": [
+          0.0,
+          0.0
+        ],
+        "median_log_gap_closure": 0.0,
+        "moves_toward_nemo_fraction": 0.0,
+        "n_eligible": 47,
+        "review_label": "SATURATED_NOT_EVIDENCE"
+      }
+    },
+    "owner": null,
+    "response_ledger": {
+      "arm_max_abs_change_at_10m": {
+        "buoyancy_sink_rn2": 0.0,
+        "dissipation_dissl": 0.0,
+        "production_sh2": 0.0,
+        "surface_boundary_condition": 0.0
+      },
+      "dt_times_term_magnitude": {
+        "buoyancy": {
+          "geometric_mean": 0.0003808092616650287,
+          "iqr": [
+            0.00030797097610265256,
+            0.0005195291978542095
+          ],
+          "max": 0.0005619040702786827,
+          "median": 0.0004554083950567112,
+          "min": 7.544751604425365e-05
+        },
+        "dissipation_explicit_half": {
+          "geometric_mean": 0.0006684686330880215,
+          "iqr": [
+            0.000548739825058133,
+            0.0009091760962448663
+          ],
+          "max": 0.0009833321229876942,
+          "median": 0.0007969646913492444,
+          "min": 0.00014600088340162946
+        },
+        "production": {
+          "geometric_mean": 0.0017380080584383914,
+          "iqr": [
+            0.0014155936880786164,
+            0.002370738280106784
+          ],
+          "max": 0.0025668473634591076,
+          "median": 0.0020817660359618243,
+          "min": 0.0003375492924266927
+        }
+      },
+      "lego_matrix_solve_en": {
+        "geometric_mean": 9.999999999999991e-05,
+        "iqr": [
+          0.0001,
+          0.0001
+        ],
+        "max": 0.0001,
+        "median": 0.0001,
+        "min": 0.0001
+      },
+      "lego_matrix_solve_floor_fraction": 0.0,
+      "lego_postsolve_etau_addition": {
+        "geometric_mean": 1.0324454778523038e-13,
+        "iqr": [
+          1.0324454778522923e-13,
+          1.0324454778522923e-13
+        ],
+        "max": 1.0324454778522923e-13,
+        "median": 1.0324454778522923e-13,
+        "min": 1.0324454778522923e-13
+      },
+      "nemo_final_en": {
+        "geometric_mean": 4.433341168581807e-05,
+        "iqr": [
+          4.464750380168286e-05,
+          4.781173647673374e-05
+        ],
+        "max": 4.931056353795186e-05,
+        "median": 4.636406837744588e-05,
+        "min": 2.2274924466642527e-05
+      },
+      "nemo_inferred_pre_etau_floor_fraction": 0.0,
+      "nemo_pre_etau_inferred_with_identical_injection": {
+        "geometric_mean": 4.433341158112813e-05,
+        "iqr": [
+          4.4647503698438314e-05,
+          4.781173637348919e-05
+        ],
+        "max": 4.931056343470731e-05,
+        "median": 4.6364068274201334e-05,
+        "min": 2.227492436339798e-05
+      },
+      "unregistered_tke_self_diffusion_input_avm_lego_over_nemo": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2551864434211057,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.000198950360976,
+        "iqr": [
+          1.0000175804362241,
+          1.0001000277502587
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0000470054006778,
+        "n_eligible": 47,
+        "n_population": 47
+      }
+    },
+    "structural_surface_floor_replay": {
+      "arm_over_nemo_geometric_mean": 1.054275004129711,
+      "base_pinned_to_1e_4_fraction": 1.0,
+      "closure_iqr": [
+        0.9311458526413244,
+        0.9559388648577125
+      ],
+      "historical_fix_design_before_build": "Guard the :1378-1381 tke_surface_min clamp with surface_bc_level == 'interior_pinned'. Under nemo_z0 the virtual z=0 row consumes cfg.tke_surface_min as rn_emin0; solved interface 0 retains only tke_background/rn_emin.",
+      "lego_source": "pre-fix tke.py at 2cb678259 applied tke_background, then unconditionally applied tke_surface_min to e_new[...,0] under nemo_z0; fixed by d86d97d496463b9317764426573af958fe5f20b9",
+      "median_log_gap_closure": 0.9435488424873223,
+      "moves_toward_nemo_fraction": 1.0,
+      "n_eligible": 47,
+      "nemo_below_1e_4_fraction": 1.0,
+      "nemo_source": "cfgs/DINO/MY_SRC/zdftke.F90:361 holds rn_emin0 at jk=1; :564-565 floors solved jk=2..jpkm1 with rn_emin",
+      "registered_chain_prediction": "fix -> en_L/en_N approaches 1 at 10.14 m -> buoyancy-limited mxl and avm ratios approach 1 -> 5-26 m shear strengthens and the EUC core shoals toward NEMO",
+      "trajectory_result": "CONFIRMED_DAY10_DAY90_DO_NO_HARM; day-10 response, day-90 persistence, and global do-no-harm all CONFIRM",
+      "verdict": "CONFIRM_MISPLACED_SURFACE_MIN_CLAMP"
+    },
+    "surface_boundary": {
+      "en_surface_lego_over_nemo": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2556351135780925,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.0,
+        "iqr": [
+          1.0,
+          1.0
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "lego_formula_max_relative_error": 0.0,
+      "lego_source": "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:_surface_tke_dirichlet: MAX(cfg.tke_surface_min,67.83/rho_0*taum); default cfg value is 1e-4",
+      "nemo_formula_max_relative_error": 0.0,
+      "nemo_source": "cfgs/DINO/MY_SRC/zdftke.F90:334,356-365; line 361: en(ji,jj,1) = MAX( rn_emin0, zbbrau * taum(ji,jj) )",
+      "nemo_surface_avm_from_en_zmxlm_max_relative_error": 0.0,
+      "nemo_taum_source": "cfgs/DINO/MY_SRC/usrdef_sbc.F90:380-383: ABS(utau), x1.3 where utau>0",
+      "taum_lego_over_nemo": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2556351135780925,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.0,
+        "iqr": [
+          1.0,
+          1.0
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "zmxlm_surface_lego_over_nemo": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.255635113578093,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 0.9999999999999998,
+        "iqr": [
+          0.9999999999999998,
+          0.9999999999999998
+        ],
+        "label": "NEAR_UNITY",
+        "median": 0.9999999999999998,
+        "n_eligible": 47,
+        "n_population": 47
+      }
+    },
+    "verdict": "UNRESOLVED_TKE_EQUATION_OWNER"
+  }
+}

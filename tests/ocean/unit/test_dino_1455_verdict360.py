@@ -483,3 +483,124 @@ def test_negative_control_runs_two_lags(V, capsys):
     out = capsys.readouterr().out
     assert "TWO lags" in out and "lag30 gap" in out and "lag90 gap" in out
     assert V.N_DAYS - 90 in V.SCORE_DAYS and V.N_DAYS - 30 in V.SCORE_DAYS
+
+
+# ---------------------------------------------------------------------------
+# fp64 snapshot storage: the quantum gate must read the artifacts' own stamp
+# ---------------------------------------------------------------------------
+def _member_npz(tmp_path, V, i, storage=None):
+    """A minimal legoESM member artifact carrying only the stamps the controls
+    read."""
+    kw = dict(nemo_ladder_mode=np.str_("both"),
+              seasonal_t0_seconds=np.float64(0.0),
+              control_dtype=np.str_("float64"))
+    if storage is not None:
+        kw["storage_dtypes"] = np.str_(storage)
+    p = tmp_path / f"m{i}.npz"
+    np.savez(p, **kw)
+    return str(p)
+
+
+def test_an_unstamped_artifact_still_gets_the_all_float32_quantum(V, tmp_path):
+    """EXTEND-ONLY: every recorded artifact predates the storage stamp, and its
+    score must not move."""
+    paths = [_member_npz(tmp_path, V, i) for i in range(V.N_MEM)]
+    assert V.storage_fp32_fields(paths) == ("T", "S", "u")
+
+
+def test_a_float64_ensemble_reports_no_float32_stored_fields(V, tmp_path):
+    sto = ('{"T3d": "float64", "S3d": "float64", "u3d": "float64", '
+           '"eta3d": "float64", "v3d": "float64", "reduced": "float64"}')
+    paths = [_member_npz(tmp_path, V, i, sto) for i in range(V.N_MEM)]
+    assert V.storage_fp32_fields(paths) == ()
+
+
+def test_a_mixed_precision_ensemble_is_refused(V, tmp_path):
+    """One floor cannot span two storage quanta -- and the floor is the
+    denominator every verdict divides by, so this must abort rather than pick
+    one."""
+    sto64 = '{"T3d": "float64", "S3d": "float64", "u3d": "float64"}'
+    paths = [_member_npz(tmp_path, V, 0, sto64)] + [
+        _member_npz(tmp_path, V, i) for i in range(1, V.N_MEM)]
+    with pytest.raises(SystemExit, match="different precisions"):
+        V.storage_fp32_fields(paths)
+
+
+def test_no_float32_stored_field_means_no_quantum_to_downgrade_for(V):
+    """The UNMEASURABLE downgrade must be skipped for fp64-stored fields --
+    otherwise a --fp64-3d ensemble is penalised for a storage limit it does not
+    have. Driven through the real reduction on a synthetic state, so it is the
+    metric machinery answering, not a stubbed constant."""
+    rng = np.random.default_rng(1)
+    ny, nx, nz = V.A.tmask.shape
+    z = np.arange(nz, dtype=np.float64)
+    st = {"T": 4.0 + 16.0 * np.exp(-z / 6.0)[None, None, :]
+              + 0.05 * rng.standard_normal((ny, nx, nz)),
+          "S": 34.5 + 0.5 * np.exp(-z / 10.0)[None, None, :]
+              + 0.01 * rng.standard_normal((ny, nx, nz)),
+          "u": 0.05 * rng.standard_normal((ny, nx, nz))}
+    q32 = V.fp32_quantum(st, V.A.tmask)
+    q64 = V.fp32_quantum(st, V.A.tmask, ())
+    assert set(q64) == set(V.KEYS) and all(v == 0.0 for v in q64.values())
+    # the default must be NON-vacuous, or the comparison above proves nothing
+    assert any(v > 0.0 for v in q32.values())
+    # dropping u alone must move only the transport metrics' quantum
+    q_ts = V.fp32_quantum(st, V.A.tmask, ("T", "S"))
+    assert q_ts["acc"] == 0.0 and q32["acc"] > 0.0
+
+
+def test_only_the_scored_3d_fields_decide_the_storage_precision(V, tmp_path):
+    """Comparing the WHOLE stamp map falsely aborted legitimate ensembles two
+    ways: a recorded member resolves to a nine-entry legacy map while a new
+    single-precision member writes a ten-entry one, and two brand-new members
+    disagree if one member's reduction succeeded and the other's did not.
+    Neither is a difference in storage precision."""
+    legacy = _member_npz(tmp_path, V, 0)                      # unstamped
+    fresh = _member_npz(tmp_path, V, 1, (
+        '{"T3d": "float32", "S3d": "float32", "u3d": "float32", '
+        '"eta3d": "float32", "v3d": "float32", "eta": "float32", '
+        '"sst": "float32", "u": "float32", "v": "float32", '
+        '"reduced": "float64"}'))
+    no_series = _member_npz(tmp_path, V, 2, (
+        '{"T3d": "float32", "S3d": "float32", "u3d": "float32", '
+        '"reduced": "absent"}'))
+    assert V.storage_fp32_fields([legacy, fresh, no_series]) == ("T", "S", "u")
+
+
+def test_a_zero_quantum_requires_every_member_to_separate_at_every_horizon(
+        V, capsys):
+    """The relaxed early-horizon tie rule exists ONLY because a float32
+    max-type metric can tie at the storage quantum while the trajectories
+    differ. With float64 snapshots that excuse is gone, so a tie that used to
+    be tolerated must now be a hard failure."""
+    rows = _synth(V, tie_day=90)
+    zero = {d: {k: 0.0 for k in V.KEYS} for d in V.HORIZONS}
+    with pytest.raises(SystemExit, match="distinct member values"):
+        V.separation_control(rows, zero)
+    # the SAME tie is tolerated when a real storage quantum explains it
+    assert V.separation_control(rows, _quantum(V))[90] == set()
+
+
+def test_a_zero_quantum_leaves_every_q_flag_off(V, capsys):
+    """End-to-end through the printer: with no storage quantum, no metric is
+    flagged dtype-limited and the reader is told why."""
+    rows = _synth(V)
+    zero = {d: {k: 0.0 for k in V.KEYS} for d in V.HORIZONS}
+    thin = V.separation_control(rows, zero)
+    out = capsys.readouterr().out
+    assert all(thin[d] == set() for d in V.HORIZONS)
+    assert "stored their 3-D snapshots at float64" in out
+    V.verdict_table(rows, thin, set())
+    body = capsys.readouterr().out.split("--- day 360 ---")[1]
+    assert "q" not in body.split("--- DOES")[0].replace("quantum", "")
+
+
+def test_an_absent_3d_block_keeps_the_float32_quantum(V, tmp_path):
+    """A run that wrote no 3-D block stamps "absent", not a dtype. That must
+    NOT be read as float64: granting a quantum waiver an artifact did not earn
+    removes a downgrade that exists, which is the direction that manufactures
+    a false measurement. Unstamped and "absent" both stay float32."""
+    sto = ('{"T3d": "absent", "S3d": "absent", "u3d": "absent", '
+           '"reduced": "absent"}')
+    paths = [_member_npz(tmp_path, V, i, sto) for i in range(V.N_MEM)]
+    assert V.storage_fp32_fields(paths) == ("T", "S", "u")

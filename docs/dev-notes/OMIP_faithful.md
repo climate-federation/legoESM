@@ -1,5 +1,43 @@
 # OMIP-Faithful: legoESM ocean vs NEMO ORCA1
 
+## ★ STANDARD CONFIGURATION (declared 2026-08-25)
+The standard NEMO-faithful 1-degree tripole card is
+`scripts/cluster/omip_nemo/run_standard_faithful_1deg.sbatch` — the
+byte-identical card of the validated 180-day run
+(`results/omip_nemo/nemolev_trp_long180`).  Scored against NEMO's matched
+GATEWAY cold start (5-day means, same January IC): SST rmse 0.515/0.495/0.456
+C at d30/d60/d90 (d90 verdict "excellent"), SSS rmse 0.46-0.70, nino3 warm
+bias +1.42 -> +1.43 -> +0.70.  RETRACTION (GLM adversarial review,
+2026-08-25): the d60->d90 bias drop is REFERENCE-attributable — NEMO warmed
++1.39 K into the Mar-Apr warm season while we warmed only +0.66 K (our nino3
+seasonal amplitude is ~48% of NEMO's).  The bias is BOUNDED (not growing),
+but "closing transient" is NOT established; a damped-seasonal-cycle error
+predicts the bias REOPENS in the Aug-Sep-Oct cold season, which no matched
+NEMO record yet covers.  Revalidation conditions attached to this standard:
+(1) extend the matched NEMO GATEWAY run to >=365 days and pre-register an
+ASO nino3 criterion; (2) mixed-layer heat-budget attribution of the day-30
++1.4 K onset; (3) track SSS (rmse grew 0.46->0.62->0.70, monotonic) and
+regionally-decomposed MLD (rmse 21.5->39.5 m) on every A/B scorecard.
+The corrected (_MOD) CORE-II forcing is the default resolver, gated by
+`tests/ocean/unit/test_core2_corrected_cache_default.py`.
+FORCING INTERPOLATION (user decision 2026-08-27): BILINEAR on the tripole
+(commits 089d10b75/a90bd1935) is the standard — kept despite the
+pre-registered stripe A/B falling short (MLD stripe index -32% vs -50%
+target; SST rmse 0.515->0.527 from the expected Jensen stress weakening) —
+because it is NEMO's own convention, removes the stairstep forcing at the
+source (114->0 duplicated rows), and improves MLD (21.5->20.5 m) and SSS.
+Standard-card numbers quoted above predate the switch; the next standard
+run re-baselines.  Follow-up: locate the residual MLD banding source
+(remaining nearest-sampled static maps).
+Change ONE flag per new run and A/B against this card; never edit it in place.
+Cross-grid caveat: MPAS cannot take `--dm2dc --isf --bbl-adv --sw-rgb-chl
+--iwm --nemo-monthly-init` (driver hard-errors), and it silently IGNORES
+`--adaptive-implicit-vertadv`/`--momentum-rk3` (builder does not forward
+them — do not pass flags an arm does not run).  The `--tke-*` knobs ARE now
+legal on MPAS under `--mpas-vmix tke` (the older `_xgrid_mpas.sbatch` header
+predates that wiring).  Matched three-grid comparisons therefore run the
+maximal common card; each arm's number carries its reduced-card caveat.
+
 **Goal.** Run reference NEMO ORCA1 (morays, COREv2 normal-year forcing) and drive
 legoESM ocean on **all 5 grids** under the *same* forcing; iterate legoESM code
 until integral/climatological diagnostics match NEMO. Review every code change

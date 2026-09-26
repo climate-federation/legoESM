@@ -964,6 +964,79 @@ def regrid_scalar_nan_aware(
         return res.reshape(regrid_weights.target_shape + extra_dims)
 
 
+def fill_missing_nearest_valid(
+    data: np.ndarray,
+    coords: np.ndarray,
+) -> np.ndarray:
+    """Fill ``NaN`` entries from the nearest valid point, slice by slice.
+
+    Each row of ``data`` is filled INDEPENDENTLY: a missing entry takes the
+    value of the nearest point that is valid *in that same row*.  Two uses in
+    the model share this: an AMIP forcing frame filled from the nearest
+    unmasked cell at that same time, and an observed T/S level filled from the
+    nearest source column that has an observation at that same depth.  Filling
+    per row is what makes the second one correct -- a column-wise fill would
+    carry a shallow value down into levels it was never observed at.
+
+    Distances are Euclidean in the supplied coordinates.  Passing unit-sphere
+    Cartesian coordinates (``x, y, z``) makes the ordering exact on the globe
+    with no dateline or pole seam, which is why callers convert lat/lon rather
+    than differencing degrees.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Shape ``(n_slices, n_points)``.  ``NaN`` marks a missing value.
+    coords : np.ndarray
+        Point coordinates, shape ``(n_points, n_dim)``; unit-sphere Cartesian
+        (``n_dim = 3``) for geographic data.
+
+    Returns
+    -------
+    np.ndarray
+        ``data`` with every ``NaN`` replaced, same shape.
+
+    Raises
+    ------
+    ValueError
+        If a slice is entirely ``NaN``.  There is no donor for it, and
+        returning it unchanged would leak ``NaN`` into whatever consumes the
+        field with no message at all.
+    """
+    data = np.asarray(data)
+    coords = np.asarray(coords)
+    if data.ndim != 2:
+        raise ValueError(
+            f"data must be 2-D (n_slices, n_points); got shape {data.shape}."
+        )
+    if coords.shape[0] != data.shape[1]:
+        raise ValueError(
+            f"coords has {coords.shape[0]} points but data has "
+            f"{data.shape[1]} per slice."
+        )
+    if not np.any(np.isnan(data)):
+        return data
+
+    from scipy.interpolate import NearestNDInterpolator
+
+    filled = data.copy()
+    for i in range(data.shape[0]):
+        frame = data[i]
+        mask_valid = ~np.isnan(frame)
+        if not mask_valid.any():
+            raise ValueError(
+                f"nearest-valid fill: slice {i} of {data.shape[0]} is "
+                "entirely NaN/missing, so there is no valid point to fill it "
+                "from. Check the source field for an all-masked time record "
+                "or depth level."
+            )
+        if mask_valid.all():
+            continue
+        interp = NearestNDInterpolator(coords[mask_valid], frame[mask_valid])
+        filled[i] = interp(coords)
+
+    return filled
+
 
 def _cell_edges(centers):
     """Cell edges (n+1) from 1-D cell centres (works for ascending or descending)."""

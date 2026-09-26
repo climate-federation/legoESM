@@ -5,8 +5,8 @@ requires ``n_lat % N == 0``.  eORCA025 (``n_lat=1207``) is odd, so the driver
 appends LAND rows at the SOUTH (the tripole north fold is north-relative and stays
 put).  These tests pin the two pure-array helpers:
 
-* ``_south_pad_rows(n_lat, n_gpus)`` — the number of rows to append.
-* ``_pad_mask_bathy_south(land_mask, H_bathy, n_pad)`` — the mask/bathy pad
+* ``south_pad_rows(n_lat, n_gpus)`` — the number of rows to append.
+* ``pad_mask_bathy_south(land_mask, H_bathy, n_pad)`` — the mask/bathy pad
   (wet rows preserved bit-exact, added rows LAND, divisibility achieved).
 
 The GRID-side pad (``pad_tripole_grid_south``, fold-preserving) is tested in
@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from scripts.run import run_omip_core2 as R
+from legoesm.grids import tripole as R
 
 
 @pytest.mark.parametrize("n_lat,n_gpus,expect", [
@@ -31,7 +31,7 @@ from scripts.run import run_omip_core2 as R
     (100, 3, 2),      # 100 % 3 == 1 -> +2 = 102
 ])
 def test_south_pad_rows(n_lat, n_gpus, expect):
-    n_pad = R._south_pad_rows(n_lat, n_gpus)
+    n_pad = R.south_pad_rows(n_lat, n_gpus)
     assert n_pad == expect
     assert (n_lat + n_pad) % max(1, n_gpus) == 0
 
@@ -42,7 +42,7 @@ def test_pad_mask_bathy_south_preserves_wet_and_lands_added():
     land_mask = (rng.random((n_lat, n_lon)) > 0.4).astype(np.float64)
     H_bathy = (rng.random((n_lat, n_lon)) * 4000.0) * land_mask
 
-    lm_p, hb_p = R._pad_mask_bathy_south(land_mask, H_bathy, n_pad)
+    lm_p, hb_p = R.pad_mask_bathy_south(land_mask, H_bathy, n_pad)
 
     # shape grew by n_pad on the south (axis 0)
     assert lm_p.shape == (n_lat + n_pad, n_lon)
@@ -60,6 +60,6 @@ def test_pad_mask_bathy_south_preserves_wet_and_lands_added():
 def test_pad_mask_bathy_south_zero_is_identity():
     lm = np.ones((5, 4))
     hb = np.full((5, 4), 100.0)
-    lm_p, hb_p = R._pad_mask_bathy_south(lm, hb, 0)
+    lm_p, hb_p = R.pad_mask_bathy_south(lm, hb, 0)
     np.testing.assert_array_equal(lm_p, lm)
     np.testing.assert_array_equal(hb_p, hb)

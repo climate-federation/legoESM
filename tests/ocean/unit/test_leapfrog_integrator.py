@@ -210,14 +210,18 @@ def test_leapfrog_before_seed_wide_halo_not_implemented():
     # The MLF before-level barotropic seed is not wired into the wide-halo path;
     # the leap-frog step must raise NotImplementedError rather than silently drop
     # the Nbb seed (barotropic_wide_halo=True + a non-ab3 filter reaches the
-    # before-state guard). First step is a forward-Euler start (no seed), so
-    # advance one step to populate the before-fields, then the seeded pass fires.
+    # before-state guard).
+    #
+    # #1729: this used to need TWO steps, because the Euler start returned
+    # before the seeded pass. It does not any more -- the start is the same
+    # program with rDt=dt and Nbb:=Nnn, so it seeds the barotropic mode from
+    # the before level like every other step and the guard fires on step ONE.
+    # That is strictly better: the run refuses before doing any work.
     state, model = _leapfrog_channel(
         barotropic_time_filter="nemo_boxcar_centred",
         barotropic_wide_halo=True, barotropic_local_subcycle_clamp=True)
-    s = model.step(state, dt=_DT)   # forward-Euler start (no before-seed yet)
     with pytest.raises(NotImplementedError, match="wide-halo"):
-        model.step(s, dt=_DT)       # leapfrog pass → before-seed → guard
+        model.step(state, dt=_DT)
 
 
 def test_ab3am4_live_split_still_rejected():

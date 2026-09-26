@@ -244,36 +244,33 @@ class TestSpectralPECMT:
         assert float(jnp.max(jnp.abs(tendencies.vor_hat.data))) == 0.0
         assert float(jnp.max(jnp.abs(tendencies.div_hat.data))) == 0.0
 
-    def test_zm_with_zero_winds_quiescent_yields_small_cmt(
+    def test_zm_runs_with_vapour_and_cloud_tracers_and_refuses_without_cloud(
         self, grid, sigma_coord, rest_state,
     ):
-        """ZM with zero winds + isothermal rest state → tiny CMT.
-
-        ZM's smooth-everywhere triggers produce ε-level tendencies even
-        at zero CAPE, but the spectral plumbing must not amplify those
-        beyond the leaf-level magnitude.  A K/s threshold of 1e-4 (well
-        above the ε-noise floor) suffices to confirm the wiring is
-        well-conditioned.
-        """
+        """CAM6 Zhang-McFarlane emits a SIGNED net rain-flux divergence whose
+        column integral is the surface rain.  The bridge books only dq_v and
+        dq_c and lets the rain leave the column (the hydrostatic bridge's
+        surface route), so it needs BOTH tracers; without q_c the detrained
+        condensate would vanish unrecorded, and that is refused loudly."""
         physics_fn = make_convection_physics(
             ConvectionConfig(scheme="zhang_mcfarlane"),
             model_type="spectral_pe", dt=300.0,
         )
-        tendencies, _ = physics_fn(rest_state, grid, sigma_coord)
-        # T tendency may have a smooth-trigger floor; CMT inherits that.
-        # The spectral round-trip should preserve magnitude — so verify
-        # vor/div tendency magnitudes are consistent with T (no blow-up).
-        T_max = float(jnp.max(jnp.abs(tendencies.T_hat.data)))
-        vor_max = float(jnp.max(jnp.abs(tendencies.vor_hat.data)))
-        div_max = float(jnp.max(jnp.abs(tendencies.div_hat.data)))
-        assert T_max < 1e-3, f"T tendency too large in quiescent state: {T_max}"
-        assert vor_max < 1.0, f"vor tendency too large: {vor_max}"
-        assert div_max < 1.0, f"div tendency too large: {div_max}"
+        zeros = jnp.zeros((grid.n_lat, grid.n_lon, sigma_coord.n_levels))
+        q_v = Field(data=zeros, name="q_v", dims=("lat", "lon", "level"), units="kg/kg")
+        q_c = Field(data=zeros, name="q_c", dims=("lat", "lon", "level"), units="kg/kg")
+        tendencies, _ = physics_fn(
+            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord)
+        assert set(tendencies.tracers) == {"q_v", "q_c"}
+        for k in ("q_v", "q_c"):
+            assert bool(jnp.all(jnp.isfinite(tendencies.tracers[k].data)))
+        with pytest.raises(ValueError, match="must carry both tracers"):
+            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord)
 
-    def test_zm_with_cape_and_winds_yields_nonzero_cmt(
+    def test_tiedtke_with_cape_and_winds_yields_nonzero_cmt(
         self, grid, sigma_coord, rest_state,
     ):
-        """Inject CAPE + winds → ZM should fire and produce non-zero CMT.
+        """Inject CAPE + winds → the CMT scheme should fire and produce non-zero CMT.
 
         Constructs a state with non-zero u (solid-body rotation) and
         attaches a tracers dict with q_v close to saturation.  The
@@ -317,14 +314,14 @@ class TestSpectralPECMT:
             data=q_v_grid, name="q_v",
             dims=("lat", "lon", "level"), units="kg/kg",
         )
-        state_with_tracers = _state_with_tracers(
-            state_w_uT, {"q_v": q_v_field},
-        )
+        state_with_tracers = _state_with_tracers(state_w_uT, {"q_v": q_v_field})
 
+        # Tiedtke: the CMT-capable scheme this bridge can run (ZM's net rain
+        # flux needs a surface sink this bridge lacks; see the refusal test).
         physics_fn = make_convection_physics(
             ConvectionConfig(
-                scheme="zhang_mcfarlane",
-                zhang_mcfarlane=ZhangMcFarlaneConfig(enable_cmt=True),
+                scheme="tiedtke",
+                tiedtke=TiedtkeConfig(precip_efficiency=0.0),
             ),
             model_type="spectral_pe", dt=300.0,
         )
@@ -334,13 +331,13 @@ class TestSpectralPECMT:
         # Plume should fire somewhere — vor/div tendencies must be
         # non-zero in at least one mode/level.
         assert float(jnp.max(jnp.abs(tendencies.T_hat.data))) > 0.0, (
-            "ZM should produce non-zero T tendencies on a CAPE column"
+            "Tiedtke should produce non-zero T tendencies on a CAPE column"
         )
         assert float(jnp.max(jnp.abs(tendencies.vor_hat.data))) > 0.0, (
-            "ZM should produce non-zero vor_hat tendencies via CMT"
+            "Tiedtke should produce non-zero vor_hat tendencies via CMT"
         )
         assert float(jnp.max(jnp.abs(tendencies.div_hat.data))) > 0.0, (
-            "ZM should produce non-zero div_hat tendencies via CMT"
+            "Tiedtke should produce non-zero div_hat tendencies via CMT"
         )
 
     def test_tiedtke_responds_to_moisture_convergence(
@@ -586,7 +583,8 @@ class TestSpectralPECMT:
         holomorphic-input dance with a complex T_hat).
         """
         physics_fn = make_convection_physics(
-            ConvectionConfig(scheme="zhang_mcfarlane"),
+            ConvectionConfig(scheme="tiedtke",
+                             tiedtke=TiedtkeConfig(precip_efficiency=0.0)),
             model_type="spectral_pe", dt=300.0,
         )
 
@@ -620,13 +618,16 @@ class TestSpectralPECMT:
 @pytest.fixture(
     scope="module",
     params=[
-        ("zhang_mcfarlane", "zhang_mcfarlane", ZhangMcFarlaneConfig),
+        # zhang_mcfarlane is absent by design: this fixture's state is q_v-only
+        # and ZM needs a q_c tracer for its detrained condensate (its signed
+        # net rain flux takes the surface route); it is pinned through the
+        # bridge in tests/unit/test_spectral_zm_rain_surface_route.py.
         ("kain_fritsch", "kain_fritsch", KainFritschConfig),
         ("emanuel", "emanuel", EmanuelConfig),
         ("tiedtke", "tiedtke", TiedtkeConfig),
         ("bechtold", "bechtold", BechtoldConfig),
     ],
-    ids=["zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold"],
+    ids=["kain_fritsch", "emanuel", "tiedtke", "bechtold"],
 )
 def profile_scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each new scheme."""

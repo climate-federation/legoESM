@@ -161,7 +161,12 @@ _CACHE_MIN_COMPILE_SECS_DEFAULT = 1.0   # only cache XLA compiles slower than th
 # subdir), so a CPU-built cache never serves a GPU run or vice versa.  A jaxlib
 # upgrade that alters bits on the SAME backend is the user's responsibility (bump
 # the version), mirroring the trainer's documented same-code/backend assumption.
-_EQUILIBRIUM_CACHE_VERSION = "v6"  # v6: + opt-in leaf-carbon resorption (leaf_c_resorption_frac hashed into the key) refills the labile reserve at leaf-fall, raising cold-deciduous equilibria. v5: + opt-in NSC-gated R_maint / cold-deciduous freeze-dormancy gates change the high-latitude equilibria when enabled (the cache key ALSO hashes both flags, so on/off never alias). v4: + perennial-frost/anaerobic SOM protection (f_perma on the SOM modifier, keyed on the annual frozen fraction) -- coupled-spin-up equilibrium rises for perennially-frozen high-latitude archetypes (permafrost carbon; v3 was the r_maint_* CUE recalibration)
+# Physics switches the equilibria are spun with.  Written into BOTH output npz
+# files so the drift validator rebuilds the SAME model (defaults would silently
+# re-integrate a different one); all are hashed into the equilibrium cache key.
+PHYSICS_PROVENANCE_KEYS = ("stomatal_model", "nsc_gated_respiration",
+                           "cold_deciduous_dormancy", "leaf_c_resorption_frac")
+_EQUILIBRIUM_CACHE_VERSION = "v7"  # v7: the archetype step's carbon diagnostics now use the SURFACE SCHEME's GPP (two-leaf canopy, the land default since 2026-08-20) instead of a big-leaf re-derivation, so every equilibrium under a canopy scheme changes; the canopy stomatal model is hashed into the key. v6: + opt-in leaf-carbon resorption (leaf_c_resorption_frac hashed into the key) refills the labile reserve at leaf-fall, raising cold-deciduous equilibria. v5: + opt-in NSC-gated R_maint / cold-deciduous freeze-dormancy gates change the high-latitude equilibria when enabled (the cache key ALSO hashes both flags, so on/off never alias). v4: + perennial-frost/anaerobic SOM protection (f_perma on the SOM modifier, keyed on the annual frozen fraction) -- coupled-spin-up equilibrium rises for perennially-frozen high-latitude archetypes (permafrost carbon; v3 was the r_maint_* CUE recalibration)
 # COUPLED-RUN MAINTENANCE (now wired): this map is built WITH the perennial-
 # frost/anaerobic SOM protection (annual_frozen_fraction -> soil_frozen_fraction
 # threaded into the archetype spin-up), and the drift validator applies the SAME
@@ -632,7 +637,7 @@ def _print_qc_summary(table, qc, n_arch) -> None:
 
 
 def _write_archetypes_npz(path, table, eq, qc, pft_names, *,
-                          n_layers, soil_depth, dt, res_deg):
+                          n_layers, soil_depth, dt, res_deg, physics):
     """Write ``archetypes.npz``: ``ArchetypeTable`` + eq pools + QC + the
     SOIL-COLUMN GEOMETRY.
 
@@ -657,12 +662,14 @@ def _write_archetypes_npz(path, table, eq, qc, pft_names, *,
     arch["soil_depth"] = np.asarray(float(soil_depth))
     arch["dt"] = np.asarray(float(dt))
     arch["resolution_deg"] = np.asarray(float(res_deg))
+    for k in PHYSICS_PROVENANCE_KEYS:
+        arch[k] = np.asarray(physics[k])
     np.savez(path, **arch)
     return path
 
 
 def _write_outputs(out_dir, inputs, grid_state, table, eq, qc, w_min, res_deg,
-                   *, n_layers, soil_depth, dt, soil_frozen_fraction):
+                   *, n_layers, soil_depth, dt, soil_frozen_fraction, physics):
     """Write ``global_carbon_ic.npz`` (finidat) + ``archetypes.npz`` (lookup).
 
     ``soil_frozen_fraction`` is the cover-weighted per-cell perennial-frost
@@ -697,13 +704,16 @@ def _write_outputs(out_dir, inputs, grid_state, table, eq, qc, w_min, res_deg,
         n_layers=np.asarray(int(n_layers)),
         soil_depth=np.asarray(float(soil_depth)),
         dt=np.asarray(float(dt)),
+        surface_scheme=np.asarray("two_leaf_canopy"),
+        **{k: np.asarray(physics[k]) for k in PHYSICS_PROVENANCE_KEYS},
     )
     np.savez(finidat_path, **finidat)
 
     # --- archetypes: ArchetypeTable + equilibrium pools + QC + geometry ---
     _write_archetypes_npz(
         archetypes_path, table, eq, qc, pft_names,
-        n_layers=n_layers, soil_depth=soil_depth, dt=dt, res_deg=res_deg)
+        n_layers=n_layers, soil_depth=soil_depth, dt=dt, res_deg=res_deg,
+        physics=physics)
 
     return finidat_path, archetypes_path
 
@@ -746,7 +756,8 @@ def _equilibrium_cache_key(table, spin: dict) -> str:
       3. the string ``soil_class`` field as ``"|".join(...)`` (per-archetype
          texture keys; ``|`` is not a soil-class token).
       4. the spin config ``(n_spinup, n_verify, dt, n_layers, soil_depth)``
-         (``repr`` on the floats keeps full precision stable).
+         (``repr`` on the floats keeps full precision stable), the three
+         opt-in carbon flags, and the canopy ``stomatal_model``.
 
     Mirrors ``train_carbon_params._precompute_cache_key``; the only differences
     are the domain-separation prefix and the version constant, because the two
@@ -767,12 +778,88 @@ def _equilibrium_cache_key(table, spin: dict) -> str:
                 f"{spin['n_layers']}|{spin['soil_depth']!r}|"
                 f"nsc{int(spin.get('nsc_gated_respiration', False))}|"
                 f"cd{int(spin.get('cold_deciduous_dormancy', False))}|"
-                f"rsrp{spin.get('leaf_c_resorption_frac', 0.0)!r}|")
+                f"rsrp{spin.get('leaf_c_resorption_frac', 0.0)!r}|"
+                f"sm{spin.get('stomatal_model', 'ball_berry')}|")
     h.update(spin_key.encode("utf-8"))
     return h.hexdigest()
 
 
-def _load_or_equilibrate(table, spin: dict, *, cache_dir: str, rebuild: bool):
+def _atomic_savez(path: Path, **arrays) -> None:
+    """np.savez via an exclusively-created temp file + os.replace (atomic within
+    the directory) so a concurrent reader never sees a truncated npz."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f"{path.stem}.", suffix=".tmp.npz")
+    os.close(fd)  # np.savez reopens by name
+    tmp = Path(tmp_name)
+    try:
+        np.savez(tmp, **arrays)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _make_cached_spinup_batch(cache_dir: str, base_key: str):
+    """Disk memo around the per-GROUP spin-up (``global_init._spinup_batch``).
+
+    The whole-table cache in :func:`_load_or_equilibrate` only pays off once a
+    run has COMPLETED; with the two-leaf canopy a group takes ~4 h and 21
+    groups do not fit one job, so each group's ``(final_carbon, annual)`` is
+    also memoised under ``<cache_dir>/<backend>/groups/<base_key>_<g>.npz``
+    (``g`` = sha256 of the group's archetype indices).  Any later run with the
+    same table + spin config -- a relaunch after a timeout, or the assembling
+    run after a ``--only-groups`` array -- reloads finished groups in seconds.
+    """
+    import jax
+
+    from legoesm.land.carbon.config import CarbonState
+    from legoesm.land.carbon.global_init import _spinup_batch
+
+    root = Path(cache_dir) / jax.default_backend() / "groups"
+
+    def spinup(batch, *, n_spinup, n_verify, dt):
+        g = hashlib.sha256(np.ascontiguousarray(batch.g_idx, dtype=np.int64)
+                           .tobytes()).hexdigest()[:16]
+        path = root / f"{base_key}_{g}.npz"
+        ncol = int(batch.g_idx.shape[0])
+        if path.exists():
+            try:
+                with np.load(path) as z:
+                    pools = {p: _check_cached_array(z[f"eq_{p}"], f"eq_{p}", ncol)
+                             for p in CarbonState._fields}
+                    annual = {k[len("annual_"):]: np.asarray(z[k])
+                              for k in z.files if k.startswith("annual_")}
+                for k, v in annual.items():
+                    if v.ndim != 2 or v.shape[1] != ncol:
+                        raise ValueError(f"annual_{k} shape {v.shape}")
+                if not annual:
+                    raise KeyError("annual_*")
+            except (OSError, ValueError, KeyError, EOFError, TypeError,
+                    zipfile.BadZipFile) as exc:
+                print(f"[global_carbon_ic] group cache {g} unreadable "
+                      f"({type(exc).__name__}); recomputing", flush=True)
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            else:
+                print(f"[global_carbon_ic] group CACHE HIT ({g}, {ncol} archetypes)",
+                      flush=True)
+                return CarbonState(**pools), annual
+        final_carbon, annual = _spinup_batch(
+            batch, n_spinup=n_spinup, n_verify=n_verify, dt=dt)
+        arrays = {f"eq_{p}": np.asarray(getattr(final_carbon, p))
+                  for p in CarbonState._fields}
+        arrays.update({f"annual_{k}": np.asarray(v) for k, v in annual.items()})
+        _atomic_savez(path, **arrays)
+        return final_carbon, annual
+
+    return spinup
+
+
+def _load_or_equilibrate(table, spin: dict, *, cache_dir: str, rebuild: bool,
+                         only_groups=None):
     """Deterministic RESULT cache around :func:`equilibrate_archetypes`.
 
     ``equilibrate_archetypes`` cold-compiles + spins ONE coupled-land-model graph
@@ -856,31 +943,23 @@ def _load_or_equilibrate(table, spin: dict, *, cache_dir: str, rebuild: bool):
         dt=spin["dt"], n_layers=spin["n_layers"], soil_depth=spin["soil_depth"],
         nsc_gated_respiration=spin.get("nsc_gated_respiration", False),
         cold_deciduous_dormancy=spin.get("cold_deciduous_dormancy", False),
-        leaf_c_resorption_frac=spin.get("leaf_c_resorption_frac", 0.0))
+        leaf_c_resorption_frac=spin.get("leaf_c_resorption_frac", 0.0),
+        stomatal_model=spin.get("stomatal_model", "ball_berry"),
+        spinup_batch_fn=(_make_cached_spinup_batch(cache_dir, key)
+                         if cache_dir else None),
+        only_groups=only_groups)
     elapsed = time.time() - t0
-    if path is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    if only_groups is not None:
+        print(f"[global_carbon_ic] equilibrated groups {sorted(only_groups)} in "
+              f"{elapsed:.1f}s (partial run: whole-table cache NOT written)",
+              flush=True)
+    elif path is not None:
         # Save the eight equilibrium pools (eq_<field>) + the five QC members
         # (qc_<key>, canonical order); reading qc[k] for the fixed _QC_KEYS keeps
         # save + load symmetric and fails LOUD if the compute ever drops a member.
         arrays = {f"eq_{p}": np.asarray(getattr(eq, p)) for p in eq._fields}
         arrays.update({f"qc_{k}": np.asarray(qc[k]) for k in _QC_KEYS})
-        # Write to an EXCLUSIVELY-created unique temp file in the same directory,
-        # then os.replace (ATOMIC within a dir) onto the final path.  tempfile
-        # guarantees the temp name is unique even across nodes/containers sharing a
-        # PID on the advertised SHARED filesystem (os.getpid() alone is not), so
-        # concurrent writers own distinct complete files and a reader only ever
-        # sees a complete file or none -- never a truncated npz.
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(path.parent), prefix=f"{path.stem}.", suffix=".tmp.npz")
-        os.close(fd)  # np.savez reopens by name
-        tmp = Path(tmp_name)
-        try:
-            np.savez(tmp, **arrays)
-            os.replace(tmp, path)
-        finally:
-            if tmp.exists():
-                tmp.unlink()
+        _atomic_savez(path, **arrays)
         print(f"[global_carbon_ic] equilibrated {elapsed:.1f}s (saved cache {key8})",
               flush=True)
     else:
@@ -924,6 +1003,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "reserve at leaf-fall (deciduous leaf-C recovery; refills "
                         "the reserve behind the cold leaf-out lock); changes the "
                         "high-latitude equilibria (cache key includes it).")
+    # Canopy switch for the archetype spin-up (two-leaf canopy = the land
+    # default surface scheme).  Named explicitly so the resolved physics is in
+    # the run record; hashed into the equilibrium cache key and written into
+    # the finidat.
+    p.add_argument("--stomatal-model", type=str, default="ball_berry",
+                   choices=("ball_berry", "medlyn"),
+                   help="Two-leaf canopy stomatal model.")
+    p.add_argument("--only-groups", type=str, default=None,
+                   help="Comma-separated archetype-group indices to spin (fills "
+                        "the per-group equilibrium cache, writes NO outputs); "
+                        "run the groups as parallel jobs, then a plain run "
+                        "assembles them from the cache.")
     p.add_argument("--seed", type=int, default=0, help="base k-means RNG seed")
     p.add_argument("--output", type=str, default="results/global_carbon_ic",
                    help="output DIRECTORY for the two .npz files")
@@ -1068,10 +1159,22 @@ def main(argv=None):
         "nsc_gated_respiration": args.nsc_gated_respiration,
         "cold_deciduous_dormancy": args.cold_deciduous_dormancy,
         "leaf_c_resorption_frac": args.leaf_c_resorption_frac,
+        "stomatal_model": args.stomatal_model,
     }
+    print("[global_carbon_ic] RESOLVED canopy: surface_scheme=two_leaf_canopy "
+          f"stomatal_model={args.stomatal_model} "
+          "(big-leaf StomataConfig mirrors the same stomatal model)", flush=True)
+    only_groups = (tuple(int(g) for g in args.only_groups.split(","))
+                   if args.only_groups else None)
+    if only_groups is not None and not args.equilibrium_cache_dir:
+        raise SystemExit("--only-groups needs --equilibrium-cache-dir (the "
+                         "per-group results are its only output)")
     eq, qc = _load_or_equilibrate(
         table, spin, cache_dir=args.equilibrium_cache_dir,
-        rebuild=args.rebuild_equilibrium)
+        rebuild=args.rebuild_equilibrium, only_groups=only_groups)
+    if only_groups is not None:
+        print("[global_carbon_ic] --only-groups run complete; no finidat written")
+        return None, None
 
     # Stage C: cover-weighted map of archetype equilibria onto the grid.
     grid_state = map_to_grid(cell_id, cell_w, eq)
@@ -1093,7 +1196,8 @@ def main(argv=None):
         args.output, inputs, grid_state, table, eq, qc, args.w_min,
         float(args.resolution_deg),
         n_layers=args.n_layers, soil_depth=args.soil_depth, dt=args.dt,
-        soil_frozen_fraction=phi_cell)
+        soil_frozen_fraction=phi_cell,
+        physics={k: spin[k] for k in PHYSICS_PROVENANCE_KEYS})
     print(f"[global_carbon_ic] wrote {finidat_path}")
     print(f"[global_carbon_ic] wrote {archetypes_path}")
     return finidat_path, archetypes_path

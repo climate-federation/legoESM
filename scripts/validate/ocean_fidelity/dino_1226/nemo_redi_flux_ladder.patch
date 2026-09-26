@@ -1,0 +1,79 @@
+diff --git a/cfgs/DINO/MY_SRC/traldf_iso.F90 b/cfgs/DINO/MY_SRC/traldf_iso.F90
+--- a/cfgs/DINO/MY_SRC/traldf_iso.F90
++++ b/cfgs/DINO/MY_SRC/traldf_iso.F90
+@@ -105,7 +105,7 @@ CONTAINS
+       INTEGER  ::   itra               ! number of tracers
+       INTEGER  ::   ik, ikp1, iis      ! swap  indices
+       !
+-      LOGICAL  ::   ll_ptr, ll_hst
++      LOGICAL  ::   ll_ptr, ll_hst, ll_round78_dump
+       !
+       REAL(wp) ::   zmsku, zahu_w      ! local scalars
+       REAL(wp) ::   zmskv, zahv_w      !   -      -
+@@ -118,8 +118,10 @@ CONTAINS
+       REAL(wp), DIMENSION(T2D(1),0:1) ::   zdkt         ! INNER + 1 domain at level jk and jk+1
+       REAL(wp), DIMENSION(T2D(1)    ) ::   zfu , zfv    ! INNER + 1 domain
+       REAL(wp), DIMENSION(T2D(0)    ) ::   zfw          ! INNER     domain
++      REAL(wp), DIMENSION(jpi,jpj,jpkm1) :: zround78_zfu, zround78_zfv, zround78_zfw
+       !!----------------------------------------------------------------------
+       ll_ptr = .FALSE. ; ll_hst = .FALSE.
++      ll_round78_dump = ( kt == nit000 ) .AND. ( .NOT. l_istiled .OR. ntile == 1 )
+       IF( PRESENT(ld_ptr) ) ll_ptr = l_diaptr .AND. ld_ptr
+       IF( PRESENT(ld_hst) ) ll_hst = ld_hst
+       !
+@@ -137,6 +141,9 @@ CONTAINS
+       itra = SIZE( pt, dim = 4 )                   ! number of tracers
+       !
+       DO jn = 1, itra                     !==  tracer loop  ==!
++         zround78_zfu(:,:,:) = 0._wp
++         zround78_zfv(:,:,:) = 0._wp
++         zround78_zfw(:,:,:) = 0._wp
+          !
+          DO jk = 1, jpkm1                       !=  ij slab  =!
+             !
+@@ -151,6 +158,16 @@ CONTAINS
+ #           undef    INN
+ #           undef    pt_in
+             !
++            IF( ll_round78_dump ) THEN
++               DO_2D( 0, 0, 0, 0 )
++                  zround78_zfu(ji,jj,jk) = zfu(ji,jj)
++                  zround78_zfv(ji,jj,jk) = zfv(ji,jj)
++                  IF( jk < jpkm1 ) THEN
++                     zround78_zfw(ji,jj,jk) = zfw(ji,jj)
++                  ENDIF
++               END_2D
++            ENDIF
++            !
+             !
+             !                                   !=  "Poleward" & 2D-integrated diffusive heat and salt transports  =!
+             !                                       Note sign is reversed to give down-gradient diffusive transports
+@@ -158,6 +175,28 @@ CONTAINS
+             IF( ll_hst )  CALL dia_ar5_hst( jn, 'ldf', -zfu(:,:), -zfv(:,:), ldfin=(jk == jpkm1) )
+          END DO                             !=  end ij slab  =!
+          !
++         IF( ll_round78_dump .AND. jn == 1 ) THEN
++            OPEN( UNIT=9450, FILE='redi_dump_zfu_tem.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9451, FILE='redi_dump_zfv_tem.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9452, FILE='redi_dump_zfw_tem.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            WRITE(9450) zround78_zfu ; CLOSE(9450)
++            WRITE(9451) zround78_zfv ; CLOSE(9451)
++            WRITE(9452) zround78_zfw ; CLOSE(9452)
++         ELSEIF( ll_round78_dump .AND. jn == 2 ) THEN
++            OPEN( UNIT=9453, FILE='redi_dump_zfu_sal.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9454, FILE='redi_dump_zfv_sal.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=9455, FILE='redi_dump_zfw_sal.bin', ACCESS='STREAM', &
++               FORM='UNFORMATTED', STATUS='REPLACE' )
++            WRITE(9453) zround78_zfu ; CLOSE(9453)
++            WRITE(9454) zround78_zfv ; CLOSE(9454)
++            WRITE(9455) zround78_zfw ; CLOSE(9455)
++         ENDIF
++         !
+       END DO                          !==  end tracer loop  ==!
+       !
+    END SUBROUTINE traldf_iso_lap

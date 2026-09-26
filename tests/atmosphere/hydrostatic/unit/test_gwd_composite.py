@@ -27,7 +27,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
 def _make_state(n=4, nlev=10, wind_speed=20.0):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(n)
     sigma = create_sigma_coordinate(nlev)
@@ -66,7 +66,8 @@ def test_get_gwd_fn_resolves_composite():
 
 
 @pytest.mark.parametrize("bad", [
-    "e3sm_cam+hines",              # e3sm_cam not composable (#834)
+    "mcfarlane+e3sm_cam",          # e3sm_cam's (default) orographic source next
+                                   # to mcfarlane: double-counted topography
     "ml_emulator+hines",          # ml_emulator not composable
     "hines+",                     # empty part -> non-composable ""
     "prognostic_spectral+prognostic_spectral",  # >1 stateful carry

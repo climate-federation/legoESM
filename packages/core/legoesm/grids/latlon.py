@@ -551,11 +551,23 @@ def create_mercator_grid(
       the true ``R·Δφ(j)``, and ``area := dx_single(j)²``.  This is a
       DELIBERATE closed-form approximation NEMO makes, not a more
       exact grid — legoESM's ``"exact"`` default is geometrically
-      MORE correct.  Only the cell latitudes/faces (``lat``,
-      ``lat_v``, and therefore ``cos_lat_v``/``f``) are shared between
-      both conventions; ``"nemo_isotropic"`` does NOT touch them, so
-      the #516 v-face metric (``vface_zonal_cos_lat``, derived from
-      cell-center latitudes) is unaffected by this flag.
+      MORE correct.  The cell latitudes/faces (``lat``, ``lat_v``, and
+      therefore ``cos_lat_v``/``f``) are shared between both
+      conventions and this flag does not touch them.
+
+      It DOES, since #1455, select the latitude at which the two
+      v-face scale factors are evaluated: NEMO builds both from its
+      own V-point Mercator latitude ``gphiv``
+      (``usrdef_hgr.F90:113``/``:118``), i.e. at the half-integer row
+      index, whereas ``"exact"`` averages the two adjacent tracer
+      latitudes.  ``asin(tanh(.))`` is nonlinear, so those are
+      different latitudes -- on DINO by up to 0.0011 degrees, making
+      ``dx_v`` 3.3e-05 relatively too large at the walls under
+      ``"exact"``.  The #516 invariants (the strain/stress adjoint
+      pair, divergence/advection mass consistency) are unaffected
+      because every operator shares ONE stored width, whatever its
+      value; that is measured, not assumed, in
+      ``tests/ocean/unit/test_dino_vface_zonal_width_nemo.py``.
 
     Placement formula
     -----------------
@@ -1022,6 +1034,8 @@ def ensure_geometry(
     omega: float | None = None,
     *,
     metric_convention: str = "exact",
+    vface_zonal_metric_evaluation: str = "nemo_vpoint",
+    coriolis_placement: str = "cell_average",
 ) -> "LatLonCGridGeometry":
     """Convert a ``LatLonGrid`` to ``LatLonCGridGeometry`` if needed.
 
@@ -1044,6 +1058,14 @@ def ensure_geometry(
         through the conversion — the previous ``constants.Omega``
         default silently re-rotated it (#521, codex 2026-07-03
         round-4 HIGH).
+    coriolis_placement : {"cell_average", "face_latitude"}, optional
+        Forwarded to :func:`create_latlon_geometry` when converting
+        from a ``LatLonGrid``.  **A no-op when *grid* is ALREADY a**
+        ``LatLonCGridGeometry`` -- the early returns above skip
+        conversion entirely, so a caller holding a pre-built geometry
+        (the NEMO bridge builds one) must select the convention where
+        that geometry is built, not here.  Default ``"cell_average"``
+        is BIT-IDENTICAL to every existing caller.
     metric_convention : {"exact", "nemo_isotropic"}, optional (#1226)
         Forwarded to :func:`create_latlon_geometry` when converting
         from a ``LatLonGrid`` (a no-op when *grid* is already a
@@ -1051,6 +1073,11 @@ def ensure_geometry(
         returns above skip conversion entirely, so an already-built
         geometry's convention cannot be changed here). Default
         ``"exact"`` is BIT-IDENTICAL to every existing caller.
+    vface_zonal_metric_evaluation : {"legacy_tracer_midpoint", "nemo_vpoint"}
+        Selects the latitude used for ``dx_v`` when ``metric_convention`` is
+        ``"nemo_isotropic"`` on a variable-dlat grid.  The default preserves
+        the NEMO-faithful V-point construction; the legacy value is an explicit
+        counterfactual for the #1455 climate attribution experiment.
 
     Returns
     -------
@@ -1087,6 +1114,8 @@ def ensure_geometry(
         # geometries are bit-unchanged.
         lat_face_1d=getattr(grid, "lat_v", None),
         metric_convention=metric_convention,
+        vface_zonal_metric_evaluation=vface_zonal_metric_evaluation,
+        coriolis_placement=coriolis_placement,
     )
 
 
@@ -1118,6 +1147,27 @@ class FoldDescriptor(NamedTuple):
         Sign flip for u-component across the fold (typically -1.0).
     vector_sign_v : float
         Sign flip for v-component across the fold (typically -1.0).
+    pivot_row_stored : bool
+        Storage layout of the mesh's top row (measured, not assumed — see
+        ``check_tripole_fold_pairing.py``).  ``False`` (eORCA1.2-style,
+        "halo row stored"): the stored top row IS the duplicated fold-halo
+        row (top = permuted copy of the row below), so a ghost built from
+        the stored top row is consistent.  ``True`` (eORCA025-style,
+        "de-haloed"): the stored top row is the SELF-SYMMETRIC T-pivot row
+        (cell ``(i, j_max)`` and ``(perm_T[i], j_max)`` are the SAME
+        physical cell), the halo row was stripped, and the fold BC must
+        (a) build ghost rows from the rows BELOW the pivot
+        (``J+k <- J-k``) and (b) enforce the pivot row's half-mirror
+        self-duplication every step — otherwise the two mirror copies of
+        each wet fold cell evolve independently and the run blows up
+        (the eORCA025 step-23 NaN, 2026-08-26).
+    perm_u : jax.Array | None
+        (n_lon,) int32 — i-permutation for U stagger points (NEMO T-pivot:
+        ``(-i-1) % n_lon`` de-haloed, ``n_lon-2-i`` halo-stored).  ``None``
+        (legacy descriptors) falls back to ``perm_T``.
+    perm_f : jax.Array | None
+        (n_lon,) int32 — i-permutation for F/vertex stagger points.
+        ``None`` falls back to ``perm_v``.
     """
     is_active: bool
     fold_j: int
@@ -1126,6 +1176,9 @@ class FoldDescriptor(NamedTuple):
     perm_v: jax.Array
     vector_sign_u: float
     vector_sign_v: float
+    pivot_row_stored: bool = False
+    perm_u: jax.Array | None = None
+    perm_f: jax.Array | None = None
 
 
 def _inactive_fold(n_lon: int) -> FoldDescriptor:
@@ -1290,6 +1343,25 @@ class LatLonCGridGeometry(NamedTuple):
     # other T-point cell-row fields so it stays aligned with band-local
     # ``n_lat`` (``None`` passes through unchanged).
     seam_wall_rows: jax.Array | None = None
+    #: ``(n_lat+1,)`` v-face (cell-edge) latitudes [rad], when the builder
+    #: knows them.  Consumers that need the MERIDIONAL CELL EDGES -- the MOC
+    #: and barotropic streamfunction, and ``spinup``'s ACC-latitude lookup --
+    #: read ``getattr(grid, "lat_v", None)`` and otherwise fall back to
+    #: ``lat +/- 0.5*dlat`` with the SCALAR ``dlat``.  On a stretched grid that
+    #: fallback is wrong: measured 0.326 deg off NEMO's own ``gphiv`` on the
+    #: DINO Mercator mesh, whose true row spacing runs 0.344-1.000 deg against
+    #: a scalar 0.347 -- i.e. a third of a cell, on the axis the ACC transport
+    #: is located along.  ``None`` on builders that genuinely have no face
+    #: array (tripole), which keeps the fallback for them.
+    lat_v: jax.Array | None = None
+
+    # Optional native T-point latitude in degrees.  NEMO evaluates a few
+    # source profiles from the mesh's stored ``gphit`` values, before any
+    # degree->radian->degree coordinate round trip.  The bridge alone fills
+    # this field; regular/tripolar constructors retain ``None`` so existing
+    # grids have the same pytree leaves and arithmetic as before.  Appended
+    # at the NamedTuple end to preserve positional callers.
+    native_lat_T_deg: jax.Array | None = None
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -1373,6 +1445,31 @@ class LatLonCGridGeometry(NamedTuple):
         return 2.0 * self.dy_T[:, 0]
 
 
+def _uniform_dlat_tol(lat_like, dlat) -> float:
+    """Tolerance below which a row-spacing variation is STORAGE NOISE, not a
+    stretched grid (#1455 adversarial review, BLOCKER 2).
+
+    The uniform/variable-dlat decision selects ``metric_convention``'s whole
+    NEMO branch, so a false POSITIVE applies a Mercator-only construction to a
+    uniform grid.  The old fixed ``1e-6 * dlat`` bar sat BELOW the float32
+    noise floor: a uniform ``linspace`` stored at fp32 differs from its own
+    first spacing by ~1e-07 while ``1e-6*dlat`` is ~8.7e-08, so 11 of 21
+    standard resolutions (n_lat 36, 60, 90, 96, 120, 128, 180, 192, 240, 256,
+    360) were misclassified as STRETCHED.  That was harmless while the flag
+    moved only ``dx_v`` by ~1e-07; once it also selects the vertex area it is
+    a 25% error straight into the vorticity, so the bar is now floored at the
+    dtype's own resolution.
+
+    The noise scales with the LATITUDE MAGNITUDE (~pi/2), not with ``dlat``:
+    each latitude carries an absolute rounding error of ``eps*|lat|`` and the
+    difference of two of them carries twice that.
+    """
+    lat_like = jnp.asarray(lat_like)
+    eps = float(jnp.finfo(lat_like.dtype).eps)
+    lat_scale = max(float(jnp.max(jnp.abs(lat_like))), 1.0)
+    return max(1e-6 * abs(float(dlat)), 8.0 * eps * lat_scale)
+
+
 def create_latlon_geometry(
     n_lat: int,
     n_lon: int | None = None,
@@ -1384,6 +1481,8 @@ def create_latlon_geometry(
     lon_1d: jax.Array | None = None,
     lat_face_1d: jax.Array | None = None,
     metric_convention: str = "exact",
+    vface_zonal_metric_evaluation: str = "nemo_vpoint",
+    coriolis_placement: str = "cell_average",
 ) -> LatLonCGridGeometry:
     """Create a regular lat-lon ``LatLonCGridGeometry``.
 
@@ -1434,27 +1533,123 @@ def create_latlon_geometry(
         existing caller. ``"nemo_isotropic"`` reproduces NEMO's
         ``usr_def_hgr.F90`` DINO closed form (``pe1t = pe2t``, see
         :func:`create_mercator_grid`'s docstring for the full citation)
-        for ``dy_T``/``dy_u``/``area_T`` ONLY.  The v-face metrics
-        (``dx_v``, ``dy_v``, ``cos_lat_v``) and the vertex area
-        (``area_q``) are the #516 single-source v-face invariant
-        (:func:`legoesm.ocean.dynamics.latlon_cgrid_operators.
-        vface_zonal_cos_lat`, tested by
-        ``tests/ocean/unit/test_vface_metric_consistency_mercator.py``)
-        and are DELIBERATELY left on the exact finite-difference
-        convention regardless of this flag — do not extend
-        ``metric_convention`` to touch them without re-reading that
-        test file. Raises ``ValueError`` on any other value. Ignored
+        for ``dy_T``/``dy_u``/``area_T``, and additionally selects the
+        latitude at which the two v-face scale factors ``dx_v``
+        (NEMO's ``e1v``) and ``dy_v`` (NEMO's ``e2v``) are evaluated —
+        NEMO's own V-point Mercator latitude ``gphiv`` rather than the
+        mean of the two adjacent tracer latitudes (#1455,
+        ``usrdef_hgr.F90:113``/``:118``); under this convention the two
+        are ONE quantity, bit-for-bit on the interior.  ``cos_lat_v``
+        (the raw face-latitude cosine) is not touched by this flag.
+        The flag ALSO selects the vertex
+        (F-cell) area ``area_q`` on the INTERIOR rows: NEMO forms it
+        as the product ``e1f·e2f`` of two F-point scale factors taken
+        at the F-point's own Mercator latitude
+        (``usrdef_hgr.F90:114``/``:118``), which on this mesh is the
+        SQUARE of the corrected v-face width, where the ``"exact"``
+        default uses the true spherical cap between the two adjacent
+        tracer latitudes.  Those are the exact interval integral of
+        ``cos²φ`` versus its midpoint value — a gap of
+        ``(Δλ²/12)(3sin²φ − 1)``, signed median +1.0791e-05 and
+        4.0965e-05 max over the DINO R1 mesh's own interior rows
+        (#1455).  The two END rows keep the ``"exact"`` cap under
+        both conventions.  The two END v-faces stay hard
+        zeroed under both conventions — that is the #516 transport
+        contract (no meridional flux through the closed wall), and
+        :func:`legoesm.ocean.dynamics.latlon_cgrid_operators.
+        vface_zonal_cos_lat` re-imposes it on read.  The #516
+        invariants hold because every operator SHARES one stored
+        width, not because of its value; they are re-measured on the
+        corrected width in
+        ``tests/ocean/unit/test_dino_vface_zonal_width_nemo.py``.
+        Raises ``ValueError`` on any other value. Ignored
         on uniform-dlat grids (scalar-dlat branch has no ``dlat_1d``
         to override).
+    vface_zonal_metric_evaluation : {"legacy_tracer_midpoint", "nemo_vpoint"}
+        The one-variable #1455 selector for NEMO-isotropic, variable-dlat
+        grids. ``"nemo_vpoint"`` evaluates ``dx_v`` at NEMO's analytic
+        V-point Mercator latitude; ``"legacy_tracer_midpoint"`` reproduces
+        the prior adjacent-T-latitude midpoint.  It changes ``dx_v`` only:
+        T/u metrics, true face coordinates, and ``dy_v`` are held fixed.
+
+    coriolis_placement : {"cell_average", "face_latitude"}, optional
+        Where the Coriolis parameter at the v-point / vertex is
+        EVALUATED.  ``f_T`` and ``f_u`` are unaffected by this flag and
+        never need to be: on a lat-lon grid the u-point shares the
+        tracer row's latitude, so ``f_u`` is already ``f`` at its own
+        point (the zonal 4-point average of a latitude-only field is
+        that field).  The v-point does not, and there the two
+        conventions differ:
+
+        * ``"cell_average"`` (default, BIT-IDENTICAL to every existing
+          caller) — ``f_v`` is the arithmetic mean of the two adjacent
+          tracer rows' ``f``, with the polar rows carried over from the
+          nearest tracer row.
+        * ``"face_latitude"`` — ``f_v = 2 Omega sin(phi_face)``,
+          evaluated at the v-face latitude itself.  This is what NEMO
+          does (``ff_f = 2 omega sin(gphif)``, ``domain.F90`` /
+          ``usrdef_hgr.F90``), and it is what any C-grid model that
+          defines its Coriolis at the F-point does; select it to match
+          one.
+
+        THE TRADE, measured by ``tests/ocean/unit/
+        test_coriolis_placement.py`` with the model's own curl operator
+        on a stretched mesh, NOT asserted here: the cell average IS the
+        discrete curl of solid-body rotation (``|curl - f_v|/2Omega``
+        median 4.1e-15, i.e. exact), and ``"face_latitude"`` is 2.0e-05
+        off it.  So selecting the face convention buys oracle fidelity
+        and gives up discrete planetary-vorticity (Kelvin/Stokes)
+        consistency: a fluid in exact solid-body co-rotation acquires a
+        spurious vorticity, fixed in space.  It does NOT give up the
+        EEN energy/enstrophy identities, which are generic in the vertex
+        field -- a RANDOM vertex array conserves just as well, because
+        those need every paired (u, v) contribution to share ONE vertex
+        value, not a particular value.  That exoneration is measured on
+        the EEN triads ONLY; the face-f path
+        (``barotropic_common.coriolis_at_faces``) pairs ``f_u`` with
+        ``f_v`` and this flag moves ``f_v`` alone, so its work residual
+        is UNMEASURED.  NEMO itself is on the face convention.
+
+        The two agree to ``cos(dphi/2)`` on a grid with CONSTANT
+        latitude spacing — a uniform factor there, indistinguishable
+        from a rotation-rate change — and disagree with a genuine
+        latitude structure on a stretched (Mercator) grid.  On NEMO's
+        DINO mesh the cell-average convention is low by a median
+        3.6e-05 relative against NEMO's own dumped ``ff_f``
+        (``scripts/validate/ocean_fidelity/dino_1226/
+        coriolis_omega_routing_audit.py``).
+
+        ``f_v`` is the SINGLE array every C-grid Coriolis path reads,
+        through one of two helpers, so this is the only place the
+        convention has to change (verified by grep, not asserted):
+        ``latlon_cgrid_operators.vertex_coriolis`` -> ``grid.f_v``
+        serves the barotropic EEN pre-block and the 3-D EEN/ENE
+        vorticity flux, and ``barotropic_common.coriolis_at_faces``
+        -> ``grid.f_u``/``grid.f_v`` serves the semi-implicit and
+        ``explicit_ab2`` face-f Coriolis.  ``f_u`` is returned
+        unchanged by this flag for the reason given above.  Raises
+        ``ValueError`` on any other value.
 
     Returns
     -------
     LatLonCGridGeometry
     """
+    if coriolis_placement not in ("cell_average", "face_latitude"):
+        raise ValueError(
+            f"coriolis_placement must be 'cell_average' or 'face_latitude', "
+            f"got {coriolis_placement!r}"
+        )
     if metric_convention not in ("exact", "nemo_isotropic"):
         raise ValueError(
             f"metric_convention must be 'exact' or 'nemo_isotropic', "
             f"got {metric_convention!r}"
+        )
+    if vface_zonal_metric_evaluation not in (
+            "legacy_tracer_midpoint", "nemo_vpoint"):
+        raise ValueError(
+            "vface_zonal_metric_evaluation must be "
+            "'legacy_tracer_midpoint' or 'nemo_vpoint', got "
+            f"{vface_zonal_metric_evaluation!r}"
         )
     if n_lon is None:
         n_lon = 2 * n_lat
@@ -1486,7 +1681,8 @@ def create_latlon_geometry(
         # boundary vs the middle of the domain.
         if n_lat > 4:
             _dlat_mid = lat_1d[n_lat // 2] - lat_1d[n_lat // 2 - 1]
-            _is_variable_dlat = abs(float(_dlat_mid - dlat)) > 1e-6 * abs(float(dlat))
+            _is_variable_dlat = (abs(float(_dlat_mid - dlat))
+                                 > _uniform_dlat_tol(lat_1d, dlat))
         else:
             _is_variable_dlat = False
 
@@ -1505,7 +1701,7 @@ def create_latlon_geometry(
         _row_dlat = lat_face_1d[1:] - lat_face_1d[:-1]
         _is_variable_dlat = bool(
             float(jnp.max(jnp.abs(_row_dlat - _row_dlat[0])))
-            > 1e-6 * abs(float(_row_dlat[0]))
+            > _uniform_dlat_tol(lat_face_1d, _row_dlat[0])
         )
 
     if lon_1d is None:
@@ -1634,15 +1830,84 @@ def create_latlon_geometry(
     # v-face latitudes: midpoints between cell centers, with poles at
     # ends.  cos(lat_v) at poles is exactly 0 (wall BC in regular
     # lat-lon).  This matches the inline computation in divergence_cgrid.
-    lat_v_interior = 0.5 * (lat_s[:-1] + lat_s[1:])
-    cos_lat_v_interior = jnp.cos(lat_v_interior)
-    cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))  # (n_lat+1,)
+    _use_nemo_vpoint = (
+        metric_convention == "nemo_isotropic"
+        and _is_variable_dlat
+        and vface_zonal_metric_evaluation == "nemo_vpoint"
+    )
+    if _use_nemo_vpoint:
+        # GATED ON A NON-UNIFORM MERIDIONAL COORDINATE, deliberately
+        # (adversarial review finding 1).  The whole defect below exists only
+        # because the meridional coordinate is NONLINEAR: on a uniform-dlat
+        # grid the midpoint of two tracer latitudes IS the face latitude, so
+        # there is nothing to correct and the only thing this branch could
+        # change is floating-point rounding (~7e-07 relative at fp32 storage,
+        # because it reads the UNCAST face latitudes where the "exact" branch
+        # reads the storage-cast ones).  Without this guard the flag stopped
+        # being inert on uniform grids, contradicting the parameter docstring
+        # above.  Uncast is kept on purpose for the variable-dlat case: it is
+        # the more accurate value, it is what the ``nemo_isotropic`` ``dy_v``
+        # below already consumes, and matching it is what makes the two v-face
+        # scale factors bit-identical.  At the fp64 storage the oracle lane
+        # runs, cast and uncast are the same array.
+        #
+        # NEMO usrdef_hgr.F90:113 (DINO's MY_SRC) --
+        #     pe1v(ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg
+        # evaluated at the V-point's OWN Mercator latitude ``pphiv`` (line
+        # 108: ``ASIN(TANH(rn_e1_deg*rad*zvj))`` with ``zvj = j - nn_jeq_s +
+        # 0.5``), i.e. the transform is taken at the HALF-INTEGER ROW INDEX.
+        # The "exact" branch below instead averages the two adjacent tracer
+        # LATITUDES.  On a Mercator meridional coordinate ``asin(tanh(.))`` is
+        # nonlinear, so ``asin(tanh(x+0.5)) != 0.5*(asin(tanh(x)) +
+        # asin(tanh(x+1)))`` and the two midpoints differ -- by up to 0.0011
+        # degrees on DINO, which makes this width 3.3e-05 relatively TOO LARGE
+        # at both walls (#1455).  Same formula, same radius, same dlon: a
+        # different LATITUDE, because the midpoint was taken in latitude space
+        # instead of in Mercator index space.
+        #
+        # ``cos_lat_v_1d`` is the cosine of the TRUE v-face latitude that the
+        # variable-dlat branch above already carries (``lat_face``), and is the
+        # same array the ``nemo_isotropic`` ``dy_v`` below consumes -- NEMO's
+        # mesh is isotropic (``pe2v = pe1v``, usrdef_hgr.F90:118), so under
+        # this convention the two v-face scale factors are ONE quantity.
+        #
+        # One semantic difference between the branches, stated because it is
+        # invisible otherwise: ``cos_lat_v_1d`` carries an ``abs`` and a
+        # 1e-10 floor (it is the shared face-cosine, clamped for operators
+        # that divide by it), where the "exact" branch below takes a raw
+        # ``cos``.  Both are unreachable for any latitude strictly inside
+        # +-90 degrees, so the two agree wherever either is defined -- but
+        # they are not the same function of latitude.
+        #
+        # The two END faces stay hard-zeroed, exactly as the "exact" branch
+        # zeroes them: that is the #516 TRANSPORT-metric contract (no
+        # meridional flux through the closed wall), it is what
+        # ``vface_zonal_cos_lat`` re-imposes on read via
+        # ``zero_polar_lat_ends``, and NEMO enforces the same no-flux by its
+        # vmask rather than by its metric.  Only the INTERIOR latitude moves.
+        cos_lat_v = jnp.pad(cos_lat_v_1d[1:-1], (1, 1))  # (n_lat+1,)
+    else:
+        lat_v_interior = 0.5 * (lat_s[:-1] + lat_s[1:])
+        cos_lat_v_interior = jnp.cos(lat_v_interior)
+        cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))  # (n_lat+1,)
 
     # dx_v = R * cos(lat_v) * dlon — zonal extent of the v-face
-    dx_v = (
-        radius * cos_lat_v[:, jnp.newaxis] * dlon
-        * jnp.ones((1, n_lon))
-    )
+    if _use_nemo_vpoint:
+        # Same gate as the cos_lat_v branch above: on a uniform-dlat grid this
+        # convention leaves the v-face zonal width alone entirely.
+        # ``(radius * dlon) * cos`` -- the SAME association order the
+        # ``nemo_isotropic`` ``dy_v`` below uses, so the two v-face scale
+        # factors come out BIT-IDENTICAL on the interior rather than differing
+        # by a floating-point ulp.  NEMO's DINO mesh has ``e1v == e2v`` to the
+        # last bit (one formula, usrdef_hgr.F90:113 and :118), and reproducing
+        # that isotropy exactly is free here.
+        dx_v = (radius * dlon) * cos_lat_v[:, jnp.newaxis] \
+            * jnp.ones((1, n_lon))
+    else:
+        dx_v = (
+            radius * cos_lat_v[:, jnp.newaxis] * dlon
+            * jnp.ones((1, n_lon))
+        )
     # dy_v = meridional spacing at v-faces
     if dlat_1d is not None:
         # Variable dlat: v-face spacing = distance between adjacent cell
@@ -1660,7 +1925,7 @@ def create_latlon_geometry(
     else:
         dy_v = jnp.full((n_lat + 1, n_lon), float(radius * dlat), dtype=dtype)
     if metric_convention == "nemo_isotropic":
-        # NEMO usrdef_hgr.F90:117 -- pe2v = ra*rad*COS(rad*gphiv)*rn_e1_deg,
+        # NEMO usrdef_hgr.F90:118 -- pe2v = ra*rad*COS(rad*gphiv)*rn_e1_deg,
         # the SAME expression as pe1v.  Under the isotropic convention the
         # meridional v-point scale factor IS the zonal one, evaluated at the
         # TRUE v-face latitude (cos_lat_v, NOT the pole-zeroed #516 transport
@@ -1684,6 +1949,45 @@ def create_latlon_geometry(
     # Uses sin_lat_s (storage-dtype) so bit-exact with inline operator.
     sin_ext = jnp.pad(sin_lat_s, (1, 1), constant_values=(-1.0, 1.0))
     area_q_1d = radius**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+    if metric_convention == "nemo_isotropic" and _is_variable_dlat:
+        # NEMO usrdef_hgr.F90 (DINO's MY_SRC) builds the F-cell area as the
+        # PRODUCT of two F-point scale factors, both evaluated at the F-point's
+        # own Mercator latitude:
+        #     :97   zfj   = REAL(mjg(jj,0) - nn_jeq_s) + 0.5
+        #     :109  pphif = 1./rad * ASIN( TANH( rn_e1_deg*rad*zfj ) )
+        #     :114  pe1f  = ra * rad * COS( rad * pphif ) * rn_e1_deg
+        #     :118  pe2f  = ra * rad * COS( rad * pphif ) * rn_e1_deg
+        # so ``e1f*e2f = (R*dlon)^2 * cos^2(phi_f)``.  ``zfj`` and ``zvj``
+        # (:96) carry the SAME +0.5 row offset, so ``pphif == pphiv`` and
+        # ``e1f*e2f == e1v*e2v`` -- verified exactly (0.0 relative) on NEMO's
+        # own dumped mesh_mask.  The F-cell area is therefore the SQUARE of
+        # the v-face width the #1455 width fix already corrected, and is
+        # built from that same ``cos_lat_v_1d`` rather than re-derived.
+        #
+        # legoESM's default is the EXACT spherical cap between the two
+        # adjacent TRACER latitudes.  On the Mercator coordinate
+        # ``sin(phi) = tanh(dlon*j)`` gives ``d(sin phi)/dj = dlon*cos^2(phi)``,
+        # so the cap is ``R^2*dlon^2`` times the exact INTERVAL INTEGRAL of
+        # ``cos^2(phi)`` while NEMO's product is ``R^2*dlon^2`` times its
+        # MIDPOINT value.  Exact quadrature versus the midpoint rule on
+        # ``sech^2``: the gap is ``(dlon^2/12)*(3 sin^2(phi_f) - 1)``, i.e.
+        # a SIGNED median of +1.0791e-05 (2.1872e-05 unsigned) and 4.0965e-05
+        # max over the DINO R1 mesh's own 194 interior rows, changing sign at
+        # |phi| = 35.26 deg.  (Against NEMO's dumped mesh_mask, whose rows
+        # include a 2-row halo reaching past the domain, the same curve reads
+        # +1.1747e-05 / 2.2230e-05 / 4.1585e-05 -- same quantity, wider row
+        # set; both appear in the campaign documents and neither is wrong.)  Same class as the width fix -- a
+        # midpoint taken in the wrong space -- and reproducing the oracle
+        # means adopting NEMO's quadrature, not keeping the more accurate one
+        # (exactly as this convention already adopts NEMO's ``pe1t = pe2t``).
+        #
+        # INTERIOR ROWS ONLY.  The two end rows are wall/pole rows whose cap
+        # spans from the pole to the first tracer row; they are fully masked,
+        # and ``curl_vertex_cgrid`` divides by this array behind a positivity
+        # guard, so they are left exactly as the "exact" branch builds them
+        # rather than collapsed toward zero by ``cos(+-pi/2)``.
+        e_f_1d = _c((radius * dlon) * cos_lat_v_1d)      # (n_lat+1,) NEMO e1f == e2f
+        area_q_1d = area_q_1d.at[1:-1].set((e_f_1d * e_f_1d)[1:-1])
     area_q = area_q_1d[:, jnp.newaxis] * jnp.ones((1, n_lon + 1))
 
     # ------- Coriolis at all stagger points -------
@@ -1694,9 +1998,30 @@ def create_latlon_geometry(
     f_u_interior = 0.5 * (jnp.roll(f_T, 1, axis=1) + f_T)
     f_u = jnp.concatenate([f_u_interior, f_u_interior[:, 0:1]], axis=1)
 
-    # f at v-points: average of cells sharing the lat-face
-    f_v_interior = 0.5 * (f_T[:-1] + f_T[1:])
-    f_v = jnp.concatenate([f_T[0:1], f_v_interior, f_T[-1:]], axis=0)
+    # f at v-points -- the one place the REGULAR LAT-LON vertex Coriolis
+    # convention lives.  Scope, because "the ONE place" was too strong: the
+    # tripolar builder and create_beta_plane_cgrid_geometry each construct
+    # their own f_v and do NOT take this option (on a beta-plane the two
+    # conventions coincide exactly, so there is nothing there to select).
+    # Every C-grid Coriolis path in the repo reads THIS array, through one of
+    # two helpers: `latlon_cgrid_operators.vertex_coriolis` (the barotropic EEN
+    # pre-block and the 3-D EEN/ENE vorticity flux) and
+    # `barotropic_common.coriolis_at_faces` (the semi-implicit and
+    # `explicit_ab2` face-f Coriolis).  So the selector belongs here and
+    # nowhere else.
+    if coriolis_placement == "cell_average":
+        # The arithmetic mean of the two adjacent tracer rows; the polar rows
+        # carry over from the nearest tracer row.
+        f_v_interior = 0.5 * (f_T[:-1] + f_T[1:])
+        f_v = jnp.concatenate([f_T[0:1], f_v_interior, f_T[-1:]], axis=0)
+    else:  # "face_latitude" -- validated at function entry
+        # f evaluated AT the v-face latitude, NEMO's ff_f convention.  Computed
+        # in native precision and cast once, exactly as f_T is, so the two
+        # arrays are consistent to the storage dtype rather than to whatever
+        # order the arithmetic happened to fall in.  The polar rows are the
+        # true wall latitudes here (sin = +-1), not a carried-over tracer row.
+        f_v = _c(2.0 * omega * jnp.sin(lat_face)[:, jnp.newaxis]
+                 * jnp.ones((1, n_lon)))
 
     # ------- Rotation angles (zero for regular lat-lon) -------
     cos_alpha_u = jnp.ones((n_lat, n_lon + 1), dtype=dtype)
@@ -1708,6 +2033,7 @@ def create_latlon_geometry(
     fold = _inactive_fold(n_lon)
 
     return LatLonCGridGeometry(
+        lat_v=_c(lat_face),
         n_lat=n_lat,
         n_lon=n_lon,
         radius=float(radius),

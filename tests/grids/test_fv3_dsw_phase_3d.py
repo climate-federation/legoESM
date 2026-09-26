@@ -91,7 +91,10 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 
-from tests.grids.fv3_gate_helpers import gated_check_grads  # noqa: E402
+from tests.grids.fv3_gate_helpers import (  # noqa: E402
+    assert_batched_matches_loop,
+    gated_check_grads,
+)
 from legoesm.core import fv3_dsw_phase_3d as jdsw  # noqa: E402
 from legoesm.core import fv3_native_cgrid_phase_3d as npcg  # noqa: E402
 from legoesm.core import fv3_native_dsw_phase_3d as npdsw  # noqa: E402
@@ -1256,8 +1259,21 @@ def test_shape_gate_is_non_vacuous(jctx, jstate, jcsw, monkeypatch):
     monkeypatch.setattr(jdsw, "validate_stacked", lambda *a, **k: None)
     bad_in = dict(jcsw)
     bad_in["uc"] = jnp.swapaxes(jcsw["uc"], 1, 2)
-    bad = jdsw.dsw_transport_phase_3d(jctx, jstate, bad_in, DT, KM)
-
+    # ⛔ CORRECTED AGAIN (2026-08-26, the allk batching): the k-batched
+    # exchange path (ext_*_allk, M3 v2a) rebuilds stacks with explicit
+    # shape-carrying .at[].set writes, so the transposed operand that
+    # used to run to completion on the wrong cells now trips a
+    # BROADCAST error mid-phase.  Loud beats silently-wrong: the
+    # neutered call RAISING is a STRONGER outcome than "succeeds and
+    # differs", and either outcome proves the gate is load-bearing.
+    # Accept both, refuse only the vacuous case (runs AND matches).
+    try:
+        bad = jdsw.dsw_transport_phase_3d(jctx, jstate, bad_in, DT, KM)
+    except ValueError as e:
+        # Narrow (codex MINOR): only the stagger-slip's own broadcast
+        # error counts; an unrelated ValueError must FAIL this test.
+        assert "Incompatible shapes for broadcasting" in str(e), e
+        return  # the slip is now caught structurally -- gate non-vacuous
     # `equal_nan=True`: these stacks carry NaN scratch by construction
     # (the halo lane's tripwire fill), and plain array_equal calls two
     # identical NaN arrays UNEQUAL -- which would make `moved` non-empty
@@ -1286,19 +1302,32 @@ def test_f64_gate_is_non_vacuous(jctx, jstate, jcsw, monkeypatch):
     of the same gate stops it.
 
     So the discriminator is the routine NAME, not the wording: every
-    copy of this gate in the campaign says "must be float64", and
-    asserting on the wording would pass whichever one fired.  What this
-    proves is that the CLEAN, early refusal comes from the 3-D lane's
-    gate rather than from luck three frames deeper.
+    copy of this (now dtype-UNIFORMITY) gate prefixes its message with
+    its ``{fname}:``, and a MIXED-dtype dict (an f32 pt among f64 leaves)
+    still raises; asserting on the wording would pass whichever one fired.
+    What this proves is that the CLEAN, early refusal comes from the 3-D
+    lane's gate rather than from luck three frames deeper.
     """
     monkeypatch.setattr(jdsw, "require_f64_jax", lambda *a, **k: None)
     bad = dict(jstate)
     bad["pt"] = jstate["pt"].astype(jnp.float32)
     with pytest.raises(Exception) as ei:
         jdsw.dsw_transport_phase_3d(jctx, bad, jcsw, DT, KM)
-    assert "dsw_transport_phase_3d:" not in str(ei.value), (
-        f"the 3-D lane's f64 gate still fired after being neutered: "
-        f"{ei.value}")
+    msg = str(ei.value)
+    # (1) the 3-D lane's own gate did NOT fire (it was neutered)...
+    assert "dsw_transport_phase_3d:" not in msg, (
+        f"the 3-D lane's dtype gate still fired after being neutered: "
+        f"{msg}")
+    # (2) ...and the refusal that DID fire is a DEEPER dtype gate catching
+    #     the f32 pt among f64 leaves -- i.e. a MIXED-dtype refusal, not an
+    #     unrelated crash (codex MAJOR 2026-08-28: the old assert only
+    #     proved "some exception", which a shape/None bug would also
+    #     satisfy). The uniformity gate's signature is "MIXED float dtypes";
+    #     it is prefixed by the DEEPER routine's own fname, never the
+    #     neutered 3-D one.
+    assert "MIXED float dtypes" in msg, (
+        f"expected a deeper dtype-uniformity gate to catch the f32 pt, but "
+        f"the exception was not a mixed-dtype refusal: {msg}")
 
 
 def test_flux_cap_missing_a_capacitor_names_it(jctx, jstate, jcsw):
@@ -1544,3 +1573,75 @@ def test_dsw_transport_check_grads(jctx, jstate, jcsw, order):
                       (one, one), order=order,
                       modes=("fwd", "rev"),
                       atol=1e-6, rtol=1e-6, eps=1e-4)
+
+
+# =====================================================================
+# H. the face-batched arm (C2a -- face-batching ladder step 3)
+#
+# The vmapped arm is an OPT-IN twin of the certified loop path: same
+# kernels, same level loops, the two face loops replaced by `jax.vmap`
+# over `build_batched_gs`'s stacked view, with BARRIER 1 and the
+# post-p_grad_c exchanges untouched on the full six-face stack.  Gates
+# follow the cgrid file's section G: (i) batched == loop per output at
+# the reassociation bound (sentinel cells compared as both-fills, NaNs
+# by position), on the capacitor-carrying hydrostatic arm AND the NH
+# arm -- the NH arm is what exercises d_sw2's (damp_w*da_min_c) path,
+# i.e. the traced per-face da_min_c threading; (ii) defaults-off (RULE
+# 3: the certified loop path stays the default); (iii) one jit-vs-eager
+# batched smoke at the FMA-class bound.  The common-mode gate is
+# exercised through a phase in the cgrid file and unit-gated in
+# test_fv3_phase3d_common.py, so it is not repeated here.
+# =====================================================================
+
+
+def test_dsw_transport_batched_matches_loop_with_capacitors(
+        jctx, jstate, jcsw):
+    """Hydrostatic arm, capacitors charged: covers the D4 window slices
+    and the capacitor write-back on the batched arm, plus d_sw1's
+    fv_tp_2d (damp_c*da_min) threading."""
+    caps = _stack_cap(_cap_np())
+    loop = jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw, DT, KM,
+                                       flux_cap=caps)
+    bat = jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw, DT, KM,
+                                      flux_cap=caps, batched=True)
+    assert_batched_matches_loop(bat, loop, "dsw_transport_phase_3d")
+
+
+def test_dsw_transport_batched_matches_loop_nh(jctx, jstate, jcsw_nh):
+    """NH arm, no capacitors: covers the w/dw keys, allflux slot 2, and
+    d_sw2's (damp_w*da_min_c)**(nord_w+1) with the TRACED per-face
+    da_min_c (damp_w falls back to the deck's damp_v = 0.2 > 1e-5 on
+    this arm, so the branch is live)."""
+    loop = jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw_nh, DT, KM,
+                                       hydrostatic=False)
+    bat = jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw_nh, DT, KM,
+                                      hydrostatic=False, batched=True)
+    assert_batched_matches_loop(bat, loop, "dsw_transport_phase_3d[nh]")
+
+
+def test_dsw_transport_batched_defaults_off_and_bool(jctx, jstate, jcsw):
+    """RULE 3 guard: the certified loop path is the DEFAULT; the vmap
+    arm is opt-in (the acoustic assembler passes no flag)."""
+    import inspect
+
+    sig = inspect.signature(jdsw.dsw_transport_phase_3d)
+    assert sig.parameters["batched"].default is False
+    with pytest.raises(TypeError, match="batched"):
+        jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw, DT, KM,
+                                    batched=1)
+
+
+def test_dsw_transport_batched_jit_matches_eager(jctx, jstate, jcsw):
+    """jit-vs-eager on the batched arm, through the module's OWN
+    factory (batched declared static there).  FMA contraction under jit
+    is a LARGER class than batched-vs-loop reassociation.  Measured on
+    THIS phase: worst 1.22e-12 rel on a ~1e15-scale KE cell (job
+    9502803) -- the cgrid file's 1e-12 was one violation short here, so
+    the bound is this module's own measured x4."""
+    eager = jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw, DT, KM,
+                                        batched=True)
+    jitted = jdsw.make_dsw_transport_phase_3d_jit()(
+        jctx, jstate, jcsw, DT, KM, batched=True)
+    assert_batched_matches_loop(jitted, eager,
+                                "dsw_transport_phase_3d[jit,batched]",
+                                rtol=5e-12, atol=1e-12)

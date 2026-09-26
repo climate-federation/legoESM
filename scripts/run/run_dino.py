@@ -25,6 +25,18 @@ machine for production runs.
 See ``docs/dev-notes/ocean_experiments_reference.md`` for a 1-minute
 orientation and the full scientific configuration, decisions log, and
 stability investigation.
+
+Numerics note (decision 2026-09-09, NEMO-fidelity campaign): on CPU the XLA
+compiler contracts ``a - b*c`` into a fused multiply-add, which NEMO's
+reference build never does. The two sites where that broke bit-exactness
+(the tracer and momentum implicit-solve sweeps) round the multiply
+separately by hand. A global switch exists — ``XLA_FLAGS=--xla_cpu_max_isa=AVX``
+(also ``SSE4_2``, or ``--xla_backend_optimization_level=0``) — and was
+measured: with the hand fixes in place it changes no operator result, moves
+GYRE trajectory rows by <= 7e-13 and no first-failing step, costs ~3% speed.
+It was deliberately NOT adopted. If a new fused-multiply-add mismatch appears
+in a NEMO-identity comparison, try that flag first to confirm the class
+before hand-fixing the site.
 """
 
 from __future__ import annotations
@@ -126,6 +138,18 @@ def _parse_args():
              "(background-only; also NaNs ~day 230). Both grids.",
     )
     p.add_argument(
+        "--coriolis-placement", choices=("cell_average", "face_latitude"),
+        default=None,
+        help="Where the vertex Coriolis is EVALUATED (#1455; "
+             "DINOConfig.coriolis_placement). 'cell_average' (default) is the "
+             "mean of the two adjacent tracer rows; 'face_latitude' evaluates "
+             "f = 2*Omega*sin(phi_face) AT the v-face latitude, which is "
+             "NEMO's own ff_f convention. NB 'face_latitude' is 10x less "
+             "consistent with the discrete curl of solid-body rotation "
+             "(planetary-vorticity/Kelvin consistency) and is intended for "
+             "oracle-matching only -- see create_latlon_geometry's docstring.",
+    )
+    p.add_argument(
         "--eos", choices=("wright", "nemo_seos"), default=None,
         help="Equation of state (DINOConfig.eos): 'wright' (legoESM default, "
              "Wright 1997 full nonlinear EOS) or 'nemo_seos' (the paper/NEMO "
@@ -135,11 +159,17 @@ def _parse_args():
     p.add_argument(
         "--nemo-faithful-grid", action="store_true",
         help="Build the lat-lon grid on NEMO's EXACT DINO R1 mesh "
-             "(DINOConfig.nemo_faithful_grid): 48×195 with the equator on a "
-             "T-point and faces [1,49] (matches our NEMO 5.0.2 build cell-for-"
-             "cell to 3e-6°; 100%% wet/dry-domain agreement), instead of the "
-             "legoESM [-50,0]/198×50 default. Co-sets the bathymetry lon frame "
-             "+ sill anchor via nemo_faithful_dino_config. Lat-lon only.",
+             "(DINOConfig.nemo_faithful_grid): 52 columns x 199 rows, equator "
+             "on a T-point, U-faces [0,51], instead of the legoESM "
+             "[-50,0]/198x50 default. The mesh is transcribed from NEMO's own "
+             "namelist -- no NEMO file is read -- and is BIT-EXACT against "
+             "NEMO 5.0.2's mesh_mask on every field except the two Coriolis "
+             "arrays, which differ by <=3 ulp because the NEMO binary "
+             "vectorised its own sine (gated by scripts/validate/"
+             "ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py). Co-sets the "
+             "bathymetry lon frame, sill anchor, vertical coordinate, omega "
+             "and metric convention via nemo_faithful_dino_config, and returns "
+             "the same domain the certified NEMO twin runs on. Lat-lon only.",
     )
     p.add_argument(
         "--tke-momentum-visc-bg", type=float, default=None,
@@ -486,8 +516,34 @@ def _save_run_metadata(args, cfg: DINOConfig, grid, z, output_dir: Path,
 # Main
 # ---------------------------------------------------------------------
 
+def _is_nemo_fidelity_run(args) -> bool:
+    """The NEMO-identity DINO path: NEMO's exact mesh and/or a ``nemo_*`` card."""
+    return bool(args.nemo_faithful_grid) or str(args.recipe or "").startswith("nemo_")
+
+
+def _force_fp64_for_nemo_fidelity(args) -> None:
+    """NEMO-fidelity runs are ALWAYS fp64, and not by a flag (user decision
+    2026-09-09).  ``JAX_ENABLE_X64=1`` only permits float64; legoESM's
+    constructors cast to ``get_policy().control``, which defaults to float32,
+    so without this the NEMO-exact mesh and initial state are rebuilt in
+    single precision and stop being bit-exact.  Must run before any array is
+    built.  Other cards keep the default policy.
+    """
+    if not _is_nemo_fidelity_run(args):
+        return
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    set_policy(PrecisionPolicy.fp64())
+    policy = get_policy()
+    if policy.control != PrecisionPolicy.fp64().control:
+        raise SystemExit(
+            f"NEMO-fidelity run requires the fp64 precision policy, got {policy}")
+    print(f"[run_dino] NEMO-fidelity run: precision policy forced to fp64 "
+          f"(control={policy.control}, storage={policy.storage})", flush=True)
+
+
 def main():
     args = _parse_args()
+    _force_fp64_for_nemo_fidelity(args)
 
     # JAX x64 sanity check: DINO uses Wright EOS + barotropic split;
     # both need 64-bit precision to avoid silent eta drift and EOS noise.
@@ -538,6 +594,9 @@ def main():
         cfg = dataclasses.replace(cfg, vmix_scheme=args.vmix)
     if args.eos is not None:
         cfg = dataclasses.replace(cfg, eos=args.eos)
+    if args.coriolis_placement is not None:
+        cfg = dataclasses.replace(
+            cfg, coriolis_placement=args.coriolis_placement)
     if args.tke_momentum_visc_bg is not None:
         cfg = dataclasses.replace(
             cfg, tke_momentum_visc_bg=args.tke_momentum_visc_bg)

@@ -28,6 +28,8 @@ from legoesm.core.precision import (        # noqa: F401
     cast,
     const,
     cast_pytree,
+    finalize_to_storage,
+    ACCUMULATE_ROLE_LEAVES,
     global_sum,
     global_max,
     norm,
@@ -58,7 +60,13 @@ _FP64_STORAGE_MODES = frozenset({"fp64", "float64", "mixed_fp64_storage"})
 
 
 def available_precision_modes() -> tuple[str, ...]:
-    """Sorted names of the precision modes ``apply_precision`` accepts."""
+    """Sorted names of the KNOWN precision modes.
+
+    All four are activatable.  ``'mixed'`` / ``'mixed_fp64_storage'`` were
+    refused for the duration of the #1665 interim and were re-enabled by
+    #1675; they require JAX x64 (``apply_precision`` says so loudly if it is
+    off), because their accumulate and control roles are float64.
+    """
     return tuple(sorted(_MODE_FACTORIES))
 
 
@@ -92,9 +100,44 @@ def resolve_precision(mode: str = "fp32") -> PrecisionPolicy:
 def apply_precision(mode: str = "fp32") -> PrecisionPolicy:
     """Resolve *mode*, activate the policy globally, and enable x64 if needed.
 
-    This is the **one-shot** entry point used by :func:`runtime.bootstrap`.
+    This is the **one-shot** entry point used by :func:`runtime.bootstrap`
+    AND by the driver CLIs directly, so gating a mode here covers every caller.
     """
     policy = resolve_precision(mode)
+
+    # #1675: the #1665 interim refusal of 'mixed' is LIFTED — the eager dycore
+    # step now re-casts its bulk state to the storage dtype at the step
+    # boundary (``core.precision.finalize_to_storage``), which is what the
+    # refusal was waiting for.  What is NOT optional is x64: 'mixed' means
+    # fp32 storage/compute with float64 accumulate/control, and with x64 off
+    # JAX silently turns every float64 role back into float32 — i.e. the mode
+    # would claim a precision it does not run.  Refuse that combination
+    # explicitly rather than degrade in silence.  fp32/fp64 are untouched.
+    if mode.strip().lower() in ("mixed", "mixed_fp64_storage"):
+        from legoesm.runtime.backend import (
+            get_backend, is_x64_enabled, supports_float64,
+        )
+
+        if not is_x64_enabled():
+            raise RuntimeError(
+                f"precision={mode!r} needs JAX x64 enabled: its accumulate and "
+                "control roles are float64, and with x64 off JAX demotes them "
+                "to float32, so the run would not be mixed precision at all. "
+                "Go through legoesm.runtime.configure_runtime/bootstrap (which "
+                "enables x64 for this mode), or set JAX_ENABLE_X64=1."
+            )
+        # x64 alone is not enough: on a backend with no native float64 (Apple
+        # Metal) every role silently resolves to float32, so the mode would
+        # again claim a precision it does not run.  Adversarial review found
+        # this by mocking the backend away (#1675).
+        if not supports_float64():
+            raise RuntimeError(
+                f"precision={mode!r} needs a backend with native float64; "
+                f"{get_backend()!r} has none, so its float64 accumulate and "
+                "control roles would resolve to float32 and the mode would be "
+                "indistinguishable from 'fp32'. Use precision='fp32' on this "
+                "backend."
+            )
 
     # Activate globally.
     set_policy(policy)

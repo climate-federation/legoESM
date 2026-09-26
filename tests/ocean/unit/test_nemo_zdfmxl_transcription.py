@@ -50,6 +50,7 @@ def _z_coord(dz, n_lat, n_lon, k_bot):
         t_depth_ref=jnp.asarray(gdept),
         is_active=jnp.asarray(is_active),
         h_partial=jnp.broadcast_to(jnp.asarray(dz), (n_lat, n_lon, nlev)),
+        nemo_e3w_mesh_reference=False,
     )
 
 
@@ -84,6 +85,61 @@ def _nemo_nmln_reference(n2_by_level, mbkt, thresh, nlb10=2):
         if hmlp < thresh:
             nmln = min(jk, mbkt) + 1
     return nmln
+
+
+def test_native_bn2_divide_and_mld_multiply_share_one_e3w():
+    """Native e3w is consumed, and only the shared multiply cancels it."""
+    from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+
+    dz = np.array([8.0, 12.0, 20.0, 35.0, 55.0, 80.0])
+    nlev = len(dz)
+    gd = np.cumsum(dz) - 0.45 * dz
+    active = jnp.ones((1, 1, nlev))
+    T = jnp.asarray(np.linspace(14.0, 4.0, nlev)[None, None, :])
+    S = jnp.asarray(np.linspace(35.3, 34.8, nlev)[None, None, :])
+
+    def run(native_e3w):
+        z = types.SimpleNamespace(
+            dz_ref=jnp.asarray(dz), t_depth_ref=jnp.asarray(gd),
+            is_active=active, h_partial=jnp.asarray(dz)[None, None, :],
+            nemo_e3w_mesh_reference=True,
+            nemo_e3w_0=jnp.asarray(native_e3w), n_levels=nlev,
+        )
+        return _nemo_mld_from_n2_integral(
+            T, S, jnp.ones((1, 1)), z, None, 0.2, 9.80665, 1026.0,
+            active_3d=active)
+
+    e3w = np.concatenate([[2.0 * gd[0]], np.diff(gd)])
+    gdepw = np.cumsum(dz)[:-1]
+    n2_1 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        T, S, jnp.asarray(gd), jnp.asarray(gdepw),
+        e3w_int=jnp.asarray(e3w[1:])))
+    n2_2 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        T, S, jnp.asarray(gd), jnp.asarray(gdepw),
+        e3w_int=jnp.asarray(2.0 * e3w[1:])))
+    assert not np.array_equal(n2_1, n2_2), (
+        "doubling native e3w did not change bn2, so the supplied divisor "
+        "is not actually consumed")
+    paired_1 = n2_1 * e3w[1:]
+    paired_2 = n2_2 * (2.0 * e3w[1:])
+    mismatched = n2_2 * e3w[1:]
+    assert np.array_equal(paired_1, paired_2)
+    assert not np.array_equal(paired_1, mismatched), (
+        "a deliberately different MLD multiplier did not break cancellation")
+    # Red-capable threshold control: the fixture must make the mismatched
+    # product choose the opposite side at its first eligible interface.
+    # The production loop begins at its second interior contribution.  The
+    # actual rho_c=0.2 threshold is between the matched and mismatched values,
+    # so rebuilding the production multiplier from a fixed ladder makes the
+    # two run() results below choose different MLD levels.
+    threshold = 9.80665 / 1026.0 * 0.2
+    assert np.all(paired_1[..., 1] > threshold)
+    assert np.all(mismatched[..., 1] < threshold)
+
+    h1, k1 = run(e3w)
+    h2, k2 = run(2.0 * e3w)
+    assert np.array_equal(np.asarray(k1), np.asarray(k2))
+    assert np.array_equal(np.asarray(h1), np.asarray(h2))
 
 
 def test_unstratified_column_stops_at_the_seafloor_not_the_last_interface():
@@ -202,7 +258,8 @@ def test_alpha_beta_use_true_gdepw_not_the_gdept_midpoint():
     T = 10.0 + np.cumsum(rng.uniform(0.05, 0.4, (4, 3, nlev)), axis=-1)[:, :, ::-1]
     S = 35.0 + rng.uniform(-0.1, 0.1, (4, 3, nlev))
 
-    kw = dict(cfg=NemoSEOSConfig(), g=9.80665)
+    kw = dict(cfg=NemoSEOSConfig(), g=9.80665,
+              e3w_source="depth_difference")
     n2_true = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
         jnp.asarray(z_iface[:-1]), **kw))
@@ -342,7 +399,8 @@ def test_nemo_bn2_matches_an_independent_numpy_transcription():
 
     got = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
-        jnp.asarray(gdepw), NemoSEOSConfig(), g=grav))
+        jnp.asarray(gdepw), NemoSEOSConfig(), g=grav,
+        e3w_source="depth_difference"))
 
     # --- independent port of eosbn2.F90:1459-1466 ---
     a, b = nemo_seos_alpha_beta(jnp.asarray(T), jnp.asarray(S),
@@ -616,6 +674,45 @@ def test_native_slopes_are_lon_translation_equivariant():
             rtol=1e-11, atol=1e-16,
             err_msg=f"{name} is not lon-translation equivariant -- a seam "
                     "(zero-ghost) dependence is back")
+
+
+def test_native_slope_legacy_selector_keeps_output_bits_and_skips_barriers(
+        monkeypatch):
+    """Explicit legacy selection retains the pre-row-30 numerical path."""
+    import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.grids.latlon import create_latlon_grid
+
+    nlat, nlon, nlev = 4, 5, 5
+    dz = np.geomspace(20.0, 180.0, nlev)
+    z = _z_coord(dz, nlat, nlon, np.full((nlat, nlon), nlev - 1))
+    rng = np.random.default_rng(31)
+    T = 8.0 + rng.uniform(-1.0, 1.0, (nlat, nlon, nlev))
+    S = 35.0 + rng.uniform(-0.1, 0.1, (nlat, nlon, nlev))
+    rho = jnp.asarray(1026.0 + 0.2 * (10.0 - T))
+    mask = jnp.ones((nlat, nlon))
+    umask = jnp.ones((nlat, nlon + 1))
+    vmask = jnp.ones((nlat + 1, nlon))
+    grid = create_latlon_grid(n_lat=nlat, n_lon=nlon)
+    eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
+    default = gm.compute_nemo_native_slopes(
+        rho, jnp.asarray(T), jnp.asarray(S), mask, umask, vmask, z, grid,
+        GMRediConfig(), eos_fn, active_3d=z.is_active)
+
+    def barrier_must_not_run(_value):
+        raise AssertionError("literal association reached the legacy card")
+
+    monkeypatch.setattr(gm.lax, "optimization_barrier", barrier_must_not_run)
+    explicit = gm.compute_nemo_native_slopes(
+        rho, jnp.asarray(T), jnp.asarray(S), mask, umask, vmask, z, grid,
+        GMRediConfig(
+            slope_prd_evaluation="density_roundtrip",
+            slope_prd_geometry_stage="current_step",
+            slope_n2_evaluation="recompute"),
+        eos_fn, active_3d=z.is_active)
+    for implicit, selected in zip(default, explicit):
+        np.testing.assert_array_equal(np.asarray(selected), np.asarray(implicit))
 
 
 def test_wslp_ml_anchor_never_reads_past_the_columns_own_bottom():

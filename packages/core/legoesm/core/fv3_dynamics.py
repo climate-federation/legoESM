@@ -75,7 +75,7 @@ from legoesm.core.fv3_mapz import (
 from legoesm.core.fv3_native_state_3d import (
     field_shape,
 )
-from legoesm.core.fv3_phase3d_common import require_f64_jax
+from legoesm.core.fv3_phase3d_common import batch_size, require_f64_jax
 from legoesm.core.fv3_tracer2d import (
     alloc_flux_capacitors,
     require_tracer_2d_1l_lane,
@@ -134,7 +134,8 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
     """
     delp = jnp.asarray(delp)
     require_f64_jax("p_var_hydrostatic", {"delp": delp})
-    want = (6,) + tuple(field_shape("delp", n, ng, km))
+    nb = delp.shape[0]            # 6 faces, or 6*kt*kt windows
+    want = (nb,) + tuple(field_shape("delp", n, ng, km))
     if delp.shape != want:
         raise ValueError(f"p_var_hydrostatic: delp must be {want}, got "
                          f"{delp.shape}")
@@ -161,7 +162,7 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
         acc = acc + x
         lnp = jnp.log(acc)
         return acc, (acc, lnp, jnp.exp(akap * lnp))
-    acc0 = jnp.zeros((6, n, n), dtype=dt) + ptop
+    acc0 = jnp.zeros((nb, n, n), dtype=dt) + ptop
     # lax.scan returns (final_carry, stacked_ys) -- TWO values. The
     # three stage outputs come back inside ys, so they unpack from
     # the second element, never from the call.
@@ -169,18 +170,19 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
 
     # :80-83  pe(i,1,j) = ptop ; pk(i,j,1) = ptop**cappa
     pek = ptop ** akap
-    pe = jnp.zeros((6,) + tuple(field_shape("pe", n, ng, km)), dtype=dt)
+    pe = jnp.zeros((nb,) + tuple(field_shape("pe", n, ng, km)), dtype=dt)
     pe = pe.at[:, 1:n + 1, 0, 1:n + 1].set(ptop)
     pe = pe.at[:, 1:n + 1, 1:km + 1, 1:n + 1].set(
         jnp.transpose(pe_c, (1, 2, 0, 3)))           # (6,i,k,j)
-    pk = jnp.zeros((6,) + tuple(field_shape("pk", n, ng, km)), dtype=dt)
+    pk = jnp.zeros((nb,) + tuple(field_shape("pk", n, ng, km)), dtype=dt)
     pk = pk.at[:, ia:ia + n, ia:ia + n, 0].set(pek)
     pk = pk.at[:, ia:ia + n, ia:ia + n, 1:km + 1].set(
         jnp.transpose(pk_c, (1, 2, 3, 0)))           # (6,i,j,k)
-    peln = jnp.zeros((6,) + tuple(field_shape("peln", n, ng, km)), dtype=dt)
+    peln = jnp.zeros((nb,) + tuple(field_shape("peln", n, ng, km)),
+                     dtype=dt)
     peln = peln.at[:, :, 1:km + 1, :].set(jnp.transpose(lnp_c, (1, 2, 0, 3)))
     # :110-112  ps = pe(i,km+1,j)
-    ps = jnp.zeros((6,) + tuple(field_shape("ps", n, ng, km)), dtype=dt)
+    ps = jnp.zeros((nb,) + tuple(field_shape("ps", n, ng, km)), dtype=dt)
     ps = ps.at[:, ia:ia + n, ia:ia + n].set(pe[:, 1:n + 1, km, 1:n + 1])
     # :114-125 peln(:,1,:).  jnp.where: both arms total and finite -- the
     # dead log arm is clamped at PTOP_MIN, which cannot alter the live
@@ -423,6 +425,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                      kord_mt: int, kord_tm: int, kord_tr,
                      q, omga=None, nh=None,
                      zvir: float = 0.0, consv_te: float = 0.0,
+                     batched: bool = False,
                      sphum_index: int | None = None,
                      n_sponge: int = -1, tau: float = -1.0,
                      hydrostatic: bool = True,
@@ -581,13 +584,14 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 "area-weighted and use rsin2/cosa_s "
                 "(fv_mapz.F90:650-656).")
     n, ng = ctx.n, ctx.ng
-    want_delp = (6,) + tuple(field_shape("delp", n, ng, km))
+    nb = batch_size(ctx)          # 6 faces, or the window ctx's 6*kt*kt
+    want_delp = (nb,) + tuple(field_shape("delp", n, ng, km))
     for nm in ("delp", "pt", "u", "v"):
         if nm not in state:
             raise ValueError(f"state is missing '{nm}'")
-        if state[nm].shape[0] != 6:
-            raise ValueError(f"state['{nm}'] must lead with 6 faces, got "
-                             f"{state[nm].shape}")
+        if state[nm].shape[0] != nb:
+            raise ValueError(f"state['{nm}'] must lead with {nb} faces/"
+                             f"windows, got {state[nm].shape}")
     for nm in ("delp", "pt"):
         if state[nm].shape != want_delp:
             raise ValueError(f"state['{nm}'] must be {want_delp}, got "
@@ -595,9 +599,9 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     for nm in ("ps", "pe", "peln", "pk", "pkz"):
         if nm not in press:
             raise ValueError(f"press is missing '{nm}'")
-        if press[nm].shape[0] != 6:
-            raise ValueError(f"press['{nm}'] must lead with 6 faces, got "
-                             f"{press[nm].shape}")
+        if press[nm].shape[0] != nb:
+            raise ValueError(f"press['{nm}'] must lead with {nb} faces/"
+                             f"windows, got {press[nm].shape}")
     nq = len(q)
     for i, qt in enumerate(q):
         if qt.shape != want_delp:
@@ -625,7 +629,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     w_limiter = bool(w_limiter) if w_limiter is not None else False
 
     if omga is None:
-        omga = jnp.zeros(want_delp, dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from state["delp"]
+        omga = jnp.zeros(want_delp, dtype=state["delp"].dtype)
     ak = jnp.asarray(ak)
     bk = jnp.asarray(bk)
     require_f64_jax("fv_dynamics_step",
@@ -669,11 +674,11 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     if abs(consv_te) > _CONSV_MIN:
         _gs = ctx.gs6
         _stack = lambda k: jnp.asarray(  # noqa: E731
-            np.stack([np.asarray(_gs[t][k]) for t in range(6)]))
+            np.stack([np.asarray(_gs[t][k]) for t in range(nb)]))
         _rsin2, _cosa_s = _stack("rsin2"), _stack("cosa_s")
         _area = _stack("area")
         _hs = jnp.asarray(np.stack([_hs_face_jax(ctx, t, n, ng)
-                                    for t in range(6)]))
+                                    for t in range(nb)]))
         qc = (zvir * q[sphum_index][:, ia:ia + n, ia:ia + n, :]
               if zvir != 0.0 else None)
         te0_2d = total_energy_2d_hydrostatic_jax(
@@ -730,10 +735,13 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         # dyn_core.F90:313-316 sits INSIDE dyn_core: one zeroing per n_map
         # call (never per acoustic sub-step); k_split=1 makes it once per
         # fv_dynamics_step.  This module owns the zeroing (D3).
-        fc = alloc_flux_capacitors(n, ng, km) if nq > 0 else None
+        fc = (alloc_flux_capacitors(n, ng, km, dtype=st["delp"].dtype,
+                                    nb=nb)
+              if nq > 0 else None)
         # :502 dyn_core; press_out's role is taken by ac["press"] (the
         # callee contract supplies it, replacing the spec's length check)
-        ac = acoustic_loop_3d(ctx, st, mdt, km, n_split=n_split, ptop=ptop,
+        ac = acoustic_loop_3d(ctx, st, mdt, km, batched=batched,
+                              n_split=n_split, ptop=ptop,
                               akap=akap, cp_air=cp_air, cfg=cfg,
                               check_state=check_state,
                               remap_follows=remapped,
@@ -753,12 +761,30 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             # -- the spec's own [face][iq] order. Passing the list
             # straight through made the callee see nq as the face axis.
             _q_in = jnp.stack(qq, axis=1)
+            # WINDOW lane: the tracer step is a phase of its own between
+            # the acoustic loop and the remap, and like every acoustic
+            # substep it needs its seam pads rebuilt from the owners at
+            # ENTRY (acoustic_loop_3d does this for state/nh/flux_cap).
+            # Without it the tracer's pad NaN (the outer stencil-reach
+            # cells, expected) survived into the next step and ate ~2
+            # cells inward per step, reaching owned cells at step 3
+            # (C24 kt=2 pad=5 n_split=8; gate jobs 9910440/1, probe
+            # 9912744; forced refresh before OR after the step confines
+            # it, jobs 9912821/2).  No-op on the six-face lane.
+            # One tracer per key (each (nb, W, W, km), the layout pt already
+            # relies on) in ONE firing -- NOT km*nq merged into the trailing
+            # axis, which can collide with a horizontal extent and trip the
+            # layout classifier (codex: nq=4, km=5 at C24 gives 20 = n_w+1).
+            _wc = getattr(getattr(ctx, "tab", None), "window_comm", None)
+            if _wc is not None:
+                _ref = _wc.refresh({f"q{i}": _q_in[:, i] for i in range(nq)})
+                _q_in = jnp.stack([_ref[f"q{i}"] for i in range(nq)], axis=1)
             _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1_delp, ac["flux_cap"],
                                        km=km, nq=nq, hord_tr=hord_tr,
                                        dt=mdt, q_split=tracer_q_split,
                                        nord_tr=nord_tr, trdm=trdm2,
                                        lim_fac=lim_fac, z_tracer=z_tracer,
-                                       inline_q=inline_q)
+                                       inline_q=inline_q, batched=batched)
             # The routine returns a DICT (C4: everything the spec
             # mutates). Binding the whole dict to qq made the remap's
             # `qq[i]` a KeyError on any run with tracers.
@@ -817,64 +843,127 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             pr["pk"] = pr["pk"].at[:, ia:ia + n, ia:ia + n, :].set(g["pk"])
 
         # :618 the remap, ONE FACE PER CALL -- the callee's contract is
-        # per-face with the numpy-lane layouts, so this stays a 6-deep
-        # static (unrolled) face loop; no face reads another's writes
-        fs = []
-        for t in range(6):
-            fs.append(lagrangian_to_eulerian(
-                pe=pr["pe"][t], peln=pr["peln"][t], pk=pr["pk"][t],
-                pkz=pr["pkz"][t], delp=st["delp"][t], pt=st["pt"][t],
-                u=st["u"][t], v=st["v"][t], ps=pr["ps"][t],
-                ak=ak, bk=bk, ptop=ptop, akap=akap, cp=cp_air,
-                r_vir=zvir, km=km, n=n, ng=ng,
-                kord_mt=kord_mt, kord_tm=kord_tm, kord_tr=kord_tr,
-                q=[qq[i][t] for i in range(nq)],
-                omga=om[t], sphum_index=sphum_index,
-                last_step=last_step, hydrostatic=hydrostatic,
-                adiabatic=adiabatic_flag, consv=consv_te,
-                w=(None if hydrostatic else st["w"][t]),
-                delz=(None if hydrostatic else st["delz"][t]),
-                ws=(None if hydrostatic else g["ws"][t]),
-                kord_wz=kord_wz, w_limiter=w_limiter,
-                rdgas=(None if hydrostatic else _FV3_RDGAS),
-                grav=(None if hydrostatic else _FV3_GRAV),
-                fill=False, do_sat_adj=False, do_inline_mp=False,
-                do_adiabatic_init=False,
-                defer_close=(bool(last_step) and abs(consv_te) > _CONSV_MIN)))
-        # PYTREE STRUCTURE IS PART OF THE CARRY CONTRACT. The remap owns
-        # delp/pt/u/v always and w/delz only on the NH arm, so rebuilding
-        # from scratch DROPS a hydrostatic run's `w` -- which the state
-        # still carries (build_state_3d allocates it zeroed either way).
-        # lax.scan then rejects the k_split loop with "carry input and
-        # carry output must have the same pytree structure ... symmetric
-        # difference {'w'}". Any key the remap does not own is carried
-        # through untouched rather than recreated, so the structure is
-        # whatever the caller handed in.
-        _st_in = st
-        st = {"delp": jnp.stack([o.delp for o in fs]),
-              "pt": jnp.stack([o.pt for o in fs]),
-              "u": jnp.stack([o.u for o in fs]),
-              "v": jnp.stack([o.v for o in fs])}
-        if not hydrostatic:
-            st["w"] = jnp.stack([o.w for o in fs])
-            st["delz"] = jnp.stack([o.delz for o in fs])
-        for _k in _st_in:
-            if _k not in st:
-                st[_k] = _st_in[_k]
-        pr = {"ps": jnp.stack([o.ps for o in fs]),
-              "pe": jnp.stack([o.pe for o in fs]),
-              "peln": jnp.stack([o.peln for o in fs]),
-              "pk": jnp.stack([o.pk for o in fs]),
-              "pkz": jnp.stack([o.pkz for o in fs])}
-        if nq > 0:
-            # rebuild the list of stacked tracers from the per-face lists
-            # list(), not the tree_map result as-is: the callee returns
-            # its tracers as a tuple, and a carry that goes in a list and
-            # comes out a tuple is a pytree-structure mismatch under
-            # lax.scan even though every leaf matches.
-            qq = list(jax.tree_util.tree_map(lambda *xs: jnp.stack(xs),
-                                             *[o.q for o in fs]))
-        om = jnp.stack([o.omga for o in fs])
+        # per-face with the numpy-lane layouts.  Two arms: the certified
+        # default is the 6-deep static (unrolled) face loop below (no
+        # face reads another's writes); `batched` (face-batching ladder
+        # step 6, pattern 4c7198bd1) vmaps the SAME callee over the face
+        # axis instead -- each traced `x[t]` read in the loop is a
+        # masked-select + all-reduce under SPMD, and the remap was one
+        # of the two remaining per-face `[t]` sites.
+        if batched:
+            # in_axes: every per-face operand at axis 0 -- the press
+            # bundle (pe/peln/pk/pkz/ps), the state (delp/pt/u/v),
+            # each tracer leaf of the q list, omga, and on the NH arm
+            # w/delz/ws (vmap's default in_axes=0 over the positional
+            # args of the wrapper).  Closed over (face-invariant at
+            # trace time): ak/bk/ptop/akap/cp_air/zvir/km/n/ng, the
+            # three kords, kord_wz/w_limiter, hydrostatic/adiabatic/
+            # consv_te/sphum_index, and last_step/defer_close (Python
+            # bools per k_split iteration).  The callee Python-branches
+            # only on those statics, never on a per-face VALUE (read,
+            # fv3_mapz.py:1319-1720), so the six faces are one program.
+            _defer = bool(last_step) and abs(consv_te) > _CONSV_MIN
+
+            def _remap_face(pe_t, peln_t, pk_t, pkz_t, delp_t, pt_t,
+                            u_t, v_t, ps_t, q_t, om_t, *nh_t):
+                w_t, delz_t, ws_t = nh_t if nh_t else (None, None, None)
+                return lagrangian_to_eulerian(
+                    pe=pe_t, peln=peln_t, pk=pk_t, pkz=pkz_t,
+                    delp=delp_t, pt=pt_t, u=u_t, v=v_t, ps=ps_t,
+                    ak=ak, bk=bk, ptop=ptop, akap=akap, cp=cp_air,
+                    r_vir=zvir, km=km, n=n, ng=ng,
+                    kord_mt=kord_mt, kord_tm=kord_tm, kord_tr=kord_tr,
+                    q=list(q_t), omga=om_t, sphum_index=sphum_index,
+                    last_step=last_step, hydrostatic=hydrostatic,
+                    adiabatic=adiabatic_flag, consv=consv_te,
+                    w=w_t, delz=delz_t, ws=ws_t,
+                    kord_wz=kord_wz, w_limiter=w_limiter,
+                    rdgas=(None if hydrostatic else _FV3_RDGAS),
+                    grav=(None if hydrostatic else _FV3_GRAV),
+                    fill=False, do_sat_adj=False, do_inline_mp=False,
+                    do_adiabatic_init=False, defer_close=_defer)
+
+            _nh_ops = (() if hydrostatic
+                       else (st["w"], st["delz"], g["ws"]))
+            o = jax.vmap(_remap_face)(
+                pr["pe"], pr["peln"], pr["pk"], pr["pkz"],
+                st["delp"], st["pt"], st["u"], st["v"], pr["ps"],
+                list(qq), om, *_nh_ops)
+            # Assembly mirrors the loop arm KEY-FOR-KEY: vmap stacks
+            # every output leaf at axis 0, which is exactly what the
+            # loop arm's jnp.stack builds, and the same carry-contract
+            # rules apply (w/delz only on NH; unowned keys carried
+            # through; q back to a LIST -- the callee returns a tuple).
+            _st_in = st
+            st = {"delp": o.delp, "pt": o.pt, "u": o.u, "v": o.v}
+            if not hydrostatic:
+                st["w"] = o.w
+                st["delz"] = o.delz
+            for _k in _st_in:
+                if _k not in st:
+                    st[_k] = _st_in[_k]
+            pr = {"ps": o.ps, "pe": o.pe, "peln": o.peln,
+                  "pk": o.pk, "pkz": o.pkz}
+            if nq > 0:
+                qq = list(o.q)
+            om = o.omga
+        else:
+            fs = []
+            for t in range(nb):
+                fs.append(lagrangian_to_eulerian(
+                    pe=pr["pe"][t], peln=pr["peln"][t], pk=pr["pk"][t],
+                    pkz=pr["pkz"][t], delp=st["delp"][t], pt=st["pt"][t],
+                    u=st["u"][t], v=st["v"][t], ps=pr["ps"][t],
+                    ak=ak, bk=bk, ptop=ptop, akap=akap, cp=cp_air,
+                    r_vir=zvir, km=km, n=n, ng=ng,
+                    kord_mt=kord_mt, kord_tm=kord_tm, kord_tr=kord_tr,
+                    q=[qq[i][t] for i in range(nq)],
+                    omga=om[t], sphum_index=sphum_index,
+                    last_step=last_step, hydrostatic=hydrostatic,
+                    adiabatic=adiabatic_flag, consv=consv_te,
+                    w=(None if hydrostatic else st["w"][t]),
+                    delz=(None if hydrostatic else st["delz"][t]),
+                    ws=(None if hydrostatic else g["ws"][t]),
+                    kord_wz=kord_wz, w_limiter=w_limiter,
+                    rdgas=(None if hydrostatic else _FV3_RDGAS),
+                    grav=(None if hydrostatic else _FV3_GRAV),
+                    fill=False, do_sat_adj=False, do_inline_mp=False,
+                    do_adiabatic_init=False,
+                    defer_close=(bool(last_step) and abs(consv_te) > _CONSV_MIN)))
+            # PYTREE STRUCTURE IS PART OF THE CARRY CONTRACT. The remap owns
+            # delp/pt/u/v always and w/delz only on the NH arm, so rebuilding
+            # from scratch DROPS a hydrostatic run's `w` -- which the state
+            # still carries (build_state_3d allocates it zeroed either way).
+            # lax.scan then rejects the k_split loop with "carry input and
+            # carry output must have the same pytree structure ... symmetric
+            # difference {'w'}". Any key the remap does not own is carried
+            # through untouched rather than recreated, so the structure is
+            # whatever the caller handed in.
+            _st_in = st
+            st = {"delp": jnp.stack([o.delp for o in fs]),
+                  "pt": jnp.stack([o.pt for o in fs]),
+                  "u": jnp.stack([o.u for o in fs]),
+                  "v": jnp.stack([o.v for o in fs])}
+            if not hydrostatic:
+                st["w"] = jnp.stack([o.w for o in fs])
+                st["delz"] = jnp.stack([o.delz for o in fs])
+            for _k in _st_in:
+                if _k not in st:
+                    st[_k] = _st_in[_k]
+            pr = {"ps": jnp.stack([o.ps for o in fs]),
+                  "pe": jnp.stack([o.pe for o in fs]),
+                  "peln": jnp.stack([o.peln for o in fs]),
+                  "pk": jnp.stack([o.pk for o in fs]),
+                  "pkz": jnp.stack([o.pkz for o in fs])}
+            if nq > 0:
+                # rebuild the list of stacked tracers from the per-face lists
+                # list(), not the tree_map result as-is: the callee returns
+                # its tracers as a tuple, and a carry that goes in a list and
+                # comes out a tuple is a pytree-structure mismatch under
+                # lax.scan even though every leaf matches.
+                qq = list(jax.tree_util.tree_map(lambda *xs: jnp.stack(xs),
+                                                 *[o.q for o in fs]))
+            om = jnp.stack([o.omga for o in fs])
 
         if last_step and abs(consv_te) > _CONSV_MIN:
             # THE REDUCTION, and the reason the remap was split. fv_mapz
@@ -898,13 +987,29 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             dtmp = energy_fixer_dtmp_jax(te0_2d, te_2d, zsum0, _area,
                                          consv=consv_te, n=n, ng=ng)
             st = dict(st)
-            st["pt"] = jnp.stack([
-                close_out_pt(st["pt"][t], pr["pkz"][t],
-                             [qq[i][t] for i in range(nq)],
-                             sphum_index=sphum_index, r_vir=zvir,
-                             dtmp=dtmp, cp=cp_air, n=n, ng=ng,
-                             fixer_on=True)
-                for t in range(6)])
+            if batched:
+                # Face-batch the energy fixer's close_out_pt (the last
+                # dormant per-face x[t] read; consv_te-only).  dtmp is a
+                # GLOBAL scalar reduction (energy_fixer_dtmp_jax sums over
+                # every face) so it is face-invariant -> closed over, NOT
+                # mapped; pt/pkz and each q leaf are per-face -> in_axes 0.
+                # A positional-only wrapper keeps the kwargs (static +
+                # the closed dtmp) out of vmap's in_axes.
+                def _close_one(pt_t, pkz_t, q_t):
+                    return close_out_pt(
+                        pt_t, pkz_t, q_t, sphum_index=sphum_index,
+                        r_vir=zvir, dtmp=dtmp, cp=cp_air, n=n, ng=ng,
+                        fixer_on=True)
+                st["pt"] = jax.vmap(_close_one, in_axes=(0, 0, 0))(
+                    st["pt"], pr["pkz"], [qq[i] for i in range(nq)])
+            else:
+                st["pt"] = jnp.stack([
+                    close_out_pt(st["pt"][t], pr["pkz"][t],
+                                 [qq[i][t] for i in range(nq)],
+                                 sphum_index=sphum_index, r_vir=zvir,
+                                 dtmp=dtmp, cp=cp_air, n=n, ng=ng,
+                                 fixer_on=True)
+                    for t in range(nb)])
 
         return (st, pr, qq, om, nhc, nspl, nexc), ac["stages"]
 
@@ -982,7 +1087,8 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               tracer_q_split: int = 0, nord_tr: int = 0,
                               trdm2=0.0, lim_fac=1.0, z_tracer: bool = True,
                               inline_q: bool = False, zvir: float = 0.0,
-                              consv_te: float = 0.0, out_shardings=None):
+                              consv_te: float = 0.0, out_shardings=None,
+                              batched: bool = False):
     """Static (C3/D5): ctx, km and every DECK constant.  Dynamic: only
     state, press, q, bdt, omga and nh.
 
@@ -1004,7 +1110,7 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
             cfg=cfg, a2b_ord=a2b_ord, check_state=check_state,
             hord_tr=hord_tr, tracer_q_split=tracer_q_split,
             nord_tr=nord_tr, trdm2=trdm2, lim_fac=lim_fac,
-            z_tracer=z_tracer, inline_q=inline_q)
+            z_tracer=z_tracer, inline_q=inline_q, batched=batched)
 
     # THE RETURN CARRIES TWO NON-ARRAY LEAVES -- `pt_units` (a str) and
     # `omga_is_meaningless` (a bool) -- and jit refuses to return either

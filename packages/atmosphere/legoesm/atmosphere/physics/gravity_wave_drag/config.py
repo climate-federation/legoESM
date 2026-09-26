@@ -570,6 +570,13 @@ class E3SMFrontalConfig(NamedTuple):
         quadrature in ``gw_front_init`` (``dca``); each phase-speed bin
         of width ``dc`` is integrated over ``nint(dc/dca)`` sub-intervals
         (default 0.1, E3SM ``gw_front.F90`` ``dca``).
+    effgw : float or None
+        Efficiency applied to THIS source's drag (CAM ``effgw_cm``; CAM6 f09
+        namelist 1.0).  ``None`` (default, byte-identical) falls back to
+        ``E3SMCAMConfig.effgw`` for the single-source path; a multi-source
+        ``E3SMCAMConfig.source`` ("orographic+frontal+convective") uses the
+        per-source value where set so each source keeps its own CAM
+        efficiency.
     latitude_taper : bool
         Apply the ``cos(lat)`` polar taper to the frontal tendencies.  E3SM
         sets this BY DYCORE (gw_drag.F90:829-833: ``do_latitude_taper =
@@ -579,10 +586,12 @@ class E3SMFrontalConfig(NamedTuple):
         tree.  legoESM's
         cubed-sphere / icosahedral / MPAS grids correspond to the
         UNSTRUCTURED branch, so the E3SM-equivalent value there is
-        ``False`` — the default ``True`` (legacy, matches E3SM structured)
-        suppresses frontal drag toward the poles (→ 0), a first-order
-        high-latitude difference.  Flip per grid family; behavioral →
-        AMIP-gated.
+        ``False``, which is the default here since 2026-09-17 (user decision).
+        It was ``True`` — E3SM's structured branch — and that suppressed the
+        drag toward the poles, exactly where the polar-night jet needs it;
+        the same class of defect as the surface-launch default this repo
+        already carries a rule about.  Set it ``True`` only for a genuinely
+        structured lat-lon lane.
     """
     taubgnd: float = 1.5e-3
     frontgfc: float = 1.25e-15
@@ -590,7 +599,8 @@ class E3SMFrontalConfig(NamedTuple):
     launch_p: float = 5.0e4
     front_p: float = 6.0e4
     front_spectrum_dc_resolution: float = 0.1
-    latitude_taper: bool = True
+    latitude_taper: bool = False
+    effgw: float | None = None
 
 
 class E3SMBeresConfig(NamedTuple):
@@ -658,6 +668,40 @@ class E3SMBeresConfig(NamedTuple):
         heating depth (default 0.05), a documented monotone surrogate for
         the real table's deepening-convection dependence.  Only used when
         ``use_stand_in_table=True``.
+    effgw : float or None
+        Efficiency applied to THIS source's drag (CAM ``effgw_beres_dp``;
+        CAM6 f09 namelist 0.4).  ``None`` (default, byte-identical) falls
+        back to ``E3SMCAMConfig.effgw``; see ``E3SMFrontalConfig.effgw``.
+    mfcc_table_path : str
+        Path of the offline Beres lookup-table netcdf (CAM/E3SM
+        ``gw_drag_file``, e.g. ``newmfspectra40_dc25.nc``: dims ``PS``, ``MW``,
+        ``HD``, variable ``mfcc``).  Empty (default) = no file; the kernel then
+        follows ``use_stand_in_table``.  When set, the GWD factories load it
+        once (``e3sm_cam.load_mfcc_table``) and thread it as ``mfcc_table``,
+        which the kernel uses regardless of ``use_stand_in_table``.
+    spectrum_shift : str
+        How the looked-up spectrum is Doppler-shifted to ground-relative
+        speeds: ``"circular"`` (E3SM ``cshift``, wraps the spectrum ends;
+        default) or ``"end_off"`` (CAM6 ``eoshift``, shifted-in bins are
+        zero).  CAM6 ``gw_convect.F90:239``.
+    storm_speed_truncate : bool
+        ``True`` (E3SM, default): the cell speed ``CS`` is truncated to an
+        integer before it shifts ``uh`` and the spectrum.  ``False`` (CAM6):
+        ``CS`` is kept real (``gw_convect.F90:217``; ``uh - CS`` real,
+        ``shift = -nint(CS/dc)``).
+    hd_index_rule : str
+        How the heating depth picks the table row: ``"nint"`` (E3SM
+        ``NINT(hdepth [km])``, half-km ties round UP; default) or
+        ``"nearest_grid"`` (CAM6 ``index_of_nearest(hdepth, hd)``,
+        gw_convect.F90:308-325: ``idx = 1 + count(hdepth > interfaces)`` with
+        interfaces at the half-km points, so an exact tie takes the LOWER
+        row).  Identical away from exact ties.
+    source_level_rule : str
+        Which midpoint supplies the source wind: ``"nearest_midpoint"``
+        (E3SM: the level whose column-mean pressure is nearest
+        ``source_wind_p``; default) or ``"interface_below_p"`` (CAM6
+        ``gw_drag.F90:871-874``: the lowest midpoint whose TOP interface
+        pressure is below ``source_wind_p``, i.e. the layer straddling it).
     mfcc_uh_slope : float
         Fractional change of the stand-in spectrum amplitude per (m/s) of the
         heating-region mean wind ``uh`` (default 0.0 -> uh-independent).  The
@@ -682,6 +726,12 @@ class E3SMBeresConfig(NamedTuple):
     mfcc_c0: float = 30.0
     mfcc_hdepth_growth: float = 0.05
     mfcc_uh_slope: float = 0.0
+    effgw: float | None = None
+    mfcc_table_path: str = ""
+    spectrum_shift: str = "circular"
+    storm_speed_truncate: bool = True
+    source_level_rule: str = "nearest_midpoint"
+    hd_index_rule: str = "nint"
 
 
 class E3SMCAMConfig(NamedTuple):
@@ -698,9 +748,14 @@ class E3SMCAMConfig(NamedTuple):
     ------
     source : str
         Wave source: ``"orographic"`` (McFarlane c=0), ``"frontal"``
-        (uniform Gaussian spectrum tied to frontogenesis), or
-        ``"convective"`` (Beres 2004 source from the deep-convective
-        heating profile).  The Beres convective source's full
+        (uniform Gaussian spectrum tied to frontogenesis), ``"background"``
+        or ``"convective"`` (Beres 2004 source from the deep-convective
+        heating profile) — or a ``+``-joined set of them (e.g.
+        ``"orographic+frontal+convective"``, the CAM6 f09 suite): each source
+        runs its own ``gw_drag_prof`` solve with its own efficiency
+        (``frontal.effgw`` / ``beres.effgw``, falling back to ``effgw``) and
+        the tendencies are summed, as CAM's ``gw_tend`` accumulates them
+        into ``ptend``.  The Beres convective source's full
         bit-faithfulness needs an offline ``mfcc`` lookup table that is not
         bundled with the repo; by default ``"convective"`` runs with a
         documented analytic stand-in spectrum (see ``E3SMBeresConfig``).
