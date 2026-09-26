@@ -120,7 +120,40 @@ read-only`.  Its exact disposition is:
 The terminal error was `failed to initialize in-process app-server client:
 Read-only file system`; it emitted no SHIP or DO NOT SHIP verdict.
 
-Test and citation results are recorded at the final committed tip below.
+The receipt citation gate reports PASS with three citations, zero failures,
+zero unmapped citations, and zero map-audit failures; all nine self-test plants
+fire.  Its shifted compiled-source plant reports FAIL and exits `1`.
+Adding the private slots shifted six older Python citation anchors; five were
+rigid shifts and one range grew by three lines because the new content override
+lands inside it.  Every endpoint symbol was re-verified before the gate passed.
+
+The focused year-owner, citation, and implicit-solver files report
+`57 passed in 44.97s`.  Three production-step/private-hook tracer tests report
+`3 passed in 59.68s`.  An earlier four-file focused attempt reached the final
+RK3 tracer test but did not finish and emitted no terminal summary; it was
+interrupted and is not represented as a pass.
+
+The mandated single `tests/ocean/fidelity tests/ocean/unit -n 12` battery was
+run once.  Nine JAX/xDist workers aborted during unrelated compilations and
+were replaced.  The run reached 95%, then stopped making useful progress and
+was interrupted.  It emitted **no terminal pytest summary line** and no final
+`FAILED <node-id>` list, so its interspersed failure/error counts cannot be
+classified against the historical known-red set.  This is incomplete
+full-tree coverage, not a pass.  The directly changed gate, citation file, and
+production-step hook are covered by the two clean focused summaries above.
+
+## Evidence hashes
+
+| artifact | SHA-256 |
+|---|---|
+| `daily_record_audit.json` | `51081d2735644cbf5a54e5eb3b6accdb70df111be022c3e64ec1b2e301015b1d` |
+| `developed_solve_input_sensitivity.json` | `a68d97267bc6012640b5f224f233448a3bf90e4716fee9f47aba373d6687f509` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `citation_gate.json` | `612a76bb4cb6cad34b6ed0bf852b4005942fa49abeb68bd8004d7afd0bfb7d96` |
+| `citation_gate_shifted_plant.json` | `ad7fec7619b5c36eeee25a41d58e5984bc1d594701310ce8352f4101843a2069` |
+| `focused_completed_tests.log` | `eee044d9a3c2ea82f80a1ab45097e2ead78b2df79f877530e768819d77838cb1` |
+| `focused_production_step_tests.log` | `4109231370b562bae0fe3fa485804b9c6ceb121050d7e64aab7ad7afa41c6159` |
+| `full_fidelity_unit_tests.log` | `e4b808c95bfdf195b0d696ca01bde6d9ab67c803864996ef5fd3cea3e8a3e735` |
 
 ## OPEN — round 172
 
