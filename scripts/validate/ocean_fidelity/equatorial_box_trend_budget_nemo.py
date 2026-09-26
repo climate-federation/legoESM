@@ -39,7 +39,10 @@ def main():
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     print(f"[provenance] git {sha} | {' '.join(sys.argv)}")
     d = nc.Dataset(a.trd_file)
-    la = np.asarray(d.variables["nav_lat"][:]); lo = np.asarray(d.variables["nav_lon"][:]) % 360.0
+    # XIOS names the T-grid coordinates nav_lat_grid_T when a file mixes T and W grids
+    _lat = "nav_lat" if "nav_lat" in d.variables else "nav_lat_grid_T"
+    _lon = "nav_lon" if "nav_lon" in d.variables else "nav_lon_grid_T"
+    la = np.asarray(d.variables[_lat][:]); lo = np.asarray(d.variables[_lon][:]) % 360.0
     box = (np.abs(la) <= a.lat_halfwidth) & (lo >= a.lon_lo) & (lo <= a.lon_hi)
     dep = np.asarray(d.variables["deptht"][:]).ravel()
     n = a.n_levels
