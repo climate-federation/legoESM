@@ -109,7 +109,8 @@ Failed predictions R33-P2 and R33-P3 are retained exactly as preregistered.
 
 The exact shared-card inventory is green: 160 DINO/rule-12/lock/overflow
 tests pass with nine warnings, and the remaining tank round-34 file passes
-10/10, for **170/170**.  The focused round-33 unit and gate suites pass.
+10/10, for **170/170**.  The focused round-33 unit, operand, outcome and
+citation suites pass **38/38 in 25.53 s**.
 
 The required separate `codex exec --sandbox read-only` review was attempted
 against the committed diff.  It failed before reading the diff with
@@ -121,8 +122,18 @@ The receipt citation gate passes all three compiled citations with zero
 failures, zero unmapped citations and zero map-audit failures.  Its rigid
 line-shift plant exits nonzero with `SYMBOL-NOT-AT-LINE`.
 
-The required single `tests/ocean/fidelity -n 12` battery and final 127-test
-ORCA2 push battery are reported in the closing gate commit.
+The required single `tests/ocean/fidelity -n 12` battery collected 1,891
+tests.  It reached the inherited final-tail stall at 98% and was interrupted
+after a bounded idle wait, having emitted **1,868 passed, 7 skipped, 5 failed
+and 11 unfinished**.  The five failures were rerun by exact ID in isolation
+and reproduce the inherited SI3 MY_SRC provenance mismatch, round-129
+worktree-stamp mismatch, stale round-51 trace suffix, three legacy report
+emitters without stamps, and missing `hires_lane_surface` case-board row.
+No round-33 test fails.
+
+The final ORCA2 push battery runs the citation gate, TKE terms, recipe,
+freshwater closure and parallel-receipt gate against the committed receipt:
+**127/127 pass in 371.12 s**.
 
 ## Choices
 
