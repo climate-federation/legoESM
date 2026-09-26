@@ -251,7 +251,7 @@ def _carried(geo, ahmt, ahmf):
     return types.SimpleNamespace(nemo_ldf_ahmt=ahmt, nemo_ldf_ahmf=ahmf)
 
 
-def _call_visc_z(geo, config, z_coord):
+def _call_visc_z(geo, config, z_coord, *, vertex_mask=None):
     n_lat, n_lon = geo.lat.shape[0], geo.lon.shape[0]
     rng = np.random.default_rng(4)
     u3 = jnp.asarray(rng.standard_normal((n_lat, n_lon + 1)))[..., None]
@@ -259,7 +259,9 @@ def _call_visc_z(geo, config, z_coord):
     out = _bc_horizontal_viscosity(
         jnp.zeros_like(u3), jnp.zeros_like(v3), u3, v3, geo,
         jnp.ones((n_lat, n_lon)), jnp.ones((n_lat, n_lon + 1)),
-        jnp.ones((n_lat + 1, n_lon)), config, z_coord, None, 1.0)
+        jnp.ones((n_lat + 1, n_lon)), config, z_coord, None, 1.0,
+        h_k=jnp.ones((n_lat, n_lon, 1)),
+        vertex_mask=vertex_mask)
     return np.asarray(out[0])
 
 
@@ -288,6 +290,33 @@ def test_file_source_uses_the_carried_coefficient_not_the_formula():
         geo, _ahm_source_config("nemo_ahm_3d_file"),
         _carried(geo, jnp.asarray(bumped), ahmf_3d))
     assert not np.array_equal(moved, read)
+
+
+def test_file_source_does_not_apply_a_second_vertex_mask():
+    """NEMO's read ahmf already contains fmask; computed ahmf is still masked."""
+    geo = _geo(n_lat=8, n_lon=12)
+    n_lat, n_lon = geo.lat.shape[0], geo.lon.shape[0]
+    ahmt = jnp.full((n_lat, n_lon, 1), 2.0)
+    ahmf = jnp.full((n_lat + 1, n_lon + 1, 1), 3.0)
+    ones = jnp.ones((n_lat + 1, n_lon + 1))
+    zeros = jnp.zeros_like(ones)
+
+    file_cfg = _ahm_source_config("nemo_ahm_3d_file")._replace(
+        lateral_viscosity_e3_weighting="nemo_e3")
+    carried = _carried(geo, ahmt, ahmf)
+    file_unmasked = _call_visc_z(
+        geo, file_cfg, carried, vertex_mask=ones)
+    file_zero_mask = _call_visc_z(
+        geo, file_cfg, carried, vertex_mask=zeros)
+    np.testing.assert_array_equal(file_zero_mask, file_unmasked)
+
+    formula_cfg = _ahm_source_config("nemo_ldf_c2d")._replace(
+        lateral_viscosity_e3_weighting="nemo_e3")
+    formula_unmasked = _call_visc_z(
+        geo, formula_cfg, None, vertex_mask=ones)
+    formula_zero_mask = _call_visc_z(
+        geo, formula_cfg, None, vertex_mask=zeros)
+    assert not np.array_equal(formula_zero_mask, formula_unmasked)
 
 
 def test_file_source_refuses_without_the_carried_coefficient():
