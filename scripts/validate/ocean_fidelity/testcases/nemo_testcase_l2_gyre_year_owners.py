@@ -12451,9 +12451,23 @@ def developed_vertical_day240_sensitivity(
                     mismatch = _state_bit_mismatches(
                         reference_state, selected_state)
                     identity_mismatched_bytes += mismatch
-                    require(mismatch == 0,
-                            f"{name} seam moved step {step} state by "
-                            f"{mismatch} bytes")
+                    if mismatch:
+                        reference_fields = gate.lego_fields(reference_state)
+                        selected_fields = gate.lego_fields(selected_state)
+                        masks = gate.expected_masks(card)
+                        first_step["identity_failure"] = {
+                            "arm": name,
+                            "step": step,
+                            "state_bytes_moved": mismatch,
+                            "field_cells_moved": {
+                                field: _different_cells(
+                                    reference_fields[field],
+                                    selected_fields[field], masks[field])
+                                for field in FIELDS
+                            },
+                            "verdict": "REFUTED",
+                        }
+                        return None, identity_mismatched_bytes
                 if step == PROCESS_START_STEP:
                     selected_vertical = _vertical_trace_frame(selected)
                     probe_process = _trace_frame(probe)
@@ -12549,6 +12563,42 @@ def developed_vertical_day240_sensitivity(
         if arm_state is None:
             break
         final_states[arm] = arm_state
+
+    if "identity_failure" in first_step:
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        return {
+            "format": "gyre-round171-developed-solve-input-refutation-v1",
+            "status": "REFUTED",
+            "case": CASE,
+            "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
+            "worktree": stamp,
+            "interval": {"entry_step": DEVELOPED_ENTRY_STEP,
+                         "failed_step": PROCESS_START_STEP,
+                         "entry_day": 180},
+            "admission": {
+                "process": process_admission["status"],
+                "vertical": vertical_admission["status"],
+                "daily_audit": str(daily_audit),
+                "entry_restart": str(bundle["restart_path"]),
+                "entry_restart_sha256": payload["sha256"],
+            },
+            "controls": {
+                "identity_failure": first_step["identity_failure"],
+                "first_step_compiled_calibration_cells_unequal":
+                    _vertical_calibration(recorded_vertical(
+                        PROCESS_START_STEP)[0]),
+            },
+            "sensitivity": None,
+            "conclusion": (
+                "the isolated e3t(Kaa) identity seam changes the "
+                "production-jitted step, so both directed sensitivities "
+                "are withheld and no magnitude owner is named"),
+            "compiled_source": {
+                "e3t_matrix_weight": "trazdf.f90:468-474",
+                "content_rhs": "trazdf.f90:549-567",
+                "implicit_solve": "trazdf.f90:577-582",
+            },
+        }
 
     if plant == "developed-vertical-avt-ulp":
         planted_state, _ = run_arm(
