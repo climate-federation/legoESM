@@ -77,6 +77,8 @@ def capture(deck_root: Path, record_root: Path, base_json: Path,
          if substitutions[name]["status"] == "PASS"),
         None,
     )
+    carried_hf0 = r32.capture_ldf_replay(
+        deck_root, record_root, plant=plant, use_carried_hf0=True)
     at_bar = (
         carried_score["bit_identical"]
         and second_mask_score["unequal"] > 0
@@ -108,6 +110,11 @@ def capture(deck_root: Path, record_root: Path, base_json: Path,
             for name, row in substitutions.items()
         },
         "first_face_substitution_at_bar": first_face_owner,
+        "carried_hf0_replay": {
+            "status": carried_hf0["status"],
+            "u_momentum": carried_hf0["u_momentum"],
+            "v_momentum": carried_hf0["v_momentum"],
+        },
         "plant": plant,
         "citations": {
             "file_read": "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:348-353",

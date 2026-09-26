@@ -133,7 +133,8 @@ def evaluate_outcome(parent_path: Path, arm_path: Path,
 
 def capture_ldf_replay(deck_root: Path, record_root: Path,
                        *, plant: bool = False,
-                       face_thickness_substitution: str = "none") -> dict:
+                       face_thickness_substitution: str = "none",
+                       use_carried_hf0: bool = False) -> dict:
     """Re-run round 24's literal compiled LDF replay on the landed routing."""
     import jax.numpy as jnp
     from jax import lax
@@ -198,7 +199,10 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
     kbb_v = raw_e3v if face_thickness_substitution in {"kbb", "both"} else e3v
     kmm_u = raw_e3u if face_thickness_substitution in {"kmm", "both"} else e3u
     kmm_v = raw_e3v if face_thickness_substitution in {"kmm", "both"} else e3v
-    e3f = nemo_qco_live_vorticity_e3f_cgrid(
+    e3f_builder = _hf0_builder(
+        nemo_qco_live_vorticity_e3f_cgrid,
+        use_carried_hf0=use_carried_hf0)
+    e3f = e3f_builder(
         state.eta.data, zc, state.eta.data.dtype, grid=grid,
         e3t_0=h_ref, tmask=tmask, reference_e3f=nemo_ldf_reference_e3f(zc))
     bundle = (e3t, kbb_u, kbb_v, e3f, kmm_u, kmm_v)
@@ -267,6 +271,7 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
         "v_momentum": score_v,
         "plant": plant,
         "face_thickness_substitution": face_thickness_substitution,
+        "use_carried_hf0": use_carried_hf0,
         "worktree": worktree_stamp(),
         "citations": {
             "file_read": "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:348-353",
