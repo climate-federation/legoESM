@@ -1067,6 +1067,11 @@ CITATION_MAP = {
         ('DO jk = 1, jpkm1', 4),
         ('z1_e3f(ji,jj) = 1._wp / (e3f_0vor(ji,jj,jk)', 1),
         5],
+    # --- ORCA2 card round 29: EEN numerator/denominator split ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:741-779': [
+        'SELECT CASE( kvor )                 !==  vorticity considered  ==!',
+        "CALL ctl_stop('STOP','dyn_vor: wrong value for kvor'  )",
+        39],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:784-802': [
         ('zwx(ji,jj) = e2u(ji,jj) * (e3u_3d(ji,jj,jk)', 3),
         ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 2),
