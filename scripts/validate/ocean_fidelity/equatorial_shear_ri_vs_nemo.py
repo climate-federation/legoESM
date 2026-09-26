@@ -206,6 +206,30 @@ def main() -> int:
         print(f"{k + 1:>3}{zw_int[k]:>8.2f} | {S2_o_m[k]:>9.2e}{S2_N_m[k]:>9.2e} | {N2_o_m[k]:>9.2e}{N2_N_m[k]:>9.2e}{bn2_m[k]:>9.2e} | "
               f"{Ri_o:>8.2f}{Ri_N:>8.2f} | {KH_m[k]:>9.2e}{KH_med[k]:>9.2e}{avt_m[k]:>9.2e}{avt_med[k]:>9.2e} | "
               f"{unst_o[k]:>10.3f}{evd_N[k]:>11.3f}{kh_hi_unst[k]:>11.3f}{n2_med_unst[k]:>11.2e}")
+    # Turbocline depth (NEMO mldkz5: first depth where avt < 5e-4 m2/s), the
+    # oracle's window MEAN of an hourly depth. Ours per snapshot from K_H_diag
+    # on this state; a 4-clock-phase mean of it is the daily mean. Also NEMO's
+    # depth-of-the-MEAN-avt for the reduction caveat (mean of depths != depth
+    # of mean).
+    kz_thr = 5e-4
+    def _turbocline(K_w, zw, box_mask, w):
+        below = np.where(np.isfinite(K_w), K_w < kz_thr, True)         # dry = below threshold
+        first = np.argmax(below, axis=1)                               # first interface below thr
+        never = ~below.any(axis=1)
+        depth = np.where(never, zw[-1], zw[np.minimum(first, zw.size - 1)])
+        depth = np.where(np.isfinite(K_w[:, 0]), depth, np.nan)
+        return _box_mean(depth[:, None], w, box_mask)[0]
+    tc_o = _turbocline(KH_w, zw_int, box_o, w_o)
+    tc_N_of_mean = _turbocline(avt_int, depthw[1:nlN], boxT, wT)
+    d5 = nc.Dataset(a.nemo_dir / f"{a.nemo_stem}_grid_T.nc")
+    if "mldkz5" in d5.variables:
+        mk = np.ma.filled(np.ma.masked_invalid(d5.variables["mldkz5"][a.rec]), np.nan).astype(float).ravel()
+        tc_N = _box_mean(mk[:, None], wT, boxT)[0]
+        print(f"\n[turbocline avt<5e-4] ours (this snapshot) {tc_o:.2f} m | NEMO mldkz5 window mean {tc_N:.2f} m "
+              f"| NEMO depth of the MEAN avt {tc_N_of_mean:.2f} m (reduction caveat)")
+    else:
+        print(f"\n[turbocline avt<5e-4] ours {tc_o:.2f} m | NEMO grid_T has no mldkz5; depth of the mean avt {tc_N_of_mean:.2f} m")
+
     # box-mean u profile too: is the undercurrent itself weaker?
     u_o = m(uf, w_o, box_o); u_N = m(uoF, wU, boxU)
     print(f"\n{'k':>3}{'z_c m':>8}{'u ours':>9}{'u NEMO':>9}   (zonal velocity box mean, m/s; ours 00 UTC, NEMO 5-day mean)")
