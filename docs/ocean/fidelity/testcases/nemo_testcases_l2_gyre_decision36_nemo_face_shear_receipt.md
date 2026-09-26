@@ -37,7 +37,7 @@ satisfied: no AT-BAR row leaves the bar and first-over-bar does not move.
 |---|---|
 | `cb5028d2dd2f` | GYRE alone selects face-native production, face `avm`, and live QCO metric. Its initial `nemo_face_native` spelling was not RK3-constructible; the next commit repairs that intermediate state. |
 | `138de77eb757` | Adds/selects the explicit RK3 `nemo_face_native_now2` variant. Final card selectors are pinned at `nemo_testcase_recipe.py:249-251`. |
-| `f78547b752f7` | The live Kbb face metric is statically selected from step-entry eta for `now2`; the leap-frog `nemo_face_native` arm still requires the carried eta and has no presence-based fallback (`ocean_model_latlon_cgrid.py:10114-10131`, `ocean_model_latlon_cgrid.py:10152-10225`). |
+| `f78547b752f7` | The live Kbb face metric is statically selected from step-entry eta for `now2`; the leap-frog `nemo_face_native` arm still requires the carried eta and has no presence-based fallback (`ocean_model_latlon_cgrid.py:10124-10141`, `ocean_model_latlon_cgrid.py:10162-10235`). |
 
 Statement walk: the helper forms `wumask/wvmask`, the live two-factor
 denominator, face-summed `avm`, source-ordered products, coast factors, and
