@@ -245,10 +245,29 @@ def main() -> int:
               f"first sub-threshold interface is an ISOLATED hole (K>=thr right below) in {int(hole.sum())} of {fb.size} columns")
         ic = np.where(box_mask)[0][fb.size // 2]
         print("    example column K profile (interfaces 1-20):", " ".join(f"{v:.1e}" for v in K_w[ic, :20]))
+        # Anatomy of the hole: is the TKE at its floor (sink/dissipation killed
+        # it) or is the TKE healthy and only the length collapsed at an N2 spike?
+        # Box medians at the first hole, one interface above and one below.
+        if _hole_ctx is not None:
+            tke_w, n2_w, s2_w, km_w = _hole_ctx
+            idx = np.where(box_mask)[0][hole]; hk = fb[hole]
+            for off, lab in ((-1, "above"), (0, "HOLE "), (1, "below")):
+                kk = np.clip(hk + off, 0, K_w.shape[1] - 1)
+                med = lambda F: np.nanmedian(F[idx, kk]) if F is not None else np.nan
+                print(f"    {lab}: median z {np.median(zw[kk]):5.1f} m  K_T {med(K_w):.1e}  K_M {med(km_w):.1e}  "
+                      f"tke {med(tke_w):.1e}  N2 {med(n2_w):.1e}  S2 {med(s2_w):.1e}  (n={int(hole.sum())} isolated-hole columns)")
         print(f"    turbocline per-column quantiles 10/25/50/75/90%: {q[0]:.1f} {q[1]:.1f} {q[2]:.1f} {q[3]:.1f} {q[4]:.1f} m; "
               f"columns {int(np.isfinite(depth[box_mask]).sum())}")
         return _box_mean(depth[:, None], w, box_mask)[0]
+    if "tke" in s.files:
+        _tke = np.asarray(s["tke"], float).reshape(box_o.size, -1)
+        _tke_w = _tke[:, 1:nlev] if _tke.shape[1] in (nlev + 1, nlev) else _tke
+        print(f"[ours] tke field {s['tke'].shape} read on the K_H_diag staggering")
+    else:
+        _tke_w = None
+    _hole_ctx = (_tke_w, N2_o, S2_o, KM_w if KM_w is not None else None)
     tc_o = _turbocline(KH_w, zw_int, box_o, w_o)
+    _hole_ctx = None
     tc_N_of_mean = _turbocline(avt_int, depthw[1:nlN], boxT, wT)
     d5 = nc.Dataset(a.nemo_dir / f"{a.nemo_stem}_grid_T.nc")
     if "mldkz5" in d5.variables:
