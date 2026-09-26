@@ -30,7 +30,7 @@ atmosphere:
   dynamics: shallow_water      # canonical key -> ExperimentConfig.dycore.model_type
   time_integrator: ssp_rk3
   dt_seconds: 600
-  hyperdiffusion_coeff: 0.0
+  hyperdiff_scale: 0.0
 
 conservation:
   fix_mass: true

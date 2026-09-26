@@ -65,7 +65,7 @@ _ATMOSPHERE_KEYS: frozenset[str] = frozenset({
     "discretization",
     "time_integrator",
     "dt_seconds",
-    "hyperdiffusion_coeff",
+    "hyperdiff_scale",
     # Live LOWEST-precedence fallback for the radiation scheme, behind the
     # top-level ``radiation.scheme`` block and ``physics.radiation``.  It is
     # mapped (unlike the retired keys), so it must be allowed -- omitting it
@@ -78,6 +78,11 @@ _ATMOSPHERE_KEYS: frozenset[str] = frozenset({
 # user who wrote one had every reason to think it worked: they were documented
 # in DEFAULT_CONFIG and (for advection/equations) shipped in the templates.
 _ATMOSPHERE_RETIRED: dict[str, str] = {
+    "hyperdiffusion_coeff": (
+        "renamed to 'hyperdiff_scale': it was always a dimensionless multiplier "
+        "on the scheme's hyperdiffusion, not a coefficient.  Its old default "
+        "0.0 switched biharmonic damping off; the new default is 1.0"
+    ),
     "equations": (
         "the legacy 'equations' key never reached ExperimentConfig on this "
         "path (DEFAULT_CONFIG always supplied 'dynamics', so the axis-based "
@@ -217,7 +222,7 @@ DEFAULT_CONFIG = {
         # would have silently pinned EVERY nested config to ssp_rk3.
         "time_integrator": "auto",
         "dt_seconds": 600,          # 10 minutes
-        "hyperdiffusion_coeff": 0.0,
+        "hyperdiff_scale": 1.0,     # dimensionless multiplier on the scheme hyperdiffusion
     },
     "conservation": {
         "fix_mass": True,
@@ -390,7 +395,9 @@ class Config:
                     atm.get("discretization", "cdgrid")
                 ),
                 "dt": float(atm.get("dt_seconds", 600)),  # dt_seconds -> dt
-                "hyperdiff_scale": float(atm.get("hyperdiffusion_coeff", 1.0)),
+                "hyperdiff_scale": float(atm.get(
+                    "hyperdiff_scale",
+                    DEFAULT_CONFIG["atmosphere"]["hyperdiff_scale"])),
                 "conservation_fixer": fix_mass,
                 "fix_mass": fix_mass,
                 # Declared in DEFAULT_CONFIG and written by the experiment

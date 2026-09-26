@@ -130,7 +130,7 @@ def test_translation_field_mapping_is_pinned() -> None:
                 "dynamics": "hydrostatic",
                 "discretization": "spectral",
                 "dt_seconds": 300,
-                "hyperdiffusion_coeff": 2.0,
+                "hyperdiff_scale": 2.0,
             },
             "conservation": {"fix_mass": False},
             "time": {
@@ -164,7 +164,7 @@ def test_translation_field_mapping_is_pinned() -> None:
     assert ec.dycore.model_type == "hydrostatic"  # dynamics -> model_type
     assert ec.dycore.discretization == "spectral"
     assert ec.dycore.dt == 300.0                  # dt_seconds -> dt
-    assert ec.dycore.hyperdiff_scale == 2.0       # hyperdiffusion_coeff -> hyperdiff_scale
+    assert ec.dycore.hyperdiff_scale == 2.0
     assert ec.dycore.fix_mass is False
     assert ec.dycore.conservation_fixer is False  # both driven by conservation.fix_mass
     # Time / integration unit conversions.
@@ -184,6 +184,19 @@ def test_translation_field_mapping_is_pinned() -> None:
     assert ec.rh_init == 0.8
     assert ec.distributed is True
     assert ec.seed == 9                           # master RNG seed (reproducibility)
+
+
+def test_hyperdiff_scale_defaults_to_canonical_one() -> None:
+    """A YAML that omits the key gets the ExperimentConfig default scale."""
+    from legoesm.driver.config import DycoreConfig
+    ec = Config.from_dict({}).to_experiment_config()
+    assert ec.dycore.hyperdiff_scale == DycoreConfig._field_defaults["hyperdiff_scale"] == 1.0
+
+
+def test_retired_hyperdiffusion_coeff_key_names_its_replacement() -> None:
+    with pytest.raises(ValueError, match="hyperdiff_scale"):
+        Config.from_dict(
+            {"atmosphere": {"hyperdiffusion_coeff": 0.0}}).to_experiment_config()
 
 
 def test_diag_days_floor_is_at_least_one() -> None:
