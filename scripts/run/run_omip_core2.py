@@ -679,7 +679,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                         lc: bool | None = None,
                         etau_mode: str | None = None,
                         preclosure_coeff_source: str | None = None,
-                        buoyancy_sink: str | None = None):
+                        buoyancy_sink: str | None = None,
+                        step_evaluation: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -1141,6 +1142,22 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 f"orca1_zdftke_config buoyancy_sink {buoyancy_sink!r} invalid; "
                 "expected 'implicit_linearized' or 'nemo_explicit'.")
         _cfg = _cfg._replace(tke_buoyancy_sink=buoyancy_sink)
+    # TKE step evaluation (``--tke-step-evaluation``).  'nemo_literal' selects
+    # the zdftke.F90:403-455 matrix assembly AND its tridiagonal recurrences
+    # (tke.py tke_matrix_evaluation / tke_solver_evaluation, the DINO-certified
+    # pair); it needs the nemo_z0 surface row and the carried avm_k/dissl
+    # (--tke-surface-bc-level nemo_z0 --tke-preclosure-coeff-source
+    # carried_previous_step), which the closure enforces.  None keeps the card
+    # ('factored' + 'shared_thomas').
+    if step_evaluation is not None:
+        if step_evaluation not in ("factored", "nemo_literal"):
+            raise ValueError(
+                f"orca1_zdftke_config step_evaluation {step_evaluation!r} invalid; "
+                "expected 'factored' or 'nemo_literal'.")
+        _cfg = _cfg._replace(
+            tke_matrix_evaluation=step_evaluation,
+            tke_solver_evaluation=("nemo_literal" if step_evaluation == "nemo_literal"
+                                   else "shared_thomas"))
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
     # value (2 = Veros Bougeault-Lacarrere, the current production).  3 selects
     # NEMO nn_mxl=3: the lup/ldown |dl/dz|<=e3t sweeps WITH the ln_mxl0 wind-
@@ -1484,7 +1501,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_shear_production=None, tke_lc=None,
                               tke_etau=None,
                               tke_preclosure_coeff_source=None,
-                              tke_kappah_min=None, tke_buoyancy_sink=None):
+                              tke_kappah_min=None, tke_buoyancy_sink=None,
+                              tke_step_evaluation=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -1524,7 +1542,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                     ("--tke-preclosure-coeff-source",
                      tke_preclosure_coeff_source),
                     ("--tke-kappah-min", tke_kappah_min),
-                    ("--tke-buoyancy-sink", tke_buoyancy_sink)):
+                    ("--tke-buoyancy-sink", tke_buoyancy_sink),
+                    ("--tke-step-evaluation", tke_step_evaluation)):
         if _v is not None and tripole_vmix != "tke":
             raise ValueError(
                 f"{_fl} {_v!r} requires --tripole-vmix tke; got --tripole-vmix "
@@ -1544,7 +1563,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    lc=tke_lc, etau_mode=tke_etau,
                                    preclosure_coeff_source=(
                                        tke_preclosure_coeff_source),
-                                   buoyancy_sink=tke_buoyancy_sink)
+                                   buoyancy_sink=tke_buoyancy_sink,
+                                   step_evaluation=tke_step_evaluation)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 3):
                 raise ValueError(
@@ -1609,6 +1629,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_lc=None, tke_etau=None,
                   tke_preclosure_coeff_source=None,
                   tke_kappah_min=None, tke_buoyancy_sink=None,
+                  tke_step_evaluation=None,
                   A_h_profile_file=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
@@ -1887,6 +1908,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tke_lc=tke_lc, tke_etau=tke_etau,
             tke_preclosure_coeff_source=tke_preclosure_coeff_source,
             tke_buoyancy_sink=tke_buoyancy_sink,
+            tke_step_evaluation=tke_step_evaluation,
             tke_kappah_min=tke_kappah_min)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
@@ -3888,6 +3910,7 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_lc=None, tke_etau=None,
                             tke_preclosure_coeff_source=None,
                             tke_buoyancy_sink=None,
+                            tke_step_evaluation=None,
                             mpas_vmix="kpp",
                             fesom_vmix="fesom"):
     """Reject the zdftke card knobs unless the tke closure is active.
@@ -3957,6 +3980,13 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
             "(--grid tripole --tripole-vmix tke, or --grid mpas --mpas-vmix "
             f"tke). Got --grid {grid!r} --tripole-vmix {tripole_vmix!r} "
             f"--mpas-vmix {mpas_vmix!r}.")
+    if tke_step_evaluation is not None and not (
+            grid == "tripole" and tripole_vmix == "tke"):
+        raise SystemExit(
+            "--tke-step-evaluation selects the zdftke matrix/solver pair; it "
+            "takes effect ONLY on --grid tripole --tripole-vmix tke (the carried "
+            "avm_k/dissl it needs live on LatLonCGridOceanState). Got --grid "
+            f"{grid!r} --tripole-vmix {tripole_vmix!r}.")
     if tke_preclosure_coeff_source is not None and not (
             grid == "tripole" and tripole_vmix == "tke"):
         raise SystemExit(
@@ -7593,6 +7623,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "diagonal). 'nemo_explicit' is zdftke.F90:417-420: the "
                         "whole signed term on the RHS with the previous-step "
                         "K_T, relying on the post-solve rn_emin floor.")
+    p.add_argument("--tke-step-evaluation", type=str, default=None,
+                   choices=["factored", "nemo_literal"],
+                   help="Which TKE tridiagonal step runs on --tripole-vmix tke. "
+                        "None (default) keeps the card ('factored' matrix + "
+                        "'shared_thomas' solver). 'nemo_literal' is the DINO-"
+                        "certified transcription of zdftke.F90:403-455 (matrix "
+                        "AND recurrences); it requires --tke-surface-bc-level "
+                        "nemo_z0 and --tke-preclosure-coeff-source "
+                        "carried_previous_step (the closure raises otherwise).")
     p.add_argument("--tke-kappa-convention", type=str, default=None,
                    choices=["veros_sqrte", "gaspar_sqrt2e"],
                    help="Amplitude of K from TKE for --tripole-vmix tke. "
@@ -8182,6 +8221,7 @@ def main() -> int:
                             tke_preclosure_coeff_source=(
                                 args.tke_preclosure_coeff_source),
                             tke_buoyancy_sink=args.tke_buoyancy_sink,
+                            tke_step_evaluation=args.tke_step_evaluation,
                             mpas_vmix=args.mpas_vmix,
                             fesom_vmix=args.fesom_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
@@ -8489,6 +8529,7 @@ def main() -> int:
             tke_etau=args.tke_etau,
             tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
             tke_buoyancy_sink=args.tke_buoyancy_sink,
+            tke_step_evaluation=args.tke_step_evaluation,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
@@ -8760,9 +8801,10 @@ def main() -> int:
                                       or args.kpp_eice is not None
                                       or args.tke_surface_bc is not None
                                       or args.tke_surface_bc_level is not None
-                                      or args.tke_buoyancy_sink is not None):
+                                      or args.tke_buoyancy_sink is not None
+                                      or args.tke_step_evaluation is not None):
                 raise ValueError(
-                    "--kpp-ri-crit/--kpp-cv/--kpp-eice/--tke-buoyancy-sink conflict with a --config "
+                    "--kpp-ri-crit/--kpp-cv/--kpp-eice/--tke-buoyancy-sink/--tke-step-evaluation conflict with a --config "
                     "ocean.physics block: the YAML physics config would overwrite "
                     "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
