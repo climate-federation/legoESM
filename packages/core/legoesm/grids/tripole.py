@@ -583,11 +583,14 @@ def create_tripole_grid(
         e1f = raw["e1f"].astype(dtype)
         e2f = raw["e2f"].astype(dtype)
         area_q_inner = e1f * e2f  # (n_lat, n_lon)
-        # Pad to (n_lat+1, n_lon+1)
-        area_q = jnp.pad(area_q_inner, ((0, 1), (0, 1)), mode="edge")
+        # NEMO F(j, i) is legoESM vertex [j+1, i+1], the same stagger map
+        # used by the F-point coefficient and live e3f operands.  The added
+        # south/west row/column are boundary images; appending north/east
+        # instead shifted every interior dyn_ldf vertex-area divisor by one.
+        area_q = jnp.pad(area_q_inner, ((1, 0), (1, 0)), mode="edge")
     else:
         # Estimate from T-point areas
-        area_q = jnp.pad(area_T, ((0, 1), (0, 1)), mode="edge")
+        area_q = jnp.pad(area_T, ((1, 0), (1, 0)), mode="edge")
 
     # Coriolis.  NEMO domhgr.F90:202-226 reads ff_t/ff_f directly when the
     # domain file supplies them.  Preserve ff_t for its literal T-point

@@ -846,3 +846,27 @@ class TestUPointMetricAlignment:
                                        rtol=1e-6, atol=1e-12)
             dy_u = np.asarray(grid.dy_u, dtype=np.float64)
             np.testing.assert_allclose(dy_u[:, 1:], e2u, rtol=1e-6)
+
+
+class TestFPointAreaAlignment:
+    """NEMO F(j, i) occupies legoESM vertex [j+1, i+1]."""
+
+    def test_vertex_area_uses_the_southwest_nemo_f_point(self):
+        from netCDF4 import Dataset
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh_varying_f.nc")
+            _write_mesh_with_varying_u_metrics(path)
+            with Dataset(path, "a") as ds:
+                ny, nx = ds.dimensions["y"].size, ds.dimensions["x"].size
+                e1f = np.arange(1, ny * nx + 1, dtype=np.float64).reshape(ny, nx)
+                e2f = np.arange(2, ny * nx + 2, dtype=np.float64).reshape(ny, nx)
+                ds.createVariable("e1f", "f8", ("y", "x"))[:] = e1f
+                ds.createVariable("e2f", "f8", ("y", "x"))[:] = e2f
+            grid = create_tripole_grid(path, min_dx_m=0.0)
+            np.testing.assert_array_equal(
+                np.asarray(grid.area_q)[1:, 1:], e1f * e2f)
+            # The pre-fix north/east padding placed the raw product here.
+            assert not np.array_equal(
+                np.asarray(grid.area_q)[:-1, :-1], e1f * e2f)
