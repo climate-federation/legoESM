@@ -1144,6 +1144,14 @@ CITATION_MAP = {
         ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 4),
         '&                   * ( umask(ji,jj  ,jk) + umask(ji,jj  ,jk+1) ) * 0.5_wp',
         47],
+    # --- round 179: causal inputs before the returned slope boundary ---
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/ldfslp.f90:156-180': [
+        '! nmln calculation in zdfmxl is only on internal points',
+        'r1_hmlw(ji,jj) = 1._wp / MAX( hmlp(ji,jj) - ((gdepw_1d(mikt(ji,jj)) ) *(1._wp+r3t(ji,jj,Kmm))), 10._wp )',
+        25],
+    'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/ldfslp.f90:183-213': [
+        'iikm1 = 1   ;   iik = 2',
+        ('END DO   ;   END DO', 3), 31],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/ldfslp.f90:262-268': [
         'uslp(ji,jj,jk) = z1_16',
         '&                   * ( umask(ji,jj  ,jk) + umask(ji,jj  ,jk+1) ) * 0.5_wp',
