@@ -136,8 +136,8 @@ emitters, and missing `hires_lane_surface` case-board row.  No round-34 test
 fails.
 
 The final ORCA2 push battery runs the citation gate, TKE terms, recipe,
-freshwater closure, and parallel-receipt gate against this committed receipt;
-its result is added by the closing commit.
+freshwater closure, and parallel-receipt gate against the committed receipt:
+**127/127 pass in 372.23 s**.
 
 ## Choices
 
