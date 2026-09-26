@@ -38,7 +38,8 @@
 # delivered values) not the length. Choice 4 crashed a run on 2026-08-06; a
 # crash here is itself the finding (report, do not stabilise).
 set -uo pipefail
-ROOT=/burg-archive/glab/users/pg2328/_arm_mxl4   # detached worktree at the pinned commit; _omip_merge stays free for probe commits; cd $ROOT || exit 1
+# detached worktree at the pinned commit; _omip_merge stays free for probe commits
+ROOT=/burg-archive/glab/users/pg2328/_arm_mxl4; cd $ROOT || exit 1
 echo "HEAD: $(git -C $ROOT log --oneline -1)"
 echo "dirty: $(git -C $ROOT status --porcelain | wc -l)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
