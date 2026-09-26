@@ -95,6 +95,41 @@ the survey; `self.grid` IS the mesh)
    Fortran dump; (c) C24 smoke, C48 scorecard, CAM L32; dt proposed
    with the deck.
 
+## M2 landed (2026-09-26): the column model, rungs 1-3 at C12 km=5
+
+`atmosphere/dynamics/gcm/fv3_duo_column.py` (`FV3DuoColumnModel`,
+`FV3DuoColumnState`, `DuoColumnMesh`) over two shared six-face
+functions in `core/fv3_native_physics_coupling.py`
+(`column_view_sixface_jax`, `apply_column_increments_sixface_jax`) that
+the Held-Suarez twin and the Kessler bridge now also run on (receipt:
+both bitwise vs HEAD, eager and jit, C12 km=5).  Decisions fixed by the
+M2 dual review (codex 4xP1 + 2xP2, GLM 5):
+
+* Heating convention is CONFIG-time, not data-driven: the moist deck
+  (`FV3DuoConfig.moist=True`) always applies `dT` through
+  `fv_update_phys`'s moist block (`c_pd -> cp_air` rescale, then
+  `cp_air/cvm`), water tendency or not; the dry deck applies `dT` as
+  given (idealized Held-Suarez only) and REFUSES water tendencies.
+* Tracer names must start with `(q_v, q_c, q_r)` (the warm-rain slots
+  the nwat block reads) and be unique.  The CAM6 deck carries ICE
+  (`q_i`...): rung 5 needs FV3's nwat=6 block (fv_update_phys.F90
+  sums every water species); a tendency on any other slot is refused
+  until then.  Tracked, not hidden.
+* `dp_s_dt` is not consumed (MPAS physics returns zeros); p_s follows
+  the layer mass the water tendencies move.  Louis on the moist deck:
+  water mass change == dt*sum(delp*dq) (the surface evaporation), p_s
+  rises by exactly that, dry mass delp*(1-q) invariant to 1e-12.
+* `_sfc_diag` merges slot-wise (held-radiation steps keep the last
+  sw/lw), as the MPAS model.
+* Cross-program identities (column lane vs bridge, both jitted) hold to
+  1e-12 of peak, the twin gate's tolerance, not bitwise (XLA fusion
+  differs between programs; the HS identity within one program IS
+  bitwise).
+* Findings on the way: the gridstruct cell areas sum to the sphere to
+  3.5e-6 relative at C12 (not exact spherical excess);
+  `test_held_suarez_jax_differentiable_wrt_state` fails on untouched
+  HEAD (FD gap/floor 18.4 vs 10) -- pre-existing, not M2's.
+
 ## Certification ladder v3
 
 1. Zero-tendency physics through the column lane == closed duo lane

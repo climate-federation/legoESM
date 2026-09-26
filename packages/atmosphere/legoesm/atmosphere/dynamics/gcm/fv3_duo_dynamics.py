@@ -323,6 +323,21 @@ class FV3DuoDynamicsModel:
         )
 
     @property
+    def ak(self) -> np.ndarray:
+        """Hybrid ``ak`` interface coefficients [Pa], ``(km+1,)``."""
+        return self._ak
+
+    @property
+    def bk(self) -> np.ndarray:
+        """Hybrid ``bk`` interface coefficients, ``(km+1,)``."""
+        return self._bk
+
+    @property
+    def ptop(self) -> float:
+        """Model-top pressure [Pa] (``ak[0]``)."""
+        return self._ptop
+
+    @property
     def zvir(self) -> float:
         """``rvgas/rdgas - 1`` with the oracle's gas constants when the
         deck is moist (atmosphere.F90:156-161), else exactly 0.0."""
