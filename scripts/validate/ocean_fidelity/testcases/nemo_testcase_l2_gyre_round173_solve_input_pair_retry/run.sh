@@ -250,6 +250,8 @@ validate_existing() {
       refuse 70 "existing $arm arm lacks STOP 0"
     cmp -s "$BINARY" "$run/nemo" || \
       refuse 70 "existing $arm executable moved"
+    cmp -s "$RAW" "$run/round172_solve_inputs.raw" || \
+      refuse 70 "existing $arm corrected input moved"
   done
   cmp -s "$SOURCE_RUN/$RESTART_1080" "$BASELINE_RUN/$RESTART_1080" || \
     refuse 71 "reused baseline day-180 restart moved"
@@ -301,7 +303,9 @@ done
 
 printf '%s\n' "$COMMIT" >"$TARGET_RUN/producer_commit.txt"
 sha256sum "$BINARY" >"$TARGET_RUN/binary.sha256"
-sha256sum "$RAW" >"$TARGET_RUN/corrected_input.sha256"
+raw_digest=$(sha256sum "$RAW" | awk '{print $1}')
+printf '%s  corrected_round172_solve_inputs.raw\n' "$raw_digest" \
+  >"$TARGET_RUN/corrected_input.sha256"
 (
   cd "$TARGET_RUN"
   sha256sum e3t_wet/$RESTART_1080 e3t_wet/$RESTART_1440 \
