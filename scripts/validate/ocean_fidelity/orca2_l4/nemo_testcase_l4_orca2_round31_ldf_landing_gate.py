@@ -382,6 +382,48 @@ def capture_shared_cards(*, plant: str | None = None) -> dict:
                 mesh = jnp.asarray(mesh).at[0, 0, 0].add(1.0)
             row["mesh_reference_vs_vorticity_reference"] = score(
                 mesh, vorticity)
+            # dynldf_lev.f90:123 multiplies the reference by ahmf, which
+            # ldfdyn.f90:387-393 has already multiplied by the F mask.  Where
+            # that product is exactly zero the reference cannot reach the
+            # tendency at ANY step, so the card is unmoved for every day, not
+            # only for the ten scored ones.
+            differing = np.asarray(mesh, np.float64) != np.asarray(
+                vorticity, np.float64)
+            ahmf = getattr(z_coord, "nemo_ldf_ahmf", None)
+            if ahmf is None:
+                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                    nemo_lateral_viscosity_coefficients,
+                )
+                half_um = (config.lateral_viscosity.A_h
+                           / (recipe.grid.radius * recipe.grid.dlon))
+                ahmf = nemo_lateral_viscosity_coefficients(
+                    recipe.grid, half_um)[1]
+            ahmf = np.asarray(ahmf, np.float64)
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                compute_vertex_mask,
+            )
+            import jax as _jax
+            vertex3 = np.asarray(_jax.vmap(
+                lambda m2: compute_vertex_mask(m2, grid=recipe.grid),
+                in_axes=-1, out_axes=-1)(
+                    jnp.asarray(tmask) * state.land_mask.data[..., None]),
+                np.float64)
+            surface = np.asarray(compute_vertex_mask(
+                state.land_mask.data, grid=recipe.grid), np.float64)
+            vertex3 = vertex3 * surface[..., None]
+            if ahmf.ndim == 1:
+                ahmf = ahmf[:, None, None]
+            coefficient = np.abs(np.broadcast_to(
+                ahmf, vertex3.shape) * vertex3)
+            # The reference lives on the (n_lat+1, n_lon+1) vertex layout the
+            # operator reads; the native comparison above is A2D, so map the
+            # differing flags the same way the builder's tail does.
+            with_south = np.concatenate([differing[:1], differing], axis=0)
+            differing_vertex = np.concatenate(
+                [with_south[:, -1:], with_south], axis=1)
+            row["differing_reference_cells"] = int(differing.sum())
+            row["max_coefficient_at_differing_cells"] = float(
+                coefficient[differing_vertex].max(initial=0.0))
         rows[name] = row
     return {
         "status": "CAPTURED",
@@ -399,9 +441,12 @@ def evaluate_shared_cards(capture: dict) -> dict:
         if not row["executes_the_changed_statement"]:
             continue
         unequal = row["mesh_reference_vs_vorticity_reference"]["unequal"]
-        if unequal:
+        coefficient = row.get("max_coefficient_at_differing_cells")
+        if unequal and coefficient != 0.0:
             verdict = "MOVES"
-            reasons.append(f"{name} moves: {unequal} unequal reference cells")
+            reasons.append(
+                f"{name} moves: {unequal} unequal reference cells reach a "
+                f"non-zero coefficient ({coefficient})")
     return {**capture, "status": verdict, "reasons": reasons}
 
 
