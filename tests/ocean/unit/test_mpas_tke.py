@@ -479,24 +479,53 @@ class TestNemoSurfaceTermsOnMPAS:
             captured["surface_tmask"], st.land_mask.data))
 
     def test_eice3_quarter_ice_maps_to_full_attenuation(
-            self, mesh, z_coord, state):
-        """NEMO nn_eice=3 maps quarter ice to complete attenuation.
+            self, mesh, z_coord, state, monkeypatch):
+        """The bridge hands the kernel NEMO's ``zice_fra`` for the chosen mode.
 
-        Mode 1 is source-literally ``tanh(10*fi)`` (zdftke.F90:255), so even
-        full ice remains infinitesimally below one and must differ from mode 3.
-        It must also differ strongly from mode-1 quarter ice.  Comparing only
-        full ice previously hid the erroneous raw-fi interpretation.
+        ``zdftke.f90:260,262``: mode 1 is ``TANH(10*fr_i)`` and mode 3 is
+        ``MIN(4*fr_i, 1)``, so a QUARTER ice cover attenuates completely under
+        mode 3 and 98.7% under mode 1.  Reading the raw fraction as mode 1 --
+        which is NEMO's mode 2 -- is what this catches.
+
+        Pinned on what the bridge PASSES rather than on the coefficients it
+        returns, because the two modes are no longer separable there: the card
+        holds the surface turbulent energy at the z=0 water surface (NEMO's
+        ``en(1)``), so the shallowest coefficient this bridge returns belongs
+        to the first interior w-level, and NEMO's own background clamp
+        ``MAX(zav, avmb)`` / ``MAX(zav, avtb)`` (``zdftke.f90:684-685``) pins
+        both arms to the same background value there.  Measured on this
+        fixture, every cell and level of both arms is the background floor,
+        so a returned-profile assertion either way is vacuous.  The law
+        itself is pinned in
+        ``test_tke_nemo_terms.py::test_nemo_nn_eice1_is_scalar_libm_tanh_not_linear_fraction``.
         """
+        import math
+
+        from legoesm.ocean.physics.vertical_mixing import (
+            mpas_integration as mi,
+        )
+
         f_q = self._ice_wind_forcing(state, ice=0.25)
-        f_full = self._ice_wind_forcing(state, ice=1.0)
-        _, K3q = make_tke_profiles_mpas(self._card(eice=3))(
-            state, mesh, z_coord, f_q)
-        _, K1f = make_tke_profiles_mpas(self._card(eice=1))(
-            state, mesh, z_coord, f_full)
-        _, K1q = make_tke_profiles_mpas(self._card(eice=1))(
-            state, mesh, z_coord, f_q)
-        assert not bool(jnp.array_equal(K3q, K1f))
-        assert not bool(jnp.allclose(K3q, K1q))
+        seen = {}
+        real_kernel = mi.tke_vertical_mixing
+
+        def capture(tag):
+            def spy(*args, **kwargs):
+                seen[tag] = kwargs["ice_frac"]
+                return real_kernel(*args, **kwargs)
+            return spy
+
+        for mode in (1, 3):
+            monkeypatch.setattr(mi, "tke_vertical_mixing", capture(mode))
+            mi.make_tke_profiles_mpas(self._card(eice=mode))(
+                state, mesh, z_coord, f_q)
+
+        # mode 3: MIN(4*0.25, 1) == 1 exactly -- complete attenuation.
+        assert bool(jnp.all(seen[3] == 1.0))
+        # mode 1: TANH(10*0.25), NOT the raw 0.25, and strictly below one.
+        assert bool(jnp.allclose(seen[1], math.tanh(2.5), rtol=1e-12,
+                                 atol=0.0))
+        assert float(jnp.max(seen[1])) < 1.0
 
     def test_partial_cell_zeroes_subseafloor_interfaces(self, mesh, z_coord):
         """Partial-cell geometry: profiles at interfaces below each column's

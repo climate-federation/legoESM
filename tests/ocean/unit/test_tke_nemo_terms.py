@@ -86,11 +86,20 @@ def test_zero_step_probe_uses_the_shared_derived_floor():
 
 
 def test_nemo_nn_eice1_is_scalar_libm_tanh_not_linear_fraction():
-    """zdftke.F90:255: mode 1 is TANH(10*fr_i); mode 2 alone is raw fr_i."""
+    """zdftke.F90:255: mode 1 is TANH(10*fr_i); mode 2 alone is raw fr_i.
+
+    Full ice is included because mode 1 is source-literally ``TANH(10*fr_i)``
+    and therefore never reaches complete attenuation, while mode 3's
+    ``MIN(4*fr_i, 1)`` reaches it at a quarter cover (zdftke.f90:260,262).
+    That difference is 4.1e-9 and vanishes inside NEMO's background clamp on
+    the mixing coefficients, so it is pinned HERE, on the shared
+    transcription, rather than through a diffusivity profile where the clamp
+    would hide it (round 170).
+    """
     old = get_policy()
     try:
         set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-        fr_i = jnp.asarray([0.0, 0.01, 0.25, 0.9], dtype=jnp.float64)
+        fr_i = jnp.asarray([0.0, 0.01, 0.25, 0.9, 1.0], dtype=jnp.float64)
         got = np.asarray(jax.jit(
             lambda value: nemo_tke_effective_ice_fraction(value, 1))(fr_i))
         import math
@@ -99,6 +108,14 @@ def test_nemo_nn_eice1_is_scalar_libm_tanh_not_linear_fraction():
         np.testing.assert_array_equal(got.view(np.uint64), target.view(np.uint64))
         assert not np.array_equal(got[1:].view(np.uint64),
                                   np.asarray(fr_i)[1:].view(np.uint64))
+        # Mode 1 at FULL ice stays strictly below the complete attenuation
+        # mode 3 already reaches at a quarter cover.
+        full_mode1 = float(nemo_tke_effective_ice_fraction(
+            jnp.asarray(1.0, dtype=jnp.float64), 1))
+        quarter_mode3 = float(nemo_tke_effective_ice_fraction(
+            jnp.asarray(0.25, dtype=jnp.float64), 3))
+        assert quarter_mode3 == 1.0
+        assert full_mode1 < quarter_mode3
         tangent = jax.grad(lambda value: jnp.sum(
             nemo_tke_effective_ice_fraction(value, 1)))(fr_i)
         assert bool(jnp.all(jnp.isfinite(tangent)))
