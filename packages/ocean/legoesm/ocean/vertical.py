@@ -293,8 +293,91 @@ def nemo_fe3mask_from_tmask(tmask, *, grid=None):
     return nemo_t_fold_f_owned(fe3mask, grid)
 
 
+def nemo_dynvor_e3f_0vor(e3t_0, tmask, *, grid, dtype, nn_e3f_typ=0,
+                         substitute_e3f=None, return_stages=False):
+    """``dyn_vor_init``'s frozen vertex thickness ``e3f_0vor``.
+
+    Three compiled statements, in NEMO's order
+    (``dynvor.f90:914-919``, ``:935``, ``:937``):
+
+    1. the masked four-cell reference average, ``nn_e3f_typ=0`` dividing by a
+       literal four (``:918``) and ``=1`` by the wet-mask sum (``:929``);
+    2. ``CALL lbc_lnk( 'dynvor', e3f_0vor, 'F', 1._wp )`` (``:935``) --
+       the F-point north-fold exchange, a no-op off a folded grid;
+    3. ``WHERE( e3f_0vor == 0 ) e3f_0vor = e3f_3d`` (``:937``), the zero
+       substitution, which takes the MESH reference F thickness.
+
+    ``substitute_e3f`` supplies statement 3's operand.  ``None`` keeps the
+    historical unmasked four-cell ``e3t_0`` average, which is what every
+    certified card was built and measured on; it is NOT ``e3f_3d`` and the
+    difference is reported in round 31's receipt.
+
+    ``return_stages`` additionally returns the array after statement 1 and
+    after statement 2, so a gate can score the three compiled statements
+    separately instead of re-deriving them.
+    """
+    b = lax.optimization_barrier
+    one = jnp.asarray(1.0, dtype=dtype)
+    quarter = jnp.asarray(0.25, dtype=dtype)
+    e3t0 = jnp.asarray(e3t_0, dtype=dtype)
+    tmask = jnp.asarray(tmask, dtype=dtype)
+
+    def east(value):
+        return jnp.roll(value, -1, axis=1)
+
+    def north(value):
+        return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
+
+    masked = b(e3t0 * tmask)
+    masked_n = north(masked)
+    ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
+    tmask_n = north(tmask)
+    wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
+    divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
+               else jnp.maximum(wet_sum, one))
+    e3f0vor = b(ref_sum / divisor)
+    after_average = e3f0vor
+    if substitute_e3f is None:
+        ref_n = north(e3t0)
+        fill = b(quarter * b(b(e3t0 + east(e3t0))
+                             + b(ref_n + east(ref_n))))
+        e3f0vor = jnp.where(e3f0vor == 0.0, fill, e3f0vor)
+        # ORCA T-pivot north fold, F-point field.  Regular/closed grids
+        # retain the historical path byte-for-byte.  NOTE the order: this
+        # substitutes BEFORE the exchange, where NEMO exchanges first.
+        after_fold = nemo_t_fold_f_owned(e3f0vor, grid)
+        result = after_fold
+    else:
+        after_fold = nemo_t_fold_f_owned(e3f0vor, grid)
+        fill = jnp.asarray(substitute_e3f, dtype=dtype)
+        result = jnp.where(after_fold == 0.0, fill, after_fold)
+    if return_stages:
+        return result, after_average, after_fold
+    return result
+
+
+def nemo_ldf_reference_e3f(z_coord):
+    """dyn_ldf's OWN frozen F thickness operand, ``e3f_3d``.
+
+    ``dynldf_lev.f90:123`` stretches the MESH reference F thickness, not
+    ``dyn_vor_init``'s masked four-cell ``e3f_0vor``; ``e3f_3d`` is ``e3f_0``
+    by ``domzgr_substitute.h90:100`` and is read from the domain file at
+    ``domzgr.F90:173``.  Fail closed rather than fall back to the vorticity
+    array: silently reusing it is exactly the defect this separates.
+    """
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    reference = None if raw is None else getattr(raw, "e3f_0", None)
+    if reference is None:
+        raise ValueError(
+            "NEMO's e3-weighted lateral diffusion reads the mesh reference F "
+            "thickness e3f_3d (dynldf_lev.f90:123); the card must carry it "
+            "as z_coord.nemo_een_barotropic.e3f_0")
+    return reference
+
+
 def nemo_qco_live_vorticity_e3f_cgrid(
     eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
+    reference_e3f=None,
 ):
     """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
 
@@ -307,6 +390,23 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     callers may provide the same operands from their own state.  Horizontal
     areas and F-depth are always rebuilt from that mesh; bridge-carried ENE
     operands are an oracle check, not a production dependency.
+
+    ``reference_e3f`` selects WHICH frozen F thickness the live ``r3f``
+    stretch multiplies, because NEMO's two consumers do not share one.  The
+    vorticity operator takes ``dyn_vor_init``'s own masked four-cell array
+    ``e3f_0vor`` (``dynvor.f90:734-738`` over ``:914-937``) and is the
+    default here.  The lateral-diffusion operator instead takes the MESH
+    reference thickness ``e3f_3d`` -- ``e3f_0`` by the compiled macro in
+    ``domzgr_substitute.h90:100``, read from the domain file at
+    ``domzgr.F90:173`` -- at ``dynldf_lev.f90:123``::
+
+        zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk) * (e3f_3d(ji-1,jj-1,jk)          &
+           &   *(1._wp+r3f(ji-1,jj-1)*fe3mask(ji-1,jj-1,jk))) * r1_e1e2f(...)
+
+    Passing the card's carried ``e3f_0`` here therefore gives ``dyn_ldf`` its
+    own consumer-local reference while ``r3f`` and ``fe3mask``, which NEMO
+    genuinely shares between the two operators, stay the same arrays.  The
+    array is expected on the native A2D F layout, like the carried mesh.
     """
     if nn_e3f_typ not in (0, 1):
         raise ValueError("nn_e3f_typ must be 0 or 1")
@@ -333,22 +433,8 @@ def nemo_qco_live_vorticity_e3f_cgrid(
         # The certified GYRE use is a closed beta-plane box.
         return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
 
-    masked = b(e3t0 * tmask)
-    masked_n = north(masked)
-    ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
-    tmask_n = north(tmask)
-    wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
-    divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
-               else jnp.maximum(wet_sum, one))
-    e3f0vor = b(ref_sum / divisor)
-    ref_n = north(e3t0)
-    e3f_0 = b(quarter * b(b(e3t0 + east(e3t0))
-                            + b(ref_n + east(ref_n))))
-    e3f0vor = jnp.where(e3f0vor == 0.0, e3f_0, e3f0vor)
-
-    # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain the
-    # historical path byte-for-byte.
-    e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
+    e3f0vor = nemo_dynvor_e3f_0vor(
+        e3t0, tmask, grid=grid, dtype=dtype, nn_e3f_typ=nn_e3f_typ)
 
     area_eta = b(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
     area_eta_n = north(area_eta)
@@ -370,7 +456,16 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     # mask.  The later lateral-slip/strait changes at :207-243 affect fmask
     # only.  domzgr_substitute.h90:48,130 therefore consumes fe3mask here;
     # using the vorticity fmask silently stretches partial-cell bottom faces.
-    e3f_native = b(e3f0vor * b(one + r3f[..., None] * fe3mask))
+    # dynldf_lev.f90:123 stretches e3f_3d, dynvor.f90:734-738 stretches
+    # e3f_0vor.  Only the reference differs; r3f and fe3mask above are the
+    # single shared pair NEMO builds once.
+    reference = (e3f0vor if reference_e3f is None
+                 else jnp.asarray(reference_e3f, dtype=dtype))
+    if reference.shape != e3f0vor.shape:
+        raise ValueError(
+            "reference_e3f must be the native A2D F-point thickness with "
+            f"shape {e3f0vor.shape}; got {reference.shape}")
+    e3f_native = b(reference * b(one + r3f[..., None] * fe3mask))
 
     # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
     # south/west rows are inert walls for this closed-box identity.

@@ -5404,15 +5404,21 @@ class LatLonCGridOceanModel:
                         state.eta.data, _ws_h_ref, _ws_u_live_mask,
                         _ws_v_live_mask, _grid)[:2])
                 from legoesm.ocean.vertical import (
+                    nemo_ldf_reference_e3f,
                     nemo_qco_live_vorticity_e3f_cgrid,
                 )
                 _ws_t_live_mask = getattr(_zc, "is_active", None)
                 if _ws_t_live_mask is None:
                     _ws_t_live_mask = jnp.broadcast_to(
                         state.land_mask.data[..., None], _ws_h_ref.shape)
+                # dynldf_lev.f90:123 stretches e3f_3d, the MESH reference F
+                # thickness; only dynvor.f90:734-738 stretches its own frozen
+                # e3f_0vor.  The two consumers share r3f and fe3mask, not the
+                # reference, so lateral diffusion asks for its own.
                 _ws_e3f_kbb = nemo_qco_live_vorticity_e3f_cgrid(
                     state.eta.data, _zc, state.eta.data.dtype, grid=_grid,
-                    e3t_0=_ws_h_ref, tmask=_ws_t_live_mask)
+                    e3t_0=_ws_h_ref, tmask=_ws_t_live_mask,
+                    reference_e3f=nemo_ldf_reference_e3f(_zc))
                 _ws_ldf_thickness_kbb = (
                     _geom_density[1], _ws_ldf_face_thickness_kbb[0],
                     _ws_ldf_face_thickness_kbb[1], _ws_e3f_kbb,
@@ -5931,14 +5937,18 @@ class LatLonCGridOceanModel:
                 if (not skip_ldf and _ws_uses_nemo_ldf_e3
                         and stage_face_thickness is not None):
                     from legoesm.ocean.vertical import (
+                        nemo_ldf_reference_e3f,
                         nemo_qco_live_vorticity_e3f_cgrid,
                     )
+                    # Same consumer-local reference as the stage-1 call above
+                    # (dynldf_lev.f90:123); the stage only moves r3f.
                     _stage_ldf_thickness = (
                         _geom_density[1], _ws_ldf_face_thickness_kbb[0],
                         _ws_ldf_face_thickness_kbb[1],
                         nemo_qco_live_vorticity_e3f_cgrid(
                             st.eta.data, _zc, st.eta.data.dtype, grid=_grid,
-                            e3t_0=_ws_h_ref, tmask=_ws_t_live_mask),
+                            e3t_0=_ws_h_ref, tmask=_ws_t_live_mask,
+                            reference_e3f=nemo_ldf_reference_e3f(_zc)),
                         stage_face_thickness[0], stage_face_thickness[1])
                 td_result = self.tendencies(
                                      st, surface_forcing, sponge=sponge, dt=dt,
