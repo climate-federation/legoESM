@@ -12795,8 +12795,8 @@ def developed_vertical_day240_sensitivity(
             },
             "sensitivity": None,
             "conclusion": (
-                "the fixed-shape disabled or identity solve input changes "
-                "the production-jitted step, so both directed "
+                "the fixed-shape identity solve input changes the "
+                "production-jitted step, so both directed "
                 "sensitivities are withheld and no magnitude owner is "
                 "named"),
             "compiled_source": {
