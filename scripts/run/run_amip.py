@@ -911,6 +911,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "sub-grid variance the cloud PDF otherwise has to "
                              "guess. Requires --turbulence clubb. Default off "
                              "= the diagnostic path (byte-identical).")
+    parser.add_argument("--clubb-liquid-partition", dest="clubb_liquid_partition",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Let CLUBB exchange CLOUD LIQUID with the host, as "
+                             "CAM does: the closure's total water carries the "
+                             "existing cloud water in, and its own diagnosed "
+                             "liquid is written back to the condensate tracer "
+                             "instead of being returned as vapour. Without it "
+                             "the host takes its cloud FRACTION from CLUBB and "
+                             "its cloud WATER from a tracer CLUBB never wrote, "
+                             "and the two disagree. Requires --turbulence clubb "
+                             "and --clubb-prognostic. Default off = the "
+                             "historical bridge (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -930,6 +942,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "so cold dry polar snow keeps its fresh albedo "
                              "while melting snow darkens as before. "
                              "None = 0.0 = off (calendar clock, byte-identical).")
+    parser.add_argument("--land-soil-freeze-thaw", dest="land_soil_freeze_thaw",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_freeze_thaw,
+                        help="Soil-water freeze/thaw (latent zero-curtain) in "
+                             "the multilayer land, as in CLM5. Default off "
+                             "(sensible-only). Requires --use-multilayer-land.")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -1806,17 +1824,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "MG2 has no graupel; --no-morrison-do-graupel "
                              "routes frozen rain to snow and removes the "
                              "graupel riming sink of cloud water.")
-    parser.add_argument("--clubb-liquid-handoff",
-                        action=argparse.BooleanOptionalAction,
-                        default=ExperimentConfig._field_defaults[
-                            "clubb_liquid_handoff"],
-                        dest="clubb_liquid_handoff",
-                        help="CAM6 clubb_intr moist mapping: prognostic CLUBB "
-                             "runs on total water (q_v + q_c) and its PDF "
-                             "liquid becomes the model cloud water; Morrison's "
-                             "own liquid condensation is switched off. MPAS "
-                             "lane, turbulence=clubb + clubb_prognostic + "
-                             "microphysics=morrison only.")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -2363,6 +2370,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_scheme=args.clouds,
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
+        clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
@@ -2413,6 +2421,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cap_floor_q_c=args.cloud_cap_floor_q_c,
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
+        land_soil_freeze_thaw=args.land_soil_freeze_thaw,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
@@ -2483,7 +2492,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         morrison_do_graupel=args.morrison_do_graupel,
-        clubb_liquid_handoff=args.clubb_liquid_handoff,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

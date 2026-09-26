@@ -1734,6 +1734,32 @@ def _make_spectral_pe_convection(
             )
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
 
+        # CAM6 deep-convective cloud-fraction inputs (clubb_intr deepcu):
+        # publish the interface updraft mass flux and in-cloud water into
+        # the lagged PhysicsState carry when the scheme exposes them, exactly
+        # as the hydrostatic bridge does.  Schemes without an updraft mass
+        # flux publish nothing and the carry stays zero (deepcu exactly 0).
+        if conv_fn is not None:
+            if (conv_out.mass_flux_up is None) != (conv_out.icwmr is None):
+                raise ValueError(
+                    "ConvectionOutput.mass_flux_up and icwmr must be published "
+                    "together (the CAM6 deepcu consumer refuses one without "
+                    f"the other); got mass_flux_up={conv_out.mass_flux_up is not None}, "
+                    f"icwmr={conv_out.icwmr is not None}.")
+            if conv_out.mass_flux_up is not None:
+                _mf_pub = {
+                    "conv_mass_flux_up":
+                        conv_out.mass_flux_up.reshape(ncol, nlev + 1),
+                    "conv_icwmr": conv_out.icwmr.reshape(ncol, nlev),
+                }
+                if isinstance(conv_prog_out, dict):
+                    conv_prog_out = {**conv_prog_out, **_mf_pub}
+                elif conv_prog_out is not None:
+                    conv_prog_out = {"conv_prog_profile": conv_prog_out,
+                                     **_mf_pub}
+                else:
+                    conv_prog_out = _mf_pub
+
         # Transform T tendency to spectral space.
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
@@ -1756,15 +1782,28 @@ def _make_spectral_pe_convection(
         # (``dq_r_conv_dt is not None`` => bechtold/tiedtke precip_efficiency>0);
         # the ``conv_fn is not None`` clause short-circuits before ``conv_out``
         # is read, so a physics-free spectral step is unaffected.
-        if (conv_fn is not None and _tr.rain_is_net_flux
-                and conv_out.dq_r_conv_dt is not None):
+        # A NET precipitation-flux divergence (CAM ZM ``ntprprd``, signed per
+        # layer: production minus evaporation of rain from above) is never a
+        # tracer source -- booked per layer it would sink condensate from
+        # layers holding none.  Its column integral IS the surface rain, so it
+        # takes the surface route here exactly as on the hydrostatic bridge
+        # (``_to_sfc``) and in the unified pipeline: only dq_v and dq_c are
+        # booked and the rain leaves the column (this lane has no surface
+        # precipitation channel; every precipitating species already leaves
+        # the prescribed surface this way).  Column water then closes by the
+        # scheme's own contract, sum dp*dq_r = -sum dp*(dq_v + dq_c), which
+        # requires BOTH q_v and q_c to be carried -- without q_c the detrained
+        # condensate would vanish unrecorded.
+        _rain_to_sfc = conv_fn is not None and _tr.rain_is_net_flux
+        if (_rain_to_sfc and conv_out.dq_r_conv_dt is not None
+                and (state.tracers is None or "q_v" not in state.tracers
+                     or "q_c" not in state.tracers)):
             raise ValueError(
-                f"convection scheme '{scheme_name}' emits a signed NET rain-flux "
-                "divergence (dq_r_conv_dt) that must be column-integrated to "
-                "surface precipitation; the spectral bridge has no surface-precip "
-                "sink and booking it per layer into a tracer would create "
-                "condensate sinks in layers holding none. Use the hydrostatic "
-                "bridge or the unified PhysicsPipeline."
+                f"convection scheme '{scheme_name}' routes its net rain flux "
+                "(dq_r_conv_dt) to the surface and books vapour and detrained "
+                "condensate into q_v and q_c; the spectral state must carry "
+                "both tracers, got "
+                f"{None if state.tracers is None else sorted(state.tracers)}."
             )
         if (conv_fn is not None and state.tracers is None
                 and conv_out.dq_r_conv_dt is not None):
@@ -1803,9 +1842,10 @@ def _make_spectral_pe_convection(
             # ``q_c`` tendency so total convective condensate (dq_c + dq_r) is
             # CONSERVED, not dropped (no surface-precip path in this bridge).
             # SIGN: ``dq_r_conv_dt >= 0`` is a condensate SOURCE, same sign as
-            # ``dq_c_conv_dt``.  Schemes with no rain split emit ``None`` ->
-            # no-op (byte-identical).
-            _dq_r_conv = conv_out.dq_r_conv_dt
+            # ``dq_c_conv_dt`` -- when booked; a signed net-flux field
+            # (``_rain_to_sfc``) is routed out above and never reaches here.
+            # Schemes with no rain split emit ``None`` -> no-op (byte-identical).
+            _dq_r_conv = None if _rain_to_sfc else conv_out.dq_r_conv_dt
             if _dq_r_conv is not None:
                 _dq_r_grid = _dq_r_conv.reshape(n_lat, n_lon, nlev)
                 if "q_r" in _state_tracers:

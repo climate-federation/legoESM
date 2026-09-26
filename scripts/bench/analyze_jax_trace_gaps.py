@@ -119,17 +119,32 @@ def _union_ms(evs: list[dict]) -> float:
     return total
 
 
+# Two naming schemes reach this table. GPU captures carry HLO instruction
+# names ("all-reduce", "collective-permute"); CPU captures carry the JAX-level
+# primitive names instead ("psum", "all_gather"), verified by tracing each one
+# on this stack. Both are listed because a name that is missing here does not
+# raise -- it reads as a confident ZERO for that family, and for a while the
+# CPU lanes reported no reductions at all for exactly that reason.
 _FAMILY_TOKENS = {
     "all-gather": "all-gather",
     "allgather": "all-gather",
+    "all_gather": "all-gather",
     "all-to-all": "all-to-all",
     "alltoall": "all-to-all",
+    "all_to_all": "all-to-all",
     "collective-permute": "permute",
     "ppermute": "permute",
     "all-reduce": "all-reduce",
     "allreduce": "all-reduce",
+    # psum/pmax/pmin are all all-reduces on the wire; they differ in the
+    # combiner, not in what they cost. pmax/pmin are diagnostics-only in this
+    # repo (they carry no gradient) but they still occupy the fabric.
+    "psum": "all-reduce",
+    "pmax": "all-reduce",
+    "pmin": "all-reduce",
     "reduce-scatter": "reduce-scatter",
     "reducescatter": "reduce-scatter",
+    "reduce_scatter": "reduce-scatter",
 }
 
 # An HLO instruction name is the opcode plus optional numeric suffixes:
@@ -137,7 +152,9 @@ _FAMILY_TOKENS = {
 # that shape instead of a substring search is what keeps a FUSION whose name
 # merely CONTAINS an opcode -- "fusion.all-gather.18" -- out of the gather
 # family, which codex demonstrated a substring match would swallow.
-_INSTR_RE = re.compile(r"^([a-z][a-z-]*)(?:\.\d+)*$")
+# Underscores are part of the name on CPU captures (all_gather.7);
+# a pattern without them silently rejects every such event.
+_INSTR_RE = re.compile(r"^([a-z][a-z_-]*)(?:\.\d+)*$")
 
 
 def collective_family(name: str) -> str | None:
@@ -396,6 +413,54 @@ def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
                   f"   | kernel median {kernel:7.1f} us")
     return quoted > 0
 
+def top_ops(events: list[dict], steps: int, n: int = 25) -> list[dict]:
+    """Per-op-name totals over ALL threads of the busiest process: thread
+    time per step, executions per step, and the mean number of threads
+    busy on that op while any thread is (thread time / union span). A
+    parallel op shows a mean near the pool size; a serial one shows ~1.
+    Uses every tid, unlike device_events' single-track view, because on
+    CPU one op's work is spread over the worker threads."""
+    from collections import defaultdict
+    xs = [e for e in events if e.get("ph") == "X" and e.get("dur", 0) > 0]
+    # Prefer a GPU device track (kernels), as device_events does; the host
+    # track's PjRt/executor wrappers would otherwise rank first on GPU.
+    pid_name = {e.get("pid"): e.get("args", {}).get("name", "")
+                for e in events if e.get("name") == "process_name"}
+    gpu_pids = {q for q, nm in pid_name.items() if "GPU" in nm or "gpu" in nm}
+    tot = defaultdict(float)
+    for e in xs:
+        if not gpu_pids or e["pid"] in gpu_pids:
+            tot[e["pid"]] += e["dur"]
+    if not tot:
+        raise SystemExit("no complete events in trace")
+    pid = max(tot, key=tot.get)
+    by = defaultdict(list)
+    for e in xs:
+        # XLA ops only: the CPU host track also carries Python frames
+        # ("$file:line fn") and the executor's own bookkeeping spans.
+        if e["pid"] == pid and not e["name"].startswith("$") \
+                and not e["name"].startswith("ThunkExecutor"):
+            by[e["name"]].append(e)
+    rows = []
+    for name, evs in by.items():
+        thread_ms = sum(e["dur"] for e in evs) / 1e3
+        iv = sorted((e["ts"], e["ts"] + e["dur"]) for e in evs)
+        span_us, cur_s, cur_e = 0.0, iv[0][0], iv[0][1]
+        for a, b in iv[1:]:
+            if a > cur_e:
+                span_us += cur_e - cur_s
+                cur_s, cur_e = a, b
+            else:
+                cur_e = max(cur_e, b)
+        span_ms = (span_us + cur_e - cur_s) / 1e3
+        rows.append({"name": name, "thread_ms_per_step": thread_ms / steps,
+                     "span_ms_per_step": span_ms / steps,
+                     "count_per_step": len(evs) / steps,
+                     "mean_threads": thread_ms / span_ms if span_ms else 0.0})
+    rows.sort(key=lambda r: -r["span_ms_per_step"])
+    return rows[:n]
+
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -415,7 +480,7 @@ def main() -> int:
                          "event count disagrees is refused rather than "
                          "indexed with the wrong period.")
     ap.add_argument("--end-tol-us", type=float, default=5.0,
-                    help="reject a pair whose END-residual p90 exceeds this "
+                    help="reject a pair whose WORST END-residual exceeds this "
                          "many microseconds. Matched participants finish "
                          "together, so the residual is bounded by timestamp "
                          "jitter, which is absolute and does not grow with "
@@ -451,7 +516,24 @@ def main() -> int:
                     help="devices each traced process drives (1 under the "
                          "multi-process launch, 24 in a virtual-CPU smoke)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--top-ops", type=int, default=0, metavar="N",
+                    help="Print the N op names with the largest wall span "
+                         "per step on rank 0 with their thread time, count "
+                         "and mean threads busy (CPU parallel-efficiency "
+                         "view; span is per op name so it does not add up "
+                         "across names). Then exit.")
     args = ap.parse_args()
+    if args.top_ops:
+        rank0 = sorted(args.trace_root.glob("rank*"))[0]
+        evs = load_trace(rank0)
+        rows = top_ops(evs, args.steps, args.top_ops)
+        print(f"{'op':44s} {'span ms/step':>12s} {'thr ms/step':>12s} "
+              f"{'n/step':>7s} {'threads':>8s}")
+        for r in rows:
+            print(f"{r['name'][:44]:44s} {r['span_ms_per_step']:12.1f} "
+                  f"{r['thread_ms_per_step']:12.1f} {r['count_per_step']:7.1f} "
+                  f"{r['mean_threads']:8.1f}")
+        return 0
 
     # A flag that silently does nothing is a gate the caller thinks they
     # armed (GLM). These two only act inside --time-by-family.

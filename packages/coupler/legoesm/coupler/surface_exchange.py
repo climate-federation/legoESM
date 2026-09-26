@@ -10,7 +10,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.coupler.config import CouplerConfig
-from legoesm.core.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface, lowest_level_height
 from legoesm.core.state import HydrostaticState, NonHydrostaticState
 from legoesm.grids.vertical import SigmaCoordinate
 from legoesm.atmosphere.physics.thermodynamics import (
@@ -88,6 +88,9 @@ def extract_atm_to_surface(
     has_precip = jnp.array(1.0) if precip_total is not None else jnp.array(0.0)
 
     return AtmToSurface(
+        z_lowest=lowest_level_height(
+            T_lowest, sigma_coord.pressure_at_half(p_s),
+            sigma_coord.pressure_at_full(p_s)),
         sw_down=sw_down if sw_down is not None else zero,
         lw_down=lw_down if lw_down is not None else zero,
         precip_total=precip_total if precip_total is not None else zero,
@@ -163,6 +166,8 @@ def extract_atm_to_surface_nh(
     has_precip = jnp.array(1.0) if precip_total is not None else jnp.array(0.0)
 
     return AtmToSurface(
+        z_lowest=(terrain_metric.z_full_3d[..., -1]
+                  - terrain_metric.z_half_3d[..., -1]),
         sw_down=sw_down if sw_down is not None else zero,
         lw_down=lw_down if lw_down is not None else zero,
         precip_total=precip_total if precip_total is not None else zero,

@@ -890,7 +890,7 @@ class PhysicsPipeline:
         ``step_multilayer_land`` with the pipeline's land config / per-column params.
         Pure + differentiable w.r.t. the land params (the whole point of the refactor).
         Deferred land imports avoid a core->land top-level cross-package cycle."""
-        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface, lowest_level_height
         from legoesm.land.multilayer_land import step_multilayer_land
         from legoesm.thermo import saturation_mixing_ratio
         ad = self.adapter
@@ -907,6 +907,9 @@ class PhysicsPipeline:
         # a shared faithful-zenith upgrade for those is a separate follow-up).
         _cosz = cos_zenith_col if cos_zenith_col is not None else 0.5 * ones
         forcing = AtmToSurface(
+            z_lowest=lowest_level_height(
+                T_air, self.sigma_coord.pressure_at_half(p_s_col),
+                self.sigma_coord.pressure_at_full(p_s_col)),
             sw_down=sw_down_col, lw_down=lw_down_col, precip_total=precip,
             precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
             T_lowest=T_air, q_lowest=q_air, u_lowest=u_low, v_lowest=v_low,
@@ -2503,9 +2506,13 @@ class PhysicsPipeline:
                 # every structured-grid canopy run (codex).
                 _alb_veg = getattr(_lmp_rad, "albedo_veg", None)
                 if _alb_veg is None:
+                    # Soil bands at the tile's current top-layer water (the
+                    # land step rewets the same bounds with its own water).
+                    from legoesm.land.soil_albedo import rewet_soil_bands
+                    _lmp_alb = rewet_soil_bands(_lmp_rad, land_ml.theta_soil[:, 0])
                     alb_land = ad.unflatten_2d(
-                        _VIS_FRAC_SOLAR * _lmp_rad.ALB_VIS
-                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_rad.ALB_NIR)
+                        _VIS_FRAC_SOLAR * _lmp_alb.ALB_VIS
+                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_alb.ALB_NIR)
                 else:
                     alb_land = ad.unflatten_2d(_alb_veg)
                 emis_land = ad.unflatten_2d(_lmp_rad.emissivity)
@@ -4019,15 +4026,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
                 else _sed_max)
     _graupel = (None if _graupel
                 is _ExpCfg._field_defaults["morrison_do_graupel"] else _graupel)
-    # CLUBB owns cloud liquid under the moist mapping, so Morrison's own
-    # liquid condensation is switched off (CAM6: MG2 does no condensation).
-    _handoff = getattr(config, "clubb_liquid_handoff", False)
-    if not isinstance(_handoff, bool):
-        raise TypeError(f"clubb_liquid_handoff must be a bool, got {_handoff!r}")
-    _liq_cond = False if _handoff else None
     if (not _touched and _flavor is None and _sed_sub is None
-            and _sed_strict is None and _sed_max is None and _graupel is None
-            and _liq_cond is None):
+            and _sed_strict is None and _sed_max is None and _graupel is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4037,8 +4037,7 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
         morrison_sed_cfl_substeps_max=_sed_max,
         morrison_sed_cfl_substeps_strict=_sed_strict,
-        morrison_do_graupel=_graupel,
-        morrison_liquid_condensation=_liq_cond)
+        morrison_do_graupel=_graupel)
 
 
 def _resolve_microphysics(config):
@@ -4128,16 +4127,24 @@ def _resolve_microphysics(config):
     _hs_thr = getattr(config, "hard_sat_adjust_threshold", None)
     _hs_cap = getattr(config, "hard_sat_max_heating_K", None)
     _hom_nuc = bool(getattr(config, "homogeneous_ice_nucleation", False))
-    if _hs_thr is not None or _hs_cap is not None or _hom_nuc:
-        from legoesm.atmosphere.physics.microphysics.config import (
-            apply_microphysics_experiment_flags,
-        )
-        micro_config = apply_microphysics_experiment_flags(
-            micro_config, scheme,
-            hard_sat_adjust_threshold=_hs_thr,
-            hard_sat_max_heating_K=_hs_cap,
-            homogeneous_ice_nucleation=_hom_nuc,
-        )
+    # Second half of the CLUBB liquid partition; see the MPAS call site.
+    _liq_closure = bool(config._liquid_partition_resolved())
+    # Called UNCONDITIONALLY.  The clearing assignment inside the helper is
+    # what stops a microphysics override that already carries
+    # liquid_from_closure=True from reaching a built model with no liquid
+    # source; gating the call on the other flags being set left exactly that
+    # leak standing (GLM).  All-None / all-False is a no-op on every other
+    # knob, so this is free.
+    from legoesm.atmosphere.physics.microphysics.config import (
+        apply_microphysics_experiment_flags,
+    )
+    micro_config = apply_microphysics_experiment_flags(
+        micro_config, scheme,
+        hard_sat_adjust_threshold=_hs_thr,
+        hard_sat_max_heating_K=_hs_cap,
+        homogeneous_ice_nucleation=_hom_nuc,
+        liquid_from_closure=_liq_closure,
+    )
 
     # Morrison ice-process tunables (flat ``morrison_*`` ExperimentConfig
     # scalars, declared with "MorrisonConfig.<field>" comments but NEVER
@@ -4387,18 +4394,27 @@ def turbulence_config_for(config):
             )
             tc = materialize_sub_config(tc)
             tc = tc._replace(clubb=tc.clubb._replace(prognostic=True))
-        # CAM6 moist host mapping: CLUBB owns cloud liquid.  Same threading
-        # and refusal as the prognostic flag; False => byte-identical.
-        if getattr(config, "clubb_liquid_handoff", False):
+        # CLUBB's two-sided cloud-liquid exchange with the host (CAM
+        # clubb_intr.F90).  Same threading and the same refusal as the flag
+        # above, plus a prognostic requirement: the liquid the closure writes
+        # back is the POST-ADVANCE PDF's rcm, which only the prognostic path
+        # produces from advanced moments.
+        if getattr(config, "clubb_liquid_partition", False):
             if tc.scheme != "clubb":
                 raise ValueError(
-                    f"clubb_liquid_handoff requires turbulence='clubb', got "
-                    f"{tc.scheme!r}.")
+                    f"clubb_liquid_partition=True requires turbulence='clubb', "
+                    f"got {tc.scheme!r}. The exchanged liquid is the CLUBB PDF's "
+                    f"own rcm; no other closure diagnoses one.")
+            if not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_liquid_partition=True requires clubb_prognostic=True: "
+                    "the liquid handed back is the post-advance PDF closure's "
+                    "rcm, which the diagnostic path does not produce.")
             from legoesm.atmosphere.physics.turbulence.integration import (
                 materialize_sub_config,
             )
             tc = materialize_sub_config(tc)
-            tc = tc._replace(clubb=tc.clubb._replace(liquid_handoff=True))
+            tc = tc._replace(clubb=tc.clubb._replace(liquid_partition=True))
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => byte-identical: the scheme's own 0.0 (off) stands.
@@ -4494,16 +4510,20 @@ def turbulence_config_for(config):
                 f"{getattr(_sub, 'prognostic', None)!r}). The override is "
                 "authoritative, so set CLUBBConfig(prognostic=True) inside it "
                 "rather than relying on the experiment-level flag.")
-    _ovr_handoff = bool(getattr(getattr(tc, "clubb", None), "liquid_handoff", False))
-    if _ovr_handoff != bool(getattr(config, "clubb_liquid_handoff", False)):
-        # Morrison's liquid condensation is switched from the flat flag, so an
-        # override that disagrees would leave nobody, or two schemes, owning
-        # cloud-liquid condensation.
-        raise ValueError(
-            "clubb_liquid_handoff="
-            f"{getattr(config, 'clubb_liquid_handoff', False)} but the explicit "
-            f"turbulence_override has liquid_handoff={_ovr_handoff}; set both "
-            "the same.")
+    if getattr(config, "clubb_liquid_partition", False):
+        # Same refusal, and it matters more here: swallowing this one silently
+        # would run a deck that asked for the liquid exchange with the closure
+        # still throwing its liquid away, which looks exactly like the defect
+        # the lever exists to remove.
+        _sub = getattr(tc, "clubb", None)
+        if tc.scheme != "clubb" or _sub is None or not _sub.liquid_partition:
+            raise ValueError(
+                "clubb_liquid_partition=True but an explicit turbulence_override "
+                "is in force and does not select it (override "
+                f"scheme={tc.scheme!r}, liquid_partition="
+                f"{getattr(_sub, 'liquid_partition', None)!r}). The override is "
+                "authoritative, so set CLUBBConfig(liquid_partition=True) inside "
+                "it rather than relying on the experiment-level flag.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the

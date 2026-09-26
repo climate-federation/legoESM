@@ -50,6 +50,17 @@ class TurbulenceOutput(NamedTuple):
         (sundqvist / xu_randall).  A moist higher-order closure's cloud fraction
         is physically less overcast than the RH-diagnosed one over a saturated
         marine BL; ``cloud_scheme="clubb"`` routes THIS field to RRTMGP.
+    dq_c_dt : jax.Array or None
+        Optional CLOUD LIQUID mixing-ratio tendency [kg/kg/s], shape
+        ``(ncol, nlev)``.  ``None`` (the default) for every scheme that does not
+        exchange condensate with the host, which is all of them unless CLUBB's
+        ``liquid_partition`` is on.  When present it REPLACES the host's cloud
+        liquid with the closure's own (``(rcm − q_c)/dt``, CAM
+        ``clubb_intr.F90:2160``) and is paired with a ``dq_v_dt`` that has had
+        that same liquid removed, so the two together conserve total water.
+        Dropping it while keeping ``dq_v_dt`` would therefore DESTROY water; a
+        lane that cannot route it must refuse the configuration rather than
+        ignore the field.
     wtheta_flux : jax.Array or None
         Optional DIAGNOSTIC kinematic heat flux ``⟨w'θ'⟩`` [K m/s] the scheme would
         transport at the given mean state, shape (ncol, nlev), on FULL levels. For a
@@ -59,10 +70,6 @@ class TurbulenceOutput(NamedTuple):
         NOT feed the tendencies (those come from the flux DIVERGENCE / implicit solve)
         and so cannot change any run. Consumed only by the LES-suite Q1 diagnostic
         score (``les_suite`` compares it to the LES flux at the LES mean state).
-    dq_c_dt : jax.Array or None
-        Cloud-liquid tendency [kg/kg/s], shape (ncol, nlev), from a closure that
-        owns liquid condensation (prognostic CLUBB with ``liquid_handoff``).
-        ``None`` for every other scheme and for the dry mapping.
     """
     du_dt: jax.Array
     dv_dt: jax.Array

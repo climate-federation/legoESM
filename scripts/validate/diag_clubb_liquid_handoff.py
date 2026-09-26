@@ -47,6 +47,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--clubb-nsub", type=int, default=1,
                     help="macro/micro sub-steps for the closure call "
                          "(the run's cld_macmic_num_steps; 3 => 600 s on an 1800 s step)")
+    ap.add_argument("--partition", action="store_true",
+                    help="ALSO size CLUBBConfig.liquid_partition: run the same "
+                         "closure call with the host's q_c seeded into rt, take "
+                         "the liquid it writes back, and push it through the "
+                         "deck's own optics. This is the lever's effect, not an "
+                         "upper bound built from an unseeded call.")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
     return ap
 
@@ -117,6 +123,7 @@ def main():
     scheme_name = turb.scheme
     print(f"[{a.label}] turbulence scheme = {scheme_name}")
     rcm_done = False
+    q_c_partitioned_out = None
     _aux = getattr(driver, "_carry_aux", {}) or {}
     def carry(name):
         v = _aux.get("physstate_" + name)
@@ -162,7 +169,11 @@ def main():
                 _T = _T + _dts * _dT; _q = _q + _dts * _dq
                 _tv = jnp.maximum(virtual_temperature(_T, _q), clubb_cfg.T0 * 0.5)
                 _rho = p_full / (constants.R_d * _tv)
-        rcm_a = np.asarray(diags["rcm"])          # ascending (bottom-up)
+        # GRID MEAN, not the in-layer value: compute_cloud_cover divides rcm by
+        # a vertical cloud fraction <= 1 at cloud edges, so diags["rcm"] is the
+        # in-cloud water and integrating it as a grid mean inflates the
+        # inventory and the missing-share (codex).
+        rcm_a = np.asarray(diags["rcm_grid"])     # ascending (bottom-up)
         cf_a = np.asarray(diags["cloud_frac"])
         rcm = rcm_a[:, ::-1][:, :nlev] if rcm_a.shape[1] >= nlev else rcm_a[:, ::-1]
         cfl = cf_a[:, ::-1][:, :nlev] if cf_a.shape[1] >= nlev else cf_a[:, ::-1]
@@ -184,6 +195,43 @@ def main():
         print(f"[{a.label}] host q_c on those layers = {L_qc_m:.6e} kg/m2")
         print(f"[{a.label}] H = missing share of PDF liquid = {H:.4f}")
         rcm_done = True
+
+        # ---- 1b. the LEVER itself ------------------------------------------
+        # The band quoted before this came from an UNSEEDED call: rt held only
+        # vapour, so the closure condensed from scratch and its rcm was an upper
+        # bound. With the partition on, a layer that already holds liquid carries
+        # it in rt, so the closure REPARTITIONS instead of condensing, which is
+        # the quantity the lever actually delivers.
+        if a.partition and q_c is not None:
+            liq_cfg = clubb_cfg._replace(liquid_partition=True)
+            _u = u_cell.reshape(nCells, nlev); _v = v_cell.reshape(nCells, nlev)
+            _T = T; _q = q_v; _m = moments; _rho = rho; _ql = q_c
+            for _i in range(_ns):
+                _du, _dv, _dT, _dq, _m, _dg = clubb_step(
+                    _u, _v, _T, _q, _m, p_full, p_half, z_full, z_half,
+                    T_sfc, q_sfc, _rho, _dts, liq_cfg, q_c=_ql)
+                _ql = _ql + _dts * _dg["dq_c_dt"]
+                if _i < _ns - 1:
+                    _u = _u + _dts * _du; _v = _v + _dts * _dv
+                    _T = _T + _dts * _dT; _q = _q + _dts * _dq
+                    _tv = jnp.maximum(virtual_temperature(_T, _q), liq_cfg.T0 * 0.5)
+                    _rho = p_full / (constants.R_d * _tv)
+            q_c_partitioned = jnp.maximum(_ql, 0.0)
+            _p0 = colint(q_c)
+            _p1 = colint(q_c_partitioned)
+            print(f"[{a.label}] PARTITION: q_c {_p0:.6e} -> {_p1:.6e} kg/m2  "
+                  f"(x{_p1 / max(_p0, 1e-30):.3f})")
+            _above900 = np.asarray(p_full) < 9.0e4
+            _dpn = np.asarray(dp)
+            _m900 = lambda x: float(np.sum(
+                A * np.sum(np.where(_above900, np.asarray(x), 0.0) * _dpn, axis=1)
+                / constants.g))
+            print(f"[{a.label}] PARTITION above 900 hPa: q_c "
+                  f"{_m900(q_c):.6e} -> {_m900(q_c_partitioned):.6e} kg/m2 "
+                  f"(x{_m900(q_c_partitioned) / max(_m900(q_c), 1e-30):.3f})  "
+                  f"[the sub-900-hPa band is contaminated by the probe's "
+                  f"saturated surface humidity]")
+            q_c_partitioned_out = q_c_partitioned
     if not rcm_done:
         print(f"[{a.label}] no carried CLUBB moments on this state -> PDF liquid N/A")
 
@@ -249,6 +297,29 @@ def main():
               f"{100.0*(IWP-IWP0)/max(IWP,1e-30):.2f}% of IWP")
         print(f"[{a.label}] tau floor-on = {float(np.sum(A*tau.sum(axis=1))):.4f}  "
               f"floor-off = {float(np.sum(A*tau0.sum(axis=1))):.4f}")
+
+    if a.partition and q_c_partitioned_out is not None:
+        _qcp_new = q_c_partitioned_out
+        cp_p = compute_cloud_properties(
+            T, p_full, q_v, dp, ccfg, q_cloud=_qcp_new, q_ice=q_i,
+            n_ice=n_i, n_cloud=n_c, cloud_fraction_override=cf_override,
+            p_half=p_half, lat=jnp.asarray(mesh.latCell).reshape(nCells))
+        lwp_p = np.asarray(cp_p.lwp); reff_p = np.asarray(cp_p.r_eff_liq)
+        LWP_p = float(np.sum(A * lwp_p.sum(axis=1)))
+        tau_p = 1.5 * lwp_p / (RHO_W * np.maximum(reff_p, 1e-12))
+        TAU = float(np.sum(A * tau.sum(axis=1)))
+        TAU_p = float(np.sum(A * tau_p.sum(axis=1)))
+        # LIQUID-ONLY sensitivity: the new liquid is pushed through the optics
+        # against the ORIGINAL temperature, vapour and cloud fraction. The full
+        # lever also moves T and q_v (and hence the fraction on the next step),
+        # so this isolates the condensate's radiative weight rather than
+        # predicting the run's response (codex).
+        print(f"[{a.label}] PARTITION optics (LIQUID-ONLY sensitivity, "
+              f"T/q_v/cloud-fraction held at their restart values):")
+        print(f"[{a.label}] PARTITION optics: LWP {LWP:.6e} -> {LWP_p:.6e} kg/m2 "
+              f"(x{LWP_p / max(LWP, 1e-30):.3f})")
+        print(f"[{a.label}] PARTITION optics: liquid tau {TAU:.4f} -> {TAU_p:.4f} "
+              f"(x{TAU_p / max(TAU, 1e-30):.3f})")
 
     # ---- 2b. WHERE the condensate is lost between the tracer and the optics --
     qcp = float(np.sum(A * np.asarray(jnp.sum(q_c * dp, axis=1) / constants.g))) if q_c is not None else float("nan")

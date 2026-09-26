@@ -142,15 +142,34 @@ morrison_sed_cfl_substeps_strict: false # the abort path is an equinox error_if,
                                         # reported as a diagnostic.
                                  # (L32 at 600 s needs ~90 for graupel; a clamp
                                  # would silently slow the fall)
-hard_saturation_adjustment: false  # CAM6: clubb_do_liqsupersat = .false.
-                                   # (namelist_defaults_cam.xml) -- no
-                                   # post-CLUBB saturation removal.  The
-                                   # Levante CAM6 arms ran this TRUE (MPAS
-                                   # post-step drain).  User 2026-09-24:
-                                   # "very close to CAM6".
+hard_saturation_adjustment: false  # CAM6 clubb_do_liqsupersat = .false.
+                                   # (namelist_defaults_cam.xml:1225): no
+                                   # supersaturation removal after the physics
+                                   # step.  On this lane the flag is the
+                                   # POST-STEP drain (model_driver
+                                   # _mpas_hard_saturation_poststep), which is
+                                   # our counterpart of CAM's post-CLUBB
+                                   # "iceadj" block (clubb_intr.F90:2258).
+                                   # Was true; user table 2026-09-24, row 2.
 cloud_partial_coverage_optics: none
-cloud_optics_inhomogeneity: two_region
-cloud_fsd: 1.0
+cloud_optics_inhomogeneity: constant  # CAM6: RRTMG applies NO in-cloud
+                                       # inhomogeneity factor (none anywhere
+                                       # in src/physics/rrtmg/).  "constant"
+                                       # with factor 1.0 is the no-thinning
+                                       # path (chi = 1, byte-identical).  Was
+                                       # two_region: on day-15 states it
+                                       # removed 52% of the liquid in run 1
+                                       # and 42% in run 3, so the water
+                                       # reaching radiation stayed ~14.5 g/m2
+                                       # across the liquid hand-off.  User
+                                       # decision 2026-09-25, for run 4.
+cloud_inhomogeneity_factor: 1.0        # the "constant" scheme's scalar: 1.0
+                                       # = homogeneous, no reduction.  Set
+                                       # explicitly so the no-thinning row
+                                       # rests on no default.
+cloud_fsd: 1.0                         # INERT under "constant" (consumed by
+                                       # two_region only); kept explicit so
+                                       # the old value is on record.
 cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
                                      # g-point sees its own max-random cloud
                                      # subcolumn in ONE solve (was max_random:
@@ -159,12 +178,10 @@ cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
                                      # reference: bias within sampling noise,
                                      # per-column scatter ~1.8x the 8-subcolumn one.
 cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
-hard_sat_ice_curve: false  # part of the drain above (refused without it).
-                           # Ice supersaturation is then only RELAXED
-                           # (homogeneous nucleation + finite-rate deposition),
-                           # not capped -- as in CAM6/MG2.  The drain was
-                           # adopted on Levante against a TTL moist/warm bias;
-                           # watch 100 hPa T and q in the first arm.
+hard_sat_ice_curve: false          # the ice-curve blend of that same
+                                   # post-step drain; inert once the drain
+                                   # is off, set explicitly so no row rests
+                                   # on a default.  User table row 3.
 homogeneous_ice_nucleation: true
 aerosol_ccn: true
 energy_consistent_moisture_clip: true
@@ -186,14 +203,20 @@ convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
 # ---- turbulence ---------------------------------------------------------------
 turbulence: clubb
 clubb_prognostic: true
+clubb_liquid_partition: true       # CAM6 clubb_intr: the closure's diagnosed
+                                   # cloud liquid is handed to the host as a
+                                   # tendency, and the Morrison saturation
+                                   # adjustment stops condensing (MG2
+                                   # allow_sed_supersat = .false. under CLUBB,
+                                   # micro_mg_cam.F90:668-672).  One flag,
+                                   # both halves.  User table row 1.
+# The partition REFUSES an active radiative condensate floor (it would be
+# imposed on top of the liquid the closure now supplies, making clouds opaque
+# twice).  Both floors default to a non-zero scheme value when unset, so they
+# are pinned to 0 here.  Not in the user's three-row table: REQUIRED BY ROW 1.
+cloud_q_c_diagnostic: 0.0
+conv_cloud_condensate: 0.0
 clubb_trop_cloud_top_press: 15000.0
-clubb_liquid_handoff: true  # CAM6 clubb_intr moist mapping: CLUBB runs on
-                            # total water q+ql and its grid-mean PDF liquid
-                            # becomes the cloud water; Morrison does no liquid
-                            # condensation of its own (MG2 does none).  The
-                            # Levante CAM6 arms ran FALSE (vapour-only CLUBB,
-                            # its liquid discarded).  User 2026-09-24: "very
-                            # close to CAM6".
 
 # ---- gravity-wave drag ---------------------------------------------------------
 # CAM6 f09 L32 (non-WACCM, nlev < 60) runs OROGRAPHIC drag ONLY: build-namelist
@@ -237,6 +260,9 @@ land_update_seconds: 1800.0  # CAM6: CLM steps once per 1800 s coupling
                              # Was 300 (-> 337.5 s actual, every 3 steps).
 multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
+# Soil freeze/thaw ON (user 2026-09-26), as in CLM5 and as the land IC spin-up
+# ran; the land calibration's tables were fitted with it off.
+land_soil_freeze_thaw: true
 land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true

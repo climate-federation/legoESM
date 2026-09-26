@@ -79,7 +79,7 @@ class LandConfig(NamedTuple):
     # DEFAULT: Monin-Obukhov, the exchange law the coupled land tile runs;
     # "constant" is a fixed coefficient for idealized work.
     bulk_scheme: str = "most"  # "most" or "constant"
-    z_ref: float = 10.0           # Reference height for MOST [m]
+    z_ref: float = 10.0           # Observed forcing height [m]; model uses z_lowest
     bulk_n_iter: int = 5          # MOST iterations
     # Snow/albedo
     snow_albedo_feedback: bool = False  # Enable snow albedo feedback
@@ -159,7 +159,7 @@ class MultiLayerLandConfig(NamedTuple):
     # forest-floor range (~1e2-1e3 s/m).
     soil_evap_litter_resistance_s_m: float = 300.0
     bulk_scheme: str = "most"       # see LandConfig.bulk_scheme
-    z_ref: float = 10.0
+    z_ref: float = 10.0           # Observed forcing height [m]; model uses z_lowest
     bulk_n_iter: int = 5
     # Snow/albedo
     snow_albedo_feedback: bool = False  # Enable snow albedo feedback

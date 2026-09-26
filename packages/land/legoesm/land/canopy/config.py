@@ -501,6 +501,17 @@ class CanopyLandParams(NamedTuple):
     theta_wp: jax.Array | None = None        # [m3/m3]
     theta_fc: jax.Array | None = None        # [m3/m3]
 
+    # ---- Soil-colour albedo bounds (per-column; optional) ----
+    # Dry / saturated background soil albedo per band (CLM soil-colour table;
+    # glacier columns carry dry == sat == the ice albedo).  When set, the land
+    # step recomputes ``ALB_VIS``/``ALB_NIR`` from the live top-layer soil water
+    # (``soil_albedo.rewet_soil_bands``), as CTSM does; ``ALB_VIS``/``ALB_NIR``
+    # then hold only the value at build time.  ``None`` = prescribed albedo.
+    ALB_VIS_DRY: jax.Array | None = None
+    ALB_VIS_SAT: jax.Array | None = None
+    ALB_NIR_DRY: jax.Array | None = None
+    ALB_NIR_SAT: jax.Array | None = None
+
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
 # scheme of ``MultiLayerLandConfig`` (and, in Phase 3b, ``LandConfig``):

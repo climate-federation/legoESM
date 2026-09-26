@@ -53,7 +53,8 @@ echo "outdir=$OUTDIR nd=$ND sha=$(git rev-parse --short HEAD)"
 rc=0
 
 arm() {  # arm <label> <channels>
-  local label="$1" ch="$2" tag="mpas9_d${ND}_${label}"
+  local label="$1" ch="$2"
+  local tag="mpas9_d${ND}_${label}"
   rm -f "$OUTDIR/${tag}.jsonl"
   echo "=== arm $tag $(date '+%F %T') channels=$ch"
   if ! env NCCL_MIN_NCHANNELS="$ch" NCCL_MAX_NCHANNELS="$ch" \

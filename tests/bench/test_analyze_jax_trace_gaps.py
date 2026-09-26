@@ -285,3 +285,65 @@ def test_gate_flags_without_their_mode_are_refused(tmp_path, monkeypatch):
             assert flag in str(exc), (flag, exc)
         else:
             raise AssertionError(f"{flag} was silently ignored")
+
+
+def test_cpu_capture_collective_names_are_recognised():
+    """CPU captures name collectives differently, and a miss reads as zero.
+
+    A GPU capture carries HLO instruction names; a CPU capture carries the
+    JAX primitive names instead, verified by tracing each of these on this
+    stack.  ``collective_family`` returns None for anything it does not
+    know, and None means the family contributes nothing -- so a missing name
+    does not fail, it reports a confident zero.  For a while every CPU trace
+    reported no reductions at all because ``psum`` was absent and the name
+    pattern rejected the underscore in ``all_gather`` outright.
+    """
+    seen_on_cpu = {
+        "ppermute.3": "permute",
+        "psum.7": "all-reduce",
+        "pmax.7": "all-reduce",
+        "pmin.7": "all-reduce",
+        "all_gather.7": "all-gather",
+    }
+    for name, family in seen_on_cpu.items():
+        assert mod.collective_family(name) == family, name
+
+    # The GPU spellings must keep working; this table serves both captures.
+    assert mod.collective_family("all-reduce.18") == "all-reduce"
+    assert mod.collective_family("collective-permute.1295") == "permute"
+
+    # Still anchored: a fused kernel that merely CONTAINS a collective's name
+    # is not that collective, and the zero-width end markers are not events.
+    assert mod.collective_family("fusion.all_gather.18") is None
+    assert mod.collective_family("end: psum.7") is None
+
+
+def test_top_ops_reports_span_thread_time_and_parallelism():
+    """A serial op (one thread, back to back) must show mean_threads ~1 and
+    a parallel op (four threads at once) ~4; the wall-span ranking must put
+    the serial 10 ms op above the parallel 4 x 2.5 ms op."""
+    evs = [{"ph": "X", "pid": 1, "tid": 1, "name": "serial", "ts": 0, "dur": 10000}]
+    evs += [{"ph": "X", "pid": 1, "tid": t, "name": "parallel", "ts": 20000,
+             "dur": 2500} for t in range(1, 5)]
+    evs.append({"ph": "X", "pid": 2, "tid": 1, "name": "other-process", "ts": 0,
+                "dur": 1})
+    rows = mod.top_ops(evs, steps=1, n=5)
+    names = [r["name"] for r in rows]
+    assert names == ["serial", "parallel"], names
+    serial, parallel = rows
+    assert abs(serial["mean_threads"] - 1.0) < 1e-9
+    assert abs(parallel["mean_threads"] - 4.0) < 1e-9
+    assert abs(parallel["thread_ms_per_step"] - 10.0) < 1e-9
+    assert abs(parallel["span_ms_per_step"] - 2.5) < 1e-9
+
+
+def test_top_ops_prefers_the_gpu_device_track_over_the_host_track():
+    """On GPU the host track carries PjRt wrapper spans longer than any
+    kernel; the ranking must come from the device track."""
+    evs = [{"ph": "M", "name": "process_name", "pid": 1, "args": {"name": "/host:CPU"}},
+           {"ph": "M", "name": "process_name", "pid": 7, "args": {"name": "/device:GPU:0"}},
+           {"ph": "X", "pid": 1, "tid": 1, "name": "PjRt wrapper", "ts": 0, "dur": 9000},
+           {"ph": "X", "pid": 7, "tid": 1, "name": "kernel_a", "ts": 0, "dur": 3000},
+           {"ph": "X", "pid": 7, "tid": 2, "name": "kernel_b", "ts": 0, "dur": 1000}]
+    rows = mod.top_ops(evs, steps=1, n=5)
+    assert [r["name"] for r in rows] == ["kernel_a", "kernel_b"]

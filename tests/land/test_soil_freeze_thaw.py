@@ -160,6 +160,49 @@ def test_zero_curtain_plateau():
     assert jnp.any(theta - liq > 1e-3)
 
 
+def _true_enthalpy_change(T0, T1, theta, cfg):
+    """Latent part exact, sensible part trapezoid (sensible C varies slowly)."""
+    def sens(T):
+        tl, _ = liquid_water_content(T, theta, cfg)
+        ti = jnp.maximum(theta - tl, 0.0)
+        return ((1 - HYDRO.theta_sat) * cfg.C_soil + tl * cfg.C_water_vol
+                + ti * cfg.C_ice_vol + (HYDRO.theta_sat - theta) * cfg.C_air)
+    l0, _ = liquid_water_content(T0, theta, cfg)
+    l1, _ = liquid_water_content(T1, theta, cfg)
+    return (0.5 * (sens(T0) + sens(T1)) * (T1 - T0)
+            + constants.rho_water * constants.L_f * (l1 - l0))
+
+
+@pytest.mark.parametrize("T0,G", [(275.0, -30.0), (275.0, -100.0),
+                                  (275.0, -270.0), (262.0, 100.0)])
+def test_production_grid_curtain_crossing_energy(T0, G):
+    """AMIP production soil (10 layers to 3 m, 2.9 mm top layer), land step
+    300 s, 10 days of one-signed forcing through the curtain (freeze and thaw).
+    The start-of-step apparent heat capacity lets a thin layer overshoot the
+    curtain in single steps (worst step measured 2 / 28 / 319 W/m2 at
+    |G| = 30 / 100 / 270), leaving a small one-signed episode error: measured
+    +0.003 / +0.07 / +0.35 W/m2, i.e. <= 0.13 % of the forcing.  Tolerance
+    0.3 % of |G|."""
+    from legoesm.land.soil_grid import SoilGridConfig
+    grid = make_soil_grid(SoilGridConfig(n_layers=10, total_depth=3.0))
+    n = grid.dz.shape[0]
+    theta = jnp.full((1, n), 0.30)
+    cfg = SoilThermalConfig(enable_freeze_thaw=True)
+    dt, nsteps = 300.0, 12 * 24 * 10
+    flux = (G + cfg.Q_geothermal) * dt
+
+    def body(T, _):
+        Tn = solve_soil_thermal(T, theta, grid, HYDRO, cfg, jnp.array([G]), dt=dt)
+        return Tn, jnp.sum(_true_enthalpy_change(T, Tn, theta, cfg) * grid.dz) - flux
+
+    T_end, errs = jax.jit(lambda T: jax.lax.scan(body, T, None, length=nsteps))(
+        jnp.full((1, n), T0))
+    assert jnp.all(jnp.isfinite(T_end))
+    # the episode really crossed the curtain in the top layers
+    assert (T_end[0, 0] - constants.T_freeze) * (T0 - constants.T_freeze) < 0
+    assert abs(float(errs.sum()) / (nsteps * dt)) < 3e-3 * abs(G)
+
+
 def test_config_validation():
     """freeze_curve_width_K <= 0 raises (div-by-zero / sign-reversal guard)."""
     theta = jnp.full((1, 3), 0.3)

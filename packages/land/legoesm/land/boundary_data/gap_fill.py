@@ -56,7 +56,8 @@ def bare_land_surface_params(ncol: int):
 _BARE_PFT_INDEX = 0
 
 
-def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None) -> CanopyLandParams:
+def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None,
+                       soil_bounds: bool = False) -> CanopyLandParams:
     """Bare (no-vegetation) :class:`CanopyLandParams` broadcast to ncol.
 
     ``pft_root_params`` (per-PFT length-17 tables, keys ``root_depth`` /
@@ -66,8 +67,17 @@ def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None) -> Can
     pytree map, so a fallback carrying ``None`` where the params carry an array
     is a structure mismatch (``None is not a valid value for jnp.array``), not a
     silent default.
+
+    ``soil_bounds`` fills the soil-colour albedo bounds with dry == sat == the
+    bare albedo (a fallback column has no soil colour, so no wetness
+    dependence).  Like the root fields it must match the params being filled:
+    set it when those carry ``ALB_VIS_DRY``.
     """
     full = lambda v: jnp.full(ncol, v)
+    _bounds_kw = {}
+    if soil_bounds:
+        _bounds_kw = dict(ALB_VIS_DRY=full(ALB_VIS_BARE), ALB_VIS_SAT=full(ALB_VIS_BARE),
+                          ALB_NIR_DRY=full(ALB_NIR_BARE), ALB_NIR_SAT=full(ALB_NIR_BARE))
     _root_kw = {}
     if pft_root_params is not None:
         _root_kw = {k: full(float(np.asarray(v)[_BARE_PFT_INDEX]))
@@ -80,7 +90,7 @@ def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None) -> Can
         alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
         ALB_VIS=full(ALB_VIS_BARE), ALB_NIR=full(ALB_NIR_BARE),
         emissivity=full(EMISS_BARE), rz0m=full(RZ0M_BARE), rd=full(0.0),
-        **_root_kw,
+        **_root_kw, **_bounds_kw,
     )
 
 
@@ -131,7 +141,8 @@ def fill_land_param_gaps(land_params, gsd, f_land=None):
             "fill_land_param_gaps: land_params carries per-column root fields; "
             "use make_step_land_params_updater (which builds a matching bare "
             "fallback from its pft_root_params) instead.")
-    fb = (bare_canopy_params(ncol)
+    fb = (bare_canopy_params(ncol,
+                             soil_bounds=land_params.ALB_VIS_DRY is not None)
           if isinstance(land_params, CanopyLandParams)
           else bare_land_surface_params(ncol))
 

@@ -159,6 +159,20 @@ _Z0H_Z0_RATIO_DEFAULT = 0.1
 _BH91_PSIH_BASE_FLOOR = 1e-6
 
 
+def surface_reference_state(T, z_ref, z_low=None):
+    """Pair model-level height with dry-adiabatic surface-referenced air T.
+
+    Observed forcing (z_low=None) already follows its supplied reference
+    convention. Model-level forcing must move BOTH height and temperature.
+    """
+    if z_low is None:
+        return T, z_ref
+    # Sensible heat is positive UPWARD: H = rho cp Ch U (T_sfc - T_air).
+    # Bringing air down warms it (+g z/cp), reducing upward H; land loses H
+    # through -H in its energy budget. Height simultaneously reduces exchange.
+    return T + (constants.g / constants.c_pd) * z_low, z_low
+
+
 def apply_gustiness(u: jax.Array, v: jax.Array, gustiness: float) -> jax.Array:
     """Effective surface wind with a sub-grid convective gustiness floor.
 

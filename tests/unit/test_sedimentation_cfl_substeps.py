@@ -639,24 +639,21 @@ def test_new_config_fields_sit_at_the_tuple_end():
     # The sedimentation trio is no longer LAST: the in-run cloud-water budget
     # appended ``publish_qc_budget`` after it, which is the correct end-append,
     # so the trio is pinned where it now sits rather than at the tail.
-    # ``liquid_condensation`` (2026-09-24) end-appended after publish_qc_budget.
-    assert MorrisonConfig._fields[-5:-2] == (
+    assert MorrisonConfig._fields[-4:-1] == (
         "sed_cfl_substeps", "sed_cfl_substeps_max", "sed_cfl_substeps_strict")
-    assert MorrisonConfig._fields[-2:] == ("publish_qc_budget",
-                                           "liquid_condensation")
-    # ``morrison_do_graupel`` then ``clubb_liquid_handoff`` were end-appended
-    # after the block (2026-09-24), so it is pinned two slots in from the tail.
+    assert MorrisonConfig._fields[-1] == "publish_qc_budget"
+    # ``morrison_do_graupel`` end-appended after the block (2026-09-24).
     for cls in (ExperimentConfig, AMIPExperimentConfig):
-        assert cls._fields[-6:-2] == (
+        assert cls._fields[-5:-1] == (
             "cld_macmic_num_steps", "morrison_sed_cfl_substeps",
             "morrison_sed_cfl_substeps_max", "morrison_sed_cfl_substeps_strict")
-        assert cls._fields[-2:] == ("morrison_do_graupel", "clubb_liquid_handoff")
+        assert cls._fields[-1] == "morrison_do_graupel"
     # ... AND the field before the block is pinned, so an insertion just
     # ahead of it (which re-binds every stored positional value) goes red
     # too (GLM round 4)
-    assert MorrisonConfig._fields[-6] == "homogeneous_ice_supersaturation"
-    assert ExperimentConfig._fields[-7] == "bechtold_rhebc_land_deep"
-    assert AMIPExperimentConfig._fields[-7] == "physics_parameterization_seed"
+    assert MorrisonConfig._fields[-5] == "homogeneous_ice_supersaturation"
+    assert ExperimentConfig._fields[-6] == "bechtold_rhebc_land_deep"
+    assert AMIPExperimentConfig._fields[-6] == "physics_parameterization_seed"
     # full field ORDER, hashed: an insertion anywhere (not just before the
     # tail) re-binds every stored positional value, so pin the whole tuple
     # (recompute deliberately when a field is added AT THE END)
@@ -665,18 +662,20 @@ def test_new_config_fields_sit_at_the_tuple_end():
             # 116 -> 117 when the in-run cloud-water budget appended
             # publish_qc_budget at the END, which is the convention this guard
             # protects rather than a violation of it.
-            # 117 -> 118: liquid_condensation end-appended (2026-09-24).
-            (MorrisonConfig, 118, "3fb527a47d94c49d"),
+            # 117 -> 118: main inserted liquid_from_closure MID-tuple (CLUBB
+            # liquid partition); recomputed at the 2026-09-26 merge, same audit
+            # as below (no positional construction, name-keyed serialization).
+            (MorrisonConfig, 118, "a3d53d0a9b9f5c86"),
             # 283 -> 288 at the 2026-09-23 merge of main: main inserted five
             # cloud_cap_floor_* fields MID-tuple (idx ~65-69), which is exactly
             # what this guard is for.  Recomputed, not relaxed -- the audit
             # that accompanied it found no positional construction of this
             # tuple anywhere and its serialization is name-keyed (_asdict),
             # so nothing re-binds.
-            # 288 -> 290 / 125 -> 127: morrison_do_graupel, then
-            # clubb_liquid_handoff, end-appended (2026-09-24).
-            (ExperimentConfig, 290, "7dc5a7cc62f8c536"),
-            (AMIPExperimentConfig, 127, "730262ab0a1f3bd9")):
+            # 288 -> 291 / 125 -> 126 at the 2026-09-26 merge: main added the
+            # CLUBB liquid-partition fields; morrison_do_graupel end-appended.
+            (ExperimentConfig, 291, "c023f86f71966a44"),
+            (AMIPExperimentConfig, 126, "4a3eca6eda2a76ed")):
         assert len(cls._fields) == n, (cls.__name__, len(cls._fields))
         assert hashlib.sha256(",".join(cls._fields).encode()).hexdigest()[:16] \
             == digest, f"{cls.__name__} field ORDER changed (positional ABI)"

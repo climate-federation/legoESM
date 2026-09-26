@@ -98,6 +98,10 @@ FV3_RDGAS = 287.05         # const-ok: gfs_constants.h:42; == legoESM R_d
 FV3_CP_AIR = 1004.6        # const-ok: gfs_constants.h:47, != legoESM c_pd
 FV3_RVGAS = 461.50         # const-ok: gfs_constants.h:43, != legoESM R_v
 FV3_GRAV = 9.80665         # const-ok: gfs_constants.h:35-36, != legoESM g
+# moist_cp's water heat capacities (fv_mapz.F90:29,40,48): CP_VAPOR is FMS
+# constants_mod's 4*RVGAS (= 1846.0), c_liq is gfdl_mp_mod's IFS value.
+FV3_CP_VAPOR = 4.0 * FV3_RVGAS   # const-ok: FMS constants.F90 CP_VAPOR = 4*RVGAS
+FV3_C_LIQ = 4.218e3              # const-ok: gfdl_mp.F90:89 (IFS, water at 0 C)
 
 # gfs_constants.h:53 -- KAPPA = RDGAS/CP_AIR. Computed from the pair above
 # so it can never drift from them.
