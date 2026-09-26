@@ -1017,7 +1017,7 @@ def compute_nemo_native_slopes(
     prd_TS_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     prd_override: jnp.ndarray | None = None,
     pn2_override: jnp.ndarray | None = None,
-    e3w_override: jnp.ndarray | None = None, return_diagnostics: bool = False,
+    e3w_override: jnp.ndarray | None = None, return_diagnostics: bool = False, nmln_override: jnp.ndarray | None = None,
 ):
     """NEMO ldfslp native four-position isopycnal slopes (uslp, vslp, wslpi,
     wslpj) — a direct transcription of ``ldfslp.F90`` (ldf_slp, NEMO 5.0.2)
@@ -1205,7 +1205,7 @@ def compute_nemo_native_slopes(
     hml, m_base = _nemo_mld(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
         g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian)
-    first = jnp.clip(m_base + 1, 1, nlev - 1)                    # (nlat,nlon) int
+    first = jnp.clip(m_base + 1, 1, nlev - 1) if nmln_override is None else jnp.asarray(nmln_override, dtype=jnp.int32)
     # zhmlpt = gdept(nmln-1,Kmm) = depth of the last T-point inside the ML
     # (ldfslp.F90:143) -- live gdept, so the static per-level gather is
     # stretched by the SAME per-column (1+r3t) factor afterward (stretch has
@@ -4010,7 +4010,7 @@ def gm_redi_tracer_tendency_latlon(
     redi_flux_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
-    return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False,
+    return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False, native_slope_nmln_override: jnp.ndarray | None = None,
     redi_face_thickness_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -4428,7 +4428,7 @@ def gm_redi_tracer_tendency_latlon(
                 prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
-                e3w_override=native_slope_e3w, return_diagnostics=return_redi_slope_diagnostics)
+                e3w_override=native_slope_e3w, return_diagnostics=return_redi_slope_diagnostics, nmln_override=native_slope_nmln_override)
             _slope_diagnostics = _nat[4] if return_redi_slope_diagnostics else None; _nat = _nat[:4]; _bolus_nat = None
             if native_bolus_slope_eta is not None:
                 _bolus_nat = compute_nemo_native_slopes(

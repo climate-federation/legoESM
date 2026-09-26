@@ -13266,11 +13266,12 @@ def developed_tracer_ldf_statement_walk(
             f"Round-177 cropped wet count moved: {np.count_nonzero(wet)}")
 
     def execute_mode(*, eager: bool, override=None):
+        diagnostic_hook = (
+            "slope" if slope_oracle is not None and override is None
+            else (True if override is None else override))
         hooks = _NEMOWSRK3TestHooks(
             tracer_process_trace=(), vertical_solve_trace=True,
-            tracer_ldf_diagnostics=(
-                "slope" if slope_oracle is not None and override is None
-                else (True if override is None else override)))
+            tracer_ldf_diagnostics=diagnostic_hook)
         trace_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord,
             card.recipe.model_config, _nemo_ws_test_hooks=hooks)
@@ -13295,8 +13296,9 @@ def developed_tracer_ldf_statement_walk(
         trace = execute(trace_model, tracing=True)
         ordinary = execute(ordinary_model, tracing=False)
         moved = _state_bit_mismatches(trace.state_after, ordinary)
-        require(moved == 0,
-                f"tracer-LDF observer moved {moved} production-state bytes")
+        if override is None:
+            require(moved == 0,
+                    f"tracer-LDF observer moved {moved} production-state bytes")
         raw_diagnostics = trace.ldf_diagnostics
         diagnostics = {
             key: np.asarray(value, dtype=np.float64)
@@ -13482,6 +13484,47 @@ def developed_tracer_ldf_statement_walk(
         baseline_jit)
     slope_eager_rows, slope_eager_first, slope_eager_first_owned = score_slope(
         baseline_eager)
+    if plant == "developed-slope-first-ulp":
+        require(slope_oracle is not None,
+                "developed slope plant needs --developed-slope-root")
+        # `nmln` is integer-valued.  Its smallest representable causal
+        # perturbation is one vertical index, not one floating-point ULP.
+        first = np.asarray(baseline_jit["slope"]["nmln"], dtype=np.int32) - 1
+        candidates = np.argwhere(wet2 & (first < nlev - 2))
+        require(candidates.size > 0,
+                "developed slope plant has no movable wet mixed-layer index")
+        index = tuple(int(value) for value in candidates[0])
+        planted_first = np.array(first, copy=True)
+        planted_first[index] += 1
+        planted, state_moved = execute_mode(
+            eager=False, override={"nmln": jnp.asarray(planted_first)})
+        upstream = ("prd", "pn2", "gdept_1d")
+        downstream = ("nmln", "zhmlpt", "r1_hmlu", "uslp")
+        control = {
+            "moved_index_ji": list(index),
+            "integer_boundary_reason": (
+                "nmln is an integer branch index; one level is its smallest "
+                "representable causal perturbation"),
+            "production_state_unequal_bytes": state_moved,
+            "upstream_cells_moved": {
+                name: _different_cells(
+                    planted["slope"][name], baseline_jit["slope"][name],
+                    np.ones_like(planted["slope"][name], dtype=bool))
+                for name in upstream},
+            "downstream_cells_moved": {
+                name: _different_cells(
+                    planted["slope"][name], baseline_jit["slope"][name],
+                    np.ones_like(planted["slope"][name], dtype=bool))
+                for name in downstream},
+        }
+        require(all(value == 0 for value in
+                    control["upstream_cells_moved"].values()),
+                f"mixed-layer-index plant moved an upstream row: {control}")
+        require(all(value > 0 for value in
+                    control["downstream_cells_moved"].values()),
+                f"mixed-layer-index plant missed a consumer: {control}")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": control}
     statements = {
         "uslp": "ldfslp.f90:262-268",
         "vslp": "ldfslp.f90:269-275",
