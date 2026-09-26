@@ -938,7 +938,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "then accumulates dt*exp(A*(1/T_freeze - 1/T_snow)), "
                              "so cold dry polar snow keeps its fresh albedo "
                              "while melting snow darkens as before. "
-                             "None = 0.0 = off (calendar clock, byte-identical).")
+                             "None = the LandAlbedoConfig default (5000 K); 0 = "
+                             "calendar clock.")
     parser.add_argument("--land-soil-freeze-thaw", dest="land_soil_freeze_thaw",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_soil_freeze_thaw,

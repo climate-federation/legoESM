@@ -781,8 +781,8 @@ class ExperimentConfig(NamedTuple):
     cloud_cap_floor_q_c: float | None = None
     # Snow grain-growth activation temperature [K] (BATS ~5000): the snow-age
     # clock accumulates dt*exp(A*(1/T_freeze - 1/T_snow)) so cold dry snow keeps
-    # its fresh albedo. None => LandAlbedoConfig default (0.0 = off, the
-    # calendar clock, byte-identical).
+    # its fresh albedo. None => LandAlbedoConfig default (5000 K, BATS;
+    # 0.0 selects the calendar clock).
     snow_age_activation_K: float | None = None
     # Snow-albedo age e-folding time [days].  None => the calibration's value
     # (3.674 d under land_calibrated_physics, 11.64 d otherwise).
