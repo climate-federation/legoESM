@@ -93,7 +93,19 @@ the committed round diff.  It failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-Validation results are recorded in the final follow-up commit for this receipt.
+The citation gate passes all four compiled citations with zero failures, zero
+unmapped citations, and zero map-audit failures.  Its rigid +2-line numerator
+plant exits 1 with `SYMBOL-NOT-AT-LINE`; all nine citation self-tests fire.
+
+The focused round-27/28/29 and citation battery reports **22 passed**.  The one
+required `tests/ocean/fidelity -n 12` battery collected 1,873 tests and reached
+the inherited final-tail hang after **1,853 passed, 7 skipped, 5 failed, and 8
+unfinished** were emitted; it was interrupted after a bounded idle wait at
+99%.  Isolated reruns reproduce the same five historical failures as round 28:
+the SI3 scalar-math source provenance gate, the round-129 stepping-gate stamp,
+the stale round-51 live-trace suffix assertion, three unstamped legacy report
+emitters, and the missing `hires_lane_surface` case-board row.  No round-29
+test fails.
 
 No GYRE/DINO/lock-exchange/overflow landing gate is claimed: this round lands
 no model statement, and `git diff 23eb11d18 -- packages` is empty at the final
