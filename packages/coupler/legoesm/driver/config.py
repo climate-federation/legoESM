@@ -1187,12 +1187,6 @@ class ExperimentConfig(NamedTuple):
     # the full CLM PFT parameterisation validated.  Ignored unless land_surface_scheme
     # == 'clm_ml' (+ use_multilayer_land).
     clm_ml_use_surfdata_pft: bool = False
-    # Strategy B: hydrate MultiLayerLandState from an ERA5 land NetCDF
-    # at IC time instead of the strategy-A uniform 0.5*theta_sat fill.
-    # Build with probes/preprocess_era5_land_ic.sh; expects variables
-    # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
-    # use_multilayer_land is False.
-    era5_land_ic_path: str = ""
     # Spun-up land INITIAL CONDITION (#746 item 1): a MultiLayerLandState
     # restart (.npz) written by ``scripts/run/run_land_spinup.py`` after an
     # offline multi-year land spin-up.  When set (and use_multilayer_land is
@@ -1201,7 +1195,8 @@ class ExperimentConfig(NamedTuple):
     # run starts from a settled deep-soil temperature/moisture instead of the
     # day-0 cold-start shock that drives the land cloud-albedo cold trap.  The
     # restart's ncol / n_layers must match the run's grid (validated on load).
-    # Takes precedence over era5_land_ic_path when both are set.
+    # An ERA5 soil-temperature variant is built by
+    # ``scripts/data/regrid_land_ic.py --era5-soil-t``.
     land_ic_path: str = ""
     # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
     # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
@@ -4105,7 +4100,6 @@ class ExperimentConfig(NamedTuple):
             use_multilayer_land=getattr(amip_cfg, 'use_multilayer_land', False),
             multilayer_n_layers=getattr(amip_cfg, 'multilayer_n_layers', 10),
             multilayer_soil_depth=getattr(amip_cfg, 'multilayer_soil_depth', 3.0),
-            era5_land_ic_path=getattr(amip_cfg, 'era5_land_ic_path', ''),
             cloud_r_eff_ice=getattr(amip_cfg, 'cloud_r_eff_ice', 30.0e-6),
             cloud_r_eff_liq_ocean=getattr(amip_cfg, 'cloud_r_eff_liq_ocean', 10.0e-6),
             cloud_r_eff_liq_land=getattr(amip_cfg, 'cloud_r_eff_liq_land', 7.0e-6),

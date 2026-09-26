@@ -116,7 +116,6 @@
   "enable_tiled_dycore": false,
   "energy_consistent_moisture_clip": false,
   "ensemble_size": 1,
-  "era5_land_ic_path": "",
   "experiment": "",
   "fix_moisture": false,
   "forcing_path": "",

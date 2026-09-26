@@ -64,6 +64,54 @@ _COPIED_FIELDS = ("restart_version", "land_mode", "t_end_s", "n_steps_completed"
 # on load, so it is dropped rather than attached to the wrong columns.
 _DROPPED_FIELDS = ("soil_hydraulics_column_sig",)
 
+# ERA5 (IFS) soil layer interfaces [m]: 0-7, 7-28, 28-100, 100-289 cm (IFS
+# documentation Part IV, land surface).  The GRIB stamps layer 4 as 100-255 cm
+# (8-bit field limit); the model's base is 2.89 m.  Below it the column takes
+# layer 4's value.
+_ERA5_SOIL_BOUNDS_M = (0.0, 0.07, 0.28, 1.0, 2.89)
+_ERA5_LAND_LSM_MIN = 0.5
+_DONOR_FAR_KM = 100.0
+
+
+def overlap_weights(soil_dz, bounds=_ERA5_SOIL_BOUNDS_M) -> np.ndarray:
+    """(n_model, n_src) depth-overlap weights, rows summing to 1.
+
+    Each model layer takes the thickness-weighted mean of the source layers it
+    overlaps; the part of a model layer below the deepest source interface is
+    credited to the deepest source layer.
+    """
+    z = np.concatenate([[0.0], np.cumsum(np.asarray(soil_dz, np.float64))])
+    lo = np.asarray(bounds[:-1], np.float64)
+    hi = np.asarray(bounds[1:], np.float64).copy()
+    hi[-1] = np.inf
+    top, bot = z[:-1, None], z[1:, None]
+    w = np.clip(np.minimum(bot, hi) - np.maximum(top, lo), 0.0, None)
+    return w / w.sum(axis=1, keepdims=True)
+
+
+def era5_soil_temperature(T_ic, soil_dz, dst_lat, dst_lon, replace,
+                          src_lat, src_lon, stl, src_land):
+    """Replace ``T_ic`` on ``replace`` columns with depth-mapped ERA5 soil T.
+
+    ``stl`` is (4, n_src) = stl1..stl4 [K] on source points (radians lat/lon);
+    each replaced column takes its nearest ERA5 LAND point.  Returns the new
+    (ncol, n_layers) temperature and the donor great-circle distance [km] for
+    every column (NaN where not replaced).
+    """
+    from legoesm import constants
+    from legoesm.coupler.grid_remap import nearest_column_map
+    idx = np.flatnonzero(replace)
+    near = nearest_column_map(src_lat, src_lon, dst_lat[idx], dst_lon[idx],
+                              src_valid=src_land)
+    T = np.array(T_ic, dtype=np.float64, copy=True)
+    T[idx] = np.asarray(stl, np.float64)[:, near].T @ overlap_weights(soil_dz).T
+    cosd = (np.sin(dst_lat[idx]) * np.sin(src_lat[near])
+            + np.cos(dst_lat[idx]) * np.cos(src_lat[near])
+            * np.cos(dst_lon[idx] - src_lon[near]))
+    dist = np.full(T.shape[0], np.nan)
+    dist[idx] = np.arccos(np.clip(cosd, -1.0, 1.0)) * constants.R_earth / 1e3
+    return T, dist
+
 
 def _cols_rad(grid) -> tuple[np.ndarray, np.ndarray]:
     """Per-column (lat, lon) in radians, in the surfdata loader's order.
@@ -89,7 +137,17 @@ def _source_land_mask(surfdata: str, grid, land_ncol: int) -> np.ndarray:
     the SAME loader the spin-up used (run_lmip_biophys.py's no-mask-file
     branch), so the mask cannot disagree with the state it selects from.
     """
+    return _land_and_glacier(surfdata, grid, land_ncol)[0]
+
+
+def _land_and_glacier(surfdata: str, grid, ncol: int):
+    """(land, glacier) masks from the harmonized surfdata on ``grid``.
+
+    land = f_land + f_lake + f_glacier > 0 through the spin-up's own loader;
+    glacier = the builders' dominant-glacier mask (ice-sheet columns).
+    """
     from legoesm.land.boundary_data import init_land_surface_data
+    from legoesm.land.boundary_data.builders import glacier_mask
     from legoesm.land.config import MultiLayerLandConfig
 
     _, _, gsd = init_land_surface_data(
@@ -101,11 +159,108 @@ def _source_land_mask(surfdata: str, grid, land_ncol: int) -> np.ndarray:
 
     frac = (cover1d(gsd.f_land) + cover1d(gsd.f_lake)
             + cover1d(gsd.f_glacier)).ravel()
-    if frac.size != land_ncol:
+    if frac.size != ncol:
         raise SystemExit(
             f"surfdata mask has {frac.size} columns but the soil state has "
-            f"{land_ncol}: wrong source grid.")
-    return frac > 0.0
+            f"{ncol}: wrong grid.")
+    return frac > 0.0, np.asarray(glacier_mask(gsd)).ravel()
+
+
+def _era5_field(path):
+    """(values (n,), lat_rad (n,), lon_rad (n,), times) of a one-step ERA5 nc."""
+    import xarray as xr
+    ds = xr.open_dataset(path)
+    names = [k for k in ds.data_vars if k.startswith("var")]
+    if len(names) != 1:
+        raise SystemExit(f"{path}: expected one varNNN field, got {names}.")
+    a = ds[names[0]]
+    if a.size != ds.sizes["lat"] * ds.sizes["lon"]:
+        raise SystemExit(f"{path}: expected ONE time step on one level.")
+    lat, lon = np.meshgrid(np.deg2rad(ds["lat"].values),
+                           np.deg2rad(ds["lon"].values), indexing="ij")
+    times = [str(t) for t in np.atleast_1d(ds["time"].values)] if "time" in ds else []
+    return np.asarray(a.values, np.float64).ravel(), lat.ravel(), lon.ravel(), times
+
+
+def main_era5_soil_t(args) -> int:
+    """Replace ONLY the soil temperature of an IC already on the target grid.
+
+    Non-glacier land columns take ERA5 stl1-4 from the files' single time step
+    (nearest ERA5 land point, lsm >= 0.5; depth-overlap onto the IC's stamped
+    soil column).  Glacier columns and every other field stay byte-identical:
+    ERA5 stl under an ice sheet is not a soil temperature.
+    """
+    from legoesm.grids.factory import create_grid
+
+    src = np.load(args.source, allow_pickle=False)
+    if "soil_dz" not in src.files:
+        raise SystemExit("source IC has no soil_dz stamp; regrid it first.")
+    if "soil_hydraulics_json" not in src.files:
+        raise SystemExit(
+            "source IC has no soil-hydraulics stamp, so the output would be "
+            "refused by the model; stamp it first (--stamp-only).")
+    ncol = src["T_soil"].shape[0]
+    grid = create_grid(args.target_grid, resolution=args.target_resolution)
+    lat, lon = _cols_rad(grid)
+    if lat.size != ncol:
+        raise SystemExit(f"grid has {lat.size} columns, the IC has {ncol}.")
+    land, glacier = _land_and_glacier(args.surfdata, grid, ncol)
+    replace = land & ~glacier
+
+    fields = [_era5_field(f) for f in args.era5_soil_t]
+    lsm, llat, llon, _ = _era5_field(args.era5_lsm)
+    glat, glon = fields[0][1], fields[0][2]
+    for _, a, o, _ in fields[1:] + [(None, llat, llon, None)]:
+        if not (np.array_equal(a, glat) and np.array_equal(o, glon)):
+            raise SystemExit("ERA5 soil layers / land-sea mask are not on one grid.")
+    times = {tuple(f[3]) for f in fields}
+    if len(times) != 1:
+        raise SystemExit(f"ERA5 soil layers are at different times: {times}.")
+    stl = np.stack([f[0] for f in fields])
+    if not np.all(np.isfinite(stl)):
+        raise SystemExit("ERA5 soil temperature has non-finite values; refusing.")
+
+    T, dist = era5_soil_temperature(src["T_soil"], src["soil_dz"], lat, lon,
+                                    replace, glat, glon, stl,
+                                    lsm >= _ERA5_LAND_LSM_MIN)
+    d = dist[replace]
+    far = int(np.sum(d > _DONOR_FAR_KM))
+    print(f"replaced {int(replace.sum())} land columns, kept "
+          f"{int((land & glacier).sum())} glacier columns; donor distance max "
+          f"{d.max():.1f} km, p99 {np.percentile(d, 99):.1f} km, "
+          f"{far} columns > {_DONOR_FAR_KM:.0f} km")
+
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                             text=True, check=True).stdout.strip()
+    except Exception:
+        sha = "unknown"
+    md5 = lambda p: hashlib.md5(pathlib.Path(p).read_bytes()).hexdigest()
+    meta = json.loads(str(src["metadata_json"]))
+    meta.update({
+        "soil_t_source": "ERA5 stl1-4 (GRIB params 139,170,183,236)",
+        "soil_t_time": list(times.pop()),
+        "soil_t_files": {pathlib.Path(f).name: md5(f) for f in args.era5_soil_t},
+        "soil_t_lsm": {pathlib.Path(args.era5_lsm).name: md5(args.era5_lsm)},
+        "soil_t_from_ic": pathlib.Path(args.source).name,
+        "soil_t_from_ic_md5": md5(args.source),
+        "soil_t_choices": (
+            "T_soil only (moisture/snow/runoff from the source IC); nearest ERA5 "
+            "land point lsm>=0.5; depth-overlap on 0,.07,.28,1.0,2.89 m, layer 4 "
+            "below; stl1 for the top layer (not skt); glacier columns keep the "
+            "source IC"),
+        "soil_t_donor_km_max": float(d.max()),
+        "soil_t_donor_km_p99": float(np.percentile(d, 99)),
+        "soil_t_donor_n_over_100km": far,
+        "soil_t_git_sha": sha,
+        "soil_t_script": "scripts/data/regrid_land_ic.py --era5-soil-t",
+    })
+    out = {k: src[k] for k in src.files}
+    out["T_soil"] = T.astype(src["T_soil"].dtype)
+    out["metadata_json"] = np.str_(json.dumps(meta))
+    np.savez_compressed(args.out, **out)
+    print(f"wrote {args.out}")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -119,6 +274,14 @@ def main(argv=None) -> int:
                     help="target grid type (e.g. mpas, latlon)")
     ap.add_argument("--target-resolution", type=int, default=None)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--era5-soil-t", nargs=4, metavar="STL",
+                    help="ERA5 stl1..stl4 netCDFs (one time step, regular "
+                         "grid, e.g. cdo -f nc -setgridtype,regular "
+                         "-seltimestep,1). Switches to SOIL-T mode: --source is "
+                         "an IC already on the target grid and ONLY its soil "
+                         "temperature is replaced on non-glacier land columns.")
+    ap.add_argument("--era5-lsm", help="ERA5 land-sea mask netCDF (param 172), "
+                                       "same grid; required with --era5-soil-t")
     ap.add_argument("--source-soil-column", default=None,
                     help="attest the SOURCE state's soil column as "
                          "'n_layers,depth_m,growth' (e.g. '10,3.0,2.0'). The "
@@ -141,6 +304,13 @@ def main(argv=None) -> int:
                          "attested soil-hydraulics stamp to --out (for an IC "
                          "already on its target grid).")
     args = ap.parse_args(argv)
+    if args.era5_soil_t:
+        if not args.era5_lsm:
+            ap.error("--era5-soil-t needs --era5-lsm")
+        if args.stamp_only or args.source_soil_hydraulics:
+            ap.error("--era5-soil-t takes a stamped --source; --stamp-only / "
+                     "--source-soil-hydraulics apply to regridding or stamping")
+        return main_era5_soil_t(args)
     if not args.stamp_only:
         missing = [f for f in ("surfdata", "target_grid", "target_resolution",
                                "source_soil_column")
