@@ -19,7 +19,7 @@ standard iso-neutral Laplacian call at
 The selected compiled routine calls `traldf_iso_a33`, evaluates the masked
 tracer gradients, face coefficients and fluxes, and adds their divergence to
 temperature `Krhs` at
-`GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/traldf_iso.f90:154-305`.
+`GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/traldf_iso.f90:154-300`.
 
 The existing Round-123 record stores only the completed before/after `Krhs`
 boundary.  The Round-40 and Round-64 records are from-rest, and Round 148 is a
