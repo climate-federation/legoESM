@@ -226,14 +226,12 @@ DEFAULT_CONFIG = {
     },
     "conservation": {
         "fix_mass": True,
-        "fix_energy": True,
     },
     "time": {
         "duration_hours": 120,     # 5 days
         "output_interval_hours": 6,
     },
     "output": {
-        "format": "zarr",
         "path": "output/",
     },
     "hardware": {

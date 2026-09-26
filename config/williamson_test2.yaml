@@ -19,14 +19,12 @@ atmosphere:
 
 conservation:
   fix_mass: true
-  fix_energy: true
 
 time:
   duration_hours: 120          # 5 days
   output_interval_hours: 6
 
 output:
-  format: zarr
   path: output/williamson_test2/
 
 hardware:

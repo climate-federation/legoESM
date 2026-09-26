@@ -27,12 +27,10 @@ atmosphere:
   hyperdiff_scale: 0.0
 conservation:
   fix_mass: true
-  fix_energy: false
 time:
   duration_hours: 8760         # 1 year
   output_interval_hours: 24
 output:
-  format: zarr
   path: output/amip/
 hardware:
   precision:

@@ -48,12 +48,10 @@ surface:
   rh_init: 0.0
 conservation:
   fix_mass: true
-  fix_energy: false
 time:
   duration_hours: 2400          # 100 days (spin-up)
   output_interval_hours: 24
 output:
-  format: zarr
   path: output/held_suarez/
 hardware:
   precision:

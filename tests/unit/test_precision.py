@@ -322,24 +322,52 @@ class TestRecommendedOverrides:
     def test_ocean_overrides_present(self):
         set_recommended_overrides("mixed")
         overrides = get_module_overrides()
-        assert "pressure_gradient" in overrides
+        assert "barotropic_solver" in overrides
         assert "equation_of_state" in overrides
 
     def test_atmosphere_overrides_present(self):
         set_recommended_overrides("mixed")
         overrides = get_module_overrides()
-        assert "spectral_transform" in overrides
-        assert "semi_implicit" in overrides
+        assert "atm_pressure_gradient" in overrides
 
-    def test_land_overrides_present(self):
-        set_recommended_overrides("mixed")
-        overrides = get_module_overrides()
-        assert "carbon_pools" in overrides
+    def test_every_mixed_override_is_consumed(self):
+        """Each non-empty mixed-mode entry names a module a kernel really
+        passes to the precision API (literal, or a string-bound name in the
+        same file); otherwise "mixed" promises fp64 that never happens."""
+        import ast
+        from pathlib import Path
 
-    def test_ice_overrides_present(self):
-        set_recommended_overrides("mixed")
-        overrides = get_module_overrides()
-        assert "evp_solver" in overrides
+        from legoesm.core import precision as P
+        api = {"resolve_dtype": 0, "cast": 1, "const": 1, "cast_pytree": 1,
+               "global_sum": 1, "norm": 1, "with_precision": 0}
+        root = Path(__file__).resolve().parents[2] / "packages"
+        used = set()
+        for f in root.rglob("*.py"):
+            if f.name == "precision.py":
+                continue
+            src = f.read_text(errors="ignore")
+            if "precision" not in src:
+                continue
+            tree = ast.parse(src)
+            bound = {t.id: n.value.value for n in ast.walk(tree)
+                     if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
+                     and isinstance(n.value.value, str)
+                     for t in n.targets if isinstance(t, ast.Name)}
+            for n in ast.walk(tree):
+                if not isinstance(n, ast.Call):
+                    continue
+                name = getattr(n.func, "attr", getattr(n.func, "id", None))
+                if name not in api or len(n.args) <= api[name]:
+                    continue
+                a = n.args[api[name]]
+                if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                    used.add(a.value)
+                elif isinstance(a, ast.Name) and a.id in bound:
+                    used.add(bound[a.id])
+        tables = (P._OCEAN_OVERRIDES, P._ATMOSPHERE_OVERRIDES,
+                  P._LAND_OVERRIDES, P._ICE_OVERRIDES)
+        dead = sorted(k for t in tables for k, v in t.items() if v and k not in used)
+        assert not dead, f"mixed-mode overrides nothing consumes: {dead}"
 
 
 # ===========================================================================

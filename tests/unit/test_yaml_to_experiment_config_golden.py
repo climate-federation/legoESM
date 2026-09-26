@@ -199,6 +199,14 @@ def test_retired_hyperdiffusion_coeff_key_names_its_replacement() -> None:
             {"atmosphere": {"hyperdiffusion_coeff": 0.0}}).to_experiment_config()
 
 
+def test_unread_yaml_keys_are_not_declared() -> None:
+    """conservation.fix_energy and output.format reached no ExperimentConfig
+    field; the schema must not advertise them."""
+    from legoesm.config import DEFAULT_CONFIG
+    assert "fix_energy" not in DEFAULT_CONFIG["conservation"]
+    assert "format" not in DEFAULT_CONFIG["output"]
+
+
 def test_diag_days_floor_is_at_least_one() -> None:
     """Sub-daily output interval must still yield diag_days >= 1, not 0."""
     cfg = Config.from_dict({"time": {"output_interval_hours": 6}})
