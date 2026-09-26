@@ -271,7 +271,9 @@ def test_env_var_conflicting_with_config_raises(monkeypatch):
 
 
 def test_model_driver_applies_config_corner_fill(monkeypatch):
+    import legoesm.grids.halo as halo
     monkeypatch.delenv("LEGOESM_CORNER_FILL", raising=False)
+    monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
     from legoesm.driver.config import DycoreConfig, ExperimentConfig
     from legoesm.driver.model_driver import ModelDriver
     ModelDriver(ExperimentConfig(dycore=DycoreConfig(corner_fill="fv3_bgrid_xdir")))

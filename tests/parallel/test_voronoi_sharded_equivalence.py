@@ -276,8 +276,9 @@ class TestVoronoiShardedEquivalence:
 
 def test_sharded_borrow_without_mass_fix_gets_real_cell_area():
     """The sharded floors pass areaCell to the borrow's global residual; with
-    fix_mass=False that array must still be the real mesh area, not the
-    empty mass-fixer placeholder."""
+    fix_mass=False that array must still be the real mesh area.  Net-negative
+    columns force the global residual to run; the sharded q must then match
+    the serial step, which borrows with the true areaCell."""
     _need_multi_device(2)
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.grids.voronoi import create_voronoi_mesh
@@ -296,15 +297,19 @@ def test_sharded_borrow_without_mass_fix_gets_real_cell_area():
     cfg = MPASPrimitiveEquationConfig(
         fix_mass=False, conservative_tracer_clamp=True,
         time_integrator="ssp_rk3")
+    state = held_suarez_init_mpas(mesh, sigma)
+    ncell, nlev = state.T.data.shape
+    q = np.random.default_rng(0).uniform(0.0, 1e-3, (ncell, nlev))
+    q[: ncell // 10] = -1e-4          # whole columns net-negative
+    state = state._replace(tracers={"q_v": state.p_s.replace(data=jnp.asarray(q))})
+
+    ref = MPASPrimitiveEquationModel(mesh, sigma, cfg).step(state, 75.0)
     dev = create_voronoi_device_mesh(
         nCells=mesh.nCells, nEdges=mesh.nEdges, nVertices=mesh.nVertices,
         n_devices=2)
     model = MPASPrimitiveEquationModel(replicate_pytree(mesh, dev), sigma, cfg)
-    state = held_suarez_init_mpas(mesh, sigma)
-    ncell, nlev = state.T.data.shape
-    q = jnp.asarray(np.random.default_rng(0).uniform(0.0, 1e-3, (ncell, nlev)))
-    q = q.at[:, 2].add(-2e-4)
-    state = state._replace(tracers={"q_v": state.p_s.replace(data=q)})
     out = make_voronoi_sharded_step(model, dev)(state, 75.0)
     arr = np.asarray(out.tracers["q_v"].data)
     assert np.isfinite(arr).all() and arr.min() >= 0.0
+    np.testing.assert_allclose(
+        arr, np.asarray(ref.tracers["q_v"].data), rtol=1e-6, atol=1e-12)

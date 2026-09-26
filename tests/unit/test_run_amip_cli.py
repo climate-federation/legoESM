@@ -4564,7 +4564,12 @@ def test_corner_fill_flag_round_trip_and_production_pin():
     cfg.validate_strict()
     with pytest.raises(SystemExit):
         parser.parse_args(["--corner-fill", "fv3_bgrid"])
-    import yaml
     from pathlib import Path
+    from legoesm.driver.run_config_yaml import load_yaml_config
     deck = Path(__file__).resolve().parents[2] / "config/amip/amip_production.yaml"
-    assert yaml.safe_load(deck.read_text())["corner_fill"] == "avg"
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(deck), parser)
+    assert keys["corner_fill"] == "avg"                          # deck -> loader
+    parser.set_defaults(**keys)
+    cfg = build_config_from_args(parser.parse_args([]))           # loader -> config
+    assert cfg.dycore.corner_fill == "avg"
