@@ -6,6 +6,8 @@ Parent: `7de81830940c672714cd51e091ffac74cfb3ca23`
 
 Implementation commit: `4ae4b9700ff68f624b5763918a01375c5aa1bb70`
 
+Final tested implementation/citation tip: `13c2927a844570fd0f4892a9ee8ed6946d6c67bb`
+
 Status: **LANDED — USE NEMO'S CARRIED F-COLUMN DEPTH IN `r3f`.**  The card's
 carried `hf_0` is bit-identical to a literal transcription of NEMO's compiled
 mesh construction in all 26,640 cells.  The given-entry lateral-diffusion
@@ -74,8 +76,8 @@ planted exact-row loss exits nonzero.
 
 ## Independent GYRE safety gates
 
-The exact base `7de81830940c672714cd51e091ffac74cfb3ca23` and implementation
-tip `4ae4b9700ff68f624b5763918a01375c5aa1bb70` ten-step ladders compare
+The exact base `7de81830940c672714cd51e091ffac74cfb3ca23` and final tested tip
+`13c2927a844570fd0f4892a9ee8ed6946d6c67bb` ten-step ladders compare
 exactly.  All 70 certified rows have zero field movement and zero
 oracle-residual worsening; all 210 residual arrays are `np.array_equal`.
 Both residual archives have SHA-256
@@ -104,10 +106,12 @@ GYRE carries a constant-depth operand which equals its reconstruction.
 
 ## Gates, review, and tests
 
-The exact shared-card inventory is green: 160 DINO/rule-12/lock/overflow
-tests pass with nine warnings, and the remaining tank round-34 file passes
-10/10, for **170/170**.  The pre-commit focused round-31/34 reference and
-operand tests pass **12/12**.
+The exact shared-card inventory is green at the final tested tip: 160
+DINO/rule-12/lock/overflow tests pass with nine warnings in 334.22 s, and the
+remaining tank round-34 file passes 10/10 in 7.49 s, for **170/170**.  The
+pre-commit focused round-31/34 reference and operand tests pass **12/12**;
+after the citation-preserving helper extraction, the focused reference,
+operand, and citation files pass **28/28 in 6.08 s**.
 
 The required separate `codex exec --sandbox read-only` review was attempted
 against the committed diff.  It failed before reading the diff with
@@ -115,9 +119,25 @@ against the committed diff.  It failed before reading the diff with
 Verdict: **independent review unavailable in-sandbox**.  The complete failure
 log is preserved as `codex_readonly_review.log`.
 
-The receipt citation gate and its rigid line-shift plant are run against this
-receipt.  The required `tests/ocean/fidelity -n 12` battery and final ORCA2
-push battery are recorded below before the closing commit.
+The receipt citation gate passes all three compiled citations with zero
+failures, zero unmapped citations, and zero map-audit failures.  Its rigid
+line-shift plant exits nonzero with `SYMBOL-NOT-AT-LINE`.  The implementation
+helper leaves the historical 99-line vorticity-function citation unchanged;
+the two later `vertical.py` citations and their source anchors are shifted by
+the same ten lines.
+
+The required single `tests/ocean/fidelity -n 12` battery collected 1,893
+tests.  It reached the inherited final-tail stall at 98% and was interrupted
+after a bounded silent wait.  Its progress stream emitted five failures, all
+at the same positions as round 33.  Their exact node IDs were rerun in
+isolation and reproduce the inherited SI3 MY_SRC provenance mismatch, stale
+GYRE member/gate stamp, round-51 trace suffix, three unstamped legacy report
+emitters, and missing `hires_lane_surface` case-board row.  No round-34 test
+fails.
+
+The final ORCA2 push battery runs the citation gate, TKE terms, recipe,
+freshwater closure, and parallel-receipt gate against this committed receipt;
+its result is added by the closing commit.
 
 ## Choices
 
