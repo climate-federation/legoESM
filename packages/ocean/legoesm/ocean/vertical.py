@@ -444,14 +444,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     quad = b(b(area_eta + east(area_eta))
              + b(area_eta_n + east(area_eta_n)))
     fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
-    # domain.f90:203-215 builds and stores hf_0 from the mesh e3f_3d and two
-    # V masks.  It is not the column sum of dyn_vor_init's distinct e3f_0vor
-    # array.  NEMO-identity cards carry that compiled operand; cards without
-    # one retain the generic reconstruction.
-    carried_hf0 = None if raw is None else getattr(raw, "hf_0", None)
-    hf0 = (jnp.sum(e3f0vor * fe3mask, axis=-1)
-           if carried_hf0 is None
-           else jnp.asarray(carried_hf0, dtype=dtype))
+    hf0 = _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype)
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
@@ -481,6 +474,16 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     # south/west rows are inert walls for this closed-box identity.
     with_south = jnp.concatenate([e3f_native[:1], e3f_native], axis=0)
     return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
+
+
+def _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype):
+    """Select NEMO's carried mesh F column, retaining the generic fallback."""
+    # domain.f90:203-215 builds hf_0 from mesh e3f_3d and two V masks, not
+    # from dyn_vor_init's distinct e3f_0vor reference thickness.
+    carried = None if raw is None else getattr(raw, "hf_0", None)
+    if carried is None:
+        return jnp.sum(e3f0vor * fe3mask, axis=-1)
+    return jnp.asarray(carried, dtype=dtype)
 
 
 def nemo_qco_vorticity_f_cgrid(z_coord, dtype):
