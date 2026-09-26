@@ -330,6 +330,81 @@ def evaluate_direct_ldf(capture: dict) -> dict:
     return {**capture, "status": verdict, "reasons": reasons}
 
 
+def capture_shared_cards(*, plant: str | None = None) -> dict:
+    """Which shared cards the landed statement moves, and by how much.
+
+    A card whose mesh reference ``e3f_0`` is bit-equal to its own frozen
+    vorticity array cannot move: the landing changes only which of the two
+    the lateral-diffusion curl multiplies.  This is the cheap, decisive
+    precondition for the GYRE-unchanged claim; the trajectory gate confirms
+    it.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipes
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    from legoesm.ocean.vertical import (
+        compute_layer_thickness,
+        nemo_dynvor_e3f_0vor,
+        nemo_ldf_reference_e3f,
+    )
+
+    _policy()
+    rows = {}
+    builders = {
+        "GYRE-zco": recipes.build_gyre_zco_card,
+        "LOCK_EXCHANGE-zco": recipes.build_lock_exchange_zco_card,
+        "OVERFLOW-zps": recipes.build_overflow_zps_card,
+    }
+    for name, build in builders.items():
+        card = build()
+        recipe = card.recipe
+        config = recipe.model_config
+        executes = (
+            getattr(config, "lateral_viscosity_operator", None) == "nemo_div_curl"
+            and getattr(config, "lateral_viscosity_e3_weighting", "off")
+            == "nemo_e3")
+        row = {"executes_the_changed_statement": bool(executes)}
+        if executes:
+            z_coord = recipe.z_coord
+            state = recipe.initial_state
+            e3t_0 = compute_layer_thickness(
+                jnp.zeros_like(state.eta.data), state.H_bathy.data, z_coord,
+                min_water_column_m=config.min_water_column_m)
+            tmask = getattr(z_coord, "is_active", None)
+            if tmask is None:
+                tmask = jnp.broadcast_to(
+                    state.land_mask.data[..., None], e3t_0.shape)
+            vorticity = nemo_dynvor_e3f_0vor(
+                e3t_0, tmask, grid=recipe.grid, dtype=jnp.float64)
+            mesh = nemo_ldf_reference_e3f(z_coord)
+            if plant == "card_reference":
+                mesh = jnp.asarray(mesh).at[0, 0, 0].add(1.0)
+            row["mesh_reference_vs_vorticity_reference"] = score(
+                mesh, vorticity)
+        rows[name] = row
+    return {
+        "status": "CAPTURED",
+        "claim_label": "card mesh, no trajectory",
+        "cards": rows,
+        "plant": plant,
+        "worktree": worktree_stamp(),
+    }
+
+
+def evaluate_shared_cards(capture: dict) -> dict:
+    reasons = []
+    verdict = "PASS"
+    for name, row in capture["cards"].items():
+        if not row["executes_the_changed_statement"]:
+            continue
+        unequal = row["mesh_reference_vs_vorticity_reference"]["unequal"]
+        if unequal:
+            verdict = "MOVES"
+            reasons.append(f"{name} moves: {unequal} unequal reference cells")
+    return {**capture, "status": verdict, "reasons": reasons}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -342,6 +417,9 @@ def main() -> int:
     direct.add_argument("--record-root", type=Path, required=True)
     direct.add_argument("--json-out", type=Path, required=True)
     direct.add_argument("--plant", choices=("een_digest",))
+    cards = sub.add_parser("shared-cards")
+    cards.add_argument("--json-out", type=Path, required=True)
+    cards.add_argument("--plant", choices=("card_reference",))
     args = parser.parse_args()
     try:
         if args.command == "e3f0vor":
@@ -354,6 +432,14 @@ def main() -> int:
                 {"carried_e3f_0_vs_transcribed_e3f_0vor":
                  result["carried_e3f_0_vs_transcribed_e3f_0vor"]},
                 indent=1, sort_keys=True))
+            print(result["status"], result["reasons"])
+            return 0 if result["status"] == "PASS" else 2
+        if args.command == "shared-cards":
+            result = evaluate_shared_cards(
+                capture_shared_cards(plant=args.plant))
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            args.json_out.write_text(json.dumps(result, indent=1, sort_keys=True))
+            print(json.dumps(result["cards"], indent=1, sort_keys=True))
             print(result["status"], result["reasons"])
             return 0 if result["status"] == "PASS" else 2
         if args.command == "direct-ldf":
