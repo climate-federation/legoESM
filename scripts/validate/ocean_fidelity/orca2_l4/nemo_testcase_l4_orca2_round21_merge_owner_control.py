@@ -3,7 +3,9 @@
 
 ``fold`` reuses the committed pre-merge fold-descriptor control.  ``e3f``
 restores the bridge-carried NEMO operands consumed by the pre-``ddb70da1a4``
-live vorticity-thickness producer.  ``both`` installs both substitutions.
+live vorticity-thickness producer.  ``ldf`` withholds the six live thickness
+arguments added at every RK3 lateral-diffusion call by ``94b7761bc7``.
+``both`` retains round 21's two substitutions and ``all`` installs all three.
 Every remaining argument is forwarded unchanged to the round-1 ladder gate.
 """
 
@@ -116,21 +118,53 @@ def install_bridge_control(*, plant_ulp: bool = False) -> None:
     vertical.nemo_qco_live_vorticity_e3f_cgrid = controlled
 
 
+def install_legacy_ldf_routing() -> None:
+    """Restore the lateral-diffusion call boundary before ``94b7761bc7``.
+
+    The operator and every state/config operand stay current.  Only the new
+    six-array ``ldf_thickness_operands`` bundle is withheld, which makes the
+    existing operator take the same internal thickness path it took before
+    the GYRE-lane merge.  This is a private diagnostic control, not a model
+    selector.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    original = LatLonCGridOceanModel.tendencies
+    removed_calls = [0]
+
+    def controlled(self, *args, **kwargs):
+        if kwargs.get("ldf_thickness_operands") is not None:
+            kwargs = dict(kwargs)
+            kwargs["ldf_thickness_operands"] = None
+            removed_calls[0] += 1
+        return original(self, *args, **kwargs)
+
+    controlled.__wrapped__ = original
+    controlled.removed_calls = removed_calls
+    LatLonCGridOceanModel.tendencies = controlled
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--owner", choices=("fold", "e3f", "both"), required=True)
+    parser.add_argument(
+        "--owner", choices=("fold", "e3f", "both", "ldf", "all"),
+        required=True)
     parser.add_argument("--plant-vorticity-ulp", action="store_true")
     args, forwarded = parser.parse_known_args()
     if args.plant_vorticity_ulp and args.owner == "fold":
         parser.error("--plant-vorticity-ulp requires owner e3f or both")
 
-    if args.owner in ("fold", "both"):
+    if args.owner in ("fold", "both", "all"):
         from nemo_testcase_l4_orca2_merge_gyre_fold_layout_control import (
             install_parent_layout,
         )
         install_parent_layout()
-    if args.owner in ("e3f", "both"):
+    if args.owner in ("e3f", "both", "all"):
         install_bridge_control(plant_ulp=args.plant_vorticity_ulp)
+    if args.owner in ("ldf", "all"):
+        install_legacy_ldf_routing()
 
     sys.argv = [sys.argv[0], *forwarded]
     import nemo_testcase_l4_orca2_round1_ladder_gate as gate

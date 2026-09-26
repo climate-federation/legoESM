@@ -48,6 +48,27 @@ def test_bridge_control_ignores_current_card_operands_and_can_fail():
     assert np.count_nonzero(base.view(np.uint64) != planted.view(np.uint64)) > 0
 
 
+def test_legacy_ldf_control_withholds_only_live_thickness(monkeypatch):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    seen = []
+
+    def original(_self, *args, **kwargs):
+        seen.append(kwargs)
+        return args
+
+    monkeypatch.setattr(LatLonCGridOceanModel, "tendencies", original)
+    control.install_legacy_ldf_routing()
+    wrapped = LatLonCGridOceanModel.tendencies
+    marker = object()
+    assert wrapped(marker, "state", ldf_thickness_operands=(1, 2, 3)) == (
+        "state",)
+    assert seen == [{"ldf_thickness_operands": None}]
+    assert wrapped.removed_calls == [1]
+
+
 def _document(delta=0.0):
     checkpoints = []
     for kt in range(1, 11):
