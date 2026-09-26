@@ -223,6 +223,113 @@ def evaluate_e3f0vor(capture: dict) -> dict:
     return {**capture, "status": verdict, "reasons": reasons}
 
 
+# Round 28's measured parent digest of the exposed stage-2 EEN component,
+# quoted from its receipt.  The lateral-diffusion landing must not move it.
+R28_PARENT_EEN_DIGEST = (
+    "032cb7d192afb4a60ec5816ab78504ffb96faa5d19d4e83b61c17d1d462247b2")
+
+
+def capture_direct_ldf(deck_root: Path, record_root: Path,
+                       *, plant: str | None = None) -> dict:
+    """Part A, given NEMO's own recorded kt=2 entry.
+
+    Three controls: the lateral-diffusion tendency built on the vorticity
+    reference versus the mesh reference (is the landing active?); a runtime
+    census of which production caller asks for which reference (is it
+    consumer-local?); and the exposed stage-2 EEN component against round
+    28's measured parent digest (is the vorticity operator untouched?).
+    """
+    import hashlib
+
+    from legoesm.ocean import vertical
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round27_consumer_gate as r27,
+    )
+
+    _policy()
+    original = vertical.nemo_qco_live_vorticity_e3f_cgrid
+
+    vorticity_reference = r27._ldf_inputs(deck_root, record_root, 2)[0]["base"]
+
+    def with_mesh_reference(*args, **kwargs):
+        z_coord = args[1]
+        kwargs["reference_e3f"] = vertical.nemo_ldf_reference_e3f(z_coord)
+        return original(*args, **kwargs)
+
+    vertical.nemo_qco_live_vorticity_e3f_cgrid = with_mesh_reference
+    try:
+        mesh_reference = r27._ldf_inputs(deck_root, record_root, 2)[0]["base"]
+    finally:
+        vertical.nemo_qco_live_vorticity_e3f_cgrid = original
+
+    census: list[dict] = []
+
+    def observed(*args, **kwargs):
+        import sys as _sys
+        census.append({
+            "caller": _sys._getframe(1).f_code.co_name,
+            "reference_given": kwargs.get("reference_e3f") is not None,
+        })
+        return original(*args, **kwargs)
+
+    vertical.nemo_qco_live_vorticity_e3f_cgrid = observed
+    try:
+        exposed_u, exposed_v = r27._stage2_vorticity(deck_root, record_root)
+    finally:
+        vertical.nemo_qco_live_vorticity_e3f_cgrid = original
+
+    digest = hashlib.sha256()
+    for value in (exposed_u, exposed_v):
+        arr = np.ascontiguousarray(np.asarray(value, np.float64))
+        digest.update(str(arr.shape).encode("ascii"))
+        digest.update(arr.tobytes())
+    een_digest = digest.hexdigest()
+    if plant == "een_digest":
+        een_digest = "0" * 64
+
+    return {
+        "status": "CAPTURED",
+        "claim_label": "given NEMO's entry",
+        "citations": {"ldf_f_curl": CITATIONS["ldf_f_curl"],
+                      "vor_reciprocal": CITATIONS["vor_reciprocal"]},
+        "ldf_tendency_vorticity_vs_mesh_reference": {
+            "u": score(vorticity_reference[0], mesh_reference[0]),
+            "v": score(vorticity_reference[1], mesh_reference[1]),
+        },
+        "builder_call_census": {
+            "total_calls": len(census),
+            "callers_with_consumer_local_reference": sorted(
+                {row["caller"] for row in census if row["reference_given"]}),
+            "callers_on_the_vorticity_reference": sorted(
+                {row["caller"] for row in census
+                 if not row["reference_given"]}),
+        },
+        "exposed_stage2_een_digest": een_digest,
+        "round28_parent_een_digest": R28_PARENT_EEN_DIGEST,
+        "plant": plant,
+        "worktree": worktree_stamp(),
+    }
+
+
+def evaluate_direct_ldf(capture: dict) -> dict:
+    reasons = []
+    verdict = "PASS"
+    if capture["exposed_stage2_een_digest"] != capture[
+            "round28_parent_een_digest"]:
+        verdict = "HELD"
+        reasons.append("the exposed stage-2 EEN component moved")
+    if not capture["builder_call_census"][
+            "callers_with_consumer_local_reference"]:
+        verdict = "HELD"
+        reasons.append("no production caller asked for the mesh reference")
+    rows = capture["ldf_tendency_vorticity_vs_mesh_reference"]
+    if rows["u"]["unequal"] == 0 and rows["v"]["unequal"] == 0:
+        verdict = "HELD"
+        reasons.append("the reference swap is inert; the arm proves nothing")
+    return {**capture, "status": verdict, "reasons": reasons}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -230,6 +337,11 @@ def main() -> int:
     cap.add_argument("--deck-root", type=Path, required=True)
     cap.add_argument("--json-out", type=Path, required=True)
     cap.add_argument("--plant", choices=("substitute_operand",))
+    direct = sub.add_parser("direct-ldf")
+    direct.add_argument("--deck-root", type=Path, required=True)
+    direct.add_argument("--record-root", type=Path, required=True)
+    direct.add_argument("--json-out", type=Path, required=True)
+    direct.add_argument("--plant", choices=("een_digest",))
     args = parser.parse_args()
     try:
         if args.command == "e3f0vor":
@@ -242,6 +354,16 @@ def main() -> int:
                 {"carried_e3f_0_vs_transcribed_e3f_0vor":
                  result["carried_e3f_0_vs_transcribed_e3f_0vor"]},
                 indent=1, sort_keys=True))
+            print(result["status"], result["reasons"])
+            return 0 if result["status"] == "PASS" else 2
+        if args.command == "direct-ldf":
+            result = evaluate_direct_ldf(capture_direct_ldf(
+                args.deck_root, args.record_root, plant=args.plant))
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            args.json_out.write_text(json.dumps(result, indent=1, sort_keys=True))
+            print(json.dumps(result["builder_call_census"], indent=1,
+                             sort_keys=True))
+            print("een digest", result["exposed_stage2_een_digest"])
             print(result["status"], result["reasons"])
             return 0 if result["status"] == "PASS" else 2
     except GateError as exc:
