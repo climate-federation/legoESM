@@ -1151,12 +1151,23 @@ CITATION_MAP = {
         'zzwi = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk  ) *(1._wp+r3t(ji,jj,Kmm)))',
         'zzws = - p2dt * zwt(ji,jk+1) / (e3w_1d(jk+1) *(1._wp+r3t(ji,jj,Kmm)))',
         2],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:468-474': [
+        'zzwi = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk  ) *(1._wp+r3t(ji,jj,Kmm)))',
+        'zws(ji,jk) = zzws - p2dt *   MAX( wi(ji,jj,jk+1) , 0._wp )',
+        7],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:470': (
         'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk)))',
         1),
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:527-582': [
         '!* 1st recurrence:   Tk = Dk - Ik Sk-1 / Tk-1',
         '&             / zwt(ji,jk) * tmask(ji,jj,jk)', 56],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:549-567': [
+        '!* 2nd recurrence:    Zk = Yk - Ik / Tk-1  Zk-1',
+        'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk) / zwt(ji,jk-1) * pt(ji,jj,jk-1,jn,Kaa)',
+        19],
+    'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:577-582': [
+        '!* 3d recurrence:    Xk = (Zk - Sk Xk+1 ) / Tk',
+        '&             / zwt(ji,jk) * tmask(ji,jj,jk)', 6],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/zdfphy.f90:334-359': [
         'SELECT CASE ( nzdf_phy )',
         'IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )', 26],
