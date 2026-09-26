@@ -186,7 +186,7 @@ def test_stage_momentum_census_builds_real_orca2_card():
     orca2 = cards["ORCA2-zps"]
     assert orca2["recipe_source"] == "build_orca2_zps_card"
     assert orca2["executes_route"] is True
-    assert orca2["executes_at_this_tip"] is False
+    assert orca2["executes_at_this_tip"] is True
     assert orca2["unmeasured_features"]
 
 

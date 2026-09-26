@@ -1658,9 +1658,9 @@ def nemo_stage_momentum_wzv_resolved(config) -> bool:
     This is the BLAST RADIUS of the second solve, not its execution: a card
     this returns True for MUST set its own explicit
     ``nemo_stage_momentum_wzv_split`` choice (round 163, Decision 55/note
-    AT) -- GYRE-zco's is ``True``, ORCA2-zps's is ``False``, both explicit,
-    neither inferred.  ``nemo_stage_momentum_wzv_executes`` is what a given
-    run actually takes, reading that explicit choice (or a test hook).
+    AT) -- GYRE-zco's is ``True``; Decision 58 makes ORCA2-zps's ``True`` as
+    well.  Both are explicit, neither inferred.  The execution predicate reads
+    that card choice (or a test hook).
     """
     return (
         getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
@@ -1684,10 +1684,10 @@ def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:
     AT) -- an EXPLICIT per-card config field, never inferred from EOS or any
     other unrelated selector (round-163 review BLOCKER: keying it on
     ``eos`` would have been a hidden coupling between unrelated choices).
-    GYRE-zco's own resolved config sets it ``True`` (measured, landed);
-    ORCA2-zps resolves the SAME three base conditions by specializing the
-    identical config branch but sets it explicitly ``False`` (never
-    measured under this route).  A card that resolves the two-solve program
+    GYRE-zco's own resolved config sets it ``True`` (measured, landed), and
+    Decision 58 sets ORCA2-zps's own resolved choice to ``True`` after its
+    ten-step ladder measurement.  Both choices remain explicit and separate.
+    A card that resolves the two-solve program
     WITHOUT setting this field explicitly (``None``, the field's own
     construction default) is a configuration gap, not a silent choice: this
     raises rather than guessing, so the next such card either sets the

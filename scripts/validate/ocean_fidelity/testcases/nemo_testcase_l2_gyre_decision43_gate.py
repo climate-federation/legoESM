@@ -275,9 +275,9 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             # answer different questions: whether the card's configuration
             # selects NEMO's two-solve stage program at all -- the blast
             # radius of the statement -- and whether this run actually takes
-            # it, which is each card's OWN explicit config choice (GYRE-zco
-            # True, ORCA2-zps False) and can disagree with the blast radius,
-            # unless a test opts out/in explicitly via a hook.
+            # it, which is each card's OWN explicit config choice (both are
+            # True after ORCA2 Decision 58) and can disagree with the blast
+            # radius unless a test opts out/in explicitly via a hook.
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 nemo_stage_momentum_wzv_executes,
                 nemo_stage_momentum_wzv_resolved)
@@ -287,7 +287,7 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             # radius of the statement under test, and it is the question the
             # admission gate exists to answer.  ``executes_at_this_tip``
             # answers the other question -- what runs today -- which is the
-            # production default as of round 163.
+            # production card choice at this tip.
             values["executes_at_this_tip"] = bool(
                 nemo_stage_momentum_wzv_executes(config))
             executes = nemo_stage_momentum_wzv_resolved(config)

@@ -2401,10 +2401,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # included) -- every card whose resolved configuration reaches the
     # nemo_literal branch MUST set it, ``True`` or ``False``, or the model
     # raises rather than guessing. GYRE-zco sets ``True`` (measured, landed,
-    # round-163 receipt); ORCA2-zps sets ``False`` (resolves the same
-    # program, never measured under it). ``None`` here is a construction
-    # default only, refused by the model at STEP-TIME if the card also
-    # resolves ``nemo_literal`` without overriding it.
+    # round-163 receipt); ORCA2-zps also sets ``True`` under Decision 58 after
+    # its ten-step ladder measurement. ``None`` here is a construction default
+    # only, refused by the model at STEP-TIME if the card also resolves
+    # ``nemo_literal`` without overriding it.
     nemo_stage_momentum_wzv_split: bool | None = None
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
