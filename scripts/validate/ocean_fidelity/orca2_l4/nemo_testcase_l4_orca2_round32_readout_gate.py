@@ -135,6 +135,7 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
                        *, plant: bool = False) -> dict:
     """Re-run round 24's literal compiled LDF replay on the landed routing."""
     import jax.numpy as jnp
+    from jax import lax
 
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         compute_face_masks_3d,
@@ -146,7 +147,6 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
     from legoesm.ocean.fidelity.provenance import worktree_stamp
     from legoesm.ocean.vertical import (
         compute_layer_thickness,
-        nemo_ldf_metric_reciprocals_cgrid,
         nemo_ldf_reference_e3f,
         nemo_qco_live_vorticity_e3f_cgrid,
     )
@@ -183,12 +183,41 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
         state.eta.data, state.H_bathy.data, zc,
         min_water_column_m=cfg.min_water_column_m)
     e3u, e3v, _, _ = _nemo_ws_qco_stage_faces(
-        state.eta.data, h_ref, umask, vmask, grid, z_coord=zc)
+        state.eta.data, h_ref, umask, vmask, grid)
     e3f = nemo_qco_live_vorticity_e3f_cgrid(
         state.eta.data, zc, state.eta.data.dtype, grid=grid,
         e3t_0=h_ref, tmask=tmask, reference_e3f=nemo_ldf_reference_e3f(zc))
     bundle = (e3t, e3u, e3v, e3f, e3u, e3v)
-    metric = nemo_ldf_metric_reciprocals_cgrid(zc, grid, state.eta.data.dtype)
+    # Recreate round 24's six *stored* NEMO metric reciprocals locally.  The
+    # experimental production seam that once built these was correctly
+    # removed; this read-only replay still needs the exact operands in order
+    # to compare the landed arithmetic with the compiled statements.
+    raw = zc.nemo_een_barotropic
+    barrier = lax.optimization_barrier
+    one = jnp.asarray(1.0, dtype=state.eta.data.dtype)
+
+    def reciprocal(value):
+        value = barrier(jnp.asarray(value, dtype=state.eta.data.dtype))
+        return barrier(jnp.where(value > 0.0, one / value, 0.0))
+
+    def west(value):
+        return jnp.concatenate([value[:, -1:], value], axis=1)
+
+    def south(value):
+        return jnp.concatenate([jnp.zeros_like(value[:1]), value], axis=0)
+
+    r1_t = reciprocal(barrier(jnp.asarray(raw.e1t) * jnp.asarray(raw.e2t)))
+    r1_f_native = reciprocal(
+        barrier(jnp.asarray(raw.e1f) * jnp.asarray(raw.e2f)))
+    with_south = jnp.concatenate([r1_f_native[:1], r1_f_native], axis=0)
+    metric = (
+        r1_t,
+        west(with_south),
+        west(reciprocal(raw.e1u)),
+        south(reciprocal(raw.e2v)),
+        west(reciprocal(raw.e2u)),
+        south(reciprocal(raw.e1v)),
+    )
     model = LatLonCGridOceanModel(grid, zc, cfg)
     result = model.tendencies(
         state, dt=card.dt_s, momentum_only=True,
