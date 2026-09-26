@@ -12532,14 +12532,19 @@ def developed_content_producer_walk(
         before = (_vertical_field(record, "e3t_Kbb", nlev)
                   * _vertical_field(record, "T_Kbb_in", nlev))
         baseline_accum = (dt * e3t) * tkrhs
+        baseline_rhs = before + baseline_accum
         all_next = np.nextafter(tkrhs, np.inf)
         all_next_accum = (dt * e3t) * all_next
+        all_next_rhs = before + all_next_accum
         candidates = np.argwhere(
             wet & np.isfinite(tkrhs)
             & (all_next_accum.view(np.uint64)
-               != baseline_accum.view(np.uint64)))
+               != baseline_accum.view(np.uint64))
+            & (all_next_rhs.view(np.uint64)
+               != baseline_rhs.view(np.uint64)))
         require(candidates.size > 0,
-                "PLANT-BLIND: no one-ULP wet T(Krhs) change reaches content")
+                "PLANT-BLIND: no one-ULP wet T(Krhs) change reaches both "
+                "literal content rows")
         index = tuple(int(value) for value in candidates[0])
         planted = np.array(tkrhs, copy=True)
         planted[index] = np.nextafter(planted[index], np.inf)
@@ -12548,7 +12553,7 @@ def developed_content_producer_walk(
         planted_accum = (dt * e3t) * planted
         accum_moved = _different_cells(planted_accum, baseline_accum, wet)
         rhs_moved = _different_cells(
-            before + planted_accum, before + baseline_accum, wet)
+            before + planted_accum, baseline_rhs, wet)
         if accum_moved != 1 or rhs_moved != 1:
             raise GateError(
                 "PLANT-BLIND: T(Krhs) ULP moved "
