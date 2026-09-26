@@ -1980,8 +1980,6 @@ class CoupledESMDriver:
         from legoesm.ocean.freshwater import FreshwaterForcing
         from legoesm.ocean.state import OceanSurfaceForcing
 
-        from legoesm import constants
-
         sst_K, u_o, v_o = self._ocean_surface_KuvC()
         ccfg = getattr(self, "_coupler_cfg", None) or CouplerConfig()
         tile = ocean_tile_response(atm_forcing, sst_K, u_o, v_o, ccfg)
@@ -2107,7 +2105,8 @@ class CoupledESMDriver:
         sw_pen = f_ocean * sw_net                    # +into ocean (penetrating SW)
         tau_x = f_ocean * tile.tau_x                 # atmospheric convention (-tau)
         tau_y = f_ocean * tile.tau_y
-        evap = f_ocean * (tile.lhflx / constants.L_v)  # [kg/m²/s], +up (open water)
+        # Tile mass flux = lhflx over the latent heat the flux used.
+        evap = f_ocean * tile.surface_mass_flux  # [kg/m²/s], +up (open water)
         # Precip over the ice fraction: WHERE it is counted depends on whether
         # the active ice model owns a snow reservoir.  Sign: +into ocean.  The
         # LAND and LAKE fractions are ALWAYS excluded here -- their precip is the
