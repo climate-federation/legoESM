@@ -211,3 +211,10 @@ def test_diag_days_floor_is_at_least_one() -> None:
     """Sub-daily output interval must still yield diag_days >= 1, not 0."""
     cfg = Config.from_dict({"time": {"output_interval_hours": 6}})
     assert cfg.to_experiment_config().output.diag_days == 1
+
+
+@pytest.mark.parametrize("blk,key,val", [("conservation", "fix_energy", True),
+                                         ("output", "format", "zarr")])
+def test_removed_yaml_keys_raise(blk, key, val):
+    with pytest.raises(ValueError, match=f"{blk}.{key} was removed and did nothing"):
+        Config.from_dict({blk: {key: val}}).to_experiment_config()

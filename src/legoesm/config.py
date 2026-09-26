@@ -144,6 +144,16 @@ def _normalize_dynamics(raw: str) -> str:
     return raw
 
 
+# Keys DEFAULT_CONFIG used to declare that nothing ever read.  A config that
+# still sets one raises, so nobody believes it changed the run.
+_REMOVED_KEYS: dict[tuple[str, str], str] = {
+    ("conservation", "fix_energy"): (
+        "it was never read: no energy fixer ran whatever its value"),
+    ("output", "format"): (
+        "it was never read; the checkpoint format is output.checkpoint_format"),
+}
+
+
 def _require_known_keys(
     block: Any,
     name: str,
@@ -356,6 +366,10 @@ class Config:
         # (``convectoin: bechtold``) or the canonical-but-wrong spelling
         # (``cloud_scheme:`` instead of ``clouds:``) would be dropped in silence
         # and the run would proceed on defaults.
+        for (blk, key), why in _REMOVED_KEYS.items():
+            if key in (d.get(blk) or {}):
+                raise ValueError(
+                    f"{blk}.{key} was removed and did nothing: {why}.  Delete it.")
         physics = _require_known_keys(physics, "physics", _PHYSICS_KEYS)
         atm = _require_known_keys(
             atm, "atmosphere", _ATMOSPHERE_KEYS, _ATMOSPHERE_RETIRED
