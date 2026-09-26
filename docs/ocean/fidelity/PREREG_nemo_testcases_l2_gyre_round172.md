@@ -80,3 +80,43 @@ will not name either operand as the magnitude owner.
 No production physics, configuration, carried state, immutable before arm, or
 pending user decision changes.  No NEMO acquisition is authorized unless the
 fixed-shape passivity prerequisite is refuted.
+
+## Post-refutation acquisition preregistration
+
+Prediction 1 is REFUTED and remains above: the fixed disabled form is
+byte-identical through steps 1081--1440, but the all-selected identity form
+moves `7,558` step-1081 state bytes (T `3,849` wet cells, S `3,680`, U/V/SSH
+zero).  Before creating any replacement record, freeze the NEMO-side paired
+sensitivity requested by Round 171's OPEN section.
+
+1. Extend the existing developed-state observer to write only the model's
+   ordinarily consumed `e3t(Kaa)` and temperature-content arrays for all 360
+   steps.  The observer advances from the admitted NEMO step-1080 restart via
+   an independently compiled ordinary production result.  Its traced and
+   ordinary carried states must be byte-identical at every step.  A scale
+   plant on each recorded family must move every selected wet cell and the
+   manifest must fail closed on a truncated payload.
+2. A new NEMO target, cloned file-for-file from the Round-125 producing card,
+   runs three independent from-rest trajectories through step 1440: baseline,
+   replace only the matrix's live `e3t(Kaa)` factor over steps 1081--1440, and
+   replace only temperature content over the same steps.  The replacement
+   arrays are the admitted ordinary legoESM record, mapped into NEMO's
+   compiled interior box.  Salinity content is never replaced; the e3t arm
+   retains NEMO's shared T/S matrix semantics.
+3. This is an every-step one-family forced-input sensitivity, not a local JAX
+   closure and not a landing candidate.  The baseline day-180 and day-240
+   restarts must be byte-identical to the uninstrumented Round-125 source run.
+   The two directed arms must differ from baseline at day 240, or the record is
+   non-discriminating and refused.
+4. Round 173 will score the three day-240 restarts against the immutable NEMO
+   state.  The arm removing more of the production `1.241262968697578e-03` K
+   complete-K/e3w remainder is the promoted producer.  Because the directed
+   NEMO arms consume the free legoESM input sequence rather than their own
+   evolving operand, this ranks family leverage only; it cannot by itself
+   establish a source-exact landing.
+
+The acquisition script must use a new target name, prove the additive source
+patch with `gfortran -fsyntax-only`, print a named REFUSE line before every
+nonzero exit, use shell timing rather than `/usr/bin/time`, and admit the
+baseline by restart byte identity.  The operator runs it because PMIx sockets
+are unavailable in the sandbox.
