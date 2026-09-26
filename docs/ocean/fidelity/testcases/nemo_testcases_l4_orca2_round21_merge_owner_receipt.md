@@ -101,10 +101,30 @@ at the committed measurement tip.  It failed before reading the diff because
 the in-process app-server client could not initialize on a read-only
 filesystem.  Verdict: **independent review unavailable in-sandbox**.
 
-The result gate exits 2 with `HELD_THIRD_OWNER`; that nonzero exit is its
-registered scientific verdict, not a crash.  Its direct tests pass 2 / 2.
-The receipt citation gate and test batteries are recorded below after their
-final runs.
+The final clean result gate exits 2 with `HELD_THIRD_OWNER`; that nonzero exit
+is its registered scientific verdict, not a crash.  Its report stamps the
+clean worktree and the path plus SHA-256 of all seven input documents.
+
+The receipt citation gate passes: 3 citations, 0 failures, 0 unmapped, and 0
+map entries failing audit.  Its real two-line plant on the executed vorticity
+statement fires `SYMBOL-NOT-AT-LINE` at line 558 and exits 1 as required.
+
+The focused ladder, result-control, receipt-citation, and citation-gate battery
+passes **42 / 42**.  The required `tests/ocean/fidelity -n 12` battery was
+launched once.  It collected 1,846 tests and reached 99% with 1,828 passes,
+seven skips, five failures, and six unfinished tests before the same final-tail
+hang recorded in rounds 19 and 20; after a five-minute bounded tail it was
+interrupted and is not represented as green.  The five failures reproduce in
+isolation and are inherited: SI3's non-verbatim scalar source, GYRE round 51's
+stale final trace-field assertion, the three-file worktree-stamp ratchet,
+the `hires_lane_surface` case-board row, and GYRE round 129's moved certified
+stepping-gate stamp.  The parent-to-tip diff touches none of their asserted
+model, record, or registry paths.
+
+No GYRE trajectory rerun is required because the parent-to-tip `packages/`
+diff is empty.  The current certified GYRE ladder digest and day-30/240/360
+numbers from the merge receipt remain the lane reference; this round makes no
+new GYRE measurement claim.
 
 ## Choices
 

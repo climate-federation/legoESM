@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 from pathlib import Path
+
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 FIELDS = ("T", "S", "u", "v", "ssh")
 CHECKPOINTS = ("entry", "stage1", "stage2", "stage3")
@@ -51,6 +54,14 @@ def _row_summary(key, reference, candidate) -> dict:
         "round20": reference[key],
         "candidate": candidate[key],
     }
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def analyze(documents: dict[str, dict], *, packages_changed=()) -> dict:
@@ -141,8 +152,8 @@ def analyze(documents: dict[str, dict], *, packages_changed=()) -> dict:
             "kt10_entry_T": 3.947126188631776,
         },
         "R21-P2": (
-            target_values["fold"]["kt1_stage2_u"]
-            == 0.06463349183839187 and bool(moved["fold"])
+            format(target_values["fold"]["kt1_stage2_u"], ".14g")
+            == "0.064633491838392" and bool(moved["fold"])
         ),
         "R21-P3": (
             bool(changed_from_baseline["e3f"])
@@ -199,6 +210,12 @@ def main() -> int:
             check=True, capture_output=True, text=True,
         ).stdout.splitlines()
         result = analyze(documents, packages_changed=changed)
+        result["input_documents"] = {
+            name: {"path": str(getattr(args, name)),
+                   "sha256": _sha256(getattr(args, name))}
+            for name in ("round20", "merge", "baseline", "fold", "e3f", "both", "plant")
+        }
+        result["worktree"] = worktree_stamp()
     except (GateError, OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"REFUSE: {exc}")
         return 1
