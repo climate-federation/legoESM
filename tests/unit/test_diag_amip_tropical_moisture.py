@@ -28,3 +28,12 @@ def test_budget_gap_is_zero_for_a_closed_column_and_signs_a_source():
     assert m.budget_gap(3.0, 3.0, 25.0, 25.0, 30.0) == 0.0
     # rain exceeding evaporation while the column also moistens = water created
     assert abs(m.budget_gap(2.78, 2.46, 25.09, 26.18, 30.0) - (0.32 + 1.09 / 30.0)) < 1e-12
+
+
+def test_band_means_select_latitude_bands():
+    m = _load()
+    lat = np.array([-15.0, -5.0, 5.0, 15.0])
+    x = np.repeat(lat[:, None], 3, axis=1)
+    area = np.ones_like(x)
+    out = m.band_means(x, lat, area, np.ones_like(x, bool), [-20, -10, 0, 10, 20])
+    assert out == [-15.0, -5.0, 5.0, 15.0]
