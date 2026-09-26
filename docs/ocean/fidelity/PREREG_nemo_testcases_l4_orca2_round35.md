@@ -21,7 +21,7 @@ will not be mixed in one table.  The six sea-ice selectors and the card's
 
 The executing build materialises `e1e2f=e1f*e2f`, then stores
 `r1_e1e2f=1/e1e2f`, at
-`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domhgr.f90:154-156`.
+`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domhgr.f90:155-157`.
 The executing QCO routine forms `r3f` by multiplying the bracketed four-cell
 surface sum, stored `r1_hf_0`, and stored `r1_e1e2f`, in that order, at
 `ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90:273-286`.

@@ -125,7 +125,7 @@ def capture(deck_root: Path, record_root: Path, *, plant: bool = False) -> dict:
         "citations": {
             "stored_reciprocal": (
                 "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/"
-                "domhgr.f90:154-156"
+                "domhgr.f90:155-157"
             ),
             "r3f": (
                 "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/"

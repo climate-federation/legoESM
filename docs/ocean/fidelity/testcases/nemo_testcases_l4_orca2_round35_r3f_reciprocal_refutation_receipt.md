@@ -21,7 +21,7 @@ and the card's `unmeasured_features` tuple are unchanged.  Evidence is under
 ## Compiled statements
 
 The executing build forms the F area and stores its reciprocal at
-`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domhgr.f90:154-156`.
+`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domhgr.f90:155-157`.
 The executing QCO routine multiplies the bracketed surface sum by the stored
 F-column and F-area reciprocals at
 `ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90:273-286`.
