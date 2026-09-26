@@ -3722,8 +3722,7 @@ def _resolve_convection(config):
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
             # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
-            # coefficients + the quasi-equilibrium heating-ceiling ratio
-            # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
+            # coefficients.  Defaults match BechtoldConfig.
             # The ExperimentConfig field (2026-09-15); the earlier
             # getattr(..., 'bechtold_m_b_max', 0.02) read a field that never
             # existed and silently capped every run at 0.02.
