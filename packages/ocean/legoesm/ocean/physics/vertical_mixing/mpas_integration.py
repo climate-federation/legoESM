@@ -92,7 +92,7 @@ __physics_contract__ = {
 
 
 # Placeholder salinity for dry cells so the EOS stays well-defined [PSU].
-_EOS_SAFE_SALINITY_PSU = 35.0
+EOS_SAFE_SALINITY_PSU = 35.0
 
 # Diagnostic (Mode-B) quasi-steady TKE on MPAS: a long pseudo-timestep drives
 # the backward-Euler TKE solve toward local equilibrium in a few sub-iterations
@@ -293,7 +293,7 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
     u_east_w = jnp.where(m3 > 0.5, u_east_raw, 0.0)
     v_north_w = jnp.where(m3 > 0.5, v_north_raw, 0.0)
     T_w = jnp.where(m3 > 0.5, T_3d, 0.0)
-    S_w = jnp.where(m3 > 0.5, S_3d, _EOS_SAFE_SALINITY_PSU)  # safe S for EOS
+    S_w = jnp.where(m3 > 0.5, S_3d, EOS_SAFE_SALINITY_PSU)  # safe S for EOS
     if hasattr(z_coord, 'is_active'):
         _active = z_coord.is_active  # (nCells, nlev) bool
         _bot_lev = z_coord.bottom_level  # (nCells,) int
