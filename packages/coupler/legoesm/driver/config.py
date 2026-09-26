@@ -1158,6 +1158,16 @@ class ExperimentConfig(NamedTuple):
     # with it OFF. Library default False = sensible-only (legacy): whether the
     # default should move is an open user decision, so decks set it explicitly.
     land_soil_freeze_thaw: bool = False
+    # Two-leaf canopy (land_surface_scheme="two_leaf"): whether soil-moisture
+    # stress also down-regulates the Ball-Berry intercept b0
+    # (TwoLeafCanopyConfig.stress_b0). Library default True (both stressed);
+    # the FLUXNET-validated EC-site setup uses False. Whether the default should
+    # move is an open user decision, so decks set it explicitly.
+    land_canopy_stress_b0: bool = True
+    # Two-leaf canopy rain interception (MultiLayerLandConfig.interception =
+    # InterceptionConfig()): a prognostic canopy water store, throughfall and
+    # wet-leaf evaporation. Default off; decks set it explicitly.
+    land_canopy_interception: bool = False
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -2087,6 +2097,14 @@ class ExperimentConfig(NamedTuple):
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
                 "multilayer soil has a freeze/thaw scheme — the knob would be "
                 "silently inert.")
+        if ((self.land_canopy_interception or not self.land_canopy_stress_b0)
+                and not (self.use_multilayer_land
+                         and self.land_surface_scheme == "two_leaf")):
+            errors.append(
+                "land_canopy_interception=True / land_canopy_stress_b0=False "
+                "require use_multilayer_land with land_surface_scheme="
+                "'two_leaf': only the two-leaf canopy reads them — the knob "
+                "would be silently inert.")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "

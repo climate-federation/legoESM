@@ -213,10 +213,11 @@ class MultiLayerLandConfig(NamedTuple):
     surface_scheme: Any = TwoLeafCanopyConfig()
     # Canopy-water interception (shared CLM-ML formulation, land/canopy/
     # interception.py).  ``None`` (default) = off (rain infiltrates directly).
-    # When set, the two-leaf / SimpleSEB path intercepts rain into a prognostic
-    # ``W_canopy`` store, drips the excess as throughfall, and evaporates the wet
-    # leaf — reducing soil infiltration and re-partitioning the canopy latent
-    # flux.  The CLM-ML canopy has its OWN internal interception and ignores this.
+    # When set, the two-leaf path intercepts rain into a prognostic ``W_canopy``
+    # store, drips the excess as throughfall, and evaporates the wet leaf —
+    # reducing soil infiltration and re-partitioning the canopy latent flux.
+    # SimpleSEB has no canopy latent stream and ignores it; the CLM-ML canopy
+    # has its OWN internal interception and ignores it too.
     interception: Any | None = None
 
 
