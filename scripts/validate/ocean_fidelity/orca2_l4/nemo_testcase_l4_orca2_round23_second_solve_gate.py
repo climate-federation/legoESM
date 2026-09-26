@@ -7,9 +7,14 @@ import argparse
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 from scripts.validate.ocean_fidelity.orca2_l4 import (
