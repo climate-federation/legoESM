@@ -1570,6 +1570,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     metric_reciprocal_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
                                       jnp.ndarray, jnp.ndarray,
                                       jnp.ndarray] | None = None,
+    coefficient_fmask_already_applied: bool = False,
     return_intermediates: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
     jnp.ndarray, jnp.ndarray, dict[str, jnp.ndarray]
@@ -1733,7 +1734,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
                 jnp.asarray(value)[..., jnp.newaxis]
                 for value in metric_reciprocal_operands)
         ahmt_live = _bc(ahmt)
-        if mask is not None:
+        if mask is not None and not coefficient_fmask_already_applied:
             ahmt_live = sr(ahmt_live * _bm(mask))
         h_k_safe = jnp.where(e3t_kbb > 0.0, e3t_kbb, 1.0)
         zdiv_scale = jax.lax.div(
@@ -1799,7 +1800,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     #    flux sum exactly (SAME e1/e2 face metrics); ahmt/e3t is the outer
     #    scale (h90:27-29).
     div_e3 = divergence_cgrid(e3u_kbb * u_eff, e3v_kbb * v_eff, grid)
-    if mask is not None:
+    if mask is not None and not coefficient_fmask_already_applied:
         div_e3 = div_e3 * _bm(mask)
     h_k_safe = jnp.where(e3t_kbb > 0.0, e3t_kbb, 1.0)
     zdiv = div_e3 * _bc(ahmt) / h_k_safe
