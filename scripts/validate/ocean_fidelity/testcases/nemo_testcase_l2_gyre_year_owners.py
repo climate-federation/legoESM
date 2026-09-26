@@ -12282,6 +12282,11 @@ def score_nemo_solve_input_pair(
         pair_root: Path, baseline_root: Path, source_root: Path,
         mesh_path: Path, *, plant: str | None = None) -> dict:
     """Admit and score the Round-173 wet-only NEMO input pair."""
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "solve-input scoring requires a clean committed tree")
     pair_root = Path(pair_root)
     baseline_root = Path(baseline_root)
     source_root = Path(source_root)
@@ -12368,6 +12373,7 @@ def score_nemo_solve_input_pair(
     return {
         "format": "gyre-round174-nemo-solve-input-pair-v1",
         "status": "PASS",
+        "worktree": stamp,
         "precision": "binary64",
         "metric": "unweighted T3D RMS over NEMO tmask",
         "interval": {"entry_step": 1080, "final_step": 1440,
