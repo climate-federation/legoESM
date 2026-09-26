@@ -223,6 +223,9 @@ def main() -> int:
         never = ~below.any(axis=1)
         depth = np.where(never, zw[-1], zw[np.minimum(first, zw.size - 1)])
         depth = np.where(np.isfinite(K_w[:, 0]), depth, np.nan)
+        q = np.nanpercentile(depth[box_mask], [10, 25, 50, 75, 90])
+        print(f"    turbocline per-column quantiles 10/25/50/75/90%: {q[0]:.1f} {q[1]:.1f} {q[2]:.1f} {q[3]:.1f} {q[4]:.1f} m; "
+              f"columns {int(np.isfinite(depth[box_mask]).sum())}")
         return _box_mean(depth[:, None], w, box_mask)[0]
     tc_o = _turbocline(KH_w, zw_int, box_o, w_o)
     tc_N_of_mean = _turbocline(avt_int, depthw[1:nlN], boxT, wT)
