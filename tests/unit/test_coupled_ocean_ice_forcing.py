@@ -231,3 +231,50 @@ class TestOceanIceForcing(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+class TestSlabOceanUnderIce(unittest.TestCase):
+    """The SLAB ocean must receive its open-ocean atmospheric fluxes only over the
+    ice-free fraction ``1 - sic`` (the ice-covered part is forced by the ice
+    tile), the slab analogue of the 3D-ocean ``f_ocean`` scaling above."""
+
+    def test_slab_surface_energy_scaled_by_open_water_fraction(self):
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        from legoesm.ocean.simple_ocean import (
+            SimpleOceanConfig, init_slab_state, make_ocean,
+        )
+
+        conc = jnp.asarray([[0.0, 0.75]])
+        shape = conc.shape
+        z = jnp.zeros(shape)
+        forcing = AtmToSurface(
+            sw_down=z + 200.0, lw_down=z + 300.0, precip_total=z,
+            precip_snow=z, T_lowest=z + 285.0, q_lowest=z + 0.006,
+            u_lowest=z + 5.0, v_lowest=z, p_lowest=z + 1.0e5,
+            p_surface=z + 1.01e5, rho_lowest=z + 1.2, cos_zenith=z + 0.5,
+            co2_ppmv=z + 415.0, has_radiation=jnp.array(1.0),
+            has_precipitation=jnp.array(1.0),
+        )
+        cfg = SimpleOceanConfig(mode="slab")
+        st0 = init_slab_state(shape, T_sfc_init=290.0)
+        stub = types.SimpleNamespace(
+            _is_dynamic_ocean=False,
+            _ocean_step=make_ocean(cfg),
+            _ocean_state=st0,
+            _grid_remapper=None,
+            _sfc_state=types.SimpleNamespace(
+                ice=types.SimpleNamespace(
+                    concentration=types.SimpleNamespace(
+                        data=conc, dims=("lat", "lon")))),
+        )
+        stub._slab_open_water_frac = (
+            lambda: CoupledESMDriver._slab_open_water_frac(stub))
+        dt = 3600.0
+        CoupledESMDriver._step_ocean(stub, forcing, dt)
+
+        C_mix = cfg.rho_ocean * cfg.c_ocean * cfg.h_mix
+        heat_in = C_mix * (stub._ocean_state.T_sfc.data - 290.0) / dt  # W/m2
+        q_open = float(heat_in[0, 0])       # ice-free cell: full surface flux
+        self.assertGreater(abs(q_open), 1.0)
+        # Ice-covered cell (same SST and forcing): (1 - sic) of that flux.
+        self.assertAlmostEqual(float(heat_in[0, 1]), 0.25 * q_open, places=6)

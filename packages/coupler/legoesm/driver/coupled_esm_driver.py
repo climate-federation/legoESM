@@ -1824,6 +1824,10 @@ class CoupledESMDriver:
         step; ``None`` falls back to the scalar ``config.Q_flux`` in the slab
         step (byte-identical when no climatology is loaded).
 
+        The slab's own open-ocean atmospheric fluxes are applied over the
+        ice-free fraction only (``_slab_open_water_frac``, lagged one coupling
+        step like the 3D path); under ice the slab receives only ``q_flux``.
+
         **One-way ice -> ocean coupling (intentional for the slab ocean).**
         ``step_sea_ice`` populates ice -> ocean back-reaction channels on
         the surface response (``freshwater_flux``, ``ocean_heat_extraction``,
@@ -1849,6 +1853,7 @@ class CoupledESMDriver:
         if not getattr(self, "_is_dynamic_ocean", False):
             self._ocean_state, sst_new, u_sfc, v_sfc = self._ocean_step(
                 self._ocean_state, atm_forcing, dt, q_flux=q_flux,
+                open_water_frac=self._slab_open_water_frac(),
             )
             self._ocean_u_sfc = u_sfc
             self._ocean_v_sfc = v_sfc
@@ -1872,6 +1877,25 @@ class CoupledESMDriver:
         # once per coupling step over the full dt; no-op when the restoring
         # timescales are 0 or no WOA target was loaded (byte-identical).
         self._apply_ocean_restoring(dt)
+
+    def _slab_open_water_frac(self):
+        """Ice-free fraction of the slab's water area, on the ocean grid.
+
+        Sea-ice concentration is relative to the water area (tile fractions:
+        ``f_ice = f_water * sic``), so the per-unit-water-area slab column
+        receives the open-ocean atmospheric fluxes over ``1 - sic`` of its
+        area; the ice-covered part is forced by the ice tile.  ``1.0`` when no
+        ice state exists.
+        """
+        from legoesm.coupler.grid_remap import remap_field
+        _sfc = getattr(self, "_sfc_state", None)
+        if _sfc is None or getattr(_sfc, "ice", None) is None:
+            return 1.0
+        sic = _total_ice_sic(_sfc.ice)
+        _rem = getattr(self, "_grid_remapper", None)
+        if _rem is not None and getattr(_rem, "a2o", None) is not None:
+            sic = remap_field(sic, _rem.a2o)
+        return 1.0 - jnp.clip(sic, 0.0, 1.0)
 
     def _apply_ocean_restoring(self, dt):
         """Relax the 3D-ocean surface T/S toward the WOA-climatology IC.
