@@ -537,10 +537,11 @@ def global_area_sum(
     if spmd_sums is not None:
         return spmd_sums[0]
     if is_distributed():
+        from legoesm.parallel.reductions import (
+            broadcast_allreduce_sum, global_sum_mpi,
+        )
         if differentiable_broadcast:
-            from legoesm.parallel.reductions import broadcast_allreduce_sum
             return broadcast_allreduce_sum(local_sum)
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
     # Cube GSPMD / single-device: use the shard-count-invariant per-face
     # fixed-order reduction (issue #852) so a face-sharded mass integral is
@@ -682,14 +683,15 @@ def batch_global_area_sums(
         return spmd_sums
 
     if is_distributed():
+        from legoesm.parallel.reductions import (
+            batch_allreduce_mpi, broadcast_allreduce_sum,
+        )
         if differentiable_broadcast:
             # One stacked broadcast-allreduce (allreduce fwd AND bwd) — same
             # single-message batching as batch_allreduce_mpi, but the correct
             # transpose for a reused/broadcast reduced value.
-            from legoesm.parallel.reductions import broadcast_allreduce_sum
             reduced = broadcast_allreduce_sum(jnp.stack(local_sums, axis=0))
             return [reduced[i] for i in range(len(local_sums))]
-        from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     # Cube whole-face GSPMD / single-device: shard-count-invariant per-array
     # reduction (issue #852), matching the single-array global_area_sum fix so
@@ -755,11 +757,11 @@ def global_face_sum_if_scattered(
         if (topo is not None and area is not None
                 and hasattr(topo, "local_face_ids")
                 and area.shape[0] == len(topo.local_face_ids) < 6):
+            from legoesm.parallel.reductions import (
+                broadcast_allreduce_sum, global_sum_mpi,
+            )
             if differentiable_broadcast:
-                from legoesm.parallel.reductions import broadcast_allreduce_sum
                 return broadcast_allreduce_sum(local_sum)
-            from legoesm.parallel.reductions import global_sum_mpi
-
             return global_sum_mpi(local_sum)
     return local_sum
 
