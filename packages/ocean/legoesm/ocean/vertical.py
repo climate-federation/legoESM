@@ -333,41 +333,35 @@ def nemo_qco_live_vorticity_e3f_cgrid(
         # The certified GYRE use is a closed beta-plane box.
         return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
 
-    raw_f = getattr(z_coord, "nemo_een_barotropic", None)
-    if raw_f is None:
-        masked = b(e3t0 * tmask)
-        masked_n = north(masked)
-        ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
-        tmask_n = north(tmask)
-        wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
-        divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
-                   else jnp.maximum(wet_sum, one))
-        e3f0vor = b(ref_sum / divisor)
-        ref_n = north(e3t0)
-        e3f_0 = b(quarter * b(b(e3t0 + east(e3t0))
-                                + b(ref_n + east(ref_n))))
-        e3f0vor = jnp.where(e3f0vor == 0.0, e3f_0, e3f0vor)
-        e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
-        fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
-        hf0 = jnp.sum(e3f0vor * fe3mask, axis=-1)
-        area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
-    else:
-        e3f0vor = jnp.asarray(raw_f.e3f_0, dtype=dtype)
-        fe3mask = jnp.asarray(raw_f.fe3mask, dtype=dtype)
-        hf0 = jnp.asarray(raw_f.hf_0, dtype=dtype)
-        area_f = b(jnp.asarray(raw_f.e1f, dtype=dtype)
-                   * jnp.asarray(raw_f.e2f, dtype=dtype))
+    masked = b(e3t0 * tmask)
+    masked_n = north(masked)
+    ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
+    tmask_n = north(tmask)
+    wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
+    divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
+               else jnp.maximum(wet_sum, one))
+    e3f0vor = b(ref_sum / divisor)
+    ref_n = north(e3t0)
+    e3f_0 = b(quarter * b(b(e3t0 + east(e3t0))
+                            + b(ref_n + east(ref_n))))
+    e3f0vor = jnp.where(e3f0vor == 0.0, e3f_0, e3f0vor)
+
+    # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain the
+    # historical path byte-for-byte.
+    e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
 
     area_eta = b(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
     area_eta_n = north(area_eta)
     quad = b(b(area_eta + east(area_eta))
              + b(area_eta_n + east(area_eta_n)))
+    fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
+    hf0 = jnp.sum(e3f0vor * fe3mask, axis=-1)
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
     # area at that same boundary so production JIT cannot fuse it into /area_f.
-    r1_area_f = b(one / area_f)
-    r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
+    area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
+    r3f = b(b(quarter * quad) * r1_hf0 / area_f)
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
     # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
@@ -514,14 +508,11 @@ def nemo_qco_resolved_mesh_operands(
         e3t0, hu0, hv0, area_t, area_u, area_v, e2u, e1v = (
             jnp.asarray(value, dtype=dtype) for value in raw)
         e3t0 = e3t0[..., :nlev]
-        een = getattr(z_coord, "nemo_een_barotropic", None)
-        e3u0 = (e3t0 if een is None else
-                 jnp.asarray(een.e3u_0, dtype=dtype)[..., :nlev])
-        e3v0 = (e3t0 if een is None else
-                 jnp.asarray(een.e3v_0, dtype=dtype)[..., :nlev])
+        # NEMO's own mesh: e3u_0/e3v_0 are e3t_0 on the full-step meshes this
+        # branch serves; keeping the raw statement preserves the certified
+        # DINO arithmetic bit for bit.
         return NemoQCOMeshOperands(
-            e3t_0=e3t0, e3u_0=e3u0, e3v_0=e3v0,
-            umask3=umask3, vmask3=vmask3,
+            e3t_0=e3t0, e3u_0=e3t0, e3v_0=e3t0, umask3=umask3, vmask3=vmask3,
             hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,
             e2u=e2u, e1v=e1v)
     if any(value is not None for value in raw):
