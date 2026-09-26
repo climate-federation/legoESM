@@ -12473,6 +12473,21 @@ def _content_walk_rows(observed: dict[str, np.ndarray], record: dict,
     }
     first_non_bit = next(
         (name for name in registry if not rows[name]["bit_exact"]), "NONE")
+    substitutions = {
+        "model_T_Krhs_only": _score_developed_row(
+            (dt * nemo["e3t_Kmm"]) * observed["T_Krhs"],
+            nemo["accumulated_Krhs_content"], wet),
+        "model_e3t_Kmm_only": _score_developed_row(
+            (dt * observed["e3t_Kmm"]) * nemo["T_Krhs"],
+            nemo["accumulated_Krhs_content"], wet),
+        "both_model_operands_nemo_association": _score_developed_row(
+            (dt * observed["e3t_Kmm"]) * observed["T_Krhs"],
+            nemo["accumulated_Krhs_content"], wet),
+    }
+    ranked = sorted(
+        ({"operand": name, **row} for name, row in substitutions.items()
+         if name != "both_model_operands_nemo_association"),
+        key=lambda row: row["rms"], reverse=True)
     return {
         "rows": rows,
         "registered_order": list(registry),
@@ -12480,6 +12495,8 @@ def _content_walk_rows(observed: dict[str, np.ndarray], record: dict,
         "literal_nemo_rhs_calibration": calibration,
         "model_content_rebuild": _score_developed_row(
             observed["rebuilt_content"], observed["content"], wet),
+        "reciprocal_operand_substitution": substitutions,
+        "operand_ranking_by_rms": ranked,
     }
 
 
