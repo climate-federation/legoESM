@@ -39,6 +39,9 @@ VERTICAL_CARD = (ROOT / "scripts" / "validate" / "ocean_fidelity"
 VERTICAL_EARLY_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round123/"
     "oracle_process_budget/oracle_trazdf_matrix_kt00000001.bin")
+ROUND179_CARD = (ROOT / "scripts" / "validate" / "ocean_fidelity"
+                 / "testcases"
+                 / "nemo_testcase_l2_gyre_round179_slope_walk")
 
 
 @pytest.fixture(scope="module")
@@ -1203,3 +1206,31 @@ def test_round178_ldf_walk_refuses_dirty_worktree(
         harness.developed_tracer_ldf_statement_walk(
             tmp_path / "ldf", tmp_path / "daily",
             tmp_path / "audit", "0" * 40)
+
+
+def test_round179_slope_record_layout_is_derived_and_additive():
+    """The acquisition schema and additive source card stay synchronized."""
+    count3 = 36 * 26 * 31
+    count2 = 36 * 26
+    expected = 16 + 13 * 4 + 31 * count3 * 8 + 17 * count2 * 8 + 3 * 31 * 8
+    assert expected == 7_324_076
+    run = (ROUND179_CARD / "run.sh").read_text()
+    patch = (ROUND179_CARD / "ldfslp_round179.patch").read_text()
+    assert "readonly EXPECTED_SIZE=7324076" in run
+    assert "expected_header = (1, 1081, 1, 1, 36, 26, 31, 30, 31, 17, 3, 0, 179)" in run
+    assert "IN_RUN_SHAPIRO_CALIBRATION_PASS" in run
+    assert "/usr/bin/time" not in run
+    removed = [line for line in patch.splitlines()
+               if line.startswith("-") and not line.startswith("---")]
+    assert removed == []
+
+
+def test_round179_source_layout_plant_fires():
+    """Removing one registered recurrence row is a named nonzero refusal."""
+    result = subprocess.run(
+        [str(ROUND179_CARD / "run.sh"), "--plant-layout"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    output = result.stdout + result.stderr
+    assert result.returncode == 69, output
+    assert "STATUS PLANT-FIRED: source-layout" in output
+    assert "REFUSE: intentional source-layout plant exit" in output
