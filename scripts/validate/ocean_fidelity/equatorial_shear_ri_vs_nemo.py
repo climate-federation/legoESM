@@ -72,6 +72,9 @@ def main() -> int:
     ap.add_argument("--lon-hi", type=float, default=240.0)
     ap.add_argument("--lat-halfwidth", type=float, default=2.0)
     ap.add_argument("--n-levels", type=int, default=26)
+    ap.add_argument("--n2-threshold", type=float, default=-1e-12,
+                    help="EVD trigger threshold on N2 [1/s2]; must equal the run's enhanced_diffusion.n2_threshold")
+    ap.add_argument("--rn-evd", type=float, default=100.0, help="NEMO rn_evd [m2/s], for the implied EVD fraction")
     a = ap.parse_args()
     import netCDF4 as nc
 
@@ -175,6 +178,14 @@ def main() -> int:
     S2_N_m = m(S2u, wU, boxU) + m(S2v, wV, boxV)
     N2_N_m = m(N2_N_recomp, wT, boxT); bn2_m = m(bn2_int, wT, boxT)
     avt_m = m(avt_int, wT, boxT); avt_med = np.nanmedian(avt_int[boxT], axis=0)
+    # Instability occupancy: ours = area fraction of box interfaces with N2 below the
+    # EVD threshold in THIS snapshot (instantaneous T/S only -- on window means the
+    # N2 of the mean is not the instability); NEMO = (mean avt - median avt)/rn_evd,
+    # the window fraction EVD must have fired IF the median is the TKE-only value.
+    unst_o = m(np.where(np.isfinite(N2_o), (N2_o < a.n2_threshold).astype(float), np.nan), w_o, box_o)
+    evd_N = np.clip((avt_m - avt_med) / a.rn_evd, 0.0, 1.0)
+    if a.use_mean_fields:
+        unst_o[:] = np.nan
     print(f"\n=== Box {a.lon_lo:.0f}-{a.lon_hi:.0f}E |lat|<={a.lat_halfwidth}: ours {int(box_o.sum())} cols, "
           f"NEMO {int(boxT.sum())} T-cols; interior interfaces (top of cell k+1) ===")
     print("Ri = box-mean N2 / box-mean S2 (a ratio of means, not the mean Ri). NEMO S2 from 5-day-MEAN u,v (lower bound); "
@@ -186,7 +197,8 @@ def main() -> int:
         Ri_o = N2_o_m[k] / S2_o_m[k] if S2_o_m[k] > 0 else np.nan
         Ri_N = N2_N_m[k] / S2_N_m[k] if S2_N_m[k] > 0 else np.nan
         print(f"{k + 1:>3}{zw_int[k]:>8.2f} | {S2_o_m[k]:>9.2e}{S2_N_m[k]:>9.2e} | {N2_o_m[k]:>9.2e}{N2_N_m[k]:>9.2e}{bn2_m[k]:>9.2e} | "
-              f"{Ri_o:>8.2f}{Ri_N:>8.2f} | {KH_m[k]:>9.2e}{KH_med[k]:>9.2e}{avt_m[k]:>9.2e}{avt_med[k]:>9.2e}")
+              f"{Ri_o:>8.2f}{Ri_N:>8.2f} | {KH_m[k]:>9.2e}{KH_med[k]:>9.2e}{avt_m[k]:>9.2e}{avt_med[k]:>9.2e} | "
+              f"{unst_o[k]:>10.3f}{evd_N[k]:>11.3f}")
     # box-mean u profile too: is the undercurrent itself weaker?
     u_o = m(uf, w_o, box_o); u_N = m(uoF, wU, boxU)
     print(f"\n{'k':>3}{'z_c m':>8}{'u ours':>9}{'u NEMO':>9}   (zonal velocity box mean, m/s; ours 00 UTC, NEMO 5-day mean)")
