@@ -65,7 +65,6 @@ def capture(deck_root: Path, record_root: Path, variant: str,
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean import vertical
-    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_mod
     from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
     from legoesm.ocean.fidelity.provenance import worktree_stamp
     from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -95,7 +94,6 @@ def capture(deck_root: Path, record_root: Path, variant: str,
     calls: list[dict[str, object]] = []
     original_flux = pe.pv_flux_al81_partial_cell
     original_builder = vertical.nemo_qco_live_vorticity_e3f_cgrid
-    original_model_builder = model_mod.nemo_qco_live_vorticity_e3f_cgrid
 
     def selected_builder(*args, **kwargs):
         require("bridge_operands" not in kwargs,
@@ -124,13 +122,11 @@ def capture(deck_root: Path, record_root: Path, variant: str,
         return result
 
     vertical.nemo_qco_live_vorticity_e3f_cgrid = selected_builder
-    model_mod.nemo_qco_live_vorticity_e3f_cgrid = selected_builder
     pe.pv_flux_al81_partial_cell = observed
     try:
         exposed_u, exposed_v = r27._stage2_vorticity(deck_root, record_root)
     finally:
         pe.pv_flux_al81_partial_cell = original_flux
-        model_mod.nemo_qco_live_vorticity_e3f_cgrid = original_model_builder
         vertical.nemo_qco_live_vorticity_e3f_cgrid = original_builder
 
     require(calls, "production EEN observer captured no calls")
