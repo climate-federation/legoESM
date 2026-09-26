@@ -21,9 +21,13 @@ SIF=$WS/morays_env_amd64.sif
 RUNREL=nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_HOURLY
 echo "=== HOST ==="; hostname; date; echo "ntasks=$SLURM_NTASKS"
 module load singularity/3.7.1 2>&1 | tail -1
+# g188 (2026-09-26): module loaded silently, binary absent -> fail loudly so
+# afterok chains do not fire on a zero-second "COMPLETED".
+SING=$(command -v singularity || command -v apptainer) || { echo "no singularity/apptainer on $(hostname)"; exit 3; }
+echo "container runtime: $SING"
 
 echo "=== RUN NEMO (mpirun -np 32) ==="
-time singularity exec --writable-tmpfs --bind "$WS":/home/jdoe/to_host "$SIF" \
+time $SING exec --writable-tmpfs --bind "$WS":/home/jdoe/to_host "$SIF" \
   bash -lc "cd /home/jdoe/to_host/$RUNREL && ulimit -s unlimited && mpirun -np 32 ./nemo.exe"
 echo "nemo_rc=$?"
 
