@@ -12531,15 +12531,20 @@ def developed_content_producer_walk(
         e3t = _vertical_field(record, "e3t_Kmm", nlev)
         before = (_vertical_field(record, "e3t_Kbb", nlev)
                   * _vertical_field(record, "T_Kbb_in", nlev))
-        candidates = np.argwhere(wet & np.isfinite(tkrhs))
+        baseline_accum = (dt * e3t) * tkrhs
+        all_next = np.nextafter(tkrhs, np.inf)
+        all_next_accum = (dt * e3t) * all_next
+        candidates = np.argwhere(
+            wet & np.isfinite(tkrhs)
+            & (all_next_accum.view(np.uint64)
+               != baseline_accum.view(np.uint64)))
         require(candidates.size > 0,
-                "PLANT-BLIND: no finite wet T(Krhs) operand")
+                "PLANT-BLIND: no one-ULP wet T(Krhs) change reaches content")
         index = tuple(int(value) for value in candidates[0])
         planted = np.array(tkrhs, copy=True)
         planted[index] = np.nextafter(planted[index], np.inf)
         require(planted[index] != tkrhs[index],
                 "PLANT-BLIND: T(Krhs) ULP rounded away")
-        baseline_accum = (dt * e3t) * tkrhs
         planted_accum = (dt * e3t) * planted
         accum_moved = _different_cells(planted_accum, baseline_accum, wet)
         rhs_moved = _different_cells(
