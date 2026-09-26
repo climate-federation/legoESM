@@ -133,10 +133,8 @@ def main() -> int:
     acc = acc_transport(psi_bt, lat_t)
     print(f"   ACC @ Drake     = {acc.transport_Sv:6.2f} Sv")
 
-    # SST bias vs WOA: only against the real climatology on the model grid;
-    # a synthetic stand-in would print an observational score that is not one.
-    # Not scored (None) when the cache is missing or not on the model grid;
-    # AMOC/ACC are still reported.
+    # SST bias vs WOA only against the real climatology on the model grid (a
+    # synthetic stand-in is not an observational score); otherwise not scored.
     sst_K = np.asarray(state.T.data)[..., 0] + constants.T_freeze
     bias = None
     try:

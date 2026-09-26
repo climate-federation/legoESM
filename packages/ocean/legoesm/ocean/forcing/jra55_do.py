@@ -178,8 +178,7 @@ def _load_from_builder_cache(store: Path, year: int) -> Optional[OceanForcing]:
 
     prra, prsn = f("prra"), f("prsn")
     return OceanForcing(
-        lon=f("lon"),
-        lat=np.asarray(ds.lat.values, dtype=np.float64),
+        lon=f("lon"), lat=f("lat"),
         time_s=np.arange(per_year, dtype=np.float64)
         * (86400.0 / RECORDS_PER_DAY),
         u10=f("uas"), v10=f("vas"), T_air=f("tas"), q_air=f("huss"),

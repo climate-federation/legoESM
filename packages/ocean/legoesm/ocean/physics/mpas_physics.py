@@ -432,22 +432,19 @@ def make_mpas_ocean_physics(
                             "expected 'auto', 'jerlov_2band' or 'sweeney_2band'")
                     q_nonsolar = _sf_q_net - sw_absorbed
 
+                    # Live thickness of the lane's coordinate (z-star OR
+                    # partial cells with ETOPO): dry levels carry h = 0, so
+                    # wetness and the deposit of the remainder in the deepest
+                    # wet cell follow the same geometry the dynamics integrate
+                    # against (every scheme; dz_ref*jacobian would put light
+                    # below the seabed on partial cells).
+                    _h_live = compute_layer_thickness(
+                        state.eta.data, state.H_bathy.data, z_coord)
                     if _sw_scheme == "sweeney_2band":
-                        # Live thickness of the lane's coordinate (z-star OR
-                        # partial cells with ETOPO): dry levels carry h = 0,
-                        # so wetness and the deposit of the remainder in the
-                        # deepest wet cell follow the same geometry the
-                        # dynamics integrate against.
-                        _h_live = compute_layer_thickness(
-                            state.eta.data, state.H_bathy.data, z_coord)
                         _wet_live = jnp.asarray(_h_live > 0.0, dtype=_h_live.dtype)
                         dz_0_cell_q = _h_live[:, 0]
                     else:
                         dz_0_cell_q = z_coord.dz_ref[0] * jacobian
-                        # Live geometry for the Jerlov kernel too: on partial
-                        # cells dz_ref*jacobian puts light below the seabed.
-                        _h_live = compute_layer_thickness(
-                            state.eta.data, state.H_bathy.data, z_coord)
 
                     # Non-solar part: surface cell only
                     inv_rho_csw_dz = 1.0 / (
