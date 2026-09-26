@@ -995,6 +995,34 @@ def make_turbulence_only_spectral_physics(dt,
 # Physics-based parameterizations with trainable parameters
 # =============================================================================
 
+# The TrainablePhysicsParams names make_physics_params_spectral_physics reads
+# (on its rrtmgp path).  Any other DEFAULT_TRAINABLE leaf (C_H, C_E, albedo_ice)
+# is never consumed here and is frozen OUT of the spectral trainer (no inert
+# parameters).
+SPECTRAL_PHYSICS_TRAINABLE = ("sbm_tau_c", "sbm_RH_ref", "albedo_ocean")
+
+
+def assert_spectral_physics_params_reachable(params, make_physics_fn, grid,
+                                             sigma, ic_state):
+    """No-inert-parameters gate for the spectral physics trainer.
+
+    Differentiates the sum of the physics output on one IC with respect to
+    every trainable leaf and raises (``assert_no_inert``) on a leaf the
+    forward does not consume.  The parameters act only through the physics
+    (the dycore reads none of them), so a zero here means the leaf is inert
+    in the training loss too.
+    """
+    from legoesm.training.inert_params import assert_no_inert
+
+    def _probe(p):
+        out = make_physics_fn(p, grid)(ic_state, grid, sigma)
+        # Real + imaginary parts: spectral coefficients are complex.
+        return sum(jnp.sum(jnp.real(x)) + jnp.sum(jnp.imag(x)) for x in
+                   jax.tree.leaves(eqx.filter(out, eqx.is_inexact_array)))
+
+    assert_no_inert(eqx.filter_grad(_probe)(params).raw_values)
+
+
 def make_physics_params_spectral_physics(params, grid, dt, *,
                                          radiation: str = "rrtmgp"):
     """Create a spectral PE physics_fn from trainable physics parameters.
@@ -5869,21 +5897,26 @@ def train_physics_params_spectral(
     physics computations and the spectral dynamical core. Gray radiation runs
     at its documented defaults — it is not trained.
 
-    Trainable parameters (via ``TrainablePhysicsParams``):
+    Trainable parameters (via ``TrainablePhysicsParams``,
+    :data:`SPECTRAL_PHYSICS_TRAINABLE`):
     - ``sbm_tau_c``: SBM convection relaxation timescale
     - ``sbm_RH_ref``: SBM convection reference relative humidity
+    - ``albedo_ocean``: surface albedo override on the rrtmgp path
 
     Returns (trained_params, loss_history).
     """
     # The IDEALIZED 2-family parameter set (convection + radiation), not the
     # campaign "classical" model — the registry's classical is the six-family
     # AIMIPClassicalParams since 2026-08-12.
-    from legoesm.training.trainable_params import TrainablePhysicsParams
+    from legoesm.training.trainable_params import (
+        DEFAULT_TRAINABLE, TrainablePhysicsParams,
+    )
 
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
-    params = TrainablePhysicsParams.from_defaults()
+    params = TrainablePhysicsParams.from_defaults(
+        [c for c in DEFAULT_TRAINABLE if c.name in SPECTRAL_PHYSICS_TRAINABLE])
     n_p = len(params.raw_values)
     logger.info(f"Physics params: {n_p} trainable ({', '.join(params.raw_values)})")
     for k, v in params.as_dict().items():
@@ -5898,6 +5931,9 @@ def train_physics_params_spectral(
 
     def _make_physics_fn(p, grid_):
         return make_physics_params_spectral_physics(p, grid_, dt)
+
+    assert_spectral_physics_params_reachable(
+        params, _make_physics_fn, grid, sigma, ic_states[0])
 
     return _train_spectral_loop(
         params, _make_physics_fn,

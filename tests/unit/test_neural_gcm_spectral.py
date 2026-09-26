@@ -678,6 +678,59 @@ class TestPhysicsParamsSpectral:
         assert has_nonzero, "All physics param gradients are zero"
 
 
+    def test_no_inert_gate_rejects_unconsumed_params(self):
+        """The spectral physics forward reads only SPECTRAL_PHYSICS_TRAINABLE;
+        the full default set carries inert leaves the gate must reject, and the
+        restricted set passes."""
+        from legoesm.training.trainable_params import (
+            DEFAULT_TRAINABLE, TrainablePhysicsParams,
+        )
+        from legoesm.training.neural_gcm_spectral import (
+            SPECTRAL_PHYSICS_TRAINABLE,
+            assert_spectral_physics_params_reachable,
+            carry_to_spectral_state,
+            make_physics_params_spectral_physics,
+        )
+        # Warm, humid column so SBM convection is active (its knobs are gated
+        # on convection firing).
+        state = carry_to_spectral_state(
+            _make_gaussian_carry(T_val=300.0, q_v_val=0.02), _GRID)
+
+        def mk(p, g):
+            return make_physics_params_spectral_physics(p, g, dt=1800.0)
+
+        with pytest.raises(ValueError, match="C_H"):
+            assert_spectral_physics_params_reachable(
+                TrainablePhysicsParams.from_defaults(), mk, _GRID, _SIGMA,
+                state)
+        live = TrainablePhysicsParams.from_defaults(
+            [c for c in DEFAULT_TRAINABLE
+             if c.name in SPECTRAL_PHYSICS_TRAINABLE])
+        assert set(live.raw_values) == set(SPECTRAL_PHYSICS_TRAINABLE)
+        assert_spectral_physics_params_reachable(live, mk, _GRID, _SIGMA, state)
+
+    def test_trainer_trains_only_consumed_params(self, monkeypatch):
+        """Executed: the trainer hands the loop only the consumed parameters."""
+        from legoesm.training import neural_gcm_spectral as ngs
+        from legoesm.training.neural_gcm_spectral import (
+            NeuralGCMSpectralConfig, carry_to_spectral_state,
+        )
+        state = carry_to_spectral_state(
+            _make_gaussian_carry(T_val=300.0, q_v_val=0.02), _GRID)
+        seen = {}
+        monkeypatch.setattr(
+            ngs, "load_training_data",
+            lambda *a, **k: ([state], [None], [None]))
+        monkeypatch.setattr(
+            ngs, "_train_spectral_loop",
+            lambda params, *a, **k: seen.setdefault("params", params))
+        ngs.train_physics_params_spectral(
+            NeuralGCMSpectralConfig(n_max=N_MAX, n_levels=NLEV,
+                                    sigma_top=0.1, dt=1800.0))
+        assert set(seen["params"].raw_values) == set(
+            ngs.SPECTRAL_PHYSICS_TRAINABLE)
+
+
 class TestAreaWeightedLoss:
     """PR B #6: the spectral-state MSE/CRPS must be Gaussian-latitude area
     weighted, not a plain jnp.mean that over-weights the poles (which would
