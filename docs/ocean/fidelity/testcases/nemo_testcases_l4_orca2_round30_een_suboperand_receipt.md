@@ -87,11 +87,27 @@ The operand outcome gate exits 2 with `HELD`; its carried-mask plant exits 1.
 The owner-trajectory gate exits 2 with `HELD`; its score and refusal plants
 exit 1.  The all-three calibration is 0 unequal U/V cells against round 29.
 
-REVIEW_PENDING
+The required separate `codex exec --sandbox read-only` review was attempted on
+the committed round diff.  It failed before reading the diff with
+`failed to initialize in-process app-server client: Read-only file system`.
+Verdict: **independent review unavailable in-sandbox**.
 
-CITATION_PENDING
+The citation gate passes all four compiled citations with zero failures, zero
+unmapped citations, and zero map-audit failures.  Its rigid +2-line EEN
+reciprocal plant exits 1 with `SYMBOL-NOT-AT-LINE`; all nine citation
+self-tests fire.  The preregistration's initial `domqco` header citation was
+rigidly re-anchored to the executed `:273-286` statement before the receipt;
+no prediction or result changed.
 
-TESTS_PENDING
+The focused round-27/28/29/30 and citation battery reports **25 passed**.
+The one required `tests/ocean/fidelity -n 12` battery collected 1,876 tests
+and reached the inherited final-tail stall after **1,857 passed, 7 skipped,
+5 failed, and 7 unfinished** were emitted; it was interrupted after a bounded
+idle wait at 99%.  Isolated reruns reproduce the same five historical
+failures as round 29: SI3 scalar-math source provenance, the stale round-51
+live-trace suffix assertion, the round-129 stepping-gate stamp, three
+unstamped legacy report emitters, and the missing `hires_lane_surface`
+case-board row.  No round-30 test fails.
 
 No GYRE/DINO/lock-exchange/overflow landing gate is claimed: no model statement
 lands and `git diff 325384a7dc -- packages` is empty at the final tip.
