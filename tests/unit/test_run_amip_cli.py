@@ -4551,3 +4551,21 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
     with pytest.raises(ValueError, match="silently inert"):   # ...the guard does not
         create_atmosphere_dycore(cfg, create_cubed_sphere(12),
                                  create_sigma_coordinate(5))
+
+
+def test_zm_land_fraction_flows_to_config_and_kernel():
+    """--zm-land-fraction threads CLI -> ExperimentConfig -> ZhangMcFarlaneConfig;
+    the default requires a land fraction; validate_strict refuses anything else."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "zhang_mcfarlane"]), parser))
+    assert cfg.zm_land_fraction == "required"
+    cfg_aqua = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "zhang_mcfarlane",
+         "--zm-land-fraction", "none"]), parser))
+    assert cfg_aqua.zm_land_fraction == "none"
+    with pytest.raises(ValueError, match="zm_land_fraction"):
+        cfg._replace(zm_land_fraction="bogus").validate_strict()
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    assert _resolve_convection(cfg)[1].land_fraction == "required"
+    assert _resolve_convection(cfg_aqua)[1].land_fraction == "none"

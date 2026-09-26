@@ -47,6 +47,10 @@ from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
 # Synthetic single-column setup
 # ---------------------------------------------------------------------------
 
+# The synthetic columns have no land fraction: an explicit aquaplanet.
+_AQUA = ZhangMcFarlaneConfig(land_fraction="none")
+
+
 def _synthetic_column(
     ncol: int = 2,
     nlev: int = 16,
@@ -98,7 +102,7 @@ def test_zm_tendency_shape_dtype():
     T, q, pf, ph, u, v = _synthetic_column(ncol=3, nlev=12)
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
-    out, cpp_new = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0)
+    out, cpp_new = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0, config=_AQUA)
     assert out.dT_dt.shape == (ncol, nlev)
     assert out.dq_v_dt.shape == (ncol, nlev)
     assert out.dq_c_conv_dt.shape == (ncol, nlev)
@@ -117,7 +121,7 @@ def test_zm_outputs_finite():
     T, q, pf, ph, u, v = _synthetic_column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
-    out, cpp_new = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0)
+    out, cpp_new = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0, config=_AQUA)
     for arr in (out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt, out.cape,
                 out.convective_mask, out.du_dt_conv, out.dv_dt_conv,
                 cpp_new):
@@ -130,7 +134,7 @@ def test_zm_cloud_water_source_non_negative():
     T, q, pf, ph, u, v = _synthetic_column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
-    out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0)
+    out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0, config=_AQUA)
     assert jnp.all(out.dq_c_conv_dt >= -1e-12)
 
 
@@ -140,7 +144,7 @@ def test_zm_carry_layout_scalar_at_surface():
     T, q, pf, ph, u, v = _synthetic_column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
-    _, cpp_new = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0)
+    _, cpp_new = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0, config=_AQUA)
     assert jnp.all(cpp_new[:, :-1] == 0.0)
     # Surface slot is the diagnosed mb [kg/m^2/s], non-negative.
     assert jnp.all(cpp_new[:, -1] >= 0.0)
@@ -151,8 +155,8 @@ def test_zm_carry_is_not_read():
     tendencies and the returned carry are independent of the carry passed in."""
     T, q, pf, ph, u, v = _synthetic_column()
     ncol, nlev = T.shape
-    out0, c0 = zhang_mcfarlane_convection(T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), dt=300.0)
-    out1, c1 = zhang_mcfarlane_convection(T, q, pf, ph, u, v, jnp.full((ncol, nlev), 0.3), dt=300.0)
+    out0, c0 = zhang_mcfarlane_convection(T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), dt=300.0, config=_AQUA)
+    out1, c1 = zhang_mcfarlane_convection(T, q, pf, ph, u, v, jnp.full((ncol, nlev), 0.3), dt=300.0, config=_AQUA)
     assert jnp.array_equal(out0.dT_dt, out1.dT_dt)
     assert jnp.array_equal(c0, c1)
     assert float(jnp.max(c0[:, -1])) > 0.0
@@ -182,7 +186,7 @@ def test_zm_lapse_rate_stabilization():
     cpp = jnp.zeros((ncol, nlev))
 
     dt = 1800.0
-    out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=dt)
+    out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=dt, config=_AQUA)
 
     # Environment is heated above LFC and roughly conserved below;
     # the column-mean tendency over the cloud layer is positive.
@@ -216,7 +220,7 @@ def test_zm_grad_through_tau_finite():
     cpp = jnp.zeros((ncol, nlev))
 
     def f(tau):
-        config = ZhangMcFarlaneConfig(tau=tau)
+        config = ZhangMcFarlaneConfig(land_fraction="none", tau=tau)
         out, _ = zhang_mcfarlane_convection(
             T, q, pf, ph, u, v, cpp, dt=300.0, config=config,
         )
@@ -234,7 +238,7 @@ def test_zm_grad_through_capelmt_finite():
     cpp = jnp.zeros((ncol, nlev))
 
     def f(threshold):
-        config = ZhangMcFarlaneConfig(capelmt=threshold)
+        config = ZhangMcFarlaneConfig(land_fraction="none", capelmt=threshold)
         out, _ = zhang_mcfarlane_convection(
             T, q, pf, ph, u, v, cpp, dt=300.0, config=config,
         )
@@ -252,7 +256,7 @@ def test_zm_grad_through_cmt_coefficient():
     cpp = jnp.zeros((ncol, nlev))
 
     def f(c_u_arr):
-        config = ZhangMcFarlaneConfig(momcu=c_u_arr)
+        config = ZhangMcFarlaneConfig(land_fraction="none", momcu=c_u_arr)
         out, _ = zhang_mcfarlane_convection(
             T, q, pf, ph, u, v, cpp, dt=300.0, config=config,
         )
@@ -272,7 +276,7 @@ def test_zm_cmt_disabled_returns_none():
     T, q, pf, ph, u, v = _synthetic_column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
-    config = ZhangMcFarlaneConfig(enable_cmt=False)
+    config = ZhangMcFarlaneConfig(land_fraction="none", enable_cmt=False)
     out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0, config=config)
     assert out.du_dt_conv is None
     assert out.dv_dt_conv is None
@@ -286,7 +290,7 @@ def test_zm_cmt_zero_in_no_shear_column():
     u = jnp.full_like(T, 10.0)  # uniform 10 m/s
     v = jnp.zeros_like(T)
     cpp = jnp.zeros((ncol, nlev))
-    out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0)
+    out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0, config=_AQUA)
     # Tendencies should be vanishing in a no-shear column up to floats.
     assert float(jnp.max(jnp.abs(out.du_dt_conv))) < 1e-8
 
@@ -303,7 +307,7 @@ def test_zm_stable_column_tendencies_small():
     )
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
-    out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0)
+    out, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0, config=_AQUA)
     assert float(jnp.max(jnp.abs(out.dT_dt))) == 0.0
     assert float(jnp.max(out.convective_mask)) == 0.0
 
@@ -330,10 +334,13 @@ def _make_3d_state(n=4, nlev=12):
     return state, grid, sigma
 
 
-def _make_zm_only_config():
+def _make_zm_only_config(land_fraction="none"):
+    conv = ConvectionConfig(scheme="zhang_mcfarlane")
+    conv = conv._replace(zhang_mcfarlane=conv.zhang_mcfarlane._replace(
+        land_fraction=land_fraction))
     return PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
-        convection=ConvectionConfig(scheme="zhang_mcfarlane"),
+        convection=conv,
         turbulence=TurbulenceConfig(scheme="none"),
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
@@ -397,7 +404,7 @@ def test_zm_column_water_closes_with_explicit_rain():
     out, _ = zhang_mcfarlane_convection(
         T=T, q_v=q_v, p_full=p_full, p_half=p_half,
         u=u, v=v, conv_prog_profile=cpp, dt=1800.0,
-        config=ZhangMcFarlaneConfig(enable_cmt=False),
+        config=ZhangMcFarlaneConfig(land_fraction="none", enable_cmt=False),
     )
     dp = p_half[:, 1:] - p_half[:, :-1]
     sink = -jnp.sum((out.dq_v_dt + out.dq_c_conv_dt) * dp, axis=1) / constants.g
@@ -458,7 +465,12 @@ def test_hydro_bridge_routes_zm_net_rain_to_surface_precip():
     dq_v = tt["q_v"].data
     dp = sigma.layer_thickness_dp(state.p_s.data)
     sink = -jnp.sum((dq_v + dq_c) * dp, axis=-1) / constants.g
-    np.testing.assert_allclose(np.asarray(precip), np.asarray(sink), rtol=1e-9, atol=1e-14)
+    # rtol 1e-6, not 1e-9: CAM's zm_conv_evap clips the falling-rain flux at 0
+    # (zm_conv_evap.F90:224, kept in the port), so when evaporation exceeds the
+    # flux the column gains that water.  Measured on this state: 1.2e-7 of the
+    # precipitation with CAM's specific-humidity qsat (the clip did not bind
+    # with the former mixing-ratio qsat).  A real booking error is O(1).
+    np.testing.assert_allclose(np.asarray(precip), np.asarray(sink), rtol=1e-6, atol=1e-14)
 
 
 def test_cubed_sphere_grid_carries_land_frac_to_zm():
@@ -477,7 +489,7 @@ def test_cubed_sphere_grid_carries_land_frac_to_zm():
     leaves, tree = jax.tree_util.tree_flatten(g_land)
     assert tree.unflatten(leaves).land_frac is not None
 
-    cfg = _make_zm_only_config()
+    cfg = _make_zm_only_config("required")
     physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
     ps = init_physics_state(ncol, nlev, cfg)
     outs = []
@@ -511,3 +523,24 @@ def test_hydro_bridge_publishes_deepcu_inputs_into_the_carry():
     assert float(mf.max()) > 0.0 and float(icw.max()) > 0.0
     deepcu = cam6_deep_convective_fraction(mf, icw, CloudConfig(scheme="cam6_clubb"))
     assert float(deepcu.max()) > 0.0
+
+
+def test_zm_land_fraction_is_an_explicit_choice():
+    """No land fraction is an error unless the run declares an aquaplanet;
+    declaring one while passing a land fraction is an error too; an unknown
+    policy raises (dispatch hardening)."""
+    T, q, pf, ph, u, v = _synthetic_column()
+    cpp = jnp.zeros(T.shape)
+    with pytest.raises(ValueError, match="land_frac is required"):
+        zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0)
+    with pytest.raises(ValueError, match="land_fraction='none'"):
+        zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0, config=_AQUA,
+                                   land_frac=jnp.zeros(T.shape[0]))
+    with pytest.raises(ValueError, match="Unknown ZhangMcFarlaneConfig.land_fraction"):
+        zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0,
+                                   config=ZhangMcFarlaneConfig(land_fraction="ocean"))
+    # The aquaplanet choice reproduces the all-ocean column exactly.
+    a, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0, config=_AQUA)
+    b, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, v, cpp, dt=300.0,
+                                      land_frac=jnp.zeros(T.shape[0]))
+    assert jnp.array_equal(a.dT_dt, b.dT_dt)

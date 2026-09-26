@@ -252,6 +252,9 @@ class TestConvectionGrad:
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig
 
         config = ConvectionConfig(scheme=scheme)
+        if scheme == "zhang_mcfarlane":  # the test grid has no land fraction
+            config = config._replace(
+                zhang_mcfarlane=config.zhang_mcfarlane._replace(land_fraction="none"))
         conv_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
         state = self.state
 

@@ -33,6 +33,8 @@ from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
 from tests.atmosphere.hydrostatic.unit import _zm_cam6_oracle as O
 
 CFG = ZhangMcFarlaneConfig()
+# columns called without a land fraction: the explicit aquaplanet choice
+CFG_AQUA = CFG._replace(land_fraction="none")
 DT = 1800.0
 NLEV = 30
 KW = dict(tpert=0.0, capelmt=CFG.capelmt, tau=CFG.tau, num_cin=CFG.num_cin,
@@ -321,7 +323,7 @@ def test_saturation_curve_departure_is_small():
 def test_qsat_is_cam_specific_humidity_not_mixing_ratio():
     """CAM ``wv_sat_svp_to_qsat``: ``ε·es/(p − (1−ε)·es)``, written out here
     independently of any thermo conversion.  A port feeding the mixing ratio
-    ``ε·es/(p − es)`` is 0.8-2.3 % high over this range and fails."""
+    ``ε·es/(p − es)`` is 0.08-2.3 % high over this range and fails."""
     ts = np.array([240.0, 280.0, 300.0])
     ps = np.array([300.0, 850.0, 1000.0])
     es = np.array([float(saturation_vapor_pressure(jnp.float64(t))) for t in ts])
@@ -347,7 +349,7 @@ def test_non_convecting_column_with_zero_humidity_is_finite(cols):
         assert bool(jnp.isfinite(a).all()), name
         assert float(jnp.abs(a).max()) == 0.0, name
     out, _ = zhang_mcfarlane_convection(cols["T"], q, cols["pf"], cols["ph"], cols["u"],
-                                        cols["v"], jnp.zeros_like(q), DT, CFG)
+                                        cols["v"], jnp.zeros_like(q), DT, CFG_AQUA)
     assert bool(jnp.isfinite(out.dq_v_dt).all()) and bool(jnp.isfinite(out.dT_dt).all())
 
 
@@ -491,7 +493,7 @@ def test_real_columns_with_zero_humidity_are_finite_and_pinned(tag):
     ncol, nlev = T.shape
     assert bool((q == 0.0).any()), "fixture must contain an exact zero"
     u = jnp.zeros_like(T)
-    out, carry = zhang_mcfarlane_convection(T, q, pf, ph, u, u, jnp.zeros_like(T), 112.5, CFG,
+    out, carry = zhang_mcfarlane_convection(T, q, pf, ph, u, u, jnp.zeros_like(T), 112.5, CFG_AQUA,
                                             pref_edge=pref)
     for name in ("dT_dt", "dq_v_dt", "dq_c_conv_dt", "dq_r_conv_dt", "cape", "du_dt_conv",
                  "mass_flux_up", "icwmr"):
@@ -501,14 +503,14 @@ def test_real_columns_with_zero_humidity_are_finite_and_pinned(tag):
     # the tendency is a RATE: a 1800 s physics step (CAM's dtime, the cadence
     # arm) returns the same dT_dt as a 112.5 s one except where the mumax CFL
     # cap on mb binds (then smaller), never larger (2026-09-22 cadence bisect)
-    out_h, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, u, jnp.zeros_like(T), 1800.0, CFG,
+    out_h, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, u, jnp.zeros_like(T), 1800.0, CFG_AQUA,
                                           pref_edge=pref)
     assert float(jnp.abs(out_h.dT_dt).max()) <= 1.05 * float(jnp.abs(out.dT_dt).max())
     assert float(jnp.abs(out_h.dq_v_dt).max()) <= 1.05 * float(jnp.abs(out.dq_v_dt).max())
     # the run's second physics call: the carry from the first call plus a
     # carried cloud fraction (the wrapper reads neither into the kernels)
     out2, carry2 = zhang_mcfarlane_convection(
-        T, q, pf, ph, u, u, carry, 112.5, CFG, cld_frac=jnp.full(T.shape, 0.5), pref_edge=pref)
+        T, q, pf, ph, u, u, carry, 112.5, CFG_AQUA, cld_frac=jnp.full(T.shape, 0.5), pref_edge=pref)
     assert bool(jnp.isfinite(out2.dT_dt).all()) and bool(jnp.isfinite(out2.dq_v_dt).all())
     assert bool(jnp.isfinite(carry2).all())
     dz, _, z = compute_column_geometry(T, pf, ph, q_v=jnp.maximum(q, Z.Q_MIN_VAPOR))

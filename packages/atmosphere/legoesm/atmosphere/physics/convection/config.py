@@ -749,7 +749,12 @@ class ZhangMcFarlaneConfig(NamedTuple):
     pbl_top_pa: float = 7.0e4
     parcel_tpert: float = 0.0
     enable_cmt: bool = True
-
+    # Column land fraction policy (static, closure-time).  "required": the host
+    # must pass ``land_frac`` (it picks c0_lnd vs c0_ocn per column); a missing
+    # one raises instead of silently treating every column as ocean.  "none":
+    # an aquaplanet run with no land, recorded as a choice -- ocean
+    # coefficients everywhere, and passing a land fraction is an error.
+    land_fraction: str = "required"
 
 
 class KainFritschConfig(NamedTuple):
