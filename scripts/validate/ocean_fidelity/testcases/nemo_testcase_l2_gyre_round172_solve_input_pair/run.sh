@@ -200,8 +200,12 @@ for arm in baseline e3t content; do
   done
   cp "$BINARY" "$run/nemo"
   cp "$RAW" "$run/round172_solve_inputs.raw"
-  [[ "$arm" == e3t ]] && touch "$run/round172_e3t.arm"
-  [[ "$arm" == content ]] && touch "$run/round172_content.arm"
+  if [[ "$arm" == e3t ]]; then
+    touch "$run/round172_e3t.arm"
+  fi
+  if [[ "$arm" == content ]]; then
+    touch "$run/round172_content.arm"
+  fi
   (
     cd "$run"
     export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
