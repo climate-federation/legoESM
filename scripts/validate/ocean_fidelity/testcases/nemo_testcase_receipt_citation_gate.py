@@ -1062,6 +1062,15 @@ CITATION_MAP = {
         'SELECT CASE( nn_e3f_typ )',
         'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
         26],
+    # --- ORCA2 card round 27: split the shared F-thickness consumers ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:733-738': [
+        'DO jk = 1, jpkm1',
+        ('z1_e3f(ji,jj) = 1._wp / (e3f_0vor(ji,jj,jk)', 1),
+        6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:782-805': [
+        ('zwx(ji,jj) = e2u(ji,jj) * (e3u_3d(ji,jj,jk)', 1),
+        'pu_rhs(ji,jj,jk) = pu_rhs(ji,jj,jk) + zua',
+        24],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90:273-286': [
         ('IF( PRESENT( pr3f ) ) THEN             !==  ratio at f-point  ==!', 2),
         ('END DO   ;   END DO', 6), 14],
