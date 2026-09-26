@@ -151,9 +151,14 @@ on the committed round diff.  It failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-The receipt citation gate and its real shifted-line plant are reported by the
-final commit below.  The final ORCA2 push battery is likewise run against the
-committed receipt.
+The receipt citation gate passes all seven compiled citations with zero
+failures, zero unmapped citations, and zero map-audit failures; all nine
+self-tests fire.  Its real +2-line plant on the landed vorticity citation exits 1 with
+`SYMBOL-NOT-AT-LINE`.
+
+The final ORCA2 push battery runs the citation gate, TKE terms, recipe,
+freshwater closure, and parallel-receipt gate against the committed receipt:
+**127/127 pass in 474.23 s**.
 
 ## Choices
 
