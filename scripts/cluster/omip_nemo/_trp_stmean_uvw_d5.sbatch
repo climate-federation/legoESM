@@ -36,7 +36,7 @@ export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 CMD=$(cat /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_trp_stmean_uvw_d5.txt)
 case "$CMD" in *"--state-accumulate"*"--snapshot-every-days 5"*|*"--snapshot-every-days 5"*"--state-accumulate"*) ;; *) echo "FATAL: arm flags missing"; exit 1;; esac
-[ "$(git -C $ROOT rev-parse --short HEAD)" = "6122c6295" ] || { echo "FATAL: tree HEAD is not 60919bf31"; exit 1; }
+[ "$(git -C $ROOT rev-parse --short HEAD)" = "2ffc90709" ] || { echo "FATAL: tree HEAD is not 2ffc90709"; exit 1; }
 echo "CMD: $PY scripts/run/run_omip_core2.py $CMD"
 $PY -u scripts/run/run_omip_core2.py $CMD
 rc=$?
