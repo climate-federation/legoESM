@@ -4159,6 +4159,10 @@ def main(argv=None) -> int:
         "--developed-vertical-sensitivity", action="store_true",
         help="rank the day-240 sensitivity to NEMO's recorded vertical "
              "tracer coefficient and live e3w(Kmm) divisor")
+    parser.add_argument(
+        "--produce-solve-input-record", action="store_true",
+        help="write the passive developed e3t/content input pair used by "
+             "the Round-172 NEMO-side sensitivity")
     parser.add_argument("--developed-stage2-adv-split", action="store_true",
                         help="split NEMO's vector-invariant dyn_adv into its "
                              "kinetic-energy gradient and vertical advection "
@@ -4354,6 +4358,20 @@ def main(argv=None) -> int:
         print("DEVELOPED TKE FIRST NON-BIT: "
               f"{report['first_non_bit_statement']}")
         print("STATUS PASS")
+        return 0
+    if args.produce_solve_input_record:
+        require(args.expect_commit is not None,
+                "--produce-solve-input-record needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--produce-solve-input-record needs --daily-record-audit")
+        report = produce_developed_solve_input_record(
+            args.daily_record_root, args.daily_record_audit,
+            args.expect_commit, args.root)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        print("STATUS PASS: developed solve-input record "
+              f"{report['record_count']} frames")
         return 0
     if args.developed_vertical_sensitivity:
         require(args.expect_commit is not None,
@@ -12157,6 +12175,128 @@ def _rank_vertical_sensitivity(final_rows: dict[str, dict]) -> list[dict]:
     return sorted(ranking,
                   key=lambda row: row["day240_T3D_rms_removed_K"],
                   reverse=True)
+
+
+def produce_developed_solve_input_record(
+        daily_root: Path, daily_audit: Path, expected_commit: str,
+        root: Path) -> dict:
+    """Write passive e3t/content inputs for the NEMO-side paired run."""
+    _policy()
+    import jax.numpy as jnp
+    from numpy.lib.format import open_memmap
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "solve-input record requires a clean tree: "
+            f"{stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "solve-input record commit differs from --expect-commit")
+    root = Path(root)
+    require(not root.exists(),
+            f"solve-input record root exists; refusing overwrite: {root}")
+    root.mkdir(parents=True)
+
+    bundle = _developed_entry_bundle(
+        Path(daily_root), Path(daily_audit), expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    wet = bundle["wet"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    shape = (LEGO_PROCESS_TRACE_STEPS,) + wet.shape
+    paths = [root / "e3t_Kaa.npy", root / "content_T.npy"]
+    e3t_out = open_memmap(paths[0], mode="w+", dtype="<f8", shape=shape)
+    content_out = open_memmap(paths[1], mode="w+", dtype="<f8", shape=shape)
+
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(), vertical_solve_trace=True))
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    carried_bytes = 0
+    scale = np.float64(1.0 + 2.0 ** -20)
+    scale_control = None
+    started = time.time()
+    for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1):
+        freshwater, surface = gate._surface_forcings(card, state, step)
+        ssha = (jnp.asarray(payload["ssha"])
+                if step == PROCESS_START_STEP else None)
+        trace = trace_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        ordinary = ordinary_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        mismatch = _state_bit_mismatches(trace.state_after, ordinary)
+        carried_bytes += mismatch
+        require(mismatch == 0,
+                f"step {step}: solve-input observer moved {mismatch} bytes")
+        vertical = _vertical_trace_frame(trace)
+        e3t = np.asarray(vertical["e3t_after"], dtype=np.float64)
+        content = np.asarray(vertical["content_T"], dtype=np.float64)
+        require(e3t.shape == wet.shape == content.shape,
+                f"step {step}: solve-input shape differs from wet mask")
+        require(np.all(np.isfinite(e3t[wet]))
+                and np.all(np.isfinite(content[wet])),
+                f"step {step}: solve-input record has non-finite wet cells")
+        index = step - PROCESS_START_STEP
+        e3t_out[index] = e3t
+        content_out[index] = content
+        if step == PROCESS_START_STEP:
+            moved = {}
+            for name, values in (("e3t_Kaa", e3t),
+                                 ("content_T", content)):
+                selected = wet & np.isfinite(values) & (values > 0.0)
+                planted = np.array(values, copy=True)
+                planted[selected] *= scale
+                moved[name] = int(np.count_nonzero(
+                    planted[selected].view(np.uint64)
+                    != values[selected].view(np.uint64)))
+                require(moved[name] == int(np.count_nonzero(selected)),
+                        f"PLANT-BLIND: {name} scale missed a selected cell")
+            scale_control = {
+                "scale": float(scale),
+                "selected_cells_moved": moved,
+            }
+        state = ordinary
+        if step % 60 == 0:
+            print(f"  solve-input record step {step}/1440 "
+                  f"{time.time() - started:.1f}s", flush=True)
+
+    e3t_out.flush()
+    content_out.flush()
+    del e3t_out, content_out
+    require(scale_control is not None, "solve-input scale plant never ran")
+    metadata = {
+        "format": "gyre-round172-developed-solve-input-record-v1",
+        "producer_commit": expected_commit,
+        "case": CASE,
+        "steps": [PROCESS_START_STEP, PROCESS_END_STEP],
+        "record_count": LEGO_PROCESS_TRACE_STEPS,
+        "shape": list(shape),
+        "dtype": "float64",
+        "platform": "cpu",
+        "precision": "fp64/libm",
+        "production_entry": "LatLonCGridOceanModel.step -> self._step_jitted",
+        "carried_state_unequal_bytes": carried_bytes,
+        "scale_control": scale_control,
+        "daily_audit": str(daily_audit),
+        "entry_restart": str(bundle["restart_path"]),
+        "entry_restart_sha256": payload["sha256"],
+        "worktree": stamp,
+    }
+    metadata_path = root / "manifest.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+    paths.append(metadata_path)
+    metadata["files_sha256"] = _write_trace_manifest(
+        root, paths, expected_commit)
+    return metadata
 
 
 def developed_vertical_day240_sensitivity(
