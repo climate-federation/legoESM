@@ -379,7 +379,10 @@ def capture_shared_cards(*, plant: str | None = None) -> dict:
                 e3t_0, tmask, grid=recipe.grid, dtype=jnp.float64)
             mesh = nemo_ldf_reference_e3f(z_coord)
             if plant == "card_reference":
-                mesh = jnp.asarray(mesh).at[0, 0, 0].add(1.0)
+                # Perturb EVERY cell, so the plant is guaranteed to reach a
+                # vertex whose masked coefficient is non-zero; a single-cell
+                # plant under land would be refused for the wrong reason.
+                mesh = jnp.asarray(mesh) + 1.0
             row["mesh_reference_vs_vorticity_reference"] = score(
                 mesh, vorticity)
             # dynldf_lev.f90:123 multiplies the reference by ahmf, which
