@@ -12,6 +12,8 @@
 # so it encodes the phasing. Ours: turbocline from K_H_diag at four clock
 # phases (00/06/12/18 UTC = 15/21/03/09 local at 230E) on the EVD arm's
 # 6-hourly snapshots, days 1-4.75; the 4-phase mean is our daily mean.
+# 2026-09-26 second pass: first pass searched from the SURFACE (16.0 m vs 35.7 m,
+# not like-for-like); NEMO searches from nlb10 (>= 10 m). Rerun.
 # PRE-REGISTERED: 4-phase mean shallower than NEMO's mldkz5 by > 3 m with the
 # 15-local phase the shallow one -> daytime mixing is confined shallower than
 # NEMO's (phasing defect, TKE under the diurnal layer); within 3 m -> mixing
