@@ -979,3 +979,43 @@ def test_round167_vertical_sensitivity_ranking_is_complete_and_signed(harness):
     broken.pop("complete_K")
     with pytest.raises(harness.GateError, match="no complete_K arm"):
         harness._rank_vertical_sensitivity(broken)
+
+
+def test_round174_solve_input_pair_ranks_both_arms_and_plants_fire(harness):
+    """The paired scorer registers both arms and catches either scale plant."""
+    shape = (20, 30, 30)
+    wet = np.ones(shape, dtype=bool)
+    baseline = np.full(shape, 10.0, dtype=np.float64)
+    e3t = baseline + np.float64(1.0e-4)
+    content = baseline.copy()
+    content[:10] += np.float64(1.0e-5)
+    fields = {
+        "baseline": baseline,
+        "source": baseline.copy(),
+        "e3t_wet": e3t,
+        "content_wet": content,
+    }
+
+    scored = harness._score_solve_input_temperatures(fields, wet)
+    assert scored["baseline"]["cells_unequal"] == 0
+    assert scored["baseline"]["day240_T3D_rms_K"] == 0.0
+    assert [row["arm"] for row in scored["ranking"]] == [
+        "e3t_wet", "content_wet"]
+    assert scored["prediction_e3t_larger_than_content"] == "CONFIRMED"
+
+    for plant in ("solve-input-e3t-scale",
+                  "solve-input-content-scale"):
+        with pytest.raises(harness.GateError, match="scale was caught"):
+            harness._score_solve_input_temperatures(
+                fields, wet, plant=plant)
+
+    incomplete = dict(fields)
+    incomplete.pop("content_wet")
+    with pytest.raises(harness.GateError, match="registry is incomplete"):
+        harness._score_solve_input_temperatures(incomplete, wet)
+
+    moved_source = dict(fields)
+    moved_source["source"] = baseline.copy()
+    moved_source["source"][0, 0, 0] = np.nextafter(10.0, np.inf)
+    with pytest.raises(harness.GateError, match="baseline moved 1 source"):
+        harness._score_solve_input_temperatures(moved_source, wet)

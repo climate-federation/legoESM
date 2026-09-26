@@ -49,6 +49,9 @@ MODES
                      drives independent day-180-to-240 production-JIT arms
                      with NEMO's recorded heat or complete effective tracer
                      diffusivity at the implicit-solve boundary.
+  --score-solve-input-pair
+                     admits the Round-173 NEMO-side e3t/content pair and
+                     ranks its day-240 wet-cell temperature leverage.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -95,6 +98,10 @@ record-backed plants are persisted in their round evidence)
   developed-vertical-avt-ulp
                            moves one consumed NEMO avt interface by one ULP;
                            the matrix and day-240 temperature must both move
+  solve-input-e3t-scale    scales the e3t arm's day-240 wet temperature
+                           difference and requires its registered RMS to move
+  solve-input-content-scale
+                           does the same for the content arm
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -197,6 +204,16 @@ DEFAULT_REFERENCE_PROCESS_TRACE = Path(
     "lego_process_trace_v3")
 DEFAULT_IMMUTABLE_GYRE_YEAR = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre")
+DEFAULT_SOLVE_INPUT_PAIR_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round173/"
+    "oracle_solve_input_pair_wet_retry")
+DEFAULT_SOLVE_INPUT_BASELINE_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round172/"
+    "oracle_solve_input_pair/baseline")
+DEFAULT_SOLVE_INPUT_SOURCE_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round125/"
+    "oracle_vertical_decomposition")
+SOLVE_INPUT_REMAINDER_K = 1.241262968697578e-03
 # Round 125 reuses the existing self-describing ``tra_zdf`` record.  The
 # source writer remains armed for steps 1--2; one additive source line widens
 # it to the 360-step day-180-to-240 interval.  These are byte-layout constants,
@@ -4163,6 +4180,15 @@ def main(argv=None) -> int:
         "--produce-solve-input-record", action="store_true",
         help="write the passive developed e3t/content input pair used by "
              "the Round-172 NEMO-side sensitivity")
+    parser.add_argument(
+        "--score-solve-input-pair", action="store_true",
+        help="admit and score the Round-173 NEMO-side e3t/content pair")
+    parser.add_argument("--solve-input-pair-root", type=Path,
+                        default=DEFAULT_SOLVE_INPUT_PAIR_ROOT)
+    parser.add_argument("--solve-input-baseline-root", type=Path,
+                        default=DEFAULT_SOLVE_INPUT_BASELINE_ROOT)
+    parser.add_argument("--solve-input-source-root", type=Path,
+                        default=DEFAULT_SOLVE_INPUT_SOURCE_ROOT)
     parser.add_argument("--developed-stage2-adv-split", action="store_true",
                         help="split NEMO's vector-invariant dyn_adv into its "
                              "kinetic-energy gradient and vertical advection "
@@ -4372,6 +4398,29 @@ def main(argv=None) -> int:
             print(f"  wrote {args.json}")
         print("STATUS PASS: developed solve-input record "
               f"{report['record_count']} frames")
+        return 0
+    if args.score_solve_input_pair:
+        try:
+            report = score_nemo_solve_input_pair(
+                args.solve_input_pair_root,
+                args.solve_input_baseline_root,
+                args.solve_input_source_root,
+                args.mesh, plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            if str(error).startswith("PLANT-BLIND"):
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["ranking"], indent=2))
+        print("STATUS PASS")
         return 0
     if args.developed_vertical_sensitivity:
         require(args.expect_commit is not None,
@@ -12135,6 +12184,210 @@ def developed_state_process_walk(
               f"{known['recorded_uu_b_active_max_abs']:.8e}; "
               f"disagreement {known['removed_minus_recorded_active_max_abs']:.8e}")
     return report
+
+
+# ---------------- Round-174 paired NEMO solve-input ranking ----------------
+def _score_solve_input_temperatures(
+        temperatures: dict[str, np.ndarray], wet: np.ndarray,
+        *, plant: str | None = None) -> dict:
+    """Score both directed NEMO arms against their admitted baseline."""
+    required = {"baseline", "source", "e3t_wet", "content_wet"}
+    require(set(temperatures) == required,
+            "solve-input temperature registry is incomplete")
+    shape = temperatures["baseline"].shape
+    require(wet.shape == shape,
+            f"solve-input mask shape {wet.shape} != temperature {shape}")
+    require(int(np.count_nonzero(wet)) == 18000,
+            "solve-input wet-cell census moved from 18000")
+    for name, values in temperatures.items():
+        require(values.shape == shape,
+                f"solve-input {name} shape {values.shape} != {shape}")
+        require(bool(np.all(np.isfinite(values[wet]))),
+                f"solve-input {name} has non-finite wet temperature")
+
+    baseline = np.asarray(temperatures["baseline"], dtype=np.float64)
+    source = np.asarray(temperatures["source"], dtype=np.float64)
+    source_unequal = int(np.count_nonzero(baseline[wet] != source[wet]))
+    require(source_unequal == 0,
+            f"solve-input baseline moved {source_unequal} source cells")
+
+    rows = {}
+    for name in ("e3t_wet", "content_wet"):
+        values = np.asarray(temperatures[name], dtype=np.float64)
+        delta = values - baseline
+        unequal = int(np.count_nonzero(delta[wet] != 0.0))
+        rms = _rms(delta, wet)
+        require(unequal > 0 and rms > 0.0,
+                f"solve-input {name} is non-discriminating")
+        rows[name] = {
+            "wet_cells": 18000,
+            "cells_unequal": unequal,
+            "max_abs_K": float(np.max(np.abs(delta[wet]))),
+            "day240_T3D_rms_K": rms,
+            "fraction_of_complete_K_e3w_remainder": (
+                rms / SOLVE_INPUT_REMAINDER_K),
+        }
+
+    plant_to_arm = {
+        "solve-input-e3t-scale": "e3t_wet",
+        "solve-input-content-scale": "content_wet",
+    }
+    if plant not in (None, "none"):
+        require(plant in plant_to_arm,
+                f"PLANT-BLIND: unknown solve-input plant {plant!r}")
+        name = plant_to_arm[plant]
+        values = np.asarray(temperatures[name], dtype=np.float64)
+        delta = values - baseline
+        planted = values.copy()
+        planted[wet] = baseline[wet] + delta[wet] * np.float64(
+            1.0 + 2.0**-20)
+        moved = int(np.count_nonzero(planted[wet] != values[wet]))
+        outside = int(np.count_nonzero(planted[~wet] != values[~wet]))
+        planted_rms = _rms(planted - baseline, wet)
+        expected = rows[name]["cells_unequal"]
+        if (moved != expected or outside != 0
+                or planted_rms == rows[name]["day240_T3D_rms_K"]):
+            raise GateError(
+                "PLANT-BLIND: solve-input scale moved "
+                f"{moved}/{expected} unequal wet cells, {outside} dry cells; "
+                f"rms={planted_rms:.17e}")
+        raise GateError(
+            f"solve-input {name} scale was caught: wet_cells={moved}, "
+            f"dry_cells={outside}, rms={planted_rms:.17e}")
+
+    ranking = sorted(
+        ({"arm": name, **row} for name, row in rows.items()),
+        key=lambda row: row["day240_T3D_rms_K"], reverse=True)
+    return {
+        "baseline": {
+            "cells_unequal": source_unequal,
+            "day240_T3D_rms_K": _rms(baseline - source, wet),
+        },
+        "rows": rows,
+        "ranking": ranking,
+        "larger_family": ranking[0]["arm"],
+        "prediction_e3t_larger_than_content": (
+            "CONFIRMED" if rows["e3t_wet"]["day240_T3D_rms_K"]
+            > rows["content_wet"]["day240_T3D_rms_K"] else "REFUTED"),
+        "half_remainder_threshold_K": 0.5 * SOLVE_INPUT_REMAINDER_K,
+        "prediction_neither_reaches_half": (
+            "CONFIRMED" if all(
+                row["day240_T3D_rms_K"]
+                < 0.5 * SOLVE_INPUT_REMAINDER_K
+                for row in rows.values()) else "REFUTED"),
+    }
+
+
+def score_nemo_solve_input_pair(
+        pair_root: Path, baseline_root: Path, source_root: Path,
+        mesh_path: Path, *, plant: str | None = None) -> dict:
+    """Admit and score the Round-173 wet-only NEMO input pair."""
+    pair_root = Path(pair_root)
+    baseline_root = Path(baseline_root)
+    source_root = Path(source_root)
+    restart_1080 = "GYRE_OMIP_L2_P3_00001080_restart.nc"
+    restart_1440 = "GYRE_OMIP_L2_P3_00001440_restart.nc"
+    arms = ("e3t_wet", "content_wet")
+
+    required = [
+        pair_root / "round173_outputs.sha256",
+        pair_root / "binary.sha256",
+        pair_root / "corrected_input.sha256",
+        baseline_root / restart_1080,
+        baseline_root / restart_1440,
+        source_root / restart_1080,
+        source_root / restart_1440,
+    ]
+    for arm in arms:
+        required.extend((
+            pair_root / arm / restart_1080,
+            pair_root / arm / restart_1440,
+            pair_root / arm / "nemo",
+            pair_root / arm / "round172_solve_inputs.raw",
+            pair_root / arm / "run.user.stdout.log",
+        ))
+    for path in required:
+        require(path.is_file(), f"solve-input record lacks {path}")
+
+    output_rows = {}
+    for line in (pair_root / "round173_outputs.sha256").read_text().splitlines():
+        digest, name = line.split()
+        output_rows[name] = digest
+    expected_outputs = {
+        f"{arm}/{restart}" for arm in arms
+        for restart in (restart_1080, restart_1440)
+    }
+    require(set(output_rows) == expected_outputs,
+            "solve-input output manifest registry moved")
+    for name, digest in output_rows.items():
+        require(_sha256(pair_root / name) == digest,
+                f"solve-input output hash moved for {name}")
+
+    binary_digest = (pair_root / "binary.sha256").read_text().split()[0]
+    raw_digest = (pair_root / "corrected_input.sha256").read_text().split()[0]
+    for arm in arms:
+        require(_sha256(pair_root / arm / "nemo") == binary_digest,
+                f"solve-input {arm} binary moved")
+        require(_sha256(pair_root / arm / "round172_solve_inputs.raw")
+                == raw_digest, f"solve-input {arm} input moved")
+        require((pair_root / arm / "run.user.stdout.log").read_text()
+                .splitlines() == ["STOP 0"],
+                f"solve-input {arm} lacks an exact STOP 0 record")
+
+    source_hashes = {
+        restart: _sha256(source_root / restart)
+        for restart in (restart_1080, restart_1440)
+    }
+    require(_sha256(baseline_root / restart_1080)
+            == source_hashes[restart_1080],
+            "solve-input baseline step 1080 moved from Round 125")
+    require(_sha256(baseline_root / restart_1440)
+            == source_hashes[restart_1440],
+            "solve-input baseline step 1440 moved from Round 125")
+    for arm in arms:
+        require(_sha256(pair_root / arm / restart_1080)
+                == source_hashes[restart_1080],
+                f"solve-input {arm} step 1080 moved before intervention")
+        require(_sha256(pair_root / arm / restart_1440)
+                != source_hashes[restart_1440],
+                f"solve-input {arm} step 1440 is non-discriminating")
+
+    year = _year()
+    wet = np.asarray(year.nemo_operands(mesh_path)["tmask"][..., :30]) > 0.5
+    temperatures = {
+        "source": year._load_nemo(
+            source_root, 0, 240, 30, directory=source_root)["T"],
+        "baseline": year._load_nemo(
+            baseline_root, 0, 240, 30, directory=baseline_root)["T"],
+    }
+    for arm in arms:
+        temperatures[arm] = year._load_nemo(
+            pair_root, 0, 240, 30, directory=pair_root / arm)["T"]
+    scored = _score_solve_input_temperatures(
+        temperatures, wet, plant=plant)
+    return {
+        "format": "gyre-round174-nemo-solve-input-pair-v1",
+        "status": "PASS",
+        "precision": "binary64",
+        "metric": "unweighted T3D RMS over NEMO tmask",
+        "interval": {"entry_step": 1080, "final_step": 1440,
+                     "entry_day": 180, "final_day": 240},
+        "admission": {
+            "pair_root": str(pair_root),
+            "baseline_root": str(baseline_root),
+            "source_root": str(source_root),
+            "binary_sha256": binary_digest,
+            "corrected_input_sha256": raw_digest,
+            "source_restart_sha256": source_hashes,
+            "wet_cells": int(np.count_nonzero(wet)),
+            "arms": list(arms),
+        },
+        "complete_K_e3w_remainder_K": SOLVE_INPUT_REMAINDER_K,
+        **scored,
+        "interpretation": (
+            "forced-input magnitude sensitivity only; not source-exact "
+            "landing proof"),
+    }
 
 
 # ---------------- Round-167 developed vertical-coefficient sensitivity ----
