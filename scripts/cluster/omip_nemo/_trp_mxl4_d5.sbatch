@@ -46,8 +46,8 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 CMD=$(cat /burg-archive/glab/users/pg2328/legoESM/omip_nemo/_trp_mxl4_d5.txt)
-case "$CMD" in *"--state-accumulate"*"--snapshot-every-days 0.25"*|*"--snapshot-every-days 5"*"--state-accumulate"*) ;; *) echo "FATAL: arm flags missing"; exit 1;; esac
-[ "$(git -C $ROOT rev-parse --short HEAD)" = "9de02003f" ] || { echo "FATAL: tree HEAD is not 9de02003f"; exit 1; }
+case "$CMD" in *"--snapshot-every-days 0.25"*"--state-accumulate"*|*"--snapshot-every-days 5"*"--state-accumulate"*) ;; *) echo "FATAL: arm flags missing"; exit 1;; esac
+[ "$(git -C $ROOT rev-parse --short HEAD)" = "f07d84e48" ] || { echo "FATAL: tree HEAD is not f07d84e48"; exit 1; }
 echo "CMD: $PY scripts/run/run_omip_core2.py $CMD"
 $PY -u scripts/run/run_omip_core2.py $CMD
 rc=$?
