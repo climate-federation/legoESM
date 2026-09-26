@@ -56,6 +56,9 @@ def _load_z20_helper():
     return mod.z20_from_column
 
 
+_USE_MEAN = [False]   # set from --use-mean-fields in main()
+
+
 def _flatten(snapshot: Path):
     """(T, lat, lon, wet, z, area) as point clouds, from either grid layout.
 
@@ -66,7 +69,16 @@ def _flatten(snapshot: Path):
     meshes reports a sampling difference as a physical one.
     """
     z = np.load(snapshot)
-    T = np.asarray(z["T"], dtype=np.float64)
+    if _USE_MEAN[0]:
+        # --use-mean-fields: the 5-day thickness-weighted window mean the
+        # driver writes with --state-accumulate -- the statistic NEMO's
+        # to/so ARE. Refused if absent; never a silent instantaneous fallback.
+        if "T_mean_hw" not in z.files:
+            raise SystemExit(f"{snapshot}: --use-mean-fields but no T_mean_hw "
+                             "(run the driver with --state-accumulate)")
+        T = np.asarray(z["T_mean_hw"], dtype=np.float64)
+    else:
+        T = np.asarray(z["T"], dtype=np.float64)
     lat = np.asarray(z["lat_T"], dtype=np.float64)
     lon = np.asarray(z["lon_T"], dtype=np.float64)
     wet = np.asarray(z["land_mask"], dtype=np.float64)
@@ -288,6 +300,16 @@ def _surface_profile(T, lat, lon, wet, zc, area, halfwidth, lo, hi,
     return out
 
 
+def _level_box_mean(T, lat, lon, wet, area, halfwidth, lo, hi) -> np.ndarray:
+    """Area-weighted box mean of T on the model's OWN levels (NaN-aware)."""
+    box = wet & (np.abs(lat) <= halfwidth) & (lon >= lo) & (lon < hi)
+    w = (area if area is not None else np.cos(np.radians(lat)))[box]
+    Tb = T[box]
+    ok = np.isfinite(Tb)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.sum(np.where(ok, Tb, 0.0) * w[:, None], axis=0) / np.sum(ok * w[:, None], axis=0)
+
+
 def _layer_mean_T(T: np.ndarray, zc: np.ndarray, z0: float, z1: float) -> np.ndarray:
     dz = np.gradient(zc)
     k = (zc >= z0) & (zc < z1)
@@ -325,6 +347,10 @@ def main() -> int:
                          "diapycnal-mixing discriminator)")
     ap.add_argument("--isopycnal-lon-lo", type=float, default=200.0)
     ap.add_argument("--isopycnal-lon-hi", type=float, default=260.0)
+    ap.add_argument("--use-mean-fields", action="store_true",
+                    help="read the driver's 5-day window mean (T_mean_hw) "
+                         "instead of the instantaneous T -- the statistic "
+                         "NEMO's 5-day 'to' is; refuses snapshots without it")
     ap.add_argument("--surface-profile", action="store_true",
                     help="box-mean T at common depths over the top 50 m "
                          "(the warm-lens probe), late and early states")
@@ -409,6 +435,9 @@ def main() -> int:
                 print(f"{f'{lo:.0f}-{hi:.0f}E':>12}{cells}")
             print()
 
+    _USE_MEAN[0] = bool(a.use_mean_fields)
+    if a.use_mean_fields:
+        print("[fields] legoESM = 5-day WINDOW MEAN (T_mean_hw); NEMO = 5-day mean")
     if a.surface_profile:
         lo, hi = a.surface_lon_lo, a.surface_lon_hi
         print(f"=== Near-surface T profile [C], |lat| <= {a.lat_halfwidth}, "
@@ -435,6 +464,32 @@ def main() -> int:
                     f"{prof[o][k]:>12.2f}" for o in order))
             print(f"{'T(0.5)-T(20)':>10}" + "".join(
                 f"{prof[o][0] - prof[o][5]:>12.2f}" for o in order))
+            print()
+            # Per-LEVEL box means (levels 1-20, own levels) and the cumulative
+            # excess heat vs NEMO -- the warm excess, its compensating deficit
+            # and the compensation depth, which the interpolated profile hides.
+            lvl = {}
+            for snap, lab in zip(snaps, a.label):
+                T, lat, lon, wet, zc, area = _flatten(snap)
+                lvl[lab] = (_level_box_mean(T, lat, lon, wet, area, a.lat_halfwidth, lo, hi), zc)
+            T, lat, lon, wet, zc, area = _nemo_columns(a.nemo_gridt, rec)
+            lvl["NEMO"] = (_level_box_mean(T, lat, lon, wet, area, a.lat_halfwidth, lo, hi), zc)
+            zN = lvl["NEMO"][1]
+            dz = np.diff(np.concatenate([[0.0], 0.5 * (zN[1:] + zN[:-1]), [zN[-1] + 0.5 * (zN[-1] - zN[-2])]]))
+            print(f"--- {stage}: per-level box mean and CUMULATIVE excess heat vs NEMO "
+                  f"[MJ/m2, rho0 cp = 4.1e6 J/m3/K] ---")
+            labs = [o for o in order if o != "NEMO"]
+            print(f"{'lev':>4}{'z m':>8}{'NEMO':>9}" + "".join(f"{o:>10}{'dT':>8}{'cumH':>8}" for o in labs))
+            cum = {o: 0.0 for o in labs}
+            for k in range(min(20, zN.size)):
+                row = f"{k + 1:>4}{zN[k]:>8.2f}{lvl['NEMO'][0][k]:>9.3f}"
+                for o in labs:
+                    if not np.allclose(lvl[o][1][:20], zN[:20], rtol=0.02, atol=0.02):
+                        raise SystemExit(f"{o}: levels differ from NEMO (ours {lvl[o][1][:5]}, NEMO {zN[:5]}); per-level diff undefined")
+                    d = lvl[o][0][k] - lvl["NEMO"][0][k]
+                    cum[o] += 4.1e6 * d * dz[k] / 1e6
+                    row += f"{lvl[o][0][k]:>10.3f}{d:>8.3f}{cum[o]:>8.2f}"
+                print(row)
             print()
 
     if a.isopycnal:
