@@ -209,11 +209,11 @@ def test_pole_rows_are_the_regrid_hazard_and_trim_fixes_it(tmp_path):
     raw = {m._VAR_T2M: 250.0 + 0.1 * r, m._VAR_TP: 1.0e-4 * r,
            m._VAR_SSRD: 1.0e6 * r, m._VAR_SSR: 0.8e6 * r, m._VAR_STR: -1.0e5 * r}
 
-    # (1) hazard: pole rows regrid to NaN (identity regrid onto the same grid).
+    # (1) the regrid now clips pole-row edges to +/-90, so a pole-inclusive
+    # identity regrid returns the field (it used to give NaN pole rows).
     field = raw[m._VAR_T2M][0]                                     # (nlat, nlon)
     out = conservative_regrid_latlon(field, lat, lon, lat, lon)
-    assert not np.isfinite(out[0]).any() and not np.isfinite(out[-1]).any()
-    assert np.isfinite(out[1:-1]).all()                           # interior is fine
+    np.testing.assert_allclose(out, field, rtol=1e-12)
 
     # (2) fix: drop poles, assemble, and read back THROUGH the driver -> all finite.
     raw2, lat2 = m._drop_pole_rows(raw, lat)
