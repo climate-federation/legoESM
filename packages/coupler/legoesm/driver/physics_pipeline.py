@@ -3809,6 +3809,13 @@ def _resolve_convection(config):
                 and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
 
+        # Tiedtke plume buoyancy-death memory (ExperimentConfig /
+        # --convective-buoyancy-death-memory, Tiedtke-only per the CLI guard).
+        if scheme == "tiedtke":
+            conv_config = conv_config._replace(
+                buoyancy_death_memory=bool(getattr(
+                    config, "convective_buoyancy_death_memory", False)))
+
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
         # replaces the constant ``precip_efficiency`` with the PHYSICAL

@@ -4551,3 +4551,21 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
     with pytest.raises(ValueError, match="silently inert"):   # ...the guard does not
         create_atmosphere_dycore(cfg, create_cubed_sphere(12),
                                  create_sigma_coordinate(5))
+
+
+def test_convective_buoyancy_death_memory_reaches_tiedtke_config():
+    """--convective-buoyancy-death-memory must reach the Tiedtke scheme config
+    the kernel is built from, not stop at ExperimentConfig."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+
+    parser = build_arg_parser()
+    base = ["--grid", "gaussian", "--resolution", "21",
+            "--convection", "tiedtke"]
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--convective-buoyancy-death-memory"]),
+        parser))
+    assert cfg_on.convective_buoyancy_death_memory is True
+    assert _resolve_convection(cfg_off)[1].buoyancy_death_memory is False
+    assert _resolve_convection(cfg_on)[1].buoyancy_death_memory is True

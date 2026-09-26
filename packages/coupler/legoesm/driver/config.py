@@ -930,7 +930,7 @@ class ExperimentConfig(NamedTuple):
     # reviving above an inversion (the default False lets a plume killed by
     # negative buoyancy resume nonzero M_u aloft — physically questionable,
     # and the cause of convective detrainment heating reaching the ~100 hPa
-    # tropical cold point).  Tiedtke-only (guarded in physics_pipeline).
+    # tropical cold point).  Tiedtke-only (guarded by the run_amip CLI).
     convective_buoyancy_death_memory: bool = False
 
     # Convection / Turbulence / GWD

@@ -439,15 +439,8 @@ DANGLING_FIELDS = {
     # a fail-loud guard on non-Morrison schemes — and ``morrison_dep_coeff``'s
     # declaration was corrected 1e-8 -> 1e-3 to match the leaf BEFORE wiring,
     # so the overlay is a no-op at defaults.  Entries removed per exact-match.)
-    # Case 4 in the module docstring, found by the adversarial review OF this
-    # audit: BechtoldConfig/ZhangMcFarlaneConfig.buoyancy_death_memory exists
-    # and is consumed by bechtold.py / zhang_mcfarlane.py, but nothing maps the
-    # ExperimentConfig scalar onto it.  Both default False => wiring it is
-    # behaviour-preserving.  (The original baseline claimed this was "carried
-    # in SegmentCarry, not a leaf" — false on both counts.)
-    "convective_buoyancy_death_memory": (
-        "wiring gap; BechtoldConfig.buoyancy_death_memory=False agrees",
-        (BechtoldConfig, "buoyancy_death_memory", True)),
+    # (2026-09-26: convective_buoyancy_death_memory WIRED — _resolve_convection
+    # maps it onto TiedtkeConfig.buoyancy_death_memory; entry removed.)
     # --- Cause 3: the leaf field does not exist ANYWHERE.  The config comment
     # documents physics that was never implemented; these are fiction and the
     # honest fix is deletion (or implementing the described behaviour).
