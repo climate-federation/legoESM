@@ -295,6 +295,7 @@ def nemo_fe3mask_from_tmask(tmask, *, grid=None):
 
 def nemo_qco_live_vorticity_e3f_cgrid(
     eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
+    bridge_operands=(),
 ):
     """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
 
@@ -333,6 +334,13 @@ def nemo_qco_live_vorticity_e3f_cgrid(
         # The certified GYRE use is a closed beta-plane box.
         return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
 
+    bridge_operands = frozenset(bridge_operands)
+    if not bridge_operands <= {"e3f0vor", "r3f", "fe3mask"}:
+        raise ValueError("unknown bridge vorticity-thickness operand")
+    raw_f = getattr(z_coord, "nemo_een_barotropic", None)
+    if bridge_operands and raw_f is None:
+        raise ValueError("bridge operands require carried NEMO EEN fields")
+
     masked = b(e3t0 * tmask)
     masked_n = north(masked)
     ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
@@ -349,13 +357,19 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     # ORCA T-pivot north fold, F-point field.  Regular/closed grids retain the
     # historical path byte-for-byte.
     e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
+    if "e3f0vor" in bridge_operands:
+        e3f0vor = jnp.asarray(raw_f.e3f_0, dtype=dtype)
 
     area_eta = b(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
     area_eta_n = north(area_eta)
     quad = b(b(area_eta + east(area_eta))
              + b(area_eta_n + east(area_eta_n)))
     fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
+    if "fe3mask" in bridge_operands:
+        fe3mask = jnp.asarray(raw_f.fe3mask, dtype=dtype)
     hf0 = jnp.sum(e3f0vor * fe3mask, axis=-1)
+    if "r3f" in bridge_operands:
+        hf0 = jnp.asarray(raw_f.hf_0, dtype=dtype)
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
