@@ -133,6 +133,8 @@ def _ldf_inputs(deck_root: Path, record_root: Path, kt: int):
     operand_scores = {
         "raw_face_u_vs_base": array_score(raw_u, base_u),
         "raw_face_v_vs_base": array_score(raw_v, base_v),
+        "raw_face_u_wet_vs_base": array_score(raw_u * u_mask, base_u * u_mask),
+        "raw_face_v_wet_vs_base": array_score(raw_v * v_mask, base_v * v_mask),
     }
     return outputs, card, entry, operand_scores
 
@@ -309,7 +311,7 @@ def compare_captures(parent: dict, raw_f: dict, parent_arrays: dict,
             "kmm_grad_div_u_vs_base", "kmm_grad_div_v_vs_base"))
     p1_refuted_by_equal_operands = all(
         direct[name]["bit_identical"] for name in (
-            "raw_face_u_vs_base", "raw_face_v_vs_base",
+            "raw_face_u_wet_vs_base", "raw_face_v_wet_vs_base",
             "kbb_vs_kmm_u", "kbb_vs_kmm_v",
             "kbb_output_vs_base_u", "kbb_output_vs_base_v",
             "kmm_output_vs_base_u", "kmm_output_vs_base_v"))
@@ -345,6 +347,8 @@ def compare_captures(parent: dict, raw_f: dict, parent_arrays: dict,
         "kbb_kmm_direct": {
             "raw_face_u_vs_base": direct["raw_face_u_vs_base"],
             "raw_face_v_vs_base": direct["raw_face_v_vs_base"],
+            "raw_face_u_wet_vs_base": direct["raw_face_u_wet_vs_base"],
+            "raw_face_v_wet_vs_base": direct["raw_face_v_wet_vs_base"],
             "u": direct["kbb_vs_kmm_u"],
             "v": direct["kbb_vs_kmm_v"],
             "verdict": (

@@ -17,6 +17,8 @@ def _capture(variant):
     direct = {
         "raw_face_u_vs_base": _score(False),
         "raw_face_v_vs_base": _score(False),
+        "raw_face_u_wet_vs_base": _score(False),
+        "raw_face_v_wet_vs_base": _score(False),
         "kbb_vs_kmm_u": _score(False),
         "kbb_vs_kmm_v": _score(True),
         "kbb_grad_div_u_vs_base": _score(False),
