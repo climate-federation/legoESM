@@ -27,8 +27,8 @@ by this loader are:
 The loader caches each calendar year as a zarr store under
 ``$LEGOESM_CACHE/forcing/jra55_do/<year>.zarr`` (resolved via
 ``legoesm.ocean.fidelity.cache.sub("forcing")`` to match the existing
-pattern). When the cache is missing the loader returns a deterministic
-synthetic climatology so the matrix smoke runs need no external data.
+pattern). When the cache is missing the loader raises; smoke runs opt in
+to a deterministic synthetic climatology with ``allow_synthetic=True``.
 """
 
 from __future__ import annotations
@@ -184,14 +184,15 @@ def _load_from_builder_cache(store: Path, year: int) -> Optional[OceanForcing]:
 
 
 def load_jra55_do(year: int, *, cache_dir: Optional[Path] = None,
-                  allow_synthetic: bool = True) -> OceanForcing:
+                  allow_synthetic: bool = False) -> OceanForcing:
     """Load one calendar year of JRA55-do forcing.
 
     Looks for ``<cache_dir>/<year>.zarr`` first, then for the multi-year
     cache written by ``scripts/data/prepare_omip_forcing.py`` (``cache_dir``
     may name that store directly or the directory holding it under its
-    default filename). Falls back to :func:`synthetic_ocean_forcing` when
-    ``allow_synthetic=True`` and neither holds the year.
+    default filename). Raises ``FileNotFoundError`` when neither holds the
+    year, unless ``allow_synthetic=True`` (smoke runs only), which returns
+    :func:`synthetic_ocean_forcing` with a warning.
     """
     root = Path(cache_dir) if cache_dir is not None else _cache_dir()
     zarr_path = root / f"{year}.zarr"
@@ -236,8 +237,8 @@ def load_jra55_do(year: int, *, cache_dir: Optional[Path] = None,
     logger.warning(
         "JRA55-do cache missing at %s — falling back to SYNTHETIC analytic "
         "forcing. This is NOT the OMIP-2 protocol; results are not "
-        "OMIP-comparable. Pass allow_synthetic=False to fail loudly, or "
-        "populate the cache (scripts/data/prepare_omip_forcing.py).",
+        "OMIP-comparable (allow_synthetic=True was requested). Populate the "
+        "cache with scripts/data/prepare_omip_forcing.py for real runs.",
         zarr_path,
     )
     return synthetic_ocean_forcing(year)

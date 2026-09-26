@@ -133,11 +133,15 @@ def main() -> int:
     acc = acc_transport(psi_bt, lat_t)
     print(f"   ACC @ Drake     = {acc.transport_Sv:6.2f} Sv")
 
-    # SST bias vs WOA (synthetic fallback ok for the local run).
+    # SST bias vs WOA: only against the real climatology on the model grid;
+    # a synthetic stand-in would print an observational score that is not one.
     sst_K = np.asarray(state.T.data)[..., 0] + constants.T_freeze
-    nlat = grid.n_lat
-    nlon = grid.n_lon
-    sst_ref, _, _ = load_woa_sst(nlat=nlat, nlon=nlon)
+    sst_ref, _, _ = load_woa_sst(allow_synthetic=False)
+    if sst_ref.shape != sst_K.shape:
+        raise ValueError(
+            f"WOA SST cache is on a {sst_ref.shape} grid, the model SST on "
+            f"{sst_K.shape}; regrid the WOA file to the model grid before "
+            "scoring (no score is computed across grids).")
     area = np.asarray(grid.area)
     bias = sst_climatology_bias(sst_K, sst_ref, area, mask=mask)
     print(f"   SST bias vs WOA = {bias.bias_K:6.2f} K (RMSE {bias.rmse_K:.2f})")

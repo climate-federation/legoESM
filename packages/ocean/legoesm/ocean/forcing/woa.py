@@ -9,9 +9,8 @@ What
 ----
 Loads the annual-mean sea-surface temperature climatology from a
 local NetCDF cache (the canonical 1 deg WOA grid is 360 x 180). When
-the cache file is missing the loader returns a deterministic
-synthetic climatology consistent with the OMIP-2 forcing fields so
-the matrix smoke tests do not depend on the ~3 GB WOA download.
+the cache file is missing the loader raises; smoke tests opt in to a
+deterministic synthetic climatology with ``allow_synthetic=True``.
 
 Synthetic climatology
 ---------------------
@@ -71,7 +70,7 @@ def synthetic_woa_sst(*, nlon: int = WOA_LON_NATIVE,
 
 def load_woa_sst(*, cache_dir: Optional[Path] = None,
                   month: Optional[int] = None,
-                  allow_synthetic: bool = True,
+                  allow_synthetic: bool = False,
                   nlat: int = WOA_LAT_NATIVE,
                   nlon: int = WOA_LON_NATIVE,
                   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -113,7 +112,7 @@ def load_woa_sst(*, cache_dir: Optional[Path] = None,
     logger.warning(
         "WOA SST cache missing at %s — falling back to SYNTHETIC analytic "
         "SST. Any 'bias vs WOA' computed from it is NOT an observational "
-        "comparison. Pass allow_synthetic=False to fail loudly.", nc_path)
+        "comparison (allow_synthetic=True was requested).", nc_path)
     return synthetic_woa_sst(nlon=nlon, nlat=nlat, month=month)
 
 

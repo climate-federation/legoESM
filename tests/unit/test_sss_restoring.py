@@ -55,7 +55,9 @@ class TestWOASSSLoader:
         assert sss_zonal[idx_arctic] < sss_zonal[idx_subtrop]
 
     def test_load_falls_back_to_synthetic(self, tmp_path):
-        sss, lat, lon = load_woa_sss(cache_dir=tmp_path)
+        with pytest.raises(FileNotFoundError):       # fail-loud by default
+            load_woa_sss(cache_dir=tmp_path)
+        sss, lat, lon = load_woa_sss(cache_dir=tmp_path, allow_synthetic=True)
         assert sss.shape[0] == WOA_LAT_NATIVE
         assert sss.shape[1] == WOA_LON_NATIVE
 

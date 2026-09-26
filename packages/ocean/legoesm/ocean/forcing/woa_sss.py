@@ -101,7 +101,7 @@ def load_woa_sss(
     *,
     cache_dir: Optional[Path] = None,
     month: Optional[int] = None,
-    allow_synthetic: bool = True,
+    allow_synthetic: bool = False,
     nlat: int = WOA_LAT_NATIVE,
     nlon: int = WOA_LON_NATIVE,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -109,8 +109,9 @@ def load_woa_sss(
 
     Looks for the cached NetCDF at
     ``<cache_dir>/woa_sss_annual.nc`` (or ``woa_sss_m<MM>.nc``).
-    Falls back to a synthetic climatology when the cache is
-    missing and ``allow_synthetic=True``.
+    Raises ``FileNotFoundError`` when the cache is missing, unless
+    ``allow_synthetic=True`` (smoke runs only), which returns a synthetic
+    climatology with a warning.
 
     Returns
     -------
@@ -153,5 +154,5 @@ def load_woa_sss(
     logger.warning(
         "WOA SSS cache missing at %s — falling back to SYNTHETIC analytic "
         "SSS. Salinity restoring and SSS scores use a made-up target. "
-        "Pass allow_synthetic=False to fail loudly.", nc_path)
+        "(allow_synthetic=True was requested).", nc_path)
     return synthetic_woa_sss(nlon=nlon, nlat=nlat, month=month)

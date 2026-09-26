@@ -125,14 +125,15 @@ def synthetic_dai_trenberth(
 def load_dai_trenberth(
     *,
     cache_dir: Optional[Path] = None,
-    allow_synthetic: bool = True,
+    allow_synthetic: bool = False,
 ) -> RiverRunoffData:
     """Load the Dai-Trenberth river-runoff climatology.
 
     Reads ``<cache_dir>/dai_trenberth_rivers.nc`` (CF-compliant
     NetCDF expected variables: ``lat``, ``lon``, ``time``,
-    ``runoff`` in kg/s, optional ``river_name``).  Falls back to the
-    synthetic 16-river climatology when the file is missing.
+    ``runoff`` in kg/s, optional ``river_name``).  Raises when the file
+    is missing unless ``allow_synthetic=True`` (smoke runs only), which
+    returns the synthetic 16-river climatology with a warning.
 
     Parameters
     ----------
@@ -188,8 +189,8 @@ def load_dai_trenberth(
         )
     logger.warning(
         "Dai-Trenberth cache missing at %s — falling back to the "
-        "SYNTHETIC 16-river climatology. Pass allow_synthetic=False to "
-        "fail loudly.", nc_path)
+        "SYNTHETIC 16-river climatology (allow_synthetic=True was "
+        "requested).", nc_path)
     return synthetic_dai_trenberth()
 
 

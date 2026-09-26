@@ -120,9 +120,12 @@ def test_woa_synthetic_sst_in_realistic_range():
     assert 285.0 < sst_K.mean() < 297.0
 
 
-def test_load_woa_sst_synthetic_fallback():
+def test_load_woa_sst_synthetic_fallback(tmp_path):
     from legoesm.ocean.forcing import load_woa_sst
-    sst_K, lat, lon = load_woa_sst(nlon=72, nlat=36)
+    with pytest.raises(FileNotFoundError):           # fail-loud by default
+        load_woa_sst(cache_dir=tmp_path, nlon=72, nlat=36)
+    sst_K, lat, lon = load_woa_sst(cache_dir=tmp_path, nlon=72, nlat=36,
+                                   allow_synthetic=True)
     assert sst_K.shape == (36, 72)
     # Sanity: equator is warmer than poles.
     eq_band = sst_K[16:20, :].mean()
@@ -136,11 +139,12 @@ def test_load_woa_sst_raises_when_synthetic_disabled(tmp_path):
         load_woa_sst(cache_dir=tmp_path, allow_synthetic=False)
 
 
-def test_woa_into_sst_climatology_bias():
+def test_woa_into_sst_climatology_bias(tmp_path):
     """Plug WOA loader into the climate-bias diagnostic."""
     from legoesm.ocean.forcing import load_woa_sst
     from legoesm.ocean.diagnostics_climate import sst_climatology_bias
-    sst_ref, _, _ = load_woa_sst(nlon=36, nlat=18)
+    sst_ref, _, _ = load_woa_sst(cache_dir=tmp_path, nlon=36, nlat=18,
+                                 allow_synthetic=True)
     # Model = WOA + uniform 1 K warm bias.
     sst_model = sst_ref + 1.0
     area = np.ones_like(sst_ref)
