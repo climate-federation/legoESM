@@ -1080,13 +1080,13 @@ CITATION_MAP = {
         ('+ ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 18],
     # --- ORCA2 card round 26: split the three live-thickness positions ---
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:121-125': [
-        'DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)',
+        ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 1),
         ('e1u(ji-1,jj  ) * pu(ji-1,jj  ,jk,Kbb)', 1), 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:127-129': [
-        'zwt(ji,jj)     = ahmt(ji,jj,jk) * r1_e1e2t(ji,jj)',
+        ('zwt(ji,jj)     = ahmt(ji,jj,jk) * r1_e1e2t(ji,jj)', 1),
         ('e1v(ji,jj-1)*(e3v_3d(ji  ,jj-1,jk)', 1), 3],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:132-140': [
-        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)',
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
         ('+ ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 9],
     # --- ORCA2 card round 24: held Decision-54 whole attribution ---
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:348-353': [
