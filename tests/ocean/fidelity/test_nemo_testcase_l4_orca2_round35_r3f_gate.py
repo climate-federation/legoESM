@@ -16,12 +16,22 @@ def _replay(status, u_max, v_max, exact):
     }
 
 
+def _moving_boundary():
+    return {
+        "area_t_grid_vs_raw_product": {"bit_identical": True},
+        "area_f_grid_vs_raw_product": {"bit_identical": True},
+        "r3f_division_vs_stored_reciprocal": {"bit_identical": False},
+    }
+
+
 def test_gate_requires_parent_reproduction_and_an_exact_arm(monkeypatch):
     responses = iter((
         _replay("HELD", gate.EXPECTED_PARENT_MAX["u_momentum"],
                 gate.EXPECTED_PARENT_MAX["v_momentum"], False),
         _replay("PASS", 0.0, 0.0, True),
     ))
+    monkeypatch.setattr(gate, "capture_r3f_boundary",
+                        lambda *args, **kwargs: _moving_boundary())
     monkeypatch.setattr(gate.r32, "capture_ldf_replay",
                         lambda *args, **kwargs: next(responses))
     assert gate.capture(SimpleNamespace(), SimpleNamespace())["status"] == "AT_BAR"
@@ -32,6 +42,23 @@ def test_gate_rejects_one_remaining_arm_bit(monkeypatch):
         _replay("HELD", gate.EXPECTED_PARENT_MAX["u_momentum"],
                 gate.EXPECTED_PARENT_MAX["v_momentum"], False),
         _replay("HELD", float.fromhex("0x1p-1074"), 0.0, False),
+    ))
+    monkeypatch.setattr(gate, "capture_r3f_boundary",
+                        lambda *args, **kwargs: _moving_boundary())
+    monkeypatch.setattr(gate.r32, "capture_ldf_replay",
+                        lambda *args, **kwargs: next(responses))
+    assert gate.capture(SimpleNamespace(), SimpleNamespace())["status"] == "DEBT"
+
+
+def test_gate_rejects_a_bit_identical_source_order_arm(monkeypatch):
+    boundary = _moving_boundary()
+    boundary["r3f_division_vs_stored_reciprocal"] = {"bit_identical": True}
+    monkeypatch.setattr(gate, "capture_r3f_boundary",
+                        lambda *args, **kwargs: boundary)
+    responses = iter((
+        _replay("HELD", gate.EXPECTED_PARENT_MAX["u_momentum"],
+                gate.EXPECTED_PARENT_MAX["v_momentum"], False),
+        _replay("PASS", 0.0, 0.0, True),
     ))
     monkeypatch.setattr(gate.r32, "capture_ldf_replay",
                         lambda *args, **kwargs: next(responses))
