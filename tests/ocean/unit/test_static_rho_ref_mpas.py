@@ -108,7 +108,7 @@ def test_static_matches_dynamic_at_init(setup):
     mask = state.land_mask.data
 
     def _fill(f):
-        return fill_land_cells_mpas(f, mask, c1, c2, mesh.edgesOnCell, mesh.nEdgesOnCell)
+        return fill_land_cells_mpas(f, mask, c1, c2)
 
     eos_fn = make_eos_fn("wright", None)
     rho_dyn, rho_prime_dyn, _p = iterate_eos_and_pressure_anomaly(
@@ -141,7 +141,7 @@ def test_runtime_uses_static_profile(setup):
 
     rho, rho_prime, _p = iterate_eos_and_pressure_anomaly(
         state.T.data, state.S.data, mask,
-        lambda f: fill_land_cells_mpas(f, mask, c1, c2, mesh.edgesOnCell, mesh.nEdgesOnCell),
+        lambda f: fill_land_cells_mpas(f, mask, c1, c2),
         eos_fn, pc_coord.dz_ref, constants.rho_ocean, constants.g, n_iter=2,
         rho_ref_z_static=state_static.rho_ref_z.data,
         h_actual=None,

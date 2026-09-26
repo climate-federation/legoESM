@@ -622,10 +622,8 @@ class MPASOceanModel:
         # the sharp ocean-to-zero discontinuity that `* mask` would create.
         c1_m = mesh.cellsOnEdge[0]
         c2_m = mesh.cellsOnEdge[1]
-        T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m,
-                                     mesh.edgesOnCell, mesh.nEdgesOnCell)
-        S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m,
-                                     mesh.edgesOnCell, mesh.nEdgesOnCell)
+        T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
+        S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
         # [stage-halo R1] The updated tracers' halo ring carries the
         # NEIGHBOR rank's tendencies this rank could not compute
         # (masked-wrong beyond the outer ring); KPP/TKE column inputs,

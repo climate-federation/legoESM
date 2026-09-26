@@ -191,8 +191,7 @@ def barotropic_substeps_mpas(
     # gradient_edge sees smooth fields at coastlines instead of the
     # sharp ocean-to-zero jump from masking.
     def _fill_land_cells_mpas(field_cell, mask_cell):
-        return fill_land_cells_mpas(field_cell, mask_cell, c1, c2,
-                                    mesh.edgesOnCell, mesh.nEdgesOnCell)
+        return fill_land_cells_mpas(field_cell, mask_cell, c1, c2)
 
     # --- Fix 2: Barotropic Laplacian diffusion ---
     baro_alpha_val = config.barotropic_diffusion_alpha

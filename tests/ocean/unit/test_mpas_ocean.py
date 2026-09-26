@@ -718,18 +718,10 @@ class TestMPASLandFill:
 
     @staticmethod
     def _chain_connectivity(n):
-        """Connectivity of a linear chain of n cells: edge i joins cells i
-        and i+1.  Returns (c1, c2, edgesOnCell (2, n), nEdgesOnCell)."""
+        """Build c1, c2 arrays for a linear chain of n cells."""
         c1 = jnp.arange(n - 1)
         c2 = jnp.arange(1, n)
-        left = jnp.arange(n) - 1                     # edge to the left
-        right = jnp.arange(n)                        # edge to the right
-        # end cells have one edge; pad the unused slot with a valid index
-        first = jnp.where(left < 0, right, left)
-        second = jnp.where((left >= 0) & (right < n - 1), right, 0)
-        eoc = jnp.stack([first, second])
-        neoc = jnp.where((jnp.arange(n) == 0) | (jnp.arange(n) == n - 1), 1, 2)
-        return c1, c2, eoc, neoc
+        return c1, c2
 
     def test_single_iter_reaches_only_one_ring(self):
         """With n_iter=1, only land cells adjacent to ocean get filled.
@@ -745,9 +737,9 @@ class TestMPASLandFill:
         # Chain: ocean ocean ocean land land land
         field = jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
         mask = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
-        c1, c2, eoc, neoc = self._chain_connectivity(6)
+        c1, c2 = self._chain_connectivity(6)
 
-        filled = fill_land_cells_mpas(field, mask, c1, c2, eoc, neoc, n_iter=1)
+        filled = fill_land_cells_mpas(field, mask, c1, c2, n_iter=1)
         # Cell 3 (1 edge from ocean) → filled with cell-2 value.
         assert float(filled[3]) == 3.0
         # Cells 4, 5 (2-3 edges from ocean) → unfilled.
@@ -763,9 +755,9 @@ class TestMPASLandFill:
 
         field = jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
         mask = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
-        c1, c2, eoc, neoc = self._chain_connectivity(6)
+        c1, c2 = self._chain_connectivity(6)
 
-        filled = fill_land_cells_mpas(field, mask, c1, c2, eoc, neoc)  # default n_iter=3
+        filled = fill_land_cells_mpas(field, mask, c1, c2)  # default n_iter=3
         # Every land cell in the chain is reachable within 3 edges.
         assert float(filled[3]) == 3.0
         assert float(filled[4]) == 3.0
@@ -791,9 +783,9 @@ class TestMPASLandFill:
             axis=-1,
         )  # (6, 3)
         mask = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
-        c1, c2, eoc, neoc = self._chain_connectivity(6)
+        c1, c2 = self._chain_connectivity(6)
 
-        filled = fill_land_cells_mpas(field, mask, c1, c2, eoc, neoc)  # n_iter=3
+        filled = fill_land_cells_mpas(field, mask, c1, c2)  # n_iter=3
         # Ocean cells preserved per-level.
         assert jnp.allclose(filled[0], jnp.array([1.0, 4.0, 7.0]))
         assert jnp.allclose(filled[2], jnp.array([3.0, 6.0, 9.0]))
@@ -815,9 +807,9 @@ class TestMPASLandFill:
             [1.0] * 6 + [-99.0] * 5, dtype=jnp.float32,
         )
         mask = jnp.array([1.0] * 6 + [0.0] * 5, dtype=jnp.float32)
-        c1, c2, eoc, neoc = self._chain_connectivity(n)
+        c1, c2 = self._chain_connectivity(n)
 
-        filled = fill_land_cells_mpas(field, mask, c1, c2, eoc, neoc, n_iter=3)
+        filled = fill_land_cells_mpas(field, mask, c1, c2, n_iter=3)
         # Cells 6, 7, 8 are 1, 2, 3 edges from ocean → filled.
         assert float(filled[6]) == 1.0
         assert float(filled[7]) == 1.0
@@ -830,44 +822,6 @@ class TestMPASLandFill:
 # ============================================================================
 # Test: Conservation
 # ============================================================================
-
-    def test_gather_matches_frozen_edge_scatter_on_mesh(self):
-        """The per-cell gather visits exactly the edges the former per-edge
-        scatter-add did: on a real SCVT mesh with a random coastline the two
-        agree to rounding (only the summation order differs)."""
-        import numpy as np
-        from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
-
-        def scatter_ref(field, m, c1, c2, n_iter=3):
-            filled = field
-            for _ in range(n_iter):
-                cnt = jnp.zeros_like(m).at[c1].add(m[c2]).at[c2].add(m[c1])
-                has = cnt > 0.0
-                if filled.ndim == 1:
-                    vs = jnp.zeros_like(filled).at[c1].add(filled[c2] * m[c2])
-                    vs = vs.at[c2].add(filled[c1] * m[c1])
-                    avg, can = vs / jnp.maximum(cnt, 1.0), (m < 0.5) & has
-                else:
-                    vs = jnp.zeros_like(filled).at[c1].add(filled[c2] * m[c2, None])
-                    vs = vs.at[c2].add(filled[c1] * m[c1, None])
-                    avg = vs / jnp.maximum(cnt[:, None], 1.0)
-                    can = ((m < 0.5) & has)[:, None]
-                filled = jnp.where(can, avg, filled)
-                m = jnp.where((m < 0.5) & has, 1.0, m)
-            return filled
-
-        mesh = create_voronoi_mesh(subdivision_level=4, lloyd_iterations=0)
-        rng = np.random.default_rng(7)
-        lon, lat = np.asarray(mesh.lonCell), np.asarray(mesh.latCell)
-        mask = jnp.asarray((np.sin(3 * lon) * np.cos(2 * lat) < 0.3).astype(np.float64))
-        c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
-        for shape in ((mesh.nCells,), (mesh.nCells, 5)):
-            f = jnp.asarray(rng.normal(size=shape))
-            new = fill_land_cells_mpas(f, mask, c1, c2, mesh.edgesOnCell, mesh.nEdgesOnCell)
-            ref = scatter_ref(f, mask, c1, c2)
-            np.testing.assert_allclose(np.asarray(new), np.asarray(ref), rtol=1e-13, atol=1e-15)
-            assert int(np.sum(np.asarray(new) != np.asarray(f))) > 0  # something was filled
 
 class TestConservation:
     """Test conservation fixers."""
