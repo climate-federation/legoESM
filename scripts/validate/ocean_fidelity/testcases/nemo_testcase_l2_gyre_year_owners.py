@@ -13540,13 +13540,29 @@ def developed_tracer_ldf_statement_walk(
             "e3u_live", "e3v_live"),
         "jit_and_eager_same_first_non_bit": jit_first == eager_first,
     }
+    slope_predictions = ({
+        "first_non_bit_is_nmln": slope_jit_first == "nmln",
+        "prd_is_non_bit": not slope_jit_rows["prd"]["bit_exact"],
+        "pn2_is_non_bit": not slope_jit_rows["pn2"]["bit_exact"],
+        "jit_and_eager_same_first_non_bit": (
+            slope_jit_first == slope_eager_first),
+        "first_owned_row_is_downstream": (
+            slope_jit_first_owned is not None
+            and list(slope_jit_rows).index(slope_jit_first_owned)
+            > list(slope_jit_rows).index(slope_jit_first)),
+    } if slope_oracle is not None else {})
     return {
-        "format": "gyre-round178-developed-tracer-ldf-walk-v1",
+        "format": ("gyre-round180-developed-slope-walk-v1"
+                   if slope_oracle is not None
+                   else "gyre-round178-developed-tracer-ldf-walk-v1"),
         "status": "PASS", "case": CASE, "worktree": stamp,
         "execution": "LatLonCGridOceanModel._step_jitted production closure",
         "step": DEVELOPED_PROCESS_STEP,
         "record": {key: value for key, value in oracle.items()
                    if key != "arrays"},
+        "slope_record": ({key: value for key, value in slope_oracle.items()
+                          if key != "arrays"}
+                         if slope_oracle is not None else None),
         "admission": {"daily_audit": str(daily_audit),
                       "entry_restart": str(bundle["restart_path"]),
                       "source_checks": bundle["source_checks"],
@@ -13575,6 +13591,9 @@ def developed_tracer_ldf_statement_walk(
         "first_owned_non_bit_row": slope_jit_first_owned,
         "predictions": predictions,
         "all_frozen_predictions_confirmed": all(predictions.values()),
+        "round180_predictions": slope_predictions,
+        "all_round180_predictions_confirmed": (
+            all(slope_predictions.values()) if slope_predictions else None),
         "compiled_source": {
             "call": "stprk3_stg.f90:928-934",
             "slope_call": "stprk3.f90:178",

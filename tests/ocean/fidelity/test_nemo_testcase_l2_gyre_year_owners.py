@@ -1234,3 +1234,22 @@ def test_round179_source_layout_plant_fires():
     assert result.returncode == 69, output
     assert "STATUS PLANT-FIRED: source-layout" in output
     assert "REFUSE: intentional source-layout plant exit" in output
+
+
+def test_round180_slope_walk_registry_and_production_hook(harness):
+    """The admitted causal schema is complete and routed through production."""
+    assert harness.ROUND179_SLOPE_HEADER == (
+        1, 1081, 1, 1, 36, 26, 31, 30, 31, 17, 3, 0, 179)
+    assert len(harness.ROUND179_SLOPE_3D) == 31
+    assert len(harness.ROUND179_SLOPE_2D) == 17
+    assert len(harness.ROUND179_SLOPE_1D) == 3
+    model = Path(
+        "packages/ocean/legoesm/ocean/dynamics/"
+        "ocean_model_latlon_cgrid.py").read_text()
+    operator = Path(
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/"
+        "gm_redi_latlon_cgrid.py").read_text()
+    assert "return_redi_slope_diagnostics=" in model
+    assert "native_slope_nmln_override=" in model
+    assert "def _nemo_native_slope_diagnostics" in operator
+    assert '"zuslp_post": post_u' in operator
