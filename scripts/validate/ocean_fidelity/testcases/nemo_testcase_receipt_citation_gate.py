@@ -1069,7 +1069,7 @@ CITATION_MAP = {
         5],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:784-802': [
         ('zwx(ji,jj) = e2u(ji,jj) * (e3u_3d(ji,jj,jk)', 3),
-        'pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva',
+        ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 2),
         19],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90:273-286': [
         ('IF( PRESENT( pr3f ) ) THEN             !==  ratio at f-point  ==!', 2),
