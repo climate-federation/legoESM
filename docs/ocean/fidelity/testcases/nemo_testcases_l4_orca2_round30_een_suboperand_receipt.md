@@ -96,7 +96,7 @@ The citation gate passes all four compiled citations with zero failures, zero
 unmapped citations, and zero map-audit failures.  Its rigid +2-line EEN
 reciprocal plant exits 1 with `SYMBOL-NOT-AT-LINE`; all nine citation
 self-tests fire.  The preregistration's initial `domqco` header citation was
-rigidly re-anchored to the executed `:273-286` statement before the receipt;
+rigidly re-anchored to the executed lines 273–286 before the receipt;
 no prediction or result changed.
 
 The focused round-27/28/29/30 and citation battery reports **25 passed**.
