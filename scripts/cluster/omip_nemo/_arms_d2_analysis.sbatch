@@ -25,13 +25,13 @@ snap() { local h=$1; local d=$(python3 -c "print(f'{$h/24:.3f}'.rstrip('0').rstr
 ls $R | grep -c snapshot_day | sed 's/^/snapshots: /'
 NEMODIRS="RUN_HOURLY"; [ "$ARM" = trp_nolc_d2 ] && NEMODIRS="RUN_HOURLY RUN_HOURLY_NOLC"
 for D in $NEMODIRS; do for H in 04 08 12 16 24 36 48; do
-  S=$(ls $R/snapshot_day*.npz | awk -v h=$H '{ if (match($0,/day([0-9.]+)\.npz/,m) && sprintf("%.3f", m[1]*24)+0 == h+0) print }' | head -1)
+  S=$(ls $R/snapshot_day*.npz | awk -v h=$H '{ if (match($0,/day([0-9.]+)\.npz/,m) && int(m[1]*24+0.5)==h+0) print }' | head -1)
   [ -z "$S" ] && { echo "##### $D hour $H: no snapshot"; continue; }
   echo "##### $ARM vs $D restart step $H (ours $(basename $S))"
   $PY -u scripts/validate/ocean_fidelity/equatorial_tke_length_vs_nemo_restart.py --restart-glob "$B/$D/ORCA1_000000${H}_restart_oce_*.nc" --snapshot $S --n-levels 16 2>&1 | grep -vE "$NOISE"
 done; done
 echo "##### profile change vs NEMO hourly (first hours)"
-PAIRS=""; for H in 2 4 6 12 24; do S=$(ls $R/snapshot_day*.npz | awk -v h=$H '{ if (match($0,/day([0-9.]+)\.npz/,m) && sprintf("%.3f", m[1]*24)+0 == h+0) print }' | head -1); [ -n "$S" ] && PAIRS="$PAIRS $((H-1)):$S"; done
+PAIRS=""; for H in 2 4 6 12 24; do S=$(ls $R/snapshot_day*.npz | awk -v h=$H '{ if (match($0,/day([0-9.]+)\.npz/,m) && int(m[1]*24+0.5)==h+0) print }' | head -1); [ -n "$S" ] && PAIRS="$PAIRS $(python3 -c "import re,sys;print(int(float(re.search(r'day([0-9.]+)\.npz',sys.argv[1]).group(1))*24))" $S):$S"; done
 $PY -u scripts/validate/ocean_fidelity/equatorial_box_profile_tendency_vs_nemo.py --nemo-dir $B/RUN_HOURLY --n-levels 14 --pairs $PAIRS 2>&1 | grep -vE "$NOISE"
 echo "##### turbocline per snapshot (ours instantaneous vs NEMO hourly mean, rec = hour-1)"
 for S in $(ls $R/snapshot_day*.npz | grep -v final); do
