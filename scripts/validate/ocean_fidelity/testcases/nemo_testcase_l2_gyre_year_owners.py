@@ -12311,6 +12311,10 @@ def developed_vertical_day240_sensitivity(
                 elif name in ("complete_K", "complete_K_ulp"):
                     target = vertical["heat_K"]
                     target_postadd = np.array(nemo_effective, copy=True)
+                    # Route the unchanged live divisor through the existing
+                    # fourth seam slot so every complete-K arm shares one
+                    # production-JIT signature.
+                    target_e3w = np.array(vertical["e3w_now"], copy=True)
                     if plant_first_coefficient and step == PROCESS_START_STEP:
                         candidates = np.argwhere(
                             interface_wet & np.isfinite(target_postadd)
@@ -12352,6 +12356,11 @@ def developed_vertical_day240_sensitivity(
                             if (name.endswith("_identity")
                                 or "_content" in name) else
                             np.array(nemo_e3t, copy=True))
+                    if "_e3t" in name:
+                        # Keep the sixth slot present and identity-valued so
+                        # e3t and content arms share one compiled signature.
+                        target_content = np.array(
+                            vertical["content_T"], copy=True)
                     if "_content" in name:
                         target_content = (
                             np.array(vertical["content_T"], copy=True)
