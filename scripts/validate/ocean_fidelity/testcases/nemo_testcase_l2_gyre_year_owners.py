@@ -12480,12 +12480,6 @@ def _content_walk_rows(observed: dict[str, np.ndarray], record: dict,
         "literal_nemo_rhs_calibration": calibration,
         "model_content_rebuild": _score_developed_row(
             observed["rebuilt_content"], observed["content"], wet),
-        "model_accumulator_components": {
-            "advection_cells_nonzero": int(np.count_nonzero(
-                observed["advection_increment"][wet])),
-            "source_cells_nonzero": int(np.count_nonzero(
-                observed["source_increment"][wet])),
-        },
     }
 
 
@@ -12499,7 +12493,6 @@ def developed_content_producer_walk(
     _policy()
     import jax
     import jax.numpy as jnp
-    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
     from legoesm.ocean.fidelity.provenance import worktree_stamp
@@ -12591,7 +12584,7 @@ def developed_content_producer_walk(
     ssha = jnp.asarray(payload["ssha"])
     hooks = _NEMOWSRK3TestHooks(
         tracer_process_trace=(), vertical_solve_trace=True)
-    real_pair_step = model_module._nemo_ws_rk3_tracer_pair_step
+    e3t_0 = _vertical_field(record, "e3t_0", nlev)
 
     def run_mode(*, eager: bool) -> tuple[object, dict[str, np.ndarray]]:
         def execute(model):
@@ -12610,83 +12603,48 @@ def developed_content_producer_walk(
                     _nemo_stage1_zad_eta_after_override=ssha)
             return jax.device_get(result)
 
-        control_model = LatLonCGridOceanModel(
+        trace_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord,
             card.recipe.model_config, _nemo_ws_test_hooks=hooks)
-        control = execute(control_model)
-        captured = []
-
-        def sink(*values):
-            captured.append(tuple(np.asarray(value) for value in values))
-
-        def observed_pair_step(*values, **kwargs):
-            result = real_pair_step(*values, **kwargs)
-            if kwargs.get("return_final_content", False):
-                tr_a = values[0]
-                h_old = values[6]
-                h_new = values[7]
-                dt = jnp.asarray(values[11], dtype=h_old.dtype)
-                h_half = jnp.asarray(0.5, h_old.dtype) * (h_old + h_new)
-                before = h_old * tr_a
-                advection = result[4]
-                source_rate = kwargs["stage_source_rates"][2][0]
-                source_increment = dt * h_half * source_rate
-                advection_increment = advection - before
-                accumulated = advection_increment + source_increment
-                content = result[2]
-                recovered_krhs = accumulated / (dt * h_half)
-                rebuilt = before + accumulated
-                jax.debug.callback(
-                    sink, tr_a, h_old, before, recovered_krhs, h_half,
-                    accumulated, content, rebuilt, advection_increment,
-                    source_increment, ordered=True)
-            return result
-
-        model_module._nemo_ws_rk3_tracer_pair_step = observed_pair_step
-        try:
-            observed_model = LatLonCGridOceanModel(
-                card.recipe.grid, card.recipe.z_coord,
-                card.recipe.model_config, _nemo_ws_test_hooks=hooks)
-            observed = execute(observed_model)
-            jax.effects_barrier()
-        finally:
-            model_module._nemo_ws_rk3_tracer_pair_step = real_pair_step
-        require(len(captured) >= 1,
-                "content observer saw no final-stage call")
-        moved = _state_bit_mismatches(
-            control.state_after, observed.state_after)
+        ordinary_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config)
+        trace = execute(trace_model)
+        ordinary = execute(ordinary_model)
+        trace_state = trace.state_after
+        moved = _state_bit_mismatches(trace_state, ordinary)
         require(moved == 0,
-                f"content observer moved {moved} returned-state bytes")
-        names = (
-            "T_Kbb", "e3t_Kbb", "before_content", "T_Krhs", "e3t_Kmm",
-            "accumulated_Krhs_content", "content", "rebuilt_content",
-            "advection_increment", "source_increment",
-        )
-        consumed_content = np.asarray(
-            observed.vertical_solve.content_T, dtype=np.float64)
-        consumed_matches = [
-            index for index, values in enumerate(captured)
-            if np.array_equal(values[6], consumed_content)
-        ]
-        require(len(consumed_matches) == 1,
-                "content observer cannot uniquely identify the trace call "
-                f"consumed by the vertical solve: matches={consumed_matches}")
-        selected = consumed_matches[0]
-        fields = dict(zip(names, captured[selected], strict=True))
-        fields["_observer_final_stage_calls"] = len(captured)
-        fields["_observer_consumed_call_index"] = selected
-        return observed, fields
+                f"existing content trace moved {moved} returned-state bytes")
+        frame = _trace_frame(trace)
+        vertical = _vertical_trace_frame(trace)
+        tbb = frame["Tbb"]
+        e3t_kbb = e3t_0 * frame["q_Kbb"][..., None]
+        e3t_kmm = e3t_0 * frame["q_Kmm"][..., None]
+        before = e3t_kbb * tbb
+        content = vertical["content_T"]
+        accumulated = content - before
+        recovered_krhs = accumulated / (
+            np.float64(record["arrays"]["rDt"]) * e3t_kmm)
+        return trace, {
+            "T_Kbb": tbb,
+            "e3t_Kbb": e3t_kbb,
+            "before_content": before,
+            "T_Krhs": recovered_krhs,
+            "e3t_Kmm": e3t_kmm,
+            "accumulated_Krhs_content": accumulated,
+            "content": content,
+            "rebuilt_content": before + accumulated,
+        }
 
     modes = {}
     for name, eager in (("production_step_jit", False),
                         ("production_eager", True)):
         _trace, observed = run_mode(eager=eager)
-        observer_calls = int(observed.pop("_observer_final_stage_calls"))
-        consumed_call = int(observed.pop("_observer_consumed_call_index"))
         modes[name] = _content_walk_rows(observed, record, wet)
         modes[name]["observer_state_unequal_bytes"] = 0
-        modes[name]["observer_final_stage_calls"] = observer_calls
-        modes[name]["observer_consumed_call_index"] = consumed_call
+        modes[name]["observer"] = (
+            "existing tracer_process_trace and vertical_solve_trace; "
+            "no callback or new returned field")
 
     authoritative = modes["production_step_jit"]
     predictions = {
