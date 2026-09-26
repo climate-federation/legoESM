@@ -41,7 +41,7 @@ class IncrementalDiagnostics(NamedTuple):
     cost_history: list
     grad_norm_history: list
     inner_iterations: list
-    innovation_rms: list
+    innovation_rms: list  # RMS of y - H(M(x)) over all obs, after each outer
 
 
 def incremental_4dvar(
@@ -89,6 +89,9 @@ def incremental_4dvar(
     """
     x_b = state_to_control(background_state, control_spec)
     x_k = x_b.copy()
+    # Preconditioned iterate, x_k = x_b + B^{1/2} v_k; carried across outer
+    # iterations so each inner solve warm-starts from the current analysis.
+    v_k = jnp.zeros_like(x_b)
 
     cost_history = []
     grad_norm_history = []
@@ -120,6 +123,29 @@ def incremental_4dvar(
         J_tilde = preconditioned_cost_fn(cost_fn, B, x_b)
         return jax.value_and_grad(J_tilde)(v)
 
+    n_obs_values = sum(int(jnp.size(o.values)) for o in observations)
+
+    @jax.jit
+    def _innovation_rms(x):
+        # Forward-only rollout accumulating sum (y - H(M(x)))^2 in-loop (no
+        # stored trajectory); obs time convention matches the cost rollout.
+        def body(s, i):
+            s = model.step(s, dt)
+            sq = jnp.zeros((), x.dtype)
+            for o in observations:
+                t = jnp.asarray(o.time_index)
+                t = jnp.where(t < 0, t + n_steps, t)
+                sq = sq + jax.lax.cond(
+                    i == t,
+                    lambda s, o=o: jnp.sum((o.values - o.operator(s)) ** 2).astype(x.dtype),
+                    lambda s: jnp.zeros((), x.dtype),
+                    s)
+            return s, sq
+
+        state = control_to_state(x, control_spec, background_state)
+        _, sq = jax.lax.scan(body, state, jnp.arange(n_steps))
+        return jnp.sqrt(jnp.sum(sq) / n_obs_values)
+
     for outer in range(config.n_outer):
         # Re-linearize around the current iterate (changing VALUE, fixed shape).
         template = control_to_state(x_k, control_spec, background_state)
@@ -136,15 +162,14 @@ def incremental_4dvar(
 
         if g_norm < config.inner_gtol:
             inner_iterations.append(0)
-            innovation_rms_list.append(0.0)
+            innovation_rms_list.append(float(_innovation_rms(x_k)))
             continue
 
         # Inner loop minimization.  ``partial`` binds the current template by
         # VALUE (no late-binding / B023), giving the minimizer a single-arg
         # ``f(x) -> (J, grad)`` backed by the once-compiled wrapper above.
         if config.use_preconditioning:
-            # Initial v from current x: x_k = x_b + B^{1/2} v
-            v0 = jnp.zeros_like(x_k)
+            v0 = v_k
             inner_fn = partial(_precond_and_grad, template_state=template)
 
             if config.inner_method == "cg":
@@ -158,8 +183,8 @@ def incremental_4dvar(
                     max_iter=config.n_inner, gtol=config.inner_gtol,
                 )
 
-            # Recover x from v
-            x_k = x_b + B.sqrt_multiply(result.x)
+            v_k = result.x
+            x_k = x_b + B.sqrt_multiply(v_k)
         else:
             inner_fn = partial(_cost_and_grad, template_state=template)
             if config.inner_method == "cg":
@@ -176,9 +201,7 @@ def incremental_4dvar(
 
         inner_iterations.append(int(result.n_iter))
 
-        # Compute innovation RMS
-        J_final = float(result.fun)
-        innovation_rms_list.append(J_final)
+        innovation_rms_list.append(float(_innovation_rms(x_k)))
 
     analysis_state = control_to_state(x_k, control_spec, background_state)
 
