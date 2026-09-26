@@ -381,3 +381,21 @@ def test_thickness_weighted_mean_matches_nemo_definition():
     assert np.isnan(out["T_mean_hw"][..., 1]).all() and np.isnan(out["S_mean_hw"][..., 1]).all()
     np.testing.assert_allclose(out["h_mean"][..., 0], 2.0, rtol=1e-12)
     assert "T_h_mean" not in out
+
+
+def test_velocity_window_means_are_plain_means_on_their_own_staggering():
+    acc = _driver()._SurfaceFluxAccumulator()
+    st = lambda k: SimpleNamespace(T=SimpleNamespace(data=np.zeros((2, 2, 1))),
+                                   S=SimpleNamespace(data=np.zeros((2, 2, 1))),
+                                   u=SimpleNamespace(data=np.full((2, 3, 1), k)),
+                                   v=SimpleNamespace(data=np.full((3, 2, 1), 2 * k)),
+                                   mass_flux_w=np.full((2, 2, 2), 3 * k))
+    acc.add(None, state=st(1.0)); acc.add(None, state=st(3.0))
+    out = acc.drain()
+    np.testing.assert_allclose(out["u_mean"], 2.0); assert out["u_mean"].shape == (2, 3, 1)
+    np.testing.assert_allclose(out["v_mean"], 4.0); assert out["v_mean"].shape == (3, 2, 1)
+    np.testing.assert_allclose(out["mass_flux_w_mean"], 6.0)
+    # a state without velocities still works and writes no velocity key
+    acc.add(None, state=SimpleNamespace(T=SimpleNamespace(data=np.ones((1, 1, 1))),
+                                        S=SimpleNamespace(data=np.ones((1, 1, 1)))))
+    assert "u_mean" not in acc.drain()

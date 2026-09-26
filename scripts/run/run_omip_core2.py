@@ -6014,6 +6014,10 @@ class _SurfaceFluxAccumulator:
         self._n = 0
 
     _STATE_FIELDS = ("T", "S")
+    # Plain window means of the velocities too (NEMO's uo/vo/wo are 5-day
+    # means; an instantaneous w against them read 6x at day 5). Staggered
+    # shapes, so no thickness weighting; skipped when the state lacks one.
+    _STATE_VEL_FIELDS = ("u", "v", "mass_flux_w")
 
     def add(self, sf, mld=None, state=None, dz=None):
         """Accumulate one step. ``mld`` and ``state`` are optional and share
@@ -6055,6 +6059,13 @@ class _SurfaceFluxAccumulator:
             if h is not None:
                 prev = self._sums.get("h")
                 self._sums["h"] = h if prev is None else prev + h
+            for name in self._STATE_VEL_FIELDS:
+                f = getattr(state, name, None)
+                if f is None:
+                    continue
+                v = jnp.asarray(getattr(f, "data", f), dtype=_acc_dtype)
+                prev = self._sums.get(name)
+                self._sums[name] = v if prev is None else prev + v
         if sf is None and mld is None and state is None:
             return
         self._n += 1
