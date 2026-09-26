@@ -15,7 +15,7 @@
 # after the first night -> the nocturnal entrainment itself is short.
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge; cd $ROOT || exit 1
-git -C $ROOT rev-parse --short HEAD | grep -q 01820ddb6 || { echo "worktree HEAD moved"; exit 2; }
+git -C $ROOT rev-parse --short HEAD | grep -q aa80adbcf || { echo "worktree HEAD moved"; exit 2; }
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu
