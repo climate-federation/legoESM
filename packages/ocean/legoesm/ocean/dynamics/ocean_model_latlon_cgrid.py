@@ -1032,6 +1032,24 @@ def _ssp_rk3_tracer_pair_step(
     return a_new, b_new
 
 
+class _NEMOVerticalSolveTestInput(NamedTuple):
+    """Fixed-shape private input for production-compiled solve probes.
+
+    ``replace`` is a dynamic six-element boolean array.  Disabled, identity,
+    directed, and planted probes therefore share one JIT input structure and
+    one traced graph; only leaf values differ.  No model configuration can
+    construct or select this diagnostic input.
+    """
+
+    heat_K: object
+    viscosity_K: object
+    formed_K: object
+    tracer_e3w: object
+    tracer_e3t: object
+    temperature_content: object
+    replace: object
+
+
 class _NEMOWSRK3TestHooks(NamedTuple):
     """Private causal controls; never part of a constructible model config."""
 
@@ -10938,7 +10956,23 @@ class LatLonCGridOceanModel:
         _tracer_e3w_test_override = None
         _tracer_e3t_test_override = None
         _tracer_content_t_test_override = None
-        if effective_K_test_override is not None:
+        _fixed_solve_test_input = None
+        _fixed_solve_replace = None
+        if isinstance(effective_K_test_override,
+                      _NEMOVerticalSolveTestInput):
+            _fixed_solve_test_input = effective_K_test_override
+            _fixed_solve_replace = jnp.asarray(
+                effective_K_test_override.replace, dtype=bool)
+            if _fixed_solve_replace.shape != (6,):
+                raise ValueError(
+                    "fixed vertical-solve test input requires six selectors")
+            K_v_cell = jnp.where(
+                _fixed_solve_replace[0],
+                effective_K_test_override.heat_K, K_v_cell)
+            A_v_cell = jnp.where(
+                _fixed_solve_replace[1],
+                effective_K_test_override.viscosity_K, A_v_cell)
+        elif effective_K_test_override is not None:
             if len(effective_K_test_override) not in (2, 3, 4, 5, 6):
                 raise ValueError(
                     "vertical K test override requires 2 through 6 arrays")
@@ -11116,7 +11150,11 @@ class LatLonCGridOceanModel:
                 K_v_cell = K_v_cell * _wet_if_vmix
                 if dK_ddm_salt is not None:
                     dK_ddm_salt = dK_ddm_salt * _wet_if_vmix
-            if _formed_effective_K_override is not None:
+            if _fixed_solve_test_input is not None:
+                K_v_cell = jnp.where(
+                    _fixed_solve_replace[2],
+                    _fixed_solve_test_input.formed_K, K_v_cell)
+            elif _formed_effective_K_override is not None:
                 K_v_cell = _formed_effective_K_override
             # IMPLICIT surface tracer forcing: add masked dt·S_surf to the
             # solve input, matching Veros's dt_tracer·forc/dz[surface] RHS.
@@ -11492,10 +11530,20 @@ class LatLonCGridOceanModel:
         # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
         # object) ⇒ the shared-K pair fast path stays BYTE-IDENTICAL.
         K_s_cell = K_v_cell if dK_ddm_salt is None else (K_v_cell + dK_ddm_salt)
-        _tracer_e3w = (dz_half_cell if _tracer_e3w_test_override is None
-                       else _tracer_e3w_test_override)
-        _tracer_e3t = (dz_cell if _tracer_e3t_test_override is None
-                       else _tracer_e3t_test_override)
+        if _fixed_solve_test_input is not None:
+            _tracer_e3w = jnp.where(
+                _fixed_solve_replace[3],
+                _fixed_solve_test_input.tracer_e3w, dz_half_cell)
+            _tracer_e3t = jnp.where(
+                _fixed_solve_replace[4],
+                _fixed_solve_test_input.tracer_e3t, dz_cell)
+        else:
+            _tracer_e3w = (dz_half_cell
+                           if _tracer_e3w_test_override is None
+                           else _tracer_e3w_test_override)
+            _tracer_e3t = (dz_cell
+                           if _tracer_e3t_test_override is None
+                           else _tracer_e3t_test_override)
         if _vmix_batched:
             T_new, S_new, u_new, v_new = (
                 implicit_vertical_diffusion_ocean_batched([
@@ -11521,7 +11569,12 @@ class LatLonCGridOceanModel:
                         _content_s = S_solve_in * dz_cell
                     else:
                         _content_t, _content_s = nemo_tracer_content_rhs
-                    if _tracer_content_t_test_override is not None:
+                    if _fixed_solve_test_input is not None:
+                        _content_t = jnp.where(
+                            _fixed_solve_replace[5],
+                            _fixed_solve_test_input.temperature_content,
+                            _content_t)
+                    elif _tracer_content_t_test_override is not None:
                         _content_t = _tracer_content_t_test_override
                     _tracer_wet = _literal_t_wet
                     _tracer_result = (
