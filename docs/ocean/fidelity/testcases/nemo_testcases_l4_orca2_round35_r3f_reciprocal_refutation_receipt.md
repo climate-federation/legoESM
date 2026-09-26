@@ -84,6 +84,15 @@ the committed measurement diff.  It failed before reading the diff with
 Verdict: **independent review unavailable in-sandbox**.  The complete log is
 preserved as `codex_readonly_review.log`.
 
+The receipt citation gate passes all three compiled citations with zero
+failures, zero unmapped citations, and zero map-audit failures.  Its real
+rigid-shift plant exits 1 with `SYMBOL-NOT-AT-LINE`.  The first gate run
+caught the preregistration's one-line-high `domhgr` range; the three-line
+extent was shifted rigidly by +1 and the correction is retained in the
+preregistration.  The final push battery, including the citation gate,
+NEMO recipe, TKE, freshwater, parallel-receipt, and Round-35 tests, passes
+**130/130 in 360.54 s**.
+
 The live GitHub issue could not be read: the local `gh` credential is invalid
 and the public issue URL is unavailable without authentication.  No issue
 comment was posted or claimed.
