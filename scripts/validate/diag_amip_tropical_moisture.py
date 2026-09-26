@@ -91,6 +91,38 @@ def gpcp_pr_mm_day(lat, lon, year, month):
     return block_area_mean(sel.isel(time=0).values, g.lat.values, f) * _DAY
 
 
+def sign_agreement(diffs, area, mask):
+    """Area fraction (under mask) where every difference map has the same
+    sign; ~0.5 for two independent noise maps, 0.25 for three."""
+    d = np.stack([np.asarray(x, float) for x in diffs])
+    ok = mask & np.all(np.isfinite(d), axis=0)
+    same = np.all(d > 0, axis=0) | np.all(d < 0, axis=0)
+    return float((area * (same & ok)).sum() / (area * ok).sum())
+
+
+def pair_agreement(pairs, month, fields=("pr", "prw", "clt", "rsut", "tas", "hfls")):
+    """Fix-minus-control per pair for each field: tropical (20S-20N) and
+    global area means, per-pair values, and map sign agreement."""
+    import xarray as xr
+
+    def fld(run, v):
+        x = xr.open_dataset(glob.glob(f"{run}/cmor/Amon/{v}_*.nc")[0])[v].isel(time=month - 1)
+        return x.values * (_DAY if v == "pr" else 1.0), x.lat.values
+    area = xr.open_dataset(glob.glob(f"{pairs[0][0]}/cmor/fx/areacella_*.nc")[0]).areacella.values
+    for v in fields:
+        diffs = []
+        for ctl, fix in pairs:
+            a, lat = fld(ctl, v)
+            b, _ = fld(fix, v)
+            diffs.append(b - a)
+        allm = np.ones_like(area, bool)
+        trop = (np.abs(lat) <= 20)[:, None] & allm
+        print(f"[pairs] {v:5s} fix-ctl global " + " ".join(f"{area_mean(d, area, allm):+.3f}" for d in diffs)
+              + " | trop " + " ".join(f"{area_mean(d, area, trop):+.3f}" for d in diffs)
+              + f" | sign agreement global {sign_agreement(diffs, area, allm):.2f} trop {sign_agreement(diffs, area, trop):.2f}"
+              + f" (noise {0.5 ** (len(diffs) - 1):.2f})")
+
+
 def _coarsen_to(x, lat, lon):
     x = x.sortby("lat")
     if x.lat.size > lat.size:
@@ -107,12 +139,17 @@ def main(argv=None):
     from legoesm.thermo import relative_humidity, specific_humidity_to_mixing_ratio
 
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("runs", nargs="+")
+    ap.add_argument("runs", nargs="*")
     ap.add_argument("--month", type=int, default=2, help="1-based month index in the CMOR files")
     ap.add_argument("--year", type=int, default=1979)
     ap.add_argument("--bands", action="store_true",
                     help="also print 10-degree zonal-band means (40S-40N): pr vs GPCP, prw vs ERA5, ocean and land")
+    ap.add_argument("--pairs", nargs="+", default=None, metavar="CTL,FIX",
+                    help="instead: fix-minus-control agreement across pairs, each given as ctl_dir,fix_dir")
     a = ap.parse_args(argv)
+    if a.pairs:
+        pair_agreement([tuple(x.split(",")) for x in a.pairs], a.month)
+        return
 
     def era5(v, lat, lon, plev=None):
         f = sorted(glob.glob(f"{ERA5_ROOT}/{v}/*.nc"))

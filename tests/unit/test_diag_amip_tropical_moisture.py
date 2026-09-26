@@ -61,3 +61,12 @@ def test_rain_outside_the_gpcp_record_is_refused_not_substituted():
     feb2002 = m.gpcp_pr_mm_day(lat, lon, 2002, 2)
     assert feb2002.shape == (36, 72) and 2.0 < np.average(
         feb2002, weights=np.cos(np.deg2rad(lat))[:, None] * np.ones((1, 72))) < 3.2
+
+
+def test_sign_agreement_counts_area_where_all_maps_share_a_sign():
+    m = _load()
+    a = np.array([[1.0, -1.0, 2.0, np.nan]])
+    b = np.array([[3.0, 1.0, 1.0, 1.0]])
+    area = np.array([[1.0, 1.0, 2.0, 5.0]])
+    # finite cells: 1 (agree, w1), 2 (disagree, w1), 3 (agree, w2) -> 3/4
+    assert abs(m.sign_agreement([a, b], area, np.ones_like(a, bool)) - 0.75) < 1e-12
