@@ -116,8 +116,9 @@ def test_topo_init_spectral(sigma):
 
 def test_hs_parameter_overrides_reach_every_grid(sigma):
     """Held-Suarez tunables must reach the lat-lon, MPAS and spectral forcings,
-    not only the cubed-sphere one: each grid's temperature tendency with a
-    non-default parameter set equals the shared relaxation helper's."""
+    not only the cubed-sphere one.  Lat-lon and MPAS: the tendency with a
+    non-default parameter set equals the shared relaxation helper's.  Spectral
+    (output is in spectral space): every override, applied alone, changes it."""
     import jax
     from legoesm.atmosphere.forcing.idealized import held_suarez as HS
 
@@ -146,6 +147,7 @@ def test_hs_parameter_overrides_reach_every_grid(sigma):
     gg = create_gaussian_grid(n_max=21)
     s = held_suarez_topo_init_spectral(gg, sigma, h_0=2000.0)
     base = HS.held_suarez_forcing_spectral(s, gg, sigma)
-    tuned = HS.held_suarez_forcing_spectral(s, gg, sigma, **kw)
-    diff = jax.tree_util.tree_map(lambda a, b: bool(jnp.array_equal(a, b)), base, tuned)
-    assert not all(jax.tree_util.tree_leaves(diff))
+    for name, value in kw.items():
+        tuned = HS.held_suarez_forcing_spectral(s, gg, sigma, **{name: value})
+        same = jax.tree_util.tree_map(lambda a, b: bool(jnp.array_equal(a, b)), base, tuned)
+        assert not all(jax.tree_util.tree_leaves(same)), name
