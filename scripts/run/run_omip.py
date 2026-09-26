@@ -274,6 +274,18 @@ def build_config_from_args(args) -> OMIPRunConfig:
     )
 
 
+def with_kpp_cfl_dt(run_config: OMIPRunConfig, dt: float) -> OMIPRunConfig:
+    """Tie the KPP explicit-diffusion CFL cap to the run's timestep.
+
+    ``KPPConfig.cfl_cap_dt_s`` must equal the ocean dynamics dt (its default
+    300 s matched only the MPAS default dt), so the driver passes the value it
+    knows instead of leaving a default that disagrees with ``--dt``.
+    """
+    vm = run_config.vertical_mixing
+    return run_config._replace(vertical_mixing=vm._replace(
+        kpp=vm.kpp._replace(cfl_cap_dt_s=float(dt))))
+
+
 def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
     """Post-``_create_setup`` application of the NEMO zdfdrg drag-law flags
     and the zdfiwm forcing maps (mirrors the run_omip_core2 replace-flat +
@@ -5745,6 +5757,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     else:
         resolution = GRID_DEFAULTS[grid_type]["resolution"]
     dt = args.dt or GRID_DEFAULTS[grid_type]["dt"]
+    run_config = with_kpp_cfl_dt(run_config, dt)
     days = 30.0 if args.quick else args.days
     n_steps = int(days * 86400.0 / dt)
     diag_every = args.diag_every or max(1, int(86400.0 / dt))  # ~daily
