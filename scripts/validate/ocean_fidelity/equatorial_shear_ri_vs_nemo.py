@@ -184,8 +184,15 @@ def main() -> int:
     # the window fraction EVD must have fired IF the median is the TKE-only value.
     unst_o = m(np.where(np.isfinite(N2_o), (N2_o < a.n2_threshold).astype(float), np.nan), w_o, box_o)
     evd_N = np.clip((avt_m - avt_med) / a.rn_evd, 0.0, 1.0)
+    # Among OUR unstable interfaces: fraction where the model's own diagnosed K_H
+    # exceeds 10 m2/s (EVD engaged on this state) and the median N2 (a value near
+    # the threshold = instability generated after the solve; ~1e-5 = unmixed).
+    _u = (N2_o < a.n2_threshold) & np.isfinite(N2_o) & box_o[:, None]
+    with np.errstate(invalid="ignore"):
+        kh_hi_unst = np.where(_u.sum(0) > 0, ((KH_w > 10.0) & _u).sum(0) / np.maximum(_u.sum(0), 1), np.nan)
+    n2_med_unst = np.array([np.nanmedian(N2_o[_u[:, k], k]) if _u[:, k].any() else np.nan for k in range(N2_o.shape[1])])
     if a.use_mean_fields:
-        unst_o[:] = np.nan
+        unst_o[:] = np.nan; kh_hi_unst[:] = np.nan; n2_med_unst[:] = np.nan
     print(f"\n=== Box {a.lon_lo:.0f}-{a.lon_hi:.0f}E |lat|<={a.lat_halfwidth}: ours {int(box_o.sum())} cols, "
           f"NEMO {int(boxT.sum())} T-cols; interior interfaces (top of cell k+1) ===")
     print("Ri = box-mean N2 / box-mean S2 (a ratio of means, not the mean Ri). NEMO S2 from 5-day-MEAN u,v (lower bound); "
@@ -198,7 +205,7 @@ def main() -> int:
         Ri_N = N2_N_m[k] / S2_N_m[k] if S2_N_m[k] > 0 else np.nan
         print(f"{k + 1:>3}{zw_int[k]:>8.2f} | {S2_o_m[k]:>9.2e}{S2_N_m[k]:>9.2e} | {N2_o_m[k]:>9.2e}{N2_N_m[k]:>9.2e}{bn2_m[k]:>9.2e} | "
               f"{Ri_o:>8.2f}{Ri_N:>8.2f} | {KH_m[k]:>9.2e}{KH_med[k]:>9.2e}{avt_m[k]:>9.2e}{avt_med[k]:>9.2e} | "
-              f"{unst_o[k]:>10.3f}{evd_N[k]:>11.3f}")
+              f"{unst_o[k]:>10.3f}{evd_N[k]:>11.3f}{kh_hi_unst[k]:>11.3f}{n2_med_unst[k]:>11.2e}")
     # box-mean u profile too: is the undercurrent itself weaker?
     u_o = m(uf, w_o, box_o); u_N = m(uoF, wU, boxU)
     print(f"\n{'k':>3}{'z_c m':>8}{'u ours':>9}{'u NEMO':>9}   (zonal velocity box mean, m/s; ours 00 UTC, NEMO 5-day mean)")
