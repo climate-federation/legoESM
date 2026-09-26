@@ -1172,9 +1172,9 @@ CITATION_MAP = {
         19],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:549-552': [
         '!* 2nd recurrence:    Zk = Yk - Ik / Tk-1  Zk-1',
-        'END DO', 4],
+        ('END DO', 23), 4],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:562-567': [
-        'DO jk =    2,  jpkm1,  1',
+        ('DO jk =    2,  jpkm1,  1', 2),
         'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk) / zwt(ji,jk-1) * pt(ji,jj,jk-1,jn,Kaa)',
         6],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:577-582': [
