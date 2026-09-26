@@ -36,4 +36,7 @@ $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline_structure.py --sur
    --snapshot $S --label tripole --nemo-gridt $N --nemo-rec 0 2>&1 | grep -vi warning
 echo "##### (4) nino3 window mean + lens"
 $PY -u scripts/validate/ocean_fidelity/sst_phase_vs_nemo.py --nemo-gridt $N --rec 0 --mean --use-mean-fields --snapshots $S 2>&1 | grep -vi warning
+echo "##### (5) full scorecard + maps, window means (5-day window matches the record)"
+$PY -u scripts/validate/compare_omip_nemo.py --legoesm-snapshot $S --nemo-gridt $N --nemo-time-idx 0 \
+    --output-dir $R/compare_uvw_d5_mean --grid-label tripole --use-mean-fields 2>&1 | grep -vi warning
 echo "=== card exit: $? ==="
