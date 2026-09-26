@@ -629,6 +629,23 @@ def run_nemo(args, oracle, twins):
             print(f"  ->  ratio x{o_t / n_t:.3f}")
         else:
             print("  ->  non-finite/empty band reduction")
+    # Per-interface box means (common mask): where in the column does our closure
+    # disagree with NEMO's on NEMO's own state?  Ratio-of-means, top 20 interfaces.
+    maskM = common_mask(avm, n_avmk)
+    zk_np = np.asarray(zk).ravel()
+    print("\n[nemo] per-interface box means (ours on NEMO state vs NEMO avm_k/avt_k; l = K_M/(c_k sqrt(en)))")
+    print("   k    z_w m |  avm ours  avm_k NEMO  ratio |  avt ours  avt_k NEMO  ratio |   l ours   l NEMO")
+    en_int = np.asarray(R["en"][band][:, 1:], dtype=np.float64)
+    ck = float(getattr(cfg, "c_k", 0.1))
+    for k in range(min(20, zk_np.size)):
+        mk = np.asarray(maskM)[..., k].ravel()
+        if not mk.any():
+            continue
+        o = float(np.mean(np.asarray(avm)[..., k].ravel()[mk])); n_ = float(np.mean(np.asarray(n_avmk)[..., k].ravel()[mk]))
+        ot = float(np.mean(np.asarray(avt)[..., k].ravel()[mk])); nt = float(np.mean(np.asarray(n_avtk)[..., k].ravel()[mk]))
+        e_ = float(np.mean(en_int[..., k].ravel()[mk]))
+        lo_ = o / (ck * np.sqrt(max(e_, 1e-30))); ln_ = n_ / (ck * np.sqrt(max(e_, 1e-30)))
+        print(f"  {k + 1:2d}  {zk_np[k]:7.2f} | {o:9.3e} {n_:10.3e} {o / n_ if n_ > 0 else float('nan'):6.3f} | {ot:9.3e} {nt:10.3e} {ot / nt if nt > 0 else float('nan'):6.3f} | {lo_:8.3f} {ln_:8.3f}")
     print("\n[nemo] instant-vs-instant, NEMO's OWN en, closure-vs-closure. "
           "avm is the PRIMARY trusted number; avt carries the Prandtl "
           "time-level caveat. Numbers only, no verdict.")
