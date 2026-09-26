@@ -726,6 +726,19 @@ def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     assert "ROUND123_PROCESS_RECORD_READY" in run_sh
 
 
+def test_round177_record_header_tracks_the_compiled_writer():
+    """The admission pins Kbb/Kmm/Krhs in the writer's literal order."""
+    root = Path(
+        "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_l2_gyre_round177_tracer_ldf")
+    patch = (root / "traldf_iso_round177.patch").read_text()
+    run_sh = (root / "run.sh").read_text()
+    assert "1, kt, Kbb, Kmm, Krhs" in patch
+    assert (
+        "expected_header = (1, 1081, 1, 2, 3, 36, 26, 31, 30, 1, 64, 38, 11)"
+        in run_sh)
+
+
 def _toy():
     lat = np.array([[18.0, 30.0, 42.0]])
     wet = np.ones_like(lat, dtype=bool)

@@ -163,7 +163,7 @@ if len(blob) != expected_size:
 if blob[:16] != b"NEMO_L2_R177LDF ":
     raise SystemExit(f"REFUSE: {record_path.name} magic is {blob[:16]!r}")
 header = struct.unpack_from("=13i", blob, 16)
-expected_header = (1, 1081, 1, 1, 3, 36, 26, 31, 30, 1, 64, 38, 11)
+expected_header = (1, 1081, 1, 2, 3, 36, 26, 31, 30, 1, 64, 38, 11)
 if header != expected_header:
     raise SystemExit(f"REFUSE: header is {header}, expected {expected_header}")
 
