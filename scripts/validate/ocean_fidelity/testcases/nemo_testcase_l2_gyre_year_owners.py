@@ -13248,7 +13248,7 @@ def developed_tracer_ldf_statement_walk(
         ("wslpi", "wslpi", wet), ("wslpj", "wslpj", wet),
         ("dit", "dit", umask), ("djt", "djt", vmask),
         ("dkt", "dkt", wmask),
-        ("e3t_3d", "e3t", wet), ("e3u_live", "e3u_flux", umask),
+        ("e3t_live", "e3t", wet), ("e3u_live", "e3u_flux", umask),
         ("e3v_live", "e3v_flux", vmask),
         ("A11", "A11", umask), ("A22", "A22", vmask),
         ("hmsku", "hmsku", umask), ("hmskv", "hmskv", vmask),
@@ -13262,6 +13262,9 @@ def developed_tracer_ldf_statement_walk(
         ("Krhs_increment", "tendency", wet),
     )
     reference_alias = {
+        "e3t_live": reference["e3t_3d"] * (
+            1.0 + raw["r3t_Kmm"][2:-2, 2:-2, None]
+            * reference["tmask"]),
         "e3u_live": reference["e3u_3d"] * (
             1.0 + raw["r3u_Kmm"][2:-2, 2:-2, None]
             * reference["umask"]),
@@ -13316,6 +13319,14 @@ def developed_tracer_ldf_statement_walk(
 
     jit_rows, jit_first = score(baseline_jit)
     eager_rows, eager_first = score(baseline_eager)
+    statements = {
+        "uslp": "ldfslp.f90:262-268",
+        "vslp": "ldfslp.f90:269-275",
+        "wslpi": "ldfslp.f90:323-327",
+        "wslpj": "ldfslp.f90:329-333",
+        "e3u_live": "traldf_iso.f90:275",
+        "e3v_live": "traldf_iso.f90:276",
+    }
     predictions = {
         "observer_passive": moved_jit == 0 and moved_eager == 0,
         "entry_temperature_bit_exact": jit_rows["T_Kbb"]["bit_exact"],
@@ -13336,19 +13347,24 @@ def developed_tracer_ldf_statement_walk(
                       "wet_cells": int(np.count_nonzero(wet))},
         "modes": {
             "production_step_jit": {
-                "first_non_bit_statement": jit_first,
+                "first_non_bit_row": jit_first,
+                "first_non_bit_statement": statements.get(jit_first),
                 "observer_state_unequal_bytes": moved_jit,
                 "rows": jit_rows},
             "production_eager": {
-                "first_non_bit_statement": eager_first,
+                "first_non_bit_row": eager_first,
+                "first_non_bit_statement": statements.get(eager_first),
                 "observer_state_unequal_bytes": moved_eager,
                 "rows": eager_rows}},
         "authoritative_mode": "production_step_jit",
-        "first_non_bit_statement": jit_first,
+        "first_non_bit_row": jit_first,
+        "first_non_bit_statement": statements.get(jit_first),
         "predictions": predictions,
         "all_frozen_predictions_confirmed": all(predictions.values()),
         "compiled_source": {
             "call": "stprk3_stg.f90:928-934",
+            "slope_call": "stprk3.f90:178",
+            "u_slope_write": "ldfslp.f90:262-268",
             "a33": "traldf_iso.f90:167",
             "gradients": "traldf_iso.f90:215-250",
             "horizontal": "traldf_iso.f90:272-299",

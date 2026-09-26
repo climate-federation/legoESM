@@ -1170,3 +1170,36 @@ def test_round176_content_process_walk_refuses_dirty_worktree(
         harness.developed_accumulated_content_process_walk(
             tmp_path / "process", tmp_path / "vertical",
             tmp_path / "daily", tmp_path / "audit", "0" * 40)
+
+
+def test_round178_ldf_walk_pins_record_and_production_diagnostics(harness):
+    """The developed walk consumes the admitted layout through the step."""
+    assert harness.ROUND177_LDF_HEADER == (
+        1, 1081, 1, 2, 3, 36, 26, 31, 30, 1, 64, 38, 11)
+    assert len(harness.ROUND177_LDF_3D) == 38
+    assert len(harness.ROUND177_LDF_2D) == 11
+    model = Path(
+        "packages/ocean/legoesm/ocean/dynamics/"
+        "ocean_model_latlon_cgrid.py").read_text()
+    operator = Path(
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/"
+        "gm_redi_latlon_cgrid.py").read_text()
+    assert "tracer_ldf_diagnostics" in model
+    assert "return_redi_diagnostics=" in model
+    assert '"e3u_flux": e3u_flux' in operator
+    assert '"tendency": tend' in operator
+
+
+def test_round178_ldf_walk_refuses_dirty_worktree(
+        harness, tmp_path, monkeypatch):
+    """The statement walk refuses before it opens the acquired record."""
+    from legoesm.ocean.fidelity import provenance
+
+    monkeypatch.setattr(
+        provenance, "worktree_stamp",
+        lambda: {"clean": False, "commit": "synthetic-dirty"})
+    with pytest.raises(harness.GateError,
+                       match="requires a clean committed tree"):
+        harness.developed_tracer_ldf_statement_walk(
+            tmp_path / "ldf", tmp_path / "daily",
+            tmp_path / "audit", "0" * 40)
