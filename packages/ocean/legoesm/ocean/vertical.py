@@ -368,7 +368,11 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
     # area at that same boundary so production JIT cannot fuse it into /area_f.
-    r3f = b(b(quarter * quad) * r1_hf0 / area_f)
+    # domqco.f90:281-285 multiplies the stored reciprocal ``r1_e1e2f``;
+    # spelling this as division is real-equivalent but moved 19 ORCA2 e3f
+    # cells and 24 wet-face LDF outputs in the last bits.
+    r1_area_f = b(one / area_f)
+    r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
     # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
