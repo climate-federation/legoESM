@@ -114,8 +114,7 @@ The final round-22 classifier exits 0 with `RECERTIFIED`.  It binds the four
 exact snapshots, both admitted ladder documents, the restored ten-step ladder,
 and the fresh current-tip ladder.  The receipt citation gate exits 0 with all
 three compiled-source citations mapped and audited.  Its rigid-line plant
-exits 1 and reports `SYMBOL-NOT-AT-LINE` for the planted
-`stprk3_stg.f90:493-506` anchor.
+exits 1 and reports `SYMBOL-NOT-AT-LINE` for the planted stage-call anchor.
 
 The final focused battery passes **11 / 11** tests.  The one required
 `tests/ocean/fidelity -n 12` battery completes with **1,843 passed, 7 skipped,
