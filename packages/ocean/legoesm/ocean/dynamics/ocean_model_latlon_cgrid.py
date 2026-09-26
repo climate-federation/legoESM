@@ -10931,19 +10931,26 @@ class LatLonCGridOceanModel:
                 )
 
         # Private causal seam: two arrays replace the post-closure heat and
-        # viscosity profiles; a third optionally replaces formed tracer K;
-        # a fourth optionally replaces only the tracer e3w(Kmm) divisor.
+        # viscosity profiles; later arrays optionally replace formed tracer
+        # K, the tracer e3w(Kmm) divisor, the tracer e3t(Kaa) matrix weight,
+        # and the already-formed temperature content, in that order.
         _formed_effective_K_override = None
         _tracer_e3w_test_override = None
+        _tracer_e3t_test_override = None
+        _tracer_content_t_test_override = None
         if effective_K_test_override is not None:
-            if len(effective_K_test_override) not in (2, 3, 4):
+            if len(effective_K_test_override) not in (2, 3, 4, 5, 6):
                 raise ValueError(
-                    "vertical K test override requires 2, 3, or 4 arrays")
+                    "vertical K test override requires 2 through 6 arrays")
             K_v_cell, A_v_cell = effective_K_test_override[:2]
             if len(effective_K_test_override) >= 3:
                 _formed_effective_K_override = effective_K_test_override[2]
-            if len(effective_K_test_override) == 4:
+            if len(effective_K_test_override) >= 4:
                 _tracer_e3w_test_override = effective_K_test_override[3]
+            if len(effective_K_test_override) >= 5:
+                _tracer_e3t_test_override = effective_K_test_override[4]
+            if len(effective_K_test_override) == 6:
+                _tracer_content_t_test_override = effective_K_test_override[5]
 
         # DIAGNOSTIC CAPTURE (return_K_profiles): the interface diffusivity
         # K_v_cell (heat, NEMO avt) and viscosity A_v_cell (momentum, avm) at
@@ -11487,6 +11494,8 @@ class LatLonCGridOceanModel:
         K_s_cell = K_v_cell if dK_ddm_salt is None else (K_v_cell + dK_ddm_salt)
         _tracer_e3w = (dz_half_cell if _tracer_e3w_test_override is None
                        else _tracer_e3w_test_override)
+        _tracer_e3t = (dz_cell if _tracer_e3t_test_override is None
+                       else _tracer_e3t_test_override)
         if _vmix_batched:
             T_new, S_new, u_new, v_new = (
                 implicit_vertical_diffusion_ocean_batched([
@@ -11512,11 +11521,14 @@ class LatLonCGridOceanModel:
                         _content_s = S_solve_in * dz_cell
                     else:
                         _content_t, _content_s = nemo_tracer_content_rhs
+                    if _tracer_content_t_test_override is not None:
+                        _content_t = _tracer_content_t_test_override
                     _tracer_wet = _literal_t_wet
                     _tracer_result = (
                         implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
                             T_solve_in, S_solve_in, _content_t, _content_s,
-                            K_v_cell, dz_cell, _tracer_e3w, dt, _tracer_wet,
+                            K_v_cell, _tracer_e3t, _tracer_e3w, dt,
+                            _tracer_wet,
                             evaluation="nemo_literal",
                             implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))
                     if return_tracer_solve_trace:
@@ -11531,7 +11543,7 @@ class LatLonCGridOceanModel:
                             heat_K=_trace_heat_K,
                             isoneutral_K=_trace_isoneutral_K,
                             effective_K=K_v_cell,
-                            e3t_after=dz_cell,
+                            e3t_after=_tracer_e3t,
                             e3w_now=_tracer_e3w,
                             wet=_tracer_wet,
                             content_T=_content_t,
