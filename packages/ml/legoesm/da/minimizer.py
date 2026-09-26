@@ -183,13 +183,15 @@ def minimize_lbfgs(
         q, alpha_buf = jax.lax.fori_loop(0, m, first_loop_body, (q, alpha_buf))
 
         # Initial Hessian approximation: gamma * I
-        # gamma = (s_{k-1} . y_{k-1}) / (y_{k-1} . y_{k-1})
+        # gamma = (s_{k-1} . y_{k-1}) / (y_{k-1} . y_{k-1}); with no pairs yet,
+        # a unit-length first step (gamma = 1/||g||, as in L-BFGS-B) so a
+        # badly scaled cost does not exhaust the backtracking on step one.
         last_idx = (state.n_pairs - 1) % m
         gamma = jnp.where(
             state.n_pairs > 0,
             jnp.sum(state.S[last_idx] * state.Y[last_idx])
             / jnp.maximum(jnp.sum(state.Y[last_idx] * state.Y[last_idx]), _TINY),
-            1.0,
+            1.0 / jnp.maximum(jnp.linalg.norm(state.g), _TINY),
         )
         r = gamma * q
 
