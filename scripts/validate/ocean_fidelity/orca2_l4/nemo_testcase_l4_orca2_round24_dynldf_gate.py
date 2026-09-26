@@ -71,7 +71,7 @@ def _live_production_ldf(deck_root: Path, record_root: Path, kt: int):
         state.eta.data, state.H_bathy.data, zc,
         min_water_column_m=cfg.min_water_column_m)
     e3u, e3v, _, _ = _nemo_ws_qco_stage_faces(
-        state.eta.data, h_ref, umask, vmask, grid)
+        state.eta.data, h_ref, umask, vmask, grid, z_coord=zc)
     e3f = nemo_qco_live_vorticity_e3f_cgrid(
         state.eta.data, zc, state.eta.data.dtype, grid=grid,
         e3t_0=h_ref, tmask=tmask)
