@@ -936,3 +936,58 @@ def test_ocean_loader_rejects_record_window_outside_cache(tmp_path):
     zarr.consolidate_metadata(str(cache_path))
     with pytest.raises(ValueError, match="malformed"):
         load_jra55_do(1958, cache_dir=cache_path)
+
+
+@pytest.fixture(scope="module")
+def two_year_builder_cache(tmp_path_factory):
+    """A 1958-1959 cache written by the real builder (shared, read-only)."""
+    tmp = tmp_path_factory.mktemp("jra2y")
+    src = tmp / "src.zarr"
+    _make_synthetic_jra55_zarr(src, year_start=1958, year_end=1959,
+                               n_lat=8, n_lon=16, cadence_hours=6)
+    cfg = JRA55DoConfig(
+        source_path=str(src), years=(1958, 1959),
+        target_lat_edges=np.deg2rad(np.linspace(-90.0, 90.0, 5)),
+        target_lon_edges=np.deg2rad(np.linspace(0.0, 360.0, 9)),
+        cache_dir=tmp / "cache",
+    )
+    return build_jra55_cache(cfg, overwrite=True, progress=False)
+
+
+def test_ocean_loader_cycles_years_through_the_cache_window(two_year_builder_cache):
+    """OMIP-2 long runs request years past the cache's end (2000 + y up to
+    2059 against a 1958-2018 cache): with cycle_years they wrap into the
+    cache's own window instead of crashing."""
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+    store = two_year_builder_cache
+    y58 = load_jra55_do(1958, cache_dir=store)
+    y59 = load_jra55_do(1959, cache_dir=store)
+    assert not np.array_equal(y58.T_air, y59.T_air)
+    for req, ref in ((1960, y58), (1961, y59), (2019, y59), (1957, y59)):
+        got = load_jra55_do(req, cache_dir=store, cycle_years=True)
+        np.testing.assert_array_equal(got.T_air, ref.T_air)
+    with pytest.raises(FileNotFoundError, match="outside the cached window 1958-1959"):
+        load_jra55_do(1960, cache_dir=store)
+
+
+@pytest.mark.parametrize("mutate,match", [
+    (lambda g: g.attrs.update(records_per_day=4), "records_per_day"),
+    (lambda g: g.attrs.update(n_records=10), "n_records"),
+    (lambda g: g.attrs.update(calendar="standard"), "calendar"),
+    (lambda g: g["tas"].__setitem__((5, 0, 0), np.nan), "non-finite"),
+])
+def test_ocean_loader_rejects_malformed_builder_cache(
+        two_year_builder_cache, tmp_path, mutate, match):
+    """Layout and finiteness are checked at the cache boundary: a store at a
+    different cadence, with the wrong record count, another calendar, or
+    NaNs must raise instead of feeding shifted or non-finite forcing."""
+    import shutil
+    import zarr
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+    store = tmp_path / "c.zarr"
+    shutil.copytree(two_year_builder_cache, store)
+    g = zarr.open_group(str(store), mode="r+")
+    mutate(g)
+    zarr.consolidate_metadata(str(store))
+    with pytest.raises(ValueError, match=match):
+        load_jra55_do(1958, cache_dir=store)

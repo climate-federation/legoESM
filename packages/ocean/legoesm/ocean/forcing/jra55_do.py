@@ -151,34 +151,64 @@ def synthetic_ocean_forcing(year: int, *,
     )
 
 
-def _load_from_builder_cache(store: Path, year: int) -> Optional[OceanForcing]:
+def _load_from_builder_cache(store: Path, year: int,
+                             cycle_years: bool) -> OceanForcing:
     """Slice one noleap year out of the multi-year CMOR-named cache written
-    by ``legoesm.forcing.jra55_do.build_jra55_cache``; None if the year is
-    outside the cached window."""
+    by ``legoesm.forcing.jra55_do.build_jra55_cache``.
+
+    ``cycle_years=True`` maps ``year`` onto the cache's own window
+    ``year_start + (year - year_start) % n_years`` (the OMIP-2 protocol repeats
+    its forcing cycle); otherwise a year outside the window raises
+    ``FileNotFoundError``.  The store's layout (calendar, cadence, record
+    count, coordinates) and every returned field are checked; a mismatch
+    raises ``ValueError`` rather than feeding time-shifted or non-finite
+    forcing to the model.
+    """
     import xarray as xr
     from legoesm.forcing.jra55_do import RECORDS_PER_DAY
     from legoesm.forcing.time_utils import NOLEAP_DAYS_PER_YEAR
 
     ds = xr.open_zarr(store)
-    y0, y1 = int(ds.attrs["year_start"]), int(ds.attrs["year_end"])
-    if not y0 <= year <= y1:
-        return None
+    a = ds.attrs
+    y0, y1 = int(a["year_start"]), int(a["year_end"])
     per_year = NOLEAP_DAYS_PER_YEAR * RECORDS_PER_DAY
-    start = (year - int(ds.attrs["ref_year"])) * per_year
-    if start < 0 or start + per_year > ds.sizes["time"]:
-        raise ValueError(
-            f"{store}: year {year} maps to records [{start}, "
-            f"{start + per_year}) outside the {ds.sizes['time']}-record axis "
-            f"(ref_year={ds.attrs['ref_year']}, window {y0}-{y1}); "
-            "the cache is malformed")
+    n_time = ds.sizes["time"]
+    problems = [
+        msg for bad, msg in (
+            (a.get("calendar") != "noleap", f"calendar={a.get('calendar')!r}, expected 'noleap'"),
+            (int(a.get("records_per_day", -1)) != RECORDS_PER_DAY,
+             f"records_per_day={a.get('records_per_day')}, expected {RECORDS_PER_DAY}"),
+            (int(a["ref_year"]) != y0, f"ref_year={a['ref_year']} != year_start={y0}"),
+            (not (int(a.get("n_records", -1)) == n_time == (y1 - y0 + 1) * per_year),
+             f"n_records={a.get('n_records')}, time axis {n_time}, expected "
+             f"{(y1 - y0 + 1) * per_year} for {y0}-{y1}"),
+            (not np.array_equal(ds["time"].values, np.arange(n_time)),
+             "time axis is not the consecutive record index 0..n-1"),
+        ) if bad
+    ]
+    if problems:
+        raise ValueError(f"{store}: malformed JRA55-do cache: " + "; ".join(problems))
+    if cycle_years:
+        year = y0 + (year - y0) % (y1 - y0 + 1)
+    elif not y0 <= year <= y1:
+        raise FileNotFoundError(
+            f"JRA55-do year {year} is outside the cached window {y0}-{y1} of {store}")
+    start = (year - y0) * per_year
     ds = ds.isel(time=slice(start, start + per_year))
 
     def f(name):
-        return np.asarray(ds[name].values, dtype=np.float64)
+        arr = np.asarray(ds[name].values, dtype=np.float64)
+        if not np.isfinite(arr).all():
+            raise ValueError(f"{store}: non-finite values in {name!r} for year {year}")
+        return arr
 
+    lat, lon = f("lat"), f("lon")
+    if lat.min() < -90.0 or lat.max() > 90.0 or lon.min() < 0.0 or lon.max() >= 360.0:
+        raise ValueError(f"{store}: lat/lon not in degrees [-90, 90] x [0, 360)")
+    logger.info("JRA55-do: forcing year %d read from %s", year, store)
     prra, prsn = f("prra"), f("prsn")
     return OceanForcing(
-        lon=f("lon"), lat=f("lat"),
+        lon=lon, lat=lat,
         time_s=np.arange(per_year, dtype=np.float64)
         * (86400.0 / RECORDS_PER_DAY),
         u10=f("uas"), v10=f("vas"), T_air=f("tas"), q_air=f("huss"),
@@ -189,7 +219,8 @@ def _load_from_builder_cache(store: Path, year: int) -> Optional[OceanForcing]:
 
 
 def load_jra55_do(year: int, *, cache_dir: Optional[Path] = None,
-                  allow_synthetic: bool = False) -> OceanForcing:
+                  allow_synthetic: bool = False,
+                  cycle_years: bool = False) -> OceanForcing:
     """Load one calendar year of JRA55-do forcing.
 
     Looks for ``<cache_dir>/<year>.zarr`` first, then for the multi-year
@@ -197,7 +228,9 @@ def load_jra55_do(year: int, *, cache_dir: Optional[Path] = None,
     may name that store directly or the directory holding it under its
     default filename). Raises ``FileNotFoundError`` when neither holds the
     year, unless ``allow_synthetic=True`` (smoke runs only), which returns
-    :func:`synthetic_ocean_forcing` with a warning.
+    :func:`synthetic_ocean_forcing` with a warning.  ``cycle_years=True``
+    (multi-year cache only) wraps ``year`` into the cache's own year window,
+    as the OMIP-2 protocol repeats its forcing cycle.
     """
     root = Path(cache_dir) if cache_dir is not None else _cache_dir()
     zarr_path = root / f"{year}.zarr"
@@ -206,9 +239,11 @@ def load_jra55_do(year: int, *, cache_dir: Optional[Path] = None,
         store = root if root.suffix == ".zarr" else (
             root / JRA55DoConfig.cache_filename)
         if store.exists():
-            forcing = _load_from_builder_cache(store, year)
-            if forcing is not None:
-                return forcing
+            try:
+                return _load_from_builder_cache(store, year, cycle_years)
+            except FileNotFoundError:
+                if not allow_synthetic:
+                    raise
     if zarr_path.exists():
         try:
             import xarray as xr

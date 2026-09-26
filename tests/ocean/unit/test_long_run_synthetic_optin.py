@@ -25,7 +25,8 @@ def _loader_calls(path):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id in _LOADERS):
             kw = {k.arg: ast.unparse(k.value) for k in node.keywords}
-            out.append((node.func.id, kw.get("allow_synthetic")))
+            out.append((node.func.id, kw.get("allow_synthetic"),
+                        kw.get("cycle_years")))
     return out
 
 
@@ -39,14 +40,17 @@ def _has_flag(path):
 ])
 def test_drivers_forward_allow_synthetic(script, expected):
     calls = _loader_calls(_DIR / script)
-    assert {name for name, _ in calls} == expected
-    assert all(kw == "args.allow_synthetic" for _, kw in calls), calls
+    assert {name for name, _, _ in calls} == expected
+    assert all(kw == "args.allow_synthetic" for _, kw, _ in calls), calls
+    # OMIP-2 years past the cache end (2000 + y) wrap into its window
+    assert all(cyc == "True" for name, _, cyc in calls
+               if name == "load_jra55_do"), calls
     assert _has_flag(_DIR / script)
 
 
 def test_postprocess_never_scores_against_synthetic_woa():
     calls = _loader_calls(_DIR / "postprocess_climate.py")
-    assert calls == [("load_woa_sst", "False")]
+    assert calls == [("load_woa_sst", "False", None)]
 
 
 @pytest.mark.parametrize("modname,fn", [
