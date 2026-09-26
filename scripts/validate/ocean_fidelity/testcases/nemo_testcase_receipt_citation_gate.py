@@ -119,6 +119,10 @@ FILES = {
     # byte-identical source card.
     "GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/traldf.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/traldf.f90"),
+    "GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/traldf_iso.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/traldf_iso.f90"),
     "GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/sshwzv.f90": (
@@ -1082,6 +1086,13 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:249-260': [
         'CALL dia_wri   ( kstp,      Nbb )',
         'CALL rst_write    ( kstp, Nbb, Nnn, Naa )', 12],
+    # --- round 177: active developed tracer-LDF program before acquisition ---
+    'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/traldf.f90:69-110': [
+        'SUBROUTINE tra_ldf( kt, Kbb, Kmm, pts, Krhs )',
+        'CALL traldf_iso_lap  ( kt, Kbb, Kmm, pts, Krhs, l_ptr, l_hst )', 42],
+    'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/traldf_iso.f90:154-305': [
+        'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )',
+        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 152],
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/restart.f90:176-184': [
         "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )",
         "IF( PRESENT(Kaa) )   CALL iom_rstput( kt, nitrst, numrow, 'ssha', ssh(:,:,Kaa) )",
