@@ -60,6 +60,9 @@ def main() -> int:
     ap.add_argument("--lon-hi", type=float, default=240.0)
     ap.add_argument("--lat-halfwidth", type=float, default=2.0)
     ap.add_argument("--n-levels", type=int, default=20)
+    ap.add_argument("--nemo-t-file", type=Path, default=None,
+                    help="hourly grid_T file: prints the box-mean taum of the hour ending at the restart step")
+    ap.add_argument("--nemo-rec", type=int, default=None, help="record of --nemo-t-file (hour-1)")
     a = ap.parse_args()
     nl = a.n_levels
 
@@ -74,6 +77,8 @@ def main() -> int:
         return _box_mean(f, wN, boxN)
 
     eN, kmN, ktN, dsN = (nprof(R[k]) for k in ("en", "avm_k", "avt_k", "dissl"))
+    # surface row: NEMO en(1) is the Dirichlet value rn_ebb*taum/rho0 at z=0
+    e_sfc_N = _box_mean(np.where(np.abs(R["en"][0]) < 1e-30, np.nan, R["en"][0]).reshape(1, -1).T, wN, boxN)[0]
     lmN = kmN / (RN_EDIFF * np.sqrt(eN)); leN = np.sqrt(eN) / dsN
 
     s = np.load(a.snapshot)
@@ -88,6 +93,18 @@ def main() -> int:
         raise SystemExit(f"tke {e.shape} vs K_M_diag {KM.shape}: staggering differs")
     eo, kmo, kho = (_box_mean(x.reshape(-1, x.shape[-1])[:, :nl], area, box) for x in (e, KM, KH))
     lmo = kmo / (RN_EDIFF * np.sqrt(eo))
+    RN_EBB, RHO0 = 67.83, 1026.0  # coeff-ok: namelist rn_ebb, phycst rho0 -> e_sfc = rn_ebb*taum/rho0
+    taum_line = ""
+    if a.nemo_t_file is not None:
+        dT = nc.Dataset(a.nemo_t_file)
+        laT = np.asarray(dT.variables["nav_lat"][:], float); loT = np.asarray(dT.variables["nav_lon"][:], float) % 360.0
+        bT = ((np.abs(laT) <= a.lat_halfwidth) & (loT >= a.lon_lo) & (loT < a.lon_hi)).ravel()
+        tm = np.ma.filled(np.ma.masked_invalid(dT.variables["taum"][a.nemo_rec]), np.nan).ravel()
+        taum_N = _box_mean(tm[:, None], np.ones(bT.size), bT)[0]
+        taum_line = f"; NEMO hourly-mean taum (rec {a.nemo_rec}) {taum_N:.4f} Pa -> rn_ebb*taum/rho0 = {RN_EBB*taum_N/RHO0:.3e}"
+    e0_o = eo[0]
+    print(f"[surface] NEMO en(z=0) box mean {e_sfc_N:.3e} (implied taum {e_sfc_N*RHO0/RN_EBB:.4f} Pa){taum_line}; "
+          f"ours e at interface 1 ({zw_int[0]:.2f} m) {e0_o:.3e} (= the pinned Dirichlet value under interior_pinned; implied taum {e0_o*RHO0/RN_EBB:.4f} Pa)")
     print(f"box {a.lon_lo}-{a.lon_hi}E |lat|<={a.lat_halfwidth}: ours {int(box.sum())} cols (t = {float(s['time_days'])*24:.1f} h, "
           f"{a.snapshot.name}); NEMO {int(boxN.sum())} cols ({Path(a.restart_glob).name}); interior interfaces; "
           f"l_m = K_M/({RN_EDIFF}*sqrt(e)) both sides, l_eps NEMO = sqrt(en)/dissl")
