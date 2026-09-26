@@ -26,8 +26,8 @@ its Kbb divergence at `:127-129`, and its Kmm divisors at `:132-140`.
 The same compiled configuration selects the EEN vorticity consumer.  Its
 reference F thickness is built by the selected `nn_e3f_typ` branch at
 `ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:912-937`.
-The EEN operator takes the reciprocal at `:733-738`, then forms transports and
-adds the tendency at `:782-805`.  The admitted `ocean.output` has
+The EEN operator takes the reciprocal at `:734-738`, then forms transports and
+adds the tendency at `:784-802`.  The admitted `ocean.output` has
 `ln_dynvor_een = T` and `ln_dynvor_msk = F`; these are live statements, not a
 dead arm.
 
