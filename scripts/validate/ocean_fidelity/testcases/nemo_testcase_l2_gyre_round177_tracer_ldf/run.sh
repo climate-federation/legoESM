@@ -207,7 +207,7 @@ process = process_path.read_bytes()
 if len(process) != 1415300 or process[:16] != b"NEMO_L2_R123PROC":
     raise SystemExit("REFUSE: Round-123 process record layout changed")
 process_header = struct.unpack_from("=11i", process, 16)
-if process_header != (1, 1081, 3, 1, 1, 3, 2, 36, 26, 31, 64):
+if process_header != (1, 1081, 3, 1, 2, 3, 3, 36, 26, 31, 64):
     raise SystemExit(f"REFUSE: Round-123 header changed: {process_header}")
 process_offset = 16 + 11 * 4 + 8 + count3 * 8 + 3 * count2 * 8
 process_rows = []

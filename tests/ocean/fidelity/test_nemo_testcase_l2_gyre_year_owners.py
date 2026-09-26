@@ -737,6 +737,14 @@ def test_round177_record_header_tracks_the_compiled_writer():
     assert (
         "expected_header = (1, 1081, 1, 2, 3, 36, 26, 31, 30, 1, 64, 38, 11)"
         in run_sh)
+    process_patch = Path(
+        "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_l2_gyre_round123_process_budget/"
+        "stprk3_stg_round123.patch").read_text()
+    assert "kstg, Kbb, Kmm, Krhs, Kaa" in process_patch
+    assert (
+        "process_header != (1, 1081, 3, 1, 2, 3, 3, 36, 26, 31, 64)"
+        in run_sh)
 
 
 def _toy():
