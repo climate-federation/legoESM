@@ -250,9 +250,10 @@ SUBCLOUD_MICROPHYSICS_INCLUDE = {
 #: Only the schemes that expose such a knob appear; for the others the focused
 #: set is turbulence + microphysics, reported rather than silently assumed.
 #:
-#: Emanuel exposes no downdraft knob: its unsaturated-downdraft branch (off by
-#: default, ``--emanuel-unsaturated-downdraft``) runs the ported CONVECT shaft,
-#: whose constants are source constants, not tunables.  Switching the branch on
+#: Emanuel has no entry: its downdraft tunables (downdraft_sigd, downdraft_sigs,
+#: downdraft_omtrain_pa_s) are read only by the unsaturated-downdraft branch,
+#: which is off by default (``--emanuel-unsaturated-downdraft``), so in the
+#: shipped configuration they would carry no gradient.  Switching the branch on
 #: is different physics and enters the checkpoint signature.
 SUBCLOUD_CONVECTION_INCLUDE = {
     "bechtold": ("atm.conv.BechtoldConfig.downdraft_evap_efficiency",),

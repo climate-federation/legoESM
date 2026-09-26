@@ -465,9 +465,11 @@ def test_hydro_bridge_routes_zm_net_rain_to_surface_precip():
     dq_v = tt["q_v"].data
     dp = sigma.layer_thickness_dp(state.p_s.data)
     sink = -jnp.sum((dq_v + dq_c) * dp, axis=-1) / constants.g
-    # rtol 1e-6, not 1e-9: CAM's zm_conv_evap clips the falling-rain flux at 0
-    # (zm_conv_evap.F90:224, kept in the port), so when evaporation exceeds the
-    # flux the column gains that water.  Measured on this state: 1.2e-7 of the
+    # rtol 1e-6, not 1e-9: CAM's zm_conv_evap caps evaporation at the falling
+    # flux, then clips the flux at 0 after adding the net production
+    # (zm_conv_evap.F90:224; oracle transcription kept in the port) without
+    # adjusting the tendency, so where a negative net production (rprd)
+    # empties the flux the column gains that water.  Measured on this state: 1.2e-7 of the
     # precipitation with CAM's specific-humidity qsat (the clip did not bind
     # with the former mixing-ratio qsat).  A real booking error is O(1).
     np.testing.assert_allclose(np.asarray(precip), np.asarray(sink), rtol=1e-6, atol=1e-14)
