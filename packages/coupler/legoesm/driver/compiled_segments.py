@@ -1244,10 +1244,12 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         _led_q_names = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g")
         _led_before = column_store_snapshot(
             carry.p_s, statics.dsigma, carry.T,
-            *(getattr(carry, _n) for _n in _led_q_names))
+            *(getattr(carry, _n) for _n in _led_q_names),
+            area=statics.grid.grid_area)
         _led_after = column_store_snapshot(
             p_s_new, statics.dsigma, T_new,
-            *(moist[_n] for _n in _led_q_names))
+            *(moist[_n] for _n in _led_q_names),
+            area=statics.grid.grid_area)
         _led_dynamics = (_led_after - _led_before) / statics.dt
     _dm_in = {}
     for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
@@ -1420,10 +1422,12 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
             None if moist["q_s"] is None
             else moist["q_s"] + statics.dt * phys_out.dq_s_dt,
             None if moist["q_g"] is None
-            else moist["q_g"] + statics.dt * phys_out.dq_g_dt)
+            else moist["q_g"] + statics.dt * phys_out.dq_g_dt,
+            area=statics.grid.grid_area)
         _led_clipped = column_store_snapshot(
             p_s_new, statics.dsigma, T_upd,
-            q_v_upd, q_c_upd, q_r_upd, q_i_upd, q_s_upd, q_g_upd)
+            q_v_upd, q_c_upd, q_r_upd, q_i_upd, q_s_upd, q_g_upd,
+            area=statics.grid.grid_area)
         _led_clips = (_led_clipped - _led_raw) / statics.dt
         _led_step = phys_out.budget_ledger.astype(_led_clips.dtype)
         _led_step = _led_step.at[ROW_DYNAMICS].set(_led_dynamics)
@@ -1516,7 +1520,8 @@ def finalize_split_step(carry, lz, statics):
     if statics.budget_ledger:
         from legoesm.diagnostics.process_ledger import column_store_snapshot
         _led_tail_before = column_store_snapshot(
-            p_s_new, statics.dsigma, T_upd, q_v_upd)
+            p_s_new, statics.dsigma, T_upd, q_v_upd,
+            area=statics.grid.grid_area)
 
     # --- Saturation adjustment ---
     if statics.do_sat_adjust:
@@ -1544,7 +1549,8 @@ def finalize_split_step(carry, lz, statics):
             ROW_CLIPS, column_store_snapshot,
         )
         _led_tail_after = column_store_snapshot(
-            p_s_new, statics.dsigma, T_upd, q_v_upd)
+            p_s_new, statics.dsigma, T_upd, q_v_upd,
+            area=statics.grid.grid_area)
         _led_tail_rate = (_led_tail_after - _led_tail_before) / statics.dt
         _led_step = lz.budget_ledger_step.at[ROW_CLIPS].add(_led_tail_rate)
         _led_accum = (carry.budget_ledger_accum
