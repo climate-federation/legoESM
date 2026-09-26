@@ -319,6 +319,31 @@ def test_file_source_does_not_apply_a_second_vertex_mask():
     assert not np.array_equal(formula_zero_mask, formula_unmasked)
 
 
+def test_ldf_metric_operands_map_native_f_area_to_vertex():
+    """NEMO F(j,i) is lego vertex [j+1,i+1], local to the LDF seam."""
+    import types
+
+    from legoesm.ocean.vertical import nemo_ldf_metric_reciprocals_cgrid
+
+    geo = _geo(n_lat=4, n_lon=6)
+    ny, nx = geo.area_T.shape
+    e1f = jnp.arange(1, ny * nx + 1, dtype=jnp.float64).reshape(ny, nx)
+    e2f = e1f + 2.0
+    raw = types.SimpleNamespace(
+        e1t=jnp.ones((ny, nx)), e2t=jnp.ones((ny, nx)),
+        e1u=jnp.ones((ny, nx)), e2u=jnp.ones((ny, nx)),
+        e1v=jnp.ones((ny, nx)), e2v=jnp.ones((ny, nx)),
+        e1f=e1f, e2f=e2f)
+    zc = types.SimpleNamespace(nemo_een_barotropic=raw)
+    r1_f = nemo_ldf_metric_reciprocals_cgrid(
+        zc, geo, jnp.float64)[1]
+    np.testing.assert_array_equal(
+        np.asarray(r1_f)[1:, 1:], 1.0 / np.asarray(e1f * e2f))
+    # Plant the retired global-area route: it has a different stagger.
+    assert not np.array_equal(
+        np.asarray(r1_f)[1:, 1:], 1.0 / np.asarray(geo.area_q)[1:, 1:])
+
+
 def test_file_source_refuses_without_the_carried_coefficient():
     geo = _geo()
     with pytest.raises(ValueError, match="nemo_ldf_ahmt"):

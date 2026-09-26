@@ -40,6 +40,7 @@ def _live_production_ldf(deck_root: Path, record_root: Path, kt: int):
     )
     from legoesm.ocean.vertical import (
         compute_layer_thickness,
+        nemo_ldf_metric_reciprocals_cgrid,
         nemo_qco_live_vorticity_e3f_cgrid,
     )
     from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -76,12 +77,15 @@ def _live_production_ldf(deck_root: Path, record_root: Path, kt: int):
         state.eta.data, zc, state.eta.data.dtype, grid=grid,
         e3t_0=h_ref, tmask=tmask)
     bundle = (e3t, e3u, e3v, e3f, e3u, e3v)
+    metric_reciprocals = nemo_ldf_metric_reciprocals_cgrid(
+        zc, grid, state.eta.data.dtype)
 
     model = LatLonCGridOceanModel(grid, zc, cfg)
     result = model.tendencies(
         state, dt=card.dt_s, momentum_only=True,
         ldf_state=(state.T.data, state.S.data, state.u.data, state.v.data),
         ldf_thickness_operands=bundle,
+        ldf_metric_reciprocal_operands=metric_reciprocals,
         return_nemo_operator_components=True)
     components = result[2]
     du = np.asarray(components["ldf_u"].data, dtype=np.float64)[:, 1:, :r11.NZ]
