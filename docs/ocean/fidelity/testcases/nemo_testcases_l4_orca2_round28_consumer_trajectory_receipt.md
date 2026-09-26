@@ -106,15 +106,26 @@ No failed prediction was rewritten.
 The round-28 outcome gate exits 2 with `HELD`.  Its exact-row plant exits 1
 with `LDF-only moved a formerly exact row`; its consumer-label plant exits 1
 with `EEN arm consumer label is wrong`.  The focused gate battery reports
-**3 passed** before the final receipt checks.
+**21 passed** across the round-26/27/28 and citation-gate tests.
 
 The required separate `codex exec --sandbox read-only` review was attempted on
 the committed round diff.  It failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-Citation-gate and final pytest results are recorded in the final receipt
-commit.
+The citation gate passes all five compiled citations with zero failures, zero
+unmapped citations, and zero map-audit failures.  Its rigid +2-line EEN
+reciprocal plant exits 1 with `SYMBOL-NOT-AT-LINE`; all nine citation self-tests
+fire.
+
+The required `tests/ocean/fidelity -n 12` battery collected 1,871 tests,
+emitted the same five inherited failure markers and seven skips as round 27,
+then stalled in the inherited final tail after 96%; it was interrupted after a
+bounded idle wait without a terminal pytest summary.  Explicit isolated reruns
+reproduce the five historical failures: the round-129 stepping-gate stamp, the
+stale round-51 live-trace suffix assertion, SI3 scalar-math source provenance,
+three unstamped legacy report emitters, and the missing `hires_lane_surface`
+case-board row.  No round-28 test fails.
 
 No GYRE/DINO/lock-exchange/overflow landing gate is claimed: this round lands
 no model statement, and `git diff 1628376f8 -- packages` is empty at the final
