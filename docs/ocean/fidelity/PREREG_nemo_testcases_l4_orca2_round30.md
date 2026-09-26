@@ -20,7 +20,7 @@ root: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round30/`.
 The admitted compiled build constructs and exchanges frozen `e3f_0vor` at
 `ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:912-937`,
 constructs live `r3f` at
-`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90:233-246`, and
+`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90:273-286`, and
 freezes `fe3mask` at
 `ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dommsk.f90:258`.
 The executed EEN statement consumes exactly
