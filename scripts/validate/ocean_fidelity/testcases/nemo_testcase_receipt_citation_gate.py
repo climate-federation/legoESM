@@ -1177,10 +1177,10 @@ CITATION_MAP = {
         "INQUIRE( FILE='round172_e3t.arm', EXIST=ll_r172_e3t )",
         "CALL ctl_stop( 'tra_zdf: cannot read Round-172 solve-input frame' )",
         15],
-    'GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:489-505': [
+    'GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:490-504': [
         'IF( ln_zad_Aimp ) THEN',
         'zws(ji,jk) = zzws - p2dt *   MAX( wi(ji,jj,jk+1) , 0._wp )',
-        17],
+        15],
     'GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:561-565': [
         '!* 1st recurrence:   Tk = Dk - Ik Sk-1 / Tk-1',
         'zwt(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwt(ji,jk-1)',

@@ -33,7 +33,7 @@ In the selected adaptive-implicit branch, NEMO's ordinary diagonal retains
 reference thickness on dry cells through
 `e3t_3d * (1 + r3t(Kaa) * tmask)`, while the failed arm selected the imported
 array directly at
-`GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:489-505`.
+`GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:490-504`.
 The following LU recurrence divides by the preceding diagonal at
 `GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:561-565`.
 

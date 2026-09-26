@@ -9,7 +9,7 @@ evidence and is never scored.
 
 The compiled adaptive-implicit branch forms the ordinary diagonal with
 `e3t_3d * (1 + r3t(Kaa) * tmask)` at
-`GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:489-505`.
+`GYRE_OMIP_L2_P3_SM_R172SOLVEPAIR/BLD/ppsrc/nemo/trazdf.f90:490-504`.
 Therefore dry cells retain positive reference thickness.  The Round-172
 reader instead selected the imported array without a mask at lines 494--497.
 The imported legoESM array has exactly 3,120 zero values in its first frame,
