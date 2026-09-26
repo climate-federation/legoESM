@@ -1019,3 +1019,18 @@ def test_round174_solve_input_pair_ranks_both_arms_and_plants_fire(harness):
     moved_source["source"][0, 0, 0] = np.nextafter(10.0, np.inf)
     with pytest.raises(harness.GateError, match="baseline moved 1 source"):
         harness._score_solve_input_temperatures(moved_source, wet)
+
+
+def test_round174_solve_input_pair_refuses_dirty_worktree(
+        harness, tmp_path, monkeypatch):
+    """The record scorer must refuse before reading data from a dirty tree."""
+    from legoesm.ocean.fidelity import provenance
+
+    monkeypatch.setattr(
+        provenance, "worktree_stamp",
+        lambda: {"clean": False, "commit": "synthetic-dirty"})
+    with pytest.raises(harness.GateError,
+                       match="requires a clean committed tree"):
+        harness.score_nemo_solve_input_pair(
+            tmp_path / "pair", tmp_path / "baseline",
+            tmp_path / "source", tmp_path / "mesh")
