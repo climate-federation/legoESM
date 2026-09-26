@@ -21,6 +21,5 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu
 R=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_evdocc_d5
 N=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_HOURLY
-$PY -u scripts/validate/ocean_fidelity/equatorial_box_profile_tendency_vs_nemo.py --nemo-dir $N \
-  --pairs 0:$R/snapshot_day0000.250.npz 1:$R/snapshot_day0000.250.npz 2:$R/snapshot_day0000.250.npz 3:$R/snapshot_day0000.250.npz 4:$R/snapshot_day0000.250.npz 5:$R/snapshot_day0000.250.npz \
+$PY -u scripts/validate/ocean_fidelity/equatorial_box_profile_tendency_vs_nemo.py --nemo-dir $N --n-levels 14 --pairs 0:$R/snapshot_day0000.250.npz 1:$R/snapshot_day0000.250.npz 2:$R/snapshot_day0000.250.npz 3:$R/snapshot_day0000.250.npz 4:$R/snapshot_day0000.250.npz 5:$R/snapshot_day0000.250.npz 6:$R/snapshot_day0000.250.npz 2>&1 | grep -vE "cuInit|jax_plugins|plugin_module|_check_cuda|cuda_versions|Traceback|^\s*\^|Jax plugin"
 echo "=== card exit: $? ==="
