@@ -58,6 +58,7 @@ FILES = {
     "oce.F90": _OCE / "oce.F90",
     "DOM/istate.F90": _OCE / "DOM/istate.F90",
     "domzgr_substitute.h90": _OCE / "DOM/domzgr_substitute.h90",
+    "DOM/domzgr.F90": _OCE / "DOM/domzgr.F90",
     "dynspg_ts.F90": _DYN / "dynspg_ts.F90",
     "dynhpg.F90": _DYN / "dynhpg.F90",
     "dynadv.F90": _DYN / "dynadv.F90",
@@ -1065,6 +1066,23 @@ CITATION_MAP = {
         'SELECT CASE( nn_e3f_typ )',
         'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
         26],
+    # --- ORCA2 card round 31: the two consumers' own frozen F thicknesses ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:123':
+        ('zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk) * (e3f_3d(ji-1,jj-1,jk)', 1),
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:914-919': [
+        ('DO jk =  1,  jpk  ; DO jj = ntsj-(  0), ntej+(   0) ; '
+         'DO ji = ntsi-( 0), ntei+(   0)', 1),
+        ('END DO   ;   END DO   ;   END DO', 2), 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:935':
+        ("CALL lbc_lnk( 'dynvor', e3f_0vor, 'F', 1._wp )", 1),
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:937':
+        ('WHERE( e3f_0vor(:,:,:) == 0._wp )   '
+         'e3f_0vor(:,:,:) = e3f_3d(:,:,:)', 1),
+    'domzgr_substitute.h90:100':
+        ('#     define  e3f_0(i,j,k)    e3f_3d(i,j,k)', 1),
+    'DOM/domzgr.F90:173': (
+        "CALL iom_get( inum, jpdom_global, 'e3f_0'  , e3f_3d, cd_type = 'F', "
+        "psgn = 1._wp, kfill = jpfillcopy )", 1),
     # --- ORCA2 card round 27: split the shared F-thickness consumers ---
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:734-738': [
         ('DO jk = 1, jpkm1', 4),
