@@ -12602,10 +12602,12 @@ def developed_content_producer_walk(
                         surface_forcing=surface,
                         _nemo_stage1_zad_eta_after_override=ssha)
                     return jax.device_get(result)
-            result = model.step(
-                state, dt=card.dt_s, freshwater=freshwater,
-                surface_forcing=surface,
-                _nemo_stage1_zad_eta_after_override=ssha)
+            model.prime_step_caches(state)
+            with jax.disable_jit(False):
+                result = model._step_jitted(
+                    state, card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface,
+                    _nemo_stage1_zad_eta_after_override=ssha)
             return jax.device_get(result)
 
         control_model = LatLonCGridOceanModel(
