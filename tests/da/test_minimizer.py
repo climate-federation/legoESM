@@ -137,3 +137,4 @@ class TestLBFGSDescentSafeguards:
         np.testing.assert_allclose(np.asarray(r.x), np.asarray(x0))
         assert float(r.fun) == float(jnp.sum(x0 ** 2))
         assert not bool(r.converged)
+        assert bool(r.line_search_failed)

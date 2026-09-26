@@ -41,7 +41,9 @@ class IncrementalDiagnostics(NamedTuple):
     cost_history: list
     grad_norm_history: list
     inner_iterations: list
-    innovation_rms: list  # RMS of y - H(M(x)) over all obs, after each outer
+    # RMS of y - H(M(x)) over all obs, after each outer iteration; NaN when
+    # there are no observation values (the RMS of an empty set is undefined).
+    innovation_rms: list
 
 
 def incremental_4dvar(

@@ -22,6 +22,10 @@ class MinimizationResult(NamedTuple):
     n_iter: jax.Array         # Number of iterations performed
     converged: jax.Array      # Boolean: converged?
     history: jax.Array        # Cost at each iteration, shape (max_iter,)
+    # L-BFGS only: True when it stopped because no step met the Armijo
+    # condition (x is the last accepted point). CG accepts such steps and
+    # always reports False.
+    line_search_failed: jax.Array = jnp.array(False)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +258,7 @@ def minimize_lbfgs(
         n_iter=final.k,
         converged=final.converged,
         history=final.history,
+        line_search_failed=final.stalled,
     )
 
 
