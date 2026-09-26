@@ -21,9 +21,28 @@ def test_card_default_is_unchanged_without_the_flag():
     assert (cfg.tke_matrix_evaluation, cfg.tke_solver_evaluation) == ("factored", "shared_thomas")
 
 
-def test_literal_sets_matrix_and_solver_together():
+def test_literal_sets_the_whole_bundle():
     cfg = _core2().orca1_zdftke_config(step_evaluation="nemo_literal")
     assert (cfg.tke_matrix_evaluation, cfg.tke_solver_evaluation) == ("nemo_literal", "nemo_literal")
+    # operands of the transcribed matrix (tke.py:1220, :2786-2800)
+    assert cfg.tke_n2_evaluation_stage == "step_entry"
+    assert cfg.tke_dry_wmask is True
+
+
+def test_card_default_bundle_is_not_the_literal_one():
+    cfg = _core2().orca1_zdftke_config()
+    assert cfg.tke_n2_evaluation_stage == "implicit_solve_state"
+    assert cfg.tke_dry_wmask is False
+
+
+def test_validator_demands_the_two_companion_flags():
+    v = _core2()._validate_tke_card_grid
+    with pytest.raises(SystemExit, match="nemo_z0"):
+        v("tripole", "tke", tke_step_evaluation="nemo_literal")
+    with pytest.raises(SystemExit, match="carried_previous_step"):
+        v("tripole", "tke", tke_step_evaluation="nemo_literal", tke_surface_bc_level="nemo_z0")
+    v("tripole", "tke", tke_step_evaluation="nemo_literal", tke_surface_bc_level="nemo_z0",
+      tke_preclosure_coeff_source="carried_previous_step")
 
 
 def test_explicit_factored_is_the_card_pair():

@@ -1154,10 +1154,20 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
             raise ValueError(
                 f"orca1_zdftke_config step_evaluation {step_evaluation!r} invalid; "
                 "expected 'factored' or 'nemo_literal'.")
-        _cfg = _cfg._replace(
-            tke_matrix_evaluation=step_evaluation,
-            tke_solver_evaluation=("nemo_literal" if step_evaluation == "nemo_literal"
-                                   else "shared_thomas"))
+        if step_evaluation == "nemo_literal":
+            # The literal step is a BUNDLE (tke.py:1220, :2786-2800): live
+            # e3t/e3w from the step-entry N2 stage and the wmask-zeroed dry rows
+            # (w_active) are operands of the transcribed matrix, so they switch
+            # with it; nemo_z0 and carried_previous_step come from their own
+            # flags and are checked at parse time in _validate_tke_card_grid.
+            _cfg = _cfg._replace(
+                tke_matrix_evaluation="nemo_literal",
+                tke_solver_evaluation="nemo_literal",
+                tke_n2_evaluation_stage="step_entry",
+                tke_dry_wmask=True)
+        else:
+            _cfg = _cfg._replace(tke_matrix_evaluation="factored",
+                                 tke_solver_evaluation="shared_thomas")
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
     # value (2 = Veros Bougeault-Lacarrere, the current production).  3 selects
     # NEMO nn_mxl=3: the lup/ldown |dl/dz|<=e3t sweeps WITH the ln_mxl0 wind-
@@ -3987,6 +3997,15 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
             "takes effect ONLY on --grid tripole --tripole-vmix tke (the carried "
             "avm_k/dissl it needs live on LatLonCGridOceanState). Got --grid "
             f"{grid!r} --tripole-vmix {tripole_vmix!r}.")
+    if tke_step_evaluation == "nemo_literal" and not (
+            tke_surface_bc_level == "nemo_z0"
+            and tke_preclosure_coeff_source == "carried_previous_step"):
+        raise SystemExit(
+            "--tke-step-evaluation nemo_literal needs the NEMO z=0 surface row "
+            "and the carried avm_k/dissl: pass --tke-surface-bc-level nemo_z0 "
+            "--tke-preclosure-coeff-source carried_previous_step (got "
+            f"{tke_surface_bc_level!r} / {tke_preclosure_coeff_source!r}); the "
+            "closure would otherwise raise after the model is built.")
     if tke_preclosure_coeff_source is not None and not (
             grid == "tripole" and tripole_vmix == "tke"):
         raise SystemExit(
