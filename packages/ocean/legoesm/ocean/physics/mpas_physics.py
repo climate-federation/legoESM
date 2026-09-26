@@ -346,7 +346,11 @@ def make_mpas_ocean_physics(
                 from legoesm.ocean.eos import c_sw
                 _sf_sw = getattr(surface_forcing, "sw_down", None)
 
-                if _sf_sw is not None and _sf_chl is not None:
+                # RGB only when no explicit scheme was selected (lat-lon lane
+                # order): otherwise an attached chl silently replaced the
+                # requested sweeney_2band / jerlov_2band scheme.
+                if (_sf_sw is not None and _sf_chl is not None
+                        and getattr(sf_config, "shortwave_scheme", "auto") == "auto"):
                     # NEMO RGB chlorophyll penetration (ln_qsr_rgb), the SAME
                     # shared kernel the lat-lon C-grid PE step selects when chl
                     # is attached (ocean_pe_latlon_cgrid).  NEMO partitions 100%
@@ -434,13 +438,16 @@ def make_mpas_ocean_physics(
                         # so wetness and the deposit of the remainder in the
                         # deepest wet cell follow the same geometry the
                         # dynamics integrate against.
-                        from legoesm.ocean.vertical import compute_layer_thickness
                         _h_live = compute_layer_thickness(
                             state.eta.data, state.H_bathy.data, z_coord)
                         _wet_live = jnp.asarray(_h_live > 0.0, dtype=_h_live.dtype)
                         dz_0_cell_q = _h_live[:, 0]
                     else:
                         dz_0_cell_q = z_coord.dz_ref[0] * jacobian
+                        # Live geometry for the Jerlov kernel too: on partial
+                        # cells dz_ref*jacobian puts light below the seabed.
+                        _h_live = compute_layer_thickness(
+                            state.eta.data, state.H_bathy.data, z_coord)
 
                     # Non-solar part: surface cell only
                     inv_rho_csw_dz = 1.0 / (
@@ -455,12 +462,14 @@ def make_mpas_ocean_physics(
                     elif _sw_scheme == "jerlov_2band":
                         sw_tend = shortwave_penetration_tendency(
                             sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref,
-                            jacobian, _sw_cfg, rho_0=rho_0_ref, c_sw=c_sw)
+                            jacobian, _sw_cfg, rho_0=rho_0_ref, c_sw=c_sw,
+                            dz_live=_h_live)
                     else:
                         # Solar part: Jerlov penetration through column
                         sw_tend = shortwave_penetration_tendency(
                             sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref,
                             jacobian, rho_0=rho_0_ref, c_sw=c_sw,
+                            dz_live=_h_live,
                         )
                     dT_dt = dT_dt + sw_tend * mask[:, None]
                 else:

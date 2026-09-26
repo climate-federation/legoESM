@@ -4141,9 +4141,11 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * inv_rho_csw_dz * mask
                 )
+                # Live geometry: no light in below-seabed partial cells, the
+                # seabed remainder goes to the deepest wet cell.
                 sw_tend = shortwave_penetration_tendency(
                     sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref, J, _sw_cfg,
-                    rho_0=float(rho_0),
+                    rho_0=float(rho_0), dz_live=h_k,
                 )
                 dT_target = dT_target + sw_tend * mask_3d
             elif _sf_sw is not None and _sf_chl is not None:
@@ -4191,6 +4193,7 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
                     z_coord.z_half_ref,
                     J,
                     rho_0=float(rho_0),
+                    dz_live=h_k,
                 )
                 dT_target = dT_target + sw_tend * mask_3d
             else:

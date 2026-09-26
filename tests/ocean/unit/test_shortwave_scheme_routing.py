@@ -122,8 +122,10 @@ def test_mpas_physics_dispatch_column_total_is_q_net_for_every_scheme(_fp64_poli
         phys = config.physics._replace(surface_forcing=SurfaceForcingConfig(
             scheme="none", shortwave_scheme=scheme, shortwave_water_type="II"))
         fn = make_mpas_ocean_physics(phys)
+        # chl only where the scheme needs it: with chl attached "auto" is RGB
         sf = OceanSurfaceForcing(sw_down=sw, q_net=q_net, tau_x=jnp.zeros(n),
-                                 tau_y=jnp.zeros(n), chl=chl)
+                                 tau_y=jnp.zeros(n),
+                                 chl=chl if scheme == "sweeney_2band" else None)
         tend = fn(state, mesh, z_coord, surface_forcing=sf)
         dT = np.asarray(getattr(tend.dT_dt, "data", tend.dT_dt))
         h = np.asarray(z_coord.dz_ref)[None, :] * np.ones((n, 1))
@@ -131,6 +133,13 @@ def test_mpas_physics_dispatch_column_total_is_q_net_for_every_scheme(_fp64_poli
         np.testing.assert_allclose(col[np.asarray(mask) > 0.5], 50.0, rtol=1e-9)
         out[scheme] = dT
     np.testing.assert_allclose(out["auto"], out["jerlov_2band"])   # same type II
+    # an explicit sweeney_2band must not be replaced by RGB when chl is attached
+    phys = config.physics._replace(surface_forcing=SurfaceForcingConfig(
+        scheme="none", shortwave_scheme="auto"))
+    rgb = make_mpas_ocean_physics(phys)(state, mesh, z_coord, surface_forcing=OceanSurfaceForcing(
+        sw_down=sw, q_net=q_net, tau_x=jnp.zeros(n), tau_y=jnp.zeros(n), chl=chl))
+    rgb = np.asarray(getattr(rgb.dT_dt, "data", rgb.dT_dt))
+    assert np.abs(out["sweeney_2band"] - rgb).max() > 1e-2 * np.abs(rgb).max()
     assert np.abs(out["sweeney_2band"] - out["auto"]).max() > 1e-2 * np.abs(out["auto"]).max()
     # sweeney routes 0.54 of the shortwave into the column, jerlov 0.94: the
     # surface cell therefore holds MORE heat under sweeney
@@ -144,7 +153,8 @@ def test_mpas_physics_dispatch_column_total_is_q_net_for_every_scheme(_fp64_poli
             sw_down=sw, q_net=q_net, tau_x=jnp.zeros(n), tau_y=jnp.zeros(n)))
 
 
-def test_mpas_sweeney_respects_partial_cells(_fp64_policy_restored):
+@pytest.mark.parametrize("scheme", ["sweeney_2band", "auto", "jerlov_2band"])
+def test_mpas_sweeney_respects_partial_cells(_fp64_policy_restored, scheme):
     """With a partial-cell coordinate (the ETOPO lane), no heat lands below the
     seabed and the column still integrates to q_net (codex P1 on batch 2)."""
     import jax.numpy as jnp
@@ -167,10 +177,13 @@ def test_mpas_sweeney_respects_partial_cells(_fp64_policy_restored):
     state = state._replace(H_bathy=Field(data=H, name="H_bathy", dims=state.H_bathy.dims))
     h_live = np.asarray(compute_layer_thickness(state.eta.data, H, pc))
     phys = config.physics._replace(surface_forcing=SurfaceForcingConfig(
-        scheme="none", shortwave_scheme="sweeney_2band"))
+        scheme="none", shortwave_scheme=scheme))
     fn = make_mpas_ocean_physics(phys)
+    # chl only for sweeney: with chl attached the "auto" lane runs RGB, and the
+    # Jerlov kernel is what these arms must exercise.
+    chl = jnp.full((n,), 0.3) if scheme == "sweeney_2band" else None
     sf = OceanSurfaceForcing(sw_down=jnp.full((n,), 200.0), q_net=jnp.full((n,), 50.0),
-                             tau_x=jnp.zeros(n), tau_y=jnp.zeros(n), chl=jnp.full((n,), 0.3))
+                             tau_x=jnp.zeros(n), tau_y=jnp.zeros(n), chl=chl)
     tend = fn(state, mesh, pc, surface_forcing=sf)
     # isolate the surface-heat part from the recipe's vertical mixing (which
     # is not level-masked on MPAS): subtract the same physics with zero heat
@@ -184,7 +197,8 @@ def test_mpas_sweeney_respects_partial_cells(_fp64_policy_restored):
     assert (h_live[wet] <= 0.0).any()          # the fixture really has dry levels
 
 
-def test_tripole_sweeney_column_total_is_q_net_on_partial_cells(tmp_path, _fp64_policy_restored):
+@pytest.mark.parametrize("scheme", ["sweeney_2band", "auto", "jerlov_2band"])
+def test_tripole_sweeney_column_total_is_q_net_on_partial_cells(tmp_path, _fp64_policy_restored, scheme):
     """Functional tripole twin of the MPAS test (Claude review, batch 2): on a
     synthetic tripole mesh with a partial-cell coordinate the Sweeney branch
     deposits exactly q_net per wet column and nothing below the seabed."""
@@ -201,7 +215,7 @@ def test_tripole_sweeney_column_total_is_q_net_on_partial_cells(tmp_path, _fp64_
     common = dict(tripole_mesh=str(mesh), tripole_fold_convention="(n_lon-i)%n_lon",
                   forcing_mode="jra55_do_tropical")
     grid, z, config, model, _ = R._create_setup(
-        "tripole", "eorca1", 12, 600.0, "none", "II", sw_scheme="sweeney_2band", **common)
+        "tripole", "eorca1", 12, 600.0, "none", "II", sw_scheme=scheme, **common)
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     state = R._init_rest_state("tripole", grid, z, H_max=600.0)
     wet2d = np.asarray(state.land_mask.data) > 0.5
@@ -212,9 +226,10 @@ def test_tripole_sweeney_column_total_is_q_net_on_partial_cells(tmp_path, _fp64_
     state = state._replace(H_bathy=Field(data=H, name="H_bathy", dims=state.H_bathy.dims))
     h_k = np.asarray(compute_layer_thickness(state.eta.data, H, pc))
     shape2d = state.T.data.shape[:2]
+    chl = jnp.full(shape2d, 0.3) if scheme == "sweeney_2band" else None
     sf = OceanSurfaceForcing(sw_down=jnp.full(shape2d, 200.0), q_net=jnp.full(shape2d, 50.0),
                              tau_x=jnp.zeros(shape2d), tau_y=jnp.zeros(shape2d),
-                             chl=jnp.full(shape2d, 0.3))
+                             chl=chl)
     t_on = model.tendencies(state, surface_forcing=sf)
     t_zero = model.tendencies(state, surface_forcing=sf._replace(
         sw_down=jnp.zeros(shape2d), q_net=jnp.zeros(shape2d)))
