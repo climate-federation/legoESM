@@ -7,7 +7,7 @@
 #SBATCH --time=01:30:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/tkelen_%j.out
 # The 2-4x viscosity gap at 15-29 m at hour 5 (hourly rerun): energy or length?
-# NEMO restarts every 6 h (nn_stock=6) give instantaneous en/avm_k/dissl at
+# NEMO restarts every 4 h (nn_stock=4; must be a multiple of nn_fsbc=4) give instantaneous en/avm_k/dissl at
 # the same clock hour as our snapshots.
 # PRE-REGISTERED: (a) e ours/NEMO ~1 and l_m ours/NEMO ~0.3-0.5 at 15-29 m ->
 # length formulation/bounds; (b) e ratio ~0.3-0.5 with l_m ~1 -> TKE budget
@@ -23,7 +23,7 @@ export JAX_PLATFORMS=cpu
 R=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_evdocc_d5
 N=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_HOURLY
 NOISE="cuInit|jax_plugins|plugin_module|_check_cuda|cuda_versions|Traceback|^\s*\^|Jax plugin|RuntimeWarning|nanmedian|avm_m = |pr_o = |pr_N = "
-for PAIR in "06:snapshot_day0000.250" "12:snapshot_day0000.500" "18:snapshot_day0000.750" "24:snapshot_day0001" "42:snapshot_day0001.750" "48:snapshot_day0002"; do
+for PAIR in "12:snapshot_day0000.500" "24:snapshot_day0001" "36:snapshot_day0001.500" "48:snapshot_day0002"; do
   H=${PAIR%%:*}; S=$R/${PAIR#*:}.npz
   echo "##### NEMO restart step $H (UTC $H:00, instantaneous) vs ours $(basename $S)"
   $PY -u scripts/validate/ocean_fidelity/equatorial_tke_length_vs_nemo_restart.py --restart-glob "$N/ORCA1_000000${H}_restart_oce_*.nc" --snapshot $S --n-levels 20 2>&1 | grep -vE "$NOISE"
