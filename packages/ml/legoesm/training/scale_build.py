@@ -880,10 +880,21 @@ def build_mode_components(cfg, yml):
         params = TrainablePhysicsParams.from_defaults()
         step_unified = physics_pipeline.build_step_unified()
 
+        # The configured physics, exactly as the production compiled segment
+        # passes it; the builder's defaults (no microphysics -> an extra
+        # saturation adjustment, no fixers, radiation every step) would tune a
+        # different model from the configured one.
+        _configured = dict(
+            microphysics=config.microphysics,
+            fix_moisture=config.fix_moisture,
+            fix_mass=config.dycore.fix_mass,
+            rad_update_steps=int(config.rad_update_steps),
+        )
+
         def make_run_seg(trainable):
             return build_training_segment(
                 model, step_unified, grid, sigma, dt, fric_decay=fric_decay,
-                **trainable.to_segment_kwargs())
+                **{**_configured, **trainable.to_segment_kwargs()})
 
     elif cfg.mode == "neural_gcm":
         from legoesm.atmosphere.physics.neural_physics import (
