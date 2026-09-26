@@ -156,8 +156,6 @@ pass and was not rerun.
 | `content_process_effect_plant_final.log` | `eed7895e9413572e14ff7fa7c4f314169c38cce97fa499a4a7f51a6ba9664335` |
 | `codex_review.log` | `626acf42958926c40c748abdf9a45bd51d2418c34d7c471ca5022ecf845f6573` |
 | `focused_tests_final.log` | `9031d60330443667e8ff0dcef13be892216da335e0ed5c5ef33fbf2dcb927fc8` |
-| `citation_gate.json` | `027d09a8cad40880502daea63685e8207c741dc4618b645faf8365d691c4e8c2` |
-| `citation_shift_plant.json` | `735c6013cb4a1e68bf49771b3b1771afc2f7bdb6d0af25f965e6ead86ff5e19c` |
 | `full_ocean_tests.log` | `0cbefb57f985364cdf75f33fa9dc4d776342c5ff7f6a6dce965f125a280f0b17` |
 
 ## OPEN — round 177
