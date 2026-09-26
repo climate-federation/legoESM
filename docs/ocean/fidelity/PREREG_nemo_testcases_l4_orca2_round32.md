@@ -21,7 +21,7 @@ The executing build constructs the masked four-cell reference average at
 exchanges it on the F fold at `:935`, and replaces remaining zero values with
 the mesh thickness at `:937`.  The EEN reciprocal consumes that array at
 `:734-738`.  The independent `hf_0` read-out is separately tied to its
-construction from `e3f_0` at `ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domain.f90:199`
+construction from `e3f_0` at `ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domain.f90:203-206`
 and the live `r3f` construction at
 `ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90:273-286`.
 

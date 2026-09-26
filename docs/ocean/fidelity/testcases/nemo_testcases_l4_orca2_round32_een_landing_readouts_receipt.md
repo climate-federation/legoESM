@@ -83,7 +83,7 @@ velocity outcome plants both exit nonzero.
 
 Given NEMO's recorded kt=2 entry, the canonical production replay is not
 bit-exact against the literal statements at
-`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:121-140`.
+`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:123-140`.
 All 411,736 scored U cells differ, with maximum `2.2089693992382724e-05`
 m/s2, and all 412,537 scored V cells differ, with maximum
 `1.798072838581657e-05` m/s2.  A second round-32 replay that explicitly
@@ -101,7 +101,7 @@ lateral-diffusion operator debt.
 ### Carried `hf_0` in `r3f` — measured, not landed
 
 NEMO builds the carried column depth from `e3f_0` at
-`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domain.f90:199`; the live
+`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domain.f90:203-206`; the live
 F ratio is formed at
 `ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90:273-286` and is
 consumed by the reciprocal at
