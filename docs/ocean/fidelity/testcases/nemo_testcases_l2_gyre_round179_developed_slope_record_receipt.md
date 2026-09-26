@@ -130,11 +130,22 @@ The record-magic plant is implemented but cannot execute until the operator
 produces the record.  Round 180 must require its nonzero `STATUS PLANT-FIRED`
 result before parsing scientific rows.
 
+The final focused battery reports **`64 passed in 36.26s`**.  It covers the
+year-owner acquisition tests, the executable Round-179 source-layout plant,
+and the complete receipt-citation suite.  An intermediate citation run
+correctly rejected two repeated endpoint symbols; the final map pins their
+occurrences without moving either cited range.  The final citation gate is
+**PASS** with zero unmapped citations, failures, or map-audit failures.  Its
+shifted Round-179 range plant exits 1.
+
 | artifact | SHA-256 |
 |---|---|
 | `preflight.log` | `23fff4b4d369ff207fd1820cb732f679f85e2a7a6b6462d926092dde0ae12872` |
 | `layout_plant.log` | `831c68020af81934d5c23f7fa3d311cc859ede03422abc1b86cbbaaadecad29d` |
 | `codex_review.log` | `626acf42958926c40c748abdf9a45bd51d2418c34d7c471ca5022ecf845f6573` |
+| `focused_tests_final.log` | `6e3c63f584050cc0449eb1fb767b3c5c785a664868e8199fd65fef87bf8963e6` |
+| `citation_gate.json` | `62baaccda3517b7587ddba966e10e219869b5a79f086ed801f63800b05e02230` |
+| `citation_gate_plant.json` | `c54072ac55ba651f1606e08530fd241e4739a388c3e8a8c1a91e0dc76bff7461` |
 
 Choices made: no scientific or configuration choice.  The end step and
 restart cadence reproduce the admitted Round-132 comparison window and exist
