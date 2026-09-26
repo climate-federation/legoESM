@@ -86,7 +86,13 @@ def _live_production_ldf(deck_root: Path, record_root: Path, kt: int):
     components = result[2]
     du = np.asarray(components["ldf_u"].data, dtype=np.float64)[:, 1:, :r11.NZ]
     dv = np.asarray(components["ldf_v"].data, dtype=np.float64)[1:, :, :r11.NZ]
-    return du, dv, card, entry
+    live = {
+        "e3t": np.asarray(e3t, dtype=np.float64)[:, :, :r11.NZ],
+        "e3u": np.asarray(e3u, dtype=np.float64)[:, 1:, :r11.NZ],
+        "e3v": np.asarray(e3v, dtype=np.float64)[1:, :, :r11.NZ],
+        "e3f": np.asarray(e3f, dtype=np.float64)[1:, 1:, :r11.NZ],
+    }
+    return du, dv, card, entry, live
 
 
 def run(deck_root: Path, record_root: Path, kt: int, *, plant: bool) -> dict:
@@ -97,12 +103,16 @@ def run(deck_root: Path, record_root: Path, kt: int, *, plant: bool) -> dict:
          "e3t_0", "e3u_0", "e3v_0", "e3f_0", "tmask", "umask", "vmask"))
     coeff = r11._stitch(
         record_root, "output.init_{rank:04d}.nc", ("ahmt", "ahmf"))
-    candidate_u, candidate_v, card, entry = _live_production_ldf(
+    candidate_u, candidate_v, card, entry, live = _live_production_ldf(
         deck_root, record_root, kt)
     if plant:
         candidate_u = r11._plant_one_value(candidate_u)
     oracle_u, oracle_v = r11.nemo_dynldf_lev_lap_rot(
         mesh, coeff["ahmt"], coeff["ahmf"], entry["u"], entry["v"], entry["ssh"])
+    live_u, live_v = r11.nemo_dynldf_lev_lap_rot(
+        mesh, coeff["ahmt"], coeff["ahmf"], entry["u"], entry["v"], entry["ssh"],
+        thickness_override=(live["e3u"], live["e3v"], live["e3f"]),
+        e3t_override=live["e3t"])
     weight_u = mesh["umask"] * np.isfinite(oracle_u)
     weight_v = mesh["vmask"] * np.isfinite(oracle_v)
     score_u = r11.score(candidate_u, oracle_u, weight_u)
@@ -137,6 +147,8 @@ def run(deck_root: Path, record_root: Path, kt: int, *, plant: bool) -> dict:
         },
         "u_momentum": score_u,
         "v_momentum": score_v,
+        "live_operand_replay_u": r11.score(candidate_u, live_u, weight_u),
+        "live_operand_replay_v": r11.score(candidate_v, live_v, weight_v),
         "predictions": {key: ("CONFIRMED" if value else "REFUTED")
                         for key, value in predictions.items()},
     }
