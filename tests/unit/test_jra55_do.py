@@ -884,3 +884,33 @@ def test_cache_polar_gap_is_treated_not_diluted(tmp_path):
     ))
     np.testing.assert_allclose(untreated[1:-1, :], 290.0, atol=1e-9)
     np.testing.assert_allclose(untreated[[0, -1], :], 290.0 * 0.749995, rtol=1e-4)
+
+
+def test_ocean_loader_reads_builder_cache(tmp_path):
+    """The ocean OMIP-2 loader must read what build_jra55_cache writes
+    instead of silently falling back to synthetic forcing."""
+    import xarray as xr
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+
+    src_path = tmp_path / "synthetic_jra55.zarr"
+    _make_synthetic_jra55_zarr(src_path, n_lat=8, n_lon=16, cadence_hours=6)
+    cfg = JRA55DoConfig(
+        source_path=str(src_path), years=(1958, 1958),
+        target_lat_edges=np.deg2rad(np.linspace(-90.0, 90.0, 5)),
+        target_lon_edges=np.deg2rad(np.linspace(0.0, 360.0, 9)),
+        cache_dir=tmp_path / "cache",
+    )
+    cache_path = build_jra55_cache(cfg, overwrite=True, progress=False)
+    for root in (cfg.cache_dir, cache_path):   # directory or the store itself
+        f = load_jra55_do(1958, cache_dir=root, allow_synthetic=False)
+        ds = xr.open_zarr(cache_path)
+        n = 365 * RECORDS_PER_DAY
+        assert f.u10.shape == (n, 4, 8)
+        np.testing.assert_array_equal(f.T_air, ds.tas.values[:n])
+        np.testing.assert_array_equal(
+            f.precip, ds.prra.values[:n] + ds.prsn.values[:n])
+        np.testing.assert_array_equal(f.slp, ds.psl.values[:n])
+        assert np.all((f.lon >= 0.0) & (f.lon < 360.0))
+        assert f.time_s[1] - f.time_s[0] == 3 * 3600.0
+    with pytest.raises(FileNotFoundError):
+        load_jra55_do(1959, cache_dir=cfg.cache_dir, allow_synthetic=False)

@@ -17,8 +17,8 @@ grid from 1958 to present. The seven OMIP-2 forcing channels carried
 by this loader are:
 
 * ``u10``, ``v10``      [m/s]       3-hourly 10-m wind components
-* ``T_air``             [K]         3-hourly 2-m air temperature
-* ``q_air``             [kg/kg]     3-hourly 2-m specific humidity
+* ``T_air``             [K]         3-hourly 10-m air temperature
+* ``q_air``             [kg/kg]     3-hourly 10-m specific humidity
 * ``sw_down``           [W/m^2]     3-hourly downward shortwave
 * ``lw_down``           [W/m^2]     3-hourly downward longwave
 * ``precip``            [kg/m^2/s]  3-hourly precipitation flux
@@ -151,16 +151,58 @@ def synthetic_ocean_forcing(year: int, *,
     )
 
 
+def _load_from_builder_cache(store: Path, year: int) -> Optional[OceanForcing]:
+    """Slice one noleap year out of the multi-year CMOR-named cache written
+    by ``legoesm.forcing.jra55_do.build_jra55_cache``; None if the year is
+    outside the cached window."""
+    import xarray as xr
+    from legoesm.forcing.jra55_do import RECORDS_PER_DAY
+    from legoesm.forcing.time_utils import NOLEAP_DAYS_PER_YEAR
+
+    ds = xr.open_zarr(store)
+    y0, y1 = int(ds.attrs["year_start"]), int(ds.attrs["year_end"])
+    if not y0 <= year <= y1:
+        return None
+    per_year = NOLEAP_DAYS_PER_YEAR * RECORDS_PER_DAY
+    start = (year - int(ds.attrs["ref_year"])) * per_year
+    ds = ds.isel(time=slice(start, start + per_year))
+
+    def f(name):
+        return np.asarray(ds[name].values, dtype=np.float64)
+
+    prra, prsn = f("prra"), f("prsn")
+    return OceanForcing(
+        lon=f("lon"),
+        lat=np.asarray(ds.lat.values, dtype=np.float64),
+        time_s=np.arange(per_year, dtype=np.float64)
+        * (86400.0 / RECORDS_PER_DAY),
+        u10=f("uas"), v10=f("vas"), T_air=f("tas"), q_air=f("huss"),
+        sw_down=f("rsds"), lw_down=f("rlds"),
+        precip=prra + prsn, runoff=f("friver"),
+        snow=prsn, slp=f("psl"),
+    )
+
+
 def load_jra55_do(year: int, *, cache_dir: Optional[Path] = None,
                   allow_synthetic: bool = True) -> OceanForcing:
     """Load one calendar year of JRA55-do forcing.
 
-    Looks for ``<cache_dir>/<year>.zarr`` first; falls back to
-    :func:`synthetic_ocean_forcing` when ``allow_synthetic=True`` and
-    no cached year is present.
+    Looks for ``<cache_dir>/<year>.zarr`` first, then for the multi-year
+    cache written by ``scripts/data/prepare_omip_forcing.py`` (``cache_dir``
+    may name that store directly or the directory holding it under its
+    default filename). Falls back to :func:`synthetic_ocean_forcing` when
+    ``allow_synthetic=True`` and neither holds the year.
     """
     root = Path(cache_dir) if cache_dir is not None else _cache_dir()
     zarr_path = root / f"{year}.zarr"
+    if not zarr_path.exists():
+        from legoesm.forcing.jra55_do import JRA55DoConfig
+        store = root if root.suffix == ".zarr" else (
+            root / JRA55DoConfig.cache_filename)
+        if store.exists():
+            forcing = _load_from_builder_cache(store, year)
+            if forcing is not None:
+                return forcing
     if zarr_path.exists():
         try:
             import xarray as xr
@@ -186,7 +228,7 @@ def load_jra55_do(year: int, *, cache_dir: Optional[Path] = None,
     if not allow_synthetic:
         raise FileNotFoundError(
             f"JRA55-do cache missing: {zarr_path}; populate via "
-            f"``scripts/download_jra55_do.py`` (see "
+            f"``scripts/data/prepare_omip_forcing.py`` (see "
             f"https://climate.mri-jma.go.jp/pub/ocean/JRA55-do/)."
         )
     # Loud (not silent) fallback: synthetic analytic forcing is NOT the
