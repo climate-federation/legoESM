@@ -72,8 +72,7 @@ cmp -s "$SOURCE_RUN/$RESTART_1440" "$BASELINE_RUN/$RESTART_1440" || \
 
 readonly DRY=$(mktemp -d /tmp/gyre-r173-wet-input.XXXXXXXX)
 readonly RAW=$DRY/round172_solve_inputs.raw
-set +e
-"$PY" - "$REPO" "$SOURCE_RUN" "$INPUT_ROOT" "$RAW" "$MODE" <<'PYINPUT'
+if "$PY" - "$REPO" "$SOURCE_RUN" "$INPUT_ROOT" "$RAW" "$MODE" <<'PYINPUT'
 import hashlib
 import json
 import sys
@@ -201,8 +200,11 @@ print(
     "WET_INPUT_LAYOUT_PASS bytes=167132160 selected_per_frame=18000 "
     "retained_per_frame=3120")
 PYINPUT
-python_status=$?
-set -e
+then
+  python_status=0
+else
+  python_status=$?
+fi
 
 if [[ "$MODE" == --plant-wet-mask ]]; then
   [[ "$python_status" -eq 2 ]] || \
