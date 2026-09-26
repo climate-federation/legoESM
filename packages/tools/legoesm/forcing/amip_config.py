@@ -196,7 +196,6 @@ class AMIPExperimentConfig(NamedTuple):
     monthly_means: bool = False  # Accumulate zonal/global monthly means
 
     # Carbon cycle
-    carbon_cycle: str = "none"  # "none", "differland", or "seasonal"
 
     # CMIP experiment
     experiment: str = ""  # "piControl", "historical", "ssp245", "ssp585", "amip", "1pctCO2"

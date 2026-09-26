@@ -47,7 +47,6 @@ __param_spec__ = {
     "RichardsConfig": {
         "scheme_key": "land.richards",
         "excluded": {
-            "theta_tol": "numerics: Newton convergence tolerance",
             "pond_max": "numerics: surface ponding cap before overland runoff [m]",
             "fc_drain_saturation": "config-level knob (not auto-collected): the "
             "RichardsConfig field default is 0.0 (limiter OFF, guarded by `> 0.0`), which "
@@ -100,11 +99,9 @@ class RichardsConfig(NamedTuple):
     """Configuration for the Richards equation solver.
 
     The solver runs a fixed number of Picard iterations (``max_iter``)
-    per time step.  ``theta_tol`` is retained for future use but is
-    **not** checked during the loop.
+    per time step; there is no convergence check.
     """
     max_iter: int = 10
-    theta_tol: float = 1e-6       # reserved for future convergence check [m3/m3]
     bottom_bc: str = "free_drainage"  # "free_drainage" or "zero_flux"
     # Surface ponding: max depth [m] held on the surface before it overflows to
     # runoff (overland flow).  Excess precip ponds up to this depth (a coupled

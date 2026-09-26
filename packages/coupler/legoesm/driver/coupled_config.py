@@ -42,8 +42,6 @@ class CoupledConfig(NamedTuple):
     carbon_land : str
         Land carbon scheme: ``"none"``, ``"differland"`` (DALEC 6-pool),
         ``"seasonal"`` (prescribed NEE cycle).
-    carbon_ocean : bool
-        Enable ocean biogeochemistry CO2 exchange.
     co2_tracer : bool
         Enable prognostic atmospheric CO2 transport.
     co2_ppmv_init : float
@@ -122,7 +120,6 @@ class CoupledConfig(NamedTuple):
     # Carbon cycle
     carbon_active: bool = False
     carbon_land: str = "none"
-    carbon_ocean: bool = False
     co2_tracer: bool = False
     co2_ppmv_init: float = 415.0
     # Spun-up land carbon IC (finidat).  Path to a ``global_carbon_ic.npz`` built
@@ -353,7 +350,7 @@ def preset_slab_carbon(**overrides) -> CoupledConfig:
 
 
 def preset_full_coupled(**overrides) -> CoupledConfig:
-    """Slab ocean + Richards' land + land & ocean carbon + atm CO2."""
+    """Slab ocean + Richards' land + land carbon + atm CO2."""
     defaults = dict(
         ocean_mode="slab",
         ocean_config=SimpleOceanConfig(mode="slab", h_mix=50.0),
@@ -365,7 +362,6 @@ def preset_full_coupled(**overrides) -> CoupledConfig:
         f_land_mode="analytical",
         carbon_active=True,
         carbon_land="differland",
-        carbon_ocean=True,
         co2_tracer=True,
     )
     defaults.update(overrides)

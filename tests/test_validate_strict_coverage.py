@@ -14,8 +14,9 @@ Mechanism (three layers, so no single loose heuristic carries the guarantee):
     field a bogus value is fed through ``validate_strict`` and must raise
     ``ValueError``. This is immune to AST-matching subtleties.
   * **Structural regression** — each ``EXPECTED_VALIDATED`` field must carry a
-    real *membership* check (``not in``/``in``) in ``validate_strict`` source;
-    ``carbon_cycle`` is the one equality-rejection (``!= "none"``). A plain
+    real *membership* check (``not in``/``in``) in ``validate_strict`` source,
+    or an equality-rejection (``!= "none"``) if listed in
+    ``EQUALITY_VALIDATED`` (empty today). A plain
     cross-field compatibility ``==`` does NOT count (it would otherwise mask a
     deleted membership guard).
   * **Completeness** — scheme-like fields are detected two ways (an inline
@@ -89,9 +90,9 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "experiment",
     }
 )
-# Validated by equality-rejection rather than a set membership: ``carbon_cycle``
-# is rejected unless ``== "none"`` (coupled mode unsupported in this driver).
-EQUALITY_VALIDATED: frozenset[str] = frozenset({"carbon_cycle"})
+# Validated by equality-rejection rather than a set membership.  Empty since
+# the unimplemented ``carbon_cycle`` stub was deleted (2026-09-26).
+EQUALITY_VALIDATED: frozenset[str] = frozenset()
 
 # Scheme/dispatch fields NOT membership-validated in validate_strict today.
 # Validated at their forcing loader / builder / factory (cf. grid_type at
@@ -116,7 +117,7 @@ KNOWN_UNVALIDATED: frozenset[str] = frozenset(
     }
 )
 
-# Bogus values for behavioural teeth. ``carbon_cycle`` rejects any non-"none".
+# Bogus value for behavioural teeth.
 _BOGUS = "__nonexistent_scheme__"
 
 # Config classes whose scheme-like str fields the completeness scan covers
