@@ -1685,12 +1685,20 @@ def precompute_halo_tables(n: int) -> None:
 #   day 30 zonal_std: 0.520 -> 0.274                               -47%
 #   day 30 eddy_std:  0.364 -> 0.260                               -29%
 #
-# Set via the ``LEGOESM_CORNER_FILL`` environment variable or via the
-# ``set_corner_fill_mode(...)`` helper.  Default ``avg`` preserves the
-# current production behaviour.
+# Runs select it through ``DycoreConfig.corner_fill`` (applied by the model
+# driver at build, before any step is traced, via ``apply_corner_fill_config``).
+# The ``LEGOESM_CORNER_FILL`` environment variable is still read at import for
+# scripts/tests outside the driver; an unknown value raises.
 import os as _os
 
+CORNER_FILL_MODES = ("avg", "fv3_agrid_xdir", "fv3_bgrid_xdir")
+
 _corner_fill_mode = _os.environ.get("LEGOESM_CORNER_FILL", "avg")
+if _corner_fill_mode not in CORNER_FILL_MODES:
+    raise ValueError(
+        f"LEGOESM_CORNER_FILL={_corner_fill_mode!r} is not a corner fill mode; "
+        f"choose from {CORNER_FILL_MODES} (runs should set "
+        f"DycoreConfig.corner_fill instead).")
 
 
 def set_corner_fill_mode(mode: str) -> None:
@@ -1716,11 +1724,10 @@ def set_corner_fill_mode(mode: str) -> None:
           See FV3_3D.md iter 10.
     """
     global _corner_fill_mode
-    valid_modes = ("avg", "fv3_agrid_xdir", "fv3_bgrid_xdir")
-    if mode not in valid_modes:
+    if mode not in CORNER_FILL_MODES:
         raise ValueError(
             f"Unknown corner fill mode: {mode!r}.  "
-            f"Choose from {valid_modes}."
+            f"Choose from {CORNER_FILL_MODES}."
         )
     _corner_fill_mode = mode
 
@@ -1728,6 +1735,18 @@ def set_corner_fill_mode(mode: str) -> None:
 def get_corner_fill_mode() -> str:
     """Return the current cube-vertex halo fill mode."""
     return _corner_fill_mode
+
+
+def apply_corner_fill_config(mode: str) -> None:
+    """Apply a run's configured corner fill.  A ``LEGOESM_CORNER_FILL`` that
+    disagrees with the config raises, so the env var cannot silently override
+    (or be silently overridden by) the recorded run configuration."""
+    env = _os.environ.get("LEGOESM_CORNER_FILL")
+    if env is not None and env != mode:
+        raise ValueError(
+            f"LEGOESM_CORNER_FILL={env!r} disagrees with the run config "
+            f"corner_fill={mode!r}; set the config field and unset the env var.")
+    set_corner_fill_mode(mode)
 
 
 def fill_corners_h1(padded: jax.Array) -> jax.Array:

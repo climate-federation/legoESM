@@ -17,6 +17,8 @@ The toggle is at module scope in ``legoesm.grids.halo``, exposed via
 """
 from __future__ import annotations
 
+import sys
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -250,3 +252,27 @@ def test_h2_modes_differ_on_random_input():
 
     diff = float(jnp.max(jnp.abs(out_avg - out_xdir)))
     assert diff > 0.0, "h2 modes must differ on random input"
+
+
+def test_invalid_env_value_raises_at_import():
+    import os
+    import subprocess
+    env = dict(os.environ, LEGOESM_CORNER_FILL="fv3_bgrid", JAX_PLATFORMS="cpu")
+    r = subprocess.run([sys.executable, "-c", "import legoesm.grids.halo"],
+                       env=env, capture_output=True, text=True)
+    assert r.returncode != 0 and "LEGOESM_CORNER_FILL" in r.stderr
+
+
+def test_env_var_conflicting_with_config_raises(monkeypatch):
+    from legoesm.grids.halo import apply_corner_fill_config
+    monkeypatch.setenv("LEGOESM_CORNER_FILL", "avg")
+    with pytest.raises(ValueError, match="disagrees with the run config"):
+        apply_corner_fill_config("fv3_bgrid_xdir")
+
+
+def test_model_driver_applies_config_corner_fill(monkeypatch):
+    monkeypatch.delenv("LEGOESM_CORNER_FILL", raising=False)
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    from legoesm.driver.model_driver import ModelDriver
+    ModelDriver(ExperimentConfig(dycore=DycoreConfig(corner_fill="fv3_bgrid_xdir")))
+    assert get_corner_fill_mode() == "fv3_bgrid_xdir"
