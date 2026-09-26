@@ -136,29 +136,70 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
     """Re-run round 24's literal compiled LDF replay on the landed routing."""
     import jax.numpy as jnp
 
-    from legoesm.ocean import vertical
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,
+    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _nemo_ws_qco_stage_faces,
+    )
     from legoesm.ocean.fidelity.provenance import worktree_stamp
+    from legoesm.ocean.vertical import (
+        compute_layer_thickness,
+        nemo_ldf_metric_reciprocals_cgrid,
+        nemo_ldf_reference_e3f,
+        nemo_qco_live_vorticity_e3f_cgrid,
+    )
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round11_dynldf_operator_gate as r11,
     )
     from scripts.validate.ocean_fidelity.orca2_l4 import (
-        nemo_testcase_l4_orca2_round27_consumer_gate as r27,
+        nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
     )
 
     _policy()
-    original = vertical.nemo_qco_live_vorticity_e3f_cgrid
-
-    def with_mesh_reference(*args, **kwargs):
-        kwargs["reference_e3f"] = vertical.nemo_ldf_reference_e3f(args[1])
-        return original(*args, **kwargs)
-
-    vertical.nemo_qco_live_vorticity_e3f_cgrid = with_mesh_reference
-    try:
-        outputs, _card, entry, _ = r27._ldf_inputs(deck_root, record_root, 2)
-    finally:
-        vertical.nemo_qco_live_vorticity_e3f_cgrid = original
-    candidate_u = np.asarray(outputs["base"][0], np.float64)[:, 1:, :r11.NZ]
-    candidate_v = np.asarray(outputs["base"][1], np.float64)[1:, :, :r11.NZ]
+    _, card = ladder.card_fields(deck_root)
+    cfg = card.recipe.model_config
+    entry = r11.read_entry_frame(record_root, 2)
+    state = card.recipe.initial_state._replace(
+        T=card.recipe.initial_state.T.replace(
+            data=jnp.asarray(entry["T"], dtype=jnp.float64)),
+        S=card.recipe.initial_state.S.replace(
+            data=jnp.asarray(entry["S"], dtype=jnp.float64)),
+        u=card.recipe.initial_state.u.replace(data=jnp.asarray(
+            r11._nemo_u_to_legoesm(entry["u"]), dtype=jnp.float64)),
+        v=card.recipe.initial_state.v.replace(data=jnp.asarray(
+            r11._nemo_v_to_legoesm(entry["v"]), dtype=jnp.float64)),
+        eta=card.recipe.initial_state.eta.replace(
+            data=jnp.asarray(entry["ssh"], dtype=jnp.float64)),
+    )
+    grid, zc = card.recipe.grid, card.recipe.z_coord
+    tmask = jnp.asarray(zc.is_active, dtype=jnp.float64)
+    umask, vmask = compute_face_masks_3d(tmask, grid)
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(state.eta.data), state.H_bathy.data, zc,
+        min_water_column_m=cfg.min_water_column_m)
+    e3t = compute_layer_thickness(
+        state.eta.data, state.H_bathy.data, zc,
+        min_water_column_m=cfg.min_water_column_m)
+    e3u, e3v, _, _ = _nemo_ws_qco_stage_faces(
+        state.eta.data, h_ref, umask, vmask, grid, z_coord=zc)
+    e3f = nemo_qco_live_vorticity_e3f_cgrid(
+        state.eta.data, zc, state.eta.data.dtype, grid=grid,
+        e3t_0=h_ref, tmask=tmask, reference_e3f=nemo_ldf_reference_e3f(zc))
+    bundle = (e3t, e3u, e3v, e3f, e3u, e3v)
+    metric = nemo_ldf_metric_reciprocals_cgrid(zc, grid, state.eta.data.dtype)
+    model = LatLonCGridOceanModel(grid, zc, cfg)
+    result = model.tendencies(
+        state, dt=card.dt_s, momentum_only=True,
+        ldf_state=(state.T.data, state.S.data, state.u.data, state.v.data),
+        ldf_thickness_operands=bundle,
+        ldf_metric_reciprocal_operands=metric,
+        return_nemo_operator_components=True)
+    candidate_u = np.asarray(
+        result[2]["ldf_u"].data, np.float64)[:, 1:, :r11.NZ]
+    candidate_v = np.asarray(
+        result[2]["ldf_v"].data, np.float64)[1:, :, :r11.NZ]
     if plant:
         candidate_u = r11._plant_one_value(candidate_u)
 
