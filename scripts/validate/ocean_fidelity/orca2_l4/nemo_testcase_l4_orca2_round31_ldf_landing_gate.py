@@ -63,7 +63,11 @@ def score(left, right) -> dict:
     left = np.asarray(left, np.float64)
     right = np.asarray(right, np.float64)
     require(left.shape == right.shape, f"shape mismatch {left.shape} {right.shape}")
-    unequal = ~(left == right)
+    # Bit patterns, not numeric equality: a signed zero compares equal under
+    # ``==`` and would let a "bit-exact" claim through.
+    left = np.ascontiguousarray(left)
+    right = np.ascontiguousarray(right)
+    unequal = left.view(np.uint64) != right.view(np.uint64)
     count = int(unequal.sum())
     row = {"cells": int(left.size), "unequal": count}
     if count:
@@ -299,6 +303,12 @@ def capture_direct_ldf(deck_root: Path, record_root: Path,
         },
         "builder_call_census": {
             "total_calls": len(census),
+            # The full multiset, not a set: dropping multiplicity would let a
+            # reverted call site or an extra wrong caller pass unnoticed.
+            "calls": sorted(
+                f"{row['caller']}:"
+                f"{'mesh' if row['reference_given'] else 'vorticity'}"
+                for row in census),
             "callers_with_consumer_local_reference": sorted(
                 {row["caller"] for row in census if row["reference_given"]}),
             "callers_on_the_vorticity_reference": sorted(
@@ -319,10 +329,18 @@ def evaluate_direct_ldf(capture: dict) -> dict:
             "round28_parent_een_digest"]:
         verdict = "HELD"
         reasons.append("the exposed stage-2 EEN component moved")
-    if not capture["builder_call_census"][
-            "callers_with_consumer_local_reference"]:
+    expected = sorted([
+        "_mom_pert_ws:mesh",
+        "_step_impl:mesh",
+        "latlon_cgrid_ocean_baroclinic_tendencies:vorticity",
+        "latlon_cgrid_ocean_baroclinic_tendencies:vorticity",
+        "latlon_cgrid_ocean_baroclinic_tendencies:vorticity",
+    ])
+    if capture["builder_call_census"]["calls"] != expected:
         verdict = "HELD"
-        reasons.append("no production caller asked for the mesh reference")
+        reasons.append(
+            "the production builder call census is not the measured one: "
+            f"{capture['builder_call_census']['calls']}")
     rows = capture["ldf_tendency_vorticity_vs_mesh_reference"]
     if rows["u"]["unequal"] == 0 and rows["v"]["unequal"] == 0:
         verdict = "HELD"

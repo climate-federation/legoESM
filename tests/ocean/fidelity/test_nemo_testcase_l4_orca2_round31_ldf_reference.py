@@ -10,6 +10,8 @@ zero substitution is the statement that distinguishes the two builders.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -107,3 +109,67 @@ def test_a_reference_of_the_wrong_shape_is_refused():
             jnp.zeros((4, 4)), None, jnp.float64, grid=grid,
             e3t_0=jnp.ones((4, 4, 2)), tmask=jnp.ones((4, 4, 2)),
             reference_e3f=jnp.ones((3, 3, 2)))
+
+
+# --- the production wiring itself, which the unit tests above do not bind ---
+
+def _function_source(module_path, name):
+    """Return the AST of the named function that RUNS, not a wrapper."""
+    import ast
+
+    tree = ast.parse(Path(module_path).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} is not defined in {module_path}")
+
+
+def _reference_calls(node):
+    """Calls to the shared builder inside ``node``, keyed by their reference."""
+    import ast
+
+    found = []
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        target = call.func
+        if not (isinstance(target, ast.Name)
+                and target.id == "nemo_qco_live_vorticity_e3f_cgrid"):
+            continue
+        reference = None
+        for keyword in call.keywords:
+            if keyword.arg == "reference_e3f":
+                reference = keyword.value
+        if reference is None:
+            found.append("vorticity")
+        elif (isinstance(reference, ast.Call)
+              and isinstance(reference.func, ast.Name)
+              and reference.func.id == "nemo_ldf_reference_e3f"):
+            found.append("mesh")
+        else:
+            found.append("other")
+    return found
+
+
+MODEL = (Path(__file__).resolve().parents[3]
+         / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py")
+TENDENCIES = (Path(__file__).resolve().parents[3]
+              / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py")
+
+
+@pytest.mark.parametrize("caller", ["_step_impl", "_mom_pert_ws"])
+def test_each_lateral_diffusion_call_site_asks_for_the_mesh_reference(caller):
+    # These two names are the functions the runtime census recorded as the
+    # lateral-diffusion callers, not wrappers around them.  ``_mom_pert_ws``
+    # is nested inside ``_step_impl``, so the outer walk legitimately sees
+    # both; what binds the fix is that EVERY builder call reachable inside a
+    # lateral-diffusion caller takes the mesh reference and none takes the
+    # vorticity one.
+    calls = _reference_calls(_function_source(MODEL, caller))
+    assert calls and set(calls) == {"mesh"}, calls
+
+
+def test_the_vorticity_caller_keeps_its_own_frozen_array():
+    node = _function_source(
+        TENDENCIES, "latlon_cgrid_ocean_baroclinic_tendencies")
+    assert "mesh" not in _reference_calls(node)
