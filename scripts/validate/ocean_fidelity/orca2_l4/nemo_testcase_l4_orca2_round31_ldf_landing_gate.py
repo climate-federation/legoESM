@@ -453,6 +453,110 @@ def evaluate_shared_cards(capture: dict) -> dict:
     return {**capture, "status": verdict, "reasons": reasons}
 
 
+# Round 28's measured parent kt=10 stage-3 velocity maxima, quoted from its
+# receipt.  The landing must cut them, not merely change them.
+R28_PARENT_KT10_STAGE3 = {"u": 15.365503106245665, "v": 42.669598831454074}
+
+
+def _read(path: Path) -> dict:
+    require(path.is_file(), f"missing artifact: {path}")
+    return json.loads(path.read_text())
+
+
+def _row(document: dict, kt: int, checkpoint: str, field: str) -> dict:
+    for item in document["candidate_trajectory"]["checkpoints"]:
+        if item["kt"] == kt and item["checkpoint"] == checkpoint:
+            return item["rows"][field]
+    raise GateError(f"missing score kt={kt}:{checkpoint}:{field}")
+
+
+def evaluate_outcome(parent_path: Path, arm_path: Path, cards_path: Path,
+                     direct_path: Path, *, plant: str | None = None) -> dict:
+    import copy
+
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round25_outcome_gate as r25,
+    )
+
+    parent = _read(parent_path)
+    arm = _read(arm_path)
+    cards = _read(cards_path)
+    direct = _read(direct_path)
+    require(parent["status"] == "LADDER_MEASURED", "parent is not measured")
+    require(arm["status"] == "LADDER_MEASURED", "arm is not measured")
+    require(len(parent["candidate_trajectory"]["checkpoints"]) == 40,
+            "parent is not the ten-step/40-checkpoint ladder")
+
+    if plant == "arm_refusal":
+        arm = copy.deepcopy(arm)
+        arm["candidate_trajectory"]["checkpoints"] = (
+            arm["candidate_trajectory"]["checkpoints"][:12])
+    if plant == "worse_velocity":
+        arm = copy.deepcopy(arm)
+        for field in ("u", "v"):
+            _row(arm, 10, "stage3", field)["max_abs"] = 1.0e3
+
+    comparison = r25._compare(parent, arm, "ldf_reference")
+    velocities = {
+        field: {
+            "parent": float(_row(parent, 10, "stage3", field)["max_abs"]),
+            "arm": float(_row(arm, 10, "stage3", field)["max_abs"]),
+            "round28_parent": R28_PARENT_KT10_STAGE3[field],
+        }
+        for field in ("u", "v")
+    }
+    moved = comparison["moved_row_count"]
+    reasons = []
+    verdict = "LANDED"
+    if comparison["checkpoint_count"] != 40:
+        verdict = "HELD"
+        reasons.append("the arm did not complete kt=1..10")
+    if comparison["at_bar_rows_left"]:
+        verdict = "HELD"
+        reasons.append("a formerly bit-identical row left the bar")
+    if not comparison["first_non_bit_statement_unchanged"]:
+        verdict = "HELD"
+        reasons.append("the first non-bit statement changed")
+    for field, row in velocities.items():
+        if row["arm"] >= row["parent"]:
+            verdict = "HELD"
+            reasons.append(f"kt=10 stage-3 {field} maximum did not fall")
+    if cards["status"] != "PASS":
+        verdict = "HELD"
+        reasons.append("a shared card moves")
+    if direct["status"] != "PASS":
+        verdict = "HELD"
+        reasons.append("the given-entry control did not pass")
+    if not moved:
+        verdict = "HELD"
+        reasons.append("the arm is inert")
+
+    predictions = {
+        "R31-P2": direct["exposed_stage2_een_digest"] == direct[
+            "round28_parent_een_digest"],
+        "R31-P3": (comparison["checkpoint_count"] == 40 and all(
+            row["arm"] < row["parent"] / 10.0
+            for row in velocities.values())),
+        "R31-P5": cards["status"] == "PASS",
+    }
+    return {
+        "status": verdict,
+        "reasons": reasons,
+        "claim_label": "independent with Decision-52 SSH",
+        "parent_commit": parent["worktree"]["commit"],
+        "arm_commit": arm["worktree"]["commit"],
+        "kt10_stage3_velocity_maxima": velocities,
+        "ladder": {key: value for key, value in comparison.items()
+                   if key != "moved_rows"},
+        "moved_rows": comparison["moved_rows"],
+        "shared_cards_status": cards["status"],
+        "given_entry_status": direct["status"],
+        "predictions": {key: "CONFIRMED" if value else "REFUTED"
+                        for key, value in predictions.items()},
+        "plant": plant,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -468,6 +572,13 @@ def main() -> int:
     cards = sub.add_parser("shared-cards")
     cards.add_argument("--json-out", type=Path, required=True)
     cards.add_argument("--plant", choices=("card_reference",))
+    outcome = sub.add_parser("outcome")
+    outcome.add_argument("--parent", type=Path, required=True)
+    outcome.add_argument("--arm", type=Path, required=True)
+    outcome.add_argument("--shared-cards", type=Path, required=True)
+    outcome.add_argument("--direct-ldf", type=Path, required=True)
+    outcome.add_argument("--json-out", type=Path, required=True)
+    outcome.add_argument("--plant", choices=("arm_refusal", "worse_velocity"))
     args = parser.parse_args()
     try:
         if args.command == "e3f0vor":
@@ -482,6 +593,18 @@ def main() -> int:
                 indent=1, sort_keys=True))
             print(result["status"], result["reasons"])
             return 0 if result["status"] == "PASS" else 2
+        if args.command == "outcome":
+            result = evaluate_outcome(
+                args.parent, args.arm, args.shared_cards, args.direct_ldf,
+                plant=args.plant)
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            args.json_out.write_text(json.dumps(result, indent=1, sort_keys=True))
+            print(json.dumps(result["kt10_stage3_velocity_maxima"], indent=1,
+                             sort_keys=True))
+            print(json.dumps(result["ladder"], indent=1, sort_keys=True))
+            print(json.dumps(result["predictions"], indent=1, sort_keys=True))
+            print(result["status"], result["reasons"])
+            return 0 if result["status"] == "LANDED" else 2
         if args.command == "shared-cards":
             result = evaluate_shared_cards(
                 capture_shared_cards(plant=args.plant))
