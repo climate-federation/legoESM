@@ -66,7 +66,17 @@ def capture(deck_root: Path, record_root: Path, base_json: Path,
 
     carried_score = r32.score(carried, oracle)
     second_mask_score = r32.score(after_second_mask, carried)
-    replay = r32.capture_ldf_replay(deck_root, record_root, plant=plant)
+    substitutions = {}
+    for name in ("none", "kbb", "kmm", "both"):
+        substitutions[name] = r32.capture_ldf_replay(
+            deck_root, record_root, plant=plant,
+            face_thickness_substitution=name)
+    replay = substitutions["none"]
+    first_face_owner = next(
+        (name for name in ("kbb", "kmm", "both")
+         if substitutions[name]["status"] == "PASS"),
+        None,
+    )
     at_bar = (
         carried_score["bit_identical"]
         and second_mask_score["unequal"] > 0
@@ -89,6 +99,15 @@ def capture(deck_root: Path, record_root: Path, base_json: Path,
             "u_momentum": replay["u_momentum"],
             "v_momentum": replay["v_momentum"],
         },
+        "face_thickness_walk": {
+            name: {
+                "status": row["status"],
+                "u_momentum": row["u_momentum"],
+                "v_momentum": row["v_momentum"],
+            }
+            for name, row in substitutions.items()
+        },
+        "first_face_substitution_at_bar": first_face_owner,
         "plant": plant,
         "citations": {
             "file_read": "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:348-353",

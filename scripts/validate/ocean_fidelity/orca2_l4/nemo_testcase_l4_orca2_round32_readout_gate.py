@@ -132,7 +132,8 @@ def evaluate_outcome(parent_path: Path, arm_path: Path,
 
 
 def capture_ldf_replay(deck_root: Path, record_root: Path,
-                       *, plant: bool = False) -> dict:
+                       *, plant: bool = False,
+                       face_thickness_substitution: str = "none") -> dict:
     """Re-run round 24's literal compiled LDF replay on the landed routing."""
     import jax.numpy as jnp
     from jax import lax
@@ -148,6 +149,7 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
     from legoesm.ocean.vertical import (
         compute_layer_thickness,
         nemo_ldf_reference_e3f,
+        nemo_qco_live_face_geometry_cgrid,
         nemo_qco_live_vorticity_e3f_cgrid,
     )
     from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -184,10 +186,22 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
         min_water_column_m=cfg.min_water_column_m)
     e3u, e3v, _, _ = _nemo_ws_qco_stage_faces(
         state.eta.data, h_ref, umask, vmask, grid)
+    raw = zc.nemo_een_barotropic
+    raw_faces = nemo_qco_live_face_geometry_cgrid(
+        state.eta.data, raw.e3u_0, raw.e3v_0, raw.umask, raw.vmask,
+        raw.hu_0, raw.hv_0, zc.nemo_e1e2t, zc.nemo_e1e2u,
+        zc.nemo_e1e2v)
+    raw_e3u, raw_e3v = raw_faces[:2]
+    require(face_thickness_substitution in {"none", "kbb", "kmm", "both"},
+            f"unknown face-thickness substitution {face_thickness_substitution!r}")
+    kbb_u = raw_e3u if face_thickness_substitution in {"kbb", "both"} else e3u
+    kbb_v = raw_e3v if face_thickness_substitution in {"kbb", "both"} else e3v
+    kmm_u = raw_e3u if face_thickness_substitution in {"kmm", "both"} else e3u
+    kmm_v = raw_e3v if face_thickness_substitution in {"kmm", "both"} else e3v
     e3f = nemo_qco_live_vorticity_e3f_cgrid(
         state.eta.data, zc, state.eta.data.dtype, grid=grid,
         e3t_0=h_ref, tmask=tmask, reference_e3f=nemo_ldf_reference_e3f(zc))
-    bundle = (e3t, e3u, e3v, e3f, e3u, e3v)
+    bundle = (e3t, kbb_u, kbb_v, e3f, kmm_u, kmm_v)
     # Recreate round 24's six *stored* NEMO metric reciprocals locally.  The
     # experimental production seam that once built these was correctly
     # removed; this read-only replay still needs the exact operands in order
@@ -252,6 +266,7 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
         "u_momentum": score_u,
         "v_momentum": score_v,
         "plant": plant,
+        "face_thickness_substitution": face_thickness_substitution,
         "worktree": worktree_stamp(),
         "citations": {
             "file_read": "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:348-353",
