@@ -2746,9 +2746,40 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     tend = tend * act
     if return_diagnostics:
         diagnostics = {
+            "q": q,
+            "tmask": act,
+            "umask": umask,
+            "vmask": vmask,
+            "wmask": wmask,
+            "ahtu": aht,
+            "ahtv": aht_v,
+            "uslp": uslp,
+            "vslp": vslp,
+            "wslpi": wslpi,
+            "wslpj": wslpj,
+            "e3t": e3t,
+            "e3u_flux": e3u_flux,
+            "e3v_flux": e3v_flux,
+            "dit": zdit,
+            "djt": zdjt,
+            "dkt": zdkt,
+            "A11": zA11,
+            "A22": zA22,
+            "A13": zA13,
+            "A23": zA23,
+            "hmsku": zmsku_h,
+            "hmskv": zmskv_h,
+            "vmsku": zmsku_w,
+            "vmskv": zmskv_w,
+            "ahu_w": zahu_w,
+            "ahv_w": zahv_w,
+            "A31": zA31,
+            "A32": zA32,
             "zfu": zfu,
             "zfv": zfv,
+            "zfw_top": zfw_top,
             "zfw_kp1": zfw_kp1,
+            "tendency": tend,
         }
         if return_operand_diagnostics:
             diagnostics["zfu_operands"] = {
@@ -3998,6 +4029,8 @@ def gm_redi_tracer_tendency_latlon(
     redi_flux_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
+    return_redi_diagnostics: bool = False,
+    redi_face_thickness_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.  ``kappa_redi_v_override``:
@@ -4253,6 +4286,11 @@ def gm_redi_tracer_tendency_latlon(
         raise ValueError(
             "gm_redi_tracer_tendency_latlon(return_bolus_transport=True) is only "
             f"supported by slope_scheme='nemo_iso_lap', got {scheme!r}.")
+    if return_redi_diagnostics and (
+            scheme != "nemo_iso_lap" or return_bolus_transport):
+        raise ValueError(
+            "return_redi_diagnostics requires the nemo_iso_lap tracer "
+            "operator without a bolus-transport return")
     _slope_limit = getattr(cfg, "slope_limit", "dm95_taper")
     validate_slope_limit(_slope_limit)
     # nemo_cap is wired for BOTH the triads and the centered/nemo_iso_lap
@@ -4444,6 +4482,8 @@ def gm_redi_tracer_tendency_latlon(
             _skew_eval = cfg.redi_vertical_skew_evaluation
             _a33_eval = cfg.redi_a33_evaluation
             _bolus = None
+            if redi_face_thickness_override is not None:
+                _flux_e3u, _flux_e3v = redi_face_thickness_override
             _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
@@ -4456,9 +4496,13 @@ def gm_redi_tracer_tendency_latlon(
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,
-                a33_evaluation=_a33_eval)
+                a33_evaluation=_a33_eval,
+                return_diagnostics=return_redi_diagnostics,
+                return_operand_diagnostics=return_redi_diagnostics)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
+            elif return_redi_diagnostics:
+                dT_dt, _redi_diagnostics = _dT
             else:
                 dT_dt = _dT
             dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
@@ -4475,6 +4519,8 @@ def gm_redi_tracer_tendency_latlon(
                 a33_evaluation=_a33_eval)
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
+            if return_redi_diagnostics:
+                return dT_dt, dS_dt, _redi_diagnostics
             return dT_dt, dS_dt
         # SLOPE SIGN CONVENTION (2026-07-17 winter ttrd_ldf certificate):
         # the producer computes S = -grad_h(rho)/drho_dz with drho_dz floored

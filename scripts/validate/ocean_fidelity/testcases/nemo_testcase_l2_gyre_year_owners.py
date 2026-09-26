@@ -55,6 +55,9 @@ MODES
   --developed-content-walk
                      walks the two compiled temperature-content families at
                      step 1081 through production JIT and eager execution.
+  --developed-tracer-ldf-walk
+                     walks every recorded compiled-order tracer-LDF operand
+                     and write at step 1081 through that production step.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -4206,6 +4209,14 @@ def main(argv=None) -> int:
         "--developed-content-process-walk", action="store_true",
         help="decompose the step-1081 accumulated temperature content over "
              "the directly observed process boundaries under JIT and eager")
+    parser.add_argument(
+        "--developed-tracer-ldf-walk", action="store_true",
+        help="walk the admitted Round-177 tracer-LDF operands and writes in "
+             "the complete production step under JIT and eager")
+    parser.add_argument("--developed-tracer-ldf-root", type=Path,
+                        default=Path(
+                            "/data/abyssal/dbalwada/nemo-testcases-l2/"
+                            "phase3/round177/oracle_tracer_ldf_walk"))
     parser.add_argument("--solve-input-pair-root", type=Path,
                         default=DEFAULT_SOLVE_INPUT_PAIR_ROOT)
     parser.add_argument("--solve-input-baseline-root", type=Path,
@@ -4456,6 +4467,33 @@ def main(argv=None) -> int:
                 args.developed_process_root, args.developed_vertical_root,
                 args.daily_record_root, args.daily_record_audit,
                 args.expect_commit, plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+            return 2
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["modes"], indent=2))
+        print("STATUS PASS")
+        return 0
+    if args.developed_tracer_ldf_walk:
+        require(args.expect_commit is not None,
+                "--developed-tracer-ldf-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-tracer-ldf-walk needs --daily-record-audit")
+        try:
+            report = developed_tracer_ldf_statement_walk(
+                args.developed_tracer_ldf_root, args.daily_record_root,
+                args.daily_record_audit, args.expect_commit,
+                plant=args.plant)
         except GateError as error:
             if args.plant in (None, "none"):
                 raise
@@ -13053,6 +13091,270 @@ def developed_accumulated_content_process_walk(
             "process_order": "stprk3_stg.f90:861-869,930-970",
             "content_consumer": "trazdf.f90:549-567",
         },
+    }
+
+
+# ---------------- Round-178 developed tracer-LDF statement walk -----------
+ROUND177_LDF_MAGIC = b"NEMO_L2_R177LDF "
+ROUND177_LDF_HEADER = (1, 1081, 1, 2, 3, 36, 26, 31, 30, 1, 64, 38, 11)
+ROUND177_LDF_RECORD = "oracle_tracer_ldf_walk_kt00001081.bin"
+ROUND177_LDF_3D = (
+    "T_Kbb", "Krhs_before", "Krhs_after", "Krhs_increment",
+    "e3t_3d", "e3u_3d", "e3v_3d", "tmask", "umask", "vmask", "wmask",
+    "ahtu", "ahtv", "uslp", "vslp", "wslpi", "wslpj", "ah_wslp2",
+    "akz", "dit", "djt", "dkt", "A11", "A22", "A13", "A23",
+    "hmsku", "hmskv", "fu", "fv", "vmsku", "vmskv", "ahu_w",
+    "ahv_w", "A31", "A32", "fw_lower", "fw_upper")
+ROUND177_LDF_2D = (
+    "r3t_Kmm", "r3u_Kmm", "r3v_Kmm", "e2_e1u", "e1_e2v", "e2u",
+    "e1v", "e1t", "e2t", "e1e2t", "r1_e1e2t")
+
+
+def _read_round177_ldf_record(root: Path) -> dict:
+    """Read the already-admitted compiled Round-177 stream fail-closed."""
+    root = Path(root)
+    path = root / ROUND177_LDF_RECORD
+    stamp_path = path.with_suffix(path.suffix + ".stamp")
+    require(path.is_file() and stamp_path.is_file(),
+            f"Round-177 record or stamp is missing under {root}")
+    blob = path.read_bytes()
+    require(len(blob) == 8_903_548,
+            f"Round-177 record has {len(blob)} bytes, expected 8903548")
+    require(blob[:16] == ROUND177_LDF_MAGIC,
+            f"Round-177 magic moved: {blob[:16]!r}")
+    header = struct.unpack_from("=13i", blob, 16)
+    require(header == ROUND177_LDF_HEADER,
+            f"Round-177 header is {header}, expected {ROUND177_LDF_HEADER}")
+    digest = hashlib.sha256(blob).hexdigest()
+    stamped = stamp_path.read_text().strip().split()
+    require(stamped == [digest,
+                        "7634d2720f73d0c41a8007f1faaab5cea9883cdc",
+                        ROUND177_LDF_RECORD],
+            f"Round-177 record stamp disagrees: {stamped}")
+    offset = 16 + 13 * 4
+    arrays = {}
+    count3 = 36 * 26 * 31
+    count2 = 36 * 26
+    for name in ROUND177_LDF_3D:
+        raw = np.frombuffer(blob, dtype="=f8", count=count3,
+                            offset=offset).reshape((36, 26, 31), order="F")
+        arrays[name] = np.ascontiguousarray(raw.transpose(1, 0, 2))
+        offset += count3 * 8
+    for name in ROUND177_LDF_2D:
+        raw = np.frombuffer(blob, dtype="=f8", count=count2,
+                            offset=offset).reshape((36, 26), order="F")
+        arrays[name] = np.ascontiguousarray(raw.T)
+        offset += count2 * 8
+    arrays["e3w_1d"] = np.frombuffer(
+        blob, dtype="=f8", count=31, offset=offset).copy()
+    offset += 31 * 8
+    require(offset == len(blob),
+            f"Round-177 parser stopped at {offset} of {len(blob)} bytes")
+    require(all(np.all(np.isfinite(value)) for value in arrays.values()),
+            "Round-177 record contains a non-finite value")
+    return {"path": str(path), "sha256": digest, "header": list(header),
+            "producer_commit": stamped[1], "arrays": arrays}
+
+
+def developed_tracer_ldf_statement_walk(
+        ldf_root: Path, daily_root: Path, daily_audit: Path,
+        expected_commit: str, *, plant: str | None = None) -> dict:
+    """Walk the developed tracer-LDF statement in the complete step graph."""
+    require(plant in (None, "none", "developed-ldf-e3u-ulp"),
+            f"unknown developed tracer-LDF plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "developed tracer-LDF walk requires a clean committed tree")
+    require(stamp["commit"] == expected_commit,
+            "developed tracer-LDF walk commit differs from --expect-commit")
+    oracle = _read_round177_ldf_record(Path(ldf_root))
+    raw = oracle["arrays"]
+    bundle = _developed_entry_bundle(
+        Path(daily_root), Path(daily_audit), expected_commit)
+    card, gate = bundle["card"], bundle["gate"]
+    state, payload = bundle["state"], bundle["payload"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+    nlev = int(np.asarray(state.T.data).shape[-1])
+
+    def field3(name):
+        return np.ascontiguousarray(raw[name][2:-2, 2:-2, :nlev])
+
+    reference = {name: field3(name) for name in ROUND177_LDF_3D}
+    wet = reference["tmask"] != 0.0
+    umask = reference["umask"] != 0.0
+    vmask = reference["vmask"] != 0.0
+    wmask = reference["wmask"] != 0.0
+    require(wet.shape == np.asarray(state.T.data).shape,
+            f"Round-177 crop is {wet.shape}, state is {state.T.data.shape}")
+    require(int(np.count_nonzero(wet)) == 18000,
+            f"Round-177 cropped wet count moved: {np.count_nonzero(wet)}")
+
+    def execute_mode(*, eager: bool, override=None):
+        hooks = _NEMOWSRK3TestHooks(
+            tracer_process_trace=(), vertical_solve_trace=True,
+            tracer_ldf_diagnostics=True,
+            tracer_ldf_face_thickness_override=override)
+        trace_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config, _nemo_ws_test_hooks=hooks)
+        ordinary_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+
+        def execute(model, *, tracing):
+            if eager:
+                with jax.disable_jit():
+                    return jax.device_get(model._step_impl(
+                        state, card.dt_s, freshwater=freshwater,
+                        surface_forcing=surface,
+                        _nemo_stage1_zad_eta_after_override=ssha,
+                        _return_tracer_process_trace=tracing))
+            model.prime_step_caches(state)
+            with jax.disable_jit(False):
+                return jax.device_get(model._step_jitted(
+                    state, card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface,
+                    _nemo_stage1_zad_eta_after_override=ssha))
+
+        trace = execute(trace_model, tracing=True)
+        ordinary = execute(ordinary_model, tracing=False)
+        moved = _state_bit_mismatches(trace.state_after, ordinary)
+        require(moved == 0,
+                f"tracer-LDF observer moved {moved} production-state bytes")
+        diagnostics = {
+            key: np.asarray(value, dtype=np.float64)
+            for key, value in trace.ldf_diagnostics.items()
+            if not isinstance(value, dict)
+        }
+        return diagnostics, moved
+
+    # Compiled execution order, including the source rows which are dead in
+    # this GYRE branch but consumed by the later implicit solve.
+    row_spec = (
+        ("T_Kbb", "q", wet), ("tmask", "tmask", np.ones_like(wet)),
+        ("umask", "umask", np.ones_like(wet)),
+        ("vmask", "vmask", np.ones_like(wet)),
+        ("wmask", "wmask", np.ones_like(wet)),
+        ("ahtu", "ahtu", umask), ("ahtv", "ahtv", vmask),
+        ("uslp", "uslp", umask), ("vslp", "vslp", vmask),
+        ("wslpi", "wslpi", wet), ("wslpj", "wslpj", wet),
+        ("dit", "dit", umask), ("djt", "djt", vmask),
+        ("dkt", "dkt", wmask),
+        ("e3t_3d", "e3t", wet), ("e3u_live", "e3u_flux", umask),
+        ("e3v_live", "e3v_flux", vmask),
+        ("A11", "A11", umask), ("A22", "A22", vmask),
+        ("hmsku", "hmsku", umask), ("hmskv", "hmskv", vmask),
+        ("A13", "A13", umask), ("A23", "A23", vmask),
+        ("fu", "zfu", wet), ("fv", "zfv", wet),
+        ("vmsku", "vmsku", wmask), ("vmskv", "vmskv", wmask),
+        ("ahu_w", "ahu_w", wmask), ("ahv_w", "ahv_w", wmask),
+        ("A31", "A31", wmask), ("A32", "A32", wmask),
+        ("fw_lower", "zfw_top", wet),
+        ("fw_upper", "zfw_kp1", wet),
+        ("Krhs_increment", "tendency", wet),
+    )
+    reference_alias = {
+        "e3u_live": reference["e3u_3d"] * (
+            1.0 + raw["r3u_Kmm"][2:-2, 2:-2, None]
+            * reference["umask"]),
+        "e3v_live": reference["e3v_3d"] * (
+            1.0 + raw["r3v_Kmm"][2:-2, 2:-2, None]
+            * reference["vmask"]),
+    }
+
+    def score(diagnostics):
+        rows = {}
+        for oracle_name, actual_name, mask in row_spec:
+            expected = (reference_alias[oracle_name]
+                        if oracle_name in reference_alias
+                        else reference[oracle_name])
+            rows[oracle_name] = _score_developed_row(
+                diagnostics[actual_name], expected, mask)
+        first = next((name for name, row in rows.items()
+                      if not row["bit_exact"]), None)
+        return rows, first
+
+    baseline_jit, moved_jit = execute_mode(eager=False)
+    baseline_eager, moved_eager = execute_mode(eager=True)
+    if plant == "developed-ldf-e3u-ulp":
+        planted_e3u = np.array(baseline_jit["e3u_flux"], copy=True)
+        index = tuple(int(value) for value in np.argwhere(umask)[0])
+        planted_e3u[index] = np.nextafter(planted_e3u[index], np.inf)
+        planted, _ = execute_mode(
+            eager=False,
+            override=(jnp.asarray(planted_e3u),
+                      jnp.asarray(baseline_jit["e3v_flux"])))
+        upstream = ("q", "dit", "djt", "dkt")
+        downstream = ("A11", "zfu", "tendency")
+        control = {
+            "moved_index_jik": list(index),
+            "upstream_cells_moved": {
+                name: _different_cells(planted[name], baseline_jit[name],
+                                       np.ones_like(wet))
+                for name in upstream},
+            "downstream_cells_moved": {
+                name: _different_cells(planted[name], baseline_jit[name],
+                                       np.ones_like(wet))
+                for name in downstream},
+        }
+        require(all(value == 0 for value in
+                    control["upstream_cells_moved"].values()),
+                f"face-thickness plant moved an upstream row: {control}")
+        require(all(value > 0 for value in
+                    control["downstream_cells_moved"].values()),
+                f"face-thickness plant did not reach every consumer: {control}")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": control}
+
+    jit_rows, jit_first = score(baseline_jit)
+    eager_rows, eager_first = score(baseline_eager)
+    predictions = {
+        "observer_passive": moved_jit == 0 and moved_eager == 0,
+        "entry_temperature_bit_exact": jit_rows["T_Kbb"]["bit_exact"],
+        "first_non_bit_is_live_face_thickness": jit_first in (
+            "e3u_live", "e3v_live"),
+        "jit_and_eager_same_first_non_bit": jit_first == eager_first,
+    }
+    return {
+        "format": "gyre-round178-developed-tracer-ldf-walk-v1",
+        "status": "PASS", "case": CASE, "worktree": stamp,
+        "execution": "LatLonCGridOceanModel._step_jitted production closure",
+        "step": DEVELOPED_PROCESS_STEP,
+        "record": {key: value for key, value in oracle.items()
+                   if key != "arrays"},
+        "admission": {"daily_audit": str(daily_audit),
+                      "entry_restart": str(bundle["restart_path"]),
+                      "source_checks": bundle["source_checks"],
+                      "wet_cells": int(np.count_nonzero(wet))},
+        "modes": {
+            "production_step_jit": {
+                "first_non_bit_statement": jit_first,
+                "observer_state_unequal_bytes": moved_jit,
+                "rows": jit_rows},
+            "production_eager": {
+                "first_non_bit_statement": eager_first,
+                "observer_state_unequal_bytes": moved_eager,
+                "rows": eager_rows}},
+        "authoritative_mode": "production_step_jit",
+        "first_non_bit_statement": jit_first,
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "compiled_source": {
+            "call": "stprk3_stg.f90:928-934",
+            "a33": "traldf_iso.f90:167",
+            "gradients": "traldf_iso.f90:215-250",
+            "horizontal": "traldf_iso.f90:272-299",
+            "vertical": "traldf_iso.f90:311-344",
+            "rhs": "traldf_iso.f90:346-367",
+            "writer": "traldf_iso.f90:403-419"},
     }
 
 

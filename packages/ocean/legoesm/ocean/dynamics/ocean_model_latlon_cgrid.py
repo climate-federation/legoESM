@@ -1449,6 +1449,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     bn2_alpha_beta_override: object = None  # Recorded-entry operator input.
     bn2_tracer_override: object = None  # Recorded-entry T/S operator input.
     tracer_process_trace: object = None  # Round-124 write-only trace / plant.
+    # Return the temperature Redi operands/intermediates from the same full
+    # production step.  Diagnostic-only; requires tracer_process_trace.
+    tracer_ldf_diagnostics: bool = False
+    # Diagnostic liveness plant: replace only the face-thickness operand
+    # immediately before the shared Redi operator consumes it.
+    tracer_ldf_face_thickness_override: object = None
     # Return the stage-3 FCT active-cell map alongside the unchanged process
     # boundaries. Kept separate so Round 136 can prove this larger return
     # graph does not move the already-admitted Round-124 observer's rows.
@@ -2790,6 +2796,10 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "tracer_process_branch_activity requires "
                 "tracer_process_trace")
+        if (self._nemo_ws_test_hooks.tracer_ldf_diagnostics
+                and _process_trace is None):
+            raise ValueError(
+                "tracer_ldf_diagnostics requires tracer_process_trace")
         if _process_trace is not None:
             if not isinstance(_process_trace, tuple) or len(
                     _process_trace) not in (0, 4):
@@ -5821,6 +5831,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_process_qsr_rate = None
         _nemo_ws_process_boundaries = None
         _nemo_ws_process_Taa = None
+        _nemo_ws_ldf_diagnostics = None
         _nemo_ws_vertical_solve_trace, _return_vertical_solve_trace = None, (_return_tracer_process_trace and self._nemo_ws_test_hooks.vertical_solve_trace)
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
@@ -8209,6 +8220,12 @@ class LatLonCGridOceanModel:
                 # state_new.eta (Naa). stpmlf.F90:528,548 + scheme.h90:73-74.
                 redi_flux_eta=state.eta.data,
                 return_bolus_transport=_want_bolus,
+                return_redi_diagnostics=(
+                    _return_tracer_process_trace
+                    and self._nemo_ws_test_hooks.tracer_ldf_diagnostics),
+                redi_face_thickness_override=(
+                    self._nemo_ws_test_hooks
+                    .tracer_ldf_face_thickness_override),
                 dt=dt,
                 eos_depth=getattr(_cfg_b, "eos_depth", "insitu"),
             )
@@ -8223,7 +8240,12 @@ class LatLonCGridOceanModel:
                         )
                     )
             else:
-                dT_gm, dS_gm = _gm_out
+                if (_return_tracer_process_trace
+                        and self._nemo_ws_test_hooks
+                        .tracer_ldf_diagnostics):
+                    dT_gm, dS_gm, _nemo_ws_ldf_diagnostics = _gm_out
+                else:
+                    dT_gm, dS_gm = _gm_out
             if gm_cfg.implicit_K33:
                 # Veros-faithful: K_33 (the vertical isoneutral diagonal ∝ S²) was
                 # dropped from the explicit F_z above (implicit_K33=True); recompute
@@ -9282,6 +9304,7 @@ class LatLonCGridOceanModel:
                 Taa=_nemo_ws_process_Taa,
                 vertical_solve=_nemo_ws_vertical_solve_trace,
                 fct_activity=_nemo_ws_fct_activity,
+                ldf_diagnostics=_nemo_ws_ldf_diagnostics,
             )
         if _return_live_stage_operands:
             if (getattr(_cfg_b, "momentum_time_integrator", "euler")
@@ -14725,3 +14748,4 @@ class _NEMOWSTracerProcessTrace(NamedTuple):
     Taa: object
     vertical_solve: object
     fct_activity: object
+    ldf_diagnostics: object
