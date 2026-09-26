@@ -346,6 +346,8 @@ land_update_seconds: 300.0  # land tile every ~300 s on interval-mean forcing
                             # same shape as the hourly radiation cadence.)
 multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
+# Explicit OFF: this deck reproduces arms that ran sensible-only soil.
+land_soil_freeze_thaw: false
 # Drier soil cold-start (theta_init = 0.25*theta_sat, vs 0.5 default): the deep
 # 3 m soil cold-starts too wet, feeding over-evaporation cold-cloudy land (#730).
 land_soil_moisture_init_frac: 0.25
