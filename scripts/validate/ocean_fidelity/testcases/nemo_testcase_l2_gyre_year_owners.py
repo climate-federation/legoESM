@@ -107,7 +107,10 @@ record-backed plants are persisted in their round evidence)
                            does the same for the content arm
   developed-content-krhs-ulp
                            moves one recorded T(Krhs) operand by one ULP and
-                           requires both literal content rows to change
+                           requires the accumulated-content row to change
+  developed-content-rhs-ulp
+                           moves the recorded complete content by one ULP and
+                           requires the final registered row to change
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -12490,7 +12493,8 @@ def developed_content_producer_walk(
         vertical_root: Path, daily_root: Path, daily_audit: Path,
         expected_commit: str, *, plant: str | None = None) -> dict:
     """Walk NEMO's two temperature-content families at developed step 1081."""
-    require(plant in (None, "none", "developed-content-krhs-ulp"),
+    require(plant in (None, "none", "developed-content-krhs-ulp",
+                      "developed-content-rhs-ulp"),
             f"unknown developed-content plant {plant!r}")
     _policy()
     import jax
@@ -12525,7 +12529,8 @@ def developed_content_producer_walk(
     require(all(value == 0 for value in calibration.values()),
             "Round-125 compiled calibration moved at step 1081")
 
-    if plant == "developed-content-krhs-ulp":
+    if plant in ("developed-content-krhs-ulp",
+                 "developed-content-rhs-ulp"):
         dt = np.float64(record["arrays"]["rDt"])
         tkrhs = _vertical_field(record, "T_Krhs_in", nlev)
         e3t = _vertical_field(record, "e3t_Kmm", nlev)
@@ -12533,18 +12538,34 @@ def developed_content_producer_walk(
                   * _vertical_field(record, "T_Kbb_in", nlev))
         baseline_accum = (dt * e3t) * tkrhs
         baseline_rhs = before + baseline_accum
+        if plant == "developed-content-rhs-ulp":
+            candidates = np.argwhere(wet & np.isfinite(baseline_rhs))
+            require(candidates.size > 0,
+                    "PLANT-BLIND: no finite wet complete content")
+            index = tuple(int(value) for value in candidates[0])
+            planted_rhs = np.array(baseline_rhs, copy=True)
+            planted_rhs[index] = np.nextafter(
+                planted_rhs[index], np.inf)
+            rhs_moved = _different_cells(
+                planted_rhs, baseline_rhs, wet)
+            if rhs_moved != 1:
+                raise GateError(
+                    "PLANT-BLIND: complete-content ULP moved "
+                    f"{rhs_moved} cells")
+            return {
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": {"index_jik": list(index),
+                            "complete_rhs_cells_moved": rhs_moved},
+            }
         all_next = np.nextafter(tkrhs, np.inf)
         all_next_accum = (dt * e3t) * all_next
-        all_next_rhs = before + all_next_accum
         candidates = np.argwhere(
             wet & np.isfinite(tkrhs)
             & (all_next_accum.view(np.uint64)
-               != baseline_accum.view(np.uint64))
-            & (all_next_rhs.view(np.uint64)
-               != baseline_rhs.view(np.uint64)))
+               != baseline_accum.view(np.uint64)))
         require(candidates.size > 0,
-                "PLANT-BLIND: no one-ULP wet T(Krhs) change reaches both "
-                "literal content rows")
+                "PLANT-BLIND: no one-ULP wet T(Krhs) change reaches the "
+                "accumulated-content row")
         index = tuple(int(value) for value in candidates[0])
         planted = np.array(tkrhs, copy=True)
         planted[index] = np.nextafter(planted[index], np.inf)
@@ -12554,7 +12575,7 @@ def developed_content_producer_walk(
         accum_moved = _different_cells(planted_accum, baseline_accum, wet)
         rhs_moved = _different_cells(
             before + planted_accum, baseline_rhs, wet)
-        if accum_moved != 1 or rhs_moved != 1:
+        if accum_moved != 1:
             raise GateError(
                 "PLANT-BLIND: T(Krhs) ULP moved "
                 f"accum={accum_moved}, rhs={rhs_moved} cells")
