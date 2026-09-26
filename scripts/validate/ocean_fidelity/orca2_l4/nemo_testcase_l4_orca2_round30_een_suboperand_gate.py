@@ -217,9 +217,8 @@ def evaluate(captures: dict[str, dict], arrays: dict[str, dict],
             "fe3mask-only arm is not inert")
     require(not component_scores["e3f0vor"]["output_u"]["bit_identical"],
             "e3f0vor-only arm changes no EEN output")
-    r3f_changed = not (
-        component_scores["r3f"]["denominator"]["bit_identical"]
-        and component_scores["r3f"]["output_u"]["bit_identical"]
+    r3f_first_output_changed = not (
+        component_scores["r3f"]["output_u"]["bit_identical"]
         and component_scores["r3f"]["output_v"]["bit_identical"])
 
     rank = sorted(
@@ -257,7 +256,8 @@ def evaluate(captures: dict[str, dict], arrays: dict[str, dict],
         "single_component_exact_whole_owner": exact_owner,
         "predictions": {
             "R30-P1": "CONFIRMED",
-            "R30-P2": "CONFIRMED" if r3f_changed else "REFUTED",
+            "R30-P2": ("CONFIRMED" if r3f_first_output_changed
+                       else "REFUTED"),
             "R30-P3": "REFUTED" if plant else "CONFIRMED",
             "R30-P4": "CONFIRMED",
             "R30-P5": "REFUTED" if plant else "CONFIRMED",

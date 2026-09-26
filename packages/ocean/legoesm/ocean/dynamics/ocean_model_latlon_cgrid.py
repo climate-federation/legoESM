@@ -5412,7 +5412,8 @@ class LatLonCGridOceanModel:
                         state.land_mask.data[..., None], _ws_h_ref.shape)
                 _ws_e3f_kbb = nemo_qco_live_vorticity_e3f_cgrid(
                     state.eta.data, _zc, state.eta.data.dtype, grid=_grid,
-                    e3t_0=_ws_h_ref, tmask=_ws_t_live_mask)
+                    e3t_0=_ws_h_ref, tmask=_ws_t_live_mask,
+                    bridge_operands=())
                 _ws_ldf_thickness_kbb = (
                     _geom_density[1], _ws_ldf_face_thickness_kbb[0],
                     _ws_ldf_face_thickness_kbb[1], _ws_e3f_kbb,
@@ -5938,7 +5939,8 @@ class LatLonCGridOceanModel:
                         _ws_ldf_face_thickness_kbb[1],
                         nemo_qco_live_vorticity_e3f_cgrid(
                             st.eta.data, _zc, st.eta.data.dtype, grid=_grid,
-                            e3t_0=_ws_h_ref, tmask=_ws_t_live_mask),
+                            e3t_0=_ws_h_ref, tmask=_ws_t_live_mask,
+                            bridge_operands=()),
                         stage_face_thickness[0], stage_face_thickness[1])
                 td_result = self.tendencies(
                                      st, surface_forcing, sponge=sponge, dt=dt,

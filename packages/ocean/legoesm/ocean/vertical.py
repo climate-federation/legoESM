@@ -295,7 +295,7 @@ def nemo_fe3mask_from_tmask(tmask, *, grid=None):
 
 def nemo_qco_live_vorticity_e3f_cgrid(
     eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
-    bridge_operands=(),
+    bridge_operands=("e3f0vor",),
 ):
     """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
 
