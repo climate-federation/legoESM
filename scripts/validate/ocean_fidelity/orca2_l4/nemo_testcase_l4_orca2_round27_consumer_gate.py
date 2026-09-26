@@ -149,8 +149,9 @@ def _stage2_vorticity(deck_root: Path, record_root: Path):
     state = card.recipe.initial_state._replace(
         eta=card.recipe.initial_state.eta.replace(
             data=jnp.asarray(entry["ssh"], dtype=jnp.float64)))
+    candidate_fields = ladder._candidate_fields(state)
     for name in ("T", "S", "u", "v"):
-        candidate = np.asarray(getattr(state, name).data)
+        candidate = np.asarray(candidate_fields[name])
         require(np.array_equal(candidate, np.asarray(entry[name])),
                 f"Decision-52 entry {name} is no longer bit-identical")
     surface_fields = ladder.assemble_surface_fields(record_root, 1)
