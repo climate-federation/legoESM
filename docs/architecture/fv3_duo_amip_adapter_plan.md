@@ -87,14 +87,13 @@ the survey; `self.grid` IS the mesh)
 8. Cadence is a TIME invariant: physics every 1800 s, radiation hourly;
    `physics_update_steps` / `rad_update_steps` are set from the duo's dt
    (GLM: a 16-step lump at dt 1800 s would be an 8 h physics step).
-9. ASKS (one line each, before the deck runs): (a) qv del2/del4
-   smoothing on the duo: off (my pick, FV3's advection has its own
-   monotone limiting) or ported; (b) orography gate without a Fortran
-   dump: smoothed ERA5 terrain (CAM-style filter to the C24 scale) and a
-   10-day dry run checked for hydrostatic heights vs ERA5 and no
-   grid-scale noise over the Andes/Himalaya (GLM), plus the rest-state
-   balance test; (c) C24 smoke / C48 scorecard, CAM L32, dt for C24
-   (to be proposed with the deck).
+9. DECIDED (user 2026-09-26): (a) qv del2/del4 smoothing OFF on the duo
+   (refused unless both coefficients are 0); (b) orography gate =
+   smoothed ERA5 terrain (CAM-style filter to the C24 scale) + 10-day
+   dry run checked for hydrostatic heights vs ERA5 and no grid-scale
+   noise over the Andes/Himalaya, plus the rest-state balance test, no
+   Fortran dump; (c) C24 smoke, C48 scorecard, CAM L32; dt proposed
+   with the deck.
 
 ## Certification ladder v3
 
