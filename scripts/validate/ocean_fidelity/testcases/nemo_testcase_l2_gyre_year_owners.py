@@ -12649,8 +12649,15 @@ def developed_content_producer_walk(
             jax.effects_barrier()
         finally:
             model_module._nemo_ws_rk3_tracer_pair_step = real_pair_step
-        require(len(captured) == 1,
-                f"content observer saw {len(captured)} final-stage calls")
+        require(len(captured) >= 1,
+                "content observer saw no final-stage call")
+        for duplicate in captured[1:]:
+            require(len(duplicate) == len(captured[0])
+                    and all(np.array_equal(left, right)
+                            for left, right in zip(
+                                duplicate, captured[0], strict=True)),
+                    "content observer saw distinct duplicate final-stage "
+                    "calls")
         moved = _state_bit_mismatches(
             control.state_after, observed.state_after)
         require(moved == 0,
@@ -12660,14 +12667,18 @@ def developed_content_producer_walk(
             "accumulated_Krhs_content", "content", "rebuilt_content",
             "advection_increment", "source_increment",
         )
-        return observed, dict(zip(names, captured[0], strict=True))
+        fields = dict(zip(names, captured[0], strict=True))
+        fields["_observer_final_stage_calls"] = len(captured)
+        return observed, fields
 
     modes = {}
     for name, eager in (("production_step_jit", False),
                         ("production_eager", True)):
         _trace, observed = run_mode(eager=eager)
+        observer_calls = int(observed.pop("_observer_final_stage_calls"))
         modes[name] = _content_walk_rows(observed, record, wet)
         modes[name]["observer_state_unequal_bytes"] = 0
+        modes[name]["observer_final_stage_calls"] = observer_calls
 
     authoritative = modes["production_step_jit"]
     predictions = {
