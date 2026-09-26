@@ -216,7 +216,11 @@ def evaluate_e3f0vor(capture: dict) -> dict:
     if rows["s3_final_default_order"]["unequal"] == 0:
         verdict = "HELD"
         reasons.append("the default builder already matches; no defect found")
-    return {"status": verdict, "reasons": reasons, **capture}
+    for name in ("s1_masked_four_cell_average", "s2_after_fold_repaired_order"):
+        if rows[name]["unequal"] != 0:
+            verdict = "HELD"
+            reasons.append(f"{name} is not exact")
+    return {**capture, "status": verdict, "reasons": reasons}
 
 
 def main() -> int:
