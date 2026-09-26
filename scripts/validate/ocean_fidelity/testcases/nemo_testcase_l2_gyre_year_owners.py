@@ -12651,13 +12651,6 @@ def developed_content_producer_walk(
             model_module._nemo_ws_rk3_tracer_pair_step = real_pair_step
         require(len(captured) >= 1,
                 "content observer saw no final-stage call")
-        for duplicate in captured[1:]:
-            require(len(duplicate) == len(captured[0])
-                    and all(np.array_equal(left, right)
-                            for left, right in zip(
-                                duplicate, captured[0], strict=True)),
-                    "content observer saw distinct duplicate final-stage "
-                    "calls")
         moved = _state_bit_mismatches(
             control.state_after, observed.state_after)
         require(moved == 0,
@@ -12667,8 +12660,19 @@ def developed_content_producer_walk(
             "accumulated_Krhs_content", "content", "rebuilt_content",
             "advection_increment", "source_increment",
         )
-        fields = dict(zip(names, captured[0], strict=True))
+        consumed_content = np.asarray(
+            observed.vertical_solve.content_T, dtype=np.float64)
+        consumed_matches = [
+            index for index, values in enumerate(captured)
+            if np.array_equal(values[6], consumed_content)
+        ]
+        require(len(consumed_matches) == 1,
+                "content observer cannot uniquely identify the trace call "
+                f"consumed by the vertical solve: matches={consumed_matches}")
+        selected = consumed_matches[0]
+        fields = dict(zip(names, captured[selected], strict=True))
         fields["_observer_final_stage_calls"] = len(captured)
+        fields["_observer_consumed_call_index"] = selected
         return observed, fields
 
     modes = {}
@@ -12676,9 +12680,11 @@ def developed_content_producer_walk(
                         ("production_eager", True)):
         _trace, observed = run_mode(eager=eager)
         observer_calls = int(observed.pop("_observer_final_stage_calls"))
+        consumed_call = int(observed.pop("_observer_consumed_call_index"))
         modes[name] = _content_walk_rows(observed, record, wet)
         modes[name]["observer_state_unequal_bytes"] = 0
         modes[name]["observer_final_stage_calls"] = observer_calls
+        modes[name]["observer_consumed_call_index"] = consumed_call
 
     authoritative = modes["production_step_jit"]
     predictions = {
