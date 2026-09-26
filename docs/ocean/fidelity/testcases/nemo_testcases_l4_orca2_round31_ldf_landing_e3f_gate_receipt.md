@@ -158,17 +158,37 @@ maxima differ by `1.36e-02` m, a relative `2.09e-05`, which is the size of
 `r3f` — consistent, and labelled **PLAUSIBLE**, because the same cell was not
 independently re-identified in those rounds' arrays.
 
-## 6. Part B — the one EEN arm: STILL RUNNING, NOT A RESULT
+## 6. Part B — the one EEN arm: THE kt=4 REFUSAL IS GONE
 
-The construction gate met its bar, so the order's one EEN trajectory arm was
-launched: a separate clean worktree carrying part A plus the single repaired
-statement, branch `round31-een-arm`, running the same ten-step ladder against
-the same record.  **It had not finished when this receipt was written and no
-number from it is claimed.**  The arm's command and its evidence path are in
-the evidence directory (`een_arm.log`), and reading it out is round 32's
-first item.  The host carried four trajectory processes and two review
-processes at once this round, and the two last-launched ladders were still in
-flight after roughly two hours.
+The construction gate met its bar, so the order's one EEN trajectory arm ran:
+a separate clean worktree at `5adfc6198` (branch `round31-een-arm`) carrying
+part A plus the single repaired substitution statement, on the same record,
+forcing, policy and ladder.
+
+| | parent `800602875` | part A `d0c7fa3ef` | part A + B `5adfc6198` |
+|---|---:|---:|---:|
+| checkpoints | 40 | 40 | **40** |
+| kt=10 stage-3 U maximum error | `15.365503106245665` | `0.4230544199344073` | `0.4230544199344075` |
+| kt=10 stage-3 V maximum error | `42.669598831454074` | `0.6838675521949863` | `0.6838675521949865` |
+
+**The `raw-mesh e3w_int must contain only finite values > 0` refusal that
+held Decision 54 from round 24 to round 30 does not occur.**  The arm reaches
+kt=10.  Against part A alone it moves 80 of 200 rows — 1 toward NEMO, 2 away
+and 77 at an unchanged maximum — first at `kt=5:stage2:S`, with no formerly
+bit-identical row leaving the bar and the first non-bit statement unchanged.
+Against the parent it reproduces part A's 175 moved rows, 75 toward and 100
+away, exactly.
+
+So the repaired statement is both CORRECT (0 unequal cells against the
+compiled transcription, section 5) and SAFE on this card (no refusal, and a
+trajectory that differs from part A's only in the last digits of the tenth
+step).  **It is NOT landed here.**  The order asked this round to report the
+arm, not to land it, and landing it is a second variable that needs its own
+GYRE, shared-card and push gates — none of which were run for it.  In
+particular the repair changes the vorticity denominator at fully dry
+vertices, where GYRE's EEN divisor has its own guard; that is a measurement,
+not an argument, and it is round 32's first item with everything else already
+in hand.
 
 ## 7. Frozen predictions
 
@@ -275,11 +295,11 @@ landing it would cost.  It is round 32's first item.
 
 ## OPEN
 
-1. **Read out the EEN arm.**  It is running on branch `round31-een-arm`
-   (part A plus the single repaired substitution statement), evidence
-   `een_arm.log`.  Report whether the kt=4 raw-`e3w` refusal is gone and what
-   the ten-step ladder does.  If it completes, landing that one statement is
-   the rest of the vorticity half.
+1. **Land the repaired substitution statement.**  Section 6 shows it is
+   correct and safe on ORCA2 and that the kt=4 refusal is gone; what it still
+   needs is its own GYRE trajectory, shared-card and push gates, because it
+   changes the vorticity denominator at fully dry vertices where GYRE's EEN
+   divisor has a guard of its own.  The arm is on branch `round31-een-arm`.
 2. **Re-run GYRE's 360-day certified year.**  The ten-step pair is
    byte-identical and the zero-coefficient argument covers every step, but
    the pinned day 30 / 240 / 360 numbers were not re-measured this round and
