@@ -134,6 +134,24 @@ def _score2(actual: np.ndarray, expected: np.ndarray, mask2: np.ndarray) -> dict
     return handoff.bit_score(actual, expected, mask2)
 
 
+@jax.jit
+def _rk13_q_from_endpoints(eta_before, eta_after, depth, wet):
+    """stprk3_stg.f90:53-54,177 on dom_qco_r3c's endpoint ratios."""
+    one = jnp.asarray(1.0, dtype=eta_before.dtype)
+    r1_depth = nemo_source_round(one / jnp.where(wet, depth, one))
+    r3_before = jnp.where(
+        wet, nemo_source_round(eta_before * r1_depth), 0.0)
+    r3_after = jnp.where(
+        wet, nemo_source_round(eta_after * r1_depth), 0.0)
+    r1_3 = nemo_source_round(one / jnp.asarray(3.0, dtype=one.dtype))
+    r2_3 = nemo_source_round(
+        jnp.asarray(2.0, dtype=one.dtype) / jnp.asarray(3.0, dtype=one.dtype))
+    r3_stage = nemo_source_round(
+        nemo_source_round(r2_3 * r3_before)
+        + nemo_source_round(r1_3 * r3_after))
+    return nemo_source_round(one + r3_stage), r3_before, r3_after
+
+
 def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, object]:
     jax.config.update("jax_enable_x64", True)
     policy = PrecisionPolicy.fp64(transcendentals="libm")
@@ -175,6 +193,17 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
     qaa_model = np.asarray(nemo_r3t_stretch(
         card.recipe.z_coord, jnp.asarray(eta_one_third),
         card.recipe.initial_state.H_bathy.data, evaluation="nemo_reciprocal"))[:, :OWNED_NX]
+    qaa_rk13, r3bb_endpoints, r3ta_endpoints = map(
+        np.asarray,
+        _rk13_q_from_endpoints(
+            jnp.asarray(entry["ssh"]), jnp.asarray(eta_final_full),
+            card.recipe.initial_state.H_bathy.data,
+            card.recipe.initial_state.H_bathy.data > 0.0,
+        ),
+    )
+    qaa_rk13 = qaa_rk13[:, :OWNED_NX]
+    r3bb_endpoints = r3bb_endpoints[:, :OWNED_NX]
+    r3ta_endpoints = r3ta_endpoints[:, :OWNED_NX]
 
     recorded_r3 = {
         name: np.asarray(operands[name], np.float64)[:, :OWNED_NX]
@@ -185,6 +214,10 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
         "q_Kbb": _score2(qbb_model, recorded_q["r3t_Kbb"], mask2),
         "q_Kmm": _score2(qbb_model, recorded_q["r3t_Kmm"], mask2),
         "q_Kaa": _score2(qaa_model, recorded_q["r3t_Kaa"], mask2),
+        "q_Kaa_source_r3_interpolation": _score2(
+            qaa_rk13, recorded_q["r3t_Kaa"], mask2),
+        "r3_Kbb_endpoint_reconstruction": _score2(
+            r3bb_endpoints, recorded_r3["r3t_Kbb"], mask2),
     }
 
     stage_dt = np.asarray(card.dt_s / 3.0, np.float64)
@@ -242,6 +275,10 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
         },
         "resolved": {"stage": 1, "stage_dt": float(stage_dt), "qco": True},
         "q_operand_rows": q_rows,
+        "r3_endpoint_digests": {
+            "r3ta_model_sha256": hashlib.sha256(
+                r3ta_endpoints.tobytes(order="C")).hexdigest(),
+        },
         "replay_rows": replays,
     }
 
