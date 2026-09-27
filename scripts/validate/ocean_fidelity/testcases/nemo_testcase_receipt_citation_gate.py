@@ -1188,6 +1188,10 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:670-681': [
         ('SELECT CASE( kstg )', 4),
         ('END DO   ;   END DO   ;   END DO', 8), 12],
+    # --- ORCA2 card round 45: stage-1 r3 interpolation owner ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:160-179': [
+        ('!                     !==  ssh/h0 ratio at Kaa  ==!', 1),
+        ('r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 1), 20],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:556':
         ('zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
     # --- ORCA2 card round 22: exact stage-to-entry transition and LDF owner ---
