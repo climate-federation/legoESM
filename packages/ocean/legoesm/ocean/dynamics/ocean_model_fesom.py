@@ -1493,8 +1493,11 @@ class FesomOceanModel:
     """
 
     def __init__(self, mesh: "Mesh", z_coord: Any, config: FesomOceanConfig,
-                 *, vmix_config=None, iwm_forcing=None):
+                 *, vmix_config=None, iwm_forcing=None, visc_nemo=None):
         require_fesom_jax()
+        # (ahmt_node, ahmf_node): NEMO's rotation-divergence Laplacian replaces
+        # fesom's own viscosity (fesom_jax.momentum.visc_nemo_lap).
+        self._visc_nemo = visc_nemo
         from fesom_jax import config as fconfig
         from fesom_jax import ssh as fssh
         from fesom_jax.params import Params
@@ -1692,6 +1695,7 @@ class FesomOceanModel:
             ale_cfg=self._ale_cfg,
             surface_fluxes=surface_fluxes,
             vertical_mixing=vertical_mixing,
+            visc_nemo=self._visc_nemo,
         )
         if tke_nl is not None:
             new_inner = dataclasses.replace(new_inner, tke=tke_nl)

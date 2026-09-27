@@ -1384,20 +1384,18 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
                             nemo_e3f_0=jnp.asarray(e3f, dtype))
 
 
-def attach_nemo_ldf_fields_mpas(z_coord, mesh, ldf_path, domcfg_path,
-                                rn_shlat: float):
-    """NEMO nn_ahm_ijk_t=-30 viscosity on the MPAS Voronoi mesh.
+def nemo_ldf_nearest_wet(ldf_path, domcfg_path, lat_rad, lon_rad, lev_idx):
+    """ahmt_3d / ahmf_3d of eddy_viscosity_3D.nc at the NEAREST WET NEMO T / F
+    point of each target (lat_rad, lon_rad), at NEMO level ``lev_idx[k]`` for
+    target layer k.  Returns two (n_target, len(lev_idx)) arrays.
 
-    ahmt_3d from eddy_viscosity_3D.nc is taken at the NEAREST NEMO T point of
-    each cell centre, ahmf_3d at the nearest NEMO F point (domain_cfg
-    gphif/glamf) of each vertex (the shared KD-tree of ``regridding``).
-    ponytail: nearest neighbour; the file is piecewise smooth (1000..20000
-    m2/s ramps over >5 degrees) at ~1-degree spacing, so bilinear buys little.
-    ahmt * cell activity; ahmf * nemo_vertex_shlat_factor_3d (NEMO fmask
-    carried to triangles by wet kite area).
+    Wet-only per level: the file is zero on land (ldfdyn.F90:329-330 multiplies
+    by tmask/fmask), so an all-points nearest neighbour hands a coastal target
+    the LAND zero -- no viscosity at exactly the cells no-slip acts on.
+    ponytail: nearest neighbour; the file is piecewise smooth (1000..20000 m2/s
+    ramps over >5 degrees) at ~1-degree spacing, so bilinear buys little.
     """
     import netCDF4 as nc4
-    from legoesm.core.operators_voronoi import nemo_vertex_shlat_factor_3d
     from legoesm.grids.regridding import inverse_distance_weights, latlon_to_xyz
 
     def _read(path, names):
@@ -1411,19 +1409,45 @@ def attach_nemo_ldf_fields_mpas(z_coord, mesh, ldf_path, domcfg_path,
     ahmt_f, ahmf_f, tlat, tlon = _read(
         ldf_path, ("ahmt_3d", "ahmf_3d", "nav_lat", "nav_lon"))
     flat, flon = _read(domcfg_path, ("gphif", "glamf"))
+    if ahmt_f.shape[1:] != (331, 360) or flat.shape != (331, 360):
+        raise SystemExit(f"--nemo-ldf-file expects (nk,331,360) ldf and (331,360) "
+                         f"domain_cfg; got {ahmt_f.shape}, {flat.shape}")
+    lev_idx = np.asarray(lev_idx, dtype=int)
+    tgt = latlon_to_xyz(np.asarray(lat_rad), np.asarray(lon_rad))
+    out = []
+    for fld, la, lo in ((ahmt_f, tlat, tlon), (ahmf_f, flat, flon)):
+        src_xyz = latlon_to_xyz(np.radians(la.ravel()), np.radians(lo.ravel()))
+        res = np.zeros((tgt.shape[0], lev_idx.size))
+        for k in np.unique(lev_idx):
+            v = fld[k].ravel()
+            wet = v > 0.0
+            if not wet.any():
+                continue
+            i, _ = inverse_distance_weights(src_xyz[wet], tgt, 1)
+            res[:, lev_idx == k] = v[wet][i[:, 0]][:, None]
+        out.append(res)
+    return out[0], out[1]
+
+
+def attach_nemo_ldf_fields_mpas(z_coord, mesh, ldf_path, domcfg_path,
+                                rn_shlat: float):
+    """NEMO nn_ahm_ijk_t=-30 viscosity on the MPAS Voronoi mesh.
+
+    ahmt_3d at the nearest wet NEMO T point of each cell centre, ahmf_3d at the
+    nearest wet NEMO F point of each vertex (``nemo_ldf_nearest_wet``), same 75
+    levels.  ahmt * cell activity; ahmf * nemo_vertex_shlat_factor_3d (NEMO
+    fmask carried to triangles by wet kite area).
+    """
+    from legoesm.core.operators_voronoi import nemo_vertex_shlat_factor_3d
+
     nk = int(z_coord.n_levels)
-    if ahmt_f.shape != (nk, 331, 360) or flat.shape != (331, 360):
-        raise SystemExit(f"--nemo-ldf-file on MPAS expects ({nk},331,360) "
-                         f"ldf and (331,360) domain_cfg; got {ahmt_f.shape}, {flat.shape}")
-    rad = np.radians
-    it, _ = inverse_distance_weights(
-        latlon_to_xyz(rad(tlat.ravel()), rad(tlon.ravel())),
-        latlon_to_xyz(np.asarray(mesh.latCell), np.asarray(mesh.lonCell)), 1)
-    iv, _ = inverse_distance_weights(
-        latlon_to_xyz(rad(flat.ravel()), rad(flon.ravel())),
-        latlon_to_xyz(np.asarray(mesh.latVertex), np.asarray(mesh.lonVertex)), 1)
-    ahmt = ahmt_f.reshape(nk, -1)[:, it[:, 0]].T               # (nCells, nk)
-    ahmf = ahmf_f.reshape(nk, -1)[:, iv[:, 0]].T               # (nVertices, nk)
+    if nk != 75:
+        raise SystemExit(f"--nemo-ldf-file on MPAS expects NEMO's 75 levels; got {nk}")
+    lev = np.arange(nk)
+    ahmt, _ = nemo_ldf_nearest_wet(ldf_path, domcfg_path, mesh.latCell,
+                                   mesh.lonCell, lev)            # (nCells, nk)
+    _, ahmf = nemo_ldf_nearest_wet(ldf_path, domcfg_path, mesh.latVertex,
+                                   mesh.lonVertex, lev)          # (nVertices, nk)
     act = np.asarray(z_coord.is_active, dtype=np.float64)
     fac = np.asarray(nemo_vertex_shlat_factor_3d(z_coord.is_active, mesh, rn_shlat),
                      dtype=np.float64)
@@ -1434,6 +1458,36 @@ def attach_nemo_ldf_fields_mpas(z_coord, mesh, ldf_path, domcfg_path,
           f"..{fac.max():.3f}")
     return z_coord._replace(nemo_ahmt_3d=jnp.asarray(ahmt * act, dtype),
                             nemo_ahmf_3d=jnp.asarray(ahmf * fac, dtype))
+
+
+def nemo_ldf_fesom(mesh, ldf_path, domcfg_path, rn_shlat: float):
+    """(ahmt_node, ahmf_node), each (nod2D, nl), for fesom_jax's ``visc_nemo``.
+
+    Horizontal: nearest wet NEMO T / F point of each node (geographic coords).
+    Vertical: each FESOM layer takes the NEMO level whose nav_lev is nearest its
+    mid-depth (the file varies up to 20x with depth).  ahmt * node layer mask;
+    ahmf * ``nemo_node_slip_factor`` (rn_shlat/2 on coastal dual cells, whose
+    loop is only the wet part).
+    """
+    import netCDF4 as nc4
+    from fesom_jax.momentum import nemo_node_slip_factor
+
+    ds = nc4.Dataset(ldf_path)
+    try:
+        nav_lev = np.asarray(ds.variables["nav_lev"][:], dtype=np.float64)
+    finally:
+        ds.close()
+    zmid = np.abs(np.asarray(mesh.Z, dtype=np.float64))              # (nl-1,)
+    lev = np.abs(zmid[:, None] - nav_lev[None, :]).argmin(axis=1)
+    lev = np.append(lev, lev[-1])                                    # pad slot
+    geo = np.asarray(mesh.geo_coord_nod2D)
+    ahmt, ahmf = nemo_ldf_nearest_wet(ldf_path, domcfg_path, geo[:, 1], geo[:, 0], lev)
+    lm = np.asarray(mesh.node_layer_mask, dtype=np.float64)
+    fac = np.asarray(nemo_node_slip_factor(mesh, rn_shlat), dtype=np.float64)
+    print(f"[nemo-ldf] FESOM {ldf_path}: ahmt {ahmt[lm > 0].min():g}..{ahmt.max():g} "
+          f"m2/s at {ahmt.shape[0]} nodes x {ahmt.shape[1]} slots; rn_shlat={rn_shlat:g}; "
+          f"coastal node-levels {int(((fac != 1.0) & (lm > 0)).sum())}")
+    return jnp.asarray(ahmt * lm), jnp.asarray(ahmf * fac * lm)
 
 
 def renormalise_ah_profile(lv, A_h_new: float):
@@ -2824,6 +2878,7 @@ _FESOM_WIRED_DESTS = frozenset({
     # Dec/Jan blend NEMO itself starts from; build_fesom_ocean takes it):
     "nemo_monthly_init", "nemo_init_month", "nemo_init_tint",
     "woa_init", "woa_t", "woa_s",
+    "nemo_ldf_file", "lateral_side_bc", "nemo_domain_cfg",
 })
 
 # B4 selectors that CONSUME the forced loop's forcing/coupling — meaningless
@@ -2929,7 +2984,10 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
                       nemo_init_tint: bool = False,
                       woa_init: bool = False, woa_t=None, woa_s=None,
                       vertical_mixing: str = "fesom", vmix_config=None,
-                      iwm_forcing_file: str | None = None):
+                      iwm_forcing_file: str | None = None,
+                      nemo_ldf_file: str | None = None,
+                      nemo_domain_cfg: str | None = None,
+                      lateral_side_bc: str | None = None):
     """FESOM core in the OMIP driver (three-grid unification B1; IC B4).
 
     Loads the REAL-bathymetry fesom_jax mesh (NOT the idealized
@@ -2985,8 +3043,12 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
             land_mask=np.asarray(mesh.node_layer_mask[:, 0], dtype=np.float64),
             paired_cells=True)
         print(f"[setup] fesom zdfiwm ENABLED (maps={iwm_forcing_file})")
+    _visc_nemo = (nemo_ldf_fesom(
+        mesh, nemo_ldf_file, nemo_domain_cfg,
+        rn_shlat={"no_slip": 2.0, "free_slip": 0.0}[lateral_side_bc])
+        if nemo_ldf_file else None)
     model = FesomOceanModel(mesh, z_coord, config, vmix_config=vmix_config,
-                            iwm_forcing=_iwm_maps)
+                            iwm_forcing=_iwm_maps, visc_nemo=_visc_nemo)
     if ic_dir:
         from fesom_jax.phc_ic import cold_start_state
         # seed_sea_ice=False: the PHC cold start would seed a static
@@ -8382,7 +8444,15 @@ def main() -> int:
     # --grid tripole --tripole-vmix tke; reject every other context (they are
     # silently discarded there) — the --tripole-vmix guard above misses them at
     # its "none" default and under the kpp closure.
-    if args.nemo_ldf_file:
+    if args.nemo_ldf_file and args.grid == "fesom":
+        # fesom's own viscosity has no A_h/B_h/Smagorinsky flags in this lane;
+        # the NEMO operator replaces it wholesale, single device.
+        _bad = [f for f, bad in (
+            ("--lateral-side-bc", args.lateral_side_bc is None),
+            ("--n-gpus 1", int(args.n_gpus or 1) != 1)) if bad]
+        if _bad:
+            raise SystemExit("--nemo-ldf-file on FESOM requires: " + ", ".join(_bad))
+    elif args.nemo_ldf_file:
         _bad = [f for f, bad in (
             ("--grid tripole|mpas", args.grid not in ("tripole", "mpas")),
             ("--partial-cell", not args.partial_cell),
@@ -8861,6 +8931,9 @@ def main() -> int:
             # builder + knobs the tripole/MPAS lanes use.
             vertical_mixing=args.fesom_vmix,
             iwm_forcing_file=args.iwm_forcing_file,
+            nemo_ldf_file=args.nemo_ldf_file,
+            nemo_domain_cfg=args.nemo_domain_cfg or _NEMO_DOMAIN_CFG,
+            lateral_side_bc=args.lateral_side_bc,
             vmix_config=(build_tripole_vmix_config(
                 "tke", iwm=_iwm_cfg,
                 tke_eice=args.tke_eice,
