@@ -94,6 +94,7 @@ preprocess "$dry/dynvor.F90" "$syntax/dynvor.f90"
 "$FC" -fsyntax-only -ffree-line-length-none -I "$syntax" \
   -I "$SOURCE_ROOT/BLD/inc" -J "$syntax" "$syntax/dynvor.f90"
 
+mkdir -p "$(dirname "$TARGET_RUN")"
 for mount in /tmp "$(dirname "$TARGET_RUN")" "$NEMO_ROOT"; do
   free_kb=$(df -Pk "$mount" | awk 'NR==2 {print $4}')
   [[ "$free_kb" -ge 2097152 ]] || {

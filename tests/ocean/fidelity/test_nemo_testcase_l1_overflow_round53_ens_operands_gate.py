@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -126,3 +127,28 @@ def test_preflight_is_additions_only_and_compiled_branch_bound():
     assert report["status"] == "PREFLIGHT_PASS"
     assert report["removed_source_lines"] == 0
     assert report["compiled_kvor"] == 5
+
+
+def test_launcher_creates_only_missing_target_parent_before_df(tmp_path):
+    run = (gate.INSTRUMENT / "run.sh").read_text()
+    target_guard = '[[ ! -e "$TARGET_ROOT" && ! -e "$TARGET_RUN" ]]'
+    create_parent = 'mkdir -p "$(dirname "$TARGET_RUN")"'
+    space_check = 'for mount in /tmp "$(dirname "$TARGET_RUN")" "$NEMO_ROOT"; do'
+    assert run.index(target_guard) < run.index(create_parent) < run.index(space_check)
+
+    target = tmp_path / "absent" / "nested" / "run"
+    result = subprocess.run(
+        [
+            "bash",
+            "-ceu",
+            '[[ ! -e "$1" ]]; mkdir -p "$(dirname "$1")"; df -Pk "$(dirname "$1")"',
+            "round54-parent-check",
+            str(target),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert target.parent.is_dir()
+    assert not target.exists()
