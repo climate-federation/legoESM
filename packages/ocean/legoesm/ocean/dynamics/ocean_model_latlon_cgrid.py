@@ -1963,6 +1963,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     fct_low_order_predictor: str = "nemo_rk3_two_step",
     bbl_context=None,
     stage_source_rates=None,
+    stage_source_terms=None,
     stage_qco_weights=None,
     stop_after_stage: int = 3,
     resume=None,
@@ -2001,6 +2002,8 @@ def _nemo_ws_rk3_tracer_pair_step(
         stage_source_rates = ((zero_a, zero_b),) * 3
     if len(stage_source_rates) != 3:
         raise ValueError("stage_source_rates must contain exactly 3 stages")
+    if stage_source_terms is not None and len(stage_source_terms) != 3:
+        raise ValueError("stage_source_terms must contain exactly 3 stages")
     if stage_qco_weights is not None and len(stage_qco_weights) != 3:
         raise ValueError("stage_qco_weights must contain exactly 3 stages")
     resume_stage = 0
@@ -2153,13 +2156,22 @@ def _nemo_ws_rk3_tracer_pair_step(
             fd_b = fd_b - h_stage * bbl_b
         return fd_a, fd_b, rhs_a, rhs_b, fct_activity
 
+    def _source_order_sum(base, fallback, terms):
+        if terms is None:
+            return base + fallback
+        out = base
+        for term in terms:
+            out = nemo_source_round(out + term)
+        return out
+
     def _stage(
         base, flux_div, concentration_rhs, source_rate, stage_dt,
-        h_after, h_rhs, stage_index,
+        h_after, h_rhs, stage_index, source_terms=None,
     ):
         if stage_qco_weights is not None and concentration_rhs is not None:
             q_before, q_rhs, q_after = stage_qco_weights[stage_index]
-            rhs = concentration_rhs + source_rate
+            rhs = _source_order_sum(
+                concentration_rhs, source_rate, source_terms)
             out = (
                 q_before[..., None] * base
                 + stage_dt * q_rhs[..., None] * rhs
@@ -2187,14 +2199,21 @@ def _nemo_ws_rk3_tracer_pair_step(
         trace_adv_b = (
             rhs0_b if rhs0_b is not None
             else -fd0_b / jnp.maximum(h_k_old, 1.0e-10))
-        trace_sbc_a = trace_adv_a + stage_source_rates[0][0]
-        trace_sbc_b = trace_adv_b + stage_source_rates[0][1]
+        _terms0 = None if stage_source_terms is None else stage_source_terms[0]
+        trace_sbc_a = _source_order_sum(
+            trace_adv_a, stage_source_rates[0][0],
+            None if _terms0 is None else _terms0[0])
+        trace_sbc_b = _source_order_sum(
+            trace_adv_b, stage_source_rates[0][1],
+            None if _terms0 is None else _terms0[1])
         a1 = _stage(
             tr_a, fd0_a, rhs0_a, stage_source_rates[0][0], dt / 3.0,
-            h_one_third, h_k_old, 0)
+            h_one_third, h_k_old, 0,
+            None if _terms0 is None else _terms0[0])
         b1 = _stage(
             tr_b, fd0_b, rhs0_b, stage_source_rates[0][1], dt / 3.0,
-            h_one_third, h_k_old, 0)
+            h_one_third, h_k_old, 0,
+            None if _terms0 is None else _terms0[1])
     if stop_after_stage == 1:
         if return_stage1_trace:
             return (
@@ -2207,12 +2226,15 @@ def _nemo_ws_rk3_tracer_pair_step(
     else:
         fd1_a, fd1_b, rhs1_a, rhs1_b, _ = _flux_pair(
             a1, b1, dt / 2.0, 1, h_one_half)
+        _terms1 = None if stage_source_terms is None else stage_source_terms[1]
         a2 = _stage(
             tr_a, fd1_a, rhs1_a, stage_source_rates[1][0], dt / 2.0,
-            h_one_half, h_one_third, 1)
+            h_one_half, h_one_third, 1,
+            None if _terms1 is None else _terms1[0])
         b2 = _stage(
             tr_b, fd1_b, rhs1_b, stage_source_rates[1][1], dt / 2.0,
-            h_one_half, h_one_third, 1)
+            h_one_half, h_one_third, 1,
+            None if _terms1 is None else _terms1[1])
     if stop_after_stage == 2:
         return a2, b2
     fd2_a, fd2_b, _, _, fct_activity = _flux_pair(a2, b2, dt, 2, h_k_new)
@@ -6836,7 +6858,7 @@ class LatLonCGridOceanModel:
             # stage-3-only and remain in the later physics completion.
             _zero_stage_source = jnp.zeros_like(state.T.data)
             if freshwater is None:
-                _fw_eta_stage = jnp.zeros_like(state.eta.data)
+                _emp_stage_mass_flux = jnp.zeros_like(state.eta.data)
             else:
                 # The dilution operand is NEMO's ``emp`` ALONE
                 # (trasbc.F90:282-288): the river runoff is NOT in it.  NEMO
@@ -6857,15 +6879,23 @@ class LatLonCGridOceanModel:
                 # that resolves no runoff the two sums are bitwise equal,
                 # because ``x + 0.0`` is ``x`` for every value this sum can
                 # hold.
-                _fw_eta_stage = (
-                    net_freshwater_flux(freshwater, include_runoff=False)
-                    / _cfg_b.rho_0)
+                _emp_stage_mass_flux = net_freshwater_flux(
+                    freshwater, include_runoff=False)
+            _stage_r1_rho0 = nemo_source_round(
+                jnp.asarray(1.0, dtype=state.T.data.dtype)
+                / jnp.asarray(_cfg_b.rho_0, dtype=state.T.data.dtype))
 
             def _emp_stage_rate(tracer, h_stage):
-                top = (
-                    _fw_eta_stage * tracer[..., 0]
-                    / jnp.maximum(h_stage[..., 0], 1.0e-10)
-                    * _active_live[..., 0])
+                # trasbc.f90:284-286 first stores r1_rho0/e3t(Kmm), then
+                # multiplies EMP by the Kbb tracer and by that reciprocal.
+                # ``_emp_stage_mass_flux`` is -EMP in legoESM's convention.
+                z1_rho0_e3t = nemo_source_round(
+                    _stage_r1_rho0
+                    / jnp.maximum(h_stage[..., 0], 1.0e-10))
+                top = nemo_source_round(
+                    nemo_source_round(
+                        _emp_stage_mass_flux * tracer[..., 0])
+                    * z1_rho0_e3t) * _active_live[..., 0]
                 return _zero_stage_source.at[..., 0].set(top)
 
             # River-runoff tracer source (trasbc.F90's river-runoff block).
@@ -6908,6 +6938,23 @@ class LatLonCGridOceanModel:
                 return (
                     _add_rnf_stage_rate(rate_t, _rnf_content[0], h_stage),
                     _add_rnf_stage_rate(rate_s, _rnf_content[1], h_stage),
+                )
+
+            def _stage_tracer_source_terms(h_stage):
+                """Keep the two compiled statements separate until Krhs."""
+                emp_t = _emp_stage_rate(state.T.data, h_stage)
+                emp_s = _emp_stage_rate(state.S.data, h_stage)
+                if _rnf_content is None:
+                    return ((emp_t,), (emp_s,))
+                zero_t = jnp.zeros_like(emp_t)
+                zero_s = jnp.zeros_like(emp_s)
+                return (
+                    (emp_t,
+                     _add_rnf_stage_rate(
+                         zero_t, _rnf_content[0], h_stage)),
+                    (emp_s,
+                     _add_rnf_stage_rate(
+                         zero_s, _rnf_content[1], h_stage)),
                 )
 
             _stage3_T_rate = (
@@ -7013,6 +7060,15 @@ class LatLonCGridOceanModel:
                     tend.dT_dt.data, _qsr_b, _qsr_m,
                     h_k_old, _h_live_one_half)
 
+            _stage12_source_terms = (
+                None
+                if _rnf_content is None
+                else (
+                    _stage_tracer_source_terms(h_k_old),
+                    _stage_tracer_source_terms(_h_live_one_third),
+                    None,
+                )
+            )
             _stage_source_rates = (
                 _stage_tracer_sources(h_k_old),
                 _stage_tracer_sources(_h_live_one_third),
@@ -7124,6 +7180,7 @@ class LatLonCGridOceanModel:
                     linssh_top_flux=getattr(_zc, "linear_free_surface", False),
                     stage_transport_geometry=stage_geometry,
                     stage_source_rates=_stage_source_rates,
+                    stage_source_terms=_stage12_source_terms,
                     stage_qco_weights=_tracer_qco_weights,
                     stop_after_stage=stop_after_stage,
                     resume=resume,
