@@ -437,6 +437,10 @@ FILES = {
         NEMO / "cfgs/DINO/BLD/ppsrc/nemo/domain.f90"),
     "DINO/BLD/ppsrc/nemo/domqco.f90": (
         NEMO / "cfgs/DINO/BLD/ppsrc/nemo/domqco.f90"),
+    "DINO/BLD/ppsrc/nemo/lbclnk.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/lbclnk.f90"),
+    "DINO/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "DINO/BLD/ppsrc/nemo/eosbn2.f90": (
         NEMO / "cfgs/DINO/BLD/ppsrc/nemo/eosbn2.f90"),
     "DINO/BLD/ppsrc/nemo/ldfslp.f90": (
@@ -792,7 +796,7 @@ CITATION_MAP = {
         'CALL dom_qco_r3c( ssh(:,:,Kbb), r3t(:,:,Kbb), r3u(:,:,Kbb), r3v(:,:,Kbb)           )',
         '&                         r3u(:,:,Kmm), \'U\', 1._wp, r3v(:,:,Kmm), \'V\', 1._wp, r3f(:,:), \'F\', 1._wp )', 5],
     'DINO/BLD/ppsrc/nemo/domqco.f90:211-215': [
-        'DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)',
+        ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)', 1),
         '&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 5],
     'DINO/BLD/ppsrc/nemo/lbclnk.f90:1816-1820': [
         'zland = 0._wp                                     ! land filling value: zero by default',
