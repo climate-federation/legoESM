@@ -50,6 +50,16 @@ MARKERS = ["o", "s", "^", "D", "v", "P"]
 # until commit 4b763579a (2026-08-26); every float64 receipt from a job older
 # than the first post-fix ladder is a mislabelled fp32 run and is refused.
 FIRST_REAL_F64_JOB = 27253192
+# Receipts without a SLURM job id (Derecho PBS/PALS, interactive runs) are
+# dated instead: the fix reached the benches' branch on 2026-09-16.
+FIRST_REAL_F64_UTC = "2026-09-17"
+
+
+def _real_f64(r, job):
+    if job:
+        return int(job) >= FIRST_REAL_F64_JOB
+    ts = r.get("metadata", {}).get("timestamp_utc")
+    return isinstance(ts, str) and ts >= FIRST_REAL_F64_UTC
 # canonical vertical levels per lane: receipts at other level counts are a
 # different problem and are dropped (e.g. the 32-level MPAS probe rows)
 #: The vertical level count each lane's curve is built from.  This is a
@@ -148,8 +158,10 @@ MPAS_NCCL_CHANNELS = {"icosahedral": "64", "mpas": "8"}
 # passes --cpus-per-task = node threads / ranks-per-node = 64 since
 # 2026-09-21); rows stamped below this, or unstamped, were 1-core ranks
 # (7.4x slower per rank) and are refused -- single-rank rows included, the
-# old launch bound a one-task step to one core just the same.
-CPU_AFFINITY_MIN = 16
+# old launch bound a one-task step to one core just the same.  The floor is
+# 4, not 16: the Derecho CPU ladder runs 16 ranks x 8 cores per node
+# (affinity 8, 2026-09-25), while a one-core rank reads 1 or 2.
+CPU_AFFINITY_MIN = 4
 MPAS_NCCL_CHUNK = "131072"
 
 
@@ -186,8 +198,7 @@ def load(dirs):
                 if prec not in PREC_LW:
                     continue
                 job = r.get("slurm_job_id") or r.get("metadata", {}).get("slurm_job_id")
-                if prec == "float64" and grid != "fesom" and (
-                        job is None or int(job) < FIRST_REAL_F64_JOB):
+                if prec == "float64" and grid != "fesom" and not _real_f64(r, job):
                     continue
                 nlev = r.get("nlev", r.get("n_levels"))
                 if (comp, grid) in NLEV and nlev != NLEV[(comp, grid)]:

@@ -93,7 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
     # how much of the plateau the barotropic solve owns, instead of inferring
     # it from a reduction count.
     p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
-                   default="standard")
+                   default=None,
+                   help="unset = MPASOceanConfig default (single_reduce)")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
                    help="distributed PCG iteration count (config default 20); "
                         "a PROBE knob -- lowering it changes the solve")
@@ -301,14 +302,14 @@ def main() -> int:
                    for k in ("NCCL_MIN_NCHANNELS", "NCCL_MAX_NCHANNELS",
                                 "NCCL_P2P_NET_CHUNKSIZE")
                },
-               "pcg_variant": args.pcg_variant,
+               "pcg_variant": str(config.barotropic_implicit_pcg_variant),
                "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
                "pcg_precond": str(config.barotropic_implicit_pcg_precond),
                "pcg_poly_sweeps": int(config.barotropic_implicit_pcg_poly_sweeps),
                "pcg_solver_path": ("fixed_iter_pcg" if nd > 1 else "stock_cg_to_tol"),
                "eta_floor_clamp_iters": args.eta_clamp_iters,
                "barotropic_allreduces_per_step": (
-                   1 + (1 if args.pcg_variant == "single_reduce" else 2)
+                   1 + (1 if config.barotropic_implicit_pcg_variant == "single_reduce" else 2)
                    * int(config.barotropic_implicit_pcg_fixed_iters)
                    if nd > 1 else None)},
     ))

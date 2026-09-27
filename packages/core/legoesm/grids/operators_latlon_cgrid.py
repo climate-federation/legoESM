@@ -556,11 +556,12 @@ def interp_cell_to_vface_halo(
             # SPMD: restore the legacy pole edge-copy at the south / north pole
             # bands only (interior cuts keep the cross-cut average). south then
             # north, sequenced so a single band reproduces serial at both ends.
+            # Row-index selects (not a where over a concatenated copy):
+            # they fuse into the average instead of two extra passes.
             south_m, north_m = spmd_pm
-            f_v = jnp.where(
-                south_m, jnp.concatenate([f[0:1], f_v[1:]], axis=0), f_v)
-            f_v = jnp.where(
-                north_m, jnp.concatenate([f_v[:-1], f[-1:]], axis=0), f_v)
+            i = jnp.arange(f_v.shape[0]).reshape((-1,) + (1,) * (f_v.ndim - 1))
+            f_v = jnp.where(south_m & (i == 0), f[0:1], f_v)
+            f_v = jnp.where(north_m & (i == f_v.shape[0] - 1), f[-1:], f_v)
         else:
             # MPI: static per-rank pole answer (None ⟺ this rank owns the pole).
             if band.south_rank is None:

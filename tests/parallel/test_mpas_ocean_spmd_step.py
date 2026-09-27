@@ -29,6 +29,23 @@ jax.config.update("jax_enable_x64", True)
 N_DEV = 4
 
 
+@pytest.fixture(autouse=True)
+def _fp64_policy():
+    """x64 parity needs the fp64 PRECISION POLICY too: under the default
+    policy the equation of state computes in float32 (density good to ~1e-7),
+    and the step then differs by eta ~1e-5 between two compilations of the
+    SAME code (jit vs eager, 1 step), so a 3e-10 bar only held while the
+    sharded and serial programs happened to compile alike. Under fp64 the
+    jit-vs-eager gap is ~1e-14 (measured 2026-09-26)."""
+    from legoesm.core.precision import (
+        PrecisionPolicy, get_policy, resolve_dtype, set_policy)
+    prev = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    assert resolve_dtype("equation_of_state", "compute") == jnp.float64
+    yield
+    set_policy(prev)
+
+
 def _need_devices(n):
     if len(jax.devices()) < n:
         pytest.skip(f"need {n} devices (XLA_FLAGS=--xla_force_host_platform_device_count={n})")

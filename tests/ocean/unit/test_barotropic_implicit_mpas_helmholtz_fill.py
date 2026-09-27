@@ -28,7 +28,7 @@ def _reference_apply_with_fill(eta_in, H_e, coeff, mesh, mask, edge_mask):
     c2 = mesh.cellsOnEdge[1]
     H_e_face = H_e * edge_mask
     eta_m = eta_in * mask
-    eta_filled = fill_land_cells_mpas(eta_m, mask, c1, c2)
+    eta_filled = fill_land_cells_mpas(eta_m, mask, c1, c2, mesh.edgesOnCell, mesh.nEdgesOnCell)
     grad = gradient_edge(eta_filled, mesh)
     flux = H_e_face * grad
     div_grad = divergence_cell(flux, mesh) * mask
@@ -60,7 +60,7 @@ def test_fixture_actually_exercises_the_fill():
     equality would hold trivially and prove nothing."""
     mesh, mask, _, eta_in, _, _, c1, c2 = _fixture()
     eta_m = eta_in * mask
-    eta_filled = fill_land_cells_mpas(eta_m, mask, c1, c2)
+    eta_filled = fill_land_cells_mpas(eta_m, mask, c1, c2, mesh.edgesOnCell, mesh.nEdgesOnCell)
     assert not np.array_equal(np.asarray(eta_filled), np.asarray(eta_m)), (
         "fixture degenerate: the fill changed nothing, so the "
         "value-preservation assertion would not be exercised")
