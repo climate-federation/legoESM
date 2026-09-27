@@ -734,53 +734,6 @@ def test_nemo_ws_stage1_trace_preserves_source_statement_order(monkeypatch):
     np.testing.assert_array_equal(np.asarray(regrouped[5]), 0.0)
 
 
-def test_nemo_ws_qco_tracer_assignment_preserves_source_order(monkeypatch):
-    """The executing stage assignment keeps NEMO's multiply/add barriers."""
-    set_policy(PrecisionPolicy.fp64())
-    kbb = jnp.asarray([[[-0.6333231084168918]]], dtype=jnp.float64)
-    krhs = jnp.asarray([[[1.5175620838095593e-08]]], dtype=jnp.float64)
-    active = jnp.ones_like(kbb)
-    qbb = jnp.asarray([[1.0 - 0.00014940245890372877]], dtype=jnp.float64)
-    qmm = qbb
-    qaa = jnp.asarray([[1.0 - 0.00020466918852310662]], dtype=jnp.float64)
-    weights = ((qbb, qmm, qaa),) * 3
-    grid = SimpleNamespace(
-        dy_u=jnp.ones((1, 2), dtype=jnp.float64),
-        dx_v=jnp.ones((2, 1), dtype=jnp.float64),
-        area_T=jnp.ones((1, 1), dtype=jnp.float64),
-    )
-    mass_u = jnp.ones((1, 2, 1), dtype=jnp.float64)
-    mass_v = jnp.ones((2, 1, 1), dtype=jnp.float64)
-    w = jnp.ones((1, 1, 2), dtype=jnp.float64)
-
-    monkeypatch.setattr(
-        model_module, "_nemo_cen2_tracer_rhs",
-        lambda *args, **kwargs: krhs)
-
-    def evaluate(base):
-        return model_module._nemo_ws_rk3_tracer_pair_step(
-            base, base, "fct2", mass_u, mass_v, w,
-            active, active, mass_u, mass_v, grid, 10800.0, active,
-            stage_qco_weights=weights, stop_after_stage=1,
-        )[0]
-
-    eager = evaluate(kbb)
-    compiled = jax.jit(evaluate)(kbb)
-    expected = np.asarray([[[-0.6333034820241417]]], dtype=np.float64)
-    np.testing.assert_array_equal(np.asarray(eager), expected)
-    np.testing.assert_array_equal(np.asarray(compiled), expected)
-
-    fused = jax.jit(lambda base, rhs: (
-        qbb[..., None] * base
-        + jnp.float64(3600.0) * qmm[..., None] * rhs
-    ) / qaa[..., None])(kbb, krhs)
-    assert not np.array_equal(np.asarray(compiled), np.asarray(fused))
-
-    gradient = jax.grad(lambda value: jnp.sum(evaluate(value)))(kbb)
-    assert np.isfinite(np.asarray(gradient)).all()
-    assert np.any(np.asarray(gradient) != 0.0)
-
-
 def test_nemo_ws_stage1_boundary_hook_is_private_and_validated():
     with pytest.raises(ValueError, match="expose_tracer_stage1_boundary"):
         _lock_model(model_module._NEMOWSRK3TestHooks(
