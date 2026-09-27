@@ -83,6 +83,34 @@ def main() -> None:
         return original(*call_args, **call_kwargs)
 
     eos.compute_buoyancy_frequency_nemo_bn2 = traced
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    original_step = LatLonCGridOceanModel.step
+
+    def traced_step(model, state, *step_args, **step_kwargs):
+        result = original_step(model, state, *step_args, **step_kwargs)
+        fields = {
+            "eta": result.eta.data,
+            "T": result.T.data,
+            "S": result.S.data,
+            "u": result.u.data,
+            "v": result.v.data,
+        }
+        jax.debug.print(
+            "TRACE_STEP_OUT " + " ".join(
+                f"{name}_nonfinite={{{name}}}" for name in fields),
+            ordered=True,
+            **{
+                name: jnp.sum(~jnp.isfinite(value))
+                for name, value in fields.items()
+            },
+        )
+        return result
+
+    LatLonCGridOceanModel.step = traced_step
     sys.argv = ["kamm_twin_90d.py", *args]
     runpy.run_path(
         "scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py",
