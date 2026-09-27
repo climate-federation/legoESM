@@ -29,14 +29,14 @@ The active compiled step calls `ldf_slp(kstp,rhd,rn2b,Nbb,Nbb)` at
 `GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/stprk3.f90:173-180`.
 The routine reads `nmln`, live depth, and mixed-layer inverse depths at
 `GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/ldfslp.f90:187-229`,
-then forms density gradients at `ldfslp.f90:231-261` and the face gradients,
+then forms density gradients at `:231-261` and the face gradients,
 limiter, selectors, recurrence, and Shapiro outputs at
-`ldfslp.f90:270-361`.  The same build produces `nmln` earlier by calling
+`:270-361`.  The same build produces `nmln` earlier by calling
 `zdf_mxl` at
 `GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfphy.f90:326-330`;
 that producer initializes the index, accumulates positive `rn2b*e3w`, updates
 the last below-threshold level, and writes the live mixed-layer depth at
-`GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfmxl.f90:109-124`.
+`:109-124`.
 
 ## Production-step result
 
