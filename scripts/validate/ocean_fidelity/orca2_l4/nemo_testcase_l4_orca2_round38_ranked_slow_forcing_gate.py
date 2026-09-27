@@ -336,14 +336,16 @@ def run(deck_root: Path, boundary_root: Path, ranked_root: Path,
     }
     scientific_plant = {"requested": plant, "fires": None}
     if plant:
-        planted = np.array(oracle_u["krhs"], copy=True)
-        planted[support_rows[0], -1, 0] = np.nextafter(
-            planted[support_rows[0], -1, 0], np.inf)
-        planted_depth = round14._source_sum(
-            oracle_u["e3"], planted, oracle_u["mask"], oracle_u["r1_h0"])
+        planted_target = np.array(oracle_u["depth_mean"], copy=True)
+        index = (support_rows[0], planted_target.shape[1] - 1)
+        planted_target[index] = np.nextafter(planted_target[index], np.inf)
+        record_replay = round14._source_sum(
+            oracle_u["e3"], oracle_u["krhs"], oracle_u["mask"],
+            oracle_u["r1_h0"])
         scientific_plant["fires"] = not _support_row(
-            planted_depth, oracle_u["depth_mean"], support_rows)["bit_exact"]
-        require(bool(scientific_plant["fires"]), "one-ULP RHS plant did not fire")
+            record_replay, planted_target, support_rows)["bit_exact"]
+        require(bool(scientific_plant["fires"]),
+                "one-ULP scored-boundary plant did not fire")
 
     result = {
         "gate": "nemo_testcase_l4_orca2_round38_ranked_slow_forcing_gate",
