@@ -105,7 +105,7 @@ for needle in 'CALL tra_qsr' 'CALL qsr_2BD_l2_replay' \
     exit 66
   fi
 done
-for needle in 'SUBROUTINE qsr_2BD_l2_replay' \
+for needle in 'PUBLIC   qsr_2BD_l2_replay' 'SUBROUTINE qsr_2BD_l2_replay' \
   'pinc(ji,jj,jk) = qsr(ji,jj)' 'DO jk = nk0+1, nkV'; do
   if ! grep -Fq "$needle" "$dry/traqsr.F90"; then
     printf 'REFUSE: dry qsr replay lacks %s\n' "$needle" >&2

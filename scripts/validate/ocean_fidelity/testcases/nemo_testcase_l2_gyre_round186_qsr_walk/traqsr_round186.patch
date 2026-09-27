@@ -1,5 +1,13 @@
 --- traqsr.F90
 +++ traqsr.F90
+@@ -49,6 +49,7 @@
+ 
+    PUBLIC   tra_qsr       ! routine called by step.F90 (ln_traqsr=T)
+    PUBLIC   tra_qsr_init  ! routine called by nemogcm.F90
++   PUBLIC   qsr_2BD_l2_replay
+ 
+    !                                 !!* Namelist namtra_qsr: penetrative solar radiation
+    LOGICAL , PUBLIC ::   ln_traqsr    !: light absorption (qsr) flag
 @@ -1440,4 +1440,38 @@
     END SUBROUTINE tra_qsr_init
 +
