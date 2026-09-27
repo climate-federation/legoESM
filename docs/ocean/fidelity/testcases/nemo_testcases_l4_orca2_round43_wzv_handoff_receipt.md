@@ -86,9 +86,16 @@ number from the unbridged replay is used as a fidelity claim.
 
 - The one-ULP stage-1 tracer plant exits nonzero with
   `REFUSE: planted stage-1 tracer cell rejected through scorer`.
-- Focused round-43 tests: 2 passed.
-- The complete `tests/ocean/fidelity -n 12` outcome is recorded below after
-  the single permitted battery run.
+- Focused round-43 plus citation-gate tests: 18 passed.
+- The single `tests/ocean/fidelity -n 12` run dispatched 1,927 items and
+  reached 99%, then repeated the known xdist-controller hang after its Python
+  workers had exited; it was interrupted without a terminal summary.  Five
+  red markers were rerun by exact node ID in one serial battery and remained
+  red: the known SI3 scalar-math provenance and worktree-stamp ratchets, plus
+  pre-existing GYRE round-129 stale-certified-gate, round-51 private-field
+  registry, and recipe-case-board (`hires_lane_surface`) failures.  None reads
+  a round-43 file or a changed model file; this incomplete battery is not
+  called green.
 - Separate read-only `codex exec` review: **independent review unavailable
   in-sandbox** (`failed to initialize in-process app-server client: Read-only
   file system`).
