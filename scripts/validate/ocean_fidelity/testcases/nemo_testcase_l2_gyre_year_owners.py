@@ -13551,7 +13551,7 @@ def developed_tracer_ldf_statement_walk(
                 "developed slope plant needs --developed-slope-root")
         # `nmln` is integer-valued.  Its smallest representable causal
         # perturbation is one vertical index, not one floating-point ULP.
-        first = np.asarray(baseline_jit["slope"]["nmln"], dtype=np.int32) - 1
+        first = np.asarray(carried_jit["slope"]["nmln"], dtype=np.int32) - 1
         candidates = np.argwhere(wet2 & (first < nlev - 2))
         require(candidates.size > 0,
                 "developed slope plant has no movable wet mixed-layer index")
@@ -13571,12 +13571,12 @@ def developed_tracer_ldf_statement_walk(
             "production_state_unequal_bytes": state_moved,
             "upstream_cells_moved": {
                 name: _different_cells(
-                    planted["slope"][name], baseline_jit["slope"][name],
+                    planted["slope"][name], carried_jit["slope"][name],
                     np.ones_like(planted["slope"][name], dtype=bool))
                 for name in upstream},
             "downstream_cells_moved": {
                 name: _different_cells(
-                    planted["slope"][name], baseline_jit["slope"][name],
+                    planted["slope"][name], carried_jit["slope"][name],
                     np.ones_like(planted["slope"][name], dtype=bool))
                 for name in downstream},
         }
