@@ -75,6 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from metadata import (  # noqa: E402
     annotate_incomplete, hlo_collective_census, scaling_metadata,
     tidy_throughput_fields)
+from hyperdiff import hyperdiff_coeff  # noqa: E402
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -94,6 +95,11 @@ MPAS_PARITY_MAX_STEPS = 8
 # dry mass to the pre-step value each step, so the drift over a smoke window
 # is the allreduce rounding floor, not scheme drift.
 MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
+
+
+def nu_del4_for(subdivision):
+    """del4 coefficient for this subdivision (shared law, hyperdiff.py)."""
+    return hyperdiff_coeff(subdivision, "icosahedral")
 
 
 def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
@@ -128,10 +134,12 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
             f"count divides --reorder-for ({reorder_target}).")
     sigma = create_sigma_coordinate(nlev)
     # Same recipe as the icosahedral lane of run_levante_gpu_scaling /
-    # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion,
-    # energy-conserving PV flux, SSP-RK3, global mass fixer.
+    # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion
+    # (scaled with resolution, nu_del4_for), energy-conserving PV flux,
+    # SSP-RK3, global mass fixer.
     cfg = MPASPrimitiveEquationConfig(
-        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=fix_mass,
+        nu_del4=nu_del4_for(subdivision), nu_del4_ps=nu_del4_for(subdivision),
+        fix_mass=fix_mass,
         pv_scheme="energy", time_integrator="ssp_rk3",
     )
     dev_config = create_voronoi_device_mesh(
@@ -685,6 +693,7 @@ def main() -> int:
             # only by their FILENAME, and a knob that failed to take
             # effect is indistinguishable from one that did.
             "fix_mass": not args.no_fix_mass,
+            "nu_del4": nu_del4_for(args.subdivision),
             "per_rank_median_ms": per_rank_median_ms,
             "per_rank_spread_ms": per_rank_spread_ms,
             # The NCCL transport the arm ran with: the channel count moves
