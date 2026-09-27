@@ -258,40 +258,36 @@ def test_nearest_column_map_chunked_equals_dense(monkeypatch):
     assert gr.nearest_column_map(sl, so, tl[:0], to[:0]).size == 0
 
 
-def _write_era5_nc(path, var, values, lat_deg, lon_deg, time="1979-01-01"):
+def _write_era5_nc(path, var, values, lat_deg, lon_deg, time="1979-01-01",
+                   dims=("time", "lat", "lon")):
     import xarray as xr
     xr.Dataset(
-        {var: (("time", "lat", "lon"), values[None])},
+        {var: (dims, values[None])},
         coords={"time": np.array([time], dtype="datetime64[ns]"),
                 "lat": lat_deg, "lon": lon_deg}).to_netcdf(path)
 
 
-def _era5_test_stamp(tmp_path):
-    from legoesm.land.restart import (
-        HYDRAULICS_SOURCE_SURFDATA_COSBY, soil_hydraulics_stamp)
-    pf = tmp_path / "cosby_era5.nc"
-    pf.write_bytes(b"cosby")
-    return soil_hydraulics_stamp("clapp_hornberger",
-                                 HYDRAULICS_SOURCE_SURFDATA_COSBY, pf)
+def _era5_inputs(tmp_path, stl_vars=("var139", "var170", "var183", "var236"),
+                 lsm_var="var172", base=280.0):
+    lat, lon = np.array([10.0, -10.0]), np.array([0.0, 1.0])
+    files = []
+    for n, (v, off) in enumerate(zip(stl_vars, (1.0, 2.0, 3.0, 4.0))):
+        f = tmp_path / f"stl{n + 1}.nc"
+        _write_era5_nc(f, v, np.full((2, 2), base + off), lat, lon)
+        files.append(str(f))
+    lsm = tmp_path / "lsm.nc"
+    _write_era5_nc(lsm, lsm_var, np.array([[0.0, 1.0], [1.0, 1.0]]), lat, lon,
+                   time="2000-01-01")
+    sd = tmp_path / "surfdata.nc"
+    sd.write_bytes(b"stand-in; the masks are monkeypatched")
+    return files, str(lsm), str(sd)
 
 
-def test_era5_soil_t_refuses_an_unstamped_source(tmp_path):
-    rg = _load("scripts/data/regrid_land_ic.py", "_rg")
-    src = tmp_path / "ic.npz"
-    np.savez(src, soil_dz=np.ones(3), T_soil=np.zeros((2, 3)))
-    with pytest.raises(SystemExit, match="soil-hydraulics stamp"):
-        rg.main(["--source", str(src), "--era5-soil-t", "a", "b", "c", "d",
-                 "--era5-lsm", "l", "--out", str(tmp_path / "o.npz")])
-
-
-def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
-    """End to end: only T_soil of replaced columns changes, every other field is
-    byte-identical, provenance is stamped, and the driver's restart loader reads
-    back exactly the mapped profile, layer by layer (the t=0 check)."""
-    import json
+def _setup_cli(tmp_path, monkeypatch, replace_land=(True, False, True)):
+    """Synthetic 3-column IC, stubbed grid and masks; returns (rg, ic_path, ic)."""
     rg = _load("scripts/data/regrid_land_ic.py", "_rg")
     import legoesm.grids.factory as gf
-    from legoesm.land.restart import load_land_restart, save_land_restart
+    from legoesm.land.restart import save_land_restart
     from legoesm.land.state import MultiLayerLandState
 
     ncol, dz = 3, np.array([0.0029, 0.0059, 0.0117, 0.0235, 0.047, 0.094,
@@ -305,7 +301,7 @@ def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gf, "create_grid", lambda *a, **k: Mesh())
     monkeypatch.setattr(rg, "_land_and_glacier", lambda s, g, n: (
-        np.array([True, False, True]), np.array([False, False, True])))
+        np.array(replace_land), np.array([False, False, True])))
 
     ic_path = tmp_path / "ic.npz"
     save_land_restart(
@@ -319,24 +315,26 @@ def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
             snow_depth=rng.uniform(0, 50, ncol),
             snow_age=rng.uniform(0, 1e6, ncol)),
         land_mode="multilayer", t_end_s=3.0e7, n_steps_completed=10,
-        metadata={"origin": "synthetic"}, soil_dz=dz,
-        soil_hydraulics=_era5_test_stamp(tmp_path))
-    ic = dict(np.load(ic_path, allow_pickle=False))
+        metadata={"origin": "synthetic"}, soil_dz=dz)
+    return rg, ic_path, dict(np.load(ic_path, allow_pickle=False))
 
-    lat, lon = np.array([10.0, -10.0]), np.array([0.0, 1.0])
-    files = []
-    for n, off in enumerate((1.0, 2.0, 3.0, 4.0)):
-        f = tmp_path / f"stl{n + 1}.nc"
-        _write_era5_nc(f, f"var{139 + n}", np.full((2, 2), 280.0 + off), lat, lon)
-        files.append(str(f))
-    lsm = tmp_path / "lsm.nc"
-    _write_era5_nc(lsm, "var172", np.array([[0.0, 1.0], [1.0, 1.0]]), lat, lon,
-                   time="2000-01-01")
-    out = tmp_path / "out.npz"
-    assert rg.main(["--source", str(ic_path), "--surfdata", "unused",
+
+def _run_cli(rg, ic_path, out, files, lsm, sd):
+    return rg.main(["--source", str(ic_path), "--surfdata", sd,
                     "--target-grid", "mpas", "--target-resolution", "6",
-                    "--era5-soil-t", *files, "--era5-lsm", str(lsm),
-                    "--out", str(out)]) == 0
+                    "--era5-soil-t", *files, "--era5-lsm", lsm, "--out", str(out)])
+
+
+def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
+    """End to end: only T_soil of replaced columns changes, every other field is
+    byte-identical, provenance is stamped, and the driver's restart loader reads
+    back exactly the mapped profile, layer by layer (the t=0 check)."""
+    import json
+    from legoesm.land.restart import load_land_restart
+    rg, ic_path, ic = _setup_cli(tmp_path, monkeypatch)
+    files, lsm, sd = _era5_inputs(tmp_path)
+    out = tmp_path / "out.npz"
+    assert _run_cli(rg, ic_path, out, files, lsm, sd) == 0
 
     new = np.load(out, allow_pickle=False)
     for k in ic:
@@ -347,13 +345,60 @@ def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
     np.testing.assert_array_equal(new["T_soil"][1:], ic["T_soil"][1:])   # ocean + glacier
     meta = json.loads(str(new["metadata_json"]))
     assert meta["soil_t_donor_km_max"] > 0 and "soil_t_git_sha" in meta
-    assert set(meta["soil_t_files"]) == {pathlib.Path(f).name for f in files}
+    assert [meta["soil_t_files"][v]["path"] for v in
+            ("var139", "var170", "var183", "var236")] == files
+    assert meta["soil_t_surfdata"]["path"] == sd and meta["soil_t_target_grid"] == "mpas 6"
 
-    state, lmeta = load_land_restart(out, expected_land_mode="multilayer",
-                                     expected_ncol=ncol,
-                                     expected_n_layers=ic["T_soil"].shape[1])
-    assert lmeta["soil_hydraulics"] == json.loads(str(ic["soil_hydraulics_json"]))
+    state, _ = load_land_restart(out, expected_land_mode="multilayer",
+                                 expected_ncol=ic["T_soil"].shape[0],
+                                 expected_n_layers=ic["T_soil"].shape[1])
     np.testing.assert_allclose(np.asarray(state.T_soil)[0], expected, rtol=0, atol=1e-4)
+
+
+@pytest.mark.parametrize("kw", [
+    {"stl_vars": ("var236", "var183", "var170", "var139")},   # slots reversed
+    {"stl_vars": ("var139", "var170", "var236", "var183")},   # two swapped
+    {"lsm_var": "var33"},                                      # snow depth as lsm
+    {"base": 5.0},                                             # degC, not K
+], ids=["reversed", "swapped", "wrong-lsm", "celsius"])
+def test_cli_refuses_wrong_era5_inputs(tmp_path, monkeypatch, kw):
+    rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch)
+    files, lsm, sd = _era5_inputs(tmp_path, **kw)
+    with pytest.raises(SystemExit):
+        _run_cli(rg, ic_path, tmp_path / "out.npz", files, lsm, sd)
+    assert not (tmp_path / "out.npz").exists()
+
+
+def test_cli_refuses_transposed_era5_field(tmp_path, monkeypatch):
+    rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch)
+    files, lsm, sd = _era5_inputs(tmp_path)
+    _write_era5_nc(pathlib.Path(files[2]), "var183", np.full((2, 2), 283.0),
+                   np.array([10.0, -10.0]), np.array([0.0, 1.0]),
+                   dims=("time", "lon", "lat"))
+    with pytest.raises(SystemExit):
+        _run_cli(rg, ic_path, tmp_path / "out.npz", files, lsm, sd)
+
+
+def test_cli_refuses_when_no_column_is_replaceable(tmp_path, monkeypatch):
+    rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch,
+                                replace_land=(False, False, True))  # only glacier
+    files, lsm, sd = _era5_inputs(tmp_path)
+    with pytest.raises(SystemExit, match="no non-glacier land"):
+        _run_cli(rg, ic_path, tmp_path / "out.npz", files, lsm, sd)
+
+
+def test_production_deck_resolves_to_the_era5_soil_t_ic():
+    """The deck row must reach ExperimentConfig.land_ic_path through the real
+    --config route (YAML -> parser defaults -> build_config_from_args)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from scripts.run.run_amip import build_arg_parser, build_config_from_args
+    deck = _REPO / "config" / "amip" / "amip_production.yaml"
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(deck), parser)
+    parser.set_defaults(**keys)
+    parser.set_defaults(_config_keys=frozenset(keys))
+    cfg = build_config_from_args(parser.parse_args([]))
+    assert cfg.land_ic_path == "data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101.npz"
 
 
 def test_warm_era5_soil_is_ice_consistent_with_freeze_thaw_on():

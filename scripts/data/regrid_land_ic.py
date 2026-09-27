@@ -71,6 +71,11 @@ _DROPPED_FIELDS = ("soil_hydraulics_column_sig",)
 _ERA5_SOIL_BOUNDS_M = (0.0, 0.07, 0.28, 1.0, 2.89)
 _ERA5_LAND_LSM_MIN = 0.5
 _DONOR_FAR_KM = 100.0
+# cdo names a GRIB field varNNN after its parameter id: stl1..stl4, lsm.
+_ERA5_STL_VARS = ("var139", "var170", "var183", "var236")
+_ERA5_LSM_VAR = "var172"
+# Refuse a soil temperature outside this range [K]: catches degC or a wrong param.
+_ERA5_STL_RANGE_K = (180.0, 340.0)
 
 
 def overlap_weights(soil_dz, bounds=_ERA5_SOIL_BOUNDS_M) -> np.ndarray:
@@ -166,14 +171,20 @@ def _land_and_glacier(surfdata: str, grid, ncol: int):
     return frac > 0.0, np.asarray(glacier_mask(gsd)).ravel()
 
 
-def _era5_field(path):
-    """(values (n,), lat_rad (n,), lon_rad (n,), times) of a one-step ERA5 nc."""
+def _era5_field(path, var):
+    """(values (n,), lat_rad (n,), lon_rad (n,), times) of a one-step ERA5 nc.
+
+    ``var`` is the cdo name the file must carry (varNNN = GRIB param id), so a
+    file in the wrong slot is refused instead of permuting the profile.
+    """
     import xarray as xr
     ds = xr.open_dataset(path)
     names = [k for k in ds.data_vars if k.startswith("var")]
-    if len(names) != 1:
-        raise SystemExit(f"{path}: expected one varNNN field, got {names}.")
-    a = ds[names[0]]
+    if names != [var]:
+        raise SystemExit(f"{path}: expected field {var}, got {names}.")
+    a = ds[var]
+    if a.dims[-2:] != ("lat", "lon"):
+        raise SystemExit(f"{path}: expected (..., lat, lon) dims, got {a.dims}.")
     if a.size != ds.sizes["lat"] * ds.sizes["lon"]:
         raise SystemExit(f"{path}: expected ONE time step on one level.")
     lat, lon = np.meshgrid(np.deg2rad(ds["lat"].values),
@@ -207,8 +218,8 @@ def main_era5_soil_t(args) -> int:
     land, glacier = _land_and_glacier(args.surfdata, grid, ncol)
     replace = land & ~glacier
 
-    fields = [_era5_field(f) for f in args.era5_soil_t]
-    lsm, llat, llon, _ = _era5_field(args.era5_lsm)
+    fields = [_era5_field(f, v) for f, v in zip(args.era5_soil_t, _ERA5_STL_VARS)]
+    lsm, llat, llon, _ = _era5_field(args.era5_lsm, _ERA5_LSM_VAR)
     glat, glon = fields[0][1], fields[0][2]
     for _, a, o, _ in fields[1:] + [(None, llat, llon, None)]:
         if not (np.array_equal(a, glat) and np.array_equal(o, glon)):
@@ -219,6 +230,12 @@ def main_era5_soil_t(args) -> int:
     stl = np.stack([f[0] for f in fields])
     if not np.all(np.isfinite(stl)):
         raise SystemExit("ERA5 soil temperature has non-finite values; refusing.")
+    lo, hi = _ERA5_STL_RANGE_K
+    if stl.min() < lo or stl.max() > hi:
+        raise SystemExit(f"ERA5 soil temperature spans {stl.min():.1f}-"
+                         f"{stl.max():.1f} K, outside {lo}-{hi} K; refusing.")
+    if not replace.any():
+        raise SystemExit("no non-glacier land column to replace; wrong surfdata?")
 
     T, dist = era5_soil_temperature(src["T_soil"], src["soil_dz"], lat, lon,
                                     replace, glat, glon, stl,
@@ -240,8 +257,12 @@ def main_era5_soil_t(args) -> int:
     meta.update({
         "soil_t_source": "ERA5 stl1-4 (GRIB params 139,170,183,236)",
         "soil_t_time": list(times.pop()),
-        "soil_t_files": {pathlib.Path(f).name: md5(f) for f in args.era5_soil_t},
-        "soil_t_lsm": {pathlib.Path(args.era5_lsm).name: md5(args.era5_lsm)},
+        "soil_t_files": {v: {"path": str(f), "md5": md5(f)}
+                         for f, v in zip(args.era5_soil_t, _ERA5_STL_VARS)},
+        "soil_t_lsm": {_ERA5_LSM_VAR: {"path": str(args.era5_lsm),
+                                       "md5": md5(args.era5_lsm)}},
+        "soil_t_surfdata": {"path": str(args.surfdata), "md5": md5(args.surfdata)},
+        "soil_t_target_grid": f"{args.target_grid} {args.target_resolution}",
         "soil_t_from_ic": pathlib.Path(args.source).name,
         "soil_t_from_ic_md5": md5(args.source),
         "soil_t_choices": (
