@@ -2444,8 +2444,14 @@ def run(
                 lateral_viscosity=cfg.lateral_viscosity._replace(A_h=0.0)
             ),
             "tracer_isoneutral_laplacian": cfg._replace(gm_redi=None),
+            # This synthetic arm removes the TKE producer wholesale.  Its GM
+            # consumer therefore cannot request the production TKE-carried
+            # step-entry N2 field; select the arm's explicit recomputation
+            # counterfactual instead of relying on a silent fallback.
             "tke_evd_background_identity": cfg._replace(
-                physics=None, A_v=1.0e-4, K_v=0.0
+                physics=None, A_v=1.0e-4, K_v=0.0,
+                gm_redi=cfg.gm_redi._replace(
+                    slope_n2_evaluation="recompute"),
             ),
             "two_band_shortwave": cfg._replace(
                 physics=cfg.physics._replace(shortwave_penetration=None)
