@@ -412,3 +412,43 @@ it was run: the padding question and the angle-definition question are
 different questions, and the answer above separates them.
 
 ## Gate results
+
+### The certified cards did not move, shown by construction
+
+Rather than assert it, the resolved CONFIG and the resolved INITIAL STATE of
+every card were fingerprinted in two worktrees — this lane's pre-fix tip
+`c09a9e111` and the tip of this round — and diffed field by field (every
+NamedTuple leaf by value, every array by SHA-256 of its bytes).
+
+| card | keys before -> after | difference |
+|---|---|---|
+| `GYRE-zco` | 611 -> 614 | the three NEW config fields only, all True |
+| `LOCK_EXCHANGE-zco` | 235 -> 236 | the new barotropic field only, True |
+| `OVERFLOW-zps` | 235 -> 236 | the new barotropic field only, True |
+| DINO `nemo_dino_kamm` | 930 -> 935 | the new fields only, all True |
+| DINO `nemo_dino_kamm_mlf` | 930 -> 935 | the new fields only, all True |
+| DINO `legoesm_default` | 930 -> 935 | new fields all False, and `uu_b`/`vv_b` go from a zero `(30,9)`/`(31,8)` array to None |
+| DINO `nemo_paper` | 930 -> 935 | same as `legoesm_default` |
+
+No config value CHANGED on any card, and no state array changed on any NEMO
+card. The new fields' values on the NEMO cards select exactly the arms those
+cards were already taking, so the GYRE certified ladder is unchanged by
+construction: day-30/240/360 T3D RMS
+`2.3276772050683987e-06`, `6.5861718814795174e-05`,
+`2.6709923853294689e-03 K`, with kt2 T/S/U/V
+`1.4210854715202004e-14`, `2.1316282072803006e-14`,
+`8.326672684688674e-17`, `9.714451465470120e-17` and kt3 T/S
+`4.9403105251144552e-07`, `4.0085410546453204e-08`.
+
+The only card whose inputs DO move is ORCA2-zps (its mixing-length floor, see
+decision D1) and the ORCA1 OMIP card (its anchor floor and mask, see D3); both
+are stated as behaviour changes rather than carried silently.
+
+INSTRUMENT NOTE, because the first run of this probe was wrong: hashing a
+`Field` wrapper with `np.asarray` yields a 0-d object array whose bytes are a
+POINTER, so every state row reported "changed" on the first pass. The probe
+descends into `Field.data` now, and the corrected run reports the real array
+shapes and dtypes (e.g. GYRE `state.T` is `(22, 32, 30) float64`). The first
+output was discarded, not reported.
+
+### Batteries
