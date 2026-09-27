@@ -206,15 +206,22 @@ def diagnose_blowup(
                         non-finite value while the rest of the adjoint is small,
                         so this points at a kernel returning ``NaN``/``inf`` in
                         its own right.
-    ``"unclassified"``  a failure with no reference to judge amplitude against.
+    ``"unclassified"``  a failure with no reference to judge amplitude against,
+                        or one where NO finite leaf survives (nothing left to
+                        compare, so a total overflow is not mislabelled).
     """
     bad = [v for v, ok in report.values() if not ok]
     if not bad:
         return "finite"
     if reference_max is None or not (reference_max > 0.0):
         return "unclassified"
-    finite_max = max((v for v, ok in report.values() if ok), default=0.0)
-    return "growth" if finite_max > growth_factor * reference_max else "kernel"
+    finite = [v for v, ok in report.values() if ok]
+    if not finite:
+        # Every leaf is non-finite: there is no surviving amplitude to judge,
+        # and "kernel" would have been reached only because max() of nothing
+        # defaulted to zero -- a total overflow must not be labelled a kernel.
+        return "unclassified"
+    return "growth" if max(finite) > growth_factor * reference_max else "kernel"
 
 
 def grad_max_norm(report: dict[str, tuple[float, bool]]) -> float:
