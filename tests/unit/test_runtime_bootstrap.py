@@ -605,3 +605,19 @@ class TestCubedSphereLevelFallbackBootstrap:
                 n_devices=4,
                 allow_level_fallback=False,
             )
+
+
+@pytest.mark.parametrize("precision,expected", [
+    ({}, "fp32"),
+    ({"dynamics": "float64"}, "fp64"),
+    ({"dynamics": "float32", "conservation": "float64"}, "mixed"),
+    ({"dynamics": "float32"}, "fp32"),
+    ({"mode": "fp32", "dynamics": "float64"}, "fp32"),
+])
+def test_yaml_precision_honours_per_component_keys(precision, expected):
+    """DEFAULT_CONFIG supplies no precision mode, so a per-component request is
+    not overridden by a default mode; an explicit mode still wins."""
+    from legoesm.config import Config
+    from legoesm.runtime.config import precision_mode_from_yaml_config
+    cfg = Config.from_dict({"hardware": {"precision": precision}})
+    assert precision_mode_from_yaml_config(cfg) == expected

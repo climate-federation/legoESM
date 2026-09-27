@@ -245,11 +245,11 @@ DEFAULT_CONFIG = {
         "path": "output/",
     },
     "hardware": {
+        # No precision mode/dynamics/conservation default: a default "mode"
+        # would override a user's per-component request.  Unset resolves to
+        # fp32 (runtime.config.precision_mode_from_yaml_config).
         "precision": {
-            "mode": "fp32",  # fp32, fp64, mixed, mixed_fp64_storage
-            "dynamics": "float32",
             "ml": "bfloat16",
-            "conservation": "float64",
         },
         "devices": "auto",
         "parallelism": {
