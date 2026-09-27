@@ -131,8 +131,7 @@ def _jax_source_ordered(kbb, krhs, r3bb, r3mm, r3aa, tmask, stage_dt):
 
 
 def _score2(actual: np.ndarray, expected: np.ndarray, mask2: np.ndarray) -> dict[str, object]:
-    mask3 = np.broadcast_to(mask2[..., None], actual.shape)
-    return handoff.bit_score(actual, expected, mask3)
+    return handoff.bit_score(actual, expected, mask2)
 
 
 def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, object]:
