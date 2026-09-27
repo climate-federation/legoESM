@@ -124,22 +124,23 @@ def _admit_hpg(root: Path, family_root: Path) -> tuple[list[dict], dict]:
 
 
 def _literal_from_inputs(
-    inputs: dict[str, np.ndarray], g: float
+    inputs: dict[str, np.ndarray], g: float, grid=None
 ) -> dict[str, np.ndarray]:
     import jax.numpy as jnp
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         nemo_hpg_sco_literal_cgrid,
     )
 
-    r1_e1u = inputs["r1_e1u"]
-    r1_e2v = inputs["r1_e2v"]
-    dx_u = np.ones((r1_e1u.shape[0], r1_e1u.shape[1] + 1), np.float64)
-    dy_v = np.ones((r1_e2v.shape[0] + 1, r1_e2v.shape[1]), np.float64)
-    dx_u[:, 1:] = np.divide(
-        1.0, r1_e1u, out=np.ones_like(r1_e1u), where=r1_e1u != 0.0)
-    dy_v[1:, :] = np.divide(
-        1.0, r1_e2v, out=np.ones_like(r1_e2v), where=r1_e2v != 0.0)
-    grid = hpg_gate.LocalMetricGrid(jnp.asarray(dx_u), jnp.asarray(dy_v))
+    if grid is None:
+        r1_e1u = inputs["r1_e1u"]
+        r1_e2v = inputs["r1_e2v"]
+        dx_u = np.ones((r1_e1u.shape[0], r1_e1u.shape[1] + 1), np.float64)
+        dy_v = np.ones((r1_e2v.shape[0] + 1, r1_e2v.shape[1]), np.float64)
+        dx_u[:, 1:] = np.divide(
+            1.0, r1_e1u, out=np.ones_like(r1_e1u), where=r1_e1u != 0.0)
+        dy_v[1:, :] = np.divide(
+            1.0, r1_e2v, out=np.ones_like(r1_e2v), where=r1_e2v != 0.0)
+        grid = hpg_gate.LocalMetricGrid(jnp.asarray(dx_u), jnp.asarray(dy_v))
     values = tuple(np.asarray(value) for value in nemo_hpg_sco_literal_cgrid(
         jnp.asarray(inputs["rhd"]), jnp.asarray(inputs["e3w"]),
         jnp.asarray(inputs["gdept_z0"]), grid, g,
@@ -292,7 +293,8 @@ def run(
                 "recorded-replay plant did not fire")
 
     candidate_inputs = _candidate_inputs(card, state)
-    candidate_literal = _literal_from_inputs(candidate_inputs, g)
+    candidate_literal = _literal_from_inputs(
+        candidate_inputs, g, grid=card.recipe.grid)
     input_rows = {}
     for name in INPUT_ORDER[:-1]:
         candidate_pair = _support_pair(candidate_inputs[name], support_rows)[..., :30]
