@@ -1811,7 +1811,7 @@ def _projection(component: np.ndarray, endpoint: np.ndarray,
 
 
 def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
-                         expected_commit: str, *,
+                         expected_commit: str, *, expected_day240_rms: float,
                          immutable_lego_root: Path = DEFAULT_IMMUTABLE_GYRE_YEAR,
                          nemo_root: Path = YEAR_ROOT,
                          mesh_path: Path = DEFAULT_MESH) -> dict:
@@ -1861,9 +1861,11 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
     nemo_end = np.asarray(nemo240["T"], dtype=np.float64)
     endpoint = lego_end - nemo_end
     endpoint_rms = _rms(endpoint, wet3)
-    require(endpoint_rms == 1.6446741930292448e-2,
-            f"day-240 headline {endpoint_rms:.17e} differs from frozen "
-            "1.6446741930292448e-2 K")
+    require(np.isfinite(expected_day240_rms) and expected_day240_rms >= 0.0,
+            "--expect-day240-rms must be finite and non-negative")
+    require(endpoint_rms == expected_day240_rms,
+            f"day-240 headline {endpoint_rms:.17e} differs from explicit "
+            f"expected value {expected_day240_rms:.17e} K")
     immutable030 = _load_npz(
         Path(immutable_lego_root) / "lego_seed0_year/day030.npz")
     nemo030 = year._load_nemo(nemo_root, 0, 30, nlev)
@@ -2025,6 +2027,7 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
         "immutable_lego_root": str(immutable_lego_root),
         "nemo_root": str(nemo_root),
         "headline": {"day240_T3D_rms_K": endpoint_rms,
+                     "expected_day240_T3D_rms_K": expected_day240_rms,
                      "day30_T3D_rms_K": day30_rms},
         "endpoint_controls": {
             "immutable_cells_unequal": immutable_mismatches,
@@ -4137,6 +4140,9 @@ def main(argv=None) -> int:
     parser.add_argument("--process-budget", type=Path, default=None,
                         help="score this NEMO process root against "
                              "--lego-process-record")
+    parser.add_argument("--expect-day240-rms", type=float, default=None,
+                        help="exact required day-240 T3D RMS for "
+                             "--process-budget")
     parser.add_argument("--vertical-record", type=Path, default=None,
                         help="validate a Round-125 tra_zdf internal-record "
                              "root")
@@ -4968,9 +4974,13 @@ def main(argv=None) -> int:
                 "--process-budget needs --lego-process-record")
         require(args.expect_commit is not None,
                 "--process-budget needs --expect-commit")
+        require(args.expect_day240_rms is not None,
+                "--process-budget needs --expect-day240-rms")
         report = score_process_budget(
             args.process_budget, args.lego_process_record,
-            args.expect_commit, immutable_lego_root=args.immutable_lego_root,
+            args.expect_commit,
+            expected_day240_rms=args.expect_day240_rms,
+            immutable_lego_root=args.immutable_lego_root,
             nemo_root=args.nemo_root, mesh_path=args.mesh)
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
