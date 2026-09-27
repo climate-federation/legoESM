@@ -1659,6 +1659,15 @@ class ModelDriver:
                     if getattr(template, f) is not None
                     and f not in _LAND_ML_CACHE_FIELDS}
         got = set(popped) - set(_LAND_ML_CACHE_FIELDS)
+        _snow_layer_fields = {"snow_ice_layers", "snow_liq_layers",
+                              "snow_T_layers", "snow_rho_layers"}
+        if got != expected and (expected - got) == _snow_layer_fields:
+            raise ValueError(
+                "This checkpoint was written with the BULK snowpack but the run "
+                "selects land_snow_scheme='layered'; it carries no snow-layer "
+                "state to restart from. Restart with land_snow_scheme: bulk, or "
+                "start the land from a land IC (the pack is then seeded from "
+                "its snow water).")
         if got != expected:
             raise ValueError(
                 "land_ml checkpoint field set does not match the current "
@@ -3367,6 +3376,13 @@ class ModelDriver:
         _ft = bool(self.config.land_soil_freeze_thaw)
         cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=_ft))
         logger.info("  land soil freeze/thaw: %s", "ON" if _ft else "off")
+        # Snowpack scheme + snow emissivity, same placement (after the bake).
+        cfg = cfg._replace(
+            snow_scheme=str(self.config.land_snow_scheme),
+            snow_column=cfg.snow_column._replace(
+                emissivity_snow=float(self.config.land_snow_emissivity)))
+        logger.info("  land snowpack: %s (snow emissivity %.3f)",
+                    cfg.snow_scheme, cfg.snow_column.emissivity_snow)
         if _ft and getattr(self.config, "land_calibrated_physics", False):
             logger.warning("  land soil freeze/thaw ON with the calibrated land "
                            "tables, which were fitted with it OFF")
@@ -3701,6 +3717,13 @@ class ModelDriver:
             # (fixes the pytree structure), then cast the array leaves to the
             # run's storage precision (the restart deserialises float64).
             _merged = merge_land_restart_into_template(_ic_state, _template)
+            # A land IC without snow layers (bulk spin-up) seeds the layered pack
+            # from its SWE — the template's layers were built from the
+            # cold-start SWE and would not match the grafted snow_depth.
+            if (cfg.snow_scheme == "layered"
+                    and getattr(_ic_state, "snow_T_layers", None) is None):
+                from legoesm.land.multilayer_land import seed_snow_layers
+                _merged = seed_snow_layers(_merged, cfg)
             # A REGRIDDED state's matric potential is not this run's.  The
             # Richards step evolves potential directly, but potential and water
             # content are tied through each column's own soil-texture retention

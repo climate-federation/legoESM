@@ -70,6 +70,9 @@ _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     # Intercepted canopy-water store (present iff interception is enabled); real
     # mass, so it must round-trip or the warm start leaks it.
     "W_canopy",
+    # Layered snowpack (present iff snow_scheme == "layered"): the pack's water,
+    # enthalpy and density, which snow_depth alone cannot rebuild.
+    "snow_ice_layers", "snow_liq_layers", "snow_T_layers", "snow_rho_layers",
 )
 
 

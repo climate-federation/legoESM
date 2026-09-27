@@ -1,24 +1,15 @@
 """Multi-layer snowpack column (energy- and mass-conserving).
 
-**NOT YET INTEGRATED** — this module is the validated multi-layer snow *core*
-for replacing the single-layer bulk SWE budget (``snow_budget.update_snow``)
-used by the land models.  It is not yet imported by any production path; wire
-it in by:
-
-1. adding a prognostic :class:`SnowColumnState` (per-layer ``swe_ice``,
-   ``swe_liq``, ``T``, ``density``; shape ``(..., n_snow_layers)``) to
-   :class:`legoesm.land.state.MultiLayerLandState`, with defaults so existing
-   constructors are unaffected;
-2. gating it behind a ``config.snow_scheme == "multilayer"`` branch in
-   ``multilayer_land.step_multilayer_land`` — replacing the single-node
-   ``update_snow`` call, threading the surface energy flux ``Q_top`` into
-   ``step_snow_column`` and the snow<->soil conductive flux ``G_bottom`` into
-   the top soil layer so the coupled surface-energy balance still closes;
-3. routing ``drainage`` (liquid leaving the pack base, at ``T_freeze``) into
-   the soil infiltration / bucket, and exposing the pack-top temperature as the
-   skin temperature for the bulk-flux and albedo blocks;
-4. adding ``--multilayer-snow`` to ``run_lmip`` + a round-trip test, and a
-   snow-column conservation test to the multilayer land suite.
+Used by the multilayer land when ``MultiLayerLandConfig.snow_scheme ==
+"layered"``: the land step accumulates snowfall and rain into the pack
+(``snow_add_mass``), remaps and compacts it (``snow_remap_compact``), solves the
+pack and the soil as ONE implicit heat-conduction column
+(``soil_thermal.solve_snow_soil_thermal``, fed by ``snow_thermal_props``), then
+re-equilibrates phase and percolates liquid (``snow_phase_and_percolate``).
+``step_snow_column`` is the stand-alone composition with a PRESCRIBED base flux
+(kept for the module's own conservation tests; explicit snow-soil coupling is
+unstable for a thin pack at a 30-min land step, which is why the land model
+does not use it).
 
 Physics (fixed ``n_layers`` equal-SWE-mass layers; the total pack SWE is
 remapped to ``n_layers`` equal-mass layers each step, a conservative 1-D
@@ -71,6 +62,7 @@ _TF = constants.T_freeze                # freezing point [K]
 _LF = constants.L_f                     # latent heat of fusion [J/kg]
 _EPS = 1e-12                            # generic small floor
 _DZ_HALF_MIN = 1e-4                     # [m] min interface distance (empty-pack conductance bound)
+_COEFF_MIN = 1e-6                       # [W/m^2/K] floor on every inter-layer conductance (no layer decouples)
 
 
 class SnowColumnConfig(NamedTuple):
@@ -82,6 +74,15 @@ class SnowColumnConfig(NamedTuple):
     irreducible_liq_frac: float = 0.05   # liquid held per unit ice mass [-]
     k_conductivity_exponent: float = 2.0  # k ~ (rho/rho_ref)^exp (Sturm 1997)
     min_pack_swe: float = 1e-8           # [kg/m^2] below which the pack is empty
+    # --- coupling to the land surface (used by multilayer_land, snow_scheme="layered") ---
+    # Broadband thermal-IR emissivity of snow: observed ~0.97-0.99 (Warren 1982;
+    # Hori et al. 2006, fine grains near 0.99); CLM5 fixes 0.97.  Tunable within
+    # those bounds, default mid-range of the observations.
+    emissivity_snow: float = 0.98
+    # Snow-covered fraction f = SWE / (SWE + swe_half): SWE at half cover [kg/m^2].
+    swe_half_kg_m2: float = 10.0
+    # Density of a pack seeded from a bulk SWE (cold start / land IC) [kg/m^3].
+    seed_density: float = 250.0
 
 
 __param_spec__ = {
@@ -91,6 +92,7 @@ __param_spec__ = {
             "compaction_timescale_s": "numerics: density-relaxation e-folding time",
             "k_conductivity_exponent": "material: Sturm (1997) conductivity exponent",
             "min_pack_swe": "numerics: empty-pack floor",
+            "seed_density": "initial condition: density of a pack seeded from bulk SWE",
         },
         "params": {
             "rho_snow_fresh": {
@@ -107,6 +109,19 @@ __param_spec__ = {
                 "units": "1", "bounds": (0.0, 0.15), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "closure",
                 "reference": "irreducible liquid water holding capacity (CLM5)", "shape": None,
+            },
+            "emissivity_snow": {
+                "units": "1", "bounds": (0.96, 0.995), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiative",
+                "reference": "snow thermal-IR emissivity (Warren 1982 Rev. Geophys. 20:67; "
+                             "Hori et al. 2006 Remote Sens. Environ. 100:486)",
+                "shape": None,
+            },
+            "swe_half_kg_m2": {
+                "units": "kg/m^2", "bounds": (2.0, 50.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "SWE of half snow cover (cf. CLM5 frac_sno; Niu & Yang 2007)",
+                "shape": None,
             },
         },
     },
@@ -222,94 +237,106 @@ def _thickness_and_conductivity(swe_ice, swe_liq, density, config):
     return dz, k
 
 
-def step_snow_column(
-    state: SnowColumnState,
-    precip_snow: jnp.ndarray,
-    T_air: jnp.ndarray,
-    Q_top: jnp.ndarray,
-    G_bottom: jnp.ndarray,
-    dt: float,
-    config: SnowColumnConfig = SnowColumnConfig(),
-):
-    """Advance the multi-layer snowpack one step.
+def snow_fraction(swe, config: SnowColumnConfig = SnowColumnConfig()):
+    """Snow-covered fraction ``SWE / (SWE + swe_half)`` in [0, 1) — smooth, so the
+    surface fluxes stay continuous as a pack appears or melts out."""
+    swe = jnp.maximum(swe, 0.0)
+    return swe / (swe + config.swe_half_kg_m2)
 
-    Parameters
-    ----------
-    state : SnowColumnState
-    precip_snow : array (...,)   snowfall rate [kg/m^2/s]
-    T_air : array (...,)         air temperature [K] (fresh-snow temperature)
-    Q_top : array (...,)         net surface energy flux INTO the pack top [W/m^2]
-    G_bottom : array (...,)      conductive flux from the pack base INTO the
-                                 soil [W/m^2, positive downward]
-    dt : float
-    config : SnowColumnConfig
 
-    Returns
-    -------
-    new_state : SnowColumnState
-    drainage : array (...,)        liquid water leaving the pack base [kg/m^2]
-                                   this step (route to soil infiltration).
-    drainage_heat : array (...,)   enthalpy of that drained water relative to
-                                   T_freeze [J/m^2] (= drainage*(c_liq*(T-Tf) +
-                                   L_f); route to the soil so energy closes).
+def seed_snow_state(swe, T_top, config: SnowColumnConfig = SnowColumnConfig()):
+    """A pack holding ``swe`` [kg/m^2] as ICE in equal-mass layers at
+    ``min(T_top, T_freeze)`` and ``seed_density`` (cold start / land IC)."""
+    n = config.n_layers
+    swe = jnp.maximum(jnp.asarray(swe), 0.0)
+    m = jnp.broadcast_to((swe / n)[..., None], swe.shape + (n,))
+    T = jnp.broadcast_to(jnp.minimum(jnp.asarray(T_top), _TF)[..., None], m.shape)
+    return SnowColumnState(swe_ice=m, swe_liq=jnp.zeros_like(m), T=T,
+                           density=jnp.full_like(m, config.seed_density))
+
+
+def snow_add_mass(state: SnowColumnState, snowfall, T_snow, rain=None, T_rain=None,
+                  config: SnowColumnConfig = SnowColumnConfig()):
+    """Add snowfall (ice at ``min(T_snow, T_freeze)``) and rain (liquid at
+    ``max(T_rain, T_freeze)``) [kg/m^2] to the TOP layer, as mass + enthalpy, and
+    re-equilibrate it (rain refreezes into a cold pack, releasing ``L_f``).
+
+    Enthalpy added (relative to ice at ``T_freeze``):
+    ``snowfall*c_ice*(T_s - Tf) + rain*(c_liq*(T_r - Tf) + L_f)``.
     """
     swe_ice, swe_liq, T, density = state
-    n = swe_ice.shape[-1]                                     # static from shape (JIT-safe)
-
-    # --- 1. Accumulation: fresh snow (ice at min(T_air,T_freeze)) into TOP ---
-    snowfall = precip_snow * dt                              # [kg/m^2]
-    T_fresh = jnp.minimum(T_air, _TF)
-    fresh_enth = snowfall * _C_ICE * (T_fresh - _TF)         # enthalpy added [J/m^2]
-    # Add mass + enthalpy to the top layer, then re-derive (ice,liq,T).
-    # Fresh snow is ICE at T_fresh, so it adds only sensible enthalpy
-    # c_ice*(T_fresh-T_freeze) (no latent term — it is not liquid).
-    top_w = swe_ice[..., 0] + swe_liq[..., 0] + snowfall
-    top_H = _enthalpy(swe_ice[..., 0], swe_liq[..., 0], T[..., 0]) + fresh_enth
+    H_add = snowfall * _C_ICE * (jnp.minimum(T_snow, _TF) - _TF)
+    w_add = snowfall
+    if rain is not None:
+        H_add = H_add + rain * (_C_LIQ * (jnp.maximum(T_rain, _TF) - _TF) + _LF)
+        w_add = w_add + rain
+    old_top = swe_ice[..., 0] + swe_liq[..., 0]
+    top_w = old_top + w_add
+    top_H = _enthalpy(swe_ice[..., 0], swe_liq[..., 0], T[..., 0]) + H_add
     ti, tl, tt = _phase_from_w_H(top_w, top_H)
-    swe_ice = swe_ice.at[..., 0].set(ti)
-    swe_liq = swe_liq.at[..., 0].set(tl)
-    T = T.at[..., 0].set(tt)
-    # Fresh-snow density mixing (mass-weighted) for the top layer.
-    old_top_mass = state.swe_ice[..., 0] + state.swe_liq[..., 0]
-    density = density.at[..., 0].set(
-        jnp.where(snowfall > _EPS,
-                  (old_top_mass * density[..., 0] + snowfall * config.rho_snow_fresh)
-                  / jnp.maximum(old_top_mass + snowfall, _EPS),
-                  density[..., 0])
-    )
+    # Fresh-snow density mixing (mass-weighted) for the top layer; rain does not
+    # change the ice-matrix density.
+    rho_top = jnp.where(snowfall > _EPS,
+                        (old_top * density[..., 0] + snowfall * config.rho_snow_fresh)
+                        / jnp.maximum(old_top + snowfall, _EPS),
+                        density[..., 0])
+    return SnowColumnState(swe_ice=swe_ice.at[..., 0].set(ti),
+                           swe_liq=swe_liq.at[..., 0].set(tl),
+                           T=T.at[..., 0].set(tt),
+                           density=density.at[..., 0].set(rho_top))
 
-    # --- 2. Equal-mass remap (static N, conserves mass + enthalpy) ---
-    swe_ice, swe_liq, T, density = _remap_equal_mass(swe_ice, swe_liq, T, density)
 
-    # --- 3. Compaction: density relaxes toward rho_snow_max ---
+def snow_remap_compact(state: SnowColumnState, dt,
+                       config: SnowColumnConfig = SnowColumnConfig()):
+    """Equal-mass remap (conserves water + enthalpy), then density relaxation
+    toward ``rho_snow_max``."""
+    swe_ice, swe_liq, T, density = _remap_equal_mass(*state)
     density = density + (config.rho_snow_max - density) * jnp.clip(
         dt / config.compaction_timescale_s, 0.0, 1.0)
     density = jnp.clip(density, config.rho_snow_fresh, config.rho_snow_max)
+    return SnowColumnState(swe_ice=swe_ice, swe_liq=swe_liq, T=T, density=density)
 
-    # --- 4. Thermal diffusion (implicit backward-Euler) ---
-    dz, k = _thickness_and_conductivity(swe_ice, swe_liq, density, config)
-    C = jnp.maximum(_sensible_hc(swe_ice, swe_liq), _EPS)     # full ice+liquid HC
+
+def snow_thermal_props(state: SnowColumnState,
+                       config: SnowColumnConfig = SnowColumnConfig()):
+    """Pack thermal properties for an implicit conduction solve.
+
+    Returns ``(C, coeff, r_base)``: per-layer sensible heat capacity per unit area
+    [J/m^2/K] (floored so an empty layer stays non-singular), the conductance
+    between adjacent layers [W/m^2/K] (harmonic-mean k over the node spacing,
+    floored at ``_COEFF_MIN`` so no layer ever decouples), and the thermal
+    resistance from the base node to the pack bottom ``dz_last / (2 k_last)``
+    [m^2 K/W] — the caller adds its own half-layer to form the snow-soil series
+    conductance.
+    """
+    dz, k = _thickness_and_conductivity(state.swe_ice, state.swe_liq, state.density, config)
+    C = jnp.maximum(_sensible_hc(state.swe_ice, state.swe_liq), _EPS)
+    coeff = jnp.maximum(_interface_coeff(dz, k), _COEFF_MIN)
+    r_base = dz[..., -1] / (2.0 * k[..., -1])
+    return C, coeff, r_base
+
+
+def _interface_coeff(dz, k):
     dz_half = jnp.maximum(0.5 * (dz[..., :-1] + dz[..., 1:]), _DZ_HALF_MIN)
     k_half = 2.0 * k[..., :-1] * k[..., 1:] / (k[..., :-1] + k[..., 1:] + _EPS)
-    coeff = k_half / dz_half
-    diag = C / dt
-    diag = diag.at[..., 1:].add(coeff)
-    diag = diag.at[..., :-1].add(coeff)
-    sub = -coeff
-    sup = -coeff
-    rhs = C / dt * T
-    rhs = rhs.at[..., 0].add(Q_top)                          # surface flux INTO top
-    rhs = rhs.at[..., -1].add(-G_bottom)                     # base loses G_bottom to soil
-    a = jnp.pad(sub, [(0, 0)] * (sub.ndim - 1) + [(1, 0)])
-    c = jnp.pad(sup, [(0, 0)] * (sup.ndim - 1) + [(0, 1)])
-    T = thomas_solve(a, diag, c, rhs)
+    return k_half / dz_half
 
-    # --- 5. Phase change (enthalpy method): melt + refreeze per layer ---
+
+def snow_phase_and_percolate(state: SnowColumnState,
+                             config: SnowColumnConfig = SnowColumnConfig()):
+    """Enthalpy re-equilibration (melt + refreeze) of every layer at its solved
+    ``T``, then percolation of liquid beyond the irreducible holding capacity.
+
+    Returns ``(state, drainage [kg/m^2], drainage_heat [J/m^2])`` — the liquid
+    leaving the base and its enthalpy relative to ice at ``T_freeze``
+    (``drainage*(c_liq*(T-Tf) + L_f)``).
+    """
+    swe_ice, swe_liq, T, density = state
+    n = swe_ice.shape[-1]
     w = swe_ice + swe_liq
     H = _enthalpy(swe_ice, swe_liq, T)
     swe_ice, swe_liq, T = _phase_from_w_H(w, H)
 
-    # --- 6. Percolation + drainage (liquid carries its full enthalpy) ---
     # Scan top->bottom: excess liquid beyond the irreducible holding capacity
     # flows down and each receiving layer re-equilibrates.  Carry BOTH the
     # downward liquid MASS and its ENTHALPY, so above-freezing liquid transports
@@ -319,13 +346,11 @@ def step_snow_column(
         ice_i = jnp.take(swe_ice, i, axis=-1)
         liq_i = jnp.take(swe_liq, i, axis=-1)
         T_i = jnp.take(T, i, axis=-1)
-        # Receive the downward liquid flux (mass + enthalpy) and re-equilibrate.
         w_i = ice_i + liq_i + in_m
         H_i = _enthalpy(ice_i, liq_i, T_i) + in_H
         ice_i, liq_i, T_i = _phase_from_w_H(w_i, H_i)
-        # Drain liquid beyond the irreducible holding capacity; it leaves at the
-        # layer temperature T_i, carrying enthalpy c_liq*(T_i-Tf)+Lf per unit
-        # mass (removing liquid at T_i leaves the remainder's T_i unchanged).
+        # Liquid beyond the holding capacity leaves at the layer temperature T_i,
+        # carrying c_liq*(T_i-Tf)+Lf per unit mass.
         hold = config.irreducible_liq_frac * ice_i
         drain = jnp.maximum(liq_i - hold, 0.0)
         drain_H = drain * (_C_LIQ * (T_i - _TF) + _LF)
@@ -335,14 +360,44 @@ def step_snow_column(
     z = jnp.zeros(swe_ice.shape[:-1])
     (drainage, drainage_heat), (ice_s, liq_s, T_s) = jax.lax.scan(
         _perc, (z, z), jnp.arange(n))
-    swe_ice = jnp.moveaxis(ice_s, 0, -1)
-    swe_liq = jnp.moveaxis(liq_s, 0, -1)
-    T = jnp.moveaxis(T_s, 0, -1)
-    # ``drainage`` (mass) and ``drainage_heat`` (enthalpy relative to T_freeze)
-    # are the fluxes OUT of the base -> route the water AND its heat to the soil.
-
-    new_state = SnowColumnState(swe_ice=swe_ice, swe_liq=swe_liq, T=T, density=density)
+    new_state = SnowColumnState(swe_ice=jnp.moveaxis(ice_s, 0, -1),
+                                swe_liq=jnp.moveaxis(liq_s, 0, -1),
+                                T=jnp.moveaxis(T_s, 0, -1), density=density)
     return new_state, drainage, drainage_heat
+
+
+def step_snow_column(
+    state: SnowColumnState,
+    precip_snow: jnp.ndarray,
+    T_air: jnp.ndarray,
+    Q_top: jnp.ndarray,
+    G_bottom: jnp.ndarray,
+    dt: float,
+    config: SnowColumnConfig = SnowColumnConfig(),
+):
+    """Advance a STAND-ALONE pack one step with a prescribed base flux.
+
+    ``precip_snow`` snowfall rate [kg/m^2/s]; ``T_air`` fresh-snow temperature
+    [K]; ``Q_top`` net flux INTO the pack top and ``G_bottom`` conductive flux
+    from the base INTO the soil [W/m^2].  Returns ``(state, drainage [kg/m^2],
+    drainage_heat [J/m^2])``.  The land model couples the pack to the soil
+    implicitly instead (``soil_thermal.solve_snow_soil_thermal``).
+    """
+    state = snow_add_mass(state, precip_snow * dt, T_air, config=config)
+    state = snow_remap_compact(state, dt, config)
+    dz, k = _thickness_and_conductivity(state.swe_ice, state.swe_liq, state.density, config)
+    C = jnp.maximum(_sensible_hc(state.swe_ice, state.swe_liq), _EPS)
+    coeff = _interface_coeff(dz, k)
+    diag = C / dt
+    diag = diag.at[..., 1:].add(coeff)
+    diag = diag.at[..., :-1].add(coeff)
+    rhs = C / dt * state.T
+    rhs = rhs.at[..., 0].add(Q_top)                          # surface flux INTO top
+    rhs = rhs.at[..., -1].add(-G_bottom)                     # base loses G_bottom to soil
+    a = jnp.pad(-coeff, [(0, 0)] * (coeff.ndim - 1) + [(1, 0)])
+    c = jnp.pad(-coeff, [(0, 0)] * (coeff.ndim - 1) + [(0, 1)])
+    T = thomas_solve(a, diag, c, rhs)
+    return snow_phase_and_percolate(state._replace(T=T), config)
 
 
 def total_water(state: SnowColumnState) -> jnp.ndarray:

@@ -91,6 +91,13 @@ def test_freeze_thaw_flag_flows_to_config():
     assert cfg_on.land.thermal.enable_freeze_thaw is True
 
 
+def test_snow_scheme_flag_flows_to_config():
+    """--snow-scheme selects the land snowpack (default bulk)."""
+    assert build_config_from_args(_parse_args(["--lat", "45.0"])).land.snow_scheme == "bulk"
+    cfg = build_config_from_args(_parse_args(["--lat", "45.0", "--snow-scheme", "layered"]))
+    assert cfg.land.snow_scheme == "layered"
+
+
 def test_issue484_new_lmip_flags_flow_to_config():
     args = _parse_args([
         "--lat", "45.5",

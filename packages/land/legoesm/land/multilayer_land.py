@@ -44,7 +44,18 @@ from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import solve_soil_thermal
+from legoesm.land.soil_thermal import solve_snow_soil_thermal, solve_soil_thermal
+from legoesm.land.snow_budget import update_snow_age
+from legoesm.land.snow_column import (
+    SnowColumnState,
+    seed_snow_state,
+    snow_add_mass,
+    snow_fraction,
+    snow_phase_and_percolate,
+    snow_remap_compact,
+    snow_thermal_props,
+    total_water,
+)
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
     intercept_rain,
@@ -478,6 +489,40 @@ def _step_multilayer_land_impl(
     else:
         precip_snow_eff = forcing.precip_snow
 
+    # --- Layered snowpack (``snow_scheme == "layered"``, snow_column.py) ---
+    # Snowfall enters the pack at the START of the step, the pack is remapped and
+    # compacted, and the surface schemes see a skin temperature and a ground
+    # emissivity blended by the snow-covered fraction f = SWE/(SWE + swe_half).
+    # The pack and the soil are then solved as ONE implicit column (the canopy
+    # Picard callback below and the final solve), with f*G entering the pack top
+    # and (1-f)*G the soil top.
+    if config.snow_scheme not in ("bulk", "layered"):
+        raise ValueError(
+            f"Unknown MultiLayerLandConfig.snow_scheme {config.snow_scheme!r}; "
+            "expected 'bulk' or 'layered'.")
+    layered = config.snow_scheme == "layered"
+    if layered:
+        if bands is not None:
+            raise ValueError(
+                "snow_scheme='layered' is not supported with config.elev_bands "
+                "(the banded snowpack is a separate bulk scheme).")
+        if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+            raise ValueError(
+                "snow_scheme='layered' is not supported with the CLM-ML canopy "
+                "scheme (it runs its own soil/snow boundary).")
+        if state.snow_T_layers is None:
+            raise ValueError(
+                "snow_scheme='layered' needs the snow-layer state; build the state "
+                "with init_multilayer_land_state(config=...) or seed_snow_layers().")
+        scc = config.snow_column
+        pack = SnowColumnState(swe_ice=state.snow_ice_layers,
+                               swe_liq=state.snow_liq_layers,
+                               T=state.snow_T_layers, density=state.snow_rho_layers)
+        pack = snow_add_mass(pack, precip_snow_eff * dt, forcing.T_lowest, config=scc)
+        pack = snow_remap_compact(pack, dt, scc)
+        f_snow = snow_fraction(total_water(pack), scc)
+        T_surface = _snow_skin(pack, T_soil[:, 0], f_snow)
+
     # Smooth wind speed floor.
     wind_speed = jnp.sqrt(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2)
@@ -544,12 +589,26 @@ def _step_multilayer_land_impl(
     # Surface scheme dispatch
     # =================================================================
     canopy_state_new = None  # updated only by CLMMLCanopyConfig branch
+    _eps_ground = None       # layered: snow-blended ground emissivity (two-leaf)
+    if layered:
+        emissivity = f_snow * scc.emissivity_snow + (1.0 - f_snow) * emissivity
+        if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+            _eps_ground = (f_snow * scc.emissivity_snow
+                           + (1.0 - f_snow) * config.surface_scheme.epss)
     _alpha_applied = None    # set by the two-leaf branch: one albedo, absorbed + exported
     _lp_soil = None          # two-leaf: params with soil bands at start-of-step water
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
         # advances soil thermal tentatively between passes.
         def _soil_thermal_cb(G, dt_):
+            if layered:
+                # Tentative combined pack+soil solve; the SEB boundary is the
+                # snow-blended skin of the tentative column.
+                C_s, coeff_s, rb_s = snow_thermal_props(pack, scc)
+                T_s, T_g = solve_snow_soil_thermal(
+                    pack.T, C_s, coeff_s, rb_s, f_snow, T_soil, theta, grid,
+                    config.hydraulics, config.thermal, G, dt_)
+                return _snow_skin(pack._replace(T=T_s), T_g[:, 0], f_snow)
             T_tent = solve_soil_thermal(
                 T_soil, theta, grid,
                 config.hydraulics, config.thermal,
@@ -673,6 +732,7 @@ def _step_multilayer_land_impl(
                 # residual boundary for a trainable exp<1 (AD-safe; see above).
                 else _h_r_top * _S_top ** config.soil_evap_resistance_exp),
             soil_surface_relsat=_W1_top,
+            ground_emissivity=_eps_ground,
         )
     elif isinstance(config.surface_scheme, CLMMLCanopyConfig):
         # CLM-ML-JAX multilayer canopy scheme (Phase 3 implementation).
@@ -849,6 +909,19 @@ def _step_multilayer_land_impl(
         blow_subl = band_step.blow_subl        # (ncol,) blowing-snow sublimation [kg/m2/s]
         # Frozen glacier discharge + ablation ice meltwater both leave as runoff.
         cap_runoff = band_step.ice_runoff + ice_melt / dt
+    elif layered:
+        # Melt lives in the pack's enthalpy (after the final combined solve), so
+        # neither the bulk energy-limited melt nor its SEB sink applies here.
+        snow_new = total_water(pack)
+        snow_age_new = None          # set after the final solve
+        snow_melt = jnp.zeros_like(snow_new)
+        snow_bands_new = state.snow_bands
+        snow_age_bands_new = state.snow_age_bands
+        ice_bands_new = state.ice_bands
+        ice_melt = jnp.zeros_like(snow_new)
+        refreeze = jnp.zeros_like(snow_new)
+        blow_subl = jnp.zeros_like(snow_new)
+        cap_runoff = jnp.zeros_like(snow_new)
     else:
         snow_new, snow_age_new, snow_melt = update_snow(
             snow, snow_age, T_surface, precip_snow_eff, dt,
@@ -914,11 +987,19 @@ def _step_multilayer_land_impl(
 
     # --- Snowpack sublimation / frost (L_s), pack-limited ---
     snow_after_melt = snow_new
-    max_sublim = jnp.maximum(snow_after_melt / dt, 0.0)
+    # Layered: only the TOP layer's ice can sublimate this step (unmet demand
+    # returns to the ground heat flux through ``evap_excess_energy`` below).
+    max_sublim = jnp.maximum((pack.swe_ice[:, 0] if layered else snow_after_melt)
+                             / dt, 0.0)
     sublim_demand = snow_latent / constants.L_s
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
     snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
+    if layered:
+        # Sublimation removes / frost deposits top-layer ICE at that layer's
+        # temperature (its latent L_s is in the surface energy balance).
+        pack = pack._replace(swe_ice=pack.swe_ice.at[:, 0].set(
+            jnp.maximum(pack.swe_ice[:, 0] - sublim_actual * dt, 0.0)))
     if bands is not None:
         # Redistribute the aggregate sublimation/deposition across bands (preserve the
         # band distribution + aggregate mass); empty-pack deposition (frost) spreads
@@ -970,6 +1051,14 @@ def _step_multilayer_land_impl(
         # negative "rain" (numerical / refreeze deficit) so the column budget is
         # unchanged in that edge case.
         infil_rain = _throughfall + jnp.minimum(precip_rain, 0.0)
+    if layered:
+        # Rain-on-snow: the snow-covered fraction of the throughfall enters the
+        # pack top as liquid at max(T_air, T_freeze), carrying its enthalpy
+        # (it refreezes into a cold pack, releasing L_f); the rest infiltrates.
+        rain_pack = f_snow * jnp.maximum(infil_rain, 0.0) * dt
+        pack = snow_add_mass(pack, 0.0, forcing.T_lowest, rain=rain_pack,
+                             T_rain=forcing.T_lowest, config=scc)
+        infil_rain = infil_rain - rain_pack / dt
     # --- Soil / plant-water evaporation (L_v), water-limited ---
     soil_evap_demand = soil_latent / constants.L_v
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
@@ -1064,6 +1153,29 @@ def _step_multilayer_land_impl(
         # transpiration sink; wet_evap <= evap_transp keeps this >= 0.
         evap_transp = evap_transp - _wet_evap
 
+    if layered:
+        # FINAL combined pack+soil solve with the converged ground flux (plus the
+        # unmet-evaporation energy), then melt / refreeze by enthalpy and
+        # percolation.  Soil temperature is solved BEFORE the soil hydrology here
+        # (CLM5 order) because the pack's drainage feeds the Richards top flux;
+        # the bulk branch keeps its post-hydrology solve below.
+        C_s, coeff_s, rb_s = snow_thermal_props(pack, scc)
+        T_pack_solved, T_soil_new = solve_snow_soil_thermal(
+            pack.T, C_s, coeff_s, rb_s, f_snow, T_soil, theta, grid,
+            config.hydraulics, config.thermal,
+            G_surface + evap_excess_energy, dt,
+            surface_conductance=surface_out.surface_conductance)
+        snow_T_top_excess = jnp.maximum(
+            T_pack_solved[:, 0] - constants.T_freeze, 0.0)
+        pack, snow_drainage, _ = snow_phase_and_percolate(
+            pack._replace(T=T_pack_solved), scc)
+        # Meltwater leaves the pack base into the soil top (no sensible heat,
+        # the same convention as rain infiltration).
+        melt_rate = snow_drainage / dt
+        snow_new = total_water(pack)
+        snow_age_new = update_snow_age(
+            snow_new, snow_age, precip_snow_eff, dt, T_snow=T_surface,
+            age_activation_K=config.land_albedo.snow_age_activation_K)
     flux_top = (infil_rain + melt_rate - evap_bare) / rho_w
 
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w
@@ -1091,13 +1203,14 @@ def _step_multilayer_land_impl(
     # T_sfc-dependence implicit here, removing the explicit-coupling large-dt/thin-
     # top-layer instability.  None for the two-leaf canopy (its Newton closure owns
     # the coupling) and for slab builds that leave it unset -> explicit BC, unchanged.
-    G_surface = G_surface + evap_excess_energy
-    T_soil_new = solve_soil_thermal(
-        T_soil, richards_out.theta_new, grid,
-        config.hydraulics, config.thermal,
-        G_surface, dt,
-        surface_conductance=surface_out.surface_conductance,
-    )
+    if not layered:
+        G_surface = G_surface + evap_excess_energy
+        T_soil_new = solve_soil_thermal(
+            T_soil, richards_out.theta_new, grid,
+            config.hydraulics, config.thermal,
+            G_surface, dt,
+            surface_conductance=surface_out.surface_conductance,
+        )
 
     # --- Advance the 30-day TgC EMA (only when state carries it) ---
     if state.TgC is not None:
@@ -1156,10 +1269,23 @@ def _step_multilayer_land_impl(
         canopy_x=(_match(surface_out.canopy_x, state.canopy_x)
                   if (state.canopy_x is not None
                       and surface_out.canopy_x is not None) else None),
+        snow_ice_layers=(_match(pack.swe_ice, state.snow_ice_layers)
+                         if layered else state.snow_ice_layers),
+        snow_liq_layers=(_match(pack.swe_liq, state.snow_liq_layers)
+                         if layered else state.snow_liq_layers),
+        snow_T_layers=(_match(pack.T, state.snow_T_layers)
+                       if layered else state.snow_T_layers),
+        snow_rho_layers=(_match(pack.density, state.snow_rho_layers)
+                         if layered else state.snow_rho_layers),
     )
 
     # --- Post-step surface state for coupler ---
     T_surface_new = T_soil_new[:, 0]
+    # Radiative / humidity skin: the snow-blended surface on the layered branch
+    # (post-step cover), the top soil layer otherwise.  The carbon cycle keeps
+    # the soil-top temperature.
+    T_skin_new = (_snow_skin(pack, T_surface_new, snow_fraction(snow_new, scc))
+                  if layered else T_surface_new)
     # Re-brighten the snow-free base with the END-of-step top-layer moisture so the albedo
     # handed to the coupler (drives the next radiation step) is consistent with the updated
     # T_surface_new / snow_new state — the pre-step ``albedo_land`` used start-of-step theta.
@@ -1219,7 +1345,7 @@ def _step_multilayer_land_impl(
         # lw_up recomputed with post-step surface T and surface scheme's
         # effective emissivity (canopy RT vs scalar land emissivity).
         _, _, lw_up_new = surface_radiation_fluxes(
-            forcing.sw_down, forcing.lw_down, T_surface_new, alpha_new,
+            forcing.sw_down, forcing.lw_down, T_skin_new, alpha_new,
             emissivity,
         )
 
@@ -1244,8 +1370,8 @@ def _step_multilayer_land_impl(
     if stom_ratio is None:
         stom_ratio = jnp.ones_like(beta_soil_new)
     beta_new = stom_ratio * beta_soil_new
-    q_sat_liq_new = saturation_mixing_ratio(T_surface_new, forcing.p_surface)
-    q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
+    q_sat_liq_new = saturation_mixing_ratio(T_skin_new, forcing.p_surface)
+    q_sat_ice_new = saturation_mixing_ratio_ice(T_skin_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
     # Snow that was present when the scheme computed its humidity but melted
@@ -1318,7 +1444,7 @@ def _step_multilayer_land_impl(
                           else surface_out.T_surface)
         response_lw_up = surface_out.lw_up          # canopy LW_out
     else:
-        response_T_sfc = T_surface_new              # SimpleSEB: top-soil surface temp
+        response_T_sfc = T_skin_new                 # SimpleSEB: surface skin temp
         response_lw_up = lw_up_new                  # recomputed from post-step skin T
     response = TileResponse(
         T_sfc=response_T_sfc,
@@ -1369,8 +1495,34 @@ def _step_multilayer_land_impl(
                                carbon_old=carbon_state,
                                carbon_new=carbon_state_new))
     surface_out = surface_out._replace(held=_held_mask, n_held=_n_held)
+    if layered:
+        surface_out = surface_out._replace(snow_T_top_excess=snow_T_top_excess)
 
     return new_state, response, carbon_state_new, surface_out
+
+
+def _snow_skin(pack, T_soil_top, f_snow):
+    """Snow-blended skin ``f*T_pack_top + (1-f)*T_soil_top``.  A pack top that
+    still holds ice cannot be warmer than T_freeze at its surface (the excess is
+    melt, carried by the column enthalpy), so it enters the blend clamped."""
+    T_top = jnp.where(pack.swe_ice[:, 0] > 0.0,
+                      jnp.minimum(pack.T[:, 0], constants.T_freeze), pack.T[:, 0])
+    return f_snow * T_top + (1.0 - f_snow) * T_soil_top
+
+
+def seed_snow_layers(state: MultiLayerLandState,
+                     config: MultiLayerLandConfig) -> MultiLayerLandState:
+    """Build the layered pack from the bulk ``snow_depth`` (all ice, equal mass,
+    ``T = min(T_soil_top, T_freeze)``, ``snow_column.seed_density``).  Used at cold
+    start and after grafting a land IC that carries no snow layers; NOT an
+    equilibrated pack (expect weeks of drift in pack T and density)."""
+    pack = seed_snow_state(state.snow_depth, state.T_soil[:, 0], config.snow_column)
+    dt_ = state.T_soil.dtype
+    return state._replace(
+        snow_ice_layers=pack.swe_ice.astype(dt_),
+        snow_liq_layers=pack.swe_liq.astype(dt_),
+        snow_T_layers=pack.T.astype(dt_),
+        snow_rho_layers=pack.density.astype(dt_))
 
 
 # ---------------------------------------------------------------------------
@@ -1608,7 +1760,7 @@ def init_multilayer_land_state(
     else:
         canopy_state = None
 
-    return MultiLayerLandState(
+    state = MultiLayerLandState(
         T_soil=T_soil,
         psi_soil=psi_soil,
         theta_soil=theta_soil,
@@ -1635,6 +1787,9 @@ def init_multilayer_land_state(
                       and not isinstance(config.surface_scheme,
                                          CLMMLCanopyConfig)) else None),
     )
+    if config.snow_scheme == "layered":
+        state = seed_snow_layers(state, config)
+    return state
 
 
 def aridity_theta_init(rh_surface, theta_wp, theta_fc):

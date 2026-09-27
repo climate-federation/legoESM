@@ -75,6 +75,7 @@ from legoesm.land.lmip_forcing import make_synthetic_lmip_forcing
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
     init_multilayer_land_state,
+    seed_snow_layers,
 )
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.carbon.spinup import (
@@ -242,6 +243,7 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         ),
         hydraulics=SoilHydraulicsConfig(**texture_kwargs),
         thermal=SoilThermalConfig(enable_freeze_thaw=args.freeze_thaw),
+        snow_scheme=args.snow_scheme,
         richards=RichardsConfig(),
         carbon=CarbonConfig(
             scheme=args.carbon_scheme,
@@ -447,6 +449,10 @@ def _save_restart(
         payload["snow_age_bands"] = np.asarray(state.snow_age_bands)
         if state.ice_bands is not None:
             payload["ice_bands"] = np.asarray(state.ice_bands)
+    # Layered snowpack (present iff snow_scheme == "layered").
+    for _f in _SNOW_LAYER_FIELDS:
+        if getattr(state, _f) is not None:
+            payload[_f] = np.asarray(getattr(state, _f))
     if carbon_state is not None:
         for field in carbon_state._fields:
             payload[f"carbon_{field}"] = np.asarray(
@@ -455,6 +461,10 @@ def _save_restart(
     if soil_frozen_fraction is not None:
         payload["soil_frozen_fraction"] = np.asarray(soil_frozen_fraction)
     np.savez_compressed(str(restart_path), **payload)
+
+
+_SNOW_LAYER_FIELDS = ("snow_ice_layers", "snow_liq_layers", "snow_T_layers",
+                      "snow_rho_layers")
 
 
 def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
@@ -494,6 +504,13 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         state = state._replace(
             ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
             else jnp.zeros((ncol, nb)))
+    if config.snow_scheme == "layered":
+        if all(_f in data for _f in _SNOW_LAYER_FIELDS):
+            state = state._replace(**{_f: jnp.asarray(data[_f])
+                                      for _f in _SNOW_LAYER_FIELDS})
+        else:
+            # Layered pack newly selected on a bulk restart: seed it from the SWE.
+            state = seed_snow_layers(state, config)
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None
@@ -680,6 +697,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--freeze-thaw", action="store_true",
                    help="Enable soil-water freeze/thaw (apparent-heat-capacity "
                         "zero-curtain) in the soil thermal solver.")
+    p.add_argument("--snow-scheme", choices=("bulk", "layered"), default="bulk",
+                   help="Snowpack: bulk (one SWE reservoir) or layered (5-layer "
+                        "pack solved implicitly with the soil column).")
     p.add_argument("--bulk-scheme", default="most",
                    choices=["constant", "most"],
                    help="Bulk flux scheme")

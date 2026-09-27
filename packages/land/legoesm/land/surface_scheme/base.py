@@ -175,4 +175,9 @@ class SurfaceFluxOutput(NamedTuple):
     # ignore.
     held: jax.Array | None = None
     n_held: jax.Array | None = None
-
+    # Layered snowpack only (``snow_scheme == "layered"``): excess of the pack-top
+    # temperature over T_freeze after the implicit solve and BEFORE the enthalpy
+    # re-equilibration [K], (ncol,).  The solve carries sensible heat only, so this
+    # measures how far one step overshoots the melting point (an accuracy, not a
+    # conservation, diagnostic).  None for the bulk snowpack.
+    snow_T_top_excess: jax.Array | None = None

@@ -83,3 +83,13 @@ class MultiLayerLandState(NamedTuple):
     # scheme is the two-leaf canopy; ``None`` otherwise, which restores the
     # cold-start-every-step behaviour exactly.  Appended last (positional-ABI).
     canopy_x: Any | None = None
+    # Layered snowpack (``MultiLayerLandConfig.snow_scheme == "layered"``,
+    # ``legoesm.land.snow_column``): per-layer ice and liquid mass [kg/m2],
+    # temperature [K] and density [kg/m3], ``(ncol, n_snow_layers)``, top layer
+    # first.  ``snow_depth`` stays the TOTAL pack water (sum of ice + liquid), so
+    # albedo, snow cover and the latent partition read it unchanged.  ``None``
+    # for the bulk snowpack.
+    snow_ice_layers: jax.Array | None = None
+    snow_liq_layers: jax.Array | None = None
+    snow_T_layers: jax.Array | None = None
+    snow_rho_layers: jax.Array | None = None

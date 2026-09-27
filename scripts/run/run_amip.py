@@ -945,6 +945,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Soil-water freeze/thaw (latent zero-curtain) in "
                              "the multilayer land, as in CLM5. Default off "
                              "(sensible-only). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-scheme", dest="land_snow_scheme",
+                        choices=("bulk", "layered"),
+                        default=_EXPERIMENT_DEFAULTS.land_snow_scheme,
+                        help="Multilayer-land snowpack: bulk (one SWE reservoir) "
+                             "or layered (5-layer pack solved with the soil "
+                             "column). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-emissivity", dest="land_snow_emissivity",
+                        type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_snow_emissivity,
+                        help="Snow thermal-IR emissivity for the layered pack "
+                             "(bounds 0.96-0.995, default 0.98: Warren 1982, "
+                             "Hori et al. 2006).")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -2409,6 +2421,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
+        land_snow_scheme=args.land_snow_scheme,
+        land_snow_emissivity=args.land_snow_emissivity,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,

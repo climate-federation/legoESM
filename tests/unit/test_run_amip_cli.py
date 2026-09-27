@@ -4551,3 +4551,43 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
     with pytest.raises(ValueError, match="silently inert"):   # ...the guard does not
         create_atmosphere_dycore(cfg, create_cubed_sphere(12),
                                  create_sigma_coordinate(5))
+
+
+def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
+    """--land-snow-scheme / --land-snow-emissivity reach ExperimentConfig, and each
+    deck states its snowpack explicitly: production layered with the observed
+    snow emissivity, the preserved old deck bulk."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_snow_scheme == "bulk"
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-snow-scheme", "layered", "--land-snow-emissivity", "0.97"]),
+        parser))
+    assert cfg1.land_snow_scheme == "layered"
+    assert cfg1.land_snow_emissivity == 0.97
+    for deck, want in (("amip_production.yaml", "layered"),
+                       ("amip_sundqvist_l36.yaml", "bulk")):
+        p = build_arg_parser()
+        rows = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), p)
+        assert rows.get("land_snow_scheme") == want, deck
+        p.set_defaults(**rows)
+        cfg = build_config_from_args(_postprocess_args(
+            p.parse_args(_AMIP_DUMMY_PATHS), p))
+        assert cfg.land_snow_scheme == want, deck
+    rows = load_yaml_config(str(_repo_root() / "config" / "amip"
+                                / "amip_production.yaml"), build_arg_parser())
+    assert rows.get("land_snow_emissivity") == 0.98
+
+
+@pytest.mark.parametrize("argv, match", [
+    (["--land-snow-scheme", "layered"], "use_multilayer_land"),
+    (["--use-multilayer-land", "--land-snow-emissivity", "0.9"], "land_snow_emissivity"),
+])
+def test_land_snow_options_refused_when_invalid(argv, match):
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical"] + argv), parser))
+    with pytest.raises(ValueError, match=match):
+        cfg.validate_strict()
