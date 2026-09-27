@@ -787,6 +787,25 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 184: DINO developed-state closed V-face repair ---
+    'DINO/BLD/ppsrc/nemo/domqco.f90:177-181': [
+        'CALL dom_qco_r3c( ssh(:,:,Kbb), r3t(:,:,Kbb), r3u(:,:,Kbb), r3v(:,:,Kbb)           )',
+        '&                         r3u(:,:,Kmm), \'U\', 1._wp, r3v(:,:,Kmm), \'V\', 1._wp, r3f(:,:), \'F\', 1._wp )', 5],
+    'DINO/BLD/ppsrc/nemo/domqco.f90:211-215': [
+        'DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)',
+        '&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 5],
+    'DINO/BLD/ppsrc/nemo/lbclnk.f90:1816-1820': [
+        'zland = 0._wp                                     ! land filling value: zero by default',
+        'IF( PRESENT(kfillmode) )   ifill_nfd = kfillmode', 5],
+    'DINO/BLD/ppsrc/nemo/lbclnk.f90:1866-1871': [
+        'DO jn = 1, 4   ! 4 sides',
+        'ELSE                                ;   ifill(jn,jf) = jpfillcst       ! constant value (zland)', 6],
+    'DINO/BLD/ppsrc/nemo/lbclnk.f90:2130-2135': [
+        'IF(     ifill(jn,jf) == jpfillcst ) THEN',
+        'ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = zland', 6],
+    'DINO/BLD/ppsrc/nemo/dynspg_ts.f90:484-487': [
+        'hu_e  (:,:) =    (hu_0(:,:) *(1._wp+r3u(:,:,Kmm)))',
+        'hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kmm)))', 4],
     # --- round 166: developed-state shear statement walk ---
     'GYRE_OMIP_L2_P3_SM_R164TKEDEV/BLD/ppsrc/nemo/stprk3.f90:167-168': [
         'CALL zdf_phy( kstp, Nbb, Nnn, Nrhs )',

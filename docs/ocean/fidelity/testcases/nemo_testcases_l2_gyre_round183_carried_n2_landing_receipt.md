@@ -227,3 +227,18 @@ turns a previously finite prognostic family non-finite, land the minimal fix
 with a non-vacuous production plant, then measure both DINO cards with the
 Round-183 carried route and register the result here.  Do not attribute the
 downstream step-2 geometry guard as the first statement.
+
+### Round-184 amendment — developed DINO row measured
+
+Round 184 named the earlier failure in the first barotropic QCO face-ratio
+boundary, repaired NEMO's closed V-face result, and made both the carried and
+recompute arms finite through the registered first two steps on both DINO
+cards.  Both MLF arms complete day one; the landed carried arm differs from
+recompute in the four registered surface rows (SSH/SST/U/V maximum moves
+`1.8164515495300293e-5`, `2.105712890625e-3`,
+`5.127839744091034e-3`, and `7.992575410753489e-4` in their native units).
+The Euler-style card has a later shared fifth-step implicit-solve instability,
+so no full-day claim is made for that card.  The authoritative proof and
+artifact hashes are in
+`nemo_testcases_l2_gyre_round184_dino_developed_bridge_receipt.md`; the
+Decision-61 row is no longer simply UNMEASURED.
