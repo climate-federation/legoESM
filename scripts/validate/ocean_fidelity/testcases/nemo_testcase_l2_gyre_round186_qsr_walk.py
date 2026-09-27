@@ -155,7 +155,7 @@ def _score(reference: np.ndarray, candidate: np.ndarray,
     }
 
 
-def _compiled_direct_rate(record: dict) -> np.ndarray:
+def _compiled_direct_rate(record: dict, *, return_rows: bool = False):
     """Replay qsr_2BD through its compiled scalar statement order.
 
     This deliberately excludes the final ``(Krhs + rate) - Krhs`` update;
@@ -181,12 +181,29 @@ def _compiled_direct_rate(record: dict) -> np.ndarray:
     zz1 = (1.0 - params.R) * r1_rho0_rcp
     result = np.zeros((QSR_NI, QSR_NJ, JPK - 1), dtype=np.float64)
     zatt = np.empty((QSR_NI, QSR_NJ), dtype=np.float64)
+    surface_depth = np.empty_like(zatt)
+    surface_arguments = np.empty(zatt.shape + (2,), dtype=np.float64)
+    surface_exponentials = np.empty_like(surface_arguments)
+    live_depth = np.empty(zatt.shape + (17,), dtype=np.float64)
+    live_arguments = np.empty(zatt.shape + (17, 2), dtype=np.float64)
+    live_exponentials = np.empty_like(live_arguments)
+    live_attenuation = np.empty_like(live_depth)
+    live_ze3t = np.empty_like(live_depth)
+    absorbed = np.empty_like(live_depth)
+    numerator = np.empty_like(live_depth)
     for i in range(QSR_NI):
         for j in range(QSR_NJ):
             stretch = 1.0 + r3t[i, j]
+            surface_depth[i, j] = gdepw[0] * stretch
+            surface_arguments[i, j, 0] = -surface_depth[i, j] * r1_si0
+            surface_arguments[i, j, 1] = -surface_depth[i, j] * r1_si1
+            surface_exponentials[i, j, 0] = math.exp(
+                surface_arguments[i, j, 0])
+            surface_exponentials[i, j, 1] = math.exp(
+                surface_arguments[i, j, 1])
             zatt[i, j] = (
-                zz0 * math.exp(-(gdepw[0] * stretch) * r1_si0)
-                + zz1 * math.exp(-(gdepw[0] * stretch) * r1_si1))
+                zz0 * surface_exponentials[i, j, 0]
+                + zz1 * surface_exponentials[i, j, 1])
     # qsr_ext_lev on this admitted GYRE card resolves nk0=2 and nkV=17.
     for k in range(17):
         for i in range(QSR_NI):
@@ -194,22 +211,49 @@ def _compiled_direct_rate(record: dict) -> np.ndarray:
                 stretch = 1.0 + r3t[i, j]
                 ze3t = e3t[i, j, k] * (
                     1.0 + r3t[i, j] * tmask[i, j, k])
+                live_ze3t[i, j, k] = ze3t
+                live_depth[i, j, k] = gdepw[k + 1] * stretch
+                live_arguments[i, j, k, 0] = (
+                    -live_depth[i, j, k] * r1_si0)
+                live_arguments[i, j, k, 1] = (
+                    -live_depth[i, j, k] * r1_si1)
+                live_exponentials[i, j, k, 0] = math.exp(
+                    live_arguments[i, j, k, 0])
+                live_exponentials[i, j, k, 1] = math.exp(
+                    live_arguments[i, j, k, 1])
                 if k < 2:
                     next_attenuation = (
-                        zz0 * math.exp(
-                            -(gdepw[k + 1] * stretch) * r1_si0)
-                        + zz1 * math.exp(
-                            -(gdepw[k + 1] * stretch) * r1_si1)
+                        zz0 * live_exponentials[i, j, k, 0]
+                        + zz1 * live_exponentials[i, j, k, 1]
                     ) * wmask[i, j, k + 1]
                 else:
                     next_attenuation = (
-                        zz1 * math.exp(
-                            -(gdepw[k + 1] * stretch) * r1_si1)
+                        zz1 * live_exponentials[i, j, k, 1]
                         * wmask[i, j, k + 1])
-                result[i, j, k] = (
-                    qsr[i, j] * (zatt[i, j] - next_attenuation) / ze3t)
+                live_attenuation[i, j, k] = next_attenuation
+                absorbed[i, j, k] = zatt[i, j] - next_attenuation
+                numerator[i, j, k] = qsr[i, j] * absorbed[i, j, k]
+                result[i, j, k] = numerator[i, j, k] / ze3t
                 zatt[i, j] = next_attenuation
-    return result
+    if not return_rows:
+        return result
+    return result, {
+        "coefficients": np.asarray([zz0, zz1]),
+        "surface_depth": surface_depth,
+        "surface_arguments": surface_arguments,
+        "surface_exponentials": surface_exponentials,
+        "surface_attenuation": (
+            zz0 * surface_exponentials[..., 0]
+            + zz1 * surface_exponentials[..., 1]),
+        "live_depth": live_depth,
+        "live_arguments": live_arguments,
+        "live_exponentials": live_exponentials,
+        "live_ze3t": live_ze3t,
+        "live_attenuation": live_attenuation,
+        "absorbed_flux_fraction": absorbed,
+        "absorbed_flux_numerator": numerator,
+        "direct_rate": result[..., :17],
+    }
 
 
 def walk(root: Path, process_record: Path, lego_trace: Path,
@@ -238,7 +282,7 @@ def walk(root: Path, process_record: Path, lego_trace: Path,
             1, 0, 2)[..., :JPK - 1]
     interior = (slice(NN_HLS, -NN_HLS), slice(NN_HLS, -NN_HLS))
     wet = record["tmask"][interior][..., :JPK - 1] > 0.5
-    direct = _compiled_direct_rate(record)
+    direct, compiled_rows = _compiled_direct_rate(record, return_rows=True)
     replay = record["replay_increment"][interior][..., :JPK - 1]
     compiled_associated = (before + direct) - before
     require(_score(replay, compiled_associated, wet)["cells_unequal"] == 0,
@@ -266,6 +310,57 @@ def walk(root: Path, process_record: Path, lego_trace: Path,
         rate = literal_rate(qsr_value, stretch_value)
         return (before_value + rate) - before_value
 
+    def literal_rows(qsr_value, stretch_value):
+        from legoesm.core.source_rounding import nemo_source_round as sr
+        from legoesm.core.transcendentals import exp as precision_exp
+        from legoesm.ocean.physics.shortwave_penetration import JERLOV_TYPES
+        dtype = qsr_value.dtype
+        one = jnp.asarray(1.0, dtype=dtype)
+        params = JERLOV_TYPES["I"]
+        rho0_csw = sr(
+            jnp.asarray(NEMO_CONSTANTS_CONFIG.rho_0, dtype=dtype)
+            * jnp.asarray(NEMO_CONSTANTS_CONFIG.c_sw, dtype=dtype))
+        reciprocal = sr(one / rho0_csw)
+        r1_si0 = sr(one / jnp.asarray(params.zeta1, dtype=dtype))
+        r1_si1 = sr(one / jnp.asarray(params.zeta2, dtype=dtype))
+        rn_abs = jnp.asarray(params.R, dtype=dtype)
+        zz0 = sr(rn_abs * reciprocal)
+        zz1 = sr(sr(one - rn_abs) * reciprocal)
+        depth = sr(
+            jnp.asarray(record["gdepw_1d"])
+            * stretch_value[..., jnp.newaxis])
+        arg0 = sr((-depth) * r1_si0)
+        arg1 = sr((-depth) * r1_si1)
+        exp0 = precision_exp(arg0)
+        exp1 = precision_exp(arg1)
+        both = sr(sr(zz0 * exp0) + sr(zz1 * exp1))
+        visible = sr(zz1 * exp1)
+        wmask = jnp.asarray(record["wmask"][interior])
+        next_attenuation = jnp.concatenate((
+            both[..., 1:3] * wmask[..., 1:3],
+            visible[..., 3:18] * wmask[..., 3:18]), axis=-1)
+        previous_attenuation = jnp.concatenate((
+            both[..., :1], next_attenuation[..., :-1]), axis=-1)
+        ze3t = sr(jnp.asarray(dz_ref) * stretch_value[..., jnp.newaxis])
+        absorbed_value = sr(previous_attenuation - next_attenuation)
+        numerator_value = sr(qsr_value[..., jnp.newaxis] * absorbed_value)
+        rate_value = sr(numerator_value / ze3t[..., :17])
+        return {
+            "coefficients": jnp.stack((zz0, zz1)),
+            "surface_depth": depth[..., 0],
+            "surface_arguments": jnp.stack((arg0[..., 0], arg1[..., 0]), -1),
+            "surface_exponentials": jnp.stack((exp0[..., 0], exp1[..., 0]), -1),
+            "surface_attenuation": both[..., 0],
+            "live_depth": depth[..., 1:18],
+            "live_arguments": jnp.stack((arg0[..., 1:18], arg1[..., 1:18]), -1),
+            "live_exponentials": jnp.stack((exp0[..., 1:18], exp1[..., 1:18]), -1),
+            "live_ze3t": ze3t[..., :17],
+            "live_attenuation": next_attenuation,
+            "absorbed_flux_fraction": absorbed_value,
+            "absorbed_flux_numerator": numerator_value,
+            "direct_rate": rate_value,
+        }
+
     eager_rate = np.asarray(literal_rate(jnp.asarray(qsr), jnp.asarray(stretch)))
     jit_rate = np.asarray(jax.jit(literal_rate)(
         jnp.asarray(qsr), jnp.asarray(stretch)))
@@ -273,6 +368,12 @@ def walk(root: Path, process_record: Path, lego_trace: Path,
         jnp.asarray(qsr), jnp.asarray(stretch), jnp.asarray(before)))
     jit_associated = np.asarray(jax.jit(associated)(
         jnp.asarray(qsr), jnp.asarray(stretch), jnp.asarray(before)))
+    eager_rows = {
+        name: np.asarray(value) for name, value in literal_rows(
+            jnp.asarray(qsr), jnp.asarray(stretch)).items()}
+    jit_rows = {
+        name: np.asarray(value) for name, value in jax.jit(literal_rows)(
+            jnp.asarray(qsr), jnp.asarray(stretch)).items()}
     if plant:
         moved = _score(direct, jit_rate, wet)["cells_unequal"]
         require(moved > 0, "r3t ULP plant did not move the JIT qsr row")
@@ -315,6 +416,27 @@ def walk(root: Path, process_record: Path, lego_trace: Path,
     }
     first_inherited = next(
         name for name, row in input_rows.items() if row["cells_unequal"])
+    row_scores = {}
+    for name, reference in compiled_rows.items():
+        if reference.ndim == 1:
+            row_mask = np.ones(reference.shape, dtype=bool)
+        elif reference.shape[:2] == wet.shape[:2]:
+            if reference.ndim >= 3 and reference.shape[2] == 17:
+                base_mask = wet[..., :17]
+                if reference.ndim == 4:
+                    base_mask = base_mask[..., None]
+                row_mask = np.broadcast_to(base_mask, reference.shape)
+            elif reference.ndim == 2:
+                row_mask = qmm_mask
+            else:
+                row_mask = np.broadcast_to(
+                    qmm_mask[..., None], reference.shape)
+        else:  # pragma: no cover - every registered row is covered above
+            raise GateError(f"unregistered statement-row shape {name}")
+        row_scores[name] = {
+            "isolated_eager": _score(reference, eager_rows[name], row_mask),
+            "isolated_jit": _score(reference, jit_rows[name], row_mask),
+        }
     return {
         "format": "gyre-round188-developed-qsr-walk-v1",
         "status": "HELD",
@@ -323,6 +445,7 @@ def walk(root: Path, process_record: Path, lego_trace: Path,
         "input_rows": input_rows,
         "first_inherited_operand": first_inherited,
         "statement_rows": {
+            "compiled_order": row_scores,
             "isolated_eager_direct_rate": _score(direct, eager_rate, wet),
             "isolated_jit_direct_rate": _score(direct, jit_rate, wet),
             "isolated_eager_associated_update": _score(
