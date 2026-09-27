@@ -6,6 +6,8 @@ Parent: `53dab7544`
 
 Implementation commit: `b9522dafa`
 
+Final tested implementation/citation tip: `407cd6890`
+
 Status: **LANDED — NATIVE F AREA PLUS NEMO'S STORED RECIPROCAL CLOSE THE
 GIVEN-ENTRY LATERAL-DIFFUSION REPLAY BIT-FOR-BIT.**  The two halves measured
 separately in rounds 35 and 36 are a real cancelling pair at the bit boundary:
@@ -53,8 +55,10 @@ argument.  The planted U value exits nonzero.
 
 The base artifact is round 34's final certified ladder at `13c2927a8`.  A
 tree comparison proves its `packages/` tree is identical to round 37's parent
-`dfe2710a3`; the interrupted round-36 attempt is not used.  The landed arm at
-`b9522dafa` completes all 40 checkpoints.
+`dfe2710a3`; the interrupted round-36 attempt is not used.  The final landed
+arm at `407cd6890` completes all 40 checkpoints.  The helper extraction and
+fallback repair made after the first run were each followed by a complete
+re-run; only the final-tip artifact is authoritative.
 
 Of 200 scored rows, **185 move**: 111 maxima move toward NEMO and 74 move away.
 No exact/AT-BAR row leaves its bar, every moved row is registered, and the
@@ -100,18 +104,42 @@ No prediction was rewritten after measurement.
 
 ## Gates, review, and tests
 
-The shared-card battery passes **170 / 170**: 160 DINO/Rule-12/lock/overflow
-tests pass with nine warnings in 354.20 s, followed by 10 / 10 tank tests in
-7.40 s.  The pre-commit round-32/35/36/37 focused battery passes **12 / 12**.
+The final-tip shared-card battery passes **170 / 170**: 160
+DINO/Rule-12/lock/overflow tests pass with nine warnings in 344.46 s, followed
+by 10 / 10 tank tests in 7.43 s.  The pre-commit round-32/35/36/37 focused
+battery passes **12 / 12**.
 
 The required separate `codex exec --sandbox read-only` review was attempted
 at the committed diff.  It failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-The receipt citation gate, required `tests/ocean/fidelity -n 12` battery,
-closing focused tests and push battery are recorded in the closing commit
-after this receipt is made citable.
+The first citation-map run caught three displaced `vertical.py` anchors.  A
+naive rigid shift then failed because this round had expanded the cited
+function.  The area arithmetic was extracted into a helper so the historical
+function kept its exact 99-line extent; all three anchors and their map entries
+then moved by one rigid +12-line shift.  The final citation gate passes all
+three compiled citations with zero failures, zero unmapped citations and zero
+map-audit failures.  Its rigid source-shift plant exits nonzero and all nine
+self-tests fire.
+
+The first wide battery exposed two real new failures: synthetic partial-card
+fixtures carry `hf_0/e3f_0` but no `e1f/e2f`, and the helper treated them as
+metric-complete.  The final implementation requires both raw metrics before
+selecting the native path and otherwise retains the geometric fallback.  Both
+tests pass after that repair, all ORCA2/GYRE/card gates above were rerun at the
+repair commit, and the rigid citation positions did not move.
+
+The closing `tests/ocean/fidelity -n 12` battery reached 99% and the inherited
+silent tail, then was interrupted after a bounded wait.  It emits only the
+five known inherited failures: SI3 MY_SRC provenance, the stale GYRE
+member/gate stamp, round-51 trace suffix, three unstamped legacy report
+emitters, and missing `hires_lane_surface` case-board row.  An isolated rerun
+reports **5 failed, 2 passed in 10.60 s**; the two passes are the repaired
+round-31 partial-card tests.  No round-37 path remains red.
+
+Closing focused and push-battery results are recorded in the final receipt
+commit.
 
 ## Choices
 
