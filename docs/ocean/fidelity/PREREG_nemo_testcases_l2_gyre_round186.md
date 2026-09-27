@@ -73,3 +73,32 @@ scorer are extended; no parallel harness is created.
 
 The final diff receives a separate read-only Codex review.  A `DO NOT SHIP`
 verdict blocks a landing.  No configuration decision is expected.
+
+## Frozen addendum: magnitude-bearing shortwave statement record
+
+The completed ranking promotes shortwave penetration, but the compatible
+`oracle_qsr_stage3_kt00000001.bin` record contains only the surface flux and
+completed increment at the smooth first step.  It does not contain the live
+developed-state optical operands or statement boundaries, so it cannot name a
+first non-bit statement for the magnitude-bearing developed flow.
+
+Before requesting a new measurement, freeze the next record as follows.
+Record stage-3 `qsr_2BD` at step 1080, in the strongest measured ten-day
+interval (days 170--180), from the unchanged admitted year card.  Store the
+surface `qsr`, `r3t(Kmm)`, `gdepw_1d`, `e3t_3d`, `tmask`, `wmask`, the actual
+post-minus-pre `Krhs` increment, and a post-call replay of the compiled
+statements.  The replay is diagnostic only and runs after the production call.
+
+Predictions and falsifiers:
+
+1. The step-180 and step-1080 restarts remain byte-identical to the admitted
+   uninstrumented record; either mismatch **REFUTES** passivity.
+2. The post-call replay is bit-identical to the actual increment on every
+   stored cell.  Any unequal cell **REFUTES** calibration and the record is not
+   admitted.
+3. A one-ULP mutation of the stored actual increment makes admission exit
+   nonzero with `STATUS PLANT-FIRED`; a green mutation **REFUTES** control
+   non-vacuity.
+4. The record is evidence for a subsequent compiled-order statement walk, not
+   a candidate and not a landing.  No internal shortwave statement is claimed
+   in round 186 without this record.
