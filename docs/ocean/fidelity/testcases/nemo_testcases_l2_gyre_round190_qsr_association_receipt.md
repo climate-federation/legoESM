@@ -113,11 +113,13 @@ the receipt gate to FAIL and exited 1.  The focused battery
 reported `49 passed in 309.14s (0:05:09)`.  No broad ocean battery is required
 because no executable production path, recipe, or physics gate changed.
 
-## OPEN — round 191
+## OPEN — maintenance debt after Decision 63
 
-Correct the existing process observer, not model physics: classify surface and
-QSR using the already-materialized production `_qsr_b` field instead of the
-second combined-physics evaluation.  Show the old observer arm reproduces this
+Decision 63 declares Round 190 the last GYRE batch round and moves the active
+budget to ORCA2.  If GYRE maintenance resumes, correct the existing process
+observer, not model physics: classify surface and QSR using the
+already-materialized production `_qsr_b` field instead of the second
+combined-physics evaluation.  Show the old observer arm reproduces this
 round's equal-and-opposite transfer, the corrected arm keeps every cumulative
 total and ordinary carried-state byte BIT, and the observer plant fires.  Then
 re-run the pre-day-180 owner ranking: surface boundary and QSR must be reported
