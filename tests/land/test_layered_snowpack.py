@@ -465,3 +465,29 @@ def test_trace_pack_does_not_block_ground_evaporation():
         lh[swe] = float(out[0][1].lhflx[0])
     assert lh[0.0] > 50.0, lh
     assert lh[0.01] == pytest.approx(lh[0.0], rel=0.05), lh
+
+
+@pytest.mark.parametrize("q_air", [0.0005, 0.002])
+@pytest.mark.parametrize("scheme", ["two_leaf", "seb"])
+def test_exported_humidity_agrees_with_latent_flux_sign(scheme, q_air):
+    """Cold pack under sun (canopy or bare): the exported surface humidity sits
+    on the same side of the air humidity as the reported latent flux, for thin
+    and deep packs, so a humidity-based consumer infers the realised exchange."""
+    two = scheme == "two_leaf"
+    cfg = _cfg(scheme=TwoLeafCanopyConfig() if two else None)
+    n = 3
+    lp = bare_canopy_params(n)._replace(LAI=jnp.asarray([0.5, 2.0, 4.0])) if two else None
+    st = _state(cfg, n, T_soil=268.0, swe=40.0)
+    st = st._replace(snow_depth=jnp.array([0.5, 40.0, 150.0]))
+    st = seed_snow_layers(st, cfg)
+    st = st._replace(snow_T_layers=jnp.full_like(st.snow_T_layers, 255.0))
+    f = _forcing(n, T_air=272.0, sw=600.0, lw=260.0, q=q_air)
+    _, out = _run(cfg, st, f, 2, 300.0, lp=lp)
+    for _, resp, sfc in out:
+        # the exported humidity IS the one the scheme solved its flux with
+        np.testing.assert_allclose(resp.q_surface, sfc.q_surface, rtol=0, atol=0)
+        lh = np.asarray(resp.lhflx)
+        dq = np.asarray(resp.q_surface) - q_air
+        big = np.abs(lh) > 0.1
+        assert big.any()
+        assert np.all(np.sign(lh[big]) == np.sign(dq[big])), (lh, dq)

@@ -1008,6 +1008,8 @@ def _step_multilayer_land_impl(
     snow_after_melt = snow_new
     # Layered: only the TOP layer's ice can sublimate this step (unmet demand
     # returns to the ground heat flux through ``evap_excess_energy`` below).
+    # Relies on: percolation keeps liq <= irreducible_liq_frac*ice per layer, so
+    # after the remap a non-empty top layer always holds ice.
     max_sublim = jnp.maximum((pack.swe_ice[:, 0] if layered else snow_after_melt)
                              / dt, 0.0)
     sublim_demand = snow_latent / constants.L_s
@@ -1446,18 +1448,10 @@ def _step_multilayer_land_impl(
         q_sfc_new = (forcing.q_lowest
                      + beta_effective_new * (q_sat_sfc_new - forcing.q_lowest))
     if layered and surface_out.q_surface is not None:
-        # Fractional cover, not the binary switch: SimpleSEB already solved an
-        # f-blended humidity; for a canopy the snow-covered f is ice-saturated at
-        # the pack top and the rest keeps the scheme's solved humidity.
-        if scheme_is_seb:
-            q_sfc_new = surface_out.q_surface
-        else:
-            _T_top = jnp.where(pack.swe_ice[:, 0] > 0.0,
-                               jnp.minimum(pack.T[:, 0], constants.T_freeze),
-                               pack.T[:, 0])
-            _f_new = snow_fraction(snow_new, scc)
-            q_sfc_new = (_f_new * saturation_mixing_ratio_ice(_T_top, forcing.p_surface)
-                         + (1.0 - _f_new) * surface_out.q_surface)
+        # Fractional cover: export the humidity the scheme solved its flux with
+        # (SimpleSEB's is already f-blended), never the binary ice override,
+        # so the exported humidity and the realised flux agree in sign.
+        q_sfc_new = surface_out.q_surface
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
