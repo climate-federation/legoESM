@@ -3474,11 +3474,19 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         _facc.add(None, mld=mld, state=facade,
                   dz=inner.hnode if args.state_accumulate else None)
 
+    _facc_last = {}
+
     def _fesom_acc_drain():
+        # The final snapshot coincides with the last day snapshot when the run
+        # ends on a boundary; the window was drained there, so reuse it.
         if _facc is None:
             return None
-        return {k: (v[:, :_nreal] if v.ndim == 2 and v.shape[1] == model.mesh.nl else v)
-                for k, v in _facc.drain(dt).items()}
+        got = {k: (v[:, :_nreal] if v.ndim == 2 and v.shape[1] == model.mesh.nl else v)
+               for k, v in _facc.drain(dt).items()}
+        if got:
+            _facc_last.clear()
+            _facc_last.update(got)
+        return dict(_facc_last)
 
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
