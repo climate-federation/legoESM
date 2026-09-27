@@ -52,6 +52,7 @@ _DYN = _OCE / "DYN"
 _R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
 _ORCA2_COMPILED = NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo"
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
+_OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
@@ -79,6 +80,8 @@ FILES = {
         _OVERFLOW_COMPILED / "stprk3_stg.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
         _OVERFLOW_COMPILED / "dynhpg.f90"),
+    "OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _OVERFLOW_P3_COMPILED / "stprk3_stg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo"
         "/stprk3.f90"),
@@ -861,6 +864,14 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 50: executing OVERFLOW P3 kt=3 statement order ---
+    'OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:327-354': [
+        ('SELECT CASE( kstg )', 2), ('END SELECT', 6), 28],
+    'OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:378-438': [
+        ('SELECT CASE( kstg )', 3), ('DEALLOCATE( zub, zvb )', 2), 61],
+    'OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:480-567': [
+        '!                       !==  T-S Tracers  ==!',
+        ('END SELECT', 8), 88],
     # --- ORCA2 round 49: held tracer statement and downstream OVERFLOW order ---
     'OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:501-508': [
         ('DO jn = 1, jpts', 2), ('END DO', 14), 8],
