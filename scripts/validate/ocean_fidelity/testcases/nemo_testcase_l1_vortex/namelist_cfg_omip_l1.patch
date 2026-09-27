@@ -1,0 +1,37 @@
+--- /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/tests/VORTEX/EXPREF/namelist_cfg	2026-07-14 12:56:26.180418856 -0400
++++ namelist_cfg	2026-09-27 18:46:48.367948991 -0400
+@@ -27,11 +27,11 @@
+ &namrun        !   parameters of the run
+ !-----------------------------------------------------------------------
+    nn_no       =       0   !  job number (no more used...)
+-   cn_exp      = "VORTEX"  !  experience name
++   cn_exp      = "VORTEX_OMIP_L1_ZCO"  !  certified oracle receipt
+    nn_it000    =       1   !  first time step
+-   nn_itend    =    3000   !  last time step 
++   nn_itend    =      10   !  phase-3 contiguous sweep cadence
+    nn_istate   =       0   !  output the initial state (1) or not (0)
+-   nn_stock    =   99999   !  frequency of creation of a restart file (modulo referenced to 1)
++   nn_stock    =      10   !  final-step restart receipt
+    nn_write    =   99999   !  frequency of write in the output file   (modulo referenced to nn_it000)
+ /
+ !-----------------------------------------------------------------------
+@@ -40,7 +40,7 @@
+ !MLF   rn_Dt       =   1440.   !  time step for the dynamics (and tracer if nn_acc=0)
+    rn_Dt       =   2880.   !  time step for the dynamics (and tracer if nn_acc=0)
+ !MLF   rn_atfp     =   0.05    !  asselin time filter parameter
+-   ln_meshmask = .false.   !  =T create a mesh file
++   ln_meshmask = .true.    !  geometry receipt
+ /
+ !-----------------------------------------------------------------------
+ &namcfg        !   parameters of the configuration                      (default: use namusr_def in namelist_cfg)
+@@ -127,7 +127,9 @@
+ !-----------------------------------------------------------------------
+ &nameos        !   ocean Equation Of Seawater                           (default: NO selection)
+ !-----------------------------------------------------------------------
+-   ln_seos     = .true.         !  = Use simplified equation of state (S-EOS)
++   ln_teos10   = .true.         !  OMIP-style TEOS-10 (campaign decision 64)
++   ln_eos80    = .false.
++   ln_seos     = .false.        !  shipped VORTEX selects S-EOS; documented deviation
+    !                            !  rd(T,S,Z)*rho0 = -a0*(1+.5*lambda*dT+mu*Z+nu*dS)*dT+b0*dS
+    rn_a0       =  0.28        !  thermal expension coefficient (for simplified equation of state)
+    rn_b0       =  0.          !  saline  expension coefficient (for simplified equation of state)
