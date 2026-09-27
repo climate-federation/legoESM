@@ -107,9 +107,21 @@ acquisition specification, not a produced oracle record.
 - Candidate OVERFLOW trajectory: reproduced round 48 exactly; expected DEBT.
 - Narrow boundary gate: candidate exit 0; base exit 0; real plant exit 2.
 - Focused sidecar/hash test: PASS.
-- Citation gate and plant: recorded below after receipt finalisation.
-- Independent read-only review: recorded below after review.
-- Full card/fidelity batteries: not used to claim a landing; recorded below.
+- Default citation gate: PASS, 274 citations, no unmapped citation or map-audit
+  failure.  This receipt: PASS, 3 citations.  The shifted QCO citation plant
+  exits 1 with one failure.
+- Shared-card battery: 160 passed in 363.51 s; the separate tank-removal file:
+  10 passed in 8.60 s.
+- `tests/ocean/fidelity -n 12`: 1,931 items reached 99%, showing the five
+  documented failures, then reproduced the known xdist controller stall and
+  was interrupted.  The five IDs were rerun serially and retained the known
+  signatures: round-129 stale certification, round-51 private trace registry,
+  SI3 scalar-math provenance, the worktree-stamp ratchet (only its three
+  pre-existing offenders after this round's comparison stamp was repaired),
+  and the `hires_lane_surface` case-board ratchet.
+- Separate read-only `codex exec` review: **independent review unavailable
+  in-sandbox** (`failed to initialize in-process app-server client: Read-only
+  file system`).
 
 ## OPEN
 
