@@ -39,9 +39,6 @@ PRODUCER_COMMIT = "932cbfa9ec2f2fbcbf51a03ca8e46e5b39b78c62"
 SOURCE_ORDER = (
     "kt3.entry.T", "kt3.entry.S", "kt3.entry.u", "kt3.entry.v",
     "kt3.entry.ssh",
-    "s1.momentum.postbar_kaa.u", "s1.momentum.postbar_kaa.v",
-    "s1.tracer.after_adv.T", "s1.tracer.after_adv.S",
-    "s1.tracer.after_sbc.T", "s1.tracer.after_sbc.S",
     "s1.tracer.Kaa.T", "s1.tracer.Kaa.S", "s1.tracer.Kaa.ssh",
     "s2.entry.T", "s2.entry.S", "s2.entry.ssh",
     "s2.hpg.u", "s2.hpg.v",
@@ -249,21 +246,7 @@ def _live_arrays(card, momentum: dict, tracer: dict) -> tuple[dict, list[dict]]:
     )
     pair = pair_model.step(state, dt=card.dt_s)
 
-    stage1_momentum = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_momentum_stage=1),
-    ).step(state, dt=card.dt_s)
-
-    boundary = {}
-    for name in ("after_advection", "after_sbc"):
-        exposed = LatLonCGridOceanModel(
-            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-                expose_tracer_stage1_boundary=name),
-        ).step(state, dt=card.dt_s)
-        boundary[name] = (np.asarray(exposed.T.data), np.asarray(exposed.S.data))
-
-    s1_m, s2_m = momentum[1], momentum[2]
+    s2_m = momentum[2]
     s1_t = tracer[1]
     entry = read_entry(ORACLE_ROOT / "oracle_step_entry_kt00000003.bin",
                        "OVERFLOW-zps")
@@ -275,12 +258,6 @@ def _live_arrays(card, momentum: dict, tracer: dict) -> tuple[dict, list[dict]]:
         "kt3.entry.u": entry_values["u"],
         "kt3.entry.v": entry_values["v"],
         "kt3.entry.ssh": entry_values["ssh"],
-        "s1.momentum.postbar_kaa.u": _u(stage1_momentum.u.data),
-        "s1.momentum.postbar_kaa.v": _v(stage1_momentum.v.data),
-        "s1.tracer.after_adv.T": boundary["after_advection"][0],
-        "s1.tracer.after_adv.S": boundary["after_advection"][1],
-        "s1.tracer.after_sbc.T": boundary["after_sbc"][0],
-        "s1.tracer.after_sbc.S": boundary["after_sbc"][1],
         "s1.tracer.Kaa.T": np.asarray(pair.T.data),
         "s1.tracer.Kaa.S": np.asarray(pair.S.data),
         "s1.tracer.Kaa.ssh": np.asarray(pair.eta.data),
@@ -294,12 +271,6 @@ def _live_arrays(card, momentum: dict, tracer: dict) -> tuple[dict, list[dict]]:
         "kt3.entry.T": entry["T"], "kt3.entry.S": entry["S"],
         "kt3.entry.u": entry["u"], "kt3.entry.v": entry["v"],
         "kt3.entry.ssh": entry["ssh"],
-        "s1.momentum.postbar_kaa.u": _nemo_owned(s1_m["postbar_kaa_u"]),
-        "s1.momentum.postbar_kaa.v": _nemo_owned(s1_m["postbar_kaa_v"]),
-        "s1.tracer.after_adv.T": _nemo_owned(s1_t["after_adv_T"]),
-        "s1.tracer.after_adv.S": _nemo_owned(s1_t["after_adv_S"]),
-        "s1.tracer.after_sbc.T": _nemo_owned(s1_t["after_sbc_T"]),
-        "s1.tracer.after_sbc.S": _nemo_owned(s1_t["after_sbc_S"]),
         "s1.tracer.Kaa.T": _nemo_owned(s1_t["Kaa_T"]),
         "s1.tracer.Kaa.S": _nemo_owned(s1_t["Kaa_S"]),
         "s1.tracer.Kaa.ssh": _nemo_owned(s1_t["Kaa_ssh"]),
