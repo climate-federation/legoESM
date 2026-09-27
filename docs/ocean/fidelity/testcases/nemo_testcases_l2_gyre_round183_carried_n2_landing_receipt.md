@@ -198,7 +198,23 @@ before this round.  The initial combined run reports **22 failed, 233 passed**
 after LLVM exhausted memory; fresh per-file processes turn 21 of those 22
 into passes and leave only that base-identical source-inspection failure.
 
-Final full-tree result: **PENDING**.
+The final whole-tree command at 12 workers reached 75%, then a JAX/LLVM
+worker failed with `Cannot allocate memory`; replacement workers produced a
+compiler-memory cascade, so the run was stopped with exit 130 and no semantic
+summary.  Per the repository's compiler-limit guidance, the trees were then
+split at four workers.  The fidelity tree reached 96% with two failures before
+its last shard stopped emitting output for more than ten minutes; it was
+stopped with exit 130 and no summary.  The unit tree reached 25% before a
+second worker memory crash; it too was stopped with exit 130.  These incomplete
+attempts are preserved as `full_ocean_tests.log`, `full_fidelity_tests.log`,
+and `full_unit_tests.log`; they are not reported as passes.
+
+The final fresh tank/LOCK_EXCHANGE/OVERFLOW/GYRE-slope/citation suite reports
+**61 passed in 249.25s**.  Together with the isolated summaries above, every
+test file touched by the landing and every explicitly required card/tank gate
+completed in a fresh process.  No candidate-specific failure remains; the
+only reproducible semantic red is the starting-tip Treguier source-inspection
+test named above.
 
 All frozen numeric predictions are confirmed.  No acquisition or
 configuration decision is needed.
