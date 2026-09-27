@@ -887,7 +887,7 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynvor.f90:242-248': [
         ('CASE( np_ENS )                        !* enstrophy conserving scheme',
          1),
-        'CALL vor_ens( kt, Kmm, ntot, usd, vsd,', 7],
+        ('CALL vor_ens( kt, Kmm, ntot, usd, vsd,', 1), 7],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynvor.f90:866-869': [
         'CASE( np_FLX_c2 , np_FLX_up3 )',
         'ntot = np_CME', 4],
