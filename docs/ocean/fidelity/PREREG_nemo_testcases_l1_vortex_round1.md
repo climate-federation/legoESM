@@ -8,6 +8,13 @@ not move any existing certified number.
 Frozen BEFORE any NEMO record exists. Round 1 transcribes the card, writes the
 acquisition, and stops at ACQUISITION_NEEDED; the operator runs NEMO.
 
+AMENDED once, at commit `7fda955ce`+1, still before any measurement: two
+adversarial reviews found that the card was inheriting the Courant-dependent
+implicit vertical advection from a sibling case's namelist, so the resolved-case
+table grew that row, and the additivity digests were widened and re-measured.
+No prediction in section 3 changed. Nothing had been measured when this was
+written, and nothing has been measured since.
+
 ## 1. The case as resolved
 
 Read from `tests/VORTEX/EXPREF/namelist_cfg` and `tests/VORTEX/MY_SRC`, not
@@ -26,6 +33,7 @@ from prose.
 | tracers | FCT2 (h2 v2), no lateral diffusion | namelist `namtra_adv`, `namtra_ldf` |
 | pressure gradient | `hpg_sco` | namelist `namdyn_hpg` |
 | vertical mixing | constant, `rn_avm0 = 1e-4`, `rn_avt0 = 0`, no EVD, no NPC | namelist `namzdf` |
+| vertical momentum advection | Courant-dependent implicit scheme OFF: the namelist does not set `ln_zad_Aimp`, so it stays `.false.` | namelist `namzdf`, reference default |
 | drag / forcing | none: `ln_drg_OFF`, user forcing writes zeros | namelist `namdrg`, `usrdef_sbc.F90:60-68` |
 | initial state | analytic anticyclonic Gaussian eddy: T, S = 35, u, v, ssh | `usrdef_istate.F90:69-75,83-88,101-105,177-182` |
 
@@ -130,13 +138,16 @@ gets a plant before it is believed.
 | invariant | value | how checked |
 |---|---|---|
 | GYRE ladder digest | `cf06a8fc7d0e90f2` (unchanged; newest receipt `..._round170_mpas_tke_bc_receipt.md:149`) | the code GYRE executes is untouched, proven by the row below |
-| LOCK_EXCHANGE-zco card digest | `f248153cc366f9ea` | measured at `c09a9e111780` and with the VORTEX card present: identical |
-| OVERFLOW-zps card digest | `090acab214d20672` | as above |
-| GYRE-zco card digest | `abfd869f4b1c4d66` | as above |
+| LOCK_EXCHANGE-zco card digest | `42d13c75ea8cbcc6` | measured at `c09a9e111780` and with the VORTEX card present: identical |
+| OVERFLOW-zps card digest | `c2bca636ac2f14ef` | as above |
+| GYRE-zco card digest | `4a6f0b6b0827ac6a` | as above |
 | push-gate tests | unchanged pass count | the six files in `autopilot_max.sh` |
 
 The three card digests cover the resolved model config, the full initial T, S,
-u, v and ssh arrays, the Coriolis field, and the card metadata. They are pinned
+u, v, ssh and barotropic-velocity arrays, all three masks, the T-, U-, V- and
+F-point Coriolis fields, the horizontal metric, the vertical coordinate
+(reference ladder, interfaces, partial thicknesses, bottom index, active mask
+and NEMO's own reference thickness), the land mask, and every card field. They are pinned
 in `tests/ocean/unit/test_nemo_vortex_card.py`, so a later edit to the shared
 identity that leaks into a certified card turns a test red rather than moving a
 certified number quietly.

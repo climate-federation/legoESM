@@ -64,6 +64,10 @@ def test_card_resolves_the_shipped_namelist(card):
     assert cfg.pgf_scheme == "nemo_sco"
     assert cfg.vorticity_scheme == "een_total"
     assert (cfg.A_v, cfg.K_v) == (1.0e-4, 0.0)              # rn_avm0, rn_avt0
+    # namzdf does not set ln_zad_Aimp, so it stays .false. (namelist_ref:1177).
+    # The identity this card inherits from resolves it True for OVERFLOW, so
+    # the row is here rather than left to inheritance.
+    assert cfg.adaptive_implicit_vertadv is False
     assert card.surface_boundary_condition == "none"        # usrdef_sbc zeros
 
 
@@ -158,6 +162,11 @@ def test_validator_refuses_a_broken_vortex_composition(card):
     broken = card._replace(surface_boundary_condition="gyre_usrdef_sbc")
     with pytest.raises(ValueError, match="no surface forcing"):
         validate_nemo_testcase_card(broken)
+    broken = card._replace(
+        recipe=card.recipe._replace(
+            model_config=cfg._replace(adaptive_implicit_vertadv=True)))
+    with pytest.raises(ValueError, match="ln_zad_Aimp"):
+        validate_nemo_testcase_card(broken)
 
 
 def _read_step_entry(path, n_lat, n_lon):
@@ -180,7 +189,7 @@ def _read_step_entry(path, n_lat, n_lon):
             halo_x:nx - halo_x, halo_y:ny - halo_y].transpose(1, 0, 2)
 
     return {
-        "step": step, "Nbb": nbb,
+        "step": step, "Nbb": nbb, "nz": nz,
         "T": xyz(data[:count]),
         "S": xyz(data[count:2 * count]),
         "u": xyz(data[2 * count:3 * count]),
@@ -190,12 +199,35 @@ def _read_step_entry(path, n_lat, n_lon):
     }
 
 
+def _bits_equal(left, right, mask):
+    """Compare RAW BITS, so +0.0 and -0.0 are not silently equal.
+
+    ``==`` on float64 calls those two values identical; NEMO's signed halo
+    exchange can produce a negative zero where the card produces a positive
+    one, and that is a real difference in the record even though no arithmetic
+    would notice it.  The count this returns is the one the prereg predicts.
+    """
+    use = np.asarray(mask, dtype=bool)
+    lhs = np.ascontiguousarray(
+        np.asarray(left, dtype=np.float64)[use]).view(np.int64)
+    rhs = np.ascontiguousarray(
+        np.asarray(right, dtype=np.float64)[use]).view(np.int64)
+    return int(np.count_nonzero(lhs != rhs))
+
+
 @pytest.mark.skipif(
     not glob.glob(_ORACLE),
     reason="VORTEX kt=1 step-entry record not acquired on this machine")
 def test_initial_state_is_bit_exact_against_the_nemo_record(card):
     oracle = _read_step_entry(glob.glob(_ORACLE)[0], 63, 63)
+    assert oracle["step"] == 1
     state = card.recipe.initial_state
+    n_lev = int(card.recipe.z_coord.n_levels)
+    # NEMO's record carries jpk levels; the card executes jpkm1 of them and
+    # record jpk is the permanently dry dummy bottom (card.dummy_bottom_records).
+    assert oracle["nz"] == n_lev + card.dummy_bottom_records
+    for name in ("T", "S", "u", "v"):
+        oracle[name] = oracle[name][..., :n_lev]
     active = np.asarray(card.recipe.z_coord.is_active)
     wet = active[:, :, 0]
     u_face = active & np.roll(active, -1, axis=1)
@@ -210,7 +242,7 @@ def test_initial_state_is_bit_exact_against_the_nemo_record(card):
         "ssh": (np.asarray(state.eta.data), wet),
     }
     unequal = {
-        name: int(np.count_nonzero(value[mask] != oracle[name][mask]))
+        name: _bits_equal(oracle[name], value, mask)
         for name, (value, mask) in pairs.items()
     }
     assert unequal == {name: 0 for name in pairs}, unequal
@@ -222,25 +254,53 @@ def test_initial_state_is_bit_exact_against_the_nemo_record(card):
 # that leaks into a certified card turns this red instead of moving a
 # certified number quietly.
 _CERTIFIED_CARD_DIGESTS = {
-    "GYRE-zco": "abfd869f4b1c4d66",
-    "LOCK_EXCHANGE-zco": "f248153cc366f9ea",
-    "OVERFLOW-zps": "090acab214d20672",
+    "GYRE-zco": "4a6f0b6b0827ac6a",
+    "LOCK_EXCHANGE-zco": "42d13c75ea8cbcc6",
+    "OVERFLOW-zps": "c2bca636ac2f14ef",
 }
 
 
 def _card_digest(card):
+    """Everything a card carries that could change an executed number.
+
+    The first draft hashed only the config, the tracer/velocity/ssh state and
+    the T-point Coriolis; a reviewer pointed out that a change to the vertical
+    coordinate, to the masks, to the FACE Coriolis fields or to the barotropic
+    pair would have slipped through, so all of those are in it now.
+    """
     import hashlib
     handle = hashlib.sha256()
     handle.update(repr(card.recipe.model_config).encode())
     state = card.recipe.initial_state
-    for name in ("T", "S", "u", "v", "eta"):
+    for name in ("T", "S", "u", "v", "eta", "uu_b", "vv_b", "land_mask",
+                 "u_mask", "v_mask"):
+        field = getattr(state, name, None)
         handle.update(
-            np.asarray(getattr(state, name).data, dtype=np.float64).tobytes())
-    handle.update(np.asarray(card.recipe.grid.f_T, dtype=np.float64).tobytes())
+            b"none" if field is None
+            else np.asarray(field.data, dtype=np.float64).tobytes())
+    grid = card.recipe.grid
+    for name in ("f_T", "f_u", "f_v", "ff_f", "dx_T", "dy_T"):
+        value = getattr(grid, name, None)
+        handle.update(
+            b"none" if value is None
+            else np.asarray(value, dtype=np.float64).tobytes())
+    z = card.recipe.z_coord
+    for name in ("dz_ref", "z_half_ref", "h_partial", "is_active",
+                 "bottom_level", "nemo_e3t_0"):
+        value = getattr(z, name, None)
+        handle.update(
+            b"none" if value is None
+            else np.asarray(value, dtype=np.float64).tobytes())
+    handle.update(
+        np.asarray(card.recipe.land_mask, dtype=np.float64).tobytes())
     handle.update(repr((
-        card.dt_s, card.n_steps, card.bbl_adv_option, card.bbl_gamma_s,
+        card.dt_s, card.n_steps, card.dummy_bottom_records,
+        card.bbl_adv_option, card.bbl_gamma_s,
         card.bbl_diffusive_option, card.bbl_aht_m2_s,
-        card.surface_boundary_condition, card.unmeasured_features)).encode())
+        card.surface_boundary_condition, card.surface_input_operator,
+        card.transcendentals, card.precision_policy,
+        card.unmeasured_features, card.icebergs_enabled,
+        card.iceberg_inputs)).encode())
     return handle.hexdigest()[:16]
 
 

@@ -25,8 +25,13 @@ from pathlib import Path
 #  number of extra 2-D arrays).  Everything else is read from the header.
 _FAMILIES = {
     "oracle_step_entry_kt": ("NEMO_L1_ENTRY_1", 8, "ts+uuvv", 1),
-    "oracle_bt_frames_kt": ("NEMO_L1_BTFRM_1", 7, "b2d", 0),
+    # stprk3.F90:349 writes SIX integers after the magic (version, step,
+    # time level, jpi, jpj, bit width) -- one fewer than the other families,
+    # because the barotropic record has no vertical dimension.
+    "oracle_bt_frames_kt": ("NEMO_L1_BTFRM_1", 6, "b2d", 0),
     "oracle_stage_kt": ("NEMO_L1_STAGE_1", 9, "ts+uuvv", 1),
+    # NOTE: the stage record's filename carries the stage after the step, so
+    # its step digits are read from the "kt" split above, not from the tail.
     "oracle_rhs_kt": ("NEMO_L1_RHS___1", 7, "uuvv", 0),
 }
 
@@ -54,8 +59,18 @@ def parse_record(path: Path, corrupt_header: bool = False) -> dict:
         header[-2] += 1
     _require(magic == magic_expected,
              f"{path.name}: magic {magic!r} is not {magic_expected!r}")
+    _require(header[0] == 1,
+             f"{path.name}: record format version {header[0]}, this checker "
+             "reads version 1")
     bits = header[-1]
     _require(bits == 64, f"{path.name}: records must be 64-bit, header says {bits}")
+    # The step is in the FILENAME and in the header; a writer that drifted
+    # between them would silently mislabel the whole ladder.
+    stamped = "".join(ch for ch in path.stem.split("kt")[-1][:8] if ch.isdigit())
+    if stamped:
+        _require(int(stamped) == header[1],
+                 f"{path.name}: filename says step {int(stamped)}, its header "
+                 f"says {header[1]}")
     payload = len(raw) - (16 + 4 * n_header)
     _require(payload % 8 == 0, f"{path.name}: payload is not a whole number of f64")
     values = payload // 8
@@ -108,9 +123,17 @@ def main(argv=None) -> int:
                  "the step-record writer PERTURBS NEMO: the instrumented and "
                  "reference restarts differ byte for byte")
 
-        # 2. Every step-entry record kt=1..steps must exist and parse.
+        # 2. Every record the writer emits must exist and parse.  Naming only
+        # the step entries would admit a build whose stage and barotropic
+        # writers were silently dropped, which is exactly the "stale build"
+        # failure the tanks' acquisitions guard against.
         wanted = [args.run_dir / f"oracle_step_entry_kt{kt:08d}.bin"
                   for kt in range(1, args.steps + 1)]
+        wanted += [args.run_dir / f"oracle_bt_frames_kt{kt:08d}.bin"
+                   for kt in range(1, args.steps + 1)]
+        wanted += [args.run_dir / f"oracle_stage_kt00000001_s{s}.bin"
+                   for s in (1, 2, 3)]
+        wanted.append(args.run_dir / "oracle_rhs_kt00000001.bin")
         for path in wanted:
             _require(path.is_file(), f"the run did not write {path.name}")
         for path in sorted(args.run_dir.glob("oracle_*.bin")):

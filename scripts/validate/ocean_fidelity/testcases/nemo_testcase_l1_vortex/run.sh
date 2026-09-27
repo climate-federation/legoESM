@@ -118,6 +118,14 @@ grep -q 'ln_teos10   = .true.' "$dry/namelist_cfg" \
 grep -q 'rn_a0       =  0.28' "$dry/namelist_cfg" \
   || { printf 'REFUSE: rn_a0 was dropped; usrdef_istate needs it for T\n' >&2
        rm -rf "$dry"; exit 67; }
+# The card transcribes ln_zad_Aimp = .false., which this deck gets by LEAVING
+# IT UNSET.  The tanks' own campaign decks set it .true.; if anyone copies that
+# line in here the card and the oracle stop agreeing on the vertical momentum
+# scheme, silently.  Refuse instead.
+if grep -q 'ln_zad_Aimp' "$dry/namelist_cfg"; then
+  printf 'REFUSE: the deck now sets ln_zad_Aimp; the card transcribes the unset default\n' >&2
+  rm -rf "$dry"; exit 67
+fi
 rm -rf "$dry"
 python "$CHECKER" --help >/dev/null \
   || { printf 'REFUSE: the record checker does not run\n' >&2; exit 67; }
@@ -193,7 +201,12 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
     printf 'REFUSE: the writer is absent from %s ppsrc (stale build)\n' \
       "$name" >&2; exit 69
   fi
-  if nm -D "$cfg/BLD/bin/nemo.exe" | grep -q '_ZGV'; then
+  # `nm | grep -q` would report CLEAN if nm itself failed, so capture first
+  # and require nm to have succeeded before believing the grep.
+  local symbols
+  symbols=$(nm -D "$cfg/BLD/bin/nemo.exe") || {
+    printf 'REFUSE: cannot read symbols from %s\n' "$name" >&2; exit 65; }
+  if printf '%s' "$symbols" | grep -q '_ZGV'; then
     printf 'REFUSE: vector-math symbol present in %s\n' "$name" >&2
     exit 65
   fi
@@ -211,8 +224,11 @@ run_one() {            # $1 = config name, $2 = run directory
     cd "$dir"
     export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
     printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.log
-    mpirun -np 1 --oversubscribe ./nemo 2>&1 | tee -a run.user.log
-    test "${PIPESTATUS[0]}" -eq 0
+    # No pipe: under `set -o pipefail` a failing mpirun aborts the script
+    # before any ${PIPESTATUS} line could be read, so such a guard would be
+    # unreachable and would prove nothing.  Redirect, then show the tail.
+    mpirun -np 1 --oversubscribe ./nemo >>run.user.log 2>&1
+    tail -n 20 run.user.log
     printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       >>run.user.log
   )

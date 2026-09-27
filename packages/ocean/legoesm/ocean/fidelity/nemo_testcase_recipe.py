@@ -121,7 +121,15 @@ def _model_config(
             tke_langmuir_evaluation=tke_langmuir_evaluation,
         )
         return base._replace(
-            # dynvor.F90:1326-1332 dispatches ln_dynvor_een to np_EEN.  The
+            # namelist_cfg's namzdf block does NOT set ln_zad_Aimp, so
+            # namelist_ref:1177 leaves it .false. and NEMO never compiles the
+            # Courant-dependent implicit vertical advection.  The tanks share
+            # this identity and their campaign decks resolve it .true., which
+            # is why the inherited value is True; VORTEX must state its own.
+            # This is executed physics (ocean_model_latlon_cgrid.py:4472,4485
+            # take a different arm), not metadata, so it is explicit here.
+            adaptive_implicit_vertadv=False,
+            # dynvor.F90:874 dispatches ln_dynvor_een to np_EEN.  The
             # operand selectors are the already-canonical ones GYRE/ORCA2
             # use: nn_e3f_typ=0 and ln_dynvor_msk=.false. are the resolved
             # namelist_ref defaults, neither being overridden here.
@@ -1981,6 +1989,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         if (cfg.A_v, cfg.K_v) != (1.0e-4, 0.0):
             raise ValueError(
                 "VORTEX-zco requires rn_avm0=1.0e-4 and rn_avt0=0.0")
+        if cfg.adaptive_implicit_vertadv:
+            raise ValueError(
+                "VORTEX-zco leaves ln_zad_Aimp at its .false. default; the "
+                "Courant-dependent implicit vertical advection must be OFF")
         return
 
     # The namelists select ENS, while these Cartesian cases have f=0 and only

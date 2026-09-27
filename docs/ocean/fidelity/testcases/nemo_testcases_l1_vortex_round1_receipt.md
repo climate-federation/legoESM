@@ -46,7 +46,7 @@ difference.
 | planted defect: meridional velocity sign flipped | RED, as required |
 | record checker on synthetic records | admits a good set; refuses a corrupt header, a perturbed reference restart and a missing step |
 | acquisition preflight (no build, no run) | PREFLIGHT_OK; both patches apply to the shipped sources |
-| certified card digests unchanged | LOCK `f248153cc366f9ea`, OVERFLOW `090acab214d20672`, GYRE `abfd869f4b1c4d66` — identical before and after |
+| certified card digests unchanged | LOCK `42d13c75ea8cbcc6`, OVERFLOW `c2bca636ac2f14ef`, GYRE `4a6f0b6b0827ac6a` — identical before and after |
 | push-gate tests | see section 6 |
 | citation gate | see section 6 |
 
@@ -55,6 +55,7 @@ difference.
 | choice | ASKED or UNASKED | note |
 |---|---|---|
 | TEOS-10 instead of the shipped S-EOS | ASKED (decision 64, operator note BF) | but see the FINDING below, which is new information the decision did not have |
+| the oracle deck leaves the Courant-dependent implicit vertical advection OFF, unlike the two tanks' decks | UNASKED, and stated as a finding | it is the shipped VORTEX default and the card now matches it, so deck and card agree with no new deviation; the tanks' decks turn it on, so this diverges from their convention. One line for the operator: leave it off (my pick, no deviation) or match the tanks? |
 | the AGRIF zoom is out of scope; parent grid only | ASKED (the round's own task) | both oracle builds drop the nesting key |
 | ten-step run cadence for the oracle run | UNASKED, precedent-based | it is the tanks' own kt1_10 cadence, and the shipped 3000-step length is preserved on the card itself |
 | mesh receipt written by the oracle run | UNASKED, precedent-based | the tanks' kt1_10 decks do the same |
@@ -92,7 +93,44 @@ Nothing below can be filled in until the operator runs the acquisition.
 
 ACQUISITION_NEEDED. The exact command is in section 7.
 
-## 6. Test and gate output
+## 6. Reviews, and what they changed
+
+Two independent adversarial reviews ran on the diff before anything was
+finished. Both returned DO NOT SHIP, and both named THE SAME blocker
+independently, which is the strongest signal either one could have given.
+
+| reviewer | verdict | the blocker |
+|---|---|---|
+| a fresh Claude code-reviewer, given the diff and the oracle | DO NOT SHIP | the card silently inherited the Courant-dependent implicit vertical advection from a sibling case's namelist |
+| codex, adversarial, read-only | DO NOT SHIP | the same switch, named as active momentum physics that no gate checked |
+
+What each finding turned into:
+
+| finding | disposition |
+|---|---|
+| BLOCKER: the card inherited implicit vertical advection ON while its own namelist leaves it OFF | FIXED. The card states it explicitly, the validator refuses a card that turns it on, the card test asserts it, and the acquisition refuses a deck that grows the switch. Both reviewers were right; this WOULD have broken the ladder from step two. |
+| the oracle comparison would have crashed on shapes: NEMO's record carries one more vertical level than the card executes | FIXED. The comparison now asserts the record's level count equals the card's plus its dummy bottom record, and trims to the card's levels — the same thing the tanks' own gate does. |
+| "bit-exact" was being checked with floating equality, which calls positive and negative zero the same value | FIXED. The comparison is now on raw bit patterns. |
+| the record checker ignored the format version, never cross-checked the step in the filename against the step in the header, and required only the step-entry records | FIXED, and the fix immediately exposed a real defect in the checker itself: it had the barotropic record's header one integer too wide. Corrected against the writer. |
+| a guard reading the pipeline status after a failing run could never be reached, and a symbol check could report clean if its own tool failed | FIXED: the run redirects instead of piping, and the symbol list is captured before it is searched. |
+| the additivity digest omitted the vertical coordinate, the masks, the face Coriolis fields and the barotropic pair, so it could not support "no existing card moved" | FIXED. The digest now covers all of them, and the claim was re-measured against the lane tip with the wider digest: still identical. |
+| one reviewer could not confirm that the lateral-diffusion OFF switch wins over the direction flag | NOT a defect: the card carries zero lateral viscosity either way, and the validator requires it. |
+| one reviewer noted the checker's plant only exercises one refusal path | ADDRESSED by exercising four: a corrupted header, a version bump, a filename-versus-header step disagreement, and a missing record. |
+
+One thing found while fixing the blocker, worth recording. The claim that the
+two tank cards contradict their own decks is FALSE and is retracted here before
+anyone builds on it: their SHIPPED namelists differ on this switch, but their
+campaign decks both set it on, which is what their cards resolve. VORTEX is the
+first card on this identity whose deck leaves it off, which is why the
+inherited value was wrong only here.
+
+A pre-existing observation, not this round's to fix: the reference layer
+thickness the cards carry is single precision on every card, while the
+thicknesses NEMO actually executes are double. It is a reference ladder, not an
+executed operand, but it means a sub-1e-7 change to it would not move the
+digest above.
+
+## 6b. Test and gate output
 
 Filled in at the end of the round; see the commit range in section 7.
 
