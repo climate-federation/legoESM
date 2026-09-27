@@ -31,6 +31,9 @@ def main() -> None:
         "--trace-step-boundaries", action="store_true",
         help="print non-finite counts at the bridged-entry, post-surface-"
              "forcing, and returned-step boundaries")
+    parser.add_argument(
+        "--trace-baro-entry", action="store_true",
+        help="trace the first NEMO ssh-average entry-inverse operands")
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args()
     args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
@@ -93,6 +96,44 @@ def main() -> None:
             return result
 
         dino.apply_dino_lat_lon_surface_forcing = traced_surface
+
+    if ns.trace_baro_entry:
+        from legoesm.ocean.dynamics import barotropic_latlon_cgrid as baro
+
+        original_ssh_avg = baro._nemo_ssh_avg_apply
+        ssh_avg_calls = 0
+
+        def traced_ssh_avg(eta_dyn, u_mask, v_mask, grid, area, prep, **kwargs):
+            nonlocal ssh_avg_calls
+            ssh_avg_calls += 1
+            result = original_ssh_avg(
+                eta_dyn, u_mask, v_mask, grid, area, prep, **kwargs)
+            if kwargs.get("return_entry_inverse", False):
+                _, _, _, r1_e1e2v, _ = prep
+                area_pad = baro.pad_ns_zero(area)
+                eta_pad = baro.pad_ns_zero(eta_dyn)
+                ssh_v_s = baro.nemo_source_round(area_pad[:-1] * eta_pad[:-1])
+                ssh_v_n = baro.nemo_source_round(area_pad[1:] * eta_pad[1:])
+                ssh_v_sum = baro.nemo_source_round(ssh_v_s + ssh_v_n)
+                r3_v_half_sum = baro.nemo_source_round(0.5 * ssh_v_sum)
+                jax.debug.print(
+                    "TRACE_BARO_ENTRY call={call} "
+                    "eta_nonfinite={eta_bad} inv_area_nonfinite={metric_bad} "
+                    "zero_half_sum={zero_sum} zero_times_nonfinite={overlap} "
+                    "r1_u_nonfinite={u_bad} r1_v_nonfinite={v_bad}",
+                    call=ssh_avg_calls,
+                    eta_bad=jnp.sum(~jnp.isfinite(eta_dyn)),
+                    metric_bad=jnp.sum(~jnp.isfinite(r1_e1e2v)),
+                    zero_sum=jnp.sum(r3_v_half_sum == 0.0),
+                    overlap=jnp.sum(
+                        (r3_v_half_sum == 0.0) & ~jnp.isfinite(r1_e1e2v)),
+                    u_bad=jnp.sum(~jnp.isfinite(result[2])),
+                    v_bad=jnp.sum(~jnp.isfinite(result[3])),
+                    ordered=True,
+                )
+            return result
+
+        baro._nemo_ssh_avg_apply = traced_ssh_avg
 
     original = eos.compute_buoyancy_frequency_nemo_bn2
     call_count = 0
