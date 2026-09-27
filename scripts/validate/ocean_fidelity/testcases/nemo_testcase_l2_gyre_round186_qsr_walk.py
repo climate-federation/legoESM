@@ -546,6 +546,131 @@ def _producer_walk(record: dict, process: dict, reference_frame: dict,
     }
 
 
+def association_ranking(root: Path, process_record: Path,
+                        reference_trace: Path) -> dict:
+    """Rank the remaining QSR inputs after the production ratio arm fails."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "shortwave association ranking is not fp64/libm")
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig, _nemo_qsr_2bd_tendency)
+
+    year = _load_sibling(
+        "_round189_association_year", "nemo_testcase_l2_gyre_year_owners.py")
+    process = year.read_process_record(process_record)
+    record = read_record(root / "oracle_qsr_walk_kt00001080.bin")
+    frame = {
+        name: np.asarray(
+            np.load(reference_trace / f"{name}.npy", mmap_mode="r")[1079])
+        for name in year.LEGO_PROCESS_FIELDS
+    }
+    gate = _load_sibling(
+        "_round189_association_gate", "nemo_testcase_l2_gyre_phase3_gate.py")
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    card = build_nemo_testcase_card("GYRE-zco")
+    wet = gate.expected_masks(card)["T"]
+    wet2 = np.any(wet, axis=-1)
+    qsr = record["qsr"].T
+    dz_ref = np.asarray(record["e3t_3d"][2, 2, :JPK - 1])
+    config = ShortwavePenetrationConfig(
+        scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0)
+
+    @jax.jit
+    def direct_rate(qsr_value, stretch_value):
+        return _nemo_qsr_2bd_tendency(
+            qsr_value, jnp.asarray(-record["gdepw_1d"]),
+            jnp.asarray(dz_ref), stretch_value, config,
+            NEMO_CONSTANTS_CONFIG.rho_0, NEMO_CONSTANTS_CONFIG.c_sw)
+
+    model_direct = np.asarray(direct_rate(
+        jnp.asarray(qsr), jnp.asarray(frame["q_Kmm"])))
+    nemo_direct = _compiled_direct_rate(record).transpose(1, 0, 2)
+    nemo_rows = year.process_temperature_rows(process)
+    model_rows = year.lego_process_temperature_rows(frame)
+    nemo_shortwave = np.asarray(nemo_rows["shortwave"])
+    model_shortwave = np.asarray(model_rows["shortwave"])
+
+    qbb = 1.0 + np.asarray(process["r3t_Kbb"])
+    qmm = 1.0 + np.asarray(process["r3t_Kmm"])
+    qaa = 1.0 + np.asarray(process["r3t_Kaa"])
+    tbb = np.asarray(process["Tbb"])[..., :JPK - 1]
+    base = qbb[..., None] * tbb
+    rhs_sbc = np.asarray(
+        process["rhs_after_surface_boundary"])[..., :JPK - 1]
+    rhs_qsr = np.asarray(process["rhs_after_shortwave"])[..., :JPK - 1]
+    nemo_bsbc = (base + 14400.0 * qmm[..., None] * rhs_sbc) / qaa[..., None]
+    nemo_bqsr = (base + 14400.0 * qmm[..., None] * rhs_qsr) / qaa[..., None]
+    require(_score(
+        nemo_shortwave, nemo_bqsr - nemo_bsbc, wet)["cells_unequal"] == 0,
+        "NEMO cumulative QSR boundaries do not reproduce the process row")
+
+    def associate(bsbc, qmm_value, qaa_value, rate_value):
+        content_before = bsbc * qaa_value[..., None]
+        after = (content_before
+                 + 14400.0 * qmm_value[..., None] * rate_value)
+        return after / qaa_value[..., None] - bsbc
+
+    rebuilt_model = associate(
+        frame["Bsbc"], frame["q_Kmm"], frame["q_Kaa"], model_direct)
+    rebuild_vs_actual = _score(model_shortwave, rebuilt_model, wet)
+    actual_vs_nemo = _score(nemo_shortwave, model_shortwave, wet)
+    arms = {
+        "rebuilt_model_operands": _score(
+            nemo_shortwave, rebuilt_model, wet),
+        "nemo_qmm_only": _score(
+            nemo_shortwave, associate(
+                frame["Bsbc"], qmm, frame["q_Kaa"], model_direct), wet),
+        "nemo_qaa_only": _score(
+            nemo_shortwave, associate(
+                frame["Bsbc"], frame["q_Kmm"], qaa, model_direct), wet),
+        "nemo_direct_rate_only": _score(
+            nemo_shortwave, associate(
+                frame["Bsbc"], frame["q_Kmm"], frame["q_Kaa"],
+                nemo_direct), wet),
+        "nemo_preceding_accumulator_only": _score(
+            nemo_shortwave, associate(
+                nemo_bsbc, frame["q_Kmm"], frame["q_Kaa"],
+                model_direct), wet),
+        "all_nemo_inputs": _score(
+            nemo_shortwave, associate(nemo_bsbc, qmm, qaa, nemo_direct), wet),
+    }
+    for row in arms.values():
+        row["max_abs_removed_fraction_vs_actual"] = _removed_fraction(
+            actual_vs_nemo["max_abs"], row["max_abs"])
+        row["rms_removed_fraction_vs_actual"] = _removed_fraction(
+            actual_vs_nemo["rms"], row["rms"])
+    first_surviving = (
+        "stage3_qsr_source_association"
+        if rebuild_vs_actual["cells_unequal"] else None)
+    return {
+        "format": "gyre-round189-qsr-association-ranking-v1",
+        "status": "HELD", "step": 1080, "precision": "fp64/libm",
+        "input_rows": {
+            "qsr_surface_flux": _score(record["qsr"].T, qsr, wet2),
+            "step_entry_stretch": _score(qbb, frame["q_Kbb"], wet2),
+            "live_stretch": _score(qmm, frame["q_Kmm"], wet2),
+            "after_stretch": _score(qaa, frame["q_Kaa"], wet2),
+            "direct_rate": _score(nemo_direct, model_direct, wet),
+            "preceding_accumulator": _score(
+                nemo_bsbc, frame["Bsbc"], wet),
+        },
+        "actual_production_row": actual_vs_nemo,
+        "direct_rebuild_vs_actual_production": rebuild_vs_actual,
+        "isolated_association_arms": arms,
+        "first_surviving_boundary": first_surviving,
+        "verdict": (
+            "the production QSR process row is not the direct qsr_2BD rate "
+            "associated with its recorded qmm/qaa and preceding accumulator"
+            if first_surviving else
+            "the direct QSR association reproduces the production row"),
+    }
+
+
 def production_substitution(root: Path, process_record: Path,
                             reference_trace: Path, expect_commit: str,
                             plant: str | None = None) -> dict:
@@ -674,6 +799,10 @@ def production_substitution(root: Path, process_record: Path,
         producer = _producer_walk(
             record, process, reference_frame, candidate, card, wet2,
             root / "GYRE_OMIP_L2_P3_00001080_restart.nc")
+    nemo_cumulative = year.process_temperature_rows(process)
+    nemo_bsbc = np.asarray(nemo_cumulative["geometry"])
+    nemo_bsbc = nemo_bsbc + np.asarray(nemo_cumulative["advection"])
+    nemo_bsbc = nemo_bsbc + np.asarray(nemo_cumulative["surface_boundary"])
     remaining = {
         "qsr_surface_flux": _score(
             record["qsr"].T, np.asarray(surface.sw_down), wet2),
@@ -683,7 +812,7 @@ def production_substitution(root: Path, process_record: Path,
         "stage3_live_stretch": _score(
             nemo_stretch, reference_frame["q_Kmm"], wet2),
         "preceding_accumulator": _score(
-            np.asarray(process["rhs_after_surface_boundary"])[..., :JPK - 1],
+            nemo_bsbc,
             reference_frame["Bsbc"], wet),
     }
     return {
@@ -714,6 +843,7 @@ def main() -> int:
     parser.add_argument("--plant", choices=("actual-increment-ulp",))
     parser.add_argument("--walk", action="store_true")
     parser.add_argument("--production-substitution", action="store_true")
+    parser.add_argument("--association-ranking", action="store_true")
     parser.add_argument("--process-record", type=Path)
     parser.add_argument("--lego-trace", type=Path)
     parser.add_argument("--walk-plant", choices=("r3t-ulp",))
@@ -722,7 +852,13 @@ def main() -> int:
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     try:
-        if args.production_substitution:
+        if args.association_ranking:
+            require(args.process_record is not None and args.lego_trace is not None,
+                    "--association-ranking requires --process-record and "
+                    "--lego-trace")
+            report = association_ranking(
+                args.root, args.process_record, args.lego_trace)
+        elif args.production_substitution:
             require(args.process_record is not None and args.lego_trace is not None,
                     "--production-substitution requires --process-record "
                     "and --lego-trace")
