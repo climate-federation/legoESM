@@ -118,10 +118,15 @@ import re, sys
 src, dst, itend, stock, write = sys.argv[1:6]
 text = open(src).read()
 for key, value in (("nn_itend", itend), ("nn_stock", stock), ("nn_write", write)):
+    # No count=1: with it, n is capped at 1 and the "exactly once" check below
+    # could only ever catch ZERO occurrences, never the duplicate its message
+    # names.  A namelist that sets a row twice must refuse, not silently take
+    # the first.
     text, n = re.subn(r"^(\s*%s\s*=\s*)(\S+)" % key, r"\g<1>%s" % value,
-                      text, count=1, flags=re.M)
+                      text, flags=re.M)
     if n != 1:
-        raise SystemExit("REFUSE: %s not found exactly once in %s" % (key, src))
+        raise SystemExit("REFUSE: %s found %d times in %s, expected exactly "
+                         "once" % (key, n, src))
 open(dst, "w").write(text)
 
 ASSIGN = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*(.*?)\s*(?:!.*)?$")
@@ -192,6 +197,7 @@ fi
 #     this is not the certified trajectory and nothing downstream is admissible.
 printf '\n=== admission: year-1 restarts against the round-132 reference ===\n'
 mismatch=0
+compared=0
 for (( step=NN_STOCK; step<=YEAR_STEPS; step+=NN_STOCK )); do
   name=$(printf 'GYRE_OMIP_L2_P3_%08d_restart.nc' "$step")
   if [[ ! -f "$TARGET_RUN/$name" ]]; then
@@ -201,37 +207,54 @@ for (( step=NN_STOCK; step<=YEAR_STEPS; step+=NN_STOCK )); do
     printf 'REFUSE: the round-132 reference has no %s\n' "$name" >&2; exit 71
   fi
   if cmp -s "$REFERENCE_RUN/$name" "$TARGET_RUN/$name"; then
-    printf '  IDENTICAL %s\n' "$name"
+    printf '  IDENTICAL %s\n' "$name"; compared=$((compared + 1))
   else
     printf '  DIFFERS   %s\n' "$name"; mismatch=1
   fi
 done
+# A loop that ran zero times would satisfy every check above.
+if [[ "$compared" -ne 12 ]]; then
+  printf 'REFUSE: compared %s year-1 restarts, expected 12\n' "$compared" >&2
+  exit 71
+fi
 if [[ "$mismatch" -ne 0 ]]; then
   printf 'REFUSE: the decade run is not byte-identical to the certified year;\n' >&2
   printf '  it is a different trajectory and the decade record is not admissible.\n' >&2
   exit 71
 fi
-printf 'ADMISSION OK: all twelve year-1 months match round 132 byte for byte\n'
+printf 'ADMISSION OK: all %s year-1 months match round 132 byte for byte\n' "$compared"
 
 # 2.  Every scored month must have a restart, or the scorer would silently
 #     compute a climatology over fewer months than the preregistration names.
 printf '\n=== completeness: 120 monthly restarts ===\n'
 missing=0
+present=0
 for (( step=NN_STOCK; step<=NN_ITEND; step+=NN_STOCK )); do
   name=$(printf 'GYRE_OMIP_L2_P3_%08d_restart.nc' "$step")
-  [[ -f "$TARGET_RUN/$name" ]] || { printf '  MISSING %s\n' "$name"; missing=$((missing + 1)); }
+  if [[ -f "$TARGET_RUN/$name" ]]; then
+    present=$((present + 1))
+  else
+    printf '  MISSING %s\n' "$name"; missing=$((missing + 1))
+  fi
 done
+if [[ "$((present + missing))" -ne 120 ]]; then
+  printf 'REFUSE: the monthly loop visited %s steps, expected 120\n' \
+    "$((present + missing))" >&2
+  exit 72
+fi
 if [[ "$missing" -ne 0 ]]; then
   printf 'REFUSE: %s of the 120 monthly restarts are missing\n' "$missing" >&2
   exit 72
 fi
-printf 'all 120 monthly restarts present\n'
+printf 'all %s monthly restarts present\n' "$present"
 
 ( cd "$TARGET_RUN" && find . -maxdepth 1 -name '*_restart.nc' -print0 \
     | sort -z | xargs -0 sha256sum > nemo_decade_restarts.sha256 )
 
 printf '\nNEMO decade written to %s\n' "$TARGET_RUN"
-printf 'score with:\n'
-printf '  python %s --score --months 120\n' "$SCORER"
-printf '  python %s --figures --months 120\n' "$SCORER"
+printf 'score with (the environment is part of the command):\n'
+printf '  cd %s\n' "$REPO"
+printf '  export PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src\n'
+printf '  export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1\n'
+printf '  .venv/bin/python %s --score --figures --months 120\n' "$SCORER"
 printf 'GYRE_DECADE_NEMO_READY %s\n' "$TARGET_RUN"

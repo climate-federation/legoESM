@@ -88,6 +88,9 @@ BAR_RATIO = 1.0e-2                 # FESOM2-JAX: two orders of magnitude
 BAR_REL_TREND_PER_MONTH = 0.01     # bounded difference
 BAR_SPIKE = 10.0                   # max / median over the climatology window
 BAR_DRIFT_K = 1.0e-2               # volume-mean temperature agreement
+# Year 1 separately: a volume mean of a difference cannot exceed that
+# difference's RMS, which round 183 measured at 2.670992e-03 K on day 360.
+BAR_DRIFT_YEAR1_K = 3.0e-3
 
 DEFAULT_LEGO_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/decade/lego")
@@ -101,8 +104,12 @@ DEFAULT_OUT = Path(
 # into an array check.
 FIELD_NAMES = ("T", "S", "u", "v", "ssh")
 
-PLANTS = ("ratio-denominator-zero", "mld-unsorted", "trend-short",
-          "month-shift")
+# Synthetic violations.  Each must fail, and each must fail BECAUSE of the
+# line it plants.  "month-shift" is not here: it pairs legoESM month m with
+# NEMO month m+1 inside score() itself, so it needs the real snapshots and is
+# exercised by the data-backed test rather than by this arithmetic self-check.
+PLANTS = ("ratio-denominator-zero", "mld-unsorted", "trend-short")
+SCORE_PLANTS = ("month-shift",)
 
 
 # ------------------------------------------------------------------ helpers --
@@ -126,6 +133,9 @@ def _weighted_mean(values, weights, mask) -> float:
 def _weighted_rms(values, weights, mask) -> float:
     values = np.asarray(values, dtype=np.float64)
     weights = np.asarray(weights, dtype=np.float64)
+    require(values.shape == weights.shape == mask.shape,
+            f"weighted rms shapes disagree: {values.shape} {weights.shape} "
+            f"{mask.shape}")
     total = float(np.sum(weights[mask]))
     require(total > 0.0, "weighted rms has zero total weight")
     return float(np.sqrt(np.sum(weights[mask] * values[mask] ** 2) / total))
@@ -236,7 +246,8 @@ def _relative_trend(series) -> dict:
 # ------------------------------------------------------------------ scoring --
 def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
           clim_first_month: int = CLIM_FIRST_MONTH, seed: int = 0,
-          mesh_path: Path = DEFAULT_NEMO_MESH, plant: str | None = None) -> dict:
+          mesh_path: Path = DEFAULT_NEMO_MESH, plant: str | None = None,
+          allow_dirty: bool = False) -> dict:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card)
@@ -348,10 +359,12 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
     # over the cells both models actually have.
     zm_mask = np.isfinite(clim["lego"]["Tzm"]) & np.isfinite(clim["nemo"]["Tzm"])
     require(bool(zm_mask.any()), "the zonal-mean section is empty")
-    # The section is compared cell by cell with unit weights: the same
-    # weighting on both models, so the ratio is fair, but it is not a
-    # volume-weighted section average and is not quoted as one.
-    zm_weights = np.ones_like(clim["lego"]["Tzm"])
+    # The section is weighted by LAYER THICKNESS.  Unit weights would count a
+    # 10 m surface cell and a 300 m abyssal cell equally, which on this card is
+    # a factor of thirty, and the ratio would then be a surface statistic
+    # wearing a section's name.
+    zm_weights = np.broadcast_to(np.asarray(dz, dtype=np.float64),
+                                 clim["lego"]["Tzm"].shape)
 
     climatology = {}
     for name, weights, mask in (("SST", area2, wet2), ("SSS", area2, wet2),
@@ -367,7 +380,11 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
             np.where(mask, left, 0.0), weights, mask)
         climatology[name] = row
 
-    # EKE: the kinetic energy of the departure from the climatological flow.
+    # The kinetic energy of the departure from the climatological flow.  The
+    # round brief called this EKE; it is NOT an eddy kinetic energy on this
+    # card -- 106 km cells over a flat bottom resolve no mesoscale -- so it is
+    # reported under the name of what it measures, the velocity variance about
+    # the record mean.  Same formula on both models.
     eke = {}
     for side in ("lego", "nemo"):
         u_clim = np.mean([pair[0] for pair in velocity[side]], axis=0)
@@ -391,6 +408,11 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
             - np.asarray(series["nemo_S_volmean"])))),
         "bar_abs_T_volmean_difference": BAR_DRIFT_K,
     }
+    year_one = min(MONTHS_PER_YEAR, months)
+    drift["max_abs_T_volmean_difference_year1"] = float(np.max(np.abs(
+        np.asarray(series["lego_T_volmean"][:year_one])
+        - np.asarray(series["nemo_T_volmean"][:year_one]))))
+    drift["bar_abs_T_volmean_difference_year1"] = BAR_DRIFT_YEAR1_K
 
     report = {
         "format": "nemo-testcase-l2-gyre-decade-climate-v1",
@@ -415,7 +437,8 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
         "energetics": {
             "lego_mean_KE_m2_s2": float(np.mean(series["lego_KE"][window])),
             "nemo_mean_KE_m2_s2": float(np.mean(series["nemo_KE"][window])),
-            "lego_EKE_m2_s2": eke["lego"], "nemo_EKE_m2_s2": eke["nemo"],
+            "lego_velocity_variance_about_climatology_m2_s2": eke["lego"],
+            "nemo_velocity_variance_about_climatology_m2_s2": eke["nemo"],
         },
         # A calendar slot with no sample is reported as null, not as a NaN a
         # reader would plot as zero.  Every slot has nine samples over the
@@ -429,7 +452,10 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
         },
         "plant": plant,
         "wall_seconds": time.time() - started,
-        "worktree": worktree_stamp(),
+        # A real scoring run refuses to stamp a dirty tree, because a report
+        # whose commit does not identify its code is not evidence.  Only the
+        # unit test, whose report is thrown away, passes allow_dirty.
+        "worktree": worktree_stamp(allow_dirty=allow_dirty),
     }
     return report
 
@@ -637,8 +663,15 @@ def _plant(name: str) -> int:
     require(name in PLANTS, f"unknown plant {name}")
     try:
         if name == "ratio-denominator-zero":
+            # The reference here HAS variability, so this plant fires only
+            # because the planted line zeroes the denominator.  An earlier
+            # version passed a constant reference, whose scale is zero
+            # anyway -- the plant "failed" with the planted line deleted,
+            # which is the definition of a guard that proves nothing.
             mask = np.ones((2, 2), dtype=bool)
-            _ratio(np.ones((2, 2)), np.ones((2, 2)), np.ones((2, 2)), mask,
+            reference = np.array([[-1.0, -1.0], [1.0, 1.0]])
+            assert _spatial_scale(reference, np.ones((2, 2)), mask) > 0.0
+            _ratio(np.ones((2, 2)), reference, np.ones((2, 2)), mask,
                    plant=name)
         elif name == "mld-unsorted":
             depth = np.broadcast_to(np.array([5.0, 15.0]), (1, 1, 2)).copy()
@@ -646,19 +679,6 @@ def _plant(name: str) -> int:
                                np.ones((1, 1, 2), dtype=bool), plant=name)
         elif name == "trend-short":
             _relative_trend(np.array([1.0, 2.0]))
-        elif name == "month-shift":
-            # Pairing month m of one model with month m+1 of the other must
-            # change the difference; a scorer blind to the shift would report
-            # the same number and could never see a frame error.
-            straight = _rms(np.arange(6.0).reshape(2, 3)
-                            - np.arange(6.0).reshape(2, 3),
-                            np.ones((2, 3), dtype=bool))
-            shifted = _rms(np.arange(6.0).reshape(2, 3)
-                           - np.arange(1.0, 7.0).reshape(2, 3),
-                           np.ones((2, 3), dtype=bool))
-            require(straight == shifted,
-                    f"a one-month shift changes the difference from "
-                    f"{straight} to {shifted}, as it must")
     except (YEAR.GateError, SystemExit, AssertionError,
             ValueError) as error:
         print(f"plant {name} failed as required: {error}")
@@ -673,7 +693,8 @@ def main(argv=None) -> int:
     parser.add_argument("--score", action="store_true")
     parser.add_argument("--figures", action="store_true")
     parser.add_argument("--self-check", action="store_true")
-    parser.add_argument("--plant", default=None, choices=list(PLANTS))
+    parser.add_argument("--plant", default=None,
+                        choices=list(PLANTS) + list(SCORE_PLANTS))
     parser.add_argument("--months", type=int, default=DECADE_MONTHS)
     parser.add_argument("--clim-first-month", type=int,
                         default=CLIM_FIRST_MONTH,
@@ -687,7 +708,8 @@ def main(argv=None) -> int:
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    if args.self_check or args.plant is not None:
+    if args.self_check or (args.plant is not None
+                           and args.plant not in SCORE_PLANTS):
         return self_check(args.plant)
     if not (args.score or args.figures):
         parser.error("choose --score, --figures or --self-check")
@@ -697,7 +719,7 @@ def main(argv=None) -> int:
     if args.score:
         report = score(args.lego_root, args.nemo_dir, months=args.months,
                        clim_first_month=args.clim_first_month, seed=args.seed,
-                       mesh_path=args.mesh)
+                       mesh_path=args.mesh, plant=args.plant)
         destination.write_text(json.dumps(report, indent=2))
         print(json.dumps({
             "json": str(destination),

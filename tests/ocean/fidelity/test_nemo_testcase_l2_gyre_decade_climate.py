@@ -43,7 +43,7 @@ def test_self_check_passes_as_a_subprocess():
 
 
 @pytest.mark.parametrize("plant", ["ratio-denominator-zero", "mld-unsorted",
-                                   "trend-short", "month-shift"])
+                                   "trend-short"])
 def test_every_plant_fails(plant):
     """A guard that cannot fire is not a guard."""
     result = subprocess.run([sys.executable, str(HARNESS), "--plant", plant],
@@ -144,6 +144,42 @@ def test_the_acquisition_refuses_to_run_without_the_explicit_flag():
     assert "round132/oracle_daily_restarts" in text
 
 
+YEAR1_LEGO = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/decade"
+                  "/year1_validation")
+YEAR1_NEMO = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round132"
+                  "/oracle_daily_restarts")
+
+
+@pytest.mark.skipif(not (YEAR1_LEGO / "lego_seed0" / "day030.npz").is_file()
+                    or not YEAR1_NEMO.is_dir(),
+                    reason="the year-1 archive is not on this machine")
+def test_pairing_month_m_with_month_m_plus_one_changes_every_number(harness):
+    """The month pairing, exercised on the real snapshots.
+
+    An arithmetic self-check cannot prove this: the defect it guards against
+    is legoESM month m being read against NEMO month m+1, which only exists
+    inside ``score``.  So ``score`` is run twice on the year-1 archive, once
+    straight and once with the shift planted, and the difference series must
+    move by orders of magnitude.  If it did not, the scorer would be blind to
+    a frame error and every number it prints would be unanchored.
+    """
+    # allow_dirty: this report is thrown away at the end of the test, and a
+    # test that goes red whenever someone has an unsaved edit is a test
+    # nobody runs.  A real scoring run still refuses a dirty tree.
+    kwargs = dict(months=6, clim_first_month=2, seed=0, allow_dirty=True)
+    straight = harness.score(YEAR1_LEGO, YEAR1_NEMO, **kwargs)
+    shifted = harness.score(YEAR1_LEGO, YEAR1_NEMO, plant="month-shift",
+                            **kwargs)
+    a = straight["difference_series"]["T3D_rms"]
+    b = shifted["difference_series"]["T3D_rms"]
+    assert len(a) == len(b) == 6
+    # Every month must move, and by far more than the difference itself.
+    assert all(y > 100.0 * x for x, y in zip(a, b)), list(zip(a, b))
+    # And the straight run must reproduce the certified day-30 number, so the
+    # pairing that is NOT shifted is the right one.
+    assert a[0] == pytest.approx(2.327677e-06, rel=1e-6)
+
+
 def test_the_preregistration_states_the_bar_the_scorer_reports(harness):
     """The bar lives in the preregistration; the code only reports it."""
     text = PREREG.read_text()
@@ -151,3 +187,9 @@ def test_the_preregistration_states_the_bar_the_scorer_reports(harness):
     assert "1e-2" in text
     assert harness.BAR_RATIO == 1.0e-2
     assert harness.CLIM_FIRST_MONTH == 13
+    assert harness.BAR_DRIFT_YEAR1_K == 3.0e-3
+    # The brief's "EKE" is reported under the name of what it measures.
+    source = HARNESS.read_text()
+    assert "velocity_variance_about_climatology" in text
+    assert "velocity_variance_about_climatology_m2_s2" in source
+    assert "_EKE_m2_s2" not in source

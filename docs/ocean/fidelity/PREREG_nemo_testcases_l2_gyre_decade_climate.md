@@ -77,11 +77,18 @@ excluded from every climatology.
 3. **Drift.** Volume-weighted basin-mean T and S per month, both models, and
    their difference.
 4. **Energetics.** Volume-weighted domain-mean kinetic energy
-   `0.5·(u² + v²)` per month, both models; and EKE, the same quantity formed
-   from `u − u_clim`, `v − v_clim` where the climatology is the years-2-10 mean.
-   Both models' velocities are read at their own native C-grid points and are
-   *not* interpolated to T points; the formula is identical on both sides, so
-   the comparison is fair, but neither number is a certified energy budget.
+   `0.5·(u² + v²)` per month, both models; and the same quantity formed from
+   `u − u_clim`, `v − v_clim` where the climatology is the years-2-10 mean.
+   The round brief called that second number EKE. **It is not an eddy kinetic
+   energy on this card** — GYRE at this resolution has ~106 km cells over a
+   flat bottom and resolves no mesoscale, and a monthly snapshot cadence
+   cannot see one either — so it is reported under the name of what it
+   actually measures, `velocity_variance_about_climatology`, the variance of
+   the monthly flow about the record mean, i.e. the seasonal cycle plus the
+   drift. Both models' velocities are read at their own native C-grid points
+   and are *not* interpolated to T points; the formula is identical on both
+   sides, so the comparison is fair, but neither number is a certified energy
+   budget.
 5. **Seasonal cycle.** Area-weighted basin-mean SST and mixed-layer depth by
    calendar month (1..12), averaged over years 2-10, both models. Mixed-layer
    depth is the depth at which temperature first falls 0.2 K below the surface
@@ -122,7 +129,9 @@ the zonal-mean T and S sections:
 > **P3 — drift.** The two models' volume-mean temperatures stay within
 > 1e-2 K of each other at every month, and within 3e-3 K over year 1 — the
 > latter because a volume mean of a difference cannot exceed that difference's
-> RMS, which round 183 measured at 2.670992e-03 K on day 360.
+> RMS, which round 183 measured at 2.670992e-03 K on day 360. Both are
+> reported: `max_abs_T_volmean_difference` over all months and
+> `max_abs_T_volmean_difference_year1` over months 1-12.
 
 A number outside a bar is reported as a number, in the receipt, with the bar
 quoted next to it. The tool never prints PASS, FAIL or a verdict.
