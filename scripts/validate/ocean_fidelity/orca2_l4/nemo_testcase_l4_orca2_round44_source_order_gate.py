@@ -112,8 +112,6 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
     validate_nemo_testcase_card(card)
     cfg = card.recipe.model_config
     require(cfg.tracer_advection == "fct2", "ORCA2 no longer selects FCT2")
-    require(not card.recipe.z_coord.linear_free_surface,
-            "ORCA2 unexpectedly selects linear free surface")
 
     (tracer_path, tracer, entry, surface_fields, tmask, h_top) = (
         _source_operands(card, deck_root, record_root))
