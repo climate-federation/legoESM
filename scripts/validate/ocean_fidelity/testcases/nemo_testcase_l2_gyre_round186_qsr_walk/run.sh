@@ -75,7 +75,7 @@ done
 for pattern in 'number of the last time step.*nn_itend *= *2160' \
   'ocean time step.*rn_Dt *= *14400' \
   'Light penetration in temperature Eq.*ln_traqsr *= *T' \
-  '2 bands light penetration.*ln_qsr_2bd *= *T'; do
+  '2 band.*light penetration.*ln_qsr_2bd *= *T'; do
   if ! grep -Eq "$pattern" "$SOURCE_RUN/ocean.output"; then
     printf 'REFUSE: source run lacks resolved row: %s\n' "$pattern" >&2
     exit 65
