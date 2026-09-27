@@ -3708,6 +3708,13 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/domqco.f90:237-258': [
         'SUBROUTINE dom_qco_r3c_RK3( pssh, pr3t, pr3u, pr3v, pr3f )',
         ('END DO   ;   END DO', 4), 22],
+    # --- round 190: split the production QSR observer association ---
+    'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3_stg.f90:911-950': [
+        '!           !==  complete the tracers RHS  ==!   except ZDF (implicit)',
+        'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing', 40],
+    'ocean_model_latlon_cgrid.py:6917-6966': [
+        'if _return_tracer_process_trace:',
+        'process_qsr_rate=_nemo_ws_process_qsr_rate,', 50],
 }
 
 
