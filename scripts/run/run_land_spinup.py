@@ -173,8 +173,9 @@ def main(argv=None) -> int:
     from legoesm.land.boundary_data import (
         init_land_surface_data, make_step_land_params_updater)
     from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_SURFDATA_COSBY, convert_ic_soil_water,
         save_land_restart, load_land_restart,
-        merge_land_restart_into_template)
+        merge_land_restart_into_template, soil_hydraulics_stamp)
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -221,6 +222,10 @@ def main(argv=None) -> int:
                      + _cover1d(gsd.f_glacier))
     land_mask = land_frac >= args.land_frac_min
 
+    _hyd_stamp = soil_hydraulics_stamp(
+        config.hydraulics.retention_curve, HYDRAULICS_SOURCE_SURFDATA_COSBY,
+        args.surfdata)
+
     # State: resume from a restart, or cold-start.
     year0, t0_s = 0, 0.0
     if args.restart_from:
@@ -234,6 +239,15 @@ def main(argv=None) -> int:
         # round-trips the core fields; the optional structural fields are None.
         _template = init_multilayer_land_state(ncol, config, T_init=288.0)
         state = merge_land_restart_into_template(loaded, _template)
+        state, _conv = convert_ic_soil_water(
+            state, meta, config.hydraulics, _hyd_stamp, soil_dz,
+            land_mask=land_mask,
+            file_column_sig=meta.get("soil_hydraulics_column_sig"),
+            path=args.restart_from)
+        if _conv is not None:
+            print(f"restart: soil water converted to this run's hydraulics "
+                  f"({_conv['stamp']['retention_curve']} -> "
+                  f"{_conv['run_stamp']['retention_curve']}); psi re-derived")
         t0_s = float(meta["t_end_s"])
         year0 = int(round(t0_s / sec_per_year))
         print(f"resumed from {args.restart_from}: year {year0}, t={t0_s:.0f}s")
@@ -283,7 +297,9 @@ def main(argv=None) -> int:
                 soil_dz=soil_dz,
                 metadata={"grid_type": args.grid_type,
                           "resolution": args.resolution, "dt": dt},
-                soil_grid=config.soil_grid)
+                soil_grid=config.soil_grid,
+                soil_hydraulics=_hyd_stamp,
+                hydraulics=config.hydraulics)
 
     restart_out = Path(args.restart_out) if args.restart_out else out_dir / "land_ic.npz"
     save_land_restart(
@@ -294,7 +310,9 @@ def main(argv=None) -> int:
         metadata={"grid_type": args.grid_type, "resolution": args.resolution,
                   "dt": dt, "years": year0 + args.years,
                   "surface_scheme": args.surface_scheme},
-        soil_grid=config.soil_grid)
+        soil_grid=config.soil_grid,
+        soil_hydraulics=_hyd_stamp,
+        hydraulics=config.hydraulics)
 
     # Verdict for #746 item 1: is the land converging (spin-up) or pinned
     # (structural)?  The LAST year's |drift| vs the tolerance decides.
