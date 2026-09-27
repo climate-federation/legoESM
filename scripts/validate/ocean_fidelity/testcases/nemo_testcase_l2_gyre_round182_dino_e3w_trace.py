@@ -24,6 +24,9 @@ import jax.numpy as jnp
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plant-call", type=int, default=-1)
+    parser.add_argument("--sanitize-invalid", action="store_true",
+                        help="diagnostic only: report then replace invalid "
+                             "divisors, allowing later call sites to execute")
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args()
     args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
@@ -66,6 +69,10 @@ def main() -> None:
                 invalid=invalid,
                 ordered=True,
             )
+            if ns.sanitize_invalid:
+                call_kwargs["e3w_int"] = jnp.where(
+                    jnp.isfinite(e3w) & (e3w > 0.0), e3w,
+                    jnp.ones_like(e3w))
         return original(*call_args, **call_kwargs)
 
     eos.compute_buoyancy_frequency_nemo_bn2 = traced
