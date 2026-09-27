@@ -291,7 +291,9 @@ def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
     the bulk pack's does under the same forcing (measured 2026-09-26: largest
     step change 1.3 K while melting out vs 8 K for bulk, whose whole 3 kg pack
     vanishes in one step; both ~6-8 K at the forcing switch itself)."""
-    seq = ((_forcing(1, T_air=282.0, sw=500.0, lw=330.0, q=0.004), 48),
+    # 72 melt steps: under partial cover only f*G reaches a thin pack, so its
+    # last grams decay ~exponentially (measured 2.2e-6 kg/m2 left after 48 steps).
+    seq = ((_forcing(1, T_air=282.0, sw=500.0, lw=330.0, q=0.004), 72),
            (_forcing(1, T_air=266.0, snow=3e-4, sw=0.0, lw=250.0), 48))
     jumps = {}
     for scheme in ("bulk", "layered"):
@@ -432,3 +434,20 @@ def test_rain_on_snow_enters_the_pack_in_the_land_step():
     gained = float(st1.snow_depth[0] - st.snow_depth[0])
     sub = float(out[0][1].surface_mass_flux[0]) * 1800.0     # upper bound on vapour loss
     assert gained == pytest.approx(f * rain * 1800.0, abs=abs(sub) + 1e-6)
+
+
+def test_trace_pack_does_not_block_ground_evaporation():
+    """Two-leaf over a trace pack (SWE 0.01, f = 0.001): only f of the ground
+    latent is the pack's, so the reported latent flux matches the snow-free
+    column's.  A binary split sent ALL ground latent to the pack, whose
+    top-layer clamp returned it to the ground heat flux."""
+    cfg = _cfg(scheme=TwoLeafCanopyConfig())
+    lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.3]))
+    f = _forcing(1, T_air=285.0, sw=500.0, lw=330.0, q=0.004)
+    lh = {}
+    for swe in (0.0, 0.01):
+        st = _state(cfg, 1, T_soil=288.0, swe=swe)
+        _, out = _run(cfg, st, f, 1, 1800.0, lp=lp)
+        lh[swe] = float(out[0][1].lhflx[0])
+    assert lh[0.0] > 50.0, lh
+    assert lh[0.01] == pytest.approx(lh[0.0], rel=0.05), lh

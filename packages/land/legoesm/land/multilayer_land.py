@@ -981,8 +981,17 @@ def _step_multilayer_land_impl(
         lhflx_ground = jnp.zeros_like(lhflx)
         lhflx_transp = lhflx
     transp_to_snow = has_snow & (lhflx_transp < 0.0)
-    snow_latent = (jnp.where(has_snow, lhflx_ground, 0.0)
-                   + jnp.where(transp_to_snow, lhflx_transp, 0.0))
+    if layered:
+        # Partial cover: only the snow-covered fraction f of the ground (and of
+        # canopy dew) is the pack; the snow-free (1-f) evaporates from the soil.
+        # A binary split here routed ALL ground latent to a trace pack, whose
+        # top-layer clamp then returned it to G (measured: ~0 latent flux over
+        # 290 K soil for ~20 h while a 3 kg/m2 pack melted out).
+        snow_latent = f_snow * (lhflx_ground
+                                + jnp.where(transp_to_snow, lhflx_transp, 0.0))
+    else:
+        snow_latent = (jnp.where(has_snow, lhflx_ground, 0.0)
+                       + jnp.where(transp_to_snow, lhflx_transp, 0.0))
     soil_latent = lhflx - snow_latent
 
     # --- Snowpack sublimation / frost (L_s), pack-limited ---
@@ -1124,9 +1133,18 @@ def _step_multilayer_land_impl(
     # snow).  SimpleSEB over snow leaves soil_flux == 0, so the branch is a no-op
     # for it.
     f_veg = jnp.clip(w_frac_rz, 0.0, 1.0)
-    evap_bare, evap_transp = _partition_latent_root_top(
-        soil_evap, has_snow, f_veg,
-        surface_out.LE_canopy, surface_out.LE_soil)
+    if layered:
+        # The soil stream is transpiration plus the snow-FREE share of the ground
+        # latent, split like any snow-free cell.
+        _le_soil = (None if surface_out.LE_soil is None
+                    else (1.0 - f_snow) * surface_out.LE_soil)
+        evap_bare, evap_transp = _partition_latent_root_top(
+            soil_evap, jnp.zeros_like(has_snow), f_veg,
+            surface_out.LE_canopy, _le_soil)
+    else:
+        evap_bare, evap_transp = _partition_latent_root_top(
+            soil_evap, has_snow, f_veg,
+            surface_out.LE_canopy, surface_out.LE_soil)
 
     # --- Canopy interception, phase 2: deplete the store by the wet-leaf flux --
     # The canopy energy balance already computed the wet-leaf evaporation

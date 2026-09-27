@@ -4555,8 +4555,8 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
 
 def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
     """--land-snow-scheme / --land-snow-emissivity reach ExperimentConfig, and each
-    deck states its snowpack explicitly: production layered with the observed
-    snow emissivity, the preserved old deck bulk."""
+    deck states its snowpack explicitly: both bulk (moving production to the
+    layered pack is an open user decision)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
     base = ["--dataset", "analytical", "--use-multilayer-land"]
@@ -4567,7 +4567,7 @@ def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
         parser))
     assert cfg1.land_snow_scheme == "layered"
     assert cfg1.land_snow_emissivity == 0.97
-    for deck, want in (("amip_production.yaml", "layered"),
+    for deck, want in (("amip_production.yaml", "bulk"),
                        ("amip_sundqvist_l36.yaml", "bulk")):
         p = build_arg_parser()
         rows = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), p)
@@ -4576,9 +4576,6 @@ def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
         cfg = build_config_from_args(_postprocess_args(
             p.parse_args(_AMIP_DUMMY_PATHS), p))
         assert cfg.land_snow_scheme == want, deck
-    rows = load_yaml_config(str(_repo_root() / "config" / "amip"
-                                / "amip_production.yaml"), build_arg_parser())
-    assert rows.get("land_snow_emissivity") == 0.98
 
 
 @pytest.mark.parametrize("argv, match", [

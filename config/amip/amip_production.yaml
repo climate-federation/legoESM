@@ -245,10 +245,9 @@ multilayer_soil_depth: 3.0
 # Soil freeze/thaw ON (user 2026-09-26), as in CLM5 and as the land IC spin-up
 # ran; the land calibration's tables were fitted with it off.
 land_soil_freeze_thaw: true
-# Layered snowpack (5 equal-mass layers solved with the soil column; user
-# 2026-09-26), snow emissivity from observations (Warren 1982; Hori et al. 2006).
-land_snow_scheme: layered
-land_snow_emissivity: 0.98
+# Snowpack: explicit bulk (one SWE reservoir), as every prior production run.
+# Moving production to the layered pack (bulk -> layered) is an OPEN user decision.
+land_snow_scheme: bulk
 land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true

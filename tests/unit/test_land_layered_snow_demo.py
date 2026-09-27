@@ -24,4 +24,4 @@ def test_forcing_schedule_and_short_run():
     assert float(demo.forcing_at(25 * spd).precip_total[0]) > 0.0        # day-25 rain
     assert float(demo.forcing_at(25 * spd).precip_snow[0]) == 0.0
     rows, held = demo.run("layered", days=2.0 / spd)
-    assert rows.shape == (2, 3) and np.all(np.isfinite(rows)) and held == 0
+    assert rows.shape == (2, 4) and np.all(np.isfinite(rows)) and held == 0

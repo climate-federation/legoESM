@@ -6,7 +6,7 @@ to 258 K with a +-4 K diurnal cycle; 8-hour days with 150 W/m2 peak sun;
 downwelling LW = 0.75 sigma T_air^4; three 10 kg/m2 snowfalls (days 2, 10, 18,
 12 h each) and a 275 K rain-on-snow day (day 25, 5 kg/m2); air at 80%
 relative humidity over ice.  Prints soil
-temperature interpolated to 0.3 m, SWE and skin T for both snowpacks.
+temperature interpolated to 0.3 m and 1 m, SWE and skin T for both snowpacks.
 
     JAX_ENABLE_X64=1 python scripts/validate/land_layered_snow_demo.py
 """
@@ -30,7 +30,7 @@ from legoesm.thermo import saturation_mixing_ratio_ice
 jax.config.update("jax_enable_x64", True)
 DT = 1800.0
 DAYS = 30
-DEPTH = 0.3
+DEPTHS = (0.3, 1.0)
 
 
 def forcing_at(k):
@@ -68,7 +68,8 @@ def run(snow_scheme, days=DAYS):
     for k in range(int(days * 86400 / DT)):
         st, resp, _, sfc = step(st, forcing_at(k))
         held += int(sfc.n_held)
-        rows.append((np.interp(DEPTH, z, np.asarray(st.T_soil[0])),
+        T = np.asarray(st.T_soil[0])
+        rows.append((np.interp(DEPTHS[0], z, T), np.interp(DEPTHS[1], z, T),
                      float(st.snow_depth[0]), float(resp.T_sfc[0])))
     return np.array(rows), held
 
@@ -76,19 +77,20 @@ def run(snow_scheme, days=DAYS):
 def main():
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                          text=True).stdout.strip()
-    print(f"git {sha}  dt={DT:.0f}s days={DAYS}  depth={DEPTH} m  freeze_thaw=on  two_leaf LAI=1")
+    print(f"git {sha}  dt={DT:.0f}s days={DAYS}  depths={DEPTHS} m  freeze_thaw=on  two_leaf LAI=1")
     out = {s: run(s) for s in ("bulk", "layered")}
     spd = int(86400 / DT)
-    print("day | T0.3m bulk  layered | SWE bulk  layered | Tsfc bulk  layered")
+    print("day | T0.3m bulk  layered | T1m bulk  layered | SWE bulk  layered | Tsfc bulk  layered")
     for d in (1, 5, 10, 15, 20, 25, 30):
         i = d * spd - 1
         b, lay = out["bulk"][0][i], out["layered"][0][i]
-        print(f"{d:3d} | {b[0]:7.2f}  {lay[0]:7.2f} | {b[1]:6.1f}  {lay[1]:6.1f} | "
-              f"{b[2]:7.2f}  {lay[2]:7.2f}")
+        print(f"{d:3d} | {b[0]:7.2f}  {lay[0]:7.2f} | {b[1]:7.2f}  {lay[1]:7.2f} | "
+              f"{b[2]:6.1f}  {lay[2]:6.1f} | {b[3]:7.2f}  {lay[3]:7.2f}")
     for s in ("bulk", "layered"):
         r, held = out[s]
-        print(f"{s}: mean T0.3m days 21-30 = {r[20 * spd:, 0].mean():.2f} K, "
-              f"min = {r[:, 0].min():.2f} K, held columns = {held}")
+        print(f"{s}: mean days 21-30 T0.3m = {r[20 * spd:, 0].mean():.2f} K, "
+              f"T1m = {r[20 * spd:, 1].mean():.2f} K; min T0.3m = {r[:, 0].min():.2f} K, "
+              f"held columns = {held}")
 
 
 if __name__ == "__main__":
