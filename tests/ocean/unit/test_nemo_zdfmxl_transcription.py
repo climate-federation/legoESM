@@ -729,7 +729,7 @@ def test_carried_mld_n2_skips_dead_recompute_with_dry_mesh_e3w(monkeypatch):
     z = _z_coord(
         np.geomspace(10.0, 100.0, nlev), nlat, nlon,
         np.full((nlat, nlon), nlev - 1))
-    active = np.asarray(z.is_active)
+    active = np.asarray(z.is_active) > 0.5
     iface_wet = active[..., :-1] & active[..., 1:]
     carried_e3w = np.where(iface_wet, 1.0, 0.0)
     carried_n2 = np.zeros_like(carried_e3w)
