@@ -930,7 +930,8 @@ class ExperimentConfig(NamedTuple):
     # reviving above an inversion (the default False lets a plume killed by
     # negative buoyancy resume nonzero M_u aloft — physically questionable,
     # and the cause of convective detrainment heating reaching the ~100 hPa
-    # tropical cold point).  Tiedtke-only (guarded by the run_amip CLI).
+    # tropical cold point).  Tiedtke-only: validate_strict refuses it with any
+    # other convection scheme.
     convective_buoyancy_death_memory: bool = False
 
     # Convection / Turbulence / GWD
@@ -2092,6 +2093,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_update_seconds must be a finite value >= 0 "
                 f"(0 = every step), got {self.land_update_seconds}")
+        if self.convective_buoyancy_death_memory and self.convection != "tiedtke":
+            errors.append(
+                "convective_buoyancy_death_memory=True requires "
+                f"convection='tiedtke' (got {self.convection!r}): only the "
+                "Tiedtke scheme reads it — the knob would be silently inert.")
         if self.land_soil_freeze_thaw and not self.use_multilayer_land:
             errors.append(
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
