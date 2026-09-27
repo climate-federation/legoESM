@@ -39,7 +39,7 @@ def main() -> None:
 
     from legoesm.ocean import eos
 
-    def trace_state(label, state):
+    def trace_state(label, state, model=None):
         fields = {
             "eta": state.eta.data,
             "T": state.T.data,
@@ -56,6 +56,27 @@ def main() -> None:
                 for name, value in fields.items()
             },
         )
+        if model is not None:
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                compute_face_masks_3d,
+            )
+            wet_t = jnp.asarray(model.z_coord.is_active, dtype=bool)
+            wet_u, wet_v = compute_face_masks_3d(wet_t, model.grid)
+            wet_eta = jnp.asarray(state.land_mask.data, dtype=bool)
+            jax.debug.print(
+                label + "_ACTIVE "
+                "eta_nonfinite={eta} T_nonfinite={T} S_nonfinite={S} "
+                "u_nonfinite={u} v_nonfinite={v} "
+                "eta_cells={eta_n} T_cells={T_n} u_cells={u_n} v_cells={v_n}",
+                eta=jnp.sum(wet_eta & ~jnp.isfinite(state.eta.data)),
+                T=jnp.sum(wet_t & ~jnp.isfinite(state.T.data)),
+                S=jnp.sum(wet_t & ~jnp.isfinite(state.S.data)),
+                u=jnp.sum(wet_u & ~jnp.isfinite(state.u.data)),
+                v=jnp.sum(wet_v & ~jnp.isfinite(state.v.data)),
+                eta_n=jnp.sum(wet_eta), T_n=jnp.sum(wet_t),
+                u_n=jnp.sum(wet_u), v_n=jnp.sum(wet_v),
+                ordered=True,
+            )
 
     if ns.trace_step_boundaries:
         from legoesm.ocean.experiments import dino
@@ -128,7 +149,7 @@ def main() -> None:
 
     def traced_step(model, state, *step_args, **step_kwargs):
         if ns.trace_step_boundaries:
-            trace_state("TRACE_MODEL_ENTRY", state)
+            trace_state("TRACE_MODEL_ENTRY", state, model)
         result = original_step(model, state, *step_args, **step_kwargs)
         fields = {
             "eta": result.eta.data,
@@ -146,6 +167,8 @@ def main() -> None:
                 for name, value in fields.items()
             },
         )
+        if ns.trace_step_boundaries:
+            trace_state("TRACE_STEP_OUT_ACTIVE_CHECK", result, model)
         return result
 
     LatLonCGridOceanModel.step = traced_step
