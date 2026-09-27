@@ -429,6 +429,18 @@ FILES = {
         NEMO / "cfgs/DINO/BLD/ppsrc/nemo/zdfphy.f90"),
     "DINO/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/DINO/BLD/ppsrc/nemo/trazdf.f90"),
+    "DINO/BLD/ppsrc/nemo/usrdef_zgr.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/usrdef_zgr.f90"),
+    "DINO/BLD/ppsrc/nemo/zgr_lib.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/zgr_lib.f90"),
+    "DINO/BLD/ppsrc/nemo/domain.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/domain.f90"),
+    "DINO/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/domqco.f90"),
+    "DINO/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/eosbn2.f90"),
+    "DINO/BLD/ppsrc/nemo/ldfslp.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/ldfslp.f90"),
     # Round 95 consumes the operator-run Round-94 stage-closure record and
     # therefore binds the transport boundary to that record's compiled card.
     "GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -1514,6 +1526,35 @@ CITATION_MAP = {
     'DINO/BLD/ppsrc/nemo/trazdf.f90:219-235': [
         '! Diagonal, lower (i), upper (s)',
         ('END DO   ;   END DO', 9), 17],
+    # --- round 182: DINO raw geometry and the complete live-Kmm route ---
+    'DINO/BLD/ppsrc/nemo/usrdef_zgr.f90:123-135': [
+        'IF( ld_zco ) THEN',
+        'CALL zgr_msk_top_bot( pdept_1d, zbathy, k_top, k_bot )', 13],
+    'DINO/BLD/ppsrc/nemo/zgr_lib.f90:198-209': [
+        '!                       !==  t- and w- scale factors from depth  ==!',
+        '&                   pe3uw, pe3vw        )', 12],
+    'DINO/BLD/ppsrc/nemo/domain.f90:194-216': [
+        'ht_0(:,:) = 0._wp  ! Reference ocean thickness',
+        'r1_hf_0(:,:) = ssfmask(:,:) / ( hf_0(:,:) + 1._wp - ssfmask(:,:) )',
+        23],
+    'DINO/BLD/ppsrc/nemo/domqco.f90:186-207': [
+        'SUBROUTINE dom_qco_r3c( pssh, pr3t, pr3u, pr3v, pr3f )',
+        'END DO   ;   END DO', 22],
+    'DINO/BLD/ppsrc/nemo/eosbn2.f90:1507-1517': [
+        'DO jk =  2,  jpkm1',
+        'END DO   ;   END DO   ;   END DO', 11],
+    'DINO/BLD/ppsrc/nemo/stpmlf.f90:197-216': [
+        'IF( l_ldfslp ) THEN',
+        'CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nnn )', 20],
+    'DINO/BLD/ppsrc/nemo/ldfslp.f90:139-177': [
+        'INTEGER , INTENT(in)                   ::   kt',
+        'zhmlpt(ji,jj) = ((gdept_3d(ji,jj,nmln(ji,jj)-1)', 39],
+    'DINO/BLD/ppsrc/nemo/ldfslp.f90:215-216': [
+        'DO jj = ntsj-( 1), ntej+(  1 )',
+        'r1_hmlw(ji,jj) = 1._wp / MAX(', 2],
+    'DINO/BLD/ppsrc/nemo/ldfslp.f90:320-345': [
+        'DO jj = ntsj-( 1), ntej+(  1 )',
+        'zck = ( ((gdepw_3d(ji,jj,jk)', 26],
     # --- round 104: the shear-production routine and its operand builders ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:167-168': [
         '!!st                         CALL zdf_phy( kstp, Nbb, Nnn, Nrhs )',
