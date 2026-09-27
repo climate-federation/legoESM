@@ -505,8 +505,8 @@ def test_native_e3w_coordinate_validation_wrappers_and_ad():
         nemo_gdept_0_m=gd,
         nemo_e3w_0_m=ew_roundoff,
     )
-    assert np.allclose(
-        np.asarray(z_roundoff.nemo_e3w_0), ew_roundoff, rtol=0.0, atol=1.0e-5
+    np.testing.assert_array_equal(
+        np.asarray(z_roundoff.nemo_e3w_0), ew_roundoff
     )
 
     z = create_z_star_from_thicknesses(
