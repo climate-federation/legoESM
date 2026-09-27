@@ -73,7 +73,7 @@ def test_same_key_different_mesh_is_flagged(tmp_path):
 def test_atmosphere_rows_follow_atm_nlev(tmp_path):
     atm = {"component": "mpas_atm", "grid_type": "icosahedral", "platform": "gpu",
            "precision": "float32", "subdivision": 9, "nlev": 40, "n_devices": 1,
-           "valid": True, "metadata": {}}
+           "valid": True, "finite_ok": True, "metadata": {}}
     _write(tmp_path / "b", "atm_d1", {**atm, "steady_median_ms": 100.0})
     _write(tmp_path / "c", "atm_d1", {**atm, "steady_median_ms": 200.0})
     assert _main(tmp_path, nlev="40") == 1     # compared, and slower
@@ -168,3 +168,25 @@ def test_latlon_atmosphere_rows_must_prove_a_finite_state(tmp_path):
     _write(tmp_path / "b", "ll_d1", {**ll, "steady_median_ms": 100.0})   # legacy: unchecked
     _write(tmp_path / "c", "ll_d1", {**ll, "steady_median_ms": 200.0})
     assert _main(tmp_path) == 2                # refused on both sides
+
+
+def test_mpas_atmosphere_rows_must_prove_finite_and_match_the_coefficient(tmp_path):
+    atm = {"component": "mpas_atm", "grid_type": "icosahedral", "platform": "gpu",
+           "precision": "float32", "subdivision": 8, "nlev": 40, "n_devices": 1,
+           "valid": True, "metadata": {}}
+    _write(tmp_path / "b", "a_d1", {**atm, "steady_median_ms": 100.0})       # legacy: unchecked
+    _write(tmp_path / "c", "a_d1", {**atm, "steady_median_ms": 200.0})
+    assert _main(tmp_path) == 2
+    _write(tmp_path / "b", "a_d1", {**atm, "steady_median_ms": 100.0, "finite_ok": True, "nu_del4": 1e16})
+    _write(tmp_path / "c", "a_d1", {**atm, "steady_median_ms": 100.0, "finite_ok": True, "nu_del4": 1.2e13})
+    assert _main(tmp_path) == 3                # different physics is a mismatch, not a comparison
+
+
+def test_icosahedral_hyperdiff_rule_scales_with_dx4():
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "bench"))
+    from run_levante_gpu_scaling import hyperdiff_coeff
+    assert hyperdiff_coeff(5, "icosahedral") == pytest.approx(5e16, rel=1e-12)
+    for lev in (6, 7, 8):   # nCells ~ 4^L, so dx^4 ~ 16^-L
+        assert hyperdiff_coeff(lev, "icosahedral") == pytest.approx(
+            hyperdiff_coeff(lev - 1, "icosahedral") / 16, rel=1e-3)

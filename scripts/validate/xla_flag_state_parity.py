@@ -61,11 +61,11 @@ def _child(lane, steps, out):
     elif lane == "mpas_atm":
         b = _load_bench("bench_mpas_spmd_scaling")
         from legoesm.parallel.sharded_dynamics import make_voronoi_sharded_step
+        dt = max(600.0 * 4.0 ** (4 - 5), 30.0)
         _, model, s, dev_config = b.build_model_and_state(
-            5, 26, N_DEV, N_DEV, "sfc", lloyd_iterations=0)
+            5, 26, N_DEV, N_DEV, "sfc", dt=dt, lloyd_iterations=0)
         os.environ["LEGOESM_MPAS_WIDE_HALO"] = "1"
         step = make_voronoi_sharded_step(model, dev_config, halo_strategy="auto")
-        dt = max(600.0 * 4.0 ** (4 - 5), 30.0)
         run = lambda st: step(st, dt)  # noqa: E731
     else:
         raise ValueError(f"unknown lane {lane!r}")

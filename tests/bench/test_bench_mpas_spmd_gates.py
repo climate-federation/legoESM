@@ -80,9 +80,44 @@ def test_lloyd_flag_reaches_the_mesh_builder(monkeypatch):
 
     monkeypatch.setattr(voronoi, "create_voronoi_mesh", _spy)
     with pytest.raises(RuntimeError, match="stop-after-mesh-request"):
-        mod.build_model_and_state(4, 4, 1, 1, "sfc", lloyd_iterations=0)
+        mod.build_model_and_state(4, 4, 1, 1, "sfc", dt=600.0, lloyd_iterations=0)
     assert seen["level"] == 4
     assert seen["lloyd_iterations"] == 0
+
+
+
+def test_del4_coeff_is_the_levante_rule_capped_by_dt():
+    sys.path.insert(0, str(_BENCH.parent))
+    from run_levante_gpu_scaling import hyperdiff_coeff
+    from legoesm import constants
+    mod = _load_bench()
+    assert mod.DEL4_S_MAX == 6e-4   # user-approved margin, 2026-09-27
+
+    def s_num(level, dt):
+        dx = constants.R_earth * (4 * 3.141592653589793 / (10 * 4 ** level + 2)) ** 0.5
+        return mod.del4_coeff(level, dt) * dt / dx ** 4
+
+    assert s_num(4, 600.0) == pytest.approx(mod.DEL4_S_MAX, rel=1e-12)   # cap binds
+    assert mod.del4_coeff(4, 300.0) == pytest.approx(2 * mod.del4_coeff(4, 600.0))
+    assert mod.del4_coeff(8, 5.0) == hyperdiff_coeff(8, "icosahedral")   # rule binds
+    assert s_num(8, 5.0) < mod.DEL4_S_MAX
+
+
+def test_builder_passes_the_capped_coefficient(monkeypatch):
+    import legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas as pe
+
+    mod = _load_bench()
+    seen = {}
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop-at-config")
+
+    monkeypatch.setattr(pe, "MPASPrimitiveEquationConfig", _spy)
+    with pytest.raises(RuntimeError, match="stop-at-config"):
+        mod.build_model_and_state(2, 4, 1, 1, "sfc", dt=1200.0, lloyd_iterations=0)
+    want = mod.del4_coeff(2, 1200.0)
+    assert seen["nu_del4"] == want and seen["nu_del4_ps"] == want
 
 
 def test_gather_voronoi_state_spmd_round_trip():

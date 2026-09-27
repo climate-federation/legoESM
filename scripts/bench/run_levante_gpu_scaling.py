@@ -884,7 +884,7 @@ def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
 # Hyperdiffusion scaling
 # ===========================================================================
 
-def _hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
+def hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     """Scale \\nabla^4 hyperdiffusion coefficient with resolution."""
     if grid_type == "spectral":
         ref_n = 42
@@ -1495,7 +1495,7 @@ def run_benchmark(
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
         grid = create_gaussian_grid(n_grid)
-        hd = _hyperdiff_coeff(n_grid, grid_type)
+        hd = hyperdiff_coeff(n_grid, grid_type)
         config = SpectralPEConfig(
             hyperdiff_coeff=hd,
             hyperdiff_order=4,
@@ -1521,7 +1521,7 @@ def run_benchmark(
         grid = create_voronoi_mesh(subdivision_level=n_grid)
 
         total_cells = grid.nCells * n_levels
-        hd = _hyperdiff_coeff(n_grid, grid_type)
+        hd = hyperdiff_coeff(n_grid, grid_type)
         config = MPASPrimitiveEquationConfig(
             nu_del4=hd,
             nu_del4_ps=hd,
@@ -1655,7 +1655,7 @@ def run_benchmark(
 
         grid = create_cubed_sphere(n_grid)
         cdgrid = create_cubed_sphere_cdgrid(grid)
-        hd = _hyperdiff_coeff(n_grid, grid_type)
+        hd = hyperdiff_coeff(n_grid, grid_type)
         # When mass anchoring (``fix_mass_hydrostatic_target``) is active
         # we already get exact mass conservation via a single post-step
         # allreduce.  The per-stage ``zero_mean_ps_tendency`` correction

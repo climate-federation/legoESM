@@ -75,6 +75,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from metadata import (  # noqa: E402
     annotate_incomplete, hlo_collective_census, scaling_metadata,
     state_all_finite, tidy_throughput_fields)
+from run_levante_gpu_scaling import hyperdiff_coeff  # noqa: E402
+
+# Cap on the del4 stability number nu*dt/dx^4 (dx = mean cell spacing),
+# user-approved 2026-09-27.  Measured on the lloyd-0 mesh over 500 steps:
+# finite at 0.0006-0.003, non-finite from 0.008 up; 6e-4 keeps a margin.
+DEL4_S_MAX = 6e-4
+
+
+def del4_coeff(subdivision: int, dt: float) -> float:
+    """Levante resolution rule for the del4 coefficient, capped at DEL4_S_MAX."""
+    from legoesm import constants
+    dx = constants.R_earth * np.sqrt(4.0 * np.pi / (10 * 4 ** subdivision + 2))
+    return float(min(hyperdiff_coeff(subdivision, "icosahedral"),
+                     DEL4_S_MAX * dx ** 4 / dt))
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -96,8 +110,8 @@ MPAS_PARITY_MAX_STEPS = 8
 MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
 
 
-def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
-                          moist=False, lloyd_iterations=50, fix_mass=True):
+def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method, *,
+                          dt, moist=False, lloyd_iterations=50, fix_mass=True):
     """Reordered+padded global mesh, MPAS PE model, baroclinic-wave IC.
 
     ``reorder_target`` sets the PARTITION (and ghost padding) so every run
@@ -129,9 +143,15 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
     sigma = create_sigma_coordinate(nlev)
     # Same recipe as the icosahedral lane of run_levante_gpu_scaling /
     # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion,
-    # energy-conserving PV flux, SSP-RK3, global mass fixer.
+    # energy-conserving PV flux, SSP-RK3, global mass fixer.  The del4
+    # coefficient follows that lane's resolution rule (5e16 m^4/s at level 5,
+    # scaled with dx^4), capped at the stability limit measured for THIS dt.
+    # It was a fixed 1e16 at every level, which broke the limit from level 7
+    # up (levels 7 and 8 non-finite within 500 steps, 2026-09-27); the plain
+    # rule broke it at levels 3-4 with this bench's automatic dt.
+    nu4 = del4_coeff(subdivision, dt)
     cfg = MPASPrimitiveEquationConfig(
-        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=fix_mass,
+        nu_del4=nu4, nu_del4_ps=nu4, fix_mass=fix_mass,
         pv_scheme="energy", time_integrator="ssp_rk3",
     )
     dev_config = create_voronoi_device_mesh(
@@ -351,7 +371,7 @@ def main() -> int:
                else PrecisionPolicy.fp32())
     mesh, model, s0, dev_config = build_model_and_state(
         args.subdivision, args.nlev, reorder_for, nd, args.partition_method,
-        moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd,
+        dt=dt, moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd,
         fix_mass=not args.no_fix_mass)
 
     if args.multicontroller:
@@ -614,6 +634,7 @@ def main() -> int:
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,
+        nu_del4=float(model.config.nu_del4),
         # lloyd=0 is the LABELLED synthetic scaling mesh — anti-masquerade:
         # a row without this field could pass as a production-SCVT receipt.
         lloyd_iterations=args.lloyd,
