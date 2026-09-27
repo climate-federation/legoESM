@@ -94,12 +94,24 @@ boundaries before transferring this observer result.
 
 ## Review and verification
 
-Independent Codex verdict: **PENDING**.
+The required independent Codex command was attempted with `--sandbox
+read-only`; it produced no scientific verdict because its app-server could not
+initialize.  Its decisive output is quoted verbatim:
 
-The focused test, citation gate, shifted-citation plant, and final test summary
-are recorded under the Round-190 evidence root.  No broad ocean battery is
-required because no executable production path, recipe, or physics gate
-changed.
+> `Error: failed to initialize in-process app-server client: Read-only file system (os error 30)`
+
+Accordingly this diagnostic receipt remains **UNREVIEWED** under the campaign's
+two-reviewer rule.  Nothing is landing, so this does not authorize a physics
+claim or candidate.
+
+The receipt citation gate passed all three cited ranges with zero unmapped,
+failed, or map-audit-failure rows.  The cumulative default-receipt audit passed all
+274 citations.  Shifting the compiled `traqsr` citation by two lines changed
+the receipt gate to FAIL and exited 1.  The focused battery
+`test_nemo_testcase_l2_gyre_round186_qsr_walk.py`,
+`test_nemo_testcase_receipt_citation_gate.py`, and `test_nemo_recipe.py`
+reported `49 passed in 309.14s (0:05:09)`.  No broad ocean battery is required
+because no executable production path, recipe, or physics gate changed.
 
 ## OPEN — round 191
 
