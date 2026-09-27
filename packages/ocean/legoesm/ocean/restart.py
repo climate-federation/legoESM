@@ -1611,40 +1611,30 @@ def _rebuild_slots(template, kinds: dict, prefix: str, loaded: dict,
     return out
 
 
-def _migrate_v3_deviation_bt_hist(state, in_path: Path):
-    """Convert the only readable legacy bt_hist representation to v4.
+def _refuse_v3_deviation_bt_hist(state, in_path: Path):
+    """Refuse a version-3 archive that carries the deviation-form ``bt_hist``.
 
     Version 3 persisted ``final - history`` for each NEMO AB3/AM4 b/bb slot.
-    The matching final values are the independently persisted ``uu_b``,
-    ``vv_b`` and ``eta`` fields.  Refuse an incomplete archive rather than
-    silently treating deviations as NEMO's absolute histories.
+    Recovering the absolute histories needs the matching FINAL values, i.e.
+    the depth-mean external mode.  A version-3 archive does not hold one:
+    ``uu_b``/``vv_b`` are version-4 slots, and reducing the 3-D velocity here
+    would need the grid, the face masks and the live layer thicknesses, none
+    of which the loader has.  So there is no readable conversion, and a
+    version-3 ``bt_hist`` is rejected with that said plainly rather than
+    silently reinterpreted as absolute histories.
+
+    Version-3 archives WITHOUT ``bt_hist`` (the common case: any run that did
+    not use the NEMO AB3/AM4 barotropic filter) still load unchanged.
     """
-    hist = getattr(state, "bt_hist", None)
-    if hist is None:
+    if getattr(state, "bt_hist", None) is None:
         return state
-
-    def fail(detail: str):
-        raise ValueError(
-            f"load_run_restart: {in_path} cannot migrate deviation-form "
-            f"bt_hist: {detail}")
-
-    if not isinstance(hist, tuple) or len(hist) != 6:
-        fail(f"expected six arrays, got {type(hist).__name__}")
-    uu_b = getattr(state, "uu_b", None)
-    vv_b = getattr(state, "vv_b", None)
-    eta = getattr(state, "eta", None)
-    if not all(isinstance(x, Field) for x in (uu_b, vv_b, eta)):
-        fail("the paired persisted uu_b, vv_b and eta fields are required")
-
-    finals = (uu_b.data, uu_b.data, vv_b.data, vv_b.data,
-              eta.data, eta.data)
-    absolute = []
-    for i, (final, delta) in enumerate(zip(finals, hist)):
-        if not hasattr(delta, "shape") or delta.shape != final.shape:
-            got = getattr(delta, "shape", None)
-            fail(f"element {i} has shape {got}, expected {final.shape}")
-        absolute.append(final - delta.astype(final.dtype))
-    return state._replace(bt_hist=tuple(absolute))
+    raise ValueError(
+        f"load_run_restart: {in_path} is a format-3 archive whose barotropic "
+        "AB3/AM4 history was stored as final-minus-history deviations. That "
+        "form cannot be converted to the absolute histories this build reads "
+        "(the matching final values are not in the archive), so this restart "
+        "must be REGENERATED with the current build. Format-3 archives that "
+        "carry no barotropic history load normally.")
 
 
 def load_run_restart(path: str | Path, template_state, *,
@@ -1720,7 +1710,7 @@ def load_run_restart(path: str | Path, template_state, *,
     # Payload-dependent reconstruction (decode + shape + static geometry).
     state = _rebuild_slots(template_state, meta["slots"], "", loaded, in_path)
     if meta["format"] == 3:
-        state = _migrate_v3_deviation_bt_hist(state, in_path)
+        state = _refuse_v3_deviation_bt_hist(state, in_path)
     ice_state = (_rebuild_slots(ice_template, ice_kinds, _ICE_PREFIX, loaded,
                                 in_path)
                  if ice_kinds else None)

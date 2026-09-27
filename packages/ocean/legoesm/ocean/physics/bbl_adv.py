@@ -173,7 +173,7 @@ def nemo_bbl_diffusive_geometry(
     b = nemo_source_round
     h = jnp.asarray(h_ref)
     dtype = h.dtype
-    active3 = h > jnp.asarray(1.0e-3, dtype=dtype)
+    active3 = h > jnp.asarray(1.0e-3, dtype=dtype)  # coeff-ok: wet-cell thickness floor [m]
     t_active = jnp.asarray(land_mask, dtype=dtype) > 0.5
     bot_k = jnp.maximum(jnp.sum(active3.astype(jnp.int32), axis=-1) - 1, 0)
     depth = jnp.asarray(gdept_0, dtype=dtype)

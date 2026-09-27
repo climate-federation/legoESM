@@ -441,7 +441,11 @@ def _nemo_rgb_class_row(chl: jnp.ndarray) -> jnp.ndarray:
     sr = nemo_source_round
     dtype = chl.dtype
     log10_chl = sr(precision_log10(chl))
-    value = sr(jnp.asarray(41.0, dtype=dtype) + sr(jnp.asarray(20.0, dtype=dtype) * log10_chl))
+    # NEMO trc_oce.F90 RGB class index: NINT(offset + slope*log10(Chl)),
+    # the published fit already held as module constants above.
+    value = sr(
+        jnp.asarray(_RGB_CLASS_INDEX_OFFSET, dtype=dtype)
+        + sr(jnp.asarray(_RGB_CLASS_INDEX_SLOPE, dtype=dtype) * log10_chl))
     value = sr(value + jnp.asarray(1.0e-15, dtype=dtype))
     itab = jnp.floor(sr(value + jnp.asarray(0.5, dtype=dtype)))
     return jnp.clip(itab - 1.0, 0.0, 60.0).astype(jnp.int32)
