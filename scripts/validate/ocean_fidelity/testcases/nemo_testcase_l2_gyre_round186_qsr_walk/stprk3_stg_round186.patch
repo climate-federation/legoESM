@@ -1,0 +1,48 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -91,6 +91,8 @@
+       INTEGER  ::   l1_unit, l1_ios, l2_tracer_unit, l2_tracer_ios
+       CHARACTER(LEN=96) :: l1_filename
+       CHARACTER(LEN=16) :: l1_magic
++      INTEGER :: r186_unit, r186_ios
++      CHARACTER(LEN=16) :: r186_magic
+       !                    !--- round-40 stage-3 per-operator instrument locals ---!
+       !     A SEPARATE unit and magic from the stage-2 term writer above: the
+       !     stage-3 record carries the same four Krhs snapshots PLUS the
+@@ -105,6 +107,7 @@
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:)   ::   zub, zvb        ! barotropic velocity correction at Kmm
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   zFu, zFv, zFw   ! advective transport
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   l2_qsr_before   ! L2 write-only qsr increment control
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   r186_qsr_before, r186_qsr_replay
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   l2_e3u, l2_e3v  ! L2 write-only live face thickness
+ #else
+       REAL(wp), DIMENSION(T2D(nn_hls)) ::   zub, zvb        ! barotropic velocity correction at Kmm
+@@ -968,11 +971,28 @@
+             !           !==  complete the tracers RHS  ==!   except ZDF (implicit)
+             !
+             IF( ln_traqsr  ) THEN
++               IF( lwp .AND. kstp == 1080 .AND. kstg == 3 ) THEN
++                  ALLOCATE( r186_qsr_before(jpi,jpj,jpk), r186_qsr_replay(jpi,jpj,jpk) )
++                  r186_qsr_before(:,:,:) = ts(:,:,:,jp_tem,Krhs)
++               ENDIF
+                IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+                   ALLOCATE( l2_qsr_before(jpi,jpj,jpk) )
+                   l2_qsr_before(:,:,:) = ts(:,:,:,jp_tem,Krhs)
+                ENDIF
+                CALL tra_qsr( kstp, Kmm, ts, Krhs )                    ! penetrative solar radiation qsr
++               IF( lwp .AND. kstp == 1080 .AND. kstg == 3 ) THEN
++                  CALL qsr_2BD_l2_replay( Kmm, r186_qsr_replay )
++                  r186_magic = 'NEMO_L2_R186QSR1'
++                  OPEN( NEWUNIT=r186_unit, FILE='oracle_qsr_walk_kt00001080.bin', ACCESS='STREAM', &
++                     &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=r186_ios )
++                  IF( r186_ios /= 0 ) CALL ctl_stop( 'stp_RK3_stg: cannot open round-186 qsr dump' )
++                  WRITE(r186_unit) r186_magic, 1, kstp, kstg, Kmm, Krhs, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++                  WRITE(r186_unit) gdepw_1d, qsr, r3t(:,:,Kmm), e3t_3d, tmask, wmask, &
++                     & ts(:,:,:,jp_tem,Krhs)-r186_qsr_before(:,:,:), r186_qsr_replay
++                  CLOSE(r186_unit, IOSTAT=r186_ios)
++                  IF( r186_ios /= 0 ) CALL ctl_stop( 'stp_RK3_stg: cannot close round-186 qsr dump' )
++                  DEALLOCATE( r186_qsr_before, r186_qsr_replay )
++               ENDIF
+                IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+                   l1_filename = 'oracle_qsr_stage3_kt00000001.bin'
+                   l1_magic = 'NEMO_L2_QSR___1'
