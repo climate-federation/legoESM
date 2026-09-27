@@ -56,6 +56,13 @@ The recorded Kbb endpoint ratio is independently reconstructed exactly from
 the card's entry SSH and reference-depth reciprocal.  This validates the
 endpoint-ratio instrument before the interpolation result is used.
 
+## Instrument correction retained
+
+The first scorer invocation refused before emitting a result because its 2-D
+stretch mask was incorrectly promoted to three dimensions.  The committed
+repair passes that mask at its native rank.  All scientific values in this
+receipt come from the repaired scorer; none comes from the refused invocation.
+
 ## First non-bit statement
 
 The compiled HYB stage-1 branch first computes the endpoint r3 arrays and then
@@ -77,6 +84,18 @@ statement in this held round.
 
 - The one-ULP tracer plant exits nonzero with `REFUSE: planted QCO/RK tracer
   cell rejected through scorer`.
+- Focused citation tests: 16 passed.
+- The required `tests/ocean/fidelity -n 12` battery reached 99%, reproduced
+  the five documented pre-existing reds, and then repeated the known
+  xdist-controller hang after its Python workers exited.  It was interrupted
+  without a terminal summary and is not called green.  The five exact node IDs
+  were rerun in one serial battery and retained their existing signatures:
+  stale GYRE round-129 certification, round-51 private trace registry, SI3
+  scalar-math provenance, worktree-stamp ratchet, and the
+  `hires_lane_surface` case-board ratchet.
+- Receipt and default citation gates each pass with zero failures, zero
+  unmapped citations, and zero map-audit failures; the shifted-line plant
+  exits nonzero.
 - Separate read-only `codex exec` review: **independent review unavailable
   in-sandbox** (`failed to initialize in-process app-server client: Read-only
   file system`).
