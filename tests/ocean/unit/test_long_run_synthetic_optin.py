@@ -48,9 +48,11 @@ def test_drivers_forward_allow_synthetic(script, expected):
     assert _has_flag(_DIR / script)
 
 
-def test_postprocess_never_scores_against_synthetic_woa():
-    calls = _loader_calls(_DIR / "postprocess_climate.py")
-    assert calls == [("load_woa_sst", "False", None)]
+def test_postprocess_does_not_score_sst_against_woa():
+    """SST bias vs WOA is retired until real WOA SST is regridded."""
+    src = (_DIR / "postprocess_climate.py").read_text()
+    assert _loader_calls(_DIR / "postprocess_climate.py") == []
+    assert "sst_bias" not in src and "retired" in src
 
 
 @pytest.mark.parametrize("modname,fn", [

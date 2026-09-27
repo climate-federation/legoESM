@@ -1,4 +1,4 @@
-"""Post-process AMOC / ACC / SST climate diagnostics from a long-run restart.
+"""Post-process AMOC / ACC climate diagnostics from a long-run restart.
 
 Reads the final ``restart_year_NNNN.npz`` from a long-run output
 directory, rebuilds the grid + state, computes:
@@ -6,7 +6,9 @@ directory, rebuilds the grid + state, computes:
 * AMOC streamfunction + value at 26.5 deg N (Cunningham 2007 RAPID).
 * Barotropic streamfunction + ACC transport across Drake passage
   (Donohue 2016).
-* SST bias vs the WOA annual-mean climatology (Locarnini 2018).
+
+SST bias vs WOA is retired (user decision 2026-09-27): no real WOA SST is
+regridded to the model grid; it returns when one is.
 
 Writes a ``climate_diagnostics.json`` next to the restart + appends
 a Markdown row to the long-run report.
@@ -93,10 +95,8 @@ def main() -> int:
         moc_streamfunction, barotropic_streamfunction,
     )
     from legoesm.ocean.diagnostics_climate import (
-        amoc_at_latitude, acc_transport, sst_climatology_bias,
+        amoc_at_latitude, acc_transport,
     )
-    from legoesm.ocean.forcing import load_woa_sst
-    from legoesm import constants
 
     import jax.numpy as jnp
     h_k = np.asarray(compute_layer_thickness(
@@ -133,24 +133,8 @@ def main() -> int:
     acc = acc_transport(psi_bt, lat_t)
     print(f"   ACC @ Drake     = {acc.transport_Sv:6.2f} Sv")
 
-    # SST bias vs WOA only against the real climatology on the model grid (a
-    # synthetic stand-in is not an observational score); otherwise not scored.
-    sst_K = np.asarray(state.T.data)[..., 0] + constants.T_freeze
-    bias = None
-    try:
-        sst_ref, _, _ = load_woa_sst(allow_synthetic=False)
-    except FileNotFoundError as exc:
-        print(f"   SST bias vs WOA = NOT SCORED ({exc})")
-    else:
-        if sst_ref.shape != sst_K.shape:
-            print(f"   SST bias vs WOA = NOT SCORED (WOA cache on a "
-                  f"{sst_ref.shape} grid, model SST on {sst_K.shape}; regrid "
-                  "the WOA file to the model grid first)")
-        else:
-            area = np.asarray(grid.area)
-            bias = sst_climatology_bias(sst_K, sst_ref, area, mask=mask)
-            print(f"   SST bias vs WOA = {bias.bias_K:6.2f} K "
-                  f"(RMSE {bias.rmse_K:.2f})")
+    # SST bias vs WOA retired (user decision 2026-09-27) until a real WOA
+    # SST climatology is regridded to the model grid.
 
     out = {
         "restart": str(restart),
@@ -159,8 +143,6 @@ def main() -> int:
         "amoc_Sv": amoc.streamfunction_Sv,
         "amoc_depth_m": amoc.depth_of_max_m,
         "acc_Sv": acc.transport_Sv,
-        "sst_bias_K": None if bias is None else bias.bias_K,
-        "sst_rmse_K": None if bias is None else bias.rmse_K,
     }
     json_path = args.run_dir / "climate_diagnostics.json"
     json_path.write_text(json.dumps(out, indent=2))
@@ -168,17 +150,9 @@ def main() -> int:
 
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        # AMOC 15+/-3 Sv (RAPID), ACC 130+/-15 Sv (Donohue 2016),
-        # SST bias < 1.5 K vs WOA.
+        # AMOC 15+/-3 Sv (RAPID), ACC 130+/-15 Sv (Donohue 2016).
         amoc_pass = abs(amoc.streamfunction_Sv - 15.0) <= 3.0
         acc_pass = abs(acc.transport_Sv - 130.0) <= 15.0
-        if bias is None:
-            sst_row = "| SST bias vs WOA | not scored | < 1.5 K | N/A |"
-            rmse_row = "| SST RMSE | not scored | -- | -- |"
-        else:
-            sst_row = (f"| SST bias vs WOA | {bias.bias_K:.2f} K | < 1.5 K | "
-                       f"{'PASS' if abs(bias.bias_K) < 1.5 else 'FAIL'} |")
-            rmse_row = f"| SST RMSE | {bias.rmse_K:.2f} K | -- | -- |"
         md = [
             f"# Climate diagnostics -- {args.run_dir.name}",
             "",
@@ -190,8 +164,9 @@ def main() -> int:
             f"{'PASS' if amoc_pass else 'FAIL'} |",
             f"| ACC @ Drake | {acc.transport_Sv:.2f} Sv | 130 +/- 15 Sv | "
             f"{'PASS' if acc_pass else 'FAIL'} |",
-            sst_row,
-            rmse_row,
+            "",
+            ("SST bias vs WOA is retired (user decision 2026-09-27): no real "
+             "WOA SST is regridded to the model grid; it returns when one is."),
         ]
         args.report.write_text("\n".join(md) + "\n")
         print(f"=> {args.report}")

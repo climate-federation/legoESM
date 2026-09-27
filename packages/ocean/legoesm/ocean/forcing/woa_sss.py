@@ -146,8 +146,10 @@ def load_woa_sss(
         lon = lon[order]
         # interp_woa_sss_to_grid assumes ascending, uniform lat and a global,
         # uniform lon axis: refuse a file it would silently misread.
-        if not np.all(np.diff(lat) > 0.0):
-            raise ValueError(f"{nc_path}: WOA SSS latitude must be ascending")
+        if not (np.all(np.diff(lat) > 0.0)
+                and np.allclose(np.diff(lat), lat[1] - lat[0])):
+            raise ValueError(
+                f"{nc_path}: WOA SSS latitude must be ascending and uniform")
         if not np.allclose(np.diff(lon), 360.0 / lon.size):
             raise ValueError(
                 f"{nc_path}: WOA SSS longitude must be global with uniform "

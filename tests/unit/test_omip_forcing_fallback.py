@@ -103,6 +103,7 @@ def test_woa_sss_real_file_surface_2d_and_lon_wrapped(tmp_path):
 
 @pytest.mark.parametrize("bad,match", [
     ("descending_lat", "latitude must be ascending"),
+    ("nonuniform_lat", "latitude must be ascending and uniform"),
     ("regional_lon", "longitude must be global"),
 ])
 def test_woa_sss_real_file_rejects_layouts_the_interpolator_misreads(tmp_path, bad, match):
@@ -111,6 +112,8 @@ def test_woa_sss_real_file_rejects_layouts_the_interpolator_misreads(tmp_path, b
     lon = np.arange(0.5, 360.0, 1.0)
     if bad == "descending_lat":
         lat = lat[::-1]
+    elif bad == "nonuniform_lat":
+        lat = np.concatenate([lat[:90], lat[90:] + 0.25])  # 1.25 deg jump
     else:
         lon = np.arange(0.5, 180.0, 0.5)          # half the globe
     s = np.full((1, 1, lat.size, lon.size), 35.0)

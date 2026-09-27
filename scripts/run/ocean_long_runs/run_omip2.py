@@ -10,14 +10,13 @@ year:
 * Tracer budget (volume / heat / salt / SSH integral).
 * AMOC @ 26.5 deg N (Cunningham 2007).
 * ACC transport @ Drake (Donohue 2016).
-* SST climatology bias vs WOA (loaded separately).
 * Restart written at end of each model year.
 
 Acceptance bars after 30 years:
 
 * AMOC @ 26.5 deg N -- 15 +/- 3 Sv.
 * ACC @ Drake -- 130 +/- 15 Sv.
-* SST bias -- < 1.5 deg C globally vs WOA.
+* (SST bias vs WOA retired until real WOA SST is regridded to the model grid.)
 * RPE drift -- < 0.5 mW/m^2 (Petersen 2015 reference).
 
 Usage::
