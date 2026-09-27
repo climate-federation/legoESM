@@ -44,6 +44,7 @@ STATEMENT_ORDER = ("zhpi_u", "zuap_u", "sum_u")
 PLANTS = ("header", "truncation", "swapped-rank", "parent-byte", "restart-byte")
 _PP = "ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo"
 CITATIONS = {
+    "eos_rhd": f"{_PP}/eosbn2.f90:810-844",
     "hpg_surface": f"{_PP}/dynhpg.f90:404-426",
     "hpg_interior": f"{_PP}/dynhpg.f90:440-464",
     "hpg_record": f"{_PP}/dynhpg.f90:477-490",
@@ -266,10 +267,19 @@ def run(
     reproduction = round14.compare(
         candidate_hpg[support_rows, -1, :],
         oracle_hpg[support_rows, -1, :], support_mask)
-    require(reproduction["differing_cells"] == 1753
-            and reproduction["scored_cells"] == 1754
-            and reproduction["absolute_max"] == 1.4862887125471208e-17,
-            "round-41 HPG support result did not reproduce")
+    historical_hpg = prior_support["first_non_bit"]
+    historical_reproduced = (
+        reproduction["differing_cells"] == historical_hpg["differing_cells"]
+        and reproduction["scored_cells"] == historical_hpg["scored_cells"]
+        and reproduction["absolute_max"] == historical_hpg["absolute_max"])
+    hpg_closed = reproduction["bit_exact"]
+    hpg_improved = (
+        reproduction["scored_cells"] == historical_hpg["scored_cells"]
+        and reproduction["differing_cells"] < historical_hpg["differing_cells"]
+        and reproduction["absolute_max"] < historical_hpg["absolute_max"])
+    require(historical_reproduced or hpg_closed or hpg_improved,
+            "HPG support is neither the admitted round-41 row, improved, nor "
+            f"bit-exact: {reproduction}")
     for family in round41_score.FAMILIES[1:]:
         candidate = round38._native_rank(
             np.asarray(parts[f"{round41_score.PART_KEYS[family]}_u"].data),
@@ -304,7 +314,9 @@ def run(
             trial[location] = np.nextafter(trial[location], np.inf)
         self_replay[name] = round14.compare(
             replay_native, trial, full_u_mask)
+    recorded_replay_plant_fires = None
     if plant == "recorded-replay":
+        recorded_replay_plant_fires = not self_replay["sum_u"]["bit_exact"]
         require(not self_replay["sum_u"]["bit_exact"],
                 "recorded-replay plant did not fire")
 
@@ -337,7 +349,7 @@ def run(
 
     walk = {**input_rows, **statement_rows}
     measured_first = first_non_bit(walk)
-    plant_fires = None
+    plant_fires = recorded_replay_plant_fires
     if plant == "first-boundary":
         require(measured_first is not None, "no first boundary exists to plant")
         planted = {name: dict(row) for name, row in walk.items()}
@@ -369,13 +381,18 @@ def run(
         "hpg_admission": hpg_admission,
         "family_admission": family_admission,
         "round41_reproduction": reproduction,
+        "round41_historical_hpg": historical_hpg,
+        "round41_historical_reproduced": historical_reproduced,
+        "hpg_improved": hpg_improved,
+        "hpg_closed": hpg_closed,
         "recorded_input_self_replay": self_replay,
         "candidate_literal_matches_production_hpg": production_literal_identity,
         "rank1_disputed_u_walk": walk,
         "first_non_bit": measured_first,
         "plant": plant,
         "plant_fires": plant_fires,
-        "single_statement_eligible": False,
+        "single_statement_eligible": (
+            hpg_closed and measured_first is None and instrument_valid),
     }
     if json_out:
         json_out.parent.mkdir(parents=True, exist_ok=True)

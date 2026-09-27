@@ -54,6 +54,7 @@ from legoesm.ocean.eos import (
     make_eos_fn,
     nemo_bn2_live_ladders,
     nemo_r3t_stretch,
+    nemo_roquet_density_anomaly_ratio,
     nemo_teos10_density_anomaly_ratio,
 )
 from legoesm.ocean.vertical import (
@@ -1392,10 +1393,15 @@ def _bc_geometry_and_density(
         # the pre-existing behaviour for every non-NEMO-bridged recipe).
         eos_geometric_depth_1d=_eos_geometric_depth,
         density_anomaly_ratio_fn=(
-            (lambda t, s, p, **_kw: nemo_teos10_density_anomaly_ratio(
+            (lambda t, s, p, **_kw: (
+                nemo_teos10_density_anomaly_ratio
+                if config.eos == "nemo_teos10"
+                else nemo_roquet_density_anomaly_ratio
+            )(
                 t, s, p, rho0=rho_0,
                 geometric_depth_m=_eos_geometric_depth, tmask=_nemo_tmask3))
-            if (config.eos == "nemo_teos10" and _eos_depth == "geometric")
+            if (config.eos in ("nemo_eos80", "nemo_teos10")
+                and _eos_depth == "geometric")
             else None
         ),
     )
