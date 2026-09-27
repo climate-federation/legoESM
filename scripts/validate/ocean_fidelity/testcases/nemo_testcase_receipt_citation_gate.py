@@ -3713,7 +3713,7 @@ CITATION_MAP = {
         '!           !==  complete the tracers RHS  ==!   except ZDF (implicit)',
         'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing', 40],
     'ocean_model_latlon_cgrid.py:6917-6966': [
-        'if _return_tracer_process_trace:',
+        ('if _return_tracer_process_trace:', 1),
         'process_qsr_rate=_nemo_ws_process_qsr_rate,', 50],
 }
 
