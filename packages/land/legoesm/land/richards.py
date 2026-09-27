@@ -48,9 +48,15 @@ __param_spec__ = {
         "scheme_key": "land.richards",
         "excluded": {
             "pond_max": "numerics: surface ponding cap before overland runoff [m]",
-            "fc_drain_saturation": "config-level knob (not auto-collected): a "
-            "structural switch (0.0 = limiter OFF, guarded by `> 0.0`) as well as a "
-            "threshold; the field default equals MultiLayerLandConfig's 0.5.",
+            "fc_drain_saturation": "config-level knob (not auto-collected): the "
+            "RichardsConfig field default is 0.0 (limiter OFF, guarded by `> 0.0`), which "
+            "is the value the collector would seed — the lower bound of (0.0, 0.8), with no "
+            "interior sigmoid seed. It IS used in production (MultiLayerLandConfig sets "
+            "0.5), but as an explicit config choice, not an auto-seeded trainable — so tune "
+            "it by setting an interior S_e_fc in config, not from the 0.0 field default. "
+            "(Aligning the field default to 0.5 would make it collector-tunable but changes "
+            "~15 bare RichardsConfig() call sites that rely on the 0.0=off default, so it is "
+            "left a config knob.)",
         },
         "params": {},
     },
@@ -108,10 +114,9 @@ class RichardsConfig(NamedTuple):
     # near the -33 kPa point (S_e ~ 0.24 for loam), so the column drains ~0.1 m3/m3 below
     # the field-observed / HTESSEL-CLM5 effective field capacity (S_e ~ 0.55, theta ~0.27
     # for loam); this suppresses gravity drainage at the wetter effective fc so the root
-    # zone retains realistic water.  0.0 = OFF (unbounded gravity drainage).
-    # ~0.5-0.6 = a loam-like effective field capacity; the default 0.5 equals
-    # MultiLayerLandConfig's production value.
-    fc_drain_saturation: float = 0.5
+    # zone retains realistic water.  0.0 = OFF (unbounded gravity drainage, backward-
+    # compatible).  ~0.5-0.6 = a loam-like effective field capacity.
+    fc_drain_saturation: float = 0.0
 
 
 class RichardsOutput(NamedTuple):

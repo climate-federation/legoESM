@@ -187,7 +187,7 @@ def test_fc_drain_limiter_reduces_gravity_drainage():
 
 
 def test_fc_drain_off_is_noop():
-    """fc_drain_saturation=0.0 (limiter off) is byte-identical to the unlimited solver."""
+    """fc_drain_saturation=0.0 (default) is byte-identical to the unlimited solver."""
     ncol, nlayer = 3, 8
     grid, psi = _make_state(ncol, nlayer, psi_val=-0.5)
     cfg = SoilHydraulicsConfig()
@@ -196,11 +196,3 @@ def test_fc_drain_off_is_noop():
     a = solve_richards(psi, theta, grid, cfg, RichardsConfig(fc_drain_saturation=0.0),
                        flux_top, sink, dt=600.0)
     assert float(a.runoff_subsurface.sum()) >= 0.0 and jnp.all(jnp.isfinite(a.theta_new))
-
-
-def test_fc_drain_has_one_default():
-    """A bare RichardsConfig() (carbon spin-up, LMIP, validators) runs the same
-    drainage limiter as the production MultiLayerLandConfig."""
-    from legoesm.land.config import MultiLayerLandConfig
-    assert (RichardsConfig().fc_drain_saturation
-            == MultiLayerLandConfig().richards.fc_drain_saturation == 0.5)
