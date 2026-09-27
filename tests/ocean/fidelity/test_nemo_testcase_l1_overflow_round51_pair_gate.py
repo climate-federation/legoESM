@@ -33,6 +33,20 @@ def test_exact_scorer_one_ulp_plant_fires_once():
     assert planted["status"] == "NON_BIT" and planted["n_unequal"] == 1
 
 
+def test_physical_level_slice_accepts_only_one_bottom_halo():
+    mask = np.ones((2, 3, 4), dtype=bool)
+    physical = np.arange(24).reshape(2, 3, 4)
+    halo = np.concatenate((physical, np.full((2, 3, 1), -1)), axis=-1)
+    assert np.array_equal(gate._physical_levels(physical, mask), physical)
+    assert np.array_equal(gate._physical_levels(halo, mask), physical)
+    try:
+        gate._physical_levels(np.zeros((2, 3, 6)), mask)
+    except gate.GateError as error:
+        assert "extent" in str(error)
+    else:  # pragma: no cover - fail-closed assertion
+        raise AssertionError("two halo levels were admitted")
+
+
 def test_sidecar_hash_and_first_moved_boundary(tmp_path):
     fields = {
         name: np.zeros(2, dtype=np.float64)

@@ -71,6 +71,17 @@ def _v(value) -> np.ndarray:
     return np.asarray(value)[1:, ...]
 
 
+def _physical_levels(value, mask) -> np.ndarray:
+    """Select the card's physical levels from a state with a bottom halo."""
+    value = np.asarray(value)
+    mask = np.asarray(mask)
+    require(value.ndim == mask.ndim == 3, "physical-level arrays must be 3-D")
+    require(value.shape[:2] == mask.shape[:2], "physical-level horizontal drift")
+    require(value.shape[-1] in (mask.shape[-1], mask.shape[-1] + 1),
+            "unexpected physical-level extent")
+    return value[..., :mask.shape[-1]]
+
+
 def _score(name: str, oracle, candidate, mask, *, plant=False) -> dict:
     oracle = np.asarray(oracle, dtype=np.float64)
     candidate = np.asarray(candidate)
@@ -287,6 +298,9 @@ def _live_arrays(card, momentum: dict, tracer: dict) -> tuple[dict, list[dict]]:
                     "T" if name.endswith(".T") else "S"]
         for name in SOURCE_ORDER
     }
+    for name in SOURCE_ORDER:
+        if mask_for[name].ndim == 3:
+            values[name] = _physical_levels(values[name], mask_for[name])
     rows = [_score(name, references[name], values[name], mask_for[name])
             for name in SOURCE_ORDER]
     active = {name: _active_values(values[name], mask_for[name])
