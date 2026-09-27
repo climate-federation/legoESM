@@ -84,7 +84,8 @@ def nemo(t_path: str, u_path: str, rec: int, k: int, lon_lo: float, lon_hi: floa
         out = np.full_like(f, np.nan); out[:, 1:] = 0.5 * (f[:, :-1] + f[:, 1:]); return out
     wet = np.isfinite(Tk) & np.isfinite(tos)
     sel = (lon >= lon_lo) & (lon <= lon_hi); wetw = wet & sel
-    rows = [j for j in range(lat.shape[0]) if np.any(np.abs(lat[j]) <= halfwidth) and wetw[j].sum() >= 16]
+    # nav_lat is 0 on NEMO land cells: test latitude on WET, in-window cells only
+    rows = [j for j in range(lat.shape[0]) if wetw[j].sum() >= 16 and np.any(np.abs(lat[j][wetw[j]]) <= halfwidth)]
     print(f"[NEMO] {t_path.split('/')[-2]} rec {rec} level {k}  rows {rows[0]}..{rows[-1]}")
     band_report("SST", np.nan_to_num(tos), wetw, rows)
     band_report(f"T level {k}", np.nan_to_num(Tk), wetw, rows)
