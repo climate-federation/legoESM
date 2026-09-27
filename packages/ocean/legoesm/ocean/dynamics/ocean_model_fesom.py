@@ -1495,8 +1495,8 @@ class FesomOceanModel:
     def __init__(self, mesh: "Mesh", z_coord: Any, config: FesomOceanConfig,
                  *, vmix_config=None, iwm_forcing=None, visc_nemo=None):
         require_fesom_jax()
-        # (ahmt_node, ahmf_node): NEMO's rotation-divergence Laplacian replaces
-        # fesom's own viscosity (fesom_jax.momentum.visc_nemo_lap).
+        # (ahm_node, rn_shlat): NEMO's viscosity values on the element edges replace
+        # fesom's own viscosity (fesom_jax.momentum.visc_nemo_elem).
         self._visc_nemo = visc_nemo
         from fesom_jax import config as fconfig
         from fesom_jax import ssh as fssh

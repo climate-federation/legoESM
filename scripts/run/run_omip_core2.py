@@ -1453,16 +1453,16 @@ def attach_nemo_ldf_fields_mpas(z_coord, mesh, ldf_path, domcfg_path,
 
 
 def nemo_ldf_fesom(mesh, ldf_path, domcfg_path, rn_shlat: float):
-    """(ahmt_node, ahmf_node), each (nod2D, nl), for fesom_jax's ``visc_nemo``.
+    """(ahm_node (nod2D, nl), rn_shlat) for fesom_jax's ``visc_nemo`` (element-edge
+    harmonic viscosity, fesom_jax.momentum.visc_nemo_elem).
 
     Horizontal: nearest NEMO T / F point of each node (geographic coords).
     Vertical: each FESOM layer takes the NEMO level whose nav_lev is nearest its
-    mid-depth (the file varies up to 20x with depth).  ahmt * node layer mask;
-    ahmf * ``nemo_node_slip_factor`` (rn_shlat/2 on coastal dual cells, whose
-    loop is only the wet part).
+    mid-depth (the file varies up to 20x with depth). ahm = 0.5 (ahmt + ahmf)
+    (one coefficient for the edge Laplacian), times the node layer mask; the
+    wall condition is rn_shlat on edges with one wet side.
     """
     import netCDF4 as nc4
-    from fesom_jax.momentum import nemo_node_slip_factor
 
     ds = nc4.Dataset(ldf_path)
     try:
@@ -1475,11 +1475,11 @@ def nemo_ldf_fesom(mesh, ldf_path, domcfg_path, rn_shlat: float):
     geo = np.asarray(mesh.geo_coord_nod2D)
     ahmt, ahmf = nemo_ldf_nearest(ldf_path, domcfg_path, geo[:, 1], geo[:, 0], lev)
     lm = np.asarray(mesh.node_layer_mask, dtype=np.float64)
-    fac = np.asarray(nemo_node_slip_factor(mesh, rn_shlat), dtype=np.float64)
-    print(f"[nemo-ldf] FESOM {ldf_path}: ahmt {ahmt[lm > 0].min():g}..{ahmt.max():g} "
-          f"m2/s at {ahmt.shape[0]} nodes x {ahmt.shape[1]} slots; rn_shlat={rn_shlat:g}; "
-          f"coastal node-levels {int(((np.asarray(nemo_node_slip_factor(mesh, 0.0)) == 0.0) & (lm > 0)).sum())}")
-    return jnp.asarray(ahmt * lm), jnp.asarray(ahmf * fac * lm)
+    ahm = 0.5 * (ahmt + ahmf) * lm
+    print(f"[nemo-ldf] FESOM {ldf_path}: ahm {ahm[lm > 0].min():g}..{ahm.max():g} "
+          f"m2/s at {ahm.shape[0]} nodes x {ahm.shape[1]} slots; rn_shlat={rn_shlat:g} "
+          "on element walls")
+    return jnp.asarray(ahm), jnp.asarray(float(rn_shlat))
 
 
 def renormalise_ah_profile(lv, A_h_new: float):
