@@ -137,7 +137,7 @@ def main():
         AIMIPClassicalParams, make_aimip_classical_spectral_physics,
     )
     from legoesm.training.campaign_driver import parse_bool_flag
-    from legoesm.training.aimip_spatial import land_mask_from_phis
+    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction, land_mask_from_phis
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
     )
@@ -259,6 +259,7 @@ def main():
     if not is_nn:
         _, phis0 = _build_samples(1)  # phis is rollout-agnostic -> land mask once
         land_mask = land_mask_from_phis(phis0, smooth=True)
+        grid = grid_with_zm_land_fraction(grid, str(cfg["aimip_convection"]))
         sizing_ps = init_physics_state(
             ncol, nlev,
             PhysicsConfig(

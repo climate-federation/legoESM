@@ -402,3 +402,23 @@ def land_mask_from_phis(
     if smooth:
         return jax.nn.sigmoid(sharpness * phis)
     return jnp.where(phis > 0.0, 1.0, 0.0)
+
+
+def grid_with_zm_land_fraction(grid, convection_scheme: str):
+    """``grid`` carrying the column land fraction Zhang-McFarlane needs.
+
+    ZM picks its autoconversion coefficient per column from the land fraction
+    and refuses to run without one; the AIMIP Gaussian grid carries none.  The
+    fraction is the ERA5 land-sea mask of the AIMIP store, regridded exactly as
+    the WB classical arm feeds it to ZM.  Not ``phis > 0``: on the smoothed
+    orography that marked 72 % of T21 columns as land.  Any other convection
+    scheme gets ``grid`` back unchanged, with no store access.
+    """
+    if convection_scheme != "zhang_mcfarlane":
+        return grid
+    from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
+    from legoesm.training.scale_build import prescribed_surface_planes
+
+    sl = load_era5_slice(TrainingERA5Config(load_land_frac=True), 0)
+    land = prescribed_surface_planes(sl, grid)["land_frac"]
+    return grid._replace(land_frac=land.reshape(-1))

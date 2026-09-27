@@ -621,3 +621,62 @@ def test_spatial_baselines_from_params_maps_trained_scalars():
     assert b_gray["sfc_albedo"] == GrayRadiationConfig().sfc_albedo
     assert b_gray["sfc_emissivity"] == GrayRadiationConfig().sfc_emissivity
     assert "gray_sfc_albedo" not in d
+
+
+def test_aimip_zm_lane_runs_on_the_era5_land_fraction_and_refuses_without_it(
+        monkeypatch):
+    """ZM on the AIMIP classical lane gets the ERA5 land-sea mask; without it ZM raises."""
+    import types
+
+    import numpy as np
+
+    import legoesm.training.era5_to_state as e2s
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+    )
+    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction
+
+    # ERA5-like slice: land in ONE quadrant (north, lon < pi), so a lat flip,
+    # lon roll or transpose of the mask lands it on the wrong columns.
+    lat = np.linspace(-np.pi / 2, np.pi / 2, 19)
+    lon = np.linspace(0.0, 2 * np.pi, 72, endpoint=False)
+    lsm = ((lat[:, None] > 0) & (lon[None, :] < np.pi)).astype(np.float32)
+    calls = []
+
+    def fake_slice(config, time_idx):
+        calls.append(config.load_land_frac)
+        return types.SimpleNamespace(lat=lat, lon=lon, land_frac=lsm, sfc_shf=None)
+
+    monkeypatch.setattr(e2s, "load_era5_slice", fake_slice)
+    grid = create_gaussian_grid(8, dealiasing="quadratic")
+    sig = create_sigma_coordinate(6)
+    assert grid_with_zm_land_fraction(grid, "tiedtke") is grid
+    assert calls == []
+    g_land = grid_with_zm_land_fraction(grid, "zhang_mcfarlane")
+    assert calls == [True]
+    assert g_land.land_frac.shape == (grid.n_lat * grid.n_lon,)
+    lf = np.asarray(g_land.land_frac).reshape(grid.n_lat, grid.n_lon)
+    glat = np.asarray(grid.lat)[:, None] * np.ones((1, grid.n_lon))
+    glon = np.ones((grid.n_lat, 1)) * np.asarray(grid.lon)[None, :]
+    inside = (glat > 0.3) & (glon > 0.3) & (glon < np.pi - 0.3)
+    outside = (glat < -0.3) | ((glon > np.pi + 0.3) & (glon < 2 * np.pi - 0.3))
+    assert inside.any() and outside.any()
+    assert np.all(lf[inside] == 1.0) and np.all(lf[outside] == 0.0)
+
+    shp = (grid.n_lat, grid.n_lon, 6)
+    state = isothermal_rest_state_spectral(
+        grid, sig, T_init=290.0, p_s_init=1.0e5,
+        tracers={"q_v": jnp.full(shp, 1.2e-2), "q_c": jnp.full(shp, 1e-5),
+                 "q_i": jnp.full(shp, 1e-6)})
+    fn = make_aimip_classical_spectral_physics(
+        AIMIPClassicalParams.from_defaults(), grid, 1800.0,
+        radiation="gray", convection_scheme="zhang_mcfarlane",
+        turbulence_scheme="louis", gwd_scheme="mcfarlane",
+        microphysics_scheme="sundqvist", cloud_scheme="xu_randall")
+    out = fn(state, g_land, sig)
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(out))
+    with pytest.raises(ValueError, match="land_frac is required"):
+        fn(state, grid, sig)

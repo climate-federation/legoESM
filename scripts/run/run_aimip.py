@@ -548,6 +548,8 @@ def _train_aimip_classical(
     # (scripts/run/run_aimip_classical_sweep_stage1.py).
     from legoesm.training.aimip_params import CLASSICAL_DEFAULT_SCHEMES as _DS
     conv_scheme = str(cfg.get("aimip_convection", _DS["convection"]))
+    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction
+    grid = grid_with_zm_land_fraction(grid, conv_scheme)
     turb_scheme = str(cfg.get("aimip_turbulence", _DS["turbulence"]))
     gwd_scheme = str(cfg.get("aimip_gwd", _DS["gwd"]))
     # Was "none", which produced classical runs missing a whole family.
@@ -786,6 +788,9 @@ def _evaluate_variant(
     ic_states, target_carries, eval_ic_times = load_training_data(
         eval_cfg, grid, sigma, cache_dir, windows=eval_cfg.windows,
     )
+    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction
+    grid = grid_with_zm_land_fraction(
+        grid, str(cfg.get("aimip_convection", "tiedtke")))
     # NN variants trained WITH prescribed surface forcing must be
     # evaluated with the same inputs (a forced network scored unforced
     # would see out-of-distribution proxies and mis-rank the variants).
