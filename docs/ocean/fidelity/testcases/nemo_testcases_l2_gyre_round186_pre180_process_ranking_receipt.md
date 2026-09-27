@@ -122,8 +122,19 @@ This is **independent review unavailable in-sandbox**, not a SHIP verdict.
 The first focused instrument run reported **`1 failed, 53 passed in 34.37s`**;
 the sole failure was the pre-existing Round-179 source-layout test observing
 the deliberately dirty uncommitted instrument tree and exiting at its clean
-tree guard.  The final committed-tree rerun and citation results are reported
-below after completion.
+tree guard.  The final clean-tree focused batch reported
+**`1 failed, 79 passed in 41.12s`**.  Its only failure was
+`test_every_report_emitter_stamps_the_worktree`, with exactly these four
+offenders: Round 50, 146, 156, and 184 gates.  Running that test alone at the
+unchanged incoming commit `af374a04e053` reported the byte-identical four-file
+set and **`1 failed, 9 passed in 3.58s`**; it is pre-existing, not caused by
+this round.
+
+The receipt citation gate passed all five citations with zero unmapped or
+failed rows.  Shifting the compiled `traqsr.f90:615-645` citation by two lines
+made the gate fail and exit 1.  The acquisition source passed
+`gfortran -fsyntax-only` for both patched files, and `bash -n` passed its
+operator script.
 
 ## OPEN — round 187
 
