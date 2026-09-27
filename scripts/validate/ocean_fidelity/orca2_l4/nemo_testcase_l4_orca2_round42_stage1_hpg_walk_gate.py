@@ -352,16 +352,25 @@ def run(
     measured_first = first_non_bit(walk)
     plant_fires = recorded_replay_plant_fires
     if plant == "first-boundary":
-        require(measured_first is not None, "no first boundary exists to plant")
         planted = {name: dict(row) for name, row in walk.items()}
-        planted[measured_first["boundary"]] = {
-            "bit_exact": True, "differing_cells": 0,
-            "scored_cells": measured_first["scored_cells"],
-            "absolute_max": 0.0, "ulp_max": 0,
-        }
+        if measured_first is None:
+            planted[INPUT_ORDER[0]] = {
+                "bit_exact": False, "differing_cells": 1,
+                "scored_cells": walk[INPUT_ORDER[0]]["scored_cells"],
+                "absolute_max": float.fromhex("0x1p-1074"), "ulp_max": 1,
+            }
+        else:
+            planted[measured_first["boundary"]] = {
+                "bit_exact": True, "differing_cells": 0,
+                "scored_cells": measured_first["scored_cells"],
+                "absolute_max": 0.0, "ulp_max": 0,
+            }
         planted_first = first_non_bit(planted)
-        plant_fires = (planted_first is None
-                       or planted_first["boundary"] != measured_first["boundary"])
+        plant_fires = (
+            planted_first is not None and measured_first is None
+            or planted_first is None and measured_first is not None
+            or (planted_first is not None and measured_first is not None
+                and planted_first["boundary"] != measured_first["boundary"]))
         require(plant_fires, "first-boundary plant did not move selector")
 
     result = {
