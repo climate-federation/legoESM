@@ -131,8 +131,8 @@ set and **`1 failed, 9 passed in 3.58s`**; it is pre-existing, not caused by
 this round.
 
 The receipt citation gate passed all five citations with zero unmapped or
-failed rows.  Shifting the compiled `traqsr.f90:615-645` citation by two lines
-made the gate fail and exit 1.  The acquisition source passed
+failed rows.  Shifting the compiled shortwave citation by two lines made the
+gate fail and exit 1.  The acquisition source passed
 `gfortran -fsyntax-only` for both patched files, and `bash -n` passed its
 operator script.
 
