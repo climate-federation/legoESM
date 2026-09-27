@@ -213,6 +213,13 @@ def test_sub_daily_output_interval_is_exact() -> None:
     assert cfg.to_experiment_config().output.diag_days == 0.25
 
 
+@pytest.mark.parametrize("hours", [0, 0.0, -6, float("nan")])
+def test_non_positive_output_interval_raises(hours) -> None:
+    cfg = Config.from_dict({"time": {"output_interval_hours": hours}})
+    with pytest.raises(ValueError, match="output_interval_hours must be > 0"):
+        cfg.to_experiment_config()
+
+
 @pytest.mark.parametrize("blk,key,val", [("conservation", "fix_energy", True),
                                          ("output", "format", "zarr")])
 def test_removed_yaml_keys_raise(blk, key, val):

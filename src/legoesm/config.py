@@ -387,6 +387,12 @@ class Config:
                 f"{_forcing!r}"
             )
 
+        _out_h = float(time_cfg.get("output_interval_hours", 6))
+        if not _out_h > 0.0:  # also rejects NaN
+            raise ValueError(
+                f"time.output_interval_hours must be > 0, got {_out_h!r}; "
+                "it sets the diagnostic output cadence.")
+
         canonical = {
             "grid": {
                 "grid_type": grid.get("type", "cubed_sphere"),
@@ -421,7 +427,7 @@ class Config:
             },
             "output": {
                 "output_dir": output_cfg.get("path", ""),
-                "diag_days": float(time_cfg.get("output_interval_hours", 6)) / 24.0,
+                "diag_days": _out_h / 24.0,
                 "checkpoint_days": int(output_cfg.get("checkpoint_days", 0)),
                 "monthly_means": bool(output_cfg.get("monthly_means", False)),
                 "cmip_output": bool(output_cfg.get("cmip_output", False)),
