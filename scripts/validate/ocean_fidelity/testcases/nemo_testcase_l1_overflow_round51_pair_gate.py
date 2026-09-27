@@ -156,10 +156,15 @@ def _given_input_rows(card, momentum: dict, tracer: dict, masks: dict,
         name: _nemo_owned(s1[name])
         for name in ("Kbb_ssh", "Kmm_ssh", "Kaa_ssh")
     }
+    depth = np.asarray(card.recipe.initial_state.H_bathy.data)
+    if depth.ndim == 3 and depth.shape[-1] == 1:
+        depth = depth[..., 0]
+    require(depth.shape == ssh["Kbb_ssh"].shape,
+            "card column-depth layout does not match the recorded SSH")
     q = {
         name: np.asarray(nemo_r3t_stretch(
             card.recipe.z_coord, jnp.asarray(value),
-            card.recipe.initial_state.H_bathy.data,
+            jnp.asarray(depth),
             evaluation="nemo_reciprocal",
         ))
         for name, value in ssh.items()
