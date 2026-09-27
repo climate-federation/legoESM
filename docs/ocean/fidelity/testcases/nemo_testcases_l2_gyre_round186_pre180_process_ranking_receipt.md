@@ -104,7 +104,20 @@ changed model statement.  ORCA2 transfer of this ranking remains
 **UNMEASURED-WITH-SPEC**: acquire its native process rows, masks, independent
 production trace, and endpoint projection before transferring ownership.
 
-Independent review: **PENDING FINAL PASS**.
+The required separate read-only Codex review could not initialize in this
+sandbox.  Its complete verdict text is:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only
+> file system (os error 30)
+>
+> Reading additional input from stdin...
+>
+> Error: failed to initialize in-process app-server client: Read-only file
+> system (os error 30)
+>
+> codex_exit_code=1
+
+This is **independent review unavailable in-sandbox**, not a SHIP verdict.
 
 The first focused instrument run reported **`1 failed, 53 passed in 34.37s`**;
 the sole failure was the pre-existing Round-179 source-layout test observing
