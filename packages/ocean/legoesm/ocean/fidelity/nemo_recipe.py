@@ -240,6 +240,14 @@ def _nemo_tke_config() -> TKEConfig:
         # reproduces NEMO's dumped avt_k to 3-4 significant figures at
         # every level; choice 2 is 7x high at 10 m.
         tke_mxl_choice=3,
+        # GYRE sets no ln_zdfiwm, so namelist_ref:1200 leaves it .FALSE. and
+        # zdf_tke_init takes the DERIVED arm rmxl_min = 1e-6/(rn_ediff*
+        # SQRT(rn_emin)) = 1e-2 m (zdftke.F90:845-846), not the namelist
+        # mxl_min.  ORCA2 overrides this pair: its namelist_cfg:396 sets
+        # ln_zdfiwm=.TRUE., which forces rmxl_min = 1e-3 (zdftke.F90:841-843).
+        nemo_derived_mxl_min=True,
+        # zdftke.F90:640-642 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1).
+        nemo_mxl0_surface_tmask=True,
         # NEMO stp ordering: eosbn2 runs at step start (bn2(Nnow)), BEFORE
         # tra_adv. Sampling the diffusivity-stage N² on the before-advection
         # T/S stops the single-step fct2 bottom-cell drift from flipping the
@@ -426,6 +434,12 @@ def nemo_lat_lon_model_config(
         pgf_scheme=cfg.pgf_scheme,
         pgf_quadrature=cfg.pgf_quadrature,
         barotropic_solver=cfg.barotropic_solver,
+        # Every NEMO recipe allocates the prognostic external mode
+        # (rest_state_latlon_cgrid_ocean(nemo_prognostic_barotropic_velocity
+        # =True) below), and dynspg_ts.F90:484-500 seeds the barotropic window
+        # from that carried pair.  The CONFIG says so, so the choice is not
+        # read off whether the state happens to hold the arrays.
+        nemo_prognostic_barotropic_state=True,
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_time_filter=cfg.barotropic_time_filter,
         momentum_time_integrator=cfg.momentum_time_integrator,

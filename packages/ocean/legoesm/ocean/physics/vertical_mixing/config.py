@@ -265,6 +265,29 @@ class TKEConfig(NamedTuple):
     # Requires positivity="floor" (the Veros positivity branch returns before
     # the `MAX(en,rn_emin)` this mask rides on).
     tke_dry_wmask: bool = False
+    # ----- NEMO rmxl_min provenance (zdftke.F90:841-848) -----------------
+    # NEMO picks the mixing-length floor in TWO arms:
+    #   ln_zdfiwm=.TRUE.  -> rn_emin FORCED to 1e-10 and rmxl_min FORCED to
+    #                        1e-3 (zdftke.F90:842-843); the derivation below
+    #                        is never evaluated.
+    #   ln_zdfiwm=.FALSE. -> rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin))
+    #                        (zdftke.F90:846), i.e. derived from c_k and
+    #                        tke_background, and the namelist floor is unused.
+    # ``False`` (DEFAULT, main's behaviour): the floor IS ``mxl_min``, whatever
+    #   the card set.  That is also the correct value for an ln_zdfiwm=.TRUE.
+    #   card, which simply sets ``mxl_min=1.0e-3`` (ORCA1, ORCA2).
+    # ``True``: take the ln_zdfiwm=.FALSE. derivation.  Only a NEMO-literal
+    #   card that runs ln_zdfiwm=.FALSE. selects it (GYRE, DINO).  The
+    #   derivation is evaluated in binary64 and RAISES without x64, so the
+    #   requirement lands only on the cards that ask for it.
+    nemo_derived_mxl_min: bool = False
+    # ``ln_mxl0`` surface-anchor masking (zdftke.F90:640-642 evaluates
+    # ``taum(:,:)*tmask(:,:,1)``).  ``False`` (DEFAULT, main's behaviour):
+    # the anchor is built from ``taum`` alone and a caller that has no
+    # surface T-mask (FESOM) is accepted.  ``True``: the compiled masked
+    # statement, and a missing ``surface_tmask`` is a hard error.  Only the
+    # NEMO-literal cards select it.
+    nemo_mxl0_surface_tmask: bool = False
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5

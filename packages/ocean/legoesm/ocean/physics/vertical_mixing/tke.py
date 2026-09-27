@@ -174,17 +174,31 @@ _NEMO_MOLECULAR_VISCOSITY = 1.0e-6
 def _mixing_length_floor(cfg: "TKEConfig"):
     """Return the active scheme's mixing-length floor.
 
-    NEMO derives ``rmxl_min = 1.e-6_wp / (rn_ediff*SQRT(rn_emin))``
-    in binary64 (shipped ``zdftke.F90:845-847``; GYRE preprocessed
-    ``zdftke.f90:815-817``). legoESM's corresponding card fields are ``c_k``
-    (``rn_ediff``) and ``tke_background`` (``rn_emin``). Keep the source
-    association exactly; in particular, do not replace division by a
-    reciprocal. Veros choices retain their independently configured floor.
+    ``zdf_tke_init`` chooses ``rmxl_min`` in two arms
+    (shipped ``zdftke.F90:841-848``):
+
+    * ``ln_zdfiwm = .TRUE.`` FORCES ``rn_emin = 1.e-10_wp`` and
+      ``rmxl_min = 1.e-03_wp`` (``:842-843``) and never evaluates the
+      derivation below.  A card on that arm therefore carries ``1.0e-3`` in
+      ``cfg.mxl_min`` and leaves ``nemo_derived_mxl_min`` False (ORCA1,
+      ORCA2).
+    * ``ln_zdfiwm = .FALSE.`` derives
+      ``rmxl_min = 1.e-6_wp / (rn_ediff*SQRT(rn_emin))`` (``:846``; GYRE
+      preprocessed ``zdftke.f90:815-817``) in binary64.  legoESM's
+      corresponding card fields are ``c_k`` (``rn_ediff``) and
+      ``tke_background`` (``rn_emin``).  Keep the source association exactly;
+      in particular, do not replace division by a reciprocal.
+
+    ``nemo_derived_mxl_min`` selects the second arm.  It is False by default,
+    so every card that does not ask for the derivation — Veros choices, FESOM,
+    and every ln_zdfiwm card — keeps its own configured ``mxl_min``.
     """
-    if cfg.tke_mxl_choice not in (3, 4):
+    if not cfg.nemo_derived_mxl_min:
         return cfg.mxl_min
     if not jax.config.x64_enabled:
-        raise ValueError("NEMO-derived rmxl_min requires JAX binary64 enabled")
+        raise ValueError(
+            "TKEConfig.nemo_derived_mxl_min=True (NEMO-derived rmxl_min) "
+            "requires JAX binary64 enabled")
     rn_ediff = jnp.asarray(cfg.c_k, dtype=jnp.float64)
     rn_emin = jnp.asarray(cfg.tke_background, dtype=jnp.float64)
     return (jnp.asarray(_NEMO_MOLECULAR_VISCOSITY, dtype=jnp.float64)
@@ -204,20 +218,28 @@ def _mxl0_surface_anchor(
     independently of nn_mxl, so BOTH need the anchor."""
     if cfg.tke_mxl_choice not in (3, 4):
         return None
-    if surface_tmask is None:
-        raise ValueError(
-            "NEMO tke_mxl_choice 3/4 requires surface_tmask for the "
-            "compiled `taum*tmask(:,:,1)` ln_mxl0 statement.")
     taum = jnp.asarray(taum)
-    surface_tmask = jnp.asarray(surface_tmask, dtype=taum.dtype)
-    if surface_tmask.shape != taum.shape:
-        raise ValueError(
-            "surface_tmask must match taum; got "
-            f"{surface_tmask.shape} vs {taum.shape}.")
+    if not cfg.nemo_mxl0_surface_tmask:
+        # Default (main's behaviour): unmasked stress.  Callers with no
+        # surface T-mask (FESOM) stay supported; NEMO-literal cards opt into
+        # the compiled masked statement with nemo_mxl0_surface_tmask=True.
+        masked_taum = jnp.maximum(taum, 0.0)
+    else:
+        if surface_tmask is None:
+            raise ValueError(
+                "TKEConfig.nemo_mxl0_surface_tmask=True requires "
+                "surface_tmask for the compiled `taum*tmask(:,:,1)` ln_mxl0 "
+                "statement (zdftke.F90:640-642).")
+        surface_tmask = jnp.asarray(surface_tmask, dtype=taum.dtype)
+        if surface_tmask.shape != taum.shape:
+            raise ValueError(
+                "surface_tmask must match taum; got "
+                f"{surface_tmask.shape} vs {taum.shape}.")
+        masked_taum = jnp.maximum(taum, 0.0) * surface_tmask
     return jnp.maximum(
         jnp.asarray(_mixing_length_floor(cfg), dtype=taum.dtype),
         _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
-        * jnp.maximum(taum, 0.0) * surface_tmask)
+        * masked_taum)
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
 _NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
 

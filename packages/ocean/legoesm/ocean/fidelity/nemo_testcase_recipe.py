@@ -372,6 +372,9 @@ def _model_config(
                 barotropic_transport_accumulation_evaluation="nemo_literal",
                 barotropic_seed_face_depth="nemo_ssh_avg",
                 barotropic_seed_evaluation="nemo_literal",
+                # dynspg_ts.F90:484-500 seeds the window from the CARRIED
+                # uu_b/vv_b (oce.F90:39,99), not from a 3-D reduction.
+                nemo_prognostic_barotropic_state=True,
                 barotropic_pgf_evaluation="nemo_literal",
                 barotropic_coriolis="ene_metric",
                 barotropic_een_seed="nemo_kmm",
@@ -419,6 +422,9 @@ def _model_config(
         barotropic_transport_accumulation_evaluation="nemo_literal",
         barotropic_seed_face_depth="nemo_ssh_avg",
         barotropic_seed_evaluation="nemo_literal",
+        # dynspg_ts.F90:484-500 seeds the window from the CARRIED uu_b/vv_b
+        # (oce.F90:39,99), not from a 3-D reduction.
+        nemo_prognostic_barotropic_state=True,
         barotropic_pgf_evaluation="nemo_literal",
         # NEMO commits the primary velocity-weighted uu_b(Kaa) into the RK3
         # prognostic velocity (dynspg_ts.F90:845-847;
@@ -1145,6 +1151,11 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         dtype=jnp.float64,
         min_dx_m=0.0,
         fold_convention="(n_lon-i)%n_lon",
+        # ORCA2's domain file supplies ff_t and ff_f, so NEMO reads them
+        # instead of recomputing 2*Omega*sin(lat) (domhgr.F90:222-227).  This
+        # card is the NEMO-literal one, so it opts in; every other tripole
+        # caller keeps the analytic default.
+        use_mesh_coriolis=True,
     )
     tmask, umask, vmask, fmask = _orca2_masks(bottom, strait)
     # dommsk.F90:146-198 copies the four-T-cell free-slip mask into
@@ -1323,6 +1334,13 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     )
     tke_config = model_config.physics.vertical_mixing.tke._replace(
         tke_background=1.0e-10,
+        # ORCA2 namelist_cfg:396 sets ln_zdfiwm=.TRUE., so zdf_tke_init takes
+        # the FORCED arm: rn_emin=1e-10 AND rmxl_min=1e-3 (zdftke.F90:841-843).
+        # The derived ln_zdfiwm=.FALSE. expression (:846) is never evaluated on
+        # this card; with rn_emin=1e-10 it would return 1.0 m, a thousand times
+        # NEMO's floor.
+        nemo_derived_mxl_min=False,
+        mxl_min=1.0e-3,
         # ORCA2 resolves ln_drg_OFF=.false.; tke_tke therefore applies the
         # bottom-friction Dirichlet value unconditionally at mbkt+1
         # (zdftke.F90:279-288).  nn_bc_bot is read for wave coupling but does
@@ -1413,6 +1431,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         "barotropic_seed_face_depth": "nemo_ssh_avg",
         "barotropic_seed_evaluation": "nemo_literal",
         "barotropic_pgf_evaluation": "nemo_literal",
+        # dynspg_ts.F90:484-500 reads the CARRIED uu_b/vv_b at the window
+        # seed; this card must select that identity by config, not inherit it
+        # from whether the state happens to hold the pair.
+        "nemo_prognostic_barotropic_state": True,
     }
     for field, value in required.items():
         got = getattr(cfg.barotropic, field)
