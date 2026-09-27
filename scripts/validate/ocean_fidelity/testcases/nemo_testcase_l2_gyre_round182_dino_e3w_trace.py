@@ -27,6 +27,10 @@ def main() -> None:
     parser.add_argument("--sanitize-invalid", action="store_true",
                         help="diagnostic only: report then replace invalid "
                              "divisors, allowing later call sites to execute")
+    parser.add_argument(
+        "--trace-step-boundaries", action="store_true",
+        help="print non-finite counts at the bridged-entry, post-surface-"
+             "forcing, and returned-step boundaries")
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args()
     args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
@@ -34,6 +38,38 @@ def main() -> None:
         parser.error("pass the kamm_twin_90d.py arguments after --")
 
     from legoesm.ocean import eos
+
+    def trace_state(label, state):
+        fields = {
+            "eta": state.eta.data,
+            "T": state.T.data,
+            "S": state.S.data,
+            "u": state.u.data,
+            "v": state.v.data,
+        }
+        jax.debug.print(
+            label + " " + " ".join(
+                f"{name}_nonfinite={{{name}}}" for name in fields),
+            ordered=True,
+            **{
+                name: jnp.sum(~jnp.isfinite(value))
+                for name, value in fields.items()
+            },
+        )
+
+    if ns.trace_step_boundaries:
+        from legoesm.ocean.experiments import dino
+
+        original_surface = dino.apply_dino_lat_lon_surface_forcing
+
+        def traced_surface(state, *surface_args, **surface_kwargs):
+            trace_state("TRACE_STEP_ENTRY", state)
+            result = original_surface(state, *surface_args, **surface_kwargs)
+            state_out = result[0] if isinstance(result, tuple) else result
+            trace_state("TRACE_AFTER_SURFACE", state_out)
+            return result
+
+        dino.apply_dino_lat_lon_surface_forcing = traced_surface
 
     original = eos.compute_buoyancy_frequency_nemo_bn2
     call_count = 0
@@ -91,6 +127,8 @@ def main() -> None:
     original_step = LatLonCGridOceanModel.step
 
     def traced_step(model, state, *step_args, **step_kwargs):
+        if ns.trace_step_boundaries:
+            trace_state("TRACE_MODEL_ENTRY", state)
         result = original_step(model, state, *step_args, **step_kwargs)
         fields = {
             "eta": result.eta.data,
