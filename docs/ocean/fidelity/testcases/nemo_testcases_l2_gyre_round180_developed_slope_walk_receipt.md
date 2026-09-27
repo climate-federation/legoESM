@@ -147,7 +147,9 @@ HOLD, or DO NOT SHIP verdict.
 
 The focused battery covers the year-owner harness, native GM/Redi operator,
 and NEMO testcase recipe: **175 passed in 110.77s**.  The receipt citation gate
-and shifted-citation plant are recorded after this receipt is committed.
+passed with all six compiled-source citations mapped.  Its shifted
+`zdfmxl.f90:109-124` plant exited 1 with `SYMBOL-NOT-AT-LINE`, as required.
+The focused citation regression reports **16 passed in 2.55s**.
 
 | artifact | SHA-256 |
 |---|---|
@@ -158,6 +160,9 @@ and shifted-citation plant are recorded after this receipt is committed.
 | `developed_slope_plant.log` | `5fb991804e6ce52905870f51eb85f0733e6387b8ef8b14c05a5fc166d0552fe9` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
 | `focused_tests.log` | `58ec60d90f8a73339c3b010b508be1654fd022bf9063e9ce5cc927c05ac01910` |
+| `citation_gate_final3.json` | `fe03f15952b457a7871d72e6e0557837c2bb83f9d68956c7522b12a8f17b608f` |
+| `citation_gate_shift_plant.json` | `bd2932a7572827f2fb67c8c26dfb91e8cd51db180b1f71b880f16d6f0b0ac2ac` |
+| `citation_pytest.log` | `e88f0ff294401dad47a1758f5f54b03a018ed7edbd684865af47c0bb7a84d3a3` |
 
 Choices made: none.  The new hook is default-off and diagnostic-only; no card,
 scheme, threshold, cadence, state field, or production default changed.
