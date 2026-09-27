@@ -42,8 +42,17 @@ statement reaches zero cells, so R39-P4 is **CONFIRMED** and nothing lands.
 
 The Round-38 admission, record self-replays, inherited boundary, and both
 Round-38 plants reproduce.  A one-ULP mutation of the newly scored product
-boundary fires.  The receipt citation gate uses the already pinned compiled
-range above.
+boundary fires.  The focused Round-38/39 plus citation battery passes 20/20.
+The receipt citation gate passes the compiled range above with zero failures,
+zero unmapped citations, and zero map-audit failures; its rigid two-line plant
+fires.
+
+The required `tests/ocean/fidelity -n 12` battery was launched once.  It
+reached 99% and the inherited final-tail stall, then was interrupted after the
+same bounded wait as Round 38 and is not represented as green.  It emitted the
+same five known failures (SI3 provenance, stale GYRE stamp, round-51 trace
+suffix, unstamped legacy emitters, missing case-board row); both new Round-39
+tests passed.
 
 The required separate `codex exec --sandbox read-only` review remains
 unavailable in this sandbox: its app-server initialization fails with a
