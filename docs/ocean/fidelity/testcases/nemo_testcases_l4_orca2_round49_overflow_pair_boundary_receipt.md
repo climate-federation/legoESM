@@ -74,17 +74,19 @@ Consequences for the frozen predictions:
 - R49-P2 is **REFUTED at kt=1**: neither tracer nor the following HPG boundary
   moves.  The hook ordering is correct, but kt=1 is earlier than the held
   candidate's causal effect on this card.
-- R49-P3 is **UNMEASURED**, not refuted: the first card-level movement occurs
-  at kt=2, and no admitted kt=2 source-order stage stream exists.
+- R49-P3 is **UNMEASURED**, not refuted: step entries kt=1 through kt=3 are
+  bit-identical, while U first moves at the kt=4 entry (25 cells worsen and 16
+  improve; maximum move 2.1510571102112408e-16 m s-1).  The effect is therefore
+  produced inside kt=3, and no admitted kt=3 source-order stage stream exists.
 - R49-P4 is **CONFIRMED**: the record has kt=1 stage endpoints, kt=1 RHS and
-  transports, kt=1..10 step entries and barotropic frames, but no kt=2
+  transports, kt=1..10 step entries and barotropic frames, but no kt=3
   stage-local T/S/rhd or post-HPG U/V accumulator.
 - R49-P5 is **CONFIRMED**: no unmeasured pair landed.
 
 The first non-bit statement is therefore not named this round.  The evidence
-only bounds it after the bit-identical kt=1 stage-2 HPG boundary and at or
-before the already-observed kt=2 whole-step movement.  Assigning EOS, HPG, or
-a later operator without the missing kt=2 record would violate the first-
+only bounds it after the bit-identical kt=1 stage-2 HPG boundary and inside
+kt=3, before the observed kt=4 step entry.  Assigning EOS, HPG, or
+a later operator without the missing kt=3 record would violate the first-
 statement rule.
 
 ## Record stop
@@ -94,7 +96,7 @@ The fail-closed acquisition contract is:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round49/acquisition/run.sh`
 
 It names new config `OVERFLOW_OMIP_L1_P3_R49PAIR` and new run
-`oracle_overflow_kt2_pair`.  It requests kt=2, stages 1..3, source-ordered
+`oracle_overflow_kt3_pair`.  It requests kt=3, stages 1..3, source-ordered
 tracer accumulator boundaries plus EOS `rhd`, every momentum accumulator from
 entry through HPG/vorticity/advection/LDF/ZDF, raw Kaa, and post-barotropic
 Kaa.  Its preflight exits 66 with the named refusal
@@ -125,9 +127,9 @@ acquisition specification, not a produced oracle record.
 
 ## OPEN
 
-1. Commit the additions-only OVERFLOW kt=2 writer and its fail-closed parser,
+1. Commit the additions-only OVERFLOW kt=3 writer and its fail-closed parser,
    then complete and run the acquisition contract under the new target name.
-2. Compare held candidate and base at kt=2 in NEMO's compiled order.  Name the
+2. Compare held candidate and base at kt=3 in NEMO's compiled order.  Name the
    first unequal statement; test it bit-exact on NEMO operands before forming
    any cancelling pair.
 3. Keep the QCO candidate held until the full shared-statement landing gate
