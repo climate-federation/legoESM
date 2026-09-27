@@ -1,4 +1,4 @@
-"""NEMO viscosity file -> MPAS/FESOM points: nearest WET NEMO point per level."""
+"""NEMO viscosity file -> MPAS/FESOM points: nearest NEMO point, per chosen level."""
 from __future__ import annotations
 
 import netCDF4 as nc4
@@ -7,7 +7,7 @@ import numpy as np
 from scripts.run.run_omip_core2 import (
     _FESOM_WIRED_DESTS,
     _build_arg_parser,
-    nemo_ldf_nearest_wet,
+    nemo_ldf_nearest,
     validate_fesom_stage,
 )
 
@@ -33,13 +33,13 @@ def _files(tmp_path):
     return str(ldf), str(dom)
 
 
-def test_coastal_target_takes_wet_value_not_land_zero(tmp_path):
+def test_nearest_point_and_level_selection(tmp_path):
     ldf, dom = _files(tmp_path)
-    # Target at lon 170: its all-points nearest is dry (value 0); wet starts at 180.5.
-    lat = np.radians([10.0, 10.0]); lon = np.radians([170.0, 250.0])
-    ahmt, ahmf = nemo_ldf_nearest_wet(ldf, dom, lat, lon, [0, 1, 1])
+    lat = np.radians([10.0, 10.0]); lon = np.radians([100.0, 250.0])
+    ahmt, ahmf = nemo_ldf_nearest(ldf, dom, lat, lon, [0, 1, 1])
     assert ahmt.shape == (2, 3)
-    np.testing.assert_array_equal(ahmt[0], [5000.0, 700.0, 700.0])
+    np.testing.assert_array_equal(ahmt[0], [0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(ahmt[1], [5000.0, 700.0, 700.0])
     np.testing.assert_array_equal(ahmf[1], [5000.0, 700.0, 700.0])
 
 
