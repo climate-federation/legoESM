@@ -527,13 +527,19 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
             _stretch = None
         e3w = nemo_e3w_from_live_gdept(
             z_coord, _gdept, stretch=_stretch, interior=True)
-        n2_int = compute_buoyancy_frequency_nemo_bn2(
-            T_filled, S_filled, _gdept, _gdepw_int, NemoSEOSConfig(), g=g,
-            e3w_int=e3w)
+        # A carried rn2b is already the compiled eosbn2 result.  Do not
+        # evaluate and then discard a second local eosbn2 call: besides being
+        # the wrong stage program, that dead call rejects DINO's dry/halo raw
+        # e3w slots before the recorded operand can replace it.
+        if n2_override is None:
+            n2_int = compute_buoyancy_frequency_nemo_bn2(
+                T_filled, S_filled, _gdept, _gdepw_int, NemoSEOSConfig(), g=g,
+                e3w_int=e3w)
     else:
-        n2_int = compute_buoyancy_frequency_adiabatic(
-            T_filled, S_filled, p_cell, dz_ref, J1, eos_fn=eos_fn,
-            rho_ref=rho_0, g=g)                       # (...,nlev-1)
+        if n2_override is None:
+            n2_int = compute_buoyancy_frequency_adiabatic(
+                T_filled, S_filled, p_cell, dz_ref, J1, eos_fn=eos_fn,
+                rho_ref=rho_0, g=g)                   # (...,nlev-1)
     # e3w(jk) for interface m = spacing between the bracketing T-centres.
     # It MUST be built from the SAME gdept ladder the N^2 was divided by, or the
     # exact e3w cancellation below is broken.  The faithful bn2 branch divides
