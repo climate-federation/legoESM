@@ -149,6 +149,12 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo/dynhpg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo"
         "/dynhpg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo"
+        "/eosbn2.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/dynhpg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo"
+        "/dynhpg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
         "/dynldf_lev.f90"),
@@ -1141,6 +1147,12 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo/dynhpg.f90:340-451': [
         ('SUBROUTINE hpg_sco( kt, Kmm, puu, pvv, Krhs )', 1),
         ('END SUBROUTINE hpg_sco', 1), 112],
+    'ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/eosbn2.f90:810-844': [
+        'CASE( np_teos10, np_eos80 )',
+        'prd(ji,jj,jk) = (  zn * r1_rho0 - 1._wp  ) * ztm', 35],
+    'ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/dynhpg.f90:404-459': [
+        'zhpi(ji,jj) = zcoef0 * r1_e1u(ji,jj)',
+        'r41_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap', 56],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:556':
         ('zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
     # --- ORCA2 card round 22: exact stage-to-entry transition and LDF owner ---
