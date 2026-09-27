@@ -148,7 +148,8 @@ def _literal_from_inputs(
     return dict(zip(hpg_gate.COMPONENTS, values, strict=True))
 
 
-def _candidate_inputs(card, state) -> dict[str, np.ndarray]:
+def _candidate_inputs(model, state) -> dict[str, np.ndarray]:
+    import jax
     import jax.numpy as jnp
     from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
@@ -157,31 +158,46 @@ def _candidate_inputs(card, state) -> dict[str, np.ndarray]:
         nemo_e3w0_reference,
     )
 
-    grid = card.recipe.grid
-    z_coord = card.recipe.z_coord
-    config = card.recipe.model_config
-    geom = pe.compute_frozen_geom_density(state, grid, z_coord, config)
-    active = jnp.asarray(z_coord.is_active)
-    rhd = jnp.where(active, geom[2], jnp.zeros_like(geom[2])) / config.rho_0
-    eta = state.eta.data
-    min_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
-    eta_safe = jnp.maximum(eta, min_col - state.H_bathy.data) * state.land_mask.data
-    stretch = nemo_r3t_stretch(
-        z_coord, eta_safe, state.H_bathy.data,
-        evaluation="nemo_reciprocal")[..., jnp.newaxis]
+    grid = model.grid
+    z_coord = model.z_coord
+    config = model.config
     e3w0 = nemo_e3w0_reference(z_coord)
     require(e3w0 is not None, "ORCA2 card lost its recorded e3w_0")
-    t_depth = jnp.asarray(z_coord.t_depth_ref)
-    gdept_z0 = pe._nemo_qco_gdept_z0(  # measurement reuses production helper
-        t_depth[jnp.newaxis, jnp.newaxis, :], stretch, eta_safe)
-    one = jnp.asarray(1.0, dtype=rhd.dtype)
-    return {
-        "rhd": np.asarray(rhd),
-        "e3w": np.asarray(jnp.asarray(e3w0) * stretch),
-        "gdept_z0": np.asarray(gdept_z0),
-        "r1_e1u": np.asarray(nemo_source_round(one / grid.dx_u[:, 1:])),
-        "r1_e2v": np.asarray(nemo_source_round(one / grid.dy_v[1:, :])),
-    }
+
+    @jax.jit
+    def _compiled_inputs(source_state):
+        # The production HPG evaluates this bundle inside ``_step_jitted``.
+        # Keep the diagnostic in one compiled graph as well; eager EOS
+        # evaluation can otherwise expose a different last-bit association.
+        geom = pe.compute_frozen_geom_density(
+            source_state, grid, z_coord, config)
+        active = jnp.asarray(z_coord.is_active)
+        rhd = (jnp.where(active, geom[2], jnp.zeros_like(geom[2]))
+               / config.rho_0)
+        eta = source_state.eta.data
+        min_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
+        eta_safe = (jnp.maximum(
+            eta, min_col - source_state.H_bathy.data)
+            * source_state.land_mask.data)
+        stretch = nemo_r3t_stretch(
+            z_coord, eta_safe, source_state.H_bathy.data,
+            evaluation="nemo_reciprocal")[..., jnp.newaxis]
+        t_depth = jnp.asarray(z_coord.t_depth_ref)
+        gdept_z0 = pe._nemo_qco_gdept_z0(
+            t_depth[jnp.newaxis, jnp.newaxis, :], stretch, eta_safe)
+        one = jnp.asarray(1.0, dtype=rhd.dtype)
+        return (
+            rhd,
+            jnp.asarray(e3w0) * stretch,
+            gdept_z0,
+            nemo_source_round(one / grid.dx_u[:, 1:]),
+            nemo_source_round(one / grid.dy_v[1:, :]),
+        )
+
+    values = jax.device_get(_compiled_inputs(state))
+    return dict(zip(
+        ("rhd", "e3w", "gdept_z0", "r1_e1u", "r1_e2v"),
+        (np.asarray(value) for value in values), strict=True))
 
 
 def _support_pair(field: np.ndarray, rows: np.ndarray) -> np.ndarray:
@@ -274,7 +290,7 @@ def run(
         name: _owned(hpg_records, name)
         for name in hpg_gate.COMPONENTS
     }
-    g = card.recipe.model_config.g
+    g = model.config.g
     recorded_replay = _literal_from_inputs(recorded_inputs, g)
     full_u_mask = np.concatenate(
         [np.asarray(parent["umask"]) for parent in parents], axis=1) > 0.0
@@ -292,9 +308,9 @@ def run(
         require(not self_replay["sum_u"]["bit_exact"],
                 "recorded-replay plant did not fire")
 
-    candidate_inputs = _candidate_inputs(card, state)
+    candidate_inputs = _candidate_inputs(model, state)
     candidate_literal = _literal_from_inputs(
-        candidate_inputs, g, grid=card.recipe.grid)
+        candidate_inputs, g, grid=model.grid)
     input_rows = {}
     for name in INPUT_ORDER[:-1]:
         candidate_pair = _support_pair(candidate_inputs[name], support_rows)[..., :30]
