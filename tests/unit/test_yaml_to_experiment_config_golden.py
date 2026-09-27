@@ -135,7 +135,7 @@ def test_translation_field_mapping_is_pinned() -> None:
             "conservation": {"fix_mass": False},
             "time": {
                 "duration_hours": 480,          # -> days = 20
-                "output_interval_hours": 48,    # -> diag_days = max(1, 48//24) = 2
+                "output_interval_hours": 36,    # -> diag_days = 36/24 = 1.5
                 "start_day": 3.0,
             },
             "output": {
@@ -170,7 +170,7 @@ def test_translation_field_mapping_is_pinned() -> None:
     # Time / integration unit conversions.
     assert ec.days == 20                          # duration_hours // 24
     assert ec.start_day == 3.0
-    assert ec.output.diag_days == 2               # max(1, output_interval_hours // 24)
+    assert ec.output.diag_days == 1.5             # output_interval_hours / 24, exact
     # Output passthrough.
     assert ec.output.output_dir == "out/run/"
     assert ec.output.checkpoint_days == 30
@@ -207,10 +207,10 @@ def test_unread_yaml_keys_are_not_declared() -> None:
     assert "format" not in DEFAULT_CONFIG["output"]
 
 
-def test_diag_days_floor_is_at_least_one() -> None:
-    """Sub-daily output interval must still yield diag_days >= 1, not 0."""
+def test_sub_daily_output_interval_is_exact() -> None:
+    """A 6-hour output interval is a quarter-day cadence, not truncated to 1 day."""
     cfg = Config.from_dict({"time": {"output_interval_hours": 6}})
-    assert cfg.to_experiment_config().output.diag_days == 1
+    assert cfg.to_experiment_config().output.diag_days == 0.25
 
 
 @pytest.mark.parametrize("blk,key,val", [("conservation", "fix_energy", True),

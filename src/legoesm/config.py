@@ -421,7 +421,7 @@ class Config:
             },
             "output": {
                 "output_dir": output_cfg.get("path", ""),
-                "diag_days": max(1, int(time_cfg.get("output_interval_hours", 6) / 24)),
+                "diag_days": float(time_cfg.get("output_interval_hours", 6)) / 24.0,
                 "checkpoint_days": int(output_cfg.get("checkpoint_days", 0)),
                 "monthly_means": bool(output_cfg.get("monthly_means", False)),
                 "cmip_output": bool(output_cfg.get("cmip_output", False)),
