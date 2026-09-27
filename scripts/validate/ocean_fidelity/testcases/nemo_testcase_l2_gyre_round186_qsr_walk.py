@@ -424,7 +424,12 @@ def walk(root: Path, process_record: Path, lego_trace: Path,
             if reference.ndim >= 3 and reference.shape[2] == 17:
                 base_mask = wet[..., :17]
                 if reference.ndim == 4:
-                    base_mask = base_mask[..., None]
+                    base_mask = np.broadcast_to(
+                        base_mask[..., None], reference.shape).copy()
+                    if name in ("live_arguments", "live_exponentials"):
+                        # The IR arm is evaluated only through nk0=2; levels
+                        # 3..nkV execute the visible expression alone.
+                        base_mask[..., 2:, 0] = False
                 row_mask = np.broadcast_to(base_mask, reference.shape)
             elif reference.ndim == 2:
                 row_mask = qmm_mask

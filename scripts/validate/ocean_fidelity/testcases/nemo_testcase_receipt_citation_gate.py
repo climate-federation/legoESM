@@ -150,6 +150,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/nemogcm.f90"),
     "GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/traqsr.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/traqsr.f90"),
     "GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/dynldf_lev.f90": (
@@ -3685,6 +3687,16 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3.f90:200-222': [
         '! Stage 1 :',
         'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs', 23],
+    # --- round 188: compiled-order developed qsr statement walk ---
+    'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/traqsr.f90:616-645': [
+        'zz0 =           rn_abs   * r1_rho0_rcp',
+        'pts(ji,jj,jk,jp_tem,Krhs) = pts(ji,jj,jk,jp_tem,Krhs)', 30],
+    'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/traqsr.f90:1021-1070': [
+        'FUNCTION qsr_ext_lev( pL, pfr ) RESULT( klev )',
+        'END FUNCTION qsr_ext_lev', 50],
+    'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/traqsr.f90:1145-1213': [
+        'r1_si0 = 1._wp / rn_si0',
+        'nkV  = qsr_ext_lev( rn_si1, zVlp )', 69],
 }
 
 
