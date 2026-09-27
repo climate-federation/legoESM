@@ -88,8 +88,10 @@ def _support_masks(card) -> dict[str, np.ndarray]:
     safe = np.zeros((OWNED_NY, OWNED_NX), dtype=bool)
     safe[:-1, 1:-1] = True
     cell = cell & safe[..., None]
-    u = np.asarray(card.recipe.initial_state.u_mask.data)[:, 1:OWNED_NX + 1, :NLEV] > 0.5
-    v = np.asarray(card.recipe.initial_state.v_mask.data)[1:OWNED_NY + 1, :OWNED_NX, :NLEV] > 0.5
+    u2 = np.asarray(card.recipe.initial_state.u_mask.data)[:, 1:OWNED_NX + 1] > 0.5
+    v2 = np.asarray(card.recipe.initial_state.v_mask.data)[1:OWNED_NY + 1, :OWNED_NX] > 0.5
+    u = np.broadcast_to(u2[..., None], cell.shape)
+    v = np.broadcast_to(v2[..., None], cell.shape)
     return {
         "T": cell,
         "u": u & safe[..., None],
