@@ -82,7 +82,12 @@ if [[ "$actual_sha" != "$BINARY_SHA" ]]; then
     "$binary" "$actual_sha" "$BINARY_SHA" >&2
   exit 65
 fi
-if nm -D "$binary" | grep -q '_ZGV'; then
+# Captured first, then searched: under `set -o pipefail`, `nm | grep -q` can
+# close the pipe on the first match, kill nm with SIGPIPE and turn the whole
+# pipeline false -- so the refusal would not fire on exactly the binary it
+# exists to reject.
+dynamic_symbols=$(nm -D "$binary")
+if grep -q '_ZGV' <<<"$dynamic_symbols"; then
   printf 'REFUSE: vector-math symbol present in %s; not the scalar-math arch\n' "$binary" >&2
   exit 65
 fi

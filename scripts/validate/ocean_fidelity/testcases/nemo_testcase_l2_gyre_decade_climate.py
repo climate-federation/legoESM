@@ -108,7 +108,9 @@ FIELD_NAMES = ("T", "S", "u", "v", "ssh")
 # line it plants.  "month-shift" is not here: it pairs legoESM month m with
 # NEMO month m+1 inside score() itself, so it needs the real snapshots and is
 # exercised by the data-backed test rather than by this arithmetic self-check.
-PLANTS = ("ratio-denominator-zero", "mld-unsorted", "trend-short")
+PLANTS = {"ratio-denominator-zero": "zero spatial variability",
+          "mld-unsorted": "not strictly increasing",
+          "trend-short": "is not a trend"}
 SCORE_PLANTS = ("month-shift",)
 
 
@@ -169,13 +171,16 @@ def _ratio(difference, reference, weights, mask, *, plant=None) -> dict:
             "ratio": gap / scale, "bar": BAR_RATIO}
 
 
-def _mixed_layer_depth(temperature, depth3, wet3, *, plant=None):
+def _mixed_layer_depth(temperature, depth3, wet3, bottom=None, *, plant=None):
     """Depth at which T first falls MLD_THRESHOLD_K below the surface cell.
 
-    Linear interpolation between the bracketing cell centres; a column that
-    never crosses the threshold is given its deepest wet cell's depth, which is
-    the physically right answer for a fully mixed column and is reported as
-    such rather than as a fill value.
+    Linear interpolation between the bracketing cell centres.  A column that
+    never crosses the threshold is fully mixed, so its mixed layer reaches the
+    sea floor and it is given the BOTTOM INTERFACE depth of its deepest wet
+    cell -- not that cell's centre, which would understate a fully mixed
+    column by half the bottom layer, up to 150 m on this card.  ``bottom`` is
+    the cumulative layer thickness; without it the centre is used and the
+    caller is told.
     """
     temperature = np.asarray(temperature, dtype=np.float64)
     depth3 = np.asarray(depth3, dtype=np.float64)
@@ -196,7 +201,8 @@ def _mixed_layer_depth(temperature, depth3, wet3, *, plant=None):
             k_wet = column[-1]
             surface = temperature[j, i, column[0]]
             target = surface - MLD_THRESHOLD_K
-            out[j, i] = depth3[j, i, k_wet]
+            out[j, i] = (depth3[j, i, k_wet] if bottom is None
+                         else float(bottom[k_wet]))
             for k in column[1:]:
                 if temperature[j, i, k] <= target:
                     above = temperature[j, i, k - 1]
@@ -266,12 +272,34 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
                         dtype=np.float64)[..., :nlev]
     # Weights.  2-D fields are weighted by cell area; 3-D fields by area x dz.
     area2 = np.asarray(area, dtype=np.float64)
-    volume3 = area2[..., None] * np.asarray(dz, dtype=np.float64)[None, None, :]
+    dz1 = np.asarray(dz, dtype=np.float64)
+    volume3 = area2[..., None] * dz1[None, None, :]
+    interfaces = np.cumsum(dz1)
+    # The wet mask is NEMO's tmask and it is imposed on BOTH models.  If
+    # legoESM's own active mask disagreed, cells would be scored that one
+    # model calls land, and the score would still be a plausible number.
+    lego_wet = (np.asarray(card.recipe.z_coord.is_active)[..., :nlev]
+                & (np.asarray(card.recipe.land_mask) > 0.5)[..., None])
+    require(lego_wet.shape == wet3.shape,
+            f"legoESM's active mask is {lego_wet.shape}, NEMO's tmask is "
+            f"{wet3.shape}")
+    require(bool(np.array_equal(lego_wet, wet3)),
+            f"legoESM's active mask and NEMO's tmask disagree on "
+            f"{int(np.count_nonzero(lego_wet != wet3))} cells; the two models "
+            "do not agree on where the ocean is")
+    # The zonal mean averages over x with equal weight per cell, which is only
+    # a mean if the cells are equally wide.  On this card they are; the check
+    # is here so a stretched grid cannot inherit the formula silently.
+    dx = np.asarray(card.recipe.grid.dx_T, dtype=np.float64)
+    require(float(np.max(np.ptp(dx, axis=1)) / np.max(dx)) < 1.0e-12,
+            "the x spacing varies along a row, so an unweighted zonal mean is "
+            "not a zonal mean; weight by dx before using it")
     started = time.time()
 
     clim_months = list(range(clim_first_month, months + 1))
     series: dict[str, list] = {key: [] for key in (
         "month", "day", "T3D_rms", "S3D_rms",
+        "T3D_rms_volume_weighted", "S3D_rms_volume_weighted",
         "lego_T3D_monthly_change", "nemo_T3D_monthly_change",
         "lego_S3D_monthly_change", "nemo_S3D_monthly_change",
         "lego_T_volmean", "nemo_T_volmean", "lego_S_volmean", "nemo_S_volmean",
@@ -315,6 +343,15 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
                                       wet3))
         series["S3D_rms"].append(_rms(states["lego"]["S"] - states["nemo"]["S"],
                                       wet3))
+        # The two rows above are the CAMPAIGN's metric: the year harness's
+        # unweighted _rms, so they are the same quantity the round-183 receipt
+        # quotes and can be compared with it.  The two below weight each cell
+        # by its volume, because an unweighted 3-D rms on a grid whose layers
+        # run 10 m to 300 m is thirty times more a surface statistic than a
+        # bottom one.
+        for name in ("T", "S"):
+            series[f"{name}3D_rms_volume_weighted"].append(_weighted_rms(
+                states["lego"][name] - states["nemo"][name], volume3, wet3))
         for side in ("lego", "nemo"):
             state = states[side]
             for name, field in (("T", "T"), ("S", "S")):
@@ -333,7 +370,8 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
         for side, state in states.items():
             calendar = (month - 1) % MONTHS_PER_YEAR
             if month in clim_months:
-                mld = _mixed_layer_depth(state["T"], depth3, wet3, plant=plant)
+                mld = _mixed_layer_depth(state["T"], depth3, wet3,
+                                         bottom=interfaces, plant=plant)
                 seasonal[side]["sst"][calendar].append(
                     _weighted_mean(state["T"][..., 0], area2, wet2))
                 seasonal[side]["mld"][calendar].append(
@@ -437,6 +475,11 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
         "energetics": {
             "lego_mean_KE_m2_s2": float(np.mean(series["lego_KE"][window])),
             "nemo_mean_KE_m2_s2": float(np.mean(series["nemo_KE"][window])),
+            "note": ("u and v are each model's own C-grid face values, "
+                     "squared at coincident indices and weighted by T-cell "
+                     "volume.  Identical on both models, so the comparison "
+                     "is fair; not a physical kinetic energy, and not to be "
+                     "quoted as one."),
             "lego_velocity_variance_about_climatology_m2_s2": eke["lego"],
             "nemo_velocity_variance_about_climatology_m2_s2": eke["nemo"],
         },
@@ -521,7 +564,8 @@ def figures(report: dict, out: Path, lego_root: Path, nemo_dir: Path, *,
                 fontsize=9)
             figure.colorbar(image, ax=axes[r, c], fraction=0.046)
     figure.suptitle(
-        f"GYRE years {first // MONTHS_PER_YEAR + 1}-{last // MONTHS_PER_YEAR} "
+        f"GYRE years {(first - 1) // MONTHS_PER_YEAR + 1}"
+        f"-{(last - 1) // MONTHS_PER_YEAR + 1} "
         f"climatology ({len(months)} monthly snapshots)")
     figure.tight_layout()
     path = out / "fig1_decade_climatology_maps.png"
@@ -638,9 +682,11 @@ def self_check(plant: str | None = None) -> int:
     wet = np.ones((1, 1, 2), dtype=bool)
     mld = _mixed_layer_depth(temperature, depth, wet)
     assert abs(float(mld[0, 0]) - 7.0) < 1e-12, mld
-    # A fully mixed column reports its deepest wet cell, not a fill value.
-    mld = _mixed_layer_depth(np.array([[[20.0, 20.0]]]), depth, wet)
-    assert abs(float(mld[0, 0]) - 15.0) < 1e-12, mld
+    # A fully mixed column reaches the sea floor: with layers 10 m and 10 m
+    # the bottom interface is 20 m, not the 15 m cell centre.
+    mld = _mixed_layer_depth(np.array([[[20.0, 20.0]]]), depth, wet,
+                             bottom=np.array([10.0, 20.0]))
+    assert abs(float(mld[0, 0]) - 20.0) < 1e-12, mld
 
     zonal = _zonal_mean(np.array([[[1.0], [3.0]], [[5.0], [9.0]]]),
                         np.ones((2, 2, 1), dtype=bool))
@@ -679,8 +725,13 @@ def _plant(name: str) -> int:
                                np.ones((1, 1, 2), dtype=bool), plant=name)
         elif name == "trend-short":
             _relative_trend(np.array([1.0, 2.0]))
-    except (YEAR.GateError, SystemExit, AssertionError,
-            ValueError) as error:
+    except GateError as error:
+        # The message is checked, not merely the failure: a plant that raises
+        # for an unrelated reason would otherwise be reported as proof of the
+        # guard it names.
+        if PLANTS[name] not in str(error):
+            print(f"PLANT {name} FAILED FOR THE WRONG REASON: {error}")
+            return 2
         print(f"plant {name} failed as required: {error}")
         return 1
     print(f"PLANT {name} DID NOT FAIL")
@@ -694,7 +745,7 @@ def main(argv=None) -> int:
     parser.add_argument("--figures", action="store_true")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--plant", default=None,
-                        choices=list(PLANTS) + list(SCORE_PLANTS))
+                        choices=sorted(PLANTS) + list(SCORE_PLANTS))
     parser.add_argument("--months", type=int, default=DECADE_MONTHS)
     parser.add_argument("--clim-first-month", type=int,
                         default=CLIM_FIRST_MONTH,

@@ -78,6 +78,21 @@ def test_the_basin_mean_is_area_weighted_not_a_plain_mean(harness):
     assert float(np.mean(values)) == pytest.approx(2.0)
 
 
+def test_the_weighted_rms_actually_uses_its_weights(harness):
+    """Deleting the weights from the RMS must change the answer."""
+    mask = np.ones((2,), dtype=bool)
+    values = np.array([0.0, 4.0])
+    weights = np.array([1.0, 3.0])
+    # sqrt((1*0 + 3*16)/4) = sqrt(12)
+    assert harness._weighted_rms(values, weights, mask) == pytest.approx(
+        np.sqrt(12.0))
+    # The unweighted answer is sqrt(8): different, so the weights are doing
+    # work rather than being carried along.
+    assert float(np.sqrt(np.mean(values ** 2))) == pytest.approx(np.sqrt(8.0))
+    with pytest.raises(harness.GateError):
+        harness._weighted_rms(values, np.ones((3,)), mask)
+
+
 def test_the_ratio_is_the_difference_over_the_fields_own_variability(harness):
     mask = np.ones((2, 3), dtype=bool)
     weights = np.ones((2, 3))
@@ -98,10 +113,17 @@ def test_the_mixed_layer_interpolates_between_cell_centres(harness):
     wet = np.ones((1, 1, 2), dtype=bool)
     mld = harness._mixed_layer_depth(np.array([[[20.0, 19.0]]]), depth, wet)
     assert float(mld[0, 0]) == pytest.approx(7.0)
-    # A fully mixed column reports its deepest wet cell, not a magic sentinel a
-    # downstream mean would silently average in.
-    mld = harness._mixed_layer_depth(np.array([[[20.0, 20.0]]]), depth, wet)
-    assert float(mld[0, 0]) == pytest.approx(15.0)
+    # A fully mixed column reaches the sea floor.  With 10 m layers the floor
+    # is the 20 m interface; the 15 m cell CENTRE would understate a fully
+    # mixed column by half the bottom layer, which on the real card is 150 m.
+    mld = harness._mixed_layer_depth(np.array([[[20.0, 20.0]]]), depth, wet,
+                                     bottom=np.array([10.0, 20.0]))
+    assert float(mld[0, 0]) == pytest.approx(20.0)
+    # And a thick bottom layer makes the two answers far apart, so the test
+    # would fail if the centre came back.
+    mld = harness._mixed_layer_depth(np.array([[[20.0, 20.0]]]), depth, wet,
+                                     bottom=np.array([10.0, 310.0]))
+    assert float(mld[0, 0]) == pytest.approx(310.0)
     # The violation: a depth axis that is not increasing must raise, because
     # the bracketing search would otherwise return a plausible wrong depth.
     with pytest.raises(harness.GateError):
@@ -140,6 +162,9 @@ def test_the_acquisition_refuses_to_run_without_the_explicit_flag():
     text = ACQUISITION.read_text()
     assert "NN_ITEND=21600" in text
     assert "NN_STOCK=180" in text
+    # The two completeness loops must count, not merely print a sentence.
+    assert '"$compared" -ne 12' in text
+    assert '-ne 120' in text
     # The admission check of operator's note AS: year 1 against round 132.
     assert "round132/oracle_daily_restarts" in text
 
@@ -193,3 +218,9 @@ def test_the_preregistration_states_the_bar_the_scorer_reports(harness):
     assert "velocity_variance_about_climatology" in text
     assert "velocity_variance_about_climatology_m2_s2" in source
     assert "_EKE_m2_s2" not in source
+    # Each plant names the message it must fail with, so a plant that raises
+    # for an unrelated reason is not counted as proof of its guard.
+    assert set(harness.PLANTS) == {"ratio-denominator-zero", "mld-unsorted",
+                                   "trend-short"}
+    assert all(isinstance(reason, str) and reason
+               for reason in harness.PLANTS.values())
