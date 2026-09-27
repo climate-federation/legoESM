@@ -23,12 +23,19 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (  # noqa: E402
     LatLonCGridOceanModel,
     _NEMOWSRK3TestHooks,
 )
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (  # noqa: E402
+    nemo_qco_wzv_recurrence,
+    nemo_transport_wzv_divergence_level,
+)
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (  # noqa: E402
     build_orca2_zps_card,
     validate_nemo_testcase_card,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_phase2l_tracer_gate as phase2l,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_phase2l_production_w_gate as production_w,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
@@ -112,8 +119,11 @@ def _endpoint_override(card, entry: dict[str, np.ndarray], root: Path):
     return jnp.asarray(eta_after), jnp.asarray(hu_avg), jnp.asarray(hv_avg)
 
 
-def _run(card, state, freshwater, surface, *, endpoint, exposure: str):
+def _run(card, state, freshwater, surface, *, endpoint, exposure: str,
+         transport_override=None):
     kwargs: dict[str, object] = {"external_mode_result_override": endpoint}
+    if transport_override is not None:
+        kwargs["stage1_tracer_transport_override"] = transport_override
     if exposure == "transport":
         kwargs["expose_tracer_transport_stage"] = 1
     elif exposure in ("after_advection", "after_sbc"):
@@ -130,6 +140,26 @@ def _run(card, state, freshwater, surface, *, endpoint, exposure: str):
     )
     return model.step(
         state, dt=card.dt_s, freshwater=freshwater, surface_forcing=surface)
+
+
+def _wzv_replay(wzv: dict[str, np.ndarray], dt: float) -> np.ndarray:
+    """Drive the production literal recurrence from recorded NEMO operands."""
+    fu, fv = wzv["pFu_stencil"], wzv["pFv_stencil"]
+    levels = []
+    for jk in range(NLEV):
+        levels.append(nemo_transport_wzv_divergence_level(
+            jnp.asarray(fu[1:, 1:, jk]), jnp.asarray(fu[1:, :-1, jk]),
+            jnp.asarray(fv[1:, 1:, jk]), jnp.asarray(fv[:-1, 1:, jk]),
+            jnp.asarray(wzv["r1_area"]), jnp.asarray(wzv["e3t"][..., jk]),
+            jnp.asarray(wzv["tmask"][..., jk]),
+            runoff_mass_flux=(jnp.asarray(wzv["runoff"]) if jk == 0 else None),
+        ))
+    return np.asarray(nemo_qco_wzv_recurrence(
+        jnp.stack(levels, axis=-1), jnp.asarray(wzv["e3t0"])[..., :NLEV],
+        jnp.asarray(wzv["r3bb"]), jnp.asarray(wzv["r3aa"]),
+        jnp.asarray(wzv["tmask"])[..., :NLEV],
+        jnp.asarray(dt, dtype=jnp.float64),
+    ))
 
 
 def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, object]:
@@ -151,10 +181,12 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
 
     tracer_path = record_root / phase2l.TRACER_RECORD
     stage_path = record_root / "oracle_stage_kt00000001_s1.bin"
+    wzv_path = record_root / production_w.WZV_RECORD
     for path in (tracer_path, stage_path, record_root / phase2l.STAGE3_RECORD,
-                 record_root / phase2l.BT_RECORD):
+                 record_root / phase2l.BT_RECORD, wzv_path):
         require(path.is_file(), f"missing admitted record {path}")
     tracer = phase2l.read_tracer(tracer_path)
+    wzv = production_w.read_wzv(wzv_path)
     oracle_stage = ladder.read_state_frame(stage_path, kt=1, stage=1)
     entry = ladder.assemble_state_fields(record_root, 1, stage=None)
     surface_fields = ladder.assemble_surface_fields(record_root, 1)
@@ -228,6 +260,39 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
         name: bit_score(endpoint_arm[name], expected[name], row_masks[name])
         for name in ORDER
     }
+
+    # The endpoint arm has already shown zFu/zFv exact.  Replace only its
+    # non-bit zFw on rank zero; the support mask excludes every cell that can
+    # read the unrecorded rank-one half.  The U/V members are the same exact
+    # recorded values, so this is a one-variable vertical-transport arm.
+    shape = state.T.data.shape
+    zfu = np.zeros(shape, dtype=np.float64)
+    zfv = np.zeros(shape, dtype=np.float64)
+    zfw = np.zeros(shape[:-1] + (shape[-1] + 1,), dtype=np.float64)
+    zfu[:, :OWNED_NX] = expected["metric_zFu"]
+    zfv[:, :OWNED_NX] = expected["metric_zFv"]
+    zfw[:, :OWNED_NX] = np.asarray(tracer["zFw"])
+    transport_override = tuple(map(jnp.asarray, (zfu, zfv, zfw)))
+    recorded_w_arm: dict[str, np.ndarray] = {}
+    for boundary in ("after_advection", "after_sbc"):
+        out = _run(card, state, freshwater, surface, endpoint=endpoint,
+                   exposure=boundary, transport_override=transport_override)
+        recorded_w_arm[f"{boundary}_T"] = np.asarray(out.T.data)[:, :OWNED_NX, :NLEV]
+        recorded_w_arm[f"{boundary}_S"] = np.asarray(out.S.data)[:, :OWNED_NX, :NLEV]
+    out = _run(card, state, freshwater, surface, endpoint=endpoint,
+               exposure="stage1", transport_override=transport_override)
+    recorded_w_arm.update({
+        "stage1_T": np.asarray(out.T.data)[:, :OWNED_NX, :NLEV],
+        "stage1_S": np.asarray(out.S.data)[:, :OWNED_NX, :NLEV],
+    })
+    recorded_w_rows = {
+        name: bit_score(values, expected[name], row_masks[name])
+        for name, values in recorded_w_arm.items()
+    }
+
+    source_w = _wzv_replay(wzv, card.dt_s / 3.0)[..., :NLEV]
+    source_w_row = bit_score(
+        source_w, np.asarray(wzv["ww"])[..., :NLEV], masks["T"])
     if plant:
         planted = expected["stage1_T"].copy()
         target = tuple(np.argwhere(row_masks["stage1_T"])[0])
@@ -245,7 +310,8 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
         },
         "record": {
             "root": str(record_root), "tracer_sha256": sha256(tracer_path),
-            "stage1_sha256": sha256(stage_path), "schema": tracer["header"],
+            "stage1_sha256": sha256(stage_path),
+            "wzv_sha256": sha256(wzv_path), "schema": tracer["header"],
         },
         "decision52_entry": entry_rows,
         "support": {name: int(mask.sum()) for name, mask in row_masks.items()},
@@ -254,6 +320,10 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
         "endpoint_rows": endpoint_rows,
         "endpoint_first_non_bit": first_non_bit(endpoint_rows),
         "endpoint_closes_all": all(row["bit_exact"] for row in endpoint_rows.values()),
+        "recorded_w_rows": recorded_w_rows,
+        "recorded_w_closes_downstream": all(
+            row["bit_exact"] for row in recorded_w_rows.values()),
+        "source_stage_wzv_replay": source_w_row,
     }
 
 
