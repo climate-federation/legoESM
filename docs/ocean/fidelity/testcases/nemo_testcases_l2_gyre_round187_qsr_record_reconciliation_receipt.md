@@ -97,12 +97,27 @@ production trace, and endpoint projection.
 
 ## Tests, citations, and review
 
-The focused reader tests report `4 passed`.  The direct citation gate and its
-shifted-citation plant are run after this receipt is committed; their exact
-results are appended below without changing any scientific claim.  The final
-diff receives the required separate read-only Codex review; its verbatim
-verdict is appended below.  No broad ocean battery is warranted because no
-model implementation or production gate changed.
+The focused reader suite reports **`4 passed in 0.09s`**.  The direct citation
+gate passes all five compiled-source citations with zero unmapped or failed
+rows.  Shifting the compiled writer citation by two lines reports
+`SYMBOL-NOT-AT-LINE`, status `FAIL`, and exits 1.  `bash -n` passes the
+corrected acquisition script, and `git diff --check` passes.  No broad ocean
+battery is warranted because no model implementation or production gate
+changed.
+
+The required separate read-only Codex review could not initialize in this
+sandbox.  Its complete verdict text is:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only
+> file system (os error 30)
+>
+> Reading additional input from stdin...
+>
+> Error: failed to initialize in-process app-server client: Read-only file
+> system (os error 30)
+
+This is **independent review unavailable in-sandbox**, not a `SHIP` verdict;
+it did not issue `DO NOT SHIP`.
 
 ## OPEN — round 188
 
