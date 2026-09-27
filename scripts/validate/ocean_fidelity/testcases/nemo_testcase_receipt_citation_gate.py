@@ -878,9 +878,9 @@ CITATION_MAP = {
         "CALL r50_mom_uv( 'after_adv', uu, vv, Krhs )", 37],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:492-541': [
         '!                       !==  T-S Tracers  ==!',
-        'CALL r50_tra_finish( ts, ssh, Kaa )', 50],
+        ('CALL r50_tra_finish( ts, ssh, Kaa )', 1), 50],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/eosbn2.f90:684-718': [
-        'SELECT CASE( neos )',
+        ('SELECT CASE( neos )', 2),
         'prd(ji,jj,jk) = (  zn * r1_rho0 - 1._wp  ) * ztm', 35],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynhpg.f90:341-419': [
         'SUBROUTINE hpg_sco( kt, Kmm, puu, pvv, Krhs )',
