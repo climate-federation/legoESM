@@ -32,16 +32,23 @@ def _bits(values: jax.Array) -> np.ndarray:
 
 def test_nemo_source_round_preserves_binary64_bits_and_jit_parity() -> None:
     subnormal = np.nextafter(np.float64(0.0), np.float64(1.0))
-    values = jnp.asarray(
+    values_np = np.array(
         [-np.inf, -2.0, -subnormal, -0.0, subnormal, 3.0, np.inf],
-        dtype=jnp.float64,
+        dtype=np.float64,
     )
+    values = jnp.asarray(values_np, dtype=jnp.float64)
 
     eager = nemo_source_round(values)
     compiled = jax.jit(nemo_source_round)(values)
 
-    np.testing.assert_array_equal(_bits(eager), _bits(values))
-    np.testing.assert_array_equal(_bits(compiled), _bits(values))
+    # Ground truth computed purely in NumPy (never touches JAX/x64), so a
+    # float64->float32->float64 round-trip on `values` itself cannot also
+    # corrupt this comparison target. The subnormal (~4.94e-324) underflows
+    # to exactly 0.0 under float32, so a truncation bug flips its bit
+    # pattern away from expected_bits and this assertion catches it.
+    expected_bits = values_np.view(np.uint64)
+    np.testing.assert_array_equal(_bits(eager), expected_bits)
+    np.testing.assert_array_equal(_bits(compiled), expected_bits)
     np.testing.assert_array_equal(_bits(compiled), _bits(eager))
 
 
