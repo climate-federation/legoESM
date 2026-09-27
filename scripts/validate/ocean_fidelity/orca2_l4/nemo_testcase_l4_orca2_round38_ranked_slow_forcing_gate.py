@@ -371,7 +371,16 @@ def run(deck_root: Path, boundary_root: Path, ranked_root: Path,
         "candidate_sum_times_oracle_reciprocal": round14.compare(
             candidate_partial[:, -1] * oracle_reciprocal, oracle_depth,
             np.ones(candidate_partial.shape[0], dtype=bool)),
+        "product_plant": {"requested": plant, "fires": None},
     }
+    if plant:
+        planted_product = np.array(oracle_support_product, copy=True)
+        planted_product[0, 0] = np.nextafter(planted_product[0, 0], np.inf)
+        product_walk["product_plant"]["fires"] = not round14.compare(
+            oracle_support_product, planted_product,
+            np.ones(planted_product.shape, dtype=bool))["bit_exact"]
+        require(bool(product_walk["product_plant"]["fires"]),
+                "one-ULP product plant did not fire")
     scientific_plant = {"requested": plant, "fires": None}
     if plant:
         planted_target = np.array(oracle_u["depth_mean"], copy=True)
