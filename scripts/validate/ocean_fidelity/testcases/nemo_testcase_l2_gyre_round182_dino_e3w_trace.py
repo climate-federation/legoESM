@@ -112,10 +112,22 @@ def main() -> None:
 
     LatLonCGridOceanModel.step = traced_step
     sys.argv = ["kamm_twin_90d.py", *args]
-    runpy.run_path(
-        "scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py",
-        run_name="__main__",
-    )
+    try:
+        runpy.run_path(
+            "scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py",
+            run_name="__main__",
+        )
+    except Exception as exc:
+        if (ns.plant_call > 0
+                and "raw-mesh e3w_int must contain only finite values > 0"
+                in str(exc)):
+            print("STATUS PLANT-FIRED")
+        elif ns.plant_call > 0:
+            print("STATUS PLANT-MISSED")
+        raise
+    if ns.plant_call > 0:
+        print("STATUS PLANT-MISSED")
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
