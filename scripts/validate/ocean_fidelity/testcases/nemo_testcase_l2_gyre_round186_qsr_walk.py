@@ -777,6 +777,21 @@ def association_split(process_record: Path, reference_trace: Path,
         "qsr_rate_vs_qsr_kmm": _score(
             qsr_kmm, arrays["process_qsr_rate"], wet),
     }
+    observer_excess_rate = (
+        (process_qsr_kbb - qsr_kbb) * h_kbb
+        / np.maximum(h_kmm, 1.0e-10))
+    observer_rebuilt_qsr_rate = qsr_kmm + observer_excess_rate
+    observer_rows = {
+        "observer_excess_closes_qsr_rate": _score(
+            arrays["process_qsr_rate"], observer_rebuilt_qsr_rate, wet),
+        "observer_excess_associated_magnitude": _score(
+            _associate_qsr(
+                frame["Bsbc"], frame["q_Kmm"], frame["q_Kaa"], qsr_kmm),
+            _associate_qsr(
+                frame["Bsbc"], frame["q_Kmm"], frame["q_Kaa"],
+                observer_rebuilt_qsr_rate),
+            wet),
+    }
     cumulative_rebuild = frame["Bsbc"] + _associate_qsr(
         frame["Bsbc"], frame["q_Kmm"], frame["q_Kaa"],
         arrays["process_qsr_rate"])
@@ -800,25 +815,29 @@ def association_split(process_record: Path, reference_trace: Path,
             "STATUS PLANT-FIRED: production-qsr-association; "
             f"unequal={plant_row['cells_unequal']}")
 
-    bridge_bit = all(
-        identity_rows[name]["cells_unequal"] == 0
-        for name in ("process_qsr_kbb_vs_qsr_kbb",
-                     "surface_rate_bridge", "qsr_rate_bridge"))
+    observer_misclassified = (
+        identity_rows["process_qsr_kbb_vs_qsr_kbb"]["cells_unequal"] > 0)
     return {
         "format": "gyre-round190-production-qsr-association-v1",
         "status": "HELD", "precision": "fp64/libm", "step": 1080,
         "worktree": stamp, "reference_trace": trace_admission,
         "round189_split_reproduced": reproduced_split,
         "production_jit_identity_rows": identity_rows,
+        "observer_accounting_rows": observer_rows,
         "returned_cumulative_boundary_rebuild": cumulative_row,
-        "first_non_bit_statement": None if bridge_bit else next(
-            name for name, row in identity_rows.items()
-            if row["cells_unequal"]),
+        "first_non_bit_boundary": (
+            "process_observer_qsr_kbb_recompute"
+            if observer_misclassified else
+            next((name for name, row in identity_rows.items()
+                  if row["cells_unequal"]), None)),
+        "first_non_bit_statement": None,
         "verdict": (
-            "bridge source algebra is BIT; the non-bit process row is an "
-            "observer cumulative-boundary classification artifact"
-            if bridge_bit else
-            "the first non-bit bridge identity owns the association walk"),
+            "the process observer recomputes a different Kbb shortwave field "
+            "and assigns that difference to the QSR bucket; no compiled NEMO "
+            "or production-model statement is named"
+            if observer_misclassified else
+            "the observer input is BIT; a downstream association boundary "
+            "remains non-bit, with no statement named"),
     }
 
 
