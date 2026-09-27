@@ -35,6 +35,21 @@ def test_round186_qsr_record_admits_exact_replay(tmp_path, monkeypatch):
     assert MOD.admit(root, "abc")["calibration"]["cells_unequal"] == 0
 
 
+def test_round186_qsr_record_uses_compiled_no_halo_qsr_extent(tmp_path):
+    root = _root(tmp_path)
+    record = root / "oracle_qsr_walk_kt00001080.bin"
+    parsed = MOD.read_record(record)
+    assert parsed["qsr"].shape == (32, 22)
+    assert parsed["qsr_bounds_1based"] == [3, 34, 3, 24]
+
+    # A full-domain qsr payload is the original arithmetic defect and must not
+    # be silently accepted as a different record layout.
+    extra = np.zeros(MOD.JPI * MOD.JPJ - MOD.QSR_NI * MOD.QSR_NJ, dtype="=f8")
+    record.write_bytes(record.read_bytes() + extra.tobytes())
+    with pytest.raises(MOD.GateError, match="bytes, expected"):
+        MOD.read_record(record)
+
+
 def test_round186_qsr_record_ulp_plant_fires(tmp_path, monkeypatch):
     root = _root(tmp_path)
     monkeypatch.setattr(MOD.subprocess, "check_output", lambda *a, **k: "tip\n")

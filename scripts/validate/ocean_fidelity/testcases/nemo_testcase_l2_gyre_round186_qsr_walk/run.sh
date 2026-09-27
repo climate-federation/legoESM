@@ -21,7 +21,7 @@ readonly RESTART_1080=GYRE_OMIP_L2_P3_00001080_restart.nc
 readonly SHA_0180=853b3d41b2aa512e934430cc1fcbf36ea574c2148419d6c4b98a1e16db94cfc6
 readonly SHA_1080=6c0c7a950b30b9d59dbf2673833ddf462a5f8ea5650f496f2f772e1e17092976
 readonly SOURCE_BINARY_SHA=578c88f17ecaa8052276ff43e6b6c928f5be49fb218d4af33bc8718472613c4a
-readonly RECORD_BYTES=1175916
+readonly RECORD_BYTES=1174060
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)

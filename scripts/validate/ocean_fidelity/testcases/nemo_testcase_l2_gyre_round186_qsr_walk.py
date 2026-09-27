@@ -17,7 +17,12 @@ MAGIC = b"NEMO_L2_R186QSR1"
 HEADER = (1, 1080, 3, 2, 3, 36, 26, 31, 64)
 HEADER_INTS = len(HEADER)
 JPI, JPJ, JPK = 36, 26, 31
-VALUE_COUNT = JPK + 2 * JPI * JPJ + 5 * JPI * JPJ * JPK
+# qsr is allocated on NEMO's no-halo domain (Nis0:Nie0,Njs0:Nje0), while
+# r3t and every 3-D field in the same WRITE retain the full local domain.
+# With nn_hls=2 that no-halo extent is (36 - 4) by (26 - 4).
+NN_HLS = 2
+QSR_NI, QSR_NJ = JPI - 2 * NN_HLS, JPJ - 2 * NN_HLS
+VALUE_COUNT = JPK + QSR_NI * QSR_NJ + JPI * JPJ + 5 * JPI * JPJ * JPK
 RECORD_BYTES = 16 + 4 * HEADER_INTS + 8 * VALUE_COUNT
 
 
@@ -61,7 +66,7 @@ def read_record(path: Path) -> dict:
     n3 = n2 * JPK
     result = {
         "gdepw_1d": take(JPK, (JPK,), "gdepw_1d"),
-        "qsr": take(n2, (JPI, JPJ), "qsr"),
+        "qsr": take(QSR_NI * QSR_NJ, (QSR_NI, QSR_NJ), "qsr"),
         "r3t_Kmm": take(n2, (JPI, JPJ), "r3t_Kmm"),
         "e3t_3d": take(n3, (JPI, JPJ, JPK), "e3t_3d"),
         "tmask": take(n3, (JPI, JPJ, JPK), "tmask"),
@@ -70,8 +75,12 @@ def read_record(path: Path) -> dict:
         "replay_increment": take(n3, (JPI, JPJ, JPK), "replay_increment"),
     }
     require(offset == VALUE_COUNT, f"{path}: unread values")
-    result.update(path=str(path), sha256=hashlib.sha256(raw).hexdigest(),
-                  header=list(header), bytes=len(raw))
+    result.update(
+        path=str(path), sha256=hashlib.sha256(raw).hexdigest(),
+        header=list(header), bytes=len(raw),
+        qsr_bounds_1based=[1 + NN_HLS, JPI - NN_HLS,
+                           1 + NN_HLS, JPJ - NN_HLS],
+    )
     return result
 
 
@@ -102,7 +111,8 @@ def admit(root: Path, expect_commit: str, plant: str | None = None) -> dict:
         "status": "PASS",
         "producer_commit": producer,
         "record": {"path": record["path"], "sha256": record["sha256"],
-                   "bytes": record["bytes"], "header": record["header"]},
+                   "bytes": record["bytes"], "header": record["header"],
+                   "qsr_bounds_1based": record["qsr_bounds_1based"]},
         "calibration": {"cells_unequal": unequal, "max_abs_K_s-1": max_abs},
         "worktree": {"commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True).strip()},
