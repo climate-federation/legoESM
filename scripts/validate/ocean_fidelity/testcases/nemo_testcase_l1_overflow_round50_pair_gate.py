@@ -75,6 +75,18 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
+def _worktree_stamp() -> dict:
+    """Stamp reports; say explicitly if the shared helper is unavailable."""
+    try:
+        from legoesm.ocean.fidelity.provenance import worktree_stamp
+    except Exception as error:  # pragma: no cover - acquisition environment
+        return {"unavailable": f"provenance helper is not importable: {error}"}
+    try:
+        return worktree_stamp()
+    except Exception as error:  # pragma: no cover - environment-specific
+        return {"unavailable": str(error)}
+
+
 def _take(raw: bytes, offset: int, size: int, what: str) -> tuple[bytes, int]:
     end = offset + size
     require(end <= len(raw), f"truncated {what}")
@@ -191,6 +203,7 @@ def preflight() -> dict:
     require(not missing, f"patched source misses sentinels {missing}")
     return {
         "status": "PREFLIGHT_PASS",
+        "worktree": _worktree_stamp(),
         "source": str(SOURCE),
         "source_sha256": hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
         "module_sha256": hashlib.sha256(MODULE.read_bytes()).hexdigest(),
@@ -223,6 +236,7 @@ def admit(record_dir: Path, expected_commit: str, plant: str | None) -> dict:
         "status": "AT_BAR", "producer_commit": expected_commit,
         "records": records, "stamps": stamps,
         "plant": plant, "preflight": preflight(),
+        "worktree": _worktree_stamp(),
     }
 
 

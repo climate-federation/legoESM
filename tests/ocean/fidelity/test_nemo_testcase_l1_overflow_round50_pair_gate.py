@@ -109,3 +109,4 @@ def test_round50_preflight_is_additions_only():
     report = gate.preflight()
     assert report["status"] == "PREFLIGHT_PASS"
     assert report["removed_source_lines"] == 0
+    assert "worktree" in report
