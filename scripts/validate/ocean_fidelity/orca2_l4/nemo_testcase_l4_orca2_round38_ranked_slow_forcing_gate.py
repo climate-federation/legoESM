@@ -334,6 +334,44 @@ def run(deck_root: Path, boundary_root: Path, ranked_root: Path,
         "recorded_rhs_only_vs_record": _support_row(
             literal_rhs_arm, oracle_u["depth_mean"], support_rows),
     }
+    candidate_product = ((candidate_u["e3"] * candidate_u["krhs"])
+                         * candidate_u["mask"])
+    oracle_product = ((oracle_u["e3"] * oracle_u["krhs"])
+                      * oracle_u["mask"])
+    candidate_support_product = candidate_product[support_rows, -1, :]
+    oracle_support_product = oracle_product[support_rows, -1, :]
+    product_row = round14.compare(
+        candidate_support_product, oracle_support_product,
+        np.ones(candidate_support_product.shape, dtype=bool))
+    candidate_partial = np.cumsum(candidate_support_product, axis=-1)
+    oracle_partial = np.cumsum(oracle_support_product, axis=-1)
+    partial_rows = [round14.compare(
+        candidate_partial[:, level], oracle_partial[:, level],
+        np.ones(candidate_partial.shape[0], dtype=bool))
+        for level in range(candidate_partial.shape[-1])]
+    first_partial = next((
+        {"level_zero_based": level, **row}
+        for level, row in enumerate(partial_rows) if not row["bit_exact"]
+    ), None)
+    candidate_reciprocal = candidate_u["r1_h0"][support_rows, -1]
+    oracle_reciprocal = oracle_u["r1_h0"][support_rows, -1]
+    oracle_depth = oracle_u["depth_mean"][support_rows, -1]
+    product_walk = {
+        "per_level_product": product_row,
+        "first_non_bit_partial_sum": first_partial,
+        "completed_sum": round14.compare(
+            candidate_partial[:, -1], oracle_partial[:, -1],
+            np.ones(candidate_partial.shape[0], dtype=bool)),
+        "candidate_sum_times_candidate_reciprocal": round14.compare(
+            candidate_partial[:, -1] * candidate_reciprocal, oracle_depth,
+            np.ones(candidate_partial.shape[0], dtype=bool)),
+        "oracle_sum_times_candidate_reciprocal": round14.compare(
+            oracle_partial[:, -1] * candidate_reciprocal, oracle_depth,
+            np.ones(candidate_partial.shape[0], dtype=bool)),
+        "candidate_sum_times_oracle_reciprocal": round14.compare(
+            candidate_partial[:, -1] * oracle_reciprocal, oracle_depth,
+            np.ones(candidate_partial.shape[0], dtype=bool)),
+    }
     scientific_plant = {"requested": plant, "fires": None}
     if plant:
         planted_target = np.array(oracle_u["depth_mean"], copy=True)
@@ -364,6 +402,7 @@ def run(deck_root: Path, boundary_root: Path, ranked_root: Path,
         "rank1_disputed_source_walk": support,
         "first_non_bit_rank1_disputed_source": first_support,
         "one_variable_depth_arms": arms,
+        "compiled_product_walk": product_walk,
         "scientific_plant": scientific_plant,
         "single_statement_eligible": False,
     }
