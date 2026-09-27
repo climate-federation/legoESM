@@ -1168,7 +1168,9 @@ def curl_vertex_cgrid(
         # metrics vary significantly in BOTH lat and lon — column-0
         # extraction is not valid.
         A_vertex_full = grid.area_q                    # (n_lat+1, n_lon+1)
-        dx_cell = grid.dx_T                            # (n_lat, n_lon)
+        # u-edge length of the circulation loop is the u-face's own e1u
+        # (dynldf_lev_rot_scheme.h90:25 ``e1u*pu``), not the T cell's e1t.
+        dx_cell = grid.dx_u                            # (n_lat, n_lon+1)
         # dy at each v-face edge of the circulation loop: east and west
         # edges have different dy on the distorted cap.
         dy_v_2d = grid.dy_v                            # (n_lat+1, n_lon)
@@ -1298,8 +1300,7 @@ def curl_vertex_cgrid(
         # Bit-identical to jnp.pad((1,1),(0,0)) on the local backend.
         dx_pad = pad_with_pole_bc_lat(
             dx_cell, halo=1, south_value=0.0, north_value=0.0,
-        )  # (n_lat+2, n_lon)
-        dx_pad = jnp.concatenate([dx_pad, dx_pad[:, 0:1]], axis=1)  # (n_lat+2, n_lon+1)
+        )  # (n_lat+2, n_lon+1) -- dx_u already carries the wrap column
         dx_south = dx_pad[:-1]  # (n_lat+1, n_lon+1)
         dx_north = dx_pad[1:]   # (n_lat+1, n_lon+1)
         if is_3d:

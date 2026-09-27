@@ -1021,6 +1021,15 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    # NEMO lateral-viscosity fields (nn_ahm_ijk_t=-30, ldfdyn.F90:288-331) on
+    # the model's own stagger, attached by the driver from eddy_viscosity_3D.nc:
+    # ahmt at T (n_lat, n_lon, nlev) already * tmask; ahmf at the vertex/F
+    # stagger (n_lat+1, n_lon+1, nlev) already * the rn_shlat fmask
+    # (dommsk.F90:207-210), so a coastal F point carries 2*ahmf for no-slip;
+    # e3f_0 at the vertex stagger (domain_cfg) for the coastal zcur thickness.
+    nemo_ahmt_3d: jnp.ndarray | None = None
+    nemo_ahmf_3d: jnp.ndarray | None = None
+    nemo_e3f_0: jnp.ndarray | None = None
 
 
 def create_partial_cell_coordinate(

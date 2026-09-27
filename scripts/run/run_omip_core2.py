@@ -1309,6 +1309,81 @@ def ah_profile_from_file(grid, path, A_h_base: float):
     return tuple(float(x) for x in prof)
 
 
+def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
+                           rn_shlat: float):
+    """NEMO nn_ahm_ijk_t=-30 lateral viscosity on the full eORCA1 tripole.
+
+    ``eddy_viscosity_3D.nc`` and ``domain_cfg.nc`` hold NEMO's INNER domain
+    (331 x 360, no halo): file (r, c) is mesh-mask (jj=r, ji=c+1).  The model
+    carries the full 332 x 362 mesh, so T (j, i) = file (j, i-1) and the
+    vertex (j, i) -- SW corner of T (j, i), i.e. NEMO F (ji=i-1, jj=j-1) --
+    = file (j-1, i-2); cyclic halo columns wrap mod 360.  Both mappings are
+    checked against the mesh coordinates before use.  The top (fold halo) row
+    copies the row below: the file is uniform there (asserted).
+
+    ahmt is multiplied by tmask and ahmf by NEMO's rn_shlat fmask
+    (ldfdyn.F90:329-330, dommsk.F90:207-210).
+    """
+    import netCDF4 as nc4
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import nemo_fmask_shlat_3d
+
+    def _read(path, names):
+        ds = nc4.Dataset(path)
+        try:
+            return [np.asarray(ds.variables[n][:], dtype=np.float64).squeeze()
+                    for n in names]
+        finally:
+            ds.close()
+
+    ahmt_f, ahmf_f, lat_f = _read(ldf_path, ("ahmt_3d", "ahmf_3d", "nav_lat"))
+    e3f_f, gphif_d = _read(domcfg_path, ("e3f_0", "gphif"))
+    gphit_m, gphif_m = _read(mesh_path, ("gphit", "gphif"))
+    nk = int(z_coord.n_levels)
+    n_lat, n_lon = int(grid.n_lat), int(grid.n_lon)
+    if (n_lat, n_lon) != (332, 362) or ahmt_f.shape != (nk, 331, 360) \
+            or e3f_f.shape != (nk, 331, 360):
+        raise SystemExit(
+            f"--nemo-ldf-file expects the full 332x362 eORCA1 tripole and "
+            f"({nk},331,360) inner-domain files; got grid {(n_lat, n_lon)}, "
+            f"ldf {ahmt_f.shape}, domain_cfg {e3f_f.shape}")
+    ci_t = (np.arange(n_lon) - 1) % 360            # T col i  -> file col
+    ci_f = (np.arange(n_lon + 1) - 2) % 360        # vertex col i -> file col
+    # coordinate checks (degrees; files are float32)
+    d_t = np.max(np.abs(lat_f[:, ci_t] - gphit_m[:331]))
+    d_f = np.max(np.abs(gphif_d[:, ci_f[1:]] - gphif_m[:331, :]))  # vertex i -> mesh F col i-1
+    if d_t > 1e-4 or d_f > 1e-4:
+        raise SystemExit(f"--nemo-ldf-file index mapping failed: T {d_t:.2e}, F {d_f:.2e} deg")
+    for nm, a in (("ahmt_3d", ahmt_f), ("ahmf_3d", ahmf_f)):
+        if np.ptp(a[:, -3:]) != 0.0:
+            raise SystemExit(f"{ldf_path}: {nm} not uniform in the top rows; "
+                             "the fold-row copy would not be exact")
+
+    def _to_T(a):                                   # (nk,331,360) -> (332,362,nk)
+        out = a[:, :, ci_t].transpose(1, 2, 0)
+        return np.concatenate([out, out[-1:]], axis=0)
+
+    def _to_F(a, south):                            # -> (333,363,nk)
+        out = a[:, :, ci_f].transpose(1, 2, 0)
+        return np.concatenate([south, out, out[-1:]], axis=0)
+
+    dtype = z_coord.h_partial.dtype
+    tmask = np.asarray(z_coord.is_active, dtype=np.float64)
+    fmask = np.asarray(nemo_fmask_shlat_3d(z_coord.is_active, grid, rn_shlat),
+                       dtype=np.float64)
+    zero_row = np.zeros((1, n_lon + 1, nk))
+    ahmt = _to_T(ahmt_f) * tmask
+    ahmf = _to_F(ahmf_f, zero_row) * fmask
+    e3f = _to_F(e3f_f, np.broadcast_to(np.asarray(z_coord.dz_ref, np.float64),
+                                       (1, n_lon + 1, nk)))
+    print(f"[nemo-ldf] {ldf_path}: ahmt {ahmt[tmask > 0].min():g}..{ahmt.max():g} "
+          f"m2/s; rn_shlat={rn_shlat:g}: coastal F points "
+          f"{int(((fmask > 0) & (fmask != 1)).sum())}, wet-interior "
+          f"{int((fmask == 1).sum())}; e3f_0 from {domcfg_path}")
+    return z_coord._replace(nemo_ahmt_3d=jnp.asarray(ahmt, dtype),
+                            nemo_ahmf_3d=jnp.asarray(ahmf, dtype),
+                            nemo_e3f_0=jnp.asarray(e3f, dtype))
+
+
 def renormalise_ah_profile(lv, A_h_new: float):
     """Change A_h without changing the viscosity the A_h profile specifies.
 
@@ -1641,7 +1716,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_preclosure_coeff_source=None,
                   tke_kappah_min=None, tke_buoyancy_sink=None,
                   tke_step_evaluation=None,
-                  A_h_profile_file=None,
+                  A_h_profile_file=None, nemo_ldf_file=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
@@ -1721,6 +1796,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("lateral_side_bc", lateral_side_bc),
                               ("barotropic_coriolis", barotropic_coriolis),
+                              ("lateral_viscosity_operator",
+                               "nemo_div_curl" if nemo_ldf_file else None),
+                              ("lateral_viscosity_e3_weighting",
+                               "nemo_e3" if nemo_ldf_file else None),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
                               ("barotropic_solver", barotropic_solver),
@@ -2086,6 +2165,14 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         z_coord, H_bathy, land_mask = make_partial_cell(
             z_coord, H_bathy, land_mask, smoothing_passes=bathy_smoothing_passes,
             min_levels=min_levels)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
+    if nemo_ldf_file:
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        z_coord = attach_nemo_ldf_fields(
+            z_coord, model.grid, mesh_path, nemo_ldf_file, nemo_domain_cfg,
+            rn_shlat={"no_slip": 2.0, "free_slip": 0.0}[lateral_side_bc])
         model = LatLonCGridOceanModel(grid, z_coord, config)
     if iwm is not None and iwm.enabled:
         # FINAL model build with the zdfiwm maps (after every config /
@@ -6787,6 +6874,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "A_h shape from the oracle's own momentum-viscosity "
                         "file (zonal median, ratio to --A-h). Replaces "
                         "--A-h-eq-boost. Tripole only.")
+    p.add_argument("--nemo-ldf-file", type=str, default=None,
+                   help="ORCA1 eddy_viscosity_3D.nc: run NEMO's own lateral "
+                        "momentum viscosity (nn_ahm_ijk_t=-30, ln_dynldf_lap + "
+                        "ln_dynldf_lev): the file's 3-D ahmt/ahmf used "
+                        "directly in the e3-weighted rotation-divergence "
+                        "operator, with NEMO's fmask (--lateral-side-bc "
+                        "no_slip -> rn_shlat=2, free_slip -> 0). Needs "
+                        "--grid tripole --partial-cell --nemo-domain-mask "
+                        "--A-h 0 --lateral-side-bc, and excludes "
+                        "--A-h-profile-file/--visc-schedule/--B-h.")
     p.add_argument("--adaptive-implicit-vertadv", action="store_true",
                    help="Enable adaptive-implicit vertical momentum advection "
                         "(Shchepetkin 2015 / NEMO ln_zad_Aimp) -- removes the vertical-CFL "
@@ -8228,6 +8325,19 @@ def main() -> int:
     # --grid tripole --tripole-vmix tke; reject every other context (they are
     # silently discarded there) — the --tripole-vmix guard above misses them at
     # its "none" default and under the kpp closure.
+    if args.nemo_ldf_file:
+        _bad = [f for f, bad in (
+            ("--grid tripole", args.grid != "tripole"),
+            ("--partial-cell", not args.partial_cell),
+            ("--nemo-domain-mask", not args.nemo_domain_mask),
+            ("--A-h 0", args.A_h is None or float(args.A_h) != 0.0),
+            ("--lateral-side-bc", args.lateral_side_bc is None),
+            ("no --A-h-profile-file", args.A_h_profile_file is not None),
+            ("no --visc-schedule", args.visc_schedule is not None),
+            ("no --B-h (or --B-h 0)", args.B_h not in (None, 0.0)),
+            ("--n-gpus 1", int(args.n_gpus or 1) != 1)) if bad]
+        if _bad:
+            raise SystemExit("--nemo-ldf-file requires: " + ", ".join(_bad))
     if args.A_h_profile_file and args.grid != "tripole":
         raise SystemExit("--A-h-profile-file is tripole-only (the profile is "
                          "built on the eORCA nominal latitude rows).")
@@ -8494,6 +8604,7 @@ def main() -> int:
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
             A_h_eq_sigma_deg=args.A_h_eq_sigma_deg,
             A_h_profile_file=args.A_h_profile_file,
+            nemo_ldf_file=args.nemo_ldf_file,
             ke_gradient_scheme=args.ke_gradient_scheme,
             lateral_side_bc=args.lateral_side_bc,
             barotropic_coriolis=args.barotropic_coriolis,

@@ -1402,7 +1402,10 @@ def nemo_ldf_lap_viscosity_cgrid(
         return m
 
     def _bc(c):
-        # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev]
+        # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev];
+        # a field already on the full stagger (NEMO eddy_viscosity_3D) passes through.
+        if c.ndim > 1:
+            return c
         return c[:, None, None] if is_3d else c[:, None]
 
     u_eff = u if u_mask is None else u * _bm(u_mask)
@@ -1497,6 +1500,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     vertex_mask: jnp.ndarray | None = None,
+    h_vtx: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     r"""NEMO ``dyn_ldf_lev_lap`` Laplacian viscosity, e3-THICKNESS-WEIGHTED
     div/curl (#1455 topographic-step residual fix).
@@ -1584,6 +1588,8 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         return m
 
     def _bc(c):
+        if c.ndim > 1:
+            return c
         return c[:, None, None] if is_3d else c[:, None]
 
     u_eff = u if u_mask is None else u * _bm(u_mask)
@@ -1593,7 +1599,14 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     # convention as h_u/h_v built for the vertical-velocity/PV stages).
     h_u = min_cell_to_uface(h_k)
     h_v = min_cell_to_vface(h_k, grid)
-    h_vtx = min_cell_to_vertex(h_k, grid)
+    # ``h_vtx`` override: the min-rule gives e3f = 0 at every coastal F point
+    # (a dry neighbour has h = 0), which silently zeroes zcur there and turns a
+    # no-slip fmask (rn_shlat=2) back into free-slip. NEMO's e3f_0 at a coastal
+    # F point is the min of the four e3t_0 INCLUDING the land cells' filled
+    # values (domain_cfg: 389099/389099 coastal F points), so a caller running
+    # no-slip passes that thickness here.
+    if h_vtx is None:
+        h_vtx = min_cell_to_vertex(h_k, grid)
 
     # 1. e3-weighted divergence at T-points: divergence_cgrid on the
     #    thickness-weighted faces reproduces NEMO's e2u*e3u*u / e1v*e3v*v
@@ -3734,6 +3747,36 @@ def compute_face_masks_3d(
     # SPMD lat-band interior cuts: see _spmd_cut_vfaces (no-op unless armed).
     v_mask = _spmd_cut_vfaces(v_mask, a)
     return u_mask, v_mask
+
+
+def nemo_fmask_shlat_3d(is_active_3d, grid, rn_shlat: float) -> jnp.ndarray:
+    """NEMO ``fmask`` with the lateral-slip value ``rn_shlat`` (dommsk.F90:207-210).
+
+    Interior F points are 1 where all four surrounding T cells are wet (the
+    product mask, :func:`compute_vertex_mask` per level).  Where that product is
+    0, NEMO sets ``fmask = rn_shlat * MIN(1, MAX(umask(ji,jj), umask(ji,jj+1),
+    vmask(ji,jj), vmask(ji+1,jj)))``: the two u-faces meeting the F point from
+    south and north and the two v-faces meeting it from west and east.  In this
+    model's stagger vertex ``(j, i)`` is the SW corner of T ``(j, i)``, so those
+    faces are u ``(j-1, i)``, u ``(j, i)``, v ``(j, i-1)``, v ``(j, i)``.
+
+    rn_shlat = 0 free-slip, 2 no-slip.  ponytail: the north-fold vertex row
+    takes its faces from this side only (fold v-faces are walls in
+    :func:`compute_face_masks_3d`); NEMO lbc_lnk copies the partner's value.
+
+    Returns ``(n_lat+1, n_lon+1, nlev)`` float.
+    """
+    a = is_active_3d.astype(jnp.float32)
+    interior = jax.vmap(lambda m2: compute_vertex_mask(m2, grid=grid),
+                        in_axes=-1, out_axes=-1)(a)
+    um, vm = compute_face_masks_3d(is_active_3d, grid)
+    zrow = jnp.zeros_like(um[:1])
+    um_p = jnp.concatenate([zrow, um, zrow], axis=0)          # (n_lat+2, n_lon+1, nk)
+    touch_u = jnp.maximum(um_p[:-1], um_p[1:])                  # u(j-1,i), u(j,i)
+    touch_v = jnp.maximum(jnp.roll(vm, 1, axis=1), vm)          # v(j,i-1), v(j,i)
+    touch_v = jnp.concatenate([touch_v, touch_v[:, 0:1]], axis=1)
+    coast = rn_shlat * jnp.minimum(1.0, jnp.maximum(touch_u, touch_v))
+    return jnp.where(interior > 0.0, interior, coast)
 
 
 def partial_cell_pgf_correction_x(

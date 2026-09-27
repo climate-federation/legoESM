@@ -92,6 +92,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     nemo_lateral_viscosity_coefficients,
     nemo_ldf_lap_viscosity_cgrid,
     nemo_ldf_lap_viscosity_e3_cgrid,
+    min_cell_to_vertex,
     flux_divergence_viscosity_cgrid,
     no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
@@ -3078,7 +3079,21 @@ def _bc_horizontal_viscosity(
             uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
 
-    if _use_nemo_div_curl and config.lateral_viscosity.A_h > 0:
+    # NEMO nn_ahm_ijk_t=-30: ahmt/ahmf read from eddy_viscosity_3D.nc and
+    # attached to the coordinate by the driver (fmask/rn_shlat already folded
+    # into ahmf).  The file IS the Laplacian magnitude, so A_h must be 0.
+    _nemo_ahmt3 = getattr(z_coord, "nemo_ahmt_3d", None)
+    _nemo_ahmf3 = getattr(z_coord, "nemo_ahmf_3d", None)
+    _nemo_ldf_file = _nemo_ahmt3 is not None
+    if _nemo_ldf_file and (config.lateral_viscosity.A_h != 0.0
+                           or not _use_nemo_div_curl):
+        raise ValueError(
+            "the coordinate carries NEMO eddy_viscosity_3D coefficients; they "
+            "set the Laplacian magnitude, so lateral_viscosity.A_h must be 0 "
+            "and lateral_viscosity_operator must be 'nemo_div_curl' (got "
+            f"A_h={config.lateral_viscosity.A_h!r}, operator={_visc_op!r}).")
+    if _use_nemo_div_curl and (_nemo_ldf_file
+                               or config.lateral_viscosity.A_h > 0):
         # NEMO dyn_ldf_lev_lap: coefficient ahmt(T)/ahmf(F) = ½·rn_Uv·MAX(e1,e2)
         # EMBEDDED inside div/curl (node 14). ``A_h`` here is NEMO's A_h_base =
         # ½·rn_Uv·R·Δλ (the DINO builder), so ½·rn_Uv = A_h / (R·Δλ). This branch
@@ -3102,13 +3117,20 @@ def _bc_horizontal_viscosity(
                 "harmonic Laplacian (NEMO ln_dynldf_lap); B_h biharmonic is not "
                 "wired for this operator (DINO uses Laplacian only)."
             )
-        if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):
-            raise ValueError(
-                "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
-                "with a scalar dlon (got dlon<=0; tripolar unsupported)."
-            )
-        _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
-        _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
+        if _nemo_ldf_file:
+            if _want_kdiss_flux:
+                raise ValueError(
+                    "kdiss_h_flux_form is not wired for the NEMO "
+                    "eddy_viscosity_3D coefficients (3-D ahmt/ahmf).")
+            _ahmt, _ahmf = _nemo_ahmt3, _nemo_ahmf3
+        else:
+            if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):
+                raise ValueError(
+                    "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
+                    "with a scalar dlon (got dlon<=0; tripolar unsupported)."
+                )
+            _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
+            _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
         # 3-D staircase vertex mask (NEMO fmask analogue, rn_shlat=0 free-slip):
         # a 2-D surface vertex mask broadcast over levels leaves zeta LIVE at
         # submerged staircase side walls, where it is computed against the dry
@@ -3132,6 +3154,15 @@ def _bc_horizontal_viscosity(
         # (default) keeps the existing horizontal-metrics-only div/curl
         # BIT-IDENTICAL; "nemo_e3" restores NEMO's e3u/e3v/e3f weighting,
         # dynldf_lev_rot_scheme.h90:22-29,41,51).
+        _nl_umask, _nl_vmask, _nl_hvtx = u_mask, v_mask, None
+        if _nemo_ldf_file:
+            # NEMO: ahmf already * fmask (0 land / 1 wet / rn_shlat coast), so
+            # the vertex mask must not zero the coastal F points; per-level
+            # face masks stand in for umask/vmask(jk) inside div/curl.
+            _visc_vmask = (_ahmf > 0.0).astype(u.dtype)
+            _fm3u, _fm3v = compute_face_masks_3d(z_coord.is_active, grid)
+            _nl_umask = _fm3u.astype(u.dtype)
+            _nl_vmask = _fm3v.astype(v.dtype)
         if _e3_weighting == "nemo_e3":
             if h_k is None:
                 raise ValueError(
@@ -3139,13 +3170,26 @@ def _bc_horizontal_viscosity(
                     "cell-centre layer thickness h_k to be passed to "
                     "_bc_horizontal_viscosity."
                 )
+            if _nemo_ldf_file:
+                # interior F: min-rule (== e3f_0 at all 3660598 wet F points of
+                # domain_cfg); coastal F: NEMO's static e3f_0. ponytail: the
+                # coastal value skips the z-star stretch (|eta|/H <~ 1e-3).
+                _e3f0 = getattr(z_coord, "nemo_e3f_0", None)
+                if _e3f0 is None:
+                    raise ValueError(
+                        "NEMO eddy_viscosity_3D path with nemo_e3 weighting "
+                        "needs z_coord.nemo_e3f_0 for the coastal zcur.")
+                _nl_hvtx = jnp.where(_vm3 > 0.0, min_cell_to_vertex(h_k, grid),
+                                     _e3f0.astype(h_k.dtype))
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_e3_cgrid(
                 u, v, grid, _ahmt, _ahmf, h_k,
-                mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
+                mask=mask, u_mask=_nl_umask, v_mask=_nl_vmask,
+                vertex_mask=_visc_vmask, h_vtx=_nl_hvtx)
         else:
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
                 u, v, grid, _ahmt, _ahmf,
-                mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
+                mask=mask, u_mask=_nl_umask, v_mask=_nl_vmask,
+                vertex_mask=_visc_vmask)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         if _want_kdiss_flux:
             # cell-centre ahmt for the K_diss_h coefficient field. APPROXIMATION:

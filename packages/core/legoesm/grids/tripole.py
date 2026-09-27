@@ -578,9 +578,14 @@ def create_tripole_grid(
     if "e1f" in raw and "e2f" in raw:
         e1f = raw["e1f"].astype(dtype)
         e2f = raw["e2f"].astype(dtype)
-        area_q_inner = e1f * e2f  # (n_lat, n_lon)
-        # Pad to (n_lat+1, n_lon+1)
-        area_q = jnp.pad(area_q_inner, ((0, 1), (0, 1)), mode="edge")
+        area_q_inner = e1f * e2f  # (n_lat, n_lon), NEMO F(ji,jj) = NE corner of T(ji,jj)
+        # Model vertex (j, i) is the SW corner of T(j, i), i.e. NEMO F(ji=i-1,
+        # jj=j-1): shift one column east (longitude-periodic) and one row
+        # north (south wall row copies its neighbour), then append the wrap
+        # column (vertex column n_lon == column 0).
+        _aq = jnp.roll(area_q_inner, 1, axis=1)
+        _aq = jnp.concatenate([_aq[:1], _aq], axis=0)            # (n_lat+1, n_lon)
+        area_q = jnp.concatenate([_aq, _aq[:, :1]], axis=1)      # (n_lat+1, n_lon+1)
     else:
         # Estimate from T-point areas
         area_q = jnp.pad(area_T, ((0, 1), (0, 1)), mode="edge")
