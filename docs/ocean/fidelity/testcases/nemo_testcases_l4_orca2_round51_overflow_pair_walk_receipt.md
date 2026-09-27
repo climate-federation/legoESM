@@ -81,8 +81,8 @@ The large arrays remain outside git as hash-stamped npz sidecars.
 
 ## Verification
 
-- New round-51 gate controls: four focused tests pass; Ruff and `py_compile`
-  are clean.
+- Focused round-50/51 parser/scorer and citation-gate controls: **29 passed**;
+  round-51 Ruff and both gate `py_compile` checks are clean.
 - Base and candidate are clean, CPU-only fp64/libm production-JIT runs.  The
   candidate comparison confirms identical entry and the stage-1 Kaa first
   movement.  An attempted persistent JAX cache was rejected after XLA warned
@@ -91,9 +91,19 @@ The large arrays remain outside git as hash-stamped npz sidecars.
 - Final package diff against `932cbfa9e`: empty.  Therefore this held round
   does not trigger the shared-model GYRE trajectory/year or DINO/tank landing
   gates.
-- Citation gate, citation plant, focused/shared tests, full fidelity battery,
-  and independent review results are recorded in the final verification
-  commit; known pre-existing failures remain explicitly named there.
+- Shared-card battery: **170 passed** in 352.96 s.
+- `tests/ocean/fidelity -n 12` collected 1,944 items, reached 99%, and then
+  reproduced the documented xdist tail stall.  Its five red nodes were rerun
+  serially and retain their pre-existing signatures: round-129 stale
+  certification, round-51 private trace registry, SI3 scalar-math provenance,
+  the worktree-stamp ratchet, and the `hires_lane_surface` case-board ratchet.
+- Default receipt citation gate: **274 citations, PASS**, zero failures and
+  zero unmapped.  This receipt: **4 citations, PASS**, zero failures and zero
+  unmapped.  Shifting the QCO citation by two lines fires
+  `SYMBOL-NOT-AT-LINE`.
+- Separate read-only `codex exec` review: **independent review unavailable
+  in-sandbox** (`failed to initialize in-process app-server client: Read-only
+  file system`).
 - Sea ice, all six selectors, and the ORCA2 card's `unmeasured_features` tuple
   are unchanged at `STOP_SELECTOR_GAP`.
 
