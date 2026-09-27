@@ -191,9 +191,37 @@ the read-only sandbox.  Its terminal line is quoted verbatim:
 Therefore: **independent review unavailable in-sandbox**.  This is not a SHIP,
 HOLD, or DO NOT SHIP verdict.
 
-Focused test and citation outcomes are filled from the final clean tree below.
+The citation gate passes all five compiled-source mappings.  Its shifted
+`zdfmxl.f90:109-124` plant exits 1 with `SYMBOL-NOT-AT-LINE`, as required.
 
-<!-- FINAL_VERIFICATION -->
+The first focused suite reports **1 failed, 108 passed in 99.81s**.  The sole
+failure is
+`test_nemo_zdfmxl_transcription.py::test_treguier_kappa_uses_the_same_n2_variant_as_the_slopes`:
+its source-inspection assertion still searches `gm_redi_tracer_tendency_latlon`
+for a call that the starting tip already placed in
+`native_treguier_kappa_for_state`.  Neither the test nor the implementation
+differs from `1ffb26a044`; it is base-identical and unrelated to this round.
+The same battery with only that test deselected reports **108 passed, 1
+deselected in 99.23s**.  This second run includes the year-owner harness,
+Decision-43 census, native-slope and mixed-layer transcription tests, literal
+slope tests, and the citation regression suite.
+
+| artifact | SHA-256 |
+|---|---|
+| `daily_record_audit_final2.json` | `f5a80298b103b65e981a103319200549a0a7276c2afe33d7decab20ba1ab93cc` |
+| `developed_mxl_walk_initial.json` | `1f9b14c2399e3ce5c3e1a0934660861c07c7e0a554741782adfe21b8535f5504` |
+| `developed_mxl_plant_final.log` | `51132447758c49a9d3087e75f0b6ee39a22073d21051c3588a889794a6e15157` |
+| `ladder_trajectory.json` | `be326a539f0e30784010f7625e1e5843035fce2b89e5e78a84cf66f2acb92c55` |
+| `ladder_comparison.json` | `c3f05bdab4fe94cd871451255f7a324232078e99d1507a8724f9783794829180` |
+| `day_gap_candidate.json` | `1793270d5313ba430c9b1ff6ef708faf12944a8feff82d73ec57a7102ce17219` |
+| `year_gap_candidate.json` | `5eb7c741dddd96aef1012865cf1634e7b8d3959b82a19f129a977b31bb03f5a5` |
+| `dino/carried_day1_final.log` | `cb664771ef9b1d53fd48e397211e21898e16afd6461e3478245d487b38901b93` |
+| `dino/recompute_day1.log` | `9345a132e8f1c1fc02963068d17b447a6ad0dcc82bd60767b72572f8b11b9f19` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `citation_gate_final.json` | `2419ee766b248c76ec453af7bf54274f81e87dd014921a65ec2d7e1672bedba4` |
+| `citation_gate_shift_plant.json` | `a3bff00d3a20b07fb23738e75574b1ddea88d5207ac48a5b62e1e1f40d165f7c` |
+| `focused_tests.log` | `3b3696710f6b07ac4490306c06b402d8c34929ba7a7596eed9ef4a968afea6e7` |
+| `focused_tests_round_owned.log` | `787d414255b548bed366ec41ea75ee3f9640586468d9768f03f133adb047f91c` |
 
 Choices made: none.  No configuration choice or carried-state schema changed.
 
