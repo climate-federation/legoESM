@@ -131,8 +131,11 @@ verdict.  Its verbatim terminal finding is:
 > Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
 
 Thus independent review is unavailable in-sandbox; it did not issue `DO NOT
-SHIP`.  The receipt citation gate, its shifted-citation plant, and the default
-cumulative gate are run after this receipt is committed.
+SHIP`.  At committed receipt `bad0c8c55`, the direct citation gate passes all
+6 citations with zero failures and zero unmapped citations; the default
+cumulative gate passes all 274 citations with the same zero counts.  Shifting
+the first compiled writer range by two lines produces `SYMBOL-NOT-AT-LINE`,
+reports `status: FAIL`, and exits 1.
 
 Key artifact SHA-256 values:
 
