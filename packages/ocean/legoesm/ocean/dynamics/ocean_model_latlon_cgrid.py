@@ -2172,16 +2172,10 @@ def _nemo_ws_rk3_tracer_pair_step(
             q_before, q_rhs, q_after = stage_qco_weights[stage_index]
             rhs = _source_order_sum(
                 concentration_rhs, source_rate, source_terms)
-            # stprk3_stg.f90:674-677 materializes each product before the
-            # following add/divide in the nonlinear-free-surface assignment.
-            # Preserve that compiled association; XLA otherwise fuses the
-            # real-equivalent expression and moves ORCA2 by one ULP.
-            left = nemo_source_round(q_before[..., None] * base)
-            right = nemo_source_round(stage_dt * q_rhs[..., None])
-            right = nemo_source_round(right * rhs)
-            right = nemo_source_round(right * active_3d)
-            numerator = nemo_source_round(left + right)
-            out = nemo_source_round(numerator / q_after[..., None])
+            out = (
+                q_before[..., None] * base
+                + stage_dt * q_rhs[..., None] * rhs
+            ) / q_after[..., None]
             return jnp.where(active_3d > 0.5, out, base)
         out = (
             h_k_old * base - stage_dt * flux_div
