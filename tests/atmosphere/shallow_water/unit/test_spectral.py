@@ -430,3 +430,42 @@ class TestSpectralSW:
         grad_fn = jax.grad(loss_fn)
         g = grad_fn(state.vor_hat.data)
         assert jnp.all(jnp.isfinite(g))
+
+
+class TestTruncationScaledHyperdiffDefault:
+    """Default hyperdiff_coeff scales with truncation, anchored to 2.338e15 at T85."""
+
+    def test_t85_reproduces_historical_value(self):
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import default_hyperdiff_coeff
+        nu = default_hyperdiff_coeff(create_gaussian_grid(85))
+        np.testing.assert_allclose(nu, 2.338e15, rtol=1e-12)
+
+    def test_efold_time_is_resolution_independent(self):
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import default_hyperdiff_coeff
+
+        def efold_s(n):
+            g = create_gaussian_grid(n)
+            eig = n * (n + 1) / (g.radius * g.radius)
+            return 1.0 / (default_hyperdiff_coeff(g) * eig ** 2)
+
+        np.testing.assert_allclose(efold_s(42), efold_s(85), rtol=1e-12)
+        np.testing.assert_allclose(efold_s(21), efold_s(85), rtol=1e-12)
+        assert default_hyperdiff_coeff(create_gaussian_grid(42)) > 10 * 2.338e15
+
+    def test_model_resolves_default_and_keeps_explicit(self, grid_t21):
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import default_hyperdiff_coeff
+        m = SpectralShallowWaterModel(grid_t21)
+        assert m.config.hyperdiff_coeff == default_hyperdiff_coeff(grid_t21)
+        m0 = SpectralShallowWaterModel(grid_t21, SpectralSWConfig(hyperdiff_coeff=0.0))
+        assert m0.config.hyperdiff_coeff == 0.0
+        m1 = SpectralShallowWaterModel(grid_t21, SpectralSWConfig(hyperdiff_coeff=2.338e15))
+        assert m1.config.hyperdiff_coeff == 2.338e15
+
+    def test_tendency_default_equals_explicit_resolved(self, grid_t21):
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import default_hyperdiff_coeff
+        state = williamson_test5_spectral(grid_t21)
+        t_def = spectral_sw_tendencies(state, grid_t21, SpectralSWConfig())
+        t_exp = spectral_sw_tendencies(state, grid_t21, SpectralSWConfig(
+            hyperdiff_coeff=default_hyperdiff_coeff(grid_t21)))
+        np.testing.assert_array_equal(np.asarray(t_def.vor_hat.data),
+                                      np.asarray(t_exp.vor_hat.data))
