@@ -214,3 +214,37 @@ def test_initial_state_is_bit_exact_against_the_nemo_record(card):
         for name, (value, mask) in pairs.items()
     }
     assert unequal == {name: 0 for name in pairs}, unequal
+
+
+# Measured at the lane tip c09a9e111 (before the VORTEX card existed) and
+# re-measured with it present: identical.  The VORTEX card is additive, and
+# this row is what keeps it additive -- a later edit to the shared identity
+# that leaks into a certified card turns this red instead of moving a
+# certified number quietly.
+_CERTIFIED_CARD_DIGESTS = {
+    "GYRE-zco": "abfd869f4b1c4d66",
+    "LOCK_EXCHANGE-zco": "f248153cc366f9ea",
+    "OVERFLOW-zps": "090acab214d20672",
+}
+
+
+def _card_digest(card):
+    import hashlib
+    handle = hashlib.sha256()
+    handle.update(repr(card.recipe.model_config).encode())
+    state = card.recipe.initial_state
+    for name in ("T", "S", "u", "v", "eta"):
+        handle.update(
+            np.asarray(getattr(state, name).data, dtype=np.float64).tobytes())
+    handle.update(np.asarray(card.recipe.grid.f_T, dtype=np.float64).tobytes())
+    handle.update(repr((
+        card.dt_s, card.n_steps, card.bbl_adv_option, card.bbl_gamma_s,
+        card.bbl_diffusive_option, card.bbl_aht_m2_s,
+        card.surface_boundary_condition, card.unmeasured_features)).encode())
+    return handle.hexdigest()[:16]
+
+
+@pytest.mark.parametrize("case", sorted(_CERTIFIED_CARD_DIGESTS))
+def test_the_certified_cards_are_untouched_by_the_vortex_card(case):
+    assert _card_digest(build_nemo_testcase_card(case)) == \
+        _CERTIFIED_CARD_DIGESTS[case]

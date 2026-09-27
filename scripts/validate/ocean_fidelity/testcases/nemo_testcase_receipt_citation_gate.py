@@ -56,6 +56,15 @@ FILES = {
     "stp2d.F90": _OCE / "stp2d.F90",
     "oce.F90": _OCE / "oce.F90",
     "DOM/istate.F90": _OCE / "DOM/istate.F90",
+    # --- VORTEX card, round 1: the shipped case's own user routines, plus
+    # the shared sources that fix the initial-state execution order ---
+    "tests/VORTEX/MY_SRC/usrdef_nam.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_nam.F90",
+    "tests/VORTEX/MY_SRC/usrdef_hgr.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_hgr.F90",
+    "tests/VORTEX/MY_SRC/usrdef_zgr.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_zgr.F90",
+    "tests/VORTEX/MY_SRC/usrdef_istate.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_istate.F90",
+    "tests/VORTEX/MY_SRC/usrdef_sbc.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_sbc.F90",
+    "restart.F90": _OCE / "IOM/restart.F90",
+    "eosbn2.F90": _OCE / "TRA/eosbn2.F90",
     "domzgr_substitute.h90": _OCE / "DOM/domzgr_substitute.h90",
     "dynspg_ts.F90": _DYN / "dynspg_ts.F90",
     "dynhpg.F90": _DYN / "dynhpg.F90",
@@ -819,6 +828,69 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- VORTEX card, round 1: transcription + acquisition ---
+    'tests/VORTEX/MY_SRC/usrdef_nam.F90:96-97': [
+        'kpi = NINT( 1800.e3  / rn_dx ) + 3',
+        'kpj = NINT( 1800.e3  / rn_dy ) + 3',
+        2],
+    'tests/VORTEX/MY_SRC/usrdef_nam.F90:121': [
+        'kpk = NINT( 5000._wp / rn_dz ) + 1'],
+    'tests/VORTEX/MY_SRC/usrdef_hgr.F90:83-84': [
+        'zroffsetx = (-REAL(Ni0glo-1, wp) + 1._wp) * 0.5_wp * 1.e-3 * rn_dx',
+        'zroffsety = (-REAL(Nj0glo-1, wp) + 1._wp) * 0.5_wp * 1.e-3 * rn_dy',
+        2],
+    'tests/VORTEX/MY_SRC/usrdef_hgr.F90:174-177': [
+        'zbeta = 2._wp * omega * COS( rad * rn_ppgphi0 ) / ra',
+        'pff_t(:,:) = zf0 + zbeta * pphit(:,:) * 1.e+3',
+        4],
+    'tests/VORTEX/MY_SRC/usrdef_zgr.F90:126': [
+        'zd = 5000._wp/REAL(jpkm1,wp)'],
+    'tests/VORTEX/MY_SRC/usrdef_zgr.F90:187-193': [
+        'z2d(:,:) = REAL( jpkm1 , wp )          ! flat bottom',
+        'k_top(:,:) = MIN( 1 , k_bot(:,:) )     ! = 1    over the ocean point, =0 elsewhere',
+        7],
+    'tests/VORTEX/MY_SRC/usrdef_istate.F90:69-75': [
+        ('zf0   = 2._wp * omega * SIN( rad * rn_ppgphi0 )', 1),
+        ('zP0 = rho0 * zf0 * zumax * zlambda * SQRT(EXP(1._wp)/2._wp)', 1),
+        7],
+    'tests/VORTEX/MY_SRC/usrdef_istate.F90:83-88': [
+        'zrho1 = rho0 * (1._wp + zn2*zdt/grav)',
+        'pts(ji,jj,jk,jp_tem) = (20._wp + (rho0-zrho1) / rn_a0 ) * ptmask(ji,jj,jk)',
+        6],
+    'tests/VORTEX/MY_SRC/usrdef_istate.F90:101-105': [
+        'zdu = 0.5_wp * (pdept(ji  ,jj,jk) + pdept(ji+1,jj,jk))',
+        'pu(ji,jj,jk) = (za * zf * zy * EXP(-(zx**2+zy**2)/zlambda**2)) * ptmask(ji,jj,jk) * ptmask(ji+1,jj,jk)',
+        5],
+    'tests/VORTEX/MY_SRC/usrdef_istate.F90:177-182': [
+        'za = -zP0 * (1._wp-EXP(-zH)) / (grav*(zH-1._wp + EXP(-zH)))',
+        'pssh(ji,jj) = zP0 * EXP(-(zx**2+zy**2)/zlambda**2)/(zrho1*grav) * ptmask(ji,jj,1)',
+        6],
+    'tests/VORTEX/MY_SRC/usrdef_sbc.F90:60-68': [
+        'utau(:,:) = 0._wp',
+        'qsr (:,:) = 0._wp',
+        9],
+    'restart.F90:461': [
+        ('CALL usr_def_istate_ssh( tmask, ssh(:,:,Kbb) )', 2)],
+    'DOM/istate.F90:127-130': [
+        'DO jk = 1, jpk',
+        'CALL usr_def_istate( zgdept, tmask, ts(:,:,:,:,Kbb), uu(:,:,:,Kbb), vv(:,:,:,Kbb) )',
+        4],
+    'domzgr_substitute.h90:139': [
+        '# define  gdept(i,j,k,t)    ((DEPt_0(i,j,k) Tisf(r3t,risfdep,i,j,t))'],
+    'DOM/istate.F90:149-154': [
+        'uu_b(:,:,Kbb) = 0._wp   ;   vv_b(:,:,Kbb) = 0._wp',
+        'uu_b(:,:,Kbb) = uu_b(:,:,Kbb) * r1_hu(:,:,Kbb)',
+        6],
+    'domqco.F90:166-169': [
+        ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 1),
+        ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1),
+        4],
+    'eosbn2.F90:1890-1895': [
+        'NAMELIST/nameos/ ln_TEOS10, ln_EOS80, ln_SEOS, rn_T0, rn_S0, rn_a0, rn_b0, rn_lambda1, rn_mu1, &',
+        'READ_NML_CFG(numnam,nameos)',
+        6],
+    'dynvor.F90:874': [
+        'IF( ln_dynvor_een ) THEN   ;   ioptio = ioptio + 1   ;   nvor_scheme = np_EEN   ;   ENDIF'],
     # --- round 184: DINO developed-state closed V-face repair ---
     'DINO/BLD/ppsrc/nemo/domqco.f90:177-181': [
         'CALL dom_qco_r3c( ssh(:,:,Kbb), r3t(:,:,Kbb), r3u(:,:,Kbb), r3v(:,:,Kbb)           )',
