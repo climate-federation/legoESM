@@ -1530,9 +1530,9 @@ CITATION_MAP = {
     'DINO/BLD/ppsrc/nemo/usrdef_zgr.f90:123-135': [
         'IF( ld_zco ) THEN',
         'CALL zgr_msk_top_bot( pdept_1d, zbathy, k_top, k_bot )', 13],
-    'DINO/BLD/ppsrc/nemo/zgr_lib.f90:198-209': [
+    'DINO/BLD/ppsrc/nemo/zgr_lib.f90:199-209': [
         ('!                       !==  t- and w- scale factors from depth  ==!', 3),
-        '&                   pe3uw, pe3vw        )', 12],
+        '&                   pe3uw, pe3vw        )', 11],
     'DINO/BLD/ppsrc/nemo/domain.f90:194-216': [
         'ht_0(:,:) = 0._wp  ! Reference ocean thickness',
         'r1_hf_0(:,:) = ssfmask(:,:) / ( hf_0(:,:) + 1._wp -  ssfmask(:,:) )',

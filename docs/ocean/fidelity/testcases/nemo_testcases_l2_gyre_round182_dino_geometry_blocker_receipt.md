@@ -22,7 +22,7 @@ The DINO z-coordinate branch first constructs the full-grid 3-D scale factors
 and depths, and only afterwards derives the wet top/bottom indices, at
 `DINO/BLD/ppsrc/nemo/usrdef_zgr.f90:123-135`.  The called MI96 routine forms
 `pe3t`/`pe3w` from depth and reconstructs depth from those scale factors at
-`DINO/BLD/ppsrc/nemo/zgr_lib.f90:198-209`.  Thus the raw geometry is a full-
+`DINO/BLD/ppsrc/nemo/zgr_lib.f90:199-209`.  Thus the raw geometry is a full-
 grid positive operand; it is not a wet mask.
 
 The compiled domain separately sums reference depth through `tmask` and makes
