@@ -227,6 +227,11 @@ def main_era5_soil_t(args) -> int:
     times = {tuple(f[3]) for f in fields}
     if len(times) != 1:
         raise SystemExit(f"ERA5 soil layers are at different times: {times}.")
+    ftime = next(iter(times))
+    if (len(ftime) != 1
+            or np.datetime64(ftime[0]) != np.datetime64(args.era5_time)):
+        raise SystemExit(f"ERA5 soil layers are at {list(ftime)}, not the "
+                         f"requested --era5-time {args.era5_time}.")
     stl = np.stack([f[0] for f in fields])
     if not np.all(np.isfinite(stl)):
         raise SystemExit("ERA5 soil temperature has non-finite values; refusing.")
@@ -256,7 +261,7 @@ def main_era5_soil_t(args) -> int:
     meta = json.loads(str(src["metadata_json"]))
     meta.update({
         "soil_t_source": "ERA5 stl1-4 (GRIB params 139,170,183,236)",
-        "soil_t_time": list(times.pop()),
+        "soil_t_time": list(ftime),
         "soil_t_files": {v: {"path": str(f), "md5": md5(f)}
                          for f, v in zip(args.era5_soil_t, _ERA5_STL_VARS)},
         "soil_t_lsm": {_ERA5_LSM_VAR: {"path": str(args.era5_lsm),
@@ -301,6 +306,9 @@ def main(argv=None) -> int:
                          "-seltimestep,1). Switches to SOIL-T mode: --source is "
                          "an IC already on the target grid and ONLY its soil "
                          "temperature is replaced on non-glacier land columns.")
+    ap.add_argument("--era5-time", help="the instant the --era5-soil-t files "
+                                       "must hold (e.g. 1979-01-01T00:00); "
+                                       "required with --era5-soil-t")
     ap.add_argument("--era5-lsm", help="ERA5 land-sea mask netCDF (param 172), "
                                        "same grid; required with --era5-soil-t")
     ap.add_argument("--source-soil-column", default=None,
@@ -326,8 +334,8 @@ def main(argv=None) -> int:
                          "already on its target grid).")
     args = ap.parse_args(argv)
     if args.era5_soil_t:
-        if not args.era5_lsm:
-            ap.error("--era5-soil-t needs --era5-lsm")
+        if not (args.era5_lsm and args.era5_time):
+            ap.error("--era5-soil-t needs --era5-lsm and --era5-time")
         if args.stamp_only or args.source_soil_hydraulics:
             ap.error("--era5-soil-t takes a stamped --source; --stamp-only / "
                      "--source-soil-hydraulics apply to regridding or stamping")

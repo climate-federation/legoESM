@@ -252,9 +252,21 @@ def test_nearest_column_map_chunked_equals_dense(monkeypatch):
     rng = np.random.default_rng(3)
     sl, so = rng.uniform(-1.5, 1.5, 300), rng.uniform(0.0, 6.28, 300)
     tl, to = rng.uniform(-1.5, 1.5, 257), rng.uniform(0.0, 6.28, 257)
-    dense = gr.nearest_column_map(sl, so, tl, to)
+    valid = rng.uniform(size=300) < 0.3
+
+    def brute(mask):
+        # independent reference: haversine distance, per target
+        ok = np.flatnonzero(mask)
+        return np.array([ok[np.argmin(
+            np.sin((sl[ok] - a) / 2) ** 2
+            + np.cos(a) * np.cos(sl[ok]) * np.sin((so[ok] - b) / 2) ** 2)]
+            for a, b in zip(tl, to)])
+
     monkeypatch.setattr(gr, "_NN_CHUNK_ELEMS", 300 * 7)   # 7 targets per chunk
-    np.testing.assert_array_equal(gr.nearest_column_map(sl, so, tl, to), dense)
+    np.testing.assert_array_equal(gr.nearest_column_map(sl, so, tl, to),
+                                  brute(np.ones(300, bool)))
+    np.testing.assert_array_equal(
+        gr.nearest_column_map(sl, so, tl, to, src_valid=valid), brute(valid))
     assert gr.nearest_column_map(sl, so, tl[:0], to[:0]).size == 0
 
 
@@ -327,10 +339,11 @@ def _setup_cli(tmp_path, monkeypatch, replace_land=(True, False, True)):
     return rg, ic_path, dict(np.load(ic_path, allow_pickle=False))
 
 
-def _run_cli(rg, ic_path, out, files, lsm, sd):
+def _run_cli(rg, ic_path, out, files, lsm, sd, time="1979-01-01T00:00"):
     return rg.main(["--source", str(ic_path), "--surfdata", sd,
                     "--target-grid", "mpas", "--target-resolution", "6",
-                    "--era5-soil-t", *files, "--era5-lsm", lsm, "--out", str(out)])
+                    "--era5-soil-t", *files, "--era5-lsm", lsm,
+                    "--era5-time", time, "--out", str(out)])
 
 
 def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
@@ -375,6 +388,25 @@ def test_cli_refuses_wrong_era5_inputs(tmp_path, monkeypatch, kw):
     with pytest.raises(SystemExit):
         _run_cli(rg, ic_path, tmp_path / "out.npz", files, lsm, sd)
     assert not (tmp_path / "out.npz").exists()
+
+
+@pytest.mark.parametrize("time", ["1979-01-01T18:00", "1979-01-02T00:00"])
+def test_cli_refuses_era5_at_another_time(tmp_path, monkeypatch, time):
+    rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch)
+    files, lsm, sd = _era5_inputs(tmp_path)
+    with pytest.raises(SystemExit, match="--era5-time"):
+        _run_cli(rg, ic_path, tmp_path / "out.npz", files, lsm, sd, time=time)
+
+
+def test_cli_refuses_era5_without_time(tmp_path, monkeypatch):
+    import xarray as xr
+    rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch)
+    files, lsm, sd = _era5_inputs(tmp_path)
+    for f, v in zip(files, ("var139", "var170", "var183", "var236")):
+        ds = xr.load_dataset(f).isel(time=0).drop_vars("time")
+        ds.to_netcdf(f)
+    with pytest.raises(SystemExit, match="--era5-time"):
+        _run_cli(rg, ic_path, tmp_path / "out.npz", files, lsm, sd)
 
 
 def test_cli_refuses_transposed_era5_field(tmp_path, monkeypatch):
