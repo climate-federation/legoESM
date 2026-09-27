@@ -880,11 +880,18 @@ class TestUPointMetricAlignment:
             assert np.ptp(s_raw[-1, :]) > 1.0e-6
             cos_u = np.asarray(grid.cos_alpha_u, dtype=np.float64)
             sin_u = np.asarray(grid.sin_alpha_u, dtype=np.float64)
-            np.testing.assert_allclose(cos_u[:, 1:], c_raw, rtol=1e-12)
-            np.testing.assert_allclose(sin_u[:, 1:], s_raw, rtol=1e-12)
-            np.testing.assert_allclose(sin_u[:, 0], s_raw[:, -1], rtol=1e-12)
-            # and NOT the first column, which is what the old build used
-            assert not np.allclose(sin_u[:, 0], s_raw[:, 0])
+            # The stored grid is float32 by default, so the comparison is at
+            # single precision; the misalignment this pins is O(0.1), five
+            # orders of magnitude above that.
+            np.testing.assert_allclose(cos_u[:, 1:], c_raw, rtol=1e-6)
+            np.testing.assert_allclose(sin_u[:, 1:], s_raw, rtol=1e-6)
+            np.testing.assert_allclose(sin_u[:, 0], s_raw[:, -1], rtol=1e-6)
+            # The wrap column alone cannot discriminate: the raw array's own
+            # padding makes its last column a copy of its first. The layout
+            # question is settled on the INTERIOR: under the old APPEND build
+            # the first n_lon faces carried the raw array unshifted, and that
+            # must now be false.
+            assert not np.allclose(sin_u[:, :-1], s_raw, rtol=1e-6)
 
 
 class TestMeshCoriolisIsOptIn:
@@ -919,7 +926,7 @@ class TestMeshCoriolisIsOptIn:
                 f_T,
                 2.0 * float(grid.omega) * np.sin(
                     np.asarray(grid.lat_T, dtype=np.float64)),
-                rtol=1e-12)
+                rtol=1e-6)      # stored float32; the mesh value is 1e-4 away
 
     def test_opt_in_reads_the_mesh_field(self):
         from legoesm.grids.tripole import create_tripole_grid
@@ -928,7 +935,7 @@ class TestMeshCoriolisIsOptIn:
             path = self._mesh(tmp, 1.2345e-4)
             grid = create_tripole_grid(path, use_mesh_coriolis=True)
             np.testing.assert_allclose(
-                np.asarray(grid.f_T, dtype=np.float64), 1.2345e-4, rtol=1e-12)
+                np.asarray(grid.f_T, dtype=np.float64), 1.2345e-4, rtol=1e-6)
 
     def test_ff_f_is_carried_either_way(self):
         """The F-point field is a pure addition: only literal arms read it."""
