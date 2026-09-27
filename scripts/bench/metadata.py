@@ -936,6 +936,23 @@ def calibrated_bound(
     }
 
 
+def state_all_finite(state) -> bool:
+    """True iff every array leaf of ``state`` is finite (global, sharded-safe).
+
+    Non-finite values persist once they appear, so checking the state at the
+    END of a timed window catches a blow-up anywhere inside it.  A timing of
+    a non-finite state is not a measurement of the model.
+    """
+    import jax
+    import jax.numpy as jnp
+    leaves = [x for x in jax.tree.leaves(state)
+              if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.inexact)]
+    if not leaves:
+        return True
+    return bool(jax.jit(lambda ls: jnp.all(jnp.stack(
+        [jnp.isfinite(x).all() for x in ls])))(leaves))
+
+
 def timed_scan_blocks(
     advance,
     state,

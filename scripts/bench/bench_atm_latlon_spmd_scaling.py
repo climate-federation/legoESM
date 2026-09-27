@@ -27,8 +27,9 @@ state STOPS the timed loop and stamps the record ``finite_ok=false`` +
 ``valid=false`` (with ``completed_blocks`` saying how far it got, a
 ``diverged: ...`` entry under ``metadata._incomplete``, and nulled
 ``sypd``/``mcells_per_s``) — a diverging trajectory is never serialized as
-valid scaling data.  The default fused lane has no in-graph finite check, so
-its rows carry ``finite_ok=null``.
+valid scaling data.  The default fused lane checks the final state after its
+timed blocks (non-finite values persist, so this catches a blow-up anywhere in
+the window) and stamps ``finite_ok`` / ``valid`` the same way.
 
 Device count is fixed at process start, so each n_devices runs as a SEPARATE
 process (one sbatch step per count); this script benches ONE n_devices and
@@ -99,7 +100,7 @@ from metadata import (  # noqa: E402
 )
 
 
-def _build_model(n_lat, n_lon, nlev, fix_mass=True):
+def _build_model(n_lat, n_lon, nlev, dt, fix_mass=True):
     _import_jax()
     from legoesm import constants
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
@@ -116,20 +117,27 @@ def _build_model(n_lat, n_lon, nlev, fix_mass=True):
     # halo exchanges -- so its cost is reported by this benchmark as local
     # work. Being able to switch it off is what makes the two separable.
     # MEASUREMENT ONLY: a run with it off does not conserve mass.
+    # Polar filter ON (2026-09-27): without it the rows next to the poles are
+    # metres wide at 2048x4096 and the state goes non-finite within 20 steps
+    # at dt = 60 s, so every timing before this change timed a blown-up
+    # state.  Filter settings named explicitly (they equal the config's
+    # defaults) and the mask is built for the run's dt, not the model's
+    # 600 s constructor default.
     cfg = CGridLatLonPrimitiveEquationConfig(
-        fix_mass=fix_mass, use_polar_filter=False, use_ppm_transport=True,
+        fix_mass=fix_mass, use_polar_filter=True, polar_filter_cutoff_deg=60.0,
+        polar_filter_max_wave_speed=300.0, use_ppm_transport=True,
         time_integrator="ssp_rk3")
-    return CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
+    return CGridLatLonPrimitiveEquationModel(grid, sigma, cfg, dt=dt)
 
 
-def _build(n_lat, n_lon, nlev, fix_mass=True):
+def _build(n_lat, n_lon, nlev, dt, fix_mass=True):
     _import_jax()
     # nd=1 lane + tests: global (unsharded) IC build, unchanged protocol.
     from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         hydrostatic_to_cgrid)
 
-    model = _build_model(n_lat, n_lon, nlev, fix_mass)
+    model = _build_model(n_lat, n_lon, nlev, dt, fix_mass)
     hs0 = held_suarez_init_latlon(model.grid, model.sigma_coord)
     c0 = hydrostatic_to_cgrid(hs0, model.grid)
     return model, c0
@@ -197,7 +205,12 @@ def main() -> int:
                         "step; a 16x8 tiling moves 1,280 boundary cells per "
                         "tile against 8,192 for a band.")
     p.add_argument("--physics", choices=["none", "held_suarez"], default="none")
-    p.add_argument("--dt", type=float, default=60.0)
+    # 5 s: half the largest timestep measured to stay finite for 500 steps at
+    # 2048x4096 with the polar filter (10 s finite, 15 s non-finite within 50
+    # steps; 2026-09-27, one Derecho node).  The old 60 s default went
+    # non-finite within 20 steps, with or without the filter.  Step cost does
+    # not depend on dt, so a small stable dt costs the benchmark nothing.
+    p.add_argument("--dt", type=float, default=5.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
                    help="fused_step_ms of the nd=1 row at the SAME per-device "
                         "size (compute ingredient of the calibrated T_bound, "
@@ -388,7 +401,7 @@ def main() -> int:
             raise SystemExit("--p-lon > 1 needs more than one device")
 
     if nd == 1:
-        model, c0 = _build(n_lat, args.n_lon, args.nlev,
+        model, c0 = _build(n_lat, args.n_lon, args.nlev, args.dt,
                            fix_mass=not args.no_fix_mass)
         mesh = None
         c = c0
@@ -400,7 +413,7 @@ def main() -> int:
         # assert_equal all-gather). This is what lets full-node-packed CPU
         # rungs (128 procs/node) survive at large n_lat.
         _stage("building model geometry (host)")
-        model = _build_model(n_lat, args.n_lon, args.nlev,
+        model = _build_model(n_lat, args.n_lon, args.nlev, args.dt,
                              fix_mass=not args.no_fix_mass)
         _stage("geometry built; creating mesh + band-local IC")
         if p_lon > 1:
@@ -440,7 +453,7 @@ def main() -> int:
 
     per_block_ms = None
     completed_blocks = None
-    finite_ok = None   # default fused lane: no in-graph finite check -> null
+    finite_ok = None   # set below by every timing lane
     timing = None   # metadata.timed_scan_blocks metrics (default lane only)
     if seg_n > 0:
         # Multi-controller: align every process before the timed loop so
@@ -520,9 +533,10 @@ def main() -> int:
         # Headline = fused per-step time from the SLOWEST process; key name
         # kept for the aggregators.
         med = float(timing["fused_step_ms"])
+        from metadata import state_all_finite
+        finite_ok = state_all_finite(c)
 
-    # valid=false ONLY on an observed non-finite state; the default fused
-    # lane (finite_ok=None: unchecked) stays valid.
+    # valid=false on a non-finite state (checked at the end of every lane).
     valid = finite_ok is not False
     # A diverging segment run's med is not a measurement: feed the bound
     # honest nulls (its flat throughput twins are nulled after assembly).
@@ -699,9 +713,12 @@ def main() -> int:
     if not valid:
         # Divergence reason on the aggregator-facing incomplete list (the
         # same channel annotate_incomplete uses for missing metadata).
+        _where = (f"segment finite scalar false after block "
+                  f"{completed_blocks - 1} of {args.steps}"
+                  if completed_blocks is not None
+                  else "final state non-finite after the timed blocks")
         rec["metadata"].setdefault("_incomplete", []).append(
-            f"diverged: segment finite scalar false after block "
-            f"{completed_blocks - 1} of {args.steps} — timings describe a "
+            f"diverged: {_where} — timings describe a "
             "non-finite trajectory, not valid scaling data")
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).

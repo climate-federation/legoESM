@@ -24,7 +24,7 @@ def _load():
 def test_build_returns_consistent_cgrid_state():
     mod = _load()
     n_lat, n_lon, nlev = 8, 8, 4
-    model, c0 = mod._build(n_lat, n_lon, nlev)
+    model, c0 = mod._build(n_lat, n_lon, nlev, 60.0)
     # C-grid staggering: u (n_lat, n_lon+1, nlev), v (n_lat+1, n_lon, nlev),
     # T/p_s at centers.
     assert c0.u.shape == (n_lat, n_lon + 1, nlev)
@@ -130,24 +130,27 @@ def test_main_segment_mode_divergence_marks_record_invalid(
     assert "INVALID[diverged" in outtxt
 
 
-def test_main_per_step_lane_finite_unchecked_is_null(tmp_path, monkeypatch):
-    """The legacy per-step lane has NO in-graph finite check: its rows must
-    say so (finite_ok=null) while remaining valid — never a fabricated
-    finite_ok=true."""
+@pytest.mark.parametrize("dt,finite", [("60", True), ("1e18", False)])
+def test_main_default_lane_checks_final_state_finite(tmp_path, monkeypatch, dt, finite):
+    """The default fused lane checks the state after its timed blocks: a
+    stable run is stamped finite_ok=true/valid, a diverging one (huge dt)
+    finite_ok=false/valid=false with no throughput -- never an unchecked
+    timing of a blown-up state."""
     import json
     mod = _load()
-    out = tmp_path / "perstep.jsonl"
+    out = tmp_path / "default.jsonl"
     monkeypatch.setattr(
         "sys.argv",
         ["bench", "--n-devices", "1", "--n-lat", "8", "--n-lon", "8",
          "--nlev", "4", "--steps", "2", "--warmup", "1",
-         "--dt", "60", "--out", str(out)])
+         "--dt", dt, "--out", str(out)])
     assert mod.main() == 0
     rec = json.loads(out.read_text().strip().splitlines()[-1])
     assert rec["segment_mode"] is False
-    assert rec["finite_ok"] is None
-    assert rec["valid"] is True
-    assert rec["completed_blocks"] is None
+    assert rec["finite_ok"] is finite
+    assert rec["valid"] is finite
+    if not finite:
+        assert rec["sypd"] is None and rec["mcells_per_s"] is None
 
 
 def test_thin_band_guard_applies_to_the_gpu_lane_only(monkeypatch, capsys):

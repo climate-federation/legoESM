@@ -74,7 +74,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
 from metadata import (  # noqa: E402
     annotate_incomplete, hlo_collective_census, scaling_metadata,
-    tidy_throughput_fields)
+    state_all_finite, tidy_throughput_fields)
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -608,6 +608,7 @@ def main() -> int:
 
     steady = per_step_ms[args.warmup:]
     med = float(np.median(steady))
+    finite = state_all_finite(s)
     rec = dict(
         component="mpas_atm",
         subdivision=args.subdivision, n_devices=nd,
@@ -632,7 +633,7 @@ def main() -> int:
         n_processes=jax.process_count(),
         multicontroller=bool(args.multicontroller),
         compile_ms=round(per_step_ms[0], 1),
-        steady_median_ms=round(med, 2),
+        steady_median_ms=round(med, 2), finite_ok=finite, valid=finite,
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
@@ -723,7 +724,7 @@ def main() -> int:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "
                   "hardware scaling — do not report it as a speedup.")
-    return 0
+    return 0 if finite else 3
 
 
 if __name__ == "__main__":

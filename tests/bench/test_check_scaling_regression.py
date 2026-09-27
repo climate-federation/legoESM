@@ -143,3 +143,15 @@ def test_cpu_rows_refuse_one_core_ranks_keep_eight_core_ranks(tmp_path):
     assert _main(tmp_path) == 0
     _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, platform="cpu", metadata={**meta, "cpu_affinity": 2}))
     assert _main(tmp_path) == 2
+
+
+def test_state_all_finite_flags_nan_inf_and_ignores_integer_leaves():
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts" / "bench"))
+    import jax.numpy as jnp
+    from metadata import state_all_finite
+    ok = {"T": jnp.ones((4, 3)), "n": jnp.arange(3), "none": None}
+    assert state_all_finite(ok) is True
+    assert state_all_finite({**ok, "u": jnp.array([1.0, jnp.nan])}) is False
+    assert state_all_finite({**ok, "u": jnp.array([jnp.inf])}) is False
+    assert state_all_finite({"n": jnp.arange(3)}) is True

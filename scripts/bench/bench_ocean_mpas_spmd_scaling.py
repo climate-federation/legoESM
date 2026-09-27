@@ -25,7 +25,6 @@ import sys
 import time
 from pathlib import Path
 
-import jax.numpy as jnp
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -37,6 +36,7 @@ from bench_ocean_mpas_scaling import (  # noqa: E402
 from metadata import (  # noqa: E402
     annotate_incomplete,
     scaling_metadata,
+    state_all_finite,
     tidy_throughput_fields,
     timed_scan_blocks,
 )
@@ -206,11 +206,6 @@ def main() -> int:
         def advance(st, aux=None):   # timed_scan_blocks calls 1-arg when aux is None
             return model.step(st, args.dt)
 
-    @jax.jit
-    def _all_finite(st):
-        return jnp.all(jnp.array([jnp.isfinite(l).all()
-                                  for l in jax.tree.leaves(st)]))
-
     try:
         t0 = time.perf_counter()
         jax.block_until_ready(jax.tree.leaves(advance(state, aux)))
@@ -250,7 +245,7 @@ def main() -> int:
             trace_dir=trace_dir, aux=aux)
         # jitted global reduction -> replicated scalar (fully addressable) over
         # EVERY prognostic leaf, not a host fetch of one sharded field.
-        finite = bool(_all_finite(state))
+        finite = state_all_finite(state)
     finally:
         if nd > 1:
             disarm_mpas_ocean_spmd()
