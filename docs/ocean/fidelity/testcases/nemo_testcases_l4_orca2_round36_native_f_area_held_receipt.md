@@ -85,8 +85,17 @@ at the committed diff.  It failed before reading the diff with
 Verdict: **independent review unavailable in-sandbox**.
 
 The focused round-32/35/36 binding battery reports **9 passed**.  The receipt
-citation gate, required wide fidelity battery, and closing focused result are
-recorded in the closing commit after this receipt is made citable.
+citation gate passes all three compiled citations with zero failures, zero
+unmapped citations and zero map-audit failures.  Its rigid two-line source
+plant exits 1 with `SYMBOL-NOT-AT-LINE`; all nine citation self-tests fire.
+
+The required `tests/ocean/fidelity -n 12` battery reached 98% and the inherited
+final-tail stall, then was interrupted after a bounded silent wait.  It emitted
+the same five inherited failures as rounds 34 and 35: SI3 MY_SRC provenance,
+the stale GYRE member/gate stamp, the round-51 trace suffix, three unstamped
+legacy report emitters, and the missing `hires_lane_surface` case-board row.
+Their exact node IDs were rerun in isolation and all five reproduce in 7.01 s.
+No round-36 test fails.
 
 ## Choices
 
