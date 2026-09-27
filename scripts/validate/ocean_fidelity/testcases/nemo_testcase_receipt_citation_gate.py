@@ -51,6 +51,7 @@ _OCE = NEMO / "src/OCE"
 _DYN = _OCE / "DYN"
 _R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
 _ORCA2_COMPILED = NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo"
+_OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
@@ -74,6 +75,10 @@ FILES = {
     # that executes the category-summed initial snow/ice load adjustment.
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90": (
         _ORCA2_COMPILED / "iceistate.f90"),
+    "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _OVERFLOW_COMPILED / "stprk3_stg.f90"),
+    "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
+        _OVERFLOW_COMPILED / "dynhpg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo"
         "/stprk3.f90"),
@@ -856,6 +861,14 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 49: held tracer statement and downstream OVERFLOW order ---
+    'OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:501-508': [
+        ('DO jn = 1, jpts', 2), ('END DO', 14), 8],
+    'OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:311-338': [
+        ('SELECT CASE( kstg )', 2), ('END SELECT', 6), 28],
+    'OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90:341-414': [
+        'SUBROUTINE hpg_sco( kt, Kmm, puu, pvv, Krhs )',
+        'pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 74],
     # --- ORCA2 card round 20: exact MPI transfer and slow-forcing owner ---
     'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
     '/dynspg_ts.f90:291-294': [
