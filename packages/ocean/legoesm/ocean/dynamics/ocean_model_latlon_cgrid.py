@@ -5254,13 +5254,7 @@ class LatLonCGridOceanModel:
         _grid = grid if grid is not None else self.grid
         _vmask = vertex_mask if vertex_mask is not None else self._vertex_mask
         _tke_n2_bundle = _tke_n2_bundle_override
-        _carried_slope_n2 = (
-            _cfg_b.gm_redi is not None
-            and getattr(
-                _cfg_b.gm_redi, "slope_n2_evaluation", "recompute")
-            == "carried_step_entry")
-        if (_tke_n2_bundle is None
-                and (_apply_implicit_vmix or _carried_slope_n2)):
+        if _tke_n2_bundle is None and _apply_implicit_vmix:
             _tke_n2_bundle = self._tke_step_entry_n2_bundle(
                 state, z_coord=_zc, config=_cfg_b)
         # Prescribed-flow lever (config.prescribed_flow, validated at

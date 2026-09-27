@@ -7,7 +7,6 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 def test_gyre_selects_the_single_nemo_ldfslp_association_bundle():
     gm = build_nemo_testcase_card("GYRE-zco").recipe.model_config.gm_redi
     assert gm.mld_criterion == "n2_integral"
-    assert gm.slope_n2_evaluation == "carried_step_entry"
     assert gm.slope_metric_evaluation == "nemo_reciprocal"
     assert gm.slope_face_thickness_evaluation == "nemo_qco_live"
     assert gm.slope_depth_evaluation == "nemo_qco_live_literal"
