@@ -123,11 +123,42 @@ the starting tip.
 
 ## Review, citations, and tests
 
-REVIEW_PENDING
+The required read-only `codex exec` review was attempted against the complete
+Round-182 diff.  It produced no scientific verdict because the in-process
+app-server could not initialize in the read-only sandbox.  Its terminal line
+is quoted verbatim:
 
-CITATION_PENDING
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
 
-TESTS_PENDING
+Therefore **independent review unavailable in-sandbox**.  This is not a SHIP,
+HOLD, or DO NOT SHIP verdict.
+
+The citation gate reports **PASS** for all nine compiled-source citations.
+Its shifted `DINO/BLD/ppsrc/nemo/eosbn2.f90:1507-1517` plant exits 1 with
+`SYMBOL-NOT-AT-LINE`, as required.  The production-call invalid-cell plant
+also prints `STATUS PLANT-FIRED` and exits 1.
+
+The focused battery reports **1 failed, 170 passed, 9 warnings in 163.92s**.
+The sole failure is
+`test_nemo_zdfmxl_transcription.py::test_treguier_kappa_uses_the_same_n2_variant_as_the_slopes`,
+the same starting-tip source-inspection failure documented by Round 181: it
+searches `gm_redi_tracer_tendency_latlon` for a call that the base already
+placed in `native_treguier_kappa_for_state`.  The relevant literal-slope,
+DINO-experiment, and receipt-citation tests otherwise pass.  A final
+`git diff --quiet 46dd5e810 -- packages/ocean tests/ocean` exits 0, proving
+that neither production nor tests differ from this round's base.
+
+| artifact | SHA-256 |
+|---|---|
+| `mesh_gate_baseline.log` | `f3e82431e2de88c030f6baf85b918579e9d769a62d55bd190ef5d85451689496` |
+| `dino_trace_invalid_classes.log` | `fd89b3b5f7357a53f2efe0549ba79fc24f3799270e2f9ca6c444b7cebba3f3ea` |
+| `dino_trace_step_output.log` | `9aa18a1be818fa62e5926d52a29ae95ac14f373469217f0e16d3481dd3e5fd0a` |
+| `dino_trace_plant_call1.log` | `fad71813ad2cac4bcdb6608b6895446d91cf682087cbc926f03bfa8ebb242b7d` |
+| `citation_gate_final.json` | `02bc9b8c7c75044e99b53b9c664d104ddcf25a2ff7d3a1f3aa1bce0e6f48ae9e` |
+| `citation_gate_shift_plant.json` | `7b58dcbb8af88582afdc0a19b906c98d3129e303dc8208d6d566fb6311ddb85c` |
+| `focused_tests.log` | `fbd71ddb33cec950a34c771f167844f041af35487e06c435307ad51c3a087396` |
+| `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
+| `production_restore_check.log` | `8ae4bcd5810dcecb829d37ad532dd7628e3aa4bd2ed81efd41ec63648cd85f7f` |
 
 Choices made: none.  No NEMO acquisition is required.
 
