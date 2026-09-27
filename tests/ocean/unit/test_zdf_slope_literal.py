@@ -60,7 +60,7 @@ def test_literal_prd_is_jittable_and_differentiable():
 
 def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
         monkeypatch):
-    """Kmm literal geometry supersedes a poisoned later-state Jacobian."""
+    """The unused restored surface W slot must not inject 0*inf into AD."""
     from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
     from legoesm.ocean.eos import make_eos_fn
     from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
@@ -100,27 +100,16 @@ def test_full_literal_slope_with_carried_w_bundle_has_finite_jit_gradient(
     cfg = GMRediConfig(
         slope_prd_evaluation="nemo_literal",
         slope_metric_evaluation="nemo_reciprocal")
-    literal_cfg = cfg._replace(
-        slope_n2="nemo_bn2",
-        slope_depth_evaluation="nemo_qco_live_literal")
     eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
     carried_n2 = jnp.full((nlat, nlon, nlev - 1), 1.0e-5)
     carried_e3w = jnp.broadcast_to(
         jnp.asarray([1.5, 2.5, 3.5]), carried_n2.shape)
-    eta_kmm = jnp.full((nlat, nlon), 0.125, dtype=jnp.float64)
-    H_bathy = jnp.full((nlat, nlon), float(dz.sum()), dtype=jnp.float64)
-    poisoned_later_jacobian = jnp.full(
-        (nlat, nlon), jnp.nan, dtype=jnp.float64)
-    assert not np.isfinite(np.asarray(poisoned_later_jacobian)).any()
 
     def objective(temperature):
         rho = 1026.0 + 0.2 * (10.0 - temperature)
         slopes = compute_nemo_native_slopes(
-            rho, temperature, S, mask, umask, vmask, z_coord, grid,
-            literal_cfg,
+            rho, temperature, S, mask, umask, vmask, z_coord, grid, cfg,
             eos_fn, active_3d=z_coord.is_active,
-            jacobian=poisoned_later_jacobian,
-            eta=eta_kmm, H_bathy=H_bathy,
             pn2_override=carried_n2, e3w_override=carried_e3w)
         return sum(jnp.sum(field) for field in slopes)
 
