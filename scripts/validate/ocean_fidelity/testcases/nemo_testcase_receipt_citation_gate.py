@@ -879,12 +879,14 @@ CITATION_MAP = {
     # --- ORCA2 round 52: admitted OVERFLOW stage-2 vorticity replay ---
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:343-358': [
         '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
-        'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )', 16],
+        ('CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )', 2),
+        16],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3.f90:200-207': [
         '! Stage 1 :',
         'CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )', 8],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynvor.f90:242-248': [
-        'CASE( np_ENS )                        !* enstrophy conserving scheme',
+        ('CASE( np_ENS )                        !* enstrophy conserving scheme',
+         1),
         'CALL vor_ens( kt, Kmm, ntot, usd, vsd,', 7],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynvor.f90:866-869': [
         'CASE( np_FLX_c2 , np_FLX_up3 )',
