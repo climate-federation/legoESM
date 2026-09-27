@@ -49,7 +49,8 @@ import jax.numpy as jnp
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["assert_no_inert", "measure_leaf_reachability", "trainable_filter_spec",
+__all__ = ["assert_no_inert", "assert_no_inert_over", "measure_leaf_reachability",
+           "trainable_filter_spec",
            "mpi_max_reduce", "probe_indices", "freeze_unreachable"]
 
 
@@ -83,6 +84,19 @@ def assert_no_inert(g: dict) -> None:
             logger.warning("no-inert gate: %s has %d/%d zero-gradient components "
                            "(PFTs absent from the sample stay at the prior)",
                            k, nz, tot)
+
+
+def assert_no_inert_over(grads) -> None:
+    """:func:`assert_no_inert` on the elementwise max |grad| over per-sample
+    gradient dicts: a leaf gated off on one sample is not inert.  ``fmax``
+    ignores a NaN sample, so one bad sample cannot poison a leaf."""
+    absmax = None
+    for g in grads:
+        g = jax.tree.map(jnp.abs, g)
+        absmax = g if absmax is None else jax.tree.map(jnp.fmax, absmax, g)
+    if absmax is None:
+        raise ValueError("no-inert-parameters gate: no samples to judge")
+    assert_no_inert(absmax)
 
 
 def _leaf_names(tree):

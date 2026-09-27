@@ -462,7 +462,7 @@ def train_physics_params(
     TrainablePhysicsParams — optimized parameters
     list[float] — loss history
     """
-    from legoesm.training.inert_params import assert_no_inert
+    from legoesm.training.inert_params import assert_no_inert_over
     from legoesm.training.trainable_params import TrainablePhysicsParams
 
     params = TrainablePhysicsParams.from_defaults(constraints)
@@ -486,18 +486,14 @@ def train_physics_params(
             model, step_unified, grid, sigma, dt, **seg_kw,
         )
 
-    # No-inert-parameters gate on the FULL data before any update: a leaf
-    # gated off on one sample (no convective trigger that day) is not inert.
-    # fmax ignores a NaN sample so one bad sample cannot poison a leaf.
+    # No-inert-parameters gate on the FULL data before any update.
     _grad = eqx.filter_jit(eqx.filter_grad(
         lambda t, ic, tgt, f: _rollout_loss(
             make_run_seg, t, ic, tgt, f, dt=dt, rollout_hours=rollout_hours,
             sigma_full=sigma_full, grid=grid, loss_config=loss_config)))
-    absmax = None
-    for ic, tgt, f in zip(initial_carries, target_carries, forcings):
-        g = jax.tree.map(jnp.abs, _grad(params, ic, tgt, f).raw_values)
-        absmax = g if absmax is None else jax.tree.map(jnp.fmax, absmax, g)
-    assert_no_inert(absmax)
+    assert_no_inert_over(
+        _grad(params, ic, tgt, f).raw_values
+        for ic, tgt, f in zip(initial_carries, target_carries, forcings))
 
     optimizer = _make_driver_optimizer(
         lr, "adam", n_epochs, len(initial_carries),

@@ -1013,7 +1013,7 @@ def assert_spectral_physics_params_reachable(params, make_physics_fn, grid,
     is inert in the training loss too; one zero IC is not evidence (the SBM
     trigger may simply not fire there).
     """
-    from legoesm.training.inert_params import assert_no_inert
+    from legoesm.training.inert_params import assert_no_inert_over
 
     def _probe(p, ic_state):
         out = make_physics_fn(p, grid)(ic_state, grid, sigma)
@@ -1023,11 +1023,7 @@ def assert_spectral_physics_params_reachable(params, make_physics_fn, grid,
                    jax.tree.leaves(eqx.filter(out, eqx.is_inexact_array)))
 
     _grad = eqx.filter_grad(_probe)
-    absmax = None
-    for ic_state in ic_states:
-        g = jax.tree.map(jnp.abs, _grad(params, ic_state).raw_values)
-        absmax = g if absmax is None else jax.tree.map(jnp.fmax, absmax, g)
-    assert_no_inert(absmax)
+    assert_no_inert_over(_grad(params, ic).raw_values for ic in ic_states)
 
 
 def make_physics_params_spectral_physics(params, grid, dt, *,
