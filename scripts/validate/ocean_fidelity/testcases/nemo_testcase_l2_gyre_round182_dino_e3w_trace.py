@@ -62,6 +62,8 @@ def main() -> None:
             )
             wet_t = jnp.asarray(model.z_coord.is_active, dtype=bool)
             wet_u, wet_v = compute_face_masks_3d(wet_t, model.grid)
+            wet_u = jnp.asarray(wet_u, dtype=bool)
+            wet_v = jnp.asarray(wet_v, dtype=bool)
             wet_eta = jnp.asarray(state.land_mask.data, dtype=bool)
             jax.debug.print(
                 label + "_ACTIVE "
