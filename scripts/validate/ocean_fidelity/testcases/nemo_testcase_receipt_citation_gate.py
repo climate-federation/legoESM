@@ -1184,6 +1184,10 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:275-328': [
         ('!        EMP, SFX and QNS effects', 2),
         ('ENDIF', 24), 54],
+    # --- ORCA2 card round 44: first downstream source-order debt ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:670-681': [
+        ('SELECT CASE( kstg )', 4),
+        ('END DO   ;   END DO   ;   END DO', 8), 12],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:556':
         ('zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
     # --- ORCA2 card round 22: exact stage-to-entry transition and LDF owner ---
