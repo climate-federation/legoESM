@@ -66,27 +66,33 @@ def capture_r3f_boundary(deck_root: Path, record_root: Path) -> dict:
         reciprocal = b(one / area_f)
         multiplied = nemo_t_fold_f_owned(
             b(numerator * reciprocal), card.recipe.grid)
-        return divided, multiplied, area_t, area_f
+        unshifted_area_f = b(jnp.asarray(
+            geom.area_q[:-1, :-1], dtype=jnp.float64))
+        return divided, multiplied, area_t, area_f, unshifted_area_f
 
-    divided, multiplied, area_t, area_f = (
+    divided, multiplied, area_t, area_f, unshifted_area_f = (
         np.asarray(value, np.float64) for value in jax.jit(build)())
     raw_area_t = np.asarray(raw.e1t, np.float64) * np.asarray(raw.e2t, np.float64)
     raw_area_f = np.asarray(raw.e1f, np.float64) * np.asarray(raw.e2f, np.float64)
     return {
         "area_t_grid_vs_raw_product": r32.score(area_t, raw_area_t),
         "area_f_grid_vs_raw_product": r32.score(area_f, raw_area_f),
+        "area_f_unshifted_grid_vs_raw_product": r32.score(
+            unshifted_area_f, raw_area_f),
         "r3f_division_vs_stored_reciprocal": r32.score(divided, multiplied),
     }
 
 
 def capture(deck_root: Path, record_root: Path, *, plant: bool = False) -> dict:
     boundary = capture_r3f_boundary(deck_root, record_root)
-    parent = r32.capture_ldf_replay(deck_root, record_root)
+    parent = r32.capture_ldf_replay(
+        deck_root, record_root, use_shifted_r3f_area=True)
     arm = r32.capture_ldf_replay(
         deck_root,
         record_root,
         plant=plant,
         r3f_reciprocal_order=True,
+        use_shifted_r3f_area=True,
     )
     parent_reproduced = all(
         parent[name]["max_abs"] == expected

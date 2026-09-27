@@ -447,9 +447,15 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     hf0 = _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype)
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
-    # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
-    # area at that same boundary so production JIT cannot fuse it into /area_f.
-    area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
+    # NEMO forms r3f on its native F layout.  The tripolar grid's padded
+    # ``area_q[1:, 1:]`` is a vertex-layout shift, not that native field.
+    # Cards carrying NEMO's mesh therefore supply the exact e1f*e2f operand;
+    # generic cards retain the established geometric fallback.
+    if raw is None:
+        area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
+    else:
+        area_f = b(b(jnp.asarray(raw.e1f, dtype=dtype))
+                   * b(jnp.asarray(raw.e2f, dtype=dtype)))
     r3f = b(b(quarter * quad) * r1_hf0 / area_f)
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.

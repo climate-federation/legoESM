@@ -136,7 +136,9 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
                        face_thickness_substitution: str = "none",
                        use_carried_hf0: bool = False,
                        hf0_override=None,
-                       r3f_reciprocal_order: bool = False) -> dict:
+                       r3f_reciprocal_order: bool = False,
+                       use_native_r3f_area: bool = False,
+                       use_shifted_r3f_area: bool = False) -> dict:
     """Re-run round 24's literal compiled LDF replay on the landed routing."""
     import jax.numpy as jnp
     from jax import lax
@@ -204,7 +206,9 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
     e3f_builder = _hf0_builder(
         nemo_qco_live_vorticity_e3f_cgrid,
         use_carried_hf0=use_carried_hf0, hf0_override=hf0_override,
-        r3f_reciprocal_order=r3f_reciprocal_order)
+        r3f_reciprocal_order=r3f_reciprocal_order,
+        use_native_r3f_area=use_native_r3f_area,
+        use_shifted_r3f_area=use_shifted_r3f_area)
     e3f = e3f_builder(
         state.eta.data, zc, state.eta.data.dtype, grid=grid,
         e3t_0=h_ref, tmask=tmask, reference_e3f=nemo_ldf_reference_e3f(zc))
@@ -276,6 +280,8 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
         "face_thickness_substitution": face_thickness_substitution,
         "use_carried_hf0": use_carried_hf0,
         "r3f_reciprocal_order": r3f_reciprocal_order,
+        "use_native_r3f_area": use_native_r3f_area,
+        "use_shifted_r3f_area": use_shifted_r3f_area,
         "worktree": worktree_stamp(),
         "citations": {
             "file_read": "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:348-353",
@@ -286,10 +292,13 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
 
 
 def _hf0_builder(original, *, use_carried_hf0: bool, hf0_override=None,
-                 r3f_reciprocal_order: bool = False):
+                 r3f_reciprocal_order: bool = False,
+                 use_native_r3f_area: bool = False,
+                 use_shifted_r3f_area: bool = False):
     def builder(eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None,
                 e3t_0=None, tmask=None, reference_e3f=None):
-        if not use_carried_hf0 and not r3f_reciprocal_order:
+        if (not use_carried_hf0 and not r3f_reciprocal_order
+                and not use_native_r3f_area and not use_shifted_r3f_area):
             return original(
                 eta, z_coord, dtype, nn_e3f_typ, grid=grid, e3t_0=e3t_0,
                 tmask=tmask, reference_e3f=reference_e3f)
@@ -340,7 +349,13 @@ def _hf0_builder(original, *, use_carried_hf0: bool, hf0_override=None,
             raw.hf_0 if hf0_override is None else hf0_override, dtype=dtype)
         wet_f = (hf0 > 0.0).astype(dtype)
         r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
-        area_f = b(jnp.asarray(geom.area_q[1:, 1:], dtype=dtype))
+        require(not (use_native_r3f_area and use_shifted_r3f_area),
+                "r3f area override cannot be both native and shifted")
+        if use_native_r3f_area:
+            area_f = b(b(jnp.asarray(raw.e1f, dtype=dtype))
+                       * b(jnp.asarray(raw.e2f, dtype=dtype)))
+        else:
+            area_f = b(jnp.asarray(geom.area_q[1:, 1:], dtype=dtype))
         numerator = b(b(quarter * quad) * r1_hf0)
         if r3f_reciprocal_order:
             r1_area_f = b(one / area_f)
