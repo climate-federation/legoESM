@@ -1449,6 +1449,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     bn2_alpha_beta_override: object = None  # Recorded-entry operator input.
     bn2_tracer_override: object = None  # Recorded-entry T/S operator input.
     tracer_process_trace: object = None; tracer_ldf_diagnostics: object = None
+    # Round 189 one-variable production-JIT discriminator.  Replace only the
+    # live stage-3 stretch handed to qsr_2BD; the stage geometry, QCO weights,
+    # preceding accumulator and returned trajectory retain their own values.
+    # This requires the WRITE-only process trace and is not configurable.
+    stage3_qsr_stretch_override: object = None
     # Return the stage-3 FCT active-cell map alongside the unchanged process
     # boundaries. Kept separate so Round 136 can prove this larger return
     # graph does not move the already-admitted Round-124 observer's rows.
@@ -2781,6 +2786,10 @@ class LatLonCGridOceanModel:
                     "stage-3 FCT pair hook requires "
                     "tracer_time_integrator='rk3_ws'")
         _process_trace = self._nemo_ws_test_hooks.tracer_process_trace
+        if (self._nemo_ws_test_hooks.stage3_qsr_stretch_override is not None
+                and _process_trace is None):
+            raise ValueError(
+                "stage3_qsr_stretch_override requires tracer_process_trace")
         if (self._nemo_ws_test_hooks.vertical_solve_trace
                 and _process_trace is None):
             raise ValueError(
@@ -6852,6 +6861,10 @@ class LatLonCGridOceanModel:
                     _h_ref_ws[..., 0], 1.0e-10)
                 _r3t_m = _h_live_one_half[..., 0] / jnp.maximum(
                     _h_ref_ws[..., 0], 1.0e-10)
+                _qsr_stretch_override = (
+                    self._nemo_ws_test_hooks.stage3_qsr_stretch_override)
+                if _qsr_stretch_override is not None:
+                    _r3t_m = _qsr_stretch_override
                 _qsr_b = shortwave_penetration_tendency(
                     surface_forcing.sw_down,
                     _zc.dz_ref, _zc.z_half_ref, _r3t_b,

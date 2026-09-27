@@ -11,6 +11,7 @@ import math
 import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -146,13 +147,20 @@ def _score(reference: np.ndarray, candidate: np.ndarray,
     unequal = int(np.count_nonzero(
         selected_reference.view(np.uint64)
         != selected_candidate.view(np.uint64)))
+    difference = selected_candidate - selected_reference
     return {
         "cells_scored": int(mask.sum()),
         "cells_unequal": unequal,
-        "max_abs": float(np.max(np.abs(
-            selected_reference - selected_candidate), initial=0.0)),
+        "max_abs": float(np.max(np.abs(difference), initial=0.0)),
+        "rms": float(np.sqrt(np.mean(difference * difference))
+                     if difference.size else 0.0),
         "classification": "BIT" if unequal == 0 else "NON-BIT",
     }
+
+
+def _removed_fraction(before: float, after: float) -> float:
+    require(before > 0.0, "cannot rank removal from a zero baseline")
+    return float((before - after) / before)
 
 
 def _compiled_direct_rate(record: dict, *, return_rows: bool = False):
@@ -474,19 +482,254 @@ def walk(root: Path, process_record: Path, lego_trace: Path,
     }
 
 
+def _trace_frame(year, trace) -> dict[str, np.ndarray]:
+    return year._trace_frame(trace)
+
+
+def _producer_walk(record: dict, process: dict, reference_frame: dict,
+                   candidate_trace, card, wet2: np.ndarray,
+                   restart_path: Path) -> dict:
+    """Walk the source-ordered producer only after QSR closes."""
+    from netCDF4 import Dataset
+    import jax.numpy as jnp
+    from legoesm.ocean.eos import nemo_r3t_stretch
+
+    oracle = {
+        name: 1.0 + np.asarray(process[name], dtype=np.float64)
+        for name in ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")
+    }
+    model = {
+        name: np.asarray(reference_frame[name], dtype=np.float64)
+        for name in ("q_Kbb", "q_Kmm", "q_Kaa")
+    }
+    oracle_blend = 1.0 + 0.5 * (
+        (oracle["r3t_Kbb"] - 1.0) + (oracle["r3t_Kaa"] - 1.0))
+    calibration = _score(oracle["r3t_Kmm"], oracle_blend, wet2)
+    require(calibration["cells_unequal"] == 0,
+            "compiled half-step ratio does not reproduce recorded r3t(Kmm)")
+    model_blend = 1.0 + 0.5 * (
+        (model["q_Kbb"] - 1.0) + (model["q_Kaa"] - 1.0))
+
+    with Dataset(restart_path, "r") as handle:
+        sshn = np.asarray(handle.variables["sshn"][0], dtype=np.float64)
+    require(sshn.shape == wet2.shape,
+            f"restart ssh shape {sshn.shape} != {wet2.shape}")
+    ratio_from_nemo_ssh = np.asarray(nemo_r3t_stretch(
+        card.recipe.z_coord, jnp.asarray(sshn),
+        card.recipe.initial_state.H_bathy.data,
+        evaluation="nemo_reciprocal"))
+    model_eta_after = np.asarray(candidate_trace.state_after.eta.data)
+    rows = {
+        "step_entry_stretch": _score(
+            oracle["r3t_Kbb"], model["q_Kbb"], wet2),
+        "after_ssh": _score(sshn, model_eta_after, wet2),
+        "after_ratio_statement_given_nemo_ssh": _score(
+            oracle["r3t_Kaa"], ratio_from_nemo_ssh, wet2),
+        "after_stretch": _score(
+            oracle["r3t_Kaa"], model["q_Kaa"], wet2),
+        "half_step_blend_from_model_operands": _score(
+            oracle["r3t_Kmm"], model_blend, wet2),
+        "production_half_step_stretch": _score(
+            oracle["r3t_Kmm"], model["q_Kmm"], wet2),
+    }
+    first = next((name for name, row in rows.items()
+                  if row["cells_unequal"]), None)
+    return {
+        "compiled_blend_calibration": calibration,
+        "rows": rows,
+        "first_non_bit": first,
+        "compiled_source_order": [
+            "step_entry_stretch", "after_ssh",
+            "after_ratio_statement_given_nemo_ssh", "after_stretch",
+            "half_step_blend_from_model_operands",
+            "production_half_step_stretch"],
+    }
+
+
+def production_substitution(root: Path, process_record: Path,
+                            reference_trace: Path, expect_commit: str,
+                            plant: str | None = None) -> dict:
+    """Substitute NEMO's r3t(Kmm) at the production-JIT QSR boundary."""
+    require(plant in (None, "production-r3t-ulp"),
+            f"unknown production substitution plant {plant}")
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "production shortwave substitution is not fp64/libm")
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"production substitution requires clean tree: "
+            f"{stamp['dirty_paths']}")
+    require(stamp["commit"] == expect_commit,
+            "production substitution commit differs from --expect-commit")
+    year = _load_sibling(
+        "_round189_year_owners", "nemo_testcase_l2_gyre_year_owners.py")
+    trace_manifest = json.loads((reference_trace / "manifest.json").read_text())
+    trace_admission = year.validate_lego_process_trace(
+        reference_trace, trace_manifest["producer_commit"])
+    require(trace_admission["layout"]["steps"] == [1, 1080],
+            "reference process trace does not cover steps 1..1080")
+    process = year.read_process_record(process_record)
+    require(process["kstp"] == 1080, "process operand is not step 1080")
+    record = read_record(root / "oracle_qsr_walk_kt00001080.bin")
+    card = build_nemo_testcase_card("GYRE-zco")
+    gate = _load_sibling(
+        "_round189_phase3_gate", "nemo_testcase_l2_gyre_phase3_gate.py")
+    wet = gate.expected_masks(card)["T"]
+    wet2 = np.any(wet, axis=-1)
+    reference_frame = {
+        name: np.asarray(
+            np.load(reference_trace / f"{name}.npy", mmap_mode="r")[1079])
+        for name in year.LEGO_PROCESS_FIELDS
+    }
+    nemo_rows = year.process_temperature_rows(process)
+    nemo_shortwave = np.asarray(nemo_rows["shortwave"])
+    reference_rows = year.lego_process_temperature_rows(reference_frame)
+    baseline = _score(nemo_shortwave, reference_rows["shortwave"], wet)
+    require(baseline["cells_unequal"] == 9666,
+            f"Round-188 baseline moved to {baseline['cells_unequal']} cells")
+    require(baseline["max_abs"] == 2.4678031493863273e-06,
+            f"Round-188 baseline max moved to {baseline['max_abs']}")
+
+    state = card.recipe.initial_state
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    started = time.time()
+    for completed in range(1079):
+        kt = completed + 1
+        freshwater, surface = gate._surface_forcings(card, state, kt)
+        state = ordinary_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface)
+        if kt % 180 == 0:
+            print(f"  round189 production prefix step {kt:4d}  "
+                  f"{time.time() - started:7.1f} s", flush=True)
+
+    nemo_stretch = (1.0 + np.asarray(
+        record["r3t_Kmm"][NN_HLS:-NN_HLS, NN_HLS:-NN_HLS],
+        dtype=np.float64)).T
+    override = np.array(nemo_stretch, copy=True)
+    if plant:
+        j, i = (int(value) for value in np.argwhere(wet2)[0])
+        override[j, i] = np.nextafter(override[j, i], np.inf)
+    hooks = _NEMOWSRK3TestHooks(
+        tracer_process_trace=(), stage3_qsr_stretch_override=jnp.asarray(
+            override))
+    candidate_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks)
+    freshwater, surface = gate._surface_forcings(card, state, 1080)
+    candidate = candidate_model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface)
+    candidate = jax.device_get(candidate)
+    candidate_frame = _trace_frame(year, candidate)
+
+    pre_fields = ("Tbb", "q_Kbb", "q_Kmm", "q_Kaa", "B0", "Badv", "Bsbc")
+    pre_rows = {
+        name: _score(reference_frame[name], candidate_frame[name],
+                     wet if candidate_frame[name].ndim == 3 else wet2)
+        for name in pre_fields
+    }
+    require(all(row["cells_unequal"] == 0 for row in pre_rows.values()),
+            "ratio substitution moved a registered pre-shortwave boundary")
+    candidate_rows = year.lego_process_temperature_rows(candidate_frame)
+    candidate_score = _score(
+        nemo_shortwave, candidate_rows["shortwave"], wet)
+    if plant:
+        exact_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                tracer_process_trace=(),
+                stage3_qsr_stretch_override=jnp.asarray(nemo_stretch)))
+        exact = jax.device_get(exact_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface))
+        exact_frame = _trace_frame(year, exact)
+        planted = _score(exact_frame["Bqsr"], candidate_frame["Bqsr"], wet)
+        require(planted["cells_unequal"] > 0,
+                "production r3t ULP plant moved no QSR boundary cell")
+        raise GateError(
+            "STATUS PLANT-FIRED: production-r3t-ulp; "
+            f"unequal={planted['cells_unequal']}")
+
+    comparison = {
+        "baseline": baseline,
+        "nemo_r3t_Kmm_only": candidate_score,
+        "max_abs_removed_fraction": _removed_fraction(
+            baseline["max_abs"], candidate_score["max_abs"]),
+        "rms_removed_fraction": _removed_fraction(
+            baseline["rms"], candidate_score["rms"]),
+    }
+    producer = None
+    if candidate_score["cells_unequal"] == 0:
+        producer = _producer_walk(
+            record, process, reference_frame, candidate, card, wet2,
+            root / "GYRE_OMIP_L2_P3_00001080_restart.nc")
+    remaining = {
+        "qsr_surface_flux": _score(
+            record["qsr"].T, np.asarray(surface.sw_down), wet2),
+        "stage3_step_entry_stretch": _score(
+            1.0 + np.asarray(process["r3t_Kbb"]),
+            reference_frame["q_Kbb"], wet2),
+        "stage3_live_stretch": _score(
+            nemo_stretch, reference_frame["q_Kmm"], wet2),
+        "preceding_accumulator": _score(
+            np.asarray(process["rhs_after_surface_boundary"])[..., :JPK - 1],
+            reference_frame["Bsbc"], wet),
+    }
+    return {
+        "format": "gyre-round189-production-qsr-r3t-substitution-v1",
+        "status": "HELD", "precision": "fp64/libm", "step": 1080,
+        "worktree": stamp, "reference_trace": trace_admission,
+        "registered_pre_shortwave_rows": pre_rows,
+        "comparison": comparison,
+        "prediction": {
+            "at_least_90pct_max_removed": (
+                comparison["max_abs_removed_fraction"] >= 0.90),
+            "confirmed": comparison["max_abs_removed_fraction"] >= 0.90,
+        },
+        "remaining_input_and_association_rows": remaining,
+        "producer_walk": producer,
+        "verdict": (
+            "r3t(Kmm) closes the production-JIT QSR row; producer walked"
+            if producer is not None else
+            "r3t(Kmm) alone does not close the production-JIT QSR row; "
+            "upstream producer walk withheld"),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--plant", choices=("actual-increment-ulp",))
     parser.add_argument("--walk", action="store_true")
+    parser.add_argument("--production-substitution", action="store_true")
     parser.add_argument("--process-record", type=Path)
     parser.add_argument("--lego-trace", type=Path)
     parser.add_argument("--walk-plant", choices=("r3t-ulp",))
+    parser.add_argument("--production-plant",
+                        choices=("production-r3t-ulp",))
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     try:
-        if args.walk:
+        if args.production_substitution:
+            require(args.process_record is not None and args.lego_trace is not None,
+                    "--production-substitution requires --process-record "
+                    "and --lego-trace")
+            report = production_substitution(
+                args.root, args.process_record, args.lego_trace,
+                args.expect_commit, args.production_plant)
+        elif args.walk:
             require(args.process_record is not None and args.lego_trace is not None,
                     "--walk requires --process-record and --lego-trace")
             report = walk(

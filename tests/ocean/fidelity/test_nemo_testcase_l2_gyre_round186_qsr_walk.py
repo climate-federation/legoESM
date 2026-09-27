@@ -71,3 +71,27 @@ def test_round188_qsr_walk_score_is_bitwise_and_masked():
     row = MOD._score(reference, candidate, mask)
     assert row["classification"] == "NON-BIT"
     assert row["cells_unequal"] == 1
+
+
+def test_round189_removed_fraction_is_directional_and_fail_closed():
+    assert MOD._removed_fraction(4.0, 1.0) == pytest.approx(0.75)
+    assert MOD._removed_fraction(4.0, 5.0) == pytest.approx(-0.25)
+    with pytest.raises(MOD.GateError, match="zero baseline"):
+        MOD._removed_fraction(0.0, 0.0)
+
+
+def test_round189_qsr_override_requires_process_trace():
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = build_nemo_testcase_card("GYRE-zco")
+    hooks = _NEMOWSRK3TestHooks(
+        stage3_qsr_stretch_override=np.ones((22, 32), dtype=np.float64))
+    with pytest.raises(ValueError, match="requires tracer_process_trace"):
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config, _nemo_ws_test_hooks=hooks)
