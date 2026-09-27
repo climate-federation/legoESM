@@ -50,7 +50,6 @@ from legoesm.land.snow_column import (
     SnowColumnState,
     seed_snow_state,
     snow_add_mass,
-    snow_fraction,
     snow_phase_and_percolate,
     snow_remap_compact,
     snow_thermal_props,
@@ -492,7 +491,8 @@ def _step_multilayer_land_impl(
     # --- Layered snowpack (``snow_scheme == "layered"``, snow_column.py) ---
     # Snowfall enters the pack at the START of the step, the pack is remapped and
     # compacted, and the surface schemes see a skin temperature and a ground
-    # emissivity blended by the snow-covered fraction f = SWE/(SWE + swe_half).
+    # emissivity blended by the snow-covered fraction f (the albedo's snow cover,
+    # land_snow_cover).
     # The pack and the soil are then solved as ONE implicit column (the canopy
     # Picard callback below and the final solve), with f*G entering the pack top
     # and (1-f)*G the soil top.
@@ -529,7 +529,7 @@ def _step_multilayer_land_impl(
         # Pack-top temperature the surface fluxes are evaluated at (the Robin
         # linearisation point; sublimation and rain modify the pack afterwards).
         T_pack_top_ref = pack.T[:, 0]
-        f_snow = snow_fraction(total_water(pack), scc)
+        f_snow = land_snow_cover(total_water(pack), config.land_albedo)
         T_surface = _snow_skin(pack, T_soil[:, 0], f_snow)
 
     # Smooth wind speed floor.
@@ -1329,7 +1329,8 @@ def _step_multilayer_land_impl(
     # Radiative / humidity skin: the snow-blended surface on the layered branch
     # (post-step cover), the top soil layer otherwise.  The carbon cycle keeps
     # the soil-top temperature.
-    T_skin_new = (_snow_skin(pack, T_surface_new, snow_fraction(snow_new, scc))
+    T_skin_new = (_snow_skin(pack, T_surface_new,
+                             land_snow_cover(snow_new, config.land_albedo))
                   if layered else T_surface_new)
     # Re-brighten the snow-free base with the END-of-step top-layer moisture so the albedo
     # handed to the coupler (drives the next radiation step) is consistent with the updated
@@ -1552,6 +1553,17 @@ def _step_multilayer_land_impl(
             snow_ground_heat_applied=snow_ground_heat_applied)
 
     return new_state, response, carbon_state_new, surface_out
+
+
+def land_snow_cover(swe, land_albedo):
+    """Snow-covered fraction of the land column: the SAME cover the snow albedo
+    uses (``snow_cover_fraction`` times the per-cell canopy snow-mask scale when
+    set, clipped to 1), so radiation, the ground-flux split and the latent split
+    see one snow cover."""
+    f = snow_cover_fraction(swe, land_albedo)
+    if land_albedo.snow_cover_scale is None:
+        return f
+    return jnp.clip(f * jnp.asarray(land_albedo.snow_cover_scale), 0.0, 1.0)
 
 
 def _snow_skin(pack, T_soil_top, f_snow):

@@ -4563,10 +4563,10 @@ def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
     cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
     assert cfg0.land_snow_scheme == "bulk"
     cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
-        base + ["--land-snow-scheme", "layered", "--land-snow-emissivity", "0.97"]),
+        base + ["--land-snow-scheme", "layered", "--land-snow-emissivity", "0.975"]),
         parser))
     assert cfg1.land_snow_scheme == "layered"
-    assert cfg1.land_snow_emissivity == 0.97
+    assert cfg1.land_snow_emissivity == 0.975
     for deck, want in (("amip_production.yaml", "bulk"),
                        ("amip_sundqvist_l36.yaml", "bulk")):
         p = build_arg_parser()

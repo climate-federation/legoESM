@@ -75,11 +75,9 @@ class SnowColumnConfig(NamedTuple):
     k_conductivity_exponent: float = 2.0  # k ~ (rho/rho_ref)^exp (Sturm 1997)
     # --- coupling to the land surface (used by multilayer_land, snow_scheme="layered") ---
     # Broadband thermal-IR emissivity of snow: observed ~0.97-0.99 (Warren 1982;
-    # Hori et al. 2006, fine grains near 0.99); CLM5 fixes 0.97.  Tunable within
-    # those bounds, default mid-range of the observations.
-    emissivity_snow: float = 0.98
-    # Snow-covered fraction f = SWE / (SWE + swe_half): SWE at half cover [kg/m^2].
-    swe_half_kg_m2: float = 10.0
+    # Hori et al. 2006, fine grains near 0.99).  Default CLM5's fixed 0.97 (user
+    # decision 2026-09-27); tunable within the observed bounds.
+    emissivity_snow: float = 0.97
     # Density of a pack seeded from a bulk SWE (cold start / land IC) [kg/m^3].
     seed_density: float = 250.0
 
@@ -113,12 +111,6 @@ __param_spec__ = {
                 "transform": "sigmoid", "category": "radiative",
                 "reference": "snow thermal-IR emissivity (Warren 1982 Rev. Geophys. 20:67; "
                              "Hori et al. 2006 Remote Sens. Environ. 100:486)",
-                "shape": None,
-            },
-            "swe_half_kg_m2": {
-                "units": "kg/m^2", "bounds": (2.0, 50.0), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "closure",
-                "reference": "SWE of half snow cover (cf. CLM5 frac_sno; Niu & Yang 2007)",
                 "shape": None,
             },
         },
@@ -233,13 +225,6 @@ def _thickness_and_conductivity(swe_ice, swe_liq, density, config):
     dz = mass / jnp.maximum(density, _EPS)
     k = _K_SNOW_REF * (density / _RHO_SNOW_REF) ** config.k_conductivity_exponent
     return dz, k
-
-
-def snow_fraction(swe, config: SnowColumnConfig = SnowColumnConfig()):
-    """Snow-covered fraction ``SWE / (SWE + swe_half)`` in [0, 1) — smooth, so the
-    surface fluxes stay continuous as a pack appears or melts out."""
-    swe = jnp.maximum(swe, 0.0)
-    return swe / (swe + config.swe_half_kg_m2)
 
 
 def seed_snow_state(swe, T_top, config: SnowColumnConfig = SnowColumnConfig()):

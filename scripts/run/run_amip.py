@@ -955,8 +955,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         type=float,
                         default=_EXPERIMENT_DEFAULTS.land_snow_emissivity,
                         help="Snow thermal-IR emissivity for the layered pack "
-                             "(bounds 0.96-0.995, default 0.98: Warren 1982, "
-                             "Hori et al. 2006).")
+                             "(bounds 0.96-0.995 from Warren 1982 / Hori et al. "
+                             "2006; default 0.97, CLM5).")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
