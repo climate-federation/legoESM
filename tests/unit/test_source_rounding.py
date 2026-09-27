@@ -5,8 +5,25 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm.core.source_rounding import nemo_source_round
+
+
+@pytest.fixture(autouse=True)
+def _enable_x64():
+    """Run these binary64 bit-preservation checks in float64 (restored after).
+
+    Without this, the jnp.float64 inputs below are silently truncated to
+    float32 before nemo_source_round ever sees them, so the bit-preservation
+    assertions would pass vacuously on already-rounded-off float32 bits.
+    """
+    prev = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prev)
 
 
 def _bits(values: jax.Array) -> np.ndarray:
