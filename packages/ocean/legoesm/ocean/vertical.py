@@ -447,10 +447,16 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     hf0 = _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype)
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
-    # NEMO stores e1f*e2f before the r3f division.  Materialise the card-owned
-    # area at that same boundary so production JIT cannot fuse it into /area_f.
-    area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
-    r3f = b(b(quarter * quad) * r1_hf0 / area_f)
+    # NEMO materialises native e1f*e2f and its reciprocal before this
+    # statement.  Preserve both the F-layout operand and the multiplication
+    # boundary on cards that carry NEMO's raw mesh.
+    if raw is None:
+        area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
+    else:
+        area_f = b(b(jnp.asarray(raw.e1f, dtype=dtype))
+                   * b(jnp.asarray(raw.e2f, dtype=dtype)))
+    r1_area_f = b(one / area_f)
+    r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
     # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
