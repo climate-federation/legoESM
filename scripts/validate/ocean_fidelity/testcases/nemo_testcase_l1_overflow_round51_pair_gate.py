@@ -301,6 +301,7 @@ def _live_arrays(card, momentum: dict, tracer: dict) -> tuple[dict, list[dict]]:
     for name in SOURCE_ORDER:
         if mask_for[name].ndim == 3:
             values[name] = _physical_levels(values[name], mask_for[name])
+            references[name] = _physical_levels(references[name], mask_for[name])
     rows = [_score(name, references[name], values[name], mask_for[name])
             for name in SOURCE_ORDER]
     active = {name: _active_values(values[name], mask_for[name])
