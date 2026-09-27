@@ -315,8 +315,9 @@ def run(
     production_literal_identity = round14.compare(
         candidate_literal["sum_u"][:, 1:, :30][support_rows, -1, :],
         candidate_hpg[support_rows, -1, :], support_mask)
-    require(production_literal_identity["bit_exact"],
-            "candidate literal does not reproduce production HPG")
+    instrument_valid = (
+        all(row["bit_exact"] for row in self_replay.values())
+        and production_literal_identity["bit_exact"])
 
     walk = {**input_rows, **statement_rows}
     measured_first = first_non_bit(walk)
@@ -336,7 +337,10 @@ def run(
 
     result = {
         "gate": "nemo_testcase_l4_orca2_round42_stage1_hpg_walk_gate",
-        "status": "PLANT_FIRED" if plant != "none" else "MEASURED",
+        "status": (
+            "PLANT_FIRED" if plant != "none" else
+            "MEASURED" if instrument_valid else "STOP_INSTRUMENT"
+        ),
         "label": "given NEMO's entry",
         "provenance": worktree_stamp(),
         "execution": {
@@ -395,7 +399,9 @@ def main() -> int:
         "plant": result["plant"],
         "plant_fires": result["plant_fires"],
     }, indent=2, sort_keys=True))
-    return 1 if args.plant != "none" else 0
+    if args.plant != "none":
+        return 1
+    return 2 if result["status"] == "STOP_INSTRUMENT" else 0
 
 
 if __name__ == "__main__":
