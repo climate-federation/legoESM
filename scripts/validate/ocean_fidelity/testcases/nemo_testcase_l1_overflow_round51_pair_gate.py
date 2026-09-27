@@ -63,6 +63,8 @@ def _nemo_owned(value: np.ndarray) -> np.ndarray:
     """Map the round-50 owned Fortran (x,y,z) payload to (y,x,z)."""
     value = np.asarray(value)
     require(value.ndim in (2, 3), f"unexpected record rank {value.ndim}")
+    if value.ndim == 3 and value.shape[-1] == 1:
+        return value[:, :, 0].T
     axes = (1, 0) if value.ndim == 2 else (1, 0, 2)
     return value.transpose(axes)
 

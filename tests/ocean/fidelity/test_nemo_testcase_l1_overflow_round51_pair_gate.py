@@ -19,6 +19,9 @@ def test_owned_record_mapping_transposes_fortran_xy_axes():
     mapped = gate._nemo_owned(values)
     assert mapped.shape == (3, 4, 2)
     assert np.array_equal(mapped[:, :, 1], values[:, :, 1].T)
+    surface = gate._nemo_owned(values[:, :, :1])
+    assert surface.shape == (3, 4)
+    assert np.array_equal(surface, values[:, :, 0].T)
 
 
 def test_exact_scorer_one_ulp_plant_fires_once():
