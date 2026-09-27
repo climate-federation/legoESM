@@ -206,7 +206,7 @@ def _mixing_length_floor(cfg: "TKEConfig"):
 
 
 def _mxl0_surface_anchor(
-    cfg: "TKEConfig", taum, rho_0: float, g: float, surface_tmask,
+    cfg: "TKEConfig", taum, rho_0: float, g: float, surface_tmask=None,
 ):
     """ln_mxl0 surface anchor (shipped zdftke.F90:575,598-603,640-642).
 

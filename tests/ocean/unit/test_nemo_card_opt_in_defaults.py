@@ -137,13 +137,23 @@ def test_fesom_eice_uses_the_shared_nemo_numbering():
     assert "_eice == 1 else" not in text
 
 
-def test_fesom_accepts_nn_eice_2():
-    import inspect
+def test_fesom_builder_accepts_nn_eice_2_and_still_refuses_an_unknown():
+    """Behavioural, not textual: the builder validates eice at build time."""
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VerticalMixingConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.fesom_integration import (
+        make_tke_profiles_fesom,
+    )
 
-    from legoesm.ocean.physics.vertical_mixing import fesom_integration
+    def build(eice):
+        return make_tke_profiles_fesom(VerticalMixingConfig(
+            scheme="tke", tke=TKEConfig(prognostic=True, eice=eice)))
 
-    text = inspect.getsource(fesom_integration.make_tke_profiles_fesom)
-    assert "(0, 1, 2, 3)" in text
+    for eice in (0, 1, 2, 3):
+        assert callable(build(eice))          # 2 raised before the fix
+    with pytest.raises(ValueError, match="nn_eice"):
+        build(5)
 
 
 # --------------------------------------------------------------------------
@@ -201,14 +211,25 @@ def test_carried_seed_is_selected_by_config_not_by_state_presence():
 
 
 def test_non_nemo_dino_recipes_allocate_no_new_prognostic_state():
-    from legoesm.ocean.experiments.dino import DINOConfig, DINO_RECIPES
+    """Resolved state and resolved config, not dictionary keys."""
+    from legoesm.ocean.experiments.dino import (
+        DINOConfig,
+        dino_config_for_recipe,
+        dino_lat_lon_grid,
+        dino_lat_lon_state,
+    )
+    from legoesm.ocean.vertical import create_ocean_z_star
 
     assert DINOConfig().nemo_prognostic_barotropic_state is False
-    assert (DINO_RECIPES["nemo_dino_kamm"]
-            ["nemo_prognostic_barotropic_state"] is True)
-    for name in ("legoesm_default", "nemo_paper", "veros", "mitgcm",
-                 "oceananigans"):
-        assert "nemo_prognostic_barotropic_state" not in DINO_RECIPES[name]
+    plain = dino_config_for_recipe("legoesm_default")
+    nemo = dino_config_for_recipe("nemo_dino_kamm")
+    assert plain.nemo_prognostic_barotropic_state is False
+    assert nemo.nemo_prognostic_barotropic_state is True
+
+    grid = dino_lat_lon_grid(plain, n_lon=6)
+    z = create_ocean_z_star(n_levels=3, H_max=float(plain.H_deep))
+    state = dino_lat_lon_state(grid, z, plain)
+    assert state.uu_b is None and state.vv_b is None
 
 
 # --------------------------------------------------------------------------

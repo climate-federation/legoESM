@@ -1068,7 +1068,9 @@ def top_layer_absorbed_fraction(dz_top, chl_surface=None,
     the sea-ice lead heat budget (NEMO icesbc zqld adds ``(1-A)*qsr*frq_m``).
     """
     dz_top = jnp.asarray(dz_top, dtype=jnp.float64)
-    deep = 1.0e4
+    # A numerics device, not an optical coefficient: the lower layer of the
+    # two-layer probe column stands in for the rest of the ocean.
+    deep = 1.0e4  # coeff-ok: synthetic semi-infinite lower layer [m]
     if chl_surface is not None:
         chl = jnp.asarray(chl_surface, dtype=jnp.float64)
         shape = jnp.broadcast_shapes(chl.shape, dz_top.shape)

@@ -767,6 +767,15 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         c_eps=rn_ediss,
         tke_background=rn_emin,         # rn_emin (1e-10 under ln_zdfiwm, else 1e-6)
         mxl_min=rmxl_min,               # rmxl_min (1e-3 under ln_zdfiwm, else model default)
+        # Both arms above already carry NEMO's OWN rmxl_min, so the card must
+        # NOT re-derive it: zdf_tke_init evaluates 1e-6/(rn_ediff*SQRT(rn_emin))
+        # only on the ln_zdfiwm=.FALSE. arm (zdftke.F90:846), and ORCA1 runs
+        # ln_zdfiwm=.TRUE., where :841-843 FORCES rmxl_min=1e-3.
+        nemo_derived_mxl_min=False,
+        # ORCA1 runs ln_mxl0=.TRUE., and the compiled anchor statement
+        # multiplies the stress by tmask(:,:,1) (zdftke.F90:640-642).  The mask
+        # is 1 on every wet column, so this changes land columns only.
+        nemo_mxl0_surface_tmask=True,
         tke_surface_min=1.0e-4,         # rn_emin0
         # nn_mxl: choice=3 IS the NEMO nn_mxl construction (lup/ldown |dl/dz|<=e3t
         # sweeps) WITH the ln_mxl0 wind-stress surface anchor that NEMO ORCA1 runs

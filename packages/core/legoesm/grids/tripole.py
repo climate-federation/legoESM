@@ -496,7 +496,10 @@ def create_tripole_grid(
         and its stored constants make the two differ in the last bits, so
         this is an opt-in for NEMO-literal cards, not a default.  The
         F-point field ``ff_f`` is carried separately either way and is read
-        only by the literal NEMO EEN/ENE vorticity arms.
+        only by the literal NEMO EEN/ENE vorticity arms.  NEMO's rule is a
+        PAIR -- it takes the mesh Coriolis only when BOTH ``ff_f`` and
+        ``ff_t`` are in the file -- so a mesh holding only one of them
+        supplies neither, here as there.
     strip_north_rows : int, default 0
         Drop this many rows from the NORTH end of every mesh field before
         building the geometry.  NEMO ``jperio=4`` (T-point pivot) meshes such
@@ -607,7 +610,12 @@ def create_tripole_grid(
     # default so every existing tripole run keeps its f_T to the last bit.
     # ff_f is carried separately either way, and is read only by the literal
     # NEMO EEN/ENE vorticity arms.
-    if use_mesh_coriolis and "ff_t" in raw:
+    # NEMO's own rule is a PAIR: it takes the mesh Coriolis only when BOTH
+    # ff_f and ff_t exist in cn_domcfg (domhgr.F90:222-227, kff=1), and
+    # otherwise computes both itself.  Follow that, so a file with only one of
+    # them can never produce a mesh-F / analytic-T mixture.
+    _mesh_coriolis = "ff_t" in raw and "ff_f" in raw
+    if use_mesh_coriolis and _mesh_coriolis:
         f_T = raw["ff_t"].astype(dtype)
     else:
         f_T = (2.0 * omega * jnp.sin(lat_T)).astype(dtype)
@@ -626,7 +634,7 @@ def create_tripole_grid(
     f_v = jnp.concatenate(
         [f_T_for_v[0:1], f_v_inner, f_T_for_v[-1:]], axis=0
     )
-    ff_f = raw["ff_f"].astype(dtype) if "ff_f" in raw else None
+    ff_f = raw["ff_f"].astype(dtype) if _mesh_coriolis else None
 
     # Fold descriptor. ``_detect_fold`` raises on a genuinely ambiguous
     # (near-constant) fold row under "auto" because BOTH seam origins fit, and a

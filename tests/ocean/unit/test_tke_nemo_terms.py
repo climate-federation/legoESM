@@ -46,9 +46,14 @@ def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
         _mixing_length_floor, _mxl0_surface_anchor,
     )
 
+    # A NEMO card on the ln_zdfiwm=.FALSE. arm: it SELECTS the derivation
+    # (zdftke.F90:845-846) and the compiled masked anchor statement
+    # (zdftke.F90:640-642).  Without those two selections the card keeps its
+    # own mxl_min, which is what every non-NEMO card must keep.
     cfg = TKEConfig(
         tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,
-        tke_background=1.0e-6)
+        tke_background=1.0e-6,
+        nemo_derived_mxl_min=True, nemo_mxl0_surface_tmask=True)
     expected = np.float64(1.0e-6) / (
         np.float64(cfg.c_k) * np.sqrt(np.float64(cfg.tke_background)))
     floor = _mixing_length_floor(cfg)
@@ -71,8 +76,21 @@ def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
     # The card fields remain differentiable; deriving the floor must not
     # convert a traced rn_ediff to a host scalar.
     grad = jax.grad(lambda ediff: _mixing_length_floor(
-        TKEConfig(tke_mxl_choice=3, c_k=ediff, tke_background=1.0e-6)))
+        TKEConfig(tke_mxl_choice=3, c_k=ediff, tke_background=1.0e-6,
+                  nemo_derived_mxl_min=True)))
     assert np.isfinite(float(grad(jnp.asarray(0.1, dtype=jnp.float64))))
+
+    # The other half of the same rule: a card that does NOT select the
+    # derivation keeps its configured floor and accepts a missing mask.
+    # NEMO's ln_zdfiwm=.TRUE. arm is exactly this case (zdftke.F90:841-843
+    # forces rmxl_min=1e-3), and so is every non-NEMO card.
+    plain = TKEConfig(tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,
+                      tke_background=1.0e-6)
+    assert float(_mixing_length_floor(plain)) == 0.04
+    np.testing.assert_array_equal(
+        np.asarray(_mxl0_surface_anchor(
+            plain, jnp.asarray([0.0]), _RHO0, constants.g, None)),
+        np.asarray([0.04]))
 
 
 def test_zero_step_probe_uses_the_shared_derived_floor():

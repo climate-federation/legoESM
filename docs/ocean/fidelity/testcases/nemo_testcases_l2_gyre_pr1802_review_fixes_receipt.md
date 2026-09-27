@@ -292,22 +292,25 @@ readable.
 3. **ORCA2-zps mixing-length floor.** 1.0e-3 m (NEMO's `ln_zdfiwm` forced
    value) instead of the branch's derived 1.0 m and main's 1.0e-8 m. The ORCA2
    card must be re-certified; see decision D1.
-4. **NEMO `ln_mxl0` anchor floor.** For `tke_mxl_choice` 3/4 the anchor floor
+4. **ORCA1 `ln_mxl0` anchor is masked.** The ORCA1 OMIP card now evaluates
+   the anchor on `taum*tmask(:,:,1)`, which differs from the previous unmasked
+   form on land columns only.
+5. **NEMO `ln_mxl0` anchor floor.** For `tke_mxl_choice` 3/4 the anchor floor
    is now `rmxl_min` (NEMO overwrites `rn_mxl0` with it at
    `zdftke.F90:859-862`) rather than the deleted `TKEConfig.mxl0_min_m`
    (default 0.04 m). Only choice-3/4 cards are affected, i.e. only NEMO cards.
-5. **DINO prognostic barotropic state.** The NEMO DINO cards carry
+6. **DINO prognostic barotropic state.** The NEMO DINO cards carry
    `uu_b`/`vv_b`; every other DINO recipe no longer does. The DINO Y5
    certification predates the prognostic pair and must be re-run against the
    NEMO DINO cards — see decision D2. Restart archives written by a NEMO DINO
    run therefore hold two extra prognostic slots.
-6. **File-backed tripole grids.** `ff_f` is now carried on the geometry (read
+7. **File-backed tripole grids.** `ff_f` is now carried on the geometry (read
    only by the literal NEMO EEN/ENE arms); `f_T` is unchanged unless a card
    passes `use_mesh_coriolis=True` (only the ORCA2 card does). The U-point
    metrics AND rotation angles now both take the face-to-their-west operand:
    a layout fix that changes every file-backed tripole run on a NON-uniform
    mesh, including ORCA1 OMIP production.
-7. **Restart format 3.** An archive carrying the deviation-form barotropic
+8. **Restart format 3.** An archive carrying the deviation-form barotropic
    history is now refused with an explicit message instead of failing inside a
    migration that could never succeed. Format-3 archives without that history
    are unaffected.
@@ -334,11 +337,14 @@ external mode (the lane's DINO gates pass with it), but the DINO Y5
 certification predates it. **Recommend: re-run DINO Y5 on the NEMO DINO cards
 before citing it again.** Nothing to change in code.
 
-**D3 — ORCA1 `ln_mxl0` surface mask.** `TKEConfig.nemo_mxl0_surface_tmask`
-stays False on the ORCA1 OMIP card, so its anchor uses the unmasked stress
-(main's behaviour). NEMO masks it (`zdftke.F90:640-642`). **Recommend: move
-ORCA1 to True** — one line in `orca1_zdftke_config` — but it changes ORCA1 OMIP
-production, so it is the operator's call. Affects: ORCA1 OMIP only.
+**D3 — ORCA1 `ln_mxl0` surface mask. MOVED after review, flagged.** Codex
+raised it as a HIGH inconsistency: the ORCA1 card is NEMO-literal, runs
+`ln_mxl0 = .TRUE.`, and was the only such card left unmasked. It now sets
+`nemo_mxl0_surface_tmask=True` (and `nemo_derived_mxl_min=False` explicitly,
+since both of its arms already carry NEMO's own `rmxl_min`). The mask is
+`tmask(:,:,1)`, which is 1 on every WET column, so masked and unmasked differ
+only on LAND columns — the anchor there collapses to the floor. **Recommend:
+keep the move.** Affects: ORCA1 OMIP, land columns only. Revert is one line.
 
 **D4 — the barotropic `U_bar_corr` convention.** The replacement depth-mean
 keeps the generic min-rule reduction on cards whose window seed is
@@ -354,7 +360,55 @@ last-bits but it is not zero.
 
 ---
 
-## Gate results
+## Review
 
-Filled in at the end of the round; see the sections following this line in the
-commit that lands them.
+Both reviews ran on this diff, before it was declared done.
+
+**codex** (`codex exec --sandbox read-only`) returned **HOLD** with six
+findings. Five are closed in the follow-up commit:
+
+1. HIGH, ORCA1 missed the `ln_mxl0` mask opt-in — FIXED, see decision D3.
+2. HIGH, `tests/ocean/unit/test_tke_nemo_terms.py` (a push-gate test) still
+   expected the unconditional derivation and the unconditional raise — FIXED:
+   the test now states the card's two selections and additionally pins the
+   default arm (configured floor, missing mask accepted).
+3. MEDIUM, `scripts/validate/ocean_fidelity/frozen_column_tke_twin.py` passed
+   four arguments to `_mxl0_surface_anchor` — FIXED by giving `surface_tmask`
+   a `None` default, which is also what the unmasked arm wants.
+4. HIGH, "B3b is not established and is likely mis-indexed" — **NOT ACCEPTED as
+   stated, and split.** Codex is right that legoESM's angle DEFINITION is not
+   NEMO's: `_compute_rotation_angles` takes a forward difference of
+   `glamu`/`gphiu` along i, while NEMO's `gsinu`/`gcosu` use the vector between
+   the F points below and above that U point (`geo2ocean.F90:168,259-260`).
+   That difference predates this branch and is unchanged by it. The question
+   B3b actually asks is narrower: the array is shaped like `gphiu` and its
+   element `i` is built from `gphiu[:, i]`, so it is indexed by NATIVE U point
+   `i`, exactly as `e1u` is — and the metrics were already corrected and tested
+   to sit at face `i+1`. Leaving the angles on the old append would put the two
+   operands of one rotation on different faces. Registered as an open, separate
+   item: legoESM's U/V rotation angles are a forward-difference estimate, not
+   NEMO's F-point construction.
+5. MEDIUM, `use_mesh_coriolis` did not implement NEMO's PAIRED rule — FIXED:
+   `domhgr.F90:222-223` guards `ff_f` and `ff_t` with one `.AND.`, so a mesh
+   holding only one of them now supplies neither, and `ff_f` is carried only
+   with its partner. Tested.
+6. LOW, several new tests were textual — FIXED: the FESOM test now BUILDS the
+   profiles function for every `nn_eice` value (2 raised before the change) and
+   checks an unknown value still raises; the DINO test now resolves the two
+   recipes' configs and builds a `legoesm_default` state to show it carries no
+   `uu_b`/`vv_b`.
+
+**Claude code-reviewer** (independent, fresh context) returned **no blockers**:
+no certified NEMO card silently moved, no leak in the other direction, no stale
+callers of the three changed/renamed symbols, no vacuous tests, and it
+independently CONFIRMED the B3b west-face convention from
+`interp_cell_to_uface` and the measured `glamu - glamt = +0.5` deg. It
+separately surfaced the ORCA1 mask gap as the receipt's own decision D3, which
+is the same item as codex finding 1.
+
+The two reviewers disagreed on exactly one point, codex finding 4 versus the
+Claude reviewer's confirmation of B3b. The discriminating check is a grep, and
+it was run: the padding question and the angle-definition question are
+different questions, and the answer above separates them.
+
+## Gate results

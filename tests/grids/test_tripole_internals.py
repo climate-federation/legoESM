@@ -939,3 +939,25 @@ class TestMeshCoriolisIsOptIn:
             assert create_tripole_grid(path).ff_f is not None
             assert create_tripole_grid(
                 path, use_mesh_coriolis=True).ff_f is not None
+
+    def test_a_lone_mesh_field_supplies_neither(self):
+        """NEMO takes the mesh Coriolis only when BOTH ff_t and ff_f exist.
+
+        ``domhgr.F90:222-227`` guards the pair with one ``.AND.``; with only
+        one present it sets ``kff=0`` and computes both itself.  A file with
+        ff_t alone must therefore not produce a mesh-T / analytic-F mixture.
+        """
+        from legoesm.grids.tripole import create_tripole_grid
+
+        for lone in ("ff_t", "ff_f"):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "mesh_lone.nc")
+                _write_mesh_with_varying_u_metrics(path)
+                ds = netcdf4.Dataset(path, "a")
+                v = ds.createVariable(lone, "f8", ("y", "x"))
+                v[:] = np.full(ds.variables["gphit"].shape, 1.2345e-4)
+                ds.close()
+                grid = create_tripole_grid(path, use_mesh_coriolis=True)
+                assert grid.ff_f is None
+                assert not np.allclose(
+                    np.asarray(grid.f_T, dtype=np.float64), 1.2345e-4)
