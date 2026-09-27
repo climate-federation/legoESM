@@ -267,16 +267,24 @@ def _write_era5_nc(path, var, values, lat_deg, lon_deg, time="1979-01-01",
                 "lat": lat_deg, "lon": lon_deg}).to_netcdf(path)
 
 
+# Distinct per ERA5 cell so a flipped or transposed read picks a different
+# value (a lat or lon mirror moves the donor): the land donor of target
+# column 0 (10N, 0.1E) is (10N, 1E) = +5; (10N, 0E) is ocean.
+_ERA5_LAT, _ERA5_LON = np.array([10.0, -10.0]), np.array([0.0, 1.0, 2.0])
+_CELL_OFFSET = np.array([[0.0, 5.0, 7.0], [10.0, 15.0, 20.0]])
+_LSM = np.array([[0.0, 1.0, 1.0], [1.0, 1.0, 1.0]])
+
+
 def _era5_inputs(tmp_path, stl_vars=("var139", "var170", "var183", "var236"),
                  lsm_var="var172", base=280.0):
-    lat, lon = np.array([10.0, -10.0]), np.array([0.0, 1.0])
+    lat, lon = _ERA5_LAT, _ERA5_LON
     files = []
     for n, (v, off) in enumerate(zip(stl_vars, (1.0, 2.0, 3.0, 4.0))):
         f = tmp_path / f"stl{n + 1}.nc"
-        _write_era5_nc(f, v, np.full((2, 2), base + off), lat, lon)
+        _write_era5_nc(f, v, base + off + _CELL_OFFSET, lat, lon)
         files.append(str(f))
     lsm = tmp_path / "lsm.nc"
-    _write_era5_nc(lsm, lsm_var, np.array([[0.0, 1.0], [1.0, 1.0]]), lat, lon,
+    _write_era5_nc(lsm, lsm_var, _LSM, lat, lon,
                    time="2000-01-01")
     sd = tmp_path / "surfdata.nc"
     sd.write_bytes(b"stand-in; the masks are monkeypatched")
@@ -340,7 +348,7 @@ def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
     for k in ic:
         if k not in ("T_soil", "metadata_json"):
             np.testing.assert_array_equal(new[k], ic[k], err_msg=k)
-    expected = 280.0 + rg.overlap_weights(ic["soil_dz"]) @ np.array([1.0, 2.0, 3.0, 4.0])
+    expected = 285.0 + rg.overlap_weights(ic["soil_dz"]) @ np.array([1.0, 2.0, 3.0, 4.0])
     np.testing.assert_allclose(new["T_soil"][0], expected, rtol=0, atol=1e-4)
     np.testing.assert_array_equal(new["T_soil"][1:], ic["T_soil"][1:])   # ocean + glacier
     meta = json.loads(str(new["metadata_json"]))
@@ -372,8 +380,8 @@ def test_cli_refuses_wrong_era5_inputs(tmp_path, monkeypatch, kw):
 def test_cli_refuses_transposed_era5_field(tmp_path, monkeypatch):
     rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch)
     files, lsm, sd = _era5_inputs(tmp_path)
-    _write_era5_nc(pathlib.Path(files[2]), "var183", np.full((2, 2), 283.0),
-                   np.array([10.0, -10.0]), np.array([0.0, 1.0]),
+    _write_era5_nc(pathlib.Path(files[2]), "var183", np.full((3, 2), 283.0),
+                   _ERA5_LAT, _ERA5_LON,
                    dims=("time", "lon", "lat"))
     with pytest.raises(SystemExit):
         _run_cli(rg, ic_path, tmp_path / "out.npz", files, lsm, sd)
