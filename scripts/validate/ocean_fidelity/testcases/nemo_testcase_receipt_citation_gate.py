@@ -133,6 +133,10 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/zdftke.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/zdftke.f90"),
+    "GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/traqsr.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/traqsr.f90"),
     "GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/dynldf_lev.f90": (
