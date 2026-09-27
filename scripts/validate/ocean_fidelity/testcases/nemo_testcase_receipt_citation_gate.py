@@ -1201,7 +1201,7 @@ CITATION_MAP = {
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 10],
     'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/eosbn2.f90:1609-1619': [
         'DO jk =  2,  jpkm1',
-        'END DO   ;   END DO   ;   END DO', 11],
+        ('END DO   ;   END DO   ;   END DO', 15), 11],
     'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/domzgr.f90:382-386': [
         '! deepest/shallowest W level Above/Below ~10m',
         'nla10 = nlb10 - 1', 5],
