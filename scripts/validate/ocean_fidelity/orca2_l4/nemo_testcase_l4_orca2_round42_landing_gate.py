@@ -24,7 +24,8 @@ def require(condition: bool, message: str) -> None:
 
 
 def run(deck_root: Path, record_root: Path, baseline_path: Path,
-        *, plant_at_bar: bool = False) -> dict[str, object]:
+        *, plant_at_bar: bool = False,
+        saved_arm_path: Path | None = None) -> dict[str, object]:
     import jax
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -48,17 +49,22 @@ def run(deck_root: Path, record_root: Path, baseline_path: Path,
     require(len(baseline["candidate_trajectory"]["checkpoints"]) == 40,
             "baseline is not the ten-step/40-checkpoint ladder")
 
-    _, card = ladder.card_fields(deck_root)
-    trajectory = ladder.candidate_trajectory(
-        deck_root, record_root, card, max_step=10)
-    arm = {
-        "status": "LADDER_MEASURED",
-        "label": "given NEMO's entry",
-        "worktree": worktree_stamp(),
-        "card": card.case,
-        "unmeasured_features": list(card.unmeasured_features),
-        "candidate_trajectory": trajectory,
-    }
+    if saved_arm_path is None:
+        _, card = ladder.card_fields(deck_root)
+        trajectory = ladder.candidate_trajectory(
+            deck_root, record_root, card, max_step=10)
+        arm = {
+            "status": "LADDER_MEASURED",
+            "label": "given NEMO's entry",
+            "worktree": worktree_stamp(),
+            "card": card.case,
+            "unmeasured_features": list(card.unmeasured_features),
+            "candidate_trajectory": trajectory,
+        }
+    else:
+        require(plant_at_bar, "--saved-arm is only valid for the plant")
+        arm = json.loads(saved_arm_path.read_text())
+        trajectory = arm["candidate_trajectory"]
     require(len(trajectory["checkpoints"]) == 40,
             "tip did not complete ten steps/40 checkpoints")
     if plant_at_bar:
@@ -96,10 +102,12 @@ def main() -> int:
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--plant-at-bar", action="store_true")
+    parser.add_argument("--saved-arm", type=Path)
     args = parser.parse_args()
     try:
         result = run(args.deck_root, args.record_root, args.baseline,
-                     plant_at_bar=args.plant_at_bar)
+                     plant_at_bar=args.plant_at_bar,
+                     saved_arm_path=args.saved_arm)
     except (GateError, OSError, KeyError, TypeError, ValueError) as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
