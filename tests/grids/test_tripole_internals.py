@@ -846,3 +846,96 @@ class TestUPointMetricAlignment:
                                        rtol=1e-6, atol=1e-12)
             dy_u = np.asarray(grid.dy_u, dtype=np.float64)
             np.testing.assert_allclose(dy_u[:, 1:], e2u, rtol=1e-6)
+
+    def test_u_rotation_angles_pad_like_the_u_metrics(self):
+        """The U ANGLES must sit on the same faces as the U METRICS.
+
+        ``_compute_rotation_angles`` returns the angle at NEMO's u-point
+        ``i`` (east of T-cell ``i``), exactly as ``e1u`` does, so the padded
+        array must carry it at face ``i+1`` and wrap the LAST column into
+        face 0.  The previous build appended the FIRST column instead, which
+        put the angle of the face one column EAST on every face while the
+        metric beside it had already been corrected -- the two operands of
+        the same rotation then referred to different faces.
+        """
+        from legoesm.grids.tripole import (
+            _compute_rotation_angles,
+            _read_nemo_mesh_mask,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh_varying.nc")
+            _write_mesh_with_varying_u_metrics(path)
+            from legoesm.grids.tripole import create_tripole_grid
+
+            grid = create_tripole_grid(path)
+            raw = _read_nemo_mesh_mask(path)
+            c_raw, s_raw, _, _ = _compute_rotation_angles(
+                raw["glamu"], raw["gphiu"], raw["glamv"], raw["gphiv"],
+                int(grid.fold.cap_j))
+            c_raw = np.asarray(c_raw, dtype=np.float64)
+            s_raw = np.asarray(s_raw, dtype=np.float64)
+            # non-vacuity: the angle must really vary along i, else any
+            # padding passes
+            assert np.ptp(s_raw[-1, :]) > 1.0e-6
+            cos_u = np.asarray(grid.cos_alpha_u, dtype=np.float64)
+            sin_u = np.asarray(grid.sin_alpha_u, dtype=np.float64)
+            np.testing.assert_allclose(cos_u[:, 1:], c_raw, rtol=1e-12)
+            np.testing.assert_allclose(sin_u[:, 1:], s_raw, rtol=1e-12)
+            np.testing.assert_allclose(sin_u[:, 0], s_raw[:, -1], rtol=1e-12)
+            # and NOT the first column, which is what the old build used
+            assert not np.allclose(sin_u[:, 0], s_raw[:, 0])
+
+
+class TestMeshCoriolisIsOptIn:
+    """``ff_t`` from the mesh file changes ``f_T``, so a card must ask for it.
+
+    NEMO reads ``ff_t``/``ff_f`` from ``cn_domcfg`` whenever both exist
+    (``domhgr.F90:222-227``), but ORCA's stored values differ from
+    ``2*Omega*sin(lat)`` in the last bits, so adopting them silently would
+    move every tripole run (ORCA1 OMIP production included).
+    """
+
+    def _mesh(self, tmp, ff_t_value):
+        path = os.path.join(tmp, "mesh_ff.nc")
+        _write_mesh_with_varying_u_metrics(path)
+        ds = netcdf4.Dataset(path, "a")
+        shape = ds.variables["gphit"].shape
+        for name in ("ff_t", "ff_f"):
+            v = ds.createVariable(name, "f8", ("y", "x"))
+            v[:] = np.full(shape, ff_t_value, dtype=np.float64)
+        ds.close()
+        return path
+
+    def test_default_keeps_the_analytic_coriolis(self):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._mesh(tmp, 1.2345e-4)
+            grid = create_tripole_grid(path)
+            f_T = np.asarray(grid.f_T, dtype=np.float64)
+            assert not np.allclose(f_T, 1.2345e-4)
+            np.testing.assert_allclose(
+                f_T,
+                2.0 * float(grid.omega) * np.sin(
+                    np.asarray(grid.lat_T, dtype=np.float64)),
+                rtol=1e-12)
+
+    def test_opt_in_reads_the_mesh_field(self):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._mesh(tmp, 1.2345e-4)
+            grid = create_tripole_grid(path, use_mesh_coriolis=True)
+            np.testing.assert_allclose(
+                np.asarray(grid.f_T, dtype=np.float64), 1.2345e-4, rtol=1e-12)
+
+    def test_ff_f_is_carried_either_way(self):
+        """The F-point field is a pure addition: only literal arms read it."""
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._mesh(tmp, 1.2345e-4)
+            assert create_tripole_grid(path).ff_f is not None
+            assert create_tripole_grid(
+                path, use_mesh_coriolis=True).ff_f is not None

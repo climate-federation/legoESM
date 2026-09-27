@@ -460,6 +460,7 @@ def create_tripole_grid(
     fold_convention: str = "auto",
     allow_ambiguous_legacy_fold: bool = False,
     strip_north_rows: int = 0,
+    use_mesh_coriolis: bool = False,
 ) -> LatLonCGridGeometry:
     """Load a tripolar grid from a NEMO mesh_mask NetCDF file.
 
@@ -485,6 +486,17 @@ def create_tripole_grid(
         with implicit barotropics. Default 1 000 m matches the
         runner-side floor used in the 20-yr ORCA1 production run.
         Pass 0.0 to disable.
+    use_mesh_coriolis : bool, default False
+        Source of the T-point Coriolis parameter ``f_T``.  ``False``
+        (DEFAULT, the historical behaviour): the analytic
+        ``2*omega*sin(lat_T)``.  ``True``: the mesh file's own ``ff_t`` when
+        it supplies one, which is what NEMO reads
+        (``domhgr.F90:222-227`` takes ``ff_t``/``ff_f`` from ``cn_domcfg``
+        whenever both variables exist).  ORCA's curvilinear grid generation
+        and its stored constants make the two differ in the last bits, so
+        this is an opt-in for NEMO-literal cards, not a default.  The
+        F-point field ``ff_f`` is carried separately either way and is read
+        only by the literal NEMO EEN/ENE vorticity arms.
     strip_north_rows : int, default 0
         Drop this many rows from the NORTH end of every mesh field before
         building the geometry.  NEMO ``jperio=4`` (T-point pivot) meshes such
@@ -589,10 +601,16 @@ def create_tripole_grid(
         # Estimate from T-point areas
         area_q = jnp.pad(area_T, ((0, 1), (0, 1)), mode="edge")
 
-    # Coriolis.  NEMO domhgr.F90:202-226 reads ff_t/ff_f directly when the
-    # domain file supplies them.  Preserve ff_t for its literal T-point
-    # consumers and carry ff_f separately for NEMO's EEN/ENE vorticity arms.
-    f_T = raw.get("ff_t", 2.0 * omega * jnp.sin(lat_T)).astype(dtype)
+    # Coriolis.  NEMO domhgr.F90:222-227 reads ff_t/ff_f directly when the
+    # domain file supplies BOTH.  That is an opt-in here
+    # (``use_mesh_coriolis``): the analytic 2*omega*sin(lat_T) stays the
+    # default so every existing tripole run keeps its f_T to the last bit.
+    # ff_f is carried separately either way, and is read only by the literal
+    # NEMO EEN/ENE vorticity arms.
+    if use_mesh_coriolis and "ff_t" in raw:
+        f_T = raw["ff_t"].astype(dtype)
+    else:
+        f_T = (2.0 * omega * jnp.sin(lat_T)).astype(dtype)
 
     # f at u-points
     f_u_inner = 0.5 * (jnp.roll(f_T, 1, axis=1) + f_T)

@@ -52,6 +52,9 @@ def test_external_mode_reads_and_rewrites_carried_pair():
     grid, z, state = _case(carried=True)
     cfg = LatLonCGridOceanConfig(fix_eta_drift=False)
     cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+        # The NEMO identity is a CONFIG choice: the window reads the carried
+        # pair because the card says so, not because the arrays exist.
+        nemo_prognostic_barotropic_state=True,
         barotropic_solver="explicit_substep",
         bebt=0.0,
         maxvel_barotropic=0.0,

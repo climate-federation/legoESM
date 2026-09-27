@@ -500,13 +500,27 @@ def nemo_een_ene_vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
     """Literal NEMO F-point Coriolis for the NEMO EEN/ENE vorticity arms.
 
     File-backed NEMO cards carry native ``ff_f`` separately from generic
-    ``f_v``.  Analytic/test grids without a literal field retain the historical
-    generic fallback; this keeps non-file-backed callers byte-identical.
-    NEMO ``dynvor.F90`` uses ``ff_f`` in ENE/ENS/EEN, while its T-point energy
-    arm uses ``ff_t``.
+    ``f_v``.  NEMO ``dynvor.F90`` uses ``ff_f`` in ENE/ENS/EEN, while its
+    T-point energy arm uses ``ff_t``.
+
+    A grid with no native ``ff_f`` falls back to :func:`vertex_coriolis` ONLY
+    while its F points and V points share a latitude, i.e. on a rectilinear
+    (beta-plane / regular lat-lon) grid, where the generic value IS the F-point
+    value.  On a CURVILINEAR grid (an active tripolar fold) they are different
+    staggerings, so the fallback would silently substitute a different operand:
+    that case raises instead of running the wrong Coriolis field.
     """
     native = getattr(grid, "ff_f", None)
     if native is None:
+        fold = getattr(grid, "fold", None)
+        if fold is not None and bool(getattr(fold, "is_active", False)):
+            raise ValueError(
+                "the literal NEMO EEN/ENE vorticity arm needs the mesh's "
+                "native F-point Coriolis `ff_f`, and this curvilinear grid "
+                "carries none (grid.ff_f is None). On a curvilinear mesh the "
+                "V-point field `f_v` is a DIFFERENT staggering, so it is not "
+                "a substitute. Load a mesh file that supplies `ff_f`, or "
+                "select a generic vorticity scheme.")
         return vertex_coriolis(grid)
     expected = (int(grid.n_lat), int(grid.n_lon))
     if tuple(native.shape) != expected:

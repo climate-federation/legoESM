@@ -1163,6 +1163,16 @@ class BarotropicConfig(NamedTuple):
     # Requires barotropic_seed_face_depth="nemo_ssh_avg" so the live face
     # thickness and its separately associated reciprocal describe one state.
     barotropic_seed_evaluation: str = "generic"
+    # Does this card CARRY NEMO's prognostic external mode (``uu_b``/``vv_b``,
+    # NEMO ``oce.F90:39,99``) as model state, so the barotropic window seeds
+    # from it (``dynspg_ts.F90:484-500``) instead of re-reducing the 3-D
+    # velocity?  ``False`` (DEFAULT, main's behaviour): the window always
+    # seeds from the depth reduction and no prognostic pair is allocated.
+    # ``True``: the card allocates the pair and the window reads it; the pair
+    # then being absent is a hard error, never a silent reduction.  This is a
+    # CONFIG predicate on purpose — reading it off the presence of
+    # ``state.uu_b`` would let a state-allocation detail pick the scheme.
+    nemo_prognostic_barotropic_state: bool = False
     # Split-explicit surface-PGF arithmetic. ``nemo_literal`` consumes the
     # carried U/V face metrics and preserves dynspg_ts.F90:776-780 ordering.
     barotropic_pgf_evaluation: str = "generic"
