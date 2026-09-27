@@ -577,6 +577,7 @@ def compare_round49_pair_arrays(reference_report: Path, candidate: dict) -> dict
     first = next((row["name"] for row in rows if not row["exact"]), None)
     return {
         "format": "nemo-testcase-overflow-round49-pair-comparison-v1",
+        "worktree": worktree_stamp(),
         "reference": str(reference_report),
         "reference_commit": reference["legoesm_git_sha"],
         "candidate_commit": candidate["legoesm_git_sha"],
