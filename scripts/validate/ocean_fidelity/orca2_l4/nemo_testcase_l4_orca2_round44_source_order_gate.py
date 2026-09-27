@@ -126,6 +126,9 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
             "Decision-52 kt=1 entry bridge is not bit-exact")
 
     endpoint = handoff._endpoint_override(card, entry, record_root)
+    stage_path = record_root / "oracle_stage_kt00000001_s1.bin"
+    require(stage_path.is_file(), f"missing admitted stage record {stage_path}")
+    oracle_stage = ladder.read_state_frame(stage_path, kt=1, stage=1)
     expected = {
         boundary: {
             tracer_name: np.asarray(
@@ -150,12 +153,25 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
             exposure=boundary, transport_override=transport)
         production[f"{boundary}_T"] = np.asarray(out.T.data)[:, :OWNED_NX, :NLEV]
         production[f"{boundary}_S"] = np.asarray(out.S.data)[:, :OWNED_NX, :NLEV]
+    out = handoff._run(
+        card, state, freshwater, surface, endpoint=endpoint,
+        exposure="stage1", transport_override=transport)
+    production["stage1_T"] = np.asarray(out.T.data)[:, :OWNED_NX, :NLEV]
+    production["stage1_S"] = np.asarray(out.S.data)[:, :OWNED_NX, :NLEV]
 
     masks = handoff._support_masks(card)
     mask = masks["T"]
+    production_expected = {
+        **{
+            f"{boundary}_{tracer_name}": expected[boundary][tracer_name]
+            for boundary in ("after_advection", "after_sbc")
+            for tracer_name in ("T", "S")
+        },
+        "stage1_T": np.asarray(oracle_stage["T"]),
+        "stage1_S": np.asarray(oracle_stage["S"]),
+    }
     production_rows = {
-        name: handoff.bit_score(
-            values, expected[name.rsplit("_", 1)[0]][name.rsplit("_", 1)[1]], mask)
+        name: handoff.bit_score(values, production_expected[name], mask)
         for name, values in production.items()
     }
     require(production_rows["after_advection_T"]["bit_exact"]
@@ -206,7 +222,7 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
         },
         "record": {
             "root": str(record_root), "tracer_sha256": sha256(tracer_path),
-            "schema": tracer["header"],
+            "stage1_sha256": sha256(stage_path), "schema": tracer["header"],
         },
         "resolved": {
             "stage": 1, "nonlinear_free_surface": True,
