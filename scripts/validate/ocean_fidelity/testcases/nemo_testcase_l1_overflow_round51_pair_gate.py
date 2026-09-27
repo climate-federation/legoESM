@@ -398,6 +398,21 @@ def run(root: Path, expect_commit: str, output: Path,
         planted = next(row for row in given if row["name"] == "given.s2.eos.rhd")
         require(planted["n_unequal"] >= 1,
                 "one-ULP rhd plant did not make the exact row refuse")
+        return {
+            "format": "nemo-testcase-l1-overflow-round51-pair-v1",
+            "status": "PLANTED_REFUSAL",
+            "case": "OVERFLOW-zps", "kt": 3,
+            "worktree": stamp,
+            "precision": "cpu-fp64-libm-production-jit",
+            "record_root": str(root),
+            "record_admission": {
+                "status": admission["status"],
+                "producer_commit": admission["producer_commit"],
+                "records": len(admission["records"]),
+            },
+            "given_input_rows": given,
+            "plant": plant,
+        }
     arrays, live_rows = _live_arrays(card, momentum, tracer)
     report = {
         "format": "nemo-testcase-l1-overflow-round51-pair-v1",
