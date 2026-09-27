@@ -18,7 +18,7 @@ Preregistration:
 
 The Round-185 compiled writer opens one frame for each stage-3 step 1--1080
 and records entry temperature and all three QCO ratios at
-`GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:818-831`.
+`GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:818-830`.
 It then records the advection and surface-boundary writes in compiled order at
 `GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:861-869`, and
 shortwave, lateral diffusion, and the completed vertical solve at
