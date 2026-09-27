@@ -95,11 +95,28 @@ attempted in the sandbox.
 The score's first-boundary plant replaces the recorded HPG boundary by the
 candidate and moves the selector away from HPG.  The residual-equality plant
 changes one active LDF oracle value by one representable step and breaks the
-cellwise identity.  Both controls fire.  Focused and wide-test results are
-recorded below.
+cellwise identity.  Both controls fire with the required nonzero exit and
+`plant_fires: true`.
 
-The required separate `codex exec --sandbox read-only` review result is
-recorded below.
+The focused Round-38 through Round-41 gate/citation battery passes 20 / 20.
+The single required `tests/ocean/fidelity -n 12` battery collected 1,922
+tests and reached 99% before its controller stopped producing output.  After
+three silent 30-second polls, no pytest process was visible; the stuck
+controller was interrupted.  It had recorded 1,903 passes, 7 skips, and the
+same five pre-existing failures named by the recent campaign receipts:
+Round-129's stale record-backed stamp, Round-51's private-arm census, SI3
+scalar-math provenance, the worktree-stamp ratchet, and the recipe case-board
+ratchet.  Seven scheduled tests did not return a terminal result.  No
+Round-41 test failed.  The full log is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round41/wide_pytest.log`.
+
+The required separate `codex exec --sandbox read-only` review failed before
+reading the diff with `failed to initialize in-process app-server client:
+Read-only file system`.  Verdict: **independent review unavailable
+in-sandbox**.
+
+No `packages/` file changed, so the shared-model GYRE trajectory/year gates
+have no eligible model diff to compare in this round.
 
 ## Choices
 
