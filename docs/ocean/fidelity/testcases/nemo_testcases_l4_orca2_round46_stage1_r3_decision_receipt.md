@@ -110,9 +110,14 @@ The refuted prediction is retained without rewriting.
 - Separate read-only `codex exec` review: **independent review unavailable
   in-sandbox** (`failed to initialize in-process app-server client: Read-only
   file system`).
-- The wide card and ocean-fidelity batteries were not run after P5 refuted the
-  landing condition.  The candidate was reverted instead; the final tree has
-  no model or test delta to promote.
+- After the candidate was reverted, the required
+  `tests/ocean/fidelity -n 12` battery was run once.  It reproduced the five
+  campaign-known reds (round-129 spread-floor record, SI3 scalar-math
+  provenance, round-51 private trace registry, worktree-stamp ratchet, and
+  case-board oracle-comparison ratchet), reached 99%, and then made no further
+  progress in the known xdist-controller hang.  It was interrupted after a
+  grace period, so it has no terminal pytest summary and is not reported as
+  green.  The final tree has no model or test delta to promote.
 
 ## Choices
 
@@ -136,7 +141,7 @@ The decisive files are `qco_rk_base.json`, `qco_rk_tip_final.json`,
 `orca2_ladder_base.json`, `orca2_ladder_tip.json`,
 `gyre_offline_compare.json`, both GYRE residual archives, both 30-day member
 directories, `gyre_base_day30_gap.json`, `gyre_tip_day30_gap.json`,
-`focused_revert_plant.log`, and `codex_review.log`.
+`focused_revert_plant.log`, `fidelity_full_final.log`, and `codex_review.log`.
 
 ## OPEN
 
