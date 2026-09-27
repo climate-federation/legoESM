@@ -120,6 +120,16 @@ def test_shared_dino_statement_requires_a_separate_measured_gate(monkeypatch):
     assert report["criteria"]["dino_measurement_required"] is True
     assert report["criteria"]["dino_statement_not_executed"] is False
 
+    measured = module.evaluate(
+        _comparison(), _day(1.0), _day(0.1),
+        _year(1.0, "b" * 40), _year(0.1, "c" * 40),
+        expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
+        measured_cards=("DINO:nemo_dino_kamm",),
+        registered_rows=_registry())
+    assert measured["status"] == "PASS"
+    assert measured["criteria"]["all_executing_cards_measured"] is True
+
 
 def test_all_admission_plants_fail_the_gate(monkeypatch):
     module = _module()
@@ -212,11 +222,11 @@ def test_mld_carried_step_entry_n2_execution_is_recipe_derived():
     executing = {
         name for name, row in cards.items() if row["executes_route"]}
 
-    # Production is restored after Round 181's held GYRE candidate.  Both
-    # DINO Kamm cards already select the carried route, so they remain the
-    # mandatory blast-radius measurements before GYRE may select it too.
+    # Round 183 selects the carried route for GYRE.  Both DINO Kamm cards
+    # already select it, so all three are mandatory measured blast-radius
+    # rows in the landing gate.
     assert executing == {
-        "DINO:nemo_dino_kamm", "DINO:nemo_dino_kamm_mlf"}
+        "GYRE-zco", "DINO:nemo_dino_kamm", "DINO:nemo_dino_kamm_mlf"}
     assert cards["GYRE-zco"]["gm_redi_mld_criterion"] == "n2_integral"
     assert not cards["GYRE-zco"]["executes_route"]
     assert cards["ORCA2-zps"]["gm_redi_slope_n2_evaluation"] == "recompute"

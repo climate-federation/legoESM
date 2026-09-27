@@ -663,9 +663,11 @@ def evaluate(
         "dino_statement_not_executed": not dino_shared,
         "all_executing_cards_measured": not unmeasured_executing_cards,
     }
-    # Decision 43 requires a DINO before/after measurement only when the exact
-    # source condition executes.  This route does not: both shipped DINO cards
-    # use the Euler tracer lane.  Keep both booleans so the waiver is explicit.
+    # Decision 43 requires a separate measurement for every non-primary card
+    # that executes the exact source condition.  ``all_executing_cards_measured``
+    # is the fail-closed discharge for a shared DINO statement; the historical
+    # ``dino_statement_not_executed`` field remains an explicit census fact,
+    # not an unconditional admission requirement.
     admissible = bool(
         criteria["day30_T_rms_decreases"]
         and criteria["month_and_year_day30_agree"]
@@ -675,7 +677,6 @@ def evaluate(
         and criteria["first_over_bar_not_earlier"]
         and criteria["no_kt1_at_bar_row_leaves"]
         and criteria["all_moved_rows_registered"]
-        and criteria["dino_statement_not_executed"]
         and criteria["all_executing_cards_measured"])
 
     return {
