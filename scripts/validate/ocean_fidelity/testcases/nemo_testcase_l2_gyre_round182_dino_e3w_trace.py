@@ -91,7 +91,7 @@ def main() -> None:
         def traced_surface(state, *surface_args, **surface_kwargs):
             trace_state("TRACE_STEP_ENTRY", state)
             result = original_surface(state, *surface_args, **surface_kwargs)
-            state_out = result[0] if isinstance(result, tuple) else result
+            state_out = result if hasattr(result, "eta") else result[0]
             trace_state("TRACE_AFTER_SURFACE", state_out)
             return result
 
