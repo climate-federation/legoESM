@@ -228,7 +228,7 @@ def test_mld_carried_step_entry_n2_execution_is_recipe_derived():
     assert executing == {
         "GYRE-zco", "DINO:nemo_dino_kamm", "DINO:nemo_dino_kamm_mlf"}
     assert cards["GYRE-zco"]["gm_redi_mld_criterion"] == "n2_integral"
-    assert not cards["GYRE-zco"]["executes_route"]
+    assert cards["GYRE-zco"]["executes_route"]
     assert cards["ORCA2-zps"]["gm_redi_slope_n2_evaluation"] == "recompute"
     assert not cards["NEMO-GYRE-recipe"]["executes_route"]
     assert not cards["LOCK_EXCHANGE-zco"]["executes_route"]
