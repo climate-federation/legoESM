@@ -163,6 +163,13 @@ def _removed_fraction(before: float, after: float) -> float:
     return float((before - after) / before)
 
 
+def _associate_qsr(bsbc, qmm, qaa, rate):
+    """Apply the stage-3 QSR source to an already-associated accumulator."""
+    content_before = bsbc * qaa[..., None]
+    after = content_before + 14400.0 * qmm[..., None] * rate
+    return after / qaa[..., None] - bsbc
+
+
 def _compiled_direct_rate(record: dict, *, return_rows: bool = False):
     """Replay qsr_2BD through its compiled scalar statement order.
 
@@ -609,13 +616,7 @@ def association_ranking(root: Path, process_record: Path,
         nemo_shortwave, nemo_bqsr - nemo_bsbc, wet)["cells_unequal"] == 0,
         "NEMO cumulative QSR boundaries do not reproduce the process row")
 
-    def associate(bsbc, qmm_value, qaa_value, rate_value):
-        content_before = bsbc * qaa_value[..., None]
-        after = (content_before
-                 + 14400.0 * qmm_value[..., None] * rate_value)
-        return after / qaa_value[..., None] - bsbc
-
-    rebuilt_model = associate(
+    rebuilt_model = _associate_qsr(
         frame["Bsbc"], frame["q_Kmm"], frame["q_Kaa"], model_direct)
     rebuild_vs_actual = _score(model_shortwave, rebuilt_model, wet)
     actual_vs_nemo = _score(nemo_shortwave, model_shortwave, wet)
@@ -623,21 +624,22 @@ def association_ranking(root: Path, process_record: Path,
         "rebuilt_model_operands": _score(
             nemo_shortwave, rebuilt_model, wet),
         "nemo_qmm_only": _score(
-            nemo_shortwave, associate(
+            nemo_shortwave, _associate_qsr(
                 frame["Bsbc"], qmm, frame["q_Kaa"], model_direct), wet),
         "nemo_qaa_only": _score(
-            nemo_shortwave, associate(
+            nemo_shortwave, _associate_qsr(
                 frame["Bsbc"], frame["q_Kmm"], qaa, model_direct), wet),
         "nemo_direct_rate_only": _score(
-            nemo_shortwave, associate(
+            nemo_shortwave, _associate_qsr(
                 frame["Bsbc"], frame["q_Kmm"], frame["q_Kaa"],
                 nemo_direct), wet),
         "nemo_preceding_accumulator_only": _score(
-            nemo_shortwave, associate(
+            nemo_shortwave, _associate_qsr(
                 nemo_bsbc, frame["q_Kmm"], frame["q_Kaa"],
                 model_direct), wet),
         "all_nemo_inputs": _score(
-            nemo_shortwave, associate(nemo_bsbc, qmm, qaa, nemo_direct), wet),
+            nemo_shortwave, _associate_qsr(
+                nemo_bsbc, qmm, qaa, nemo_direct), wet),
     }
     for row in arms.values():
         row["max_abs_removed_fraction_vs_actual"] = _removed_fraction(
@@ -668,6 +670,155 @@ def association_ranking(root: Path, process_record: Path,
             "associated with its recorded qmm/qaa and preceding accumulator"
             if first_surviving else
             "the direct QSR association reproduces the production row"),
+    }
+
+
+def association_split(process_record: Path, reference_trace: Path,
+                      expect_commit: str, plant: bool = False) -> dict:
+    """Expose and close the production-JIT stage-3 QSR association."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "production association split is not fp64/libm")
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            f"association split requires clean tree: {stamp['dirty_paths']}")
+    require(stamp["commit"] == expect_commit,
+            "association split commit differs from --expect-commit")
+    year = _load_sibling(
+        "_round190_association_year", "nemo_testcase_l2_gyre_year_owners.py")
+    trace_manifest = json.loads((reference_trace / "manifest.json").read_text())
+    trace_admission = year.validate_lego_process_trace(
+        reference_trace, trace_manifest["producer_commit"])
+    require(trace_admission["layout"]["steps"] == [1, 1080],
+            "reference process trace does not cover steps 1..1080")
+    process = year.read_process_record(process_record)
+    require(process["kstp"] == 1080, "process operand is not step 1080")
+    card = build_nemo_testcase_card("GYRE-zco")
+    gate = _load_sibling(
+        "_round190_phase3_gate", "nemo_testcase_l2_gyre_phase3_gate.py")
+    wet = gate.expected_masks(card)["T"]
+
+    state = card.recipe.initial_state
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    started = time.time()
+    for completed in range(1079):
+        kt = completed + 1
+        freshwater, surface = gate._surface_forcings(card, state, kt)
+        state = ordinary_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface)
+        if kt % 180 == 0:
+            print(f"  round190 production prefix step {kt:4d}  "
+                  f"{time.time() - started:7.1f} s", flush=True)
+
+    freshwater, surface = gate._surface_forcings(card, state, 1080)
+    hooks = _NEMOWSRK3TestHooks(tracer_process_trace=())
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks)
+    trace = jax.device_get(trace_model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface))
+    frame = _trace_frame(year, trace)
+    association = trace.qsr_association
+    arrays = {
+        "tendency_kbb": np.asarray(association.tendency_kbb),
+        "qsr_kbb": np.asarray(association.qsr_kbb),
+        "qsr_kmm": np.asarray(association.qsr_kmm),
+        "thickness_kbb": np.asarray(association.thickness_kbb),
+        "thickness_kmm": np.asarray(association.thickness_kmm),
+        "process_qsr_kbb": np.asarray(association.process_qsr_kbb),
+        "process_surface_rate": np.asarray(association.process_surface_rate),
+        "process_qsr_rate": np.asarray(association.process_qsr_rate),
+    }
+    require(all(value.shape == wet.shape for value in arrays.values()),
+            "association trace array shape differs from the wet-cell mask")
+
+    tendency = arrays["tendency_kbb"]
+    qsr_kbb = arrays["qsr_kbb"]
+    qsr_kmm = arrays["qsr_kmm"]
+    h_kbb = arrays["thickness_kbb"]
+    h_kmm = arrays["thickness_kmm"]
+    process_qsr_kbb = arrays["process_qsr_kbb"]
+    surface_rebuilt = ((tendency - process_qsr_kbb) * h_kbb
+                       / np.maximum(h_kmm, 1.0e-10))
+    stage3_rebuilt = ((tendency - qsr_kbb) * h_kbb
+                      / np.maximum(h_kmm, 1.0e-10) + qsr_kmm)
+    qsr_rebuilt = stage3_rebuilt - surface_rebuilt
+
+    model_shortwave = np.asarray(frame["Bqsr"] - frame["Bsbc"])
+    direct_rebuild = _associate_qsr(
+        frame["Bsbc"], frame["q_Kmm"], frame["q_Kaa"], qsr_kmm)
+    reproduced_split = _score(model_shortwave, direct_rebuild, wet)
+    require(reproduced_split["cells_unequal"] == 9679,
+            "Round-189 direct-rebuild split moved to "
+            f"{reproduced_split['cells_unequal']} cells")
+    require(reproduced_split["max_abs"] == 2.467770444880557e-06,
+            "Round-189 direct-rebuild maximum moved to "
+            f"{reproduced_split['max_abs']}")
+
+    identity_rows = {
+        "process_qsr_kbb_vs_qsr_kbb": _score(
+            qsr_kbb, process_qsr_kbb, wet),
+        "surface_rate_bridge": _score(
+            arrays["process_surface_rate"], surface_rebuilt, wet),
+        "qsr_rate_bridge": _score(
+            arrays["process_qsr_rate"], qsr_rebuilt, wet),
+        "qsr_rate_vs_qsr_kmm": _score(
+            qsr_kmm, arrays["process_qsr_rate"], wet),
+    }
+    cumulative_rebuild = frame["Bsbc"] + _associate_qsr(
+        frame["Bsbc"], frame["q_Kmm"], frame["q_Kaa"],
+        arrays["process_qsr_rate"])
+    cumulative_row = _score(frame["Bqsr"], cumulative_rebuild, wet)
+
+    if plant:
+        plant_index = tuple(int(value) for value in np.argwhere(wet)[0])
+        plant_delta = float(np.ldexp(1.0, -40))
+        plant_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                tracer_process_trace=(*plant_index, plant_delta)))
+        planted = jax.device_get(plant_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface))
+        planted_frame = _trace_frame(year, planted)
+        plant_row = _score(frame["Bqsr"], planted_frame["Bqsr"], wet)
+        require(plant_row["cells_unequal"] > 0,
+                "production association plant moved no Bqsr cell")
+        raise GateError(
+            "STATUS PLANT-FIRED: production-qsr-association; "
+            f"unequal={plant_row['cells_unequal']}")
+
+    bridge_bit = all(
+        identity_rows[name]["cells_unequal"] == 0
+        for name in ("process_qsr_kbb_vs_qsr_kbb",
+                     "surface_rate_bridge", "qsr_rate_bridge"))
+    return {
+        "format": "gyre-round190-production-qsr-association-v1",
+        "status": "HELD", "precision": "fp64/libm", "step": 1080,
+        "worktree": stamp, "reference_trace": trace_admission,
+        "round189_split_reproduced": reproduced_split,
+        "production_jit_identity_rows": identity_rows,
+        "returned_cumulative_boundary_rebuild": cumulative_row,
+        "first_non_bit_statement": None if bridge_bit else next(
+            name for name, row in identity_rows.items()
+            if row["cells_unequal"]),
+        "verdict": (
+            "bridge source algebra is BIT; the non-bit process row is an "
+            "observer cumulative-boundary classification artifact"
+            if bridge_bit else
+            "the first non-bit bridge identity owns the association walk"),
     }
 
 
@@ -847,6 +998,8 @@ def main() -> int:
     parser.add_argument("--walk", action="store_true")
     parser.add_argument("--production-substitution", action="store_true")
     parser.add_argument("--association-ranking", action="store_true")
+    parser.add_argument("--association-split", action="store_true")
+    parser.add_argument("--association-plant", action="store_true")
     parser.add_argument("--process-record", type=Path)
     parser.add_argument("--lego-trace", type=Path)
     parser.add_argument("--walk-plant", choices=("r3t-ulp",))
@@ -856,7 +1009,14 @@ def main() -> int:
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     try:
-        if args.association_ranking:
+        if args.association_split:
+            require(args.process_record is not None and args.lego_trace is not None,
+                    "--association-split requires --process-record and "
+                    "--lego-trace")
+            report = association_split(
+                args.process_record, args.lego_trace, args.expect_commit,
+                args.association_plant)
+        elif args.association_ranking:
             require(args.process_record is not None and args.lego_trace is not None,
                     "--association-ranking requires --process-record and "
                     "--lego-trace")

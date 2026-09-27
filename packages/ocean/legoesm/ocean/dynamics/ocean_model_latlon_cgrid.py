@@ -5834,6 +5834,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_process_qco = None
         _nemo_ws_process_surface_rate = None
         _nemo_ws_process_qsr_rate = None
+        _nemo_ws_qsr_association = None
         _nemo_ws_process_boundaries = None
         _nemo_ws_process_Taa = None; _nemo_ws_ldf_diagnostics = None
         _nemo_ws_vertical_solve_trace, _return_vertical_solve_trace = None, (_return_tracer_process_trace and self._nemo_ws_test_hooks.vertical_solve_trace)
@@ -6953,6 +6954,16 @@ class LatLonCGridOceanModel:
                 _nemo_ws_process_qco = (
                     _qt_b, _qt_12, _qt_aa,
                     h_k_old, _h_live_one_half, _h_live_new)
+                _nemo_ws_qsr_association = _NEMOWSQsrAssociationTrace(
+                    tendency_kbb=tend.dT_dt.data,
+                    qsr_kbb=_qsr_b,
+                    qsr_kmm=_qsr_m,
+                    thickness_kbb=h_k_old,
+                    thickness_kmm=_h_live_one_half,
+                    process_qsr_kbb=_process_qsr_kbb,
+                    process_surface_rate=_nemo_ws_process_surface_rate,
+                    process_qsr_rate=_nemo_ws_process_qsr_rate,
+                )
 
             def _momentum_stage_w(geom):
                 # NEMO's momentum consumers read the field its OWN continuity
@@ -9285,7 +9296,8 @@ class LatLonCGridOceanModel:
         if _return_tracer_process_trace:
             if (_nemo_ws_process_qco is None
                     or _nemo_ws_process_boundaries is None
-                    or _nemo_ws_process_Taa is None):
+                    or _nemo_ws_process_Taa is None
+                    or _nemo_ws_qsr_association is None):
                 raise ValueError("WS-RK3 tracer process trace is incomplete")
             if (_return_vertical_solve_trace
                     and _nemo_ws_vertical_solve_trace is None):
@@ -9299,6 +9311,7 @@ class LatLonCGridOceanModel:
                 q_Kaa=_qaa,
                 boundaries=_nemo_ws_process_boundaries,
                 Taa=_nemo_ws_process_Taa,
+                qsr_association=_nemo_ws_qsr_association,
                 vertical_solve=_nemo_ws_vertical_solve_trace,
                 fct_activity=_nemo_ws_fct_activity, ldf_diagnostics=_nemo_ws_ldf_diagnostics,
             )
@@ -14732,6 +14745,19 @@ class _NEMOWSTracerSolveTrace(NamedTuple):
     viscosity_K: object
 
 
+class _NEMOWSQsrAssociationTrace(NamedTuple):
+    """Consumed production-JIT QSR source-association arrays for Round 190."""
+
+    tendency_kbb: object
+    qsr_kbb: object
+    qsr_kmm: object
+    thickness_kbb: object
+    thickness_kmm: object
+    process_qsr_kbb: object
+    process_surface_rate: object
+    process_qsr_rate: object
+
+
 class _NEMOWSTracerProcessTrace(NamedTuple):
     """Private production-JIT stage-3 temperature boundaries for Round 124."""
 
@@ -14742,6 +14768,7 @@ class _NEMOWSTracerProcessTrace(NamedTuple):
     q_Kaa: object  # noqa: N815 - NEMO time-level spelling is the record API.
     boundaries: object
     Taa: object
+    qsr_association: object
     vertical_solve: object
     fct_activity: object
     ldf_diagnostics: object

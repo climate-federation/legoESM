@@ -95,3 +95,15 @@ def test_round189_qsr_override_requires_process_trace():
         LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord,
             card.recipe.model_config, _nemo_ws_test_hooks=hooks)
+
+
+def test_round190_qsr_association_uses_live_qco_weights():
+    bsbc = np.array([[[2.0, 3.0]]], dtype=np.float64)
+    qmm = np.array([[1.25]], dtype=np.float64)
+    qaa = np.array([[0.75]], dtype=np.float64)
+    rate = np.array([[[2.0e-8, -3.0e-8]]], dtype=np.float64)
+    expected = ((bsbc * qaa[..., None]
+                 + 14400.0 * qmm[..., None] * rate)
+                / qaa[..., None] - bsbc)
+    np.testing.assert_array_equal(
+        MOD._associate_qsr(bsbc, qmm, qaa, rate), expected)
