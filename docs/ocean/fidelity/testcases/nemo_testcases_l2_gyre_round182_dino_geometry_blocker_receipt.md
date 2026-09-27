@@ -154,8 +154,8 @@ that neither production nor tests differ from this round's base.
 | `dino_trace_invalid_classes.log` | `fd89b3b5f7357a53f2efe0549ba79fc24f3799270e2f9ca6c444b7cebba3f3ea` |
 | `dino_trace_step_output.log` | `9aa18a1be818fa62e5926d52a29ae95ac14f373469217f0e16d3481dd3e5fd0a` |
 | `dino_trace_plant_call1.log` | `fad71813ad2cac4bcdb6608b6895446d91cf682087cbc926f03bfa8ebb242b7d` |
-| `citation_gate_final.json` | `02bc9b8c7c75044e99b53b9c664d104ddcf25a2ff7d3a1f3aa1bce0e6f48ae9e` |
-| `citation_gate_shift_plant.json` | `7b58dcbb8af88582afdc0a19b906c98d3129e303dc8208d6d566fb6311ddb85c` |
+| `citation_gate_final.json` | `d2ee1f1ad9bd98f756a87decc0e520d596eca127825655d11fbbc476a1f4aa44` |
+| `citation_gate_shift_plant.json` | `c13020cdf3cc1df7a3e17766293d287e9beec01ffe8bd3c7ee667dc66eb286c1` |
 | `focused_tests.log` | `fbd71ddb33cec950a34c771f167844f041af35487e06c435307ad51c3a087396` |
 | `codex_review.log` | `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5` |
 | `production_restore_check.log` | `8ae4bcd5810dcecb829d37ad532dd7628e3aa4bd2ed81efd41ec63648cd85f7f` |
