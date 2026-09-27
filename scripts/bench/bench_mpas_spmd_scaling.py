@@ -175,6 +175,18 @@ def _block(state):
                            if leaf is not None])
 
 
+def _state_is_finite(state) -> bool:
+    """True when every floating leaf of the (possibly sharded) state is finite.
+
+    Every process must call this: the reduction over a global array is a
+    collective under multi-controller.
+    """
+    import jax.numpy as jnp
+    flags = [jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(state)
+             if jnp.issubdtype(getattr(x, "dtype", np.int8), jnp.inexact)]
+    return bool(jnp.all(jnp.stack(flags))) if flags else True
+
+
 def _global_dry_mass(state, mesh):
     """sum(p_s * areaCell) on host arrays — the quantity fix_mass pins."""
     ps = np.asarray(state.p_s.data)
@@ -556,6 +568,15 @@ def main() -> int:
     hlo_cp = (hlo_census.get("collective_permute")
               if hlo_census else None)
 
+    # A blown-up trajectory times NaN arithmetic, not the model: the fixed
+    # 1e16 del4 went non-finite at s7+ within 4 steps and every such ladder
+    # row serialized as data.  Stamp it; plot_nature_scaling refuses
+    # valid=false / finite_ok=false rows.
+    finite_ok = _state_is_finite(s)
+    if not finite_ok and jax.process_index() == 0:
+        print("ERROR: final state is NON-FINITE; the record is marked "
+              "INVALID (finite_ok=false, valid=false).", flush=True)
+
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
         final_global = (gather_voronoi_state_spmd(s, dev_config)
@@ -618,6 +639,7 @@ def main() -> int:
     med = float(np.median(steady))
     rec = dict(
         component="mpas_atm",
+        finite_ok=finite_ok, valid=finite_ok,
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,

@@ -114,6 +114,17 @@ def test_hyperdiffusion_scales_with_subdivision(monkeypatch):
     assert seen["nu_del4"] == seen["nu_del4_ps"] == mod.nu_del4_for(7)
 
 
+def test_state_is_finite_flags_nan_and_inf():
+    """A blown-up state must be stamped invalid, not timed as data."""
+    import jax.numpy as jnp
+
+    mod = _load_bench()
+    good = {"u": jnp.ones(3), "idx": jnp.arange(3), "none": None, "t": 0.5}
+    assert mod._state_is_finite(good) is True
+    assert mod._state_is_finite({**good, "u": jnp.array([1.0, jnp.nan])}) is False
+    assert mod._state_is_finite({**good, "T": jnp.array([jnp.inf])}) is False
+
+
 def test_gather_voronoi_state_spmd_round_trip():
     """Direct exercise of the new gather: shard -> gather == original."""
     if len(__import__("jax").devices()) < 2:
@@ -180,6 +191,7 @@ def test_single_process_two_virtual_devices_with_gates(tmp_path):
     rec = json.loads(out.read_text().strip().splitlines()[-1])
     assert rec["component"] == "mpas_atm"
     assert rec["n_devices"] == 2
+    assert rec["finite_ok"] is True and rec["valid"] is True
     assert "parity" in proc.stdout and "MISMATCH" not in proc.stdout
     # #1113 ask 2: the ppermute round count is now recorded per row.
     assert "hlo_collective_permutes" in rec
