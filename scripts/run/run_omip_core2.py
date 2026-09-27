@@ -1384,6 +1384,58 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
                             nemo_e3f_0=jnp.asarray(e3f, dtype))
 
 
+def attach_nemo_ldf_fields_mpas(z_coord, mesh, ldf_path, domcfg_path,
+                                rn_shlat: float):
+    """NEMO nn_ahm_ijk_t=-30 viscosity on the MPAS Voronoi mesh.
+
+    ahmt_3d from eddy_viscosity_3D.nc is taken at the NEAREST NEMO T point of
+    each cell centre, ahmf_3d at the nearest NEMO F point (domain_cfg
+    gphif/glamf) of each vertex (the shared KD-tree of ``regridding``).
+    ponytail: nearest neighbour; the file is piecewise smooth (1000..20000
+    m2/s ramps over >5 degrees) at ~1-degree spacing, so bilinear buys little.
+    ahmt * cell activity; ahmf * nemo_vertex_shlat_factor_3d (NEMO fmask
+    carried to triangles by wet kite area).
+    """
+    import netCDF4 as nc4
+    from legoesm.core.operators_voronoi import nemo_vertex_shlat_factor_3d
+    from legoesm.grids.regridding import inverse_distance_weights, latlon_to_xyz
+
+    def _read(path, names):
+        ds = nc4.Dataset(path)
+        try:
+            return [np.asarray(ds.variables[n][:], dtype=np.float64).squeeze()
+                    for n in names]
+        finally:
+            ds.close()
+
+    ahmt_f, ahmf_f, tlat, tlon = _read(
+        ldf_path, ("ahmt_3d", "ahmf_3d", "nav_lat", "nav_lon"))
+    flat, flon = _read(domcfg_path, ("gphif", "glamf"))
+    nk = int(z_coord.n_levels)
+    if ahmt_f.shape != (nk, 331, 360) or flat.shape != (331, 360):
+        raise SystemExit(f"--nemo-ldf-file on MPAS expects ({nk},331,360) "
+                         f"ldf and (331,360) domain_cfg; got {ahmt_f.shape}, {flat.shape}")
+    rad = np.radians
+    it, _ = inverse_distance_weights(
+        latlon_to_xyz(rad(tlat.ravel()), rad(tlon.ravel())),
+        latlon_to_xyz(np.asarray(mesh.latCell), np.asarray(mesh.lonCell)), 1)
+    iv, _ = inverse_distance_weights(
+        latlon_to_xyz(rad(flat.ravel()), rad(flon.ravel())),
+        latlon_to_xyz(np.asarray(mesh.latVertex), np.asarray(mesh.lonVertex)), 1)
+    ahmt = ahmt_f.reshape(nk, -1)[:, it[:, 0]].T               # (nCells, nk)
+    ahmf = ahmf_f.reshape(nk, -1)[:, iv[:, 0]].T               # (nVertices, nk)
+    act = np.asarray(z_coord.is_active, dtype=np.float64)
+    fac = np.asarray(nemo_vertex_shlat_factor_3d(z_coord.is_active, mesh, rn_shlat),
+                     dtype=np.float64)
+    dtype = z_coord.h_partial.dtype
+    print(f"[nemo-ldf] MPAS {ldf_path}: ahmt {ahmt[act > 0].min():g}..{ahmt.max():g} "
+          f"m2/s at {ahmt.shape[0]} cells; rn_shlat={rn_shlat:g}: coastal vertex "
+          f"factor range {fac[(fac > 0) & (fac != 1)].min() if np.any((fac > 0) & (fac != 1)) else 0:.3f}"
+          f"..{fac.max():.3f}")
+    return z_coord._replace(nemo_ahmt_3d=jnp.asarray(ahmt * act, dtype),
+                            nemo_ahmf_3d=jnp.asarray(ahmf * fac, dtype))
+
+
 def renormalise_ah_profile(lv, A_h_new: float):
     """Change A_h without changing the viscosity the A_h profile specifies.
 
@@ -3546,7 +3598,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      vertical_mixing=None, ew_cyclic_overlap=False,
                      no_gm_redi=False, K_zeta_bih=None,
                      gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
-                     gm_kappa_min=0.0):
+                     gm_kappa_min=0.0, nemo_ldf_file=None,
+                     lateral_side_bc=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -3739,6 +3792,10 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         # min_levels=1 only: the make_partial_cell min_levels>1 path assumes a
         # 2-D leading axis; MPAS cells are 1-D (nCells,).
         z_coord, H_bathy, land_mask = make_partial_cell(z_coord, H_bathy, land_mask)
+    if nemo_ldf_file:
+        z_coord = attach_nemo_ldf_fields_mpas(
+            z_coord, mesh, nemo_ldf_file, nemo_domain_cfg,
+            rn_shlat={"no_slip": 2.0, "free_slip": 0.0}[lateral_side_bc])
 
     _iwm_maps = None
     if iwm is not None and iwm.enabled and iwm_forcing_file:
@@ -6881,7 +6938,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "directly in the e3-weighted rotation-divergence "
                         "operator, with NEMO's fmask (--lateral-side-bc "
                         "no_slip -> rn_shlat=2, free_slip -> 0). Needs "
-                        "--grid tripole --partial-cell --nemo-domain-mask "
+                        "--grid tripole|mpas --partial-cell --nemo-domain-mask "
                         "--A-h 0 --lateral-side-bc, and excludes "
                         "--A-h-profile-file/--visc-schedule/--B-h.")
     p.add_argument("--adaptive-implicit-vertadv", action="store_true",
@@ -8327,7 +8384,7 @@ def main() -> int:
     # its "none" default and under the kpp closure.
     if args.nemo_ldf_file:
         _bad = [f for f, bad in (
-            ("--grid tripole", args.grid != "tripole"),
+            ("--grid tripole|mpas", args.grid not in ("tripole", "mpas")),
             ("--partial-cell", not args.partial_cell),
             ("--nemo-domain-mask", not args.nemo_domain_mask),
             ("--A-h 0", args.A_h is None or float(args.A_h) != 0.0),
@@ -8335,6 +8392,8 @@ def main() -> int:
             ("no --A-h-profile-file", args.A_h_profile_file is not None),
             ("no --visc-schedule", args.visc_schedule is not None),
             ("no --B-h (or --B-h 0)", args.B_h not in (None, 0.0)),
+            # NEMO ORCA1 has no Smagorinsky; the MPAS recipe default is 0.33.
+            ("--C-smag-lap 0", args.C_smag_lap is None or float(args.C_smag_lap) != 0.0),
             ("--n-gpus 1", int(args.n_gpus or 1) != 1)) if bad]
         if _bad:
             raise SystemExit("--nemo-ldf-file requires: " + ", ".join(_bad))
@@ -8737,6 +8796,8 @@ def main() -> int:
             # these overrides but the call never passed them.
             A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             C_smag_lap=args.C_smag_lap, K_zeta_bih=args.K_zeta_bih,
+            nemo_ldf_file=args.nemo_ldf_file,
+            lateral_side_bc=args.lateral_side_bc,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,

@@ -42,7 +42,7 @@ class RegridWeights(NamedTuple):
     src_flat_size: int
 
 
-def _latlon_to_xyz(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+def latlon_to_xyz(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     """Convert lat/lon [rad] to Cartesian (x, y, z) on unit sphere."""
     cos_lat = np.cos(lat)
     return np.stack([
@@ -52,7 +52,7 @@ def _latlon_to_xyz(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     ], axis=-1)
 
 
-def _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors: int):
+def inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors: int):
     """KD-tree k-nearest-neighbour inverse-distance weights from source to target
     Cartesian points — the SHARED core of every ``compute_*_weights`` builder so the
     KD-tree + IDW math is written ONCE.  Returns ``(indices (n_tgt, k), weights
@@ -90,10 +90,10 @@ def compute_latlon_to_cs_weights(
     src_lat = np.asarray(src_lat)
     src_lon = np.asarray(src_lon)
     lat2d, lon2d = np.meshgrid(src_lat, src_lon, indexing="ij")   # (n_lat, n_lon)
-    src_xyz = _latlon_to_xyz(lat2d.ravel(), lon2d.ravel())
-    tgt_xyz = _latlon_to_xyz(
+    src_xyz = latlon_to_xyz(lat2d.ravel(), lon2d.ravel())
+    tgt_xyz = latlon_to_xyz(
         np.asarray(cs_grid.lat).ravel(), np.asarray(cs_grid.lon).ravel())
-    indices, weights = _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
+    indices, weights = inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
         weights=jnp.array(weights, dtype=jnp.float32),
@@ -127,11 +127,11 @@ def compute_cs_to_gauss_weights(
         Precomputed weights for regridding.
     """
     # Source points: flatten cubed-sphere (6, n, n); target: Gaussian grid.
-    src_xyz = _latlon_to_xyz(
+    src_xyz = latlon_to_xyz(
         np.asarray(cs_grid.lat).ravel(), np.asarray(cs_grid.lon).ravel())
-    tgt_xyz = _latlon_to_xyz(
+    tgt_xyz = latlon_to_xyz(
         np.asarray(gauss_grid.lat2d).ravel(), np.asarray(gauss_grid.lon2d).ravel())
-    indices, weights = _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
+    indices, weights = inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
         weights=jnp.array(weights, dtype=jnp.float64),
@@ -160,11 +160,11 @@ def compute_gauss_to_cs_weights(
     -------
     RegridWeights
     """
-    src_xyz = _latlon_to_xyz(
+    src_xyz = latlon_to_xyz(
         np.asarray(gauss_grid.lat2d).ravel(), np.asarray(gauss_grid.lon2d).ravel())
-    tgt_xyz = _latlon_to_xyz(
+    tgt_xyz = latlon_to_xyz(
         np.asarray(cs_grid.lat).ravel(), np.asarray(cs_grid.lon).ravel())
-    indices, weights = _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
+    indices, weights = inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
         weights=jnp.array(weights, dtype=jnp.float64),
@@ -219,10 +219,10 @@ def compute_latlon_to_voronoi_weights(
     lon2d, lat2d = np.meshgrid(
         np.asarray(src_lon_1d), np.asarray(src_lat_1d),
     )
-    src_xyz = _latlon_to_xyz(lat2d.ravel(), lon2d.ravel())
+    src_xyz = latlon_to_xyz(lat2d.ravel(), lon2d.ravel())
 
     # Target: unstructured points → (n_target, 3)
-    tgt_xyz = _latlon_to_xyz(
+    tgt_xyz = latlon_to_xyz(
         np.asarray(tgt_lat).ravel(), np.asarray(tgt_lon).ravel(),
     )
 
@@ -789,9 +789,9 @@ def compute_voronoi_to_latlon_weights(
     lat_cent = np.linspace(-90.0, 90.0, n_lat)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
-    src_xyz = _latlon_to_xyz(np.asarray(lat_cell, dtype=np.float64),
+    src_xyz = latlon_to_xyz(np.asarray(lat_cell, dtype=np.float64),
                              np.asarray(lon_cell, dtype=np.float64))
-    tgt_xyz = _latlon_to_xyz(np.deg2rad(lat2d.ravel()),
+    tgt_xyz = latlon_to_xyz(np.deg2rad(lat2d.ravel()),
                              np.deg2rad(lon2d.ravel()))
 
     k = int(min(k, src_xyz.shape[0]))
