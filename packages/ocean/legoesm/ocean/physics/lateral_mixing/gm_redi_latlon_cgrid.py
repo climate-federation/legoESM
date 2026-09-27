@@ -4167,9 +4167,11 @@ def gm_redi_tracer_tendency_latlon(
         # slope_positions combination keeps the byte-identical generic path.
         if (getattr(cfg, "slope_scheme", "triads") == "nemo_iso_lap"
                 and getattr(cfg, "slope_positions", "mode_b") == "nemo_native"):
+            _kappa_native_J = compute_ocean_jacobian(
+                _kappa_native_eta, H_bathy, z_coord)
             kappa_GM = native_treguier_kappa_for_state(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
-                jacobian, _kappa_native_eta, H_bathy, _native_prd_J,
+                _kappa_native_J, _kappa_native_eta, H_bathy, _native_prd_J,
                 native_prd_TS, native_slope_pn2, native_slope_e3w,
                 f_coriolis, rho_0, g, omega,
             )
