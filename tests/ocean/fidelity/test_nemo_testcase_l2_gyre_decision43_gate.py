@@ -206,6 +206,21 @@ def test_tke_shear_step_entry_eta_execution_is_recipe_derived():
     assert not cards["DINO:nemo_dino_kamm_mlf"]["executes_route"]
 
 
+def test_mld_carried_step_entry_n2_execution_is_recipe_derived():
+    module = _module()
+    cards = module._card_execution("mld_carried_step_entry_n2")
+    executing = {
+        name for name, row in cards.items() if row["executes_route"]}
+
+    assert executing == {
+        "GYRE-zco", "DINO:nemo_dino_kamm", "DINO:nemo_dino_kamm_mlf"}
+    assert cards["GYRE-zco"]["gm_redi_mld_criterion"] == "n2_integral"
+    assert cards["ORCA2-zps"]["gm_redi_slope_n2_evaluation"] == "recompute"
+    assert not cards["NEMO-GYRE-recipe"]["executes_route"]
+    assert not cards["LOCK_EXCHANGE-zco"]["executes_route"]
+    assert not cards["OVERFLOW-zps"]["executes_route"]
+
+
 def test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured():
     module = _module()
     cards = module._card_execution("fct_metric_upstream")

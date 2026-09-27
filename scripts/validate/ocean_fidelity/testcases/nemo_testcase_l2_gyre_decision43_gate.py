@@ -223,7 +223,7 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     require(route in {
         "ldf_stage3", "fct_metric_upstream", "wind_qco",
         "momentum_ldf_live_geometry", "stage_momentum_wzv",
-        "tke_shear_step_entry_eta",
+        "tke_shear_step_entry_eta", "mld_carried_step_entry_n2",
     },
             f"unknown Decision-43 source route {route!r}")
 
@@ -242,6 +242,10 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             "adaptive_implicit_vertadv": bool(
                 config.adaptive_implicit_vertadv),
             "gm_redi_configured": config.gm_redi is not None,
+            "gm_redi_mld_criterion": getattr(
+                config.gm_redi, "mld_criterion", None),
+            "gm_redi_slope_n2_evaluation": getattr(
+                config.gm_redi, "slope_n2_evaluation", None),
             "momentum_advection": getattr(
                 config, "momentum_advection", "flux_form"),
             "wzv_call2_evaluation": getattr(
@@ -302,6 +306,14 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
                     "nemo_face_native_now2", "nemo_face_native_nbb2")
                 and getattr(tke, "tke_shear_metric_source", None)
                 == "nemo_qco_live_face")
+        elif route == "mld_carried_step_entry_n2":
+            executes = (
+                config.gm_redi is not None
+                and getattr(config.gm_redi, "mld_criterion", None)
+                == "n2_integral"
+                and getattr(
+                    config.gm_redi, "slope_n2_evaluation", "recompute")
+                == "carried_step_entry")
         else:
             executes = (
                 config.momentum_time_integrator == "rk3_ws"
@@ -720,7 +732,7 @@ def main(argv: list[str] | None = None) -> int:
         "--route", choices=(
             "ldf_stage3", "fct_metric_upstream", "wind_qco",
             "momentum_ldf_live_geometry", "stage_momentum_wzv",
-            "tke_shear_step_entry_eta"),
+            "tke_shear_step_entry_eta", "mld_carried_step_entry_n2"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],
