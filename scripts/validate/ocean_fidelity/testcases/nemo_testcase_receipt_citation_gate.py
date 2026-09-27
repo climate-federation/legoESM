@@ -3638,6 +3638,20 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:5589-5630': [
         ('if _sfx is not None:', 1),
         ('F_slow_v + _wind_increment_v) * state.v_mask.data', 1), 42],
+    # --- round 186: admitted pre-day-180 process stream and qsr promotion ---
+    'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:818-831': [
+        'lr123_write = lwp .AND. .NOT.ln_tile .AND. kstg == 3 .AND.',
+        'WRITE(r123_unit) r3t(:,:,Kbb), r3t(:,:,Kmm), r3t(:,:,Kaa)', 14],
+    'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:861-869': [
+        'CALL tra_adv', 'WRITE(r123_unit) ts(:,:,:,jp_tem,Krhs)', 9],
+    'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:930-970': [
+        'IF( ln_traqsr  ) THEN',
+        "CALL ctl_stop( 'stp_RK3_stg: cannot close round-185 process dump' )", 41],
+    'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:930-945': [
+        'IF( ln_traqsr  ) THEN', 'DEALLOCATE( l2_qsr_before )', 16],
+    'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/traqsr.f90:615-645': [
+        'zz0 =           rn_abs   * r1_rho0_rcp',
+        'zatt(ji,jj) = zzatt', 31],
 }
 
 
