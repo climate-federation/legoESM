@@ -224,10 +224,10 @@ def test_decision59_admits_only_strictly_sub_ten_floor_unit_year_moves(
     module = _module()
     monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
     before = _year(1.0, "b" * 40)
-    within = _year(1.0, "c" * 40)
+    within = _year(0.1, "c" * 40)
     for row in within["rows"]:
         if row["day"] in (240, 360):
-            row["rms_T"] += 0.5 * module.DECISION59_MAX_ABS_K
+            row["rms_T"] = 1.0 + 0.5 * module.DECISION59_MAX_ABS_K
     passed = module.evaluate(
         _comparison(), _day(1.0), _day(0.1), before, within,
         expected_candidate_commit="c" * 40,
@@ -237,10 +237,10 @@ def test_decision59_admits_only_strictly_sub_ten_floor_unit_year_moves(
     assert passed["criteria"]["year_day240_T_rms_not_worse"] is False
     assert passed["criteria"]["year_day240_T_rms_admitted"] is True
 
-    outside = _year(1.0, "c" * 40)
+    outside = _year(0.1, "c" * 40)
     for row in outside["rows"]:
         if row["day"] in (240, 360):
-            row["rms_T"] += 2.0 * module.DECISION59_MAX_ABS_K
+            row["rms_T"] = 1.0 + 2.0 * module.DECISION59_MAX_ABS_K
     failed = module.evaluate(
         _comparison(), _day(1.0), _day(0.1), before, outside,
         expected_candidate_commit="c" * 40,
