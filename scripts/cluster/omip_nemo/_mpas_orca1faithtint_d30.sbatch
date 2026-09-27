@@ -129,7 +129,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
   --bbl-adv --years $YEARS --snapshot-every-days 5 --diag-every-days 1 \
   --restart-save $OUT/restart_leg$LEG.npz \
-  $([ "$LEG" = 2 ] && echo "--restart-from $OUT/restart_leg1.npz") \
+  $([ "$LEG" -gt 1 ] && echo "--restart-from $OUT/restart_leg$((LEG-1)).npz") \
   --tracer-advection superbee --runoff-depth-nemo-ini \
   --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic \
   --ice-ocean-heat-coeff 70 \
