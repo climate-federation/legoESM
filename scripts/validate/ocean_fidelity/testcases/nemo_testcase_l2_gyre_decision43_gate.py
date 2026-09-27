@@ -227,7 +227,6 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
         "ldf_stage3", "fct_metric_upstream", "wind_qco",
         "momentum_ldf_live_geometry", "stage_momentum_wzv",
         "tke_shear_step_entry_eta", "stage1_r3t_ratio",
-        "stage12_qco_tracer_order",
     },
             f"unknown Decision-43 source route {route!r}")
 
@@ -312,8 +311,6 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             executes = (
                 config.tracer_time_integrator == "rk3_ws"
                 and not values["linear_free_surface"])
-        elif route == "stage12_qco_tracer_order":
-            executes = config.tracer_time_integrator == "rk3_ws"
         else:
             executes = (
                 config.momentum_time_integrator == "rk3_ws"
@@ -747,8 +744,7 @@ def main(argv: list[str] | None = None) -> int:
         "--route", choices=(
             "ldf_stage3", "fct_metric_upstream", "wind_qco",
             "momentum_ldf_live_geometry", "stage_momentum_wzv",
-            "tke_shear_step_entry_eta", "stage1_r3t_ratio",
-            "stage12_qco_tracer_order"),
+            "tke_shear_step_entry_eta", "stage1_r3t_ratio"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],
