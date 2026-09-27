@@ -113,7 +113,7 @@ echo "=== gate: corrected forcing is the default ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
 rc=${PIPESTATUS[0]}; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 
-JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
+JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0 `# user 2026-09-27: no Smagorinsky, as in NEMO` \
   --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke --K-zeta-bih 0 \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \

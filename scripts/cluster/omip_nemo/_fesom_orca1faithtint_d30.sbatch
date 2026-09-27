@@ -106,7 +106,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
   --runoff --river-mouth-restoring-gate \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
-  --forcing-ramp-days 5 \
+  --forcing-ramp-days 0 `# user 2026-09-27: no ramp, as on tripole/MPAS and in NEMO` \
   `# ---- the adopted sets the FESOM lane wires ----` \
   --ice-exchange nemo_si3 \
   --forcing-time-interp linear \
