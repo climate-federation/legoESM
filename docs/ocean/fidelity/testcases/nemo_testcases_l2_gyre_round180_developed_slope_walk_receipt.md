@@ -36,7 +36,7 @@ limiter, selectors, recurrence, and Shapiro outputs at
 `GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfphy.f90:326-330`;
 that producer initializes the index, accumulates positive `rn2b*e3w`, updates
 the last below-threshold level, and writes the live mixed-layer depth at
-`:109-124`.
+`GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfmxl.f90:109-124`.
 
 ## Production-step result
 
@@ -166,7 +166,9 @@ scheme, threshold, cadence, state field, or production default changed.
 
 Stay upstream in execution order and walk `zdf_mxl` at the same developed
 day-180 entry.  Extend this harness; do not create another bridge.  Score the
-compiled recurrence at `zdfmxl.f90:109-124` from initialization through each
+compiled recurrence at
+`GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfmxl.f90:109-124` from
+initialization through each
 `MAX(rn2b,0)*e3w` accumulation and the strict below-threshold index update.
 Use the admitted Round-179 `pn2`, `e3w_1d`, `r3t_Kmm`, `nmln`, and `hmlp`
 operands first; acquire only a per-level cumulative stream if those operands
