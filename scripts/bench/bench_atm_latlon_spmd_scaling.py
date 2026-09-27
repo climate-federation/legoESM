@@ -242,6 +242,14 @@ def main() -> int:
                         "(SLURM) is unavailable; process count/id then come "
                         "from OMPI_COMM_WORLD_SIZE/RANK.")
     args = p.parse_args()
+    if args.p_lon > 1:
+        # The 2-D tiled step does not support the polar filter, and without
+        # it this model goes non-finite within a few steps (2026-09-27), so
+        # a tiled timing would be of a blown-up state.
+        raise SystemExit(
+            "--p-lon > 1: the tiled lat-lon step has no polar filter, and the "
+            "unfiltered model goes non-finite; tiled timings are refused until "
+            "the 2-D step supports the filter")
 
     # Validate the schedule BEFORE any model/device work: a zero/negative
     # --steps would otherwise surface only as timed_scan_blocks' None
@@ -750,7 +758,7 @@ def main() -> int:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "
                   "hardware scaling — do not report it as a speedup.")
-    return 0
+    return 0 if valid else 3
 
 
 if __name__ == "__main__":

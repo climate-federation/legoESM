@@ -110,7 +110,7 @@ def test_main_segment_mode_divergence_marks_record_invalid(
         ["bench", "--n-devices", "1", "--n-lat", "8", "--n-lon", "8",
          "--nlev", "4", "--steps", "3", "--warmup", "1",
          "--segment-steps", "2", "--dt", "1e18", "--out", str(out)])
-    assert mod.main() == 0
+    assert mod.main() == 3
     rec = json.loads(out.read_text().strip().splitlines()[-1])
     assert rec["finite_ok"] is False
     assert rec["valid"] is False
@@ -144,7 +144,7 @@ def test_main_default_lane_checks_final_state_finite(tmp_path, monkeypatch, dt, 
         ["bench", "--n-devices", "1", "--n-lat", "8", "--n-lon", "8",
          "--nlev", "4", "--steps", "2", "--warmup", "1",
          "--dt", dt, "--out", str(out)])
-    assert mod.main() == 0
+    assert mod.main() == (0 if finite else 3)
     rec = json.loads(out.read_text().strip().splitlines()[-1])
     assert rec["segment_mode"] is False
     assert rec["finite_ok"] is finite
@@ -207,3 +207,13 @@ def test_receipt_records_the_warmup_that_actually_applied(tmp_path,
     assert extra["warmup"] is None
     assert extra["warmup_requested"] == 10
     assert "none" in extra["warmup_applies"]
+
+
+def test_tiled_lane_is_refused(monkeypatch):
+    mod = _load()
+    monkeypatch.setattr(
+        "sys.argv",
+        ["bench", "--n-devices", "4", "--p-lon", "2", "--n-lat", "8", "--n-lon", "8",
+         "--nlev", "4", "--steps", "2", "--out", "/dev/null"])
+    with pytest.raises(SystemExit, match="tiled lat-lon step has no polar filter"):
+        mod.main()
