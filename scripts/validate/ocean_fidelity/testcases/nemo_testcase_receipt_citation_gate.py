@@ -699,6 +699,12 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfmxl.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo"
         "/zdfmxl.f90"),
+    "GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo"
+        "/eosbn2.f90"),
+    "GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/domzgr.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo"
+        "/domzgr.f90"),
     # Round 154 reads the exact instrumented build that produced the admitted
     # developed FCT record; its added observation calls shift FCT line numbers.
     "GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -1189,6 +1195,16 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfmxl.f90:109-124': [
         '! w-level of the mixing and mixed layers',
         ('END DO   ;   END DO', 3), 16],
+    # --- round 181: developed mixed-layer carried-N2 causal walk ---
+    'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/stprk3.f90:159-168': [
+        'CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )',
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 10],
+    'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/eosbn2.f90:1609-1619': [
+        'DO jk =  2,  jpkm1',
+        'END DO   ;   END DO   ;   END DO', 11],
+    'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/domzgr.f90:382-386': [
+        '! deepest/shallowest W level Above/Below ~10m',
+        'nla10 = nlb10 - 1', 5],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:167': (
         'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:215-250': [

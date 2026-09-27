@@ -212,9 +212,13 @@ def test_mld_carried_step_entry_n2_execution_is_recipe_derived():
     executing = {
         name for name, row in cards.items() if row["executes_route"]}
 
+    # Production is restored after Round 181's held GYRE candidate.  Both
+    # DINO Kamm cards already select the carried route, so they remain the
+    # mandatory blast-radius measurements before GYRE may select it too.
     assert executing == {
-        "GYRE-zco", "DINO:nemo_dino_kamm", "DINO:nemo_dino_kamm_mlf"}
+        "DINO:nemo_dino_kamm", "DINO:nemo_dino_kamm_mlf"}
     assert cards["GYRE-zco"]["gm_redi_mld_criterion"] == "n2_integral"
+    assert not cards["GYRE-zco"]["executes_route"]
     assert cards["ORCA2-zps"]["gm_redi_slope_n2_evaluation"] == "recompute"
     assert not cards["NEMO-GYRE-recipe"]["executes_route"]
     assert not cards["LOCK_EXCHANGE-zco"]["executes_route"]
