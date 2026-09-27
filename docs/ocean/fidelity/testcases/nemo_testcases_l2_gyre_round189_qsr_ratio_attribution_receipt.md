@@ -134,7 +134,19 @@ it did not issue `DO NOT SHIP`.  The round is therefore explicitly
 **UNREVIEWED** under the house dual-review rule.  Its production change is
 test-only instrumentation and is inert without a private hook.
 
-VALIDATION_PLACEHOLDER
+The post-hoc finite-effect production plant moved 15 `Bqsr` cells, printed
+`STATUS PLANT-FIRED: production-r3t-effect; unequal=15`, and exited 1.  The
+failed one-ULP control also exited 1, but printed the named zero-effect refusal
+rather than success.  The focused instrument, receipt-citation, and generic
+NEMO recipe batch reports **`48 passed in 336.00s (0:05:35)`**.  The receipt
+citation gate passes all four citations with zero failures, zero unmapped
+citations, and zero map-audit failures.  Shifting the compiled stage-program
+citation by two lines changes the gate to `FAIL` with
+`SYMBOL-NOT-AT-LINE` and exits 1.  The full citation-gate tests also exercise
+the default cumulative receipt after the required model-file re-anchoring.
+`git diff --check` and Python compilation pass.  A broad ocean battery was not
+run because no production model path, recipe, or physics gate changed; the
+only model edit is a guarded private test hook.
 
 ## OPEN — round 190
 
