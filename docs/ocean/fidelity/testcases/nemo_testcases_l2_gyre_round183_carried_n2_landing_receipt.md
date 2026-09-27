@@ -18,7 +18,7 @@ The record-producing GYRE program computes `rn2b` once from `Nbb`, copies it
 to `rn2`, and calls `zdf_phy(kstp,Nbb,Nbb,Nrhs)` at
 `GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/stprk3.f90:159-168`; it later
 passes the same stored `rn2b` to `ldf_slp` at
-`GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/stprk3.f90:173-178`.
+`GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/stprk3.f90:173-180`.
 The compiled producer evaluates the active W levels at
 `GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/eosbn2.f90:1609-1619`.
 The mixed-layer recurrence consumes that `rn2b`, multiplies it by the live W
