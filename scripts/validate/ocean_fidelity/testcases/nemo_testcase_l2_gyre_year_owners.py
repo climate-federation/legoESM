@@ -13265,18 +13265,19 @@ def developed_tracer_ldf_statement_walk(
     require(int(np.count_nonzero(wet)) == 18000,
             f"Round-177 cropped wet count moved: {np.count_nonzero(wet)}")
 
-    def execute_mode(*, eager: bool, override=None, carried_mld: bool = False):
+    def execute_mode(*, eager: bool, override=None,
+                     slope_n2_mode: str = "recompute"):
         diagnostic_hook = (
             "slope" if slope_oracle is not None and override is None
             else (True if override is None else override))
         hooks = _NEMOWSRK3TestHooks(
             tracer_process_trace=(), vertical_solve_trace=True,
             tracer_ldf_diagnostics=diagnostic_hook)
-        model_config = card.recipe.model_config
-        if carried_mld:
-            model_config = model_config._replace(
-                gm_redi=model_config.gm_redi._replace(
-                    slope_n2_evaluation="carried_step_entry"))
+        require(slope_n2_mode in ("recompute", "carried_step_entry"),
+                f"unknown slope N2 mode {slope_n2_mode!r}")
+        model_config = card.recipe.model_config._replace(
+            gm_redi=card.recipe.model_config.gm_redi._replace(
+                slope_n2_evaluation=slope_n2_mode))
         trace_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord,
             model_config, _nemo_ws_test_hooks=hooks)
@@ -13538,9 +13539,9 @@ def developed_tracer_ldf_statement_walk(
             "hmlp": literal_hmlp,
         }
         carried_jit, carried_moved_jit = execute_mode(
-            eager=False, carried_mld=True)
+            eager=False, slope_n2_mode="carried_step_entry")
         carried_eager, carried_moved_eager = execute_mode(
-            eager=True, carried_mld=True)
+            eager=True, slope_n2_mode="carried_step_entry")
         (carried_jit_rows, carried_jit_first,
          carried_jit_first_owned) = score_slope(carried_jit)
         (carried_eager_rows, carried_eager_first,
@@ -13558,7 +13559,8 @@ def developed_tracer_ldf_statement_walk(
         planted_first = np.array(first, copy=True)
         planted_first[index] += 1
         planted, state_moved = execute_mode(
-            eager=False, override={"nmln": jnp.asarray(planted_first)})
+            eager=False, override={"nmln": jnp.asarray(planted_first)},
+            slope_n2_mode="carried_step_entry")
         upstream = ("prd", "pn2", "gdept_1d")
         downstream = ("nmln", "zhmlpt", "r1_hmlu", "uslp")
         control = {

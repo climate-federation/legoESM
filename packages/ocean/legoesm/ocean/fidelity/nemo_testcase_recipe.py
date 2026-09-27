@@ -965,6 +965,13 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
         whole_step_identity="gyre_vector_ene_c2",
         tke_langmuir_evaluation="nemo_literal",
     )
+    # stprk3 computes rn2b once from Nbb before zdf_phy, which consumes that
+    # field in zdf_mxl, and then passes the same rn2b to ldf_slp.  Keep the
+    # mixed-layer recurrence and the slope denominator on that one carried
+    # step-entry field instead of evaluating eosbn2 a second time.
+    model_config = model_config._replace(
+        gm_redi=model_config.gm_redi._replace(
+            slope_n2_evaluation="carried_step_entry"))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
