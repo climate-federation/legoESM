@@ -13265,18 +13265,23 @@ def developed_tracer_ldf_statement_walk(
     require(int(np.count_nonzero(wet)) == 18000,
             f"Round-177 cropped wet count moved: {np.count_nonzero(wet)}")
 
-    def execute_mode(*, eager: bool, override=None):
+    def execute_mode(*, eager: bool, override=None, carried_mld: bool = False):
         diagnostic_hook = (
             "slope" if slope_oracle is not None and override is None
             else (True if override is None else override))
         hooks = _NEMOWSRK3TestHooks(
             tracer_process_trace=(), vertical_solve_trace=True,
             tracer_ldf_diagnostics=diagnostic_hook)
+        model_config = card.recipe.model_config
+        if carried_mld:
+            model_config = model_config._replace(
+                gm_redi=model_config.gm_redi._replace(
+                    slope_n2_evaluation="carried_step_entry"))
         trace_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord,
-            card.recipe.model_config, _nemo_ws_test_hooks=hooks)
+            model_config, _nemo_ws_test_hooks=hooks)
         ordinary_model = LatLonCGridOceanModel(
-            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+            card.recipe.grid, card.recipe.z_coord, model_config)
 
         def execute(model, *, tracing):
             if eager:
@@ -13484,6 +13489,62 @@ def developed_tracer_ldf_statement_walk(
         baseline_jit)
     slope_eager_rows, slope_eager_first, slope_eager_first_owned = score_slope(
         baseline_eager)
+    carried_jit = carried_eager = None
+    carried_jit_rows = carried_eager_rows = {}
+    carried_jit_first = carried_eager_first = None
+    carried_jit_first_owned = carried_eager_first_owned = None
+    carried_moved_jit = carried_moved_eager = None
+    source_recurrence = None
+    if slope_oracle is not None:
+        # Rebuild the literal zdf_mxl loop from the admitted record before
+        # interpreting either model arm.  NEMO initializes nmln at nlb10,
+        # advances it only while the cumulative integral is strictly below
+        # zN2_c, and caps the level by mbkt (zdfmxl.f90:109-123).
+        gdepw = slope_reference["gdepw_1d"]
+        e3w_1d = slope_reference["e3w_1d"]
+        zrefdep = 10.0 - 0.1 * float(np.min(e3w_1d))
+        nlb10_index = int(np.flatnonzero(gdepw > zrefdep)[0])
+        nmln_literal = np.full(wet2.shape, nlb10_index + 1,
+                               dtype=np.int32)
+        hml_acc = np.zeros(wet2.shape, dtype=np.float64)
+        mbkt = np.count_nonzero(slope_reference["tmask"], axis=-1)
+        threshold = (float(card.recipe.model_config.constants.g)
+                     * float(card.recipe.model_config.gm_redi.mld_rho_c)
+                     / float(card.recipe.model_config.constants.rho_0))
+        cumulative = np.zeros_like(slope_reference["pn2"])
+        for level in range(nlb10_index, nlev):
+            hml_acc = hml_acc + np.maximum(
+                slope_reference["pn2"][..., level], 0.0) * (
+                    e3w_1d[level]
+                    * (1.0 + slope_reference["r3t_Kmm"]))
+            cumulative[..., level] = hml_acc
+            nmln_literal = np.where(
+                hml_acc < threshold,
+                np.minimum(level + 1, mbkt) + 1,
+                nmln_literal)
+        hml_literal = np.take(gdepw, nmln_literal - 1) * (
+            1.0 + slope_reference["r3t_Kmm"]) * slope_reference["ssmask"]
+        literal_nmln = _score_developed_row(
+            nmln_literal.astype(np.float64), slope_reference["nmln"], wet2)
+        literal_hmlp = _score_developed_row(
+            hml_literal, slope_reference["hmlp"], wet2)
+        require(literal_nmln["bit_exact"] and literal_hmlp["bit_exact"],
+                "literal zdf_mxl reconstruction does not calibrate to NEMO")
+        source_recurrence = {
+            "nlb10_fortran": nlb10_index + 1,
+            "zrefdep_m": zrefdep,
+            "threshold_s-2_m": threshold,
+            "nmln": literal_nmln,
+            "hmlp": literal_hmlp,
+        }
+        carried_jit, carried_moved_jit = execute_mode(
+            eager=False, carried_mld=True)
+        carried_eager, carried_moved_eager = execute_mode(
+            eager=True, carried_mld=True)
+        (carried_jit_rows, carried_jit_first,
+         carried_jit_first_owned) = score_slope(carried_jit)
+        (carried_eager_rows, carried_eager_first,
+         carried_eager_first_owned) = score_slope(carried_eager)
     if plant == "developed-slope-first-ulp":
         require(slope_oracle is not None,
                 "developed slope plant needs --developed-slope-root")
@@ -13581,7 +13642,17 @@ def developed_tracer_ldf_statement_walk(
                 "observer_state_unequal_bytes": moved_eager,
                 "rows": eager_rows, "slope_first_non_bit": slope_eager_first,
                 "slope_first_owned_non_bit": slope_eager_first_owned,
-                "slope_rows": slope_eager_rows}},
+                "slope_rows": slope_eager_rows},
+            "carried_mld_production_step_jit": {
+                "observer_state_unequal_bytes": carried_moved_jit,
+                "slope_first_non_bit": carried_jit_first,
+                "slope_first_owned_non_bit": carried_jit_first_owned,
+                "slope_rows": carried_jit_rows},
+            "carried_mld_production_eager": {
+                "observer_state_unequal_bytes": carried_moved_eager,
+                "slope_first_non_bit": carried_eager_first,
+                "slope_first_owned_non_bit": carried_eager_first_owned,
+                "slope_rows": carried_eager_rows}},
         "authoritative_mode": "production_step_jit",
         "first_non_bit_row": (slope_jit_first if slope_oracle is not None
                               else jit_first),
@@ -13594,6 +13665,21 @@ def developed_tracer_ldf_statement_walk(
         "round180_predictions": slope_predictions,
         "all_round180_predictions_confirmed": (
             all(slope_predictions.values()) if slope_predictions else None),
+        "round181_source_recurrence": source_recurrence,
+        "round181_predictions": ({
+            "baseline_nmln_14_columns": (
+                slope_jit_rows["nmln"]["cells_unequal"] == 14
+                and slope_eager_rows["nmln"]["cells_unequal"] == 14),
+            "literal_source_recurrence_bit_exact": (
+                source_recurrence["nmln"]["bit_exact"]
+                and source_recurrence["hmlp"]["bit_exact"]),
+            "carried_n2_makes_nmln_bit_exact": (
+                carried_jit_rows["nmln"]["bit_exact"]
+                and carried_eager_rows["nmln"]["bit_exact"]),
+            "carried_n2_makes_hmlp_bit_exact": (
+                carried_jit_rows["hmlp"]["bit_exact"]
+                and carried_eager_rows["hmlp"]["bit_exact"]),
+        } if slope_oracle is not None else {}),
         "compiled_source": {
             "call": "stprk3_stg.f90:928-934",
             "slope_call": "stprk3.f90:178",

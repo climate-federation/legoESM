@@ -431,7 +431,8 @@ def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c,
 
 
 def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
-                               active_3d=None, jacobian=None):
+                               active_3d=None, jacobian=None,
+                               n2_override=None, e3w_override=None):
     """Mixed-layer depth [m] via NEMO's EXACT zdfmxl N^2-integral criterion.
 
     NEMO (``zdfmxl.F90:91-105``, 5.0.2) integrates the POSITIVE buoyancy
@@ -543,6 +544,22 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     # MLD columns whose below-threshold decisions otherwise matched NEMO.
     if not _use_nemo_bn2:
         e3w = z_centers[1:] - z_centers[:-1]         # (nlev-1,)
+    if n2_override is not None:
+        n2_int = jnp.asarray(n2_override, dtype=dtype)
+        if n2_int.shape[-1] == nlev:
+            n2_int = n2_int[..., 1:]
+        elif n2_int.shape[-1] != nlev - 1:
+            raise ValueError(
+                "n2_override must contain nlev or nlev-1 W levels, got "
+                f"{n2_int.shape[-1]} for nlev={nlev}")
+    if e3w_override is not None:
+        e3w = jnp.asarray(e3w_override, dtype=dtype)
+        if e3w.shape[-1] == nlev:
+            e3w = e3w[..., 1:]
+        elif e3w.shape[-1] != nlev - 1:
+            raise ValueError(
+                "e3w_override must contain nlev or nlev-1 W levels, got "
+                f"{e3w.shape[-1]} for nlev={nlev}")
     # The MLD CRITERION is thickness-free, and that is not an approximation --
     # it is an identity in NEMO.  eosbn2 divides by the live e3w and zdfmxl
     # multiplies it straight back:
@@ -643,7 +660,8 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
 
 
 def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
-              g=constants.g, rho_0=_RHO_0, active_3d=None, jacobian=None):
+              g=constants.g, rho_0=_RHO_0, active_3d=None, jacobian=None,
+              n2_override=None, e3w_override=None):
     """Dispatch the NEMO zdfmxl mixed-layer depth by criterion (raise on typo).
 
     ``"rho_c"`` (default, byte-identical) = potential-density difference;
@@ -657,7 +675,8 @@ def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
     if criterion == "n2_integral":
         return _nemo_mld_from_n2_integral(
             T, S, mask, z_coord, eos_fn, rho_c, g, rho_0, active_3d=active_3d,
-            jacobian=jacobian)
+            jacobian=jacobian, n2_override=n2_override,
+            e3w_override=e3w_override)
     raise ValueError(
         f"unknown GMRediConfig.mld_criterion {criterion!r}; "
         "expected 'rho_c' or 'n2_integral'.")
@@ -1204,7 +1223,8 @@ def compute_nemo_native_slopes(
     # helper: ``first`` = first stratified cell = 0-based nmln).
     hml, m_base = _nemo_mld(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
-        g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian)
+        g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian,
+        n2_override=pn2_override, e3w_override=e3w_override)
     first = jnp.clip(m_base + 1, 1, nlev - 1) if nmln_override is None else jnp.asarray(nmln_override, dtype=jnp.int32)
     # zhmlpt = gdept(nmln-1,Kmm) = depth of the last T-point inside the ML
     # (ldfslp.F90:143) -- live gdept, so the static per-level gather is
