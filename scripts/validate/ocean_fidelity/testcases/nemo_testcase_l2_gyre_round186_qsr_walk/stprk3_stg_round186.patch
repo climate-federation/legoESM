@@ -31,7 +31,7 @@
                 ENDIF
                 CALL tra_qsr( kstp, Kmm, ts, Krhs )                    ! penetrative solar radiation qsr
 +               IF( lwp .AND. kstp == 1080 .AND. kstg == 3 ) THEN
-+                  CALL qsr_2BD_l2_replay( Kmm, r186_qsr_replay )
++                  CALL qsr_2BD_l2_replay( Kmm, r186_qsr_before, r186_qsr_replay )
 +                  r186_magic = 'NEMO_L2_R186QSR1'
 +                  OPEN( NEWUNIT=r186_unit, FILE='oracle_qsr_walk_kt00001080.bin', ACCESS='STREAM', &
 +                     &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=r186_ios )

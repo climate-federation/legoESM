@@ -8,12 +8,13 @@
  
     !                                 !!* Namelist namtra_qsr: penetrative solar radiation
     LOGICAL , PUBLIC ::   ln_traqsr    !: light absorption (qsr) flag
-@@ -1440,4 +1440,38 @@
+@@ -1440,4 +1440,39 @@
     END SUBROUTINE tra_qsr_init
 +
-+   SUBROUTINE qsr_2BD_l2_replay( Kmm, pinc )
++   SUBROUTINE qsr_2BD_l2_replay( Kmm, pbefore, pinc )
 +      !! Post-call diagnostic replay of the compiled qsr_2BD statements.
 +      INTEGER, INTENT(in) :: Kmm
++      REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: pbefore
 +      REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(out) :: pinc
 +      INTEGER :: ji, jj, jk
 +      REAL(wp) :: zzatt, zz0, zz1, ze3t
@@ -31,7 +32,7 @@
 +            ze3t = e3t_3d(ji,jj,jk) * (1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))
 +            zzatt = ( zz0 * EXP( -(gdepw_1d(jk+1)*(1._wp+r3t(ji,jj,Kmm)))*r1_si0 ) &
 +               &    + zz1 * EXP( -(gdepw_1d(jk+1)*(1._wp+r3t(ji,jj,Kmm)))*r1_si1 ) ) * wmask(ji,jj,jk+1)
-+            pinc(ji,jj,jk) = qsr(ji,jj) * ( zatt(ji,jj) - zzatt ) / ze3t
++            pinc(ji,jj,jk) = ( pbefore(ji,jj,jk) + qsr(ji,jj) * ( zatt(ji,jj) - zzatt ) / ze3t ) - pbefore(ji,jj,jk)
 +            zatt(ji,jj) = zzatt
 +         END DO ; END DO
 +      END DO
@@ -39,7 +40,7 @@
 +         DO jj = ntsj-(0), ntej+(0) ; DO ji = ntsi-(0), ntei+(0)
 +            ze3t = e3t_3d(ji,jj,jk) * (1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))
 +            zzatt = zz1 * EXP( -(gdepw_1d(jk+1)*(1._wp+r3t(ji,jj,Kmm)))*r1_si1 ) * wmask(ji,jj,jk+1)
-+            pinc(ji,jj,jk) = qsr(ji,jj) * ( zatt(ji,jj) - zzatt ) / ze3t
++            pinc(ji,jj,jk) = ( pbefore(ji,jj,jk) + qsr(ji,jj) * ( zatt(ji,jj) - zzatt ) / ze3t ) - pbefore(ji,jj,jk)
 +            zatt(ji,jj) = zzatt
 +         END DO ; END DO
 +      END DO
