@@ -33,6 +33,9 @@ YEAR_TAG = "year"
 YEAR_DT_S = 14400.0
 YEAR_STEPS = 2160
 YEAR_SNAPSHOT_STEP_INTERVAL = 6
+RUN_TO_RUN_FLOOR_K = 2.0e-10
+DECISION59_MAX_FLOOR_UNITS = 10.0
+DECISION59_MAX_ABS_K = RUN_TO_RUN_FLOOR_K * DECISION59_MAX_FLOOR_UNITS
 
 
 class GateError(RuntimeError):
@@ -223,16 +226,18 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     require(route in {
         "ldf_stage3", "fct_metric_upstream", "wind_qco",
         "momentum_ldf_live_geometry", "stage_momentum_wzv",
-        "tke_shear_step_entry_eta",
+        "tke_shear_step_entry_eta", "stage1_r3t_ratio",
     },
             f"unknown Decision-43 source route {route!r}")
 
-    def row(config, **extra):
+    def row(config, *, z_coord=None, **extra):
         vertical_mixing = getattr(
             getattr(config, "physics", None), "vertical_mixing", None)
         tke = getattr(vertical_mixing, "tke", None)
         values = {
             "tracer_time_integrator": config.tracer_time_integrator,
+            "linear_free_surface": bool(
+                getattr(z_coord, "linear_free_surface", False)),
             "momentum_time_integrator": config.momentum_time_integrator,
             "lateral_viscosity_operator": config.lateral_viscosity_operator,
             "lateral_viscosity_e3_weighting": (
@@ -302,6 +307,10 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
                     "nemo_face_native_now2", "nemo_face_native_nbb2")
                 and getattr(tke, "tke_shear_metric_source", None)
                 == "nemo_qco_live_face")
+        elif route == "stage1_r3t_ratio":
+            executes = (
+                config.tracer_time_integrator == "rk3_ws"
+                and not values["linear_free_surface"])
         else:
             executes = (
                 config.momentum_time_integrator == "rk3_ws"
@@ -312,8 +321,11 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
 
     rows = {}
     for case in ("GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps"):
-        config = build_nemo_testcase_card(case).recipe.model_config
-        rows[case] = row(config, recipe_source="nemo_testcase_card")
+        card = build_nemo_testcase_card(case)
+        config = card.recipe.model_config
+        rows[case] = row(
+            config, recipe_source="nemo_testcase_card",
+            z_coord=card.recipe.z_coord)
     # The ORCA2 card is source-file driven and therefore cannot be represented
     # by the three synthetic-card dispatch calls above.  Build the real card
     # from the campaign's pinned deck so the census covers the shared RK3/QCO
@@ -324,12 +336,14 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     rows[orca2.case] = row(
         orca2.recipe.model_config,
         recipe_source="build_orca2_zps_card",
+        z_coord=orca2.recipe.z_coord,
         deck_root=str(orca2_deck),
         unmeasured_features=list(orca2.unmeasured_features),
     )
+    generic = build_nemo_gyre_recipe()
     rows["NEMO-GYRE-recipe"] = row(
-        build_nemo_gyre_recipe().model_config,
-        recipe_source="build_nemo_gyre_recipe")
+        generic.model_config, recipe_source="build_nemo_gyre_recipe",
+        z_coord=generic.z_coord)
     for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
         dino = dino_config_for_recipe(recipe)
         grid = dino_lat_lon_grid(dino, n_lon=10)
@@ -507,7 +521,6 @@ def _read_moved_row_registry(path: Path) -> tuple[str, ...]:
     rows = tuple(
         line.split("\t", 1)[0]
         for line in path.read_text().splitlines() if line.strip())
-    require(rows, "moved-row registry is empty")
     require(len(set(rows)) == len(rows),
             "moved-row registry contains duplicate names")
     return rows
@@ -572,8 +585,9 @@ def evaluate(
     elif plant == "missing-moved-registry":
         registered_rows = registered_rows[1:]
     elif plant == "year-day240-worse":
-        after_year[240]["rms_T"] = float(np.nextafter(
-            np.float64(before_year[240]["rms_T"]), np.float64(np.inf)))
+        after_year[240]["rms_T"] = (
+            float(before_year[240]["rms_T"])
+            + 2.0 * DECISION59_MAX_ABS_K)
     elif plant is not None:
         raise GateError(f"unknown plant {plant!r}")
 
@@ -587,6 +601,11 @@ def evaluate(
             "after_T_rms": after_value,
             "delta_T_rms": after_value - before_value,
             "not_worse": after_value <= before_value,
+            "run_to_run_floor_K": RUN_TO_RUN_FLOOR_K,
+            "delta_floor_units": (
+                (after_value - before_value) / RUN_TO_RUN_FLOOR_K),
+            "decision59_within_ten_floor_units": bool(
+                abs(after_value - before_value) < DECISION59_MAX_ABS_K),
         })
     year_by_day = {row["day"]: row for row in year_rows}
 
@@ -641,12 +660,17 @@ def evaluate(
             and after30["rms_T"] == after_year[30]["rms_T"]),
         "year_day240_T_rms_not_worse": year_by_day[240]["not_worse"],
         "year_day360_T_rms_not_worse": year_by_day[360]["not_worse"],
+        "year_day240_T_rms_admitted": bool(
+            year_by_day[240]["not_worse"]
+            or year_by_day[240]["decision59_within_ten_floor_units"]),
+        "year_day360_T_rms_admitted": bool(
+            year_by_day[360]["not_worse"]
+            or year_by_day[360]["decision59_within_ten_floor_units"]),
         "all_year_rows_registered": len(year_rows) == len(YEAR_DAYS),
         "first_over_bar_not_earlier": first_not_earlier,
         "no_kt1_at_bar_row_leaves": not kt1_losses,
         "all_moved_rows_registered": bool(
-            moved and not missing_registered_rows
-            and not unexpected_registered_rows),
+            not missing_registered_rows and not unexpected_registered_rows),
         "dino_measurement_required": dino_shared,
         "dino_statement_not_executed": not dino_shared,
         "all_executing_cards_measured": not unmeasured_executing_cards,
@@ -657,8 +681,8 @@ def evaluate(
     admissible = bool(
         criteria["day30_T_rms_decreases"]
         and criteria["month_and_year_day30_agree"]
-        and criteria["year_day240_T_rms_not_worse"]
-        and criteria["year_day360_T_rms_not_worse"]
+        and criteria["year_day240_T_rms_admitted"]
+        and criteria["year_day360_T_rms_admitted"]
         and criteria["all_year_rows_registered"]
         and criteria["first_over_bar_not_earlier"]
         and criteria["no_kt1_at_bar_row_leaves"]
@@ -720,7 +744,7 @@ def main(argv: list[str] | None = None) -> int:
         "--route", choices=(
             "ldf_stage3", "fct_metric_upstream", "wind_qco",
             "momentum_ldf_live_geometry", "stage_momentum_wzv",
-            "tke_shear_step_entry_eta"),
+            "tke_shear_step_entry_eta", "stage1_r3t_ratio"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],

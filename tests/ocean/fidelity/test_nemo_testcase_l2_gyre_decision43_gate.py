@@ -190,6 +190,67 @@ def test_stage_momentum_census_builds_real_orca2_card():
     assert orca2["unmeasured_features"]
 
 
+def test_stage1_r3t_ratio_execution_is_recipe_derived():
+    module = _module()
+    cards = module._card_execution("stage1_r3t_ratio")
+    executing = {
+        name for name, row in cards.items() if row["executes_route"]}
+
+    assert executing == {
+        "GYRE-zco", "LOCK_EXCHANGE-zco", "ORCA2-zps", "OVERFLOW-zps"}
+    assert cards["NEMO-GYRE-recipe"]["linear_free_surface"] is True
+    assert cards["NEMO-GYRE-recipe"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm"]["tracer_time_integrator"] == "euler"
+    assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
+
+
+def test_zero_ladder_moves_are_vacuously_registered(monkeypatch):
+    module = _module()
+    monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
+    comparison = _comparison()
+    comparison["field_moves"] = []
+    report = module.evaluate(
+        comparison, _day(1.0), _day(0.1),
+        _year(1.0, "b" * 40), _year(0.1, "c" * 40),
+        expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
+        registered_rows=())
+    assert report["status"] == "PASS"
+    assert report["criteria"]["all_moved_rows_registered"] is True
+
+
+def test_decision59_admits_only_strictly_sub_ten_floor_unit_year_moves(
+        monkeypatch):
+    module = _module()
+    monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
+    before = _year(1.0, "b" * 40)
+    within = _year(1.0, "c" * 40)
+    for row in within["rows"]:
+        if row["day"] in (240, 360):
+            row["rms_T"] += np.nextafter(
+                module.DECISION59_MAX_ABS_K, 0.0)
+    passed = module.evaluate(
+        _comparison(), _day(1.0), _day(0.1), before, within,
+        expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
+        registered_rows=_registry())
+    assert passed["status"] == "PASS"
+    assert passed["criteria"]["year_day240_T_rms_not_worse"] is False
+    assert passed["criteria"]["year_day240_T_rms_admitted"] is True
+
+    outside = _year(1.0, "c" * 40)
+    for row in outside["rows"]:
+        if row["day"] in (240, 360):
+            row["rms_T"] += 2.0 * module.DECISION59_MAX_ABS_K
+    failed = module.evaluate(
+        _comparison(), _day(1.0), _day(0.1), before, outside,
+        expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
+        registered_rows=_registry())
+    assert failed["status"] == "FAIL"
+    assert failed["criteria"]["year_day240_T_rms_admitted"] is False
+
+
 def test_tke_shear_step_entry_eta_execution_is_recipe_derived():
     module = _module()
     cards = module._card_execution("tke_shear_step_entry_eta")
