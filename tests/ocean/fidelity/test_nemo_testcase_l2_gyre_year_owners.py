@@ -505,6 +505,22 @@ def test_round124_lego_process_budget_closes_and_ulp_control_moves(harness):
         rows["surface_boundary"], inert["surface_boundary"], mask) == 0
 
 
+def test_process_rounding_closes_the_paired_interval_directly(harness):
+    target = np.asarray([1.0, -1.0], dtype=np.float64)
+    rows = {
+        "incoming": np.asarray([1.0e16, -1.0e16], dtype=np.float64),
+        "shortwave": np.asarray([-1.0e16, 1.0e16], dtype=np.float64),
+        "surface_boundary": np.asarray([0.25, -0.25], dtype=np.float64),
+    }
+    rounding, reconstructed = harness._explicit_process_rounding(target, rows)
+    assert np.array_equal(reconstructed, target)
+    assert np.any(rounding != 0.0)
+    without_rounding = np.zeros_like(target)
+    for values in rows.values():
+        without_rounding += values
+    assert not np.array_equal(without_rounding, target)
+
+
 def test_round124_effect_control_reaches_downstream_not_carried_state(harness):
     from types import SimpleNamespace
 

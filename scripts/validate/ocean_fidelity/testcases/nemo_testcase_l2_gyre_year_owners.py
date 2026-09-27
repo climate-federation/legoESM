@@ -1855,6 +1855,17 @@ def _projection(component: np.ndarray, endpoint: np.ndarray,
     return fraction * endpoint_rms, fraction
 
 
+def _explicit_process_rounding(target: np.ndarray,
+                               physical_rows: dict[str, np.ndarray],
+                               ) -> tuple[np.ndarray, np.ndarray]:
+    """Close the paired interval directly, without differencing closures."""
+    subtotal = np.zeros_like(target)
+    for values in physical_rows.values():
+        subtotal = subtotal + values
+    rounding = target - subtotal
+    return rounding, subtotal + rounding
+
+
 def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
                          expected_commit: str, *, expected_day240_rms: float,
                          process_start_step: int = PROCESS_START_STEP,
@@ -1998,10 +2009,8 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
     component = {"incoming": lego_start - nemo_start}
     for name in PROCESS_ROWS:
         component[name] = components_lego[name] - components_nemo[name]
-    component["rounding_closure"] = closure_lego - closure_nemo
-    reconstruction = np.zeros_like(endpoint)
-    for values in component.values():
-        reconstruction = reconstruction + values
+    component["rounding_closure"], reconstruction = (
+        _explicit_process_rounding(interval_endpoint, component))
     reconstruction_residual = interval_endpoint - reconstruction
     max_reconstruction = float(np.max(np.abs(reconstruction_residual[wet3])))
     require(max_reconstruction <= 4.0e-15,
@@ -2016,7 +2025,13 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
                               - sum_rows(block_lego[block]))
         local_nemo_closure = ((block_end_nemo[block] - block_start_nemo[block])
                               - sum_rows(block_nemo[block]))
-        item["rounding_closure"] = local_lego_closure - local_nemo_closure
+        block_target = ((block_end_lego[block] - block_end_nemo[block])
+                        - (block_start_lego[block] - block_start_nemo[block]))
+        item["rounding_closure"], block_reconstruction = (
+            _explicit_process_rounding(block_target, item))
+        require(float(np.max(np.abs(
+            (block_target - block_reconstruction)[wet3]))) <= 4.0e-15,
+                f"ten-day block {block} fails explicit rounding closure")
         block_components.append(item)
 
     regions = _regions(lat, wet2)
@@ -2127,6 +2142,8 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
             "max_abs_reconstruction_residual_K": max_reconstruction,
             "lego_interval_closure_rms_K": _rms(closure_lego, wet3),
             "nemo_interval_closure_rms_K": _rms(closure_nemo, wet3),
+            "differenced_model_closures_rms_K": _rms(
+                closure_lego - closure_nemo, wet3),
             "signed_carry_sum_K": signed_sum,
             "projected_interval_carry_K": projected_interval_carry,
             "expected_projected_interval_carry_K": required_interval_carry,
