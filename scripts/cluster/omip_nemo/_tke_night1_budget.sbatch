@@ -63,7 +63,7 @@ $PY -u scripts/validate/ocean_fidelity/compare_tendencies_nemo.py \
   --vfile $D/ORCA1_1h_20000101_20000102_trd1h_V.nc \
   --rec 13 --skip-maps --mxl-choice $MXL --iwm-backgrounds \
   --restart-npz $D/restart_288_full.npz --restart-next-npz "$NEXT" \
-  --mode-a-iterations 1 --mode-a-dt $DT --mode-a-budget ${INCLUDE_EVD:+--mode-a-include-evd} \
+  --mode-a-iterations 1 --mode-a-dt $DT --mode-a-budget --mode-a-budget-levels ${LEVELS:-8} ${INCLUDE_EVD:+--mode-a-include-evd} \
   --output-dir "$OUT"
 rc=$?
 echo "=== card exit: $rc ==="

@@ -1122,6 +1122,9 @@ def main():
                          "values integrate to the equation's own fixed point.")
     ap.add_argument("--mode-a-dt", type=float, default=3600.0,
                     help="Mode-A step length [s] (default 3600 = NEMO's).")
+    ap.add_argument("--mode-a-budget-levels", type=int, default=8,
+                    help="Number of interfaces (from the surface) in the "
+                         "--mode-a-budget table (default 8 = the top ~11 m).")
     ap.add_argument("--mode-a-include-evd", action="store_true",
                     help="Keep columns where NEMO's EVD is active (avt > 1 "
                          "somewhere) in the mode-A box. Default excludes them "
@@ -1357,7 +1360,7 @@ def main():
                      ("dissipation", "dissipation"), ("transport", "transport"),
                      ("external(LC)", "external"), ("etau", "etau"),
                      ("floor", "floor"), ("pin", "pin")]
-            for k in range(min(8, eseed2.shape[1])):
+            for k in range(min(args.mode_a_budget_levels, eseed2.shape[1])):
                 _sel = _box & np.isfinite(eseed2[:, k]) & (eseed2[:, k] > 0)
                 if not _sel.any():
                     continue
