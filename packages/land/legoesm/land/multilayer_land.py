@@ -44,7 +44,7 @@ from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import solve_soil_thermal
+from legoesm.land.soil_thermal import moisture_fusion_heat_source, solve_soil_thermal
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
     intercept_rain,
@@ -548,7 +548,8 @@ def _step_multilayer_land_impl(
     _lp_soil = None          # two-leaf: params with soil bands at start-of-step water
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
-        # advances soil thermal tentatively between passes.
+        # advances soil thermal tentatively between passes.  These run before
+        # Richards on unchanged theta, so they carry no moisture fusion source.
         def _soil_thermal_cb(G, dt_):
             T_tent = solve_soil_thermal(
                 T_soil, theta, grid,
@@ -1092,11 +1093,19 @@ def _step_multilayer_land_impl(
     # top-layer instability.  None for the two-leaf canopy (its Newton closure owns
     # the coupling) and for slab builds that leave it unset -> explicit BC, unchanged.
     G_surface = G_surface + evap_excess_energy
+    # Fusion heat of the ice change Richards made at fixed T (evaluated at the
+    # start-of-step T the apparent heat capacity uses).
+    _fusion_source = (
+        moisture_fusion_heat_source(
+            T_soil, theta, richards_out.theta_new, dz,
+            config.thermal, dt)
+        if config.thermal.enable_freeze_thaw else None)
     T_soil_new = solve_soil_thermal(
         T_soil, richards_out.theta_new, grid,
         config.hydraulics, config.thermal,
         G_surface, dt,
         surface_conductance=surface_out.surface_conductance,
+        layer_source=_fusion_source,
     )
 
     # --- Advance the 30-day TgC EMA (only when state carries it) ---

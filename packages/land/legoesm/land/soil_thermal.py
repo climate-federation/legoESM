@@ -23,7 +23,10 @@ to O(dt) per step (exact in the linearised metric — see
 reduces EXACTLY to sensible-heat diffusion (bit-identical to prior behaviour).
 
 Scope of this first implementation: THERMAL freeze/thaw only (the dominant
-zero-curtain physics).  Two coupled refinements are deliberately NOT included
+zero-curtain physics).  Water moved by Richards at fixed temperature changes
+the diagnosed ice without any temperature change; its fusion heat enters the
+final thermal solve as an explicit per-layer source
+(``moisture_fusion_heat_source``).  Two coupled refinements are deliberately NOT included
 and are tracked follow-ups: (a) ice-aware thermal CONDUCTIVITY (frozen soil
 conducts better, k_ice ~ 2.0 vs k_water ~ 0.57) — the conductivity still uses
 total ``theta``; (b) hydraulic IMMOBILISATION of the ice fraction in Richards
@@ -204,6 +207,37 @@ def liquid_water_content(
     return theta_liq, dtheta_liq_dT
 
 
+def moisture_fusion_heat_source(
+    T_soil: jnp.ndarray,
+    theta_old: jnp.ndarray,
+    theta_new: jnp.ndarray,
+    dz: jnp.ndarray,
+    thermal_config: SoilThermalConfig,
+    dt: float,
+) -> jnp.ndarray:
+    """Fusion heat [W/m2 per layer, + = heating] of the ice change caused by a
+    soil-water change at FIXED temperature.
+
+    The apparent heat capacity only charges latent heat for ice that changes
+    with T.  When water moves (infiltration, drainage, root uptake,
+    evaporation) at fixed T, the diagnosed ice ``theta - theta_liq(T, theta)``
+    changes too, with no fusion heat — an enthalpy leak.  This returns
+    ``rho_water * L_f * [ice(T, theta_new) - ice(T, theta_old)] * dz / dt``:
+    ice created releases heat, ice removed absorbs it.  ``T_soil`` MUST be the
+    same start-of-step temperature at which the solver's apparent heat
+    capacity is evaluated; the identity closed is the solver's linearised one.
+
+    Conventions (pre-existing, not changed here): moving water carries no
+    sensible heat; ice removed by drainage / roots / evaporation is paid for
+    in L_f by the layer it leaves.
+    """
+    liq_old, _ = liquid_water_content(T_soil, theta_old, thermal_config)
+    liq_new, _ = liquid_water_content(T_soil, theta_new, thermal_config)
+    d_ice = (theta_new - liq_new) - (theta_old - liq_old)
+    # Sign: freezing (d_ice > 0) releases latent heat into the layer.
+    return constants.rho_water * constants.L_f * d_ice * dz / dt
+
+
 def compute_apparent_heat_capacity(
     T_soil: jnp.ndarray,
     theta: jnp.ndarray,
@@ -298,6 +332,7 @@ def solve_soil_thermal(
     G_surface: jnp.ndarray,
     dt: float,
     surface_conductance: jnp.ndarray | None = None,
+    layer_source: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Solve soil heat diffusion for one time step (backward Euler).
 
@@ -328,6 +363,10 @@ def solve_soil_thermal(
         instead of overshooting and diverging.  ``None`` (default) reduces
         EXACTLY to the explicit Neumann ground-heat-flux BC (bit-identical for
         every existing caller).
+    layer_source : jnp.ndarray, optional
+        Explicit per-layer heat source [W/m2 of column, positive = heating],
+        shape (ncol, n_layers), added to each layer's RHS.  ``None`` (default)
+        adds nothing (bit-identical).  See ``moisture_fusion_heat_source``.
 
     Returns
     -------
@@ -388,6 +427,9 @@ def solve_soil_thermal(
 
     # Bottom BC: geothermal heat flux (Neumann, positive into soil)
     rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
+
+    if layer_source is not None:
+        rhs = rhs + layer_source
 
     # Assemble full arrays via ``jnp.pad`` — one Pad HLO op per
     # diagonal vs ``zeros + .at[].set`` (alloc + scatter).
