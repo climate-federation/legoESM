@@ -206,6 +206,7 @@ train_windows:
 eval_years:
 - 2020
 era5_cadence_hours: 6
+smoke_radiation: rrtmgp
 n_epochs: 12
 optimizer: adamw
 lr: 0.0015
