@@ -46,6 +46,21 @@ def test_active_u_one_ulp_plant_fires_exactly_once():
     assert rows[0]["n_unequal"] == 1
 
 
+def test_plant_adds_one_refusal_when_baseline_has_signed_zero_debt():
+    before = np.zeros((2, 3, 2), dtype=np.float64)
+    after = before.copy()
+    after[0, 0, 0] = -0.0
+    masks = {
+        "u": np.ones_like(before, dtype=bool),
+        "v": np.zeros_like(before, dtype=bool),
+    }
+    clean = gate._vorticity_rows(_record(before, after), masks, plant=False)[0]
+    planted = gate._vorticity_rows(_record(before, after), masks, plant=True)[0]
+    assert clean["n_unequal"] == 1
+    assert clean["signed_zero_unequal"] == 1
+    assert planted["n_unequal"] == clean["n_unequal"] + 1
+
+
 def test_nonzero_vorticity_delta_refuses_exact_bar():
     before = np.arange(12, dtype=np.float64).reshape(2, 3, 2)
     after = before.copy()

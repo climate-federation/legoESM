@@ -79,14 +79,39 @@ def _require_executed_branch(card) -> dict:
 def _vorticity_rows(momentum: dict, masks: dict, *, plant: bool) -> list[dict]:
     """Score NEMO's VOR accumulator against the zero-addend replay."""
     stage2 = momentum[2]
+    oracle_u = _nemo_owned(stage2["after_vor_u"])
+    replay_u = _nemo_owned(stage2["after_hpg_u"])
+    active_u = np.asarray(masks["u"], dtype=bool)
+    require(oracle_u.shape == replay_u.shape == active_u.shape,
+            "vorticity u replay shape drift")
+    original_bits = replay_u.view(np.uint64)
+    oracle_bits = oracle_u.view(np.uint64)
+    baseline_unequal = active_u & (original_bits != oracle_bits)
+    if plant:
+        equal = active_u & ~baseline_unequal
+        require(equal.any(), "no equal active u cell is available for the plant")
+        replay_u = replay_u.copy()
+        at = tuple(np.argwhere(equal)[0])
+        replay_u[at] = np.nextafter(replay_u[at], np.float64(np.inf))
+        require(replay_u[at] != _nemo_owned(stage2["after_hpg_u"])[at],
+                "active-u plant did not move")
+    u_row = _score(
+        "given.s2.vor.u", oracle_u, replay_u, active_u)
+    unequal = active_u & (replay_u.view(np.uint64) != oracle_bits)
+    if unequal.any():
+        first = tuple(int(i) for i in np.argwhere(unequal)[0])
+        u_row["first_unequal"] = list(first)
+    zero_delta = active_u & (oracle_u == 0.0) & (replay_u == 0.0)
+    u_row["signed_zero_unequal"] = int(np.count_nonzero(
+        zero_delta & (replay_u.view(np.uint64) != oracle_bits)))
+    u_row["replay_positive_zero_oracle_negative_zero"] = int(np.count_nonzero(
+        zero_delta & ~np.signbit(replay_u) & np.signbit(oracle_u)))
+    u_row["replay_negative_zero_oracle_positive_zero"] = int(np.count_nonzero(
+        zero_delta & np.signbit(replay_u) & ~np.signbit(oracle_u)))
+    u_row["plant"] = plant
+    u_row["baseline_n_unequal"] = int(np.count_nonzero(baseline_unequal))
     return [
-        _score(
-            "given.s2.vor.u",
-            _nemo_owned(stage2["after_vor_u"]),
-            _nemo_owned(stage2["after_hpg_u"]),
-            masks["u"],
-            plant=plant,
-        ),
+        u_row,
         _score(
             "given.s2.vor.v",
             _nemo_owned(stage2["after_vor_v"]),
@@ -136,8 +161,8 @@ def run(root: Path, expect_commit: str, plant: str | None) -> dict:
     rows = _vorticity_rows(momentum, masks, plant=plant == "vor_u")
     u_row, v_row = rows
     if plant == "vor_u":
-        require(u_row["n_unequal"] == 1,
-                "one-ULP active-u vorticity plant did not fire exactly once")
+        require(u_row["n_unequal"] == u_row["baseline_n_unequal"] + 1,
+                "one-ULP active-u vorticity plant did not add one refusal")
         status = "PLANTED_REFUSAL"
     else:
         status = "AT_BAR" if (
@@ -168,7 +193,8 @@ def run(root: Path, expect_commit: str, plant: str | None) -> dict:
         "vorticity_rows": rows,
         "R52-P1": "CONFIRMED",
         "R52-P2": "CONFIRMED" if status == "AT_BAR" else "REFUTED",
-        "R52-P3": "CONFIRMED" if plant == "vor_u" else "NOT_RUN",
+        "R52-P3": "REFUTED_PREMISE_BUT_CONTROL_FIRES" if plant == "vor_u"
+        else "NOT_RUN",
         "R52-P4": "UNMEASURED_UNTIL_FINAL_DIFF",
         "plant": plant,
     }
