@@ -294,12 +294,21 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
     require(float(np.max(np.ptp(dx, axis=1)) / np.max(dx)) < 1.0e-12,
             "the x spacing varies along a row, so an unweighted zonal mean is "
             "not a zonal mean; weight by dx before using it")
+    # The section ratio weights rows by layer thickness only, which is an AREA
+    # weighting only while the rows are equally tall.  On this card they are
+    # (dy is 106 km everywhere, measured); on a stretched grid the small
+    # high-latitude rows would be over-weighted, so this refuses instead.
+    dy_t = np.asarray(card.recipe.grid.dy_T, dtype=np.float64)
+    require(float(np.ptp(dy_t) / np.max(dy_t)) < 1.0e-12,
+            "the y spacing varies, so weighting the zonal-mean section by dz "
+            "alone over-weights the narrow rows; weight by row area x dz")
     started = time.time()
 
     clim_months = list(range(clim_first_month, months + 1))
     series: dict[str, list] = {key: [] for key in (
         "month", "day", "T3D_rms", "S3D_rms",
         "T3D_rms_volume_weighted", "S3D_rms_volume_weighted",
+        "SST_rms", "SSS_rms", "SSH_rms",
         "lego_T3D_monthly_change", "nemo_T3D_monthly_change",
         "lego_S3D_monthly_change", "nemo_S3D_monthly_change",
         "lego_T_volmean", "nemo_T_volmean", "lego_S_volmean", "nemo_S_volmean",
@@ -352,6 +361,17 @@ def score(lego_root: Path, nemo_dir: Path, *, months: int = DECADE_MONTHS,
         for name in ("T", "S"):
             series[f"{name}3D_rms_volume_weighted"].append(_weighted_rms(
                 states["lego"][name] - states["nemo"][name], volume3, wet3))
+        # The INSTANTANEOUS surface difference, month by month.  The
+        # climatology rows below take an RMS AFTER averaging 108 snapshots, so
+        # monthly errors of opposite sign would cancel and leave an excellent
+        # climatological ratio on top of poor instantaneous agreement.  These
+        # three rows are how a reader tells the two apart.
+        for label, field in (("SST", "T"), ("SSS", "S")):
+            series[f"{label}_rms"].append(_weighted_rms(
+                states["lego"][field][..., 0] - states["nemo"][field][..., 0],
+                area2, wet2))
+        series["SSH_rms"].append(_weighted_rms(
+            states["lego"]["ssh"] - states["nemo"]["ssh"], area2, wet2))
         for side in ("lego", "nemo"):
             state = states[side]
             for name, field in (("T", "T"), ("S", "S")):
