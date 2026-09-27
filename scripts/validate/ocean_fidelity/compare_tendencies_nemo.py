@@ -1122,6 +1122,12 @@ def main():
                          "values integrate to the equation's own fixed point.")
     ap.add_argument("--mode-a-dt", type=float, default=3600.0,
                     help="Mode-A step length [s] (default 3600 = NEMO's).")
+    ap.add_argument("--mode-a-include-evd", action="store_true",
+                    help="Keep columns where NEMO's EVD is active (avt > 1 "
+                         "somewhere) in the mode-A box. Default excludes them "
+                         "(the daytime 'calm' seed); at night the equatorial "
+                         "box is EVD-active almost everywhere, so the night "
+                         "budget needs them.")
     ap.add_argument("--mode-a-budget", action="store_true",
                     help="Mode-A: print the per-term TKE budget of ONE step at "
                          "NEMO's seed (TKEStepBudget) beside NEMO's own terms "
@@ -1292,7 +1298,9 @@ def main():
         # 30 m means our equation holds NEMO's energy on NEMO's own state.
         _lon_col = d["lon"].reshape(-1) % 360.0
         _box = (wet_pair.any(axis=1) & (np.abs(lat_col) <= 2.0)
-                & (_lon_col >= 220.0) & (_lon_col <= 240.0) & ~evd_cols)
+                & (_lon_col >= 220.0) & (_lon_col <= 240.0))
+        if not args.mode_a_include_evd:
+            _box &= ~evd_cols
         print(f"\n[mode-a-en] {int(_box.sum())} calm columns 220-240E |lat|<=2; "
               f"{args.mode_a_iterations} step(s) x {args.mode_a_dt:g} s = "
               f"{args.mode_a_iterations * args.mode_a_dt / 3600.0:.1f} h on the "
