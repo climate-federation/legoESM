@@ -685,6 +685,20 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/ldfslp.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo"
         "/ldfslp.f90"),
+    # Round 180 reads the exact passive build that produced its admitted
+    # developed native-slope causal stream.
+    "GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo"
+        "/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/ldfslp.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo"
+        "/ldfslp.f90"),
+    "GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfphy.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo"
+        "/zdfphy.f90"),
+    "GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfmxl.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo"
+        "/zdfmxl.f90"),
     # Round 154 reads the exact instrumented build that produced the admitted
     # developed FCT record; its added observation calls shift FCT line numbers.
     "GYRE_OMIP_L2_P3_SM_R153FCTD/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -1156,6 +1170,25 @@ CITATION_MAP = {
         'uslp(ji,jj,jk) = z1_16',
         '&                   * ( umask(ji,jj  ,jk) + umask(ji,jj  ,jk+1) ) * 0.5_wp',
         7],
+    # --- round 180: developed native-slope causal walk ---
+    'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/stprk3.f90:173-180': [
+        'IF( l_ldfslp ) THEN', ('ENDIF', 7), 8],
+    'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/ldfslp.f90:187-229': [
+        '! nmln calculation in zdfmxl is only on internal points',
+        ('END DO   ;   END DO', 5), 43],
+    'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/ldfslp.f90:231-261': [
+        'iikm1 = 1   ;   iik = 2',
+        ('END DO   ;   END DO', 8), 31],
+    'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/ldfslp.f90:270-361': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 2),
+        ('END DO   ;   END DO', 10), 92],
+    'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfphy.f90:326-330': [
+        '! Update top/bottom drag',
+        'CALL zdf_mxl( kt, Kmm )                        !* mixed layer depth, and level',
+        5],
+    'GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfmxl.f90:109-124': [
+        '! w-level of the mixing and mixed layers',
+        ('END DO   ;   END DO', 3), 16],
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:167': (
         'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
     'GYRE_OMIP_L2_P3_SM_R177TRALDF/BLD/ppsrc/nemo/traldf_iso.f90:215-250': [
