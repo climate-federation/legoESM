@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=32:00:00
+#SBATCH --time=40:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/trp_nosmag90_%j.out
 #
 # THE PRODUCTION CONTROL, RE-RUN WITH THE WINDOW MEAN.
