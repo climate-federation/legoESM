@@ -323,9 +323,14 @@ def run(deck_root: Path, boundary_root: Path, ranked_root: Path,
     literal_rhs_arm = round14._source_sum(
         candidate_u["e3"], oracle_u["krhs"], candidate_u["mask"],
         candidate_u["r1_h0"])
+    literal_e3_arm = round14._source_sum(
+        oracle_u["e3"], candidate_u["krhs"], candidate_u["mask"],
+        candidate_u["r1_h0"])
     arms = {
         "parent_depth_vs_record": _support_row(
             literal_parent, oracle_u["depth_mean"], support_rows),
+        "recorded_e3_only_vs_record": _support_row(
+            literal_e3_arm, oracle_u["depth_mean"], support_rows),
         "recorded_rhs_only_vs_record": _support_row(
             literal_rhs_arm, oracle_u["depth_mean"], support_rows),
     }
