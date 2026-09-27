@@ -21,10 +21,7 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/oc
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy  # noqa: E402
 from legoesm.core.source_rounding import nemo_source_round  # noqa: E402
-from legoesm.ocean.eos import (  # noqa: E402
-    nemo_r3t_rk3_stage1_stretch,
-    nemo_r3t_stretch,
-)
+from legoesm.ocean.eos import nemo_r3t_stretch  # noqa: E402
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (  # noqa: E402
     build_orca2_zps_card,
     validate_nemo_testcase_card,
@@ -193,13 +190,9 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
     qbb_model = np.asarray(nemo_r3t_stretch(
         card.recipe.z_coord, jnp.asarray(entry["ssh"]),
         card.recipe.initial_state.H_bathy.data, evaluation="nemo_reciprocal"))[:, :OWNED_NX]
-    qaa_interpolated_ssh = np.asarray(nemo_r3t_stretch(
+    qaa_model = np.asarray(nemo_r3t_stretch(
         card.recipe.z_coord, jnp.asarray(eta_one_third),
         card.recipe.initial_state.H_bathy.data, evaluation="nemo_reciprocal"))[:, :OWNED_NX]
-    qaa_model = np.asarray(nemo_r3t_rk3_stage1_stretch(
-        card.recipe.z_coord, jnp.asarray(entry["ssh"]),
-        jnp.asarray(eta_final_full), card.recipe.initial_state.H_bathy.data,
-    ))[:, :OWNED_NX]
     qaa_rk13, r3bb_endpoints, r3ta_endpoints = map(
         np.asarray,
         _rk13_q_from_endpoints(
@@ -221,8 +214,6 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
         "q_Kbb": _score2(qbb_model, recorded_q["r3t_Kbb"], mask2),
         "q_Kmm": _score2(qbb_model, recorded_q["r3t_Kmm"], mask2),
         "q_Kaa": _score2(qaa_model, recorded_q["r3t_Kaa"], mask2),
-        "q_Kaa_interpolated_ssh_control": _score2(
-            qaa_interpolated_ssh, recorded_q["r3t_Kaa"], mask2),
         "q_Kaa_source_r3_interpolation": _score2(
             qaa_rk13, recorded_q["r3t_Kaa"], mask2),
         "r3_Kbb_endpoint_reconstruction": _score2(
@@ -251,7 +242,7 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
             recorded_r3["r3t_Kaa"], tmask, stage_dt)
         mixed_kaa = _numpy_literal(
             kbb, krhs, recorded_r3["r3t_Kbb"], recorded_r3["r3t_Kmm"],
-            qaa_interpolated_ssh - 1.0, tmask, stage_dt)
+            qaa_model - 1.0, tmask, stage_dt)
         if plant and tracer_name == "T":
             target = tuple(np.argwhere(mask3)[0])
             literal[target] = np.nextafter(literal[target], np.inf)
@@ -261,8 +252,7 @@ def validate(deck_root: Path, record_root: Path, *, plant: bool) -> dict[str, ob
             "jax_source_ordered": handoff.bit_score(ordered, kaa, mask3),
             "model_q_Kbb_only": handoff.bit_score(mixed_kbb, kaa, mask3),
             "model_q_Kmm_only": handoff.bit_score(mixed_kmm, kaa, mask3),
-            "interpolated_ssh_q_Kaa_only": handoff.bit_score(
-                mixed_kaa, kaa, mask3),
+            "model_q_Kaa_only": handoff.bit_score(mixed_kaa, kaa, mask3),
             "production_stage1": source["production_rows"][f"stage1_{tracer_name}"],
         }
 

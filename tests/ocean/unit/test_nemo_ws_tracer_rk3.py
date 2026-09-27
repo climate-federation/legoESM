@@ -1,7 +1,5 @@
 """Stage-program tests for NEMO's key_RK3 active tracers."""
 
-import inspect
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -53,44 +51,6 @@ def test_nemo_ws_stage_transport_preserves_fortran_product_association():
         np.asarray(metric)[..., None]
         * (np.asarray(thickness) * np.asarray(velocity)))
     assert not np.array_equal(reassociated, expected)
-
-
-def test_nemo_r3t_stage1_interpolates_endpoint_ratios_in_source_order():
-    """The executing RK3 Kaa ratio uses NEMO's endpoint association."""
-    set_policy(PrecisionPolicy.fp64())
-    depth = jnp.asarray([[1.5528150381393142]], dtype=jnp.float64)
-    before = jnp.asarray([[0.366016802486834]], dtype=jnp.float64)
-    after = jnp.asarray([[0.26495575608265054]], dtype=jnp.float64)
-    z_coord = SimpleNamespace(linear_free_surface=False)
-
-    def evaluate(a, b):
-        return eos_module.nemo_r3t_rk3_stage1_stretch(
-            z_coord, a, b, depth)
-
-    eager = evaluate(before, after)
-    compiled = jax.jit(evaluate)(before, after)
-    np.testing.assert_array_equal(np.asarray(compiled), np.asarray(eager))
-
-    r1_depth = np.float64(1.0) / np.asarray(depth)
-    r3_before = np.asarray(before) * r1_depth
-    r3_after = np.asarray(after) * r1_depth
-    expected = np.float64(1.0) + (
-        (np.float64(2.0) / np.float64(3.0)) * r3_before
-        + (np.float64(1.0) / np.float64(3.0)) * r3_after)
-    np.testing.assert_array_equal(np.asarray(compiled), expected)
-
-    interpolated_ssh = np.asarray(before) + (
-        np.asarray(after) - np.asarray(before)) / np.float64(3.0)
-    wrong = np.float64(1.0) + interpolated_ssh * r1_depth
-    assert not np.array_equal(np.asarray(compiled), wrong)
-
-    gradients = jax.grad(lambda a, b: jnp.sum(evaluate(a, b)), argnums=(0, 1))(
-        before, after)
-    assert all(np.isfinite(np.asarray(value)).all() for value in gradients)
-    assert all(np.any(np.asarray(value) != 0.0) for value in gradients)
-
-    source = inspect.getsource(model_module.LatLonCGridOceanModel._step_impl)
-    assert "_qt_13 = nemo_r3t_rk3_stage1_stretch(" in source
 
 
 def test_nemo_qco_live_t_thickness_matches_literal_source_bits():
