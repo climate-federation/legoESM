@@ -173,7 +173,8 @@ def _candidate_inputs(model, state) -> dict[str, np.ndarray]:
         geom = pe.compute_frozen_geom_density(
             source_state, grid, z_coord, config)
         active = jnp.asarray(z_coord.is_active)
-        rhd = (jnp.where(active, geom[2], jnp.zeros_like(geom[2]))
+        rhd = (geom[4] if geom[4] is not None else
+               jnp.where(active, geom[2], jnp.zeros_like(geom[2]))
                / config.rho_0)
         eta = source_state.eta.data
         min_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)

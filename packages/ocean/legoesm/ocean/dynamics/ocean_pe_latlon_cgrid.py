@@ -1291,8 +1291,9 @@ def _bc_geometry_and_density(
     Pure substage extracted verbatim from
     ``latlon_cgrid_ocean_baroclinic_tendencies`` (Q8 decomposition; same
     operators + order -> bit-identical). Returns ``(J, h_k, rho_prime,
-    p_prime_filled)``; the in-situ ``rho`` and unfilled ``p_prime`` are not
-    consumed downstream.
+    p_prime_filled, nemo_hpg_rhd)``; the last value is the source-associated
+    EOS80 ratio for NEMO's literal HPG consumer and ``None`` otherwise.  The
+    in-situ ``rho`` and unfilled ``p_prime`` are not consumed downstream.
     """
     # --- 1. Layer thickness and Jacobian ---
     J = compute_ocean_jacobian(
@@ -1355,7 +1356,9 @@ def _bc_geometry_and_density(
         if isinstance(z_coord, OceanPartialCellCoordinate)
         else jnp.broadcast_to(jnp.asarray(mask, dtype=T.dtype)[..., None], T.shape)
     )
-    rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
+    _carry_nemo_hpg_rhd = (
+        config.eos == "nemo_eos80" and _eos_depth == "geometric")
+    _density_result = iterate_eos_and_pressure_anomaly(
         T, S, mask,
         lambda field: neumann_fill_cgrid(field, mask, grid=grid),
         eos_fn, z_coord.dz_ref, rho_0, g_val,
@@ -1404,14 +1407,20 @@ def _bc_geometry_and_density(
                 and _eos_depth == "geometric")
             else None
         ),
+        return_density_anomaly_ratio=_carry_nemo_hpg_rhd,
     )
+    if _carry_nemo_hpg_rhd:
+        rho, rho_prime, p_prime, nemo_hpg_rhd = _density_result
+    else:
+        rho, rho_prime, p_prime = _density_result
+        nemo_hpg_rhd = None
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)
-    return J, h_k, rho_prime, p_prime_filled
+    return J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd
 
 
 def compute_frozen_geom_density(state, grid, z_coord, config):
-    """``(J, h_k, rho_prime, p_prime_filled)`` from a state's eta/T/S.
+    """``(J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd)`` from eta/T/S.
 
     The eta_safe derivation (mirrors :func:`latlon_cgrid_ocean_baroclinic_
     tendencies` stages 1-3 verbatim) + :func:`_bc_geometry_and_density`.  These
@@ -2092,7 +2101,8 @@ def _bc_ke_and_pressure_gradients(
                 # in Krhs.  Preserve that association; the former collapsed
                 # pressure-gradient identity magnified roundoff through the
                 # long vertical sum on GYRE's rotating stage-2 state.
-                rhd = rho_m / config.rho_0
+                rhd = (nemo_hpg_rhd if nemo_hpg_rhd is not None
+                       else rho_m / config.rho_0)
                 e3w0 = nemo_e3w0_reference(z_coord)
                 if e3w0 is None:
                     raise ValueError(
@@ -5065,11 +5075,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # same frozen inputs (compute_frozen_geom_density mirrors the eta_safe
     # derivation above).
     if precomputed_geom_density is not None:
-        J, h_k, rho_prime, p_prime_filled = precomputed_geom_density
+        if len(precomputed_geom_density) == 5:
+            J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd = (
+                precomputed_geom_density)
+        else:
+            J, h_k, rho_prime, p_prime_filled = precomputed_geom_density
+            nemo_hpg_rhd = None
     else:
-        J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
-            eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
-        )
+        J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd = (
+            _bc_geometry_and_density(
+                eta_safe, H_bathy, z_coord, config, T, S, mask, grid,
+                rho_0, g_val,
+            ))
 
     # --- Stages 4-4b: vertical velocity (w), face thicknesses (h_u, h_v),
     # per-layer flux divergence, and perturbation velocities. ---

@@ -5020,7 +5020,8 @@ class LatLonCGridOceanModel:
         ``latlon_cgrid_ocean_baroclinic_tendencies``).
 
         ``precomputed_geom_density`` (a ``(J, h_k, rho_prime,
-        p_prime_filled)`` tuple from :func:`compute_frozen_geom_density`)
+        p_prime_filled, nemo_hpg_rhd)`` tuple from
+        :func:`compute_frozen_geom_density`)
         skips the EOS + baroclinic-pressure recompute (stages 1-3, frozen
         across RK3 momentum sub-stages) — bit-identical, ~the dominant
         per-substage cost (#25).

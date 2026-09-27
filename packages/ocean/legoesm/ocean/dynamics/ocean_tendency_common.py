@@ -85,7 +85,8 @@ def iterate_eos_and_pressure_anomaly(
     eos_depth: str = "insitu",
     eos_geometric_depth_1d: jnp.ndarray | None = None,
     density_anomaly_ratio_fn: Callable | None = None,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    return_density_anomaly_ratio: bool = False,
+) -> Tuple[jnp.ndarray, ...]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
     Replicates the identical iteration that previously lived inline in
@@ -173,6 +174,10 @@ def iterate_eos_and_pressure_anomaly(
         to form ``rho_prime`` without the cancellation in ``rho-rho0``.
         NEMO's polynomial EOS stores this ratio directly in ``rhd``
         (``eosbn2.F90:288``). ``None`` preserves every legacy caller.
+    return_density_anomaly_ratio : bool, default False
+        Return the source-associated dimensionless ratio as a fourth value.
+        This is only valid with ``density_anomaly_ratio_fn`` and avoids a
+        later ``ratio * rho0 / rho0`` round trip at a literal NEMO consumer.
 
     Returns
     -------
@@ -237,6 +242,7 @@ def iterate_eos_and_pressure_anomaly(
             )
             rho = eos_fn(T_filled, S_filled, p_hydro, **eos_kw)
 
+    ratio = None
     if rho_ref_z_static is not None:
         # STATIC reference profile (preferred): a frozen-at-init
         # ρ_ref(z) computed from the initial T, S over wet cells.
@@ -322,6 +328,12 @@ def iterate_eos_and_pressure_anomaly(
             inc = jnp.concatenate(
                 [h_b[..., :1] * rho_q[..., :1], e3w_int * pair], axis=-1)
         p_prime = (0.5 * g) * jnp.cumsum(inc, axis=-1)
+        if return_density_anomaly_ratio:
+            if ratio is None:
+                raise ValueError(
+                    "return_density_anomaly_ratio requires "
+                    "density_anomaly_ratio_fn")
+            return rho, rho_prime, p_prime, ratio
         return rho, rho_prime, p_prime
 
     if hi_precision_pressure:
@@ -334,6 +346,11 @@ def iterate_eos_and_pressure_anomaly(
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
 
+    if return_density_anomaly_ratio:
+        if ratio is None:
+            raise ValueError(
+                "return_density_anomaly_ratio requires density_anomaly_ratio_fn")
+        return rho, rho_prime, p_prime, ratio
     return rho, rho_prime, p_prime
 
 
