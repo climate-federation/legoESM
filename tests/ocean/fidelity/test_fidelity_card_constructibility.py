@@ -66,7 +66,8 @@ def test_dino_card_constructs(recipe_name):
     assert np.asarray(model.z_coord.z_full_ref).dtype == np.float64
 
 
-@pytest.mark.parametrize("case", ("LOCK_EXCHANGE-zco", "OVERFLOW-zps"))
+@pytest.mark.parametrize(
+    "case", ("LOCK_EXCHANGE-zco", "OVERFLOW-zps", "VORTEX-zco"))
 def test_nemo_testcase_card_constructs(case):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
@@ -82,6 +83,14 @@ def test_nemo_testcase_card_constructs(case):
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
     assert model.config.eos == "nemo_teos10"
     assert model.config.eos_depth == "geometric"
+    # VORTEX is the first card on this identity with a LIVE rotation
+    # operator, so building the model is the check that its frozen
+    # barotropic EEN operands are actually consumable -- a card that only
+    # RESOLVES and then raises inside the model is the failure note AR was
+    # written about.
+    if case == "VORTEX-zco":
+        assert model.config.vorticity_scheme == "een_total"
+        assert not model.config.adaptive_implicit_vertadv
 
 
 def test_l2_gyre_testcase_card_constructs():
