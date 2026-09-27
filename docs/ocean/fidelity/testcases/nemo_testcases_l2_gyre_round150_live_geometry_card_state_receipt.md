@@ -34,7 +34,7 @@ quarter sum, with dry F points replaced by `e3f_3d`, at
 
 The shared transcription now accepts the card's own grid, reference T
 thickness, and T mask and rebuilds the compiled F reference/live fields at
-`vertical.py:378-476`.  It deliberately materialises the stored F-cell area
+`vertical.py:384-482`.  It deliberately materialises the stored F-cell area
 before the final division, preserving the compiled association under
 production JIT.  The production route is selected only by the complete source
 condition at `ocean_model_latlon_cgrid.py:5278-5280`; GYRE supplies its
