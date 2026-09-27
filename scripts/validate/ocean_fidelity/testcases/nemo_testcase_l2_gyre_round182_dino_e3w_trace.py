@@ -53,10 +53,17 @@ def main() -> None:
                 e3w = e3w.at[(0,) * e3w.ndim].set(0.0)
                 call_kwargs["e3w_int"] = e3w
                 print(f"TRACE_PLANT call={call_id} cell=all-zero-index value=0")
-            invalid = jnp.sum(~jnp.isfinite(e3w) | (e3w <= 0.0))
+            nonfinite = jnp.sum(~jnp.isfinite(e3w))
+            zero = jnp.sum(e3w == 0.0)
+            negative = jnp.sum(e3w < 0.0)
+            invalid = nonfinite + zero + negative
             jax.debug.print(
-                "TRACE_VALUE call={call} min={minimum:.17e} invalid={invalid}",
-                call=call_id, minimum=jnp.nanmin(e3w), invalid=invalid,
+                "TRACE_VALUE call={call} min={minimum:.17e} "
+                "nonfinite={nonfinite} zero={zero} negative={negative} "
+                "invalid={invalid}",
+                call=call_id, minimum=jnp.nanmin(e3w),
+                nonfinite=nonfinite, zero=zero, negative=negative,
+                invalid=invalid,
                 ordered=True,
             )
         return original(*call_args, **call_kwargs)
