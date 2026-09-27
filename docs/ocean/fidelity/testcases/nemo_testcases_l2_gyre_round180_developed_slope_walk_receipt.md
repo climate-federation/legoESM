@@ -148,7 +148,7 @@ HOLD, or DO NOT SHIP verdict.
 The focused battery covers the year-owner harness, native GM/Redi operator,
 and NEMO testcase recipe: **175 passed in 110.77s**.  The receipt citation gate
 passed with all six compiled-source citations mapped.  Its shifted
-`zdfmxl.f90:109-124` plant exited 1 with `SYMBOL-NOT-AT-LINE`, as required.
+mixed-layer-range plant exited 1 with `SYMBOL-NOT-AT-LINE`, as required.
 The focused citation regression reports **16 passed in 2.55s**.
 
 | artifact | SHA-256 |
