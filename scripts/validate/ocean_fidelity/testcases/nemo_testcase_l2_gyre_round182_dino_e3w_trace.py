@@ -63,8 +63,8 @@ def main() -> None:
 
     eos.compute_buoyancy_frequency_nemo_bn2 = traced
     sys.argv = ["kamm_twin_90d.py", *args]
-    runpy.run_module(
-        "scripts.validate.ocean_fidelity.dino_1226.kamm_twin_90d",
+    runpy.run_path(
+        "scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py",
         run_name="__main__",
     )
 
