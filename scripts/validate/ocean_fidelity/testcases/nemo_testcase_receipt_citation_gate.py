@@ -1147,9 +1147,9 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo/dynhpg.f90:340-451': [
         ('SUBROUTINE hpg_sco( kt, Kmm, puu, pvv, Krhs )', 1),
         ('END SUBROUTINE hpg_sco', 1), 112],
-    'ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/eosbn2.f90:810-844': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/eosbn2.f90:810-842': [
         ('CASE( np_teos10, np_eos80 )', 3),
-        ('prd(ji,jj,jk) = (  zn * r1_rho0 - 1._wp  ) * ztm', 3), 35],
+        ('prd(ji,jj,jk) = (  zn * r1_rho0 - 1._wp  ) * ztm', 3), 33],
     'ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/dynhpg.f90:403-458': [
         ('zhpi(ji,jj) = zcoef0 * r1_e1u(ji,jj)', 1),
         ('r41_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap', 1), 56],

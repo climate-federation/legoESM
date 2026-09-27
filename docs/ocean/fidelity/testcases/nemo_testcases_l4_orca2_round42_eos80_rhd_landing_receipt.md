@@ -100,7 +100,7 @@ The decisive reports are `stage1_hpg_walk_diagnostic2.json`,
 The executing EOS80 branch normalizes its operands, evaluates the Roquet
 polynomial, and stores the masked density anomaly in the source order
 `zn * r1_rho0 - 1` at
-`ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/eosbn2.f90:810-844`.
+`ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/eosbn2.f90:810-842`.
 The executing HPG branch consumes `rhd` directly in the surface and interior
 recurrences and writes `zhpi + zuap` at
 `ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/dynhpg.f90:403-458`.
