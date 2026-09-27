@@ -29,9 +29,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 
 _PP = "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
 CITATIONS = {
-    "vertical_average": f"{_PP}/stp2d.f90:189-205",
-    "baroclinic_drag": f"{_PP}/stp2d.f90:216-222",
-    "wind_forcing": f"{_PP}/stp2d.f90:224-236",
+    "vertical_average": f"{_PP}/stp2d.f90:189-204",
+    "baroclinic_drag": f"{_PP}/stp2d.f90:218-221",
+    "wind_forcing": f"{_PP}/stp2d.f90:225-235",
 }
 
 MAGIC = "NEMO_L4_SLOW_R1"

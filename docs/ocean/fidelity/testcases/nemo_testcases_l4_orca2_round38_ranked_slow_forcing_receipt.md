@@ -17,11 +17,11 @@ number is claimed.  The six sea-ice selectors and the card's
 
 The executing build records and then consumes `e3u_3d`, `uu(Krhs)`, and
 `umask` in the vertical average at
-`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:189-205`, calls
+`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:189-204`, calls
 the baroclinic drag at
-`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:216-222`, and
+`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:218-221`, and
 adds wind at
-`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:224-236`.
+`ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:225-235`.
 
 The existing operator-run acquisition admits without repair: both ranked
 streams have the frozen 22,814,424-byte size, distinct rank headers and

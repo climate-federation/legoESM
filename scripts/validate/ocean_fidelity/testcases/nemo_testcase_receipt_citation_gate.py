@@ -1117,16 +1117,15 @@ CITATION_MAP = {
         "CALL lbc_lnk('domain', hf_0, 'F', 1._wp)", 4],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dommsk.f90:258':
         ('fe3mask(:,:,:) = fmask(:,:,:)', 1),
-    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:189-205': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:189-204': [
         ("WRITE(l2_slow_unit) l4_canon_3d(e3u_3d,'U')", 1),
-        ('Ve_rhs(ji,jj) = Ve_rhs(ji,jj) + SUM(', 1), 17],
-    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:216-222': [
+        ('Ve_rhs(ji,jj) = Ve_rhs(ji,jj) + SUM(', 1), 16],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:218-221': [
         ('!* baroclinic drag forcing *!', 1),
-        ('CALL dyn_drg_init(', 1), 7],
-    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:224-236': [
+        ('l4_canon_2d(CdU_v', 1), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:225-235': [
         ('WRITE(l2_slow_unit) r1_rho0', 1),
-        ('Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0', 1),
-        ('LANE2_SLOW_FORCING_DUMP', 1), 13],
+        ('LANE2_SLOW_FORCING_DUMP', 1), 11],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:556':
         ('zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
     # --- ORCA2 card round 22: exact stage-to-entry transition and LDF owner ---
