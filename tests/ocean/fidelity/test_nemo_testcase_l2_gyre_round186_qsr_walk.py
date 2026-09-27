@@ -50,6 +50,10 @@ def test_round186_qsr_record_uses_compiled_no_halo_qsr_extent(tmp_path):
         MOD.read_record(record)
 
 
+def test_round186_qsr_header_tracks_step_1080_slot_rotation():
+    assert MOD.HEADER[:5] == (1, 1080, 3, 2, 1)
+
+
 def test_round186_qsr_record_ulp_plant_fires(tmp_path, monkeypatch):
     root = _root(tmp_path)
     monkeypatch.setattr(MOD.subprocess, "check_output", lambda *a, **k: "tip\n")

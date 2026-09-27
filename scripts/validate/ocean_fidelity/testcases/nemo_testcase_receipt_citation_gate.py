@@ -137,6 +137,19 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/traqsr.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/traqsr.f90"),
+    # Round 187 reconciles the exact compiled writer that produced the
+    # developed shortwave record, including its no-halo surface allocation and
+    # the persistent RK slot rotation at step 1080.
+    "GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/sbc_oce.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/sbc_oce.f90"),
+    "GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/mppini.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/mppini.f90"),
+    "GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/nemogcm.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/nemogcm.f90"),
+    "GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3.f90"),
     "GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_SM_R146RHSFAM/BLD/ppsrc/nemo/dynldf_lev.f90": (
@@ -3657,6 +3670,21 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/traqsr.f90:615-645': [
         'zz0 =           rn_abs   * r1_rho0_rcp',
         ('zatt(ji,jj) = zzatt', 2), 31],
+    # --- round 187: reconcile the acquired developed qsr record layout ---
+    'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3_stg.f90:925-931': [
+        "r186_magic = 'NEMO_L2_R186QSR1'",
+        '& ts(:,:,:,jp_tem,Krhs)-r186_qsr_before(:,:,:), r186_qsr_replay', 7],
+    'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/sbc_oce.f90:210-212': [
+        'ALLOCATE( qns    (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))',
+        '&      STAT=ierr(5) )', 3],
+    'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/mppini.f90:1501-1507': [
+        'Nis0 =   1+nn_hls',
+        'Nj_0 = Nje0 - Njs0 + 1', 7],
+    'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/nemogcm.f90:368':
+        'Nbb = 1   ;   Nnn = 2   ;   Naa = 3   ;   Nrhs = Naa',
+    'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3.f90:200-222': [
+        '! Stage 1 :',
+        'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs', 23],
 }
 
 

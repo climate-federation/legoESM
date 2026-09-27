@@ -14,7 +14,9 @@ import numpy as np
 
 
 MAGIC = b"NEMO_L2_R186QSR1"
-HEADER = (1, 1080, 3, 2, 3, 36, 26, 31, 64)
+# At step 1080 the persistent three-slot rotation enters stage 3 with Kmm=2
+# and Krhs=1 (stprk3.f90's two in-stage swaps plus its end-of-step swap).
+HEADER = (1, 1080, 3, 2, 1, 36, 26, 31, 64)
 HEADER_INTS = len(HEADER)
 JPI, JPJ, JPK = 36, 26, 31
 # qsr is allocated on NEMO's no-halo domain (Nis0:Nie0,Njs0:Nje0), while
