@@ -233,35 +233,38 @@ def test_water_closes_and_albedo_contract_holds_through_melt_and_refreeze():
     assert bool(jnp.all(jnp.isfinite(st.T_soil)))
 
 
-def test_two_leaf_step_closes_pack_plus_soil_energy():
-    """Two-leaf canopy (Picard callback runs the combined solve): over a cold
-    snowfall spell the pack enthalpy plus soil energy changes by the ground flux
-    (plus the unmet-evaporation energy) plus the fresh-snow enthalpy.  The only
-    unexported term is the sensible enthalpy of sublimated ice, bounded by
-    c_ice*60 K per kg of latent mass."""
-    cfg = _cfg(scheme=TwoLeafCanopyConfig())
+@pytest.mark.parametrize("scheme, ft", [("two_leaf", True), ("seb", False)])
+def test_land_step_closes_pack_plus_soil_energy(scheme, ft):
+    """Full land step, both surface schemes, through cold snowfall, rain on snow
+    and a warm melt: pack enthalpy + soil energy change by exactly
+    dt*(applied ground flux + geothermal) + the enthalpy carried by mass
+    (snowfall, frost, rain in; sublimated ice, drainage out)."""
+    two = scheme == "two_leaf"
+    cfg = _cfg(scheme=TwoLeafCanopyConfig() if two else None)
+    cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=ft))
     n = 2
-    st = _state(cfg, n, T_soil=268.0, swe=30.0)
-    lp = bare_canopy_params(n)._replace(LAI=jnp.asarray([0.3, 2.0]))
-    f = _forcing(n, T_air=255.0, snow=2e-4)
-    dt = 1800.0
+    lp = bare_canopy_params(n)._replace(LAI=jnp.asarray([0.3, 2.0])) if two else None
+    s = _state(cfg, n, T_soil=270.0, swe=15.0)
     grid = make_soil_grid(cfg.soil_grid)
-    tc = cfg.thermal
-    resid = jnp.zeros(n)
-    bound = jnp.zeros(n)
-    s = st
-    _, out = _run(cfg, st, f, 12, dt, lp=lp)
-    for s_new, resp, sfc in out:
-        Cg = compute_heat_capacity(s.theta_soil, cfg.hydraulics, tc) * grid.dz
-        dE = (column_enthalpy(_pack(s_new)) - column_enthalpy(_pack(s))
-              + jnp.sum(Cg * (s_new.T_soil - s.T_soil), -1))
-        src = (dt * (sfc.G_soil + sfc.lhflx - resp.lhflx + tc.Q_geothermal)
-               + f.precip_snow * dt * constants.c_pi * (jnp.minimum(f.T_lowest, TF) - TF))
-        resid = resid + (dE - src)
-        bound = bound + jnp.abs(resp.lhflx) / constants.L_s * dt * constants.c_pi * 60.0
-        s = s_new
-        assert int(sfc.n_held) == 0
-    assert bool(jnp.all(jnp.abs(resid) <= bound + 1e-3)), (resid, bound)
+    tc, hc = cfg.thermal, cfg.hydraulics
+    dt = 1800.0
+    saw = {"drain": False, "rain": False}
+    for forcing, nstep in ((_forcing(n, T_air=255.0, snow=2e-4, q=0.0015), 8),
+                           (_forcing(n, T_air=276.0, rain=5e-4, lw=320.0), 8),
+                           (_forcing(n, T_air=283.0, sw=600.0, lw=330.0, q=0.004), 16)):
+        _, out = _run(cfg, s, forcing, nstep, dt, lp=lp)
+        for s_new, resp, sfc in out:
+            Cg = (compute_apparent_heat_capacity(s.T_soil, s.theta_soil, hc, tc) if ft
+                  else compute_heat_capacity(s.theta_soil, hc, tc)) * grid.dz
+            dE = (column_enthalpy(_pack(s_new)) - column_enthalpy(_pack(s))
+                  + jnp.sum(Cg * (s_new.T_soil - s.T_soil), -1))
+            src = dt * (sfc.snow_ground_heat_applied + tc.Q_geothermal) + sfc.snow_advected_heat
+            np.testing.assert_allclose(dE, src, rtol=1e-9, atol=1e-3)
+            assert int(sfc.n_held) == 0
+            saw["drain"] |= bool(jnp.any(s_new.snow_depth < s.snow_depth - 1e-3))
+            saw["rain"] |= float(forcing.precip_total[0]) > float(forcing.precip_snow[0])
+            s = s_new
+    assert all(saw.values()), saw
 
 
 def test_thin_pack_melt_is_dt_converged_and_bounded():
@@ -291,8 +294,9 @@ def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
     the bulk pack's does under the same forcing (measured 2026-09-26: largest
     step change 1.3 K while melting out vs 8 K for bulk, whose whole 3 kg pack
     vanishes in one step; both ~6-8 K at the forcing switch itself)."""
-    # 72 melt steps: under partial cover only f*G reaches a thin pack, so its
-    # last grams decay ~exponentially (measured 2.2e-6 kg/m2 left after 48 steps).
+    # 72 melt steps: under partial cover only f*G reaches a thin pack, so a trace
+    # pack decays exponentially (f ~ SWE/swe_half; e-fold ~4 h here, measured
+    # 1.9e-4 kg/m2 left after 72 steps) and "bare" means f < 1e-3 (SWE < 0.01).
     seq = ((_forcing(1, T_air=282.0, sw=500.0, lw=330.0, q=0.004), 72),
            (_forcing(1, T_air=266.0, snow=3e-4, sw=0.0, lw=250.0), 48))
     jumps = {}
@@ -307,7 +311,7 @@ def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
             assert np.all(np.isfinite(T))
             worst = max(worst, float(np.max(np.abs(np.diff(T)))))
             for s, _, _ in out:
-                saw_bare = saw_bare or float(s.snow_depth[0]) < 1e-6
+                saw_bare = saw_bare or float(s.snow_depth[0]) < 1e-2
                 if scheme == "layered":
                     assert bool(jnp.all(jnp.isfinite(s.snow_T_layers)))
         jumps[scheme] = worst
@@ -316,22 +320,26 @@ def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
 
 
 def test_sublimation_clamped_to_top_layer_and_water_closes():
-    """Dry windy air over a trace pack: sublimation demand exceeds the top
-    layer's ice, is clamped to it (never a negative pack), and the unmet latent
-    flux is not reported to the atmosphere as vapour."""
+    """Dry windy air over a thin pack at a 6-hour step: the pack's share of the
+    sublimation demand exceeds the top layer's ice, is clamped to it (never a
+    negative pack), the unmet latent flux is not reported to the atmosphere as
+    vapour, and water closes."""
     cfg = _cfg()
-    st = _state(cfg, 1, T_soil=272.0, swe=0.05)
+    dt = 21600.0
+    st = _state(cfg, 1, T_soil=272.0, swe=2.0)
     f = _forcing(1, T_air=271.0, sw=400.0, lw=300.0, q=1e-5, wind=12.0)
     W0 = st.snow_depth + _soil_water(cfg, st)
-    top_ice = float(st.snow_ice_layers[0, 0])
-    st1, out = _run(cfg, st, f, 1, 1800.0)
+    st1, out = _run(cfg, st, f, 1, dt)
     _, resp, sfc = out[0]
-    assert float(sfc.lhflx[0]) / constants.L_s * 1800.0 > top_ice    # clamp binds
+    p = snow_remap_compact(snow_add_mass(_pack(st), 0.0, 271.0), dt)
+    frac = float(snow_fraction(total_water(p))[0])
+    demand = frac * float(sfc.lhflx[0]) / constants.L_s * dt
+    assert demand > float(p.swe_ice[0, 0]), (demand, float(p.swe_ice[0, 0]))  # clamp binds
     assert bool(jnp.all(st1.snow_ice_layers >= 0.0))
     assert float(resp.lhflx[0]) < float(sfc.lhflx[0])
     W1 = st1.snow_depth + _soil_water(cfg, st1)
     np.testing.assert_allclose(W1 - W0, -(resp.surface_mass_flux + resp.freshwater_flux)
-                               * 1800.0, atol=1e-6)
+                               * dt, atol=1e-6)
 
 
 def test_grad_through_snow_active_step_matches_finite_difference():

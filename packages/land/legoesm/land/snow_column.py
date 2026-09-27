@@ -73,7 +73,6 @@ class SnowColumnConfig(NamedTuple):
     compaction_timescale_s: float = 8.64e5  # density-relaxation e-folding time [s] (~10 d)
     irreducible_liq_frac: float = 0.05   # liquid held per unit ice mass [-]
     k_conductivity_exponent: float = 2.0  # k ~ (rho/rho_ref)^exp (Sturm 1997)
-    min_pack_swe: float = 1e-8           # [kg/m^2] below which the pack is empty
     # --- coupling to the land surface (used by multilayer_land, snow_scheme="layered") ---
     # Broadband thermal-IR emissivity of snow: observed ~0.97-0.99 (Warren 1982;
     # Hori et al. 2006, fine grains near 0.99); CLM5 fixes 0.97.  Tunable within
@@ -91,7 +90,6 @@ __param_spec__ = {
         "excluded": {
             "compaction_timescale_s": "numerics: density-relaxation e-folding time",
             "k_conductivity_exponent": "material: Sturm (1997) conductivity exponent",
-            "min_pack_swe": "numerics: empty-pack floor",
             "seed_density": "initial condition: density of a pack seeded from bulk SWE",
         },
         "params": {
@@ -385,9 +383,7 @@ def step_snow_column(
     """
     state = snow_add_mass(state, precip_snow * dt, T_air, config=config)
     state = snow_remap_compact(state, dt, config)
-    dz, k = _thickness_and_conductivity(state.swe_ice, state.swe_liq, state.density, config)
-    C = jnp.maximum(_sensible_hc(state.swe_ice, state.swe_liq), _EPS)
-    coeff = _interface_coeff(dz, k)
+    C, coeff, _ = snow_thermal_props(state, config)
     diag = C / dt
     diag = diag.at[..., 1:].add(coeff)
     diag = diag.at[..., :-1].add(coeff)

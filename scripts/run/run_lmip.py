@@ -75,7 +75,6 @@ from legoesm.land.lmip_forcing import make_synthetic_lmip_forcing
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
     init_multilayer_land_state,
-    seed_snow_layers,
 )
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.carbon.spinup import (
@@ -504,13 +503,16 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         state = state._replace(
             ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
             else jnp.zeros((ncol, nb)))
-    if config.snow_scheme == "layered":
-        if all(_f in data for _f in _SNOW_LAYER_FIELDS):
-            state = state._replace(**{_f: jnp.asarray(data[_f])
-                                      for _f in _SNOW_LAYER_FIELDS})
-        else:
-            # Layered pack newly selected on a bulk restart: seed it from the SWE.
-            state = seed_snow_layers(state, config)
+    _have = [_f for _f in _SNOW_LAYER_FIELDS if _f in data]
+    if config.snow_scheme == "layered" and len(_have) == len(_SNOW_LAYER_FIELDS):
+        state = state._replace(**{_f: jnp.asarray(data[_f])
+                                  for _f in _SNOW_LAYER_FIELDS})
+    elif config.snow_scheme == "layered" or _have:
+        raise ValueError(
+            f"Restart {restart_path} carries snow-layer fields {_have} but the run "
+            f"selects --snow-scheme {config.snow_scheme}: a layered restart needs "
+            "all four and a bulk run cannot drop them. Restart with the scheme "
+            "the checkpoint was written with.")
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None

@@ -416,6 +416,7 @@ def solve_snow_soil_thermal(
     G_surface: jnp.ndarray,
     dt: float,
     surface_conductance: jnp.ndarray | None = None,
+    T_snow_top_ref: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """ONE implicit (backward-Euler) heat solve of a snowpack stacked on the soil.
 
@@ -430,7 +431,10 @@ def solve_snow_soil_thermal(
     by the snow-covered fraction ``f_snow``: ``f*G`` enters the pack top and
     ``(1-f)*G`` the soil top (the snow-free tile).  A Robin ``surface_conductance``
     lambda is split the same way (``f*lambda`` on the pack top, ``(1-f)*lambda``
-    on the soil top, each linearised in its own start-of-step temperature).  The
+    on the soil top), each linearised about the temperature the flux was
+    evaluated at: ``T_snow_top_ref`` for the pack top (default ``T_snow[:, 0]``;
+    pass it when the pack was modified, e.g. by rain, after the surface fluxes)
+    and the start-of-step soil top.  The
     geothermal flux enters the bottom soil row.  The solve conserves the column's
     sensible energy exactly; latent heat in the pack is handled afterwards by the
     enthalpy re-equilibration (``snow_column.snow_phase_and_percolate``).
@@ -454,7 +458,8 @@ def solve_snow_soil_thermal(
         lam_s = f_snow * surface_conductance
         lam_g = (1.0 - f_snow) * surface_conductance
         diag = diag.at[:, 0].add(lam_s).at[:, ns].add(lam_g)
-        rhs = rhs.at[:, 0].add(lam_s * T_snow[:, 0]).at[:, ns].add(lam_g * T_soil[:, 0])
+        T_ref = T_snow[:, 0] if T_snow_top_ref is None else T_snow_top_ref
+        rhs = rhs.at[:, 0].add(lam_s * T_ref).at[:, ns].add(lam_g * T_soil[:, 0])
     rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
     a = jnp.pad(-coeff, ((0, 0), (1, 0)))
     c = jnp.pad(-coeff, ((0, 0), (0, 1)))

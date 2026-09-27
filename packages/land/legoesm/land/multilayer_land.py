@@ -518,8 +518,17 @@ def _step_multilayer_land_impl(
         pack = SnowColumnState(swe_ice=state.snow_ice_layers,
                                swe_liq=state.snow_liq_layers,
                                T=state.snow_T_layers, density=state.snow_rho_layers)
+        # Enthalpy [J/m^2, relative to ice at T_freeze] carried INTO the pack by
+        # mass this step (snowfall, frost, rain) minus that leaving it (sublimated
+        # ice, drainage) -- the closure term reported as snow_advected_heat.
+        snow_advected_heat = (precip_snow_eff * dt * constants.c_pi
+                              * (jnp.minimum(forcing.T_lowest, constants.T_freeze)
+                                 - constants.T_freeze))
         pack = snow_add_mass(pack, precip_snow_eff * dt, forcing.T_lowest, config=scc)
         pack = snow_remap_compact(pack, dt, scc)
+        # Pack-top temperature the surface fluxes are evaluated at (the Robin
+        # linearisation point; sublimation and rain modify the pack afterwards).
+        T_pack_top_ref = pack.T[:, 0]
         f_snow = snow_fraction(total_water(pack), scc)
         T_surface = _snow_skin(pack, T_soil[:, 0], f_snow)
 
@@ -812,6 +821,7 @@ def _step_multilayer_land_impl(
             albedo_land=albedo_land,
             emissivity=emissivity,
             z0=z0,
+            snow_cover=f_snow if layered else None,
         )
     else:
         raise ValueError(
@@ -988,7 +998,7 @@ def _step_multilayer_land_impl(
         # top-layer clamp then returned it to G (measured: ~0 latent flux over
         # 290 K soil for ~20 h while a 3 kg/m2 pack melted out).
         snow_latent = f_snow * (lhflx_ground
-                                + jnp.where(transp_to_snow, lhflx_transp, 0.0))
+                                + jnp.where(lhflx_transp < 0.0, lhflx_transp, 0.0))
     else:
         snow_latent = (jnp.where(has_snow, lhflx_ground, 0.0)
                        + jnp.where(transp_to_snow, lhflx_transp, 0.0))
@@ -1007,6 +1017,9 @@ def _step_multilayer_land_impl(
     if layered:
         # Sublimation removes / frost deposits top-layer ICE at that layer's
         # temperature (its latent L_s is in the surface energy balance).
+        snow_advected_heat = snow_advected_heat - (
+            sublim_actual * dt * constants.c_pi
+            * (pack.T[:, 0] - constants.T_freeze))
         pack = pack._replace(swe_ice=pack.swe_ice.at[:, 0].set(
             jnp.maximum(pack.swe_ice[:, 0] - sublim_actual * dt, 0.0)))
     if bands is not None:
@@ -1065,6 +1078,9 @@ def _step_multilayer_land_impl(
         # pack top as liquid at max(T_air, T_freeze), carrying its enthalpy
         # (it refreezes into a cold pack, releasing L_f); the rest infiltrates.
         rain_pack = f_snow * jnp.maximum(infil_rain, 0.0) * dt
+        snow_advected_heat = snow_advected_heat + rain_pack * (
+            constants.c_pw * (jnp.maximum(forcing.T_lowest, constants.T_freeze)
+                              - constants.T_freeze) + constants.L_f)
         pack = snow_add_mass(pack, 0.0, forcing.T_lowest, rain=rain_pack,
                              T_rain=forcing.T_lowest, config=scc)
         infil_rain = infil_rain - rain_pack / dt
@@ -1182,10 +1198,19 @@ def _step_multilayer_land_impl(
             pack.T, C_s, coeff_s, rb_s, f_snow, T_soil, theta, grid,
             config.hydraulics, config.thermal,
             G_surface + evap_excess_energy, dt,
-            surface_conductance=surface_out.surface_conductance)
+            surface_conductance=surface_out.surface_conductance,
+            T_snow_top_ref=T_pack_top_ref)
         snow_T_top_excess = jnp.maximum(
             T_pack_solved[:, 0] - constants.T_freeze, 0.0)
-        pack, snow_drainage, _ = snow_phase_and_percolate(
+        # Ground heat flux the column actually received [W/m^2]: the Robin term
+        # evaluated at the solved temperatures (zero for the two-leaf canopy).
+        snow_ground_heat_applied = G_surface + evap_excess_energy
+        if surface_out.surface_conductance is not None:
+            snow_ground_heat_applied = snow_ground_heat_applied - (
+                surface_out.surface_conductance
+                * (f_snow * (T_pack_solved[:, 0] - T_pack_top_ref)
+                   + (1.0 - f_snow) * (T_soil_new[:, 0] - T_soil[:, 0])))
+        pack, snow_drainage, snow_drainage_heat = snow_phase_and_percolate(
             pack._replace(T=T_pack_solved), scc)
         # Meltwater leaves the pack base into the soil top (no sensible heat,
         # the same convention as rain infiltration).
@@ -1420,6 +1445,19 @@ def _step_multilayer_land_impl(
         beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
         q_sfc_new = (forcing.q_lowest
                      + beta_effective_new * (q_sat_sfc_new - forcing.q_lowest))
+    if layered and surface_out.q_surface is not None:
+        # Fractional cover, not the binary switch: SimpleSEB already solved an
+        # f-blended humidity; for a canopy the snow-covered f is ice-saturated at
+        # the pack top and the rest keeps the scheme's solved humidity.
+        if scheme_is_seb:
+            q_sfc_new = surface_out.q_surface
+        else:
+            _T_top = jnp.where(pack.swe_ice[:, 0] > 0.0,
+                               jnp.minimum(pack.T[:, 0], constants.T_freeze),
+                               pack.T[:, 0])
+            _f_new = snow_fraction(snow_new, scc)
+            q_sfc_new = (_f_new * saturation_mixing_ratio_ice(_T_top, forcing.p_surface)
+                         + (1.0 - _f_new) * surface_out.q_surface)
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
@@ -1514,7 +1552,10 @@ def _step_multilayer_land_impl(
                                carbon_new=carbon_state_new))
     surface_out = surface_out._replace(held=_held_mask, n_held=_n_held)
     if layered:
-        surface_out = surface_out._replace(snow_T_top_excess=snow_T_top_excess)
+        surface_out = surface_out._replace(
+            snow_T_top_excess=snow_T_top_excess,
+            snow_advected_heat=snow_advected_heat - snow_drainage_heat,
+            snow_ground_heat_applied=snow_ground_heat_applied)
 
     return new_state, response, carbon_state_new, surface_out
 

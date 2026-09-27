@@ -181,3 +181,13 @@ class SurfaceFluxOutput(NamedTuple):
     # measures how far one step overshoots the melting point (an accuracy, not a
     # conservation, diagnostic).  None for the bulk snowpack.
     snow_T_top_excess: jax.Array | None = None
+    # Layered snowpack only, for the column energy budget: enthalpy carried into
+    # the pack by mass (snowfall, frost, rain) minus that leaving it (sublimated
+    # ice, drainage incl. any liquid above T_freeze) [J/m^2, relative to ice at
+    # T_freeze]; and the ground heat flux the pack+soil column received, Robin
+    # term included [W/m^2, positive into the ground].  Pack enthalpy + soil
+    # sensible energy change by dt*(snow_ground_heat_applied + geothermal) +
+    # snow_advected_heat.  Melt water enters the soil carrying no heat (same
+    # convention as rain infiltration), so the drainage enthalpy leaves the column.
+    snow_advected_heat: jax.Array | None = None
+    snow_ground_heat_applied: jax.Array | None = None

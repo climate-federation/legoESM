@@ -85,6 +85,7 @@ def compute_simple_seb_fluxes(
     albedo_land,
     emissivity,
     z0,
+    snow_cover: jnp.ndarray | None = None,
 ) -> SurfaceFluxOutput:
     """Compute SimpleSEB surface fluxes for one time step.
 
@@ -99,6 +100,9 @@ def compute_simple_seb_fluxes(
     T_surface : (ncol,) skin temperature [K]
     snow      : (ncol,) snow water equivalent [kg/m^2]
     snow_age  : (ncol,) snow age [s]
+    snow_cover: optional (ncol,) fractional snow cover in [0, 1) (layered pack);
+                blends ice/soil saturation humidity, surface efficiency and latent
+                heat.  ``None`` keeps the binary snow/no-snow switch.
     beta_soil : (ncol,) root-zone weighted soil moisture beta [0-1]
     forcing   : atmospheric forcing fields
     land_config : LandConfig or MultiLayerLandConfig
@@ -147,9 +151,14 @@ def compute_simple_seb_fluxes(
         (fresh_snow_mass > 1e-6) & (T_surface < constants.T_freeze)
     )
     has_snow = has_existing_snow | has_surviving_fresh_snow
-    q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
+    # ``snow_cover`` (the layered pack's fractional cover f) replaces the binary
+    # phase switch: the surface is f ice-saturated snow + (1-f) soil.
+    w_snow = snow_cover
+    q_sat_sfc = (jnp.where(has_snow, q_sat_ice, q_sat_liq) if snow_cover is None
+                 else w_snow * q_sat_ice + (1.0 - w_snow) * q_sat_liq)
     # Snow surface is freely evaporating (snowpack limits later).
-    beta_effective = jnp.where(has_snow, 1.0, beta)
+    beta_effective = (jnp.where(has_snow, 1.0, beta) if snow_cover is None
+                      else w_snow + (1.0 - w_snow) * beta)
     # Condensation is NOT moisture-limited: water arriving on the surface does
     # not have to come out of the soil.  Where the surface is colder than the
     # air is moist (q_sat < q_air) the resistance drops out, so real dew and
@@ -172,7 +181,8 @@ def compute_simple_seb_fluxes(
         q_sat_sfc, forcing.q_lowest, jnp.ones_like(q_sat_sfc), beta_effective)
 
     # Phase-appropriate latent heat (consistent with iter-68 gate above).
-    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
+    L_eff = (jnp.where(has_snow, constants.L_s, constants.L_v) if snow_cover is None
+             else w_snow * constants.L_s + (1.0 - w_snow) * constants.L_v)
 
     # --- Bulk fluxes ---
     # Dispatch hardening (restores the guard lost when this dispatch moved
@@ -263,7 +273,9 @@ def compute_simple_seb_fluxes(
         has_snow,
         saturation_mixing_ratio_ice(T_sfc_lin, forcing.p_surface),
         saturation_mixing_ratio(T_sfc_lin, forcing.p_surface),
-    )
+    ) if snow_cover is None else (
+        w_snow * saturation_mixing_ratio_ice(T_sfc_lin, forcing.p_surface)
+        + (1.0 - w_snow) * saturation_mixing_ratio(T_sfc_lin, forcing.p_surface))
     _beta_lin = jnp.where(_q_sat_lin < forcing.q_lowest, 1.0, beta_effective)
     q_sfc_lin = beta_limited_surface_humidity(
         _q_sat_lin, forcing.q_lowest, jnp.ones_like(_q_sat_lin), _beta_lin)
