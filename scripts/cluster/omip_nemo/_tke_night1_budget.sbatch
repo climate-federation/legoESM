@@ -61,7 +61,7 @@ $PY -u scripts/validate/ocean_fidelity/compare_tendencies_nemo.py \
   --tfile $D/ORCA1_1h_20000101_20000102_trd1h_T.nc \
   --ufile $D/ORCA1_1h_20000101_20000102_trd1h_U.nc \
   --vfile $D/ORCA1_1h_20000101_20000102_trd1h_V.nc \
-  --rec 12 --skip-maps --mxl-choice $MXL --iwm-backgrounds \
+  --rec 13 --skip-maps --mxl-choice $MXL --iwm-backgrounds \
   --restart-npz $D/restart_288_full.npz --restart-next-npz "$NEXT" \
   --mode-a-iterations 1 --mode-a-dt $DT --mode-a-budget \
   --output-dir "$OUT"

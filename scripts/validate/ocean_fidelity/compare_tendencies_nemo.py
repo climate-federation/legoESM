@@ -1243,9 +1243,12 @@ def main():
         evd_cols=evd_cols, z_iface=_z_iface, z_cuts_m=(300.0, 100.0))
 
     if args.restart_npz:
-        if args.rec != 1:
-            raise SystemExit("--restart-npz requires --rec 1 (the restart "
-                             "state pairs with avt record 0)")
+        # The restart must be the instantaneous state at the START of hourly
+        # record rec-1 (restart 8760 at file start <-> --rec 1; a restart at
+        # step 288 = 12 h of an hourly file <-> --rec 13).  Nothing here can
+        # check that; the caller pairs them.
+        print(f"[restart] pairing: restart state = start of record {args.rec - 1}, "
+              f"target avt/trends = record {args.rec}")
         rst = dict(np.load(args.restart_npz))
         # prognostic=True card, THEN the same overrides Stage A got.
         cfg_a2 = _apply_overrides(
