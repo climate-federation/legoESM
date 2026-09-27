@@ -267,25 +267,31 @@ def test_land_step_closes_pack_plus_soil_energy(scheme, ft):
     assert all(saw.values()), saw
 
 
-def test_thin_pack_melt_is_dt_converged_and_bounded():
-    """Thin pack under strong sun through the full two-leaf step: melt over two
-    days changes < 5% when dt is halved; ice-bearing layers stay <= T_freeze; the
-    pre-equilibration overshoot diagnostic is finite."""
+def test_melt_is_dt_converged_and_overshoot_is_first_order():
+    """A pack under strong sun through the full two-leaf step: the first day's
+    melt (pack still present) changes < 5% when dt is halved; ice-bearing layers
+    stay <= T_freeze; the pre-equilibration overshoot of the top layer (sensible
+    solve, melt applied after, as CLM5's post-solve phase change) is a
+    time-discretisation error: it shrinks with dt.  Measured 2026-09-27: melt
+    129.9 vs 130.9 kg/m2, overshoot 31.9 K vs 19.9 K."""
     cfg = _cfg(scheme=TwoLeafCanopyConfig())
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.3]))
     f = _forcing(1, T_air=279.0, sw=700.0, lw=320.0, q=0.004)
-    melt = {}
-    for dt, nstep in ((1800.0, 96), (900.0, 192)):
-        st0 = _state(cfg, 1, T_soil=273.0, swe=40.0)
+    melt, over = {}, {}
+    for dt in (1800.0, 900.0):
+        nstep = int(86400 / dt)
+        st0 = _state(cfg, 1, T_soil=273.0, swe=150.0)
         st, out = _run(cfg, st0, f, nstep, dt, lp=lp)
         melt[dt] = float(st0.snow_depth[0] - st.snow_depth[0])
-        for s, _, sfc in out:
+        over[dt] = max(float(sfc.snow_T_top_excess[0]) for _, _, sfc in out)
+        assert float(st.snow_depth[0]) > 5.0                   # the pack survives the day
+        for s, _, _ in out:
             ice = s.snow_ice_layers > 0.0
             assert bool(jnp.all(jnp.where(ice, s.snow_T_layers <= TF + 1e-9,
                                           jnp.isfinite(s.snow_T_layers))))
-            assert bool(jnp.all(jnp.isfinite(sfc.snow_T_top_excess)))
-    assert melt[1800.0] > 5.0, melt
+    assert melt[1800.0] > 50.0, melt
     assert abs(melt[1800.0] - melt[900.0]) < 0.05 * melt[900.0], melt
+    assert 0.0 < over[900.0] < 0.75 * over[1800.0], over
 
 
 def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
