@@ -19,6 +19,7 @@ import struct
 import numpy as np
 import pytest
 
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG as CONSTANTS
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     VORTEX_UNMEASURED,
@@ -32,6 +33,23 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
 # The acquisition script writes here (round 1 of the VORTEX card).
 _ORACLE = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round1/"
            "oracle_step_entry_kt00000001.bin")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _fp64():
+    """Oracle cards are fp64 models; pin the policy instead of inheriting it.
+
+    The certified-card digests below are global-state dependent: under the
+    library default (fp32 storage) the same card hashes differently, so a
+    digest measured in one session and checked in another would disagree for
+    a reason that has nothing to do with the card.  A long mixed battery
+    caught exactly that.  Set the policy the cards actually run at, and put
+    it back afterwards.
+    """
+    previous = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    yield
+    set_policy(previous)
 
 
 @pytest.fixture(scope="module")
@@ -275,7 +293,7 @@ def test_initial_state_is_bit_exact_against_the_nemo_record(card):
 # that leaks into a certified card turns this red instead of moving a
 # certified number quietly.
 _CERTIFIED_CARD_DIGESTS = {
-    "GYRE-zco": "4a6f0b6b0827ac6a",
+    "GYRE-zco": "f227194da309e66b",
     "LOCK_EXCHANGE-zco": "42d13c75ea8cbcc6",
     "OVERFLOW-zps": "c2bca636ac2f14ef",
 }

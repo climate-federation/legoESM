@@ -60,7 +60,7 @@ difference.
 | planted defect: meridional velocity sign flipped | RED, as required |
 | record checker on synthetic records | admits a good set; refuses a corrupt header, a perturbed reference restart and a missing step |
 | acquisition preflight (no build, no run) | PREFLIGHT_OK; both patches apply to the shipped sources |
-| certified card digests unchanged | LOCK `42d13c75ea8cbcc6`, OVERFLOW `c2bca636ac2f14ef`, GYRE `4a6f0b6b0827ac6a` — identical before and after |
+| certified card digests unchanged | LOCK `42d13c75ea8cbcc6`, OVERFLOW `c2bca636ac2f14ef`, GYRE `f227194da309e66b` — identical before and after |
 | push-gate tests | see section 6 |
 | citation gate | see section 6 |
 
@@ -130,6 +130,7 @@ What each finding turned into:
 | the additivity digest omitted the vertical coordinate, the masks, the face Coriolis fields and the barotropic pair, so it could not support "no existing card moved" | FIXED. The digest now covers all of them, and the claim was re-measured against the lane tip with the wider digest: still identical. |
 | one reviewer could not confirm that the lateral-diffusion OFF switch wins over the direction flag | NOT a defect: the card carries zero lateral viscosity either way, and the validator requires it. |
 | one reviewer noted the checker's plant only exercises one refusal path | ADDRESSED by exercising four: a corrupted header, a version bump, a filename-versus-header step disagreement, and a missing record. |
+| the widened additivity digest turned out to depend on a GLOBAL precision setting, so it disagreed between a short run and a long mixed battery | FIXED. The cards are double-precision models; the test now pins that policy and restores it, and the before-and-after measurement was redone under it. |
 
 **And then the review fixes found the real blocker.** Adding VORTEX to the
 card constructibility tripwire — a check that builds a real model, not just a

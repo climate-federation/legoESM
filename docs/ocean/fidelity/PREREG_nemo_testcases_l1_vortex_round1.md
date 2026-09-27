@@ -181,14 +181,17 @@ gets a plant before it is believed.
 | GYRE ladder digest | `cf06a8fc7d0e90f2` (unchanged; newest receipt `..._round170_mpas_tke_bc_receipt.md:149`) | the code GYRE executes is untouched, proven by the row below |
 | LOCK_EXCHANGE-zco card digest | `42d13c75ea8cbcc6` | measured at `c09a9e111780` and with the VORTEX card present: identical |
 | OVERFLOW-zps card digest | `c2bca636ac2f14ef` | as above |
-| GYRE-zco card digest | `4a6f0b6b0827ac6a` | as above |
+| GYRE-zco card digest | `f227194da309e66b` | as above |
 | push-gate tests | unchanged pass count | the six files in `autopilot_max.sh` |
 
 The three card digests cover the resolved model config, the full initial T, S,
 u, v, ssh and barotropic-velocity arrays, all three masks, the T-, U-, V- and
 F-point Coriolis fields, the horizontal metric, the vertical coordinate
 (reference ladder, interfaces, partial thicknesses, bottom index, active mask
-and NEMO's own reference thickness), the land mask, and every card field. They are pinned
+and NEMO's own reference thickness), the land mask, and every card field. They
+are measured with the fp64 precision policy the oracle cards run at, which the
+test pins: the same card hashes differently under the library's fp32 default,
+and a long mixed battery caught that the hard way. They are pinned
 in `tests/ocean/unit/test_nemo_vortex_card.py`, so a later edit to the shared
 identity that leaks into a certified card turns a test red rather than moving a
 certified number quietly.

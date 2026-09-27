@@ -16,7 +16,17 @@ set -euo pipefail
 # split-explicit dynspg_ts with nn_bt_flt=3, constant zdf -- plus ONE thing the
 # tanks structurally cannot exercise: a LIVE beta-plane Coriolis with
 # ln_dynvor_een=.true.  The tanks have f=0 and one wet row, so their vorticity
-# operator is dead.  This record is what lets legoESM's VORTEX card be scored.
+# operator is dead.
+#
+# READ THIS BEFORE YOU RUN IT.  That last switch is also the reason the legoESM
+# VORTEX card is NOT execution-ready: on flux-form momentum NEMO applies the
+# energy-and-enstrophy scheme to the planetary vorticity alone, so on this case
+# it IS the Coriolis operator, and legoESM has no such arm (it binds its own
+# implementation to vector-invariant momentum).  The card declares that gap and
+# its execution gate refuses it.  This acquisition is still worth running: the
+# initial state does not depend on the momentum scheme, so the bit-exactness
+# comparison is live today, and the record is what the round that builds the
+# missing arm will measure against.
 #
 # TWO CONFIGURATIONS, DELIBERATELY.  A brand-new card has no un-instrumented
 # reference to judge its writer against, so this script builds BOTH:
