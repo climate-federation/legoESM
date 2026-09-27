@@ -97,9 +97,10 @@ production trace, and endpoint projection.
 
 ## Tests, citations, and review
 
-The focused reader suite reports **`4 passed in 0.09s`**.  The direct citation
-gate passes all five compiled-source citations with zero unmapped or failed
-rows.  Shifting the compiled writer citation by two lines reports
+The initial focused reader suite reports **`4 passed in 0.09s`**; the final
+reader-plus-citation-gate suite reports **`20 passed in 2.59s`**.  The direct
+citation gate passes all five compiled-source citations with zero unmapped or
+failed rows.  Shifting the compiled writer citation by two lines reports
 `SYMBOL-NOT-AT-LINE`, status `FAIL`, and exits 1.  `bash -n` passes the
 corrected acquisition script, and `git diff --check` passes.  No broad ocean
 battery is warranted because no model implementation or production gate
