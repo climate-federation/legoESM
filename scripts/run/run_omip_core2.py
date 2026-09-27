@@ -8444,6 +8444,10 @@ def main() -> int:
     # --grid tripole --tripole-vmix tke; reject every other context (they are
     # silently discarded there) — the --tripole-vmix guard above misses them at
     # its "none" default and under the kpp closure.
+    if args.grid == "fesom" and args.lateral_side_bc and not args.nemo_ldf_file:
+        raise SystemExit("--lateral-side-bc on FESOM acts only through "
+                         "--nemo-ldf-file (fesom's own viscosity has no slip "
+                         "condition to set); it would be silently dropped.")
     if args.nemo_ldf_file and args.grid == "fesom":
         # fesom's own viscosity has no A_h/B_h/Smagorinsky flags in this lane;
         # the NEMO operator replaces it wholesale, single device.
