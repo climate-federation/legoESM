@@ -3,15 +3,29 @@
 Date 2026-09-27. Lane tip `c09a9e111780`. Preregistered in
 `PREREG_nemo_testcases_l1_vortex_round1.md`, frozen before anything was built.
 
-Status: **ACQUISITION_NEEDED.** Everything below is built, tested and
-committed. The kt=1..10 rows are empty because NEMO has not been run: MPI is
-refused in the agent's sandbox, so round 1 wrote the acquisition and stopped.
+Status: **ACQUISITION_NEEDED, and the card is NOT EXECUTION-READY.**
+
+Two things a reader must take away before anything else:
+
+1. **The ladder survey's "UNLOCKED" verdict for VORTEX is REFUTED.** This case
+   runs NEMO's energy-and-enstrophy scheme on FLUX-FORM momentum, where that
+   scheme IS the Coriolis operator, and legoESM has no such arm: it binds its
+   own EEN implementation to vector-invariant momentum and refuses the pair
+   outright. The two tanks never exposed this because their rotation is
+   structurally dead. The card declares the gap and its execution gate refuses
+   it; it does not substitute legoESM's 4-point average for NEMO's triad.
+2. **The acquisition is still worth running.** The initial state does not
+   depend on the momentum scheme, so the bit-exactness claim stands, and the
+   record is what a later round needs to measure the new arm the day it exists.
+
+The kt=1..10 rows are empty because NEMO has not been run: MPI is refused in
+the agent's sandbox, so round 1 wrote the acquisition and stopped.
 
 ## 1. What was built
 
 | artefact | what it is |
 |---|---|
-| the VORTEX card | additive in the shared NEMO test-case recipe: one new whole-step identity, one new builder, one new validator branch, one new dispatch entry |
+| the VORTEX card | additive in the shared NEMO test-case recipe: one new whole-step identity, one new builder, one new validator branch, one new dispatch entry, and one declared capability gap that makes the execution gate refuse it |
 | the card test | 11 tests, 10 run and 1 skips until the oracle record exists |
 | the acquisition | builds the shipped case twice, runs both, admits by restart byte-identity |
 | the record checker | parses each record's own header; predicts no size |
@@ -117,7 +131,19 @@ What each finding turned into:
 | one reviewer could not confirm that the lateral-diffusion OFF switch wins over the direction flag | NOT a defect: the card carries zero lateral viscosity either way, and the validator requires it. |
 | one reviewer noted the checker's plant only exercises one refusal path | ADDRESSED by exercising four: a corrupted header, a version bump, a filename-versus-header step disagreement, and a missing record. |
 
-One thing found while fixing the blocker, worth recording. The claim that the
+**And then the review fixes found the real blocker.** Adding VORTEX to the
+card constructibility tripwire — a check that builds a real model, not just a
+configuration — turned it red immediately: legoESM refuses to combine the
+energy-and-enstrophy vorticity scheme with flux-form momentum, because its
+flux-form branch never receives the vertex Coriolis field and the combination
+would drop the rotation term entirely. NEMO's own dispatch confirms the case
+needs exactly that pair, and that on the flux-form arm the scheme is applied to
+the planetary vorticity alone, so it IS the Coriolis operator here. The card
+now declares the gap and fails its execution gate rather than running
+legoESM's 4-point average under NEMO's name. This is the finding of the round,
+and neither reviewer found it: only building a model did.
+
+One thing found while fixing the first blocker, worth recording. The claim that the
 two tank cards contradict their own decks is FALSE and is retracted here before
 anyone builds on it: their SHIPPED namelists differ on this switch, but their
 campaign decks both set it on, which is what their cards resolve. VORTEX is the

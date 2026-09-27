@@ -8,12 +8,16 @@ not move any existing certified number.
 Frozen BEFORE any NEMO record exists. Round 1 transcribes the card, writes the
 acquisition, and stops at ACQUISITION_NEEDED; the operator runs NEMO.
 
-AMENDED once, at commit `7fda955ce`+1, still before any measurement: two
-adversarial reviews found that the card was inheriting the Courant-dependent
-implicit vertical advection from a sibling case's namelist, so the resolved-case
-table grew that row, and the additivity digests were widened and re-measured.
-No prediction in section 3 changed. Nothing had been measured when this was
-written, and nothing has been measured since.
+AMENDED TWICE, both times before any measurement; nothing has been measured
+yet and nothing in this file was written after a number was seen.
+
+1. Two adversarial reviews found the card inheriting the Courant-dependent
+   implicit vertical advection from a sibling case's namelist. The
+   resolved-case table grew that row and the additivity digests were widened
+   and re-measured. No prediction changed.
+2. Building a real model from the card — a tripwire added because of those
+   reviews — surfaced a BLOCKING capability gap, and section 3.2 is WITHDRAWN
+   as a result. See section 2b.
 
 ## 1. The case as resolved
 
@@ -37,11 +41,9 @@ from prose.
 | drag / forcing | none: `ln_drg_OFF`, user forcing writes zeros | namelist `namdrg`, `usrdef_sbc.F90:60-68` |
 | initial state | analytic anticyclonic Gaussian eddy: T, S = 35, u, v, ssh | `usrdef_istate.F90:69-75,83-88,101-105,177-182` |
 
-**Nothing in the namelist is outside the transcribed switch set.** The switch
-composition is the certified `lane1_flux_up3` identity (LOCK_EXCHANGE and
-OVERFLOW) with one addition the tanks structurally cannot exercise: a live
-beta-plane Coriolis under EEN. The tanks have f = 0 and one wet row, so their
-vorticity operator is provably dead.
+**One switch in the namelist is OUTSIDE the transcribed set, and the survey's
+UNLOCKED verdict is refuted by it.** See section 2b. Everything else is the
+certified `lane1_flux_up3` identity (LOCK_EXCHANGE and OVERFLOW).
 
 Two things the card carries that need saying out loud:
 
@@ -50,6 +52,40 @@ Two things the card carries that need saying out loud:
 * **`ln_dynldf_hor = .true.` is inert**, because `ln_dynldf_OFF = .true.` is
   also set. The ladder survey listed this case as running a horizontal
   Laplacian; it does not. The card has zero lateral viscosity.
+
+## 2b. THE BLOCKER: legoESM cannot express this case's Coriolis
+
+The ladder survey called VORTEX UNLOCKED on the grounds that its switch set is
+the tanks' certified composition. That is wrong, and this is the measurement
+that refuses it: **building a real model from the card raises.**
+
+NEMO's own dispatch, read rather than assumed. `namelist_cfg:193` selects EEN
+vorticity and `dynvor.F90:874` routes it to the energy-and-enstrophy scheme.
+`namelist_cfg:182` selects FLUX-FORM momentum, and NEMO's `dyn_vor` then takes
+its `ln_dynadv_vec=.false.` arm, which calls the EEN routine on the PLANETARY
+vorticity alone. On this case, therefore, **EEN is the Coriolis operator**: a
+triad-weighted f x u, not a vorticity flux.
+
+legoESM binds its EEN arm to VECTOR-INVARIANT momentum and refuses the pair
+outright, because its flux-form branch never receives the vertex Coriolis field
+and combining them would drop f x u entirely. Its flux-form branch uses a
+4-point C-grid average instead. The two tanks never exposed this: they have
+f = 0 and one wet row, so their rotation operator is provably dead and any
+Coriolis discretisation gives the same zeros. VORTEX is the first case on this
+identity where the operator is alive.
+
+**What the card does about it.** It declares the gap, verbatim, in the field
+the campaign already has for exactly this (`unmeasured_features`), so the
+execution gate REFUSES the card. It does not select the 4-point average and
+call it NEMO's. A card that drops the declaration is refused by the validator,
+and a card that selects the EEN family is refused too.
+
+**Consequence: VORTEX is NOT execution-ready, and section 3.2's ladder
+predictions are WITHDRAWN.** Round 1's deliverable is the card, the declared
+gap, and the acquisition. The acquisition is still worth running: the initial
+state does not depend on the momentum scheme, so section 3.1 stands unchanged,
+and the record is what a later round needs to measure the new arm the day it
+exists.
 
 ## 2. The EOS deviation, and the one thing that makes it unusual here
 
@@ -102,7 +138,12 @@ statement order, but the `(1 + r3u)` factor is applied in the accumulation and
 removed in the divisor as two separate statements, and that has never been
 measured on a card with a non-zero initial velocity. Registered as a watch row.
 
-### 3.2 The kt = 1..10 ladder
+### 3.2 The kt = 1..10 ladder — WITHDRAWN
+
+Withdrawn by section 2b: the card cannot execute, so no ladder row is
+predictable and none would mean anything if it were. Everything from here to
+the end of this subsection is kept only as the record of what was frozen
+before the gap was found, and MUST NOT be scored against.
 
 The tanks' recorded history is the reference (`nemo_testcases_l1_phase3_ref_*`):
 both are AT-BAR at kt=1 on every field, and first-over-bar at kt=2 — LOCK on

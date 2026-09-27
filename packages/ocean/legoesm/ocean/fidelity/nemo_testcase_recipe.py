@@ -106,10 +106,25 @@ def _model_config(
     if whole_step_identity == "vortex_flux_up3_een":
         # VORTEX runs the SAME flux-form UP3 / FCT2 / hpg_sco / zdfcst RK3
         # program as the two tanks (namelist_cfg:143-152,182-185,198,252-260),
-        # so build that identity and change only what its namelist selects
-        # differently: a LIVE beta-plane Coriolis with ln_dynvor_een=.true.
-        # (namelist_cfg:193).  The tanks have f=0 and one wet row, so their
-        # vorticity operator is structurally dead and never exercised.
+        # so build that identity and change only what its own namelist selects
+        # differently.
+        #
+        # WHAT IS *NOT* CHANGED HERE, AND WHY THE CARD FAILS ITS EXECUTION
+        # GATE.  namelist_cfg:193 selects ln_dynvor_een with a LIVE beta-plane
+        # f, and dynvor.F90:874 routes that to np_EEN.  Under
+        # ln_dynadv_vec=.false. (namelist_cfg:182) NEMO's dyn_vor takes its
+        # FLUX-FORM arm, which calls vor_een on the PLANETARY vorticity alone
+        # -- so on this case EEN *is* the Coriolis discretisation, a triad-
+        # weighted f x u.  legoESM binds its own EEN arm to VECTOR-INVARIANT
+        # momentum (ocean_model_latlon_cgrid.py:4392-4400 refuses the pair
+        # outright, because its flux-form branch never receives f_vtx) and
+        # gives the flux-form branch the 4-point C-grid average instead.
+        # Selecting een_total here would not build; selecting nothing and
+        # running the 4-point average would silently substitute a different
+        # Coriolis operator for NEMO's.  The card therefore leaves the
+        # inherited selectors alone and DECLARES the gap in
+        # unmeasured_features, which makes
+        # validate_nemo_testcase_card_for_execution refuse it.
         base = _model_config(
             barotropic_time_filter=barotropic_time_filter,
             n_barotropic_substeps=n_barotropic_substeps,
@@ -126,27 +141,9 @@ def _model_config(
             # Courant-dependent implicit vertical advection.  The tanks share
             # this identity and their campaign decks resolve it .true., which
             # is why the inherited value is True; VORTEX must state its own.
-            # This is executed physics (ocean_model_latlon_cgrid.py:4472,4485
-            # take a different arm), not metadata, so it is explicit here.
+            # This is executed physics (ocean_model_latlon_cgrid.py takes a
+            # different arm), not metadata, so it is explicit here.
             adaptive_implicit_vertadv=False,
-            # dynvor.F90:874 dispatches ln_dynvor_een to np_EEN.  The
-            # operand selectors are the already-canonical ones GYRE/ORCA2
-            # use: nn_e3f_typ=0 and ln_dynvor_msk=.false. are the resolved
-            # namelist_ref defaults, neither being overridden here.
-            vorticity_scheme="een_total",
-            een_e3f_scheme="nemo_avg4",
-            een_metric_weighting="nemo",
-            een_q_boundary="nemo_live",
-            coriolis_scheme="explicit_ab2",
-            # dynspg_ts.F90:359,689 with nn_bt_flt=3 subtracts the Kmm EEN
-            # Coriolis from zu_frc and reapplies it to every AB3 mid-step
-            # velocity -- the same live split GYRE selects for its ENE arm.
-            barotropic_coriolis_split="live",
-            barotropic=base.barotropic._replace(
-                barotropic_coriolis="een_metric",
-                barotropic_een_seed="nemo_kmm",
-                barotropic_een_coefficient_evaluation="nemo_literal",
-            ),
         )
 
     if whole_step_identity == "orca2_vector_een_c2":
@@ -1674,6 +1671,21 @@ def _vortex_barotropic_velocity(ssh, u, v, tmask):
     return uu_b * (r1_hu_0 / (1.0 + r3u)), vv_b * (r1_hv_0 / (1.0 + r3v))
 
 
+# The one composition this card cannot express, named rather than substituted.
+# Both entries are the SAME missing operator seen from the two sides NEMO runs
+# it on: the baroclinic momentum trend and the split-explicit substeps.
+VORTEX_UNMEASURED = (
+    "NEMO's EEN planetary-Coriolis discretisation under FLUX-FORM momentum "
+    "(namelist_cfg:182,193; dynvor.F90:874 routes np_EEN, and dyn_vor's "
+    "ln_dynadv_vec=.false. arm calls vor_een on the planetary vorticity "
+    "alone): legoESM binds its EEN arm to vector-invariant momentum and gives "
+    "the flux-form branch the 4-point C-grid average instead",
+    "the matching EEN barotropic Coriolis inside the split-explicit substeps "
+    "(dyn_cor_2D under np_EEN), which the card cannot select without the "
+    "baroclinic arm above",
+)
+
+
 def build_vortex_zco_card() -> NEMOTestcaseCard:
     """VORTEX root grid: 63x63x10 beta-plane box, flat 5000 m zco bottom."""
 
@@ -1781,7 +1793,8 @@ def build_vortex_zco_card() -> NEMOTestcaseCard:
     )
     # namelist_cfg:32,41: nn_itend = 3000 at rn_Dt = 2880 s.
     card = NEMOTestcaseCard(
-        "VORTEX-zco", recipe, 2880.0, 3000, 1, 0, 0, 0.0, 0.0
+        "VORTEX-zco", recipe, 2880.0, 3000, 1, 0, 0, 0.0, 0.0,
+        unmeasured_features=VORTEX_UNMEASURED,
     )
     validate_nemo_testcase_card(card)
     return card
@@ -1947,25 +1960,19 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if card.case == "VORTEX-zco":
         # VORTEX is the first card on this identity with a LIVE rotation
         # operator, so the structural-elimination escape below must not be
-        # reachable for it.  Require the executed EEN composition instead.
-        een = (
-            cfg.vorticity_scheme,
-            cfg.een_e3f_scheme,
-            cfg.een_metric_weighting,
-            cfg.een_q_boundary,
-            cfg.coriolis_scheme,
-            cfg.barotropic_coriolis_split,
-            cfg.barotropic.barotropic_coriolis,
-            cfg.barotropic.barotropic_een_coefficient_evaluation,
-        )
-        expected_een = (
-            "een_total", "nemo_avg4", "nemo", "nemo_live", "explicit_ab2",
-            "live", "een_metric", "nemo_literal",
-        )
-        if een != expected_een:
+        # reachable for it.  What replaces it is a DECLARED gap: NEMO's EEN
+        # planetary Coriolis under flux-form momentum has no legoESM arm, so
+        # the card must fail closed rather than run the 4-point average.
+        if card.unmeasured_features != VORTEX_UNMEASURED:
             raise ValueError(
-                f"VORTEX-zco requires the live literal EEN composition "
-                f"{expected_een!r}, got {een!r}")
+                "VORTEX-zco must declare the EEN/flux-form Coriolis gap "
+                "verbatim; a card that drops it would silently substitute "
+                "legoESM's 4-point C-grid average for NEMO's triad operator")
+        if cfg.vorticity_scheme.endswith("_total"):
+            raise ValueError(
+                "VORTEX-zco cannot select a _total vorticity scheme: the "
+                "model binds that family to vector-invariant momentum, and "
+                "this case runs ln_dynadv_vec=.false.")
         if not np.any(np.asarray(card.recipe.grid.ff_f) != 0.0):
             raise ValueError(
                 "VORTEX-zco requires a live beta-plane Coriolis at F points")
@@ -2047,6 +2054,7 @@ __all__ = (
     "build_overflow_zps_card",
     "build_orca2_zps_card",
     "build_vortex_zco_card",
+    "VORTEX_UNMEASURED",
     "build_nemo_testcase_card",
     "gyre_horizontal_coordinates",
     "gyre_surface_boundary_condition",

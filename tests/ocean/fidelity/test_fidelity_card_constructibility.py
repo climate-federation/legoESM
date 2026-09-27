@@ -84,12 +84,14 @@ def test_nemo_testcase_card_constructs(case):
     assert model.config.eos == "nemo_teos10"
     assert model.config.eos_depth == "geometric"
     # VORTEX is the first card on this identity with a LIVE rotation
-    # operator, so building the model is the check that its frozen
-    # barotropic EEN operands are actually consumable -- a card that only
-    # RESOLVES and then raises inside the model is the failure note AR was
-    # written about.
+    # operator, and building the model is what discovered that the model
+    # REFUSES the scheme pair its namelist selects (EEN vorticity with
+    # flux-form momentum).  The card now declares that gap instead of
+    # substituting another Coriolis operator, so what this row checks is
+    # that the declared-gap card still builds a model at all.
     if case == "VORTEX-zco":
-        assert model.config.vorticity_scheme == "een_total"
+        assert card.unmeasured_features
+        assert not model.config.vorticity_scheme.endswith("_total")
         assert not model.config.adaptive_implicit_vertadv
 
 

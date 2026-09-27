@@ -21,9 +21,11 @@ import pytest
 
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG as CONSTANTS
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    VORTEX_UNMEASURED,
     build_nemo_testcase_card,
     build_vortex_zco_card,
     validate_nemo_testcase_card,
+    validate_nemo_testcase_card_for_execution,
     vortex_horizontal_coordinates,
 )
 
@@ -62,7 +64,6 @@ def test_card_resolves_the_shipped_namelist(card):
     assert cfg.momentum_flux_scheme == "nemo_up3"
     assert cfg.tracer_advection == "fct2"
     assert cfg.pgf_scheme == "nemo_sco"
-    assert cfg.vorticity_scheme == "een_total"
     assert (cfg.A_v, cfg.K_v) == (1.0e-4, 0.0)              # rn_avm0, rn_avt0
     # namzdf does not set ln_zad_Aimp, so it stays .false. (namelist_ref:1177).
     # The identity this card inherits from resolves it True for OVERFLOW, so
@@ -82,6 +83,23 @@ def test_the_beta_plane_is_live_and_centred_on_the_reference_latitude(card):
         f0, rel=1e-12)
     # A live rotation operator: f must vary across the box, not be a constant.
     assert float(np.ptp(np.asarray(card.recipe.grid.ff_f))) > 3.0e-5
+
+
+def test_the_card_fails_closed_on_the_coriolis_it_cannot_express(card):
+    """namelist_cfg:182,193 -- EEN vorticity under FLUX-FORM momentum.
+
+    NEMO's dyn_vor takes its ln_dynadv_vec=.false. arm and calls vor_een on
+    the PLANETARY vorticity, so on this case EEN *is* the Coriolis operator.
+    legoESM binds its EEN arm to vector-invariant momentum and gives the
+    flux-form branch a 4-point C-grid average instead.  The card must say so
+    and be refused for execution, NOT quietly run the average.
+    """
+    assert card.unmeasured_features == VORTEX_UNMEASURED
+    assert len(card.unmeasured_features) == 2
+    with pytest.raises(ValueError, match="not execution-ready"):
+        validate_nemo_testcase_card_for_execution(card)
+    # And the substitution the gap exists to prevent must be unreachable.
+    assert not card.recipe.model_config.vorticity_scheme.endswith("_total")
 
 
 def test_initial_state_is_the_anticyclonic_source_vortex(card):
@@ -147,10 +165,13 @@ def test_salinity_and_land_follow_the_source_mask(card):
 def test_validator_refuses_a_broken_vortex_composition(card):
     """A card that loses its EEN rotation must be REFUSED, not rebuilt."""
     cfg = card.recipe.model_config
+    broken = card._replace(unmeasured_features=())
+    with pytest.raises(ValueError, match="EEN/flux-form Coriolis gap"):
+        validate_nemo_testcase_card(broken)
     broken = card._replace(
         recipe=card.recipe._replace(
-            model_config=cfg._replace(vorticity_scheme="ene_total")))
-    with pytest.raises(ValueError, match="live literal EEN composition"):
+            model_config=cfg._replace(vorticity_scheme="een_total")))
+    with pytest.raises(ValueError, match="_total vorticity scheme"):
         validate_nemo_testcase_card(broken)
     broken = card._replace(
         recipe=card.recipe._replace(
