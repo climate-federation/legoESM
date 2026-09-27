@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
+import math
 import struct
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +29,7 @@ NN_HLS = 2
 QSR_NI, QSR_NJ = JPI - 2 * NN_HLS, JPJ - 2 * NN_HLS
 VALUE_COUNT = JPK + QSR_NI * QSR_NJ + JPI * JPJ + 5 * JPI * JPJ * JPK
 RECORD_BYTES = 16 + 4 * HEADER_INTS + 8 * VALUE_COUNT
+_HERE = Path(__file__).resolve().parent
 
 
 class GateError(RuntimeError):
@@ -121,15 +125,247 @@ def admit(root: Path, expect_commit: str, plant: str | None = None) -> dict:
     }
 
 
+def _load_sibling(name: str, filename: str):
+    spec = importlib.util.spec_from_file_location(name, _HERE / filename)
+    require(spec is not None and spec.loader is not None,
+            f"cannot load sibling tool {filename}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _score(reference: np.ndarray, candidate: np.ndarray,
+           mask: np.ndarray) -> dict:
+    reference = np.asarray(reference, dtype=np.float64)
+    candidate = np.asarray(candidate, dtype=np.float64)
+    require(reference.shape == candidate.shape == mask.shape,
+            "shortwave walk score shape mismatch")
+    selected_reference = reference[mask]
+    selected_candidate = candidate[mask]
+    unequal = int(np.count_nonzero(
+        selected_reference.view(np.uint64)
+        != selected_candidate.view(np.uint64)))
+    return {
+        "cells_scored": int(mask.sum()),
+        "cells_unequal": unequal,
+        "max_abs": float(np.max(np.abs(
+            selected_reference - selected_candidate), initial=0.0)),
+        "classification": "BIT" if unequal == 0 else "NON-BIT",
+    }
+
+
+def _compiled_direct_rate(record: dict) -> np.ndarray:
+    """Replay qsr_2BD through its compiled scalar statement order.
+
+    This deliberately excludes the final ``(Krhs + rate) - Krhs`` update;
+    the independently admitted process record supplies that operand below.
+    """
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+    from legoesm.ocean.physics.shortwave_penetration import JERLOV_TYPES
+
+    interior = (slice(NN_HLS, -NN_HLS), slice(NN_HLS, -NN_HLS))
+    qsr = record["qsr"]
+    r3t = record["r3t_Kmm"][interior]
+    e3t = record["e3t_3d"][interior]
+    tmask = record["tmask"][interior]
+    wmask = record["wmask"][interior]
+    gdepw = record["gdepw_1d"]
+    params = JERLOV_TYPES["I"]
+    r1_rho0_rcp = 1.0 / (
+        float(NEMO_CONSTANTS_CONFIG.rho_0)
+        * float(NEMO_CONSTANTS_CONFIG.c_sw))
+    r1_si0 = 1.0 / params.zeta1
+    r1_si1 = 1.0 / params.zeta2
+    zz0 = params.R * r1_rho0_rcp
+    zz1 = (1.0 - params.R) * r1_rho0_rcp
+    result = np.zeros((QSR_NI, QSR_NJ, JPK - 1), dtype=np.float64)
+    zatt = np.empty((QSR_NI, QSR_NJ), dtype=np.float64)
+    for i in range(QSR_NI):
+        for j in range(QSR_NJ):
+            stretch = 1.0 + r3t[i, j]
+            zatt[i, j] = (
+                zz0 * math.exp(-(gdepw[0] * stretch) * r1_si0)
+                + zz1 * math.exp(-(gdepw[0] * stretch) * r1_si1))
+    # qsr_ext_lev on this admitted GYRE card resolves nk0=2 and nkV=17.
+    for k in range(17):
+        for i in range(QSR_NI):
+            for j in range(QSR_NJ):
+                stretch = 1.0 + r3t[i, j]
+                ze3t = e3t[i, j, k] * (
+                    1.0 + r3t[i, j] * tmask[i, j, k])
+                if k < 2:
+                    next_attenuation = (
+                        zz0 * math.exp(
+                            -(gdepw[k + 1] * stretch) * r1_si0)
+                        + zz1 * math.exp(
+                            -(gdepw[k + 1] * stretch) * r1_si1)
+                    ) * wmask[i, j, k + 1]
+                else:
+                    next_attenuation = (
+                        zz1 * math.exp(
+                            -(gdepw[k + 1] * stretch) * r1_si1)
+                        * wmask[i, j, k + 1])
+                result[i, j, k] = (
+                    qsr[i, j] * (zatt[i, j] - next_attenuation) / ze3t)
+                zatt[i, j] = next_attenuation
+    return result
+
+
+def walk(root: Path, process_record: Path, lego_trace: Path,
+         plant: str | None = None) -> dict:
+    """Walk developed qsr_2BD using the admitted record and existing trace."""
+    require(plant in (None, "r3t-ulp"), f"unknown walk plant {plant}")
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "shortwave walk is not fp64/libm")
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig, _nemo_qsr_2bd_tendency)
+
+    record = read_record(root / "oracle_qsr_walk_kt00001080.bin")
+    year = _load_sibling(
+        "_round188_year_owners", "nemo_testcase_l2_gyre_year_owners.py")
+    process = year.read_process_record(process_record)
+    require(process["kstp"] == 1080, "process operand is not step 1080")
+    before = np.asarray(
+        process["rhs_after_surface_boundary"], dtype=np.float64).transpose(
+            1, 0, 2)[..., :JPK - 1]
+    interior = (slice(NN_HLS, -NN_HLS), slice(NN_HLS, -NN_HLS))
+    wet = record["tmask"][interior][..., :JPK - 1] > 0.5
+    direct = _compiled_direct_rate(record)
+    replay = record["replay_increment"][interior][..., :JPK - 1]
+    compiled_associated = (before + direct) - before
+    require(_score(replay, compiled_associated, wet)["cells_unequal"] == 0,
+            "Round-185 Krhs-before does not reproduce Round-186 replay")
+
+    qsr = np.asarray(record["qsr"], dtype=np.float64)
+    stretch = 1.0 + np.asarray(
+        record["r3t_Kmm"][interior], dtype=np.float64)
+    if plant == "r3t-ulp":
+        planted = stretch.copy()
+        i, j = (int(value) for value in np.argwhere(np.any(wet, axis=-1))[0])
+        planted[i, j] = np.nextafter(planted[i, j], np.inf)
+        stretch = planted
+    dz_ref = np.asarray(record["e3t_3d"][2, 2, :JPK - 1])
+    config = ShortwavePenetrationConfig(
+        scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0)
+
+    def literal_rate(qsr_value, stretch_value):
+        return _nemo_qsr_2bd_tendency(
+            qsr_value, jnp.asarray(-record["gdepw_1d"]),
+            jnp.asarray(dz_ref), stretch_value, config,
+            NEMO_CONSTANTS_CONFIG.rho_0, NEMO_CONSTANTS_CONFIG.c_sw)
+
+    def associated(qsr_value, stretch_value, before_value):
+        rate = literal_rate(qsr_value, stretch_value)
+        return (before_value + rate) - before_value
+
+    eager_rate = np.asarray(literal_rate(jnp.asarray(qsr), jnp.asarray(stretch)))
+    jit_rate = np.asarray(jax.jit(literal_rate)(
+        jnp.asarray(qsr), jnp.asarray(stretch)))
+    eager_associated = np.asarray(associated(
+        jnp.asarray(qsr), jnp.asarray(stretch), jnp.asarray(before)))
+    jit_associated = np.asarray(jax.jit(associated)(
+        jnp.asarray(qsr), jnp.asarray(stretch), jnp.asarray(before)))
+    if plant:
+        moved = _score(direct, jit_rate, wet)["cells_unequal"]
+        require(moved > 0, "r3t ULP plant did not move the JIT qsr row")
+        raise GateError(f"STATUS PLANT-FIRED: {plant}; unequal={moved}")
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    gate = _load_sibling(
+        "nemo_testcase_l2_gyre_phase3_gate",
+        "nemo_testcase_l2_gyre_phase3_gate.py")
+    _, surface = gate._surface_forcings(
+        card, card.recipe.initial_state, 1080)
+    model_qsr = np.asarray(surface.sw_down, dtype=np.float64).T
+    model_qmm = np.asarray(
+        np.load(lego_trace / "q_Kmm.npy", mmap_mode="r")[1079],
+        dtype=np.float64).T
+    nemo_qmm = stretch
+    model_frame = {
+        name: np.asarray(
+            np.load(lego_trace / f"{name}.npy", mmap_mode="r")[1079])
+        for name in year.LEGO_PROCESS_FIELDS
+    }
+    model_process_row = year.lego_process_temperature_rows(
+        model_frame)["shortwave"].transpose(1, 0, 2)
+    nemo_process_row = year.process_temperature_rows(
+        process)["shortwave"].transpose(1, 0, 2)
+    qmm_mask = np.any(wet, axis=-1)
+    static_depth = -np.asarray(card.recipe.z_coord.z_half_ref)
+    static_thickness = np.broadcast_to(
+        np.asarray(card.recipe.z_coord.dz_ref),
+        record["e3t_3d"][interior][..., :JPK - 1].shape)
+    input_rows = {
+        "qsr_surface_flux": _score(record["qsr"], model_qsr,
+                                   qmm_mask),
+        "gdepw_1d": _score(record["gdepw_1d"], static_depth,
+                            np.ones(record["gdepw_1d"].shape, dtype=bool)),
+        "e3t_reference": _score(
+            record["e3t_3d"][interior][..., :JPK - 1], static_thickness,
+            wet),
+        "r3t_Kmm": _score(nemo_qmm, model_qmm, qmm_mask),
+    }
+    first_inherited = next(
+        name for name, row in input_rows.items() if row["cells_unequal"])
+    return {
+        "format": "gyre-round188-developed-qsr-walk-v1",
+        "status": "HELD",
+        "precision": "fp64/libm",
+        "oracle_step": 1080,
+        "input_rows": input_rows,
+        "first_inherited_operand": first_inherited,
+        "statement_rows": {
+            "isolated_eager_direct_rate": _score(direct, eager_rate, wet),
+            "isolated_jit_direct_rate": _score(direct, jit_rate, wet),
+            "isolated_eager_associated_update": _score(
+                replay, eager_associated, wet),
+            "isolated_jit_associated_update": _score(
+                replay, jit_associated, wet),
+            "production_jit_own_chain_shortwave": _score(
+                nemo_process_row, model_process_row, wet),
+            "production_eager_own_chain_shortwave": {
+                "classification": "UNMEASURED"},
+            "production_jit_given_nemo_stage_entry": {
+                "classification": "UNMEASURED"},
+            "production_eager_given_nemo_stage_entry": {
+                "classification": "UNMEASURED"},
+        },
+        "verdict": (
+            "qsr_2BD is BIT given NEMO operands in isolated eager/JIT; "
+            "the first own-chain input difference is r3t(Kmm), inherited "
+            "from the stage free surface; full-step NEMO-entry ownership "
+            "is unmeasured"),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--plant", choices=("actual-increment-ulp",))
+    parser.add_argument("--walk", action="store_true")
+    parser.add_argument("--process-record", type=Path)
+    parser.add_argument("--lego-trace", type=Path)
+    parser.add_argument("--walk-plant", choices=("r3t-ulp",))
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     try:
-        report = admit(args.root, args.expect_commit, args.plant)
+        if args.walk:
+            require(args.process_record is not None and args.lego_trace is not None,
+                    "--walk requires --process-record and --lego-trace")
+            report = walk(
+                args.root, args.process_record, args.lego_trace,
+                args.walk_plant)
+        else:
+            report = admit(args.root, args.expect_commit, args.plant)
     except GateError as exc:
         print(str(exc))
         return 1

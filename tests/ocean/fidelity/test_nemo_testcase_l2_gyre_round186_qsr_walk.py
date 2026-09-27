@@ -59,3 +59,15 @@ def test_round186_qsr_record_ulp_plant_fires(tmp_path, monkeypatch):
     monkeypatch.setattr(MOD.subprocess, "check_output", lambda *a, **k: "tip\n")
     with pytest.raises(MOD.GateError, match="STATUS PLANT-FIRED"):
         MOD.admit(root, "abc", "actual-increment-ulp")
+
+
+def test_round188_qsr_walk_score_is_bitwise_and_masked():
+    reference = np.array([[0.0, 1.0], [2.0, 3.0]], dtype=np.float64)
+    candidate = reference.copy()
+    candidate[0, 0] = np.nextafter(candidate[0, 0], np.inf)
+    mask = np.array([[False, True], [True, True]])
+    assert MOD._score(reference, candidate, mask)["classification"] == "BIT"
+    mask[0, 0] = True
+    row = MOD._score(reference, candidate, mask)
+    assert row["classification"] == "NON-BIT"
+    assert row["cells_unequal"] == 1
