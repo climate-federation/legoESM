@@ -191,8 +191,9 @@ the read-only sandbox.  Its terminal line is quoted verbatim:
 Therefore: **independent review unavailable in-sandbox**.  This is not a SHIP,
 HOLD, or DO NOT SHIP verdict.
 
-The citation gate passes all five compiled-source mappings.  Its shifted
-`zdfmxl.f90:109-124` plant exits 1 with `SYMBOL-NOT-AT-LINE`, as required.
+The citation gate passes all compiled-source mappings.  Its shifted
+`GYRE_OMIP_L2_P3_SM_R179SLPWALK/BLD/ppsrc/nemo/zdfmxl.f90:109-124` plant exits
+1 with `SYMBOL-NOT-AT-LINE`, as required.
 
 The first focused suite reports **1 failed, 108 passed in 99.81s**.  The sole
 failure is
