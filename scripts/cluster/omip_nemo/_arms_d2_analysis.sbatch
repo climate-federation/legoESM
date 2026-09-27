@@ -13,7 +13,7 @@
 # (3) turbocline at all snapshot hours (Ri probe, turbocline line only).
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge; cd $ROOT || exit 1
-git -C $ROOT rev-parse --short HEAD | grep -q 035ad86bd || { echo "worktree HEAD moved"; exit 2; }
+git -C $ROOT rev-parse --short HEAD | grep -q 3d853732d || { echo "worktree HEAD moved"; exit 2; }
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu
