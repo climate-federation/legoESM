@@ -204,6 +204,21 @@ def test_stage1_r3t_ratio_execution_is_recipe_derived():
     assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
 
 
+def test_stage12_qco_tracer_order_execution_is_recipe_derived():
+    module = _module()
+    cards = module._card_execution("stage12_qco_tracer_order")
+    executing = {
+        name for name, row in cards.items() if row["executes_route"]}
+
+    assert executing == {
+        "GYRE-zco", "LOCK_EXCHANGE-zco", "ORCA2-zps", "OVERFLOW-zps",
+        "NEMO-GYRE-recipe",
+    }
+    assert cards["NEMO-GYRE-recipe"]["linear_free_surface"] is True
+    assert cards["DINO:nemo_dino_kamm"]["tracer_time_integrator"] == "euler"
+    assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
+
+
 def test_zero_ladder_moves_are_vacuously_registered(monkeypatch):
     module = _module()
     monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
