@@ -71,10 +71,22 @@ the committed diff.  It failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-The focused ranked-reader battery passes 2/2.  The gate and plant run from
-committed code at fp64/libm with production JIT.  No ORCA2 or GYRE trajectory
-gate is eligible because the isolated statement misses the exact bar and the
-`packages/` tree is unchanged.
+The focused ranked-reader plus citation-gate battery passes 18/18.  The
+receipt citation gate passes all three compiled citations with zero failures,
+zero unmapped citations, and zero map-audit failures; its rigid two-line plant
+fails with `SYMBOL-NOT-AT-LINE`.
+
+The required `tests/ocean/fidelity -n 12` battery was launched once.  It
+reached 99% and the inherited final-tail stall, then was interrupted after a
+bounded silent wait and is not represented as green.  It emitted exactly the
+five failures already listed by rounds 36 and 37: SI3 MY_SRC provenance, the
+stale GYRE member/gate stamp, the round-51 trace suffix, the unstamped legacy
+report emitters, and the missing `hires_lane_surface` case-board row.  Both
+round-38 tests passed in that battery.
+
+The gate and plant run from committed code at fp64/libm with production JIT.
+No ORCA2 or GYRE trajectory gate is eligible because the isolated statement
+misses the exact bar and the `packages/` tree is unchanged.
 
 ## Choices
 
