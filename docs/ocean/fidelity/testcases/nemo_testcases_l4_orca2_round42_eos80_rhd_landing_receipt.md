@@ -103,4 +103,4 @@ polynomial, and stores the masked density anomaly in the source order
 `ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/eosbn2.f90:810-844`.
 The executing HPG branch consumes `rhd` directly in the surface and interior
 recurrences and writes `zhpi + zuap` at
-`ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/dynhpg.f90:404-459`.
+`ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/dynhpg.f90:403-459`.
