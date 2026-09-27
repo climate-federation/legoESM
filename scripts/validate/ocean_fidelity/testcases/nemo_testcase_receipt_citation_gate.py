@@ -3647,7 +3647,8 @@ CITATION_MAP = {
         'lr123_write = lwp .AND. .NOT.ln_tile .AND. kstg == 3 .AND.',
         'WRITE(r123_unit) r3t(:,:,Kbb), r3t(:,:,Kmm), r3t(:,:,Kaa)', 13],
     'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:861-869': [
-        ('CALL tra_adv', 3), 'WRITE(r123_unit) ts(:,:,:,jp_tem,Krhs)', 9],
+        ('CALL tra_adv', 3),
+        ('WRITE(r123_unit) ts(:,:,:,jp_tem,Krhs)', 2), 9],
     'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:930-970': [
         'IF( ln_traqsr  ) THEN',
         "CALL ctl_stop( 'stp_RK3_stg: cannot close round-185 process dump' )", 41],
