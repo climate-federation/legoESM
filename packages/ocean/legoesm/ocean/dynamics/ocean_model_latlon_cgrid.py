@@ -8191,6 +8191,7 @@ class LatLonCGridOceanModel:
                 native_slope_pn2=_gm_native_pn2,
                 native_slope_e3w=_gm_native_e3w,
                 native_slope_eta=state.eta.data,
+                native_kappa_slope_eta=state.eta.data,
                 # ldf_eiv_trp precedes dynamics and consumes the same-stage
                 # ldf_slp slopes, while the later tra_ldf tensor consumes Kmm
                 # geometry -- that is the stpMLF reading, and on the leapfrog
@@ -8203,7 +8204,7 @@ class LatLonCGridOceanModel:
                 # operand set had moved.  MEASURED inert on GYRE: the card
                 # resolves kappa_GM = 0.0 and gm_bolus_advection = "centred",
                 # so the bolus is not even requested there.
-                native_bolus_slope_eta=_eta_gm_in,
+                native_bolus_slope_eta=state.eta.data,
                 # tra_ldf e3u/e3v use the step-entry Nnn SSH (Kmm).
                 redi_flux_eta=state.eta.data,
                 return_bolus_transport=_want_bolus,

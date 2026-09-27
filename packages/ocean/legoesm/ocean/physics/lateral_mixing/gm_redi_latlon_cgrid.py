@@ -4674,9 +4674,11 @@ def compute_isoneutral_K33_latlon(
             _vm = v_mask
         _native_prd_J = _J if native_prd_jacobian is None else native_prd_jacobian
         _native_eta = eta if native_slope_eta is None else native_slope_eta
+        _native_J = compute_ocean_jacobian(
+            _native_eta, H_bathy, z_coord)
         _, _, _wi, _wj = compute_nemo_native_slopes(
             _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
-            jacobian=_J, eta=_native_eta, H_bathy=H_bathy,
+            jacobian=_native_J, eta=_native_eta, H_bathy=H_bathy,
             prd_jacobian=_native_prd_J,
             prd_TS_override=native_prd_TS,
             pn2_override=native_slope_pn2,
@@ -4685,7 +4687,7 @@ def compute_isoneutral_K33_latlon(
         if cfg.redi_coefficient == "nemo21":
             _kgm = native_treguier_kappa_for_state(
                 _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
-                _J, eta, H_bathy, _native_prd_J,
+                _native_J, _native_eta, H_bathy, _native_prd_J,
                 native_prd_TS, native_slope_pn2, native_slope_e3w,
                 jnp.broadcast_to(grid.f, _m.shape), rho_0, g, omega)
             kappa_redi_override, kappa_redi_v_override = nemo21_redi_from_gm(
