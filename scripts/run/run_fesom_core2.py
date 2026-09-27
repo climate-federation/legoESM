@@ -109,7 +109,7 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
+def write_snapshot(out_dir: Path, tag: str, state, mesh, extra=None) -> Path:
     """Snapshot in the comparator's node-cloud conventions.
 
     fesom-jax state: T/S are (nl-1, nod2D) level-first; the comparator's
@@ -162,6 +162,7 @@ def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
         ice_thickness=np.asarray(state.m_ice, dtype=np.float64),
         lat_T=lat, lon_T=lon, land_mask=wet,                # 1.0 == OCEAN
         H_bathy=H, z_center_ref=z_center,
+        **(extra or {}),
     )
     return path
 

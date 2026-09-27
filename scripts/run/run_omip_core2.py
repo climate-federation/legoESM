@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import types
 import time
 import warnings
 from pathlib import Path
@@ -2870,6 +2871,7 @@ _FESOM_WIRED_DESTS = frozenset({
     "nemo_monthly_init", "nemo_init_month", "nemo_init_tint",
     "woa_init", "woa_t", "woa_s",
     "nemo_ldf_file", "lateral_side_bc", "nemo_domain_cfg",
+    "state_accumulate", "mld_accumulate",
 })
 
 # B4 selectors that CONSUME the forced loop's forcing/coupling — meaningless
@@ -3448,6 +3450,36 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
           f"ice={'PROGNOSTIC' if ice_config is not None else 'off'}, "
           f"sss_restore={'on' if sss_restore_cfg is not None else 'off'}, "
           f"runoff={'on' if runoff_monthly is not None else 'off'}")
+    # 5-day window means, as NEMO writes and the host lanes score
+    # (--state-accumulate / --mld-accumulate): same accumulator, node columns.
+    _facc = (_SurfaceFluxAccumulator()
+             if (args.state_accumulate or args.mld_accumulate) else None)
+    _nreal = int(np.asarray(model.mesh.Z).size)
+    _zc_f = -jnp.asarray(model.mesh.Z)                            # positive-down
+    _Hb_f = -jnp.asarray(model.mesh.depth)
+    _wet_f = ((_zc_f[None, :] < _Hb_f[:, None])
+              & jnp.asarray(model.mesh.node_layer_mask[:, :1])).astype(_zc_f.dtype)
+
+    def _fesom_acc_add(st):
+        inner = st.inner
+        mld = None
+        if args.mld_accumulate:
+            from legoesm.ocean.diagnostics import mixed_layer_depth
+            mld = mixed_layer_depth(inner.T[:, :_nreal], inner.S[:, :_nreal], _zc_f,
+                                    delta_sigma=0.01, wet_mask=_wet_f,
+                                    bottom_depth=_Hb_f)
+        facade = (types.SimpleNamespace(T=types.SimpleNamespace(data=inner.T),
+                                        S=types.SimpleNamespace(data=inner.S))
+                  if args.state_accumulate else None)
+        _facc.add(None, mld=mld, state=facade,
+                  dz=inner.hnode if args.state_accumulate else None)
+
+    def _fesom_acc_drain():
+        if _facc is None:
+            return None
+        return {k: (v[:, :_nreal] if v.ndim == 2 and v.shape[1] == model.mesh.nl else v)
+                for k, v in _facc.drain(dt).items()}
+
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _dm2dc_win = None
@@ -3609,14 +3641,18 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 state, S_target=_sss_tgt_step, ice_concentration=_sss_ice,
                 config=sss_restore_cfg, grid=grid, dt=dt,
                 river_runoff=_R_gate)
+        if _facc is not None:
+            _fesom_acc_add(state)
         if snap_every and step % snap_every == 0:
             d = int(round(step * dt / 86400.0))
-            write_snapshot(out, f"day{d:04d}", state.inner, model.mesh)
+            write_snapshot(out, f"day{d:04d}", state.inner, model.mesh,
+                           extra=_fesom_acc_drain())
     _T_fin = np.asarray(state.inner.T)
     if not np.all(np.isfinite(_T_fin)):
         raise SystemExit("fesom forced loop: non-finite temperature after "
                          f"{n_steps} steps — refusing to report success.")
-    write_snapshot(out, "final", state.inner, model.mesh)
+    write_snapshot(out, "final", state.inner, model.mesh,
+                   extra=_fesom_acc_drain())
     if ice_state is not None:
         # Final prognostic-ice state next to the ocean snapshot (the ice is
         # not part of the fesom inner state, so the ocean snapshot alone

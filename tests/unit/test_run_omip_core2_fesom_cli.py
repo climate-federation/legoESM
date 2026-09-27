@@ -192,3 +192,8 @@ def test_river_mouth_gate_accepted_on_fesom():
     args, p = _parse(["--runoff", "--river-mouth-restoring-gate"])
     validate_fesom_stage(args, p)  # no raise
     assert args.river_mouth_restoring_gate
+
+
+def test_window_mean_flags_allowed():
+    args, p = _parse(["--state-accumulate", "--mld-accumulate"])
+    validate_fesom_stage(args, p)  # no raise
