@@ -79,6 +79,9 @@ by this round.
 ## Verification
 
 - Focused round-50 gate: **9 passed**; Ruff clean; shell syntax clean.
+- Citation gate: the 274-citation default receipt and all three round-50
+  compiled-source spans pass with no unmapped citation; shifting the first
+  round-50 span by two lines fires `SYMBOL-NOT-AT-LINE`.
 - Shared card battery: **160 passed** in 365.13 s; tank-removal battery:
   **10 passed** in 8.21 s.
 - `tests/ocean/fidelity -n 12`: 1,940 items reached 99%; all emitted nodes were
