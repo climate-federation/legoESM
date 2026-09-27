@@ -361,9 +361,13 @@ def compare(reference_path: Path, candidate: dict) -> dict:
         "reference_commit": reference["worktree"]["commit"],
         "candidate_commit": candidate["worktree"]["commit"],
         "first_moved_boundary": None if first is None else first,
-        "R51-P2": "CONFIRMED" if all(
+        "R51-P2": "PARTLY_CONFIRMED" if all(
             row["exact"] for row in rows if row["name"].startswith("kt3.entry."))
             else "REFUTED",
+        "R51-P2_entry": "CONFIRMED" if all(
+            row["exact"] for row in rows if row["name"].startswith("kt3.entry."))
+            else "REFUTED",
+        "R51-P2_observer_noninterference": "UNMEASURED_INCOMPATIBLE_CARD",
         "R51-P3": "CONFIRMED" if p3 else "REFUTED",
         "R51-P4": "CONFIRMED" if p4 else "REFUTED",
         "rows": rows,

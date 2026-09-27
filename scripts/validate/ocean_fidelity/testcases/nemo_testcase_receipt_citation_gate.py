@@ -53,6 +53,8 @@ _R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
 _ORCA2_COMPILED = NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo"
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
+_OVERFLOW_R50PAIR_COMPILED = (
+    NEMO / "tests/OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo")
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
@@ -82,6 +84,12 @@ FILES = {
         _OVERFLOW_COMPILED / "dynhpg.f90"),
     "OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _OVERFLOW_P3_COMPILED / "stprk3_stg.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "stprk3_stg.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/eosbn2.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "eosbn2.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynhpg.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "dynhpg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo"
         "/stprk3.f90"),
@@ -864,6 +872,19 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 51: admitted OVERFLOW pair record's executing build ---
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:327-363': [
+        'CALL r50_mom_begin( kstp, kstg, Kbb, Kmm, Krhs, Kaa, ts, ssh, uu, vv )',
+        "CALL r50_mom_uv( 'after_adv', uu, vv, Krhs )", 37],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:492-541': [
+        '!                       !==  T-S Tracers  ==!',
+        'CALL r50_tra_finish( ts, ssh, Kaa )', 50],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/eosbn2.f90:684-718': [
+        'SELECT CASE( neos )',
+        'prd(ji,jj,jk) = (  zn * r1_rho0 - 1._wp  ) * ztm', 35],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynhpg.f90:341-419': [
+        'SUBROUTINE hpg_sco( kt, Kmm, puu, pvv, Krhs )',
+        'END SUBROUTINE hpg_sco', 79],
     # --- ORCA2 round 50: executing OVERFLOW P3 kt=3 statement order ---
     'OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:327-354': [
         ('SELECT CASE( kstg )', 2), ('END SELECT', 6), 28],

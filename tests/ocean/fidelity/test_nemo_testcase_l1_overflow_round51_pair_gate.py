@@ -77,7 +77,10 @@ def test_sidecar_hash_and_first_moved_boundary(tmp_path):
     candidate["sidecar"] = gate._write_sidecar(candidate_path, moved)
     result = gate.compare(base_path, candidate)
     assert result["first_moved_boundary"]["name"] == "s1.tracer.Kaa.T"
-    assert result["R51-P2"] == "CONFIRMED"
+    assert result["R51-P2"] == "PARTLY_CONFIRMED"
+    assert result["R51-P2_entry"] == "CONFIRMED"
+    assert result["R51-P2_observer_noninterference"] == (
+        "UNMEASURED_INCOMPATIBLE_CARD")
     assert result["R51-P3"] == "CONFIRMED"
     assert result["R51-P4"] == "CONFIRMED"
 
