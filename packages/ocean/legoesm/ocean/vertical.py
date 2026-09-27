@@ -375,6 +375,18 @@ def nemo_ldf_reference_e3f(z_coord):
     return reference
 
 
+def _nemo_qco_r1_area_f(raw, geom_grid, dtype):
+    """Materialize NEMO's native F area and stored reciprocal."""
+    b = lax.optimization_barrier
+    one = jnp.asarray(1.0, dtype=dtype)
+    if raw is None:
+        area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
+    else:
+        area_f = b(b(jnp.asarray(raw.e1f, dtype=dtype))
+                   * b(jnp.asarray(raw.e2f, dtype=dtype)))
+    return b(one / area_f)
+
+
 def nemo_qco_live_vorticity_e3f_cgrid(
     eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
     reference_e3f=None,
@@ -447,15 +459,9 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     hf0 = _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype)
     wet_f = (hf0 > 0.0).astype(dtype)
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
-    # NEMO materialises native e1f*e2f and its reciprocal before this
-    # statement.  Preserve both the F-layout operand and the multiplication
-    # boundary on cards that carry NEMO's raw mesh.
-    if raw is None:
-        area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
-    else:
-        area_f = b(b(jnp.asarray(raw.e1f, dtype=dtype))
-                   * b(jnp.asarray(raw.e2f, dtype=dtype)))
-    r1_area_f = b(one / area_f)
+    # Preserve NEMO's native F-layout operand and stored-reciprocal boundary
+    # on cards that carry its raw mesh.
+    r1_area_f = _nemo_qco_r1_area_f(raw, geom_grid, dtype)
     r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.

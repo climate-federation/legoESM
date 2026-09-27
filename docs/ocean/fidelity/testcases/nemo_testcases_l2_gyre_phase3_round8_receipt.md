@@ -5191,7 +5191,7 @@ ratio is NOT zero during step 1: `r3u(:,:,Kaa)` is assigned at STAGE 1 from
 `ssha` (`stprk3_stg.F90:156`, the assignment at `:163`), so a stage-3
 thickness already carries a nonzero free-surface ratio inside the step that
 produces the kt=2 state.  And the MIN rule is not what the production stage
-builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:655`)
+builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:661`)
 transcribes NEMO's area-weighted MEAN (`domqco.F90:166-169` for the MLF
 entry, `:219-222` for the RK3 one) and both time-stepping lanes call it, so
 MIN survives only as an ablation arm.  What the measured `3.06e-08` actually
@@ -5779,7 +5779,7 @@ Caught by the gate.
    tests stop there.  What should that mask be on a card with no mesh file?
 3. **The slow forcing's depth average** still uses the min rule where NEMO
    uses the area-weighted mean (`domqco.F90:166-169`, `:219-222`, transcribed
-   in `vertical.py:655`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
+   in `vertical.py:661`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
 4. **Decision 16 is preregistered and NOT landed** — the unconditional
    vorticity call in the pre-stage 2-D momentum RHS.  Its predictions are in
    the round-29 manifest; landing it needs cross-card runs this round did not
@@ -10426,7 +10426,7 @@ macro is `e3t(i,j,k,t) = e3t_0(i,j,k)*(1 + r3t(i,j,t))`
 `stprk3_stg.F90:156` computes `r3ta` from `ssha`, and `stprk3_stg.F90:231`
 assigns it to `r3t(:,:,Kaa)`.  NEMO never forms `(ssh + ht_0)/ht_0`.
 
-legoESM's shared `compute_ocean_jacobian` (`vertical.py:1747`) formed the SUM
+legoESM's shared `compute_ocean_jacobian` (`vertical.py:1753`) formed the SUM
 first, so the low bits of the small ratio were lost to cancellation.
 
 **THE INSTRUMENT WAS VALIDATED BEFORE THE CLAIM.**  On host arrays, from
@@ -10710,7 +10710,7 @@ through the shared helper, one feeds legoESM's, and the arm's verdict sentence
 is now READ OFF those rows instead of asserted beside them.
 
 **THE CHANGE IS ONE STATEMENT IN ONE SHARED HELPER**, no knob and no default
-that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1747`)
+that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1753`)
 forms `1 + eta*r1_h` with the reciprocal taken in the PROMOTED dtype of ssh and
 bathymetry — an existing test caught the first version taking it in the
 bathymetry's storage dtype, at a relative `3.0e-10` that is f32 eps times the
