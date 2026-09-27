@@ -197,6 +197,17 @@ def test_process_card_endpoint_follows_explicit_interval(tmp_path, harness):
         harness._resolved_process_card(output, expected_itend=1440)
 
 
+def test_process_interval_is_day_aligned_and_fail_closed(harness):
+    assert harness._day_aligned_process_interval(1, 1080, "test") == (
+        0, 180, 1080)
+    assert harness._day_aligned_process_interval(1081, 1440, "test") == (
+        180, 240, 360)
+    with pytest.raises(harness.GateError, match="daily boundaries"):
+        harness._day_aligned_process_interval(2, 1080, "test")
+    with pytest.raises(harness.GateError, match="positive and ordered"):
+        harness._day_aligned_process_interval(1081, 1080, "test")
+
+
 def test_round136_record_availability_refuses_endpoint_relabeling(harness):
     rows = harness.developed_record_availability()
     assert [row["day"] for row in rows] == [30, 90, 180, 240]
