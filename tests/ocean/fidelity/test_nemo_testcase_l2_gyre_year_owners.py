@@ -175,6 +175,28 @@ def test_round123_process_record_layout_and_reader(tmp_path, harness):
         harness.read_process_record(record_path, truncate=True)
 
 
+def test_process_card_endpoint_follows_explicit_interval(tmp_path, harness):
+    output = tmp_path / "ocean.output"
+    output.write_text("""
+       number of the last time step    nn_itend = 1080
+       ocean time step                 rn_Dt = 14400.0
+       Tiling (T) or not (F)           ln_tile = F
+       Light penetration in temperature Eq. ln_traqsr = T
+       open boundaries not used (ln_bdy = F)
+       geothermal heating at ocean bottom ln_trabbc = F
+       bottom boundary layer flag ln_trabbl = F
+       Apply relaxation or not ln_tradmp = F
+       convection mass flux (mfc) ln_zdfmfc = F
+       OSMOSIS-OBL closure (OSM) ln_zdfosm = F
+       non-penetrative convection (npc) ln_zdfnpc = F
+    """)
+    rows = harness._resolved_process_card(output, expected_itend=1080)
+    assert rows["itend_1080"]
+    with pytest.raises(harness.GateError,
+                       match="resolved process card differs: itend_1440"):
+        harness._resolved_process_card(output, expected_itend=1440)
+
+
 def test_round136_record_availability_refuses_endpoint_relabeling(harness):
     rows = harness.developed_record_availability()
     assert [row["day"] for row in rows] == [30, 90, 180, 240]

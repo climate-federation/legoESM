@@ -498,10 +498,16 @@ def _check_process_stamp(root: Path, expected_commit: str) -> None:
                         "process_records.stamp")
 
 
-def _resolved_process_card(path: Path) -> dict[str, bool]:
+def _resolved_process_card(
+        path: Path, *, expected_itend: int = PROCESS_END_STEP,
+        ) -> dict[str, bool]:
     text = Path(path).read_text(encoding="utf-8", errors="replace")
+    require(expected_itend >= 1,
+            "resolved process-card endpoint must be positive")
     patterns = {
-        "itend_1440": r"number of the last time step\s+nn_itend\s*=\s*1440\b",
+        f"itend_{expected_itend}": (
+            rf"number of the last time step\s+nn_itend\s*=\s*"
+            rf"{expected_itend}\b"),
         "dt_14400": r"ocean time step\s+rn_Dt\s*=\s*14400(?:\.0+)?\b",
         "tiling_off": r"Tiling \(T\) or not \(F\)\s+ln_tile\s*=\s*F\b",
         "qsr_on": r"Light penetration in temperature Eq\.\s+ln_traqsr\s*=\s*T\b",
@@ -716,7 +722,8 @@ def validate_process_record(root: Path, expected_commit: str,
         require(activity[name] > 0,
                 f"active process row {name} never moves a wet cell")
 
-    resolved = _resolved_process_card(root / "ocean.output")
+    resolved = _resolved_process_card(
+        root / "ocean.output", expected_itend=end_step)
     restart_rows = {}
     for name, expected in restart_hashes.items():
         observed_digest = _sha256(root / name)
