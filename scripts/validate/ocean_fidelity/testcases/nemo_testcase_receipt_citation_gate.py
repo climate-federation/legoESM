@@ -1531,18 +1531,18 @@ CITATION_MAP = {
         'IF( ld_zco ) THEN',
         'CALL zgr_msk_top_bot( pdept_1d, zbathy, k_top, k_bot )', 13],
     'DINO/BLD/ppsrc/nemo/zgr_lib.f90:198-209': [
-        '!                       !==  t- and w- scale factors from depth  ==!',
+        ('!                       !==  t- and w- scale factors from depth  ==!', 3),
         '&                   pe3uw, pe3vw        )', 12],
     'DINO/BLD/ppsrc/nemo/domain.f90:194-216': [
         'ht_0(:,:) = 0._wp  ! Reference ocean thickness',
-        'r1_hf_0(:,:) = ssfmask(:,:) / ( hf_0(:,:) + 1._wp - ssfmask(:,:) )',
+        'r1_hf_0(:,:) = ssfmask(:,:) / ( hf_0(:,:) + 1._wp -  ssfmask(:,:) )',
         23],
     'DINO/BLD/ppsrc/nemo/domqco.f90:186-207': [
         'SUBROUTINE dom_qco_r3c( pssh, pr3t, pr3u, pr3v, pr3f )',
-        'END DO   ;   END DO', 22],
+        ('END DO   ;   END DO', 1), 22],
     'DINO/BLD/ppsrc/nemo/eosbn2.f90:1507-1517': [
         'DO jk =  2,  jpkm1',
-        'END DO   ;   END DO   ;   END DO', 11],
+        ('END DO   ;   END DO   ;   END DO', 15), 11],
     'DINO/BLD/ppsrc/nemo/stpmlf.f90:197-216': [
         'IF( l_ldfslp ) THEN',
         'CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nnn )', 20],
@@ -1550,10 +1550,10 @@ CITATION_MAP = {
         'INTEGER , INTENT(in)                   ::   kt',
         'zhmlpt(ji,jj) = ((gdept_3d(ji,jj,nmln(ji,jj)-1)', 39],
     'DINO/BLD/ppsrc/nemo/ldfslp.f90:215-216': [
-        'DO jj = ntsj-( 1), ntej+(  1 )',
+        ('DO jj = ntsj-( 1), ntej+(  1 )', 3),
         'r1_hmlw(ji,jj) = 1._wp / MAX(', 2],
     'DINO/BLD/ppsrc/nemo/ldfslp.f90:320-345': [
-        'DO jj = ntsj-( 1), ntej+(  1 )',
+        ('DO jj = ntsj-( 1), ntej+(  1 )', 5),
         'zck = ( ((gdepw_3d(ji,jj,jk)', 26],
     # --- round 104: the shear-production routine and its operand builders ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:167-168': [
