@@ -43,13 +43,20 @@ def main() -> None:
         call_count += 1
         call_id = call_count
         site = "unknown"
+        chain = []
         for frame in inspect.stack()[1:]:
             if ("/legoesm/ocean/" in frame.filename
                     and not frame.filename.endswith("/eos.py")):
-                site = f"{frame.filename.rsplit('/', 1)[-1]}:{frame.function}:{frame.lineno}"
-                break
+                chain.append(
+                    f"{frame.filename.rsplit('/', 1)[-1]}:"
+                    f"{frame.function}:{frame.lineno}")
+                if site == "unknown":
+                    site = chain[-1]
+                if len(chain) == 5:
+                    break
         e3w = call_kwargs.get("e3w_int")
-        print(f"TRACE_SITE call={call_id} site={site} has_e3w={e3w is not None}")
+        print(f"TRACE_SITE call={call_id} site={site} "
+              f"chain={' > '.join(chain)} has_e3w={e3w is not None}")
         if e3w is not None:
             e3w = jnp.asarray(e3w)
             if call_id == ns.plant_call:
