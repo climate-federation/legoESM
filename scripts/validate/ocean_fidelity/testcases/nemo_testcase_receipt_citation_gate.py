@@ -3690,7 +3690,7 @@ CITATION_MAP = {
     # --- round 188: compiled-order developed qsr statement walk ---
     'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/traqsr.f90:616-645': [
         'zz0 =           rn_abs   * r1_rho0_rcp',
-        'pts(ji,jj,jk,jp_tem,Krhs) = pts(ji,jj,jk,jp_tem,Krhs)', 30],
+        ('pts(ji,jj,jk,jp_tem,Krhs) = pts(ji,jj,jk,jp_tem,Krhs)', 11), 30],
     'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/traqsr.f90:1021-1070': [
         'FUNCTION qsr_ext_lev( pL, pfr ) RESULT( klev )',
         'END FUNCTION qsr_ext_lev', 50],
