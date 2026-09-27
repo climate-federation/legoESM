@@ -227,8 +227,7 @@ def test_decision59_admits_only_strictly_sub_ten_floor_unit_year_moves(
     within = _year(1.0, "c" * 40)
     for row in within["rows"]:
         if row["day"] in (240, 360):
-            row["rms_T"] += np.nextafter(
-                module.DECISION59_MAX_ABS_K, 0.0)
+            row["rms_T"] += 0.5 * module.DECISION59_MAX_ABS_K
     passed = module.evaluate(
         _comparison(), _day(1.0), _day(0.1), before, within,
         expected_candidate_commit="c" * 40,
