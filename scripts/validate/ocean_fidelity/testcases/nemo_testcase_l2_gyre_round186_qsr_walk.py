@@ -675,7 +675,7 @@ def production_substitution(root: Path, process_record: Path,
                             reference_trace: Path, expect_commit: str,
                             plant: str | None = None) -> dict:
     """Substitute NEMO's r3t(Kmm) at the production-JIT QSR boundary."""
-    require(plant in (None, "production-r3t-ulp"),
+    require(plant in (None, "production-r3t-ulp", "production-r3t-effect"),
             f"unknown production substitution plant {plant}")
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -744,7 +744,10 @@ def production_substitution(root: Path, process_record: Path,
     override = np.array(nemo_stretch, copy=True)
     if plant:
         j, i = (int(value) for value in np.argwhere(wet2)[0])
-        override[j, i] = np.nextafter(override[j, i], np.inf)
+        if plant == "production-r3t-ulp":
+            override[j, i] = np.nextafter(override[j, i], np.inf)
+        else:
+            override[j, i] += 2.0 ** -20
     hooks = _NEMOWSRK3TestHooks(
         tracer_process_trace=(), stage3_qsr_stretch_override=jnp.asarray(
             override))
@@ -781,9 +784,9 @@ def production_substitution(root: Path, process_record: Path,
         exact_frame = _trace_frame(year, exact)
         planted = _score(exact_frame["Bqsr"], candidate_frame["Bqsr"], wet)
         require(planted["cells_unequal"] > 0,
-                "production r3t ULP plant moved no QSR boundary cell")
+                f"{plant} moved no QSR boundary cell")
         raise GateError(
-            "STATUS PLANT-FIRED: production-r3t-ulp; "
+            f"STATUS PLANT-FIRED: {plant}; "
             f"unequal={planted['cells_unequal']}")
 
     comparison = {
@@ -848,7 +851,8 @@ def main() -> int:
     parser.add_argument("--lego-trace", type=Path)
     parser.add_argument("--walk-plant", choices=("r3t-ulp",))
     parser.add_argument("--production-plant",
-                        choices=("production-r3t-ulp",))
+                        choices=("production-r3t-ulp",
+                                 "production-r3t-effect"))
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     try:
