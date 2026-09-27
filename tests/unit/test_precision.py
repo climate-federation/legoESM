@@ -35,6 +35,18 @@ from legoesm.core.precision import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _restore_policy():
+    """Save and restore the global precision policy around each test.
+
+    Without this, test_scalar_libm_transcendental_policy leaves the
+    process-wide policy at fp64/libm for every test that runs after it.
+    """
+    saved = get_policy()
+    yield
+    set_policy(saved)
+
+
 # ===========================================================================
 # Part 1: PrecisionPolicy
 # ===========================================================================
