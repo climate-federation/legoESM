@@ -143,6 +143,14 @@ it did not issue `DO NOT SHIP`.  No second independent reviewer is callable in
 this sandbox, so the diagnostic is explicitly **UNREVIEWED** under the house
 dual-review rule.  Nothing in the unreviewed diff changes production physics.
 
+The focused reader, citation-gate, and shortwave unit batch reports
+**`36 passed in 7.06s`**.  The receipt citation gate passes all five citations
+with zero failures, zero unmapped citations, and zero map-audit failures.  A
+two-line shift of the compiled `qsr_2BD` citation changes the gate to `FAIL`
+and exits 1.  The admission plant and walk plant both print
+`STATUS PLANT-FIRED` and exit 1.  `git diff --check` passes.  A broad ocean
+battery was not run because no production model or scientific gate changed.
+
 ## OPEN — round 189
 
 Quantify inheritance before walking another operator: substitute the exact
