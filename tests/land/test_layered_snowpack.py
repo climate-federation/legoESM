@@ -348,12 +348,15 @@ def test_sublimation_clamped_to_top_layer_and_water_closes():
                                * dt, atol=1e-6)
 
 
-def test_grad_through_snow_active_step_matches_finite_difference():
-    """d(pack-top T after 3 steps)/d(snow emissivity) is finite, nonzero and
-    agrees with a central difference.  SimpleSEB under jit: the eager two-leaf
-    gradient's compile exhausts the node's memory-map limit (vm.max_map_count
-    65530) on Levante, not RAM."""
-    cfg0 = _cfg()
+@pytest.mark.parametrize("scheme, nstep", [("seb", 3), ("two_leaf", 1)])
+def test_grad_through_snow_active_step_matches_finite_difference(scheme, nstep):
+    """d(pack-top T after n steps)/d(snow emissivity) is finite, nonzero and
+    agrees with a central difference, through both surface schemes.  Jitted:
+    the EAGER two-leaf gradient's compile exhausts the node's memory-map limit
+    (vm.max_map_count 65530) on Levante, not RAM."""
+    two = scheme == "two_leaf"
+    cfg0 = _cfg(scheme=TwoLeafCanopyConfig() if two else None)
+    lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.5])) if two else None
     st0 = _state(cfg0, 1, T_soil=268.0, swe=30.0)
     f = _forcing(1, T_air=258.0, lw=200.0, sw=0.0)
 
@@ -361,9 +364,9 @@ def test_grad_through_snow_active_step_matches_finite_difference():
     def loss(eps):
         cfg = cfg0._replace(snow_column=cfg0.snow_column._replace(emissivity_snow=eps))
         s = st0
-        for _ in range(3):
+        for _ in range(nstep):
             s, _, _, _ = step_multilayer_land_with_diagnostics(
-                s, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 0.9))
+                s, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 0.9), land_params=lp)
         return jnp.sum(s.snow_T_layers[:, 0])
 
     g = float(jax.jit(jax.grad(loss))(0.98))
