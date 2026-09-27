@@ -800,13 +800,13 @@ CITATION_MAP = {
         ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1), 5],
     'DINO/BLD/ppsrc/nemo/lbclnk.f90:1816-1820': [
         ('zland = 0._wp                                     ! land filling value: zero by default', 3),
-        'IF( PRESENT(kfillmode) )   ifill_nfd = kfillmode', 5],
+        ('IF( PRESENT(kfillmode) )   ifill_nfd = kfillmode', 3), 5],
     'DINO/BLD/ppsrc/nemo/lbclnk.f90:1866-1871': [
         ('DO jn = 1, 4   ! 4 sides', 2),
-        'ELSE                                ;   ifill(jn,jf) = jpfillcst       ! constant value (zland)', 6],
+        ('ELSE                                ;   ifill(jn,jf) = jpfillcst       ! constant value (zland)', 3), 6],
     'DINO/BLD/ppsrc/nemo/lbclnk.f90:2130-2135': [
         ('IF(     ifill(jn,jf) == jpfillcst ) THEN', 5),
-        'ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = zland', 6],
+        ('ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = zland', 5), 6],
     'DINO/BLD/ppsrc/nemo/dynspg_ts.f90:484-487': [
         'hu_e  (:,:) =    (hu_0(:,:) *(1._wp+r3u(:,:,Kmm)))',
         'hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kmm)))', 4],
