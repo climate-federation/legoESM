@@ -264,9 +264,6 @@ classical:
   orbital_insolation: true
   convective_rain_to_surface: true
   rrtmgp_gpoint_batch_size: 8
-  param_init:
-    atm.clouds.CloudConfig.rh_crit: 0.85
-    atm.clouds.CloudConfig.q_c_diagnostic: 5.0e-06
   param_fixed:
     atm.clouds.CloudConfig:
       cloud_optics_inhomogeneity: two_region
@@ -275,7 +272,6 @@ classical:
       cloud_n_subcolumns: 8
       cloud_fsd: 1.0
       convective_cloud: false
-      saturation_scheme: mixed_phase
     atm.turb.CLUBBConfig:
       prognostic: true
     atm.micro.MorrisonConfig:
