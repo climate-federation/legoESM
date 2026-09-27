@@ -154,9 +154,23 @@ The focused battery reports **238 passed, 9 warnings in 682.62s**.  It covers
 the repaired eager/JIT row, all DINO experiment tests, generic GYRE, the
 barotropic restart/state gates, both tanks, and the Decision-43/45 controls.
 
-The receipt citation gate and its shifted-citation plant are run at the final
-receipt commit.  The separate read-only Codex review verdict is quoted below
-after that pass.
+The receipt citation gate reports `PASS` with 6 citations, no failures, and no
+unmapped citations.  The default cumulative receipt gate separately reports
+`PASS` with 274 citations, no failures, and no unmapped citations.  Shifting
+`DINO/BLD/ppsrc/nemo/domqco.f90:211-215` by two lines reports
+`SYMBOL-NOT-AT-LINE`, prints `status: FAIL`, and exits 1.
+
+The mandated separate Codex review was attempted three times with
+`codex exec --sandbox read-only`, including writable private `CODEX_HOME`
+locations outside and inside `/tmp`; every attempt failed before sampling.
+Its verbatim terminal finding was: **"Error: failed to initialize in-process
+app-server client: Read-only file system (os error 30)"**.  Therefore the
+independent Codex review was unavailable in-sandbox; it did not issue a
+`DO NOT SHIP` verdict.  A second independent Claude review was also attempted
+in plan/read-only mode and failed before sampling with the verbatim terminal
+finding **"API Error: Can't reach the API server — check your internet or DNS
+(ENOTFOUND)"**.  Both failure logs are preserved rather than substituting the
+author's own review for an independent verdict.
 
 | artifact | SHA-256 |
 |---|---|
@@ -168,6 +182,11 @@ after that pass.
 | `after_year_gap.json` | `50bbaabbcd243ba32f79b17fbea5ff249b2fbda7bd3e9a33836c08f563cf9647` |
 | `generic_comparison.json` | `c6ed37544facd4afb3f26c464e09724de10d4fb641a6d6d229054d3f56e98195` |
 | `focused_tests.log` | `33a24ce181248e857ab595393c550427dabc42709e58673bbee69fa87a91a869` |
+| `citation_round184_final.json` | `f4f828833c9192ed0f3fc3ff97ddfe540ab37d2677aa43bb0d49730c3e73736c` |
+| `citation_round184_plant.log` | `b11beaee5aa6f598171059e6da7a8765c985e30bc236e8f48a428e5a94df8830` |
+| `citation_default_final.json` | `6db1d05f236a98701eb31bba0ae6e4d35710b6af453c3ad338c1a6b4be222d60` |
+| `codex_review_retry2.log` | `8b1cfa9d9bc69140f7cdb1f12333e44c1fcd137533bab35bef86c476ab55cc9c` |
+| `claude_review.log` | `8b4bea83f688c9ecbdbc7802d0db0ed95bbe84d6f5ea5ef3bb8f48f5747fd18f` |
 
 ## OPEN
 
