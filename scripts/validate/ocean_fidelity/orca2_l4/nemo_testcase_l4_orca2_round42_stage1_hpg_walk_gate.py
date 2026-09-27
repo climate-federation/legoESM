@@ -250,7 +250,7 @@ def run(
         candidate_hpg[support_rows, -1, :],
         oracle_hpg[support_rows, -1, :], support_mask)
     require(reproduction["differing_cells"] == 1753
-            and reproduction["count"] == 1754
+            and reproduction["scored_cells"] == 1754
             and reproduction["absolute_max"] == 1.4862887125471208e-17,
             "round-41 HPG support result did not reproduce")
     for family in round41_score.FAMILIES[1:]:
@@ -324,7 +324,8 @@ def run(
         planted = {name: dict(row) for name, row in walk.items()}
         planted[measured_first["boundary"]] = {
             "bit_exact": True, "differing_cells": 0,
-            "count": measured_first["count"], "absolute_max": 0.0,
+            "scored_cells": measured_first["scored_cells"],
+            "absolute_max": 0.0, "ulp_max": 0,
         }
         planted_first = first_non_bit(planted)
         plant_fires = (planted_first is None
