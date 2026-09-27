@@ -376,14 +376,14 @@ def nemo_ldf_reference_e3f(z_coord):
 
 
 def _nemo_qco_r1_area_f(raw, geom_grid, dtype):
-    """Materialize NEMO's native F area and stored reciprocal."""
-    b = lax.optimization_barrier
-    one = jnp.asarray(1.0, dtype=dtype)
-    if raw is None:
+    b, one = lax.optimization_barrier, jnp.asarray(1.0, dtype=dtype)
+    e1f = None if raw is None else getattr(raw, "e1f", None)
+    e2f = None if raw is None else getattr(raw, "e2f", None)
+    if e1f is None or e2f is None:
         area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
     else:
-        area_f = b(b(jnp.asarray(raw.e1f, dtype=dtype))
-                   * b(jnp.asarray(raw.e2f, dtype=dtype)))
+        area_f = b(b(jnp.asarray(e1f, dtype=dtype))
+                   * b(jnp.asarray(e2f, dtype=dtype)))
     return b(one / area_f)
 
 
