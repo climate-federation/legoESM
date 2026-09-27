@@ -155,3 +155,16 @@ def test_state_all_finite_flags_nan_inf_and_ignores_integer_leaves():
     assert state_all_finite({**ok, "u": jnp.array([1.0, jnp.nan])}) is False
     assert state_all_finite({**ok, "u": jnp.array([jnp.inf])}) is False
     assert state_all_finite({"n": jnp.arange(3)}) is True
+    assert state_all_finite({"dt": float("nan"), "u": jnp.ones(2)}) is False
+
+
+def test_latlon_atmosphere_rows_must_prove_a_finite_state(tmp_path):
+    ll = {"component": "atmosphere", "grid_type": "latlon", "platform": "gpu",
+          "precision": "float32", "mode": "strong", "n_lat": 2048, "n_lon": 4096,
+          "nlev": 40, "n_devices": 1, "valid": True, "metadata": {}}
+    _write(tmp_path / "b", "ll_d1", {**ll, "steady_median_ms": 100.0, "finite_ok": True})
+    _write(tmp_path / "c", "ll_d1", {**ll, "steady_median_ms": 200.0, "finite_ok": True})
+    assert _main(tmp_path) == 1                # checked rows compare
+    _write(tmp_path / "b", "ll_d1", {**ll, "steady_median_ms": 100.0})   # legacy: unchecked
+    _write(tmp_path / "c", "ll_d1", {**ll, "steady_median_ms": 200.0})
+    assert _main(tmp_path) == 2                # refused on both sides

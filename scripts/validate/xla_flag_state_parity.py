@@ -51,6 +51,8 @@ def _child(lane, steps, out):
         from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
             build_sharded_held_suarez_state_atm_latlon, make_sharded_atm_latlon_step)
         model = b._build_model(64, 128, 26, 60.0)
+        if len(jax.devices()) < N_DEV:
+            raise SystemExit(f"needs {N_DEV} devices, have {len(jax.devices())}")
         mesh = jax.sharding.Mesh(np.array(jax.devices()[:N_DEV]), axis_names=("lat",))
         s = build_sharded_held_suarez_state_atm_latlon(model.grid, model.sigma_coord, mesh)
         step = make_sharded_atm_latlon_step(model, mesh)
@@ -85,7 +87,7 @@ def _compare(lane, a_path, b_path):
         x, y = a[k], b[k]
         if x.dtype.kind in "fc" and not np.all(np.isfinite(x)):
             raise SystemExit(f"{lane}: non-finite values in {k} (default arm)")
-        n_el += x.size
+        n_el += x.size if x.dtype.kind in "fc" else 0
         if x.shape != y.shape or x.dtype != y.dtype or x.tobytes() != y.tobytes():
             same = False
             d = np.max(np.abs(x.astype(np.float64) - y.astype(np.float64))) if x.shape == y.shape else float("nan")

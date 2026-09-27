@@ -945,8 +945,9 @@ def state_all_finite(state) -> bool:
     """
     import jax
     import jax.numpy as jnp
-    leaves = [x for x in jax.tree.leaves(state)
-              if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.inexact)]
+    leaves = [x if hasattr(x, "dtype") else jnp.asarray(x)
+              for x in jax.tree.leaves(state) if isinstance(x, (float, complex)) or hasattr(x, "dtype")]
+    leaves = [x for x in leaves if jnp.issubdtype(x.dtype, jnp.inexact)]
     if not leaves:
         return True
     return bool(jax.jit(lambda ls: jnp.all(jnp.stack(

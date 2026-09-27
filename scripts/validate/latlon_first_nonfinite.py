@@ -87,6 +87,8 @@ def main():
     else:
         from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
             build_sharded_held_suarez_state_atm_latlon, make_sharded_atm_latlon_step)
+        if len(jax.devices()) < args.devices:
+            raise SystemExit(f"needs {args.devices} devices, have {len(jax.devices())}")
         mesh = jax.sharding.Mesh(np.array(jax.devices()[:args.devices]), axis_names=("lat",))
         c = build_sharded_held_suarez_state_atm_latlon(model.grid, model.sigma_coord, mesh)
         sstep = make_sharded_atm_latlon_step(model, mesh)
@@ -100,6 +102,12 @@ def main():
         c = step(c)
         st = _stats(gather(c), args.n_lat)
         nbad = sum(st[f + "_bad"] for f in ("u", "v", "T", "p_s"))
+        other = [kp for kp, x in jax.tree_util.tree_flatten_with_path(c)[0]
+                 if x is not None and np.asarray(x).dtype.kind == "f"
+                 and not np.all(np.isfinite(np.asarray(x)))]
+        if other and not nbad:
+            print("FIRST NON-FINITE at step", k, "in", [jax.tree_util.keystr(kp) for kp in other])
+            return 1
         if nbad or k % args.every == 0 or k <= 3:
             print(f"step {k}: umax={st['umax']:.3e}@row{st['urow']} vmax={st['vmax']:.3e}@row{st['vrow']} "
                   f"T={st['T'][0]:.1f}..{st['T'][1]:.1f} ps={st['ps'][0]:.0f}..{st['ps'][1]:.0f}", flush=True)

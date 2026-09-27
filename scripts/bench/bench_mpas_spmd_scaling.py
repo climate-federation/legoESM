@@ -657,9 +657,13 @@ def main() -> int:
         physics_level=args.physics,
         backend=jax.default_backend(),
         **tidy_throughput_fields(
-            dt_seconds=dt, time_per_step_ms=med,
+            dt_seconds=dt, time_per_step_ms=med if finite else None,
             total_cells=int(mesh.nCells) * args.nlev),
     )
+    if not finite:
+        # A timing of a non-finite state is not a measurement.
+        for _k in ("steady_median_ms", "steady_min_ms", "scan_median_ms"):
+            rec[_k] = None
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="icosahedral",
         component="atmosphere",

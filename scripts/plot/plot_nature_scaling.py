@@ -190,6 +190,12 @@ def load(dirs):
                     continue
                 comp = _component(r)
                 grid = _grid(r, comp)
+                # Every atmosphere lat-lon receipt before ce34716b7 timed a
+                # state that went non-finite within 20 steps (polar filter
+                # off, dt 60 s) and none was checked: only rows that
+                # PROVED a finite state are data.
+                if comp == "atmosphere" and grid == "latlon" and r.get("finite_ok") is not True:
+                    continue
                 prec = r.get("precision") or r.get("metadata", {}).get("precision")
                 if prec not in PREC_LW:
                     continue
