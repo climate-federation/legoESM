@@ -124,6 +124,13 @@ expectation.  The focused owner suite reports:
 49 passed in 32.91s
 ```
 
+The final citation/worktree-stamp suite reports **1 failed, 25 passed in
+5.32s**.  The sole failure is the starting-tip worktree-stamp ratchet: its
+four offenders are the Round-50, Round-146, Round-156, and Round-184 gates;
+none is in the `0b6455560..HEAD` diff.  All 16 citation-gate tests pass.  No
+model implementation changed, so a broad ocean physics battery would not
+exercise any additional Round-185 path.
+
 The separate read-only Codex review was attempted against the ranking,
 generalized record gate, and acquisition script.  It produced no scientific
 verdict.  Its verbatim terminal finding is:
