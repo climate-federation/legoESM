@@ -576,8 +576,8 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
         nemo_source_round(H_v_ref + 1.0) - v_mask)
     r1_v0 = nemo_source_round(v_mask / r1_v0_denom)
     r3_v_half_sum = nemo_source_round(0.5 * ssh_v_sum)
-    r3_v = nemo_source_round(
-        nemo_source_round(r3_v_half_sum * r1_v0) * _r1_e1e2v)
+    r3_v = _zero_polar_lat_ends(nemo_source_round(
+        nemo_source_round(r3_v_half_sum * r1_v0) * _r1_e1e2v))
     r1_v_entry = nemo_source_round(
         r1_v0 / nemo_source_round(1.0 + r3_v))
     if return_entry_inverse:
