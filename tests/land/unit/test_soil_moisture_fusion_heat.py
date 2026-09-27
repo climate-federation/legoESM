@@ -95,14 +95,27 @@ def test_fixed_moisture_is_bit_identical():
     assert jnp.array_equal(a, b)
 
 
+def test_mixed_precision_unchanged_water_gives_zero():
+    grid, T0, th0, _ = _kernel_case(constants.T_freeze - 0.2, 0.0)
+    th32 = (th0 + 1.0e-3).astype(jnp.float32)
+    src = moisture_fusion_heat_source(T0, th32, th32.astype(jnp.float64), grid.dz, ON, 1800.0)
+    assert jnp.all(src == 0.0)
+
+
 def test_source_jit_and_grad_finite():
     grid, T0, th0, th1 = _kernel_case(constants.T_freeze - 0.2, 0.02)
-    f = lambda th: jnp.sum(solve_soil_thermal(
-        T0, th, grid, HYDRO, ON, jnp.array([-15.0]), 1800.0,
-        layer_source=moisture_fusion_heat_source(T0, th0, th, grid.dz, ON, 1800.0)))
+
+    def f(th, detach=False):
+        src = moisture_fusion_heat_source(T0, th0, th, grid.dz, ON, 1800.0)
+        src = jax.lax.stop_gradient(src) if detach else src
+        return jnp.sum(solve_soil_thermal(
+            T0, th, grid, HYDRO, ON, jnp.array([-15.0]), 1800.0, layer_source=src))
+
     assert jnp.allclose(f(th1), jax.jit(f)(th1), rtol=1e-12)
     g = jax.grad(f)(th1)
-    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+    assert bool(jnp.all(jnp.isfinite(g)))
+    # the source itself carries gradient (not only C_app / conductivity)
+    assert float(jnp.max(jnp.abs(g - jax.grad(lambda th: f(th, True))(th1)))) > 1.0e-3
 
 
 # ── full multilayer land step ────────────────────────────────────────────────

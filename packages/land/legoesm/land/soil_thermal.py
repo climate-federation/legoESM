@@ -227,10 +227,13 @@ def moisture_fusion_heat_source(
     same start-of-step temperature at which the solver's apparent heat
     capacity is evaluated; the identity closed is the solver's linearised one.
 
-    Conventions (pre-existing, not changed here): moving water carries no
-    sensible heat; ice removed by drainage / roots / evaporation is paid for
-    in L_f by the layer it leaves.
+    Conventions: moving water carries no sensible heat (unchanged); ice that
+    leaves a layer by drainage, roots or evaporation, or moves between layers,
+    is melted there at the layer's expense (new with this source).
     """
+    # Same dtype for both moisture states, so unchanged water gives exactly 0.
+    theta_old = jnp.asarray(theta_old).astype(jnp.result_type(theta_old, theta_new))
+    theta_new = jnp.asarray(theta_new).astype(theta_old.dtype)
     liq_old, _ = liquid_water_content(T_soil, theta_old, thermal_config)
     liq_new, _ = liquid_water_content(T_soil, theta_new, thermal_config)
     d_ice = (theta_new - liq_new) - (theta_old - liq_old)
