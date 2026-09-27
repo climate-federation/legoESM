@@ -1105,6 +1105,11 @@ def compute_nemo_native_slopes(
                 "NOW sea-surface height and local bathymetry")
         _live_gdept, _live_gdepw, _live_stretch = _nemo_qco_live_slope_depths(
             eta, H_bathy, z_coord, dtype)
+        # The compiled ldf_slp receives Kmm explicitly and every gdept/gdepw/
+        # e3w reference expands with r3t(Kmm).  Keep that literal stretch for
+        # the complete slope program.  The caller's density Jacobian can
+        # belong to a later tracer-volume state; it is not Kmm geometry.
+        _stretch2d = _live_stretch
 
     from legoesm.grids.latlon import ensure_geometry
     geom = ensure_geometry(grid)
@@ -1153,7 +1158,7 @@ def compute_nemo_native_slopes(
     # consistent with the slopes it is coupled to; no duplicate numerics).
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
-        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian)
+        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=_stretch2d)
     _e3w_surface = e3w[..., :1]
     if pn2_override is not None:
         pn2 = jnp.asarray(pn2_override, dtype=dtype)
@@ -1204,7 +1209,7 @@ def compute_nemo_native_slopes(
     # helper: ``first`` = first stratified cell = 0-based nmln).
     hml, m_base = _nemo_mld(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
-        g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian)
+        g=g, rho_0=rho_0, active_3d=active_3d, jacobian=_stretch2d)
     first = jnp.clip(m_base + 1, 1, nlev - 1) if nmln_override is None else jnp.asarray(nmln_override, dtype=jnp.int32)
     # zhmlpt = gdept(nmln-1,Kmm) = depth of the last T-point inside the ML
     # (ldfslp.F90:143) -- live gdept, so the static per-level gather is
