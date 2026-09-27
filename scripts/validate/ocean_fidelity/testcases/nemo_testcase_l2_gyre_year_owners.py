@@ -605,17 +605,25 @@ def _process_sbc_effect_control(record: dict, mask: np.ndarray) -> dict:
 
 
 def validate_process_record(root: Path, expected_commit: str,
-                            *, plant: str | None = None) -> dict:
-    """Admit all 360 passive NEMO frames, or exercise one named plant."""
+                            *, plant: str | None = None,
+                            start_step: int = PROCESS_START_STEP,
+                            end_step: int = PROCESS_END_STEP,
+                            restart_hashes: dict[str, str] | None = None,
+                            ) -> dict:
+    """Admit a contiguous passive NEMO process stream or fire a plant."""
     root = Path(root)
+    require(1 <= start_step <= end_step,
+            "process-record step interval must be positive and ordered")
+    restart_hashes = (PROCESS_RESTART_HASHES if restart_hashes is None
+                      else restart_hashes)
     expected_names = [
         f"oracle_process_budget_kt{step:08d}.bin"
-        for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1)
+        for step in range(start_step, end_step + 1)
     ]
     records = [root / name for name in expected_names]
     observed = sorted(root.glob("oracle_process_budget_kt*.bin"))
     require([path.name for path in observed] == expected_names,
-            "process-record set is not exactly steps 1081..1440")
+            f"process-record set is not exactly steps {start_step}..{end_step}")
     producer = (root / "producer_commit.txt").read_text(
         encoding="utf-8").strip()
     require(producer == expected_commit,
@@ -679,15 +687,15 @@ def validate_process_record(root: Path, expected_commit: str,
     previous_taa = None
     headers = []
     digests = {}
-    for expected_step, path in enumerate(records, PROCESS_START_STEP):
-        record = first if expected_step == PROCESS_START_STEP \
+    for expected_step, path in enumerate(records, start_step):
+        record = first if expected_step == start_step \
             else read_process_record(path)
         require(record["kstp"] == expected_step,
                 f"{path.name}: step sequence mismatch")
         require(record["sha256"] == manifest[path.name],
                 f"{path.name}: sha256 manifest mismatch")
         digests[path.name] = record["sha256"]
-        if expected_step in (PROCESS_START_STEP, PROCESS_END_STEP):
+        if expected_step in (start_step, end_step):
             headers.append(list(record["header"]))
         if previous_taa is not None:
             chained_cells_unequal += _different_cells(
@@ -710,7 +718,7 @@ def validate_process_record(root: Path, expected_commit: str,
 
     resolved = _resolved_process_card(root / "ocean.output")
     restart_rows = {}
-    for name, expected in PROCESS_RESTART_HASHES.items():
+    for name, expected in restart_hashes.items():
         observed_digest = _sha256(root / name)
         require(observed_digest == expected,
                 f"passive restart {name} is {observed_digest}, expected "
@@ -731,6 +739,7 @@ def validate_process_record(root: Path, expected_commit: str,
         "worktree": worktree_stamp(), "binary_sha256": binary_digest,
         "layout": {
             "magic": PROCESS_MAGIC, "record_count": len(records),
+            "start_step": start_step, "end_step": end_step,
             "bytes_per_record": PROCESS_RECORD_BYTES,
             "total_record_bytes": sum(path.stat().st_size for path in records),
             "first_and_last_headers": headers,
@@ -4129,6 +4138,14 @@ def main(argv=None) -> int:
                         help="decompose the gap at this day")
     parser.add_argument("--process-record", type=Path, default=None,
                         help="validate a Round-123 process-record root")
+    parser.add_argument("--process-start-step", type=int,
+                        default=PROCESS_START_STEP)
+    parser.add_argument("--process-end-step", type=int,
+                        default=PROCESS_END_STEP)
+    parser.add_argument("--process-restart-sha", action="append", default=[],
+                        metavar="NAME=SHA256",
+                        help="override passive restart checks for a different "
+                             "contiguous process-record interval")
     parser.add_argument("--produce-process-trace", action="store_true",
                         help="run the independent legoESM Round-124 process "
                              "trace into --root")
@@ -5005,8 +5022,22 @@ def main(argv=None) -> int:
     if args.process_record is not None:
         require(args.expect_commit is not None,
                 "--process-record needs --expect-commit")
+        restart_hashes = None
+        if args.process_restart_sha:
+            restart_hashes = {}
+            for row in args.process_restart_sha:
+                require("=" in row,
+                        "--process-restart-sha needs NAME=SHA256")
+                name, digest = row.split("=", 1)
+                require(name and re.fullmatch(r"[0-9a-f]{64}", digest),
+                        "--process-restart-sha has an invalid name or digest")
+                require(name not in restart_hashes,
+                        f"duplicate passive restart row {name}")
+                restart_hashes[name] = digest
         report = validate_process_record(
-            args.process_record, args.expect_commit, plant=args.plant)
+            args.process_record, args.expect_commit, plant=args.plant,
+            start_step=args.process_start_step,
+            end_step=args.process_end_step, restart_hashes=restart_hashes)
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
