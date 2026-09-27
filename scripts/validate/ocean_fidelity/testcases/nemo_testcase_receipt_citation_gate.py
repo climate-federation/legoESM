@@ -819,6 +819,15 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sshwzv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/traadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv_cen.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/traadv_cen.f90"),
     # --- ORCA2 round 14: the barotropic slow forcing and its solver ---
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
@@ -1153,6 +1162,28 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/dynhpg.f90:403-458': [
         ('zhpi(ji,jj) = zcoef0 * r1_e1u(ji,jj)', 1),
         ('r41_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap', 1), 56],
+    # --- ORCA2 card round 43: stage-1 tracer transport handoff ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:265-284': [
+        ('ALLOCATE( zub(ntsi-', 1),
+        ('END DO   ;   END DO   ;   END DO', 1), 20],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:551-645': [
+        ('IF( .NOT.ln_shuman ) THEN', 1),
+        ('CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )', 1), 95],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv.f90:267-315': [
+        ('IF( ll_Fw ) THEN', 1),
+        ('CLOSE(993)', 1), 49],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sshwzv.f90:271-299': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 2),
+        ('END DO   ;   END DO   ;   END DO', 6), 29],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv_cen.f90:143-160': [
+        ('DO jn = 1, kjpt', 1),
+        ('r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1), 18],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv_cen.f90:202-227': [
+        ('IF( lk_linssh ) THEN', 1),
+        ('r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 4), 26],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:275-328': [
+        ('!        EMP, SFX and QNS effects', 1),
+        ('ENDIF', 24), 54],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:556':
         ('zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
     # --- ORCA2 card round 22: exact stage-to-entry transition and LDF owner ---
