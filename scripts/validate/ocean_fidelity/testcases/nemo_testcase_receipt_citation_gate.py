@@ -1117,6 +1117,9 @@ CITATION_MAP = {
         "CALL lbc_lnk('domain', hf_0, 'F', 1._wp)", 4],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dommsk.f90:258':
         ('fe3mask(:,:,:) = fmask(:,:,:)', 1),
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:139-166': [
+        ('!*  hydrostatic pressure gradient (HPG))  *!', 1),
+        ('CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 1), 28],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:189-204': [
         ("WRITE(l2_slow_unit) l4_canon_3d(e3u_3d,'U')", 1),
         ('Ve_rhs(ji,jj) = Ve_rhs(ji,jj) + SUM(', 1), 16],
