@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = (
     ROOT
@@ -26,6 +28,9 @@ def _load_probe():
 
 def test_scalar_libm_arm_is_exact_and_vector_arm_binds() -> None:
     probe = _load_probe()
+    for oracle_root in (probe.ROOT, probe.PROBE_ROOT):
+        if not oracle_root.is_dir():
+            pytest.skip(f"oracle run root absent: {oracle_root}")
     report, code = probe.run_probe()
     assert code == 0
     assert report["status"] == "BIT-EXACT"
