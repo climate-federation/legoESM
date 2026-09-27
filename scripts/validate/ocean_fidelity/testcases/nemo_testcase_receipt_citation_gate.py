@@ -1182,7 +1182,7 @@ CITATION_MAP = {
         ('IF( lk_linssh ) THEN', 1),
         ('r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 4), 26],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:275-328': [
-        ('!        EMP, SFX and QNS effects', 1),
+        ('!        EMP, SFX and QNS effects', 2),
         ('ENDIF', 24), 54],
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:556':
         ('zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
