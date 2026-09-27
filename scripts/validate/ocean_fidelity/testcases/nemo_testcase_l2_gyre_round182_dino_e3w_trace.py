@@ -34,6 +34,11 @@ def main() -> None:
     parser.add_argument(
         "--trace-baro-entry", action="store_true",
         help="trace the first NEMO ssh-average entry-inverse operands")
+    parser.add_argument(
+        "--plant-closed-v-boundary", action="store_true",
+        help="after the repaired ssh-average entry inverse, restore one "
+             "non-finite closed V-face boundary value; the production run "
+             "must fail and print STATUS PLANT-FIRED")
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args()
     args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
@@ -72,7 +77,10 @@ def main() -> None:
                 label + "_ACTIVE "
                 "eta_nonfinite={eta} T_nonfinite={T} S_nonfinite={S} "
                 "u_nonfinite={u} v_nonfinite={v} "
-                "eta_cells={eta_n} T_cells={T_n} u_cells={u_n} v_cells={v_n}",
+                "eta_cells={eta_n} T_cells={T_n} u_cells={u_n} v_cells={v_n} "
+                "eta_maxabs={eta_max:.17e} T_maxabs={T_max:.17e} "
+                "S_maxabs={S_max:.17e} u_maxabs={u_max:.17e} "
+                "v_maxabs={v_max:.17e}",
                 eta=jnp.sum(wet_eta & ~jnp.isfinite(state.eta.data)),
                 T=jnp.sum(wet_t & ~jnp.isfinite(state.T.data)),
                 S=jnp.sum(wet_t & ~jnp.isfinite(state.S.data)),
@@ -80,6 +88,11 @@ def main() -> None:
                 v=jnp.sum(wet_v & ~jnp.isfinite(state.v.data)),
                 eta_n=jnp.sum(wet_eta), T_n=jnp.sum(wet_t),
                 u_n=jnp.sum(wet_u), v_n=jnp.sum(wet_v),
+                eta_max=jnp.nanmax(jnp.where(wet_eta, jnp.abs(state.eta.data), 0.0)),
+                T_max=jnp.nanmax(jnp.where(wet_t, jnp.abs(state.T.data), 0.0)),
+                S_max=jnp.nanmax(jnp.where(wet_t, jnp.abs(state.S.data), 0.0)),
+                u_max=jnp.nanmax(jnp.where(wet_u, jnp.abs(state.u.data), 0.0)),
+                v_max=jnp.nanmax(jnp.where(wet_v, jnp.abs(state.v.data), 0.0)),
                 ordered=True,
             )
 
@@ -109,6 +122,9 @@ def main() -> None:
             result = original_ssh_avg(
                 eta_dyn, u_mask, v_mask, grid, area, prep, **kwargs)
             if kwargs.get("return_entry_inverse", False):
+                if ns.plant_closed_v_boundary:
+                    planted_v = result[3].at[0, 0].set(jnp.nan)
+                    result = (*result[:3], planted_v, *result[4:])
                 _, _, _, r1_e1e2v, _ = prep
                 area_pad = baro.pad_ns_zero(area)
                 eta_pad = baro.pad_ns_zero(eta_dyn)
@@ -222,6 +238,9 @@ def main() -> None:
             run_name="__main__",
         )
     except Exception as exc:
+        if ns.plant_closed_v_boundary:
+            print("STATUS PLANT-FIRED")
+            raise
         if (ns.plant_call > 0
                 and "raw-mesh e3w_int must contain only finite values > 0"
                 in str(exc)):
@@ -229,6 +248,9 @@ def main() -> None:
         elif ns.plant_call > 0:
             print("STATUS PLANT-MISSED")
         raise
+    if ns.plant_closed_v_boundary:
+        print("STATUS PLANT-MISSED")
+        raise SystemExit(2)
     if ns.plant_call > 0:
         print("STATUS PLANT-MISSED")
         raise SystemExit(2)
