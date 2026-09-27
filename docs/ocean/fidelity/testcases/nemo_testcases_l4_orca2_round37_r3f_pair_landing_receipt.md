@@ -138,8 +138,10 @@ emitters, and missing `hires_lane_surface` case-board row.  An isolated rerun
 reports **5 failed, 2 passed in 10.60 s**; the two passes are the repaired
 round-31 partial-card tests.  No round-37 path remains red.
 
-Closing focused and push-battery results are recorded in the final receipt
-commit.
+The closing focused battery passes **39 / 39 in 6.60 s**.  The final push
+battery passes **130 / 130 in 381.32 s**, including the citation-gate tests,
+TKE terms, recipe and freshwater-closure units, the ORCA2 parallel receipt
+gate, and this round's three planted-control tests.
 
 ## Choices
 
