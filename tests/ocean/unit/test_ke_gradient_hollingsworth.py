@@ -210,3 +210,50 @@ def test_invalid_ke_scheme_raises():
     model = LatLonCGridOceanModel(grid, z, cfg)
     with pytest.raises(ValueError, match="ke_gradient_scheme"):
         model.step(state, dt=600.0)
+
+
+# ---------- production function, regular grid vs tripole fold ----------
+
+def _rand_uv(n_lat, n_lon, nlev=2, seed=0):
+    rng = np.random.default_rng(seed)
+    u = jnp.asarray(rng.standard_normal((n_lat, n_lon + 1, nlev)))
+    u = u.at[:, -1, :].set(u[:, 0, :])  # periodic duplicate column
+    v = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon, nlev)))
+    return u, v
+
+
+def test_production_HW_regular_grid_matches_mirror():
+    from legoesm.grids.latlon import create_latlon_geometry
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        hollingsworth_kinetic_energy)
+    g = create_latlon_geometry(12, 24)
+    u, v = _rand_uv(g.n_lat, g.n_lon)
+    np.testing.assert_allclose(hollingsworth_kinetic_energy(u, v, g),
+                               _ke_hollingsworth(u, v), rtol=1e-12)
+
+
+def test_production_HW_tripole_top_row_uses_signed_fold_partner():
+    """Top row's j+1 u neighbour = vector_sign_u * u[top, perm_u] (NEMO
+    lbc_lnk 'U',-1), not a repeat of the top row; all other rows unchanged."""
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.grids.operators_latlon_cgrid import (
+        fold_ghost_source_T, fold_perm_u, fold_row)
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        hollingsworth_kinetic_energy)
+    g = create_synthetic_tripole(12, 24)
+    f = g.fold
+    u, v = _rand_uv(g.n_lat, g.n_lon)
+    K = hollingsworth_kinetic_energy(u, v, g)
+    K_neumann = _ke_hollingsworth(u, v)
+    np.testing.assert_allclose(K[:-1], K_neumann[:-1], rtol=1e-12)
+    ghost = fold_row(fold_ghost_source_T(u, f), fold_perm_u(f),
+                     f.vector_sign_u, f.perm_T.shape[0])[0]
+    u_l, u_r = u[-1, :-1], u[-1, 1:]
+    zu = (8.0 * (u_l ** 2 + u_r ** 2)
+          + (u[-2, :-1] + ghost[:-1]) ** 2 + (u[-2, 1:] + ghost[1:]) ** 2)
+    v_s, v_n = v[-2], v[-1]
+    zv = (8.0 * (v_s ** 2 + v_n ** 2)
+          + (jnp.roll(v_s, 1, 0) + jnp.roll(v_s, -1, 0)) ** 2
+          + (jnp.roll(v_n, 1, 0) + jnp.roll(v_n, -1, 0)) ** 2)
+    np.testing.assert_allclose(K[-1], (zu + zv) / 48.0, rtol=1e-12)
+    assert not np.allclose(K[-1], K_neumann[-1])  # the fold row really changed

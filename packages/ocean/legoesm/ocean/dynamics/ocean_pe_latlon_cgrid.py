@@ -1635,6 +1635,52 @@ def nemo_qco_wzv_operands(
 _nemo_qco_zad_operands = nemo_qco_wzv_operands
 
 
+def hollingsworth_kinetic_energy(u, v, grid):
+    """NEMO nkeg_HW kinetic energy at T-points (dynkeg.F90, nn_dynkeg=1).
+
+    u: (n_lat, n_lon+1, nlev); v: (n_lat+1, n_lon, nlev). Tripole-fold aware.
+    """
+    # u shape (n_lat, n_lon+1, nlev) — u(i-1,j) = u[:, :-1, :], u(i,j) = u[:, 1:, :]
+    u_l = u[:, :-1, :]                                  # (n_lat, n_lon, nlev)
+    u_r = u[:, 1:, :]
+    # j±1 with Neumann (edge) BC at south/north walls
+    u_l_jm1 = jnp.concatenate([u_l[:1], u_l[:-1]], axis=0)
+    u_l_jp1 = jnp.concatenate([u_l[1:], u_l[-1:]], axis=0)
+    u_r_jm1 = jnp.concatenate([u_r[:1], u_r[:-1]], axis=0)
+    u_r_jp1 = jnp.concatenate([u_r[1:], u_r[-1:]], axis=0)
+    # Tripole: the row above the top row is the u-sign-flipped fold
+    # partner (NEMO lbc_lnk 'U',-1), not a repeat of the top row.
+    _nmask_hw = north_fold_mask(grid)
+    if fold_is_local(grid) or _nmask_hw is not None:
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T, fold_perm_u, fold_row,
+        )
+        _f = grid.fold
+        _u_ghost = fold_row(
+            fold_ghost_source_T(u, _f), fold_perm_u(_f),
+            _f.vector_sign_u, _f.perm_T.shape[0])      # (1, n_lon+1, nlev)
+        _u_jp1 = apply_north_fold(
+            jnp.concatenate([u[1:], u[-1:]], axis=0), _u_ghost, grid,
+            north_mask=_nmask_hw)
+        u_l_jp1 = _u_jp1[:, :-1, :]
+        u_r_jp1 = _u_jp1[:, 1:, :]
+    # v shape (n_lat+1, n_lon, nlev) — v(i,j-1) = v[:-1, :, :], v(i,j) = v[1:, :, :]
+    v_s = v[:-1, :, :]                                  # (n_lat, n_lon, nlev)
+    v_n = v[1:, :, :]
+    # i±1 periodic in longitude (jnp.roll matches existing convention)
+    v_s_im1 = jnp.roll(v_s, shift=+1, axis=1)
+    v_s_ip1 = jnp.roll(v_s, shift=-1, axis=1)
+    v_n_im1 = jnp.roll(v_n, shift=+1, axis=1)
+    v_n_ip1 = jnp.roll(v_n, shift=-1, axis=1)
+    zu = 8.0 * (u_l ** 2 + u_r ** 2) \
+         + (u_l_jm1 + u_l_jp1) ** 2 \
+         + (u_r_jm1 + u_r_jp1) ** 2
+    zv = 8.0 * (v_s ** 2 + v_n ** 2) \
+         + (v_s_im1 + v_s_ip1) ** 2 \
+         + (v_n_im1 + v_n_ip1) ** 2
+    return (zu + zv) / 48.0
+
+
 def _bc_ke_and_pressure_gradients(
     u, v, p_prime_filled, rho_prime, grid, config, z_coord,
     eta_safe, H_bathy, g_val, mask,
@@ -1772,29 +1818,7 @@ def _bc_ke_and_pressure_gradients(
         #   gradient near sloping bathymetry. Required for stable
         #   stratified flow on Mercator grids over realistic topography.
         if config.ke_gradient_scheme == "hollingsworth":
-            # u shape (n_lat, n_lon+1, nlev) — u(i-1,j) = u[:, :-1, :], u(i,j) = u[:, 1:, :]
-            u_l = u[:, :-1, :]                                  # (n_lat, n_lon, nlev)
-            u_r = u[:, 1:, :]
-            # j±1 with Neumann (edge) BC at south/north walls
-            u_l_jm1 = jnp.concatenate([u_l[:1], u_l[:-1]], axis=0)
-            u_l_jp1 = jnp.concatenate([u_l[1:], u_l[-1:]], axis=0)
-            u_r_jm1 = jnp.concatenate([u_r[:1], u_r[:-1]], axis=0)
-            u_r_jp1 = jnp.concatenate([u_r[1:], u_r[-1:]], axis=0)
-            # v shape (n_lat+1, n_lon, nlev) — v(i,j-1) = v[:-1, :, :], v(i,j) = v[1:, :, :]
-            v_s = v[:-1, :, :]                                  # (n_lat, n_lon, nlev)
-            v_n = v[1:, :, :]
-            # i±1 periodic in longitude (jnp.roll matches existing convention)
-            v_s_im1 = jnp.roll(v_s, shift=+1, axis=1)
-            v_s_ip1 = jnp.roll(v_s, shift=-1, axis=1)
-            v_n_im1 = jnp.roll(v_n, shift=+1, axis=1)
-            v_n_ip1 = jnp.roll(v_n, shift=-1, axis=1)
-            zu = 8.0 * (u_l ** 2 + u_r ** 2) \
-                 + (u_l_jm1 + u_l_jp1) ** 2 \
-                 + (u_r_jm1 + u_r_jp1) ** 2
-            zv = 8.0 * (v_s ** 2 + v_n ** 2) \
-                 + (v_s_im1 + v_s_ip1) ** 2 \
-                 + (v_n_im1 + v_n_ip1) ** 2
-            KE = (zu + zv) / 48.0
+            KE = hollingsworth_kinetic_energy(u, v, grid)
         elif config.ke_gradient_scheme == "centered":
             u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
             v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
