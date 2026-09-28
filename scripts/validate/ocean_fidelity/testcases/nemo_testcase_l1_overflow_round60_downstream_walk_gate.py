@@ -303,6 +303,10 @@ def compare(reference_path: Path, candidate_report: dict) -> dict:
         index for index, row in enumerate(measured)
         if row["name"] == "s2.after_adv.u")
     initial_direction = measured[after_adv_index]["direction"]
+    direction_change = next((
+        row for row in measured[after_adv_index + 1:]
+        if row["direction"] != initial_direction
+    ), None)
     opposite = {"TOWARD": "AWAY", "AWAY": "TOWARD"}.get(initial_direction)
     reversal = next((
         row for row in measured[after_adv_index + 1:]
@@ -315,9 +319,69 @@ def compare(reference_path: Path, candidate_report: dict) -> dict:
         "candidate_commit": candidate_report["worktree"]["commit"],
         "first_moved_boundary": first_moved,
         "after_adv_direction": initial_direction,
+        "first_direction_change": direction_change,
         "first_direction_reversal": reversal,
         "compensating_owner": None if reversal is None else reversal["name"],
         "rows": rows,
+    }
+
+
+def plant_sidecar(reference_path: Path, output: Path, expect_commit: str) -> dict:
+    """Plant one ULP in one clean active value without another integration."""
+    stamp = worktree_stamp()
+    require(stamp["clean"], "producer worktree is dirty")
+    require(stamp["commit"] == expect_commit,
+            f"producer commit mismatch: {stamp['commit']} != {expect_commit}")
+    reference_report = json.loads(reference_path.read_text())
+    require(reference_report["format"] == FORMAT, "reference format drift")
+    arrays = _read_sidecar(reference_report)
+    name = "kt3.entry.u"
+    candidate = arrays[name].copy()
+    oracle = arrays[f"oracle::{name}"]
+    clean = candidate.view(np.uint64) == oracle.view(np.uint64)
+    require(bool(np.any(clean)), "no bit-exact active U value available for plant")
+    index = int(np.flatnonzero(clean)[0])
+    before_unequal = int(np.count_nonzero(~clean))
+    candidate[index] = np.nextafter(candidate[index], np.float64(np.inf))
+    require(candidate[index] != oracle[index], "one-ULP plant did not create mismatch")
+    arrays[name] = candidate
+    after_unequal = int(np.count_nonzero(
+        candidate.view(np.uint64) != oracle.view(np.uint64)))
+    require(after_unequal == before_unequal + 1,
+            "one-ULP plant did not add exactly one refusal")
+    report = {
+        "format": FORMAT,
+        "status": "PLANTED_REFUSAL",
+        "worktree": stamp,
+        "source_report": str(reference_path),
+        "plant": {
+            "name": name,
+            "active_flat_index": index,
+            "before_unequal": before_unequal,
+            "after_unequal": after_unequal,
+            "delta_unequal": after_unequal - before_unequal,
+        },
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    report["sidecar"] = _write_sidecar(output, arrays)
+    return report
+
+
+def reclassify(reference_path: Path, candidate_path: Path,
+               expect_commit: str) -> dict:
+    """Re-run the deterministic sidecar comparison without integrating."""
+    stamp = worktree_stamp()
+    require(stamp["clean"], "producer worktree is dirty")
+    require(stamp["commit"] == expect_commit,
+            f"producer commit mismatch: {stamp['commit']} != {expect_commit}")
+    candidate = json.loads(candidate_path.read_text())
+    require(candidate["format"] == FORMAT, "candidate format drift")
+    return {
+        "format": FORMAT,
+        "status": "COMPARISON_RECLASSIFIED",
+        "worktree": stamp,
+        "candidate_report": str(candidate_path),
+        "comparison": compare(reference_path, candidate),
     }
 
 
@@ -419,16 +483,29 @@ def main(argv=None) -> int:
     parser.add_argument("--entry-input", type=Path)
     parser.add_argument("--entry-output", type=Path)
     parser.add_argument("--entry-only", action="store_true")
+    parser.add_argument("--plant-sidecar", type=Path)
+    parser.add_argument("--reclassify-report", type=Path)
     args = parser.parse_args(argv)
     try:
-        report = run(
-            args.output, args.expect_commit, args.reference, args.plant_entry,
-            args.entry_input, args.entry_output, args.entry_only,
-        )
+        require(not (args.plant_sidecar and args.reclassify_report),
+                "choose only one sidecar-only action")
+        if args.plant_sidecar is not None:
+            report = plant_sidecar(
+                args.plant_sidecar, args.output, args.expect_commit)
+        elif args.reclassify_report is not None:
+            require(args.reference is not None,
+                    "--reclassify-report requires --reference")
+            report = reclassify(
+                args.reference, args.reclassify_report, args.expect_commit)
+        else:
+            report = run(
+                args.output, args.expect_commit, args.reference, args.plant_entry,
+                args.entry_input, args.entry_output, args.entry_only,
+            )
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
         args.output.write_text(rendered)
         print(rendered, end="")
-        return 2 if args.plant_entry else 0
+        return 2 if (args.plant_entry or args.plant_sidecar is not None) else 0
     except (OSError, RuntimeError, ValueError, KeyError) as error:
         rendered = json.dumps({"status": "REFUSE", "reason": str(error)}, indent=2) + "\n"
         args.output.parent.mkdir(parents=True, exist_ok=True)
