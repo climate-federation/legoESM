@@ -2909,7 +2909,7 @@ CITATION_MAP = {
         '&      + ( ahtv(ji,jj-1,jk-1) + ahtv(ji,jj  ,jk) )  ) * zmskv', 4],
     'domqco.F90:160': (
         'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)   !==  ratio at t-point  ==!', 1),
-    'fidelity/nemo_recipe.py:955': ('def build_nemo_gyre_recipe(', 1),
+    'fidelity/nemo_recipe.py:956': ('def build_nemo_gyre_recipe(', 1),
     'ocean_model_latlon_cgrid.py:5494': (
         'T_new = state.T.data + dt * tend.dT_dt.data', 1),
     'round38_oracle_trazdf_kt2/ocean.output:798': (
@@ -2943,8 +2943,8 @@ CITATION_MAP = {
         'k33_implicit = compute_isoneutral_K33_latlon(', 1),
     # tracer_combine is READ by two step functions and SELECTED by a DINO
     # recipe -- the retraction of round 37's "a lever nothing selects".
-    'dino.py:1701': ('"tracer_combine": "thickness_weighted",', 1),
-    'dino.py:3907': ('tracer_combine=cfg.tracer_combine,', 1),
+    'dino.py:1702': ('"tracer_combine": "thickness_weighted",', 1),
+    'dino.py:3908': ('tracer_combine=cfg.tracer_combine,', 1),
     # A bare '}' is the eighth-most-common line in that file, so the endpoint
     # is the last SUBSTANTIVE line of the reconstruction rather than its brace.
     'nemo_testcase_l2_gyre_stage3_completion_gate.py:147-156': [
