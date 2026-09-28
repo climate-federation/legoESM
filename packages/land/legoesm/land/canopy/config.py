@@ -157,6 +157,10 @@ CLM_ML_STOMATAL_GS_TYPE = {"medlyn": 0, "ball_berry": 1, "wue": 2}
 VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
 
 
+# Largest accepted smooth-RH-cap width: at 0.1, RH_c at saturation is 7% low.
+_RH_CAP_WIDTH_MAX = 0.1
+
+
 class CanopyConfig(NamedTuple):
     """Physics settings for the canopy energy balance solver."""
 
@@ -239,6 +243,18 @@ class CanopyConfig(NamedTuple):
     # positional / tuple reconstruction of a pre-field CanopyConfig stays aligned
     # and defaults this to the legacy True.
     stress_b0: bool = True
+    # Width [-] of the smooth cap on canopy-air relative humidity used by the
+    # stomatal model, RH_c = r - w*softplus((r-1)/w) with r = e/e_sat(Tc),
+    # instead of the hard clip(r, 0, 1).  The hard cap's kink stalled the canopy
+    # Newton solve wherever the canopy air saturates (warm wet ground under a
+    # canopy): 857 captured stalled production columns converged 105 -> 697.
+    # Intended physics change, not bit-identical: RH_c is lowered by w*ln2 at
+    # saturation and by <5e-4 below r = 0.97, so Ball-Berry (gs - b0) is at most
+    # 0.7% lower.  The 857-column replay still leaves 160 stalled (night: An
+    # floored at 0, Ci at its 0.9*Ca clamp) -- a separate kink.  Must be > 0.
+    # Static under jit (excluded from __param_spec__ tuning).  Appended at the
+    # end of the tuple (positional ABI).
+    rh_cap_smoothing_width: float = 0.01
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -259,6 +275,11 @@ class CanopyConfig(NamedTuple):
                 f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
                 f"'PM'=Penman-Monteith). The internal dispatch is a bare "
                 f"'else: # PM', so a typo would silently run PM.")
+        if not 0.0 < self.rh_cap_smoothing_width <= _RH_CAP_WIDTH_MAX:
+            raise ValueError(
+                f"rh_cap_smoothing_width must be in (0, {_RH_CAP_WIDTH_MAX}] (the smooth "
+                "relative-humidity cap divides by it), got "
+                f"{self.rh_cap_smoothing_width!r}")
         return self
 
 
@@ -270,6 +291,9 @@ __param_spec__ = {
         "scheme_key": "land.two_leaf_canopy",
         "excluded": {
             "tol": "numerics: Newton-Raphson convergence tolerance",
+            "rh_cap_smoothing_width": "numerics: smoothing width of the "
+                                      "RH_c <= 1 cap (keeps the canopy "
+                                      "Newton residual differentiable)",
         },
         "params": {
             "epsf": {

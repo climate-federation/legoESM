@@ -189,6 +189,7 @@ def _canopy_residual(
     stomatal_model: str,
     le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
+    rh_cap_width: float,
 ) -> jax.Array:
     """Compute the residual vector F(x) for the FULLY_COUPLED canopy closure.
 
@@ -245,7 +246,7 @@ def _canopy_residual(
 
     # ---- Leaf microclimate (FULLY_COUPLED: leaves use canopy air space) ----
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
-        b.Ps, Tc, q_c)
+        b.Ps, Tc, q_c, rh_cap_width)
 
     # ---- Leaf energy balance ----
     if LE_module == "BT":
@@ -371,6 +372,7 @@ def canopy_forward(
     stomatal_model: str,
     le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
+    rh_cap_width: float,
 ) -> dict:
     """Evaluate the FULLY_COUPLED canopy state and return all fluxes.
 
@@ -423,7 +425,7 @@ def canopy_forward(
 
     # FULLY_COUPLED: leaves and soil share the canopy air space (Tc, q_c).
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
-        b.Ps, Tc, q_c)
+        b.Ps, Tc, q_c, rh_cap_width)
 
     if LE_module == "BT":
         q_f_Sun = saturation_specific_humidity(Tf_Sun, b.Ps)
@@ -538,11 +540,16 @@ def solve_canopy_closure(
             f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
             f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
             "'PM'=Penman-Monteith)")
+    if not config.rh_cap_smoothing_width > 0.0:
+        raise ValueError("rh_cap_smoothing_width must be > 0 (the smooth "
+                         "relative-humidity cap divides by it), got "
+                         f"{config.rh_cap_smoothing_width!r}")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,
         le_cap_mode=config.le_cap_mode,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
+        rh_cap_width=config.rh_cap_smoothing_width,
         max_iters=config.max_iters,
         tol=config.tol,
     )
@@ -571,11 +578,16 @@ def solve_canopy_closure_diag(
             f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
             f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
             "'PM'=Penman-Monteith)")
+    if not config.rh_cap_smoothing_width > 0.0:
+        raise ValueError("rh_cap_smoothing_width must be > 0 (the smooth "
+                         "relative-humidity cap divides by it), got "
+                         f"{config.rh_cap_smoothing_width!r}")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,
         le_cap_mode=config.le_cap_mode,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
+        rh_cap_width=config.rh_cap_smoothing_width,
         max_iters=config.max_iters,
         tol=config.tol,
     )
@@ -591,6 +603,7 @@ def _make_implicit_newton_solver(
     stomatal_model: str,
     le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
+    rh_cap_width: float,
     max_iters: int,
     tol: float,
 ):
@@ -604,6 +617,7 @@ def _make_implicit_newton_solver(
             stomatal_model=stomatal_model,
             le_cap_mode=le_cap_mode,
             use_ta_for_photosynthesis=use_ta_for_photosynthesis,
+            rh_cap_width=rh_cap_width,
         )
 
     return make_implicit_newton_solver(
