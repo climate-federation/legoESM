@@ -42,6 +42,14 @@ def budget_residual(s0, s1, precip, evap, runoff, drainage, dt):
     return (s1 - s0) - (precip - evap - runoff - drainage) * dt
 
 
+def step_runoff(drainage_state, freshwater, held):
+    """(surface runoff, drainage) [kg/m2/s] of one land step.  A held column
+    reverted its state (stale drainage field) and zeroed its response, so it
+    moved no water: both are 0 there and the column is counted, not budgeted."""
+    dr = np.where(held, 0.0, drainage_state)
+    return np.where(held, 0.0, freshwater - dr), dr
+
+
 def area_mean(x, w):
     return float(np.sum(x * w) / np.sum(w))
 
@@ -79,7 +87,8 @@ def _run_arm(d, st0, cfg, idx, n_steps, dt):
     import jax.numpy as jnp
     from legoesm import constants
     from legoesm.core.coupling_fields import AtmToSurface
-    from legoesm.land.multilayer_land import gather_land_columns, step_multilayer_land
+    from legoesm.land.multilayer_land import (
+        gather_land_columns, step_multilayer_land_with_diagnostics)
     ph = d.physics
     ncol = st0.theta_soil.shape[0]
 
@@ -102,15 +111,17 @@ def _run_arm(d, st0, cfg, idx, n_steps, dt):
 
     @jax.jit
     def step(st):
-        new, resp, _ = step_multilayer_land(
+        new, resp, _, sfc = step_multilayer_land_with_diagnostics(
             st, f, cfg_p, u_min, dt, lat=lat_p, doy=_DOY,
             land_params=params_p, carbon_state=carbon_p)
-        return new, resp.surface_mass_flux, resp.freshwater_flux
+        held = (jnp.zeros(n, bool) if sfc.held is None
+                else jnp.asarray(sfc.held).reshape(-1))
+        return new, resp.surface_mass_flux, resp.freshwater_flux, held
 
     st = pack(st0)
     for _ in range(n_steps):
-        new, evap, fw = step(st)
-        yield st, new, np.asarray(evap), np.asarray(fw)
+        new, evap, fw, held = step(st)
+        yield st, new, np.asarray(evap), np.asarray(fw), np.asarray(held)
         st = new
 
 
@@ -164,17 +175,22 @@ def main(argv=None):
         cfg = cfg0._replace(richards=cfg0.richards._replace(ice_impedance_exponent=e))
         drain = runoff = 0.0
         resid_max = 0.0
-        for s0, s1, evap, fw in _run_arm(d, st0, cfg, idx, n_steps, dt):
+        n_held = 0
+        for s0, s1, evap, fw, held in _run_arm(d, st0, cfg, idx, n_steps, dt):
             # phase-aware vapour flux (sublimation at L_s) and the tile's total
             # runoff to the ocean (surface incl. snowmelt + drainage)
-            dr = np.asarray(s1.runoff_subsurface)
-            ro = fw - dr
-            r = budget_residual(storage(s0), storage(s1), 0.0, evap, ro, dr, dt)
-            if not np.all(np.isfinite(r[mask])):
+            ro, dr = step_runoff(np.asarray(s1.runoff_subsurface), fw, held)
+            r = budget_residual(storage(s0), storage(s1), 0.0,
+                                np.where(held, 0.0, evap), ro, dr, dt)
+            ok = mask & ~held
+            n_held += int(np.sum(mask & held))
+            if not np.all(np.isfinite(r[ok])):
                 raise SystemExit(f"non-finite water budget in arm e={e:g}")
-            resid_max = max(resid_max, float(np.max(np.abs(r[mask]))))
+            if ok.any():
+                resid_max = max(resid_max, float(np.max(np.abs(r[ok]))))
             drain += area_mean(dr * dt, w); runoff += area_mean(ro * dt, w)
         res[f"e={e:g}"] = dict(drainage_mm=drain, surface_runoff_mm=runoff,
+                               held_column_steps=n_held,
                                max_budget_residual_kg_m2_per_step=resid_max,
                                budget_within_tol=resid_max < _BUDGET_TOL_KG_M2)
 

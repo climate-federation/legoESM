@@ -32,6 +32,16 @@ def test_budget_closes_and_catches_a_missing_term(probe):
     assert abs(r_bad[0]) == pytest.approx(1.0)
 
 
+def test_held_column_moves_no_water(probe):
+    """A held column keeps a stale drainage field and zero response: counting
+    that drainage (or fw - drainage as runoff) would fake a flux pair that
+    cancels in the budget."""
+    ro, dr = probe.step_runoff(np.array([2e-4, 2e-4]), np.array([3e-4, 0.0]),
+                               np.array([False, True]))
+    assert dr.tolist() == [2e-4, 0.0]
+    assert ro[0] == pytest.approx(1e-4) and ro[1] == 0.0
+
+
 def test_area_mean_weights(probe):
     assert probe.area_mean(np.array([1.0, 3.0]), np.array([3.0, 1.0])) == pytest.approx(1.5)
 
