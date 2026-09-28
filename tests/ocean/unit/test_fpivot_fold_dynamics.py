@@ -136,6 +136,16 @@ def test_fold_line_helpers_are_fold_consistent():
     np.testing.assert_allclose(uv, -uv[P], rtol=0, atol=1e-15)
     z = np.asarray(curl_vertex_cgrid(jnp.asarray(u), flux, grid))[-1, :-1]
     np.testing.assert_allclose(z, z[PF], rtol=1e-12, atol=0)
+    # Independent assembly (NEMO rot at F(k-1, jpj-1), our vertex k): east
+    # minus west fold-line v, plus top u minus the signed U ghost -u[-1][P_U].
+    PU = np.asarray(grid.fold.perm_u)
+    dxu, dyv = np.asarray(grid.dx_u), np.asarray(grid.dy_v)
+    vv = np.asarray(flux)[-1]
+    k = np.arange(N_LON)
+    circ = (vv[k] * dyv[-1, k, None] - vv[k - 1] * dyv[-1, k - 1, None]
+            + u[-1, k] * dxu[-1, k, None] + u[-1, PU] * dxu[-1, PU, None])
+    ref = circ / np.asarray(grid.area_q)[-1, k, None]
+    np.testing.assert_allclose(z, ref, rtol=1e-12, atol=0)
 
 
 def test_fold_line_momentum_tendency_is_antisymmetric():
@@ -164,14 +174,17 @@ def test_fold_line_momentum_tendency_is_antisymmetric():
     assert nonzero >= 4
 
 
+@pytest.mark.parametrize("bt_cor", ["avg", "een"])
 @pytest.mark.parametrize("n_steps", [100])
-def test_fold_symmetry_survives_100_steps_without_lbc(n_steps, monkeypatch):
+def test_fold_symmetry_survives_100_steps_without_lbc(n_steps, bt_cor,
+                                                      monkeypatch):
     """The model's post-step fold lbc is DISABLED; the fold-line v must stay
     antisymmetric to round-off by itself for 100 steps of the full model."""
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as mod
     # fix_eta_drift off: that fixer removes any global-mean eta drift and
     # would hide a fold leak from the volume check below.
-    grid, zc, cfg, st = _setup(dict(CARD, fix_eta_drift=False))
+    grid, zc, cfg, st = _setup(dict(CARD, fix_eta_drift=False,
+                                    barotropic_coriolis=bt_cor))
     monkeypatch.setattr(mod, "fpivot_fold_line", lambda x, *a, **k: x)
     model = mod.LatLonCGridOceanModel(grid, zc, cfg)
     P = grid.fold.perm_v
