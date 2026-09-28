@@ -31,7 +31,8 @@ readonly BINARY_SHA=c4907e476cf3969052b44c5c7fa966f3dac493e8cfb563f6554c8f3a2718
 readonly DECK_SHA=51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9
 readonly INPUT_SHA=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
 readonly ICE_CFG_SHA=6b647863137b518b95ff97f83975d9afcb3944b7f6e8d63e45a05f494f5edc89
-readonly CALIBRATION_COMMIT=950b1e4c281ff3677b4613bd5987cf932e1cd6a9
+readonly CALIBRATION_COMMIT=61314622ebff810e988159566e3ec1990cc6a00c
+readonly ACQUIRED_MONTH_COMMIT=61314622ebff810e988159566e3ec1990cc6a00c
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
@@ -157,13 +158,9 @@ if [[ "$MODE" == --admit-existing ]]; then
   [[ -d "$CALIBRATION" && -d "$MONTH" ]] || {
     printf 'REFUSE: existing calibration or month target is absent\n' >&2; exit 68;
   }
-  admit "$CALIBRATION_COMMIT" "$COMMIT"
+  admit "$CALIBRATION_COMMIT" "$ACQUIRED_MONTH_COMMIT"
   exit 0
 fi
-
-[[ ! -e "$CALIBRATION" && ! -e "$MONTH" ]] || {
-  printf 'REFUSE: calibration or month target already exists\n' >&2; exit 68;
-}
 
 stage() {
   local target=$1 step=$2
@@ -238,6 +235,10 @@ if [[ "$MODE" == --resume-month ]]; then
   admit "$CALIBRATION_COMMIT" "$COMMIT"
   exit 0
 fi
+
+[[ ! -e "$CALIBRATION" && ! -e "$MONTH" ]] || {
+  printf 'REFUSE: calibration or month target already exists\n' >&2; exit 68;
+}
 
 stage "$CALIBRATION" 10
 run_target "$CALIBRATION"

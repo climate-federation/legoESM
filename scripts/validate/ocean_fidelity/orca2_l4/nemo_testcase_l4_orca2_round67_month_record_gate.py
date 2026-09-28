@@ -100,7 +100,9 @@ def validate_deck_delta(calibration: Path, month: Path, *, plant: str = "none") 
     after = namelist_values(month / "namelist_cfg")
     require(set(before) == set(after), "namelist assignment inventory changed")
     if plant == "hidden-deck-delta":
-        after["namrun.rn_dt"] = "10801.0"
+        require("namdom.rn_dt" in after,
+                "hidden-deck-delta plant target namdom.rn_dt is absent")
+        after["namdom.rn_dt"] = "10801.0"
     changed = sorted(key for key in before if before[key] != after[key])
     expected = ["namrun.nn_itend", "namrun.nn_stock"]
     require(changed == expected,

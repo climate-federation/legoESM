@@ -48,6 +48,8 @@ def _namelist(step: int) -> str:
         "   nn_it000 = 1\n"
         f"   nn_itend = {step}\n"
         f"   nn_stock = {step}\n"
+        "/\n"
+        "&namdom\n"
         "   rn_dt = 10800.0\n"
         "/\n"
     )
