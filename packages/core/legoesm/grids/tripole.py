@@ -174,6 +174,8 @@ def _detect_fold(
     cap_dlat_rel_deviation: float = 0.1,
     fold_convention: str = "auto",
     fold_tie_tol_deg: float = 1e-6,
+    fold_pivot: str = "legacy",
+    vf_coords=None,
 ) -> FoldDescriptor:
     """Detect the tripolar fold from the T-point coordinates.
 
@@ -206,6 +208,16 @@ def _detect_fold(
         ``"auto"`` tie threshold [deg]: if the two candidate fold-row latitude
         asymmetries differ by no more than this (and both are valid fits), the
         detection is ambiguous and raises rather than silently guessing.
+    fold_pivot : {"legacy", "F"}, default "legacy"
+        ``"legacy"`` = every existing detection path, byte-identical.  ``"F"``
+        = explicit opt-in to the NEMO F-point-pivot descriptor for a mesh whose
+        duplicated fold-halo row has been STRIPPED (see
+        ``FoldDescriptor.fpivot``).  The maps are VERIFIED, not assumed: the
+        stored top v row and top F row must each be self-coincident under
+        their fold maps (``vf_coords`` required), else this raises.
+    vf_coords : (glamv, gphiv, glamf, gphif) arrays in degrees, optional
+        NEMO-layout V and F coordinates (east-of-cell ``glamf`` columns),
+        required for ``fold_pivot="F"``.
 
     Returns
     -------
@@ -213,6 +225,13 @@ def _detect_fold(
     """
     fold_j = n_lat - 1
     lat_fold = gphit[fold_j]
+
+    if fold_pivot not in ("legacy", "F"):
+        raise ValueError(
+            f"fold_pivot must be 'legacy' or 'F', got {fold_pivot!r}")
+    if fold_pivot == "F":
+        return _detect_fpivot_fold(glamt, gphit, n_lat, n_lon, vf_coords,
+                                   cap_dlat_rel_deviation)
 
     # NEMO tripole meshes use two index conventions for the T-fold
     # self-permutation of the fold (last) row, differing only by the cyclic
@@ -353,6 +372,103 @@ def _detect_fold(
     )
 
 
+def _detect_fpivot_fold(glamt, gphit, n_lat, n_lon, vf_coords,
+                        cap_dlat_rel_deviation, tol_deg: float = 1e-6):
+    """F-point-pivot descriptor for a mesh with its fold-halo row stripped.
+
+    Measured maps (``measure_fpivot_fold_perms.py`` on eORCA1.2, this model's
+    staggering; NEMO ``lbc_nfd_generic.h90`` F branch): ``P_T = P_V = n-1-i``,
+    ``P_U = P_F = (n-i) % n``.  Verified here on the mesh itself: the stored
+    top V row (the fold line) must be self-coincident under ``P_V`` and the
+    top F row under ``P_F`` (our SW-vertex column ``k`` = NEMO F column
+    ``k-1``), every column except the two cyclic-halo columns, to
+    ``tol_deg``.  A mesh whose top row is still the duplicated halo row, or a
+    T-pivot mesh, fails and raises.
+    """
+    if vf_coords is None:
+        raise ValueError("fold_pivot='F' needs vf_coords=(glamv, gphiv, "
+                         "glamf, gphif) to verify the fold line")
+    glamv, gphiv, glamf, gphif = (jnp.asarray(a) for a in vf_coords)
+    idx = jnp.arange(n_lon, dtype=jnp.int32)
+    p_t = (n_lon - 1 - idx).astype(jnp.int32)
+    p_u = ((n_lon - idx) % n_lon).astype(jnp.int32)
+
+    def _wrap(a, b):
+        d = jnp.abs(a - b) % 360.0
+        return jnp.minimum(d, 360.0 - d)
+
+    def _self_err(lon_row, lat_row, perm, keep):
+        d = jnp.maximum(_wrap(lon_row, lon_row[perm]),
+                        jnp.abs(lat_row - lat_row[perm]))
+        return float(jnp.max(jnp.where(keep, d, 0.0)))
+
+    # Exclude self-paired columns and (when the mesh carries them) the two
+    # cyclic-halo columns, whose stored coordinates NEMO does not fold.
+    halo = (idx == 0) | (idx == n_lon - 1)
+    keep_v = (p_t != idx) & ~halo & ~halo[p_t]
+    err_v = _self_err(glamv[-1], gphiv[-1], p_t, keep_v)
+    # Our vertex column k = NEMO F column k-1 (SW corner of cell k).
+    lon_f = jnp.concatenate([glamf[-1, -1:], glamf[-1, :-1]])
+    lat_f = jnp.concatenate([gphif[-1, -1:], gphif[-1, :-1]])
+    src = idx - 1
+    halo_f = (src <= 0) | (src >= n_lon - 1)
+    keep_f = (p_u != idx) & ~halo_f & ~halo_f[p_u]
+    err_f = _self_err(lon_f, lat_f, p_u, keep_f)
+    if not (err_v < tol_deg and err_f < tol_deg):
+        raise ValueError(
+            "fold_pivot='F' refused: the stored top row is not an F-pivot "
+            f"fold line (V self-mismatch {err_v:.3e} deg under n-1-i, F "
+            f"self-mismatch {err_f:.3e} deg under (n-i)%n; need < {tol_deg}). "
+            "Strip the duplicated fold-halo row first "
+            "(strip_north_rows=1 on eORCA1.2), or this is not an F-pivot mesh.")
+    # NEMO's cyclic E-W halo columns (eORCA1.2): col 0 == col n-2, col n-1 ==
+    # col 1 on every row below the fold.
+    glamt = jnp.asarray(glamt)
+    ew_halo = bool(
+        n_lon > 4
+        and float(jnp.max(_wrap(glamt[:-1, 0], glamt[:-1, n_lon - 2]))) < tol_deg
+        and float(jnp.max(_wrap(glamt[:-1, n_lon - 1], glamt[:-1, 1]))) < tol_deg)
+    return fpivot_descriptor(n_lat, n_lon, ew_halo=ew_halo,
+                             cap_j=_detect_cap_j(gphit, n_lat, n_lat - 1,
+                                                 cap_dlat_rel_deviation))
+
+
+def fpivot_perms(n_lon: int, ew_halo: bool):
+    """F-pivot fold maps ``(P_T, P_U)`` in this model's staggering
+    (``P_V = P_T``, ``P_F = P_U``).
+
+    Pure periodic layout: ``P_T = n-1-i``, ``P_U = (n-i) % n``.  With NEMO's
+    two cyclic halo columns (``ew_halo``) the maps are NEMO ``lbc_nfd``'s own
+    index sets (``ihls = 1``), which read interior columns only:
+    T/V column 0 <- 1 and n-1 <- n-2; U/F (our west face k = NEMO column
+    k-1) face 0 <- n-2, face n-1 <- n-1 (self: NEMO's point ``ipi-ihls``).
+    """
+    idx = jnp.arange(n_lon, dtype=jnp.int32)
+    p_t = (n_lon - 1 - idx).astype(jnp.int32)
+    p_u = ((n_lon - idx) % n_lon).astype(jnp.int32)
+    if ew_halo:
+        p_t = p_t.at[0].set(1).at[n_lon - 1].set(n_lon - 2)
+        p_u = p_u.at[0].set(n_lon - 2).at[n_lon - 1].set(n_lon - 1)
+    return p_t, p_u
+
+
+def fpivot_descriptor(n_lat: int, n_lon: int, *, ew_halo: bool = False,
+                      cap_j: int | None = None) -> FoldDescriptor:
+    """The F-pivot ``FoldDescriptor`` (see ``FoldDescriptor.fpivot``)."""
+    if n_lon % 2:
+        raise ValueError(f"F-pivot fold needs an even n_lon, got {n_lon}")
+    p_t, p_u = fpivot_perms(n_lon, ew_halo)
+    return FoldDescriptor(
+        is_active=True, fold_j=n_lat - 1,
+        cap_j=max(0, n_lat - n_lat // 4) if cap_j is None else int(cap_j),
+        perm_T=p_t, perm_v=p_t,
+        vector_sign_u=-1.0, vector_sign_v=-1.0,
+        pivot_row_stored=False,
+        perm_u=p_u, perm_f=p_u,
+        fpivot=True, ew_halo=bool(ew_halo),
+    )
+
+
 def _compute_rotation_angles(
     glamu: jax.Array,
     gphiu: jax.Array,
@@ -456,6 +572,7 @@ def create_tripole_grid(
     fold_convention: str = "auto",
     allow_ambiguous_legacy_fold: bool = False,
     strip_north_rows: int = 0,
+    fold_pivot: str = "legacy",
 ) -> LatLonCGridGeometry:
     """Load a tripolar grid from a NEMO mesh_mask NetCDF file.
 
@@ -497,6 +614,11 @@ def create_tripole_grid(
         flat to disambiguate (``"(n_lon-i)%n_lon"`` for eORCA025-style de-haloed
         meshes, ``"n_lon-1-i"`` for halo-inclusive eORCA1.2-style meshes); the
         choice is still verified against the symmetry tolerance.
+    fold_pivot : {"legacy", "F"}, default "legacy"
+        ``"F"`` = explicit opt-in to the NEMO F-point-pivot fold descriptor
+        (``FoldDescriptor.fpivot``); requires the duplicated halo row to be
+        stripped (``strip_north_rows=1`` on eORCA1.2) and is verified against
+        the mesh's V/F coordinates.  ``"legacy"`` = unchanged detection.
     allow_ambiguous_legacy_fold : bool, default False
         Explicit opt-in: when ``True`` and ``fold_convention="auto"`` hits an
         ambiguous fold row, fall back to the historical ``"n_lon-1-i"`` origin
@@ -600,6 +722,12 @@ def create_tripole_grid(
     # f at v-points
     f_v_inner = 0.5 * (f_T[:-1] + f_T[1:])
     f_v = jnp.concatenate([f_T[0:1], f_v_inner, f_T[-1:]], axis=0)
+    if fold_pivot == "F":
+        # F-pivot: the top v row is the fold line between the top cell and
+        # its mirror image (perm_T = n-1-i), so it takes the same two-cell
+        # average as every interior v row (self-symmetric under perm_v).
+        _pt = (n_lon - 1 - jnp.arange(n_lon)).astype(jnp.int32)
+        f_v = f_v.at[-1].set(0.5 * (f_T[-1] + f_T[-1][_pt]))
 
     # Fold descriptor. ``_detect_fold`` raises on a genuinely ambiguous
     # (near-constant) fold row under "auto" because BOTH seam origins fit, and a
@@ -611,9 +739,18 @@ def create_tripole_grid(
     # explicit opt-in that restores the historical "n_lon-1-i" tie-break (with a
     # warning) for callers who knowingly accept the legacy behaviour. Non-
     # ambiguity errors always propagate.
+    if fold_pivot == "F":
+        fold = _detect_fold(
+            raw["glamt"], raw["gphit"], n_lat, n_lon, fold_pivot="F",
+            vf_coords=(raw["glamv"], raw["gphiv"], raw["glamf"],
+                       raw["gphif"]))
+    else:
+        fold = None
     try:
-        fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
-                            fold_convention=fold_convention)
+        if fold is None:
+            fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
+                                fold_convention=fold_convention,
+                                fold_pivot=fold_pivot)
     except ValueError as exc:
         is_ambiguity = (
             fold_convention == "auto"
@@ -1087,3 +1224,50 @@ def pad_mask_bathy_south(land_mask, H_bathy, n_pad: int):
     zeros_hb = np.zeros((n_pad, n_lon), dtype=hb.dtype)
     return (np.concatenate([zeros_lm, lm], axis=0),
             np.concatenate([zeros_hb, hb], axis=0))
+
+
+def create_synthetic_tripole_fpivot(n_lat: int, n_lon: int | None = None,
+                                    radius: float = constants.R_earth,
+                                    omega: float = constants.Omega,
+                                    dtype=None, ew_halo: bool = False,
+                                    lat_1d=None):
+    """Synthetic tripole with the NEMO F-POINT-pivot fold (halo row stripped).
+
+    The eORCA1 layout after ``strip_north_rows=1`` (measured 2026-09-28,
+    ``measure_fpivot_fold_perms.py``): the fold line is the north v-face of
+    the stored top row; ``perm_T = perm_v = n-1-i`` and
+    ``perm_u = perm_f = (n-i) % n`` (see ``FoldDescriptor.fpivot``).  Regular
+    lat-lon metrics (each row uniform in longitude, hence fold-symmetric);
+    only the fold dispatch is exercised.  ``n_lon`` must be even.
+    ``ew_halo=True`` selects NEMO's halo-column index sets (the geometry
+    itself stays purely periodic).  ``lat_1d`` (radians, optional) gives a
+    regional band so the fold line sits away from the geographic pole; the
+    top v-face width and vertex area are opened into a fold line
+    (:func:`fpivot_fold_line_geometry`).
+    """
+    geom = create_latlon_geometry(n_lat, n_lon, radius, omega, dtype,
+                                  lat_1d=lat_1d)
+    return fpivot_fold_line_geometry(
+        geom._replace(fold=fpivot_descriptor(n_lat, geom.n_lon,
+                                             ew_halo=ew_halo)))
+
+
+def fpivot_fold_line_geometry(geom):
+    """Open the regular builder's north WALL row into an F-pivot fold line.
+
+    ``create_latlon_geometry`` zeroes the top v-face width (a pole wall) and
+    keeps only the southern half of the top vertex dual cell.  On the F-pivot
+    fold the top v-face is an interior face shared with the mirror cell, so
+    its width is the face-latitude ``R cos(phi) dlon`` and the dual cell is
+    twice the stored half (its northern half is the mirror of the southern).
+    Test-grid helper for the synthetic fixtures only (a mesh file supplies
+    these metrics directly)."""
+    lat_top_face = float(geom.lat[-1]) + 0.5 * float(geom.lat[-1] - geom.lat[-2])
+    dlon = 2.0 * jnp.pi / geom.n_lon
+    dxv_top = jnp.full((1, geom.n_lon),
+                       geom.radius * jnp.cos(lat_top_face) * dlon,
+                       dtype=geom.dx_v.dtype)
+    return geom._replace(
+        dx_v=jnp.concatenate([geom.dx_v[:-1], dxv_top], axis=0),
+        area_q=jnp.concatenate([geom.area_q[:-1], 2.0 * geom.area_q[-1:]],
+                               axis=0))

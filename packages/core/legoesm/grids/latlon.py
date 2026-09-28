@@ -1168,6 +1168,28 @@ class FoldDescriptor(NamedTuple):
     perm_f : jax.Array | None
         (n_lon,) int32 — i-permutation for F/vertex stagger points.
         ``None`` falls back to ``perm_v``.
+    fpivot : bool
+        ``True`` = NEMO F-point-pivot fold (``jperio=6``, eORCA1) stored with
+        the duplicated halo row STRIPPED: the stored top T row is NEMO
+        ``jpj-1`` and the fold line is the NORTH v-face of that row (this
+        model's ``v[n_lat]`` / vertex row ``q[n_lat]``), which is PROGNOSTIC
+        and self-mapped (``v(i) = -v(perm_v[i])``, ``q(i) = q(perm_f[i])``).
+        Ghost rows above the top (NEMO ``lbc_nfd`` F branch, measured in
+        ``measure_fpivot_fold_perms.py``): ``T[n_lat] = T[n_lat-1][perm_T]``,
+        ``U[n_lat] = -U[n_lat-1][perm_u]``, ``v[n_lat+1] = -v[n_lat-1][perm_v]``,
+        ``q[n_lat+1] = q[n_lat-1][perm_f]`` with ``perm_T = perm_v = n-1-i``
+        and ``perm_u = perm_f = (n-i) % n`` in this model's west-face / SW-
+        vertex staggering.  The T-pivot helpers (``pad_ns_scalar``,
+        ``pad_ns_vector_v``, ...) whose north row is a GHOST of the row below
+        refuse this descriptor.  ``False`` (default) = every legacy layout,
+        byte-identical.
+    ew_halo : bool
+        F-pivot only: the grid carries NEMO's two cyclic E-W halo columns
+        (column 0 == column n-2, column n-1 == column 1; eORCA1.2 mesh).  The
+        fold maps then reproduce NEMO's halo-column index sets EXACTLY (they
+        read interior columns, never a possibly-stale halo column; they are
+        no longer bijections), and the fold-line overwrite uses NEMO's column
+        range.  On E-W-consistent data both forms agree.
     """
     is_active: bool
     fold_j: int
@@ -1179,6 +1201,8 @@ class FoldDescriptor(NamedTuple):
     pivot_row_stored: bool = False
     perm_u: jax.Array | None = None
     perm_f: jax.Array | None = None
+    fpivot: bool = False
+    ew_halo: bool = False
 
 
 def _inactive_fold(n_lon: int) -> FoldDescriptor:

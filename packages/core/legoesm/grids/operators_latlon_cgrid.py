@@ -198,6 +198,7 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
+        refuse_fpivot(fold, "pad_ns_scalar")
         # Fold: i-reversed ghost (scalar sign +1).  V-face rows (n_lon
         # columns) use perm_T on BOTH storage layouts (their stored top row
         # pairs cross-row on the pivot mesh too, matching the legacy
@@ -253,6 +254,121 @@ def fold_perm_f(fold):
     """F/vertex-stagger fold permutation (falls back to perm_v)."""
     p = getattr(fold, "perm_f", None)
     return fold.perm_v if p is None else p
+
+
+def is_fpivot(fold) -> bool:
+    """True for the NEMO F-point-pivot descriptor (``FoldDescriptor.fpivot``)."""
+    return fold is not None and bool(getattr(fold, "fpivot", False))
+
+
+def fpivot_active(grid) -> bool:
+    """True when ``grid`` carries a LOCAL F-pivot fold (serial / fold-owning
+    rank).  The lat-band SPMD backend (traced north mask) is not wired for
+    the F-pivot fold and raises rather than silently walling it."""
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    if not is_fpivot(fold):
+        return False
+    if north_fold_mask(grid) is not None:
+        raise NotImplementedError(
+            "F-pivot fold under the lat-band SPMD backend is not wired")
+    return fold_is_local(grid)
+
+
+def refuse_fpivot(fold, where: str) -> None:
+    """Fail loud when a T-pivot-only fold formula meets an F-pivot descriptor.
+
+    The legacy helpers build the stored north v/vertex row as a GHOST image of
+    the row below.  On the F-pivot layout that row is the PROGNOSTIC fold line
+    (``FoldDescriptor.fpivot``), so the legacy formula would silently impose a
+    wrong boundary value; the call site must compute the fold line instead
+    (with :func:`fpivot_ghost_rows` / :func:`fpivot_fold_line`).
+    """
+    if is_fpivot(fold):
+        raise NotImplementedError(
+            f"{where}: T-pivot fold formula called on an F-pivot fold "
+            "descriptor; this call site must compute the fold line from the "
+            "F-pivot ghost rows (fpivot_ghost_rows / fpivot_fold_line).")
+
+
+_FPIVOT_POINTS = ("T", "U", "V", "F")
+
+
+def _fpivot_perm(fold, point):
+    if point not in _FPIVOT_POINTS:
+        raise ValueError(f"point must be one of {_FPIVOT_POINTS}, got {point!r}")
+    return {"T": fold.perm_T, "U": fold_perm_u(fold),
+            "V": fold.perm_v, "F": fold_perm_f(fold)}[point]
+
+
+def _permute_cols(row, perm, n_lon):
+    """``row[:, perm]`` for n_lon-column rows; for n_lon+1-column (u-face /
+    vertex) rows permute the first n_lon columns and re-append the periodic
+    closure column (column n_lon == column 0)."""
+    if row.shape[1] == n_lon:
+        return row[:, perm]
+    core = row[:, :n_lon][:, perm]
+    return jnp.concatenate([core, core[:, 0:1]], axis=1)
+
+
+def fpivot_ghost_rows(field, fold, *, point: str, sign: float, depth: int = 1):
+    """Ghost rows ABOVE the stored top row on the F-pivot layout, bottom-up.
+
+    NEMO ``lbc_nfd`` F-point pivot (``lbc_nfd_generic.h90``, ``c_NFtype ==
+    'F'``), in this model's staggering with the halo row stripped:
+
+    * ``point="T"`` / ``"U"`` (n_lat rows): ghost ``k`` (k = 0 is the row
+      just above the top) = ``sign * field[n_lat-1-k][P]``.
+    * ``point="V"`` / ``"F"`` (n_lat+1 rows whose top row is the fold line):
+      ghost ``k`` = ``sign * field[n_lat-1-k][P]`` i.e. the image of the row
+      BELOW the fold line (``v[n_lat+1] <- v[n_lat-1]``).
+
+    ``P`` = ``perm_T``/``perm_u``/``perm_v``/``perm_f``.  ``sign`` is +1 for
+    scalars and -1 for the i/j vector components (NEMO ``psgn``).
+    Returns ``(depth, n_cols, ...)``.
+    """
+    perm = _fpivot_perm(fold, point)
+    n_lon = perm.shape[0]
+    top = field.shape[0] - (1 if point in ("T", "U") else 2)
+    rows = [sign * _permute_cols(field[top - k:top - k + 1], perm, n_lon)
+            for k in range(depth)]
+    return jnp.concatenate(rows, axis=0)
+
+
+def fpivot_fold_line(field, fold, *, point: str, sign: float):
+    """Impose NEMO's F-pivot fold-line identity on the stored top V/F row.
+
+    The fold line (``v[n_lat]`` / vertex row ``q[n_lat]``) folds onto itself:
+    NEMO ``lbc_nfd`` F branch overwrites its RIGHT half with the signed image
+    of its left half (``ptab(ii,ipj-1) = psgn*ptab(P(ii),ipj-1)`` for the
+    columns east of the pivot).  Here "right half" = columns ``c < n_lon``
+    with ``P[c] < c`` (NEMO's exact halo-column ranges when
+    ``fold.ew_halo``); self-mapped columns are untouched, and the periodic
+    closure column of an n_lon+1-column row is re-copied from column 0.
+    Returns the full field with its last row replaced.
+    """
+    if point not in ("V", "F"):
+        raise ValueError(f"fold line exists for V/F points only, got {point!r}")
+    perm = _fpivot_perm(fold, point)
+    n_lon = perm.shape[0]
+    top = field[-1:]
+    idx = jnp.arange(n_lon)
+    if bool(getattr(fold, "ew_halo", False)):
+        # NEMO's own column ranges (ihls = 1): V line ``ipi/2+1..ipi-1``
+        # (Fortran) plus column 1 <- 2; F line ``ipi/2+1..ipi-2`` (Fortran
+        # ii == our vertex column).  The halo column(s) left alone are made
+        # consistent by the E-W cyclic overlap.
+        if point == "V":
+            right = ((idx >= n_lon // 2) & (idx <= n_lon - 2)) | (idx == 0)
+        else:
+            right = (idx >= n_lon // 2 + 1) & (idx <= n_lon - 2)
+    else:
+        right = perm < idx
+    right = right.reshape((1, n_lon) + (1,) * (field.ndim - 2))
+    core = top[:, :n_lon]
+    core = jnp.where(right, sign * core[:, perm], core)
+    if top.shape[1] != n_lon:
+        core = jnp.concatenate([core, core[:, 0:1]], axis=1)
+    return jnp.concatenate([field[:-1], core], axis=0)
 
 
 def north_fold_mask(grid):
@@ -314,6 +430,7 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
+        refuse_fpivot(fold, "pad_ns_vector_v")
         north = fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v,
                          fold.perm_v.shape[0])
         padded = apply_north_fold(padded, north, grid, north_mask=nmask)
@@ -424,6 +541,11 @@ def interp_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     f_v : (n_lat+1, n_lon, ...) at v-faces.
     """
     f_v_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, ...)
+    if grid is not None and fpivot_active(grid):
+        # F-pivot fold line: average of the top cell and its fold image.
+        fg = fpivot_ghost_rows(f, grid.fold, point="T", sign=1.0)
+        return jnp.concatenate(
+            [jnp.zeros_like(f[:1]), f_v_interior, 0.5 * (f[-1:] + fg)], axis=0)
     if grid is not None:
         return pad_ns_scalar(f_v_interior, grid)
     return jnp.concatenate([f[0:1], f_v_interior, f[-1:]], axis=0)
@@ -612,6 +734,13 @@ def interp_u_to_vface_4pt(u: jnp.ndarray, grid) -> jnp.ndarray:
         + u_pad[1:, :-1] + u_pad[1:, 1:]
     )  # (n_lat+1, n_lon, ...)
     u_at_v = zero_polar_lat_ends(u_at_v)
+    if fpivot_active(grid):
+        # F-pivot: the fold line averages the top u row with its signed fold
+        # image (the U ghost row) — NEMO's interior formula at jpj-1.
+        ug = fpivot_ghost_rows(u, grid.fold, point="U",
+                               sign=grid.fold.vector_sign_u)
+        top = 0.25 * (u[-1:, :-1] + u[-1:, 1:] + ug[:, :-1] + ug[:, 1:])
+        return jnp.concatenate([u_at_v[:-1], top], axis=0)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
@@ -917,6 +1046,11 @@ def upwind_cell_to_vface(
     # Wall BC at the physical pole faces only (backend-aware), then the
     # tripolar north fold row exactly as pad_ns_scalar produced it.
     f_v = zero_polar_lat_ends(f_v)
+    if fpivot_active(grid):
+        # F-pivot fold line: donor = top cell (flux > 0) or its fold image.
+        fg = fpivot_ghost_rows(f, grid.fold, point="T", sign=1.0)
+        top = jnp.where(flux_v[-1:] > 0, f[-1:], fg)
+        return jnp.concatenate([f_v[:-1], top], axis=0)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         north = f_v[-2:-1][:, grid.fold.perm_T]
@@ -1359,6 +1493,20 @@ def curl_vertex_cgrid(
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     zeta = zero_polar_lat_ends(zeta)
 
+    if _tripolar_curl and fpivot_active(grid):
+        # F-pivot: the top vertex row is the fold line; its circulation loop
+        # closes through the signed U ghost row above (NEMO rot at jpj-1).
+        fold = grid.fold
+        ug = fpivot_ghost_rows(u, fold, point="U", sign=fold.vector_sign_u)
+        dxg = fpivot_ghost_rows(dx_cell, fold, point="U", sign=1.0)
+        dx_top = dx_cell[-1:]
+        if is_3d:
+            dxg = dxg[:, :, jnp.newaxis]
+            dx_top = dx_top[:, :, jnp.newaxis]
+        circ_top = u[-1:] * dx_top - ug * dxg + dv_circ_full[-1:]
+        zeta_top = circ_top / safe_A[-1:]
+        return jnp.concatenate([zeta[:-1], zeta_top], axis=0)
+
     # Tripolar north fold: the rank that owns the seam overwrites its north
     # pole row with the fold-permuted sub-polar vertex row (matches the
     # pad_ns_scalar fold convention; vertex fields carry an n_lon+1 wrap
@@ -1474,7 +1622,12 @@ def gradient_curl_to_v(
     # (perm_T of the last interior face row; n_lon columns — no wrap
     # column on this stagger).
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
+    grad_top = grad[-1:]
     grad = zero_polar_lat_ends(grad)
+    if fpivot_active(grid):
+        # F-pivot: the fold-line v-face gradient uses the fold-line vertex
+        # row itself (stored) — the interior formula, no overwrite.
+        return jnp.concatenate([grad[:-1], grad_top], axis=0)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         north = fold_row(grad[-2:-1], grid.fold.perm_T, 1.0,
@@ -1641,6 +1794,18 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
         full = full.at[:, 0].multiply(vtx_open)
         full = full.at[:, -1].multiply(vtx_open)
     nmask = north_fold_mask(grid)
+    if fold_is_local(grid) and is_fpivot(grid.fold):
+        # F-pivot: the top vertex row IS the fold line; each of its vertices
+        # is surrounded by the two top cells and their two fold images (the
+        # T ghost row), NEMO fmask on the lbc'd tmask.  Self-consistent under
+        # perm_f by construction.
+        two = jnp.concatenate(
+            [land_mask[-1:],
+             fpivot_ghost_rows(land_mask, grid.fold, point="T", sign=1.0)],
+            axis=0)
+        two = pad_lon_cgrid(two, halo=1)
+        top = two[:1, 1:] * two[1:, 1:] * two[:1, :-1] * two[1:, :-1]
+        return full.at[-1:].set(top.astype(full.dtype))
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
         # fold_row handles the n_lon+1 vertex wrap column (scalar sign +1).
