@@ -29,11 +29,6 @@ from legoesm.ml.data.era5_loader import (
     ERA5Config,
     create_era5_dataset,
 )
-from legoesm.thermo import (
-    specific_condensate_to_mixing_ratio,
-    specific_humidity_to_mixing_ratio,
-)
-
 # Canonical long ERA5/WeatherBench variable name → its short ECMWF/GRIB alias.
 # Used BIDIRECTIONALLY by resolve_var: a request for either form finds the other.
 _ERA5_VAR_ALIASES = {
@@ -1329,7 +1324,8 @@ def _with_ice(seeds: dict, q_i_model) -> dict:
 
 def _condensate_model_fields(era5, regrid, vinterp, q_spec_model, shape_3d,
                              microphysics):
-    """Cloud liquid and cloud ice on model levels, as dry-air mixing ratios.
+    """Cloud liquid and cloud ice on model levels, as specific contents
+    (kg per kg of moist air, ERA5's own definition; the tracer convention).
 
     ``regrid`` and ``vinterp`` are the builder's OWN horizontal regrid and its
     pressure-to-sigma interpolation, applied in that order, so the condensate
@@ -1375,8 +1371,10 @@ def _condensate_model_fields(era5, regrid, vinterp, q_spec_model, shape_3d,
         return vinterp(regrid(
             _fill_below_ground(field_native, era5.plev_Pa, era5.p_s)))
 
-    q_c = specific_condensate_to_mixing_ratio(_to_model(era5.q_c), q_spec_model)
-    q_i = specific_condensate_to_mixing_ratio(_to_model(era5.q_i), q_spec_model)
+    # specific condensate contents, loaded AS IS (same convention as q_v);
+    # an interpolation undershoot at a cloud edge is clipped to zero
+    q_c = jnp.maximum(_to_model(era5.q_c), 0.0)
+    q_i = jnp.maximum(_to_model(era5.q_i), 0.0)
     if required_microphysics_tracer_slots(microphysics) <= 3:
         logger.warning(
             "ERA5 cloud ice DROPPED: microphysics %r carries no ice slot "
@@ -1477,12 +1475,13 @@ def era5_to_spectral_carry(
     # ERA5 q is SPECIFIC HUMIDITY (mass vapor / mass moist air); the legoesm
     # physics path treats q_v as MASS MIXING RATIO (mass vapor / mass dry air —
     # the convention saturation_mixing_ratio + the physics modules consume).
-    # Convert at the ERA5 boundary via the CANONICAL thermo helper r = q/(1−q)
-    # (clips q below 1 to guard the division).  In the tropical PBL (q ≈ 0.025)
-    # the bias from skipping this conversion is ~3% of q.
+    # ERA5 q is SPECIFIC HUMIDITY, the tracer convention on every lane
+    # (thermo.py "Conventions", 2026-09-28): loaded AS IS.  The former
+    # r = q/(1-q) conversion here over-counted column water by q/(1-q)
+    # against the sum(q dp)/g bookkeeping.
     q_spec_model = interp_pressure_to_sigma(
         jnp.asarray(q_ll), plev, p_s_jax, sigma_f, p_full=p_full)
-    q_model = specific_humidity_to_mixing_ratio(q_spec_model)
+    q_model = q_spec_model
 
     # Build HydrostaticState (phis_jax / p_s_jax already smoothed + reconciled)
     dims_3d = ("lat", "lon", "level")
@@ -1647,11 +1646,11 @@ def era5_to_cubedsphere_carry(
     T_model = interp_pressure_to_sigma(T_cs, plev, p_s_cs, sigma_f, p_full=p_full)
     u_model = interp_pressure_to_sigma(u_cs, plev, p_s_cs, sigma_f, p_full=p_full)
     v_model = interp_pressure_to_sigma(v_cs, plev, p_s_cs, sigma_f, p_full=p_full)
-    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
-    # r = q/(1−q) (canonical thermo helper; see era5_to_spectral_carry).
+    # ERA5 q is SPECIFIC HUMIDITY, the tracer convention on every lane:
+    # loaded AS IS (see era5_to_spectral_carry).
     q_spec_model = interp_pressure_to_sigma(
         q_cs, plev, p_s_cs, sigma_f, p_full=p_full)
-    q_model = specific_humidity_to_mixing_ratio(q_spec_model)
+    q_model = q_spec_model
     q_c_model, q_i_model = _condensate_model_fields(
         era5, _regrid_3d,
         lambda f: interp_pressure_to_sigma(
@@ -1827,11 +1826,10 @@ def era5_to_latlon_carry(
     T_model = _vinterp(T_ll)
     u_model = _vinterp(u_ll)
     v_model = _vinterp(v_ll)
-    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
-    # r = q/(1−q) (canonical thermo helper; consistent with the spectral,
-    # Gaussian, and cube carries above — #565 unified this path onto it).
+    # ERA5 q is SPECIFIC HUMIDITY, the tracer convention on every lane:
+    # loaded AS IS (consistent with the spectral, Gaussian and cube carries).
     q_spec_model = _vinterp(q_ll)
-    q_model = specific_humidity_to_mixing_ratio(q_spec_model)
+    q_model = q_spec_model
     q_c_model, q_i_model = _condensate_model_fields(
         era5,
         lambda f: regrid_3d_to_gaussian(f, era5.lat, era5.lon, grid),
@@ -1880,7 +1878,7 @@ class MPASCarry(NamedTuple):
     T: jnp.ndarray      # (nCells, nlev) temperature [K]
     p_s: jnp.ndarray    # (nCells,) surface pressure [Pa]
     phis: jnp.ndarray   # (nCells,) surface geopotential [m^2/s^2]
-    q_v: jnp.ndarray    # (nCells, nlev) water vapour mixing ratio [kg/kg]
+    q_v: jnp.ndarray    # (nCells, nlev) specific humidity [kg/kg]
 
 
 def era5_to_mpas_carry(
@@ -1907,8 +1905,8 @@ def era5_to_mpas_carry(
     3. Vertical interpolation from ERA5 pressure levels to the model
        sigma/hybrid levels (true level pressure ``A·p_ref + B·p_s`` for
        hybrid), with a hybrid ``p_s`` floor over high terrain.
-    4. Specific humidity → mixing ratio (``r = q/(1−q)``), matching the
-       cube/lat-lon convention.
+    4. Specific humidity kept AS IS (the tracer convention on every lane,
+       thermo.py "Conventions", 2026-09-28).
 
     Parameters
     ----------
@@ -2025,9 +2023,9 @@ def era5_to_mpas_carry(
 
     T_model = _vinterp_cell(T_cell)
     u_model = _vinterp_edge(u_n_edge)
-    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO.
-    q_specific = jnp.clip(jnp.maximum(_vinterp_cell(q_cell), 0.0), 0.0, 0.99)
-    q_model = q_specific / (1.0 - q_specific)
+    # ERA5 q is SPECIFIC HUMIDITY, the tracer convention on every lane:
+    # loaded AS IS.
+    q_model = jnp.clip(jnp.maximum(_vinterp_cell(q_cell), 0.0), 0.0, 0.99)
 
     if logger.isEnabledFor(logging.INFO):
         import jax as _jax

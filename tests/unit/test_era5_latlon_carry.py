@@ -66,9 +66,9 @@ def test_latlon_carry_shapes_and_physical():
     assert np.all(qv >= 0.0) and qv.max() < 0.05, "mixing ratio unphysical"
 
 
-def test_latlon_carry_specific_to_mixing_ratio():
-    # A column with q_specific=0.02 must map to r = q/(1-q) ≈ 0.0204.
-    # Build a fresh slice with the desired q (no in-place mutation).
+def test_latlon_carry_loads_q_as_specific_humidity():
+    # ERA5 specific humidity is loaded AS IS (the tracer convention on
+    # every lane, 2026-09-28); the former r = q/(1-q) = 0.0204 must FAIL.
     base = _synthetic_era5()
     era5 = base._replace(q=np.full_like(base.q, 0.02))
     grid = create_grid("latlon", 12)
@@ -78,7 +78,7 @@ def test_latlon_carry_specific_to_mixing_ratio():
     qv = np.asarray(getattr(carry, "q_v").data
                     if hasattr(getattr(carry, "q_v"), "data") else getattr(carry, "q_v"))
     # Near the surface (sigma~1) where interpolation is well-posed.
-    assert 0.0200 < float(qv[..., -1].mean()) < 0.0210
+    np.testing.assert_allclose(float(qv[..., -1].mean()), 0.02, rtol=1e-3)
 
 
 def _mountain_era5(n_lat=37, n_lon=72, n_plev=8, peak_phis=5.6e4):

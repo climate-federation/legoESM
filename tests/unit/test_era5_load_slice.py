@@ -420,7 +420,7 @@ def test_load_era5_slice_missing_optional_zero_fills(monkeypatch):
 def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
     """END-TO-END input chain (the path the empirical run consumes, currently bypassed
     by the compare test's monkeypatch): REAL load_era5_slice → REAL era5_to_latlon_carry
-    (regrid + log-p interp + q→mixing-ratio) → column_state_from_carry → a PHYSICALLY
+    (regrid + log-p interp, q as specific humidity) → column_state_from_carry → a PHYSICALLY
     VALID reference ColumnState on the model grid+sigma (iter 107). This is exactly the
     integration gap that hid iter 106's silent-zeros bug."""
     from legoesm.grids.latlon import create_latlon_grid
@@ -458,14 +458,9 @@ def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
         np.testing.assert_allclose(u[k], 10.0 + 0.5 * (ld / 90.0), atol=2e-3)
     # a non-flat u profile across latitude (proves it is NOT a constant-fill).
     assert float(u[0].mean()) < float(u[1].mean()) < float(u[2].mean())
-    # q is converted SPECIFIC HUMIDITY → MIXING RATIO r = q/(1−q) (NOT left as raw
-    # specific humidity): the synthetic q≡5e-3 ⇒ r = 5e-3/(1−5e-3) via the canonical
-    # thermo helper. (For this physical q the helper and the old inline form agree
-    # to machine precision, so this pins "is the mixing ratio", not "which code path".)
-    from legoesm.thermo import specific_humidity_to_mixing_ratio
-    expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(5e-3)))
-    np.testing.assert_allclose(np.asarray(ref.q_v), expected_r, rtol=1e-4)
-    assert expected_r > 5e-3        # mixing ratio strictly exceeds specific humidity
+    # q is loaded AS IS -- SPECIFIC humidity, the tracer convention on every
+    # lane (2026-09-28); the former r = q/(1-q) = 5.025e-3 fails at 1e-4.
+    np.testing.assert_allclose(np.asarray(ref.q_v), 5e-3, rtol=1e-4)
 
 
 def test_era5_to_latlon_carry_hybrid_over_terrain_is_physical(monkeypatch):

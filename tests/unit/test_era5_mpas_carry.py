@@ -3,7 +3,7 @@
 The real-data reference path for the MPAS column comparison (iter 75): a
 fabricated ERA5Slice is inverse-distance regridded to a level-2 MPAS mesh's cell
 centres + vertically interpolated to sigma.  Asserts shape, finiteness, physical
-bounds, the specific→mixing-ratio conversion, a constant-field exactness check,
+bounds, specific humidity loaded as is, a constant-field exactness check,
 an equator-pole value structure, and the dispatcher wiring.  (Full physical
 validation against real ERA5 is deferred to when a zarr path is provided.)
 """
@@ -75,14 +75,16 @@ def test_mpas_carry_constant_field_is_exact():
     np.testing.assert_allclose(T, 263.0, atol=1e-2)
 
 
-def test_mpas_carry_specific_to_mixing_ratio():
+def test_mpas_carry_loads_q_as_specific_humidity():
+    """ERA5 specific humidity is loaded AS IS (the tracer convention on
+    every lane, 2026-09-28); the former r = q/(1-q) = 0.0204 must FAIL."""
     base = _synthetic_era5()
     era5 = base._replace(q=np.full_like(base.q, 0.02))
     mesh = create_voronoi_mesh(2)
     sigma = create_sigma_coordinate(20)
     carry = era5_to_mpas_carry(era5, mesh, sigma)
     qv = _carry_field(carry, "q_v")
-    assert 0.0200 < float(qv[..., -1].mean()) < 0.0210   # r = q/(1-q) ≈ 0.0204
+    np.testing.assert_allclose(float(qv[..., -1].mean()), 0.02, rtol=1e-3)
 
 
 def test_mpas_carry_equator_pole_structure():

@@ -826,21 +826,17 @@ class TestERA5ToState:
             np.asarray(carry_smooth.p_s), np.asarray(carry_raw.p_s)
         ), "barometric p_s correction had no effect"
 
-    def test_era5_to_cubedsphere_carry_converts_q_to_mixing_ratio(self):
-        """Cross-grid parity with the latlon carry's q→mixing-ratio lock
-        (``test_era5_load_regrid_to_reference_column_state_integration``): the
-        cubed-sphere carry must ALSO convert ERA5 SPECIFIC humidity to MIXING ratio
-        ``r = q/(1−q)`` (each ``era5_to_*_carry`` applies it independently, line 559;
-        a refactor dropping it from THIS carry would silently leave the reference q as
-        specific humidity — a moisture bias on every cubed-sphere run).  A CONSTANT
-        ``q`` makes the test robust to the (nonlinear) convert-vs-regrid order: both
-        give ``r`` for a uniform field."""
-        import jax.numpy as jnp
-        from legoesm.thermo import specific_humidity_to_mixing_ratio
+    def test_era5_to_cubedsphere_carry_loads_q_as_specific_humidity(self):
+        """Cross-grid parity: every ``era5_to_*_carry`` loads ERA5 SPECIFIC
+        humidity AS IS (the tracer convention on every lane, thermo.py
+        "Conventions", 2026-09-28).  The former ``r = q/(1-q)`` conversion
+        over-counted column water by q/(1-q) against the sum(q dp)/g
+        bookkeeping.  q0 = 0.02 so the test separates q from r = 0.0204
+        at the 2e-3 tolerance (a 5e-3 field could not)."""
         from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
 
         n_lat, n_lon, n_plev = 18, 36, 4
-        q0 = 5e-3
+        q0 = 0.02
 
         def const(v):
             return np.full((n_lat, n_lon, n_plev), v, dtype=np.float32)
@@ -854,24 +850,18 @@ class TestERA5ToState:
             lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
             plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
         carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
-        expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(q0)))
-        # The uniform specific humidity becomes the (larger) MIXING ratio everywhere.
-        np.testing.assert_allclose(np.asarray(carry.q_v), expected_r, rtol=2e-3)
-        assert expected_r > q0          # mixing ratio strictly exceeds specific humidity
+        np.testing.assert_allclose(np.asarray(carry.q_v), q0, rtol=2e-3)
+        assert abs(q0 / (1.0 - q0) - q0) > 4e-3 * q0   # r would FAIL the check above
 
-    def test_era5_to_spectral_carry_converts_q_to_mixing_ratio(self):
-        """The LAST carry to reach q→mixing-ratio parity (after latlon/MPAS/cubed-
-        sphere): the SPECTRAL carry must ALSO convert ERA5 SPECIFIC humidity to MIXING
-        ratio ``r = q/(1−q)`` (line 462) — previously only its dispatch NAME was
-        tested.  ``carry.q_v`` is the grid-space tracer (a constant field is invariant
-        under the latlon→Gaussian regrid, so it equals ``r`` everywhere)."""
-        import jax.numpy as jnp
+    def test_era5_to_spectral_carry_loads_q_as_specific_humidity(self):
+        """The SPECTRAL carry loads ERA5 SPECIFIC humidity AS IS (see the
+        cubed-sphere twin).  ``carry.q_v`` is the grid-space tracer (a constant
+        field is invariant under the latlon→Gaussian regrid)."""
         from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.thermo import specific_humidity_to_mixing_ratio
         from legoesm.training.era5_to_state import ERA5Slice, era5_to_spectral_carry
 
         n_lat, n_lon, n_plev = 18, 36, 4
-        q0 = 5e-3
+        q0 = 0.02
 
         def const(v):
             return np.full((n_lat, n_lon, n_plev), v, dtype=np.float32)
@@ -886,9 +876,8 @@ class TestERA5ToState:
             plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
         carry = era5_to_spectral_carry(
             era5, create_gaussian_grid(8), create_sigma_coordinate(5))
-        expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(q0)))
-        np.testing.assert_allclose(np.asarray(carry.q_v), expected_r, rtol=2e-3)
-        assert expected_r > q0          # mixing ratio strictly exceeds specific humidity
+        np.testing.assert_allclose(np.asarray(carry.q_v), q0, rtol=2e-3)
+        assert abs(q0 / (1.0 - q0) - q0) > 4e-3 * q0   # r would FAIL the check above
 
     def test_era5_to_cubedsphere_carry_regrids_phis_into_the_state(self):
         """``era5_to_*_carry`` builds a FULL reference state — used both as the compare
