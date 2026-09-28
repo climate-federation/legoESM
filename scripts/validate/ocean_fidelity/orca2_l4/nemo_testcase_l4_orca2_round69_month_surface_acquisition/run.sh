@@ -169,6 +169,7 @@ printf '%s\n' "$COMMIT" >"$RUN/producer_commit.txt"
 sha256sum "$RUN/nemo" >"$RUN/binary.sha256"
 sha256sum "$RUN/compiled_stprk3.f90" "$RUN/compiled_l4_r69_surface.f90" \
   >"$RUN/compiled_source.sha256"
+sha256sum "$MODULE" "$PATCH" >"$RUN/acquisition_sources.sha256"
 
 (
   cd "$RUN"

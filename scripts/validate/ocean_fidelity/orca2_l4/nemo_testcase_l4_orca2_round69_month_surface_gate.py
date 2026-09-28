@@ -243,6 +243,51 @@ def _manifest(root: Path, name: str, expected_sha: str) -> None:
                 f"manifest target mismatch: {target}")
 
 
+def _sha_rows(path: Path) -> dict[str, str]:
+    require(path.is_file(), f"missing SHA-256 ledger: {path}")
+    rows: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        parts = line.split(maxsplit=1)
+        require(len(parts) == 2 and re.fullmatch(r"[0-9a-f]{64}", parts[0]) is not None,
+                f"malformed SHA-256 ledger row: {line!r}")
+        name = Path(parts[1].lstrip("* ")).name
+        require(name not in rows, f"duplicate SHA-256 ledger name: {name}")
+        rows[name] = parts[0]
+    return rows
+
+
+def validate_producer(root: Path) -> dict[str, object]:
+    binary = _sha_rows(root / "binary.sha256")
+    compiled = _sha_rows(root / "compiled_source.sha256")
+    sources = _sha_rows(root / "acquisition_sources.sha256")
+    expected = {
+        "nemo": root / "nemo",
+        "compiled_stprk3.f90": root / "compiled_stprk3.f90",
+        "compiled_l4_r69_surface.f90": root / "compiled_l4_r69_surface.f90",
+    }
+    require(set(binary) == {"nemo"}, "binary ledger inventory changed")
+    require(set(compiled) == set(expected) - {"nemo"},
+            "compiled-source ledger inventory changed")
+    for name, target in expected.items():
+        ledger = binary if name == "nemo" else compiled
+        require(target.is_file() and sha256(target) == ledger[name],
+                f"producer artifact digest mismatch: {target}")
+    require(sources == {
+        MODULE.name: sha256(MODULE),
+        PATCH.name: sha256(PATCH),
+    }, "committed acquisition source digest mismatch")
+    compiled_module = (root / "compiled_l4_r69_surface.f90").read_text()
+    compiled_stprk3 = (root / "compiled_stprk3.f90").read_text()
+    require("STATUS='NEW'" in compiled_module and
+            "CALL l4_r69_dump( kstp, Nbb )" in compiled_stprk3,
+            "compiled writer/call-site markers are absent")
+    return {
+        "binary_sha256": binary["nemo"],
+        "compiled_source_sha256": compiled,
+        "acquisition_source_sha256": sources,
+    }
+
+
 def preflight() -> dict[str, object]:
     require(BASE_STPRK3.is_file() and sha256(BASE_STPRK3) == EXPECTED_BASE_SHA256,
             "pinned base stprk3 changed")
@@ -283,6 +328,7 @@ def validate_record(root: Path, old_root: Path, month_root: Path, *,
             "producer commit mismatch")
     _manifest(root, "deck_files.sha256", EXPECTED_DECK_SHA256)
     _manifest(root, "input_files.sha256", EXPECTED_INPUT_SHA256)
+    producer = validate_producer(root)
     stdout = (root / "run.user.stdout.log").read_text()
     timing = (root / "run.user.time.log").read_text()
     require("STOP 0" in stdout and "RUN_DONE" in timing,
@@ -297,6 +343,7 @@ def validate_record(root: Path, old_root: Path, month_root: Path, *,
         "status": "PASS_MONTH_SURFACE_RECORD",
         "claim_label": "independent",
         "producer_commit": expect_commit,
+        "producer": producer,
         "surface_frames": len(inventory),
         "surface_fields": list(FIELDS),
         "surface_inventory": inventory,

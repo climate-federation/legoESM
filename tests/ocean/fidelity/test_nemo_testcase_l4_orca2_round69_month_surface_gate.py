@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import struct
 from pathlib import Path
 
@@ -112,3 +113,32 @@ def test_restart_ulp_plant_changes_raw_payload(tmp_path):
     gate._mutated_copy(source, changed)
     with pytest.raises(gate.phase1.GateError):
         gate.phase1._netcdf_equal_except_timestamp(source, changed)
+
+
+def test_producer_ledgers_bind_every_artifact(tmp_path):
+    payloads = {
+        "nemo": b"binary",
+        "compiled_stprk3.f90": b"CALL l4_r69_dump( kstp, Nbb )",
+        "compiled_l4_r69_surface.f90": b"OPEN(STATUS='NEW')",
+    }
+    for name, payload in payloads.items():
+        (tmp_path / name).write_bytes(payload)
+    def digest(payload: bytes) -> str:
+        return hashlib.sha256(payload).hexdigest()
+    (tmp_path / "binary.sha256").write_text(
+        f"{digest(payloads['nemo'])}  {tmp_path / 'nemo'}\n"
+    )
+    (tmp_path / "compiled_source.sha256").write_text(
+        "".join(
+            f"{digest(payloads[name])}  {tmp_path / name}\n"
+            for name in ("compiled_stprk3.f90", "compiled_l4_r69_surface.f90")
+        )
+    )
+    (tmp_path / "acquisition_sources.sha256").write_text(
+        f"{gate.sha256(gate.MODULE)}  {gate.MODULE}\n"
+        f"{gate.sha256(gate.PATCH)}  {gate.PATCH}\n"
+    )
+    gate.validate_producer(tmp_path)
+    (tmp_path / "nemo").write_bytes(b"changed")
+    with pytest.raises(gate.GateError, match="producer artifact digest mismatch"):
+        gate.validate_producer(tmp_path)
