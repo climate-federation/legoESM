@@ -303,6 +303,15 @@ def _era5_inputs(tmp_path, stl_vars=("var139", "var170", "var183", "var236"),
     return files, str(lsm), str(sd)
 
 
+def _era5_test_stamp(tmp_path):
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_SURFDATA_COSBY, soil_hydraulics_stamp)
+    pf = tmp_path / "cosby_era5.nc"
+    pf.write_bytes(b"cosby")
+    return soil_hydraulics_stamp("clapp_hornberger",
+                                 HYDRAULICS_SOURCE_SURFDATA_COSBY, pf)
+
+
 def _setup_cli(tmp_path, monkeypatch, replace_land=(True, False, True)):
     """Synthetic 3-column IC, stubbed grid and masks; returns (rg, ic_path, ic)."""
     rg = _load("scripts/data/regrid_land_ic.py", "_rg")
@@ -335,7 +344,8 @@ def _setup_cli(tmp_path, monkeypatch, replace_land=(True, False, True)):
             snow_depth=rng.uniform(0, 50, ncol),
             snow_age=rng.uniform(0, 1e6, ncol)),
         land_mode="multilayer", t_end_s=3.0e7, n_steps_completed=10,
-        metadata={"origin": "synthetic"}, soil_dz=dz)
+        metadata={"origin": "synthetic"}, soil_dz=dz,
+        soil_hydraulics=_era5_test_stamp(tmp_path))
     return rg, ic_path, dict(np.load(ic_path, allow_pickle=False))
 
 
@@ -370,10 +380,22 @@ def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
             ("var139", "var170", "var183", "var236")] == files
     assert meta["soil_t_surfdata"]["path"] == sd and meta["soil_t_target_grid"] == "mpas 6"
 
-    state, _ = load_land_restart(out, expected_land_mode="multilayer",
-                                 expected_ncol=ic["T_soil"].shape[0],
-                                 expected_n_layers=ic["T_soil"].shape[1])
+    state, lmeta = load_land_restart(out, expected_land_mode="multilayer",
+                                     expected_ncol=ic["T_soil"].shape[0],
+                                     expected_n_layers=ic["T_soil"].shape[1])
     np.testing.assert_allclose(np.asarray(state.T_soil)[0], expected, rtol=0, atol=1e-4)
+    # The source's soil-hydraulics stamp rides through unchanged.
+    assert lmeta["soil_hydraulics"] == json.loads(str(ic["soil_hydraulics_json"]))
+
+
+def test_cli_refuses_an_unstamped_source(tmp_path, monkeypatch):
+    rg, ic_path, ic = _setup_cli(tmp_path, monkeypatch)
+    unstamped = tmp_path / "unstamped.npz"
+    np.savez(unstamped, **{k: v for k, v in ic.items() if k != "soil_hydraulics_json"})
+    files, lsm, sd = _era5_inputs(tmp_path)
+    with pytest.raises(SystemExit, match="soil-hydraulics stamp"):
+        _run_cli(rg, unstamped, tmp_path / "out.npz", files, lsm, sd)
+    assert not (tmp_path / "out.npz").exists()
 
 
 @pytest.mark.parametrize("kw", [
