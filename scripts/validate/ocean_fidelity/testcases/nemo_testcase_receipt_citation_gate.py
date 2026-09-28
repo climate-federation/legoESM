@@ -880,6 +880,12 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP/BLD/ppsrc/nemo/dom_oce.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP/BLD/ppsrc/nemo"
         "/dom_oce.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo"
+        "/dynadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynzad.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo"
+        "/dynzad.f90"),
     "scripts/validate/ocean_fidelity/orca2_l4/"
     "nemo_testcase_l4_orca2_round62_vector_advection_acquisition/"
     "dynadv_round62_writer.F90": (
@@ -1322,6 +1328,13 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round62_vector_advection_acquisition/dynadv_round62_writer.F90:79-89': [
         'ALLOCATE( r62_payload(jpi,jpj,jpk) )',
         "R62_3D('e3v_Kmm         ',r62_payload)", 11],
+    # --- ORCA2 card round 64: admitted ZAD source-order replay ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynadv.f90:136-143': [
+        'SELECT CASE( n_dynadv )',
+        'CALL dynadv_round62_after_zad( kt, Kmm, Krhs, nn_dynkeg, puu, pvv )', 8],
+    'ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynzad.f90:102-137': [
+        'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
+        '&                                              * zWdzV(ji,jj)', 36],
     # --- ORCA2 card round 21: merge-owner substitution ---
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:912-937': [
         'SELECT CASE( nn_e3f_typ )',
