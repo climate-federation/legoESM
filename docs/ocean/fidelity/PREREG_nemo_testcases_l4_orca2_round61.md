@@ -1,7 +1,7 @@
 # ORCA2 round 61 preregistration — close the stage-3 raw-Kaa boundary
 
 Date frozen: 2026-09-28  
-Base: `ef132df0e58ec0a273448a35751a7f8cb39896c9`  
+Base: `ef132df0e5f99313974c723aa78ef0f155036746`
 Cards: `OVERFLOW-zps`; the held shared UP3 statement remains a controlled arm  
 Claim labels: OVERFLOW trajectory **independent**; statement records **given NEMO's recorded operands**
 
