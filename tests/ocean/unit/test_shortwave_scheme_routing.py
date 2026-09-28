@@ -154,9 +154,14 @@ def test_mpas_physics_dispatch_column_total_is_q_net_for_every_scheme(_fp64_poli
 
 
 @pytest.mark.parametrize("scheme", ["sweeney_2band", "auto", "jerlov_2band"])
-def test_mpas_sweeney_respects_partial_cells(_fp64_policy_restored, scheme):
+@pytest.mark.parametrize("H_min", [15.0, 3.0], ids=["deep-top", "partial-top"])
+def test_mpas_sweeney_respects_partial_cells(_fp64_policy_restored, scheme, H_min):
     """With a partial-cell coordinate (the ETOPO lane), no heat lands below the
-    seabed and the column still integrates to q_net (codex P1 on batch 2)."""
+    seabed and the column still integrates to q_net (codex P1 on batch 2).
+    ``H_min=3`` puts the seabed inside the TOP layer for some columns: the
+    non-solar deposit on ``dz_ref[0] * jacobian`` must equal the live top
+    thickness there too (a codex review of #1810 claimed it did not; measured:
+    the column closes to 1e-9 either way, so the two are the same number)."""
     import jax.numpy as jnp
     from scripts.run import run_omip as R
     from legoesm.core.field import Field
@@ -172,7 +177,7 @@ def test_mpas_sweeney_respects_partial_cells(_fp64_policy_restored, scheme):
     n = state.T.data.shape[0]
     rng = np.random.default_rng(3)
     H = jnp.asarray(np.where(np.asarray(state.land_mask.data) > 0.5,
-                             rng.uniform(15.0, 300.0, n), 0.0))
+                             rng.uniform(H_min, 300.0, n), 0.0))
     pc = create_partial_cell_coordinate(z_coord, H)
     state = state._replace(H_bathy=Field(data=H, name="H_bathy", dims=state.H_bathy.dims))
     h_live = np.asarray(compute_layer_thickness(state.eta.data, H, pc))
@@ -195,6 +200,8 @@ def test_mpas_sweeney_respects_partial_cells(_fp64_policy_restored, scheme):
     col = (rho_0_ref * c_sw * h_live * dT).sum(axis=1)
     np.testing.assert_allclose(col[wet], 50.0, rtol=1e-9)
     assert (h_live[wet] <= 0.0).any()          # the fixture really has dry levels
+    if H_min < float(np.asarray(z_coord.dz_ref)[0]):
+        assert (h_live[wet, 0] < np.asarray(z_coord.dz_ref)[0]).any()   # a partial TOP cell exists
 
 
 @pytest.mark.parametrize("scheme", ["sweeney_2band", "auto", "jerlov_2band"])

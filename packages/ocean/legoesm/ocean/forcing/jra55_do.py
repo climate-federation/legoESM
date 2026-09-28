@@ -151,6 +151,12 @@ def synthetic_ocean_forcing(year: int, *,
     )
 
 
+# Plausible near-surface air temperature in Kelvin; a Celsius field (~-70..50)
+# or a corrupt one falls outside.  Trust boundary of the forcing cache.
+_TAS_KELVIN_MIN_K = 150.0
+_TAS_KELVIN_MAX_K = 350.0
+
+
 def _load_from_builder_cache(store: Path, year: int,
                              cycle_years: bool) -> OceanForcing:
     """Slice one noleap year out of the multi-year CMOR-named cache written
@@ -198,6 +204,13 @@ def _load_from_builder_cache(store: Path, year: int,
     ds = ds.isel(time=slice(start, start + per_year))
 
     def f(name):
+        if name in ("lat", "lon"):
+            dims = (name,)
+        elif tuple(ds[name].dims) != ("time", "lat", "lon"):
+            raise ValueError(
+                f"{store}: {name!r} has dims {tuple(ds[name].dims)}, expected "
+                f"('time', 'lat', 'lon') -- a transposed field would be read as "
+                f"(time, lat, lon) without error")
         arr = np.asarray(ds[name].values, dtype=np.float64)
         if not np.isfinite(arr).all():
             raise ValueError(f"{store}: non-finite values in {name!r} for year {year}")
@@ -209,11 +222,16 @@ def _load_from_builder_cache(store: Path, year: int,
     logger.info("JRA55-do: requested year %d -> forcing year %d read from %s",
                 requested, year, store)
     prra, prsn = f("prra"), f("prsn")
+    tas = f("tas")
+    if not (_TAS_KELVIN_MIN_K < tas.min() and tas.max() < _TAS_KELVIN_MAX_K):
+        raise ValueError(
+            f"{store}: tas spans {tas.min():.1f}..{tas.max():.1f}, outside "
+            f"{_TAS_KELVIN_MIN_K}..{_TAS_KELVIN_MAX_K} K -- Celsius or corrupt")
     return OceanForcing(
         lon=lon, lat=lat,
         time_s=np.arange(per_year, dtype=np.float64)
         * (86400.0 / RECORDS_PER_DAY),
-        u10=f("uas"), v10=f("vas"), T_air=f("tas"), q_air=f("huss"),
+        u10=f("uas"), v10=f("vas"), T_air=tas, q_air=f("huss"),
         sw_down=f("rsds"), lw_down=f("rlds"),
         precip=prra + prsn, runoff=f("friver"),
         snow=prsn, slp=f("psl"),

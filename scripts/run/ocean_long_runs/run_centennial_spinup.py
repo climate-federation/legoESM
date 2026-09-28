@@ -541,7 +541,7 @@ def main() -> int:
             f"dt_mom={dt_mom:.0f}s, dt_tra={dt_tra:.0f}s)"
         )
         forcing = load_jra55_do(
-            year=(2000 + (y % 60)) if not args.smoke else 0,
+            year=(2000 + y) if not args.smoke else 0,   # the loader wraps into the cache window
             cache_dir=args.jra55_cache,
             allow_synthetic=args.allow_synthetic,
             cycle_years=not args.smoke,   # OMIP-2 repeats the cache's year window

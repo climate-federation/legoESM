@@ -970,6 +970,27 @@ def test_ocean_loader_cycles_years_through_the_cache_window(two_year_builder_cac
         load_jra55_do(1960, cache_dir=store)
 
 
+def test_ocean_loader_refuses_celsius_and_transposed_fields(two_year_builder_cache, tmp_path):
+    """The cache is a trust boundary: a Celsius air temperature or a field
+    stored (time, lon, lat) would otherwise be read as Kelvin (time, lat, lon)
+    without error (codex review of #1810)."""
+    import shutil
+    import xarray as xr
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+    good = two_year_builder_cache
+    load_jra55_do(1958, cache_dir=good)                       # the control passes
+    for name, edit, match in (
+        ("celsius", lambda ds: ds.assign(tas=ds["tas"] - 273.15), "Celsius"),
+        ("transposed", lambda ds: ds.assign(uas=ds["uas"].transpose("time", "lon", "lat")),
+         "expected \\('time', 'lat', 'lon'\\)"),
+    ):
+        bad = tmp_path / f"{name}.zarr"
+        ds = xr.open_zarr(good).load()
+        edit(ds).to_zarr(bad, mode="w")
+        with pytest.raises(ValueError, match=match):
+            load_jra55_do(1958, cache_dir=bad)
+
+
 @pytest.mark.parametrize("mutate,match", [
     (lambda g: g.attrs.update(records_per_day=4), "records_per_day"),
     (lambda g: g.attrs.update(n_records=10), "n_records"),
