@@ -226,7 +226,7 @@ def _build_convection_call(scheme: str, dt: float):
         )
 
     elif scheme == "zhang_mcfarlane":
-        cfg = ZhangMcFarlaneConfig(enable_cmt=False)
+        cfg = ZhangMcFarlaneConfig(enable_cmt=False, land_fraction="none")
 
         def call(T, qv, pf, ph, u, v, carry):
             (prog,) = carry

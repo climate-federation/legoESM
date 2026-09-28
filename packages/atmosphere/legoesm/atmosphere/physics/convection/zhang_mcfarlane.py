@@ -34,8 +34,9 @@ a per-layer condensate source; hosts must sum it (the bridges do, or refuse).
 Host inputs the oracle has that the convection contract lacks: ``pblh``
 (PBL height; ``None`` -> ``pbl_top_pa`` launch bound), the total cloud
 fraction for the evaporation (``cld_frac``; ``None`` -> 0, i.e. CAM's
-``(1 - cldfrc)`` factor at its maximum), and ``land_frac`` (``None`` -> 0,
-ocean coefficients everywhere; the bridge passes it when the grid has it).
+``(1 - cldfrc)`` factor at its maximum), and ``land_frac``, which is required
+unless ``config.land_fraction == "none"`` (an explicit aquaplanet: ocean
+coefficients everywhere).
 """
 
 from __future__ import annotations
@@ -164,8 +165,24 @@ def zhang_mcfarlane_convection(
     dz, _, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
     zf = jnp.concatenate(
         [jnp.cumsum(dz[:, ::-1], axis=1)[:, ::-1], jnp.zeros((ncol, 1), dtype)], axis=1)
-    lf = (jnp.zeros((ncol,), dtype) if land_frac is None
-          else jnp.asarray(land_frac, dtype).reshape(ncol))
+    if config.land_fraction == "required":
+        if land_frac is None:
+            raise ValueError(
+                "zhang_mcfarlane_convection: land_frac is required (it selects "
+                "the land/ocean autoconversion coefficient per column). Pass "
+                "the column land fraction, or set ZhangMcFarlaneConfig."
+                "land_fraction='none' for an aquaplanet.")
+        lf = jnp.asarray(land_frac, dtype).reshape(ncol)
+    elif config.land_fraction == "none":
+        if land_frac is not None:
+            raise ValueError(
+                "zhang_mcfarlane_convection: land_fraction='none' (aquaplanet) "
+                "but a land_frac was passed; drop one of the two.")
+        lf = jnp.zeros((ncol,), dtype)
+    else:
+        raise ValueError(
+            f"Unknown ZhangMcFarlaneConfig.land_fraction scheme "
+            f"{config.land_fraction!r}; choose 'required' or 'none'.")
     cf = (jnp.zeros_like(T) if cld_frac is None
           else jnp.asarray(cld_frac, dtype).reshape(ncol, nlev))
 

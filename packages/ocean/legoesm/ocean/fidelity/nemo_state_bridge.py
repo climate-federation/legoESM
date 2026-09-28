@@ -32,6 +32,7 @@ topography/partial cells is rejected (see :func:`bridge_nemo_to_legoesm`).
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -48,6 +49,7 @@ from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanState
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
+    nemo_fe3mask_from_tmask,
     create_full_step_coordinate,
     create_z_star_from_thicknesses,
 )
@@ -75,8 +77,13 @@ def _nemo_een_barotropic_operands(grid: NemoGrid):
     if any(value is None for value in required):
         return None
     hf_0 = (np.asarray(grid.e3f_0) * np.asarray(grid.fmask)).sum(axis=-1)
+    # dommsk.F90:146-198 freezes fe3mask before lateral-slip fmask changes.
+    tmask = np.asarray(grid.tmask, dtype=bool)
+    fe3mask = np.asarray(
+        nemo_fe3mask_from_tmask(tmask.astype(np.float64)), dtype=np.float64
+    )
     values = (grid.ff_f, grid.e3u_0, grid.e3v_0, grid.e3f_0,
-              grid.umask, grid.vmask, grid.fmask,
+              grid.umask, grid.vmask, grid.fmask, fe3mask,
               grid.hu_0, grid.hv_0, hf_0,
               grid.e1t, grid.e2t, grid.e1u, grid.e2u,
               grid.e1v, grid.e2v, grid.e1f, grid.e2f)
@@ -127,6 +134,59 @@ def _u_east_to_face_periodic(nemo_u: np.ndarray) -> np.ndarray:
     """
     nemo_u = np.asarray(nemo_u)
     return np.concatenate([nemo_u[:, -1:], nemo_u], axis=1)
+
+
+def _restart_depth_mean_velocity(
+    state: NemoState,
+    grid: NemoGrid,
+    *,
+    periodic_i: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return restart ``uu_n/vv_n`` on legoESM U/V faces.
+
+    The identity route reads the pair written at ``restart.F90:175-182`` and
+    read at :304-314.  NEMO's :315-323 compatibility branch re-derives it only
+    when an older restart lacks ``uu_n``; this helper mirrors that exception,
+    logs it, and is never called by the live model step.  Re-derivation is not
+    an alternative numerical identity path.
+    """
+    umap = _u_east_to_face_periodic if periodic_i else _u_east_to_face
+    if (state.uu_b is None) != (state.vv_b is None):
+        raise ValueError("NEMO restart must carry both uu_n/vv_n or neither")
+    if state.uu_b is not None:
+        return (
+            umap(np.asarray(state.uu_b)[..., None])[..., 0],
+            _v_north_to_face(np.asarray(state.vv_b)[..., None])[..., 0],
+        )
+
+    required = (grid.e3u_0, grid.e3v_0, grid.umask, grid.vmask,
+                grid.hu_0, grid.hv_0)
+    if any(value is None for value in required):
+        raise ValueError(
+            "legacy NEMO restart lacks uu_n/vv_n and mesh_mask lacks the "
+            "e3u_0/e3v_0/mask/hu_0/hv_0 operands required by restart.F90:316-323")
+    logging.getLogger(__name__).warning(
+        "NEMO restart lacks uu_n/vv_n; using restart.F90:316-323 legacy "
+        "depth-mean reconstruction (not the NEMO-identity live-step path)")
+    u = np.asarray(state.u)
+    v = np.asarray(state.v)
+    e3u = np.asarray(grid.e3u_0)
+    e3v = np.asarray(grid.e3v_0)
+    umask = np.asarray(grid.umask)
+    vmask = np.asarray(grid.vmask)
+    ub = u[..., 0] * e3u[..., 0] * umask[..., 0]
+    vb = v[..., 0] * e3v[..., 0] * vmask[..., 0]
+    for jk in range(1, u.shape[-1] - 1):
+        ub = ub + u[..., jk] * e3u[..., jk] * umask[..., jk]
+        vb = vb + v[..., jk] * e3v[..., jk] * vmask[..., jk]
+    hu = np.asarray(grid.hu_0)
+    hv = np.asarray(grid.hv_0)
+    r1_hu = np.divide(1.0, hu, out=np.zeros_like(hu), where=hu > 0.0)
+    r1_hv = np.divide(1.0, hv, out=np.zeros_like(hv), where=hv > 0.0)
+    return (
+        umap((ub * r1_hu)[..., None])[..., 0],
+        _v_north_to_face((vb * r1_hv)[..., None])[..., 0],
+    )
 
 
 def bridge_nemo_to_legoesm(
@@ -212,6 +272,7 @@ def bridge_nemo_to_legoesm(
 
     base = rest_state_latlon_cgrid_ocean(
         geom, z_coord, H_max=H_max, land_mask_override=jnp.asarray(land_mask),
+        nemo_prognostic_barotropic_velocity=True,
     )
 
     # Neumann-fill T/S over land so the 0.0 NEMO stores on masked cells cannot
@@ -222,12 +283,16 @@ def bridge_nemo_to_legoesm(
 
     u_face = _u_east_to_face(np.asarray(state.u))
     v_face = _v_north_to_face(np.asarray(state.v))
+    uu_b_face, vv_b_face = _restart_depth_mean_velocity(
+        state, grid, periodic_i=False)
     st = base._replace(
         T=base.T.replace(data=T_fill),
         S=base.S.replace(data=S_fill),
         u=base.u.replace(data=jnp.asarray(u_face)),
         v=base.v.replace(data=jnp.asarray(v_face)),
         eta=base.eta.replace(data=jnp.asarray(state.ssh)),
+        uu_b=base.uu_b.replace(data=jnp.asarray(uu_b_face)),
+        vv_b=base.vv_b.replace(data=jnp.asarray(vv_b_face)),
     )
 
     return NemoBridgeOutput(
@@ -849,6 +914,7 @@ def bridge_nemo_to_legoesm_topo(
         geom, z_coord,
         land_mask_override=jnp.asarray(land_mask),
         H_bathy_override=jnp.asarray(H_bathy.astype(np.float64)),
+        nemo_prognostic_barotropic_velocity=True,
     )
 
     # Surface face masks from NEMO umask/vmask (periodic-wrap for re-entrant i).
@@ -873,6 +939,8 @@ def bridge_nemo_to_legoesm_topo(
     S_fill = neumann_fill_cgrid(jnp.asarray(state.S), mask3, geom)
     u_face = umap(np.asarray(state.u))
     v_face = _v_north_to_face(np.asarray(state.v))
+    uu_b_face, vv_b_face = _restart_depth_mean_velocity(
+        state, grid, periodic_i=periodic_i)
 
     st = base._replace(
         T=base.T.replace(data=T_fill),
@@ -880,6 +948,8 @@ def bridge_nemo_to_legoesm_topo(
         u=base.u.replace(data=jnp.asarray(u_face)),
         v=base.v.replace(data=jnp.asarray(v_face)),
         eta=base.eta.replace(data=jnp.asarray(state.ssh)),
+        uu_b=base.uu_b.replace(data=jnp.asarray(uu_b_face)),
+        vv_b=base.vv_b.replace(data=jnp.asarray(vv_b_face)),
         u_mask=base.u_mask.replace(data=jnp.asarray(umask_face)),
         v_mask=base.v_mask.replace(data=jnp.asarray(vmask_face)),
     )

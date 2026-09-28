@@ -233,3 +233,70 @@ def test_roundtrip_real_shape_gmnhsh_units(tmp_path):
 def test_main_requires_input(tmp_path):
     m = _mod()
     assert m.main(["--out", str(tmp_path / "x.nc")]) == 2  # no --in-dir/--co2…
+
+
+def _cesm_ghg_ds():
+    """Synthetic CESM ``GHG_CMIP-*`` layout: one file, short CAM names, a
+    YYYYMMDD ``date`` and a ``days since 0-1-1`` axis that starts at year 0."""
+    years = np.arange(0, 5)
+    date = years * 10000 + 702                       # July 2 = mid-year
+    t = np.arange(years.size) * 365.0 + 183.0
+    mk = lambda v, u: (("time",), np.asarray(v, dtype=np.float64), {"units": u})
+    return xr.Dataset(
+        {"CO2": mk(280.0 + years, "1.e-6"), "CH4": mk(700.0 + years, "1.e-9"),
+         "N2O": mk(270.0 + years, "1.e-9"), "f11": mk(1.0 + years, "1.e-12"),
+         "f12": mk(2.0 + years, "1.e-12"),
+         "date": (("time",), date)},
+        coords={"time": ("time", t, {"units": "days since 0-1-1"})})
+
+
+def test_cesm_single_file_roundtrips_through_real_loader(tmp_path):
+    m = _mod()
+    out = m.adapt_cesm_ghg(_cesm_ghg_ds())
+    assert list(out.data_vars) == ["CO2", "CH4", "N2O", "CFC_11", "CFC_12"]
+    # annual means sit at mid-year, not at their July-2 label
+    np.testing.assert_allclose(out["time"].values, np.arange(5) + 0.5)
+    path = tmp_path / "ghg.nc"
+    out.to_netcdf(path)
+    from legoesm.forcing.external import _load_ghg_annual_file
+    _load_ghg_annual_file.cache_clear() if hasattr(_load_ghg_annual_file, "cache_clear") else None
+    years, data = _load_ghg_annual_file(str(path))
+    np.testing.assert_allclose(years, np.arange(5) + 0.5)
+    assert "EQUIVALENT" in out["CFC_11"].attrs["long_name"]
+    np.testing.assert_allclose(data["CO2"], (280.0 + np.arange(5)) * 1e-6)
+    np.testing.assert_allclose(data["CFC_11"], (1.0 + np.arange(5)) * 1e-12)
+    np.testing.assert_allclose(data["CFC_12"], (2.0 + np.arange(5)) * 1e-12)
+
+
+def test_cesm_single_file_rejects_other_layouts():
+    m = _mod()
+    with pytest.raises(ValueError, match="not a CESM GHG file"):
+        m.adapt_cesm_ghg(_cesm_ghg_ds().drop_vars("f11"))
+    bad = _cesm_ghg_ds()
+    bad["date"] = ("time", bad["date"].values[::-1])
+    with pytest.raises(ValueError, match="strictly increasing"):
+        m.adapt_cesm_ghg(bad)
+    monthly = _cesm_ghg_ds()
+    monthly["date"] = ("time", np.arange(5) * 10000 + 115)
+    with pytest.raises(ValueError, match="annual-mean"):
+        m.adapt_cesm_ghg(monthly)
+    adj = _cesm_ghg_ds()
+    adj["adj"] = ("time", np.full(5, 0.1))
+    with pytest.raises(ValueError, match="adj"):
+        m.adapt_cesm_ghg(adj)
+    zero_adj = _cesm_ghg_ds()
+    zero_adj["adj"] = ("time", np.zeros(5))
+    m.adapt_cesm_ghg(zero_adj)
+    no_units = _cesm_ghg_ds()
+    no_units["CO2"].attrs.pop("units")
+    with pytest.raises(ValueError, match="units"):
+        m.adapt_cesm_ghg(no_units)
+
+
+def test_cesm_file_refuses_other_inputs(tmp_path):
+    m = _mod()
+    src = tmp_path / "cesm.nc"
+    _cesm_ghg_ds().to_netcdf(src)
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        m.main(["--cesm-file", str(src), "--co2", str(src),
+                "--out", str(tmp_path / "o.nc")])

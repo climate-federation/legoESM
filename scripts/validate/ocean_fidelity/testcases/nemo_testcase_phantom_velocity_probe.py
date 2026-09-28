@@ -48,6 +48,11 @@ import json
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    scoped_allow_dirty,
+    worktree_stamp,
+)
 
 CASE = "OVERFLOW-zps"
 LOCK = "LOCK_EXCHANGE-zco"
@@ -87,8 +92,8 @@ def set_fp64():
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
 
 
@@ -222,6 +227,7 @@ def census(*, max_kt: int, out_dir: Path, allow_dirty: bool) -> dict:
 
     TRAJ = _load("nemo_testcase_phase3_trajectory_gate")
     BARO = _load("nemo_testcase_overflow_barotropic_gate")
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()
     card, model, live_u, flat_u = build(CASE)
@@ -230,6 +236,7 @@ def census(*, max_kt: int, out_dir: Path, allow_dirty: bool) -> dict:
     artifacts = {}
 
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phantom-census-v1", "case": CASE,
         "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(),
         "dtypes": dtypes, "dt_s": card.dt_s, "artifacts": artifacts,
@@ -349,6 +356,7 @@ def scaling(*, kts, out_dir: Path, allow_dirty: bool) -> dict:
 
     TRAJ = _load("nemo_testcase_phase3_trajectory_gate")
     BARO = _load("nemo_testcase_overflow_barotropic_gate")
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()
     card, model, live_u, _ = build(CASE)
@@ -407,6 +415,7 @@ def scaling(*, kts, out_dir: Path, allow_dirty: bool) -> dict:
                 "argmax": [int(v) for v in idx], "faces": faces}
 
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phantom-scaling-v1", "case": CASE,
         "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(),
         "dtypes": dtypes, "dt_s": card.dt_s, "artifacts": artifacts,
@@ -484,6 +493,7 @@ def scaling(*, kts, out_dir: Path, allow_dirty: bool) -> dict:
     return report
 
 
+@scoped_allow_dirty
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("census", "scaling"))

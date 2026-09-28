@@ -228,6 +228,7 @@ class AMIPExperimentConfig(NamedTuple):
     morrison_sed_cfl_substeps: bool = True  # MG2 CFL sub-stepped sedimentation (user 2026-09-22)
     morrison_sed_cfl_substeps_max: int = 256  # static bound of that loop (cost is linear in it)
     morrison_sed_cfl_substeps_strict: bool = False  # error when a column exceeds the cap
+    morrison_do_graupel: bool = True  # Morrison graupel category (CAM6 MG2 has none)
 
 
 def config_to_dict(config) -> dict:

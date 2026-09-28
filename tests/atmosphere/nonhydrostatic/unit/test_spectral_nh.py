@@ -519,3 +519,39 @@ def test_batched_cpu_step_honors_threaded_target_mass():
     assert abs(m2 - 1.01 * m0) / m0 < 1e-9, (
         f"threaded target ignored: {m2} vs {1.01 * m0}"
     )
+
+
+def test_semi_implicit_acoustic_matches_shared_kernel_on_stretched_grid():
+    """On a stretched vertical grid the spectral semi-implicit w solve and
+    continuity update must equal the shared column kernel's (stretched-grid
+    metric; both couplings kept on the diagonal next to the rigid lid).  The
+    θ' update differs only on the top/bottom levels by design (docstring)."""
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
+        semi_implicit_acoustic_column_kernel,
+    )
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
+        _acoustic_substeps_grid_semi_implicit,
+    )
+    from legoesm.grids.vertical import create_height_coordinate_from_z_half
+
+    dz = 50.0 * 1.4 ** np.arange(12)                       # 50 m ... ~2 km
+    z_half = jnp.asarray(np.concatenate([[0.0], np.cumsum(dz)])[::-1])
+    hc = create_height_coordinate_from_z_half(z_half)
+    tm = compute_terrain_metric(jnp.zeros((3, 4)), hc)
+    key = jax.random.PRNGKey(0)
+    k1, k2 = jax.random.split(key)
+    nlev = hc.n_levels
+    theta_p = 0.5 * jax.random.normal(k1, (3, 4, nlev))
+    rho_p = 1e-3 * jax.random.normal(k2, (3, 4, nlev))
+    w = jnp.zeros((3, 4, nlev + 1))
+    cfg = SpectralNHConfig()
+    dt_s = 2.0
+
+    w_s, th_s, rho_s = _acoustic_substeps_grid_semi_implicit(
+        w, theta_p, rho_p, dt_s, 1, hc, tm, cfg)
+    w_k, th_k, rho_k = semi_implicit_acoustic_column_kernel(
+        w, theta_p, rho_p, hc, tm.jacobian, dt_s, 0.0, cfg.g)
+    np.testing.assert_allclose(np.asarray(w_s), np.asarray(w_k), rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(np.asarray(rho_s), np.asarray(rho_k), rtol=1e-12, atol=1e-16)
+    np.testing.assert_allclose(np.asarray(th_s[..., 1:-1]), np.asarray(th_k[..., 1:-1]),
+                               rtol=1e-12, atol=1e-14)

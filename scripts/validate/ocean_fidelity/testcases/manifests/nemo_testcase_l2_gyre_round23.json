@@ -1,0 +1,55 @@
+{
+  "format": "nemo-testcase-l2-gyre-round23-manifest-v1",
+  "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "date": "2026-09-05",
+  "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+  "starting_git_sha": "b2702b318f7e734baf41487372787aed495bc723",
+  "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+  "status": "HOLD",
+  "commits": {
+    "preregistration": "de11a3348af9459911a60d4a0f19a4a2f722e093",
+    "literal_cen2_wmask": "7b1b6329167a50c4488b5f939161fbcf14d1b4c7",
+    "gyre_cellwise_register": "e662ef3bf44286123b1fd3667f9997a33018d7d1",
+    "overflow_rule12_localization": "46cf0511d38c85dbe415bb891620060244329f5f"
+  },
+  "outcomes": {
+    "cen2_wmask": "CONFIRMED_INERT_ON_OWNED_CELLS: oracle pW is zero on 161733/161733 dry inner W faces; ORCA2 T/S remains 0/228641",
+    "wmask_crosscard": "GYRE 50-row trajectory and LOCK/OVERFLOW stage/trajectory comparisons PASS with zero moved cells and zero row-scale ulp",
+    "gyre_register": "kt1 is 0/n; first_over_bar remains kt2 T,S,u,v; round21b-to-current has 42 moved rows and 39 Rule-12 rows, no status changes",
+    "overflow_localization": "seven rows; 3/71 three-dimensional cells at bottom and 68/71 non-bottom; partial-cell-bottom candidate refuted",
+    "first_unconstructible_operand": "prognostic uu_b/vv_b(Kbb) at stprk3_stg.F90:267-274; source-confirmed, numeric value UNMEASURED",
+    "persistent_barotropic_state": "HOLD: open user decision; not implemented or rederived",
+    "lane3b_dry_face_nan": "REGISTERED_NO_HANDOFF",
+    "independent_review": "OUTSTANDING"
+  },
+  "tests": {
+    "focused_cpu": "74 passed in 8.63s",
+    "focused_cpu_selection": "CEN2 literal bit test; ulp_move_gate; GYRE phase3 gate tests; no-scheme-duplication tripwire",
+    "orca2_plant": "exit 1 at T 1/228641",
+    "overflow_localization_plant": "exit 1 on active-cell/payload cardinality mismatch"
+  },
+  "artifacts": {
+    "preregister": "b1a0e380ae9a5518ff6454f8b72e369de48d497888c9dd76382afc8860e24fb9",
+    "orca2_wmask": "4fa0bfc621af7df1923e2d8a51f5c3d134d7d12f31d2b19cde97eb4ba24fd4da",
+    "orca2_wmask_plant": "3b06f0d465197106beb372218efcac8622b3bf3e97d82b2fc0c5624a9a4b8d00",
+    "wmask_lock_stage_compare": "5992b7dbc690b9f3d7c25fb315f49c4305c87ff1b4800eda39c5b9e3ea5cfd37",
+    "wmask_lock_trajectory_compare": "524858b8bf28f84211550607d945a0089d1ede5e327eb2676f0672804aeba589",
+    "wmask_overflow_stage_compare": "c19b273f1d0797dce64c0d27011625f6609318d155f6001fbd0ee0fd16677739",
+    "wmask_overflow_trajectory_compare": "ef076ec99d650c9abbee231420a6b85d78a1ad7fecd2ac09ded571a82dfda72c",
+    "wmask_gyre_b270_report": "a8bfbd9c22d303288500f090760b4660a6d2a716b240e17d6afd3f37b901d384",
+    "wmask_gyre_b270_residuals": "459e63219273883af365efe313bb79bf07352b484c2542187f4ca36eb4ee4864",
+    "wmask_gyre_current_report": "3cd8332f54bcfa30641c6b5033de8ca9450cbae45ace0d94d19d183b6ebf1546",
+    "wmask_gyre_current_residuals": "459e63219273883af365efe313bb79bf07352b484c2542187f4ca36eb4ee4864",
+    "wmask_gyre_compare": "c4831e1a005528508b1daaa0fc66616d27bcd75a4c5e90792281f6c0ba851536",
+    "gyre_round21b_report": "f63c7be5f8c67f781e450e01c4477ebe564b3647b7a0de9e27466bd284c86a77",
+    "gyre_round21b_residuals": "aca765c05e288da319ffa9f72ef7cc2eced7af19530a39cebb4ab7b208384507",
+    "gyre_post_cen2_report": "c14a3541e943a0371043dce186d14869732aaf3d1fdb66838b4922c717801b45",
+    "gyre_post_cen2_residuals": "4d6c6341d290f33c7963861f620dc48c636601c36ac1ca3ad066b553ebec9de1",
+    "gyre_current_report": "3cd8332f54bcfa30641c6b5033de8ca9450cbae45ace0d94d19d183b6ebf1546",
+    "gyre_current_residuals": "459e63219273883af365efe313bb79bf07352b484c2542187f4ca36eb4ee4864",
+    "gyre_round21b_to_current_compare": "c55dcfc78013a2ac9eaabeb11f9286fd74b1e16cbaf81aaf5fbe2910aa07583b",
+    "gyre_post_cen2_to_current_compare": "aaa7b220d9808d1b8816392680401e1180eceb452a90d9583ec9cc2a8440ca61",
+    "overflow_localization": "1e8a70a2b6df820a31ab6432e902334692afea36a04ce5f1953241b4c0b13422",
+    "overflow_localization_plant": "4292123bc457c8ed5e5ca4385b144090b732f9aa415dfea03e8cb87ee3793fa1"
+  }
+}

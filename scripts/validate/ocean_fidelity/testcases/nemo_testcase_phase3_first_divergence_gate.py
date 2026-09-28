@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 BAR = 1.0e-15
@@ -273,8 +274,8 @@ def run(
     from legoesm.ocean.vertical import compute_layer_thickness
     from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_lock_exchange_zco_card()
     model = LatLonCGridOceanModel(
@@ -588,6 +589,7 @@ def run(
     stage_baro_u_error = stage_baro_u_row["normalized_max_abs"]
     full_u_error = full_u_row["normalized_max_abs"]
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phase3-first-divergence-v2",
         "case": card.case,
         "status": "AT-BAR" if not failed else "DEBT",

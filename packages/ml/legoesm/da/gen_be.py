@@ -717,7 +717,8 @@ class GenBETransform:
 
     Implements the interface expected by build_cost_fn:
       - sqrt_multiply(v)  →  B^{1/2} v
-      - inv_multiply(x)   →  B^{-1} x  (exact via jax.vjp)
+      - inv_multiply(x)   →  B^{-1} x  (via jax.vjp of U^{-1}; raises on MPAS
+        meshes, where U^{-1} is not implemented — see :meth:`inv_multiply`)
 
     Parameters
     ----------
@@ -1139,6 +1140,18 @@ class GenBETransform:
         Applies the operators in reverse order:
           U_wind^{-1} → U_sigma^{-1} → U_vert^{-1} → U_bal^{-1} → U_horiz^{-1}
         """
+        if self._laplacian_weights is not None or self._use_mpas_helmholtz:
+            # (I - sL)^n is not the inverse of the forward (I + sL)^n diffusion
+            # (their product is (I - s^2 L^2)^n, amplifying grid-scale modes by up
+            # to ~2^n), and the wind inverse uses a Poisson iteration that is not
+            # convergent on the global mesh. Refuse rather than return a wrong B^-1.
+            raise NotImplementedError(
+                "GenBETransform: U^{-1} (inv_multiply) is not implemented on MPAS "
+                "meshes; the reverse-diffusion and Poisson-iteration inverses are "
+                "not inverses of the forward operator. Write the cost in the "
+                "preconditioned control variable v with sqrt_multiply only "
+                "(J_b = 0.5 |v|^2), as the MPAS 3D/4D-Var drivers do."
+            )
         params = self.params
 
         # --- Unpack physical increment ---
@@ -1200,6 +1213,8 @@ class GenBETransform:
     def inv_multiply(self, x: jax.Array) -> jax.Array:
         """Apply B^{-1} x = U^{-T} U^{-1} x.
 
+        Raises NotImplementedError on MPAS meshes (see :meth:`_inverse`).
+
         Uses jax.vjp to compute U^{-T} exactly (U^{-1} is linear, so its
         VJP is the matrix transpose applied to the cotangent).
 
@@ -1208,9 +1223,9 @@ class GenBETransform:
         The jax.vjp call builds a linearisation graph of _inverse.  For large
         states this is memory-proportional to the number of scalar operations in
         _inverse (dominated by the diffusion scan, O(n_iter * ncol * n_ch)).
-        For the preconditioned formulation (use_preconditioning=True in
-        IncrementalConfig) this method is never called; prefer that path for
-        production runs.
+        Note that ``preconditioned_cost_fn`` still evaluates the x-space cost,
+        whose J_b term calls this method; only a cost written directly in v
+        (J_b = 0.5 |v|^2, as the MPAS 3D/4D-Var drivers do) avoids it.
         """
         y = self._inverse(x)  # U^{-1} x
         _, vjp_fn = jax.vjp(self._inverse, x)

@@ -25,6 +25,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.advection import (
+    NEMO_FCT_TRACE_FIELDS,
     _zalesak_signsplit_face_alphas,
     fct_tracer_advection,
 )
@@ -79,6 +80,87 @@ class TestConservation:
         # 1e-10 K · m² is the tightest closure achievable with float64
         # divergence_cgrid summation across (n_lat * n_lon * nlev) cells.
         assert float(jnp.abs(area_weighted)) < 1e-9
+
+    def test_optional_nemo_split_preserves_production_outputs(
+        self, grid_small, smooth_state,
+    ):
+        """The write-only low/anti census cannot perturb the applied flux."""
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+
+        def run(expose):
+            return fct_tracer_advection(
+                tracer, mu, mv, w_half, h_k, grid_small, dt,
+                high_order="centred2", return_nemo_split=expose)
+
+        ordinary = jax.jit(lambda: run(False))()
+        exposed = jax.jit(lambda: run(True))()
+        for got, want in zip(exposed[:2], ordinary, strict=True):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+        assert len(exposed[2]) == 4
+        assert all(value.shape == tracer.shape for value in exposed[2])
+        assert all(bool(jnp.all(jnp.isfinite(value))) for value in exposed[2])
+
+    def test_write_only_activity_map_preserves_outputs_and_is_nonvacuous(
+        self, grid_small, smooth_state,
+    ):
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+
+        def run(field, expose):
+            return fct_tracer_advection(
+                field, mu, mv, w_half, h_k, grid_small, dt,
+                high_order="centred2", return_limiter_activity=expose)
+
+        ordinary = jax.jit(lambda: run(tracer, False))()
+        exposed = jax.jit(lambda: run(tracer, True))()
+        for got, want in zip(exposed[:2], ordinary, strict=True):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+        activity = np.asarray(exposed[2])
+        assert activity.shape == tracer.shape
+        assert activity.dtype == np.bool_
+        assert activity.any()
+
+        # A zero-transport arm has exactly zero antidiffusive flux, so a map
+        # that merely reports alpha<1 without checking the consumed flux
+        # would fire here and make the developed-state overlap vacuous.
+        uniform = jnp.full_like(tracer, 7.0)
+        uniform_activity = np.asarray(jax.jit(lambda: fct_tracer_advection(
+            uniform, jnp.zeros_like(mu), jnp.zeros_like(mv),
+            jnp.zeros_like(w_half), h_k, grid_small, dt,
+            high_order="centred2", return_limiter_activity=True))()[2])
+        assert not uniform_activity.any()
+
+    def test_write_only_nemo_trace_preserves_outputs_and_sees_transport_ulp(
+        self, grid_small, smooth_state,
+    ):
+        from legoesm.grids.latlon import create_latlon_geometry
+
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        cgrid = create_latlon_geometry(
+            grid_small.n_lat, grid_small.n_lon, radius=grid_small.radius)
+
+        def run(u_transport, expose):
+            return fct_tracer_advection(
+                tracer, u_transport, mv, w_half, h_k, cgrid, dt,
+                high_order="centred2", tracer_before=tracer,
+                low_order_predictor="nemo_rk3_two_step",
+                base_thickness=h_k, after_thickness=h_k,
+                return_nemo_trace=expose)
+
+        ordinary = jax.jit(lambda value: run(value, False))(mu)
+        exposed = jax.jit(lambda value: run(value, True))(mu)
+        for got, want in zip(exposed[:2], ordinary, strict=True):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+        trace = exposed[2]
+        assert len(trace) == len(NEMO_FCT_TRACE_FIELDS)
+        assert all(bool(jnp.all(jnp.isfinite(value))) for value in trace)
+
+        planted_mu = np.asarray(mu).copy()
+        planted_mu[0, 0, 0] = np.nextafter(planted_mu[0, 0, 0], np.inf)
+        planted = jax.jit(lambda value: run(value, True))(
+            jnp.asarray(planted_mu))[2]
+        first_u = NEMO_FCT_TRACE_FIELDS.index("first_u")
+        assert not np.array_equal(
+            np.asarray(planted[first_u]), np.asarray(trace[first_u]))
 
 
 # ---------------------------------------------------------------------------

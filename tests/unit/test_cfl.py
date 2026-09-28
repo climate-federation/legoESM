@@ -186,7 +186,7 @@ class TestCFLCheckAndAdjust:
 # estimate_min_dx: one spacing for the setup clamp and the run-time CFL
 # ============================================================================
 
-class TestEstimateMinDx:
+class TestEstimateMinDxByGridType:
     def test_latlon_is_pole_cell_not_cube_formula(self):
         from legoesm.core.cfl import estimate_min_dx
         dx = estimate_min_dx(90, "latlon")

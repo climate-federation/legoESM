@@ -1,0 +1,23 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -819,6 +819,20 @@
+          WRITE(l1_unit) zFu, zFv, zFw
+          CLOSE(l1_unit)
+       ENDIF
++      ! Round-94 additive stage-closure record: the existing fixed-name
++      ! stream covers kt=1 only; preserve it and emit the missing kt=2
++      ! post-tra_adv_trp stage-3 boundary without changing model state.
++      IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) THEN
++         WRITE(l1_filename,'("oracle_tracer_transport_kt",I8.8,"_s3.bin")') kstp
++         OPEN( NEWUNIT=l1_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l1_ios )
++         IF( l1_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot open Round-94 tracer transport dump' )
++         l1_magic = 'NEMO_L2_TRTRP_1'
++         WRITE(l1_unit) l1_magic, 1, kstp, kstg, Kbb, Kmm, Kaa, Krhs, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++         WRITE(l1_unit) zFu, zFv, zFw
++         CLOSE(l1_unit)
++         WRITE(numout,*) 'ROUND94_STAGE_CLOSURE_DUMP ', kstp, kstg, TRIM(l1_filename)
++      ENDIF
+       !
+       !
+       !                       !==  T-S Tracers  ==!

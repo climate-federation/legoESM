@@ -1,0 +1,82 @@
+{
+    "format": "nemo-testcase-l2-gyre-round21-manifest-v1",
+    "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+    "date": "2026-09-05",
+    "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+    "starting_git_sha": "fa14627631d8a7babd4701b939b57cad360ca2ed",
+    "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+    "status": "HOLD_EEN_PRIMITIVE_ACQUISITION_AND_STATE_DESIGN",
+    "commits": {
+        "preregistration": "a246da0cc",
+        "stage_ww_gate_and_oracle_recipe": "abe71f910",
+        "acquisition_hold": "b33805600",
+        "user_exp00_precondition_fix": "9019dc8e5",
+        "returned_record_admission_preregistration": "e85024571",
+        "returned_record_admission": "1f5a96b5a",
+        "stage_ww_result": "e2fbaf72c",
+        "een_preregistration": "5d281c19d"
+    },
+    "stage_ww": {
+        "existing_oracle_coverage": "UNMEASURED: pre-tra_adv zFw uninitialized at stages 1-3; post-tra_adv record exists for stage 3 only",
+        "new_record": "NEMO_L2_STGWW_1: rDt, ww, pFw after traadv.F90:220-235",
+        "production_prediction": "stage1/2 DEBT, stage3 AT-BAR",
+        "arm_prediction": "rn_Dt/3,rn_Dt/2,rn_Dt gives 0 / n at stages 1-3",
+        "current_gate": "AT-BAR all three stages; max abs 1.6543612251060553e-23, 6.107901643091556e-21, 2.68242819152769e-17",
+        "private_arm": "DEBT all three stages; full-step eta delta paired with stage-local dt",
+        "owner": "REFUTED_ORCA2_GATE_OR_OPERAND_PAIRING",
+        "production_fix": "NONE: preregistered condition false"
+    },
+    "round21_write_only_admission": {
+        "verdict": "PASS",
+        "oracle_records": "39/49 raw-identical; 10/10 changed records consumed-field bit-identical",
+        "final_restart": "BYTE_IDENTICAL",
+        "round19_coefficient_twin": "10/10 consumed projections bit-identical",
+        "raw_differences": "BTORD append plus uninitialized/stale pre-consumer workspace or discarded halos",
+        "plant": "FAIL exit 1 after one consumed-bit mutation"
+    },
+    "een_external_coefficients": {
+        "orca2_baseline": "DEBT all 8; mismatch counts 8285-8331; max abs 6.983696920301593e-5 to 8.320420480597231e-5",
+        "one_variable_arm": "raw e3f0 divisor -> live e3f_0vor*(1+r3f)",
+        "arm_result": "DEBT all 8; mismatch counts 3066-3231; max abs 1.2479779528873167e-5 to 4.944551560061315e-5",
+        "owner": "CONFIRMED_CONTRIBUTOR_NOT_COMPLETE_OWNER",
+        "association_subarms": "source-rounded e3f_0vor and reciprocal-multiply r3f made zero additional move",
+        "gyre_control": "all 8 ENE coefficient fields remain raw bit-identical in admitted V2 record",
+        "production_fix": "NONE: preregistered all-AT-BAR condition false",
+        "next_boundary": "UNMEASURED e3f_0vor/e3f_vor/q/zpvo oracle primitives at ORCA2 Kmm=1"
+    },
+    "open_register": {
+        "prognostic_uu_b_vv_b": "HOLD user decision; NEMO prognostic/restart state; no rederivation",
+        "stage2_kaa": "DEBT u=2.1986806906376666e-15 v=2.2380914396075147e-15",
+        "een_external_coefficients": "HOLD missing ORCA2 e3f_0vor/e3f_vor/q/zpvo oracle primitives; live divisor is contributor, not complete owner",
+        "overflow_dry_face_nan": "UNMEASURED_PENDING_LANE3B_PRODUCER",
+        "stage3_transport_zdf_tke": "UNMEASURED_UPSTREAM_STAGE2_DEBT"
+    },
+    "artifacts": {
+        "v2_traadv_source": "4807fa59ce15237ac04ef8e84f39c77b3da4080aa9ad1effa517fb79e1a6968d",
+        "round21_instrument_patch": "af49471cd0dae365a052a3feddd461ef4c52a97cd5756eb12458459fe0341271",
+        "round21_run_recipe": "c395c0d2547ed814cfcfa3b6aae868e3472bde08ca404d02c87a6b33b9a98f38",
+        "round21_stage_ww_gate_output": "69823c78a737dd1aab7ab1e51c19671e81269f752f07721cf26ae9a4982f95f2",
+        "round21_stage_ww_plant_output": "fe66ac5a9d0bea221e37c1fba936f50e7806d6560afec9cd39f29259c977edb9",
+        "patched_traadv_check": "a2ed0cf0e581a920fc9df01a56131ffa07d4c2d3c244d3d78542415068ae25df",
+        "missing_oracle_fail_closed_log": "4a142241914e29a7f3363bcac0e024b37efe7b2c1cfa402d597de3add3e98918",
+        "round21_admission_output": "8fface2eef7df33214dae0aec02baeab0ae2c0cee87523f2522d70bf6c642dc2",
+        "round21_admission_plant_output": "1588154440fbb8d0fd05d554539babb7592de2ac2854a7b04aea2e2c842f8339",
+        "round21_oracle_restart": "6245d06d9b9f477e08d4d0b7b77f42fdb0ef6d86188332811898880f96233a68",
+        "round21_oracle_run_log": "d70f9bfd5add2f2de204d73d2d3168a13e13e94bf4fa2d967825a3d0e14a5d17",
+        "orca2_een_baseline_output": "6f3981c13aec91269b413b0180786703370489a843bf31e576971e59079326d0",
+        "orca2_een_live_divisor_output": "e881d2f7617a4d6aa017d38d39af6b89d3f179c5878c6bf0f9575a660cd5a43c",
+        "orca2_een_source_rounding_output": "e881d2f7617a4d6aa017d38d39af6b89d3f179c5878c6bf0f9575a660cd5a43c",
+        "orca2_een_reciprocal_association_output": "e881d2f7617a4d6aa017d38d39af6b89d3f179c5878c6bf0f9575a660cd5a43c"
+    },
+    "verification": {
+        "focused_tests": "80 passed in 11.46 s",
+        "final_gyre_phase3_gate_tests": "21 passed in 5.31 s (Python 3.13.0, CPU/x64)",
+        "reader_exact_control": "0 / 21824",
+        "reader_one_cell_plant": "1 / 21824 DEBT",
+        "run_script_bash_syntax": "PASS",
+        "instrument_patch_dry_run": "PASS",
+        "python_compile": "PASS",
+        "nemo_run": "NOT RUN FROM SANDBOX",
+        "independent_review": "OUTSTANDING"
+    }
+}

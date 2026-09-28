@@ -8,7 +8,8 @@ allocated with a dummy index 0 so the Fortran indices can be used verbatim.
 
 Independent of the JAX port except for the two shared physical inputs it
 must agree on to be comparable at 1e-10: the saturation curve
-(``legoesm.thermo.saturation_mixing_ratio``, CLAUDE.md) and the constants
+(``legoesm.thermo.saturation_mixing_ratio``, CLAUDE.md, converted to CAM's
+specific humidity in ``qsat_pa``) and the constants
 (``legoesm.constants``).  The entropy inversion here is scipy ``brentq``
 (the oracle's Brent, run to 1e-13) so it is an independent root finder from
 the port's Newton iteration.
@@ -25,16 +26,24 @@ from scipy.optimize import brentq
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio, saturation_vapor_pressure
 
-_qsat_jit = jax.jit(saturation_mixing_ratio)
+_w_sat_jit = jax.jit(saturation_mixing_ratio)
+
+
+def qsat_pa(t, p_pa):
+    """CAM ``qsat_water``/``qsat`` -> saturation SPECIFIC humidity (kg/kg).
+
+    ``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``: ``qs = ε·es/(p − (1−ε)·es)``.
+    Written here from the shared mixing ratio ``w = ε·es/(p − es)`` as
+    ``w/(1 + w)`` (the same expression), so the shared smooth cap cancels and
+    the pins stay at 1e-10 while a port that feeds ``w`` itself is caught.
+    """
+    w = float(_w_sat_jit(np.float64(t), np.float64(p_pa)))
+    return w / (1.0 + w)
 
 
 def qsat_hpa(t, p_hpa):
     """``qsat_hPa`` -> qm (kg/kg); es is not needed by the callers here."""
-    return float(_qsat_jit(np.float64(t), np.float64(p_hpa) * 100.0))
-
-
-def qsat_pa(t, p_pa):
-    return float(_qsat_jit(np.float64(t), np.float64(p_pa)))
+    return qsat_pa(t, p_hpa * 100.0)
 
 
 # constants named as in the Fortran (values from legoesm.constants)

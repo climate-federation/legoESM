@@ -113,6 +113,7 @@ def rest_state_latlon_cgrid_ocean(
     land_mask_override: jnp.ndarray | None = None,
     H_bathy_override: jnp.ndarray | None = None,
     stratification: str = "exponential",
+    nemo_prognostic_barotropic_velocity: bool = False,
 ) -> LatLonCGridOceanState:
     """Create a rest-state initial condition on a C-grid lat-lon grid.
 
@@ -157,6 +158,12 @@ def rest_state_latlon_cgrid_ocean(
           Veros ACC's ``T = (1 - z / z_bottom) * 15`` initial condition
           (``veros/setups/acc/acc.py:117``; ``T_deep=0`` there), which the
           exponential profile leaves ~1 °C too warm at the deepest cell.
+    nemo_prognostic_barotropic_velocity : bool, default False
+        Allocate NEMO key_RK3's separately carried U/V depth-mean velocity
+        pair.  At rest, ``istate.F90:143-167`` initializes both Kbb fields to
+        the depth mean of zero 3-D velocity and copies Kbb to Kmm, hence exact
+        zero.  Non-NEMO recipes leave the pair as ``None`` and gain no array
+        pytree leaves.
 
     Returns
     -------
@@ -260,6 +267,14 @@ def rest_state_latlon_cgrid_ocean(
         u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
         v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
         w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
+        uu_b=(Field(data=jnp.zeros((n_lat, n_lon + 1), dtype=dtype),
+                    name="uu_b", dims=dims_u2d, units="m/s",
+                    staggering="edge")
+              if nemo_prognostic_barotropic_velocity else None),
+        vv_b=(Field(data=jnp.zeros((n_lat + 1, n_lon), dtype=dtype),
+                    name="vv_b", dims=dims_v2d, units="m/s",
+                    staggering="edge")
+              if nemo_prognostic_barotropic_velocity else None),
     )
 
 

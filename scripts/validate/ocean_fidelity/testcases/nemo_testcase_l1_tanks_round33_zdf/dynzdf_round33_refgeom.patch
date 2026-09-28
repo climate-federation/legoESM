@@ -1,0 +1,49 @@
+--- dynzdf.F90.round29	2026-09-06 04:16:42.794243319 -0400
++++ dynzdf.F90	2026-09-06 04:17:00.961565888 -0400
+@@ -731,6 +731,46 @@
+          WRITE(il2_unit) 3, jpi, jpj, jpk  
+          WRITE(il2_unit) pvv(:,:,:,Kaa)
+          !
++         !                 !--- round-33 addition: NEMO's OWN reference geometry ---!
++         !     So the tank Rule-12 discharge divides by nothing it rebuilt.
++         !     e3u_0/e3v_0 are PREPROCESSOR MACROS -- e3t_1d(k) under
++         !     key_vco_1d (domzgr_substitute.h90:89) and e3u_3d(i,j,k) under
++         !     key_vco_3d (:98) -- so each is materialised elementwise into
++         !     zl2_ypu, which has already been written out by here.  hu_0 and
++         !     r1_hu_0 are real arrays (dom_oce.F90:167); the RECIPROCAL is
++         !     carried because stprk3_stg.F90:440 MULTIPLIES by it, which is
++         !     not the same rounding as dividing by hu_0 (domain.F90:159
++         !     builds it as ssumask/(hu_0 + 1 - ssumask)).
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_ypu(ji,jj,jk) = e3u_0(ji,jj,jk)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3u_0           '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_ypu
++         !
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_ypu(ji,jj,jk) = e3v_0(ji,jj,jk)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3v_0           '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_ypu
++         !
++         WRITE(il2_unit) 'hu_0            '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) hu_0
++         !
++         WRITE(il2_unit) 'r1_hu_0         '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) r1_hu_0
++         !
++         WRITE(il2_unit) 'hv_0            '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) hv_0
++         !
++         WRITE(il2_unit) 'r1_hv_0         '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) r1_hv_0
++         !
+          WRITE(il2_unit) 'rDt             '
+          WRITE(il2_unit) 0, 1, 1, 1        
+          WRITE(il2_unit) rDt

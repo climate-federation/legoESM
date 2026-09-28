@@ -151,8 +151,12 @@ def test_smoke_overrides_use_gray_radiation():
         multi_step_hours=(6, 12), lr=3e-4, optimizer="adamw", grad_accum=1,
         out_dir="out", resume=False, eval_wb2=False, smoke=True,
     )
-    yml = {"warmup_steps": 1000, "radiation": "rrtmgp"}
+    yml = {"warmup_steps": 1000, "radiation": "rrtmgp",
+           "spectral": {"n_max": 63, "dt": 1800.0}}
     new_cfg = _apply_smoke_overrides(cfg, yml)
+    # The spectral core's own resolution key is dropped (it then falls back to
+    # n_lat, i.e. T21); everything else in the block is kept.
+    assert yml["spectral"] == {"dt": 1800.0}
     # gray radiation crushes the rrtmgp compile wall (item 6) ...
     assert yml["radiation"] == "gray"
     # ... and shrinks the grid + trains a single epoch.
@@ -167,6 +171,52 @@ def test_smoke_radiation_opt_out_into_rrtmgp():
     yml = {"smoke_radiation": "rrtmgp"}
     _apply_smoke_overrides(cfg, yml)
     assert yml["radiation"] == "rrtmgp"
+
+
+def test_cam6_deck_smoke_builds_its_cloud_settings_into_the_cam6_cloud_config(
+        monkeypatch):
+    """The committed CAM6 deck's --smoke builds on RRTMGP, and every cloud
+    setting it pins lands on the cam6_clubb CloudConfig of the built physics."""
+    import yaml
+
+    import legoesm.training.aimip_params as ap
+    from legoesm.training.scale_build import (
+        build_mode_components, validate_wb_campaign_yaml,
+    )
+    from scripts.run.train_weatherbench_scale import _resolve_training_keys
+
+    deck = "config/wb/campaign/spectral_t63_cam6.yaml"
+    yml = yaml.safe_load(open(deck))
+    validate_wb_campaign_yaml(yml)
+    cfg = build_scale_config_from_args(
+        ["--config", deck, "--mode", "physics", "--training-core", "spectral",
+         "--smoke"])
+    cfg, _, _ = _resolve_training_keys(cfg, yml)
+    cfg = _apply_smoke_overrides(cfg, yml)
+    assert yml["radiation"] == "rrtmgp"
+
+    built = []
+    orig = ap._splice_scheme_overrides
+
+    def spy(node, overrides, _ctx=None):
+        out = orig(node, overrides, _ctx)
+        if _ctx is None:
+            built.append(out)
+        return out
+
+    monkeypatch.setattr(ap, "_splice_scheme_overrides", spy)
+    _m, grid, _s, params, make_run_seg, _lc, _dt = build_mode_components(cfg, yml)
+    assert grid.n_max == 21
+    # Frozen out by name: nothing on the cam6_clubb path reads them.
+    trainable = set(params.schemes.raw_values)
+    assert any(".clouds.CloudConfig." in k for k in trainable)
+    assert not trainable & {"atm.clouds.CloudConfig.rh_crit",
+                            "atm.clouds.CloudConfig.q_c_diagnostic"}
+    make_run_seg(params)
+    cc = built[-1].radiation.cloud_config
+    assert cc.scheme == "cam6_clubb"
+    pinned = yml["classical"]["param_fixed"]["atm.clouds.CloudConfig"]
+    assert {f: getattr(cc, f) for f in pinned} == pinned
 
 
 def test_latlon_grid_exposes_2d_lat_for_radiation():

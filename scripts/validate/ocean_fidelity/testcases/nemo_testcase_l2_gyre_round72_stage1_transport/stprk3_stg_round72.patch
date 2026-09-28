@@ -1,0 +1,20 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -295,7 +295,7 @@
+ 
+          ! Round-13 WRITE-only stage-1 transport operand record.  It is
+          ! emitted while zub/zvb are still live and is never read by NEMO.
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 1 ) THEN
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg == 1 ) THEN
+             ALLOCATE( l2_e3u(jpi,jpj,jpk), l2_e3v(jpi,jpj,jpk) )
+             l2_e3u(:,:,:) = 0._wp
+             l2_e3v(:,:,:) = 0._wp
+@@ -303,7 +303,7 @@
+                l2_e3u(ji,jj,jk) = e3u(ji,jj,jk,Kmm)
+                l2_e3v(ji,jj,jk) = e3v(ji,jj,jk,Kmm)
+             END_3D
+-            l1_filename = 'oracle_rkstage1_transport_operands_kt00000001.bin'
++            WRITE(l1_filename,'("oracle_rkstage1_transport_operands_kt",I8.8,".bin")') kstp
+             OPEN( NEWUNIT=l1_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+                &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l1_ios )
+             IF( l1_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot open L2 stage-1 transport operand dump' )
