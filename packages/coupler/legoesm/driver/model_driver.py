@@ -1770,6 +1770,24 @@ class ModelDriver:
                 "read at the wrong depths. Re-run the land spin-up on this "
                 "run's column.")
 
+    def _preflight_land_ic_stamp(self, ic_path) -> None:
+        """Refuse a land IC without a soil-hydraulics stamp, on every rank.
+
+        Same reason as the column check: the file is identical on every rank,
+        the land load happens only on ranks that own land.
+        """
+        import json as _json
+        from legoesm.land.restart import check_soil_hydraulics_stamp
+        with np.load(ic_path, allow_pickle=False) as _ic_npz:
+            try:
+                _ic_stamp = (_json.loads(str(_ic_npz["soil_hydraulics_json"]))
+                             if "soil_hydraulics_json" in _ic_npz.files
+                             else None)
+            except ValueError as exc:
+                raise ValueError(f"{ic_path}: unreadable soil-hydraulics "
+                                 f"stamp ({exc})") from exc
+        check_soil_hydraulics_stamp({"soil_hydraulics": _ic_stamp}, ic_path)
+
     def _reject_shallow_water_unrunnable(self) -> None:
         """Shallow-water is not a runnable ModelDriver equation set.
 
@@ -1813,6 +1831,9 @@ class ModelDriver:
         # the equivalent check inside the land setup, which runs only on ranks
         # that own land and would leave the rest waiting (codex round 10).
         self._preflight_land_inputs()
+        if (getattr(self.config, "use_multilayer_land", False)
+                and getattr(self.config, "land_ic_path", "")):
+            self._preflight_land_ic_stamp(self.config.land_ic_path)
 
         # Config cross-validation
         config_warnings = self.config.validate()
@@ -3731,24 +3752,60 @@ class ModelDriver:
             # (fixes the pytree structure), then cast the array leaves to the
             # run's storage precision (the restart deserialises float64).
             _merged = merge_land_restart_into_template(_ic_state, _template)
-            # A REGRIDDED state's matric potential is not this run's.  The
-            # Richards step evolves potential directly, but potential and water
-            # content are tied through each column's own soil-texture retention
-            # curve — and a regridded column carries the SOURCE column's
-            # texture in its potential.  Water content is the conserved
-            # quantity, so keep theta and re-derive psi on THIS run's
-            # hydraulics, exactly as the cold-start does.  Scoped to states
-            # whose metadata says they were regridded: a byte-exact same-grid
-            # restart is left untouched.
-            if _ic_meta.get("regridded_from"):
-                from legoesm.land.soil_hydraulics import psi_from_theta
-                _merged = _merged._replace(
-                    psi_soil=psi_from_theta(_merged.theta_soil,
-                                            cfg.hydraulics))
+            # The spin-up's matric potential belongs to ITS hydraulics.  Water
+            # content is the conserved quantity: keep it (moved into the band
+            # the Richards step can hold, column water conserved) and re-derive
+            # the potential on this run's hydraulics whenever the file's
+            # soil-hydraulics stamp differs or its columns were regridded.
+            # Before the storage cast, so the conform runs in float64.
+            from legoesm.land.restart import (
+                HYDRAULICS_SOURCE_CLM_MAP, convert_ic_soil_water,
+                soil_hydraulics_stamp)
+            _f_land_ic = np.asarray(self._f_land).reshape(-1)
+            if _f_land_ic.shape[0] != ncol:
+                raise ValueError(
+                    f"land fraction has {_f_land_ic.shape[0]} columns but the "
+                    f"land tile has {ncol}; cannot mask the land IC conversion.")
+            _sig_ic = _ic_meta.get("soil_hydraulics_column_sig")
+            if _sig_ic is not None and _part_ic is not None:
+                _sig_ic = np.asarray(_land_columns_to_local(_sig_ic, _part_ic))
+            try:
+                _merged, _conv = convert_ic_soil_water(
+                    _merged, _ic_meta, cfg.hydraulics,
+                    soil_hydraulics_stamp(cfg.hydraulics.retention_curve,
+                                          HYDRAULICS_SOURCE_CLM_MAP,
+                                          surfdata_file),
+                    make_soil_grid(cfg.soil_grid).dz,
+                    land_mask=_f_land_ic > 0.0, file_column_sig=_sig_ic,
+                    path=_land_ic_path)
+            except Exception:
+                # The conversion is per column, so its refusals are rank-local
+                # while the other ranks walk on into the next collective.  Take
+                # the whole job down rather than strand them.
+                try:
+                    from mpi4py import MPI
+                except ImportError:     # no MPI in this environment
+                    MPI = None
+                if (MPI is not None and MPI.Is_initialized()
+                        and MPI.COMM_WORLD.Get_size() > 1):
+                    logger.exception("land IC conversion failed on this rank; "
+                                     "aborting every rank")
+                    MPI.COMM_WORLD.Abort(1)
+                raise
+            if _conv is not None:
                 logger.info(
-                    "  Land tile: regridded IC (%s) — psi_soil re-derived "
-                    "from theta_soil on this run's soil texture.",
-                    _ic_meta.get("regridded_from"))
+                    "  Land tile: IC soil water converted to this run's "
+                    "hydraulics (%s -> %s%s): dry layers lifted %d in %d "
+                    "columns (max %.3g mm moved), wet layers %d in %d columns, "
+                    "%d columns overflow to surface water (max %.3g mm); "
+                    "psi_soil re-derived.",
+                    _conv["stamp"]["retention_curve"],
+                    _conv["run_stamp"]["retention_curve"],
+                    ", regridded" if _conv["regridded"] else "",
+                    _conv["dry_layers"], _conv["dry_columns"],
+                    _conv["dry_moved_mm_max"], _conv["wet_layers"],
+                    _conv["wet_columns"], _conv["pond_columns"],
+                    _conv["pond_mm_max"])
             self._land_ml_state = jax.tree_util.tree_map(
                 lambda a: (a.astype(storage_dtype)
                            if hasattr(a, "dtype")
