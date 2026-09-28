@@ -2,7 +2,7 @@
 
 Date: 2026-09-28
 
-Base: `7ab42435b2f56f8c2a97cedee5bb2ea3fd1737d4`
+Base: `7ab42435b249b20c120ab4dbf1836b21b175e686`
 
 Disposition: **HELD; the independent ten-step headline is measured and no
 model statement lands**
@@ -92,8 +92,7 @@ Validation results:
 
 - Independent ladder: `LADDER_MEASURED`; round classifier
   `PASS_INDEPENDENT_LADDER`.
-- Focused ladder/classifier controls: `24 passed`, followed by the JSON-order
-  regression test (`7 passed`).
+- Final focused ladder, classifier, and citation controls: `41 passed`.
 - Shared card battery: `160 passed` with nine dtype warnings; separate tank
   set: `10 passed`.
 - Full `tests/ocean/fidelity -n 12` battery: `2,002 passed`, `7 skipped`, and
@@ -101,6 +100,16 @@ Validation results:
   phase-3 certification, round-51 private trace registry, four worktree-stamp
   emitters, and the missing `hires_lane_surface` case-board row.  No round-66
   test failed.
+- Receipt citation audit: `PASS` for all four citations; the default cumulative
+  audit also `PASS`es with zero unmapped citations, failures, or map-audit
+  failures; shifting the SSH citation exits nonzero.
+
+The required separate review was attempted with `codex exec --sandbox
+read-only`.  Exact terminal verdict:
+
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+Therefore: **independent review unavailable in-sandbox**.
 
 Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round66/`.

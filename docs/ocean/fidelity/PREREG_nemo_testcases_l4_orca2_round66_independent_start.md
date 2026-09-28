@@ -2,7 +2,7 @@
 
 Date frozen: 2026-09-28
 
-Base: `7ab42435b2f56f8c2a97cedee5bb2ea3fd1737d4`
+Base: `7ab42435b249b20c120ab4dbf1836b21b175e686`
 
 Claim label: **independent**.  legoESM starts from its own card state and is
 compared only with NEMO's own from-rest trajectory.  No NEMO entry field is
