@@ -57,3 +57,10 @@ def test_parent_mask_embedding_obeys_record_origin():
     parent = np.ones((1, 2, 1), dtype=bool)
     full = gate._embed_parent_mask(parent, (6, 5, 1), (3, 3))
     assert np.array_equal(np.argwhere(full), np.array([[2, 2, 0], [3, 2, 0]]))
+
+
+def test_writer_face_flux_is_loop_aligned():
+    module = (gate.r56_gate.INSTRUMENT / "l1_r56_up3.F90").read_text()
+    assert "CALL r56_up3_hflux(ji,jj,jk,zFu_t(ji+1,jj)" in (
+        gate.r56_gate.PATCH.read_text())
+    assert "flux_u_t(ji,jj,jk)=fut" in module

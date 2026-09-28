@@ -179,7 +179,10 @@ def _analyze_u(
     production_in_nemo_units = np.float64(4.0) * production
     flux_row = _score(
         SOURCE_ORDER[3],
-        fields["flux_u_t"][i + 1, j, k],
+        # The writer receives zFu_t(ji+1,jj) but stores the scalar under its
+        # loop coordinate (ji,jj).  Its self-describing field is therefore
+        # loop-aligned, not native zFu_t-array-aligned.
+        fields["flux_u_t"][i, j, k],
         production_in_nemo_units,
         plant=plant == "face_flux",
     )
@@ -204,14 +207,14 @@ def _analyze_u(
     if first is not None:
         unequal = (
             _bits(production_in_nemo_units)
-            != _bits(fields["flux_u_t"][i + 1, j, k])
+            != _bits(fields["flux_u_t"][i, j, k])
         ) if first["name"] == SOURCE_ORDER[3] else None
         if unequal is not None:
             at = int(np.flatnonzero(unequal)[0])
             first["first_record_index_0based"] = [
-                int(i[at] + 1), int(j[at]), int(k[at])]
+                int(i[at]), int(j[at]), int(k[at])]
             first["first_fortran_index_1based"] = [
-                int(i[at] + 2), int(j[at] + 1), int(k[at] + 1)]
+                int(i[at] + 1), int(j[at] + 1), int(k[at] + 1)]
 
     return {
         "status": status,
