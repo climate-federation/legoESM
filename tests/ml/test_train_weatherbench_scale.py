@@ -151,8 +151,12 @@ def test_smoke_overrides_use_gray_radiation():
         multi_step_hours=(6, 12), lr=3e-4, optimizer="adamw", grad_accum=1,
         out_dir="out", resume=False, eval_wb2=False, smoke=True,
     )
-    yml = {"warmup_steps": 1000, "radiation": "rrtmgp"}
+    yml = {"warmup_steps": 1000, "radiation": "rrtmgp",
+           "spectral": {"n_max": 63, "dt": 1800.0}}
     new_cfg = _apply_smoke_overrides(cfg, yml)
+    # The spectral core's own resolution key is dropped (it then falls back to
+    # n_lat, i.e. T21); everything else in the block is kept.
+    assert yml["spectral"] == {"dt": 1800.0}
     # gray radiation crushes the rrtmgp compile wall (item 6) ...
     assert yml["radiation"] == "gray"
     # ... and shrinks the grid + trains a single epoch.
@@ -202,6 +206,7 @@ def test_cam6_deck_smoke_builds_its_cloud_settings_into_the_cam6_cloud_config(
 
     monkeypatch.setattr(ap, "_splice_scheme_overrides", spy)
     _m, grid, _s, params, make_run_seg, _lc, _dt = build_mode_components(cfg, yml)
+    assert grid.n_max == 21
     # Frozen out by name: nothing on the cam6_clubb path reads them.
     trainable = set(params.schemes.raw_values)
     assert any(".clouds.CloudConfig." in k for k in trainable)

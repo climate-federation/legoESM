@@ -522,6 +522,11 @@ def _apply_smoke_overrides(cfg: ScaleConfig, yml: dict) -> ScaleConfig:
     compile itself, with a bumped walltime) via ``smoke_radiation: rrtmgp``.
     """
     yml["n_lat"], yml["n_lon"], yml["nlev"] = 32, 64, 8
+    # The spectral core takes its grid from ``spectral.n_max`` and only falls
+    # back to n_lat; drop it so the smoke runs the same small grid (T21).
+    if "spectral" in yml:
+        yml["spectral"] = {k: v for k, v in yml["spectral"].items()
+                           if k != "n_max"}
     yml["radiation"] = str(yml.get("smoke_radiation", "gray"))
     return cfg._replace(n_epochs=1)
 
