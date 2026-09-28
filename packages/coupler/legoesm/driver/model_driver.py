@@ -3394,6 +3394,9 @@ class ModelDriver:
         _ft = bool(self.config.land_soil_freeze_thaw)
         cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=_ft))
         logger.info("  land soil freeze/thaw: %s", "ON" if _ft else "off")
+        from legoesm.land.multilayer_land import FINAL_THERMAL_SUBSTEPS
+        logger.info("  land soil thermal sub-steps per land step: %d",
+                    FINAL_THERMAL_SUBSTEPS if _ft else 1)
         if _ft and getattr(self.config, "land_calibrated_physics", False):
             logger.warning("  land soil freeze/thaw ON with the calibrated land "
                            "tables, which were fitted with it OFF")
