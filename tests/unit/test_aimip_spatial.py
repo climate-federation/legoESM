@@ -680,3 +680,29 @@ def test_aimip_zm_lane_runs_on_the_era5_land_fraction_and_refuses_without_it(
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(out))
     with pytest.raises(ValueError, match="land_frac is required"):
         fn(state, grid, sig)
+
+
+@pytest.mark.slow
+@pytest.mark.tier3
+def test_era5_land_fraction_on_the_aimip_t21_grid_is_earths():
+    """The real ERA5 land-sea mask on the T21 AIMIP grid (needs the WB2 store):
+    about a third of the columns, and 0.29 of the area, are land."""
+    import numpy as np
+
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_spatial import (
+        era5_land_fraction, grid_with_zm_land_fraction,
+    )
+
+    grid = create_gaussian_grid(21, dealiasing="quadratic")
+    land = np.asarray(era5_land_fraction(grid))
+    assert land.shape == (grid.n_lat, grid.n_lon)
+    assert land.min() >= 0.0 and land.max() <= 1.0
+    w = np.cos(np.asarray(grid.lat))[:, None] * np.ones((1, grid.n_lon))
+    print(f"ERA5 land fraction T21: column mean {land.mean():.4f}, "
+          f"area mean {(land * w).sum() / w.sum():.4f}")
+    assert land.mean() == pytest.approx(0.33, abs=0.03)
+    assert (land * w).sum() / w.sum() == pytest.approx(0.29, abs=0.03)
+    # ZM and the surface-parameter mask see the same field.
+    zm = grid_with_zm_land_fraction(grid, "zhang_mcfarlane", land).land_frac
+    assert np.array_equal(np.asarray(zm), land.reshape(-1))

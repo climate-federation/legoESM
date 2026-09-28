@@ -404,21 +404,30 @@ def land_mask_from_phis(
     return jnp.where(phis > 0.0, 1.0, 0.0)
 
 
-def grid_with_zm_land_fraction(grid, convection_scheme: str):
-    """``grid`` carrying the column land fraction Zhang-McFarlane needs.
+def era5_land_fraction(grid) -> jax.Array:
+    """ERA5 land-sea mask of the AIMIP store on ``grid``, shape (n_lat, n_lon).
 
-    ZM picks its autoconversion coefficient per column from the land fraction
-    and refuses to run without one; the AIMIP Gaussian grid carries none.  The
-    fraction is the ERA5 land-sea mask of the AIMIP store, regridded exactly as
-    the WB classical arm feeds it to ZM.  Not ``phis > 0``: on the smoothed
-    orography that marked 72 % of T21 columns as land.  Any other convection
-    scheme gets ``grid`` back unchanged, with no store access.
+    Regridded exactly as the WB classical arm feeds it to ZM.  Not
+    ``phis > 0``: on the smoothed orography that marked 72 % of T21 columns
+    as land.
     """
-    if convection_scheme != "zhang_mcfarlane":
-        return grid
     from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
     from legoesm.training.scale_build import prescribed_surface_planes
 
     sl = load_era5_slice(TrainingERA5Config(load_land_frac=True), 0)
-    land = prescribed_surface_planes(sl, grid)["land_frac"]
-    return grid._replace(land_frac=land.reshape(-1))
+    return prescribed_surface_planes(sl, grid)["land_frac"]
+
+
+def grid_with_zm_land_fraction(grid, convection_scheme: str, land=None):
+    """``grid`` carrying the column land fraction Zhang-McFarlane needs.
+
+    ZM picks its autoconversion coefficient per column from the land fraction
+    and refuses to run without one; the AIMIP Gaussian grid carries none.
+    ``land`` is :func:`era5_land_fraction` (loaded here when not given).  Any
+    other convection scheme gets ``grid`` back unchanged, with no store access.
+    """
+    if convection_scheme != "zhang_mcfarlane":
+        return grid
+    if land is None:
+        land = era5_land_fraction(grid)
+    return grid._replace(land_frac=jnp.asarray(land).reshape(-1))
