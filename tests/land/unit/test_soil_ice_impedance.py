@@ -35,6 +35,15 @@ from legoesm.land.soil_thermal import liquid_water_content
 jax.config.update("jax_enable_x64", True)
 
 _DT = 1800.0
+
+
+@pytest.fixture(autouse=True)
+def _clear_jax_caches():
+    # same mitigation as tests/land/integration/conftest.py: many distinct
+    # land/canopy executables in one process crash jaxlib's CPU compiler
+    yield
+    jax.clear_caches()
+
 _LN10 = math.log(10.0)
 
 
