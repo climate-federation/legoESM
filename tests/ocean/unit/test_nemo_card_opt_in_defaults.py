@@ -115,6 +115,46 @@ def test_nemo_card_requires_the_masked_statement():
 
 
 # --------------------------------------------------------------------------
+# D66 — the ORCA1 OMIP card keeps its unmasked ln_mxl0 anchor
+# --------------------------------------------------------------------------
+
+def _orca1_tke_config(iwm_enabled):
+    """Resolve the ORCA1 OMIP card's TKE config from its own builder."""
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    path = root / "scripts" / "run" / "run_omip_core2.py"
+    spec = importlib.util.spec_from_file_location("_omip_core2_card", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.orca1_zdftke_config(iwm_enabled=iwm_enabled)
+
+
+@pytest.mark.parametrize("iwm_enabled", [False, True])
+def test_orca1_card_keeps_the_unmasked_ln_mxl0_anchor(iwm_enabled):
+    """Decision 66: the ORCA1 card must NOT take NEMO's masked anchor.
+
+    NEMO's compiled statement multiplies the surface stress by tmask(:,:,1)
+    (zdftke.F90:640-642), which collapses the anchor to the mixing-length
+    floor on LAND columns.  That transcription belongs to the NEMO-literal
+    cards; this card keeps the behaviour it had before the branch.  The test
+    fails both ways: if the card re-selects the mask, and if the library
+    default stops being the unmasked arm.
+    """
+    cfg = _orca1_tke_config(iwm_enabled)
+    assert cfg.nemo_mxl0_surface_tmask is False
+    assert TKEConfig().nemo_mxl0_surface_tmask is False
+    # ... and the resolved anchor is the unmasked one: a LAND column (mask 0)
+    # still sees its own wind stress, exactly as it did before the branch.
+    taum = jnp.asarray([0.07, 0.07])
+    unmasked = _mxl0_surface_anchor(cfg, taum, 1026.0, 9.80665,
+                                    jnp.asarray([1.0, 0.0]))
+    assert float(np.asarray(unmasked)[1]) == float(np.asarray(unmasked)[0])
+    assert float(np.asarray(unmasked)[0]) > float(_mixing_length_floor(cfg))
+
+
+# --------------------------------------------------------------------------
 # S5 — one meaning per nn_eice value, on every integration
 # --------------------------------------------------------------------------
 
