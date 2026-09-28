@@ -4332,6 +4332,8 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     the SSS comparison (runoff=0 made SSS only informational). Curvilinear ->
     model grid via the same IDW used for bathy; eORCA1 nav_lat/lon are the runoff
     file's own coords."""
+    if regrid not in ("idw4", "volume_nearest"):
+        raise ValueError(f"runoff regrid {regrid!r}: expected 'idw4' or 'volume_nearest'")
     import xarray as xr
     from legoesm.ocean.bathymetry import (
         laplacian_smooth_2d, laplacian_smooth_voronoi)
@@ -4365,8 +4367,6 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
             f"runoff source area {A_src.shape} != runoff field {total.shape[1:]}: "
             f"domain_cfg e1t/e2t must match the Dai-Trenberth grid")
     A_tgt = np.asarray(grid.areaCell if hasattr(grid, "areaCell") else grid.area)
-    if regrid not in ("idw4", "volume_nearest"):
-        raise ValueError(f"runoff regrid {regrid!r}: expected 'idw4' or 'volume_nearest'")
     if regrid == "volume_nearest":
         # Each discharge cell's VOLUME goes to its nearest wet target cell, so
         # every river is conserved locally.  idw4 averages INTENSITY over the

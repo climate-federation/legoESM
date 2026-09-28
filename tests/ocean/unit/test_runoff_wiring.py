@@ -121,6 +121,8 @@ def _white_sea_totals(regrid):
     return tgt, float((src * R._load_nemo_cell_area_m2())[sbox].sum()) / 1000.0
 
 
+@pytest.mark.skipif(not os.path.exists(R._RUNOFF_NC),
+                    reason="NEMO Dai-Trenberth runoff file not on this host")
 def test_volume_nearest_conserves_each_river_locally():
     """volume_nearest keeps the White Sea's rivers in the White Sea (to the
     global renorm, ~1); idw4 is reported alongside as the defect it replaces."""
@@ -129,6 +131,7 @@ def test_volume_nearest_conserves_each_river_locally():
     print(f"White Sea Jan runoff m3/s: source {src:.0f}, volume_nearest {tgt:.0f}, idw4 {tgt_idw:.0f}")
     assert src > 1000.0
     assert abs(tgt / src - 1.0) < 0.10, (tgt, src)
+    assert abs(tgt_idw / src - 1.0) > 0.25, (tgt_idw, src)  # the defect this replaces
 
 
 def test_unknown_runoff_regrid_raises():
