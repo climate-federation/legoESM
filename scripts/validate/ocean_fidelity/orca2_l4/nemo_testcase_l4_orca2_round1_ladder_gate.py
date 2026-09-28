@@ -484,25 +484,37 @@ def assemble_surface_fields(root: Path, kt: int) -> dict[str, np.ndarray]:
     }
 
 
-def chlorophyll_at_step(deck_root: Path, kt: int, wet: np.ndarray) -> np.ndarray:
-    """Reproduce the yearly December/January ``fld_read`` interpolation."""
+def chlorophyll_at_step(
+    deck_root: Path, kt: int, wet: np.ndarray, *, dt_s: float
+) -> np.ndarray:
+    """Reproduce the first-month monthly ``fld_read`` interpolation."""
 
     from netCDF4 import Dataset
 
-    require(1 <= kt <= 10, "chlorophyll step must be in 1..10")
+    require(1 <= kt <= 240, "chlorophyll step must be in 1..240")
     path = deck_root / "chlorophyll.nc"
     require(path.is_file(), f"missing ORCA2 chlorophyll input: {path}")
     with Dataset(path) as dataset:
         source = np.asarray(dataset.variables["CHLA"][:], dtype=np.float64)
     require(source.shape == (12, 148, 180),
             f"unexpected chlorophyll shape {source.shape}")
-    # fldread.F90's yearly interpolation spans the two 31-day centred records.
-    # With the 3-hour ORCA2 clock there are 496 steps between the December and
-    # January centres; kt=1 is 249/496 of that interval.  Keep NEMO's two-term
-    # multiply/add association, independently pinned against its kt=1 dump.
-    after = np.float64(248 + kt) / np.float64(496)
+    # The admitted run resolves record centres at -15.5, +15.5 and +45.0 days.
+    # NEMO forms the midpoint clock and weights at fldread.f90:243-246.  The
+    # January centre is crossed between kt=124 and kt=125.
+    dt_i = int(dt_s)
+    require(float(dt_i) == float(dt_s) and dt_i % 2 == 0,
+            f"chlorophyll clock needs an even integer dt, got {dt_s}")
+    midpoint_s = (2 * kt - 1) * dt_i // 2
+    centres_s = (-1339200, 1339200, 3888000)
+    if midpoint_s < centres_s[1]:
+        before_index, after_index = 11, 0
+        before_s, after_s = centres_s[:2]
+    else:
+        before_index, after_index = 0, 1
+        before_s, after_s = centres_s[1:]
+    after = np.float64(midpoint_s - before_s) / np.float64(after_s - before_s)
     before = np.float64(1.0) - after
-    result = before * source[11] + after * source[0]
+    result = before * source[before_index] + after * source[after_index]
     return np.where(wet, result, np.float64(0.0))
 
 
@@ -745,7 +757,7 @@ def _surface_forcings(
     tau_x = -(cos_alpha * native_i - sin_alpha * native_j)
     tau_y = -(sin_alpha * native_i + cos_alpha * native_j)
     wet = np.asarray(card.recipe.initial_state.land_mask.data) > 0.5
-    chl = chlorophyll_at_step(deck_root, kt, wet)
+    chl = chlorophyll_at_step(deck_root, kt, wet, dt_s=card.dt_s)
     q_total = np.asarray(nemo_source_round(
         jnp.asarray(fields["qns"]) + jnp.asarray(fields["qsr"])
     ))
@@ -958,8 +970,11 @@ def candidate_trajectory(
         root / "oracle_rgb_chl_kt00000001.bin"
     )["chl"])
     wet = np.asarray(card.recipe.initial_state.land_mask.data)[:, :90] > 0.5
-    reconstructed_chl = chlorophyll_at_step(deck_root, 1,
-                                             np.asarray(card.recipe.initial_state.land_mask.data) > 0.5)
+    reconstructed_chl = chlorophyll_at_step(
+        deck_root, 1,
+        np.asarray(card.recipe.initial_state.land_mask.data) > 0.5,
+        dt_s=card.dt_s,
+    )
     chl_row = score(reconstructed_chl[:, :90], emitted_chl)
     require(chl_row["bit_identical"], "kt1 chlorophyll interpolation is non-bit")
 
