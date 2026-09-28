@@ -161,7 +161,8 @@ def run(output: Path, expect_commit: str, entry_input: Path,
     R60.require(admission["status"] == "AT_BAR",
                 "round-62 dyn_zdf record is not admitted")
     oracle_record = R62.read_record(RECORD)
-    parent_record = R51._record_pair(R60.ORACLE_ROOT)[0][3]
+    acquired_parent = R62.r50_gate.read_record(PARENT, "momentum", 3)
+    historical_parent = R51._record_pair(R60.ORACLE_ROOT)[0][3]
 
     card = build_nemo_testcase_card("OVERFLOW-zps")
     cfg = card.recipe.model_config
@@ -202,10 +203,26 @@ def run(output: Path, expect_commit: str, entry_input: Path,
 
     oracle_explicit_u = oracle_record["fields"]["explicit_u"]
     oracle_implicit_u = oracle_record["fields"]["implicit_solve_u"]
-    R60.require(np.array_equal(oracle_explicit_u, parent_record["pre_zdf_u"]),
-                "oracle explicit U differs from round-50 pre-ZDF U")
-    R60.require(np.array_equal(oracle_implicit_u, parent_record["raw_kaa_u"]),
-                "oracle implicit U differs from round-50 raw-Kaa U")
+    R60.require(
+        np.array_equal(oracle_explicit_u,
+                       acquired_parent["fields"]["pre_zdf_u"]),
+        "oracle explicit U differs from same-build parent pre-ZDF U")
+    R60.require(
+        np.array_equal(oracle_implicit_u,
+                       acquired_parent["fields"]["raw_kaa_u"]),
+        "oracle implicit U differs from same-build parent raw-Kaa U")
+    cross_build = {}
+    for name in ("pre_zdf_u", "raw_kaa_u"):
+        current = acquired_parent["fields"][name]
+        historical = historical_parent[name]
+        R60.require(current.shape == historical.shape,
+                    f"cross-build {name} shape drift")
+        cross_build[name] = {
+            "n": int(current.size),
+            "n_unequal": int(np.count_nonzero(
+                current.view(np.uint64) != historical.view(np.uint64))),
+            "absolute_max": float(np.max(np.abs(current - historical))),
+        }
 
     planted = None
     if plant:
@@ -240,6 +257,7 @@ def run(output: Path, expect_commit: str, entry_input: Path,
             "producer_commit": admission["producer_commit"],
             "endpoint_identity": admission["endpoint_identity"],
         },
+        "cross_build_information": cross_build,
         "compiled_source_order": list(SOURCE_ORDER),
         "controlled_entry": {
             "path": str(entry_input), "sha256": R60._sha256(entry_input)},
