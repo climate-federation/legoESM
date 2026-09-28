@@ -95,6 +95,31 @@ def _noninterference(before: dict[str, np.ndarray], observed) -> list[dict]:
     return rows
 
 
+def _write_ordinary(path: Path, state) -> dict:
+    arrays = _state_arrays(state)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **arrays)
+    return {"path": str(path), "sha256": R60._sha256(path),
+            "fields": list(arrays)}
+
+
+def _read_ordinary(meta_path: Path) -> tuple[dict, dict[str, np.ndarray]]:
+    meta = json.loads(meta_path.read_text())
+    R60.require(meta["format"] == FORMAT, "ordinary report format drift")
+    R60.require(meta["status"] == "ORDINARY_WRITTEN",
+                "ordinary report is not complete")
+    state_meta = meta["ordinary_state"]
+    path = Path(state_meta["path"])
+    R60.require(path.is_file(), f"missing ordinary state {path}")
+    R60.require(R60._sha256(path) == state_meta["sha256"],
+                "ordinary state hash drift")
+    with np.load(path) as stored:
+        R60.require(stored.files == state_meta["fields"],
+                    "ordinary state field-order drift")
+        arrays = {name: np.asarray(stored[name]) for name in stored.files}
+    return meta, arrays
+
+
 def _write_sidecar(output: Path, arrays: dict[str, np.ndarray]) -> dict:
     return R60._write_sidecar(output, arrays)
 
@@ -144,7 +169,8 @@ def compare(reference_path: Path, candidate_report: dict) -> dict:
 
 
 def run(output: Path, expect_commit: str, entry_input: Path,
-        reference: Path | None, plant: bool) -> dict:
+        reference: Path | None, plant: bool,
+        ordinary_only: bool, ordinary_reference: Path | None) -> dict:
     print(f"ROUND63_GATE_REVISION {GATE_REVISION}", file=sys.stderr,
           flush=True)
     stamp = worktree_stamp()
@@ -180,12 +206,28 @@ def run(output: Path, expect_commit: str, entry_input: Path,
     state = R60._read_entry_state(entry_input, card.recipe.initial_state)
     masks = R60.expected_masks(card)
 
-    ordinary_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, cfg)
-    ordinary = ordinary_model.step(state, dt=card.dt_s)
-    ordinary_arrays = _state_arrays(ordinary)
-    del ordinary, ordinary_model
-    jax.clear_caches()
+    if ordinary_only:
+        R60.require(ordinary_reference is None,
+                    "--ordinary-only does not accept --ordinary-reference")
+        ordinary_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg)
+        ordinary = ordinary_model.step(state, dt=card.dt_s)
+        state_meta = _write_ordinary(output.with_suffix(".state.npz"), ordinary)
+        return {
+            "format": FORMAT,
+            "gate_revision": GATE_REVISION,
+            "status": "ORDINARY_WRITTEN",
+            "case": "OVERFLOW-zps",
+            "worktree": stamp,
+            "controlled_entry": {
+                "path": str(entry_input), "sha256": R60._sha256(entry_input)},
+            "ordinary_state": state_meta,
+        }
+    R60.require(ordinary_reference is not None,
+                "observer walk requires --ordinary-reference")
+    ordinary_report, ordinary_arrays = _read_ordinary(ordinary_reference)
+    R60.require(ordinary_report["worktree"]["commit"] == expect_commit,
+                "ordinary/observer commit mismatch")
     observed, trace = _observer(card, state)
     observer_rows = _noninterference(ordinary_arrays, observed)
 
@@ -276,6 +318,10 @@ def run(output: Path, expect_commit: str, entry_input: Path,
         "rows": rows,
         "observer_noninterference": observer_rows,
         "plant": planted,
+        "ordinary_reference": {
+            "path": str(ordinary_reference),
+            "sha256": R60._sha256(ordinary_reference),
+        },
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     report["sidecar"] = _write_sidecar(output, arrays)
@@ -291,11 +337,14 @@ def main(argv=None) -> int:
     parser.add_argument("--entry-input", type=Path, required=True)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument("--ordinary-only", action="store_true")
+    parser.add_argument("--ordinary-reference", type=Path)
     args = parser.parse_args(argv)
     try:
         report = run(
             args.output, args.expect_commit, args.entry_input,
-            args.reference, args.plant)
+            args.reference, args.plant,
+            args.ordinary_only, args.ordinary_reference)
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
         args.output.write_text(rendered)
         print(rendered, end="")

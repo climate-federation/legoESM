@@ -77,3 +77,27 @@ def test_walk_is_complete_and_source_observer_is_write_only():
     assert "jax.debug.callback(\n                    _zdf_momentum_observer" in text
     assert "zdf_momentum_observer" not in gate.build_nemo_testcase_card(
         "OVERFLOW-zps").recipe.model_config._fields
+
+
+def test_ordinary_reference_is_hash_bound(tmp_path):
+    state = tmp_path / "ordinary.state.npz"
+    np.savez_compressed(state, u=np.arange(3, dtype=np.float64))
+    report = tmp_path / "ordinary.json"
+    report.write_text(json.dumps({
+        "format": gate.FORMAT,
+        "status": "ORDINARY_WRITTEN",
+        "ordinary_state": {
+            "path": str(state),
+            "sha256": gate.R60._sha256(state),
+            "fields": ["u"],
+        },
+    }))
+    _, arrays = gate._read_ordinary(report)
+    assert np.array_equal(arrays["u"], np.arange(3, dtype=np.float64))
+    state.write_bytes(state.read_bytes() + b"x")
+    try:
+        gate._read_ordinary(report)
+    except RuntimeError as error:
+        assert "hash drift" in str(error)
+    else:  # pragma: no cover - non-vacuity guard
+        raise AssertionError("ordinary-state hash plant did not fire")
