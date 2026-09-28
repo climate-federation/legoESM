@@ -22,13 +22,32 @@ FORMAT = "nemo-testcase-l1-overflow-round61-raw-kaa-v1"
 SOURCE_ORDER = R60.SOURCE_ORDER
 
 
-def _collect(card, state, ordinary_after, momentum, masks):
-    """Extend round 60 with the one missing production-bound raw-Kaa frame."""
-    arrays, rows = R60._collect(
-        card, state, ordinary_after, momentum, masks)
+def _collect(card, state, ordinary_after, momentum, masks,
+             round60_report: Path, entry_input: Path):
+    """Extend the hash-bound round-60 sidecar with one freshly measured frame."""
+    prior = json.loads(round60_report.read_text())
+    R60.require(prior["format"] == R60.FORMAT, "round-60 report format drift")
+    R60.require(
+        prior["controlled_entry"]["sha256"] == R60._sha256(entry_input),
+        "round-60 controlled-entry hash drift")
+    arrays = R60._read_sidecar(prior)
+    rows = list(prior["rows"])
+    u_mask = np.asarray(masks["u"], dtype=bool)
+    current_entry = R60._active(R60._physical_u(state.u.data, u_mask), u_mask)
+    current_final = R60._active(
+        R60._physical_u(ordinary_after.u.data, u_mask), u_mask)
+    R60.require(
+        np.array_equal(current_entry, arrays["kt3.entry.u"]),
+        "current controlled entry differs from round-60 sidecar")
+    R60.require(
+        np.array_equal(current_final, arrays["s3.postbar_kaa.u"]),
+        "current postbar U differs from round-60 sidecar")
+    R60.require(
+        np.array_equal(current_final, arrays["kt4.entry.u"]),
+        "current kt4 entry differs from round-60 sidecar")
+
     observed = R60._observer(
         card, state, expose_stage3_raw_momentum=True)
-    u_mask = np.asarray(masks["u"], dtype=bool)
     raw = R60._physical_u(observed["u"], u_mask)
     reference = R60._physical_levels(
         R60._nemo_owned(momentum[3]["raw_kaa_u"]), u_mask)
@@ -104,7 +123,7 @@ def compare(reference_path: Path, candidate_report: dict) -> dict:
 
 
 def run(output: Path, expect_commit: str, reference: Path | None,
-        plant: bool, entry_input: Path) -> dict:
+        plant: bool, entry_input: Path, round60_report: Path) -> dict:
     stamp = worktree_stamp()
     R60.require(stamp["clean"], "producer worktree is dirty")
     R60.require(
@@ -136,7 +155,9 @@ def run(output: Path, expect_commit: str, reference: Path | None,
     ordinary = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
     ordinary_after = ordinary.step(state, dt=card.dt_s)
     print("ROUND61_KT4_ENTRY_READY", file=sys.stderr, flush=True)
-    arrays, rows = _collect(card, state, ordinary_after, momentum, masks)
+    arrays, rows = _collect(
+        card, state, ordinary_after, momentum, masks,
+        round60_report, entry_input)
 
     if plant:
         name = "kt3.entry.u"
@@ -170,6 +191,10 @@ def run(output: Path, expect_commit: str, reference: Path | None,
         "plant": plant,
         "controlled_entry": {
             "path": str(entry_input), "sha256": R60._sha256(entry_input)},
+        "round60_source": {
+            "path": str(round60_report),
+            "sha256": R60._sha256(round60_report),
+        },
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     report["sidecar"] = R60._write_sidecar(output, arrays)
@@ -183,13 +208,14 @@ def main(argv=None) -> int:
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--entry-input", type=Path, required=True)
+    parser.add_argument("--round60-report", type=Path, required=True)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--plant-entry", action="store_true")
     args = parser.parse_args(argv)
     try:
         report = run(
             args.output, args.expect_commit, args.reference,
-            args.plant_entry, args.entry_input)
+            args.plant_entry, args.entry_input, args.round60_report)
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
         args.output.write_text(rendered)
         print(rendered, end="")
