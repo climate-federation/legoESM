@@ -4173,6 +4173,24 @@ def test_fv3_duo_windows_flags_round_trip_and_validate():
     cfg.validate_strict()
 
 
+def test_fv3_duo_column_lane_flag_round_trips_and_validates():
+    """--fv3-duo-column-lane reaches DycoreConfig (default False) and
+    validate_strict refuses it with the window layout."""
+    cfg = _fv3_duo_cfg([])
+    assert cfg.dycore.fv3_duo_column_lane is False
+    cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
+    assert cfg.dycore.fv3_duo_column_lane is True
+    cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-column-lane", "--fv3-duo-windows", "2",
+                        "--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="rung 7"):
+        cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
+    cfg = cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid"))
+    with pytest.raises(ValueError, match="fv3_duo_column_lane needs"):
+        cfg.validate_strict()
+
+
 def test_fv3_duo_windows_without_pad_is_refused():
     """The pad is a measured per-deck halo width, never defaulted."""
     cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2"])

@@ -467,6 +467,109 @@ def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
             f"choose a lane that supports them.")
 
 
+def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
+    """The FV3 duo as a COLUMN model for the MPAS lane (route A).
+
+    The MPAS lane consumes the whole ExperimentConfig surface, so the
+    closed lane's default-deny wall does not apply; what the column lane
+    cannot honour yet is refused HERE, by name, so nothing is silently
+    inert (the wall's failure mode):
+      * the MPAS-lane numerics knobs that edit the state after the step
+        (top sponge, q_v del2/del4 smoothing): the columns are a VIEW of
+        the duo bundle and the model refuses wind edits; q_v smoothing
+        is OFF on the duo by decision (user 2026-09-26);
+      * held_suarez_forcing: the closed lane's FV3 hswf is the certified
+        HS on this dycore; the MPAS lane's HS drops the meridional drag;
+      * distributed / windows / NH / km outside {5, 10} (rung 7 / M4).
+    """
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel,
+    )
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig,
+        FV3DuoDynamicsModel,
+    )
+    from legoesm.grids.factory import create_fv3_duo_grid
+
+    refused = []
+    if getattr(config, "sponge_enabled", False):
+        refused.append("sponge_enabled=True (post-step wind edit)")
+    for k in ("mpas_qv_smooth_del2_m2s", "mpas_qv_smooth_del4_m4s"):
+        if float(getattr(config, k, 0.0) or 0.0) != 0.0:
+            refused.append(f"{k}={getattr(config, k)!r} (q_v smoothing is "
+                           "OFF on the duo, decision 2026-09-26)")
+    if config.held_suarez_forcing:
+        refused.append("held_suarez_forcing=True (use the closed duo lane's "
+                       "certified FV3 hswf)")
+    if config.distributed:
+        refused.append("distributed=True (single-process; windows are rung 7)")
+    if model_type != "hydrostatic":
+        refused.append(f"model_type={model_type!r} (hydrostatic only: the "
+                       "column increments rebuild the hydrostatic pressures)")
+    if config.precision not in ("fp64", "float64", "mixed_fp64_storage"):
+        refused.append(f"precision={config.precision!r} (fp64 only)")
+    # the vertical table follows nlev: the certified analytic branch at
+    # 5/10, CAM6's L32 table at 32 (user decision 2026-09-26: CAM L32)
+    eta = {5: "analytic", 10: "analytic", 32: "cam6_l32"}.get(gc.nlev)
+    if eta is None:
+        refused.append(f"grid.nlev={gc.nlev} (analytic set_eta km in {{5, 10}} "
+                       "or the CAM6 L32 table at 32)")
+    # Anything the driver regrids onto self.grid in setup() lands on the
+    # STANDARD cubed-sphere cell centres, which are NOT the duo's A-grid
+    # (MEASURED 2026-09-26, C12: 1.6 deg offsets on matching faces, faces
+    # 2-4 permuted) -- until M6 builds the forcings on the column mesh,
+    # every such input is refused rather than misplaced.
+    if config.dataset != "analytical":
+        refused.append(f"dataset={config.dataset!r} (SST/SIC regrid on the "
+                       "driver grid is M6)")
+    if config.topography != "flat":
+        refused.append(f"topography={config.topography!r} (an elevation "
+                       "file is M6; with ic='era5' the terrain is ERA5's own "
+                       "phis, del-2 filtered topo_smoothing passes, as on "
+                       "the MPAS lane)")
+    if config.use_multilayer_land:
+        refused.append("use_multilayer_land=True (land data regrid is M6)")
+    if config.radiation != "none":
+        refused.append(f"radiation={config.radiation!r} (ozone/aerosol/solar "
+                       "boundary regrids are M6)")
+    # The column model's mass block is FV3's nwat=3 warm-rain block; a
+    # scheme that moves water into ice / snow / graupel would have that
+    # water DROPPED (codex 2026-09-26: Morrison nucleation takes vapour
+    # and hands ice, which no slot receives).  Until the nwat=6 block is
+    # ported, only warm-rain microphysics and no convection.
+    if config.microphysics not in ("none", "kessler"):
+        refused.append(f"microphysics={config.microphysics!r} (ice species; "
+                       "the nwat=6 mass block is not ported)")
+    if config.convection != "none":
+        refused.append(f"convection={config.convection!r} (detrained ice; "
+                       "the nwat=6 mass block is not ported)")
+    # MPAS-dycore numerics knobs (dycore.mpas_*) are the MPAS model's; the
+    # duo reads none of them, so a non-default value would be inert
+    d_def = type(config.dycore)()
+    inert = [f for f in config.dycore._fields
+             if f.startswith("mpas_")
+             and getattr(config.dycore, f) != getattr(d_def, f)]
+    if inert:
+        refused.append("dycore." + ", dycore.".join(inert)
+                       + " (MPAS-dycore knobs the duo does not read)")
+    if getattr(config.output, "budget_ledger", False):
+        refused.append("output.budget_ledger=True (the column model exports "
+                       "no per-step ledger)")
+    if refused:
+        raise ValueError(
+            "fv3_duo column lane cannot honour: " + "; ".join(refused))
+    moist = any(getattr(config, k) != "none"
+                for k in ("microphysics", "convection", "turbulence"))
+    bundle = create_fv3_duo_grid(gc.resolution)
+    if bundle.ctx_np.get("ectx") is None:
+        raise ValueError("fv3_duo column lane needs the duo ext bundle "
+                         "(ctx['ectx'] with amat6) for the c2l column winds")
+    dyn = FV3DuoDynamicsModel(
+        bundle, FV3DuoConfig(km=gc.nlev, hydrostatic=True,
+                             storage_dtype="float64", moist=moist, eta=eta))
+    return FV3DuoColumnModel(dyn)
+
+
 def create_atmosphere_dycore(
     config: ExperimentConfig,
     grid,
@@ -837,6 +940,9 @@ def create_atmosphere_dycore(
         return MPASCompressibleEulerModel(grid, height_coord, terrain_metric, nh_cfg)
 
     # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
+    if (solver_name == "fv3_duo_primitive_equations"
+            and getattr(config.dycore, "fv3_duo_column_lane", False)):
+        return _create_fv3_duo_column_model(config, gc, model_type)
     if solver_name == "fv3_duo_primitive_equations":
         # Slice 1 contract, enforced LOUDLY. The core SUPPORTS moist
         # coupling (zvir != 0) on both arms now, but this lane never

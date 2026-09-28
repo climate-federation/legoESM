@@ -332,6 +332,12 @@ class DycoreConfig(NamedTuple):
     # invariant both sides were preserving independently.
     fv3_duo_windows: int | None = None
     fv3_duo_window_pad: int | None = None
+    # FV3 duo as a COLUMN model inside the MPAS lane (route A, 2026-09-26,
+    # docs/architecture/fv3_duo_amip_adapter_plan.md): the duo is the
+    # dynamics operator of ``_run_mpas`` through FV3DuoColumnModel, so the
+    # CAM6 AMIP suite (physics on (nCells, nlev) columns) drives it
+    # without any physics rewrite.  False = the closed certified duo lane.
+    fv3_duo_column_lane: bool = False
 
     # Divergence-SELECTIVE biharmonic damping on the MPAS hydrostatic lane,
     # as a multiple of CAM-FV's own ldiv4 coefficient 0.01*area^2/dt
@@ -2003,6 +2009,15 @@ class ExperimentConfig(NamedTuple):
         elif d.fv3_duo_window_pad is not None:
             errors.append(
                 "dycore.fv3_duo_window_pad given without dycore.fv3_duo_windows")
+        if d.fv3_duo_column_lane:
+            if d.discretization != "fv3_duo":
+                errors.append(
+                    "dycore.fv3_duo_column_lane needs "
+                    f"dycore.discretization='fv3_duo', got {d.discretization!r}")
+            if d.fv3_duo_windows is not None:
+                errors.append(
+                    "dycore.fv3_duo_column_lane runs on six faces; the window "
+                    "layout is certification rung 7 (drop fv3_duo_windows)")
         if d.hyperdiff_scale < 0:
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:

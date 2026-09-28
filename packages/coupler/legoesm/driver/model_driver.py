@@ -1144,6 +1144,26 @@ def _seed_nucleated_ice_number(N_i, dq_i, ice_nuc_mass, n_i_nuc_max, p_full, T):
     return N_i + jnp.minimum(d_n_raw, headroom)
 
 
+def _cell_winds(state, grid, *, level=None, u_override=None):
+    """Geographic cell-centre winds of an MPAS-lane state: the Perot
+    reconstruction of the edge-normal ``u`` on a Voronoi mesh, or the
+    state's own ``(u, v)`` when it carries cell winds (the FV3 duo column
+    model, ``state.v is not None``).  ``level`` selects one level first
+    (``-1`` = lowest); ``u_override`` replaces the edge field (halo-
+    refreshed copies on the cell-partition lane; edge states only)."""
+    if state.v is not None:
+        if u_override is not None:
+            raise ValueError("_cell_winds: u_override is an edge-field "
+                             "hook; the column model carries cell winds")
+        u, v = state.u.data, state.v.data
+        return (u, v) if level is None else (u[:, level], v[:, level])
+    from legoesm.grids.voronoi import reconstruct_cell_velocity
+    u = state.u.data if u_override is None else u_override
+    if level is not None:
+        u = u[:, level]
+    return reconstruct_cell_velocity(u, grid)
+
+
 def _is_mpas_cell_partitioned(drv) -> bool:
     """True iff *drv* is running a MULTI-rank MPAS/Voronoi cell partition —
     i.e. every per-cell array it holds is a rank-local ``(n_local_cells,)``
@@ -2753,7 +2773,10 @@ class ModelDriver:
         # ERA5 IC override — replace held-suarez rest state with ERA5 reanalysis.
         # Applied after the default moisture init so the Field metadata (dims,
         # units, names) from held_suarez_init is preserved as the template.
-        if cfg.ic == "era5" and cfg.ic_path:
+        if (cfg.ic == "era5" and cfg.ic_path
+                and not getattr(cfg.dycore, "fv3_duo_column_lane", False)):
+            # (the fv3_duo column lane builds its ERA5 IC on its own mesh
+            # in _run_fv3_duo_column; the driver grid is not the duo's)
             from legoesm.training.era5_to_state import (
                 load_era5_ic,
                 era5_to_cubedsphere_carry,
@@ -7569,7 +7592,10 @@ class ModelDriver:
                 # discovering its host callback has nowhere to land
                 # (GLM 2026-09-22)
                 require_cpu_for_strict_sedimentation()
-            if self.config.dycore.discretization == "fv3_duo":
+            if (self.config.dycore.discretization == "fv3_duo"
+                    and self.config.dycore.fv3_duo_column_lane):
+                status = self._run_fv3_duo_column(start_step, start_day)
+            elif self.config.dycore.discretization == "fv3_duo":
                 warn_sed_substeps_unreported(
                     self.config, "fv3_duo",
                     getattr(self.physics, "micro_config", None))
@@ -8071,11 +8097,12 @@ class ModelDriver:
         ``None`` (serial / single-rank) uses ``state.u`` directly and is
         byte-identical.
         """
-        from legoesm.grids.voronoi import reconstruct_cell_velocity
         state = self.state
-        # Geographic cell-centre winds from the edge-normal velocity.
-        u_edges = state.u.data if u_override is None else u_override
-        u_east, v_north = reconstruct_cell_velocity(u_edges, self.grid)
+        # Geographic cell-centre winds from the edge-normal velocity (or
+        # the column model's own cell winds).
+        u_east, v_north = _cell_winds(
+            state, self.grid,
+            u_override=u_override)
         tas, ts = ModelDriver._mpas_surface_temperatures(
             self, day, diag, u_east, v_north)
 
@@ -8587,6 +8614,94 @@ class ModelDriver:
     _FV3_DUO_BLOWUP_UMAX_MS = 400.0
     _FV3_DUO_CKPT_SCHEMA = "fv3duo_ckpt_v1"
     _FV3_DUO_PRESS_KEYS = ("ps", "pe", "peln", "pk", "pkz")
+
+    def _run_fv3_duo_column(self, start_step: int = 0,
+                            start_day: float | None = None) -> str:
+        """The FV3 duo through the MPAS lane (route A): the driver's grid,
+        vertical coordinate and state become the column model's, then
+        ``_run_mpas`` runs unchanged with the duo as its dynamics
+        operator.  Fresh IC = the closed lane's own builder
+        (``_fv3_duo_fresh_ic``: DCMIP16 baroclinic wave, Kessler slots)
+        seen through the column view, so rung 1 of the ladder is the
+        SAME bundle on both lanes.  Restart (M5) and the ERA5 IC (M4)
+        are refused here by name.
+        """
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+            FV3DuoColumnModel,
+        )
+        if not isinstance(self.model, FV3DuoColumnModel):
+            raise ValueError(
+                "fv3_duo_column_lane: the constructed dycore is "
+                f"{type(self.model).__name__}, not FV3DuoColumnModel")
+        if getattr(self, "_fv3_duo_restart_bundle", None) is not None:
+            raise NotImplementedError(
+                "fv3_duo column lane: restart is M5 (the MPAS writer does "
+                "not carry the duo bundle yet)")
+        if self.config.output.checkpoint_days > 0:
+            raise NotImplementedError(
+                "fv3_duo column lane: checkpoints are M5; run with "
+                "checkpoint_days=0")
+        if getattr(self, "_ensemble_size", 1) not in (None, 1):
+            raise NotImplementedError(
+                "fv3_duo column lane threads no ensemble axis")
+        cfg = self.config
+        if cfg.ic == "era5":
+            # ERA5 IC (M4): the duo grid is REBUILT with the ERA5 terrain
+            # (phis_fn on the padded A-grid, FV3's del-2 filter ON the duo
+            # grid, cfg.topo_smoothing passes -- the same field the MPAS
+            # path reads for its Laplacian passes) and the bundle built on
+            # the column mesh; the factory's flat model is discarded.
+            from legoesm.grids.factory import create_fv3_duo_grid
+            from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+                FV3DuoColumnModel,
+            )
+            from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+                FV3DuoDynamicsModel,
+            )
+            from legoesm.training.era5_to_state import (
+                era5_phis_fn, era5_to_fv3_duo_bundle, load_era5_ic,
+            )
+            if not cfg.ic_path:
+                raise ValueError("ic='era5' needs ic_path")
+            era5 = load_era5_ic(cfg.ic_path, cfg.start_year)
+            old = self.model.dyn
+            grid = create_fv3_duo_grid(
+                old.grid.n, old.grid.ng, phis_fn=era5_phis_fn(era5),
+                phis_filter_iter=int(cfg.topo_smoothing))
+            self.model = FV3DuoColumnModel(
+                FV3DuoDynamicsModel(grid, old.config),
+                tracer_names=self.model.tracer_names)
+            self.grid = self.model.mesh
+            self.sigma = self.model.sigma_coord
+            bundle = era5_to_fv3_duo_bundle(
+                era5, self.model, n_tracers=len(self.model.tracer_names))
+            logger.info(
+                "  fv3_duo column lane: ERA5 IC %s year %s, terrain del-2 "
+                "x%d, phis max %.0f m2/s2, p_s [%.0f, %.0f] Pa",
+                cfg.ic_path, cfg.start_year, int(cfg.topo_smoothing),
+                float(np.max(self.model._phis)),
+                float(jnp.min(bundle["press"]["ps"][:, self.model.ng:-self.model.ng,
+                                                    self.model.ng:-self.model.ng])),
+                float(jnp.max(bundle["press"]["ps"][:, self.model.ng:-self.model.ng,
+                                                    self.model.ng:-self.model.ng])))
+        else:
+            self.grid = self.model.mesh
+            self.sigma = self.model.sigma_coord
+            # the duo's own IC through the view (Kessler slots when on)
+            dyn = self.model.dyn
+            bundle = dyn.dcmip16_initial_state(do_pert=True)
+            q0 = bundle["q"][0]
+            bundle = {**bundle,
+                      "q": [q0, jnp.zeros_like(q0), jnp.zeros_like(q0)]}
+        self.state = self.model.from_bundle(bundle)
+        dyn = self.model.dyn
+        self.tracers = {nm: f.data for nm, f in self.state.tracers.items()}
+        self._phis_data = self.state.phis.data
+        logger.info(
+            "  fv3_duo COLUMN lane: C%d km=%d moist=%s, %d columns through "
+            "_run_mpas", dyn.grid.n, dyn.config.km, dyn.config.moist,
+            self.model.mesh.nCells)
+        return self._run_mpas(start_step, start_day)
 
     def _run_fv3_duo(self, start_step: int = 0,
                      start_day: float | None = None) -> str:
@@ -10852,7 +10967,6 @@ class ModelDriver:
             # never advance.
             from legoesm.land.multilayer_land import step_multilayer_land
             from legoesm.core.coupling_fields import AtmToSurface
-            from legoesm.grids.voronoi import reconstruct_cell_velocity
             _lml_cfg = self.physics.land_ml_cfg
             _lml_params = self.physics.land_ml_params
             _lml_lat = self.physics.land_ml_lat
@@ -11082,8 +11196,7 @@ class ModelDriver:
                 q_air = (_qv_tr.data[:, -1] if _qv_tr is not None
                          else jnp.zeros_like(T_air))
                 p_s = jnp.asarray(self.state.p_s.data).reshape(-1)
-                u_c, v_c = reconstruct_cell_velocity(
-                    self.state.u.data[:, -1], self.grid)
+                u_c, v_c = _cell_winds(self.state, self.grid, level=-1)
                 # Same conventions as the coupled tile: p_lowest ~ 0.99 p_s,
                 # ideal-gas rho at the lowest level, snow split at T_freeze.
                 # The zenith is the REAL per-cell sun (same doy/seconds the
@@ -12316,13 +12429,11 @@ class ModelDriver:
                     from legoesm.diagnostics.energy_budget import (
                         area_weighted_mean as _awm,
                     )
-                    from legoesm.grids.voronoi import reconstruct_cell_velocity
                     _awt = self.diagnostics._area_w
                     # MPAS u is EDGE-normal (nEdges, nlev); the column KE term
                     # needs cell-centred east/north winds (codex P0).  Perot
                     # reconstruction, the same the turbulence/coupler paths use.
-                    _uc, _vc = reconstruct_cell_velocity(self.state.u.data,
-                                                         self.grid)
+                    _uc, _vc = _cell_winds(self.state, self.grid)
                     _eb = _ebd.update(
                         self.state.T.data, _qv_e, _uc, _vc,
                         self.state.phis.data, p_s_data,
@@ -12516,7 +12627,8 @@ class ModelDriver:
                 # it over the generic bounds message.  MPAS-only, eager path —
                 # no SegmentCarry / _step_jit signature change.
                 _floor_reason = t_min_floor_blowup_reason(
-                    elapsed_day, T_min, float(self.model.config.T_min))
+                    elapsed_day, T_min,
+                    float(getattr(self.model.config, "T_min", 0.0)))
                 _reason = _floor_reason or _bounds_reason
                 if (not T_finite) or _reason is not None:
                     run_status = (_reason
