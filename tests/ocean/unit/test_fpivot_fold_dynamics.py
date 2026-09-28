@@ -281,3 +281,18 @@ def test_implicit_helmholtz_fold_row_matches_independent_stencil():
     div = (H_u[-1, c + 1] * dyu[-1, c + 1] * gxE - H_u[-1, c] * dyu[-1, c] * gxW
            + H_v[-1] * dxv[-1] * gyN - H_v[-2] * dxv[-2] * gyS) / area[-1]
     np.testing.assert_allclose(A, e - coeff * div, rtol=1e-11, atol=1e-12)
+
+
+def test_vertical_viscosity_acts_on_the_fold_line():
+    """Implicit vertical viscosity reaches the fold-line v face: raising A_v
+    changes the fold-line v after one step about as much as the row below
+    (a walled face -- zero face viscosity/thickness -- would not change)."""
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as mod
+    out = []
+    for a_v in (1.0e-3, 1.0e-1):
+        grid, zc, cfg, st = _setup(dict(CARD, A_v=a_v))
+        out.append(np.asarray(mod.LatLonCGridOceanModel(grid, zc, cfg)
+                              .step(st, 300.0).v.data))
+    d = np.abs(out[1] - out[0])
+    assert d[-2].max() > 0.0
+    assert d[-1].max() > 0.1 * d[-2].max(), (d[-1].max(), d[-2].max())

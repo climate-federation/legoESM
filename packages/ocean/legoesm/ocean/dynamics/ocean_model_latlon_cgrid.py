@@ -8682,7 +8682,11 @@ class LatLonCGridOceanModel:
             dz_u = interp_cell_to_uface(dz_cell)
             # Fused v-interps: one sendrecv pair per cut for A_v + dz
             # (audit lever O4; both are independent cell fields here).
-            A_v_v, dz_v = interp_to_v_points_multi((A_v_cell, dz_cell))
+            # F-pivot: the fold-line face reads the top cell and its fold
+            # image; every other layout keeps the grid-less (wall) form.
+            A_v_v, dz_v = interp_to_v_points_multi(
+                (A_v_cell, dz_cell),
+                grid=_grid if fpivot_active(_grid) else None)
             # UNMASKED face thickness, kept under its own name because two
             # consumers need a POSITIVE thickness rather than the masked
             # control volume built below: the centre-to-centre gradient slot
