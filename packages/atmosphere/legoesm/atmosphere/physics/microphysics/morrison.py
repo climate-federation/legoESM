@@ -85,7 +85,10 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     donor_clamp_scale,
 )
 from legoesm.atmosphere.physics._shared import safe_divide
-from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+from legoesm.atmosphere.physics.microphysics.config import (
+    SED_CFL_SUBSTEPS_MAX_LIMIT,
+    MorrisonConfig,
+)
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
@@ -121,8 +124,12 @@ _VT_CAP_GRAUPEL = 20.0           # graupel fall-speed cap [m/s]
 # every configured lane with >2x margin EXCEPT N=1 at 1800 s (graupel 269),
 # which the required-count diagnostic / strict mode makes visible: when the
 # cap binds the flux cap fires and the species falls slower than its terminal
-# speed (mass conserved, transport wrong).  The count is undefined for a NaN
-# fall speed (int cast of NaN); the strict gate is not a NaN guard.
+# speed (mass conserved, transport wrong).  A NON-FINITE fall speed reports
+# the int32 ceiling, so the strict gate fires on it too.
+# ^ the DEFAULT of ``MorrisonConfig.sed_cfl_substeps_max``, which a deck sizes
+# per lane; the loop cost is LINEAR in it (that field's comment has the
+# measured milliseconds).  The hard ceiling of that field lives with the
+# field, in ``microphysics.config.SED_CFL_SUBSTEPS_MAX_LIMIT``.
 _SEDIMENTATION_SUBSTEPS_MAX = 256
 _VT_CLIP_RAIN = 20.0             # rain fall-speed clip ceiling [m/s]
 _VT_CLIP_FROZEN = 5.0            # snow/ice fall-speed clip ceiling [m/s]
@@ -274,6 +281,26 @@ def morrison_microphysics(
         hard_threshold=config.hard_sat_adjust_threshold,
         hard_max_heating_K=config.hard_sat_max_heating_K,
     )
+    # CAM6 arrangement: when the turbulence closure already diagnosed this
+    # layer's cloud liquid and handed it to the host, MG2 carries no
+    # vapour-to-liquid CONDENSATION (micro_mg_cam.F90:668-672 switches the
+    # residual block at micro_mg2_0.F90:2688-2730 off under CLUBB).
+    #
+    # POSITIVE BRANCH ONLY.  An earlier version of this gate zeroed the signed
+    # rate, which was wrong twice over.  CAM's residual block is guarded by
+    # ``qtmp > qvn`` at micro_mg2_0.F90:2700, i.e. it fires only on positive
+    # supersaturation and has no evaporation branch to switch off in the first
+    # place.  And our default ``wbf_scheme="emergent"`` has NO explicit
+    # Bergeron rate (see the WBF section below): the mixed-phase cloud-water
+    # sink IS the negative branch here, evaporating liquid as ice deposition
+    # draws vapour below liquid saturation.  Zeroing it deleted that sink
+    # outright on any ice-supersaturated, liquid-subsaturated cell.
+    #
+    # ``q_sat`` is untouched -- rain evaporation, the sub-grid cloud-fraction
+    # closure and the ice branch all still read it.  Static Python gate on a
+    # config bool, the documented feature-gating exception to ``jnp.where``.
+    if config.liquid_from_closure:
+        condensation = jnp.minimum(condensation, 0.0)
     # Sub-grid in-cloud closure (Morrison & Gettelman 2008): evaluate the
     # warm-rain rates on the IN-CLOUD water q_c/cf and scale back by cf, so the
     # non-linear KK2000/SB rates see the (higher) in-cloud concentration rather
@@ -1262,7 +1289,16 @@ def morrison_microphysics(
         raise ValueError(
             "MorrisonConfig.sed_cfl_substeps_strict=True needs "
             "sed_cfl_substeps=True (nothing to check otherwise)")
-    _nsub = (_SEDIMENTATION_SUBSTEPS_MAX if config.sed_cfl_substeps else 1)
+    if (not isinstance(config.sed_cfl_substeps_max, int)
+            or isinstance(config.sed_cfl_substeps_max, bool)
+            or not 1 <= config.sed_cfl_substeps_max
+            <= SED_CFL_SUBSTEPS_MAX_LIMIT):
+        raise ValueError(
+            "MorrisonConfig.sed_cfl_substeps_max must be an int in "
+            f"[1, {SED_CFL_SUBSTEPS_MAX_LIMIT}] (the sub-step loop cost is "
+            f"linear in it), got {config.sed_cfl_substeps_max!r}")
+    _nsub_max = int(config.sed_cfl_substeps_max)
+    _nsub = (_nsub_max if config.sed_cfl_substeps else 1)
     sed_r, precip_r, _req_r = sedimentation_tendency(
         q_r, rho, V_t_r, dz, dt=dt,
         return_surface_flux=True,
@@ -1289,20 +1325,37 @@ def morrison_microphysics(
     )
     # Required (unclipped) count, max over species; the number calls below
     # share each species' count (cfl_speed pairs mass and number speeds).
+    _sed_poison = None
     if config.sed_cfl_substeps:
         sed_substeps_required = jnp.maximum(
             jnp.maximum(_req_r, _req_i), jnp.maximum(_req_s, _req_g))
         if config.sed_cfl_substeps_strict:
             # equinox error_if: a custom_jvp puts the check outside AD, so the
-            # gate is jit- and gradient-safe (equinox/_errors.py).
-            sed_substeps_required = eqx.error_if(
-                sed_substeps_required,
-                jnp.any(sed_substeps_required > _SEDIMENTATION_SUBSTEPS_MAX),
+            # gate is jit- and gradient-safe (equinox/_errors.py).  It is
+            # attached to the SEDIMENTATION TENDENCIES and surface fluxes, not
+            # only to the diagnostic count: a caller that discards the count
+            # let XLA eliminate the check as dead code (codex 2026-09-22
+            # reproduced exactly that, under jit AND under grad).
+            _overflow = jnp.any(sed_substeps_required > _nsub_max)
+            (sed_substeps_required, sed_r, sed_i, sed_s, sed_g,
+             precip_r, precip_i, precip_s, precip_g) = eqx.error_if(
+                (sed_substeps_required, sed_r, sed_i, sed_s, sed_g,
+                 precip_r, precip_i, precip_s, precip_g),
+                _overflow,
                 "Morrison sedimentation: a column needs more CFL sub-steps "
-                f"than _SEDIMENTATION_SUBSTEPS_MAX={_SEDIMENTATION_SUBSTEPS_MAX} "
-                "(the loop would clamp and the species fall slower than its "
-                "terminal speed); shorten the physics sub-step or raise "
-                "_SEDIMENTATION_SUBSTEPS_MAX")
+                f"than MorrisonConfig.sed_cfl_substeps_max={_nsub_max} (the "
+                "loop clamps and the species falls slower than its terminal "
+                "speed); shorten the physics sub-step or raise the cap")
+            # ``error_if`` alone is not enough: its check sits OUTSIDE AD (a
+            # custom_jvp), so ``jit(grad(f))`` keeps the gradient and drops
+            # the abort, and a caller reading an output that does not descend
+            # from sedimentation (``dq_v_dt``) never touches it at all (codex
+            # 2026-09-22 reproduced both).  ``_sed_poison`` is exactly 1.0
+            # unless the cap is exceeded and multiplies EVERY returned field
+            # below, so the guard is a real data dependency of every consumer
+            # and of its derivative: on overflow the outputs and their
+            # gradients are NaN, which no caller can silently ignore.
+            _sed_poison = jnp.where(_overflow, jnp.nan, 1.0)
     else:
         sed_substeps_required = None
     # NUMBER sedimentation (so the rain/ice number falls WITH the mass and the
@@ -1712,7 +1765,7 @@ def morrison_microphysics(
     # (No placeholder outputs here — every MicrophysicsOutput field below is
     # a computed tendency, so no dtype pin is needed; a former bare
     # ``jnp.zeros(...)`` expression at this point was dead code.)
-    return MicrophysicsOutput(
+    out = MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
         dq_c_dt=dq_c_dt,
@@ -1728,3 +1781,52 @@ def morrison_microphysics(
         dN_g_dt=dN_g_dt,
         sed_substeps_required=sed_substeps_required,
     )
+    if getattr(config, "publish_qc_budget", False):
+        # APPLIED terms: every sink below already carries ``qc_scale`` (the
+        # donor clamp), and ``condensation`` is the saturation-adjustment
+        # source.  They reconstruct ``dq_c_dt`` exactly -- the probe asserts
+        # the residual, so a term added to ``dq_c_dt`` without being listed
+        # here is caught rather than hidden.  Sedimentation of cloud water is
+        # NOT a q_c term in this scheme (cloud droplets do not sediment); it
+        # appears in the rain budget instead.
+        out = out._replace(qc_budget={
+            "condensation": condensation,
+            "autoconversion": -dq_c_au,
+            "accretion": -dq_c_ac,
+            "bergeron": -bergeron,
+            "riming_ice": -riming_i,
+            "riming_snow": -riming_s,
+            "riming_graupel": -riming_g,
+            "homogeneous_freezing": -homo_freeze_c,
+        })
+    if _sed_poison is not None:
+        # Strict mode: every FLOAT field carries the overflow guard (the
+        # count stays a usable integer).  Static Python branch -- the
+        # non-strict graph is untouched.  BOTH a multiply and an add: the
+        # multiply propagates the poison into derivatives, the add reaches a
+        # field that is structurally ZERO (dN_c_dt with predict_Nc=False),
+        # where a multiply alone still leaves 0 * NaN unevaluated in some
+        # simplifications.  Residual, documented limit: a loss reading ONLY a
+        # field that does not depend on the differentiated input at all has
+        # no AD path, so jit(grad) of it returns zeros with no abort -- the
+        # forward value is NaN and the reported count still shows the
+        # overflow (codex 2026-09-22).  A ``where`` would be bit-neutral on
+        # the clean path (the ADD turns -0.0 into +0.0; the multiply by 1.0
+        # does not) but its
+        # DERIVATIVE on overflow is 0, not NaN, which is the silent failure
+        # this guard exists to prevent; strict and non-strict arms are not
+        # claimed bit-identical (GLM 2026-09-22).
+        _bias = jnp.where(jnp.isnan(_sed_poison), jnp.nan, 0.0)
+        # ``qc_budget`` is a dict of arrays, not an array: ``jnp.asarray`` on a
+        # dict raises, so filter on type BEFORE probing the dtype.  The budget
+        # is a diagnostic and carries no gradient the guard needs to poison.
+        def _is_float_array(v):
+            if v is None or isinstance(v, dict):
+                return False
+            return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
+
+        out = out._replace(**{
+            _k: getattr(out, _k) * _sed_poison + _bias
+            for _k in out._fields
+            if _is_float_array(getattr(out, _k))})
+    return out

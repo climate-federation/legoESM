@@ -52,8 +52,28 @@ MARKERS = ["o", "s", "^", "D", "v", "P"]
 FIRST_REAL_F64_JOB = 27253192
 # canonical vertical levels per lane: receipts at other level counts are a
 # different problem and are dropped (e.g. the 32-level MPAS probe rows)
-NLEV = {("atmosphere", "latlon"): 26, ("atmosphere", "icosahedral"): 26,
-        ("atmosphere", "cubed-sphere"): 26, ("ocean", "tripole"): 75, ("ocean", "mpas"): 40}
+#: The vertical level count each lane's curve is built from.  This is a
+#: FILTER, not a label: a receipt at another count is refused rather than
+#: drawn, because the level count changes the cost per cell and mixing two
+#: of them in one curve would read as scaling.
+#:
+#: The atmosphere ladder moved from 26 levels to 40 on 2026-09-23 (26 was
+#: the most expensive count in the repo's measured table, 1.6x the per-level
+#: cost of 40 at subdivision 9, while production AMIP runs 40).  This still
+#: defaults to 26 so the existing curves keep plotting; pass --atm-nlev 40
+#: once enough receipts at the new count exist.  The two sets are NOT
+#: comparable and must not share a figure.
+ATM_NLEV_DEFAULT = 26
+
+
+def _nlev_map(atm_nlev: int) -> dict:
+    return {("atmosphere", "latlon"): atm_nlev,
+            ("atmosphere", "icosahedral"): atm_nlev,
+            ("atmosphere", "cubed-sphere"): atm_nlev,
+            ("ocean", "tripole"): 75, ("ocean", "mpas"): 40}
+
+
+NLEV = _nlev_map(ATM_NLEV_DEFAULT)
 
 
 def _component(r):
@@ -119,7 +139,11 @@ OCEAN_MPAS_PCG_PRECOND = ("poly", 4)
 # rows at any other count or chunk size, or without the stamp, are refused.
 # The 32-channel gain is ATMOSPHERE evidence; the ocean lane (PCG-dominated,
 # 2M+9 allreduces/step) is pinned by decision and A/B-checked separately.
-MPAS_NCCL_CHANNELS = "32"
+MPAS_NCCL_CHANNELS = {"icosahedral": "64", "mpas": "8"}
+# Atmosphere moved 32 -> 64 on 2026-09-25 (s9 at 128 GPUs: -7%, both run
+# orders, jobs 27627022 / 27670098); 32-channel atmosphere rows are refused.
+# Ocean MPAS pins 8 (ladder since 2026-09-24: 32 channels hang that lane at
+# 128 GPUs); older 32-channel ocean rows are refused (owner, 2026-09-25).
 # Multi-rank CPU rows need each rank's full core share (nature_ladder.sbatch
 # passes --cpus-per-task = node threads / ranks-per-node = 64 since
 # 2026-09-21); rows stamped below this, or unstamped, were 1-core ranks
@@ -152,6 +176,10 @@ def load(dirs):
                     continue
                 if r.get("metadata", {}).get("virtual_cpu_devices"):
                     continue
+                # A row with no device count cannot sit on a scaling curve at
+                # all; probe/census receipts in the same trees carry none.
+                if r.get("n_devices") is None:
+                    continue
                 comp = _component(r)
                 grid = _grid(r, comp)
                 prec = r.get("precision") or r.get("metadata", {}).get("precision")
@@ -178,11 +206,15 @@ def load(dirs):
                     # inert and they stay comparable across the change.
                     solver = extra.get("pcg_solver_path")
                     pre = (extra.get("pcg_precond"), extra.get("pcg_poly_sweeps"))
-                    if (solver != "stock_cg_to_tol"
+                    # single_reduce is a different recurrence (and faster);
+                    # a best-of key would silently pick it over the standard row.
+                    variant = extra.get("pcg_variant", "standard")
+                    if variant != "standard" or (
+                            solver != "stock_cg_to_tol"
                             and (iters != OCEAN_MPAS_PCG_ITERS
                                  or pre != OCEAN_MPAS_PCG_PRECOND)):
                         dropped.append((f, int(r["n_devices"]),
-                                        f"{iters}/{pre[0]}{pre[1]}"))
+                                        f"{iters}/{pre[0]}{pre[1]}/{variant}"))
                         continue
                 if _backend(r) == "cpu":
                     aff = r.get("metadata", {}).get("cpu_affinity")
@@ -194,7 +226,8 @@ def load(dirs):
                     env = r.get("metadata", {}).get("extra", {}).get("nccl_env") or {}
                     ch = (env.get("NCCL_MIN_NCHANNELS"), env.get("NCCL_MAX_NCHANNELS"),
                           env.get("NCCL_P2P_NET_CHUNKSIZE"))
-                    if ch != (MPAS_NCCL_CHANNELS, MPAS_NCCL_CHANNELS, MPAS_NCCL_CHUNK):
+                    pin = MPAS_NCCL_CHANNELS.get(grid)
+                    if pin is None or ch != (pin, pin, MPAS_NCCL_CHUNK):
                         dropped_nccl.append((f, int(r["n_devices"]), ch))
                         continue
                 mode = _mode(r, f)
@@ -243,6 +276,14 @@ def load(dirs):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mode", choices=["strong", "weak"], default="strong")
+    ap.add_argument("--atm-nlev", type=int, default=ATM_NLEV_DEFAULT,
+                    help="vertical level count the ATMOSPHERE curves are "
+                         "built from. Receipts at any other count are "
+                         "refused, because the level count changes the cost "
+                         "per cell and mixing two of them in one curve reads "
+                         "as scaling. The ladder moved 26 -> 40 on "
+                         "2026-09-23; this still defaults to 26 so existing "
+                         "curves keep plotting.")
     ap.add_argument("--receipts", nargs="+", required=True)
     ap.add_argument("--out", default="fig_scaling.pdf")
     ap.add_argument("--png", default=None)
@@ -253,6 +294,8 @@ def main() -> int:
                          "performance-tuned (the cube slot carries the legend); "
                          "supp = the cubed-sphere panel alone; all = every panel")
     args = ap.parse_args()
+    global NLEV
+    NLEV = _nlev_map(args.atm_nlev)
 
     best = load(args.receipts)
     series = defaultdict(list)     # (comp,grid,backend,prec,res) -> [(nd, ms, job, file, steps)]

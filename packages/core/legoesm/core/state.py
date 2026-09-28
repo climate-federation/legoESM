@@ -198,11 +198,20 @@ class HydrostaticTendencies(NamedTuple):
 # ``_mpas_cmip_feed_enabled`` explicitly enables the CMOR feed for — accepted
 # ``--clear-sky-diag`` and silently published no rsutcs/rlutcs.  A shared
 # constant makes that class of drift impossible instead of merely tested-for.
+# The three fixed leading slots of the same tuple, so a consumer can derive an
+# extras index instead of hand-counting the prefix.
+MPAS_SFC_DIAG_BASE_KEYS = ("sw_net_sfc", "lw_net_sfc", "precip")
 MPAS_SFC_DIAG_EXTRA_KEYS = (
     "lw_up_toa", "sw_up_toa", "sw_down_toa",
     "shflx_sfc", "lhflx_sfc",
     "sw_down_sfc", "lw_down_sfc",
     "sw_up_toa_clr", "lw_up_toa_clr",
+    # slot 12: the microphysics' REQUIRED CFL sedimentation sub-step count
+    # (int, unclipped).  Appended at the END so every existing slot index is
+    # unchanged; the driver logs it so an overflow (the loop clamped, the
+    # species fell slower than its terminal speed) is visible in a real run
+    # instead of dying only under the strict abort.
+    "sed_substeps_required",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their

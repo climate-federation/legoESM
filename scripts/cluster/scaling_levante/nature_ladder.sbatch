@@ -100,6 +100,24 @@ run_arm() {
   unset NCCL_P2P_NET_CHUNKSIZE NCCL_MIN_NCHANNELS NCCL_MAX_NCHANNELS \
         LEGOESM_LATLON_PACKED_EXCHANGE LEGOESM_LATLON_SPMD_FUSED_HALO LEGOESM_MESH_CACHE_DIR \
         LEGOESM_OCEAN_MIXED LEGOESM_VMIX_F32_SOLVE LEGOESM_BAROCLINIC_F32 LEGOESM_ENABLE_TF32
+  # ATMOSPHERE VERTICAL LEVELS. 40, matching what production AMIP runs
+  # (run_amip.py --nlev default), changed from 26 on 2026-09-23 by user
+  # decision after this was measured on four A100s, float32, icosahedral
+  # core, 30 timed steps, two replicates, arms interleaved:
+  #
+  #     mesh      26 lev   32 lev   40 lev   (picoseconds per cell per level)
+  #     sub7         707      471      488
+  #     sub9         614      375      382
+  #
+  # 26 was the most expensive count in the repo's own table and it is the
+  # count every published MPAS scaling number was taken at. Per cell at
+  # subdivision 9 the totals are 15,964 ps at 26 levels and 15,280 at 40 --
+  # the same cost for 54% more vertical resolution, on the configuration AMIP
+  # actually runs.
+  #
+  # RECEIPTS TAKEN AT 26 ARE NOT COMPARABLE TO THESE. Every curve has to be
+  # rebuilt; do not mix them in one figure.
+  local ATM_NLEV="${ATM_NLEV:-40}"
   local bench args=(--multicontroller --n-devices "$nd")
   case "$lane" in
     latlon)
@@ -111,19 +129,22 @@ run_arm() {
       else
         args+=(--mode weak --nlat-per-dev "$res" --n-lon "$NLON_WEAK")
       fi
-      args+=(--nlev 26 --steps "$STEPS" --warmup "$WARMUP") ;;
+      args+=(--nlev "$ATM_NLEV" --steps "$STEPS" --warmup "$WARMUP") ;;
     mpas)
-      export NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=131072
+      # 64 channels (was 32; owner decision 2026-09-25): s9 L26 at 128 GPUs
+      # 3.41/3.38 -> 3.15/3.16 ms with the 64-channel arms run FIRST (job
+      # 27670098), -6.9% with them run second (27627022); equal at 32 GPUs.
+      export NCCL_MIN_NCHANNELS=64 NCCL_MAX_NCHANNELS=64 NCCL_P2P_NET_CHUNKSIZE=131072
       export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
       bench=scripts/bench/bench_mpas_spmd_scaling.py
-      args+=(--subdivision "$res" --nlev 26 --lloyd 0 --wide-halo --partition-method sfc
+      args+=(--subdivision "$res" --nlev "$ATM_NLEV" --lloyd 0 --wide-halo --partition-method sfc
              --steps "$STEPS" --warmup "$WARMUP") ;;
     cube)
       if (( ${res%:*} % ${res#*:} != 0 )); then echo "[skip] $tag: kt does not divide N"; return 0; fi
       export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
       bench=scripts/bench/bench_cube_tiled_step_scaling.py
       # the tiled bench has no --n-devices: the count is 6*kt^2 by construction
-      args=(--multicontroller --kt "${res#*:}" --resolution "${res%:*}" --nlev 26
+      args=(--multicontroller --kt "${res#*:}" --resolution "${res%:*}" --nlev "$ATM_NLEV"
             --steps "$STEPS" --warmup "$WARMUP") ;;
     tripole)
       export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
@@ -136,7 +157,15 @@ run_arm() {
       fi
       args+=(--steps "$STEPS" --warmup "$WARMUP") ;;
     omps)
-      export NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=131072
+      # 8, NOT the atmosphere's 32. Same machine, same binary, same mesh
+      # family, opposite answer: at 128 GPUs the atmosphere mesh is fastest at
+      # 32 channels (4.65 ms) while the ocean mesh produced no output at all
+      # and was killed at the arm limit, twice, then a third time under a
+      # doubled limit. 8 channels completed twice in the same job (36.83 and
+      # 36.92 ms). At 32 GPUs both work and 32 is only ~2.4% faster, so this
+      # costs the low end almost nothing and is the only setting that makes
+      # the high end runnable. Chosen by the user 2026-09-24.
+      export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
       export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
       bench=scripts/bench/bench_ocean_mpas_spmd_scaling.py
       args+=(--nlev 40 --lloyd 0 --block-steps 20 --blocks 3)

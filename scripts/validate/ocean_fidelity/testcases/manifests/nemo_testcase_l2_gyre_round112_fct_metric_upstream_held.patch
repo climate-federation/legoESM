@@ -1,0 +1,637 @@
+ROUND-112 METRIC FCT UPSTREAM CANDIDATE (2026-09-18; incoming tip
+a6bb76339dec6a9395cdcad36cea37ac5c2a1b5a; exact-input diagnostic tip
+cfb132e0ba135116aa192862764d1c35af9e2451; measured candidate
+f411ab255f6fabeb7bb67aa0647c42a24897d8b3): HELD. Decision 43 refuses the
+trajectory and no physics from this patch is present at the round-112 final
+tip.
+
+COMPILED STATEMENT. The active FCT program calls the two-step upstream
+routine at the record build's compiled traadv_fct.f90:167-176. That routine
+writes first u/v/w faces at :503-533, the first divergence and midpoint at
+:536-549, averaged faces at :572-608, and the final divergence plus divided
+Krhs at :611-623. The stage constructs metric-bearing horizontal and vertical
+transports at compiled stprk3_stg.f90:295-296 and :326-346 and passes them to
+tracer advection at :860. The candidate preserves these materialization and
+association boundaries and carries the already-divided concentration RHS into
+the stage-3 content update.
+
+LOCAL PROOF. With NEMO's recorded kt2-stage3 entry and all recorded operands,
+the pre-edit production-JIT walk first differs at the horizontal first-upwind
+faces: T first-u 5,958 cells / 2.3283064365386963e-10 and S first-u 5,947 /
+2.3283064365386963e-10. All ten candidate source rows for both T and S are BIT
+in production-step JIT, production eager, and isolated-closure JIT. The
+production-JIT one-ULP p_u plant changes the exact source row and exits
+nonzero. The dry-cell representation needs an inert divisor because legoESM
+stores zero dry thickness where NEMO retains finite reference e3t before
+masking; the added regression fails without that guard.
+
+OWN-STATE DISCRIMINATOR. The source proof does not close the writer under
+legoesm's own upstream stage state. T/S adv_up1 remain unequal in
+18,000/18,000 wet cells at 6.545655547463206e-11 /
+5.680531219588900e-12 per second. Local kt3 T/S remain
+8.600420500215478e-7 / 6.979443156751586e-8, refuting the preregistered
+<=6.0e-8 / <=7.0e-9 forecast. The next walk must score each recorded FCT input
+against the live production input before changing another downstream
+statement.
+
+ROUND-113 LIVE-INPUT RESULT. The production-JIT walk scores only cells and
+faces consumed by the compiled statement while retaining separate full-domain
+dry diagnostics. Kbb T/S, Kbb thickness, tmask/wmask, reciprocal area, and
+p2dt are BIT. The first non-bit family is the transport triplet constructed at
+compiled stprk3_stg.f90:295-296,326-346: live U/V/W differ in
+17,400/17,100/17,400 consumed faces. Replacing only that triplet from the
+admitted record reduces direct adv_up1 T from 6.545655547452618e-11 to
+1.632720658269341e-16 s-1 and local kt3 T from 8.600420500215478e-7 to
+5.763797261693071e-8 K. It does not make adv_up1 BIT (18,000 wet words remain
+unequal), so this measurement assigns the magnitude upstream of this held
+downstream association patch; it does not revive or land the patch. A
+production-JIT one-ULP p_u plant changes both the injected transport and the
+consumed adv_up1 result and exits nonzero.
+
+DECISION-43 VETO. The full kt1-10 comparison registers 60/70 moved endpoint
+rows, no status change, no kt1 AT-BAR loss, and first-over-bar kt2 U/V on both
+arms. Kt2 T/S/U/V are unchanged. Kt3 T changes only from
+8.600419718618468e-7 to 8.600419683091332e-7 and S is unchanged at
+6.979441735666114e-8. Day-30 T RMS WORSENS from
+6.890484901489568e-5 to 6.890486874862000e-5 K, so Decision 43 criterion (a)
+fails and this patch must not land.
+
+BLAST RADIUS. The recipe-derived route table finds GYRE-zco and the generic
+build_nemo_gyre_recipe card execute. LOCK_EXCHANGE-zco and OVERFLOW-zps are
+excluded by adaptive implicit vertical advection; both DINO cards use the
+Euler tracer lane. The generic NEMO-GYRE recipe was not separately measured,
+which is a second fail-closed reason and is registered rather than waived.
+ORCA2 remains UNMEASURED-WITH-SPEC.
+
+/usr/bin/id: cannot find name for user ID 10257
+/usr/bin/id: cannot find name for group ID 10257
+/usr/bin/id: cannot find name for user ID 10257
+Error while loading conda entry point: conda-anaconda-tos (cannot import name 'validate_prefix_exists' from 'conda.cli.install' (/home/dbalwada/miniconda3/lib/python3.13/site-packages/conda/cli/install.py))
+diff --git a/packages/ocean/legoesm/ocean/advection.py b/packages/ocean/legoesm/ocean/advection.py
+index 928d3eadf..c7b799917 100644
+--- a/packages/ocean/legoesm/ocean/advection.py
++++ b/packages/ocean/legoesm/ocean/advection.py
+@@ -21,6 +21,7 @@ where:
+ """
+ 
+ import jax.numpy as jnp
++from legoesm.core.source_rounding import nemo_source_round
+ from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
+ from legoesm.grids.latlon import LatLonGrid
+ from legoesm.core.flux_limiters import grad_safe_ratio, ratio_grad_floor
+@@ -825,6 +826,114 @@ def centred2_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
+ FCT_HIGH_ORDER_SCHEMES = ("ppm", "centred2")
+ 
+ 
++def nemo_fct_two_step_upstream_rows(
++    base: jnp.ndarray,
++    transport_u: jnp.ndarray,
++    transport_v: jnp.ndarray,
++    transport_w: jnp.ndarray,
++    h_base: jnp.ndarray,
++    h_mid: jnp.ndarray,
++    tmask: jnp.ndarray,
++    wmask: jnp.ndarray,
++    reciprocal_area: jnp.ndarray,
++    dt: float,
++) -> tuple:
++    """NEMO ``fct_up1_2stp`` writes in compiled source association.
++
++    The three transports are already metric-bearing NEMO ``pU/pV/pW``
++    arrays.  The returned tuple follows the record build's compiled
++    ``traadv_fct.f90:508-623`` write order: first u/v/w faces, first
++    content-rate divergence, midpoint tracer, averaged u/v/w faces, final
++    content-rate divergence, and the divided RHS write.  Its caller receives
++    those same transports from compiled ``stprk3_stg.f90:294-297,326-347``
++    and passes them to tracer advection at ``:860``.
++    Each ``nemo_source_round`` is a Fortran array-store boundary; without
++    those boundaries XLA fuses the midpoint and changes thousands of fp64
++    words even when every input is NEMO's own recorded value.
++    """
++    nlev = base.shape[-1]
++    if transport_u.shape != (base.shape[0], base.shape[1] + 1, nlev):
++        raise ValueError("NEMO FCT transport_u shape does not match tracer")
++    if transport_v.shape != (base.shape[0] + 1, base.shape[1], nlev):
++        raise ValueError("NEMO FCT transport_v shape does not match tracer")
++    if transport_w.shape != base.shape[:-1] + (nlev + 1,):
++        raise ValueError("NEMO FCT transport_w needs nlev+1 interfaces")
++    if any(value.shape != base.shape for value in (
++            h_base, h_mid, tmask, wmask)):
++        raise ValueError("NEMO FCT cell operands must match tracer shape")
++    if reciprocal_area.shape != base.shape[:2]:
++        raise ValueError("NEMO FCT reciprocal area must be two-dimensional")
++
++    sr = nemo_source_round
++    zero = jnp.asarray(0.0, dtype=base.dtype)
++    half = jnp.asarray(0.5, dtype=base.dtype)
++    dt_value = jnp.asarray(dt, dtype=base.dtype)
++
++    west = jnp.roll(base, 1, axis=1)
++    west = jnp.concatenate([west, west[:, :1]], axis=1)
++    east = jnp.concatenate([base, base[:, :1]], axis=1)
++    first_u = sr(
++        sr(jnp.maximum(transport_u, zero) * west)
++        + sr(jnp.minimum(transport_u, zero) * east))
++    padded = jnp.pad(base, ((1, 1), (0, 0), (0, 0)))
++    first_v = sr(
++        sr(jnp.maximum(transport_v, zero) * padded[:-1])
++        + sr(jnp.minimum(transport_v, zero) * padded[1:]))
++    first_w_int = sr(
++        sr(jnp.maximum(transport_w[..., 1:nlev], zero) * base[..., 1:])
++        + sr(sr(jnp.minimum(transport_w[..., 1:nlev], zero)
++                * base[..., :-1]) * wmask[..., 1:]))
++    first_w = jnp.pad(first_w_int, ((0, 0), (0, 0), (1, 1)))
++
++    du = sr(first_u[:, 1:] - first_u[:, :-1])
++    dv = sr(first_v[1:] - first_v[:-1])
++    dw = sr(first_w[..., :-1] - first_w[..., 1:])
++    first_div = sr(-sr(sr(du + dv) + dw) * reciprocal_area[..., None])
++    # NEMO retains a finite reference ``e3t`` in dry cells and masks the
++    # quotient after dividing.  legoESM represents those same dry thicknesses
++    # as zero, so select an inert finite divisor there before performing the
++    # identical wet-cell statement; otherwise dry 0/0 contaminates adjacent
++    # upwind faces before the later mask can remove it.
++    h_mid_divisor = jnp.where(tmask > 0.5, h_mid, jnp.ones_like(h_mid))
++    midpoint = sr(
++        sr(sr(sr(sr(h_base) * base)
++              + sr(sr(half * dt_value) * first_div))
++           / sr(h_mid_divisor)) * tmask)
++
++    west = jnp.roll(midpoint, 1, axis=1)
++    west = jnp.concatenate([west, west[:, :1]], axis=1)
++    east = jnp.concatenate([midpoint, midpoint[:, :1]], axis=1)
++    next_u = sr(
++        sr(jnp.maximum(transport_u, zero) * west)
++        + sr(jnp.minimum(transport_u, zero) * east))
++    padded = jnp.pad(midpoint, ((1, 1), (0, 0), (0, 0)))
++    next_v = sr(
++        sr(jnp.maximum(transport_v, zero) * padded[:-1])
++        + sr(jnp.minimum(transport_v, zero) * padded[1:]))
++    average_u = sr(half * sr(first_u + next_u))
++    average_v = sr(half * sr(first_v + next_v))
++    next_w = sr(
++        sr(jnp.maximum(transport_w[..., 1:nlev], zero) * midpoint[..., 1:])
++        + sr(sr(jnp.minimum(transport_w[..., 1:nlev], zero)
++                * midpoint[..., :-1]) * wmask[..., 1:]))
++    average_w = jnp.pad(
++        sr(half * sr(first_w[..., 1:nlev] + next_w)),
++        ((0, 0), (0, 0), (1, 1)))
++
++    du = sr(average_u[:, 1:] - average_u[:, :-1])
++    dv = sr(average_v[1:] - average_v[:-1])
++    dw = sr(average_w[..., :-1] - average_w[..., 1:])
++    final_div = sr(-sr(sr(du + dv) + dw) * reciprocal_area[..., None])
++    rhs_after = sr(sr(sr(final_div / sr(h_mid_divisor)) * tmask)
++                   + jnp.zeros_like(final_div))
++    # XLA may delete the source's addition to positive-zero Krhs and retain a
++    # negative dry-cell zero from ``final_div * tmask``.  The compiled stored
++    # result is +0, so make that signed-zero consequence explicit.
++    rhs_after = jnp.where(tmask > 0.5, rhs_after, jnp.zeros_like(rhs_after))
++    return (first_u, first_v, first_w, first_div, midpoint,
++            average_u, average_v, average_w, final_div, rhs_after)
++
++
+ def fct_tracer_advection(
+     tracer: jnp.ndarray,
+     mass_flux_u: jnp.ndarray,
+@@ -840,7 +949,12 @@ def fct_tracer_advection(
+     low_order_predictor: str = "one_step",
+     base_thickness: jnp.ndarray | None = None,
+     after_thickness: jnp.ndarray | None = None,
+-    implicit_w: jnp.ndarray | None = None, return_nemo_split: bool = False,
++    implicit_w: jnp.ndarray | None = None,
++    nemo_metric_transports: tuple | None = None,
++    nemo_wmask: jnp.ndarray | None = None,
++    nemo_reciprocal_area: jnp.ndarray | None = None,
++    return_nemo_split: bool = False,
++    return_nemo_rhs: bool = False,
+ ) -> tuple:
+     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
+ 
+@@ -1004,36 +1118,79 @@ def fct_tracer_advection(
+     # upstream fluxes.  That averaged flux supplies BOTH the low-order guess
+     # and the antidiffusive difference consumed by nonosc.
+     h_base = h_k if base_thickness is None else base_thickness
++    nemo_upstream_rows = None
+     if low_order_predictor == "nemo_rk3_two_step":
+-        implicit_mass_div = 0.0
+-        if implicit_w is not None:
+-            if implicit_w.shape != tracer.shape[:-1] + (nlev + 1,):
+-                raise ValueError("implicit_w must contain nlev+1 interfaces")
+-            # Resolved nn_fct_imp=1: traadv_fct.F90:528-536 subtracts
+-            # (wi_top-wi_bottom)*T(Kbb) in the half-step predictor; the same
+-            # zero-order term is used again at :598-607 for the full predictor.
+-            implicit_mass_div = (
+-                implicit_w[..., :-1] - implicit_w[..., 1:]) * base
+-        q_mid = grad_safe_ratio(
+-            h_base * base - (0.5 * dt) * (
+-                div_h_low + vert_div_low + implicit_mass_div),
+-            jnp.maximum(h_k, eps),
+-            h_k > ratio_grad_floor(tracer.dtype),
+-        )
+-        if active_mask is not None:
+-            q_mid = jnp.where(active_mask > 0.5, q_mid, base)
+-        qmid_u = upwind_to_u_points(q_mid, mass_flux_u)
+-        qmid_v = upwind_to_v_points(q_mid, mass_flux_v)
+-        flux_u_low = 0.5 * (flux_u_low + mass_flux_u * qmid_u)
+-        flux_v_low = 0.5 * (flux_v_low + mass_flux_v * qmid_v)
+-        div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
+-        qmid_below = q_mid[..., 1:]
+-        qmid_above = q_mid[..., :-1]
+-        qmid_face = jnp.where(w_int > 0.0, qmid_below, qmid_above)
+-        F_vert_low_int = 0.5 * (
+-            F_vert_low_int + w_int * qmid_face)
+-        F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
+-        vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
++        if nemo_metric_transports is not None:
++            if implicit_w is not None:
++                raise ValueError(
++                    "NEMO metric FCT upstream requires the explicit-W arm")
++            if active_mask is None:
++                raise ValueError(
++                    "NEMO metric FCT upstream requires the compiled tmask")
++            if len(nemo_metric_transports) != 3:
++                raise ValueError(
++                    "nemo_metric_transports must contain pU, pV, and pW")
++            p_u, p_v, p_w = nemo_metric_transports
++            compiled_tmask = active_mask
++            if compiled_tmask.ndim == tracer.ndim - 1:
++                compiled_tmask = compiled_tmask[..., None]
++            compiled_tmask = jnp.broadcast_to(compiled_tmask, tracer.shape)
++            wmask = compiled_tmask if nemo_wmask is None else nemo_wmask
++            if wmask.ndim == tracer.ndim - 1:
++                wmask = wmask[..., None]
++            wmask = jnp.broadcast_to(wmask, tracer.shape)
++            reciprocal_area = (
++                nemo_source_round(
++                    1.0 / jnp.asarray(grid.area_T, dtype=tracer.dtype))
++                if nemo_reciprocal_area is None
++                else nemo_reciprocal_area)
++            nemo_upstream_rows = nemo_fct_two_step_upstream_rows(
++                base, p_u, p_v, p_w, h_base, h_k,
++                compiled_tmask, wmask, reciprocal_area, dt)
++            q_mid = nemo_upstream_rows[4]
++            dy_u = jnp.asarray(grid.dy_u, dtype=tracer.dtype)[..., None]
++            dx_v = jnp.asarray(grid.dx_v, dtype=tracer.dtype)[..., None]
++            area = jnp.asarray(grid.area_T, dtype=tracer.dtype)[..., None]
++            flux_u_low = nemo_upstream_rows[5] / dy_u
++            flux_v_low = nemo_upstream_rows[6] / dx_v
++            F_vert_low = nemo_upstream_rows[7] / area
++            F_vert_low_int = F_vert_low[..., 1:nlev]
++            # Carry the already-associated combined source divergence in one
++            # component.  Splitting and re-adding horizontal/vertical pieces
++            # would recreate the very association error this route removes.
++            div_h_low = nemo_source_round(-nemo_upstream_rows[8])
++            vert_div_low = jnp.zeros_like(div_h_low)
++        else:
++            implicit_mass_div = 0.0
++            if implicit_w is not None:
++                if implicit_w.shape != tracer.shape[:-1] + (nlev + 1,):
++                    raise ValueError(
++                        "implicit_w must contain nlev+1 interfaces")
++                # Resolved nn_fct_imp=1: traadv_fct.F90:528-536 subtracts
++                # (wi_top-wi_bottom)*T(Kbb) in the half-step predictor; the
++                # same zero-order term is used again at :598-607.
++                implicit_mass_div = (
++                    implicit_w[..., :-1] - implicit_w[..., 1:]) * base
++            q_mid = grad_safe_ratio(
++                h_base * base - (0.5 * dt) * (
++                    div_h_low + vert_div_low + implicit_mass_div),
++                jnp.maximum(h_k, eps),
++                h_k > ratio_grad_floor(tracer.dtype),
++            )
++            if active_mask is not None:
++                q_mid = jnp.where(active_mask > 0.5, q_mid, base)
++            qmid_u = upwind_to_u_points(q_mid, mass_flux_u)
++            qmid_v = upwind_to_v_points(q_mid, mass_flux_v)
++            flux_u_low = 0.5 * (flux_u_low + mass_flux_u * qmid_u)
++            flux_v_low = 0.5 * (flux_v_low + mass_flux_v * qmid_v)
++            div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
++            qmid_below = q_mid[..., 1:]
++            qmid_above = q_mid[..., :-1]
++            qmid_face = jnp.where(w_int > 0.0, qmid_below, qmid_above)
++            F_vert_low_int = 0.5 * (
++                F_vert_low_int + w_int * qmid_face)
++            F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
++            vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+ 
+     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
+     # Anti-diffusive face fluxes:
+@@ -1148,15 +1305,47 @@ def fct_tracer_advection(
+         q_td, q_min, q_max, h_new, dt, grid, eps,
+     )
+     limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v
+-    div_h_fct = divergence_cgrid(flux_u_low + limited_u, flux_v_low + limited_v, grid)
+     div_h_anti = divergence_cgrid(limited_u, limited_v, grid)
+     limited_w = alpha_vert_face * ad_vert_int
+-    F_vert_fct = jnp.pad(F_vert_low_int + limited_w, (*pad_axes_v, (1, 1)))
+-    vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
+     anti_full = jnp.pad(limited_w, (*pad_axes_v, (1, 1)))
++    anti_vert_div = anti_full[..., :-1] - anti_full[..., 1:]
++    if nemo_upstream_rows is not None:
++        div_h_fct = nemo_source_round(div_h_low + div_h_anti)
++        vert_div_fct = anti_vert_div
++    else:
++        div_h_fct = divergence_cgrid(
++            flux_u_low + limited_u, flux_v_low + limited_v, grid)
++        F_vert_fct = jnp.pad(
++            F_vert_low_int + limited_w, (*pad_axes_v, (1, 1)))
++        vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
++    nemo_rhs = None
++    if nemo_upstream_rows is not None:
++        # ``fct_up1_2stp`` has already divided the metric-bearing divergence
++        # by e3t(Kmm) when it writes Krhs.  Preserve that stored RHS through
++        # the RK3 content update: converting it back to a divergence here and
++        # dividing again in the caller recreates the very last-bit loss this
++        # source route removes.
++        anti_div = nemo_source_round(div_h_anti + anti_vert_div)
++        anti_rhs = nemo_source_round(
++            -anti_div / jnp.where(
++                compiled_tmask > 0.5, h_k, jnp.ones_like(h_k)))
++        anti_rhs = jnp.where(
++            compiled_tmask > 0.5, anti_rhs, jnp.zeros_like(anti_rhs))
++        low_rhs = nemo_upstream_rows[9]
++        combined_rhs = nemo_source_round(low_rhs + anti_rhs)
++        nemo_rhs = (combined_rhs, low_rhs, anti_rhs)
++    if return_nemo_rhs and nemo_rhs is None:
++        raise ValueError(
++            "return_nemo_rhs requires NEMO metric two-step transports")
++    if return_nemo_split and return_nemo_rhs:
++        return (div_h_fct, vert_div_fct,
++                (div_h_low, vert_div_low, div_h_anti, anti_vert_div),
++                nemo_rhs)
+     if return_nemo_split:
+-        return div_h_fct, vert_div_fct, (div_h_low, vert_div_low, div_h_anti,
+-            anti_full[..., :-1] - anti_full[..., 1:])
++        return (div_h_fct, vert_div_fct,
++                (div_h_low, vert_div_low, div_h_anti, anti_vert_div))
++    if return_nemo_rhs:
++        return div_h_fct, vert_div_fct, nemo_rhs
+     return div_h_fct, vert_div_fct
+ 
+ 
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index e0e8efdfa..97e05db96 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -485,6 +485,7 @@ def _compute_advection_flux_div(
+     fct_base_thickness=None,
+     fct_after_thickness=None,
+     fct_implicit_w=None,
++    fct_nemo_metric_transports=None,
+ ):
+     """Compute advection flux divergence for a single tracer field.
+ 
+@@ -557,7 +558,7 @@ def _compute_advection_flux_div(
+             "centered/ppm/dst3/weno5/weno7).")
+     if tracer_advection in ("ppm_fct", "fct2"):
+         from legoesm.ocean.advection import fct_tracer_advection
+-        div_hut, vert_flux_div = fct_tracer_advection(
++        fct_result = fct_tracer_advection(
+             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
+             high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
+             tracer_before=tr_before,
+@@ -575,7 +576,14 @@ def _compute_advection_flux_div(
+             base_thickness=fct_base_thickness,
+             after_thickness=fct_after_thickness,
+             implicit_w=fct_implicit_w,
++            nemo_metric_transports=fct_nemo_metric_transports,
++            return_nemo_rhs=fct_nemo_metric_transports is not None,
+         )
++        if fct_nemo_metric_transports is None:
++            div_hut, vert_flux_div = fct_result
++            nemo_fct_rhs = None
++        else:
++            div_hut, vert_flux_div, nemo_fct_rhs = fct_result
+     elif tracer_advection == "ppm":
+         from legoesm.ocean.advection import (
+             ppm_to_u_points, ppm_to_v_points,
+@@ -705,6 +713,8 @@ def _compute_advection_flux_div(
+ 
+     if return_h_fluxes:
+         return div_hut, vert_flux_div, _h_flux_pair[0], _h_flux_pair[1]
++    if fct_nemo_metric_transports is not None:
++        return div_hut, vert_flux_div, nemo_fct_rhs
+     return div_hut, vert_flux_div
+ 
+ 
+@@ -737,6 +747,7 @@ def compute_advection_flux_div_pair(
+     fct_base_thickness=None,
+     fct_after_thickness=None,
+     fct_implicit_w=None,
++    fct_nemo_metric_transports=None,
+ ):
+     """Advection flux divergence for TWO tracers (T, S) in one pass.
+ 
+@@ -795,6 +806,7 @@ def compute_advection_flux_div_pair(
+             fct_base_thickness=fct_base_thickness,
+             fct_after_thickness=fct_after_thickness,
+             fct_implicit_w=fct_implicit_w,
++            fct_nemo_metric_transports=fct_nemo_metric_transports,
+         )
+         out_b = _compute_advection_flux_div(
+             tr_b, tracer_advection, mass_flux_u, mass_flux_v,
+@@ -807,6 +819,7 @@ def compute_advection_flux_div_pair(
+             fct_base_thickness=fct_base_thickness,
+             fct_after_thickness=fct_after_thickness,
+             fct_implicit_w=fct_implicit_w,
++            fct_nemo_metric_transports=fct_nemo_metric_transports,
+         )
+         if return_b_h_fluxes:
+             div_b, vert_b, sf_u, sf_v = out_b
+@@ -1725,6 +1738,7 @@ def _nemo_ws_rk3_tracer_pair_step(
+     bbl_context=None,
+     stage_source_rates=None,
+     stage_qco_weights=None,
++    nemo_metric_fct_upstream: bool = False,
+     stop_after_stage: int = 3,
+     resume=None,
+     stage3_advection_content_override=None,
+@@ -1825,7 +1839,20 @@ def _nemo_ws_rk3_tracer_pair_step(
+             (fd_a, rhs_a), (fd_b, rhs_b) = (
+                 _cen2_content_div(a_val), _cen2_content_div(b_val))
+         else:
+-            (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
++            metric_transports = None
++            fct_implicit_w = wi_stage
++            if nemo_metric_fct_upstream and stage_index == 2:
++                if zfu_stage is None or zfv_stage is None:
++                    raise ValueError(
++                        "NEMO metric FCT upstream requires stage zFu/zFv")
++                p_w = nemo_source_round(
++                    jnp.asarray(grid.area_T)[..., None] * w_stage)
++                metric_transports = (zfu_stage, zfv_stage, p_w)
++                # The caller enables this route only for NEMO's explicit-W
++                # arm.  Passing an all-zero wi array would select a different
++                # Python branch inside FCT and obscure that source contract.
++                fct_implicit_w = None
++            pair_a, pair_b = compute_advection_flux_div_pair(
+                 a_val, b_val, tracer_advection, mf_u, mf_v,
+                 w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
+                 recon_fill_mask=recon_fill_mask,
+@@ -1835,10 +1862,18 @@ def _nemo_ws_rk3_tracer_pair_step(
+                 fct_low_order_predictor=fct_low_order_predictor,
+                 fct_base_thickness=h_k_old,
+                 fct_after_thickness=h_after,
+-                fct_implicit_w=wi_stage,
++                fct_implicit_w=fct_implicit_w,
++                fct_nemo_metric_transports=metric_transports,
+             )
++            if metric_transports is None:
++                dh_a, dv_a = pair_a
++                dh_b, dv_b = pair_b
++                rhs_a = rhs_b = None
++            else:
++                dh_a, dv_a, nemo_rhs_a = pair_a
++                dh_b, dv_b, nemo_rhs_b = pair_b
++                rhs_a, rhs_b = nemo_rhs_a[0], nemo_rhs_b[0]
+             fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
+-            rhs_a = rhs_b = None
+         if stage_index == 2 and bbl_context is not None:
+             from legoesm.ocean.physics.bbl_adv import (
+                 apply_bbl_adv_tendency,
+@@ -1938,9 +1973,19 @@ def _nemo_ws_rk3_tracer_pair_step(
+             h_one_half, h_one_third, 1)
+     if stop_after_stage == 2:
+         return a2, b2
+-    fd2_a, fd2_b, _, _ = _flux_pair(a2, b2, dt, 2, h_k_new)
+-    advection_content_a = h_k_old * tr_a - dt * fd2_a
+-    advection_content_b = h_k_old * tr_b - dt * fd2_b
++    fd2_a, fd2_b, rhs2_a, rhs2_b = _flux_pair(
++        a2, b2, dt, 2, h_k_new)
++    if rhs2_a is None:
++        advection_content_a = h_k_old * tr_a - dt * fd2_a
++        advection_content_b = h_k_old * tr_b - dt * fd2_b
++    else:
++        stage_weight = nemo_source_round(dt * h_one_half)
++        advection_content_a = nemo_source_round(
++            nemo_source_round(h_k_old * tr_a)
++            + nemo_source_round(stage_weight * rhs2_a))
++        advection_content_b = nemo_source_round(
++            nemo_source_round(h_k_old * tr_b)
++            + nemo_source_round(stage_weight * rhs2_b))
+     if stage3_advection_content_override is not None:
+         advection_content_a, advection_content_b = (
+             stage3_advection_content_override)
+@@ -6342,6 +6387,8 @@ class LatLonCGridOceanModel:
+                     stage_transport_geometry=stage_geometry,
+                     stage_source_rates=_stage_source_rates,
+                     stage_qco_weights=_tracer_qco_weights,
++                    nemo_metric_fct_upstream=not getattr(
++                        _cfg_b, "adaptive_implicit_vertadv", False),
+                     stop_after_stage=stop_after_stage,
+                     resume=resume,
+                     return_stage1_trace=(
+@@ -7803,6 +7850,10 @@ class LatLonCGridOceanModel:
+                         "nemo_rk3_two_step"
+                         if self._nemo_ws_test_hooks.two_step_fct_predictor
+                         else "one_step"),
++                    nemo_metric_fct_upstream=(
++                        self._nemo_ws_test_hooks.two_step_fct_predictor
++                        and not getattr(
++                            _cfg_b, "adaptive_implicit_vertadv", False)),
+                     stage_source_rates=_ws_stage_source_rates,
+                     bbl_context=_bbl_context,
+                     # One stage ladder: stages 1-2 were advanced by the
+diff --git a/tests/ocean/unit/test_advection_fct_zalesak.py b/tests/ocean/unit/test_advection_fct_zalesak.py
+index b313766b9..f35e2807e 100644
+--- a/tests/ocean/unit/test_advection_fct_zalesak.py
++++ b/tests/ocean/unit/test_advection_fct_zalesak.py
+@@ -24,9 +24,11 @@ import pytest
+ jax.config.update("jax_enable_x64", True)
+ 
+ from legoesm.grids.latlon import create_latlon_grid
++from legoesm.core.source_rounding import nemo_source_round
+ from legoesm.ocean.advection import (
+     _zalesak_signsplit_face_alphas,
+     fct_tracer_advection,
++    nemo_fct_two_step_upstream_rows,
+ )
+ 
+ 
+@@ -99,6 +101,84 @@ class TestConservation:
+         assert all(value.shape == tracer.shape for value in exposed[2])
+         assert all(bool(jnp.all(jnp.isfinite(value))) for value in exposed[2])
+ 
++    def test_nemo_metric_two_step_split_keeps_literal_combined_divergence(
++        self, grid_small,
++    ):
++        """The WS source route must not split and re-add NEMO's low flux."""
++        from legoesm.ocean.fidelity.nemo_testcase_recipe import (
++            build_nemo_testcase_card,
++        )
++        grid = build_nemo_testcase_card("GYRE-zco").recipe.grid
++        n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, 30
++        tracer = jnp.broadcast_to(
++            jnp.linspace(12.0, 4.0, nlev), (n_lat, n_lon, nlev))
++        base = tracer + 0.01 * jnp.arange(n_lon)[None, :, None]
++        base = jnp.broadcast_to(base, (n_lat, n_lon, nlev))
++        h = jnp.full_like(base, 100.0)
++        mask = jnp.ones_like(base)
++        face = jnp.arange(n_lon + 1, dtype=jnp.float64)
++        p_u = (1.0 + 0.125 * jnp.sin(2.0 * jnp.pi * face / n_lon))
++        p_u = jnp.broadcast_to(p_u[None, :, None],
++                               (n_lat, n_lon + 1, nlev))
++        p_v = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=jnp.float64)
++        p_w = jnp.zeros((n_lat, n_lon, nlev + 1), dtype=jnp.float64)
++        mass_u = p_u / jnp.asarray(grid.dy_u)[..., None]
++        mass_v = p_v / jnp.asarray(grid.dx_v)[..., None]
++        w = p_w / jnp.asarray(grid.area_T)[..., None]
++        r1_area = 1.0 / jnp.asarray(grid.area_T)
++
++        rows = jax.jit(nemo_fct_two_step_upstream_rows)(
++            base, p_u, p_v, p_w, h, h, mask, mask, r1_area, 1.0)
++        _, _, split, nemo_rhs = jax.jit(lambda: fct_tracer_advection(
++            tracer, mass_u, mass_v, w, h, grid, 1.0,
++            high_order="centred2", tracer_before=base,
++            active_mask=mask, low_order_predictor="nemo_rk3_two_step",
++            base_thickness=h, after_thickness=h,
++            nemo_metric_transports=(p_u, p_v, p_w),
++            nemo_wmask=mask, nemo_reciprocal_area=r1_area,
++            return_nemo_split=True, return_nemo_rhs=True))()
++        low_div = split[0] + split[1]
++        np.testing.assert_array_equal(np.asarray(low_div), np.asarray(-rows[8]))
++        np.testing.assert_array_equal(np.asarray(nemo_rhs[1]), np.asarray(rows[9]))
++        np.testing.assert_array_equal(
++            np.asarray(nemo_rhs[0]),
++            np.asarray(nemo_source_round(nemo_rhs[1] + nemo_rhs[2])),
++        )
++        assert bool(jnp.any(rows[8] != 0.0))
++
++        _, _, ordinary_split = jax.jit(lambda: fct_tracer_advection(
++            tracer, mass_u, mass_v, w, h, grid, 1.0,
++            high_order="centred2", tracer_before=base,
++            active_mask=mask, low_order_predictor="nemo_rk3_two_step",
++            base_thickness=h, after_thickness=h,
++            return_nemo_split=True))()
++        assert bool(jnp.any(
++            ordinary_split[0] + ordinary_split[1] != low_div))
++
++    def test_nemo_metric_two_step_dry_zero_thickness_stays_finite(self):
++        """legoESM's zero dry thickness must represent NEMO's masked row."""
++        from legoesm.ocean.fidelity.nemo_testcase_recipe import (
++            build_nemo_testcase_card,
++        )
++        grid = build_nemo_testcase_card("GYRE-zco").recipe.grid
++        n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, 30
++        base = jnp.broadcast_to(
++            jnp.linspace(12.0, 4.0, nlev), (n_lat, n_lon, nlev))
++        mask = jnp.ones_like(base).at[:, 0, :].set(0.0)
++        h = jnp.full_like(base, 100.0) * mask
++        p_u = jnp.ones((n_lat, n_lon + 1, nlev), dtype=jnp.float64)
++        p_v = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=jnp.float64)
++        p_w = jnp.zeros((n_lat, n_lon, nlev + 1), dtype=jnp.float64)
++        rows = jax.jit(nemo_fct_two_step_upstream_rows)(
++            base, p_u, p_v, p_w, h, h, mask, mask,
++            1.0 / jnp.asarray(grid.area_T), 1.0)
++
++        assert all(bool(jnp.all(jnp.isfinite(row))) for row in rows)
++        np.testing.assert_array_equal(
++            np.asarray(rows[4][:, 0, :]),
++            np.zeros((n_lat, nlev), dtype=np.float64),
++        )
++
+ 
+ # ---------------------------------------------------------------------------
+ # Monotonicity (no new extrema)
+

@@ -1,0 +1,177 @@
+{
+  "format": "nemo-testcase-l2-gyre-round19-manifest-v1",
+  "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "date": "2026-09-04",
+  "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+  "starting_git_sha": "a07338be5bed45a615b41bc491db5369372ce867",
+  "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+  "status": "DEBT",
+  "commits": {
+    "round17_review_minors": "2f395a91e0539e8c51f831fe13c2c9a381c6de0e",
+    "external_substep_preregistration": "fbcdbef70",
+    "external_substep_source_order": "ec6af6c61"
+  },
+  "confirmed_owners": [
+    "surface_weighted_face_ssh_association",
+    "continuity_update_association",
+    "backward_ssh_blend_association",
+    "ene_coefficient_vertical_then_ff_association",
+    "vector_velocity_update_association",
+    "ab3_midpoint_association"
+  ],
+  "ordered_external_mode": {
+    "substep_1_2_exact_rows": "110 / 110",
+    "full_50_substep_exact_rows": "792 / 800",
+    "first_remaining_bit_debt": {
+      "name": "external_mode.substep7.trd_u",
+      "absolute_max": 5.048709793414476e-29,
+      "oracle_magnitude": 3.435509165498437e-09,
+      "relative": 1.4695666785339487e-20,
+      "ulp_max": 1,
+      "differing_cells": 1,
+      "wet_cells": 580,
+      "label": "NEAR_NULL_BIT_DEBT_NO_OWNER_POWER"
+    },
+    "advective_mean_u": "0 / 580 differing",
+    "advective_mean_v": "0 / 570 differing",
+    "stage1_kaa_u": "0 / 17400 differing",
+    "stage1_kaa_v": "0 / 17100 differing"
+  },
+  "whole_step": {
+    "first_over_bar": {
+      "kt": 2,
+      "fields": ["T", "S", "u", "v"]
+    },
+    "baseline_to_current_rows": {
+      "improved": 15,
+      "unchanged": 21,
+      "worsened": 14
+    }
+  },
+  "later_boundaries": {
+    "stage2_kaa": {
+      "status": "DEBT",
+      "u_normalized_max_abs": 2.1986806906376666e-15,
+      "v_normalized_max_abs": 2.2380914396075147e-15,
+      "owner": "UPSTREAM_TRACER_ACCUMULATION_OR_PROPAGATION_OPEN"
+    },
+    "stage3_transport": {
+      "status": "DEBT_OWNER_UNMEASURED_UPSTREAM_STAGE2",
+      "zFu_normalized_max_abs": 1.122004923897255e-11,
+      "zFv_normalized_max_abs": 1.2743986985222504e-11,
+      "zFw_normalized_max_abs": 7.464529752188664e-10
+    },
+    "zdf_matrix": "NOT_ENTERED"
+  },
+  "oracle_v2_instrumentation": {
+    "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external_coeff",
+    "executable_sha256": "207e701f740b2fc4ee5f234a22508d774c2f517646e8b9d2f1e0a2a2d58d7ea9",
+    "my_src_dynspg_sha256": "62d51638def7a811264d5f0eb53c8ef1c27b34b601110e7b9993ff62dfa4b4e6",
+    "ordered_record_sha256": "8aa0836c11824ffcaddaafca4aefd53f62692481fc8d10d74665ac508d1eb054",
+    "ordinary_stage1_sha256": "ce25b004e7e8289b6e803263f895576981ce22516ccddfbd85d7be5ce5bcaedc",
+    "libmvec_symbol_count": 0
+  },
+  "artifacts": {
+    "pre_fix_ordered_trace": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/ordered_prefx_tracefixed.json",
+      "sha256": "b6e017400e264114993cae126bfe5f79f20eb2ae33851265303162eb8a0e1623"
+    },
+    "final_ordered_trace": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/ordered_final3.json",
+      "sha256": "a72055a7d97f008d8bbac25777ac3d651d8481eca319bf7028e0a720bd743472",
+      "verdict": "AT-BAR_WITH_8_NEAR_NULL_BIT_DEBT_ROWS"
+    },
+    "legacy_continuity_arm": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/ordered_legacy_continuity_final2.json",
+      "sha256": "815337c35adf87c2e7f5831212b73ad4a1af9933bf0f5211cce64d25a091e806",
+      "exit_code": 1
+    },
+    "ordered_plant": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/ordered_plant_final2.json",
+      "sha256": "d5b424ad9d159582594b316e9d7e2b441988a3edea171dbd626d601073c9c236",
+      "exit_code": 1
+    },
+    "whole_step_baseline": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/production_jit_sweep_baseline_a07338be5.json",
+      "sha256": "330aaf2625f45bcd7b596e2c943b8dc3eb1a3428bd1bda465748212a1f38bca6"
+    },
+    "whole_step_current": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/production_jit_sweep_final.json",
+      "sha256": "9ad9b3fc36f07aa0bb38516f07ea366be20a9a1d23f0317244bd1f2c38cdf393"
+    },
+    "stage2_kaa": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/stage2_composition_corrected.json",
+      "sha256": "a471c4d419d00706ce5ef4cac403be56f75bdb43345fc343c9d6ec4283c0a3d8"
+    },
+    "stage2_plant": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/stage2_composition_plant.json",
+      "sha256": "375a0175134488c7ad605684c217e95e6f342b2cfcdc456ab1a9c524800b6031",
+      "exit_code": 1
+    },
+    "stage3_transport": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/stage3_transport.json",
+      "sha256": "b6a28c99ba79d811ed429a465dcec73041171b8555859352c56d3d7770dd9858"
+    },
+    "stage3_transport_npz": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/stage3_transport_arrays.npz",
+      "sha256": "c0d717bf66bbdf08000851a0de330dfac433739862d17936b49da5e234117584"
+    },
+    "stage3_transport_plant": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19/stage3_transport_plant.json",
+      "sha256": "70e4d13633ac2d298d22611069b5ae38d32524ef8c634567edc360dc2311a5bf",
+      "exit_code": 1
+    },
+    "crosscard": {
+      "overflow_stage": {
+        "baseline_report_sha256": "b497ebad2121e1936ae42d3b8e72f792e27ca8c59c0b3269f7d3949f215fd0df",
+        "baseline_residual_npz_sha256": "0fe0e38679867e49f9e7f83f684893c9e6f38c84327ce281d1b0c9c7f09a078d",
+        "current_report_sha256": "5f37a152136ccfe44e05d58e0357797ebf31d78e496131b5e8779416cc2e3ff8",
+        "current_residual_npz_sha256": "f690d2dc3a9a8b36d8a4842be899e709ee2cd8c8deafbd17a0ad72f6f1af1ff9",
+        "comparison_sha256": "3b98c41ae26f66e17fd61934fe1904bdd8ebe1c916234931ccd21776c7e6858b",
+        "verdict": "PASS",
+        "max_worsening_row_scale_ulps": 0.00006103515625
+      },
+      "lock_stage": {
+        "baseline_report_sha256": "40b9c92f47a435062220b839c5f068fa625d141439e45307c9f42fbbe7ca821a",
+        "baseline_residual_npz_sha256": "cf6f72069015452d568a900bac093748f4756282cafc7ac44c4d301190fcb601",
+        "current_report_sha256": "1eb4960b33795de353cd2657518da5191d4cb87c0e670f5047f0611133d6c9da",
+        "current_residual_npz_sha256": "cf6f72069015452d568a900bac093748f4756282cafc7ac44c4d301190fcb601",
+        "comparison_sha256": "9ec7319bf3e736460472a725fc49a6ba3d8e668e1269e87045a1a8fc256391b3",
+        "verdict": "PASS",
+        "max_worsening_row_scale_ulps": 0.0
+      },
+      "overflow_trajectory": {
+        "baseline_report_sha256": "a161f1f70817d3aaf00b342cb13ea23c3b30ac6144bbd371ae16168f3ad27a99",
+        "baseline_residual_npz_sha256": "df24c40acbf7ac373195c28c9ff9c22b813937dced43a29f50f8e79b43a74330",
+        "current_report_sha256": "766e38d69b28435084b2a6a7182880f80d7268855536522027709013c16b992f",
+        "current_residual_npz_sha256": "a981cbb05d3a5afd09370754c57d1433350850487ce182d5adeb1a5a8f652933",
+        "comparison_sha256": "c0c41c862fa7f7868763ea7bcc2ccfd385f666e6889baf072be7102adbe0b242",
+        "verdict": "FAIL_REGISTERED_SECOND_ERROR",
+        "max_worsening_row_scale_ulps": 3.5625,
+        "violating_rows": [
+          "OVERFLOW-zps.kt9.before.u",
+          "OVERFLOW-zps.kt10.before.u"
+        ]
+      },
+      "lock_trajectory": {
+        "baseline_report_sha256": "350293cfe35022f54e1a9a15e1220ece42820186f1b6b586891011a076933153",
+        "baseline_residual_npz_sha256": "ffdcfd457aa389568738e7f409ce5cb57ac14b0ba010de4cb552d2b3fc3c83a8",
+        "current_report_sha256": "e83a94c295fd65103a1216c58da3c438d1016033e72391b7cb9f44d76327b686",
+        "current_residual_npz_sha256": "83980ff8572b497e0c22908d82cfc08fdcb4c8db8db34a5ec620ab01687cb31e",
+        "comparison_sha256": "d8ee86328071f2d47b73817ed0fb298f6e5c01ea74bdd196550b4bdb7b7b622e",
+        "verdict": "PASS",
+        "max_worsening_row_scale_ulps": 0.0009765625
+      }
+    }
+  },
+  "verification": {
+    "focused_ci": "85 passed in 16.42 s",
+    "barotropic_behavioral_subset": "29 passed in 29.31 s",
+    "ordered_legacy_continuity": "exit 1",
+    "ordered_metric_plant": "exit 1",
+    "stage2_plant": "exit 1",
+    "stage3_transport_plant": "exit 1",
+    "crosscard_verdicts": "OVERFLOW stage PASS; LOCK stage PASS; OVERFLOW trajectory FAIL (registered second error); LOCK trajectory PASS",
+    "independent_review": "OUTSTANDING"
+  }
+}

@@ -65,9 +65,6 @@ class AMIPExperimentConfig(NamedTuple):
     radiation: str = "gray"  # "gray" or "rrtmg"
     rad_update_steps: int = 1  # recompute radiation every N steps (1 = every step)
     physics_update_steps: int = 1  # run the whole physics every N steps, hold its tendencies between (MPAS)
-    cld_macmic_num_steps: int = 1  # CAM6 macro/micro sub-cycles per physics step (namelist cld_macmic_num_steps)
-    morrison_sed_cfl_substeps: bool = True  # MG2 CFL sub-stepped sedimentation inside Morrison (default ON, user 2026-09-22)
-    morrison_sed_cfl_substeps_strict: bool = False  # error when a column exceeds the sub-step cap
     diurnal_cycle: bool = False  # use instantaneous solar zenith angle
     solar_source: str = "constant"  # "constant", "file", or "spectral_file"
     solar_file: str = ""
@@ -224,6 +221,15 @@ class AMIPExperimentConfig(NamedTuple):
     physics_parameterization_hidden_dim: int = 128
     physics_parameterization_layers: int = 3
     physics_parameterization_seed: int = 0
+
+    # --- CAM6 macro/micro sub-cycle + MG2 CFL sedimentation (tuple END, so
+    # a positional construction or a pickle written earlier keeps binding the
+    # same fields) ---
+    cld_macmic_num_steps: int = 1  # CAM6 macro/micro sub-cycles per physics step
+    morrison_sed_cfl_substeps: bool = True  # MG2 CFL sub-stepped sedimentation (user 2026-09-22)
+    morrison_sed_cfl_substeps_max: int = 256  # static bound of that loop (cost is linear in it)
+    morrison_sed_cfl_substeps_strict: bool = False  # error when a column exceeds the cap
+    morrison_do_graupel: bool = True  # Morrison graupel category (CAM6 MG2 has none)
 
 
 def config_to_dict(config) -> dict:

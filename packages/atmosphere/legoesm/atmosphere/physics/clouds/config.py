@@ -349,7 +349,8 @@ class CloudConfig(NamedTuple):
     # layers is solved as ONE deep uniform cloud. "max_random" re-solves the
     # column as n_sub deterministic maximum-random-overlap subcolumns and
     # averages: measured -30% cloud albedo and +18 W/m2 OLR against a
-    # Monte-Carlo reference. Costs n_sub x the radiation time. Unknown => raise.
+    # Monte-Carlo reference. Costs n_sub x the radiation time. "mcica" (CAM6)
+    # gives each g-point its own such subcolumn in ONE solve. Unknown => raise.
     # MUTUALLY EXCLUSIVE with cloud_partial_coverage_optics="two_column":
     # both correct partial coverage (that one horizontally per layer, this one
     # with real subcolumns), so enabling both double-discounts the cloud.

@@ -1,0 +1,49 @@
+{
+ "format": "nemo-testcase-l2-gyre-round38-preregister-amendment-v1",
+ "date": "2026-09-06",
+ "amends": "nemo_testcase_l2_gyre_round38_preregister.json",
+ "why": "An independent CLAIM REVIEW ran on the preregistration BEFORE any arm was written, as the campaign requires. It broke six things in it. This amendment records what it broke, what the correction is, and -- separately -- the measurements that were taken while it ran, which are recorded as MEASUREMENTS and never as predictions.",
+
+ "what_the_claim_review_broke": {
+  "C1": {"finding": "the jit cache key is the model instance (static_argnums=(0,)), so a patched module or class attribute can be shadowed by an already-compiled executable and the capture silently returns nothing", "disposition": "REAL AS A HAZARD, ALREADY AVOIDED AND NOW GATED. The arm builds a FRESH card and a FRESH model per run, which retraces; measured, the callback fired exactly once per operand. The arm now ASSERTS the call count and refuses a run in which it is not exactly one."},
+  "C2": {"finding": "'the model's T and S are bit-identical with and without the capture' cannot see a capture that reads a differently-contracted copy of an operand while the solve keeps the fused one", "disposition": "REAL. The control becomes a ROUND TRIP: a third run in which the dispatch's own operands are REPLACED by the captured host arrays. Bit-identical T and S then prove the captured values ARE the values the solve consumed."},
+  "C3": {"finding": "a causal substitution through the existing _vertical_K_test_override is stronger than a correlational operand table, and it already ships", "disposition": "ADOPTED IN SPIRIT, NOT IN MECHANISM. That override lands BEFORE the K33 fold (:9671 vs :9802), so it cannot deliver NEMO's zwt_mix to the matrix. The substitution is done AT THE OPERAND instead, through the same wrapper that captures it -- the exact array the matrix reads."},
+  "C4": {"finding": "'K_v_cell IS K_v_phys + K33_iso and nothing else' is read off the wrong lines: :9506 adds cfg.K_v, :9531 adds the internal-wave term, and the prognostic-TKE branch RECOMPUTES K_v_cell entirely", "disposition": "CORRECT, THE SENTENCE IS WITHDRAWN. The arm makes no decomposition claim from the code. It scores the SUM (K_v_cell against NEMO's zwt_mix) and the FOLD (K33_iso against NEMO's ah_wslp2) as two independent measured rows, and reports which branch ran."},
+  "C5": {"finding": "PR1's falsifier required assembly.zwd at 0 cells unequal, which a permanent registered 3120-dry-cell DEBT row makes unreachable", "disposition": "CORRECT. Every operand row and every assembled row in this arm is scored on WET cells only, and the falsifier says so."},
+  "C6": {"finding": "implicit_w (nemo_aimp_tracer_w) is a matrix operand and was off the list; so were the working dtype and the background/internal-wave contributions", "disposition": "CORRECT. implicit_w and the dtype are captured and reported; a non-None implicit_w on a card whose oracle pins ln_zad_Aimp = F is a hard failure, not a row."},
+  "C7": {"finding": "PR3's bracket was on the wrong quantity: a max relative difference over 20416 faces is dominated by the smallest K, and the reviewer measured that perturbing EVERY wet avt by one ulp moves T by at most 1.16e-14 K, 2760x short of the residual", "disposition": "CORRECT AND IMPORTANT. PR3 is replaced by an OUTPUT-SIDE prediction: the substitution arm's measured movement of the stage-3 output, against the residual it must explain."},
+  "C8": {"finding": "NEMO's ah_wslp2 is identically 0.0 on this record, so scoring legoESM's fold against it only asks whether legoESM's fold is also exactly zero; and naming the TKE closure before measuring is a story", "disposition": "CORRECT ON BOTH. The zero is confirmed independently below. PR2 becomes a RANKED HYPOTHESIS, not a prediction."},
+  "C9": {"finding": "PR5's x1e3 plant is inert by TOPOLOGY on a card with no dry cell above a wet one, not by identity, and a masked back substitution can absorb it silently", "disposition": "CORRECT. The plant becomes NaN plus a random +/-1e6 in every dry diagonal, and it is additionally run on a SYNTHETIC column that HAS a dry cell above a wet one. NaN cannot be absorbed."},
+  "C10": {"finding": "PR4 restates a control and PR6 is a measurement already taken", "disposition": "CORRECT. Both are relabelled."}
+ },
+ "what_the_claim_review_confirmed": {
+  "the_mapping": "_box gives (i,j,k) and .transpose(1,0,2) gives the model's (lat,lon,level); the level slices K<->zwt_mix[...,1:jpkm1], dz<->e3t_Kaa[...,:jpkm1], e3w<->e3w_Kmm[...,1:jpkm1], wet<->tmask[...,:jpkm1] are right. NEMO's zws does read zwt at jk=jpk, which that slice omits; avt and ah_wslp2 are measured EXACTLY 0.0 there, so the omission is inert BY MEASUREMENT and is recorded that way.",
+  "the_bound": "||M^-1||_inf = 0.09996 reproduced independently by dense inversion of 16 sampled columns."
+ },
+
+ "measured_before_this_amendment_was_written": {
+  "note": "Taken while the claim review ran, on the round-37 record and on a kt=1 GYRE step at 5f5859165c97. Recorded as MEASUREMENTS.",
+  "M1": "The two capture points fire exactly ONCE each in a kt=1 GYRE step, and the model's returned T and S are BIT-IDENTICAL with and without the capture: 0 of 21120 on each tracer.",
+  "M2": "The model's dt at the tracer solve is a TRACED value, not a Python float -- it cannot be read with float() and is captured as an array. Its captured value is 14400.0, which is the record's rDt.",
+  "M3": "legoESM's LIVE isoneutral vertical fold K33_iso at the tracer solve has absolute maximum 9.6620886711883531e-13 m2/s. NEMO's ah_wslp2 on the round-37 record is IDENTICALLY 0.0 (absmax 0, and its companion akz likewise). So legoESM adds an isoneutral term to the matrix diffusivity where NEMO adds exactly nothing.",
+  "M4": "legoESM's LIVE matrix diffusivity K_v_cell has absolute maximum 0.0081881547567426074 m2/s; NEMO's avt on the record has absolute maximum 0.0081881547565397887 -- a difference of 2.03e-13 at that cell, the same order as M3's fold.",
+  "M5": "The installed jaxlib 0.10.0 advertises 404 xla_* flags and NONE of them names fma, contraction or fp-contract. LLVM's --fp-contract is NOT a registered option in this build: --xla_backend_extra_options=--fp-contract=off is refused with 'Unknown command line argument'. The ONE setting that disables the contraction is --xla_backend_optimization_level=0, and it does so by disabling backend optimisation entirely.",
+  "M6": "The 2x2 on the round-37 record: with the per-site rounding ON and no flag, sweep T and S are 0/21120; with the rounding REMOVED and no flag, 133 and 111; with the rounding REMOVED and --xla_backend_optimization_level=0, 0 and 0; with both, 0 and 0."
+ },
+
+ "predictions_as_amended": {
+  "PR1": {"claim": "At least one matrix operand differs from NEMO's ON WET CELLS.", "falsifier": "every operand row and both assembled off-diagonals are 0 cells unequal on WET cells, which would put the owner downstream of the solve."},
+  "PR2": {"claim": "RANKED HYPOTHESIS, not a prediction. The largest single contribution to the matrix difference is the ISONEUTRAL FOLD -- legoESM's K33_iso against NEMO's identically-zero ah_wslp2 -- and not the closure's own avt. Ranked first because M3 and M4 agree in order of magnitude and because the claim review's bound wants about 1e-13 m2/s.", "discriminator": "max |K_v_cell - K33_iso - avt_NEMO| over wet faces, against max |K33_iso|. Fold-dominated if the first is much smaller than the second."},
+  "PR3": {"claim": "OUTPUT-SIDE. Substituting NEMO's own zwt_mix for legoESM's K at the tracer solve's own call site moves the kt=1 stage-3 T output by MORE THAN HALF of 3.1956659540810506e-11 K.", "falsifier": "it moves the output by less than a tenth of the residual, which exonerates the matrix diffusivity and puts the owner downstream, exactly as round 37's RHS substitution exonerated the right-hand side."},
+  "PR4": {"claim": "SECOND OUTPUT-SIDE ARM. Substituting only the FOLD -- NEMO's zero in place of legoESM's K33_iso -- accounts for most of PR3's movement.", "falsifier": "it accounts for less than half of it, which would name the closure's avt instead."},
+  "CONTROL_1": "the capture is inert (M1) and round-trips: replacing the dispatch's operands by the captured host arrays leaves T and S bit-identical.",
+  "CONTROL_2": "each capture point fires exactly once; any other count is a hard failure.",
+  "CONTROL_3": "--plant perturbs one captured operand by one ulp and the arm must go red and exit non-zero.",
+  "PLANT": {"claim": "Dry-cell diagonal values are UNCONSUMED SLOTS: writing NaN and a random +/-1e6 into every dry diagonal leaves every WET cell of the solved column bit-identical, on all three cards AND on a synthetic column that HAS a dry cell above a wet one.", "falsifier": "any wet cell moves, or goes non-finite, on any of the four."}
+ },
+ "still_asked_and_not_decided_here": [
+  "whether --xla_backend_optimization_level=0 becomes the default (it disables backend optimisation entirely; measured effect recorded, default NOT changed)",
+  "tracer_combine's disposition",
+  "the dry-cell thickness convention"
+ ]
+}

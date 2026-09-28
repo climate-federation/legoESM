@@ -1794,7 +1794,11 @@ class CoupledESMDriver:
         else:
             co2_ppmv = jnp.full_like(p_s, self.atm_config.co2_ppmv)
 
+        from legoesm.core.coupling_fields import lowest_level_height
         return AtmToSurface(
+            z_lowest=lowest_level_height(
+                T_low, self._atm.sigma.pressure_at_half(p_s),
+                self._atm.sigma.pressure_at_full(p_s)),
             sw_down=sw_down,
             lw_down=lw_down,
             precip_total=precip_total,

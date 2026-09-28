@@ -105,7 +105,8 @@ def apply_le_cap(LE: jax.Array, Rn: jax.Array,
     * ``"soft"`` — smooth softplus UPPER bound ``LE <= max(Rn,0)+slack(Rn)`` with a
       radiation-gated slack (wide by day, tight at night).  Default; stops the
       positive-LE runaway that diverges the leaf-T Newton solve.  Negative LE
-      (dew) passes through unchanged; a zero raw flux stays ~0 (no lower bound).
+      (dew) passes through unchanged; a zero raw flux stays exactly 0 (no lower
+      bound).
     * ``"hard"`` — legacy ``clip(LE, 0, max(Rn,0))`` (non-smooth; forces H>=0).
     * ``"off"`` — no cap (pre-regression behaviour; can diverge at dry sites).
     """
@@ -120,8 +121,14 @@ def apply_le_cap(LE: jax.Array, Rn: jax.Array,
         slack = _LE_CAP_NIGHT_SLACK_WM2 + (
             _LE_CAP_DAY_SLACK_WM2 - _LE_CAP_NIGHT_SLACK_WM2) * gate
         cap_hi = rn_pos + slack
-        # Upper bound only — see module notes (no lower/dew bound).
-        return cap_hi - jax.nn.softplus((cap_hi - LE) * k) / k
+        # Upper bound only — see module notes (no lower/dew bound).  Shifted so
+        # a zero raw flux maps to EXACTLY zero: the plain form
+        # cap_hi - softplus(k (cap_hi - LE))/k leaks -ln(1+exp(-k cap_hi))/k
+        # (-0.1..-0.4 W m-2) at LE = 0, a leaf-area-independent spurious dew
+        # that the leaf balance divides by a conductance proportional to LAI:
+        # sparse leaves ran tens of K hot and the canopy solve stalled.
+        return (jax.nn.softplus(cap_hi * k)
+                - jax.nn.softplus((cap_hi - LE) * k)) / k
     raise ValueError(
         f"unknown le_cap_mode {le_cap_mode!r}; expected one of {_LE_CAP_MODES}")
 

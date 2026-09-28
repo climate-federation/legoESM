@@ -170,9 +170,9 @@ SYMBOL_DISPOSITION: dict[tuple[str, str], tuple] = {
                               "state.S_before (Nbb)"),
     ("oce", "ssh"): (IN_STATE, "state.eta (Nnn) + state.eta_before (Nbb)"),
     ("oce", "ww"): (IN_STATE, "state.w"),
-    ("oce", "uu_b"): (THREADED, "barotropic depth mean; recomputed from u/h "
-                                "inside the barotropic solve each step"),
-    ("oce", "vv_b"): (THREADED, "as uu_b, for v"),
+    ("oce", "uu_b"): (IN_STATE, "state.uu_b; NEMO key_RK3 prognostic Kbb/Kaa "
+                                 "depth-mean U velocity"),
+    ("oce", "vv_b"): (IN_STATE, "state.vv_b; v-face twin of state.uu_b"),
     ("oce", "hdiv"): (THREADED, "horizontal divergence recomputed from u/v "
                                 "each step (div_hor) and consumed in-step by "
                                 "ssh_nxt/wzv"),

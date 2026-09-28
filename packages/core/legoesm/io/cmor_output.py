@@ -275,10 +275,8 @@ def merged_variable_attrs(
 ) -> Dict[str, str]:
     """Table attributes with a producer's overrides merged in.
 
-    Producers legitimately override ``cell_methods`` to be HONEST about
-    sampling -- a monthly value built from once-daily instantaneous samples
-    is not a continuous time mean, so the MPAS lean path relabels it (see
-    ``DiagnosticsCollector.cmip_snapshot_vars``).  What a producer knows is
+    Producers can override ``cell_methods`` to describe their sampling.
+    What a producer supplies is
     the TIME clause; the AREA clause belongs to the variable and must keep
     matching the table.
 

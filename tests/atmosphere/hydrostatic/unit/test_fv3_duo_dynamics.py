@@ -344,6 +344,51 @@ class TestFV3DuoDynamicsModel:
         assert float(np.abs(np.asarray(out["state"]["w"])).max()) > 0.0
 
 
+    def test_moist_arm_routes_zvir_into_ic_and_step(self, bundle):
+        """``moist=True`` = the oracle's zvir with tracer 0 as humidity:
+        (1) the IC's pt is the dry IC's pt divided by (1 + zvir*q) on
+        the compute window (test_cases.F90:6762), bitwise; (2) the
+        wrapper's step is the CORE's own moist step (zvir, sphum_index=0)
+        bitwise -- the routing is that and nothing else; (3) it differs
+        from the dry step on the same moist IC (non-vacuous)."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoConfig,
+            FV3DuoDynamicsModel,
+        )
+        from legoesm.core.fv3_dynamics import make_fv_dynamics_step_jit
+        from legoesm.grids.fv3_native_gridstruct import (
+            FV3_CP_AIR, FV3_KAPPA, FV3_RDGAS, FV3_RVGAS)
+        dry = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2))
+        wet = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2,
+                                                       moist=True))
+        assert dry.zvir == 0.0
+        assert wet.zvir == FV3_RVGAS / FV3_RDGAS - 1.0
+        ic_d, ic_w = dry.dcmip16_initial_state(), wet.dcmip16_initial_state()
+        cs = slice(NG, NG + N)
+        q = np.asarray(ic_w["q"][0])
+        exp_pt = np.asarray(ic_d["state"]["pt"])[:, cs, cs] \
+            / (1.0 + wet.zvir * q[:, cs, cs])
+        assert np.asarray(ic_w["state"]["pt"])[:, cs, cs].tobytes() \
+            == exp_pt.tobytes()
+        assert np.array_equal(q, np.asarray(ic_d["q"][0]))
+        out_w = wet.step(ic_w, BDT)
+        core = make_fv_dynamics_step_jit(
+            wet._ctx_jax, KM, k_split=1, n_split=2, ptop=wet._ptop,
+            ak=wet._ak, bk=wet._bk, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+            kord_mt=9, kord_tm=-9, kord_tr=9, hydrostatic=True,
+            w_limiter=None, out_shardings=None, batched=False,
+            zvir=wet.zvir, sphum_index=0)
+        ref = core(ic_w["state"], ic_w["press"], ic_w["q"], BDT,
+                   ic_w["omga"], ic_w["nh"])
+        for nm in ("delp", "pt", "u", "v"):
+            assert np.asarray(out_w["state"][nm]).tobytes() == \
+                np.asarray(ref["state"][nm]).tobytes(), nm
+        out_d = dry.step(ic_w, BDT)
+        d = float(np.abs(np.asarray(out_w["state"]["pt"])
+                         - np.asarray(out_d["state"]["pt"])).max())
+        assert d > 1e-6, "moist step identical to dry step on the same IC"
+
+
 # ---------------------------------------------------------------------
 # 4. Component-factory dispatch + refusals
 # ---------------------------------------------------------------------
@@ -394,6 +439,13 @@ class TestComponentFactoryDispatch:
         # step); the NH combination stays refused as uncertified.
         (dict(held_suarez_forcing=True, model_type="nonhydrostatic"),
          "hydrostatic-only"),
+        # Kessler is routed ALONE on the hydrostatic arm; with HS or NH
+        # it stays refused, and any second scheme next to it is inert.
+        (dict(microphysics="kessler", held_suarez_forcing=True),
+         "choose one"),
+        (dict(microphysics="kessler", model_type="nonhydrostatic"),
+         "Kessler is hydrostatic-only"),
+        (dict(microphysics="kessler", turbulence="louis"), "silently inert"),
         # distributed now legal with mode spmd; the DEFAULT mode (mpi)
         # is refused with the SPMD-only message (PR #1656 driver wiring).
         (dict(distributed=True), "SPMD-only"),
@@ -425,6 +477,27 @@ class TestComponentFactoryDispatch:
         with pytest.raises(ValueError, match="needs exactly 24"):
             create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                      create_sigma_coordinate(KM))
+
+    def test_kessler_hydrostatic_constructs(self):
+        """hydro + microphysics='kessler' (alone) passes the wall and
+        the specific guards: the one routed scheme on this lane."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        from legoesm.driver.component_factory import create_atmosphere_dycore
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        cfg = _fv3_duo_config(microphysics="kessler")
+        model = create_atmosphere_dycore(cfg, create_cubed_sphere(N),
+                                         create_sigma_coordinate(KM))
+        assert isinstance(model, FV3DuoDynamicsModel)
+        # Kessler selects MOIST dynamics (user 2026-09-24); the dry deck
+        # does not
+        assert model.config.moist is True and model.zvir > 0.0
+        dry = create_atmosphere_dycore(_fv3_duo_config(),
+                                       create_cubed_sphere(N),
+                                       create_sigma_coordinate(KM))
+        assert dry.config.moist is False and dry.zvir == 0.0
 
     def test_held_suarez_hydrostatic_constructs(self):
         """hydro + held_suarez_forcing passes the wall AND the specific
@@ -660,6 +733,99 @@ class TestModelDriverLane:
         assert (tmp_path / "fv3duo_status.txt").read_text().strip() \
             == "COMPLETED"
 
+    def test_kessler_run_is_dynamics_plus_the_bridge(self, tmp_path):
+        """Kessler-on driver run COMPLETEs with THREE tracers (DCMIP16
+        humidity + zero cloud + zero rain) and its final state is
+        bitwise the driver's own dynamics step composed with the shared
+        Kessler bridge after every step -- the routing is exactly that
+        and nothing else (and the bridge reads pe/peln of the SAME
+        step's press dict, not a stale one)."""
+        from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
+            apply_kessler_step_sixface_jax)
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path),
+                              microphysics="kessler")
+        driver = ModelDriver(cfg, output_dir=tmp_path)
+        driver.setup()
+        status = driver.run()
+        assert status == "COMPLETED", f"Kessler driver lane returned {status!r}"
+        assert len(driver.state["q"]) == 3
+        dt = float(driver.config.dycore.dt)
+        n_steps = int(cfg.days * 86400.0 / dt)
+        bundle = driver.model.dcmip16_initial_state(do_pert=True)
+        q0 = bundle["q"][0]
+        bundle = {**bundle, "q": [q0, jnp.zeros_like(q0), jnp.zeros_like(q0)]}
+        from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+        g = driver.model.grid
+        for _ in range(n_steps):
+            bundle = driver.model.step(bundle, dt)
+            st, pr, q = apply_kessler_step_sixface_jax(
+                bundle["state"], bundle["press"], bundle["q"], dt=dt,
+                n=g.n, ng=g.ng, km=driver.model.config.km,
+                ptop=driver.model._ptop, akap=FV3_KAPPA)
+            bundle = {**bundle, "state": st, "press": pr, "q": q}
+        pt_drv = np.asarray(driver.state["state"]["pt"])
+        assert np.isfinite(pt_drv).all()
+        # the driver's bridge is jitted, this composition is eager: XLA
+        # fusion makes that rounding-level (1e-13 of peak), not bitwise
+        def _close(x, y):
+            x, y = np.asarray(x), np.asarray(y)
+            return np.abs(x - y).max() <= 1e-13 * max(np.abs(x).max(), 1e-300)
+        assert _close(pt_drv, bundle["state"]["pt"])
+        assert _close(driver.state["state"]["delp"], bundle["state"]["delp"])
+        assert _close(driver.state["press"]["pe"], bundle["press"]["pe"])
+        for i in range(3):
+            assert _close(driver.state["q"][i], bundle["q"][i]), i
+        # the humidity slot is the DCMIP16 field, not a passenger copy
+        assert float(np.abs(np.asarray(driver.state["q"][0])).max()) > 1e-3
+
+    def test_kessler_hook_keeps_a_passenger_once(self, tmp_path):
+        """Face layout: a fourth tracer beyond the Kessler slots rides
+        through the driver hook unchanged and exactly once (codex
+        2026-09-24: the bridge already keeps it, and the hook appended
+        it again -- four became five, then seven)."""
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path),
+                              microphysics="kessler")
+        driver = ModelDriver(cfg, output_dir=tmp_path)
+        driver.setup()
+        # rain on a SATURATED column so some reaches the surface and the
+        # renormalisation is NOT the identity (mass gate non-vacuous); on
+        # the dry IC the core evaporates any seed within the step
+        from tests.grids.test_fv3_duo_window_spmd import _saturate_and_seed_rain
+        b = _saturate_and_seed_rain(driver._fv3_duo_fresh_ic(),
+                                    driver.model.grid)
+        out = driver._fv3_duo_apply_kessler(b, float(cfg.dycore.dt))
+        assert len(out["q"]) == 4
+        # the passenger's MASS is conserved through the renormalisation
+        g = driver.model.grid
+        cs = slice(g.ng, g.ng + g.n)
+        m0 = (np.asarray(b["state"]["delp"]) * np.asarray(b["q"][3]))[:, cs, cs]
+        m1 = (np.asarray(out["state"]["delp"]) * np.asarray(out["q"][3]))[:, cs, cs]
+        assert np.allclose(m1, m0, rtol=1e-12, atol=0)
+        assert np.abs(np.asarray(out["q"][3]) - np.asarray(b["q"][3]))[:, cs, cs].max() > 0.0
+        out2 = driver._fv3_duo_apply_kessler(out, float(cfg.dycore.dt))
+        assert len(out2["q"]) == 4
+
+    def test_kessler_restart_template_carries_three_tracers(self, tmp_path):
+        """The multi-process restart validator sizes a checkpoint against
+        the deck's OWN fresh IC; with Kessler on that IC carries three
+        tracers, so a Kessler checkpoint (nq=3) is not refused as
+        foreign (GLM 2026-09-23).  Dry deck: one."""
+        from legoesm.driver.model_driver import ModelDriver
+        for micro, nq in (("kessler", 3), ("none", 1)):
+            cfg = _fv3_duo_config(output_dir=str(tmp_path / micro),
+                                  microphysics=micro)
+            driver = ModelDriver(cfg, output_dir=tmp_path / micro)
+            driver.setup()
+            flat = driver._fv3_duo_flatten_bundle(
+                driver._fv3_duo_host_faces(driver._fv3_duo_fresh_ic()))
+            assert sum(nm.startswith("q_") for nm in flat) == nq, micro
+            if micro == "kessler":
+                assert not np.asarray(flat["q_1"]).any()
+                assert not np.asarray(flat["q_2"]).any()
+                assert np.asarray(flat["q_0"]).any()
+
     def test_blowup_writes_explicit_status_marker(self, tmp_path):
         """A guard-tripped run leaves an EXPLICIT marker (not just a
         missing manifest digest).  Cheap: an identity step (no jit
@@ -705,6 +871,7 @@ def _write_duo_ckpt(path, drv, **over):
         "_hydrostatic": np.bool_(drv.model.config.hydrostatic),
         "_km": np.int64(drv.model.config.km),
         "_resolution": np.int64(drv.model.grid.n),
+        "_zvir": np.float64(drv.model.zvir),
         "_git_sha": "test",
     }
     meta.update(over)
@@ -743,6 +910,9 @@ class TestFV3DuoRestart:
         ("_resolution", 24, "resolution mismatch"),
         ("_hydrostatic", False, "hydrostatic mismatch"),
         ("_dt", 7.0, "dt mismatch"),
+        # a MOIST checkpoint on the dry driver (codex 2026-09-24: the
+        # tracer count alone cannot tell the two thermodynamic modes)
+        ("_zvir", 0.6078, "thermodynamic-mode mismatch"),
     ])
     def test_deck_mismatch_refused(self, restart_driver, field, value,
                                    frag):
@@ -868,15 +1038,21 @@ class TestFV3DuoRestart:
         with pytest.raises(ValueError, match="load_checkpoint"):
             drv._run_fv3_duo(start_step=7)
 
-    @pytest.mark.parametrize("model_type,hs", [
-        ("hydrostatic", False),
-        ("nonhydrostatic", False),
+    @pytest.mark.parametrize("model_type,hs,micro", [
+        ("hydrostatic", False, "none"),
+        ("nonhydrostatic", False, "none"),
         # HS-on restart: the adapter is stateless (bundle -> bundle) and
         # checkpoints persist the post-HS bundle, so the chain must stay
         # bitwise exactly like the dry lane (codex MINOR 2026-08-24).
-        ("hydrostatic", True),
+        ("hydrostatic", True, "none"),
+        # Kessler (moist, three tracers): the checkpoint carries nq=3 and
+        # the loader must take it back without refusing or re-deriving
+        # the tracer list (codex 2026-09-24: the template test alone
+        # could not tell).
+        ("hydrostatic", False, "kessler"),
     ])
-    def test_restart_roundtrip_bitwise(self, tmp_path, model_type, hs):
+    def test_restart_roundtrip_bitwise(self, tmp_path, model_type, hs,
+                                       micro):
         """PRE-REGISTERED acceptance (non-negotiable): run A = 2 days
         straight; run B = fresh driver loading A's day-1 checkpoint,
         then the remaining day.  Final bundles must be BITWISE identical
@@ -887,7 +1063,7 @@ class TestFV3DuoRestart:
         dir_a, dir_b = tmp_path / "a", tmp_path / "b"
         dir_a.mkdir(), dir_b.mkdir()
         mk = dict(days=2, checkpoint_days=1, model_type=model_type,
-                  held_suarez_forcing=hs)
+                  held_suarez_forcing=hs, microphysics=micro)
         cfg_a = _fv3_duo_config(output_dir=str(dir_a), **mk)
         drv_a = ModelDriver(cfg_a, output_dir=dir_a)
         drv_a.setup()
@@ -1014,7 +1190,13 @@ def test_wall_default_surface_is_frozen():
 # Recorded because it is main's, not this branch's, and someone should look at
 # it there: `forcing/amip.py` still declares `albedo_ice: float = 0.65`, so the
 # two declarations of that quantity now disagree.
-_WALL_SURFACE_SHA256 = "8851a6fe84378ee1fbda9dc96fd238895a493dc7e74a4e3350727f49066d3842"
+#
+# 2026-09-23 re-review (job 9952079, old vs new surface): five new
+# cloud_cap_floor_* fields (all off) and cloud_saturation_scheme moving
+# 'liquid' -> 'mixed_phase'.  Both are cloud diagnostics the duo execution
+# loop never evaluates (the cloud_scheme allow-list entry's own argument);
+# non-default values stay refused, so the allow-list is unchanged.
+_WALL_SURFACE_SHA256 = "95569efd839eee0287c4980fdff33981403573022936c7ccc6e4067d808ed709"
 
 
 def test_wall_leaf_types_are_scalar():

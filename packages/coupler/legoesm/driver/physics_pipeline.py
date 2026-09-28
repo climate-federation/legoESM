@@ -890,7 +890,7 @@ class PhysicsPipeline:
         ``step_multilayer_land`` with the pipeline's land config / per-column params.
         Pure + differentiable w.r.t. the land params (the whole point of the refactor).
         Deferred land imports avoid a core->land top-level cross-package cycle."""
-        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface, lowest_level_height
         from legoesm.land.multilayer_land import step_multilayer_land
         from legoesm.thermo import saturation_mixing_ratio
         ad = self.adapter
@@ -907,6 +907,9 @@ class PhysicsPipeline:
         # a shared faithful-zenith upgrade for those is a separate follow-up).
         _cosz = cos_zenith_col if cos_zenith_col is not None else 0.5 * ones
         forcing = AtmToSurface(
+            z_lowest=lowest_level_height(
+                T_air, self.sigma_coord.pressure_at_half(p_s_col),
+                self.sigma_coord.pressure_at_full(p_s_col)),
             sw_down=sw_down_col, lw_down=lw_down_col, precip_total=precip,
             precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
             T_lowest=T_air, q_lowest=q_air, u_lowest=u_low, v_lowest=v_low,
@@ -1511,8 +1514,7 @@ class PhysicsPipeline:
                         dt=dt, config=_conv_cfg,
                         land_frac=(
                             ad.flatten_2d(self.f_land)
-                            if self.f_land is not None
-                            else jnp.zeros((ad.ncol,), dtype=T_col.dtype)),
+                            if self.f_land is not None else None),
                         cld_frac=(None if cloud_fraction is None
                                   else cloud_fraction.reshape(T_col.shape)),
                         pref_edge=self.sigma_half * constants.p_ref,
@@ -1587,6 +1589,9 @@ class PhysicsPipeline:
         # Isolated saturation-adjustment condensation (q_v->q_c) for the joint
         # vapour donor clamp below; None unless the micro scheme exposes it.
         _micro_dq_v_to_qc = None
+        # CFL sedimentation sub-steps the scheme required this step; None
+        # unless the scheme publishes it (Morrison with sub-stepping on).
+        _sed_req = None
 
         if micro_out_ml is not None:
             dT_dt_micro = ad.unflatten_3d(micro_out_ml.dT_dt)
@@ -1703,6 +1708,9 @@ class PhysicsPipeline:
             dN_c_dt = ad.unflatten_3d(micro_out.dN_c_dt)
             dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
             dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
+            _sed_req = getattr(micro_out, "sed_substeps_required", None)
+            if _sed_req is not None:
+                _sed_req = ad.unflatten_2d(_sed_req)
             _c = micro_out.dq_v_to_qc_dt
             _micro_dq_v_to_qc = (
                 ad.unflatten_3d(_c) if _c is not None else None)
@@ -2329,6 +2337,7 @@ class PhysicsPipeline:
             cloud_fraction=(
                 turb_out.cloud_fraction if turb_out is not None else None),
             budget_ledger=_bl_out,
+            sed_substeps_required=_sed_req,
         )
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
@@ -2496,9 +2505,13 @@ class PhysicsPipeline:
                 # every structured-grid canopy run (codex).
                 _alb_veg = getattr(_lmp_rad, "albedo_veg", None)
                 if _alb_veg is None:
+                    # Soil bands at the tile's current top-layer water (the
+                    # land step rewets the same bounds with its own water).
+                    from legoesm.land.soil_albedo import rewet_soil_bands
+                    _lmp_alb = rewet_soil_bands(_lmp_rad, land_ml.theta_soil[:, 0])
                     alb_land = ad.unflatten_2d(
-                        _VIS_FRAC_SOLAR * _lmp_rad.ALB_VIS
-                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_rad.ALB_NIR)
+                        _VIS_FRAC_SOLAR * _lmp_alb.ALB_VIS
+                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_alb.ALB_NIR)
                 else:
                     alb_land = ad.unflatten_2d(_alb_veg)
                 emis_land = ad.unflatten_2d(_lmp_rad.emissivity)
@@ -3708,8 +3721,7 @@ def _resolve_convection(config):
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
             # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
-            # coefficients + the quasi-equilibrium heating-ceiling ratio
-            # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
+            # coefficients.  Defaults match BechtoldConfig.
             # The ExperimentConfig field (2026-09-15); the earlier
             # getattr(..., 'bechtold_m_b_max', 0.02) read a field that never
             # existed and silently capped every run at 0.02.
@@ -3794,6 +3806,9 @@ def _resolve_convection(config):
         if (_pe is not None and _pe > 0.0
                 and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
+        if scheme == "zhang_mcfarlane":
+            conv_config = conv_config._replace(
+                land_fraction=config.zm_land_fraction)
 
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
@@ -3987,10 +4002,18 @@ def thread_morrison_scalars(config, scheme, micro_config):
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps"])
     _sed_strict = getattr(config, "morrison_sed_cfl_substeps_strict",
                           _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"])
+    _sed_max = getattr(config, "morrison_sed_cfl_substeps_max",
+                       _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"])
+    _graupel = getattr(config, "morrison_do_graupel",
+                       _ExpCfg._field_defaults["morrison_do_graupel"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
-                    ("morrison_sed_cfl_substeps_strict", _sed_strict)):
+                    ("morrison_sed_cfl_substeps_strict", _sed_strict),
+                    ("morrison_do_graupel", _graupel)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
+    if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
+        raise ValueError(
+            f"morrison_sed_cfl_substeps_max must be an int >= 1, got {_sed_max!r}")
     # Forward only when the flat value deviates from the ExperimentConfig
     # default (locked equal to the MorrisonConfig leaf by test), so an
     # untouched config stays byte-identical on Morrison and silent elsewhere.
@@ -3999,7 +4022,13 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _sed_strict = (None if _sed_strict
                    is _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"]
                    else _sed_strict)
-    if not _touched and _flavor is None and _sed_sub is None and _sed_strict is None:
+    _sed_max = (None if _sed_max
+                == _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"]
+                else _sed_max)
+    _graupel = (None if _graupel
+                is _ExpCfg._field_defaults["morrison_do_graupel"] else _graupel)
+    if (not _touched and _flavor is None and _sed_sub is None
+            and _sed_strict is None and _sed_max is None and _graupel is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4007,7 +4036,9 @@ def thread_morrison_scalars(config, scheme, micro_config):
     return apply_microphysics_experiment_flags(
         micro_config, scheme, morrison_scalars=_touched,
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
-        morrison_sed_cfl_substeps_strict=_sed_strict)
+        morrison_sed_cfl_substeps_max=_sed_max,
+        morrison_sed_cfl_substeps_strict=_sed_strict,
+        morrison_do_graupel=_graupel)
 
 
 def _resolve_microphysics(config):
@@ -4097,16 +4128,24 @@ def _resolve_microphysics(config):
     _hs_thr = getattr(config, "hard_sat_adjust_threshold", None)
     _hs_cap = getattr(config, "hard_sat_max_heating_K", None)
     _hom_nuc = bool(getattr(config, "homogeneous_ice_nucleation", False))
-    if _hs_thr is not None or _hs_cap is not None or _hom_nuc:
-        from legoesm.atmosphere.physics.microphysics.config import (
-            apply_microphysics_experiment_flags,
-        )
-        micro_config = apply_microphysics_experiment_flags(
-            micro_config, scheme,
-            hard_sat_adjust_threshold=_hs_thr,
-            hard_sat_max_heating_K=_hs_cap,
-            homogeneous_ice_nucleation=_hom_nuc,
-        )
+    # Second half of the CLUBB liquid partition; see the MPAS call site.
+    _liq_closure = bool(config._liquid_partition_resolved())
+    # Called UNCONDITIONALLY.  The clearing assignment inside the helper is
+    # what stops a microphysics override that already carries
+    # liquid_from_closure=True from reaching a built model with no liquid
+    # source; gating the call on the other flags being set left exactly that
+    # leak standing (GLM).  All-None / all-False is a no-op on every other
+    # knob, so this is free.
+    from legoesm.atmosphere.physics.microphysics.config import (
+        apply_microphysics_experiment_flags,
+    )
+    micro_config = apply_microphysics_experiment_flags(
+        micro_config, scheme,
+        hard_sat_adjust_threshold=_hs_thr,
+        hard_sat_max_heating_K=_hs_cap,
+        homogeneous_ice_nucleation=_hom_nuc,
+        liquid_from_closure=_liq_closure,
+    )
 
     # Morrison ice-process tunables (flat ``morrison_*`` ExperimentConfig
     # scalars, declared with "MorrisonConfig.<field>" comments but NEVER
@@ -4166,6 +4205,36 @@ def apply_surface_flux_config(tc, config):
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
     zml = getattr(config, "surface_z_ref_model_level", None)
+
+    # #1783: the unified land-flux law pins the reference height OFF.
+    #
+    # The height correction tells the MOST solver the real height of the lowest
+    # full level (~135 m instead of a nominal 10 m) and brings the air down
+    # dry-adiabatically, ~1.5 K.  Against the unified land interface that
+    # manufactures an air-surface contrast that is not there: with it on, five
+    # tests of TestUnifiedLaneOneFluxLaw fail with sensible heat at
+    # -1.13 .. -7.94 W/m^2 where the blended law wants +43.6 .. -16.9, i.e. a
+    # downward flux out of nothing.  Forcing it off takes that class to 7
+    # passed and the whole module to 29 passed -- measured, one constructor
+    # field, job 9946756.
+    #
+    # Only when the run does not state it.  An explicit request is never
+    # silently inverted; the two settings genuinely disagree, so asking for
+    # both is refused rather than resolved behind the caller's back.
+    if getattr(config, "land_interface_flux", None) == "unified":
+        if zml is None:
+            zml = False
+        elif bool(zml):
+            raise ValueError(
+                "land_interface_flux='unified' with "
+                "surface_z_ref_model_level=True is not a supported "
+                "combination (#1783): the lowest-level height correction "
+                "invents an air-surface contrast that the unified flux law "
+                "then debits, producing a downward sensible heat flux out of "
+                "nothing. Set surface_z_ref_model_level=False or leave it "
+                "unset (the unified lane pins it off), or select a different "
+                "land_interface_flux."
+            )
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
     # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
     # sea-water surface humidity needs a path that separates the ocean from
@@ -4326,6 +4395,27 @@ def turbulence_config_for(config):
             )
             tc = materialize_sub_config(tc)
             tc = tc._replace(clubb=tc.clubb._replace(prognostic=True))
+        # CLUBB's two-sided cloud-liquid exchange with the host (CAM
+        # clubb_intr.F90).  Same threading and the same refusal as the flag
+        # above, plus a prognostic requirement: the liquid the closure writes
+        # back is the POST-ADVANCE PDF's rcm, which only the prognostic path
+        # produces from advanced moments.
+        if getattr(config, "clubb_liquid_partition", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_liquid_partition=True requires turbulence='clubb', "
+                    f"got {tc.scheme!r}. The exchanged liquid is the CLUBB PDF's "
+                    f"own rcm; no other closure diagnoses one.")
+            if not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_liquid_partition=True requires clubb_prognostic=True: "
+                    "the liquid handed back is the post-advance PDF closure's "
+                    "rcm, which the diagnostic path does not produce.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(liquid_partition=True))
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => byte-identical: the scheme's own 0.0 (off) stands.
@@ -4421,6 +4511,20 @@ def turbulence_config_for(config):
                 f"{getattr(_sub, 'prognostic', None)!r}). The override is "
                 "authoritative, so set CLUBBConfig(prognostic=True) inside it "
                 "rather than relying on the experiment-level flag.")
+    if getattr(config, "clubb_liquid_partition", False):
+        # Same refusal, and it matters more here: swallowing this one silently
+        # would run a deck that asked for the liquid exchange with the closure
+        # still throwing its liquid away, which looks exactly like the defect
+        # the lever exists to remove.
+        _sub = getattr(tc, "clubb", None)
+        if tc.scheme != "clubb" or _sub is None or not _sub.liquid_partition:
+            raise ValueError(
+                "clubb_liquid_partition=True but an explicit turbulence_override "
+                "is in force and does not select it (override "
+                f"scheme={tc.scheme!r}, liquid_partition="
+                f"{getattr(_sub, 'liquid_partition', None)!r}). The override is "
+                "authoritative, so set CLUBBConfig(liquid_partition=True) inside "
+                "it rather than relying on the experiment-level flag.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the

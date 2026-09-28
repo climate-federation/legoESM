@@ -1,0 +1,556 @@
+{
+ "artifacts_sha256": {
+  "orca2/orca2_hpg_model_arm.json": "76787a41bd95e04e1b2e9486b3262a8a0bc16628c78249f527f7ba96ebf040f6",
+  "orca2/orca2_hpg_model_arm_plant.json": "9698c77cccf67afa9c1cf011d1091b107924308316091a24f7cd5ba5ff1bcb21",
+  "verify/bbl_geometry_census.json": "0f0ab0a3fa06d378b62662412d8d5fef43a153cb5d34d425a4d8a18fcbf01e2f",
+  "verify/citation_gate.json": "5a4db29a1d2c87023db5957d2d84c453e05180edca0b1ae3f8b5703e6ce75f9b",
+  "verify/citation_gate.log": "5a4db29a1d2c87023db5957d2d84c453e05180edca0b1ae3f8b5703e6ce75f9b",
+  "verify/focused_suite.log": "3e3d62691777ebe9351a1d6cb9067f40ce63de0b98f6397a57d0a2341152d68b",
+  "verify/lock_external_walk_kt1.json": "f157b3dbd64861499d99a9678ff62df674fe9c5dd7946800d79bb832d3474054",
+  "verify/lock_external_walk_kt1.log": "f157b3dbd64861499d99a9678ff62df674fe9c5dd7946800d79bb832d3474054",
+  "verify/lock_external_walk_kt1_plant_entry.json": "87795d5f941c9ec961da146ca4bc2a4fc72815a0bbb1f4def642115d8de1b02b",
+  "verify/lock_external_walk_kt1_plant_exit.json": "49a71e13f4460bb41b8ee037b2ebc095406b0f51345399f22b255667333bb8a4",
+  "verify/lock_plant_entry.log": "87795d5f941c9ec961da146ca4bc2a4fc72815a0bbb1f4def642115d8de1b02b",
+  "verify/lock_plant_exit.log": "49a71e13f4460bb41b8ee037b2ebc095406b0f51345399f22b255667333bb8a4",
+  "verify/lock_slow_forcing_owner.json": "2e16e69834be35ad59e552bcdeeaa7b970d2e04a69a2b7532d9009087d0a00e5",
+  "verify/lock_slow_forcing_owner_plant.json": "5cbb3e264ff7ecde072dbe06b7637a3a53290490ddde03d84e3a2806589868b3",
+  "verify/overflow_regression.log": "8bce662b9a524cd69d3bf52847675de356fdb896f24c7892237d8e147fbe22db",
+  "verify/overflow_regression_kt1.json": "8bce662b9a524cd69d3bf52847675de356fdb896f24c7892237d8e147fbe22db",
+  "verify/rule12_LOCK_EXCHANGE-zco_r27.log": "574fb343bd7cc5aa2ce488db0b70fbb1763289713e57b9526d075992ae4d81ef",
+  "verify/rule12_LOCK_EXCHANGE-zco_r27_plant.log": "a2ecdad1332ee2f63b183ea6970fd17e045d55dbfdfc74663335d2a8b3b8b3a7",
+  "verify/rule12_OVERFLOW-zps_r27.log": "ea456b56746e4b625cb71f34ca3be818ad270820ea5afa04d5f296d639fa995a",
+  "verify/rule12_OVERFLOW-zps_r27_plant.log": "5077fcbcc64926c41b2548585bca02a84ddcf87aeb20b38c08ff909f3e17442a",
+  "verify/rule12_ppsrc_plant_dino.log": "dbd51bf9571ffbcd8c4a725ae9b9ab368b25a6874055a2f474483019dd10c840",
+  "verify/rule12_stp2d_momentum_rhs_LOCK_EXCHANGE-zco_r27.json": "574fb343bd7cc5aa2ce488db0b70fbb1763289713e57b9526d075992ae4d81ef",
+  "verify/rule12_stp2d_momentum_rhs_LOCK_EXCHANGE-zco_r27_plant.json": "a2ecdad1332ee2f63b183ea6970fd17e045d55dbfdfc74663335d2a8b3b8b3a7",
+  "verify/rule12_stp2d_momentum_rhs_OVERFLOW-zps_r27.json": "ea456b56746e4b625cb71f34ca3be818ad270820ea5afa04d5f296d639fa995a",
+  "verify/rule12_stp2d_momentum_rhs_OVERFLOW-zps_r27_plant.json": "5077fcbcc64926c41b2548585bca02a84ddcf87aeb20b38c08ff909f3e17442a"
+ },
+ "bbl": {
+  "assertion_is_a_theorem_on_this_card": true,
+  "census": {
+   "bbl_static_geometry": {
+    "u_active": 141,
+    "u_active_degenerate_ku_s_eq_ku_d": 112,
+    "u_active_stepped": 29,
+    "v_active": 0
+   },
+   "nemo_bbl_static_geometry": {
+    "u_active": 29,
+    "u_active_degenerate_ku_s_eq_ku_d": 0,
+    "u_active_stepped": 29,
+    "v_active": 0
+   }
+  },
+  "planted_break": "BBL off in the ON arm -> 0.0 movement, 1 failed",
+  "test": "1 passed in 398.72s"
+ },
+ "citation_gate": {
+  "plants": {
+   "shifted citation": 1,
+   "unmapped citation": 1
+  },
+  "result": {
+   "citations_found": 81,
+   "failures": [],
+   "format": "nemo-testcase-receipt-citation-gate-v1",
+   "from_heading": "## Round 25 \u2014",
+   "planted_shift": null,
+   "receipt": "/tmp/codex-gyre/docs/ocean/fidelity/testcases/nemo_testcases_l2_gyre_phase3_round8_receipt.md",
+   "shift_blind_map_entries": [],
+   "status": "PASS",
+   "unmapped_citations": []
+  },
+  "shift_blind_after_fix": 0,
+  "shift_blind_before_fix": 36
+ },
+ "commits": [
+  "116cfdedfa1a fix(ocean): close both review blockers -- the citation gate was shift-blind,  the ORCA2 probe re-derived the arm",
+  "a0c07213fdf6 fix(ocean): retract this round's own \"bit-exact / dyn_hpg alone\", and scope  three more claims",
+  "814f0b103d99 docs(ocean): round-27 receipt -- the retraction retracted, ORCA2 scored",
+  "401fb3e67be5 fix(ocean): null the undefined slow-forcing ratio, and make trajectory  provenance per card",
+  "35f6925f2fa8 feat(ocean): score ORCA2 as the fourth Rule-12 card, from a disposable probe",
+  "c0aff952b730 feat(ocean): separate LOCK's :172-vs-:185 external-mode owner offline",
+  "9d3d61e15c22 fix(ocean): point the OVERFLOW BBL liveness test at the geometry the model runs",
+  "6ba170443502 feat(ocean): gate every receipt citation against the symbol it names",
+  "d10f8b87c2c0 fix(ocean): un-retract the dyn_hpg-alone frame, proved from the ppsrc",
+  "9aba55fc9304 docs(ocean): round-27 preregistration for the un-retraction and the fourth card"
+ ],
+ "date": "2026-09-05",
+ "flagged_probe_worktrees": [
+  "/tmp/codex-orca2-r27-probe",
+  "/tmp/codex-orca2-r26",
+  "/tmp/codex-gyre-r25tip"
+ ],
+ "format": "nemo-testcase-l2-gyre-round27-v1",
+ "lock_slow_forcing_owner": {
+  "confirmed": "stp2d.F90:185's counterpart, the depth-mean reduction",
+  "instrument_reproduces_model_statement": true,
+  "landed": false,
+  "other_ue_rhs_writers_off": {
+   "ln_apr_dyn": {
+    "live": false,
+    "read_from": "ocean.output"
+   },
+   "ln_bern_srfc": {
+    "live": false,
+    "read_from": "namelist_ref"
+   },
+   "ln_ice_embd": {
+    "live": false,
+    "read_from": "ocean.output"
+   }
+  },
+  "plant": 1,
+  "producing_operation": "divide vs NEMO's precomputed reciprocal, SCOPED to this frame",
+  "refuted": "stp2d.F90:172 -- Ue_rhs after it is exactly 0.0 at this rest entry",
+  "resolution_demonstration": {
+   "arms_differ_by": 2.168404344971009e-19,
+   "divide_arm_unequal_vs_nemo": 1,
+   "note": "the +1.0 plant proves the probe READS its operand, not that it resolves the 2.168e-19 effect it attributes -- one ULP on the largest operand moves the mean by ~2e-20, below one ULP of the mean. What demonstrates the resolution is the ARM SEPARATION: the divide and reciprocal arms differ from each other by exactly the bit under attribution.",
+   "reciprocal_arm_unequal_vs_nemo": 0
+  },
+  "rows": [
+   {
+    "absolute_max": 2.168404344971009e-19,
+    "bar": 1e-15,
+    "candidate_dtype": "float64",
+    "exact": false,
+    "first_unequal_index": [
+     1,
+     64
+    ],
+    "max_residual_index": [
+     1,
+     64
+    ],
+    "n": 127,
+    "n_unequal": 1,
+    "name": "LOCK_EXCHANGE-zco.kt1.substep1.slow_u.model_captured",
+    "normalized_max_abs": 2.168404344971009e-19,
+    "oracle_dtype": "float64",
+    "reference_max_abs": 0.001135367194865404,
+    "signed_residual_at_max": -2.168404344971009e-19,
+    "status": "AT-BAR"
+   },
+   {
+    "absolute_max": 2.168404344971009e-19,
+    "bar": 1e-15,
+    "candidate_dtype": "float64",
+    "exact": false,
+    "first_unequal_index": [
+     1,
+     64
+    ],
+    "max_residual_index": [
+     1,
+     64
+    ],
+    "n": 127,
+    "n_unequal": 1,
+    "name": "LOCK_EXCHANGE-zco.kt1.substep1.slow_u.statement_model_rhs",
+    "normalized_max_abs": 2.168404344971009e-19,
+    "oracle_dtype": "float64",
+    "reference_max_abs": 0.001135367194865404,
+    "signed_residual_at_max": -2.168404344971009e-19,
+    "status": "AT-BAR"
+   },
+   {
+    "absolute_max": 2.168404344971009e-19,
+    "bar": 1e-15,
+    "candidate_dtype": "float64",
+    "exact": false,
+    "first_unequal_index": [
+     1,
+     64
+    ],
+    "max_residual_index": [
+     1,
+     64
+    ],
+    "n": 127,
+    "n_unequal": 1,
+    "name": "LOCK_EXCHANGE-zco.kt1.substep1.slow_u.statement_nemo_rhs",
+    "normalized_max_abs": 2.168404344971009e-19,
+    "oracle_dtype": "float64",
+    "reference_max_abs": 0.001135367194865404,
+    "signed_residual_at_max": -2.168404344971009e-19,
+    "status": "AT-BAR"
+   },
+   {
+    "absolute_max": 0.0,
+    "bar": 1e-15,
+    "candidate_dtype": "float64",
+    "exact": true,
+    "first_unequal_index": null,
+    "max_residual_index": [
+     1,
+     1
+    ],
+    "n": 127,
+    "n_unequal": 0,
+    "name": "LOCK_EXCHANGE-zco.kt1.substep1.slow_u.statement_nemo_rhs_reciprocal",
+    "normalized_max_abs": 0.0,
+    "oracle_dtype": "float64",
+    "reference_max_abs": 0.001135367194865404,
+    "signed_residual_at_max": 0.0,
+    "status": "AT-BAR"
+   }
+  ]
+ },
+ "merge_readiness": {
+  "also_the_tip_of": [
+   "origin/fidelity/nemo-gyre-integration-merge",
+   "origin/fidelity/nemo-testcases-l2-gyre-reconciled"
+  ],
+  "blocking": [
+   "independent adversarial review of rounds 25 and 26 is OUTSTANDING"
+  ],
+  "commits_ahead": 77,
+  "integration_tip": "03c6e8d96ff7",
+  "model_numerics_landed": "none; the only packages/ change is a one-line comment",
+  "relationship": "ancestor of HEAD; FAST-FORWARD, 0 conflicts by construction",
+  "verdict": "HOLD; nothing merged or pushed"
+ },
+ "open_questions": [
+  "the barotropic slow-forcing weighting AND association: reference-vs-live weighting is the larger, unmeasured half; measure at kt=2 before landing either",
+  "the signed-zero population in the kt=1 momentum-RHS frame: carry NEMO's zero, normalise it, or accept value-exactness as the bar",
+  "the native demo GYRE card's momentum program (unchanged this round)",
+  "the ORCA2 branch strategy (the numerical question is now answered)",
+  "independent adversarial review of rounds 25 and 26 -- OUTSTANDING"
+ ],
+ "oracle_roots": {
+  "GYRE-zco": [
+   "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+   "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww"
+  ],
+  "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+  "LOCK_EXCHANGE-zco.external": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25_lock_external_oracle",
+  "ORCA2": "/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2v_tke_a_10step_np2",
+  "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"
+ },
+ "preregistration": "manifests/nemo_testcase_l2_gyre_round27_preregister.json (9aba55fc9304)",
+ "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+ "report_defects_fixed": {
+  "exit_over_slow_dt_prediction": {
+   "after": null,
+   "before": 1.559250241824e+290,
+   "lock_unchanged": 0.3
+  },
+  "trajectory_provenance": {
+   "lock": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_trajectory_gate_kt10.json",
+   "overflow": "/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/overflow_kt1_10_flux_gate.json"
+  }
+ },
+ "retractions": {
+  "round26_bbl_open_model_question": {
+   "dead_claim": "why a ku_s == ku_d face is BBL-active on a zps card is an open model question",
+   "killed_by": "the test called bbl_static_geometry; the model calls nemo_bbl_static_geometry (trabbl.F90:519-527), which never marks an equal-mbkt face active",
+   "status": "RETRACTED; the new assertion is a theorem on this card (1-D gdept) and is recorded as such"
+  },
+  "round26_retraction_1": {
+   "dead_claim": "the kt=1 momentum-RHS frame is a COMPOSITE of HPG, the depth-mean removal and the barotropic add-back",
+   "killed_by": "that read the SHIPPED dynspg_ts.F90; under key_RK3 the removal (#else at :303) and the add-back (#else at :910) do not compile, and the ppsrc has ZERO puu/pvv assignments",
+   "status": "RETRACTED"
+  },
+  "round26_review_premise_lock_trajectory": {
+   "dead_claim": "the LOCK walk names overflow_kt1_10_flux_gate.json as its trajectory_gate",
+   "killed_by": "the round-26 LOCK record names lock_trajectory_gate_kt10.json",
+   "status": "REFUTED as written; the latent default hole was real and is closed per card"
+  },
+  "round27_own_bit_exact": {
+   "dead_claim": "the row is bit-exact",
+   "killed_by": "the shared scorer uses np.array_equal (VALUE equality). Measured bit-unequal: LOCK 1260/2540, OVERFLOW 16400/16900, all signed zeros",
+   "status": "RETRACTED; the gate now publishes value_exact and bit_exact separately"
+  },
+  "round27_own_citation_gate_strength": {
+   "dead_claim": "the citation gate replaces hand-checking",
+   "killed_by": "36 of 78 mapped citations passed with a line number wrong by up to 6; the range check asked 'symbol anywhere in the range'",
+   "status": "FIXED: both endpoints pinned, plus a shift-sensitivity audit that fails the gate on any blind entry (now 0)"
+  },
+  "round27_own_hpg_alone": {
+   "dead_claim": "the frame is dyn_hpg ALONE",
+   "killed_by": "adding NEMO's exactly-zero dyn_vor accumulation takes both bit counts to 0; IEEE -0.0+0.0=+0.0, so dyn_vor is VALUE-invisible and BIT-visible",
+   "status": "RETRACTED; the frame is dyn_hpg PLUS a zero-valued dyn_vor accumulation"
+  },
+  "round27_own_orca2_routing": {
+   "dead_claim": "the ORCA2 probe routes through the model's arm",
+   "killed_by": "it called the operator with return_components=True where the model does not, and skipped the astype cast; it had no instrument calibration",
+   "status": "FIXED: production call shape scored, diagnostic split checked bit-identical to it, ablation now REQUIRED"
+  },
+  "round27_own_reciprocal_generality": {
+   "dead_claim": "the divide-vs-reciprocal association is the whole residual",
+   "killed_by": "r1_hu_0 is ssumask/(hu_0+1-ssumask) (domain.F90:159), equal to 1/H only because LOCK has one wet depth 20.0; and NEMO weights with REFERENCE e3u_0 where legoESM uses LIVE thicknesses, coinciding only because LOCK's kt=1 eta is exactly 0.0",
+   "status": "CONFIRMED for this frame, REFUTED as a general statement"
+  }
+ },
+ "review": {
+  "blockers": 2,
+  "not_adopted": [
+   "ASSIGNS regex inspects only the first RHS token",
+   "IF/ELSE tracker models neither ELSEIF nor a one-line IF with a write"
+  ],
+  "reason_not_adopted": "neither construct occurs in the routines walked",
+  "retractions": 6,
+  "reviewers": 2
+ },
+ "rule12_eligibility": {
+  "LOCK_EXCHANGE-zco": {
+   "bit_comparison": {
+    "bit_unequal": 1260,
+    "bit_unequal_after_adding_nemo_zero_vorticity_term": 0,
+    "bit_unequal_that_are_signed_zero_only": 1260,
+    "n": 2540,
+    "negative_zeros_candidate": 1260,
+    "negative_zeros_oracle": 0,
+    "value_unequal": 0
+   },
+   "bit_exact": false,
+   "ppsrc_isolation": {
+    "cpp_keys": [
+     "bld::tool::fppkeys",
+     "key_qco",
+     "key_vco_1d",
+     "key_RK3"
+    ],
+    "dyn_adv_up3_rhs_writes_in_present_pue_else": [
+     213,
+     216,
+     336,
+     337,
+     357,
+     358
+    ],
+    "dyn_adv_up3_rhs_writes_unguarded": [],
+    "dyn_drg_init_intent": [
+     "REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv           ! ocean velocities and RHS of momentum equation"
+    ],
+    "dynspg_ts_rhs_writes": [],
+    "hpg_sco_rhs_assignments": [
+     "puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap   ! RK3 case: dyn_hpg always called first",
+     "pvv(ji,jj,1,Krhs) = zhpj(ji,jj) + zvap",
+     "puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap   ! RK3 case: dyn_hpg always called first",
+     "pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap"
+    ],
+    "namelist_selections": {
+     "ln_dynadv_cen2": false,
+     "ln_dynadv_up3": true,
+     "ln_dynadv_vec": false,
+     "ln_dynldf_OFF": true,
+     "ln_hpg_sco": true
+    },
+    "ppsrc": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/tests/LOCK_EXCHANGE_OMIP_L1_P3/BLD/ppsrc/nemo"
+   },
+   "row": {
+    "absolute_max": 0.0,
+    "bar": 1e-15,
+    "exact": true,
+    "frame": "instantaneous_post_stp2d_momentum_rhs",
+    "n": 2540,
+    "name": "LOCK_EXCHANGE-zco.kt1.stp2d.momentum_rhs.u",
+    "normalized_max_abs": 0.0,
+    "reference_max_abs": 0.0022144653577459176,
+    "staggering_and_reduction": "NEMO puu(:,:,:,Nrhs) after stp_2D (MY_SRC/stprk3.F90:206, before stage 1) and legoESM's momentum tendency are both instantaneous 3-D C-grid face accelerations in m/s^2 at the same wet faces; elementwise L-infinity, no vertical, substep or time reduction. At this rest start the frame is dyn_hpg ALONE: see precondition_ppsrc_isolation",
+    "status": "AT-BAR"
+   },
+   "value_exact": true
+  },
+  "ORCA2": {
+   "ablation": [
+    {
+     "absolute_max": 3.3881317890172014e-21,
+     "exact": false,
+     "field": "sum_u",
+     "n": 221640,
+     "n_unequal": 79793,
+     "status": "DEBT"
+    },
+    {
+     "absolute_max": 3.3881317890172014e-21,
+     "exact": false,
+     "field": "sum_v",
+     "n": 222048,
+     "n_unequal": 80268,
+     "status": "DEBT"
+    },
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "zhpi_u",
+     "n": 221640,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    },
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "zhpi_v",
+     "n": 222048,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    },
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "zuap_u",
+     "n": 221640,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    },
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "zuap_v",
+     "n": 222048,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    }
+   ],
+   "instrument_reproduces_production_pair": true,
+   "probe_worktree": "/tmp/codex-orca2-r27-probe",
+   "probe_worktree_tip": "c6f3e33f063ba392ad455f5a3fc17e0a97001801 fidelity: preserve NEMO GYRE HPG operands",
+   "routed_through": "nemo_hpg_sco_literal_cgrid -> _nemo_hpg_tendency_from_pressure_or_direct (the model's nemo_sco arm), NOT the helper alone",
+   "rows": [
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "sum_u",
+     "n": 221640,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    },
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "sum_v",
+     "n": 222048,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    },
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "zhpi_u",
+     "n": 221640,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    },
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "zhpi_v",
+     "n": 222048,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    },
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "zuap_u",
+     "n": 221640,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    },
+    {
+     "absolute_max": 0.0,
+     "exact": true,
+     "field": "zuap_v",
+     "n": 222048,
+     "n_unequal": 0,
+     "status": "AT-BAR"
+    }
+   ],
+   "scope_limits": [
+    "gdept_z0 is NEMO's own, so _nemo_qco_gdept_z0 is NOT exercised here; it is card-independent arithmetic pinned by test_nemo_qco_gdept_z0_oracle_bit_pattern",
+    "rank0 stencil-valid owned wet U/V core, 88x146x30; one owned-cell band excluded because the canonical MPI halos are zero. EXCLUDES the ORCA2 north fold, the cyclic seam and level 31 -- the topology this card alone could test",
+    "dx_u/dy_v are 1/r1_e1u and 1/r1_e2v from the record; the operator inverts them back. Round trip measured bit-exact on all 2035 and 2070 distinct nonzero values, so the association does not bite"
+   ],
+   "status": "AT-BAR"
+  },
+  "OVERFLOW-zps": {
+   "bit_comparison": {
+    "bit_unequal": 16400,
+    "bit_unequal_after_adding_nemo_zero_vorticity_term": 0,
+    "bit_unequal_that_are_signed_zero_only": 16400,
+    "n": 16900,
+    "negative_zeros_candidate": 16400,
+    "negative_zeros_oracle": 0,
+    "value_unequal": 0
+   },
+   "bit_exact": false,
+   "ppsrc_isolation": {
+    "cpp_keys": [
+     "bld::tool::fppkeys",
+     "key_qco",
+     "key_vco_3d",
+     "key_RK3"
+    ],
+    "dyn_adv_up3_rhs_writes_in_present_pue_else": [
+     214,
+     217,
+     337,
+     338,
+     358,
+     359
+    ],
+    "dyn_adv_up3_rhs_writes_unguarded": [],
+    "dyn_drg_init_intent": [
+     "REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv           ! ocean velocities and RHS of momentum equation"
+    ],
+    "dynspg_ts_rhs_writes": [],
+    "hpg_sco_rhs_assignments": [
+     "puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap   ! RK3 case: dyn_hpg always called first",
+     "pvv(ji,jj,1,Krhs) = zhpj(ji,jj) + zvap",
+     "puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap   ! RK3 case: dyn_hpg always called first",
+     "pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap"
+    ],
+    "namelist_selections": {
+     "ln_dynadv_cen2": false,
+     "ln_dynadv_up3": true,
+     "ln_dynadv_vec": false,
+     "ln_dynldf_OFF": true,
+     "ln_hpg_sco": true
+    },
+    "ppsrc": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
+   },
+   "row": {
+    "absolute_max": 0.0,
+    "bar": 1e-15,
+    "exact": true,
+    "frame": "instantaneous_post_stp2d_momentum_rhs",
+    "n": 16900,
+    "name": "OVERFLOW-zps.kt1.stp2d.momentum_rhs.u",
+    "normalized_max_abs": 0.0,
+    "reference_max_abs": 0.010445594048097442,
+    "staggering_and_reduction": "NEMO puu(:,:,:,Nrhs) after stp_2D (MY_SRC/stprk3.F90:206, before stage 1) and legoESM's momentum tendency are both instantaneous 3-D C-grid face accelerations in m/s^2 at the same wet faces; elementwise L-infinity, no vertical, substep or time reduction. At this rest start the frame is dyn_hpg ALONE: see precondition_ppsrc_isolation",
+    "status": "AT-BAR"
+   },
+   "value_exact": true
+  },
+  "cards_discharged_value_exact": [
+   "GYRE-zco (round 25)",
+   "LOCK_EXCHANGE-zco",
+   "OVERFLOW-zps",
+   "ORCA2"
+  ],
+  "plants": {
+   "LOCK numeric": 1,
+   "ORCA2 one-ULP gdept_z0": 1,
+   "OVERFLOW numeric": 1,
+   "ppsrc --plant-ppsrc cfgs/DINO": 1
+  },
+  "signed_zero_debt": {
+   "landed": false,
+   "lock": 1260,
+   "overflow": 16400,
+   "owner": "CONFIRMED: NEMO's zero-valued dyn_vor accumulation normalises -0.0 to +0.0; legoESM has no such addition",
+   "status": "DEBT"
+  }
+ },
+ "starting_tip": "1af6ba2976dc",
+ "tests": {
+  "failures_are_preexisting": "test_nemo_recipe GYRE native card, open question 3",
+  "focused_suite": "5 failed, 70 passed in 1477.04s",
+  "ratchets": "identical 9 failures at 1af6ba2976dc and at this tip"
+ }
+}

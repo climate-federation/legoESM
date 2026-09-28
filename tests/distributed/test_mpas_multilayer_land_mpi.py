@@ -48,6 +48,7 @@ Run under MPI::
 from __future__ import annotations
 
 import os
+import pathlib
 import tempfile
 
 import jax
@@ -68,6 +69,38 @@ from legoesm.driver.model_driver import ModelDriver  # noqa: E402
 
 RES, NLEV, DT, DAYS = 3, 20, 300.0, 1     # level 3 = 642 cells; days is an int
 N_SOIL = 6
+
+# The land surface scheme defaulted to two-leaf after this file was written,
+# and a canopy run refuses to start without the harmonized surfdata its
+# per-PFT parameters come from -- so every test here had been failing on that
+# refusal, unrelated to what they assert. Point them at the staged file.
+#
+# The path is resolved against THIS checkout's data directory, not one
+# developer's absolute path, with an environment override for a shared copy.
+SURFDATA = os.environ.get("LEGOESM_TEST_SURFDATA") or str(
+    pathlib.Path(__file__).resolve().parents[2]
+    / "data" / "legoesm_surfdata_c260716.nc")
+# A module-level skip would turn these three tests from LOUDLY FAILING into
+# SILENTLY GREEN wherever the file is absent, which is how a gate rots (GLM
+# raised exactly this). So the absence is a FAILURE with an actionable message,
+# and only an explicit opt-out skips -- someone who knowingly has no surfdata
+# says so once, in the environment, instead of every machine quietly passing.
+if not os.path.exists(SURFDATA):
+    pytestmark = (
+        pytest.mark.skip(reason=(
+            f"LEGOESM_TEST_SKIP_NO_SURFDATA set and no surfdata at {SURFDATA}"))
+        if os.environ.get("LEGOESM_TEST_SKIP_NO_SURFDATA")
+        else pytest.mark.usefixtures("_surfdata_required"))
+
+
+@pytest.fixture
+def _surfdata_required():
+    raise AssertionError(
+        f"the multilayer land tests need the harmonized surfdata and none is "
+        f"at {SURFDATA}. The land surface scheme defaults to two-leaf, and a "
+        f"canopy run refuses to start without the per-PFT parameters that "
+        f"file carries. Stage it, point LEGOESM_TEST_SURFDATA at a copy, or "
+        f"set LEGOESM_TEST_SKIP_NO_SURFDATA=1 to skip deliberately.")
 
 
 def _shared_tmp_root():
@@ -131,15 +164,20 @@ def _surfdata_or_none():
 
     The canopy schemes REFUSE to run without it (they would otherwise run on
     generic constants with every tuned per-PFT value inert), so the canopy
-    coverage below is opt-in on the file being present rather than a hard
-    dependency that would make this module unrunnable again.
+    coverage below is opt-in on the file being present.
+
+    It resolves the SAME path the module-level policy and ``_build`` use, which
+    is the repository's staged copy with an environment override.  Consulting
+    only the override was a merge artifact: with the file staged at the default
+    path and no variable set, this returned None and the canopy rows SKIPPED
+    while _build was handing the solver a perfectly good file (codex, merge
+    review 2026-09-24).
     """
-    cand = os.environ.get("LEGOESM_TEST_SURFDATA", "")
-    return cand if cand and os.path.isfile(cand) else None
+    return SURFDATA if SURFDATA and os.path.isfile(SURFDATA) else None
 
 
 def _build(distributed, mask_path, output_dir=None, fix_mass=True,
-           land_surface_scheme="simple_seb"):
+           land_surface_scheme="simple_seb", land_ic=""):
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=RES, nlev=NLEV,
                         vertical_coord="sigma"),
@@ -149,6 +187,7 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True,
         days=DAYS, dataset="analytical", radiation="gray",
         convection="none", turbulence="none", precision="fp64",
         land_mask_path=mask_path, use_multilayer_land=True,
+        surfdata_path=SURFDATA,
         multilayer_n_layers=N_SOIL, multilayer_soil_depth=2.5,
         # NAME the land surface scheme rather than inherit the driver default.
         # This test asks one question -- are the soil columns partitioned
@@ -161,7 +200,7 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True,
         # at all, on any rank count, and nothing noticed because nothing runs
         # it in CI.
         land_surface_scheme=land_surface_scheme,
-        surfdata_path=_surfdata_or_none() or "",
+        land_ic_path=land_ic,
         distributed=distributed,
     )
     d = ModelDriver(cfg, output_dir=output_dir or tempfile.mkdtemp())
@@ -202,6 +241,25 @@ def _column_leaves(state, ncol):
         a = np.asarray(v)
         (per_col if a.ndim >= 1 and a.shape[0] == ncol else other)[name] = a
     return per_col, other
+
+
+def _stamp_columns(state, ncol):
+    """Write each column's GLOBAL index into every per-column leaf.
+
+    Values stay in a physically harmless range (the state is only ever used to
+    check index bookkeeping, never stepped), but every column is unique, so any
+    mis-indexed scatter shows up as an exact mismatch rather than surviving
+    because two columns happened to hold the same profile.
+    """
+    def _leaf(v):
+        if v is None or not hasattr(v, "shape") or v.ndim < 1:
+            return v
+        if int(v.shape[0]) != ncol:
+            return v
+        ids = np.arange(ncol, dtype=np.float64).reshape(
+            (ncol,) + (1,) * (v.ndim - 1))
+        return jnp.asarray(np.asarray(v) + ids * 1e-3)
+    return jax.tree_util.tree_map(_leaf, state)
 
 
 def _run_pair(mask_path, fix_mass):
@@ -468,9 +526,127 @@ def test_mpas_multilayer_land_checkpoint_round_trip_under_mpi():
               f"{len(before)} per-column land leaves")
 
 
+def test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets():
+    """A global spun-up land state must load on every rank, at the right columns.
+
+    The second thing blocking a multi-device production arm, and the mirror of
+    the sea-ice one: that file is written once for the whole globe, but the
+    loader was handed THIS RANK's column count and refused the file with a
+    different number on every rank. So any arm started from a spun-up land
+    state was forced back to a single device.
+
+    A test that only checked it no longer crashes would pass on a scatter that
+    hands every rank the wrong slice, so this compares values: each rank's
+    owned columns against the SERIAL run's columns at the same global indices,
+    and exactly -- loading and cutting a file is pure data movement with no
+    atmosphere in it, so there is no tolerance to hide behind.
+    """
+    mask = _land_mask_path()
+    shared = _shared_tmpdir("land_ic_")
+    ic_path = os.path.join(shared, "spinup_land.npz")
+
+    # The spun-up file is the serial cold-start state, which the aridity seed
+    # already makes spatially varying -- checked below, because a uniform state
+    # would match under ANY permutation.
+    seed = _build(False, mask)
+    # Stamp every per-column leaf with its own GLOBAL column index before
+    # writing the file, so a wrong index is observable by construction.
+    # Codex raised this against the first version, which only required the
+    # state to be "spatially varying": the cold-start soil profile varies with
+    # DEPTH, so a field could satisfy that while every column was identical,
+    # and a scatter that handed a rank the wrong columns would still compare
+    # equal. A per-column fingerprint cannot be fooled that way.
+    seed._land_ml_state = _stamp_columns(
+        seed._land_ml_state, np.asarray(seed.state.T.data).shape[0])
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        from legoesm.land.clm_surface_map import download_clm_surfdata
+        from legoesm.land.restart import (
+            HYDRAULICS_SOURCE_CLM_MAP, save_land_restart,
+            soil_hydraulics_stamp)
+        from legoesm.land.soil_grid import make_soil_grid
+        # Stamped with the run's own hydraulics, so the file is loaded verbatim
+        # and the comparison below stays bit-exact.
+        save_land_restart(
+            ic_path, seed._land_ml_state, land_mode="multilayer",
+            t_end_s=0.0, n_steps_completed=0,
+            soil_dz=np.asarray(
+                make_soil_grid(seed.physics.land_ml_cfg.soil_grid).dz),
+            soil_hydraulics=soil_hydraulics_stamp(
+                seed.physics.land_ml_cfg.hydraulics.retention_curve,
+                HYDRAULICS_SOURCE_CLM_MAP, download_clm_surfdata()),
+            hydraulics=seed.physics.land_ml_cfg.hydraulics)
+    MPI.COMM_WORLD.Barrier()
+    assert os.path.exists(ic_path), "the spun-up land state was never written"
+
+    ref = _build(False, mask, land_ic=ic_path)
+    d = _build(True, mask, land_ic=ic_path)
+    assert d._voronoi_layout is not None, (
+        "the distributed run built no Voronoi partition, so nothing was "
+        "scattered and this test is not exercising the lane")
+
+    part = d._voronoi_layout.partition
+    n_owned = part.n_owned_cells
+    gids = np.asarray(part.local_cells[:n_owned])
+    n_global = np.asarray(ref.state.T.data).shape[0]
+    assert n_owned < n_global, "this rank was given every global cell"
+
+    ref_cols, _ = _column_leaves(ref._land_ml_state, n_global)
+    mpi_cols, _ = _column_leaves(d._land_ml_state, part.n_local_cells)
+    assert set(ref_cols) == set(mpi_cols), (
+        f"the runs disagree on which land leaves are per-column: "
+        f"serial-only {set(ref_cols) - set(mpi_cols)}, "
+        f"mpi-only {set(mpi_cols) - set(ref_cols)}")
+    for required in ("T_soil", "theta_soil"):
+        assert required in ref_cols, f"{required} is not being compared"
+
+    # Variation ACROSS COLUMNS, not across all axes: a profile that varies only
+    # with depth is uniform in the dimension this test is about.
+    varying = [k for k in ref_cols
+               if float(np.ptp(np.asarray(ref_cols[k]).reshape(n_global, -1),
+                               axis=0).max()) > 0.0]
+    # Require the fingerprint on the fields the RESTART carries. Leaves the
+    # restart does not restore (a canopy solver seed, say) come from the
+    # cold-start template on both sides and are legitimately uniform; they are
+    # still compared, they just cannot carry the proof.
+    from legoesm.land.restart import _MULTILAYER_FIELDS
+    restored = [k for k in ref_cols if k in _MULTILAYER_FIELDS]
+    assert restored, "none of the restart's own fields are being compared"
+    assert set(restored) <= set(varying), (
+        f"these RESTORED land leaves are identical in every column, so a wrong "
+        f"slice would be invisible in them: "
+        f"{sorted(set(restored) - set(varying))}")
+
+    # Compare the WHOLE local band, halo included, not just the owned prefix:
+    # the scatter fills halo columns too and the land tile integrates them, so
+    # a scatter that got the halo wrong would pass an owned-only check.
+    all_gids = np.asarray(part.local_cells[:part.n_local_cells])
+    for name, a_ref in ref_cols.items():
+        np.testing.assert_array_equal(
+            mpi_cols[name], a_ref[all_gids],
+            err_msg=f"land leaf {name!r} landed on the wrong columns after "
+                    f"the spun-up state was cut to this rank")
+
+    # A per-column leaf whose column axis is NOT leading would be skipped by
+    # both the scatter and this comparison, so refuse to leave one uninspected.
+    _, ref_other = _column_leaves(ref._land_ml_state, n_global)
+    for name, v in ref_other.items():
+        if v is None:
+            continue
+        _shape = tuple(np.asarray(v).shape)
+        assert n_global not in _shape and (n_global + 1) not in _shape, (
+            f"land leaf {name!r} carries a global-length axis that is not "
+            f"leading, so nothing cut it to this rank and nothing here "
+            f"compared it")
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        print(f"\n[land IC] {len(ref_cols)} per-column leaves scattered "
+              f"exactly, {len(varying)} of them spatially varying")
+
+
 if __name__ == "__main__":
     test_land_advance_on_the_voronoi_partition_is_bit_exact()
     test_mpas_multilayer_land_end_to_end_inherits_only_the_atmosphere_residual()
     test_mpas_multilayer_land_checkpoint_round_trip_under_mpi()
+    test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets()
     if MPI.COMM_WORLD.Get_rank() == 0:
         print("OK")

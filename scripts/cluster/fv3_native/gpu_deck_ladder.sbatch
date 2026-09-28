@@ -78,6 +78,64 @@ DECKS=(
   "96|10|1|5|3|450|2"
   "96|10|2|11|3|450|2"
 )
+# ---- stall watch (GLM + user 2026-09-25) --------------------------------
+# The six-rank reference and the scoring run intermittently stall at the
+# FIRST execute of the compiled step (~1 in 8 quiet runs; never while
+# NCCL_DEBUG=INFO was on): all ranks sit inside XLA's execute for good,
+# no collective timeout fires, reruns pass (autopsies 9982798, 9986618,
+# 9997090). run_watched launches the srun in the background; if the
+# progress MARKER has not appeared by STALL_S it attaches gdb to every rank
+# on every node (native stacks -> <log>.gdb_<host>_<pid>.txt), tears the
+# step down and relaunches, up to STALL_RETRIES times, then fails loudly.
+STALL_S=${STALL_S:-800}          # passing runs print step 1 by ~385 s (C48 km=10)
+STALL_RETRIES=${STALL_RETRIES:-2}
+STALLS=0
+run_watched() {   # run_watched <cap_s> <marker> <log> <srun args...>; final log in WATCH_LOG
+  local cap=$1 marker=$2 log=$3; shift 3
+  local try rc t0 pid
+  for try in $(seq 0 "$STALL_RETRIES"); do
+    [ "$try" -gt 0 ] && { log="${log%.log}.retry${try}.log"; echo "  stall retry $try -> $log"; }
+    WATCH_LOG=$log
+    t0=$SECONDS
+    # own session+group so the teardown can kill timeout AND its srun tree
+    setsid timeout --kill-after=60 "$cap" "$@" > "$log" 2>&1 &
+    pid=$!
+    rc=
+    while :; do
+      sleep 20
+      # a process that exited (0, a crash, or timeout's 124) is NOT a stall:
+      # its own status is the result (codex 2026-09-26: 7 and 124 became 0)
+      if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; return $rc; fi
+      if [ $((SECONDS - t0)) -ge "$STALL_S" ] && ! grep -q -- "$marker" "$log"; then
+        STALLS=$((STALLS + 1))
+        echo "  STALL #$STALLS: no '$marker' after $((SECONDS - t0))s -> gdb attach on every rank, then teardown"
+        timeout --kill-after=30 "${STALL_GDB_S:-300}" \
+          srun --overlap -N "$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 bash -c '
+          for p in $(pgrep -u "$USER" -f tiled_m6_model_gate); do
+            timeout 120 gdb -p "$p" -batch -ex "set pagination off" -ex "thread apply all bt 25" \
+              > "'"${log%.log}"'.gdb_$(hostname)_$p.txt" 2>&1
+            echo "    $(hostname) pid $p gdb rc=$? ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)"
+          done' || echo "  gdb step rc=$? (bounded)"
+        # teardown the whole group (timeout + srun + its children), verify
+        kill -TERM -- "-$pid" 2>/dev/null
+        local w=0
+        while kill -0 "$pid" 2>/dev/null && [ "$w" -lt "${STALL_TEARDOWN_S:-30}" ]; do sleep 1; w=$((w + 1)); done
+        kill -KILL -- "-$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        if pgrep -u "$USER" -f tiled_m6_model_gate > /dev/null; then
+          echo "  WARNING: gate processes survived the teardown -- scancel of this job's steps"
+          scancel --signal=KILL "$SLURM_JOB_ID.$(squeue -s -j "$SLURM_JOB_ID" -h -o %i | grep -v batch | tail -1 | cut -d. -f2)" 2>/dev/null || true
+          sleep 5
+        fi
+        rc=125
+        break
+      fi
+    done
+  done
+  echo "  STALLED $((STALL_RETRIES + 1)) times in a row -- giving up on this step"
+  return 125
+}
+
 REF_CAP=${REF_CAP:-1800}
 SCORE_CAP=${SCORE_CAP:-2400}
 FAIL=0
@@ -103,14 +161,14 @@ for d in "${DECKS[@]}"; do
   #    reference is the six-FACE state and carries no window geometry, which
   #    is why a kt=1 build is what the kt=2 scoring run consumes (as
   #    gpu_ref_c24_v2.npz already does, jobs 9756805 -> 9756806).
-  timeout --kill-after=60 "$REF_CAP" \
+  run_watched "$REF_CAP" "flat-ref step 1" "$RLOG" \
     srun -N 3 -n 6 --ntasks-per-node=2 --gpus-per-task=1 --kill-on-bad-exit=0 -c "$CPUS" \
       "$PY" "$GATE" --n "$N" --km "$KM" --kt 1 --pad "$PAD" \
       --n-split "$NSPLIT" --dt "$DT" --steps "$STEPS" \
-      --distributed --flat-ref --save-npz "$REF" \
-    > "$RLOG" 2>&1
-  REF_RC=$?
+      --distributed --flat-ref --save-npz "$REF"
+  REF_RC=$?; RLOG=$WATCH_LOG
   [ "$REF_RC" -eq 124 ] && echo "  step A TIMEOUT after ${REF_CAP}s"
+  [ "$REF_RC" -eq 125 ] && echo "  step A STALLED (native stacks next to $RLOG)"
   if [ "$REF_RC" -eq 0 ] && [ ! -s "$REF" ]; then REF_RC=10; fi
   echo "  step A reference: rc=$REF_RC  $( [ -s "$REF" ] && echo "npz $(du -h "$REF" | cut -f1)" || echo 'npz MISSING' )"
 
@@ -120,14 +178,14 @@ for d in "${DECKS[@]}"; do
     echo "  reference unusable -- SKIPPING this deck's scoring (tail of $RLOG):"
     tail -n 12 "$RLOG" | sed 's/^/    /'
   else
-    timeout --kill-after=60 "$SCORE_CAP" \
+    run_watched "$SCORE_CAP" "step 1: nsplt" "$SLOG" \
       srun -N "$SNODES" -n "$RANKS" --ntasks-per-node=2 --gpus-per-task=1 --kill-on-bad-exit=0 -c "$CPUS" \
         "$PY" "$GATE" --n "$N" --km "$KM" --kt "$KT" --pad "$PAD" \
         --n-split "$NSPLIT" --dt "$DT" --steps "$STEPS" \
-        --distributed --ref-npz "$REF" --gpu-max-rel-peak "${GPU_MAX_REL_PEAK:-1e-12}" --timing 5 \
-      > "$SLOG" 2>&1
-    SCORE_RC=$?
+        --distributed --ref-npz "$REF" --gpu-max-rel-peak "${GPU_MAX_REL_PEAK:-1e-12}" --timing 5
+    SCORE_RC=$?; SLOG=$WATCH_LOG
     [ "$SCORE_RC" -eq 124 ] && echo "  step B TIMEOUT after ${SCORE_CAP}s"
+    [ "$SCORE_RC" -eq 125 ] && echo "  step B STALLED (native stacks next to $SLOG)"
     VERDICT=$(grep -m1 -F '[m6] VERDICT' "$SLOG" || true)
     TIMING=$(grep -m1 '^\[m6\] TIMING .*p50 ' "$SLOG" || true)
     if [ -z "$VERDICT" ]; then
@@ -150,6 +208,7 @@ echo ""
 echo "==== DECK LADDER SUMMARY ===="
 for s in "${SUMMARY[@]}"; do echo "$s"; done
 echo "outdir=$OUT"
+echo "STALLS=$STALLS (first-execute stalls caught by the watch; a rising count is a finding)"
 # the marker says what happened (codex 2026-09-16: a bare DONE printed even
 # when every deck was skipped, and marker-only monitoring would read that as
 # success)

@@ -28,10 +28,14 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio_ice
+from legoesm.thermo import (
+    nemo_si3_saturation_over_ice,
+    saturation_mixing_ratio_ice,
+)
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes,
     compute_most_fluxes,
+    nemo_si3_constant_fluxes,
     validate_bulk_scheme,
 )
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
@@ -57,13 +61,23 @@ from legoesm.ice.ridging import apply_ridging
 from legoesm.ice.shortwave import compute_ice_sw
 from legoesm.ice.ponds import step_ponds
 from legoesm.core.surface_energy import surface_radiation_fluxes
-from legoesm.ice.config import SeaIceConfig
+from legoesm.ice.config import (
+    SeaIceConfig,
+    validate_si3_bulk_config,
+    validate_si3_thermo_config,
+)
 from legoesm.ice.rheology import strain_rates
 from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,
+    SI3ColumnState,
     dynamic_to_slab,
     slab_to_dynamic,
+)
+from legoesm.ice.bitz_lipscomb import (
+    SI3ColumnArrays,
+    SI3SurfaceForcing,
+    si3_column_step_arrays,
 )
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
@@ -244,10 +258,44 @@ def step_sea_ice(
     response : TileResponse
     """
     if ocean_freezing_temperature_K is not None:
+        # Refused rather than silently ignored on the layered branch: the
+        # override lands on config.T_freeze_ocean, which the zero-layer
+        # thermodynamics reads but _si3_step_with_trace never does -- it takes
+        # its bottom boundary from the SI3 forcing instead.  Neither parent of
+        # the 2026-09-25 merge could express this combination (main has no
+        # layered branch, and no caller on this lane passes the argument), so
+        # this refusal closes a fail-quiet seam the merge would otherwise have
+        # opened.  Routing the liquidus into SI3's bottom boundary is a
+        # physics decision for the SI3 lane, not for a merge.
+        if config.thermo_scheme == "si3_bl99":
+            raise ValueError(
+                "ocean_freezing_temperature_K is not routed into the layered "
+                "SI3 thermodynamics (thermo_scheme='si3_bl99'); pass the "
+                "liquidus through the SI3 forcing's bottom boundary instead "
+                "of the ocean-side override")
         liquidus = jnp.asarray(ocean_freezing_temperature_K)
         if liquidus.shape != jnp.shape(ocean_sst):
             raise ValueError("ocean_freezing_temperature_K must have the ocean SST shape")
         config = config._replace(T_freeze_ocean=liquidus)
+    if config.thermo_scheme not in ("zero_layer", "si3_bl99"):
+        raise ValueError(
+            f"Unknown sea-ice thermo_scheme {config.thermo_scheme!r}; expected "
+            "'zero_layer' or 'si3_bl99' (icethd.F90:148-183)."
+        )
+    validate_si3_thermo_config(config)
+    if config.thermo_scheme == "si3_bl99":
+        if not isinstance(state, SI3ColumnState):
+            raise ValueError(
+                "thermo_scheme='si3_bl99' requires SI3ColumnState with 3+3 "
+                "layer enthalpies; a bulk SeaIceState cannot silently invent them"
+            )
+        if not isinstance(forcing, SI3SurfaceForcing):
+            raise ValueError(
+                "thermo_scheme='si3_bl99' requires SI3SurfaceForcing at the "
+                "ice_thd entry boundary (ice1D.F90:393-421)"
+            )
+        new_state, response, _ = _si3_step_with_trace(state, forcing, config, dt)
+        return new_state, response
 
     # Validate: dynamics literal + grid requirement
     if config.dynamics not in ("none", "free_drift", "evp", "mevp"):
@@ -445,9 +493,376 @@ def step_sea_ice(
                              config, U_min, dt, grid)
 
 
+def _si3_step_with_trace(state: SI3ColumnState,
+                         forcing: SI3SurfaceForcing,
+                         config: SeaIceConfig,
+                         dt: float):
+    """Private fidelity hook returning registered SI3 sub-call boundaries."""
+
+    arrays = SI3ColumnArrays(
+        state.concentration.data,
+        state.h_ice.data,
+        state.h_snow.data,
+        state.T_surface.data,
+        state.e_ice.data,
+        state.e_snow.data,
+        state.S_bulk.data,
+        state.S_layers.data,
+        state.age_volume.data,
+    )
+    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants)
+    out = trace.exit
+    new_state = SI3ColumnState(
+        concentration=state.concentration.replace(data=out.concentration),
+        h_ice=state.h_ice.replace(data=out.h_ice),
+        h_snow=state.h_snow.replace(data=out.h_snow),
+        T_surface=state.T_surface.replace(data=out.T_surface),
+        e_ice=state.e_ice.replace(data=out.e_ice),
+        e_snow=state.e_snow.replace(data=out.e_snow),
+        S_bulk=state.S_bulk.replace(data=out.S_bulk),
+        S_layers=state.S_layers.replace(data=out.S_layers),
+        age_volume=state.age_volume.replace(data=out.age_volume),
+    )
+    z = jnp.zeros_like(out.h_ice)
+    one = jnp.ones_like(out.h_ice)
+    response = TileResponse(
+        T_sfc=out.T_surface,
+        albedo=one * config.albedo_ice,
+        emissivity=one * config.emissivity_ice,
+        z0=one * config.z0_ice,
+        q_surface=z,
+        shflx=z,
+        lhflx=forcing.evaporation * config.ice_constants.latent_sublimation,
+        tau_x=z,
+        tau_y=z,
+        lw_up=z,
+        u_ocean_sfc=z,
+        v_ocean_sfc=z,
+        co2_flux=z,
+        freshwater_flux=z,
+        ocean_heat_extraction=z,
+        ocean_stress_x=z,
+        ocean_stress_y=z,
+        surface_mass_flux=forcing.evaporation * out.concentration,
+        salt_flux=z,
+        T_rad=out.T_surface,
+        ice_concentration_thermo=arrays.concentration,
+    )
+    return new_state, response, trace
+
+
 # ==============================================================================
 # Shared bulk-flux dispatch
 # ==============================================================================
+
+def _nemo_si3_ice_albedo(
+    T_surface: jnp.ndarray,
+    h_ice: jnp.ndarray,
+    h_snow: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    *,
+    _preserve_subnormal_snow: bool = True,
+) -> jnp.ndarray:
+    """Active no-pond SI3 albedo, ``icealb.F90:124-185``.
+
+    The ORCA1 identity fixes ``nn_snwfra=2`` and ``ln_pnd_alb=.false.``;
+    alternate snow-cover and pond branches are intentionally absent.
+    """
+    if _preserve_subnormal_snow:
+        # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
+        # floating comparisons.  NEMO's scalar IEEE comparison does not.  A
+        # left shift discards the sign bit and preserves every nonzero payload,
+        # including subnormals; both +0 and -0 remain zero.
+        snow_bits = jax.lax.bitcast_convert_type(h_snow, jnp.uint64)
+        snow_is_zero = (snow_bits << jnp.uint64(1)) == jnp.uint64(0)
+    else:  # private one-variable ablation; never exposed in SeaIceConfig
+        snow_is_zero = h_snow == 0.0
+    snow_fraction = h_snow / (h_snow + constants.snow_cover_depth_nemo)
+    bare_thick = jnp.where(
+        snow_is_zero & (T_surface >= constants.T_freeze),
+        constants.albedo_ice_melt_orca1,
+        constants.albedo_ice_dry_orca1,
+    )
+    inv_log_interval = 1.0 / (
+        jnp.log(constants.albedo_ice_pivot_orca1)
+        - jnp.log(constants.albedo_ice_thin_break_nemo)
+    )
+    bare_mid = bare_thick + (
+        constants.albedo_ice_thin_nemo - bare_thick
+    ) * inv_log_interval * (
+        jnp.log(constants.albedo_ice_pivot_orca1) - jnp.log(h_ice)
+    )
+    inv_thin_break = 1.0 / constants.albedo_ice_thin_break_nemo
+    bare_thin = constants.albedo_ocean_nemo + (
+        constants.albedo_ice_thin_nemo - constants.albedo_ocean_nemo
+    ) * inv_thin_break * h_ice
+    bare = jnp.where(
+        h_ice <= constants.albedo_ice_thin_break_nemo,
+        bare_thin,
+        jnp.where(h_ice <= constants.albedo_ice_pivot_orca1, bare_mid, bare_thick),
+    )
+    snow_dry = constants.albedo_snow_dry_orca1 - (
+        constants.albedo_snow_dry_orca1 - bare
+    ) * jnp.exp(-h_snow * (1.0 / constants.albedo_snow_decay_dry_nemo))
+    snow_melt = constants.albedo_snow_melt_orca1 - (
+        constants.albedo_snow_melt_orca1 - bare
+    ) * jnp.exp(-h_snow * (1.0 / constants.albedo_snow_decay_melt_nemo))
+    snow = jnp.where(T_surface < constants.T_freeze, snow_dry, snow_melt)
+    overcast = snow_fraction * snow + (1.0 - snow_fraction) * bare
+    clear = overcast - (
+        constants.albedo_cloud_quad_nemo * overcast * overcast
+        + constants.albedo_cloud_linear_nemo * overcast
+        + constants.albedo_cloud_offset_nemo
+    )
+    return (1.0 - cloud_fraction) * clear + cloud_fraction * overcast
+
+
+def _nemo_si3_blk_ice_2(
+    *,
+    T_surface,
+    h_ice,
+    h_snow,
+    cloud_fraction,
+    theta_air,
+    q_air,
+    p_surface,
+    lw_down,
+    precip,
+    snow,
+    qsr,
+    rho_air,
+    wind,
+    Ch,
+    Ce,
+    ice_fraction_before,
+    category_fraction_before,
+    sst_celsius,
+    qns_ocean,
+    qsr_ocean,
+    emp_ocean_raw,
+    ice_constants,
+    _preserve_subnormal_snow: bool = True,
+):
+    """ORCA1-resolved ``ice_alb`` + ``blk_ice_2`` scalar identity.
+
+    Formula and ordering follow NEMO 5.0.2 ``icealb.F90:124-185`` and
+    ``sbcblk.F90:1218-1346``.  It is private because partial combinations with
+    another public bulk selector are outside the certified identity.
+    """
+    albedo = _nemo_si3_ice_albedo(
+        T_surface, h_ice, h_snow, cloud_fraction,
+        _preserve_subnormal_snow=_preserve_subnormal_snow,
+    )
+    q_sat, dq_sat = nemo_si3_saturation_over_ice(T_surface, p_surface)
+    theta_surface = T_surface * (
+        constants.p_ref / p_surface
+    ) ** (
+        constants.R_gas_molar
+        / (constants.M_dry_air * constants.c_p_dry_air_nemo)
+    )
+    qsr_ice = (
+        1.0 / (1.0 - constants.albedo_ocean_nemo)
+        * (1.0 - albedo) * qsr
+    )
+    surface_t3 = T_surface * T_surface * T_surface
+    q_lw = constants.emissivity_ice_nemo * (
+        lw_down - constants.sigma_sb_nemo * T_surface * surface_t3
+    )
+    dq_lw = (
+        4.0 * constants.emissivity_ice_nemo
+        * constants.sigma_sb_nemo * surface_t3
+    )
+    rho_wind = rho_air * wind
+    sensible_scale = rho_wind * constants.c_p_air_ice_nemo * Ch
+    sensible = sensible_scale * (theta_surface - theta_air)
+    latent_scale = rho_wind * ice_constants.latent_sublimation * Ce
+    latent = latent_scale * (q_sat - q_air)
+    dq_latent = latent_scale * dq_sat
+    qns_ice = q_lw - sensible - latent
+    dqns_ice = -(dq_lw + sensible_scale + dq_latent)
+
+    total_precip = precip
+    snow_precip = snow
+    ocean_evap = emp_ocean_raw + total_precip
+    evaporation_ice = latent / ice_constants.latent_sublimation
+    devaporation_ice = dq_latent / ice_constants.latent_sublimation
+    snow_on_ice_fraction = 1.0 - (
+        1.0 - ice_fraction_before
+    ) ** constants.snow_blow_exponent_orca1
+    emp_ocean = (
+        (1.0 - ice_fraction_before) * ocean_evap
+        - (total_precip - snow_precip)
+        - snow_precip * (1.0 - snow_on_ice_fraction)
+    )
+    emp_ice = (
+        category_fraction_before * evaporation_ice
+        - snow_precip * snow_on_ice_fraction
+    )
+    emp_total = emp_ocean + emp_ice
+    rain_heat = (theta_air - ice_constants.T0) * ice_constants.c_ocean
+    snow_heat = (
+        (jnp.minimum(theta_air, ice_constants.T0) - ice_constants.T0)
+        * ice_constants.c_ice
+    )
+    ocean_heat = sst_celsius * ice_constants.c_ocean
+    qemp_ocean = (
+        -(1.0 - ice_fraction_before) * ocean_evap * ocean_heat
+        + (total_precip - snow_precip) * rain_heat
+        + snow_precip * (1.0 - snow_on_ice_fraction)
+        * (snow_heat - ice_constants.latent_fusion)
+    )
+    qemp_ice = (
+        snow_precip * snow_on_ice_fraction
+        * (snow_heat - ice_constants.latent_fusion)
+    )
+    qns_total = (
+        (1.0 - ice_fraction_before) * qns_ocean
+        + category_fraction_before * qns_ice
+        + qemp_ice + qemp_ocean
+    )
+    qsr_total = (
+        (1.0 - ice_fraction_before) * qsr_ocean
+        + category_fraction_before * qsr_ice
+    )
+    qprecip_ice = ice_constants.rho_snow * (
+        snow_heat - ice_constants.latent_fusion
+    )
+    transmission = (
+        constants.ice_sw_clear_nemo * (1.0 - cloud_fraction)
+        + constants.ice_sw_cloudy_nemo * cloud_fraction
+    )
+    transmission = jnp.where(
+        h_ice < constants.ice_sw_thin_threshold_nemo,
+        transmission + (1.0 - transmission) * (
+            1.0 - h_ice * constants.ice_sw_thin_inverse_nemo
+        ),
+        transmission,
+    )
+    if _preserve_subnormal_snow:
+        snow_bits = jax.lax.bitcast_convert_type(h_snow, jnp.uint64)
+        snow_is_zero = (snow_bits << jnp.uint64(1)) == jnp.uint64(0)
+    else:
+        snow_is_zero = h_snow == 0.0
+    qtr_ice_top = jnp.where(snow_is_zero, qsr_ice * transmission, 0.0)
+    return {
+        "albedo": albedo,
+        "qsr_ice": qsr_ice,
+        "qla_ice": latent,
+        "dqla_ice": dq_latent,
+        "qns_ice": qns_ice,
+        "dqns_ice": dqns_ice,
+        "evap_ice": evaporation_ice,
+        "devap_ice": devaporation_ice,
+        "tprecip": total_precip,
+        "sprecip": snow_precip,
+        "emp_oce": emp_ocean,
+        "emp_ice": emp_ice,
+        "emp_tot": emp_total,
+        "qemp_oce": qemp_ocean,
+        "qemp_ice": qemp_ice,
+        "qns_tot": qns_total,
+        "qsr_tot": qsr_total,
+        "qprec_ice": qprecip_ice,
+        "qevap_ice": jnp.zeros_like(T_surface),
+        "qtr_ice_top": qtr_ice_top,
+    }
+
+
+def _nemo_si3_ice_flx_other(
+    *,
+    ice_fraction,
+    ice_fraction_before,
+    ice_volume,
+    u_ice,
+    u_ice_west,
+    v_ice,
+    v_ice_south,
+    u_ocean,
+    u_ocean_west,
+    v_ocean,
+    v_ocean_south,
+    drag_io,
+    frq,
+    qsr_ocean,
+    qns_ocean,
+    qemp_ocean,
+    ocean_layer_thickness,
+    sst_celsius,
+    T_bottom,
+    dt,
+    rho_ocean,
+    c_ocean,
+    T0,
+    ice_epsilon,
+    max_ice_fraction,
+):
+    """Active C1D ``ice_flx_other`` branch, ``icesbc.F90:322-437``.
+
+    The accepted run has ``ln_icedyn/ln_leadhfx/ln_icedO/ln_icedH=.true.``
+    and form drag false.  No public flags expose the inactive alternatives.
+    """
+    du = u_ice - u_ocean
+    du_west = u_ice_west - u_ocean_west
+    dv = v_ice - v_ocean
+    dv_south = v_ice_south - v_ocean_south
+    friction = drag_io * 0.5 * (
+        (du * du + du_west * du_west) + (dv * dv + dv_south * dv_south)
+    )
+    ice_speed = 0.5 * jnp.sqrt(
+        (u_ice_west + u_ice) * (u_ice_west + u_ice)
+        + (v_ice_south + v_ice) * (v_ice_south + v_ice)
+    )
+    switch = jnp.where(ice_fraction >= ice_epsilon, 1.0, 0.0)
+    lead_energy = dt * (
+        (1.0 - ice_fraction_before) * qsr_ocean * frq
+        + (1.0 - ice_fraction_before) * qns_ocean
+        + qemp_ocean
+    )
+    freeze_energy = (
+        rho_ocean * c_ocean * ocean_layer_thickness
+        * (T_bottom - (sst_celsius + T0))
+    )
+    freeze_negative = jnp.minimum(freeze_energy, 0.0)
+    freeze_positive = jnp.maximum(freeze_energy, 0.0)
+    friction_velocity = jnp.sqrt(friction)
+    qsb = (
+        switch * rho_ocean * c_ocean
+        * constants.ice_ocean_heat_transfer_nemo * friction_velocity
+        * ((sst_celsius + T0) - T_bottom)
+    )
+    qsb = switch * jnp.minimum(
+        qsb,
+        -freeze_negative / dt / jnp.maximum(ice_fraction, ice_epsilon),
+    )
+    stop_supercool = (
+        (T_bottom - (sst_celsius + T0) > 0.0)
+        & (ice_volume >= constants.ice_supercool_volume_stop_nemo)
+    )
+    freeze_energy = jnp.where(stop_supercool, 0.0, freeze_energy)
+    freeze_positive = jnp.where(stop_supercool, 0.0, freeze_positive)
+    qsb = jnp.where(stop_supercool, 0.0, qsb)
+    cooling = lead_energy - freeze_energy < 0.0
+    fhld = jnp.where(
+        cooling,
+        0.0,
+        switch * jnp.maximum(
+            0.0,
+            (lead_energy - freeze_positive) / dt
+            / jnp.maximum(ice_fraction, ice_epsilon),
+        ),
+    )
+    qlead = jnp.where(cooling, jnp.minimum(0.0, lead_energy - freeze_energy), 0.0)
+    landfast_stop = (
+        (ice_speed <= constants.ice_landfast_speed_stop_nemo)
+        & (ice_fraction >= max_ice_fraction - constants.ice_full_cover_margin_nemo)
+        & (ice_volume >= constants.ice_growth_thickness_stop_nemo)
+    )
+    full_cover_stop = (
+        (ice_fraction >= 1.0 - ice_epsilon)
+        & (ice_volume >= constants.ice_growth_thickness_stop_nemo)
+    )
+    qlead = jnp.where(landfast_stop | full_cover_stop, 0.0, qlead)
+    return {"qsb_ice_bot": qsb, "fhld": fhld, "qlead": qlead}
 
 def _bulk_flux_dispatch(
     T_ice: jnp.ndarray,
@@ -463,7 +878,9 @@ def _bulk_flux_dispatch(
     helper centralises the choice so both paths and the diagnostic
     ``_build_response`` produce consistent values.
     """
-    valid_schemes = ("constant", "most", "coare3", "large_yeager")
+    valid_schemes = (
+        "constant", "most", "coare3", "large_yeager", "nemo_si3_constant",
+    )
     if config.bulk_scheme not in valid_schemes:
         raise ValueError(
             f"Unknown sea-ice bulk_scheme {config.bulk_scheme!r}; "
@@ -475,9 +892,26 @@ def _bulk_flux_dispatch(
         )
     )
     rho = forcing.rho_lowest
-    q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
     validate_bulk_scheme(config.bulk_scheme)
-    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+    if config.bulk_scheme == "nemo_si3_constant":
+        validate_si3_bulk_config(config)
+        theta_air = forcing.T_lowest * (
+            constants.p_ref / forcing.p_lowest
+        ) ** (
+            constants.R_gas_molar
+            / (constants.M_dry_air * constants.c_p_dry_air_nemo)
+        )
+        raw = nemo_si3_constant_fluxes(
+            forcing.u_lowest, forcing.v_lowest, theta_air, forcing.q_lowest,
+            T_ice, forcing.p_surface, rho,
+            config.Cd_ice, config.Ch_ice, config.Ce_ice,
+        )
+        # NEMO returns air->ice stress; TileResponse carries the equal/opposite
+        # ice->air reaction used by the existing legoESM coupling convention.
+        tau_x, tau_y = -raw[0], -raw[1]
+        shflx, lhflx = raw[6], raw[7]
+    elif config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
@@ -490,6 +924,7 @@ def _bulk_flux_dispatch(
             stability_scheme=config.stability_scheme,
         )
     else:
+        q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,

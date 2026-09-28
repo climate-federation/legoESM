@@ -6,532 +6,294 @@
 #       <machine path flags> --days N --output DIR
 #
 # Keys are run_amip argument DESTS (set as defaults via --config); any explicit
-# CLI flag still overrides a key here. Machine-specific PATHS (ERA5 IC, SST/SIC,
-# solar/ozone/GHG/aerosol/volcanic, topography) are deliberately NOT pinned here
-# — they live in config/amip/amip_production.sh (env-overridable) so this
-# physics config stays machine-independent and reproducible across deployments.
+# CLI flag still overrides a key here.  Machine-specific PATHS (ERA5 IC,
+# SST/SIC, solar/ozone/GHG/aerosol/volcanic, topography) are deliberately NOT
+# pinned here — they live in config/amip/amip_production.sh (env-overridable)
+# so this physics config stays machine-independent and reproducible across
+# deployments.
 #
-# Provenance: derived from Pierre's tuned CMIP-realism config
-# config/cmip/cmip_ocean_slab.yaml (Morrison + Sundqvist + COARE3 +
-# gustiness + q_c_diagnostic 3e-4), ported to prescribed-SST AMIP. Land = the
-# SOTA multilayer Richards soil + CLM PFT/texture + prognostic snow,
-# stomatal-beta OFF (#741); Louis turbulence. Upgraded from the Manabe slab
-# bucket 2026-07-07; grid lane switched cube -> MPAS 2026-07-24 (see grid
-# block).  On MPAS the surface is UNTILED (tiled port pending).
+# THE ATMOSPHERIC PHYSICS SUITE IS CAM6 (user decision 2026-09-23).  The lane
+# (MPAS res6 Voronoi, prescribed SST, two-leaf multilayer land, external
+# forcings) is unchanged from the previous production deck; the atmospheric
+# parameterizations, the vertical grid and the physics cadence are CAM6
+# (CESM2.1, cam_cesm2_1_rel_60, f09 namelist) wherever a faithful port exists.
+# The outgoing configuration is kept RUNNABLE and unchanged at
+# config/amip/amip_sundqvist_l36.yaml, so every earlier result reproduces; the
+# decks that used to `include: amip_production.yaml` now include that file,
+# because they document results measured against it.
 #
-# Convection = BECHTOLD (mass-flux, IFS lineage; directive 2026-07-06): mass
-# flux is column-water-conserving BY CONSTRUCTION, unlike the SBM relaxation
-# whose net-moistening leak (+0.5 mm/day, #771) drove the pilot's day-150
-# blowup (gated fix: PR #819). CAVEAT: the earlier 10-day A/B (job 25918469,
-# pre-McFarlane, pre-#613 subgrid autoconversion) measured Bechtold at
-# albedo 0.57 / precip 0.81 vs SBM's on-target 0.292 / 3.2 — the C24
-# physics-combo screen (bechtold vs fixed-sbm under this exact suite,
-# /scratch amip_physcombo_c24, 2026-07-06) is the revalidation gate; revisit
-# this choice against its verdict before the 36-yr launch (#811 Gate 2).
-# GWD = McFarlane (orographic wave breaking, same directive; was hines).
-# Tracking: GitHub issues #636, #811.
-# =============================================================================
-
-# --- Grid + dycore: MPAS Voronoi SCVT level 5 (~2.2°) / L30 sigma, dt 75 s ----
-# MPAS is THE production AMIP lane (Pierre directive 2026-07-23: "we should not
-# work with the cubed sphere"; cube retired after the unresolved #1296 Antarctic
-# terrain instability).  This exact recipe (level 5 / L30 / sigma / dt 75) is
-# the PROVEN-stable stack: Pierre's climeval_bech 1-yr Bechtold run (day 247+)
-# and our slabrep/mllandrep replica chains all run it.  The lane is
-# RECIPE-SENSITIVE: L40 + hybrid + dt-auto NaN'd on day 1 (undiagnosed) — do
-# not change these five keys independently of a stability A/B.
-# History: the cube C48/L40 cd-grid dt150 lane (with its fp64-barotropic
-# requirement) lives on only in git history and issues #1294-#1296.
+# THIS DEFAULT IS ADOPTED ON FAITHFULNESS TO CAM6, NOT ON DEMONSTRATED SKILL.
+# The 60-day CAM6 arm is NOT finished and has NOT yet been scored against
+# observations.  Over its first twenty-five days it sits about 25 W/m2 out of
+# top-of-atmosphere energy balance, against about 2 W/m2 for the Sundqvist/L36
+# arm, because its clouds reflect far too little sunlight.  The cause is known
+# and is NOT yet fixed: cloud water is being rimed onto falling ice.  The
+# supporting measurement, on the two arms' day-5 states: 71% of the liquid
+# deficit lies below freezing, 70% of that cold deficit is accounted for by
+# the snow + graupel increase, and graupel more than doubles column-wide.
+#
+# EVIDENCE AND PAIR RECORD live in the RUN TREE, which is deliberately NOT in
+# this repository (runtime outputs are gitignored):
+#   /work/bd1083/b309178/diffESM/legoesm_pg/amip_runs/_cam6/PREREGISTRATION.md
+# on the Levante deployment.  It records the pair (cam6_base60 = the
+# Sundqvist/L36 deck, cam6_suite60 = this one; 60-day cold starts, scored
+# days 31-60 vs ERA5), the resolved-config diff, and every measurement cited
+# above.  A reader without that tree should treat the numbers here as
+# unverifiable rather than as repository facts.
+#
+# NOT YET CAM6 (run 2+): MG2 microphysics (Morrison mg flavour stands in),
+# ridge-based orographic drag (needs the ridge-statistics dataset), MAM4
+# aerosols (licence decision), CLUBB tuning table.
+#
+# EVERY scientific choice is spelled out below even where it equals a code
+# default: a default is not a record.  In particular the two numerical levers
+# (mpas_div_damp4_scale, mpas_vert_advection_scheme: sb) keep their OFF code
+# defaults and are selected HERE.
+# ---- grid / dycore ----------------------------------------------------------
 grid_type: voronoi
-resolution: 6               # icosahedral SCVT level 6 = 40962 cells (~1.1°).
-                            # DEFAULT per user directive 2026-08-25: res6 is
-                            # the production AMIP configuration; res5 is for
-                            # fast iteration only (override via --resolution 5).
-# Vertical: 36 layers to a 2 hPa lid (user decision 2026-09-17), NOT the old
-# 30 layers to 10 hPa.  The troposphere is bit-identical to the L30 production
-# grid (its lowest 27 layers of 33 hPa are kept) and the old top three layers
-# are replaced by nine layers uniform in ln(sigma) up to 2 hPa, ~3 km each,
-# CAM6-L32-like spacing.  Why now: the raised lid and the spectral
-# non-orographic gravity-wave source above were measured TOGETHER and only work
-# together.  At this deck's former 10 hPa lid, a 10-day pair (l30_ctl /
-# l30_bg07, days 30-40) shows the new source improving the Arctic 100-250 hPa
-# bias +15.3 -> +10.7 K and the polar-night jet error -18.6 -> -12.1 m/s, but
-# driving the 60-90N 10-50 hPa layer from -20.7 to -26.9 K, because those are
-# the lid layers and the old drag's deposition was holding them up.  At the
-# 2 hPa lid the same swap gives +7.5 -> +1.2 K there with the jet within 4 m/s
-# of reanalysis.  Shipping the source without the lid is the combination that
-# was measured to be worse.
-nlev: 36
-sigma_top: 0.002
-sigma_layout: l30_trop_logstrat
-# CAM-style del2 sponge: the horizontal momentum viscosity is raised x8 in the
-# top layer and x4 / x2 in the next two, so waves reaching the lid are absorbed
-# without a Rayleigh torque on the mean flow.
-mpas_sponge_del2_top_layers: 3
-mpas_sponge_del2_top_factor: 8.0
+resolution: 6               # 40962 cells (~1.1 deg) ~ CAM6 f09 (0.9x1.25)
+nlev: 32                    # CAM6: the L32 hybrid table (cam_vcoords_L32_c180105)
+vertical_coord: cam_l32     # CAM6: hyai/hybi verbatim, p_top 2.255 hPa
 discretization: mpas
-dt: 112.5               # dt ladder 2026-08-25 (5-day res6 arms at 90/112.5/150,
-                            # all stable): 112.5 captures the full ~1.38x speedup
-                            # (150 ties it and exceeds the 138 s advective limit).
-                            # a_h_scale is raised 0.25->0.375 in step so the
-                            # PHYSICAL viscosity A_h = a_h_scale*3e-3*dx_min^2/dt
-                            # is unchanged from the storm-track-validated value.
-vertical_coord: sigma
-precision: fp64             # dycore fp64; rrtmgp runs fp32 on the MPAS path
-                            # (mpas_rrtmgp_fp32 default, perf — validated)
-a_h_scale: 0.375            # Laplacian viscosity multiplier (A_h = a_h_scale
-                            # * 3e-3 * dx_min^2/dt).  The default 1.0 gives
-                            # A_h ~ 1.4e6 m2/s on this mesh — tau ~ 0.8 d for
-                            # a 2000 km eddy, at baroclinic growth rate — and
-                            # KILLED the midlatitude storm tracks (2026-08
-                            # production year: synoptic psl std 5-10x low, psl
-                            # pattern r = -0.37; ERA5-inherited eddies dead by
-                            # week 3).  One-variable A/Bs: 0.25 sustains eddies
-                            # through 120 d (2-8 d bandpassed psl std, 40-70N,
-                            # d60-120: 0.58 hPa vs 0.05-0.10 at 1.0) with the
-                            # matched m1-4 scorecard IMPROVED (rlut bias -31.9
-                            # -> -18.4, rsut +35.4 -> +27.2, psl r -0.23 ->
-                            # -0.07); 0.5 still decays the NH track (0.29 by
-                            # d90-120); 0.0 sustains eddies but blows up day 37
-                            # (#1354 hot-bottom mode — the Laplacian partially
-                            # masks the vertical-solve instability, so do NOT
-                            # go below 0.25 until #1354 is fixed).  MESH-
-                            # SPECIFIC: the dx^2/dt scaling is resolution-
-                            # blind (see the a_h follow-up issue).
-# Production default 2026-09-16 (user decision): the first-order upwind vertical
-# advection carried an implicit vertical diffusion measured at +0.8 K/day of
-# warming at the tropical tropopause; with van Leer (2nd-order monotone) and the
-# physical top-layer radiation + filter-ghost fixes of the same PR, 60-day
-# restart arms from dd_ctl day 90 moved the UTLS bias vs ERA5 from +5..+7 K to
-# -1..+2.5 K at 100-290 hPa (tropics +9 -> +1.5 K at 100 hPa), no drift after
-# day 20; byte-identical elsewhere; sigma lane only (validate_strict refuses it
-# on other coordinates).
-mpas_vert_advection_scheme: van_leer
+dt: 112.5
+precision: fp64
+a_h_scale: 0.375
+mpas_sponge_del2_top_layers: 2       # index-based sponge: 2 layers on L32 span
+                                     # 2.3-10.2 hPa (the Sundqvist/L36 deck: 3 layers on
+                                     # sigma-36 = 2.0-7.6 hPa).  CAM6 f09 FV has
+                                     # NO top sponge (div24del2flag=4 = uniform
+                                     # del4 divergence damping; the tanh top
+                                     # profile lives only in the ldel2/ldiv2
+                                     # branches) -- 2 layers is the closest
+                                     # offered setting (user 2026-09-21)
+mpas_sponge_del2_top_factor: 8.0
+mpas_vert_advection_scheme: sb       # conservative Simmons-Burridge flux form
+                                     # of the hybrid theta transport (van Leer
+                                     # is sigma-only on this lane).  The
+                                     # advective upwind form violates the
+                                     # discrete product rule: measured column
+                                     # residual 3.8e-2 of the interfacial
+                                     # exchange on this L32 table against
+                                     # 6.7e-16 conservative.  USER-APPROVED
+                                     # 2026-09-23; the CODE default stays
+                                     # 'upwind' and this deck selects it.
+mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
+                                     # 4th-order DIVERGENCE damping at every
+                                     # level (cd_core.F90 tau4 = 0.01/dt times
+                                     # the squared cell area).  1.0 = CAM's
+                                     # nondimensional RATE, not CAM's behaviour
+                                     # (CAM applies it per acoustic substep,
+                                     # per cell); 7.235e15 m^4/s here.  RATE
+                                     # PENDING USER APPROVAL.  Our del2/del4
+                                     # are VECTOR Laplacians and damp balanced
+                                     # flow too; this is the curl-free-only
+                                     # term CAM relies on, and the L32 table's
+                                     # 14 pure-pressure top layers have no way
+                                     # to absorb divergence into their own mass.
+                                     # MEASURED, physics off, from the day-5
+                                     # state: alone it cuts the 24 hPa
+                                     # hot-patch drift from 3.14 to 1.96 K/h,
+                                     # a 38% reduction -- real but NOT
+                                     # sufficient.  WITH the conservative
+                                     # transport above the drift REVERSES to
+                                     # -1.10 K/h, which is why this deck
+                                     # carries both or neither.
 
-# --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
-radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
-rad_update_steps: 32        # exactly hourly at dt 112.5 (48 was hourly at dt 75)
-# Cloud fraction: Xu-Randall (1996), owner decision 2026-09-17, replacing
-# Sundqvist.  Sundqvist is a pure RH closure with a HARD onset at rh_crit, and
-# it sees only the humidity: measured on this configuration, an Arctic layer at
-# 230 K holding 20 mg/kg of ice at RH 0.70 reports cover 0.000, and so does the
-# same layer in an anvil at 215 K.  Xu-Randall reads the CONDENSATE as well, so
-# an ice-bearing layer below rh_crit is cloudy - 0.311 and 0.357 in those two
-# cases - while a layer with no condensate still returns 0.000, so it does not
-# manufacture cover out of dry air.  That is the mixed/ice-phase behaviour this
-# model needs; see cloud_alpha_xr / cloud_p_xr below for its sensitivity.
-# The condensate it reads is the PROGNOSTIC one: this deck runs Morrison, so
-# physics_pipeline passes q_c/q_i from the microphysics and the constant
-# cloud_q_c_diagnostic is only the fallback for runs with no microphysics wired
-# (it would otherwise give a near-uniform cover wherever cloud exists).
-clouds: xu_randall
-microphysics: morrison
-morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
-                                 # sedimentation (micro_mg2_0.F90 loop). The
-                                 # one-pass form moved a hydrometeor at most one
-                                 # layer per call; production bottom-layer rain
-                                 # CFL ~3.4 at 112.5 s (281 m layer, 9.1 m/s cap),
-                                 # so this changes production numerics BY DESIGN.
-                                 # Pre-2026-09-22 runs: --no-morrison-sed-cfl-substeps
-                                 # morrison_sed_cfl_substeps_strict left at its default
-                                 # (False): max required count here is 8 (graupel) vs the
-                                 # 256 cap; turning the abort on is a user choice, not taken.
-convection: bechtold        # mass-flux (IFS lineage), water-conserving by
-                            # construction; C24 screen = revalidation gate
-# NEW BASELINE, 2026-09-13 (owner decision). This moves TWO things at once and
-# is therefore a deliberate re-baselining, not a one-variable arm: the boundary
-# layer changes closure AND gains prognostic sub-grid variance. Nothing here is
-# term-by-term comparable to a Louis-era run; score it against a fresh control.
-# WHY: the cloud-cover bias is a humidity/variance problem, not a cloud-closure
-# one -- roughly four fifths of tropical mid-troposphere cells sit near
-# saturation, which is why five convection knobs in a row returned null.
-# Diagnostic closures hand the cloud PDF a variance re-estimated each step from
-# a mixing length times a local gradient; CLUBB run prognostically carries the
-# total-water variance and its covariance with temperature as real state.
-turbulence: clubb           # was: louis (directive turbulence, and required by
-                            # the cube-era tiled surface; MPAS runs untiled)
-clubb_prognostic: true      # carry the 15 higher-order moments as state rather
-                            # than re-diagnosing them each step
-# NOT SET, and this is the open gap: radiation cannot yet consume the moist
-# closure's cloud fraction on THIS lane. use_clubb_cloud_fraction is refused on
-# the MPAS backend, which builds its radiation config directly and bypasses the
-# shared pipeline that threads the override, so setting it here would stop the
-# run at startup. Until that is wired, the prognostic variance reaches the
-# boundary layer but NOT the cloud optics: clouds stay on the humidity-based
-# grid-scale fraction, and this deck should not be expected to move the
-# cloud-cover bias on its own.
-# CLUBB upper domain limit [Pa] (CAM trop_cloud_top_press): the scheme's
-# mixing is tapered to zero above 150 hPa.  ADOPTED 2026-09-16 (user).  The
-# production cold start blew up on day 3-4 because diagnostic CLUBB's explicit
-# TKE production ran away in one warm-pool anvil column at 110-270 hPa; with
-# the taper the same start ran clean (peak wind 65 vs 357 m/s), and the
-# day-80 restart twin (tp_ctl / tp_taper150) is climate-neutral to < 0.3 W/m2
-# in every region.  Caveat (GLM): 150 hPa is inside the anvil layer; a
-# production-term limiter would be the targeted fix.
-clubb_trop_cloud_top_press: 15000.0
-# ADOPTED 2026-09-17 (user): the non-orographic member is the E3SM/CAM spectral
-# solver launched with a uniform background spectrum, NOT the bulk "hines"
-# heuristic.  Measured on the raised-lid L36 grid, days 30-40 from one pinned
-# checkpoint, against ERA5 February climatology: with hines the Arctic
-# polar-night jet is +2 m/s where ERA5 has +21 (i.e. no vortex), and the
-# 60-90N 10-50 hPa layer is +7.5 K too warm; with this source the jet is
-# +25 m/s (+4 bias) and the warm layer is +1.2 K.  The SH summer cap improves
-# (-7.1 -> -4.3 K at 5-30 hPa) and the tropics move < 0.3 K.  The global column
-# momentum sink falls from 253 mPa to 57 mPa, of which 5.6 mPa is
-# non-orographic -- the IFS/MAECHAM range (5-15 mPa), where the hines surrogate
-# launched ~3.5 Pa.  taubgnd 0.7e-3 Pa was preferred over 1.5e-3 because the
-# stronger arm overshoots the jet (+9 m/s) for ~1 K of temperature that is
-# inside the 10-day single-winter sampling spread.
-# CAVEAT: the arms were run at the 2 hPa lid (amip_production_l36.yaml).  At
-# this deck's 10 hPa lid the top layer received 29 % of the hines momentum
-# sink, so the L30 lane needs its own 10-day check before a long run.
-gravity_wave_drag: mcfarlane+e3sm_cam  # orographic (McFarlane) + non-orographic
-                            # (E3SM/CAM uniform background spectrum).  Was
-                            # mcfarlane+hines from the 2026-07-15 directive
-                            # until 2026-09-17; that A/B only ever compared
-                            # hines against NO non-orographic drag (on latlon24
-                            # the +hines lid braking pushed the topo-wave
-                            # blowup day 100->179, on cube C12 it was
-                            # metric-neutral), never against a normalised
-                            # spectral source.
-                            # REQUIRES a real SSO file (#1514): the orographic
-                            # member with subgrid_orography_path empty launches
-                            # from the scalar h_topo=500 m on every OCEAN
-                            # column (-0.29 Pa spurious 40-60S drag; westerly
-                            # belt + both storm tracks erased). The path is
-                            # machine-specific so it lives in the launcher:
-                            # amip_production.sh wires AMIP_SSO via
-                            # --subgrid-orography-file; tests/unit/
-                            # test_amip_production_subgrid_orography.py goes
-                            # red if that wiring is dropped.
-diurnal_cycle: true
-orbital_insolation: true    # AMIP-II realistic orbit (Berger 1978): orbital
-                            # declination + (a/r)^2 eccentricity asymmetry
-# Hard saturation adjustment (post-step supersaturation drain, <=5 K/step,
-# loudly logged per interception): the MPAS-lane Bechtold stabilizer.  Both
-# 2026-07-23 chains WITHOUT it NaN'd (day 25/40); every healthy year-long
-# Bechtold-on-MPAS run (Pierre's climeval_bech day 247+, our replica chains)
-# runs WITH it.  Non-conservative by design — the drain is the documented,
-# validated exception to the no-silent-clip rule (it is neither silent nor
-# unvalidated).  Whether it stays campaign-permanent is tracked with Pierre.
-hard_saturation_adjustment: true
+# ---- physics cadence ---------------------------------------------------------
+physics_update_steps: 16    # CAM6: physics every 1800 s (16 x 112.5 s); the
+                            # held-physics steps re-apply the last tendencies
+rad_update_steps: 32        # CAM6 f09: radiation hourly (iradsw = -1)
+cld_macmic_num_steps: 3     # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_sgs,
+                            # dtime 1800): CLUBB + microphysics sub-cycled 3 x
+                            # at 600 s inside each physics step (tphysbc macmic)
 
-# --- Cloud tuning (mass-flux over-bright-anvil fix — PROVISIONAL) --------------
-# The mass-flux schemes (bechtold/edmf/tiedtke) over-cloud the AMIP troposphere.
-# A day-90 pe=0 scorecard: edmf clt 85% (ref 67), albedo 0.60-0.71 (ref 0.29),
-# from excessive sundqvist stratiform cloud over an over-moist column. Two levers:
-#   cloud_rh_crit        — Sundqvist critical RH; RAISE => less stratiform cloud
-#                          FRACTION (edmf clt 85.5 -> 63.5 at 0.85, day-35 partial).
-#   cloud_q_c_diagnostic — in-cloud condensate / optical THICKNESS; LOWER => less
-#                          reflective cloud (targets the residual albedo that
-#                          rh_crit alone leaves, 0.695 -> 0.637).
-# PROVISIONAL: values are day-35 partials; day-90 validation (edmf full-recipe
-# run) in progress. To restore the prior default: rh_crit 0.77, q_c 3.0e-4,
-# convective_precip_efficiency 0.0.
-cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f376730e)
-cloud_q_c_diagnostic: 5.0e-6   # was 3.0e-4 ("thinner cloud" -> lower albedo)
-# Cloud cover is diagnosed from RH against the ICE-BLENDED saturation curve, not
-# the liquid one (the code default also moved on 2026-09-17; recorded here
-# because it is a scientific choice and a default is not a record).  With
-# "liquid", RH is measured against liquid saturation at every temperature: at
-# 230 K / 900 hPa ice-saturated air reads 0.662 against the 0.85 above, so no
-# cold cloud can form.  Measured in this deck's own February: 0.0 % cover north
-# of 80N and 19 % at 65N, against 35-60 % observed, with surface air 10-19 K
-# too cold underneath it.
+# ---- radiation / clouds / microphysics --------------------------------------
+radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
+# Saturation curve the cloud-cover diagnosis measures RH against.  NAMED, not
+# inherited: the code default is "mixed_phase" and that is the value this deck
+# wants, but the default moved on 2026-09-17 and a default is not a record.
+# The preserved pre-CAM6 deck pins "liquid" for the same reason.
 cloud_saturation_scheme: mixed_phase
-
-# --- Cloud-optics corrections (#1519) -----------------------------------------
-# WITHOUT these two the radiation solver sees ONE homogeneous overcast column at
-# the grid-mean water path: `to_rrtmg_kwargs` (clouds/cloud_fraction.py:145)
-# omits `cloud_fraction`, so it computes R(cf*tau_ic) instead of the
-# independent-column cf*R(tau_ic) + (1-cf)*R(0).  R is concave in optical depth,
-# so the single-column form is ALWAYS brighter — the function's own docstring
-# says so.  Measured on this mesh: radiation treats 86-91% of columns and  The sign of the error is
-# therefore grid-independent; only its magnitude depends on the cloud field.
-# 30-41% of layers as overcast slabs against a true cover of 60% and a mean
-# layer cloud fraction of 8.5%; in-cloud layer water 60.7 g/m2 vs grid-mean 19.3.
-#
-# This file previously set NEITHER, so it fell through to the code defaults
-# ("none"/"constant") and the "production" configuration was the UNCORRECTED
-# one.  Measured cost, two 365-day AMIP runs identical in every other respect
-# (same pinned tree, forcing deck, ERA5 IC and diffusion bundle):
-#     rsut  +59.33 -> +36.60  (-22.7 W/m2)      rlut  -36.55 -> -23.66
-#     prw   +1.85  ->  +0.24                    TOA net -24.83 -> -12.92
-# Both TOA components move toward observations TOGETHER, so this is a structural
-# correction, not compensating-error tuning.
-#
-# cloud_fsd is the width parameter the two_region optic consumes and is INERT
-# under "constant".  two_region + cloud_fsd are the in-cloud INHOMOGENEITY lever;
-# they are computed before the partial-coverage/overlap branch and so apply
-# independently of the sub-grid OVERLAP lever described next.
-#
-# Sub-grid cloud OVERLAP lever: cloud_partial_coverage_optics and
-# cloud_vertical_overlap_optics are MUTUALLY EXCLUSIVE (config.py:1799 refuses
-# the pair) — two complete alternative treatments of the same degree of freedom.
-# This config selects max_random (set in the block below as
-# cloud_vertical_overlap_optics, 8 deterministic McICA subcolumns) and turns the
-# analytic two-column path OFF here.  Measured on a matched 30-day window:
-# max_random rsut 140.98 vs two_column 145.70 (control 168.57), i.e. 4.7 W/m2
-# better; max_random adopted to match the validated tropical-rain campaign.
+clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
+                            # deep-convective = clubb_intr deepcu from the
+                            # scheme's updraft mass flux + in-cloud condensate
+use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
+                                 # radiation (required by cam6_clubb)
+microphysics: morrison      # mg flavour (MG2 port = run 2)
+morrison_do_graupel: true   # NAMED, equals the code default: this deck's
+                            # measured behaviour.  CAM6's MG2 has NO graupel
+                            # (eight constituents, micro_mg_cam.F90:139); our
+                            # port rimes cloud water onto graupel, ~half the
+                            # cold-sector cloud-water sink on the day-5 state.
+                            # The graupel-off arm is this deck plus
+                            # --no-morrison-do-graupel; this value stays
+                            # until the user decides (2026-09-24).
+morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
+                                 # nstep = 1 + int(max V dt/dz) per column,
+                                 # so precipitation crosses >1 layer per 600 s.
+                                 # DEPARTURE: Morrison sediments the PRE-source
+                                 # pools (MG2 sediments post-source, :2204).
+morrison_sed_cfl_substeps_strict: false # the abort path is an equinox error_if,
+                                        # i.e. a host callback, and the GPU lane
+                                        # runs JAX_PLATFORMS=cuda with no CPU
+                                        # device to place it on (this killed the
+                                        # first 60-day arm at day 2).  The
+                                        # required sub-step count is still
+                                        # reported as a diagnostic.
+                                 # (L32 at 600 s needs ~90 for graupel; a clamp
+                                 # would silently slow the fall)
+hard_saturation_adjustment: false  # CAM6 clubb_do_liqsupersat = .false.
+                                   # (namelist_defaults_cam.xml:1225): no
+                                   # supersaturation removal after the physics
+                                   # step.  On this lane the flag is the
+                                   # POST-STEP drain (model_driver
+                                   # _mpas_hard_saturation_poststep), which is
+                                   # our counterpart of CAM's post-CLUBB
+                                   # "iceadj" block (clubb_intr.F90:2258).
+                                   # Was true; user table 2026-09-24, row 2.
 cloud_partial_coverage_optics: none
-cloud_optics_inhomogeneity: two_region
-cloud_fsd: 1.0
-convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain split
-# Survivor convective rain (after the IFS downdraft + sub-cloud evaporation)
-# goes to the SURFACE (IFS cuflxn); before 2026-09-16 it entered the
-# microphysics rain tracer and was re-evaporated at grid-mean humidity
-# (4.1 kg/m2/day below 700 hPa in the tropics). 30-day pair: tropical-ocean
-# prw -9 kg/m2, evaporation +4 %; the RH cover threshold is being re-tuned
-# on the drier column (cloud-cover session).
-convective_rain_to_surface: true
-# Cloud-base mass-flux cap: the pipeline used to fall back to 0.02 on a field
-# no config carried (bound in 71 % of tropical-ocean columns); 0.05 is the
-# scheme's own default (user 2026-09-16). Range 0.02-0.15.
-bechtold_M_b_max: 0.05
-                            # (raises pr, drains column moisture). The bechtold
-                            # rain-split scheme is on this branch (#929), so the
-                            # old #932 argparse hard-error no longer applies.
-                            # PINNED 0.8 from the 2026-07-14 C12/60d dose-response
-                            # (one-variable vs the 365d pilot control, identical
-                            # Jan+Feb protocol): 0 -> 0.5 -> 0.8 moves EVERY
-                            # hydro/TOA metric monotonically toward obs —
-                            # pr 0.60->1.09->1.40 mm/d, hfls 49.9->60.2->65.9,
-                            # prw 30.6->28.3->26.1 (obs 24), clivi 0.10->0.05->
-                            # 0.03 (=obs), rlut 175->179->187, rsut 231->223->219.
-                            # 0.0 = bit-exact legacy no-split (kept for A/Bs).
-                            # History: #899 intended 0.5; #932 blocked it pre-#929.
-# convective_cloud (precip-based cumulus-cover surrogate, Slingo-1987-inspired): OFF here.  The canonical
-# tuned-physics base (config/cmip/cmip_tuned_physics.yaml) ships it true for the
-# COUPLED run, but under prescribed SST it is a pure radiative cost (see the A/B
-# below), so this AMIP config and the validated tropical-rain campaign both turn
-# it off.  (#647 rationale for mirroring the coupled knobs still holds for the
-# rest; this ONE knob is deliberately not mirrored — see the finding below.)
-#   DOCUMENTED FINDING (not a reason to diverge): a matched 30-day C48/L40 A/B
-#   (jobs 25929869 ON vs 25929870 OFF, both q_c=3e-4) shows that under PRESCRIBED
-#   SST conv-cloud=ON degrades the TOA budget — albedo 0.295->0.370, OLR
-#   234.7->213.3, rsut 100.5->126.3 (~25 W/m^2 off CERES) — for only +0.55 K of
-#   near-surface air warming. That degradation is expected: conv-cloud's benefit
-#   in the COUPLED base is OLR-trapping warming a FREE surface (cuts the ~4.5 K
-#   tropical cold bias / SST drift); with SST pinned that lever is inert and only
-#   the radiative cost shows. AMIP thus EXPOSES conv-cloud as a coupled-mode
-#   SST-drift compensator, which is why it is OFF under prescribed SST here.
-#   This now matches the CMIP6 production science chain (scripts/cluster/amip/
-#   amip_cmip6_chain.sbatch), which already set false (best prescribed-SST TOA,
-#   per the A/B above) — the tracked value and the science chain now agree.
-#   NOTE (MPAS lane): the standalone MPAS/spectral radiation path FORCES this
-#   OFF regardless (loudly, at setup); the value is false here, so both the FV
-#   and MPAS lanes agree.
-convective_cloud: false
+cloud_optics_inhomogeneity: constant  # CAM6: RRTMG applies NO in-cloud
+                                       # inhomogeneity factor (none anywhere
+                                       # in src/physics/rrtmg/).  "constant"
+                                       # with factor 1.0 is the no-thinning
+                                       # path (chi = 1, byte-identical).  Was
+                                       # two_region: on day-15 states it
+                                       # removed 52% of the liquid in run 1
+                                       # and 42% in run 3, so the water
+                                       # reaching radiation stayed ~14.5 g/m2
+                                       # across the liquid hand-off.  User
+                                       # decision 2026-09-25, for run 4.
+cloud_inhomogeneity_factor: 1.0        # the "constant" scheme's scalar: 1.0
+                                       # = homogeneous, no reduction.  Set
+                                       # explicitly so the no-thinning row
+                                       # rests on no default.
+cloud_fsd: 1.0                         # INERT under "constant" (consumed by
+                                       # two_region only); kept explicit so
+                                       # the old value is on record.
+cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
+                                     # g-point sees its own max-random cloud
+                                     # subcolumn in ONE solve (was max_random:
+                                     # 8 full solves, ~8.5x the radiation cost).
+                                     # Synthetic 512-column check vs a 64-subcolumn
+                                     # reference: bias within sampling noise,
+                                     # per-column scatter ~1.8x the 8-subcolumn one.
+cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
+hard_sat_ice_curve: false          # the ice-curve blend of that same
+                                   # post-step drain; inert once the drain
+                                   # is off, set explicitly so no row rests
+                                   # on a default.  User table row 3.
+homogeneous_ice_nucleation: true
+aerosol_ccn: true
+energy_consistent_moisture_clip: true
 
-# --- Tiled surface + interactive REAL land (multilayer Richards, SOTA) ---------
-# COARE3 ocean / land-MOST surface fluxes + multilayer Richards soil + CLM
-# PFT/texture surface map + prognostic snow.  Replaces the Manabe slab bucket
-# with the physical land model (use_multilayer_land, PR #715: land skin-T drives
-# the atmospheric BL, land MOST + CLM per-cell z0, snow-albedo + stomata threaded).
-# Needs the CLM surfdata staged (--clm-surfdata-path; compute nodes have no
-# internet).  Deep 3 m / 10-layer soil needs a multi-year cold spin-up before its
-# T/moisture fields are trustworthy.
-use_multilayer_land: true
-land_update_seconds: 300.0  # land tile every ~300 s on interval-mean forcing
-                            # (2026-08-25 step profile: the tile was 58% of
-                            # wall time called every 75 s; 300 s is the canopy
-                            # design substep ceiling. Fluxes held in between,
-                            # same shape as the hourly radiation cadence.)
-multilayer_n_layers: 10
-multilayer_soil_depth: 3.0
-# Drier soil cold-start (theta_init = 0.25*theta_sat, vs 0.5 default): the deep
-# 3 m soil cold-starts too wet, feeding over-evaporation cold-cloudy land (#730).
-land_soil_moisture_init_frac: 0.25
-# Jarvis/Farquhar interactive stomata (#715): DISABLED (#741). On the multilayer
-# soil it over-transpires (effective beta stays near-potential in the moist root
-# zone), driving a large over-evaporation/moistening drift. With it off the
-# multilayer uses the beta_soil root-zone moisture-stress path, which is realistic.
-land_stomatal_beta: false
-snow_albedo_feedback: true  # prognostic SWE snow-albedo feedback, threaded into
-                            # the multilayer land (#715)
-# POLAR SURFACE ALBEDO, two measured fixes adopted 2026-09-13 (owner decision).
-# The poles reflect 22 W/m2 too little in CLEAR SKY against CERES -- a surface
-# error no cloud lever can reach -- and both of these were measured earlier and
-# then left switched off.
-#
-# Snow-albedo ageing timescale [days]. Every snow-covered polar cell measured
-# 0.521 against an observed 0.70 (Arctic tundra) to 0.82 (Antarctic plateau),
-# because a 3.7-day clock darkens any snowpack older than a few weeks whatever
-# its temperature. At 150 days the measured albedo is 0.703 Arctic / 0.724
-# Antarctic, worth +6.8 W/m2 of polar clear-sky reflection. Turning on the
-# temperature dependence ALONE does not fix it: an arm at the BATS activation
-# slowed the clock 5-12% in ten days and left the albedo at 0.521, so the
-# e-folding time is the binding parameter.
-# CAVEAT, carried deliberately: the land calibration fitted 3.674 d with the
-# temperature dependence off, so this trades against that surface-temperature
-# calibration and any run adopting it must score land temperature too, not only
-# the albedo.
-# ADOPTED 2026-09-15 (user), after the canopy's absorbed shortwave and the
-# exported surface albedo were reconciled (commit 8065cb0e9): the land now
-# absorbs with the SAME snow-aged albedo the atmosphere reflects with, so a
-# brighter snow no longer creates energy at the surface. Without this the
-# 3.67-day ageing put every polar snow cell at the aged 0.52. Measured on a
-# 30-day pair (pa30_both vs pa30_ctl, days 80-110, with albedo_ice below):
-# polar clear-sky reflected SW bias -15.7 -> -2.7 W/m2 vs CERES; all-sky
-# -22.3 -> -11.1 (the rest is the polar cloud deficit); global reflected SW
-# bias +10.2 -> +12.6; polar tas -0.5 K. The 5-day single-lever arm gave
-# +7.3 of the pair's polar clear-sky gain.
-land_snow_tau_days: 150.0
-# Snow grain-growth activation temperature [K] (BATS 5000): the age clock runs
-# as dt*exp(A*(1/T_freeze - 1/T_snow)), so cold dry snow keeps its fresh
-# albedo and only near-melting snow ages at the calendar rate.  ADOPTED
-# 2026-09-16 (user, Antarctic plateau at 0.69 vs observed 0.83 with the
-# calendar clock).  Pairs with the floor in surface_albedo.land_albedo: snow
-# cannot darken a surface below its own snow-free albedo (ice-sheet bands).
-# NOTE a restart inherits its snow AGE; this slows growth but cannot reduce
-# an age already accumulated -- cold-start runs see the full effect.
-snow_age_activation_K: 5000.0
-# Sea-ice albedo, flat over the prescribed ice fraction (no snow-on-ice, pond
-# or temperature dependence is wired on this lane). 0.65 is a bare/melting-ice
-# value; late-winter ice is snow-covered (CICE/CCSM3 dry snow-on-ice 0.80-0.85
-# broadband). ADOPTED 2026-09-15 (user); the 5-day single-lever arm gave +2.7
-# of the pair's polar clear-sky gain in a window that barely lights the Arctic.
-albedo_ice: 0.80
-# Zenith-angle-dependent open-ocean albedo (Briegleb 1992). The flag name is
-# broader than its effect: on this lane it changes the OPEN-OCEAN term only and
-# leaves the ice and land blends alone. Measured +6.0 W/m2 of Southern Ocean
-# clear-sky reflection, which essentially erased that bias, and +1.3 at the
-# poles. Refused outright on the spectral path, which would ignore it.
-dynamic_albedo: true
-surface_bulk_scheme: coare3   # OCEAN tile (land tile uses MOST via #715)
-surface_gustiness_zi: 300.0  # == cmip_tuned_physics.yaml (run_coupled-mirrored #647 dest)
-surface_tiled: false        # MPAS standalone path has NO tiled surface (open
-                            # port, see the lane-gap list in #1309); the
-                            # cube-era tiled COARE3/MOST split returns if/when
-                            # tiling is ported.  FV lanes may re-enable via CLI.
+# ---- convection ---------------------------------------------------------------
+convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelist:
+                            # c0_lnd 0.0075, c0_ocn 0.03, ke 5e-6 (dyn=fv),
+                            # tau 3600,
+                            # capelmt 70, tiedke_add 0.5, momcu = momcd = 0.7,
+                            # num_cin 1); scheme defaults carry those values.
+                            # ZM convective momentum transport (momtran) is ON
+                            # and reaches the MPAS winds (mpas_cmt resolves True;
+                            # the Sundqvist/L36 deck's Bechtold runs CMT
+                            # off, lane default)
+convective_precip_efficiency: 0.8
+convective_rain_to_surface: true
+convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
+
+# ---- turbulence ---------------------------------------------------------------
+turbulence: clubb
+clubb_prognostic: true
+clubb_liquid_partition: true       # CAM6 clubb_intr: the closure's diagnosed
+                                   # cloud liquid is handed to the host as a
+                                   # tendency, and the Morrison saturation
+                                   # adjustment stops condensing (MG2
+                                   # allow_sed_supersat = .false. under CLUBB,
+                                   # micro_mg_cam.F90:668-672).  One flag,
+                                   # both halves.  User table row 1.
+# The partition REFUSES an active radiative condensate floor (it would be
+# imposed on top of the liquid the closure now supplies, making clouds opaque
+# twice).  Both floors default to a non-zero scheme value when unset, so they
+# are pinned to 0 here.  Not in the user's three-row table: REQUIRED BY ROW 1.
+cloud_q_c_diagnostic: 0.0
+conv_cloud_condensate: 0.0
+clubb_trop_cloud_top_press: 15000.0
+
+# ---- gravity-wave drag ---------------------------------------------------------
+# CAM6 f09 L32 (non-WACCM, nlev < 60) runs OROGRAPHIC drag ONLY: build-namelist
+# sets use_gw_front=false and use_gw_convect_dp=false (bld/build-namelist ~3230;
+# the f09 frontal/Beres coefficient rows apply to WACCM / >=60-level builds).
+# So no non-orographic member here (the Sundqvist/L36 deck carries the
+# e3sm_cam
+# background source; that row is dropped on purpose).
+gravity_wave_drag: mcfarlane            # orographic member: McFarlane (decision
+                                        # pending: CAM6 gw_oro port via e3sm_cam
+                                        # 'orographic', effgw_oro 0.125,
+                                        # gw_polar_taper true on fv, lndscl_sgh)
+hines_launch_p: 70000.0                 # inert (hines not selected); kept equal
+                                        # to the Sundqvist/L36 deck.  The e3sm_cam_*
+                                        # rows
+                                        # also resolve (to run_amip defaults) but
+                                        # are dead while e3sm_cam is not in the
+                                        # selector; re-pin them from the CAM6
+                                        # namelist before any run that adds it.
+
+# ---- surface ------------------------------------------------------------------
+surface_bulk_scheme: large_yeager_cesm  # CAM6/CESM shr_flux_atmOcn (LY04)
+surface_gustiness_zi: 300.0
+surface_tiled: false
 surface_z0_land: 0.1
-# MPAS passive/slab land-tile knobs (Pierre's f0efce5a4; used by BOTH arms of
-# the land A/B — with use_multilayer_land the beta still feeds turbulence
-# until #1312 threads the soil's per-cell beta_soil):
 mpas_land_lapse_K_per_km: 6.5
 mpas_land_beta: 0.6
+mpas_ice_skin_prognostic: true
+albedo_ice: 0.80
+dynamic_albedo: true
+snow_albedo_feedback: true
+land_snow_tau_days: 150.0
+snow_age_activation_K: 5000.0
 
-# --- Forcing selectors (observed SST/SIC + full CMIP6 external forcing) --------
-# File PATHS are supplied at runtime (see amip_production.sh); these are the
-# authoritative SELECTORS + variable names + scalings.
+# ---- land (unchanged) -----------------------------------------------------------
+use_multilayer_land: true
+land_update_seconds: 1800.0  # CAM6: CLM steps once per 1800 s coupling
+                             # interval (user 2026-09-25).  = 16 x 112.5 s,
+                             # forced with the interval-mean atmosphere; the
+                             # offline LMIP driver also runs the tile at 1800 s.
+                             # Was 300 (-> 337.5 s actual, every 3 steps).
+multilayer_n_layers: 10
+multilayer_soil_depth: 3.0
+# Soil freeze/thaw ON (user 2026-09-26), as in CLM5 and as the land IC spin-up
+# ran; the land calibration's tables were fitted with it off.
+land_soil_freeze_thaw: true
+land_soil_moisture_init_frac: 0.25
+land_stomatal_beta: false
+land_calibrated_physics: true
+land_surface_scheme: two_leaf
+mpas_land_beta_soil: true
+land_soil_init: aridity
+
+# ---- moisture smoothing / clamps (unchanged) -----------------------------------
+mpas_qv_smooth_del2_m2s: 0.0
+mpas_qv_smooth_del4_m4s: 3.6421e14
+mpas_conservative_tracer_clamp: true
+
+# ---- forcing / IC / output (unchanged) ------------------------------------------
+diurnal_cycle: true
+orbital_insolation: true
 ic: era5
 dataset: custom
 sst_var: tosbcs
 sst_offset: 0.0
 sic_var: siconcbcs
 sic_scale: 0.01
-solar_source: spectral_file  # transient TSI + 14-band spectral SSI (2026-07-23
-                            # upgrade; was `file` = TSI-only since the first
-                            # campaign config — the spectral weights in the
-                            # swflux_14band file were never consumed). Reader
-                            # validated on the MPI-M file: SSI_frac -> 112
-                            # g-points, sum=1, band rotation `auto` (#322 fix);
-                            # TSI reproduces solar cycles 21/22 (~1.2 W/m^2).
-                            # Weights reach rrtmg/rrtmgp only (gray: TSI only).
+solar_source: spectral_file
 solar_tsi_var: TSI
 solar_spectral_var: SSI_frac
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external
 start_year: 1979
-
-# --- Diagnostics / output (CMIP6-protocol CMOR) -------------------------------
-diag_days: 1                # daily diag line (Pierre protocol): a blowup must
-                            # be localizable to <1 day — the day-25 NaN autopsy
-                            # under diag_days 5 captured only a fully-NaN state
-checkpoint_days: 30
+diag_days: 1
+checkpoint_days: 30         # run control, carried from the outgoing production
+                            # deck (not a CAM6 choice)
 monthly_means: true
 cmip_output: true
 clear_sky_diag: true
-
-# --- levers whose DEFAULT preserves a diagnosed defect (see CLAUDE.md RULE 3) ---
-# Each of these was fixed in code and then left switched off, so every run that
-# does not name them inherits the bug the fix was written to remove.  Named here
-# so production runs get the fix and a future audit can see the choice.
-#
-# Non-orographic gravity waves released at 700 hPa.  Unset means SURFACE launch,
-# where 55% of the wave momentum is deposited below 1 km and brakes the
-# near-surface wind that drives ocean evaporation.
-hines_launch_p: 70000.0        # retained: selects the hines member if a deck
-                               # re-selects it (the default 0.0 = surface launch
-                               # is the defect documented above).
-#
-# E3SM/CAM background non-orographic source (the production non-orographic
-# member since 2026-09-17).  pgwv 32 with the kernel's dc gives phase speeds
-# -80..80 m/s; c0 30 m/s is the CAM Gaussian spectrum width; launch at 500 hPa
-# is CAM's kbot for the frontal source; effgw 1.0 is CAM5's effgw_cm; the
-# cos(lat) taper is OFF because E3SM disables it for unstructured dynamics and
-# the polar-night jet is exactly where the drag is needed.
-e3sm_cam_source: background
-e3sm_cam_pgwv: 32
-e3sm_cam_effgw: 1.0
-e3sm_cam_taubgnd: 0.7e-3
-e3sm_cam_c0: 30.0
-e3sm_cam_launch_p: 50000.0
-e3sm_cam_latitude_taper: false
-# Moist-static-energy-conserving form of the per-step vapour floor: the latent
-# heat of clipped vapour is removed with the vapour instead of being left
-# behind. Unset means the non-conserving form.
-energy_consistent_moisture_clip: true
-
-# --- the tropical-rain science configuration (folded in 2026-08-22) ----------
-# These were previously named only in amip_campaign_mpas.yaml.  A run built on
-# production alone therefore got a DIFFERENT climate from the campaign runs,
-# and the difference was large: tropical ocean rain 0.48-0.61 of observed
-# against 0.89, on ocean evaporation 0.54-0.62 against 0.83.  Nobody chose
-# that -- the settings simply fell to code defaults, several of which preserve
-# an already-diagnosed defect.  Naming them here makes the science
-# configuration the DEFAULT rather than something a side deck has to remember.
-#
-# Radiation and cloud optics.  Maximum-random overlap is measured at -30% cloud
-# albedo and +18 W/m2 outgoing longwave against a Monte-Carlo reference; it is
-# mutually exclusive with the two-column partial-coverage treatment, which is
-# why that one is off above.
-cloud_vertical_overlap_optics: max_random
-cloud_n_subcolumns: 8
-# Microphysics: saturation over ice below freezing, a homogeneous freezing
-# source for ice number, and droplet number from the aerosol field.
-hard_sat_ice_curve: true
-homogeneous_ice_nucleation: true
-aerosol_ccn: true
-# Grid-scale moisture smoothing, the positivity fixer that borrows within a
-# column rather than creating water, and the prognostic sea-ice skin.
-# The moisture filter is a SCALE-SELECTIVE biharmonic, not a Laplacian, since
-# 2026-09-12. The Laplacian at 2.0e5 was itself a cause of the tropical
-# free-tropospheric moist bias: it flattened the resolved humidity gradients
-# along with the grid-scale noise it was added to suppress. 3.6421e14 m^4/s
-# matches that Laplacian's damping of the TWO-CELL mode exactly, measured on
-# the operator's own top eigenvalue on this mesh, so it changes selectivity
-# without changing the grid-scale damping production has always had.
-#
-# Measured on a 30-day controlled pair, days 101-110, against the Laplacian:
-# reflected shortwave 112.8 -> 108.0 (CERES 99-100), outgoing longwave
-# 233.7 -> 237.7 (CERES ~240), global cloud cover 72.2 -> 67.1 (ESACCI ~67),
-# tropical free-troposphere relative humidity 0.744 -> 0.688, and the humidity
-# field stays smooth (structure-function exponent 1.48 against the Laplacian's
-# 1.56; the refuted weaken-the-Laplacian arm scored 0.58).
-#
-# CHOSEN FROM A FOUR-POINT SWEEP, not from two points: 0.91e14 gives better
-# radiation still (shortwave 103.9, longwave 240.4, deep-tropical cover inside
-# the observed range) but its exponent is 1.02, at the step-discontinuity value,
-# and no instantaneous-humidity reference exists yet to say whether that is a
-# sharp front or under-damping. Both reviewers chose this value over it;
-# revisit when the daily reanalysis humidity reference is available.
-#
-# CAVEAT that is NOT fixed by this: the filter is a uniform drying. It improves
-# every region that was too cloudy and WORSENS every region already too clear —
-# the Californian stratocumulus deck loses a further 10 cover points on a deck
-# already 34 too clear, at every coefficient in the sweep.
-mpas_qv_smooth_del2_m2s: 0.0
-mpas_qv_smooth_del4_m4s: 3.6421e14
-mpas_conservative_tracer_clamp: true
-mpas_ice_skin_prognostic: true
-
-# --- the interactive land surface -------------------------------------------
-# The calibrated two-leaf canopy on a 3 m, ten-layer soil with the per-plant
-# root, wilting-point, field-capacity and albedo tables.  Runs need --surfdata
-# for the per-plant canopy parameters.
-land_calibrated_physics: true
-land_surface_scheme: two_leaf
-mpas_land_beta_soil: true
-land_soil_init: aridity

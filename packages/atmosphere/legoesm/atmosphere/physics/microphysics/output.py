@@ -14,6 +14,15 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+# --- sub-step counting (numerics, not physics) ---
+# Ceiling of the CFL a required-sub-step count is derived from: the count
+# is cast to int32, and a non-finite or absurd fall speed must report a
+# saturated integer rather than overflow or a quiet 1.
+_CFL_COUNT_CEILING = 2.0 ** 30
+# Sub-steps run per early-exit check; loop-structure only (answers do not
+# depend on it).
+_SED_CHUNK = 8
+
 
 class HydrometeorState(NamedTuple):
     """Hydrometeor state for backends. All fields shape (ncol, nlev).
@@ -95,6 +104,15 @@ class MicrophysicsOutput(NamedTuple):
     # convective vapour sink (both draw the same pre-physics q_v).  ``None`` for
     # schemes that do not expose it (the joint clamp then skips the micro term).
     dq_v_to_qc_dt: jax.Array | None = None
+    # Optional: the APPLIED (post-donor-clamp) cloud-water budget terms,
+    # [kg/kg/s], as a plain dict keyed by process name.  Populated only when
+    # ``MorrisonConfig.publish_qc_budget`` is set, which is a STATIC Python
+    # branch, so the default graph is untouched.  Exists because the aggregate
+    # ``dq_c_dt`` cannot be decomposed after the fact: the donor clamp scales
+    # every sink by a common factor, so a re-derivation outside the scheme
+    # reports PRE-clamp rates and cannot close the budget (codex review,
+    # 2026-09-23).  The terms sum to ``dq_c_dt`` by construction.
+    qc_budget: dict | None = None
     # MG2-style CFL sub-stepping (``sedimentation_tendency(n_substeps_max>1)``):
     # per-column max over species of the REQUIRED sub-step count, unclipped.
     # Above the scheme's static cap the loop clamped (mass conserved, the
@@ -205,7 +223,9 @@ def sedimentation_tendency(
         (``1 + floor(max_k V dt/dz)``, NOT clipped to ``n_substeps_max``) to
         the return tuple.  A value above the cap means the loop clamped and
         that column fell slower than its terminal speed (mass conserved) --
-        the caller must surface it.  Ones on the one-pass path.
+        the caller must surface it.  It is computed from the CFL on EVERY
+        path, including the one-pass one (``n_substeps_max=1`` is itself a
+        cap that can be exceeded; reporting 1 there hid the clamp).
 
     Returns
     -------
@@ -243,11 +263,33 @@ def sedimentation_tendency(
     dz_safe = jnp.clip(dz, 1.0, None)
     tendency = (flux_in - flux) / (rho * dz_safe)
 
+    # Bottom outgoing flux is the precipitation reaching the surface.
     out = (tendency, flux[:, -1]) if return_surface_flux else (tendency,)
     if return_substeps:
-        # Bottom outgoing flux is the precipitation reaching the surface.
-        out = out + (jnp.ones(q.shape[0], dtype=jnp.int32),)
+        out = out + (_required_substeps(V_t, dz, dt, cfl_speed),)
     return out if len(out) > 1 else out[0]
+
+
+def _required_substeps(V_t, dz, dt, cfl_speed):
+    """``1 + floor(max_k V dt/dz)`` per column, int32, never clipped.
+
+    ``dt`` None (a rate-only call) cannot overflow anything, so the count is
+    1.  A NON-FINITE fall speed reports the int32 ceiling: the count must
+    stay a sane integer, and a quiet 1 would hide a column whose transport
+    is meaningless (GLM 2026-09-22) -- the strict gate then fires.
+    """
+    if dt is None:
+        return jnp.ones(V_t.shape[0], dtype=jnp.int32)
+    v_cfl = V_t if cfl_speed is None else jnp.maximum(V_t, cfl_speed)
+    cfl = jnp.max(v_cfl * jnp.maximum(dt, 1.0e-12) / jnp.clip(dz, 1.0, None),
+                  axis=1)
+    # bounded BOTH ways: int32 headroom above, and a negative fall speed must
+    # not report a nonsensical count the strict gate would never catch.
+    # coeff-ok: int32 headroom for an infinite CFL
+    cfl = jnp.where(jnp.isfinite(cfl),
+                    jnp.clip(cfl, 0.0, _CFL_COUNT_CEILING),
+                    _CFL_COUNT_CEILING)
+    return 1 + jnp.floor(cfl).astype(jnp.int32)
 
 
 def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
@@ -263,13 +305,25 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
     dt = jnp.maximum(dt, 1.0e-12)
     v_cfl = V_t if cfl_speed is None else jnp.maximum(V_t, cfl_speed)
     cfl = jnp.max(v_cfl * dt / dz_safe, axis=1, keepdims=True)  # (ncol, 1)
-    # int32 headroom for an infinite CFL; a NaN fall speed reports 1 so the
-    # count is always a sane integer (the tendency carries the NaN itself)
-    cfl = jnp.where(jnp.isfinite(cfl), jnp.minimum(cfl, 2.0 ** 30), 0.0)  # coeff-ok: int32 headroom
+    # A non-finite CFL reports the ceiling (it is not a runnable column) and
+    # runs the full cap; a negative speed cannot report a negative count.
+    # Accepted consequence: a column whose PAIRED number fall speed is NaN
+    # while its own is finite now runs the cap instead of one pass, so its
+    # tendency differs -- on a column already carrying a NaN, and the count
+    # then names it (GLM 2026-09-22).
+    cfl = jnp.where(jnp.isfinite(cfl),
+                    jnp.clip(cfl, 0.0, _CFL_COUNT_CEILING),
+                    _CFL_COUNT_CEILING)
     nstep_req = 1 + jnp.floor(cfl).astype(jnp.int32)
     nstep = jnp.clip(nstep_req, 1, n_max)
-    dt_s = dt / nstep
-    reserve = extra_sink * dt if extra_sink is not None else None
+    # The state dtype rules: a float64 dt (or a float64 python scalar) must
+    # not promote an f32 column, or the fori_loop carry types stop matching
+    # and the lane dies at trace time (found by the coupled-voronoi driver
+    # test: mixed precision, f32 state under JAX_ENABLE_X64).
+    _dtype = q_pos.dtype
+    dt_s = (dt / nstep).astype(_dtype)
+    reserve = ((extra_sink * dt).astype(_dtype)
+               if extra_sink is not None else None)
 
     def body(i, carry):
         q_dum, tend_acc, sfc_acc = carry
@@ -281,12 +335,25 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
         flux = jnp.where(active, flux, 0.0)
         flux_in = jnp.pad(flux[:, :-1], ((0, 0), (1, 0)))
         tend = (flux_in - flux) / (rho * dz_safe)
-        q_dum = q_dum + dt_s * tend
-        return (q_dum, tend_acc + tend / nstep,
-                sfc_acc + flux[:, -1] / nstep[:, 0])
+        q_dum = (q_dum + dt_s * tend).astype(_dtype)
+        return (q_dum, (tend_acc + tend / nstep).astype(_dtype),
+                (sfc_acc + flux[:, -1] / nstep[:, 0]).astype(_dtype))
+
+    # Passes past every column's nstep add exact zeros, so stop after the
+    # chunk holding max(nstep): bit-identical to running all n_max, and the
+    # cond + static-length loops keep reverse-mode AD.
+    n_run = jnp.max(nstep)
+
+    def chunk(c, carry):
+        return jax.lax.cond(
+            c * _SED_CHUNK < n_run,
+            lambda cr: jax.lax.fori_loop(
+                0, _SED_CHUNK, lambda j, x: body(c * _SED_CHUNK + j, x), cr),
+            lambda cr: cr,
+            carry)
 
     _, tendency, sfc = jax.lax.fori_loop(
-        0, n_max, body,
+        0, -(-n_max // _SED_CHUNK), chunk,
         (q_pos, jnp.zeros_like(q_pos), jnp.zeros_like(q_pos[:, -1])))
     out = (tendency, sfc) if return_surface_flux else (tendency,)
     if return_substeps:

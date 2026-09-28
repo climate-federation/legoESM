@@ -64,6 +64,16 @@ class GridConfig(NamedTuple):
     vertical_coord: str = "hybrid"   # sigma, hybrid, cam_l32 (CAM6 32-level table)
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+    # B(eta) = eta**transition_exponent on the hybrid lane.  Default 3 is
+    # UNCHANGED -- no committed run moves by this field existing.  It exists
+    # because 3 makes the coordinate carry NEGATIVE layer mass below 663.9 hPa,
+    # i.e. above ~3450 m of orography, which is 0.92% of the planet by area
+    # (Tibet, the altiplano, the Greenland and Antarctic domes) and is fatal
+    # where it bites: two such cells killed a 200-day idealized run in 200
+    # steps (#1029).  2 moves that threshold to ~498 hPa / ~5870 m, which
+    # covers all of ETOPO.  Selecting it CHANGES LEVEL PLACEMENT, so it is a
+    # new baseline, not a comparison against existing runs.
+    transition_exponent: int = 3
     # SIGMA-coordinate layer redistribution toward the tropopause, at FIXED
     # nlev (grids/vertical.tropopause_refined_sigma_half).  1.0 = the uniform
     # grid, bit-identical.  Uniform sigma gives ~33 hPa layers everywhere at
@@ -322,6 +332,21 @@ class DycoreConfig(NamedTuple):
     # invariant both sides were preserving independently.
     fv3_duo_windows: int | None = None
     fv3_duo_window_pad: int | None = None
+    # FV3 duo as a COLUMN model inside the MPAS lane (route A, 2026-09-26,
+    # docs/architecture/fv3_duo_amip_adapter_plan.md): the duo is the
+    # dynamics operator of ``_run_mpas`` through FV3DuoColumnModel, so the
+    # CAM6 AMIP suite (physics on (nCells, nlev) columns) drives it
+    # without any physics rewrite.  False = the closed certified duo lane.
+    fv3_duo_column_lane: bool = False
+
+    # Divergence-SELECTIVE biharmonic damping on the MPAS hydrostatic lane,
+    # as a multiple of CAM-FV's own ldiv4 coefficient 0.01*area^2/dt
+    # (cd_core.F90:655-683; fv_div24del2flag=4 is the CAM6 physics default at
+    # every horizontal grid).  1.0 = CAM's strength, 0.0 = off and
+    # byte-identical.  The existing nu_del2/nu_del4 are VECTOR Laplacians and
+    # damp balanced flow together with the divergent mode; this term does not.
+    # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION.
+    mpas_div_damp4_scale: float = 0.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -496,6 +521,20 @@ def parse_gwd_spec(value: str) -> str:
 VALID_SURFACE_BULK = ("constant", "coare3", "large_yeager", "large_yeager_cesm")
 
 
+# Hard ceiling of ``morrison_sed_cfl_substeps_max``, imported from the leaf
+# config that owns the field so the two validators cannot drift apart (GLM
+# 2026-09-22).  The loop cost is LINEAR in the cap, so a typo ("2560")
+# silently decouples a run's cost from its physics; the largest configured
+# lane needs 269 (CAM L32 at 1800 s).
+def _sed_substeps_cap_limit() -> int:
+    """The leaf config's hard ceiling (deferred import: this module must not
+    pull the atmosphere package at import time)."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        SED_CFL_SUBSTEPS_MAX_LIMIT,
+    )
+    return SED_CFL_SUBSTEPS_MAX_LIMIT
+
+
 class ExperimentConfig(NamedTuple):
     """Top-level experiment configuration.
 
@@ -543,11 +582,6 @@ class ExperimentConfig(NamedTuple):
     # (byte-identical to before).  MPAS lane only; ``rad_update_steps`` must
     # be a multiple of it so radiation stays on physics steps.
     physics_update_steps: int = 1
-    # CAM6 ``cld_macmic_num_steps``: turbulence (macrophysics) and
-    # microphysics run N times sequentially at dt_phys/N inside each
-    # physics step, after the convective increment (CAM tphysbc macmic
-    # loop).  1 = the parallel split (byte-identical).  MPAS lane.
-    cld_macmic_num_steps: int = 1
     # Un-fuse radiation from the compiled-segment scan (issue: ~3h XLA
     # compile).  Static Python gate (NOT trainable); default OFF keeps
     # every existing run byte-identical.  When True AND
@@ -644,6 +678,18 @@ class ExperimentConfig(NamedTuple):
     # than silently re-seeding it every step.  False (default) is the
     # byte-identical diagnostic path.
     clubb_prognostic: bool = False
+    # Whether CLUBB exchanges CLOUD LIQUID with the host, as CAM's
+    # ``clubb_intr.F90`` does (rt = q_v + q_c in, q_v = rt - rcm and
+    # q_c := rcm out).  False (default) keeps the historical bridge, which
+    # hands the advanced total water back wholly as vapour and so never gives
+    # the host the liquid the closure's own PDF diagnosed -- the host then
+    # takes cloud FRACTION from CLUBB and cloud WATER from a tracer CLUBB never
+    # wrote.  Requires turbulence='clubb' and the prognostic path, plus a
+    # condensate tracer to write into; the MPAS lane is the only one wired to
+    # route the liquid tendency, and the others refuse rather than drop it.
+    # Turning this on MOVES water between two host tracers and changes the
+    # cloud radiative state, so it is a prognostic change, not a diagnostic one.
+    clubb_liquid_partition: bool = False
     # CLUBB's upper domain limit [Pa] (CAM ``trop_cloud_top_press``): the
     # scheme's mixing is tapered to zero above this pressure.  None (default)
     # keeps the scheme's own 0.0 = no limit, byte-identical.
@@ -699,7 +745,8 @@ class ExperimentConfig(NamedTuple):
     # VERTICAL overlap optics: "none" (legacy/byte-identical) or
     # "max_random" (n_sub deterministic maximum-random-overlap subcolumns,
     # measured -30% cloud albedo and +18 W/m2 OLR vs a Monte-Carlo
-    # reference; costs n_sub x the radiation time). MUTUALLY EXCLUSIVE with
+    # reference; costs n_sub x the radiation time) or "mcica" (CAM6: one
+    # such subcolumn per g-point, a single solve). MUTUALLY EXCLUSIVE with
     # cloud_partial_coverage_optics="two_column" -- both correct partial
     # coverage, so enabling both double-discounts the cloud.
     cloud_vertical_overlap_optics: str = "none"
@@ -1116,6 +1163,12 @@ class ExperimentConfig(NamedTuple):
     land_update_seconds: float = 0.0
     multilayer_n_layers: int = 10        # soil discretization
     multilayer_soil_depth: float = 3.0   # m
+    # Soil-water freeze/thaw (latent zero-curtain, SoilThermalConfig
+    # .enable_freeze_thaw) in the multilayer land. CLM5 always has it; the
+    # land IC spin-up ran with it ON; the land calibration's tables were fitted
+    # with it OFF. Library default False = sensible-only (legacy): whether the
+    # default should move is an open user decision, so decks set it explicitly.
+    land_soil_freeze_thaw: bool = False
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -1345,6 +1398,10 @@ class ExperimentConfig(NamedTuple):
     # "formation" (default, at the rain-formation levels) or "vapour_mass"
     # (legacy spread over the whole column by vapour mass; the A/B control).
     bechtold_rain_vapor_sink: str = "formation"
+    # Zhang-McFarlane column land-fraction policy (ZhangMcFarlaneConfig.
+    # land_fraction): "required" (default; a run without a land fraction
+    # raises) or "none" (explicit aquaplanet, ocean coefficients everywhere).
+    zm_land_fraction: str = "required"
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -1687,13 +1744,6 @@ class ExperimentConfig(NamedTuple):
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
                                                 # "mg" (E3SM MG, GCM default) |
                                                 # "sam" (gSAM M2005 anvil tune)
-    morrison_sed_cfl_substeps: bool = True      # MorrisonConfig.sed_cfl_substeps:
-                                                # MG2 CFL sub-stepped sedimentation
-                                                # (default ON, user 2026-09-22;
-                                                # False = legacy one-pass form)
-    morrison_sed_cfl_substeps_strict: bool = False  # MorrisonConfig.sed_cfl_substeps_strict:
-                                                # runtime error when a column
-                                                # needs more sub-steps than the cap
     # Flux law the SLAB-land skin energy balance debits at the land-air
     # interface (physics_pipeline._step_slab_land):
     #   "legacy_dual" (default, byte-identical): the slab debits its OWN
@@ -1747,6 +1797,67 @@ class ExperimentConfig(NamedTuple):
     bechtold_subcloud_evap_scale: float = 1.0
     bechtold_rhebc_land: float = 0.75
     bechtold_rhebc_land_deep: float = 0.70
+
+    # --- CAM6 macro/micro sub-cycle + MG2 CFL sedimentation --------------
+    # APPENDED AT THE TUPLE END to preserve the positional ABI (a field
+    # inserted mid-tuple silently re-binds every positional construction and
+    # every pickle written before it).
+    # CAM6 ``cld_macmic_num_steps``: turbulence (macrophysics) and
+    # microphysics run N times sequentially at dt_phys/N inside each physics
+    # step, after the convective increment (CAM tphysbc macmic loop).  1 =
+    # the parallel split (byte-identical).  MPAS lane.
+    cld_macmic_num_steps: int = 1
+    # MorrisonConfig.sed_cfl_substeps: MG2 CFL sub-stepped sedimentation
+    # (default ON, user 2026-09-22; False = the legacy one-pass form).
+    morrison_sed_cfl_substeps: bool = True
+    # MorrisonConfig.sed_cfl_substeps_max: static bound of the sub-step loop.
+    # The loop cost is LINEAR in it (2048 columns, CPU x64, whole Morrison
+    # call: one pass 10 ms, 16 -> 24 ms, 96 -> 59 ms, 256 -> 131 ms), and the
+    # required counts are 8 on production sigma-36 at 112.5 s and 90 on CAM
+    # L32 at 600 s, so a deck should size it instead of paying for 256.
+    morrison_sed_cfl_substeps_max: int = 256
+    # MorrisonConfig.sed_cfl_substeps_strict: runtime error when a column
+    # needs more sub-steps than the cap.
+    morrison_sed_cfl_substeps_strict: bool = False
+    # MorrisonConfig.do_graupel: the prognostic graupel category (riming of
+    # cloud water and rain onto graupel, frozen rain -> graupel).  CAM6's MG2
+    # carries no graupel; False routes frozen rain to snow and drops the
+    # graupel riming sink.  Default equals the leaf (True).
+    morrison_do_graupel: bool = True
+
+    def _liquid_partition_resolved(self) -> bool:
+        """Is CLUBB's cloud-liquid exchange selected, by ANY route?
+
+        Not the experiment flag alone: an authoritative ``turbulence_override``
+        can carry ``CLUBBConfig(liquid_partition=True)`` without it ever being
+        set, and that route reached a validated, built model with both
+        radiative condensate floors still active (codex).
+
+        OPEN BEFORE THIS IS ENABLED ANYWHERE, both from the round-3 reviews and
+        neither closed here:
+
+        * the optics cover accounting.  The arm this lever targets carries MORE
+          cloud cover than the baseline (61.5 % against 52.2 % over the arms'
+          identical first 20 days) and still reflects 14.5 W/m2 LESS sunlight,
+          with clear-sky fluxes matching to 0.3.  Under the standard accounting
+          more cover at fixed grid-mean water should reflect MORE, so either the
+          liquid mass really is the deficit (which this lever addresses) or the
+          radiation is fed an in-cloud optical depth and treats it as a
+          grid-mean one (which it does not).  Read where cover enters optical
+          depth versus albedo before crediting any radiative effect to this.
+        * ``clubb_dt`` reconciliation across the host sub-steps, which becomes
+          load-bearing because the guard above forces the macro/micro sub-cycle
+          on wherever this is enabled.
+
+        A future change that turns this on has to confront both.
+        """
+        if self.clubb_liquid_partition:
+            return True
+        _ov = self.turbulence_override
+        if _ov is not None and getattr(_ov, "scheme", None) == "clubb":
+            return bool(getattr(getattr(_ov, "clubb", None),
+                                "liquid_partition", False))
+        return False
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1814,6 +1925,20 @@ class ExperimentConfig(NamedTuple):
                     "grid.p_top_Pa and grid.stretching are hybrid-only fields and are inert "
                     "on the sigma lane; leave them at their defaults (200.0, 2.0) and set "
                     "grid.sigma_top instead")
+            if g.transition_exponent != 3:
+                errors.append(
+                    "grid.transition_exponent is a hybrid-only field and is inert on the "
+                    f"sigma lane; leave it at its default 3 (got {g.transition_exponent})")
+        elif (g.vertical_coord == "hybrid"
+                and g.transition_exponent not in (2, 3)):
+            # 1 is pure sigma spelled as a hybrid (use vertical_coord='sigma'
+            # instead, which is the tested lane); >3 makes the negative-mass
+            # threshold worse, not better.
+            errors.append(
+                "grid.transition_exponent must be 2 or 3 on the hybrid lane "
+                f"(got {g.transition_exponent}); 2 admits p_s down to ~498 hPa "
+                "(~5870 m of orography), 3 only to ~664 hPa (~3450 m). For a "
+                "pure sigma coordinate use vertical_coord='sigma'.")
         elif g.vertical_coord == "hybrid" and g.sigma_top != 0.01:
             errors.append(
                 "grid.sigma_top is inert on the hybrid lane, which uses p_top_Pa/"
@@ -1884,10 +2009,29 @@ class ExperimentConfig(NamedTuple):
         elif d.fv3_duo_window_pad is not None:
             errors.append(
                 "dycore.fv3_duo_window_pad given without dycore.fv3_duo_windows")
+        if d.fv3_duo_column_lane:
+            if d.discretization != "fv3_duo":
+                errors.append(
+                    "dycore.fv3_duo_column_lane needs "
+                    f"dycore.discretization='fv3_duo', got {d.discretization!r}")
+            if d.fv3_duo_windows is not None:
+                errors.append(
+                    "dycore.fv3_duo_column_lane runs on six faces; the window "
+                    "layout is certification rung 7 (drop fv3_duo_windows)")
         if d.hyperdiff_scale < 0:
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
+        # NaN/inf must die here: the scale multiplies a coefficient that goes
+        # straight into a momentum tendency, so a non-finite value does not
+        # raise anywhere downstream -- it silently turns the whole wind field
+        # non-finite on the first step (codex review 2026-09-22).
+        _dd4 = getattr(d, "mpas_div_damp4_scale", 0.0)
+        if (not isinstance(_dd4, (int, float)) or isinstance(_dd4, bool)
+                or not math.isfinite(_dd4) or _dd4 < 0):
+            errors.append(
+                "dycore.mpas_div_damp4_scale must be a finite number >= 0, "
+                f"got {_dd4!r}")
         # Dynamical-core axis membership.  Mirror the gate in
         # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
         # config-validation time, instead of deep in the solver factory at JIT.
@@ -2006,6 +2150,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_update_seconds must be a finite value >= 0 "
                 f"(0 = every step), got {self.land_update_seconds}")
+        if self.land_soil_freeze_thaw and not self.use_multilayer_land:
+            errors.append(
+                "land_soil_freeze_thaw requires use_multilayer_land: only the "
+                "multilayer soil has a freeze/thaw scheme — the knob would be "
+                "silently inert.")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "
@@ -2036,6 +2185,11 @@ class ExperimentConfig(NamedTuple):
                 f"bechtold_subsidence_solve must be one of "
                 f"('implicit_flux', 'advective'), got "
                 f"{self.bechtold_subsidence_solve!r}"
+            )
+        if self.zm_land_fraction not in ("required", "none"):
+            errors.append(
+                f"zm_land_fraction must be one of ('required', 'none'), got "
+                f"{self.zm_land_fraction!r}"
             )
         if self.bechtold_rain_vapor_sink not in ("formation", "vapour_mass"):
             errors.append(
@@ -2140,7 +2294,7 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_partial_coverage_optics must be one of {_valid_cover}, "
                 f"got {self.cloud_partial_coverage_optics!r}"
             )
-        _valid_overlap = ("none", "max_random")
+        _valid_overlap = ("none", "max_random", "mcica")
         if self.cloud_vertical_overlap_optics not in _valid_overlap:
             errors.append(
                 f"cloud_vertical_overlap_optics must be one of "
@@ -2723,6 +2877,73 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"cld_macmic_num_steps={_nmm} sub-cycles turbulence and "
                     "microphysics, but both are 'none'")
+        if self._liquid_partition_resolved():
+            # CLUBB's liquid exchange REPLACES the host's cloud water with the
+            # closure's equilibrium diagnosis, so the microphysics must read the
+            # REPLACED value; CAM guarantees that by sequential-update splitting
+            # inside its macmic loop (physpkg.F90:2097-2101).  This model uses
+            # that order only when the loop runs: at cld_macmic_num_steps=1 the
+            # combined physics takes the PARALLEL branch
+            # (combined.py ``_accumulate_step``), where every module is
+            # evaluated on the same start-of-step state and the tendencies are
+            # SUMMED.  The final liquid would then be the closure's equilibrium
+            # PLUS a microphysical increment computed from the stale, 2-3x
+            # smaller liquid -- and since autoconversion goes as roughly the
+            # 2.5th power of cloud water, that sink is wrong by nearly an order
+            # of magnitude.  Water is still conserved, so nothing would fail
+            # loudly; the climate would simply be wrong.  Refuse instead.
+            if _nmm is None or not isinstance(_nmm, int) or _nmm < 2:
+                errors.append(
+                    "clubb_liquid_partition=True needs cld_macmic_num_steps>=2: "
+                    "the closure REPLACES the host cloud water, so the "
+                    "microphysics has to run on the replaced value, and only "
+                    "the macro/micro sub-cycle applies the modules in sequence. "
+                    f"At cld_macmic_num_steps={_nmm!r} they are evaluated in "
+                    "parallel on the same state and summed, which leaves the "
+                    "microphysical sinks evaluated on the pre-exchange liquid")
+            # The diagnostic condensate floors exist to compensate for the very
+            # liquid this lever restores, so with it on they are added on top of
+            # the closure's own water and the clouds are opaque twice over.
+            # They act on the RADIATIVE condensate, not on the prognostic
+            # tracers, so this is an opacity error rather than a break in the
+            # exchange's tracer-water pairing (codex corrected the rationale) --
+            # but it is still a mechanism to switch OFF, not a number to retune.
+            #
+            # Checked against the RESOLVED cloud config, because ``None`` here
+            # does not mean "no floor": it means "take the scheme's default",
+            # which is non-zero.  Both floors count: the stratiform
+            # ``q_c_diagnostic`` and the independent convective
+            # ``conv_cloud_condensate`` term in cloud_fraction.py.
+            try:
+                from legoesm.atmosphere.physics.clouds.config import (
+                    build_cloud_config,
+                )
+                _cc = build_cloud_config(
+                    self.cloud_scheme,
+                    q_c_diagnostic=self.cloud_q_c_diagnostic,
+                    conv_cloud_condensate=self.cloud_conv_cloud_condensate,
+                    convective_cloud=bool(self.convective_cloud))
+            except Exception:                       # pragma: no cover
+                _cc = None                          # reported by its own check
+            if _cc is not None:
+                _floors = [
+                    (n, v) for n, v in
+                    (("q_c_diagnostic", getattr(_cc, "q_c_diagnostic", 0.0)),
+                     ("conv_cloud_condensate",
+                      getattr(_cc, "conv_cloud_condensate", 0.0)
+                      if bool(self.convective_cloud) else 0.0))
+                    if v
+                ]
+                if _floors:
+                    errors.append(
+                        "clubb_liquid_partition=True leaves a diagnostic "
+                        "condensate floor active in the RESOLVED cloud config "
+                        f"({', '.join(f'{n}={v!r}' for n, v in _floors)}). "
+                        "Those floors exist to compensate for the missing "
+                        "closure liquid this lever restores, so they would be "
+                        "imposed on top of it and the clouds would be made "
+                        "opaque twice. Set them to 0 explicitly (None means "
+                        "the scheme's non-zero default, not 'off')")
         if _is_mpas:
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
@@ -3040,7 +3261,7 @@ class ExperimentConfig(NamedTuple):
                     "Unset it or use the MPAS lane.")
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
-        _vert_adv_options = ("upwind", "van_leer")
+        _vert_adv_options = ("upwind", "van_leer", "sb")
         _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
             errors.append(
@@ -3061,6 +3282,14 @@ class ExperimentConfig(NamedTuple):
                 "dycore.mpas_sponge_del2_top_layers > 0 is silently inert when "
                 f"a_h_scale={d.a_h_scale!r} turns the del2 viscosity off; use a_h_scale > 0 "
                 "or set mpas_sponge_del2_top_layers=0")
+        _dd4s = getattr(d, "mpas_div_damp4_scale", 0.0)
+        if (isinstance(_dd4s, (int, float)) and not isinstance(_dd4s, bool)
+                and _dd4s > 0
+                and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
+            errors.append(
+                "dycore.mpas_div_damp4_scale is wired into the hydrostatic MPAS dycore "
+                f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
+                "it would be silently inert")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
@@ -3072,7 +3301,17 @@ class ExperimentConfig(NamedTuple):
                     "MPAS dycore; on discretization="
                     f"{d.discretization!r} it would be silently inert. "
                     "Leave it at 'upwind' or use the MPAS lane.")
-            if g.vertical_coord != "sigma":
+            # 'van_leer' is sigma-only; 'sb' (conservative Simmons-Burridge
+            # flux form) is HYBRID-only.  Each lane refuses the other's scheme
+            # rather than run it silently inert.
+            _sb = d.mpas_vert_advection_scheme == "sb"
+            if _sb and g.vertical_coord == "sigma":
+                errors.append(
+                    "dycore.mpas_vert_advection_scheme='sb' is the conservative "
+                    "flux form of the HYBRID vertical transport; on "
+                    "vertical_coord='sigma' it would be silently inert. "
+                    "Use a hybrid vertical_coord, or 'upwind'/'van_leer'.")
+            if not _sb and g.vertical_coord != "sigma":
                 errors.append(
                     "dycore.mpas_vert_advection_scheme is implemented for the "
                     "sigma vertical coordinate only; on vertical_coord="
@@ -3278,7 +3517,20 @@ class ExperimentConfig(NamedTuple):
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} unknown; choose "
                 "'mg' (E3SM MG, default) or 'sam' (gSAM M2005).")
-        for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict"):
+        _nmm_max = self.morrison_sed_cfl_substeps_max
+        if (not isinstance(_nmm_max, int) or isinstance(_nmm_max, bool)
+                or not 1 <= _nmm_max <= _sed_substeps_cap_limit()):
+            errors.append(
+                "morrison_sed_cfl_substeps_max must be an int in "
+                f"[1, {_sed_substeps_cap_limit()}] (the sub-step loop costs "
+                f"linearly in it), got {_nmm_max!r}")
+        if (_nmm_max != ExperimentConfig._field_defaults[
+                "morrison_sed_cfl_substeps_max"] and self.microphysics != "morrison"):
+            errors.append(
+                f"morrison_sed_cfl_substeps_max={_nmm_max} requires "
+                f"microphysics='morrison' (got {self.microphysics!r})")
+        for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
+                    "morrison_do_graupel"):
             _v = getattr(self, _nm)
             if not isinstance(_v, bool):
                 errors.append(f"{_nm} must be a bool, got {_v!r}")
@@ -3353,6 +3605,21 @@ class ExperimentConfig(NamedTuple):
             ("clubb_q_flux_scale", 0.1, 10.0),
         ):
             _v = getattr(self, _f)
+            # 0.0 means OFF for the two radiative condensate floors.  Their
+            # declared ranges start above zero because a floor of 0 was
+            # previously unreachable, so without this the liquid-partition
+            # guard would demand a value this loop then rejects (codex).
+            #
+            # UNCONDITIONAL, deliberately.  Gating it on the partition made
+            # "floors off, partition off" unbuildable, which is exactly the
+            # control arm needed to attribute anything to the partition: the
+            # two would have had to move together and no measurement could
+            # separate them.  A guard that forbids the control is a defect in
+            # the guard.  This only ADDS a previously-refused configuration;
+            # every existing deck keeps its value and its behaviour.
+            if (_v == 0.0 and _f in ("cloud_q_c_diagnostic",
+                                     "cloud_conv_cloud_condensate")):
+                continue
             if _v is not None and not (_lo <= _v <= _hi):
                 errors.append(
                     f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
@@ -3812,7 +4079,9 @@ class ExperimentConfig(NamedTuple):
             physics_update_steps=amip_cfg.physics_update_steps,
             cld_macmic_num_steps=amip_cfg.cld_macmic_num_steps,
             morrison_sed_cfl_substeps=amip_cfg.morrison_sed_cfl_substeps,
+            morrison_sed_cfl_substeps_max=amip_cfg.morrison_sed_cfl_substeps_max,
             morrison_sed_cfl_substeps_strict=amip_cfg.morrison_sed_cfl_substeps_strict,
+            morrison_do_graupel=amip_cfg.morrison_do_graupel,
             unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
@@ -3953,6 +4222,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
             bechtold_rain_vapor_sink=getattr(amip_cfg, 'bechtold_rain_vapor_sink', "formation"),
+            zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
             convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
@@ -4037,7 +4307,9 @@ class ExperimentConfig(NamedTuple):
             physics_update_steps=self.physics_update_steps,
             cld_macmic_num_steps=self.cld_macmic_num_steps,
             morrison_sed_cfl_substeps=self.morrison_sed_cfl_substeps,
+            morrison_sed_cfl_substeps_max=self.morrison_sed_cfl_substeps_max,
             morrison_sed_cfl_substeps_strict=self.morrison_sed_cfl_substeps_strict,
+            morrison_do_graupel=self.morrison_do_graupel,
             diurnal_cycle=self.diurnal_cycle,
             co2_ppmv=self.co2_ppmv,
             ch4_ppbv=self.ch4_ppbv,
@@ -4140,6 +4412,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_transport=self.bechtold_downdraft_transport,
             bechtold_subsidence_solve=self.bechtold_subsidence_solve,
             bechtold_rain_vapor_sink=self.bechtold_rain_vapor_sink,
+            zm_land_fraction=self.zm_land_fraction,
             convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,

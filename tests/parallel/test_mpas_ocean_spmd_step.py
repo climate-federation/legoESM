@@ -48,7 +48,7 @@ def _build(config_kwargs, *, nlev=4, n_dev=N_DEV, level=2, partial_cells=False):
 
     mesh0 = create_voronoi_mesh(level)
     n_real = mesh0.nCells
-    mesh = reorder_voronoi_for_sharding(mesh0, n_dev)
+    mesh = reorder_voronoi_for_sharding(mesh0, n_dev, edge_order="owner")
     z = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
     config = MPASOceanConfig(**config_kwargs)
     state = rest_state_mpas_ocean(mesh, z, H_max=4000.0)
@@ -236,7 +236,7 @@ def test_vertex_lane_restores_global_ids():
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout, spmd_vertex_refresh_probe,
     )
-    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(2), N_DEV)
+    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(2), N_DEV, edge_order="owner")
     try:
         layout = build_mpas_ocean_spmd_layout(mesh, N_DEV, nlev=1)
         assert layout.vppermute_perms, "fixture has no vertex exchange"
@@ -329,7 +329,7 @@ def test_cfl_check_ignores_padded_edges():
     from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
     mesh0 = create_voronoi_mesh(2)
     # 480 edges: divisible by 4 (no edge pads) but not by 7 -> ghost edges exist
-    mesh = reorder_voronoi_for_sharding(mesh0, 7)
+    mesh = reorder_voronoi_for_sharding(mesh0, 7, edge_order="owner")
     assert mesh.nEdges > mesh0.nEdges, "fixture must actually pad edges"
     z = create_ocean_z_star(n_levels=3)
     cfl_pad = MPASOceanModel(mesh, z, MPASOceanConfig()).check_barotropic_cfl(300.0)

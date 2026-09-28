@@ -1,0 +1,234 @@
+--- stprk3_stg.F90.round38
++++ stprk3_stg.F90
+@@ -90,6 +90,14 @@
+       INTEGER  ::   l1_unit, l1_ios, l2_tracer_unit, l2_tracer_ios
+       CHARACTER(LEN=96) :: l1_filename
+       CHARACTER(LEN=16) :: l1_magic
++      !                    !--- round-40 stage-3 per-operator instrument locals ---!
++      !     A SEPARATE unit and magic from the stage-2 term writer above: the
++      !     stage-3 record carries the same four Krhs snapshots PLUS the
++      !     derived stage geometry the operators read, so its layout differs
++      !     and it must not be readable as a NEMO_L2_RKTRM_1 record.
++      INTEGER  ::   l3_unit, l3_ios
++      CHARACTER(LEN=16) :: l3_magic
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   zl3_tmp   ! macro scratch
+       REAL(wp) ::   ze3Tb, ze3Tr, z1_e3t     ! local scalars
+       REAL(wp) ::   ze3Sb, ze3Sr             !   -      -
+ #if ! defined key_PSYCLONE_2p5p0
+@@ -374,6 +382,48 @@
+             ENDIF
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) &
+                CALL eos_l2_dump_next( kstp, kstg, Kmm, Krhs )
++            !
++            !           !--- round-40 L2 WRITE-only stage-3 per-operator momentum frame ---!
++            !     The stage-2 writer above is gated on kstg == 2 and NOTHING in
++            !     this MY_SRC dumps the stage-3 split, so the stage-3 momentum
++            !     RHS can only be scored as a TOTAL (the round-29 pre-LDF frame,
++            !     NEMO_L2_RKPLD_1).  This frame separates dyn_hpg, dyn_vor and
++            !     dyn_adv at kstg == 3 and carries, in the same file, the
++            !     DERIVED stage geometry those three operators read -- r3f,
++            !     e3f_0vor, fe3mask, ww, rhd, the Kmm face thicknesses -- which
++            !     no other record in this campaign carries.
++            !
++            !     Self-describing, on the round-35 pattern: a 16-character
++            !     magic, sixteen header integers, then one (name, rank, n1, n2,
++            !     n3, payload) group per array until EOF.
++            !
++            !     `before_u`/`before_v` are a diagnostic of the INCOMING Krhs
++            !     slot only.  Under key_RK3 dyn_hpg OVERWRITES Krhs
++            !     (dynhpg.F90:359-363,383-387), so they are NOT an operand of
++            !     anything at this stage and must not be read as one.
++            !
++            !     Fail closed on domain tiling -- the writes below are whole
++            !     global arrays, so a tiled call would dump one tile and label
++            !     it the field -- and on a build whose wp is not 64-bit,
++            !     because the reader assumes both.
++            IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++               IF( l_istiled )                     CALL ctl_stop( 'stp_RK3_stg: L2 stage-3 term instrument does not support domain tiling' )
++               IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'stp_RK3_stg: L2 stage-3 term instrument requires 64-bit wp' )
++               ALLOCATE( zl3_tmp(jpi,jpj,jpk) )
++               zl3_tmp(:,:,:) = 0._wp
++               l1_filename = 'oracle_rkstage3_terms_kt00000001.bin'
++               OPEN( NEWUNIT=l3_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++                  &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l3_ios )
++               IF( l3_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot open L2 stage-3 term dump' )
++               l3_magic = 'NEMO_L2_RKTS3_1'
++               WRITE(l3_unit) l3_magic
++               WRITE(l3_unit) 1, kstp, kstg, Kbb, Kmm, Krhs, Kaa, jpi, jpj, jpk, jpkm1,   &
++                  &               ntsi, ntei, ntsj, ntej, STORAGE_SIZE(1._wp)
++               WRITE(l3_unit) 'before_u        '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) uu(:,:,:,Krhs)
++               WRITE(l3_unit) 'before_v        '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) vv(:,:,:,Krhs)
++            ENDIF
+             CALL    eos    (        ts, Kmm, rhd, rhop )     ! Kmm in situ density anomaly for hpg computation
+             !                                                ! and potential density for BGC 
+             ! L2 GYRE write-only HPG operand stream.  Capture the exact
+@@ -394,10 +444,22 @@
+             ENDIF
+             CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )  ! Hydrostratic Pressure Gradient (HPG)
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
++            IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++               WRITE(l3_unit) 'after_hpg_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) uu(:,:,:,Krhs)
++               WRITE(l3_unit) 'after_hpg_v     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) vv(:,:,:,Krhs)
++            ENDIF
+             !
+             !                             !* Coriolis / vorticity       ==> 3D RHS
+             CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
++            IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++               WRITE(l3_unit) 'after_vor_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) uu(:,:,:,Krhs)
++               WRITE(l3_unit) 'after_vor_v     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) vv(:,:,:,Krhs)
++            ENDIF
+             !
+             !                             !* advection (VIF or FF)      ==> 3D RHS
+             IF( ln_dynadv_vec ) THEN                        ! VIF: only velocities used for momentum advection
+@@ -411,6 +473,144 @@
+                WRITE(numout,*) 'L2_RK_STAGE2_TERM_DUMP ', kstp, Kmm, Krhs, TRIM(l1_filename)
+             ENDIF
+             !
++            !           !--- round-40 instrument: the advection snapshot, then the
++            !           !    derived stage geometry the three operators read ---!
++            !     rhd is set by the CALL eos above and read by dyn_hpg; ww is
++            !     set by wzv at the top of this routine and read by dyn_zad.
++            !     Neither is written by dyn_hpg, dyn_vor or dyn_adv, so the
++            !     values taken here are the values those operators consumed.
++            !
++            !     e3u, e3v, e3t and e3f_vor are PREPROCESSOR MACROS under
++            !     key_qco (domzgr_substitute.h90:125-130), not arrays, so each
++            !     is materialised elementwise -- and their REFERENCE halves are
++            !     recorded too, so the reader can check the SUBSTITUTION itself
++            !     and not only its result.  e3f_vor is the divisor vor_ene
++            !     actually uses on this build: key_qco IS defined, so
++            !     dynvor.F90:490 runs and the nn_e3f_typ SELECT at :493-516 is
++            !     dead code.
++            IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++               WRITE(l3_unit) 'after_adv_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) uu(:,:,:,Krhs)
++               WRITE(l3_unit) 'after_adv_v     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) vv(:,:,:,Krhs)
++               !
++               !           !-- the stage scalars --!
++               WRITE(l3_unit) 'rDt             '   ;   WRITE(l3_unit) 0, 1, 1, 1
++               WRITE(l3_unit) rDt
++               WRITE(l3_unit) 'r1_Dt           '   ;   WRITE(l3_unit) 0, 1, 1, 1
++               WRITE(l3_unit) r1_Dt
++               WRITE(l3_unit) 'n_baro_upd      '   ;   WRITE(l3_unit) 0, 1, 1, 1
++               WRITE(l3_unit) REAL( n_baro_upd, wp )
++               zl3_tmp(1,1,1) = 0._wp   ;   IF( ln_dynadv_vec )   zl3_tmp(1,1,1) = 1._wp
++               WRITE(l3_unit) 'ln_dynadv_vec   '   ;   WRITE(l3_unit) 0, 1, 1, 1
++               WRITE(l3_unit) zl3_tmp(1,1,1)
++               zl3_tmp(1,1,1) = 0._wp   ;   IF( ln_zad_Aimp   )   zl3_tmp(1,1,1) = 1._wp
++               WRITE(l3_unit) 'ln_zad_Aimp     '   ;   WRITE(l3_unit) 0, 1, 1, 1
++               WRITE(l3_unit) zl3_tmp(1,1,1)
++               !
++               !           !-- the operator inputs --!
++               WRITE(l3_unit) 'uu_Kmm          '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) uu(:,:,:,Kmm)
++               WRITE(l3_unit) 'vv_Kmm          '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) vv(:,:,:,Kmm)
++               WRITE(l3_unit) 'rhd             '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) rhd
++               WRITE(l3_unit) 'ww              '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) ww
++               !
++               !           !-- the derived stage geometry --!
++               WRITE(l3_unit) 'r3f             '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) r3f(:,:)
++               WRITE(l3_unit) 'r3t_Kmm         '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) r3t(:,:,Kmm)
++               WRITE(l3_unit) 'r3u_Kmm         '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) r3u(:,:,Kmm)
++               WRITE(l3_unit) 'r3v_Kmm         '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) r3v(:,:,Kmm)
++               DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++                  zl3_tmp(ji,jj,jk) = e3u(ji,jj,jk,Kmm)
++               END DO            ;   END DO            ;   END DO
++               WRITE(l3_unit) 'e3u_Kmm         '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) zl3_tmp
++               DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++                  zl3_tmp(ji,jj,jk) = e3v(ji,jj,jk,Kmm)
++               END DO            ;   END DO            ;   END DO
++               WRITE(l3_unit) 'e3v_Kmm         '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) zl3_tmp
++               DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++                  zl3_tmp(ji,jj,jk) = e3t(ji,jj,jk,Kmm)
++               END DO            ;   END DO            ;   END DO
++               WRITE(l3_unit) 'e3t_Kmm         '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) zl3_tmp
++               DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++                  zl3_tmp(ji,jj,jk) = e3w(ji,jj,jk,Kmm)
++               END DO            ;   END DO            ;   END DO
++               WRITE(l3_unit) 'e3w_Kmm         '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) zl3_tmp
++               DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++                  zl3_tmp(ji,jj,jk) = e3f_vor(ji,jj,jk)
++               END DO            ;   END DO            ;   END DO
++               WRITE(l3_unit) 'e3f_vor_Kmm     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) zl3_tmp
++               zl3_tmp(:,:,:) = 0._wp
++               IF( ALLOCATED( e3f_0vor ) )   zl3_tmp(:,:,:) = e3f_0vor(:,:,:)
++               WRITE(l3_unit) 'e3f_0vor        '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) zl3_tmp
++               DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++                  zl3_tmp(ji,jj,jk) = E3u_0(ji,jj,jk)
++               END DO            ;   END DO            ;   END DO
++               WRITE(l3_unit) 'e3u_0           '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) zl3_tmp
++               DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++                  zl3_tmp(ji,jj,jk) = E3v_0(ji,jj,jk)
++               END DO            ;   END DO            ;   END DO
++               WRITE(l3_unit) 'e3v_0           '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) zl3_tmp
++               DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++                  zl3_tmp(ji,jj,jk) = E3t_0(ji,jj,jk)
++               END DO            ;   END DO            ;   END DO
++               WRITE(l3_unit) 'e3t_0           '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) zl3_tmp
++               !
++               !           !-- the masks and the horizontal metric --!
++               WRITE(l3_unit) 'fe3mask         '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) fe3mask
++               WRITE(l3_unit) 'fmask           '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) fmask
++               WRITE(l3_unit) 'umask           '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) umask
++               WRITE(l3_unit) 'vmask           '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) vmask
++               WRITE(l3_unit) 'tmask           '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) tmask
++               WRITE(l3_unit) 'wmask           '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
++               WRITE(l3_unit) wmask
++               WRITE(l3_unit) 'ff_f            '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) ff_f
++               WRITE(l3_unit) 'e1u             '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) e1u
++               WRITE(l3_unit) 'e2u             '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) e2u
++               WRITE(l3_unit) 'e1v             '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) e1v
++               WRITE(l3_unit) 'e2v             '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) e2v
++               WRITE(l3_unit) 'r1_e1u          '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) r1_e1u
++               WRITE(l3_unit) 'r1_e2v          '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) r1_e2v
++               WRITE(l3_unit) 'e1e2t           '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) e1e2t
++               WRITE(l3_unit) 'r1_e1e2f        '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) r1_e1e2f
++               WRITE(l3_unit) 'r1_hf_0         '   ;   WRITE(l3_unit) 2, jpi, jpj, 1
++               WRITE(l3_unit) r1_hf_0
++               !
++               CLOSE(l3_unit)
++               DEALLOCATE( zl3_tmp )
++               WRITE(numout,*) 'L2_RK_STAGE3_TERM_DUMP ', kstp, kstg, Kbb, Kmm, Krhs, Kaa, TRIM(l1_filename)
++            ENDIF
++            !
+          END SELECT
+          !
+ !!gm ===>>>>>> Probably useless since uu_b(Kaa) will be imposed at the end of stage 1 and 2

@@ -84,7 +84,9 @@ def test_literal_tracer_matrix_fuses_diffusion_and_implicit_transport():
         jnp.asarray(h), jnp.asarray(e3w), dt,
         jnp.ones(3, dtype=bool), implicit_w=jnp.asarray(wi))
     np.testing.assert_allclose(got_t, expected_t, rtol=0.0, atol=2.0e-15)
-    np.testing.assert_allclose(got_s, expected_s, rtol=0.0, atol=2.0e-15)
+    # Commit 101d3383f deliberately keeps the tracer pair's two solves
+    # separate.  Their independent roundoff is one binary64 ulp here.
+    np.testing.assert_array_max_ulp(np.asarray(got_s), expected_s, maxulp=1)
     # Planted omission: removing wi must move the result.
     zero_t, _ = implicit_vertical_diffusion_nemo_tracer_pair(
         jnp.asarray(h * field_t), jnp.asarray(h * field_s), jnp.asarray(k),

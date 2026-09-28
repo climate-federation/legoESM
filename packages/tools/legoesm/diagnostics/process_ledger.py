@@ -115,6 +115,54 @@ def sigma_band_weight(sigma_half, sigma_lo, sigma_hi):
     return overlap / jnp.maximum(bot - top, 1e-30)
 
 
+def pressure_band_weight(p_half, p_lo_pa, p_hi_pa):
+    """Per-layer weight for the PRESSURE band ``[p_lo_pa, p_hi_pa)``, per column.
+
+    The per-column analogue of :func:`sigma_band_weight`, for coordinates whose
+    layer pressures depend on the column (hybrid sigma-pressure) rather than
+    only on a fixed sigma profile.  Same fractional-overlap arithmetic, so a
+    layer straddling a band edge contributes the FRACTION of its thickness
+    inside the band and two adjacent bands' weights sum to one.
+
+    That fraction matters for comparing arms on DIFFERENT vertical grids: a
+    whole-layer mask selected by layer midpoint makes a 32-level and a 36-level
+    grid integrate different effective pressure intervals, which biases every
+    term and the reservoir alike.  Fractional weights remove that bias.
+
+    Parameters
+    ----------
+    p_half : array (..., nlev+1)
+        Half-level (interface) pressures, increasing downward.
+    p_lo_pa, p_hi_pa : float
+        Band edges in Pa, ``p_lo_pa`` the upper (lower-pressure) edge.
+
+    Returns
+    -------
+    array (..., nlev) of weights in [0, 1].
+    """
+    ph = jnp.asarray(p_half)
+    if ph.shape[-1] < 2:
+        raise ValueError(
+            f"p_half must have >=2 interfaces, got {ph.shape}")
+    if not (p_lo_pa < p_hi_pa):
+        raise ValueError(
+            f"need p_lo < p_hi, got ({p_lo_pa}, {p_hi_pa})")
+    top, bot = ph[..., :-1], ph[..., 1:]
+    # Interfaces MUST increase downward.  An inverted column returns zero
+    # weights and a non-monotonic one can count an interval twice, and in both
+    # cases the budget that uses these weights still CLOSES -- the error
+    # cancels between the inventory and the terms -- so it would be silently
+    # wrong rather than loudly wrong (codex review, 2026-09-23).  This is a
+    # static-shape check on a traced array, so it is expressed as a finite
+    # sentinel rather than a Python raise: non-monotonic layers yield NaN,
+    # which propagates into the budget and cannot be mistaken for a result.
+    bad = bot <= top
+    overlap = jnp.clip(jnp.minimum(bot, p_hi_pa) - jnp.maximum(top, p_lo_pa),
+                       0.0, None)
+    w = overlap / jnp.maximum(bot - top, 1e-30)
+    return jnp.where(bad, jnp.nan, w)
+
+
 def apply_level_weight(field, level_weight):
     """Mask a (..., nlev) tendency to a vertical band before integrating.
 
@@ -136,6 +184,8 @@ def apply_level_weight(field, level_weight):
     if level_weight is None or field is None:
         return field
     w = jnp.asarray(level_weight, dtype=jnp.asarray(field).dtype)
+    # A (nlev,) profile broadcasts; a per-column (ncol, nlev) weight from
+    # ``pressure_band_weight`` is also accepted.
     if w.shape[-1] != jnp.asarray(field).shape[-1]:
         raise ValueError(
             f"level_weight has {w.shape[-1]} levels but the tendency has "

@@ -157,6 +157,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="cam_l32 = CAM6's 32-level hybrid table (nlev must be 32)")
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
+    parser.add_argument("--transition-exponent", type=int, default=None,
+                        choices=[2, 3],
+                        help="hybrid B(eta)=eta**n exponent. 3 (default) carries "
+                             "NEGATIVE layer mass below 664 hPa, i.e. above ~3450 m "
+                             "of orography -- 0.92%% of the planet by area. 2 moves "
+                             "that to ~498 hPa / ~5870 m and covers all of ETOPO, at "
+                             "the cost of different level placement (#1029).")
     # ``mpas`` is the canonical name for the SCVT Voronoi mesh + TRiSK
     # discretization (Ringler 2010 / Thuburn 2009), matching the ocean
     # side which has always used this name.  Legacy aliases
@@ -382,7 +389,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-mpas-conservative-tracer-clamp restores the "
                              "legacy clamp for bit-comparison runs.")
     parser.add_argument("--mpas-vert-advection-scheme",
-                        choices=("upwind", "van_leer"),
+                        choices=("upwind", "van_leer", "sb"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
                         help="Vertical advection scheme on the MPAS sigma lane "
                              "(theta, tracers, edge winds).  'upwind' (default) "
@@ -403,6 +410,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="mpas_sponge_del2_top_factor",
                         help="top-layer del2 viscosity multiplier of the sponge, ramping "
                              "geometrically to 1 below the sponge layers (1.0 = off)")
+    parser.add_argument("--mpas-div-damp4-scale", type=float, default=None,
+                        dest="mpas_div_damp4_scale",
+                        help="Divergence-SELECTIVE biharmonic damping on the MPAS "
+                             "hydrostatic lane, as a multiple of CAM-FV's ldiv4 "
+                             "nondimensional rate 0.01*area^2/dt (0 = off). 1.0 is "
+                             "CAM's rate per APPLICATION, not CAM's behaviour: CAM "
+                             "applies it per acoustic substep with a per-cell "
+                             "coefficient, so treat this as a calibration knob. "
+                             "Unlike --div-damp-scale / the del2+del4 viscosities, this "
+                             "damps only the curl-free mode and leaves balanced flow alone.")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -804,7 +821,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "a thin one).")
     parser.add_argument("--cloud-vertical-overlap-optics",
                         dest="cloud_vertical_overlap_optics",
-                        choices=["none", "max_random"], default="none",
+                        choices=["none", "max_random", "mcica"], default="none",
                         help="VERTICAL cloud-overlap optics. The solver has "
                              "no McICA/overlap, so cloud spread thinly over "
                              "many partly cloudy layers is solved as ONE "
@@ -813,7 +830,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "deterministic maximum-random-overlap "
                              "subcolumns and averages: measured -30%% cloud "
                              "albedo and +18 W/m2 OLR. Costs n_sub x the "
-                             "radiation time. Mutually exclusive with "
+                             "radiation time. 'mcica' (CAM6) gives each "
+                             "g-point its own maximum-random subcolumn: "
+                             "one solve, sampling noise per g-point. "
+                             "Mutually exclusive with "
                              "--cloud-partial-coverage-optics=two_column.")
     parser.add_argument("--cloud-n-subcolumns", dest="cloud_n_subcolumns",
                         type=int, default=8,
@@ -891,6 +911,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "sub-grid variance the cloud PDF otherwise has to "
                              "guess. Requires --turbulence clubb. Default off "
                              "= the diagnostic path (byte-identical).")
+    parser.add_argument("--clubb-liquid-partition", dest="clubb_liquid_partition",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Let CLUBB exchange CLOUD LIQUID with the host, as "
+                             "CAM does: the closure's total water carries the "
+                             "existing cloud water in, and its own diagnosed "
+                             "liquid is written back to the condensate tracer "
+                             "instead of being returned as vapour. Without it "
+                             "the host takes its cloud FRACTION from CLUBB and "
+                             "its cloud WATER from a tracer CLUBB never wrote, "
+                             "and the two disagree. Requires --turbulence clubb "
+                             "and --clubb-prognostic. Default off = the "
+                             "historical bridge (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -910,6 +942,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "so cold dry polar snow keeps its fresh albedo "
                              "while melting snow darkens as before. "
                              "None = 0.0 = off (calendar clock, byte-identical).")
+    parser.add_argument("--land-soil-freeze-thaw", dest="land_soil_freeze_thaw",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_freeze_thaw,
+                        help="Soil-water freeze/thaw (latent zero-curtain) in "
+                             "the multilayer land, as in CLM5. Default off "
+                             "(sensible-only). Requires --use-multilayer-land.")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -982,6 +1020,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--fv3-duo-window-pad", type=int, default=None, metavar="PAD",
         help=("Window halo width for --fv3-duo-windows (a measured per-deck "
               "value, e.g. 11 at C48 with 3 acoustic substeps; no default)."))
+    parser.add_argument(
+        "--fv3-duo-column-lane", action="store_true", default=False,
+        help=("fv3_duo as a COLUMN model inside the MPAS lane (route A): the "
+              "duo is the dynamics operator of the CAM6-suite loop through "
+              "FV3DuoColumnModel; physics runs on (nCells, nlev) columns "
+              "unchanged. Six faces, fp64, hydrostatic; checkpoints/ERA5 IC "
+              "not yet (M4/M5)."))
     parser.add_argument("--allow-disabled-physics", action="store_true",
                         default=False,
                         help="Permit a parameterization slot set to 'none' (an "
@@ -1018,6 +1063,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "vapour_mass (legacy whole-column spread by vapour "
                              "mass; the A/B control). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_rain_vapor_sink}.")
+    parser.add_argument("--zm-land-fraction", type=str,
+                        choices=["required", "none"],
+                        default=_EXPERIMENT_DEFAULTS.zm_land_fraction,
+                        dest="zm_land_fraction",
+                        help="Zhang-McFarlane column land fraction: required "
+                             "(the run must supply one; it picks the land/"
+                             "ocean autoconversion coefficient) or none "
+                             "(explicit aquaplanet, ocean coefficients "
+                             "everywhere). "
+                             f"Default {_EXPERIMENT_DEFAULTS.zm_land_fraction}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -1761,11 +1816,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "2026-09-22). --no-morrison-sed-cfl-substeps = the "
                              "legacy one-pass form (falls at most one layer per "
                              "call) for reproducing earlier runs.")
+    parser.add_argument("--morrison-sed-cfl-substeps-max", type=int,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_sed_cfl_substeps_max"],
+                        dest="morrison_sed_cfl_substeps_max",
+                        help="Static bound of the Morrison CFL sedimentation "
+                             "sub-step loop; the cost is LINEAR in it (whole "
+                             "Morrison call on 2048 columns, CPU x64: one pass "
+                             "10 ms, 16 -> 24 ms, 96 -> 59 ms, 256 -> 131 ms). "
+                             "Required counts: 8 on production sigma-36 at "
+                             "112.5 s, 90 on CAM L32 at 600 s.")
     parser.add_argument("--morrison-sed-cfl-substeps-strict", action="store_true",
                         default=False, dest="morrison_sed_cfl_substeps_strict",
                         help="With --morrison-sed-cfl-substeps: abort the run "
                              "when any column needs more sub-steps than the "
                              "static cap (otherwise the count is only reported).")
+    parser.add_argument("--morrison-do-graupel",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_do_graupel"],
+                        dest="morrison_do_graupel",
+                        help="Morrison prognostic graupel category (riming "
+                             "onto graupel, frozen rain -> graupel). CAM6's "
+                             "MG2 has no graupel; --no-morrison-do-graupel "
+                             "routes frozen rain to snow and removes the "
+                             "graupel riming sink of cloud water.")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -2165,6 +2240,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         vertical_coord=args.vertical_coord,
         p_top_Pa=args.p_top if args.p_top is not None else 200.0,
         stretching=args.stretching if args.stretching is not None else 2.0,
+        transition_exponent=(args.transition_exponent
+                             if args.transition_exponent is not None else 3),
         tropopause_refine=(args.tropopause_refine
                            if args.tropopause_refine is not None else 1.0),
         sigma_top=(args.sigma_top if args.sigma_top is not None else 0.01),
@@ -2180,6 +2257,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         fv3_duo_windows=args.fv3_duo_windows,
         fv3_duo_window_pad=args.fv3_duo_window_pad,
+        fv3_duo_column_lane=args.fv3_duo_column_lane,
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
         k_h_scale=args.k_h_scale,
@@ -2192,6 +2270,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                                      if args.mpas_sponge_del2_top_layers is not None else 0),
         mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
                                      if args.mpas_sponge_del2_top_factor is not None else 1.0),
+        mpas_div_damp4_scale=(args.mpas_div_damp4_scale
+                              if args.mpas_div_damp4_scale is not None else 0.0),
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
@@ -2308,6 +2388,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_scheme=args.clouds,
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
+        clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
@@ -2358,6 +2439,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cap_floor_q_c=args.cloud_cap_floor_q_c,
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
+        land_soil_freeze_thaw=args.land_soil_freeze_thaw,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
@@ -2425,7 +2507,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
+        morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
+        morrison_do_graupel=args.morrison_do_graupel,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None
@@ -2511,6 +2595,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
         bechtold_rain_vapor_sink=args.bechtold_rain_vapor_sink,
+        zm_land_fraction=args.zm_land_fraction,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
@@ -3244,6 +3329,8 @@ def _require_full_physics_for_amip(args, parser) -> None:
         "ENTIRE stack is dry; latlon-SPMD dry runs go through Held-Suarez.)")
 
 
+
+
 def main(argv: list[str] | None = None):
     # Persistent cross-process XLA compile cache (RRTMGP cold-compile ~2600 s,
     # otherwise re-paid every launch).  Idempotent; before any jit.  run_amip
@@ -3294,23 +3381,6 @@ def main(argv: list[str] | None = None):
     # prognostic default schemes (2026-07-21 audit — cross-grid smoke).
     args = _postprocess_args(args, parser, argv if argv is not None else sys.argv[1:])
 
-    # The strict sedimentation-overflow abort is an equinox ``error_if``, i.e.
-    # a host callback: it needs a CPU device to place its inputs on, which the
-    # GPU lane (``JAX_PLATFORMS=cuda``) does not have.  Refuse at startup
-    # instead of dying mid-run (the first CAM6 60-day arm died at day 2).
-    if getattr(args, "morrison_sed_cfl_substeps_strict", False):
-        import jax as _jax
-        if not any(d.platform == "cpu" for d in _jax.devices()) and not any(
-                _b == "cpu" for _b in _jax.local_devices()):
-            try:
-                _jax.devices("cpu")
-            except RuntimeError:
-                raise SystemExit(
-                    "morrison_sed_cfl_substeps_strict=True needs a CPU device for "
-                    "its host-callback abort, but none is available (JAX_PLATFORMS="
-                    f"{os.environ.get('JAX_PLATFORMS', '<unset>')!r}).  Add 'cpu' to "
-                    "JAX_PLATFORMS or run with the flag off (the required sub-step "
-                    "count is still reported as a diagnostic).") from None
     _apply_spectral_scheme_fallback(
         args, argv if argv is not None else sys.argv[1:], parser)
 
@@ -3326,6 +3396,19 @@ def main(argv: list[str] | None = None):
                          "is the route-B transport for the lat-band SPMD lane).")
         from legoesm.parallel.early_init import init_multicontroller_distributed
         init_multicontroller_distributed(getattr(args, "coordinator", None))
+
+    # The strict sedimentation-overflow abort is an equinox ``error_if``, i.e.
+    # a host callback: it needs a CPU device to place its inputs on, which the
+    # GPU lane (``JAX_PLATFORMS=cuda``) does not have.  Refuse at startup
+    # instead of dying mid-run (the first CAM6 60-day arm died at day 2).
+    # AFTER the multicontroller init: querying devices initializes the backend,
+    # and jax.distributed.initialize must run before any backend work, so the
+    # guard used to break a valid --multicontroller launch (codex 2026-09-22).
+    if getattr(args, "morrison_sed_cfl_substeps_strict", False):
+        from legoesm.driver.model_driver import (
+            require_cpu_for_strict_sedimentation,
+        )
+        require_cpu_for_strict_sedimentation()
 
     # --aimip-classical-checkpoint: seed the classical physics with the AIMIP
     # best-fit trained params used as INITIAL values (forces the trained scheme
