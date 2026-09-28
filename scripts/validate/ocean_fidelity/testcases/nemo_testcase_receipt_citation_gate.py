@@ -1289,14 +1289,14 @@ CITATION_MAP = {
         'CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )',
         'L2_RK_STAGE2_TERM_DUMP', 19],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynadv.f90:134-138': [
-        ('CASE( np_VEC_c2  )', 1),
+        'SELECT CASE( n_dynadv )',
         'CALL dyn_zad', 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynkeg.f90:117-130': [
         'CASE ( nkeg_C2 )',
         ('pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) -', 1), 14],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzad.f90:102-137': [
         'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
-        ('pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) -', 2), 36],
+        '&                                              * zWdzV(ji,jj)', 36],
     # --- ORCA2 card round 21: merge-owner substitution ---
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:912-937': [
         'SELECT CASE( nn_e3f_typ )',
