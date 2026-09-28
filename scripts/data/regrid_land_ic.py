@@ -334,8 +334,11 @@ def main(argv=None) -> int:
                          "already on its target grid).")
     args = ap.parse_args(argv)
     if args.era5_soil_t:
-        if not (args.era5_lsm and args.era5_time):
-            ap.error("--era5-soil-t needs --era5-lsm and --era5-time")
+        missing = [f for f in ("era5_lsm", "era5_time", "surfdata", "target_grid",
+                               "target_resolution") if getattr(args, f) is None]
+        if missing:
+            ap.error("--era5-soil-t needs " + ", ".join(
+                "--" + m.replace("_", "-") for m in missing))
         if args.stamp_only or args.source_soil_hydraulics:
             ap.error("--era5-soil-t takes a stamped --source; --stamp-only / "
                      "--source-soil-hydraulics apply to regridding or stamping")

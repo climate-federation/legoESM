@@ -7,6 +7,8 @@ import pathlib
 import numpy as np
 import pytest
 
+from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
+
 _REPO = pathlib.Path(__file__).resolve().parents[3]
 
 
@@ -345,7 +347,9 @@ def _setup_cli(tmp_path, monkeypatch, replace_land=(True, False, True)):
             snow_age=rng.uniform(0, 1e6, ncol)),
         land_mode="multilayer", t_end_s=3.0e7, n_steps_completed=10,
         metadata={"origin": "synthetic"}, soil_dz=dz,
-        soil_hydraulics=_era5_test_stamp(tmp_path))
+        soil_hydraulics=_era5_test_stamp(tmp_path),
+        hydraulics=SoilHydraulicsConfig(
+            theta_sat=np.array([[0.40], [0.45], [0.50]])))   # distinct column signatures
     return rg, ic_path, dict(np.load(ic_path, allow_pickle=False))
 
 
@@ -384,8 +388,36 @@ def test_cli_swaps_only_soil_temperature_and_round_trips(tmp_path, monkeypatch):
                                      expected_ncol=ic["T_soil"].shape[0],
                                      expected_n_layers=ic["T_soil"].shape[1])
     np.testing.assert_allclose(np.asarray(state.T_soil)[0], expected, rtol=0, atol=1e-4)
-    # The source's soil-hydraulics stamp rides through unchanged.
+    # The source's soil-hydraulics stamp and per-column signature ride through unchanged.
     assert lmeta["soil_hydraulics"] == json.loads(str(ic["soil_hydraulics_json"]))
+    assert len(set(ic["soil_hydraulics_column_sig"].tolist())) == 3
+    np.testing.assert_array_equal(lmeta["soil_hydraulics_column_sig"],
+                                  ic["soil_hydraulics_column_sig"])
+
+
+@pytest.mark.parametrize("extra", [["--stamp-only"],
+                                   ["--source-soil-hydraulics", "a", "b", "c"]])
+def test_cli_refuses_stamping_flags_in_era5_mode(tmp_path, monkeypatch, extra):
+    rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch)
+    files, lsm, sd = _era5_inputs(tmp_path)
+    with pytest.raises(SystemExit):
+        rg.main(["--source", str(ic_path), "--surfdata", sd, "--target-grid", "mpas",
+                 "--target-resolution", "6", "--era5-soil-t", *files, "--era5-lsm", lsm,
+                 "--era5-time", "1979-01-01T00:00", "--out", str(tmp_path / "o.npz"),
+                 *extra])
+    assert not (tmp_path / "o.npz").exists()
+
+
+@pytest.mark.parametrize("drop", ["--surfdata", "--target-grid", "--target-resolution"])
+def test_cli_era5_mode_requires_the_target_description(tmp_path, monkeypatch, drop):
+    rg, ic_path, _ = _setup_cli(tmp_path, monkeypatch)
+    files, lsm, sd = _era5_inputs(tmp_path)
+    argv = ["--source", str(ic_path), "--surfdata", sd, "--target-grid", "mpas",
+            "--target-resolution", "6", "--era5-soil-t", *files, "--era5-lsm", lsm,
+            "--era5-time", "1979-01-01T00:00", "--out", str(tmp_path / "o.npz")]
+    i = argv.index(drop)
+    with pytest.raises(SystemExit):
+        rg.main(argv[:i] + argv[i + 2:])
 
 
 def test_cli_refuses_an_unstamped_source(tmp_path, monkeypatch):
