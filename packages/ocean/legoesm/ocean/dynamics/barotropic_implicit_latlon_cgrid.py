@@ -77,6 +77,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     apply_north_fold,
     divergence_cgrid,
     fold_vface_row,
+    refuse_fpivot,
     gradient_x_cgrid,
     gradient_y_cgrid,
     is_tripolar,
@@ -1319,6 +1320,9 @@ def barotropic_implicit_latlon_cgrid(
     implicitly.  CFL on the explicit terms (Coriolis + slow forcing) is
     only ``f·dt`` and ``|U|·dt/dx``, both ≪ 1 at typical parameters.
     """
+    # ponytail: implicit Helmholtz fold rows not converted to the F-pivot
+    # layout; refuse until verified (the card uses the split-explicit solver).
+    refuse_fpivot(getattr(grid, "fold", None), "barotropic_implicit_latlon_cgrid")
     g = jnp.asarray(config.g)
     H_bathy = state.H_bathy.data
     mask = state.land_mask.data

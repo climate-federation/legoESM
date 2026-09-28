@@ -72,6 +72,10 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     tvd_to_u_points,
     tvd_to_v_points,
 )
+from legoesm.grids.operators_latlon_cgrid import (
+    fpivot_active,
+    fpivot_fold_line,
+)
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks,
     compute_face_masks_3d,
@@ -9453,6 +9457,17 @@ class LatLonCGridOceanModel:
             new_state = self._apply_polar_filter(new_state, dt, grid=grid)
         if self.config.freeze_floor:
             new_state = self._apply_freeze_floor(new_state)
+        # F-pivot north fold (NEMO lbc_lnk 'V', -1 after the dynamics): the
+        # fold-line v row is self-mapped; re-impose v(i) = -v(perm_v(i)) on its
+        # right half.  Static gate on the grid's fold descriptor: every other
+        # layout skips it (byte-identical).
+        _g_fold = grid if grid is not None else self.grid
+        if fpivot_active(_g_fold) and getattr(
+                self.config, "prescribed_flow", None) is None:
+            new_state = new_state._replace(v=new_state.v.replace(
+                data=fpivot_fold_line(new_state.v.data, _g_fold.fold,
+                                      point="V",
+                                      sign=_g_fold.fold.vector_sign_v)))
         # ORCA east-west cyclic-overlap (tripole seam) — LAST, so the halo
         # columns exactly mirror their overlap partners after every other
         # post-step projection (static config-bool gate; default off).

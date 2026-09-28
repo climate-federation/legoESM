@@ -42,6 +42,11 @@ from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_scalar,
     fold_row,
     pad_ns_vector_v,
+    refuse_fpivot,
+    is_fpivot,
+    fpivot_active,
+    fpivot_ghost_rows,
+    fpivot_fold_line,
     interp_cell_to_uface,
     interp_cell_to_vface,
     interp_u_to_vface_4pt,
@@ -127,6 +132,7 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
+        refuse_fpivot(fold, "pad_ns_vector_u")
         # Layout-aware ghost: pivot-row-stored meshes (eORCA025) source the
         # row BELOW the pivot with the U-stagger map; halo-row-stored keeps
         # the legacy byte-identical formula (see fold_ghost_source_T).
@@ -195,6 +201,7 @@ def pad_ns_vector_pair(
     fold = getattr(grid, "fold", None)
     if fold is None or not fold.is_active or fold.fold_j < 0:
         return pad_ns_zero_multi(u_interior, v_interior)
+    refuse_fpivot(fold, "pad_ns_vector_pair")
 
     u_padded, v_padded = pad_ns_zero_multi(u_interior, v_interior)
 
@@ -489,7 +496,15 @@ def vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
         f_cell = grid.f
         f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
         f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
-    return jnp.concatenate([f_v, f_v[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+    f_q = jnp.concatenate([f_v, f_v[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+    if fpivot_active(grid):
+        # F-pivot fold line: vertex k takes the mean of its two fold-line
+        # v-faces (k-1, k), which is self-symmetric under perm_f; the
+        # interior "vertex k <- v-face k" convention is not (it would pair
+        # vertex k with v-face k but vertex perm_f(k) with v-face perm_v(k-1)).
+        top = 0.5 * (jnp.roll(f_v[-1:], 1, axis=1) + f_v[-1:])
+        f_q = f_q.at[-1:].set(jnp.concatenate([top, top[:, 0:1]], axis=1))
+    return f_q
 
 
 # Back-compat internal alias (promoted to public for the ene_total consumer;
@@ -715,7 +730,9 @@ def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
         A_int = grid.area_q[1:-1]                       # (n_lat-1, n_lon+1)
         n_lon1 = A_int.shape[1]
         zero_row = jnp.zeros((1, n_lon1), dtype=A_int.dtype)
-        return jnp.concatenate([zero_row, A_int, zero_row], axis=0)
+        # F-pivot: the top vertex row is the fold line (a real dual cell).
+        north = grid.area_q[-1:] if fpivot_active(grid) else zero_row
+        return jnp.concatenate([zero_row, A_int, north], axis=0)
     # Routed through the shared reader so this helper and ``curl_vertex_cgrid``
     # cannot drift apart: the discrete-Stokes property in the docstring above
     # is the statement that THIS area is the one the curl divided by.  Cast to
@@ -1478,8 +1495,14 @@ def min_cell_to_vertex(h_k: jnp.ndarray, grid: LatLonGrid) -> jnp.ndarray:
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        h_partner = h_k[-1:, fold.perm_T]
-        h_sw_partner = h_sw[-1:, fold.perm_T]
+        if is_fpivot(fold):
+            # F-pivot: the cells across the fold from vertex k are the T
+            # ghost cells k and k-1 (see ocean_pe _vertex_fold_partners).
+            h_partner = fpivot_ghost_rows(h_k, fold, point="T", sign=1.0)
+            h_sw_partner = jnp.roll(h_partner, 1, axis=1)
+        else:
+            h_partner = h_k[-1:, fold.perm_T]
+            h_sw_partner = h_sw[-1:, fold.perm_T]
         h_vtx_north = jnp.minimum(
             jnp.minimum(h_k[-1:], h_sw[-1:]),
             jnp.minimum(h_partner, h_sw_partner),
@@ -3484,6 +3507,8 @@ def neumann_fill_vertex(
     f: jnp.ndarray,
     vtx_mask: jnp.ndarray,
     n_passes: int = 3,
+    *,
+    grid=None,
 ) -> jnp.ndarray:
     """Fill land vertices with nearest ocean-neighbour (Neumann BC).
 
@@ -3507,6 +3532,10 @@ def neumann_fill_vertex(
     n_passes : int
         Number of fill passes.  3 is sufficient to cover the typical
         coastal triad stencil.
+    grid : optional
+        Only consulted for the F-pivot fold (``FoldDescriptor.fpivot``): the
+        top vertex row's north neighbour is then the F ghost row instead of
+        the edge clamp.  ``None`` keeps every legacy behaviour.
 
     Returns
     -------
@@ -3529,6 +3558,7 @@ def neumann_fill_vertex(
     # fractional out-of-contract mask would differ at round-off as the
     # f32 path already did.
     m = vtx_mask.astype(f.dtype)
+    _fpv = fpivot_active(grid)
 
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     south_is_pole, north_is_pole = lat_ends_are_poles()
@@ -3582,7 +3612,16 @@ def neumann_fill_vertex(
             if south_is_pole:
                 f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
                 m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
-            if north_is_pole:
+            if north_is_pole and _fpv:
+                # F-pivot: the top vertex row is the fold line; its north
+                # neighbour is the F ghost row = image of the row below.
+                f_n = jnp.concatenate(
+                    [f_n[:-1], fpivot_ghost_rows(filled, grid.fold,
+                                                 point="F", sign=1.0)], axis=0)
+                m_n = jnp.concatenate(
+                    [m_n[:-1], fpivot_ghost_rows(m, grid.fold,
+                                                 point="F", sign=1.0)], axis=0)
+            elif north_is_pole:
                 f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
                 m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
 
@@ -3742,7 +3781,7 @@ def compute_face_masks_3d(
         v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
         return u_mask, v_mask
     south = jnp.zeros_like(a[:1])
-    north = jnp.zeros_like(south)
+    north = _fpivot_open_fold_vface(a, grid, jnp.zeros_like(south))
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
     # SPMD lat-band interior cuts: see _spmd_cut_vfaces (no-op unless armed).
     v_mask = _spmd_cut_vfaces(v_mask, a)
@@ -4295,6 +4334,7 @@ def pv_flux_al81_partial_cell(
     eps_h: float = 1.0e-10,
     q_boundary: str = "neumann_fill",
     metric_widths: tuple | None = None,
+    grid=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
 
@@ -4521,7 +4561,7 @@ def pv_flux_al81_partial_cell(
     #     vorticity source feeding the triads (dynvor.F90:85-90; fully-dry
     #     vertices still give q≈0 via the BIG_H h_vtx sentinel = z1_e3f=0).
     if q_boundary == "neumann_fill":
-        q = neumann_fill_vertex(q, vtx_mask)
+        q = neumann_fill_vertex(q, vtx_mask, grid=grid)
     elif q_boundary != "nemo_live":
         raise ValueError(
             f"pv_flux_al81_partial_cell: unknown q_boundary variant {q_boundary!r} "
@@ -4699,6 +4739,22 @@ def pv_flux_al81_partial_cell(
         (t_stack, F_u), halo=1,
     )  # (n_lat+2, n_lon, 4*nlev), (n_lat+2, n_lon+1, nlev)
     t_NW_pad, t_NE_pad, t_SW_pad, t_SE_pad = jnp.split(t_stack_pad, 4, axis=-1)
+    if fpivot_active(grid):
+        # F-pivot fold line (v-face n_lat): the NORTH cell is the T ghost
+        # cell, i.e. the top cell rotated 180 deg about the pivot, so its
+        # SW/SE triads are the top cell's NE/NW triads under perm_T (q is an
+        # F scalar, psgn +1), and its u-fluxes are the signed U ghost row.
+        _fold = grid.fold
+        t_SW_pad = jnp.concatenate(
+            [t_SW_pad[:-1], fpivot_ghost_rows(t_NE, _fold, point="T",
+                                              sign=1.0)], axis=0)
+        t_SE_pad = jnp.concatenate(
+            [t_SE_pad[:-1], fpivot_ghost_rows(t_NW, _fold, point="T",
+                                              sign=1.0)], axis=0)
+        F_u_pad = jnp.concatenate(
+            [F_u_pad[:-1], fpivot_ghost_rows(F_u, _fold, point="U",
+                                             sign=_fold.vector_sign_u)],
+            axis=0)
     t_NW_S = t_NW_pad[:-1, :, :]   # south-cell NW at v-face j
     t_NE_S = t_NE_pad[:-1, :, :]
     t_SW_N = t_SW_pad[1:, :, :]    # north-cell SW at v-face j
@@ -4769,6 +4825,20 @@ def _apply_seam_wall_u(u_mask: jnp.ndarray, seam_wall_rows) -> jnp.ndarray:
     return u_mask
 
 
+def _fpivot_open_fold_vface(cell_mask, grid, wall_row):
+    """North v-face mask row: the F-pivot fold line is an OPEN face between
+    the top cell and its fold partner (``m[-1] * m[-1][perm_T]``, i.e. NEMO
+    ``vmask(jpj-1) = tmask(jpj-1)*tmask(jpj)`` after ``lbc_lnk``).  Every other
+    layout keeps the wall row (byte-identical)."""
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    if not (is_fpivot(fold) and fold_is_local(grid)):
+        return wall_row
+    if north_fold_mask(grid) is not None:
+        raise NotImplementedError(
+            "F-pivot fold under the lat-band SPMD backend is not wired")
+    return cell_mask[-1:] * cell_mask[-1:, fold.perm_T]
+
+
 def compute_face_masks(
     land_mask: jnp.ndarray,
     grid=None,
@@ -4827,7 +4897,7 @@ def compute_face_masks(
     # exchange architecture (Option B) is implemented.  Opening the
     # fold face without consistent halo exchange creates fold-asymmetry
     # that drives an instability over ~40 steps.
-    north = jnp.zeros_like(south)
+    north = _fpivot_open_fold_vface(land_mask, grid, jnp.zeros_like(south))
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
     # SPMD lat-band interior cuts (codex finding 2: the MLE path calls this
     # 2-D builder IN-BODY and ANDs it into the 3-D mask, re-walling every cut

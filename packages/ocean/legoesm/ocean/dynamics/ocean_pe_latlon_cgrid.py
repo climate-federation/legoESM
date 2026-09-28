@@ -49,6 +49,11 @@ from legoesm.grids.operators_latlon_cgrid import (  # noqa: F401
     upwind_cell_to_uface as upwind_to_u_points,
     upwind_cell_to_vface as upwind_to_v_points,
 )
+from legoesm.grids.operators_latlon_cgrid import (
+    fpivot_active,
+    fpivot_fold_line,
+    fpivot_ghost_rows,
+)
 from legoesm.ocean.eos import make_eos_fn, nemo_bn2_live_ladders
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
@@ -298,6 +303,10 @@ def _finish_interp_to_v(
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     f_v = zero_polar_lat_ends(f_v)
     fold = getattr(grid, "fold", None) if grid is not None else None
+    if fpivot_active(grid):
+        # F-pivot fold line: midpoint of the top cell and its fold image.
+        fg = fpivot_ghost_rows(f, fold, point="T", sign=1.0)
+        return jnp.concatenate([f_v[:-1], 0.5 * (f[-1:] + fg)], axis=0)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         n_cols = f_v.shape[1]
@@ -441,6 +450,14 @@ def tvd_to_v_points(
     f_pad = pad_with_pole_bc_lat(
         f, halo=2, south_value=0.0, north_value=0.0,
     )
+    _fpv = fpivot_active(grid)
+    if _fpv:
+        # F-pivot: the two ghost rows above the top are the fold images of
+        # the top two rows (NEMO lbc_nfd F), so the fold-line face (and the
+        # face below it) reconstruct from true neighbour data.
+        f_pad = jnp.concatenate(
+            [f_pad[:-2], fpivot_ghost_rows(f, grid.fold, point="T", sign=1.0,
+                                           depth=2)], axis=0)
     # (2) ALL n_lat+1 local v-faces; face i sits between cells i-1 and i.
     f_south = f_pad[1:n_lat + 2]     # f[i-1]
     f_north = f_pad[2:n_lat + 3]     # f[i]
@@ -505,7 +522,18 @@ def tvd_to_v_points(
     #     keep their computed values), then the tripolar north fold row
     #     exactly as pad_ns_scalar produced it (perm_T of the last
     #     interior face row).
+    _f_top = f_tvd[-1:]
     f_tvd = zero_polar_lat_ends(f_tvd)
+    if _fpv:
+        # F-pivot: the fold line is ONE physical face stored twice (columns
+        # c and perm_v(c)), each entering its own top cell's divergence, so
+        # conservation needs the two face values EQUAL.  The limiter above is
+        # not reflection-symmetric (its negative-flow ratio carries the
+        # opposite sign to its positive-flow ratio), so impose NEMO's lbc
+        # identity on the face value: the right half takes its partner's.
+        return fpivot_fold_line(
+            jnp.concatenate([f_tvd[:-1], _f_top], axis=0), grid.fold,
+            point="V", sign=1.0)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         north = f_tvd[-2:-1][:, grid.fold.perm_T]
@@ -2113,6 +2141,41 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     return dT_dt, dS_dt
 
 
+def _fpivot_vface_top(face_field, cell_field, grid, how):
+    """F-pivot: overwrite the north (fold-line) row of a v-face field built
+    from a cell field with its interior formula across the fold — ``"mean"``
+    (0.5*(top + image)) or ``"min"`` (shallower of the pair) — instead of the
+    wall/edge row the builder padded.  Identity on every other layout."""
+    if not fpivot_active(grid):
+        return face_field
+    partner = cell_field[-1:, grid.fold.perm_T]
+    if how == "mean":
+        top = 0.5 * (cell_field[-1:] + partner)
+    elif how == "min":
+        top = jnp.minimum(cell_field[-1:], partner)
+    else:
+        raise ValueError(f"how must be 'mean' or 'min', got {how!r}")
+    return jnp.concatenate([face_field[:-1], top.astype(face_field.dtype)],
+                           axis=0)
+
+
+def _vertex_fold_partners(x, fold):
+    """The two cells ACROSS the fold that surround each top-row vertex, as
+    ``(partner of x, partner of roll(x, 1))`` rows (``(1, n_lon, ...)``).
+
+    Legacy descriptors: ``x[-1][perm_T]`` and ``roll(x,1)[-1][perm_T]``
+    (byte-identical).  F-pivot: the vertex ``k`` on the fold line is bounded
+    above by the T ghost cells ``k`` and ``k-1`` (``x[-1][P_T(k)]``,
+    ``x[-1][P_T(k-1)]``), i.e. the ghost row and ITS west neighbour — the
+    legacy pair is off by one column there and breaks the ``perm_f``
+    symmetry of the fold-line vertex row.
+    """
+    if bool(getattr(fold, "fpivot", False)):
+        g = fpivot_ghost_rows(x, fold, point="T", sign=1.0)
+        return g, jnp.roll(g, 1, axis=1)
+    return x[-1:, fold.perm_T], jnp.roll(x, 1, axis=1)[-1:, fold.perm_T]
+
+
 def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     """EEN F-point (vertex) thickness ``h_vtx``, plus the Fu/u fields padded
     over latitude in the SAME fused halo exchange (MPI audit lever O4).
@@ -2226,10 +2289,8 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
             h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid,
                                      north_mask=nmask)
         elif een_e3f_scheme == "nemo_avg":
-            h_k_partner = h_k[-1:, fold.perm_T, :]
-            h_sw_partner = h_sw[-1:, fold.perm_T, :]
-            t_k_partner = t_k[-1:, fold.perm_T, :]
-            t_sw_partner = t_sw[-1:, fold.perm_T, :]
+            h_k_partner, h_sw_partner = _vertex_fold_partners(h_k, fold)
+            t_k_partner, t_sw_partner = _vertex_fold_partners(t_k, fold)
             e3f_sum_north = h_k[-1:] + h_sw[-1:] + h_k_partner + h_sw_partner
             wet_count_north = t_k[-1:] + t_sw[-1:] + t_k_partner + t_sw_partner
             # Same fully-dry-vertex fallback as the interior branch above
@@ -2240,8 +2301,7 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
                 dry_fallback[-1:] if dz_ref is not None else BIG_H,
             )
         else:
-            h_k_partner = h_k_active[-1:, fold.perm_T, :]
-            h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
+            h_k_partner, h_sw_partner = _vertex_fold_partners(h_k_active, fold)
             h_vtx_north = jnp.minimum(
                 jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
                 jnp.minimum(h_k_partner, h_sw_partner),
@@ -2557,6 +2617,7 @@ def _bc_pv_flux(
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
+                grid=grid,
             )
         else:  # "ene"
             # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
@@ -3001,8 +3062,9 @@ def _bc_horizontal_viscosity(
         _slope_E_u = jnp.minimum(_slope_E, jnp.roll(_slope_E, 1, axis=1))
         _slope_E_u = jnp.concatenate([_slope_E_u, _slope_E_u[:, 0:1, :]], axis=1)
         _slope_E_v_int = jnp.minimum(_slope_E[:-1], _slope_E[1:])
-        _slope_E_v = jnp.pad(_slope_E_v_int, ((1, 1), (0, 0), (0, 0)),
-                             constant_values=1.0)
+        _slope_E_v = _fpivot_vface_top(
+            jnp.pad(_slope_E_v_int, ((1, 1), (0, 0), (0, 0)),
+                    constant_values=1.0), _slope_E, grid, "min")
     else:
         _slope_E_u = 1.0
         _slope_E_v = 1.0
@@ -3735,7 +3797,8 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
     r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)
     r_eff_u = jnp.concatenate([r_u_inner, r_u_inner[:, 0:1]], axis=1)
     r_v_int = 0.5 * (r_t[:-1, :] + r_t[1:, :])
-    r_eff_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
+    r_eff_v = _fpivot_vface_top(
+        jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge"), r_t, grid, "mean")
 
     # Partial-cell bottom-level indicator at u/v faces (face's bottom level
     # is the SHALLOWER of the two adjacent columns — see _bc_bottom_drag).
@@ -3746,7 +3809,9 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
     bot_lev_u = jnp.concatenate(
         [bot_lev_u_inner, bot_lev_u_inner[:, 0:1]], axis=1)
     bot_lev_v_int = jnp.minimum(bot_lev_cell[:-1], bot_lev_cell[1:])
-    bot_lev_v = jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)), constant_values=0)
+    bot_lev_v = _fpivot_vface_top(
+        jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)), constant_values=0),
+        bot_lev_cell, grid, "min")
     is_bot_u_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
                     == bot_lev_u[..., jnp.newaxis]).astype(u.dtype)
     is_bot_v_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
@@ -3809,7 +3874,9 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
                 r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)
                 r_u = jnp.concatenate([r_u_inner, r_u_inner[:, 0:1]], axis=1)
                 r_v_int = 0.5 * (r_t[:-1, :] + r_t[1:, :])
-                r_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
+                r_v = _fpivot_vface_top(
+                    jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge"),
+                    r_t, grid, "mean")
             # Broadcast over the level axis: the coefficient is a
             # bottom-speed property (NEMO applies it to the bottom cell;
             # the H_BBL>0 branch spreads the same stress over the K&E99
@@ -3888,8 +3955,9 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
             )
             # v-face bottom_level: min of south/north cell.
             bot_lev_v_int = jnp.minimum(bot_lev_cell[:-1], bot_lev_cell[1:])
-            bot_lev_v = jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)),
-                                 constant_values=0)
+            bot_lev_v = _fpivot_vface_top(
+                jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)), constant_values=0),
+                bot_lev_cell, grid, "min")
             is_bot_u_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
                             == bot_lev_u[..., jnp.newaxis]).astype(u.dtype)
             is_bot_v_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]

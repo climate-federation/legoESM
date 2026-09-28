@@ -583,6 +583,8 @@ def barotropic_rigid_lid_latlon_cgrid(state, dt, grid, z_coord, config, rl_data,
     -------
     (state_new, (Hu_avg, Hv_avg)).
     """
+    from legoesm.grids.operators_latlon_cgrid import refuse_fpivot
+    refuse_fpivot(getattr(grid, "fold", None), "barotropic_rigid_lid_latlon_cgrid")
     # Dispatch hardening: the streamfunction solve is single-rank only (global
     # elliptic CG with rank-local dots + domain-wide island line integrals).
     # Fail LOUDLY at trace time rather than return a silently per-rank-wrong

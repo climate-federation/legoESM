@@ -68,6 +68,7 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     fold_is_local,
+    fpivot_active,
     north_fold_mask,
     apply_north_fold,
     compute_vertex_mask,
@@ -783,6 +784,11 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
         # (PR358) and a tripolar barotropic-diffusion validation case, so it
         # is deferred to PR358 rather than introduced unvalidated here.
         nu_face_v = _zero_polar_lat_ends(nu_face_v).astype(dtype)
+        if fpivot_active(grid):
+            # F-pivot: the fold line is an interior face (gradient_y_cgrid
+            # already reads the fold image there), so it gets its coefficient.
+            nu_face_v = nu_face_v.at[-1:].set((baro_alpha * 0.5 * (
+                area[-1:] + fold_vface_row(area, grid))).astype(dtype))
         # Face masks for land boundaries (zero flux at coastlines)
         diff_u_mask = mask * jnp.roll(mask, 1, axis=1)
         diff_u_mask = jnp.concatenate(
@@ -831,6 +837,9 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
         area_p_dd = pad_ns_zero(area)
         div_damp_area_v = 0.5 * (area_p_dd[:-1] + area_p_dd[1:])
         div_damp_area_v = _zero_polar_lat_ends(div_damp_area_v).astype(dtype)
+        if fpivot_active(grid):
+            div_damp_area_v = div_damp_area_v.at[-1:].set((0.5 * (
+                area[-1:] + fold_vface_row(area, grid))).astype(dtype))
 
     return (nu_face_u, nu_face_v, diff_u_mask, diff_v_mask,
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
@@ -1049,7 +1058,7 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
     return out
 
 
-def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
+def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10, *, grid=None):
     """EEN barotropic Coriolis tendency (``cor_u``, ``cor_v``) — node 16.
 
     ``cor_u = (1/hu)·Σ_k e3u_k·diag_u_k``, ``cor_v = (1/hv)·Σ_k e3v_k·diag_v_k``
@@ -1090,6 +1099,10 @@ def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
       it is a fidelity refinement over the metric-less "een".
     """
     if pre.get("coefficient_evaluation", "generic") == "nemo_literal":
+        if grid is not None and fpivot_active(grid):
+            raise NotImplementedError(
+                "barotropic EEN nemo_literal coefficients walls the north row; "
+                "not wired for the F-pivot fold")
         b = jax.lax.optimization_barrier
         coeff = pre["literal_coefficients"]
 
@@ -1152,7 +1165,8 @@ def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
         jnp.zeros_like(pre["h_vtx"]), pre["h_vtx"], pre["e3v"], v3,
         pre["e3u"], u3, pre["u_mask_3d"], pre["v_mask_3d"], pre["vtx_mask"],
         f_vtx=pre["f_vtx"],
-        q_boundary=pre.get("q_boundary", "neumann_fill"))
+        q_boundary=pre.get("q_boundary", "neumann_fill"),
+        grid=grid)
     cor_u = jnp.sum(pre["e3u"] * diag_u, axis=-1) / jnp.maximum(pre["hu"], eps)
     cor_v = jnp.sum(pre["e3v"] * diag_v, axis=-1) / jnp.maximum(pre["hv"], eps)
     if pre.get("metric_complete", False):
@@ -1204,7 +1218,7 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
             z_coord=z_coord)
     U_bar, V_bar = _depth_average_to_faces(
         u_3d, v_3d, h_k, min_water_col, mask, u_mask, v_mask, grid)
-    cor_u, cor_v = een_barotropic_coriolis(U_bar, V_bar, pre)
+    cor_u, cor_v = een_barotropic_coriolis(U_bar, V_bar, pre, grid=grid)
     if return_pre:
         return cor_u, cor_v, pre
     return cor_u, cor_v
@@ -1533,7 +1547,7 @@ def _run_substep_loop(
             # planetary f rides the depth-integrated AL81 12-point triad, which
             # exerts a restoring on the 2Δx checkerboard the 4-pt avg annihilates.
             _cor_u_een, _cor_v_een = een_barotropic_coriolis(
-                _U_cor_src_cur, _V_cor_src, een_pre)
+                _U_cor_src_cur, _V_cor_src, een_pre, grid=grid)
         V_west = jnp.roll(_V_cor_src, 1, axis=1)
         V_at_u = 0.25 * (_V_cor_src[:-1] + _V_cor_src[1:]
                          + V_west[:-1] + V_west[1:])

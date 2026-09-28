@@ -57,6 +57,7 @@ from legoesm import constants
 from legoesm.grids.latlon import ensure_geometry
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks_3d,
+    fpivot_active,
     gradient_x_cgrid,
     gradient_y_cgrid,
     interp_cell_to_uface,
@@ -268,6 +269,11 @@ def mle_tracer_tendency_latlon_cgrid(
     H_v_int = face_mld(zmld_filled[:-1], zmld_filled[1:], cfg.mld_uv)   # (n_lat-1, n_lon)
     H_v = jnp.concatenate(
         [zmld_filled[0:1], H_v_int, zmld_filled[-1:]], axis=0)          # (n_lat+1, n_lon)
+    if fpivot_active(grid):
+        # F-pivot fold line: the face MLD pairs the top cell with its fold
+        # image (the interior rule), not the edge copy of the top cell.
+        H_v = H_v.at[-1:].set(face_mld(
+            zmld_filled[-1:], zmld_filled[-1:, grid.fold.perm_T], cfg.mld_uv))
 
     # --- Streamfunction magnitude (NEMO nn_mle=1) ---
     rc_f = mle_coefficient(cfg.ce, cfg.lat_ref_deg)   # constant scalar [s/m]
@@ -296,6 +302,9 @@ def mle_tracer_tendency_latlon_cgrid(
         face_n2_v_int = jnp.minimum(col_n2_filled[:-1], col_n2_filled[1:])
         face_n2_v = jnp.concatenate(
             [col_n2_filled[0:1], face_n2_v_int, col_n2_filled[-1:]], axis=0)
+        if fpivot_active(grid):
+            face_n2_v = face_n2_v.at[-1:].set(jnp.minimum(
+                col_n2_filled[-1:], col_n2_filled[-1:, grid.fold.perm_T]))
         psim_u = jnp.where(face_n2_u < 0.0, 0.0, psim_u)
         psim_v = jnp.where(face_n2_v < 0.0, 0.0, psim_v)
 
