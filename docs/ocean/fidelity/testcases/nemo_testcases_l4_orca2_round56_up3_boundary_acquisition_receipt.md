@@ -85,6 +85,7 @@ count.
   -fsyntax-only` against the producing configuration's includes.
 - Focused round-56 tests: **7 passed**.  Ruff, Python compilation, shell syntax,
   and `git diff --check` pass.
+- Push-gate-equivalent battery: **127 passed** in 380.55 s.
 - Shared-card battery: **170 passed**, 9 warnings, in 358.49 s.
 - `tests/ocean/fidelity -n 12` collected 1,964 items and reproduced the
   registered xdist tail stall at 99%; before interruption it logged 1,941
