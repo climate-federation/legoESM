@@ -77,8 +77,7 @@ def _observer(card, state) -> tuple[object, dict[str, np.ndarray]]:
     return observed, trace
 
 
-def _noninterference(ordinary, observed) -> list[dict]:
-    before = _state_arrays(ordinary)
+def _noninterference(before: dict[str, np.ndarray], observed) -> list[dict]:
     after = _state_arrays(observed)
     R60.require(before.keys() == after.keys(), "observer state-field drift")
     rows = []
@@ -179,8 +178,11 @@ def run(output: Path, expect_commit: str, entry_input: Path,
     ordinary_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg)
     ordinary = ordinary_model.step(state, dt=card.dt_s)
+    ordinary_arrays = _state_arrays(ordinary)
+    del ordinary, ordinary_model
+    jax.clear_caches()
     observed, trace = _observer(card, state)
-    observer_rows = _noninterference(ordinary, observed)
+    observer_rows = _noninterference(ordinary_arrays, observed)
 
     arrays: dict[str, np.ndarray] = {}
     rows = []
