@@ -158,6 +158,19 @@ _ARMS = {
 }
 
 
+def _exact_residual(T0, T1, th0, th1, dz, G, dt, cfg, n=4000):
+    """Enthalpy residual [J/m2] of a step: the exact integral of C_app over the
+    temperature change at fixed th1, minus the moisture fusion term, minus the
+    boundary heat (surface conductance None)."""
+    s = (jnp.arange(n) + 0.5) / n
+    Tq = T0[..., None] + (T1 - T0)[..., None] * s
+    Cq = jax.vmap(lambda Tk: compute_apparent_heat_capacity(Tk, th1, HYDRO, cfg),
+                  in_axes=-1, out_axes=-1)(Tq)
+    dH = jnp.sum(jnp.mean(Cq, -1) * (T1 - T0) * dz, axis=1)
+    fusion = _RLF * jnp.sum(dz * (_ice(T0, th1, cfg) - _ice(T0, th0, cfg)), axis=1)
+    return dH - fusion - (G + cfg.Q_geothermal) * dt, fusion
+
+
 @pytest.mark.parametrize("arm", sorted(_ARMS))
 def test_full_step_closes_soil_energy(monkeypatch, arm):
     a = _ARMS[arm]
@@ -166,22 +179,47 @@ def test_full_step_closes_soil_energy(monkeypatch, arm):
     st, new, (args, kwargs, T1) = _captured_step(
         monkeypatch, cfg, _forcing(1, **a["forcing"]), a["T_init"], a["theta_init"])
     T0, th1, grid, _, _, G, dt = args
-    # Final solve sees start-of-step T and the post-Richards water.
+    # Final solve: start-of-step T, post-Richards water, result accepted.
     assert jnp.array_equal(T0, st.T_soil)
     assert jnp.array_equal(th1.astype(new.theta_soil.dtype), new.theta_soil)
+    assert jnp.array_equal(T1.astype(new.T_soil.dtype), new.T_soil)
+    assert kwargs.get("surface_conductance") is None
+    assert kwargs["n_substeps"] == multilayer_land.FINAL_THERMAL_SUBSTEPS > 1
     dz = jnp.asarray(grid.dz)
-    lam = kwargs.get("surface_conductance")
-    lam = jnp.zeros(1) if lam is None else lam
-    res, fusion = _residual(T0, T1, st.theta_soil, th1, dz, G, lam, dt, cfg.thermal)
+    assert jnp.allclose(kwargs["layer_source"], moisture_fusion_heat_source(
+        T0, st.theta_soil, th1, dz, cfg.thermal, dt), rtol=1e-12)
+    res, fusion = _exact_residual(T0, T1, st.theta_soil, th1, dz, G, dt, cfg.thermal)
     assert abs(float(fusion[0])) > 1.0e3, fusion       # water moved, ice changed
-    assert bool(jnp.all(jnp.isfinite(T1)))
-    assert abs(float(res[0])) < 1.0e-8 * abs(float(fusion[0])) + 1.0e-6, (res, fusion)
+    # The same solve as one 1800 s step overshoots the curtain: measured first-
+    # step residuals 44 / 44 / 0.3 W/m2 sub-stepped vs 998 / 389 / 4.4 in one
+    # step (rain / heavy / drain).
+    one = solve_soil_thermal(*args, **{**kwargs, "n_substeps": 1})
+    res1, _ = _exact_residual(T0, one, st.theta_soil, th1, dz, G, dt, cfg.thermal)
+    assert abs(float(res[0])) < 0.5 * abs(float(res1[0])), (res, res1)
 
 
-def test_full_step_off_passes_no_source(monkeypatch):
+def test_full_step_off_passes_no_source_and_one_step(monkeypatch):
     cfg = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0))
     assert not cfg.thermal.enable_freeze_thaw
     _, _, (_, kwargs, _) = _captured_step(
         monkeypatch, cfg, _forcing(1, **_ARMS["rain_on_frozen"]["forcing"]),
         constants.T_freeze - 4.0, 0.20)
     assert kwargs.get("layer_source") is None
+    assert kwargs["n_substeps"] == 1
+
+
+def test_one_substep_is_the_single_step_solve():
+    grid, T0, th0, th1 = _kernel_case(constants.T_freeze - 0.2, 0.02)
+    G = jnp.array([-15.0])
+    src = moisture_fusion_heat_source(T0, th0, th1, grid.dz, ON, 1800.0)
+    a = solve_soil_thermal(T0, th1, grid, HYDRO, ON, G, 1800.0, layer_source=src)
+    b = solve_soil_thermal(T0, th1, grid, HYDRO, ON, G, 1800.0, layer_source=src,
+                           n_substeps=1)
+    assert jnp.array_equal(a, b)
+    # Sub-steps conserve the linearised identity sub-step by sub-step: with
+    # moisture fixed and freeze/thaw off, n sub-steps deliver exactly G*dt.
+    off = SoilThermalConfig(enable_freeze_thaw=False)
+    T6 = solve_soil_thermal(T0, th1, grid, HYDRO, off, G, 1800.0, n_substeps=6)
+    from legoesm.land.soil_thermal import compute_heat_capacity
+    stored = jnp.sum(compute_heat_capacity(th1, HYDRO, off) * grid.dz * (T6 - T0), axis=1)
+    assert jnp.allclose(stored, (G + off.Q_geothermal) * 1800.0, rtol=1e-9)

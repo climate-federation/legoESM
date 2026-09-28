@@ -45,6 +45,12 @@ from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import moisture_fusion_heat_source, solve_soil_thermal
+
+# Sub-steps of the final soil-thermal solve when soil freeze/thaw is on: at the
+# 1800 s land step a single apparent-heat-capacity step overshoots the 0 C
+# curtain in a thin top layer; six 300 s sub-steps keep it on the curtain
+# (user decision 2026-09-28).  A loop count, never config or trainable.
+FINAL_THERMAL_SUBSTEPS = 6
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
     intercept_rain,
@@ -1106,6 +1112,8 @@ def _step_multilayer_land_impl(
         G_surface, dt,
         surface_conductance=surface_out.surface_conductance,
         layer_source=_fusion_source,
+        n_substeps=(FINAL_THERMAL_SUBSTEPS
+                    if config.thermal.enable_freeze_thaw else 1),
     )
 
     # --- Advance the 30-day TgC EMA (only when state carries it) ---
