@@ -26,7 +26,7 @@ the agent's sandbox, so round 1 wrote the acquisition and stopped.
 | artefact | what it is |
 |---|---|
 | the VORTEX card | additive in the shared NEMO test-case recipe: one new whole-step identity, one new builder, one new validator branch, one new dispatch entry, and one declared capability gap that makes the execution gate refuse it |
-| the card test | 11 tests, 10 run and 1 skips until the oracle record exists |
+| the card test | 12 tests, 11 run and 1 skips until the oracle record exists |
 | the acquisition | builds the shipped case twice, runs both, admits by restart byte-identity |
 | the record checker | parses each record's own header; predicts no size |
 
@@ -55,10 +55,12 @@ difference.
 
 | gate | result |
 |---|---|
-| card test, `tests/ocean/unit/test_nemo_vortex_card.py` | 10 passed, 1 skipped |
+| card test, `tests/ocean/unit/test_nemo_vortex_card.py` | `11 passed, 1 skipped` |
 | planted defect: reference depth ladder instead of the live stretched depth | RED, as required |
 | planted defect: meridional velocity sign flipped | RED, as required |
-| record checker on synthetic records | admits a good set; refuses a corrupt header, a perturbed reference restart and a missing step |
+| record checker on synthetic records | admits a complete set; refuses a corrupted header, a bumped format version, a filename-versus-header step disagreement, a missing record and a perturbed reference restart |
+| card constructibility, a real model built from the card | passes; it is the check that found the Coriolis gap |
+| execution gate | REFUSES the card, naming the declared gap — the intended state |
 | acquisition preflight (no build, no run) | PREFLIGHT_OK; both patches apply to the shipped sources |
 | certified card digests unchanged | LOCK `42d13c75ea8cbcc6`, OVERFLOW `c2bca636ac2f14ef`, GYRE `f227194da309e66b` — identical before and after |
 | push-gate tests | see section 6 |
@@ -159,9 +161,24 @@ digest above.
 
 ## 6b. Test and gate output
 
-Filled in at the end of the round; see the commit range in section 7.
+| gate | its own success line |
+|---|---|
+| card test | `11 passed, 1 skipped` — the skip is the oracle comparison, which has no record yet |
+| push-gate battery: the six files the autopilot runs, plus the card test, the card constructibility tripwire and the dispatch-hardening ratchet | `187 passed, 1 skipped in 1032.58s` |
+| citation gate, this receipt | `PASS`, 18 citations, every one mapped and checked against the real file |
+| citation gate, this receipt, planted shift | exits non-zero, so the gate can fail |
+| citation gate, the lane's own default receipt | `PASS`, 274 citations — unchanged by this round |
+| citation map self-audit | 0 entries failing, after three rounds of re-anchoring as the recipe module grew |
+| acquisition preflight | `PREFLIGHT_OK`, exit 0 |
+
+The same battery was red twice on the way here, both times for a reason this
+round created and fixed: first the barotropic-writer allow-list, then the
+precision-dependent digest. Both are recorded above rather than only in the
+commits.
 
 ## 7. How to acquire
+
+Commit range `c09a9e111..` the tip of this branch, eleven commits.
 
 Preflight first (reads only, writes nothing outside a temporary directory),
 then the real thing:
