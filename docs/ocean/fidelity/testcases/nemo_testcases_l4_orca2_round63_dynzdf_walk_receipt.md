@@ -80,6 +80,26 @@ kt=3.  Both residual archives have SHA-256
 All 30 daily snapshots are byte-identical; both day-30 files have SHA-256
 `e2daff3f91ec3d806c109d1f7dff592ed705d236a6bfdb6a8c82614596fb3ec3`.
 
+## Review and verification
+
+The required separate read-only Codex review could not initialize a reviewer.
+Its exact terminal result was:
+
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+Therefore **independent review unavailable in-sandbox**.  The focused
+round-60/61/62/63 and citation tests passed **39 / 39**.  The default citation
+gate passed 274 citations and the round-63 gate passed 15 citations, each with
+zero unmapped entries and zero failures.  A real +2-line plant on the observer
+callback exited 1 with `SYMBOL-NOT-AT-LINE`.
+
+The one permitted `tests/ocean/fidelity -n 12` battery collected 1,991 tests,
+showed five failure marks and seven skips, reached 97%, and reproduced the
+registered terminal zero-progress stall before a summary.  It was stopped
+after a final observation window and was not rerun.  The focused round-63
+tests are clean; the five broad-suite marks match the count already recorded
+on the incoming lane and no round-63 test emitted a failure.
+
 ## Process record
 
 The first full observer attempts exposed a per-process compiler-map limit and
