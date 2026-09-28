@@ -364,7 +364,7 @@ Carried forward, each checked to reproduce without this round's commits:
    weight-averaged mean of the substep velocities.  Options, with my pick:
    (a) **leave it held**, which is what ships today and is what I recommend
    until someone walks the real statement; (b) re-aim it at
-   `dynspg_ts.f90:767-769,802`, which is a different change to a different
+   the velocity-sum branch at `GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90:767-769` and `GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90:802`, which is a different change to a different
    operator and needs its own round; (c) land the held version anyway, which
    costs `7e-06 Sv` of DINO 90-day ACC and buys a convention NEMO does not use.
 5. **The DINO year certification is not re-run in this round** — the from-rest
@@ -373,7 +373,7 @@ Carried forward, each checked to reproduce without this round's commits:
 
 ## OPEN
 
-1. Decision 67's real statement: walk `dynspg_ts.f90:767-769,802` — the
+1. Decision 67's real statement: walk the velocity-sum branch at `GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90:767-769` and `GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90:802` — the
    velocity-sum branch that actually runs — and decide what legoESM's
    replacement reference should be under it.  The held patch is in this round's
    history if it is ever wanted.
