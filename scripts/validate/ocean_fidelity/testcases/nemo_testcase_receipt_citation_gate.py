@@ -55,6 +55,8 @@ _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo")
+_OVERFLOW_R56UP3_COMPILED = (
+    NEMO / "tests/OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo")
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
@@ -98,6 +100,8 @@ FILES = {
         _OVERFLOW_R50PAIR_COMPILED / "dynadv.f90"),
     "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90": (
         _OVERFLOW_R50PAIR_COMPILED / "dynadv_up3.f90"),
+    "OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90": (
+        _OVERFLOW_R56UP3_COMPILED / "dynadv_up3.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo"
         "/stprk3.f90"),
@@ -880,6 +884,19 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
+    'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
+        'DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)',
+        'CALL r56_up3_curv(ji,jj,jk,zlu_uu(ji,jj),zlv_vv(ji,jj),zlu_uv(ji,jj),zlv_vu(ji,jj))',
+        10],
+    'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:182-192': [
+        'DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)',
+        'CALL r56_up3_select_t(ji,jj,jk,zui,zvj,zl_u,zl_v)',
+        11],
+    'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:194-195': [
+        'zFu_t(ji+1,jj  ) = (  zFu(ji,jj) + zFu(ji+1,jj  )  ) * ( zui - gamma1 * zl_u )',
+        'zFv_t(ji  ,jj+1) = (  zFv(ji,jj) + zFv(ji  ,jj+1)  ) * ( zvj - gamma1 * zl_v )',
+        2],
     # --- ORCA2 round 56: admitted OVERFLOW stage-2 UP3 boundary ---
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv.f90:134-144': [
         ('SELECT CASE( n_dynadv )', 1),
