@@ -433,6 +433,42 @@ def _detect_fpivot_fold(glamt, gphit, n_lat, n_lon, vf_coords,
                                                  cap_dlat_rel_deviation))
 
 
+def fpivot_fold_line_rotation(glamv, gphiv, perm_v):
+    """(cos_alpha_v, sin_alpha_v) on the F-pivot fold line (stored top V row).
+
+    The generic builder copies the row below's angle onto the top v row; on
+    the F-pivot layout that row is the fold line, a face whose normal seen
+    from column ``c`` is the OPPOSITE of the normal seen from ``perm_v[c]``
+    (same physical point), so the angle must be taken AT the face.  The local
+    j direction at face ``c`` is the chord from the V point below (row -2,
+    column c) to the V ghost above (row -2, column ``perm_v[c]``, NEMO
+    lbc_nfd 'V'), projected on geographic east/north at the fold point
+    (3-D chord: the fold runs over the pole, where lon/lat differences are
+    ill-conditioned).  Same convention as :func:`_compute_rotation_angles`
+    (``cos = N_j/|d|``, ``sin = -E_j/|d|``); the chord at ``perm_v[c]`` is the
+    exact negative, so both components are antisymmetric under ``perm_v``.
+    """
+    lam = jnp.deg2rad(jnp.asarray(glamv, dtype=jnp.float64))
+    phi = jnp.deg2rad(jnp.asarray(gphiv, dtype=jnp.float64))
+
+    def xyz(la, ph):
+        return jnp.stack([jnp.cos(ph) * jnp.cos(la), jnp.cos(ph) * jnp.sin(la),
+                          jnp.sin(ph)], axis=-1)
+    below = xyz(lam[-2], phi[-2])
+    d = below[perm_v] - below
+    la0, ph0 = lam[-1], phi[-1]
+    east = jnp.stack([-jnp.sin(la0), jnp.cos(la0), jnp.zeros_like(la0)], axis=-1)
+    north = jnp.stack([-jnp.sin(ph0) * jnp.cos(la0), -jnp.sin(ph0) * jnp.sin(la0),
+                       jnp.cos(ph0)], axis=-1)
+    e_j = jnp.sum(d * east, axis=-1)
+    n_j = jnp.sum(d * north, axis=-1)
+    r = jnp.sqrt(e_j ** 2 + n_j ** 2)
+    ok = r > 0.0
+    r = jnp.where(ok, r, 1.0)
+    # Self-paired / degenerate columns (zero chord) keep the unrotated frame.
+    return jnp.where(ok, n_j / r, 1.0), jnp.where(ok, -e_j / r, 0.0)
+
+
 def fpivot_perms(n_lon: int, ew_halo: bool):
     """F-pivot fold maps ``(P_T, P_U)`` in this model's staggering
     (``P_V = P_T``, ``P_F = P_U``).
@@ -795,6 +831,10 @@ def create_tripole_grid(
     sin_alpha_v = jnp.concatenate(
         [sin_alpha_v[0:1], sin_alpha_v], axis=0
     )
+    if fold_pivot == "F":
+        c_top, s_top = fpivot_fold_line_rotation(glamv, gphiv, fold.perm_v)
+        cos_alpha_v = cos_alpha_v.at[-1].set(c_top.astype(dtype))
+        sin_alpha_v = sin_alpha_v.at[-1].set(s_top.astype(dtype))
 
     # Legacy 1D fields (approximate — use column averages)
     lat_1d = jnp.mean(lat_T, axis=1)

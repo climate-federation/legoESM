@@ -377,6 +377,35 @@ def test_real_mesh_fpivot_detection():
                             dtype=jnp.float64)
 
 
+def test_real_mesh_fold_line_rotation_is_antisymmetric():
+    """The fold-line face normal seen from column c is the opposite of the one
+    seen from perm_v[c]: both rotation components flip sign (wet columns of
+    the real mesh, halo columns excluded)."""
+    import os
+    mesh = os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                        "data", "grids", "eORCA1.2_mesh_mask.nc")
+    if not os.path.exists(mesh):
+        pytest.skip("eORCA1.2 mesh not present")
+    from legoesm.grids.tripole import create_tripole_grid
+    g = create_tripole_grid(mesh, strip_north_rows=1, fold_pivot="F",
+                            dtype=jnp.float64)
+    leg = create_tripole_grid(mesh, strip_north_rows=1, dtype=jnp.float64)
+    P = np.asarray(g.fold.perm_v)
+    c, s = np.asarray(g.cos_alpha_v)[-1], np.asarray(g.sin_alpha_v)[-1]
+    k = np.arange(1, g.n_lon - 1)
+    k = k[(P[k] >= 1) & (P[k] <= g.n_lon - 2) & (P[k] != k)]
+    np.testing.assert_allclose(c[k], -c[P[k]], atol=1e-12)
+    np.testing.assert_allclose(s[k], -s[P[k]], atol=1e-12)
+    np.testing.assert_allclose(c ** 2 + s ** 2, 1.0, atol=1e-12)
+    # rows below the fold are the generic builder's, unchanged
+    np.testing.assert_array_equal(np.asarray(g.cos_alpha_v)[:-1],
+                                  np.asarray(leg.cos_alpha_v)[:-1])
+    cl, sl = np.asarray(leg.cos_alpha_v)[-1], np.asarray(leg.sin_alpha_v)[-1]
+    print("legacy top-row antisym defect", np.abs(cl[k] + cl[P[k]]).max(),
+          "| new vs legacy max |d cos|", np.abs(c - cl)[k].max(),
+          "median", np.median(np.abs(c - cl)[k]))
+
+
 def test_transcription_reproduces_nemo_mesh_halo():
     """Validate the TRANSCRIPTION itself on data NEMO produced: applying it to
     the eORCA1.2 coordinates (psgn +1) must reproduce the mesh's own stored
