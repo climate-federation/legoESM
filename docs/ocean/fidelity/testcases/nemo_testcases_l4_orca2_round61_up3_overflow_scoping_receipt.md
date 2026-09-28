@@ -97,6 +97,26 @@ row: `1.942932e-07` m of sea level expressed in units of
 `numpy.spacing(1.0)` = `2.220446e-16`. The row it worsens is already
 `6.265025e-07` m from the oracle.
 
+**That ratio is a row statistic, and the cellwise form of it is weaker.** The
+row maximum of the worsening and the row maximum of the residual are in
+general at DIFFERENT cells, so the table above does not say that every cell
+moves by less than its own error. Re-derived per cell, at the cell where each
+row's worsening is largest:
+
+| row family | cellwise ratio at the worst cell | cells where the worsening exceeds that cell's own residual |
+|---|---|---|
+| six `ssh` rows (kt4-kt10) | `0.0727` to `0.4957` | **0** on every one |
+| five `u` rows (kt4-kt10) | `0.0843` to `0.6030` | 0 to 103 of 16,900 |
+| five `T` rows (kt5-kt10) | `6.3e-05` to **`8.0`** | 18 to 93 of 17,000 |
+
+So on the two large-amplitude fields the candidate never dominates a cell's
+existing error, but on 10 of the 20 rows some cells do move by more than they
+were already wrong by. Those cells are the smallest ones in absolute terms:
+the worst of them, kt6 `T`, is a worsening of 8 row-scale ULP at a cell whose
+prior residual was 1 ULP. The honest summary is that the bar is plainly
+non-discriminating on the `ssh` rows and is a real, if tiny, signal on parts
+of the `T` and `u` rows.
+
 Of the 31 rows that move at all, 7 are `AT-BAR` salinity rows; their largest
 move is `1.421085e-14`, which is two row-scale ULP at a salinity row scale,
 i.e. at the bar and not over it. The gate's own `AT-BAR -> DEBT` status rule
@@ -110,6 +130,10 @@ never fires.
   is not vacuous.
 - Ratio plant: setting one ratio to `1.5` flips "all ratios below 1" from true
   to false.
+- Cellwise re-derivation of the ratio claim directly from the two residual
+  arrays (`round47/overflow_tip.residuals.npz` and
+  `round59/iterm_1/overflow_trajectory_tip.residuals.npz`), which is what
+  exposed that the row-maximum ratio is not the cellwise ratio.
 - Two parsed rows re-read by eye in the raw reference report:
   `kt2.before.T` (`DEBT`, `7.815970093361103e-15`) and `kt10.before.ssh`
   (`DEBT`, `6.265025088159071e-07`).
@@ -144,7 +168,7 @@ never fires.
 | R61-P1 | **CONFIRMED** | The four constructed cards carry the predicted selections; each matches its deck's switch. |
 | R61-P2 | **CONFIRMED** | One production call site, under the `flux_form` guard, with the vector-invariant operator in the sibling branch. |
 | R61-P3 | **CONFIRMED** | 20 violating rows, all `DEBT`; no `AT-BAR` row among them; the plant fires. |
-| R61-P4 | **CONFIRMED** | Maximum ratio 0.3101, median 0.0054, all below 1; the plant fires. |
+| R61-P4 | **CONFIRMED as preregistered, REFINED against itself** | As frozen (row maxima): maximum ratio 0.3101, median 0.0054, all below 1; the plant fires. The cellwise form of the same sentence is FALSE on 10 of the 20 rows, worst cellwise ratio 8.0 at kt6 `T`. The refinement was found by this round, not by a reviewer, and the row-maximum wording of the prediction is recorded as too strong. |
 | R61-P5 | **CONFIRMED** | The `packages/` tree is byte-identical to base `1bbf37814553`; this round's commits touch documentation and the citation map only. |
 
 ## Scope ledger
@@ -171,9 +195,10 @@ entries and two deck paths, which add citations and change no behaviour.
 3. **DECISION_NEEDED (threshold, operator's to answer).** The frozen strict
    2-ULP bar is an absolute no-worsening ratchet — `4.440892e-16` m of sea
    level — and it is being applied to rows whose own residual is up to
-   `5.42e-06`. So it refuses any statement-level fidelity improvement whose
-   downstream effect is smaller than the error the row already carries, which
-   is what happened here. One line, three options:
+   `5.42e-06`. On the sea-level rows it therefore refuses a change that no
+   cell's own error is smaller than; on parts of the `T` and `u` rows the
+   change is a real few-ULP signal, so the question is not purely about a
+   non-discriminating instrument. One line, three options:
    - (1) keep the ratchet exactly as it is on every row, and accept that no
      UP3 statement lands on OVERFLOW until the `kt = 2` owner is closed;
    - (2) read the ratchet on `DEBT` rows as a registered ratio against the
