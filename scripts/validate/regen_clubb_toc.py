@@ -113,8 +113,10 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     path = pathlib.Path(args.path)
-    lines = path.read_text().split("\n")
-    out, drift = retarget(lines)
+    # One implementation, two doors: the CLI goes through the same row-count
+    # guard as pytest, so ``--check`` cannot pass on a TOC it failed to parse.
+    drift = check_toc(path)
+    out = retarget(path.read_text().split("\n"))[0]
 
     if not drift:
         print(f"{path.name}: TOC is exact")
