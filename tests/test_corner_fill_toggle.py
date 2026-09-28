@@ -261,6 +261,12 @@ def test_invalid_env_value_raises_at_import():
     r = subprocess.run([sys.executable, "-c", "import legoesm.grids.halo"],
                        env=env, capture_output=True, text=True)
     assert r.returncode != 0 and "LEGOESM_CORNER_FILL" in r.stderr
+    # An EMPTY value is unset, not an invalid mode (GLM review of #1811).
+    env["LEGOESM_CORNER_FILL"] = ""
+    r = subprocess.run([sys.executable, "-c",
+                        "import legoesm.grids.halo as h; print(h.get_corner_fill_mode())"],
+                       env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.strip() == "avg", r.stderr[-400:]
 
 
 def test_env_var_conflicting_with_config_raises(monkeypatch):

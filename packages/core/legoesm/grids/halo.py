@@ -1693,7 +1693,8 @@ import os as _os
 
 CORNER_FILL_MODES = ("avg", "fv3_agrid_xdir", "fv3_bgrid_xdir")
 
-_corner_fill_mode = _os.environ.get("LEGOESM_CORNER_FILL", "avg")
+# An EMPTY value is "unset" (shell `VAR= cmd`), not a mode.
+_corner_fill_mode = _os.environ.get("LEGOESM_CORNER_FILL") or "avg"
 if _corner_fill_mode not in CORNER_FILL_MODES:
     raise ValueError(
         f"LEGOESM_CORNER_FILL={_corner_fill_mode!r} is not a corner fill mode; "
@@ -1750,7 +1751,7 @@ def apply_corner_fill_config(mode: str) -> None:
     process-global and read at trace time, so a second model built in the same
     process with a different mode raises instead of retargeting the first."""
     global _corner_fill_claimed
-    env = _os.environ.get("LEGOESM_CORNER_FILL")
+    env = _os.environ.get("LEGOESM_CORNER_FILL") or None     # empty = unset
     if env is not None and env != mode:
         raise ValueError(
             f"LEGOESM_CORNER_FILL={env!r} disagrees with the run config "
