@@ -1,0 +1,64 @@
+--- dynzdf.F90.shipped
++++ dynzdf.F90
+@@ -28,6 +28,9 @@
+    !
+    USE in_out_manager ! I/O manager
+    USE lib_mpp        ! MPP library
++   USE l1_r62_dynzdf, ONLY : r62_zdf_begin, r62_zdf_row, &
++      & r62_zdf_u_solve, r62_zdf_v_solve, r62_zdf_finish
++                       ! round-62 WRITE-only kt3 stage-3 recorder
+    USE prtctl         ! Print control
+    USE timing         ! Timing
+@@ -108,3 +111,4 @@
+       ENDIF
+       !
++      CALL r62_zdf_begin(kt,Kbb,Kmm,Krhs,Kaa)
+       !                                               ! ================= !
+@@ -140,6 +144,8 @@
+ #endif
+             END_2D
+          ENDIF
++         CALL r62_zdf_row(1,jj,puu(ntsi:ntei,jj,1:jpkm1,Kaa), &
++            & pvv(ntsi:ntei,jj,1:jpkm1,Kaa))
+          !                    ! add top/bottom friction
+          !     With split-explicit free surface, barotropic stress is treated explicitly Update velocities at the bottom.
+          !     J. Chanut: The bottom stress is computed considering after barotropic velocities, which does
+@@ -150,6 +156,8 @@
+                puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b(ji,jj,Kaa) ) * umask(ji,jj,jk)
+                pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b(ji,jj,Kaa) ) * vmask(ji,jj,jk)
+             END_2D
++            CALL r62_zdf_row(2,jj,puu(ntsi:ntei,jj,1:jpkm1,Kaa), &
++               & pvv(ntsi:ntei,jj,1:jpkm1,Kaa))
+             DO_1Di( 0, 0 )      ! Add bottom/top stress due to barotropic component only
+                iku = mbku(ji,jj)         ! ocean bottom level at u- and v-points
+                ikv = mbkv(ji,jj)         ! (deepest ocean u- and v-points)
+@@ -169,6 +177,8 @@
+                END_1D
+             ENDIF
+          ENDIF
++         CALL r62_zdf_row(3,jj,puu(ntsi:ntei,jj,1:jpkm1,Kaa), &
++            & pvv(ntsi:ntei,jj,1:jpkm1,Kaa))
+          !
+          !              !-------------------------------!
+          !              !==  Vertical diffusion on u  ==!
+@@ -344,6 +354,7 @@
+          DO_2Dik( 0, 0,    jpk-2, 1, -1 )
+             puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - zws(ji,jk) * puu(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)
+          END_2D
++         CALL r62_zdf_u_solve(jj,puu(ntsi:ntei,jj,1:jpkm1,Kaa))
+          !
+          !              !-------------------------------!
+          !              !==  Vertical diffusion on v  ==!
+@@ -518,10 +529,12 @@
+          DO_2Dik( 0, 0,   jpk-2, 1, -1 )
+             pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - zws(ji,jk) * pvv(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)
+          END_2D
++         CALL r62_zdf_v_solve(jj,pvv(ntsi:ntei,jj,1:jpkm1,Kaa))
+          !
+          !                                            ! ================= !
+       END_1D                                          !  i-k slices loop  !
+       !                                               ! ================= !
++      CALL r62_zdf_finish
+       !
+       IF( l_trddyn )   THEN                      ! save the vertical diffusive trends for further diagnostics
+          ztrdu(:,:,:) = ( puu(T2D(0),:,Kaa) - puu(T2D(0),:,Kbb) )*r1_Dt - ztrdu(:,:,:)
