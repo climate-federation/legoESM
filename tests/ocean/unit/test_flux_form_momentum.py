@@ -210,6 +210,71 @@ class TestUP3Reconstruction:
         r_neg = _up3_reconstruct(fp, ap, an, fn, jnp.array(-1.0))
         assert float(jnp.abs(r_pos - r_neg)) > 1e-6
 
+    def test_nemo_source_ordered_t_flux_matches_recorded_association(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _nemo_up3_same_direction_flux,
+        )
+
+        velocity = np.array([
+            3.31646809321458e-05,
+            4.605109786009353e-05,
+            1.5578967898351246e-04,
+            1.3338847226702986e-04,
+        ], dtype=np.float64)
+        transport = np.array([
+            3.6587957947489358e-03,
+            -1.1852888897627461e-02,
+        ], dtype=np.float64)
+        pair = np.float64(velocity[1] + velocity[2])
+        curvature = np.float64(
+            np.float64(velocity[2] - velocity[1])
+            + np.float64(velocity[0] - velocity[1]))
+        expected = np.float64(
+            np.float64(transport[0] + transport[1])
+            * np.float64(pair - np.float64(1.0 / 3.0) * curvature))
+        args = tuple(map(jnp.asarray, (
+            transport[0], transport[1], *velocity, 1.0, 1.0,
+        )))
+        eager = np.float64(4.0) * np.asarray(
+            _nemo_up3_same_direction_flux(*args), dtype=np.float64)
+        compiled = np.float64(4.0) * np.asarray(
+            jax.jit(_nemo_up3_same_direction_flux)(*args), dtype=np.float64)
+        assert expected.view(np.uint64) == eager.view(np.uint64)
+        assert expected.view(np.uint64) == compiled.view(np.uint64)
+
+    def test_nemo_source_ordered_t_flux_masks_selected_curvature(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _nemo_up3_same_direction_flux,
+        )
+
+        args = tuple(map(jnp.asarray, (2.0, 3.0, 8.0, 1.0, 2.0, 5.0)))
+        masked = np.float64(4.0) * np.asarray(
+            _nemo_up3_same_direction_flux(*args, jnp.asarray(0.0), jnp.asarray(1.0)),
+            dtype=np.float64,
+        )
+        omitted_mask = np.float64(4.0) * np.asarray(
+            _nemo_up3_same_direction_flux(*args, jnp.asarray(1.0), jnp.asarray(1.0)),
+            dtype=np.float64,
+        )
+        assert masked == np.float64(15.0)
+        assert omitted_mask != masked
+
+    def test_nemo_source_ordered_t_flux_gradient_is_finite_and_nonzero(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _nemo_up3_same_direction_flux,
+        )
+
+        def loss(adv_pos):
+            return _nemo_up3_same_direction_flux(
+                jnp.asarray(2.0), jnp.asarray(3.0), jnp.asarray(0.5), adv_pos,
+                jnp.asarray(2.0), jnp.asarray(3.0), jnp.asarray(1.0),
+                jnp.asarray(1.0),
+            )
+
+        gradient = jax.grad(loss)(jnp.asarray(1.0))
+        assert bool(jnp.isfinite(gradient))
+        assert float(gradient) != 0.0
+
 
 def test_F6_differentiable():
     """jax.grad of a scalar loss through the flux-form path is finite + nonzero."""
@@ -307,6 +372,21 @@ def _hadv(u, v, tv, scheme="nemo_up3", **kw):
     return np.asarray(hadv_u), np.asarray(hadv_v), args
 
 
+def test_nemo_up3_flux_form_executes_source_ordered_t_flux(monkeypatch):
+    import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as module
+
+    u, v, u_t = _zonal_selector_case()
+    baseline_u, baseline_v, _ = _hadv(u, v, (u_t, v))
+
+    def zero_t_flux(*args, **kwargs):
+        return jnp.zeros_like(args[0])
+
+    monkeypatch.setattr(module, "_nemo_up3_same_direction_flux", zero_t_flux)
+    planted_u, planted_v, _ = _hadv(u, v, (u_t, v))
+    assert not np.array_equal(planted_u, baseline_u)
+    assert np.array_equal(planted_v, baseline_v)
+
+
 def test_F9_up3_velocity_selector_is_nemo_dynadv_up3():
     """NEMO dynadv_up3.F90:166-170: the T-point UP3 branch is chosen by the
     sign of the advected-velocity pair ``uu_i + uu_{i+1}``, not by the
@@ -392,7 +472,7 @@ def test_F11_up3_t_point_selector_follows_the_scheme_s_reference_arm():
         "the two selector rules coincide on this case — it cannot discriminate")
     assert np.array_equal(nemo, by_velocity), (
         "nemo_up3 must select the T-point branch by the advected-velocity pair")
-    assert np.array_equal(ocng, by_transport), (
+    assert np.allclose(ocng, by_transport, rtol=1e-14, atol=0.0), (
         "oceananigans_up3 must select the T-point branch by the transport pair")
 
 

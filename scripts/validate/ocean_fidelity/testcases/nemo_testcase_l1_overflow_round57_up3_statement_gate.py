@@ -124,6 +124,7 @@ def _analyze_u(
     origin: tuple[int, int],
     *,
     plant: str | None,
+    production_flux_fn=None,
 ) -> dict:
     kbb = np.asarray(fields["kbb_u"], dtype=np.float64)
     kmm = np.asarray(fields["kmm_u"], dtype=np.float64)
@@ -163,16 +164,25 @@ def _analyze_u(
         _score(SOURCE_ORDER[2], fields["selected_u_t"][i, j, k], selected)
     )
 
+    production_args = (
+        jnp.asarray(transport[i, j, k]),
+        jnp.asarray(transport[i + 1, j, k]),
+        jnp.asarray(kmm[i - 1, j, k]),
+        jnp.asarray(kmm[i, j, k]),
+        jnp.asarray(kmm[i + 1, j, k]),
+        jnp.asarray(kmm[i + 2, j, k]),
+        jnp.asarray(pair),
+    )
+    if production_flux_fn is None:
+        production_value = _production_t_flux(*production_args)
+    else:
+        production_value = production_flux_fn(
+            *production_args,
+            jnp.asarray(active[i, j, k], dtype=kbb.dtype),
+            jnp.asarray(active[i + 1, j, k], dtype=kbb.dtype),
+        )
     production = np.asarray(
-        _production_t_flux(
-            jnp.asarray(transport[i, j, k]),
-            jnp.asarray(transport[i + 1, j, k]),
-            jnp.asarray(kmm[i - 1, j, k]),
-            jnp.asarray(kmm[i, j, k]),
-            jnp.asarray(kmm[i + 1, j, k]),
-            jnp.asarray(kmm[i + 2, j, k]),
-            jnp.asarray(pair),
-        ),
+        production_value,
         dtype=np.float64,
     )
     # NEMO stores Qsum*(pair-gamma*curvature); legoESM stores
