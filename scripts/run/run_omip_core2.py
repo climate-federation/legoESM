@@ -2862,7 +2862,7 @@ _FESOM_WIRED_DESTS = frozenset({
     "sss_restore_normalization", "sss_ice_gate_nemo", "sss_restore_regions",
     # B4 — Dai-Trenberth runoff (node-adjacency coastal spread from
     # mesh.edges via FesomOceanGrid.cellsOnCell):
-    "runoff", "runoff_spread_passes", "river_mouth_restoring_gate",
+    "runoff", "runoff_spread_passes", "runoff_regrid", "river_mouth_restoring_gate",
     # NEMO zdfiwm (ln_zdfiwm=T in ORCA1): spliced additively onto the legoESM
     # closure by the FESOM TKE bridge, exactly as MPASOceanModel does.
     "iwm", "iwm_forcing_file",
@@ -2886,7 +2886,7 @@ _FESOM_FORCED_ONLY_DESTS = (
     "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
     "sss_restore_bound_mmday", "sss_restore_file",
     "sss_restore_normalization", "sss_ice_gate_nemo", "sss_restore_regions",
-    "runoff", "runoff_spread_passes", "river_mouth_restoring_gate",
+    "runoff", "runoff_spread_passes", "runoff_regrid", "river_mouth_restoring_gate",
     # NEMO zdfiwm (ln_zdfiwm=T in ORCA1): spliced additively onto the legoESM
     # closure by the FESOM TKE bridge, exactly as MPASOceanModel does.
     "iwm", "iwm_forcing_file",
@@ -3444,7 +3444,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             land_mask=_wet_top, spread_passes=_spread,
             # --isf is not wired on the fesom lane (gate-rejected), so the
             # surface runoff keeps the ice-shelf-melt component.
-            exclude_isf=False)
+            exclude_isf=False,
+            regrid=args.runoff_regrid)
 
     print(f"[fesom-forced] CORE-II bulk injection (B2+B3+B4): {n_steps} "
           f"steps of dt={dt}s, {n_rec} forcing records, "
@@ -4306,8 +4307,23 @@ def _runoff_component_vars(exclude_isf: bool):
     return ("sorunoff", "sornfisf", "Icb_flux")
 
 
+def _nearest_wet_target(src_lat_deg, src_lon_deg, tgt_lat_deg, tgt_lon_deg):
+    """Index into the target arrays of the nearest target point (great-circle
+    chord) for every source point, and that chord distance."""
+    from scipy.spatial import cKDTree
+
+    def _xyz(lat, lon):
+        la, lo = np.deg2rad(np.asarray(lat, float)), np.deg2rad(np.asarray(lon, float))
+        return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], -1)
+
+    d, idx = cKDTree(_xyz(tgt_lat_deg, tgt_lon_deg)).query(
+        _xyz(src_lat_deg, src_lon_deg), k=1)
+    return idx, d
+
+
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
-                        land_mask=None, spread_passes=2, exclude_isf=False):
+                        land_mask=None, spread_passes=2, exclude_isf=False,
+                        regrid="idw4"):
     """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
     each climatological month onto the model grid. Total freshwater = rivers
     (sorunoff) + ice-shelf melt (sornfisf) + icebergs (Icb_flux) [kg/m²/s, +INTO
@@ -4349,11 +4365,34 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
             f"runoff source area {A_src.shape} != runoff field {total.shape[1:]}: "
             f"domain_cfg e1t/e2t must match the Dai-Trenberth grid")
     A_tgt = np.asarray(grid.areaCell if hasattr(grid, "areaCell") else grid.area)
+    if regrid not in ("idw4", "volume_nearest"):
+        raise ValueError(f"runoff regrid {regrid!r}: expected 'idw4' or 'volume_nearest'")
+    if regrid == "volume_nearest":
+        # Each discharge cell's VOLUME goes to its nearest wet target cell, so
+        # every river is conserved locally.  idw4 averages INTENSITY over the
+        # 4 nearest discharge cells and lets the global renorm move the deficit
+        # elsewhere (FESOM White Sea received 203 of NEMO's 3018 m3/s).
+        _tgt_wet = (ocean if ocean is not None
+                    else np.ones(np.asarray(lat2d_deg).shape, dtype=bool)).ravel()
+        _tgt_idx = np.flatnonzero(_tgt_wet)
+        _src_flat = np.flatnonzero(src_valid.ravel())
+        _dest, _ = _nearest_wet_target(
+            src_lat.ravel()[_src_flat], src_lon.ravel()[_src_flat],
+            np.asarray(lat2d_deg).ravel()[_tgt_idx],
+            np.asarray(lon2d_deg).ravel()[_tgt_idx])
+        _dest = _tgt_idx[_dest]
+        _A_tgt_flat = A_tgt.ravel()
     for m in range(12):
-        # k=4 (NOT k=1: _regrid_curv_to_points assumes 2-D kNN -> k=1 crashes, codex HIGH)
-        Rm, _ = _regrid_curv_to_points(
-            total[m], src_lat, src_lon, src_valid,
-            lat2d_deg, lon2d_deg, k=4, max_deg=2.0)
+        if regrid == "volume_nearest":
+            _V = total[m].ravel()[_src_flat] * A_src.ravel()[_src_flat]   # kg/s
+            _acc = np.bincount(_dest, weights=_V, minlength=_A_tgt_flat.size)
+            Rm = (_acc / np.where(_A_tgt_flat > 0, _A_tgt_flat, 1.0)).reshape(
+                np.asarray(lat2d_deg).shape)
+        else:
+            # k=4 (NOT k=1: _regrid_curv_to_points assumes 2-D kNN -> k=1 crashes, codex HIGH)
+            Rm, _ = _regrid_curv_to_points(
+                total[m], src_lat, src_lon, src_valid,
+                lat2d_deg, lon2d_deg, k=4, max_deg=2.0)
         Rm = np.maximum(Rm, 0.0)
         # COASTAL SPREAD (codex conservation flag + SSS-quality): the NN/IDW
         # regrid concentrates each river in ~1 model cell -> over-fresh spots that
@@ -7353,6 +7392,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "single surface cell — fixes the too-fresh/too-shallow "
                         "Amazon-type plume. Column-integral salt unchanged. "
                         "Default None = legacy top-cell (bit-exact).")
+    p.add_argument("--runoff-regrid", type=str, default="idw4",
+                   choices=["idw4", "volume_nearest"],
+                   help="How NEMO's Dai-Trenberth runoff reaches the model grid. "
+                        "'idw4' (default, unchanged) averages runoff INTENSITY from "
+                        "the 4 nearest discharge cells, then a global renorm; it "
+                        "is not conservative river by river (FESOM White Sea got "
+                        "203 of 3018 m3/s). 'volume_nearest' sends each discharge "
+                        "cell's volume to its nearest wet model cell, then the "
+                        "same spread passes and renorm.")
     p.add_argument("--runoff-spread-passes", type=int, default=None,
                    help="HORIZONTAL coastal-spread passes for the regridded "
                         "runoff (ocean-masked neighbour-average; Voronoi-topology "
@@ -9511,7 +9559,8 @@ def main() -> int:
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread,
             # --isf deposits the SAME file's sornfisf at depth -> drop it from
             # the surface runoff or the ice-shelf melt is counted twice.
-            exclude_isf=args.isf)
+            exclude_isf=args.isf,
+            regrid=args.runoff_regrid)
     if ((args.runoff_dep_max is not None or args.runoff_rnf_max is not None)
             and not args.runoff_depth_nemo_ini):
         raise SystemExit(

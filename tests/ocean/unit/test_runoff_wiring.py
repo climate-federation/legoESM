@@ -97,3 +97,45 @@ def test_arctic_salt_forcing_flags_registered(capsys):
     for flag in ("--sss-restore-file", "--nemo-monthly-init",
                  "--nemo-init-month", "--runoff-depth-nemo-ini"):
         assert flag in out, flag
+
+
+def _white_sea_totals(regrid):
+    """Jan runoff [m3/s] in 63-68N 30-45E: (model grid, NEMO source file)."""
+    import xarray as xr
+    from legoesm.grids.latlon import create_latlon_grid
+    grid = create_latlon_grid(90, 180)
+    lon2d, lat2d = np.meshgrid(np.rad2deg(np.asarray(grid.lon)),
+                               np.rad2deg(np.asarray(grid.lat)))
+    lon2d = np.where(lon2d > 180.0, lon2d - 360.0, lon2d)
+    Rm = R.load_runoff_monthly(grid, "latlon", lat2d, lon2d, None,
+                               land_mask=np.ones((90, 180)), spread_passes=0,
+                               regrid=regrid)[0]
+    box = (lat2d >= 63) & (lat2d <= 68) & (lon2d >= 30) & (lon2d <= 45)
+    tgt = float((Rm * np.asarray(grid.area))[box].sum()) / 1000.0
+    ds = xr.open_dataset(R._RUNOFF_NC, decode_times=False)
+    src = sum(np.nan_to_num(np.asarray(ds[v].values[0], float))
+              for v in R._runoff_component_vars(False) if v in ds)
+    sl, so = R._squeeze2d(ds["nav_lat"].values), R._squeeze2d(ds["nav_lon"].values)
+    so = np.where(so > 180.0, so - 360.0, so)
+    sbox = (sl >= 63) & (sl <= 68) & (so >= 30) & (so <= 45)
+    return tgt, float((src * R._load_nemo_cell_area_m2())[sbox].sum()) / 1000.0
+
+
+def test_volume_nearest_conserves_each_river_locally():
+    """volume_nearest keeps the White Sea's rivers in the White Sea (to the
+    global renorm, ~1); idw4 is reported alongside as the defect it replaces."""
+    tgt, src = _white_sea_totals("volume_nearest")
+    tgt_idw, _ = _white_sea_totals("idw4")
+    print(f"White Sea Jan runoff m3/s: source {src:.0f}, volume_nearest {tgt:.0f}, idw4 {tgt_idw:.0f}")
+    assert src > 1000.0
+    assert abs(tgt / src - 1.0) < 0.10, (tgt, src)
+
+
+def test_unknown_runoff_regrid_raises():
+    from legoesm.grids.latlon import create_latlon_grid
+    grid = create_latlon_grid(10, 20)
+    lon2d, lat2d = np.meshgrid(np.rad2deg(np.asarray(grid.lon)),
+                               np.rad2deg(np.asarray(grid.lat)))
+    with pytest.raises(ValueError, match="runoff regrid"):
+        R.load_runoff_monthly(grid, "latlon", lat2d, lon2d, None,
+                              land_mask=np.ones((10, 20)), regrid="bogus")
