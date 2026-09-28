@@ -116,6 +116,9 @@ Focused observer, round-50/51/60/61, and citation tests passed **38 / 38**.
 The default citation audit passed 274 citations with zero unmapped entries; a
 real shifted-line plant on the pre-implicit-state citation exited 1 with
 `SYMBOL-NOT-AT-LINE`.
+The round-61 receipt audit separately passed all 6 citations with zero unmapped
+entries; its shifted raw-Kaa capture plant exited 1 with
+`SYMBOL-NOT-AT-LINE`.
 
 The one permitted `tests/ocean/fidelity -n 12` battery collected 1,976 tests,
 reached 99%, and reproduced the registered terminal zero-progress stall before
