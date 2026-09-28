@@ -746,18 +746,51 @@ def relative_humidity(
     return e / saturation_vapor_pressure(T)
 
 
-def latent_heat_vaporization_sst(T_sfc_K: jax.Array) -> jax.Array:
-    """SST-dependent latent heat of vaporization [J/kg].
+def latent_heat_vaporization(
+    T: jax.Array,
+    c_liquid: float = constants.c_pw,
+) -> jax.Array:
+    """Latent heat of vaporization at ``T`` [J/kg], Kirchhoff form.
 
-    The NEMO/AeroBulk air-sea convention (sbc_phy ``L_vap``, also
-    COARE/Fairall): ``L = L_v - L_v_sst_slope (T - T_freeze)``; equals
-    ``constants.L_v`` at 0 degC by construction.  Up to ~3 % smaller than
-    the constant at warm SST (issue #762).  Dtype-preserving — the OMIP
-    NEMO-parity path wraps this with its float64 pin.
+    ``L_v(T) = L_v - (c_liquid - c_pv) (T - T_freeze)``: equals ``constants.L_v``
+    at 0 degC and falls by ``c_pw - c_pv`` = 2372 J/kg per kelvin (about 3 %
+    lower at 30 degC).  THE latent heat of the codebase: every surface flux,
+    coupler tile, land/ice/ocean exchange and budget ledger uses this family
+    (``latent_heat_sublimation``, ``latent_heat_fusion``, ``surface_latent_heat``);
+    the former NEMO/AeroBulk empirical slope (2370) and the DifferBESS canopy
+    slope were retired in its favour.  ``c_liquid`` exists for Emanuel's CONVECT
+    port, which carries its own tunable liquid heat capacity.  Dtype-preserving.
     """
-    return constants.L_v - constants.L_v_sst_slope * (
-        T_sfc_K - constants.T_freeze
-    )
+    return constants.L_v - (c_liquid - constants.c_pv) * (T - constants.T_freeze)
+
+
+def latent_heat_sublimation(T: jax.Array) -> jax.Array:
+    """Latent heat of sublimation at ``T`` [J/kg], Kirchhoff form.
+
+    ``L_s(T) = L_s + (c_pv - c_pi) (T - T_freeze)``; ``c_pv < c_pi`` so it
+    DEcreases with temperature (2.8347e6 at 0 degC, larger in the cold).
+    """
+    return constants.L_s + (constants.c_pv - constants.c_pi) * (T - constants.T_freeze)
+
+
+def latent_heat_fusion(T: jax.Array) -> jax.Array:
+    """Latent heat of fusion at ``T`` [J/kg]: ``L_s(T) - L_v(T)`` identically,
+    i.e. ``L_f + (c_pw - c_pi) (T - T_freeze)``."""
+    return latent_heat_sublimation(T) - latent_heat_vaporization(T)
+
+
+def surface_latent_heat(T_sfc: jax.Array, frozen_fraction) -> jax.Array:
+    """Latent heat [J/kg] of the water leaving a surface at ``T_sfc``.
+
+    ``(1 - f) L_v(T) + f L_s(T)`` with ``f`` the frozen (snow / ice) fraction of
+    the evaporating surface -- a fractional weight, not a threshold switch, so
+    the flux is continuous and differentiable across melt-out.  A tile made of
+    several evaporating components (transpiring canopy under a sublimating
+    snowpack, ice categories) sums ``L * E`` per component instead of calling
+    this with an aggregate temperature.
+    """
+    f = jnp.asarray(frozen_fraction, dtype=jnp.asarray(T_sfc).dtype)
+    return (1.0 - f) * latent_heat_vaporization(T_sfc) + f * latent_heat_sublimation(T_sfc)
 
 
 def moist_air_cp(q_air: jax.Array) -> jax.Array:

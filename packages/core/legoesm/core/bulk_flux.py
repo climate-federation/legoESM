@@ -1252,8 +1252,8 @@ def compute_most_fluxes(
     if L_latent is not None:
         _L = L_latent
     elif thermo_convention == "aerobulk":
-        from legoesm.thermo import latent_heat_vaporization_sst
-        _L = latent_heat_vaporization_sst(T_sfc)
+        from legoesm.thermo import latent_heat_vaporization
+        _L = latent_heat_vaporization(T_sfc)
     else:
         _L = constants.L_v
     if thermo_convention == "aerobulk":

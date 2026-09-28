@@ -29,7 +29,7 @@ from legoesm import constants  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
     air_sea_fluxes,
     exner_potential_temperature,
-    latent_heat_vaporization_sst,
+    latent_heat_vaporization_sst as latent_heat_vaporization,
     moist_air_cp,
     ncar_transfer_coefficients,
     potential_air_temperature_10m,
@@ -176,7 +176,7 @@ def _np_fluxes(u, v, T_air, q_air, sst, slp):
     Urho = Ub * np.maximum(rho, 1.0)
     tau_x = -Urho * Cd * u
     tau_y = -Urho * Cd * v
-    L_vap = (2.501 - 0.00237 * (theta_sst - _RT0)) * 1e6  # const-ok: NEMO L_vap mirror
+    L_vap = 2.501e6 - (4218.0 - 1846.0) * (theta_sst - _RT0)  # const-ok: Kirchhoff L_v(T) mirror
     cp_a = 1005.0 + 1860.0 * q_air
     zevap = Urho * Ce * (q_air - ssq)
     sh = Urho * Ch * (theta_air - theta_sst) * cp_a
@@ -336,10 +336,10 @@ def test_rho_air_moist_reference_and_floor():
 
 
 def test_l_vap_and_cp_air_reference():
-    assert float(latent_heat_vaporization_sst(constants.T_freeze)) == (
+    assert float(latent_heat_vaporization(constants.T_freeze)) == (
         pytest.approx(constants.L_v, rel=1e-12))
-    assert float(latent_heat_vaporization_sst(constants.T_freeze + 25.0)) == (
-        pytest.approx(constants.L_v - 2.37e3 * 25.0, rel=1e-12))
+    assert float(latent_heat_vaporization(constants.T_freeze + 25.0)) == (
+        pytest.approx(constants.L_v - (constants.c_pw - constants.c_pv) * 25.0, rel=1e-12))
     assert float(moist_air_cp(0.0)) == pytest.approx(
         constants.c_p_dry_air_nemo, rel=1e-12)
     assert float(moist_air_cp(0.01)) == pytest.approx(
@@ -407,7 +407,7 @@ def test_fluxes_signs_and_consistency():
     # (BULK_FORMULA pTs = zsspt), not the absolute SST.
     theta_sst = exner_potential_temperature(jnp.asarray(291.0),
                                             jnp.asarray(101000.0))
-    L = float(latent_heat_vaporization_sst(theta_sst))
+    L = float(latent_heat_vaporization(theta_sst))
     assert float(evap) == pytest.approx(-float(lh) / L, rel=1e-12)
 
 
