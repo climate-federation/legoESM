@@ -626,17 +626,20 @@ def check_soil_hydraulics_stamp(meta, path) -> dict[str, Any]:
 
 
 # Wet cap of the IC conform, as a margin below effective saturation Se = 1
-# (user decision 2026-09-28: "1e-4 under").
+# (user decision 2026-09-28, "1e-4 under", read as an Se margin).  It must stay
+# well above the retention curve's own clip (Se = 1 - 1e-6, 100x smaller, also
+# above float32 rounding) or conformed layers land back on the saturated branch.
 _WET_CAP_SE_MARGIN = 1.0e-4
 
 
 def conform_soil_water(theta, dz, hydraulics, land_mask=None):
-    """Move a soil-water profile into the band the Richards step can hold.
+    """Move a soil-water profile between the solver's dry floor and a wet cap.
 
     Host-side, float64.  Per column, conserving the column's water exactly:
 
-    1. WET: layers above the wet cap (effective saturation ``1 - 1e-4``, just
-       below ``theta_sat``) give their excess to the column's layers below it,
+    1. WET: layers above the wet cap (effective saturation
+       ``1 - _WET_CAP_SE_MARGIN``, just below ``theta_sat``) give their excess
+       to the column's layers below it,
        in proportion to each layer's room.  What the column
        cannot store is returned as ``pond_add`` [m] for the surface water, which
        the first Richards step keeps up to ``pond_max`` and routes the rest to

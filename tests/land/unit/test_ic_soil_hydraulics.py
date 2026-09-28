@@ -17,7 +17,7 @@ import pytest
 
 from legoesm.land.restart import (
     HYDRAULICS_SOURCE_CLM_MAP, HYDRAULICS_SOURCE_SURFDATA_COSBY,
-    conform_soil_water, convert_ic_soil_water, load_land_restart,
+    _WET_CAP_SE_MARGIN, conform_soil_water, convert_ic_soil_water, load_land_restart,
     save_land_restart, soil_hydraulics_column_signature, soil_hydraulics_stamp,
     soil_hydraulics_stamps_match)
 from legoesm.land.richards import RichardsConfig, psi_dry_floor, solve_richards
@@ -63,7 +63,7 @@ def _bands(h):
     lo = np.broadcast_to(np.asarray(theta_from_psi(psi_dry_floor(h), h)),
                          (_NCOL, _NLAY))
     tr = np.asarray(h.theta_r)
-    hi = np.broadcast_to(tr + (1.0 - 1.0e-4) * (np.asarray(h.theta_sat) - tr),
+    hi = np.broadcast_to(tr + (1.0 - _WET_CAP_SE_MARGIN) * (np.asarray(h.theta_sat) - tr),
                          (_NCOL, _NLAY))
     return lo, hi
 
@@ -133,7 +133,10 @@ def test_conform_conserves_each_column_and_lands_in_the_band():
     assert pond[2] > 0 and pond[4] > 0 and np.all(pond[[0, 1, 3, 5]] == 0)
     np.testing.assert_allclose(new[2], hi[2])
     np.testing.assert_allclose(new[4], hi[4])
-    assert np.all(new[land] < np.asarray(h.theta_sat)[land])
+    sat = np.broadcast_to(np.asarray(h.theta_sat), new.shape)
+    tr = np.broadcast_to(np.asarray(h.theta_r), new.shape)
+    # Strictly off the retention curve's saturated clip (Se = 1 - 1e-6).
+    assert np.all((new[land] - tr[land]) / (sat[land] - tr[land]) < 1.0 - 1.0e-5)
     assert rep["dry_columns"] == 1 and rep["pond_columns"] == 2
     assert rep["wet_columns"] == 3
 
@@ -233,14 +236,14 @@ def _wet_ch_world_state():
     return _state(theta, psi)
 
 
-_UNCONVERGED_PICARD = pytest.mark.xfail(strict=True, reason=(
-    "pre-existing Richards defect: on a wet-over-dry front the fixed-count "
-    "Picard iteration does not converge (it cycles between two states), and an "
-    "unconverged iterate is not mass-conservative (about 0.5 mm here, 117 mm "
-    "for a real column filled to exact saturation). Separate fix."))
+_WET_FRONT_PICARD = pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "pre-existing Richards defect: on this wet-over-dry front the fixed-count "
+    "Picard iteration cycles between two states (max_iter 199 vs 201: top "
+    "theta 0.277 vs 0.429) and neither iterate is mass-conservative "
+    "(-0.56 / +0.53 mm). Separate solver fix."))
 
 
-@pytest.mark.parametrize("wet", [False, pytest.param(True, marks=_UNCONVERGED_PICARD)])
+@pytest.mark.parametrize("wet", [False, pytest.param(True, marks=_WET_FRONT_PICARD)])
 @pytest.mark.parametrize("dtype,atol_mm", [(jnp.float64, 1e-9), (jnp.float32, 1e-2)])
 def test_first_step_after_conversion_closes_the_water_budget(
         tmp_path, dtype, atol_mm, wet):
@@ -298,11 +301,7 @@ def test_one_day_keeps_the_deep_water_that_the_carried_potential_loses(tmp_path)
     assert deep0 - deep_after_one_day(st0) > 0.05
 
 
-@_UNCONVERGED_PICARD
-def test_overflowing_column_closes_the_budget_on_its_first_step(tmp_path):
-    """A column holding more than it can store: saturated throughout, the rest
-    in the surface pond, which the first step keeps up to pond_max and runs
-    off beyond it."""
+def _overflow_first_step(tmp_path):
     run = soil_hydraulics_stamp("van_genuchten", HYDRAULICS_SOURCE_CLM_MAP,
                                 _param_file(tmp_path))
     src = soil_hydraulics_stamp("clapp_hornberger", HYDRAULICS_SOURCE_SURFDATA_COSBY,
@@ -310,8 +309,28 @@ def test_overflowing_column_closes_the_budget_on_its_first_step(tmp_path):
     theta = np.full((_NCOL, _NLAY), 0.45)
     st0 = _state(theta, np.asarray(psi_from_theta(jnp.asarray(theta), _ch())))
     conv, rep = convert_ic_soil_water(st0, _meta(src, True), _vg(), run, _DZ)
+    return conv, rep, _one_step(conv, _vg(), jnp.float64)
+
+
+def test_overflowing_column_goes_to_the_cap_and_the_pond(tmp_path):
+    """A column holding more than it can store: every layer at the wet cap,
+    the rest in the surface pond, which the first step keeps up to pond_max
+    and runs off beyond it."""
+    conv, rep, o = _overflow_first_step(tmp_path)
     assert rep["pond_columns"] == _NCOL
-    o = _one_step(conv, _vg(), jnp.float64)
+    assert np.all(np.asarray(conv.surface_water) > 0.05)   # beyond pond_max
+    assert np.all(np.isfinite(np.asarray(o.theta_new)))
+    assert np.all(np.asarray(o.surface_water) <= 0.05 + 1e-12)
+    assert np.all(np.asarray(o.runoff_surface) > 0)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "pre-existing Richards defect, second trigger: pond infiltration pushes the "
+    "capped top layers onto the elastic branch (psi > 0) and the fixed-count "
+    "Picard iteration cycles between two states (odd vs even iterates) that "
+    "are not mass-conservative (-0.018 / -0.023 mm). Separate solver fix."))
+def test_overflowing_column_first_step_closes_the_budget(tmp_path):
+    conv, _, o = _overflow_first_step(tmp_path)
     w0 = (np.asarray(conv.theta_soil) * _DZ).sum(1) + np.asarray(conv.surface_water)
     w1 = (np.asarray(o.theta_new) * _DZ).sum(1) + np.asarray(o.surface_water)
     out = (np.asarray(o.runoff_surface) + np.asarray(o.runoff_subsurface)) * 300.0 / 1e3
