@@ -62,6 +62,10 @@ def _score(name: str, oracle, candidate, *, plant: bool = False) -> dict:
         require(flat[planted_index] != candidate.reshape(-1)[planted_index],
                 f"{name}: plant did not move")
     unequal = _bits(tested) != _bits(oracle)
+    absolute = np.abs(tested - oracle)
+    spacing = np.abs(np.spacing(oracle))
+    require(np.all(spacing > 0.0), f"{name}: invalid fp64 spacing")
+    scale = np.maximum(np.abs(oracle), np.finfo(np.float64).tiny)
     return {
         "name": name,
         "status": "BIT_EXACT" if not unequal.any() else "NON_BIT",
@@ -69,7 +73,9 @@ def _score(name: str, oracle, candidate, *, plant: bool = False) -> dict:
         "n": int(oracle.size),
         "baseline_n_unequal": int(np.count_nonzero(baseline)),
         "n_unequal": int(np.count_nonzero(unequal)),
-        "absolute_max": float(np.max(np.abs(tested - oracle))),
+        "absolute_max": float(np.max(absolute)),
+        "relative_max": float(np.max(absolute / scale)),
+        "row_scale_ulp_max": float(np.max(absolute / spacing)),
         "plant": plant,
         "planted_flat_index": planted_index,
     }
