@@ -48,7 +48,7 @@ def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
 
     # A NEMO card on the ln_zdfiwm=.FALSE. arm: it SELECTS the derivation
     # (zdftke.F90:845-846) and the compiled masked anchor statement
-    # (zdftke.F90:640-642).  Without those two selections the card keeps its
+    # (zdftke.F90:602).  Without those two selections the card keeps its
     # own mxl_min, which is what every non-NEMO card must keep.
     cfg = TKEConfig(
         tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,

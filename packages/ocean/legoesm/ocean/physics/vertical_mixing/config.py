@@ -281,7 +281,7 @@ class TKEConfig(NamedTuple):
     #   derivation is evaluated in binary64 and RAISES without x64, so the
     #   requirement lands only on the cards that ask for it.
     nemo_derived_mxl_min: bool = False
-    # ``ln_mxl0`` surface-anchor masking (zdftke.F90:640-642 evaluates
+    # ``ln_mxl0`` surface-anchor masking (zdftke.F90:602 evaluates
     # ``taum(:,:)*tmask(:,:,1)``).  ``False`` (DEFAULT, main's behaviour):
     # the anchor is built from ``taum`` alone and a caller that has no
     # surface T-mask (FESOM) is accepted.  ``True``: the compiled masked

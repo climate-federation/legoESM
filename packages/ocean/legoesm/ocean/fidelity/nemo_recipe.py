@@ -246,7 +246,8 @@ def _nemo_tke_config() -> TKEConfig:
         # mxl_min.  ORCA2 overrides this pair: its namelist_cfg:396 sets
         # ln_zdfiwm=.TRUE., which forces rmxl_min = 1e-3 (zdftke.F90:841-843).
         nemo_derived_mxl_min=True,
-        # zdftke.F90:640-642 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1).
+        # zdftke.F90:602 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1);
+        # :640-642 is the rn_mxl0 floor that follows it.
         nemo_mxl0_surface_tmask=True,
         # NEMO stp ordering: eosbn2 runs at step start (bn2(Nnow)), BEFORE
         # tra_adv. Sampling the diffusivity-stage N² on the before-advection

@@ -591,7 +591,8 @@ class DINOConfig:
     # rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin)) = 1e-2 m (:846).  Only the NEMO
     # DINO cards select it; a generic DINO recipe keeps its configured floor.
     tke_nemo_derived_mxl_min: bool = False
-    # zdftke.F90:640-642 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1).
+    # zdftke.F90:602 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1);
+    # :640-642 is the rn_mxl0 floor that follows it.
     # Only the NEMO DINO cards select the masked statement.
     tke_nemo_mxl0_surface_tmask: bool = False
     # T18b — DRY-w-point TKE: NEMO closes tke_tke with

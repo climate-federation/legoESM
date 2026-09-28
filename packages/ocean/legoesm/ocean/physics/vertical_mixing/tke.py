@@ -208,7 +208,7 @@ def _mixing_length_floor(cfg: "TKEConfig"):
 def _mxl0_surface_anchor(
     cfg: "TKEConfig", taum, rho_0: float, g: float, surface_tmask=None,
 ):
-    """ln_mxl0 surface anchor (shipped zdftke.F90:575,598-603,640-642).
+    """ln_mxl0 surface anchor (shipped zdftke.F90:575,602,640-642).
 
     zdf_tke_init first overwrites rn_mxl0 with the derived rmxl_min when
     ln_mxl0 is true (shipped zdftke.F90:859-862; GYRE ppsrc:829-832), then
@@ -229,7 +229,7 @@ def _mxl0_surface_anchor(
             raise ValueError(
                 "TKEConfig.nemo_mxl0_surface_tmask=True requires "
                 "surface_tmask for the compiled `taum*tmask(:,:,1)` ln_mxl0 "
-                "statement (zdftke.F90:640-642).")
+                "statement (zdftke.F90:602).")
         surface_tmask = jnp.asarray(surface_tmask, dtype=taum.dtype)
         if surface_tmask.shape != taum.shape:
             raise ValueError(
@@ -832,7 +832,7 @@ def compute_mixing_lengths(
         raw_evaluation = getattr(cfg, "tke_mxl_raw_evaluation", "factored")
         l_int = _tke_raw_mixing_length(e, N2, cfg)
         # ln_mxl0 surface anchor l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
-        # (shipped zdftke.F90:575,598-603,640-642), computed by the CALLER
+        # (shipped zdftke.F90:575,602,640-642), computed by the CALLER
         # (which owns taum/rho_0/g and the surface tmask)
         # and passed via l_surface_anchor. The no-anchor fallback used to claim
         # NEMO's ln_mxl0=F branch, but that branch uses raw rn_mxl0

@@ -136,7 +136,7 @@ def test_orca1_card_keeps_the_unmasked_ln_mxl0_anchor(iwm_enabled):
     """Decision 66: the ORCA1 card must NOT take NEMO's masked anchor.
 
     NEMO's compiled statement multiplies the surface stress by tmask(:,:,1)
-    (zdftke.F90:640-642), which collapses the anchor to the mixing-length
+    (zdftke.F90:602), which collapses the anchor to the mixing-length
     floor on LAND columns.  That transcription belongs to the NEMO-literal
     cards; this card keeps the behaviour it had before the branch.  The test
     fails both ways: if the card re-selects the mask, and if the library

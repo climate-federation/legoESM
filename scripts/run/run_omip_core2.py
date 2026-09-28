@@ -774,7 +774,7 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         nemo_derived_mxl_min=False,
         # DECISION 66 (user, 2026-09-28): this ORCA1 card keeps its PREVIOUS,
         # UNMASKED ln_mxl0 surface anchor.  NEMO's compiled statement does
-        # multiply the stress by tmask(:,:,1) (zdftke.F90:640-642), and that
+        # multiply the stress by tmask(:,:,1) (zdftke.F90:602), and that
         # transcription stays available -- but only to the NEMO-literal cards,
         # which select it with nemo_mxl0_surface_tmask=True.  tmask(:,:,1) is 1
         # on every WET column, so the two arms differ on LAND columns only, and
