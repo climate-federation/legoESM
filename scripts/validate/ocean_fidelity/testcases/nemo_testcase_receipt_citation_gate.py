@@ -132,6 +132,9 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/istate.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/istate.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/iceistate.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/mppini.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/mppini.f90"),
@@ -1435,6 +1438,19 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:670-681': [
         ('SELECT CASE( kstg )', 4),
         ('END DO   ;   END DO   ;   END DO', 8), 12],
+    # --- ORCA2 card round 66: independent from-rest entry ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/istate.f90:93-140': [
+        ('CALL dta_tsd_init', 1),
+        ('vv    (:,:,:,Kmm) = vv   (:,:,:,Kbb)', 1), 48],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:217-254': [
+        ('!                                   !==   ORCA_R2 configuration and T & S damping   ==!', 1),
+        ('ENDIF', 9), 38],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:307-310': [
+        ('DO jk =  1,  jpk', 2),
+        ('END DO   ;   END DO   ;   END DO', 2), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90:440-465': [
+        ('! 4) Adjust ssh and vertical scale factors to snow-ice mass', 1),
+        ('CALL dom_qco_zgr( Kbb, Kmm )', 1), 26],
     # --- ORCA2 card round 45: stage-1 r3 interpolation owner ---
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:160-179': [
         ('!                     !==  ssh/h0 ratio at Kaa  ==!', 1),
