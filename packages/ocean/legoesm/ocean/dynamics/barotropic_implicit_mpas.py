@@ -526,11 +526,17 @@ def barotropic_implicit_mpas(
     # predictor consumes 1-2 more tangential hops of both.  One packed
     # edge message re-arms them (solver-internal matvecs already exchange
     # per iteration — audit table stage 4').
-    if halo_refresh is not None:
-        u_bar_old, F_slow_u = halo_refresh.edges(u_bar_old, F_slow_u)
+    # [stage-halo I1] the step-3 flux divergence of the eta gradient needs a
+    # refreshed gradient ring (stage audit).  grad_eta_old does not depend on
+    # the I0-refreshed fields, so it rides in the same message; the predictor
+    # keeps the unrefreshed copy.
     eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2,
                                           mesh.edgesOnCell, mesh.nEdgesOnCell)
     grad_eta_old = gradient_edge(eta_filled_old, mesh).astype(eta_dtype)
+    grad_eta_for_div = grad_eta_old
+    if halo_refresh is not None:
+        u_bar_old, F_slow_u, grad_eta_for_div = halo_refresh.edges(
+            u_bar_old, F_slow_u, grad_eta_old)
     f_e = mesh.fEdge.astype(eta_dtype)
 
     v_t_old = tangential_velocity(u_bar_old, mesh)
@@ -562,12 +568,6 @@ def barotropic_implicit_mpas(
     div_HU_pred = divergence_cell(flux_HU_pred, mesh) * mask
     div_HU_pred = div_HU_pred.astype(eta_dtype)
 
-    # [stage-halo I1] fill+grad already consumed eta's 2-ring budget; the
-    # flux divergence below is a 3rd chained hop, so refresh the gradient
-    # ring first (edge field).
-    grad_eta_for_div = grad_eta_old
-    if halo_refresh is not None:
-        (grad_eta_for_div,) = halo_refresh.edges(grad_eta_for_div)
     flux_eta_old = H_e_old * grad_eta_for_div * edge_mask
     div_grad_eta_old = divergence_cell(flux_eta_old, mesh) * mask
     div_grad_eta_old = div_grad_eta_old.astype(eta_dtype)
