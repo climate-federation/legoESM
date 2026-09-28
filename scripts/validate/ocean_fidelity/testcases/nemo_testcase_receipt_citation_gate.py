@@ -1276,7 +1276,7 @@ CITATION_MAP = {
         'IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN',
         'WRITE(cl_traj,\'("oracle_step_entry_kt",I8.8,".bin")\') kstp', 3],
     # --- ORCA2 card round 69: surface operands are complete after sbc ---
-    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:150-152': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:151-152': [
         'CALL sbc        ( kstp, Nbb, Nbb )',
         'CALL l4_dump_ocean_surface_input( kstp, Nbb )', 3],
     # --- ORCA2 card round 6: full-domain entry and first runtime stop ---
