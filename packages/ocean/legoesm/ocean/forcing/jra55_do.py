@@ -176,6 +176,9 @@ def _load_from_builder_cache(store: Path, year: int,
 
     ds = xr.open_zarr(store)
     a = ds.attrs
+    missing = [k for k in ("year_start", "year_end", "ref_year") if k not in a]
+    if missing:
+        raise ValueError(f"{store}: malformed JRA55-do cache: missing attrs {missing}")
     y0, y1 = int(a["year_start"]), int(a["year_end"])
     per_year = NOLEAP_DAYS_PER_YEAR * RECORDS_PER_DAY
     n_time = ds.sizes["time"]

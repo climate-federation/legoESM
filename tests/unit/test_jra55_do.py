@@ -996,6 +996,7 @@ def test_ocean_loader_refuses_celsius_and_transposed_fields(two_year_builder_cac
     (lambda g: g.attrs.update(n_records=10), "n_records"),
     (lambda g: g.attrs.update(calendar="standard"), "calendar"),
     (lambda g: g["tas"].__setitem__((5, 0, 0), np.nan), "non-finite"),
+    (lambda g: g.attrs.pop("year_start"), "missing attrs"),
 ])
 def test_ocean_loader_rejects_malformed_builder_cache(
         two_year_builder_cache, tmp_path, mutate, match):
