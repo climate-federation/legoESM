@@ -100,8 +100,19 @@ terminal verdict was:
 Therefore **independent review unavailable in-sandbox**.  The artifact SHA-256
 is `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-The focused round-62 controls pass 11 / 11.  Final citation and ocean-fidelity
-battery results are recorded in the closing commit.
+The focused round-50/53/56/62 and citation controls pass **47 / 47**.  The
+default citation audit and this receipt each pass with zero unmapped entries;
+shifting the compiled barotropic-subtraction citation by two lines exits 1
+with `SYMBOL-NOT-AT-LINE`.
+
+The one permitted `tests/ocean/fidelity -n 12` battery collected 1,987 tests,
+reached 99%, and reproduced the registered terminal zero-progress stall; it
+was interrupted after sustained silence.  Before the stall it emitted the
+same five pre-existing failures as round 61.  Their isolated rerun retained
+the exact signatures: SI3 `MY_SRC` provenance, round-129 stale phase-3
+certification, round-51 private trace registry, the three worktree-stamp
+offenders, and the missing `hires_lane_surface` case-board row.  All five
+failed as expected; no round-62 test failed.
 
 ## Scope ledger
 
