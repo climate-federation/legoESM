@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# ORCA2 round-62 acquisition: split stage-2 vector advection into KEG and ZAD.
+# ORCA2 round-63 acquisition: repaired split of stage-2 vector advection.
 # The operator runs this file; the agent does not invoke mpirun in the sandbox.
 set -Eeuo pipefail
 
 refuse_unexpected() {
   local status=$?
-  printf 'REFUSE: round-62 vector split failed at line %s (exit %s)\n' \
+  printf 'REFUSE: round-63 vector split failed at line %s (exit %s)\n' \
     "${BASH_LINENO[0]:-unknown}" "$status" >&2
   exit "$status"
 }
@@ -21,11 +21,11 @@ export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/l
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY
-readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP
+readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2
-readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round62/acquisition_vector_split
+readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round63/acquisition_vector_split
 readonly TARGET_RUN=$EVIDENCE/orca1ice_vector_advection_split_np2
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
@@ -37,7 +37,7 @@ readonly DYN_PATCH=$here/dynadv_round62.patch
 readonly STG_PATCH=$here/stprk3_stg_round62.patch
 readonly WRITER=$here/dynadv_round62_writer.F90
 readonly GATE=$here/../nemo_testcase_l4_orca2_round62_vector_split_admission.py
-readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round62_vector_advection.md
+readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round63_vector_record_reconciliation.md
 readonly SOURCE_DYN=$NEMO_ROOT/src/OCE/DYN/dynadv.F90
 readonly SOURCE_STG=$SOURCE_ROOT/MY_SRC/stprk3_stg.F90
 
@@ -111,7 +111,7 @@ cpp -Dkey_nosignedzero -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
   "$syntax/dynadv_round62_writer.f90"
 printf 'SYNTAX_PROOF_PASS dynadv_round62_writer.f90\n'
 if [[ "$MODE" == --preflight-only ]]; then
-  printf 'ORCA2_ROUND62_VECTOR_SPLIT_PREFLIGHT_READY %s\n' "$TARGET_RUN"
+  printf 'ORCA2_ROUND63_VECTOR_SPLIT_PREFLIGHT_READY %s\n' "$TARGET_RUN"
   exit 0
 fi
 
@@ -121,16 +121,16 @@ admit() {
   [[ "$(cat "$TARGET_RUN/producer_commit.txt")" == "$COMMIT" ]] || { printf 'REFUSE: producer commit changed\n' >&2; exit 70; }
   for plant in header field-order truncation restart stamp; do
     if "$PY" "$GATE" --root "$TARGET_RUN" --baseline "$SOURCE_RUN" \
-      --expect-commit "$COMMIT" --plant "$plant" >"$TARGET_RUN/round62_${plant}_plant.log" 2>&1; then
+      --expect-commit "$COMMIT" --plant "$plant" >"$TARGET_RUN/round63_${plant}_plant.log" 2>&1; then
       printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 71
     fi
-    grep -q 'STATUS PLANT-FIRED' "$TARGET_RUN/round62_${plant}_plant.log"
+    grep -q 'STATUS PLANT-FIRED' "$TARGET_RUN/round63_${plant}_plant.log"
   done
   "$PY" "$GATE" --root "$TARGET_RUN" --baseline "$SOURCE_RUN" \
-    --expect-commit "$COMMIT" --output "$TARGET_RUN/round62_vector_split_admission.json"
+    --expect-commit "$COMMIT" --output "$TARGET_RUN/round63_vector_split_admission.json"
   ( cd "$TARGET_RUN" && sha256sum oracle_vector_adv_split_*.bin ORCA2_00000010_restart*.nc \
-      round62_vector_split_admission.json round62_*_plant.log >round62_outputs.sha256 )
-  printf 'ORCA2_ROUND62_VECTOR_SPLIT_ACQUISITION_PASS %s\n' "$TARGET_RUN"
+      round63_vector_split_admission.json round63_*_plant.log >round63_outputs.sha256 )
+  printf 'ORCA2_ROUND63_VECTOR_SPLIT_ACQUISITION_PASS %s\n' "$TARGET_RUN"
 }
 
 if [[ "$MODE" == --admit-existing ]]; then

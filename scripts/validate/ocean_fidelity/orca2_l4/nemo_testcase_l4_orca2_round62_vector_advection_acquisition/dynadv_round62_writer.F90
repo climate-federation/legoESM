@@ -48,10 +48,10 @@ CONTAINS
    SUBROUTINE dynadv_round62_after_zad( kt, Kmm, Krhs, kscheme, puu, pvv )
       INTEGER, INTENT(in) :: kt, Kmm, Krhs, kscheme
       REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in) :: puu, pvv
-      INTEGER :: r62_unit, r62_ios
+      INTEGER :: r62_unit, r62_ios, ji, jj, jk
       CHARACTER(LEN=96) :: r62_file
       CHARACTER(LEN=16) :: r62_magic
-      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r62_zero
+      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r62_payload
       IF( kt /= nit000 .OR. r62_stage /= 2 ) RETURN
       IF( .NOT.ALLOCATED(r62_after_keg_u) ) CALL ctl_stop( 'round62 KEG frame is absent' )
       IF( STORAGE_SIZE(1._wp) /= 64 ) CALL ctl_stop( 'round62 vector writer requires fp64 wp' )
@@ -76,11 +76,17 @@ CONTAINS
       R62_3D('uu_Kmm          ',puu(:,:,:,Kmm))
       R62_3D('vv_Kmm          ',pvv(:,:,:,Kmm))
       R62_3D('ww              ',ww)
-      ALLOCATE( r62_zero(jpi,jpj,jpk) )
-      r62_zero(:,:,:) = 0._wp
-      R62_3D('wsd_effective   ',r62_zero)
-      R62_3D('e3u_Kmm         ',e3u(:,:,:,Kmm))
-      R62_3D('e3v_Kmm         ',e3v(:,:,:,Kmm))
+      ALLOCATE( r62_payload(jpi,jpj,jpk) )
+      r62_payload(:,:,:) = 0._wp
+      R62_3D('wsd_effective   ',r62_payload)
+      DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
+         r62_payload(ji,jj,jk) = e3u_3d(ji,jj,jk) * (1._wp + r3u(ji,jj,Kmm) * umask(ji,jj,jk))
+      END DO ; END DO ; END DO
+      R62_3D('e3u_Kmm         ',r62_payload)
+      DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
+         r62_payload(ji,jj,jk) = e3v_3d(ji,jj,jk) * (1._wp + r3v(ji,jj,Kmm) * vmask(ji,jj,jk))
+      END DO ; END DO ; END DO
+      R62_3D('e3v_Kmm         ',r62_payload)
       R62_2D('e1e2t           ',e1e2t)
       R62_2D('e1e2u           ',e1e2u)
       R62_2D('e1e2v           ',e1e2v)
@@ -93,7 +99,7 @@ CONTAINS
 #undef R62_3D
 #undef R62_2D
       CLOSE(r62_unit)
-      DEALLOCATE( r62_zero, r62_before_u, r62_before_v, r62_after_keg_u, r62_after_keg_v )
+      DEALLOCATE( r62_payload, r62_before_u, r62_before_v, r62_after_keg_u, r62_after_keg_v )
       WRITE(numout,*) 'ORCA2_R62_VECTOR_ADV_SPLIT ', kt, r62_stage, narea-1, TRIM(r62_file)
    END SUBROUTINE dynadv_round62_after_zad
 
