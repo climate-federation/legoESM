@@ -152,6 +152,7 @@ quoted from an older receipt.
 | barotropic first over bar | `{uu_b,vv_b}` at kt 2 | unchanged |
 | all 14 report content keys | — | identical |
 | 210 residual arrays | — | **0 unequal** |
+| the same, re-measured at the FINAL held tip `5f36257b7b` | — | **0 unequal**, no content key differs |
 | report digest, provenance stripped | `7ba15556de2de841` | `7ba15556de2de841` |
 
 ### GYRE — the from-rest year
@@ -261,8 +262,9 @@ One battery at a time on this host, every log under
 | gate | result |
 |---|---|
 | card gates: both DINO recipes, both tanks, the tank zero-diffusion removal, the DINO mesh / from-rest / step-1 / rank-dump gates | `221 passed, 9 warnings in 503.11s` |
-| the six-file push gate, on the committed tip, clean tree | `135 passed in 1298.87s (0:21:38)` |
-| the four CI ratchets | `1 failed, 10114 passed, 4 skipped in 109.21s` |
+| the six-file push gate plus this round's own test file, on the FINAL committed tip | `150 passed in 964.38s (0:16:04)` |
+| the same gate on the tip that still carried decision 67 | `135 passed in 1298.87s (0:21:38)` |
+| the four CI ratchets, final tip | `1 failed, 10114 passed, 4 skipped in 87.34s` |
 | receipt citation gate, cumulative default receipt | `PASS`, 274 citations, 0 failures, 0 unmapped, 0 map-audit failures, all 9 self-tests fired |
 | the same gate with a planted shift | `FAIL` and exit 1 — it can fail |
 | receipt citation gate, THIS receipt | `PASS`, 7 citations, 0 failures, 0 unmapped |
