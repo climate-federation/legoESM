@@ -369,41 +369,6 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
         return sum(f.coeffs.size for f in self.fields.values())
 
 
-def land_mask_from_phis(
-    phis: jax.Array,
-    *,
-    smooth: bool = True,
-    sharpness: float = 1.0e-2,
-) -> jax.Array:
-    """Derive a (soft) land mask from surface geopotential.
-
-    ``phis = g * z_s`` so positive ``phis`` indicates surface above sea
-    level (land).  For differentiability we default to a smooth
-    sigmoid in ``phis`` with a sharpness chosen so the transition zone
-    is roughly one model layer wide (~10 m elevation).
-
-    Parameters
-    ----------
-    phis : jax.Array
-        Surface geopotential, shape ``(n_lat, n_lon)`` [m^2/s^2].
-    smooth : bool
-        If True, use a sigmoid (differentiable).  If False, use a
-        hard step (non-differentiable).
-    sharpness : float
-        Sigmoid sharpness in 1/(m^2/s^2).  At ``sharpness=1e-2`` the
-        transition width in elevation is ~10 m (since
-        d(sigmoid)/d(phis)|_0 = sharpness/4 and phis = g*z_s).
-
-    Returns
-    -------
-    jax.Array
-        Land fraction in [0, 1], shape ``(n_lat, n_lon)``.
-    """
-    if smooth:
-        return jax.nn.sigmoid(sharpness * phis)
-    return jnp.where(phis > 0.0, 1.0, 0.0)
-
-
 def era5_land_fraction(grid) -> jax.Array:
     """ERA5 land-sea mask of the AIMIP store on ``grid``, shape (n_lat, n_lon).
 
