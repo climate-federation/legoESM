@@ -1429,6 +1429,9 @@ CITATION_MAP = {
         ('!        EMP, SFX and QNS effects', 2),
         ('ENDIF', 24), 54],
     # --- ORCA2 card round 44: first downstream source-order debt ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:467-480': [
+        ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN', 1),
+        ('END DO   ;   END DO   ;   END DO', 5), 14],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:670-681': [
         ('SELECT CASE( kstg )', 4),
         ('END DO   ;   END DO   ;   END DO', 8), 12],
