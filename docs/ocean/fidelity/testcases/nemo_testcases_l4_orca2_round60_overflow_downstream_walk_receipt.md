@@ -119,11 +119,19 @@ Therefore **independent review unavailable in-sandbox**.  The review artifact
 SHA-256 is
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-Verification results are recorded in the final round commits and evidence
-log: the focused round-60 gate tests pass; the default and round-60 citation
-gates plus their shifted-line plant are required to pass; and the single
-`tests/ocean/fidelity -n 12` battery is reported with registered reds kept
-distinct from new failures.
+The focused round-50/51/60 and citation battery passed **33 / 33**.  The
+default citation audit passed 274 citations with no unmapped entry; this
+receipt passed all four compiled citations; and shifting its QCO citation by
+two lines exited 1 as required.
+
+The one permitted `tests/ocean/fidelity -n 12` battery collected 1,972 tests,
+reached 99%, and reproduced the registered terminal zero-progress stall; it
+was interrupted after sustained silence.  Before the stall it reported the
+same five pre-existing reds as round 59.  An isolated rerun retained their
+exact signatures: SI3 `MY_SRC` provenance, round-129 stale phase-3
+certification, round-51 private trace registry, the three worktree-stamp
+offenders, and the missing `hires_lane_surface` case-board row.  No round-60
+test failed.
 
 ## Scope ledger
 
