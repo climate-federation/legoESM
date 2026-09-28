@@ -935,6 +935,17 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:327-363': [
         'CALL r50_mom_begin( kstp, kstg, Kbb, Kmm, Krhs, Kaa, ts, ssh, uu, vv )',
         "CALL r50_mom_uv( 'after_adv', uu, vv, Krhs )", 37],
+    # --- ORCA2 round 60: controlled OVERFLOW walk after stage-2 ADV ---
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:386-405': [
+        'SELECT CASE( kstg )',
+        '&             /           ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)',
+        20],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:412-433': [
+        'CASE ( 3 )        !==  Stage 3  ==!',
+        "CALL r50_mom_uv( 'raw_kaa', uu, vv, Kaa )", 22],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:436-448': [
+        '!==  All stages: correct the barotropic component ==!',
+        'CALL r50_mom_finish( uu, vv, Kaa )', 13],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:492-541': [
         '!                       !==  T-S Tracers  ==!',
         ('CALL r50_tra_finish( ts, ssh, Kaa )', 1), 50],
