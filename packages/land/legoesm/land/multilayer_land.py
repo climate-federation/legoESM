@@ -44,7 +44,11 @@ from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import solve_snow_soil_thermal, solve_soil_thermal
+from legoesm.land.soil_thermal import (
+    moisture_fusion_heat_source,
+    solve_snow_soil_thermal,
+    solve_soil_thermal,
+)
 from legoesm.land.snow_budget import update_snow_age
 from legoesm.land.snow_column import (
     SnowColumnState,
@@ -55,6 +59,12 @@ from legoesm.land.snow_column import (
     snow_thermal_props,
     total_water,
 )
+
+# Sub-steps of the final soil-thermal solve when soil freeze/thaw is on: at the
+# 1800 s land step a single apparent-heat-capacity step overshoots the 0 C
+# curtain in a thin top layer; six 300 s sub-steps keep it on the curtain
+# (user decision 2026-09-28).  A loop count, never config or trainable.
+FINAL_THERMAL_SUBSTEPS = 6
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
     intercept_rain,
@@ -608,7 +618,8 @@ def _step_multilayer_land_impl(
     _lp_soil = None          # two-leaf: params with soil bands at start-of-step water
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
-        # advances soil thermal tentatively between passes.
+        # advances soil thermal tentatively between passes.  These run before
+        # Richards on unchanged theta, so they carry no moisture fusion source.
         def _soil_thermal_cb(G, dt_):
             if layered:
                 # Tentative combined pack+soil solve; the SEB boundary is the
@@ -1201,7 +1212,13 @@ def _step_multilayer_land_impl(
             config.hydraulics, config.thermal,
             G_surface + evap_excess_energy, dt,
             surface_conductance=surface_out.surface_conductance,
-            T_snow_top_ref=T_pack_top_ref)
+            T_snow_top_ref=T_pack_top_ref,
+            n_substeps=(FINAL_THERMAL_SUBSTEPS
+                        if config.thermal.enable_freeze_thaw else 1))
+        # NOTE: this branch solves soil heat BEFORE Richards, so the fusion heat
+        # of the ice change Richards makes at fixed T (``moisture_fusion_heat_
+        # source``, charged on the bulk branch below) is NOT applied here; where
+        # to charge it in this ordering is an open decision.
         snow_T_top_excess = jnp.maximum(
             T_pack_solved[:, 0] - constants.T_freeze, 0.0)
         # Ground heat flux the column actually received [W/m^2]: the Robin term
@@ -1250,11 +1267,21 @@ def _step_multilayer_land_impl(
     # the coupling) and for slab builds that leave it unset -> explicit BC, unchanged.
     if not layered:
         G_surface = G_surface + evap_excess_energy
+        # Fusion heat of the ice change Richards made at fixed T (evaluated at the
+        # start-of-step T the apparent heat capacity uses).
+        _fusion_source = (
+            moisture_fusion_heat_source(
+                T_soil, theta, richards_out.theta_new, dz,
+                config.thermal, dt)
+            if config.thermal.enable_freeze_thaw else None)
         T_soil_new = solve_soil_thermal(
             T_soil, richards_out.theta_new, grid,
             config.hydraulics, config.thermal,
             G_surface, dt,
             surface_conductance=surface_out.surface_conductance,
+            layer_source=_fusion_source,
+            n_substeps=(FINAL_THERMAL_SUBSTEPS
+                        if config.thermal.enable_freeze_thaw else 1),
         )
 
     # --- Advance the 30-day TgC EMA (only when state carries it) ---

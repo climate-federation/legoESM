@@ -580,14 +580,20 @@ class DINOConfig:
     # T8 — Prandtl chain: NEMO's EXACT zri=rn2b*avm/(sh2+bshear) form
     # ("nemo_ri"), not Veros's own Ri=N2/shear_sq ("richardson", missing
     # the avm factor — see tke_prandtl_ri below, now wired to "nemo_ri").
-    # T18/T19 — mixing-length floors: NEMO's ln_mxl0 init OVERWRITES BOTH
-    # rn_mxl0 (surface) and rmxl_min (interior) to the SAME derived value
-    # rmxl_min=1e-6/(rn_ediff*sqrt(rn_emin))=0.01 m for DINO's rn_ediff=0.1,
-    # rn_emin=1e-6 (zdftke.F90:846,859-863) — the namelist rn_mxl0=0.04 is
-    # DEAD CODE once ln_mxl0=T. legoESM defaults: mxl_min=1e-8 (interior,
-    # WRONG SIGN vs NEMO's larger floor), mxl0_min_m=0.04 (dead value).
-    tke_mxl_min_m: float = 1.0e-8                # 0.01 = NEMO rmxl_min
-    tke_mxl0_min_m: float = 0.04                 # 0.01 = NEMO rmxl_min (dead namelist value)
+    # T18/T19 — non-NEMO recipes retain their configured mixing-length floor.
+    # NEMO choices derive rmxl_min from c_k/tke_background in the shared TKE
+    # implementation (shipped zdftke.F90:845-847), so this field is not a
+    # hidden NEMO-card choice.
+    tke_mxl_min_m: float = 1.0e-8                # non-NEMO configured floor
+    # NEMO rmxl_min arm (zdftke.F90:841-848).  False (DEFAULT, main's
+    # behaviour): the floor IS tke_mxl_min_m.  True: DINO sets no ln_zdfiwm, so
+    # namelist_ref:1200 leaves it .FALSE. and zdf_tke_init DERIVES
+    # rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin)) = 1e-2 m (:846).  Only the NEMO
+    # DINO cards select it; a generic DINO recipe keeps its configured floor.
+    tke_nemo_derived_mxl_min: bool = False
+    # zdftke.F90:640-642 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1).
+    # Only the NEMO DINO cards select the masked statement.
+    tke_nemo_mxl0_surface_tmask: bool = False
     # T18b — DRY-w-point TKE: NEMO closes tke_tke with
     # `en = MAX(en,rn_emin) * wmask` (cfgs/DINO/MY_SRC/zdftke.F90:565 =
     # upstream src/OCE/ZDF/zdftke.F90:469), so en is EXACTLY 0 below the
@@ -906,6 +912,14 @@ class DINOConfig:
     # dynspg_ts.F90:963-966,978-979).  The kamm cards override to
     # "nemo_ssh_avg" (see the card comment in DINO_RECIPES).
     barotropic_seed_face_depth: str = "min_rule"
+    # BarotropicConfig.nemo_prognostic_barotropic_state, threaded 1:1 via
+    # from_flat.  False (DEFAULT, main's behaviour): no prognostic external
+    # mode is allocated in the initial state and the barotropic window seeds
+    # from the 3-D reduction.  True: the state carries NEMO's uu_b/vv_b pair
+    # (oce.F90:39,99) and the window reads it (dynspg_ts.F90:484-500).  Only
+    # the NEMO DINO cards select it; every other DINO recipe carries no new
+    # prognostic state.
+    nemo_prognostic_barotropic_state: bool = False
     tracer_advection: str = "tvd"
     # Hollingsworth correction for KE gradient (fixes Hollingsworth-
     # Kallberg instability over stratified bathymetry; legoESM #263).
@@ -1225,7 +1239,12 @@ DINO_RECIPES: dict[str, dict] = {
         #    NEMO-faithful prognostic closure; cures the eq surface avm 32×
         #    over-mixing (mxl 16.8 m vs NEMO ~0.2 m). --
         "tke_prognostic": True,                  # NEMO prognostic en at model dt
-        "tke_mxl_choice": 3,                     # nn_mxl=3 lup/ldown + ln_mxl0 (rn_mxl0=0.04)
+        "tke_mxl_choice": 3,                     # nn_mxl=3 lup/ldown + ln_mxl0
+        # ln_mxl0 overwrites rn_mxl0 with rmxl_min (zdftke.F90:859-862), and
+        # DINO runs ln_zdfiwm=.FALSE. (namelist_ref:1200), so the anchor floor
+        # is the DERIVED 1e-6/(rn_ediff*SQRT(rn_emin)) = 1e-2 m, not 0.04.
+        "tke_nemo_derived_mxl_min": True,
+        "tke_nemo_mxl0_surface_tmask": True,
         "tke_n2_mode": "nemo_bn2",               # zdftke consumes eosbn2's rn2
         "tke_surface_bc": "nemo_dirichlet",      # en(1)=MAX(rn_emin0, rn_ebb·taum/rho0)
         "tke_dissipation": "nemo_1p5_split",     # zdftke zfact2/zfact3 1.5/0.5 split
@@ -1241,8 +1260,6 @@ DINO_RECIPES: dict[str, dict] = {
         "convection_two_level_trigger": True,    # zdfevd MIN(rn2,rn2b) (zdfevd.F90:119)
         # -- Phase-2 #1317 Tier C: small faithful items (tke_prandtl_ri --
         #    already True above -> "nemo_ri" mode, see _dino_vertical_mixing_config) --
-        "tke_mxl_min_m": 0.01,                   # NEMO rmxl_min (interior floor; was 1e-8)
-        "tke_mxl0_min_m": 0.01,                  # NEMO rmxl_min (ln_mxl0 overwrites rn_mxl0=0.04)
         # `en = MAX(en,rn_emin)*wmask` (MY_SRC/zdftke.F90:565 = upstream
         # :469) -> en==0 below the seafloor -> zmxlm==rmxl_min (:759 / :651)
         "tke_dry_wmask": True,
@@ -1544,6 +1561,9 @@ DINO_RECIPES: dict[str, dict] = {
         # ``TestBarotropicSeedFaceDepth::
         # test_shelf_column_floor_breaks_inertness_at_production_default``.
         "barotropic_seed_face_depth": "nemo_ssh_avg",
+        # dynspg_ts.F90:484-500 seeds the window from the CARRIED uu_b/vv_b
+        # (oce.F90:39,99); this card allocates that prognostic pair.
+        "nemo_prognostic_barotropic_state": True,
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
@@ -3305,6 +3325,9 @@ def dino_lat_lon_state(
         H_max=cfg.H_deep,
         land_mask_override=land_mask,
         H_bathy_override=H_bathy,
+        # The card decides whether this run CARRIES NEMO's prognostic external
+        # mode; a recipe that does not select it allocates no new state.
+        nemo_prognostic_barotropic_velocity=cfg.nemo_prognostic_barotropic_state,
     )
     # Replace T, S with our lat-z structured ICs
     state = state._replace(
@@ -3380,7 +3403,8 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_surface_bc_level=cfg.tke_surface_bc_level,
             tke_buoyancy_sink=cfg.tke_buoyancy_sink,
             mxl_min=cfg.tke_mxl_min_m,
-            mxl0_min_m=cfg.tke_mxl0_min_m,
+            nemo_derived_mxl_min=cfg.tke_nemo_derived_mxl_min,
+            nemo_mxl0_surface_tmask=cfg.tke_nemo_mxl0_surface_tmask,
             tke_dry_wmask=cfg.tke_dry_wmask,
             bottom_tke_bc=cfg.tke_bottom_bc,
             tke_shear_production=cfg.tke_shear_production,
@@ -3979,6 +4003,7 @@ def dino_lat_lon_model_config(
         barotropic_seed_evaluation=cfg.barotropic_seed_evaluation,
         barotropic_pgf_evaluation=cfg.barotropic_pgf_evaluation,
         barotropic_seed_face_depth=cfg.barotropic_seed_face_depth,
+        nemo_prognostic_barotropic_state=cfg.nemo_prognostic_barotropic_state,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,

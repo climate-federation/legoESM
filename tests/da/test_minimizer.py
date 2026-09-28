@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.da.minimizer import minimize_lbfgs, minimize_cg
@@ -107,3 +108,59 @@ class TestCG:
             jnp.array([5.0, 3.0])
         )
         assert jnp.allclose(result.x, 0.0, atol=1e-3)
+
+
+class TestLBFGSDescentSafeguards:
+    def test_history_monotone_on_nonconvex_cost(self):
+        """Negative-curvature pairs must not enter the memory and a failed
+        line search must not be accepted, so the cost never increases."""
+        def f(x):
+            return jnp.sum(jnp.cos(3 * x) + 0.1 * x ** 2) + 0.5 * x[0] * x[1]
+
+        vg = jax.value_and_grad(f)
+        for seed in range(20):
+            x0 = 2.0 * jax.random.normal(jax.random.PRNGKey(seed), (4,))
+            r = minimize_lbfgs(vg, x0, max_iter=30, gtol=1e-12, ftol=0.0)
+            h = np.asarray(r.history)
+            h = h[np.isfinite(h)]
+            assert np.all(np.diff(h) <= 1e-12), (seed, h)
+            assert float(r.fun) <= float(f(x0)) + 1e-12, seed
+
+    def test_failed_line_search_keeps_current_point(self):
+        """Inconsistent gradient (wrong sign): no step satisfies Armijo, so
+        the minimizer must stop at x0 instead of accepting an ascent step."""
+        def vg(x):
+            return jnp.sum(x ** 2), -2.0 * x
+
+        x0 = jnp.array([1.0, -2.0, 0.5])
+        r = minimize_lbfgs(vg, x0, max_iter=5)
+        np.testing.assert_allclose(np.asarray(r.x), np.asarray(x0))
+        assert float(r.fun) == float(jnp.sum(x0 ** 2))
+        assert not bool(r.converged)
+        assert bool(r.line_search_failed)
+
+
+class TestCGDescentSafeguards:
+    def test_failed_line_search_keeps_current_point(self):
+        """Wrong-sign gradient: no step meets Armijo, so CG must stay at x0
+        and report the failure instead of accepting an ascent step."""
+        def vg(x):
+            return jnp.sum(x ** 2), -2.0 * x
+
+        x0 = jnp.array([1.0, -2.0, 0.5])
+        r = minimize_cg(vg, x0, max_iter=5)
+        np.testing.assert_allclose(np.asarray(r.x), np.asarray(x0))
+        assert float(r.fun) == float(jnp.sum(x0 ** 2))
+        assert bool(r.line_search_failed)
+
+    def test_history_monotone_on_nonconvex_cost(self):
+        def f(x):
+            return jnp.sum(jnp.cos(3 * x) + 0.1 * x ** 2) + 0.5 * x[0] * x[1]
+
+        vg = jax.value_and_grad(f)
+        for seed in range(20):
+            x0 = 2.0 * jax.random.normal(jax.random.PRNGKey(seed), (4,))
+            r = minimize_cg(vg, x0, max_iter=30, gtol=1e-12)
+            h = np.asarray(r.history)
+            h = h[np.isfinite(h)]
+            assert np.all(np.diff(h) <= 1e-12), (seed, h)

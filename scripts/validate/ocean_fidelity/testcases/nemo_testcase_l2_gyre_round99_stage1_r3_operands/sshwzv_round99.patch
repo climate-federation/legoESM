@@ -1,0 +1,27 @@
+--- sshwzv.F90
++++ sshwzv.F90
+@@ -296,5 +296,6 @@
+       !
+       INTEGER  ::   ji, jj, jk   ! dummy loop indices
++      INTEGER  ::   l99_unit     ! write-only stage-1 r3 operand record
+       REAL(wp), DIMENSION(T2D(1),jpk) ::   ze3div
+       !!----------------------------------------------------------------------
+       !
+@@ -318,6 +319,17 @@
+       ELSE
+          CALL div_hor( kt, Kbb, Kmm, pu, pv, ze3div, k_ind )
+       ENDIF
++      IF( lwp .AND. kt == nit000 .AND. PRESENT(k_ind) ) THEN
++         IF( k_ind == np_transport .AND. Kbb == 1 .AND. Kmm == 1 .AND. Kaa == 3 ) THEN
++            OPEN( NEWUNIT=l99_unit, FILE='oracle_stage1_r3_operands_kt00000001.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE' )
++            WRITE(l99_unit) 'NEMO_L2_R99R3_1 '
++            WRITE(l99_unit) 1, kt, Kbb, Kmm, Kaa, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++            WRITE(l99_unit) ssh(:,:,Kaa), r1_ht_0, r3t(:,:,Kaa)
++            WRITE(l99_unit) ssh(:,:,Kbb), r3t(:,:,Kbb), ht_0
++            CLOSE(l99_unit)
++         ENDIF
++      ENDIF
+       !                                           !------------------------------!
+       !                                           !     Now Vertical Velocity    !
+       !                                           !------------------------------!

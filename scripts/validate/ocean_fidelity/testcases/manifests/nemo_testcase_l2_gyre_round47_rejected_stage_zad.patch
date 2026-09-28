@@ -1,0 +1,91 @@
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -4486,6 +4486,7 @@ class LatLonCGridOceanModel:
+                    momentum_flux_face_thickness=None,
+                    ene_generic_f_vtx=False,
+                    legacy_hpg_algebraic=False,
+                    nemo_operator_association=False,
+-                   return_nemo_operator_components=False):
++                   return_nemo_operator_components=False,
++                   nemo_stage_zad_operands=None):
+         """Compute baroclinic tendencies.
+@@ -4542,4 +4543,5 @@ class LatLonCGridOceanModel:
+             ene_generic_f_vtx=ene_generic_f_vtx,
+             legacy_hpg_algebraic=legacy_hpg_algebraic,
+             nemo_operator_association=nemo_operator_association,
++            nemo_stage_zad_operands=nemo_stage_zad_operands,
+             diagnose_momentum=return_nemo_operator_components,
+@@ -5245,4 +5247,5 @@ class LatLonCGridOceanModel:
+                 u_in, v_in, skip_ldf, transport_mean=None,
+                 stage_tracers_eta=None, extra_rhs=None,
+                 stage_face_thickness=None, stage_index=0,
++                stage_zad_operands=None,
+             ):
+@@ -5339,4 +5342,5 @@ class LatLonCGridOceanModel:
+                                      nemo_operator_association=(
+                                          self._nemo_ws_test_hooks
+                                          .nemo_stage_rhs_accumulation_order_arm),
++                                     nemo_stage_zad_operands=stage_zad_operands,
+                                      return_nemo_operator_components=(
+@@ -6269,6 +6273,20 @@ class LatLonCGridOceanModel:
+                     stage_face_thickness=_face_thickness_kbb, stage_index=1)
+                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
+                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
++            # stp2d.f90:157-174 forms stage 1 before the external solve but
++            # its WZV recurrence consumes the guessed Kaa free surface.  The
++            # shared transport program above is the first point where that
++            # after level exists.  Replace only ZAD, leaving HPG/LDF/VOR/KEG
++            # and their original source association untouched.
++            _p0_with_zad = _mom_pert_ws(
++                u0, v0, False, None,
++                stage_face_thickness=_face_thickness_kbb,
++                stage_zad_operands=(_g0[2], _g0[4], _g0[5]), stage_index=1)
++            _p0_without_zad = _mom_pert_ws(
++                u0, v0, False, None,
++                stage_face_thickness=_face_thickness_kbb, stage_index=1)
++            _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
++            _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
+             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
+             _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
+             _v1_rhs = _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1]
+@@ -6340,4 +6358,5 @@ class LatLonCGridOceanModel:
+                     _T_stage1, _S_stage1, _eta_live_one_third),
+                 _stage_vertical_up3(u1_corr, v1_corr, _g1),
+                 stage_face_thickness=_stage_face_thickness(_eta_live_one_third),
++                stage_zad_operands=(_g1[2], _g1[4], _g1[5]),
+                 stage_index=2)
+@@ -6403,4 +6408,5 @@ class LatLonCGridOceanModel:
+                 _stage3_hpg_operands,
+                 _stage3_vertical_up3,
+                 stage_face_thickness=_stage3_face_thickness,
++                stage_zad_operands=(_g2[2], _g2[4], _g2[5]),
+                 stage_index=3)
+@@ -6418,4 +6424,5 @@ class LatLonCGridOceanModel:
+                     _stage3_hpg_operands,
+                     _stage3_vertical_up3,
+                     stage_face_thickness=_stage3_face_thickness,
++                    stage_zad_operands=(_g2[2], _g2[4], _g2[5]),
+                     stage_index=3)
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py
+@@ -4631,4 +4631,5 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
+     legacy_hpg_algebraic=False,
+     nemo_operator_association: bool = False,
+     return_nemo_operator_components: bool = False,
++    nemo_stage_zad_operands=None,
+ ):
+@@ -4755,5 +4756,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
+         zad_w = jax.lax.optimization_barrier(zad_w)
+         zad_h_u = jax.lax.optimization_barrier(zad_h_u)
+         zad_h_v = jax.lax.optimization_barrier(zad_h_v)
++    if nemo_stage_zad_operands is not None:
++        # Consume the stage program's already-materialized NEMO operands.
++        zad_w, zad_h_u, zad_h_v = nemo_stage_zad_operands
++        zad_w = jax.lax.optimization_barrier(zad_w)
++        zad_h_u = jax.lax.optimization_barrier(zad_h_u)
++        zad_h_v = jax.lax.optimization_barrier(zad_h_v)
++
+ 
+     # --- 5. Coriolis ---

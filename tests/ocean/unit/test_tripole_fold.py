@@ -22,6 +22,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     coriolis_cgrid,
     laplacian_cgrid,
 )
+from legoesm.ocean.vertical import _nemo_t_fold_f_owned
 
 
 @pytest.fixture
@@ -67,6 +68,16 @@ class TestFoldRoundTrip:
             f"North fold mismatch: got {padded[-1][:5]}, "
             f"expected {expected_north[:5]}"
         )
+
+    def test_nemo_t_pivot_f_owned_row_uses_f_origin(self, tripole_grid):
+        """NEMO T-fold F fields copy row j-1 with ``(-1-i) mod N``."""
+        n_lat, n_lon = tripole_grid.n_lat, tripole_grid.n_lon
+        field = jnp.arange(n_lat * n_lon * 2, dtype=jnp.float64).reshape(
+            n_lat, n_lon, 2)
+        folded = _nemo_t_fold_f_owned(field, tripole_grid)
+        expected = field[-2, jnp.arange(n_lon - 1, -1, -1)]
+        assert jnp.array_equal(folded[-1], expected)
+        assert jnp.array_equal(folded[:-1], field[:-1])
 
     def test_vector_u_fold_has_sign_flip(self, tripole_grid):
         """u-component across fold should be sign-reversed and i-reversed."""

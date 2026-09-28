@@ -449,7 +449,7 @@ independent counts.** On code, both sides write the UNFILTERED after level:
 NEMO swaps its time indices at `stpmlf.F90:621-624` before `rst_write` at
 `:634`, so the saved `sshn` is the pre-swap AFTER level, and legoESM returns
 `naa.eta` from the leap-frog step with the Asselin result parked separately in
-`eta_before` (`ocean_model_latlon_cgrid.py:8708-8713`). Empirically, no integer
+`eta_before` (`ocean_model_latlon_cgrid.py:8848-8853`). Empirically, no integer
 re-pairing brings the fit anywhere near zero — shifting legoESM against NEMO by
 −1 dump gives α = −0.198, by +1 gives α = +1.240, and pairing against NEMO's
 Asselin-filtered before level gives α = −0.160. An output-convention error is
@@ -493,7 +493,7 @@ error.
 
 **What the card actually runs is γ = 0.1, and that is NOT the flat 0.5.** NEMO
 filters from step 1 while legoESM's Euler branch does not
-(`ocean_model_latlon_cgrid.py:8058`, "no RA filter"), and that asymmetry tilts
+(`ocean_model_latlon_cgrid.py:8198`, "no RA filter"), and that asymmetry tilts
 the answer up and makes it rise with period. Scored with the SHIPPED
 `substep_lag_fit` (`euler_start_lag_toy.py`):
 

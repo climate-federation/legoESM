@@ -27,6 +27,11 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanMode
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 from legoesm.ocean.rpe import pack_sorted_rpe
 from legoesm.ocean.vertical import compute_layer_thickness
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    scoped_allow_dirty,
+    worktree_stamp,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ARTIFACT_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l1")
@@ -233,6 +238,7 @@ def run_legoesm(
             }
             if not all(finite.values()):
                 failure = {
+                    "worktree": worktree_stamp(),
                     "format": "nemo-testcase-l1-full-failure-v1",
                     "preregistration_commit": PREREG_SHA,
                     "git_sha": stamped_sha,
@@ -281,6 +287,7 @@ def run_legoesm(
     state_path = output_dir / "states.npz"
     np.savez_compressed(state_path, **arrays)
     metadata = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-full-state-v1",
         "preregistration_commit": PREREG_SHA,
         "git_sha": stamped_sha,
@@ -391,6 +398,7 @@ def run_fp32_temperature_trace(output: Path, stamped_sha: str) -> dict:
     gross_threshold = 1.0e-6 * max(abs(low), abs(high), 1.0)
     crossings = [row["completed_step"] for row in trace if row["excess_K"] > gross_threshold]
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-fp32-temperature-trace-v1",
         "preregistration_commit": FP32_DISCRIMINATOR_PREREG_SHA,
         "git_sha": stamped_sha,
@@ -1219,6 +1227,7 @@ def score_case(
     }
 
 
+@scoped_allow_dirty
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1242,6 +1251,9 @@ def main() -> int:
     score_parser.add_argument("--plant-unregistered", action="store_true")
     args = parser.parse_args()
 
+    # This gate owns an --allow-dirty flag; bridge it to the shared stamp or
+    # wiring the stamp in would kill the flag and raise after the model run.
+    allow_dirty_stamps(args.allow_dirty)
     if args.command == "run-legoesm":
         report = run_legoesm(
             args.case,
@@ -1254,7 +1266,7 @@ def main() -> int:
         report = run_fp32_temperature_trace(
             args.output, git_sha(allow_dirty=args.allow_dirty))
     else:
-        set_policy(PrecisionPolicy.fp64())
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
         require(bool(jax.config.jax_enable_x64), "scoring requires JAX x64")
         report = score_case(
             args.case,

@@ -10,7 +10,7 @@ Round 35 localizes row 4 first to the raw dispatch RHS. NEMO constructs
 term at DINO `dynzdf.F90:137-178`; only after the matrix forward-factor sweep
 does it add surface stress to level 1 at `:340-373`. Production's default
 explicit stress is already in the state before the baroclinic strip at
-`ocean_model_latlon_cgrid.py:7160-7180,7275-7296`. This round asks whether
+`ocean_model_latlon_cgrid.py:7300-7320,7275-7296`. This round asks whether
 stripping the wind's depth mean before the solve owns the RHS difference.
 
 ## Additive arms and bars

@@ -52,7 +52,6 @@ __param_spec__ = {
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
             "mxl_min": "numerics: floor/cap",
-            "mxl0_min_m": "numerics: floor/cap (NEMO rn_mxl0 ln_mxl0 surface length floor)",
             "prandtl_ri_coeff": "Galperin/Veros fixed Pr-Ri slope (6.6)",
             "tke_background": "numerics: floor/cap",
             "tke_surface_min": "numerics: floor/cap",
@@ -249,7 +248,6 @@ class TKEConfig(NamedTuple):
                                      # SINGLE length: l_eps = l_k = min(lup,ldn)).
                                      # NOTE the numbering is Veros-derived and
                                      # does NOT match NEMO's nn_mxl values.
-    mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     # NEMO dry-w-point TKE.  NEMO closes tke_tke with
     #     en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)
     # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
@@ -267,6 +265,29 @@ class TKEConfig(NamedTuple):
     # Requires positivity="floor" (the Veros positivity branch returns before
     # the `MAX(en,rn_emin)` this mask rides on).
     tke_dry_wmask: bool = False
+    # ----- NEMO rmxl_min provenance (zdftke.F90:841-848) -----------------
+    # NEMO picks the mixing-length floor in TWO arms:
+    #   ln_zdfiwm=.TRUE.  -> rn_emin FORCED to 1e-10 and rmxl_min FORCED to
+    #                        1e-3 (zdftke.F90:842-843); the derivation below
+    #                        is never evaluated.
+    #   ln_zdfiwm=.FALSE. -> rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin))
+    #                        (zdftke.F90:846), i.e. derived from c_k and
+    #                        tke_background, and the namelist floor is unused.
+    # ``False`` (DEFAULT, main's behaviour): the floor IS ``mxl_min``, whatever
+    #   the card set.  That is also the correct value for an ln_zdfiwm=.TRUE.
+    #   card, which simply sets ``mxl_min=1.0e-3`` (ORCA1, ORCA2).
+    # ``True``: take the ln_zdfiwm=.FALSE. derivation.  Only a NEMO-literal
+    #   card that runs ln_zdfiwm=.FALSE. selects it (GYRE, DINO).  The
+    #   derivation is evaluated in binary64 and RAISES without x64, so the
+    #   requirement lands only on the cards that ask for it.
+    nemo_derived_mxl_min: bool = False
+    # ``ln_mxl0`` surface-anchor masking (zdftke.F90:640-642 evaluates
+    # ``taum(:,:)*tmask(:,:,1)``).  ``False`` (DEFAULT, main's behaviour):
+    # the anchor is built from ``taum`` alone and a caller that has no
+    # surface T-mask (FESOM) is accepted.  ``True``: the compiled masked
+    # statement, and a missing ``surface_tmask`` is a hard error.  Only the
+    # NEMO-literal cards select it.
+    nemo_mxl0_surface_tmask: bool = False
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -619,7 +640,7 @@ class TKEConfig(NamedTuple):
     tke_langmuir_evaluation: str = "vectorized"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
-    # NEMO cards instead freeze p_sh2 from the step-entry NOW/BEFORE faces and
+    # NEMO cards instead freeze p_sh2 from selected step-entry face levels and
     # carried avm_k, matching zdfphy.F90:268 before the explicit update reaches
     # zdftke.F90.  Kept legacy by default so all other cards remain unchanged.
     tke_shear_evaluation_stage: str = "implicit_solve_state"
@@ -695,20 +716,10 @@ class TKEConfig(NamedTuple):
     #   BC — the prior legoESM behaviour).
     # ``True``: NEMO's bottom friction TKE source (zdftke.F90:279-288):
     #   en(mbkt+1) = max(0.001875·CdU_bot·|u_bot|, rn_emin)·ssmask, held as
-    #   a Dirichlet identity row at the ABSOLUTE-DEEPEST array interface
-    #   (``e_new[..., -1]``), not the per-column bathymetry-relative
-    #   ``bottom_level``-adjacent row. On a FLAT-BOTTOM column (every DINO
-    #   column here reaches the max depth) these coincide exactly; on
-    #   variable topography (a shallower column) the true seafloor
-    #   interface sits SHALLOWER than the array's last row, so the pin
-    #   lands one level below the real bottom (a masked/dry level there —
-    #   downstream wet-interface masking prevents any leak into wet cells,
-    #   so this is NOT a correctness bug, but the BC does not fire at the
-    #   physically correct row on shallow columns). Physics-validator
-    #   review 2026-07-24: acceptable for the Phase-2 kamm-card target
-    #   (deep/not entrainment-relevant per the Phase-1 ranking); a
-    #   bottom_level-relative scatter is the documented follow-up before
-    #   any abyssal-tendency certification.
+    #   a Dirichlet identity row at each column's bathymetry-relative
+    #   ``bottom_level``-adjacent W interface when the caller supplies a
+    #   partial-cell bottom index.  The legacy flat-bottom interface remains
+    #   supported by pinning ``e_new[..., -1]`` when no bottom index exists.
     #   Requires the model-step caller to thread the bottom-cell velocities
     #   + the NEMO bottom-drag rate (reusing
     #   ``nemo_effective_bottom_drag_r`` — single-owner doctrine, no
@@ -791,12 +802,13 @@ class TKEConfig(NamedTuple):
     #   full wave TKE even under compact ice.  Nonzero modes thread
     #   ``surface_forcing.ice_concentration`` as an EFFECTIVE ``ice_frac``
     #   into the kernels' built-in ``(1-ice_frac)`` factor:
-    #     1 -> eff = fi            (factor (1-fi),        NEMO nn_eice=1)
+    #     1 -> eff = tanh(10*fi)   (factor 1-tanh(10*fi), NEMO nn_eice=1)
+    #     2 -> eff = fi            (factor 1-fi, NEMO nn_eice=2)
     #     3 -> eff = min(4*fi, 1)  (factor max(0,1-4*fi), NEMO nn_eice=3 —
     #          the ORCA1 namelist choice; wave TKE killed at fi >= 0.25).
     #   2026-07-18 audit: the kernels ALWAYS supported ``ice_frac`` but no
     #   caller supplied it — under-ice TKE injection over-mixed the Arctic.
-    eice: int = 0                        # 0 off | 1 (1-fi) | 3 max(0,1-4fi)  (NEMO nn_eice)
+    eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
 
 
 class KPPConfig(NamedTuple):
@@ -869,17 +881,18 @@ class KPPConfig(NamedTuple):
     langmuir_coeff: float = 0.08     # C_L in eps_L = sqrt(1 + C_L/La_t^2)
     langmuir_number_default: float = 0.3  # fallback La_t when no Stokes-drift input
     # ``eice``: under-ice attenuation of the KPP turbulent velocity scales
-    #   (NEMO nn_eice analogue; mirrors TKEConfig.eice).  Compact sea ice caps
+    #   (NEMO nn_eice numbering; mirrors TKEConfig.eice).  Compact sea ice caps
     #   the surface, so the surface-forcing-driven w_m/w_s — and hence BOTH the
     #   bulk-Ri boundary-layer depth (via V_t^2) and the mixing coefficients —
     #   are scaled by (1 - eff) under ice.  0 (default, BIT-IDENTICAL) = off;
-    #   1 = linear eff=fi (factor 1-fi; NOT NEMO nn_eice=1 = 1-tanh(10fi));
+    #   1 = eff=tanh(10fi) (factor 1-tanh(10fi));
+    #   2 = linear eff=fi (factor 1-fi);
     #   3 = eff=min(4*fi,1) (max(0,1-4*fi), matches NEMO nn_eice=3, mixing
     #   killed at fi>=0.25).  Consumes surface_forcing.ice_concentration
     #   (2026-07-19: the KPP grids' Arctic halocline erosion — over-deep MLD +
     #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
     #   reached the KPP grids).
-    eice: int = 0                    # 0 off | 1 (1-fi) | 3 max(0,1-4fi)
+    eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
 
 
 class CATKEConfig(NamedTuple):

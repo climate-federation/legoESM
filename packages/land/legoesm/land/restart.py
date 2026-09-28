@@ -25,6 +25,7 @@ when we enable DALEC in a later push.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import warnings
@@ -175,6 +176,8 @@ def save_land_restart(
     soil_dz=None,
     carbon_state=None,
     soil_frozen_fraction=None,
+    soil_hydraulics: dict[str, Any] | None = None,
+    hydraulics=None,
 ) -> Path:
     """Write ``state`` and its bookkeeping to a compressed ``.npz`` restart file.
 
@@ -208,6 +211,15 @@ def save_land_restart(
         a reader that knows either spelling can check the file and the two can
         never disagree.
 
+    soil_hydraulics : dict, optional
+        The :func:`soil_hydraulics_stamp` of the hydraulics this state was
+        evolved under.  A reader on different hydraulics re-derives the matric
+        potential from the water content (:func:`convert_ic_soil_water`); an
+        IC load refuses a file without one.
+    hydraulics : SoilHydraulicsConfig, optional
+        The resolved hydraulics themselves; writes the per-column
+        :func:`soil_hydraulics_column_signature` next to the stamp.
+
     Returns
     -------
     Path
@@ -223,6 +235,12 @@ def save_land_restart(
         "n_steps_completed": np.array(int(n_steps_completed), dtype=np.int64),
         "metadata_json": np.array(json.dumps(metadata or {}), dtype="U65536"),
     }
+    if soil_hydraulics is not None:
+        payload["soil_hydraulics_json"] = np.array(json.dumps(soil_hydraulics))
+    if hydraulics is not None:
+        _theta = np.asarray(state.theta_soil)
+        payload["soil_hydraulics_column_sig"] = soil_hydraulics_column_signature(
+            hydraulics, _theta.shape[0], _theta.shape[1])
     _dz = _soil_dz_from(soil_grid, soil_dz, what="save_land_restart")
     if _dz is not None:
         payload["soil_dz"] = _dz
@@ -456,6 +474,11 @@ def load_land_restart(
         "carbon_state": carbon,
         "soil_frozen_fraction": (jnp.asarray(data["soil_frozen_fraction"])
                                  if "soil_frozen_fraction" in data.files else None),
+        "soil_hydraulics": (json.loads(str(data["soil_hydraulics_json"]))
+                            if "soil_hydraulics_json" in data.files else None),
+        "soil_hydraulics_column_sig": (
+            np.asarray(data["soil_hydraulics_column_sig"])
+            if "soil_hydraulics_column_sig" in data.files else None),
     }
     return state, meta
 
@@ -505,8 +528,252 @@ def merge_land_restart_into_template(loaded, template):
         fields[name] = arr
     return template._replace(**fields)
 
+# --- soil-hydraulics stamp ------------------------------------------------
+# Which retention curve and which parameter set a saved soil state was evolved
+# under.  The Richards step carries matric potential; potential and water
+# content are tied through the hydraulics, so a state written on one set and
+# read on another pairs each potential with the wrong water content and the
+# solver turns the mismatch into lost or created water (measured: the deep
+# root zone of the regridded LMIP state dried from 0.29 to 0.15 in one day).
+SOIL_HYDRAULICS_STAMP_VERSION = 1
+# Builders of a run's soil hydraulics.  One id per code path that produces them.
+HYDRAULICS_SOURCE_CLM_MAP = "clm_surface_map"          # clm_hydraulics_config (VG)
+HYDRAULICS_SOURCE_SURFDATA_COSBY = "surfdata_cosby"    # build_soil_hydraulics (CH)
+# The keys that decide compatibility.  Anything else in a stamp (who attested
+# it, checksums of the file it came from) is provenance and never compared.
+_STAMP_COMPAT_KEYS = ("version", "retention_curve", "parameter_source",
+                      "parameter_md5")
+
+
+def file_md5(path) -> str:
+    """md5 of a file's bytes (chunked)."""
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 24), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def soil_hydraulics_stamp(retention_curve: str, parameter_source: str,
+                          parameter_path) -> dict[str, Any]:
+    """The stamp for hydraulics built by ``parameter_source`` from ``parameter_path``.
+
+    ``parameter_md5`` is the parameter FILE's content hash, not its name: two
+    surfdata versions can share a basename.  The resolved arrays are not
+    hashed because under MPAS cell partitioning each rank holds only its own
+    columns, so an array hash would differ by rank count.
+    """
+    if parameter_source not in (HYDRAULICS_SOURCE_CLM_MAP,
+                                HYDRAULICS_SOURCE_SURFDATA_COSBY):
+        raise ValueError(f"unknown soil-hydraulics source {parameter_source!r}")
+    from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
+    psi_from_theta(0.3, SoilHydraulicsConfig(retention_curve=str(retention_curve)))
+    return {
+        "version": SOIL_HYDRAULICS_STAMP_VERSION,
+        "retention_curve": str(retention_curve),
+        "parameter_source": parameter_source,
+        "parameter_md5": file_md5(parameter_path),
+        "parameter_file": Path(parameter_path).name,
+    }
+
+
+def soil_hydraulics_stamps_match(a: dict, b: dict) -> bool:
+    """Same hydraulics?  Compares only the compatibility keys."""
+    for key in _STAMP_COMPAT_KEYS:
+        if key not in a or key not in b:
+            raise ValueError(f"soil-hydraulics stamp is missing {key!r}: {a} / {b}")
+    return all(a[k] == b[k] for k in _STAMP_COMPAT_KEYS)
+
+
+def soil_hydraulics_column_signature(hydraulics, ncol: int,
+                                     n_layers: int) -> np.ndarray:
+    """One 64-bit hash per column of every numeric hydraulic parameter.
+
+    Catches what the file-level stamp cannot: the same parameter file read by
+    changed builder code or tables.  Per column, so a cell-partitioned rank
+    compares only its own columns and the verdict does not depend on the rank
+    count.  Parameters are hashed at float32 so a float32 and a float64 build
+    of the same values agree.
+    """
+    parts = []
+    for name in hydraulics._fields:
+        v = getattr(hydraulics, name)
+        if isinstance(v, str):
+            continue
+        parts.append(np.broadcast_to(
+            np.asarray(v, dtype=np.float32), (ncol, n_layers)))
+    block = np.ascontiguousarray(np.stack(parts, axis=1))
+    return np.array(
+        [int.from_bytes(hashlib.blake2b(block[i].tobytes(),
+                                        digest_size=8).digest(), "little")
+         for i in range(ncol)], dtype=np.uint64)
+
+
+def check_soil_hydraulics_stamp(meta, path) -> dict[str, Any]:
+    """The file's stamp, or raise: absent, or missing a compatibility key.
+
+    Depends only on the file, so every rank reaches the same verdict.
+    """
+    stamp = meta.get("soil_hydraulics")
+    if stamp is None:
+        raise ValueError(
+            f"{path} records no soil-hydraulics stamp, so which retention curve "
+            "its matric potential belongs to is unknown.  Stamp it with "
+            "scripts/data/regrid_land_ic.py (--stamp-only for a file already on "
+            "this grid, --source-soil-hydraulics to attest an unstamped "
+            "source) or re-save it from the run that produced it.")
+    missing = [k for k in _STAMP_COMPAT_KEYS if k not in stamp]
+    if missing:
+        raise ValueError(f"{path}: soil-hydraulics stamp lacks {missing}")
+    return stamp
+
+
+# Wet cap of the IC conform, as a margin below effective saturation Se = 1
+# (user decision 2026-09-28, "1e-4 under", read as an Se margin).  It must stay
+# well above the retention curve's own clip (Se = 1 - 1e-6, 100x smaller, also
+# above float32 rounding) or conformed layers land back on the saturated branch.
+_WET_CAP_SE_MARGIN = 1.0e-4
+
+
+def conform_soil_water(theta, dz, hydraulics, land_mask=None):
+    """Move a soil-water profile between the solver's dry floor and a wet cap.
+
+    Host-side, float64.  Per column, conserving the column's water exactly:
+
+    1. WET: layers above the wet cap (effective saturation
+       ``1 - _WET_CAP_SE_MARGIN``, just below ``theta_sat``) give their excess
+       to the column's layers below it,
+       in proportion to each layer's room.  What the column
+       cannot store is returned as ``pond_add`` [m] for the surface water, which
+       the first Richards step keeps up to ``pond_max`` and routes the rest to
+       surface runoff.  (The cap is policy: the solver's elastic branch could
+       carry the excess as a positive head of order 1e3 m, and a layer at
+       exactly ``theta_sat`` sits on the retention curve's clipped saturated
+       branch.)
+    2. DRY: layers below the solver's dry floor ``theta_from_psi(psi_dry_floor)``
+       are lifted to it, the water taken from the column's other layers in
+       proportion to each one's surplus above that floor.  Existing pond water
+       is not used.  A column with too little water in total raises.
+
+    Only ``land_mask`` columns are touched (all when ``None``).  Returns
+    ``(theta, pond_add, report)``.
+    """
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import theta_from_psi
+
+    theta = np.array(theta, dtype=np.float64)
+    ncol, nlay = theta.shape
+    dz = np.asarray(dz, dtype=np.float64).reshape(1, nlay)
+    lo = np.broadcast_to(np.asarray(
+        theta_from_psi(psi_dry_floor(hydraulics), hydraulics),
+        dtype=np.float64), theta.shape)
+    theta_r = np.asarray(hydraulics.theta_r, dtype=np.float64)
+    hi = np.broadcast_to(
+        theta_r + (1.0 - _WET_CAP_SE_MARGIN)
+        * (np.asarray(hydraulics.theta_sat, dtype=np.float64) - theta_r),
+        theta.shape)
+    act = (np.ones(ncol, dtype=bool) if land_mask is None
+           else np.asarray(land_mask, dtype=bool).reshape(ncol))
+    a = act[:, None]
+
+    over = np.where(a, np.maximum(theta - hi, 0.0), 0.0) * dz
+    room = np.where(a, np.maximum(hi - theta, 0.0), 0.0) * dz
+    O, Rm = over.sum(1), room.sum(1)
+    moved = np.minimum(O, Rm)
+    fill = np.divide(moved, Rm, out=np.zeros(ncol), where=Rm > 0)
+    theta = theta - over / dz + room / dz * fill[:, None]
+    pond_add = O - moved
+
+    need = np.where(a, np.maximum(lo - theta, 0.0), 0.0) * dz
+    spare = np.where(a, np.maximum(theta - lo, 0.0), 0.0) * dz
+    D, E = need.sum(1), spare.sum(1)
+    # A state stored in float32 sits on the floor only to float32 rounding, so
+    # a shortfall that small is rounding, not a dry column: it is lifted (the
+    # water created is below float32 resolution of the column's floor water).
+    roundoff = np.finfo(np.float32).eps * (lo * dz).sum(1)
+    bad = D - E > roundoff
+    if bad.any():
+        raise ValueError(
+            f"{int(bad.sum())} land column(s) hold less water than the Richards "
+            "step's dry floor in every layer; lifting them would create water. "
+            f"Largest shortfall {1e3 * float((D - E)[bad].max()):.3g} mm.")
+    take = np.minimum(np.divide(D, E, out=np.zeros(ncol), where=E > 0), 1.0)
+    theta = theta + need / dz - spare / dz * take[:, None]
+
+    report = {
+        "dry_columns": int((D > 0).sum()), "dry_layers": int((need > 0).sum()),
+        "dry_moved_mm_max": 1e3 * float(D.max(initial=0.0)),
+        "wet_columns": int((O > 0).sum()), "wet_layers": int((over > 0).sum()),
+        "pond_columns": int((pond_add > 0).sum()),
+        "pond_mm_max": 1e3 * float(pond_add.max(initial=0.0)),
+    }
+    return theta, pond_add, report
+
+
+def convert_ic_soil_water(state, meta, hydraulics, run_stamp, soil_dz, *,
+                          land_mask=None, file_column_sig=None,
+                          path="<land IC>"):
+    """Make a loaded land state's soil water consistent with THIS run's hydraulics.
+
+    Raises when the file carries no soil-hydraulics stamp.  Columns are
+    converted when the stamp differs from ``run_stamp``, when the state was
+    regridded (its columns carry another grid's soil), or -- stamps equal --
+    where ``file_column_sig`` (the file's per-column signature, already cut to
+    this rank's columns) differs from this run's, or everywhere when the file
+    has no signature.  For those columns the water
+    content is kept as the conserved quantity: conformed (land columns only,
+    :func:`conform_soil_water`, overflow into ``surface_water``) and the matric
+    potential re-derived on this run's hydraulics, floored at the solver's dry
+    floor so it stays finite in float32.  The conform is float64; the
+    re-derived potential is in JAX's working precision.
+
+    Same-run checkpoint restarts do not come through here.
+    Returns ``(state, report)``; ``report`` is ``None`` when nothing changed.
+    """
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import psi_from_theta
+
+    stamp = check_soil_hydraulics_stamp(meta, path)
+    regridded = bool((meta.get("metadata") or {}).get("regridded_from"))
+    ncol, nlay = np.shape(state.theta_soil)
+    if not soil_hydraulics_stamps_match(stamp, run_stamp) or regridded:
+        cols = np.ones(ncol, dtype=bool)
+    elif file_column_sig is not None:
+        cols = (np.asarray(file_column_sig, dtype=np.uint64)
+                != soil_hydraulics_column_signature(hydraulics, ncol, nlay))
+    else:
+        # Equal file stamps without per-column signatures cannot show the
+        # parameters are the same (the builder or its tables may have changed
+        # under an unchanged file), so every column is converted.
+        cols = np.ones(ncol, dtype=bool)
+    if not cols.any():
+        return state, None
+    land = (np.ones(ncol, dtype=bool) if land_mask is None
+            else np.asarray(land_mask, dtype=bool).reshape(ncol))
+    theta, pond_add, report = conform_soil_water(
+        state.theta_soil, soil_dz, hydraulics, land & cols)
+    if (pond_add > 0).any() and state.surface_water is None:
+        raise ValueError(
+            f"{path}: {report['pond_columns']} column(s) hold more water than "
+            "their soil can store, and this run has no surface-water store to "
+            "put it in.")
+    psi = jnp.where(jnp.asarray(cols)[:, None],
+                    jnp.maximum(psi_from_theta(jnp.asarray(theta), hydraulics),
+                                psi_dry_floor(hydraulics)),
+                    state.psi_soil)
+    fields = {"theta_soil": jnp.asarray(theta), "psi_soil": psi}
+    if state.surface_water is not None:
+        fields["surface_water"] = (np.asarray(state.surface_water, np.float64)
+                                   + pond_add)
+    report.update(stamp=stamp, run_stamp=run_stamp, regridded=regridded,
+                  converted_columns=int(cols.sum()))
+    return state._replace(**fields), report
 
 __all__ = [
     "save_land_restart", "load_land_restart",
     "merge_land_restart_into_template",
+    "soil_hydraulics_stamp", "soil_hydraulics_stamps_match",
+    "conform_soil_water", "convert_ic_soil_water", "file_md5",
+    "soil_hydraulics_column_signature", "check_soil_hydraulics_stamp",
+    "HYDRAULICS_SOURCE_CLM_MAP", "HYDRAULICS_SOURCE_SURFDATA_COSBY",
 ]

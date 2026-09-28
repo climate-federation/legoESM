@@ -166,7 +166,8 @@ def make_ocean_physics(
 
     Returns
     -------
-    Callable : physics_fn(state, grid, z_coord, surface_forcing=None) -> OceanTendencies
+    Callable : physics_fn(state, grid, z_coord, surface_forcing=None, dt=None)
+        -> OceanTendencies.  ``dt`` [s] reaches lateral mixing only.
     """
     # Tidal mixing rides on VerticalMixingConfig but is a SEPARATE caller-applied
     # additive step (ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step),
@@ -207,6 +208,7 @@ def make_ocean_physics(
         )
 
     fns = []
+    lateral_fn = None  # the one sub-physics that takes the run's dt
 
     if config.vertical_mixing.scheme != "none":
         fns.append(make_vertical_mixing_physics(
@@ -215,8 +217,9 @@ def make_ocean_physics(
             constants_config=config.constants,
         ))
     if config.lateral_mixing.scheme != "none":
-        fns.append(make_lateral_mixing_physics(
-            config.lateral_mixing, constants_config=config.constants))
+        lateral_fn = make_lateral_mixing_physics(
+            config.lateral_mixing, constants_config=config.constants)
+        fns.append(lateral_fn)
     if config.surface_forcing.scheme != "none":
         fns.append(make_surface_forcing_physics(config.surface_forcing))
     # Physics-level bottom drag is deprecated — use the dynamics-level
@@ -294,7 +297,13 @@ def make_ocean_physics(
         grid: CubedSphereGrid,
         z_coord: OceanZStarCoordinate,
         surface_forcing: OceanSurfaceForcing | None = None,
+        dt: float | None = None,
     ) -> OceanTendencies:
+        def _call(fn):
+            if fn is lateral_fn:
+                return fn(state, grid, z_coord, surface_forcing, dt=dt)
+            return fn(state, grid, z_coord, surface_forcing)
+
         if not fns and sw_config is None:
             return zero_ocean_tendencies(state)
 
@@ -306,7 +315,7 @@ def make_ocean_physics(
         K_v_sum = None
         A_v_sum = None
         if fns:
-            first = fns[0](state, grid, z_coord, surface_forcing)
+            first = _call(fns[0])
             du_dt = first.du_dt.data
             dv_dt = first.dv_dt.data
             dT_dt = first.dT_dt.data
@@ -318,7 +327,7 @@ def make_ocean_physics(
                 A_v_sum = first.A_v
 
             for fn in fns[1:]:
-                t = fn(state, grid, z_coord, surface_forcing)
+                t = _call(fn)
                 du_dt = du_dt + t.du_dt.data
                 dv_dt = dv_dt + t.dv_dt.data
                 dT_dt = dT_dt + t.dT_dt.data
@@ -349,6 +358,8 @@ def make_ocean_physics(
                 z_coord.z_half_ref,
                 J,
                 sw_config,
+                rho_0=config.constants.rho_0,
+                c_sw=config.constants.c_sw,
             )
             dT_dt = dT_dt + sw_tend
 

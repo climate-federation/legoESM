@@ -67,7 +67,7 @@ def test_testcase_kt1_dump_is_registered_before():
 
 
 @pytest.mark.parametrize("case", sorted(gate.ROOTS))
-def test_kt1_rows_are_exact_but_only_temperature_measures_alignment(case):
+def test_kt1_rows_follow_case_alignment_contract(case):
     card = gate._card(case)
     rows, _ = gate.ic_step1_gate(card, gate.ROOTS[case])
     by_name = {row["name"].rsplit(".", 1)[-1]: row for row in rows}
@@ -75,5 +75,30 @@ def test_kt1_rows_are_exact_but_only_temperature_measures_alignment(case):
     assert by_name["T"]["status"] == "AT-BAR"
     for name in ("S", "u", "v", "ssh"):
         assert by_name[name]["bar"] == 0.0
-        assert by_name[name]["alignment_status"] == "AT-BAR"
-        assert by_name[name]["status"] == "UNMEASURED"
+        if case == "GYRE-zco":
+            if name == "S":
+                assert by_name[name]["status"] == "AT-BAR"
+            else:
+                assert by_name[name]["exact_control_status"] == "AT-BAR"
+                assert by_name[name]["status"] == "UNINFORMATIVE"
+                assert by_name[name]["reason"]
+        else:
+            assert by_name[name]["alignment_status"] == "AT-BAR"
+            assert by_name[name]["status"] == "UNMEASURED"
+
+
+def test_gyre_rotated_grid_synthetic_violation_fires():
+    registry = GATE_PATH.parent / "manifests/gyre_zco_phase2.json"
+    with pytest.raises(gate.GateError, match="geometry.glamt"):
+        gate.geometry_gate(
+            "GYRE-zco",
+            gate.ROOTS["GYRE-zco"],
+            registry,
+            plant_geometry=True,
+        )
+
+
+def test_gyre_seasonal_forcing_synthetic_violation_fires():
+    card = gate._card("GYRE-zco")
+    with pytest.raises(gate.GateError, match="forcing.kt1.qsr_w_m2"):
+        gate.forcing_gate(card, plant_forcing=True)

@@ -1,0 +1,107 @@
+{
+  "format": "nemo-testcase-l2-gyre-round34-preregister-v1",
+  "date": "2026-09-06",
+  "starting_tip": "2c83a59bcfbe",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "oracle_roots": {
+    "GYRE-zco": [
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29_oracle_v2_zdf_matrix"
+    ],
+    "LOCK_EXCHANGE-zco twin": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+    "LOCK_EXCHANGE-zco round-33 acquisition": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round33_lock_zdf_matrix",
+    "OVERFLOW-zps twin": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10",
+    "OVERFLOW-zps round-33 acquisition": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round33_overflow_zdf_matrix",
+    "ORCA2-zps": "no card on this branch; UNMEASURED"
+  },
+  "part_a_read_before_measuring": {
+    "a0_1": "The user ran nemo_testcase_l1_tanks_round33_zdf/run.sh for both cards. Attempt 1 died inside FCM because the system perl lacks Text::Balanced; makenemo needs PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH. Attempt 2 built and ran both cards.  Logs: round33/tanks_run_{LOCK_EXCHANGE,OVERFLOW}.attempt2.log.",
+    "a0_2": "run.sh line 222-225's RAW twin cmp exited non-zero under set -e, so lines 226-243 never ran: the mesh/restart cmp, the Rule-12 discharge, its plant and round33_outputs.sha256 are all ABSENT from both target run directories.  Verified by listing both directories: neither contains round33_rule12_correction.json nor round33_outputs.sha256.",
+    "a0_3": "Each tank source run carries 27 oracle_*.bin records: 10 oracle_bt_frames, 1 oracle_rhs, 3 oracle_stage, 10 oracle_step_entry, 3 oracle_transport.  The acquisition adds exactly one, oracle_zdf_matrix_kt00000001.bin, so the candidate carries 28.",
+    "a0_4": "Every tank record carries its own 16-byte magic and its dims in its header: NEMO_L1_TRANSP_1 (8 header ints, nx/ny/nz at 5,6,7), NEMO_L1_STAGE_1 (9 ints, 5,6,7), NEMO_L1_ENTRY_1 (8 ints, 4,5,6), NEMO_L1_RHS___1 (7 ints, 4,5,6), NEMO_L1_BTFRM_1 (6 ints, 4,5, no nz), NEMO_L2_ZDFMX_1.  Readers: nemo_testcase_phase3_first_divergence_gate.py:66-180.",
+    "a0_5": "The halo width is nn_hls = 2 on BOTH tanks, read from each run's own ocean.output: lock_kt1_10/ocean.output:42 and overflow_kt1_10/ocean.output:44 each print 'halo width (applies to both rows and columns) nn_hls = 2', and the GYRE root prints the same at round19_oracle_v2_external/ocean.output:41.  Every committed reader in this campaign strips [2:-2, 2:-2] accordingly (nemo_testcase_phase3_first_divergence_gate.py:63-64, nemo_testcase_phase3_stage_sweep_gate.py:78-84, nemo_testcase_l2_gyre_phase3_gate.py:131-133).",
+    "a0_6": "The round-21 admission gate (nemo_testcase_l2_gyre_round21_admission.py) is the precedent: it admits a twin whose raw bytes differ when every CONSUMED field is bit-identical on OWNED cells.  It already takes --dims/--restart/--allowed-new/--writer as CLI arguments; its record-kind map and its layout table are GYRE-only."
+  },
+  "part_a_predictions": {
+    "PA1": {
+      "claim": "The generalised admission gate PASSES on both tank twins: every one of the 27 inherited records is bit-identical on every OWNED cell of every field, and the only raw byte differences live in halo cells.",
+      "threshold": "verdict PASS; 0 violations; restart and mesh_mask byte-identical",
+      "falsifier": "any owned cell of any field differs by one bit -> FAIL, and the round-32 discharge on that card cannot be quoted"
+    },
+    "PA2": {
+      "claim": "LOCK's differing records are exactly oracle_transport_kt00000001_s2 and _s3, and OVERFLOW's are exactly _s1, _s2 and _s3.  So LOCK is 25/27 raw-identical and OVERFLOW 24/27.",
+      "threshold": "exactly those record names, no others",
+      "falsifier": "a different or larger set"
+    },
+    "PA3": {
+      "claim": "Every differing element sits at i or j inside the 2-cell halo, and its VALUE is uninitialised memory: LOCK's zFw(0,0,0) and zFw(1,0,0) near 6.94e-310 (a float64 denormal), OVERFLOW's zFu at (1,6,11), (3,6,12), (5,6,13), (205,1,16) near 4.2e-318 plus zFw(0..1,0,0) near 6.9e-310.",
+      "threshold": "all differing indices have i < 2 or i >= nx-2 or j < 2 or j >= ny-2; all values below 1e-300 in magnitude",
+      "falsifier": "any differing element at an owned index, or any value of ordinary magnitude"
+    },
+    "PA4": {
+      "claim": "The plant -- one bit flipped in one OWNED cell of one consumed field -- turns the generalised gate red and it exits non-zero.",
+      "threshold": "exit code 1 and the planted record named in violations",
+      "falsifier": "exit 0"
+    },
+    "PA5": {
+      "claim": "The round-33 Rule-12 discharge reads AT-BAR on BOTH tanks: legoESM's own rk3_stage_barotropic_correction, given NEMO's dyn_zdf output, NEMO's uu_b(Kaa) and NEMO's own e3u_0/hu_0/r1_hu_0, reproduces NEMO's own stage-3 u to at most 1e-15 relative.",
+      "threshold": "status AT-BAR on both cards",
+      "falsifier": "DEBT on either card -> round 32's ordering fix stays under Rule 12 and the card's row enters the register as debt with its boundary named",
+      "note": "exact (n_unequal = 0) is NOT predicted.  GYRE's own row is AT-BAR with exact false (1730/17400 u cells bit-unequal), and the tank divisor is NEMO's own hu_0 rather than a rebuild, so the association row the round-33 gate measures (divide vs multiply) can still leave a sub-ulp difference."
+    },
+    "PA6": {
+      "claim": "The plant on the round-33 discharge (a unit offset) turns it red on both cards and exits non-zero.",
+      "threshold": "exit code 1, status DEBT",
+      "falsifier": "exit 0"
+    }
+  },
+  "part_b_read_before_measuring": {
+    "b0_1": "NEMO's kt=1 tracer program, from the COMPILED arm GYRE runs (cfgs/GYRE_OMIP_L2_P3_SM_R29ZDF/BLD/ppsrc/nemo/stprk3_stg.f90).  Stages 1 and 2, in source order: ts(Krhs)=0 at :608-610; tra_adv at :640; tra_sbc_RK3 at :646; then the qco time step at :674-680, ts(Kaa) = ((1+r3t(Kbb))*ts(Kbb) + rDt*(1+r3t(Kmm))*ts(Krhs)*tmask)/(1+r3t(Kaa)).  ln_isf, lk_asminc and ln_bdy are all false on GYRE, so nothing else runs.",
+    "b0_2": "Stage 3 adds five operators stages 1 and 2 never run: tra_qsr at :712, tra_ldf at :727, and tra_zdf at :741 which performs the time integration itself.  tra_bbc, tra_bbl, tra_dmp, tra_mfc, tra_osm and tra_npc are all gated false on GYRE.",
+    "b0_3": "The oracle carries the WHOLE program, per stage.  oracle_rktracer_operands_kt00000001_s1.bin and _s2.bin (NEMO_L2_RKTRA_1, written at stprk3_stg.f90:623-633 and :641-651 and :686-692) carry zero, after_advection, after_sbc, then Kbb/Kmm/Kaa T and S and the r3t triple.  oracle_rktracer_stage3_kt00000001.bin (NEMO_L2_RKTR3_1, :611-619, :641-644, :647-650, :725-727, :728-730, :742-748) carries zero, after_advection, after_sbc, after_qsr, after_ldf, then Kbb/Kmm/Kaa and the r3t triple.",
+    "b0_4": "The per-stage OUTPUT T/S is oracle_stage_kt00000001_s{1,2,3}.bin (NEMO_L1_STAGE_1), written by l1_dump_stage(kstp, N, Naa) immediately after each stp_RK3_stg call at stprk3.f90:198, :204, :212.  Stage 3's Naa becomes the next step's Nbb, so stage 3's T/S is the same array the trajectory gate scores as kt2.before.",
+    "b0_5": "The alignment table is ALREADY BUILT in the shared GYRE gate and needs no new instrument.  nemo_testcase_l2_gyre_phase3_gate.py:1750-1775 scores GYRE-zco.kt1.stage1.thermodynamic_operand.{T,S,ssh} through the model's own compiled step with the WRITE-only hook expose_tracer_stage=1; :1777-1802 does stage 2 under --measure-stage2-tracers; :1812-1892 does the stage-3 completion under --measure-stage3-completion, scoring kt1.stage3.pre_zdf.{T,S} against NEMO's own ((1+r3bb)*Kbb + rDt*(1+r3mm)*after_ldf)/(1+r3aa) and then an oracle-injected kt1.stage3.oracle_pre_zdf.{T,S}.",
+    "b0_6": "A PRIOR measurement of stage 1 exists and is STALE (round-16 and round-19 trees, quoted here as the prediction's basis and NOT as this round's result): GYRE-zco.kt1.stage1.thermodynamic_operand.T = 3.552713678800501e-15 K absolute, AT-BAR; S = 7.105427357601002e-15 psu absolute, AT-BAR.  Those are ONE ulp of 23.47 K and one ulp of 36.84 psu respectively.  It must be re-measured on this tree before it is used.",
+    "b0_7": "score() in the shared gate normalises by max(|reference|, 1.0), so the 1e-15 bar is RELATIVE for T (scale 23.47 K) and S (scale 36.84 psu) and ABSOLUTE for u, v and ssh.  Both quantities are reported for every row this round, per round 33's item-1 correction.",
+    "b0_8": "The transport each stage's tracer program consumes is built from that stage's INPUT velocity (Kmm), not its output: stprk3_stg.f90:338 and the tra_adv_trp call at :560.  So stage 1's tracers consume the kt=1 entry velocity (identically zero) plus the barotropic un_adv from stp_2D; stage 2's consume the stage-1 output velocity; stage 3's consume the stage-2 output velocity.",
+    "b0_9": "Round 30 measured the per-stage MOMENTUM residual on this card: stage 1 2.710505431213761e-19 (AT-BAR), stage 2 4.740083109008864e-13, stage 3 9.481924730527598e-07 before round 32 and 2.7478405293344943e-12 after round 33."
+  },
+  "part_b_predictions": {
+    "PB1": {
+      "claim": "Stage 1's T and S are AT-BAR and reproduce b0_6 on this tree: T 3.552713678800501e-15 K absolute (1.514e-16 normalized), S 7.105427357601002e-15 psu (1.929e-16 normalized).",
+      "threshold": "both AT-BAR; each absolute within one ulp of the quoted value",
+      "falsifier": "either row DEBT, or an absolute more than 2x the quoted one -> the owner is at or before stage 1 and round 33's registered walk is answered at its first step"
+    },
+    "PB2": {
+      "claim": "Stage 2's T and S are AT-BAR TOO, and stage 3 is the FIRST stage over bar.",
+      "threshold": "stage-2 normalized T and S both below 1e-15, and stage-2 absolute T below 3.6e-14 K (10x stage 1's)",
+      "falsifier": "stage-2 normalized T or S at or above 1e-15 -> PB2 REFUTED and the owner is inside stage 2's tracer program, which would exonerate every stage-3-only operator",
+      "mechanism_and_why_it_could_be_wrong": "the only new input stage 2's tracers take is the stage-1 output velocity, which is AT-BAR at 2.7e-19 (b0_9), so stage 2 should not amplify stage 1's one ulp.  Stage 3 takes the stage-2 output velocity at 4.74e-13 AND runs three operators no earlier stage runs (tra_qsr, tra_ldf, tra_zdf).  This is a mechanism, not a measurement, and it is labelled PLAUSIBLE: an alternative that would also fit is a defect in the stage-2 qco combine itself, which the stage-1 row cannot see because stage 1 and stage 2 use the same statement with different r3t operands."
+    },
+    "PB3": {
+      "claim": "Inside stage 3, the pre-zdf accumulator is ALREADY over bar -- i.e. kt1.stage3.pre_zdf.T is DEBT -- so the owner is at or before tra_ldf and the implicit vertical solve is exonerated.",
+      "threshold": "kt1.stage3.pre_zdf.T normalized at or above 1e-15",
+      "falsifier": "pre_zdf AT-BAR while the stage-3 output is DEBT -> the owner is tra_zdf itself, and the gate's own owner_label would read ZDF_SOLVER_FIRST_OWNER_CAPABLE_BOUNDARY"
+    },
+    "PB4": {
+      "claim": "The three quantities this round reports for kt2 are UNCHANGED from round 33 unless a fix lands: T 3.1956659540810506e-11 K absolute / 1.361474e-12 normalized, S 8.1712414612411521e-13 psu / 2.218110e-14 normalized.  They are the stage-3 output rows under a different name.",
+      "threshold": "bit-for-bit equal to round 33's numbers",
+      "falsifier": "any move -> something in this round's Part A work touched the model, which it must not"
+    },
+    "PB5": {
+      "claim": "No fix lands this round unless the first non-bit STATEMENT is identified AND the changed operator is bit-exact given NEMO's inputs on GYRE, LOCK and OVERFLOW.  If the localisation stops at a record gap instead, the WRITE-only frame specification is written and NOT run, exactly as round 33 did for the tanks.",
+      "threshold": "no model-code commit without a Rule-12 table covering every executing card",
+      "falsifier": "n/a -- this is a landing rule, not a measurement"
+    }
+  },
+  "what_this_round_may_not_do": [
+    "touch the decision-17 guard in ocean/vertical.py",
+    "touch the tanks' zdf_baroclinic_only flag",
+    "run makenemo, mpirun or any NEMO executable",
+    "edit anything under the NEMO src/ tree",
+    "change a default, a scheme selection, a threshold or a card's forcing"
+  ],
+  "artifact_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round34",
+  "reviews_planned": "codex is unavailable on this account, so the mandatory DUAL adversarial review runs as two fresh independent Claude agents: one on THIS preregistration's Part-B claims before any code is written, one on the diff afterwards."
+}

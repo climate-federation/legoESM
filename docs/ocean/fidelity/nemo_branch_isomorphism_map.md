@@ -80,9 +80,9 @@ Cards: `D`=DINO kamm_mlf (MLF), `L`=LOCK_EXCHANGE-zco, `O`=OVERFLOW-zps,
 | S-16 | `dyn_spg_ts` continuity / transport accumulation / spg dynspg_ts.F90:~640-700,~840 | none | D L O G | `blc:494 nemo_literal_metric_transports`, `:512 nemo_literal_accumulate_transport`, `:548 nemo_literal_continuity_divergence`, `:224 _nemo_literal_barotropic_pressure_gradient`, `:147 _nemo_literal_seed_from_reference_mesh` vs the generic inline arms in `_run_substep_loop` | `barotropic_continuity_evaluation`, `barotropic_transport_accumulation_evaluation`, `barotropic_pgf_evaluation`, `barotropic_seed_evaluation`, `barotropic_seed_face_depth` | ARTIFICIAL_BRANCH x5 — NEMO has one program; defaults are the generic arm; ORCA1 on defaults |
 | S-17 | `dyn_cor_2D` (in-substep barotropic Coriolis) dynspg_ts.F90:359,689 | `ln_dynvor_ene/ens/een` | D G | `blc:944 een_barotropic_coriolis`, `:1058 barotropic_coriolis_een_pre_step`, `:731 _nemo_literal_een_coefficients`, `:840 _build_een_barotropic_inputs`; generic 4-pt `f_u*V_at_u` at `blc:1441,1494` | `barotropic_coriolis` (`avg`/`een`/`een_metric`/`ene_metric`), `barotropic_coriolis_split` (`frozen`/`live`), `barotropic_een_seed`, `barotropic_een_coefficient_evaluation` | NEMO_SWITCH on ene/een; `avg` + `frozen` = ARTIFICIAL (no NEMO arm) and is what L/O/A resolve to |
 | S-18 | `dom_qco_r3c` / `dom_qco_r3c_RK3` domqco.F90:140-186, :189-240 (r3u = **surface-weighted MEAN** of ssh) | `key_qco`; `key_qcoTest_FluxForm` sub-arm | D L O G A | ~~(a) `dynamics/latlon_cgrid_operators.py:277 min_cell_to_uface`/`:312 min_cell_to_vface` — MIN of live thickness, used by `omlc:1063 _nemo_ws_stage_transport`~~ **CORRECTED 2026-09-02 (post-1d6a7448d) — see the "Triage against HEAD 648e5cd69" section below.** `_nemo_ws_stage_transport`'s stage-transport builder (`_nemo_ws_qco_stage_faces`) does NOT call `min_cell_to_uface` for this quantity (that citation conflated this row with S-19's `zad_qco_evaluation` gate, which lives in a different function, `nemo_qco_wzv_operands`); it calls the shared kernel via `vertical.py:218 nemo_qco_live_face_geometry_cgrid` (`:140 nemo_qco_live_face_geometry_from_operands` underneath), same as the MLF tracer transport and GM/Redi. `min_cell_to_uface`'s citation at `omlc:1379-1384` is a genuinely different routine (Matsuno-split Coriolis depth-average, S-27) | `zad_qco_evaluation`/`wzv_call2_evaluation`/`gm_redi_*_face_thickness_evaluation` gate the SEPARATE S-19/S-43 consumers of the shared kernel, not this row | **OTHER_RECIPE** (was `ARTIFICIAL_BRANCH (rank 1)`) — one NEMO kernel (`nemo_qco_live_face_geometry_cgrid`/`_from_operands`) reached by every card, beside `min_cell_to_uface`'s real, separately-cited MOM6/MITgcm hFacW=min role (PE-lane depth-average/slow-forcing, `opl:1364`/`omlc:4125`), reached by DINO/LOCK/OVERFLOW/ORCA1 **and** by `veros_faithful_v1`/`mitgcm_v1`/`oceananigans_v1` (which structurally cannot reach the NEMO arm — no raw NEMO mesh operands) |
-| S-19 | `wzv` sshwzv.F90 (np_velocity / np_transport) | none (arg-level) | D L O G A | `vertical.py diagnose_w_from_flux_div` (generic); `opl nemo_qco_wzv_operands` (literal, incl. `nemo_qco_kmm_velocity_cycle`) | `wzv_call2_evaluation` (`generic`/`nemo_literal`) | ARTIFICIAL_BRANCH — one NEMO routine, two impls; D/G literal, L/O/A generic. **MEASURED 2026-09-02** — the branch is arithmetic association only: stage `w` differs 3.0e-18 m/s (OVERFLOW) / 2.4e-21 m/s (LOCK), every kt=1..10 row BIT-IDENTICAL, and it does NOT own OVERFLOW's 2.599e-7 kt=2 velocity debt. Operand wall REMOVED (`nemo_qco_resolved_mesh_operands`); the remaining wall is NEMO's own call-site split. See "S-19 arm result" below |
+| S-19 | `wzv` sshwzv.F90 (np_velocity / np_transport) | none (arg-level) | D L O G A | `vertical.py diagnose_w_from_flux_div` (generic); `opl nemo_qco_wzv_operands` (literal, incl. `nemo_qco_kmm_velocity_cycle`) | `wzv_call2_evaluation` (`generic`/`nemo_literal`) | ARTIFICIAL_BRANCH — one NEMO routine, two impls; D/G literal, L/O/A generic. **MEASURED 2026-09-02** — the branch is arithmetic association only: stage `w` differs 3.0e-18 m/s (OVERFLOW) / 2.4e-21 m/s (LOCK), every kt=1..10 row BIT-IDENTICAL, and it does NOT own OVERFLOW's 2.599e-7 kt=2 velocity debt. **GYRE 2026-09-03:** the literal transport call now consumes the already materialized stage `pFu/pFv`, exactly as `traadv.F90:220-226`; the private legacy-rebuild hook is diagnostic only. Operand wall REMOVED (`nemo_qco_resolved_mesh_operands`); the remaining wall is NEMO's own call-site split. See "S-19 arm result" below |
 | S-20 | `wAimp` sshwzv.F90 (adaptive-implicit w split) | `ln_zad_Aimp` | L O A | `vertical.py:52 nemo_wicker_aimp_partition_transport` (called by `_nemo_ws_stage_transport` per stage) | `adaptive_implicit_vertadv` | SHARED (one impl). OVERFLOW now carries the source 20 m `e3w_0` operand (`usrdef_zgr.F90:157-168`); the former midpoint is private-test-only. ORCA1 consumes the kernel at a different post-program site — composition differs |
-| S-21 | stage transport `zFu/zFv` + `zub` correction stprk3_stg.F90:257-277 | none (RK3 identity) | L O G | `omlc:1046 _nemo_ws_stage_transport` | none (private, `_NEMOWSRK3TestHooks` only) | SHARED for the tracer stages and all three momentum stages — momentum stage 1 now advects with the same Kmm transport (`zub`) as stages 2-3 (**LANDED 2026-09-02**, `tests/ocean/unit/test_nemo_ws_stage1_transport.py`; before/after rows in the phase-3 receipt "S-21 stage-1 transport LANDED") |
+| S-21 | stage transport `zFu/zFv/zFw` + `zub` correction stprk3_stg.F90:257-304; stage clocks at :123-124,177-178,221-222 feed `sshwzv.F90:334-335` | none (RK3 identity) | L O G | `omlc:_nemo_ws_stage_transport` + `_nemo_stage_corrected_velocity` + `_nemo_metric_stage_transport`; coupled QCO reciprocal from `vertical:nemo_qco_live_face_geometry_from_operands` | no public selector; private legacy 3-D re-reduction ablation and Round-21 `source_stage_wzv_clock_arm` measurement only | SHARED for the tracer stages and all three momentum stages — momentum stage 1 advects with the same Kmm transport (`zub`) as stages 2-3; `zub/zvb` consume NEMO's separately stored `uu_b/vv_b(Kmm)` and the stored `r1_hu_0/(1+r3u)` / `r1_hv_0/(1+r3v)` from `domqco.F90:175-181,219-222`, rather than re-deriving `1/SUM(e3_face(Kmm))`.  The metric-bearing products remain materialized as `(e2u*e3u)*(uu+zub*umask)` / `(e1v*e3v)*(vv+zvb*vmask)` instead of re-reduction or divide/remultiply regrouping.  ORCA2's non-uniform partial-cell discriminator closes zFu/zFv from `102431/108307` unequal to `0/0` (Round 22). The stored-mean change remains **HOLD** beyond kt=1 pending prognostic `uu_b/vv_b` design; the stage-W clock claim was refuted by the admitted Round-21 records (`tests/ocean/unit/test_nemo_ws_stage1_transport.py`, `test_nemo_ws_stage_transport_preserves_fortran_product_association`, `test_nemo_ws_stage_corrected_velocity_matches_oracle_bits`; GYRE Round-20/21/22 receipt) |
 | S-22 | `dyn_adv` dispatch dynadv.F90:87-89 | `ln_dynadv_vec` / `ln_dynadv_cen2` / `ln_dynadv_up3` | D G A (vec) / L O (up3) | `opl` flux-form UP3 path (`momentum_flux_scheme="upwind3"`) vs vector-invariant path (`opl:2203+`) | `momentum_advection`, `momentum_flux_scheme` | NEMO_SWITCH |
 | S-23 | `dyn_adv_up3` vertical flux dynadv_up3.F90:239-365 | inside `ln_dynadv_up3` | L O | `vertical.py:1556 nemo_up3_vertical_momentum_advection`, called per stage at `omlc:4781 _stage_vertical_up3` AND once post-program at `omlc:5310+` (gated `momentum_time_integrator != "rk3_ws"`) | `vertical_momentum_scheme="nemo_up3"` | SHARED arithmetic, two call sites gated mutually exclusive; composition differs from NEMO only on the non-rk3_ws path |
 | S-24 | `dyn_zad` dynzad.F90:86-119 | `ln_dynadv_vec` | D G | `vertical.py:1632 nemo_advective_vertical_momentum_advection` | `vertical_momentum_scheme="nemo_advective"`, `zad_bottom_face_mask`, `zad_qco_evaluation` | SHARED impl; `zad_bottom_face_mask` (`min_rule`/`nemo_faithful`) = ARTIFICIAL (no NEMO arm) |
@@ -444,7 +444,7 @@ routine). `min_cell_to_uface`'s only competing role for THIS quantity is
 never by a production card. `min_cell_to_uface`'s real role (MOM6/MITgcm
 hFacW=min, `latlon_cgrid_operators.py:277-284`) is the PE-lane
 depth-average/slow-forcing (`ocean_pe_latlon_cgrid.py:1364`,
-`ocean_model_latlon_cgrid.py:4125`), reached by DINO/LOCK/OVERFLOW/ORCA1 *and*
+`ocean_model_latlon_cgrid.py:4230`), reached by DINO/LOCK/OVERFLOW/ORCA1 *and*
 by `veros_faithful_v1`/`mitgcm_v1`/`oceananigans_v1` (confirmed real catalog
 names via `legoesm.ocean.recipes.list_recipes()`), none of which can ever
 reach the NEMO arm (it needs `z_coord.nemo_hu_0`/`nemo_e1e2*`, only present on
@@ -461,7 +461,7 @@ quantity at all).
    nemo_qco_wzv_operands` (literal), both reachable — confirmed by direct
    `grep`, both symbols AST-resolve and both have live callers
    (`ocean_model_latlon_cgrid.py:456,1154,5340` for the generic diagnostic;
-   `ocean_model_latlon_cgrid.py:5333` for the literal path). Gated by
+   `ocean_model_latlon_cgrid.py:5438` for the literal path). Gated by
    `state.py:2221 zad_qco_evaluation` / `:2225 wzv_call2_evaluation`, both
    default `"generic"`.
 2. **What do the certified cards run?** DINO's certified card
@@ -691,7 +691,7 @@ routine this row is about.
 
 ### M-01 (`stp_MLF`: `_leapfrog_step` vs `_nemo_mlf_step`)
 
-1. **Duplicate present at HEAD?** Yes. `ocean_model_latlon_cgrid.py:9842
+1. **Duplicate present at HEAD?** Yes. `ocean_model_latlon_cgrid.py:9994
    _leapfrog_step` vs `:10379 _nemo_mlf_step`, dispatched at `:8938`/`:8949` on
    `outer_integrator in ("leapfrog", "nemo_mlf")` — both are real, wired
    dispatch values (multiple `raise` guards elsewhere reference both, e.g.
@@ -1127,7 +1127,7 @@ a test. Restoring the cap turns
 
 **REFUSED as a config flip: routing ORCA1 through the in-stage site.** The
 in-model BBL hook is built only inside the WS-RK3 tracer lane
-(`ocean_model_latlon_cgrid.py:6007`, under `elif _tti == "rk3_ws":`) and is
+(`ocean_model_latlon_cgrid.py:6113`, under `elif _tti == "rk3_ws":`) and is
 passed only to `_nemo_ws_rk3_tracer_pair_step`. ORCA1 resolves
 `tracer_time_integrator="euler"` (`run_omip_core2.py:7463`), whose branch has
 no BBL hook at all. So setting `bbl_adv_option=2` on ORCA1 — the "config-only
@@ -1152,7 +1152,7 @@ answers and is not a default to move silently.
 **2026-09-02 follow-up (this pass): the silent-drop hazard is now a hard
 error.** `bbl_adv_option=2` paired with any `tracer_time_integrator` other
 than `rk3_ws` now raises `ValueError` at `LatLonCGridOceanModel._validate_config`
-(`ocean_model_latlon_cgrid.py:3342-3361`), naming the mismatched lane and
+(`ocean_model_latlon_cgrid.py:3447-3466`), naming the mismatched lane and
 pointing at the driver-side `apply_bbl_adv_step` (`run_omip_core2.py`'s
 `--bbl-adv`) as the alternative. Verified inert on ORCA1 (never sets
 `bbl_adv_option`, stays at the default 0). This closes the "SILENTLY run NO
@@ -1217,7 +1217,7 @@ owner. Left UNVERIFIED — neither explanation is measured here.
 
 **Also blocked structurally, independent of the numbers.** `outer_integrator=
 "nemo_mlf"` hard-requires `implicit_vmix_e3t_now_divisor=True`
-(`ocean_model_latlon_cgrid.py:3019`), which DINO's certified card sets False
+(`ocean_model_latlon_cgrid.py:3124`), which DINO's certified card sets False
 (S-34). So the collapse could not be a one-variable config move even if the
 states agreed: it would flip S-34's divisor at the same time. The A/B above
 sidesteps that by calling the two methods directly at DINO's own config, which
@@ -1279,7 +1279,7 @@ generic vertical-velocity diagnostic for three other lanes —
 `fidelity/box_heat_budget.py:310`. So the row cannot become OTHER_RECIPE
 either: LOCK/OVERFLOW/ORCA1 are NEMO cards and they resolve
 `wzv_call2_evaluation="generic"`, so a NEMO card still reaches the generic arm
-at the MLF call-2 site (`ocean_model_latlon_cgrid.py:5367`).
+at the MLF call-2 site (`ocean_model_latlon_cgrid.py:5472`).
 
 **4. The second site is NEMO's own split, restated.** `wzv_call2_evaluation=
 "nemo_literal"` requires `zad_qco_evaluation="nemo_literal"`, which requires
@@ -1476,7 +1476,7 @@ hu_0(:,:)  = hu_0(:,:) + e3u_0(:,:,jk) * umask(:,:,jk)                          
 
 legoESM removes a LIVE-weighted one: `_replace_stage_mean` uses
 `sum(u*h_u_pre)/H_u_pre` with `h_u_pre = min_cell_to_uface(h_k_pre)`
-(`ocean_model_latlon_cgrid.py:4264`), `h_k_pre` being the ssh-stretched
+(`ocean_model_latlon_cgrid.py:4369`), `h_k_pre` being the ssh-stretched
 thickness.  This was the phantom round's open item 3, recorded UNMEASURED.
 
 **RETRACTED before it was believed.**  A first pass claimed the two weightings
@@ -1527,3 +1527,159 @@ OVERFLOW statistic still outside the NEMO scheme spread
 in bulk mixing (NEMO's own FCT4 run moves it the same direction as legoESM
 while moving the dilution measure the opposite way), so no operator attribution
 to that row is supported yet.  See the receipt's retraction list.
+
+## 2026-09-03 S-49 — nonlinear implicit split-explicit bottom drag
+
+| id | NEMO routine | NEMO switch | cards | legoESM implementation | selector | classification |
+|---|---|---|---|---|---|---|
+| S-49 | `zdf_drg` rate + `dyn_drg_init` external-mode residual/rate + `dyn_zdf` implicit bottom cell | `ln_non_lin` + `ln_drgimp` + `ln_dynspg_ts` | D G | `nemo_bottom_drag_rate_faces`, consumed by the existing external-substep and implicit-ZDF sites | `bottom_drag_scheme="nemo_quadratic"` plus the inseparable `zdf_drag_in_matrix` + `zdf_baroclinic_only` + `barotropic_drag_substep` identity | SHARED |
+
+NEMO has one stored Kmm `rCdU_bot`: `zdfdrg.F90:138-190` constructs it,
+`dynspg_ts.F90:1584-1643` freezes its face rate and baroclinic residual for the
+external-mode solve, `:699-705` applies the entry-velocity drag inside every
+substep, and `dynzdf.F90:148-160,293-305` composes the same rate into the
+baroclinic-only implicit solve. DINO already selected this canonical program;
+GYRE now selects the same three-part identity from its resolved
+`ln_non_lin=T`, `ln_drgimp=T`, `ln_dynspg_ts=T` namelist. The private
+`omit_barotropic_substep_drag` hook is a one-variable measurement ablation of
+the in-substep boundary only, cites this reference, and is not a constructible
+scheme arm.
+
+## 2026-09-03 S-39/S-40/S-41 — GYRE stage-3 tracer completion
+
+The GYRE walk closes an artificial ordering error without adding a routine:
+the existing `_nemo_ws_rk3_tracer_pair_step` now carries non-advective physics
+in its stage-3 Krhs and returns that same content RHS to the one existing
+NEMO-literal `tra_zdf` solver.  This matches `stprk3_stg.F90:565-600` and
+`trazdf.F90:271-286`; stages 1–2 still receive only nonlinear EMP transport.
+
+Two-band QSR also has one implementation.  The shared physics kernel owns the
+deposit, while the external-forcing consumer supplies only qns on the NEMO
+selector (`trasbc.F90:299-315`; `traqsr.F90:665-712`).  The prior second
+deposit was an artificial inline consumer, not a NEMO switch.  GYRE additionally
+selects NEMO's full-qsr convention (rather than legoESM's legacy 94% split) and
+the card constants.  Its TEOS surface EMP operand uses the literal shared
+`nemo_potential_temperature_from_conservative` recurrence from
+`eosbn2.F90:1493-1542`.  These are components of the existing collapsed
+`gyre_vector_ene_c2` identity; no independently constructible hybrid was added.
+
+## 2026-09-03 S-50 — GYRE literal `hpg_sco` operands and recurrence
+
+| id | NEMO routine | NEMO switch | cards | legoESM implementation | selector | classification |
+|---|---|---|---|---|---|---|
+| S-50 | `hpg_sco` density polynomial plus bottom-up pressure-gradient recurrence (`dynhpg.F90:340-390`; `eosbn2.F90:265-288`) | `ln_hpg_sco` | D L O G | `nemo_roquet_density_anomaly_ratio` + `nemo_hpg_sco_literal_cgrid`, selected by the existing `pgf_scheme="nemo_sco"` identity | none beyond the NEMO `hpg_sco` switch | SHARED |
+
+The GYRE stage-2 WRITE-only operand record made `rhd`, `e3w(Kmm)`, and
+`gdept(Kmm)` independently observable.  The shared implementation preserves
+NEMO's multiply-before-subtract density anomaly and the exact bottom-up
+trapezoid/face-gradient statement order.  Private freeze/legacy hooks only
+form preregistered causal arms; they cannot select a card and do not create a
+second `hpg_sco` implementation.  It also includes NEMO's final `* tmask`
+(`eosbn2.F90:288`), which round 9 restored after the density anomaly had been
+left unmasked.
+
+The 2026-09-03 round-9 audit disclosed a shared reassociation as well: the one
+Roquet implementation now uses NEMO's literal `zn3/zn2/zn1/zn0` nesting for
+both EOS-80 and TEOS-10.  Direct old-versus-literal probes moved density by at
+most `4.55e-13 kg m-3` and `prd` by `4.43e-16`; this is a source-association
+correction within S-50, not a GYRE-only identity arm.  OVERFLOW and
+LOCK_EXCHANGE were assigned phase-3 2-ulp and tracer-bit-identity guards.
+Round 10 proved the exact OVERFLOW EOS mask equals oracle `tmask` (zero
+differing cells and zero NEMO-wet cells zeroed); the earlier `3.051e12`-ulp
+result was primarily missing raw W-grid geometry.  With every card supplying
+oracle `e3w_0`, LOCK_EXCHANGE's stage sweep passes at `0.017648` ulp, but
+OVERFLOW's stage sweep still fails at `28.062` ulp and the kt=1…10 trajectory
+guards fail at `513504.875` ulp (OVERFLOW) and `2.743` ulp plus lost tracer bit
+identity (LOCK_EXCHANGE).  Direct-`prd` and prior-wet-evaluator one-variable
+diagnostics did not remove the trajectory amplification.  The shared
+EOS/HPG-association boundary therefore remains open and fail-closed; it is not
+a passed isomorphism exception and no card guard exists.
+
+Round 12 resolves the remaining source-operation association inside this same
+S-50 implementation.  A stage-2 config-local WRITE-only record of the
+executed four-argument `eos_insitu_pot_New_t` overload follows
+`eosbn2.F90:260-288` through `zh/zt/zs/ztm`, `zn3/zn2/zn1/zn0`, `zn`, and
+`prd`; all 52 coefficients and the normalizers/reference density at
+`:1898,1926-1982,2331-2334` are also recorded.  QCO's depth operand is the
+literal `r3t=ssh*r1_ht_0` then `gdept_0*(1+r3t)` path
+(`domqco.F90:159-161`; `domzgr_substitute.h90:50,56,75,139`).  That input and
+every normalized coordinate are bit-identical; the first departure was the
+compiled `zn0` evaluation (4 ulp), while a pure NumPy transcription of the
+Fortran statements was bit-identical through `prd`.  The shared JAX evaluator
+now preserves a rounding boundary after each source operation, with no new
+selector, card guard, callback, or duplicate routine.  On identical oracle
+inputs every intermediate and `prd` is bit-identical under production JIT.
+
+This does not close GYRE stage 2.  Propagating the shared change produces nine
+one-ulp T/S cells at the live EOS entry and two differing `prd` cells
+(`2.220446049250313e-16`); HPG improves about 32–37×, while corrected Kaa
+improves about 23–26× to `2.0033670902752654e-14` u and
+`2.0003665607629117e-14` v, still DEBT.  The next upstream tracer-state owner
+is UNMEASURED, so the stage-3 transport walk remains gated.  Cross-card oracle
+scoring is mixed: LOCK_EXCHANGE stage rows improve and remain AT-BAR;
+OVERFLOW stage-3 u moves away by 3.281–4.0625 ulp, while its stage-1 u
+improves.
+
+The 2026-09-04 user decision replaces the prior-output compare-to criterion
+with the shared, oracle-relative cellwise criterion.  Every scored boundary
+now persists its compressed per-cell ``abs(legoESM - NEMO)`` field.  A shared
+change fails when any cell worsens by more than two ulp of that cell's oracle
+magnitude, when an AT-BAR row becomes DEBT, or when ``first_over_bar`` moves
+earlier.  Movement versus the preceding legoESM output remains disclosed but
+is not an acceptance criterion.  This policy is Rule 12 of the oracle-fidelity
+skill; it is not a card-specific S-50 exception.
+
+### PLAUSIBLE debt: barrier-only shared recurrences
+
+Round 12's optimized-HLO census showed that ``optimization_barrier`` alone is
+not a materialized rounding boundary.  The following shared NEMO-literal
+recurrences still rely on that barrier without the EOS path's surviving IEEE
+``isfinite``/``select`` identity.  They are therefore **PLAUSIBLE debt**, not
+measured defects and not implementation exceptions; this round changes none
+of them.
+
+| shared recurrence | implementation | reason for registration |
+|---|---|---|
+| QCO live e3f recurrence | `vertical.py` (`nemo_qco_e3f_from_faces`) | source-operation barriers may disappear before contraction/reassociation; the live face-thickness/reciprocal recurrence was hardened and closed by ORCA2 in Round 22 |
+| external-mode literal helpers | `dynamics/barotropic_common.py` | source-associated transport/update arithmetic uses barrier-only boundaries |
+| RK3 external-mode and transport accumulation | `dynamics/barotropic_latlon_cgrid.py` | substep, weighted-mean, and final-update recurrences use barrier-only boundaries |
+| PE HPG/QCO literal path | `dynamics/ocean_pe_latlon_cgrid.py` | HPG operands and the depth/transport recurrence use barrier-only boundaries |
+| Thomas recurrence | `physics/vertical_mixing/implicit_solver.py` | forward elimination and back-substitution are association-sensitive recurrences |
+| GM/Redi recurrence | `physics/lateral_mixing/gm_redi_latlon_cgrid.py` | slope/tensor accumulation carries barrier-only source order |
+
+Each boundary remains on the ordered fidelity register and requires an
+operand-level oracle discriminator before any code change.
+
+## 2026-09-04 Round 19 — S-16/S-17 external-mode source recurrences
+
+Round 19 keeps the existing RoutineRows S-16 and S-17; these are refinements
+of their one registered implementations, not exceptions or new rows.  The
+S-16 `nemo_literal` arm now follows `dynspg_ts.F90:549-562,603-609,627-629,
+653-685,719-731,771-778` in written binary64 order for the AB3 midpoint,
+continuity update, surface-weighted face SSH and inverse depth, backward SSH
+blend, pressure-gradient handoff, and vector velocity update.  The private
+`legacy_barotropic_continuity_association` hook is a non-constructible
+one-variable test ablation of `dynspg_ts.F90:629`; it is not a selector.
+
+S-17's existing `ene_metric` arm now preserves the live ENE coefficient
+program at `dynspg_ts.F90:1383-1410`: it accumulates
+`e3u*e3v*mask/e3f_vor` vertically before applying `ff_f` in the post-loop
+coefficient statement.  The former algebraic folding of `ff_f/e3f_vor` into
+each level was not a NEMO branch.  Both S-16 and S-17 use the one shared
+`legoesm.core.source_rounding.nemo_source_round` helper; no GYRE guard or
+second NEMO routine implementation was introduced.
+
+## 2026-09-04 S-51 — coastal surface-stress face factors
+
+| RoutineRow | NEMO routine / source | NEMO selector | cards | one legoESM implementation | selector / private seam | disposition |
+|---|---|---|---|---|---|---|
+| S-51 | U/V stress interpolation and coastal factors (`sbcmod.F90:539-546`) | none | D G A | `ocean_pe_latlon_cgrid.surface_stress_faces`, consumed by both the external-mode slow forcing and implicit momentum-ZDF surface boundary | no public selector; private `_NEMOWSRK3TestHooks.legacy_coastal_surface_stress_factors` is a gate-only ablation | SHARED |
+
+The NEMO identity applies the written `(2-umask)*MAX(tmask,tmask_east)`
+factor (and its meridional analogue) after the face average.  The generic
+non-NEMO caller may omit masks; every NEMO WS-RK3 consumer supplies the same
+cell and face masks.  GYRE's 580 active U and 570 active V faces are unchanged
+because their factor is one, while the source-written dry coastal inventory
+moves on 124 U and 102 V faces and becomes bit-identical to oracle V2.  The
+private legacy hook does not construct a model card and introduces no second
+physics implementation.
