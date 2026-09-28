@@ -103,10 +103,18 @@ without attributing ZAD before its required carried operands exist.
 
 ## Validation readout
 
-- Citation gate: pending final run.
-- Focused tests: pending final run.
-- Full card battery: pending final run.
-- Single ocean-fidelity battery: pending final run.
+- Citation gate: six round-63 citations pass, the shifted failed-writer
+  citation fails, and the default cumulative gate passes all 274 citations
+  with no unmapped citation.
+- Focused record/replay and citation-gate tests: `20 passed`.
+- Full card battery: `170 passed`, with nine JAX dtype warnings.
+- The mandated single `tests/ocean/fidelity -n 12` invocation collected 2,000
+  tests and reached 99%.  It printed the same five standing failure markers
+  recorded by round 62 before stalling without a terminal summary: the
+  round-129 spread certification, round-51 private trace registry, SI3 scalar
+  provenance, worktree-stamp emitters, and recipe case-board census.  The
+  session was interrupted after five minutes with no further output.  No
+  round-63 test failed.
 
 ## OPEN
 
