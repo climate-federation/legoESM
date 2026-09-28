@@ -270,11 +270,26 @@ def test_env_var_conflicting_with_config_raises(monkeypatch):
         apply_corner_fill_config("fv3_bgrid_xdir")
 
 
+def test_config_door_refuses_a_mode_another_trace_already_used(monkeypatch):
+    """The fill reads the mode at trace time, so a compiled function keeps the
+    mode it traced with; a run configured for another mode in the same process
+    would silently mix two modes (codex review of #1811)."""
+    from legoesm.grids import halo
+    monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
+    monkeypatch.setattr(halo, "_corner_fill_claimed", None)
+    monkeypatch.setattr(halo, "_corner_fill_traced", {"fv3_bgrid_xdir"})
+    halo.apply_corner_fill_config("fv3_bgrid_xdir")          # same mode: fine
+    monkeypatch.setattr(halo, "_corner_fill_claimed", None)
+    with pytest.raises(ValueError, match="already traced"):
+        halo.apply_corner_fill_config("avg")
+
+
 def test_model_driver_applies_config_corner_fill(monkeypatch):
     import legoesm.grids.halo as halo
     monkeypatch.delenv("LEGOESM_CORNER_FILL", raising=False)
     monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
     monkeypatch.setattr(halo, "_corner_fill_claimed", None)
+    monkeypatch.setattr(halo, "_corner_fill_traced", set())    # earlier tests traced other modes
     from legoesm.driver.config import DycoreConfig, ExperimentConfig
     from legoesm.driver.model_driver import ModelDriver
     ModelDriver(ExperimentConfig(dycore=DycoreConfig(corner_fill="fv3_bgrid_xdir")))
@@ -286,6 +301,7 @@ def test_second_model_with_other_corner_fill_raises(monkeypatch):
     monkeypatch.delenv("LEGOESM_CORNER_FILL", raising=False)
     monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
     monkeypatch.setattr(halo, "_corner_fill_claimed", None)
+    monkeypatch.setattr(halo, "_corner_fill_traced", set())    # earlier tests traced other modes
     from legoesm.driver.config import DycoreConfig, ExperimentConfig
     from legoesm.driver.model_driver import ModelDriver
     ModelDriver(ExperimentConfig(dycore=DycoreConfig(corner_fill="fv3_bgrid_xdir")))

@@ -1761,6 +1761,15 @@ def apply_corner_fill_config(mode: str) -> None:
             f"{_corner_fill_claimed!r} of a model already built in this "
             f"process; the mode is process-global, so run them in separate "
             f"processes.")
+    # A fill that already TRACED with another mode (a compiled function keeps
+    # the mode it traced with) is the same conflict, whether or not the earlier
+    # model went through this door.
+    other = _corner_fill_traced - {mode}
+    if other:
+        raise ValueError(
+            f"corner_fill={mode!r} conflicts with the mode(s) {sorted(other)} a "
+            f"halo fill already traced with in this process; compiled functions "
+            f"keep their traced mode, so run them in separate processes.")
     set_corner_fill_mode(mode)
     _corner_fill_claimed = mode
 
