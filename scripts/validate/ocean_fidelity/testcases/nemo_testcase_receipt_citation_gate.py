@@ -598,6 +598,7 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
     "barotropic_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py",
+    "eos.py": REPO / "packages/ocean/legoesm/ocean/eos.py",
     "state.py": REPO / "packages/ocean/legoesm/ocean/state.py",
     "provenance.py": REPO / "packages/ocean/legoesm/ocean/fidelity/provenance.py",
     # --- round 35 paths: the implicit vertical TRACER solve ---
@@ -2769,6 +2770,13 @@ CITATION_MAP = {
         'IF( ln_bt_fw ) THEN                 ! FORWARD integration: start from NOW fields',
         'vn_adv(:,:)     = 0._wp', 27],
     # --- PR #1802 final round: decisions 66 and 67 -----------------------
+    # D67's own call site, and the DINO year screen's pre-existing refusal.
+    'barotropic_latlon_cgrid.py:2655-2660': [
+        'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
+        ('_nemo_legacy_seed_faces_test_override or False),', 2),
+        6],
+    'eos.py:742':
+        '"raw-mesh e3w_int must contain only finite values > 0",',
     # D67: the e1e2-weighted SSH-average face depth NEMO divides the
     # accumulated barotropic transport by, to form puu_b/pvv_b(Kaa).
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90:835-842': [
