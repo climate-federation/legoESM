@@ -96,6 +96,22 @@ _SE_DRY_FLOOR = 1.0e-4
 _PSI_FLOOR_MIN = -1.0e30
 
 
+def psi_dry_floor(hydro_config: SoilHydraulicsConfig) -> jnp.ndarray:
+    """The solver's dry-side matric-potential floor (see ``_SE_DRY_FLOOR``).
+
+    psi at Se = ``_SE_DRY_FLOOR`` for the active retention curve and (possibly
+    per-column) hydraulics, capped at ``_PSI_FLOOR_MIN`` so it stays finite in
+    float32.  ``theta_from_psi(psi_dry_floor(h), h)`` is therefore the driest
+    water content the Richards step can hold; a state below it gains water on
+    its first step.
+    """
+    floor = psi_from_theta(
+        hydro_config.theta_r
+        + _SE_DRY_FLOOR * (hydro_config.theta_sat - hydro_config.theta_r),
+        hydro_config)
+    return jnp.maximum(floor, _PSI_FLOOR_MIN)
+
+
 class RichardsConfig(NamedTuple):
     """Configuration for the Richards equation solver.
 
@@ -265,18 +281,7 @@ def solve_richards(
     # --- Picard iteration ---
     psi_m = psi  # iterate
 
-    # Config-aware dry-side psi floor (see _SE_DRY_FLOOR): matric potential at
-    # Se = _SE_DRY_FLOOR for the active retention curve + (possibly per-column)
-    # hydraulics, computed ONCE.  jnp.maximum(psi, _psi_dry_floor) then bounds the
-    # dry limit with a water error <= _SE_DRY_FLOOR*(theta_sat-theta_r) for ANY (alpha, n).
-    _psi_dry_floor = psi_from_theta(
-        hydro_config.theta_r
-        + _SE_DRY_FLOOR * (hydro_config.theta_sat - hydro_config.theta_r),
-        hydro_config)
-    # Keep the floor FINITE in the working precision (float32 overflows the flat-curve
-    # psi to -inf, defeating the guard — see _PSI_FLOOR_MIN).  Never binds for a normal
-    # soil (floor ~ -1e6 >> -1e30).
-    _psi_dry_floor = jnp.maximum(_psi_dry_floor, _PSI_FLOOR_MIN)
+    _psi_dry_floor = psi_dry_floor(hydro_config)
 
     def picard_body(m, carry):
         h_s_m, psi_m, theta_m, _ = carry  # 4th slot: K_bot diagnostic (write-only)

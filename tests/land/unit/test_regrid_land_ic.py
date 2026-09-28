@@ -86,3 +86,128 @@ def test_regridding_latitude_returns_latitude():
     assert err.max() < np.deg2rad(2.0), (
         f"a target column received a latitude {np.rad2deg(err.max()):.1f} deg "
         "away: the regridder's geometry is mis-registered")
+
+
+# --- soil-hydraulics stamp through the regridder -----------------------------
+
+def _source(tmp_path, *, stamp=None, extra=None, ncol=32, nlay=10):
+    """A tiny multilayer restart on the 4x8 lat-lon grid."""
+    import json
+    rng = np.random.default_rng(0)
+    fields = {
+        "restart_version": np.array(2, dtype=np.int32),
+        "land_mode": np.array("multilayer", dtype="U16"),
+        "t_end_s": np.array(0.0), "n_steps_completed": np.array(0),
+        "metadata_json": np.array(json.dumps(
+            {"grid_type": "latlon", "resolution": 4})),
+        "T_soil": 270.0 + rng.random((ncol, nlay)),
+        "psi_soil": -1.0 - rng.random((ncol, nlay)),
+        "theta_soil": 0.2 + 0.1 * rng.random((ncol, nlay)),
+        "runoff_surface": np.zeros(ncol), "runoff_subsurface": np.zeros(ncol),
+        "snow_depth": np.zeros(ncol), "snow_age": np.zeros(ncol),
+    }
+    if stamp is not None:
+        fields["soil_hydraulics_json"] = np.array(json.dumps(stamp))
+    fields.update(extra or {})
+    p = tmp_path / "src.npz"
+    np.savez(p, **fields)
+    return p
+
+
+def _argv(src, tmp_path, *more):
+    return ["--source", str(src), "--surfdata", "unused.nc",
+            "--target-grid", "latlon", "--target-resolution", "4",
+            "--out", str(tmp_path / "out.npz"),
+            "--source-soil-column", "10,3.0,2.0", *more]
+
+
+def test_regridder_refuses_fields_it_does_not_remap(tmp_path):
+    mod = _load("scripts/data/regrid_land_ic.py", "regrid_land_ic")
+    src = _source(tmp_path, extra={"surface_water": np.zeros(32)})
+    with pytest.raises(SystemExit, match="does not remap"):
+        mod.main(_argv(src, tmp_path))
+
+
+def test_regridder_needs_the_hydraulics_of_an_unstamped_source(tmp_path):
+    mod = _load("scripts/data/regrid_land_ic.py", "regrid_land_ic")
+    with pytest.raises(SystemExit, match="records no soil hydraulics"):
+        mod.main(_argv(_source(tmp_path), tmp_path))
+
+
+def test_regridder_will_not_overrule_a_stamped_source(tmp_path):
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_SURFDATA_COSBY, soil_hydraulics_stamp)
+    pf = tmp_path / "cosby.nc"
+    pf.write_bytes(b"cosby")
+    stamp = soil_hydraulics_stamp("clapp_hornberger",
+                                  HYDRAULICS_SOURCE_SURFDATA_COSBY, pf)
+    mod = _load("scripts/data/regrid_land_ic.py", "regrid_land_ic")
+    with pytest.raises(SystemExit, match="already records"):
+        mod.main(_argv(_source(tmp_path, stamp=stamp), tmp_path,
+                       "--source-soil-hydraulics", "clapp_hornberger",
+                       "surfdata_cosby", str(pf)))
+
+
+def test_regridder_writes_the_attested_stamp(tmp_path, monkeypatch):
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_SURFDATA_COSBY, file_md5, load_land_restart,
+        soil_hydraulics_stamp, soil_hydraulics_stamps_match)
+    pf = tmp_path / "cosby.nc"
+    pf.write_bytes(b"cosby")
+    mod = _load("scripts/data/regrid_land_ic.py", "regrid_land_ic")
+    monkeypatch.setattr(mod, "_source_land_mask",
+                        lambda surfdata, grid, n: np.ones(n, dtype=bool))
+    src = _source(tmp_path)
+    assert mod.main(_argv(src, tmp_path, "--source-soil-hydraulics",
+                          "clapp_hornberger", "surfdata_cosby", str(pf))) == 0
+    _, meta = load_land_restart(tmp_path / "out.npz",
+                                expected_land_mode="multilayer",
+                                expected_ncol=32)
+    got = meta["soil_hydraulics"]
+    assert soil_hydraulics_stamps_match(got, soil_hydraulics_stamp(
+        "clapp_hornberger", HYDRAULICS_SOURCE_SURFDATA_COSBY, pf))
+    assert got["attested"] is True
+    assert got["attested_source_md5"] == file_md5(src)
+    # The regridded flag is what forces a full conversion on load, now that
+    # the source grid's column signature is dropped.
+    assert meta["metadata"]["regridded_from"] == src.name
+
+
+def test_stamp_only_adds_the_stamp_and_changes_nothing_else(tmp_path):
+    from legoesm.land.restart import load_land_restart
+    pf = tmp_path / "cosby.nc"
+    pf.write_bytes(b"cosby")
+    mod = _load("scripts/data/regrid_land_ic.py", "regrid_land_ic")
+    src = _source(tmp_path)
+    out = tmp_path / "stamped.npz"
+    assert mod.main(["--source", str(src), "--out", str(out), "--stamp-only",
+                     "--source-soil-hydraulics", "clapp_hornberger",
+                     "surfdata_cosby", str(pf)]) == 0
+    a, b = np.load(src), np.load(out)
+    assert set(b.files) == set(a.files) | {"soil_hydraulics_json"}
+    for k in a.files:
+        np.testing.assert_array_equal(a[k], b[k])
+    _, meta = load_land_restart(out, expected_land_mode="multilayer",
+                                expected_ncol=32)
+    assert meta["soil_hydraulics"]["retention_curve"] == "clapp_hornberger"
+    with pytest.raises(SystemExit, match="already"):
+        mod.main(["--source", str(out), "--out", str(tmp_path / "x.npz"),
+                  "--stamp-only"])
+
+
+def test_regridder_drops_the_source_grids_column_signature(tmp_path, monkeypatch):
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_SURFDATA_COSBY, soil_hydraulics_stamp)
+    pf = tmp_path / "cosby.nc"
+    pf.write_bytes(b"cosby")
+    stamp = soil_hydraulics_stamp("clapp_hornberger",
+                                  HYDRAULICS_SOURCE_SURFDATA_COSBY, pf)
+    mod = _load("scripts/data/regrid_land_ic.py", "regrid_land_ic")
+    monkeypatch.setattr(mod, "_source_land_mask",
+                        lambda surfdata, grid, n: np.ones(n, dtype=bool))
+    src = _source(tmp_path, stamp=stamp, extra={
+        "soil_hydraulics_column_sig": np.arange(32, dtype=np.uint64)})
+    assert mod.main(_argv(src, tmp_path)) == 0
+    out = np.load(tmp_path / "out.npz")
+    assert "soil_hydraulics_column_sig" not in out.files
+    assert "soil_hydraulics_json" in out.files

@@ -42,6 +42,8 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
     _depth_average_to_faces,
+    _nemo_ssh_avg_apply,
+    _nemo_ssh_avg_prep,
     _nemo_literal_barotropic_pressure_gradient,
     _nemo_literal_seed_depth_mean,
     nemo_literal_accumulate_transport,
@@ -476,6 +478,28 @@ class TestBarotropicSeedFaceDepth:
     thickness once the loop is already running (see the state.py field
     docstrings for the full NEMO citation).
     """
+
+    def test_nemo_entry_inverse_has_finite_closed_meridional_faces(self):
+        """DINO developed ssh must not turn the two storage faces into NaN."""
+        grid, _, state = _flat_basin(n_lat=8, n_lon=16, H=1000.0)
+        geom = ensure_geometry(grid)
+        dtype = state.eta.data.dtype
+        prep = _nemo_ssh_avg_prep(
+            state.H_bathy.data, state.land_mask.data, grid, dtype, None)
+        eta = (jnp.asarray(0.125, dtype=dtype)
+               * state.land_mask.data)
+
+        def entry_inverse(eta_arg):
+            return _nemo_ssh_avg_apply(
+                eta_arg, state.u_mask.data, state.v_mask.data, grid,
+                geom.area, prep, return_entry_inverse=True)[2:]
+
+        r1_u, r1_v = entry_inverse(eta)
+        r1_u_jit, r1_v_jit = jax.jit(entry_inverse)(eta)
+        for value in (r1_u, r1_v, r1_u_jit, r1_v_jit):
+            assert np.isfinite(np.asarray(value)).all()
+        np.testing.assert_array_equal(np.asarray(r1_v)[[0, -1]], 0.0)
+        np.testing.assert_array_equal(np.asarray(r1_v_jit)[[0, -1]], 0.0)
 
     def test_unknown_seed_face_depth_raises(self):
         with pytest.raises(ValueError, match="barotropic_seed_face_depth"):

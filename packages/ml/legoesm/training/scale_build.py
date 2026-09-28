@@ -554,6 +554,7 @@ def _build_mode_components_spectral(cfg, yml):
         if _tier:
             from legoesm.training.aimip_params import (
                 AIMIPTrainableBundle,
+                aimip_inactive_fields,
                 aimip_legacy_owned_fields,
                 aimip_scheme_keys_for,
             )
@@ -586,6 +587,8 @@ def _build_mode_components_spectral(cfg, yml):
                 exclude=tuple(sorted(
                     set(aimip_legacy_owned_fields(
                         cloud_scheme=_schemes["cloud_scheme"]))
+                    | aimip_inactive_fields(
+                        cloud_scheme=_schemes["cloud_scheme"])
                     | _pinned_trainable_names(_param_fixed))),
             )
             params = AIMIPTrainableBundle(

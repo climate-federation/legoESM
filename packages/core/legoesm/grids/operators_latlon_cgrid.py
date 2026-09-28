@@ -374,7 +374,9 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     return jnp.pad(f, tuple(pad), mode="wrap")
 
 
-def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
+def interp_cell_to_uface(
+    f: jnp.ndarray, *, source_round: bool = False,
+) -> jnp.ndarray:
     """Interpolate a cell-center field to u-face (lon interface) positions.
 
     Simple average of the two cells sharing each lon face.
@@ -394,6 +396,11 @@ def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     # spans lon partition cuts under a 2-D split.  Output face j = mean of
     # the two cells sharing it; n_lon+1 faces (the last the periodic closure).
     f_pad = pad_lon_cgrid(f, halo=1)
+    if source_round:
+        from legoesm.core.source_rounding import nemo_source_round
+
+        neighbour_sum = nemo_source_round(f_pad[:, :-1] + f_pad[:, 1:])
+        return nemo_source_round(0.5 * neighbour_sum)
     return 0.5 * (f_pad[:, :-1] + f_pad[:, 1:])
 
 

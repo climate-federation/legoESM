@@ -88,8 +88,10 @@ def _fake_zm(ncol, nlev, dq_v, dq_c, dq_r):
 def _run(monkeypatch, name, fake, state, grid, sigma):
     monkeypatch.setattr(convint, "_get_convection_fn",
                         lambda cfg: (name, fake, getattr(cfg, name)))
-    fn = convint.make_convection_physics(ConvectionConfig(scheme=name),
-                                         "spectral_pe", _DT)
+    cc = ConvectionConfig(scheme=name)
+    if name == "zhang_mcfarlane":   # the test grid carries no land fraction
+        cc = cc._replace(zhang_mcfarlane=cc.zhang_mcfarlane._replace(land_fraction="none"))
+    fn = convint.make_convection_physics(cc, "spectral_pe", _DT)
     tend, _prog = fn(state, grid, sigma)
     return {k: np.asarray(getattr(v, "data", v)) for k, v in tend.tracers.items()}
 

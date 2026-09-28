@@ -35,6 +35,18 @@ from legoesm.core.precision import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _restore_policy():
+    """Save and restore the global precision policy around each test.
+
+    Without this, test_scalar_libm_transcendental_policy leaves the
+    process-wide policy at fp64/libm for every test that runs after it.
+    """
+    saved = get_policy()
+    yield
+    set_policy(saved)
+
+
 # ===========================================================================
 # Part 1: PrecisionPolicy
 # ===========================================================================
@@ -48,6 +60,7 @@ class TestPrecisionPolicy:
         assert p.compute == jnp.float32
         assert p.accumulate == jnp.float32
         assert p.control == jnp.float32
+        assert p.transcendentals == "native"
 
     def test_fp64_mode(self):
         p = PrecisionPolicy.fp64()
@@ -55,6 +68,14 @@ class TestPrecisionPolicy:
         assert p.compute == jnp.float64
         assert p.accumulate == jnp.float64
         assert p.control == jnp.float64
+        assert p.transcendentals == "native"
+
+    def test_scalar_libm_transcendental_policy(self):
+        p = PrecisionPolicy.fp64(transcendentals="libm")
+        set_policy(p)
+        assert get_policy() == p
+        with pytest.raises(ValueError, match="transcendentals"):
+            set_policy(p._replace(transcendentals="unknown"))
 
     def test_mixed_mode(self):
         p = PrecisionPolicy.mixed()

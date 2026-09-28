@@ -276,3 +276,26 @@ class TestMPI4JAXArrayResult:
         """Empty tuple raises RuntimeError."""
         with pytest.raises(RuntimeError, match="empty tuple"):
             mpi4jax_array_result(())
+
+
+# ---------------------------------------------------------------------------
+# broadcast_allreduce_sum VJP (emulated ranks: vmap axis + psum)
+# ---------------------------------------------------------------------------
+
+def test_broadcast_allreduce_sum_vjp_sums_cross_rank_cotangents(monkeypatch):
+    """Each emulated rank r computes y_r = x_r * S with S = Σ_all x (broadcast)
+    and seeds its own local loss sum(y_r). True dL/dx_r = S + Σ_all x = 2 S.
+    The identity-VJP reduction would give S + Σ_local x_r instead."""
+    import legoesm.parallel.reductions as red
+
+    monkeypatch.setattr(red, "global_sum_mpi",
+                        lambda v: jax.lax.psum(v, "rank"))
+    x = jnp.arange(1.0, 7.0, dtype=jnp.float64).reshape(3, 2)  # 3 ranks
+
+    def local_loss(x_r):
+        s = red.broadcast_allreduce_sum(jnp.sum(x_r))
+        return jnp.sum(x_r * s)
+
+    g = jax.vmap(jax.grad(local_loss), axis_name="rank")(x)
+    np.testing.assert_allclose(np.asarray(g), 2.0 * float(jnp.sum(x)),
+                               rtol=1e-12)

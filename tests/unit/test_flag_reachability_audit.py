@@ -152,6 +152,7 @@ _STRING_ALTS = {
     "convective_precip_split": "autoconversion",
     "bechtold_subsidence_solve": "advective",
     "morrison_flavor": "sam",
+    "zm_land_fraction": "none",
 }
 
 _HINTS = typing.get_type_hints(ExperimentConfig)

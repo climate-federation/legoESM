@@ -17,10 +17,34 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    scoped_allow_dirty,
+    worktree_stamp,
+)
 
 BAR = 1.0e-15
+# Defaults are the OVERFLOW card this gate was written for.  Both are
+# overridable so the identical 19-frame NEMO_L1_OVBT_1 record produced for
+# another card can be read by this ONE reader instead of a second copy; LOCK's
+# own record carries (134, 7, 1, 19, 64), i.e. a single barotropic substep.
 CASE = "OVERFLOW-zps"
 EXPECTED = (206, 7, 4, 19, 64)
+CASE_EXPECTED = {
+    "OVERFLOW-zps": (206, 7, 4, 19, 64),
+    "LOCK_EXCHANGE-zco": (134, 7, 1, 19, 64),
+}
+# The resolved barotropic program the candidate must carry, per card, read
+# from each card's namelist_cfg rather than assumed: (time filter, nn_e).
+CASE_BAROTROPIC = {
+    "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3),
+    "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1),
+}
+# resolved_program, whole_step_kt2_causal_arm and ownership are OVERFLOW
+# CONCLUSIONS with OVERFLOW constants baked in.  Emitting them for another
+# card would publish a false record, so they are withheld by name.
+OVERFLOW_ONLY_REPORT_KEYS = (
+    "resolved_program", "whole_step_kt2_causal_arm", "ownership")
 DEFAULT_ORACLE = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/"
     "oracle_kt1_calls/oracle_overflow_bt_substeps_kt00000001_call1.bin"
@@ -33,9 +57,20 @@ DEFAULT_CERTIFIED_ENTRY = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10/"
     "oracle_step_entry_kt00000001.bin"
 )
-DEFAULT_TRAJECTORY = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/overflow_kt1_10_flux_gate.json"
-)
+# The trajectory report is a PER-CARD artifact.  A single OVERFLOW default
+# meant a LOCK run on gate defaults would stamp OVERFLOW's file as LOCK's
+# ``trajectory_gate`` provenance -- a false record even though the block it
+# feeds is withheld for non-OVERFLOW cards.  Defaults are per card now, and
+# ``_trajectory_kt2`` refuses a report belonging to another card.
+CASE_TRAJECTORY = {
+    "OVERFLOW-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/"
+        "overflow_kt1_10_flux_gate.json"),
+    "LOCK_EXCHANGE-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/"
+        "lock_trajectory_gate_kt10.json"),
+}
+DEFAULT_TRAJECTORY = CASE_TRAJECTORY["OVERFLOW-zps"]
 
 FIELDS = (
     "eta_entry",
@@ -272,8 +307,9 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     update (harness-only control arm).
 
     ``kt`` selects which step's external solve is captured: the first
-    ``kt - 1`` steps run as the production trajectory gate runs them, the
-    ``kt``-th under ``jax.disable_jit`` with the trace hook.  ``reseed_entry``
+    ``kt - 1`` steps run as the production trajectory gate runs them, and the
+    ``kt``-th returns the trace through the production-jitted pytree seam.
+    ``reseed_entry``
     (a NEMO ``oracle_step_entry_kt{kt}`` record) replaces legoESM's own
     kt-entry prognostic state by NEMO's, so the captured solve starts from
     an EXACT entry and its first over-bar frame names the operand rather
@@ -282,7 +318,6 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     perturbed arm); it is mutually exclusive with ``reseed_entry``.
     """
     import jax
-    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         nemo_flux_form_update_active,
@@ -294,13 +329,16 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
         build_nemo_testcase_card,
     )
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(CASE)
     cfg = card.recipe.model_config
-    require(cfg.barotropic.barotropic_time_filter == "nemo_boxcar1_ab3", "wrong filter")
-    require(cfg.barotropic.n_barotropic_substeps == 3, "wrong nn_e")
+    want_filter, want_nn_e = CASE_BAROTROPIC[CASE]
+    require(cfg.barotropic.barotropic_time_filter == want_filter,
+            f"wrong filter: {cfg.barotropic.barotropic_time_filter!r} != {want_filter!r}")
+    require(cfg.barotropic.n_barotropic_substeps == want_nn_e,
+            f"wrong nn_e: {cfg.barotropic.n_barotropic_substeps} != {want_nn_e}")
     require(cfg.momentum_time_integrator == "rk3_ws", "wrong momentum integrator")
     require(cfg.momentum_advection == "flux_form", "wrong momentum form")
     # Measured, not assumed: the production predicate the solver evaluates.
@@ -308,26 +346,14 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     require(production_resolution,
             "production does not resolve to the literal flux-form update")
 
-    original = ocean_model.barotropic_substeps_latlon_cgrid
-    captured = []
-    armed = []
-
-    def wrapper(*args, **kwargs):
-        if armed and not captured:
-            kwargs = dict(kwargs)
-            kwargs["_nemo_substep_trace_test_hook"] = True
-            kwargs["_nemo_flux_form_update_test_override"] = flux_form_override
-            state_new, transports, trace = original(*args, **kwargs)
-            captured.append(trace)
-            return state_new, transports
-        return original(*args, **kwargs)
-
     require(kt >= 1, "kt must be positive")
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
 
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            barotropic_flux_form_update_override=flux_form_override,
             legacy_seed_min_rule_faces=legacy_seed_faces))
     state = card.recipe.initial_state
     require(reseed_entry is None or start_state is None,
@@ -342,26 +368,30 @@ def capture_legoesm_trace(*, flux_form_override, kt: int = 1,
     else:
         for _ in range(kt - 1):
             state = model.step(state, dt=card.dt_s)
-    ocean_model.barotropic_substeps_latlon_cgrid = wrapper
-    try:
-        armed.append(True)
-        # The test hook must materialise its operand arrays on the host; a
-        # traced Python closure would retain DynamicJaxprTracers instead.
-        with jax.disable_jit():
-            model.step(state, dt=card.dt_s)
-    finally:
-        ocean_model.barotropic_substeps_latlon_cgrid = original
-    require(len(captured) == 1, f"captured {len(captured)} call-1 traces")
-
-    trace = captured[0]
-    require(len(trace) == len(FIELDS), "candidate registry length mismatch")
-    require(int(np.asarray(trace[0]).shape[0]) == 4, "candidate icycle mismatch")
+    # The WRITE-only trace is an ordinary leaf of the compiled return pytree.
+    # Materialise it only after ``step`` returns; capturing it in a Python
+    # closure during tracing retains DynamicJaxprTracers and makes the gate
+    # depend on an eager route that production never executes.
+    captured = model.step(state, dt=card.dt_s)
+    require(hasattr(captured, "substeps"), "compiled step did not return trace")
+    trace = captured.substeps
+    # The solver returns ONE keyed frame shared with the L2-GYRE harness (see
+    # barotropic_latlon_cgrid._run_substep_loop).  Bind by NAME: this registry
+    # declares the subset THIS gate scores, and a name the solver stops
+    # emitting goes red here immediately.  (The previous positional length
+    # check could not see a same-length reorder and went red on an unrelated
+    # addition; keying is strictly the stronger guard.)
+    missing = [name for name in FIELDS if name not in trace]
+    require(not missing, f"candidate frame is missing {missing}")
+    icycle = EXPECTED[2]
+    require(int(np.asarray(trace["eta_entry"]).shape[0]) == icycle,
+            "candidate icycle mismatch")
     substeps = []
-    for jn in range(4):
+    for jn in range(icycle):
         substeps.append(
             {
-                name: _candidate_frame(np.asarray(trace[index])[jn], STAGGER[name])
-                for index, name in enumerate(FIELDS)
+                name: _candidate_frame(np.asarray(trace[name])[jn], STAGGER[name])
+                for name in FIELDS
             }
         )
     masks = {
@@ -408,6 +438,8 @@ def score_frame(name: str, oracle, candidate, mask, *, plant=False) -> dict:
     residual = candidate[active] - oracle[active]
     absolute = np.abs(residual)
     index_flat = int(np.argmax(absolute))
+    active_indices = np.argwhere(active)
+    unequal = candidate[active].view(np.uint64) != oracle[active].view(np.uint64)
     absolute_max = float(absolute[index_flat])
     scale = max(float(np.max(np.abs(oracle[active]))), 1.0)
     error = absolute_max / scale
@@ -421,6 +453,11 @@ def score_frame(name: str, oracle, candidate, mask, *, plant=False) -> dict:
         "signed_residual_at_max": float(residual[index_flat]),
         "bar": BAR,
         "n": int(active.sum()),
+        "n_unequal": int(np.count_nonzero(unequal)),
+        "first_unequal_index": (
+            active_indices[int(np.flatnonzero(unequal)[0])].tolist()
+            if np.any(unequal) else None),
+        "max_residual_index": active_indices[index_flat].tolist(),
         "oracle_dtype": str(oracle.dtype),
         "candidate_dtype": str(candidate.dtype),
     }
@@ -435,6 +472,9 @@ def score_frame(name: str, oracle, candidate, mask, *, plant=False) -> dict:
 
 def _trajectory_kt2(path: Path) -> dict:
     report = json.loads(path.read_text())
+    require(report.get("case") == CASE,
+            f"{path} is a {report.get('case')!r} trajectory report, but this "
+            f"run is {CASE!r}; stamping it would be a false provenance record")
     step = next(item for item in report["steps"] if item["kt"] == 2)
     result = {}
     for field in ("T", "u", "ssh"):
@@ -455,6 +495,7 @@ def run(
     allow_dirty: bool = False,
 ) -> dict:
     # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     validate_frame_registry()
     require(
@@ -522,7 +563,7 @@ def run(
         first[arm_name] = first_over_bar
 
     scaling = []
-    for jn in range(4):
+    for jn in range(EXPECTED[2]):
         ref = oracle["substeps"][jn]["u_exit"]
         old = baseline["substeps"][jn]["u_exit"]
         new = faithful["substeps"][jn]["u_exit"]
@@ -571,7 +612,12 @@ def run(
         if row["name"].endswith(".u_exit")
     )
     slow_dt_prediction = first_slow["absolute_max"] * (10.0 / 3.0)
-    slow_ratio = first_exit["absolute_max"] / max(slow_dt_prediction, np.finfo(float).tiny)
+    # A zero denominator has no ratio.  Dividing by np.finfo(float).tiny
+    # printed 1.559250241824e+290 on OVERFLOW, which reads as a measurement
+    # and is not one: substep 1's slow_u error is exactly 0.0 there, so pure
+    # inheritance predicts nothing at all and the comparison is undefined.
+    slow_ratio = (first_exit["absolute_max"] / slow_dt_prediction
+                  if slow_dt_prediction > 0.0 else None)
 
     # Planted controls must land as the FIRST DEBT of BOTH arms at substep 1
     # with the +1.0 plant visible; otherwise the gate is broken (exit 2).
@@ -613,7 +659,8 @@ def run(
         require(pytest_log.is_file(), f"pytest log does not exist: {pytest_log}")
         artifacts["pytest_log"] = {"path": str(pytest_log), "sha256": sha256(pytest_log)}
 
-    return {
+    report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-barotropic-gate-v1",
         "case": CASE,
         "status": status,
@@ -642,6 +689,10 @@ def run(
             "substep1_slow_u_error_times_dt": slow_dt_prediction,
             "substep1_u_exit_error": first_exit["absolute_max"],
             "exit_over_slow_dt_prediction": slow_ratio,
+            "exit_over_slow_dt_prediction_undefined_reason": (
+                None if slow_ratio is not None else
+                "substep-1 slow_u error is exactly 0.0, so the inheritance "
+                "prediction is 0 and the ratio does not exist"),
         },
         "whole_step_kt2_causal_arm": {
             "frozen_confirm_predicate": ("u error falls >=10x and neither T nor SSH worsens >10x"),
@@ -710,6 +761,18 @@ def run(
             "NEMO 5.0.2 src/OCE/DYN/dynspg_ts.F90:823-847",
         ],
     }
+    if CASE != "OVERFLOW-zps":
+        for key in OVERFLOW_ONLY_REPORT_KEYS:
+            report[key] = {
+                "status": "NOT_APPLICABLE_ON_THIS_CARD",
+                "reason": (
+                    f"{key} is an OVERFLOW-zps conclusion with OVERFLOW "
+                    "constants baked in (its resolved namelist, its kt=2 "
+                    "prior residuals, its owner labels).  Publishing it for "
+                    f"{CASE} would be a false record."
+                ),
+            }
+    return report
 
 
 def _score_substeps(arm_name: str, oracle: dict, candidate: dict) -> tuple[list, dict | None, list]:
@@ -763,6 +826,7 @@ def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
     step by an operand the barotropic solve consumes or a memory NEMO carries
     that the prognostic state does not.
     """
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     validate_frame_registry()
     require(kt >= 2, "run_kt_walk is the kt>=2 walk; kt=1 is run()")
@@ -827,6 +891,7 @@ def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
             "normalized_max_abs": row["normalized_max_abs"]}
 
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-barotropic-kt-walk-v1",
         "case": CASE,
         "kt": kt,
@@ -846,7 +911,9 @@ def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
     }
 
 
+@scoped_allow_dirty
 def main(argv=None) -> int:
+    global CASE, EXPECTED
     parser = argparse.ArgumentParser()
     parser.add_argument("--kt", type=int, default=1,
                         help="ocean step whose external solve is walked; "
@@ -864,11 +931,18 @@ def main(argv=None) -> int:
     parser.add_argument("--oracle", type=Path, default=DEFAULT_ORACLE)
     parser.add_argument("--new-entry", type=Path, default=DEFAULT_NEW_ENTRY)
     parser.add_argument("--certified-entry", type=Path, default=DEFAULT_CERTIFIED_ENTRY)
-    parser.add_argument("--trajectory", type=Path, default=DEFAULT_TRAJECTORY)
+    parser.add_argument("--trajectory", type=Path,
+                        help="per-card trajectory report; defaults to the "
+                             "card's own (never another card's)")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-entry", action="store_true")
     parser.add_argument("--plant-exit", action="store_true")
     parser.add_argument("--pytest-log", type=Path)
+    parser.add_argument("--case", choices=tuple(CASE_EXPECTED), default=CASE,
+                        help="testcase card the records belong to")
+    parser.add_argument("--expected", type=int, nargs=5,
+                        metavar=("NX", "NY", "NCYCLE", "NFIELDS", "BITS"),
+                        help="record header shape; defaults to the card's")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
@@ -876,6 +950,10 @@ def main(argv=None) -> int:
     )
     add_ulp_compare_arguments(parser)
     args = parser.parse_args(argv)
+    CASE = args.case
+    EXPECTED = tuple(args.expected) if args.expected else CASE_EXPECTED[CASE]
+    if args.trajectory is None:
+        args.trajectory = CASE_TRAJECTORY[CASE]
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
     try:

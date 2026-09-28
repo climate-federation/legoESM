@@ -1,0 +1,102 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -20,6 +20,7 @@
+    !!----------------------------------------------------------------------
+    USE step_oce       ! time stepping used modules
+    USE l2_r154_transport, ONLY : r154_transport_dump
++   USE l2_r156_stage2 ! round-156 WRITE-only developed stage-2 momentum record
+    USE eosbn2, ONLY : eos_l2_dump_next ! config-local WRITE-only lane-2 instrument
+    USE dynadv, ONLY : dyn_adv_round41_stage ! WRITE-only stage tag for the dyn_adv split
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+@@ -453,6 +454,24 @@
+                WRITE(l3_unit) 'before_v        '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
+                WRITE(l3_unit) vv(:,:,:,Krhs)
+             ENDIF
++            ! Round-156 developed stage-2 entry operands.  Krhs still holds the
++            ! value dyn_hpg is about to OVERWRITE, so it is recorded here.
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 2 ) THEN
++               CALL r156_stage2_open( kstp, kstg, Kbb, Kmm, Krhs, Kaa )
++               CALL r156_stage2_pair3( 'rhs_entry       ', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
++               CALL r156_stage2_pair3( 'uu_vv_Kbb       ', uu(:,:,:,Kbb ), vv(:,:,:,Kbb ) )
++               CALL r156_stage2_pair3( 'uu_vv_Kmm       ', uu(:,:,:,Kmm ), vv(:,:,:,Kmm ) )
++               CALL r156_stage2_pair2( 'r3u_r3v_Kbb     ', r3u(:,:,Kbb), r3v(:,:,Kbb) )
++               CALL r156_stage2_pair2( 'r3u_r3v_Kmm     ', r3u(:,:,Kmm), r3v(:,:,Kmm) )
++               CALL r156_stage2_pair2( 'r3u_r3v_Kaa     ', r3u(:,:,Kaa), r3v(:,:,Kaa) )
++               CALL r156_stage2_pair2( 'r3t_Kmm_r3f     ', r3t(:,:,Kmm), r3f(:,:) )
++               CALL r156_stage2_pair2( 'ssh_Kmm_ssh_Kaa ', ssh(:,:,Kmm), ssh(:,:,Kaa) )
++               CALL r156_stage2_pair3( 'umask_vmask     ', umask, vmask )
++               CALL r156_stage2_scal ( 'rDt_r1_Dt       ', rDt, r1_Dt )
++               CALL r156_stage2_scal ( 'flags_vec_linssh', &
++                  & MERGE( 1._wp, 0._wp, ln_dynadv_vec ), &
++                  & MERGE( 1._wp, 0._wp, lk_linssh ) )
++            ENDIF
+             CALL    eos    (        ts, Kmm, rhd, rhop )     ! Kmm in situ density anomaly for hpg computation
+             !                                                ! and potential density for BGC 
+             ! L2 GYRE write-only HPG operand stream.  Capture the exact
+@@ -471,7 +490,13 @@
+                CLOSE(l2_tracer_unit)
+                WRITE(numout,*) 'L2_STAGE2_HPG_OPERAND_DUMP ', kstp, Kmm, TRIM(l1_filename)
+             ENDIF
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 2 ) THEN
++               CALL r156_stage2_pair3( 'rhd_ww          ', rhd, ww )
++            ENDIF
+             CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )  ! Hydrostratic Pressure Gradient (HPG)
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 2 ) THEN
++               CALL r156_stage2_pair3( 'after_hpg       ', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
++            ENDIF
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+                WRITE(l3_unit) 'after_hpg_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
+@@ -482,6 +507,9 @@
+             !
+             !                             !* Coriolis / vorticity       ==> 3D RHS
+             CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 2 ) THEN
++               CALL r156_stage2_pair3( 'after_vor       ', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
++            ENDIF
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+                WRITE(l3_unit) 'after_vor_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
+@@ -498,6 +526,9 @@
+             ELSE                                            ! FF : advective transports used for momentum advection
+                CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )
+             ENDIF
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 2 ) THEN
++               CALL r156_stage2_pair3( 'after_adv       ', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
++            ENDIF
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) THEN
+                WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+                CLOSE(l1_unit)
+@@ -711,6 +742,9 @@
+                END_3D
+             ENDIF
+             !
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 2 ) THEN
++               CALL r156_stage2_pair3( 'uu_vv_Kaa_raw   ', uu(:,:,:,Kaa), vv(:,:,:,Kaa) )
++            ENDIF
+             IF(sn_cfctl%l_prtctl)   CALL prt_ctl( tab3d_1=uu(:,:,:,Kaa), clinfo1='stp stg   - Ua: ', mask1=umask,   &
+                &                                  tab3d_2=vv(:,:,:,Kaa), clinfo2=           ' Va: ', mask2=vmask, clinfo3='dyn' )
+             !
+@@ -780,6 +814,10 @@
+             zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
+             zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3v_0(ji,jj,:)*vv(ji,jj,:,Kaa) ) * r1_hv_0(ji,jj)
+          END_2D
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 2 ) THEN
++            CALL r156_stage2_pair2( 'zub_zvb         ', zub, zvb )
++            CALL r156_stage2_pair2( 'uu_b_vv_b_Kaa   ', uu_b(:,:,Kaa), vv_b(:,:,Kaa) )
++         ENDIF
+          ! Phase-3 L2 WRITE-only stage-2 operand record.  The first payload
+          ! ends at the raw Kaa state and the diagnosed column correction; the
+          ! second payload below records the state after the ordinary source
+@@ -799,6 +837,11 @@
+             uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)
+             vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)
+          END_3D
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 2 ) THEN
++            CALL r156_stage2_pair3( 'uu_vv_Kaa_final ', uu(:,:,:,Kaa), vv(:,:,:,Kaa) )
++            CALL r156_stage2_close()
++            WRITE(numout,*) 'ROUND156_DEVELOPED_STAGE2_DUMP ', kstp, kstg, Kbb, Kmm, Krhs, Kaa
++         ENDIF
+          IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) THEN
+             WRITE(l1_unit) uu(:,:,:,Kaa), vv(:,:,:,Kaa)
+             CLOSE(l1_unit)

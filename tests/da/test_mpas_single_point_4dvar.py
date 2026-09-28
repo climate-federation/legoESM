@@ -30,3 +30,19 @@ def test_nearest_cell_handles_west_longitude_as_east_degrees() -> None:
         lonCell=np.deg2rad(np.asarray([310.0, 300.0, 310.0])),
     )
     assert nearest_cell(mesh, 45.0, -50.0) == 0
+
+
+def test_minimizer_status_names_line_search_failure() -> None:
+    import jax.numpy as jnp
+
+    from legoesm.da.minimizer import minimize_lbfgs
+    from scripts.run.mpas_4dvar_single.run_assimilation import (
+        minimizer_status_message,
+    )
+
+    x0 = jnp.array([1.0, -2.0])
+    bowl = minimize_lbfgs(lambda x: (jnp.sum(x**2), 2.0 * x), x0, gtol=1e-8)
+    wrong_sign = minimize_lbfgs(lambda x: (jnp.sum(x**2), -2.0 * x), x0)
+    assert minimizer_status_message(bowl) == "converged"
+    assert bool(wrong_sign.line_search_failed)
+    assert minimizer_status_message(wrong_sign) == "line search failed"

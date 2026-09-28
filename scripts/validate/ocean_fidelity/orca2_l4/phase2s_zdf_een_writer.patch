@@ -1,0 +1,315 @@
+--- source/src/OCE/ZDF/zdfphy.F90
++++ phase2s/MY_SRC/zdfphy.F90
+@@ -61,6 +61,7 @@
+ 
+    !! * Substitutions
+ #  include "do_loop_substitute.h90"
++#  include "domzgr_substitute.h90"
+ #  include "read_nml_substitute.h90"
+    !!----------------------------------------------------------------------
+    !! NEMO/OCE 5.0, NEMO Consortium (2024)
+@@ -254,6 +255,13 @@
+       INTEGER, INTENT(in) ::   Kbb, Kmm, Krhs   ! ocean time level indices
+       !
+       INTEGER ::   ji, jj, jk, jtile   ! dummy loop indice
++      INTEGER ::   l4_zdf_unit, l4_zdf_ios, l4_zdf_n3, l4_zdf_n2, l4_zdf_payload, l4_zdf_ifield
++      INTEGER, DIMENSION(3,25) :: l4_zdf_extents
++      CHARACTER(LEN=96) :: l4_zdf_filename
++      CHARACTER(LEN=16) :: l4_zdf_magic
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: l4_zdf_e3uw_bb, l4_zdf_e3uw_mm
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: l4_zdf_e3vw_bb, l4_zdf_e3vw_mm
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: l4_zdf_gdepw_mm, l4_zdf_e3t_mm, l4_zdf_e3w_mm
+ #if defined key_PSYCLONE_2p5p0
+       REAL(wp), DIMENSION(A2D(0),jpk) ::   sh2   ! shear term
+ #endif
+@@ -267,6 +275,94 @@
+ #endif
+          CALL zdf_sh2( Kbb, Kmm, avm_k,   &     ! <<== in
+             &                      sh2    )     ! ==>> out : shear production
++         ! Lane-4 acquisition boundary: zdf_sh2 has produced sh2, while
++         ! avm_k/avt_k/en still carry the pre-closure values consumed by
++         ! zdf_tke below (zdfphy.F90:264-304; zdfsh2.F90:80-100).
++         ! Every payload expression is an INTENT(in) canonical view; no model
++         ! field is assigned and only rank zero writes its owned subdomain.
++         IF( lwp .AND. .NOT.ln_tile .AND. ( kt == nit000 .OR. kt == nit000 + 1 ) ) THEN
++            ALLOCATE( l4_zdf_e3uw_bb(jpi,jpj,jpk), l4_zdf_e3uw_mm(jpi,jpj,jpk), &
++               & l4_zdf_e3vw_bb(jpi,jpj,jpk), l4_zdf_e3vw_mm(jpi,jpj,jpk), &
++               & l4_zdf_gdepw_mm(jpi,jpj,jpk), l4_zdf_e3t_mm(jpi,jpj,jpk), &
++               & l4_zdf_e3w_mm(jpi,jpj,jpk), STAT=l4_zdf_ios )
++            IF( l4_zdf_ios /= 0 )   CALL ctl_stop( 'cannot allocate lane4 zdf-sh2 dump storage' )
++            l4_zdf_e3uw_bb(:,:,:) = 0._wp ; l4_zdf_e3uw_mm(:,:,:) = 0._wp
++            l4_zdf_e3vw_bb(:,:,:) = 0._wp ; l4_zdf_e3vw_mm(:,:,:) = 0._wp
++            l4_zdf_gdepw_mm(:,:,:) = 0._wp ; l4_zdf_e3t_mm(:,:,:) = 0._wp
++            l4_zdf_e3w_mm(:,:,:) = 0._wp
++            DO jk = 1, jpk
++               DO jj = 1+nn_hls, jpj-nn_hls
++                  DO ji = 1+nn_hls, jpi-nn_hls
++                     l4_zdf_e3uw_bb(ji,jj,jk) = e3uw (ji,jj,jk,Kbb)
++                     l4_zdf_e3uw_mm(ji,jj,jk) = e3uw (ji,jj,jk,Kmm)
++                     l4_zdf_e3vw_bb(ji,jj,jk) = e3vw (ji,jj,jk,Kbb)
++                     l4_zdf_e3vw_mm(ji,jj,jk) = e3vw (ji,jj,jk,Kmm)
++                     l4_zdf_gdepw_mm(ji,jj,jk) = gdepw(ji,jj,jk,Kmm)
++                     l4_zdf_e3t_mm (ji,jj,jk) = e3t  (ji,jj,jk,Kmm)
++                     l4_zdf_e3w_mm (ji,jj,jk) = e3w  (ji,jj,jk,Kmm)
++                  END DO
++               END DO
++            END DO
++            WRITE(l4_zdf_filename,'("oracle_zdf_sh2_operands_kt",I8.8,".bin")') kt
++            OPEN( NEWUNIT=l4_zdf_unit, FILE=TRIM(l4_zdf_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++               &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_zdf_ios )
++            IF( l4_zdf_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 zdf-sh2 dump' )
++            l4_zdf_magic = 'NEMO_L4_ZSH2_2'
++            l4_zdf_n3 = 21
++            l4_zdf_n2 = 4
++            ! Self-describing allocation table, in exact WRITE order.  Every
++            ! 2-D value uses a literal singleton third extent.  Payload count
++            ! is derived from this table, never from assumed full domains.
++            l4_zdf_extents(:, 1) = SHAPE(sh2)
++            l4_zdf_extents(:, 2) = SHAPE(avm_k)
++            l4_zdf_extents(:, 3) = SHAPE(avt_k)
++            l4_zdf_extents(:, 4) = SHAPE(en)
++            l4_zdf_extents(:, 5) = SHAPE(rn2)
++            l4_zdf_extents(:, 6) = SHAPE(rn2b)
++            l4_zdf_extents(:, 7) = SHAPE(uu(:,:,:,Kbb))
++            l4_zdf_extents(:, 8) = SHAPE(uu(:,:,:,Kmm))
++            l4_zdf_extents(:, 9) = SHAPE(vv(:,:,:,Kbb))
++            l4_zdf_extents(:,10) = SHAPE(vv(:,:,:,Kmm))
++            l4_zdf_extents(:,11) = SHAPE(l4_zdf_e3uw_bb)
++            l4_zdf_extents(:,12) = SHAPE(l4_zdf_e3uw_mm)
++            l4_zdf_extents(:,13) = SHAPE(l4_zdf_e3vw_bb)
++            l4_zdf_extents(:,14) = SHAPE(l4_zdf_e3vw_mm)
++            l4_zdf_extents(:,15) = SHAPE(umask)
++            l4_zdf_extents(:,16) = SHAPE(vmask)
++            l4_zdf_extents(:,17) = SHAPE(wumask)
++            l4_zdf_extents(:,18) = SHAPE(wvmask)
++            l4_zdf_extents(:,19) = SHAPE(l4_zdf_gdepw_mm)
++            l4_zdf_extents(:,20) = SHAPE(l4_zdf_e3t_mm)
++            l4_zdf_extents(:,21) = SHAPE(l4_zdf_e3w_mm)
++            l4_zdf_extents(:,22) = (/ SIZE(taum,1), SIZE(taum,2), 1 /)
++            l4_zdf_extents(:,23) = (/ SIZE(fr_i,1), SIZE(fr_i,2), 1 /)
++            l4_zdf_extents(:,24) = (/ SIZE(rCdU_bot,1), SIZE(rCdU_bot,2), 1 /)
++            l4_zdf_extents(:,25) = (/ SIZE(mbkt,1), SIZE(mbkt,2), 1 /)
++            l4_zdf_payload = 0
++            DO l4_zdf_ifield = 1, l4_zdf_n3 + l4_zdf_n2
++               l4_zdf_payload = l4_zdf_payload + PRODUCT(l4_zdf_extents(:,l4_zdf_ifield))
++            END DO
++            WRITE(l4_zdf_unit) l4_zdf_magic, 2, kt, Kbb, Kmm, Krhs, jpi, jpj, jpk, &
++               & STORAGE_SIZE(1._wp), l4_zdf_n3, l4_zdf_n2, l4_zdf_payload, MERGE(1,0,l_zdfsh2)
++            WRITE(l4_zdf_unit) l4_zdf_extents
++            WRITE(l4_zdf_unit) l4_zdf_canon_3d(sh2,'W'), &
++               & l4_zdf_canon_3d(avm_k,'W'), l4_zdf_canon_3d(avt_k,'W'), l4_zdf_canon_3d(en,'W'), &
++               & l4_zdf_canon_3d(rn2,'W'), l4_zdf_canon_3d(rn2b,'W'), &
++               & l4_canon_3d(uu(:,:,:,Kbb),'U'), l4_canon_3d(uu(:,:,:,Kmm),'U'), &
++               & l4_canon_3d(vv(:,:,:,Kbb),'V'), l4_canon_3d(vv(:,:,:,Kmm),'V'), &
++               & l4_zdf_canon_3d(l4_zdf_e3uw_bb,'X'), l4_zdf_canon_3d(l4_zdf_e3uw_mm,'X'), &
++               & l4_zdf_canon_3d(l4_zdf_e3vw_bb,'Y'), l4_zdf_canon_3d(l4_zdf_e3vw_mm,'Y'), &
++               & l4_canon_3d(umask,'U'), l4_canon_3d(vmask,'V'), &
++               & l4_zdf_canon_3d(wumask,'X'), l4_zdf_canon_3d(wvmask,'Y'), &
++               & l4_zdf_canon_3d(l4_zdf_gdepw_mm,'W'), l4_canon_3d(l4_zdf_e3t_mm,'T'), &
++               & l4_zdf_canon_3d(l4_zdf_e3w_mm,'W'), l4_canon_2d(taum,'T'), &
++               & l4_canon_2d(fr_i,'T'), l4_canon_2d(rCdU_bot,'T'), &
++               & l4_canon_2d(REAL(mbkt,wp),'T')
++            CLOSE(l4_zdf_unit)
++            DEALLOCATE( l4_zdf_e3uw_bb, l4_zdf_e3uw_mm, l4_zdf_e3vw_bb, l4_zdf_e3vw_mm, &
++               & l4_zdf_gdepw_mm, l4_zdf_e3t_mm, l4_zdf_e3w_mm )
++            WRITE(numout,*) 'LANE4_ZDF_SH2_DUMP ', kt, Kbb, Kmm, Krhs, TRIM(l4_zdf_filename)
++         ENDIF
+       ENDIF
+ 
+       IF( ln_tile ) CALL dom_tile_start         ! [tiling] ZDF tiling loop
+@@ -381,5 +477,37 @@
+       CALL mpp_sum ( 'zdfphy', zdf_phy_alloc )
+    END FUNCTION zdf_phy_alloc
+ 
++   FUNCTION l4_zdf_canon_3d( pfield, cdgrid ) RESULT( zfield )
++      !! WRITE-only zero-first view for the W/WU/WV grids owned by ZDF.
++      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: pfield
++      CHARACTER(LEN=1), INTENT(in) :: cdgrid
++      REAL(wp), DIMENSION(SIZE(pfield,1),SIZE(pfield,2),SIZE(pfield,3)) :: zfield
++      INTEGER :: ji, jj, jk, jif, jjf, ioff, joff
++      LOGICAL :: llwet
++      zfield(:,:,:) = 0._wp
++      ioff = ( jpi - SIZE(pfield,1) ) / 2
++      joff = ( jpj - SIZE(pfield,2) ) / 2
++      DO jk = 1, SIZE(pfield,3)
++         DO jj = 1, SIZE(pfield,2)
++            jjf = jj + joff
++            DO ji = 1, SIZE(pfield,1)
++               jif = ji + ioff
++               IF( jif >= 1+nn_hls .AND. jif <= jpi-nn_hls .AND. &
++                  & jjf >= 1+nn_hls .AND. jjf <= jpj-nn_hls ) THEN
++                  SELECT CASE( cdgrid )
++                  CASE('W')   ; llwet = wmask (jif,jjf,jk) /= 0._wp
++                  CASE('X')   ; llwet = wumask(jif,jjf,jk) /= 0._wp
++                  CASE('Y')   ; llwet = wvmask(jif,jjf,jk) /= 0._wp
++                  CASE DEFAULT; llwet = .FALSE.
++                  END SELECT
++                  IF( llwet ) zfield(ji,jj,jk) = pfield(ji,jj,jk)
++               ENDIF
++            END DO
++         END DO
++      END DO
++   END FUNCTION l4_zdf_canon_3d
++
++#include "l4_oracle_canon_subroutines.h90"
++
+    !!======================================================================
+ END MODULE zdfphy
+--- phase2q/MY_SRC/dynspg_ts.F90
++++ phase2s/MY_SRC/dynspg_ts.F90
+@@ -303,7 +303,7 @@
+       !                                   !=  remove 2D Coriolis trend  =!
+       !                                   !  --------------------------  !
+       !
+-      IF( kt == nit000 .OR. .NOT. lk_linssh )   CALL dyn_cor_2D_init( Kmm )   ! Set zwz, the barotropic Coriolis force coefficient
++      IF( kt == nit000 .OR. .NOT. lk_linssh )   CALL dyn_cor_2D_init( kt, Kmm )   ! Set zwz, the barotropic Coriolis force coefficient
+       !                      ! recompute zwz = f/depth  at every time step for (.NOT.lk_linssh) as the water colomn height changes
+       !
+       ! Lane-2 GYRE ENE operand instrument: write the eight frozen coefficient
+@@ -384,7 +384,7 @@
+       !                                   !=  remove 2D Coriolis trend  =!
+       !                                   !  --------------------------  !
+       !
+-      IF( kt == nit000 .OR. .NOT. lk_linssh )   CALL dyn_cor_2D_init( Kmm )   ! Set zwz, the barotropic Coriolis force coefficient
++      IF( kt == nit000 .OR. .NOT. lk_linssh )   CALL dyn_cor_2D_init( kt, Kmm )   ! Set zwz, the barotropic Coriolis force coefficient
+       !                      ! recompute zwz = f/depth  at every time step for (.NOT.lk_linssh) as the water colomn height changes
+       !
+       !
+@@ -1492,7 +1492,7 @@
+    END SUBROUTINE dyn_spg_ts_init
+ 
+ 
+-   SUBROUTINE dyn_cor_2D_init( Kmm )
++   SUBROUTINE dyn_cor_2D_init( kt, Kmm )
+       !!---------------------------------------------------------------------
+       !!                   ***  ROUTINE dyn_cor_2D_init  ***
+       !!
+@@ -1505,12 +1505,49 @@
+       !! and update depths at T- points (ht) at each barotropic time step
+       !!
+       !!----------------------------------------------------------------------
+-      INTEGER,  INTENT(in)         ::  Kmm  ! Time index
++      INTEGER,  INTENT(in)         ::  kt, Kmm  ! Ocean step and time index
+       INTEGER  ::   ji ,jj, jk              ! dummy loop indices
++      INTEGER  ::   l4_unit, l4_ios, l4_n3
+       REAL(wp) ::   z1_ht, zr1_e3f
+       REAL(wp) ::   zpvo_nw, zpvo_ne, zpvo_sw, zpvo_se
++      LOGICAL  ::   ll_l4_een_dump
++      CHARACTER(LEN=16) :: l4_magic
++      CHARACTER(LEN=96) :: l4_filename
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: l4_e3f0vor, l4_e3fvor, l4_q
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: l4_zpvo_u_nw, l4_zpvo_u_ne
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: l4_zpvo_u_sw, l4_zpvo_u_se
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: l4_zpvo_v_nw, l4_zpvo_v_ne
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: l4_zpvo_v_sw, l4_zpvo_v_se
+       !!----------------------------------------------------------------------
+       !
++      ! Lane-4 EEN discriminator: writer-local storage is armed only for the
++      ! first rank-zero call.  Every slot starts at zero; model arrays are
++      ! never assigned by this block.
++      ll_l4_een_dump = lwp .AND. kt == nit000 .AND. nvor_scheme == np_EEN
++      IF( ll_l4_een_dump ) THEN
++         IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane4 EEN primitive dumps require 64-bit wp' )
++         ALLOCATE( l4_e3f0vor(jpi,jpj,jpk), l4_e3fvor(jpi,jpj,jpk), l4_q(jpi,jpj,jpk), &
++            & l4_zpvo_u_nw(jpi,jpj,jpk), l4_zpvo_u_ne(jpi,jpj,jpk), &
++            & l4_zpvo_u_sw(jpi,jpj,jpk), l4_zpvo_u_se(jpi,jpj,jpk), &
++            & l4_zpvo_v_nw(jpi,jpj,jpk), l4_zpvo_v_ne(jpi,jpj,jpk), &
++            & l4_zpvo_v_sw(jpi,jpj,jpk), l4_zpvo_v_se(jpi,jpj,jpk), STAT=l4_ios )
++         IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot allocate lane4 EEN primitive dump storage' )
++         l4_e3f0vor(:,:,:) = 0._wp
++         l4_e3fvor (:,:,:) = 0._wp
++         l4_q       (:,:,:) = 0._wp
++         l4_zpvo_u_nw(:,:,:) = 0._wp   ;   l4_zpvo_u_ne(:,:,:) = 0._wp
++         l4_zpvo_u_sw(:,:,:) = 0._wp   ;   l4_zpvo_u_se(:,:,:) = 0._wp
++         l4_zpvo_v_nw(:,:,:) = 0._wp   ;   l4_zpvo_v_ne(:,:,:) = 0._wp
++         l4_zpvo_v_sw(:,:,:) = 0._wp   ;   l4_zpvo_v_se(:,:,:) = 0._wp
++         DO_3D( 0, 0, 0, 0, 1, jpk )
++            l4_e3f0vor(ji,jj,jk) = e3f_0vor(ji,jj,jk)
++         END_3D
++         DO_3D( 0, 0, 0, 0, 1, jpkm1 )
++            l4_e3fvor(ji,jj,jk) = e3f_vor(ji,jj,jk)
++            l4_q      (ji,jj,jk) = ff_f(ji,jj) / e3f_vor(ji,jj,jk)
++         END_3D
++      ENDIF
++      !
+       ffu_nw(:,:) = 0._wp   ;   ffu_ne(:,:) = 0._wp   ;   ffu_sw(:,:) = 0._wp   ;   ffu_se(:,:) = 0._wp
+       ffv_nw(:,:) = 0._wp   ;   ffv_ne(:,:) = 0._wp   ;   ffv_sw(:,:) = 0._wp   ;   ffv_se(:,:) = 0._wp
+       !
+@@ -1531,6 +1568,12 @@
+                zpvo_se = ff_f(ji+1,jj-1) / e3f_vor(ji+1,jj-1,jk) + & 
+                        & ff_f(ji  ,jj-1) / e3f_vor(ji  ,jj-1,jk) + & 
+                        & ff_f(ji  ,jj  ) / e3f_vor(ji  ,jj  ,jk)
++               IF( ll_l4_een_dump ) THEN
++                  l4_zpvo_u_nw(ji,jj,jk) = zpvo_nw
++                  l4_zpvo_u_ne(ji,jj,jk) = zpvo_ne
++                  l4_zpvo_u_sw(ji,jj,jk) = zpvo_sw
++                  l4_zpvo_u_se(ji,jj,jk) = zpvo_se
++               ENDIF
+                !
+                ffu_nw(ji,jj) = ffu_nw(ji,jj) + e3u(ji  ,jj, jk, Kmm) * e3v(ji  ,jj  , jk, Kmm) * vmask(ji  ,jj  ,jk) * zpvo_nw
+                ffu_ne(ji,jj) = ffu_ne(ji,jj) + e3u(ji  ,jj, jk, Kmm) * e3v(ji+1,jj  , jk, Kmm) * vmask(ji+1,jj  ,jk) * zpvo_ne
+@@ -1558,6 +1601,12 @@
+                zpvo_nw = ff_f(ji  ,jj  ) / e3f_vor(ji  ,jj  ,jk) + & 
+                        & ff_f(ji-1,jj  ) / e3f_vor(ji-1,jj  ,jk) + & 
+                        & ff_f(ji-1,jj+1) / e3f_vor(ji-1,jj+1,jk)
++               IF( ll_l4_een_dump ) THEN
++                  l4_zpvo_v_nw(ji,jj,jk) = zpvo_nw
++                  l4_zpvo_v_ne(ji,jj,jk) = zpvo_ne
++                  l4_zpvo_v_sw(ji,jj,jk) = zpvo_sw
++                  l4_zpvo_v_se(ji,jj,jk) = zpvo_se
++               ENDIF
+                !
+                ffv_nw(ji,jj) = ffv_nw(ji,jj) + e3v(ji  ,jj, jk, Kmm) * e3u(ji-1,jj+1, jk, Kmm) * umask(ji-1,jj+1, jk) * zpvo_nw
+                ffv_ne(ji,jj) = ffv_ne(ji,jj) + e3v(ji  ,jj, jk, Kmm) * e3u(ji  ,jj+1, jk, Kmm) * umask(ji  ,jj+1, jk) * zpvo_ne
+@@ -1668,6 +1717,52 @@
+          !
+       END SELECT
+       !
++      IF( ll_l4_een_dump ) THEN
++         l4_n3 = jpi * jpj * jpk
++
++         l4_magic = 'NEMO_L4_E3F0_1'
++         WRITE(l4_filename,'("oracle_een_e3f0vor_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_ios )
++         IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 e3f_0vor dump' )
++         WRITE(l4_unit) l4_magic, 1, kt, Kmm, nvor_scheme, jpi, jpj, jpk, 1, STORAGE_SIZE(1._wp), l4_n3
++         WRITE(l4_unit) l4_e3f0vor
++         CLOSE(l4_unit)
++
++         l4_magic = 'NEMO_L4_E3FV_1'
++         WRITE(l4_filename,'("oracle_een_e3fvor_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_ios )
++         IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 live e3f_vor dump' )
++         WRITE(l4_unit) l4_magic, 1, kt, Kmm, nvor_scheme, jpi, jpj, jpk, 1, STORAGE_SIZE(1._wp), l4_n3
++         WRITE(l4_unit) l4_e3fvor
++         CLOSE(l4_unit)
++
++         l4_magic = 'NEMO_L4_QEEN_1'
++         WRITE(l4_filename,'("oracle_een_q_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_ios )
++         IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 EEN q dump' )
++         WRITE(l4_unit) l4_magic, 1, kt, Kmm, nvor_scheme, jpi, jpj, jpk, 1, STORAGE_SIZE(1._wp), l4_n3
++         WRITE(l4_unit) l4_q
++         CLOSE(l4_unit)
++
++         l4_magic = 'NEMO_L4_ZPVO_1'
++         WRITE(l4_filename,'("oracle_een_zpvo_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_ios )
++         IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 EEN zpvo dump' )
++         WRITE(l4_unit) l4_magic, 1, kt, Kmm, nvor_scheme, jpi, jpj, jpk, 8, STORAGE_SIZE(1._wp), 8*l4_n3
++         WRITE(l4_unit) l4_zpvo_u_nw, l4_zpvo_u_ne, l4_zpvo_u_sw, l4_zpvo_u_se, &
++            & l4_zpvo_v_nw, l4_zpvo_v_ne, l4_zpvo_v_sw, l4_zpvo_v_se
++         CLOSE(l4_unit)
++
++         DEALLOCATE( l4_e3f0vor, l4_e3fvor, l4_q, l4_zpvo_u_nw, l4_zpvo_u_ne, &
++            & l4_zpvo_u_sw, l4_zpvo_u_se, l4_zpvo_v_nw, l4_zpvo_v_ne, &
++            & l4_zpvo_v_sw, l4_zpvo_v_se )
++         WRITE(numout,*) 'LANE4_EEN_PRIMITIVE_DUMPS ', kt, Kmm
++      ENDIF
++      !
+    END SUBROUTINE dyn_cor_2D_init
+

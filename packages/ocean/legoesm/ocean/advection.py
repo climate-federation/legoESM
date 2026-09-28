@@ -823,6 +823,13 @@ def centred2_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
 
 
 FCT_HIGH_ORDER_SCHEMES = ("ppm", "centred2")
+NEMO_FCT_TRACE_FIELDS = (
+    "first_u", "first_v", "first_w", "first_div", "midpoint",
+    "average_u", "average_v", "average_w", "upstream_div",
+    "rhs_after_up", "anti_pre_u", "anti_pre_v", "anti_pre_w",
+    "coef_u", "coef_v", "coef_w", "anti_post_u", "anti_post_v",
+    "anti_post_w", "final_div", "divisor", "rhs_final",
+)
 
 
 def fct_tracer_advection(
@@ -841,7 +848,10 @@ def fct_tracer_advection(
     base_thickness: jnp.ndarray | None = None,
     after_thickness: jnp.ndarray | None = None,
     implicit_w: jnp.ndarray | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    return_nemo_split: bool = False,
+    return_nemo_trace: bool = False,
+    return_limiter_activity: bool = False,
+) -> tuple:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
     Combines first-order upwind (inherently stable) with a high-order flux
@@ -907,6 +917,16 @@ def fct_tracer_advection(
         ``h_k`` itself.  False (z-star default): the AFTER thickness
         ``h_new = h_k - dt*div(mf)`` is derived in the body and the
         Zalesak box is certified against it -- see the h_new block.
+    return_limiter_activity : bool
+        Private write-only diagnostic. If true, append a cell-centred bool
+        map for cells incident to a non-zero antidiffusive face whose limiter
+        coefficient is below one. False preserves the ordinary two-array
+        return.
+    return_nemo_trace : bool
+        Private write-only fidelity trace of the values corresponding to
+        NEMO's compiled two-step FCT stores.  This requires
+        ``low_order_predictor="nemo_rk3_two_step"`` and cannot be combined
+        with another diagnostic return.  False preserves the ordinary return.
 
     Returns
     -------
@@ -926,6 +946,14 @@ def fct_tracer_advection(
         raise ValueError(
             f"Unknown FCT low_order_predictor {low_order_predictor!r}; "
             "expected 'one_step' or 'nemo_rk3_two_step'")
+    if return_nemo_trace:
+        if return_nemo_split or return_limiter_activity:
+            raise ValueError(
+                "return_nemo_trace cannot be combined with another "
+                "diagnostic return")
+        if low_order_predictor != "nemo_rk3_two_step":
+            raise ValueError(
+                "return_nemo_trace requires the NEMO RK3 two-step predictor")
 
     eps = 1e-30
 
@@ -943,6 +971,9 @@ def fct_tracer_advection(
     flux_u_low = mass_flux_u * tr_u_low
     flux_v_low = mass_flux_v * tr_v_low
     div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
+    if return_nemo_trace:
+        trace_first_u = flux_u_low * jnp.asarray(grid.dy_u)[..., None]
+        trace_first_v = flux_v_low * jnp.asarray(grid.dx_v)[..., None]
 
     if high_order == "ppm":
         tr_u_hi = ppm_to_u_points(tracer, mass_flux_u)
@@ -996,6 +1027,9 @@ def fct_tracer_advection(
     pad_axes_v = ((0, 0),) * (F_vert_low_int.ndim - 1)
     F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
     vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+    if return_nemo_trace:
+        trace_first_w = F_vert_low * jnp.asarray(grid.area_T)[..., None]
+        trace_first_div = -(div_h_low + vert_div_low)
 
     # NEMO key_RK3 does not use the ordinary one-step upstream predictor.
     # traadv_fct.F90:493-537 first advances Kbb by pDt/2 with upstream
@@ -1035,11 +1069,23 @@ def fct_tracer_advection(
         F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
         vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
 
+    if return_nemo_trace:
+        trace_average_u = flux_u_low * jnp.asarray(grid.dy_u)[..., None]
+        trace_average_v = flux_v_low * jnp.asarray(grid.dx_v)[..., None]
+        trace_average_w = F_vert_low * jnp.asarray(grid.area_T)[..., None]
+        trace_upstream_div = -(div_h_low + vert_div_low)
+
     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
     # Anti-diffusive face fluxes:
     ad_flux_u = flux_u_hi - flux_u_low      # (n_lat, n_lon+1, nlev)
     ad_flux_v = flux_v_hi - flux_v_low      # (n_lat+1, n_lon, nlev)
     ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
+    if return_nemo_trace:
+        trace_anti_pre_u = ad_flux_u * jnp.asarray(grid.dy_u)[..., None]
+        trace_anti_pre_v = ad_flux_v * jnp.asarray(grid.dx_v)[..., None]
+        trace_anti_pre_w = jnp.pad(
+            ad_vert_int, (*pad_axes_v, (1, 1))) * jnp.asarray(
+                grid.area_T)[..., None]
 
     # AFTER thickness from the SAME advecting fluxes: under z-star the
     # caller's flux-form update divides by h_new = h_k - dt*div(mf), so the
@@ -1147,16 +1193,61 @@ def fct_tracer_advection(
         ad_flux_u, ad_flux_v, ad_vert_int,
         q_td, q_min, q_max, h_new, dt, grid, eps,
     )
-
-    # --- Step 4: limited face fluxes (conservative by construction) ---
-    flux_u_fct = flux_u_low + alpha_u_full * ad_flux_u
-    flux_v_fct = flux_v_low + alpha_v * ad_flux_v
-    div_h_fct = divergence_cgrid(flux_u_fct, flux_v_fct, grid)
-
-    F_vert_fct_int = F_vert_low_int + alpha_vert_face * ad_vert_int
-    F_vert_fct = jnp.pad(F_vert_fct_int, (*pad_axes_v, (1, 1)))
+    limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v
+    div_h_fct = divergence_cgrid(flux_u_low + limited_u, flux_v_low + limited_v, grid)
+    div_h_anti = divergence_cgrid(limited_u, limited_v, grid)
+    limited_w = alpha_vert_face * ad_vert_int
+    F_vert_fct = jnp.pad(F_vert_low_int + limited_w, (*pad_axes_v, (1, 1)))
     vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
-
+    anti_full = jnp.pad(limited_w, (*pad_axes_v, (1, 1)))
+    if return_nemo_trace:
+        mask = (
+            jnp.ones_like(h_k) if active_mask is None else active_mask)
+        safe_h = jnp.maximum(h_k, jnp.asarray(1.0e-10, h_k.dtype))
+        anti_vert_div = anti_full[..., :-1] - anti_full[..., 1:]
+        trace_final_div = -(div_h_anti + anti_vert_div)
+        trace_rhs_after_up = trace_upstream_div / safe_h * mask
+        trace_rhs_final = (
+            trace_rhs_after_up + trace_final_div / safe_h * mask)
+        trace = (
+            trace_first_u, trace_first_v, trace_first_w, trace_first_div,
+            q_mid, trace_average_u, trace_average_v, trace_average_w,
+            trace_upstream_div, trace_rhs_after_up,
+            trace_anti_pre_u, trace_anti_pre_v, trace_anti_pre_w,
+            alpha_u_full, alpha_v,
+            jnp.pad(alpha_vert_face, (*pad_axes_v, (1, 1)),
+                    constant_values=1.0),
+            limited_u * jnp.asarray(grid.dy_u)[..., None],
+            limited_v * jnp.asarray(grid.dx_v)[..., None],
+            anti_full * jnp.asarray(grid.area_T)[..., None],
+            trace_final_div, h_k, trace_rhs_final,
+        )
+        return div_h_fct, vert_div_fct, trace
+    if return_limiter_activity:
+        # WRITE-only branch census for the developed-state fidelity walk.
+        # A cell is active when a non-zero antidiffusive flux on any incident
+        # face is multiplied by an alpha below one.  The ordinary return and
+        # every default caller remain byte-for-byte unchanged.
+        limited_u = (alpha_u_full < 1.0) & (ad_flux_u != 0.0)
+        limited_v = (alpha_v < 1.0) & (ad_flux_v != 0.0)
+        limited_w = (alpha_vert_face < 1.0) & (ad_vert_int != 0.0)
+        cell_activity = (
+            limited_u[:, :-1, :] | limited_u[:, 1:, :]
+            | limited_v[:-1, :, :] | limited_v[1:, :, :]
+            | jnp.pad(limited_w, ((0, 0), (0, 0), (0, 1)))
+            | jnp.pad(limited_w, ((0, 0), (0, 0), (1, 0)))
+        )
+        if active_mask is not None:
+            cell_activity = cell_activity & (active_mask > 0.5)
+        if return_nemo_split:
+            return (div_h_fct, vert_div_fct,
+                    (div_h_low, vert_div_low, div_h_anti,
+                     anti_full[..., :-1] - anti_full[..., 1:]),
+                    cell_activity)
+        return div_h_fct, vert_div_fct, cell_activity
+    if return_nemo_split:
+        return div_h_fct, vert_div_fct, (div_h_low, vert_div_low, div_h_anti,
+            anti_full[..., :-1] - anti_full[..., 1:])
     return div_h_fct, vert_div_fct
 
 

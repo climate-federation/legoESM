@@ -1,0 +1,66 @@
+--- stp2d.F90
++++ stp2d.F90
+@@ -90,11 +90,14 @@
+       INTEGER  ::   ji, jj, jk, jtile                    ! dummy loop indices
+       INTEGER  ::   l2_slow_unit, l2_slow_ios
+       INTEGER  ::   r140_slow_unit, r140_slow_ios
++      INTEGER  ::   r146_family_unit, r146_family_ios
+       REAL(wp) ::   zg_2, zintp, zgrho0r, zld, zztmp     ! local scalars
+       CHARACTER(LEN=16)  :: l2_slow_magic
+       CHARACTER(LEN=16)  :: r140_slow_magic
++      CHARACTER(LEN=16)  :: r146_family_magic
+       CHARACTER(LEN=256) :: l2_slow_filename
+       CHARACTER(LEN=256) :: r140_slow_filename
++      CHARACTER(LEN=256) :: r146_family_filename
+ #if ! defined key_PSYCLONE_2p5p0
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) ::   zpice   ! 2D workspace
+ #else
+@@ -130,11 +133,25 @@
+          IF( ln_tile ) CALL dom_tile( ntsi, ntsj, ntei, ntej, ktile = jtile )
+ 
+          !                             !*  hydrostatic pressure gradient (HPG))  *!   always called FIRST
++         IF( lwp .AND. kt == 1081 ) THEN
++            IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'round-146 RHS families require 64-bit wp' )
++            WRITE(r146_family_filename,'("oracle_developed_rhs_families_kt",I8.8,".bin")') kt
++            OPEN( NEWUNIT=r146_family_unit, FILE=TRIM(r146_family_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++               &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r146_family_ios )
++            IF( r146_family_ios /= 0 )   CALL ctl_stop( 'cannot open round-146 RHS family dump' )
++            r146_family_magic = 'NEMO_L2_R146FAM'
++            WRITE(r146_family_unit) r146_family_magic, 1, kt, Kbb, Krhs, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++            WRITE(r146_family_unit) SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), &
++               & SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), &
++               & SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs))
++         ENDIF
+          CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb
+          CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )            ! horizontal gradient of Hydrostatic pressure
++         IF( lwp .AND. kt == 1081 )   WRITE(r146_family_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+          !
+          !                             !*  lateral viscosity (LDF)  *!
+          CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )
++         IF( lwp .AND. kt == 1081 )   WRITE(r146_family_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+ #if defined key_agrif
+       END DO
+       IF( ln_tile ) CALL dom_tile_stop
+@@ -150,6 +167,7 @@
+          !                             !*  COR + MET  *!   Flux Form        : Coriolis + Metric Term  
+          !                             !*     VOR     *!   Vector Inv. Form : Coriolis + relative Vorticity
+          CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )
++         IF( lwp .AND. kt == 1081 )   WRITE(r146_family_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+          !
+          !                             !*  compute advection  *!   (only KEG + ZAD in Vector Inv. Form)
+          IF( .NOT.lk_linssh ) THEN
+@@ -167,8 +185,14 @@
+          CASE( np_VEC_c2  )               != 2nd order Vector Form =!                       ==>> 3D RHS
+             !
+             CALL dyn_keg( kt, nn_dynkeg, Kbb, uu, vv, Krhs )      !- horizontal Gradient of KE
++            IF( lwp .AND. kt == 1081 )   WRITE(r146_family_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+             !
+             CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection
++            IF( lwp .AND. kt == 1081 ) THEN
++               WRITE(r146_family_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
++               CLOSE(r146_family_unit)
++               WRITE(numout,*) 'ROUND146_DEVELOPED_RHS_FAMILIES_DUMP ', kt, TRIM(r146_family_filename)
++            ENDIF
+             !
+          CASE( np_FLX_c2  )               !=  2n order Flux Form =!   (CEN2)                ==>> 2D RHS only
+             !

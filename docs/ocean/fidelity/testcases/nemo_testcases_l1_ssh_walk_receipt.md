@@ -259,4 +259,3 @@ old path did not honour it either), and the carried-mesh seed's
 | `ssh_walk/stats_after/legoesm/overflow_zps/fp64/states.npz` | `94c6f7d4fe08502789c6e282fe312adf66dc998b1e8cbe108d7be234fdafdba2` |
 
 legoESM commits on `fidelity/overflow-ssh-walk`: `f9f027525` (S-21), `14fa71454` (gate + preregistration), `04e227fdc` (seed fix); NEMO instrument copy `tests/OVERFLOW_OMIP_L1_BTWALK4` (MY_SRC diff vs BTWALK: dump gates `kt <= nit000+3`, per-kt `oracle_rhs`, new `stp2d.F90` dump).
-
