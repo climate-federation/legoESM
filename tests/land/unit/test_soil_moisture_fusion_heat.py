@@ -8,7 +8,9 @@ pin the explicit per-layer source that closes the solver's linearised identity
     sum_k dz [C_app(T0, th1) (T1 - T0) - rho_w L_f (ice(T0, th1) - ice(T0, th0))]
         = dt (G + Q_geo - lambda (T1_top - T0_top))
 
-both for the thermal kernel and for the full multilayer land step.
+for one thermal step (the kernel tests).  The full multilayer land step
+sub-steps the final solve, so there the check is the true enthalpy residual,
+which the sub-steps shrink but do not zero.
 """
 
 from __future__ import annotations

@@ -224,8 +224,10 @@ def moisture_fusion_heat_source(
     changes too, with no fusion heat — an enthalpy leak.  This returns
     ``rho_water * L_f * [ice(T, theta_new) - ice(T, theta_old)] * dz / dt``:
     ice created releases heat, ice removed absorbs it.  ``T_soil`` MUST be the
-    same start-of-step temperature at which the solver's apparent heat
-    capacity is evaluated; the identity closed is the solver's linearised one.
+    start-of-step temperature.  With one thermal step this closes the solver's
+    linearised identity exactly; with sub-steps (capacity re-evaluated at each
+    sub-step start) the closed identity is the sum over sub-steps, and the true
+    nonlinear enthalpy balance holds only approximately.
 
     Conventions: moving water carries no sensible heat (unchanged); ice that
     leaves a layer by drainage, roots or evaporation, or moves between layers,
