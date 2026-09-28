@@ -100,6 +100,8 @@ FILES = {
         _OVERFLOW_R50PAIR_COMPILED / "dynadv.f90"),
     "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90": (
         _OVERFLOW_R50PAIR_COMPILED / "dynadv_up3.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "dynzdf.f90"),
     "OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90": (
         _OVERFLOW_R56UP3_COMPILED / "dynadv_up3.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
@@ -946,6 +948,27 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:436-448': [
         '!==  All stages: correct the barotropic component ==!',
         'CALL r50_mom_finish( uu, vv, Kaa )', 13],
+    # --- ORCA2 round 62: compiled dyn_zdf internal source order ---
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:139-151': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN   ! applied on velocity',
+        '&              /          ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)',
+        13],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:159-162': [
+        'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
+        'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b(ji,jj,Kaa) ) * vmask(ji,jj,jk)',
+        4],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:164-170': [
+        'DO ji = ntsi-( 0), ntei+( 0 )      ! Add bottom/top stress due to barotropic component only',
+        ('&                                            / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))', 1),
+        7],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:188-350': [
+        ('!**  tridiagonal matrix construction  **!    diagonal (zwd), lower (zwi), upper (zws)', 1),
+        'puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - zws(ji,jk) * puu(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)',
+        163],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:357-518': [
+        ('!**  tridiagonal matrix construction  **!    diagonal (zwd), lower (zwi), upper (zws)', 2),
+        'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - zws(ji,jk) * pvv(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)',
+        162],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:492-541': [
         '!                       !==  T-S Tracers  ==!',
         ('CALL r50_tra_finish( ts, ssh, Kaa )', 1), 50],
