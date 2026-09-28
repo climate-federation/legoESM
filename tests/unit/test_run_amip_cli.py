@@ -2241,7 +2241,7 @@ def test_config_yaml_round_trips_authoritative_values():
         materialize_sub_config,
     )
     assert materialize_sub_config(
-        turbulence_config_for(cfg)).clubb.liquid_partition is True
+        turbulence_config_for(cfg)).liquid_partition is True
     assert _resolve_microphysics(cfg)[1].liquid_from_closure is True
     # User decision 2026-09-25 (run 4): NO in-cloud inhomogeneity thinning,
     # matching CAM6 whose RRTMG applies no such factor.  "constant" with
@@ -2334,7 +2334,7 @@ def test_sundqvist_l36_deck_still_round_trips():
         materialize_sub_config,
     )
     assert materialize_sub_config(
-        turbulence_config_for(cfg)).clubb.liquid_partition is False
+        turbulence_config_for(cfg)).liquid_partition is False
     assert _resolve_microphysics(cfg)[1].liquid_from_closure is False
     # Old configuration KEEPS the in-cloud inhomogeneity thinning (user
     # decision 2026-09-25): two_region at fsd 1.0, and it measurably thins.
@@ -4552,7 +4552,7 @@ def test_clubb_liquid_partition_flag_reaches_the_turbulence_kernel():
         "--clubb-liquid-partition",
     ]), parser))
     assert cfg_on.clubb_liquid_partition is True
-    assert turbulence_config_for(cfg_on).clubb.liquid_partition is True
+    assert turbulence_config_for(cfg_on).liquid_partition is True
 
     # ... and the default really is the other value on the same lane, so the
     # assertion above cannot pass by the sub-config defaulting True.
@@ -4561,7 +4561,7 @@ def test_clubb_liquid_partition_flag_reaches_the_turbulence_kernel():
         "--clubb-prognostic",
     ]), parser))
     plain_tc = materialize_sub_config(turbulence_config_for(cfg_plain))
-    assert plain_tc.clubb.liquid_partition is False
+    assert plain_tc.liquid_partition is False
 
 
 def test_clubb_liquid_partition_requires_clubb_and_the_prognostic_path():

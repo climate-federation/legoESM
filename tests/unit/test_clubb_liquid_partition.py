@@ -3,7 +3,8 @@
 The historical bridge hands the advanced total water back WHOLLY as vapour, so
 the liquid the closure's own PDF diagnoses never reaches the host: the host then
 takes its cloud FRACTION from CLUBB and its cloud WATER from a tracer CLUBB never
-wrote.  ``CLUBBConfig.liquid_partition`` ports the reference's exchange:
+wrote.  ``TurbulenceConfig.liquid_partition`` ports the reference's exchange
+(the kernel keys on the host supplying its q_c):
 
 * IN  (clubb_intr.F90:1546,1550) ``rt = q_v + q_c``, ``thl = (T - (L_v/c_pd) q_c)/exner``
 * OUT (clubb_intr.F90:2159,2160) ``q_v = rt - rcm``, ``q_c := rcm`` (REPLACE)
@@ -60,10 +61,14 @@ def _column(seed=0, q_c_amp=0.0):
                 z_half=j(z_half), T_sfc=j(T_sfc), q_sfc=j(q_sfc), rho=j(rho))
 
 
-def _run(config, col, dt=300.0, pass_qc=True):
+def _run(config, col, dt=300.0, pass_qc=True, *, on=None):
+    """``on`` selects the liquid exchange the way the factory does: by handing
+    the kernel the host's q_c (TurbulenceConfig.liquid_partition).  Defaults to
+    "this is the _ON config" so the arms below read as before."""
     moments = pack_clubb_moments(
         init_clubb_moments(_NCOL, _NLEV, config, dtype=jnp.float64))
-    kw = {"q_c": col["q_c"]} if (config.liquid_partition and pass_qc) else {}
+    on = _ON_IDS.__contains__(id(config)) if on is None else on
+    kw = {"q_c": col["q_c"]} if (on and pass_qc) else {}
     return clubb_turbulence_prognostic(
         col["u"], col["v"], col["T"], col["q_v"], moments,
         col["p_full"], col["p_half"], col["z_full"], col["z_half"],
@@ -71,12 +76,18 @@ def _run(config, col, dt=300.0, pass_qc=True):
 
 
 _OFF = CLUBBConfig(prognostic=True)
-_ON = CLUBBConfig(prognostic=True, liquid_partition=True)
+# The kernel config no longer carries the selector (it is a dispatch flag on
+# TurbulenceConfig; the kernel keys on q_c being supplied), so the two arms are
+# the same tunables and differ only in whether _run hands over q_c.
+_ON = CLUBBConfig(prognostic=True)
+_ON_IDS = {id(_ON)}
 
 
 def test_default_is_off_and_emits_no_liquid():
     """The lever ships off, and the off path publishes no liquid tendency."""
-    assert CLUBBConfig().liquid_partition is False
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    assert TurbulenceConfig().liquid_partition is False
+    assert "liquid_partition" not in CLUBBConfig._fields     # not a pytree leaf
     out, _ = _run(_OFF, _column())
     assert out.dq_c_dt is None
 
@@ -242,8 +253,8 @@ def test_sub_cycle_carries_the_liquid_between_steps():
     n_sub = 4
     cfg_1 = _ON._replace(clubb_dt=dt)            # n_sub == 1
     cfg_n = _ON._replace(clubb_dt=dt / n_sub)    # n_sub == 4
-    out_1, _ = _run(cfg_1, col, dt=dt)
-    out_n, packed_n = _run(cfg_n, col, dt=dt)
+    out_1, _ = _run(cfg_1, col, dt=dt, on=True)
+    out_n, packed_n = _run(cfg_n, col, dt=dt, on=True)
     assert not np.allclose(np.asarray(out_1.dq_c_dt),
                            np.asarray(out_n.dq_c_dt), rtol=1e-6, atol=1e-12)
 
@@ -299,10 +310,12 @@ def test_mismatched_pairing_raises_both_ways():
     args = (col["u"], col["v"], col["T"], col["q_v"], moments,
             col["p_full"], col["p_half"], col["z_full"], col["z_half"],
             col["T_sfc"], col["q_sfc"], col["rho"], 300.0)
-    with pytest.raises(ValueError, match="requires the host cloud"):
-        clubb_step(*args, _ON)
-    with pytest.raises(ValueError, match="liquid_partition=False"):
-        clubb_step(*args, _OFF, q_c=col["q_c"])
+    # The kernel keys the exchange on q_c being supplied: without it the
+    # vapour-only bridge runs and no liquid tendency is published.
+    _, _, _, _, _, diag_off = clubb_step(*args, _ON)
+    assert "dq_c_dt" not in diag_off
+    _, _, _, _, _, diag_on = clubb_step(*args, _ON, q_c=col["q_c"])
+    assert diag_on["dq_c_dt"].shape == col["q_c"].shape
 
 
 def test_non_mpas_lanes_refuse_the_lever():
@@ -311,7 +324,7 @@ def test_non_mpas_lanes_refuse_the_lever():
         make_turbulence_physics,
     )
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-    tc = TurbulenceConfig(scheme="clubb", clubb=_ON)
+    tc = TurbulenceConfig(scheme="clubb", clubb=_ON, liquid_partition=True)
     for lane in ("hydrostatic", "nonhydrostatic", "spectral_pe"):
         with pytest.raises(NotImplementedError, match="liquid_partition"):
             make_turbulence_physics(tc, model_type=lane)
@@ -471,7 +484,7 @@ def test_an_override_cannot_smuggle_the_lever_past_the_ordering_guard():
     """The guard has to bind on the RESOLVED config, not the experiment flag.
 
     An authoritative ``turbulence_override`` carrying
-    ``CLUBBConfig(liquid_partition=True)``, or a direct ``make_physics`` call,
+    ``TurbulenceConfig(liquid_partition=True)``, or a direct ``make_physics`` call,
     both reach the combined-physics factory without the experiment-level flag
     ever being set -- and codex reproduced exactly that, validating cleanly with
     the sub-cycle off.  The refusal therefore lives at the factory, where the
@@ -483,7 +496,7 @@ def test_an_override_cannot_smuggle_the_lever_past_the_ordering_guard():
     from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
 
     cfg = PhysicsConfig(
-        turbulence=TurbulenceConfig(scheme="clubb", clubb=_ON),
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=_ON, liquid_partition=True),
         microphysics=MicrophysicsConfig(scheme="morrison"))
     with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
         make_physics(cfg, model_type="mpas", cld_macmic_num_steps=1)
@@ -557,18 +570,19 @@ def test_mpas_lane_refuses_a_state_missing_either_tracer():
     assert "is not carried" in src
 
 
-def test_public_wrapper_refuses_liquid_with_the_lever_off():
-    """The wrapper drops q_c before clubb_step sees it, so it must check too."""
-    import pytest
+def test_public_wrapper_publishes_liquid_iff_the_host_supplies_it():
+    """The exchange is keyed on q_c being handed over (the factory does that
+    iff TurbulenceConfig.liquid_partition): with it the wrapper publishes the
+    liquid tendency, without it the vapour-only bridge publishes none."""
     col = _column(q_c_amp=1.0e-4)
-    moments = pack_clubb_moments(
-        init_clubb_moments(_NCOL, _NLEV, _OFF, dtype=jnp.float64))
-    with pytest.raises(ValueError, match="liquid_partition=False"):
-        clubb_turbulence_prognostic(
-            col["u"], col["v"], col["T"], col["q_v"], moments,
+    args = (col["u"], col["v"], col["T"], col["q_v"],
+            pack_clubb_moments(init_clubb_moments(_NCOL, _NLEV, _OFF, dtype=jnp.float64)),
             col["p_full"], col["p_half"], col["z_full"], col["z_half"],
-            col["T_sfc"], col["q_sfc"], col["rho"], 300.0, _OFF,
-            q_c=col["q_c"])
+            col["T_sfc"], col["q_sfc"], col["rho"], 300.0, _OFF)
+    out_off, _ = clubb_turbulence_prognostic(*args)
+    out_on, _ = clubb_turbulence_prognostic(*args, q_c=col["q_c"])
+    assert out_off.dq_c_dt is None
+    assert out_on.dq_c_dt is not None and out_on.dq_c_dt.shape == col["q_c"].shape
 
 
 def test_an_override_cannot_smuggle_the_lever_past_the_floor_guard():
@@ -584,7 +598,7 @@ def test_an_override_cannot_smuggle_the_lever_past_the_floor_guard():
 
     cfg = _mpas_cfg(clubb_liquid_partition=False,
                     turbulence_override=TurbulenceConfig(
-                        scheme="clubb", clubb=_ON),
+                        scheme="clubb", clubb=_ON, liquid_partition=True),
                     cloud_q_c_diagnostic=None)
     with pytest.raises(ValueError, match="RESOLVED cloud config"):
         ExperimentConfig(**cfg).validate_strict()

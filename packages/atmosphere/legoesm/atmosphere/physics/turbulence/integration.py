@@ -542,9 +542,9 @@ def make_turbulence_physics(
         # vapour tendency that has had that liquid removed. Only the MPAS lane
         # routes it to a tracer today; dropping it on a lane that cannot would
         # destroy exactly that much water every step, silently. Refuse instead.
-        if _sub is not None and getattr(_sub, "liquid_partition", False):
+        if turbulence_config.liquid_partition:
             raise NotImplementedError(
-                "CLUBBConfig.liquid_partition returns a cloud-liquid tendency "
+                "TurbulenceConfig.liquid_partition returns a cloud-liquid tendency "
                 f"(TurbulenceOutput.dq_c_dt) that the {model_type!r} turbulence "
                 "lane does not route to a condensate tracer, so the liquid the "
                 "closure removed from vapour would be destroyed. Use "
@@ -787,7 +787,8 @@ def _make_mpas_turbulence(
     _accepts_surface_flux = kernel_accepts_surface_flux(turb_fn)
     # Static feature gate (build-time closure constant, not traced): with it off
     # the liquid exchange below is absent from the trace entirely.
-    _liquid_partition = bool(getattr(scheme_config, "liquid_partition", False))
+    _liquid_partition = (bool(turbulence_config.liquid_partition)
+                         and scheme_name == "clubb")
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
         from legoesm.grids.voronoi import (
@@ -867,7 +868,7 @@ def _make_mpas_turbulence(
                         if state.tracers is None or n not in state.tracers]
             if _missing:
                 raise ValueError(
-                    "CLUBBConfig.liquid_partition exchanges water between the "
+                    "TurbulenceConfig.liquid_partition exchanges water between the "
                     f"vapour and liquid tracers, and {_missing} is not carried "
                     "by this state. Both must exist, or the half that is "
                     "missing is destroyed. Carry them, or switch the partition "

@@ -48,7 +48,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="macro/micro sub-steps for the closure call "
                          "(the run's cld_macmic_num_steps; 3 => 600 s on an 1800 s step)")
     ap.add_argument("--partition", action="store_true",
-                    help="ALSO size CLUBBConfig.liquid_partition: run the same "
+                    help="ALSO size TurbulenceConfig.liquid_partition: run the same "
                          "closure call with the host's q_c seeded into rt, take "
                          "the liquid it writes back, and push it through the "
                          "deck's own optics. This is the lever's effect, not an "
@@ -203,7 +203,7 @@ def main():
         # it in rt, so the closure REPARTITIONS instead of condensing, which is
         # the quantity the lever actually delivers.
         if a.partition and q_c is not None:
-            liq_cfg = clubb_cfg._replace(liquid_partition=True)
+            liq_cfg = clubb_cfg     # the kernel keys the partition on q_c being supplied
             _u = u_cell.reshape(nCells, nlev); _v = v_cell.reshape(nCells, nlev)
             _T = T; _q = q_v; _m = moments; _rho = rho; _ql = q_c
             for _i in range(_ns):

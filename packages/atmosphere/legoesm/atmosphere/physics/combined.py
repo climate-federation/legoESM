@@ -142,11 +142,7 @@ def _clubb_liquid_partition_on(turbulence_config) -> bool:
     """
     if getattr(turbulence_config, "scheme", None) != "clubb":
         return False
-    from legoesm.atmosphere.physics.turbulence.integration import (
-        materialize_sub_config,
-    )
-    sub = getattr(materialize_sub_config(turbulence_config), "clubb", None)
-    return bool(getattr(sub, "liquid_partition", False))
+    return bool(getattr(turbulence_config, "liquid_partition", False))
 
 
 def make_physics(
@@ -262,7 +258,7 @@ def make_physics(
     # nearly an order of magnitude -- and water is still conserved, so nothing
     # fails.  Checked HERE, against the RESOLVED turbulence config, because the
     # experiment-level flag is not the only way in: an authoritative
-    # turbulence_override carrying CLUBBConfig(liquid_partition=True), or a
+    # turbulence_override carrying TurbulenceConfig(liquid_partition=True), or a
     # direct make_physics call, both reach this factory without it (codex).
     # The MICROPHYSICS half alone deletes the model's only liquid source, so it
     # is the more dangerous half to reach by itself -- the mirror of the
@@ -280,7 +276,7 @@ def make_physics(
             "neither.")
     if _clubb_liquid_partition_on(config.turbulence) and cld_macmic_num_steps < 2:
         raise ValueError(
-            "CLUBBConfig.liquid_partition needs cld_macmic_num_steps>=2: the "
+            "TurbulenceConfig.liquid_partition needs cld_macmic_num_steps>=2: the "
             "closure REPLACES the host cloud water, so the microphysics must "
             "run on the replaced value, and only the macro/micro sub-cycle "
             f"applies the modules in sequence. At cld_macmic_num_steps="
