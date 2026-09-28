@@ -179,6 +179,53 @@ drift convicts the remap / delp-weight coupling; bitwise exact there
 convicts the limiter / fill / passenger handling.  Own issue, not this
 PR.
 
+## M4 (2026-09-27): CAM L32, orography, ERA5 IC -- decisions and findings
+
+* `FV3DuoConfig.eta="cam6_l32"` (ak = A*1e5 Pa, bk = B, top 225.5 Pa,
+  15 pure-pressure interfaces, km 32); the factory selects it at
+  nlev=32.  The step reads ak/bk/ptop generically, no `ks` (GLM: safe
+  iff bk is exactly 0 at the top -- gated by the ps-perturbation test).
+* Orography: `create_fv3_duo_grid(phis_fn=, phis_filter_iter=)` -- phis
+  on the padded A-grid by the builder, then FV3's `del2_cubed_sphere`
+  ported ON the duo faces (`terrain_filter_duo`, flux form with the
+  grid's dy*sina_u*rdxc metrics, cd = 0.2*da_min, halo exchange per
+  pass).  Exactly conservative inside a face; across the seams the two
+  faces' extended-halo metrics differ (MEASURED 3.4e-3 of the area
+  integral on a 2-dx noise field, 8 passes) -- a one-time terrain
+  smoothing, documented, not a dynamics operator.  The pass count is
+  `cfg.topo_smoothing` (the MPAS path's field); its adequacy at C24 is
+  the orography gate's question, not a hidden default.
+* ERA5 IC (`era5_to_fv3_duo_bundle`): KD-tree regrid to the column
+  mesh, p_s moved hydrostatically from ERA5's raw phis to the GRID's
+  smoothed phis, a p_s below the hybrid floor REFUSED (not clamped: a
+  clamp would move phis off the grid's), hybrid vertical interpolation,
+  D winds by the certified increment lift once at t=0.  DECISION
+  (proposed, ASK): q stays SPECIFIC humidity end to end (FV3 sphum); the
+  MPAS-lane ERA5 path converts to mixing ratio and the physics library
+  treats the two "interchangeably (~1 %)"; GLM: a one-way 1-2 % bias
+  that matters at saturation thresholds -- convert once at the IC only,
+  never per step, and add a water-budget closure diagnostic (M6).
+* Rest-state gates over a 3 km smoothed Gaussian mountain at C12 L32
+  (GLM): isothermal (the Lin 1997 FV PGF is exact; regression, cap 1e-3
+  m/s) and constant lapse rate 6.5 K/km (not exact; the spurious-wind
+  gate, cap 0.3 m/s over one day, ps drift < 5 Pa) -- both from the
+  ANALYTIC hypsometric p_s(phis).
+* FINDING (blocking for CPU tests, not for GPU nodes): the 3-D phases
+  keep the level loop as a Python loop (the port's C2 discipline), so
+  the km=32 program is ~6x km=5 and XLA's CPU JIT cannot place its
+  machine code: `contiguous_section_memory_manager: allocateMappedMemory
+  failed: Cannot allocate memory` / `LLVM ERROR: Unable to allocate
+  section memory!` at 75 GB RSS under BOTH a 96 GB and a 180 GB limit
+  (jobs 10043959, 10046728/9) -- the code-section mmap fails, not the
+  heap, and `--xla_cpu_use_thunk_runtime=false` /
+  `--xla_cpu_parallel_codegen_split_count=1` do not change it.  The
+  km=32 gates therefore run on GPU nodes (`fv3_duo_gaps/test_gpu.sbatch`);
+  a level-batched (vmap over k) arm of the D-grid phase is the CPU fix
+  -- own work item before C48 L32.
+* The port runs FV3's uniform-damping arm only (n_sponge = -1, no top
+  sponge); a 2 hPa top without a sponge is an untested regime -- the
+  10-day dry ERA5 run is the first look.
+
 ## Certification ladder v3
 
 1. Zero-tendency physics through the column lane == closed duo lane

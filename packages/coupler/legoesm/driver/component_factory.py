@@ -508,9 +508,12 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
                        "column increments rebuild the hydrostatic pressures)")
     if config.precision not in ("fp64", "float64", "mixed_fp64_storage"):
         refused.append(f"precision={config.precision!r} (fp64 only)")
-    if gc.nlev not in (5, 10):
-        refused.append(f"grid.nlev={gc.nlev} (analytic set_eta km in {{5, 10}}; "
-                       "the CAM L32 table is M4)")
+    # the vertical table follows nlev: the certified analytic branch at
+    # 5/10, CAM6's L32 table at 32 (user decision 2026-09-26: CAM L32)
+    eta = {5: "analytic", 10: "analytic", 32: "cam6_l32"}.get(gc.nlev)
+    if eta is None:
+        refused.append(f"grid.nlev={gc.nlev} (analytic set_eta km in {{5, 10}} "
+                       "or the CAM6 L32 table at 32)")
     # Anything the driver regrids onto self.grid in setup() lands on the
     # STANDARD cubed-sphere cell centres, which are NOT the duo's A-grid
     # (MEASURED 2026-09-26, C12: 1.6 deg offsets on matching faces, faces
@@ -520,8 +523,10 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
         refused.append(f"dataset={config.dataset!r} (SST/SIC regrid on the "
                        "driver grid is M6)")
     if config.topography != "flat":
-        refused.append(f"topography={config.topography!r} (M4/M6: the "
-                       "column mesh must receive it)")
+        refused.append(f"topography={config.topography!r} (an elevation "
+                       "file is M6; with ic='era5' the terrain is ERA5's own "
+                       "phis, del-2 filtered topo_smoothing passes, as on "
+                       "the MPAS lane)")
     if config.use_multilayer_land:
         refused.append("use_multilayer_land=True (land data regrid is M6)")
     if config.radiation != "none":
@@ -561,7 +566,7 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
                          "(ctx['ectx'] with amat6) for the c2l column winds")
     dyn = FV3DuoDynamicsModel(
         bundle, FV3DuoConfig(km=gc.nlev, hydrostatic=True,
-                             storage_dtype="float64", moist=moist))
+                             storage_dtype="float64", moist=moist, eta=eta))
     return FV3DuoColumnModel(dyn)
 
 
