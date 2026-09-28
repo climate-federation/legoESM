@@ -34,7 +34,7 @@ momentum advection with the explicit `zFu/zFv/zFw` operands, and then records
 `after_adv` at
 `OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:327-363`.
 Its compiled dispatcher selects `np_FLX_up3` at
-`OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv.f90:134-145`.
+`OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv.f90:134-144`.
 The executed routine forms horizontal curvatures at
 `OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90:150-158`, selected
 face values, face fluxes, and the horizontal RHS at

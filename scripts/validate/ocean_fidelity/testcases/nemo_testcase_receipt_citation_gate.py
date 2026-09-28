@@ -881,10 +881,10 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- ORCA2 round 56: admitted OVERFLOW stage-2 UP3 boundary ---
-    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv.f90:134-145': [
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv.f90:134-144': [
         ('SELECT CASE( n_dynadv )', 1),
         'CALL dyn_adv_up3     ( kt       , Kbb, Kmm, puu, pvv, Krhs, pau, pav, paw )',
-        12],
+        11],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90:150-158': [
         ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
         '&             - ( pvv(ji  ,jj  ,jk,Kbb) - pvv(ji-1,jj  ,jk,Kbb) )    * fmask(ji-1,jj  ,jk)',
