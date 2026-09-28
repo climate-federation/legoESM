@@ -754,12 +754,14 @@ def latent_heat_vaporization(
 
     ``L_v(T) = L_v - (c_liquid - c_pv) (T - T_freeze)``: equals ``constants.L_v``
     at 0 degC and falls by ``c_pw - c_pv`` = 2372 J/kg per kelvin (about 3 %
-    lower at 30 degC).  THE latent heat of the codebase: every surface flux,
-    coupler tile, land/ice/ocean exchange and budget ledger uses this family
-    (``latent_heat_sublimation``, ``latent_heat_fusion``, ``surface_latent_heat``);
-    the former NEMO/AeroBulk empirical slope (2370) and the DifferBESS canopy
-    slope were retired in its favour.  ``c_liquid`` exists for Emanuel's CONVECT
-    port, which carries its own tunable liquid heat capacity.  Dtype-preserving.
+    lower at 30 degC).  The one latent-heat family of the codebase
+    (``latent_heat_sublimation``, ``latent_heat_fusion``, ``surface_latent_heat``):
+    the NEMO/AeroBulk empirical slope (2370) was retired in its favour, and every
+    component-interface site still reading the bare constants (surface fluxes,
+    coupler tiles, land/ice/ocean exchange, budget ledgers, the DifferBESS canopy
+    slope) is tracked by ``tests/test_no_bare_latent_heat.py`` for migration.
+    ``c_liquid`` exists for Emanuel's CONVECT port, which carries its own tunable
+    liquid heat capacity.  Dtype-preserving.
     """
     return constants.L_v - (c_liquid - constants.c_pv) * (T - constants.T_freeze)
 
@@ -779,7 +781,7 @@ def latent_heat_fusion(T: jax.Array) -> jax.Array:
     return latent_heat_sublimation(T) - latent_heat_vaporization(T)
 
 
-def surface_latent_heat(T_sfc: jax.Array, frozen_fraction) -> jax.Array:
+def surface_latent_heat(T_sfc: jax.Array, frozen_fraction: jax.Array | float) -> jax.Array:
     """Latent heat [J/kg] of the water leaving a surface at ``T_sfc``.
 
     ``(1 - f) L_v(T) + f L_s(T)`` with ``f`` the frozen (snow / ice) fraction of
@@ -787,7 +789,8 @@ def surface_latent_heat(T_sfc: jax.Array, frozen_fraction) -> jax.Array:
     the flux is continuous and differentiable across melt-out.  A tile made of
     several evaporating components (transpiring canopy under a sublimating
     snowpack, ice categories) sums ``L * E`` per component instead of calling
-    this with an aggregate temperature.
+    this with an aggregate temperature.  ``frozen_fraction`` is the caller's
+    contract to keep in [0, 1]; it is not clamped here.
     """
     f = jnp.asarray(frozen_fraction, dtype=jnp.asarray(T_sfc).dtype)
     return (1.0 - f) * latent_heat_vaporization(T_sfc) + f * latent_heat_sublimation(T_sfc)

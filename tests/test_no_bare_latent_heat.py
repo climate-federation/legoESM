@@ -32,26 +32,50 @@ _EXEMPT_FILES = {
 }
 
 
-def bare_latent_heat_lines(src: str) -> list[int]:
-    """Sorted, deduplicated line numbers reading ``constants.L_v``/``L_s``/``L_f``
-    (attribute access on a name ending in ``constants``), minus lines tagged
-    ``# latent-ok: <reason>``.  Raises ``SyntaxError`` on an unparseable file."""
+def _is_constants_module(node: ast.AST, aliases: set[str]) -> bool:
+    """``constants`` / an alias / a dotted chain ending in ``.constants``."""
+    if isinstance(node, ast.Name):
+        return node.id in aliases
+    return isinstance(node, ast.Attribute) and node.attr == "constants"
+
+
+def bare_latent_heat_sites(src: str) -> list[tuple[int, int]]:
+    """Sorted ``(line, col)`` of every read of ``L_v``/``L_s``/``L_f`` from the
+    constants module: ``constants.L_v``, ``<alias>.L_v``, ``legoesm.constants.L_v``
+    and a name bound by ``from legoesm.constants import L_v [as x]``; minus reads
+    on lines tagged ``# latent-ok: <reason>``.  Counted per READ, not per line,
+    so a second read cannot hide behind a budgeted line.  Raises ``SyntaxError``
+    on an unparseable file."""
     tree = ast.parse(src)
     exempt = ra.comment_tagged_lines(src, _EXEMPT_TAG)
-    # Every local name bound to the constants module: ``constants``, a dotted
-    # ``legoesm.constants`` tail, and any ``import ... constants as <alias>``.
     aliases = {"constants"}
+    bound: set[str] = set()
     for n in ast.walk(tree):
-        if isinstance(n, (ast.Import, ast.ImportFrom)):
+        if isinstance(n, ast.Import):
             for a in n.names:
                 if a.name.split(".")[-1] == "constants" and a.asname:
                     aliases.add(a.asname)
-    lines: set[int] = set()
+        elif isinstance(n, ast.ImportFrom):
+            if (n.module or "").split(".")[-1] == "constants":
+                for a in n.names:
+                    if a.name in _NAMES:
+                        bound.add(a.asname or a.name)
+            for a in n.names:
+                if a.name == "constants" and a.asname:
+                    aliases.add(a.asname)
+    sites: set[tuple[int, int]] = set()
     for n in ast.walk(tree):
         if (isinstance(n, ast.Attribute) and n.attr in _NAMES
-                and isinstance(n.value, ast.Name) and n.value.id in aliases):
-            lines.add(n.lineno)
-    return sorted(ln for ln in lines if ln not in exempt)
+                and _is_constants_module(n.value, aliases)):
+            sites.add((n.lineno, n.col_offset))
+        elif isinstance(n, ast.Name) and n.id in bound and isinstance(n.ctx, ast.Load):
+            sites.add((n.lineno, n.col_offset))
+    return sorted(s for s in sites if s[0] not in exempt)
+
+
+def bare_latent_heat_lines(src: str) -> list[int]:
+    """Distinct lines of :func:`bare_latent_heat_sites` (for messages/self-tests)."""
+    return sorted({ln for ln, _ in bare_latent_heat_sites(src)})
 
 
 _FILES = [p for p in ra.discover_py_files() if not ra.rel(p).startswith("tests/")]
@@ -71,10 +95,10 @@ def test_no_new_bare_latent_heat(path) -> None:
     if path.resolve() in _EXEMPT_FILES:
         pytest.skip("definition / canonical / guard file")
     rel = ra.rel(path)
-    hits = bare_latent_heat_lines(path.read_text())
+    hits = bare_latent_heat_sites(path.read_text())
     budget = LATENT_BUDGET.get(rel, 0)
     assert len(hits) <= budget, (
-        f"{rel} reads a bare latent-heat constant on {len(hits)} line(s) "
+        f"{rel} reads a bare latent-heat constant at {len(hits)} site(s) "
         f"(budget {budget}). Use legoesm.thermo.latent_heat_vaporization / "
         f"latent_heat_sublimation / latent_heat_fusion / surface_latent_heat at "
         f"the temperature of the phase change, or tag a scheme-internal oracle "
@@ -88,7 +112,7 @@ def test_budget_is_tight(path) -> None:
     rel = ra.rel(path)
     if rel not in LATENT_BUDGET or path.resolve() in _EXEMPT_FILES:
         pytest.skip("no budget entry")
-    hits = bare_latent_heat_lines(path.read_text())
+    hits = bare_latent_heat_sites(path.read_text())
     assert len(hits) == LATENT_BUDGET[rel], (
         f"{rel}: {len(hits)} bare site(s) but LATENT_BUDGET says {LATENT_BUDGET[rel]}; "
         f"lower the entry (or delete it at 0)")
@@ -101,6 +125,23 @@ def test_detector_flags_each_constant() -> None:
 
 def test_detector_flags_aliased_module() -> None:
     assert bare_latent_heat_lines("from legoesm import constants as _c\nq = h / _c.L_v\n") == [2]
+
+
+def test_detector_flags_from_import_of_the_constant_itself() -> None:
+    src = "from legoesm.constants import L_v, L_f as LF\nq = h / L_v\nm = e / LF\n"
+    assert bare_latent_heat_lines(src) == [2, 3]
+
+
+def test_detector_flags_dotted_module_chain() -> None:
+    assert bare_latent_heat_lines("import legoesm.constants\nq = h / legoesm.constants.L_s\n") == [2]
+
+
+def test_detector_counts_every_read_on_a_line() -> None:
+    assert len(bare_latent_heat_sites("x = constants.L_v + constants.L_f\n")) == 2
+
+
+def test_near_miss_comment_does_not_exempt() -> None:
+    assert bare_latent_heat_lines("q = h / constants.L_v  # latent heat of the flux\n") == [1]
 
 
 def test_detector_ignores_the_canonical_family_and_other_attrs() -> None:
