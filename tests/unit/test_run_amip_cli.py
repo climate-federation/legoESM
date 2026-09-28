@@ -4571,7 +4571,7 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
                                  create_sigma_coordinate(5))
 
 
-def test_corner_fill_flag_round_trip_and_production_pin():
+def test_corner_fill_flag_round_trip_and_production_pin(capsys):
     parser = build_arg_parser()
     default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
@@ -4581,7 +4581,8 @@ def test_corner_fill_flag_round_trip_and_production_pin():
     assert cfg.dycore.corner_fill == "fv3_bgrid_xdir"
     cfg.validate_strict()
     with pytest.raises(SystemExit):
-        parser.parse_args(["--corner-fill", "fv3_bgrid"])
+        parser.parse_args(["--dataset", "analytical", "--corner-fill", "fv3_bgrid"])
+    assert "invalid choice" in capsys.readouterr().err
     from pathlib import Path
     from legoesm.driver.run_config_yaml import load_yaml_config
     deck = Path(__file__).resolve().parents[2] / "config/amip/amip_production.yaml"

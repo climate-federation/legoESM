@@ -281,6 +281,7 @@ def test_config_door_refuses_a_mode_another_trace_already_used(monkeypatch):
     mode it traced with; a run configured for another mode in the same process
     would silently mix two modes (codex review of #1811)."""
     from legoesm.grids import halo
+    monkeypatch.delenv("LEGOESM_CORNER_FILL", raising=False)
     monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
     monkeypatch.setattr(halo, "_corner_fill_claimed", None)
     monkeypatch.setattr(halo, "_corner_fill_traced", {"fv3_bgrid_xdir"})
