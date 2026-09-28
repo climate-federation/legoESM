@@ -184,7 +184,7 @@ def main(argv=None):
         cfg = cfg0._replace(richards=cfg0.richards._replace(ice_impedance_exponent=e))
         drain = runoff = 0.0
         resid_max = 0.0
-        n_held = n_checked = 0
+        n_held = n_checked = n_over = 0
         for s0, s1, evap, fw, held in _run_arm(d, st0, cfg, idx, n_steps, dt):
             # phase-aware vapour flux (sublimation at L_s) and the tile's total
             # runoff to the ocean (surface incl. snowmelt + drainage)
@@ -194,6 +194,7 @@ def main(argv=None):
             ok = mask & ~held
             n_held += int(np.sum(mask & held))
             n_checked += int(np.sum(ok))
+            n_over += int(np.sum(ok & (np.abs(r) >= _BUDGET_TOL_KG_M2)))
             if not np.all(np.isfinite(r[ok])):
                 raise SystemExit(f"non-finite water budget in arm e={e:g}")
             if ok.any():
@@ -203,6 +204,7 @@ def main(argv=None):
                                held_column_steps=n_held,
                                max_budget_residual_kg_m2_per_step=resid_max,
                                budgeted_column_steps=n_checked,
+                               over_tol_column_steps=n_over,
                                budget_within_tol=budget_verdict(resid_max, n_checked))
 
     ic = getattr(ra_args, "land_ic", None)
