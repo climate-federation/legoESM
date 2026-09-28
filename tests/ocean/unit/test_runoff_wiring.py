@@ -142,3 +142,47 @@ def test_unknown_runoff_regrid_raises():
     with pytest.raises(ValueError, match="runoff regrid"):
         R.load_runoff_monthly(grid, "latlon", lat2d, lon2d, None,
                               land_mask=np.ones((10, 20)), regrid="bogus")
+
+
+@pytest.mark.skipif(not os.path.exists(R._RUNOFF_NC),
+                    reason="NEMO Dai-Trenberth runoff file not on this host")
+def test_native_runoff_is_the_nemo_field_on_eorca1():
+    """'native' hands the tripole NEMO's own field: interior bit-identical,
+    cyclic halos and top row zero; land discharge cell or shifted coords raise."""
+    import types
+    import xarray as xr
+    A = R._load_nemo_cell_area_m2()
+    ny, nx = A.shape
+    area = np.zeros((ny + 1, nx + 2)); area[:ny, 1:nx + 1] = A
+    grid = types.SimpleNamespace(area=area)
+    ds = xr.open_dataset(R._RUNOFF_NC, decode_times=False)
+    la = np.zeros((ny + 1, nx + 2)); lo = np.zeros((ny + 1, nx + 2))
+    la[:ny, 1:nx + 1] = R._squeeze2d(ds["nav_lat"].values)
+    lo[:ny, 1:nx + 1] = R._squeeze2d(ds["nav_lon"].values) + 360.0  # lon convention free
+    wet = np.ones((ny + 1, nx + 2))
+    out = R.load_runoff_monthly(grid, "tripole", la, lo, None, land_mask=wet,
+                                spread_passes=0, regrid="native")
+    src = sum(np.nan_to_num(np.asarray(ds[v].values, float))
+              for v in R._runoff_component_vars(False) if v in ds)
+    np.testing.assert_array_equal(out[:, :ny, 1:nx + 1], src)
+    assert not out[:, ny].any() and not out[:, :, 0].any() and not out[:, :, nx + 1].any()
+    with pytest.raises(ValueError, match="nav_lat"):
+        R.load_runoff_monthly(grid, "tripole", np.roll(la, 1, axis=1), lo, None,
+                              land_mask=wet, spread_passes=0, regrid="native")
+    j, i = np.unravel_index(np.argmax(src.sum(0)), src.shape[1:])
+    wet[j, i + 1] = 0.0
+    with pytest.raises(ValueError, match="land in the model mask"):
+        R.load_runoff_monthly(grid, "tripole", la, lo, None, land_mask=wet,
+                              spread_passes=0, regrid="native")
+
+
+def test_native_runoff_refuses_other_grids_and_spreading():
+    from legoesm.grids.latlon import create_latlon_grid
+    grid = create_latlon_grid(10, 20)
+    z = np.zeros((10, 20))
+    with pytest.raises(ValueError, match="tripole only"):
+        R.load_runoff_monthly(grid, "latlon", z, z, None, land_mask=np.ones((10, 20)),
+                              spread_passes=0, regrid="native")
+    with pytest.raises(ValueError, match="tripole only"):
+        R.load_runoff_monthly(grid, "tripole", z, z, None, land_mask=np.ones((10, 20)),
+                              spread_passes=8, regrid="native")

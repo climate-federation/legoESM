@@ -4332,8 +4332,12 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     the SSS comparison (runoff=0 made SSS only informational). Curvilinear ->
     model grid via the same IDW used for bathy; eORCA1 nav_lat/lon are the runoff
     file's own coords."""
-    if regrid not in ("idw4", "volume_nearest"):
-        raise ValueError(f"runoff regrid {regrid!r}: expected 'idw4' or 'volume_nearest'")
+    if regrid not in ("idw4", "volume_nearest", "native"):
+        raise ValueError(f"runoff regrid {regrid!r}: expected 'idw4', 'volume_nearest' or 'native'")
+    if regrid == "native" and (grid_type != "tripole" or spread_passes != 0):
+        raise ValueError(
+            "runoff regrid 'native' is the eORCA1 file on its own grid: tripole only, "
+            f"with --runoff-spread-passes 0 (got grid {grid_type!r}, {spread_passes} passes)")
     import xarray as xr
     from legoesm.ocean.bathymetry import (
         laplacian_smooth_2d, laplacian_smooth_voronoi)
@@ -4382,6 +4386,30 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
             np.asarray(lon2d_deg).ravel()[_tgt_idx])
         _dest = _tgt_idx[_dest]
         _A_tgt_flat = A_tgt.ravel()
+    if regrid == "native":
+        # NEMO reads sn_rnf with no weights file: the field IS on eORCA1 T points.
+        # File rows/cols = mesh rows 0..330, cols 1..360. The 2 cyclic halo columns
+        # stay 0: --ew-cyclic-overlap slaves their state each step, and a copy there
+        # would count the same river twice in every global freshwater sum.
+        # No renorm: interior cells carry NEMO's values exactly.
+        ny, nx = total.shape[1:]
+        if out.shape[1:] != (ny + 1, nx + 2):
+            raise ValueError(f"runoff native: grid {out.shape[1:]} != file {(ny, nx)} + (1 row, 2 halo cols)")
+        _dlat = np.abs(np.asarray(lat2d_deg)[:ny, 1:nx + 1] - src_lat)
+        _dlon = np.abs((np.asarray(lon2d_deg)[:ny, 1:nx + 1] - src_lon + 180.0) % 360.0 - 180.0)
+        if max(_dlat.max(), _dlon.max()) > 1e-3:
+            raise ValueError(f"runoff native: grid T points differ from the file's nav_lat/nav_lon "
+                             f"by up to {max(_dlat.max(), _dlon.max()):.3g} deg")
+        out[:, :ny, 1:nx + 1] = total
+        if ocean is not None:
+            _dry = (out[:, :, 1:nx + 1].sum(axis=0) > 0) & ~ocean[:, 1:nx + 1]
+            if _dry.any():
+                raise ValueError(f"runoff native: {int(_dry.sum())} discharge cells are land in the model mask")
+        _src = float((total.mean(axis=0) * A_src).sum()) / 1.0e9
+        _tgt = float((out.mean(axis=0) * A_tgt).sum()) / 1.0e9
+        print(f"[setup] runoff: NATIVE eORCA1 field, {int(src_valid.sum())} discharge cells, "
+              f"no regrid/spread/renorm | src={_src:.4f} Sv target={_tgt:.4f} Sv")
+        return out
     for m in range(12):
         if regrid == "volume_nearest":
             _V = total[m].ravel()[_src_flat] * A_src.ravel()[_src_flat]   # kg/s
@@ -7393,7 +7421,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "Amazon-type plume. Column-integral salt unchanged. "
                         "Default None = legacy top-cell (bit-exact).")
     p.add_argument("--runoff-regrid", type=str, default="idw4",
-                   choices=["idw4", "volume_nearest"],
+                   choices=["idw4", "volume_nearest", "native"],
                    help="How NEMO's Dai-Trenberth runoff reaches the model grid. "
                         "'idw4' (default, unchanged) averages runoff INTENSITY from "
                         "the 4 nearest discharge cells, then a global renorm; it "
