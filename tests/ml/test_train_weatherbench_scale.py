@@ -201,7 +201,12 @@ def test_cam6_deck_smoke_builds_its_cloud_settings_into_the_cam6_cloud_config(
         return out
 
     monkeypatch.setattr(ap, "_splice_scheme_overrides", spy)
-    _m, _g, _s, params, make_run_seg, _lc, _dt = build_mode_components(cfg, yml)
+    _m, grid, _s, params, make_run_seg, _lc, _dt = build_mode_components(cfg, yml)
+    # Frozen out by name: nothing on the cam6_clubb path reads them.
+    trainable = set(params.schemes.raw_values)
+    assert any(".clouds.CloudConfig." in k for k in trainable)
+    assert not trainable & {"atm.clouds.CloudConfig.rh_crit",
+                            "atm.clouds.CloudConfig.q_c_diagnostic"}
     make_run_seg(params)
     cc = built[-1].radiation.cloud_config
     assert cc.scheme == "cam6_clubb"

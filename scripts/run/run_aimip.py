@@ -599,6 +599,7 @@ def _train_aimip_classical(
     if _scheme_tier:
         from legoesm.training.aimip_params import (
             AIMIPTrainableBundle,
+            aimip_inactive_fields,
             aimip_legacy_owned_fields,
             aimip_scheme_keys_for,
         )
@@ -618,7 +619,8 @@ def _train_aimip_classical(
         _scheme_params = build_trainable_params(
             active_scheme_keys=_active,
             tier=(_scheme_tier if isinstance(_scheme_tier, str) else "extended"),
-            exclude=tuple(sorted(_owned)),
+            exclude=tuple(sorted(
+                _owned | aimip_inactive_fields(cloud_scheme=cloud_scheme))),
         )
         _n_scheme = sum(len(v) for v in _scheme_params.to_overrides().values())
         if _n_scheme == 0:
