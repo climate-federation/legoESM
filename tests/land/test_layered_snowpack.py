@@ -414,6 +414,11 @@ def test_unknown_or_unsupported_snow_scheme_raises():
     with pytest.raises(ValueError, match="elev_bands"):
         step_multilayer_land_with_diagnostics(
             init_multilayer_land_state(1, banded, T_init=270.0), f, banded, 1.0, 1800.0)
+    ft = _cfg()
+    ft = ft._replace(thermal=ft.thermal._replace(enable_freeze_thaw=True))
+    with pytest.raises(ValueError, match="enable_freeze_thaw"):
+        step_multilayer_land_with_diagnostics(
+            init_multilayer_land_state(1, ft, T_init=270.0), f, ft, 1.0, 1800.0)
 
 
 def test_init_allocates_layers_only_for_layered():

@@ -475,7 +475,6 @@ def solve_snow_soil_thermal(
     dt: float,
     surface_conductance: jnp.ndarray | None = None,
     T_snow_top_ref: jnp.ndarray | None = None,
-    n_substeps: int = 1,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """ONE implicit (backward-Euler) heat solve of a snowpack stacked on the soil.
 
@@ -497,38 +496,30 @@ def solve_snow_soil_thermal(
     geothermal flux enters the bottom soil row.  The solve conserves the column's
     sensible energy exactly; latent heat in the pack is handled afterwards by the
     enthalpy re-equilibration (``snow_column.snow_phase_and_percolate``).
-    ``n_substeps`` equal backward-Euler sub-steps re-evaluate the soil's
-    apparent heat capacity at each sub-step's start temperature, exactly as
-    :func:`solve_soil_thermal`; the pack's sensible capacity is fixed.
 
     Returns ``(T_snow_new (ncol, ns), T_soil_new (ncol, nlayers))``.
     """
     ns = T_snow.shape[-1]
-    dt_sub = dt / n_substeps
-    T_ref = T_snow[:, 0] if T_snow_top_ref is None else T_snow_top_ref
-    T_soil_top0 = T_soil[:, 0]
-    T_s, T_g = T_snow, T_soil
-    for _ in range(n_substeps):
-        d_soil, c_soil, r_soil, k_soil = _soil_heat_system(
-            T_g, theta, grid, hydro_config, thermal_config, dt_sub)
-        c_if = 1.0 / (r_snow_base + grid.z_node[0] / k_soil[:, 0])     # (ncol,)
-        coeff = jnp.concatenate([coeff_snow, c_if[:, None], c_soil], axis=-1)
-        diag = jnp.concatenate([C_snow / dt_sub, d_soil], axis=-1)
-        # The soil diagonal already carries its internal conductances; add the
-        # pack's internal ones and the snow-soil interface to the rows they join.
-        diag = diag.at[:, 1:ns + 1].add(coeff[:, :ns])
-        diag = diag.at[:, :ns].add(coeff[:, :ns])
-        rhs = jnp.concatenate([C_snow * T_s / dt_sub, r_soil], axis=-1)
-        rhs = rhs.at[:, 0].add(f_snow * G_surface)
-        rhs = rhs.at[:, ns].add((1.0 - f_snow) * G_surface)
-        if surface_conductance is not None:
-            lam_s = f_snow * surface_conductance
-            lam_g = (1.0 - f_snow) * surface_conductance
-            diag = diag.at[:, 0].add(lam_s).at[:, ns].add(lam_g)
-            rhs = rhs.at[:, 0].add(lam_s * T_ref).at[:, ns].add(lam_g * T_soil_top0)
-        rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
-        a = jnp.pad(-coeff, ((0, 0), (1, 0)))
-        c = jnp.pad(-coeff, ((0, 0), (0, 1)))
-        T_new = thomas_solve(a, diag, c, rhs)
-        T_s, T_g = T_new[:, :ns], T_new[:, ns:]
-    return T_s, T_g
+    d_soil, c_soil, r_soil, k_soil = _soil_heat_system(
+        T_soil, theta, grid, hydro_config, thermal_config, dt)
+    c_if = 1.0 / (r_snow_base + grid.z_node[0] / k_soil[:, 0])     # (ncol,)
+    coeff = jnp.concatenate([coeff_snow, c_if[:, None], c_soil], axis=-1)
+    diag = jnp.concatenate([C_snow / dt, d_soil], axis=-1)
+    # The soil diagonal already carries its internal conductances; add the pack's
+    # internal ones and the snow-soil interface to the rows they join.
+    diag = diag.at[:, 1:ns + 1].add(coeff[:, :ns])
+    diag = diag.at[:, :ns].add(coeff[:, :ns])
+    rhs = jnp.concatenate([C_snow * T_snow / dt, r_soil], axis=-1)
+    rhs = rhs.at[:, 0].add(f_snow * G_surface)
+    rhs = rhs.at[:, ns].add((1.0 - f_snow) * G_surface)
+    if surface_conductance is not None:
+        lam_s = f_snow * surface_conductance
+        lam_g = (1.0 - f_snow) * surface_conductance
+        diag = diag.at[:, 0].add(lam_s).at[:, ns].add(lam_g)
+        T_ref = T_snow[:, 0] if T_snow_top_ref is None else T_snow_top_ref
+        rhs = rhs.at[:, 0].add(lam_s * T_ref).at[:, ns].add(lam_g * T_soil[:, 0])
+    rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
+    a = jnp.pad(-coeff, ((0, 0), (1, 0)))
+    c = jnp.pad(-coeff, ((0, 0), (0, 1)))
+    T_new = thomas_solve(a, diag, c, rhs)
+    return T_new[:, :ns], T_new[:, ns:]

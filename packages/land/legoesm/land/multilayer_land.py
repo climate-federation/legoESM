@@ -524,6 +524,20 @@ def _step_multilayer_land_impl(
             raise ValueError(
                 "snow_scheme='layered' needs the snow-layer state; build the state "
                 "with init_multilayer_land_state(config=...) or seed_snow_layers().")
+        if config.thermal.enable_freeze_thaw:
+            # The bulk branch charges the fusion heat of the ice change the
+            # hydrology step makes at fixed T (moisture_fusion_heat_source, with
+            # sub-steps) on its POST-hydrology thermal solve.  This branch solves
+            # soil heat BEFORE hydrology (the pack's drainage feeds the Richards
+            # top flux), so that term has no place to be charged yet; running
+            # without it would silently reopen the enthalpy leak main closed.
+            raise ValueError(
+                "snow_scheme='layered' is not supported with "
+                "thermal.enable_freeze_thaw=True yet: the layered branch solves "
+                "soil heat before the hydrology step and cannot charge the "
+                "fusion heat of the hydrology-driven ice change "
+                "(moisture_fusion_heat_source). Use snow_scheme='bulk' with "
+                "freeze/thaw, or layered snow with freeze/thaw off.")
         scc = config.snow_column
         pack = SnowColumnState(swe_ice=state.snow_ice_layers,
                                swe_liq=state.snow_liq_layers,
@@ -1212,13 +1226,7 @@ def _step_multilayer_land_impl(
             config.hydraulics, config.thermal,
             G_surface + evap_excess_energy, dt,
             surface_conductance=surface_out.surface_conductance,
-            T_snow_top_ref=T_pack_top_ref,
-            n_substeps=(FINAL_THERMAL_SUBSTEPS
-                        if config.thermal.enable_freeze_thaw else 1))
-        # NOTE: this branch solves soil heat BEFORE Richards, so the fusion heat
-        # of the ice change Richards makes at fixed T (``moisture_fusion_heat_
-        # source``, charged on the bulk branch below) is NOT applied here; where
-        # to charge it in this ordering is an open decision.
+            T_snow_top_ref=T_pack_top_ref)
         snow_T_top_excess = jnp.maximum(
             T_pack_solved[:, 0] - constants.T_freeze, 0.0)
         # Ground heat flux the column actually received [W/m^2]: the Robin term
