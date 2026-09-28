@@ -819,6 +819,10 @@ def test_land_soil_ice_impedance_exponent_round_trip_deck_and_range():
             base + ["--land-soil-ice-impedance-exponent", bad]), parser))
         with pytest.raises(ValueError, match="land_soil_ice_impedance_exponent"):
             cfg.validate_strict()
+    slab = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-soil-ice-impedance-exponent", "3"]), parser))
+    with pytest.raises(ValueError, match="requires use_multilayer_land"):
+        slab.validate_strict()
 
 
 def test_land_soil_freeze_thaw_without_multilayer_land_is_refused():

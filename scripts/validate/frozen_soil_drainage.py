@@ -105,12 +105,12 @@ def _run_arm(d, st0, cfg, idx, n_steps, dt):
         new, resp, _ = step_multilayer_land(
             st, f, cfg_p, u_min, dt, lat=lat_p, doy=_DOY,
             land_params=params_p, carbon_state=carbon_p)
-        return new, resp.lhflx
+        return new, resp.surface_mass_flux, resp.freshwater_flux
 
     st = pack(st0)
     for _ in range(n_steps):
-        new, lh = step(st)
-        yield st, new, np.asarray(lh)
+        new, evap, fw = step(st)
+        yield st, new, np.asarray(evap), np.asarray(fw)
         st = new
 
 
@@ -129,7 +129,6 @@ def main(argv=None):
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
-    from legoesm import constants
     from legoesm.land.multilayer_land import soil_ice_log_impedance
     from legoesm.land.soil_grid import make_soil_grid
 
@@ -165,9 +164,14 @@ def main(argv=None):
         cfg = cfg0._replace(richards=cfg0.richards._replace(ice_impedance_exponent=e))
         drain = runoff = 0.0
         resid_max = 0.0
-        for s0, s1, lh in _run_arm(d, st0, cfg, idx, n_steps, dt):
-            dr = np.asarray(s1.runoff_subsurface); ro = np.asarray(s1.runoff_surface)
-            r = budget_residual(storage(s0), storage(s1), 0.0, lh / constants.L_v, ro, dr, dt)
+        for s0, s1, evap, fw in _run_arm(d, st0, cfg, idx, n_steps, dt):
+            # phase-aware vapour flux (sublimation at L_s) and the tile's total
+            # runoff to the ocean (surface incl. snowmelt + drainage)
+            dr = np.asarray(s1.runoff_subsurface)
+            ro = fw - dr
+            r = budget_residual(storage(s0), storage(s1), 0.0, evap, ro, dr, dt)
+            if not np.all(np.isfinite(r[mask])):
+                raise SystemExit(f"non-finite water budget in arm e={e:g}")
             resid_max = max(resid_max, float(np.max(np.abs(r[mask]))))
             drain += area_mean(dr * dt, w); runoff += area_mean(ro * dt, w)
         res[f"e={e:g}"] = dict(drainage_mm=drain, surface_runoff_mm=runoff,

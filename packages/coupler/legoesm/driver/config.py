@@ -2140,6 +2140,13 @@ class ExperimentConfig(NamedTuple):
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
                 "multilayer soil has a freeze/thaw scheme — the knob would be "
                 "silently inert.")
+        if (self.land_soil_ice_impedance_exponent
+                != type(self)._field_defaults["land_soil_ice_impedance_exponent"]
+                and not self.use_multilayer_land):
+            errors.append(
+                "land_soil_ice_impedance_exponent requires use_multilayer_land: "
+                "only the multilayer soil has frozen-soil hydraulics — the knob "
+                "would be silently inert.")
         if not (0.0 <= self.land_soil_ice_impedance_exponent <= 10.0):
             errors.append(
                 "land_soil_ice_impedance_exponent must be finite in [0, 10] "

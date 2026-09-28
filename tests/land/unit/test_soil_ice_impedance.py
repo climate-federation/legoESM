@@ -88,7 +88,10 @@ def test_log_form_matches_clm_multiplier_unfloored():
 def test_log_form_floored_pair_returns_the_floor():
     K = jnp.full(3, 1e-30, dtype=jnp.float32)
     z = jnp.zeros(3, dtype=jnp.float32)
-    assert np.allclose(np.asarray(interblock_K(K, K, z, z)), 1e-20, rtol=1e-5)
+    got = np.asarray(interblock_K(K, K, z, z))
+    np.testing.assert_allclose(got, 1e-20, rtol=1e-5, atol=0)
+    with pytest.raises(AssertionError):   # an underflowed zero would not pass
+        np.testing.assert_allclose(np.zeros(3), 1e-20, rtol=1e-5, atol=0)
     with pytest.raises(ValueError, match="both"):
         interblock_K(K, K, z, None)
 
@@ -228,12 +231,32 @@ def test_thawed_column_is_unimpeded(monkeypatch):
 
 
 def test_roots_and_evaporation_unchanged_by_impedance(monkeypatch):
-    """D6: only conductivity is impeded; the soil water sink and top flux are not."""
+    """D6, land step: the soil water sink and top flux reaching Richards do not
+    depend on the impedance."""
     T = constants.T_freeze - 3.0
     _, a0 = _spy_step(monkeypatch, _cfg(True, e=0.0), T)
     _, a6 = _spy_step(monkeypatch, _cfg(True, e=6.0), T)
     for i in (0, 1):  # flux_top, sink
         assert jnp.array_equal(a0[i], a6[i])
+
+
+def test_evaporation_and_root_uptake_delivered_from_frozen_soil():
+    """D6, Richards: with no pond, bare-soil evaporation and root uptake are
+    withdrawn in full from a fully impeded column (the surface cell's supply cap
+    carries evaporation, not the impeded conductance)."""
+    hyd = SoilHydraulicsConfig()
+    grid = make_soil_grid()
+    nl = grid.n_layers
+    sink = jnp.zeros((1, nl)).at[:, 1:4].set(2e-8)
+    evap = -3e-8                                   # m/s, upward
+    rcfg = RichardsConfig(bottom_bc="zero_flux")
+    want = _DT * (evap - float(jnp.sum(sink * grid.dz)))
+    for li in (None, _log_imp(nl, 1.0)):
+        out = _run(hyd, rcfg, li, n_steps=1, flux=evap, theta_frac=0.6, sink=sink)
+        _, _, th0, _ = _column(hyd, 0.6)
+        dW = float(jnp.sum((out["theta"] - th0) * grid.dz))
+        assert out["pond"] == 0.0 and out["runoff"] == 0.0
+        assert dW == pytest.approx(want, rel=1e-6)
 
 
 def test_zero_porosity_cell_gets_no_ice():
@@ -278,7 +301,9 @@ def test_gradient_partially_frozen_matches_fd():
 
 def test_float32_frozen_dry_column_under_jit_scan():
     hyd = SoilHydraulicsConfig()
-    grid = make_soil_grid()
+    g64 = make_soil_grid()
+    grid = g64._replace(**{k: jnp.asarray(getattr(g64, k), jnp.float32)
+                           for k in ("dz", "dz_interface", "z_node", "z_interface")})
     nl = grid.n_layers
     cfg = _cfg(True)
     th0 = jnp.full((2, nl), 0.05, dtype=jnp.float32)  # dry
@@ -299,6 +324,13 @@ def test_float32_frozen_dry_column_under_jit_scan():
         psi0 = psi_from_theta(th0, hyd).astype(jnp.float32)
         (psi, th), _ = jax.lax.scan(body, (psi0, th0), None, length=8)
         return jnp.sum(th)
+
+    # the solve itself runs in float32 (no promotion from the grid or factor)
+    o = solve_richards(psi_from_theta(th0, hyd).astype(jnp.float32), th0, grid, hyd,
+                       cfg.richards, jnp.zeros(2, jnp.float32),
+                       jnp.zeros((2, nl), jnp.float32), _DT,
+                       log_impedance=soil_ice_log_impedance(T, th0, cfg).astype(jnp.float32))
+    assert o.theta_new.dtype == jnp.float32 and o.runoff_subsurface.dtype == jnp.float32
 
     val = jax.jit(roll)(T, jnp.float32(6.0))
     gT, ge = jax.jit(jax.grad(roll, argnums=(0, 1)))(T, jnp.float32(6.0))
