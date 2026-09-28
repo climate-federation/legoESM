@@ -2640,6 +2640,18 @@ def barotropic_substeps_latlon_cgrid(
         # bit-unchanged because those are the same arguments they already got
         # by default.  ``eta_dyn`` is the NOW eta the replacement thickness
         # ``_h_k_corr`` was built from, so the two operands stay one state.
+        #
+        # WHERE THIS IS CONSUMED, because it is not obvious from here: on a
+        # card whose ``momentum_time_integrator`` is ``rk3_ws`` -- GYRE and
+        # both NEMO tanks -- the velocity this function returns is REPLACED
+        # downstream by ``rk3_stage_barotropic_correction``, which corrects
+        # the 3-D velocity against the CARRIED ``uu_b``/``vv_b`` instead
+        # (``ocean_model_latlon_cgrid.py``, the stage-3 correction block).
+        # So this reference is computed but unconsumed there, and a 1e-6
+        # relative perturbation of it moves no row of the certified GYRE
+        # ladder (measured; see the PR #1802 final re-certification
+        # receipt).  The cards that DO consume it are the ones on a
+        # different momentum integrator, which is where decision 67 bites.
         U_bar_corr, V_bar_corr = _depth_average_to_faces(
             u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,
             seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
