@@ -25,15 +25,18 @@ SV = 1.0e6
 
 def ours(path: str) -> dict:
     d = np.load(path)
-    F = np.asarray(d["mass_flux_v"])          # (n_lat+1, n_lon, nlev)
+    # Window mean (--state-accumulate) when present -- NEMO vocetr_eff is a
+    # 5-day mean -- else the instantaneous snapshot flux.
+    key = "mass_flux_v_mean" if "mass_flux_v_mean" in d.files else "mass_flux_v"
+    F = np.asarray(d[key])                    # (n_lat+1, n_lon, nlev)
     dx = np.asarray(d["dx_v"])                # (n_lat+1, n_lon)
     v = np.asarray(d["v"])
     if not (np.isfinite(F).all() and np.isfinite(v).all()):
         raise SystemExit(f"{path}: non-finite mass_flux_v / v")
     tr = F[-1] * dx[-1][:, None]              # m^3/s per (i, k), fold line
     # cyclic halo columns 0, n-1 duplicate interior ones: exclude
-    tr = tr[1:-1]
-    return dict(gross_north_Sv=tr[tr > 0].sum() / SV,
+    tr = tr[1:-1].sum(axis=1)                 # per column (depth-summed)
+    return dict(field=key, gross_north_Sv=tr[tr > 0].sum() / SV,
                 net_Sv=tr.sum() / SV,
                 max_abs_v_fold=float(np.abs(v[-1]).max()),
                 time_days=float(d["time_days"]) if "time_days" in d else None)
@@ -42,7 +45,7 @@ def ours(path: str) -> dict:
 def nemo(path: str, rec: int = 0) -> dict:
     import netCDF4 as nc
     with nc.Dataset(path) as ds:
-        tr = np.ma.filled(ds["vocetr_eff"][rec, :, FOLD_ROW_NEMO, :], 0.0).T
+        tr = np.ma.filled(ds["vocetr_eff"][rec, :, FOLD_ROW_NEMO, :], 0.0).sum(0)
         v = np.ma.filled(ds["vo"][rec, :, FOLD_ROW_NEMO, :], 0.0)
     return dict(gross_north_Sv=tr[tr > 0].sum() / SV, net_Sv=tr.sum() / SV,
                 max_abs_v_fold=float(np.abs(v).max()), rec=rec)

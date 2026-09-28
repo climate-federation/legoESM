@@ -6458,7 +6458,9 @@ class _SurfaceFluxAccumulator:
     # Plain window means of the velocities too (NEMO's uo/vo/wo are 5-day
     # means; an instantaneous w against them read 6x at day 5). Staggered
     # shapes, so no thickness weighting; skipped when the state lacks one.
-    _STATE_VEL_FIELDS = ("u", "v", "mass_flux_w")
+    # mass_flux_v: the tracer-advecting meridional transport per unit width,
+    # whose window mean is what NEMO's vocetr_eff is (read-only extra key).
+    _STATE_VEL_FIELDS = ("u", "v", "mass_flux_w", "mass_flux_v")
 
     def add(self, sf, mld=None, state=None, dz=None):
         """Accumulate one step. ``mld`` and ``state`` are optional and share

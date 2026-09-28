@@ -32,6 +32,7 @@ def test_fold_line_transport_ours(tmp_path):
              time_days=np.asarray(2.0))
     r = ft.ours(str(tmp_path / "s.npz"))
     assert r["gross_north_Sv"] == pytest.approx(0.6)
+    assert r["field"] == "mass_flux_v"
     assert r["net_Sv"] == pytest.approx(0.0)
     assert r["max_abs_v_fold"] == pytest.approx(0.4)
     F[-1, 3, 1] = np.nan

@@ -389,12 +389,14 @@ def test_velocity_window_means_are_plain_means_on_their_own_staggering():
                                    S=SimpleNamespace(data=np.zeros((2, 2, 1))),
                                    u=SimpleNamespace(data=np.full((2, 3, 1), k)),
                                    v=SimpleNamespace(data=np.full((3, 2, 1), 2 * k)),
-                                   mass_flux_w=np.full((2, 2, 2), 3 * k))
+                                   mass_flux_w=np.full((2, 2, 2), 3 * k),
+                                   mass_flux_v=np.full((3, 2, 1), 5 * k))
     acc.add(None, state=st(1.0)); acc.add(None, state=st(3.0))
     out = acc.drain()
     np.testing.assert_allclose(out["u_mean"], 2.0); assert out["u_mean"].shape == (2, 3, 1)
     np.testing.assert_allclose(out["v_mean"], 4.0); assert out["v_mean"].shape == (3, 2, 1)
     np.testing.assert_allclose(out["mass_flux_w_mean"], 6.0)
+    np.testing.assert_allclose(out["mass_flux_v_mean"], 10.0)
     # a state without velocities still works and writes no velocity key
     acc.add(None, state=SimpleNamespace(T=SimpleNamespace(data=np.ones((1, 1, 1))),
                                         S=SimpleNamespace(data=np.ones((1, 1, 1)))))
