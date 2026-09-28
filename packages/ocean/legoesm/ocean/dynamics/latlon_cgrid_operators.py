@@ -3799,9 +3799,11 @@ def nemo_fmask_shlat_3d(is_active_3d, grid, rn_shlat: float) -> jnp.ndarray:
     model's stagger vertex ``(j, i)`` is the SW corner of T ``(j, i)``, so those
     faces are u ``(j-1, i)``, u ``(j, i)``, v ``(j, i-1)``, v ``(j, i)``.
 
-    rn_shlat = 0 free-slip, 2 no-slip.  ponytail: the north-fold vertex row
-    takes its faces from this side only (fold v-faces are walls in
-    :func:`compute_face_masks_3d`); NEMO lbc_lnk copies the partner's value.
+    rn_shlat = 0 free-slip, 2 no-slip.  ponytail: on legacy layouts the
+    north-fold vertex row takes its faces from this side only (fold v-faces
+    are walls in :func:`compute_face_masks_3d`); NEMO lbc_lnk copies the
+    partner's value.  On the F-pivot layout the fold-line row reads the open
+    fold v-faces and the U ghost row.
 
     Returns ``(n_lat+1, n_lon+1, nlev)`` float.
     """
@@ -3810,7 +3812,11 @@ def nemo_fmask_shlat_3d(is_active_3d, grid, rn_shlat: float) -> jnp.ndarray:
                         in_axes=-1, out_axes=-1)(a)
     um, vm = compute_face_masks_3d(is_active_3d, grid)
     zrow = jnp.zeros_like(um[:1])
-    um_p = jnp.concatenate([zrow, um, zrow], axis=0)          # (n_lat+2, n_lon+1, nk)
+    # F-pivot: the fold-line vertex row's northern u-face is the U ghost
+    # (mask parity +1); every other layout keeps the wall row.
+    nrow = (fpivot_ghost_rows(um, grid.fold, point="U", sign=1.0)
+            if fpivot_active(grid) else zrow)
+    um_p = jnp.concatenate([zrow, um, nrow], axis=0)          # (n_lat+2, n_lon+1, nk)
     touch_u = jnp.maximum(um_p[:-1], um_p[1:])                  # u(j-1,i), u(j,i)
     touch_v = jnp.maximum(jnp.roll(vm, 1, axis=1), vm)          # v(j,i-1), v(j,i)
     touch_v = jnp.concatenate([touch_v, touch_v[:, 0:1]], axis=1)

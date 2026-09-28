@@ -215,3 +215,18 @@ def test_fold_line_vertex_thickness_is_perm_f_symmetric(scheme):
     np.testing.assert_allclose(top, top[PF], rtol=1e-14, atol=0)
     mv = np.asarray(min_cell_to_vertex(jnp.asarray(h), grid))[-1, :-1]
     np.testing.assert_array_equal(mv, mv[PF])
+
+
+def test_noslip_fmask_fold_row_is_perm_f_symmetric():
+    """NEMO rn_shlat fmask on the fold-line vertex row reads faces from both
+    sides of the fold (NEMO lbc_lnk 'F', +1), so it is P_F-symmetric."""
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import nemo_fmask_shlat_3d
+    grid = _grid()
+    rng = np.random.default_rng(11)
+    act = rng.random((N_LAT, N_LON, 3)) > 0.35
+    act[:, 0] = act[:, -2]
+    act[:, -1] = act[:, 1]
+    fm = np.asarray(nemo_fmask_shlat_3d(jnp.asarray(act), grid, 2.0))[-1, :-1]
+    PF = np.asarray(grid.fold.perm_f)
+    assert (fm == 2.0).any()
+    np.testing.assert_array_equal(fm, fm[PF])
