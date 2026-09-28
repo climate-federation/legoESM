@@ -33,7 +33,6 @@ __param_spec__ = {
         "excluded": {
             "B_h_momentum": "default 0 = disabled/off (enable via config, not training)",
             "B_h_tracer": "default 0 = disabled/off (enable via config, not training)",
-            "cfl_dt_estimate": "numerics: solver/CFL/smoothing parameter",
             "cfl_safety": "numerics: solver/CFL/smoothing parameter",
         },
         "params": {
@@ -109,8 +108,7 @@ class BiharmonicConfig(NamedTuple):
     """
     B_h_momentum: float = 0.0   # Biharmonic viscosity [m^4/s]
     B_h_tracer: float = 0.0     # Biharmonic tracer diffusivity [m^4/s]
-    enforce_cfl: bool = False
-    cfl_dt_estimate: float = 3600.0
+    enforce_cfl: bool = True    # Cap B at the explicit limit for the run's dt
     cfl_safety: float = 0.05    # Margin below 1/16 stability bound
     compact_outer: bool = False  # Compact 2Δx-damping outer ∇² (MOM/MPAS del4)
 
