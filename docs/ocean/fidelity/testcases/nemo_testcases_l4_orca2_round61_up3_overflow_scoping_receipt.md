@@ -115,8 +115,13 @@ never fires.
   (`DEBT`, `6.265025088159071e-07`).
 - Call-site census printed rather than asserted: two references in
   `packages/`, both in the same file, one definition and one call.
-- Citation gate on this receipt and on the default receipt, with its own
-  shifted-line plants firing.
+- Citation gate on this receipt (10 citations, PASS) and on the default
+  receipt (274 citations, PASS), its nine built-in plants firing on both.
+- Shifted-line plants on two of this round's own citations,
+  `ocean_pe_latlon_cgrid.py:5229` and `ORCA2_OMIP_L4/EXP00/namelist_cfg:346`:
+  both make the gate FAIL with `SYMBOL-NOT-AT-LINE`. Recorded because a first
+  attempt passed `--plant 3`, which names no citation and was therefore a
+  no-op that proved nothing; that vacuous run is not evidence.
 
 ## Retractions
 
