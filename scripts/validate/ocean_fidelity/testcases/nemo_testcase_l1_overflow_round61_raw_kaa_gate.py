@@ -73,7 +73,8 @@ def _collect(card, state, ordinary_after, momentum, masks,
             masks[field])
         R60.require(row["exact"], f"raw-Kaa observer perturbed {field}")
         rows.append(row)
-    final_u = R60._active(R60._physical_u(ordinary["u"], u_mask), u_mask)
+    final_u = R60._active(
+        R60._physical_u(ordinary_after.u.data, u_mask), u_mask)
     R60.require(
         np.any(final_u.view(np.uint64) != arrays["s3.raw_kaa.u"].view(np.uint64)),
         "raw-Kaa observer is vacuous: it equals postbar U on every active cell")
