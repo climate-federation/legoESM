@@ -73,9 +73,9 @@ def roots(tmp_path, monkeypatch):
     for root in (pinned, calibration, month):
         root.mkdir()
 
-    for root in (calibration, month):
+    for root, producer in ((calibration, "calibration-commit"), (month, "month-commit")):
         (root / "nemo").write_bytes(b"scalar-math-nemo")
-        (root / "producer_commit.txt").write_text("commit-under-test\n")
+        (root / "producer_commit.txt").write_text(f"{producer}\n")
         (root / "input.dat").write_bytes(b"input")
         _manifest(root, "input_files.sha256", ("input.dat",))
         (root / "namelist_ice_cfg").write_text("&nampar\n jpl=1\n/\n")
@@ -127,7 +127,8 @@ def test_admits_calibrated_month_record(roots):
         pinned,
         calibration,
         month,
-        expect_commit="commit-under-test",
+        expect_calibration_commit="calibration-commit",
+        expect_month_commit="month-commit",
     )
     assert report["status"] == "PASS_MONTH_RECORD"
     assert report["calibration"]["status"] == "BIT_EXACT"
@@ -148,7 +149,8 @@ def test_plants_refuse(roots, plant):
             pinned,
             calibration,
             month,
-            expect_commit="commit-under-test",
+            expect_calibration_commit="calibration-commit",
+            expect_month_commit="month-commit",
             plant=plant,
         )
 
@@ -159,7 +161,7 @@ def test_calibration_mode_does_not_require_month(roots):
         pinned,
         calibration,
         None,
-        expect_commit="commit-under-test",
+        expect_calibration_commit="calibration-commit",
         mode="calibration",
     )
     assert report["status"] == "PASS_MONTH_CALIBRATION"
@@ -175,5 +177,25 @@ def test_nonfinite_ocean_payload_refuses(roots):
             pinned,
             calibration,
             month,
-            expect_commit="commit-under-test",
+            expect_calibration_commit="calibration-commit",
+            expect_month_commit="month-commit",
+        )
+
+
+@pytest.mark.parametrize(
+    ("calibration_commit", "month_commit", "root"),
+    (
+        ("wrong-calibration", "month-commit", "calibration"),
+        ("calibration-commit", "wrong-month", "month"),
+    ),
+)
+def test_each_producer_commit_is_checked(roots, calibration_commit, month_commit, root):
+    pinned, calibration, month = roots
+    with pytest.raises(gate.GateError, match=f"producer commit mismatch: .*{root}"):
+        gate.validate_record(
+            pinned,
+            calibration,
+            month,
+            expect_calibration_commit=calibration_commit,
+            expect_month_commit=month_commit,
         )

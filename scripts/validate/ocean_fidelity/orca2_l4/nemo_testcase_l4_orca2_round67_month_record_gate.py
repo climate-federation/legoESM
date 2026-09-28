@@ -209,15 +209,22 @@ def validate_month(month: Path, *, plant: str = "none") -> dict:
 
 
 def validate_record(pinned: Path, calibration: Path, month: Path | None, *,
-                    expect_commit: str, mode: str = "full", plant: str = "none") -> dict:
+                    expect_calibration_commit: str,
+                    expect_month_commit: str | None = None,
+                    mode: str = "full", plant: str = "none") -> dict:
     """Validate calibration alone or the complete acquired record."""
     require(mode in ("calibration", "full"), f"unknown mode {mode}")
     require(plant in PLANTS, f"unknown plant {plant}")
-    for root in (calibration,) if month is None else (calibration, month):
+    expected_commits = [(calibration, expect_calibration_commit)]
+    if month is not None:
+        require(expect_month_commit is not None,
+                "full admission requires an expected month producer commit")
+        expected_commits.append((month, expect_month_commit))
+    for root, expected_commit in expected_commits:
         require((root / "nemo").is_file(), f"missing executable: {root}/nemo")
         require(sha256(root / "nemo") == EXPECTED_BINARY_SHA256,
                 f"unexpected scalar-math executable: {root}/nemo")
-        require((root / "producer_commit.txt").read_text().strip() == expect_commit,
+        require((root / "producer_commit.txt").read_text().strip() == expected_commit,
                 f"producer commit mismatch: {root}")
         require(sha256(root / "input_files.sha256") == EXPECTED_INPUT_SHA256,
                 f"input manifest pin changed: {root}")
@@ -259,7 +266,8 @@ def main() -> int:
     parser.add_argument("--pinned", type=Path, required=True)
     parser.add_argument("--calibration", type=Path, required=True)
     parser.add_argument("--month", type=Path)
-    parser.add_argument("--expect-commit", required=True)
+    parser.add_argument("--expect-calibration-commit", required=True)
+    parser.add_argument("--expect-month-commit")
     parser.add_argument("--mode", choices=("calibration", "full"), default="full")
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
@@ -269,7 +277,8 @@ def main() -> int:
             args.pinned,
             args.calibration,
             args.month,
-            expect_commit=args.expect_commit,
+            expect_calibration_commit=args.expect_calibration_commit,
+            expect_month_commit=args.expect_month_commit,
             mode=args.mode,
             plant=args.plant,
         )

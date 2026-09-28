@@ -13,8 +13,8 @@ trap refuse_unexpected ERR
 
 readonly MODE=${1:---run}
 case "$MODE" in
-  --run|--preflight-only|--admit-existing) ;;
-  *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing]\n' "$0" >&2; exit 64 ;;
+  --run|--resume-month|--preflight-only|--admit-existing) ;;
+  *) printf 'REFUSE: usage: %s [--run|--resume-month|--preflight-only|--admit-existing]\n' "$0" >&2; exit 64 ;;
 esac
 
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -31,6 +31,7 @@ readonly BINARY_SHA=c4907e476cf3969052b44c5c7fa966f3dac493e8cfb563f6554c8f3a2718
 readonly DECK_SHA=51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9
 readonly INPUT_SHA=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
 readonly ICE_CFG_SHA=6b647863137b518b95ff97f83975d9afcb3944b7f6e8d63e45a05f494f5edc89
+readonly CALIBRATION_COMMIT=950b1e4c281ff3677b4613bd5987cf932e1cd6a9
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
@@ -130,10 +131,12 @@ if [[ "$MODE" == --preflight-only ]]; then
 fi
 
 admit() {
+  local calibration_commit=$1 month_commit=$2
   local plant
   for plant in calibration-ulp missing-shard hidden-deck-delta; do
     if "$PY" "$GATE" --pinned "$PINNED" --calibration "$CALIBRATION" \
-      --month "$MONTH" --expect-commit "$COMMIT" --plant "$plant" \
+      --month "$MONTH" --expect-calibration-commit "$calibration_commit" \
+      --expect-month-commit "$month_commit" --plant "$plant" \
       >"$EVIDENCE/${plant}_plant.log" 2>&1; then
       printf 'REFUSE: %s plant stayed green\n' "$plant" >&2
       exit 72
@@ -141,7 +144,8 @@ admit() {
     grep -q 'STATUS PLANT-FIRED' "$EVIDENCE/${plant}_plant.log"
   done
   "$PY" "$GATE" --pinned "$PINNED" --calibration "$CALIBRATION" \
-    --month "$MONTH" --expect-commit "$COMMIT" \
+    --month "$MONTH" --expect-calibration-commit "$calibration_commit" \
+    --expect-month-commit "$month_commit" \
     --output "$EVIDENCE/month_record_admission.json"
   ( cd "$EVIDENCE" && sha256sum month_record_admission.json *_plant.log \
       "$CALIBRATION"/ORCA2_00000010_restart*.nc \
@@ -153,7 +157,7 @@ if [[ "$MODE" == --admit-existing ]]; then
   [[ -d "$CALIBRATION" && -d "$MONTH" ]] || {
     printf 'REFUSE: existing calibration or month target is absent\n' >&2; exit 68;
   }
-  admit
+  admit "$CALIBRATION_COMMIT" "$COMMIT"
   exit 0
 fi
 
@@ -219,12 +223,28 @@ run_target() {
   }
 }
 
+if [[ "$MODE" == --resume-month ]]; then
+  [[ -d "$CALIBRATION" ]] || {
+    printf 'REFUSE: completed calibration target is absent\n' >&2; exit 68;
+  }
+  [[ ! -e "$MONTH" ]] || {
+    printf 'REFUSE: month target already exists; use --admit-existing\n' >&2; exit 68;
+  }
+  "$PY" "$GATE" --pinned "$PINNED" --calibration "$CALIBRATION" \
+    --expect-calibration-commit "$CALIBRATION_COMMIT" --mode calibration \
+    --output "$EVIDENCE/calibration_admission.json"
+  stage "$MONTH" 240
+  run_target "$MONTH"
+  admit "$CALIBRATION_COMMIT" "$COMMIT"
+  exit 0
+fi
+
 stage "$CALIBRATION" 10
 run_target "$CALIBRATION"
 "$PY" "$GATE" --pinned "$PINNED" --calibration "$CALIBRATION" \
-  --expect-commit "$COMMIT" --mode calibration \
+  --expect-calibration-commit "$COMMIT" --mode calibration \
   --output "$EVIDENCE/calibration_admission.json"
 
 stage "$MONTH" 240
 run_target "$MONTH"
-admit
+admit "$COMMIT" "$COMMIT"
