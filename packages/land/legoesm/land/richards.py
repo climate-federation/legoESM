@@ -55,7 +55,7 @@ __param_spec__ = {
             "0.5), but as an explicit config choice, not an auto-seeded trainable — so tune "
             "it by setting an interior S_e_fc in config, not from the 0.0 field default. "
             "(Aligning the field default to 0.5 would make it collector-tunable but changes "
-            "~15 bare RichardsConfig() call sites that rely on the 0.0=off default, so it is "
+            "the bare RichardsConfig() sites (tests only) relying on the 0.0=off default, so it is "
             "left a config knob.)",
         },
         "params": {},
