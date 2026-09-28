@@ -2620,17 +2620,32 @@ def barotropic_substeps_latlon_cgrid(
         _h_k_corr = compute_layer_thickness(
             _h_eta_corr, H_bathy, z_coord,
             min_water_column_m=config.min_water_column_m).astype(_dt)
-        # OPEN, DELIBERATE ASYMMETRY (PR #1802 review, finding B2ii): this
-        # REPLACEMENT reference keeps the shared min-rule/generic reduction
-        # even on a card whose window SEED uses the NEMO ssh-average face
-        # depth and the literal mesh evaluation.  It is left that way on
-        # purpose: the literal seed evaluation is a different code path with
-        # its own operands (eta_dyn / H_bathy / area / z_coord), so adopting
-        # it here would change every certified NEMO trajectory, and that is an
-        # operator decision, not a silent one.  Do not "fix" this in passing —
-        # moving it re-certifies GYRE, ORCA2 and DINO.
+        # DECISION 67 (user, 2026-09-28; PR #1802 review finding B2ii, which
+        # left this as an OPEN asymmetry for an operator to decide).  The
+        # quantity this REPLACEMENT reference stands for is NEMO's own
+        # barotropic velocity ``uu_b(Kmm)`` -- the thing the RK3 stage
+        # subtracts from the 3-D velocity
+        # (``stprk3_stg.f90:276``: ``zub = un_adv*(r1_hu_0/(1+r3u(Kmm)))
+        # - uu_b(ji,jj,Kmm)``) -- and NEMO forms that velocity by dividing the
+        # accumulated transport by the e1e2-weighted SSH-AVERAGED face depth,
+        # not by a min-rule face column:
+        #   ``zzsshu = r1_2 * r1_e1e2u(ji,jj)
+        #              * ( e1e2t(ji  ,jj) * pssh(ji  ,jj,Kaa)
+        #                + e1e2t(ji+1,jj) * pssh(ji+1,jj,Kaa) ) * ssumask``
+        #   ``puu_b(ji,jj,Kaa) = puu_b(ji,jj,Kaa)
+        #                        / ( hu_0 + zzsshu + 1 - ssumask )``
+        # (``dynspg_ts.f90:835-842``).  The card's own face-thickness
+        # convention is therefore threaded through here, exactly as it is at
+        # the window seed above; ``min_rule`` / ``generic`` cards are
+        # bit-unchanged because those are the same arguments they already got
+        # by default.  ``eta_dyn`` is the NOW eta the replacement thickness
+        # ``_h_k_corr`` was built from, so the two operands stay one state.
         U_bar_corr, V_bar_corr = _depth_average_to_faces(
             u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,
+            seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
+            eta_dyn=_eta_corr, H_bathy=H_bathy, area=_area, z_coord=z_coord,
+            legacy_seed_min_rule_faces=bool(
+                _nemo_legacy_seed_faces_test_override or False),
         )
     else:
         U_bar_corr, V_bar_corr = U_bar, V_bar

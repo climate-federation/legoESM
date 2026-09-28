@@ -557,6 +557,12 @@ FILES = {
         "/round19_oracle_v2_external/ocean.output"),
     "GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90":
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90",
+    # PR #1802 final round: the barotropic velocity NEMO subtracts from the
+    # 3-D velocity, and the surface mixing-length anchor, on the same build.
+    "GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90":
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90",
+    "GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90":
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90",
     "trabbl.F90": _OCE / "TRA/trabbl.F90",
     "MY_SRC/stprk3.F90": LOCK / "MY_SRC/stprk3.F90",
     "domain.F90": _OCE / "DOM/domain.F90",
@@ -2762,6 +2768,28 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:352-378': [
         'IF( ln_bt_fw ) THEN                 ! FORWARD integration: start from NOW fields',
         'vn_adv(:,:)     = 0._wp', 27],
+    # --- PR #1802 final round: decisions 66 and 67 -----------------------
+    # D67: the e1e2-weighted SSH-average face depth NEMO divides the
+    # accumulated barotropic transport by, to form puu_b/pvv_b(Kaa).
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90:835-842': [
+        'zzsshu = r1_2 * r1_e1e2u(ji,jj) * ( e1e2t(ji  ,jj) * pssh(ji  ,jj,Kaa)',
+        'pvv_b(ji,jj,Kaa) = pvv_b(ji,jj,Kaa) / ( hv_0(ji,jj) + zzsshv + 1._wp '
+        '- ssvmask(ji,jj) )',
+        8],
+    # D67: the consumer -- the RK3 stage subtracts uu_b(Kmm), the velocity
+    # the statement above produced, from the 3-D velocity.
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90:276':
+        'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kmm))) '
+        '- uu_b(ji,jj,Kmm)',
+    # D66: the masked ln_mxl0 surface stress, and its floor.
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:606':
+        'zmxlm(ji,1) =  zraug * taum(ji,jj) * tmask(ji,jj,1)',
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:610':
+        'zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )',
+    # D66: ln_mxl0 overwrites the namelist rn_mxl0 with the derived rmxl_min,
+    # so NEMO's own anchor floor is rmxl_min, not rn_mxl0=0.04.
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:831':
+        ('rn_mxl0 = rmxl_min', 2),
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:824-827': [
         'IF(.NOT.ll_bt_av ) THEN', 'pssh (:,:,Kaa) = ssha_e(:,:)', 4],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:456-480': [
