@@ -239,13 +239,35 @@ def _analyze_u(
     require(int(np.count_nonzero(boundary | interior))
             == flux_row["baseline_n_unequal"],
             "face-flux mismatch partition does not close")
+
+    def _partition_score(name: str, domain: np.ndarray) -> dict:
+        if np.any(domain):
+            return _score(name, oracle_flux[domain], production_in_nemo_units[domain])
+        return {
+            "name": name,
+            "status": "BIT_EXACT",
+            "exact": True,
+            "n": 0,
+            "baseline_n_unequal": 0,
+            "n_unequal": 0,
+            "absolute_max": 0.0,
+            "relative_max_nonzero_reference": None,
+            "row_scale_ulp_max_nonzero_reference": None,
+            "zero_reference_to_nonzero": 0,
+            "signed_zero_only": 0,
+            "plant": False,
+            "planted_flat_index": None,
+        }
+
     mismatch_partition = {
-        "boundary_masked_stencil": _score(
+        "boundary_masked_stencil": _partition_score(
             "u.t_face_flux.boundary_masked_stencil",
-            oracle_flux[boundary], production_in_nemo_units[boundary]),
-        "wet_interior_association": _score(
+            boundary,
+        ),
+        "wet_interior_association": _partition_score(
             "u.t_face_flux.wet_interior_association",
-            oracle_flux[interior], production_in_nemo_units[interior]),
+            interior,
+        ),
     }
 
     return {
