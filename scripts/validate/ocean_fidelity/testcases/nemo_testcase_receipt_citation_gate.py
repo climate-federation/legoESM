@@ -106,6 +106,12 @@ FILES = {
         _OVERFLOW_R50PAIR_COMPILED / "dynzdf.f90"),
     "OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90": (
         _OVERFLOW_R56UP3_COMPILED / "dynadv_up3.f90"),
+    # ORCA2 round 61: the two decks themselves, so the card-scoping claim
+    # cites the switch each card resolves rather than describing it.
+    "ORCA2_OMIP_L4/EXP00/namelist_cfg": (
+        NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg"),
+    "OVERFLOW_OMIP_L1/EXP00/namelist_cfg": (
+        NEMO / "tests/OVERFLOW_OMIP_L1/EXP00/namelist_cfg"),
     "OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90": (
         _OVERFLOW_R62ZDF_COMPILED / "dynzdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
@@ -893,6 +899,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 61: which card selects which momentum advection ---
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:346': 'ln_dynadv_vec = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:352': 'ln_dynvor_een = .true.',
+    'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:83': 'ln_dynadv_up3 = .true.',
+    'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
+    'ocean_pe_latlon_cgrid.py:5229': ('if _mom_adv == "flux_form":', 2),
+    'ocean_pe_latlon_cgrid.py:5247': (
+        '_bc_horizontal_momentum_advection_flux_form(', 2),
+    'nemo_testcase_recipe.py:1599':
+        'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
         ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
