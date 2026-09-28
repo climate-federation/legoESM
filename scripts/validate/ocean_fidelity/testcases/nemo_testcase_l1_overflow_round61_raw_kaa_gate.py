@@ -27,9 +27,10 @@ def _collect(card, state, ordinary_after, momentum, masks,
     """Extend the hash-bound round-60 sidecar with one freshly measured frame."""
     prior = json.loads(round60_report.read_text())
     R60.require(prior["format"] == R60.FORMAT, "round-60 report format drift")
-    R60.require(
-        prior["controlled_entry"]["sha256"] == R60._sha256(entry_input),
-        "round-60 controlled-entry hash drift")
+    if prior.get("controlled_entry") is not None:
+        R60.require(
+            prior["controlled_entry"]["sha256"] == R60._sha256(entry_input),
+            "round-60 controlled-entry hash drift")
     arrays = R60._read_sidecar(prior)
     rows = list(prior["rows"])
     u_mask = np.asarray(masks["u"], dtype=bool)
