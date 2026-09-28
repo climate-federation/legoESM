@@ -261,12 +261,16 @@ no model behaviour.
    - (1) keep the ratchet exactly as it is on every row, and accept that no
      UP3 statement lands on OVERFLOW until the `kt = 2` owner is closed;
    - (2) read the ratchet on `DEBT` rows as a registered ratio against the
-     row's own residual, admitting a change whose effect is a stated fraction
-     of that residual;
+     row's own residual. If this is chosen, it must be the SAME-CELL ratio,
+     not the row-maximum one: on the row statistic this candidate looks
+     uniformly small (worst 0.31), while cell by cell 13 of its 20 rows
+     contain cells moving by more than their own residual, two of them at or
+     above 1.0. A row-maximum admission rule would let those through unseen;
    - (3) close the `kt = 2` `T`/`u` owner first, re-certify the tank, then
      apply the unchanged ratchet to a record it can actually discriminate.
 
    My pick is **(3)**: it changes no threshold, it follows the lane's own
    first-non-bit-statement discipline, and it makes the bar meaningful again
    instead of loosening it. Option (2) is a threshold change and is not taken
-   here.
+   here; both reviewers independently flagged that the row-maximum ratio is
+   too weak to carry it, which is a second reason not to pick it today.
