@@ -964,6 +964,27 @@ def test_nemo_ws_stage2_raw_exposure_precedes_mean_replacement():
         np.asarray(raw.v.data), np.asarray(corrected.v.data))
 
 
+def test_nemo_ws_stage3_raw_exposure_is_post_zdf_pre_barotropic():
+    """The raw-Kaa seam is passive and precedes stage-3 mean replacement."""
+    card, entry = _tilted_entry_after_one_step()
+    ordinary = _lock_model().step(entry, dt=card.dt_s)
+    raw = _lock_model(model_module._NEMOWSRK3TestHooks(
+        expose_stage3_raw_momentum=True)).step(entry, dt=card.dt_s)
+
+    assert float(np.max(np.abs(
+        np.asarray(raw.u.data) - np.asarray(ordinary.u.data)))) > 1.0e-12
+    np.testing.assert_array_equal(np.asarray(raw.T.data), np.asarray(ordinary.T.data))
+    np.testing.assert_array_equal(np.asarray(raw.S.data), np.asarray(ordinary.S.data))
+    np.testing.assert_array_equal(
+        np.asarray(raw.eta.data), np.asarray(ordinary.eta.data))
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _lock_model(model_module._NEMOWSRK3TestHooks(
+            expose_stage3_raw_momentum=True,
+            expose_stage3_momentum_rhs="post_ldf",
+        ))
+
+
 def _lock_model(hooks=None):
     card = build_lock_exchange_zco_card()
     return model_module.LatLonCGridOceanModel(

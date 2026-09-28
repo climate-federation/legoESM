@@ -1270,6 +1270,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # of the stage-3 divergence.  The ordinary step still completes before
     # either array is substituted into the returned diagnostic state.
     expose_stage3_momentum_rhs: str = ""
+    # WRITE-only stage-3 raw-Kaa gauge.  Publish the completed implicit
+    # vertical-mixing result immediately before the deferred barotropic
+    # replacement (stprk3_stg.F90:430-448).  The ordinary step and replacement
+    # still complete before the captured U/V are placed in the returned state.
+    expose_stage3_raw_momentum: bool = False
     # Private diagnostic controls for WS-RK3 stage-1 source boundaries.
     # Round 119's tuple drives compiled HPG -> LDF -> VOR -> KEG -> ZAD;
     # optional KEG fields are Round-120 arms.  Round 121 may replace only W at
@@ -2767,6 +2772,19 @@ class LatLonCGridOceanModel:
                 or self._nemo_ws_test_hooks.expose_momentum_operator):
             raise ValueError(
                 "expose_stage3_momentum_rhs cannot be combined with another "
+                "momentum exposure: they share the returned u/v slots")
+        _stage3_raw_hook = (
+            self._nemo_ws_test_hooks.expose_stage3_raw_momentum)
+        if not isinstance(_stage3_raw_hook, bool):
+            raise ValueError("expose_stage3_raw_momentum must be a bool")
+        if _stage3_raw_hook and (
+                _stage3_rhs_hook
+                or self._nemo_ws_test_hooks.expose_stage2_momentum_rhs
+                or self._nemo_ws_test_hooks.expose_stage2_raw_momentum
+                or self._nemo_ws_test_hooks.expose_momentum_stage
+                or self._nemo_ws_test_hooks.expose_momentum_operator):
+            raise ValueError(
+                "expose_stage3_raw_momentum cannot be combined with another "
                 "momentum exposure: they share the returned u/v slots")
         _config_input = config or LatLonCGridOceanConfig.from_flat()
         _oracle_endpoint_diagnostic_eos_bypass = bool(
@@ -5839,6 +5857,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_momentum_operator = None
         _nemo_ws_exposed_stage2_rhs = None
         _nemo_ws_exposed_stage3_rhs = None
+        _nemo_ws_exposed_stage3_raw = None
         _nemo_ws_stage_tracers = None
         _nemo_ws_live_stage_states = None; _nemo_ws_live_stage_raw = None; _nemo_ws_live_stage_rhs = None; _nemo_ws_live_baro_geometry = None  # noqa: E501,E702
         _nemo_ws_live_slow_forcing_producer = None
@@ -9314,6 +9333,13 @@ class LatLonCGridOceanModel:
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
 
+        if self._nemo_ws_test_hooks.expose_stage3_raw_momentum:
+            # WRITE-only capture at NEMO's raw-Kaa boundary: the implicit
+            # dyn_zdf result is complete, while the depth-mean replacement
+            # immediately below has not yet run (stprk3_stg.F90:430-448).
+            _nemo_ws_exposed_stage3_raw = (
+                state_new.u.data, state_new.v.data)
+
         if _ws_stage3_correction is not None:
             # NEMO stprk3_stg.F90:440,444-445, applied HERE because :437-446
             # runs after the CALL dyn_zdf at :430.  Same closure stages 1 and
@@ -9465,6 +9491,12 @@ class LatLonCGridOceanModel:
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_rhs_u),
                 v=state_new.v.replace(data=_rhs_v),
+            )
+        if _nemo_ws_exposed_stage3_raw is not None:
+            _raw_u, _raw_v = _nemo_ws_exposed_stage3_raw
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_raw_u),
+                v=state_new.v.replace(data=_raw_v),
             )
         if _nemo_ws_pre_implicit_state is not None:
             # Substitute only after the production step and its conservation
