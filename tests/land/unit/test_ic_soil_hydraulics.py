@@ -243,19 +243,13 @@ _WET_FRONT_PICARD = pytest.mark.xfail(strict=True, raises=AssertionError, reason
     "(-0.56 / +0.53 mm). Separate solver fix."))
 
 
-@pytest.mark.parametrize("wet", [False, pytest.param(True, marks=_WET_FRONT_PICARD)])
-@pytest.mark.parametrize("dtype,atol_mm", [(jnp.float64, 1e-9), (jnp.float32, 1e-2)])
-def test_first_step_after_conversion_closes_the_water_budget(
-        tmp_path, dtype, atol_mm, wet):
-    """Per column, through the solver: storage change + runoff == 0 with no
-    input.  The carried Clapp-Hornberger potential fails the same check."""
+def _first_step(tmp_path, dtype, wet):
     run = soil_hydraulics_stamp("van_genuchten", HYDRAULICS_SOURCE_CLM_MAP,
                                 _param_file(tmp_path))
     src = soil_hydraulics_stamp("clapp_hornberger", HYDRAULICS_SOURCE_SURFDATA_COSBY,
                                 _param_file(tmp_path, "cosby.nc", b"cosby"))
     st0 = _wet_ch_world_state() if wet else _ch_world_state()
     conv, rep = convert_ic_soil_water(st0, _meta(src, True), _vg(), run, _DZ)
-    assert (rep["wet_columns"] > 0) is wet
     h = _vg(dtype)
 
     def residual_mm(st):
@@ -268,8 +262,27 @@ def test_first_step_after_conversion_closes_the_water_budget(
                + np.asarray(o.runoff_subsurface, np.float64)) * 300.0 / 1e3
         return 1e3 * np.abs(w1 - w0 + out)
 
-    assert residual_mm(conv).max() < atol_mm
+    return st0, conv, rep, residual_mm
+
+
+@pytest.mark.parametrize("wet", [False, True])
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+def test_first_step_after_conversion_reports_and_the_carried_potential_leaks(
+        tmp_path, dtype, wet):
+    """The conversion reports the wet rule when it ran; the carried
+    Clapp-Hornberger potential fails the first-step water budget."""
+    st0, conv, rep, residual_mm = _first_step(tmp_path, dtype, wet)
+    assert (rep["wet_columns"] > 0) is wet
     assert residual_mm(st0).max() > 1.0
+
+
+@pytest.mark.parametrize("wet", [False, pytest.param(True, marks=_WET_FRONT_PICARD)])
+@pytest.mark.parametrize("dtype,atol_mm", [(jnp.float64, 1e-9), (jnp.float32, 1e-2)])
+def test_first_step_after_conversion_closes_the_water_budget(
+        tmp_path, dtype, atol_mm, wet):
+    """Per column, through the solver: storage change + runoff == 0 with no input."""
+    _, conv, _, residual_mm = _first_step(tmp_path, dtype, wet)
+    assert residual_mm(conv).max() < atol_mm
 
 
 def test_one_day_keeps_the_deep_water_that_the_carried_potential_loses(tmp_path):
@@ -317,10 +330,15 @@ def test_overflowing_column_goes_to_the_cap_and_the_pond(tmp_path):
     the rest in the surface pond, which the first step keeps up to pond_max
     and runs off beyond it."""
     conv, rep, o = _overflow_first_step(tmp_path)
+    pond_max = RichardsConfig().pond_max
+    h = _vg()
+    se = ((np.asarray(conv.theta_soil) - np.asarray(h.theta_r))
+          / (np.asarray(h.theta_sat) - np.asarray(h.theta_r)))
+    np.testing.assert_allclose(se, 1.0 - _WET_CAP_SE_MARGIN, rtol=1e-12)
     assert rep["pond_columns"] == _NCOL
-    assert np.all(np.asarray(conv.surface_water) > 0.05)   # beyond pond_max
+    assert np.all(np.asarray(conv.surface_water) > pond_max)
     assert np.all(np.isfinite(np.asarray(o.theta_new)))
-    assert np.all(np.asarray(o.surface_water) <= 0.05 + 1e-12)
+    assert np.all(np.asarray(o.surface_water) <= pond_max + 1e-12)
     assert np.all(np.asarray(o.runoff_surface) > 0)
 
 

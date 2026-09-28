@@ -644,9 +644,9 @@ def conform_soil_water(theta, dz, hydraulics, land_mask=None):
        cannot store is returned as ``pond_add`` [m] for the surface water, which
        the first Richards step keeps up to ``pond_max`` and routes the rest to
        surface runoff.  (The cap is policy: the solver's elastic branch could
-       carry the excess as a positive head of order 1e3 m, and a layer left at
-       exactly ``theta_sat`` above unsaturated ones loses water in the
-       Richards step.)
+       carry the excess as a positive head of order 1e3 m, and a layer at
+       exactly ``theta_sat`` sits on the retention curve's clipped saturated
+       branch.)
     2. DRY: layers below the solver's dry floor ``theta_from_psi(psi_dry_floor)``
        are lifted to it, the water taken from the column's other layers in
        proportion to each one's surplus above that floor.  Existing pond water
