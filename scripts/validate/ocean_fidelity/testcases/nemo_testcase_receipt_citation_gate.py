@@ -977,21 +977,21 @@ CITATION_MAP = {
         'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - zws(ji,jk) * pvv(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)',
         162],
     # --- ORCA2 round 63: executing acquisition build, including its writer ---
-    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:139-159': [
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:140-159': [
         '!              !==  RHS : time-stepping of all trends but the implicit one  ==!',
-        '& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 21],
+        ('& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 1), 20],
     'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:165-171': [
         'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
-        '& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 7],
+        ('& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 2), 7],
     'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:172-192': [
         'DO ji = ntsi-( 0), ntei+( 0 )      ! Add bottom/top stress due to barotropic component only',
-        '& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 21],
-    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:343-362': [
-        'DO jk =     2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0 )   !==  First recurrence',
-        'CALL r62_zdf_u_solve(jj,puu(ntsi:ntei,jj,1:jpkm1,Kaa))', 20],
-    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:512-531': [
-        'DO jk =     2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0 )   !==  First recurrence',
-        'CALL r62_zdf_v_solve(jj,pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 20],
+        ('& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 3), 21],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:344-362': [
+        ('zwd(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwd(ji,jk-1)', 1),
+        'CALL r62_zdf_u_solve(jj,puu(ntsi:ntei,jj,1:jpkm1,Kaa))', 19],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:513-531': [
+        ('zwd(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwd(ji,jk-1)', 2),
+        'CALL r62_zdf_v_solve(jj,pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 19],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:492-541': [
         '!                       !==  T-S Tracers  ==!',
         ('CALL r50_tra_finish( ts, ssh, Kaa )', 1), 50],
@@ -3740,7 +3740,7 @@ CITATION_MAP = {
         '_zdf_momentum_observer = (',
         'raise ValueError("zdf_momentum_observer must be callable or None")', 5],
     'ocean_model_latlon_cgrid.py:10956-10960': [
-        '_zc = self.z_coord if z_coord is None else z_coord',
+        ('_zc = self.z_coord if z_coord is None else z_coord', 11),
         '# Argument validation at ENTRY, not inside the drag branch below:', 5],
     'ocean_model_latlon_cgrid.py:11421-11424': [
         'u_new, v_new = state.u.data, state.v.data',

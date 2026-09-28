@@ -43,13 +43,13 @@ move slightly toward, but MIXED does not name an owner.  R63-P3 is therefore
 ## Source order and instrument
 
 The acquired, executing source performs the explicit update at
-`OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:139-159`, the
+`OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:140-159`, the
 barotropic subtraction at
 `OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:165-171`, the explicit
 drag at `OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:172-192`, and
 the U/V solves at
-`OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:343-362` and
-`OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:512-531`.  These are
+`OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:344-362` and
+`OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:513-531`.  These are
 live statements in the acquired test build.
 
 The private hook and constructor guard are at
