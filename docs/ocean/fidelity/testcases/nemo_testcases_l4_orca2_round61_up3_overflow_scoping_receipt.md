@@ -197,6 +197,23 @@ never fires.
 | R61-P4 | **CONFIRMED as preregistered, REFUTED cellwise** | As frozen (row maxima, consistent units): maximum ratio 0.3101, median 0.0027, all below 1. Cellwise the same sentence is FALSE on 13 of the 20 rows, worst cellwise ratio 8.00 at kt6 `T`. The prediction's row-maximum wording is recorded as too strong, and its first numeric table was unit-inconsistent; both are retracted above. |
 | R61-P5 | **CONFIRMED** | The `packages/` tree is byte-identical to base `1bbf37814553`; this round's commits touch documentation and the citation map only. |
 
+## Shared-card gates
+
+No model byte changed, so the GYRE, ORCA2, OVERFLOW, LOCK_EXCHANGE and DINO
+trajectories cannot move and were NOT re-run; spending the hours to prove that
+zero model edits change nothing is not a measurement. Stated so the reader is
+not left to assume a run happened. The lane's standing GYRE values are
+therefore unchanged and are quoted here from round 59 rather than
+re-measured: ten-step residual SHA-256
+`43f37831256832c31f9a983352d8949e9947040faf01d5f4f39751dc1a70935c`; day 30 /
+240 / 360 T RMS `6.572572612618985e-05` / `0.01644836113029585` /
+`0.01122565978973451` K; lane digest `cf06a8fc7d0e90f2`. What WAS run on this
+tree: the citation gate on this receipt (13 citations, PASS) and on the
+default receipt (274, PASS), four shifted-line plants on this round's own
+citations (all FAIL, as they must), and an 84-test battery over the citation
+gate, the ULP move gate, card constructibility, the recipe, and this round's
+new probe — `84 passed`.
+
 ## Reviews
 
 Two independent adversarial reviews, both run on the committed round.
