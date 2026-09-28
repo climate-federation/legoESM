@@ -88,6 +88,24 @@ def test_grad_with_broadcast_inputs_matches_expanded_inputs():
                                rtol=1e-12, atol=1e-12)
 
 
+def test_grad_with_singleton_bands_matches_raw_autodiff():
+    """A constant band given as shape (1,) against an n-long system: the adjoint
+    must shift the band on the FULL system axis (codex: shifting before the
+    broadcast dropped the repeated sub-diagonal and gave wrong gradients for
+    every operand, RHS included)."""
+    from legoesm.timestepping.tridiagonal import _thomas_solve_impl
+    a1 = jnp.array([-0.3]); c1 = jnp.array([-0.25])
+    b = jnp.array([2.0, 2.2, 2.1, 2.4]); d = jnp.array([0.3, -1.0, 0.7, 0.1])
+
+    def f(fn):
+        return lambda a_, c_, d_: jnp.sum(fn(a_, b, c_, d_) ** 3)
+    got = jax.grad(f(thomas_solve), argnums=(0, 1, 2))(a1, c1, d)
+    want = jax.grad(f(_thomas_solve_impl), argnums=(0, 1, 2))(a1, c1, d)
+    for g, w in zip(got, want):
+        assert g.shape == w.shape
+        np.testing.assert_allclose(np.asarray(g), np.asarray(w), rtol=1e-10, atol=1e-12)
+
+
 def test_grad_no_regression_vs_raw_autodiff():
     """On a well-conditioned system the analytic adjoint must equal the raw
     element-wise autodiff to machine precision (the existing behaviour)."""

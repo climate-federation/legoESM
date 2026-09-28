@@ -129,6 +129,13 @@ def test_builder_passes_the_capped_coefficient(monkeypatch):
         mod.build_model_and_state(7, 4, 1, 1, "sfc", dt=30.0, lloyd_iterations=0)
     want = mod.del4_coeff(7, 30.0)
     assert seen["nu_del4"] == seen["nu_del4_ps"] == want == 1.0e16 / 16.0 ** 3
+    # ...and a long step at level 4 where the CAP binds: an uncapped builder
+    # would hand the model the bare law (1e16) here.
+    seen.clear()
+    with pytest.raises(RuntimeError, match="stop-at-config"):
+        mod.build_model_and_state(4, 4, 1, 1, "sfc", dt=6000.0, lloyd_iterations=0)
+    from hyperdiff import hyperdiff_coeff
+    assert seen["nu_del4"] == mod.del4_coeff(4, 6000.0) < hyperdiff_coeff(4, "icosahedral")
 
 
 

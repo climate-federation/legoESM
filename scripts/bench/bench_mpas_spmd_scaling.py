@@ -719,7 +719,6 @@ def main() -> int:
             # only by their FILENAME, and a knob that failed to take
             # effect is indistinguishable from one that did.
             "fix_mass": not args.no_fix_mass,
-            "nu_del4": del4_coeff(args.subdivision, dt),
             "per_rank_median_ms": per_rank_median_ms,
             "per_rank_spread_ms": per_rank_spread_ms,
             # The NCCL transport the arm ran with: the channel count moves

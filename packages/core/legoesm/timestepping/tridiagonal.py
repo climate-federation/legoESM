@@ -225,6 +225,10 @@ def _thomas_solve_bwd(operation_order, res, x_bar):
     work = jnp.result_type(a, b, c, x, x_bar)
     aw = jnp.asarray(a, work); bw = jnp.asarray(b, work); cw = jnp.asarray(c, work)
     xw = jnp.asarray(x, work); xbar = jnp.asarray(x_bar, work)
+    # The primal broadcasts its operands before sweeping; the band shifts below
+    # must act on the FULL system axis, so a singleton band (a constant sub- or
+    # super-diagonal) is expanded first and its cotangent reduced back at the end.
+    aw, bw, cw, xw, xbar = jnp.broadcast_arrays(aw, bw, cw, xw, xbar)
 
     # Transposed system Aᵀ λ = x̄.  Aᵀ has sub-diag aT[k]=c[k-1], super-diag
     # cT[k]=a[k+1], same main diag b.  Solve with the SAME stable forward sweep,
