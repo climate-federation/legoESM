@@ -886,7 +886,7 @@ FILES = {
 CITATION_MAP = {
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
-        'DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)',
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
         'CALL r56_up3_curv(ji,jj,jk,zlu_uu(ji,jj),zlv_vv(ji,jj),zlu_uv(ji,jj),zlv_vu(ji,jj))',
         10],
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:182-192': [
