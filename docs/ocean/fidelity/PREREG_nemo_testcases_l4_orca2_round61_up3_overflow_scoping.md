@@ -24,8 +24,8 @@ reproducible by the quoted command. They are recorded here so the round's
 disposition is not presented as a post-hoc prediction.
 
 1. `diff` of the two decks' momentum blocks
-   (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:346-352` versus
-   `tests/OVERFLOW_OMIP_L1/EXP00/namelist_cfg:80-90`).
+   (`ORCA2_OMIP_L4/EXP00/namelist_cfg:346` and `:352` versus
+   `OVERFLOW_OMIP_L1/EXP00/namelist_cfg:83` and `:89`).
 2. `diff` of the shipped `src/OCE/DYN/dynadv_up3.F90` against the instrumented
    `tests/OVERFLOW_OMIP_L1_P3_R56UP3/MY_SRC/dynadv_up3.F90`, plus the deck and
    `cpp_*.fcm` diffs between `OVERFLOW_OMIP_L1` and `OVERFLOW_OMIP_L1_P3_R56UP3`.
