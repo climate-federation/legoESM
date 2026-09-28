@@ -703,6 +703,30 @@ class TestPadCoversEveryGeometryField:
         assert bool(np.all(np.isfinite(b[:n_pad])))
         assert bool(np.all(b[:n_pad] > 0.0))
 
+    def test_lat_v_new_entries_are_south_faces_not_row_centres(self):
+        """``lat_v[j]`` is the SOUTH FACE of T row ``j``
+        (``compute_v_face_coords``: ``lat[0] - dlat/2`` at the south end), so
+        the pad's new entries sit a HALF CELL below the new rows' centres.
+        Putting the row centres there instead — the first version of this
+        fix, caught in review — passes the shape tripwire above and is still
+        half a cell wrong on the axis the overturning diagnostics label.
+        The surviving entries must also be bit-exact at offset ``n_pad``."""
+        import numpy as np
+        g, gp, n_lat, n_pad = self._padded_pair()
+        a = np.asarray(g.lat_v)
+        b = np.asarray(gp.lat_v)
+        np.testing.assert_array_equal(
+            b[n_pad:], a, err_msg="lat_v wet entries not preserved")
+        assert bool(np.all(np.diff(b) > 0.0)), "lat_v must increase northward"
+        lat_T_pad = np.asarray(gp.lat_T)
+        centres = lat_T_pad[:n_pad].mean(axis=1)
+        dlat = float(np.mean(lat_T_pad[n_pad] - lat_T_pad[n_pad - 1]))
+        tol = 100.0 * float(np.finfo(b.dtype).eps) * float(np.max(np.abs(b)))
+        np.testing.assert_allclose(b[:n_pad], centres - 0.5 * dlat,
+                                   rtol=0.0, atol=tol)
+        # and the negative control: the row CENTRES are NOT what is stored
+        assert not np.allclose(b[:n_pad], centres, rtol=0.0, atol=tol)
+
     def test_past_pole_extrapolation_warns_but_keeps_the_contract(self, capsys):
         """A past-the-pole extrapolation (the synthetic full-sphere grid does
         this legitimately) must WARN loudly, and the land-row contract —

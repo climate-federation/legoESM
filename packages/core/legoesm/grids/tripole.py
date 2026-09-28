@@ -877,6 +877,38 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
         [jnp.maximum(jnp.cos(lat_new_1d), 1e-10).astype(dtype),
          jnp.asarray(grid.cos_lat_v, dtype)])
 
+    # lat_v is cos_lat_v's COMPANION (n_lat+1,) v-face profile — the face
+    # LATITUDES themselves — filled whenever the builder knows them
+    # (``create_latlon_geometry`` does, so every synthetic tripole carries it;
+    # the file-backed ``create_tripole_grid`` leaves it None).  It rides the
+    # SAME v-face axis as cos_lat_v, and the band slicer already slices and
+    # widens the two as ONE family (the v-face names in ``halo_latlon``), so a
+    # pad that grows cos_lat_v but not lat_v hands the NORTH band one row
+    # fewer than the interior bands and the per-field band stack dies with
+    # "All input arrays must have the same shape" — the identical eORCA025
+    # crash cos_lat_v's own miss caused (job 9471878).
+    #
+    # VALUE: ``compute_v_face_coords`` puts ``lat_v[j]`` at the SOUTH face of
+    # T row ``j`` (``lat[0] - dlat/2`` at the south end, the two-row mean
+    # inside), so the new entries are the new land rows' latitudes shifted a
+    # HALF CELL SOUTH — not the row centres (codex review).  The seam needs
+    # nothing: the surviving ``lat_v[0] = lat_T[0] - dlat/2`` is already
+    # exactly the interior face ``(lat_new[-1] + lat_T[0])/2`` the padded grid
+    # wants there, because the new rows are one ``dlat`` apart.  The result
+    # stays strictly increasing northward.
+    # ponytail: the cos_lat_v block above keeps evaluating its new entries at
+    # the row CENTRES.  That is a pre-existing half-cell difference on LAND
+    # rows, and cos_lat_v is set on the file-backed eORCA cards, so moving it
+    # would change those runs' padded metrics; it is left alone deliberately.
+    # ``None`` passes through unchanged, keeping face-array-free grids
+    # byte-identical.
+    lat_v_pad = grid.lat_v
+    if lat_v_pad is not None:
+        lat_v_new = lat_new_1d - 0.5 * jnp.mean(dlat_row)
+        lat_v_pad = jnp.concatenate(
+            [lat_v_new.astype(jnp.asarray(lat_v_pad).dtype),
+             jnp.asarray(lat_v_pad)])
+
     # seam_wall_rows is an OPTIONAL (n_lat,) per-row profile (None on the
     # eORCA builds today, set by the DINO bridge).  If present it must grow
     # too, or the same band-slice raggedness bites; the new rows are LAND,
@@ -925,6 +957,7 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
         cos_lat=cos_lat_pad,
         sin_lat=sin_lat_pad,
         cos_lat_v=cos_lat_v_pad,
+        lat_v=lat_v_pad,
         lat=lat_1d_pad,
         seam_wall_rows=seam_pad,
         native_lat_T_deg=native_lat_pad,
