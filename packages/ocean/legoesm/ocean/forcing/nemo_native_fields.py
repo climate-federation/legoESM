@@ -18,6 +18,11 @@ i.e. 332 × 362): interior cells embed at ``[:-1, 1:-1]``, the cyclic
 columns copy per the 2-point overlap, and the (land-masked) north halo
 row copies the row below.  Other grids go through the shared
 :class:`~legoesm.ocean.forcing.curvilinear_regrid.NearestWetRegridder`.
+
+``strip_north_rows`` (default 0) targets a tripole built with
+``create_tripole_grid(strip_north_rows=N)``: the result is exactly the
+unstripped embed with its last ``N`` rows dropped (the stripped fold-halo
+row is a copy of the row below, so nothing independent is lost).
 """
 
 from __future__ import annotations
@@ -106,7 +111,7 @@ def nemo_src_tmask_for(mesh_path: str, field_path: str,
 
 
 def embed_orca_interior(src: np.ndarray, n_lat: int,
-                        n_lon: int) -> np.ndarray:
+                        n_lon: int, strip_north_rows: int = 0) -> np.ndarray:
     """Embed an eORCA-interior field (..., y, x) into the model's
     (..., n_lat, n_lon) halo-carrying grid.
 
@@ -115,7 +120,16 @@ def embed_orca_interior(src: np.ndarray, n_lat: int,
     2-point overlap (``col0 <- col[nx-2]``, ``col[nx-1] <- col1``) and
     the north halo row copies the row below (it is land-masked in the
     model; the copy just keeps the array finite).
+
+    ``strip_north_rows = N > 0``: the model grid had its last ``N`` rows
+    removed, so ``n_lat == y + 1 - N``; the result is the unstripped embed
+    minus its last ``N`` rows.
     """
+    strip = int(strip_north_rows)
+    if strip < 0:
+        raise ValueError(f"strip_north_rows must be >= 0, got {strip}")
+    if strip:
+        return embed_orca_interior(src, n_lat + strip, n_lon)[..., :n_lat, :]
     src = np.asarray(src)
     ny, nx = src.shape[-2:]
     if (ny, nx) != (n_lat - 1, n_lon - 2):
@@ -133,7 +147,8 @@ def embed_orca_interior(src: np.ndarray, n_lat: int,
 
 
 def _to_model_grid_2d(field_i, src_lat, src_lon, lat_T_deg, lon_T_deg,
-                      wet_mask, regridder=None, src_wet=None):
+                      wet_mask, regridder=None, src_wet=None,
+                      strip_north_rows: int = 0):
     """One 2-D interior field -> model grid (embed or nearest-wet).
 
     Structured targets (regular lat-lon / tripole) pass a 2-D ``lat_T_deg``:
@@ -151,11 +166,16 @@ def _to_model_grid_2d(field_i, src_lat, src_lon, lat_T_deg, lon_T_deg,
                                             structured=False)
         return regridder(field_i), regridder
     n_lat, n_lon = lat_arr.shape
-    if (field_i.shape == (n_lat - 1, n_lon - 2)
-            and coords_match(src_lat, src_lon,
-                             lat_arr[:-1, 1:-1],
-                             np.asarray(lon_T_deg)[:-1, 1:-1])):
-        return embed_orca_interior(field_i, n_lat, n_lon), regridder
+    strip = int(strip_north_rows)
+    # Rows the interior shares with the model: all of them on a stripped grid
+    # (n_lat = y + 1 - strip), all but the north halo row otherwise.
+    n_cmp = min(n_lat, n_lat - 1 + strip)
+    if (field_i.shape == (n_lat - 1 + strip, n_lon - 2)
+            and coords_match(src_lat[:n_cmp], src_lon[:n_cmp],
+                             lat_arr[:n_cmp, 1:-1],
+                             np.asarray(lon_T_deg)[:n_cmp, 1:-1])):
+        return (embed_orca_interior(field_i, n_lat, n_lon, strip),
+                regridder)
     if regridder is None:
         regridder = NearestWetRegridder(src_lon, src_lat,
                                         _source_wet(field_i, src_wet),
@@ -184,6 +204,7 @@ def load_nemo_sss_restoring_climatology(
     wet_mask: np.ndarray,
     var: str = "presalt",
     src_tmask: np.ndarray | None = None,
+    strip_north_rows: int = 0,
 ) -> np.ndarray:
     """(12, n_lat, n_lon) monthly SSS-restoring target [PSU].
 
@@ -211,7 +232,7 @@ def load_nemo_sss_restoring_climatology(
     for m in range(12):
         out[m], regridder = _to_model_grid_2d(
             arr[m], src_lat, src_lon, lat_T_deg, lon_T_deg, wet_mask,
-            regridder, src_wet=_src_wet0)
+            regridder, src_wet=_src_wet0, strip_north_rows=strip_north_rows)
     # NaN-free: fill any remaining gaps (land / unmapped) with the
     # monthly wet mean so masked applies never touch NaNs.
     for m in range(12):
@@ -278,6 +299,7 @@ def load_nemo_monthly_init_ts(
     target_depths: np.ndarray | None = None,
     src_tmask: np.ndarray | None = None,
     nemo_tint: bool = False,
+    strip_north_rows: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """(T, S) 3-D initial state for the given month (1-based).
 
@@ -336,7 +358,7 @@ def load_nemo_monthly_init_ts(
                 "the run calendar to place NEMO's record centres.")
         kw = dict(n_levels=n_levels, temp_var=temp_var, salt_var=salt_var,
                   target_depths=target_depths, src_tmask=src_tmask,
-                  nemo_tint=False)
+                  nemo_tint=False, strip_north_rows=strip_north_rows)
         T_jan, S_jan = load_nemo_monthly_init_ts(
             temp_path, salt_path, lat_T_deg, lon_T_deg, month=1, **kw)
         T_dec, S_dec = load_nemo_monthly_init_ts(
@@ -401,10 +423,10 @@ def load_nemo_monthly_init_ts(
             continue
         T_out[..., k], regridder_k = _to_model_grid_2d(
             T_arr[m, k], src_lat, src_lon, lat_T_deg, lon_T_deg, None,
-            None, src_wet=_sw_k)
+            None, src_wet=_sw_k, strip_north_rows=strip_north_rows)
         S_out[..., k], _ = _to_model_grid_2d(
             S_arr[m, k], src_lat, src_lon, lat_T_deg, lon_T_deg, None,
-            regridder_k, src_wet=_sw_k)
+            regridder_k, src_wet=_sw_k, strip_north_rows=strip_north_rows)
     # Finite everywhere: below-seafloor / land cells inherit the deepest
     # finite value of their column (masked in the model, but the state
     # arrays must be NaN-free), then any all-NaN column takes the level
@@ -518,6 +540,7 @@ def load_nemo_ice_init(
     lat_T_deg: np.ndarray,
     lon_T_deg: np.ndarray,
     wet_mask: np.ndarray,
+    strip_north_rows: int = 0,
 ) -> NemoIceInit:
     """SI3 ``Ice_initialization.nc`` -> ice IC on the model T-grid.
 
@@ -536,6 +559,7 @@ def load_nemo_ice_init(
     because ``NearestWetRegridder`` meshgrids 1-D inputs).
     ``wet_mask`` (1=ocean, 0=land, target shape) zeroes the ice on
     model land.  Clamping/coherence per :class:`NemoIceInit`.
+    ``strip_north_rows``: see :func:`embed_orca_interior`.
     """
     fields, src_lat, src_lon = _read_ice_file(path)
     tgt_lat = np.asarray(lat_T_deg, dtype=np.float64)
@@ -557,18 +581,20 @@ def load_nemo_ice_init(
 
     ny, nx = fields["concentration"].shape
     n_lat, n_lon = (tgt_lat.shape if tgt_lat.ndim == 2 else (0, 0))
+    strip = int(strip_north_rows)
+    n_cmp = min(n_lat, n_lat - 1 + strip)
     native = (
         tgt_lat.ndim == 2
-        and (ny, nx) == (n_lat - 1, n_lon - 2)
-        and coords_match(src_lat, src_lon,
-                         tgt_lat[:-1, 1:-1], tgt_lon[:-1, 1:-1],
-                         valid=coord_valid)
+        and (ny, nx) == (n_lat - 1 + strip, n_lon - 2)
+        and coords_match(src_lat[:n_cmp], src_lon[:n_cmp],
+                         tgt_lat[:n_cmp, 1:-1], tgt_lon[:n_cmp, 1:-1],
+                         valid=coord_valid[:n_cmp])
     )
     out: dict = {}
     if native:
         for name, arr in fields.items():
             out[name] = (None if arr is None
-                         else embed_orca_interior(arr, n_lat, n_lon))
+                         else embed_orca_interior(arr, n_lat, n_lon, strip))
     else:
         # 1-D targets are POINT LISTS (MPAS): lift to (n, 1) so the
         # regridder does not meshgrid them into an (n, n) product grid.

@@ -1311,7 +1311,7 @@ def ah_profile_from_file(grid, path, A_h_base: float):
 
 
 def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
-                           rn_shlat: float):
+                           rn_shlat: float, strip_north_rows: int = 0):
     """NEMO nn_ahm_ijk_t=-30 lateral viscosity on the full eORCA1 tripole.
 
     ``eddy_viscosity_3D.nc`` and ``domain_cfg.nc`` hold NEMO's INNER domain
@@ -1324,6 +1324,11 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
 
     ahmt is multiplied by tmask and ahmf by NEMO's rn_shlat fmask
     (ldfdyn.F90:329-330, dommsk.F90:207-210).
+
+    ``strip_north_rows=1`` (grid built with the fold-halo row removed, 331
+    rows): the files' 331 inner rows ARE the model's rows, so no top-row copy
+    is made; the result equals the unstripped one minus its last T / vertex
+    row.  Other strip counts are refused (the files have no row to spare).
     """
     import netCDF4 as nc4
     from legoesm.ocean.dynamics.latlon_cgrid_operators import nemo_fmask_shlat_3d
@@ -1341,12 +1346,20 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
     gphit_m, gphif_m = _read(mesh_path, ("gphit", "gphif"))
     nk = int(z_coord.n_levels)
     n_lat, n_lon = int(grid.n_lat), int(grid.n_lon)
-    if (n_lat, n_lon) != (332, 362) or ahmt_f.shape != (nk, 331, 360) \
+    strip = int(strip_north_rows)
+    if strip not in (0, 1):
+        raise SystemExit(
+            f"--nemo-ldf-file supports --tripole-strip-north-rows 0 or 1, got "
+            f"{strip}: the files hold the 331 inner rows only, so a grid "
+            "stripped further would need rows dropped from the oracle's own "
+            "domain.")
+    if (n_lat + strip, n_lon) != (332, 362) or ahmt_f.shape != (nk, 331, 360) \
             or e3f_f.shape != (nk, 331, 360):
         raise SystemExit(
-            f"--nemo-ldf-file expects the full 332x362 eORCA1 tripole and "
-            f"({nk},331,360) inner-domain files; got grid {(n_lat, n_lon)}, "
-            f"ldf {ahmt_f.shape}, domain_cfg {e3f_f.shape}")
+            f"--nemo-ldf-file expects the full 332x362 eORCA1 tripole (minus "
+            f"{strip} stripped north row(s)) and ({nk},331,360) inner-domain "
+            f"files; got grid {(n_lat, n_lon)}, ldf {ahmt_f.shape}, "
+            f"domain_cfg {e3f_f.shape}")
     ci_t = (np.arange(n_lon) - 1) % 360            # T col i  -> file col
     ci_f = (np.arange(n_lon + 1) - 2) % 360        # vertex col i -> file col
     # coordinate checks (degrees; files are float32)
@@ -1355,17 +1368,20 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
     if d_t > 1e-4 or d_f > 1e-4:
         raise SystemExit(f"--nemo-ldf-file index mapping failed: T {d_t:.2e}, F {d_f:.2e} deg")
     for nm, a in (("ahmt_3d", ahmt_f), ("ahmf_3d", ahmf_f)):
-        if np.ptp(a[:, -3:]) != 0.0:
+        if strip == 0 and np.ptp(a[:, -3:]) != 0.0:
             raise SystemExit(f"{ldf_path}: {nm} not uniform in the top rows; "
                              "the fold-row copy would not be exact")
 
+    # The fold-halo copy row is appended, then the stripped rows (if any)
+    # dropped, so a stripped grid gets exactly the unstripped arrays minus
+    # their last row(s).
     def _to_T(a):                                   # (nk,331,360) -> (332,362,nk)
         out = a[:, :, ci_t].transpose(1, 2, 0)
-        return np.concatenate([out, out[-1:]], axis=0)
+        return np.concatenate([out, out[-1:]], axis=0)[:n_lat]
 
     def _to_F(a, south):                            # -> (333,363,nk)
         out = a[:, :, ci_f].transpose(1, 2, 0)
-        return np.concatenate([south, out, out[-1:]], axis=0)
+        return np.concatenate([south, out, out[-1:]], axis=0)[:n_lat + 1]
 
     dtype = z_coord.h_partial.dtype
     tmask = np.asarray(z_coord.is_active, dtype=np.float64)
@@ -1820,7 +1836,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   gm_slope_scheme=None, gm_bolus_advection=None,
                   gm_msc_stabilize=None, eos=None,
                   redi_coefficient=None, redi_aht0=None, gm_slope_positions=None,
-                  store_mass_flux=False, store_salt_flux=False):
+                  store_mass_flux=False, store_salt_flux=False,
+                  strip_north_rows=0, fold_pivot="legacy"):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -1832,7 +1849,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     NEMO starts from the Gouretski/WOCE climatology; a rest-state vs climatology IC
     confounds model differences with IC differences over a few-year spinup. (WOA18 is
     a close stand-in for NEMO's exact Gouretski IC, which is the further refinement.)
+
+    ``strip_north_rows`` / ``fold_pivot`` go to ``create_tripole_grid`` (via
+    ``run_omip._create_setup``) and every mesh-shaped read below drops the
+    same north row(s).  Defaults (0, "legacy") are the unchanged grid.
     """
+    strip_north_rows = int(strip_north_rows)
     _validate_omip_redi_selection(
         redi_coefficient, gm_slope_positions, gm_slope_scheme, gm_treguier,
         gm_kappa_min, no_gm_redi, redi_aht0, n_gpus=n_gpus)
@@ -1883,7 +1905,13 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         dz_ref_override=dz_ref_override,
         t_depth_ref_override=t_depth_ref_override,
         attach_nemo_ladders=attach_nemo_ladders,
+        tripole_strip_north_rows=strip_north_rows,
+        tripole_fold_pivot=fold_pivot,
     )
+    if strip_north_rows or fold_pivot != "legacy":
+        print(f"[setup] tripole mesh: strip_north_rows={strip_north_rows} "
+              f"fold_pivot={fold_pivot} -> grid "
+              f"{tuple(int(n) for n in grid.lat_T.shape)}")
     # Optional dycore-stability overrides (for WOA cold-start tuning): rebuild
     # the config + model from run_omip's validated tripole base, changing only
     # the requested knobs (e.g. pgf_scheme="smc03", higher A_h/B_h).
@@ -2014,6 +2042,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                 if "gphif" not in _mesh:
                     raise ValueError("nemo21 requires mesh gphif")
                 _lat_f = np.asarray(_mesh["gphif"]).squeeze()
+            if strip_north_rows:
+                _lat_f = _lat_f[:_lat_f.shape[0] - strip_north_rows]
             if _lat_f.shape != grid.f.shape or not np.isfinite(_lat_f).all():
                 raise ValueError("nemo21 gphif must be finite and match the T grid")
             _gm_kw["redi_f_f"] = (2.0 * config.omega
@@ -2209,7 +2239,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                     "not reproduce NEMO gdept on a stretched grid.")
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] tripole config override: {_ovr}")
-    land_mask, H_bathy = read_mesh_mask_bathy(mesh_path, nemo_domain_cfg=nemo_domain_cfg)
+    land_mask, H_bathy = read_mesh_mask_bathy(mesh_path, nemo_domain_cfg=nemo_domain_cfg,
+                                              strip_north_rows=strip_north_rows)
     if flat_bottom:
         H_bathy = np.where(land_mask > 0.5, H_max, 0.0)
         print("[setup] FLAT BOTTOM (topography removed -- PGF-over-topo control)")
@@ -2270,7 +2301,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         )
         z_coord = attach_nemo_ldf_fields(
             z_coord, model.grid, mesh_path, nemo_ldf_file, nemo_domain_cfg,
-            rn_shlat={"no_slip": 2.0, "free_slip": 0.0}[lateral_side_bc])
+            rn_shlat={"no_slip": 2.0, "free_slip": 0.0}[lateral_side_bc],
+            strip_north_rows=strip_north_rows)
         model = LatLonCGridOceanModel(grid, z_coord, config)
     if iwm is not None and iwm.enabled:
         # FINAL model build with the zdfiwm maps (after every config /
@@ -3098,6 +3130,50 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
     return grid, z_coord, model, state, H_bathy
 
 
+def _manifest_mesh(args, mesh=None) -> str:
+    """Mesh string for the run record.  A stripped / F-pivot tripole is a
+    different grid than the file alone names, so the two options are appended
+    when (and only when) they differ from the defaults -- the string, and
+    hence the config hash, of every default run is unchanged."""
+    out = str(args.mesh if mesh is None else mesh)
+    strip = int(getattr(args, "tripole_strip_north_rows", 0) or 0)
+    pivot = getattr(args, "tripole_fold_pivot", "legacy") or "legacy"
+    if strip or pivot != "legacy":
+        out += f" [tripole_strip_north_rows={strip} tripole_fold_pivot={pivot}]"
+    return out
+
+
+def validate_tripole_strip_args(args) -> None:
+    """--tripole-strip-north-rows / --tripole-fold-pivot pre-build gates.
+
+    Tripole only; the F pivot is only defined on the eORCA1.2 mesh with its
+    duplicated fold-halo row removed (strip = 1); --forcing-remap nemo_scrip
+    samples through weights that write the unstripped (332, 362) field and
+    has no strip path, so it is refused up front rather than at step 1."""
+    strip = int(getattr(args, "tripole_strip_north_rows", 0) or 0)
+    pivot = getattr(args, "tripole_fold_pivot", "legacy")
+    if strip < 0:
+        raise SystemExit(
+            f"--tripole-strip-north-rows must be >= 0, got {strip}")
+    if pivot not in ("legacy", "F"):
+        raise SystemExit(
+            f"--tripole-fold-pivot must be 'legacy' or 'F', got {pivot!r}")
+    if (strip or pivot != "legacy") and args.grid != "tripole":
+        raise SystemExit(
+            "--tripole-strip-north-rows / --tripole-fold-pivot apply to "
+            f"--grid tripole only; got --grid {args.grid}")
+    if pivot == "F" and strip != 1:
+        raise SystemExit(
+            "--tripole-fold-pivot F needs --tripole-strip-north-rows 1 (the "
+            "F-pivot fold is defined on the eORCA1.2 mesh with its duplicated "
+            f"fold-halo row removed); got {strip}")
+    if strip and getattr(args, "forcing_remap", "bilinear") == "nemo_scrip":
+        raise SystemExit(
+            "--forcing-remap nemo_scrip has no stripped-grid path (its "
+            "weights write the full 332-row field inside the step); use the "
+            "default bilinear remap with --tripole-strip-north-rows.")
+
+
 def _write_ocean_run_manifest(args, model, dt, total_days, out_dir,
                               *, mesh=None, nlev=None, io_proc: bool):
     """Write the STANDARD run manifest (resolved config + command line).
@@ -3133,7 +3209,7 @@ def _write_ocean_run_manifest(args, model, dt, total_days, out_dir,
         run_record = OceanRunRecord(
             runtime_config=model.config,
             grid=str(args.grid),
-            mesh=str(args.mesh if mesh is None else mesh),
+            mesh=_manifest_mesh(args, mesh),
             nlev=int(args.nlev if nlev is None else nlev),
             dt_seconds=float(dt),
             total_days=float(total_days),
@@ -4303,7 +4379,8 @@ def _runoff_component_vars(exclude_isf: bool):
 
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
-                        land_mask=None, spread_passes=2, exclude_isf=False):
+                        land_mask=None, spread_passes=2, exclude_isf=False,
+                        strip_north_rows=0):
     """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
     each climatological month onto the model grid. Total freshwater = rivers
     (sorunoff) + ice-shelf melt (sornfisf) + icebergs (Icb_flux) [kg/m²/s, +INTO
@@ -4311,8 +4388,43 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     (see :func:`_runoff_component_vars`). Returns (12, *lat2d_deg.shape). Ungates
     the SSS comparison (runoff=0 made SSS only informational). Curvilinear ->
     model grid via the same IDW used for bathy; eORCA1 nav_lat/lon are the runoff
-    file's own coords."""
+    file's own coords.
+
+    ``strip_north_rows = N`` (tripole built with its last N mesh rows removed):
+    the coastal spread's north-edge stencil and the pass-1 neighbour values
+    depend on the stripped row, so the regrid + spread + renorm run on the
+    grid with those N rows put BACK (coordinates from ``mesh_path``, land,
+    zero area) and the rows are dropped at the end -- the result is exactly
+    the unstripped field minus its last N rows."""
     import xarray as xr
+    _strip = int(strip_north_rows)
+    if _strip:
+        if grid_type != "tripole":
+            raise ValueError(
+                f"strip_north_rows applies to the tripole only; got {grid_type!r}")
+        import netCDF4
+        import jax.numpy as _jnp
+        from legoesm.grids.tripole import mesh_file_list
+        with netCDF4.Dataset(mesh_file_list(mesh_path)[0]) as _ds:
+            _glat = _squeeze2d(np.asarray(_ds.variables["gphit"][:]))
+            _glon = _squeeze2d(np.asarray(_ds.variables["glamt"][:]))
+        # Same conversion chain as the grid's lat_T/lon_T (read as float64,
+        # deg -> rad, cast to the grid dtype) and _grid_lat2d_deg (rad ->
+        # deg), so the restored rows carry the coordinates the unstripped
+        # grid would (bitwise: measured on eORCA1.2).
+        _dt = np.asarray(grid.lat_T).dtype
+
+        def _deg(a):
+            return np.rad2deg(np.asarray(
+                _jnp.deg2rad(_jnp.array(a, dtype=_jnp.float64)).astype(_dt)))
+        lat2d_deg = np.concatenate([np.asarray(lat2d_deg),
+                                    _deg(_glat[-_strip:])], axis=0)
+        lon2d_deg = np.concatenate([np.asarray(lon2d_deg),
+                                    _deg(_glon[-_strip:])], axis=0)
+        if land_mask is not None:
+            land_mask = np.concatenate(
+                [np.asarray(land_mask),
+                 np.zeros((_strip,) + np.asarray(land_mask).shape[1:])], axis=0)
     from legoesm.ocean.bathymetry import (
         laplacian_smooth_2d, laplacian_smooth_voronoi)
     ds = xr.open_dataset(_RUNOFF_NC, decode_times=False)
@@ -4345,6 +4457,9 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
             f"runoff source area {A_src.shape} != runoff field {total.shape[1:]}: "
             f"domain_cfg e1t/e2t must match the Dai-Trenberth grid")
     A_tgt = np.asarray(grid.areaCell if hasattr(grid, "areaCell") else grid.area)
+    if _strip:
+        A_tgt = np.concatenate([A_tgt, np.zeros((_strip,) + A_tgt.shape[1:])],
+                               axis=0)
     for m in range(12):
         # k=4 (NOT k=1: _regrid_curv_to_points assumes 2-D kNN -> k=1 crashes, codex HIGH)
         Rm, _ = _regrid_curv_to_points(
@@ -4403,6 +4518,8 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
           f"discharge cells, 12 months, {spread_passes} spread passes, "
           f"max {out.max():.2e} kg/m^2/s | conserved total src={_src_Sv:.4f} Sv "
           f"-> target={_tgt_Sv:.4f} Sv (area-weighted, grid-independent)")
+    if _strip:
+        out = out[:, :-_strip]
     return out
 
 
@@ -4472,7 +4589,7 @@ _GHFLUX_SCRIP_WEIGHTS = (
 _MW_PER_W = 1.0e-3
 
 
-def load_nemo_geothermal_flux(grid_type, out_shape):
+def load_nemo_geothermal_flux(grid_type, out_shape, strip_north_rows=0):
     """NEMO's geothermal seafloor heat flux [W/m^2] on the model grid.
 
     NEMO ORCA1 runs ``ln_trabbc=.true., nn_geoflx=2``, which reads this map
@@ -4513,7 +4630,7 @@ def load_nemo_geothermal_flux(grid_type, out_shape):
     out = _scrip_to_full_tripole(
         apply_scrip_weights(np.nan_to_num(src, nan=0.0), src0, wgt, nw,
                             src.shape),
-        *out_shape) * _MW_PER_W
+        *out_shape, strip_north_rows=strip_north_rows) * _MW_PER_W
     if out.shape != tuple(out_shape):
         raise ValueError(
             f"geothermal map came out {out.shape}, expected {tuple(out_shape)}")
@@ -4531,19 +4648,25 @@ def load_nemo_geothermal_flux(grid_type, out_shape):
     return out
 
 
-def _scrip_to_full_tripole(interior, ny, nx):
+def _scrip_to_full_tripole(interior, ny, nx, strip_north_rows=0):
     """Thin alias: the real implementation lives in the coupler applicator.
 
     Kept as one line rather than a second copy -- the halo convention is the
     same physics wherever it is applied, and two copies would drift.
+    ``strip_north_rows = N``: the target grid had its last N rows removed;
+    the result is the unstripped field minus those rows (exact: the fold row
+    is a fill, not data from the weights).
     """
     from legoesm.ocean.coupler.omip2_applicator import (
         scrip_interior_to_full_tripole)
-    return scrip_interior_to_full_tripole(interior, ny, nx)
+    strip = int(strip_north_rows)
+    if strip < 0:
+        raise ValueError(f"strip_north_rows must be >= 0, got {strip}")
+    return scrip_interior_to_full_tripole(interior, ny + strip, nx)[:ny]
 
 
 def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None,
-                          chl_remap="idw"):
+                          chl_remap="idw", strip_north_rows=0):
     """Load the monthly ESACCI chlorophyll climatology and IDW-regrid onto the grid.
 
     Returns a ``(12, *lat2d_deg.shape)`` array of surface chlorophyll [mg/m^3] for
@@ -4571,9 +4694,11 @@ def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None,
         # map built for a different grid.
         from legoesm.ocean.coupler.omip2_applicator import (
             apply_scrip_weights, load_scrip_weights)
-        if lat2d_deg.shape != (332, 362):
+        _want = (332 - int(strip_north_rows), 362)
+        if lat2d_deg.shape != _want:
             raise SystemExit(
-                f"chl_remap='nemo_scrip' needs the (332, 362) eORCA1 tripole; "
+                f"chl_remap='nemo_scrip' needs the {_want} eORCA1 tripole "
+                f"(332 rows minus {int(strip_north_rows)} stripped); "
                 f"got {lat2d_deg.shape} on grid_type={grid_type!r}")
         src0, wgt, nw = load_scrip_weights(_CHL_SCRIP_WEIGHTS)
         src_shape = chl.shape[1:]
@@ -4581,7 +4706,7 @@ def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None,
             np.maximum(_scrip_to_full_tripole(
                 apply_scrip_weights(np.nan_to_num(chl[m], nan=0.0),
                                     src0, wgt, nw, src_shape),
-                *lat2d_deg.shape), 0.03)
+                *lat2d_deg.shape, strip_north_rows=strip_north_rows), 0.03)
             for m in range(12)])
         print(f"[setup] RGB chlorophyll: ESACCI monthly via the ORACLE'S OWN "
               f"bilinear weights ({nw} triples) onto {grid_type}, range "
@@ -6787,6 +6912,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="NetCDF with e3t_1d for --nemo-vertical (default: the "
                         "ORCA1 domain_cfg).")
     p.add_argument("--mesh", type=str, default=_MESH)
+    p.add_argument("--tripole-strip-north-rows", type=int, default=0,
+                   help="Tripole only: drop this many NORTH rows of the mesh "
+                        "before building (1 removes eORCA1.2's duplicated "
+                        "fold-halo row: row 331 mirrors row 330). Every "
+                        "mesh-shaped input drops the same rows. Default 0 = "
+                        "unchanged grid.")
+    p.add_argument("--tripole-fold-pivot", choices=("legacy", "F"),
+                   default="legacy",
+                   help="Tripole only: north-fold descriptor. 'legacy' "
+                        "(default, unchanged); 'F' = NEMO's F-point pivot, "
+                        "requires --tripole-strip-north-rows 1.")
     p.add_argument("--grid", type=str, default="tripole",
                    choices=["tripole", "latlon_bathy", "cubed_sphere", "mpas",
                             "fesom"],
@@ -8382,6 +8518,8 @@ def main() -> int:
     # the --spinup-drag rejection + the --no-gm-redi requirement.  NB: no
     # --scan-block gate — the lever is in-model (inside _step_impl), so the
     # lax.scan block path pins correctly.
+    validate_tripole_strip_args(args)
+    _tri_strip = int(args.tripole_strip_north_rows)
     validate_prescribed_flow_args(args.prescribed_flow, args.grid,
                                   args.spinup_drag_tau_days,
                                   no_gm_redi=args.no_gm_redi)
@@ -8846,6 +8984,8 @@ def main() -> int:
                                          False)),
             store_salt_flux=bool(getattr(args, "gateway_transports",
                                          False)),
+            strip_north_rows=_tri_strip,
+            fold_pivot=args.tripole_fold_pivot,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -9370,7 +9510,8 @@ def main() -> int:
             lat2d, lon2d, n_levels=int(z_coord.n_levels),
             month=int(args.nemo_init_month),
             nemo_tint=bool(args.nemo_init_tint),
-            src_tmask=nemo_src_tmask_for(_MESH, args.nemo_monthly_init[0]))
+            src_tmask=nemo_src_tmask_for(_MESH, args.nemo_monthly_init[0]),
+            strip_north_rows=_tri_strip)
         _Td = state.T.data.dtype
         state = state._replace(
             T=state.T.replace(data=jnp.asarray(_T_ic, dtype=_Td)),
@@ -9413,7 +9554,8 @@ def main() -> int:
             sss_restore_target = load_nemo_sss_restoring_climatology(
                 args.sss_restore_file, lat2d, lon2d,
                 np.asarray(state.land_mask.data) > 0.5,   # (12, n_lat, n_lon)
-                src_tmask=nemo_src_tmask_for(_MESH, args.sss_restore_file))
+                src_tmask=nemo_src_tmask_for(_MESH, args.sss_restore_file),
+                strip_north_rows=_tri_strip)
         else:
             sss_restore_target = np.asarray(
                 state.S.data, dtype=np.float64)[..., 0].copy()  # surface SSS
@@ -9491,7 +9633,7 @@ def main() -> int:
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread,
             # --isf deposits the SAME file's sornfisf at depth -> drop it from
             # the surface runoff or the ice-shelf melt is counted twice.
-            exclude_isf=args.isf)
+            exclude_isf=args.isf, strip_north_rows=_tri_strip)
     if ((args.runoff_dep_max is not None or args.runoff_rnf_max is not None)
             and not args.runoff_depth_nemo_ini):
         raise SystemExit(
@@ -9658,7 +9800,8 @@ def main() -> int:
                 "--geothermal-map and --geothermal-flux-wm2 both set the "
                 "seafloor flux; one would silently win. Pick one.")
         _geo_map = jnp.asarray(
-            load_nemo_geothermal_flux(app_grid_type, lat2d.shape))
+            load_nemo_geothermal_flux(app_grid_type, lat2d.shape,
+                                      strip_north_rows=_tri_strip))
 
     chl_clim = None
     if args.sw_rgb_chl:
@@ -9667,7 +9810,7 @@ def main() -> int:
                 f"--sw-rgb-chl is wired for latlon/tripole/mpas only, not {app_grid_type!r}")
         chl_clim = load_nemo_chl_monthly(
             grid, app_grid_type, lat2d, lon2d, chl_file=args.chl_file,
-                                         chl_remap=args.chl_remap)
+            chl_remap=args.chl_remap, strip_north_rows=_tri_strip)
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
     # would corrupt the comparison invisibly. --forcing-path (set via --config
@@ -9771,7 +9914,8 @@ def main() -> int:
             )
             _ice_ic = load_nemo_ice_init(
                 args.ice_init, lat2d, lon2d,
-                np.asarray(state.land_mask.data))
+                np.asarray(state.land_mask.data),
+                strip_north_rows=_tri_strip)
             ice_state = _apply_ice_init(ice_state, _ice_ic)
             _a0, _c0, _h0, _ = _ice_global_stats(
                 ice_state, grid, state.land_mask.data)
@@ -9912,6 +10056,12 @@ def main() -> int:
             if _k in _RESTART_FP_EXCLUDE:
                 continue
             _v = getattr(args, _k)
+            # Grid-layout options added after restarts already existed: hashed
+            # only when set, so a default run's fingerprint (and its existing
+            # restarts) is unchanged.
+            if (_k, _v) in (("tripole_strip_north_rows", 0),
+                            ("tripole_fold_pivot", "legacy")):
+                continue
             if _k in _RESTART_FP_PATH_KEYS and _v:
                 if isinstance(_v, str):
                     _v = str(Path(_v).resolve())

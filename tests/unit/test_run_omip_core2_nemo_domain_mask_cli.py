@@ -60,7 +60,8 @@ def test_the_flag_is_forwarded_to_every_builder_and_into_the_mesh_read():
     ``nemo_domain_cfg=`` argument -- at the four dispatch sites in main() or at
     the four mesh reads inside the builders -- fails this."""
     src = RUNNER.read_text()
-    assert src.count("read_mesh_mask_bathy(mesh_path, nemo_domain_cfg=nemo_domain_cfg)") == 4
+    # No closing paren: the tripole read also carries strip_north_rows=.
+    assert src.count("read_mesh_mask_bathy(mesh_path, nemo_domain_cfg=nemo_domain_cfg") == 4
     assert src.count("nemo_domain_cfg=_nemo_domain_cfg,") == 4
     assert "_nemo_domain_cfg = (args.nemo_domain_cfg or _NEMO_DOMAIN_CFG)" in src
     assert "if args.nemo_domain_mask else None" in src

@@ -1667,6 +1667,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   tripole_mesh: str | None = None,
                   tripole_strip_north_rows: int = 0,
                   tripole_fold_convention: str = "auto",
+                  tripole_fold_pivot: str = "legacy",
                   A_h_override: float = None,
                   B_h_override: float = None,
                   K_h_override: float = None,
@@ -2152,7 +2153,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             fold_convention=(
                 tripole_fold_convention if tripole_mesh
                 else params.get("fold_convention", "auto")),
-            strip_north_rows=int(tripole_strip_north_rows))
+            strip_north_rows=int(tripole_strip_north_rows),
+            fold_pivot=tripole_fold_pivot)
 
         if forcing_mode == "jra55_do_tropical":
             sf_config = SurfaceForcingConfig(

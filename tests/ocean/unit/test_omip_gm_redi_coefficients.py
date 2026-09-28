@@ -254,7 +254,7 @@ def test_actual_build_configuration(monkeypatch,tmp_path):
     assert len(blocks)==1
     args,masks,cfg=_case()
     env=dict(vars(runner),redi_coefficient='nemo21',gm_slope_positions='nemo_native',
-        redi_aht0=1250.,mesh_path=str(mesh),grid=args[4],config=base,
+        redi_aht0=1250.,mesh_path=str(mesh),grid=args[4],config=base,strip_north_rows=0,
         _ovr={'gm_redi':runner._tripole_treguier_gm_redi(900.,0.)._replace(slope_scheme='nemo_iso_lap')})
     exec(compile(ast.Module(body=blocks,type_ignores=[]),'<actual build>','exec'),env)
     got=env['_ovr']['gm_redi']
