@@ -124,6 +124,45 @@ def compare(reference_path: Path, candidate_report: dict) -> dict:
     }
 
 
+def plant_sidecar(reference_path: Path, output: Path,
+                  expect_commit: str) -> dict:
+    """Add one ULP to one oracle-exact active U value without integrating."""
+    stamp = worktree_stamp()
+    R60.require(stamp["clean"], "producer worktree is dirty")
+    R60.require(
+        stamp["commit"] == expect_commit,
+        f"producer commit mismatch: {stamp['commit']} != {expect_commit}")
+    reference = json.loads(reference_path.read_text())
+    R60.require(reference["format"] == FORMAT, "reference format drift")
+    arrays = R60._read_sidecar(reference)
+    name = "kt3.entry.u"
+    candidate = arrays[name].copy()
+    oracle = arrays[f"oracle::{name}"]
+    clean = candidate.view(np.uint64) == oracle.view(np.uint64)
+    R60.require(bool(np.any(clean)), "no oracle-exact active U cell for plant")
+    index = int(np.flatnonzero(clean)[0])
+    before = int(np.count_nonzero(~clean))
+    candidate[index] = np.nextafter(candidate[index], np.float64(np.inf))
+    after = int(np.count_nonzero(
+        candidate.view(np.uint64) != oracle.view(np.uint64)))
+    R60.require(after == before + 1, "plant did not add exactly one refusal")
+    arrays[name] = candidate
+    report = {
+        "format": FORMAT,
+        "status": "PLANTED_REFUSAL",
+        "worktree": stamp,
+        "source_report": str(reference_path),
+        "plant": {
+            "name": name, "active_flat_index": index,
+            "before_unequal": before, "after_unequal": after,
+            "delta_unequal": after - before,
+        },
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    report["sidecar"] = R60._write_sidecar(output, arrays)
+    return report
+
+
 def run(output: Path, expect_commit: str, reference: Path | None,
         plant: bool, entry_input: Path, round60_report: Path) -> dict:
     stamp = worktree_stamp()
@@ -209,19 +248,28 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--entry-input", type=Path, required=True)
-    parser.add_argument("--round60-report", type=Path, required=True)
+    parser.add_argument("--entry-input", type=Path)
+    parser.add_argument("--round60-report", type=Path)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--plant-entry", action="store_true")
+    parser.add_argument("--plant-sidecar", type=Path)
     args = parser.parse_args(argv)
     try:
-        report = run(
-            args.output, args.expect_commit, args.reference,
-            args.plant_entry, args.entry_input, args.round60_report)
+        if args.plant_sidecar is not None:
+            report = plant_sidecar(
+                args.plant_sidecar, args.output, args.expect_commit)
+        else:
+            R60.require(args.entry_input is not None, "--entry-input is required")
+            R60.require(
+                args.round60_report is not None,
+                "--round60-report is required")
+            report = run(
+                args.output, args.expect_commit, args.reference,
+                args.plant_entry, args.entry_input, args.round60_report)
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
         args.output.write_text(rendered)
         print(rendered, end="")
-        return 2 if args.plant_entry else 0
+        return 2 if (args.plant_entry or args.plant_sidecar is not None) else 0
     except (OSError, RuntimeError, ValueError, KeyError) as error:
         rendered = json.dumps(
             {"status": "REFUSE", "reason": str(error)}, indent=2) + "\n"

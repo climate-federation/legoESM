@@ -66,3 +66,14 @@ def test_raw_kaa_toward_then_mixed_does_not_invent_an_owner(tmp_path):
 def test_round61_has_no_unmeasured_source_boundary():
     assert "s3.raw_kaa.u" in GATE.SOURCE_ORDER
     assert len(GATE.SOURCE_ORDER) == 11
+
+
+def test_sidecar_plant_adds_exactly_one_refusal(tmp_path, monkeypatch):
+    base, _ = _synthetic_arrays(np.array([2.0, 1.0, 0.5]))
+    base["kt3.entry.u"][0] = 0.0
+    base_path, _ = _report(tmp_path, "base", base, "base")
+    monkeypatch.setattr(
+        GATE, "worktree_stamp", lambda: {"clean": True, "commit": "tip"})
+    planted = GATE.plant_sidecar(base_path, tmp_path / "plant.json", "tip")
+    assert planted["plant"]["delta_unequal"] == 1
+    assert planted["status"] == "PLANTED_REFUSAL"
