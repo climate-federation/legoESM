@@ -174,7 +174,7 @@ def test_fold_line_momentum_tendency_is_antisymmetric():
     assert nonzero >= 4
 
 
-@pytest.mark.parametrize("bt_cor", ["avg", "een"])
+@pytest.mark.parametrize("bt_cor", ["avg", "een", "implicit_cn"])
 @pytest.mark.parametrize("n_steps", [100])
 def test_fold_symmetry_survives_100_steps_without_lbc(n_steps, bt_cor,
                                                       monkeypatch):
@@ -183,8 +183,12 @@ def test_fold_symmetry_survives_100_steps_without_lbc(n_steps, bt_cor,
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as mod
     # fix_eta_drift off: that fixer removes any global-mean eta drift and
     # would hide a fold leak from the volume check below.
-    grid, zc, cfg, st = _setup(dict(CARD, fix_eta_drift=False,
-                                    barotropic_coriolis=bt_cor))
+    # "implicit_cn": the production card's barotropic solver (jacobi
+    # preconditioner, face-f Coriolis).
+    extra = (dict(barotropic_solver="implicit_cn",
+                  barotropic_implicit_preconditioner="jacobi")
+             if bt_cor == "implicit_cn" else dict(barotropic_coriolis=bt_cor))
+    grid, zc, cfg, st = _setup(dict(CARD, fix_eta_drift=False, **extra))
     monkeypatch.setattr(mod, "fpivot_fold_line", lambda x, *a, **k: x)
     model = mod.LatLonCGridOceanModel(grid, zc, cfg)
     P = grid.fold.perm_v
