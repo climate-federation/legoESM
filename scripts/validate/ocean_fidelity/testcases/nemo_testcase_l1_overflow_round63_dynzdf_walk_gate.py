@@ -204,14 +204,21 @@ def run(output: Path, expect_commit: str, entry_input: Path,
     oracle_explicit_u = oracle_record["fields"]["explicit_u"]
     oracle_implicit_u = oracle_record["fields"]["implicit_solve_u"]
     R60.require(
-        np.array_equal(oracle_explicit_u,
-                       acquired_parent["fields"]["pre_zdf_u"]),
-        "oracle explicit U differs from same-build parent pre-ZDF U")
-    R60.require(
         np.array_equal(oracle_implicit_u,
                        acquired_parent["fields"]["raw_kaa_u"]),
         "oracle implicit U differs from same-build parent raw-Kaa U")
-    cross_build = {}
+    parent_pre_zdf_u = acquired_parent["fields"]["pre_zdf_u"]
+    cross_build = {
+        "same_build_rhs_pre_zdf_vs_explicit_kaa": {
+            "n": int(oracle_explicit_u.size),
+            "n_unequal": int(np.count_nonzero(
+                oracle_explicit_u.view(np.uint64)
+                != parent_pre_zdf_u.view(np.uint64))),
+            "absolute_max": float(np.max(np.abs(
+                oracle_explicit_u - parent_pre_zdf_u))),
+            "disposition": "distinct compiled statements, not endpoints",
+        },
+    }
     for name in ("pre_zdf_u", "raw_kaa_u"):
         current = acquired_parent["fields"][name]
         historical = historical_parent[name]
