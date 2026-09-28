@@ -104,10 +104,22 @@ read-only`.  It could not initialize its in-process app-server client because
 the read-only sandbox rejected a filesystem write.  Verdict: **independent
 review unavailable in-sandbox**.
 
-The citation gate is run both on this receipt and on its default cumulative
-receipt.  A shifted-line plant on this receipt's KEG citation must fail.  The
-focused gate controls, Python compilation, acquisition preflight, and the
-single `tests/ocean/fidelity` battery are recorded in the final commit below.
+The citation gate passes both on this receipt (four citations) and on its
+default cumulative receipt (274 citations).  The shifted-line plant on this
+receipt's KEG citation fails with gate status `FAIL`.
+
+Focused citation/card-scope tests pass `21/21`.  The mandated single
+`tests/ocean/fidelity -n 12` invocation collected 1,996 tests and reached 99%
+with five failure markers before the xdist process disappeared without a
+terminal summary; no pytest process remained.  The two named standing-red
+files were then rerun in isolation as instructed: 13 passed and exactly the
+two registered failures remained —
+`test_every_report_emitter_stamps_the_worktree` (four pre-existing emitters)
+and `test_full_v2_gate_and_plants` (`A MY_SRC is not verbatim`).  Neither
+failure names a round-62 file.  The new measurement gate's four controls pass,
+including a causal one-ULP payload mutation which changes the frozen active
+payload digest and is refused.  The acquisition preflight applies both
+patches with zero fuzz and passes the writer's Fortran syntax check.
 
 ## OPEN
 
