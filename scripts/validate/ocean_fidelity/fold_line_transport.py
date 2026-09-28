@@ -11,6 +11,8 @@ is the quantity that shows whether the fold is open.
 * NEMO : grid_V ``vocetr_eff`` [m^3/s] at output row 330 (= mesh row 330, the
   fold line; output rows = mesh 0..330, cols = mesh 1..360), record ``rec``.
 
+Gross is reported per column (depth-summed first) and per cell.
+
 Usage: fold_line_transport.py OURS.npz [NEMO_grid_V.nc [rec]]
 """
 from __future__ import annotations
@@ -35,8 +37,11 @@ def ours(path: str) -> dict:
         raise SystemExit(f"{path}: non-finite mass_flux_v / v")
     tr = F[-1] * dx[-1][:, None]              # m^3/s per (i, k), fold line
     # cyclic halo columns 0, n-1 duplicate interior ones: exclude
-    tr = tr[1:-1].sum(axis=1)                 # per column (depth-summed)
+    tr = tr[1:-1]
+    cell = tr[tr > 0].sum() / SV              # per (column, level) cell
+    tr = tr.sum(axis=1)                       # per column (depth-summed)
     return dict(field=key, gross_north_Sv=tr[tr > 0].sum() / SV,
+                gross_north_cell_Sv=cell,
                 net_Sv=tr.sum() / SV,
                 max_abs_v_fold=float(np.abs(v[-1]).max()),
                 time_days=float(d["time_days"]) if "time_days" in d else None)
@@ -45,9 +50,11 @@ def ours(path: str) -> dict:
 def nemo(path: str, rec: int = 0) -> dict:
     import netCDF4 as nc
     with nc.Dataset(path) as ds:
-        tr = np.ma.filled(ds["vocetr_eff"][rec, :, FOLD_ROW_NEMO, :], 0.0).sum(0)
+        t3 = np.ma.filled(ds["vocetr_eff"][rec, :, FOLD_ROW_NEMO, :], 0.0)
+        tr = t3.sum(0)
         v = np.ma.filled(ds["vo"][rec, :, FOLD_ROW_NEMO, :], 0.0)
-    return dict(gross_north_Sv=tr[tr > 0].sum() / SV, net_Sv=tr.sum() / SV,
+    return dict(gross_north_Sv=tr[tr > 0].sum() / SV,
+                gross_north_cell_Sv=t3[t3 > 0].sum() / SV, net_Sv=tr.sum() / SV,
                 max_abs_v_fold=float(np.abs(v).max()), rec=rec)
 
 

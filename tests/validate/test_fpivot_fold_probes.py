@@ -33,8 +33,18 @@ def test_fold_line_transport_ours(tmp_path):
     r = ft.ours(str(tmp_path / "s.npz"))
     assert r["gross_north_Sv"] == pytest.approx(0.6)
     assert r["field"] == "mass_flux_v"
+    assert r["gross_north_cell_Sv"] == pytest.approx(0.6)
     assert r["net_Sv"] == pytest.approx(0.0)
     assert r["max_abs_v_fold"] == pytest.approx(0.4)
+    # per column vs per cell: opposite flows stacked in one column cancel
+    G = np.zeros_like(F)
+    G[-1, 2, 0], G[-1, 2, 1] = 3.0, -1.0
+    np.savez(tmp_path / "c.npz", mass_flux_v_mean=G, mass_flux_v=F, dx_v=dx,
+             v=v)
+    rc = ft.ours(str(tmp_path / "c.npz"))
+    assert rc["field"] == "mass_flux_v_mean"
+    assert rc["gross_north_Sv"] == pytest.approx(0.4)
+    assert rc["gross_north_cell_Sv"] == pytest.approx(0.6)
     F[-1, 3, 1] = np.nan
     np.savez(tmp_path / "b.npz", mass_flux_v=F, dx_v=dx, v=v)
     with pytest.raises(SystemExit):
