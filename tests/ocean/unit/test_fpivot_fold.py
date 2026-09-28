@@ -392,18 +392,37 @@ def test_real_mesh_fold_line_rotation_is_antisymmetric():
     leg = create_tripole_grid(mesh, strip_north_rows=1, dtype=jnp.float64)
     P = np.asarray(g.fold.perm_v)
     c, s = np.asarray(g.cos_alpha_v)[-1], np.asarray(g.sin_alpha_v)[-1]
+    import netCDF4 as nc
+    with nc.Dataset(mesh) as ds:
+        glamf = np.asarray(ds["glamf"][0, -2], dtype=float)      # fold F row
+        gphif = np.asarray(ds["gphif"][0, -2], dtype=float)
+        tm = np.asarray(ds["tmask"][0, 0, -2], dtype=float)       # top T row
+    # Columns whose two flanking fold F points share one stored coordinate
+    # (a placeholder on the Canadian land pole) have no i axis; they must be
+    # land on both sides, and keep the unrotated frame.
+    degen = (glamf == np.roll(glamf, 1)) & (gphif == np.roll(gphif, 1))
+    assert degen.sum() <= 40
+    assert (tm[degen] == 0).all() and (tm[P[degen]] == 0).all()
     k = np.arange(1, g.n_lon - 1)
-    k = k[(P[k] >= 1) & (P[k] <= g.n_lon - 2) & (P[k] != k)]
+    k = k[(P[k] >= 1) & (P[k] <= g.n_lon - 2) & (P[k] != k)
+          & ~degen[k] & ~degen[P[k]]]
     np.testing.assert_allclose(c[k], -c[P[k]], atol=1e-12)
     np.testing.assert_allclose(s[k], -s[P[k]], atol=1e-12)
     np.testing.assert_allclose(c ** 2 + s ** 2, 1.0, atol=1e-12)
     # rows below the fold are the generic builder's, unchanged
     np.testing.assert_array_equal(np.asarray(g.cos_alpha_v)[:-1],
                                   np.asarray(leg.cos_alpha_v)[:-1])
+    # Signed reference, independent of the fold: NEMO's F row is ordered
+    # along the fold with increasing column, so from each column's own side
+    # the new i axis must agree in sign with the copied row-below i axis
+    # (positive dot) on the WET fold faces.
     cl, sl = np.asarray(leg.cos_alpha_v)[-1], np.asarray(leg.sin_alpha_v)[-1]
-    print("legacy top-row antisym defect", np.abs(cl[k] + cl[P[k]]).max(),
-          "| new vs legacy max |d cos|", np.abs(c - cl)[k].max(),
-          "median", np.median(np.abs(c - cl)[k]))
+    wet = k[(tm[k] > 0) & (tm[P[k]] > 0)]
+    assert wet.size > 20
+    dot = c * cl + s * sl
+    assert (dot[wet] > 0.5).all(), dot[wet].min()   # measured min 0.88 (near the pole)
+    print("legacy top-row antisym defect", np.abs(cl[wet] + cl[P[wet]]).max(),
+          "| wet fold faces", wet.size, "| min dot", dot[wet].min())
 
 
 def test_transcription_reproduces_nemo_mesh_halo():

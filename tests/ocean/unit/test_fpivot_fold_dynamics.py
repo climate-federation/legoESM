@@ -247,3 +247,37 @@ def test_noslip_fmask_fold_row_is_perm_f_symmetric():
     PF = np.asarray(grid.fold.perm_f)
     assert (fm == 2.0).any()
     np.testing.assert_array_equal(fm, fm[PF])
+
+
+def test_implicit_helmholtz_fold_row_matches_independent_stencil():
+    """The implicit free-surface operator couples each top cell to its fold
+    partner through the fold face: A(eta) on the top row equals an
+    independently assembled eta - coeff * div(H grad eta) whose north face
+    reads eta[-1][P_T] (a zero fold gradient would fail this)."""
+    from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
+        _helmholtz_apply)
+    grid = _grid()
+    rng = np.random.default_rng(5)
+    eta = rng.standard_normal((N_LAT, N_LON))
+    H_u = rng.uniform(100.0, 4000.0, (N_LAT, N_LON + 1))
+    H_u[:, -1] = H_u[:, 0]
+    H_v = rng.uniform(100.0, 4000.0, (N_LAT + 1, N_LON))
+    coeff = 3.0e4
+    one = np.ones_like(eta)
+    A = np.asarray(_helmholtz_apply(
+        jnp.asarray(eta), jnp.asarray(H_u), jnp.asarray(H_v), jnp.asarray(coeff),
+        grid, jnp.asarray(one), jnp.asarray(np.ones_like(H_u)),
+        jnp.asarray(np.ones_like(H_v))))[-1]
+    P = np.asarray(grid.fold.perm_T)
+    dxu, dyu = np.asarray(grid.dx_u), np.asarray(grid.dy_u)
+    dxv, dyv = np.asarray(grid.dx_v), np.asarray(grid.dy_v)
+    area = np.asarray(grid.area)
+    e, c = eta[-1], np.arange(N_LON)
+    cE, cW = (c + 1) % N_LON, (c - 1) % N_LON
+    gxW = (e - e[cW]) / dxu[-1, c]
+    gxE = (e[cE] - e) / dxu[-1, c + 1]
+    gyS = (e - eta[-2]) / dyv[-2]
+    gyN = (e[P] - e) / dyv[-1]
+    div = (H_u[-1, c + 1] * dyu[-1, c + 1] * gxE - H_u[-1, c] * dyu[-1, c] * gxW
+           + H_v[-1] * dxv[-1] * gyN - H_v[-2] * dxv[-2] * gyS) / area[-1]
+    np.testing.assert_allclose(A, e - coeff * div, rtol=1e-11, atol=1e-12)

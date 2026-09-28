@@ -433,40 +433,43 @@ def _detect_fpivot_fold(glamt, gphit, n_lat, n_lon, vf_coords,
                                                  cap_dlat_rel_deviation))
 
 
-def fpivot_fold_line_rotation(glamv, gphiv, perm_v):
+def fpivot_fold_line_rotation(glamv, gphiv, glamf, gphif):
     """(cos_alpha_v, sin_alpha_v) on the F-pivot fold line (stored top V row).
 
     The generic builder copies the row below's angle onto the top v row; on
-    the F-pivot layout that row is the fold line, a face whose normal seen
-    from column ``c`` is the OPPOSITE of the normal seen from ``perm_v[c]``
-    (same physical point), so the angle must be taken AT the face.  The local
-    j direction at face ``c`` is the chord from the V point below (row -2,
-    column c) to the V ghost above (row -2, column ``perm_v[c]``, NEMO
-    lbc_nfd 'V'), projected on geographic east/north at the fold point
-    (3-D chord: the fold runs over the pole, where lon/lat differences are
-    ill-conditioned).  Same convention as :func:`_compute_rotation_angles`
-    (``cos = N_j/|d|``, ``sin = -E_j/|d|``); the chord at ``perm_v[c]`` is the
-    exact negative, so both components are antisymmetric under ``perm_v``.
+    the F-pivot layout that row is the fold line, one physical face per
+    column pair whose i axis seen from column ``c`` is the OPPOSITE of the one
+    seen from ``perm_v[c]``, so the angle must be taken AT the face.  As NEMO
+    ``geo2ocean`` does for V points, the local i axis is the chord between the
+    two F points flanking the V point (NEMO ``F(c-1) -> F(c)``, both ON the
+    self-mapped fold F row), as a 3-D chord projected on geographic east /
+    north at the V point (the fold crosses the pole, where lon/lat
+    differences are ill-conditioned).  Convention of
+    :func:`_compute_rotation_angles`: ``cos = cos(alpha)``, ``sin =
+    sin(alpha)`` with alpha the i-axis angle from east.  Since
+    ``F(P_F k) == F(k)``, the chord at ``perm_v[c]`` is the exact negative of
+    the chord at ``c``: both components are antisymmetric under ``perm_v``.
+    ``glamf``/``gphif``: NEMO layout (column ``ji`` east of T ``ji``).
     """
-    lam = jnp.deg2rad(jnp.asarray(glamv, dtype=jnp.float64))
-    phi = jnp.deg2rad(jnp.asarray(gphiv, dtype=jnp.float64))
+    def rad(a):
+        return jnp.deg2rad(jnp.asarray(a, dtype=jnp.float64))
 
     def xyz(la, ph):
         return jnp.stack([jnp.cos(ph) * jnp.cos(la), jnp.cos(ph) * jnp.sin(la),
                           jnp.sin(ph)], axis=-1)
-    below = xyz(lam[-2], phi[-2])
-    d = below[perm_v] - below
-    la0, ph0 = lam[-1], phi[-1]
+    f_east = xyz(rad(glamf)[-1], rad(gphif)[-1])     # NEMO F(c)
+    d = f_east - jnp.roll(f_east, 1, axis=0)          # F(c) - F(c-1)
+    la0, ph0 = rad(glamv)[-1], rad(gphiv)[-1]
     east = jnp.stack([-jnp.sin(la0), jnp.cos(la0), jnp.zeros_like(la0)], axis=-1)
     north = jnp.stack([-jnp.sin(ph0) * jnp.cos(la0), -jnp.sin(ph0) * jnp.sin(la0),
                        jnp.cos(ph0)], axis=-1)
-    e_j = jnp.sum(d * east, axis=-1)
-    n_j = jnp.sum(d * north, axis=-1)
-    r = jnp.sqrt(e_j ** 2 + n_j ** 2)
+    e_i = jnp.sum(d * east, axis=-1)
+    n_i = jnp.sum(d * north, axis=-1)
+    r = jnp.sqrt(e_i ** 2 + n_i ** 2)
     ok = r > 0.0
     r = jnp.where(ok, r, 1.0)
-    # Self-paired / degenerate columns (zero chord) keep the unrotated frame.
-    return jnp.where(ok, n_j / r, 1.0), jnp.where(ok, -e_j / r, 0.0)
+    # A degenerate (zero) chord keeps the unrotated frame.
+    return jnp.where(ok, e_i / r, 1.0), jnp.where(ok, n_i / r, 0.0)
 
 
 def fpivot_perms(n_lon: int, ew_halo: bool):
@@ -832,7 +835,8 @@ def create_tripole_grid(
         [sin_alpha_v[0:1], sin_alpha_v], axis=0
     )
     if fold_pivot == "F":
-        c_top, s_top = fpivot_fold_line_rotation(glamv, gphiv, fold.perm_v)
+        c_top, s_top = fpivot_fold_line_rotation(glamv, gphiv, raw["glamf"],
+                                                  raw["gphif"])
         cos_alpha_v = cos_alpha_v.at[-1].set(c_top.astype(dtype))
         sin_alpha_v = sin_alpha_v.at[-1].set(s_top.astype(dtype))
 
