@@ -316,8 +316,14 @@ def test_warm_start_uses_loaded_state(tmp_path):
         snow_age=jnp.zeros(ncol),
     )
     seed_path = tmp_path / "seed.npz"
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_SURFDATA_COSBY, soil_hydraulics_stamp)
+    # Stamped as this driver's own hydraulics, so the seed is carried verbatim.
     save_land_restart(seed_path, seed, land_mode="multilayer",
-                      t_end_s=0.0, n_steps_completed=0)
+                      t_end_s=0.0, n_steps_completed=0,
+                      soil_hydraulics=soil_hydraulics_stamp(
+                          "clapp_hornberger", HYDRAULICS_SOURCE_SURFDATA_COSBY,
+                          str(sd)))
 
     out = tmp_path / "warm"
     cfg_path = _write_smoke_config(tmp_path, sd)

@@ -452,7 +452,7 @@ enter FCT and the vertical tridiagonal solve
 Before round 3, legoESM's only implementation was the older local vertical-only momentum form
 in `packages/ocean/legoesm/ocean/vertical.py:1716-1909`; it is applied after
 the completed RK3 program in
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4996-5054`.
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:5101-5159`.
 The tracer WS-RK3 stages received unpartitioned vertical transport and had no
 matching implicit tracer solve.  This was a **SOURCE-CONFIRMED MISMATCH**;
 round 3's completed discriminating run promotes it to the confirmed stability

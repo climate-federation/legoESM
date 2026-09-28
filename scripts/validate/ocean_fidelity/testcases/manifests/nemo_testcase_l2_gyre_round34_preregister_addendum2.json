@@ -1,0 +1,74 @@
+{
+  "format": "nemo-testcase-l2-gyre-round34-preregister-addendum2-v1",
+  "date": "2026-09-06",
+  "amends": "nemo_testcase_l2_gyre_round34_preregister.json at a6a96b933bfb, and addendum 1 at 6ea69c28df01",
+  "written_when": "after Part A's admission and Rule-12 discharge, before either flag moved",
+  "why": "the user answered two standing ASKED items in this round, so two configuration changes enter the round that were not in the original preregistration.  They are registered here, with predictions and falsifiers, BEFORE either is made.",
+
+  "DECISION_19": {
+    "the_users_words": "on BOTH tank cards (LOCK_EXCHANGE and OVERFLOW) the barotropic removal before the implicit vertical solve goes OFF -> ON (zdf_baroclinic_only False -> True), because NEMO executes dynzdf.F90:148-171 there (ln_drgimp=T, ln_dynspg_ts=T per their ocean.output).  Do as NEMO does.",
+    "disposition": "ASKED and ANSWERED by the user.  It is not a choice this round made.",
+    "what_resolves_today_MEASURED_by_instantiating_the_cards": {
+      "LOCK_EXCHANGE-zco": "zdf_baroclinic_only False, zdf_drag_in_matrix False, barotropic_drag_substep False, barotropic.nemo_stage_mean_imposition False",
+      "OVERFLOW-zps": "zdf_baroclinic_only False, zdf_drag_in_matrix False, barotropic_drag_substep False, barotropic.nemo_stage_mean_imposition False",
+      "GYRE-zco": "zdf_baroclinic_only True, zdf_drag_in_matrix True, barotropic_drag_substep True, barotropic.nemo_stage_mean_imposition True"
+    },
+    "where_it_resolves": "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py::_model_config.  The GYRE arm sets the three-flag bundle explicitly; the tank arm falls through to the shared LatLonCGridOceanConfig.from_flat call, which never names the field, so it takes the dataclass default False (ocean/state.py:2732).  Only the tank arm changes; GYRE's resolution is re-printed after the change and must be identical.",
+    "the_oracle_statements_read_from_the_TANKS_OWN_COMPILED_ARM": "tests/LOCK_EXCHANGE_OMIP_L1_P3_R33ZDF/BLD/ppsrc/nemo/dynzdf.f90:186 opens IF( ln_drgimp .AND. ln_dynspg_ts ); :188-191 removes the barotropic velocity, puu(Kaa) = (puu(Kaa) - uu_b(Kaa))*umask on every level; :192-200 adds the barotropic bottom stress at the deepest wet level, zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))*uu_b(Kaa) / (e3t_1d(iku)*(1+r3u(Kaa)*umask)).",
+    "MEASURED_PREMISE_the_bottom_stress_add_back_is_EXACTLY_ZERO_on_both_tanks": "rCdU_bot in each tank's own round-33 record is exactly 0.0 on every OWNED cell: 0 of 390 nonzero on LOCK (134x7, halo stripped) and 0 of 606 on OVERFLOW (206x7).  Its whole-array maximum is a denormal near 6.9e-310, which is uninitialised HALO memory, not a value.  GYRE's is 5.0e-05 on 600 of 704 owned cells, so the statement is live there and not here.  Consequence: on the tanks NEMO's dyn_zdf entry vector is exactly (A - uu_b)*umask, and legoESM not transcribing the bottom-stress statement is bit-exact rather than merely small.  This retires the round-32 receipt's 'not obviously inert' worry with a measurement.",
+    "predictions": {
+      "PA2a": {
+        "claim": "the flip CHANGES both tanks' kt=1..10 trajectories: at least one row's field moves by a nonzero amount.",
+        "threshold": "max previous-legoESM field move > 0 on at least one row of each card",
+        "falsifier": "bit-identical trajectories on a card -> the flag is INERT there, which is a real result and would mean the removal and re-addition compose to the identity through this card's tridiagonal"
+      },
+      "PA2b": {
+        "claim": "the first-over-bar step does NOT move EARLIER on either tank.",
+        "threshold": "first-over-bar kt after >= first-over-bar kt before, on both cards",
+        "falsifier": "it moves earlier -> registered as a worsened row with its boundary and owner named; under Rule 12 the faithful change still stays"
+      },
+      "PA2c": {
+        "claim": "the size of the move is bounded by the barotropic velocity the removal subtracts times the tridiagonal's failure to annihilate a column constant.  With A_v = 1.0e-4 and rDt = 1 s (LOCK) / 10 s (OVERFLOW), and uu_b(Kaa) at 1.135367e-03 m/s (LOCK) / 4.502970e-02 m/s (OVERFLOW), the kt=1 move is predicted below 1e-6 m/s on LOCK and below 1e-4 m/s on OVERFLOW.",
+        "threshold": "kt=1 u field move below those two values",
+        "falsifier": "above either -> the removal is not composing the way the docstring says and the mechanism must be re-read before any number is quoted"
+      },
+      "PA2d_RULE_12_AND_ITS_RECORD_GAP": {
+        "what_rule_12_needs": "the CHANGED operator is the barotropic removal, which maps (the explicit stage update A, uu_b(Kaa), umask) to the solve input.  NEMO's OUTPUT of that operator is uu_Kaa_pre and it is in the record.  Its INPUT A is NOT: the record carries uu_Kbb_in, uu_Krhs_in, uu_b_Kaa, uu_Kaa_pre and uu_Kaa_out, and the tanks take the key_qco arm (ln_dynadv_vec = F), which needs r3u(Kbb), r3u(Kmm) and r3u(Kaa) -- only r3u(Kaa) is recoverable, from e3u_Kaa / e3u_0.",
+        "why_the_obvious_route_is_CIRCULAR": "reconstructing A as uu_Kaa_pre + uu_b and feeding it to legoESM's removal returns uu_Kaa_pre by construction, because the reconstruction is the operator's own inverse.  That is exactly the circularity round 33's DIFF review caught, and it is not repeated.",
+        "what_is_done_instead": "(a) the WRITE-only frame that closes it is SPECIFIED and NOT run -- one array pair, puu(:,:,:,Kaa) and pvv(:,:,:,Kaa) as the arm at dynzdf.f90:165-176 leaves them and BEFORE the removal at :188-191, labelled uu_Kaa_stage/vv_Kaa_stage in the same self-describing stream; (b) what IS measurable is measured -- legoESM's own solve-input vector, through the model's own compiled path, scored against NEMO's uu_Kaa_pre, on BOTH arms.",
+        "claim": "with the flag ON, legoESM's dyn_zdf solve-input vector moves TOWARD NEMO's uu_Kaa_pre on both tanks.",
+        "threshold": "the absolute residual against uu_Kaa_pre falls on both cards",
+        "falsifier": "it rises or does not move -> the flip did not do what dynzdf.f90:188-191 does and the transcription must be re-read before the change lands"
+      }
+    }
+  },
+
+  "DECISION_17": {
+    "the_users_words": "in ocean/vertical.py move ONLY the `active is None` half of the mask guard (the raise at ~65-70) below the linear_free_surface early return (~74-75), so linear-free-surface callers are no longer refused for a mask that path never reads; the other half of the guard (mask supplied but wrong) and the moving-thickness (qco) path stay exactly as they are.",
+    "disposition": "ASKED and ANSWERED by the user.  The earlier proposal to switch the demo card to qco instead is WITHDRAWN.",
+    "predictions": {
+      "PA3a": {
+        "claim": "the four test_nemo_recipe failures go green and no other test in that file changes status.",
+        "threshold": "the four named tests pass; the file's pass count rises by exactly four",
+        "falsifier": "any other test moves"
+      },
+      "PA3b": {
+        "claim": "no certified card's trajectory moves by a single bit.  The guard is a raise, not arithmetic: GYRE, LOCK_EXCHANGE and OVERFLOW all resolve linear_free_surface FALSE and all supply is_active, so none of them reaches either half of the guard, before or after.",
+        "threshold": "kt=1..10 bit-identical on all three cards",
+        "falsifier": "any moved cell -> the edit changed arithmetic, which it must not"
+      },
+      "PA3c": {
+        "claim": "a qco caller with no mask is STILL refused, and a test that moves the guard back above the early return goes red.",
+        "threshold": "both arms present and both shown to fire",
+        "falsifier": "n/a -- a non-vacuity requirement"
+      }
+    }
+  },
+
+  "ordering": "Part A (admission + Rule-12 discharge) is DONE and its numbers are already recorded.  A2 lands next, then A3, then Part B.  Each change is measured against a BEFORE arm taken on a clean committed tree.",
+  "not_authorised_and_untouched": [
+    "any other flag on any card",
+    "GYRE's resolution of zdf_baroclinic_only, zdf_drag_in_matrix, barotropic_drag_substep or nemo_stage_mean_imposition",
+    "the moving-thickness (qco) half of the vertical.py guard"
+  ]
+}

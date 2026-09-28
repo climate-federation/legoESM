@@ -85,30 +85,33 @@ def geostrophic_wind_from_gradients(
     dlnps_dy: jax.Array,
     T_v: jax.Array,
     f_c: float,
+    *,
+    dlnp_dlnps: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    """Geostrophic wind from the sigma-surface geopotential + surface-pressure gradients.
+    """Geostrophic wind from the model-level geopotential + surface-pressure gradients.
 
     Uses the standard two-term pressure-gradient decomposition to convert the
-    **sigma-surface** geopotential gradient ``∂Φ/∂·|_σ`` to the **pressure-surface**
+    **model-level** geopotential gradient ``∂Φ/∂·|_η`` to the **pressure-surface**
     gradient ``∂Φ/∂·|_p`` that enters geostrophic balance::
 
-        ∂Φ/∂x|_p = ∂Φ/∂x|_σ + R_d·T_v·∂ln p_s/∂x          (derivation: at constant p,
-        dσ/dx|_p = −σ ∂ln p_s/∂x and ∂Φ/∂σ = −R_d T_v/σ ⇒ the +R_d T_v ∂ln p_s term)
+        ∂Φ/∂x|_p = ∂Φ/∂x|_η + R_d·T_v·∂ln p/∂x|_η
+                 = ∂Φ/∂x|_η + R_d·T_v·(∂ln p/∂ln p_s)·∂ln p_s/∂x
 
-    then geostrophic balance ``f v_g = ∂Φ/∂x|_p``, ``f u_g = −∂Φ/∂y|_p``::
+    (``∂Φ/∂ln p = −R_d T_v``).  ``dlnp_dlnps`` is the level's
+    ``∂ln p/∂ln p_s``: ``1`` for pure sigma (``p = σ p_s``), ``B·p_s/p`` for a
+    hybrid level (``p = A p_ref + B p_s``; ``0`` at pure-pressure levels).
+    Then geostrophic balance ``f v_g = ∂Φ/∂x|_p``, ``f u_g = −∂Φ/∂y|_p``.
 
-        v_g = +(∂Φ/∂x|_σ + R_d·T_v·∂ln p_s/∂x) / f
-        u_g = −(∂Φ/∂y|_σ + R_d·T_v·∂ln p_s/∂y) / f
-
-    All inputs are the gathered single column (``(nlev,)`` for the Φ gradients +
-    ``T_v``; the ``ln p_s`` gradient is column-scalar and broadcasts).  Components
+    All inputs are the gathered single column (``(nlev,)`` for the Φ gradients,
+    ``T_v`` and ``dlnp_dlnps``; the ``ln p_s`` gradient is column-scalar and
+    broadcasts).  Components
     are in the SAME grid-aligned frame as the gradient operator (so they match the
     model's ``u``/``v``).  ``f_c`` is the column's scalar Coriolis; the caller
     guards ``|f_c|`` away from zero (see :data:`_MIN_GEOSTROPHIC_LAT_DEG`), so no
     masked division is needed here.  Pure-JAX, differentiable.
     """
-    dphi_dx_p = dphi_dx_sigma + constants.R_d * T_v * dlnps_dx
-    dphi_dy_p = dphi_dy_sigma + constants.R_d * T_v * dlnps_dy
+    dphi_dx_p = dphi_dx_sigma + constants.R_d * T_v * dlnp_dlnps * dlnps_dx
+    dphi_dy_p = dphi_dy_sigma + constants.R_d * T_v * dlnp_dlnps * dlnps_dy
     u_g = -dphi_dy_p / f_c
     v_g = dphi_dx_p / f_c
     return u_g, v_g
@@ -237,7 +240,7 @@ def _geostrophic_wind_column(
     full geopotential of a pressure surface is ``Φ_total = Φ_s + Φ_above`` with the
     surface geopotential ``Φ_s = g·z_s`` (``= phis``); since ``phis`` is
     σ-independent, ``∇_σ Φ_total = ∇phis + ∇_σ Φ_above`` and the SAME σ→p correction
-    (``+R_d·T_v·∇ln p_s``) then applies — i.e. the orographic term is exactly
+    (``+R_d·T_v·(∂ln p/∂ln p_s)·∇ln p_s``) then applies — i.e. the orographic term is exactly
     ``∇phis`` added to the above-surface geopotential gradient.  Pass ``phis``
     (``(...)`` surface field, m²/s², co-located with ``p_s``) to include it; omit it
     (``None``) for the flat/ocean case (unchanged behaviour).
@@ -281,8 +284,15 @@ def _geostrophic_wind_column(
     # coriolis_f_c() calls float() on a jnp result, which is a tracer (and thus
     # errors) when the extractor itself is traced under jax.jit.
     f_c = 2.0 * constants.Omega * math.sin(float(lat_rad))
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        # ∂ln p/∂ln p_s = B·p_s/p at full levels (the dycores' hybrid PGF factor).
+        p_s_col = jnp.asarray(p_s, dtype=T.dtype)[idx]
+        dlnp_dlnps = sigma_coord.B_full * p_s_col / sigma_coord.pressure_at_full(p_s_col)
+    else:
+        dlnp_dlnps = jnp.ones_like(T_v[idx])  # pure sigma: p = σ·p_s
     return geostrophic_wind_from_gradients(
-        dphi_dx[idx], dphi_dy[idx], dlnps_dx[idx], dlnps_dy[idx], T_v[idx], f_c
+        dphi_dx[idx], dphi_dy[idx], dlnps_dx[idx], dlnps_dy[idx], T_v[idx], f_c,
+        dlnp_dlnps=dlnp_dlnps,
     )
 
 

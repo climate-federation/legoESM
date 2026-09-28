@@ -6,8 +6,19 @@ from typing import NamedTuple
 
 from legoesm import constants
 from legoesm.surface_albedo import IceAlbedoConfig
+from legoesm.ice.constants_config import (
+    NEMO_SI3_CONSTANTS_CONFIG,
+    IceConstantsConfig,
+)
 
 __param_spec__ = {
+    "SI3ThermoConfig": {
+        "scheme_key": "ice.si3_thermo",
+        "excluded": {
+            "new_ice_salinity_fraction": "oracle identity: rn_sinew=0.75 is fixed by the ORCA1 deck",
+        },
+        "params": {},
+    },
     "SnowConfig": {
         "scheme_key": "ice.snow",
         "excluded": {
@@ -277,6 +288,81 @@ class MeltPondConfig(NamedTuple):
     snow_block_threshold: float = 5.0e-3
 
 
+class SI3ThermoConfig(NamedTuple):
+    """The only supported SI3 thermodynamic identity in this campaign.
+
+    Selector provenance: BL99/P07 is ``icethd_zdf_bl99.F90:248-275``;
+    option-2 salinity is ``icethd_sal.F90:204-249``; the top-level ordering is
+    ``icethd.F90:148-183``.  Values are exposed for receipts and validation,
+    but :func:`validate_si3_thermo_config` rejects every other combination.
+    """
+
+    n_ice_layers: int = 3
+    n_snow_layers: int = 3
+    conductivity: str = "p07"
+    salinity_scheme: int = 2
+    new_ice_salinity_fraction: float = 0.75
+    drainage: bool = True
+    flushing: bool = True
+    ponds: bool = False
+    lateral_melt: bool = False
+
+
+def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
+    """Reject unsupported SI3 selector mixtures before any tendency runs."""
+
+    if config.thermo_scheme != "si3_bl99":
+        return
+    wanted = SI3ThermoConfig()
+    if config.si3 != wanted:
+        raise ValueError(
+            "thermo_scheme='si3_bl99' supports only the ORCA1-resolved "
+            f"identity {wanted!r}; got {config.si3!r}"
+        )
+    if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
+        raise ValueError(
+            "thermo_scheme='si3_bl99' requires the NEMO 5.0.2 phycst/EOS "
+            "constant set; mixing canonical legoESM constants into this "
+            "oracle identity is unsupported"
+        )
+    conflicts = []
+    if config.n_categories != 1:
+        conflicts.append("n_categories must be 1 (HFN single category; namitd)")
+    if config.ponds.enabled:
+        conflicts.append("ponds.enabled must be False (ln_pnd=.false.)")
+    if config.ridging.enabled:
+        conflicts.append("ridging is inert in the C1D thermodynamic column")
+    if config.dynamics != "none" or config.transport != "none":
+        conflicts.append("dynamics and transport must both be 'none' in C1D")
+    if conflicts:
+        raise ValueError("invalid SI3 C1D identity: " + "; ".join(conflicts))
+
+
+def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
+    """Reject mixtures outside the ORCA1 constant-coefficient ice identity.
+
+    Selector provenance is ``sbcblk.F90:335-350,1085-1168`` and the ORCA1
+    overlay ``namelist_cfg:129-142``.  The shipped C1D ECMWF arm is not this
+    selector and remains uncertified.
+    """
+    if config.bulk_scheme != "nemo_si3_constant":
+        return
+    expected = constants.bulk_transfer_ice_orca1
+    conflicts = []
+    if (config.Cd_ice, config.Ch_ice, config.Ce_ice) != (
+        expected, expected, expected,
+    ):
+        conflicts.append("Cd_ice=Ch_ice=Ce_ice must be ORCA1's 1e-3")
+    if config.emissivity_ice != constants.emissivity_ice_nemo:
+        conflicts.append("emissivity_ice must be NEMO sbc_phy emiss_i")
+    if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
+        conflicts.append("NEMO SI3 physical-constant set is required")
+    if config.n_categories != 1 or config.ponds.enabled:
+        conflicts.append("only jpl=1 with ln_pnd=.false. is certified")
+    if conflicts:
+        raise ValueError("invalid NEMO SI3 bulk identity: " + "; ".join(conflicts))
+
+
 class SeaIceConfig(NamedTuple):
     """Thermodynamic slab + optional dynamics sea ice configuration.
 
@@ -306,10 +392,10 @@ class SeaIceConfig(NamedTuple):
     h_ice_min: float = 0.01         # Min ice thickness for smooth ops [m]
     albedo_ice: float = 0.65        # Fallback constant albedo
     albedo_ocean: float = 0.06      # Ocean albedo for open-water freezing calc
-    emissivity_ice: float = 0.97
+    emissivity_ice: float = constants.emissivity_ice
     z0_ice: float = 5e-4            # Ice roughness length [m]
-    Cd_ice: float = 1.5e-3          # Ice-atmosphere drag coefficient (constant)
-    Ch_ice: float = 1.5e-3          # Ice-atmosphere heat transfer coeff (constant)
+    Cd_ice: float = constants.bulk_transfer_ice_default  # Ice-atmosphere drag coefficient
+    Ch_ice: float = constants.bulk_transfer_ice_default  # Ice-atmosphere heat transfer coefficient
     # Transport
     drag_ocean: float = 5.5e-3      # Ocean-ice drag coefficient
     drag_atm: float = 1.3e-3        # Air-ice drag coefficient
@@ -420,3 +506,18 @@ class SeaIceConfig(NamedTuple):
     #    to Tf (frazil).  Needs q_open_top + ocean_dz_top_m from the
     #    caller (step_sea_ice kwargs); the OMIP driver passes them.
     lead_freeze_source: str = "ice_skin"
+    # Layered SI3 is an option inside this existing model.
+    # ORDER, decided at the 2026-09-25 merge: both sides appended fields at
+    # the tail claiming to preserve positional SeaIceConfig constructors, and
+    # only one of the two claims can survive.  main's lead_freeze_source keeps
+    # its own index (immediately after sw_transmittance_const) because main is
+    # the shared tree; the four fidelity-lane fields below move one place
+    # later.  No positional SeaIceConfig(...) call exists anywhere in the
+    # tree -- every call site is keyword-only -- so nothing is broken either
+    # way, and this comment replaces two claims that could not both be true.
+    thermo_scheme: str = "zero_layer"
+    si3: SI3ThermoConfig = SI3ThermoConfig()
+    ice_constants: IceConstantsConfig = IceConstantsConfig()
+    # NEMO distinguishes the Dalton (Ce) and Stanton (Ch) coefficients even
+    # when ORCA1 makes them equal.
+    Ce_ice: float = constants.bulk_transfer_ice_default

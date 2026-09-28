@@ -1,0 +1,233 @@
+{
+  "concurrent_session_in_this_worktree": {
+    "committed_onto_this_branch": "7d7cbfb97319 round-29 preregistration, between two round-28 commits",
+    "consequence": "the worktree is no longer clean, and 'no model numerics landed' is a claim about the commit range 359c33c40ecc..HEAD, not about the working tree",
+    "handling": "not touched, not staged; every round-28 commit used explicit pathspecs",
+    "uncommitted_when_this_was_written": [
+      "packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py",
+      "tests/ocean/unit/test_nemo_recipe.py",
+      "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round29_zdf_matrix.py (untracked)"
+    ]
+  },
+  "date": "2026-09-05",
+  "forbidden_and_not_done": [
+    "signed-zero dyn_vor accumulation (user decision 16)",
+    "demo card vertical_momentum_scheme / adaptive_implicit_vertadv (15C)",
+    "LOCK card vorticity_scheme"
+  ],
+  "format": "nemo-testcase-l2-gyre-round28-v1",
+  "item1_gyre_merge_blocker": {
+    "kt1_barotropic_first_bit_unequal": {
+      "absolute_max": 5.048709793414476e-29,
+      "bit_unequal": 1,
+      "boundary": "trd_u",
+      "n": 580,
+      "substep": 7
+    },
+    "kt1_barotropic_first_over_bar": null,
+    "kt1_barotropic_frames_waived": {
+      "frames": [
+        "transport_metric_u",
+        "transport_metric_v"
+      ],
+      "reason": "oracle stores e2u/e1v metric transport; no independent metric operand was dumped (phase-3 gate's existing UNMEASURED disposition)"
+    },
+    "kt1_barotropic_rows_scored": 900,
+    "kt1_entry": {
+      "kt1_entry_abs_max_ssh": 0.0,
+      "kt1_entry_abs_max_u": 0.0,
+      "kt1_entry_abs_max_v": 0.0,
+      "kt2_entry_abs_max_ssh": 0.0028480078407133284
+    },
+    "kt1_slow_forcing_bit_census": {
+      "slow_u": {
+        "bit_unequal": 0,
+        "n": 580
+      },
+      "slow_v": {
+        "bit_unequal": 0,
+        "n": 570
+      }
+    },
+    "kt2_eta_over_H_abs_max": 6.622180591839445e-07,
+    "kt2_reference_minus_live_relative": {
+      "u": 8.307570867102084e-16,
+      "v": 5.993770496385322e-16
+    },
+    "nemo_source": [
+      "stp2d.F90:177 SELECT CASE( n_dynadv ); :178 vector arm (GYRE, ln_dynadv_vec=.true.) body :180; :183 flux arm (LOCK/OVERFLOW) body :185",
+      "domain.F90:159 r1_hu_0 = ssumask/(hu_0+1-ssumask)",
+      "stprk3.F90:186 stp_2D called once per step from the Nbb entry"
+    ],
+    "reference_arm_calibration_vs_nemo_dumped_operands": {
+      "u": {
+        "live_e3_vs_reference_e3_0_bit_unequal": 0,
+        "mask_bit_unequal": 0,
+        "r1_h0_bit_unequal": 0
+      },
+      "v": {
+        "live_e3_vs_reference_e3_0_bit_unequal": 0,
+        "mask_bit_unequal": 0,
+        "r1_h0_bit_unequal": 0
+      }
+    },
+    "retracted": "round 27's unmeasured O(eta/H) sizing of reference-vs-live weighting",
+    "verdict": "REFUTED"
+  },
+  "item1b_next_operand_min_versus_mean": {
+    "comparison": "ARM-TO-ARM, NOT ORACLE-SCORED",
+    "kt1": {
+      "bit_unequal": 0,
+      "max_relative_min_minus_mean": 0.0,
+      "n": 580,
+      "regime": "eta == 0"
+    },
+    "kt2": {
+      "bit_unequal": 580,
+      "max_relative_min_minus_mean": 3.058607589676341e-08,
+      "n": 580,
+      "regime": "eta != 0"
+    },
+    "nemo_source": "domqco.F90:166-168 r3u = 0.5*(e1e2t(i)*ssh(i) + e1e2t(i+1)*ssh(i+1)) * r1_hu_0 * r1_e1e2u; stp2d.F90:200 divides the wind stress by r1_hu(Kbb)"
+  },
+  "item2_citation_gate": {
+    "audited_rounds": "25 and later",
+    "defeats_after_the_fix": {
+      "bare ENDIF anchor": "AMBIGUOUS-ANCHOR",
+      "five terminal-token ranges": "EXTENT-MISMATCH",
+      "reversed range": "BAD-CITATION",
+      "uniform and single-endpoint shifts": "SYMBOL-NOT-AT-LINE",
+      "unmapped citation appended to a receipt copy": "FAIL, exit 1",
+      "widened extent": "EXTENT-MISMATCH",
+      "widened extent + widened pin": "SYMBOL-NOT-AT-LINE"
+    },
+    "defeats_confirmed_against_round27_gate": [
+      "stprk3_stg.F90:309-334 passed with its end moved to 533 (both lines ENDIF)",
+      "a range written backwards raised IndexError instead of failing"
+    ],
+    "map_entries": 86,
+    "reanchored_by_occurrence": 31,
+    "receipt_citations_checked": 87,
+    "tests": "16 passed, including two that call run() on the real receipt",
+    "unaudited_rounds": "1-24"
+  },
+  "item3_bit_bar_in_exit_code": {
+    "LOCK_EXCHANGE-zco": {
+      "bit_unequal": 1260,
+      "exit": 1,
+      "n": 2540,
+      "status": "VALUE-AT-BAR"
+    },
+    "OVERFLOW-zps": {
+      "bit_unequal": 16400,
+      "exit": 1,
+      "n": 16900,
+      "status": "VALUE-AT-BAR"
+    },
+    "planted_control_exit": 1
+  },
+  "item4_receipt_corrections": [
+    "round-25/26 review status corrected: all of 25, 26 and 27 were independently reviewed",
+    "commit count at the round-27 tip corrected from 74 to 78",
+    "the O(eta/H) sizing is now MEASURED, not asserted",
+    "LOCK/OVERFLOW card debt registered: vorticity_scheme='al81' by module default vs NEMO's ln_dynvor_ens (namelist_cfg:91, lock_kt1_10/ocean.output:715); inert at the rest start, UNMEASURED at kt>=2; card NOT changed"
+  ],
+  "kt2_entry_rows_after_one_step": {
+    "S": {
+      "absolute_max": 8.171241461241152e-13,
+      "n": 18000,
+      "n_unequal": 11229,
+      "normalized_max_abs": 2.2181101297999213e-14,
+      "status": "DEBT"
+    },
+    "T": {
+      "absolute_max": 3.1956659540810506e-11,
+      "n": 18000,
+      "n_unequal": 11840,
+      "normalized_max_abs": 1.3614736849003888e-12,
+      "status": "DEBT"
+    },
+    "ssh": {
+      "absolute_max": 0.0,
+      "n": 600,
+      "n_unequal": 0,
+      "normalized_max_abs": 0.0,
+      "status": "AT-BAR"
+    },
+    "u": {
+      "absolute_max": 9.484089938411461e-07,
+      "n": 17400,
+      "n_unequal": 17400,
+      "normalized_max_abs": 9.484089938411461e-07,
+      "status": "DEBT"
+    },
+    "v": {
+      "absolute_max": 8.987992610401277e-07,
+      "n": 17100,
+      "n_unequal": 17100,
+      "normalized_max_abs": 8.987992610401277e-07,
+      "status": "DEBT"
+    }
+  },
+  "merge_readiness": {
+    "commits_ahead_of_03c6e8d96ff7": 81,
+    "correction_the_branch_range_is_no_longer_round_28s_alone": {
+      "cause": "a concurrent session committed three changes onto this same branch while round 28 was running",
+      "no_longer_true_of": "the commit range 359c33c40ecc..HEAD, which now touches packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py",
+      "reader_guidance": "attribute those three commits to round 29, not to the round-28 section",
+      "round_28_disposition": "15C was FORBIDDEN for this round and is untouched by its commits; round 28 neither made nor verified that decision, and does not revert another session's committed work on a cited user decision",
+      "still_true_of": "round 28's OWN eleven commits -- verified by listing every file they touch: nine files, zero under packages/ or src/",
+      "their_commits": [
+        "7d7cbfb97319 round-29 preregistration",
+        "1a019b2fe85e sets the demo GYRE card's vertical_momentum_scheme and adaptive_implicit_vertadv, citing 'User decision 15C (2026-09-05)'",
+        "8091542726b3 round-29 dyn_zdf instrumentation"
+      ],
+      "what_the_committed_receipt_says": "round 28 landed no model numerics; the only changes are under scripts/validate/, tests/ and docs/",
+      "why_this_is_recorded_here_and_not_in_the_receipt": "the receipt is being edited concurrently -- an unfinished round-29 draft is in the working tree alongside this correction -- so committing that file would land another agent's draft under this round's authorship and with a failing citation gate. The correction text is left in the working tree for whoever lands round 29"
+    },
+    "first_over_bar": {
+      "GYRE-zco": "kt2 T/S/u/v",
+      "LOCK_EXCHANGE-zco": "kt4 u",
+      "ORCA2": "AT-BAR on all six HPG components",
+      "OVERFLOW-zps": "seven Rule-12 rows"
+    },
+    "is_fast_forward": true,
+    "model_numerics_landed_this_round": 0
+  },
+  "oracle_roots": {
+    "GYRE-zco": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+    "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+    "LOCK_EXCHANGE-zco.external": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25_lock_external_oracle",
+    "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"
+  },
+  "preregistration": "manifests/nemo_testcase_l2_gyre_round28_preregister.json @ 2f292b24e110",
+  "provenance": {
+    "citable_copies": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round28/clean_sha_rerun/",
+    "clean_stamp": "aab15e1fb7c5",
+    "problem": "every figure was first produced with --allow-dirty, so each report stamped <sha>-dirty and no number was tied to a committed tree",
+    "repair": "all four gates re-run from a clean detached checkout of aab15e1fb7c5 with the flag removed, so git_sha had to stamp a clean revision",
+    "result": "every report byte-identical to its dirty-run predecessor apart from the stamp; exit codes unchanged (1, 1, 0, 0)"
+  },
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "round16_probe_defect_reported_not_fixed": "_source_sum loops range(1, shape[-1]-1) over an array already trimmed to jpkm1; measured on a ones-array of 30 levels it returns 29.0, so it drops the deepest level where stp2d.F90:180 sums all of 1:jpkm1",
+  "shared_implementation": {
+    "change": "depth_mean_statement is now one implementation in nemo_testcase_lock_slow_forcing_owner.py; the GYRE probe imports it",
+    "lock_rerun_unchanged": {
+      "instrument_reproduces_model_statement": true,
+      "model_captured": "1/127 at 2.168404344971009e-19",
+      "statement_nemo_rhs_reciprocal": "0/127 at 0.0"
+    }
+  },
+  "starting_tip": "359c33c40ecc",
+  "tests": {
+    "baseline_at_starting_tip": "2 failed in 507.03s at 359c33c40ecc, both of them",
+    "failure_owned_by_this_round": "test_nemo_testcase_lock_slow_forcing_owner::test_unknown_association_raises_rather_than_defaulting -- the shared-helper signature change made the guard test's positional call raise TypeError before reaching the guard's ValueError; fixed, and the new face guard has its own plant-verified test",
+    "focused_two_touched_gate_modules": "23 passed",
+    "pre_existing_reproduced_at_starting_tip": [
+      "test_recipe_case_board::test_every_oracle_comparison_has_a_row",
+      "test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end"
+    ],
+    "round28_own_failure_count": 1,
+    "whole_tests_ocean_fidelity": "3 failed, 764 passed, 7 skipped, 18 deselected in 2417.17s"
+  }
+}

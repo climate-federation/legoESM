@@ -1027,6 +1027,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--fv3-duo-window-pad", type=int, default=None, metavar="PAD",
         help=("Window halo width for --fv3-duo-windows (a measured per-deck "
               "value, e.g. 11 at C48 with 3 acoustic substeps; no default)."))
+    parser.add_argument(
+        "--fv3-duo-column-lane", action="store_true", default=False,
+        help=("fv3_duo as a COLUMN model inside the MPAS lane (route A): the "
+              "duo is the dynamics operator of the CAM6-suite loop through "
+              "FV3DuoColumnModel; physics runs on (nCells, nlev) columns "
+              "unchanged. Six faces, fp64, hydrostatic; checkpoints/ERA5 IC "
+              "not yet (M4/M5)."))
     parser.add_argument("--allow-disabled-physics", action="store_true",
                         default=False,
                         help="Permit a parameterization slot set to 'none' (an "
@@ -1063,6 +1070,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "vapour_mass (legacy whole-column spread by vapour "
                              "mass; the A/B control). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_rain_vapor_sink}.")
+    parser.add_argument("--zm-land-fraction", type=str,
+                        choices=["required", "none"],
+                        default=_EXPERIMENT_DEFAULTS.zm_land_fraction,
+                        dest="zm_land_fraction",
+                        help="Zhang-McFarlane column land fraction: required "
+                             "(the run must supply one; it picks the land/"
+                             "ocean autoconversion coefficient) or none "
+                             "(explicit aquaplanet, ocean coefficients "
+                             "everywhere). "
+                             f"Default {_EXPERIMENT_DEFAULTS.zm_land_fraction}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -2247,6 +2264,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         fv3_duo_windows=args.fv3_duo_windows,
         fv3_duo_window_pad=args.fv3_duo_window_pad,
+        fv3_duo_column_lane=args.fv3_duo_column_lane,
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
         k_h_scale=args.k_h_scale,
@@ -2585,6 +2603,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
         bechtold_rain_vapor_sink=args.bechtold_rain_vapor_sink,
+        zm_land_fraction=args.zm_land_fraction,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,

@@ -118,10 +118,26 @@ def test_nemo_card_builds_valid_latlon_model_and_is_setup_agnostic():
     assert rest.physics_config == rest.model_config.physics
     assert eady.physics_config == eady.model_config.physics
     assert rest.initial_state.T.data.shape != eady.initial_state.T.data.shape
+    assert rest.initial_state.uu_b is not None
+    assert rest.initial_state.vv_b is not None
+    assert eady.initial_state.uu_b is not None
+    assert eady.initial_state.vv_b is not None
 
 
 def test_nemo_card_one_step_rest_sanity_is_finite():
     recipe = build_nemo_rest_recipe(n_lat=8, n_lon=12, nlev=4)
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        _nemo_surface_tmask,
+    )
+
+    # OceanZStarCoordinate deliberately has no per-level is_active.  NEMO's
+    # tmask(:,:,1) operand must still come from the state mask carried by this
+    # card; round 56 raised before taking the step below.
+    assert not hasattr(recipe.z_coord, "is_active")
+    assert bool(jnp.array_equal(
+        _nemo_surface_tmask(recipe.initial_state, recipe.z_coord),
+        recipe.initial_state.land_mask.data,
+    ))
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
 
     new_state = model.step(recipe.initial_state, dt=60.0)
@@ -337,6 +353,25 @@ def test_nemo_gyre_coordinate_is_consistent_clean_w_bc():
     assert np.max(np.abs(w[:, :, -1])) == 0.0
 
 
+def test_generic_gyre_vector_ldf_does_not_execute_nemo_e3_builder(monkeypatch):
+    """The native vector-Laplacian card must not execute dead NEMO-e3 geometry."""
+    from legoesm.ocean import vertical
+
+    recipe = build_nemo_gyre_recipe()
+    assert recipe.model_config.lateral_viscosity_operator == "vector_laplacian"
+    assert recipe.model_config.lateral_viscosity_e3_weighting == "off"
+
+    def refuse_dead_geometry(*args, **kwargs):
+        raise AssertionError("vector-Laplacian card executed NEMO-e3 geometry")
+
+    monkeypatch.setattr(
+        vertical, "nemo_qco_live_vorticity_e3f_cgrid", refuse_dead_geometry)
+    model = LatLonCGridOceanModel(
+        recipe.grid, recipe.z_coord, recipe.model_config)
+    stepped = model.step(recipe.initial_state, dt=_NEMO_GYRE_DT_S)
+    assert bool(jnp.all(jnp.isfinite(stepped.u.data)))
+
+
 def test_nemo_gyre_forced_trajectory_is_finite_and_stable():
     """A runnable forced step (model.step + the post-step thermal applicator +
     the step-level wind) is finite and physically bounded — the whole point of
@@ -497,11 +532,22 @@ def test_surface_stress_implicit_wiring():
     assert r.model_config.surface_stress_implicit is True
     assert r.model_config.barotropic.nemo_stage_mean_imposition is True
 
+    # (a) the guard binds where NEMO's own ordering does not already carry the
+    # wind into the substeps.  The card's split-explicit solver is EXEMPT by
+    # the guard's own explicit_substep clause, so asserting the raise on the
+    # card unchanged asserted nothing; it is exercised on the solver the guard
+    # actually covers, and the card's exemption is asserted separately so the
+    # pair still cannot pass vacuously.
     with pytest.raises(ValueError, match="nemo_stage_mean_imposition"):
         LatLonCGridOceanModel(
             r.grid, r.z_coord,
-            r.model_config._replace(barotropic=r.model_config.barotropic
-                                    ._replace(nemo_stage_mean_imposition=False)))
+            r.model_config._replace(barotropic=r.model_config.barotropic._replace(
+                nemo_stage_mean_imposition=False,
+                barotropic_solver="implicit_cn")))
+    LatLonCGridOceanModel(
+        r.grid, r.z_coord,
+        r.model_config._replace(barotropic=r.model_config.barotropic
+                                ._replace(nemo_stage_mean_imposition=False)))
 
     st = r.initial_state
     n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]

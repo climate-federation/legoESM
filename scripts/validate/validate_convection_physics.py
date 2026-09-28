@@ -211,7 +211,7 @@ def call_scheme(
         out, _ = zhang_mcfarlane_convection(
             **common, u=u, v=v, conv_prog_profile=prog,
             config=_with_solve(
-                ZhangMcFarlaneConfig(enable_cmt=False), subsidence_solve),
+                ZhangMcFarlaneConfig(enable_cmt=False, land_fraction="none"), subsidence_solve),
         )
         return out
     if name == "kain_fritsch":

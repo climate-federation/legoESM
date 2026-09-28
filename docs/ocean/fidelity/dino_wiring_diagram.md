@@ -140,7 +140,7 @@ inspection REFUTES it (4th agent over-claim this loop): under `matsuno_split`, `
 EXCLUDES the planetary Coriolis (the stage-7b' planetary-Coriolis add,
 `ocean_pe_latlon_cgrid.py:3627`, is gated on `coriolis_scheme=="explicit_ab2"`), so
 `F_slow` carries NO f, and the substep applies `f×U_bt` exactly once (`_add_bt_cor=True`,
-`ocean_model_latlon_cgrid.py:2544-2546`); the Matsuno rotation applies f to the
+`ocean_model_latlon_cgrid.py:2649-2651`); the Matsuno rotation applies f to the
 perturbation. Under `explicit_ab2`, `du_dt` HAS f → `F_slow` carries it → substep skips
 (`_add_bt_cor=False`). Each mode gets f exactly once in BOTH schemes — matches NEMO's
 zu_frc-subtract-then-live-substep accounting. No jet driver here.

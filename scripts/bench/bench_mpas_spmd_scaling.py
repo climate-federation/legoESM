@@ -75,6 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from metadata import (  # noqa: E402
     annotate_incomplete, hlo_collective_census, scaling_metadata,
     tidy_throughput_fields)
+from hyperdiff import hyperdiff_coeff  # noqa: E402
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -94,6 +95,11 @@ MPAS_PARITY_MAX_STEPS = 8
 # dry mass to the pre-step value each step, so the drift over a smoke window
 # is the allreduce rounding floor, not scheme drift.
 MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
+
+
+def nu_del4_for(subdivision):
+    """del4 coefficient for this subdivision (shared law, hyperdiff.py)."""
+    return hyperdiff_coeff(subdivision, "icosahedral")
 
 
 def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
@@ -128,10 +134,12 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
             f"count divides --reorder-for ({reorder_target}).")
     sigma = create_sigma_coordinate(nlev)
     # Same recipe as the icosahedral lane of run_levante_gpu_scaling /
-    # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion,
-    # energy-conserving PV flux, SSP-RK3, global mass fixer.
+    # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion
+    # (scaled with resolution, nu_del4_for), energy-conserving PV flux,
+    # SSP-RK3, global mass fixer.
     cfg = MPASPrimitiveEquationConfig(
-        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=fix_mass,
+        nu_del4=nu_del4_for(subdivision), nu_del4_ps=nu_del4_for(subdivision),
+        fix_mass=fix_mass,
         pv_scheme="energy", time_integrator="ssp_rk3",
     )
     dev_config = create_voronoi_device_mesh(
@@ -165,6 +173,18 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
 def _block(state):
     jax.block_until_ready([leaf for leaf in jax.tree.leaves(state)
                            if leaf is not None])
+
+
+def _state_is_finite(state) -> bool:
+    """True when every floating leaf of the (possibly sharded) state is finite.
+
+    Every process must call this: the reduction over a global array is a
+    collective under multi-controller.
+    """
+    import jax.numpy as jnp
+    flags = [jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(state)
+             if jnp.issubdtype(getattr(x, "dtype", np.int8), jnp.inexact)]
+    return bool(jnp.all(jnp.stack(flags))) if flags else True
 
 
 def _global_dry_mass(state, mesh):
@@ -548,6 +568,15 @@ def main() -> int:
     hlo_cp = (hlo_census.get("collective_permute")
               if hlo_census else None)
 
+    # A blown-up trajectory times NaN arithmetic, not the model: the fixed
+    # 1e16 del4 went non-finite at s7+ within 4 steps and every such ladder
+    # row serialized as data.  Stamp it; plot_nature_scaling refuses
+    # valid=false / finite_ok=false rows.
+    finite_ok = _state_is_finite(s)
+    if not finite_ok and jax.process_index() == 0:
+        print("ERROR: final state is NON-FINITE; the record is marked "
+              "INVALID (finite_ok=false, valid=false).", flush=True)
+
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
         final_global = (gather_voronoi_state_spmd(s, dev_config)
@@ -610,6 +639,7 @@ def main() -> int:
     med = float(np.median(steady))
     rec = dict(
         component="mpas_atm",
+        finite_ok=finite_ok, valid=finite_ok,
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,
@@ -685,6 +715,7 @@ def main() -> int:
             # only by their FILENAME, and a knob that failed to take
             # effect is indistinguishable from one that did.
             "fix_mass": not args.no_fix_mass,
+            "nu_del4": nu_del4_for(args.subdivision),
             "per_rank_median_ms": per_rank_median_ms,
             "per_rank_spread_ms": per_rank_spread_ms,
             # The NCCL transport the arm ran with: the channel count moves

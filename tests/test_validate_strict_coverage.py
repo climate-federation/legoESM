@@ -344,6 +344,17 @@ def test_validate_strict_rejects_bogus_nested_dycore() -> None:
     assert _bogus_raises(dycore=DycoreConfig(mpas_vert_advection_scheme=_BOGUS))
 
 
+def test_ocean_validate_strict_rejects_bogus_shortwave_selector() -> None:
+    """The nested ocean qsr selector must fail before build/JIT."""
+    from legoesm.ocean.config import OceanExperimentConfig
+
+    config = OceanExperimentConfig.from_dict({"ocean": {"physics": {
+        "shortwave_penetration": {"scheme": _BOGUS},
+    }}})
+    with pytest.raises(ValueError, match="shortwave_penetration.scheme"):
+        config.validate_strict()
+
+
 def test_validate_strict_rejects_bogus_nested_grid() -> None:
     from legoesm.driver.config import GridConfig
 
