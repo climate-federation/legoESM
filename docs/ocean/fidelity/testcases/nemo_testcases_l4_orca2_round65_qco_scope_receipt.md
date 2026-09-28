@@ -92,8 +92,9 @@ Validation results:
   reached 26/43 before reproducing a compiler zero-progress stall in the
   pre-existing tracer-RK3 tests; it is not called green.
 - Full card battery: `160 passed` with nine dtype warnings, then `10 passed`.
-- Default cumulative citation audit: `PASS`, zero unmapped citations, zero
-  failures, zero map-audit failures.
+- Receipt citation audit: both citations `PASS`; shifting the momentum-selector
+  citation exits nonzero.  The default cumulative audit also `PASS`es with
+  zero unmapped citations, failures, or map-audit failures.
 - The single permitted `tests/ocean/fidelity -n 12` invocation collected
   `2,006` tests, reached 99%, reproduced exactly the five standing failures,
   then produced no output for more than five minutes and was interrupted.
@@ -105,7 +106,7 @@ Validation results:
 Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round65/`.
 The decisive files are `card_scope.json`, `qco_current.json`,
-`qco_plant.log`, `qco_scope.json`, both composition-plant logs,
+`qco_plant.log`, `qco_scope_final.json`, both composition-plant logs,
 `card_battery_160.log`, `card_battery_10.log`, `ocean_fidelity.log`, and
 `known_reds_isolated.log`.
 
