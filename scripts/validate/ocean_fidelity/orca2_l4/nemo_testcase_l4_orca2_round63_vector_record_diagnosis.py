@@ -9,6 +9,7 @@ import json
 import struct
 from pathlib import Path
 
+import numpy as np
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 MAGIC = "NEMO_L4_VADV_1"
@@ -96,14 +97,27 @@ def _consume(
     wanted: tuple[str, int],
     dims: tuple[int, int, int],
     offset_plant: bool = False,
-) -> None:
+    capture: bool = False,
+) -> np.ndarray | None:
     name, rank, n1, n2, n3 = _header(handle, path=path)
     require((name, rank) == wanted, f"{path}: got {(name, rank)}, expected {wanted}")
     expected_shape = (dims[0], dims[1], dims[2] if rank == 3 else 1)
     require((n1, n2, n3) == expected_shape, f"{path}: bad shape for {name}: {(n1, n2, n3)}")
     count = n1 * n2 * (n3 if rank == 3 else 1)
-    handle.seek(8 * count + (8 if offset_plant else 0), 1)
-    require(handle.tell() <= path.stat().st_size, f"{path}: short payload for {name}")
+    if capture:
+        raw = handle.read(8 * count)
+        require(len(raw) == 8 * count, f"{path}: short payload for {name}")
+        array = np.frombuffer(raw, dtype=np.float64).copy()
+        require(bool(np.isfinite(array).all()), f"{path}: non-finite {name}")
+        shape = (n1, n2, n3) if rank == 3 else (n1, n2)
+        value = array.reshape(shape, order="F")
+    else:
+        handle.seek(8 * count, 1)
+        require(handle.tell() <= path.stat().st_size, f"{path}: short payload for {name}")
+        value = None
+    if offset_plant:
+        handle.seek(8, 1)
+    return value
 
 
 def diagnose_record(
@@ -111,6 +125,7 @@ def diagnose_record(
     *,
     plant: str | None = None,
     expected_dims: tuple[int, int, int, int] | None = None,
+    capture: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -122,14 +137,18 @@ def diagnose_record(
         dims = (header["jpi"], header["jpj"], header["jpk"])
         if expected_dims is not None:
             require((*dims, header["jpkm1"]) == expected_dims, f"{path}: wrong local extents")
+        arrays = {}
         for index, wanted in enumerate(PREFIX):
-            _consume(
+            value = _consume(
                 handle,
                 path=path,
                 wanted=wanted,
                 dims=dims,
                 offset_plant=(plant == "offset" and index == 0),
+                capture=wanted[0] in capture,
             )
+            if value is not None:
+                arrays[wanted[0]] = value
         missing = []
         for wanted in (("e3u_Kmm", 3), ("e3v_Kmm", 3)):
             name, rank, n1, n2, n3 = _header(handle, path=path)
@@ -143,7 +162,15 @@ def diagnose_record(
             f"{path}: missing-payload signature changed: {missing}",
         )
         for wanted in SUFFIX:
-            _consume(handle, path=path, wanted=wanted, dims=dims)
+            value = _consume(
+                handle,
+                path=path,
+                wanted=wanted,
+                dims=dims,
+                capture=wanted[0] in capture,
+            )
+            if value is not None:
+                arrays[wanted[0]] = value
         require(handle.read(1) == b"", f"{path}: trailing payload")
     return {
         "path": str(path),
@@ -152,6 +179,7 @@ def diagnose_record(
         "missing_payloads": missing,
         "later_fields_recovered": len(SUFFIX),
         "physical_eof_parsed": True,
+        "arrays": arrays,
     }
 
 
@@ -172,12 +200,17 @@ def run(root: Path, *, plant: str | None = None) -> dict[str, object]:
         diagnose_record(path, plant=plant, expected_dims=(94, 152, 31, 30)) for path in paths
     ]
     require([record["header"]["rank"] for record in records] == [0, 1], "rank headers changed")
+    serializable_records = []
+    for record in records:
+        serializable = dict(record)
+        serializable.pop("arrays")
+        serializable_records.append(serializable)
     return {
         "format": "nemo-testcase-l4-orca2-round63-vector-record-diagnosis-v1",
         "claim_label": "given NEMO's recorded operands",
         "worktree": worktree_stamp(),
         "producer_commit": RECORD_COMMIT,
-        "records": records,
+        "records": serializable_records,
         "status": "CONFIRMED_INCOMPLETE",
     }
 
