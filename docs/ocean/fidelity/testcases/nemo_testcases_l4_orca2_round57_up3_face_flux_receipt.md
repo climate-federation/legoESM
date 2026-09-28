@@ -91,8 +91,9 @@ produces the 282-cell result above.  No retracted number is used as evidence.
 
 - Baseline statement gate: `FIRST_NON_BIT_NAMED`, exit 0.  The face-flux
   plant adds exactly one refusal and exits 2.
-- Focused round-56/57 tests: **11 passed** in 0.74 s.  Ruff, Python compilation,
-  and `git diff --check` pass.
+- Focused round-56/57 tests: **11 passed** in 0.74 s.  The final round-57 plus
+  citation-gate focus is **20 passed** in 2.85 s.  Ruff on the new round-57
+  instrument/test, Python compilation, and `git diff --check` pass.
 - Push-gate-equivalent battery: **127 passed** in 364.73 s.
 - Shared-card battery: **170 passed**, 9 warnings, in 355.50 s.
 - `tests/ocean/fidelity -n 12` collected 1,968 items, reached 99%, and
