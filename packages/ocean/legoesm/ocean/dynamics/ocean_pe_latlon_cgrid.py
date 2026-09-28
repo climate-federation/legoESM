@@ -4753,6 +4753,44 @@ def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, selector):
     return jnp.where(selector > 0.0, pos, neg)
 
 
+def _nemo_up3_same_direction_flux(
+    transport_pos,
+    transport_neg,
+    far_pos,
+    adv_pos,
+    adv_neg,
+    far_neg,
+    mask_pos,
+    mask_neg,
+    selector=None,
+):
+    """NEMO source-ordered UP3 T-point flux in legoESM flux units.
+
+    NEMO masks each velocity curvature before selecting it with the sign of
+    the advected-velocity pair, then multiplies the transport sum by the
+    selected face value (compiled ``dynadv_up3.f90:157-195``).  legoESM's
+    divergence convention carries one quarter of that four-times flux.
+    """
+    b = nemo_source_round
+    curvature_pos = b(
+        b(b(adv_neg - adv_pos) + b(far_pos - adv_pos)) * mask_pos
+    )
+    curvature_neg = b(
+        b(b(far_neg - adv_neg) + b(adv_pos - adv_neg)) * mask_neg
+    )
+    velocity_pair = b(adv_pos + adv_neg)
+    upwind_selector = velocity_pair if selector is None else selector
+    selected_curvature = jnp.where(
+        upwind_selector > 0.0, curvature_pos, curvature_neg
+    )
+    face_value = b(
+        velocity_pair - b(jnp.asarray(1.0 / 3.0, dtype=velocity_pair.dtype)
+                          * selected_curvature)
+    )
+    nemo_flux = b(b(transport_pos + transport_neg) * face_value)
+    return b(jnp.asarray(0.25, dtype=nemo_flux.dtype) * nemo_flux)
+
+
 def _bc_horizontal_momentum_advection_flux_form(
     du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
     transport_velocity=None,
@@ -4872,11 +4910,25 @@ def _bc_horizontal_momentum_advection_flux_form(
     # rolls so the reconstruction does not depend on the periodic wrap column
     # u[:, n_lon] (matches the wrap-robust style of the v-momentum x-part).
     u_core = u[:, :-1, :]
-    u_c = _recon(u_core, u[:, 1:, :], Qx_c,
-                 far_pos=jnp.roll(u_core, 1, axis=1),       # face c-1
-                 far_neg=jnp.roll(u_core, -2, axis=1),      # face c+2; west when Qx>0
-                 same_direction=True)
-    Fx_uu = Qx_c * u_c                                           # (n_lat,n_lon,nlev)
+    if scheme == "nemo_up3":
+        source_selector_u = (
+            u_core + u[:, 1:, :]
+            if up3_upwind_selector == "velocity"
+            else Qx_c
+        )
+        Fx_uu = _nemo_up3_same_direction_flux(
+            Q_u[:, :-1, :], Q_u[:, 1:, :],
+            jnp.roll(u_core, 1, axis=1), u_core, u[:, 1:, :],
+            jnp.roll(u_core, -2, axis=1),
+            u_mask_3d[:, :-1, :], u_mask_3d[:, 1:, :],
+            selector=source_selector_u,
+        )
+    else:
+        u_c = _recon(u_core, u[:, 1:, :], Qx_c,
+                     far_pos=jnp.roll(u_core, 1, axis=1),   # face c-1
+                     far_neg=jnp.roll(u_core, -2, axis=1),  # face c+2; west when Qx>0
+                     same_direction=True)
+        Fx_uu = Qx_c * u_c                                       # (n_lat,n_lon,nlev)
     # divergence to u-points (periodic in lon): flux[centre J] - flux[centre J-1].
     _dx = Fx_uu - jnp.roll(Fx_uu, 1, axis=1)
     net_zonal_u = jnp.concatenate([_dx, _dx[:, 0:1, :]], axis=1)  # (n_lat,n_lon+1,nlev)
@@ -4916,11 +4968,25 @@ def _bc_horizontal_momentum_advection_flux_form(
     Qy_c = 0.5 * (Q_v[:-1, :, :] + Q_v[1:, :, :])               # (n_lat,n_lon,nlev)
     v_pad = jnp.concatenate([v[:1, :, :], v, v[-1:, :, :]], axis=0)  # (n_lat+3,...)
     n_v = v.shape[0]                                            # n_lat+1
-    v_c = _recon(v[:-1, :, :], v[1:, :, :], Qy_c,
-                 far_pos=v_pad[0:n_v - 1, :, :],
-                 far_neg=v_pad[3:n_v + 2, :, :],                # south when Qy>0
-                 same_direction=True)
-    Fy_vv = Qy_c * v_c                                          # (n_lat,n_lon,nlev)
+    if scheme == "nemo_up3":
+        source_selector_v = (
+            v[:-1, :, :] + v[1:, :, :]
+            if up3_upwind_selector == "velocity"
+            else Qy_c
+        )
+        Fy_vv = _nemo_up3_same_direction_flux(
+            Q_v[:-1, :, :], Q_v[1:, :, :],
+            v_pad[0:n_v - 1, :, :], v[:-1, :, :], v[1:, :, :],
+            v_pad[3:n_v + 2, :, :],
+            v_mask_3d[:-1, :, :], v_mask_3d[1:, :, :],
+            selector=source_selector_v,
+        )
+    else:
+        v_c = _recon(v[:-1, :, :], v[1:, :, :], Qy_c,
+                     far_pos=v_pad[0:n_v - 1, :, :],
+                     far_neg=v_pad[3:n_v + 2, :, :],            # south when Qy>0
+                     same_direction=True)
+        Fy_vv = Qy_c * v_c                                      # (n_lat,n_lon,nlev)
     # divergence to v-points (interior lat-faces; poles are walls -> 0).
     net_merid_v_int = Fy_vv[1:, :, :] - Fy_vv[:-1, :, :]       # (n_lat-1,n_lon,nlev)
     zero_lon = jnp.zeros_like(v[:1, :, :])
