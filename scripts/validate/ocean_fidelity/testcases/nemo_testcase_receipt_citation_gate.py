@@ -1330,7 +1330,7 @@ CITATION_MAP = {
         "R62_3D('e3v_Kmm         ',r62_payload)", 11],
     # --- ORCA2 card round 64: admitted ZAD source-order replay ---
     'ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynadv.f90:136-143': [
-        'SELECT CASE( n_dynadv )',
+        ('SELECT CASE( n_dynadv )', 1),
         'CALL dynadv_round62_after_zad( kt, Kmm, Krhs, nn_dynkeg, puu, pvv )', 8],
     'ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynzad.f90:102-137': [
         'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
