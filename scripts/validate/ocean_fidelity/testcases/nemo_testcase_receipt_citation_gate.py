@@ -1289,7 +1289,7 @@ CITATION_MAP = {
         'CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )',
         'L2_RK_STAGE2_TERM_DUMP', 19],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynadv.f90:134-138': [
-        'SELECT CASE( n_dynadv )',
+        ('SELECT CASE( n_dynadv )', 1),
         'CALL dyn_zad', 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynkeg.f90:117-130': [
         'CASE ( nkeg_C2 )',
