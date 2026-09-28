@@ -585,15 +585,17 @@ def test_mpas_lane_refuses_a_state_missing_either_tracer():
         model_type="mpas", dt=300.0)
     tends, _ = fn(state(q_v=q_v, q_c=q_c), mesh, sigma)
     assert tends.tracer_tendencies["q_c"].data.shape == (ncol, nlev)
-    assert bool(jnp.any(tends.tracer_tendencies["q_c"].data != 0.0))
+    _dqc = tends.tracer_tendencies["q_c"].data
+    assert bool(jnp.all(jnp.isfinite(_dqc))) and bool(jnp.any(_dqc != 0.0))
     for missing, kept in (("q_c", {"q_v": q_v}), ("q_v", {"q_c": q_c})):
         with pytest.raises(ValueError, match=rf"\['{missing}'\] is not carried"):
             fn(state(**kept), mesh, sigma)
-    # Flag off: the same states are accepted and no liquid tendency is published.
+    # Flag off: a state carrying q_c is accepted and the lane must NOT hand the
+    # host's liquid to the kernel anyway (the kernel has no flag of its own).
     off = make_turbulence_physics(
         TurbulenceConfig(scheme="clubb", clubb=_ON), model_type="mpas", dt=300.0)
-    tends_off, _ = off(state(q_v=q_v), mesh, sigma)
-    assert not (tends_off.tracer_tendencies or {}).get("q_c")
+    tends_off, _ = off(state(q_v=q_v, q_c=q_c), mesh, sigma)
+    assert "q_c" not in (tends_off.tracer_tendencies or {})
 
 
 def test_public_wrapper_publishes_liquid_iff_the_host_supplies_it():
