@@ -1714,7 +1714,8 @@ class TestSurfaceTendencyPlacement:
     ``trasbc.F90`` instead writes into the RHS accumulator BEFORE the
     ``tra_zdf``/leap-frog combine (stpmlf.F90:342 ``tra_sbc(kstp, Nnn, ts,
     Nrhs)``). These tests pin the new "leapfrog_rhs" placement end-to-end
-    on the real DINO MLF card.
+    through the DINO lat-lon MLF integrator; recipe selection is covered by
+    the run-config tests.
     """
 
     def test_default_is_applied_now(self):
@@ -1807,43 +1808,19 @@ class TestSurfaceTendencyPlacement:
         from legoesm.ocean.experiments.dino import (
             dino_lat_lon_grid, dino_lat_lon_vertical, dino_lat_lon_state,
             dino_lat_lon_model_config, dino_lat_lon_surface_forcing_arrays,
-            dino_config_for_recipe,
         )
-        # This synthetic ten-column grid is not bridged from a NEMO mesh and
-        # therefore has none of the raw eosbn2 operands required by the
-        # oracle card's faithful step-entry N2 selection. The test isolates
-        # surface-tendency placement, so use the documented legacy N2 arm.
+        # This is an integrator-placement control on a synthetic grid.  Build
+        # that contract directly instead of inheriting the evolving oracle
+        # card, whose literal arms require raw NEMO mesh/restart operands.
         cfg = dataclasses.replace(
-            dino_config_for_recipe("nemo_dino_kamm_mlf"),
-            tke_preclosure_coeff_source="current_subiteration",
-            tke_matrix_evaluation="factored",
-            tke_solver_evaluation="shared_thomas",
-            tke_etau_exponential_evaluation="jax_expression",
-            tke_n2_evaluation_stage="implicit_solve_state",
-            tke_htau_evaluation="jax_expression",
-            tke_mxl_raw_evaluation="factored",
-            tke_langmuir_evaluation="vectorized",
-            tke_shear_evaluation_stage="implicit_solve_state",
-            tke_shear_metric_source="tpoint_jacobian",
-            dino_wind_profile_evaluation="factored_smoothstep",
-            gm_redi_slope_n2_evaluation="recompute",
-            gm_redi_slope_prd_geometry_stage="current_step",
-            gm_redi_slope_prd_evaluation="density_roundtrip",
-            gm_redi_slope_face_thickness_evaluation="static_face",
-            gm_redi_slope_depth_evaluation="legacy_jacobian_t_surface",
-            # This fixture deliberately does not bridge the raw NEMO EEN
-            # coefficient operands.  Keep its unrelated surface-placement
-            # contrast on the byte-pinned generic coefficient builder.
-            barotropic_een_coefficient_evaluation="generic")
+            DINOConfig(),
+            outer_integrator="leapfrog",
+            coriolis_scheme="explicit_ab2",
+            vorticity_scheme="een_total",
+            tracer_combine="thickness_weighted",
+        )
         g = dino_lat_lon_grid(cfg, n_lon=10)
-        # This is a surface-placement control on a synthetic state, not a
-        # restart-bridge fidelity run.  Pin the two coupled QCO paths whose
-        # literal arms require raw NEMO restart operands.
-        cfg = dataclasses.replace(
-            cfg, zad_qco_evaluation="generic", wzv_call2_evaluation="generic")
-        z = dino_lat_lon_vertical(g, cfg)  # MLF card needs its matching
-                                           # partial-cell/masked-zco coord,
-                                           # not the bare z* helper.
+        z = dino_lat_lon_vertical(g, cfg)
         st0 = dino_lat_lon_state(g, z, cfg)
         frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
         mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)

@@ -63,9 +63,6 @@ class IFSTendencyConfig(NamedTuple):
     # sucumf.F90:225 -- mass-flux solver switch for T and q (implicit branch,
     # value 1.0; this module implements RMFSOLTQ > 0 only).
     rmfsoltq: float = 1.0
-    # sucumf.F90:227 -- include (1) or not (0) model tendencies in the implicit
-    # RHS; fixed to 0 for this branch.
-    rmfsolrhs: float = 0.0
     # sucumf.F90:228 -- fraction [0-1] of convective subsidence handed to the
     # dynamics (cudtdqn.F90:195-196 builds ZADVW from this for KTYPE == 1).
     rmfadvw: float = 0.0
@@ -87,12 +84,6 @@ __param_spec__: Dict[str, Dict[str, object]] = {
                 "transform": "none", "category": "convection", "shape": None,
                 "reference": "sucumf.F90:225 RMFSOLTQ=1.0; implicit solver "
                              "branch, source switch of a faithful port",
-            },
-            "rmfsolrhs": {
-                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0,
-                "transform": "none", "category": "convection", "shape": None,
-                "reference": "sucumf.F90:227 RMFSOLRHS=0.0; model tendencies "
-                             "excluded from the implicit RHS",
             },
             "rmfadvw": {
                 "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0,

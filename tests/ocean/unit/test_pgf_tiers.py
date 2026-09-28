@@ -691,6 +691,16 @@ class TestTier4:
     # Note: these tests disable lateral/vertical mixing to isolate
     # PGF + wind interaction, so speeds are higher than production.
     BLOWUP_THRESHOLD_MS = 10.0
+    # Commit 9caa61f3e corrected the AL81 triad/flux pairing to the
+    # energy-conserving NEMO stencil.  Pin the measured post-change CPU/fp64
+    # values rather than widening a ceiling around them: rtol=1e-4 is 0.01%,
+    # or 2.5e-3 m/s at the larger value.
+    REGRESSION_RTOL = 1.0e-4
+    STRONG_WIND_REGRESSION_MS = {
+        "adcroft": 25.217152071275,
+        "smc03": 21.796509983933,
+    }
+    FLAT_BOTTOM_REGRESSION_MS = 2.467487967708
 
     @pytest.mark.parametrize("pgf_scheme", ["adcroft", "smc03"])
     def test_tier4_seamount_cosine_wind(self, grid, z_coord, pgf_scheme):
@@ -763,11 +773,15 @@ class TestTier4:
             f"[{pgf_scheme}] NaN at day {_first_nan_day(speeds) + 1}"
         )
         max_speed = max(speeds)
-        assert max_speed < self.BLOWUP_THRESHOLD_MS, (
-            f"[{pgf_scheme}] BLOWUP: max|speed| = {max_speed:.2f} m/s"
+        np.testing.assert_allclose(
+            max_speed,
+            self.STRONG_WIND_REGRESSION_MS[pgf_scheme],
+            rtol=self.REGRESSION_RTOL,
+            atol=0.0,
+            err_msg=f"[{pgf_scheme}] strong-wind regression",
         )
         print(f"  Tier4 seamount strong-wind {pgf_scheme}: "
-              f"{max_speed*1e3:.1f} mm/s")
+              f"{max_speed:.12f} m/s")
 
     @pytest.mark.parametrize("pgf_scheme", ["adcroft", "smc03"])
     def test_tier4_seamount_woa_cosine_wind(self, grid, z_coord, pgf_scheme):
@@ -819,11 +833,15 @@ class TestTier4:
 
         assert all(np.isfinite(s) for s in speeds), "Flat-bottom wind: NaN"
         max_speed = max(speeds)
-        print(f"  Tier4 flat-bottom wind reference: {max_speed*1e3:.1f} mm/s")
+        print(f"  Tier4 flat-bottom wind reference: {max_speed:.12f} m/s")
         # Should develop physical Ekman transport O(10-100 mm/s)
         assert max_speed > 1e-6, (
             f"Wind not applied: {max_speed:.2e} m/s (expected > 0)"
         )
-        assert max_speed < 2.0, (
-            f"Flat-bottom wind blew up: {max_speed:.2f} m/s"
+        np.testing.assert_allclose(
+            max_speed,
+            self.FLAT_BOTTOM_REGRESSION_MS,
+            rtol=self.REGRESSION_RTOL,
+            atol=0.0,
+            err_msg="flat-bottom wind regression",
         )

@@ -985,12 +985,21 @@ def _call_radiation_backend(
         _rad_kwargs = _sub.expand_kwargs(_rad_kwargs, _n_sub, _ncol)
         _rad_kwargs["cloud_path_liq"] = _lwp
         _rad_kwargs["cloud_path_ice"] = _iwp
+    elif _ov == "mcica":
+        # CAM6 McICA: the same maximum-random generator, but ONE subcolumn per
+        # g-point (drawn inside the solver) instead of n full solves.  The
+        # solver takes IN-CLOUD paths (same floor as subcolumn_paths).
+        from legoesm.atmosphere.physics.clouds import subcolumns as _sub
+        (_rad_kwargs["cloud_path_liq"],
+         _rad_kwargs["cloud_path_ice"]) = _sub.in_cloud_paths(
+            cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
+        _rad_kwargs["mcica_cloud_fraction"] = cloud_props.cloud_fraction
     elif _ov != "none":
         # Dispatch hardening: a typo must never silently run the legacy
         # single-column path (validated on the static config value).
         raise ValueError(
             f"unknown cloud_vertical_overlap_optics {_ov!r}; "
-            "expected 'none' or 'max_random'"
+            "expected 'none', 'max_random' or 'mcica'"
         )
 
     # Column-chunk the rrtmgp solve when configured: the per-block body
@@ -1170,18 +1179,21 @@ def make_radiation_physics(
 
     # Load heavy/static RRTMGP optics once outside model JIT traces. mc3d also
     # needs the RRTMGP optics tables (Phase 2b: 3D-MC shortwave uses RRTMGP
-    # per-g-point optics; falls back to gray optics if the tables are absent).
+    # per-g-point optics).  Missing tables are an error for both schemes:
+    # mc3d used to fall back silently to gray optics, which also hid config
+    # typos and genuine bugs behind a bare ``except Exception``.
     rrtmgp_solver = None
     if radiation_config.scheme in ("rrtmgp", "mc3d"):
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
         try:
             RRTMGP.preload(radiation_config.rrtmgp)
             rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
-        except Exception:
-            if radiation_config.scheme == "rrtmgp":
-                raise
-            # mc3d: gray-optics fallback when RRTMGP data is unavailable.
-            rrtmgp_solver = None
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"RadiationConfig.scheme={radiation_config.scheme!r} needs the "
+                f"RRTMGP optics tables; {e.filename!r} was not found. Point "
+                "RRTMGPConfig's lw/sw gas and cloud file fields at the tables."
+            ) from e
 
     # Load ML ozone ridge weights once (outside JIT).  Gray radiation
     # ignores ozone, so skip the (potentially large) NetCDF load when

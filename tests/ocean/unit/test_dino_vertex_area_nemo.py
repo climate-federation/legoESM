@@ -35,12 +35,10 @@ under ``metric_convention="exact"``, which must FAIL -- so the test provably
 fires when the fix is removed rather than passing for an unrelated reason.
 
 The hand-quoted NEMO values are read off NEMO's own mesh for the DINO R1 mesh
-(195 x 48, equator on a T-point) at column i=26 and carried here as literals,
-so this test needs no NEMO installation.
+(199 x 52 including its closed walls, equator on a T-point) at column i=26
+and carried here as literals, so this test needs no NEMO installation.
 """
 from __future__ import annotations
-
-import dataclasses
 
 import jax
 import jax.numpy as jnp
@@ -74,15 +72,15 @@ from legoesm.ocean.experiments.dino import (
 # (``test_dino_vface_zonal_width_nemo.py``) quotes, to the last digit -- that
 # is the ``pphif == pphiv`` identity above, visible in the literals.
 NEMO_E1E2F_AT_VERTEX = {
-    1: (-68.9727620197, 1591968317.8563280106),    # southernmost INTERIOR row
-    2: (-68.6110140362, 1644627135.1704397202),
-    97: (-0.4999936539, 12364258960.0476951599),   # the near-equatorial row
-    193: (68.6110140362, 1644627135.1704397202),
-    194: (68.9727620197, 1591968317.8563280106),   # northernmost INTERIOR row
+    3: (-68.9727620197, 1591968317.8563280106),    # first quoted wet row
+    4: (-68.6110140362, 1644627135.1704397202),
+    99: (-0.4999936539, 12364258960.0476951599),   # the near-equatorial row
+    195: (68.6110140362, 1644627135.1704397202),
+    196: (68.9727620197, 1591968317.8563280106),   # last quoted wet row
 }
 
 # The gap the fix removes, measured over the interior vertex rows of this mesh.
-EXACT_CONVENTION_MAX_REL_GAP = 4.0965e-05
+EXACT_CONVENTION_MAX_REL_GAP = 4.1585e-05
 
 # NEMO's own earth radius and degree->radian factor (phycst.F90 :26, :37) and
 # DINO's rn_e1_deg (usrdef_nam.F90:30 / namelist_cfg).  Quoted as NEMO's
@@ -105,9 +103,10 @@ def _fp64_storage():
 
 def _dino_geometry(convention: str):
     """The NEMO-faithful DINO R1 grid + its C-grid geometry."""
-    cfg = dataclasses.replace(
-        nemo_faithful_dino_config(), metric_convention=convention)
-    g = dino_lat_lon_grid(cfg=cfg)
+    # The grid is the oracle grid for both arms.  ``convention`` is only the
+    # geometry counterfactual; feeding it back into the faithful-grid card is
+    # correctly rejected by dino_lat_lon_grid since commit aa010f143.
+    g = dino_lat_lon_grid(cfg=nemo_faithful_dino_config())
     geom = create_latlon_geometry(
         n_lat=g.n_lat, n_lon=g.n_lon, lat_1d=g.lat, lon_1d=g.lon,
         lat_face_1d=g.lat_v, radius=g.radius,
@@ -488,15 +487,13 @@ class TestPairAnalysisPins:
         cori_half = -(a ** 2 / 4.0) * np.cos(lat_v) ** 2
         # Sizes quoted in the campaign documents; pinned so a grid change
         # cannot silently move what those documents claim.  ROW SET MATTERS:
-        # these are the model's own 194 interior rows.  The probe scores the
-        # same closed forms over NEMO's dumped mesh, whose 2-row halo reaches
-        # past the domain, and reads +1.1748e-05 / -3.9022e-05 there.  Same
-        # quantity, wider rows -- both appear in the documents and neither is
-        # wrong, but they must not be quoted as though they were one number.
-        assert abs(np.median(area_half) - 1.0791e-05) < 1e-8
-        assert abs(np.median(cori_half) + 3.9978e-05) < 1e-8
+        # these are the model's own 198 interior rows after aa010f143 made the
+        # closed walls part of the faithful grid.  They now match the row set
+        # scored from NEMO's dumped mesh.
+        assert abs(np.median(area_half) - 1.1748e-05) < 1e-8
+        assert abs(np.median(cori_half) + 3.9022e-05) < 1e-8
         # And the size the campaign documents quote for the UNSIGNED gap.
-        assert abs(np.median(np.abs(area_half)) - 2.1872e-05) < 1e-8
+        assert abs(np.median(np.abs(area_half)) - 2.2231e-05) < 1e-8
 
     def test_area_half_is_negligible_in_the_absolute_vorticity_channel(
             self, dino_iso):

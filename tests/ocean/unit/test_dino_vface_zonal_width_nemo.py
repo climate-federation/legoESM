@@ -29,12 +29,11 @@ under ``metric_convention="exact"``, which must FAIL -- so the test provably
 fires when the fix is removed rather than passing for an unrelated reason.
 
 The hand-quoted NEMO values are read off NEMO's own ``domain_cfg_out.nc`` for
-the DINO R1 mesh (195 x 48, equator on a T-point) at column i=26, and are
-carried here as literals so this test needs no NEMO installation.
+the DINO R1 mesh (199 x 52 including its closed walls, equator on a T-point)
+at column i=26, and are carried here as literals so this test needs no NEMO
+installation.
 """
 from __future__ import annotations
-
-import dataclasses
 
 import jax
 import jax.numpy as jnp
@@ -67,11 +66,11 @@ from legoesm.ocean.experiments.dino import (
 # LATITUDE (asserted below), not by an assumed halo offset: NEMO's array
 # carries a 2-row halo, so legoESM v-face j is NEMO's ``e1v[j+1]``.
 NEMO_E1V_AT_VFACE = {
-    1: (-68.9727620197, 39899.4776639535),    # southern wall row
-    2: (-68.6110140362, 40554.0027022049),
-    97: (-0.4999936539, 111194.6894417521),   # the near-equatorial face
-    193: (68.6110140362, 40554.0027022049),
-    194: (68.9727620197, 39899.4776639535),   # northern wall row
+    3: (-68.9727620197, 39899.4776639535),    # first quoted wet face
+    4: (-68.6110140362, 40554.0027022049),
+    99: (-0.4999936539, 111194.6894417521),   # the near-equatorial face
+    195: (68.6110140362, 40554.0027022049),
+    196: (68.9727620197, 39899.4776639535),   # last quoted wet face
 }
 
 # The gap the fix removes, measured over the interior v-faces of this mesh.
@@ -95,9 +94,10 @@ def _fp64_storage():
 
 def _dino_geometry(convention: str, vface_evaluation: str = "nemo_vpoint"):
     """The NEMO-faithful DINO R1 grid + its C-grid geometry."""
-    cfg = dataclasses.replace(
-        nemo_faithful_dino_config(), metric_convention=convention)
-    g = dino_lat_lon_grid(cfg=cfg)
+    # Build both metric arms on the same oracle grid.  Since aa010f143 the
+    # faithful grid correctly rejects a card whose own metric convention is
+    # changed to ``exact``; that convention belongs only to this A/B geometry.
+    g = dino_lat_lon_grid(cfg=nemo_faithful_dino_config())
     geom = create_latlon_geometry(
         n_lat=g.n_lat, n_lon=g.n_lon, lat_1d=g.lat, lon_1d=g.lon,
         lat_face_1d=g.lat_v, radius=g.radius,
@@ -143,7 +143,7 @@ class TestConstructionMatchesNemo:
                 np.asarray(getattr(new, name)), np.asarray(getattr(old, name)),
                 err_msg=f"V-face attribution selector unexpectedly moved {name}")
         assert not np.array_equal(np.asarray(new.dx_v), np.asarray(old.dx_v))
-        j = 1
+        j = 3
         nemo_width = NEMO_E1V_AT_VFACE[j][1]
         legacy_gap = abs(float(old.dx_v[j, 26]) - nemo_width) / nemo_width
         assert legacy_gap > 1e-6
@@ -215,13 +215,14 @@ class TestConstructionMatchesNemo:
         # legoESM must reproduce NEMO's latitudes, not merely be consistent
         # with itself -- assert that separately so a latitude drift cannot
         # hide inside the width comparison.
-        lat_gap = np.abs(np.degrees(gphiv_rad)
-                         - np.degrees(np.asarray(g.lat_v, dtype=np.float64)))
+        sl = slice(1, g.n_lat)          # interior faces only; ends are walls
+        lat_gap = np.abs(
+            np.degrees(gphiv_rad[sl])
+            - np.degrees(np.asarray(g.lat_v, dtype=np.float64)[sl]))
         assert lat_gap.max() < 1e-9, (
             f"legoESM's v-face latitudes depart from NEMO's own Mercator "
             f"transform by up to {lat_gap.max():.3e} degrees")
         nemo_e1v = ra * rad * np.cos(gphiv_rad) * rn_e1_deg
-        sl = slice(1, g.n_lat)          # interior faces only; ends are walls
         rel_iso = np.abs(
             np.asarray(geom.dx_v, np.float64)[sl, 26] - nemo_e1v[sl]
         ) / nemo_e1v[sl]

@@ -1,0 +1,66 @@
+ROUND 166 DEVELOPED GYRE SHEAR FREE-SURFACE ROUTING SPLIT (2026-09-25): HELD.
+
+Candidate commit: 81a743bb95034f3255eaec506b64e27d2f61a735
+Candidate parent: 7998836a8
+Restored in production: 5740b7264
+
+SOURCE PROOF.  The admitted R164 build executes
+stprk3.f90:168 CALL zdf_phy(kstp,Nbb,Nbb,Nrhs), zdfphy.f90:317-320 passes
+those slots to zdf_sh2, and zdfsh2.f90:102/:107 consumes both in its U/V
+divisors.  The split therefore routes step-entry SSH only to shear while the
+implicit tracer solver retains its stage-3 Kmm half-step SSH.
+
+LOCAL PROOF.  At NEMO's day-180 entry through the production JIT, the split
+takes e3u NOW/BEFORE from 16,820 unequal at 4.265924758328765e-06 m to BIT,
+e3v NOW/BEFORE from 16,530 unequal at 4.269350483809831e-06 m to BIT, and
+p_sh2 from 17,400 unequal at 2.1204821986655657e-15 s-2 to BIT.  The
+reference-side literal replay is BIT.  The ULP plant moves the production
+vertical difference and p_sh2, prints STATUS PLANT-FIRED, and exits 1.
+
+LANDING VETO.  The candidate moves 55/70 trajectory rows, no kt1 row leaves
+the bar, first-over-bar remains kt3, and no row changes class.  Day-30 T RMS
+improves 6.572574374770603e-05 -> 6.572571060658968e-05 K, but day-240
+worsens 1.644836070117868e-02 -> 1.644836129369466e-02 K.  With no
+DEBT-to-AT-BAR transition, Decision 55 does not waive Decision 45.  The
+recipe-derived census also finds the route on ORCA2-zps, whose native
+trajectory is unmeasured.  Do not land this patch until a newly authorized
+gate changes one of those facts; do not infer an ORCA2 choice from GYRE.
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -8978,10 +8978,10 @@ class LatLonCGridOceanModel:
+                     # NEMO e3w(Kmm) divisor: state_new is the post-update
+                     # AFTER state; state.eta is NOW. Read only under the NEMO
+                     # identity (zdf_implicit_solver_evaluation="nemo_literal").
+-                    eta_now=(
+-                        _nemo_ws_zdf_eta_kmm
+-                        if _nemo_ws_zdf_eta_kmm is not None
+-                        else state.eta.data),
++                    eta_now=(_nemo_ws_zdf_eta_kmm
++                             if _nemo_ws_zdf_eta_kmm is not None
++                             else state.eta.data),
++                    tke_shear_eta_now=(state.eta.data if _nemo_ws_zdf_eta_kmm is not None else None),
+                     u_now=state.u.data, v_now=state.v.data,
+                     effective_K_test_override=_vertical_K_test_override,
+                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
+@@ -10516,7 +10516,7 @@ class LatLonCGridOceanModel:
+         n2_tracers=None,
+         n2_tracers_before=None,
+         tke_n2_bundle=None,
+-        eta_now=None,
++        eta_now=None, tke_shear_eta_now=None,
+         u_now=None,
+         v_now=None,
+         nemo_tracer_content_rhs=None,
+@@ -10780,8 +10780,8 @@ class LatLonCGridOceanModel:
+                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
+             if _tke_prognostic:
+                 _tke_p_sh2_result = self._tke_step_entry_p_sh2(
+-                    state, eta_now=eta_now, u_now=u_now, v_now=v_now,
+-                    z_coord=_zc, config=_cfg_b, grid=_grid,
++                    state, eta_now=(eta_now if tke_shear_eta_now is None else tke_shear_eta_now),
++                    u_now=u_now, v_now=v_now, z_coord=_zc, config=_cfg_b, grid=_grid,
+                     return_face_metrics=return_tke_entry)
+                 if return_tke_entry:
+                     _tke_p_sh2, _tke_shear_face_metrics_used = (

@@ -39,11 +39,22 @@ def _fake_surface_map(path, lat_deg, lon_deg):
     )
 
 
+def _run_hydraulics_stamp(drv):
+    """The soil-hydraulics stamp a driver built under ``_patch_land_loaders`` checks."""
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_CLM_MAP, soil_hydraulics_stamp)
+    return soil_hydraulics_stamp(
+        drv.physics.land_ml_cfg.hydraulics.retention_curve,
+        HYDRAULICS_SOURCE_CLM_MAP, __file__)
+
+
 def _patch_land_loaders(monkeypatch):
     """Replace the CLM-surfdata + land-mask loaders with synthetic data."""
     import legoesm.land.clm_surface_map as clm
     import legoesm.grids.topography as topo
-    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "synthetic")
+    # Any real file: the driver stamps its soil hydraulics with the parameter
+    # file's md5, so the stand-in path must be readable.
+    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: __file__)
     monkeypatch.setattr(clm, "load_clm_surface", _fake_surface_map)
     # Half-land everywhere so every column exercises the land tile blend.
     # Half-land everywhere so every column exercises the land tile blend.  The
@@ -553,7 +564,9 @@ def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
     save_land_restart(ic, spun, land_mode="multilayer",
                       t_end_s=20 * 365 * 86400.0,
                       n_steps_completed=1, metadata={},
-                      soil_grid=src.physics.land_ml_cfg.soil_grid)
+                      soil_grid=src.physics.land_ml_cfg.soil_grid,
+                      soil_hydraulics=_run_hydraulics_stamp(src),
+                      hydraulics=src.physics.land_ml_cfg.hydraulics)
 
     # 2) A fresh driver with land_ic_path set must load THAT column, not the
     #    cold start.
@@ -581,6 +594,44 @@ def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
     T_land = np.asarray(ctx["T_land"])
     expected_skin = np.asarray(spun.T_soil[:, 0]).reshape(T_land.shape)
     np.testing.assert_allclose(T_land, expected_skin, rtol=1e-6, atol=1e-4)
+
+
+def test_land_ic_soil_potential_is_rederived_on_the_runs_hydraulics(
+        monkeypatch, tmp_path):
+    """A regridded land IC keeps its WATER; its matric potential is recomputed
+    on this run's soil.  The regridded flag lives in the file's metadata dict;
+    reading it from the top of the loader's meta skipped the recompute, and the
+    Richards step then dried the deep root zone to residual in a day."""
+    from legoesm.land.restart import save_land_restart
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import psi_from_theta
+
+    _patch_land_loaders(monkeypatch)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    seed = src._land_ml_state
+    stale = seed._replace(psi_soil=jnp.asarray(np.asarray(seed.psi_soil) * 7.0))
+    common = dict(land_mode="multilayer", t_end_s=0.0, n_steps_completed=1,
+                  soil_grid=src.physics.land_ml_cfg.soil_grid)
+
+    ic = tmp_path / "regridded.npz"
+    save_land_restart(ic, stale, metadata={"regridded_from": "other_grid.npz"},
+                      soil_hydraulics=_run_hydraulics_stamp(src), **common)
+    dst = ModelDriver(_small_cfg()._replace(land_ic_path=str(ic)),
+                      output_dir=tmp_path / "dst")
+    dst.setup()
+    h = dst.physics.land_ml_cfg.hydraulics
+    got = dst._land_ml_state
+    want = jnp.maximum(psi_from_theta(got.theta_soil, h), psi_dry_floor(h))
+    np.testing.assert_allclose(np.asarray(got.psi_soil), np.asarray(want),
+                               rtol=1e-6)
+    assert not np.allclose(np.asarray(got.psi_soil), np.asarray(stale.psi_soil))
+
+    bare = tmp_path / "unstamped.npz"
+    save_land_restart(bare, stale, metadata={}, **common)
+    with pytest.raises(ValueError, match="soil-hydraulics stamp"):
+        ModelDriver(_small_cfg()._replace(land_ic_path=str(bare)),
+                    output_dir=tmp_path / "dst2").setup()
 
 
 def test_land_ic_path_wrong_grid_raises(monkeypatch, tmp_path):
@@ -987,7 +1038,9 @@ def test_driver_refuses_a_land_ic_from_a_different_soil_column(monkeypatch, tmp_
     ok = tmp_path / "right_column.npz"
     save_land_restart(ok, src._land_ml_state, land_mode="multilayer",
                       t_end_s=0.0, n_steps_completed=1, metadata={},
-                      soil_dz=make_soil_grid(src.physics.land_ml_cfg.soil_grid).dz)
+                      soil_dz=make_soil_grid(src.physics.land_ml_cfg.soil_grid).dz,
+                      soil_hydraulics=_run_hydraulics_stamp(src),
+                      hydraulics=src.physics.land_ml_cfg.hydraulics)
     dst = ModelDriver(_small_cfg()._replace(land_ic_path=str(ok)),
                       output_dir=tmp_path / "dst_ok")
     dst.setup()

@@ -31,9 +31,8 @@ from legoesm.grids.gaussian import (
     sh_synthesis_3d,
     sh_analysis,
     sh_analysis_3d,
-    sh_analysis_oc2_3d,
-    sh_analysis_dmu_3d,
     uv_from_vordiv_3d,
+    vordiv_from_uv_exact_3d,
 )
 from legoesm.atmosphere.dynamics.gcm.spectral_sw import SpectralSWState
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
@@ -284,24 +283,10 @@ def unpack_pe_output(
     # lnps → spectral
     lnps_hat = sh_analysis(grid, lnps)
 
-    # u, v → vor, div in spectral space
-    a = grid.radius
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-    one_over_a = 1.0 / a
-    cos_lat_3d = grid.cos_lat[:, None, None]
-
-    u_cos = u * cos_lat_3d
-    v_cos = v * cos_lat_3d
-
-    # vor = curl(u,v), div = div(u,v)
-    vor_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, u_cos)
-    )
-    div_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, v_cos)
-    )
+    # u, v → vor, div: exact left-inverse of the uv_from_vordiv_3d synthesis
+    # used by pack_pe_state. The Bourke oc2/dmu analysis is not, and amplifies
+    # the n = n_max row on every pack -> unpack pass (#976).
+    vor_hat, div_hat = vordiv_from_uv_exact_3d(grid, u, v)
 
     if mode == "tendencies":
         phis_hat = jnp.zeros_like(state.phis_hat.data)
