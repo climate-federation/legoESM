@@ -52,7 +52,7 @@ after the flux-form call at
 `OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:327-363`.
 For stages 1 and 2, the selected QCO branch then assigns thickness-weighted
 velocity to `Kaa` at
-`OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:386-405`.
+`OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:386-403`.
 The admitted stage schedule says stage 2 uses `(Kbb,Kmm,Krhs,Kaa) =
 (1,3,2,2)`, so the assignment overwrites the same slot the ADV writer just
 recorded.  That is the omitted executed statement that refutes R60-P3.
