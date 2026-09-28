@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import jax
@@ -67,6 +68,8 @@ def _active(value, mask) -> np.ndarray:
 
 
 def _observer(card, state, **hook_values) -> dict[str, np.ndarray]:
+    label = ",".join(f"{key}={value}" for key, value in hook_values.items())
+    print(f"ROUND60_OBSERVER_BEGIN {label}", file=sys.stderr, flush=True)
     model = LatLonCGridOceanModel(
         card.recipe.grid,
         card.recipe.z_coord,
@@ -84,6 +87,7 @@ def _observer(card, state, **hook_values) -> dict[str, np.ndarray]:
     # per-process compiler-map limit.  Values are materialized before clearing.
     del observed, model
     jax.clear_caches()
+    print(f"ROUND60_OBSERVER_DONE {label}", file=sys.stderr, flush=True)
     return fields
 
 
@@ -313,7 +317,9 @@ def run(output: Path, expect_commit: str, reference: Path | None, plant: bool) -
     state = card.recipe.initial_state
     for _ in range(2):
         state = ordinary.step(state, dt=card.dt_s)
+    print("ROUND60_KT3_ENTRY_READY", file=sys.stderr, flush=True)
     ordinary_after = ordinary.step(state, dt=card.dt_s)
+    print("ROUND60_KT4_ENTRY_READY", file=sys.stderr, flush=True)
     arrays, rows = _collect(card, state, ordinary_after, momentum, masks)
 
     if plant:
