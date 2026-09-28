@@ -124,6 +124,7 @@ def _analyze_u(
     origin: tuple[int, int],
     *,
     plant: str | None,
+    production_flux_fn=None,
 ) -> dict:
     kbb = np.asarray(fields["kbb_u"], dtype=np.float64)
     kmm = np.asarray(fields["kmm_u"], dtype=np.float64)
@@ -163,16 +164,25 @@ def _analyze_u(
         _score(SOURCE_ORDER[2], fields["selected_u_t"][i, j, k], selected)
     )
 
+    production_args = (
+        jnp.asarray(transport[i, j, k]),
+        jnp.asarray(transport[i + 1, j, k]),
+        jnp.asarray(kmm[i - 1, j, k]),
+        jnp.asarray(kmm[i, j, k]),
+        jnp.asarray(kmm[i + 1, j, k]),
+        jnp.asarray(kmm[i + 2, j, k]),
+        jnp.asarray(pair),
+    )
+    if production_flux_fn is None:
+        production_value = _production_t_flux(*production_args)
+    else:
+        production_value = production_flux_fn(
+            *production_args,
+            jnp.asarray(active[i, j, k], dtype=kbb.dtype),
+            jnp.asarray(active[i + 1, j, k], dtype=kbb.dtype),
+        )
     production = np.asarray(
-        _production_t_flux(
-            jnp.asarray(transport[i, j, k]),
-            jnp.asarray(transport[i + 1, j, k]),
-            jnp.asarray(kmm[i - 1, j, k]),
-            jnp.asarray(kmm[i, j, k]),
-            jnp.asarray(kmm[i + 1, j, k]),
-            jnp.asarray(kmm[i + 2, j, k]),
-            jnp.asarray(pair),
-        ),
+        production_value,
         dtype=np.float64,
     )
     # NEMO stores Qsum*(pair-gamma*curvature); legoESM stores
@@ -229,13 +239,35 @@ def _analyze_u(
     require(int(np.count_nonzero(boundary | interior))
             == flux_row["baseline_n_unequal"],
             "face-flux mismatch partition does not close")
+
+    def _partition_score(name: str, domain: np.ndarray) -> dict:
+        if np.any(domain):
+            return _score(name, oracle_flux[domain], production_in_nemo_units[domain])
+        return {
+            "name": name,
+            "status": "BIT_EXACT",
+            "exact": True,
+            "n": 0,
+            "baseline_n_unequal": 0,
+            "n_unequal": 0,
+            "absolute_max": 0.0,
+            "relative_max_nonzero_reference": None,
+            "row_scale_ulp_max_nonzero_reference": None,
+            "zero_reference_to_nonzero": 0,
+            "signed_zero_only": 0,
+            "plant": False,
+            "planted_flat_index": None,
+        }
+
     mismatch_partition = {
-        "boundary_masked_stencil": _score(
+        "boundary_masked_stencil": _partition_score(
             "u.t_face_flux.boundary_masked_stencil",
-            oracle_flux[boundary], production_in_nemo_units[boundary]),
-        "wet_interior_association": _score(
+            boundary,
+        ),
+        "wet_interior_association": _partition_score(
             "u.t_face_flux.wet_interior_association",
-            oracle_flux[interior], production_in_nemo_units[interior]),
+            interior,
+        ),
     }
 
     return {
