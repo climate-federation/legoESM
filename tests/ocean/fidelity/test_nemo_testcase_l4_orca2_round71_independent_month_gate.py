@@ -115,3 +115,32 @@ def test_chlorophyll_clock_switches_month_pair_at_step_125(tmp_path) -> None:
 
     with pytest.raises(gate.ladder.GateError):
         gate.ladder.chlorophyll_at_step(path.parent, 241, wet, dt_s=10800.0)
+
+
+def test_surface_schema_calibration_registers_legacy_only_fields() -> None:
+    fields = {
+        name: np.full((2, 3), index, dtype=np.float64)
+        for index, name in enumerate(gate.surface_gate.FIELDS)
+    }
+    old_fields = {**fields, "passive_debug_stream": np.ones((2, 3))}
+
+    comparisons, old_only = gate.validate_surface_schema_calibration(
+        fields, old_fields, kt=1
+    )
+
+    assert comparisons == len(gate.surface_gate.FIELDS)
+    assert old_only == ["passive_debug_stream"]
+
+
+def test_surface_schema_calibration_refuses_changed_consumed_operand() -> None:
+    fields = {
+        name: np.full((2, 3), index, dtype=np.float64)
+        for index, name in enumerate(gate.surface_gate.FIELDS)
+    }
+    old_fields = {name: values.copy() for name, values in fields.items()}
+    old_fields[gate.surface_gate.FIELDS[0]][0, 0] = np.nextafter(
+        old_fields[gate.surface_gate.FIELDS[0]][0, 0], np.inf
+    )
+
+    with pytest.raises(gate.GateError):
+        gate.validate_surface_schema_calibration(fields, old_fields, kt=1)

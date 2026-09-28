@@ -87,6 +87,27 @@ def assemble_surface(root: Path, kt: int) -> dict[str, np.ndarray]:
     return assembled
 
 
+def validate_surface_schema_calibration(
+    fields: dict[str, np.ndarray], old_fields: dict[str, np.ndarray], *, kt: int
+) -> tuple[int, list[str]]:
+    """Compare every production operand while registering legacy-only streams."""
+    require(
+        tuple(fields) == surface_gate.FIELDS,
+        f"kt={kt}: month surface field registry differs from the admitted schema",
+    )
+    missing = set(fields) - set(old_fields)
+    require(not missing, f"kt={kt}: old surface frame misses {sorted(missing)}")
+    for name in fields:
+        require(
+            np.array_equal(
+                np.ascontiguousarray(fields[name]).view(np.uint64),
+                np.ascontiguousarray(old_fields[name]).view(np.uint64),
+            ),
+            f"kt={kt}: old/new surface payload differs for {name}",
+        )
+    return len(fields), sorted(set(old_fields) - set(fields))
+
+
 def validate_chlorophyll_clock(root: Path) -> dict[str, object]:
     """Bind the reconstructed month clock to NEMO's resolved record centres."""
     path = root / "ocean.output"
@@ -368,6 +389,7 @@ def run_month(
     ten_step_actual = None
     schema_calibration = None
     surface_schema_comparisons = 0
+    old_only_surface_fields: list[str] | None = None
     consumed = 0
     for kt in range(1, STEPS + 1):
         fields = assemble_surface(surface_root, kt)
@@ -376,19 +398,16 @@ def run_month(
         state = model.step(state, dt=card.dt_s, freshwater=freshwater, surface_forcing=surface)
         if kt <= 10:
             old_fields = ladder.assemble_surface_fields(ten_step_root, kt)
-            require(
-                old_fields.keys() == fields.keys(),
-                f"kt={kt}: old/new surface field registry differs",
+            comparisons, old_only = validate_surface_schema_calibration(
+                fields, old_fields, kt=kt
             )
-            for name in fields:
-                require(
-                    np.array_equal(
-                        np.ascontiguousarray(fields[name]).view(np.uint64),
-                        np.ascontiguousarray(old_fields[name]).view(np.uint64),
-                    ),
-                    f"kt={kt}: old/new surface payload differs for {name}",
-                )
-                surface_schema_comparisons += 1
+            surface_schema_comparisons += comparisons
+            if old_only_surface_fields is None:
+                old_only_surface_fields = old_only
+            require(
+                old_only == old_only_surface_fields,
+                f"kt={kt}: legacy-only surface registry changed",
+            )
             old_freshwater, old_surface = ladder._surface_forcings(card, deck_root, old_fields, kt)
             calibration_state = model.step(
                 calibration_state,
@@ -469,6 +488,7 @@ def run_month(
         "ten_step_calibration": {
             "exact": calibration_exact,
             "surface_schema_field_comparisons": surface_schema_comparisons,
+            "legacy_only_surface_fields": old_only_surface_fields,
             "new_vs_old_schema": schema_calibration,
         },
         "chlorophyll_clock_retraction": {
