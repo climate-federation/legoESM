@@ -57,6 +57,8 @@ _OVERFLOW_R50PAIR_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo")
 _OVERFLOW_R56UP3_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo")
+_OVERFLOW_R62ZDF_COMPILED = (
+    NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
@@ -104,6 +106,8 @@ FILES = {
         _OVERFLOW_R50PAIR_COMPILED / "dynzdf.f90"),
     "OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90": (
         _OVERFLOW_R56UP3_COMPILED / "dynadv_up3.f90"),
+    "OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90": (
+        _OVERFLOW_R62ZDF_COMPILED / "dynzdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo"
         "/stprk3.f90"),
@@ -676,6 +680,9 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py",
     "state.py": REPO / "packages/ocean/legoesm/ocean/state.py",
     "provenance.py": REPO / "packages/ocean/legoesm/ocean/fidelity/provenance.py",
+    "nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py": (
+        REPO / "scripts/validate/ocean_fidelity/testcases"
+        / "nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py"),
     # --- round 35 paths: the implicit vertical TRACER solve ---
     # GYRE's OWN run log for this round, so a GYRE resolved value cannot bind
     # to OVERFLOW's ocean.output through the bare key above.
@@ -969,6 +976,22 @@ CITATION_MAP = {
         ('!**  tridiagonal matrix construction  **!    diagonal (zwd), lower (zwi), upper (zws)', 2),
         'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - zws(ji,jk) * pvv(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)',
         162],
+    # --- ORCA2 round 63: executing acquisition build, including its writer ---
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:139-159': [
+        '!              !==  RHS : time-stepping of all trends but the implicit one  ==!',
+        '& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 21],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:165-171': [
+        'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
+        '& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 7],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:172-192': [
+        'DO ji = ntsi-( 0), ntei+( 0 )      ! Add bottom/top stress due to barotropic component only',
+        '& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 21],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:343-362': [
+        'DO jk =     2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0 )   !==  First recurrence',
+        'CALL r62_zdf_u_solve(jj,puu(ntsi:ntei,jj,1:jpkm1,Kaa))', 20],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:512-531': [
+        'DO jk =     2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0 )   !==  First recurrence',
+        'CALL r62_zdf_v_solve(jj,pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 20],
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:492-541': [
         '!                       !==  T-S Tracers  ==!',
         ('CALL r50_tra_finish( ts, ssh, Kaa )', 1), 50],
@@ -3709,6 +3732,37 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:9506-9510': [
         'if _nemo_ws_exposed_stage3_raw is not None:',
         ('v=state_new.v.replace(data=_raw_v),', 2), 5],
+    # ORCA2 round 63: private write-only dyn_zdf seam observer.
+    'ocean_model_latlon_cgrid.py:1278-1283': [
+        '# WRITE-only observer for the four source-ordered stage-3 dyn_zdf',
+        'zdf_momentum_observer: object = None', 6],
+    'ocean_model_latlon_cgrid.py:2795-2799': [
+        '_zdf_momentum_observer = (',
+        'raise ValueError("zdf_momentum_observer must be callable or None")', 5],
+    'ocean_model_latlon_cgrid.py:10956-10960': [
+        '_zc = self.z_coord if z_coord is None else z_coord',
+        '# Argument validation at ENTRY, not inside the drag branch below:', 5],
+    'ocean_model_latlon_cgrid.py:11421-11424': [
+        'u_new, v_new = state.u.data, state.v.data',
+        'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 4],
+    'ocean_model_latlon_cgrid.py:11611-11614': [
+        'u_solve_in = u_solve_in - _u_bt_mean',
+        'u_solve_in, v_solve_in)', 4],
+    'ocean_model_latlon_cgrid.py:11730-11736': [
+        'u_solve_in = u_solve_in - (',
+        '_zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in', 7],
+    'ocean_model_latlon_cgrid.py:11898-11905': [
+        'if _zdf_momentum_observer is not None:',
+        'ordered=True,', 8],
+    'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:171-230': [
+        'def run(output: Path, expect_commit: str, entry_input: Path,',
+        '"ordinary/observer commit mismatch")', 60],
+    'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:232-248': [
+        'observer_rows = _noninterference(ordinary_arrays, observed)',
+        'arrays[name] = R60._active(candidate, mask)', 17],
+    'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:280-292': [
+        'planted = None',
+        'R60.require(after == before + 1, "plant did not add one refusal")', 13],
     'ocean_pe_latlon_cgrid.py:3449-3452': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
