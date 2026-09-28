@@ -1585,7 +1585,19 @@ class CoupledESMDriver:
             r = self._last_sfc_response
             if r is None or getattr(r, "shflx", None) is None:
                 return None, None
-            return r.shflx, r.lhflx
+            # The atmosphere turns this latent flux back into a MOISTURE flux
+            # with its own constant L_v (bulk kick and every turbulence
+            # kernel: evap = lhflx / L_v).  The tile flux used L_vap(SST) under
+            # the aerobulk convention, so handing lhflx itself would make the
+            # atmosphere gain ~2 % less water than the ocean loses.  Hand the
+            # tile's MASS flux, scaled by the atmosphere's L_v, so the moisture
+            # the atmosphere receives is exactly the water the tiles lost.
+            if getattr(r, "surface_mass_flux", None) is None:
+                raise ValueError(
+                    "couple_surface_fluxes: the surface response carries no "
+                    "surface_mass_flux; the atmosphere's moisture source must be "
+                    "the tile mass flux, not lhflx / L_v.")
+            return r.shflx, r.surface_mass_flux * constants.L_v
 
         self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override
         logger.info(
