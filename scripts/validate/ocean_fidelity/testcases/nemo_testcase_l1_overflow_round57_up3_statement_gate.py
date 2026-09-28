@@ -33,6 +33,7 @@ SOURCE_ORDER = (
     "u.horizontal_curvature",
     "u.velocity_pair",
     "u.selected_curvature",
+    "u.nemo_t_face_flux_replay",
     "u.t_face_flux",
 )
 
@@ -177,12 +178,18 @@ def _analyze_u(
     # NEMO stores Qsum*(pair-gamma*curvature); legoESM stores
     # (Qsum/2)*reconstruction, where reconstruction is half the bracket.
     production_in_nemo_units = np.float64(4.0) * production
+    oracle_flux = fields["flux_u_t"][i, j, k]
+    nemo_replay = (
+        (transport[i, j, k] + transport[i + 1, j, k])
+        * (pair - np.float64(1.0 / 3.0) * selected)
+    )
+    rows.append(_score(SOURCE_ORDER[3], oracle_flux, nemo_replay))
     flux_row = _score(
-        SOURCE_ORDER[3],
+        SOURCE_ORDER[4],
         # The writer receives zFu_t(ji+1,jj) but stores the scalar under its
         # loop coordinate (ji,jj).  Its self-describing field is therefore
         # loop-aligned, not native zFu_t-array-aligned.
-        fields["flux_u_t"][i, j, k],
+        oracle_flux,
         production_in_nemo_units,
         plant=plant == "face_flux",
     )
@@ -207,8 +214,8 @@ def _analyze_u(
     if first is not None:
         unequal = (
             _bits(production_in_nemo_units)
-            != _bits(fields["flux_u_t"][i, j, k])
-        ) if first["name"] == SOURCE_ORDER[3] else None
+            != _bits(oracle_flux)
+        ) if first["name"] == SOURCE_ORDER[4] else None
         if unequal is not None:
             at = int(np.flatnonzero(unequal)[0])
             first["first_record_index_0based"] = [
@@ -216,11 +223,27 @@ def _analyze_u(
             first["first_fortran_index_1based"] = [
                 int(i[at] + 1), int(j[at] + 1), int(k[at] + 1)]
 
+    flux_unequal = _bits(production_in_nemo_units) != _bits(oracle_flux)
+    boundary = flux_unequal & (~active[i, j, k] | ~active[i + 1, j, k])
+    interior = flux_unequal & active[i, j, k] & active[i + 1, j, k]
+    require(int(np.count_nonzero(boundary | interior))
+            == flux_row["baseline_n_unequal"],
+            "face-flux mismatch partition does not close")
+    mismatch_partition = {
+        "boundary_masked_stencil": _score(
+            "u.t_face_flux.boundary_masked_stencil",
+            oracle_flux[boundary], production_in_nemo_units[boundary]),
+        "wet_interior_association": _score(
+            "u.t_face_flux.wet_interior_association",
+            oracle_flux[interior], production_in_nemo_units[interior]),
+    }
+
     return {
         "status": status,
         "plant": plant,
         "source_order": list(SOURCE_ORDER),
         "rows": rows,
+        "face_flux_mismatch_partition": mismatch_partition,
         "first_non_bit_statement": first,
         "active_parent_u": int(np.count_nonzero(parent_active_u)),
         "contributing_t_faces": int(coords.shape[0]),
