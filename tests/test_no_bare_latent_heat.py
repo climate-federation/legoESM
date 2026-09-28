@@ -17,6 +17,9 @@ are exempt.  Self-tests prove the detector is non-vacuous.
 from __future__ import annotations
 
 import ast
+import io
+import re
+import tokenize
 
 import pytest
 
@@ -24,7 +27,10 @@ from tests import _ratchet_audit as ra
 from tests._latent_heat_baseline import LATENT_BUDGET
 
 _NAMES = frozenset({"L_v", "L_s", "L_f"})
-_EXEMPT_TAG = "latent"
+# Exact tag with a non-empty reason: ``# latent-ok: <scheme> oracle constant``.
+# Neither ``# latent-ok`` (no reason), ``# latent-okay: x`` nor ``# not-latent-ok: x``
+# exempt a line.
+_EXEMPT_RE = re.compile(r"#\s*latent-ok:\s*\S")
 _EXEMPT_FILES = {
     ra.canonical_source_path("packages/core/legoesm/constants.py"),
     ra.canonical_source_path("packages/core/legoesm/thermo.py"),
@@ -32,8 +38,21 @@ _EXEMPT_FILES = {
 }
 
 
+def _exempt_lines(src: str) -> set[int]:
+    """Lines whose COMMENT token (never a string literal) matches ``_EXEMPT_RE``."""
+    out: set[int] = set()
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type == tokenize.COMMENT and _EXEMPT_RE.match(tok.string):
+                out.add(tok.start[0])
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return out   # a tokeniser hiccup must not silently exempt lines
+    return out
+
+
 def _is_constants_module(node: ast.AST, aliases: set[str]) -> bool:
-    """``constants`` / an alias / a dotted chain ending in ``.constants``."""
+    """``constants`` / an alias / a dotted chain ending in ``.constants`` (any
+    root: a false positive on an unrelated ``foo.constants.L_v`` is the safe side)."""
     if isinstance(node, ast.Name):
         return node.id in aliases
     return isinstance(node, ast.Attribute) and node.attr == "constants"
@@ -47,7 +66,7 @@ def bare_latent_heat_sites(src: str) -> list[tuple[int, int]]:
     so a second read cannot hide behind a budgeted line.  Raises ``SyntaxError``
     on an unparseable file."""
     tree = ast.parse(src)
-    exempt = ra.comment_tagged_lines(src, _EXEMPT_TAG)
+    exempt = _exempt_lines(src)
     aliases = {"constants"}
     bound: set[str] = set()
     for n in ast.walk(tree):
@@ -60,6 +79,8 @@ def bare_latent_heat_sites(src: str) -> list[tuple[int, int]]:
                 for a in n.names:
                     if a.name in _NAMES:
                         bound.add(a.asname or a.name)
+                    elif a.name == "*":
+                        bound |= _NAMES   # star import: every bare L_v/L_s/L_f read counts
             for a in n.names:
                 if a.name == "constants" and a.asname:
                     aliases.add(a.asname)
@@ -140,8 +161,6 @@ def test_detector_counts_every_read_on_a_line() -> None:
     assert len(bare_latent_heat_sites("x = constants.L_v + constants.L_f\n")) == 2
 
 
-def test_near_miss_comment_does_not_exempt() -> None:
-    assert bare_latent_heat_lines("q = h / constants.L_v  # latent heat of the flux\n") == [1]
 
 
 def test_detector_ignores_the_canonical_family_and_other_attrs() -> None:
@@ -153,3 +172,13 @@ def test_detector_ignores_the_canonical_family_and_other_attrs() -> None:
 def test_inline_exemption_requires_real_comment() -> None:
     assert bare_latent_heat_lines("q = h / constants.L_v  # latent-ok: CLUBB oracle constant\n") == []
     assert bare_latent_heat_lines("q = h / constants.L_v; s = \"latent-ok: in a string\"\n") == [1]
+
+
+@pytest.mark.parametrize("comment", ["# latent-ok", "# latent-ok:", "# latent-okay: x",
+                                     "# not-latent-ok: x", "# latent heat of the flux"])
+def test_near_miss_tags_do_not_exempt(comment) -> None:
+    assert bare_latent_heat_lines(f"q = h / constants.L_v  {comment}\n") == [1]
+
+
+def test_detector_flags_star_import_reads() -> None:
+    assert bare_latent_heat_lines("from legoesm.constants import *\nq = h / L_v\n") == [2]

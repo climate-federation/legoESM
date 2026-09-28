@@ -355,6 +355,15 @@ def test_l_vap_and_cp_air_reference():
         pytest.approx(constants.L_v, rel=1e-12))
     assert float(latent_heat_vaporization(constants.T_freeze + 25.0)) == (
         pytest.approx(constants.L_v - (constants.c_pw - constants.c_pv) * 25.0, rel=1e-12))
+    # Independent pin (codex round 2): a literal, not the constants the
+    # implementation reads, so a drift in c_pw/c_pv cannot pass unnoticed.
+    assert float(latent_heat_vaporization(constants.T_freeze + 25.0)) == (
+        pytest.approx(2441700.0, rel=1e-12))   # const-ok: 2.501e6 - 2372*25 pinned
+    assert float(moist_air_cp(0.0)) == pytest.approx(
+        constants.c_p_dry_air_nemo, rel=1e-12)
+    assert float(moist_air_cp(0.01)) == pytest.approx(
+        constants.c_p_dry_air_nemo + 0.01 * constants.c_p_vapor_nemo,
+        rel=1e-12)
 
 
 def test_l_vap_deviation_from_nemo_is_bounded():
@@ -367,11 +376,6 @@ def test_l_vap_deviation_from_nemo_is_bounded():
     assert ours[0] == pytest.approx(nemo[0], rel=1e-14)
     assert np.all(np.abs(ours / nemo - 1.0) < 3e-5)
     assert np.all(ours[1:] < nemo[1:])   # Kirchhoff is the slightly steeper slope, so smaller L when warm
-    assert float(moist_air_cp(0.0)) == pytest.approx(
-        constants.c_p_dry_air_nemo, rel=1e-12)
-    assert float(moist_air_cp(0.01)) == pytest.approx(
-        constants.c_p_dry_air_nemo + 0.01 * constants.c_p_vapor_nemo,
-        rel=1e-12)
 
 
 def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
