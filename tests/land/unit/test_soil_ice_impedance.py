@@ -124,6 +124,25 @@ def test_frozen_top_layer_turns_rain_into_runoff():
     thawed = _run(hyd, rcfg, None, n_steps=6, flux=1e-5, theta_frac=0.5)
     frozen = _run(hyd, rcfg, -6.0 * _LN10 * f, n_steps=6, flux=1e-5, theta_frac=0.5)
     assert frozen["runoff"] + frozen["pond"] > thawed["runoff"] + thawed["pond"] + 1e-3
+    # the surface conductance itself is impeded: in one step the frozen top layer
+    # takes in almost nothing of the 18 mm offered (thawed, it would fill)
+    grid, _, th0, _ = _column(hyd, 0.5)
+    one = _run(hyd, rcfg, -6.0 * _LN10 * f, n_steps=1, flux=1e-5, theta_frac=0.5)
+    assert float((one["theta"] - th0)[0, 0] * grid.dz[0]) < 1e-4
+
+
+def test_frozen_middle_layer_blocks_the_interfaces():
+    """Only one mid-column layer frozen: the interfaces around it throttle the
+    drainage out of the wet layers above (bottom layer itself thawed)."""
+    hyd = SoilHydraulicsConfig()
+    rcfg = RichardsConfig()
+    nl = make_soil_grid().n_layers
+    f = jnp.zeros((1, nl)).at[:, 3].set(1.0)
+    thawed = _run(hyd, rcfg, None, n_steps=96)
+    frozen = _run(hyd, rcfg, -6.0 * _LN10 * f, n_steps=96)
+    above = slice(0, 3)
+    assert float(jnp.sum(frozen["theta"][:, above])) > float(jnp.sum(thawed["theta"][:, above])) + 1e-3
+    assert abs(frozen["resid"]) < 1e-9
 
 
 @pytest.mark.parametrize("case", [
@@ -166,6 +185,8 @@ def _cfg(freeze, e=6.0):
 
 
 def _spy_step(monkeypatch, cfg, T_init, theta_init=0.35):
+    """One jitted land step; returns (start state, the Richards call's
+    flux_top, sink and log_impedance) as traced out of the step."""
     calls = []
     real = multilayer_land.solve_richards
 
@@ -175,37 +196,43 @@ def _spy_step(monkeypatch, cfg, T_init, theta_init=0.35):
 
     monkeypatch.setattr(multilayer_land, "solve_richards", spy)
     st = init_multilayer_land_state(1, cfg, T_init=T_init, theta_init=theta_init)
-    new, _, _ = step_multilayer_land(st, _forcing(), cfg, 1.0, _DT, lat=jnp.full(1, 1.2))
-    return st, new, calls[-1]
+
+    @jax.jit
+    def run(st):
+        step_multilayer_land(st, _forcing(), cfg, 1.0, _DT, lat=jnp.full(1, 1.2))
+        args, kw = calls[-1]
+        return args[5], args[6], kw["log_impedance"]
+
+    return st, run(st)
 
 
 def test_freeze_off_passes_no_factor(monkeypatch):
-    _, _, (_, kw) = _spy_step(monkeypatch, _cfg(False), constants.T_freeze - 5.0)
-    assert kw["log_impedance"] is None
+    _, (_, _, li) = _spy_step(monkeypatch, _cfg(False), constants.T_freeze - 5.0)
+    assert li is None
 
 
 def test_frozen_step_passes_clm_factor(monkeypatch):
     cfg = _cfg(True)
-    st, _, (_, kw) = _spy_step(monkeypatch, cfg, constants.T_freeze - 5.0)
+    st, (_, _, li) = _spy_step(monkeypatch, cfg, constants.T_freeze - 5.0)
     liq, _ = liquid_water_content(st.T_soil, st.theta_soil, cfg.thermal)
     ice = st.theta_soil - liq
     want = -6.0 * _LN10 * jnp.clip(
         ice * constants.rho_water / constants.rho_ice / cfg.hydraulics.theta_sat, 0.0, 1.0)
-    np.testing.assert_allclose(kw["log_impedance"], want, rtol=1e-12)
-    assert float(jnp.min(kw["log_impedance"])) < -5.0 * _LN10  # deeply frozen
+    np.testing.assert_allclose(li, want, rtol=1e-12)
+    assert float(jnp.min(li)) < -5.0 * _LN10  # deeply frozen
 
 
 def test_thawed_column_is_unimpeded(monkeypatch):
-    _, _, (_, kw) = _spy_step(monkeypatch, _cfg(True), constants.T_freeze + 8.0)
-    assert float(jnp.min(kw["log_impedance"])) > -1e-6
+    _, (_, _, li) = _spy_step(monkeypatch, _cfg(True), constants.T_freeze + 8.0)
+    assert float(jnp.min(li)) > -1e-5  # factor > 0.99998 (sigmoid tail)
 
 
 def test_roots_and_evaporation_unchanged_by_impedance(monkeypatch):
     """D6: only conductivity is impeded; the soil water sink and top flux are not."""
     T = constants.T_freeze - 3.0
-    _, _, (a0, _) = _spy_step(monkeypatch, _cfg(True, e=0.0), T)
-    _, _, (a6, _) = _spy_step(monkeypatch, _cfg(True, e=6.0), T)
-    for i in (5, 6):  # flux_top, sink
+    _, a0 = _spy_step(monkeypatch, _cfg(True, e=0.0), T)
+    _, a6 = _spy_step(monkeypatch, _cfg(True, e=6.0), T)
+    for i in (0, 1):  # flux_top, sink
         assert jnp.array_equal(a0[i], a6[i])
 
 
@@ -241,7 +268,7 @@ def test_gradient_partially_frozen_matches_fd():
     exponent and K_sat is nonzero and matches central differences."""
     x0 = (constants.T_freeze - 0.3, 6.0, 3e-6)
     g = jax.grad(lambda *x: _drain_of(*x) * 1e3, argnums=(0, 1, 2))(*x0)
-    for i, (gi, h) in enumerate(zip(g, (1e-4, 1e-4, 1e-10))):
+    for i, (gi, h) in enumerate(zip(g, (1e-4, 1e-4, 1e-9))):
         xp = list(x0); xm = list(x0)
         xp[i] += h; xm[i] -= h
         fd = (_drain_of(*xp) - _drain_of(*xm)) * 1e3 / (2 * h)
@@ -288,7 +315,7 @@ def test_exponent_carries_gradient_through_a_land_step():
         new, _, _ = step_multilayer_land(st, _forcing(T_air=272.0), cfg, 1.0, _DT,
                                          lat=jnp.full(1, 1.2))
         return jnp.sum(new.theta_soil[:, -3:])
-    g = jax.grad(loss)(6.0)
+    g = jax.jit(jax.grad(loss))(6.0)
     assert bool(jnp.isfinite(g)) and abs(float(g)) > 0.0
 
 
