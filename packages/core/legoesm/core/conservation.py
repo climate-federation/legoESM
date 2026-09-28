@@ -1171,6 +1171,136 @@ def diagnose_moisture_correction(
     }
 
 
+#: Water species whose physics tendency carries MASS in or out of the
+#: column (vapour, warm-rain and ice-phase condensate).  Number
+#: concentrations and passengers are per-mass tracers that ride the layer
+#: mass but add none.
+WATER_MASS_SPECIES = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g")
+
+
+def _d(x):
+    """Field payload or the array itself (a bare jax Array's ``.data`` is
+    its buffer, so no ``getattr(x, "data", x)``)."""
+    return x.data if hasattr(x, "replace") and hasattr(x, "data") else x
+
+
+def dry_surface_pressure(p_s, tracers, sigma_coord, *,
+                         water_names=WATER_MASS_SPECIES):
+    """Surface pressure of the DRY air alone [Pa]:
+    ``p_top + sum_k dp_k (1 - Q_k)`` on sigma or hybrid layer masses
+    (the coordinate's own top pressure ``p_top = p_half[0]`` -- sigma_top
+    * p_s on sigma, ak[0] on hybrid -- is dry: no tracer lives above the
+    top layer).  Equals ``p_s - g * column water`` since ``p_top + sum_k
+    dp_k == p_s`` for every coordinate; written as the layer sum so it is
+    exact in floating point against the layer masses the tests and the
+    water tendencies use.
+
+    The p_s-coordinate lanes' mass fixer conserves THIS (user decision
+    2026-09-28, the FV3/IFS/CAM convention: dry air is conserved, water
+    comes and goes through precipitation and evaporation).  A fixer on
+    the total ``p_s`` would put every step's precipitated mass straight
+    back as dry air, undoing :func:`apply_physics_water_mass`.
+    ``tracers`` may be ``None`` (dry run): returns ``p_s``.
+    """
+    if tracers is None:
+        return p_s
+    Q = None
+    for name in water_names:
+        if name in tracers:
+            q = _d(tracers[name])
+            Q = q if Q is None else Q + q
+    if Q is None:
+        return p_s
+    dp = sigma_coord.layer_thickness_dp(p_s)
+    p_top = sigma_coord.pressure_at_half(p_s)[..., 0]
+    return p_top + jnp.sum(dp * (1.0 - Q), axis=-1)
+
+
+def apply_physics_water_mass(tracers, tracer_tendencies, p_s, sigma_coord,
+                             dt, *, water_names=WATER_MASS_SPECIES):
+    """Apply physics tracer tendencies WITH their mass (the FV3
+    ``fv_update_phys`` nwat block on a p_s-coordinate column).
+
+    Convention: every tracer is a SPECIFIC quantity on TOTAL air mass
+    (``q_x = m_x / m_total``, the FV3/CAM/IFS convention this driver's
+    column-water diagnostic ``sum(q p_s dsigma)/g`` already assumes).  A
+    water tendency ``dq_x`` [1/s] from physics therefore means
+    ``dt*dq_x*dp_k/g`` kg/m^2 of water added to layer k (negative for
+    precipitation leaving it).  Applying it as ``q += dt*dq`` at fixed
+    ``p_s`` (the previous behaviour) keeps the column's total mass: the
+    precipitated water stays behind as DRY AIR.  Here the layer masses
+    carry the water in and out:
+
+        D_k     = dt * sum_x dq_x,k                       (water species only)
+        dp_k    = layer mass of the coordinate at p_s      (sigma OR hybrid)
+        p_s'    = p_s + sum_k dp_k * D_k                   (column water change)
+        dp_k'   = layer mass of the coordinate at p_s'
+        q_t,k'  = (q_t,k + dt*dq_t,k) * dp_k / dp_k'       for EVERY tracer t
+
+    i.e. each tracer's layer MASS after the increment,
+    ``(q + dt*dq)*dp_k``, is placed on the coordinate's new layer mass.
+    Column totals of every tracer (water and passengers) and the column
+    dry mass ``sum_k dp_k (1 - Q_k)`` are exact; the per-layer
+    redistribution is the coordinate's own response to the column
+    mass change (GLM/codex 2026-09-28: the unweighted form
+    ``q' = (q + dq)/(1 + D_k)`` is first-order wrong on sigma).
+
+    Returns ``(tracers_new, p_s_new)``.  Tracers with no tendency entry
+    are re-weighted too (their mass is unchanged, their layer mass is
+    not).  ``tracer_tendencies`` values may be Field-like (``.data``) or
+    arrays; the tracers dict is returned in the same wrapping as given.
+    """
+    dp = sigma_coord.layer_thickness_dp(p_s)                  # (..., nlev)
+    D = None
+    for name in water_names:
+        # a tendency for a species the state does not carry adds no mass:
+        # its increment is dropped below, so it must not move p_s either
+        # (codex 2026-09-28 r2)
+        if name in tracer_tendencies and name in tracers:
+            inc = dt * _d(tracer_tendencies[name])
+            D = inc if D is None else D + inc
+    if D is None:
+        # no water tendency: layer masses unchanged, passengers still
+        # take their own tendencies (codex 2026-09-28)
+        p_s_new, ratio = p_s, None
+    else:
+        p_s_new = p_s + jnp.sum(dp * D, axis=-1)
+        ratio = dp / sigma_coord.layer_thickness_dp(p_s_new)
+    out = {}
+    for name, tr in tracers.items():
+        q = _d(tr)
+        if name in tracer_tendencies:
+            q = q + dt * _d(tracer_tendencies[name])
+        elif ratio is None:
+            out[name] = tr
+            continue
+        q_new = q if ratio is None else (q * ratio).astype(q.dtype)
+        out[name] = tr.replace(data=q_new) if hasattr(tr, "replace") else q_new
+    return out, p_s_new
+
+
+def shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction):
+    """Uniform ``p_s += correction`` (a mass fixer's move) with every
+    tracer re-weighted onto the new layer masses so each tracer's column
+    mass is untouched: ``q' = q * dp_k / dp_k'``.  The added or removed
+    mass is then entirely DRY air, so the fixer's correction is exact
+    for the dry integral (``dry' = dry + correction`` per column; the
+    unweighted shift changes dry pressure by only ``correction * (1 -
+    sum_k dB_k Q_k)`` and moves water by ``Q_bar * correction`` -- codex
+    and GLM 2026-09-28).  Returns ``(p_s_new, tracers_new)``.
+    """
+    p_s_new = p_s + correction
+    if tracers is None:
+        return p_s_new, tracers
+    ratio = sigma_coord.layer_thickness_dp(p_s) / sigma_coord.layer_thickness_dp(p_s_new)
+    out = {}
+    for name, tr in tracers.items():
+        q = _d(tr)
+        q_new = (q * ratio).astype(q.dtype)
+        out[name] = tr.replace(data=q_new) if hasattr(tr, "replace") else q_new
+    return p_s_new, out
+
+
 def fix_total_water(
     tracers: dict[str, jax.Array],
     target_total_water: jax.Array,

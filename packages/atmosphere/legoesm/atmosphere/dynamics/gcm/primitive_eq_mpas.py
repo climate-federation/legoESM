@@ -940,9 +940,13 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
 
 
     def compute_mass(self, state) -> jax.Array:
-        """Compute global ``∫ p_s dA`` in the fp64 budget accumulator."""
+        """Global DRY mass ``∫ (p_s - g*column water) dA`` in the fp64
+        budget accumulator (what the fixer conserves)."""
+        from legoesm.core.conservation import dry_surface_pressure
+        ps_dry = dry_surface_pressure(state.p_s.data, state.tracers,
+                                      self.sigma_coord)
         return jnp.sum(
-            state.p_s.data.astype(jnp.float64)
+            ps_dry.astype(jnp.float64)
             * self.mesh.areaCell.astype(jnp.float64),
         )
 
@@ -1155,23 +1159,25 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                     or _pr_sfc is not None
                     or any(_e is not None for _e in _extras)):
                 sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc) + _extras
+            _ps_phys = state_new.p_s.data + dt * _pt.dp_s_dt.data
+            _tr_phys = state_new.tracers
+            if (state_new.tracers is not None
+                    and _pt.tracer_tendencies is not None):
+                # water tendencies carry their MASS (FV3 fv_update_phys
+                # nwat block): precipitation lowers p_s, evaporation
+                # raises it; every tracer re-weighted onto the new
+                # layer masses (column totals exact, dry mass exact)
+                from legoesm.core.conservation import apply_physics_water_mass
+                _tr_phys, _ps_phys = apply_physics_water_mass(
+                    state_new.tracers, _pt.tracer_tendencies, _ps_phys,
+                    self.sigma_coord, dt)
             state_new = MPASHydrostaticState(
                 u=state_new.u.replace(data=state_new.u.data + dt * _pt.du_dt.data),
                 T=state_new.T.replace(data=state_new.T.data + dt * _pt.dT_dt.data),
-                p_s=state_new.p_s.replace(
-                    data=state_new.p_s.data + dt * _pt.dp_s_dt.data),
+                p_s=state_new.p_s.replace(data=_ps_phys),
                 phis=state_new.phis,
-                tracers=state_new.tracers,
+                tracers=_tr_phys,
             )
-            if (state_new.tracers is not None
-                    and _pt.tracer_tendencies is not None):
-                state_new = state_new._replace(tracers={
-                    k: (state_new.tracers[k].replace(
-                            data=state_new.tracers[k].data
-                            + dt * _pt.tracer_tendencies[k].data)
-                        if k in _pt.tracer_tendencies else state_new.tracers[k])
-                    for k in state_new.tracers
-                })
             # Per-process ledger rows from the combined physics (per-column,
             # (nCells, N_LEDGER, 2)).  Structural (trace-time) check: None
             # unless the physics was built with budget_ledger=True.
@@ -1194,6 +1200,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 state_new, state, self.mesh,
                 total_area=self._total_area,
                 target_mass=target_mass,
+                sigma_coord=self.sigma_coord,
             )
         _state_postfix = state_new        # ledger: after the dry-mass fixer
 
@@ -1326,8 +1333,15 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
 
 def _fix_mass_mpas_hydro(
     state_new, state_old, mesh, total_area=None, target_mass=None,
+    sigma_coord=None,
 ):
-    """Fix mass conservation: uniform additive correction to p_s.
+    """Fix DRY-mass conservation: uniform additive correction to p_s.
+
+    The conserved integral is ``∫ (p_s - g*column water) dA`` (user
+    decision 2026-09-28): water enters and leaves the column through the
+    physics (``apply_physics_water_mass``) and the fixer must not refill
+    it.  ``sigma_coord=None`` keeps the legacy TOTAL-mass fixer for
+    callers without a coordinate (none in the lanes).
 
     iter-11: cast both p_s fields to the fp64 budget accumulator before
     the area-weighted sum.  Plain fp32 reductions over ~10^4–10^5
@@ -1352,8 +1366,14 @@ def _fix_mass_mpas_hydro(
         total_area = jnp.sum(area)
     acc = jnp.float64
     area_acc = area.astype(acc)
+    if sigma_coord is not None:
+        from legoesm.core.conservation import dry_surface_pressure
+        ps_old = dry_surface_pressure(state_old.p_s.data, state_old.tracers, sigma_coord)
+        ps_new = dry_surface_pressure(state_new.p_s.data, state_new.tracers, sigma_coord)
+    else:
+        ps_old, ps_new = state_old.p_s.data, state_new.p_s.data
     if target_mass is not None:
-        mass_new = jnp.sum(state_new.p_s.data.astype(acc) * area_acc)
+        mass_new = jnp.sum(ps_new.astype(acc) * area_acc)
         # is_multi_process(), NOT jax.process_count() > 1: the mpi4jax
         # allreduce is correct only when each rank holds a LOCAL partition
         # (route-A MPI).  Under multi-controller SPMD (route-B, federated
@@ -1367,8 +1387,8 @@ def _fix_mass_mpas_hydro(
     else:
         _ps_stack = jnp.stack(
             [
-                state_old.p_s.data.astype(acc),
-                state_new.p_s.data.astype(acc),
+                ps_old.astype(acc),
+                ps_new.astype(acc),
             ],
             axis=-1,
         ) * area_acc[..., None]
@@ -1379,5 +1399,13 @@ def _fix_mass_mpas_hydro(
     correction = (mass_old - mass_new) / total_area
     # iter-11: drop ``.astype(p_s.data.dtype)`` — fp64 correction
     # promotes the add, matches ``fix_ps_mass`` cubed-sphere convention.
+    if sigma_coord is not None:
+        # the added/removed mass is DRY air: tracers re-weighted so
+        # their column masses are untouched (exact dry correction)
+        from legoesm.core.conservation import shift_ps_keep_tracer_mass
+        ps_new, tr_new = shift_ps_keep_tracer_mass(
+            state_new.p_s.data, state_new.tracers, sigma_coord, correction)
+        return state_new._replace(p_s=state_new.p_s.replace(data=ps_new),
+                                  tracers=tr_new)
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
