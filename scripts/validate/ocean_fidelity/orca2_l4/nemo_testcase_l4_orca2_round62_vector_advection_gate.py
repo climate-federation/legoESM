@@ -33,6 +33,10 @@ NAMES = (
     "after_vorticity_u", "after_vorticity_v",
     "after_advection_u", "after_advection_v",
 )
+EXPECTED_ACTIVE_AFTER_SHA256 = {
+    "U": "e24fb5e758d8f2e49cf55734b3ea7aefbb53b95db7eb62611725ba0f333807dc",
+    "V": "b28a04ba4e4d59264058bc00013a3efad48a049c4aaf8abcf8b4886015f50856",
+}
 PPROOT = Path(
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
@@ -89,10 +93,6 @@ def read_terms(path: Path, *, plant: str | None = None) -> dict[str, np.ndarray]
         name: _xyz(values[i * count:(i + 1) * count])
         for i, name in enumerate(names)
     }
-    if plant == "payload-ulp":
-        arrays["after_advection_u"][2, 2, 0] = np.nextafter(
-            arrays["after_advection_u"][2, 2, 0], np.inf
-        )
     return arrays
 
 
@@ -119,7 +119,8 @@ def _compiled_scope() -> dict[str, object]:
     }
 
 
-def _movement(arrays: dict[str, np.ndarray], root: Path) -> list[dict[str, object]]:
+def _movement(arrays: dict[str, np.ndarray], root: Path,
+              *, plant: str | None = None) -> list[dict[str, object]]:
     with xr.open_dataset(root / "mesh_mask_0000.nc", decode_cf=False) as mesh:
         masks = {
             face: np.asarray(mesh[f"{face.lower()}mask"][0, :30]).transpose(1, 2, 0) > 0
@@ -129,10 +130,20 @@ def _movement(arrays: dict[str, np.ndarray], root: Path) -> list[dict[str, objec
     for face in ("U", "V"):
         key = face.lower()
         before = arrays[f"after_vorticity_{key}"][2:-2, 2:-2, :30]
-        after = arrays[f"after_advection_{key}"][2:-2, 2:-2, :30]
+        after = np.array(
+            arrays[f"after_advection_{key}"][2:-2, 2:-2, :30], copy=True
+        )
         mask = masks[face]
         require(before.shape == after.shape == mask.shape,
                 f"{face}: record/mask shape mismatch")
+        if plant == "payload-ulp" and face == "U":
+            first = tuple(np.argwhere(mask)[0])
+            after[first] = np.nextafter(after[first], np.inf)
+        active_payload_sha256 = hashlib.sha256(
+            np.ascontiguousarray(after[mask]).tobytes()
+        ).hexdigest()
+        require(active_payload_sha256 == EXPECTED_ACTIVE_AFTER_SHA256[face],
+                f"{face}: active payload digest changed: {active_payload_sha256}")
         unequal = before.view(np.uint64) != after.view(np.uint64)
         delta = np.abs(after - before)
         active_delta = delta[mask]
@@ -142,6 +153,7 @@ def _movement(arrays: dict[str, np.ndarray], root: Path) -> list[dict[str, objec
             "bit_unequal_active_wet": int(np.count_nonzero(unequal[mask])),
             "maximum_absolute_change": float(np.max(active_delta)),
             "rms_change": float(np.sqrt(np.mean(active_delta * active_delta))),
+            "active_after_sha256": active_payload_sha256,
         }
         rows.append(row)
     require(any(row["bit_unequal_active_wet"] for row in rows),
@@ -160,9 +172,7 @@ def run(root: Path, *, expect_commit: str, plant: str | None = None) -> dict[str
     require(stamp["commit"].lower() == expected,
             f"producer commit {stamp['commit']} != expected {expected}")
     arrays = read_terms(root / RECORD, plant=plant)
-    rows = _movement(arrays, root)
-    if plant == "payload-ulp":
-        require(False, "payload ULP plant fired")
+    rows = _movement(arrays, root, plant=plant)
     return {
         "format": "nemo-testcase-l4-orca2-round62-vector-advection-v1",
         "claim_label": "given NEMO's recorded operands",
