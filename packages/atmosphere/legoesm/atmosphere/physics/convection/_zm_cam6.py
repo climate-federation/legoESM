@@ -21,10 +21,12 @@ Departures from the oracle (all documented, measured where numeric):
 * ``ientropy`` Brent inversion (data-dependent iteration count) is replaced
   by the fixed-iteration Newton solve of ``_zm_dilute.invert_entropy``
   (converges to the same root; AD-safe).
-* Saturation: CAM ``qsat_water`` (Goff-Gratch) / ``qsat`` (mixed phase) are
-  replaced by the shared ``legoesm.thermo.saturation_mixing_ratio``
-  (Tetens, smooth cap) per CLAUDE.md; the curve difference is measured in
-  ``tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py``.
+* Saturation: CAM ``qsat_water`` (Goff-Gratch) / ``qsat`` (mixed phase)
+  return the saturation SPECIFIC humidity ``ε·e/(p − (1−ε)·e)``
+  (``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``); the port uses the shared
+  ``legoesm.thermo.saturation_specific_humidity`` (same expression over the
+  shared Tetens curve, smooth cap) per CLAUDE.md.  The curve difference is
+  measured in ``tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py``.
 * Constants come from ``legoesm.constants`` (CAM's liquid/vapour heat
   capacities, dry gas constant, epsilon and vapour gas constant differ in
   the third or fourth significant figure).
@@ -56,7 +58,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_vapor_pressure
+from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
 from legoesm.atmosphere.physics.convection._zm_dilute import (
     invert_entropy,
     moist_entropy,
@@ -208,8 +210,8 @@ def _scan_levels(body, init, xs, *, descending):
 
 
 def _qsat_hpa(t, p_hpa):
-    """Oracle ``qsat_hPa``: saturation mixing ratio at ``p`` in hPa."""
-    return saturation_mixing_ratio(t, p_hpa * 100.0)
+    """Oracle ``qsat_hPa``: saturation specific humidity at ``p`` in hPa."""
+    return saturation_specific_humidity(t, p_hpa * 100.0)
 
 
 def _qst_cldprp(t, p_hpa):
@@ -1044,7 +1046,7 @@ def zm_conv_evap(t, pmid, pdel, q, prdprec, cldfrc, deltat, prec, *, ke):
     ncol, nlev = t.shape
     dtype = t.dtype
     g, latvap, latice, tmelt = constants.g, constants.L_v, constants.L_f, constants.T_freeze
-    qs = saturation_mixing_ratio(t, pmid)
+    qs = saturation_specific_humidity(t, pmid)
     _, fsnow_conv = cldfrc_fice(t)
 
     def body(carry, xk):

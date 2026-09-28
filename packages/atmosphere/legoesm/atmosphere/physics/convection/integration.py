@@ -16,6 +16,7 @@ from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
@@ -49,8 +50,23 @@ def land_fraction_for_columns(grid, ncol, scheme_config=None):
 
     ``VoronoiMesh`` and ``GaussianGrid`` can carry the field. If absent,
     the leaf keeps its previous ocean branch unchanged.
+
+    Zhang-McFarlane ``land_fraction="none"`` (aquaplanet) gets None on every
+    lane: drivers attach an all-zero mask to idealized grids, and the leaf
+    refuses any mask under "none".  A concrete mask with land is an error here.
     """
     lf = getattr(grid, "land_frac", None)
+    if getattr(scheme_config, "land_fraction", None) == "none":
+        # Only a concrete mask is checked (the isinstance guard skips a traced
+        # one).  numpy, not jnp: inside a jit trace a jnp op on a concrete
+        # array is staged into the trace and bool() of it raises (measured on
+        # the MPAS step).
+        if (lf is not None and not isinstance(lf, jax.core.Tracer)
+                and bool(np.any(np.asarray(lf) > 0))):
+            raise ValueError(
+                "ZhangMcFarlaneConfig.land_fraction='none' (aquaplanet) but "
+                "the grid's land fraction has land; select 'required'.")
+        return None
     if lf is not None:
         lf = jnp.asarray(lf).reshape(-1)
         if lf.shape[0] != ncol:

@@ -115,7 +115,9 @@ def mpas_state(mpas_mesh, sigma_coord):
 def scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each of the 5 new schemes."""
     name, scheme_field, scheme_cls = request.param
-    kwargs = {scheme_field: scheme_cls()}
+    # The test grids carry no land fraction: ZM gets the explicit aquaplanet choice.
+    kwargs = {scheme_field: (scheme_cls(land_fraction="none")
+                             if name == "zhang_mcfarlane" else scheme_cls())}
     return name, ConvectionConfig(scheme=name, **kwargs)
 
 

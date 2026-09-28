@@ -2156,6 +2156,33 @@ class ModelDriver:
                 logger.warning("  %s", _msg)
 
         self._assert_vertical_coordinate_supports_this_orography()
+        self._check_zm_land_fraction()
+
+    def _check_zm_land_fraction(self) -> None:
+        """Zhang-McFarlane land policy means the same on every lane: "required"
+        = this run has land, "none" = aquaplanet (no land anywhere).  Checked
+        once here on the host mask, because the lanes hand ZM different things
+        for an ocean-only grid (an all-zero mask on combined physics, nothing
+        on the column pipeline)."""
+        if self.config.convection != "zhang_mcfarlane":
+            return
+        has_land = (self._f_land is not None
+                    and bool(jnp.any(self._f_land > 0.0)))
+        if self._voronoi_layout is not None:
+            # Rank-local mask under MPI: OR across ranks so every rank raises
+            # (or not) together.
+            from mpi4py import MPI as _MPI
+            has_land = bool(_MPI.COMM_WORLD.allreduce(has_land, op=_MPI.LOR))
+        policy = self.config.zm_land_fraction
+        if policy == "required" and not has_land:
+            raise ValueError(
+                "convection=zhang_mcfarlane with zm_land_fraction='required', "
+                "but this run has no land (no land mask, or an all-ocean one). "
+                "For an aquaplanet set zm_land_fraction='none'.")
+        if policy == "none" and has_land:
+            raise ValueError(
+                "zm_land_fraction='none' (aquaplanet) but this run's land mask "
+                "has land; set zm_land_fraction='required'.")
 
     def _assert_vertical_coordinate_supports_this_orography(self) -> None:
         """Refuse a hybrid coordinate that inverts over this run's terrain.
@@ -4569,12 +4596,8 @@ class ModelDriver:
         # Held-Suarez Newtonian temperature relaxation (precomputed coefficients)
         if cfg.held_suarez_forcing:
             from legoesm.atmosphere.forcing.idealized.held_suarez import (
-                held_suarez_equilibrium_temperature,
-                K_A, K_S, SIGMA_B,
+                held_suarez_temperature_tendency,
             )
-            _hs_sigma_b = SIGMA_B
-            _hs_k_a = K_A
-            _hs_k_s = K_S
 
             def _newtonian_relax(T, p_s, lat):
                 """Compute dT/dt from HS Newtonian relaxation [K/s].
@@ -4588,12 +4611,7 @@ class ModelDriver:
                 lat_exp = lat
                 for _ in range(n_expand):
                     lat_exp = lat_exp[..., None]
-                T_eq = held_suarez_equilibrium_temperature(lat_exp, p_full)
-                sigma_factor = jnp.maximum(
-                    0.0, (sigma_full - _hs_sigma_b) / (1.0 - _hs_sigma_b))
-                cos_lat_4 = jnp.cos(lat_exp) ** 4
-                k_T = _hs_k_a + (_hs_k_s - _hs_k_a) * sigma_factor * cos_lat_4
-                return -k_T * (T - T_eq)
+                return held_suarez_temperature_tendency(T, lat_exp, p_full, sigma_full)
 
             self._hs_newtonian_relax = _newtonian_relax
 
