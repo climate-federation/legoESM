@@ -181,9 +181,18 @@ def test_round6_independent_trajectory_uses_production_step_and_only_bridges_ssh
     assert "_NEMOWSRK3TestHooks(expose_live_stage_operands=True)" in source
     assert "trace = model.step(" in source
     assert "state = trace.state_after" in source
-    assert '"claim_label": "INDEPENDENT_WITH_DECISION52_SSH"' in source
+    assert '"claim_label": claim_label' in source
     assert '"given_nemo_entry_eligibility": eligibility' in source
     assert '"rnf_tsc"' in source
+
+
+def test_round66_independent_mode_skips_the_ssh_bridge_and_labels_its_owner():
+    source = Path(gate.__file__).read_text()
+    body = source.split("def candidate_trajectory")[1].split("\ndef ")[0]
+    assert "if bridge_ssh:" in body
+    assert '"INDEPENDENT_WITH_DECISION52_SSH" if bridge_ssh else "INDEPENDENT"' in body
+    assert '"initial_ssh" if first_field == "ssh" else "initial_ts"' in body
+    assert "decision52_bridge\": executed_entry if bridge_ssh else None" in body
 
 
 def test_eos80_coefficient_audit_matches_the_compiled_block_and_can_fail(

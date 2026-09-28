@@ -59,6 +59,8 @@ TRAJECTORY_CITATIONS = {
     "initial_ts": "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:217-254",
     "initial_ts_mask": (
         "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:307-310"),
+    "initial_ssh": (
+        "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90:440-465"),
     "global_index_map": (
         "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/mppini.f90:1586-1594"),
     "eos80_init": (
@@ -173,12 +175,14 @@ def score(actual: np.ndarray, expected: np.ndarray) -> dict[str, object]:
         first = None
         maximum = 0.0
         mean = 0.0
+    residual = actual - expected
     return {
         "bit_identical": unequal == 0,
         "unequal": unequal,
         "count": int(actual.size),
         "max_abs": maximum,
         "mean_abs_over_unequal": mean,
+        "rms": float(np.sqrt(np.mean(residual * residual))),
         "first_unequal_index": first,
     }
 
@@ -909,8 +913,9 @@ def candidate_trajectory(
     card,
     *,
     max_step: int = 10,
+    bridge_ssh: bool = True,
 ) -> dict[str, object]:
-    """Run the production ORCA2 step with the acquired exact surface operands."""
+    """Run production ORCA2 with either its own or Decision-52 entry SSH."""
 
     import jax
     import jax.numpy as jnp
@@ -933,10 +938,15 @@ def candidate_trajectory(
             "the hand-alteration ablation is vacuous: removing the compiled "
             "ORCA_R2 alterations changed nothing")
     # Decision 52 authorizes exactly this operand replacement and nothing else.
-    state = state._replace(
-        eta=state.eta.replace(data=jnp.asarray(entry1["ssh"], dtype=jnp.float64))
+    # Independent mode deliberately skips it and executes the card's own SSH.
+    if bridge_ssh:
+        state = state._replace(
+            eta=state.eta.replace(data=jnp.asarray(entry1["ssh"], dtype=jnp.float64))
+        )
+    executed_entry = compare_fields(_candidate_fields(state), entry1)
+    claim_label = (
+        "INDEPENDENT_WITH_DECISION52_SSH" if bridge_ssh else "INDEPENDENT"
     )
-    bridge = compare_fields(_candidate_fields(state), entry1)
 
     # The kt=1 chlorophyll frame is an independent emitted witness for the
     # input-file interpolation used at all ten steps.
@@ -973,7 +983,9 @@ def candidate_trajectory(
                 "kt": kt,
                 "checkpoint": "entry",
                 "field": first_field,
-                "source_citation": TRAJECTORY_CITATIONS["initial_ts"],
+                "source_citation": TRAJECTORY_CITATIONS[
+                    "initial_ssh" if first_field == "ssh" else "initial_ts"
+                ],
             }
 
         surface_fields = assemble_surface_fields(root, kt)
@@ -992,11 +1004,15 @@ def candidate_trajectory(
             # labelled as this one, and anything that is not a deliberate
             # refusal (a ValueError, a shape error) is a defect and propagates.
             blocker = unbuilt_statement_blocker(exc, kt)
-            entry_exact, eligibility = entry_eligibility(bridge)
+            entry_exact, eligibility = entry_eligibility(executed_entry)
             return {
-                "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
+                "claim_label": claim_label,
+                "initial_mode": (
+                    "decision52_ssh_bridge" if bridge_ssh else "card_own_state"
+                ),
                 "execution": "production-jit-cpu-fp64-x64-libm",
-                "decision52_bridge": bridge,
+                "executed_initial_state_vs_nemo": executed_entry,
+                "decision52_bridge": executed_entry if bridge_ssh else None,
                 "independent_entry_before_bridge": independent,
                 "hand_alteration_ablation": ablation,
                 "independent_entry_ts_bit_identical": entry_exact,
@@ -1038,11 +1054,15 @@ def candidate_trajectory(
         row["checkpoint"]: row["rows"][first_field]
         for row in checkpoints if row["kt"] == max_step
     }
-    entry_ts_independent, eligibility = entry_eligibility(bridge)
+    entry_ts_independent, eligibility = entry_eligibility(executed_entry)
     return {
-        "claim_label": "INDEPENDENT_WITH_DECISION52_SSH",
+        "claim_label": claim_label,
+        "initial_mode": (
+            "decision52_ssh_bridge" if bridge_ssh else "card_own_state"
+        ),
         "execution": "production-jit-cpu-fp64-x64-libm",
-        "decision52_bridge": bridge,
+        "executed_initial_state_vs_nemo": executed_entry,
+        "decision52_bridge": executed_entry if bridge_ssh else None,
         "independent_entry_before_bridge": independent,
         "hand_alteration_ablation": ablation,
         "independent_entry_ts_bit_identical": entry_ts_independent,
@@ -1084,6 +1104,7 @@ def run_gate(
     trajectory_source_root: Path,
     *,
     max_step: int = 10,
+    initial_mode: str = "decision52-bridge",
     plant: str | None = None,
 ) -> dict[str, object]:
     stamp = provenance_stamp()
@@ -1140,8 +1161,14 @@ def run_gate(
             trajectory_source_root / "eosbn2.f90",
             plant=plant == "eos80_coeff",
         )
+        require(initial_mode in ("decision52-bridge", "independent"),
+                f"unknown initial mode: {initial_mode}")
         trajectory = candidate_trajectory(
-            deck_root, orca1ice_root, card, max_step=max_step
+            deck_root,
+            orca1ice_root,
+            card,
+            max_step=max_step,
+            bridge_ssh=initial_mode == "decision52-bridge",
         )
         status = trajectory.get("execution_blocker", {}).get(
             "status",
@@ -1149,7 +1176,11 @@ def run_gate(
             if trajectory["independent_entry_ts_bit_identical"] else
             "STOP_INITIAL_TS_TRANSCRIPTION_GAP",
         )
-        trajectory_claim = "MEASURED_INDEPENDENT_WITH_DECISION52_SSH"
+        trajectory_claim = (
+            "MEASURED_INDEPENDENT_WITH_DECISION52_SSH"
+            if initial_mode == "decision52-bridge"
+            else "MEASURED_INDEPENDENT_CARD_OWN_STATE"
+        )
     return {
         "worktree": stamp,
         "status": status,
@@ -1190,6 +1221,11 @@ def main() -> int:
         default=DEFAULT_TRAJECTORY_SOURCE_ROOT,
     )
     parser.add_argument("--max-step", type=int, default=10)
+    parser.add_argument(
+        "--initial-mode",
+        choices=("decision52-bridge", "independent"),
+        default="decision52-bridge",
+    )
     parser.add_argument("--json-out", type=Path)
     parser.add_argument(
         "--plant", choices=("kt1_T", "surface_hash", "eos80_coeff"))
@@ -1202,6 +1238,7 @@ def main() -> int:
             args.compiled_source,
             args.trajectory_source_root,
             max_step=args.max_step,
+            initial_mode=args.initial_mode,
             plant=args.plant,
         )
     except (GateError, OSError, UnicodeError, struct.error, ValueError) as exc:
