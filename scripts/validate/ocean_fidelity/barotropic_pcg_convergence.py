@@ -66,6 +66,11 @@ def main() -> int:
                         "call the SPMD bench makes) so a LOCAL preconditioner "
                         "can be emulated: edges crossing device blocks are "
                         "dropped from the preconditioner's operator only")
+    p.add_argument("--variant", choices=["standard", "single_reduce"],
+                   default="standard",
+                   help="PCG recurrence scored at each M: standard (two "
+                        "reductions/iteration) or single_reduce (Chronopoulos-"
+                        "Gear, one). The converged reference is always standard.")
     p.add_argument("--precond", type=str, default="jacobi",
                    help="jacobi | poly:K  (K damped-Jacobi sweeps of the "
                         "device-LOCAL operator, no communication; the "
@@ -88,7 +93,8 @@ def main() -> int:
 
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.ocean.dynamics import barotropic_implicit_mpas as bim
-    from legoesm.ocean.dynamics.barotropic_common import _fixed_iteration_pcg
+    from legoesm.ocean.dynamics.barotropic_common import (
+        _fixed_iteration_pcg, _fixed_iteration_pcg_single_reduce)
     from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "bench"))
@@ -218,16 +224,18 @@ def main() -> int:
         def wnorm(v):
             return float(jnp.sqrt(jnp.sum(w * v * v)))
 
-        def solve(m):
-            f = jax.jit(lambda b, g: _fixed_iteration_pcg(
+        def solve(m, pcg=_fixed_iteration_pcg):
+            f = jax.jit(lambda b, g: pcg(
                 A_op, b, M_inv, g, max_iter=int(m), dot_weight=w)[0])
             return f(rhs, x0)
 
+        scored = (_fixed_iteration_pcg_single_reduce
+                  if args.variant == "single_reduce" else _fixed_iteration_pcg)
         x_ref = np.asarray(solve(args.ref_iters))
         nb = wnorm(rhs)
         res_ref = wnorm(rhs - A_op(jnp.asarray(x_ref))) / max(nb, 1e-300)
         for m in m_list:
-            x = solve(m)
+            x = solve(m, scored)
             r = rhs - A_op(x)
             d = np.abs(np.asarray(x) - x_ref) * np.asarray(mask)
             rows.append(dict(
@@ -247,14 +255,15 @@ def main() -> int:
     sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
                          text=True).stdout.strip()
     rec = dict(git_sha=sha, argv=sys.argv[1:], subdivision=args.subdivision,
-               emulate_devices=nd, precond=args.precond,
+               emulate_devices=nd, precond=args.precond, variant=args.variant,
                n_cells=int(mesh.nCells), nlev=args.nlev, dt=args.dt,
                precision="float64" if args.x64 else "float32",
                backend=jax.default_backend(), capture_s=round(capture_s, 1),
                spinup_steps=args.spinup, spinup_s=round(spinup_s, 1),
                ref_iters=args.ref_iters, rows=rows)
     print(f"# mpas barotropic PCG convergence  L{args.subdivision} "
-          f"spinup={args.spinup} precond={args.precond} nd={nd} "
+          f"spinup={args.spinup} precond={args.precond} "
+          f"variant={args.variant} nd={nd} "
           f"nCells={int(mesh.nCells)} {rec['precision']} "
           f"{rec['backend']} dt={args.dt}")
     print(f"{'step':>4} {'M':>5} {'rel_res':>11} {'dEta_max[m]':>12} "

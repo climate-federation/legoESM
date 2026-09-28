@@ -348,6 +348,18 @@ def _build_latlon_interpolator(
     from scipy.interpolate import RegularGridInterpolator
 
     lat_src = np.asarray(lat_src)
+    lon_src = np.asarray(lon_src)
+    # A file carrying both periodic ends (-180 and 180, or 0 and 360) maps
+    # them to one longitude after the callers' % 360; scipy refuses repeated
+    # points.  Keep the first occurrence: the callers' stable sort puts the
+    # file's first column ahead of its end column.
+    keep = np.concatenate([[True], np.diff(lon_src) != 0.0])
+    if not keep.all():
+        logger.info("Dropping %d duplicated periodic longitude column(s) at "
+                    "%s deg (file's end column)", int((~keep).sum()),
+                    lon_src[~keep])
+        lon_src = lon_src[keep]
+        data = np.asarray(data)[:, keep]
     # Longitudinal wrap (unchanged behavior).
     lon_wrapped = np.concatenate([
         lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0
@@ -539,7 +551,7 @@ def _load_land_fraction_file(
 
     # Longitude in [0, 360), ascending
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     mask_data = mask_data[:, lon_order]
 
@@ -977,7 +989,7 @@ def load_land_albedo(
 
     # Longitude in [0, 360), ascending
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     alb_data = alb_data[:, lon_order]
 
@@ -1251,7 +1263,7 @@ def load_subgrid_orography(
         sso_data = sso_data[0]
 
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     sso_data = sso_data[:, lon_order]
 
@@ -1336,7 +1348,7 @@ def load_real_topography(
 
     # Ensure longitude in [0, 360)
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     elev_data = elev_data[:, lon_order]
 

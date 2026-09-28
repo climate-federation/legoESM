@@ -2506,9 +2506,13 @@ class PhysicsPipeline:
                 # every structured-grid canopy run (codex).
                 _alb_veg = getattr(_lmp_rad, "albedo_veg", None)
                 if _alb_veg is None:
+                    # Soil bands at the tile's current top-layer water (the
+                    # land step rewets the same bounds with its own water).
+                    from legoesm.land.soil_albedo import rewet_soil_bands
+                    _lmp_alb = rewet_soil_bands(_lmp_rad, land_ml.theta_soil[:, 0])
                     alb_land = ad.unflatten_2d(
-                        _VIS_FRAC_SOLAR * _lmp_rad.ALB_VIS
-                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_rad.ALB_NIR)
+                        _VIS_FRAC_SOLAR * _lmp_alb.ALB_VIS
+                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_alb.ALB_NIR)
                 else:
                     alb_land = ad.unflatten_2d(_alb_veg)
                 emis_land = ad.unflatten_2d(_lmp_rad.emissivity)
@@ -3999,8 +4003,11 @@ def thread_morrison_scalars(config, scheme, micro_config):
                           _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"])
     _sed_max = getattr(config, "morrison_sed_cfl_substeps_max",
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"])
+    _graupel = getattr(config, "morrison_do_graupel",
+                       _ExpCfg._field_defaults["morrison_do_graupel"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
-                    ("morrison_sed_cfl_substeps_strict", _sed_strict)):
+                    ("morrison_sed_cfl_substeps_strict", _sed_strict),
+                    ("morrison_do_graupel", _graupel)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4017,8 +4024,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _sed_max = (None if _sed_max
                 == _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"]
                 else _sed_max)
+    _graupel = (None if _graupel
+                is _ExpCfg._field_defaults["morrison_do_graupel"] else _graupel)
     if (not _touched and _flavor is None and _sed_sub is None
-            and _sed_strict is None and _sed_max is None):
+            and _sed_strict is None and _sed_max is None and _graupel is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4027,7 +4036,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         micro_config, scheme, morrison_scalars=_touched,
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
         morrison_sed_cfl_substeps_max=_sed_max,
-        morrison_sed_cfl_substeps_strict=_sed_strict)
+        morrison_sed_cfl_substeps_strict=_sed_strict,
+        morrison_do_graupel=_graupel)
 
 
 def _resolve_microphysics(config):

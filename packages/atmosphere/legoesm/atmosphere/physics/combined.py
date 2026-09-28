@@ -1387,10 +1387,22 @@ def _make_spectral_pe_combined(
     sfc_albedo_override=None, sfc_emissivity_override=None,
 ) -> Callable:
     tagged_fns = []
+    # Same producer gate as the hydrostatic combined: routing the CLUBB
+    # cloud fraction to radiation needs a closure that writes it, else the
+    # override would read the zero-initialised carry and clear every cloud.
+    if (config.radiation.use_clubb_cloud_fraction
+            and config.turbulence.scheme != "clubb"):
+        raise ValueError(
+            "RadiationConfig.use_clubb_cloud_fraction=True requires a "
+            "cloud-fraction-producing turbulence closure "
+            "(turbulence.scheme='clubb', diagnostic or prognostic); got "
+            f"turbulence.scheme={config.turbulence.scheme!r}."
+        )
     if config.radiation.scheme != "none":
-        # CLUBB-cf routing is hydrostatic-only today; pass the flag so a
-        # use_clubb_cloud_fraction request on spectral_pe raises loudly in
-        # make_radiation_physics rather than being silently ignored.
+        # The spectral radiation builder has a READ side for the CLUBB
+        # cloud-fraction carry (and the CAM6 deepcu carries); the flag
+        # selects it, and the dispatcher below forwards ``phys_state`` to
+        # the fn that advertises ``_wants_phys_state_ro``.
         tagged_fns.append((make_radiation_physics(
             config.radiation, "spectral_pe",
             sfc_albedo_override=sfc_albedo_override,
@@ -1452,6 +1464,11 @@ def _make_spectral_pe_combined(
                 else:
                     phys_updates[field_name] = field_val
         else:
+            if getattr(fn0, "_wants_phys_state_ro", False):
+                # Read-only phys_state consumer (radiation reading the CLUBB
+                # cloud-fraction / CAM6 deepcu carries): forward it but keep
+                # the single-return contract -- no carry is written back.
+                _fwd0 = {**_fwd0, "phys_state": phys_state}
             first = fn0(state, grid, sigma_coord, grid_fields=shared_fields, **_fwd0)
         vor_hat = first.vor_hat.data
         div_hat = first.div_hat.data
@@ -1489,6 +1506,8 @@ def _make_spectral_pe_combined(
                     else:
                         phys_updates[field_name] = field_val
             else:
+                if getattr(fn, "_wants_phys_state_ro", False):
+                    _fwd = {**_fwd, "phys_state": phys_state}
                 t = fn(state, grid, sigma_coord, grid_fields=shared_fields, **_fwd)
             vor_hat = vor_hat + t.vor_hat.data
             div_hat = div_hat + t.div_hat.data

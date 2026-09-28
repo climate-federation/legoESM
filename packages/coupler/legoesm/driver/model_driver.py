@@ -661,6 +661,27 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None,
                                       owned_mask=owned_mask)
 
 
+def make_mpas_qv_smooth_fn(mesh, nu, dt, nu4=0.0, halo_refresh=None,
+                           owned_mask=None):
+    """Build the per-step MPAS q_v smoother as ONE compiled call.
+
+    Halo refresh (MPI lane: boundary-owned stencils read owner values, #1321)
+    then :func:`_mpas_qv_smooth_step`.  Built once, before the time loop.
+    Called eagerly instead, every mpi4jax halo/allreduce inside was re-lowered
+    and recompiled on each call -- mpi4jax wraps the comm in a fresh object
+    with no ``__eq__``, so JAX's eager dispatch cache misses every time
+    (~45% of the 4-GPU AMIP step, 2026-09-27 profile).
+    """
+    @jax.jit
+    def smooth(q):
+        if halo_refresh is not None:
+            q = halo_refresh(q)
+        return _mpas_qv_smooth_step(q, mesh, nu, dt, nu4=nu4,
+                                    mid_refresh=halo_refresh,
+                                    owned_mask=owned_mask)
+    return smooth
+
+
 def clear_sky_pass_effective(
     *, clear_sky_diag: bool, radiation: str, spatial_feed_on: bool,
     feed_steps_reached: bool = True,
@@ -3362,6 +3383,14 @@ class ModelDriver:
                     tau_snow_decay=float(_tau_d) * 86400.0))
             logger.info("  land snow-albedo age e-folding: %.3g days "
                         "(overrides the calibration)", float(_tau_d))
+        # Soil freeze/thaw, same placement: the bake rebuilds ``thermal`` with
+        # the switch at its library default, so it must be set after it.
+        _ft = bool(self.config.land_soil_freeze_thaw)
+        cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=_ft))
+        logger.info("  land soil freeze/thaw: %s", "ON" if _ft else "off")
+        if _ft and getattr(self.config, "land_calibrated_physics", False):
+            logger.warning("  land soil freeze/thaw ON with the calibrated land "
+                           "tables, which were fitted with it OFF")
 
         # A CANOPY SCHEME GETS CANOPY PARAMETERS.
         #
@@ -8877,9 +8906,9 @@ class ModelDriver:
         and pure JAX, so ONE jitted function serves single-process faces,
         single-process windows and multi-process SPMD alike: under a
         window layout the owned block is scattered to faces and gathered
-        back exactly as the Held-Suarez twin does.  pt and the three
-        Kessler tracers are pinned to the step's face sharding.  Stateless
-        -- the restart invariant is untouched.
+        back exactly as the Held-Suarez twin does.  pt, delp, the rebuilt
+        pressures and the three Kessler tracers are pinned to the step's
+        face sharding.  Stateless -- the restart invariant is untouched.
         """
         from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
             apply_kessler_step_sixface_jax,
@@ -8888,10 +8917,13 @@ class ModelDriver:
         if fn is None:
             from legoesm.grids.fv3_duo_windows import (gather_windows,
                                                        scatter_owned)
+            from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
             grid = self.model.grid
             n, ng, km = grid.n, grid.ng, self.model.config.km
+            ptop = self.model._ptop
             sh = self.model.step_out_shardings
             lay = self.model.window_layout
+            kw = dict(n=n, ng=ng, km=km, ptop=ptop, akap=FV3_KAPPA)
 
             def _kessler(state, press, q, dt):
                 if lay is not None:
@@ -8899,33 +8931,37 @@ class ModelDriver:
                              for k in ("pt", "delp")}
                     pressf = {k: scatter_owned(lay, press[k], jnp)
                               for k in press}
-                    qf = [scatter_owned(lay, qi, jnp) for qi in q[:3]]
-                    out6, q6 = apply_kessler_step_sixface_jax(
-                        faces, pressf, qf, dt=dt, n=n, ng=ng, km=km)
-                    pt = gather_windows(lay, out6["pt"], jnp)
-                    # only the three Kessler slots went through the
-                    # bridge; passengers beyond them ride unchanged
-                    q_new = [gather_windows(lay, qi, jnp) for qi in q6] \
-                        + list(q[3:])
+                    # EVERY tracer goes through the bridge: passengers
+                    # beyond the Kessler slots are renormalised to the
+                    # new layer mass there (codex 2026-09-24)
+                    qf = [scatter_owned(lay, qi, jnp) for qi in q]
+                    out6, press6, q6 = apply_kessler_step_sixface_jax(
+                        faces, pressf, qf, dt=dt, **kw)
+                    moved = {k: gather_windows(lay, out6[k], jnp)
+                             for k in ("pt", "delp")}
+                    press_new = {k: gather_windows(lay, press6[k], jnp)
+                                 for k in press6}
+                    q_new = [gather_windows(lay, qi, jnp) for qi in q6]
                 else:
-                    # the bridge returns the FULL list (passengers kept)
-                    # -- codex 2026-09-24: appending q[3:] here too
-                    # duplicated every passenger each step
-                    out6, q_new = apply_kessler_step_sixface_jax(
-                        state, press, q, dt=dt, n=n, ng=ng, km=km)
-                    pt = out6["pt"]
+                    out6, press_new, q_new = apply_kessler_step_sixface_jax(
+                        state, press, q, dt=dt, **kw)
+                    moved = {k: out6[k] for k in ("pt", "delp")}
                     q_new = list(q_new)
                 if sh is not None:
-                    pt = jax.lax.with_sharding_constraint(pt, sh)
+                    moved = {k: jax.lax.with_sharding_constraint(v, sh)
+                             for k, v in moved.items()}
+                    press_new = {k: jax.lax.with_sharding_constraint(v, sh)
+                                 for k, v in press_new.items()}
                     q_new = [jax.lax.with_sharding_constraint(qi, sh)
                              for qi in q_new]
-                return {**state, "pt": pt}, q_new
+                return {**state, **moved}, press_new, q_new
             fn = jax.jit(_kessler)
             self._fv3_duo_kessler_jax_fn = fn
-        press = {nm: bundle["press"][nm] for nm in ("pe", "peln")}
-        new_state, new_q = fn(bundle["state"], press, list(bundle["q"]),
-                              float(dt))
-        return {**bundle, "state": new_state, "q": new_q}
+        new_state, new_press, new_q = fn(
+            bundle["state"], dict(bundle["press"]), list(bundle["q"]),
+            float(dt))
+        return {**bundle, "state": new_state, "press": new_press,
+                "q": new_q}
 
     def _fv3_duo_host_faces(self, bundle: dict) -> dict:
         """Host-side, FACE-stacked copy of the bundle for every write.
@@ -11490,7 +11526,45 @@ class ModelDriver:
         # flushed after the loop so a partial window is not lost).
         _sed_req_window = None
         from legoesm.forcing.time_utils import daily_forcing_bucket
+        _qv_smooth_jit = make_mpas_qv_smooth_fn(
+            self.grid, _qv_smooth_nu, DT, nu4=_qv_smooth_nu4,
+            halo_refresh=_qv_halo_refresh,
+            owned_mask=(None if self._voronoi_layout is None
+                        else self._voronoi_layout.owned_mask_cells))
+
+        # Profiling window, off unless LEGOESM_TRACE_STEPS="first:count:dir"
+        # (loop-step indices; each rank writes dir/rank<N>).  Blocks on the
+        # state at both ends so the trace holds exactly those steps; a window
+        # running past the end is stopped after the loop.
+        _trace_spec = os.environ.get("LEGOESM_TRACE_STEPS")
+        _trace_win = None
+        _trace_on = False
+        if _trace_spec:
+            try:
+                _t0, _tn, _tdir = _trace_spec.split(":", 2)
+                _t0, _tn = int(_t0), int(_tn)
+            except ValueError:
+                raise ValueError(
+                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: expected "
+                    "'first:count:dir' with integer first and count") from None
+            if _t0 < 0 or _tn < 1:
+                raise ValueError(
+                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: need first >= 0, "
+                    "count >= 1")
+            _trace_rank = (os.environ.get("SLURM_PROCID")
+                           or os.environ.get("OMPI_COMM_WORLD_RANK")
+                           or os.environ.get("PMI_RANK", "0"))
+            _trace_win = (_t0, _t0 + _tn,
+                          os.path.join(_tdir, "rank" + _trace_rank))
         for step in range(n_steps_total):
+            if _trace_win is not None and step in _trace_win[:2]:
+                jax.block_until_ready(self.state)
+                if step == _trace_win[0]:
+                    jax.profiler.start_trace(_trace_win[2])
+                    _trace_on = True
+                else:
+                    jax.profiler.stop_trace()
+                    _trace_on = False
             # Enter the daily-boundary block also when a coupler segment_callback
             # is present, so the ocean/land still steps even on a coupled run with
             # radiation=none (where _sst_forcing is False) — else coupling would
@@ -11940,19 +12014,10 @@ class ModelDriver:
             # UNWEIGHTED SCVT del2 + q>=0 floor.  Conserves (to fp roundoff)
             # the per-level sum_c A_c q_c integral, NOT column water vapour —
             # an explicitly non-conservative filter (see the config field note).
-            # Eager like the drain below (outside jit).
+            # Compiled once before the loop (_qv_smooth_jit).
             if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
                 _trc_sm = self.state.tracers
-                _qv_sm_in = _trc_sm["q_v"].data
-                if _qv_halo_refresh is not None:
-                    # MPI lane: fresh cell halo so boundary-owned stencils
-                    # read owner values (see the setup note, #1321).
-                    _qv_sm_in = _qv_halo_refresh(_qv_sm_in)
-                _qv_new_sm = _mpas_qv_smooth_step(
-                    _qv_sm_in, self.grid, _qv_smooth_nu, DT,
-                    nu4=_qv_smooth_nu4, mid_refresh=_qv_halo_refresh,
-                    owned_mask=(None if self._voronoi_layout is None
-                                else self._voronoi_layout.owned_mask_cells))
+                _qv_new_sm = _qv_smooth_jit(_trc_sm["q_v"].data)
                 _new_trc_sm = dict(_trc_sm)
                 _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
                 self.state = self.state._replace(tracers=_new_trc_sm)
@@ -12490,6 +12555,9 @@ class ModelDriver:
         # periodic checkpoint (exact-checkpoint-cadence completion).  Gated on
         # the feed being active (serial / 1-rank with CMIP output); a no-op
         # otherwise.
+        if _trace_on:
+            jax.block_until_ready(self.state)
+            jax.profiler.stop_trace()
         # Flush the partial sedimentation window: an overflow in the last
         # steps before the run ends must still be reported.
         if _sed_req_window is not None:

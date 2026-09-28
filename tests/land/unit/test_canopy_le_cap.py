@@ -68,6 +68,13 @@ def test_soft_cap_zero_flux_stays_near_zero():
         assert abs(out) < 1.0
 
 
+def test_soft_cap_maps_zero_flux_to_exactly_zero():
+    # Not merely "near" zero: a leaked constant is divided by a leaf conductance
+    # proportional to LAI in the leaf balance, so sparse leaves amplify it.
+    for rn in (-50.0, -20.0, 0.0, 5.0, 100.0, 500.0):
+        assert float(apply_le_cap(jnp.array(0.0), jnp.array(rn), "soft")) == 0.0
+
+
 def test_soft_cap_day_slack_exceeds_night_slack():
     # The upper bound is wider by day (Rn large) than at night (Rn <= 0).
     hi_day = float(apply_le_cap(jnp.array(5000.0), jnp.array(600.0), "soft"))

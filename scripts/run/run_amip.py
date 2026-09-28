@@ -821,7 +821,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "a thin one).")
     parser.add_argument("--cloud-vertical-overlap-optics",
                         dest="cloud_vertical_overlap_optics",
-                        choices=["none", "max_random"], default="none",
+                        choices=["none", "max_random", "mcica"], default="none",
                         help="VERTICAL cloud-overlap optics. The solver has "
                              "no McICA/overlap, so cloud spread thinly over "
                              "many partly cloudy layers is solved as ONE "
@@ -830,7 +830,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "deterministic maximum-random-overlap "
                              "subcolumns and averages: measured -30%% cloud "
                              "albedo and +18 W/m2 OLR. Costs n_sub x the "
-                             "radiation time. Mutually exclusive with "
+                             "radiation time. 'mcica' (CAM6) gives each "
+                             "g-point its own maximum-random subcolumn: "
+                             "one solve, sampling noise per g-point. "
+                             "Mutually exclusive with "
                              "--cloud-partial-coverage-optics=two_column.")
     parser.add_argument("--cloud-n-subcolumns", dest="cloud_n_subcolumns",
                         type=int, default=8,
@@ -939,6 +942,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "so cold dry polar snow keeps its fresh albedo "
                              "while melting snow darkens as before. "
                              "None = 0.0 = off (calendar clock, byte-identical).")
+    parser.add_argument("--land-soil-freeze-thaw", dest="land_soil_freeze_thaw",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_freeze_thaw,
+                        help="Soil-water freeze/thaw (latent zero-curtain) in "
+                             "the multilayer land, as in CLM5. Default off "
+                             "(sensible-only). Requires --use-multilayer-land.")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -1805,6 +1814,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="With --morrison-sed-cfl-substeps: abort the run "
                              "when any column needs more sub-steps than the "
                              "static cap (otherwise the count is only reported).")
+    parser.add_argument("--morrison-do-graupel",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_do_graupel"],
+                        dest="morrison_do_graupel",
+                        help="Morrison prognostic graupel category (riming "
+                             "onto graupel, frozen rain -> graupel). CAM6's "
+                             "MG2 has no graupel; --no-morrison-do-graupel "
+                             "routes frozen rain to snow and removes the "
+                             "graupel riming sink of cloud water.")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -2402,6 +2421,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cap_floor_q_c=args.cloud_cap_floor_q_c,
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
+        land_soil_freeze_thaw=args.land_soil_freeze_thaw,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
@@ -2471,6 +2491,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
+        morrison_do_graupel=args.morrison_do_graupel,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

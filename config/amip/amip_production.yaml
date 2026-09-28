@@ -120,6 +120,14 @@ clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
 use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
                                  # radiation (required by cam6_clubb)
 microphysics: morrison      # mg flavour (MG2 port = run 2)
+morrison_do_graupel: true   # NAMED, equals the code default: this deck's
+                            # measured behaviour.  CAM6's MG2 has NO graupel
+                            # (eight constituents, micro_mg_cam.F90:139); our
+                            # port rimes cloud water onto graupel, ~half the
+                            # cold-sector cloud-water sink on the day-5 state.
+                            # The graupel-off arm is this deck plus
+                            # --no-morrison-do-graupel; this value stays
+                            # until the user decides (2026-09-24).
 morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # nstep = 1 + int(max V dt/dz) per column,
                                  # so precipitation crosses >1 layer per 600 s.
@@ -144,10 +152,32 @@ hard_saturation_adjustment: false  # CAM6 clubb_do_liqsupersat = .false.
                                    # "iceadj" block (clubb_intr.F90:2258).
                                    # Was true; user table 2026-09-24, row 2.
 cloud_partial_coverage_optics: none
-cloud_optics_inhomogeneity: two_region
-cloud_fsd: 1.0
-cloud_vertical_overlap_optics: max_random
-cloud_n_subcolumns: 8
+cloud_optics_inhomogeneity: constant  # CAM6: RRTMG applies NO in-cloud
+                                       # inhomogeneity factor (none anywhere
+                                       # in src/physics/rrtmg/).  "constant"
+                                       # with factor 1.0 is the no-thinning
+                                       # path (chi = 1, byte-identical).  Was
+                                       # two_region: on day-15 states it
+                                       # removed 52% of the liquid in run 1
+                                       # and 42% in run 3, so the water
+                                       # reaching radiation stayed ~14.5 g/m2
+                                       # across the liquid hand-off.  User
+                                       # decision 2026-09-25, for run 4.
+cloud_inhomogeneity_factor: 1.0        # the "constant" scheme's scalar: 1.0
+                                       # = homogeneous, no reduction.  Set
+                                       # explicitly so the no-thinning row
+                                       # rests on no default.
+cloud_fsd: 1.0                         # INERT under "constant" (consumed by
+                                       # two_region only); kept explicit so
+                                       # the old value is on record.
+cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
+                                     # g-point sees its own max-random cloud
+                                     # subcolumn in ONE solve (was max_random:
+                                     # 8 full solves, ~8.5x the radiation cost).
+                                     # Synthetic 512-column check vs a 64-subcolumn
+                                     # reference: bias within sampling noise,
+                                     # per-column scatter ~1.8x the 8-subcolumn one.
+cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
 hard_sat_ice_curve: false          # the ice-curve blend of that same
                                    # post-step drain; inert once the drain
                                    # is off, set explicitly so no row rests
@@ -223,9 +253,16 @@ snow_age_activation_K: 5000.0
 
 # ---- land (unchanged) -----------------------------------------------------------
 use_multilayer_land: true
-land_update_seconds: 300.0
+land_update_seconds: 1800.0  # CAM6: CLM steps once per 1800 s coupling
+                             # interval (user 2026-09-25).  = 16 x 112.5 s,
+                             # forced with the interval-mean atmosphere; the
+                             # offline LMIP driver also runs the tile at 1800 s.
+                             # Was 300 (-> 337.5 s actual, every 3 steps).
 multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
+# Soil freeze/thaw ON (user 2026-09-26), as in CLM5 and as the land IC spin-up
+# ran; the land calibration's tables were fitted with it off.
+land_soil_freeze_thaw: true
 land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true

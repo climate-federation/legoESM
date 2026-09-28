@@ -149,7 +149,11 @@ OCEAN_MPAS_PCG_PRECOND = ("poly", 4)
 # rows at any other count or chunk size, or without the stamp, are refused.
 # The 32-channel gain is ATMOSPHERE evidence; the ocean lane (PCG-dominated,
 # 2M+9 allreduces/step) is pinned by decision and A/B-checked separately.
-MPAS_NCCL_CHANNELS = "32"
+MPAS_NCCL_CHANNELS = {"icosahedral": "64", "mpas": "8"}
+# Atmosphere moved 32 -> 64 on 2026-09-25 (s9 at 128 GPUs: -7%, both run
+# orders, jobs 27627022 / 27670098); 32-channel atmosphere rows are refused.
+# Ocean MPAS pins 8 (ladder since 2026-09-24: 32 channels hang that lane at
+# 128 GPUs); older 32-channel ocean rows are refused (owner, 2026-09-25).
 # Multi-rank CPU rows need each rank's full core share (nature_ladder.sbatch
 # passes --cpus-per-task = node threads / ranks-per-node = 64 since
 # 2026-09-21); rows stamped below this, or unstamped, were 1-core ranks
@@ -220,11 +224,15 @@ def load(dirs):
                     # inert and they stay comparable across the change.
                     solver = extra.get("pcg_solver_path")
                     pre = (extra.get("pcg_precond"), extra.get("pcg_poly_sweeps"))
-                    if (solver != "stock_cg_to_tol"
+                    # single_reduce is a different recurrence (and faster);
+                    # a best-of key would silently pick it over the standard row.
+                    variant = extra.get("pcg_variant", "standard")
+                    if variant != "standard" or (
+                            solver != "stock_cg_to_tol"
                             and (iters != OCEAN_MPAS_PCG_ITERS
                                  or pre != OCEAN_MPAS_PCG_PRECOND)):
                         dropped.append((f, int(r["n_devices"]),
-                                        f"{iters}/{pre[0]}{pre[1]}"))
+                                        f"{iters}/{pre[0]}{pre[1]}/{variant}"))
                         continue
                 if _backend(r) == "cpu":
                     aff = r.get("metadata", {}).get("cpu_affinity")
@@ -236,7 +244,8 @@ def load(dirs):
                     env = r.get("metadata", {}).get("extra", {}).get("nccl_env") or {}
                     ch = (env.get("NCCL_MIN_NCHANNELS"), env.get("NCCL_MAX_NCHANNELS"),
                           env.get("NCCL_P2P_NET_CHUNKSIZE"))
-                    if ch != (MPAS_NCCL_CHANNELS, MPAS_NCCL_CHANNELS, MPAS_NCCL_CHUNK):
+                    pin = MPAS_NCCL_CHANNELS.get(grid)
+                    if pin is None or ch != (pin, pin, MPAS_NCCL_CHUNK):
                         dropped_nccl.append((f, int(r["n_devices"]), ch))
                         continue
                 mode = _mode(r, f)

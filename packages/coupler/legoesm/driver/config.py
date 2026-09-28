@@ -739,7 +739,8 @@ class ExperimentConfig(NamedTuple):
     # VERTICAL overlap optics: "none" (legacy/byte-identical) or
     # "max_random" (n_sub deterministic maximum-random-overlap subcolumns,
     # measured -30% cloud albedo and +18 W/m2 OLR vs a Monte-Carlo
-    # reference; costs n_sub x the radiation time). MUTUALLY EXCLUSIVE with
+    # reference; costs n_sub x the radiation time) or "mcica" (CAM6: one
+    # such subcolumn per g-point, a single solve). MUTUALLY EXCLUSIVE with
     # cloud_partial_coverage_optics="two_column" -- both correct partial
     # coverage, so enabling both double-discounts the cloud.
     cloud_vertical_overlap_optics: str = "none"
@@ -1156,6 +1157,12 @@ class ExperimentConfig(NamedTuple):
     land_update_seconds: float = 0.0
     multilayer_n_layers: int = 10        # soil discretization
     multilayer_soil_depth: float = 3.0   # m
+    # Soil-water freeze/thaw (latent zero-curtain, SoilThermalConfig
+    # .enable_freeze_thaw) in the multilayer land. CLM5 always has it; the
+    # land IC spin-up ran with it ON; the land calibration's tables were fitted
+    # with it OFF. Library default False = sensible-only (legacy): whether the
+    # default should move is an open user decision, so decks set it explicitly.
+    land_soil_freeze_thaw: bool = False
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -1802,6 +1809,11 @@ class ExperimentConfig(NamedTuple):
     # MorrisonConfig.sed_cfl_substeps_strict: runtime error when a column
     # needs more sub-steps than the cap.
     morrison_sed_cfl_substeps_strict: bool = False
+    # MorrisonConfig.do_graupel: the prognostic graupel category (riming of
+    # cloud water and rain onto graupel, frozen rain -> graupel).  CAM6's MG2
+    # carries no graupel; False routes frozen rain to snow and drops the
+    # graupel riming sink.  Default equals the leaf (True).
+    morrison_do_graupel: bool = True
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2119,6 +2131,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_update_seconds must be a finite value >= 0 "
                 f"(0 = every step), got {self.land_update_seconds}")
+        if self.land_soil_freeze_thaw and not self.use_multilayer_land:
+            errors.append(
+                "land_soil_freeze_thaw requires use_multilayer_land: only the "
+                "multilayer soil has a freeze/thaw scheme — the knob would be "
+                "silently inert.")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "
@@ -2253,7 +2270,7 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_partial_coverage_optics must be one of {_valid_cover}, "
                 f"got {self.cloud_partial_coverage_optics!r}"
             )
-        _valid_overlap = ("none", "max_random")
+        _valid_overlap = ("none", "max_random", "mcica")
         if self.cloud_vertical_overlap_optics not in _valid_overlap:
             errors.append(
                 f"cloud_vertical_overlap_optics must be one of "
@@ -3488,7 +3505,8 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"morrison_sed_cfl_substeps_max={_nmm_max} requires "
                 f"microphysics='morrison' (got {self.microphysics!r})")
-        for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict"):
+        for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
+                    "morrison_do_graupel"):
             _v = getattr(self, _nm)
             if not isinstance(_v, bool):
                 errors.append(f"{_nm} must be a bool, got {_v!r}")
@@ -4039,6 +4057,7 @@ class ExperimentConfig(NamedTuple):
             morrison_sed_cfl_substeps=amip_cfg.morrison_sed_cfl_substeps,
             morrison_sed_cfl_substeps_max=amip_cfg.morrison_sed_cfl_substeps_max,
             morrison_sed_cfl_substeps_strict=amip_cfg.morrison_sed_cfl_substeps_strict,
+            morrison_do_graupel=amip_cfg.morrison_do_graupel,
             unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
@@ -4265,6 +4284,7 @@ class ExperimentConfig(NamedTuple):
             morrison_sed_cfl_substeps=self.morrison_sed_cfl_substeps,
             morrison_sed_cfl_substeps_max=self.morrison_sed_cfl_substeps_max,
             morrison_sed_cfl_substeps_strict=self.morrison_sed_cfl_substeps_strict,
+            morrison_do_graupel=self.morrison_do_graupel,
             diurnal_cycle=self.diurnal_cycle,
             co2_ppmv=self.co2_ppmv,
             ch4_ppbv=self.ch4_ppbv,
