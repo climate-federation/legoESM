@@ -2771,10 +2771,10 @@ CITATION_MAP = {
         'vn_adv(:,:)     = 0._wp', 27],
     # --- PR #1802 final round: decisions 66 and 67 -----------------------
     # D67's own call site, and the DINO year screen's pre-existing refusal.
-    'barotropic_latlon_cgrid.py:2655-2660': [
+    'barotropic_latlon_cgrid.py:2648-2649': [
         'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
-        ('_nemo_legacy_seed_faces_test_override or False),', 2),
-        6],
+        'u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,',
+        2],
     'eos.py:742':
         '"raw-mesh e3w_int must contain only finite values > 0",',
     # D67: the e1e2-weighted SSH-average face depth NEMO divides the
@@ -2789,6 +2789,15 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90:276':
         'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kmm))) '
         '- uu_b(ji,jj,Kmm)',
+    # The branch NEMO ACTUALLY runs on these cards (ln_dynadv_vec=T):
+    # it sums the substep velocities and divides by the weight sum,
+    # with no face depth -- which is what refutes decision 67's premise.
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90:767-769': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN    ! Sum velocities',
+        ('pvv_b  (:,:,Kaa) = pvv_b  (:,:,Kaa) + za1 * va_e  (:,:)', 1),
+        3],
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynspg_ts.f90:802':
+        'puu_b  (:,:,Kaa) = puu_b  (:,:,Kaa) / r1_wgt1s',
     # D66: the masked ln_mxl0 surface stress, and its floor.
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:606':
         'zmxlm(ji,1) =  zraug * taum(ji,jj) * tmask(ji,jj,1)',
