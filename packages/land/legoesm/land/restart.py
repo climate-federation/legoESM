@@ -625,17 +625,25 @@ def check_soil_hydraulics_stamp(meta, path) -> dict[str, Any]:
     return stamp
 
 
+# Wet cap of the IC conform, as a margin below effective saturation Se = 1
+# (user decision 2026-09-28: "1e-4 under").
+_WET_CAP_SE_MARGIN = 1.0e-4
+
+
 def conform_soil_water(theta, dz, hydraulics, land_mask=None):
     """Move a soil-water profile into the band the Richards step can hold.
 
     Host-side, float64.  Per column, conserving the column's water exactly:
 
-    1. WET: layers above ``theta_sat`` give their excess to the column's layers
-       below ``theta_sat``, in proportion to each layer's room.  What the column
+    1. WET: layers above the wet cap (effective saturation ``1 - 1e-4``, just
+       below ``theta_sat``) give their excess to the column's layers below it,
+       in proportion to each layer's room.  What the column
        cannot store is returned as ``pond_add`` [m] for the surface water, which
        the first Richards step keeps up to ``pond_max`` and routes the rest to
-       surface runoff.  (``theta_sat`` is a policy cap here: the solver's
-       elastic branch could carry the excess as a positive head of order 1e3 m.)
+       surface runoff.  (The cap is policy: the solver's elastic branch could
+       carry the excess as a positive head of order 1e3 m, and a layer left at
+       exactly ``theta_sat`` above unsaturated ones loses water in the
+       Richards step.)
     2. DRY: layers below the solver's dry floor ``theta_from_psi(psi_dry_floor)``
        are lifted to it, the water taken from the column's other layers in
        proportion to each one's surplus above that floor.  Existing pond water
@@ -653,8 +661,11 @@ def conform_soil_water(theta, dz, hydraulics, land_mask=None):
     lo = np.broadcast_to(np.asarray(
         theta_from_psi(psi_dry_floor(hydraulics), hydraulics),
         dtype=np.float64), theta.shape)
-    hi = np.broadcast_to(np.asarray(hydraulics.theta_sat, dtype=np.float64),
-                         theta.shape)
+    theta_r = np.asarray(hydraulics.theta_r, dtype=np.float64)
+    hi = np.broadcast_to(
+        theta_r + (1.0 - _WET_CAP_SE_MARGIN)
+        * (np.asarray(hydraulics.theta_sat, dtype=np.float64) - theta_r),
+        theta.shape)
     act = (np.ones(ncol, dtype=bool) if land_mask is None
            else np.asarray(land_mask, dtype=bool).reshape(ncol))
     a = act[:, None]
