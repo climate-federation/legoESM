@@ -109,11 +109,11 @@ def _collect(card, state, ordinary_after, momentum, masks) -> tuple[dict, list[d
     values = {
         "kt3.entry.u": entry,
         "s2.after_adv.u": _physical_u(s2_rhs["u"], u_mask),
-        # Compiled stprk3_stg:374-429 executes no stage-2 statement between
-        # after_adv and pre_zdf on this deck.  One production observation is
-        # intentionally bound to both source labels; the NEMO record must
-        # independently prove its two stored payloads are also bit-identical.
-        "s2.pre_zdf.u": _physical_u(s2_rhs["u"], u_mask),
+        # At stage 2 Krhs == Kaa == slot 2.  The explicit QCO update at
+        # stprk3_stg:396-404 overwrites that slot before the pre_zdf writer,
+        # so pre_zdf is raw Kaa, not the after-ADV RHS (round-60 R60-P3
+        # refutation). dyn_zdf does not run at stage 2, hence raw_kaa aliases it.
+        "s2.pre_zdf.u": _physical_u(s2_raw["u"], u_mask),
         "s2.raw_kaa.u": _physical_u(s2_raw["u"], u_mask),
         "s2.postbar_kaa.u": _physical_u(s2_postbar["u"], u_mask),
         "s3.after_adv.u": _physical_u(s3_pre_ldf["u"], u_mask),
@@ -160,11 +160,11 @@ def _collect(card, state, ordinary_after, momentum, masks) -> tuple[dict, list[d
         rows.append(row)
         arrays[name] = _active(value, u_mask)
 
-    require(np.array_equal(arrays["s2.after_adv.u"], arrays["s2.pre_zdf.u"]),
-            "legoESM stage-2 after_adv/pre_zdf alias drift")
+    require(np.array_equal(arrays["s2.pre_zdf.u"], arrays["s2.raw_kaa.u"]),
+            "legoESM stage-2 pre_zdf/raw_kaa alias drift")
     require(np.array_equal(
-        arrays["oracle::s2.after_adv.u"], arrays["oracle::s2.pre_zdf.u"]),
-        "NEMO stage-2 after_adv/pre_zdf payloads differ")
+        arrays["oracle::s2.pre_zdf.u"], arrays["oracle::s2.raw_kaa.u"]),
+        "NEMO stage-2 pre_zdf/raw_kaa payloads differ")
     require(np.array_equal(arrays["s3.after_ldf.u"], arrays["s3.pre_zdf.u"]),
             "legoESM stage-3 after_ldf/pre_zdf alias drift")
     require(np.array_equal(
