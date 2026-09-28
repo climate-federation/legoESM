@@ -865,6 +865,15 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynkeg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynkeg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzad.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynzad.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sshwzv.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/sshwzv.f90"),
@@ -1275,6 +1284,19 @@ CITATION_MAP = {
         'SELECT CASE( nn_e3f_typ )',
         'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
         26],
+    # --- ORCA2 card round 62: executing vector-advection source order ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:402-420': [
+        'CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )',
+        'L2_RK_STAGE2_TERM_DUMP', 19],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynadv.f90:134-138': [
+        'CASE( np_VEC_c2  )',
+        'CALL dyn_zad', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynkeg.f90:117-130': [
+        'CASE ( nkeg_C2 )',
+        'pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) -', 14],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzad.f90:102-137': [
+        'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
+        'pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) -', 36],
     # --- ORCA2 card round 21: merge-owner substitution ---
     'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:912-937': [
         'SELECT CASE( nn_e3f_typ )',
