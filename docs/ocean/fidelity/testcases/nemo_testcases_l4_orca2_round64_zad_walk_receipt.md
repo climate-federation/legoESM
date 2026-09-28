@@ -74,7 +74,31 @@ shared-statement rule; no model statement changed.
 
 ## Review and validation
 
-Validation and the required separate review are recorded in the final commit.
+The required separate review was attempted with `codex exec --sandbox
+read-only`.  It could not initialize its in-process app-server client because
+the read-only sandbox rejected a filesystem write.  Verdict: **independent
+review unavailable in-sandbox**.
+
+Validation results:
+
+- Resolved-card execution census: `PASS`, zero disagreements.
+- Fresh-record admission: `PASS`; header, field-order, truncation, restart,
+  and producer-stamp plants all fired.
+- ZAD replay: `AT_BAR_BIT_EXACT`; the one-ULP plant exited nonzero and reported
+  `PLANT_FIRED`.
+- Citation gate: both round-64 citations pass; the shifted ZAD citation fails;
+  the default cumulative receipt passes all 274 citations with no unmapped
+  citation.
+- Focused replay, parser, citation, and card-scope tests: `27 passed`.
+- The required single `tests/ocean/fidelity -n 12` invocation collected 2,002
+  tests and reached 99%.  It reproduced exactly the five standing failure
+  markers carried by round 63 (round-129 spread certification, round-51
+  private trace registry, SI3 scalar provenance, worktree-stamp emitters, and
+  recipe case-board census), then stopped producing output without a terminal
+  summary.  No round-64 test failed.
+
+The package diff against the base is empty.  No configuration choice was made;
+the only scientific interpretation changed is the explicit retraction above.
 
 ## OPEN
 
