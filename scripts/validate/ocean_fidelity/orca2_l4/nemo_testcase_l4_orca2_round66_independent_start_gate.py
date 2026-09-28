@@ -124,7 +124,8 @@ def classify(ladder: dict[str, object], *, plant: str = "none") -> dict[str, obj
 
     rows_scored = 0
     for checkpoint in checkpoints:
-        require(tuple(checkpoint["rows"]) == FIELD_ORDER,
+        require(len(checkpoint["rows"]) == len(FIELD_ORDER) and
+                set(checkpoint["rows"]) == set(FIELD_ORDER),
                 "checkpoint field registry changed")
         for field in FIELD_ORDER:
             _finite_row(

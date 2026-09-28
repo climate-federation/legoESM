@@ -101,6 +101,13 @@ def test_nonfinite_metric_refuses():
         gate.classify(ladder)
 
 
+def test_json_sorted_field_order_is_not_a_registry_change():
+    ladder = _ladder()
+    for checkpoint in ladder["candidate_trajectory"]["checkpoints"]:
+        checkpoint["rows"] = dict(sorted(checkpoint["rows"].items()))
+    assert gate.classify(ladder)["field_rows"] == 200
+
+
 def test_first_statement_citation_is_bound():
     ladder = _ladder()
     ladder["candidate_trajectory"]["first_non_bit_statement"][
