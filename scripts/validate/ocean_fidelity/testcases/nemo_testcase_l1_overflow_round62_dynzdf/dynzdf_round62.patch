@@ -1,6 +1,6 @@
 --- dynzdf.F90.shipped
 +++ dynzdf.F90
-@@ -28,6 +28,9 @@
+@@ -28,5 +28,8 @@
     !
     USE in_out_manager ! I/O manager
     USE lib_mpp        ! MPP library
