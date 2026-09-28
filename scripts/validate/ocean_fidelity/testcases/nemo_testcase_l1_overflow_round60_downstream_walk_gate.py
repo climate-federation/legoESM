@@ -66,14 +66,25 @@ def _active(value, mask) -> np.ndarray:
     return np.ascontiguousarray(value[mask])
 
 
-def _observer(card, state, **hook_values):
+def _observer(card, state, **hook_values) -> dict[str, np.ndarray]:
     model = LatLonCGridOceanModel(
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hook_values),
     )
-    return model.step(state, dt=card.dt_s)
+    observed = model.step(state, dt=card.dt_s)
+    fields = {
+        "u": np.asarray(observed.u.data),
+        "T": np.asarray(observed.T.data),
+        "S": np.asarray(observed.S.data),
+        "ssh": np.asarray(observed.eta.data),
+    }
+    # Five private hooks otherwise retain five XLA executables and can hit the
+    # per-process compiler-map limit.  Values are materialized before clearing.
+    del observed, model
+    jax.clear_caches()
+    return fields
 
 
 def _physical_u(value, mask):
@@ -93,17 +104,17 @@ def _collect(card, state, ordinary_after, momentum, masks) -> tuple[dict, list[d
     final = _physical_u(ordinary_after.u.data, u_mask)
     values = {
         "kt3.entry.u": entry,
-        "s2.after_adv.u": _physical_u(s2_rhs.u.data, u_mask),
+        "s2.after_adv.u": _physical_u(s2_rhs["u"], u_mask),
         # Compiled stprk3_stg:374-429 executes no stage-2 statement between
         # after_adv and pre_zdf on this deck.  One production observation is
         # intentionally bound to both source labels; the NEMO record must
         # independently prove its two stored payloads are also bit-identical.
-        "s2.pre_zdf.u": _physical_u(s2_rhs.u.data, u_mask),
-        "s2.raw_kaa.u": _physical_u(s2_raw.u.data, u_mask),
-        "s2.postbar_kaa.u": _physical_u(s2_postbar.u.data, u_mask),
-        "s3.after_adv.u": _physical_u(s3_pre_ldf.u.data, u_mask),
-        "s3.after_ldf.u": _physical_u(s3_post_ldf.u.data, u_mask),
-        "s3.pre_zdf.u": _physical_u(s3_post_ldf.u.data, u_mask),
+        "s2.pre_zdf.u": _physical_u(s2_rhs["u"], u_mask),
+        "s2.raw_kaa.u": _physical_u(s2_raw["u"], u_mask),
+        "s2.postbar_kaa.u": _physical_u(s2_postbar["u"], u_mask),
+        "s3.after_adv.u": _physical_u(s3_pre_ldf["u"], u_mask),
+        "s3.after_ldf.u": _physical_u(s3_post_ldf["u"], u_mask),
+        "s3.pre_zdf.u": _physical_u(s3_post_ldf["u"], u_mask),
         # There is no existing narrow production observer after dyn_zdf and
         # before the barotropic replacement.  Keep it explicit, never infer it.
         "s3.raw_kaa.u": None,
@@ -162,12 +173,11 @@ def _collect(card, state, ordinary_after, momentum, masks) -> tuple[dict, list[d
         ("s2_rhs", s2_rhs), ("s2_raw", s2_raw), ("s2_postbar", s2_postbar),
         ("s3_pre_ldf", s3_pre_ldf), ("s3_post_ldf", s3_post_ldf),
     ):
-        observed_fields = lego_fields(observed)
         for field in ("T", "S", "ssh"):
             mask = masks[field]
             row = _score(
                 f"observer.{label}.{field}", ordinary_fields[field],
-                observed_fields[field], mask,
+                observed[field], mask,
             )
             require(row["exact"], f"observer {label} perturbed {field}")
             observer_noninterference.append(row)
