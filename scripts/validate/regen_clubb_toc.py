@@ -95,12 +95,13 @@ def check_toc(path=None) -> list[str]:
     """
     path = pathlib.Path(path or _DEFAULT)
     lines = path.read_text().split("\n")
-    n_rows = sum(1 for l in lines[:_TOC_SCAN_LINES]
-                 if re.match(r"  (\d+)\.\s+\[line\s+(\d+)\]", l))
-    if n_rows != EXPECTED_TOC_ROWS:
-        return [f"parsed {n_rows} TOC rows, expected {EXPECTED_TOC_ROWS} — the "
-                f"TOC format changed, so this checker is validating nothing; "
-                f"fix the pattern or EXPECTED_TOC_ROWS before trusting a green"]
+    rows = [int(m.group(1)) for l in lines[:_TOC_SCAN_LINES]
+            if (m := re.match(r"  (\d+)\.\s+\[line\s+(\d+)\]", l))]
+    if sorted(rows) != list(range(1, EXPECTED_TOC_ROWS + 1)):
+        return [f"parsed TOC rows {sorted(rows)}, expected exactly "
+                f"1..{EXPECTED_TOC_ROWS} — the TOC format changed or a row is "
+                f"duplicated/missing, so this checker is validating nothing; fix "
+                f"the pattern or EXPECTED_TOC_ROWS before trusting a green"]
     return retarget(lines)[1]
 
 

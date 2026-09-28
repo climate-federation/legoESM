@@ -164,9 +164,10 @@ def test_the_bool_exemptions_have_not_outlived_their_reason():
         f"delete it from _BOOL_LEAF_EXEMPTIONS.")
     # A ratchet, not a policy: the list may SHRINK, never grow. A fourth
     # flag-shaped leaf has to be argued for, not appended.
-    assert len(_BOOL_LEAF_EXEMPTIONS) <= 3, (
-        f"_BOOL_LEAF_EXEMPTIONS grew to {len(_BOOL_LEAF_EXEMPTIONS)}. It is "
-        f"pre-existing debt with a permitted direction: shrink only.")
+    assert _BOOL_LEAF_EXEMPTIONS <= {"prognostic", "cloud_buoyancy", "cloud_source"}, (
+        f"_BOOL_LEAF_EXEMPTIONS holds {sorted(_BOOL_LEAF_EXEMPTIONS)}. It is "
+        f"pre-existing debt with a permitted direction: shrink only, and only "
+        f"from the three grandfathered names.")
     # ...and the two pinned structures cannot drift apart.
     assert _BOOL_LEAF_EXEMPTIONS <= _CLUBB_CONFIG_SCALAR_FIELDS, (
         f"exempted names that are not CLUBBConfig scalar fields at all: "
