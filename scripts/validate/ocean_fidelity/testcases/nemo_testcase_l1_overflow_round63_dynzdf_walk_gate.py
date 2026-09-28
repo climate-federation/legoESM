@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import jax
@@ -23,6 +24,7 @@ import nemo_testcase_l1_overflow_round62_dynzdf_gate as R62
 
 
 FORMAT = "nemo-testcase-l1-overflow-round63-dynzdf-walk-v1"
+GATE_REVISION = "rhs-distinct-v2"
 BOUNDARIES = ("explicit", "baro_subtract", "baro_drag", "implicit_solve")
 COMPONENTS = ("u", "v")
 SOURCE_ORDER = tuple(
@@ -143,6 +145,8 @@ def compare(reference_path: Path, candidate_report: dict) -> dict:
 
 def run(output: Path, expect_commit: str, entry_input: Path,
         reference: Path | None, plant: bool) -> dict:
+    print(f"ROUND63_GATE_REVISION {GATE_REVISION}", file=sys.stderr,
+          flush=True)
     stamp = worktree_stamp()
     R60.require(stamp["clean"], "producer worktree is dirty")
     R60.require(stamp["commit"] == expect_commit,
@@ -252,6 +256,7 @@ def run(output: Path, expect_commit: str, entry_input: Path,
 
     report = {
         "format": FORMAT,
+        "gate_revision": GATE_REVISION,
         "status": "PLANTED_REFUSAL" if plant else "WALK_MEASURED",
         "case": "OVERFLOW-zps",
         "kt": 3,
